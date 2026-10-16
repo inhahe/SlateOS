@@ -1993,6 +1993,7 @@ name = "jsonviewer"
 version = "0.1.0"
 dependencies = [
  "appearance",
+ "fieldmenu",
  "guitk",
  "oswindow",
  "pathtext",

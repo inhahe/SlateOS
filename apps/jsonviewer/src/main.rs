@@ -61,6 +61,7 @@ use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
 use guitk::textedit;
+use guitk::textinput::{KeyEdit, TextInput};
 use guitk::treeview::{TreeEvent, TreeHit, TreeItem, TreeMetrics, TreeSource, TreeView};
 use guitk::wheel;
 use oswindow::app::{self, Response};
@@ -85,6 +86,11 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 800.0;
 const TOOLBAR_HEIGHT: f32 = 44.0;
 const TAB_BAR_HEIGHT: f32 = 36.0;
+/// The row of view chips (Tree, Raw, ...) below the tabs.
+const MODE_BAR_HEIGHT: f32 = 30.0;
+/// Where the view's content starts: below the toolbar, the tabs and the
+/// chips. The find bar, while it is up, lies along it.
+const CONTENT_TOP: f32 = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + MODE_BAR_HEIGHT;
 const SIDEBAR_WIDTH: f32 = 320.0;
 const STATUS_BAR_HEIGHT: f32 = 28.0;
 const PADDING: f32 = 10.0;
@@ -104,6 +110,30 @@ fn search_box_rect(bar_y: f32) -> Rect {
 }
 const CASE_BUTTON_X: f32 = 500.0;
 const CASE_BUTTON_W: f32 = 28.0;
+
+/// Where a one-line box's text is drawn in its rect `r`: its left edge, its
+/// top and its width. A press is placed against the same three.
+fn box_text_area(r: Rect) -> (f32, f32, f32) {
+    let line = text::line_height(NORMAL_TEXT, FontWeightHint::Regular);
+    (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0))
+}
+
+/// Put `input`'s caret where a press at `x` landed in its box `r`, against
+/// the text as the box draws it -- scrolled to keep the caret in view --
+/// and let go of the selection.
+fn place_caret(input: &mut TextInput, r: Rect, x: f32) {
+    let (left, _, width) = box_text_area(r);
+    let cursor = textedit::cursor_at_click(
+        input.text(),
+        input.cursor(),
+        width,
+        NORMAL_TEXT,
+        FontWeightHint::Regular,
+        x - left,
+    );
+    input.set_selection_anchor(None);
+    input.set_cursor(cursor);
+}
 
 /// The text drawn on `doc`'s tab, dirty marker included.
 fn tab_label(doc: &Document) -> String {
@@ -1469,39 +1499,25 @@ fn value_summary(value: &JsonValue) -> String {
 // Edit operations
 // ============================================================================
 
-/// Mutate a value at a given path.
-fn set_value_at_path(root: &mut JsonValue, path: &[PathSegment], new_value: JsonValue) -> bool {
+/// Put `new_value` where `path` leads from `root`, and hand back what was
+/// there -- so a change can be taken back -- or `None`, with nothing
+/// changed, when the path leads nowhere.
+fn replace_value_at_path(
+    root: &mut JsonValue,
+    path: &[PathSegment],
+    new_value: JsonValue,
+) -> Option<JsonValue> {
     let Some((head, rest)) = path.split_first() else {
-        *root = new_value;
-        return true;
+        return Some(std::mem::replace(root, new_value));
     };
-    match (root, head) {
+    let child = match (root, head) {
         (JsonValue::Object(obj), PathSegment::Key(k)) => {
-            if let Some((_, val)) = obj.iter_mut().find(|(key, _)| key == k) {
-                if rest.is_empty() {
-                    *val = new_value;
-                    true
-                } else {
-                    set_value_at_path(val, rest, new_value)
-                }
-            } else {
-                false
-            }
+            obj.iter_mut().find(|(key, _)| key == k).map(|(_, val)| val)
         }
-        (JsonValue::Array(arr), PathSegment::Index(i)) => {
-            if let Some(val) = arr.get_mut(*i) {
-                if rest.is_empty() {
-                    *val = new_value;
-                    true
-                } else {
-                    set_value_at_path(val, rest, new_value)
-                }
-            } else {
-                false
-            }
-        }
-        _ => false,
-    }
+        (JsonValue::Array(arr), PathSegment::Index(i)) => arr.get_mut(*i),
+        _ => None,
+    }?;
+    replace_value_at_path(child, rest, new_value)
 }
 
 /// Delete a key/index at a given path.
@@ -1552,7 +1568,7 @@ fn delete_at_path(root: &mut JsonValue, path: &[PathSegment]) -> bool {
 /// Nothing calls this yet, and that is a statement about the UI rather than
 /// about the function: adding a key needs somewhere for the user to type the
 /// name, and this program has no such field. Editing an *existing* value works
-/// (`set_value_at_path`, wired in the same commit that wrote this comment);
+/// (`replace_value_at_path`);
 /// creating a new one does not. It keeps its test, which is what makes wiring
 /// it later a small job rather than a rewrite.
 /// See known-issues.md -> TD-C-JSONVIEWER-CAN-EDIT-A-VALUE-BUT-NOT-ADD-ONE.
@@ -2123,9 +2139,15 @@ impl Document {
     /// is not kept: the text is regenerated from the parsed value, which does
     /// not remember it.
     fn regenerate_input(&mut self) {
-        let Some(value) = self.parsed.as_ref() else {
-            return;
-        };
+        if let Some(text) = self.regenerated_input() {
+            self.input = text;
+        }
+    }
+
+    /// What [`Self::regenerate_input`] would make `input`, without making it:
+    /// `None` while nothing is parsed.
+    fn regenerated_input(&self) -> Option<String> {
+        let value = self.parsed.as_ref()?;
         let one_line = !self.input.trim().contains('\n');
         let final_newline = self.input.ends_with('\n');
         let mut text = if one_line {
@@ -2143,7 +2165,7 @@ impl Document {
             }
             _ => {}
         }
-        self.input = text;
+        Some(text)
     }
 
     /// The name to offer when saving this document somewhere new.
@@ -2176,6 +2198,28 @@ impl Document {
 // Application state
 // ============================================================================
 
+/// The one-line boxes a right-click menu can be opened on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The find bar's box.
+    Search,
+    /// The value being typed over.
+    Value,
+}
+
+/// What a one-line box shows -- its text, its caret, and where its selection
+/// starts -- for comparing frames: a move of the caret is a redraw.
+type BoxState = (String, text::TextCursor, Option<usize>);
+
+/// [`BoxState`] of `input`.
+fn box_state(input: &TextInput) -> BoxState {
+    (
+        input.text().to_owned(),
+        input.cursor(),
+        input.selection_anchor(),
+    )
+}
+
 struct App {
     /// All open documents.
     documents: Vec<Document>,
@@ -2183,8 +2227,8 @@ struct App {
     active_tab: usize,
     /// Next tab ID.
     next_tab_id: u64,
-    /// Search query.
-    search_query: String,
+    /// The find bar's box: its text is the search, edited at its caret.
+    search_box: TextInput,
     /// Whether search is case-sensitive.
     search_case_sensitive: bool,
     /// Current search results.
@@ -2201,22 +2245,21 @@ struct App {
     focus_ring_width: f32,
     /// Edit mode flag.
     edit_mode: bool,
-    /// Edit buffer for value editing.
-    edit_buffer: String,
-    /// The node the edit buffer belongs to, if an edit is in progress.
+    /// The value being typed over, edited at its caret: what Enter writes to
+    /// the node [`Self::editing_path`] names.
+    value_box: TextInput,
+    /// The node the value box belongs to, if an edit is in progress.
     ///
     /// `edit_mode` says the user has *enabled* editing; this says a particular
     /// value is being typed over. Without it a commit has no address to write
-    /// to, which is why `set_value_at_path` — written and covered by four
-    /// tests — had no caller at all: Enter loaded a value into the buffer and
-    /// nothing ever wrote it back.
+    /// to.
     editing_path: Option<Vec<PathSegment>>,
     /// The tree row the pointer is over, which the tree washes: a move onto
     /// another is a redraw. See [`Self::tree_mouse`].
     tree_hover: Option<Vec<NodeKey>>,
-    /// What Ctrl+C or Ctrl+X last took from the text being edited, for
-    /// Ctrl+V: the program's own, as in the other editors here.
-    clipboard: String,
+    /// The right-click menu of the search box or the value box, while it is
+    /// up.
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// The open or save picker. Holds the dialog, the saving flag and
     /// the routing eleven applications used to write out by hand.
     pub picker: FilePicker,
@@ -2453,13 +2496,13 @@ const TAB_CLOSE_ZONE: f32 = 22.0;
 #[derive(Clone, PartialEq)]
 struct Fingerprint {
     active_tab: usize,
-    search_query: String,
+    search_box: BoxState,
     search_index: usize,
     search_visible: bool,
     /// Whether the search is case-sensitive, which the "Aa" button draws.
     search_case_sensitive: bool,
     edit_mode: bool,
-    edit_buffer: String,
+    value_box: BoxState,
     /// The text being edited as it is: its caret, selection and scroll.
     /// What it holds is counted by `revision`.
     source: Option<(usize, Option<usize>, usize, f32)>,
@@ -2516,7 +2559,7 @@ impl App {
             note: Some(String::from("Press Ctrl+O to open a JSON file")),
             active_tab: 0,
             next_tab_id: 2,
-            search_query: String::new(),
+            search_box: textline::field_holding("", MAX_SEARCH_LEN),
             search_case_sensitive: false,
             search_results: Vec::new(),
             search_index: 0,
@@ -2524,10 +2567,10 @@ impl App {
             show_help: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             edit_mode: false,
-            edit_buffer: String::new(),
+            value_box: textline::field_holding("", MAX_OPEN_BYTES),
             editing_path: None,
             tree_hover: None,
-            clipboard: String::new(),
+            field_menu: fieldmenu::FieldMenu::new(),
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
         }
@@ -2598,9 +2641,9 @@ impl App {
             .get(self.active_tab)
             .and_then(|doc| doc.parsed.as_ref());
         match value {
-            Some(value) if !self.search_query.is_empty() => {
+            Some(value) if !self.search_box.text().is_empty() => {
                 self.search_results =
-                    search_json(value, &self.search_query, self.search_case_sensitive);
+                    search_json(value, self.search_box.text(), self.search_case_sensitive);
                 if self.search_index >= self.search_results.len() {
                     self.search_index = 0;
                 }
@@ -2697,7 +2740,14 @@ impl App {
             }
             Some(text) if self.edit_mode => {
                 if let Some(json) = json_path(path) {
-                    self.edit_buffer = text;
+                    // Leaving a value's box for another's writes what was
+                    // typed in it, as Enter would: it was thrown away. A
+                    // value refused for its size keeps its box.
+                    self.commit_edit();
+                    if self.editing_path.is_some() {
+                        return;
+                    }
+                    self.value_box.set_text(&text);
                     self.editing_path = Some(json);
                 }
             }
@@ -2710,18 +2760,12 @@ impl App {
         use guitk::event::Key;
 
         let (key, modifiers) = (ev.key, ev.modifiers);
-        let text = ev.typed().next();
         let editing_source = self.source_is_open();
 
         // The shortcut list, before anything else -- but **not** while the
-        // find bar or a value edit is open, because both of those take typed
-        // characters and `?` belongs in somebody's query or their string.
-        //
-        // That gate is here because the first survey of this app said it had
-        // no text entry at all: it takes characters as an `Option<char>`
-        // argument to this function rather than through `key.text` or
-        // `typed()`, so a search for either found nothing. The keystroke does
-        // become text; it just arrives by a road the search did not cover.
+        // find bar, a value or the text is open, because each of those takes
+        // typed characters and `?` belongs in somebody's query or their
+        // string.
         let typing = self.search_visible || self.editing_path.is_some() || editing_source;
         // Every key but a Ctrl chord and what is typed is taken plain: a
         // chord with Alt or the Windows key is the window's or the desktop's
@@ -2816,71 +2860,46 @@ impl App {
             return;
         }
 
-        // An edit in progress takes every printable key, for the same reason
-        // the search bar below does: while a value is being typed over, "5" is
-        // the character five and not the shortcut for the diff view.
-        // What it types is what a key typed -- AltGr's among it -- and not a
-        // command's letter, which a chord carries: Ctrl+X typed an `x` into
-        // the value. Its own keys are plain.
+        // A value being typed over takes every key the chords above leave,
+        // for the same reason the find bar below does: "5" is the character
+        // five and not the shortcut for the diff view. Enter writes it and
+        // Escape abandons it; the rest is the box's, at its caret, on the
+        // program's clipboard (`textline::apply_key_on_clipboard`), which
+        // types what a key typed -- AltGr's among it -- and not a command's
+        // letter.
         if self.editing_path.is_some() {
             match key {
-                _ if textline::types_into_field(ev) => {
-                    if let Some(ch) = text
-                        && self.edit_buffer.len() < MAX_SEARCH_LEN
-                    {
-                        self.edit_buffer.push(ch);
-                    }
-                    return;
+                Key::Escape if plain => self.cancel_edit(),
+                Key::Enter if plain => self.commit_edit(),
+                _ => {
+                    textline::apply_key_on_clipboard(&mut self.value_box, ev, NORMAL_TEXT);
                 }
-                _ if !plain => return,
-                Key::Escape => {
-                    self.cancel_edit();
-                    return;
-                }
-                Key::Enter => {
-                    self.commit_edit();
-                    return;
-                }
-                Key::Backspace => {
-                    self.edit_buffer.pop();
-                    return;
-                }
-                _ => return,
             }
+            return;
         }
 
-        // Search bar handling, as the value's edit.
+        // The find bar's box, as the value's: Escape puts the bar away, Enter
+        // and Shift+Enter step through what it found, and the rest is the
+        // box's, a change to it searching again.
         if self.search_visible {
             match key {
-                _ if textline::types_into_field(ev) => {
-                    if let Some(ch) = text
-                        && self.search_query.len() < MAX_SEARCH_LEN
-                    {
-                        self.search_query.push(ch);
-                        self.perform_search();
-                    }
-                    return;
-                }
-                _ if !plain => return,
-                Key::Escape => {
-                    self.search_visible = false;
-                    return;
-                }
-                Key::Enter => {
+                Key::Escape if plain => self.search_visible = false,
+                Key::Enter if plain => {
                     if modifiers.shift {
                         self.search_prev();
                     } else {
                         self.search_next();
                     }
-                    return;
                 }
-                Key::Backspace => {
-                    self.search_query.pop();
-                    self.perform_search();
-                    return;
+                _ => {
+                    let before = self.search_box.text().to_owned();
+                    textline::apply_key_on_clipboard(&mut self.search_box, ev, NORMAL_TEXT);
+                    if self.search_box.text() != before {
+                        self.perform_search();
+                    }
                 }
-                _ => return,
             }
+            return;
         }
         if !plain {
             return;
@@ -2991,39 +3010,64 @@ impl App {
         }
     }
 
-    /// Write the edit buffer back into the document.
+    /// Write the value box back into the document.
     ///
-    /// The buffer is parsed as JSON first, so `123` becomes a number and
+    /// The box is parsed as JSON first, so `123` becomes a number and
     /// `"123"` a string — which is the distinction this program exists to show,
-    /// and would be lost by storing every edit as text. A buffer that is not
+    /// and would be lost by storing every edit as text. A box that is not
     /// valid JSON on its own is taken as a string, because that is what a user
     /// typing `hello` into a string field means.
+    ///
+    /// A value that would take the text past [`MAX_OPEN_BYTES`] -- more than
+    /// this program reads of a file, so it could not read back what it saved
+    /// -- is not written: the box stays open holding it, to be cut down, and
+    /// the status line says why.
     fn commit_edit(&mut self) {
         let Some(path) = self.editing_path.take() else {
             return;
         };
-        let text = self.edit_buffer.clone();
+        let text = self.value_box.text().to_owned();
         let new_value =
             parse_json(&text).unwrap_or_else(|_| JsonValue::Str(text.trim_matches('"').to_owned()));
         let Some(doc) = self.documents.get_mut(self.active_tab) else {
             return;
         };
-        let written = doc
+        let Some(old) = doc
             .parsed
             .as_mut()
-            .is_some_and(|root| set_value_at_path(root, &path, new_value));
-        if written {
-            doc.dirty = true;
-            doc.invalidate_caches();
-            doc.regenerate_input();
+            .and_then(|root| replace_value_at_path(root, &path, new_value))
+        else {
+            // The value is no longer there to write to: nothing changed.
+            self.value_box.clear();
+            return;
+        };
+        let Some(input) = doc.regenerated_input() else {
+            // Not reached: the value was just put into the parsed document.
+            self.value_box.clear();
+            return;
+        };
+        if input.len() > MAX_OPEN_BYTES {
+            if let Some(root) = doc.parsed.as_mut() {
+                // What comes back is the value refused, which the box still
+                // holds.
+                drop(replace_value_at_path(root, &path, old));
+            }
+            self.editing_path = Some(path);
+            self.note = Some(format!(
+                "Not changed: the text would be over {MAX_OPEN_BYTES} bytes, more than this program reads of a file"
+            ));
+            return;
         }
-        self.edit_buffer.clear();
+        doc.input = input;
+        doc.dirty = true;
+        doc.invalidate_caches();
+        self.value_box.clear();
     }
 
     /// Abandon an edit in progress, leaving the document alone.
     fn cancel_edit(&mut self) {
         self.editing_path = None;
-        self.edit_buffer.clear();
+        self.value_box.clear();
     }
 
     /// A key in the tree view: the tree's own keys -- the arrows, Home and
@@ -3110,7 +3154,7 @@ impl App {
     /// How many lines of text the raw view shows: its height, less the line
     /// at its foot that says whether the text parses.
     fn source_rows(&self) -> usize {
-        let top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let top = CONTENT_TOP;
         let height = self.height - top - STATUS_BAR_HEIGHT - LINE_HEIGHT;
         if height.is_finite() && height > 0.0 {
             ((height / LINE_HEIGHT) as usize).max(1)
@@ -3160,12 +3204,19 @@ impl App {
                 copied: None,
             }
         } else {
+            // The program's clipboard, the one every field and right-click
+            // menu shares; read only for the key that pastes it.
+            let clipboard = if textline::pastes(ev) {
+                guitk::clipboard::text()
+            } else {
+                String::new()
+            };
             source
                 .area
-                .apply_key(ev, SOURCE_CHARS_UNBOUNDED, &self.clipboard, rows)
+                .apply_key(ev, SOURCE_CHARS_UNBOUNDED, &clipboard, rows)
         };
         if let Some(copied) = edited.copied {
-            self.clipboard = copied;
+            guitk::clipboard::set_text(&copied);
         }
         if source.area.text().len() > MAX_OPEN_BYTES {
             source.area = before;
@@ -3251,14 +3302,14 @@ impl App {
 
         // View mode tab clicks
         let mode_bar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT;
-        if y >= mode_bar_y && y < mode_bar_y + 30.0 {
+        if y >= mode_bar_y && y < CONTENT_TOP {
             self.handle_mode_click(x);
             return;
         }
 
         // The find bar lies over the top of the content. A click on it went
         // through to the tree, selecting whatever row was under the bar.
-        let content_y = mode_bar_y + 30.0;
+        let content_y = CONTENT_TOP;
         if self.search_visible
             && (content_y..content_y + SEARCH_BAR_HEIGHT).contains(&y)
             && x < self.width - SIDEBAR_WIDTH
@@ -3269,6 +3320,8 @@ impl App {
                     self.perform_search();
                 } else if x >= self.search_close_x() {
                     self.search_visible = false;
+                } else if search_box_rect(content_y).contains(x, y) {
+                    self.press_search_box(x);
                 }
             }
             return;
@@ -3290,6 +3343,87 @@ impl App {
         {
             self.source_click(x, y - content_y);
         }
+    }
+
+    /// The find bar's box, where it is drawn: `None` while the bar is down.
+    fn search_box_shown(&self) -> Option<Rect> {
+        self.search_visible.then(|| search_box_rect(CONTENT_TOP))
+    }
+
+    /// The value box, where it is drawn over its row: `None` while no value
+    /// is being typed over, or the tree is not on screen, or the row is
+    /// scrolled out of view.
+    fn value_box_rect(&self) -> Option<Rect> {
+        self.editing_path.as_ref()?;
+        let doc = self
+            .active_doc()
+            .filter(|d| d.view_mode == ViewMode::Tree && d.parsed.is_some())?;
+        self.tree_edit_rect(doc)
+    }
+
+    /// Give the find bar's box the keyboard. A value being typed over and
+    /// the text being edited as it is take the keys before it, so the value
+    /// is written first, as leaving its box does, and the text is put away.
+    /// `false`, and nothing else done, when the value is refused for its
+    /// size and keeps its box.
+    fn give_search_the_keyboard(&mut self) -> bool {
+        self.commit_edit();
+        if self.editing_path.is_some() {
+            return false;
+        }
+        self.close_source();
+        true
+    }
+
+    /// A press in the find bar's box at `x`: the box takes the keyboard, its
+    /// caret where the press landed.
+    fn press_search_box(&mut self, x: f32) {
+        if !self.give_search_the_keyboard() {
+            return;
+        }
+        place_caret(&mut self.search_box, search_box_rect(CONTENT_TOP), x);
+    }
+
+    /// A right press at `(x, y)`: over the find bar's box or the value box,
+    /// that box's menu where the press landed -- the find bar's box given
+    /// the keyboard -- with the caret and selection left as they are, so Cut
+    /// and Copy act on what the user selected (design-decisions 1454).
+    /// Anywhere else nothing, and `false`.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> bool {
+        let field = if self.value_box_rect().is_some_and(|r| r.contains(x, y)) {
+            MenuField::Value
+        } else if self.search_box_shown().is_some_and(|r| r.contains(x, y)) {
+            if !self.give_search_the_keyboard() {
+                return true;
+            }
+            MenuField::Search
+        } else {
+            return false;
+        };
+        let menu = match field {
+            MenuField::Search => self.search_box.edit_menu(),
+            MenuField::Value => self.value_box.edit_menu(),
+        };
+        self.field_menu
+            .open(field, menu, x, y, (self.width, self.height));
+        true
+    }
+
+    /// The menu's row `id`, chosen for `field`: done to the box as its key
+    /// would be, a change to the search searching again.
+    fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
+        match field {
+            MenuField::Search => {
+                if self.search_box.edit_command(id) == KeyEdit::Changed {
+                    self.perform_search();
+                }
+            }
+            MenuField::Value => {
+                // The box shows what the row did; nothing else follows it.
+                let _edited = self.value_box.edit_command(id);
+            }
+        }
+        EventResult::Consumed
     }
 
     /// Where each tab is drawn, as (index, left edge, width), and then where
@@ -3729,6 +3863,19 @@ impl App {
         // remember to -- and placed where the window now draws them.
         self.place_trees();
         self.refresh_active_tree();
+        // A box's right-click menu takes the presses, the keys, the pointer
+        // and the wheel while it is up, as any menu does -- a row chosen, a
+        // press outside putting it away and reaching nothing under it -- and
+        // is put away by a resize.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => return self.do_menu_row(field, id),
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
+        }
         // The close question has every key and click while it is up: a key
         // that reached the document under it would be a change made while
         // being asked whether to keep the changes. Each one it takes is a
@@ -3807,7 +3954,27 @@ impl App {
                 // The click and scroll handlers below were in the same position
                 // as `handle_key`: written, and called by nothing.
                 let before = self.state_fingerprint();
-                if self.tree_takes(mouse_ev) {
+                let (x, y) = (mouse_ev.x, mouse_ev.y);
+                if matches!(mouse_ev.kind, MouseEventKind::Press(MouseButton::Right))
+                    && self.open_field_menu(x, y)
+                {
+                    return EventResult::Consumed;
+                }
+                // The value box is drawn over its row, and a press in it is
+                // the box's: its caret where the press landed. It went to the
+                // row under the box, and a double-click there started the
+                // edit over, dropping what had been typed.
+                let in_value_box = matches!(
+                    mouse_ev.kind,
+                    MouseEventKind::Press(MouseButton::Left)
+                        | MouseEventKind::DoubleClick(MouseButton::Left)
+                );
+                if let Some(r) = self
+                    .value_box_rect()
+                    .filter(|r| in_value_box && r.contains(x, y))
+                {
+                    place_caret(&mut self.value_box, r, x);
+                } else if self.tree_takes(mouse_ev) {
                     self.tree_mouse(mouse_ev);
                 } else {
                     match mouse_ev.kind {
@@ -3838,6 +4005,11 @@ impl App {
                 // Not `Consumed`: a resize is not by itself a reason to redraw.
                 EventResult::Ignored
             }
+            // The menu's dimmed rows say why while the pointer rests on one,
+            // on its own clock -- the only clock this program has.
+            Event::Tick { elapsed_ms } if self.field_menu.tick(*elapsed_ms) => {
+                EventResult::Consumed
+            }
             _ => EventResult::Ignored,
         }
     }
@@ -3846,7 +4018,7 @@ impl App {
     /// the bar is up. It was drawn under the bar, so the row a search had
     /// just found could be the one the bar covered.
     fn tree_bounds(&self) -> Rect {
-        let mut top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let mut top = CONTENT_TOP;
         if self.search_visible {
             top += SEARCH_BAR_HEIGHT;
         }
@@ -3926,12 +4098,12 @@ impl App {
         let doc = self.documents.get(self.active_tab);
         Fingerprint {
             active_tab: self.active_tab,
-            search_query: self.search_query.clone(),
+            search_box: box_state(&self.search_box),
             search_index: self.search_index,
             search_visible: self.search_visible,
             search_case_sensitive: self.search_case_sensitive,
             edit_mode: self.edit_mode,
-            edit_buffer: self.edit_buffer.clone(),
+            value_box: box_state(&self.value_box),
             source: doc
                 .and_then(|d| d.source.as_ref())
                 .map(|s| (s.area.caret(), s.area.anchor(), s.scroll, s.hscroll)),
@@ -3986,6 +4158,12 @@ impl App {
         if self.search_visible {
             self.render_search_bar(&mut cmds);
         }
+        // A box's right-click menu over everything of the document's. The
+        // close question, the picker and the shortcut list are drawn above
+        // this, and are never up with it: each takes the press that would
+        // open it, and the menu takes every event that would raise them but
+        // the window's close, which puts it away.
+        cmds.extend(self.field_menu.render(&self.palette));
 
         cmds
     }
@@ -4220,7 +4398,7 @@ impl App {
     }
 
     fn render_content(&mut self, cmds: &mut Vec<RenderCommand>) {
-        let top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let top = CONTENT_TOP;
         let content_width = self.width - SIDEBAR_WIDTH;
         let content_height = self.height - top - STATUS_BAR_HEIGHT;
 
@@ -4318,7 +4496,7 @@ impl App {
             invalid: false,
         };
         field::draw(cmds, &self.palette, editor, state, self.focus_ring_width);
-        self.render_box_text(cmds, editor, &self.edit_buffer, "", state.focused);
+        self.render_box_text(cmds, editor, &self.value_box, "", state.focused);
     }
 
     /// The box the value being edited is typed into, over its row: `None`
@@ -4357,24 +4535,25 @@ impl App {
                 && self.editing_path.is_none()
                 && !self.source_is_open(),
             disabled: false,
-            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
+            invalid: !self.search_box.text().is_empty() && self.search_results.is_empty(),
         }
     }
 
-    /// A box's typing, centred on its line, with the caret after it while
-    /// the box has the keyboard -- scrolled so the end being typed stays in
+    /// A box's text, centred on its line, with its caret and selection
+    /// while the box has the keyboard -- scrolled so the caret stays in
     /// view rather than cut off with an ellipsis -- or, empty, what it is
     /// for.
     fn render_box_text(
         &self,
         cmds: &mut Vec<RenderCommand>,
         r: Rect,
-        typed: &str,
+        input: &TextInput,
         placeholder: &str,
         focused: bool,
     ) {
         let line = text::line_height(NORMAL_TEXT, FontWeightHint::Regular);
-        let (x, y, w) = (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0));
+        let (x, y, w) = box_text_area(r);
+        let typed = input.text();
         if typed.is_empty() && !placeholder.is_empty() {
             cmds.push(RenderCommand::Text {
                 x,
@@ -4392,10 +4571,8 @@ impl App {
             &mut tree,
             &textedit::SingleLine {
                 text: typed,
-                // Typed and erased at its end, so the end is where the caret
-                // is.
-                cursor: text::TextCursor::from(typed.len()),
-                selection_anchor: None,
+                cursor: input.cursor(),
+                selection_anchor: input.selection_anchor(),
                 focused,
                 x,
                 y,
@@ -5115,7 +5292,7 @@ impl App {
     }
 
     fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
-        let top = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let top = CONTENT_TOP;
         let sidebar_x = self.width - SIDEBAR_WIDTH;
         let sidebar_height = self.height - top - STATUS_BAR_HEIGHT;
 
@@ -5501,7 +5678,7 @@ impl App {
     }
 
     fn render_search_bar(&self, cmds: &mut Vec<RenderCommand>) {
-        let bar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let bar_y = CONTENT_TOP;
         let bar_height = SEARCH_BAR_HEIGHT;
 
         // Overlay background
@@ -5533,7 +5710,7 @@ impl App {
         self.render_box_text(
             cmds,
             search,
-            &self.search_query,
+            &self.search_box,
             "Search keys and values...",
             state.focused,
         );
@@ -5554,7 +5731,7 @@ impl App {
                 max_width: None,
                 overflow: TextOverflow::Clip,
             });
-        } else if !self.search_query.is_empty() {
+        } else if !self.search_box.text().is_empty() {
             cmds.push(RenderCommand::Text {
                 x: 370.0,
                 y: bar_y + 18.0,
@@ -5782,19 +5959,24 @@ impl oswindow::app::App for App {
         }
     }
 
-    /// No clock.
+    /// A clock only while a box's right-click menu has something to show in
+    /// time -- why a dimmed row is dimmed, once the pointer rests on it.
     ///
-    /// Nothing here advances on its own: the tree expands when it is expanded
-    /// and the view scrolls when it is scrolled. There is no animation and no
-    /// data that ages, so a tick would redraw an identical frame.
+    /// Nothing else here advances on its own: the tree expands when it is
+    /// expanded and the view scrolls when it is scrolled. There is no
+    /// animation and no data that ages, so any other tick would redraw an
+    /// identical frame.
     fn tick_interval(&self) -> Option<Duration> {
-        None
+        self.field_menu.due_in().map(Duration::from_millis)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
         // Closing over unsaved work asks first, and the window waits for the
         // answer: `KeepOpen` declines the close and draws the question.
         if matches!(event, Event::CloseRequested) {
+            // The menu is put away: it takes every event while it is up, and
+            // the question asked next must have them.
+            self.field_menu.close();
             return if self.request_quit() {
                 Response::Exit
             } else {
@@ -6273,13 +6455,13 @@ mod tests {
 
     #[test]
     fn an_edited_value_is_written_back_into_the_document() {
-        // `set_value_at_path` had four tests and no caller: Enter loaded a value
-        // into the buffer and nothing ever wrote it back, so every edit was
-        // discarded silently.
+        // Writing a value back once had no caller: Enter loaded a value into
+        // the box and nothing ever wrote it back, so every edit was discarded
+        // silently.
         let mut app = two_tabs();
         app.edit_mode = true;
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer = "42".to_owned();
+        app.value_box.set_text("42");
         app.commit_edit();
         let value = app
             .documents
@@ -6305,7 +6487,7 @@ mod tests {
         // lost by storing every edit as text.
         let mut app = two_tabs();
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer = "\"42\"".to_owned();
+        app.value_box.set_text("\"42\"");
         app.commit_edit();
         let value = app
             .documents
@@ -6327,9 +6509,9 @@ mod tests {
         // one.
         let mut app = two_tabs();
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer.clear();
+        app.value_box.clear();
         let _ = app.handle_event(&typed('5'));
-        assert_eq!(app.edit_buffer, "5");
+        assert_eq!(app.value_box.text(), "5");
         assert_eq!(
             app.documents.first().map(|d| d.view_mode),
             Some(ViewMode::Tree),
@@ -6342,10 +6524,10 @@ mod tests {
         let mut app = two_tabs();
         let before = app.documents.first().and_then(|d| d.parsed.clone());
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer = "999".to_owned();
+        app.value_box.set_text("999");
         let _ = app.handle_event(&press(Key::Escape));
         assert!(app.editing_path.is_none(), "Escape should end the edit");
-        assert!(app.edit_buffer.is_empty());
+        assert!(app.value_box.text().is_empty());
         assert_eq!(
             app.documents.first().and_then(|d| d.parsed.clone()),
             before,
@@ -6538,7 +6720,7 @@ mod tests {
     /// same commit a typed edit ends in.
     fn set_key(app: &mut App, key: &str, value: &str) {
         app.editing_path = Some(vec![PathSegment::Key(key.to_owned())]);
-        app.edit_buffer = value.to_owned();
+        app.value_box.set_text(value);
         app.commit_edit();
     }
 
@@ -6816,7 +6998,7 @@ mod tests {
             doc.reparse();
         }
         app.editing_path = Some(vec![PathSegment::Index(0)]);
-        app.edit_buffer = String::from("7");
+        app.value_box.set_text("7");
         app.commit_edit();
         assert!(app.documents[0].dirty, "control: both tabs have changes");
 
@@ -6923,7 +7105,7 @@ mod tests {
         // The root is always expanded, so row 1 is key "a".
         let mut app = two_tabs();
         app.handle_event(&press_ctrl(Key::F));
-        let bar_y = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
+        let bar_y = CONTENT_TOP;
 
         assert_eq!(
             click(&mut app, CASE_BUTTON_X + 4.0, bar_y + 12.0),
@@ -6954,7 +7136,7 @@ mod tests {
     fn a_value_being_typed_stays_with_its_own_tab() {
         let mut app = two_tabs();
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer = "7".to_owned();
+        app.value_box.set_text("7");
         app.handle_event(&press_ctrl(Key::Tab));
         assert_eq!(app.active_tab, 1);
         assert!(
@@ -6994,11 +7176,14 @@ mod tests {
             doc.input = before.to_owned();
             doc.reparse();
             let root = doc.parsed.as_mut().expect("the fixture parses");
-            assert!(set_value_at_path(
-                root,
-                &[PathSegment::Key(String::from("a"))],
-                JsonValue::Number(2.0)
-            ));
+            assert!(
+                replace_value_at_path(
+                    root,
+                    &[PathSegment::Key(String::from("a"))],
+                    JsonValue::Number(2.0)
+                )
+                .is_some()
+            );
             doc.regenerate_input();
             assert_eq!(doc.input, after, "from {before:?}");
         }
@@ -7030,7 +7215,7 @@ mod tests {
     fn a_value_being_typed_when_the_window_closes_is_asked_about() {
         let mut app = two_tabs();
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer = "8".to_owned();
+        app.value_box.set_text("8");
         assert_eq!(app.on_event(&Event::CloseRequested), Response::KeepOpen);
         assert_eq!(app.documents[0].input, r#"{"a":8,"b":"x"}"#);
     }
@@ -7041,7 +7226,7 @@ mod tests {
         let file = Scratch::with("save-mid-edit", r#"{"a":1}"#);
         let mut app = opened(&file);
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer = "6".to_owned();
+        app.value_box.set_text("6");
         app.handle_event(&press_ctrl(Key::S));
         assert_eq!(file.read(), r#"{"a":6}"#);
         assert!(app.editing_path.is_none(), "the edit was left open");
@@ -7560,12 +7745,16 @@ mod tests {
     #[test]
     fn edit_set_value() {
         let mut root = parse_json("{\"a\": 1}").unwrap();
-        let result = set_value_at_path(
+        let result = replace_value_at_path(
             &mut root,
             &[PathSegment::Key("a".to_string())],
             JsonValue::Number(42.0),
         );
-        assert!(result);
+        assert_eq!(
+            result,
+            Some(JsonValue::Number(1.0)),
+            "what was there comes back"
+        );
         if let JsonValue::Object(ref obj) = root {
             assert_eq!(obj[0].1, JsonValue::Number(42.0));
         }
@@ -7574,7 +7763,7 @@ mod tests {
     #[test]
     fn edit_set_nested() {
         let mut root = parse_json("{\"a\": {\"b\": 1}}").unwrap();
-        let result = set_value_at_path(
+        let result = replace_value_at_path(
             &mut root,
             &[
                 PathSegment::Key("a".to_string()),
@@ -7582,7 +7771,7 @@ mod tests {
             ],
             JsonValue::Str("updated".to_string()),
         );
-        assert!(result);
+        assert_eq!(result, Some(JsonValue::Number(1.0)));
     }
 
     #[test]
@@ -7619,19 +7808,22 @@ mod tests {
     #[test]
     fn edit_set_root() {
         let mut root = parse_json("1").unwrap();
-        set_value_at_path(&mut root, &[], JsonValue::Str("replaced".to_string()));
+        let was = replace_value_at_path(&mut root, &[], JsonValue::Str("replaced".to_string()));
         assert_eq!(root, JsonValue::Str("replaced".to_string()));
+        assert_eq!(was, Some(JsonValue::Number(1.0)));
     }
 
     #[test]
     fn edit_invalid_path() {
         let mut root = parse_json("{\"a\": 1}").unwrap();
-        let result = set_value_at_path(
+        let before = root.clone();
+        let result = replace_value_at_path(
             &mut root,
             &[PathSegment::Key("nonexistent".to_string())],
             JsonValue::Null,
         );
-        assert!(!result);
+        assert_eq!(result, None);
+        assert_eq!(root, before, "a path that leads nowhere changes nothing");
     }
 
     // --- Value method tests ---
@@ -7936,7 +8128,7 @@ mod tests {
             Some(vec![PathSegment::Key(String::from("b"))]),
             "a double-click on a value in edit mode did not edit it"
         );
-        assert_eq!(app.edit_buffer, "2");
+        assert_eq!(app.value_box.text(), "2");
     }
 
     /// **A move onto another row is a redraw; one within a row is not.** The
@@ -8090,13 +8282,14 @@ mod tests {
         app.handle_event(&key(Key::E, "e", Modifiers::ctrl()));
         assert!(app.edit_mode, "Ctrl+E no longer turns editing on");
         app.editing_path = Some(vec![PathSegment::Key("a".to_owned())]);
-        app.edit_buffer.clear();
+        app.value_box.clear();
         app.handle_event(&key(Key::X, "x", Modifiers::ctrl()));
         app.handle_event(&key(Key::X, "x", Modifiers::alt()));
         app.handle_event(&key(Key::E, "ę", altgr));
         app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
         assert_eq!(
-            app.edit_buffer, "ę",
+            app.value_box.text(),
+            "ę",
             "the value typed a command or lost AltGr's ę"
         );
         assert!(app.editing_path.is_some(), "Alt+Escape ended the edit");
@@ -8109,7 +8302,8 @@ mod tests {
         app.handle_event(&key(Key::S, "ś", altgr));
         app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
         assert_eq!(
-            app.search_query, "ś",
+            app.search_box.text(),
+            "ś",
             "the search typed a command or lost AltGr's ś"
         );
         assert!(app.search_visible, "Alt+Escape closed the search");
@@ -8155,7 +8349,7 @@ mod tests {
     #[test]
     fn app_search_flow() {
         let mut app = app_with_sample();
-        app.search_query = "name".to_string();
+        app.search_box.set_text("name");
         app.perform_search();
         assert!(!app.search_results.is_empty());
     }
@@ -8163,7 +8357,7 @@ mod tests {
     #[test]
     fn app_search_navigation() {
         let mut app = App::new();
-        app.search_query = "id".to_string();
+        app.search_box.set_text("id");
         app.perform_search();
         let count = app.search_results.len();
         if count > 1 {
@@ -8670,9 +8864,6 @@ mod tests {
         })
     }
 
-    /// The top of the view's text: below the toolbar, the tabs and the chips.
-    const CONTENT_Y: f32 = TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0;
-
     /// A window whose one document holds `text`, parsed.
     fn holding(text: &str) -> App {
         let mut app = App::new();
@@ -8837,7 +9028,7 @@ mod tests {
         click(
             &mut app,
             SOURCE_TEXT_X + 1.0,
-            CONTENT_Y + LINE_HEIGHT * 2.0 + 5.0,
+            CONTENT_TOP + LINE_HEIGHT * 2.0 + 5.0,
         );
         let edit = source(&app);
         assert_eq!(
@@ -8845,7 +9036,7 @@ mod tests {
             edit.area.start_of_line(2),
             "not the third line's start"
         );
-        click(&mut app, SOURCE_TEXT_X + 500.0, CONTENT_Y + 5.0);
+        click(&mut app, SOURCE_TEXT_X + 500.0, CONTENT_TOP + 5.0);
         assert_eq!(source(&app).area.caret(), 1, "past a line's end is its end");
     }
 
@@ -8855,7 +9046,7 @@ mod tests {
     fn a_press_on_a_parse_error_goes_to_it() {
         let mut app = holding("[1,\n 2,,\n 3]");
         app.handle_event(&press(Key::Num2));
-        click(&mut app, 300.0, CONTENT_Y + 300.0);
+        click(&mut app, 300.0, CONTENT_TOP + 300.0);
         let edit = source(&app);
         assert_eq!(
             edit.area.line_index(edit.area.caret()),
@@ -8892,13 +9083,13 @@ mod tests {
         app.handle_event(&press_ctrl(Key::F));
         assert!(app.search_visible && !app.source_is_open());
         app.handle_event(&typed('a'));
-        assert_eq!(app.search_query, "a");
+        assert_eq!(app.search_box.text(), "a");
         assert_eq!(app.documents[0].input, r#"{"a":1,"b":"x"}"#);
         // And editing the text again closes the find bar.
         click(
             &mut app,
             SOURCE_TEXT_X + 1.0,
-            CONTENT_Y + SEARCH_BAR_HEIGHT + 5.0,
+            CONTENT_TOP + SEARCH_BAR_HEIGHT + 5.0,
         );
         assert!(
             app.source_is_open(),
@@ -8978,7 +9169,7 @@ mod tests {
         app.handle_event(&press_ctrl(Key::A));
         app.handle_event(&press_ctrl(Key::X));
         assert_eq!(app.documents[0].input, "");
-        assert_eq!(app.clipboard, r#"{"a":1,"b":"x"}"#);
+        assert_eq!(guitk::clipboard::text(), r#"{"a":1,"b":"x"}"#);
         app.handle_event(&press_ctrl(Key::V));
         app.handle_event(&press_ctrl(Key::V));
         assert_eq!(app.documents[0].input, r#"{"a":1,"b":"x"}{"a":1,"b":"x"}"#);
@@ -9090,7 +9281,7 @@ mod tests {
         click(
             &mut app,
             SOURCE_TEXT_X + 1.0,
-            CONTENT_Y + LINE_HEIGHT * 2.0 + 5.0,
+            CONTENT_TOP + LINE_HEIGHT * 2.0 + 5.0,
         );
         let edit = source(&app);
         assert_eq!(edit.scroll, 10, "the text did not open where the view was");
@@ -9108,9 +9299,9 @@ mod tests {
         let mut app = two_tabs();
         app.edit_mode = true;
         app.editing_path = Some(vec![PathSegment::Key(String::from("a"))]);
-        app.edit_buffer = String::from("5");
+        app.value_box.set_text("5");
         app.documents[0].view_mode = ViewMode::Raw;
-        click(&mut app, SOURCE_TEXT_X + 1.0, CONTENT_Y + 5.0);
+        click(&mut app, SOURCE_TEXT_X + 1.0, CONTENT_TOP + 5.0);
         assert!(
             app.editing_path.is_none(),
             "the value edit was left pending"
@@ -9189,7 +9380,7 @@ mod tests {
 
     /// The find bar's box, wherever the bar is.
     fn find_box() -> Rect {
-        search_box_rect(TOOLBAR_HEIGHT + TAB_BAR_HEIGHT + 30.0)
+        search_box_rect(CONTENT_TOP)
     }
 
     /// **The find bar's box is the toolkit's field**: it has the keyboard
@@ -9294,5 +9485,408 @@ mod tests {
             matches!(cmds.get(at + 1), Some(RenderCommand::Line { .. })),
             "no caret after the value"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // The find bar's box and the value box: a caret, a selection, the
+    // program's clipboard and a right-click menu (2026-10-10)
+    // ------------------------------------------------------------------
+
+    /// The middle of the box `r`.
+    fn middle(r: Rect) -> (f32, f32) {
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    fn right_press_at(app: &mut App, (x, y): (f32, f32)) -> EventResult {
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)))
+    }
+
+    /// Press the up menu's row for `command`.
+    fn choose_row(app: &mut App, command: guitk::editmenu::EditCommand) {
+        let (x, y) = app
+            .field_menu
+            .row_middle(command)
+            .unwrap_or_else(|| panic!("no {command:?} row"));
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+    }
+
+    /// `b` of `{"a": 1, "b": 22}` being typed over, started as the user
+    /// starts it: editing turned on, b's row pressed and double-clicked.
+    fn editing_b() -> App {
+        let mut app = holding(r#"{"a": 1, "b": 22}"#);
+        app.render_commands();
+        app.handle_event(&press_ctrl(Key::E));
+        let (x, y) = row_point(&app, 2);
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        app.handle_event(&mouse_at(
+            x,
+            y,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        assert_eq!(
+            app.editing_path,
+            Some(vec![PathSegment::Key(String::from("b"))]),
+            "control: a double-click on b edits it"
+        );
+        app.render_commands();
+        app
+    }
+
+    /// **The find bar's box edits at a caret**, as every other box does: the
+    /// arrows and Home move it, typing goes in where it is, Delete takes the
+    /// character after it, and Ctrl+A selects what typing then replaces --
+    /// each change searching again. It typed only at its end, and Backspace
+    /// from the end was its only edit.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = app_with_sample();
+        app.handle_event(&press_ctrl(Key::F));
+        for c in "nme".chars() {
+            app.handle_event(&typed(c));
+        }
+        app.handle_event(&press(Key::Left));
+        assert_eq!(
+            app.handle_event(&press(Key::Left)),
+            EventResult::Consumed,
+            "a move of the caret is not drawn"
+        );
+        app.handle_event(&typed('a'));
+        assert_eq!(
+            app.search_box.text(),
+            "name",
+            "typing did not go in at the caret"
+        );
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            app.search_box.text(),
+            "ame",
+            "Delete did not take the first character"
+        );
+        app.handle_event(&press_ctrl(Key::A));
+        app.handle_event(&typed('i'));
+        app.handle_event(&typed('d'));
+        assert_eq!(
+            app.search_box.text(),
+            "id",
+            "typing did not replace the selection"
+        );
+        let parsed = app.documents[0].parsed.as_ref().expect("the sample parses");
+        assert_eq!(
+            app.search_results,
+            search_json(parsed, "id", false),
+            "the search is not of what the box holds"
+        );
+    }
+
+    /// **A press in the find bar's box puts the caret where it lands**, and
+    /// takes the keyboard from a value being typed over -- writing the
+    /// value, as leaving its box does.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there_and_writes_the_value() {
+        let mut app = holding(r#"{"a": 1, "b": 2}"#);
+        app.edit_mode = true;
+        app.editing_path = Some(vec![PathSegment::Key(String::from("b"))]);
+        app.value_box.set_text("7");
+        app.handle_event(&press_ctrl(Key::F));
+        assert!(
+            app.editing_path.is_some(),
+            "control: the value keeps the keyboard when the bar comes up"
+        );
+        let r = search_box_rect(CONTENT_TOP);
+        let start = (r.x + 7.0, r.y + r.h / 2.0);
+        click(&mut app, start.0, start.1);
+        assert!(
+            app.editing_path.is_none(),
+            "the value's box kept the keyboard"
+        );
+        assert_eq!(
+            app.documents[0].input, r#"{"a":1,"b":7}"#,
+            "the value typed was not written"
+        );
+        app.handle_event(&typed('a'));
+        app.handle_event(&typed('b'));
+        click(&mut app, start.0, start.1);
+        app.handle_event(&typed('x'));
+        assert_eq!(
+            app.search_box.text(),
+            "xab",
+            "the press did not put the caret at the start"
+        );
+    }
+
+    /// **The value box edits at a caret, and a press in it is its own**: it
+    /// put the caret nowhere, the press went to the row under the box, and a
+    /// double-click there started the edit over, dropping what was typed.
+    #[test]
+    fn the_value_box_edits_at_a_caret_and_takes_its_own_presses() {
+        let mut app = editing_b();
+        assert_eq!(app.value_box.text(), "22");
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&typed('5'));
+        assert_eq!(
+            app.value_box.text(),
+            "252",
+            "typing did not go in at the caret"
+        );
+        let r = app.value_box_rect().expect("the value box is on screen");
+        let (left, _, _) = box_text_area(r);
+        let at = (left + 1.0, r.y + r.h / 2.0);
+        app.handle_event(&mouse_at(
+            at.0,
+            at.1,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&mouse_at(
+            at.0,
+            at.1,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        app.handle_event(&typed('-'));
+        assert_eq!(
+            app.value_box.text(),
+            "-252",
+            "a press in the box did not put the caret there, or started the edit over"
+        );
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.documents[0].input, r#"{"a":1,"b":-252}"#);
+    }
+
+    /// **Editing another value writes the first**: a double-click on a
+    /// second value while one was being typed over threw away what was
+    /// typed.
+    #[test]
+    fn editing_another_value_writes_the_first() {
+        let mut app = editing_b();
+        app.handle_event(&press(Key::Backspace));
+        app.handle_event(&typed('9'));
+        let (x, y) = row_point(&app, 1);
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        app.handle_event(&mouse_at(
+            x,
+            y,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        assert_eq!(
+            app.editing_path,
+            Some(vec![PathSegment::Key(String::from("a"))]),
+            "control: a double-click on a edits it"
+        );
+        assert_eq!(
+            app.documents[0].input, r#"{"a":1,"b":29}"#,
+            "what was typed into b was thrown away"
+        );
+    }
+
+    /// **A value too big for the file is refused, and kept**: written, the
+    /// text would be more than this program reads of a file, so it could
+    /// not read back what it saved. The box stays open holding it and the
+    /// status line says why; cut down, it goes in.
+    #[test]
+    fn a_value_too_big_for_the_file_is_refused_and_kept() {
+        let mut app = holding(r#"{"a": 1}"#);
+        app.edit_mode = true;
+        app.editing_path = Some(vec![PathSegment::Key(String::from("a"))]);
+        app.value_box.set_text(&"x".repeat(MAX_OPEN_BYTES));
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.documents[0].input, r#"{"a": 1}"#, "the text changed");
+        assert_eq!(
+            app.documents[0].parsed,
+            parse_json(r#"{"a": 1}"#).ok(),
+            "the value refused is in the tree"
+        );
+        assert!(
+            !app.documents[0].dirty,
+            "a refused value marked the file changed"
+        );
+        assert!(app.editing_path.is_some(), "the box was closed on it");
+        assert_eq!(
+            app.value_box.text().len(),
+            MAX_OPEN_BYTES,
+            "what was typed is gone"
+        );
+        assert!(
+            app.note
+                .as_deref()
+                .is_some_and(|n| n.contains(&MAX_OPEN_BYTES.to_string())),
+            "the status line does not say why: {:?}",
+            app.note
+        );
+        app.value_box.set_text("2");
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.documents[0].input, r#"{"a":2}"#);
+    }
+
+    /// **The find bar's box has a right-click menu** -- Cut, Copy, Paste,
+    /// Delete and Select all, on the program's clipboard -- which takes the
+    /// keys while it is up, a change from it searching again.
+    #[test]
+    fn the_search_boxs_right_click_menu_edits_the_search() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with_sample();
+        app.handle_event(&press_ctrl(Key::F));
+        let search = middle(search_box_rect(CONTENT_TOP));
+        right_press_at(&mut app, search);
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the box offered nothing"
+        );
+        assert_eq!(
+            app.field_menu.row_lit(EditCommand::Copy),
+            Some(false),
+            "Copy was offered with nothing selected"
+        );
+        assert!(
+            app.render_commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Paste")),
+            "the menu is not drawn"
+        );
+        app.handle_event(&typed('x'));
+        assert_eq!(
+            app.search_box.text(),
+            "",
+            "a key reached the box through the menu"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.field_menu.is_up(), "Escape left the menu up");
+        assert!(
+            app.search_visible,
+            "Escape reached the find bar through the menu"
+        );
+
+        guitk::clipboard::set_text("name");
+        right_press_at(&mut app, search);
+        choose_row(&mut app, EditCommand::Paste);
+        assert!(!app.field_menu.is_up());
+        assert_eq!(app.search_box.text(), "name", "Paste did not paste");
+        assert!(
+            !app.search_results.is_empty(),
+            "the search did not follow the paste"
+        );
+        right_press_at(&mut app, search);
+        choose_row(&mut app, EditCommand::SelectAll);
+        guitk::clipboard::set_text("");
+        right_press_at(&mut app, search);
+        choose_row(&mut app, EditCommand::Copy);
+        assert_eq!(guitk::clipboard::text(), "name", "Copy copied nowhere");
+    }
+
+    /// **The value box has a right-click menu too**, and a right-click on
+    /// it neither ends the edit nor reaches the row under it.
+    #[test]
+    fn the_value_boxs_right_click_menu_edits_the_value() {
+        use guitk::editmenu::EditCommand;
+        let mut app = editing_b();
+        let r = app.value_box_rect().expect("the value box is on screen");
+        right_press_at(&mut app, middle(r));
+        assert!(
+            app.field_menu.is_up(),
+            "a right-click on the value box offered nothing"
+        );
+        assert!(app.editing_path.is_some(), "the right-click ended the edit");
+        choose_row(&mut app, EditCommand::SelectAll);
+        right_press_at(&mut app, middle(r));
+        choose_row(&mut app, EditCommand::Cut);
+        assert_eq!(app.value_box.text(), "", "Cut did not cut");
+        assert_eq!(
+            guitk::clipboard::text(),
+            "22",
+            "Cut put nothing on the clipboard"
+        );
+        guitk::clipboard::set_text(r#""x""#);
+        right_press_at(&mut app, middle(r));
+        choose_row(&mut app, EditCommand::Paste);
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.documents[0].input, r#"{"a":1,"b":"x"}"#);
+
+        let (x, y) = row_point(&app, 1);
+        right_press_at(&mut app, (x, y));
+        assert!(!app.field_menu.is_up(), "a row offered a box's menu");
+    }
+
+    /// **A dimmed row the pointer rests on says why, on the window's
+    /// clock**, which the window asks for only while the menu waits.
+    #[test]
+    fn the_menu_says_why_on_the_clock() {
+        use guitk::editmenu::EditCommand;
+        let mut app = app_with_sample();
+        assert_eq!(
+            app.tick_interval(),
+            None,
+            "a clock with nothing to wait for"
+        );
+        app.handle_event(&press_ctrl(Key::F));
+        right_press_at(&mut app, middle(search_box_rect(CONTENT_TOP)));
+        let (x, y) = app.field_menu.row_middle(EditCommand::Copy).expect("Copy");
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Move));
+        let mut said = false;
+        for _ in 0..40 {
+            let Some(wait) = app.tick_interval() else {
+                break;
+            };
+            let elapsed_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
+            app.handle_event(&Event::Tick { elapsed_ms });
+            if app
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::showing_reason)
+                .is_some()
+            {
+                said = true;
+                break;
+            }
+        }
+        assert!(said, "the dimmed row never said why");
+    }
+
+    /// **The text pastes the program's clipboard** -- what a box's menu or
+    /// another program's field copied -- and not a clipboard of its own.
+    #[test]
+    fn the_text_pastes_what_the_program_copied() {
+        let mut app = holding("[]");
+        app.handle_event(&press(Key::Num2));
+        app.handle_event(&press(Key::Enter));
+        assert!(
+            app.documents[0].source.is_some(),
+            "control: Enter opens the text"
+        );
+        guitk::clipboard::set_text("[1]");
+        app.handle_event(&press_ctrl(Key::A));
+        app.handle_event(&press_ctrl(Key::V));
+        assert_eq!(app.documents[0].input, "[1]");
+    }
+
+    /// **A close request puts a box's menu away**, so the question it raises
+    /// has the keys: the menu took every event while it was up.
+    #[test]
+    fn closing_the_window_puts_the_menu_away() {
+        let mut app = editing_b();
+        let r = app.value_box_rect().expect("the value box is on screen");
+        right_press_at(&mut app, middle(r));
+        assert!(app.field_menu.is_up(), "control: the menu is up");
+        app.on_event(&Event::CloseRequested);
+        assert!(
+            !app.field_menu.is_up(),
+            "the menu stayed up over the question"
+        );
+    }
+
+    /// **A right-click on the find bar's box takes the keyboard from a
+    /// value being typed over**, writing the value, as a press does.
+    #[test]
+    fn a_right_click_on_the_search_box_writes_the_value() {
+        let mut app = holding(r#"{"a": 1, "b": 2}"#);
+        app.edit_mode = true;
+        app.editing_path = Some(vec![PathSegment::Key(String::from("b"))]);
+        app.value_box.set_text("7");
+        app.handle_event(&press_ctrl(Key::F));
+        right_press_at(&mut app, middle(search_box_rect(CONTENT_TOP)));
+        assert!(app.field_menu.is_up(), "control: the menu is up");
+        assert!(
+            app.editing_path.is_none(),
+            "the value's box kept the keyboard"
+        );
+        assert_eq!(app.documents[0].input, r#"{"a":1,"b":7}"#);
     }
 }

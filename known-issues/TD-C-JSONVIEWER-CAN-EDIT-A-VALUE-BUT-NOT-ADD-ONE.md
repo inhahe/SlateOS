@@ -8,9 +8,10 @@ is missing is small and named here.
 **Adding a key.** `add_key_at_path` exists, has a test, and has no caller,
 because adding a key needs somewhere for the user to type the name and this
 program has no such field. Editing an existing value did not need one — the
-value is already selected, and the buffer starts from what is there. The fix is
-a one-line prompt in the tree view: a key name, then the same commit path
-`set_value_at_path` already uses. The function keeps its test so that wiring it
+value is already selected, and its box starts from what is there. The fix is
+a one-line prompt in the tree view, a box like the value's (`value_box`, a
+`TextInput`): a key name, then the same commit path
+`replace_value_at_path` already uses. The function keeps its test so that wiring it
 is a small job rather than a rewrite.
 
 **Tabs by index.** `Document::id` is assigned by `next_tab_id` and never read;

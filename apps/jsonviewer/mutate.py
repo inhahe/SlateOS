@@ -255,7 +255,7 @@ MUTATIONS = [
     ),
     (
         "a cut is not kept for a paste",
-        "        if let Some(copied) = edited.copied {\n            self.clipboard = copied;\n        }",
+        "        if let Some(copied) = edited.copied {\n            guitk::clipboard::set_text(&copied);\n        }",
         "        drop(edited.copied);",
         [CUT],
     ),
@@ -459,26 +459,26 @@ MUTATIONS = [
     ),
     (
         "a command's letter is typed into a value",
-        '                _ if textline::types_into_field(ev) => {\n                    if let Some(ch) = text\n                        && self.edit_buffer.len()',
-        '                _ if ev.types_text() => {\n                    if let Some(ch) = text\n                        && self.edit_buffer.len()',
+        "                    textline::apply_key_on_clipboard(&mut self.value_box, ev, NORMAL_TEXT);\n",
+        "                    self.value_box.insert_text(&ev.text);\n",
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
         "a chord works a value's own keys",
-        '                _ if !plain => return,\n                Key::Escape => {\n                    self.cancel_edit();',
-        '                Key::Escape => {\n                    self.cancel_edit();',
+        "                Key::Escape if plain => self.cancel_edit(),\n",
+        "                Key::Escape => self.cancel_edit(),\n",
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
         "a command's letter is typed into the search",
-        '                _ if textline::types_into_field(ev) => {\n                    if let Some(ch) = text\n                        && self.search_query.len()',
-        '                _ if ev.types_text() => {\n                    if let Some(ch) = text\n                        && self.search_query.len()',
+        "                    textline::apply_key_on_clipboard(&mut self.search_box, ev, NORMAL_TEXT);\n",
+        "                    self.search_box.insert_text(&ev.text);\n",
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
         "a chord works the search's own keys",
-        '                _ if !plain => return,\n                Key::Escape => {\n                    self.search_visible = false;',
-        '                Key::Escape => {\n                    self.search_visible = false;',
+        "                Key::Escape if plain => self.search_visible = false,\n",
+        "                Key::Escape => self.search_visible = false,\n",
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
@@ -628,7 +628,7 @@ MUTATIONS += [
     ),
     (
         "a query that finds nothing is not red",
-        "            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: !self.search_box.text().is_empty() && self.search_results.is_empty(),\n",
         "            invalid: false,\n",
         [FIND],
     ),
@@ -640,8 +640,8 @@ MUTATIONS += [
     ),
     (
         "the value hangs below its box",
-        "        let (x, y, w) = (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0));\n",
-        "        let (x, y, w) = (r.x + 6.0, r.y + r.h * 0.7, (r.w - 12.0).max(0.0));\n",
+        "    (r.x + 6.0, r.y + (r.h - line) / 2.0, (r.w - 12.0).max(0.0))\n",
+        "    (r.x + 6.0, r.y + r.h * 0.7, (r.w - 12.0).max(0.0))\n",
         [EDIT],
     ),
     (
@@ -649,6 +649,156 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [FIND, EDIT],
+    ),
+]
+
+# The find bar's box and the value box edit at a caret, on the program's
+# clipboard, with right-click menus; a value too big for the file is
+# refused and kept (2026-10-10).
+SEARCH_CARET = "the_search_box_edits_at_a_caret"
+SEARCH_PRESS = "a_press_in_the_search_box_puts_the_caret_there_and_writes_the_value"
+VALUE_CARET = "the_value_box_edits_at_a_caret_and_takes_its_own_presses"
+ANOTHER = "editing_another_value_writes_the_first"
+TOO_BIG = "a_value_too_big_for_the_file_is_refused_and_kept"
+SEARCH_MENU = "the_search_boxs_right_click_menu_edits_the_search"
+VALUE_MENU = "the_value_boxs_right_click_menu_edits_the_value"
+CLOCK = "the_menu_says_why_on_the_clock"
+PASTE = "the_text_pastes_what_the_program_copied"
+CLOSE_MENU = "closing_the_window_puts_the_menu_away"
+RIGHT_WRITES = "a_right_click_on_the_search_box_writes_the_value"
+
+MUTATIONS += [
+    (
+        "the search types only at its end",
+        "                    textline::apply_key_on_clipboard(&mut self.search_box, ev, NORMAL_TEXT);\n",
+        "                    let end = self.search_box.text().len();\n                    self.search_box.set_cursor(text::TextCursor::from(end));\n                    textline::apply_key_on_clipboard(&mut self.search_box, ev, NORMAL_TEXT);\n",
+        [SEARCH_CARET],
+    ),
+    (
+        "a change to the search does not search again",
+        "                    if self.search_box.text() != before {\n                        self.perform_search();\n                    }\n",
+        "                    drop(before);\n",
+        [SEARCH_CARET],
+    ),
+    (
+        "the value types only at its end",
+        "                    textline::apply_key_on_clipboard(&mut self.value_box, ev, NORMAL_TEXT);\n",
+        "                    let end = self.value_box.text().len();\n                    self.value_box.set_cursor(text::TextCursor::from(end));\n                    textline::apply_key_on_clipboard(&mut self.value_box, ev, NORMAL_TEXT);\n",
+        [VALUE_CARET],
+    ),
+    (
+        "a press in the search box puts the caret nowhere",
+        "                    self.press_search_box(x);\n",
+        "",
+        [SEARCH_PRESS],
+    ),
+    (
+        "the search box takes the keyboard from nothing",
+        "        self.commit_edit();\n        if self.editing_path.is_some() {\n            return false;\n        }\n        self.close_source();\n",
+        "        self.close_source();\n",
+        [SEARCH_PRESS, RIGHT_WRITES],
+    ),
+    (
+        "a press puts no caret",
+        "    input.set_cursor(cursor);\n",
+        "    drop(cursor);\n",
+        [SEARCH_PRESS, VALUE_CARET],
+    ),
+    (
+        "a press in the value box goes to the row under it",
+        "                    .filter(|r| in_value_box && r.contains(x, y))\n",
+        "                    .filter(|r| false && in_value_box && r.contains(x, y))\n",
+        [VALUE_CARET],
+    ),
+    (
+        "editing another value throws the first away",
+        "                    self.commit_edit();\n                    if self.editing_path.is_some() {\n                        return;\n                    }\n",
+        "",
+        [ANOTHER],
+    ),
+    (
+        "a value too big for the file is written",
+        "        if input.len() > MAX_OPEN_BYTES {\n",
+        "        if false {\n",
+        [TOO_BIG],
+    ),
+    (
+        "a value refused for its size loses its box",
+        "            self.editing_path = Some(path);\n",
+        "            drop(path);\n",
+        [TOO_BIG],
+    ),
+    (
+        "a value refused for its size stays in the tree",
+        "                drop(replace_value_at_path(root, &path, old));\n",
+        "                drop(old);\n",
+        [TOO_BIG],
+    ),
+    (
+        "a right press opens no menu",
+        "                    && self.open_field_menu(x, y)\n",
+        "                    && false\n",
+        [SEARCH_MENU, VALUE_MENU, CLOCK],
+    ),
+    (
+        "the keys reach a box through its menu",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [SEARCH_MENU],
+    ),
+    (
+        "a row chosen does nothing to the search",
+        "                if self.search_box.edit_command(id) == KeyEdit::Changed {\n",
+        "                if false {\n",
+        [SEARCH_MENU],
+    ),
+    (
+        "a paste from the menu does not search again",
+        "                if self.search_box.edit_command(id) == KeyEdit::Changed {\n                    self.perform_search();\n                }\n",
+        "                drop(self.search_box.edit_command(id));\n",
+        [SEARCH_MENU],
+    ),
+    (
+        "a row chosen does nothing to the value",
+        "                let _edited = self.value_box.edit_command(id);\n",
+        "",
+        [VALUE_MENU],
+    ),
+    (
+        "a right press on the search box leaves the value with the keyboard",
+        "            if !self.give_search_the_keyboard() {\n                return true;\n            }\n            MenuField::Search\n",
+        "            MenuField::Search\n",
+        [RIGHT_WRITES],
+    ),
+    (
+        "the menu is not drawn",
+        "        cmds.extend(self.field_menu.render(&self.palette));\n",
+        "",
+        [SEARCH_MENU],
+    ),
+    (
+        "the window's clock does not wait for the menu",
+        "        self.field_menu.due_in().map(Duration::from_millis)\n",
+        "        None\n",
+        [CLOCK],
+    ),
+    (
+        "the menu's clock does not move",
+        "            Event::Tick { elapsed_ms } if self.field_menu.tick(*elapsed_ms) => {\n",
+        "            Event::Tick { elapsed_ms } if false && self.field_menu.tick(*elapsed_ms) => {\n",
+        [CLOCK],
+    ),
+    (
+        "a close leaves the menu up",
+        "            self.field_menu.close();\n",
+        "",
+        [CLOSE_MENU],
+    ),
+    (
+        "the text pastes a clipboard of its own",
+        "            let clipboard = if textline::pastes(ev) {\n",
+        "            let clipboard = if false {\n",
+        [PASTE],
     ),
 ]
 

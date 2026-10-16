@@ -3891,9 +3891,12 @@ word; text inside them that says "lane C" is history.
   Reminders takes no pointer, by design (examined 2026-09-18), so it has no
   menu to give: its search box, drawn but reached by no key, takes Ctrl+F
   and edits at a caret, and its form's fields copy and paste on the
-  program's clipboard. **Remaining:** jsonviewer, notes, paint, regextester,
-  snippets, stickynotes -- regextester's test input, jsonviewer's source
-  pane and snippets' editor through the item below.
+  program's clipboard. The JSON viewer's find bar and the value being typed
+  over -- each typed only at its end until then -- edit at a caret, with
+  their menus, and its text pastes the program's clipboard. **Remaining:**
+  notes, paint, regextester, snippets, stickynotes, and the JSON viewer's
+  text -- regextester's test input, the viewer's text and snippets' editor
+  through the item below.
 
 - `[ ]` `[E]` **Lane E's interim multi-line field goes; its four users move
   to the toolkit's** -- 2026-10-10. `apps/textarea` was written before the

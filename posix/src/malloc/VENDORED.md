@@ -88,6 +88,25 @@ upstream's `src/dlmalloc.rs` at the version above.
    of the segments under the bin its size belongs in, the designated victim
    and the top chunk apart, for `malloc_info`. `mmap_settings` reads the two
    back for the tests.
+9. **A bin's head is reached as the current call derives it** (2026-10-16,
+   lane F's `requests/f-d-miri-finds-undefined-behaviour-in-malloc.md`). A
+   small bin's head and a tree bin's slot live inside the `Dlmalloc` struct,
+   and free chunks keep their addresses (a chunk's `prev`/`next`, a tree
+   root's `parent`). Each call takes a fresh `&mut` to the struct, which
+   invalidates every pointer an earlier call derived from it, so upstream's
+   `unlink_small_chunk` wrote through a dead pointer whenever a neighbour was
+   the head: undefined behaviour under Rust's aliasing rules, which Miri
+   reports and a `noalias` `&mut self` lets the compiler exploit. Now
+   `unlink_small_chunk` compares each neighbour with the head it derives
+   itself and writes through that one. It is the one place running code
+   dereferences a stored address of the struct: `unlink_first_small_chunk`
+   and `insert_small_chunk` dereference a stored neighbour only when it is
+   not the head, and `unlink_large_chunk` a tree root's `parent` only when
+   the chunk is not a root. Two of change 4's walks, off as they are, would
+   read through one too: `check_tree` reads a root's slot as the call
+   derives it now (upstream turned that check off under Miri instead), and
+   `check_free_chunk`'s two neighbour checks would need the same before they
+   are turned on.
 
 The file is also exempt from this workspace's lints (the `#![allow]` at its top
 says which and why): it is upstream's code, and restyling it would make every
@@ -101,6 +120,6 @@ blanket allow cannot tell a kept-for-fidelity function from a forgotten one
 ## Updating
 
 Download the new `.crate`, check its SHA-256 against crates.io's, replace this
-file with its `src/dlmalloc.rs`, and re-apply the eight changes above. Run
+file with its `src/dlmalloc.rs`, and re-apply the nine changes above. Run
 `cargo test -p posix --lib --target x86_64-pc-windows-gnu`: the upstream tests
 and `malloc.rs`'s own run the new core on the host. Update the table above.

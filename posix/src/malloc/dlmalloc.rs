@@ -1317,9 +1317,20 @@ impl<A: Allocator> Dlmalloc<A> {
     }
 
     unsafe fn unlink_small_chunk(&mut self, chunk: *mut Chunk, size: usize) {
-        let f = (*chunk).prev;
-        let b = (*chunk).next;
         let idx = self.small_index(size);
+        // LOCAL CHANGE (SlateOS): a neighbour that is the bin's head is written
+        // through the head as this call derives it, not through the pointer the
+        // chunk holds. The head lives in `self.smallbins`, and the chunk's copy
+        // of its address was derived from an earlier call's `&mut self`, which
+        // every later `&mut self` invalidates: writing through it is undefined
+        // behaviour under Rust's aliasing rules (Miri, Stacked Borrows), and a
+        // `noalias` `&mut self` lets the compiler assume no such write happens.
+        // Comparing the addresses is sound; only the access needs the fresh one.
+        // See VENDORED.md.
+        let head = self.smallbin_at(idx);
+        let own = |p: *mut Chunk| if p == head { head } else { p };
+        let f = own((*chunk).prev);
+        let b = own((*chunk).next);
         debug_assert!(chunk != b);
         debug_assert!(chunk != f);
         debug_assert_eq!(Chunk::size(chunk), self.small_index2size(idx));
@@ -1825,14 +1836,20 @@ impl<A: Allocator> Dlmalloc<A> {
                 debug_assert!(head.is_null());
                 head = u;
                 debug_assert!((*u).parent != u);
-                // TODO: unsure why this triggers UB in stacked borrows in MIRI
-                // (works in tree borrows though)
-                #[cfg(not(miri))]
-                debug_assert!(
-                    (*(*u).parent).child[0] == u
-                        || (*(*u).parent).child[1] == u
-                        || *((*u).parent as *mut *mut TreeChunk) == u
-                );
+                // LOCAL CHANGE (SlateOS): a root's parent is its bin's slot in
+                // `self.treebins`, through which the chunk's copy of the address
+                // may no longer reach (an earlier call's `&mut self` derived it;
+                // see `unlink_small_chunk`). So the slot is read as this call
+                // derives it, and a parent that is no bin slot is a chunk, whose
+                // children are read through it -- where upstream read through the
+                // stale pointer either way and turned the check off under Miri.
+                // See VENDORED.md.
+                let slot = self.treebin_at((*u).index);
+                debug_assert!(if (*u).parent == slot.cast() {
+                    *slot == u
+                } else {
+                    (*(*u).parent).child[0] == u || (*(*u).parent).child[1] == u
+                });
                 if !left.is_null() {
                     debug_assert_eq!((*left).parent, u);
                     debug_assert!(left != u);

@@ -754,7 +754,14 @@ mod envz_forms {
         // SAFETY: our own block.
         let second = unsafe { bytes(copy, n2) };
         let mut result = 0;
+        // Where in `second` the entry `e` starts: each entry is followed there
+        // by its NUL, so `second[start..at]` is the entry with it. (The slice
+        // `entries` yields stops before the NUL, and may not be stretched to
+        // reach it.)
+        let mut at = 0usize;
         for e in entries(second) {
+            let start = at;
+            at = at.saturating_add(e.len()).saturating_add(1);
             // SAFETY: the caller's vector.
             let found = find_entry(unsafe { bytes(*envz, *len) }, e);
             if let Some(off) = found {
@@ -764,9 +771,13 @@ mod envz_forms {
                 // SAFETY: an entry of the caller's vector.
                 unsafe { delete_at(envz, len, off) };
             }
-            // SAFETY: the caller's vector; the entry with its NUL, in `copy`.
-            let with_nul = unsafe { core::slice::from_raw_parts(e.as_ptr(), e.len() + 1) };
-            // SAFETY: as above.
+            let Some(with_nul) = second.get(start..at) else {
+                // Every entry of an argz vector -- `build` made this one --
+                // ends in a NUL, so this is never short.
+                debug_assert!(false, "an argz entry without its NUL");
+                break;
+            };
+            // SAFETY: the caller's vector; `with_nul` is our own copy's.
             let r = unsafe { append(envz, len, with_nul) };
             if r != 0 {
                 result = r;

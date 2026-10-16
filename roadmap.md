@@ -3980,10 +3980,14 @@ word; text inside them that says "lane C" is history.
   and edits at a caret, and its form's fields copy and paste on the
   program's clipboard. The JSON viewer's find bar and the value being typed
   over -- each typed only at its end until then -- edit at a caret, with
-  their menus, and its text pastes the program's clipboard. **Remaining:**
-  notes, paint, regextester, snippets, stickynotes, and the JSON viewer's
-  text -- regextester's test input, the viewer's text and snippets' editor
-  through the item below.
+  their menus, and its text pastes the program's clipboard. The mail
+  client's, the torrent client's and System Restore's search boxes, typed
+  only at their end until then, edit at a caret with their menus; System
+  Restore's form and the system monitor's filter box have theirs, and the
+  three stopped keeping clipboards of their own. **Remaining:** notes,
+  paint, regextester, snippets, stickynotes, and the JSON viewer's text --
+  regextester's test input, the viewer's text and snippets' editor through
+  the item below.
 
 - `[ ]` `[E]` **Lane E's interim multi-line field goes; its four users move
   to the toolkit's** -- 2026-10-10. `apps/textarea` was written before the

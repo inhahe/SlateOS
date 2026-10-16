@@ -2533,3 +2533,18 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
 - [x] Post-reboot setup: audio device, timezone, user/password, WiFi, theme, browser choice — FirstBoot phase in InstallSession with all fields
 - [x] Unattended install via YAML configuration file (apps/installer: InstallConfig, YAML parser, validation, InstallPlan, CLI)
 - [x] GRUB integration for dual-boot (grub.rs: GrubDetector, entry generation, /etc/grub.d/40_slateos lifecycle, UUID validation) — reachable since 2026-09-28 (C-Q17): the config's `bootloader:` section (Limine, or a GRUB entry the plan adds after Limine), and `installer --grub-detect/--grub-add/--grub-update/--grub-remove` (grubcmd.rs), which rebuild the running system's menu and read it back; a script of that name the installer did not write is left alone. The entry chainloads Limine: loading the kernel directly needs a multiboot2 header (known-issues `[E] GRUB cannot load the kernel itself`)
+
+# OS Development Roadmap — SIX-AGENT EDITION
+## Current backlog by lane
+### Lane E — Applications
+
+- `[x]` `[E]` **The task managers end a program three ways** (§1072, B-Q22:
+  "the same choices should also be available when killing via the task
+  manager") -- done 2026-10-16, lane B's
+  `requests/b-e-the-task-manager-offers-close-terminate-and-force.md`.
+  `apps/sysmonitor` and `apps/procexplorer` sent `SIGKILL`, their one way, so
+  a program they ended never got to save. Now Delete (and procexplorer's End
+  Task) asks it to close, Shift+Delete ends it without asking, and the menu
+  offers both and Force End -- through `procstop`, a program that answers
+  being asked and any other signalled. `apps/processctl` holds the three
+  ways and the status lines both windows carried a copy of.

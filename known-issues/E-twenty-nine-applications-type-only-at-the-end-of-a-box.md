@@ -77,8 +77,9 @@ for d in sorted(pathlib.Path("apps").iterdir()):
 ```
 
 Four more applications append typed text but also have an editor
-somewhere -- calendar, email, systemrestore and torrent -- and are worth a
-look for a box that was missed.
+somewhere -- calendar, email, systemrestore and torrent. Each had a box
+the sweep missed, its search box: all four edit at a caret, calendar's on
+2026-10-10 and the other three's on 2026-10-16.
 
 **Done:** emojipicker (2026-10-04, with its list of keys and the grid's
 keyboard); vpnmanager (2026-10-04: the profile form, its port and MTU as

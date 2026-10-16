@@ -1,5 +1,10 @@
-## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **74 of 800 remain**
+## `A-KSHELL-A-HUNDRED-AND-NINETEEN-FUNCTIONS-GUESS-A-VALUE-FOR-A-WORD-THEY-COULD-NOT-READ` (lane A, 2026-08-25) — **open**, carried as counted debt — **73 of 800 remain**
 
+> **Burn-down log.** 2026-10-15: 74 → 73; `cmd_nc` left the ledger with its
+> command: `nc`/`netcat` went with the in-kernel network stack
+> (design-decisions §934). Nothing was fixed; the site went with the code.
+> `check-option-refusal.py` confirms the count.
+>
 > **Burn-down log.** 2026-10-02: 77 → 74; `cmd_applaunch`, `cmd_appstore`
 > and `cmd_findex` left the ledger with their commands: the modules behind
 > them were removed with the kernel's program and file-type lists

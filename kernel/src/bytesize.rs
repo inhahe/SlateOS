@@ -31,18 +31,16 @@
 //! count. `remainder * 10 / unit` scales before dividing and so yields a digit
 //! in `0..=9` by construction rather than by choosing the divisor carefully.
 //!
-//! ## Deliberately three functions, and no more
+//! ## Deliberately two functions, and no more
 //!
 //! [`iec`] is the prose form (`1.5 MiB`) used in reports and status lines, and
 //! is what almost everything should call. [`compact`] is the `ls -h` column
 //! form (`1.5M`) — no space, one letter, so it fits a fixed-width field, and
-//! `ls -h`, `df` and `du` must agree with each other. [`iec2`] is [`iec`] with
-//! two digits, for throughput reports where a tenth of a GiB is 107 MB of
-//! slack.
+//! `ls -h`, `df` and `du` must agree with each other.
 //!
-//! Those three differences are real. Every *other* difference between the
-//! twenty-one copies was accident, and a fourth entry point should have to
-//! argue for itself as hard as these did.
+//! That difference is real. Every *other* difference between the twenty-one
+//! copies was accident, and a third entry point should have to argue for
+//! itself as hard as these did.
 
 use alloc::format;
 use alloc::string::String;
@@ -50,15 +48,14 @@ use alloc::string::String;
 /// IEC binary unit names, ascending. Indexed by power of 1024.
 const UNITS: [&str; 7] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB", "EiB"];
 
-/// Split `bytes` into whole units, a fraction in `0..scale`, and the index
-/// into [`UNITS`] of the unit chosen.
+/// Split `bytes` into whole units, a tenths digit, and the index into
+/// [`UNITS`] of the unit chosen.
 ///
 /// The unit is the largest one that leaves a whole part below 1024, so the
-/// output is always one to four characters before the point. `scale` is the
-/// power of ten the fraction is expressed in — `10` for one digit after the
-/// point, `100` for two — and the returned fraction is in `0..scale` by
-/// construction, which is the whole point of scaling before dividing.
-fn split(bytes: u64, scale: u64) -> (u64, u64, usize) {
+/// output is always one to four characters before the point. The tenths digit
+/// is in `0..10` by construction, which is the whole point of scaling before
+/// dividing.
+fn split(bytes: u64) -> (u64, u64, usize) {
     let mut idx = 0usize;
     let mut unit = 1u64;
     while idx.saturating_add(1) < UNITS.len() && bytes / unit >= 1024 {
@@ -66,19 +63,10 @@ fn split(bytes: u64, scale: u64) -> (u64, u64, usize) {
         idx = idx.saturating_add(1);
     }
     let whole = bytes / unit;
-    let frac = if idx == 0 {
-        0
-    } else {
-        // Widened because `remainder * 100` does not fit a `u64` at the top of
-        // the table: `unit` reaches 1024^6 = 2^60 and the remainder can be
-        // `unit - 1`, so the product needs 67 bits. `remainder * 10` does fit,
-        // but branching on the scale to save one widened divide in a *string
-        // formatter* would be trading the property that makes this function
-        // correct — one path, no size-dependent cases — for nothing.
-        let scaled = u128::from(bytes % unit).saturating_mul(u128::from(scale));
-        (scaled / u128::from(unit)) as u64
-    };
-    (whole, frac, idx)
+    // `unit` is at most 1024^6 = 2^60, so the remainder times ten stays below
+    // 2^64 and the multiply never saturates.
+    let tenths = (bytes % unit).saturating_mul(10) / unit;
+    (whole, tenths, idx)
 }
 
 /// Format `bytes` as a human-readable IEC size: `512 B`, `1.5 KiB`, `2.0 GiB`.
@@ -88,28 +76,12 @@ fn split(bytes: u64, scale: u64) -> (u64, u64, usize) {
 /// approximation at that scale and rounding it would lose information for no
 /// gain in readability.
 pub fn iec(bytes: u64) -> String {
-    let (whole, tenths, idx) = split(bytes, 10);
+    let (whole, tenths, idx) = split(bytes);
     if idx == 0 {
         return format!("{} B", whole);
     }
     let unit = UNITS.get(idx).copied().unwrap_or("B");
     format!("{}.{} {}", whole, tenths, unit)
-}
-
-/// [`iec`] with two digits after the point: `512 B`, `1.50 KiB`, `2.00 GiB`.
-///
-/// For throughput and transfer reports, where one digit is too coarse to be
-/// useful: at GiB scale a tenth is 107 MB, so `iperf`'s "1.2 GiB transferred"
-/// spans a range wider than most of the transfers anyone measures. Everything
-/// else — including every size a *file* is reported in — should use [`iec`];
-/// two digits in a size column is noise, not precision.
-pub fn iec2(bytes: u64) -> String {
-    let (whole, hundredths, idx) = split(bytes, 100);
-    if idx == 0 {
-        return format!("{} B", whole);
-    }
-    let unit = UNITS.get(idx).copied().unwrap_or("B");
-    format!("{}.{:02} {}", whole, hundredths, unit)
 }
 
 /// Format `bytes` for a fixed-width column, `ls -h` style: `512`, `1.5K`,
@@ -119,7 +91,7 @@ pub fn iec2(bytes: u64) -> String {
 /// format on purpose and not a shorter spelling of [`iec`]: it has to fit a
 /// size column, where `1.5 KiB` would not align with `512 B`.
 pub fn compact(bytes: u64) -> String {
-    let (whole, tenths, idx) = split(bytes, 10);
+    let (whole, tenths, idx) = split(bytes);
     if idx == 0 {
         return format!("{}", whole);
     }
@@ -174,24 +146,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 
     crate::serial_println!("[bytesize]   1. iec: OK");
 
-    // Two digits after the point. The leading zero matters: without `{:02}`,
-    // 1025 bytes would print as "1.0 KiB" (fraction 0) and 1126 as "1.9 KiB"
-    // (fraction 9) — the same two-digit-vs-one-digit ambiguity the tenths bug
-    // produced, arrived at from the other direction.
-    assert_eq!(iec2(0), "0 B");
-    assert_eq!(iec2(1023), "1023 B");
-    assert_eq!(iec2(1024), "1.00 KiB");
-    assert_eq!(iec2(1025), "1.00 KiB");
-    assert_eq!(iec2(1536), "1.50 KiB");
-    assert_eq!(iec2(2047), "1.99 KiB");
-    assert_eq!(iec2(1024 * 1024 - 1), "1023.99 KiB");
-    assert_eq!(iec2(1024 * 1024), "1.00 MiB");
-    // The case the `u64` arithmetic could not do: `(2^60 - 1) * 100` needs 67
-    // bits, so `split` widens. A narrow multiply would wrap and print a
-    // fraction unrelated to the size.
-    assert_eq!(iec2(u64::MAX), "15.99 EiB");
-    crate::serial_println!("[bytesize]   2. iec2: OK");
-
     assert_eq!(compact(0), "0");
     assert_eq!(compact(512), "512");
     assert_eq!(compact(1024), "1.0K");
@@ -200,8 +154,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     assert_eq!(compact(1024 * 1024 * 1024), "1.0G");
     assert_eq!(compact(1024u64 * 1024 * 1024 * 1024), "1.0T");
     assert_eq!(compact(u64::MAX), "15.9E");
-    crate::serial_println!("[bytesize]   3. compact: OK");
+    crate::serial_println!("[bytesize]   2. compact: OK");
 
-    crate::serial_println!("[bytesize] All 3 self-tests passed.");
+    crate::serial_println!("[bytesize] All 2 self-tests passed.");
     Ok(())
 }

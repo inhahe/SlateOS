@@ -43,12 +43,12 @@ anywhere). It is a filter, not a verdict: a call that leaves the module
 through a helper *in* the module is invisible to it, so a clean report means
 "nothing obvious".
 
-**Deliberately not fixed: `net::traceroute`** advances
-`icmp::next_trace_seq` and `icmpv6::next_trace6_seq` by two and does not put
-them back. The counter is a correlation nonce, it is `wrapping_add`, the
-suite registers no probe under the numbers it burns, and the assertions are
-relative to what it read. Recorded in the wrapper so the next reader of
-`survey_reach.py`'s output does not re-investigate it.
+**Deliberately not fixed, and since gone: `net::traceroute`** advanced
+`icmp::next_trace_seq` and `icmpv6::next_trace6_seq` by two and did not put
+them back -- harmless, as the counter was a `wrapping_add` correlation nonce
+the suite registered no probe under. The module and both counters were
+deleted with the in-kernel network applications on 2026-10-15
+(design-decisions §934), so `survey_reach.py` no longer reports it.
 
 ### A fourth instance, 2026-09-11 — and why eighteen days passed without anyone noticing
 

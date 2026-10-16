@@ -115,7 +115,6 @@ pub fn process_frame(data: &[u8], ns_id: crate::netns::NetNsId) -> KernelResult<
         ETHERTYPE_ARP => super::arp::process_arp(frame.payload, ns_id),
         ETHERTYPE_IPV4 => super::ipv4::process_ipv4(frame.payload, ns_id),
         ETHERTYPE_IPV6 => super::ipv6::process_ipv6(frame.payload, ns_id),
-        super::lldp::ETHERTYPE_LLDP => super::lldp::process_frame(&frame.src, frame.payload),
         _ => {
             // Unknown protocol — silently drop.
             Ok(())

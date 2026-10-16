@@ -7,6 +7,10 @@ several are large enough that adding a few locals to one could push it
 over, and they are the reason the boot's peak is still 38 280 bytes rather
 than something in the low thousands.
 
+(2026-10-15: `net::httpd` and the other in-kernel network applications are
+deleted -- design-decisions 934 -- so their rows below no longer apply;
+`python scripts/stack-frames.py` gives the current list.)
+
 Measured with `python scripts/stack-frames.py --profile debug` on the debug
 kernel after both fixes landed (top offenders, bytes claimed by the
 prologue):

@@ -78,7 +78,6 @@ cmd_memtest 1
 cmd_migstat 1
 cmd_mobilelink 1
 cmd_multiclip 1
-cmd_nc 1
 cmd_netsettings 1
 cmd_nightlight 1
 cmd_notifcenter 1

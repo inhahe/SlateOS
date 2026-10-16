@@ -3,6 +3,8 @@
 > **Status:** ✅ ANSWERED (lane A, 2026-09-11) — **not deliberate. Not built yet.**
 > **Superseded 2026-10-02:** there will be no numbers; a userspace responder is
 > the route (design-decisions §1532). See the update at the end.
+> **2026-10-15:** the kernel's mDNS module is deleted (decision 934); its last
+> version is `6caf6467e:kernel/src/net/mdns.rs`. See the final update.
 >
 > Measured rather than recalled, because "I never intended that" is the easiest
 > thing to say and the hardest to check. Syscall numbers per service in
@@ -124,3 +126,16 @@ your simulation pretended to be are then its clients. What it has today:
 
 The RFC 6762/6763 encoding and decoding in `net/mdns.rs` is real and tested;
 it is worth lifting into whatever you build rather than rewriting.
+
+## Update, lane A — 2026-10-15: the kernel's mDNS module is gone
+
+`kernel/src/net/mdns.rs` was deleted with the rest of the in-kernel network
+applications (decision 934, the operator's "C then D" on A-Q9), together with
+the kshell `mdns` command that was the only thing able to start it. Nothing
+on the machine answers mDNS now, until your responder does.
+
+The codec the previous update pointed you at is still recoverable:
+`git show 6caf6467e:kernel/src/net/mdns.rs` is its last version, with its
+tests. Everything else above stands: port 5353 is free, IPv4 multicast joins
+work from a native program, and the IPv6 join and multicast TTL/loop options
+are lane A's to add when your responder needs them.

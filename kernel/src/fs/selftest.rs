@@ -70,12 +70,11 @@
 //! ```
 //!
 //! Note that this *installs* the pristine value rather than only restoring
-//! the old one afterwards, and the difference is not cosmetic. `net::mdns`
-//! guards `init()` with `if INITIALIZED.load(..) { return; }`. Swap the table
-//! for a fresh one and leave the flag alone, and on a machine where mDNS is
-//! already up the suite gets an empty table that `init()` then declines to
-//! populate — no socket, no hostname — and tests nothing while reporting
-//! success. Whatever gates the module's initialisation has to be made
+//! the old one afterwards, and the difference is not cosmetic. Take a module
+//! that guards `init()` with `if INITIALIZED.load(..) { return; }`: swap its
+//! table for a fresh one and leave the flag alone, and on a machine where it
+//! is already up the suite gets an empty table that `init()` then declines to
+//! populate, and tests nothing while reporting success. Whatever gates the module's initialisation has to be made
 //! pristine alongside the thing it gates.
 //!
 //! ## Size — when to use [`with_pristine_swapped`] instead

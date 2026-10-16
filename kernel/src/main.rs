@@ -7582,23 +7582,8 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("net::dhcpv6", selftest::Severity::Diagnostic, || {
                 net::dhcpv6::self_test()
             });
-            selftest::dispatch_debug("net::ftp", selftest::Severity::Diagnostic, || {
-                net::ftp::self_test()
-            });
-            selftest::dispatch_debug("net::http", selftest::Severity::Diagnostic, || {
-                net::http::self_test()
-            });
             selftest::dispatch_debug("net::igmp", selftest::Severity::Diagnostic, || {
                 net::igmp::self_test()
-            });
-            selftest::dispatch_debug("net::iperf", selftest::Severity::Diagnostic, || {
-                net::iperf::self_test()
-            });
-            selftest::dispatch_debug("net::lldp", selftest::Severity::Diagnostic, || {
-                net::lldp::self_test()
-            });
-            selftest::dispatch_debug("net::mdns", selftest::Severity::Diagnostic, || {
-                net::mdns::self_test()
             });
             selftest::dispatch_debug("net::mld", selftest::Severity::Diagnostic, || {
                 net::mld::self_test()
@@ -7614,44 +7599,8 @@ extern "C" fn kernel_main() -> ! {
         // De-fanged eager self-tests, batch 4 of 4. See batch 1 above.
         #[inline(never)]
         fn case() {
-            selftest::dispatch_debug("net::netcat", selftest::Severity::Diagnostic, || {
-                net::netcat::self_test()
-            });
             selftest::dispatch_debug("net::netstat", selftest::Severity::Diagnostic, || {
                 net::netstat::self_test()
-            });
-            selftest::dispatch_debug("net::ntp", selftest::Severity::Diagnostic, || {
-                net::ntp::self_test()
-            });
-            selftest::dispatch_debug("net::pcap", selftest::Severity::Diagnostic, || {
-                net::pcap::self_test()
-            });
-            selftest::dispatch_debug("net::qos", selftest::Severity::Diagnostic, || {
-                net::qos::self_test()
-            });
-            selftest::dispatch_debug("net::smtp", selftest::Severity::Diagnostic, || {
-                net::smtp::self_test()
-            });
-            selftest::dispatch_debug("net::snmp", selftest::Severity::Diagnostic, || {
-                net::snmp::self_test()
-            });
-            selftest::dispatch_debug("net::socks", selftest::Severity::Diagnostic, || {
-                net::socks::self_test()
-            });
-            selftest::dispatch_debug("net::telnet", selftest::Severity::Diagnostic, || {
-                net::telnet::self_test()
-            });
-            selftest::dispatch_debug("net::tftp", selftest::Severity::Diagnostic, || {
-                net::tftp::self_test()
-            });
-            selftest::dispatch_debug("net::traceroute", selftest::Severity::Diagnostic, || {
-                net::traceroute::self_test()
-            });
-            selftest::dispatch_debug("net::vlan", selftest::Severity::Diagnostic, || {
-                net::vlan::self_test()
-            });
-            selftest::dispatch_debug("net::wol", selftest::Severity::Diagnostic, || {
-                net::wol::self_test()
             });
         }
         case();
@@ -8243,12 +8192,6 @@ extern "C" fn kernel_main() -> ! {
     // §914: Diagnostic — network stack, optional hardware.
     selftest::dispatch_debug("NAT", selftest::Severity::Diagnostic, || {
         net::nat::self_test()
-    });
-
-    // SSH server self-test (binary packet protocol, encryption, key derivation).
-    // §914: Diagnostic — network service, optional.
-    selftest::dispatch_debug("SSH", selftest::Severity::Diagnostic, || {
-        net::ssh::self_test()
     });
 
     // Raw-NIC claim self-test: unclaimed reads clean, a non-owner's release is

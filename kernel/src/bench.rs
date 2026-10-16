@@ -1311,40 +1311,6 @@ struct ScoreEntry {
     seq: usize,
 }
 
-/// Public view of a scorecard entry for the dashboard API.
-#[derive(Clone)]
-pub struct ScoreInfo {
-    /// Benchmark name.
-    pub name: &'static str,
-    /// Measured minimum nanoseconds.
-    pub measured_ns: u64,
-    /// Target nanoseconds from baselines, or `None` if the benchmark is
-    /// tracked for regression comparison only and has no hardware target.
-    pub target_ns: Option<u64>,
-    /// Whether the benchmark met its target, or `None` if it has no target.
-    ///
-    /// Deliberately not a bare `bool`: a tracked benchmark has not failed, and
-    /// reporting `false` for it would put it in the failure count of every
-    /// consumer that did not think to check `target_ns` first.
-    pub passed: Option<bool>,
-}
-
-/// Return a snapshot of the current scorecard for external use.
-///
-/// Returns an empty Vec if benchmarks haven't run yet.
-pub fn scorecard_snapshot() -> Vec<ScoreInfo> {
-    SCORECARD
-        .lock()
-        .iter()
-        .map(|e| ScoreInfo {
-            name: e.name,
-            measured_ns: e.measured_ns,
-            target_ns: e.target_ns,
-            passed: e.target_ns.map(|_| e.passed),
-        })
-        .collect()
-}
-
 /// Global scorecard for collecting benchmark pass/fail results.
 ///
 /// Individual benchmark functions call `score()` to record their result.
@@ -4265,20 +4231,9 @@ pub fn run_all() {
     bench_vfs_stat_3comp();
     bench_vfs_throughput_16k();
 
-    // --- HTTP server benchmarks ---
-    bench_http_parse_request();
-    bench_http_mime_type();
-    bench_http_percent_decode();
-    bench_http_etag();
-    bench_http_build_response();
-    bench_http_build_response_gzip();
+    // --- gzip of a web page's body ---
     bench_http_gzip_1k();
     bench_http_gzip_8k();
-
-    // --- Dashboard API benchmarks ---
-    bench_dashboard_api_status();
-    bench_dashboard_api_health();
-    bench_dashboard_api_metrics();
 
     // --- A-Q15's load harness: ring design A against B, same loads ---
     //
@@ -9426,87 +9381,14 @@ fn bench_vfs_throughput_16k() {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP server benchmarks (net zone)
+// gzip of a web page's body
 // ---------------------------------------------------------------------------
-
-/// Benchmark HTTP request parsing.
-///
-/// Measures the cost of parsing a typical GET request from raw bytes.
-/// This is the entry point for every HTTP/HTTPS request served.
-fn bench_http_parse_request() {
-    use crate::net::httpd;
-
-    // Typical browser GET request (~200 bytes).
-    let raw_request = b"GET /index.html HTTP/1.1\r\n\
-        Host: 10.0.2.15\r\n\
-        User-Agent: Mozilla/5.0\r\n\
-        Accept: text/html\r\n\
-        Connection: keep-alive\r\n\
-        \r\n";
-
-    let result = run("http_parse_request", 1000, || {
-        let _ = core::hint::black_box(httpd::bench_parse_request(raw_request));
-    });
-
-    serial_println!(
-        "[bench]   http_parse_request: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    // Target from baselines.toml: 15000ns (dominated by string allocations).
-    score("http_parse_request", &result, 15000);
-}
-
-/// Benchmark HTTP MIME type detection.
-///
-/// Measures the cost of determining the MIME type from a file extension.
-/// This runs once per served file.
-fn bench_http_mime_type() {
-    use crate::net::httpd;
-
-    let result = run("http_mime_type", 2000, || {
-        let _ = core::hint::black_box(httpd::bench_mime_type("/styles/main.css"));
-        let _ = core::hint::black_box(httpd::bench_mime_type("/app.js"));
-        let _ = core::hint::black_box(httpd::bench_mime_type("/photo.png"));
-        let _ = core::hint::black_box(httpd::bench_mime_type("/data.json"));
-    });
-
-    serial_println!(
-        "[bench]   http_mime_type (4 lookups): min {}ns ({}cy, ~{}ns/lookup)",
-        result.min_ns,
-        result.min_cycles,
-        result.min_ns / 4
-    );
-    // Benchmark does 4 lookups; target 500ns per lookup = 2000ns total.
-    score("http_mime_type", &result, 2000);
-}
-
-/// Benchmark HTTP percent-decode path.
-///
-/// Measures the cost of decoding a URL path with percent-encoded
-/// characters.  This runs on every request URI.
-fn bench_http_percent_decode() {
-    use crate::net::httpd;
-
-    // Path with several percent-encoded characters (spaces, etc.).
-    let encoded = "/path%20to/my%20file%20%28copy%29.txt";
-
-    let result = run("http_percent_decode", 2000, || {
-        let _ = core::hint::black_box(httpd::bench_percent_decode(encoded));
-    });
-
-    serial_println!(
-        "[bench]   http_percent_decode: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    score("http_percent_decode", &result, 20000);
-}
 
 /// Benchmark gzip compression for 1 KiB HTML-like content.
 ///
-/// Measures the time to gzip-compress a typical HTML page body, which
-/// is now on the HTTP response hot path when clients send Accept-Encoding.
+/// Measures the time to gzip-compress a typical HTML page body, what a web
+/// server does for a client that sends Accept-Encoding: `fs::compress`'s
+/// gzip on a realistic input.
 fn bench_http_gzip_1k() {
     use crate::fs::compress;
 
@@ -9577,164 +9459,9 @@ fn bench_http_gzip_8k() {
     score("http_gzip_8KiB", &result, 1_000_000);
 }
 
-/// Benchmark HTTP ETag computation.
-///
-/// Measures the FNV-1a hash + hex formatting that runs on every response.
-/// This is on the critical path for both plain and gzip responses.
-fn bench_http_etag() {
-    use crate::net::httpd;
-
-    // 4 KiB body — typical small page or JSON API response.
-    let body: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
-
-    let result = run("http_etag_4KiB", 2000, || {
-        let _ = core::hint::black_box(httpd::bench_etag(&body));
-    });
-
-    serial_println!(
-        "[bench]   http_etag_4KiB: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    // Target: 5000ns — FNV-1a over 4 KiB + hex format + String alloc.
-    score("http_etag_4KiB", &result, 5000);
-}
-
-/// Benchmark full HTTP response construction (headers + body, no gzip).
-///
-/// Measures the complete response building path: ETag hash, header
-/// formatting via format!(), Vec concatenation.  This is the code path
-/// for every non-compressed response served.
-fn bench_http_build_response() {
-    use crate::net::httpd;
-
-    // Build a 1 KiB HTML body — typical small page.
-    let body: Vec<u8> = b"<html><body><h1>Hello</h1><p>World</p></body></html>\n"
-        .iter()
-        .cycle()
-        .take(1024)
-        .copied()
-        .collect();
-
-    let result = run("http_build_response_1KiB", 1000, || {
-        let _ = core::hint::black_box(httpd::bench_build_response(&body));
-    });
-
-    serial_println!(
-        "[bench]   http_build_response_1KiB: min {}ns ({}cy)",
-        result.min_ns,
-        result.min_cycles
-    );
-    // Target: 20000ns — dominated by format!() header + ETag hash + Vec::extend.
-    score("http_build_response_1KiB", &result, 20000);
-}
-
-/// Benchmark full gzip-compressed HTTP response construction.
-///
-/// Measures the complete compressed response path: gzip compression,
-/// ETag hash (on original body), header formatting, Vec concatenation.
-/// This is the hot path for text/html and application/json responses
-/// when the client sends Accept-Encoding: gzip.
-fn bench_http_build_response_gzip() {
-    use crate::net::httpd;
-
-    // 1 KiB HTML body (same as build_response benchmark for comparison).
-    let body: Vec<u8> = b"<html><body><h1>Hello</h1><p>World</p></body></html>\n"
-        .iter()
-        .cycle()
-        .take(1024)
-        .copied()
-        .collect();
-
-    let result = run("http_build_response_gzip_1KiB", 500, || {
-        let _ = core::hint::black_box(httpd::bench_build_response_gzip(&body));
-    });
-
-    // Report response sizes.
-    let plain = httpd::bench_build_response(&body);
-    let gzip = httpd::bench_build_response_gzip(&body);
-    serial_println!(
-        "[bench]   http_build_response_gzip_1KiB: min {}ns ({}cy), plain {}B vs gzip {}B",
-        result.min_ns,
-        result.min_cycles,
-        plain.len(),
-        gzip.len()
-    );
-    // Target: 250000ns — gzip dominates (200us) + response building (~20us).
-    score("http_build_response_gzip_1KiB", &result, 250_000);
-}
-
 // ---------------------------------------------------------------------------
 // Dashboard API benchmarks (net zone)
 // ---------------------------------------------------------------------------
-
-/// Benchmark /api/status JSON generation.
-///
-/// Measures the cost of collecting system state (uptime, memory, CPU count,
-/// task count, scheduler ticks) and formatting it as JSON.  This endpoint
-/// is polled every 3 seconds by the dashboard auto-refresh.
-fn bench_dashboard_api_status() {
-    use crate::net::dashboard;
-
-    let result = run("dashboard_api_status", 1000, || {
-        let _ = core::hint::black_box(dashboard::bench_api_status());
-    });
-
-    serial_println!(
-        "[bench]   dashboard_api_status: min {}ns ({}cy), ~{}B",
-        result.min_ns,
-        result.min_cycles,
-        dashboard::bench_api_status().len()
-    );
-    // Target: 10000ns — a few atomic reads + format!() JSON.
-    score("dashboard_api_status", &result, 10000);
-}
-
-/// Benchmark /api/health JSON generation.
-///
-/// Measures the cost of the aggregated health check that queries memory,
-/// networking, HTTP server, and DNS subsystems to produce an overall
-/// health status (ok/degraded/critical).
-fn bench_dashboard_api_health() {
-    use crate::net::dashboard;
-
-    let result = run("dashboard_api_health", 1000, || {
-        let _ = core::hint::black_box(dashboard::bench_api_health());
-    });
-
-    serial_println!(
-        "[bench]   dashboard_api_health: min {}ns ({}cy), ~{}B",
-        result.min_ns,
-        result.min_cycles,
-        dashboard::bench_api_health().len()
-    );
-    // Target: 15000ns — queries several subsystems + JSON format.
-    score("dashboard_api_health", &result, 15000);
-}
-
-/// Benchmark /metrics Prometheus text exposition format generation.
-///
-/// Measures the cost of formatting ~50 Prometheus metrics (including
-/// per-CPU labeled metrics) with TYPE and HELP annotations.  This is
-/// polled by monitoring stacks (Prometheus, Grafana, etc.).
-fn bench_dashboard_api_metrics() {
-    use crate::net::dashboard;
-
-    let result = run("dashboard_api_metrics", 500, || {
-        let _ = core::hint::black_box(dashboard::bench_api_metrics());
-    });
-
-    serial_println!(
-        "[bench]   dashboard_api_metrics: min {}ns ({}cy), ~{}B",
-        result.min_ns,
-        result.min_cycles,
-        dashboard::bench_api_metrics().len()
-    );
-    // Target: 55000ns — ~50 metrics with per-CPU labels, TCP stats, swap,
-    // scheduler stats, block cache, firewall.  Raised from 50000ns after
-    // adding 8 block cache metric families.
-    score("dashboard_api_metrics", &result, 55000);
-}
 
 // ---------------------------------------------------------------------------
 // Self-test

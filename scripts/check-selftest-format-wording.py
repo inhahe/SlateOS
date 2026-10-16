@@ -152,7 +152,8 @@ N = _w.MIN_FIXED_RUN
 # file's pool turns out to depend on, and each omission is a batch of false
 # accusations rather than a missed defect:
 #
-#   * a **raw** string. `net::dashboard` writes its whole JSON body as
+#   * a **raw** string. `net::dashboard` (deleted with the in-kernel network
+#     stack, design-decisions.md §934) wrote its whole JSON body as
 #     `r#"{{"server":{{"http_running":{},"#`, so without this every one of the
 #     43 assertions naming a JSON key was reported as text nothing produces.
 #   * a literal broken across lines with a trailing backslash. `\\.` cannot
@@ -259,20 +260,8 @@ ALLOWED: dict[tuple[str, bytes], str] = {
     ("logpersist", b'"sev":"notice"'): "Key and value written separately; `notice` comes from the level table.",
     ("logpersist", b'"ns":"network.dhcp"'): "Namespace is the caller's string, written after the key.",
     ("logpersist", b'"ip":"10.0.2.15"'): "An address formatted from four octets.",
-    ("dashboard", b'"ok"'): (
-        "The value is the two-byte literal `ok`, below the four-byte floor the "
-        "substitution rule requires -- which is why the sibling values "
-        "`\"degraded\"` and `\"critical\"` are accepted and this one is not."
-    ),
-    ("dashboard", b'os_cpu_total_ticks{cpu="0"}'): "`prom_counter_labeled` substitutes name, label and value into one format string.",
-    ("dashboard", b'os_cpu_idle_ticks{cpu="0"}'): "`prom_counter_labeled` substitutes name, label and value into one format string.",
-    ("http", b"Content-Type: application/x-www-form-urlencoded"): "Header name is an `extend_from_slice` byte slice; the value is the caller's.",
-    ("http", b"Content-Length: 9\r\n"): "The body's length, computed by `build`.",
-    ("http", b"Authorization: Basic YWRtaW46c2VjcmV0"): "base64 of `admin:secret`, computed by `basic_auth_creds`.",
     ("netstat", b"10.0.2.15:12345"): "An address and port formatted from the connection table.",
     ("netstat", b"93.184.216.34:80"): "An address and port formatted from the connection table.",
-    ("smtp", b"..leading dot line"): "The dot-stuffing loop prepends a dot to the test's own input line.",
-    ("smtp", b"...double dots"): "The dot-stuffing loop prepends a dot to the test's own input line.",
     ("pciids", b"8086:ffff"): "Vendor and device IDs formatted as hex when the table has no name.",
 }
 
@@ -633,8 +622,9 @@ def substitutable(frag: bytes, lit: bytes, pool: frozenset[bytes]) -> bool:
     `"Error: {:?}"` produces `Error: Usage:` and any stale marker is producible
     from any code path that formats anything.
 
-    But a placeholder is not always unknowable.  `net::dashboard` emits every
-    metric through::
+    But a placeholder is not always unknowable.  `net::dashboard` (since
+    deleted; `fs::sysprofiler`'s `[Network]` is the case that remains) emitted
+    every metric through::
 
         fn prom_gauge(buf: &mut String, name: &str, help: &str, value: ...) {
             write!(buf, "# HELP {n} {h}\\n# TYPE {n} gauge\\n{n} {v}\\n", ...)

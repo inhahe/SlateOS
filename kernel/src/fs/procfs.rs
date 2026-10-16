@@ -369,30 +369,12 @@ const ROOT_FILES: &[&str] = &[
     "vmguest",
     "pciids",
     "upnp",
-    "http",
-    "ntp",
-    "mdns",
-    "telnet",
-    "tftp",
-    "netsyslog",
-    "wol",
-    "pcap",
-    "traceroute",
     "dhcpv6",
     "firewall",
     "igmp",
     "mld",
-    "lldp",
     "netstat",
     "ndisc",
-    "netcat",
-    "iperf",
-    "snmp",
-    "ftp",
-    "smtp",
-    "vlan",
-    "qos",
-    "socks",
     "bridge",
     "systemimage",
     "raidmgr",
@@ -10800,42 +10782,6 @@ fn gen_upnp() -> Vec<u8> {
     crate::net::upnp::procfs_content().into_bytes()
 }
 
-fn gen_http() -> Vec<u8> {
-    crate::net::http::procfs_content().into_bytes()
-}
-
-fn gen_ntp() -> Vec<u8> {
-    crate::net::ntp::procfs_content().into_bytes()
-}
-
-fn gen_mdns() -> Vec<u8> {
-    crate::net::mdns::procfs_content().into_bytes()
-}
-
-fn gen_telnet() -> Vec<u8> {
-    crate::net::telnet::procfs_content().into_bytes()
-}
-
-fn gen_tftp() -> Vec<u8> {
-    crate::net::tftp::procfs_content().into_bytes()
-}
-
-fn gen_netsyslog() -> Vec<u8> {
-    crate::net::syslog::procfs_content().into_bytes()
-}
-
-fn gen_wol() -> Vec<u8> {
-    crate::net::wol::procfs_content().into_bytes()
-}
-
-fn gen_pcap() -> Vec<u8> {
-    crate::net::pcap::procfs_content().into_bytes()
-}
-
-fn gen_traceroute() -> Vec<u8> {
-    crate::net::traceroute::procfs_content().into_bytes()
-}
-
 fn gen_dhcpv6() -> Vec<u8> {
     crate::net::dhcpv6::procfs_content().into_bytes()
 }
@@ -10852,48 +10798,12 @@ fn gen_mld() -> Vec<u8> {
     crate::net::mld::procfs_content().into_bytes()
 }
 
-fn gen_lldp() -> Vec<u8> {
-    crate::net::lldp::procfs_content().into_bytes()
-}
-
 fn gen_netstat() -> Vec<u8> {
     crate::net::netstat::procfs_content().into_bytes()
 }
 
 fn gen_ndisc() -> Vec<u8> {
     crate::net::ndisc::procfs_content().into_bytes()
-}
-
-fn gen_netcat() -> Vec<u8> {
-    crate::net::netcat::procfs_content().into_bytes()
-}
-
-fn gen_iperf() -> Vec<u8> {
-    crate::net::iperf::procfs_content().into_bytes()
-}
-
-fn gen_snmp() -> Vec<u8> {
-    crate::net::snmp::procfs_content().into_bytes()
-}
-
-fn gen_ftp() -> Vec<u8> {
-    crate::net::ftp::procfs_content().into_bytes()
-}
-
-fn gen_smtp() -> Vec<u8> {
-    crate::net::smtp::procfs_content().into_bytes()
-}
-
-fn gen_vlan() -> Vec<u8> {
-    crate::net::vlan::procfs_content().into_bytes()
-}
-
-fn gen_qos() -> Vec<u8> {
-    crate::net::qos::procfs_content().into_bytes()
-}
-
-fn gen_socks() -> Vec<u8> {
-    crate::net::socks::procfs_content().into_bytes()
 }
 
 fn gen_bridge() -> Vec<u8> {
@@ -14596,30 +14506,12 @@ fn generate(name: &str) -> KernelResult<Vec<u8>> {
         "vmguest" => Ok(gen_vmguest()),
         "pciids" => Ok(gen_pciids()),
         "upnp" => Ok(gen_upnp()),
-        "http" => Ok(gen_http()),
-        "ntp" => Ok(gen_ntp()),
-        "mdns" => Ok(gen_mdns()),
-        "telnet" => Ok(gen_telnet()),
-        "tftp" => Ok(gen_tftp()),
-        "netsyslog" => Ok(gen_netsyslog()),
-        "wol" => Ok(gen_wol()),
-        "pcap" => Ok(gen_pcap()),
-        "traceroute" => Ok(gen_traceroute()),
         "dhcpv6" => Ok(gen_dhcpv6()),
         "firewall" => Ok(gen_firewall()),
         "igmp" => Ok(gen_igmp()),
         "mld" => Ok(gen_mld()),
-        "lldp" => Ok(gen_lldp()),
         "netstat" => Ok(gen_netstat()),
         "ndisc" => Ok(gen_ndisc()),
-        "netcat" => Ok(gen_netcat()),
-        "iperf" => Ok(gen_iperf()),
-        "snmp" => Ok(gen_snmp()),
-        "ftp" => Ok(gen_ftp()),
-        "smtp" => Ok(gen_smtp()),
-        "vlan" => Ok(gen_vlan()),
-        "qos" => Ok(gen_qos()),
-        "socks" => Ok(gen_socks()),
         "bridge" => Ok(gen_bridge()),
         "systemimage" => Ok(gen_systemimage()),
         "raidmgr" => Ok(gen_raidmgr()),

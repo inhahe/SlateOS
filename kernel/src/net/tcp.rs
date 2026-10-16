@@ -1598,18 +1598,6 @@ fn conn_mut(conns: &mut [TcpConnection], handle: usize) -> KernelResult<&mut Tcp
     conns.get_mut(handle).ok_or(KernelError::InvalidArgument)
 }
 
-/// Open a TCP connection to the given address and port.
-///
-/// `ns_id` identifies the network namespace; connections in different
-/// namespaces are fully independent.  Pass `netns::ROOT_NS` for the
-/// host namespace.
-///
-/// Performs the 3-way handshake (SYN → SYN-ACK → ACK).
-/// Returns a connection handle on success.
-pub fn connect(ns_id: NetNsId, remote_ip: IpAddr, remote_port: u16) -> KernelResult<usize> {
-    connect_tagged(ns_id, remote_ip, remote_port).map(|(handle, _)| handle)
-}
-
 /// [`connect`], with the connection's generation as well, read under the
 /// lock that assigned it: what `net::native_socket` issues a handle for.
 pub fn connect_tagged(
@@ -3114,36 +3102,6 @@ pub fn peek(handle: usize, max_bytes: usize) -> KernelResult<Vec<u8>> {
     Ok(data)
 }
 
-/// Read data from a TCP connection, blocking until data arrives or
-/// the connection closes.
-///
-/// Returns the received data (up to `max_bytes`), or empty Vec if
-/// the connection closed.
-pub fn read_blocking(handle: usize, timeout_polls: u32, max_bytes: usize) -> KernelResult<Vec<u8>> {
-    for _ in 0..timeout_polls {
-        super::poll();
-
-        {
-            let conns = CONNECTIONS.lock();
-            let conn = conns.get(handle).ok_or(KernelError::InvalidArgument)?;
-            if !conn.active {
-                return Err(KernelError::InvalidArgument);
-            }
-            // Return immediately if: data available, remote closed (EOF),
-            // or local read side shut down.
-            if !conn.rx_buffer.is_empty() || conn.remote_closed || conn.local_read_closed {
-                break;
-            }
-        }
-
-        for _ in 0..10_000 {
-            core::hint::spin_loop();
-        }
-    }
-
-    read_up_to(handle, max_bytes)
-}
-
 /// Wait, for as long as it takes, until a read of connection `handle` has
 /// something to answer: data, the end of the stream (the peer's FIN, or this
 /// side shut for reading), or a reset, which the read reports as its error.
@@ -3726,21 +3684,6 @@ pub fn bind_tagged(ns_id: NetNsId, port: u16) -> KernelResult<(usize, u32)> {
 
     crate::serial_println!("[tcp] Listener bound to port {} (ns {})", port, ns_id);
     Ok((slot, generation))
-}
-
-/// Accept an incoming TCP connection on a listener.
-///
-/// Blocks (by polling) until a connection completes the 3-way handshake
-/// and is placed in the listener's backlog.
-///
-/// Returns a connection handle (same type as `connect()` returns).
-///
-/// # Errors
-///
-/// - `InvalidArgument` — invalid listener handle.
-/// - `TimedOut` — no connection arrived within the timeout.
-pub fn accept(listener_handle: usize) -> KernelResult<usize> {
-    accept_tagged(listener_handle).map(|(handle, _)| handle)
 }
 
 /// [`accept`], with the accepted connection's generation as well, as its

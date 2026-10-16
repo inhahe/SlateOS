@@ -1179,12 +1179,12 @@ BENCH_COVERAGE=(
     # time Vfs::readdir.  See bench/baselines.toml [vfs_readdir_32].
     "kernel/src/fs/vfs.rs|vfs_read_256 vfs_write_256 vfs_readdir_32 vfs_readdir_root vfs_stat_root vfs_stat_3comp vfs_stat_deep vfs_throughput_16k_read vfs_throughput_16k_write vfs_stat_breakdown_full vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve vfs_stat_breakdown_resolved"
     "kernel/src/fs/path.rs|vfs_stat_breakdown_prologue vfs_stat_breakdown_resolve"
-    "kernel/src/fs/compress.rs|http_gzip_1KiB http_gzip_8KiB http_build_response_gzip_1KiB"
+    "kernel/src/fs/compress.rs|http_gzip_1KiB http_gzip_8KiB"
     # fs/ext4, fs/zfs, fs/btrfs, fs/f2fs, fs/ntfs and the other ~460 files have
     # no benchmark at all -- see known-issues.md, "The bench gate names fs/zfs
     # as perf-critical, but no benchmark can see it".
 
-    # -- net: 10 of 49 files -----------------------------------------------
+    # -- net: 8 of 33 files ------------------------------------------------
     "kernel/src/net/arp.rs|net_arp_lookup net_ns_arp_lookup"
     "kernel/src/net/ethernet.rs|net_ethernet_parse"
     "kernel/src/net/ipv4.rs|net_ipv4_parse net_checksum"
@@ -1193,8 +1193,6 @@ BENCH_COVERAGE=(
     "kernel/src/net/dns.rs|dns_build_query"
     "kernel/src/net/firewall.rs|firewall_check"
     "kernel/src/net/veth.rs|net_veth_send net_veth_recv net_veth_roundtrip"
-    "kernel/src/net/dashboard.rs|dashboard_api_health dashboard_api_metrics dashboard_api_status"
-    "kernel/src/net/httpd.rs|http_parse_request http_build_response_1KiB http_build_response_gzip_1KiB http_mime_type http_percent_decode http_etag_4KiB http_gzip_1KiB http_gzip_8KiB"
     # The four checksum/DNS rules above are new as of design-decisions.md §251,
     # which deleted the bench-local copies those benchmarks used to time.  Until
     # then this block said the opposite -- "dns.rs is NOT here: dns_build_query
@@ -1203,8 +1201,7 @@ BENCH_COVERAGE=(
     # code, not the reading of it.  net_checksum is credited to ipv4.rs because
     # it now calls ipv4::ip_checksum; the copy it replaced was
     # character-equivalent, so that series alone is continuous across §251.
-    # net/http.rs is absent -- the pre-§250 annotation named it, but the http_*
-    # benchmarks all call crate::net::httpd.  So is net/interface.rs, which four
+    # net/interface.rs is absent: four
     # benchmarks name but only to construct an Ipv4Addr *outside* the timed
     # closure -- appearing in a benchmark's source is not the same as being
     # inside its measurement.  For the same reason tcp_checksum_v6 is credited
@@ -6103,7 +6100,7 @@ check_selftest_wording
 # `check-selftest-wording.py` follows a kshell *command* to the text it prints,
 # so it only ever looks at rungs keyed on a command word.  A module self-test
 # that formats a string and asserts on it -- `assert!(metrics.contains("..."))`
-# in `net::dashboard`, `procfs`, `smtp`, `klog` -- has no command word to
+# in `procfs`, `klog`, `logpersist` -- has no command word to
 # resolve and no `capture_command` to key on, so the sibling never looked at it,
 # and 300 assertions of that shape were guarded by nothing.
 #

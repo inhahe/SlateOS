@@ -1,26 +1,22 @@
-//! Networking stack (kernel-resident prototype).
+//! Networking in the kernel: what is left of the kernel-resident stack, and
+//! the kernel's side of the userspace one.
 //!
-//! Provides basic network protocol support:
-//! - Ethernet frame parsing/building
-//! - ARP (address resolution: IPv4 → MAC)
-//! - IPv4 (packet parsing/building with fragmentation reassembly)
-//! - IPv6 (packet parsing/building, extension header traversal)
-//! - ICMPv6 (echo request/reply, NDP neighbor solicitation/advertisement)
-//! - UDP (connectionless datagrams)
-//! - DHCP client (automatic IPv4 configuration)
+//! The network stack runs in userspace, as the `services/netstack` daemon:
+//! it owns the network card (`raw`, `mcast_filter`) and serves sockets, which
+//! the kernel forwards to it (`netstack_client`, `socket`). That is the
+//! default; `net.userspace=0` turns it off (design-decisions 934).
 //!
-//! ## Design note
-//!
-//! The design spec calls for the networking stack to run in userspace
-//! as a service.  This kernel-resident implementation is a prototype
-//! to validate the virtio-net driver and bring up basic connectivity.
-//! It will be migrated to userspace once the driver framework supports
-//! device access from user processes.
+//! The kernel-resident stack below -- Ethernet, ARP, IPv4/IPv6, ICMP, UDP,
+//! TCP, DHCP, DNS, and the container networks over `veth`/`bridge`/`nat` --
+//! is being removed, as decision 934 orders. Its applications (servers and
+//! clients for HTTP, SSH, FTP, telnet, NTP, mDNS and the rest) are gone
+//! already; what remains is what native sockets, container networks and the
+//! kernel's own resolver still run on, and goes once those run on the
+//! daemon (roadmap 5.5, "Move to userspace service").
 
 pub mod arp;
 pub mod bridge;
 pub mod checksum;
-pub mod dashboard;
 pub mod dhcp;
 pub mod dhcpd;
 pub mod dhcpv6;
@@ -28,50 +24,28 @@ pub mod dns;
 pub mod ethernet;
 pub mod firewall;
 pub mod frag;
-pub mod ftp;
-pub mod http;
-pub mod httpd;
 pub mod hwsim;
 pub mod hwsim_ap;
 pub mod icmp;
 pub mod icmpv6;
 pub mod igmp;
 pub mod interface;
-pub mod iperf;
 pub mod ipv4;
 pub mod ipv6;
-pub mod lldp;
 pub mod mcast_filter;
-pub mod mdns;
 pub mod mld;
 pub mod nat;
 pub mod native_socket;
 pub mod ndisc;
-pub mod netcat;
 pub mod netstack_client;
 pub mod netstat;
-pub mod ntp;
-pub mod pcap;
-pub mod qos;
 pub mod raw;
 pub mod ring_bench;
-pub mod smtp;
-pub mod snmp;
 pub mod socket;
-pub mod socks;
-pub mod ssh;
-pub mod syslog;
 pub mod tcp;
-pub mod telnet;
-pub mod tftp;
-pub mod tls;
-pub mod traceroute;
 pub mod udp;
 pub mod upnp;
 pub mod veth;
-pub mod vlan;
-pub mod websocket;
-pub mod wol;
 
 use crate::error::{KernelError, KernelResult};
 use alloc::vec::Vec;
@@ -118,7 +92,6 @@ pub fn poll() {
             let frame = recv_frame();
             match frame {
                 Some(data) => {
-                    pcap::capture_rx(&data);
                     interface::record_rx(interface::Source::Nic, data.len());
                     if let Err(e) = ethernet::process_frame(&data, crate::netns::ROOT_NS) {
                         interface::record_rx_drop(interface::Source::Nic);
@@ -152,18 +125,9 @@ pub fn poll() {
         dhcpv6::tick_renewal();
         frag::tick_expire();
         firewall::tick_conntrack_cleanup();
-        ntp::tick();
         igmp::tick();
         mld::tick();
-        lldp::tick();
-        mdns::tick();
-        syslog::tick();
-        telnet::tick();
-        ssh::tick();
-        tftp::tick();
         nat::tick();
-        httpd::tick();
-        httpd::tick_tls();
         dhcpd::tick_expire();
     }
 }
@@ -208,7 +172,6 @@ fn recv_frame() -> Option<Vec<u8>> {
 pub fn send_frame_ns(ns_id: crate::netns::NetNsId, frame: &[u8]) -> KernelResult<()> {
     if ns_id != crate::netns::ROOT_NS {
         if let Some((pair, end)) = veth::find_endpoint_for_ns(ns_id) {
-            pcap::capture_tx(frame);
             veth::send(pair, end, frame.to_vec())?;
             // Counted against the veth aggregate, not the NIC: this frame was
             // handed to a virtual pair and will be drained by the peer
@@ -225,8 +188,6 @@ pub fn send_frame_ns(ns_id: crate::netns::NetNsId, frame: &[u8]) -> KernelResult
 /// Used by the IPv4 layer and ARP to transmit packets.
 /// Tries virtio-net first, falls back to e1000, then rtl8139.
 pub fn send_frame(frame: &[u8]) -> KernelResult<()> {
-    pcap::capture_tx(frame);
-
     // Try virtio-net first.
     if let Some(result) = crate::virtio::net::with_device(|dev| dev.send(frame)) {
         if result.is_ok() {
@@ -408,15 +369,11 @@ pub fn self_test() -> KernelResult<()> {
     // `A-FRAG-REJECTED-FRAGMENTS-STILL-CLAIM-A-REASSEMBLY-SLOT` was hiding.
     frag::self_test_table()?;
     interface::self_test()?;
-    tls::self_test()?;
     // Note: veth::self_test() runs separately after veth::init() in
     // main.rs because veth init requires the heap + netns subsystem,
     // which initializes later in the boot sequence.
 
-    httpd::self_test()?;
-    websocket::self_test()?;
     dhcpd::self_test()?;
-    dashboard::self_test()?;
     socket::self_test()?;
 
     crate::serial_println!("[net] Network self-test PASSED");

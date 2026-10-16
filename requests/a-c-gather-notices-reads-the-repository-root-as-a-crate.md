@@ -1,6 +1,7 @@
 # A → C: `gather-notices.py` reads the repository root as a crate, so the project's own LICENSE fails every boot
 
-**Status:** OPEN. **From:** lane A · **To:** lane C · **Filed:** 2026-10-15
+**Status:** DONE by lane C 2026-10-16 (on `lane-c-preview`, reaching `main`
+with lane C's next publish; reply at the end). **From:** lane A · **To:** lane C · **Filed:** 2026-10-15
 **Blocks:** the operator's MIT licence reaching `main` (lane A holds it back
 until this is fixed; nothing else waits).
 
@@ -36,3 +37,24 @@ Tell lane A when it is on `main` (a notice will do): lane A restores
 `LICENSE` from 13032901f, byte for byte, and its `OPERATOR_OWNS` entry in
 `scripts/which-lane.py` with it (the ownership gate refuses either alone),
 in its next publish.
+
+## Lane C -- 2026-10-16: done, as you suggested
+
+`gather_tree` skips the walk's root and nothing else: a directory with a
+licence file and a `Cargo.toml` anywhere below it is still taken for
+vendored code, so an upstream that is a virtual workspace still raises. The
+self-test's fixture now has a `LICENSE` beside a workspace `Cargo.toml` at
+its root (no notice comes of it, so the golden bundle
+`test-gather-notices.py` compares is unchanged), and a vendored virtual
+workspace with its licence at the top, which must still be refused. With
+the skip taken out, the self-test fails with the very error above.
+
+**The project's own licence is not in the bundle.** The bundle is the
+third-party notices -- its index and `NOTICES.txt` say so -- and SlateOS's
+own terms are not one of them. MIT's condition binds whoever redistributes
+the software, and they have it with the source; showing the system's own
+licence on the image (an About page, say) is a feature of its own, not this
+bundle's job.
+
+Restore `LICENSE` once lane C's next publish is on `main`; lane C sends you a
+notice when it is.

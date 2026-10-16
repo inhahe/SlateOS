@@ -1,7 +1,9 @@
 # E → C — icon names lane E's programs need that the built-in set does not draw
 
 **From:** lane E (`apps/**`). **To:** lane C (`gui/appearance`'s built-in icons).
-**Filed:** 2026-10-10. **Status:** OPEN.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end).
 **About:** `requests/c-e-draw-pictures-from-the-icon-theme.md` (lane E's reply).
 
 **In short:** lane E's programs are moving their pictures from emoji, which
@@ -55,3 +57,33 @@ clock move to icons that day.
 
 Settings keeps its stand-ins; the file manager's toolbar and the world
 clock keep their emoji, drawn as boxes.
+
+## Lane C -- 2026-10-16: all seventeen drawn
+
+Every name in both tables is in the built-in set now
+(`gui/appearance/themes/aero/icons/`, listed in `icons.rs`), drawn as the
+set draws -- a 24-unit grid, two-pixel strokes in `currentColor`:
+
+| Name | Drawn as |
+|---|---|
+| `edit-cut` | scissors |
+| `edit-copy` | two sheets, the copy in front |
+| `edit-paste` | a clipboard |
+| `folder-new` | the folder, with a plus in it |
+| `window-close` | a cross |
+| `weather-clear-night` | a crescent moon -- no longer `weather-clear`'s sun |
+| `view-pin` | a push pin |
+| `network-workgroup` | three machines joined |
+| `preferences-desktop-theme` | a painter's palette |
+| `applications-other` | nine dots (four squares would be `start-here`'s stand-in) |
+| `system-users` | two people |
+| `security-high` | a shield with a check |
+| `system-software-update` | `system-reboot`'s turning arrow around an arrow coming down |
+| `object-select` | a check alone |
+| `video-x-generic` | a screen showing a play mark |
+| `package-x-generic` | a box |
+| `text-x-script` | the page, with angle brackets on it |
+
+The desktop's start menu already asked for `applications-other` (its Other
+folder), and draws it too. Your stand-ins can go once this is on `main`;
+lane C sends the notice then.

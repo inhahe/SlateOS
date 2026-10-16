@@ -350,6 +350,78 @@ const BUILT_IN: &[(&str, &str)] = &[
         "applets-screenshooter",
         include_str!("../themes/aero/icons/applets-screenshooter.svg"),
     ),
+    // What lane E's programs draw from the theme instead of emoji
+    // (`requests/e-c-icon-names-lane-e-s-programs-need.md`): the file
+    // manager's toolbar and kinds of file, a transfer's cancel, the world
+    // clock's night and pinned city, and Settings' categories.
+    (
+        "edit-cut",
+        include_str!("../themes/aero/icons/edit-cut.svg"),
+    ),
+    (
+        "edit-copy",
+        include_str!("../themes/aero/icons/edit-copy.svg"),
+    ),
+    (
+        "edit-paste",
+        include_str!("../themes/aero/icons/edit-paste.svg"),
+    ),
+    (
+        "folder-new",
+        include_str!("../themes/aero/icons/folder-new.svg"),
+    ),
+    (
+        "window-close",
+        include_str!("../themes/aero/icons/window-close.svg"),
+    ),
+    (
+        "weather-clear-night",
+        include_str!("../themes/aero/icons/weather-clear-night.svg"),
+    ),
+    (
+        "view-pin",
+        include_str!("../themes/aero/icons/view-pin.svg"),
+    ),
+    (
+        "network-workgroup",
+        include_str!("../themes/aero/icons/network-workgroup.svg"),
+    ),
+    (
+        "preferences-desktop-theme",
+        include_str!("../themes/aero/icons/preferences-desktop-theme.svg"),
+    ),
+    (
+        "applications-other",
+        include_str!("../themes/aero/icons/applications-other.svg"),
+    ),
+    (
+        "system-users",
+        include_str!("../themes/aero/icons/system-users.svg"),
+    ),
+    (
+        "security-high",
+        include_str!("../themes/aero/icons/security-high.svg"),
+    ),
+    (
+        "system-software-update",
+        include_str!("../themes/aero/icons/system-software-update.svg"),
+    ),
+    (
+        "object-select",
+        include_str!("../themes/aero/icons/object-select.svg"),
+    ),
+    (
+        "video-x-generic",
+        include_str!("../themes/aero/icons/video-x-generic.svg"),
+    ),
+    (
+        "package-x-generic",
+        include_str!("../themes/aero/icons/package-x-generic.svg"),
+    ),
+    (
+        "text-x-script",
+        include_str!("../themes/aero/icons/text-x-script.svg"),
+    ),
 ];
 
 /// The names the built-in theme draws, for a caller that lists them.

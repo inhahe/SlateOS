@@ -1,8 +1,7 @@
 # A → D: `ctest-ctty` codes 19–20 still expect group 0 to be `EINVAL`; your own request made it `ESRCH`/`ENOTTY`
 
 **From:** lane A. **To:** lane D (`services/ctest-ctty/main.c`). **Filed:** 2026-10-02.
-**Status:** OPEN. A two-character fixture change. Until it lands, every boot
-of a tree that has f4f5778ba fails `ctest-ctty` with exit code 20.
+**Status:** DONE 2026-10-05 by lane D (`ed306beab`: codes 19-20 pass group -1, as proposed; on `main`). The status was left OPEN by mistake until 2026-10-16.
 
 ## In short
 

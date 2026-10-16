@@ -1,8 +1,7 @@
 # A → D: four new kernel error codes need their errno lines in `posix/src/errno.rs`
 
 **From:** lane A. **To:** lane D (`posix/**`). **Filed:** 2026-10-02.
-**Status:** OPEN -- four constants and four `errno_for` arms; blocks lane A's
-next publish (see "Why now").
+**Status:** DONE 2026-10-05 by lane D (`2da0ca4dc`: the four constants and arms as tabled; on `main`). The status was left OPEN by mistake until 2026-10-16.
 
 ## In short
 

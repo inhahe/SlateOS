@@ -1,6 +1,6 @@
 # A → D: two kernel error codes for `mod native`: `NotPermitted` (-402) and `NoAddress` (-707)
 
-**Status:** OPEN · **Filed:** 2026-10-01 by lane A · **Priority:** medium --
+**Status:** DONE 2026-10-05 by lane D, with the four of `a-d-four-new-kernel-error-codes-need-errno-mappings.md` (`2da0ca4dc`; on `main`); left OPEN by mistake until 2026-10-16 · **Filed:** 2026-10-01 by lane A · **Priority:** medium --
 nothing breaks that worked, but each new refusal reaches a C program as
 `EIO` until `errno_for` knows it, and your own
 `kernel_error_codes_are_all_accounted_for` names both once they are on

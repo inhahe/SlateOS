@@ -46,3 +46,24 @@ Files what arrives in the pane under the sending program, applies the
 user's rules and Do Not Disturb as for its own, pops it up, and sends the
 press and close back; then retires `gui/notifications`, which §1607 retires.
 Reply here, or with a notice, when it is on `main`.
+
+## Lane C -- 2026-10-16: four fields more, so the retired program's features have a way in
+
+Surveying `gui/notifications` for what the shell must take before the
+program is deleted (`known-issues/TD-C-THE-RETIRED-NOTIFICATION-PROGRAM-STILL-HOLDS-SEVEN-THINGS-THE-SHELL-LACKS.md`)
+found four things a program sends that the list above leaves out. Please
+carry them too, as the freedesktop notification specification does, since
+ported programs send them:
+
+- **progress**, 0 to 100, optional (the specification's `value` hint): a
+  download's or a copy's bar on the pop-up;
+- **replaces**, the id of a notification of the same program's to change in
+  place (`replaces_id`): a progress update, or "3 new messages" becoming
+  "4", rather than a second pop-up;
+- **stays**, a flag (`resident`): the pop-up stays until it is dismissed,
+  whatever its priority;
+- **category**, a short word (`category`: `email.arrived`,
+  `transfer.complete`, ...), which the shell uses for the list and for
+  sounds.
+
+The shell's `Notification` gains the matching fields on lane C's side.

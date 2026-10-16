@@ -2423,9 +2423,10 @@ live.
   desktop's motion and wake the desktop once when their time is up, not
   every frame. On a surface of their own the size of the stack, so a press
   beside a toast reaches the window under it. **Next:** programs cannot send
-  a notification yet -- the channel is lane F's or lane D's to build, asked
-  for once C-Q32 settles which of the two notification systems stays (the
-  separate `gui/notifications` program is started by nothing).
+  a notification yet -- C-Q32 settled that the shell stays (§1607), and the
+  channel is asked of lane F (`requests/c-f-a-channel-for-programs-to-send-notifications.md`);
+  the separate `gui/notifications` program goes once the seven things only it
+  has are the shell's (`known-issues/TD-C-THE-RETIRED-NOTIFICATION-PROGRAM-STILL-HOLDS-SEVEN-THINGS-THE-SHELL-LACKS.md`).
 
 - `[x]` `[C]` **Notifications outlive the desktop** (`design-decisions.md`
   §1468) -- done 2026-10-05. What the notification pane holds is written to

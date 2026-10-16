@@ -2117,7 +2117,8 @@ pub extern "C" fn getdtablesize() -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn alarm(seconds: u32) -> u32 {
     let value_ns = u64::from(seconds).saturating_mul(1_000_000_000);
-    let (prev_value, _prev_interval) = crate::time::itimer_kernel_set(value_ns, 0);
+    let (prev_value, _prev_interval) =
+        crate::time::itimer_kernel_set(crate::time::ITIMER_REAL, value_ns, 0);
     if crate::errno::translate(prev_value) < 0 {
         return 0;
     }
@@ -2144,7 +2145,8 @@ pub extern "C" fn alarm(seconds: u32) -> u32 {
 pub extern "C" fn ualarm(usecs: u32, interval: u32) -> u32 {
     let value_ns = u64::from(usecs).saturating_mul(1_000);
     let interval_ns = u64::from(interval).saturating_mul(1_000);
-    let (prev_value, _prev_interval) = crate::time::itimer_kernel_set(value_ns, interval_ns);
+    let (prev_value, _prev_interval) =
+        crate::time::itimer_kernel_set(crate::time::ITIMER_REAL, value_ns, interval_ns);
     if crate::errno::translate(prev_value) < 0 {
         return 0;
     }

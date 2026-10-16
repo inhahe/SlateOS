@@ -1205,6 +1205,23 @@ pub const CPU_CLOCK_GETRES: u64 = 1;
 /// `arg3` the request, `arg4` where the time left goes (or 0).
 pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
 
+/// `SYS_POSIX_TIMER(op, a, b, c, d)` -- the per-process POSIX timers, on lane
+/// A's kernel since 2026-10-07: the Linux ABI's `timer_*` bodies, Linux's
+/// structures (`struct sigevent` 64 bytes, `struct itimerspec` 32) and its
+/// errnos as `-errno`. `timer_create` answers the new id rather than writing
+/// it through a pointer.
+pub const SYS_POSIX_TIMER: u64 = 1141;
+/// [`SYS_POSIX_TIMER`] operation: `timer_create(a = clock, b = sigevent * or 0)`.
+pub const POSIX_TIMER_CREATE: u64 = 0;
+/// [`SYS_POSIX_TIMER`] operation: `timer_settime(a = id, b = flags, c = new, d = old or 0)`.
+pub const POSIX_TIMER_SETTIME: u64 = 1;
+/// [`SYS_POSIX_TIMER`] operation: `timer_gettime(a = id, b = itimerspec *)`.
+pub const POSIX_TIMER_GETTIME: u64 = 2;
+/// [`SYS_POSIX_TIMER`] operation: `timer_getoverrun(a = id)`.
+pub const POSIX_TIMER_GETOVERRUN: u64 = 3;
+/// [`SYS_POSIX_TIMER`] operation: `timer_delete(a = id)`.
+pub const POSIX_TIMER_DELETE: u64 = 4;
+
 /// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
 /// off; does not return on success. Needs the `POWER_OFF` right on a
 /// class-wide `Process` capability (`PermissionDenied`); `NotSupported`, the

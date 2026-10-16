@@ -56,6 +56,7 @@ import os
 import stat as stat_mod
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import threading
 
@@ -186,6 +187,39 @@ def module_entries(path: str) -> list | None:
     return entries
 
 
+def could_import(entry, key: str) -> bool:
+    """Whether directory entry `entry` (from `module_entries`) is one the path
+    finder would import as the module whose case-folded name is `key`: a
+    directory of that name (a package, or a namespace package) or a file of
+    that name with an importable suffix -- not `json.md` beside `json`.
+    Case-folded, as `module_digest` is; an entry whose type could not be read
+    counts as either."""
+    name, is_dir, is_file, _ = entry
+    folded = name.casefold()
+    if folded == key:
+        return is_dir is not False
+    return is_file is not False and any(
+        folded == key + suffix.casefold() for suffix in importlib.machinery.all_suffixes())
+
+
+def _under(path: str, root: str) -> bool:
+    return path == root or path.startswith(root.rstrip("\\/") + os.sep)
+
+
+#: The Python installation, and the directories in it that are not its own.
+_INSTALL = sorted({p for p in (norm(sys.base_prefix), norm(sys.base_exec_prefix)) if p})
+_SITE = sorted({p for p in (norm(sysconfig.get_path(k)) for k in ("purelib", "platlib")) if p})
+
+
+def is_installed_module(path: str) -> bool:
+    """Whether `path` is a file of the Python installation itself, which every
+    cache key pins already (`sys.version`, `sys.executable`): under its prefix
+    and not in site-packages, whose packages change while neither does. A
+    gate's run reads hundreds of them, and digesting each one at every miss
+    and stating it at every hit would be most of the cache's own cost."""
+    return any(_under(path, r) for r in _INSTALL) and not any(_under(path, s) for s in _SITE)
+
+
 def module_digest(entries: list | None, name: str) -> str | None:
     """Digest of the entries (from `module_entries`) that could answer an
     import of module `name` from their directory: `name` itself, a package or
@@ -279,17 +313,14 @@ class _Tracer:
                 self.uncacheable.append(why)
 
     def is_internal(self, path: str) -> bool:
-        if self.trace_dir and (path == self.trace_dir or path.startswith(self.trace_dir + os.sep)):
+        if self.trace_dir and _under(path, self.trace_dir):
             return True
         if path in self.writes:
             return True
-        for root in self.roots:
-            if path == root or path.startswith(root.rstrip("\\/") + os.sep):
-                return True
-        return False
+        return any(_under(path, root) for root in self.roots)
 
     def read(self, path: str) -> None:
-        if "__pycache__" in path or self.is_internal(path):
+        if "__pycache__" in path or self.is_internal(path) or is_installed_module(path):
             return
         with self.lock:
             if path in self.reads:
@@ -337,10 +368,16 @@ class _Tracer:
             self.lookups.setdefault(path, {}).setdefault(name, module_digest(entries, name))
 
     def _read_module_sources(self) -> None:
-        """Record every loaded module's file as read. An import that finds a
-        valid `.pyc` opens only that (which `read` ignores) and never the
-        source, so without this a gate's helper module would be no input of
-        its run, and an edit to it would replay the old verdict."""
+        """Record every loaded module's file as read (but the installation's
+        own, as `read` does every file: `is_installed_module`). An import that
+        finds a valid `.pyc` opens only that (which `read` ignores) and never
+        the source, so without this a gate's helper module would be no input
+        of its run, and an edit to it would replay the old verdict.
+
+        The file finder's hook (`_traced_find_spec`) records each module as
+        it is imported, and `read` keeps the first digest; this catches the
+        rest -- what was loaded before tracing began, and what another
+        finder found."""
         for module in list(sys.modules.values()):
             spec = getattr(module, "__spec__", None)
             origin = getattr(spec, "origin", None)
@@ -377,8 +414,7 @@ class _Tracer:
                     finally:
                         self.leave()
                 key = name.casefold()
-                if any(e[0].casefold() == key or e[0].casefold().startswith(key + ".")
-                       for e in entries or ()):
+                if any(could_import(e, key) for e in entries or ()):
                     self.refuse(f"{SHADOWED}{os.path.join(path, name)}* would shadow the "
                                 f"{name} module the tracer loaded first")
                     break
@@ -637,7 +673,16 @@ def _traced_find_spec(self, fullname, target=None):
         path = norm(self.path or ".")
         if path is not None:
             t.looked_up(path, fullname.rpartition(".")[2])
-    return _REAL_FIND_SPEC(self, fullname, target)
+    spec = _REAL_FIND_SPEC(self, fullname, target)
+    # The module's file, read now, as it is imported: an import answered by
+    # its .pyc never opens the source, and a digest taken at exit would be of
+    # whatever the file had become by then -- an edit made during the run
+    # would pass for the code that ran.
+    if t is not None and not t.busy() and spec is not None and spec.has_location:
+        origin = norm(spec.origin) if isinstance(spec.origin, str) else None
+        if origin is not None:
+            t.read(origin)
+    return spec
 
 
 def _from_import_cache() -> bool:

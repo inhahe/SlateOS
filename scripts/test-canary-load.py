@@ -1847,13 +1847,13 @@ if NAMES is not None:
         live_check_true("a window the names guard refuses leaves nothing either",
                         rc == 2 and left == [], f"rc={rc} left={left}; out={out[-300:]}")
 
-# And the registered P23 command itself, verbatim from known-issues.md. This is
-# the specific regression that motivated all of the above: if this line stops
-# parsing, a pre-registered experiment has become unrunnable as published.
-rc, out = run_wrapper(["--at", "io_ring_nop", "--until", "crypto_poly1305_1KiB"])
-live_check_true("PREDICTION P23's registered command parses",
-           rc == 0 and "from 'io_ring_nop' until 'crypto_poly1305_1KiB'" in out,
-           f"rc={rc} out={out[-300:]}")
+# PREDICTION P23's registered command (`--at io_ring_nop --until
+# crypto_poly1305_1KiB`) was checked here, verbatim, so that a pre-registered
+# experiment could not become unrunnable as published. P23 has run (RESULT P23,
+# 2026-08-19), and on 2026-10-16 its window's end went with the kernel's TLS
+# and SSH cryptography (decision 934): the command now ends on a benchmark the
+# kernel no longer has, and the names guard refuses it, rightly. The guard's
+# own checks above cover what this one did.
 
 # The two-namespace trap, from both sides, on names taken from the current file
 # rather than assumed. Both of these are *real benchmarks* that a reader could

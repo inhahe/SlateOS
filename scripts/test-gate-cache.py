@@ -257,6 +257,30 @@ def cases(fx: Fixture) -> None:
     check("a file shadowing a module the tracer loaded first: not stored, untraced verdict",
           (rc, "would shadow the json module" in note, "exit 1 stands" in note),
           (1, True, True))
+    # Named like it, but no import would load it: notes, not a module.
+    beside_notes = fx.checker("""
+        import json
+        print(json.dumps(3))
+    """)
+    fx.write("json.md", "notes on json\n")
+    fx.run(beside_notes)
+    rc, _, note = fx.run(beside_notes)
+    os.remove(fx.path("json.md"))
+    check("a file named like such a module that is not one (json.md): cached, a hit",
+          (rc, kind(note), "would shadow" in note), (0, "HIT", False))
+
+    # The installation's own modules are pinned by the key's interpreter
+    # version; a module of the gate's own is an input.
+    fx.write("own_mod.py", "VALUE = 'own'\n")
+    stdlib_user = fx.checker("""
+        import colorsys
+        import own_mod
+        print(own_mod.VALUE, colorsys.rgb_to_hsv(0, 0, 0))
+    """)
+    fx.run(stdlib_user)
+    reads = [os.path.basename(p).lower() for p in entry_for(fx, stdlib_user)["inputs"]["reads"]]
+    check("a gate's own module is an input, an installed one (colorsys) is not",
+          ("own_mod.py" in reads, "colorsys.py" in reads), (True, False))
 
     probe = fx.path("data", "maybe.txt")
     asker = fx.checker(f"""
@@ -531,13 +555,7 @@ def cases(fx: Fixture) -> None:
         sys.exit(0 if "hello" in open({data!r}).read() else 1)
     """)
     fx.run(liar)
-    entries = [f for f in os.listdir(fx.store) if f.endswith(".json")]
-    target = None
-    for name in entries:
-        with open(os.path.join(fx.store, name), encoding="utf-8") as fh:
-            e = json.load(fh)
-        if e["argv"][-1] == liar:
-            target = os.path.join(fx.store, name)
+    target = entry_for(fx, liar)["_path"]
     # Make the entry lie: it now claims the run passed with an exit status the
     # checker never gave. Its inputs still match, so only a fresh run can tell.
     with open(target, encoding="utf-8") as fh:
@@ -564,6 +582,20 @@ def cases(fx: Fixture) -> None:
         json.dump(e, fh)
     check("an entry from another UTC day is not trusted",
           "entries last one UTC day" in _lookup_reason(fx, e), True)
+
+
+def entry_for(fx: Fixture, script: str) -> dict:
+    """The stored cache entry of checker `script`, with its file as `_path`."""
+    for name in os.listdir(fx.store):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(fx.store, name)
+        with open(path, encoding="utf-8") as fh:
+            e = json.load(fh)
+        if e["argv"][-1] == script:
+            e["_path"] = path
+            return e
+    raise AssertionError(f"no cache entry for {script}")
 
 
 def _lookup_reason(fx: Fixture, entry: dict) -> str:

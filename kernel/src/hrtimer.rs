@@ -623,6 +623,27 @@ pub fn cancel(handle: HrTimerHandle) -> bool {
     found
 }
 
+/// Whether the timer `handle` names has run its course -- fired, or been
+/// cancelled -- rather than still waiting to fire. `false` for a handle
+/// refused at the ceiling, which names no timer and never will.
+///
+/// For a wait with a timeout that has woken without what it waits for: the
+/// timer fired iff this says so. Comparing the clock with the deadline
+/// instead asks a different CPU's clock than the one that decided expiry
+/// ([`process_expired`]), and a waiter that reads it a little behind would
+/// park again with no timer left to wake it.
+pub fn has_expired(handle: HrTimerHandle) -> bool {
+    let Some(list) = CPU_TIMERS.get(handle.cpu) else {
+        return false;
+    };
+    crate::cpu::without_interrupts(|| {
+        let state = list.lock();
+        state.slots.get(handle.slot as usize).is_none_or(|slot| {
+            slot.generation != handle.generation || slot.heap_pos == NIL || slot.id != handle.id
+        })
+    })
+}
+
 /// Query the number of pending timers on the current CPU.
 pub fn pending_count() -> usize {
     crate::cpu::without_interrupts(|| {
@@ -1112,15 +1133,19 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Closing the interrupt window makes the manual drain deterministic.
     // (schedule_ns/process_expired disable interrupts internally too;
     // nesting without_interrupts is a safe no-op for the inner calls.)
-    let n = crate::cpu::without_interrupts(|| {
-        let _handle = schedule_ns(0, test_cb, 0xDEAD);
+    let (n, handle) = crate::cpu::without_interrupts(|| {
+        let handle = schedule_ns(0, test_cb, 0xDEAD);
         // The timer has a 0 ns delay, so it expires immediately and
         // fires on this process_expired() call.
-        process_expired()
+        (process_expired(), handle)
     });
     assert!(
         n >= 1,
         "Timer with 0 delay didn't fire on process_expired()"
+    );
+    assert!(
+        has_expired(handle),
+        "has_expired() says a fired timer is pending"
     );
     assert_eq!(
         TEST_FIRED.load(Ordering::Acquire),
@@ -1153,8 +1178,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let base = pending_count();
         let h = schedule_ns(999_999_999_999, cancel_cb, 0xBAD); // Far future.
         assert_eq!(pending_count(), base + 1, "Timer not added to pending list");
+        assert!(
+            !has_expired(h),
+            "has_expired() says a pending timer has run"
+        );
         let cancelled = cancel(h);
         assert_eq!(pending_count(), base, "Timer not removed after cancel");
+        assert!(
+            has_expired(h),
+            "has_expired() says a cancelled timer is pending"
+        );
         cancelled
     });
     assert!(cancelled, "cancel() returned false for valid handle");

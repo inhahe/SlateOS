@@ -178,9 +178,6 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
         return Ok(());
     }
 
-    let mut to_wake: [Option<TaskId>; 16] = [None; 16];
-    let mut wake_count = 0usize;
-
     {
         let mut table = SEM_TABLE.lock();
         let sem = table
@@ -197,23 +194,19 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
             return Err(KernelError::Overflow);
         }
 
-        // Wake waiters first (one unit per waiter).
+        // A unit goes to each waiter, in order, while both last: taking a
+        // waiter off the queue is its grant. Only units no waiter takes are
+        // counted, so the count is never above zero while a task waits.
+        // Woken under the lock (`SEM_TABLE` -> `SCHED`, the module's order),
+        // so that no number of waiters needs a buffer to be woken from.
         let mut units_left = count;
-        while units_left > 0 && !sem.waiters.is_empty() {
-            if let Some(task_id) = sem.waiters.pop_front() {
-                if wake_count < to_wake.len() {
-                    to_wake[wake_count] = Some(task_id);
-                    wake_count = wake_count.saturating_add(1);
-                } else {
-                    // More than 16 to wake — put it back, remaining goes to count.
-                    sem.waiters.push_front(task_id);
-                    break;
-                }
-                units_left = units_left.saturating_sub(1);
-            }
+        while units_left > 0 {
+            let Some(task_id) = sem.waiters.pop_front() else {
+                break;
+            };
+            sched::wake(task_id);
+            units_left = units_left.saturating_sub(1);
         }
-
-        // Remaining units go to the count.
         sem.count = sem.count.saturating_add(units_left);
     }
 
@@ -223,11 +216,6 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
         handle.raw(),
         count,
     );
-
-    // Wake collected tasks outside the lock.
-    for task_id in to_wake.iter().flatten() {
-        sched::wake(*task_id);
-    }
 
     Ok(())
 }
@@ -283,15 +271,35 @@ pub fn wait(handle: SemHandle) -> KernelResult<()> {
         // it: off the queue is the grant. close() removes the semaphore. A
         // park can also end for neither -- a wake recorded for an earlier wait
         // ends the next park (`sched::Task::mark_ready`) -- and then this task
-        // is still queued, holding no unit, and waits again.
-        let table = SEM_TABLE.lock();
-        match table.get(&handle.id()) {
-            None => return Err(KernelError::ChannelClosed),
-            Some(sem) if sem.closed => return Err(KernelError::ChannelClosed),
-            Some(sem) if sem.waiters.contains(&me) => {}
-            Some(_) => return Ok(()),
+        // is still queued, and waits again unless a unit is free.
+        let mut table = SEM_TABLE.lock();
+        let Some(sem) = table.get_mut(&handle.id()) else {
+            return Err(KernelError::ChannelClosed);
+        };
+        if sem.closed {
+            return Err(KernelError::ChannelClosed);
+        }
+        if holds_unit_after_park(sem, me) {
+            return Ok(());
         }
     }
+}
+
+/// After a park, for waiter `me` of `sem`: whether it holds a unit now. Off
+/// the queue, `signal` granted it one. Still queued, it takes a free unit if
+/// there is one, leaving the queue as it does -- `signal` counts units only
+/// when no waiter is left to take them, so this is a guard, not the usual
+/// path -- and otherwise holds none.
+fn holds_unit_after_park(sem: &mut Semaphore, me: TaskId) -> bool {
+    let Some(pos) = sem.waiters.iter().position(|&id| id == me) else {
+        return true;
+    };
+    if sem.count == 0 {
+        return false;
+    }
+    sem.waiters.remove(pos);
+    sem.count = sem.count.saturating_sub(1);
+    true
 }
 
 /// Non-blocking wait (try-acquire) — decrement if count > 0.
@@ -366,44 +374,49 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
 
     let timer_handle = crate::hrtimer::schedule_ns(timeout_ns, timeout_wake, task_id);
 
-    // Block loop.
+    // Queue, then park until granted a unit, closed, or timed out. Each pass
+    // decides under the lock. The timeout has come when the timer has fired
+    // (`hrtimer::has_expired`), whatever this CPU's clock reads, or when the
+    // clock is past the deadline.
+    let mut queued = false;
     loop {
         {
             let mut table = SEM_TABLE.lock();
-            let sem = table.get_mut(&handle.id()).ok_or_else(|| {
+            let Some(sem) = table.get_mut(&handle.id()) else {
                 crate::hrtimer::cancel(timer_handle);
-                KernelError::ChannelClosed
-            })?;
-
+                return Err(KernelError::ChannelClosed);
+            };
             if sem.closed {
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::ChannelClosed);
             }
-
-            if sem.count > 0 {
+            let holds_unit = if queued {
+                holds_unit_after_park(sem, task_id)
+            } else if sem.count > 0 {
                 sem.count = sem.count.saturating_sub(1);
+                true
+            } else {
+                false
+            };
+            if holds_unit {
                 crate::hrtimer::cancel(timer_handle);
                 return Ok(());
             }
-
-            // Check timeout.
-            if crate::hrtimer::now_ns() >= deadline_ns {
-                // Remove ourselves from the waiter queue if present.
+            if crate::hrtimer::has_expired(timer_handle) || crate::hrtimer::now_ns() >= deadline_ns
+            {
                 if let Some(pos) = sem.waiters.iter().position(|&id| id == task_id) {
                     sem.waiters.remove(pos);
                 }
                 crate::hrtimer::cancel(timer_handle);
                 return Err(KernelError::TimedOut);
             }
-
-            // Register as a waiter.
-            if sem.waiters.len() >= MAX_WAITERS {
-                crate::hrtimer::cancel(timer_handle);
-                return Err(KernelError::WouldBlock);
-            }
-            // Only add if not already in the queue (re-entry from loop).
-            if !sem.waiters.iter().any(|&id| id == task_id) {
+            if !queued {
+                if sem.waiters.len() >= MAX_WAITERS {
+                    crate::hrtimer::cancel(timer_handle);
+                    return Err(KernelError::WouldBlock);
+                }
                 sem.waiters.push_back(task_id);
+                queued = true;
             }
         }
 
@@ -411,32 +424,6 @@ pub fn wait_timeout(handle: SemHandle, timeout_ns: u64) -> KernelResult<()> {
             crate::wchan::WaitChannel::Semaphore,
             handle.raw(),
         ));
-
-        // Woken by either signal() or timer.
-        // If signal() woke us, it already removed us from the queue
-        // and consumed a unit on our behalf → check the table.
-        {
-            let table = SEM_TABLE.lock();
-            match table.get(&handle.id()) {
-                None => {
-                    crate::hrtimer::cancel(timer_handle);
-                    return Err(KernelError::ChannelClosed);
-                }
-                Some(sem) if sem.closed => {
-                    crate::hrtimer::cancel(timer_handle);
-                    return Err(KernelError::ChannelClosed);
-                }
-                Some(sem) => {
-                    // If we're no longer in the waiter queue, signal()
-                    // consumed a unit for us.
-                    if !sem.waiters.iter().any(|&id| id == task_id) {
-                        crate::hrtimer::cancel(timer_handle);
-                        return Ok(());
-                    }
-                    // Otherwise, timer woke us — loop back to check timeout.
-                }
-            }
-        }
     }
 }
 
@@ -688,6 +675,104 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[sem]   Signal wakes waiter: OK");
     }
 
+    // Test 6: one signal grants a unit to every waiter it covers -- more of
+    // them than a fixed wake buffer would hold -- and counts none while any
+    // waits.
+    {
+        SEM_MANY_ACQUIRED.store(0, AtOrd::Release);
+        let h = create(0, 100);
+        let mut tids: [TaskId; SEM_MANY_WAITERS] = [0; SEM_MANY_WAITERS];
+        for slot in &mut tids {
+            let Ok(tid) = sched::spawn(b"sem-many-test", 16, sem_many_waiter_task, h.raw(), 0)
+            else {
+                close(h);
+                serial_println!("[sem]   FAIL: could not spawn a many-waiters waiter");
+                return Err(KernelError::InternalError);
+            };
+            *slot = tid;
+        }
+        if !tids.iter().all(|&tid| sem_test_wait_for(tid, true)) {
+            close(h);
+            serial_println!("[sem]   FAIL: a many-waiters waiter never blocked");
+            return Err(KernelError::InternalError);
+        }
+        signal(h, SEM_MANY_WAITERS as u64)?;
+        let all = crate::selftest::wait_until(5_000, || {
+            SEM_MANY_ACQUIRED.load(AtOrd::Acquire) == SEM_MANY_WAITERS
+        });
+        let left = count(h)?;
+        close(h);
+        let ended = tids.iter().all(|&tid| sem_test_wait_for(tid, false));
+        if !all || left != 0 || !ended {
+            serial_println!(
+                "[sem]   FAIL: signal({}) to {} waiters: {} acquired, count {}, ended {}",
+                SEM_MANY_WAITERS,
+                SEM_MANY_WAITERS,
+                SEM_MANY_ACQUIRED.load(AtOrd::Acquire),
+                left,
+                ended
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[sem]   One signal wakes {} waiters: OK", SEM_MANY_WAITERS);
+    }
+
+    // Test 7: after a park, a waiter off the queue holds the unit `signal`
+    // granted; one still queued takes a free unit and leaves the queue, or
+    // holds none.
+    {
+        let me: TaskId = 0xC0FFEE;
+        let mut sem = Semaphore::new(0, 10);
+        if !holds_unit_after_park(&mut sem, me) {
+            serial_println!("[sem]   FAIL: a waiter off the queue was not granted");
+            return Err(KernelError::InternalError);
+        }
+        sem.waiters.push_back(me);
+        if holds_unit_after_park(&mut sem, me) || sem.waiters.len() != 1 {
+            serial_println!("[sem]   FAIL: a queued waiter with no unit free was granted");
+            return Err(KernelError::InternalError);
+        }
+        sem.count = 1;
+        if !holds_unit_after_park(&mut sem, me) || !sem.waiters.is_empty() || sem.count != 0 {
+            serial_println!("[sem]   FAIL: a queued waiter did not take the free unit and leave");
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[sem]   A unit after a park: OK");
+    }
+
+    // Test 8: a timed wait that times out leaves no entry behind, which a
+    // later signal would spend its unit on.
+    {
+        let h = create(0, 10);
+        let timed_out = matches!(wait_timeout(h, 1_000_000), Err(KernelError::TimedOut));
+        signal(h, 1)?;
+        let left = count(h)?;
+        close(h);
+        if !timed_out || left != 1 {
+            serial_println!(
+                "[sem]   FAIL: a timed-out wait (timed out {}) left the next unit uncounted ({})",
+                timed_out,
+                left
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[sem]   Timed-out wait leaves the queue: OK");
+    }
+
     serial_println!("[sem] IPC semaphore self-test PASSED");
     Ok(())
+}
+
+/// Waiters in [`self_test`]'s test 6: more than the 16 an earlier `signal`
+/// could wake at once.
+const SEM_MANY_WAITERS: usize = 20;
+
+/// How many of test 6's waiters have acquired.
+static SEM_MANY_ACQUIRED: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// Task entry for test 6: wait once, count the acquisition.
+extern "C" fn sem_many_waiter_task(h_raw: u64) {
+    if wait(SemHandle::from_raw(h_raw)).is_ok() {
+        SEM_MANY_ACQUIRED.fetch_add(1, AtOrd::AcqRel);
+    }
 }

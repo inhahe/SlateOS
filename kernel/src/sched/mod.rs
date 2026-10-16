@@ -4649,8 +4649,10 @@ fn dump_all_tasks_serial() {
 /// committed to and last left a CPU ([`task::Task::last_dispatch`]); `why`
 /// says who is asking. Answers how many there are.
 ///
-/// The caller holds `SCHED`; each run queue's lock is taken inside it, the
-/// scheduler's own order.
+/// The caller holds `SCHED`; each run queue's lock is tried inside it, the
+/// scheduler's own order, and never waited for: this runs from the liveness
+/// dump, in the timer interrupt, where a queue lock held by a wedged CPU
+/// would wedge this one too ([`PerCpuScheduler::try_queued_cpus`]).
 fn report_running_orphans(state: &SchedState, why: &str) -> usize {
     let mut orphans = 0usize;
     for (&id, task) in &state.tasks {
@@ -4663,13 +4665,13 @@ fn report_running_orphans(state: &SchedState, why: &str) -> usize {
             .get(..task.name_len.min(task.name.len()))
             .unwrap_or(&[]);
         serial_println!(
-            "[sched] *** ORPHAN ({}): task {} {:?} is Running on no CPU, queued on {:#x}; \
+            "[sched] *** ORPHAN ({}): task {} {:?} is Running on no CPU, queued on {}; \
              last committed to at tick {} by {}, last left a CPU at tick {} by {} as {:?}; \
              last_cpu {}",
             why,
             id,
             core::str::from_utf8(name).unwrap_or("<non-utf8>"),
-            PER_CPU_SCHED.queued_cpus(id),
+            QueuedOn(PER_CPU_SCHED.try_queued_cpus(id)),
             task.last_dispatch.0,
             task.last_dispatch.1,
             task.last_switch_out.0,
@@ -4679,6 +4681,19 @@ fn report_running_orphans(state: &SchedState, why: &str) -> usize {
         );
     }
     orphans
+}
+
+/// The CPUs whose run queues hold a task, as [`report_running_orphans`]
+/// prints them: a mask, or `unknown` when a queue's lock was held.
+struct QueuedOn(Option<u64>);
+
+impl core::fmt::Display for QueuedOn {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.0 {
+            Some(mask) => write!(f, "{mask:#x}"),
+            None => f.write_str("unknown (a run-queue lock is held)"),
+        }
+    }
 }
 
 /// Print, on one line headed by `why`, everything the scheduler knows of
@@ -11314,7 +11329,17 @@ extern "C" fn test_task_park_forever(_arg: u64) {
 /// run only when something has already hung, so this is the run on which
 /// they are known to work.
 fn test_hang_diagnostics() -> KernelResult<()> {
-    let id = spawn(b"test-diag-park", 16, test_task_park_forever, 0, 0)?;
+    // Pinned to one CPU: `queued_cpus` locks the queues one at a time and the
+    // push balancer moves queued tasks without `SCHED`, so an unpinned task
+    // could be counted in no queue or in two by a healthy scheduler.
+    let id = spawn_with_affinity(
+        b"test-diag-park",
+        16,
+        test_task_park_forever,
+        0,
+        0,
+        cpu_bit(current_cpu_id()),
+    )?;
     let fail = |what: &str| {
         serial_println!("[sched]   FAIL: hang diagnostics: {}", what);
         kill_task(id);
@@ -11326,7 +11351,7 @@ fn test_hang_diagnostics() -> KernelResult<()> {
         let state = SCHED.lock();
         let queued = PER_CPU_SCHED.queued_cpus(id);
         let ok = match state.tasks.get(&id).map(|t| t.state) {
-            Some(TaskState::Ready) => queued.count_ones() == 1,
+            Some(TaskState::Ready) => queued.is_power_of_two(),
             Some(_) => queued == 0,
             None => false,
         };

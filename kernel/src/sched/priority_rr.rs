@@ -905,6 +905,26 @@ impl PerCpuScheduler {
             .fold(0u64, |mask, (cpu, _)| mask | super::cpu_bit(cpu))
     }
 
+    /// [`queued_cpus`](Self::queued_cpus) without waiting for a queue lock:
+    /// `None` when one is held. For a report made from interrupt context,
+    /// where a queue lock held by a wedged CPU would wedge this one too.
+    #[must_use]
+    pub fn try_queued_cpus(&self, id: super::task::TaskId) -> Option<u64> {
+        let n = self.num_cpus.load(Ordering::Relaxed).max(1);
+        self.queues
+            .iter()
+            .take(n)
+            .enumerate()
+            .try_fold(0u64, |mask, (cpu, q)| {
+                let entries = Self::try_locked_irqs_off(q, |backend| backend.entries_for(id))?;
+                Some(if entries > 0 {
+                    mask | super::cpu_bit(cpu)
+                } else {
+                    mask
+                })
+            })
+    }
+
     /// Run `f` on one CPU's queue, holding its lock with interrupts disabled
     /// -- the way to lock a queue from a path that does not hold `SCHED`.
     ///

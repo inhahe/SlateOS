@@ -20,7 +20,9 @@
 //!    Returns an `ElfFile` with accessors for program headers, entry
 //!    point, and loadable segments.  This half is the `elfparse` crate,
 //!    kept out of the kernel crate so that it can be tested and fuzzed on
-//!    the host; its errors become `KernelError`s through `From`.
+//!    the host. The kernel wraps it in its own [`ElfFile`], whose methods
+//!    answer `KernelError`s (`kernel_error`): deliberately not a `From`
+//!    impl, for the reason the wrapper's doc gives.
 //!
 //! 2. **Load** — `load_into_address_space(elf, pml4)` allocates frames,
 //!    maps them at the correct virtual addresses, and copies segment

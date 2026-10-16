@@ -278,6 +278,18 @@ fn note_contention(addr: u64, ns: u64) {
     let _ = crate::fs::futexstat::record_contention(accounting_pid(), addr, ns);
 }
 
+/// Whether `task` is still queued on any futex: a wake takes a waiter off
+/// its queue before waking it, so a waiter still queued after its park has
+/// not been woken by one. Every bucket is looked in, since a requeue moves a
+/// waiter to another futex's.
+fn still_queued(task: u64) -> bool {
+    FUTEX_TABLE
+        .lock()
+        .buckets
+        .iter()
+        .any(|bucket| bucket.iter().any(|w| w.task_id == task))
+}
+
 /// Remove this task's lingering futex waiter from whatever bucket holds it,
 /// and report whether one was found.
 ///
@@ -293,18 +305,6 @@ fn note_contention(addr: u64, ns: u64) {
 /// at a time.
 ///
 /// Returns `true` iff a waiter for `task` was found and removed.
-/// Whether `task` is still queued on any futex: a wake takes a waiter off
-/// its queue before waking it, so a waiter still queued after its park has
-/// not been woken by one. Every bucket is looked in, since a requeue moves a
-/// waiter to another futex's.
-fn still_queued(task: u64) -> bool {
-    FUTEX_TABLE
-        .lock()
-        .buckets
-        .iter()
-        .any(|bucket| bucket.iter().any(|w| w.task_id == task))
-}
-
 fn remove_self_waiter(key: FutexKey, task: u64) -> bool {
     let mut table = FUTEX_TABLE.lock();
     let idx = key.bucket();
@@ -2816,9 +2816,12 @@ pub fn futex_wait_requeue_pi(
         // ownership transfer (handled above) and the timeout timer --
         // cmp_requeue_pi requeues us *without* waking. Any other ending of the
         // park (a wake recorded for an earlier wait, `sched::Task::mark_ready`)
-        // is spurious, and so is one before the deadline: re-block. Only the
-        // clock says the timeout has come.
-        if deadline.is_none_or(|d| crate::hrtimer::now_ns() < d) {
+        // is spurious: re-block. The timeout has come when the timer has fired
+        // (`hrtimer::has_expired`), whatever this CPU's clock reads, or when
+        // the clock is past the deadline.
+        let timed_out = timer_handle.is_some_and(crate::hrtimer::has_expired)
+            || deadline.is_some_and(|d| crate::hrtimer::now_ns() >= d);
+        if !timed_out {
             drop(table);
             continue;
         }

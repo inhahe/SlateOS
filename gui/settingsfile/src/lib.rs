@@ -36,11 +36,11 @@
 //!
 //! # Durability
 //!
-//! [`store`] writes a temporary file beside the target and renames it over
-//! the original. A rename within a directory is atomic, so a reader — or a
-//! crash — sees either the whole old file or the whole new one, never the
-//! truncated middle of a save. Writing in place is how a settings dialog
-//! turns a power cut into an empty config file.
+//! [`store`] writes a temporary file beside the target, flushes it to the
+//! disk and renames it over the original ([`write_atomic`]). A rename within a
+//! directory is atomic, so a reader — or a crash — sees either the whole old
+//! file or the whole new one, never the truncated middle of a save. Writing in
+//! place is how a settings dialog turns a power cut into an empty config file.
 
 use std::env;
 use std::fs;
@@ -206,8 +206,17 @@ pub fn store_data(name: &str, bytes: &[u8]) -> io::Result<()> {
 ///
 /// Public for files that are not settings groups but are replaced the same
 /// way -- a theme's `theme.yaml`, saved by `appearance::themes::authoring`.
-/// The temporary is `<file>.new` beside it, so the folder must be one the
+/// The temporary is a hidden file beside it, so the folder must be one the
 /// caller may write.
+///
+/// The write is `safeio::write_atomically`'s, every program's save, so a
+/// settings file has what any document has: its bytes on the disk before the
+/// rename (a crash leaves the old file, not an empty one), a file reached
+/// through a symlink replaced where it is rather than the link replaced by a
+/// copy, its permissions kept, and on Windows a rename tried again for a
+/// moment while a virus scanner or the indexer holds the file -- which they
+/// do as soon as a file is written, so the second of two quick saves failed
+/// (`requests/e-c-settingsfile-store-fails-on-windows-while-something-holds-the-file.md`).
 ///
 /// # Errors
 ///
@@ -216,24 +225,7 @@ pub fn write_atomic(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir)?;
     }
-    // Named for the target rather than randomly, so a crash between the write
-    // and the rename leaves one identifiable piece of litter that the next
-    // save overwrites — not an unbounded pile of temporaries.
-    let mut temp = path.to_path_buf();
-    let mut file_name = path.file_name().unwrap_or_default().to_os_string();
-    file_name.push(".new");
-    temp.set_file_name(file_name);
-
-    fs::write(&temp, bytes)?;
-    match fs::rename(&temp, path) {
-        Ok(()) => Ok(()),
-        Err(err) => {
-            // The temporary is not the user's file, so failing to clean it up
-            // is not worth masking the error that actually matters.
-            let _ = fs::remove_file(&temp);
-            Err(err)
-        }
-    }
+    safeio::write_atomically(path, bytes)
 }
 
 /// The file a named settings group lives in, `<name>.yaml` in [`config_dir`].
@@ -1044,7 +1036,7 @@ mod tests {
     fn a_real_store_is_seen_through_the_rename() {
         // The path that actually matters: not a test writing bytes, but
         // `store`'s write-a-temporary-and-rename. The watcher must follow the
-        // target across the replacement, and must not be fooled by the `.new`
+        // target across the replacement, and must not be fooled by the
         // temporary sitting beside it.
         with_config_dir("watch-store", |write| {
             write("appearance", "theme_mode: dark\n");
@@ -1246,6 +1238,84 @@ mod tests {
             store("appearance", &Document::parse("a: 1\n")).expect("store");
             assert_eq!(load("appearance").get_i64(&["a"]), Some(1));
         });
+    }
+
+    /// Open `path` as a virus scanner or the indexer opens a file it has just
+    /// been told about: reading, and sharing reading only -- not delete, so a
+    /// rename over it is refused while it is open. (`File::open` shares
+    /// delete, and would not.)
+    #[cfg(windows)]
+    fn held_as_a_scanner_holds_it(path: &std::path::Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(path)
+            .expect("the scanner opens the file")
+    }
+
+    /// **A save waits a moment for a file another program holds.** The second
+    /// of two quick saves met the first's file still held by the scanner and
+    /// failed, and a Settings test went red for it under load.
+    #[cfg(windows)]
+    #[test]
+    fn a_save_waits_a_moment_for_a_file_another_program_holds() {
+        let scratch = ScratchDir::new("settingsfile-held");
+        let path = scratch.dir().join("appearance.yaml");
+        write_atomic(&path, b"theme_mode: dark\n").expect("the first save");
+        let held = held_as_a_scanner_holds_it(&path);
+        let scanner = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(held);
+        });
+        write_atomic(&path, b"theme_mode: light\n")
+            .expect("the save gave up while the file was held a moment");
+        scanner.join().expect("the scanner");
+        assert_eq!(fs::read(&path).expect("read back"), b"theme_mode: light\n");
+    }
+
+    /// **A file held for good is reported, and left as it was**, with no
+    /// temporary beside it: a moment's wait is not a wait for ever.
+    #[cfg(windows)]
+    #[test]
+    fn a_settings_file_held_for_good_is_reported_and_left_as_it_was() {
+        let scratch = ScratchDir::new("settingsfile-held-for-good");
+        let path = scratch.dir().join("appearance.yaml");
+        write_atomic(&path, b"theme_mode: dark\n").expect("the first save");
+        let held = held_as_a_scanner_holds_it(&path);
+        let refused = write_atomic(&path, b"theme_mode: light\n");
+        drop(held);
+        assert!(
+            refused.is_err(),
+            "a save over a file held throughout went through"
+        );
+        assert_eq!(fs::read(&path).expect("read back"), b"theme_mode: dark\n");
+        let names: Vec<_> = fs::read_dir(scratch.dir())
+            .expect("list")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, ["appearance.yaml"], "a temporary was left behind");
+    }
+
+    /// **A settings file reached through a symlink is replaced where it is**:
+    /// the link -- a dotfiles folder linked into the configuration
+    /// directory, say -- is still a link afterwards, to the new contents.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_settings_file_stays_a_symlink() {
+        let scratch = ScratchDir::new("settingsfile-symlink");
+        let real = scratch.dir().join("dotfiles-appearance.yaml");
+        let link = scratch.dir().join("appearance.yaml");
+        fs::write(&real, b"theme_mode: dark\n").expect("the real file");
+        std::os::unix::fs::symlink(&real, &link).expect("the link");
+        write_atomic(&link, b"theme_mode: light\n").expect("the save");
+        assert!(
+            fs::symlink_metadata(&link)
+                .expect("stat")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(fs::read(&real).expect("read back"), b"theme_mode: light\n");
     }
 
     // -- Data --

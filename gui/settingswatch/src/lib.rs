@@ -26,9 +26,10 @@
 //! | `IN_MODIFY`, `IN_CREATE` | a file written in place, as an editor may | once it has been [`QUIET`] for a while |
 //! | `IN_Q_OVERFLOW` | events were lost | every settings file in the folder |
 //!
-//! A name that is not `<settings name>.yaml` -- `settingsfile`'s own
-//! `<name>.yaml.new` on the way to being renamed, an editor's swap file, a
-//! directory -- is nothing to announce. [`Policy`] is that table, with no
+//! A name that is not `<settings name>.yaml` -- `settingsfile`'s own hidden
+//! temporary (`.<name>.yaml.slate-save-<pid>-<n>`, `safeio`'s) on the way to
+//! being renamed, an editor's swap file, a directory -- is nothing to
+//! announce. [`Policy`] is that table, with no
 //! system calls in it, and is tested as such; [`Watcher`] puts the folder's
 //! events through it.
 //!
@@ -682,9 +683,12 @@ mod tests {
         ] {
             assert_eq!(classify(mask, b"notes.yaml"), want, "{mask:#x}");
         }
-        // settingsfile's own temporary, on its way to being renamed.
-        assert_eq!(classify(IN_MODIFY, b"notes.yaml.new"), Seen::Nothing);
-        assert_eq!(classify(IN_MOVED_TO, b"notes.yaml.new"), Seen::Nothing);
+        // settingsfile's own temporary, on its way to being renamed, and
+        // the `.new` one it used before.
+        for temporary in [&b".notes.yaml.slate-save-4321-0"[..], b"notes.yaml.new"] {
+            assert_eq!(classify(IN_MODIFY, temporary), Seen::Nothing);
+            assert_eq!(classify(IN_MOVED_TO, temporary), Seen::Nothing);
+        }
     }
 
     /// A file saved the way `settingsfile` saves it -- the temporary written,
@@ -693,8 +697,9 @@ mod tests {
     fn a_save_by_rename_is_announced_once_at_the_rename() {
         let mut p = Policy::new(QUIET);
         let t = Instant::now();
-        assert_eq!(p.event(IN_CREATE, b"notes.yaml.new", t), Decision::Wait);
-        assert_eq!(p.event(IN_MODIFY, b"notes.yaml.new", t), Decision::Wait);
+        let temporary = b".notes.yaml.slate-save-4321-0";
+        assert_eq!(p.event(IN_CREATE, temporary, t), Decision::Wait);
+        assert_eq!(p.event(IN_MODIFY, temporary, t), Decision::Wait);
         assert_eq!(
             p.event(IN_MOVED_TO, b"notes.yaml", t),
             Decision::Announce(vec![name("notes")])

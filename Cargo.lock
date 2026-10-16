@@ -3815,6 +3815,7 @@ dependencies = [
 name = "settingsfile"
 version = "0.1.0"
 dependencies = [
+ "safeio",
  "scratchdir",
  "settingsname",
  "yamldoc",

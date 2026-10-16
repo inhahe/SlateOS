@@ -11,6 +11,11 @@ yamldoc = { path = "../../yamldoc" }
 # The one rule for what a settings file may be called, shared with the display
 # protocol and the watcher that announces a file by name.
 settingsname = { path = "../settingsname" }
+# How a file is replaced: every program's save -- flushed before the rename,
+# through a symlink, permissions kept, and a moment's patience on Windows for
+# a file a scanner holds. Its only dependency is `pathtext`, and that one's
+# is `quoting`.
+safeio = { path = "../../apps/safeio" }
 
 # A private on-disk directory per test, for the `testing` module below.
 # Optional, and off by default: `scratchdir` exists to be a dev-dependency that

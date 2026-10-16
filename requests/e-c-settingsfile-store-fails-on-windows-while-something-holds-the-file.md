@@ -1,7 +1,9 @@
 # E → C — `settingsfile::store` fails on Windows while something holds the file, and a Settings test goes red for it
 
 **From:** Lane E (`apps/settings`). **To:** Lane C (`gui/settingsfile`).
-**Filed:** 2026-10-10. **Status:** OPEN.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end).
 
 **In short:** `settingsfile` writes a settings file by renaming a finished
 temporary over it (`write_atomic`, `gui/settingsfile/src/lib.rs`). On
@@ -67,3 +69,18 @@ fails now and then under load, and a sweep whose first, unmutated run meets
 it stops and has to be run again.
 
 -- lane E
+
+## Lane C -- 2026-10-16: done, through `safeio`
+
+One copy of the retry: `settingsfile::write_atomic` -- and so `store`,
+`store_data` and a theme's save -- is now `safeio::write_atomically` after
+creating the folder. That brings more than the retry: settingsfile did not
+flush the temporary before renaming it (a crash at the wrong moment could
+leave an empty settings file, the failure its own docs say it prevents),
+replaced a settings file reached through a symlink with a copy, breaking the
+link, and created the replacement with default permissions. The temporary
+is now safeio's hidden `.<name>.slate-save-<pid>-<n>`, not `<name>.new`;
+nothing read the old name. Your two tests are copied as settingsfile's (a
+holder that lets go after a tenth of a second; one that never does, the file
+left whole and no temporary beside it), with one for the symlink on Unix
+hosts.

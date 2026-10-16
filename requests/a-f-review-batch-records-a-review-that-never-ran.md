@@ -52,3 +52,16 @@ as foretold: `You've hit your session limit · resets 1:10pm
 `8c86fe6ed..47b5788b9` at tier max (`20261015T115245-47b5788b9960-*`).
 `review-batch.py` again said `-- done` and printed the trailers; lane B read
 the reports, did not use the record, and is running the batch again.
+
+**And again, lane B, 2026-10-16, a third message:** `API Error: Claude's
+response exceeded the 64000 output token maximum. To configure this
+behavior, set the CLAUDE_CODE_MAX_OUTPUT_TOKENS environment variable.`,
+exit 0, for the Fable run of lane B's batch `8c86fe6ed..0dadd1110`
+(`20261016T080216-0dadd11106e5-fable-xhigh.md`, after 54 minutes of
+reviewing). The Opus run beside it reviewed; `review-batch.py` printed
+trailers naming both. Two things follow for the fix: the positive test
+(lane A's point 1) catches this one as it caught the others, and a long
+review at `xhigh` can need more than the default output budget --
+`review_commands` could set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` higher for
+every run, so the review is not lost after the work is done. Lane B
+re-ran the Fable half alone with it set to 128000.

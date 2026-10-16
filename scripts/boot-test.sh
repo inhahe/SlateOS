@@ -220,7 +220,14 @@
 #                                       # the watchdog does not.  Use this flag
 #                                       # only if the host TCP listen itself is a
 #                                       # problem (e.g. a sandbox that forbids
-#                                       # binding a port).
+#                                       # binding a port).  It also skips the
+#                                       # screen probe, which types through it.
+#   SCREEN_PROBE=0 ./scripts/boot-test.sh
+#                                       # skip the screen probe (screen_probe:
+#                                       # at the marker, type at the guest and
+#                                       # check its screen shows the answer).
+#                                       # SCREEN_PROBE_TIMEOUT=N gives it N
+#                                       # seconds instead of 180.
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -1624,6 +1631,11 @@ ESP_DIR="$PROJECT_ROOT/build/esp"
 # QEMU's virtual FAT.  See the --usb-image case in the arg parser.
 USB_IMG="$PROJECT_ROOT/build/slateos-usb.img"
 SERIAL_FILE="$PROJECT_ROOT/build/serial-test.txt"
+# The log as it stood at the marker, while the screen probe runs
+# (marker_log_back), and the whole log after it: the serial log ends at the
+# marker, as it did before the probe kept the guest up past it.
+SERIAL_AT_MARKER="$PROJECT_ROOT/build/serial-test-at-marker.txt"
+SERIAL_WHOLE="$PROJECT_ROOT/build/serial-test-whole.txt"
 # QEMU's own stderr, which until now was captured nowhere -- it went to the
 # harness console and died with it.
 #
@@ -1831,6 +1843,56 @@ kill_qemu() {
     # Reap the Cygwin-side child so the shell doesn't leave a zombie/handle.
     [ -n "$cyg_pid" ] && wait "$cyg_pid" 2>/dev/null || true
     rm -f "$PIDFILE" 2>/dev/null || true
+}
+
+# The screen probe: what a person sees and types at, end to end.
+#
+# The marker proves the serial port and nothing on the screen.  Until the
+# desktop starts (design-decisions 1392 -- a boot test that boots to it and
+# checks it is lane A's step), the screen is the kernel console with init's
+# shell on it.  At the marker, with the guest still up, `screen.py probe` types
+# `echo <token>` and Enter through the HMP monitor and waits for the token to
+# be drawn on a line of its own on QEMU's console 0 -- the keyboard, the
+# kernel's tty, init's shell, the console, the framebuffer and QEMU's display.
+# The last screen is kept as build/screen/probe.png, its text as probe.txt.
+#
+# Called only from the wait loop, with QEMU up, so the post-loop path -- the
+# wait over before the loop saw the marker -- checks no screen and says so.  It needs the monitor:
+# --no-monitor skips it, and so does SCREEN_PROBE=0, each saying so.  Returns
+# non-zero when the screen did not show the answer, or could not be read.
+screen_probe() {
+    if [ "${SCREEN_PROBE:-1}" != "1" ]; then
+        echo "=== Screen probe: skipped (SCREEN_PROBE=${SCREEN_PROBE}) ==="
+        return 0
+    fi
+    if [ "${#MONITOR_ARGS[@]}" -eq 0 ]; then
+        echo "=== Screen probe: skipped (--no-monitor: no monitor to type through) ==="
+        return 0
+    fi
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== Screen probe: no python, so the screen cannot be checked ===" >&2
+        return 1
+    fi
+    echo "=== Screen probe: typing at the guest and reading its screen ==="
+    "$py" "$SCRIPT_DIR/screen.py" probe --hmp "$MONITOR_PORT" \
+        --timeout "${SCREEN_PROBE_TIMEOUT:-180}" --keep "$PROJECT_ROOT/build/screen"
+}
+
+# Stop QEMU and put the log back as it stood at the marker ($SERIAL_AT_MARKER,
+# copied when the marker was seen): what every verdict reads is what it read
+# before the screen probe kept the guest up. The whole log, the probe's time
+# included, is kept beside it as $SERIAL_WHOLE.
+marker_log_back() {
+    kill_qemu "$QEMU_PID"
+    if [ -f "$SERIAL_AT_MARKER" ]; then
+        mv -f "$SERIAL_FILE" "$SERIAL_WHOLE" 2>/dev/null || true
+        mv -f "$SERIAL_AT_MARKER" "$SERIAL_FILE"
+    fi
 }
 
 # Replay whatever QEMU wrote to stderr, once, on the way out.
@@ -4176,6 +4238,70 @@ check_eol() {
 
 check_eol
 
+# The screen probe's own self-test, before the build.  The probe runs only at
+# the marker (screen_probe), an hour or more into the run, and a probe broken
+# by a change to screen.py would fail that boot for a fault of its own.  This
+# drives it end to end in seconds -- fake HMP and QMP monitors on loopback, a
+# fake console that answers or does not -- and reads text drawn in the
+# kernel's own font, so a change to kernel/src/font.rs it cannot parse stops
+# here too.
+screen_probe_selftest() {
+    # Not when the probe will not run: SCREEN_PROBE=0, or --no-monitor, which
+    # is for a host that may not even allow the self-test's loopback sockets.
+    if [ "${SCREEN_PROBE:-1}" != "1" ] || [ "${MONITOR_ENABLED:-1}" != "1" ]; then
+        return 0
+    fi
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== screen probe self-test: skipped (no python; the probe will say so too) ===" >&2
+        return 0
+    fi
+    echo "=== Checking the screen probe (screen.py --self-test) ==="
+    if run_checker screen-probe-selftest "$py" "$PROJECT_ROOT/scripts/screen.py" --self-test; then
+        return 0
+    fi
+    echo "" >&2
+    echo "ERROR: refusing to build.  The screen probe's self-test failed, so the" >&2
+    echo "probe at the end of this boot would fail for its own fault, not the" >&2
+    echo "guest's.  Fix scripts/screen.py, or run with SCREEN_PROBE=0 to boot" >&2
+    echo "without it." >&2
+    exit 1
+}
+
+screen_probe_selftest
+
+# review-batch.py's self-test, before the build. Its `--check` is pre-push
+# gate 77, which refuses a publish to main that no review covers; a checker
+# that has stopped checking would pass anything there. The self-test runs
+# here rather than at the push, because much of it exercises what `--check`
+# does not use -- mutation testing, cargo -- and a failure of that part must
+# not stop every lane's publish.
+review_batch_selftest() {
+    local py=""
+    if command -v python &>/dev/null; then
+        py=python
+    elif command -v python3 &>/dev/null; then
+        py=python3
+    else
+        echo "=== review-batch self-test: skipped (no python) ===" >&2
+        return 0
+    fi
+    echo "=== Checking the review checker (review-batch.py --self-test) ==="
+    if run_checker review-batch-selftest "$py" "$PROJECT_ROOT/scripts/review-batch.py" --self-test; then
+        return 0
+    fi
+    echo "" >&2
+    echo "ERROR: refusing to build.  review-batch.py's self-test failed, so pre-push" >&2
+    echo "gate 77's verdict on what reaches main cannot be trusted." >&2
+    exit 1
+}
+
+review_batch_selftest
+
 # Lane B's manifest-producer gate.  Every entry in
 # `rootfs-bin-manifest.txt` must have something in the tree that produces
 # it, with aliases resolved to their producer.
@@ -4301,19 +4427,19 @@ check_unused_exports() {
         exit 1
     fi
 
-    echo "=== Checking for exports whose documented caller does not exist ==="
+    echo "=== Listing exports no other crate names (a report; it refuses only on its own failure) ==="
     if run_checker check-unused-exports "$py" \
             "$PROJECT_ROOT/scripts/check-unused-exports.py"; then
         return 0
     fi
 
+    # Its list of exports is a report and never refuses (it would only with
+    # --strict); the run fails for two reasons, both the checker's own.
     echo "" >&2
-    echo "ERROR: refusing to build.  Each export above is named as having a" >&2
-    echo "caller by its own documentation, and that caller does not exist." >&2
-    echo "" >&2
-    echo "An export with no caller yet is ordinary and is NOT what this" >&2
-    echo "reports.  A doc comment that names one is a promise nothing keeps," >&2
-    echo "and the next reader will believe it." >&2
+    echo "ERROR: refusing to build.  check-unused-exports.py could not give a" >&2
+    echo "verdict: its self-test failed, or it found fewer library crates than" >&2
+    echo "its floor -- a scan that saw almost nothing, whose empty list would" >&2
+    echo "read like a clean tree.  Its output above says which." >&2
     exit 1
 }
 
@@ -9036,6 +9162,13 @@ if [ ! -f "$SWAP_IMG" ]; then
     echo "=== Creating 16 MiB swap disk image ==="
     dd if=/dev/zero of="$SWAP_IMG" bs=1M count=16 status=none 2>/dev/null
 fi
+# The swap header, every run: since 2026-10-09 the kernel takes a disk for
+# swap only when its first slot says it is swap (mm::swap::parse_header), and
+# an image made before then is all zeros. Only the header page is written,
+# and a second run changes nothing (scripts/mkswap.py).
+if ! python "$PROJECT_ROOT/scripts/mkswap.py" "$SWAP_IMG" >/dev/null; then
+    echo "WARNING: could not write the swap header on $SWAP_IMG; the boot runs without disk swap" >&2
+fi
 
 # Step 3a: Backing store for the NVMe controller (see the device notes above
 # the QEMU invocation).  `-device nvme` requires a drive — a controller with no
@@ -9796,7 +9929,7 @@ fi
 # Step 4: Boot QEMU
 contention_notice "the moment before QEMU"
 echo "=== Booting QEMU (timeout: ${TIMEOUT}s, cpu: $QEMU_CPU, cpus: $SMP_CPUS) ==="
-rm -f "$SERIAL_FILE"
+rm -f "$SERIAL_FILE" "$SERIAL_AT_MARKER" "$SERIAL_WHOLE"
 # Removed together with the serial log, and for the identical reason: both are
 # evidence about *this* boot, and a leftover from the previous one is worse
 # than nothing because it looks like evidence.  record_boot_outcome only passes
@@ -10224,21 +10357,39 @@ while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     # which contains the substring BOOT_OK — a false PASS on a hung boot.
     if [ -f "$SERIAL_FILE" ] && grep -q "^$WAIT_MARKER" "$SERIAL_FILE" 2>/dev/null; then
         echo "$WAIT_MARKER detected after ${ELAPSED}s!"
-        kill_qemu "$QEMU_PID"
-        if ! check_selftest_failures "$SERIAL_FILE"; then
+        # The guest's time ends at the marker; the screen probe's is the
+        # harness's (kill_qemu stamps only the first end it sees).
+        QEMU_END_EPOCH=$(date +%s)
+        # The log is judged as it stood at the marker -- what the guest
+        # prints while the probe keeps it up neither fails nor passes the
+        # boot, and a boot already failed is not kept waiting for the probe.
+        # Afterwards the log holds that much; the whole is kept beside it.
+        cp "$SERIAL_FILE" "$SERIAL_AT_MARKER"
+        if ! check_selftest_failures "$SERIAL_AT_MARKER"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1
         fi
-        if ! check_identity_rungs "$SERIAL_FILE"; then
+        if ! check_identity_rungs "$SERIAL_AT_MARKER"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a file-identity rung did not run) ==="
             exit 1
         fi
-        if ! check_liveness_failures "$SERIAL_FILE"; then
+        if ! check_liveness_failures "$SERIAL_AT_MARKER"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the liveness watchdog reported) ==="
             exit 1
         fi
-        if ! check_bench_coverage "$SERIAL_FILE" "$BENCH"; then
+        if ! check_bench_coverage "$SERIAL_AT_MARKER" "$BENCH"; then
+            marker_log_back
             echo "=== Boot test FAILED ($WAIT_MARKER reached but the benchmark suite left windows unjudged) ==="
+            exit 1
+        fi
+        screen_ok=1
+        screen_probe || screen_ok=0
+        marker_log_back
+        if [ "$screen_ok" != "1" ]; then
+            echo "=== Boot test FAILED ($WAIT_MARKER reached but the screen did not show what was typed at it) ==="
             exit 1
         fi
         finish_pass "$SERIAL_FILE"
@@ -10310,6 +10461,7 @@ kill_qemu "$QEMU_PID"
 if [ -f "$SERIAL_FILE" ]; then
     if grep -q "^$WAIT_MARKER" "$SERIAL_FILE"; then
         echo "$WAIT_MARKER found."
+        echo "=== Screen probe: not run -- the wait ended (QEMU exited, or the clock ran out) before it saw the marker ==="
         if ! check_selftest_failures "$SERIAL_FILE"; then
             echo "=== Boot test FAILED ($WAIT_MARKER reached but a self-test failed) ==="
             exit 1

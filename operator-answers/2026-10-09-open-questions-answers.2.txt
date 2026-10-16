@@ -1,0 +1,26 @@
+C-Q34: A
+C-Q29: A
+F-Q7: A
+F-Q8: B
+F-Q9: B 
+F-Q10: A
+F-Q6: Make a note that turning on remote desktop should allow configuring a dyndns service and/or running letsencrypt too as part of the process, whatever hasn't been done that needs to be done
+Yes, commit the MIT license.
+--
+Claude and I also recently agreed in one of the lanes to reform some files, i think todo2.txt, roadmap.md and known-issues.md, to be less cumbersome and to remove the finished entries and to put some in a database, has that been done?
+--
+should we have configuration abilities like those in Process Lasso, or will the cpu and i/o regulations we have planned be good enough taht people won't need any finer-grained control?
+--
+i queued this in lane c, but i don't know if it ever got recorded: "by the way, i forgot some hotkeys that the os should enable by default - for relevant apps, pgup, pgdn, home, end, ctrl+home, ctrl+end"
+--
+weeks ago, lane c said, 
+"Still open for you, and now the actual blocker on lane C's most valuable thread:
+Flip the net.userspace default (Phase 5.7)? All technical gates closed; it's a user-visible, costly-to-reverse policy call, which is why it's yours.
+GPU acceleration for the compositor as the next thing I pick up, or something else?"
+and i responded
+"what is this about flipping the .net userspace default?
+regarding gpu acceleration, do whatever you want, though i think i had said in answer to an open-question the other day which order to do the next few things in, dunno if it got recorded."
+but I don't remember ever seeing the reply.
+
+
+

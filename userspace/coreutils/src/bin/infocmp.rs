@@ -75,18 +75,7 @@ impl Diagnostics for Stderr {
     }
 }
 
-/// A file name's bytes as the `OsString` the platform opens.
-#[cfg(unix)]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    use std::os::unix::ffi::OsStringExt;
-    OsString::from_vec(b.to_vec())
-}
-
-/// A file name's bytes, as near as a host without byte paths comes.
-#[cfg(not(unix))]
-fn os_from_bytes(b: &[u8]) -> OsString {
-    OsString::from(String::from_utf8_lossy(b).into_owned())
-}
+use quoting::os_from_bytes;
 
 /// What ends the program early, its message written: the status.
 struct Exit(u8);

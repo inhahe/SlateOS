@@ -82,6 +82,22 @@ pub struct Proc {
     pub blkio_tics: u64,
     pub gtime: u64,
     pub cgtime: u64,
+    /// `pcpu`: the ticks used since the previous reading, which `pids.c`'s
+    /// history fills in (`readproc` never does). An `int`, as upstream's.
+    pub pcpu: i32,
+    /// `maj_delta` and `min_delta`: the faults since the previous reading,
+    /// filled in by `pids.c`'s history, 0 for a process it has not seen.
+    pub maj_delta: i32,
+    pub min_delta: i32,
+    /// `statm`'s seven fields, in pages: `size`, `resident`, `share`, `trs`,
+    /// `lrs`, `drs` and `dt`.
+    pub size: u64,
+    pub resident: u64,
+    pub share: u64,
+    pub trs: u64,
+    pub lrs: u64,
+    pub drs: u64,
+    pub dt: u64,
     pub ruid: u32,
     pub euid: u32,
     pub suid: u32,
@@ -128,6 +144,11 @@ pub struct Proc {
     pub cmd: Option<Vec<u8>>,
     pub cmdline: Option<Vec<u8>>,
     pub environ: Option<Vec<u8>>,
+    /// `cmdline` and `environ` as `file2strvec` splits them (`PROC_FILLARG`,
+    /// `PROC_FILLENV`): one string per NUL- or newline-ended piece, unescaped,
+    /// or `["-"]` for a file that cannot be read or is empty.
+    pub cmdline_v: Option<Vec<Vec<u8>>>,
+    pub environ_v: Option<Vec<Vec<u8>>>,
     /// `cgroup` as `file2strvec` splits it: one string per line, unescaped,
     /// with the empty string the file's final newline leaves at the end; or
     /// `["-"]` for a file that cannot be read or is empty. `pgrep --cgroup`'s.
@@ -167,6 +188,12 @@ pub struct Fill {
     pub supgrp: bool,
     pub environ: bool,
     pub cmdline: bool,
+    /// `PROC_FILLMEM`: `statm`, [`Proc::size`] and the six after it.
+    pub statm: bool,
+    /// `PROC_FILLARG`: [`Proc::cmdline_v`].
+    pub cmdline_v: bool,
+    /// `PROC_FILLENV`: [`Proc::environ_v`].
+    pub environ_v: bool,
     /// `PROC_FILLCGROUP`: [`Proc::cgroup_v`].
     pub cgroup_v: bool,
     /// `PROC_EDITCGRPCVT`: [`Proc::cgroup`] and [`Proc::cgname`].
@@ -204,10 +231,27 @@ pub const SMAPS: [&[u8]; 20] = [
     b"Locked:",
 ];
 
-/// [`SMAPS`] indices `ps` reads.
+/// [`SMAPS`] indices: where each `smaps_rollup` field is in [`Proc::smap`].
+pub const SMAP_RSS: usize = 0;
 pub const SMAP_PSS: usize = 1;
+pub const SMAP_PSS_ANON: usize = 2;
+pub const SMAP_PSS_FILE: usize = 3;
+pub const SMAP_PSS_SHMEM: usize = 4;
+pub const SMAP_SHARED_CLEAN: usize = 5;
+pub const SMAP_SHARED_DIRTY: usize = 6;
 pub const SMAP_PRIVATE_CLEAN: usize = 7;
 pub const SMAP_PRIVATE_DIRTY: usize = 8;
+pub const SMAP_REFERENCED: usize = 9;
+pub const SMAP_ANONYMOUS: usize = 10;
+pub const SMAP_LAZY_FREE: usize = 11;
+pub const SMAP_ANON_HUGE_PAGES: usize = 12;
+pub const SMAP_SHMEM_PMD_MAPPED: usize = 13;
+pub const SMAP_FILE_PMD_MAPPED: usize = 14;
+pub const SMAP_SHARED_HUGETLB: usize = 15;
+pub const SMAP_PRIVATE_HUGETLB: usize = 16;
+pub const SMAP_SWAP: usize = 17;
+pub const SMAP_SWAP_PSS: usize = 18;
+pub const SMAP_LOCKED: usize = 19;
 
 /// A C string's text: everything before the first NUL.
 #[must_use]
@@ -574,6 +618,28 @@ pub fn io2proc(text: &[u8], p: &mut Proc) {
     }
 }
 
+/// `statm2proc`: `sscanf (s, "%lu %lu %lu %lu %lu %lu %lu", …)` into the
+/// seven page counts -- the first field that does not convert ends the scan,
+/// and it and every later one stay 0.
+pub fn statm2proc(text: &[u8], p: &mut Proc) {
+    let mut sc = Scan::new(text);
+    let fields: [&mut u64; 7] = [
+        &mut p.size,
+        &mut p.resident,
+        &mut p.share,
+        &mut p.trs,
+        &mut p.lrs,
+        &mut p.drs,
+        &mut p.dt,
+    ];
+    for field in fields {
+        match sc.ulong() {
+            Some(v) => *field = v,
+            None => break,
+        }
+    }
+}
+
 /// `smaps2proc`: each name searched for after the previous one found, so a
 /// field out of the kernel's order is missed.
 pub fn smaps2proc(text: &[u8], p: &mut Proc) {
@@ -827,7 +893,14 @@ fn file2strvec(path: &Path) -> Option<Vec<Vec<u8>>> {
 /// `PROC_FILLCGROUP`: `cgroup` by [`file2strvec`], or `vectorize_dash_rc`'s
 /// one-string vector `-` where that returns NULL.
 fn cgroup_strvec(dir: &Path) -> Vec<Vec<u8>> {
-    match file2strvec(&dir.join("cgroup")) {
+    strvec_or_dash(dir, "cgroup")
+}
+
+/// `PROC_FILLARG`, `PROC_FILLENV` and `PROC_FILLCGROUP`: `what` by
+/// [`file2strvec`], or `vectorize_dash_rc`'s one-string vector `-` where
+/// that returns NULL -- a file that cannot be read, or an empty one.
+fn strvec_or_dash(dir: &Path, what: &str) -> Vec<Vec<u8>> {
+    match file2strvec(&dir.join(what)) {
         Some(v) => v,
         None => vec![b"-".to_vec()],
     }
@@ -910,6 +983,11 @@ impl Reader {
         {
             smaps2proc(&text, p);
         }
+        if self.fill.statm
+            && let Some(text) = file2str(path, "statm")
+        {
+            statm2proc(&text, p);
+        }
         if self.fill.status
             && let Some(text) = file2str(path, "status")
         {
@@ -952,8 +1030,14 @@ impl Reader {
         if self.fill.grp {
             p.egroup = Some(self.pw.group(p.egid));
         }
+        if self.fill.environ_v {
+            p.environ_v = Some(strvec_or_dash(path, "environ"));
+        }
         if self.fill.environ {
             p.environ = Some(environ_cvt(path, self.utf8));
+        }
+        if self.fill.cmdline_v {
+            p.cmdline_v = Some(strvec_or_dash(path, "cmdline"));
         }
         if self.fill.cmdline {
             p.cmdline = Some(self.cmdline_cvt(path, p));
@@ -1016,8 +1100,14 @@ impl Reader {
         if self.fill.grp {
             t.egroup = Some(self.pw.group(t.egid));
         }
+        if self.fill.cmdline_v {
+            t.cmdline_v = Some(strvec_or_dash(path, "cmdline"));
+        }
         if self.fill.cmdline {
             t.cmdline = Some(self.cmdline_cvt(path, t));
+        }
+        if self.fill.environ_v {
+            t.environ_v = Some(strvec_or_dash(path, "environ"));
         }
         if self.fill.environ {
             t.environ = Some(environ_cvt(path, self.utf8));
@@ -1219,6 +1309,32 @@ mod tests {
     use super::*;
 
     const STAT: &[u8] = b"42 (my (odd) name) S 1 42 42 34817 42 4194560 7 0 3 0 250 150 9 8 20 5 1 0 50000 20000000 1000 18446744073709551615 4194304 4198400 140737488347136 0 0 0 0 0 0 0 0 0 17 3 0 0 11 12 13\n";
+
+    #[test]
+    fn statm_fills_seven_page_counts_and_stops_at_the_first_bad_one() {
+        let mut p = Proc::default();
+        statm2proc(b"1000 250 60 12 0 300 0\n", &mut p);
+        assert_eq!(
+            (p.size, p.resident, p.share, p.trs, p.lrs, p.drs, p.dt),
+            (1000, 250, 60, 12, 0, 300, 0)
+        );
+        let mut q = Proc::default();
+        statm2proc(b"  9 8 x 7\n", &mut q);
+        assert_eq!((q.size, q.resident, q.share, q.trs), (9, 8, 0, 0));
+    }
+
+    #[test]
+    fn a_vector_file_that_is_missing_or_empty_is_a_dash() {
+        let dir = scratchdir::ScratchDir::new("readproc-strvec");
+        std::fs::write(dir.path("cmdline"), b"").unwrap();
+        std::fs::write(dir.path("environ"), b"A=1\0B=2\0").unwrap();
+        assert_eq!(strvec_or_dash(dir.dir(), "cmdline"), vec![b"-".to_vec()]);
+        assert_eq!(strvec_or_dash(dir.dir(), "nosuch"), vec![b"-".to_vec()]);
+        assert_eq!(
+            strvec_or_dash(dir.dir(), "environ"),
+            vec![b"A=1".to_vec(), b"B=2".to_vec()]
+        );
+    }
 
     #[test]
     fn stat_fields_land_where_sscanf_puts_them() {

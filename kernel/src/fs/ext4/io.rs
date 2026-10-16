@@ -308,7 +308,6 @@ impl BlockReader {
 
     /// The device name.
     #[must_use]
-    #[allow(dead_code)]
     pub fn device(&self) -> &str {
         &self.device
     }

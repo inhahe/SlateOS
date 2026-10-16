@@ -1,0 +1,20 @@
+[package]
+name = "procstop"
+version = "0.1.0"
+edition = "2024"
+description = "How SlateOS stops a process: close, terminate or force, asked of a program that answers and signalled to one that does not"
+
+[features]
+# `procstop::fake`, a system that records what it is asked to do and does
+# nothing, for the tests of the programs that stop processes.
+fake = []
+
+[dependencies]
+# `kill(2)`, reachable only through the C ABI (design-decisions 768).
+libcall = { path = "../../libcall" }
+# The lifecycle endpoint a program answers requests on (design-decisions
+# 1072).
+libservicebus = { path = "../libservicebus" }
+
+[lints]
+workspace = true

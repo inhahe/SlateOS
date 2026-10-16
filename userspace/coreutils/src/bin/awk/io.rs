@@ -629,15 +629,8 @@ pub fn shell(cmd: &[u8]) -> Command {
 /// host, where a path is UTF-16, a name that is not UTF-8 cannot be expressed
 /// and the lossy conversion is the only thing left — but it only affects the
 /// host, and only for a filename that could not have been opened there anyway.
-#[cfg(unix)]
 pub fn os_path(name: &[u8]) -> std::path::PathBuf {
-    use std::os::unix::ffi::OsStrExt;
-    std::path::PathBuf::from(std::ffi::OsStr::from_bytes(name))
-}
-
-#[cfg(not(unix))]
-pub fn os_path(name: &[u8]) -> std::path::PathBuf {
-    std::path::PathBuf::from(String::from_utf8_lossy(name).into_owned())
+    std::path::PathBuf::from(quoting::os_from_bytes(name))
 }
 
 #[cfg(test)]

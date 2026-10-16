@@ -1,0 +1,8 @@
+xxd, from vim 9.1.0016 (src/xxd/xxd.c), whose header reads:
+
+(c) 1990-1998 by Juergen Weigert (jnweiger@gmail.com)
+
+I hereby grant permission to distribute and use xxd
+under X11-MIT or GPL-2.0 (at the user's choice).
+
+Contributions by Bram Moolenaar et al.

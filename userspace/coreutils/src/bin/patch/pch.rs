@@ -1388,7 +1388,7 @@ impl Ctx {
             let mut m = self.program_name.clone();
             m.extend_from_slice(b": memory exhausted\n");
             util::print_stderr(&m);
-            std::process::exit(2);
+            self.exit(2);
         }
     }
 

@@ -118,17 +118,40 @@ run_side() {
     case $kind in
       file)
         printf '%b' "$script" > .script
-        timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" < .script > "$out" 2> "$err"
+        with_redir "$out" "$err" timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" < .script
         ;;
       none)
-        timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" < /dev/null > "$out" 2> "$err"
+        with_redir "$out" "$err" timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" < /dev/null
+        ;;
+      closed)
+        # Standard input closed outright: ed's first read of a command fails.
+        with_redir "$out" "$err" timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" <&-
         ;;
       *)
         # A real pipe, which is what makes `is_regular_file(stdin)` false.
-        printf '%b' "$script" | timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@" > "$out" 2> "$err"
+        printf '%b' "$script" | with_redir "$out" "$err" timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/$side" ed "$@"
         ;;
     esac
   )
+}
+
+# Where the next case's standard output and error go: '' for the files the
+# comparison reads, or one of '>/dev/full', '>&-', '2>/dev/full' and '2>&-'.
+# Whatever is redirected away is compared as empty on both sides. `compare`
+# resets it after every case.
+REDIR=''
+
+# `with_redir OUT ERR COMMAND...`: COMMAND with its output and error connected
+# as `REDIR` says.
+with_redir() {
+  local out=$1 err=$2; shift 2
+  case $REDIR in
+    '>/dev/full')  "$@" >/dev/full 2>"$err" ;;
+    '>&-')         "$@" >&- 2>"$err" ;;
+    '2>/dev/full') "$@" >"$out" 2>/dev/full ;;
+    '2>&-')        "$@" >"$out" 2>&- ;;
+    *)             "$@" >"$out" 2>"$err" ;;
+  esac
 }
 
 # A directory rendered as one comparable string: every file's name, then its
@@ -155,6 +178,7 @@ compare() {
   # recorded belongs to `od`, so every failing case would be scored a pass.
   run_side ours "$o_dir" "$kind" "$script" "$o_bin" "$o_err" "$@"; o_rc=$?
   run_side gnu  "$g_dir" "$kind" "$script" "$g_bin" "$g_err" "$@"; g_rc=$?
+  REDIR=''
   o_out=$(od -An -tx1 <"$o_bin"); g_out=$(od -An -tx1 <"$g_bin")
   rm -f "$o_bin" "$g_bin"
 
@@ -206,25 +230,51 @@ report() {
 # `run_pipe SCRIPT ARGS...` — the script arrives down a pipe, so ed carries on
 # past an error and its `-v` sentences are bare.
 run_pipe() {
-  local raw=$1; shift
+  local raw=$1 redir=$REDIR; shift
   compare pipe "$raw" "$@"
-  report "pipe: ed $* <<< '$raw'"
+  report "pipe: ed $* <<< '$raw' $redir"
 }
 
 # `run_file SCRIPT ARGS...` — the same bytes in a regular file, so ed stops at
 # the first error and prefixes its `-v` sentences with `script, line N: `.
 run_file() {
-  local raw=$1; shift
+  local raw=$1 redir=$REDIR; shift
   compare file "$raw" "$@"
-  report "file: ed $* < script('$raw')"
+  report "file: ed $* < script('$raw') $redir"
 }
 
 # `run_null ARGS...` — nothing on stdin at all. `/dev/null` is a character
 # device, so this is the not-a-regular-file branch with no commands in it: it
 # isolates what ed does at *startup* from what it does with a script.
 run_null() {
+  local redir=$REDIR
   compare none '' "$@"
-  report "null: ed $*"
+  report "null: ed $* $redir"
+}
+
+# `run_closed ARGS...` — standard input closed (`<&-`), so ed's first read of
+# a command fails rather than ending.
+run_closed() {
+  local redir=$REDIR
+  compare closed '' "$@"
+  report "closed: ed $* <&- $redir"
+}
+
+# `xfail_fd REASON KIND SCRIPT ARGS...` — an expected difference with a
+# standard stream connected as `REDIR` says, for any stdin kind.
+xfail_fd() {
+  local reason=$1 kind=$2 raw=$3 redir=$REDIR; shift 3
+  compare "$kind" "$raw" "$@"
+  if [ "$AGREED" = no ]; then
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf "XFAIL %s ed %s <<< '%s' %s  (%s)\\n%s\\n" \
+      "$kind" "$*" "$raw" "$redir" "$reason" "$REPORT"
+  else
+    xpass=$((xpass+1))
+    printf "XPASS %s ed %s <<< '%s' %s\\n  now agrees with GNU, so this reason is stale: %s\\n" \
+      "$kind" "$*" "$raw" "$redir" "$reason"
+  fi
+  return 0
 }
 
 # `usage_case ARGS...` — a command line ed should refuse, compared on stdout,
@@ -1036,6 +1086,46 @@ xfail_pipe '! runs a shell command and we do not have a shell' '!echo hi\nq\n' f
 # `r`, `e`/`E`, `u`, `#`, then `h`, `H`, `P`, `W`, `x`, `y` and `z` — are all
 # implemented, and their cases have moved up into the sections above as
 # ordinary `run_pipe`s.
+
+# --- standard streams that are full or closed ------------------------------------
+# GNU ed checks no write to standard output and has no close_stdout: with its
+# output on a full disk or closed, it runs the script and exits as though all
+# was well, having printed nowhere. Ours reports the write, as a coreutils
+# program does -- design-decisions 1071, the operator's answer to B-Q25. The
+# edit itself, the bytes left on disk, is the same on both sides; with the
+# output closed, the file `w` writes opens on descriptor 1 on both sides and
+# receives only the buffer.
+why_write='a failed write to standard output is reported (design-decisions 1071)'
+REDIR='>/dev/full'; xfail_fd "$why_write" pipe 'p\nq\n' f.txt
+REDIR='>/dev/full'; xfail_fd "$why_write" file 'p\nq\n' f.txt
+REDIR='>/dev/full'; xfail_fd "$why_write" pipe '1d\nw\nq\n' f.txt
+REDIR='>&-';        xfail_fd "$why_write" pipe 'p\nq\n' f.txt
+REDIR='>&-';        xfail_fd "$why_write" file '1d\nw\nq\n' f.txt
+REDIR='>/dev/full'; xfail_fd "$why_write" none '' --version
+REDIR='>/dev/full'; xfail_fd "$why_write" none '' --help
+REDIR='>&-';        xfail_fd "$why_write" none '' --version
+# Nothing written to standard output, so nothing to report.
+REDIR='>/dev/full'; run_pipe 'q\n' -s f.txt
+REDIR='>&-';        run_pipe '1d\nw\nq\n' -s f.txt
+REDIR='>&-';        run_file '1d\nw\nq\n' -s f.txt
+# A full or closed standard error: GNU's diagnostics are unchecked, and so are
+# ours.
+REDIR='2>/dev/full'; run_pipe 'q\n' nosuch.txt
+REDIR='2>&-';        run_pipe 'q\n' nosuch.txt
+REDIR='2>&-';        run_pipe 'r nosuch.txt\nq\n' f.txt
+REDIR='2>/dev/full'; run_file 'p\nq\n' nosuch.txt
+# Standard input closed: GNU takes it for a script file -- its
+# `is_regular_file` counts `fstat` failing as regular -- that has ended, so a
+# missing file exits 2, as from a script, and reading the commands ends the
+# session quietly. The file named is read first, on descriptor 0, and closed
+# again before that.
+run_closed f.txt
+run_closed -s f.txt
+run_closed -q f.txt
+run_closed -l f.txt
+run_closed
+run_closed nosuch.txt
+REDIR='>&-'; xfail_fd "$why_write" closed '' f.txt
 
 # --- POSIXLY_CORRECT -----------------------------------------------------------
 # GNU ed parses its command line with carg_parser, not glibc's getopt, so the

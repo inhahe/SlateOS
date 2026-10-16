@@ -50,6 +50,10 @@ cprintf = { path = "../cprintf" }
 # a program links (design-decisions 768). `hostname` is upstream's calls to
 # those, and nothing else would give the answer every C program gets.
 libcall = { path = "../../libcall" }
+# How SlateOS stops a process (design-decisions 1072): close, terminate or
+# force, asked of a program that answers and signalled to one that does
+# not -- `kill`'s, `pkill`'s and `killall`'s requests.
+procstop = { path = "../procstop" }
 # The journal `systemd-cat` files its lines in: the record journald would make
 # of each (`journalrec`, shared with `syslogd` and `logger`), appended under
 # the journal's lock so that a vacuum or a rotation meanwhile loses none
@@ -80,6 +84,8 @@ ulcolors = { path = "../ulcolors" }
 # ncurses' terminfo layer -- setupterm's verdicts, tgetent's trimmed sgr0,
 # tparm, tputs -- for `pstree`'s symbol choice and its `-h`/`-H` highlight.
 terminfo = { path = "../terminfo" }
+# ncursesw's screen library, for the full-screen procps programs: `slabtop`.
+curses = { path = "../curses" }
 # C's strtol and strtoul at any base, 0 included: `xxd` reads every number
 # with them, and `hexdump`'s `_L` colour units at bases 8, 10 and 16.
 cstrtol = { path = "../cstrtol" }
@@ -184,6 +190,8 @@ optionalfile = { path = "../../optionalfile" }
 # known-issues.md `B-TEST-FIXTURES-SHARE-TEMP-PATHS-ACROSS-CONCURRENT-RUNS`.
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }
+# Its system that signals nothing, for the requests' tests.
+procstop = { path = "../procstop", features = ["fake"] }
 
 [lints]
 workspace = true

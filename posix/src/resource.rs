@@ -986,9 +986,7 @@ fn priority_errno(ret: i64) -> i32 {
 /// else `Ok` with the nice read (`is_read`) or 0 for a set, or `Err` with the
 /// errno.
 fn priority_answer(ret: i64, is_read: bool) -> Option<Result<i32, i32>> {
-    if ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
-    {
+    if crate::syscall::lacks_call(ret) {
         return None;
     }
     if ret < 0 {

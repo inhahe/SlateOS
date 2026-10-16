@@ -164,8 +164,12 @@ pub extern "C" fn fcntl(fd: Fd, cmd: i32, arg: i64) -> i32 {
             // Access mode bits (O_ACCMODE) are preserved by set_status_flags().
             #[allow(clippy::cast_possible_truncation)]
             let flags = arg as i32;
-            if entry.kind == fdtable::HandleKind::File {
-                give_kernel_append(entry.handle, flags & crate::fcntl::O_APPEND != 0);
+            if entry.kind == fdtable::HandleKind::File
+                && let Err(e) =
+                    give_kernel_append(entry.handle, flags & crate::fcntl::O_APPEND != 0)
+            {
+                errno::set_errno(e);
+                return -1;
             }
             if fdtable::set_status_flags(fd, flags) {
                 0
@@ -230,20 +234,33 @@ pub(crate) fn kernel_keeps_append() -> bool {
 /// (`known-issues/D-POSIX-APPEND-SET-BY-FCNTL-IS-A-SEEK-THEN-A-WRITE.md`);
 /// it still does, on a kernel without the call.
 ///
-/// Only success is acted on. A kernel without the call keeps no such flag
-/// (the seek does the work); a directory answers `IsADirectory`, where Linux
-/// records `O_APPEND` and answers 0 (measured on 6.6), and nothing is
-/// written to a directory; and the descriptor table's flags, which `F_GETFL`
-/// reports, are this library's whatever the kernel says.
-fn give_kernel_append(handle: u64, append: bool) {
-    let ret = crate::syscall::syscall2(
+/// `Ok` when the descriptor table may record the flag: the kernel took it;
+/// or a kernel without the call keeps no such flag (the seek does the work);
+/// or the handle is a directory, which answers `IsADirectory` where Linux
+/// records `O_APPEND` and answers 0 (measured on 6.6), and to which nothing
+/// is written. Any other refusal is the errno to fail with -- Linux's `EPERM`
+/// for clearing `O_APPEND` on an append-only file -- so that the table never
+/// says `O_APPEND` where the kernel does not append, which once some other
+/// descriptor's flag was taken would have left `write` writing at the
+/// cursor (Fable's review of lane D's round 202).
+pub(crate) fn give_kernel_append(handle: u64, append: bool) -> Result<(), i32> {
+    append_answer(crate::syscall::syscall2(
         crate::syscall::SYS_FS_SET_STATUS_FLAGS,
         handle,
         if append { NATIVE_APPEND } else { 0 },
-    );
+    ))
+}
+
+/// [`give_kernel_append`]'s reading of the kernel's answer `ret`.
+fn append_answer(ret: i64) -> Result<(), i32> {
     if ret >= 0 {
         KERNEL_KEEPS_APPEND.store(true, Ordering::Relaxed);
+        return Ok(());
     }
+    if crate::syscall::lacks_call(ret) || ret == errno::native::IS_A_DIRECTORY {
+        return Ok(());
+    }
+    Err(errno::errno_for(ret))
 }
 
 // ---------------------------------------------------------------------------
@@ -308,9 +325,7 @@ fn seals_answer(entry: &fdtable::FdEntry, call: impl FnOnce(u64) -> i64) -> Resu
         return Err(errno::EINVAL);
     }
     let ret = call(entry.handle);
-    if ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
-    {
+    if crate::syscall::lacks_call(ret) {
         return Err(errno::EINVAL);
     }
     if ret < 0 {
@@ -432,8 +447,7 @@ pub(crate) fn lock_errno(ret: i64) -> i32 {
 /// `SYS_FS_RECORD_LOCK` (every kernel before lane A's 1093), or, in the host
 /// build, no kernel at all.
 fn no_lock_table(ret: i64) -> bool {
-    ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    crate::syscall::lacks_call(ret)
 }
 
 /// Release every record lock this process holds on the file `handle` is
@@ -798,6 +812,22 @@ mod tests {
         assert_eq!(lock_errno(errno::native::WOULD_BLOCK), errno::EAGAIN);
         assert_eq!(lock_errno(errno::native::DEADLOCK), errno::EDEADLK);
         assert_eq!(lock_errno(errno::native::INTERRUPTED), errno::EINTR);
+    }
+
+    /// The table records `O_APPEND` only where the kernel appends: the
+    /// kernel took it, has no such call (the seek does the work), or the
+    /// handle is a directory, where Linux records it too; any other refusal
+    /// is `F_SETFL`'s to report -- `EPERM` for an append-only file.
+    #[test]
+    fn an_append_the_kernel_refuses_is_an_error() {
+        assert_eq!(append_answer(0), Ok(()));
+        assert_eq!(append_answer(errno::native::NO_SUCH_SYSCALL), Ok(()));
+        assert_eq!(append_answer(errno::native::IS_A_DIRECTORY), Ok(()));
+        assert_eq!(
+            append_answer(errno::native::NOT_PERMITTED),
+            Err(errno::EPERM)
+        );
+        assert_eq!(append_answer(errno::native::BAD_HANDLE), Err(errno::EBADF));
     }
 
     #[test]

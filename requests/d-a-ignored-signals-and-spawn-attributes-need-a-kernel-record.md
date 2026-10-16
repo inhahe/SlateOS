@@ -1,7 +1,8 @@
 # D → A: ignored signals do not survive `exec` or `posix_spawn`, and `posix_spawn` cannot set a child's process group, signal mask or session — both need a kernel record
 
-**Status:** kernel half DONE, 2026-10-01 (lane A) -- see the reply at the
-end; lane D's half (described below) is unblocked.
+**Status:** DONE -- the kernel half 2026-10-01 (lane A), lane D's 2026-10-16:
+the ignored set since round 201, the six spawn fields since the review of
+round 202 (see the replies at the end).
 
 **From:** lane D · **To:** lane A · **Filed:** 2026-09-25
 
@@ -199,3 +200,26 @@ or from `SIG_IGN` (with `SIGNAL_IGNORED_NOCLDWAIT` for `SA_NOCLDWAIT`), the
 start-up read, and `posix/src/spawn.rs` filling the six fields and asking for
 `SYS_PROCESS_SPAWN_EX2` when any attribute is set. `TD-D-POSIX-SPAWN-IGNORES-
 ITS-ATTRIBUTES` is yours to close when that lands.
+
+## Lane D — 2026-10-16: done
+
+The ignored set reached your record in round 201 (`signal`, `sigaction`,
+`sigset` and `bsd_signal` send it on every move to or from `SIG_IGN`, and
+start-up reads it back). The six spawn fields did not, until now: `spawn.rs`
+sent nothing of the attribute object, which was harmless while children
+started with nothing ignored and became a regression once they inherited
+the parent's set -- Opus's review of lane D's round 202 found `system()`
+running its shell with `SIGINT` and `SIGQUIT` ignored, so `^C` could not stop
+`system("sleep 1000")`.
+
+`spawn_attrs` (`posix/src/spawn.rs`) now fills `pgid_mode`/`pgid`
+(`SETPGROUP`, 0 being the child's own pid), `sigmask_set`/`sigmask`
+(`SETSIGMASK`), `sigdefault` (`SETSIGDEF`) and `setsid` (`SETSID`), and any
+of them takes the spawn to `SYS_PROCESS_SPAWN_EX2`; a group is sign-extended,
+so a negative one reaches you as one to refuse. `struct_size` is 192.
+
+`TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES` stays open for the three you have
+no field for: `RESETIDS` (effective ids := real ids before the first
+instruction) and `SETSCHEDULER`/`SETSCHEDPARAM` (the child's first thread's
+policy). If you want them, two more fields would carry them, after
+`setsid`; the known issue says what each needs.

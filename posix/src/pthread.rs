@@ -1230,9 +1230,7 @@ fn kernel_join(thread_id: PthreadT, retval: *mut *mut u8, timeout_ns: u64) -> Ke
             errno::native::WOULD_BLOCK => return KernelJoin::Joining,
             // A signal: wait again, for what is left of the time.
             errno::native::INTERRUPTED => {}
-            r if r == errno::native::NO_SUCH_SYSCALL
-                || (cfg!(not(target_os = "none")) && r == syscall::HOST_ENOSYS) =>
-            {
+            r if crate::syscall::lacks_call(r) => {
                 return KernelJoin::Unsupported;
             }
             _ => return KernelJoin::Gone,
@@ -1372,8 +1370,21 @@ unsafe fn timed_join(
                 KernelJoin::Joining => return errno::EINVAL,
                 KernelJoin::Running if left_ns <= 0 => return errno::ETIMEDOUT,
                 // The kernel's monotonic wait ended before `clockid`'s
-                // deadline (a clock set back): measure again.
-                KernelJoin::Running => continue,
+                // deadline -- a clock set back, or a remainder shorter than
+                // the kernel's timer can wait, which it answers at once. A
+                // short sleep before asking again, so that the second is not
+                // a loop of calls until the deadline passes (Fable's review
+                // of lane D's round 202).
+                KernelJoin::Running => {
+                    let pause = crate::stat::Timespec {
+                        tv_sec: 0,
+                        tv_nsec: i64::try_from(left_ns.min(i128::from(TIMEDJOIN_POLL_NS)))
+                            .unwrap_or(TIMEDJOIN_POLL_NS),
+                    };
+                    // A short or failed sleep only means an earlier look.
+                    let _ = crate::time::nanosleep(&raw const pause, core::ptr::null_mut());
+                    continue;
+                }
                 KernelJoin::Unsupported => kernel_can = false,
             }
         }

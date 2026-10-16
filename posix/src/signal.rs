@@ -3873,8 +3873,7 @@ pub(crate) fn queue_signal(pid: crate::types::PidT, sig: i32, value: u64) -> Res
 /// `SYS_SIGNAL_QUEUE` and `SYS_SIGNAL_TGKILL`, or, in the host build, no
 /// kernel at all.
 fn no_send_call(ret: i64) -> bool {
-    ret == errno::native::NO_SUCH_SYSCALL
-        || (cfg!(not(target_os = "none")) && ret == crate::syscall::HOST_ENOSYS)
+    crate::syscall::lacks_call(ret)
 }
 
 // ---------------------------------------------------------------------------

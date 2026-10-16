@@ -64,6 +64,8 @@ use crate::socket::{
     MSG_WAITALL, Msghdr, SCM_CREDENTIALS, SCM_RIGHTS, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
     SOCK_STREAM, SOL_SOCKET, Sockaddr, SocklenT,
 };
+#[cfg(target_os = "none")]
+use crate::syscall::{SYS_MMAP, SYS_MUNMAP};
 use crate::syscall::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
     SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
@@ -191,10 +193,10 @@ unsafe fn name_from_user(addr: *const Sockaddr, addrlen: SocklenT) -> Result<Opt
     parse_name(raw, cwd.get(..n).unwrap_or(&[]))
 }
 
-/// The `sockaddr_un` an address record says, as Linux's `unix_getname` and
-/// `unix_copy_addr` write one: the family alone for an unnamed socket; a path
-/// with its NUL; an abstract name after its leading NUL. Returns the bytes and
-/// their length.
+/// The `sockaddr_un` an address record says, as Linux's `unix_getname`
+/// writes one: the family alone for an unnamed socket; a path with its NUL;
+/// an abstract name after its leading NUL. Returns the bytes and their
+/// length. (A received message's sender is [`store_sender`]'s.)
 pub(crate) fn sockaddr_of(rec: &[u8]) -> ([u8; SOCKADDR_UN_LEN], usize) {
     let mut out = [0u8; SOCKADDR_UN_LEN];
     if let Some(family) = out.get_mut(..FAMILY_LEN) {
@@ -258,6 +260,35 @@ pub(crate) unsafe fn store_address(rec: &[u8], addr: *mut Sockaddr, addrlen: *mu
     }
     // SAFETY: the caller's contract.
     unsafe { *addrlen = len as SocklenT };
+}
+
+/// Write a received message's sender, address record `rec`, to the caller's
+/// `addr`/`addrlen`, as Linux's `unix_copy_addr` does: a sender with a name
+/// as [`store_address`] writes it, and one without -- an unbound socket --
+/// nothing at all, with `*addrlen` 0 (the length `recvfrom` and `recvmsg`
+/// start from). Until 2026-10-16 an unnamed sender was the family alone,
+/// length 2, which a server telling anonymous senders by a length of 0 did
+/// not see as one, and whose `sendto` back was `EINVAL` (Opus's review of
+/// lane D's round 202).
+///
+/// # Safety
+///
+/// As [`store_address`].
+pub(crate) unsafe fn store_sender(rec: &[u8], addr: *mut Sockaddr, addrlen: *mut SocklenT) {
+    if addr.is_null() || addrlen.is_null() {
+        return;
+    }
+    let kind = rec
+        .get(..4)
+        .and_then(|b| <[u8; 4]>::try_from(b).ok())
+        .map_or(0, u32::from_le_bytes);
+    if kind == 1 || kind == 2 {
+        // SAFETY: forwarded.
+        unsafe { store_address(rec, addr, addrlen) };
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { *addrlen = 0 };
+    }
 }
 
 /// An abstract name of five lowercase hex digits for `n`, as Linux's
@@ -762,7 +793,7 @@ pub(crate) unsafe fn recvfrom(
     let n = unsafe { recv(fd, handle, buf, len, flags, info.as_mut_ptr()) };
     if n >= 0 {
         // SAFETY: forwarded.
-        unsafe { store_address(info.get(28..).unwrap_or(&[]), addr, addrlen) };
+        unsafe { store_sender(info.get(28..).unwrap_or(&[]), addr, addrlen) };
     }
     n
 }
@@ -1001,6 +1032,35 @@ unsafe fn send_gather(
 /// `msg` must be a valid `msghdr` whose buffers are writable as stated.
 pub(crate) unsafe fn recvmsg(fd: i32, handle: u64, msg: &mut Msghdr, flags: i32) -> isize {
     // SAFETY: forwarded.
+    unsafe { recvmsg_reporting(fd, handle, msg, flags, true) }
+}
+
+/// [`recvmsg`] for the library's own `readv`, whose caller sees neither
+/// control data nor `msg_flags`: the credentials option is not asked for,
+/// one kernel call fewer per read (Fable's review of lane D's round 202).
+///
+/// # Safety
+///
+/// As [`recvmsg`].
+pub(crate) unsafe fn recv_vector(fd: i32, handle: u64, msg: &mut Msghdr, flags: i32) -> isize {
+    // SAFETY: forwarded.
+    unsafe { recvmsg_reporting(fd, handle, msg, flags, false) }
+}
+
+/// [`recvmsg`]'s body; `control` whether the caller can see what the
+/// credentials option decides -- the control data and `MSG_CTRUNC`.
+///
+/// # Safety
+///
+/// As [`recvmsg`].
+unsafe fn recvmsg_reporting(
+    fd: i32,
+    handle: u64,
+    msg: &mut Msghdr,
+    flags: i32,
+    control: bool,
+) -> isize {
+    // SAFETY: forwarded.
     let total = match unsafe { iov_total(msg) } {
         Ok(t) => t,
         Err(e) => return refuse(e) as isize,
@@ -1082,7 +1142,7 @@ pub(crate) unsafe fn recvmsg(fd: i32, handle: u64, msg: &mut Msghdr, flags: i32)
         let mut len = msg.msg_namelen;
         // SAFETY: `msg_name` is writable for `msg_namelen` bytes.
         unsafe {
-            store_address(
+            store_sender(
                 info.get(28..).unwrap_or(&[]),
                 msg.msg_name.cast::<Sockaddr>(),
                 &raw mut len,
@@ -1090,7 +1150,7 @@ pub(crate) unsafe fn recvmsg(fd: i32, handle: u64, msg: &mut Msghdr, flags: i32)
         };
         msg.msg_namelen = len;
     }
-    let passcred = syscall2(SYS_UNIX_GET_OPTION, handle, UNIX_OPT_PASSCRED) == 1;
+    let passcred = control && syscall2(SYS_UNIX_GET_OPTION, handle, UNIX_OPT_PASSCRED) == 1;
     // SAFETY: `msg_control` is writable for `msg_controllen` bytes.
     let (written, cut) = unsafe { write_credentials(msg, passcred, &info) };
     msg.msg_controllen = written;
@@ -1214,24 +1274,61 @@ unsafe fn write_credentials(msg: &Msghdr, passcred: bool, info: &[u8]) -> (usize
     }
 }
 
-/// A buffer from the library's own `malloc`, freed when dropped.
+/// A buffer of anonymous memory straight from the kernel, given back when
+/// dropped.
+///
+/// Not the library's `malloc`, whose lock a signal handler could find held
+/// by the thread it interrupted: `sendmsg` and `recvmsg` are
+/// async-signal-safe (POSIX), and a handler logging through a datagram
+/// socket with two iovecs re-entered `malloc` until 2026-10-16 (Opus's
+/// review of lane D's round 202). `SYS_MMAP` and `SYS_MUNMAP` take no lock of
+/// the library's. A host build has no kernel to ask, and no signal handler
+/// runs its tests, so it uses `malloc`.
 struct Bounce {
     ptr: *mut u8,
+    len: usize,
 }
 
 impl Bounce {
     /// `len` bytes, or `None` when there is no memory (a zero length still
     /// gets a buffer, so that the pointer is never null).
     fn new(len: usize) -> Option<Self> {
-        let ptr = crate::malloc::malloc(len.max(1));
-        (!ptr.is_null()).then_some(Self { ptr })
+        let len = len.max(1);
+        #[cfg(target_os = "none")]
+        {
+            const READ_WRITE: u64 = 3;
+            let ret = syscall6(SYS_MMAP, 0, len as u64, READ_WRITE, 0, 0, 0);
+            (ret > 0).then(|| Self {
+                ptr: core::ptr::with_exposed_provenance_mut(ret.cast_unsigned() as usize),
+                len,
+            })
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            let ptr = crate::malloc::malloc(len);
+            (!ptr.is_null()).then_some(Self { ptr, len })
+        }
     }
 }
 
 impl Drop for Bounce {
     fn drop(&mut self) {
-        // SAFETY: `ptr` came from `malloc` and is freed once, here.
-        unsafe { crate::malloc::free(self.ptr) };
+        #[cfg(target_os = "none")]
+        {
+            // The mapping is this buffer's own, made by `new`; an unmap of
+            // it cannot be refused for a reason anyone could act on.
+            let _ = syscall2(
+                SYS_MUNMAP,
+                self.ptr.expose_provenance() as u64,
+                self.len as u64,
+            );
+        }
+        #[cfg(not(target_os = "none"))]
+        {
+            let _ = self.len;
+            // SAFETY: `ptr` came from `malloc` and is freed once, here.
+            unsafe { crate::malloc::free(self.ptr) };
+        }
     }
 }
 
@@ -1499,26 +1596,53 @@ pub(crate) unsafe fn write(fd: i32, handle: u64, buf: *const u8, count: usize) -
 /// looking without taking (`MSG_PEEK`, without waiting), since the kernel has
 /// no count of its own yet
 /// (`requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-its-bytes.md`).
+///
+/// A message's length is in the record a receive fills, so a datagram or
+/// sequenced-packet socket is asked with no room for its bytes at all; only a
+/// stream needs them copied to be counted. Until 2026-10-16 every call took
+/// a 64 KiB buffer and had the kernel fill it (Opus's review of lane D's
+/// round 202).
 pub(crate) fn bytes_waiting(fd: i32, handle: u64) -> Result<usize, i32> {
-    let Some(bounce) = Bounce::new(MAX_DGRAM) else {
-        return Err(errno::ENOMEM);
-    };
+    // Linux's `unix_inq_len`: a listening socket has no queue to count,
+    // `EINVAL`; one not connected has nothing in it, 0.
+    if crate::socket::get_meta(fd).is_some_and(|m| m.unix_listening) {
+        return Err(errno::EINVAL);
+    }
+    let stream = sock_type(fd) == SOCK_STREAM;
     let mut info = [0u8; UNIX_RECV_INFO_LEN];
+    // A message socket's peek copies nothing: `info` stands in as the
+    // (non-null) buffer the kernel is given no room in.
+    let bounce = if stream {
+        Some(Bounce::new(MAX_DGRAM).ok_or(errno::ENOMEM)?)
+    } else {
+        None
+    };
+    let (buf, cap) = match &bounce {
+        Some(b) => (b.ptr as u64, MAX_DGRAM as u64),
+        None => (info.as_mut_ptr() as u64, 0),
+    };
     let ret = syscall5(
         SYS_UNIX_RECV,
         handle,
-        bounce.ptr as u64,
-        MAX_DGRAM as u64,
+        buf,
+        cap,
         info.as_mut_ptr() as u64,
         UNIX_NONBLOCK | UNIX_PEEK,
     );
-    if ret == native::WOULD_BLOCK {
+    waiting_answer(ret, stream, &info)
+}
+
+/// [`bytes_waiting`]'s reading of the peek's answer `ret` and record `info`:
+/// nothing waiting, or a socket not connected, is 0; a stream's count is
+/// what the peek copied, a message's length is in the record.
+fn waiting_answer(ret: i64, stream: bool, info: &[u8]) -> Result<usize, i32> {
+    if ret == native::WOULD_BLOCK || ret == native::NOT_CONNECTED {
         return Ok(0);
     }
     if ret < 0 {
         return Err(errno_of(ret));
     }
-    if sock_type(fd) == SOCK_STREAM {
+    if stream {
         return Ok(ret as usize);
     }
     let whole = u64::from_le_bytes(
@@ -1644,9 +1768,57 @@ mod tests {
         let rec = record(1, b"/run/socket");
         let mut out = [0xAAu8; 8];
         let mut len: SocklenT = 8;
+        // SAFETY: `out` is writable for the 8 bytes `len` says, and `len`
+        // is a live local.
         unsafe { store_address(&rec, out.as_mut_ptr().cast(), &raw mut len) };
         assert_eq!(len, 2 + 11 + 1);
         assert_eq!(&out[2..8], b"/run/s");
+    }
+
+    /// `FIONREAD` as Linux's `unix_inq_len` answers it: a listening socket
+    /// is `EINVAL`; one not connected, or with nothing waiting, 0; a stream
+    /// counts what a receive would take, a message socket the next message.
+    #[test]
+    fn fionread_answers_as_linux_does() {
+        let fd = fdtable::alloc_fd_with_flags(HandleKind::UnixSocket, 0x7701, crate::fcntl::O_RDWR)
+            .expect("a descriptor");
+        crate::socket::set_unix_meta(fd, SOCK_STREAM);
+        crate::socket::set_unix_listening(fd);
+        assert_eq!(bytes_waiting(fd, 0x7701), Err(errno::EINVAL));
+        let _ = fdtable::close_fd(fd);
+
+        let mut info = [0u8; UNIX_RECV_INFO_LEN];
+        assert_eq!(waiting_answer(native::NOT_CONNECTED, true, &info), Ok(0));
+        assert_eq!(waiting_answer(native::WOULD_BLOCK, false, &info), Ok(0));
+        assert_eq!(waiting_answer(17, true, &info), Ok(17));
+        info[..8].copy_from_slice(&900u64.to_le_bytes());
+        assert_eq!(waiting_answer(0, false, &info), Ok(900));
+        assert_eq!(
+            waiting_answer(native::CONNECTION_REFUSED, true, &info),
+            Err(errno_of(native::CONNECTION_REFUSED))
+        );
+    }
+
+    /// A received message's sender without a name is no address at all, as
+    /// Linux's `unix_copy_addr` leaves it: nothing written, length 0. One
+    /// with a name is written as `getsockname` writes it.
+    #[test]
+    fn an_unnamed_sender_is_length_zero() {
+        let mut out = [0xAAu8; 8];
+        let mut len: SocklenT = 8;
+        // SAFETY: `out` is writable for the 8 bytes `len` says, and `len`
+        // is a live local.
+        unsafe { store_sender(&record(0, b""), out.as_mut_ptr().cast(), &raw mut len) };
+        assert_eq!(len, 0);
+        assert_eq!(out, [0xAA; 8], "nothing written");
+        let mut len: SocklenT = 8;
+        // SAFETY: as above.
+        unsafe { store_sender(&record(1, b"/a"), out.as_mut_ptr().cast(), &raw mut len) };
+        assert_eq!(len, 2 + 2 + 1);
+        assert_eq!(&out[2..5], b"/a\0");
+        // getsockname's unnamed socket is still the family alone.
+        let (_, len) = sockaddr_of(&record(0, b""));
+        assert_eq!(len, 2);
     }
 
     #[test]

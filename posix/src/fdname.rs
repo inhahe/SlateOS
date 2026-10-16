@@ -404,6 +404,16 @@ fn reopen_file(n: i32, entry: &FdEntry, flags: i32) -> i32 {
     let status = flags & (O_ACCMODE | O_APPEND | O_NONBLOCK | O_SYNC | O_NOFOLLOW | O_PATH);
     #[allow(clippy::cast_sign_loss)]
     let handle = h as u64;
+    // The dup carries n's append flag, not the one asked for: a reopen is a
+    // new open file description, and its `O_APPEND` is its own. Without
+    // this, once `write` leaves appending to the kernel
+    // (`fcntl_ops::kernel_keeps_append`), a reopen asking for it would write
+    // at its cursor, and one not asking for it of an appending n would append.
+    if let Err(e) = crate::fcntl_ops::give_kernel_append(handle, flags & O_APPEND != 0) {
+        // Nothing holds the new handle yet, so closing it loses nothing.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_FS_CLOSE, handle);
+        return fail(e);
+    }
     let Some(fd) = crate::fdtable::alloc_fd_with_flags(HandleKind::File, handle, status) else {
         // Nothing holds the new handle yet, so closing it loses nothing.
         let _ = crate::syscall::syscall1(crate::syscall::SYS_FS_CLOSE, handle);

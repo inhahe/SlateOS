@@ -28,7 +28,7 @@ pub const BS: u8 = ctl(b'H');
 pub const DEL: u8 = ctl(b'?');
 
 /// `TTYDEF_SPEED`: a line's speed when it says it has none.
-const TTYDEF_SPEED: u32 = 0o15;
+const TTYDEF_SPEED: u32 = libcall::termios::B9600;
 
 /// `struct chardata`: what the characters of the name showed of the
 /// terminal -- its erase, kill and end-of-line characters, the parity bits

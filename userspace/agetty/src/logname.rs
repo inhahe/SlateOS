@@ -68,7 +68,9 @@ pub fn read_name(
     cp.eol = 0;
     while cp.eol == 0 {
         // Nothing typed yet, or everything rubbed out: the issue may be
-        // shown afresh before anything more is read.
+        // shown afresh before anything more is read -- upstream's `goto
+        // no_reload` after its read loop's "Everything was erased", as well
+        // as its wait after each prompt.
         if name.is_empty() && !port.wait_for_input() {
             return Ok(Read::Reload);
         }

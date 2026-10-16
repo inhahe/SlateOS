@@ -36,6 +36,9 @@ fn main() -> ExitCode {
 
 /// The program after `main`'s setup: its exit status.
 fn run(args: &[OsString], sys: &mut System) -> u8 {
+    // Before the arguments are parsed, as upstream's `main` does.
+    #[cfg(unix)]
+    let ignored = agetty::run::ignore_signals();
     let short = sys.short.clone();
     let parsed = match options::parse_args(args, &short, sys) {
         Ok(p) => p,
@@ -87,7 +90,7 @@ fn run(args: &[OsString], sys: &mut System) -> u8 {
             0
         }
         #[cfg(unix)]
-        Parsed::Run(op) => agetty::run::run(op, sys).0,
+        Parsed::Run(op) => agetty::run::run(op, sys, ignored).0,
         #[cfg(not(unix))]
         Parsed::Run(_) => sys.errx(b"a terminal line is a Unix thing").0,
     }

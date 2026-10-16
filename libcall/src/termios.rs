@@ -438,6 +438,8 @@ pub const CLOCAL: u32 = 0o4000;
 pub const CRTSCTS: u32 = 0o20_000_000_000;
 /// `B38400`: the speed a console reports, and a getty's default.
 pub const B38400: u32 = 0o17;
+/// `B9600`: a serial line's speed when none was given, and `TTYDEF_SPEED`.
+pub const B9600: u32 = 0o15;
 
 // `c_lflag`.
 
@@ -711,6 +713,7 @@ mod tests {
             (CSIZE, p::CSIZE),
             (CS8, p::CS8),
             (B38400, p::B38400),
+            (B9600, p::B9600),
             (CREAD, p::CREAD),
             (PARENB, p::PARENB),
             (HUPCL, p::HUPCL),

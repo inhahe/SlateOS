@@ -36,8 +36,6 @@ const DEFAULT_STERM: &[u8] = b"vt102";
 const PATH_TTYS: &str = "/etc/ttys";
 /// `_PATH_LOGINDEFS`.
 const PATH_LOGINDEFS: &str = "/etc/login.defs";
-/// `B9600`: a serial line's speed when none was given.
-const B9600: u32 = 0o15;
 /// `PATH_MAX`.
 const PATH_MAX: usize = 4096;
 
@@ -113,22 +111,45 @@ struct Speeds {
     index: Option<usize>,
 }
 
-/// Run on the line `op` names, as `main` does after `parse_args`: returns
-/// only when the run ends without `login` -- the status to exit with.
-pub fn run(mut op: Options, sys: &mut System) -> Exit {
-    match run_inner(&mut op, sys) {
+/// The actions `SIGHUP`, `SIGQUIT` and `SIGINT` had before [`ignore_signals`]
+/// ignored them, which a run puts back. An action that could not be read
+/// and replaced is one there is nothing to put back: `None`.
+pub struct Ignored {
+    hup: Option<libcall::signal::SavedAction>,
+    quit: Option<libcall::signal::SavedAction>,
+    int: Option<libcall::signal::SavedAction>,
+}
+
+/// Ignore `SIGHUP`, `SIGQUIT` and `SIGINT` -- "in case vhangup(2) has to
+/// called" -- as upstream's `main` does first, before it parses its
+/// arguments: `--show-issue`, `--reload` and an option error's slow exit
+/// are not interrupted either.
+#[must_use]
+pub fn ignore_signals() -> Ignored {
+    Ignored {
+        hup: libcall::signal::ignore(libcall::pty::SIGHUP).ok(),
+        quit: libcall::signal::ignore(libcall::signal::SIGQUIT).ok(),
+        int: libcall::signal::ignore(libcall::signal::SIGINT).ok(),
+    }
+}
+
+/// Run on the line `op` names, as `main` does after `parse_args`, with the
+/// signals' actions [`ignore_signals`] saved: returns only when the run
+/// ends without `login` -- the status to exit with.
+pub fn run(mut op: Options, sys: &mut System, ignored: Ignored) -> Exit {
+    match run_inner(&mut op, sys, &ignored) {
         Ok(never) => match never {},
         Err(exit) => exit,
     }
 }
 
 /// [`run`], its every way out an `Err`.
-fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infallible, Exit> {
-    // "In case vhangup(2) has to called". An action that could not be read
-    // and replaced is one there is nothing to put back: `None`.
-    let sa_hup = libcall::signal::ignore(libcall::pty::SIGHUP).ok();
-    let sa_quit = libcall::signal::ignore(libcall::signal::SIGQUIT).ok();
-    let sa_int = libcall::signal::ignore(libcall::signal::SIGINT).ok();
+fn run_inner(
+    op: &mut Options,
+    sys: &mut System,
+    ignored: &Ignored,
+) -> Result<std::convert::Infallible, Exit> {
+    let (sa_hup, sa_quit, sa_int) = (&ignored.hup, &ignored.quit, &ignored.int);
 
     crate::utmp::update_utmp(op);
 
@@ -152,7 +173,7 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     // "Default is to follow the current line speed and then default to
     // 9600".
     if op.flags & F_VCONSOLE == 0 && op.speeds.is_empty() {
-        op.speeds.push(B9600);
+        op.speeds.push(libcall::termios::B9600);
         op.flags |= F_KEEPSPEED;
     }
 
@@ -375,8 +396,8 @@ fn open_tty(op: &mut Options, sys: &mut System) -> Result<Termios, Exit> {
         });
         if let Err(e) = owned {
             let msg = join(&[&path, b": ", errmsg::strerror(&e).as_bytes()]);
-            if e.raw_os_error() == Some(30) {
-                // EROFS: a line on a read-only filesystem keeps its owner.
+            if e.raw_os_error() == Some(libcall::EROFS) {
+                // A line on a read-only filesystem keeps its owner.
                 sys.log_warn(&msg);
             } else {
                 return Err(sys.log_err(&msg));
@@ -496,6 +517,12 @@ fn take_controlling(fd: i32, pid: i32, tty: &[u8], sys: &mut System) {
 /// `termio_init (op, tp)`: a virtual console made sane in the locale its
 /// keyboard types, and cleared; a serial line made raw at its first speed.
 fn termio_init(op: &mut Options, tp: &mut Termios, sys: &mut System) {
+    // A lock an earlier program put on the line's modes would keep them
+    // through every `tcsetattr` below. Upstream first waits for plymouth
+    // to let go of one (no plymouth here: deliberate difference 1); the
+    // unlock itself fails unprivileged, and goes on regardless, as there.
+    unchecked(libcall::tty::unlock_modes(0));
+
     if op.flags & F_VCONSOLE != 0 {
         // A locale that is not there leaves the one selected, as upstream's
         // unchecked `setlocale` does.
@@ -595,7 +622,11 @@ fn next_speed(op: &Options, tp: &mut Termios, speeds: &mut Speeds) {
         Some(i) => i.saturating_add(1).checked_rem(n).unwrap_or(0),
     };
     speeds.index = Some(index);
-    let speed = op.speeds.get(index).copied().unwrap_or(B9600);
+    let speed = op
+        .speeds
+        .get(index)
+        .copied()
+        .unwrap_or(libcall::termios::B9600);
     unchecked(tc::set_input_speed(tp, speed));
     unchecked(tc::set_output_speed(tp, speed));
     unchecked(tc::set_attr(0, tc::TCSANOW, tp));
@@ -631,8 +662,10 @@ struct Reload {
 }
 
 impl Reload {
-    /// `open_netlink ()`: listen for `groups`' address changes -- once; the
-    /// socket made first stays.
+    /// `open_netlink ()`: listen for `groups`' address changes, unless a
+    /// socket is open already. One that could not be made, or that an end
+    /// or an error closed, is tried again at the next evaluation of the
+    /// issue, as upstream's is.
     fn open_netlink(&mut self, groups: u32) {
         if self.netlink.is_none() {
             // A socket that cannot be made is changes not heard: upstream

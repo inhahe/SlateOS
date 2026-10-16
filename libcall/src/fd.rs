@@ -686,9 +686,24 @@ mod tests {
         let _ = close(fd);
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o640
+            0o640 & !umask()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The process's umask, which a created file's mode passes through:
+    /// read, not set, since setting it would race the other tests' threads.
+    #[cfg(unix)]
+    fn umask() -> u32 {
+        extern crate std;
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Umask:"))
+                    .and_then(|v| u32::from_str_radix(v.trim(), 8).ok())
+            })
+            .unwrap_or(0o022)
     }
 
     /// A file opened for reading is created if need be, with the mode
@@ -705,12 +720,15 @@ mod tests {
         let fd = open_create_read(&c, 0o600).unwrap();
         let _ = close(fd);
         let meta = std::fs::metadata(&path).unwrap();
-        assert_eq!((meta.len(), meta.permissions().mode() & 0o777), (0, 0o600));
+        assert_eq!(
+            (meta.len(), meta.permissions().mode() & 0o777),
+            (0, 0o600 & !umask())
+        );
         let fd = open_create_read(&c, 0o644).unwrap();
         let _ = close(fd);
         assert_eq!(
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-            0o600
+            0o600 & !umask()
         );
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(

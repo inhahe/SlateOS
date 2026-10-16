@@ -39,6 +39,8 @@ mod sys {
     pub const TIOCSCTTY: u64 = 0x540E;
     /// Give up the controlling terminal.
     pub const TIOCNOTTY: u64 = 0x5422;
+    /// Set the terminal's lock: which of its modes `tcsetattr` may not change.
+    pub const TIOCSLCKTRMIOS: u64 = 0x5457;
     /// A virtual console's keyboard mode.
     pub const KDGKBMODE: u64 = 0x4B44;
     /// A virtual console's keyboard flags: its lights' states and their
@@ -108,6 +110,37 @@ pub fn give_up_controlling(fd: i32) -> Result<(), i32> {
     {
         // SAFETY: the request takes no argument.
         let rc = unsafe { sys::ioctl(fd, sys::TIOCNOTTY) };
+        if rc == -1 {
+            Err(crate::last_errno())
+        } else {
+            Ok(())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(crate::ENOSYS)
+    }
+}
+
+/// `ioctl (fd, TIOCSLCKTRMIOS, &lock)` with every field of `lock` zero:
+/// unlock all the modes of the terminal on `fd`, so that the next
+/// `tcsetattr` sets every one it is given -- where a lock an earlier
+/// program left would keep the locked ones as they were, silently.
+///
+/// # Errors
+///
+/// `EPERM` without the privilege to change a lock, `ENOTTY`, `EBADF`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn unlock_modes(fd: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // A `struct termios` of zeros, with room to spare: the kernel's is
+        // 36 bytes and the C library's 60.
+        let lock = [0u8; 64];
+        // SAFETY: the kernel reads one `struct termios` through the
+        // pointer, which points at 64 zero bytes alive across the call.
+        let rc = unsafe { sys::ioctl(fd, sys::TIOCSLCKTRMIOS, lock.as_ptr()) };
         if rc == -1 {
             Err(crate::last_errno())
         } else {
@@ -268,6 +301,7 @@ mod tests {
         assert!(keyboard_mode(r).is_err());
         assert!(keyboard_leds(r).is_err());
         assert!(make_controlling(r, false).is_err());
+        assert!(unlock_modes(r).is_err());
         assert!(give_up_controlling(r).is_err());
         assert!(set_foreground_group(r, 1).is_err());
         assert!(crate::termios::flush(r, crate::termios::TCIOFLUSH).is_err());
@@ -285,6 +319,7 @@ mod tests {
         assert_eq!(session_of(0), Err(crate::ENOSYS));
         assert_eq!(make_controlling(0, true), Err(crate::ENOSYS));
         assert_eq!(give_up_controlling(0), Err(crate::ENOSYS));
+        assert_eq!(unlock_modes(0), Err(crate::ENOSYS));
         assert_eq!(hang_up(), Err(crate::ENOSYS));
         assert_eq!(set_foreground_group(0, 1), Err(crate::ENOSYS));
         assert_eq!(keyboard_mode(0), Err(crate::ENOSYS));

@@ -124,6 +124,8 @@ pub const EAGAIN: i32 = 11;
 /// Permission denied -- also what a record lock may fail with when another
 /// process holds a conflicting one.
 pub const EACCES: i32 = 13;
+/// Read-only file system.
+pub const EROFS: i32 = 30;
 
 /// No such process.
 ///
@@ -924,6 +926,7 @@ mod tests {
         assert_eq!(EINTR, posix::errno::EINTR);
         assert_eq!(EAGAIN, posix::errno::EAGAIN);
         assert_eq!(EACCES, posix::errno::EACCES);
+        assert_eq!(EROFS, posix::errno::EROFS);
         assert_eq!(ENAMETOOLONG, posix::errno::ENAMETOOLONG);
         assert_eq!(
             usize::try_from(posix::limits::HOST_NAME_MAX).ok(),

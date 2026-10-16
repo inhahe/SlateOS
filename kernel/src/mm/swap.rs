@@ -93,7 +93,7 @@ use super::frame::{self, FRAME_SIZE};
 use super::page_table::{self, PageFlags, PageTableEntry, VirtAddr};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use crate::sync::Mutex;
+use crate::sync::{CachePadded, Mutex};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec;
@@ -519,8 +519,8 @@ impl MemBackend {
     /// # Errors
     ///
     /// `OutOfMemory` when the bytes to keep it cannot be allocated: memory is
-    /// short, and no other page will fare better. `InvalidArgument` for a
-    /// slot past the tier.
+    /// short, though a page that shrinks further, or one of zeros, may still
+    /// be kept. `InvalidArgument` for a slot past the tier.
     fn write(&mut self, slot: u32, scratch: &PageScratch, encoded: Encoded) -> KernelResult<bool> {
         let slot_storage = self
             .slots
@@ -912,8 +912,11 @@ impl DiskBackend {
         Ok(())
     }
 
-    /// Read a slot's page back into `buf`, `FRAME_SIZE` bytes.
-    fn read(&self, slot: u32, buf: &mut [u8]) -> KernelResult<()> {
+    /// Read a slot's page back into `buf`, `FRAME_SIZE` bytes. Allocates
+    /// nothing: a raw page is read straight into `buf`, a compressed one into
+    /// `spare` (at least `FRAME_SIZE` bytes) and decompressed from there --
+    /// this runs under `SWAP`, where an allocation cannot reclaim.
+    fn read(&self, slot: u32, buf: &mut [u8], spare: &mut [u8]) -> KernelResult<()> {
         if slot >= self.capacity || buf.len() != FRAME_SIZE {
             return Err(KernelError::InvalidArgument);
         }
@@ -923,24 +926,16 @@ impl DiskBackend {
             .copied()
             .filter(|&m| m != 0)
             .ok_or(KernelError::InvalidArgument)?;
-        let len = usize::from(meta & !META_COMPRESSED);
-        let mut disk =
-            super::user::alloc_zeroed_vec(len.div_ceil(SECTOR_BYTES).saturating_mul(SECTOR_BYTES))?;
-        area_io(
-            &self.device_name,
-            &self.extents,
-            Self::slot_start(slot),
-            &mut disk,
-            false,
-        )?;
-        if meta & META_COMPRESSED != 0 {
-            let compressed = disk.get(..len).ok_or(KernelError::InternalError)?;
-            super::compress::decompress_into(compressed, buf)
-                .map_err(|_| KernelError::InternalError)?;
-        } else {
-            buf.copy_from_slice(disk.get(..FRAME_SIZE).ok_or(KernelError::InternalError)?);
+        let start = Self::slot_start(slot);
+        if meta & META_COMPRESSED == 0 {
+            return area_io(&self.device_name, &self.extents, start, buf, false);
         }
-        Ok(())
+        let len = usize::from(meta & !META_COMPRESSED);
+        let padded = len.div_ceil(SECTOR_BYTES).saturating_mul(SECTOR_BYTES);
+        let disk = spare.get_mut(..padded).ok_or(KernelError::InternalError)?;
+        area_io(&self.device_name, &self.extents, start, disk, false)?;
+        let compressed = disk.get(..len).ok_or(KernelError::InternalError)?;
+        super::compress::decompress_into(compressed, buf).map_err(|_| KernelError::InternalError)
     }
 
     /// Forget a slot's page: it holds nothing now.
@@ -979,10 +974,12 @@ impl SwapBackend {
         }
     }
 
-    fn read(&self, slot: u32, buf: &mut [u8]) -> KernelResult<()> {
+    /// Read `slot`'s page into `buf`; a disk area reads a compressed page
+    /// through `spare` ([`DiskBackend::read`]).
+    fn read(&self, slot: u32, buf: &mut [u8], spare: &mut [u8]) -> KernelResult<()> {
         match self {
             Self::Memory(m) => m.read(slot, buf),
-            Self::Disk(d) => d.read(slot, buf),
+            Self::Disk(d) => d.read(slot, buf, spare),
         }
     }
 
@@ -1208,9 +1205,11 @@ impl SwapState {
     ///
     /// # Errors
     ///
-    /// `WouldBlock` when an area refused the page and none after it took it:
-    /// not this page, not now, though another may be kept. `OutOfMemory`
-    /// when every area is full, or there is no scratch yet. A backend's own
+    /// `WouldBlock` when an area refused the page, or could not get the
+    /// memory to keep it, and none after it took it: not this page, not now,
+    /// though another may be kept -- one that shrinks further, or one of
+    /// zeros, which the compressed tier keeps in nothing. `OutOfMemory` when
+    /// every area is full, or when there is no scratch yet. A backend's own
     /// error otherwise, its slot given back.
     ///
     /// # Safety
@@ -1227,6 +1226,7 @@ impl SwapState {
         }
         let encoded = scratch.encode();
         let mut refused = false;
+        let mut short = false;
         for dev in devices.iter_mut().filter(|d| !d.draining) {
             let Some(local_slot) = dev.slots.alloc() else {
                 continue;
@@ -1237,13 +1237,19 @@ impl SwapState {
                     dev.slots.free(local_slot);
                     refused = true;
                 }
+                // The compressed tier could not get the bytes to keep the
+                // page: a disk area after it needs none, so it is asked.
+                Err(KernelError::OutOfMemory) => {
+                    dev.slots.free(local_slot);
+                    short = true;
+                }
                 Err(e) => {
                     dev.slots.free(local_slot);
                     return Err(e);
                 }
             }
         }
-        Err(if refused {
+        Err(if short || refused {
             KernelError::WouldBlock
         } else {
             KernelError::OutOfMemory
@@ -1251,15 +1257,19 @@ impl SwapState {
     }
 
     /// Read data from a global swap slot.
-    fn read_slot(&self, global_slot: u32, buf: &mut [u8]) -> KernelResult<()> {
+    ///
+    /// Allocates nothing: a disk area's compressed page is read through the
+    /// scratch ([`PageScratch`]), which every area's registration made.
+    fn read_slot(&mut self, global_slot: u32, buf: &mut [u8]) -> KernelResult<()> {
         let (dev_idx, local_slot) = self
             .find_device(global_slot)
             .ok_or(KernelError::InvalidArgument)?;
-        let dev = self
-            .devices
-            .get(dev_idx)
-            .ok_or(KernelError::InternalError)?;
-        dev.backend.read(local_slot, buf)
+        let Self {
+            devices, scratch, ..
+        } = self;
+        let dev = devices.get(dev_idx).ok_or(KernelError::InternalError)?;
+        let spare = scratch.as_mut().ok_or(KernelError::InternalError)?;
+        dev.backend.read(local_slot, buf, &mut spare.out)
     }
 
     /// Discard data from a global swap slot.
@@ -1423,24 +1433,44 @@ pub fn unregister_reclaimable(pml4_phys: u64, vaddr: u64) {
     }
 }
 
-/// The tasks that must not reclaim now, by id ([`NO_RECLAIMER`] for a free
-/// place): those reclaiming ([`try_reclaim`]), and those holding `SWAP` or
-/// `RECLAIM` ([`lock_no_reclaim`]). Linux's `PF_MEMALLOC`.
-///
-/// An allocation such a task makes that finds memory short must not reclaim:
-/// that would take those locks a second time on the same task, a
-/// self-deadlock the locks panic on. Nor may it run the rest of the
-/// allocator's slow path -- shrinkers, compaction, the OOM killer -- which
-/// tears down processes and so reaches `RECLAIM` and `SWAP` too. So the
-/// allocator fails such an allocation at once ([`reclaim_forbidden`]), and
-/// every allocation made under those locks answers that as `OutOfMemory`.
+// ---------------------------------------------------------------------------
+// The no-reclaim mark: Linux's PF_MEMALLOC
+// ---------------------------------------------------------------------------
+//
+// A task reclaiming ([`try_reclaim`]), or holding `SWAP` or `RECLAIM`
+// ([`lock_no_reclaim`]), must not reclaim. An allocation it makes that finds
+// memory short would otherwise take those locks a second time on the same
+// task, a self-deadlock the locks panic on; and the rest of the allocator's
+// slow path -- shrinkers, compaction, the OOM killer, which tears processes
+// down -- reaches them too. So the allocator fails such an allocation at once
+// ([`reclaim_forbidden`]), and every allocation made under those locks
+// answers that as `OutOfMemory`.
+//
+// Two marks, for the two ways a task gets there. A lock holder's is its
+// CPU's ([`LOCK_DEPTH`]): the locks keep their holder on its CPU, so the mark
+// is the CPU's for as long as it matters, and costs the page-fault path that
+// takes `RECLAIM` one uncontended increment. A reclaiming task's
+// ([`NO_RECLAIM`]) follows the task, since it parks on swap I/O and may wake
+// elsewhere.
+
+/// Per CPU: how many `SWAP` and `RECLAIM` locks the task running there
+/// holds ([`lock_no_reclaim`]). Each on its own cache line, since every
+/// page fault writes its CPU's.
+static LOCK_DEPTH: [CachePadded<core::sync::atomic::AtomicU32>; crate::smp::MAX_CPUS] =
+    [const { CachePadded::new(core::sync::atomic::AtomicU32::new(0)) }; crate::smp::MAX_CPUS];
+
+/// The tasks reclaiming now ([`try_reclaim`]), by id ([`NO_RECLAIMER`] for a
+/// free place).
 static NO_RECLAIM: [core::sync::atomic::AtomicU64; NO_RECLAIM_PLACES] =
     [const { core::sync::atomic::AtomicU64::new(NO_RECLAIMER) }; NO_RECLAIM_PLACES];
 
-/// Places in [`NO_RECLAIM`]: more than are taken at once in practice (each
-/// CPU's current task, and tasks parked mid-reclaim on disk I/O). A task
-/// that finds none free goes unmarked: it reclaims, and its allocations under
-/// the locks are not protected -- the state before this mark existed.
+/// How many places of [`NO_RECLAIM`] are held: 0, nearly always, which
+/// spares [`reclaim_forbidden`] the walk.
+static NO_RECLAIM_HELD: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Places in [`NO_RECLAIM`]: more than reclaim at once in practice (each
+/// CPU's current task, and tasks parked mid-reclaim on swap I/O). A task that
+/// finds none free does not reclaim.
 const NO_RECLAIM_PLACES: usize = 64;
 
 /// A free place in [`NO_RECLAIM`]: no task has this id.
@@ -1450,8 +1480,8 @@ const NO_RECLAIMER: u64 = u64::MAX;
 struct NoReclaim(usize);
 
 impl NoReclaim {
-    /// Mark the current task; `None` when it is marked already -- the outer
-    /// mark covers it -- or no place is free.
+    /// Mark the current task as reclaiming; `None` when it is marked already
+    /// -- the outer mark covers it -- or no place is free.
     fn enter() -> Option<Self> {
         use core::sync::atomic::Ordering;
         let me = crate::sched::current_task_id();
@@ -1461,13 +1491,12 @@ impl NoReclaim {
         {
             return None;
         }
-        NO_RECLAIM
-            .iter()
-            .position(|slot| {
-                slot.compare_exchange(NO_RECLAIMER, me, Ordering::AcqRel, Ordering::Relaxed)
-                    .is_ok()
-            })
-            .map(Self)
+        let place = NO_RECLAIM.iter().position(|slot| {
+            slot.compare_exchange(NO_RECLAIMER, me, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+        })?;
+        NO_RECLAIM_HELD.fetch_add(1, Ordering::AcqRel);
+        Some(Self(place))
     }
 }
 
@@ -1475,40 +1504,85 @@ impl Drop for NoReclaim {
     fn drop(&mut self) {
         if let Some(slot) = NO_RECLAIM.get(self.0) {
             slot.store(NO_RECLAIMER, core::sync::atomic::Ordering::Release);
+            NO_RECLAIM_HELD.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
         }
     }
 }
 
-/// Whether the current task must not reclaim ([`NO_RECLAIM`]): the frame
-/// allocator's question before its slow path.
+/// Whether the current task must not reclaim: it holds `SWAP` or `RECLAIM`,
+/// or it is reclaiming. The frame allocator's question before its slow path.
 pub fn reclaim_forbidden() -> bool {
+    use core::sync::atomic::Ordering;
+    // Asked with interrupts off, so the CPU read is the one the depth is
+    // read for: a task moved between the two would read another holder's.
+    let holding = crate::cpu::without_interrupts(|| {
+        LOCK_DEPTH
+            .get(crate::smp::current_cpu_index())
+            .is_some_and(|depth| depth.load(Ordering::Acquire) > 0)
+    });
+    if holding {
+        return true;
+    }
+    if NO_RECLAIM_HELD.load(Ordering::Acquire) == 0 {
+        return false;
+    }
     let me = crate::sched::current_task_id();
     NO_RECLAIM
         .iter()
-        .any(|slot| slot.load(core::sync::atomic::Ordering::Acquire) == me)
+        .any(|slot| slot.load(Ordering::Acquire) == me)
 }
 
 /// Task `id` is gone: give back any place it held. A task killed while
-/// marked -- inside [`try_reclaim`], parked on swap I/O -- never runs its
-/// mark's drop, and the reaper calls this for it.
+/// reclaiming -- parked on swap I/O -- never runs its mark's drop, and the
+/// reaper calls this for it.
 pub fn forget_task(id: u64) {
+    use core::sync::atomic::Ordering;
     for slot in &NO_RECLAIM {
         // Only this task's place; a place it does not hold is left alone.
-        let _ = slot.compare_exchange(
-            id,
-            NO_RECLAIMER,
-            core::sync::atomic::Ordering::AcqRel,
-            core::sync::atomic::Ordering::Relaxed,
+        if slot
+            .compare_exchange(id, NO_RECLAIMER, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
+            NO_RECLAIM_HELD.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+}
+
+/// One step of [`LOCK_DEPTH`] on the CPU it was taken on, given back when
+/// dropped -- while the lock it counts is still held, so on that same CPU.
+struct LockDepth(usize);
+
+impl LockDepth {
+    /// Count a lock just taken on this CPU.
+    fn enter() -> Self {
+        let cpu = crate::smp::current_cpu_index();
+        if let Some(depth) = LOCK_DEPTH.get(cpu) {
+            depth.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+        }
+        Self(cpu)
+    }
+}
+
+impl Drop for LockDepth {
+    fn drop(&mut self) {
+        debug_assert_eq!(
+            self.0,
+            crate::smp::current_cpu_index(),
+            "a SWAP or RECLAIM holder left its CPU"
         );
+        if let Some(depth) = LOCK_DEPTH.get(self.0) {
+            depth.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
+        }
     }
 }
 
 /// A lock on `SWAP` or `RECLAIM` whose holder is marked not to reclaim while
-/// it holds it ([`NO_RECLAIM`]).
+/// it holds it ([`LOCK_DEPTH`]).
 struct NoReclaimGuard<'a, T> {
-    /// Declared before the mark, so dropped before it: the lock goes first.
+    /// Declared before the lock's guard, so dropped before it: the depth
+    /// falls while the lock still keeps the holder on its CPU.
+    _depth: LockDepth,
     guard: crate::sync::MutexGuard<'a, T>,
-    _mark: Option<NoReclaim>,
 }
 
 impl<T> core::ops::Deref for NoReclaimGuard<'_, T> {
@@ -1524,20 +1598,23 @@ impl<T> core::ops::DerefMut for NoReclaimGuard<'_, T> {
     }
 }
 
-/// Lock `SWAP` or `RECLAIM` (`lock`), the holder marked not to reclaim.
+/// Lock `SWAP` or `RECLAIM` (`lock`), the holder marked not to reclaim. The
+/// mark is taken once the lock is held: the lock is what keeps the holder on
+/// the CPU it marks.
 fn lock_no_reclaim<T>(lock: &Mutex<T>) -> NoReclaimGuard<'_, T> {
-    let mark = NoReclaim::enter();
+    let guard = lock.lock();
     NoReclaimGuard {
-        guard: lock.lock(),
-        _mark: mark,
+        _depth: LockDepth::enter(),
+        guard,
     }
 }
 
 /// [`lock_no_reclaim`] without waiting: `None` when the lock is held.
 fn try_lock_no_reclaim<T>(lock: &Mutex<T>) -> Option<NoReclaimGuard<'_, T>> {
-    let mark = NoReclaim::enter();
-    lock.try_lock()
-        .map(|guard| NoReclaimGuard { guard, _mark: mark })
+    lock.try_lock().map(|guard| NoReclaimGuard {
+        _depth: LockDepth::enter(),
+        guard,
+    })
 }
 
 /// Try to reclaim `target` pages by swapping them out.
@@ -1554,8 +1631,11 @@ fn try_lock_no_reclaim<T>(lock: &Mutex<T>) -> Option<NoReclaimGuard<'_, T>> {
 ///    scanned the entire list twice without finding a victim.
 ///
 /// Returns the number of pages actually reclaimed: 0, at once, for a task
-/// marked not to reclaim ([`NO_RECLAIM`]).
+/// marked not to reclaim ([`reclaim_forbidden`]).
 pub fn try_reclaim(target: usize) -> usize {
+    if reclaim_forbidden() {
+        return 0;
+    }
     let Some(_reclaiming) = NoReclaim::enter() else {
         return 0;
     };
@@ -1674,12 +1754,12 @@ pub fn try_reclaim(target: usize) -> usize {
             // In use right now (its address space's page-table lock was held,
             // or its entries changed after they were read), or refused by the
             // area it would have gone to (the compressed tier, for a page that
-            // does not shrink): not a failure, just not this time. It stays
-            // on the list.
+            // does not shrink or whose bytes it could not get the memory for):
+            // not a failure, just not this time. It stays on the list.
             Err(KernelError::WouldBlock) => {}
-            // Every area full (or none at all), or no memory to hold the page
-            // with while it is written: the next victim fares no better, so
-            // the pass ends. The frame stays on the list.
+            // Every area full (or none at all), or no scratch to store the
+            // page through: the next victim fares no better, so the pass
+            // ends. The frame stays on the list.
             Err(KernelError::OutOfMemory) => break,
             Err(KernelError::NotSupported) => {
                 // A frame of a kind that is not swapped (shared memory, or a
@@ -2337,6 +2417,9 @@ pub(crate) fn deactivate_also(target: &AreaTarget, extra: &[u64]) -> KernelResul
         LEAST_PRIORITY.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     }
     state.initialized = !state.devices.is_empty();
+    // Let go before the memory tier's answer allocates its device name:
+    // nothing may be allocated under `SWAP` that needs reclaim to succeed.
+    drop(state);
     match dev.backend {
         SwapBackend::Disk(disk) => Ok(RemovedArea {
             kind: dev.kind,
@@ -2360,24 +2443,25 @@ pub(crate) fn deactivate_also(target: &AreaTarget, extra: &[u64]) -> KernelResul
 /// `InvalidArgument` for no such disk area, or an offset or length that is
 /// not whole sectors or runs past it; the device's own.
 pub(crate) fn area_read(target: &AreaTarget, offset: u64, buf: &mut [u8]) -> KernelResult<()> {
-    let (device, extents) = {
-        let state = lock_no_reclaim(&SWAP);
-        match state
-            .devices
-            .iter()
-            .find(|d| target.names(d))
-            .map(|d| &d.backend)
-        {
-            Some(SwapBackend::Disk(disk)) => (disk.device_name.clone(), disk.extents.clone()),
-            _ => return Err(KernelError::InvalidArgument),
-        }
-    };
     let sector = SECTOR_BYTES as u64;
     if !offset.is_multiple_of(sector) || !buf.len().is_multiple_of(SECTOR_BYTES) {
         return Err(KernelError::InvalidArgument);
     }
     let first = offset.checked_div(sector).unwrap_or(0);
-    area_io(&device, &extents, first, buf, false)
+    // Read under `SWAP`, as the swap paths read and write: copying the
+    // area's name and extents out first would allocate under it.
+    let state = lock_no_reclaim(&SWAP);
+    match state
+        .devices
+        .iter()
+        .find(|d| target.names(d))
+        .map(|d| &d.backend)
+    {
+        Some(SwapBackend::Disk(disk)) => {
+            area_io(&disk.device_name, &disk.extents, first, buf, false)
+        }
+        _ => Err(KernelError::InvalidArgument),
+    }
 }
 
 /// Pages the area at global slot `base` still holds; `None` when it is gone.
@@ -2635,24 +2719,50 @@ fn escaped_path(path: &[u8]) -> String {
 ///
 /// Used by `/proc/swaps` to show swap configuration.
 pub fn list_devices() -> alloc::vec::Vec<SwapDeviceInfo> {
-    let state = lock_no_reclaim(&SWAP);
-    let mut result = alloc::vec::Vec::with_capacity(state.devices.len());
-    for dev in &state.devices {
-        let device_type = match dev.kind {
-            AreaKind::Memory => "memory",
-            AreaKind::Device => "disk",
-            AreaKind::File { .. } => "file",
+    // Nothing is allocated under `SWAP`, where an allocation cannot reclaim:
+    // the room for every area's details is made first, filled under the
+    // lock, and the paths escaped after it. Areas added between the two
+    // looks make the room short, and it is made again.
+    loop {
+        let (count, longest) = {
+            let state = lock_no_reclaim(&SWAP);
+            let longest = state.devices.iter().map(|d| d.path.len()).max();
+            (state.devices.len(), longest.unwrap_or(0))
         };
-        result.push(SwapDeviceInfo {
-            name: escaped_path(&dev.path),
-            path: dev.path.clone(),
-            device_type,
-            total_slots: dev.room(),
-            used_slots: dev.pages(),
-            priority: dev.priority,
-        });
+        let mut rows: alloc::vec::Vec<SwapDeviceInfo> = (0..count)
+            .map(|_| SwapDeviceInfo {
+                name: String::new(),
+                path: Vec::with_capacity(longest),
+                device_type: "",
+                total_slots: 0,
+                used_slots: 0,
+                priority: 0,
+            })
+            .collect();
+        {
+            let state = lock_no_reclaim(&SWAP);
+            if state.devices.len() > count || state.devices.iter().any(|d| d.path.len() > longest) {
+                continue;
+            }
+            rows.truncate(state.devices.len());
+            for (row, dev) in rows.iter_mut().zip(&state.devices) {
+                row.device_type = match dev.kind {
+                    AreaKind::Memory => "memory",
+                    AreaKind::Device => "disk",
+                    AreaKind::File { .. } => "file",
+                };
+                // Within the capacity made above: no allocation.
+                row.path.extend_from_slice(&dev.path);
+                row.total_slots = dev.room();
+                row.used_slots = dev.pages();
+                row.priority = dev.priority;
+            }
+        }
+        for row in &mut rows {
+            row.name = escaped_path(&row.path);
+        }
+        return rows;
     }
-    result
 }
 
 /// Compression statistics for the zram backend.
@@ -2904,6 +3014,25 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
     Ok(swap_entry)
 }
 
+/// Give back `frame`, which a swap-in allocated and gave up on before mapping
+/// it. The caller answers the error that made it give up; a failure here is
+/// the allocator refusing a frame it handed out -- its bookkeeping broken, a
+/// double free it caught -- and is reported, the frame left where it is.
+///
+/// # Safety
+///
+/// `frame` came from [`frame::alloc_frame`] and nothing maps or refers to it.
+unsafe fn give_back_unmapped(frame: frame::PhysFrame) {
+    // SAFETY: the caller's.
+    if let Err(e) = unsafe { frame::free_frame(frame) } {
+        serial_println!(
+            "[swap] an unmapped swap-in frame {:#x} was not taken back: {:?} (leaked)",
+            frame.addr(),
+            e
+        );
+    }
+}
+
 /// Swap in a page: restore a previously swapped-out frame to physical
 /// memory, each 4 KiB part as it was.
 ///
@@ -2994,7 +3123,7 @@ pub(crate) unsafe fn prepare_swap_in(pml4_phys: u64, virt: VirtAddr) -> KernelRe
     // via HHDM: FRAME_SIZE writable bytes at frame_virt.
     let buf = unsafe { core::slice::from_raw_parts_mut(frame_virt as *mut u8, FRAME_SIZE) };
     let read = {
-        let state = lock_no_reclaim(&SWAP);
+        let mut state = lock_no_reclaim(&SWAP);
         if state.initialized {
             state.read_slot(entry.slot(), buf)
         } else {
@@ -3003,7 +3132,7 @@ pub(crate) unsafe fn prepare_swap_in(pml4_phys: u64, virt: VirtAddr) -> KernelRe
     };
     if let Err(e) = read {
         // SAFETY: allocated above and never mapped.
-        let _ = unsafe { frame::free_frame(new_frame) };
+        unsafe { give_back_unmapped(new_frame) };
         return Err(e);
     }
     PAGES_SWAPPED_IN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -3040,7 +3169,7 @@ pub(crate) unsafe fn install_swap_in(
     } = prep;
     let discard = |result| {
         // SAFETY: prepared by prepare_swap_in and never mapped.
-        let _ = unsafe { frame::free_frame(new_frame) };
+        unsafe { give_back_unmapped(new_frame) };
         result
     };
     let Some(parts) = page_table::read_frame_ptes(pml4_phys, virt) else {
@@ -3996,7 +4125,7 @@ pub fn self_test_disk() {
             .and_then(|encoded| dev.backend.write(slot, scratch, encoded))
             .and_then(|stored| {
                 if stored {
-                    dev.backend.read(slot, &mut back)
+                    dev.backend.read(slot, &mut back, &mut scratch.out)
                 } else {
                     // Refused: a disk area keeps every page, so this fails.
                     Err(KernelError::WouldBlock)

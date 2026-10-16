@@ -1091,6 +1091,43 @@ fn spin_with_stall_threshold<G>(
 }
 
 // ---------------------------------------------------------------------------
+// Cache-line padding
+// ---------------------------------------------------------------------------
+
+/// Cache-line-padded wrapper to prevent false sharing on per-CPU data.
+///
+/// On x86_64, cache lines are 64 bytes.  When multiple CPUs each have
+/// their own slot in an array, without padding all slots that share a
+/// cache line will bounce between CPU caches on every write — a
+/// significant source of cross-CPU latency.
+///
+/// `CachePadded<T>` ensures each element occupies its own cache line.
+/// Implements `Deref` so `.store()`, `.load()`, `.swap()`, etc. work
+/// transparently through auto-deref.
+///
+/// Cost: 64 bytes per element instead of `size_of::<T>()`.  For 16 CPUs
+/// the overhead per array is about 1 KiB — trivially small.
+#[repr(C, align(64))]
+pub struct CachePadded<T> {
+    value: T,
+}
+
+impl<T> CachePadded<T> {
+    /// `value`, alone on its cache line.
+    pub const fn new(value: T) -> Self {
+        Self { value }
+    }
+}
+
+impl<T> core::ops::Deref for CachePadded<T> {
+    type Target = T;
+    #[inline(always)]
+    fn deref(&self) -> &T {
+        &self.value
+    }
+}
+
+// ---------------------------------------------------------------------------
 // PreemptSpinMutex — preempt-aware spinlock without lockdep/contention tracking
 // ---------------------------------------------------------------------------
 

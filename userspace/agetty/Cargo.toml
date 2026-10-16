@@ -33,6 +33,9 @@ quoting = { path = "../quoting" }
 ulclosestream = { path = "../ulclosestream" }
 # strerror's text for an I/O failure, whatever the host.
 errmsg = { path = "../errmsg" }
+# The standard descriptors and SIGPIPE as the process was started with them,
+# for what it hands on to login.
+stdfdguard = { path = "../stdfdguard" }
 # The utmp records \u and \U count.
 utmpfile = { path = "../../utmpfile" }
 

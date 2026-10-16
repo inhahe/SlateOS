@@ -375,6 +375,39 @@ fn dup_above_one(_fd: i32, _min: i32) -> Result<i32, i32> {
     Err(ENOSYS)
 }
 
+/// `fcntl`'s command for a copy at the lowest free number at or above the
+/// argument, kept across `exec`.
+#[cfg(any(unix, test))]
+const F_DUPFD: i32 = 0;
+
+/// `dup (fd)`: a copy of `fd` at the lowest free number, *kept* across
+/// `exec` -- what a program arranging another's standard descriptors needs,
+/// where [`dup_above`]'s copy would be gone in the program it runs. The
+/// copy is the caller's to close.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open, `EMFILE`; [`ENOSYS`](crate::ENOSYS) off
+/// Unix.
+pub fn dup(fd: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: numbers only; `F_DUPFD` reads its third argument as an
+        // `int` and touches no memory.
+        let copy = unsafe { sys::fcntl(fd, F_DUPFD, 0) };
+        if copy < 0 {
+            Err(last_errno())
+        } else {
+            Ok(copy)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(ENOSYS)
+    }
+}
+
 /// Whether `fd` is closed by an `exec`: `FD_CLOEXEC` set or cleared with
 /// `F_SETFD`, the descriptor's other flags (there are none today) kept.
 ///
@@ -610,6 +643,7 @@ mod tests {
     #[test]
     fn the_numbers_are_the_librarys() {
         assert_eq!(F_DUPFD_CLOEXEC, posix::fcntl_ops::F_DUPFD_CLOEXEC);
+        assert_eq!(F_DUPFD, posix::fcntl_ops::F_DUPFD);
         assert_eq!(F_GETFD, posix::fcntl_ops::F_GETFD);
         assert_eq!(F_SETFD, posix::fcntl_ops::F_SETFD);
         assert_eq!(FD_CLOEXEC, 1);
@@ -760,6 +794,27 @@ mod tests {
         close(target).unwrap();
         close(copy).unwrap();
         assert!(close(copy).is_err(), "closed twice");
+    }
+
+    /// A plain copy is kept across `exec`, where `dup_above`'s is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_copy_is_kept_across_exec() {
+        extern crate std;
+        use std::os::fd::AsRawFd;
+
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let copy = dup(file.as_raw_fd()).unwrap();
+        // SAFETY: `F_GETFD` takes no third argument.
+        let flags = unsafe { sys::fcntl(copy, F_GETFD) };
+        assert_eq!(flags & FD_CLOEXEC, 0);
+        let above = dup_above(file.as_raw_fd(), 0).unwrap();
+        // SAFETY: as above.
+        let flags = unsafe { sys::fcntl(above, F_GETFD) };
+        assert_eq!(flags & FD_CLOEXEC, FD_CLOEXEC);
+        close(copy).unwrap();
+        close(above).unwrap();
+        assert_eq!(dup(-1), Err(EBADF));
     }
 
     #[cfg(unix)]

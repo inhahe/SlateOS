@@ -204,10 +204,21 @@ pub fn input_speed(t: &Termios) -> u32 {
     #[cfg(not(unix))]
     {
         // glibc 2.39's Linux arithmetic, for a host with no library to ask:
-        // the speed bits of `c_cflag`, which the input speed shares.
-        t.c_cflag & CBAUD
+        // 0 when `cfsetispeed` was given 0, else the speed bits of
+        // `c_cflag`, which the input speed shares.
+        if t.c_iflag & IBAUD0 != 0 {
+            0
+        } else {
+            t.c_cflag & CBAUD
+        }
     }
 }
+
+/// glibc's `IBAUD0`: a bit of `c_iflag` no terminal flag uses, set by
+/// `cfsetispeed (t, 0)` -- "the input speed is the output speed" -- which a
+/// record with one speed field cannot otherwise hold.
+#[cfg(any(not(unix), test))]
+const IBAUD0: u32 = 0o20_000_000_000;
 
 /// `cfgetospeed(t)`: the output speed, as a `B*` constant.
 #[must_use]
@@ -224,12 +235,15 @@ pub fn output_speed(t: &Termios) -> u32 {
     }
 }
 
-/// `cfsetispeed(t, speed)`: set the input speed to the `B*` constant `speed`.
+/// `cfsetispeed(t, speed)`: set the input speed to the `B*` constant `speed`
+/// -- 0 meaning "as the output speed".
+///
+/// On a host with no C library of ours, glibc 2.39's arithmetic is done
+/// here, so that the record is the same.
 ///
 /// # Errors
 ///
-/// `EINVAL` for a value that is not a speed; [`ENOSYS`](crate::ENOSYS) on a
-/// host with no C library of ours.
+/// `EINVAL` for a value that is not a speed.
 pub fn set_input_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     #[cfg(unix)]
     {
@@ -243,16 +257,15 @@ pub fn set_input_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     #[cfg(not(unix))]
     {
         // glibc 2.39's Linux `cfsetispeed`, for a host with no library to
-        // ask -- the IBSHIFT it sets for speed 0 is a shift count, 16, set
-        // as a flag, as glibc sets it.
+        // ask.
         if !is_speed(speed) {
             return Err(crate::EINVAL);
         }
         t.c_ispeed = speed;
         if speed == 0 {
-            t.c_iflag |= 16;
+            t.c_iflag |= IBAUD0;
         } else {
-            t.c_iflag &= !16;
+            t.c_iflag &= !IBAUD0;
             t.c_cflag = (t.c_cflag & !CBAUD) | speed;
         }
         Ok(())
@@ -655,6 +668,24 @@ mod tests {
             offset_of!(Termios, c_ospeed),
             offset_of!(p::Termios, c_ospeed)
         );
+    }
+
+    /// Input speed 0 is "as the output", marked in `c_iflag` and the speed
+    /// bits left alone; a real speed clears the mark -- glibc 2.39's
+    /// record, from its library or from the arithmetic here.
+    #[test]
+    fn input_speed_zero_is_marked_and_a_speed_unmarks_it() {
+        let mut t = Termios {
+            c_cflag: 0o15,
+            ..Termios::default()
+        };
+        set_input_speed(&mut t, 0).expect("0 is a speed");
+        assert_eq!((t.c_iflag, t.c_cflag, input_speed(&t)), (IBAUD0, 0o15, 0));
+        set_input_speed(&mut t, 0o16).expect("B19200 is a speed");
+        assert_eq!((t.c_iflag, t.c_cflag, input_speed(&t)), (0, 0o16, 0o16));
+        set_output_speed(&mut t, 0o17).expect("B38400 is a speed");
+        assert_eq!((output_speed(&t), t.c_cflag), (0o17, 0o17));
+        assert_eq!(set_input_speed(&mut t, 0o20), Err(crate::EINVAL));
     }
 
     #[test]

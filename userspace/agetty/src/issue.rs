@@ -124,10 +124,10 @@ pub struct Issue {
     /// The memory stream's contents: `None` until a regular file was read.
     pub mem: Option<Vec<u8>>,
     /// `do_tcsetattr`: an `issue.d` held files, so the line's output must
-    /// map a new line to carriage return and new line while it is printed.
+    /// map a new line to carriage return and new line while it is printed --
+    /// and keeps doing so after: upstream's `do_tcrestore`, which would put
+    /// the modes back, is set by nothing.
     pub do_tcsetattr: bool,
-    /// `do_tcrestore`.
-    pub do_tcrestore: bool,
     /// `op->osrelease`: `os-release`, once a read of it succeeded -- read
     /// once a process, as upstream keeps it.
     pub osrelease: Option<Vec<u8>>,
@@ -637,7 +637,8 @@ impl Host for SystemHost {
 
     fn users(&self) -> usize {
         // `getutxent` over glibc's default file.
-        std::fs::read("/var/run/utmp").map_or(0, |data| utmp_users(&data))
+        std::fs::read(quoting::os_from_bytes(libcall::utmp::UTMP_FILE.to_bytes()))
+            .map_or(0, |data| utmp_users(&data))
     }
 
     fn interfaces(&self) -> Option<Vec<Iface>> {

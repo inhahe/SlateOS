@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use crate::is_space;
+
 /// `BUFSIZ`: `fgets`'s buffer, which cuts a longer line into pieces read as
 /// lines of their own.
 const LINE_MAX: usize = 8192;
@@ -14,11 +16,6 @@ const LINE_MAX: usize = 8192;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LoginDefs {
     items: Vec<(Vec<u8>, Option<Vec<u8>>)>,
-}
-
-/// C's `isspace` in the "C" locale.
-fn is_space(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
 }
 
 impl LoginDefs {

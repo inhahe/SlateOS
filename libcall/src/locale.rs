@@ -429,6 +429,35 @@ mod tests {
 
     use super::*;
 
+    /// "C" is always there, and its names are English; a locale that is not
+    /// there is refused, and leaves the selection as it was. (The tests
+    /// never select anything but "C", the process's own from the start.)
+    #[cfg(unix)]
+    #[test]
+    fn the_c_locale_is_selected_and_named_in_english() {
+        assert!(select(LC_CTYPE, c"C"));
+        assert!(!select(LC_CTYPE, c"no-such-locale.UTF-8"));
+        let mut day = [0u8; 16];
+        let n = langinfo(ABDAY_1, &mut day).expect("a Sunday");
+        assert_eq!(&day[..n], b"Sun");
+        let mut month = [0u8; 16];
+        let n = langinfo(ABMON_1 + 11, &mut month).expect("a December");
+        assert_eq!(&month[..n], b"Dec");
+        // A buffer too short is answered with the whole length.
+        let mut short = [0u8; 2];
+        assert_eq!(langinfo(ABDAY_1, &mut short), Some(3));
+        assert_eq!(&short, b"Su");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn off_unix_only_c_is_selected_and_nothing_named() {
+        assert!(select(LC_CTYPE, c"C"));
+        assert!(select(LC_CTYPE, c"POSIX"));
+        assert!(!select(LC_CTYPE, c"C.UTF-8"));
+        assert_eq!(langinfo(ABDAY_1, &mut [0u8; 8]), None);
+    }
+
     #[test]
     fn the_numbers_are_the_librarys() {
         assert_eq!(LC_CTYPE, posix::locale::LC_CTYPE);

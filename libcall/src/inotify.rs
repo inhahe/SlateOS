@@ -361,6 +361,18 @@ mod tests {
         out
     }
 
+    /// An instance's descriptor is a real one, distinct from the standard
+    /// three, and waits as the instance does: nothing to read yet.
+    #[cfg(unix)]
+    #[test]
+    fn an_instance_s_descriptor_can_be_waited_on() {
+        let made = Inotify::new();
+        assert!(made.is_ok(), "{made:?}");
+        let Ok(ino) = made else { return };
+        assert!(ino.fd() > 2, "{}", ino.fd());
+        assert_eq!(crate::fd::wait_readable_among(&[ino.fd()], 0), Ok(0));
+    }
+
     #[test]
     fn the_records_of_one_read_are_read_in_order_with_their_names() {
         let mut bytes = record(1, IN_MOVED_TO, 7, b"notes.yaml", 16);

@@ -3,16 +3,11 @@
 //! `\u` replaced by the name -- and the check the name passes first.
 
 use crate::options::{F_NOHOSTNAME, F_REMOTE, Options};
-use crate::{Diag, Exit};
+use crate::{Diag, Exit, is_space};
 
 /// `LOGIN_ARGV_MAX`: the most words a login command line has, the program's
 /// own included.
 const LOGIN_ARGV_MAX: usize = 16;
-
-/// C's `isspace` in the "C" locale.
-fn is_space(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
-}
 
 /// `replace_u (str, username)`: `word` with each `\u` in it replaced by the
 /// name, left to right, the name's own text not searched again. A word that

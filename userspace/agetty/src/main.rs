@@ -11,14 +11,17 @@ use std::process::ExitCode;
 
 use agetty::issue::{Paths, SystemHost};
 use agetty::options::{self, Parsed};
-use agetty::{Diag, Exit, System};
+use agetty::{Diag, Exit, RELOAD_FILE, System, strerror};
 use ulclosestream::Stdout;
 
-/// `AGETTY_RELOAD_FILENAME`: the file whose touch tells running agettys to
-/// print the prompt again.
-const RELOAD_FILE: &std::ffi::CStr = c"/run/agetty.reload";
+stdfdguard::guard_std_fds!();
 
 fn main() -> ExitCode {
+    // Before anything else: a standard descriptor agetty was started without
+    // is closed again, and `SIGPIPE` given back the disposition it came
+    // with -- the runtime ignores it, and `login`, and the shell after it,
+    // would otherwise inherit it ignored.
+    stdfdguard::restore();
     let mut argv = std::env::args_os();
     let argv0 = argv.next().unwrap_or_else(|| OsString::from("agetty"));
     let args: Vec<OsString> = argv.collect();
@@ -50,7 +53,7 @@ fn run(args: &[OsString], sys: &mut System) -> u8 {
         Parsed::Reload => match reload_agettys() {
             Ok(()) => 0,
             Err((what, e)) => {
-                let why = errmsg::strerror(&std::io::Error::from_raw_os_error(e));
+                let why = strerror(e);
                 let msg: [&[u8]; 5] = [
                     what.as_bytes(),
                     b" ",
@@ -69,7 +72,7 @@ fn run(args: &[OsString], sys: &mut System) -> u8 {
                     // `err (EXIT_FAILURE, "...: %m")`: `err` adds the reason
                     // to a message that already ends in it, so it is said
                     // twice.
-                    let why = errmsg::strerror(&std::io::Error::from_raw_os_error(e));
+                    let why = strerror(e);
                     let msg = format!("failed to get terminal attributes: {why}: {why}");
                     return sys.errx(msg.as_bytes()).0;
                 }

@@ -46,6 +46,7 @@ dependencies = [
  "libcsyslog",
  "quoting",
  "scratchdir",
+ "stdfdguard",
  "ulclosestream",
  "ulcolors",
  "ulstrutils",

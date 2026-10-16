@@ -153,15 +153,23 @@ sys.exit(rc if rc >= 0 else 128 - rc)
 EOF
 
 # The login program the getty runs: it writes down how it was run -- its
-# arguments, the terminal type, the directory, the niceness, and the line's
-# modes -- in the file `AGETTY_OUT` names.
+# arguments, the terminal type, the directory, the niceness, whether its
+# standard input, output and error are the line, the signals it was started
+# ignoring, and the line's modes -- in the file `AGETTY_OUT` names.
 cat > fakelogin <<'EOF'
 #!/bin/sh
+# Asked before anything is redirected: what the getty handed over.
+fds=
+for fd in 0 1 2; do
+    if [ -t "$fd" ]; then fds="$fds $fd:tty"; else fds="$fds $fd:none"; fi
+done
 {
     for a in "$@"; do printf 'ARG %s\n' "$a"; done
     echo "TERM=$TERM"
     echo "PWD=$(pwd)"
     echo "NICE=$(nice)"
+    echo "FDS:$fds"
+    grep '^SigIgn' "/proc/$$/status"
     stty -g
 } > "$AGETTY_OUT" 2>&1
 EOF

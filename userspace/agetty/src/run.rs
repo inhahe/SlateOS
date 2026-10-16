@@ -26,7 +26,7 @@ use crate::options::{
     F_WAITCRLF, Options,
 };
 use crate::termio::{self, Chardata};
-use crate::{Diag, Exit, System};
+use crate::{Diag, Exit, RELOAD_FILE, System, strerror};
 
 /// `DEFAULT_VCTERM`: a virtual console's terminal type.
 const DEFAULT_VCTERM: &[u8] = b"linux";
@@ -40,11 +40,6 @@ const PATH_LOGINDEFS: &str = "/etc/login.defs";
 const B9600: u32 = 0o15;
 /// `PATH_MAX`.
 const PATH_MAX: usize = 4096;
-
-/// `%m`'s text for `errno`.
-fn strerror(errno: i32) -> String {
-    errmsg::strerror(&std::io::Error::from_raw_os_error(errno))
-}
 
 /// The parts, one after another.
 fn join(parts: &[&[u8]]) -> Vec<u8> {
@@ -61,10 +56,15 @@ fn on_dev(tty: &[u8], what: &str) -> Vec<u8> {
     join(&[b"/dev/", tty, what.as_bytes()])
 }
 
+/// A call whose result upstream does not look at: its failure changes
+/// nothing that follows, and the run goes on as upstream's would. Every
+/// result this module drops goes through here, so that each drop says so.
+fn unchecked<T, E>(_result: Result<T, E>) {}
+
 /// `write_all (STDOUT_FILENO, ...)`: a failure is not looked at, as
 /// upstream does not look.
 fn out(bytes: &[u8]) {
-    let _ = libcall::fd::write_all(1, bytes, true);
+    unchecked(libcall::fd::write_all(1, bytes, true));
 }
 
 /// The descriptor `fd`, borrowed as a file for the calls only `std` makes,
@@ -103,7 +103,7 @@ impl Port for Line<'_> {
     }
 
     fn pause(&mut self) {
-        let _ = libcall::clock::nanosleep(0, 250_000_000);
+        unchecked(libcall::clock::nanosleep(0, 250_000_000));
     }
 }
 
@@ -124,7 +124,8 @@ pub fn run(mut op: Options, sys: &mut System) -> Exit {
 
 /// [`run`], its every way out an `Err`.
 fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infallible, Exit> {
-    // "In case vhangup(2) has to called".
+    // "In case vhangup(2) has to called". An action that could not be read
+    // and replaced is one there is nothing to put back: `None`.
     let sa_hup = libcall::signal::ignore(libcall::pty::SIGHUP).ok();
     let sa_quit = libcall::signal::ignore(libcall::signal::SIGQUIT).ok();
     let sa_int = libcall::signal::ignore(libcall::signal::SIGINT).ok();
@@ -132,7 +133,7 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     crate::utmp::update_utmp(op);
 
     if op.delay != 0 {
-        let _ = libcall::clock::nanosleep(u64::from(op.delay), 0);
+        unchecked(libcall::clock::nanosleep(u64::from(op.delay), 0));
     }
 
     let mut tp = open_tty(op, sys)?;
@@ -140,13 +141,13 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     // "Unmask SIGHUP if inherited".
     let mut hup = libcall::signal::SigSet::empty();
     if hup.add(libcall::pty::SIGHUP).is_ok() {
-        let _ = libcall::signal::unblock(&hup);
+        unchecked(libcall::signal::unblock(&hup));
     }
     if let Some(saved) = &sa_hup {
-        let _ = libcall::signal::restore_action(libcall::pty::SIGHUP, saved);
+        unchecked(libcall::signal::restore_action(libcall::pty::SIGHUP, saved));
     }
     let pid = i32::try_from(std::process::id()).unwrap_or(i32::MAX);
-    let _ = libcall::tty::set_foreground_group(0, pid);
+    unchecked(libcall::tty::set_foreground_group(0, pid));
 
     // "Default is to follow the current line speed and then default to
     // 9600".
@@ -168,7 +169,7 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     }
 
     if op.flags & F_VCONSOLE != 0 || op.clocal != Clocal::Always {
-        let _ = tc::clear_nonblocking(1);
+        unchecked(tc::clear_nonblocking(1));
     }
 
     if termio::serial_option(op, F_PARSE) {
@@ -176,6 +177,7 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     }
 
     if op.timeout != 0 {
+        // What answers is the time left on an earlier alarm: there is none.
         let _ = libcall::signal::alarm(op.timeout);
     }
 
@@ -231,6 +233,7 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     }
 
     if op.timeout != 0 {
+        // The time that was left, which nothing needs.
         let _ = libcall::signal::alarm(0);
     }
 
@@ -244,10 +247,16 @@ fn run_inner(op: &mut Options, sys: &mut System) -> Result<std::convert::Infalli
     out(b"\r\n");
 
     if let Some(saved) = &sa_quit {
-        let _ = libcall::signal::restore_action(libcall::signal::SIGQUIT, saved);
+        unchecked(libcall::signal::restore_action(
+            libcall::signal::SIGQUIT,
+            saved,
+        ));
     }
     if let Some(saved) = &sa_int {
-        let _ = libcall::signal::restore_action(libcall::signal::SIGINT, saved);
+        unchecked(libcall::signal::restore_action(
+            libcall::signal::SIGINT,
+            saved,
+        ));
     }
 
     if let Some(name) = &username {
@@ -309,6 +318,9 @@ fn exec(path: &[u8], argv: &[Vec<u8>]) -> i32 {
     let Ok(path) = CString::new(path.to_vec()) else {
         return libcall::ENOENT;
     };
+    // A word with a NUL cannot be one: every word came from the command line
+    // or the name read, where a NUL ends or is not a byte of a word. None is
+    // dropped.
     let words: Vec<CString> = argv
         .iter()
         .filter_map(|w| CString::new(w.clone()).ok())
@@ -386,13 +398,13 @@ fn open_tty(op: &mut Options, sys: &mut System) -> Result<Termios, Exit> {
         }
         take_controlling(fd, pid, &tty, sys);
 
-        let _ = libcall::fd::close(0);
+        unchecked(libcall::fd::close(0));
         if op.flags & F_HANGUP != 0 {
-            let _ = libcall::tty::give_up_controlling(fd);
+            unchecked(libcall::tty::give_up_controlling(fd));
             // "Let's close all file descriptors before vhangup".
-            let _ = libcall::fd::close(fd);
-            let _ = libcall::fd::close(1);
-            let _ = libcall::fd::close(2);
+            unchecked(libcall::fd::close(fd));
+            unchecked(libcall::fd::close(1));
+            unchecked(libcall::fd::close(2));
             closed = true;
             if let Err(e) = libcall::tty::hang_up() {
                 return Err(sys.log_err(&on_dev(
@@ -401,12 +413,12 @@ fn open_tty(op: &mut Options, sys: &mut System) -> Result<Termios, Exit> {
                 )));
             }
         } else {
-            let _ = libcall::fd::close(fd);
+            unchecked(libcall::fd::close(fd));
         }
         match libcall::fd::open_line(&cpath) {
             Ok(0) => {}
             Ok(other) => {
-                let _ = libcall::fd::close(other);
+                unchecked(libcall::fd::close(other));
                 return Err(sys.log_err(&cannot_open(0)));
             }
             Err(e) => return Err(sys.log_err(&cannot_open(e))),
@@ -423,14 +435,15 @@ fn open_tty(op: &mut Options, sys: &mut System) -> Result<Termios, Exit> {
 
     // "Get rid of the present outputs."
     if !closed {
-        let _ = libcall::fd::close(1);
-        let _ = libcall::fd::close(2);
+        unchecked(libcall::fd::close(1));
+        unchecked(libcall::fd::close(2));
     }
-    // "set up stdout and stderr"
-    let one = libcall::fd::dup_above(0, 0);
-    let two = libcall::fd::dup_above(0, 0);
-    if one != Ok(1) || two != Ok(2) {
-        let e = one.and(two).err().unwrap_or(0);
+    // "set up stdout and stderr": plain copies, which `login` keeps across
+    // its `exec` -- the second made only if the first landed on 1.
+    let one = libcall::fd::dup(0);
+    let two = (one == Ok(1)).then(|| libcall::fd::dup(0));
+    if one != Ok(1) || two != Some(Ok(2)) {
+        let e = one.err().or(two.and_then(Result::err)).unwrap_or(0);
         return Err(sys.log_err(&cat(
             &tty,
             format!(": dup problem: {}", strerror(e)).as_bytes(),
@@ -484,6 +497,8 @@ fn take_controlling(fd: i32, pid: i32, tty: &[u8], sys: &mut System) {
 /// keyboard types, and cleared; a serial line made raw at its first speed.
 fn termio_init(op: &mut Options, tp: &mut Termios, sys: &mut System) {
     if op.flags & F_VCONSOLE != 0 {
+        // A locale that is not there leaves the one selected, as upstream's
+        // unchecked `setlocale` does.
         if op.kbmode == libcall::tty::K_UNICODE {
             let _ = libcall::locale::select(libcall::locale::LC_CTYPE, c"C.UTF-8");
             op.flags |= F_UTF8;
@@ -509,15 +524,15 @@ fn termio_init(op: &mut Options, tp: &mut Termios, sys: &mut System) {
         if ws.cols == 0 {
             ws.cols = 80;
         }
-        let _ = libcall::pty::set_window_size(0, ws);
+        unchecked(libcall::pty::set_window_size(0, ws));
     }
     // "Flush input and output queues, important for modems!"
-    let _ = tc::flush(0, tc::TCIOFLUSH);
+    unchecked(tc::flush(0, tc::TCIOFLUSH));
     if let Err(e) = tc::set_attr(0, tc::TCSANOW, tp) {
         sys.log_warn(format!("setting terminal attributes failed: {}", strerror(e)).as_bytes());
     }
     // "Go to blocking input even in local mode."
-    let _ = tc::clear_nonblocking(0);
+    unchecked(tc::clear_nonblocking(0));
 }
 
 /// `termio_clear (STDOUT_FILENO)`: the cursor home, the screen below it
@@ -539,7 +554,7 @@ fn reset_vc(op: &Options, tp: &mut Termios, canon: bool, sys: &mut System) {
     if let Err(e) = tc::set_attr(0, tc::TCSADRAIN, tp) {
         sys.log_warn(format!("setting terminal attributes failed: {}", strerror(e)).as_bytes());
     }
-    let _ = tc::clear_nonblocking(0);
+    unchecked(tc::clear_nonblocking(0));
 }
 
 /// `auto_baud (tp)`: the speed a modem's status message names, set --
@@ -551,21 +566,21 @@ fn auto_baud(tp: &mut Termios) {
     if let Some(c) = tp.c_cc.get_mut(tc::VMIN) {
         *c = 0;
     }
-    let _ = tc::set_attr(0, tc::TCSANOW, tp);
-    let _ = libcall::clock::nanosleep(1, 0);
+    unchecked(tc::set_attr(0, tc::TCSANOW, tp));
+    unchecked(libcall::clock::nanosleep(1, 0));
     let mut buf = vec![0u8; 8191];
     if let Ok(n) = libcall::fd::read(0, &mut buf)
         && n > 0
         && let Some(speed) = termio::status_message_speed(buf.get(..n).unwrap_or_default())
     {
-        let _ = tc::set_input_speed(tp, speed);
-        let _ = tc::set_output_speed(tp, speed);
+        unchecked(tc::set_input_speed(tp, speed));
+        unchecked(tc::set_output_speed(tp, speed));
     }
     tp.c_iflag = iflag;
     if let Some(c) = tp.c_cc.get_mut(tc::VMIN) {
         *c = vmin;
     }
-    let _ = tc::set_attr(0, tc::TCSANOW, tp);
+    unchecked(tc::set_attr(0, tc::TCSANOW, tp));
 }
 
 /// `next_speed (op, tp)`: the next speed of the list, set -- the first
@@ -581,9 +596,9 @@ fn next_speed(op: &Options, tp: &mut Termios, speeds: &mut Speeds) {
     };
     speeds.index = Some(index);
     let speed = op.speeds.get(index).copied().unwrap_or(B9600);
-    let _ = tc::set_input_speed(tp, speed);
-    let _ = tc::set_output_speed(tp, speed);
-    let _ = tc::set_attr(0, tc::TCSANOW, tp);
+    unchecked(tc::set_input_speed(tp, speed));
+    unchecked(tc::set_output_speed(tp, speed));
+    unchecked(tc::set_attr(0, tc::TCSANOW, tp));
 }
 
 /// `eval_issue_file (ie, op, tp)`, and then -- the issue showing an
@@ -595,9 +610,6 @@ fn eval_issue(ie: &mut Issue, op: &Options, tp: &Termios, reload: &mut Reload, s
         reload.open_netlink(ie.netlink_groups);
     }
 }
-
-/// `AGETTY_RELOAD_FILENAME`: touched by `agetty --reload`.
-const RELOAD_FILE: &std::ffi::CStr = c"/run/agetty.reload";
 
 /// `inotify_fd`'s three states.
 enum Watch {
@@ -623,6 +635,8 @@ impl Reload {
     /// socket made first stays.
     fn open_netlink(&mut self, groups: u32) {
         if self.netlink.is_none() {
+            // A socket that cannot be made is changes not heard: upstream
+            // goes on without one too.
             self.netlink = libcall::netlink::open_route(groups).ok();
         }
     }
@@ -630,7 +644,7 @@ impl Reload {
     /// Stop listening: `close (netlink_fd)`.
     fn close_netlink(&mut self) {
         if let Some(fd) = self.netlink.take() {
-            let _ = libcall::fd::close(fd);
+            unchecked(libcall::fd::close(fd));
         }
     }
 
@@ -671,20 +685,19 @@ impl Reload {
                     self.watch = match libcall::inotify::Inotify::new() {
                         Ok(watch) => {
                             let mask = libcall::inotify::IN_ATTRIB | libcall::inotify::IN_MODIFY;
-                            let _ = watch.watch(RELOAD_FILE, mask);
+                            unchecked(watch.watch(RELOAD_FILE, mask));
                             Watch::On(watch)
                         }
                         Err(_) => Watch::Failed,
                     };
-                    let _ = libcall::fd::close(file);
+                    unchecked(libcall::fd::close(file));
                 }
-                Err(e) => log.log_warn(
-                    format!(
-                        "failed to create reload file: /run/agetty.reload: {}",
-                        strerror(e)
-                    )
-                    .as_bytes(),
-                ),
+                Err(e) => log.log_warn(&join(&[
+                    b"failed to create reload file: ",
+                    RELOAD_FILE.to_bytes(),
+                    b": ",
+                    strerror(e).as_bytes(),
+                ])),
             }
         }
         loop {
@@ -735,22 +748,17 @@ impl Reload {
 /// prints it once per evaluation -- with the output's new lines made
 /// carriage return and new line while it goes, when `issue.d` added to it.
 fn print_issue(ie: &mut Issue, op: &Options, tp: &mut Termios) {
-    let oflag = tp.c_oflag;
     if op.flags & F_NONL == 0 {
         out(b"\r\n");
     }
     if ie.do_tcsetattr && op.flags & F_VCONSOLE == 0 {
         tp.c_oflag |= tc::ONLCR | tc::OPOST;
-        let _ = tc::set_attr(0, tc::TCSADRAIN, tp);
+        unchecked(tc::set_attr(0, tc::TCSADRAIN, tp));
     }
     if let Some(mem) = &ie.mem
         && !mem.is_empty()
     {
         out(mem);
-    }
-    if ie.do_tcrestore {
-        tp.c_oflag = oflag;
-        let _ = tc::set_attr(0, tc::TCSADRAIN, tp);
     }
     // What was printed, to tell a reload's issue from.
     ie.mem_old = ie.mem.take();
@@ -789,7 +797,7 @@ fn do_prompt(
             // `getc (stdin)`: a buffer's worth is read, and what follows
             // the first byte is lost with the buffer.
             let mut buf = [0u8; 1024];
-            let _ = libcall::fd::read(0, &mut buf);
+            unchecked(libcall::fd::read(0, &mut buf));
         }
         break;
     }
@@ -826,9 +834,9 @@ fn get_logname(
     // "Flush pending input (especially important after parsing or
     // switching the baud rate)."
     if op.flags & F_VCONSOLE == 0 {
-        let _ = libcall::clock::nanosleep(1, 0);
+        unchecked(libcall::clock::nanosleep(1, 0));
     }
-    let _ = tc::flush(0, tc::TCIFLUSH);
+    unchecked(tc::flush(0, tc::TCIFLUSH));
     eval_issue(ie, op, tp, reload, sys);
     loop {
         do_prompt(ie, op, tp, reload, sys);
@@ -844,13 +852,13 @@ fn get_logname(
                     // "refresh prompt -- discard input data, clear terminal
                     // and call do_prompt() again".
                     if op.flags & F_VCONSOLE == 0 {
-                        let _ = libcall::clock::nanosleep(1, 0);
+                        unchecked(libcall::clock::nanosleep(1, 0));
                     }
                     eval_issue(ie, op, tp, reload, sys);
                     if !issue_is_changed(ie) {
                         continue;
                     }
-                    let _ = tc::flush(0, tc::TCIFLUSH);
+                    unchecked(tc::flush(0, tc::TCIFLUSH));
                     clear_for_reload(op);
                     break;
                 }

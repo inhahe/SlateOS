@@ -989,7 +989,36 @@ mod tests {
                     && i.family() == Some(AF_INET)
                     && matches!(i.name_info(NI_NUMERICHOST), Ok(t) if t.as_bytes() == b"127.0.0.1")
             }));
+            // Its name, and its address as the four bytes `inet_ntop` takes.
+            assert!(list.iter().any(|i| {
+                i.flags() & IFF_LOOPBACK != 0
+                    && i.family() == Some(AF_INET)
+                    && i.name().is_some_and(|n| !n.is_empty())
+                    && i.address() == Some(&[127, 0, 0, 1][..])
+            }));
         }
+    }
+
+    /// A lookup in one family answers in it: localhost's IPv4 address as
+    /// four bytes, and with `AI_V4MAPPED` an IPv6 answer of sixteen.
+    #[cfg(unix)]
+    #[test]
+    fn a_lookup_by_family_gives_its_first_address() {
+        let v4 = AddrInfo::lookup_family(c"localhost", AF_INET, 0, 0);
+        assert!(v4.is_ok(), "{:?}", v4.as_ref().err());
+        if let Ok(v4) = v4 {
+            assert_eq!(v4.first_address(), Some((AF_INET, &[127, 0, 0, 1][..])));
+        }
+        let v6 = AddrInfo::lookup_family(c"localhost", AF_INET6, 0, AI_V4MAPPED);
+        assert!(v6.is_ok(), "{:?}", v6.as_ref().err());
+        if let Ok(v6) = v6 {
+            let first = v6.first_address();
+            assert!(
+                matches!(first, Some((AF_INET6, a)) if a.len() == 16),
+                "{first:?}"
+            );
+        }
+        assert!(AddrInfo::lookup_family(c"no-such-host.invalid", AF_INET, 0, 0).is_err());
     }
 
     /// The library's words, not ours.

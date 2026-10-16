@@ -247,7 +247,6 @@ pub fn group_id(name: &core::ffi::CStr) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
     use super::*;
 
     /// The group record's layout is the C library's, as far as `gr_gid`.
@@ -269,8 +268,28 @@ mod tests {
         assert!(keyboard_mode(r).is_err());
         assert!(keyboard_leds(r).is_err());
         assert!(make_controlling(r, false).is_err());
+        assert!(give_up_controlling(r).is_err());
+        assert!(set_foreground_group(r, 1).is_err());
+        assert!(crate::termios::flush(r, crate::termios::TCIOFLUSH).is_err());
+        // `hang_up` is not run: on a test run from a terminal, with the
+        // privilege, it would hang up the terminal running the tests.
         let _ = crate::fd::close(r);
         let _ = crate::fd::close(w);
+    }
+
+    /// Off Unix every call declines -- `hang_up` among them, which nothing
+    /// can safely run on a real system's terminal.
+    #[cfg(not(unix))]
+    #[test]
+    fn off_unix_every_call_declines() {
+        assert_eq!(session_of(0), Err(crate::ENOSYS));
+        assert_eq!(make_controlling(0, true), Err(crate::ENOSYS));
+        assert_eq!(give_up_controlling(0), Err(crate::ENOSYS));
+        assert_eq!(hang_up(), Err(crate::ENOSYS));
+        assert_eq!(set_foreground_group(0, 1), Err(crate::ENOSYS));
+        assert_eq!(keyboard_mode(0), Err(crate::ENOSYS));
+        assert_eq!(keyboard_leds(0), Err(crate::ENOSYS));
+        assert_eq!(group_id(c"root"), None);
     }
 
     #[cfg(unix)]

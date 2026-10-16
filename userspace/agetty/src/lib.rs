@@ -30,9 +30,11 @@
 //!    or `--kill-chars`.** Upstream reads its 0 as a NUL, and a NUL is in
 //!    every string `strchr` searches, so it is taken for an erase or a kill
 //!    -- on a line that hung up, again and again at full speed.
-//! 5. **The netlink socket that hears address changes is closed on `exec`.**
-//!    Upstream's is not, and `login` and the shell after it inherit a
-//!    socket nothing reads.
+//! 5. **The netlink socket that hears address changes is closed on `exec`,
+//!    and its address is the kernel's choice.** Upstream's is inherited by
+//!    `login` and the shell after it, which never read it; and upstream
+//!    binds its process id, which the C library's own route socket -- made
+//!    by `getaddrinfo` for `\4` -- may already hold, and then hears nothing.
 
 pub mod issue;
 pub mod login;
@@ -49,6 +51,21 @@ pub mod utmp;
 
 /// `_PATH_LOGIN`: the login program.
 pub const PATH_LOGIN: &[u8] = b"/bin/login";
+
+/// `AGETTY_RELOAD_FILENAME`: what `--reload` touches, and a getty waiting
+/// for a name watches.
+pub const RELOAD_FILE: &core::ffi::CStr = c"/run/agetty.reload";
+
+/// `%m`'s text for `errno`.
+#[must_use]
+pub fn strerror(errno: i32) -> String {
+    errmsg::strerror(&std::io::Error::from_raw_os_error(errno))
+}
+
+/// C's `isspace` in the "C" locale.
+pub(crate) fn is_space(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+}
 
 /// How a run ends early: the status to exit with, after whatever was said.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

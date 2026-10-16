@@ -200,5 +200,21 @@ mod tests {
     #[test]
     fn off_unix_it_declines() {
         assert_eq!(since_boot(), Err(ENOSYS));
+        assert_eq!(local_now(), Err(ENOSYS));
+    }
+
+    /// The real library: now, broken down, every field in its range.
+    #[cfg(unix)]
+    #[test]
+    fn now_is_a_date_and_a_time() {
+        let t = local_now().unwrap();
+        assert!((0..=60).contains(&t.sec), "{t:?}");
+        assert!((0..60).contains(&t.min), "{t:?}");
+        assert!((0..24).contains(&t.hour), "{t:?}");
+        assert!((1..=31).contains(&t.mday), "{t:?}");
+        assert!((0..12).contains(&t.mon), "{t:?}");
+        assert!((0..7).contains(&t.wday), "{t:?}");
+        // Since 1900: this century or a later one.
+        assert!(t.year >= 100, "{t:?}");
     }
 }

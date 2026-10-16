@@ -25,7 +25,6 @@ mod sys {
         pub fn bind(fd: i32, addr: *const SockaddrNl, len: u32) -> i32;
         pub fn recv(fd: i32, buf: *mut core::ffi::c_void, len: usize, flags: i32) -> isize;
         pub fn close(fd: i32) -> i32;
-        pub fn getpid() -> i32;
     }
 
     /// `struct sockaddr_nl`.
@@ -47,8 +46,13 @@ mod sys {
     pub const MSG_DONTWAIT: i32 = 0x40;
 }
 
-/// A route netlink socket bound to hear `groups` (`RTMGRP_*`), as this
-/// process: the descriptor, close-on-exec, the caller's to close.
+/// A route netlink socket bound to hear `groups` (`RTMGRP_*`): the
+/// descriptor, close-on-exec, the caller's to close.
+///
+/// Its address is the kernel's choice. C's agetty binds the process id,
+/// which fails (`EADDRINUSE`) when the C library already holds a route
+/// socket under it -- as `getaddrinfo` and `getifaddrs` do, behind the issue's
+/// own `\4` and `\6` -- and then hears nothing.
 ///
 /// # Errors
 ///
@@ -62,12 +66,11 @@ pub fn open_route(groups: u32) -> Result<i32, i32> {
         if fd < 0 {
             return Err(crate::last_errno());
         }
-        // SAFETY: no arguments.
-        let pid = unsafe { sys::getpid() };
         let addr = sys::SockaddrNl {
             nl_family: 16,
             nl_pad: 0,
-            nl_pid: u32::try_from(pid).unwrap_or(0),
+            // "Any free address".
+            nl_pid: 0,
             nl_groups: groups,
         };
         // SAFETY: `addr` is a whole `sockaddr_nl` alive for the call, which

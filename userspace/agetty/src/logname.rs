@@ -84,7 +84,7 @@ pub fn read_name(
                 Err(e) => {
                     let mut msg = op.tty.clone();
                     msg.extend_from_slice(b": read: ");
-                    msg.extend_from_slice(errmsg_of(e).as_bytes());
+                    msg.extend_from_slice(crate::strerror(e).as_bytes());
                     return Err(diag.log_err(&msg));
                 }
             }
@@ -185,37 +185,31 @@ pub fn finish_name(
     diag: &mut dyn Diag,
 ) -> Result<(), Exit> {
     if op.flags & (F_EIGHTBITS | F_UTF8) == F_EIGHTBITS | F_UTF8 {
+        // `mbstowcs` over the whole name first: a byte that is no character
+        // anywhere in it is the error, before any character is looked at.
         let mut state = libcall::locale::MbState::default();
         let mut rest: &[u8] = name;
+        let mut chars = Vec::new();
         while !rest.is_empty() {
-            match libcall::locale::mbrtowc(rest, &mut state) {
-                libcall::locale::Mb::Char(wc, used) => {
-                    if !libcall::locale::iswprint(wc) {
-                        let mut msg = op.tty.clone();
-                        msg.extend_from_slice(
-                            format!(": invalid character 0x{wc:x} in login name").as_bytes(),
-                        );
-                        return Err(diag.log_err(&msg));
-                    }
-                    rest = rest.get(used.max(1)..).unwrap_or_default();
-                }
-                _ => {
-                    let mut msg = op.tty.clone();
-                    msg.extend_from_slice(b": invalid character conversion for login name");
-                    return Err(diag.log_err(&msg));
-                }
-            }
+            let libcall::locale::Mb::Char(wc, used) = libcall::locale::mbrtowc(rest, &mut state)
+            else {
+                let mut msg = op.tty.clone();
+                msg.extend_from_slice(b": invalid character conversion for login name");
+                return Err(diag.log_err(&msg));
+            };
+            chars.push(wc);
+            rest = rest.get(used.max(1)..).unwrap_or_default();
+        }
+        if let Some(wc) = chars.into_iter().find(|&wc| !libcall::locale::iswprint(wc)) {
+            let mut msg = op.tty.clone();
+            msg.extend_from_slice(format!(": invalid character 0x{wc:x} in login name").as_bytes());
+            return Err(diag.log_err(&msg));
         }
     } else if op.flags & F_LCUC != 0 && caps_lock(name) {
         cp.capslock = true;
         name.make_ascii_lowercase();
     }
     Ok(())
-}
-
-/// `%m`'s text for `errno`.
-fn errmsg_of(errno: i32) -> String {
-    errmsg::strerror(&std::io::Error::from_raw_os_error(errno))
 }
 
 #[cfg(test)]
@@ -441,7 +435,7 @@ mod tests {
             &mut said,
         );
         assert_eq!(r, Err(Exit(1)));
-        let want = format!("tty1: read: {}", errmsg_of(libcall::pty::EBADF));
+        let want = format!("tty1: read: {}", crate::strerror(libcall::pty::EBADF));
         assert_eq!(said.syslog, [want.into_bytes()]);
     }
 
@@ -486,6 +480,37 @@ mod tests {
         let (r, _, _, said) = read(&long, &Options::default());
         assert_eq!(r, Err(Exit(1)));
         assert_eq!(said.syslog, [b"tty1: input overrun".to_vec()]);
+    }
+
+    /// On an eight-bit UTF-8 line, read in the tests' "C" locale: a byte
+    /// that is no character anywhere is the error before a character that
+    /// cannot be printed.
+    #[test]
+    fn a_name_is_converted_whole_before_its_characters_are_judged() {
+        let op = Options {
+            flags: F_EIGHTBITS | F_UTF8,
+            ..Options::default()
+        };
+        let check = |name: &[u8]| {
+            let mut said = Said::default();
+            let r = finish_name(&mut name.to_vec(), &op, &mut Chardata::default(), &mut said);
+            (r, said.syslog)
+        };
+        assert_eq!(check(b"root"), (Ok(()), vec![]));
+        assert_eq!(
+            check(b"\x01\xff"),
+            (
+                Err(Exit(1)),
+                vec![b"tty1: invalid character conversion for login name".to_vec()]
+            )
+        );
+        assert_eq!(
+            check(b"r\x01t"),
+            (
+                Err(Exit(1)),
+                vec![b"tty1: invalid character 0x1 in login name".to_vec()]
+            )
+        );
     }
 
     #[test]

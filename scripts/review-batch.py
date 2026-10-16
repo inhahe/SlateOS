@@ -496,7 +496,9 @@ def wait_for_no_qemu(limit: int) -> None:
 def review_commands(base: str, tip: str, tier: str) -> list[tuple[str, str, list[str]]]:
     """(model, level, argv) for each review `tier` runs."""
     claude = os.environ.get("CLAUDE_CODE_EXECPATH") or shutil.which("claude") or "claude"
-    return [(model, level, [claude, "-p", "--model", model,
+    # --no-session-persistence: a reviewer saved as a session would turn up in
+    # the operator's session lists, one project folder per scratch worktree.
+    return [(model, level, [claude, "-p", "--no-session-persistence", "--model", model,
                             f"/code-review {level} commits {base}..{tip}"])
             for model, level in RUNS[tier]]
 
@@ -1333,6 +1335,8 @@ def self_test() -> int:
     cmds = review_commands("a" * 40, "b" * 40, "max")
     expect("max runs", [(m, lv) for m, lv, _ in cmds], [("opus", "max"), ("fable", "xhigh")])
     expect("max prompt", cmds[0][2][-1], f"/code-review max commits {'a' * 40}..{'b' * 40}")
+    expect("no reviewer saved as a session", all("--no-session-persistence" in argv for _, _, argv in cmds),
+           True)
 
     for f in failures:
         print(f"FAIL {f}")

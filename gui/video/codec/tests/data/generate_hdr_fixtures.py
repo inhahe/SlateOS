@@ -60,6 +60,9 @@ import sys
 import zlib
 
 import chrome_hdr
+
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
+import fixture_tools  # noqa: E402  (gui/video: where the generators find ffmpeg and mkvmerge)
 from generate_fixtures import insert_in_entry
 
 FRAMES = 4
@@ -88,8 +91,14 @@ def run(args, **kw):
 
 class Tools:
     def __init__(self, ffmpeg_dir, mkvmerge):
-        exe = lambda n: os.path.join(ffmpeg_dir, n) if ffmpeg_dir else n
-        self.ffmpeg, self.ffprobe, self.mkvmerge = exe("ffmpeg"), exe("ffprobe"), mkvmerge
+        exe = lambda n: os.path.join(ffmpeg_dir, n) if ffmpeg_dir else fixture_tools.tool(n)
+        self.ffmpeg, self.ffprobe = exe("ffmpeg"), exe("ffprobe")
+        self._mkvmerge = mkvmerge
+
+    @property
+    def mkvmerge(self):
+        # Looked up when used: --answers-only runs no mkvmerge, and needs none.
+        return fixture_tools.tool("mkvmerge", self._mkvmerge)
 
     def encode(self, out, vf, codec_args, extra=()):
         run([self.ffmpeg, "-hide_banner", "-v", "error", "-y", "-f", "lavfi", "-i", SRC,
@@ -305,7 +314,7 @@ def chrome_frame(t, name):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ffmpeg", default="")
-    ap.add_argument("--mkvmerge", default="D:/utils/mkvtoolnix-99.0/mkvmerge.exe")
+    ap.add_argument("--mkvmerge", default=None)
     a = ap.parse_args()
     t = Tools(a.ffmpeg, a.mkvmerge)
     made = []
@@ -415,7 +424,7 @@ if __name__ == "__main__":
         sys.argv.remove("--answers-only")
         ap = argparse.ArgumentParser()
         ap.add_argument("--ffmpeg", default="")
-        ap.add_argument("--mkvmerge", default="D:/utils/mkvtoolnix-99.0/mkvmerge.exe")
+        ap.add_argument("--mkvmerge", default=None)
         a = ap.parse_args()
         answers(Tools(a.ffmpeg, a.mkvmerge), FIXTURES)
     else:

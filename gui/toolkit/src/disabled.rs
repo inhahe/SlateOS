@@ -125,7 +125,7 @@ pub type Disabled<'a> = ((f32, f32, f32, f32), &'a str);
 /// appears after the toolkit's tooltip delay, beside the pointer and on the
 /// screen, as any [`Tooltip`] does; a menu's greyed rows say theirs the same
 /// way ([`ContextMenu::explain`](crate::menu::ContextMenu::explain)).
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WhyDisabled {
     /// The disabled control the pointer rests on.
     resting: Option<Explaining>,
@@ -133,6 +133,7 @@ pub struct WhyDisabled {
 
 /// The disabled control the pointer rests on: its box as drawn, its
 /// reason, and the tooltip saying the reason.
+#[derive(Clone, Debug)]
 struct Explaining {
     bounds: (f32, f32, f32, f32),
     why: String,
@@ -1713,6 +1714,28 @@ mod tests {
         assert_eq!(why.due_in(1000 + DELAY), None);
         let palette = Palette::for_mode(false);
         assert!(texts(&why.render(&palette)).contains(&"The file is read-only".to_owned()));
+    }
+
+    /// **A copy goes on where its original was** -- the reason showing, or
+    /// the wait already under way -- so a program that copies its state (a
+    /// game trying a line of play ahead) copies what is said, not a fresh
+    /// wait. Each copy then moves on its own.
+    #[test]
+    fn a_copy_says_what_its_original_was_saying() {
+        let mut why = WhyDisabled::new();
+        why.pointer_at((20.0, 20.0), 1000, SCREEN, &controls());
+        let mut waiting = why.clone();
+        assert_eq!(waiting.due_in(1200), Some(DELAY - 200), "the wait went on");
+
+        why.tick(1000 + DELAY);
+        let showing = why.clone();
+        assert_eq!(showing.showing(), Some("The file is read-only"));
+        let palette = Palette::for_mode(false);
+        assert_eq!(showing.render(&palette), why.render(&palette));
+
+        assert!(waiting.tick(1000 + DELAY), "the copy's wait ends on its own");
+        why.pointer_left();
+        assert_eq!(showing.showing(), Some("The file is read-only"), "copies are apart");
     }
 
     /// **Another control's reason takes its own wait, and leaving every

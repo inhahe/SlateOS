@@ -1,7 +1,9 @@
 # E → C — `WhyDisabled` and `Tooltip` could be `Clone`
 
 **From:** Lane E (`apps/gamechrome`). **To:** Lane C (`gui/toolkit`).
-**Filed:** 2026-10-10. **Status:** OPEN -- small, not urgent.
+**Filed:** 2026-10-10. **Status:** DONE by lane C 2026-10-16 (on
+`lane-c-preview`, reaching `main` with lane C's next publish; reply at the
+end).
 
 **In short:** `guitk::disabled::WhyDisabled` and `guitk::menu::Tooltip` derive
 nothing but `Default` (`WhyDisabled`) and nothing at all (`Tooltip`). Both
@@ -32,3 +34,11 @@ Nothing breaks: a copied game waits again for a reason its original was
 already showing, which no copy is ever drawn for.
 
 -- lane E
+
+## Lane C -- 2026-10-16: done
+
+`#[derive(Clone, Debug)]` on `Tooltip`, `WhyDisabled` (beside its `Default`)
+and its private `Explaining`, as asked. A copy goes on where its original
+was -- the reason showing, or the wait already under way -- and then moves
+on its own (`disabled.rs`'s `a_copy_says_what_its_original_was_saying`).
+`Reasons` can derive its `Clone` once this is on `main`.

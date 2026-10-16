@@ -1396,6 +1396,7 @@ const DEFAULT_TOOLTIP_DELAY_MS: u32 = 500;
 const DEFAULT_TOOLTIP_MAX_WIDTH: f32 = 300.0;
 
 /// A tooltip that appears after a configurable hover delay.
+#[derive(Clone, Debug)]
 pub struct Tooltip {
     text: String,
     x: f32,

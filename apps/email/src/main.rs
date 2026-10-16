@@ -1882,6 +1882,15 @@ const ROW_H: f32 = 64.0;
 const FOLDER_ROW_H: f32 = 30.0;
 const BODY_LINE_H: f32 = 18.0;
 const BODY_TEXT: f32 = 13.0;
+/// The most characters the search box takes.
+const SEARCH_CAPACITY: usize = 256;
+/// The size the search box's text is drawn at.
+const SEARCH_TEXT_SIZE: f32 = 12.0;
+
+/// Where the search box is, in the header: the drawing and a press read it.
+fn search_box_rect() -> Rect {
+    Rect::new(128.0, 10.0, 320.0, 28.0)
+}
 const FIELD_H: f32 = 28.0;
 
 /// The largest file attached to a message written here.
@@ -2337,6 +2346,15 @@ pub enum Target {
     CloseCompose,
 }
 
+/// The text fields a right-click menu can be opened on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuField {
+    /// The search box.
+    Search,
+    /// A field of the message being written.
+    Compose(ComposeField),
+}
+
 pub struct EmailApp {
     pub accounts: Vec<EmailAccount>,
     pub mailboxes: Vec<Mailbox>,
@@ -2364,6 +2382,10 @@ pub struct EmailApp {
     pub unread_count: u32,
     /// Whether the search box has the keyboard.
     pub searching: bool,
+    /// The search box's caret and selection: reloaded from `search_query`
+    /// when that changed underneath it -- the list's Escape empties the
+    /// search.
+    search_editor: TextInput,
 
     // -- Mail kept in files ------------------------------------------------------
     /// Where the folders are: `~/Mail`. `None` with no home to find it in.
@@ -2389,10 +2411,11 @@ pub struct EmailApp {
 
     pub picker: FilePicker,
     pub picker_for: PickerFor,
-    /// A compose field's right-click menu -- Cut, Copy, Paste, Delete,
+    /// A text field's right-click menu -- Cut, Copy, Paste, Delete,
     /// Select all, and Undo and Redo in the body -- while it is up, and the
-    /// field it is for (`requests/c-e-text-fields-have-a-right-click-menu.md`).
-    field_menu: fieldmenu::FieldMenu<ComposeField>,
+    /// field it is for (`requests/c-e-text-fields-have-a-right-click-menu.md`):
+    /// the search box's, or a field's of the message being written.
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// How wide carets are drawn: the user's `caret_width_scale` applied.
     caret_width: f32,
     /// The user's focus width, which the text boxes draw their focus mark
@@ -2454,6 +2477,7 @@ impl EmailApp {
             reading_pane_position: ReadingPanePosition::Right,
             unread_count: 0,
             searching: false,
+            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             mail_dir: None,
             folders: Vec::new(),
             opened: Vec::new(),
@@ -3042,7 +3066,15 @@ impl EmailApp {
         match self.field_menu.event(event) {
             fieldmenu::Outcome::Window => {}
             fieldmenu::Outcome::Taken => return EventResult::Consumed,
-            fieldmenu::Outcome::Chosen(field, id) => {
+            fieldmenu::Outcome::Chosen(MenuField::Search, id) => {
+                self.sync_search_editor();
+                if self.search_editor.edit_command(id) == KeyEdit::Changed {
+                    let typed = self.search_editor.text().to_owned();
+                    self.set_search(&typed);
+                }
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::Chosen(MenuField::Compose(field), id) => {
                 self.do_field_menu_row(field, id);
                 return EventResult::Consumed;
             }
@@ -3212,37 +3244,72 @@ impl EmailApp {
         EventResult::Consumed
     }
 
-    /// Keys while the search box is open.
+    /// Keys while the search box has the keyboard: Escape empties it and
+    /// leaves, Enter leaves keeping the search, and the rest is the box's
+    /// (`textline::apply_key_on_clipboard`), at its caret, on the program's
+    /// clipboard -- which types what a key typed, AltGr's among it, and not
+    /// a command's letter. Answers whether the box did anything with it.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
-        // What a key typed, AltGr's among it, and not a command's letter,
-        // which a chord carries: Ctrl+A in the box typed an `a`, and Alt+X an
-        // `x`. The box's own keys are taken plain.
-        if textline::types_into_field(key) {
-            self.search_query.extend(key.typed());
-            self.reanchor_selection();
-            return EventResult::Consumed;
-        }
-        if !textline::is_plain(key.modifiers) {
-            return EventResult::Ignored;
-        }
+        let plain = textline::is_plain(key.modifiers);
         match key.key {
-            Key::Escape => {
+            Key::Escape if plain => {
                 self.searching = false;
-                self.search_query.clear();
-                self.reanchor_selection();
-                EventResult::Consumed
+                self.set_search("");
+                return EventResult::Consumed;
             }
-            Key::Enter => {
+            Key::Enter if plain => {
                 self.searching = false;
-                EventResult::Consumed
+                return EventResult::Consumed;
             }
-            Key::Backspace => {
-                self.search_query.pop();
-                self.reanchor_selection();
-                EventResult::Consumed
-            }
-            _ => EventResult::Ignored,
+            _ => {}
         }
+        self.sync_search_editor();
+        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
+        let typed = self.search_editor.text().to_owned();
+        self.set_search(&typed);
+        if edit.handled {
+            EventResult::Consumed
+        } else {
+            EventResult::Ignored
+        }
+    }
+
+    /// Load the search box's editor from `search_query` when the search
+    /// changed underneath it, its caret at the end.
+    fn sync_search_editor(&mut self) {
+        if self.search_editor.text() != self.search_query {
+            self.search_editor.set_text(&self.search_query);
+        }
+    }
+
+    /// The search changed to `text`: the list follows it.
+    fn set_search(&mut self, text: &str) {
+        if self.search_query != text {
+            text.clone_into(&mut self.search_query);
+            self.reanchor_selection();
+        }
+    }
+
+    /// A press in the search box `rect` at `x`: the box takes the
+    /// keyboard, its caret where the press landed.
+    fn place_search_caret(&mut self, rect: Rect, x: f32) {
+        let drawn = if self.searching {
+            self.search_editor.cursor()
+        } else {
+            text::TextCursor::default()
+        };
+        self.sync_search_editor();
+        let cursor = textedit::cursor_at_click(
+            &self.search_query,
+            drawn,
+            (rect.w - 24.0).max(0.0),
+            SEARCH_TEXT_SIZE,
+            FontWeightHint::Regular,
+            x - rect.x - 12.0,
+        );
+        self.searching = true;
+        self.search_editor.set_selection_anchor(None);
+        self.search_editor.set_cursor(cursor);
     }
 
     /// Keys while a message is being written.
@@ -4004,7 +4071,7 @@ impl EmailApp {
             });
         }
         // The search box: a press puts the keyboard in it.
-        let search = Rect::new(128.0, 10.0, 320.0, 28.0);
+        let search = search_box_rect();
         // The toolkit's field, in the theme's shape (lane C,
         // c-e-a-theme-can-shape-the-controls).
         guitk::field::draw(
@@ -4019,22 +4086,58 @@ impl EmailApp {
             },
             self.focus_ring_width,
         );
-        let (shown, color) = if self.search_query.is_empty() && !self.searching {
-            ("Search mail (Ctrl+F)".to_string(), self.palette.subtext0)
-        } else if self.searching {
-            (format!("{}\u{258F}", self.search_query), self.palette.text)
+        if self.searching {
+            // The box with the keyboard: its text, with the caret and the
+            // selection where they are -- the end of the text if the search
+            // changed under the box's editor.
+            let synced = self.search_editor.text() == self.search_query;
+            let mut tree = RenderTree::new();
+            textedit::draw(
+                &mut tree,
+                &textedit::SingleLine {
+                    text: &self.search_query,
+                    cursor: if synced {
+                        self.search_editor.cursor()
+                    } else {
+                        text::TextCursor::from(self.search_query.len())
+                    },
+                    selection_anchor: if synced {
+                        self.search_editor.selection_anchor()
+                    } else {
+                        None
+                    },
+                    focused: true,
+                    x: search.x + 12.0,
+                    y: search.y + 6.0,
+                    width: (search.w - 24.0).max(0.0),
+                    line_height: 16.0,
+                    font_size: SEARCH_TEXT_SIZE,
+                    weight: FontWeightHint::Regular,
+                    color: self.palette.text,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: self.caret_width,
+                },
+            );
+            for command in tree.commands {
+                f.push(command);
+            }
         } else {
-            (self.search_query.clone(), self.palette.text)
-        };
-        self.line(
-            f,
-            search.x + 12.0,
-            search.y + 7.0,
-            shown,
-            12.0,
-            color,
-            search.w - 24.0,
-        );
+            let (shown, color) = if self.search_query.is_empty() {
+                ("Search mail (Ctrl+F)".to_string(), self.palette.subtext0)
+            } else {
+                (self.search_query.clone(), self.palette.text)
+            };
+            self.line(
+                f,
+                search.x + 12.0,
+                search.y + 7.0,
+                shown,
+                SEARCH_TEXT_SIZE,
+                color,
+                search.w - 24.0,
+            );
+        }
         f.hit(Target::SearchBox, search);
         self.button(
             f,
@@ -4808,10 +4911,19 @@ impl EmailApp {
     /// 1454), so Cut and Copy act on what the user selected. Anywhere else,
     /// nothing.
     fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
-        let Some(Target::Field(field)) = self.target_at(x, y) else {
-            return EventResult::Ignored;
-        };
         let viewport = (self.width(), self.height());
+        let field = match self.target_at(x, y) {
+            Some(Target::Field(field)) => field,
+            Some(Target::SearchBox) => {
+                self.sync_search_editor();
+                self.searching = true;
+                let menu = self.search_editor.edit_menu();
+                self.field_menu
+                    .open(MenuField::Search, menu, x, y, viewport);
+                return EventResult::Consumed;
+            }
+            _ => return EventResult::Ignored,
+        };
         let Some(compose) = self.compose.as_mut() else {
             return EventResult::Ignored;
         };
@@ -4824,7 +4936,8 @@ impl EmailApp {
             input.edit_menu()
         };
         compose.field = field;
-        self.field_menu.open(field, menu, x, y, viewport);
+        self.field_menu
+            .open(MenuField::Compose(field), menu, x, y, viewport);
         EventResult::Consumed
     }
 
@@ -4859,12 +4972,7 @@ impl EmailApp {
         match target {
             Target::HelpCard => self.show_help = false,
             Target::Help => self.show_help = true,
-            Target::SearchBox => {
-                if self.searching {
-                    return EventResult::Ignored;
-                }
-                self.searching = true;
-            }
+            Target::SearchBox => self.place_search_caret(search_box_rect(), x),
             Target::Compose => self.compose_new(),
             Target::Reply => {
                 let Some(id) = self.selected_message else {
@@ -7547,7 +7655,10 @@ mod tests {
             right_press_on(&mut app, ComposeField::Subject),
             EventResult::Consumed
         );
-        assert_eq!(app.field_menu.field(), Some(ComposeField::Subject));
+        assert_eq!(
+            app.field_menu.field(),
+            Some(MenuField::Compose(ComposeField::Subject))
+        );
         choose(&mut app, EditCommand::SelectAll);
         assert!(!app.field_menu.is_up(), "the menu stayed up");
         right_press_on(&mut app, ComposeField::Subject);
@@ -7999,5 +8110,189 @@ mod tests {
         let first = app.current_messages()[0].id;
         assert_eq!(app.selected_message, Some(first));
         assert_eq!(app.list_scroll, 0, "the choice was left off screen");
+    }
+
+    // ------------------------------------------------------------------
+    // The search box: a caret, a selection, the program's clipboard and a
+    // right-click menu (2026-10-16)
+    // ------------------------------------------------------------------
+
+    /// The middle of the search box.
+    fn search_middle() -> (f32, f32) {
+        let r = search_box_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// **The search box edits at a caret**, as every other box does: the
+    /// arrows and Home move it, typing goes in where it is, Delete takes the
+    /// character after it, and Ctrl+A selects what typing then replaces. It
+    /// typed only at its end, Backspace from the end its only edit, and drew
+    /// a caret of its own after the text whatever the keys did.
+    #[test]
+    fn the_search_box_edits_at_a_caret() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::F, true));
+        for c in "lak".chars() {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&press(Key::Left));
+        assert_eq!(
+            app.handle_event(&types('e')),
+            EventResult::Consumed,
+            "a letter typed into the search is reported unanswered, so nothing redraws"
+        );
+        assert_eq!(
+            app.search_query, "leak",
+            "typing did not go in at the caret"
+        );
+        assert_eq!(
+            app.handle_event(&Event::Key(KeyEvent {
+                key: Key::F4,
+                pressed: true,
+                modifiers: guitk::event::Modifiers::alt(),
+                text: String::new(),
+            })),
+            EventResult::Ignored,
+            "the search box answered a chord of the window's"
+        );
+        let listed = app.current_messages();
+        assert!(!listed.is_empty(), "control: some mail mentions a leak");
+        assert!(
+            listed
+                .iter()
+                .all(|m| format!("{} {} {}", m.subject, m.from, m.preview)
+                    .to_lowercase()
+                    .contains("leak")),
+            "the list does not follow the search"
+        );
+        assert!(
+            !drawn(&app).contains('\u{258F}'),
+            "the box still draws a caret of its own"
+        );
+        assert!(
+            app.frame()
+                .commands()
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "leak")),
+            "the search is not drawn by the field editor, caret and all"
+        );
+
+        app.handle_event(&press(Key::Home));
+        app.handle_event(&press(Key::Delete));
+        assert_eq!(
+            app.search_query, "eak",
+            "Delete did not take the first character"
+        );
+        app.handle_event(&key_ev(Key::A, true));
+        app.handle_event(&types('x'));
+        assert_eq!(
+            app.search_query, "x",
+            "typing did not replace the selection"
+        );
+    }
+
+    /// **A press in the search box puts the caret where it lands**: at the
+    /// start of the text, what is typed goes in first.
+    #[test]
+    fn a_press_in_the_search_box_puts_the_caret_there() {
+        let mut app = seeded();
+        let (_, y) = search_middle();
+        let start = search_box_rect().x + 13.0;
+        app.handle_event(&mouse_at(
+            start,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        assert!(app.searching, "the press did not give the box the keyboard");
+        for c in "ab".chars() {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&mouse_at(
+            start,
+            y,
+            MouseEventKind::Press(MouseButton::Left),
+        ));
+        app.handle_event(&types('x'));
+        assert_eq!(
+            app.search_query, "xab",
+            "the press did not put the caret at the start"
+        );
+    }
+
+    /// **The search the list's Escape empties is the box's too**: the box
+    /// reloads what it edits from the search, so a key typed after starts
+    /// a new search rather than bringing the old one back.
+    #[test]
+    fn a_search_emptied_by_the_list_is_empty_in_the_box() {
+        let mut app = seeded();
+        app.handle_event(&key_ev(Key::F, true));
+        for c in "meet".chars() {
+            app.handle_event(&types(c));
+        }
+        app.handle_event(&press(Key::Enter));
+        assert!(!app.searching, "control: Enter leaves the box");
+        assert_eq!(app.search_query, "meet");
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(
+            app.search_query, "",
+            "control: the list's Escape empties the search"
+        );
+        app.handle_event(&key_ev(Key::F, true));
+        app.handle_event(&types('p'));
+        assert_eq!(
+            app.search_query, "p",
+            "the box brought back the search the list emptied"
+        );
+    }
+
+    /// **The search box has a right-click menu**, as the message's fields
+    /// do -- Cut, Copy, Paste, Delete and Select all, on the program's
+    /// clipboard -- and it gives the box the keyboard, and the list follows
+    /// a paste.
+    #[test]
+    fn the_search_boxs_right_click_menu_edits_the_search() {
+        use guitk::editmenu::EditCommand;
+        let mut app = seeded();
+        let (x, y) = search_middle();
+        assert_eq!(
+            app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right))),
+            EventResult::Consumed
+        );
+        assert_eq!(app.field_menu.field(), Some(MenuField::Search));
+        assert!(app.searching, "the box was not given the keyboard");
+        assert_eq!(
+            app.field_menu.row_lit(EditCommand::Copy),
+            Some(false),
+            "Copy was offered with nothing selected"
+        );
+        app.handle_event(&types('x'));
+        assert_eq!(
+            app.search_query, "",
+            "a key reached the box through the menu"
+        );
+        app.handle_event(&press(Key::Escape));
+        assert!(!app.field_menu.is_up(), "Escape left the menu up");
+        assert!(app.searching, "Escape reached the box through the menu");
+
+        guitk::clipboard::set_text("leak");
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
+        choose(&mut app, EditCommand::Paste);
+        assert_eq!(app.search_query, "leak", "Paste did not paste");
+        assert!(
+            app.current_messages().iter().all(|m| format!(
+                "{} {} {}",
+                m.subject, m.from, m.preview
+            )
+            .to_lowercase()
+            .contains("leak")),
+            "the list did not follow the paste"
+        );
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
+        choose(&mut app, EditCommand::SelectAll);
+        guitk::clipboard::set_text("");
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
+        choose(&mut app, EditCommand::Copy);
+        assert_eq!(guitk::clipboard::text(), "leak", "Copy copied nowhere");
     }
 }

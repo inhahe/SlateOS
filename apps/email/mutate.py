@@ -217,14 +217,14 @@ MUTATIONS = [
     ),
     (
         "a command's letter is typed into the search",
-        '        if textline::types_into_field(key) {',
-        '        if key.types_text() {',
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        self.search_editor.insert_text(&key.text);\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
         ['a_chord_is_neither_a_mail_key_nor_typing'],
     ),
     (
         'a chord works the search box',
-        '        if !textline::is_plain(key.modifiers) {\n            return EventResult::Ignored;\n        }\n',
-        '',
+        "            Key::Escape if plain => {\n                self.searching = false;\n                self.set_search(\"\");\n",
+        "            Key::Escape => {\n                self.searching = false;\n                self.set_search(\"\");\n",
         ['a_chord_is_neither_a_mail_key_nor_typing'],
     ),
     (
@@ -411,8 +411,8 @@ MUTATIONS += [
     ),
     (
         "the right-click leaves the keyboard where it was",
-        "        compose.field = field;\n        self.field_menu.open(field, menu, x, y, viewport);\n",
-        "        self.field_menu.open(field, menu, x, y, viewport);\n",
+        "        compose.field = field;\n        self.field_menu\n            .open(MenuField::Compose(field), menu, x, y, viewport);\n",
+        "        self.field_menu\n            .open(MenuField::Compose(field), menu, x, y, viewport);\n",
         [E_COPY],
     ),
     (
@@ -479,6 +479,82 @@ MUTATIONS += [
         '        match self.field_menu.event(event) {\n            fieldmenu::Outcome::Window => {}\n',
         '        match self.field_menu.event(event) {\n            fieldmenu::Outcome::Window\n                if self.field_menu.is_up()\n                    && matches!(\n                        event,\n                        Event::Mouse(MouseEvent {\n                            kind: MouseEventKind::Release(_),\n                            ..\n                        })\n                    ) =>\n            {\n                return EventResult::Consumed;\n            }\n            fieldmenu::Outcome::Window => {}\n',
         ["a_body_drag_ends_at_its_release_though_a_menu_came_up_in_it"],
+    ),
+]
+
+# The search box edits at a caret, on the program's clipboard, with a
+# right-click menu (2026-10-16).
+S_CARET = "the_search_box_edits_at_a_caret"
+S_PRESS = "a_press_in_the_search_box_puts_the_caret_there"
+S_SYNC = "a_search_emptied_by_the_list_is_empty_in_the_box"
+S_MENU = "the_search_boxs_right_click_menu_edits_the_search"
+
+MUTATIONS += [
+    (
+        "the search types only at its end",
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        let end = self.search_editor.text().len();\n        self.search_editor.set_cursor(text::TextCursor::from(end));\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        [S_CARET],
+    ),
+    (
+        "the search box's editor is not reloaded",
+        "        self.sync_search_editor();\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        [S_SYNC],
+    ),
+    (
+        "what is typed is not searched for",
+        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n        if edit.handled {\n",
+        "        if edit.handled {\n",
+        [S_CARET],
+    ),
+    (
+        "a key typed into the search is reported unanswered",
+        "        self.set_search(&typed);\n        if edit.handled {\n",
+        "        self.set_search(&typed);\n        if false {\n",
+        [S_CARET],
+    ),
+    (
+        "the search box answers the window's chords",
+        "        self.set_search(&typed);\n        if edit.handled {\n",
+        "        self.set_search(&typed);\n        if true {\n",
+        [S_CARET],
+    ),
+    (
+        "the box with the keyboard is drawn as any other",
+        "        if self.searching {\n            // The box with the keyboard:",
+        "        if false {\n            // The box with the keyboard:",
+        [S_CARET],
+    ),
+    (
+        "a press in the search box puts the caret nowhere",
+        "            Target::SearchBox => self.place_search_caret(search_box_rect(), x),\n",
+        "            Target::SearchBox => self.searching = true,\n",
+        [S_PRESS],
+    ),
+    (
+        "a right press on the search box opens no menu",
+        "            Some(Target::SearchBox) => {\n                self.sync_search_editor();\n",
+        "            Some(Target::SearchBox) if false => {\n                self.sync_search_editor();\n",
+        [S_MENU],
+    ),
+    (
+        "the search's right-click leaves the keyboard where it was",
+        "                self.searching = true;\n                let menu = self.search_editor.edit_menu();\n",
+        "                let menu = self.search_editor.edit_menu();\n",
+        [S_MENU],
+    ),
+    (
+        "a row chosen does nothing to the search",
+        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if false {\n",
+        [S_MENU],
+    ),
+    (
+        "a paste from the menu is not searched for",
+        "                    let typed = self.search_editor.text().to_owned();\n                    self.set_search(&typed);\n                }\n                return EventResult::Consumed;\n",
+        "                }\n                return EventResult::Consumed;\n",
+        [S_MENU],
     ),
 ]
 

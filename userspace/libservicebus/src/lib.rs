@@ -331,9 +331,11 @@ fn len_arg(n: usize) -> u64 {
 /// Overwrite `buf` with zeros in a way the optimiser may not drop.
 ///
 /// For buffers that held a message: a message can carry a password (logind's
-/// `AuthenticateSession` does), and a plain `fill(0)` just before a buffer is
-/// freed is a dead store the compiler is entitled to delete.
-fn wipe(buf: &mut [u8]) {
+/// `AuthenticateSession` and `loginmgr`'s `Authenticate` do), and a plain
+/// `fill(0)` just before a buffer is freed is a dead store the compiler is
+/// entitled to delete. Services use it on what they received, as this crate
+/// does on its own buffers.
+pub fn wipe(buf: &mut [u8]) {
     for byte in buf.iter_mut() {
         // SAFETY: `byte` is a valid, aligned, exclusively borrowed `u8`; a
         // volatile write of a `u8` to it is in bounds.

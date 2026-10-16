@@ -29,6 +29,7 @@
 use quoting::{quoteaf_os, quotef_os};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -5038,7 +5039,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
 }
 
 /// Top-level snapshot command dispatcher.
-fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
+fn cmd_snapshot(db: &PackageDb, args: &[OsString], dry_run: bool) {
     if args.is_empty() {
         println!("Usage: pkg snapshot <subcommand> [options]");
         println!();
@@ -5053,9 +5054,9 @@ fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
         return;
     }
 
-    match args[0].as_str() {
+    match text_arg(&args[0]).as_str() {
         "export" => {
-            let path = args.get(1).map(|s| Path::new(s.as_str()));
+            let path = args.get(1).map(Path::new);
             cmd_snapshot_export(db, path);
         }
         "diff" | "compare" => {
@@ -5202,24 +5203,46 @@ Package Manifest Format:
 
 /// `--root DIR` or `--root=DIR` at the front of `args`: the directory, and
 /// the arguments after it. `Err` names what is wrong with it.
-fn take_root(args: &[String]) -> Result<(Option<PathBuf>, &[String]), &'static str> {
+fn take_root(args: &[OsString]) -> Result<(Option<PathBuf>, &[OsString]), &'static str> {
     match args.split_first() {
         Some((first, rest)) if first == "--root" => match rest.split_first() {
             Some((dir, rest)) if !dir.is_empty() => Ok((Some(PathBuf::from(dir)), rest)),
             _ => Err("--root requires a directory"),
         },
-        Some((first, rest)) => match first.strip_prefix("--root=") {
-            Some("") => Err("--root requires a directory"),
-            Some(dir) => Ok((Some(PathBuf::from(dir)), rest)),
+        Some((first, rest)) => match quoting::os_bytes(first).strip_prefix(b"--root=") {
+            Some([]) => Err("--root requires a directory"),
+            Some(dir) => Ok((Some(PathBuf::from(quoting::os_from_bytes(dir))), rest)),
             None => Ok((None, args)),
         },
         None => Ok((None, args)),
     }
 }
 
+/// `arg` as text -- a package's name, a query, a subcommand or an option,
+/// which pkg's manifests and its index hold only as text -- or the run ends
+/// saying so. (A path is taken as bytes where one is expected, and never
+/// comes here.)
+fn text_arg(arg: &OsStr) -> String {
+    arg.to_str().map_or_else(
+        || {
+            eprintln!(
+                "pkg: {}: not a package name, query or option (it is not UTF-8 text)",
+                quoteaf_os(arg)
+            );
+            process::exit(1)
+        },
+        str::to_string,
+    )
+}
+
+/// Each of `args` as text, as [`text_arg`] takes one.
+fn text_args(args: &[OsString]) -> Vec<String> {
+    args.iter().map(|a| text_arg(a)).collect()
+}
+
 fn main() {
-    let all: Vec<String> = env::args().skip(1).collect();
-    let args: Vec<String> = match take_root(&all) {
+    let all: Vec<OsString> = env::args_os().skip(1).collect();
+    let args: Vec<OsString> = match take_root(&all) {
         Ok((root, rest)) => {
             if let Some(root) = root {
                 let _ = ROOT.set(root);
@@ -5238,25 +5261,23 @@ fn main() {
     }
 
     let db = PackageDb::new();
-    let command = args[0].as_str();
-    let rest: Vec<String> = args[1..].to_vec();
+    let command = text_arg(&args[0]);
+    let rest: &[OsString] = &args[1..];
 
     // Check for --dry-run flag
     let dry_run = rest.iter().any(|a| a == "--dry-run");
-    let rest_filtered: Vec<String> = rest
-        .iter()
-        .filter(|a| a.as_str() != "--dry-run")
-        .cloned()
-        .collect();
+    let rest_os: Vec<OsString> = rest.iter().filter(|a| *a != "--dry-run").cloned().collect();
+    // The words of a command that takes no path: every one must be text.
+    let words = || text_args(&rest_os);
 
-    match command {
+    match command.as_str() {
         "install" => {
             // Detect if any argument is a local .pkg file path.
             // A local path is identified by: ending in ".pkg", starting with "/" or "./",
             // or containing a path separator and pointing to an existing file.
-            let (local_paths, repo_names): (Vec<String>, Vec<String>) = rest_filtered
-                .into_iter()
-                .partition(|arg| is_local_pkg_path(arg));
+            let (local_paths, repo_names): (Vec<OsString>, Vec<OsString>) =
+                rest_os.into_iter().partition(|arg| is_local_pkg_path(arg));
+            let repo_names = text_args(&repo_names);
 
             if !local_paths.is_empty() {
                 let paths: Vec<PathBuf> = local_paths.iter().map(PathBuf::from).collect();
@@ -5270,14 +5291,15 @@ fn main() {
                 process::exit(1);
             }
         }
-        "remove" | "uninstall" => cmd_remove(&db, &rest_filtered, dry_run),
+        "remove" | "uninstall" => cmd_remove(&db, &words(), dry_run),
         "update" => cmd_update(&db),
-        "upgrade" => cmd_upgrade(&db, &rest_filtered, dry_run),
+        "upgrade" => cmd_upgrade(&db, &words(), dry_run),
         "list" | "ls" => {
             let installed_only = rest.iter().any(|a| a == "--installed" || a == "-i");
             cmd_list(&db, installed_only);
         }
         "search" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: search requires a query");
                 process::exit(1);
@@ -5292,6 +5314,7 @@ fn main() {
             }
         }
         "info" | "show" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: info requires a package name");
                 process::exit(1);
@@ -5300,10 +5323,11 @@ fn main() {
         }
         "generations" | "gen" => cmd_generations(&db),
         "rollback" => {
-            let target = rest_filtered.first().and_then(|s| s.parse().ok());
+            let target = words().first().and_then(|s| s.parse().ok());
             cmd_rollback(&db, target);
         }
         "gc" => {
+            let rest_filtered = words();
             let mut keep = 5usize;
             let mut i = 0;
             while i < rest_filtered.len() {
@@ -5318,8 +5342,9 @@ fn main() {
             }
             cmd_gc(&db, keep);
         }
-        "verify" => cmd_verify(&db, &rest_filtered),
+        "verify" => cmd_verify(&db, &words()),
         "files" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: files requires a package name");
                 process::exit(1);
@@ -5327,13 +5352,22 @@ fn main() {
             cmd_files(&db, &rest_filtered[0]);
         }
         "which" | "owns" => {
-            if rest_filtered.is_empty() {
+            let Some(path) = rest_os.first() else {
                 eprintln!("pkg: which requires a file path");
                 process::exit(1);
+            };
+            // Every installed path is text, as the manifests that name
+            // them are: one that is not owns nothing.
+            match path.to_str() {
+                Some(path) => cmd_which(&db, path),
+                None => {
+                    eprintln!("pkg: {}: not owned by any package", quotef_os(path));
+                    process::exit(1);
+                }
             }
-            cmd_which(&db, &rest_filtered[0]);
         }
         "fetch" | "download" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: fetch requires one or more package names");
                 process::exit(1);
@@ -5341,23 +5375,24 @@ fn main() {
             cmd_fetch(&db, &rest_filtered);
         }
         "pack" => {
-            if rest_filtered.is_empty() {
+            let Some(manifest) = rest_os.first() else {
                 eprintln!("pkg: pack requires a manifest path");
                 eprintln!("Usage: pkg pack <manifest-file> [--output <file.pkg>]");
                 process::exit(1);
-            }
-            let manifest_path = Path::new(&rest_filtered[0]);
-            let output = rest_filtered
+            };
+            let manifest_path = Path::new(manifest);
+            let output = rest_os
                 .iter()
                 .position(|a| a == "--output" || a == "-o")
-                .and_then(|i| rest_filtered.get(i + 1))
-                .map(|s| Path::new(s.as_str()));
+                .and_then(|i| rest_os.get(i + 1))
+                .map(Path::new);
             cmd_pack(manifest_path, output);
         }
-        "repo" | "repository" => cmd_repo(&rest_filtered),
-        "log" | "history" => cmd_log(&rest_filtered),
-        "snapshot" | "snap" => cmd_snapshot(&db, &rest_filtered, dry_run),
+        "repo" | "repository" => cmd_repo(&words()),
+        "log" | "history" => cmd_log(&words()),
+        "snapshot" | "snap" => cmd_snapshot(&db, &rest_os, dry_run),
         "rdeps" | "reverse-deps" | "dependents" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: rdeps requires a package name");
                 process::exit(1);
@@ -5366,6 +5401,7 @@ fn main() {
         }
         "libs" | "libraries" => cmd_libs(&db),
         "upgrade-lib" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: upgrade-lib requires a library package name");
                 process::exit(1);
@@ -5386,14 +5422,12 @@ fn main() {
 ///
 /// Heuristic: it's a local path if it ends in `.pkg`, starts with `/` or `./`
 /// or `../`, or contains a path separator and the file exists.
-fn is_local_pkg_path(arg: &str) -> bool {
-    if arg.ends_with(".pkg") {
+fn is_local_pkg_path(arg: &OsStr) -> bool {
+    let bytes = quoting::os_bytes(arg);
+    if bytes.ends_with(b".pkg") {
         return true;
     }
-    if arg.starts_with('/') || arg.starts_with("./") || arg.starts_with("../") {
-        return Path::new(arg).exists();
-    }
-    if arg.contains('/') {
+    if bytes.contains(&b'/') {
         return Path::new(arg).exists();
     }
     false
@@ -5845,7 +5879,7 @@ mod tests {
 
     #[test]
     fn the_root_comes_first_in_either_spelling() {
-        let words = |w: &[&str]| w.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        let words = |w: &[&str]| w.iter().map(OsString::from).collect::<Vec<_>>();
         let args = words(&["--root", "/mnt/t", "list"]);
         let (root, rest) = take_root(&args).unwrap();
         assert_eq!(

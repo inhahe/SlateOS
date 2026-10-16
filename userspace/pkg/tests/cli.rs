@@ -124,6 +124,56 @@ fn a_package_is_packed_installed_shown_and_removed_under_the_root() {
     assert_eq!(stdout(&o), "No packages installed.\n");
 }
 
+/// An argument that is not UTF-8: a path is taken as the bytes it is, and a
+/// word that must be text -- a package's name -- is refused, not a panic.
+#[cfg(unix)]
+#[test]
+fn an_argument_need_not_be_text_where_a_path_is_wanted() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+
+    let scratch = scratchdir::ScratchDir::new("pkg-cli-bytes");
+    let root = scratch.path("root");
+    let manifest = sources(&scratch.path("src-\u{ff}").join(OsStr::from_bytes(b"\xff")));
+    let archive = scratch.path("x").join(OsStr::from_bytes(b"hello-\xfe.pkg"));
+    std::fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let run = |args: &[&OsStr]| {
+        Command::new(env!("CARGO_BIN_EXE_pkg"))
+            .arg("--root")
+            .arg(&root)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    let o = run(&[
+        OsStr::new("pack"),
+        manifest.as_os_str(),
+        OsStr::new("-o"),
+        archive.as_os_str(),
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(archive.is_file());
+    let o = run(&[OsStr::new("install"), archive.as_os_str()]);
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    assert!(root.join("usr/share/hello/hello.txt").is_file());
+
+    let o = run(&[OsStr::new("info"), OsStr::from_bytes(b"he\xffllo")]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        stderr(&o),
+        "pkg: 'he'$'\\377''llo': not a package name, query or option (it is not UTF-8 text)\n"
+    );
+
+    let o = run(&[OsStr::new("which"), OsStr::from_bytes(b"/usr/\xff")]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).ends_with(": not owned by any package\n"),
+        "{}",
+        stderr(&o)
+    );
+}
+
 #[test]
 fn a_font_family_is_searched_for_in_the_root_s_index() {
     let scratch = scratchdir::ScratchDir::new("pkg-cli-fonts");

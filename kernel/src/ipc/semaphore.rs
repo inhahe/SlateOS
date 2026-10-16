@@ -201,7 +201,9 @@ pub fn signal(handle: SemHandle, count: u64) -> KernelResult<()> {
     // (`grant_batch`): `SEM_TABLE` is a leaf, so each batch is woken after it
     // is let go, and the next taken under it again. Until then the units not
     // yet granted are held in `granting`, not counted, so no `wait` arriving
-    // between batches takes one ahead of the queue.
+    // between batches takes one ahead of the queue. A signal killed between
+    // batches leaves them so: known-issues
+    // A-KILL-ENDS-A-THREAD-WHEREVER-IT-IS-IN-THE-KERNEL.
     let mut left = count;
     let mut accepted = false;
     loop {

@@ -206,16 +206,57 @@ def cases(fx: Fixture) -> None:
           (kind(note), "helper_mod.py changed" in note), ("MISS", True))
     fx.run(importer)
     fx.write("json.py", "raise SystemExit('the standard json, shadowed')\n")
-    _, _, note = fx.run(importer)
-    check("a module that would shadow one it imported appeared: miss",
-          (kind(note), "an import of json finds" in note), ("MISS", True))
+    rc, _, note = fx.run(importer)
+    # The traced run would import the json the tracer loaded first; the
+    # untraced gate imports this file and fails, and that verdict stands.
+    check("a module that would shadow one it imported appeared: miss, untraced verdict",
+          (kind(note), "an import of json finds" in note, "exit 1 stands" in note, rc),
+          ("MISS", True, True, 1))
     os.remove(fx.path("json.py"))
-    fx.run(importer)
+    # A second importer: the first is uncacheable for the day now.
+    importer2 = fx.checker("""
+        import helper_mod
+        print(helper_mod.VALUE)
+    """)
+    fx.run(importer2)
     os.makedirs(fx.path("helper_mod"))
-    _, _, note = fx.run(importer)
+    _, _, note = fx.run(importer2)
     check("a package of the same name appeared beside a module it imported: miss",
           (kind(note), "an import of helper_mod finds" in note), ("MISS", True))
     os.rmdir(fx.path("helper_mod"))
+
+    # An import answered by a valid .pyc opens only the bytecode, never the
+    # source: the source must be an input all the same.
+    fx.write("pyc_mod.py", "VALUE = 'one'\n")
+    pyc_importer = fx.checker("""
+        import pyc_mod
+        print(pyc_mod.VALUE)
+    """)
+    warm = {k: v for k, v in os.environ.items() if k != "PYTHONDONTWRITEBYTECODE"}
+    subprocess.run([sys.executable, "-c", "import pyc_mod"], cwd=fx.root, env=warm,
+                   check=True)
+    check("the fixture has a .pyc for the module",
+          any(n.startswith("pyc_mod.") for n in os.listdir(fx.path("__pycache__"))), True)
+    fx.run(pyc_importer)
+    fx.write("pyc_mod.py", "VALUE = 'two, longer'\n")
+    _, out, note = fx.run(pyc_importer)
+    check("a module imported through its .pyc changed: miss",
+          (kind(note), "pyc_mod.py changed" in note, b"two" in out), ("MISS", True, True))
+
+    # A module the tracer itself loads before the gate runs (json), shadowed
+    # by a file beside the gate: the traced run imports the real one, the
+    # untraced gate the file. The traced pass is not stored, and the
+    # untraced run's verdict is the one returned.
+    shadowed = fx.checker("""
+        import json
+        print(json.dumps(2))
+    """)
+    fx.write("json.py", "raise SystemExit('the standard json, shadowed')\n")
+    rc, _, note = fx.run(shadowed)
+    os.remove(fx.path("json.py"))
+    check("a file shadowing a module the tracer loaded first: not stored, untraced verdict",
+          (rc, "would shadow the json module" in note, "exit 1 stands" in note),
+          (1, True, True))
 
     probe = fx.path("data", "maybe.txt")
     asker = fx.checker(f"""

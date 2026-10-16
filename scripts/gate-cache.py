@@ -193,8 +193,9 @@ def run_traced(argv: list[str], trace_dir: str) -> tuple[int, bytes]:
     env = dict(os.environ)
     env["GATE_CACHE_TRACE_DIR"] = trace_dir
     env["GATE_CACHE_SPAWN"] = "root"
-    # Bytecode is a cache of a source the tracer already records as read; but
-    # writing it is a write outside the run, which refused to store any gate
+    # Bytecode is a cache of a source the tracer records as read whether or
+    # not a .pyc answered the import (`_read_module_sources`); but writing
+    # it is a write outside the run, which refused to store any gate
     # whose imported module had changed since its .pyc -- and the refusal is
     # remembered for the day, so the gate then ran untraced however often it
     # booted. Traced runs compile in memory instead; untraced ones keep the
@@ -478,13 +479,27 @@ def main(argv: list[str] | None = None) -> int:
         return rc
     try:
         if inputs is None:
+            verdict = rc
+            rerun = ""
+            if any(w.startswith(gt.SHADOWED) for w in why):
+                # The traced run used a module the untraced one would not:
+                # its pass is not the gate's verdict. The untraced run's is.
+                retry = subprocess.run(command, stdout=subprocess.PIPE,
+                                       stderr=subprocess.STDOUT)
+                verdict = retry.returncode
+                if verdict != rc:
+                    sys.stdout.write("\n--- gate-cache: the untraced re-run's output ---\n")
+                    sys.stdout.flush()
+                    sys.stdout.buffer.write(retry.stdout)
+                    sys.stdout.buffer.flush()
+                rerun = f"; run again untraced, whose exit {verdict} stands"
             note(f"{head}; not stored: " + "; ".join(why[:3])
-                 + (f" (+{len(why) - 3} more)" if len(why) > 3 else ""))
+                 + (f" (+{len(why) - 3} more)" if len(why) > 3 else "") + rerun)
             store(store_dir, key, {"format": FORMAT, "label": label, "argv": command,
                                    "utc_date": today(), "uncacheable": why,
                                    "scripts": script_digests(command)})
             log("UNCACHEABLE", label, started)
-            return rc
+            return verdict
         store(store_dir, key, {
             "format": FORMAT, "label": label, "argv": command, "cwd": cwd,
             "recorded": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),

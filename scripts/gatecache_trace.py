@@ -72,6 +72,11 @@ REPO_ENV_NAMES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRE
                   "GIT_TEMPLATE_DIR", "GIT_CEILING_DIRECTORIES", "GIT_NAMESPACE")
 _PYTHON_NAMES = {"python", "python3", "pythonw", "py"}
 
+#: Opens a refusal that says more than "not cacheable": the traced run did
+#: not do what an untraced one would, so its verdict is not the gate's
+#: either, and the driver runs the gate again untraced.
+SHADOWED = "shadowed: "
+
 #: git subcommands that only read. Any other one, run against a repository the
 #: run did not create, changes that repository, and a replay would not.
 GIT_READS = {
@@ -331,6 +336,53 @@ class _Tracer:
             entries = self._dir_entries.setdefault(path, entries)
             self.lookups.setdefault(path, {}).setdefault(name, module_digest(entries, name))
 
+    def _read_module_sources(self) -> None:
+        """Record every loaded module's file as read. An import that finds a
+        valid `.pyc` opens only that (which `read` ignores) and never the
+        source, so without this a gate's helper module would be no input of
+        its run, and an edit to it would replay the old verdict."""
+        for module in list(sys.modules.values()):
+            spec = getattr(module, "__spec__", None)
+            origin = getattr(spec, "origin", None)
+            if spec is None or not getattr(spec, "has_location", False) or not isinstance(origin, str):
+                continue
+            path = norm(origin)
+            if path is not None:
+                self.read(path)
+
+    def _refuse_shadowed_preloads(self, search: list[str]) -> None:
+        """Refuse the run when a module the tracer's startup loaded would, in
+        an untraced run, be found earlier on the path than where it was loaded
+        from: a file beside the gate named like it. This run used the loaded
+        one and the untraced run would not, so its verdict is not theirs."""
+        for name in self.preloaded:
+            module = sys.modules.get(name)
+            spec = getattr(module, "__spec__", None)
+            origin = getattr(spec, "origin", None)
+            if spec is None or not getattr(spec, "has_location", False) or not isinstance(origin, str):
+                continue  # builtin or frozen: found before any path entry
+            loaded = norm(os.path.dirname(origin))
+            if spec.submodule_search_locations is not None and loaded is not None:
+                loaded = norm(os.path.dirname(loaded))  # a package: its parent
+            for path in search:
+                if path == loaded:
+                    break
+                with self.lock:
+                    known = path in self._dir_entries
+                    entries = self._dir_entries.get(path)
+                if not known:
+                    self.enter()
+                    try:
+                        entries = module_entries(path)
+                    finally:
+                        self.leave()
+                key = name.casefold()
+                if any(e[0].casefold() == key or e[0].casefold().startswith(key + ".")
+                       for e in entries or ()):
+                    self.refuse(f"{SHADOWED}{os.path.join(path, name)}* would shadow the "
+                                f"{name} module the tracer loaded first")
+                    break
+
     def asked(self, path: str, kind: str) -> None:
         if self.is_internal(path):
             return
@@ -348,11 +400,13 @@ class _Tracer:
     def dump(self) -> None:
         if self.ended:
             return
-        for entry in list(sys.path):
-            path = norm(entry or os.getcwd())
-            if path is not None:
-                for name in self.preloaded:
-                    self.looked_up(path, name)
+        search = [p for p in (norm(entry or os.getcwd()) for entry in list(sys.path))
+                  if p is not None]
+        for path in search:
+            for name in self.preloaded:
+                self.looked_up(path, name)
+        self._refuse_shadowed_preloads(search)
+        self._read_module_sources()
         self.ended = True
         record = {
             "pid": os.getpid(),
@@ -591,7 +645,10 @@ def _from_import_cache() -> bool:
     the import system's cache of a directory. Only the finder's own frame
     counts, a few calls up from this hook: a gate that lists a directory
     itself, however it gets there, is recorded in full."""
-    frame = sys._getframe(2)
+    try:
+        frame = sys._getframe(2)
+    except ValueError:  # fewer Python frames than that: not the finder
+        return False
     for _ in range(3):
         if frame is None:
             return False

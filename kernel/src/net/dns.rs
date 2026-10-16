@@ -1175,6 +1175,11 @@ fn pick_dns_server() -> KernelResult<DnsServer> {
 /// exhausting all retry attempts.
 #[allow(clippy::arithmetic_side_effects)]
 fn dns_query_raw(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
+    // While the network daemon holds the card, the kernel's own UDP can send
+    // but never hears the answer: what arrives is the daemon's to read.
+    if super::raw::is_claimed() {
+        return dns_query_daemon(server, query, name);
+    }
     // Port 0 means "any free port", which the allocator draws from the
     // CSPRNG.  Reading it back is necessary because `udp::send` is keyed by
     // port rather than by socket handle.
@@ -1250,6 +1255,73 @@ fn dns_query_raw(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<V
         server
     );
     Err(KernelError::TimedOut)
+}
+
+/// The largest DNS answer [`dns_query_daemon`] takes: what EDNS0 offers at
+/// most (RFC 6891 §6.2.5), well above the 512 bytes a plain query is answered
+/// within.
+const MAX_DNS_REPLY: usize = 4096;
+
+/// [`dns_query_raw`] over the network daemon, while it holds the card: the
+/// query goes as a datagram of a daemon-backed socket (`net::socket`), with
+/// the same attempts and the same per-attempt waits, sleeping rather than
+/// spinning between looks. The source port is the daemon's choice, as the
+/// kernel's own is `udp::bind`'s.
+fn dns_query_daemon(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
+    use super::socket;
+    /// `AF_INET` and `AF_INET6`, the socket layer's domains.
+    const AF_INET: u16 = 2;
+    const AF_INET6: u16 = 10;
+
+    let sock = socket::create_dgram(match server {
+        DnsServer::V4(_) => AF_INET,
+        DnsServer::V6(_) => AF_INET6,
+    })?;
+    let outcome = (|| {
+        let mut reply = crate::mm::user::alloc_zeroed_vec(MAX_DNS_REPLY)?;
+        for attempt in 0..MAX_DNS_ATTEMPTS {
+            match server {
+                DnsServer::V4(ip) => socket::dgram_send_to(sock, &ip.0, DNS_PORT, query)?,
+                DnsServer::V6(ip) => socket::dgram_send_to6(sock, &ip.0, DNS_PORT, query)?,
+            };
+            // The kernel path's polls are about a millisecond each.
+            let wait_ms = DNS_ATTEMPT_POLLS.get(attempt).copied().unwrap_or(2000);
+            let wait_ms = u64::try_from(wait_ms).unwrap_or(2000);
+            let deadline =
+                crate::hrtimer::now_ns().saturating_add(wait_ms.saturating_mul(1_000_000));
+            loop {
+                match socket::dgram_recv_from(sock, &mut reply, true) {
+                    Ok((len, _family, from, port)) => {
+                        let from_server = match server {
+                            DnsServer::V4(ip) => from.get(..4) == Some(&ip.0[..]),
+                            DnsServer::V6(ip) => from == ip.0,
+                        };
+                        if from_server && port == DNS_PORT {
+                            let len = usize::try_from(len).map_err(|_| KernelError::IoError)?;
+                            reply.truncate(len.min(MAX_DNS_REPLY));
+                            return Ok(reply);
+                        }
+                    }
+                    Err(KernelError::WouldBlock) => {
+                        if crate::hrtimer::now_ns() >= deadline {
+                            break;
+                        }
+                        crate::sched::sleep_ms(1);
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        crate::serial_println!(
+            "[dns] Query timed out for '{}' after {} attempts via {} (through the network daemon)",
+            name,
+            MAX_DNS_ATTEMPTS,
+            server
+        );
+        Err(KernelError::TimedOut)
+    })();
+    socket::close(sock);
+    outcome
 }
 
 /// Flush the entire DNS cache (both A and AAAA).

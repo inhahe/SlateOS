@@ -6017,6 +6017,19 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // previously only covered by code review, never a live ring-3 call.
     run_ring3_http_capstone();
 
+    // The native resolver and TCP calls, which lane D's C library looks
+    // names up and connects with, work while the daemon holds the card as
+    // the daemon's own do (known-issues
+    // A-NATIVE-SOCKETS-AND-DNS-STILL-USE-THE-KERNEL-STACK-...).
+    if let Err(e) = check_native_resolve_parity() {
+        serial_println!("[spawn]   FAIL: native socket parity ({:?})", e);
+        crate::selftest::report_debug(
+            "native socket parity",
+            crate::selftest::Severity::Diagnostic,
+            Err::<(), _>(e),
+        );
+    }
+
     // Ring-3 datagram capstone (UDP SOCK_DGRAM cutover): the datagram sibling of
     // the HTTP capstone. `udpget` (a bare Linux-ABI ELF) does socket(SOCK_DGRAM)/
     // bind()/sendto()/recvfrom()/close() over the persistent daemon, proving the
@@ -6036,6 +6049,138 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
          nonblock-send/listen-accept/connect6/udp6/udp-connect/ring3-capstone/ring3-udp/ring3-udp6 \
          parity checks done; daemon now owns the NIC for the system's lifetime"
+    );
+    Ok(())
+}
+
+/// Whether the native `SYS_DNS_RESOLVE` -- what lane D's C library looks a
+/// name up with -- answers while the daemon holds the card, wherever the
+/// daemon's own resolver does. With no upstream (the daemon cannot resolve
+/// either) there is nothing to compare, and the check passes.
+///
+/// # Errors
+///
+/// `NotFound` when the daemon resolves `example.com` and the native call
+/// does not: the native call is still on the kernel's stack, which hears
+/// nothing while the daemon holds the card.
+fn check_native_resolve_parity() -> KernelResult<()> {
+    let Ok(Some(_)) = netstack_resolve_a(b"example.com") else {
+        serial_println!(
+            "[spawn]   native resolver parity: the daemon cannot resolve either -- check skipped"
+        );
+        return Ok(());
+    };
+    let name = b"example.com";
+    let mut out = [0u8; 4];
+    let args = crate::syscall::dispatch::SyscallArgs {
+        arg0: name.as_ptr() as u64,
+        arg1: name.len() as u64,
+        arg2: out.as_mut_ptr() as u64,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let r = crate::syscall::dispatch::dispatch(crate::syscall::number::SYS_DNS_RESOLVE, &args);
+    if r.value < 0 || out == [0; 4] {
+        serial_println!(
+            "[spawn]   native resolver parity: the daemon resolves example.com, \
+             SYS_DNS_RESOLVE answers {}",
+            r.value
+        );
+        return Err(KernelError::NotFound);
+    }
+    serial_println!(
+        "[spawn]   native resolver parity: SYS_DNS_RESOLVE resolves example.com to {}.{}.{}.{} \
+         while the daemon holds the card: OK",
+        out[0],
+        out[1],
+        out[2],
+        out[3]
+    );
+    check_native_tcp_parity(out)
+}
+
+/// Whether a native TCP connection -- `SYS_TCP_CONNECT`, `_SEND`, `_RECV`,
+/// what lane D's C library's `connect`, `send` and `recv` are -- reaches
+/// `ip`'s port 80 and gets an HTTP answer while the daemon holds the card,
+/// wherever the daemon's own fetch of it does.
+///
+/// # Errors
+///
+/// `NotConnected` when the daemon fetches from `ip` and the native calls do
+/// not.
+fn check_native_tcp_parity(ip: [u8; 4]) -> KernelResult<()> {
+    use crate::syscall::dispatch::{SyscallArgs, dispatch};
+    use crate::syscall::number::{SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND};
+    /// `MSG_DONTWAIT`: a look that does not wait, so the check cannot hang.
+    const MSG_DONTWAIT: u64 = 0x40;
+    /// How long the answer may take.
+    const DEADLINE_NS: u64 = 10_000_000_000;
+
+    if netstack_tcp_fetch_roundtrip(&ip, 80) != Ok(Some(())) {
+        serial_println!(
+            "[spawn]   native TCP parity: the daemon cannot fetch from it either -- check skipped"
+        );
+        return Ok(());
+    }
+    let call = |nr: u64, a: [u64; 4]| {
+        dispatch(
+            nr,
+            &SyscallArgs {
+                arg0: a[0],
+                arg1: a[1],
+                arg2: a[2],
+                arg3: a[3],
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let ip_arg = u64::from(crate::net::interface::Ipv4Addr(ip).to_u32());
+    let handle = call(SYS_TCP_CONNECT, [ip_arg, 80, 0, 0]);
+    let Ok(handle) = u64::try_from(handle) else {
+        serial_println!(
+            "[spawn]   native TCP parity: SYS_TCP_CONNECT answers {}",
+            handle
+        );
+        return Err(KernelError::NotConnected);
+    };
+    let request = b"HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n";
+    let sent = call(
+        SYS_TCP_SEND,
+        [handle, request.as_ptr() as u64, request.len() as u64, 0],
+    );
+    let mut answer = [0u8; 16];
+    let mut got = 0i64;
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    while got <= 0 && crate::hrtimer::now_ns() < deadline {
+        got = call(
+            SYS_TCP_RECV,
+            [
+                handle,
+                answer.as_mut_ptr() as u64,
+                answer.len() as u64,
+                MSG_DONTWAIT,
+            ],
+        );
+        if got <= 0 {
+            crate::sched::sleep_ms(10);
+        }
+    }
+    call(SYS_TCP_CLOSE, [handle, 0, 0, 0]);
+    if sent <= 0 || got <= 0 || !answer.starts_with(b"HTTP/") {
+        serial_println!(
+            "[spawn]   native TCP parity: the daemon fetches from it, the native calls sent {} \
+             and received {}",
+            sent,
+            got
+        );
+        return Err(KernelError::NotConnected);
+    }
+    serial_println!(
+        "[spawn]   native TCP parity: SYS_TCP_CONNECT/SEND/RECV fetch an HTTP answer while \
+         the daemon holds the card: OK"
     );
     Ok(())
 }

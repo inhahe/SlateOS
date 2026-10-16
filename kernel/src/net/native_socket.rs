@@ -30,9 +30,14 @@
 //!   close, an exit or an exec that drops it takes one away ([`release`]), and
 //!   the last one closes the socket.
 //!
-//! The kernel's own users of `tcp` and `udp` -- the DNS resolver, the shell's
-//! commands, the HTTP client -- keep using slots: they hand nothing to a
-//! process.
+//! While the network daemon holds the card, a socket made in the root network
+//! namespace is the daemon's instead (`net::socket`), since the kernel's own
+//! stack hears nothing then: the handle names that socket ([`Backing`]), and
+//! the calls are served by it. A container's namespace keeps the kernel's
+//! stack (`open-questions/A-Q29.md`).
+//!
+//! The kernel's own users of `tcp` and `udp` -- the shell's commands -- keep
+//! using slots: they hand nothing to a process.
 //!
 //! Lock order: [`HANDLES`] is never held while a protocol's table is taken.
 
@@ -74,15 +79,32 @@ impl Kind {
     }
 }
 
+/// What an issued handle's socket is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backing {
+    /// A slot of the kernel stack's `kind` table, and the slot's generation
+    /// when the handle was issued: the object it names.
+    Kernel { slot: usize, generation: u32 },
+    /// A socket of the network daemon's, through `net::socket`.
+    Daemon(super::socket::SocketHandle),
+}
+
 /// One issued handle.
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     kind: Kind,
-    slot: usize,
-    /// The slot's generation when the handle was issued: the object it names.
-    generation: u32,
+    backing: Backing,
     /// How many processes hold the handle.
     holders: u32,
+}
+
+/// What a handle resolves to for one operation ([`resolve`]).
+pub enum Resolved {
+    /// A kernel stack slot, pinned for the operation.
+    Kernel(SlotPin),
+    /// A daemon socket. It lives until the handle's last holder lets go, so
+    /// it needs no pin.
+    Daemon(super::socket::SocketHandle),
 }
 
 /// Every issued handle that some process still holds.
@@ -99,6 +121,17 @@ static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 pub struct SlotPin {
     kind: Kind,
     slot: usize,
+}
+
+impl Resolved {
+    /// The kernel slot, for a kernel-backed handle.
+    #[must_use]
+    pub fn kernel_slot(&self) -> Option<usize> {
+        match self {
+            Self::Kernel(pin) => Some(pin.slot()),
+            Self::Daemon(_) => None,
+        }
+    }
 }
 
 impl SlotPin {
@@ -119,37 +152,48 @@ impl Drop for SlotPin {
 /// `slot` -- the pair a `*_tagged` create call returned.
 #[must_use]
 pub fn issue(kind: Kind, slot: usize, generation: u32) -> u64 {
+    issue_backed(kind, Backing::Kernel { slot, generation })
+}
+
+/// Issue a handle, held once, for the daemon socket `socket`, of `kind`. The
+/// handle's last release closes it.
+#[must_use]
+pub fn issue_daemon(kind: Kind, socket: super::socket::SocketHandle) -> u64 {
+    issue_backed(kind, Backing::Daemon(socket))
+}
+
+fn issue_backed(kind: Kind, backing: Backing) -> u64 {
     let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
     HANDLES.lock().insert(
         handle,
         Entry {
             kind,
-            slot,
-            generation,
+            backing,
             holders: 1,
         },
     );
     handle
 }
 
-/// Pin the slot `handle` names, if it is a `kind` handle and its object is
-/// still in that slot; `None` otherwise -- a handle never issued or already
-/// released, one of another kind, or one whose object has ended and whose
-/// slot has gone to another. Possession is the caller's to check first.
-pub fn resolve(handle: u64, kind: Kind) -> Option<SlotPin> {
+/// What `handle` names for one operation, if it is a `kind` handle: its
+/// daemon socket, or its kernel slot pinned if its object is still there.
+/// `None` otherwise -- a handle never issued or already released, one of
+/// another kind, or one whose kernel object has ended and whose slot has gone
+/// to another. Possession is the caller's to check first.
+pub fn resolve(handle: u64, kind: Kind) -> Option<Resolved> {
     let entry = HANDLES
         .lock()
         .get(&handle)
         .copied()
         .filter(|e| e.kind == kind)?;
-    // The protocol's table is taken after this table's lock is let go.
-    entry
-        .kind
-        .pin(entry.slot, entry.generation)
-        .then_some(SlotPin {
-            kind,
-            slot: entry.slot,
-        })
+    match entry.backing {
+        Backing::Daemon(socket) => Some(Resolved::Daemon(socket)),
+        // The protocol's table is taken after this table's lock is let go.
+        Backing::Kernel { slot, generation } => entry
+            .kind
+            .pin(slot, generation)
+            .then_some(Resolved::Kernel(SlotPin { kind, slot })),
+    }
 }
 
 /// What `handle` names, for a caller that takes more than one kind.
@@ -206,21 +250,30 @@ pub fn release(handle: u64, ending: Ending) -> KernelResult<()> {
     let Some(entry) = last else {
         return Ok(());
     };
+    let (slot, generation) = match entry.backing {
+        // The daemon's close is an orderly one either way: it has no reset to
+        // send on request.
+        Backing::Daemon(socket) => {
+            super::socket::close(socket);
+            return Ok(());
+        }
+        Backing::Kernel { slot, generation } => (slot, generation),
+    };
     // Pinned across the close, so the slot cannot change hands between the
     // check and the close.
-    if !entry.kind.pin(entry.slot, entry.generation) {
+    if !entry.kind.pin(slot, generation) {
         return Ok(());
     }
     let result = match (entry.kind, ending) {
-        (Kind::TcpConnection, Ending::Close) => super::tcp::close(entry.slot),
-        (Kind::TcpConnection, Ending::Abort) => super::tcp::abort(entry.slot),
-        (Kind::TcpListener, _) => super::tcp::close_listener(entry.slot),
+        (Kind::TcpConnection, Ending::Close) => super::tcp::close(slot),
+        (Kind::TcpConnection, Ending::Abort) => super::tcp::abort(slot),
+        (Kind::TcpListener, _) => super::tcp::close_listener(slot),
         (Kind::Udp, _) => {
-            super::udp::close(entry.slot);
+            super::udp::close(slot);
             Ok(())
         }
     };
-    entry.kind.unpin(entry.slot);
+    entry.kind.unpin(slot);
     result
 }
 
@@ -256,7 +309,7 @@ pub fn self_test() -> KernelResult<()> {
     // Resolve, kind, holders.
     let (slot, generation) = super::udp::bind_tagged(ns, 0)?;
     let h = issue(Kind::Udp, slot, generation);
-    let resolved = resolve(h, Kind::Udp).map(|p| p.slot());
+    let resolved = resolve(h, Kind::Udp).and_then(|r| r.kernel_slot());
     let wrong_kind = resolve(h, Kind::TcpConnection).is_some();
     let duped = dup(h).is_ok() && holders(h) == 2;
     let first = release(h, Ending::Close).is_ok();
@@ -299,7 +352,7 @@ pub fn self_test() -> KernelResult<()> {
     // A pinned slot is not given to a new socket.
     let (slot, generation) = super::udp::bind_tagged(ns, 0)?;
     let h = issue(Kind::Udp, slot, generation);
-    let Some(pin) = resolve(h, Kind::Udp) else {
+    let Some(Resolved::Kernel(pin)) = resolve(h, Kind::Udp) else {
         return fail("a live handle could not be pinned");
     };
     super::udp::close(slot);
@@ -316,10 +369,28 @@ pub fn self_test() -> KernelResult<()> {
         return fail("a handle whose socket had ended could not be released");
     }
 
+    // A daemon-backed handle resolves to its socket, for its own kind only,
+    // and goes with its last holder. (A socket no daemon issued: closing it
+    // is a no-op, so the table's own rules are what is tested.)
+    let socket = super::socket::SocketHandle::from_raw(u64::MAX);
+    let h = issue_daemon(Kind::TcpConnection, socket);
+    let to_socket =
+        matches!(resolve(h, Kind::TcpConnection), Some(Resolved::Daemon(s)) if s == socket);
+    let daemon_wrong_kind = resolve(h, Kind::Udp).is_some();
+    let held_twice = dup(h).is_ok() && holders(h) == 2;
+    let kept = release(h, Ending::Abort).is_ok() && resolve(h, Kind::TcpConnection).is_some();
+    let ended = release(h, Ending::Close).is_ok() && holders(h) == 0;
+    if !to_socket || daemon_wrong_kind {
+        return fail("a daemon-backed handle does not resolve to its socket, for its kind only");
+    }
+    if !(held_twice && kept && ended) {
+        return fail("a daemon-backed handle's holders are not counted as a kernel one's");
+    }
+
     serial_println!(
         "[native_socket]   handles: resolve to their slot and kind only; a second holder \
          keeps the socket; the last release closes it; a stale handle reaches nothing; a \
-         pinned slot is not reused: OK"
+         pinned slot is not reused; a daemon-backed handle alike: OK"
     );
     Ok(())
 }

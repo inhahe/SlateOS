@@ -419,159 +419,191 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[encrypt] Running self-test...");
 
-    // Every encryption draws its nonce from the random-number generator.
-    // Unseeded, the tests below would stop on that rather than on what they
-    // test: it is reported as the test's failure, not a panic.
-    generate_nonce()?;
-
-    test_chacha20_basic();
-    test_hmac_sha256();
-    test_encrypt_decrypt();
-    test_wrong_key();
-    test_tamper_detection();
-    test_key_management();
-    test_nonce_uniqueness();
-    test_file_info();
+    test_chacha20_basic()?;
+    test_hmac_sha256()?;
+    test_encrypt_decrypt()?;
+    test_wrong_key()?;
+    test_tamper_detection()?;
+    test_key_management()?;
+    test_nonce_uniqueness()?;
+    test_file_info()?;
 
     serial_println!("[encrypt] Self-test passed (8 tests).");
     Ok(())
 }
 
-fn test_chacha20_basic() {
+/// One check of [`self_test`]: an error naming `what`, which the self-test
+/// returns, when `ok` is false -- never a panic, which would halt the boot of
+/// a test dispatched as a diagnostic.
+fn check(ok: bool, what: &str) -> KernelResult<()> {
+    if ok {
+        Ok(())
+    } else {
+        serial_println!("[encrypt]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    }
+}
+
+/// Run `body` with raw key `key` registered as `name`, and remove the key
+/// afterwards whether it passed or not, so a failed test leaves no key
+/// behind for the next boot's self-test to trip on.
+fn with_raw_key(
+    name: &str,
+    key: [u8; KEY_SIZE],
+    body: impl FnOnce() -> KernelResult<()>,
+) -> KernelResult<()> {
+    add_raw_key(name, key)?;
+    let result = body();
+    let removed = remove_key(name);
+    result.and(removed)
+}
+
+fn test_chacha20_basic() -> KernelResult<()> {
     // Verify ChaCha20 is its own inverse (encrypt then decrypt = original).
     let key = [0x42u8; KEY_SIZE];
     let nonce = [0x01u8; NONCE_SIZE];
     let plaintext = b"Hello, ChaCha20 encryption test!";
 
     let ciphertext = chacha20_crypt(&key, &nonce, plaintext);
-    assert_ne!(&ciphertext, plaintext.as_ref(), "should not be plaintext");
-
+    check(
+        ciphertext.as_slice() != plaintext.as_slice(),
+        "chacha20 left the plaintext as it was",
+    )?;
     let decrypted = chacha20_crypt(&key, &nonce, &ciphertext);
-    assert_eq!(&decrypted, plaintext.as_ref(), "decrypt should match");
+    check(
+        decrypted.as_slice() == plaintext.as_slice(),
+        "chacha20 twice did not give the plaintext",
+    )?;
 
     serial_println!("[encrypt]   chacha20 basic: ok");
+    Ok(())
 }
 
-fn test_hmac_sha256() {
+fn test_hmac_sha256() -> KernelResult<()> {
     // Basic HMAC-SHA256 consistency check.
     let key = [0xAB; KEY_SIZE];
     let msg = b"test message for HMAC";
 
     let mac1 = hmac_sha256(&key, msg);
-    let mac2 = hmac_sha256(&key, msg);
-    assert_eq!(mac1, mac2, "same input → same MAC");
-
-    // Different message → different MAC.
-    let mac3 = hmac_sha256(&key, b"different message");
-    assert_ne!(mac1, mac3, "different input → different MAC");
-
-    // Different key → different MAC.
-    let key2 = [0xCD; KEY_SIZE];
-    let mac4 = hmac_sha256(&key2, msg);
-    assert_ne!(mac1, mac4, "different key → different MAC");
+    check(
+        mac1 == hmac_sha256(&key, msg),
+        "the same input gave two MACs",
+    )?;
+    check(
+        mac1 != hmac_sha256(&key, b"different message"),
+        "two messages gave one MAC",
+    )?;
+    check(
+        mac1 != hmac_sha256(&[0xCD; KEY_SIZE], msg),
+        "two keys gave one MAC",
+    )?;
 
     serial_println!("[encrypt]   hmac-sha256: ok");
+    Ok(())
 }
 
-fn test_encrypt_decrypt() {
+fn test_encrypt_decrypt() -> KernelResult<()> {
     // Full round-trip: add key, encrypt, decrypt.
-    add_raw_key("test_enc_1", [0x55; KEY_SIZE]).expect("add key");
-
-    let plaintext = b"Secret data that must be protected from unauthorized access.";
-    let encrypted = encrypt(plaintext, "test_enc_1").expect("encrypt");
-
-    assert!(is_encrypted(&encrypted));
-    assert_ne!(&encrypted[HEADER_SIZE..], plaintext.as_ref());
-
-    let decrypted = decrypt(&encrypted, "test_enc_1").expect("decrypt");
-    assert_eq!(&decrypted, plaintext.as_ref());
-
-    remove_key("test_enc_1").expect("remove key");
+    with_raw_key("test_enc_1", [0x55; KEY_SIZE], || {
+        let plaintext = b"Secret data that must be protected from unauthorized access.";
+        let encrypted = encrypt(plaintext, "test_enc_1")?;
+        check(
+            is_encrypted(&encrypted),
+            "an encryption is not marked encrypted",
+        )?;
+        check(
+            encrypted.get(HEADER_SIZE..) != Some(plaintext.as_slice()),
+            "an encryption holds the plaintext",
+        )?;
+        let decrypted = decrypt(&encrypted, "test_enc_1")?;
+        check(
+            decrypted.as_slice() == plaintext.as_slice(),
+            "a round trip changed the data",
+        )
+    })?;
     serial_println!("[encrypt]   encrypt/decrypt round-trip: ok");
+    Ok(())
 }
 
-fn test_wrong_key() {
+fn test_wrong_key() -> KernelResult<()> {
     // Decrypting with wrong key should fail (HMAC mismatch).
-    add_raw_key("test_enc_2a", [0x11; KEY_SIZE]).expect("add key a");
-    add_raw_key("test_enc_2b", [0x22; KEY_SIZE]).expect("add key b");
-
-    let plaintext = b"encrypted with key A";
-    let encrypted = encrypt(plaintext, "test_enc_2a").expect("encrypt");
-
-    // Try to decrypt with key B.
-    let result = decrypt(&encrypted, "test_enc_2b");
-    assert!(result.is_err(), "wrong key should fail");
-
-    remove_key("test_enc_2a").expect("rm");
-    remove_key("test_enc_2b").expect("rm");
+    with_raw_key("test_enc_2a", [0x11; KEY_SIZE], || {
+        with_raw_key("test_enc_2b", [0x22; KEY_SIZE], || {
+            let encrypted = encrypt(b"encrypted with key A", "test_enc_2a")?;
+            check(
+                decrypt(&encrypted, "test_enc_2b").is_err(),
+                "another key decrypted the data",
+            )
+        })
+    })?;
     serial_println!("[encrypt]   wrong key rejection: ok");
+    Ok(())
 }
 
-fn test_tamper_detection() {
+fn test_tamper_detection() -> KernelResult<()> {
     // Modifying ciphertext should fail HMAC verification.
-    add_raw_key("test_enc_3", [0x33; KEY_SIZE]).expect("add key");
-
-    let plaintext = b"tamper detection test data";
-    let mut encrypted = encrypt(plaintext, "test_enc_3").expect("encrypt");
-
-    // Tamper with a ciphertext byte.
-    if encrypted.len() > HEADER_SIZE + 5 {
-        encrypted[HEADER_SIZE + 5] ^= 0xFF;
-    }
-
-    let result = decrypt(&encrypted, "test_enc_3");
-    assert!(result.is_err(), "tampered data should fail");
-
-    remove_key("test_enc_3").expect("rm");
+    with_raw_key("test_enc_3", [0x33; KEY_SIZE], || {
+        let mut encrypted = encrypt(b"tamper detection test data", "test_enc_3")?;
+        let Some(byte) = encrypted.get_mut(HEADER_SIZE.saturating_add(5)) else {
+            return check(
+                false,
+                "an encryption is shorter than its header and 6 bytes",
+            );
+        };
+        *byte ^= 0xFF;
+        check(
+            decrypt(&encrypted, "test_enc_3").is_err(),
+            "tampered data decrypted",
+        )
+    })?;
     serial_println!("[encrypt]   tamper detection: ok");
+    Ok(())
 }
 
-fn test_key_management() {
+fn test_key_management() -> KernelResult<()> {
     // Test add/list/remove/has operations.
-    assert!(!has_key("test_km"));
-
-    add_key("test_km", "my passphrase").expect("add");
-    assert!(has_key("test_km"));
-
-    let keys = list_keys();
-    assert!(keys.iter().any(|k| k.name == "test_km"));
-
-    remove_key("test_km").expect("rm");
-    assert!(!has_key("test_km"));
-
+    check(!has_key("test_km"), "a test key exists before the test")?;
+    add_key("test_km", "my passphrase")?;
+    let listed = has_key("test_km") && list_keys().iter().any(|k| k.name == "test_km");
+    let removed = remove_key("test_km");
+    check(listed, "an added key is not there, or not listed")?;
+    removed?;
+    check(!has_key("test_km"), "a removed key is still there")?;
     // Removing non-existent should fail.
-    assert!(remove_key("test_km").is_err());
+    check(
+        remove_key("test_km").is_err(),
+        "a key that is gone was removed",
+    )?;
 
     serial_println!("[encrypt]   key management: ok");
+    Ok(())
 }
 
-fn test_nonce_uniqueness() {
+fn test_nonce_uniqueness() -> KernelResult<()> {
     // Generate multiple nonces — they should all be different.
-    let n1 = generate_nonce().expect("the RNG is seeded");
-    let n2 = generate_nonce().expect("the RNG is seeded");
-    let n3 = generate_nonce().expect("the RNG is seeded");
-
+    let n1 = generate_nonce()?;
+    let n2 = generate_nonce()?;
+    let n3 = generate_nonce()?;
     // 96 random bits each: any two alike is a broken generator.
-    assert!(n1 != n2 && n2 != n3 && n1 != n3, "nonces are distinct");
+    check(n1 != n2 && n2 != n3 && n1 != n3, "two nonces were alike")?;
 
     serial_println!("[encrypt]   nonce uniqueness: ok");
+    Ok(())
 }
 
-fn test_file_info() {
-    add_raw_key("test_enc_info", [0x77; KEY_SIZE]).expect("add key");
-
-    let data = b"file info test";
-    let encrypted = encrypt(data, "test_enc_info").expect("encrypt");
-
-    let info = file_info(&encrypted);
-    assert!(info.encrypted);
-    assert_eq!(info.cipher, "chacha20");
-    assert_eq!(info.original_size, data.len() as u64);
-
-    // Unencrypted data.
-    let info2 = file_info(b"not encrypted");
-    assert!(!info2.encrypted);
-
-    remove_key("test_enc_info").expect("rm");
+fn test_file_info() -> KernelResult<()> {
+    with_raw_key("test_enc_info", [0x77; KEY_SIZE], || {
+        let data = b"file info test";
+        let info = file_info(&encrypt(data, "test_enc_info")?);
+        check(
+            info.encrypted && info.cipher == "chacha20" && info.original_size == data.len() as u64,
+            "an encryption's file info is wrong",
+        )?;
+        check(
+            !file_info(b"not encrypted").encrypted,
+            "plain data reads as encrypted",
+        )
+    })?;
     serial_println!("[encrypt]   file info: ok");
+    Ok(())
 }

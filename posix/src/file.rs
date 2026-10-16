@@ -192,10 +192,11 @@ pub(crate) fn open_resolved(resolved: &[u8], flags: i32, mode: ModeT) -> Fd {
     let resolved_len = resolved.len();
     let native_flags = translate_open_flags(flags);
 
-    // Compute the umask-masked create mode only when O_CREAT is present;
-    // otherwise pass 0 so the kernel keeps its "mode unspecified" path.
+    // The create mode only when O_CREAT is present -- the caller's bits, the
+    // umask being the kernel's to apply ([`create_mode_bits`]); otherwise 0,
+    // so the kernel keeps its "mode unspecified" path.
     let create_mode = if flags & fcntl::O_CREAT != 0 {
-        u64::from(apply_umask_create(mode))
+        u64::from(create_mode_bits(mode))
     } else {
         0
     };
@@ -2844,10 +2845,10 @@ pub extern "C" fn readlink(path: *const u8, buf: *mut u8, bufsiz: SizeT) -> Ssiz
 
 /// Create a directory.
 ///
-/// The new directory's permission bits are `mode & ~umask`, masked to the low
-/// **ten** — the nine permission bits plus `S_ISVTX` — by
-/// [`apply_umask_mkdir`], and passed to the kernel as the 3rd syscall argument
-/// (the kernel is a thin create primitive; see `Vfs::mkdir_mode`).
+/// `mode`'s low **ten** bits -- the nine permission bits plus `S_ISVTX`,
+/// [`mkdir_mode_bits`] -- go to the kernel as the 3rd syscall argument, and
+/// the kernel applies the umask where the directory is made (or a default
+/// ACL in its place).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
     if path.is_null() {
@@ -2864,7 +2865,7 @@ pub extern "C" fn mkdir(path: *const u8, mode: ModeT) -> i32 {
         SYS_FS_MKDIR_MODE,
         resolved.as_ptr() as u64,
         resolved_len as u64,
-        u64::from(apply_umask_mkdir(mode)),
+        u64::from(mkdir_mode_bits(mode)),
     );
     errno::translate(ret) as i32
 }
@@ -4009,20 +4010,14 @@ unsafe fn try_pinned_fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i
 /// `None` means the fast path did not apply and the caller must fall back;
 /// errno is untouched in that case.
 ///
-/// `mode` goes through [`apply_umask_mkdir`], the same function [`mkdir`] uses
-/// on the path route, because the umask lives in this layer and the kernel
-/// applies none of its own. Getting that wrong on one route only would make a
-/// process's umask depend on whether its `dirfd` happened to be pinnable, which
-/// no caller could predict and no test would reliably catch — sharing the one
-/// function is what makes the two routes agree by construction rather than by
-/// two mask constants that have to be kept equal by hand.
+/// `mode` goes through [`mkdir_mode_bits`], the same function [`mkdir`] uses
+/// on the path route, so the two routes hand the kernel the same bits by
+/// construction -- the umask, or a default ACL, the kernel's on both.
 ///
-/// 666 masks to **ten** bits where 665 masks to twelve, and the difference is
-/// not an inconsistency to paper over: a directory that is setgid from the
-/// instant it exists is a policy decision, and Linux's answer is that it comes
-/// from the parent rather than from the mode word. Sticky is the tenth bit and
-/// went in on 2026-09-01, once the kernel's routes stopped discarding it. See
-/// [`apply_umask_mkdir`].
+/// 666 takes **ten** bits where 665 takes twelve, and the difference is not
+/// an inconsistency to paper over: a directory that is setgid from the instant
+/// it exists is a policy decision, and Linux's answer is that it comes from the
+/// parent rather than from the mode word. See [`mkdir_mode_bits`].
 ///
 /// # Safety
 ///
@@ -4037,7 +4032,7 @@ unsafe fn try_pinned_mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> Option
         base,
         name.as_ptr() as u64,
         name.len() as u64,
-        u64::from(apply_umask_mkdir(mode)),
+        u64::from(mkdir_mode_bits(mode)),
         // `mkdirat(2)` has no flags, and 666 rejects any non-zero word.
         0,
     );
@@ -5424,89 +5419,42 @@ pub(crate) fn get_umask() -> ModeT {
     unsafe { core::ptr::addr_of!(UMASK_VALUE).read() }
 }
 
-/// Apply the process umask to a requested create mode, keeping `keep` of it.
+/// The create mode `open(O_CREAT)` hands the kernel: **twelve** bits of
+/// `mode`, the umask *not* applied.
 ///
-/// Our umask lives entirely in this userspace layer — the kernel is a thin
-/// create primitive that stamps whatever final mode we hand it (see
-/// `kernel::fs::handle::open_with_mode` / `Vfs::mkdir_mode`) — so the masking
-/// is done here, right before the create syscall, and the already-masked
-/// result is passed to the kernel.
+/// The umask is the kernel's to apply, where the file is made, as Linux's VFS
+/// applies `current_umask()`: under a directory with a default ACL it gives
+/// the new file the ACL's bits *instead of* the umask (Linux's
+/// `posix_acl_create`), which works only if the umask has not been applied
+/// before the kernel sees the mode (lane A's
+/// `requests/a-d-the-umask-is-the-kernels-to-apply-now.md`). `umask()` writes
+/// the kernel's record, which is what the kernel reads.
 ///
-/// # Why `keep` is a parameter and not a constant
-///
-/// `open(O_CREAT)` and `mkdir` do not agree on how much of `mode` is real, and
-/// this used to be one function that masked both to `0o777`. `mkdir(2)` says
-/// the result is `(mode & ~umask & 0777)` in so many words; `open(2)` says
-/// `(mode & ~umask)` with no such term. Collapsing them lost the difference in
-/// the direction that silently discards a bit the caller asked for — see
-/// [`apply_umask_create`].
-///
-/// The umask itself is always narrowed to nine bits regardless of `keep`, which
-/// is a different restriction and not a redundant one: `umask(2)` specifies
-/// that only the file permission bits of the mask are used, so `~umask` must
-/// never be able to clear a setuid bit however wide the mode being masked is.
-fn apply_umask_keeping(mode: ModeT, keep: ModeT) -> ModeT {
-    (mode & keep) & !(get_umask() & 0o777)
+/// Twelve bits: `open(2)` says "the mode of the created file is
+/// `(mode & ~umask)`", with no `& 0777`, so setuid, setgid and sticky in an
+/// `O_CREAT` mode word are honoured, as the kernel's `open_with_mode` stamps
+/// `create_mode & 0o7777` (design-decisions.md §639). Not the whole word: a
+/// caller may have `S_IFREG` or another file-type bit in its `mode_t`, and
+/// what a create does with those is not a permission to forward.
+pub(crate) fn create_mode_bits(mode: ModeT) -> ModeT {
+    mode & 0o7777
 }
 
-/// Apply the process umask to `open(O_CREAT)`'s mode: **twelve** bits.
+/// The create mode `mkdir` hands the kernel: **ten** bits of `mode`, the
+/// umask *not* applied -- the kernel's, as for [`create_mode_bits`].
 ///
-/// `open(2)`: "the mode of the created file is `(mode & ~umask)`" — note the
-/// absence of the `& 0777` that `mkdir(2)` spells out explicitly. setuid,
-/// setgid and sticky in an `O_CREAT` mode word are honoured on Linux, and are
-/// honoured here.
+/// `mkdir(2)`: "in the absence of a default ACL, the mode of the created
+/// directory is `(mode & ~umask & 0777)`", plus Linux's one extension,
+/// `S_ISVTX` ("apart from the permission bits, the `S_ISVTX` mode bit is also
+/// honored") -- worth having because a sticky directory made in one step never
+/// exists in the window where it is world-writable but not yet sticky. The
+/// kernel's `SYS_FS_MKDIR_MODE` (660) and `SYS_FS_MKDIRAT_PINNED` (666) take
+/// `0o1777` (design-decisions.md §663).
 ///
-/// This masked to `0o777` until 2026-08-31, which silently dropped all three.
-/// The kernel had already been widened to twelve for exactly this reason —
-/// `handle.rs`'s `open_with_mode` stamps `create_mode & 0o7777`, and its
-/// comment cites design-decisions.md §639: "silently discarding a permission
-/// bit a caller explicitly asked for is the failure lane B and lane A agreed to
-/// rule out". This side went on narrowing the word before the syscall could see
-/// it, so the widening reached nothing — a C caller doing
-/// `open("s", O_CREAT|O_WRONLY, 0o4755)` got a plain `0755` file and no error
-/// to say so.
-///
-/// `0o7777` rather than no mask at all: the argument is a `mode_t`, so a caller
-/// may have `S_IFREG` or another file-type bit set in it, and what a create
-/// does with those is the kernel's to decide rather than ours to forward.
-pub(crate) fn apply_umask_create(mode: ModeT) -> ModeT {
-    apply_umask_keeping(mode, 0o7777)
-}
-
-/// Apply the process umask to `mkdir`'s mode: **ten** bits.
-///
-/// `mkdir(2)`, DESCRIPTION: "in the absence of a default ACL, the mode of the
-/// created directory is `(mode & ~umask & 0777)`. Whether other mode bits are
-/// honored for the created directory depends on the operating system." Nine is
-/// the portable floor; the tenth bit is Linux's one extension, `S_ISVTX`
-/// (VERSIONS: "apart from the permission bits, the `S_ISVTX` mode bit is also
-/// honored"), and it is worth having because it is the one bit where a
-/// race-free create means something — a sticky directory made in one step never
-/// exists in the window where it is world-writable but not yet sticky.
-///
-/// This masked to nine until 2026-09-01, deliberately: the kernel discarded the
-/// bit (`Vfs::mkdir_mode` and `mkdir_at_pinned` both computed `mode & 0o777`),
-/// and a libc that sends a bit the kernel drops has *moved* the silent drop
-/// rather than fixed it. Lane A widened both routes plus `SYS_FS_MKDIR_MODE`
-/// (660) and `SYS_FS_MKDIRAT_PINNED` (666) to `0o1777` in one commit
-/// (design-decisions.md §663, `requests/a-b-mkdirs-mode-is-ten-bits-now-move-apply-umask-mkdir-to-1777.md`),
-/// which is what makes the bit reachable and this widening honest.
-///
-/// **The umask stays narrowed to nine**, in [`apply_umask_keeping`], and that
-/// is what lets sticky through rather than an oversight: `umask(2)` says only
-/// the file permission bits of the mask are used, so `~(umask & 0o777)` has bit
-/// `0o1000` set and cannot clear `S_ISVTX` — exactly as it cannot clear setuid.
-/// Masking the umask to ten instead would let `umask(01000)` silently strip the
-/// sticky bit off `mkdir(p, 0o1777)`, which no Unix does.
-///
-/// setuid/setgid stay out. Linux does not take a directory's setgid bit from
-/// `mkdir`'s mode argument — it inherits it from the parent ("If the parent
-/// directory has the set-group-ID bit set, then so will the newly created
-/// directory"). Accepting it from the mode word would let a caller produce a
-/// directory that `mkdir(2)` on Linux could not; 660 and 666 refuse it on the
-/// kernel side too, so this is agreement rather than a second opinion.
-pub(crate) fn apply_umask_mkdir(mode: ModeT) -> ModeT {
-    apply_umask_keeping(mode, 0o1777)
+/// setuid/setgid stay out: Linux takes a directory's setgid from its parent,
+/// not from `mkdir`'s mode word, and 660 and 666 refuse it too.
+pub(crate) fn mkdir_mode_bits(mode: ModeT) -> ModeT {
+    mode & 0o1777
 }
 
 // ---------------------------------------------------------------------------
@@ -8415,7 +8363,7 @@ fn openat2_forward_inner(
     let native_flags = translate_open_flags(posix_flags);
     #[allow(clippy::cast_possible_truncation)]
     let create_mode = if posix_flags & fcntl::O_CREAT != 0 {
-        u64::from(apply_umask_create(h.mode as ModeT))
+        u64::from(create_mode_bits(h.mode as ModeT))
     } else {
         0
     };
@@ -9918,37 +9866,24 @@ mod tests {
     #[test]
     fn a_create_keeps_the_special_bits_and_a_mkdir_keeps_only_sticky() {
         let _g = lock_umask_for_test();
-        umask(0o022);
-
-        // setuid, setgid and sticky all survive a file create.
-        assert_eq!(apply_umask_create(0o4755), 0o4755);
-        assert_eq!(apply_umask_create(0o2755), 0o2755);
-        assert_eq!(apply_umask_create(0o1777), 0o1755);
-        // A directory create keeps sticky and drops the other two.
-        assert_eq!(apply_umask_mkdir(0o4755), 0o0755);
-        assert_eq!(apply_umask_mkdir(0o2755), 0o0755);
-        assert_eq!(apply_umask_mkdir(0o1777), 0o1755);
-        // The canonical caller: /tmp. `mkdir(p, 0o1777)` under the usual
-        // umask must not come back as a plain 0o755 directory.
-        umask(0o000);
-        assert_eq!(apply_umask_mkdir(0o1777), 0o1777);
-
-        // The umask still only ever clears permission bits. `umask` itself
-        // narrows its argument to nine, so this is belt-and-braces against a
-        // future caller of `apply_umask_keeping` passing a wider mask: a
-        // setuid bit must not be clearable by a umask.
-        umask(0o7777);
-        assert_eq!(get_umask(), 0o777);
-        assert_eq!(apply_umask_create(0o4755), 0o4000);
-        // ... and neither must a sticky bit, which is the whole reason
-        // `apply_umask_keeping` narrows the mask and not just the mode.
-        assert_eq!(apply_umask_mkdir(0o1777), 0o1000);
-
-        // A file-type bit in the mode word is the kernel's business, not
-        // something to forward — this is what `0o7777` buys over no mask.
-        umask(0o000);
-        assert_eq!(apply_umask_create(crate::fcntl::S_IFREG | 0o644), 0o644);
-
+        // The umask is the kernel's to apply: whatever it is here, the mode
+        // the kernel is handed is the caller's bits (lane A's
+        // requests/a-d-the-umask-is-the-kernels-to-apply-now.md). This
+        // asserted the umask applied until 2026-10-16.
+        for mask in [0o022, 0o077, 0o777] {
+            umask(mask);
+            // setuid, setgid and sticky all survive a file create.
+            assert_eq!(create_mode_bits(0o4755), 0o4755, "umask {mask:o}");
+            assert_eq!(create_mode_bits(0o2755), 0o2755, "umask {mask:o}");
+            assert_eq!(create_mode_bits(0o1777), 0o1777, "umask {mask:o}");
+            // A directory create keeps sticky and drops the other two.
+            assert_eq!(mkdir_mode_bits(0o4755), 0o0755, "umask {mask:o}");
+            assert_eq!(mkdir_mode_bits(0o2755), 0o0755, "umask {mask:o}");
+            assert_eq!(mkdir_mode_bits(0o1777), 0o1777, "umask {mask:o}");
+        }
+        // A file-type bit in the mode word is not a permission to forward --
+        // this is what `0o7777` buys over no mask.
+        assert_eq!(create_mode_bits(crate::fcntl::S_IFREG | 0o644), 0o644);
         umask(0o022);
     }
 

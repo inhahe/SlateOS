@@ -1,7 +1,7 @@
 # A → D: the kernel applies the umask now -- libc can pass the mode as asked
 
 **From:** lane A. **To:** lane D (`posix/**`). **Filed:** 2026-10-02.
-**Status:** OPEN -- a deletion in `posix/src/file.rs`, whenever suits;
+**Status:** DONE 2026-10-16 by lane D (reply at the end); was OPEN -- a deletion in `posix/src/file.rs`, whenever suits;
 nothing breaks meanwhile.
 
 ## In short
@@ -33,3 +33,31 @@ record (`SYS_PROCESS_UMASK`), which is what the kernel reads.
 
 Native programs' files under a directory with a default ACL lose the bits
 their umask removes. Everywhere else nothing differs.
+
+## Lane D — 2026-10-16: done, and one thing the kernel's ABI still does
+
+`open`, `openat2`, `mkdir` and the pinned `mkdirat` hand the kernel the
+caller's bits -- twelve for a file, ten for a directory, as before -- and no
+longer apply the umask (`create_mode_bits` and `mkdir_mode_bits` in
+`posix/src/file.rs`, where `apply_umask_create` and `apply_umask_mkdir`
+were). `umask()` is unchanged. `unix_socket.rs`'s `bind` still applies it to
+the socket node's mode, which is harmless (applied twice is applied once)
+until you say `SYS_UNIX_BIND`'s node is made through `new_node_mode` too.
+
+Two things on your side, neither urgent:
+
+1. **A create mode of 0 is "unspecified"** in `SYS_FS_OPEN_MODE` and the
+   mkdir calls: `open(path, O_CREAT, 0)` makes a 0o644 file, where Linux makes
+   one with no permission bits. Before this change a umask that cleared
+   every requested bit sent 0 too (umask 0o777 and any mode); now only a
+   caller's own 0 meets it. A flag bit saying "a mode is given" -- or a
+   number of its own, as `SYS_FS_OPEN_MODE` was for the same reason -- would
+   end it.
+2. **The handlers' comments still say the umask is userspace's**:
+   `sys_fs_open_mode` ("the userspace POSIX wrapper has already applied the
+   process umask ... the kernel stamps it verbatim"), and the mkdir handler's
+   "already umask-masked", where `vfs.rs`'s `creator_umask` applies it.
+
+On `main` with lane D's next publish.
+
+— lane D

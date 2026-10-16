@@ -4,8 +4,10 @@
 A harness whose rows all hold passes; a dead or ambiguous anchor, a test that
 is not there, or a duplicate row name is named and fails the run; a source
 named as a directory is read file by file, and a test in the crate's `tests/`
-counts; and a row filed in the table of a file its anchor is not in is named
-and fails, though the anchor is in the crate.
+counts; a row filed in the table of a file its anchor is not in is named
+and fails, though the anchor is in the crate; and a table may sweep another
+crate's file, whose anchors are looked for there but whose tests are not the
+sweep's.
 
 usage: python scripts/test-verify_mutations.py
 """
@@ -96,6 +98,31 @@ if __name__ == "__main__":
     raise SystemExit("a harness was run, not read")
 """
 
+# A table whose file is another crate's -- snapstore's JSON row breaks the
+# reader it moved to apps/jsonvalue, which snapstore's tests build against.
+# The key reaches outside the source directory the harness names.
+OUTSIDE_THE_CRATE = """from pathlib import Path
+SRC = Path(__file__).parent / "src"
+MAIN = [
+    ("x is two", "    let x = 1;", "    let x = 2;", ["a_test"]),
+]
+SIBLING = [
+    ROW,
+]
+TABLES = {"main.rs": MAIN, "../../sibling/src/lib.rs": SIBLING}
+if __name__ == "__main__":
+    raise SystemExit("a harness was run, not read")
+"""
+
+SIBLING_SOURCE = """pub fn z() -> u8 {
+    let z = 1;
+    z
+}
+
+#[test]
+fn only_the_sibling_runs_this() {}
+"""
+
 
 def run(root, text):
     crate = root / "crate"
@@ -107,6 +134,9 @@ def run(root, text):
         "#[test]\nfn an_integration_test() {}\n", encoding="utf-8", newline=""
     )
     (crate / "mutate.py").write_text(text, encoding="utf-8", newline="")
+    sibling = root / "sibling" / "src"
+    sibling.mkdir(parents=True, exist_ok=True)
+    (sibling / "lib.rs").write_text(SIBLING_SOURCE, encoding="utf-8", newline="")
     return subprocess.run(
         [sys.executable, str(VERIFY), str(crate)],
         capture_output=True,
@@ -186,6 +216,30 @@ def main():
             "one table over two files holds each row where its anchor is",
             ONE_TABLE_TWO_FILES,
             0,
+        ),
+        case(
+            "a table may sweep a file outside the crate (TABLES '../..')",
+            OUTSIDE_THE_CRATE.replace(
+                "ROW", '("z is two", "    let z = 1;", "    let z = 2;", ["a_test"])'
+            ),
+            0,
+        ),
+        case(
+            "...and its anchor is looked for there, not in the crate",
+            OUTSIDE_THE_CRATE.replace(
+                "ROW", '("misfiled", "    let x = 1;", "", ["a_test"])'
+            ),
+            1,
+            "[SIBLING] ANCHOR lib.rs x0: misfiled",
+        ),
+        case(
+            "...and a test only that other crate has is not one the sweep runs",
+            OUTSIDE_THE_CRATE.replace(
+                "ROW",
+                '("z is two", "    let z = 1;", "    let z = 2;", ["only_the_sibling_runs_this"])',
+            ),
+            1,
+            "NO SUCH TEST only_the_sibling_runs_this",
         ),
         case(
             "a harness that will not import is unreadable",

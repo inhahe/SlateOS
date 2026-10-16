@@ -106,7 +106,11 @@ def table_files(module, texts):
 
     A harness of one table may send each row wherever its anchor is:
     calendar's runs a row against its own `main.rs` or the store's `lib.rs`
-    by which holds the anchor, so its `SRC` is not every row's file."""
+    by which holds the anchor, so its `SRC` is not every row's file.
+
+    A `TABLES` name may reach outside the directory (snapstore's
+    `"../../jsonvalue/src/lib.rs"`), so the file it names need not be among
+    `texts`; `check` reads it for that table alone."""
     found = {}
     names = vars(module)
     several = len(tables(module)) > 1
@@ -117,7 +121,7 @@ def table_files(module, texts):
         for file_name, rows in value.items():
             if not isinstance(rows, list):
                 continue
-            under = [d / file_name for d in dirs if (d / file_name) in texts]
+            under = [d / file_name for d in dirs if (d / file_name) in texts or (d / file_name).is_file()]
             if len(under) == 1:
                 found[id(rows)] = under[0]
     for name, value in names.items():
@@ -137,12 +141,17 @@ def table_files(module, texts):
 def check(path):
     """(rows, problems) for one harness; problems printed as found."""
     module = load(path)
-    texts = {}
-    for src in sources(module):
-        texts[src] = src.read_text(encoding="utf-8", errors="replace", newline="")
+    def read(src):
+        return src.read_text(encoding="utf-8", errors="replace", newline="")
+
+    texts = {src: read(src) for src in sources(module)}
     if not texts:
         raise ValueError("names no Rust source")
     own_file = table_files(module, texts)
+    # A table's file outside the sources the harness names is another crate's:
+    # its anchors are looked for there, but the sweep's `cargo test` does not
+    # run its tests, so they stay out of `tests`.
+    outside = {f: read(f) for f in set(own_file.values()) if f not in texts}
     # A named test may live anywhere a sweep's `cargo test` runs it: in the
     # sources the harness breaks, or in its crate's other files and `tests/`.
     tests = set()
@@ -163,7 +172,7 @@ def check(path):
             seen.add(name)
             # Where the sweep will look: the table's own file when the
             # harness says which, else every source it names.
-            looked = {own: texts[own]} if own is not None else texts
+            looked = {own: texts.get(own, outside.get(own))} if own is not None else texts
             counts = [
                 text.count(old.replace("\n", "\r\n") if "\r\n" in text else old)
                 for text in looked.values()

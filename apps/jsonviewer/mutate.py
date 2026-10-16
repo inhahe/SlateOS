@@ -273,8 +273,8 @@ MUTATIONS = [
     ),
     (
         "a refused key says nothing",
-        "            self.note = Some(format!(\n                \"Not added:",
-        "            let _ = Some(format!(\n                \"Not added:",
+        "            self.note = Some(too_big(\"added\"));\n",
+        "            let _ = Some(too_big(\"added\"));\n",
         [CAP],
     ),
     (
@@ -291,14 +291,14 @@ MUTATIONS = [
     ),
     (
         "an edit is not parsed again",
-        "            doc.dirty = true;\n            doc.reparse();\n            doc.invalidate_caches();\n        }\n    }",
-        "            doc.dirty = true;\n            doc.invalidate_caches();\n        }\n    }",
+        "            doc.dirty = true;\n            doc.reparse();\n            doc.invalidate_caches();\n            self.edit_landed();\n        }\n    }",
+        "            doc.dirty = true;\n            doc.invalidate_caches();\n            self.edit_landed();\n        }\n    }",
         [ENTER, REPAIR],
     ),
     (
         "an edit is not counted as a change",
-        "            doc.reparse();\n            doc.invalidate_caches();\n        }\n    }",
-        "            doc.reparse();\n        }\n    }",
+        "            doc.reparse();\n            doc.invalidate_caches();\n            self.edit_landed();\n        }\n    }",
+        "            doc.reparse();\n            self.edit_landed();\n        }\n    }",
         [ESCAPE],
     ),
     (
@@ -666,6 +666,7 @@ CLOCK = "the_menu_says_why_on_the_clock"
 PASTE = "the_text_pastes_what_the_program_copied"
 CLOSE_MENU = "closing_the_window_puts_the_menu_away"
 RIGHT_WRITES = "a_right_click_on_the_search_box_writes_the_value"
+KEEPS_TYPED = "the_row_being_edited_keeps_what_was_typed"
 
 MUTATIONS += [
     (
@@ -799,6 +800,37 @@ MUTATIONS += [
         "            let clipboard = if textline::pastes(ev) {\n",
         "            let clipboard = if false {\n",
         [PASTE],
+    ),
+    # The review's fixes (2026-10-16).
+    (
+        "a double-click on the row being edited reloads its box",
+        "                    if self.editing_path.as_ref() == Some(&json) {\n",
+        "                    if false && self.editing_path.as_ref() == Some(&json) {\n",
+        [KEEPS_TYPED],
+    ),
+    (
+        "a landed edit leaves the refusal on the status line",
+        "            .is_some_and(|n| n == too_big(\"changed\") || n == too_big(\"added\"))\n",
+        "            .is_some_and(|_| false)\n",
+        [TOO_BIG, CAP],
+    ),
+    (
+        "a landed edit puts away any note",
+        "            .is_some_and(|n| n == too_big(\"changed\") || n == too_big(\"added\"))\n",
+        "            .is_some_and(|_| true)\n",
+        [TOO_BIG],
+    ),
+    (
+        "a value's edit landing leaves the refusal",
+        "        self.value_box.clear();\n        self.edit_landed();\n",
+        "        self.value_box.clear();\n",
+        [TOO_BIG],
+    ),
+    (
+        "the text's edit landing leaves the refusal",
+        "            doc.invalidate_caches();\n            self.edit_landed();\n",
+        "            doc.invalidate_caches();\n",
+        [CAP],
     ),
 ]
 

@@ -518,8 +518,8 @@ MUTATIONS += [
     ),
     (
         "the search box takes no plain keys",
-        "        if self.search_focused {\n            return self.search_key(key);\n        }\n",
-        "",
+        "        if self.search_focused && self.search_key(key) == EventResult::Consumed {\n",
+        "        if false {\n",
         [SEARCH, SEARCH_DRAWN],
     ),
     (
@@ -530,8 +530,8 @@ MUTATIONS += [
     ),
     (
         "the box comes back holding an old search",
-        "        self.search_focused = true;\n        self.search_editor.set_text(&self.search_query);\n",
-        "        self.search_focused = true;\n",
+        "            self.search_focused = true;\n            self.search_editor.set_text(&self.search_query);\n",
+        "            self.search_focused = true;\n",
         [SEARCH],
     ),
     (
@@ -604,6 +604,28 @@ MUTATIONS += [
         "                let done = textline::apply_key_on_clipboard(input, key, FORM_TEXT_SIZE);\n",
         "                let done = textline::apply_key(input, key, \"\", FORM_TEXT_SIZE);\n",
         [FORM_CLIP],
+    ),
+]
+
+# The review's fixes (2026-10-16): a key the search box does not answer is
+# the list's, and Ctrl+F in the box keeps its caret.
+KEYS_SEARCHING = "f1_and_the_arrows_work_while_searching"
+AGAIN = "ctrl_f_again_keeps_the_selection"
+
+MUTATIONS += [
+    (
+        "the search box keeps the keys it does not answer",
+        "        if self.search_focused && self.search_key(key) == EventResult::Consumed {\n"
+        "            return EventResult::Consumed;\n",
+        "        if self.search_focused {\n"
+        "            return self.search_key(key);\n",
+        [KEYS_SEARCHING],
+    ),
+    (
+        "Ctrl+F in the box puts its caret back at the end",
+        "        if !self.search_focused {\n            self.search_focused = true;\n",
+        "        if true {\n            self.search_focused = true;\n",
+        [AGAIN],
     ),
 ]
 

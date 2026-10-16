@@ -534,8 +534,8 @@ MUTATIONS += [
     ),
     (
         "a right press on the search box opens no menu",
-        "            Some(Target::SearchBox) => {\n                self.sync_search_editor();\n",
-        "            Some(Target::SearchBox) if false => {\n                self.sync_search_editor();\n",
+        "            Some(Target::SearchBox) if self.compose.is_none() => {\n",
+        "            Some(Target::SearchBox) if false => {\n",
         [S_MENU],
     ),
     (
@@ -555,6 +555,41 @@ MUTATIONS += [
         "                    let typed = self.search_editor.text().to_owned();\n                    self.set_search(&typed);\n                }\n                return EventResult::Consumed;\n",
         "                }\n                return EventResult::Consumed;\n",
         [S_MENU],
+    ),
+]
+
+# The review's fixes (2026-10-16): a search from the menu brings the list
+# over what it found, and the search box waits while a message is written.
+S_FOUND = "a_search_pasted_from_the_menu_shows_what_it_found"
+S_WAITS = "the_search_box_waits_while_a_message_is_written"
+# Only a search that finds more than the list shows, with the chosen message
+# high in the view below ones it hides, needs the scroll to follow it.
+S_LONG = "a_long_search_scrolls_back_to_the_chosen_message"
+
+MUTATIONS += [
+    (
+        "a changed search leaves the chosen message off screen",
+        "            self.list_scroll = self.list_scroll.min(last);\n            self.follow_selection();\n",
+        "            self.list_scroll = self.list_scroll.min(last);\n",
+        [S_LONG],
+    ),
+    (
+        "a changed search leaves the list past its end",
+        "            self.list_scroll = self.list_scroll.min(last);\n",
+        "",
+        [S_FOUND],
+    ),
+    (
+        "the search's menu opens over the message being written",
+        "            Some(Target::SearchBox) if self.compose.is_none() => {\n",
+        "            Some(Target::SearchBox) => {\n",
+        [S_WAITS],
+    ),
+    (
+        "a press on the search takes the keyboard from the message being written",
+        "            Target::SearchBox if self.compose.is_some() => return EventResult::Ignored,\n",
+        "",
+        [S_WAITS],
     ),
 ]
 

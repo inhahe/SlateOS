@@ -705,8 +705,8 @@ MUTATIONS += [
     ),
     (
         "the search box takes no plain keys",
-        "        return search_key(state, key);\n",
-        "        return EventResult::Ignored;\n",
+        "    if state.search_focused && search_key(state, key) == EventResult::Consumed {\n",
+        "    if false {\n",
         [CARET, PRESSED],
     ),
     (
@@ -785,6 +785,55 @@ MUTATIONS += [
         "    if edit.handled {\n        EventResult::Consumed\n",
         "    if true {\n        EventResult::Consumed\n",
         [CARET],
+    ),
+]
+
+# The review's fixes (2026-10-16): only the left button presses the form's
+# and the delete question's buttons, and a key the search box does not
+# answer is the calendar's.
+F1_SEARCHING = "f1_opens_the_keys_while_searching"
+RIGHT_ANSWERS = "a_right_click_does_not_answer_the_delete_question"
+WIDTH = "a_longer_search_is_drawn_and_measured_in_the_boxs_width"
+
+MUTATIONS += [
+    (
+        "a right press presses the form's buttons",
+        "            Event::Key(key) if key.pressed => return handle_form_key(state, key),\n"
+        "            Event::Mouse(mouse)\n"
+        "                if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) =>\n",
+        "            Event::Key(key) if key.pressed => return handle_form_key(state, key),\n"
+        "            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) =>\n",
+        [MENU],
+    ),
+    (
+        "a right press answers the delete question",
+        "            Event::Key(key) if key.pressed => return handle_confirm_key(state, id, key),\n"
+        "            Event::Mouse(mouse)\n"
+        "                if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) =>\n",
+        "            Event::Key(key) if key.pressed => return handle_confirm_key(state, id, key),\n"
+        "            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) =>\n",
+        [RIGHT_ANSWERS],
+    ),
+    (
+        "the search box keeps the keys it does not answer",
+        "    if state.search_focused && search_key(state, key) == EventResult::Consumed {\n"
+        "        return EventResult::Consumed;\n",
+        "    if state.search_focused {\n"
+        "        return search_key(state, key);\n",
+        [F1_SEARCHING],
+    ),
+    # The two mutants cargo-mutants found missed in the review.
+    (
+        "a press in the search box is measured in a sixteenth of its width",
+        "            (search.w - 16.0).max(0.0),\n",
+        "            (search.w / 16.0).max(0.0),\n",
+        [WIDTH],
+    ),
+    (
+        "the search box is drawn in a sixteenth of its width",
+        "                        width: (search.w - 16.0).max(0.0),\n",
+        "                        width: (search.w / 16.0).max(0.0),\n",
+        [WIDTH],
     ),
 ]
 

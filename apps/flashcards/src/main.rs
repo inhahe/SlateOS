@@ -1006,6 +1006,9 @@ const SEARCH_CAPACITY: usize = 256;
 /// The size the search box's text is drawn at.
 const SEARCH_TEXT_SIZE: f32 = 12.0;
 
+/// What the status line says when the search box takes the keyboard.
+const SEARCH_HINT: &str = "Search: type to filter, Esc to clear";
+
 /// A deck row's height.
 const DECK_ROW_H: f32 = 72.0;
 
@@ -2722,7 +2725,7 @@ impl FlashcardsApp {
         match key {
             "/" => {
                 self.search_active = true;
-                self.status_msg = String::from("Search: type to filter, Esc to clear");
+                self.status_msg = String::from(SEARCH_HINT);
             }
             "Escape" => {
                 // `search_active` needs no clearing here: this arm is only
@@ -2896,33 +2899,17 @@ impl FlashcardsApp {
         }
     }
 
-    /// Where `target` was drawn in the last frame, or would be in this one
-    /// before the first is drawn (as [`Self::target_at`] reads them).
-    fn rect_of(&self, target: Target) -> Option<Rect> {
-        let find = |hits: &[(Target, Rect)]| {
-            hits.iter()
-                .rev()
-                .find(|(t, _)| *t == target)
-                .map(|(_, r)| *r)
-        };
-        if self.last_hits.is_empty() {
-            return find(self.frame().hits());
-        }
-        find(&self.last_hits)
-    }
-
-    /// A press in the search box at `x`: it takes the keyboard, with the
-    /// caret where the press landed.
-    fn press_search(&mut self, x: f32) -> EventResult {
-        let Some(rect) = self.rect_of(Target::Search) else {
-            return EventResult::Ignored;
-        };
+    /// A press at `x` in the search box, drawn at `rect`: it takes the
+    /// keyboard, with the caret where the press landed, and the status line
+    /// says how to use it, as `/` does.
+    fn press_search(&mut self, rect: Rect, x: f32) -> EventResult {
         let drawn = if self.search_active {
             self.search_editor.cursor()
         } else {
             TextCursor::default()
         };
         self.search_active = true;
+        self.status_msg = String::from(SEARCH_HINT);
         self.sync_search_editor();
         let cursor = textedit::cursor_at_click(
             &self.search_query,
@@ -4513,11 +4500,16 @@ impl FlashcardsApp {
     fn handle_mouse(&mut self, event: &MouseEvent) -> EventResult {
         match event.kind {
             MouseEventKind::Press(MouseButton::Left) => {
-                let Some(target) = self.frame().hit_test(event.x, event.y) else {
+                let frame = self.frame();
+                let Some(target) = frame.hit_test(event.x, event.y) else {
                     return EventResult::Ignored;
                 };
-                if target == Target::Search {
-                    return self.press_search(event.x);
+                // The box measured where the press found it, in the same
+                // frame.
+                if target == Target::Search
+                    && let Some(rect) = frame.rect_of(|t| *t == Target::Search)
+                {
+                    return self.press_search(rect, event.x);
                 }
                 self.press(target)
             }
@@ -4580,10 +4572,8 @@ impl FlashcardsApp {
                     self.selected_card = p;
                 }
             }
-            Target::Search => {
-                self.search_active = true;
-                self.status_msg = String::from("Search: type to filter, Esc to clear");
-            }
+            // `handle_mouse` gives a press here to `press_search`.
+            Target::Search => {}
             Target::TagChip => self.handle_key("t", false, false),
             Target::StudyDue => self.start_study(),
             Target::StudyAll => self.start_study_all(),
@@ -7011,8 +7001,7 @@ mod tests {
 
     /// **The search box edits at a caret**, as every other box does: the
     /// arrows and Home move it, typing goes in where it is, Delete takes the
-    /// character after it, and Ctrl+A selects what typing then replaces. It
-    /// typed only at its end, and Backspace from the end was its only edit.
+    /// character after it, and Ctrl+A selects what typing then replaces.
     #[test]
     fn the_search_box_edits_at_a_caret() {
         let mut app = app_in_deck();
@@ -7071,6 +7060,87 @@ mod tests {
             app.search_query, "zabc",
             "the caret did not go where the press was"
         );
+    }
+
+    /// **A press in the search box is measured in the frame it landed in**:
+    /// after a resize, before the next frame is drawn, the caret goes where
+    /// the box is now, not where it was.
+    #[test]
+    fn a_press_in_the_search_box_is_measured_where_it_landed() {
+        let mut app = app_in_deck();
+        App::render(&mut app, 1000.0, 700.0);
+        app.handle_key("/", false, false);
+        let long = "abcdefghij".repeat(12);
+        type_text(&mut app, &long);
+        App::render(&mut app, 1000.0, 700.0);
+        let wide = probe::rect_of(&app, Target::Search).expect("the search box");
+        app.handle_event(&Event::Resize {
+            width: 400,
+            height: 700,
+        });
+        let narrow = app
+            .frame()
+            .rect_of(|t| *t == Target::Search)
+            .expect("the box, narrower");
+        let x = narrow.x + 9.0;
+        let at = |r: Rect| {
+            textedit::cursor_at_click(
+                &long,
+                TextCursor::from(long.len()),
+                (r.w - 16.0).max(0.0),
+                SEARCH_TEXT_SIZE,
+                FontWeightHint::Regular,
+                x - r.x - 8.0,
+            )
+        };
+        assert_ne!(at(wide), at(narrow), "control: the two frames disagree");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y: narrow.y + narrow.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert_eq!(
+            app.search_editor.cursor(),
+            at(narrow),
+            "the press was measured against the last frame's box"
+        );
+    }
+
+    /// **The delete question takes a right-click on the search box**, as it
+    /// takes every press: no menu opens over it to take the answer's key.
+    #[test]
+    fn no_field_menu_opens_over_the_delete_question() {
+        let mut app = app_in_deck();
+        App::render(&mut app, 1000.0, 700.0);
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        app.handle_event(&typed('x'));
+        assert!(app.pending_delete.is_some(), "control: x asks");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: search.x + 8.0,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }));
+        assert!(!app.field_menu.is_up(), "a menu opened over the question");
+        assert!(app.pending_delete.is_some(), "the question went");
+    }
+
+    /// **A press in the search box says how to use it**, as `/` does.
+    #[test]
+    fn a_press_in_the_search_box_says_how_to_use_it() {
+        let mut app = app_in_deck();
+        App::render(&mut app, 1000.0, 700.0);
+        app.status_msg.clear();
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: search.x + 8.0,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        assert!(
+            app.search_active,
+            "control: the press gave the box the keys"
+        );
+        assert_eq!(app.status_msg, SEARCH_HINT);
     }
 
     /// **A text field's right-click menu cuts, copies and pastes on the

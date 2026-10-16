@@ -3282,11 +3282,20 @@ impl EmailApp {
         }
     }
 
-    /// The search changed to `text`: the list follows it.
+    /// The search changed to `text`: the list follows it, its selection on a
+    /// message it still shows and scrolled to have that message on screen,
+    /// never past its end -- whether the change came by key or from the
+    /// menu.
     fn set_search(&mut self, text: &str) {
         if self.search_query != text {
             text.clone_into(&mut self.search_query);
             self.reanchor_selection();
+            let last = self
+                .current_messages()
+                .len()
+                .saturating_sub(self.list_rows());
+            self.list_scroll = self.list_scroll.min(last);
+            self.follow_selection();
         }
     }
 
@@ -4908,13 +4917,14 @@ impl EmailApp {
     /// A right press at (`x`, `y`): over a field of the message being
     /// written, its menu where the press landed -- the field given the
     /// keyboard, its caret and selection left as they are (design-decisions
-    /// 1454), so Cut and Copy act on what the user selected. Anywhere else,
-    /// nothing.
+    /// 1454), so Cut and Copy act on what the user selected. Over the search
+    /// box, its menu -- but not while a message is being written, whose form
+    /// has the keyboard. Anywhere else, nothing.
     fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
         let viewport = (self.width(), self.height());
         let field = match self.target_at(x, y) {
             Some(Target::Field(field)) => field,
-            Some(Target::SearchBox) => {
+            Some(Target::SearchBox) if self.compose.is_none() => {
                 self.sync_search_editor();
                 self.searching = true;
                 let menu = self.search_editor.edit_menu();
@@ -4972,6 +4982,8 @@ impl EmailApp {
         match target {
             Target::HelpCard => self.show_help = false,
             Target::Help => self.show_help = true,
+            // The message being written keeps the keyboard.
+            Target::SearchBox if self.compose.is_some() => return EventResult::Ignored,
             Target::SearchBox => self.place_search_caret(search_box_rect(), x),
             Target::Compose => self.compose_new(),
             Target::Reply => {
@@ -8125,9 +8137,7 @@ mod tests {
 
     /// **The search box edits at a caret**, as every other box does: the
     /// arrows and Home move it, typing goes in where it is, Delete takes the
-    /// character after it, and Ctrl+A selects what typing then replaces. It
-    /// typed only at its end, Backspace from the end its only edit, and drew
-    /// a caret of its own after the text whatever the keys did.
+    /// character after it, and Ctrl+A selects what typing then replaces.
     #[test]
     fn the_search_box_edits_at_a_caret() {
         let mut app = seeded();
@@ -8294,5 +8304,173 @@ mod tests {
         app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
         choose(&mut app, EditCommand::Copy);
         assert_eq!(guitk::clipboard::text(), "leak", "Copy copied nowhere");
+    }
+
+    /// **A search from the menu shows what it found**: a paste into the box
+    /// while the list is scrolled down brings the list back over the
+    /// messages it now holds, the chosen one on screen -- as a search typed
+    /// does.
+    #[test]
+    fn a_search_pasted_from_the_menu_shows_what_it_found() {
+        use guitk::editmenu::EditCommand;
+        let dir = Scratch::new("menu-search");
+        let mail = dir.0.join("Mail");
+        std::fs::create_dir_all(&mail).unwrap();
+        let mut mbox = String::new();
+        for i in 0..40 {
+            mbox.push_str(&format!(
+                "From x@example.com Thu Sep 24 09:{i:02}:00 2026\nFrom: x@example.com\nSubject: Message {i}\nDate: Thu, 24 Sep 2026 09:{i:02}:00 +0000\n\nbody {i}\n\n",
+            ));
+        }
+        std::fs::write(mail.join("Inbox.mbox"), mbox).unwrap();
+        // The chosen message one the search hides, and then one it keeps --
+        // the last it finds, low in the list the search leaves.
+        for keeps_the_chosen in [false, true] {
+            let mut app = EmailApp::new();
+            app.mail_dir = Some(mail.clone());
+            app.rescan();
+            let rows = app.list_rows();
+            for _ in 0..30 {
+                probe::scroll_at_point(&mut app, Target::MessageList, -3.0);
+            }
+            assert_eq!(
+                app.list_scroll,
+                40 - rows,
+                "control: the list is at its end"
+            );
+            let all: Vec<(u64, bool)> = app
+                .current_messages()
+                .iter()
+                .map(|m| (m.id, m.subject.contains("Message 3")))
+                .collect();
+            let chosen_before = all
+                .iter()
+                .rev()
+                .find(|(_, matches)| *matches == keeps_the_chosen)
+                .map(|(id, _)| *id);
+            app.selected_message = chosen_before;
+            let at = all.iter().position(|(id, _)| Some(*id) == chosen_before);
+            assert!(
+                at.is_some_and(|at| at >= app.list_scroll),
+                "control: the chosen message is on screen"
+            );
+
+            guitk::clipboard::set_text("Message 3");
+            let (x, y) = search_middle();
+            app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
+            choose(&mut app, EditCommand::Paste);
+            let found = app.current_messages().len();
+            assert!(found > 1 && found < 40, "control: the search found {found}");
+            assert!(
+                app.list_scroll <= found.saturating_sub(rows),
+                "the list is scrolled past what the search found: {} of {found} \
+                 (the chosen message kept: {keeps_the_chosen})",
+                app.list_scroll
+            );
+            let chosen = app
+                .selected_message
+                .and_then(|id| app.current_messages().iter().position(|m| m.id == id))
+                .expect("a message found is chosen");
+            assert!(
+                (app.list_scroll..app.list_scroll + rows).contains(&chosen),
+                "the chosen message is off screen (kept: {keeps_the_chosen})"
+            );
+            assert_eq!(
+                keeps_the_chosen,
+                app.selected_message == chosen_before,
+                "control: the search kept, or hid, the chosen message"
+            );
+        }
+    }
+
+    /// **A search that finds more than the list shows still scrolls to the
+    /// chosen message**: one high in the view, below messages the search
+    /// hides, rises above it -- and so does the first message found, chosen
+    /// in place of one the search hid -- while the rest found still fill the
+    /// list below, so no clamp to its end brings it back.
+    #[test]
+    fn a_long_search_scrolls_back_to_the_chosen_message() {
+        use guitk::editmenu::EditCommand;
+        let dir = Scratch::new("long-search");
+        let mail = dir.0.join("Mail");
+        std::fs::create_dir_all(&mail).unwrap();
+        // The newest five read "gone", the other thirty-five "kept"; the list
+        // shows the newest first.
+        let mut mbox = String::new();
+        for i in 0..40 {
+            let tag = if i >= 35 { "gone" } else { "kept" };
+            mbox.push_str(&format!(
+                "From x@example.com Thu Sep 24 09:{i:02}:00 2026\nFrom: x@example.com\nSubject: Message {i} {tag}\nDate: Thu, 24 Sep 2026 09:{i:02}:00 +0000\n\nbody {i}\n\n",
+            ));
+        }
+        std::fs::write(mail.join("Inbox.mbox"), mbox).unwrap();
+        // The chosen message, by its place in the whole list: one the search
+        // hides, and the first one it keeps -- both below the top of the view.
+        for (at, kept) in [(3, false), (5, true)] {
+            let mut app = EmailApp::new();
+            app.mail_dir = Some(mail.clone());
+            app.rescan();
+            let rows = app.list_rows();
+            let ids: Vec<u64> = app.current_messages().iter().map(|m| m.id).collect();
+            assert_eq!(ids.len(), 40, "control: every message is listed");
+            app.list_scroll = 3;
+            app.selected_message = ids.get(at).copied();
+            assert!(
+                (3..3 + rows).contains(&at),
+                "control: the chosen message is on screen ({rows} rows)"
+            );
+
+            guitk::clipboard::set_text("kept");
+            let (x, y) = search_middle();
+            app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
+            choose(&mut app, EditCommand::Paste);
+            let found = app.current_messages().len();
+            assert_eq!(found, 35, "control: the search found {found}");
+            assert!(
+                found - rows >= 3,
+                "control: what was found more than fills the list ({rows} rows)"
+            );
+            let chosen = app
+                .selected_message
+                .and_then(|id| app.current_messages().iter().position(|m| m.id == id));
+            assert_eq!(
+                chosen,
+                Some(0),
+                "control: the newest message found is chosen (kept: {kept})"
+            );
+            assert_eq!(
+                kept,
+                app.selected_message == ids.get(at).copied(),
+                "control: the search kept, or hid, the chosen message"
+            );
+            assert_eq!(
+                app.list_scroll, 0,
+                "the chosen message is above the list's top (kept: {kept})"
+            );
+        }
+    }
+
+    /// **The search box waits while a message is being written**: the form
+    /// has the keyboard, so neither a press nor a right-click on the box in
+    /// the header gives it to the search.
+    #[test]
+    fn the_search_box_waits_while_a_message_is_written() {
+        let mut app = seeded();
+        app.compose_new();
+        let (x, y) = search_middle();
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
+        assert!(
+            !app.field_menu.is_up(),
+            "the search's menu opened over the form"
+        );
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert!(!app.searching, "the search took the keyboard from the form");
+        assert!(app.compose.is_some(), "control: the form is still open");
+        app.compose = None;
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        assert!(
+            app.searching,
+            "control: with no form, a press gives the search the keys"
+        );
     }
 }

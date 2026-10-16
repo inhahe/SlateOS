@@ -3119,10 +3119,13 @@ impl RemindersApp {
                 _ => EventResult::Ignored,
             };
         }
-        // The search box takes every other key while it has the keyboard, so
-        // a letter typed is never also one of the list's keys.
-        if self.search_focused {
-            return self.search_key(key);
+        // The search box takes every key it answers while it has the
+        // keyboard -- typing, the caret's keys, Enter and Escape -- so a
+        // letter typed is never also one of the list's keys. One it does not
+        // answer -- F1, Up and Down -- is the list's: the list of keys opens,
+        // and the selection steps through what the search found.
+        if self.search_focused && self.search_key(key) == EventResult::Consumed {
+            return EventResult::Consumed;
         }
         // Every other binding is on a key, taken plain -- nothing held but
         // Shift. A chord with Alt or the Windows key is the window's or the
@@ -3203,9 +3206,9 @@ impl RemindersApp {
                 self.show_completed_subtasks = !self.show_completed_subtasks;
                 EventResult::Consumed
             }
-            // The shortcut list. Outside the search box, which takes its keys
-            // before this, nothing turns a keystroke into text, so `?` is
-            // free as well as `F1`.
+            // The shortcut list. The search box takes what it types before
+            // this, so `?` reaches here only from outside it; `F1`, which
+            // types nothing, from inside it as well.
             Key::F1 => {
                 self.show_help = !self.show_help;
                 EventResult::Consumed
@@ -3354,9 +3357,12 @@ impl RemindersApp {
     }
 
     /// Give the search box the keyboard, its caret at the end of the search.
+    /// A box that has it already keeps its caret and selection.
     fn focus_search(&mut self) {
-        self.search_focused = true;
-        self.search_editor.set_text(&self.search_query);
+        if !self.search_focused {
+            self.search_focused = true;
+            self.search_editor.set_text(&self.search_query);
+        }
     }
 
     /// A key for the search box while it has the keyboard: Escape empties it
@@ -5783,9 +5789,56 @@ mod tests {
         Event::Key(guitk::probe::ctrl(k))
     }
 
-    /// **The search box can be reached, and it searches** (Ctrl+F). It was
-    /// drawn over a search the list already knew how to do, and no key could
-    /// type into it. While it has the keyboard a letter is the search's, not
+    /// **A key the search box does not answer is the list's**: F1 opens the
+    /// list of keys while the search is being typed, as it does in every
+    /// application, and Down steps through what the search found -- while a
+    /// letter the list binds still types.
+    #[test]
+    fn f1_and_the_arrows_work_while_searching() {
+        let mut app = populated();
+        app.handle_event(&ctrl_key(Key::F));
+        assert!(
+            app.search_focused,
+            "control: Ctrl+F gives the search the keys"
+        );
+        let detail = app.detail_visible;
+        type_text(&mut app, "d");
+        assert_eq!(
+            app.search_query, "d",
+            "a letter the list binds did not type"
+        );
+        assert_eq!(app.detail_visible, detail, "the d typed was the list's too");
+        let found: Vec<u64> = app.current_tasks().iter().map(|t| t.id).collect();
+        assert!(found.len() > 1, "control: more than one reminder has a d");
+        app.selected_task_id = found.first().copied();
+        assert_eq!(app.handle_event(&press(Key::Down)), EventResult::Consumed);
+        assert_eq!(
+            app.selected_task_id,
+            found.get(1).copied(),
+            "Down did not step through what was found"
+        );
+        assert_eq!(app.handle_event(&press(Key::F1)), EventResult::Consumed);
+        assert!(app.show_help, "F1 did not open the list of keys");
+    }
+
+    /// **Ctrl+F in the search box keeps its caret and selection**: pressed
+    /// again by habit, it does not put the caret back at the end.
+    #[test]
+    fn ctrl_f_again_keeps_the_selection() {
+        let mut app = populated();
+        app.handle_event(&ctrl_key(Key::F));
+        type_text(&mut app, "abc");
+        app.handle_event(&Event::Key(guitk::probe::press_with(
+            Key::Home,
+            Modifiers::shift(),
+        )));
+        app.handle_event(&ctrl_key(Key::F));
+        type_text(&mut app, "z");
+        assert_eq!(app.search_query, "z", "Ctrl+F dropped the selection");
+    }
+
+    /// **The search box can be reached, and it searches** (Ctrl+F). While it
+    /// has the keyboard a letter is the search's, not
     /// one of the list's keys; it edits at a caret; the list follows it, and
     /// the selection with it; Enter leaves it with the search kept, and Escape
     /// empties it.

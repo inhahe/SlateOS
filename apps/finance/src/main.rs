@@ -2294,26 +2294,18 @@ impl FinanceApp {
             // Midnight, or near enough to check -- and the menu's wait.
             Event::Tick { elapsed_ms } => {
                 let menu = self.field_menu.tick(*elapsed_ms);
-                let Some(today) = today_from_clock() else {
-                    return if menu {
+                match today_from_clock() {
+                    Some(today) if today != self.current_date => {
+                        // The view follows the month if it was on this one.
+                        if self.view_month.same_month(&self.current_date) {
+                            self.view_month = SimpleDate::new(today.year, today.month, 1);
+                        }
+                        self.current_date = today;
                         EventResult::Consumed
-                    } else {
-                        EventResult::Ignored
-                    };
-                };
-                if today == self.current_date {
-                    return if menu {
-                        EventResult::Consumed
-                    } else {
-                        EventResult::Ignored
-                    };
+                    }
+                    _ if menu => EventResult::Consumed,
+                    _ => EventResult::Ignored,
                 }
-                // The view follows the month if it was on this one.
-                if self.view_month.same_month(&self.current_date) {
-                    self.view_month = SimpleDate::new(today.year, today.month, 1);
-                }
-                self.current_date = today;
-                EventResult::Consumed
             }
             Event::Resize { width, height } => {
                 #[allow(
@@ -6636,8 +6628,7 @@ mod tests {
 
     /// **The search box edits at a caret**, as every other box does: the
     /// arrows and Home move it, typing goes in where it is, Delete takes the
-    /// character after it, and Ctrl+A selects what typing then replaces. It
-    /// typed only at its end, and Backspace from the end was its only edit.
+    /// character after it, and Ctrl+A selects what typing then replaces.
     #[test]
     fn the_search_box_edits_at_a_caret() {
         let mut app = FinanceApp::with_sample_data();

@@ -4002,6 +4002,24 @@ word; text inside them that says "lane C" is history.
   toolkit's code editor serves them better
   (`requests/c-e-the-toolkit-has-a-code-editor.md`).
 
+- `[ ]` `[E]` **One search box, not twenty-four copies of it** -- 2026-10-16,
+  from the Opus review of `7e588d1a3..ff34c8565`. Twenty-four applications
+  (calendar, charmap, devicemanager, ebook, email, emojipicker, filediff,
+  finance, flashcards, logviewer, musicplayer, notes, pdfviewer, podcast,
+  procexplorer, radio, reminders, rssreader, snippets, sysinfo, sysmonitor,
+  systemrestore, torrent, undelete) each carry the same search box: the
+  search as a `String` and a `TextInput` beside it holding the same text,
+  reloaded from it before every key, press and menu row
+  (`sync_search_editor`), with a drawing that falls back to a caret at the
+  end when the two differ; a key handler deciding on its own which keys are
+  the box's and which the window's; a press that places the caret; the
+  right-click menu's routing; and the drawing. Calendar and reminders lost F1
+  while searching to that last decision. **To do:** a `SearchBox` in
+  `apps/textline` -- the `TextInput` *is* the search; `key` answers whether
+  the box took the key and whether the search changed, a key it does not
+  answer being the window's; `press(rect, x)`; `draw`; and the menu's rows
+  -- and the twenty-four moved to it, each with its tests kept.
+
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
 C's standing note before the split). **Baseline, 2026-09-24:** every `apps/*`

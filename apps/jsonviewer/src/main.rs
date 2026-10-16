@@ -2740,9 +2740,14 @@ impl App {
             }
             Some(text) if self.edit_mode => {
                 if let Some(json) = json_path(path) {
+                    // The value already being typed over keeps its box as it
+                    // is: `text` is what the document held before the typing.
+                    if self.editing_path.as_ref() == Some(&json) {
+                        return;
+                    }
                     // Leaving a value's box for another's writes what was
-                    // typed in it, as Enter would: it was thrown away. A
-                    // value refused for its size keeps its box.
+                    // typed in it, as Enter does. A value refused for its
+                    // size keeps its box.
                     self.commit_edit();
                     if self.editing_path.is_some() {
                         return;
@@ -3053,15 +3058,27 @@ impl App {
                 drop(replace_value_at_path(root, &path, old));
             }
             self.editing_path = Some(path);
-            self.note = Some(format!(
-                "Not changed: the text would be over {MAX_OPEN_BYTES} bytes, more than this program reads of a file"
-            ));
+            self.note = Some(too_big("changed"));
             return;
         }
         doc.input = input;
         doc.dirty = true;
         doc.invalidate_caches();
         self.value_box.clear();
+        self.edit_landed();
+    }
+
+    /// An edit went into the document: a refusal of an earlier one on the
+    /// status line no longer holds, and goes. A note about an open or a save
+    /// stays.
+    fn edit_landed(&mut self) {
+        if self
+            .note
+            .as_deref()
+            .is_some_and(|n| n == too_big("changed") || n == too_big("added"))
+        {
+            self.note = None;
+        }
     }
 
     /// Abandon an edit in progress, leaving the document alone.
@@ -3220,9 +3237,7 @@ impl App {
         }
         if source.area.text().len() > MAX_OPEN_BYTES {
             source.area = before;
-            self.note = Some(format!(
-                "Not added: the text would be over {MAX_OPEN_BYTES} bytes, more than this program reads of a file"
-            ));
+            self.note = Some(too_big("added"));
             return;
         }
         source.keep_caret_in_view(rows, width);
@@ -3231,6 +3246,7 @@ impl App {
             doc.dirty = true;
             doc.reparse();
             doc.invalidate_caches();
+            self.edit_landed();
         }
     }
 
@@ -3961,9 +3977,8 @@ impl App {
                     return EventResult::Consumed;
                 }
                 // The value box is drawn over its row, and a press in it is
-                // the box's: its caret where the press landed. It went to the
-                // row under the box, and a double-click there started the
-                // edit over, dropping what had been typed.
+                // the box's: its caret where the press landed, and nothing
+                // for the row under it, which a double-click would activate.
                 let in_value_box = matches!(
                     mouse_ev.kind,
                     MouseEventKind::Press(MouseButton::Left)
@@ -5884,6 +5899,15 @@ fn char_to_byte_pos(s: &str, char_idx: usize) -> usize {
 /// silent truncation would show a parse error about this cap while appearing
 /// to be about the file.
 pub const MAX_OPEN_BYTES: usize = 8 * 1024 * 1024;
+
+/// The status line refusing an edit that would take the text past
+/// [`MAX_OPEN_BYTES`]: `what` is the edit's verb -- a value "changed", text
+/// "added".
+fn too_big(what: &str) -> String {
+    format!(
+        "Not {what}: the text would be over {MAX_OPEN_BYTES} bytes, more than this program reads of a file"
+    )
+}
 
 /// A sample document, for tests.
 ///
@@ -9209,6 +9233,7 @@ mod tests {
             "the cap is not the last byte"
         );
         assert!(doc.input.starts_with(" a"));
+        assert_eq!(app.note, None, "the refusal outlived the key that went in");
     }
 
     /// Ctrl+S saves what was typed, over the file it came from.
@@ -9535,8 +9560,7 @@ mod tests {
     /// **The find bar's box edits at a caret**, as every other box does: the
     /// arrows and Home move it, typing goes in where it is, Delete takes the
     /// character after it, and Ctrl+A selects what typing then replaces --
-    /// each change searching again. It typed only at its end, and Backspace
-    /// from the end was its only edit.
+    /// each change searching again.
     #[test]
     fn the_search_box_edits_at_a_caret() {
         let mut app = app_with_sample();
@@ -9615,9 +9639,9 @@ mod tests {
         );
     }
 
-    /// **The value box edits at a caret, and a press in it is its own**: it
-    /// put the caret nowhere, the press went to the row under the box, and a
-    /// double-click there started the edit over, dropping what was typed.
+    /// **The value box edits at a caret, and a press in it is its own**: the
+    /// press puts the caret under it, and reaches neither the row under the
+    /// box nor, doubled, a fresh start of the edit.
     #[test]
     fn the_value_box_edits_at_a_caret_and_takes_its_own_presses() {
         let mut app = editing_b();
@@ -9653,8 +9677,8 @@ mod tests {
     }
 
     /// **Editing another value writes the first**: a double-click on a
-    /// second value while one was being typed over threw away what was
-    /// typed.
+    /// second value while one is being typed over writes what was typed, as
+    /// Enter does.
     #[test]
     fn editing_another_value_writes_the_first() {
         let mut app = editing_b();
@@ -9676,6 +9700,34 @@ mod tests {
             app.documents[0].input, r#"{"a":1,"b":29}"#,
             "what was typed into b was thrown away"
         );
+    }
+
+    /// **A double-click on the row being edited keeps the box as it is**:
+    /// the typing in it stays, neither written nor replaced by the value
+    /// the document held before it.
+    #[test]
+    fn the_row_being_edited_keeps_what_was_typed() {
+        let mut app = editing_b();
+        app.handle_event(&press(Key::Left));
+        app.handle_event(&typed('5'));
+        let (x, y) = row_point(&app, 2);
+        assert!(
+            app.value_box_rect().is_some_and(|r| !r.contains(x, y)),
+            "control: the press is on b's row, outside its box"
+        );
+        app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Left)));
+        app.handle_event(&mouse_at(
+            x,
+            y,
+            MouseEventKind::DoubleClick(MouseButton::Left),
+        ));
+        assert_eq!(app.value_box.text(), "252", "what was typed was replaced");
+        assert_eq!(
+            app.documents[0].input, r#"{"a": 1, "b": 22}"#,
+            "what was typed was written before Enter"
+        );
+        app.handle_event(&typed('7'));
+        assert_eq!(app.value_box.text(), "2572", "the caret moved");
     }
 
     /// **A value too big for the file is refused, and kept**: written, the
@@ -9715,6 +9767,16 @@ mod tests {
         app.value_box.set_text("2");
         app.handle_event(&press(Key::Enter));
         assert_eq!(app.documents[0].input, r#"{"a":2}"#);
+        assert_eq!(app.note, None, "the refusal outlived the edit that went in");
+
+        // An edit that lands leaves a note about anything else alone.
+        let opened = String::from("INCOMPLETE: only the first 4 bytes are shown");
+        app.note = Some(opened.clone());
+        app.editing_path = Some(vec![PathSegment::Key(String::from("a"))]);
+        app.value_box.set_text("3");
+        app.handle_event(&press(Key::Enter));
+        assert_eq!(app.documents[0].input, r#"{"a":3}"#);
+        assert_eq!(app.note, Some(opened), "an edit put away the open's note");
     }
 
     /// **The find bar's box has a right-click menu** -- Cut, Copy, Paste,

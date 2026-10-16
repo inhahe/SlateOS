@@ -302,8 +302,8 @@ MUTATIONS = [
     # -- the clock ------------------------------------------------------------------------------------------------------
     (
         "midnight never comes",
-        "                if today == self.current_date {",
-        "                if true {",
+        "                    Some(today) if today != self.current_date => {",
+        "                    Some(today) if false => {",
         ["midnight_moves_today_and_the_month_on_screen_with_it"],
     ),
     (

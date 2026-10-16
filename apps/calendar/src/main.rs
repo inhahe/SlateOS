@@ -3376,7 +3376,9 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
         }
     }
     // The form and the question before a delete are modal: every key and
-    // every press is theirs while they are up.
+    // every press is theirs while they are up. Only the left button presses
+    // their buttons; the right one opens a text field's menu and does
+    // nothing anywhere else.
     if state.form.is_some() {
         if let Event::Mouse(mouse) = event
             && matches!(mouse.kind, MouseEventKind::Press(MouseButton::Right))
@@ -3386,7 +3388,9 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
         }
         match event {
             Event::Key(key) if key.pressed => return handle_form_key(state, key),
-            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) => {
+            Event::Mouse(mouse)
+                if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) =>
+            {
                 let hit = state.target_at(mouse.x, mouse.y);
                 return handle_form_click(state, hit);
             }
@@ -3396,7 +3400,9 @@ fn route_event(state: &mut CalendarApp, event: &Event) -> EventResult {
     } else if let Some(id) = state.pending_delete {
         match event {
             Event::Key(key) if key.pressed => return handle_confirm_key(state, id, key),
-            Event::Mouse(mouse) if matches!(mouse.kind, MouseEventKind::Press(_)) => {
+            Event::Mouse(mouse)
+                if matches!(mouse.kind, MouseEventKind::Press(MouseButton::Left)) =>
+            {
                 match state.target_at(mouse.x, mouse.y) {
                     Some(Target::ConfirmDelete) => state.delete_event(id),
                     Some(Target::KeepEvent) => state.pending_delete = None,
@@ -3592,9 +3598,12 @@ fn handle_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         };
     }
 
-    // The search box takes every other key while it has the keyboard.
-    if state.search_focused {
-        return search_key(state, key);
+    // The search box takes every key it answers while it has the keyboard:
+    // typing, the caret's keys, Enter and Escape. One it does not -- F1, the
+    // vertical arrows, Page Up and Down -- is the calendar's, so the list of
+    // keys opens and what the search found scrolls while it is being typed.
+    if state.search_focused && search_key(state, key) == EventResult::Consumed {
+        return EventResult::Consumed;
     }
 
     // Every other binding is on the key itself, and is the calendar's only
@@ -6554,10 +6563,32 @@ mod tests {
         assert!(!app.search_focused);
     }
 
+    /// **A key the search box does not answer is the calendar's**: F1 opens
+    /// the list of keys while the search is being typed, as it does in every
+    /// application, and a letter the calendar binds still types.
+    #[test]
+    fn f1_opens_the_keys_while_searching() {
+        let mut app = sample_app(june_2024());
+        probe::key(&mut app, &probe::ctrl(Key::F));
+        assert!(
+            app.search_focused,
+            "control: Ctrl+F gives the search the keys"
+        );
+        probe::type_str(&mut app, "w");
+        assert_eq!(
+            app.search_query, "w",
+            "a letter the calendar binds did not type"
+        );
+        assert_eq!(
+            probe::key(&mut app, &probe::press(Key::F1)),
+            EventResult::Consumed
+        );
+        assert!(app.show_help, "F1 did not open the list of keys");
+    }
+
     /// **The search box edits at a caret**, as every other box does: the
     /// arrows and Home move it, typing goes in where it is, Delete takes the
-    /// character after it, and Ctrl+A selects what typing then replaces. It
-    /// typed only at its end, and Backspace from the end was its only edit.
+    /// character after it, and Ctrl+A selects what typing then replaces.
     #[test]
     fn the_search_box_edits_at_a_caret() {
         let mut app = sample_app(june_2024());
@@ -6618,6 +6649,46 @@ mod tests {
         assert_eq!(
             app.search_query, "Lunch",
             "the caret did not go where the press was"
+        );
+    }
+
+    /// **A search a few words long is drawn and measured in the box's own
+    /// width**: one that fits is drawn from the box's left edge, not
+    /// scrolled, and a press at its start puts the caret there.
+    #[test]
+    fn a_longer_search_is_drawn_and_measured_in_the_boxs_width() {
+        let mut app = sample_app(june_2024());
+        probe::click(&mut app, Target::SearchField);
+        let query = "nch with the whole team";
+        probe::type_str(&mut app, query);
+        let search = probe::rect_of(&app, Target::SearchField).expect("the search box");
+        let room = search.w - 16.0;
+        let wide = guitk::text::measure(query, SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        assert!(
+            wide < room && wide > room / 8.0,
+            "control: the search, {wide} wide, should fit in {room} with room to spare"
+        );
+        let drawn_at = render(&app).into_iter().find_map(|c| match c {
+            RenderCommand::RichText { x, text, .. } if text == query => Some(x),
+            _ => None,
+        });
+        assert_eq!(
+            drawn_at,
+            Some(search.x + 8.0),
+            "a search that fits was drawn scrolled"
+        );
+        handle_event(
+            &mut app,
+            &Event::Mouse(MouseEvent {
+                x: search.x + 8.0,
+                y: search.y + search.h / 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }),
+        );
+        probe::type_str(&mut app, "Lu");
+        assert_eq!(
+            app.search_query, "Lunch with the whole team",
+            "the press was measured in another width than the box's"
         );
     }
 
@@ -6713,11 +6784,32 @@ mod tests {
         );
         assert_eq!(app.form_error, None, "the complaint outlived the change");
 
-        probe::click_with(&mut app, Target::Save, MouseButton::Right);
-        assert!(
-            !app.field_menu.is_up(),
-            "a right-click on Save offered a field's menu"
-        );
+        // A right-click on a button presses nothing: the form stays up.
+        let events = app.store.len();
+        for button in [Target::Save, Target::Cancel] {
+            probe::click_with(&mut app, button, MouseButton::Right);
+            assert!(
+                !app.field_menu.is_up(),
+                "a right-click on {button:?} offered a field's menu"
+            );
+            assert!(app.form.is_some(), "a right-click on {button:?} pressed it");
+        }
+        assert_eq!(app.store.len(), events, "a right-click on Save saved");
+    }
+
+    /// **A right-click on the delete question's buttons answers nothing**:
+    /// only the left button deletes, or keeps, the event.
+    #[test]
+    fn a_right_click_does_not_answer_the_delete_question() {
+        let mut app = sample_app(june_2024());
+        let id = app.store.all().first().map(|e| e.id).expect("an event");
+        app.pending_delete = Some(id);
+        let events = app.store.len();
+        probe::click_with(&mut app, Target::ConfirmDelete, MouseButton::Right);
+        assert_eq!(app.store.len(), events, "a right-click deleted the event");
+        assert_eq!(app.pending_delete, Some(id), "the question was put away");
+        probe::click_with(&mut app, Target::ConfirmDelete, MouseButton::Left);
+        assert_eq!(app.store.len(), events - 1, "control: a left-click deletes");
     }
 
     /// **A dimmed row the pointer rests on says why, on the window's clock**,

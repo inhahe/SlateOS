@@ -724,6 +724,31 @@ MUTATIONS += [
     ),
 ]
 
+# The review's fixes (2026-10-16): a press in the search box is measured in
+# the frame it was found in, and says how to use the box.
+MEASURED = "a_press_in_the_search_box_is_measured_where_it_landed"
+HINT = "a_press_in_the_search_box_says_how_to_use_it"
+
+MUTATIONS += [
+    (
+        "a press in the search box is measured in the last frame",
+        "                    && let Some(rect) = frame.rect_of(|t| *t == Target::Search)\n",
+        "                    && let Some(rect) = self\n"
+        "                        .last_hits\n"
+        "                        .iter()\n"
+        "                        .rev()\n"
+        "                        .find(|(t, _)| *t == Target::Search)\n"
+        "                        .map(|(_, r)| *r)\n",
+        [MEASURED],
+    ),
+    (
+        "a press in the search box says nothing",
+        "        self.search_active = true;\n        self.status_msg = String::from(SEARCH_HINT);\n        self.sync_search_editor();\n",
+        "        self.search_active = true;\n        self.sync_search_editor();\n",
+        [HINT],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "flashcards", timeout=900, only=only))

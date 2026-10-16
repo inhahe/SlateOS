@@ -98,6 +98,13 @@ pub enum VmaKind {
         /// ISO9660, pseudo-filesystems) — those mappings fall back to the
         /// per-mapping `read_at` private-frame path.
         file_id: Option<crate::fs::vfs::FileId>,
+        /// A shared mapping (`MAP_SHARED`): it maps the page cache's frames
+        /// themselves, part by part, so every mapping of the file and every
+        /// `read` and `write` of it see one copy, and `fork` shares it
+        /// (design-decisions §1572). `file_id` is then always `Some`, the
+        /// identity of a file the handle holds. A private mapping copies on
+        /// a write and never changes the file.
+        shared: bool,
     },
 }
 

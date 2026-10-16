@@ -4160,6 +4160,27 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
                 }
                 crate::proc::pcb::FaultOutcome::Busy => return,
                 crate::proc::pcb::FaultOutcome::Unresolvable => {}
+                crate::proc::pcb::FaultOutcome::BeyondEnd => {
+                    // A shared mapping of a file, past the file's end: Linux's
+                    // `SIGBUS` with `BUS_ADRERR` (`filemap_fault`'s
+                    // `VM_FAULT_SIGBUS`), and a native program's access
+                    // violation, as any unresolvable fault is.
+                    log_exception(14, frame.rip, cr2);
+                    const SIGBUS: u32 = 7;
+                    let si_code = crate::proc::linux_sigframe::si_fault_code::BUS_ADRERR;
+                    if try_deliver_linux_fault_signal(frame, SIGBUS, si_code, cr2) {
+                        mm::fault::record_delivered();
+                        return;
+                    }
+                    use crate::proc::exception::ExceptionCode;
+                    dispatch_or_kill_userspace(
+                        "Page Fault (#PF) past the end of a mapped file",
+                        frame,
+                        ExceptionCode::AccessViolation,
+                        cr2,
+                    );
+                    return;
+                }
             }
         }
 

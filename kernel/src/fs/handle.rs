@@ -2258,6 +2258,21 @@ pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>
     }
 }
 
+/// The identity of the file `handle` holds (`FileHold`), when it holds one:
+/// what a shared mapping of the file is keyed by (design-decisions §1572).
+/// `None` for a description that holds no file -- its filesystem keeps no
+/// stable inode numbers -- whose identity, read by name, could become
+/// another file's once this one's last name goes.
+///
+/// # Errors
+///
+/// `InvalidHandle` for a handle that names no open file.
+pub fn held_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>> {
+    let table = OPEN_FILES.lock();
+    let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+    Ok(file.object.as_ref().map(|obj| obj.id()))
+}
+
 /// Recover a directory handle as a [`PinnedDir`](crate::fs::PinnedDir) — the
 /// path it was opened under *together with* the identity it opened onto.
 ///

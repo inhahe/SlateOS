@@ -6526,7 +6526,7 @@ fn bench_lock_primitives() {
 /// steps, and reading eliminated five candidates without finding the one that
 /// matters: the data copy (64x the bytes costs 2.95x the time),
 /// `history::try_auto_record` (early-returns when versioning is off),
-/// `invalidate_identity` (a `BTreeMap` range over one page),
+/// the page cache's `file_changed` (a `BTreeMap` range over one page),
 /// `memfs::child_ino` (a map lookup, not a scan) and `touch_modified` (the TSC,
 /// not the HPET). See `known-issues.md` →
 /// `TD-A-THE-BENCHMARK-BUDGETS-NEVER-FIRE-IN-A-BOOT-TEST`.
@@ -6740,7 +6740,7 @@ fn bench_vfs_write_breakdown() {
          and the minimum of a sum exceeds the sum of the minima unless every part \
          peaks in the same iteration. It spans 9 calls: history (now measured, \
          {}ns), check_writable, enforce_quota_write, resolve_mount, fs.lock, \
-         memfs's write_file, cache_identity, invalidate_identity, \
+         memfs's write_file, cache_identity, page_cache::file_changed, \
          invalidate_negative_prefix",
         remainder,
         history_only.min_ns,

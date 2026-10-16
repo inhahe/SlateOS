@@ -3288,7 +3288,13 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
         } else {
             '-'
         };
-        // All current VMAs are private mappings.
+        // `s` for a shared file mapping, which maps the page cache's frames
+        // (design-decisions §1572); every other VMA is private.
+        let sharing = if matches!(vma.kind, VmaKind::FileBacked { shared: true, .. }) {
+            's'
+        } else {
+            'p'
+        };
         let pathname = match vma.kind {
             VmaKind::Stack => "[stack]",
             VmaKind::Guard => "[guard]",
@@ -3305,6 +3311,7 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
                 handle,
                 file_offset,
                 file_id,
+                ..
             } => (
                 *file_offset,
                 file_id.map_or(0, |f| crate::fs::vfs::dev_of(f.fs_id)),
@@ -3321,14 +3328,14 @@ fn render_maps(vmas: &[crate::mm::vma::Vma]) -> Vec<u8> {
         let _ = match file_path {
             Some(path) => writeln!(
                 text,
-                "{:08x}-{:08x} {r}{w}{x}p {offset:08x} 00:{dev:02x} {ino} {}",
+                "{:08x}-{:08x} {r}{w}{x}{sharing} {offset:08x} 00:{dev:02x} {ino} {}",
                 vma.start,
                 vma.end,
                 path.display()
             ),
             None => writeln!(
                 text,
-                "{:08x}-{:08x} {r}{w}{x}p {offset:08x} 00:{dev:02x} {ino} {pathname}",
+                "{:08x}-{:08x} {r}{w}{x}{sharing} {offset:08x} 00:{dev:02x} {ino} {pathname}",
                 vma.start, vma.end
             ),
         };
@@ -17478,6 +17485,7 @@ pub fn self_test() -> KernelResult<()> {
                         fs_id: u64::MAX,
                         ino: 77,
                     }),
+                    shared: false,
                 },
                 flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE,
                 fork: crate::mm::vma::ForkPolicy::COPY,

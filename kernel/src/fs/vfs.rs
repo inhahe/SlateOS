@@ -1720,7 +1720,11 @@ fn release_hold(obj: &FileObject) {
         // the file is gone now. Its cached pages go, since its inode number
         // may be given to another file, and so does the state kept about it,
         // deferred at the unlink (`defer_forget_if_held`).
-        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+        let _ = crate::mm::page_cache::file_changed(
+            obj.fs_id,
+            obj.ino,
+            crate::mm::page_cache::FileChange::Dropped,
+        );
         super::perfile::object_unlinked(
             super::perfile::Unlinked {
                 id: Some(obj.id()),
@@ -2037,7 +2041,11 @@ impl Drop for SwapFileClaim {
         for e in &self.file.extents {
             super::cache::invalidate_range(&self.file.device, e.dev_sector, e.sectors);
         }
-        crate::mm::page_cache::invalidate_identity(self.hold.fs_id, self.hold.ino);
+        let _ = crate::mm::page_cache::file_changed(
+            self.hold.fs_id,
+            self.hold.ino,
+            crate::mm::page_cache::FileChange::Dropped,
+        );
         self.hold.fs.lock().swapfile_release(self.hold.ino);
     }
 }
@@ -2055,8 +2063,8 @@ impl Drop for SwapFileClaim {
 /// file it creates, so a `FileId` read before a deletion can name a different
 /// file after it. (memfs counts up and never reuses one, which is why this
 /// went unnoticed on `/tmp`.) State keyed on a `FileId` that can outlive its
-/// file must therefore end with the file: the page cache is invalidated on
-/// every removal (`invalidate_identity`), and the tables of per-file state --
+/// file must therefore end with the file: the page cache is told of every
+/// removal (`page_cache::file_changed`), and the tables of per-file state --
 /// ACLs, flags, seals, indexed attributes -- are told through
 /// [`super::perfile`], where any new such table must be registered.
 ///
@@ -4539,13 +4547,13 @@ impl Vfs {
                 init_new_owner(&mut **guard, &relative, creator, false)?;
                 acls.store(&mut **guard, fs_id, None, Some(&relative), path)?;
             }
-            // Coherence: a full overwrite replaces the file's contents — drop
-            // any cached pages so mappers see the new bytes.
-            cache_identity(&mut guard, fs_id, &relative)
+            // Coherence: a full overwrite replaces the file's contents.
+            cache_changed(
+                cache_identity(&mut guard, fs_id, &relative),
+                crate::mm::page_cache::FileChange::Replaced { data },
+            )
         };
-        if let Some((fs_id, ino)) = cache_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_inval);
         // Charge quota usage after successful write.
         super::quota::charge_bytes(0, 0, data.len() as u64);
         // Writing may create a new file — invalidate negative cache entries
@@ -4771,9 +4779,10 @@ impl Vfs {
             guard.remove(&relative)?;
             (id, unlinked)
         };
-        if let Some((fs_id, ino)) = cache_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_changed(
+            cache_inval,
+            crate::mm::page_cache::FileChange::Unlinked,
+        ));
         super::perfile::name_removed(unlinked, &path);
         // Release quota usage for deleted file.
         if file_size > 0 {
@@ -5209,13 +5218,12 @@ impl Vfs {
                 super::sealing::may_write(seals, offset, data.len() as u64, meta.size)?;
             }
             guard.write_at(&relative, offset, data)?;
-            // Coherence: drop any cached pages of this file so a later mapper
-            // (or re-fault) reads the post-write bytes, not stale cached ones.
-            cache_identity(&mut guard, fs_id, &relative)
+            cache_changed(
+                cache_identity(&mut guard, fs_id, &relative),
+                crate::mm::page_cache::FileChange::Written { offset, data },
+            )
         };
-        if let Some((fs_id, ino)) = cache_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_inval);
         super::quota::charge_bytes(0, 0, data.len() as u64);
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -5278,12 +5286,17 @@ impl Vfs {
                 }
                 Err(e) => return Err(e),
             };
-            (at, cache_identity(&mut guard, fs_id, &relative))
+            let id = cache_identity(&mut guard, fs_id, &relative);
+            (
+                at,
+                cache_changed(
+                    id,
+                    crate::mm::page_cache::FileChange::Written { offset: at, data },
+                ),
+            )
         };
         let (at, cache_inval) = cache_inval;
-        if let Some((fs_id, ino)) = cache_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_inval);
         super::quota::charge_bytes(0, 0, data.len() as u64);
         // The append may have created the file: drop negative entries.
         VFS_DCACHE.lock().invalidate_negative_prefix(path);
@@ -5315,13 +5328,12 @@ impl Vfs {
                 super::sealing::may_resize(seals, meta.size, size)?;
             }
             guard.truncate(&relative, size)?;
-            // Coherence: truncation changes (or zeroes the tail of) the file's
-            // pages — drop cached copies.
-            cache_identity(&mut guard, fs_id, &relative)
+            cache_changed(
+                cache_identity(&mut guard, fs_id, &relative),
+                crate::mm::page_cache::FileChange::Resized { size },
+            )
         };
-        if let Some((fs_id, ino)) = cache_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_inval);
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
@@ -5698,14 +5710,18 @@ impl Vfs {
         data: &[u8],
     ) -> KernelResult<()> {
         Self::object_write_checks(obj, path, data.len())?;
-        {
+        let after = {
             let mut guard = obj.fs.lock();
             if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
                 super::sealing::may_write(seals, offset, data.len() as u64, meta.size)?;
             }
             guard.write_ino(obj.ino, offset, data)?;
-        }
-        Self::object_written(obj, path, data.len());
+            Self::object_changed(
+                obj,
+                crate::mm::page_cache::FileChange::Written { offset, data },
+            )
+        };
+        Self::object_written(path, data.len(), after);
         Ok(())
     }
 
@@ -5723,9 +5739,15 @@ impl Vfs {
             if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
                 super::sealing::may_write(seals, meta.size, data.len() as u64, meta.size)?;
             }
-            guard.append_ino(obj.ino, data)?
+            let at = guard.append_ino(obj.ino, data)?;
+            let after = Self::object_changed(
+                obj,
+                crate::mm::page_cache::FileChange::Written { offset: at, data },
+            );
+            (at, after)
         };
-        Self::object_written(obj, path, data.len());
+        let (at, after) = at;
+        Self::object_written(path, data.len(), after);
         Ok(at)
     }
 
@@ -5737,14 +5759,15 @@ impl Vfs {
     /// `ReadOnlyFilesystem`, the filesystem's own.
     pub fn object_truncate(obj: &FileObject, path: &Path, size: u64) -> KernelResult<()> {
         check_writable_mount(obj.mnt_id)?;
-        {
+        let after = {
             let mut guard = obj.fs.lock();
             if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
                 super::sealing::may_resize(seals, meta.size, size)?;
             }
             guard.truncate_ino(obj.ino, size)?;
-        }
-        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+            Self::object_changed(obj, crate::mm::page_cache::FileChange::Resized { size })
+        };
+        after_cache_change(after);
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
         Ok(())
@@ -6026,10 +6049,21 @@ impl Vfs {
         enforce_quota_write(path, len as u64)
     }
 
-    /// After a write to a held file: cached pages are stale, and the write is
+    /// The page cache's coherence hook for a change to a held file
+    /// (`page_cache::file_changed`), under the filesystem's lock, as
+    /// [`cache_changed`] is for a file named by path.
+    fn object_changed(
+        obj: &FileObject,
+        change: crate::mm::page_cache::FileChange<'_>,
+    ) -> crate::mm::page_cache::AfterChange {
+        crate::mm::page_cache::file_changed(obj.fs_id, obj.ino, change)
+    }
+
+    /// After a write to a held file, with the filesystem's lock let go: what
+    /// the page cache left to do ([`after_cache_change`]), and the write is
     /// counted and announced.
-    fn object_written(obj: &FileObject, path: &Path, len: usize) {
-        crate::mm::page_cache::invalidate_identity(obj.fs_id, obj.ino);
+    fn object_written(path: &Path, len: usize, after: crate::mm::page_cache::AfterChange) {
+        after_cache_change(after);
         super::quota::charge_bytes(0, 0, len as u64);
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
@@ -6161,9 +6195,10 @@ impl Vfs {
                 guard.rename(&rel_from, &rel_to)?;
                 (id, displaced)
             };
-            if let Some((fs_id, ino)) = dest_inval {
-                crate::mm::page_cache::invalidate_identity(fs_id, ino);
-            }
+            after_cache_change(cache_changed(
+                dest_inval,
+                crate::mm::page_cache::FileChange::Unlinked,
+            ));
             // The replaced file first, so that its state is gone before the
             // moved file's names arrive where its were.
             if let Some(unlinked) = displaced {
@@ -6952,13 +6987,23 @@ impl Vfs {
         check_writable(path)?;
         check_path_access(path, PathAccess::Write)?;
         let hold = Self::open_object(path)?.ok_or(KernelError::NotSupported)?;
+        // A file a program has mapped shared cannot become swap: the mapping
+        // would show, and write into, the pages swap keeps there. Linux
+        // answers `EBUSY` for a swap file it cannot have to itself.
+        if crate::mm::page_cache::has_shared_maps(hold.id()) {
+            return Err(KernelError::DeviceBusy);
+        }
         let file = {
             let mut fs = hold.fs.lock();
             attr_policy::may_open(ino_attrs(&mut **fs, hold.ino), true, false, false)?;
             fs.swapfile_claim(hold.ino)?
         };
         let claim = SwapFileClaim { hold, file };
-        crate::mm::page_cache::invalidate_identity(claim.hold.fs_id, claim.hold.ino);
+        let _ = crate::mm::page_cache::file_changed(
+            claim.hold.fs_id,
+            claim.hold.ino,
+            crate::mm::page_cache::FileChange::Dropped,
+        );
         // On failure the claim is dropped, which lets go of it.
         super::cache::flush(&claim.file.device)?;
         for e in &claim.file.extents {
@@ -7103,9 +7148,10 @@ impl Vfs {
             }
         };
 
-        if let Some((fs_id, ino)) = cache_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_changed(
+            cache_inval,
+            crate::mm::page_cache::FileChange::Unlinked,
+        ));
         super::perfile::name_removed(unlinked, &child);
         if file_size > 0 {
             super::quota::release_bytes(0, 0, file_size);
@@ -7874,9 +7920,10 @@ impl Vfs {
                 }
             }
         };
-        if let Some((fs_id, ino)) = dest_inval {
-            crate::mm::page_cache::invalidate_identity(fs_id, ino);
-        }
+        after_cache_change(cache_changed(
+            dest_inval,
+            crate::mm::page_cache::FileChange::Unlinked,
+        ));
 
         {
             let mut dcache = VFS_DCACHE.lock();
@@ -10612,15 +10659,9 @@ fn normalize_mount_path(p: &Path) -> PathBuf {
     out
 }
 
-/// Find the mount point that best matches `path`.
-///
-/// Uses longest-prefix matching with path-boundary checks so that
-/// a mount at `"/tmp"` doesn't accidentally capture `"/tmpfile"`.
-///
-/// Returns a mutable reference to the mount point and the
-/// path relative to that mount's root.
 /// Capture a file's page-cache identity `(fs_id, ino)` under the held VFS lock,
-/// for coherence invalidation after a content/lifecycle mutation.
+/// for the page cache's coherence hook after a content/lifecycle mutation
+/// ([`cache_changed`]).
 ///
 /// Gated on [`crate::mm::page_cache::is_populated`] (a single relaxed atomic
 /// load): when nothing is cached — the common case — this returns `None`
@@ -10636,6 +10677,30 @@ fn cache_identity(fs: &mut Box<dyn FileSystem>, fs_id: u64, relative: &Path) -> 
         return None;
     }
     Some((fs_id, ino))
+}
+
+/// Tell the page cache how the file `id` names ([`cache_identity`]) changed
+/// (`page_cache::file_changed`). Called under the filesystem's lock, after
+/// the change, so that the cache's in-place updates of a shared-mapped file
+/// follow the filesystem's own order; what it answers is done once the lock
+/// is let go ([`after_cache_change`]).
+fn cache_changed(
+    id: Option<(u64, u64)>,
+    change: crate::mm::page_cache::FileChange<'_>,
+) -> crate::mm::page_cache::AfterChange {
+    match id {
+        Some((fs_id, ino)) => crate::mm::page_cache::file_changed(fs_id, ino, change),
+        None => crate::mm::page_cache::AfterChange::Done,
+    }
+}
+
+/// What [`cache_changed`] left to do, done with the filesystem's lock let go:
+/// unmapping the shared mappings of a file past its new end, which takes the
+/// process table and the address spaces' locks.
+fn after_cache_change(after: crate::mm::page_cache::AfterChange) {
+    if let crate::mm::page_cache::AfterChange::UnmapFrom { file, from } = after {
+        crate::proc::pcb::unmap_file_from(file, from);
+    }
 }
 
 /// What removing the name `relative` ends, for the tables that keep state

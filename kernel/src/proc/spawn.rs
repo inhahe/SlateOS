@@ -24526,6 +24526,106 @@ pub fn self_test_linux_setid() -> KernelResult<()> {
     Ok(())
 }
 
+/// Shared file mappings through the Linux ABI (design-decisions §1572):
+/// [`elf::build_linux_shared_file_maps_test_elf`] (`build/shmaptest.c`) maps a
+/// file `MAP_SHARED` and reads each `pwrite` through it at once, across the
+/// kernel's frames, in a forked child, through a second mapping and a
+/// `MAP_FIXED` one 4 KiB out of step with its offset; finds the mapping marked
+/// `s` in `/proc/self/maps`; and takes `SIGBUS` (`BUS_ADRERR`) past the end of
+/// the file once it is cut short. Afterwards no file is left counted as shared-
+/// mapped: every VMA gave back what it took (`pcb::Backing`).
+pub fn self_test_linux_shared_file_maps() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+
+    serial_println!("[spawn] Running Linux shared file mappings (ring 3) integration test...");
+    let exe_elf = elf::build_linux_shared_file_maps_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-shmap"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes a file in /tmp and reads /proc/self/maps.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-shmap",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let shared_before = crate::mm::page_cache::shared_mapped_files();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: shared file mappings spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    wait_for_fixture(result.pid, deadline, 5);
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    if state != Some(pcb::ProcessState::Zombie) {
+        serial_println!(
+            "[spawn]   FAIL: shared file mappings (ring 3) — the program did not finish in 60 s \
+             (state {:?})",
+            state
+        );
+        return Err(KernelError::InternalError);
+    }
+    if exit_code != Some(PASS) {
+        let what = match exit_code {
+            Some(0x30..=0x32) => "the mailbox page, or the file to map, could not be made",
+            Some(0x33 | 0x34) => "the shared mapping failed, or did not read as the file",
+            Some(0x35..=0x38) => "a pwrite was not seen through the mapping at once",
+            Some(0x39) => "a forked child did not see the mapping's bytes (ended other than 0x2D)",
+            Some(0x3A..=0x3D) => {
+                "a second mapping at offset 4096 failed, or did not see the file and its pwrite"
+            }
+            Some(0x3E..=0x42) => {
+                "a MAP_FIXED mapping out of step with its offset failed, or misread the file"
+            }
+            Some(0x43 | 0x44) => "/proc/self/maps did not mark the shared mapping 's'",
+            Some(0x45..=0x47) => "after ftruncate, the mapping did not read the file's start",
+            Some(0x48) => "an access past the end of the cut file raised no SIGBUS",
+            Some(0x60..=0x62) => {
+                "the SIGBUS past the end was not BUS_ADRERR at the address touched"
+            }
+            None => "no exit code: the program died",
+            _ => "unexpected exit code",
+        };
+        serial_println!(
+            "[spawn]   FAIL: shared file mappings (ring 3) — exit {:?}: {}",
+            exit_code,
+            what
+        );
+        return Err(KernelError::InternalError);
+    }
+    let shared_after = crate::mm::page_cache::shared_mapped_files();
+    if shared_after != shared_before {
+        serial_println!(
+            "[spawn]   FAIL: shared file mappings (ring 3) — {} files counted as shared-mapped \
+             before, {} after the program ended",
+            shared_before,
+            shared_after
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   Linux shared file mappings (ring 3: pwrite seen through MAP_SHARED, fork, \
+         offset and out-of-step views, maps 's', SIGBUS past the end): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of UTS namespaces and the handles on them through the Linux
 /// ABI: [`elf::build_linux_uts_namespaces_test_elf`] (`build/nstest.c`), run
 /// as root. `/proc/self/ns/uts` is a link whose descriptor `stat`, `fstat`

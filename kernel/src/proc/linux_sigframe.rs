@@ -310,6 +310,9 @@ pub mod si_fault_code {
     pub const ILL_ILLOPN: i32 = 2;
     /// `BUS_ADRALN` — invalid address alignment (#AC).
     pub const BUS_ADRALN: i32 = 1;
+    /// `BUS_ADRERR` — a nonexistent physical address: on Linux, an access to a
+    /// shared file mapping past the end of its file.
+    pub const BUS_ADRERR: i32 = 2;
     /// `TRAP_BRKPT` — a breakpoint instruction: `int1` (`icebp`) here; `int3`
     /// reports `SI_KERNEL`, as on Linux.
     pub const TRAP_BRKPT: i32 = 1;

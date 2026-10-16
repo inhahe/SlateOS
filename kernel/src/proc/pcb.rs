@@ -1956,13 +1956,7 @@ pub fn fork_create(
     // the backing open-file description.  Collect the handles now (before
     // `vmas` is moved into the child) and bump them after the process-table
     // lock is released below.
-    let fork_retain_handles: Vec<u64> = vmas
-        .iter()
-        .filter_map(|v| match v.kind {
-            crate::mm::vma::VmaKind::FileBacked { handle, .. } => Some(handle),
-            _ => None,
-        })
-        .collect();
+    let fork_retain_handles: Vec<Backing> = vmas.iter().filter_map(Backing::of).collect();
 
     let pid = alloc_pid();
     let child = Box::new(Process {
@@ -2210,8 +2204,9 @@ pub fn fork_create(
     // Bump the backing-file reference for each file-backed VMA the child
     // inherited.  Done with the process-table lock released — the open-file
     // lock must never nest under it.
-    for handle in fork_retain_handles {
-        let _ = crate::fs::handle::dup_shared(handle);
+    for backing in fork_retain_handles {
+        // Cannot fail for a handle the parent's VMA holds (`Backing::retain`).
+        let _ = backing.retain();
     }
 
     // The child inherits RLIMIT_CPU and RLIMIT_RTTIME, and is held to them
@@ -5806,28 +5801,134 @@ pub fn is_process_running(pid: ProcessId) -> bool {
 // Per-process VMA management (address-space records for all mmap regions)
 // ---------------------------------------------------------------------------
 
-/// Release the owned reference a VMA holds on its backing resource, if any.
+/// What a [`VmaKind::FileBacked`] VMA holds of its file, each VMA its own:
+/// one reference on the open-file description, and -- for a shared mapping
+/// -- one count of the file's shared mappings in the page cache
+/// (`page_cache::shared_map_added`), by which the cache keeps the file's
+/// pages in place while they are mapped.
 ///
-/// A [`VmaKind::FileBacked`] VMA owns an independent reference to its
-/// backing open-file description.  This is called when such a VMA is
-/// dropped from a process's authoritative VMA list (`munmap`, or process
-/// teardown).  No-op for kinds without a backing resource.
+/// Taken for each VMA made from another -- a fork's copy, each piece a split
+/// leaves -- and given back when a VMA goes (`munmap`, exec, exit). Both
+/// sides run with **no** process-table lock held: the sites collect
+/// `Backing`s under it and apply them after (the open-file lock is ordered
+/// after the process table, never the reverse).
+#[derive(Clone, Copy, Debug)]
+struct Backing {
+    /// The open-file description's handle.
+    handle: u64,
+    /// The file, for a shared mapping.
+    shared: Option<crate::fs::vfs::FileId>,
+}
+
+impl Backing {
+    /// What `vma` holds of its file, if it is file-backed.
+    fn of(vma: &Vma) -> Option<Self> {
+        match vma.kind {
+            VmaKind::FileBacked {
+                handle,
+                file_id,
+                shared,
+                ..
+            } => Some(Self {
+                handle,
+                shared: if shared { file_id } else { None },
+            }),
+            _ => None,
+        }
+    }
+
+    /// Take one more for a VMA made from another. An error leaves nothing
+    /// taken: `dup_shared` fails only for an unknown handle or a refcount at
+    /// its limit, neither of which a handle a VMA holds can be.
+    fn retain(self) -> KernelResult<()> {
+        crate::fs::handle::dup_shared(self.handle)?;
+        if let Some(file) = self.shared {
+            crate::mm::page_cache::shared_map_added(file);
+        }
+        Ok(())
+    }
+
+    /// Give back what a VMA that is gone held.
+    fn release(self) {
+        if let Some(file) = self.shared {
+            crate::mm::page_cache::shared_map_removed(file);
+        }
+        // Drops one reference; the underlying description is only torn down
+        // on the final close. A failure means the handle was already gone,
+        // which is harmless here.
+        let _ = crate::fs::handle::close(self.handle);
+    }
+}
+
+/// Whether `vma` maps `file` shared ([`VmaKind::FileBacked`]'s `shared`).
+fn maps_shared(vma: &Vma, file: crate::fs::vfs::FileId) -> bool {
+    matches!(
+        vma.kind,
+        VmaKind::FileBacked {
+            file_id: Some(f),
+            shared: true,
+            ..
+        } if f == file
+    )
+}
+
+/// Unmap every shared mapping of `file`, in every process, from file byte
+/// `from` on (design-decisions §1572): the file now ends before `from` -- its
+/// length rounded up to a 4 KiB page -- and an access there is `SIGBUS`, not
+/// a read of what the file held before (`resolve_file_shared` refuses to
+/// map it again). A process whose address space is gone meanwhile is passed
+/// by: there is nothing left to unmap.
 ///
-/// The *retain* side (fork inheritance, `MAP_FIXED` split remainders) is
-/// applied directly on collected handle ids — see `fork_create`,
-/// `remove_vma_range`, and `reset_vmas_for_exec` — because those sites
-/// defer the open-file-lock operations until after the process-table lock
-/// is dropped (the established ordering is open-file-table *after*
-/// process-table, never the reverse).
-///
-/// Must be called with **no** process-table lock held, for the same
-/// lock-ordering reason.
+/// Must be called with no process-table, open-file or filesystem lock held:
+/// it takes the first, and the unmapping frees frames.
+pub fn unmap_file_from(file: crate::fs::vfs::FileId, from: u64) {
+    let pids: Vec<ProcessId> = {
+        let table = PROCESS_TABLE.lock();
+        table
+            .values()
+            .filter(|p| p.vmas.iter().any(|v| maps_shared(v, file)))
+            .map(|p| p.pid)
+            .collect()
+    };
+    for pid in pids {
+        let Some(pin) = pin_address_space(pid) else {
+            continue;
+        };
+        // Read again now the space is pinned: the VMAs may have changed.
+        let ranges: Vec<(u64, u64)> = {
+            let table = PROCESS_TABLE.lock();
+            let Some(proc) = table.get(&pid) else {
+                continue;
+            };
+            proc.vmas
+                .iter()
+                .filter(|v| maps_shared(v, file))
+                .filter_map(|v| {
+                    let VmaKind::FileBacked { file_offset, .. } = v.kind else {
+                        return None;
+                    };
+                    let len = v.end.saturating_sub(v.start);
+                    if from >= file_offset.saturating_add(len) {
+                        return None;
+                    }
+                    Some((
+                        v.start.saturating_add(from.saturating_sub(file_offset)),
+                        v.end,
+                    ))
+                })
+                .collect()
+        };
+        for (lo, hi) in ranges {
+            crate::mm::user::unmap_user_range(pin.pml4(), lo, hi);
+        }
+    }
+}
+
+/// Give back what `vma` held of its backing file ([`Backing`]), if anything.
+/// Must be called with **no** process-table lock held.
 fn vma_release_backing(vma: &Vma) {
-    if let VmaKind::FileBacked { handle, .. } = vma.kind {
-        // Drops one reference; the underlying description is only torn
-        // down on the final close.  A failure means the handle was
-        // already gone, which is harmless here.
-        let _ = crate::fs::handle::close(handle);
+    if let Some(backing) = Backing::of(vma) {
+        backing.release();
     }
 }
 
@@ -5946,7 +6047,7 @@ pub fn set_vma_lock_range(pid: ProcessId, start: u64, end: u64, lock: bool) {
     if end <= start {
         return;
     }
-    let mut retains: Vec<u64> = Vec::new();
+    let mut retains: Vec<Backing> = Vec::new();
     {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(&pid) else {
@@ -5978,9 +6079,9 @@ pub fn set_vma_lock_range(pid: ProcessId, start: u64, end: u64, lock: bool) {
                 pieces = pieces.saturating_add(1);
             }
             // A file-backed VMA's one backing reference becomes one per piece.
-            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+            if let Some(backing) = Backing::of(&vma) {
                 for _ in 1..pieces {
-                    retains.push(handle);
+                    retains.push(backing);
                 }
             }
         }
@@ -5988,11 +6089,11 @@ pub fn set_vma_lock_range(pid: ProcessId, start: u64, end: u64, lock: bool) {
         proc.vmas = kept;
     }
     // Outside the process table, which the open-file lock never nests under.
-    for handle in retains {
+    for backing in retains {
         // The pieces' extra references: a failure to take one leaves that
         // piece's unmap releasing a reference the file no longer counts,
-        // which `dup_shared` cannot fail to give for a handle a VMA holds.
-        let _ = crate::fs::handle::dup_shared(handle);
+        // which cannot happen for a handle a VMA holds (`Backing::retain`).
+        let _ = backing.retain();
     }
 }
 
@@ -6214,11 +6315,39 @@ pub fn reserve_unmapped_area(
     kind: VmaKind,
     flags: crate::mm::page_table::PageFlags,
 ) -> Option<u64> {
+    reserve_unmapped_area_phased(pid, size, None, region_start, region_end, kind, flags)
+}
+
+/// [`reserve_unmapped_area`], placing the VMA at `phase` bytes past a 16 KiB
+/// boundary when `phase` is given (it is taken modulo 16 KiB): a shared file
+/// mapping is placed with its start in phase with its file offset, so that
+/// each of its virtual frames maps one page-cache frame
+/// (`resolve_file_shared`). `None` places it wherever the gap begins.
+#[must_use]
+pub fn reserve_unmapped_area_phased(
+    pid: ProcessId,
+    size: u64,
+    phase: Option<u64>,
+    region_start: u64,
+    region_end: u64,
+    kind: VmaKind,
+    flags: crate::mm::page_table::PageFlags,
+) -> Option<u64> {
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let mask = frame.wrapping_sub(1);
+    let span = match phase {
+        Some(_) => size.checked_add(frame)?,
+        None => size,
+    };
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid)?;
-    let base = crate::mm::vma::find_gap(&proc.vmas, size, region_start, region_end)?;
-    // `find_gap` guarantees `base + size <= region_end`, so this cannot
-    // overflow; `checked_add` keeps the arithmetic lint satisfied.
+    let gap = crate::mm::vma::find_gap(&proc.vmas, span, region_start, region_end)?;
+    // Up to 16 KiB into the gap, which is that much longer for it.
+    let lead = phase.map_or(0, |p| p.wrapping_sub(gap) & mask);
+    let base = gap.checked_add(lead)?;
+    // `find_gap` guarantees `gap + span <= region_end`, and `lead` is below
+    // the slack `span` added, so this cannot overflow; `checked_add` keeps
+    // the arithmetic lint satisfied.
     let end = base.checked_add(size)?;
     let pos = proc
         .vmas
@@ -6302,8 +6431,8 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
     // (the open-file lock must never nest under the process-table lock).
     // Retains are applied *before* releases so a description that survives
     // the operation never transiently hits a zero refcount.
-    let mut retains: Vec<u64> = Vec::new();
-    let mut releases: Vec<u64> = Vec::new();
+    let mut retains: Vec<Backing> = Vec::new();
+    let mut releases: Vec<Backing> = Vec::new();
 
     {
         let mut table = PROCESS_TABLE.lock();
@@ -6318,16 +6447,16 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
             }
             // This original VMA is being split/dropped: it loses its
             // single owned backing reference.
-            if let VmaKind::FileBacked { handle, .. } = vma.kind {
-                releases.push(handle);
+            if let Some(backing) = Backing::of(&vma) {
+                releases.push(backing);
             }
             // Left remainder [vma.start, start) survives an edge/superset
             // overlap on the low side.  Its start is unchanged, so the
             // file_offset is correct as-is (vma_subrange's delta is 0).
             if vma.start < start {
                 let rem = vma_subrange(&vma, vma.start, start, vma.flags);
-                if let VmaKind::FileBacked { handle, .. } = rem.kind {
-                    retains.push(handle);
+                if let Some(backing) = Backing::of(&rem) {
+                    retains.push(backing);
                 }
                 kept.push(rem);
             }
@@ -6337,8 +6466,8 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
             // keep mapping the right bytes — vma_subrange does exactly that.
             if vma.end > end {
                 let rem = vma_subrange(&vma, end, vma.end, vma.flags);
-                if let VmaKind::FileBacked { handle, .. } = rem.kind {
-                    retains.push(handle);
+                if let Some(backing) = Backing::of(&rem) {
+                    retains.push(backing);
                 }
                 kept.push(rem);
             }
@@ -6349,11 +6478,12 @@ pub fn remove_vma_range(pid: ProcessId, start: u64, end: u64) -> KernelResult<()
     }
 
     // Apply backing-reference deltas with the process-table lock released.
-    for handle in retains {
-        let _ = crate::fs::handle::dup_shared(handle);
+    for backing in retains {
+        // Cannot fail for a handle the split VMA holds (`Backing::retain`).
+        let _ = backing.retain();
     }
-    for handle in releases {
-        let _ = crate::fs::handle::close(handle);
+    for backing in releases {
+        backing.release();
     }
     Ok(())
 }
@@ -6375,6 +6505,7 @@ fn vma_subrange(
             handle,
             file_offset,
             file_id,
+            shared,
         } => VmaKind::FileBacked {
             handle,
             // new_start >= orig.start by construction; wrapping_sub keeps
@@ -6383,6 +6514,7 @@ fn vma_subrange(
             // Sub-ranging never changes the backing file, so its identity
             // carries through unchanged.
             file_id,
+            shared,
         },
         other => other,
     };
@@ -6451,7 +6583,7 @@ pub fn protect_vma_range(
     // backing reference each; we accrue the extra retains under the lock
     // and apply them after releasing it (the open-file lock must never
     // nest under the process-table lock).
-    let mut retains: Vec<u64> = Vec::new();
+    let mut retains: Vec<Backing> = Vec::new();
 
     {
         let mut table = PROCESS_TABLE.lock();
@@ -6466,7 +6598,7 @@ pub fn protect_vma_range(
                 kept.push(vma);
                 continue;
             }
-            let is_file = matches!(vma.kind, VmaKind::FileBacked { .. });
+            let backing = Backing::of(&vma);
             let mut pieces = 0u32;
 
             // Left remainder [vma.start, start): keeps original flags.
@@ -6505,11 +6637,9 @@ pub fn protect_vma_range(
             // The original FileBacked VMA owned exactly one backing
             // reference; each surviving piece needs one, so (pieces - 1)
             // extra retains are required.
-            if is_file {
-                if let VmaKind::FileBacked { handle, .. } = vma.kind {
-                    for _ in 1..pieces {
-                        retains.push(handle);
-                    }
+            if let Some(backing) = backing {
+                for _ in 1..pieces {
+                    retains.push(backing);
                 }
             }
         }
@@ -6517,8 +6647,9 @@ pub fn protect_vma_range(
         proc.vmas = kept;
     }
 
-    for handle in retains {
-        let _ = crate::fs::handle::dup_shared(handle);
+    for backing in retains {
+        // Cannot fail for a handle the split VMA holds (`Backing::retain`).
+        let _ = backing.retain();
     }
     Ok(())
 }
@@ -6593,7 +6724,7 @@ pub fn set_fork_policy(
     // A FileBacked VMA split into several pieces needs one owned backing
     // reference per piece; taken after the table lock is released, as
     // `protect_vma_range` does (the open-file lock must never nest under it).
-    let mut retains: Vec<u64> = Vec::new();
+    let mut retains: Vec<Backing> = Vec::new();
     let covered = {
         let mut table = PROCESS_TABLE.lock();
         let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
@@ -6642,9 +6773,9 @@ pub fn set_fork_policy(
                 kept.push(vma_subrange(&vma, end, vma.end, vma.flags));
                 pieces = pieces.saturating_add(1);
             }
-            if let VmaKind::FileBacked { handle, .. } = vma.kind {
+            if let Some(backing) = Backing::of(&vma) {
                 for _ in 1..pieces {
-                    retains.push(handle);
+                    retains.push(backing);
                 }
             }
         }
@@ -6652,14 +6783,15 @@ pub fn set_fork_policy(
         proc.vmas = kept;
         covered
     };
-    for handle in retains {
-        if let Err(e) = crate::fs::handle::dup_shared(handle) {
+    for backing in retains {
+        if let Err(e) = backing.retain() {
             // Cannot fail while the split VMA holds its own reference -- the
             // failures are an unknown handle and refcount overflow -- but if
             // it ever does, the pieces share one reference, so say so.
             serial_println!(
                 "[pcb] set_fork_policy: no reference for a piece of a split file mapping \
-                 (handle {handle}): {e:?}"
+                 (handle {}): {e:?}",
+                backing.handle
             );
         }
     }
@@ -6746,20 +6878,16 @@ pub fn vma_coverage_gaps(pid: ProcessId, start: u64, end: u64) -> Option<Vec<(u6
 /// process-table lock is dropped (the open-file lock must not nest under
 /// it).  No-op if the PID is unknown.
 pub fn reset_vmas_for_exec(pid: ProcessId) {
-    let mut releases: Vec<u64> = Vec::new();
+    let mut releases: Vec<Backing> = Vec::new();
     {
         let mut table = PROCESS_TABLE.lock();
         let Some(proc) = table.get_mut(&pid) else {
             return;
         };
-        for vma in proc.vmas.drain(..) {
-            if let VmaKind::FileBacked { handle, .. } = vma.kind {
-                releases.push(handle);
-            }
-        }
+        releases.extend(proc.vmas.drain(..).filter_map(|vma| Backing::of(&vma)));
     }
-    for handle in releases {
-        let _ = crate::fs::handle::close(handle);
+    for backing in releases {
+        backing.release();
     }
 }
 
@@ -7068,6 +7196,21 @@ pub enum FaultOutcome {
     /// The process table was held elsewhere, and the caller asked not to
     /// wait for it: nothing is known yet, so try again.
     Busy,
+    /// The address is in a shared mapping of a file, at or past the file's
+    /// end: Linux's `SIGBUS` (`BUS_ADRERR`), not a segmentation fault.
+    BeyondEnd,
+}
+
+/// Why [`resolve_fault_inner`] left a fault unresolved, when that says
+/// something besides "it cannot be".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FaultNote {
+    /// Nothing more to say.
+    None,
+    /// See [`FaultOutcome::Busy`].
+    Busy,
+    /// See [`FaultOutcome::BeyondEnd`].
+    BeyondEnd,
 }
 
 /// Resolve a page fault in `pid`'s address space against its VMA list:
@@ -7097,13 +7240,14 @@ pub enum FaultOutcome {
 ///   swap-in under it still wait for the address space's page-table lock
 ///   (`mm::as_lock`), so such a caller must not reach them.
 pub fn resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64, wait: bool) -> FaultOutcome {
-    let mut busy = false;
-    if resolve_fault_inner(pid, fault_addr, error_code, wait, &mut busy) {
-        FaultOutcome::Resolved
-    } else if busy {
-        FaultOutcome::Busy
-    } else {
-        FaultOutcome::Unresolvable
+    let mut note = FaultNote::None;
+    if resolve_fault_inner(pid, fault_addr, error_code, wait, &mut note) {
+        return FaultOutcome::Resolved;
+    }
+    match note {
+        FaultNote::None => FaultOutcome::Unresolvable,
+        FaultNote::Busy => FaultOutcome::Busy,
+        FaultNote::BeyondEnd => FaultOutcome::BeyondEnd,
     }
 }
 
@@ -7151,7 +7295,7 @@ fn resolve_fault_inner(
     fault_addr: u64,
     error_code: u64,
     wait: bool,
-    busy: &mut bool,
+    note: &mut FaultNote,
 ) -> bool {
     use crate::mm::fault::PageFaultError;
     use crate::mm::frame::{self, FRAME_SIZE};
@@ -7170,7 +7314,7 @@ fn resolve_fault_inner(
     // and needs to be copied on first write.
     if error.is_present() && error.is_write() {
         let Some(table) = lock_table_for_fault(wait) else {
-            *busy = true;
+            *note = FaultNote::Busy;
             return false;
         };
         let Some(proc) = table.get(&pid) else {
@@ -7195,7 +7339,7 @@ fn resolve_fault_inner(
     // The process table, for the VMA lookup (see `resolve_fault` on why a
     // busy table is not an unresolvable fault).
     let Some(table) = lock_table_for_fault(wait) else {
-        *busy = true;
+        *note = FaultNote::Busy;
         return false;
     };
     let Some(proc) = table.get(&pid) else {
@@ -7275,10 +7419,33 @@ fn resolve_fault_inner(
     // Guard/Fixed faults are never resolvable here.
     let file_backing = match vma.kind {
         VmaKind::Anonymous | VmaKind::Stack | VmaKind::Brk => None,
+        // A shared mapping maps the page cache's frames, part by part,
+        // whatever the frame's other parts are.
+        VmaKind::FileBacked {
+            handle,
+            file_offset,
+            file_id: Some(file_id),
+            shared: true,
+        } => {
+            let fault = SharedFault {
+                start: vma_start,
+                end: vma_end,
+                flags,
+                handle,
+                file_offset,
+                file_id,
+            };
+            drop(table);
+            if pml4_phys == 0 {
+                return false;
+            }
+            return resolve_file_shared(pml4_phys, frame_base, fault_addr, &fault, note);
+        }
         VmaKind::FileBacked {
             handle,
             file_offset,
             file_id,
+            ..
         } => Some((handle, file_offset, file_id)),
         VmaKind::Guard | VmaKind::Fixed => return false,
     };
@@ -7331,6 +7498,10 @@ fn resolve_fault_inner(
                     flags: sv.flags,
                     file: None,
                 }),
+                // A shared mapping's parts map the page cache's frames, which
+                // its own fault does (`resolve_file_shared`); never filled
+                // privately here.
+                VmaKind::FileBacked { shared: true, .. } => None,
                 VmaKind::FileBacked {
                     handle,
                     file_offset,
@@ -7521,6 +7692,143 @@ fn resolve_fault_inner(
         frame_base
     );
     true
+}
+
+/// The VMA of a fault in a shared file mapping, as [`resolve_file_shared`]
+/// needs it once the process table is let go.
+struct SharedFault {
+    /// The VMA's range.
+    start: u64,
+    end: u64,
+    /// Its permissions.
+    flags: crate::mm::page_table::PageFlags,
+    /// The handle it reads the file through.
+    handle: u64,
+    /// The file offset `start` maps.
+    file_offset: u64,
+    /// The file.
+    file_id: crate::fs::vfs::FileId,
+}
+
+/// Resolve a not-present fault in a shared file mapping (design-decisions
+/// §1572): map each absent part of the faulting 16 KiB frame that `fault`'s
+/// VMA covers onto the page cache's frame for its bytes. The 4 KiB part at
+/// virtual `v` maps the cache frame of file page `fo / FRAME_SIZE` at
+/// `fo % FRAME_SIZE`, `fo` being `v`'s file offset; a mapping the kernel
+/// placed has `v ≡ fo` and maps one cache frame per virtual frame, and any
+/// 4 KiB-aligned `MAP_FIXED` at most two.
+///
+/// A virtual frame holds one reference on each distinct cache frame it maps
+/// into, given back by `unmap_user_range` when the last part there goes, and
+/// counts it once in the address space's resident pages -- the convention for
+/// a virtual frame whose parts map more than one frame. The parts are mapped
+/// `SHARED`, so `fork` shares them and reclaim passes them by, and with no
+/// reverse mapping, so compaction never moves a frame the cache names. They
+/// are read-only: a write to a shared file mapping is step 2 of §1572.
+///
+/// A part at or past the file's end is left unmapped; when it is the faulting
+/// one, `note` becomes [`FaultNote::BeyondEnd`] (`SIGBUS`). True when the
+/// faulting part is mapped now, by this call or another CPU's.
+fn resolve_file_shared(
+    pml4_phys: u64,
+    frame_base: u64,
+    fault_addr: u64,
+    fault: &SharedFault,
+    note: &mut FaultNote,
+) -> bool {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, HW_PAGES_PER_FRAME, PageFlags, VirtAddr};
+
+    // The mapping's handle must be one that may read the file: as for the
+    // private cached path (`resolve_file_cached`), a page another process
+    // had cached must not reach a mapping of a write-only handle.
+    if !crate::fs::handle::open_flags(fault.handle).is_ok_and(|f| f.is_readable()) {
+        return false;
+    }
+    let Ok(size) = crate::fs::handle::fstat(fault.handle).map(|m| m.size) else {
+        return false;
+    };
+    let hw = HW_PAGE_SIZE as u64;
+    let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
+    let faulting_part = fault_addr & !hw.wrapping_sub(1);
+    let map_flags = PageFlags::from_bits(fault.flags.bits() & !PageFlags::WRITABLE.bits())
+        | PageFlags::SHARED
+        | PageFlags::PRESENT;
+    let mut faulting_mapped = false;
+    for i in 0..HW_PAGES_PER_FRAME {
+        let va = frame_base.saturating_add((i as u64).saturating_mul(hw));
+        if va < fault.start || va >= fault.end {
+            continue;
+        }
+        if page_table::translate(pml4_phys, VirtAddr::new(va)).is_some() {
+            faulting_mapped |= va == faulting_part;
+            continue;
+        }
+        // `va >= fault.start`, checked above.
+        let fo = fault
+            .file_offset
+            .saturating_add(va.wrapping_sub(fault.start));
+        if fo >= size {
+            if va == faulting_part {
+                *note = FaultNote::BeyondEnd;
+            }
+            continue;
+        }
+        let page_off = fo & !frame_mask;
+        let in_page = fo & frame_mask;
+        let handle = fault.handle;
+        let Ok(frame) = crate::mm::page_cache::get_or_fill(fault.file_id, page_off, |buf| {
+            crate::fs::handle::read_at_uncached(handle, page_off, buf).map(|_| ())
+        }) else {
+            return faulting_mapped;
+        };
+        // Under the address space's page-table lock: whether this virtual
+        // frame maps into `frame` already, and the mapping, must be one step,
+        // or two CPUs mapping parts of it at once would each keep a reference.
+        let (mapped, held_already) = {
+            let _held = crate::mm::as_lock::lock(pml4_phys);
+            let held_already = (0..HW_PAGES_PER_FRAME).any(|j| {
+                let sibling = frame_base.saturating_add((j as u64).saturating_mul(hw));
+                page_table::translate(pml4_phys, VirtAddr::new(sibling))
+                    .is_some_and(|p| p & !frame_mask == frame.addr())
+            });
+            // SAFETY: `pml4_phys` is the faulting process's PML4, `va` a
+            // 4 KiB-aligned user address in a VMA that allows this read-only
+            // mapping, and `frame.addr() + in_page` a 4 KiB-aligned address
+            // in a live cache frame we hold a reference on.
+            let mapped = unsafe {
+                page_table::map_4k_if_absent(
+                    pml4_phys,
+                    VirtAddr::new(va),
+                    frame.addr().saturating_add(in_page),
+                    map_flags,
+                )
+            };
+            (mapped, held_already)
+        };
+        match mapped {
+            Ok(true) if !held_already => {
+                // This virtual frame's reference on `frame`, and its count.
+                crate::mm::accounting::charge(pml4_phys, 1);
+                faulting_mapped |= va == faulting_part;
+            }
+            Ok(true) => {
+                // The virtual frame holds `frame` already.
+                crate::mm::page_cache::release(frame);
+                faulting_mapped |= va == faulting_part;
+            }
+            // Present already: another CPU's fault mapped it first.
+            Ok(false) => {
+                crate::mm::page_cache::release(frame);
+                faulting_mapped |= va == faulting_part;
+            }
+            Err(_) => {
+                crate::mm::page_cache::release(frame);
+                return faulting_mapped;
+            }
+        }
+    }
+    faulting_mapped
 }
 
 /// Resolve a whole-frame, frame-aligned `MAP_PRIVATE` file fault from the

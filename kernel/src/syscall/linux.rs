@@ -14295,12 +14295,22 @@ fn linux_file_mmap(
         HandleKind::File | HandleKind::MemFd => {}
         _ => return linux_err(errno::ENODEV),
     }
-    // We don't write back, so a writable shared map can't honour its
-    // contract.  Read-only shared maps are indistinguishable from a private
-    // copy (no write ever reaches the file), so we serve those.
+    // A writable shared map needs its stores written back (step 2 of
+    // design-decisions §1572); until then it is refused.
     if shared && (prot & PROT_WRITE) != 0 {
         return linux_err(errno::ENOSYS);
     }
+    // A shared map of a file the handle holds maps the page cache, so it
+    // sees every write to the file (§1572). One of a file without a stable
+    // identity is served as the private copy it always was: such a file has
+    // no cache to share.
+    let shared_file = if shared && matches!(entry.kind, HandleKind::File) {
+        crate::fs::handle::held_identity(entry.raw_handle)
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
 
     let frame_size = FRAME_SIZE as u64;
     let hw_page = crate::mm::page_table::HW_PAGE_SIZE as u64;
@@ -14388,7 +14398,7 @@ fn linux_file_mmap(
         // path that correctly handles a 4 KiB segment sharing a 16 KiB frame
         // with an adjacent, differently-permissioned segment (an eager
         // whole-16-KiB-frame fill would clobber the neighbour's subpages).
-        if matches!(entry.kind, HandleKind::File) && private {
+        if matches!(entry.kind, HandleKind::File) && (private || shared_file.is_some()) {
             let mapped_handle = match crate::fs::handle::dup_shared(entry.raw_handle) {
                 Ok(h) => h,
                 Err(_) => {
@@ -14400,14 +14410,24 @@ fn linux_file_mmap(
             // path).  The per-subpage overlay fault resolver does NOT use
             // the whole-frame page cache (it backs 4 KiB subpages that can
             // share a 16 KiB frame with a differently-permissioned
-            // neighbour), so `file_id` is informational for this VMA; we
-            // still record it for /proc and future coherence work.
-            let file_id = crate::fs::handle::file_identity(mapped_handle).unwrap_or(None);
+            // neighbour), so for a private overlay `file_id` is
+            // informational; a shared one maps the cache by it.
+            let file_id = match shared_file {
+                Some(f) => Some(f),
+                None => crate::fs::handle::file_identity(mapped_handle).unwrap_or(None),
+            };
             let kind = VmaKind::FileBacked {
                 handle: mapped_handle,
                 file_offset: offset,
                 file_id,
+                shared: shared_file.is_some(),
             };
+            if let Some(file) = shared_file {
+                // The VMA's count of the file's shared mappings, which its
+                // release gives back (`pcb::Backing`). Counted before the VMA
+                // is there for another thread's `munmap` to release.
+                crate::mm::page_cache::shared_map_added(file);
+            }
             if pcb::add_vma(
                 pid,
                 Vma {
@@ -14420,7 +14440,10 @@ fn linux_file_mmap(
             )
             .is_err()
             {
-                // Drop our reference and refund — the overlay never took.
+                // Drop our references and refund — the overlay never took.
+                if let Some(file) = shared_file {
+                    crate::mm::page_cache::shared_map_removed(file);
+                }
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
                 return linux_err(errno::ENOMEM);
@@ -14485,7 +14508,7 @@ fn linux_file_mmap(
     // memfd-backed maps and read-only shared maps take the eager path
     // below: memfd has a separate handle layer, and there is little to gain
     // from demand-paging them.
-    if matches!(entry.kind, HandleKind::File) && private {
+    if matches!(entry.kind, HandleKind::File) && (private || shared_file.is_some()) {
         // Take an independent reference on the open file description so the
         // mapping keeps working after the caller closes its fd.  The
         // reserved VMA owns this reference; `remove_vma` releases it.
@@ -14501,15 +14524,28 @@ fn linux_file_mmap(
         // pages from the read-only page cache.  `None` (FAT/ISO9660/pseudo-fs
         // with no stable inode) makes the fault path fall back to a private
         // per-mapping `read_at` copy.
-        let file_id = crate::fs::handle::file_identity(mapped_handle).unwrap_or(None);
+        let file_id = match shared_file {
+            Some(f) => Some(f),
+            None => crate::fs::handle::file_identity(mapped_handle).unwrap_or(None),
+        };
         let kind = VmaKind::FileBacked {
             handle: mapped_handle,
             file_offset: offset,
             file_id,
+            shared: shared_file.is_some(),
         };
-        let base = match pcb::reserve_unmapped_area(
+        // A shared mapping starts in phase with its file offset, so that each
+        // virtual frame maps one page-cache frame (§1572).
+        let phase = shared_file.map(|_| offset);
+        if let Some(file) = shared_file {
+            // The VMA's count of the file's shared mappings (`pcb::Backing`),
+            // counted before the VMA is there for another thread to unmap.
+            crate::mm::page_cache::shared_map_added(file);
+        }
+        let base = match pcb::reserve_unmapped_area_phased(
             pid,
             length_aligned,
+            phase,
             handlers::USER_MMAP_BASE,
             handlers::USER_MMAP_END,
             kind,
@@ -14517,7 +14553,10 @@ fn linux_file_mmap(
         ) {
             Some(b) => b,
             None => {
-                // Couldn't place the mapping — drop our reference and refund.
+                // Couldn't place the mapping — drop our references and refund.
+                if let Some(file) = shared_file {
+                    crate::mm::page_cache::shared_map_removed(file);
+                }
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
                 return linux_err(errno::ENOMEM);

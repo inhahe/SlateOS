@@ -3707,6 +3707,14 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_uts_namespaces(),
     );
+    // Shared file mappings: the page cache's frames mapped, each write seen
+    // through them, SIGBUS past the end (mm::page_cache, design-decisions
+    // §1572).
+    selftest::dispatch_debug(
+        "Linux shared file mappings (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_shared_file_maps(),
+    );
     // mount(2) and umount2(2) for root: new mounts, remounts, propagation,
     // busy, lazy and expiring unmounts (fs::Vfs, fs::new_filesystem).
     selftest::dispatch_debug(

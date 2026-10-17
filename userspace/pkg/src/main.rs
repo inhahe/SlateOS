@@ -74,10 +74,28 @@ static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 /// Under `--root` it is resolved as a process chrooted there would see it
 /// ([`resolve_in_root`]), so that nothing pkg writes or removes lands outside
 /// the directory.
-fn under_root(path: &str) -> PathBuf {
+///
+/// # Errors
+///
+/// The path cannot be resolved inside the root ([`resolve_in_root`]).
+fn under_root(path: &str) -> io::Result<PathBuf> {
     match ROOT.get() {
-        Some(root) => resolve_in_root(root, path),
-        None => PathBuf::from(path),
+        Some(root) => resolve_in_root(root, path, false),
+        None => Ok(PathBuf::from(path)),
+    }
+}
+
+/// One of pkg's own directories or files, where it is found: as
+/// [`under_root`], its last component followed inside the root too -- pkg
+/// writes into it and below it, and a link there must not lead out.
+///
+/// # Errors
+///
+/// As [`under_root`].
+fn state_under_root(path: &str) -> io::Result<PathBuf> {
+    match ROOT.get() {
+        Some(root) => resolve_in_root(root, path, true),
+        None => Ok(PathBuf::from(path)),
     }
 }
 
@@ -88,9 +106,20 @@ const MAX_LINKS: usize = 40;
 /// `path` resolved inside `root` as a process chrooted at `root` would
 /// resolve it: `..` stops at the root, and a symbolic link met on the way is
 /// followed inside it -- an absolute one from the root, not from `/`. The
-/// last component is not followed, since an install replaces it and a
-/// removal unlinks it. A link that cannot be read is taken as a name.
-fn resolve_in_root(root: &Path, path: &str) -> PathBuf {
+/// last component is followed too when `follow_last` -- for pkg's own
+/// directories, which it writes below -- and otherwise taken as a name,
+/// since an install replaces a package's file and a removal unlinks it.
+///
+/// The path is checked, then used: a tree that changes in between (a link
+/// put in place meanwhile) is not caught. pkg works on a tree it was given
+/// to manage, not one another user is writing.
+///
+/// # Errors
+///
+/// A link on the way that cannot be read, or more links than
+/// [`MAX_LINKS`] -- each would otherwise be followed later by the kernel,
+/// from the host's root.
+fn resolve_in_root(root: &Path, path: &str, follow_last: bool) -> io::Result<PathBuf> {
     use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::path::Component;
@@ -111,12 +140,21 @@ fn resolve_in_root(root: &Path, path: &str) -> PathBuf {
             done.pop();
             continue;
         }
-        if !todo.is_empty() && links < MAX_LINKS {
+        if !todo.is_empty() || follow_last {
             let mut here = root.to_path_buf();
             here.extend(&done);
             here.push(&part);
             let is_link = fs::symlink_metadata(&here).is_ok_and(|m| m.file_type().is_symlink());
-            if is_link && let Ok(target) = fs::read_link(&here) {
+            if is_link {
+                // A link left unfollowed here would be followed by the
+                // kernel later -- from the host's root: the path is refused
+                // instead.
+                let target = fs::read_link(&here)?;
+                if links >= MAX_LINKS {
+                    return Err(io::Error::other(format!(
+                        "{path}: too many levels of symbolic links under the root"
+                    )));
+                }
                 links += 1;
                 if target.has_root() {
                     done.clear();
@@ -131,7 +169,7 @@ fn resolve_in_root(root: &Path, path: &str) -> PathBuf {
     }
     let mut resolved = root.to_path_buf();
     resolved.extend(done);
-    resolved
+    Ok(resolved)
 }
 
 // ============================================================================
@@ -461,10 +499,11 @@ impl PackageManifest {
                     conffiles = value.split(',').map(|s| s.trim().to_string()).collect();
                 }
                 "file" => {
-                    // file: src -> dst mode hash size
-                    if let Some(pf) = parse_file_entry(value) {
-                        files.push(pf);
-                    }
+                    // file: src -> dst mode hash size. One that cannot be
+                    // read -- or names a destination outside where files go
+                    // -- makes the manifest unreadable: installed without
+                    // it, the package would be reported installed in part.
+                    files.push(parse_file_entry(value)?);
                 }
                 "archive_hash" => archive_hash = value.to_string(),
                 "archive_size" => archive_size = value.parse().unwrap_or(0),
@@ -617,8 +656,11 @@ impl PkgConfig {
     /// Load configuration from the config file, falling back to the default
     /// single repository if the file doesn't exist or can't be parsed.
     fn load() -> Self {
-        let path = under_root(CONFIG_PATH);
-        if let Ok(text) = fs::read_to_string(&path) {
+        // A configuration that cannot be found under --root is one that
+        // cannot be read: the default, as for a missing file.
+        if let Ok(path) = state_under_root(CONFIG_PATH)
+            && let Ok(text) = fs::read_to_string(&path)
+        {
             if let Some(config) = Self::parse(&text) {
                 return config;
             }
@@ -739,7 +781,7 @@ impl PkgConfig {
 
     /// Save configuration to the config file.
     fn save(&self) -> io::Result<()> {
-        let path = under_root(CONFIG_PATH);
+        let path = state_under_root(CONFIG_PATH)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -937,7 +979,15 @@ impl ContentStore {
                 continue;
             }
 
-            let dst = &under_root(&file.dst);
+            let dst = match under_root(&file.dst) {
+                Ok(dst) => dst,
+                Err(e) => {
+                    eprintln!("  warning: failed to deploy {}: {e}", file.dst);
+                    stats.failed += 1;
+                    continue;
+                }
+            };
+            let dst = &dst;
             match self.deploy_hardlink(&file.hash, dst) {
                 Ok(()) => {
                     stats.deployed += 1;
@@ -1001,7 +1051,15 @@ impl ContentStore {
                 continue;
             }
 
-            let dst = &under_root(&file.dst);
+            let dst = match under_root(&file.dst) {
+                Ok(dst) => dst,
+                Err(e) => {
+                    eprintln!("  warning: failed to deploy {}: {e}", file.dst);
+                    stats.failed += 1;
+                    continue;
+                }
+            };
+            let dst = &dst;
 
             // Check if this is a config file that might be user-modified
             if conffile_set.contains(file.dst.as_str())
@@ -1062,7 +1120,14 @@ impl ContentStore {
     fn undeploy_package_files(&self, file_hashes: &[(String, String)]) -> u64 {
         let mut removed = 0u64;
         for (dst_path, _hash) in file_hashes {
-            let dst = &under_root(dst_path);
+            let dst = match under_root(dst_path) {
+                Ok(dst) => dst,
+                Err(e) => {
+                    eprintln!("  warning: failed to remove {dst_path}: {e}");
+                    continue;
+                }
+            };
+            let dst = &dst;
             if fs::symlink_metadata(dst).is_ok() {
                 if fs::remove_file(dst).is_ok() {
                     removed += 1;
@@ -1287,17 +1352,22 @@ struct PackageDb {
 }
 
 impl PackageDb {
-    fn new() -> Self {
-        let cas = ContentStore::new(&under_root(CAS_DIR));
-        Self {
+    /// # Errors
+    ///
+    /// One of pkg's own directories cannot be resolved under `--root`
+    /// ([`resolve_in_root`]).
+    fn new() -> io::Result<Self> {
+        let cas = ContentStore::new(&state_under_root(CAS_DIR)?);
+        Ok(Self {
             cas,
-            gen_dir: under_root(GEN_DIR),
-            repo_dir: under_root(REPO_DIR),
-        }
+            gen_dir: state_under_root(GEN_DIR)?,
+            repo_dir: state_under_root(REPO_DIR)?,
+        })
     }
 
     fn ensure_dirs(&self) {
-        let _ = fs::create_dir_all(under_root(PKG_ROOT));
+        // Failures show at the first file written beneath it.
+        let _ = state_under_root(PKG_ROOT).and_then(fs::create_dir_all);
         self.cas.ensure_dirs();
         let _ = fs::create_dir_all(&self.gen_dir);
         let _ = fs::create_dir_all(&self.repo_dir);
@@ -1565,7 +1635,7 @@ impl TransactionLog {
         );
 
         // Ensure parent directory exists
-        let log = under_root(TX_LOG_PATH);
+        let log = state_under_root(TX_LOG_PATH)?;
         if let Some(parent) = log.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -1581,7 +1651,7 @@ impl TransactionLog {
 
     /// Read the transaction log.
     fn read_all() -> io::Result<Vec<Transaction>> {
-        let text = match fs::read_to_string(under_root(TX_LOG_PATH)) {
+        let text = match state_under_root(TX_LOG_PATH).and_then(fs::read_to_string) {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
@@ -3130,7 +3200,14 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         let mut removed_stale = 0u64;
         for (old_dst, _) in &old_file_hashes {
             if !new_dsts.contains(old_dst.as_str()) {
-                let dst = &under_root(old_dst);
+                let dst = match under_root(old_dst) {
+                    Ok(dst) => dst,
+                    Err(e) => {
+                        eprintln!("  warning: failed to remove {old_dst}: {e}");
+                        continue;
+                    }
+                };
+                let dst = &dst;
                 if fs::symlink_metadata(dst).is_ok() {
                     if fs::remove_file(dst).is_ok() {
                         removed_stale += 1;
@@ -3415,15 +3492,21 @@ fn cmd_repo(args: &[String]) {
                     // still be listed. So the failure is reported rather than
                     // discarded, but it does not change the exit status,
                     // because the thing the caller asked for DID happen.
-                    let db = PackageDb::new();
-                    let index_path = db.repo_index_path(name);
-                    if let Err(e) = fs::remove_file(&index_path)
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        eprintln!(
-                            "pkg: warning: the repository is removed but its                              cached index {} could not be deleted: {e}",
-                            quoteaf_os(&index_path)
-                        );
+                    match PackageDb::new() {
+                        Ok(db) => {
+                            let index_path = db.repo_index_path(name);
+                            if let Err(e) = fs::remove_file(&index_path)
+                                && e.kind() != std::io::ErrorKind::NotFound
+                            {
+                                eprintln!(
+                                    "pkg: warning: the repository is removed but its cached index {} could not be deleted: {e}",
+                                    quoteaf_os(&index_path)
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "pkg: warning: the repository is removed but its cached index could not be found: {e}"
+                        ),
                     }
                 }
                 Err(e) => {
@@ -5329,7 +5412,13 @@ fn main() {
         process::exit(0);
     }
 
-    let db = PackageDb::new();
+    let db = match PackageDb::new() {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("pkg: {e}");
+            process::exit(1);
+        }
+    };
     let command = text_arg(&args[0]);
     let rest: &[OsString] = &args[1..];
 
@@ -5524,14 +5613,14 @@ mod tests {
     fn a_path_under_root_cannot_climb_out_of_it() {
         let root = Path::new("/mnt/target");
         assert_eq!(
-            super::resolve_in_root(root, "/../../etc/profile"),
+            super::resolve_in_root(root, "/../../etc/profile", false).unwrap(),
             root.join("etc").join("profile")
         );
         assert_eq!(
-            super::resolve_in_root(root, "/usr/./bin/../lib/x"),
+            super::resolve_in_root(root, "/usr/./bin/../lib/x", false).unwrap(),
             root.join("usr/lib/x")
         );
-        assert_eq!(super::resolve_in_root(root, "/"), root);
+        assert_eq!(super::resolve_in_root(root, "/", false).unwrap(), root);
     }
 
     #[test]
@@ -5540,6 +5629,14 @@ mod tests {
         assert!(super::parse_file_entry("a -> /../../etc/x 0644 abc 3").is_none());
         assert!(super::parse_file_entry("a -> /usr/../../x 0644 abc 3").is_none());
         assert!(super::parse_file_entry("a -> usr/bin/a 0755 abc 3").is_none());
+        let manifest = |file: &str| {
+            super::PackageManifest::parse(&format!("name: p\nversion: 1.0.0\nfile: {file}\n"))
+        };
+        assert!(manifest("a -> /usr/bin/a 0755 abc 3").is_some());
+        assert!(
+            manifest("a -> /../../etc/x 0644 abc 3").is_none(),
+            "the whole manifest is refused, not the entry skipped"
+        );
     }
 
     /// A link inside the root -- absolute or relative -- is followed inside
@@ -5556,21 +5653,47 @@ mod tests {
         std::os::unix::fs::symlink("/etc/passwd", root.join("usr/lib/last")).unwrap();
         std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
         assert_eq!(
-            super::resolve_in_root(&root, "/var/run/foo"),
+            super::resolve_in_root(&root, "/var/run/foo", false).unwrap(),
             root.join("run/foo")
         );
         assert_eq!(
-            super::resolve_in_root(&root, "/lib/libc.so"),
+            super::resolve_in_root(&root, "/lib/libc.so", false).unwrap(),
             root.join("usr/lib/libc.so")
         );
         assert_eq!(
-            super::resolve_in_root(&root, "/lib/last"),
+            super::resolve_in_root(&root, "/lib/last", false).unwrap(),
             root.join("usr/lib/last")
         );
+        assert!(
+            super::resolve_in_root(&root, "/loop/x", false).is_err(),
+            "a link that never ends is refused, not taken as a name"
+        );
+        // Forty links spent, then one more on the way: refused, not left for
+        // the kernel to follow from the host's root.
+        std::fs::create_dir_all(root.join("u40")).unwrap();
+        std::os::unix::fs::symlink("/lib", root.join("u40/lib")).unwrap();
+        std::os::unix::fs::symlink("u1", root.join("usr2")).unwrap();
+        for k in 1..40 {
+            std::os::unix::fs::symlink(format!("u{}", k + 1), root.join(format!("u{k}"))).unwrap();
+        }
+        assert!(super::resolve_in_root(&root, "/usr2/lib/libx.so", false).is_err());
+        // pkg's own directory, a link planted to the host's `/`: followed
+        // inside the root, so the store's files land there.
+        std::fs::create_dir_all(root.join("var/pkg")).unwrap();
+        std::os::unix::fs::symlink("/", root.join("var/pkg/cas")).unwrap();
         assert_eq!(
-            super::resolve_in_root(&root, "/loop/x"),
-            root.join("loop/x"),
-            "a link that never ends is taken as a name"
+            super::resolve_in_root(&root, "/var/pkg/cas", true).unwrap(),
+            root
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/var/pkg/cas", false).unwrap(),
+            root.join("var/pkg/cas"),
+            "as a package's file: the last component a name"
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/u40/lib/libx.so", false).unwrap(),
+            root.join("usr/lib/libx.so"),
+            "u40/lib -> /lib, from the root, and the root's lib -> usr/lib"
         );
     }
 

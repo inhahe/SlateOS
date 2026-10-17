@@ -269,6 +269,8 @@ S_EMPTY_FOCUSED = "an_empty_box_with_the_keyboard_says_what_it_is_for_under_its_
 S_SELECT_ALL = "select_all_types_over_the_text"
 S_TO_END = "caret_to_end_types_after_the_text_and_over_no_selection"
 
+INSERT = "a_box_types_what_it_is_given_at_its_caret"
+
 LINE_MUTATIONS = [
     (
         "the box holds no capacity",
@@ -295,6 +297,18 @@ LINE_MUTATIONS = [
         ["an_edit_the_check_refuses_is_undone"],
     ),
     (
+        "what a box is given to type is not typed",
+        "            input.insert_text(text);\n",
+        "",
+        [INSERT],
+    ),
+    (
+        "typing what a box is given is not the box's",
+        "            crate::LineEdit {\n                handled: true,\n",
+        "            crate::LineEdit {\n                handled: false,\n",
+        [INSERT],
+    ),
+    (
         "a box made holding text holds none",
         '            input: crate::field_holding(text, capacity),\n',
         '            input: crate::field_holding("", capacity),\n',
@@ -310,24 +324,24 @@ LINE_MUTATIONS = [
         "a key that changes nothing says the text changed",
         "            changed: self.input.text() != before,\n",
         "            changed: true,\n",
-        [S_TYPING, S_WINDOWS, S_RELEASE, S_CAPACITY],
+        [S_TYPING, S_WINDOWS, S_RELEASE, S_CAPACITY, INSERT],
     ),
     (
         "a key never says the caret moved",
         "            moved: caret(&self.input) != caret_before,\n",
         "            moved: false,\n",
-        [S_TYPING, "a_copy_or_a_cut_says_it_took_the_selection"],
+        [S_TYPING, "a_copy_or_a_cut_says_it_took_the_selection", INSERT],
     ),
     (
         "a key that leaves the caret says it moved",
         "            moved: caret(&self.input) != caret_before,\n",
         "            moved: true,\n",
-        [S_TYPING, "a_copy_or_a_cut_says_it_took_the_selection", S_WINDOWS, S_RELEASE, S_CAPACITY],
+        [S_TYPING, "a_copy_or_a_cut_says_it_took_the_selection", S_WINDOWS, S_RELEASE, S_CAPACITY, INSERT],
     ),
     (
         "the box keeps a clipboard of its own",
-        "        let edit = crate::apply_key_on_clipboard(&mut self.input, key, self.font_size);\n",
-        '        let edit = crate::apply_key(&mut self.input, key, "", self.font_size);\n',
+        "        self.edited(|input| crate::apply_key_on_clipboard(input, key, font_size))\n",
+        '        self.edited(|input| crate::apply_key(input, key, "", font_size))\n',
         ["a_copy_or_a_cut_says_it_took_the_selection"],
     ),
     (
@@ -340,7 +354,7 @@ LINE_MUTATIONS = [
         "a key that copies nothing says it copied",
         "            copied: edit.copied.is_some(),\n",
         "            copied: edit.handled,\n",
-        ["a_copy_or_a_cut_says_it_took_the_selection", S_TYPING, S_CAPACITY],
+        ["a_copy_or_a_cut_says_it_took_the_selection", S_TYPING, S_CAPACITY, INSERT],
     ),
     (
         "a key the box does not answer is taken from the window",

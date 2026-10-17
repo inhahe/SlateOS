@@ -164,10 +164,18 @@ impl LineBox {
     /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
     /// and what it did.
     pub fn key(&mut self, key: &KeyEvent) -> LineKey {
+        let font_size = self.font_size;
+        self.edited(|input| crate::apply_key_on_clipboard(input, key, font_size))
+    }
+
+    /// Make `change` to the field, and say what it did: `handled` and
+    /// `copied` as `change` answers them, and whether the text changed and
+    /// the caret or the selection moved.
+    fn edited(&mut self, change: impl FnOnce(&mut TextInput) -> crate::LineEdit) -> LineKey {
         let before = self.input.text().to_owned();
         let caret = |input: &TextInput| (input.cursor(), input.selection_anchor());
         let caret_before = caret(&self.input);
-        let edit = crate::apply_key_on_clipboard(&mut self.input, key, self.font_size);
+        let edit = change(&mut self.input);
         LineKey {
             handled: edit.handled,
             changed: self.input.text() != before,
@@ -194,6 +202,22 @@ impl LineBox {
             };
         }
         edit
+    }
+
+    /// Type `text` at the caret, over the selection, up to the box's
+    /// capacity, as a key typing it would: for a box whose program decides
+    /// what a key types into it -- colorpicker's hex box upper-cases what is
+    /// typed and drops what is not hex. What it did, as [`key`](Self::key)
+    /// says it; always the box's. An empty `text` changes nothing, the
+    /// selection included.
+    pub fn insert(&mut self, text: &str) -> LineKey {
+        self.edited(|input| {
+            input.insert_text(text);
+            crate::LineEdit {
+                handled: true,
+                copied: None,
+            }
+        })
     }
 
     /// A press `dx` pixels right of the text's left edge, in a box whose text
@@ -510,6 +534,50 @@ mod tests {
         assert!(
             line.key_checked(&press(Key::End, ""), |_| false).moved,
             "a key that changes no text was refused"
+        );
+    }
+
+    /// **A box types what it is given at its caret**, over the selection and
+    /// up to its capacity; given nothing, it keeps its selection.
+    #[test]
+    fn a_box_types_what_it_is_given_at_its_caret() {
+        let mut line = LineBox::holding("ac", 3, 13.0);
+        line.key(&press(Key::Left, ""));
+        assert_eq!(
+            line.insert("b"),
+            LineKey {
+                handled: true,
+                changed: true,
+                moved: true,
+                copied: false,
+            }
+        );
+        assert_eq!(line.text(), "abc");
+        assert_eq!(
+            line.input().cursor().byte(),
+            2,
+            "the caret is not after what it typed"
+        );
+        assert!(!line.insert("d").changed, "the box typed past its capacity");
+        assert_eq!(line.text(), "abc");
+        line.select_all();
+        assert_eq!(
+            line.insert(""),
+            LineKey {
+                handled: true,
+                ..LineKey::default()
+            },
+            "nothing typed changed the box"
+        );
+        assert!(
+            line.input().has_selection(),
+            "nothing typed took the selection"
+        );
+        assert!(line.insert("x").changed);
+        assert_eq!(
+            line.text(),
+            "x",
+            "what was typed did not go over the selection"
         );
     }
 

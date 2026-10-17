@@ -1655,17 +1655,16 @@ fn dump_user_stack(rsp: u64, slots: usize) {
             continue;
         }
         flush_skip_run(run.take(), rsp);
-        // SAFETY: the page containing `addr` was just confirmed present and
-        // user-accessible in the *active* address space (we are still on the
-        // faulting thread's CR3), and `addr` is 8-byte-stepped from a user RSP,
-        // so the read is in-bounds of a mapped page.  `with_user_access`
-        // (STAC/CLAC) is **required**, not belt-and-braces: SMAP is enabled on
-        // this kernel, so a bare ring-0 read of a user page faults with
-        // `error = 0x1` (present, read, kernel) — which is exactly how the
-        // first version of this diagnostic killed the boot it was added on.
-        let val = unsafe {
-            crate::smep_smap::with_user_access(|| core::ptr::read_volatile(addr as *const u64))
-        };
+        // The page was just seen present and user-accessible in the active
+        // address space (we are still on the faulting thread's CR3), but
+        // another thread may unmap it before the read: read through the
+        // fixup routine, which then answers that the page went rather than
+        // fault in the kernel (`mm::user::peek_user`).
+        let mut word = [0u8; 8];
+        if !mm::user::peek_user(addr, &mut word) {
+            break;
+        }
+        let val = u64::from_ne_bytes(word);
         // Mark values that could be a code pointer: mapped, user, executable.
         let mark = match page_table::translate_flags(pml4, VirtAddr::new(val)) {
             Some(f)
@@ -1800,21 +1799,23 @@ fn kill_userspace_task_with_info(
         if mapped {
             let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
             let mut buf = [0u8; 16];
-            // SAFETY: the page containing `frame.rip` is present in the active
-            // (faulting process's) address space, and `avail` stops at the page
-            // boundary, so this read is entirely within one mapped page.  The
-            // STAC/CLAC window is mandatory: RIP is a *user* address and SMAP is
-            // on, so reading it from ring 0 without clearing enforcement faults
-            // — the mistake this dump's first version shipped with.
-            unsafe {
-                crate::smep_smap::with_user_access(|| {
-                    core::ptr::copy_nonoverlapping(frame.rip as *const u8, buf.as_mut_ptr(), avail);
-                });
+            // The page holding `frame.rip` was just seen present, and `avail`
+            // stops at its end; another thread may unmap it before the read,
+            // which the fixup routine then answers (`mm::user::peek_user`).
+            if buf
+                .get_mut(..avail)
+                .is_some_and(|b| mm::user::peek_user(frame.rip, b))
+            {
+                serial_println!(
+                    "  bytes @RIP ({avail}): {:02x?}",
+                    buf.get(..avail).unwrap_or(&[])
+                );
+            } else {
+                serial_println!(
+                    "  bytes @RIP: <{:#018x} went before it was read>",
+                    frame.rip
+                );
             }
-            serial_println!(
-                "  bytes @RIP ({avail}): {:02x?}",
-                buf.get(..avail).unwrap_or(&[])
-            );
         } else {
             serial_println!("  bytes @RIP: <{:#018x} not mapped>", frame.rip);
         }
@@ -4115,15 +4116,41 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
     // may wait. What cannot be resolved resumes at the routine's fixup, and
     // the system call answers EFAULT: Linux's exception table. Never the
     // fatal fault below, which a program racing its own munmap could reach.
+    // Only on the user side of the access: a fault on a kernel address there
+    // is a kernel bug, and stays the fatal fault's report.
+    //
+    // Resolving may wait, so it is tried only where the faulting code could
+    // have waited: interrupts on, and no spinlock or other preemption
+    // disable held (Linux's `faulthandler_disabled`). A fault where it could
+    // not is answered EFAULT unresolved, and said once, since the access
+    // should not have been made there.
     if error & 4 == 0
+        && cr2 < mm::page_table::USER_SPACE_END
         && let Some(fixup) = mm::uaccess::fixup_for(frame.rip)
     {
-        if frame.rflags & RFLAGS_IF != 0
-            && cr2 < mm::page_table::USER_SPACE_END
-            && resolve_user_access(cr2, error | 4)
+        let may_wait =
+            frame.rflags & RFLAGS_IF != 0 && sched::preempt_count(sched::current_cpu_id()) == 0;
+        let task_id = sched::current_task_id();
+        let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
+        if may_wait
+            && pid != 0
+            && resolve_user_fault(pid, task_id, cr2, error | 4) == UserFault::Resolved
         {
-            mm::fault::record_user_resolved();
             return;
+        }
+        // A process's copy only: a kernel task has no user pages to resolve,
+        // whatever it holds.
+        if !may_wait
+            && pid != 0
+            && !UACCESS_ATOMIC_SAID.swap(true, core::sync::atomic::Ordering::Relaxed)
+        {
+            serial_println!(
+                "[uaccess] a copy to or from user memory faulted where it may not wait \
+                 (rip {:#x}, address {:#x}): answered EFAULT unresolved -- a copy made \
+                 under a lock, which should be made outside it",
+                frame.rip,
+                cr2
+            );
         }
         // SAFETY: the stub's saved frame, as above; `frame` is not used after
         // this write. The fixup is in the same routine's function, on the same
@@ -4138,97 +4165,39 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
     // growth, then SEH.
     let is_user = error & 4 != 0;
     if is_user {
-        // First, try swap-in: if the PTE contains a swap entry, the
-        // page was previously evicted to swap storage and needs to be
-        // restored.  Only for not-present faults (bit 0 clear).
-        if error & 1 == 0 {
-            use mm::page_table::{VirtAddr, cr3_to_pml4, read_cr3};
-            let pml4 = cr3_to_pml4(read_cr3());
-            let frame_aligned = cr2 & !(mm::frame::FRAME_SIZE as u64 - 1);
-            let virt = VirtAddr::new(frame_aligned);
-
-            // SAFETY: pml4 is the current process's page table (from CR3).
-            if unsafe { mm::swap::is_swapped(pml4, virt) } {
-                // The page is swapped out — need to restore it, each 4 KiB
-                // part with the flags its swap entry kept. (Until 2026-10-03
-                // every part came back writable and non-executable, whatever
-                // it had been; and the swap entry was never found at all.)
-                // SAFETY: pml4 is valid, PTE contains a swap entry.
-                if let Ok(swapped) = unsafe { mm::swap::swap_in_page(pml4, virt) } {
-                    // Re-register the restored page as reclaimable so it
-                    // can be swapped out again if memory pressure returns
-                    // -- unless another CPU brought it back first, which
-                    // registered it.
-                    if let Some(flags) = swapped {
-                        mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
-                    }
-                    mm::fault::record_swap_in();
-                    mm::fault::record_user_resolved();
-                    // Major fault: resolution required I/O (swap-in).
-                    sched::account_fault(sched::current_task_id(), true);
-                    return; // Swap-in successful — retry the instruction.
-                }
-                // If swap-in fails (OOM, etc.), fall through to other
-                // handlers or eventually kill the process.
-            }
-        }
-
-        // Second, try resolving via per-process VMAs (lazy/demand-paged
-        // regions created by SYS_MMAP with MAP_LAZY).
+        // Waiting for the process table (and the address space's page-table
+        // lock) is safe here: this is a fault from user mode, which runs with
+        // interrupts on, and the handler turned them back on above, so a
+        // holder waiting for a TLB shootdown on this CPU is answered, and
+        // this CPU holds no kernel lock.
         let task_id = sched::current_task_id();
         let pid = crate::proc::thread::owner_process(task_id).unwrap_or(0);
-        if pid != 0 {
-            // Waiting for the process table (and the address space's
-            // page-table lock) is safe here: this is a fault from user mode,
-            // which runs with interrupts on, and the handler turned them back
-            // on above, so a holder waiting for a TLB shootdown on this CPU
-            // is answered, and this CPU holds no kernel lock. Until
-            // 2026-10-03 a busy table was taken as an unresolvable fault, and
-            // the process was sent SIGSEGV for a page it had every right to.
-            // `Busy` -- the table held by this very task -- cannot happen for
-            // a user-mode fault; it would retry the access.
-            match crate::proc::pcb::resolve_fault(pid, cr2, error, true) {
-                crate::proc::pcb::FaultOutcome::Resolved => {
-                    mm::fault::record_user_resolved();
-                    // Minor fault: demand-zero / CoW resolved without I/O.
-                    sched::account_fault(task_id, false);
-                    return; // Demand-paged successfully — retry the instruction.
-                }
-                crate::proc::pcb::FaultOutcome::Busy => return,
-                crate::proc::pcb::FaultOutcome::Unresolvable => {}
-                crate::proc::pcb::FaultOutcome::BeyondEnd => {
-                    // A shared mapping of a file, past the file's end: Linux's
-                    // `SIGBUS` with `BUS_ADRERR` (`filemap_fault`'s
-                    // `VM_FAULT_SIGBUS`), and a native program's access
-                    // violation, as any unresolvable fault is.
-                    log_exception(14, frame.rip, cr2);
-                    const SIGBUS: u32 = 7;
-                    let si_code = crate::proc::linux_sigframe::si_fault_code::BUS_ADRERR;
-                    if try_deliver_linux_fault_signal(frame, SIGBUS, si_code, cr2) {
-                        mm::fault::record_delivered();
-                        return;
-                    }
-                    use crate::proc::exception::ExceptionCode;
-                    dispatch_or_kill_userspace(
-                        "Page Fault (#PF) past the end of a mapped file",
-                        frame,
-                        ExceptionCode::AccessViolation,
-                        cr2,
-                    );
+        match resolve_user_fault(pid, task_id, cr2, error) {
+            // `Busy` -- the table held by this very task -- cannot happen
+            // for a user-mode fault; it would retry the access.
+            UserFault::Resolved | UserFault::Busy => return,
+            UserFault::BeyondEnd => {
+                // A shared mapping of a file, past the file's end: Linux's
+                // `SIGBUS` with `BUS_ADRERR` (`filemap_fault`'s
+                // `VM_FAULT_SIGBUS`), and a native program's access
+                // violation, as any unresolvable fault is.
+                log_exception(14, frame.rip, cr2);
+                const SIGBUS: u32 = 7;
+                let si_code = crate::proc::linux_sigframe::si_fault_code::BUS_ADRERR;
+                if try_deliver_linux_fault_signal(frame, SIGBUS, si_code, cr2) {
+                    mm::fault::record_delivered();
                     return;
                 }
+                use crate::proc::exception::ExceptionCode;
+                dispatch_or_kill_userspace(
+                    "Page Fault (#PF) past the end of a mapped file",
+                    frame,
+                    ExceptionCode::AccessViolation,
+                    cr2,
+                );
+                return;
             }
-        }
-
-        // Second, try stack growth (stack VMAs are handled separately
-        // because they pre-date the per-process VMA system and have
-        // their own growth logic with guard page detection).
-        if try_grow_user_stack(cr2, error, pid) {
-            mm::fault::record_stack_growth();
-            mm::fault::record_user_resolved();
-            // Minor fault: stack growth resolved without I/O.
-            sched::account_fault(task_id, false);
-            return; // Stack grew successfully — retry the instruction.
+            UserFault::Unresolved => {}
         }
 
         // Unresolvable *by the kernel* — try a Linux fault signal, then SEH,
@@ -4485,6 +4454,81 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
     cpu::halt_loop();
 }
 
+/// How [`resolve_user_fault`] answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UserFault {
+    /// The access may run again.
+    Resolved,
+    /// The process table is held by this very task: the access is to run
+    /// again later, not wait for itself.
+    Busy,
+    /// A shared mapping of a file, past the file's end: `SIGBUS`.
+    BeyondEnd,
+    /// Nothing the kernel can do: the access is the program's to answer for.
+    Unresolved,
+}
+
+/// Resolve a fault at the current process `pid`'s user address `cr2`
+/// (`error` with the user bit, as the program's own access has it), for the
+/// program's own access or a kernel copy on its behalf (`mm::uaccess`): a
+/// page swapped out brought back; a VMA's page mapped -- demand-paged, a
+/// file's page, a shared file mapping's page a save made read-only marked
+/// dirty and made writable; the main stack grown. Counted as the task's
+/// fault, major for a swap-in, and in the fault statistics. Called with
+/// interrupts on and nothing held that forbids waiting: it may wait.
+fn resolve_user_fault(pid: u64, task_id: sched::task::TaskId, cr2: u64, error: u64) -> UserFault {
+    // A swap entry: the page was evicted to swap and is brought back, each
+    // 4 KiB part with the flags its entry kept. Only for not-present faults
+    // (bit 0 clear).
+    if error & 1 == 0 {
+        use mm::page_table::{VirtAddr, cr3_to_pml4, read_cr3};
+        let pml4 = cr3_to_pml4(read_cr3());
+        let virt = VirtAddr::new(cr2 & !(mm::frame::FRAME_SIZE as u64 - 1));
+        // SAFETY: `pml4` is the current process's page table (from CR3).
+        if unsafe { mm::swap::is_swapped(pml4, virt) } {
+            // SAFETY: `pml4` is valid and its entry holds a swap entry.
+            if let Ok(swapped) = unsafe { mm::swap::swap_in_page(pml4, virt) } {
+                // Reclaimable again, unless another CPU brought it back first
+                // and registered it.
+                if let Some(flags) = swapped {
+                    mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                }
+                mm::fault::record_swap_in();
+                mm::fault::record_user_resolved();
+                sched::account_fault(task_id, true);
+                return UserFault::Resolved;
+            }
+            // A swap-in that fails (out of memory) falls through.
+        }
+    }
+    if pid != 0 {
+        match crate::proc::pcb::resolve_fault(pid, cr2, error, true) {
+            crate::proc::pcb::FaultOutcome::Resolved => {
+                mm::fault::record_user_resolved();
+                sched::account_fault(task_id, false);
+                return UserFault::Resolved;
+            }
+            crate::proc::pcb::FaultOutcome::Busy => return UserFault::Busy,
+            crate::proc::pcb::FaultOutcome::BeyondEnd => return UserFault::BeyondEnd,
+            crate::proc::pcb::FaultOutcome::Unresolvable => {}
+        }
+    }
+    // The main stack: older than the VMAs, it grows by its own rules, with
+    // its guard below.
+    if try_grow_user_stack(cr2, error, pid) {
+        mm::fault::record_stack_growth();
+        mm::fault::record_user_resolved();
+        sched::account_fault(task_id, false);
+        return UserFault::Resolved;
+    }
+    UserFault::Unresolved
+}
+
+/// Said once: a copy to or from user memory faulted where it could not wait
+/// to be resolved (the page-fault handler's `mm::uaccess` branch).
+static UACCESS_ATOMIC_SAID: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 /// Attempt to grow the user stack to cover the faulting address.
 ///
 /// The user stack occupies a virtual region below `USER_STACK_TOP` and
@@ -4511,50 +4555,6 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
 ///
 /// Returns `true` if the stack was successfully grown, `false` if the
 /// address is outside the stack region or allocation failed.
-/// A kernel access to the current process's user address `cr2` faulted
-/// (`error` with the user bit set, as the program's own access would have
-/// it), inside one of `mm::uaccess`'s routines: resolve it as the program's
-/// fault would be -- a page swapped out brought back, a demand-paged or
-/// shared file page mapped, a page a save made read-only marked dirty and
-/// made writable, the main stack grown. True when the access may run again.
-/// Called with interrupts on; it may wait.
-fn resolve_user_access(cr2: u64, error: u64) -> bool {
-    let Some(pid) =
-        crate::proc::thread::owner_process(sched::current_task_id()).filter(|&p| p != 0)
-    else {
-        return false;
-    };
-    if error & 1 == 0 {
-        use mm::page_table::{VirtAddr, cr3_to_pml4, read_cr3};
-        let pml4 = cr3_to_pml4(read_cr3());
-        let virt = VirtAddr::new(cr2 & !(mm::frame::FRAME_SIZE as u64 - 1));
-        // SAFETY: `pml4` is the current process's page table (from CR3).
-        if unsafe { mm::swap::is_swapped(pml4, virt) } {
-            // SAFETY: `pml4` is valid and its entry holds a swap entry.
-            return match unsafe { mm::swap::swap_in_page(pml4, virt) } {
-                Ok(swapped) => {
-                    if let Some(flags) = swapped {
-                        mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
-                    }
-                    mm::fault::record_swap_in();
-                    true
-                }
-                Err(_) => false,
-            };
-        }
-    }
-    if crate::proc::pcb::resolve_fault(pid, cr2, error, true)
-        == crate::proc::pcb::FaultOutcome::Resolved
-    {
-        return true;
-    }
-    if try_grow_user_stack(cr2, error, pid) {
-        mm::fault::record_stack_growth();
-        return true;
-    }
-    false
-}
-
 fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     // Only handle not-present faults (bit 0 clear = page not mapped).
     // A present-page violation (protection fault) is not stack growth.

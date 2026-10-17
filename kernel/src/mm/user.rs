@@ -917,8 +917,7 @@ fn user_atomic_u32(addr: u64) -> KernelResult<u64> {
     // Alignment is a hard requirement, not a courtesy: a `lock`-prefixed RMW
     // that straddles a cache line is not guaranteed atomic on all
     // microarchitectures, and on some it is a split-lock that stalls every
-    // core.  Rejecting here is also what makes the `AtomicU32` reference
-    // below well-formed.
+    // core.
     if addr == 0 || addr & 3 != 0 {
         return Err(KernelError::BadAlignment);
     }
@@ -949,6 +948,29 @@ fn in_user_window<T>(access: impl FnOnce() -> Result<T, ()>) -> KernelResult<T> 
         result
     };
     result.map_err(|()| KernelError::InvalidAddress)
+}
+
+/// Read `buf.len()` bytes of the current address space's user memory at
+/// `addr`, for a diagnostic: true when they were read. No validation and no
+/// fault-in: the caller saw the page present a moment ago, and a page that
+/// went since -- another thread unmapped it -- ends the copy at its fixup
+/// (`mm::uaccess`) instead of in a kernel fault. False for a range not
+/// wholly in user space.
+#[must_use]
+pub fn peek_user(addr: u64, buf: &mut [u8]) -> bool {
+    let len = u64::try_from(buf.len()).unwrap_or(u64::MAX);
+    if addr.checked_add(len).is_none_or(|end| end > USER_SPACE_END) {
+        return false;
+    }
+    // SAFETY: `buf` is ours, `len` bytes; `addr..addr + len` is user space,
+    // so a fault there is a user page's, and resumes at the copy's fixup.
+    let left = unsafe {
+        crate::smep_smap::stac();
+        let left = crate::mm::uaccess::copy(buf.as_mut_ptr(), addr as *const u8, buf.len());
+        crate::smep_smap::clac();
+        left
+    };
+    left == 0
 }
 
 /// The page-fault handler's fixups for `mm::uaccess`'s routines, on a user

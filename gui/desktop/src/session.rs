@@ -3789,20 +3789,18 @@ impl<T: Transport> ShellSession<T> {
     /// Everything here is one reading of the settings, so there is no second
     /// definition of what "slow" means: the speed's multiplier is applied once,
     /// by the palette source, and every animator scales by the result.
+    ///
+    /// A motion that has just become still -- the user's speed set to Off, or
+    /// a theme whose transitions do not move -- cancels what is already
+    /// running rather than letting it finish: a user who has just asked for
+    /// less motion is asking about the motion on screen now, not about the
+    /// next one.
     fn sync_motion(&mut self) {
+        let was_still = self.animations.animations_suppressed();
         let motion = self.shell.motion();
         self.animations.set_motion(motion);
         self.autohide.set_motion(motion);
-    }
-
-    /// Turn animations off, or back on, for accessibility.
-    ///
-    /// Turning them off cancels what is already running rather than letting it
-    /// finish: a user who has just asked for less motion is asking about the
-    /// motion on screen now, not about the next one.
-    pub fn set_reduced_motion(&mut self, reduced: bool) {
-        self.animations.reduced_motion = reduced;
-        if reduced {
+        if !was_still && self.animations.animations_suppressed() {
             self.animations.cancel_all();
             self.shell.overview.end_fade();
             self.dirty = true;
@@ -4276,9 +4274,6 @@ impl<T: Transport> ShellSession<T> {
     fn begin_notifications_slide(&mut self) {
         // A still motion needs no check here: the pane starts no slide under
         // one, and a frame armed for nothing moving arms nothing.
-        if self.animations.reduced_motion {
-            return;
-        }
         self.shell.notifications.begin_slide();
         self.arm_next_frame();
     }
@@ -4294,9 +4289,6 @@ impl<T: Transport> ShellSession<T> {
     fn begin_overview_fade(&mut self) {
         // A still motion needs no check here: `begin_fade` starts no fade of
         // no length, and a frame armed for nothing moving arms nothing.
-        if self.animations.reduced_motion {
-            return;
-        }
         let motion = self.shell.motion();
         self.shell
             .overview

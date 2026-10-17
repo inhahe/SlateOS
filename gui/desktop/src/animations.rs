@@ -1,8 +1,8 @@
 //! Animation and transition system for the desktop shell.
 //!
 //! Provides smooth animations for window operations, desktop transitions,
-//! and UI element state changes. All animations respect the `reduced_motion`
-//! accessibility setting.
+//! and UI element state changes. A still motion -- the user's animation
+//! speed of Off, or a theme whose transitions do not move -- starts none.
 //!
 //! Durations are **wall-clock milliseconds**, and every animation is advanced
 //! by the elapsed time reported by the frame clock
@@ -537,8 +537,6 @@ pub struct AnimationManager {
     window_anims: Vec<WindowAnimation>,
     /// Active desktop transition.
     desktop_transition: Option<DesktopTransition>,
-    /// Whether animations are disabled (for accessibility).
-    pub reduced_motion: bool,
     /// Default animation duration in milliseconds. This is the value the Tier 3
     /// `animation-duration-ms` theme setting will set.
     pub default_duration_ms: u32,
@@ -546,9 +544,9 @@ pub struct AnimationManager {
     ///
     /// `1.0` is unchanged; `1.5` makes everything take half again as long;
     /// `0.75` makes it quicker. Zero or less means "do not animate at all",
-    /// which is [`AnimationSpeed::Off`]'s multiplier and is handled by the same
-    /// gate as [`reduced_motion`](Self::reduced_motion) rather than by dividing
-    /// by it.
+    /// which is [`AnimationSpeed::Off`]'s multiplier and is handled by
+    /// [`animations_suppressed`](Self::animations_suppressed) rather than by
+    /// dividing by it.
     ///
     /// Private, with [`set_duration_scale`](Self::set_duration_scale) as the
     /// door, because it is validated: a caller reading a percentage out of a
@@ -576,7 +574,6 @@ impl AnimationManager {
         Self {
             window_anims: Vec::new(),
             desktop_transition: None,
-            reduced_motion: false,
             default_duration_ms: DEFAULT_DURATION_MS,
             duration_scale: 1.0,
             carry_ms: 0.0,
@@ -638,15 +635,11 @@ impl AnimationManager {
         self.duration_scale
     }
 
-    /// Whether anything should animate at all.
-    ///
-    /// Two independent reasons, deliberately sharing one answer: the
-    /// accessibility setting, and an appearance speed of `Off`. They mean the
-    /// same thing to everything downstream, and a caller that had to ask about
-    /// both would eventually ask about only one.
+    /// Whether anything should animate at all: not under a still motion,
+    /// whose scale is zero.
     #[must_use]
     pub fn animations_suppressed(&self) -> bool {
-        self.reduced_motion || self.duration_scale <= 0.0
+        self.duration_scale <= 0.0
     }
 
     /// Wall-clock `dt_ms` converted to the animation time it buys.
@@ -941,20 +934,14 @@ mod tests {
     }
 
     #[test]
-    fn off_suppresses_animations_exactly_as_reduced_motion_does() {
+    fn off_starts_no_animation() {
         // `AnimationSpeed::Off`'s multiplier is 0.0. It must not reach the
-        // divide -- it is routed to the same gate reduced motion uses, because
-        // the two mean the same thing downstream.
+        // divide -- it is the gate that says nothing animates at all.
         let mut off = AnimationManager::new();
         off.set_duration_scale(0.0);
         assert!(off.animations_suppressed());
         off.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
         assert!(!off.has_active(), "Off should start no animation at all");
-
-        let mut reduced = AnimationManager::new();
-        reduced.reduced_motion = true;
-        reduced.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 200));
-        assert!(!reduced.has_active());
     }
 
     #[test]
@@ -1367,9 +1354,9 @@ mod tests {
     }
 
     #[test]
-    fn reduced_motion_refuses_the_animation_rather_than_playing_it_fast() {
+    fn a_still_motion_refuses_the_animation_rather_than_playing_it_fast() {
         let mut mgr = AnimationManager::new();
-        mgr.reduced_motion = true;
+        mgr.set_motion(Motion::STILL);
 
         mgr.animate_window(WindowAnimation::open(1, 0.0, 0.0, 100.0, 100.0, 100));
         assert!(!mgr.has_active());

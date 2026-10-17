@@ -3589,13 +3589,14 @@ fn a_frame_with_nothing_moving_asks_for_no_more_frames() {
 }
 
 #[test]
-fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
-    // Reduced motion is not "the same animation, faster". An animation that
+fn a_still_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
+    // Motion off is not "the same animation, faster". An animation that
     // still runs but is invisible costs the same wake-ups and is the same
     // motion sickness; the setting has to reach the clock, not just the paint.
     let (mut session, desktop, _turn) = bound_session();
     let panel = session.panel().window();
-    session.set_reduced_motion(true);
+    session.shell_mut().appearance.animation_speed = AnimationSpeed::Off;
+    session.sync_motion();
     desktop
         .borrow_mut()
         .send_input(&[InputEvent::new(panel, super_tab())]);
@@ -3605,23 +3606,24 @@ fn reduced_motion_opens_the_overview_without_a_fade_and_without_a_clock() {
     assert!(!session.shell().overview.is_fading());
     assert!(
         (session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON,
-        "reduced motion left the overview part-way through a fade it will \
+        "a still motion left the overview part-way through a fade it will \
          never finish"
     );
     assert!(
         !session.events_mut().is_waking(panel),
-        "reduced motion still armed the frame clock"
+        "a still motion still armed the frame clock"
     );
 }
 
 #[test]
-fn turning_reduced_motion_on_mid_fade_lands_on_fully_open() {
+fn turning_motion_off_mid_fade_lands_on_fully_open() {
     let (mut session, _desktop, _turn) = bound_session();
     let panel = session.panel().window();
     deliver(&mut session, panel, super_tab());
     assert!(session.shell().overview.is_fading());
 
-    session.set_reduced_motion(true);
+    session.shell_mut().appearance.animation_speed = AnimationSpeed::Off;
+    session.sync_motion();
     assert!(!session.shell().overview.is_fading());
     assert!((session.shell().overview.fade_opacity() - 1.0).abs() < f32::EPSILON);
 }

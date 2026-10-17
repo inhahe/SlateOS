@@ -1,9 +1,9 @@
 # B → D: `init` stops a service by asking it to terminate, and forces it only after a stop timeout
 
 **Filed:** 2026-10-15 by lane B. **Addressed to:** lane D (`services/init`).
-**Status:** OPEN. **Priority:** medium -- today every service stop is a forced
-kill, so no service is ever given the chance to flush, save or release what it
-holds.
+**Status:** ✅ DONE 2026-10-17 by lane D, on `lane-d` (main with lane D's next
+boot-tested publish) -- reply at the end. (Priority was medium: every service
+stop was a forced kill.)
 
 ## In short
 
@@ -47,3 +47,33 @@ and makes the calls itself, so it cannot use the crate; the syscalls and the
 A service that wants to be asked registers with
 `libservicebus::lifecycle::Lifecycle::register()` and treats a *terminate*
 as its cue to shut down cleanly.
+
+## Reply (lane D, 2026-10-17)
+
+Done as you laid it out, in `services/init/src/lib.rs` (`stop_all`, host-
+tested against a stand-in kernel) and `main.rs` (`stop_service`):
+
+1. **Terminate**: `SYS_LIFECYCLE_QUERY`, and when it says 1,
+   `SYS_LIFECYCLE_REQUEST(pid, LIFECYCLE_TERMINATE)`; otherwise -- 0, an
+   error, or the request refused, `NotSupported` included -- `SIGTERM`
+   through `SYS_SIGNAL_SEND`.
+2. **Wait** up to the service's stop timeout, reaping it, every 10 ms.
+3. **Force** what is left with `SYS_PROCESS_KILL`, and reap it. A service
+   neither the request nor the signal reached is forced at once, as
+   waiting for it could only end one way.
+
+The timeout is your suggestion: `stop_timeout:<ms>` on the service's line
+of `/etc/startup.conf` (whole milliseconds, at most ten minutes, refused
+otherwise like any bad word), 10 000 when not given. The console line says
+which it took: `[svc] Stopped NAME (PID n): ended when asked to
+terminate`, `... ended on SIGTERM`, or `... forced after 10000 ms`.
+
+`stop_all` takes every service to stop at once and asks them all before it
+waits on any, so stopping many takes the longest timeout rather than their
+sum. Today only `svc stop` and `svc restart` call it -- init has no
+shutdown path yet. That is your other proposal,
+`requests/b-d-init-could-answer-org-slateos-servicemanager.md` (on lane-b):
+yes, init should answer it, and its `PowerOff` and `Reboot` will stop every
+service through this. That is lane D's next piece of init.
+
+— lane D

@@ -107,6 +107,15 @@ const SYS_HOSTNAME_SET: u64 = 1072;
 const SYS_CLOCK_REALTIME: u64 = 14;
 const SYS_FS_SET_PERMS: u64 = 631;
 const SYS_FS_APPEND: u64 = 643;
+const SYS_PROCESS_KILL: u64 = 506;
+const SYS_SIGNAL_SEND: u64 = 523;
+const SYS_LIFECYCLE_REQUEST: u64 = 1173;
+const SYS_LIFECYCLE_QUERY: u64 = 1174;
+/// `SYS_LIFECYCLE_REQUEST`'s kind: stop now, cleanly, asking nothing.
+const LIFECYCLE_TERMINATE: u64 = 2;
+/// The signal a service that does not answer lifecycle requests is asked to
+/// stop with, as on Linux.
+const SIGTERM: u64 = 15;
 
 /// Directory entry size from kernel (name[256] + size[4] + type[1] + pad[3]).
 const FS_DIR_ENTRY_SIZE: usize = 264;
@@ -562,6 +571,48 @@ fn process_is_ready(pid: u64) -> i64 {
 /// Kernel error code for "still running".
 const ERR_WOULD_BLOCK: i64 = -4;
 
+/// Kernel error code for a process that is not there (`NoSuchProcess`).
+const ERR_NO_SUCH_PROCESS: i64 = -200;
+
+/// The kernel, as [`init::stop_all`] asks it.
+struct Kernel;
+
+impl init::StopCalls for Kernel {
+    fn lifecycle_query(&mut self, pid: u64) -> i64 {
+        syscall1(SYS_LIFECYCLE_QUERY, pid)
+    }
+
+    fn request_terminate(&mut self, pid: u64) -> i64 {
+        syscall2(SYS_LIFECYCLE_REQUEST, pid, LIFECYCLE_TERMINATE)
+    }
+
+    fn send_sigterm(&mut self, pid: u64) -> i64 {
+        syscall2(SYS_SIGNAL_SEND, pid, SIGTERM)
+    }
+
+    fn reaped(&mut self, pid: u64) -> bool {
+        match process_try_wait(pid) {
+            WaitStatus::Running => false,
+            WaitStatus::Exited(_) => true,
+            // Reaped already, or never init's child: nothing left to wait for.
+            WaitStatus::Failed(e) => e == ERR_NO_SUCH_PROCESS,
+        }
+    }
+
+    fn kill(&mut self, pid: u64) -> i64 {
+        syscall2(SYS_PROCESS_KILL, pid, 0)
+    }
+
+    fn now_ns(&mut self) -> u64 {
+        // The monotonic clock is never negative; 0 if it were.
+        u64::try_from(clock_monotonic()).unwrap_or(0)
+    }
+
+    fn sleep_ns(&mut self, ns: u64) {
+        sleep_ns(ns);
+    }
+}
+
 /// Stat a file.  Returns 0 or negative error.
 /// On success, fills `out` with the 80-byte FsStatResult.  Only the
 /// low 16 bytes (size + type + link count) are consumed here:
@@ -794,8 +845,8 @@ fn split_first_word(s: &[u8]) -> (&[u8], &[u8]) {
 // Service manager
 // ---------------------------------------------------------------------------
 
-/// Maximum number of managed services.
-const MAX_SERVICES: usize = 16;
+/// Maximum number of managed services: the library's, which stops them.
+const MAX_SERVICES: usize = init::MAX_SERVICES;
 
 // What a service's fields hold: `lib.rs`'s, where `/etc/startup.conf`'s
 // lines and `svc start`'s path are held to them before anything is stored,
@@ -910,6 +961,9 @@ struct Service {
     /// /etc/startup.conf: the first `svc_cap_count` (design-decisions 1174).
     svc_caps: [init::CapGrant; init::MAX_SVC_CAPS],
     svc_cap_count: usize,
+    /// How long a stop waits for it to end by itself before forcing it
+    /// (`stop_timeout:`, or [`init::DEFAULT_STOP_TIMEOUT_MS`]).
+    stop_timeout_ms: u32,
 }
 
 impl Service {
@@ -940,6 +994,7 @@ impl Service {
             svc_env_count: 0,
             svc_caps: [init::CapGrant::NONE; init::MAX_SVC_CAPS],
             svc_cap_count: 0,
+            stop_timeout_ms: init::DEFAULT_STOP_TIMEOUT_MS,
         }
     }
 }
@@ -1025,6 +1080,7 @@ impl ServiceRegistry {
         svc.svc_arg_count = 0;
         svc.svc_env_count = 0;
         svc.svc_cap_count = 0;
+        svc.stop_timeout_ms = init::DEFAULT_STOP_TIMEOUT_MS;
 
         self.count += 1;
         Ok(idx)
@@ -1467,7 +1523,10 @@ impl ServiceRegistry {
         pid
     }
 
-    /// Stop a service by sending a kill and marking it for no-restart.
+    /// Stop a service as services are stopped (B-Q22, design-decisions
+    /// §1072): asked to terminate -- through its lifecycle endpoint, or with
+    /// `SIGTERM` -- then forced after its stop timeout ([`init::stop_all`]);
+    /// and marked for no restart. The console says which it took.
     fn stop_service(&mut self, idx: usize) {
         if idx >= MAX_SERVICES || !self.services[idx].active {
             return;
@@ -1477,22 +1536,16 @@ impl ServiceRegistry {
         svc.auto_restart = false;
 
         if svc.pid != 0 {
-            // Kill the process.
-            let ret = syscall2(506, svc.pid, 0); // SYS_PROCESS_KILL = 506
-            if ret >= 0 {
-                // Reap the zombie. The outcome is deliberately ignored: we
-                // are tearing the service down either way, so neither an exit
-                // code nor a wait error changes what happens next. (The kill
-                // may also have raced the child's own exit, in which case the
-                // reap legitimately reports NoSuchProcess.)
-                let _ = process_try_wait(svc.pid);
-            }
+            let mut ended = [None];
+            init::stop_all(&mut Kernel, &[(svc.pid, svc.stop_timeout_ms)], &mut ended);
             let name = &svc.name[..svc.name_len];
             print("[svc] Stopped ");
             console_write(name);
             print(" (PID ");
             print_u64(svc.pid);
-            print(")\n");
+            print("): ");
+            print_ended(ended[0], svc.stop_timeout_ms);
+            print("\n");
             svc.pid = 0;
         }
     }
@@ -2476,6 +2529,7 @@ fn report_record_failure(path: &[u8], what: &[u8]) {
 /// /bin/network args:--dhcp depends:logger
 /// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
 /// /bin/compositor depends:logger caps:InputDevice/0/r,Service/0/w
+/// /bin/database stop_timeout:30000
 /// ```
 ///
 /// Each non-empty, non-comment line is a path optionally followed by
@@ -2485,6 +2539,9 @@ fn report_record_failure(path: &[u8], what: &[u8]) {
 ///   - `depends:svc1,svc2` — dependency names
 ///   - `caps:Type/id/rights,...` — capabilities beyond init's usual ones
 ///     (design-decisions 1174; `init::parse_caps` says what it takes)
+///   - `stop_timeout:ms` — how long a stop waits for the service to end
+///     when asked before it forces it: whole milliseconds up to ten
+///     minutes, 10 000 if not given (`init::stop_all`)
 ///
 /// A line init cannot read -- an unknown keyword, one given twice, a
 /// `caps:` entry it does not know -- is refused: its service is not started,
@@ -2546,6 +2603,7 @@ fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::Servi
                 registry.set_env(idx, parsed.env);
             }
             registry.set_caps(idx, parsed.caps());
+            registry.services[idx].stop_timeout_ms = parsed.stop_timeout_ms;
 
             if registry.services[idx].dep_count > 0 {
                 // Has dependencies — don't start yet, mark as waiting.
@@ -2667,6 +2725,35 @@ fn print_line_error(e: init::LineError<'_>) {
             console_write(entry);
             print("` is not KEY=VALUE");
         }
+        init::LineError::BadStopTimeout(word) => {
+            print("`");
+            console_write(word);
+            print("` is not a stop timeout: whole milliseconds, at most ");
+            print_u64(u64::from(init::MAX_STOP_TIMEOUT_MS));
+        }
+    }
+}
+
+/// Say how a stopped service ended ([`init::stop_all`]): by itself, asked
+/// as it was, or forced -- after `timeout_ms`, or at once when it could not
+/// be asked.
+fn print_ended(ended: Option<init::Ended>, timeout_ms: u32) {
+    match ended {
+        Some(init::Ended::Exited(init::Asked::Request)) => print("ended when asked to terminate"),
+        Some(init::Ended::Exited(init::Asked::Signal)) => print("ended on SIGTERM"),
+        Some(init::Ended::Exited(init::Asked::Failed(_))) => print("ended"),
+        Some(init::Ended::Forced(init::Asked::Failed(e))) => {
+            print("forced, as it could not be asked to terminate (");
+            print_i64(e);
+            print(")");
+        }
+        Some(init::Ended::Forced(_)) => {
+            print("forced after ");
+            print_u64(u64::from(timeout_ms));
+            print(" ms");
+        }
+        // `stop_all` answers for every non-zero pid it is given.
+        None => print("not stopped"),
     }
 }
 

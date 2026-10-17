@@ -26,6 +26,13 @@ extern "C" {
 int isfdtype(int, int);
 #endif
 
+/* CMSG_NXTHDR as glibc's: a call, whose walk also checks that the next
+ * message's stated length fits the buffer, and which compiles warning-free
+ * where musl's macro compares a signed and an unsigned value. */
+struct cmsghdr *__cmsg_nxthdr(struct msghdr *, struct cmsghdr *);
+#undef CMSG_NXTHDR
+#define CMSG_NXTHDR(mhdr, cmsg) __cmsg_nxthdr(mhdr, cmsg)
+
 #ifdef __cplusplus
 }
 #endif

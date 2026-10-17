@@ -3682,6 +3682,51 @@ pub struct Cmsghdr {
     pub cmsg_type: i32,
 }
 
+/// `__cmsg_nxthdr(mhdr, cmsg)`: the control message after `cmsg` in
+/// `mhdr`'s buffer, or NULL when there is none -- glibc's
+/// (`sysdeps/unix/sysv/linux/cmsg_nxthdr.c`), which its `CMSG_NXTHDR` calls
+/// and this library's `<sys/socket.h>` makes `CMSG_NXTHDR` call too. NULL
+/// for a `cmsg` shorter than its own header, and for a next message whose
+/// header, or whose stated length, runs past the buffer.
+///
+/// # Safety
+///
+/// `mhdr` must be a valid `msghdr`, and `cmsg` a control message inside its
+/// buffer, as `CMSG_FIRSTHDR` and this function give them.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __cmsg_nxthdr(mhdr: *mut Msghdr, cmsg: *mut Cmsghdr) -> *mut Cmsghdr {
+    let header = core::mem::size_of::<Cmsghdr>();
+    let align = |n: usize| n.checked_add(7).map(|m| m & !7);
+    // SAFETY: the caller's contract: `cmsg`'s header is inside the buffer.
+    let len = unsafe { (*cmsg).cmsg_len };
+    if len < header {
+        return core::ptr::null_mut();
+    }
+    // SAFETY: the caller's contract: `mhdr` is a valid `msghdr`.
+    let (start, room) = unsafe { ((*mhdr).msg_control as usize, (*mhdr).msg_controllen) };
+    let Some(end) = start.checked_add(room) else {
+        return core::ptr::null_mut();
+    };
+    let Some(next) = align(len).and_then(|step| (cmsg as usize).checked_add(step)) else {
+        return core::ptr::null_mut();
+    };
+    if next.checked_add(header).is_none_or(|e| e > end) {
+        return core::ptr::null_mut();
+    }
+    let next_ptr = cmsg
+        .cast::<u8>()
+        .wrapping_add(next.wrapping_sub(cmsg as usize));
+    // SAFETY: the next header lies inside the buffer (checked above).
+    let next_len = unsafe { next_ptr.cast::<usize>().read_unaligned() };
+    if align(next_len)
+        .and_then(|step| next.checked_add(step))
+        .is_none_or(|e| e > end)
+    {
+        return core::ptr::null_mut();
+    }
+    next_ptr.cast()
+}
+
 /// Send a message on a socket using a message header.
 ///
 /// Iterates over all iov elements.  For small messages (≤ 4 KiB total),
@@ -5136,6 +5181,60 @@ pub unsafe extern "C" fn recvmmsg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `__cmsg_nxthdr` walks a buffer of control messages as glibc's does:
+    /// each next one, then NULL at the end, for a message shorter than its
+    /// header, and for a next one whose stated length runs past the buffer.
+    #[test]
+    fn cmsg_nxthdr_walks_as_glibcs() {
+        let mut buf = [0u64; 12]; // 96 bytes, aligned
+        let put = |buf: &mut [u64; 12], at: usize, len: usize| buf[at / 8] = len as u64;
+        put(&mut buf, 0, 20); // 16 + 4, padded to 24
+        put(&mut buf, 24, 32); // 16 + 16
+        put(&mut buf, 56, 40); // 16 + 24: ends at 96 exactly
+        let base = buf.as_mut_ptr().cast::<u8>();
+        let mut msg = Msghdr {
+            msg_name: core::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: core::ptr::null_mut(),
+            msg_iovlen: 0,
+            msg_control: base,
+            msg_controllen: 96,
+            msg_flags: 0,
+        };
+        let at = |off: usize| base.wrapping_add(off).cast::<Cmsghdr>();
+        // SAFETY: every message named is inside `buf`, which `msg` names.
+        unsafe {
+            assert_eq!(__cmsg_nxthdr(&raw mut msg, at(0)), at(24));
+            assert_eq!(__cmsg_nxthdr(&raw mut msg, at(24)), at(56));
+            assert!(__cmsg_nxthdr(&raw mut msg, at(56)).is_null(), "the end");
+            msg.msg_controllen = 90;
+            assert!(
+                __cmsg_nxthdr(&raw mut msg, at(24)).is_null(),
+                "the next one's 40 bytes run past 90"
+            );
+            msg.msg_controllen = 96;
+        }
+        put(&mut buf, 0, 8);
+        // SAFETY: as above.
+        assert!(
+            unsafe { __cmsg_nxthdr(&raw mut msg, at(0)) }.is_null(),
+            "shorter than a header"
+        );
+    }
+
+    std::thread_local! {
+        static SIGPIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    }
+
+    extern "C" fn count_sigpipe(_sig: i32) {
+        SIGPIPES.with(|p| p.set(p.get() + 1));
+    }
+
+    /// The `SIGPIPE`s this thread has had since the last call.
+    fn sigpipes() -> u32 {
+        SIGPIPES.with(|p| p.replace(0))
+    }
 
     /// A TCP socket never connected, or listening, is no connection: sending
     /// is EPIPE with `SIGPIPE` (none for `MSG_NOSIGNAL`), and receiving from

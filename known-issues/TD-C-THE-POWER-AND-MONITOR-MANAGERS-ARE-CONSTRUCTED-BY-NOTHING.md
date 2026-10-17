@@ -68,7 +68,10 @@ does. The Settings page that writes it is asked of lane E
 day: `sleep.after_minutes`, claimed on the on-screen display's window, runs
 the power menu's Sleep (`PowerChoice::Sleep.command()`, `powerctl`). What
 is left of `PowerManager`'s model is the lid, the buttons and the battery,
-which wait on lane A's events.
+which wait on events: asked of lanes A and F in
+`requests/c-af-the-power-button-and-the-lid-reach-the-shell.md`. That
+request also asks lane A about a third model of the same five options,
+`kernel/src/fs/power.rs` (`#![allow(dead_code)]`, called by nothing).
 
 **If never fixed:** 5,000 lines that read as features the desktop has, and
 a battery icon that can only ever say there is no battery.

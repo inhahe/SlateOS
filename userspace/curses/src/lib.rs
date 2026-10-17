@@ -575,3 +575,19 @@ pub fn resize_term(lines: i32, cols: i32) -> bool {
 pub fn resizeterm(lines: i32, cols: i32) -> bool {
     ok(|sp| sp.resizeterm(lines, cols))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No unit test installs the process's screen, so each `stdscr` call
+    /// gives its answer for none.
+    #[test]
+    fn without_a_screen_the_stdscr_calls_answer_err() {
+        assert_eq!(use_legacy_coding(1), -1);
+        assert_eq!(curs_set(1), -1);
+        assert_eq!(getyx(), (-1, -1));
+        assert!(!idlok(true));
+        assert_eq!(tigetstr(b"cup"), TermString::Cancelled);
+    }
+}

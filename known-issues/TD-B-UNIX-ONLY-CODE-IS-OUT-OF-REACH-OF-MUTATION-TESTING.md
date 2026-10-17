@@ -20,7 +20,7 @@ testing does not run. `chattr` is the first case and has its own entry
 | `userspace/ulallio` | `read_all`, `write_all` (libcall answers `ENOSYS` off Unix) | its unit tests under WSL |
 | `libcall/src/{alg,xattr}.rs` | every call | their unit tests under WSL; `hardlink-diff.sh` |
 | `libcall/src/fd.rs` | `poll` (6 mutants survived the review of `b50f04266..07e9cfcd0`) | its unit test under WSL; `rfkill-diff.sh`'s `event` cases |
-| `userspace/curses/src/lib.rs` | not Unix-only, but as far out of reach: the wrappers around the one process-wide screen (`use_legacy_coding`, `tigetstr`), which no unit test may install beside the others | `Screen`'s own methods' tests; `curses-diff.sh` |
+| `userspace/curses/src/lib.rs` | not Unix-only, but as far out of reach: what the wrappers around the one process-wide screen (`use_legacy_coding`, `tigetstr`) answer when there is a screen, which no unit test may install beside the others. Their answer without one is tested. | `Screen`'s own methods' tests; `curses-diff.sh` |
 
 In the review of `b50f04266..07e9cfcd0` mutation testing found 153 mutants
 no test caught: 135 in `rfkill`, the rest in the rows above and in chattr.
@@ -29,6 +29,13 @@ timestamp's zone, the option switch and its status, the words of the
 states, the program's name); the next batch's mutation run, which covers
 rfkill's changed lines again, says how many they catch. The device paths
 are this entry's.
+
+In the review of `07e9cfcd0..80bad3939` (hardlink's port) it found 187,
+179 of them in `hardlink.rs`, `fileeq.rs` and `walk.rs`. Much of those
+files was rewritten by the follow-up `ceafac4cb` (all of `walk.rs`), so
+the replay is owed against that commit, not the reviewed one. The run's
+time limit also stopped it partway through hardlink, before libcall,
+nologin, rfkill and ulallio: 208 of 511 mutants were tried.
 
 **The proper fix:** either mutation testing builds these crates for
 `x86_64-unknown-linux-gnu` in WSL and runs their tests there (a change to

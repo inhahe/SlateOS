@@ -11,7 +11,9 @@ use sshwire::{
 };
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&selector, rest)) = data.split_first() else { return };
+    let Some((&selector, rest)) = data.split_first() else {
+        return;
+    };
     match selector % 4 {
         0 => {
             let line = strip_line_terminator(rest);

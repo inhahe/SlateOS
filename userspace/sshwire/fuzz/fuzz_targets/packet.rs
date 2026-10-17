@@ -14,7 +14,11 @@ fn drain(codec: &mut PacketCodec, mut buf: &[u8]) {
     for _ in 0..64 {
         match codec.decode(buf) {
             Ok(Some((_payload, used))) => {
-                assert!(used > 0 && used <= buf.len(), "decode used {used} of {}", buf.len());
+                assert!(
+                    used > 0 && used <= buf.len(),
+                    "decode used {used} of {}",
+                    buf.len()
+                );
                 buf = &buf[used..];
             }
             _ => return,
@@ -23,14 +27,27 @@ fn drain(codec: &mut PacketCodec, mut buf: &[u8]) {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let Some((&selector, rest)) = data.split_first() else { return };
+    let Some((&selector, rest)) = data.split_first() else {
+        return;
+    };
     let mut codec = PacketCodec::new();
     if selector & 1 == 1 {
-        let role = if selector & 2 == 0 { Role::Client } else { Role::Server };
-        if codec.activate(role, &[7u8; 32], &[1u8; 32], &[2u8; 32]).is_err() {
+        let role = if selector & 2 == 0 {
+            Role::Client
+        } else {
+            Role::Server
+        };
+        if codec
+            .activate(role, &[7u8; 32], &[1u8; 32], &[2u8; 32])
+            .is_err()
+        {
             return;
         }
     }
-    let _ = (codec.is_encrypted(), codec.inbound_block_size(), codec.padding_len(rest.len()));
+    let _ = (
+        codec.is_encrypted(),
+        codec.inbound_block_size(),
+        codec.padding_len(rest.len()),
+    );
     drain(&mut codec, rest);
 });

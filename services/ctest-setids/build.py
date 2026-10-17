@@ -18,7 +18,8 @@ Linux's rules (`SYS_PROCESS_SET_IDS`, `SYS_PROCESS_GET_IDS`), which the
 library now asks. The host has no kernel to keep them, so only here are
 they seen: root setting its effective id aside and taking it back, the
 filesystem id following it, the group ids, `setreuid` and `setresuid`
-keeping or giving up root, and `EINVAL` for -1. `main.c`'s header numbers
+keeping or giving up root, `EINVAL` for -1, and the supplementary
+groups `getgroups` reads with no File capability. `main.c`'s header numbers
 the checks; it passes on Linux as root.
 
 ## It cannot hang

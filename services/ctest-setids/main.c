@@ -32,10 +32,15 @@
  *       so seteuid(0) works (51)
  *   6x  setresuid(1000, 1000, 1000) gives root up: seteuid(0) and setuid(0)
  *       are EPERM (60, 61); moving among the ids it has still works (62)
+ *   7x  (run before 6x, while root) the supplementary groups setgroups
+ *       installs are what getgroups reports -- how many (70), and which, in
+ *       ascending order (71) -- though this process holds no File
+ *       capability, which getgroups once needed to read /proc/self/status
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
+#include <grp.h>
 #include <sys/fsuid.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -114,6 +119,16 @@ int main(void)
         return 32;
     if (setresgid(0, 0, 0) != 0)
         return 32;
+
+    /* 7x */
+    gid_t want[] = {27, 4};
+    if (setgroups(2, want) != 0 || getgroups(0, 0) != 2)
+        return 70;
+    gid_t got[8];
+    if (getgroups(8, got) != 2 || got[0] != 4 || got[1] != 27)
+        return 71;
+    if (setgroups(0, 0) != 0 || getgroups(0, 0) != 0)
+        return 71;
 
     /* 5x */
     if (!setreuid_child())

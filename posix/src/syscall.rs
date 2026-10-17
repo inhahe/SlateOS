@@ -52,6 +52,15 @@ pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 /// right that governs uid/gid changes -- and capped at Linux's NGROUPS_MAX.
 pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 
+/// `(count, list_ptr) -> n`. The calling process's supplementary groups, as
+/// [`SYS_PROCESS_SETGROUPS`] stored them -- in that order, not sorted -- by
+/// Linux's `getgroups(2)` contract: `count == 0` answers how many and writes
+/// nothing; a `count` short of that is native `InvalidArgument`; otherwise
+/// the gids go to `list_ptr` as `u32`s and their number is the answer. No
+/// capability, as the uid and gid need none. On lane A's kernel since
+/// 2026-10-07 (`requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md`).
+pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
+
 /// `(path_ptr) -> 0`. Change the calling process's filesystem root to the
 /// NUL-terminated absolute path at `path_ptr`, which must name an existing
 /// directory. Gated on `(Process, SET_CREDENTIALS)`. Note that the Linux-ABI

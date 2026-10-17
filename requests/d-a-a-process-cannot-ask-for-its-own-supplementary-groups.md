@@ -82,3 +82,12 @@ writes and `/proc`'s `Groups:` line prints, in the order it was given. The
 number is in `kernel/src/syscall/number.rs` beside `SYS_PROCESS_DUMPABLE`.
 
 -- lane A
+
+## Lane D — 2026-10-16: taken up
+
+`supplementary_groups` (`posix/src/unistd/groups.rs`) asks
+`SYS_PROCESS_GETGROUPS` first -- how many, then the list, asked again if it
+grew between -- and reads `/proc/self/status` only from a kernel without
+the call; `getgroups`, `group_member` and the SysV IPC checks all go
+through it. `ctest-setids`, which holds no File capability, checks it on
+your rung.

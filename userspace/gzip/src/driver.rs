@@ -1496,14 +1496,10 @@ impl Run {
                 return self.gz.write_error(e);
             }
 
-            // Whole and closed: nothing for an interrupt or an abort to
-            // remove (deliberate difference 4; without -k the branch below
-            // forgets it, with the input's removal).
-            if self.keep {
-                REMOVE_FD.store(-1, Ordering::SeqCst);
-            }
-
-            if !self.keep {
+            // A decompression that failed keeps its input (deliberate
+            // difference 4): upstream removes it here, before it looks at
+            // the failure, and then keeps the broken output.
+            if !self.keep && method != -1 {
                 let ifname = self.gz.ifname.clone();
                 let base = last_component(&ifname);
                 let ufd = if self.atdir_eq(&ifname[..base]) {
@@ -1538,6 +1534,10 @@ impl Run {
             }
             return Ok(());
         }
+        // Whole and closed: nothing for an interrupt or an abort to remove
+        // (deliberate difference 4 -- upstream forgets it only where it
+        // removes the input, which -k skips).
+        REMOVE_FD.store(-1, Ordering::SeqCst);
 
         if self.gz.verbose != 0 {
             let gz = &self.gz;

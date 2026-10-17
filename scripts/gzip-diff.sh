@@ -678,7 +678,6 @@ for f in t.Z seq.Z fox9.Z rand12.Z noblock.Z big.Z bits17.Z flags.Z corrupt.Z fi
 done
 run_case gzip -d t.Z seq.Z
 run_case gzip -d corrupt.Z
-run_case gzip -d bits17.Z
 run_case gzip -d banana.z
 run_case gzip -d two.zip
 run_case gzip -dc two.zip
@@ -719,10 +718,13 @@ run_case gzip -c "$(printf 'nl\nname')"
 # --- -k, and an abort after an output is finished ----------------------------------
 # Upstream unlinks t, which it finished and was asked to keep, when the empty
 # operand after it aborts the run.
-SETUP=': > empty.gz'
 xfail_case 'with -k a finished output is kept when a later operand aborts (deliberate difference 4)' \
   gzip -dk t.gz empty.gz
-SETUP=': > empty.gz'; run_case gzip -d t.gz empty.gz
+run_case gzip -d t.gz empty.gz
+# A decompression that fails (codes wider than 16 bits): under -k both
+# remove the broken output; without it upstream deletes the input first.
+run_case gzip -dk bits17.Z
+xfail_case 'a failed decompression keeps its input (deliberate difference 4)' gzip -d bits17.Z
 
 # --- random and damaged streams ---------------------------------------------------
 for f in "$fixtures"/r*-gz.gz "$fixtures"/r*-z.Z "$fixtures"/r*-pk.z "$fixtures"/r*-lzh.lzh "$fixtures"/m*.gz; do

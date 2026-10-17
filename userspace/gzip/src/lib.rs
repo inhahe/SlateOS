@@ -58,12 +58,16 @@
 //!    `--help` and `--version`, and otherwise `gzip -d` (`gzip -cd` for
 //!    `zcat`) with the same arguments. The scripts' other twins (`zgrep`,
 //!    `zdiff`, `zless` and the rest) are shell scripts, not ported.
-//! 4. **With `-k`, a finished output is forgotten** once it is closed, as it
-//!    is without `-k`. Upstream forgets it only in the branch that removes
-//!    the input, which `-k` skips, so an interrupt or an abort while a later
-//!    operand is opened unlinks the output just finished and closes whatever
-//!    descriptor has reused its number -- deleting what the user asked to
-//!    keep. No run that is not interrupted or aborted there differs.
+//! 4. **Nothing the user asked to keep is deleted.** Upstream forgets a
+//!    finished output only in the branch that removes the input, which `-k`
+//!    skips, so with `-k` an interrupt or an abort while a later operand is
+//!    opened unlinks the output just finished (and closes whatever
+//!    descriptor reused its number); here it is forgotten once the file is
+//!    done, either way. And upstream removes the input before it looks at
+//!    whether the decompression failed -- `gzip -d x.Z` of a file it cannot
+//!    read (17-bit codes, an unknown method in a later member) deletes `x.Z`
+//!    and keeps the empty or partial `x`; here a failed decompression keeps
+//!    its input and removes the output, as upstream does under `-k`.
 
 #![allow(
     // The C's integer arithmetic, transcribed: every place it wraps is

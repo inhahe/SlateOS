@@ -953,6 +953,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "key-survey.py",
         "lossy-decode-baseline.txt",
         "lossy-decode.py",
+        "mutation-sweep.py",
         "mutation_harness.py",
         "reintro-benchmark.py",
         "reintro-credmanager.py",

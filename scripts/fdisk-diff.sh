@@ -35,13 +35,14 @@ blank() { truncate -s "$2M" "$fx/$1"; }
 # and copied to both sides, so both start from the same bytes.
 table() {
   blank "$1" "$2"
-  printf '%b' "$3" | sfdisk -q --no-reread --no-tell-kernel "$fx/$1" >/dev/null 2>&1
+  printf '%b' "$3" | sfdisk -q --no-reread --no-tell-kernel "$fx/$1" >/dev/null 2>&1 \
+    || { echo "fdisk-diff: fixture $1 could not be made" >&2; exit 2; }
 }
 
 blank empty.img 64
 blank tiny.img 1
 table dos.img 64 'label: dos\nlabel-id: 0x12345678\n,8M,83\n,8M,82,*\n,16M,5\n,4M,83\n,,8e\n'
-table gpt.img 64 'label: gpt\nlabel-id: 4A6F7B1C-1111-4222-8333-944455566677\n,8M,L,uuid=01234567-89AB-4CDE-8F01-23456789ABCD,name="first"\n,16M,S\n'
+table gpt.img 64 'label: gpt\nlabel-id: 4A6F7B1C-1111-4222-8333-944455566677\nsize=8M, type=L, uuid=01234567-89AB-4CDE-8F01-23456789ABCD, name="first"\nsize=16M, type=S, uuid=11234567-89AB-4CDE-8F01-23456789ABCD\n'
 table bsd.img 64 'label: dos\nlabel-id: 0x0badcafe\n,32M,a5\n,,83\n'
 table full.img 16 'label: dos\nlabel-id: 0x01020304\n,4M\n,4M\n,4M\n,,\n'
 table hybrid.img 64 'label: gpt\n,8M,L\n'

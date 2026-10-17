@@ -59339,3 +59339,15 @@ is still run by hand, not by `boot-test.sh`.
   DISPLAYS_OFF_AFTER_MINUTES`. If it is not there, publish up to the commit
   before 19cce7dd8 or wait. Then tell lane C it is on main, and the request
   can close.
+
+## Lane E — mutation rows the PC-migration halt cut short (2026-10-17)
+
+- **Run these first after the move**, before lane E publishes:
+  `python -u apps/settings/mutate.py` with the seventeen rows 19cce7dd8
+  added or re-anchored (four were caught before the halt: the two
+  `session.yaml` rows, "an idle choice is not written" and "an idle choice
+  is not announced"); `python -u apps/pdfviewer/mutate.py "Ctrl+F4 does not
+  close the tab"`; and `python -u apps/dbviewer/mutate.py "Ctrl+F4 does not
+  close the tab" "a close key held with Alt closes the tab" "the close keys
+  wait for the box to give the keyboard back"` (d7a9d3bed). A survivor is a
+  missing test, added in a follow-up.

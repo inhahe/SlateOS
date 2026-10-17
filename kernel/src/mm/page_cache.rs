@@ -855,11 +855,11 @@ pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty
 ///   which flushes the TLBs). Then each page's bytes are copied out and
 ///   written. A store after the copy faults and marks its page dirty again;
 ///   one before it is in the copy.
-/// - A write never reaches past the file's end. One made after the file's
-///   length was set since the pages were picked writes nothing
-///   (`Vfs::object_write_back`): the page is written again under the new
-///   length if the file still holds it, so that the save does not answer
-///   before its bytes landed.
+/// - A write never reaches past the file's end, as it is when the page is
+///   written. The page is copied and written under the filesystem's lock
+///   (`Vfs::object_write_back`), and only if the cache still holds it then:
+///   a cut, made under the same lock, either dropped it -- nothing to save
+///   -- or comes wholly before or after.
 /// - A page whose write fails is marked dirty again too, and the rest still
 ///   go. The first failure is answered.
 /// - Saves of one file go one at a time ([`FileState::saving`]).
@@ -970,11 +970,9 @@ fn save_pages(
         Ok(b) => b,
         Err(e) => return (Err(e), false),
     };
-    // The dirty pages, and the count of length changes they are copied
-    // under (`Vfs::object_write_back` writes nothing if it moved).
-    let (picked, cuts) = {
+    // The dirty pages.
+    let picked = {
         let mut cache = PAGE_CACHE.lock();
-        let cuts = cache.files.get(&file).map_or(0, |st| st.cuts);
         let lo = PageKey {
             file,
             page_index: first,
@@ -993,14 +991,22 @@ fn save_pages(
                 picked.push((key.page_index.saturating_mul(page), entry.frame));
             }
         }
-        (picked, cuts)
+        picked
     };
     crate::proc::pcb::write_protect_file_pages(file, &picked);
     let mut result = Ok(());
     let mut wrote = false;
     for &(offset, frame) in &picked {
-        // The copy, made under the filesystem's lock with the write.
+        let index = offset.checked_div(page).unwrap_or(0);
+        // The copy, made under the filesystem's lock with the write: of the
+        // page only if the cache holds it still, in this frame. A cut drops
+        // the pages past the file's new end under that lock
+        // (`file_changed`), so a page found here is the file's, its tail
+        // zeroed where a cut ended the file inside it.
         let mut fill = |out: &mut [u8]| {
+            if !holds_frame(file, index, frame) {
+                return false;
+            }
             let len = out.len().min(FRAME_SIZE);
             // SAFETY: a frame we hold a reference on; its HHDM alias is
             // FRAME_SIZE bytes, and `len` is at most that and `out`'s length.
@@ -1011,31 +1017,9 @@ fn save_pages(
                     len,
                 );
             }
+            true
         };
-        let index = offset.checked_div(page).unwrap_or(0);
-        // Nothing is written after a cut since the pages were picked: the
-        // page may be one it dropped. If the file still holds it in this
-        // frame, it is written again under the new length. Cuts are rare;
-        // a file cut again at every try is given up on, its page dirty.
-        let mut seen = cuts;
-        let mut tries = 0u32;
-        let saved = loop {
-            let saved = crate::fs::handle::write_back_at(writer, offset, &mut buf, &mut fill, seen);
-            let now = self::cuts(file);
-            match saved {
-                Ok(false) if now != seen => {
-                    if !holds_frame(file, index, frame) {
-                        break Ok(false);
-                    }
-                    tries = tries.saturating_add(1);
-                    if tries >= MAX_CUT_RETRIES {
-                        break Err(KernelError::IoError);
-                    }
-                    seen = now;
-                }
-                other => break other,
-            }
-        };
+        let saved = crate::fs::handle::write_back_at(writer, offset, &mut buf, &mut fill);
         release(frame);
         match saved {
             Ok(true) => {
@@ -1087,11 +1071,9 @@ fn end_save(file: FileId, whole: bool, ok: bool) -> Option<u64> {
     let_go
 }
 
-/// How many times one page's save is tried again after a cut lands between
-/// its pick and its write ([`save_pages`]).
-const MAX_CUT_RETRIES: u32 = 8;
-
-/// Whether the cache still holds page `index` of `file` in `frame`.
+/// Whether the cache still holds page `index` of `file` in `frame`. Asked
+/// under the filesystem's lock by a save ([`save_pages`]), as the cache's
+/// lock nests under it.
 fn holds_frame(file: FileId, index: u64, frame: PhysFrame) -> bool {
     let key = PageKey {
         file,

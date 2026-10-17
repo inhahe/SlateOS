@@ -5878,13 +5878,12 @@ impl Vfs {
     /// (`mm::page_cache::writeback`): `fill` copies the page's bytes into
     /// `buf` (as much of it as is asked), and they are written at `offset`.
     /// The copy and the write are one hold of the filesystem's lock. A
-    /// `write(2)`, which updates the page under that lock too
-    /// (`page_cache::file_changed`), then lands wholly before the copy or
+    /// `write(2)` or a cut, which change the page under that lock too
+    /// (`page_cache::file_changed`), then land wholly before the copy or
     /// wholly after the write, never between, so the file never gets the
     /// page's older bytes back. Under the same hold:
-    /// - nothing is written if the file's length was set since the page was
-    ///   picked (`cuts`, `page_cache::cuts`): the page may be one the cut
-    ///   dropped, its bytes no longer the file's;
+    /// - nothing is written if `fill` answers false: the page is no longer
+    ///   the file's -- a cut dropped it, its bytes no longer the file's;
     /// - nothing is written past the file's end, which a save does not move.
     ///
     /// Unlike [`object_write`](Self::object_write) it tells the page cache
@@ -5898,20 +5897,18 @@ impl Vfs {
         obj: &FileObject,
         offset: u64,
         buf: &mut [u8],
-        fill: &mut dyn FnMut(&mut [u8]),
-        cuts: u64,
+        fill: &mut dyn FnMut(&mut [u8]) -> bool,
     ) -> KernelResult<bool> {
         check_writable_mount(obj.mnt_id)?;
         let mut guard = obj.fs.lock();
-        if crate::mm::page_cache::cuts(obj.id()) != cuts {
-            return Ok(false);
-        }
         let size = guard.metadata_ino(obj.ino)?.size;
         let len = usize::try_from(size.saturating_sub(offset)).unwrap_or(usize::MAX);
         let Some(out) = buf.get_mut(..len.min(buf.len())).filter(|d| !d.is_empty()) else {
             return Ok(false);
         };
-        fill(out);
+        if !fill(out) {
+            return Ok(false);
+        }
         guard.write_ino(obj.ino, offset, out)?;
         Ok(true)
     }

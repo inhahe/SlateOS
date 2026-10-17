@@ -2287,10 +2287,10 @@ pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>
 /// Save a page a shared mapping wrote at `offset` of the file `handle`
 /// holds, past the page cache (`Vfs::object_write_back`): what
 /// `mm::page_cache::writeback` writes a dirty page through. `fill` copies the
-/// page's bytes into `buf`, under the filesystem's lock with the write.
-/// `cuts` is the file's count of length changes (`page_cache::cuts`) when
-/// the page was picked: if it moved, nothing is written. The handle's cursor
-/// is not moved. Answers whether anything was written.
+/// page's bytes into `buf`, under the filesystem's lock with the write, and
+/// answers false -- nothing is written -- when the page is no longer the
+/// file's. The handle's cursor is not moved. Answers whether anything was
+/// written.
 ///
 /// # Errors
 ///
@@ -2301,8 +2301,7 @@ pub fn write_back_at(
     handle: u64,
     offset: u64,
     buf: &mut [u8],
-    fill: &mut dyn FnMut(&mut [u8]),
-    cuts: u64,
+    fill: &mut dyn FnMut(&mut [u8]) -> bool,
 ) -> KernelResult<bool> {
     let object = {
         let table = OPEN_FILES.lock();
@@ -2313,7 +2312,7 @@ pub fn write_back_at(
         file.object.clone()
     };
     let object = object.ok_or(KernelError::NotSupported)?;
-    crate::fs::Vfs::object_write_back(&object, offset, buf, fill, cuts)
+    crate::fs::Vfs::object_write_back(&object, offset, buf, fill)
 }
 
 /// Announce that the file `handle` holds was changed through a shared

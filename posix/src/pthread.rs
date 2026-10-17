@@ -767,27 +767,8 @@ pub extern "C" fn pthread_create(
     arg: *mut u8,
 ) -> i32 {
     let want = CreateAttr::read(attr);
-    // Every thread here runs as `SCHED_OTHER` at priority 0 (see
-    // `pthread_getschedparam`): an explicit request for anything else is one
-    // this system cannot carry out, refused as Linux refuses an unprivileged
-    // real-time request, before anything is allocated.
-    if let Some((policy, priority)) = want.explicit_sched
-        && (policy != crate::sched::SCHED_OTHER || priority != 0)
-    {
-        return errno::EPERM;
-    }
-    if let Some(e) = want.affinity {
-        return e;
-    }
-    let Some(slot) = claim_slot() else {
-        return errno::EAGAIN;
-    };
-    match launch(slot, &want, start, arg) {
+    match create_from(&want, start, arg) {
         Ok(task_id) => {
-            // Publish.  From here `pthread_join`/`pthread_detach` can find
-            // the thread, and the thread -- which waits for this store before
-            // it lets go of its slot -- may exit.
-            slot.task_id.store(task_id, Ordering::Release);
             if !thread.is_null() {
                 // SAFETY: caller guarantees thread points to valid PthreadT.
                 unsafe {
@@ -796,9 +777,70 @@ pub extern "C" fn pthread_create(
             }
             0
         }
+        Err(e) => e,
+    }
+}
+
+/// An attribute object read now, for threads made later: the timer
+/// threads' (`SIGEV_THREAD`), whose `sigev_notify_attributes` the caller may
+/// destroy once `timer_create` returns. Kept as what it asks for, not as
+/// the object -- whose extension a byte copy would share -- and detached
+/// whatever it says, as glibc's `timer_create` sets it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LaterAttr(CreateAttr);
+
+impl LaterAttr {
+    /// `attr` (NULL for the defaults), read now, detached.
+    pub(crate) fn detached(attr: *const PthreadAttrT) -> Self {
+        let mut want = CreateAttr::read(attr);
+        want.detached = true;
+        Self(want)
+    }
+
+    /// Make a thread running `start(arg)` as `pthread_create` with this
+    /// attribute would: its id, or the error number.
+    pub(crate) fn create(
+        &self,
+        start: extern "C" fn(*mut u8) -> *mut u8,
+        arg: *mut u8,
+    ) -> Result<PthreadT, i32> {
+        create_from(&self.0, Some(start), arg)
+    }
+}
+
+/// `pthread_create`'s body, from what its attribute asks for: the new
+/// thread's id, or the error number.
+fn create_from(
+    want: &CreateAttr,
+    start: Option<extern "C" fn(*mut u8) -> *mut u8>,
+    arg: *mut u8,
+) -> Result<PthreadT, i32> {
+    // Every thread here runs as `SCHED_OTHER` at priority 0 (see
+    // `pthread_getschedparam`): an explicit request for anything else is one
+    // this system cannot carry out, refused as Linux refuses an unprivileged
+    // real-time request, before anything is allocated.
+    if let Some((policy, priority)) = want.explicit_sched
+        && (policy != crate::sched::SCHED_OTHER || priority != 0)
+    {
+        return Err(errno::EPERM);
+    }
+    if let Some(e) = want.affinity {
+        return Err(e);
+    }
+    let Some(slot) = claim_slot() else {
+        return Err(errno::EAGAIN);
+    };
+    match launch(slot, want, start, arg) {
+        Ok(task_id) => {
+            // Publish.  From here `pthread_join`/`pthread_detach` can find
+            // the thread, and the thread -- which waits for this store before
+            // it lets go of its slot -- may exit.
+            slot.task_id.store(task_id, Ordering::Release);
+            Ok(task_id)
+        }
         Err(e) => {
             release_slot(slot);
-            e
+            Err(e)
         }
     }
 }

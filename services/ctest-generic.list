@@ -70,3 +70,4 @@ ctest-itimers    -        60
 ctest-posix-timers -      60
 ctest-dumpable   file     30
 ctest-thread-masks -        30
+ctest-sigev-thread -        30

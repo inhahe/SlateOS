@@ -2802,6 +2802,50 @@ pub struct Sigevent {
     _pad: [u8; 48],
 }
 
+impl Sigevent {
+    /// `sigev_notify_function`, at offset 16: what a `SIGEV_THREAD` timer's
+    /// threads run, given `sigev_value` by value (a `union sigval`, one
+    /// register).
+    fn notify_function(&self) -> Option<extern "C" fn(usize)> {
+        let word = u64::from_ne_bytes(self.union_word(0));
+        // SAFETY: a `void (*)(union sigval)` or NULL, as the caller's
+        // contract has `sigev_notify_function`; an address of 0 is `None`.
+        unsafe { core::mem::transmute::<u64, Option<extern "C" fn(usize)>>(word) }
+    }
+
+    /// `sigev_notify_attributes`, at offset 24: the attributes of a
+    /// `SIGEV_THREAD` timer's threads, or NULL.
+    fn notify_attributes(&self) -> *const crate::pthread::PthreadAttrT {
+        core::ptr::with_exposed_provenance(
+            usize::try_from(u64::from_ne_bytes(self.union_word(8))).unwrap_or(0),
+        )
+    }
+
+    /// The eight bytes at `at` in the union after `sigev_notify`.
+    fn union_word(&self, at: usize) -> [u8; 8] {
+        let mut w = [0u8; 8];
+        if let Some(b) = self._pad.get(at..at.saturating_add(8)) {
+            w.copy_from_slice(b);
+        }
+        w
+    }
+
+    /// A `SIGEV_THREAD_ID` event: signal `signo` to thread `tid`, carrying
+    /// `value`.
+    fn to_thread(signo: i32, tid: i32, value: usize) -> Self {
+        let mut pad = [0u8; 48];
+        if let Some(b) = pad.get_mut(..4) {
+            b.copy_from_slice(&tid.to_ne_bytes());
+        }
+        Self {
+            sigev_value: value,
+            sigev_signo: signo,
+            sigev_notify: SIGEV_THREAD_ID,
+            _pad: pad,
+        }
+    }
+}
+
 /// No notification on timer expiration.
 pub const SIGEV_NONE: i32 = 1;
 /// Deliver a signal on timer expiration.
@@ -2860,6 +2904,9 @@ fn posix_timer_answer(op: u64, ret: i64) -> Result<i64, i32> {
 /// it: the `int` in the pointer-wide `timer_t`, which is all the kernel's
 /// ABI takes.
 fn kernel_timer(timerid: TimerT) -> u64 {
+    if let Some(record) = thread_timers::decode(timerid) {
+        return thread_timers::kernel_id(record);
+    }
     // Truncation intended: Linux's `timer_t` is an `int`, and glibc keeps it
     // in the low half of the pointer-wide one.
     #[allow(clippy::cast_possible_truncation)]
@@ -2902,7 +2949,8 @@ mod host_posix_timer {
 /// inherited by `fork` and are deleted by `exec`.
 ///
 /// `SIGEV_THREAD` -- a function run on a thread at each expiry -- is the C
-/// library's to provide, and is not yet: `ENOSYS`.
+/// library's, glibc's way ([`thread_timers`]): a new detached thread for
+/// each expiry, made with the event's attributes, runs the function.
 ///
 /// Until 2026-10-16 every timer was `ENOSYS`, after these same checks, the
 /// kernel having none for native programs; until 2026-10-05 this claimed a
@@ -2979,8 +3027,19 @@ pub extern "C" fn timer_create(
         return -1;
     }
     if notify == SIGEV_THREAD {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
+        // SAFETY: `notify` came from a non-null `sevp`, the caller's
+        // `struct sigevent`.
+        return match thread_timers::create(clockid, unsafe { &*sevp }) {
+            Ok(id) => {
+                // SAFETY: as below.
+                unsafe { core::ptr::write_unaligned(timerid, id) };
+                0
+            }
+            Err(e) => {
+                errno::set_errno(e);
+                -1
+            }
+        };
     }
     // Step 7, and the timer.
     match posix_timer(
@@ -3047,13 +3106,19 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
 /// id that names no timer. The kernel's.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
-    timer_answer(posix_timer(
+    let ret = timer_answer(posix_timer(
         POSIX_TIMER_DELETE,
         kernel_timer(timerid),
         0,
         0,
         0,
-    ))
+    ));
+    // A `SIGEV_THREAD` timer's record goes with it, once the kernel's timer
+    // can send nothing more.
+    if ret == 0 {
+        thread_timers::forget(timerid);
+    }
+    ret
 }
 
 /// How many expiries of timer `timerid` its last signal stood for beyond
@@ -3079,6 +3144,292 @@ fn timer_answer(answer: Result<i64, i32>) -> i32 {
             errno::set_errno(e);
             -1
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SIGEV_THREAD timers
+// ---------------------------------------------------------------------------
+
+/// `SIGEV_THREAD` timers, glibc's way (`sysdeps/unix/sysv/linux/timer_*.c`,
+/// for its behaviour): one helper thread per process, made at the first
+/// such timer, blocks every signal and waits for the library's own,
+/// `SIGTIMER` (32). Each timer is a record of the library's -- the function,
+/// its value, the attributes its threads are made with -- and a kernel timer
+/// that sends `SIGTIMER` to the helper alone (`SIGEV_THREAD_ID`), carrying
+/// the record's address as its value. At each expiry the helper makes a new
+/// detached thread, which runs the function with every signal blocked --
+/// the helper's mask, which it starts with, as glibc's do (Linux 6.6.87,
+/// `build/d-tools/oracle-sigev-mask.c` in lane D's scratch tree). A `timer_t`
+/// is the record's address, halved, with
+/// its top bit set -- glibc's `timer_to_timerid` -- where a kernel timer's is
+/// its id.
+///
+/// Records live on a list the helper looks a signal's up in, so that one
+/// sent before its timer was deleted starts nothing. Not inherited by
+/// `fork`, as no timer is: the child forgets the list and the helper.
+pub(crate) mod thread_timers {
+    use super::{POSIX_TIMER_CREATE, Sigevent, TimerT, posix_timer};
+    use crate::errno;
+    use crate::signal::{SI_TIMER, SIGTIMER};
+    use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+
+    /// One `SIGEV_THREAD` timer.
+    pub(crate) struct Record {
+        /// The kernel's id for the timer behind it.
+        kernel_id: i32,
+        /// `sigev_notify_function`.
+        function: extern "C" fn(usize),
+        /// `sigev_value`.
+        value: usize,
+        /// What its threads are made with.
+        attr: crate::pthread::LaterAttr,
+        /// The next on the list.
+        next: *mut Record,
+    }
+
+    /// What a timer's thread is started with.
+    struct Start {
+        function: extern "C" fn(usize),
+        value: usize,
+    }
+
+    /// The live records, newest first, under [`LOCK`].
+    static LIST: AtomicPtr<Record> = AtomicPtr::new(core::ptr::null_mut());
+    /// Guards [`LIST`] and the records on it.
+    static LOCK: AtomicI32 = AtomicI32::new(0);
+    /// The helper thread's kernel id; 0 before it has started.
+    static HELPER: AtomicI32 = AtomicI32::new(0);
+    /// Serialises the helper's start.
+    static START_LOCK: AtomicI32 = AtomicI32::new(0);
+
+    /// The top bit of a `timer_t` that names a record.
+    const RECORD_BIT: usize = 1 << (usize::BITS - 1);
+
+    /// `timer_create` of a `SIGEV_THREAD` event on clock `clockid`: the
+    /// `timer_t`, or the errno. `EINVAL` for an event with no function,
+    /// whose expiry glibc would call address 0 for; `EAGAIN` when the helper
+    /// thread cannot be made, as glibc answers; `ENOMEM` for no memory.
+    pub(crate) fn create(clockid: crate::types::ClockidT, ev: &Sigevent) -> Result<TimerT, i32> {
+        let function = ev.notify_function().ok_or(errno::EINVAL)?;
+        let attr = crate::pthread::LaterAttr::detached(ev.notify_attributes());
+        let helper = helper_tid()?;
+        let record = crate::malloc::malloc(core::mem::size_of::<Record>()).cast::<Record>();
+        if record.is_null() {
+            return Err(errno::ENOMEM);
+        }
+        let event = Sigevent::to_thread(SIGTIMER, helper, record.addr());
+        let id = match posix_timer(
+            POSIX_TIMER_CREATE,
+            u64::from(clockid.cast_unsigned()),
+            (&raw const event) as u64,
+            0,
+            0,
+        ) {
+            Ok(id) => i32::try_from(id).unwrap_or(-1),
+            Err(e) => {
+                // SAFETY: the block malloc gave above, never shared.
+                unsafe { crate::malloc::free(record.cast()) };
+                return Err(e);
+            }
+        };
+        crate::lowlevellock::lll_lock(&LOCK);
+        // SAFETY: `record` is a fresh block of a `Record`'s size, and the
+        // list is held.
+        unsafe {
+            record.write(Record {
+                kernel_id: id,
+                function,
+                value: ev.sigev_value,
+                attr,
+                next: LIST.load(Ordering::Relaxed),
+            });
+        }
+        LIST.store(record, Ordering::Relaxed);
+        crate::lowlevellock::lll_unlock(&LOCK);
+        Ok(RECORD_BIT | (record.addr() >> 1))
+    }
+
+    /// The record a `timer_t` names, if its top bit says it names one.
+    pub(crate) fn decode(timerid: TimerT) -> Option<*mut Record> {
+        (timerid & RECORD_BIT != 0).then(|| core::ptr::with_exposed_provenance_mut(timerid << 1))
+    }
+
+    /// The kernel's id for the timer behind `record` -- looked up on the
+    /// list, so that a `timer_t` naming no live record (deleted, or made up)
+    /// reaches the kernel as an id naming no timer, and is `EINVAL` there.
+    pub(crate) fn kernel_id(record: *mut Record) -> u64 {
+        crate::lowlevellock::lll_lock(&LOCK);
+        let id = find(record).map(|r| {
+            // SAFETY: a record on the list, which is held.
+            unsafe { (*r).kernel_id }
+        });
+        crate::lowlevellock::lll_unlock(&LOCK);
+        id.map_or(u64::from(u32::MAX), |id| u64::from(id.cast_unsigned()))
+    }
+
+    /// Take a deleted timer's record off the list and free it; nothing for a
+    /// `timer_t` that names no record.
+    pub(crate) fn forget(timerid: TimerT) {
+        let Some(record) = decode(timerid) else {
+            return;
+        };
+        crate::lowlevellock::lll_lock(&LOCK);
+        let gone = unlink(record);
+        crate::lowlevellock::lll_unlock(&LOCK);
+        if gone {
+            // SAFETY: off the list now, so no one else reaches it; malloc's.
+            unsafe { crate::malloc::free(record.cast()) };
+        }
+    }
+
+    /// In a `fork`'s child: no timer and no helper came with it, so the list
+    /// and the helper are forgotten (the parent's records stay the
+    /// parent's; the child's copies of them are not freed, as nothing of
+    /// the child's names them).
+    pub(crate) fn forget_after_fork() {
+        LIST.store(core::ptr::null_mut(), Ordering::Relaxed);
+        HELPER.store(0, Ordering::Relaxed);
+        LOCK.store(0, Ordering::Relaxed);
+        START_LOCK.store(0, Ordering::Relaxed);
+    }
+
+    /// `record`, if it is on the list. The list is held.
+    fn find(record: *mut Record) -> Option<*mut Record> {
+        let mut at = LIST.load(Ordering::Relaxed);
+        while !at.is_null() {
+            if at == record {
+                return Some(at);
+            }
+            // SAFETY: a record on the list, which is held.
+            at = unsafe { (*at).next };
+        }
+        None
+    }
+
+    /// Take `record` off the list; whether it was on it. The list is held.
+    fn unlink(record: *mut Record) -> bool {
+        let mut prev: *mut Record = core::ptr::null_mut();
+        let mut at = LIST.load(Ordering::Relaxed);
+        while !at.is_null() {
+            // SAFETY: a record on the list, which is held.
+            let next = unsafe { (*at).next };
+            if at == record {
+                if prev.is_null() {
+                    LIST.store(next, Ordering::Relaxed);
+                } else {
+                    // SAFETY: `prev` is on the list, which is held.
+                    unsafe { (*prev).next = next };
+                }
+                return true;
+            }
+            prev = at;
+            at = next;
+        }
+        false
+    }
+
+    /// The helper thread's kernel id, starting it first if it has not
+    /// started: `EAGAIN` when it cannot be made.
+    fn helper_tid() -> Result<i32, i32> {
+        let tid = HELPER.load(Ordering::Acquire);
+        if tid != 0 {
+            return Ok(tid);
+        }
+        crate::lowlevellock::lll_lock(&START_LOCK);
+        let started = start_helper();
+        crate::lowlevellock::lll_unlock(&START_LOCK);
+        started
+    }
+
+    /// Make the helper, which runs with every signal blocked from its first
+    /// instruction (the creator blocks them while it makes it, and the new
+    /// thread starts with its creator's mask), and wait for it to say who it
+    /// is. Under [`START_LOCK`].
+    fn start_helper() -> Result<i32, i32> {
+        let tid = HELPER.load(Ordering::Acquire);
+        if tid != 0 {
+            return Ok(tid);
+        }
+        let mut all = crate::signal::SigsetT::EMPTY;
+        let mut old = crate::signal::SigsetT::EMPTY;
+        // SAFETY: two local sets.
+        unsafe { crate::signal::sigfillset(&raw mut all) };
+        let _ = crate::signal::pthread_sigmask(
+            crate::signal::SIG_SETMASK,
+            &raw const all,
+            &raw mut old,
+        );
+        let made = crate::pthread::LaterAttr::detached(core::ptr::null())
+            .create(helper_main, core::ptr::null_mut());
+        let _ = crate::signal::pthread_sigmask(
+            crate::signal::SIG_SETMASK,
+            &raw const old,
+            core::ptr::null_mut(),
+        );
+        made.map_err(|_| errno::EAGAIN)?;
+        loop {
+            let tid = HELPER.load(Ordering::Acquire);
+            if tid != 0 {
+                return Ok(tid);
+            }
+            let _ = crate::pthread::sched_yield();
+        }
+    }
+
+    /// The helper: block the library's own signals too, say who it is, and
+    /// for each `SIGTIMER` a live timer sent, start that timer's thread.
+    extern "C" fn helper_main(_: *mut u8) -> *mut u8 {
+        crate::signal::block_internal_signals();
+        HELPER.store(crate::process::gettid(), Ordering::Release);
+        loop {
+            let Ok((_, record)) = crate::signal::take_internal(SIGTIMER) else {
+                continue;
+            };
+            if record.code == SI_TIMER {
+                start_one(core::ptr::with_exposed_provenance_mut(
+                    usize::try_from(record.value).unwrap_or(0),
+                ));
+            }
+        }
+    }
+
+    /// One expiry of `record`'s timer: a thread to run its function, if the
+    /// record is still live. A thread that cannot be made, or a start record
+    /// that cannot be allocated, loses that expiry, as glibc's does.
+    fn start_one(record: *mut Record) {
+        crate::lowlevellock::lll_lock(&LOCK);
+        let found = find(record).map(|r| {
+            // SAFETY: a record on the list, which is held.
+            unsafe { ((*r).function, (*r).value, (*r).attr) }
+        });
+        crate::lowlevellock::lll_unlock(&LOCK);
+        let Some((function, value, attr)) = found else {
+            return;
+        };
+        let start = crate::malloc::malloc(core::mem::size_of::<Start>()).cast::<Start>();
+        if start.is_null() {
+            return;
+        }
+        // SAFETY: a fresh block of a `Start`'s size.
+        unsafe { start.write(Start { function, value }) };
+        if attr.create(timer_thread, start.cast()).is_err() {
+            // SAFETY: never handed to a thread.
+            unsafe { crate::malloc::free(start.cast()) };
+        }
+    }
+
+    /// A timer's thread: the function run, with every signal blocked -- the
+    /// helper's mask, which a thread starts with, as glibc's timer threads
+    /// run theirs.
+    extern "C" fn timer_thread(arg: *mut u8) -> *mut u8 {
+        let start = arg.cast::<Start>();
+        // SAFETY: the block `start_one` filled and handed over, freed once.
+        let Start { function, value } = unsafe { start.read() };
+        // SAFETY: as above.
+        unsafe { crate::malloc::free(arg) };
+        function(value);
+        core::ptr::null_mut()
     }
 }
 
@@ -6181,6 +6532,15 @@ mod tests {
         }
     }
 
+    /// A `SIGEV_THREAD` event with a function, `signo` in it.
+    fn sev_thread(signo: i32) -> Sigevent {
+        extern "C" fn notified(_: usize) {}
+        let mut ev = sev(SIGEV_THREAD, signo);
+        let f = notified as extern "C" fn(usize) as usize as u64;
+        ev._pad[..8].copy_from_slice(&f.to_ne_bytes());
+        ev
+    }
+
     /// `timer_create`'s call, with `*timerid` preset to a sentinel: the
     /// result, errno, and whether the sentinel survived.
     fn create(clock: ClockidT, ev: Option<&Sigevent>) -> (i32, i32, bool) {
@@ -6206,8 +6566,8 @@ mod tests {
     /// range, `SIGEV_THREAD`, `SIGEV_THREAD_ID` -- passes the checks and
     /// reaches the kernel, which on a host is one without the call: ENOSYS,
     /// and `*timerid` is never written. (`SIGEV_THREAD` is the library's
-    /// own, and not yet: ENOSYS too.) Each was a slot and 0 until
-    /// 2026-10-05.
+    /// own: `test_a_sigev_thread_timer_needs_its_function_and_its_helper`.)
+    /// Each was a slot and 0 until 2026-10-05.
     #[test]
     fn test_timer_create_answers_enosys_once_its_checks_pass() {
         let events = [
@@ -6216,7 +6576,6 @@ mod tests {
             Some(sev(SIGEV_SIGNAL, crate::signal::SIGALRM)),
             Some(sev(SIGEV_SIGNAL, 1)),
             Some(sev(SIGEV_SIGNAL, crate::signal::SIGRTMAX)),
-            Some(sev(SIGEV_THREAD, 0)),
             Some(sev(SIGEV_THREAD_ID, crate::signal::SIGALRM)),
         ];
         for clock in ARMABLE_CLOCKS {
@@ -6401,17 +6760,56 @@ mod tests {
                 assert!(untouched, "notify {notify}, signo {signo}");
             }
         }
-        for notify in [SIGEV_NONE, SIGEV_THREAD] {
-            for signo in [0, -1, past, i32::MAX, i32::MIN] {
-                let (r, e, untouched) = create(CLOCK_MONOTONIC, Some(&sev(notify, signo)));
-                assert_eq!(
-                    (r, e),
-                    (-1, crate::errno::ENOSYS),
-                    "notify {notify}, signo {signo}"
-                );
-                assert!(untouched, "notify {notify}, signo {signo}");
-            }
+        for signo in [0, -1, past, i32::MAX, i32::MIN] {
+            let (r, e, untouched) = create(CLOCK_MONOTONIC, Some(&sev(SIGEV_NONE, signo)));
+            assert_eq!(
+                (r, e),
+                (-1, crate::errno::ENOSYS),
+                "SIGEV_NONE, signo {signo}"
+            );
+            assert!(untouched, "SIGEV_NONE, signo {signo}");
+            // A SIGEV_THREAD event's number is not looked at: on a host its
+            // helper thread cannot be made, which is EAGAIN, never EINVAL.
+            let (r, e, untouched) = create(CLOCK_MONOTONIC, Some(&sev_thread(signo)));
+            assert_eq!(
+                (r, e),
+                (-1, crate::errno::EAGAIN),
+                "SIGEV_THREAD, signo {signo}"
+            );
+            assert!(untouched, "SIGEV_THREAD, signo {signo}");
         }
+    }
+
+    /// A `SIGEV_THREAD` event needs a function -- glibc's would call address
+    /// 0 at the first expiry; here it is EINVAL -- and a helper thread to
+    /// take its timers' signal, which a host cannot make: EAGAIN, glibc's
+    /// answer when it cannot make its own.
+    #[test]
+    fn test_a_sigev_thread_timer_needs_its_function_and_its_helper() {
+        assert_eq!(
+            create(CLOCK_MONOTONIC, Some(&sev(SIGEV_THREAD, 0))),
+            (-1, crate::errno::EINVAL, true)
+        );
+        assert_eq!(
+            create(CLOCK_MONOTONIC, Some(&sev_thread(0))),
+            (-1, crate::errno::EAGAIN, true)
+        );
+    }
+
+    /// A `timer_t` names a `SIGEV_THREAD` timer's record as glibc's does:
+    /// the address halved, its top bit set. One naming no live record
+    /// reaches the kernel as an id naming no timer, and deleting one frees
+    /// nothing.
+    #[test]
+    fn test_a_thread_timers_timer_t_is_its_record() {
+        let top = 1usize << (usize::BITS - 1);
+        let addr = 0x7f00_1234_5670usize;
+        let id = top | (addr >> 1);
+        assert_eq!(thread_timers::decode(id).map(|p| p.addr()), Some(addr));
+        assert!(thread_timers::decode(7).is_none(), "a kernel timer's id");
+        assert_eq!(kernel_timer(id), u64::from(u32::MAX), "no live record");
+        assert_eq!(kernel_timer(7), 7);
+        thread_timers::forget(id);
     }
 
     /// Phase 147: a NULL `timerid` is EFAULT, as Linux's `copy_to_user`

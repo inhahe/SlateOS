@@ -373,7 +373,7 @@ fn blocked_mask_ptr() -> *mut SigsetT {
 
 /// Block the library's own signals in the calling thread, which no
 /// program's `sigprocmask` can: what the timer thread does first, so that
-/// the timers' signal waits for its `sigwait`.
+/// the timers' signal waits for its `sigwait` ([`take_internal`]).
 pub(crate) fn block_internal_signals() {
     // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
     unsafe {
@@ -382,6 +382,15 @@ pub(crate) fn block_internal_signals() {
         blocked_mask_ptr().write(m);
     }
     mask_changed();
+}
+
+/// Wait for the library's own signal `sig` -- one a program's `sigwait`
+/// cannot ask for, its sets refusing it -- with no deadline, and take it:
+/// the signal and its record. `Err` only for a handler that ran on this
+/// thread meanwhile (a thread that blocks every signal runs none) or a full
+/// table of waiters.
+pub(crate) fn take_internal(sig: i32) -> Result<(i32, Record), i32> {
+    accept(sigmask_bit(sig), None, crate::interrupt::Mark::now())
 }
 
 /// The calling thread's blocked mask, whole: what `pthread_create` gives the
@@ -1627,10 +1636,10 @@ impl Origin {
 /// `si_timerid` and `si_overrun` for `SI_TIMER`, at the same offsets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Record {
-    code: i32,
+    pub(crate) code: i32,
     pid: i32,
     uid: u32,
-    value: u64,
+    pub(crate) value: u64,
 }
 
 impl Record {

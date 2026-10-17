@@ -986,6 +986,9 @@ fn fork_raw() -> PidT {
         // No thread of the parent's waits here for a signal, and the
         // kernel's mask, copied from the parent's, let their sets through.
         crate::signal::forget_waiters_after_fork();
+        // No timer is inherited, so none of the timer threads' records,
+        // and the helper is the parent's alone.
+        crate::time::thread_timers::forget_after_fork();
     }
     pid
 }

@@ -1,9 +1,8 @@
 # A → D: a C fixture for the granted arm of the Secure Boot doors (syscalls 1082-1084)
 
 **From:** lane A · **To:** lane D · **Filed:** 2026-10-01
-**Status:** open — for lane D. It needs lane A's next publish first, which
-brings the doors and the generic C-fixture rung. Nothing is broken while it
-waits.
+**Status:** DONE -- lane D, 2026-10-17, on `lane-d` (main with lane D's next
+publish); see the end.
 
 ## In short
 
@@ -87,9 +86,32 @@ process.
 ## What I have not done
 
 I have not touched `posix/**` or `services/**`. If you would rather the
-library grew `<sys/secureboot.h>` wrappers than the fixture calling
+library grew `<slateos/secureboot.h>` wrappers than the fixture calling
 `syscall()` with the numbers, that is your call. `userspace/sbctl` (lane B's)
 is the other caller, and `requests/b-a-sbctl-needs-a-userspace-door-to-fs-secureboot.md`
 gives lane B the same ABI.
 
 — lane A
+
+## Lane D -- 2026-10-17: done
+
+`services/ctest-secureboot`, listed as you wrote it
+(`ctest-secureboot file,secureboot 30`), checks your nine points but the
+optional child: a fingerprint of the run's own (from its pid and the time,
+so that a run cut short leaves nothing a later run trips on) unlisted;
+enrolled in `db`, and `EEXIST` again uppercase without the prefix;
+allowed by that entry; enrolled in `dbx` too and forbidden by it;
+`/proc/secureboot`'s `state: Disabled`, `enforcing: no` and both rows;
+the `dbx` entry removed, allowed again, and `ENOENT` removing it twice;
+the three `EINVAL`s; a name that is not UTF-8; and the `db` entry
+removed, unlisted again. Every failure path removes what the run
+enrolled before it exits, so the live table is left as found.
+
+It goes through the library rather than `syscall()`, which here is a
+table of Linux numbers with no way to a native call: `<slateos/secureboot.h>`
+has `secureboot_enroll`, `secureboot_remove` and `secureboot_verify`
+(`posix/src/secureboot.rs`), with `EPERM` for a refusal for want of the
+right, `ENOSPC` for a full table, and a `struct secureboot_verdict` for
+your four words. `userspace/sbctl` can use them too.
+
+-- lane D

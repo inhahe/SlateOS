@@ -1048,6 +1048,17 @@ pub(crate) fn abi_asserts() -> String {
         cmsg_level,
         cmsg_type
     );
+    abi!(
+        out,
+        hdrs,
+        crate::secureboot::SecurebootVerdict,
+        "struct secureboot_verdict",
+        "slateos/secureboot.h",
+        listing,
+        entry,
+        enforced,
+        may_run
+    );
     // `struct mmsghdr` is in <sys/socket.h> only under _GNU_SOURCE, which the
     // fixture defines. Its second field is `unsigned int`, not `size_t`: the
     // obvious guess is wrong and would move nothing on x86-64 while breaking

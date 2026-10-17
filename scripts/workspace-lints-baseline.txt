@@ -56,7 +56,6 @@ userspace/dmidecode  # bare deny(clippy::all)
 userspace/earlyoom  # bare deny(clippy::all)
 userspace/efibootmgr  # bare deny(clippy::all)
 userspace/eject  # bare deny(clippy::all)
-userspace/fdisk
 userspace/fio  # bare deny(clippy::all)
 userspace/fsck
 userspace/fuser  # bare deny(clippy::all)

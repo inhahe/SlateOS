@@ -21,11 +21,10 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
+use textline::{LineBox, LineKey, LineLook};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -815,14 +814,9 @@ pub struct ColorPickerApp {
     eyedropper: EyedropperState,
     /// Background color for contrast checking.
     contrast_bg: PickedColor,
-    /// Clipboard text (simulated).
-    clipboard: String,
-    /// Hex input buffer.
-    hex_input: String,
-    /// The value box's editor -- its caret and selection over `hex_input`
-    /// -- loaded when the box opens, and whenever the buffer changed
-    /// under it.
-    hex_editor: TextInput,
+    /// The value box while it is open: the hex typed into it, its caret and
+    /// its selection. Empty while it is shut.
+    hex_input: LineBox,
     /// Whether the shortcut card is up.
     show_help: bool,
     /// Whether the value box is open, taking hex digits -- which it does
@@ -883,9 +877,7 @@ impl ColorPickerApp {
             active_palette_idx: 0,
             eyedropper: EyedropperState::default(),
             contrast_bg: PickedColor::from_rgb(30, 30, 46), // Catppuccin Base
-            clipboard: String::new(),
-            hex_input: String::new(),
-            hex_editor: textline::field_holding("", HEX_CAPACITY),
+            hex_input: LineBox::new(HEX_CAPACITY, FONT_SIZE),
             show_help: false,
             editing: false,
             box_hovered: false,
@@ -902,23 +894,22 @@ impl ColorPickerApp {
         self.history.push(color);
     }
 
-    /// Copy the current colour, in the active format, to *this program's*
-    /// clipboard.
+    /// Copy the current colour, in the active format, to the program's
+    /// clipboard (`guitk::clipboard`), where the value box's Ctrl+V and every
+    /// field's Paste find it, and answer what it copied.
     ///
-    /// Not the system's: there is no way to reach the clipboard service yet —
-    /// it is a binary with no library target and no IPC endpoint. See
-    /// `known-issues.md` →
-    /// `TD-C-NOTHING-CAN-ACTUALLY-COPY-AND-PASTE-BETWEEN-PROGRAMS`. When
-    /// `guitk::clipboard` exists this becomes a call to it and the field goes
-    /// away; until then the status line says "in this window" rather than
-    /// letting the user believe the colour is waiting in another one.
-    pub fn copy_to_clipboard(&mut self) {
-        self.clipboard = self.current.format_as(self.active_format);
+    /// Not the system's: no program can reach that yet (`guitk::clipboard`),
+    /// so the status line says "in this window" rather than letting the
+    /// user believe the colour is waiting in another one.
+    pub fn copy_to_clipboard(&self) -> String {
+        let copied = self.current.format_as(self.active_format);
+        guitk::clipboard::set_text(&copied);
+        copied
     }
 
     /// Try to apply a hex string typed by the user.
     pub fn apply_hex_input(&mut self) -> bool {
-        if let Some(c) = PickedColor::from_hex_str(&self.hex_input) {
+        if let Some(c) = PickedColor::from_hex_str(self.hex_input.text()) {
             self.set_color(c);
             true
         } else {
@@ -1136,11 +1127,11 @@ impl ColorPickerApp {
                 Action::Redraw
             }
             Target::CopyButton => {
-                self.copy_to_clipboard();
+                let copied = self.copy_to_clipboard();
                 // "in this window" because that is the truth: no other
                 // program can read this. Saying plain "Copied" would send
                 // the user to paste somewhere and find nothing there.
-                self.status = format!("Copied {} (in this window)", self.clipboard);
+                self.status = format!("Copied {copied} (in this window)");
                 Action::Redraw
             }
             Target::FormatTab(fmt) => {
@@ -1214,10 +1205,9 @@ impl ColorPickerApp {
     /// the current colour — `89B4FA` to `89B4FF` — and an empty field would
     /// make the user retype the five digits they wanted to keep.
     fn begin_edit(&mut self) {
-        self.hex_input = self.current.to_hex6();
-        // The caret after the digits, and no selection left from the last
-        // edit -- which may have held the very same text.
-        self.hex_editor.set_text(&self.hex_input);
+        // A box of its own each time, its caret after the digits: nothing of
+        // the last edit -- its selection -- outlives it.
+        self.hex_input = LineBox::holding(&self.current.to_hex6(), HEX_CAPACITY, FONT_SIZE);
         self.editing = true;
         // The box shows hex while it is being edited, so the tab follows it:
         // a field labelled CMYK that only accepts hex is a field that lies
@@ -1244,7 +1234,7 @@ impl ColorPickerApp {
             // The field stays open with the text still in it: clearing it
             // would destroy what the user typed and leave them nothing to
             // correct.
-            self.status = format!("{:?} is not a hex colour", self.hex_input);
+            self.status = format!("{:?} is not a hex colour", self.hex_input.text());
         }
         Action::Redraw
     }
@@ -1404,7 +1394,7 @@ impl ColorPickerApp {
                 // opens the box rather than inventing a second entry path --
                 // with what is pasted over what it holds, where that is hex.
                 self.begin_edit();
-                self.hex_editor.select_all();
+                self.hex_input.select_all();
                 self.hex_key(key);
                 Action::Redraw
             }
@@ -1481,7 +1471,7 @@ impl ColorPickerApp {
     }
 
     /// A key for the value box: the caret keys, Backspace and Delete at the
-    /// caret, Ctrl+A, C and X -- copying to the window's clipboard, where
+    /// caret, Ctrl+A, C and X -- copying to the program's clipboard, where
     /// Copy puts a colour -- and typing and Ctrl+V, of hex. Whether the box
     /// changed, or its caret or selection moved.
     ///
@@ -1493,69 +1483,45 @@ impl ColorPickerApp {
     /// the first (a dead key composing, a paste delivered as text). A paste
     /// that is not all hex -- Copy's `rgb(...)` -- is refused whole, rather
     /// than mined for the letters that happen to be hex digits.
-    ///
-    /// The box took typing at its end and Backspace from it, and nothing
-    /// else -- and a command's letter, which a chord carries as text, went in
-    /// too: Ctrl+C, the key a user presses to copy, typed a `C`.
     fn hex_key(&mut self, key: &KeyEvent) -> bool {
         let hex = |c: char| c == '#' || c.is_ascii_hexdigit();
-        if self.hex_editor.text() != self.hex_input {
-            self.hex_editor.set_text(&self.hex_input);
-        }
-        let before = (self.hex_editor.cursor(), self.hex_editor.selection_anchor());
-        if textline::types_into_field(key) {
+        let edit = if textline::types_into_field(key) {
             let typed: String = key
                 .typed()
                 .filter(|c| hex(*c))
                 .map(|c| c.to_ascii_uppercase())
                 .collect();
-            self.hex_editor.insert_text(&typed);
+            self.hex_input.insert(&typed)
         } else if textline::pastes(key) {
-            let pasted = self.clipboard.trim();
+            let clipboard = guitk::clipboard::text();
+            let pasted = clipboard.trim();
             if !pasted.is_empty() && pasted.chars().all(hex) {
-                self.hex_editor.insert_text(&pasted.to_ascii_uppercase());
+                self.hex_input.insert(&pasted.to_ascii_uppercase())
+            } else {
+                LineKey::default()
             }
         } else {
-            let edit = textline::apply_key(&mut self.hex_editor, key, &self.clipboard, FONT_SIZE);
-            if let Some(copied) = edit.copied {
-                self.clipboard = copied;
-            }
-        }
-        if self.hex_editor.text() != self.hex_input {
-            self.hex_input = self.hex_editor.text().to_owned();
-            return true;
-        }
-        before != (self.hex_editor.cursor(), self.hex_editor.selection_anchor())
+            self.hex_input.key(key)
+        };
+        edit.changed || edit.moved
     }
 
-    /// Where the value box's caret is: the editor's, or the end of the
-    /// buffer where the buffer changed under the editor. One answer for the
-    /// drawing and for a press.
-    fn hex_cursor(&self) -> TextCursor {
-        if self.hex_editor.text() == self.hex_input {
-            self.hex_editor.cursor()
-        } else {
-            TextCursor::from(self.hex_input.len())
-        }
+    /// Whether the open value box has the keyboard: the shortcut card, up,
+    /// takes every key. What it is drawn with, and its presses measured
+    /// against.
+    fn hex_has_keyboard(&self) -> bool {
+        self.editing && !self.show_help
     }
 
     /// A press in the open value box, drawn at `rect`, at `x`: the caret
     /// under the pointer, measured against the box as it was drawn.
     fn press_hex(&mut self, rect: Rect, x: f32) {
-        let drawn = self.hex_cursor();
-        if self.hex_editor.text() != self.hex_input {
-            self.hex_editor.set_text(&self.hex_input);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.hex_input,
-            drawn,
-            (rect.w - 2.0 * HEX_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
+        let focused = self.hex_has_keyboard();
+        self.hex_input.press(
             x - rect.x - HEX_TEXT_INSET,
+            rect.w - 2.0 * HEX_TEXT_INSET,
+            focused,
         );
-        self.hex_editor.set_selection_anchor(None);
-        self.hex_editor.set_cursor(cursor);
     }
 
     /// Route a whole event.
@@ -1874,7 +1840,7 @@ impl ColorPickerApp {
         // plain rather than starting out red.  Lit under the pointer, except
         // where a press would not reach it: under the card, which takes the
         // press, or with the eyedropper armed, which samples it instead.
-        let has_keyboard = self.editing && !self.show_help;
+        let has_keyboard = self.hex_has_keyboard();
         guitk::field::draw(
             cmds,
             &self.palette,
@@ -1886,7 +1852,7 @@ impl ColorPickerApp {
                 // The buffer is empty whenever the box is closed (`cancel_edit`,
                 // `commit_edit`), so a closed box is never red.
                 invalid: !self.hex_input.is_empty()
-                    && PickedColor::from_hex_str(&self.hex_input).is_none(),
+                    && PickedColor::from_hex_str(self.hex_input.text()).is_none(),
             },
             self.focus_ring_width,
         );
@@ -1904,24 +1870,17 @@ impl ColorPickerApp {
         if self.editing {
             let line = guitk::text::line_height(FONT_SIZE, FontWeightHint::Regular);
             let mut tree = RenderTree::new();
-            textedit::draw(
+            self.hex_input.draw(
                 &mut tree,
-                &textedit::SingleLine {
-                    text: &self.hex_input,
-                    cursor: self.hex_cursor(),
-                    selection_anchor: if self.hex_editor.text() == self.hex_input {
-                        self.hex_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: has_keyboard,
+                &LineLook {
                     x: tx,
                     y: rect.y + (rect.h - line) / 2.0,
                     width: tw,
                     line_height: line,
-                    font_size: FONT_SIZE,
-                    weight: FontWeightHint::Regular,
+                    focused: has_keyboard,
+                    placeholder: "",
                     color: self.palette.text,
+                    placeholder_color: self.palette.subtext0,
                     selection_bg: self.palette.accent,
                     selection_fg: self.palette.crust,
                     caret_width: textedit::CARET_WIDTH,
@@ -3381,14 +3340,18 @@ mod tests {
         let mut app = ColorPickerApp::create();
         app.current = PickedColor::from_rgb(255, 0, 0);
         app.active_format = ColorFormat::Hex;
-        app.copy_to_clipboard();
-        assert_eq!(app.clipboard, "#FF0000");
+        assert_eq!(app.copy_to_clipboard(), "#FF0000");
+        assert_eq!(
+            guitk::clipboard::text(),
+            "#FF0000",
+            "the colour is not on the clipboard"
+        );
     }
 
     #[test]
     fn apply_hex_input_valid() {
         let mut app = ColorPickerApp::create();
-        app.hex_input = "#00FF00".to_string();
+        app.hex_input.set_text("#00FF00");
         assert!(app.apply_hex_input());
         assert_eq!(app.current.r, 0);
         assert_eq!(app.current.g, 255);
@@ -3398,7 +3361,7 @@ mod tests {
     #[test]
     fn apply_hex_input_invalid() {
         let mut app = ColorPickerApp::create();
-        app.hex_input = "not-a-color".to_string();
+        app.hex_input.set_text("not-a-color");
         assert!(!app.apply_hex_input());
     }
 
@@ -3821,7 +3784,7 @@ mod tests {
         let cmds = app.frame(size.0, size.1).commands().to_vec();
         assert!(
             cmds.iter().any(
-                |c| matches!(c, RenderCommand::RichText { text, .. } if *text == app.hex_input)
+                |c| matches!(c, RenderCommand::RichText { text, .. } if *text == app.hex_input.text())
             ),
             "the open box does not show what it holds"
         );
@@ -3838,7 +3801,7 @@ mod tests {
 
         // A colour that would be refused is red as it is typed.
         key(&mut app, &press(Key::Backspace));
-        let typed = app.hex_input.clone();
+        let typed = app.hex_input.text().to_owned();
         assert!(
             PickedColor::from_hex_str(&typed).is_none(),
             "the test needs a refusable colour, not {typed:?}"
@@ -3868,8 +3831,9 @@ mod tests {
         );
         let cmds = app.frame(size.0, size.1).commands().to_vec();
         assert!(
-            cmds.iter()
-                .any(|c| matches!(c, RenderCommand::RichText { text, .. } if *text == typed)),
+            cmds.iter().any(|c| matches!(c,
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. }
+                    if *text == typed)),
             "under the card the box does not show what was typed"
         );
         assert!(
@@ -3934,7 +3898,7 @@ mod tests {
         click(&mut app, Target::ValueBox);
         assert!(app.editing, "clicking the box should focus it");
         assert_eq!(
-            app.hex_input,
+            app.hex_input.text(),
             app.current.to_hex6(),
             "the field is seeded so a one-digit change does not mean retyping six"
         );
@@ -3951,7 +3915,8 @@ mod tests {
 
         type_str(&mut app, "1z2Q3g");
         assert_eq!(
-            app.hex_input, "123",
+            app.hex_input.text(),
+            "123",
             "a field that cannot hold a non-hex character has no state in which it does"
         );
         type_str(&mut app, "456");
@@ -3970,7 +3935,7 @@ mod tests {
         // One keystroke, three characters - the shape a composed dead key or
         // a text-input paste arrives in.
         key(&mut app, &typing("abc"));
-        assert_eq!(app.hex_input, "ABC");
+        assert_eq!(app.hex_input.text(), "ABC");
     }
 
     #[test]
@@ -3992,7 +3957,7 @@ mod tests {
             app.editing,
             "clearing the field would destroy what they typed"
         );
-        assert_eq!(app.hex_input, "12345");
+        assert_eq!(app.hex_input.text(), "12345");
         assert!(app.status.contains("12345"), "status: {:?}", app.status);
     }
 
@@ -4139,18 +4104,16 @@ mod tests {
         let mut app = ColorPickerApp::create();
         app.active_format = ColorFormat::Rgb;
         assert_eq!(key(&mut app, &ctrl(Key::C)), Action::Redraw);
-        assert_eq!(app.clipboard, app.current.format_as(ColorFormat::Rgb));
-        assert!(
-            app.status.contains(&app.clipboard),
-            "status: {:?}",
-            app.status
-        );
+        let copied = guitk::clipboard::text();
+        assert_eq!(copied, app.current.format_as(ColorFormat::Rgb));
+        assert!(app.status.contains(&copied), "status: {:?}", app.status);
 
         // The button and the binding are the same action, not two.
+        guitk::clipboard::set_text("");
         let mut clicked = ColorPickerApp::create();
         clicked.active_format = ColorFormat::Rgb;
         click(&mut clicked, Target::CopyButton);
-        assert_eq!(clicked.clipboard, app.clipboard);
+        assert_eq!(guitk::clipboard::text(), copied);
     }
 
     #[test]
@@ -4476,24 +4439,25 @@ mod tests {
         let mut app = ColorPickerApp::create();
         click(&mut app, Target::ValueBox);
         assert!(app.editing);
-        assert_eq!(app.hex_input, "#89B4FA");
+        assert_eq!(app.hex_input.text(), "#89B4FA");
         key(&mut app, &press(Key::Home));
         key(&mut app, &press(Key::Delete));
-        assert_eq!(app.hex_input, "89B4FA", "Delete at the caret");
+        assert_eq!(app.hex_input.text(), "89B4FA", "Delete at the caret");
         key(&mut app, &press(Key::End));
         key(&mut app, &press(Key::Left));
         key(&mut app, &press(Key::Backspace));
         type_str(&mut app, "f");
         assert_eq!(
-            app.hex_input, "89B4FA",
+            app.hex_input.text(),
+            "89B4FA",
             "the caret did not move, or a digit was not upper-cased"
         );
         let rect = rect_of(&app, Target::ValueBox).expect("the value box is drawn");
         let at = rect.x
             + HEX_TEXT_INSET
             + guitk::text::caret_x(
-                &app.hex_input,
-                TextCursor::from(5),
+                app.hex_input.text(),
+                guitk::text::TextCursor::from(5),
                 FONT_SIZE,
                 FontWeightHint::Regular,
             );
@@ -4508,18 +4472,18 @@ mod tests {
             Action::None,
             "a z changed the box"
         );
-        assert_eq!(app.hex_input, "89B4FA");
+        assert_eq!(app.hex_input.text(), "89B4FA");
 
         key(&mut app, &shift(Key::Home));
         type_str(&mut app, "0");
-        assert_eq!(app.hex_input, "0A", "Shift+Home did not select");
+        assert_eq!(app.hex_input.text(), "0A", "Shift+Home did not select");
         key(&mut app, &ctrl(Key::A));
         key(&mut app, &ctrl(Key::C));
-        assert_eq!(app.clipboard, "0A", "Ctrl+C took nothing");
+        assert_eq!(guitk::clipboard::text(), "0A", "Ctrl+C took nothing");
         key(&mut app, &ctrl(Key::X));
-        assert_eq!(app.hex_input, "", "Ctrl+X");
+        assert_eq!(app.hex_input.text(), "", "Ctrl+X");
         key(&mut app, &ctrl(Key::V));
-        assert_eq!(app.hex_input, "0A", "Ctrl+V");
+        assert_eq!(app.hex_input.text(), "0A", "Ctrl+V");
 
         // A press at the start of the box puts the caret there.
         let size = ColorPickerApp::SIZE;
@@ -4531,7 +4495,8 @@ mod tests {
         );
         type_str(&mut app, "#");
         assert_eq!(
-            app.hex_input, "#0A",
+            app.hex_input.text(),
+            "#0A",
             "the press did not put the caret there"
         );
         // And one past its end, at its end.
@@ -4543,7 +4508,8 @@ mod tests {
         );
         type_str(&mut app, "b");
         assert_eq!(
-            app.hex_input, "#0AB",
+            app.hex_input.text(),
+            "#0AB",
             "the press did not put the caret at the end"
         );
     }
@@ -4555,20 +4521,22 @@ mod tests {
     #[test]
     fn a_paste_is_hex_or_nothing() {
         let mut app = ColorPickerApp::create();
-        app.clipboard = String::from("  #00ff00 ");
+        guitk::clipboard::set_text("  #00ff00 ");
         key(&mut app, &ctrl(Key::V));
         assert!(app.editing, "Ctrl+V did not open the box");
         assert_eq!(
-            app.hex_input, "#00FF00",
+            app.hex_input.text(),
+            "#00FF00",
             "Ctrl+V did not paste over the colour"
         );
         key(&mut app, &press(Key::Escape));
 
-        app.clipboard = String::from("rgb(137, 180, 250)");
+        guitk::clipboard::set_text("rgb(137, 180, 250)");
         key(&mut app, &ctrl(Key::V));
         assert!(app.editing);
         assert_eq!(
-            app.hex_input, "#89B4FA",
+            app.hex_input.text(),
+            "#89B4FA",
             "a paste that is not hex was taken"
         );
     }
@@ -4598,30 +4566,64 @@ mod tests {
         key(&mut app, &held(Key::C, "ç", altgr));
         assert_eq!(app.active_format, format, "a chord changed the format");
         assert_eq!(app.current, current, "a chord moved the colour");
-        assert!(app.clipboard.is_empty(), "AltGr+C copied the colour");
+        assert!(guitk::clipboard::is_empty(), "AltGr+C copied the colour");
         key(&mut app, &held(Key::C, "c", Modifiers::ctrl()));
-        assert!(!app.clipboard.is_empty(), "control: Ctrl+C copies");
+        assert!(!guitk::clipboard::is_empty(), "control: Ctrl+C copies");
         key(&mut app, &press(Key::Tab));
         assert_ne!(app.active_format, format, "control: Tab changes the format");
 
         click(&mut app, Target::ValueBox);
-        let before = app.hex_input.clone();
+        let before = app.hex_input.text().to_owned();
         key(&mut app, &held(Key::C, "c", Modifiers::ctrl()));
         key(&mut app, &held(Key::A, "a", Modifiers::alt()));
         key(&mut app, &held(Key::E, "e", Modifiers::super_key()));
-        assert_eq!(app.hex_input, before, "a command's letter was typed");
+        assert_eq!(app.hex_input.text(), before, "a command's letter was typed");
         key(&mut app, &held(Key::Escape, "", Modifiers::alt()));
         assert!(app.editing, "Alt+Escape shut the box");
     }
 
+    /// **A press in the open box lands where its hex was drawn**: in a window
+    /// too narrow for the hex, the box is drawn scrolled to its caret, so a
+    /// press at its right edge is near the hex's end, not a box's width from
+    /// its start.
+    #[test]
+    fn a_press_in_a_long_hex_lands_where_it_was_drawn() {
+        let mut app = ColorPickerApp::create();
+        click(&mut app, Target::ValueBox);
+        key(&mut app, &ctrl(Key::A));
+        type_str(&mut app, "#FFFFFFFF");
+        let size = (60.0, ColorPickerApp::SIZE.1);
+        let rect = app
+            .frame(size.0, size.1)
+            .rect_of(|t| *t == Target::ValueBox)
+            .expect("the value box is drawn");
+        let hex = app.hex_input.text().to_owned();
+        assert!(
+            guitk::text::measure(&hex, FONT_SIZE, FontWeightHint::Regular)
+                > 2.0 * (rect.w - 2.0 * HEX_TEXT_INSET),
+            "control: the hex is wider than the box"
+        );
+        app.click_at(
+            rect.right() - HEX_TEXT_INSET - 1.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        let caret = app.hex_input.input().cursor().byte();
+        assert!(
+            caret > hex.len() / 2,
+            "the press was measured from the hex's start: caret at {caret} of {}",
+            hex.len()
+        );
+    }
+
     /// **The box edits the hex it shows**, however the hex came to be in it:
-    /// its editor is loaded from the box whenever a press or a key finds the
-    /// two apart.
+    /// what is put there from outside is what a press or a key then edits.
     #[test]
     fn the_value_box_edits_the_hex_it_shows() {
         let mut app = ColorPickerApp::create();
         click(&mut app, Target::ValueBox);
-        app.hex_input = String::from("123");
+        app.hex_input.set_text("123");
         let rect = rect_of(&app, Target::ValueBox).expect("the value box is drawn");
         app.click_at(
             rect.x + HEX_TEXT_INSET + 0.5,
@@ -4630,9 +4632,13 @@ mod tests {
             ColorPickerApp::SIZE,
         );
         type_str(&mut app, "#");
-        assert_eq!(app.hex_input, "#123", "the press missed the shown hex");
-        app.hex_input = String::from("ABC");
+        assert_eq!(
+            app.hex_input.text(),
+            "#123",
+            "the press missed the shown hex"
+        );
+        app.hex_input.set_text("ABC");
         type_str(&mut app, "d");
-        assert_eq!(app.hex_input, "ABCD", "the key edited another hex");
+        assert_eq!(app.hex_input.text(), "ABCD", "the key edited another hex");
     }
 }

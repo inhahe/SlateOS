@@ -111,28 +111,28 @@ MUTATIONS = [
     ),
     (
         "the open box is not marked",
-        "        let has_keyboard = self.editing && !self.show_help;\n",
-        "        let has_keyboard = false;\n",
+        "        self.editing && !self.show_help\n",
+        "        false\n",
         [FIELD],
     ),
     (
         "the box is marked under the shortcut card",
-        "        let has_keyboard = self.editing && !self.show_help;\n",
-        "        let has_keyboard = self.editing;\n",
+        "        self.editing && !self.show_help\n",
+        "        self.editing\n",
         [FIELD],
     ),
     (
         "a colour that would be refused is not red",
         "                invalid: !self.hex_input.is_empty()\n"
-        "                    && PickedColor::from_hex_str(&self.hex_input).is_none(),\n",
+        "                    && PickedColor::from_hex_str(self.hex_input.text()).is_none(),\n",
         "                invalid: false,\n",
         [FIELD],
     ),
     (
         "an empty box starts out red",
         "                invalid: !self.hex_input.is_empty()\n"
-        "                    && PickedColor::from_hex_str(&self.hex_input).is_none(),\n",
-        "                invalid: PickedColor::from_hex_str(&self.hex_input).is_none(),\n",
+        "                    && PickedColor::from_hex_str(self.hex_input.text()).is_none(),\n",
+        "                invalid: PickedColor::from_hex_str(self.hex_input.text()).is_none(),\n",
         [FIELD],
     ),
     (
@@ -198,15 +198,15 @@ MUTATIONS = [
     ),
 ]
 
-# The value box edits at a caret (2026-10-04,
-# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
-# took typing at its end and Backspace from it, and nothing else, its caret
-# an `_` -- and a command's letter went in: Ctrl+C typed a `C`. And a chord
-# is a chord: Alt+Escape closed the program, and AltGr+C copied the colour.
+# The value box is a textline LineBox, whose own table (apps/textline/mutate.py)
+# holds the rows for its editing and drawing; these are colorpicker's: what a
+# key types into it -- hex, upper-cased -- and a paste, and a chord being a
+# chord. Alt+Escape closed the program, and AltGr+C copied the colour.
 EDITS = "the_value_box_edits_at_a_caret"
 PASTE = "a_paste_is_hex_or_nothing"
 CHORD = "a_chord_is_neither_a_key_of_the_window_nor_typing"
 SHOWN = "the_value_box_edits_the_hex_it_shows"
+LONG_PRESS = "a_press_in_a_long_hex_lands_where_it_was_drawn"
 
 MUTATIONS += [
     (
@@ -221,12 +221,9 @@ MUTATIONS += [
         "",
         [EDITS],
     ),
-    (
-        "a command's letter is typed",
-        "        if textline::types_into_field(key) {\n            let typed: String = key\n",
-        "        if key.types_text() {\n            let typed: String = key\n",
-        [CHORD],
-    ),
+    # No row for `textline::types_into_field(key)` made `key.types_text()`:
+    # `typed()` leaves a command's letter out itself, so the two differ only
+    # for a release, which `handle_key` drops before the box sees it.
     (
         "a paste that is not hex is mined for hex",
         "            if !pasted.is_empty() && pasted.chars().all(hex) {\n",
@@ -234,14 +231,8 @@ MUTATIONS += [
         [PASTE],
     ),
     (
-        "a copy takes nothing to the clipboard",
-        "                self.clipboard = copied;\n",
-        "                let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "Ctrl+V opens the box without the paste",
-        "                self.begin_edit();\n                self.hex_editor.select_all();\n                self.hex_key(key);\n",
+        "                self.begin_edit();\n                self.hex_input.select_all();\n                self.hex_key(key);\n",
         "                self.begin_edit();\n",
         [PASTE],
     ),
@@ -264,18 +255,6 @@ MUTATIONS += [
         [CHORD],
     ),
     (
-        "a key finds the editor holding another hex",
-        "        let hex = |c: char| c == '#' || c.is_ascii_hexdigit();\n        if self.hex_editor.text() != self.hex_input {\n",
-        "        let hex = |c: char| c == '#' || c.is_ascii_hexdigit();\n        if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another hex",
-        "        let drawn = self.hex_cursor();\n        if self.hex_editor.text() != self.hex_input {\n",
-        "        let drawn = self.hex_cursor();\n        if false {\n",
-        [SHOWN],
-    ),
-    (
         "a press puts the caret at the start",
         "            x - rect.x - HEX_TEXT_INSET,\n",
         "            0.0,\n",
@@ -288,16 +267,22 @@ MUTATIONS += [
         [EDITS, SHOWN],
     ),
     (
-        "the caret is drawn at the end",
-        "                    cursor: self.hex_cursor(),\n",
-        "                    cursor: TextCursor::from(self.hex_input.len()),\n",
-        [EDITS],
+        "Copy puts nothing on the clipboard",
+        "        guitk::clipboard::set_text(&copied);\n",
+        "        let _ = &copied;\n",
+        ["copy_to_clipboard", "ctrl_c_copies_the_value_the_active_tab_is_showing"],
     ),
     (
-        "an opened box keeps the last edit's selection",
-        "        self.hex_editor.set_text(&self.hex_input);\n        self.editing = true;\n",
-        "        self.editing = true;\n",
-        [PASTE],
+        "the box opens empty",
+        "        self.hex_input = LineBox::holding(&self.current.to_hex6(), HEX_CAPACITY, FONT_SIZE);\n",
+        "        self.hex_input = LineBox::holding(\"\", HEX_CAPACITY, FONT_SIZE);\n",
+        ["the_value_box_takes_hex_digits_and_refuses_everything_else", EDITS],
+    ),
+    (
+        "a press in the box with the keyboard is measured from the text's start",
+        "            focused,\n        );\n",
+        "            false,\n        );\n",
+        [LONG_PRESS],
     ),
 ]
 

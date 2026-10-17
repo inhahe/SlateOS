@@ -94,6 +94,11 @@ pub trait Accounts {
     /// Count a sign-in for `user` at `at` (seconds since 1970). A failure is
     /// the implementation's to report: the session has started.
     fn signed_in(&self, user: &str, at: u64);
+    /// The account the database says signs in by itself
+    /// ([`userdb::UserDb::automatic_account`]: the one offered account
+    /// marked, unlocked), the same answer the login screen and the
+    /// automatic sign-in hint are given.
+    fn automatic(&self) -> Option<String>;
 }
 
 /// logind.
@@ -131,23 +136,21 @@ pub trait Launcher {
     fn start_desktop(&mut self, person: &Person, env: &[(String, String)]) -> Result<u32, String>;
 }
 
-/// The account to sign in by itself at this start: the one marked, when
-/// exactly one is and it is not locked ([`loginusers::automatic_account`]),
-/// unless the kernel was started for repair (`cmdline`, the kernel's
-/// command line, holds one of [`REPAIR_WORDS`] as a word of its own) or an
-/// automatic sign-in has already happened since the machine started
-/// (`done_this_start`).
+/// The account to sign in by itself at this start: the one the database
+/// says ([`Accounts::automatic`], `marked`), unless the kernel was started
+/// for repair (`cmdline`, the kernel's command line, holds one of
+/// [`REPAIR_WORDS`] as a word of its own) or an automatic sign-in has
+/// already happened since the machine started (`done_this_start`).
 #[must_use]
 pub fn automatic_account(
-    accounts: &[Account],
+    marked: Option<String>,
     cmdline: &[u8],
     done_this_start: bool,
 ) -> Option<String> {
     if done_this_start || started_for_repair(cmdline) {
         return None;
     }
-    let i = loginusers::automatic_account(accounts)?;
-    accounts.get(i).map(|a| a.username.clone())
+    marked
 }
 
 /// Whether `cmdline` holds one of [`REPAIR_WORDS`] as a whole word.
@@ -523,6 +526,9 @@ mod tests {
                 })
         }
         fn signed_in(&self, _: &str, _: u64) {}
+        fn automatic(&self) -> Option<String> {
+            Some("ada".to_owned())
+        }
     }
 
     struct Logind(Log, bool);
@@ -904,22 +910,23 @@ mod tests {
 
     #[test]
     fn a_repair_start_or_a_second_start_signs_no_one_in() {
-        let marked = Db.offered();
+        let marked = || Db.automatic();
         assert_eq!(
-            automatic_account(&marked, b"root=/dev/sda1 quiet", false),
+            automatic_account(marked(), b"root=/dev/sda1 quiet", false),
             Some("ada".to_owned())
         );
         assert_eq!(
-            automatic_account(&marked, b"root=/dev/sda1 single", false),
+            automatic_account(marked(), b"root=/dev/sda1 single", false),
             None
         );
-        assert_eq!(automatic_account(&marked, b"recovery", false), None);
+        assert_eq!(automatic_account(marked(), b"recovery", false), None);
         assert_eq!(
-            automatic_account(&marked, b"singleuser=0", false),
+            automatic_account(marked(), b"singleuser=0", false),
             Some("ada".to_owned()),
             "a word, not a part of one"
         );
-        assert_eq!(automatic_account(&marked, b"", true), None);
+        assert_eq!(automatic_account(marked(), b"", true), None);
+        assert_eq!(automatic_account(None, b"", false), None, "none marked");
     }
 
     #[test]

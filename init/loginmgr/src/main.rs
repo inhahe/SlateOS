@@ -234,7 +234,7 @@ fn main() -> ExitCode {
         ));
         b"recovery".to_vec()
     });
-    let automatic = automatic_account(&db.offered(), &cmdline, signed_in_this_start());
+    let automatic = automatic_account(db.automatic(), &cmdline, signed_in_this_start());
     let m: Shared = Arc::new(Mutex::new(Manager::new(
         authlib::Authenticator::new(),
         db,

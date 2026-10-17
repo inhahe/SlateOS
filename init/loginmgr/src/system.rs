@@ -69,6 +69,18 @@ impl Accounts for Database {
             say(&format!("{user}'s sign-in was not recorded: {e}"));
         }
     }
+
+    /// Unreadable, no one: signing someone in by themselves from a database
+    /// that cannot be read would be signing in an account it may not say.
+    fn automatic(&self) -> Option<String> {
+        match userdb::UserDb::load(&self.path) {
+            Ok(db) => db.automatic_account().and_then(userdb::Record::username),
+            Err(e) => {
+                say(&format!("cannot read {}: {e}", self.path.display()));
+                None
+            }
+        }
+    }
 }
 
 /// logind's service name (`userspace/logind`, `bus::SERVICE_NAME`).
@@ -217,5 +229,23 @@ mod tests {
         db.signed_in("ada", 1_700_000_000);
         let after = userdb::UserDb::load(&path).unwrap();
         assert_eq!(after.find("ada").unwrap().last_login(), 1_700_000_000);
+    }
+
+    #[test]
+    fn the_automatic_account_is_the_database_s_answer() {
+        let dir = scratchdir::ScratchDir::new("loginmgr-automatic");
+        let path = dir.path("users.yaml");
+        let mut file = userdb::UserDb::new();
+        let mut ada = userdb::Record::new();
+        ada.set("username", "ada");
+        ada.set_uid(1000);
+        file.push(ada);
+        file.save(&path).unwrap();
+        let db = Database::at(&path);
+        assert_eq!(db.automatic(), None);
+        file.find_mut("ada").unwrap().set_auto_login(true);
+        file.save(&path).unwrap();
+        assert_eq!(db.automatic(), Some("ada".to_owned()));
+        assert_eq!(Database::at(&dir.path("missing.yaml")).automatic(), None);
     }
 }

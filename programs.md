@@ -229,7 +229,7 @@ two disagree.
 | `readlink` | Print a symbolic link's target, or a file name's canonical form. | yes | `coreutils` |  |
 | `realpath` | Print the resolved absolute file name. | yes | `coreutils` |  |
 | `renice` | Alter the priority of running processes. | yes | `coreutils` |  |
-| `rfkill` | Slate OS wireless device control | yes |  |  |
+| `rfkill` | List, block and unblock wireless devices. | yes |  |  |
 | `rm` | Remove files or directories. | yes | `coreutils` |  |
 | `rmdir` | Remove empty directories. | yes | `coreutils` |  |
 | `route` | Routing Table Management | yes |  |  |

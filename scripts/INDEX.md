@@ -426,6 +426,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/renice-diff.sh` | Differential test: our `renice` against util-linux 2.39.3's. |
 | `scripts/resolve-rip.sh` | resolve-rip.sh — map a kernel RIP (or any code address) to the containing |
 | `scripts/review-batch.py` | Review a batch of commits at the level its contents call for; gate `main` on it. |
+| `scripts/rfkill-diff.sh` | Differential test: our `rfkill` against util-linux 2.39.3's. |
 | `scripts/rm-diff.sh` | Differential test: our `rm` against GNU coreutils'. |
 | `scripts/rmdir-diff.sh` | Differential test: our `rmdir` against GNU coreutils 9.4's. |
 | `scripts/run-checker.sh` | `run_checker` — the one implementation of "did that checker reach a verdict?" |
@@ -595,4 +596,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_585 scripts._
+_586 scripts._

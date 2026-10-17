@@ -1588,6 +1588,16 @@ list moved to lane D on 2026-09-22):
   is refused until the C library forwards the ioctls and the kernel answers
   them natively (`requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md`).
 
+- `[x]` `[B]` **util-linux 2.39.3's `rfkill`, ported** -- replacing
+  `userspace/rfkill`, written from scratch, which read `/sys/class/rfkill`
+  alone and never opened `/dev/rfkill`, where the kernel lists the devices
+  and takes the requests to block them. Its table prints through
+  `smartcols`. Held to Ubuntu's by `scripts/rfkill-diff.sh`, each case in a
+  namespace with a `/dev/rfkill` and a `/sys/class/rfkill` of its own:
+  341 cases agree; deliberate difference, an identifier escaped in a
+  diagnostic. On SlateOS it says `cannot open /dev/rfkill` until there is a
+  driver to answer it. 2026-10-17.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

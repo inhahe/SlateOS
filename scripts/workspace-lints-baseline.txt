@@ -109,7 +109,6 @@ userspace/ping
 userspace/pkg
 userspace/pv
 userspace/quoting  # bare deny(clippy::all)
-userspace/rfkill  # bare deny(clippy::all)
 userspace/route
 userspace/rsync
 userspace/sanitize

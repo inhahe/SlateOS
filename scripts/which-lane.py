@@ -790,6 +790,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "readlink-diff.sh",
         "realpath-diff.sh",
         "renice-diff.sh",
+        "rfkill-diff.sh",
         "rm-diff.sh",
         "rmdir-diff.sh",
         "scols-probe.c",

@@ -4,7 +4,8 @@
 //! the linked C library. And two questions asked of a descriptor: whether it
 //! is a terminal (`isatty`), and whether it will take a write within a time
 //! (`poll` for `POLLOUT`), which a program writing to other people's
-//! terminals -- journald's broadcast -- asks of each.
+//! terminals -- journald's broadcast -- asks of each. And `poll` itself, for
+//! a program that waits on several descriptors, each for events of its own.
 //!
 //! What a program needs when it arranges another program's standard
 //! descriptors and then becomes that program, as `systemd-cat` does: std
@@ -31,27 +32,71 @@ const F_SETFD: i32 = 2;
 #[cfg(any(unix, test))]
 const FD_CLOEXEC: i32 = 1;
 
-/// `poll`'s events: something to read, room to write, and a descriptor that
-/// is not open.
-#[cfg(any(unix, test))]
-const POLLIN: i16 = 0x0001;
-#[cfg(any(unix, test))]
-const POLLOUT: i16 = 0x0004;
-#[cfg(any(unix, test))]
-const POLLNVAL: i16 = 0x0020;
+/// `poll`'s events: something to read, room to write, an error, a hang-up,
+/// and a descriptor that is not open. The last three are reported whether
+/// asked for or not.
+pub const POLLIN: i16 = 0x0001;
+/// Room to write.
+pub const POLLOUT: i16 = 0x0004;
+/// An error on the descriptor -- for a pipe's write end, no reader left.
+pub const POLLERR: i16 = 0x0008;
+/// The other end has gone: a pipe with no writer, a terminal hung up.
+pub const POLLHUP: i16 = 0x0010;
+/// The descriptor is not open.
+pub const POLLNVAL: i16 = 0x0020;
+
+/// One descriptor for [`poll`] to watch: C's `struct pollfd`. `events` is
+/// what to wait for -- 0 for only what `poll` always reports, an error or a
+/// hang-up -- and `revents` what came.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PollFd {
+    /// The descriptor; a negative one is not watched.
+    pub fd: i32,
+    /// The events asked for.
+    pub events: i16,
+    /// The events that came, written by [`poll`].
+    pub revents: i16,
+}
+
+/// Wait at most `timeout_ms` milliseconds (`-1` for ever) for any of `fds`
+/// to have an event it asked for, or one `poll` always reports: `poll`. How
+/// many have one -- each one's `revents` says which -- and 0 when the time
+/// ran out.
+///
+/// For a program that waits on several descriptors, each for its own events
+/// -- `rfkill event`'s device for `POLLIN | POLLHUP` and its standard output
+/// for nothing, so that only a reader going away ends the wait.
+///
+/// # Errors
+///
+/// What `poll` reports: `EINTR` when a signal came first, `EINVAL`, `ENOMEM`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<usize, i32> {
+    poll_impl(fds, timeout_ms)
+}
+
+#[cfg(unix)]
+fn poll_impl(fds: &mut [PollFd], timeout_ms: i32) -> Result<usize, i32> {
+    let nfds = u64::try_from(fds.len()).map_err(|_| crate::EINVAL)?;
+    // SAFETY: `fds` is `nfds` live `struct pollfd`s in a row -- `PollFd` is
+    // `repr(C)` with C's fields -- which the call reads and writes `revents`
+    // into, and keeps no pointer to.
+    let rc = unsafe { sys::poll(fds.as_mut_ptr(), nfds, timeout_ms) };
+    usize::try_from(rc).map_err(|_| last_errno())
+}
+
+#[cfg(not(unix))]
+fn poll_impl(_fds: &mut [PollFd], _timeout_ms: i32) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
 /// `EBADF`.
 #[cfg(unix)]
 const EBADF: i32 = 9;
 
 #[cfg(unix)]
 mod sys {
-    /// C's `struct pollfd`.
-    #[repr(C)]
-    pub struct PollFd {
-        pub fd: i32,
-        pub events: i16,
-        pub revents: i16,
-    }
+    pub use super::PollFd;
 
     unsafe extern "C" {
         pub fn dup2(old: i32, new: i32) -> i32;
@@ -650,10 +695,43 @@ mod tests {
         assert_eq!(POLLIN, posix::poll::POLLIN);
         assert_eq!(POLLOUT, posix::poll::POLLOUT);
         assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
+        assert_eq!(POLLERR, posix::poll::POLLERR);
+        assert_eq!(POLLHUP, posix::poll::POLLHUP);
+        assert_eq!(core::mem::size_of::<PollFd>(), 8, "C's struct pollfd");
         assert_eq!(O_RDWR, posix::fcntl::O_RDWR);
         assert_eq!(O_NOCTTY, posix::fcntl::O_NOCTTY);
         assert_eq!(O_CREAT, posix::fcntl::O_CREAT);
         assert_eq!(O_WRONLY, posix::fcntl::O_WRONLY);
+    }
+
+    /// Each descriptor is woken by what it asked for, and by an error or a
+    /// hang-up whether it asked or not.
+    #[cfg(unix)]
+    #[test]
+    fn poll_reports_each_descriptor_s_own_events() {
+        let (r, w) = pipe().unwrap();
+        let mut fds = [
+            PollFd {
+                fd: r,
+                events: POLLIN | POLLHUP,
+                revents: 0,
+            },
+            PollFd {
+                fd: w,
+                events: 0,
+                revents: 0,
+            },
+        ];
+        assert_eq!(poll(&mut fds, 0), Ok(0), "nothing to read, nothing wrong");
+        write(w, b"x").unwrap();
+        assert_eq!(poll(&mut fds, 0), Ok(1));
+        assert_eq!(fds[0].revents, POLLIN);
+        assert_eq!(fds[1].revents, 0, "room to write was not asked about");
+        close(r).unwrap();
+        fds[0].fd = -1;
+        assert_eq!(poll(&mut fds, 0), Ok(1));
+        assert_eq!(fds[1].revents, POLLERR, "no reader left");
+        close(w).unwrap();
     }
 
     /// A file opened for writing is created as asked, not emptied when it

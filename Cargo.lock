@@ -3608,7 +3608,15 @@ dependencies = [
 name = "rfkill"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
+ "libcall",
+ "libcsyslog",
+ "localtime",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]

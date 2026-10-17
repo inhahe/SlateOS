@@ -1,544 +1,1245 @@
-#![deny(clippy::all)]
-
-//! rfkill — Slate OS wireless device control
+//! rfkill -- list, block and unblock wireless devices.
 //!
-//! Blocks and unblocks wireless devices (`list`, `block`, `unblock`,
-//! `toggle`) and watches their changes (`event`). It used to answer to
-//! `rfkill-event` too, a name util-linux does not ship for what is
-//! `rfkill event`; the name went in the §1045 triage (2026-10-01).
+//! A port of util-linux 2.39.3's `sys-utils/rfkill.c`, function by function
+//! and with upstream's names, printing its table through `smartcols` (the
+//! libsmartcols port); measured against Ubuntu's `rfkill` (util-linux
+//! 2.39.3) by `scripts/rfkill-diff.sh`, on a `/dev/rfkill` and a
+//! `/sys/class/rfkill` of the harness's own.
+//!
+//! This replaces a hand-written program that read `/sys/class/rfkill` alone
+//! and never opened `/dev/rfkill`, where the kernel lists the devices and
+//! takes the requests to block them.
+//!
+//! # How it talks to the kernel
+//!
+//! `/dev/rfkill` is a stream of 8-byte events (`struct rfkill_event`: the
+//! device's index, its type, the operation, the soft and hard block). Opened,
+//! it first gives one `ADD` event for every device there is, then one for
+//! each change; listing reads it without waiting until `EAGAIN`. Blocking
+//! writes one event back -- `CHANGE` for a device, `CHANGE_ALL` for a type or
+//! for all -- and logs it to syslog. A device's name and type name are read
+//! from `/sys/class/rfkill/rfkillN/`. SlateOS has neither yet, so there every
+//! command but `help` says `cannot open /dev/rfkill`, as upstream's does on a
+//! Linux without the driver.
+//!
+//! # What is upstream's, and easy to get wrong
+//!
+//! * **The sysfs reader keeps its last answer.** `get_sys_attr` reads into
+//!   one static buffer and returns it whether or not the read worked, so a
+//!   device whose `name` cannot be read shows what was read last -- its own
+//!   `type`, in the table, whose TYPE column comes first. At most 127 bytes
+//!   are read, up to the first newline, and a NUL ends the value.
+//! * **A type with no description aborts.** The description of a device
+//!   type the table does not know -- 0, which is `all`, or one past NFC -- is
+//!   `NULL`, and `xstrdup(NULL)` fails its assertion: the plain `list` and
+//!   the TYPE-DESC column both die of `SIGABRT`, what they had printed lost.
+//! * **A short event is skipped, and `errno` decides what comes next.** A
+//!   read of fewer than 8 bytes is warned about; listing then stops only if
+//!   `errno` happens to be `EAGAIN` -- left there by an earlier identifier's
+//!   last read -- and otherwise reads on. [`Rfkill::errno`] follows `errno`
+//!   through the calls upstream makes, for that test alone.
+//! * **`toggle all` toggles everything once per device**: every device's
+//!   `ADD` event sends a `CHANGE_ALL` that sets every device to the opposite
+//!   of *that* device's soft block.
+//! * **`-o` adds to the default columns with `+`, else replaces them**, and
+//!   only when `list` is not named alone: `rfkill list` is the old format,
+//!   `rfkill` and `rfkill -o ... list` the table.
+//! * **`id %d`**: the log message prints the index as a signed `int`.
+//! * **A failed write changes nothing**: `write failed: /dev/rfkill` is
+//!   warned about, and the status is still 0.
+//!
+//! # What is not upstream's
+//!
+//! * **An identifier in a diagnostic** has its unprintable bytes escaped
+//!   (design-decisions §370).
 
-use quoting::quoteaf_os;
-use std::env;
-use std::process;
+stdfdguard::guard_std_fds!();
 
-// ── Constants ──────────────────────────────────────────────────────────
+use getoptlong::{Opt, Program, Takes};
+use quoting::{escape_unprintable, os_bytes};
+use smartcols::{FL_RIGHT, JsonType, Table};
+use std::ffi::{CString, OsStr, OsString};
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+use ulclosestream::{Stdout, stderr_write, warn, warnx};
+use ulstrutils::{NumErr, err_exclusive_options, num_error_message, string_add_to_idarray};
 
-const RFKILL_DIR: &str = "/sys/class/rfkill";
+/// `_PATH_DEV_RFKILL` and `_PATH_SYS_RFKILL`.
+const PATH_DEV_RFKILL: &str = "/dev/rfkill";
+const PATH_SYS_RFKILL: &str = "/sys/class/rfkill";
 
-// ── Data structures ────────────────────────────────────────────────────
+/// `RFKILL_EVENT_SIZE_V1`, which is also `sizeof (struct rfkill_event)` in
+/// the headers upstream is built with.
+const RFKILL_EVENT_SIZE_V1: usize = 8;
 
-#[derive(Clone, Debug)]
-struct RfkillDevice {
-    id: u32,
-    device_type: RfkillType,
-    name: String,
-    soft_blocked: bool,
-    hard_blocked: bool,
-    _persistent: bool,
+/// `enum rfkill_type`.
+const RFKILL_TYPE_ALL: u32 = 0;
+const RFKILL_TYPE_WLAN: u32 = 1;
+const RFKILL_TYPE_BLUETOOTH: u32 = 2;
+const RFKILL_TYPE_UWB: u32 = 3;
+const RFKILL_TYPE_WIMAX: u32 = 4;
+const RFKILL_TYPE_WWAN: u32 = 5;
+const RFKILL_TYPE_GPS: u32 = 6;
+const RFKILL_TYPE_FM: u32 = 7;
+const RFKILL_TYPE_NFC: u32 = 8;
+const NUM_RFKILL_TYPES: u32 = 9;
+
+/// `enum rfkill_operation`.
+const RFKILL_OP_ADD: u8 = 0;
+const RFKILL_OP_CHANGE: u8 = 2;
+const RFKILL_OP_CHANGE_ALL: u8 = 3;
+
+/// `EAGAIN`.
+const EAGAIN: i32 = 11;
+/// `EINVAL`.
+const EINVAL: i32 = 22;
+
+/// syslog's `LOG_USER` and `LOG_NOTICE`.
+const LOG_USER: i32 = 1 << 3;
+const LOG_NOTICE: i32 = 5;
+
+/// `struct rfkill_type_str`.
+struct TypeStr {
+    ty: u32,
+    name: Option<&'static str>,
+    desc: Option<&'static str>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-enum RfkillType {
-    Wlan,
-    Bluetooth,
-    Uwb,
-    Wimax,
-    Wwan,
-    Gps,
-    Fm,
-    Nfc,
+/// `rfkill_type_strings[]`, in its order -- the first row of a type gives
+/// its description -- with its terminator, which `rfkill_type_to_desc`
+/// searches too.
+const RFKILL_TYPE_STRINGS: [TypeStr; 12] = [
+    TypeStr {
+        ty: RFKILL_TYPE_ALL,
+        name: Some("all"),
+        desc: None,
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_WLAN,
+        name: Some("wlan"),
+        desc: Some("Wireless LAN"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_WLAN,
+        name: Some("wifi"),
+        desc: None,
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_BLUETOOTH,
+        name: Some("bluetooth"),
+        desc: Some("Bluetooth"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_UWB,
+        name: Some("uwb"),
+        desc: Some("Ultra-Wideband"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_UWB,
+        name: Some("ultrawideband"),
+        desc: None,
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_WIMAX,
+        name: Some("wimax"),
+        desc: Some("WiMAX"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_WWAN,
+        name: Some("wwan"),
+        desc: Some("Wireless WAN"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_GPS,
+        name: Some("gps"),
+        desc: Some("GPS"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_FM,
+        name: Some("fm"),
+        desc: Some("FM"),
+    },
+    TypeStr {
+        ty: RFKILL_TYPE_NFC,
+        name: Some("nfc"),
+        desc: Some("NFC"),
+    },
+    TypeStr {
+        ty: NUM_RFKILL_TYPES,
+        name: None,
+        desc: None,
+    },
+];
+
+/// `struct rfkill_id`: what an identifier on the command line names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RfkillId {
+    /// `RFKILL_IS_INVALID`.
+    Invalid,
+    /// `RFKILL_IS_TYPE`: every device of a type.
+    Type(u32),
+    /// `RFKILL_IS_INDEX`: one device, by its index.
+    Index(u32),
+    /// `RFKILL_IS_ALL`.
     All,
-    Unknown(String),
 }
 
-impl RfkillType {
-    fn from_str(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
-            "wlan" | "wifi" => Self::Wlan,
-            "bluetooth" => Self::Bluetooth,
-            "uwb" | "ultrawideband" => Self::Uwb,
-            "wimax" => Self::Wimax,
-            "wwan" => Self::Wwan,
-            "gps" => Self::Gps,
-            "fm" => Self::Fm,
-            "nfc" => Self::Nfc,
-            "all" => Self::All,
-            other => Self::Unknown(other.to_string()),
-        }
-    }
-
-    fn type_id(&self) -> u32 {
-        match self {
-            Self::Wlan => 1,
-            Self::Bluetooth => 2,
-            Self::Uwb => 3,
-            Self::Wimax => 4,
-            Self::Wwan => 5,
-            Self::Gps => 6,
-            Self::Fm => 7,
-            Self::Nfc => 8,
-            Self::All => 0,
-            Self::Unknown(_) => 255,
-        }
-    }
+/// `struct rfkill_event`, as it comes from and goes to `/dev/rfkill`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Event {
+    idx: u32,
+    ty: u8,
+    op: u8,
+    soft: u8,
+    hard: u8,
 }
 
-impl std::fmt::Display for RfkillType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Wlan => write!(f, "wlan"),
-            Self::Bluetooth => write!(f, "bluetooth"),
-            Self::Uwb => write!(f, "uwb"),
-            Self::Wimax => write!(f, "wimax"),
-            Self::Wwan => write!(f, "wwan"),
-            Self::Gps => write!(f, "gps"),
-            Self::Fm => write!(f, "fm"),
-            Self::Nfc => write!(f, "nfc"),
-            Self::All => write!(f, "all"),
-            Self::Unknown(s) => write!(f, "{}", s),
+impl Event {
+    /// The event in the kernel's layout: the index in the machine's order,
+    /// then the four bytes.
+    fn to_bytes(self) -> [u8; RFKILL_EVENT_SIZE_V1] {
+        let [a, b, c, d] = self.idx.to_ne_bytes();
+        [a, b, c, d, self.ty, self.op, self.soft, self.hard]
+    }
+
+    /// An event from the kernel's layout.
+    fn from_bytes(b: [u8; RFKILL_EVENT_SIZE_V1]) -> Self {
+        let [a, b0, c, d, ty, op, soft, hard] = b;
+        Event {
+            idx: u32::from_ne_bytes([a, b0, c, d]),
+            ty,
+            op,
+            soft,
+            hard,
         }
     }
 }
 
-// ── Device discovery ───────────────────────────────────────────────────
-
-// `simulated_devices` used to be here: a `phy0` WLAN, a Bluetooth and a WWAN
-// device, all with `soft_blocked: false`.
-//
-// It fired whenever `/sys/class/rfkill` could not be read, which on this
-// kernel is every run -- sysfs serves no `rfkill` entry. So `rfkill list`
-// always reported three radios and always reported them UNBLOCKED, having
-// looked at nothing. Someone checking whether they had disabled their
-// wireless would have been told, confidently, that they had not.
-
-fn read_devices() -> Vec<RfkillDevice> {
-    let entries = match std::fs::read_dir(RFKILL_DIR) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-
-    let mut devices = Vec::new();
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if !name_str.starts_with("rfkill") {
-            continue;
-        }
-        let id: u32 = match name_str.strip_prefix("rfkill").and_then(|s| s.parse().ok()) {
-            Some(v) => v,
-            None => continue,
-        };
-
-        let base = entry.path();
-        let dev_type = read_sysfs(&base.join("type")).unwrap_or_default();
-        let dev_name = read_sysfs(&base.join("name")).unwrap_or_else(|| format!("rfkill{}", id));
-        let soft = read_sysfs(&base.join("soft"))
-            .map(|s| s == "1")
-            .unwrap_or(false);
-        let hard = read_sysfs(&base.join("hard"))
-            .map(|s| s == "1")
-            .unwrap_or(false);
-        let persistent = read_sysfs(&base.join("persistent"))
-            .map(|s| s == "1")
-            .unwrap_or(false);
-
-        devices.push(RfkillDevice {
-            id,
-            device_type: RfkillType::from_str(&dev_type),
-            name: dev_name,
-            soft_blocked: soft,
-            hard_blocked: hard,
-            _persistent: persistent,
-        });
-    }
-
-    if devices.is_empty() {
-        return Vec::new();
-    }
-
-    devices.sort_by_key(|d| d.id);
-    devices
+/// The supported actions, `ACT_*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    List,
+    Help,
+    Event,
+    Block,
+    Unblock,
+    Toggle,
+    ListOld,
 }
 
-fn read_sysfs(path: &std::path::Path) -> Option<String> {
-    Some(std::fs::read_to_string(path).ok()?.trim().to_string())
+/// `rfkill_actions[]`.
+const RFKILL_ACTIONS: [(&str, Action); 6] = [
+    ("list", Action::List),
+    ("help", Action::Help),
+    ("event", Action::Event),
+    ("block", Action::Block),
+    ("unblock", Action::Unblock),
+    ("toggle", Action::Toggle),
+];
+
+/// The column IDs, `COL_*`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Col {
+    Device,
+    Id,
+    Type,
+    Desc,
+    Soft,
+    Hard,
 }
 
-// ── Commands ───────────────────────────────────────────────────────────
+/// `struct colinfo`.
+struct ColInfo {
+    id: Col,
+    name: &'static str,
+    whint: f64,
+    flags: u32,
+    help: &'static str,
+}
 
-fn cmd_list(args: &[String]) {
-    let no_headings = args.iter().any(|a| a == "-n" || a == "--no-headings");
-    let json_mode = args.iter().any(|a| a == "-J" || a == "--json");
-    let output_all = args.iter().any(|a| a == "-o" || a == "--output-all");
+/// `infos[]`, in `enum` order.
+const INFOS: [ColInfo; 6] = [
+    ColInfo {
+        id: Col::Device,
+        name: "DEVICE",
+        whint: 0.0,
+        flags: 0,
+        help: "kernel device name",
+    },
+    ColInfo {
+        id: Col::Id,
+        name: "ID",
+        whint: 2.0,
+        flags: FL_RIGHT,
+        help: "device identifier value",
+    },
+    ColInfo {
+        id: Col::Type,
+        name: "TYPE",
+        whint: 0.0,
+        flags: 0,
+        help: "device type name that can be used as identifier",
+    },
+    ColInfo {
+        id: Col::Desc,
+        name: "TYPE-DESC",
+        whint: 0.0,
+        flags: 0,
+        help: "device type description",
+    },
+    ColInfo {
+        id: Col::Soft,
+        name: "SOFT",
+        whint: 0.0,
+        flags: FL_RIGHT,
+        help: "status of software block",
+    },
+    ColInfo {
+        id: Col::Hard,
+        name: "HARD",
+        whint: 0.0,
+        flags: FL_RIGHT,
+        help: "status of hardware block",
+    },
+];
 
-    let devices = read_devices();
+/// `columns[ARRAY_SIZE(infos) * 2]`.
+const MAX_COLUMNS: usize = 12;
 
-    if json_mode {
-        println!("{{\"rfkill\": [");
-        for (i, d) in devices.iter().enumerate() {
-            println!("  {{");
-            println!("    \"id\": {},", d.id);
-            println!("    \"type\": \"{}\",", d.device_type);
-            println!(
-                "    \"type-desc\": \"{}\",",
-                type_description(&d.device_type)
-            );
-            println!(
-                "    \"soft\": \"{}\",",
-                if d.soft_blocked {
-                    "blocked"
-                } else {
-                    "unblocked"
-                }
-            );
-            println!(
-                "    \"hard\": \"{}\",",
-                if d.hard_blocked {
-                    "blocked"
-                } else {
-                    "unblocked"
-                }
-            );
-            println!("    \"device\": \"{}\"", d.name);
-            if i + 1 < devices.len() {
-                println!("  }},");
-            } else {
-                println!("  }}");
-            }
-        }
-        println!("]}}");
-        return;
+/// Getopt's errors are only sentences here; the referral follows them.
+const RFKILL: Program = Program::new("rfkill", 1);
+
+/// Upstream's option string.
+const SHORTS: &str = "Jno:rVh";
+
+/// `OPT_LIST_TYPES`, `CHAR_MAX + 1`: `--output-all`.
+const OPT_LIST_TYPES: i32 = 128;
+
+/// Upstream's `longopts[]`, in its order, and each one's `val`.
+const LONGS: &[(&str, Takes)] = &[
+    ("json", Takes::Nothing),
+    ("noheadings", Takes::Nothing),
+    ("output", Takes::Required),
+    ("output-all", Takes::Nothing),
+    ("raw", Takes::Nothing),
+    ("version", Takes::Nothing),
+    ("help", Takes::Nothing),
+];
+const LONG_VALS: [i32; 7] = [
+    b'J' as i32,
+    b'n' as i32,
+    b'o' as i32,
+    OPT_LIST_TYPES,
+    b'r' as i32,
+    b'V' as i32,
+    b'h' as i32,
+];
+
+/// `excl[]`.
+const EXCL: [&[i32]; 1] = [&[b'J' as i32, b'r' as i32]];
+
+/// Why the program stops before its end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Stop {
+    /// `exit (status)`: `close_stdout` runs.
+    Exit(u8),
+    /// `abort ()`, after an assertion's message: nothing is flushed.
+    Abort,
+}
+
+/// The program's state: upstream's globals and the C library's.
+struct Rfkill {
+    /// `program_invocation_short_name`.
+    short: Vec<u8>,
+    /// Standard output, buffered as glibc's.
+    out: Stdout,
+    /// `errno`, as the calls upstream makes leave it -- read once, by the
+    /// listing loops after a short event (module docs).
+    errno: i32,
+    /// `get_sys_attr`'s `static char name[128]`, as a C string.
+    sys_attr: Vec<u8>,
+    /// `_PATH_DEV_RFKILL`; another file in the tests.
+    dev: String,
+    /// `_PATH_SYS_RFKILL`; another directory in the tests.
+    sys: PathBuf,
+    /// `json`, `no_headings` and `raw` of `struct control`.
+    json: bool,
+    no_headings: bool,
+    raw: bool,
+    /// `columns[]` and `ncolumns`.
+    columns: Vec<Col>,
+}
+
+fn main() -> ExitCode {
+    // Before anything touches standard I/O: a descriptor the process was
+    // started without stays closed, as upstream would find it.
+    stdfdguard::restore();
+    let argv: Vec<OsString> = std::env::args_os().collect();
+    let short = short_name(
+        argv.first()
+            .map_or(OsStr::new("rfkill"), OsString::as_os_str),
+    );
+    // `setlocale(LC_ALL, "")`, and what it leaves in `errno`.
+    let errno = smartcols::tty::setlocale_errno();
+    let mut rf = Rfkill::new(short, errno, PATH_DEV_RFKILL, Path::new(PATH_SYS_RFKILL));
+    let stop = rf.run(&argv);
+    let short = rf.short.clone();
+    match stop {
+        Stop::Exit(status) => ExitCode::from(rf.out.close(status, &short)),
+        Stop::Abort => std::process::abort(),
     }
+}
 
-    if !no_headings {
-        if output_all {
-            println!(
-                "{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} PERSISTENT",
-                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT", "HARD"
-            );
+/// `program_invocation_short_name`: argv[0] past its last `/`.
+fn short_name(arg0: &OsStr) -> Vec<u8> {
+    let bytes = os_bytes(arg0);
+    let start = bytes
+        .iter()
+        .rposition(|&b| b == b'/')
+        .map_or(0, |i| i.saturating_add(1));
+    bytes.get(start..).unwrap_or_default().to_vec()
+}
+
+/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
+fn shown(text: &[u8]) -> String {
+    escape_unprintable(text)
+}
+
+/// `column_name_to_id(name, namesz)`: a column by its name, in any case.
+/// Unknown, it is reported with the rest of the list after it, as
+/// upstream's C string runs on to the list's end.
+fn column_name_to_id(name: &[u8], rest: &[u8], short: &[u8]) -> Option<Col> {
+    let found = INFOS
+        .iter()
+        .find(|i| i.name.as_bytes().eq_ignore_ascii_case(name))
+        .map(|i| i.id);
+    if found.is_none() {
+        warnx(short, &format!("unknown column: {}", shown(rest)));
+    }
+    found
+}
+
+/// A column's `infos[]` entry.
+fn info(col: Col) -> &'static ColInfo {
+    INFOS.iter().find(|i| i.id == col).unwrap_or(&INFOS[0])
+}
+
+/// `string_to_action(str)`.
+fn string_to_action(s: &[u8]) -> Option<Action> {
+    RFKILL_ACTIONS
+        .iter()
+        .find(|(name, _)| name.as_bytes() == s)
+        .map(|&(_, a)| a)
+}
+
+/// `rfkill_type_to_desc(type)`: the description of the first row of the
+/// table with that type -- `None` for `all`, for the terminator's
+/// `NUM_RFKILL_TYPES`, and for any type past it.
+fn rfkill_type_to_desc(ty: u32) -> Option<&'static str> {
+    RFKILL_TYPE_STRINGS
+        .iter()
+        .find(|t| t.ty == ty)
+        .and_then(|t| t.desc)
+}
+
+/// `event_match(event, id)`: an `ADD` event of the device or type asked for.
+fn event_match(event: &Event, id: RfkillId) -> bool {
+    if event.op != RFKILL_OP_ADD {
+        return false;
+    }
+    match id {
+        RfkillId::Type(ty) => u32::from(event.ty) == ty,
+        RfkillId::Index(index) => event.idx == index,
+        // `abort ()` upstream for an invalid one, which no caller passes.
+        RfkillId::All | RfkillId::Invalid => true,
+    }
+}
+
+/// `option_to_longopt(c, longopts)`.
+fn option_to_longopt(c: i32) -> Option<&'static str> {
+    LONG_VALS
+        .iter()
+        .position(|&v| v == c)
+        .and_then(|i| LONGS.get(i))
+        .map(|&(name, _)| name)
+}
+
+/// The option each parsed item stands for, as upstream's switch sees it.
+fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
+    match opt {
+        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
+        Opt::Long(name, value) => {
+            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
+            Some((*LONG_VALS.get(i)?, value.clone()))
+        }
+        Opt::Operand(_) => None,
+    }
+}
+
+/// `usage()`'s text.
+fn usage(short: &[u8]) -> Vec<u8> {
+    let mut text = b"\nUsage:\n ".to_vec();
+    text.extend_from_slice(short);
+    text.extend_from_slice(
+        b" [options] command [identifier ...]\n\
+\nTool for enabling and disabling wireless devices.\n\
+\nOptions:\n\
+\x20-J, --json             use JSON output format\n\
+\x20-n, --noheadings       don't print headings\n\
+\x20-o, --output <list>    define which output columns to use\n\
+\x20    --output-all       output all columns\n\
+\x20-r, --raw              use the raw output format\n\
+\n",
+    );
+    text.extend_from_slice(format!("{:<24}{}\n", " -h, --help", "display this help").as_bytes());
+    text.extend_from_slice(format!("{:<24}{}\n", " -V, --version", "display version").as_bytes());
+    text.extend_from_slice(b"\nAvailable output columns:\n");
+    for i in &INFOS {
+        text.extend_from_slice(format!(" {:<10}  {}\n", i.name, i.help).as_bytes());
+    }
+    text.extend_from_slice(
+        b"\nCommands:\n\
+\x20help\n\
+\x20event\n\
+\x20list   [identifier]\n\
+\x20block   identifier\n\
+\x20unblock identifier\n\
+\x20toggle  identifier\n\
+\nFor more details see rfkill(8).\n",
+    );
+    text
+}
+
+/// `strtimeval_iso(&tv, ISO_TIMESTAMP_COMMA, ...)`: `2017-01-16
+/// 09:43:41,432447+01:00`, `sec` and `usec` in the local zone.
+fn timestamp(zone: &localtime::Zone, sec: i64, usec: u32) -> String {
+    let tm = zone.localtime(sec, usec.saturating_mul(1000));
+    // `get_gmtoff`, then the minutes always positive -- half an hour west
+    // is `+00:30`, as util-linux has it.
+    let tmin = tm.gmtoff / 60;
+    let zhour = tmin / 60;
+    let zmin = (tmin % 60).abs();
+    format!(
+        "{:4}-{:02}-{:02} {:02}:{:02}:{:02},{:06}{:+03}:{:02}",
+        tm.year, tm.month, tm.day, tm.hour, tm.minute, tm.second, usec, zhour, zmin
+    )
+}
+
+/// A descriptor of `/dev/rfkill`, closed when dropped.
+struct Device(i32);
+
+impl Drop for Device {
+    fn drop(&mut self) {
+        // `close (fd)`: its answer is looked at only by `rfkill_block`,
+        // which calls [`Device::close`] instead.
+        let _ = libcall::fd::close(self.0);
+    }
+}
+
+impl Device {
+    /// `close (fd)`, its answer kept: 0 or -1, as `rfkill_block` returns it.
+    fn close(self) -> i32 {
+        let fd = self.0;
+        std::mem::forget(self);
+        if libcall::fd::close(fd).is_ok() {
+            0
         } else {
-            println!(
-                "{:<4} {:>4} {:<12} {:<16} {:<10} HARD",
-                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT"
-            );
-        }
-    }
-
-    for d in &devices {
-        let soft = if d.soft_blocked {
-            "blocked"
-        } else {
-            "unblocked"
-        };
-        let hard = if d.hard_blocked {
-            "blocked"
-        } else {
-            "unblocked"
-        };
-        if output_all {
-            println!(
-                "{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} {}",
-                d.id,
-                d.device_type.type_id(),
-                type_description(&d.device_type),
-                d.name,
-                soft,
-                hard,
-                if d._persistent { "yes" } else { "no" }
-            );
-        } else {
-            println!(
-                "{:<4} {:>4} {:<12} {:<16} {:<10} {}",
-                d.id,
-                d.device_type.type_id(),
-                type_description(&d.device_type),
-                d.name,
-                soft,
-                hard
-            );
+            -1
         }
     }
 }
 
-fn cmd_block(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("Usage: rfkill block <type|id>");
-        process::exit(1);
-    }
-
-    let target = &args[0];
-    let devices = read_devices();
-
-    if let Ok(id) = target.parse::<u32>() {
-        if let Some(d) = devices.iter().find(|d| d.id == id) {
-            println!("Soft blocked device {} ({})", d.id, d.name);
-        } else {
-            eprintln!("No device with ID {}", id);
-            process::exit(1);
-        }
-    } else {
-        let rtype = RfkillType::from_str(target);
-        let mut count = 0;
-        for d in &devices {
-            if rtype == RfkillType::All || d.device_type == rtype {
-                println!(
-                    "Soft blocked device {} ({}) [{}]",
-                    d.id, d.name, d.device_type
-                );
-                count += 1;
-            }
-        }
-        if count == 0 {
-            eprintln!("No devices of type {}", quoteaf_os(target));
-            process::exit(1);
+impl Rfkill {
+    /// The program as it starts: `errno` as `setlocale` left it.
+    fn new(short: Vec<u8>, errno: i32, dev: &str, sys: &Path) -> Self {
+        Rfkill {
+            short,
+            out: Stdout::new(1),
+            errno,
+            sys_attr: Vec::new(),
+            dev: dev.to_owned(),
+            sys: sys.to_path_buf(),
+            json: false,
+            no_headings: false,
+            raw: false,
+            columns: Vec::new(),
         }
     }
-}
 
-fn cmd_unblock(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("Usage: rfkill unblock <type|id>");
-        process::exit(1);
+    /// `warnx (msg)`.
+    fn warnx(&self, msg: &str) {
+        warnx(&self.short, msg);
     }
 
-    let target = &args[0];
-    let devices = read_devices();
-
-    if let Ok(id) = target.parse::<u32>() {
-        if let Some(d) = devices.iter().find(|d| d.id == id) {
-            if d.hard_blocked {
-                eprintln!("Warning: device {} ({}) is hardware blocked", d.id, d.name);
-            }
-            println!("Soft unblocked device {} ({})", d.id, d.name);
-        } else {
-            eprintln!("No device with ID {}", id);
-            process::exit(1);
-        }
-    } else {
-        let rtype = RfkillType::from_str(target);
-        let mut count = 0;
-        for d in &devices {
-            if rtype == RfkillType::All || d.device_type == rtype {
-                if d.hard_blocked {
-                    eprintln!("Warning: device {} ({}) is hardware blocked", d.id, d.name);
-                }
-                println!(
-                    "Soft unblocked device {} ({}) [{}]",
-                    d.id, d.name, d.device_type
-                );
-                count += 1;
-            }
-        }
-        if count == 0 {
-            eprintln!("No devices of type {}", quoteaf_os(target));
-            process::exit(1);
-        }
-    }
-}
-
-fn cmd_toggle(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("Usage: rfkill toggle <type|id>");
-        process::exit(1);
+    /// `warn (msg)`, with the `errno` of the call that failed.
+    fn warn(&self, msg: &str, errno: i32) {
+        warn(&self.short, msg, &std::io::Error::from_raw_os_error(errno));
     }
 
-    let target = &args[0];
-    let devices = read_devices();
-
-    if let Ok(id) = target.parse::<u32>() {
-        if let Some(d) = devices.iter().find(|d| d.id == id) {
-            let action = if d.soft_blocked {
-                "unblocked"
-            } else {
-                "blocked"
-            };
-            println!("Soft {} device {} ({})", action, d.id, d.name);
-        } else {
-            eprintln!("No device with ID {}", id);
-            process::exit(1);
-        }
-    } else {
-        let rtype = RfkillType::from_str(target);
-        for d in &devices {
-            if rtype == RfkillType::All || d.device_type == rtype {
-                let action = if d.soft_blocked {
-                    "unblocked"
-                } else {
-                    "blocked"
-                };
-                println!("Soft {} device {} ({})", action, d.id, d.name);
-            }
-        }
-    }
-}
-
-fn cmd_event() {
-    println!("Listening for rfkill events...");
-    println!("(Press Ctrl+C to stop)");
-    println!();
-
-    // Simulate some events
-    let devices = read_devices();
-    for d in &devices {
-        let _status = if d.soft_blocked {
-            "blocked"
-        } else {
-            "unblocked"
-        };
-        println!(
-            "{:>10}: idx {} type {} op change soft {} hard {}",
-            "rfkill",
-            d.id,
-            d.device_type.type_id(),
-            if d.soft_blocked { 1 } else { 0 },
-            if d.hard_blocked { 1 } else { 0 }
+    /// `errtryhelp (EXIT_FAILURE)`.
+    fn errtryhelp(&self) -> Stop {
+        stderr_write(
+            format!(
+                "Try '{} --help' for more information.\n",
+                shown(&self.short)
+            )
+            .as_bytes(),
         );
-    }
-}
-
-fn type_description(t: &RfkillType) -> &str {
-    match t {
-        RfkillType::Wlan => "Wireless LAN",
-        RfkillType::Bluetooth => "Bluetooth",
-        RfkillType::Uwb => "Ultra-Wideband",
-        RfkillType::Wimax => "WiMAX",
-        RfkillType::Wwan => "Wireless WAN",
-        RfkillType::Gps => "GPS",
-        RfkillType::Fm => "FM",
-        RfkillType::Nfc => "NFC",
-        RfkillType::All => "All",
-        RfkillType::Unknown(_) => "Unknown",
-    }
-}
-
-// ── Help ───────────────────────────────────────────────────────────────
-
-fn print_help() {
-    println!("rfkill — Wireless device control");
-    println!();
-    println!("Usage: rfkill [OPTIONS] COMMAND [ARGS]");
-    println!();
-    println!("Commands:");
-    println!("  list                   List rfkill devices (default)");
-    println!("  block <type|id>        Soft-block a device");
-    println!("  unblock <type|id>      Soft-unblock a device");
-    println!("  toggle <type|id>       Toggle soft-block state");
-    println!("  event                  Listen for rfkill events");
-    println!();
-    println!("Types: wlan, bluetooth, uwb, wimax, wwan, gps, fm, nfc, all");
-    println!();
-    println!("Options:");
-    println!("  -J, --json             JSON output");
-    println!("  -n, --no-headings      Suppress column headers");
-    println!("  -o, --output-all       Show all columns");
-    println!("  -h, --help             Show this help");
-}
-
-// ── Main dispatch ──────────────────────────────────────────────────────
-
-fn main() {
-    let args: Vec<String> = env::args().collect();
-    let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "list".to_string());
-    let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
-
-    if cmd == "-h" || cmd == "--help" {
-        print_help();
-        return;
+        Stop::Exit(1)
     }
 
-    match cmd.as_str() {
-        "list" => cmd_list(&cmd_args),
-        "block" => cmd_block(&cmd_args),
-        "unblock" => cmd_unblock(&cmd_args),
-        "toggle" => cmd_toggle(&cmd_args),
-        "event" => cmd_event(),
-        _ => {
-            eprintln!("Unknown command: {}", cmd);
-            print_help();
-            process::exit(1);
+    /// `xstrdup (str)` of a string that may be `NULL`: the assertion that
+    /// fails for one, and the `abort` after it.
+    fn xstrdup(&self, s: Option<&str>) -> Result<Vec<u8>, Stop> {
+        match s {
+            Some(s) => Ok(s.as_bytes().to_vec()),
+            None => {
+                let mut msg = self.short.clone();
+                msg.extend_from_slice(
+                    b": ./include/xalloc.h:68: xstrdup: Assertion `str' failed.\n",
+                );
+                stderr_write(&msg);
+                Err(Stop::Abort)
+            }
         }
     }
+
+    /// `rfkill_open (rdonly, nonblock)`: the descriptor, or `-errno` after
+    /// a warning.
+    fn rfkill_open(&mut self, rdonly: bool, nonblock: bool) -> Result<Device, i32> {
+        let flags = if rdonly {
+            libcall::file::O_RDONLY
+        } else {
+            libcall::fd::O_RDWR
+        };
+        let path = CString::new(self.dev.as_bytes()).unwrap_or_default();
+        let fd = match libcall::file::openat(libcall::file::AT_FDCWD, &path, flags, 0) {
+            Ok(fd) => Device(fd),
+            Err(e) => {
+                self.errno = e;
+                self.warn(&format!("cannot open {}", self.dev), e);
+                return Err(e.wrapping_neg());
+            }
+        };
+        if nonblock && let Err(e) = libcall::file::set_status_flags(fd.0, libcall::file::O_NONBLOCK)
+        {
+            self.errno = e;
+            self.warn(&format!("cannot set non-blocking {}", self.dev), e);
+            return Err(e.wrapping_neg());
+        }
+        Ok(fd)
+    }
+
+    /// `rfkill_read_event (fd, event)`: `Ok(Some)` for an event, `Ok(None)`
+    /// for "read again" (nothing there, or a short event), `Err(-errno)` for
+    /// a failure.
+    fn rfkill_read_event(&mut self, fd: &Device) -> Result<Option<Event>, i32> {
+        let mut buf = [0u8; RFKILL_EVENT_SIZE_V1];
+        let len = match libcall::fd::read(fd.0, &mut buf) {
+            Ok(len) => len,
+            Err(e) => {
+                self.errno = e;
+                if e == EAGAIN {
+                    return Ok(None);
+                }
+                self.warn(&format!("cannot read {}", self.dev), e);
+                return Err(e.wrapping_neg());
+            }
+        };
+        if len < RFKILL_EVENT_SIZE_V1 {
+            self.warnx(&format!(
+                "wrong size of rfkill event: {len} < {RFKILL_EVENT_SIZE_V1}"
+            ));
+            return Ok(None);
+        }
+        Ok(Some(Event::from_bytes(buf)))
+    }
+
+    /// `rfkill_event ()`: every event, timestamped, until the device or
+    /// standard output fails. Always -1.
+    fn rfkill_event(&mut self) -> i32 {
+        use libcall::fd::{POLLHUP, POLLIN, PollFd};
+        let fd = match self.rfkill_open(true, false) {
+            Ok(fd) => fd,
+            Err(rc) => return rc,
+        };
+        let zone = localtime::Zone::from_env();
+        let mut p = [
+            PollFd {
+                fd: fd.0,
+                events: POLLIN | POLLHUP,
+                revents: 0,
+            },
+            PollFd {
+                fd: 1,
+                events: 0,
+                revents: 0,
+            },
+        ];
+        // Interrupted by a signal only.
+        loop {
+            if let Err(e) = libcall::fd::poll(&mut p, -1) {
+                self.errno = e;
+                self.warn(&format!("failed to poll {}", self.dev), e);
+                return -1;
+            }
+            if p[1].revents != 0 {
+                // The read end of standard output has gone.
+                return -1;
+            }
+            let event = if p[0].revents == 0 {
+                None
+            } else {
+                match self.rfkill_read_event(&fd) {
+                    Ok(event) => event,
+                    Err(_) => return -1,
+                }
+            };
+            let Some(event) = event else {
+                continue;
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default();
+            let sec = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
+            let date = timestamp(&zone, sec, now.subsec_micros());
+            self.out.write(
+                format!(
+                    "{date}: idx {} type {} op {} soft {} hard {}\n",
+                    event.idx, event.ty, event.op, event.soft, event.hard
+                )
+                .as_bytes(),
+            );
+            self.out.flush();
+        }
+    }
+
+    /// `get_sys_attr (idx, attr)`: the first line of
+    /// `/sys/class/rfkill/rfkillIDX/ATTR`, read into the one buffer every
+    /// call shares -- left as it was when the file cannot be read.
+    fn get_sys_attr(&mut self, idx: u32, attr: &str) -> Vec<u8> {
+        let path = self.sys.join(format!("rfkill{idx}")).join(attr);
+        match std::fs::File::open(&path) {
+            Ok(file) => {
+                // `fgets (name, 128, f)`: at most 127 bytes, to a newline.
+                let mut line = Vec::new();
+                let read = BufReader::new(file.take(127)).read_until(b'\n', &mut line);
+                if matches!(read, Ok(n) if n > 0) {
+                    let line = smartcols::mbs::c_str(&line);
+                    let end = line.iter().position(|&b| b == b'\n').unwrap_or(line.len());
+                    self.sys_attr = line.get(..end).unwrap_or_default().to_vec();
+                }
+            }
+            Err(e) => {
+                if let Some(e) = e.raw_os_error() {
+                    self.errno = e;
+                }
+            }
+        }
+        self.sys_attr.clone()
+    }
+
+    /// `rfkill_id_to_type (s)`: a type's name, `all`, or a device's index
+    /// whose `name` exists in sysfs. An index that is not a number ends the
+    /// program, as `strtou32_or_err` does.
+    fn rfkill_id_to_type(&mut self, s: &[u8]) -> Result<RfkillId, Stop> {
+        match s.first() {
+            Some(b'a'..=b'z') => {
+                for t in &RFKILL_TYPE_STRINGS {
+                    let Some(name) = t.name else {
+                        break;
+                    };
+                    if name.as_bytes() == s {
+                        return Ok(if name == "all" {
+                            RfkillId::All
+                        } else {
+                            RfkillId::Type(t.ty)
+                        });
+                    }
+                }
+                Ok(RfkillId::Invalid)
+            }
+            Some(b'0'..=b'9') => {
+                let index = match self.strtou32_or_err(s) {
+                    Ok(index) => index,
+                    Err(e) => {
+                        let arg = os_from_bytes(s);
+                        self.warnx(&num_error_message("invalid identifier", &arg, e));
+                        return Err(Stop::Exit(1));
+                    }
+                };
+                let name = self.sys.join(format!("rfkill{index}")).join("name");
+                // `access (filename, F_OK)`: there, once links are followed.
+                match std::fs::metadata(&name) {
+                    Ok(_) => Ok(RfkillId::Index(index)),
+                    Err(e) => {
+                        if let Some(e) = e.raw_os_error() {
+                            self.errno = e;
+                        }
+                        Ok(RfkillId::Invalid)
+                    }
+                }
+            }
+            _ => Ok(RfkillId::Invalid),
+        }
+    }
+
+    /// `strtou32_or_err (s, ...)`'s conversion: `ul_strtou64`, which leaves
+    /// `errno` 0 when it succeeds, then the range of a `uint32_t`.
+    fn strtou32_or_err(&mut self, s: &[u8]) -> Result<u32, NumErr> {
+        let wide = ulstrutils::ul_strtou64(s, 10)?;
+        self.errno = 0;
+        u32::try_from(wide).map_err(|_| NumErr::Range)
+    }
+
+    /// `fill_table_row (tb, event)`.
+    fn fill_table_row(
+        &mut self,
+        tb: &mut Table,
+        ids: &[(Col, smartcols::ColumnId)],
+        event: &Event,
+    ) -> Result<(), Stop> {
+        let Ok(ln) = tb.new_line(None) else {
+            self.warnx("failed to allocate output line");
+            return Err(Stop::Exit(1));
+        };
+        for &(col, cl) in ids {
+            let data = match col {
+                Col::Device => self.get_sys_attr(event.idx, "name"),
+                Col::Id => event.idx.to_string().into_bytes(),
+                Col::Type => self.get_sys_attr(event.idx, "type"),
+                Col::Desc => self.xstrdup(rfkill_type_to_desc(u32::from(event.ty)))?,
+                Col::Soft => blocked(event.soft),
+                Col::Hard => blocked(event.hard),
+            };
+            if tb.line_set_data(ln, cl, &data).is_err() {
+                self.warnx("failed to add output data");
+                return Err(Stop::Exit(1));
+            }
+        }
+        Ok(())
+    }
+
+    /// `rfkill_list_old (param)`: the old format, one paragraph a device.
+    fn rfkill_list_old(&mut self, param: Option<&[u8]>) -> Result<i32, Stop> {
+        let mut id = RfkillId::All;
+        if let Some(param) = param {
+            id = self.rfkill_id_to_type(param)?;
+            if id == RfkillId::Invalid {
+                self.warnx(&format!("invalid identifier: {}", shown(param)));
+                return Ok(-EINVAL);
+            }
+        }
+        let fd = match self.rfkill_open(true, true) {
+            Ok(fd) => fd,
+            Err(rc) => return Ok(rc),
+        };
+        let rc;
+        loop {
+            match self.rfkill_read_event(&fd) {
+                Err(e) => {
+                    rc = e;
+                    break;
+                }
+                Ok(None) => {
+                    if self.errno == EAGAIN {
+                        rc = 0;
+                        break;
+                    }
+                }
+                Ok(Some(event)) => {
+                    if event_match(&event, id) {
+                        let name = self.get_sys_attr(event.idx, "name");
+                        // Upstream falls back to sysfs's type name when there
+                        // is no description -- after `xstrdup` has already
+                        // failed its assertion on the `NULL`.
+                        let ty = self.xstrdup(rfkill_type_to_desc(u32::from(event.ty)))?;
+                        let mut text = format!("{}: ", event.idx).into_bytes();
+                        text.extend_from_slice(&name);
+                        text.extend_from_slice(b": ");
+                        text.extend_from_slice(&ty);
+                        text.extend_from_slice(
+                            format!(
+                                "\n\tSoft blocked: {}\n\tHard blocked: {}\n",
+                                yes_no(event.soft),
+                                yes_no(event.hard)
+                            )
+                            .as_bytes(),
+                        );
+                        self.out.write(&text);
+                    }
+                }
+            }
+        }
+        drop(fd);
+        Ok(rc)
+    }
+
+    /// `rfkill_list_init (ctrl)`: the table and its columns.
+    fn rfkill_list_init(&self) -> (Table, Vec<(Col, smartcols::ColumnId)>) {
+        let mut tb = Table::new();
+        tb.enable_json(self.json);
+        tb.set_name(b"rfkilldevices");
+        tb.enable_noheadings(self.no_headings);
+        tb.enable_raw(self.raw);
+        let mut ids = Vec::with_capacity(self.columns.len());
+        for &col in &self.columns {
+            let i = info(col);
+            let cl = tb.new_column(i.name.as_bytes(), i.whint, i.flags);
+            if self.json && col == Col::Id {
+                // The column is the table's own.
+                let _ = tb.column_set_json_type(cl, JsonType::Number);
+            }
+            ids.push((col, cl));
+        }
+        (tb, ids)
+    }
+
+    /// `rfkill_list_fill (ctrl, param)`: a row for each device asked for.
+    fn rfkill_list_fill(
+        &mut self,
+        tb: &mut Table,
+        ids: &[(Col, smartcols::ColumnId)],
+        param: Option<&[u8]>,
+    ) -> Result<i32, Stop> {
+        let mut id = RfkillId::All;
+        if let Some(param) = param {
+            id = self.rfkill_id_to_type(param)?;
+            if id == RfkillId::Invalid {
+                self.warnx(&format!("invalid identifier: {}", shown(param)));
+                return Ok(-EINVAL);
+            }
+        }
+        let fd = match self.rfkill_open(true, true) {
+            Ok(fd) => fd,
+            Err(rc) => return Ok(rc),
+        };
+        let rc;
+        loop {
+            match self.rfkill_read_event(&fd) {
+                Err(e) => {
+                    rc = e;
+                    break;
+                }
+                Ok(None) => {
+                    if self.errno == EAGAIN {
+                        rc = 0;
+                        break;
+                    }
+                }
+                Ok(Some(event)) => {
+                    if event_match(&event, id) {
+                        self.fill_table_row(tb, ids, &event)?;
+                    }
+                }
+            }
+        }
+        drop(fd);
+        Ok(rc)
+    }
+
+    /// `__rfkill_block (fd, id, block, param)`: one request written, and
+    /// logged. Always 0 once the identifier is valid.
+    fn rfkill_block_on(&mut self, fd: &Device, id: RfkillId, block: u8, param: &[u8]) -> i32 {
+        let mut event = Event {
+            op: RFKILL_OP_CHANGE_ALL,
+            soft: block,
+            ..Event::default()
+        };
+        let message = match id {
+            RfkillId::Invalid => {
+                self.warnx(&format!("invalid identifier: {}", shown(param)));
+                return -1;
+            }
+            RfkillId::Type(ty) => {
+                event.ty = u8::try_from(ty).unwrap_or(u8::MAX);
+                let mut m = b"type ".to_vec();
+                m.extend_from_slice(param);
+                m
+            }
+            RfkillId::Index(index) => {
+                event.op = RFKILL_OP_CHANGE;
+                event.idx = index;
+                // `%d` of the index.
+                format!("id {}", index.cast_signed()).into_bytes()
+            }
+            RfkillId::All => b"all".to_vec(),
+        };
+        match write_all(fd.0, &event.to_bytes()) {
+            Err(e) => {
+                self.errno = e;
+                self.warn(&format!("write failed: {}", self.dev), e);
+            }
+            Ok(()) => {
+                // `write_all` sets `errno` to 0 before each write.
+                self.errno = 0;
+                libcsyslog::openlog(b"rfkill", 0, LOG_USER);
+                let mut line = if block == 0 {
+                    b"unblock".to_vec()
+                } else {
+                    b"block".to_vec()
+                };
+                line.extend_from_slice(b" set for ");
+                line.extend_from_slice(&message);
+                libcsyslog::syslog(LOG_NOTICE, &line);
+                libcsyslog::closelog();
+            }
+        }
+        0
+    }
+
+    /// `rfkill_block (block, param)`.
+    fn rfkill_block(&mut self, block: u8, param: &[u8]) -> Result<i32, Stop> {
+        let id = self.rfkill_id_to_type(param)?;
+        if id == RfkillId::Invalid {
+            self.warnx(&format!("invalid identifier: {}", shown(param)));
+            return Ok(-EINVAL);
+        }
+        let fd = match self.rfkill_open(false, false) {
+            Ok(fd) => fd,
+            Err(rc) => return Ok(rc),
+        };
+        self.rfkill_block_on(&fd, id, block, param);
+        Ok(fd.close())
+    }
+
+    /// `rfkill_toggle (param)`: each matching device's soft block, turned
+    /// over -- by a request of the identifier's kind, for each.
+    fn rfkill_toggle(&mut self, param: &[u8]) -> Result<i32, Stop> {
+        let id = self.rfkill_id_to_type(param)?;
+        if id == RfkillId::Invalid {
+            self.warnx(&format!("invalid identifier: {}", shown(param)));
+            return Ok(-EINVAL);
+        }
+        let fd = match self.rfkill_open(false, true) {
+            Ok(fd) => fd,
+            Err(rc) => return Ok(rc),
+        };
+        let rc;
+        loop {
+            match self.rfkill_read_event(&fd) {
+                Err(e) => {
+                    rc = e;
+                    break;
+                }
+                Ok(None) => {
+                    if self.errno == EAGAIN {
+                        rc = 0;
+                        break;
+                    }
+                }
+                Ok(Some(event)) => {
+                    if event_match(&event, id) {
+                        let block = u8::from(event.soft == 0);
+                        self.rfkill_block_on(&fd, id, block, param);
+                    }
+                }
+            }
+        }
+        drop(fd);
+        Ok(rc)
+    }
+
+    /// `main()`, to the point of its `return`.
+    fn run(&mut self, argv: &[OsString]) -> Stop {
+        let arg0 = argv
+            .first()
+            .map_or(OsStr::new("rfkill"), OsString::as_os_str);
+        let mut act = Action::List;
+        let mut list_all = false;
+        let mut outarg: Option<Vec<u8>> = None;
+        let mut excl_st = [0i32; 1];
+        let mut operands: Vec<Vec<u8>> = Vec::new();
+
+        let own = argv.get(1..).unwrap_or_default();
+        for item in RFKILL.parse(own, SHORTS, LONGS) {
+            let opt = match item {
+                Ok(opt) => opt,
+                Err(e) => {
+                    // glibc names the program by argv[0] as given.
+                    stderr_write(
+                        format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes(),
+                    );
+                    return self.errtryhelp();
+                }
+            };
+            let Some((c, value)) = option_code(&opt) else {
+                if let Opt::Operand(w) = opt {
+                    operands.push(os_bytes(w).into_owned());
+                }
+                continue;
+            };
+            if let Some(msg) =
+                err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short)
+            {
+                stderr_write(msg.as_bytes());
+                return Stop::Exit(1);
+            }
+            let arg = value
+                .as_deref()
+                .map(os_bytes)
+                .unwrap_or_default()
+                .into_owned();
+            match c {
+                c if c == i32::from(b'J') => self.json = true,
+                c if c == i32::from(b'n') => self.no_headings = true,
+                c if c == i32::from(b'o') => outarg = Some(arg),
+                OPT_LIST_TYPES => list_all = true,
+                c if c == i32::from(b'r') => self.raw = true,
+                c if c == i32::from(b'V') => {
+                    let mut line = self.short.clone();
+                    line.extend_from_slice(b" from util-linux 2.39.3\n");
+                    self.out.write(&line);
+                    return Stop::Exit(0);
+                }
+                c if c == i32::from(b'h') => {
+                    let text = usage(&self.short);
+                    self.out.write(&text);
+                    return Stop::Exit(0);
+                }
+                _ => return self.errtryhelp(),
+            }
+        }
+
+        let mut args = operands.as_slice();
+        if let Some((first, rest)) = args.split_first() {
+            let Some(a) = string_to_action(first) else {
+                return self.errtryhelp();
+            };
+            act = a;
+            args = rest;
+            // For backward compatibility the old format, if "list" is named
+            // and --output is not.
+            if outarg.is_none() && act == Action::List {
+                act = Action::ListOld;
+            }
+        }
+
+        let ret = match self.act(act, args, list_all, outarg.as_deref()) {
+            Ok(ret) => ret,
+            Err(stop) => return stop,
+        };
+        Stop::Exit(u8::from(ret != 0))
+    }
+
+    /// `main()`'s `switch (act)`: what it ORs into `ret`.
+    fn act(
+        &mut self,
+        act: Action,
+        args: &[Vec<u8>],
+        list_all: bool,
+        outarg: Option<&[u8]>,
+    ) -> Result<i32, Stop> {
+        let mut ret = 0i32;
+        match act {
+            Action::ListOld => {
+                if args.is_empty() {
+                    ret |= self.rfkill_list_old(None)?;
+                } else {
+                    for a in args {
+                        ret |= self.rfkill_list_old(Some(a))?;
+                    }
+                }
+            }
+            Action::List => {
+                self.columns = vec![Col::Id, Col::Type, Col::Device];
+                if list_all {
+                    self.columns.push(Col::Desc);
+                }
+                self.columns.push(Col::Soft);
+                self.columns.push(Col::Hard);
+                if let Some(list) = outarg {
+                    let short = self.short.clone();
+                    if string_add_to_idarray(list, &mut self.columns, MAX_COLUMNS, |name, rest| {
+                        column_name_to_id(name, rest, &short)
+                    })
+                    .is_err()
+                    {
+                        return Err(Stop::Exit(1));
+                    }
+                }
+                let (mut tb, ids) = self.rfkill_list_init();
+                if args.is_empty() {
+                    ret |= self.rfkill_list_fill(&mut tb, &ids, None)?;
+                } else {
+                    for a in args {
+                        ret |= self.rfkill_list_fill(&mut tb, &ids, Some(a))?;
+                    }
+                }
+                // `scols_print_table`, whose answer is not looked at.
+                let mut text = Vec::new();
+                let _ = tb.print_into(&mut text);
+                self.out.write(&text);
+            }
+            Action::Event => ret = self.rfkill_event(),
+            Action::Help => {
+                let text = usage(&self.short);
+                self.out.write(&text);
+                return Err(Stop::Exit(0));
+            }
+            Action::Block | Action::Unblock => {
+                let block = u8::from(act == Action::Block);
+                for a in args {
+                    ret |= self.rfkill_block(block, a)?;
+                }
+            }
+            Action::Toggle => {
+                for a in args {
+                    ret |= self.rfkill_toggle(a)?;
+                }
+            }
+        }
+        Ok(ret)
+    }
+}
+
+/// `blocked` or `unblocked`, for the table.
+fn blocked(state: u8) -> Vec<u8> {
+    if state == 0 {
+        b"unblocked".to_vec()
+    } else {
+        b"blocked".to_vec()
+    }
+}
+
+/// `yes` or `no`, for the old format.
+fn yes_no(state: u8) -> &'static str {
+    if state == 0 { "no" } else { "yes" }
+}
+
+/// `argv` bytes as an `OsString`, for a diagnostic's quoting. Off Unix,
+/// where argv is not bytes and the program never runs, bytes that are not
+/// UTF-8 are dropped.
+fn os_from_bytes(bytes: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(bytes.to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        std::str::from_utf8(bytes)
+            .map(OsString::from)
+            .unwrap_or_default()
+    }
+}
+
+/// util-linux's `write_all (fd, buf, count)`: again after a short write,
+/// after `EINTR`, and a quarter of a second after `EAGAIN`. A write of
+/// nothing fails, with the `errno` of 0 it set before the write.
+fn write_all(fd: i32, mut buf: &[u8]) -> Result<(), i32> {
+    while !buf.is_empty() {
+        match libcall::fd::write(fd, buf) {
+            Ok(0) => return Err(0),
+            Ok(n) => buf = buf.get(n..).unwrap_or_default(),
+            Err(e) if e == EAGAIN => std::thread::sleep(std::time::Duration::from_millis(250)),
+            Err(e) if e == libcall::EINTR => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_rfkill_type_from_str() {
-        assert_eq!(RfkillType::from_str("wlan"), RfkillType::Wlan);
-        assert_eq!(RfkillType::from_str("wifi"), RfkillType::Wlan);
-        assert_eq!(RfkillType::from_str("bluetooth"), RfkillType::Bluetooth);
-        assert_eq!(RfkillType::from_str("wwan"), RfkillType::Wwan);
-        assert_eq!(RfkillType::from_str("all"), RfkillType::All);
-        assert_eq!(RfkillType::from_str("nfc"), RfkillType::Nfc);
-    }
-
-    #[test]
-    fn test_rfkill_type_display() {
-        assert_eq!(format!("{}", RfkillType::Wlan), "wlan");
-        assert_eq!(format!("{}", RfkillType::Bluetooth), "bluetooth");
-        assert_eq!(format!("{}", RfkillType::All), "all");
-    }
-
-    #[test]
-    fn test_rfkill_type_id() {
-        assert_eq!(RfkillType::Wlan.type_id(), 1);
-        assert_eq!(RfkillType::Bluetooth.type_id(), 2);
-        assert_eq!(RfkillType::All.type_id(), 0);
-    }
-
-    #[test]
-    fn test_type_description() {
-        assert_eq!(type_description(&RfkillType::Wlan), "Wireless LAN");
-        assert_eq!(type_description(&RfkillType::Bluetooth), "Bluetooth");
-        assert_eq!(type_description(&RfkillType::Nfc), "NFC");
-    }
-
-    #[test]
-    /// No rfkill sysfs means no radios, not three unblocked ones.
-    ///
-    /// This asserted three devices with `soft_blocked: false`, which is a test
-    /// certifying that the tool tells you your wireless is enabled without
-    /// having looked.
-    fn radios_are_reported_only_where_there_are_any() {
-        let exists = std::path::Path::new("/sys/class/rfkill").exists();
-        assert_eq!(
-            read_devices().is_empty(),
-            !exists,
-            "radios reported without a /sys/class/rfkill to read them from"
-        );
-    }
-
-    #[test]
-    fn test_read_devices() {
-        // Asserted NON-empty before, and passed everywhere, because
-        // `simulated_devices` supplied three radios whenever
-        // /sys/class/rfkill could not be read.
-        let devices = read_devices();
-        assert_eq!(
-            devices.is_empty(),
-            !std::path::Path::new("/sys/class/rfkill").exists(),
-            "radios reported without a /sys/class/rfkill"
-        );
-    }
-
-    #[test]
-    fn test_unknown_type() {
-        let t = RfkillType::from_str("zigbee");
-        assert!(matches!(t, RfkillType::Unknown(_)));
-        assert_eq!(t.type_id(), 255);
-    }
-
-    #[test]
-    fn test_device_blocked_state() {
-        let d = RfkillDevice {
-            id: 0,
-            device_type: RfkillType::Wlan,
-            name: "test".to_string(),
-            soft_blocked: true,
-            hard_blocked: false,
-            _persistent: false,
-        };
-        assert!(d.soft_blocked);
-        assert!(!d.hard_blocked);
-    }
-
-    #[test]
-    fn test_case_insensitive() {
-        assert_eq!(RfkillType::from_str("WLAN"), RfkillType::Wlan);
-        assert_eq!(RfkillType::from_str("Bluetooth"), RfkillType::Bluetooth);
-        assert_eq!(RfkillType::from_str("WWAN"), RfkillType::Wwan);
-    }
-}
+mod tests;

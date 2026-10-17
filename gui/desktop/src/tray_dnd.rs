@@ -2,7 +2,7 @@
 //!
 //! - [`DragSource`] ([`TrayDragSource`] for the tray): whether a press on an
 //!   icon, or on a row of the overflow list, has become a drag.
-//! - [`TrayDropTarget`]: where along the tray a carried icon would land.
+//! - [`drop_boundary`]: where along the tray a carried icon would land.
 //! - [`TrayIconArrangement`]: the session's order of the icons and which are
 //!   hidden in the overflow, by [`TrayIconKey`] -- process and icon id.
 //! - [`TrayChoices`]: the same order and hiding by [`TrayIconName`] -- the
@@ -166,58 +166,23 @@ impl<K: Clone + PartialEq> Default for DragSource<K> {
 }
 
 // ============================================================================
-// TrayDropTarget
+// Drop boundary
 // ============================================================================
 
-/// Which gap between the tray's icons a carried icon is over.
+/// Which gap between the tray's icons a carried icon is over, `0..=count`.
 ///
-/// The icons stand in equal cells from `x`, so the gap is the nearest cell
-/// boundary to the pointer, `0..=` the icon count.
-pub struct TrayDropTarget {
-    /// Where the first icon's cell starts.
-    pub x: f32,
-    /// The gap last measured by [`calc_insertion_index`](Self::calc_insertion_index).
-    pub insertion_index: Option<usize>,
-    /// How many icons stand in the run.
-    icon_count: usize,
-    /// How wide one icon's cell is.
-    icon_cell_width: f32,
-}
-
-impl TrayDropTarget {
-    /// A run of icons starting at `x`, with no icons yet and the default
-    /// cell width.
-    #[must_use]
-    pub fn new(x: f32) -> Self {
-        Self {
-            x,
-            insertion_index: None,
-            icon_count: 0,
-            icon_cell_width: 36.0,
-        }
+/// `count` icons stand in equal cells `cell_width` wide from `first_x`; the
+/// gap is the cell boundary nearest `pointer_x`, clamped to the run -- left
+/// of it is gap 0, right of it the gap after the last. No icons, or cells of
+/// no width, is gap 0.
+#[must_use]
+pub fn drop_boundary(first_x: f32, cell_width: f32, count: usize, pointer_x: f32) -> usize {
+    if cell_width <= 0.0 || count == 0 {
+        return 0;
     }
-
-    /// Update the icon count (call when icons change).
-    pub fn set_icon_count(&mut self, count: usize) {
-        self.icon_count = count;
-    }
-
-    /// Update the icon cell width.
-    pub fn set_icon_cell_width(&mut self, width: f32) {
-        self.icon_cell_width = width;
-    }
-
-    /// Calculate insertion index from a pointer X position within the tray.
-    pub fn calc_insertion_index(&mut self, pointer_x: f32) {
-        if self.icon_cell_width <= 0.0 || self.icon_count == 0 {
-            self.insertion_index = Some(0);
-            return;
-        }
-        let relative_x = pointer_x - self.x;
-        // Round to nearest boundary between icons.
-        let raw = (relative_x / self.icon_cell_width + 0.5) as usize;
-        self.insertion_index = Some(raw.min(self.icon_count));
-    }
+    // `as` saturates: a pointer left of the run is gap 0, and NaN is too.
+    let nearest = ((pointer_x - first_x) / cell_width + 0.5) as usize;
+    nearest.min(count)
 }
 
 // ============================================================================
@@ -890,26 +855,24 @@ mod tests {
     }
 
     // ======================================================================
-    // TrayDropTarget tests
+    // drop_boundary tests
     // ======================================================================
 
     #[test]
-    fn drop_target_insertion_index_calculation() {
-        let mut target = TrayDropTarget::new(100.0);
-        target.set_icon_count(12);
-        target.set_icon_cell_width(36.0);
-
+    fn the_drop_boundary_is_the_nearest_gap_clamped_to_the_run() {
         // Pointer at start of tray: should insert at 0.
-        target.calc_insertion_index(100.0);
-        assert_eq!(target.insertion_index, Some(0));
+        assert_eq!(drop_boundary(100.0, 36.0, 12, 100.0), 0);
 
-        // Pointer near the middle of the first icon: round to 0 or 1 based on rounding.
-        target.calc_insertion_index(118.0); // 18px into tray, 18/36=0.5 → rounds to 1.
-        assert_eq!(target.insertion_index, Some(1));
+        // Halfway across the first icon rounds to the gap after it.
+        assert_eq!(drop_boundary(100.0, 36.0, 12, 118.0), 1);
 
-        // Pointer past all icons: clamp to icon_count.
-        target.calc_insertion_index(700.0);
-        assert_eq!(target.insertion_index, Some(12));
+        // Pointer past all icons: clamp to the count.
+        assert_eq!(drop_boundary(100.0, 36.0, 12, 700.0), 12);
+
+        // Left of the run, and a run with nothing in it, are gap 0.
+        assert_eq!(drop_boundary(100.0, 36.0, 12, 10.0), 0);
+        assert_eq!(drop_boundary(100.0, 36.0, 0, 300.0), 0);
+        assert_eq!(drop_boundary(100.0, 0.0, 12, 300.0), 0);
     }
 
     // ======================================================================

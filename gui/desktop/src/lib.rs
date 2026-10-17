@@ -13003,20 +13003,15 @@ impl DesktopShell {
 
     /// Which gap between icons the pointer is nearest, `0..=len`.
     ///
-    /// Measured through [`tray_dnd::TrayDropTarget`] rather than recomputed
-    /// here: it is the type whose job this is, and a second copy of a
-    /// rounding rule is how the drawn insertion point and the actual one come
-    /// to disagree.
+    /// Measured by [`tray_dnd::drop_boundary`] rather than recomputed here:
+    /// a second copy of a rounding rule is how the drawn insertion point and
+    /// the actual one come to disagree.
     fn tray_drop_boundary(&self, x: f32) -> usize {
         let rects = self.tray_icon_rects();
         let Some(first) = rects.first() else {
             return 0;
         };
-        let mut target = tray_dnd::TrayDropTarget::new(first.x);
-        target.set_icon_count(rects.len());
-        target.set_icon_cell_width(first.w);
-        target.calc_insertion_index(x);
-        target.insertion_index.unwrap_or(0)
+        tray_dnd::drop_boundary(first.x, first.w, rects.len(), x)
     }
 
     /// How wide one tray icon's slot is.

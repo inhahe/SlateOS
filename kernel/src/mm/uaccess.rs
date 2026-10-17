@@ -281,17 +281,14 @@ pub unsafe fn bits32(addr: u64, op: Bits, operand: u32) -> Faulted<u32> {
 
 /// Each routine on kernel memory, where nothing faults, gives the answers
 /// its Rust counterpart would; every faulting instruction has its fixup and
-/// nothing else does; and on a user address this address space does not map
-/// -- a kernel task's maps none -- each faults, and its fixup answers: the
-/// copy every byte left, the atomics a fault. That runs the page-fault
-/// handler's whole path for them, with no process to resolve the fault for.
+/// nothing else does; and the fault path itself
+/// (`mm::user::self_test_uaccess_fixups`).
 ///
 /// # Errors
 ///
 /// `InternalError` for a failed check.
 pub fn self_test() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
-    use crate::mm::page_table::{self, VirtAddr};
     crate::serial_println!("[uaccess] Running self-test...");
     let fail = |what: &str| -> crate::error::KernelResult<()> {
         crate::serial_println!("[uaccess]   FAIL: {}", what);
@@ -334,29 +331,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     {
         return fail("the fixup table is wrong");
     }
-    // A user address nothing maps here: high in user space, far from
-    // anything boot maps.
-    let hole: u64 = 0x0000_7000_0000_0000;
-    let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
-    if crate::proc::thread::owner_process(crate::sched::current_task_id()).is_some_and(|p| p != 0)
-        || page_table::translate(pml4, VirtAddr::new(hole)).is_some()
-    {
-        return fail("the self-test does not run where a user address is unmapped");
-    }
-    let mut buf = [0xAAu8; 32];
-    // SAFETY: inside a user-access window; `buf` is ours; `hole` is a user
-    // address, unmapped, so the access faults and resumes at its fixup.
-    let (left, loaded, swapped) = unsafe {
-        crate::smep_smap::stac();
-        let left = copy(buf.as_mut_ptr(), hole as *const u8, buf.len());
-        let loaded = load32(hole);
-        let swapped = bits32(hole, Bits::Or, 1);
-        crate::smep_smap::clac();
-        (left, loaded, swapped)
-    };
-    if left != buf.len() || buf != [0xAA; 32] || loaded != Err(()) || swapped != Err(()) {
-        return fail("an access to an unmapped user page did not end in its fixup's answer");
-    }
+    // The fault path, through the SMAP window only `mm::user` opens.
+    crate::mm::user::self_test_uaccess_fixups()?;
     crate::serial_println!("[uaccess] Self-test PASSED");
     Ok(())
 }

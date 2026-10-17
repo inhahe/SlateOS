@@ -951,6 +951,48 @@ fn in_user_window<T>(access: impl FnOnce() -> Result<T, ()>) -> KernelResult<T> 
     result.map_err(|()| KernelError::InvalidAddress)
 }
 
+/// The page-fault handler's fixups for `mm::uaccess`'s routines, on a user
+/// address this address space does not map -- a kernel task's maps none:
+/// each access faults, and its fixup answers -- the copy every byte left,
+/// the atomics a fault -- through the same window the primitives here open.
+/// That runs the handler's whole path for them, with no process to resolve
+/// the fault for. Part of `mm::uaccess::self_test`.
+///
+/// # Errors
+///
+/// `InternalError` for a failed check.
+pub fn self_test_uaccess_fixups() -> KernelResult<()> {
+    use crate::mm::uaccess::{self, Bits};
+    let fail = |what: &str| -> KernelResult<()> {
+        crate::serial_println!("[uaccess]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    // A user address nothing maps here: high in user space, far from
+    // anything boot maps.
+    let hole: u64 = 0x0000_7000_0000_0000;
+    let pml4 = page_table::cr3_to_pml4(page_table::read_cr3());
+    if thread::owner_process(sched::current_task_id()).is_some_and(|p| p != 0)
+        || page_table::translate(pml4, VirtAddr::new(hole)).is_some()
+    {
+        return fail("the self-test does not run where a user address is unmapped");
+    }
+    let mut buf = [0xAAu8; 32];
+    // SAFETY: inside a user-access window; `buf` is ours; `hole` is a user
+    // address, unmapped, so the access faults and resumes at its fixup.
+    let (left, loaded, swapped) = unsafe {
+        crate::smep_smap::stac();
+        let left = uaccess::copy(buf.as_mut_ptr(), hole as *const u8, buf.len());
+        let loaded = uaccess::load32(hole);
+        let swapped = uaccess::bits32(hole, Bits::Or, 1);
+        crate::smep_smap::clac();
+        (left, loaded, swapped)
+    };
+    if left != buf.len() || buf != [0xAA; 32] || loaded != Err(()) || swapped != Err(()) {
+        return fail("an access to an unmapped user page did not end in its fixup's answer");
+    }
+    Ok(())
+}
+
 /// Atomically load a user futex word.
 ///
 /// # Errors

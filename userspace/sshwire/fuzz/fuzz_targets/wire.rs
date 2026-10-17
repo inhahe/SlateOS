@@ -6,8 +6,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use sshwire::{
-    base64_decode, decode_identification, decode_openssh_private_key, is_identification_line,
-    read_bool, read_mpint, read_ssh_string, read_u32, strip_line_terminator, BigUint,
+    BigUint, base64_decode, decode_identification, decode_openssh_private_key,
+    is_identification_line, read_bool, read_mpint, read_ssh_string, read_u32,
+    strip_line_terminator,
 };
 
 fuzz_target!(|data: &[u8]| {

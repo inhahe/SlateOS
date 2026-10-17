@@ -26,8 +26,7 @@
  *   30+i  overflowing call i: pipe or fork failed
  *   50+i  overflowing call i: the child did not die by SIGABRT, as abort()
  *         ends one -- it returned (the check is missing) or ended
- *         otherwise. Until 2026-10-17 this library's abort() exited with
- *         134 instead, which this fixture took for the abort
+ *         otherwise
  *   70+i  overflowing call i: its stderr was not glibc's
  *         "*** buffer overflow detected ***: terminated\n"
  *   90    __read_chk: pipe failed

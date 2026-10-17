@@ -1036,8 +1036,10 @@ pub(crate) fn abi_asserts() -> String {
         msg_controllen,
         msg_flags
     );
-    // musl's `cmsg_len` is a `socklen_t` and four bytes of padding, glibc's a
-    // `size_t`: the same eight bytes on x86-64 little-endian, the level at 8.
+    // musl's `cmsg_len` is a `socklen_t` and four bytes of padding a program
+    // need not write, glibc's a `size_t`: the offsets agree, the level at 8,
+    // and the library reads the low four bytes (`socket::cmsg_len_at`), the
+    // value under either.
     abi!(
         out,
         hdrs,

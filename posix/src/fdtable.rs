@@ -628,6 +628,25 @@ pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
     false
 }
 
+/// Whether a descriptor other than `except` names `handle` of `kind`: for an
+/// open that shares a handle another descriptor already holds
+/// (`crate::nsfs`), asked once its own descriptor is in the table.
+#[must_use]
+pub fn is_handle_referenced_by_another(kind: HandleKind, handle: u64, except: i32) -> bool {
+    // SAFETY: The table pointer refers to storage owned exclusively by the
+    // caller -- the process on the target, this thread on host builds -- so
+    // this reference is unique. Read-only scan.
+    unsafe {
+        let table = &*table_ptr();
+        table.iter().enumerate().any(|(i, slot)| {
+            usize::try_from(except).ok() != Some(i)
+                && slot
+                    .as_ref()
+                    .is_some_and(|entry| entry.kind == kind && entry.handle == handle)
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Per-fd path storage (for fchdir / *at dirfd resolution)
 // ---------------------------------------------------------------------------

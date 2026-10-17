@@ -105,10 +105,9 @@ static int default_kills(void)
     int status = 0;
     if (waitpid(child, &status, 0) != child)
         return 12;
-    /* A signal's death, however this system reports it to the parent: as
-     * one, or as the 128 + n status the C library exits with. */
-    int died_of_it = (WIFSIGNALED(status) && WTERMSIG(status) == SIGPIPE)
-        || (WIFEXITED(status) && WEXITSTATUS(status) == 128 + SIGPIPE);
+    /* A death by the signal, as the parent sees it: not an exit with status
+     * 128 + n. */
+    int died_of_it = WIFSIGNALED(status) && WTERMSIG(status) == SIGPIPE;
     return died_of_it ? 0 : 12;
 }
 

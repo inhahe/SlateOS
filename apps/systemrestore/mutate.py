@@ -188,14 +188,18 @@ MAIN = [
         '            Key::Tab if self.dialog == DialogKind::CreateSnapshot => {',
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
-    # The form's keys are textline's editor's since 2026-10-04, which refuses
-    # Alt's and the Windows key's chords and types only what a key typed: the
-    # rule is textline's, and its own table covers it. What is this program's
-    # is handing the editor the key as it came -- chord and all.
+    # The form's keys are textline's since 2026-10-04 -- each box a LineBox
+    # since 2026-10-17 -- which refuses Alt's and the Windows key's chords and
+    # types only what a key typed: the rule is textline's, and its own table
+    # covers it. What is this program's is handing the box the key as it
+    # came -- chord and all.
     (
-        "the form's editor is given the key without its chord",
-        "textline::apply_key_on_clipboard(&mut self.form_editor, key, FONT_SIZE);",
-        "textline::apply_key_on_clipboard(\n            &mut self.form_editor,\n            &KeyEvent {\n                modifiers: guitk::event::Modifiers::NONE,\n                ..key.clone()\n            },\n            FONT_SIZE,\n        );",
+        "the form's box is given the key without its chord",
+        "let edit = self.form_box_mut(field).key(key);",
+        "let edit = self.form_box_mut(field).key(&KeyEvent {\n"
+        "            modifiers: guitk::event::Modifiers::NONE,\n"
+        "            ..key.clone()\n"
+        "        });",
         ['a_chord_is_neither_a_restore_key_nor_typing_and_altgr_types'],
     ),
 ]
@@ -253,8 +257,8 @@ MAIN += [
 ]
 
 # The Create Snapshot form's two boxes and the search box are the toolkit's
-# field; the form's are edited by textline's editor, and the description's
-# text is drawn at last (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
+# field, each a textline LineBox, and the description's text is drawn at
+# last (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
 FORM = "the_form_boxes_are_the_toolkits_field"
 EDITS = "the_form_boxes_edit_like_a_field"
 SEARCH = "the_search_box_is_the_toolkits_field"
@@ -306,38 +310,25 @@ MAIN += [
     ),
     (
         "the form types only at its end",
-        "        self.sync_form_editor(field);\n        let edit = textline::apply_key_on_clipboard(",
-        "        if textline::types_into_field(key) {\n            self.form_text_mut(field).push_str(&key.text);\n            return EventResult::Consumed;\n        }\n        self.sync_form_editor(field);\n        let edit = textline::apply_key_on_clipboard(",
-        [EDITS],
-    ),
-    (
-        "a box whose text changed is edited as it used to read",
-        "        self.sync_form_editor(field);\n        let edit = textline::apply_key_on_clipboard(",
-        "        let edit = textline::apply_key_on_clipboard(",
+        "        let edit = self.form_box_mut(field).key(key);\n",
+        "        if textline::types_into_field(key) {\n"
+        "            let typed = format!(\"{}{}\", self.form_box(field).text(), key.text);\n"
+        "            self.form_box_mut(field).set_text(&typed);\n"
+        "            return EventResult::Consumed;\n"
+        "        }\n"
+        "        let edit = self.form_box_mut(field).key(key);\n",
         [EDITS],
     ),
     (
         "a box holds any length",
-        'form_editor: textline::field_holding("", FORM_CAPACITY),',
-        'form_editor: textline::field_holding("", usize::MAX),',
-        [EDITS],
-    ),
-    (
-        "the form keeps a clipboard of its own",
-        "textline::apply_key_on_clipboard(&mut self.form_editor, key, FONT_SIZE);",
-        "textline::apply_key(&mut self.form_editor, key, \"\", FONT_SIZE);",
+        'form_name: LineBox::new(FORM_CAPACITY, FONT_SIZE),',
+        'form_name: LineBox::new(usize::MAX, FONT_SIZE),',
         [EDITS],
     ),
     (
         "a key the box does not answer is taken",
         "        if !edit.handled {\n            return EventResult::Ignored;\n        }\n",
         "",
-        [EDITS],
-    ),
-    (
-        "an edit is not written back to the form",
-        "            *self.form_text_mut(field) = edited;\n",
-        "            let _ = edited;\n",
         [EDITS],
     ),
     (
@@ -348,15 +339,8 @@ MAIN += [
     ),
     (
         "a press leaves the caret where it was",
-        "        self.form_editor.set_selection_anchor(None);\n"
-        "        self.form_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
-        [EDITS],
-    ),
-    (
-        "a press moves the keyboard but not the box's text",
-        "        } else {\n            self.focus_form_field(field);\n        }\n",
-        "        } else {\n            self.form_focus = FormFocus::Text(field);\n        }\n",
+        "        self.form_box_mut(field).press(dx, width, had_the_keyboard);\n",
+        "        let _ = (dx, width, had_the_keyboard);\n",
         [EDITS],
     ),
     (
@@ -651,8 +635,8 @@ MAIN += [
     ),
     (
         "a row chosen does nothing to a form box",
-        "                if self.form_editor.edit_command(id) == KeyEdit::Changed {\n",
-        "                if false {\n",
+        "                self.form_box_mut(form_field).menu_row(id);\n",
+        "                let _ = (form_field, id);\n",
         [F_MENU],
     ),
     (

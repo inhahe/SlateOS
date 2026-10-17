@@ -35,7 +35,6 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::{KeyEdit, TextInput};
 use oswindow::app::{self, App, Response};
 use textline::LineBox;
 
@@ -2014,10 +2013,10 @@ pub struct SystemRestoreUI {
     pub progress: Option<OperationProgress>,
     /// Scroll offset for the main list.
     pub scroll_offset: f32,
-    /// New snapshot form: name.
-    pub form_name: String,
-    /// New snapshot form: description.
-    pub form_description: String,
+    /// New snapshot form: the name's box.
+    pub form_name: LineBox,
+    /// New snapshot form: the description's box.
+    pub form_description: LineBox,
     /// New snapshot form: selected components.
     pub form_components: Vec<bool>,
     /// New snapshot form: snapshot type.
@@ -2027,10 +2026,6 @@ pub struct SystemRestoreUI {
     pub current_timestamp: u64,
     /// What in the form has the keyboard.
     pub form_focus: FormFocus,
-    /// The form's caret and selection, laid over the field the keyboard is
-    /// typing into (`form_text_mut`), whose string stays the truth:
-    /// reloaded whenever the field changes or its text changes under it.
-    form_editor: TextInput,
     /// The search box's or a form box's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<MenuField>,
     /// How wide the mark is round a box that has the keyboard: the user's
@@ -2128,13 +2123,12 @@ impl SystemRestoreUI {
             dialog: DialogKind::None,
             progress: None,
             scroll_offset: 0.0,
-            form_name: String::new(),
-            form_description: String::new(),
+            form_name: LineBox::new(FORM_CAPACITY, FONT_SIZE),
+            form_description: LineBox::new(FORM_CAPACITY, FONT_SIZE),
             form_components,
             form_type: SnapshotType::Manual,
             current_timestamp: 0,
             form_focus: FormFocus::Text(FormField::Name),
-            form_editor: textline::field_holding("", FORM_CAPACITY),
             field_menu: fieldmenu::FieldMenu::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             locations,
@@ -3181,8 +3175,7 @@ impl SystemRestoreUI {
             if self.form_focus != FormFocus::Text(field) {
                 self.focus_form_field(field);
             }
-            self.sync_form_editor(field);
-            let menu = self.form_editor.edit_menu();
+            let menu = self.form_box(field).edit_menu();
             self.field_menu
                 .open(MenuField::Form(field), menu, x, y, viewport);
             return EventResult::Consumed;
@@ -3197,8 +3190,7 @@ impl SystemRestoreUI {
     }
 
     /// The menu's row `id`, chosen for `field`: done to the box as its key
-    /// would be -- the list following a change to the search, a form box's
-    /// text written back.
+    /// would be, the list following a change to the search.
     fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
         match field {
             MenuField::Search => {
@@ -3207,23 +3199,12 @@ impl SystemRestoreUI {
                 }
             }
             MenuField::Form(form_field) => {
-                self.sync_form_editor(form_field);
-                if self.form_editor.edit_command(id) == KeyEdit::Changed {
-                    let edited = self.form_editor.text().to_owned();
-                    *self.form_text_mut(form_field) = edited;
-                }
+                // Nothing follows a change to a form box: it is read when the
+                // point is made.
+                self.form_box_mut(form_field).menu_row(id);
             }
         }
         EventResult::Consumed
-    }
-
-    /// Load the form's editor from box `field`'s text when that changed
-    /// underneath it.
-    fn sync_form_editor(&mut self, field: FormField) {
-        if self.form_editor.text() != self.form_text(field) {
-            let text = self.form_text(field).to_owned();
-            self.form_editor.set_text(&text);
-        }
     }
 
     /// Keys while a dialog is open.
@@ -3253,9 +3234,8 @@ impl SystemRestoreUI {
     }
 
     /// `key` in the form's box that has the keyboard: a field's keys
-    /// (`textline::apply_key_on_clipboard` -- the caret, the selection, the
-    /// program's clipboard,
-    /// typing), the box's text written back when the key changed it.
+    /// (`LineBox::key` -- the caret, the selection, the program's clipboard,
+    /// typing), or Space on a checkbox.
     fn edit_form(&mut self, key: &KeyEvent) -> EventResult {
         let field = match self.form_focus {
             FormFocus::Text(field) => field,
@@ -3268,15 +3248,9 @@ impl SystemRestoreUI {
                 return EventResult::Consumed;
             }
         };
-        let text = self.form_text(field).to_owned();
-        self.sync_form_editor(field);
-        let edit = textline::apply_key_on_clipboard(&mut self.form_editor, key, FONT_SIZE);
+        let edit = self.form_box_mut(field).key(key);
         if !edit.handled {
             return EventResult::Ignored;
-        }
-        if self.form_editor.text() != text {
-            let edited = self.form_editor.text().to_owned();
-            *self.form_text_mut(field) = edited;
         }
         EventResult::Consumed
     }
@@ -3554,16 +3528,16 @@ impl SystemRestoreUI {
                 "None of the chosen components can be kept on this system",
             );
         }
-        let name = if self.form_name.trim().is_empty() {
+        let name = if self.form_name.text().trim().is_empty() {
             self.default_point_name()
         } else {
-            self.form_name.trim().to_string()
+            self.form_name.text().trim().to_string()
         };
         self.start(
             Job::Create { components },
             Pending::Create {
                 name,
-                description: self.form_description.trim().to_string(),
+                description: self.form_description.text().trim().to_string(),
                 kind: self.form_type,
                 quiet: false,
             },
@@ -3812,8 +3786,8 @@ impl SystemRestoreUI {
         )
     }
 
-    /// The text of form box `field`, to change.
-    fn form_text_mut(&mut self, field: FormField) -> &mut String {
+    /// Form box `field`, to change.
+    fn form_box_mut(&mut self, field: FormField) -> &mut LineBox {
         match field {
             FormField::Name => &mut self.form_name,
             FormField::Description => &mut self.form_description,
@@ -3924,8 +3898,8 @@ impl SystemRestoreUI {
         self.toggle_component(i);
     }
 
-    /// The text of form field `field`.
-    fn form_text(&self, field: FormField) -> &str {
+    /// Form box `field`.
+    fn form_box(&self, field: FormField) -> &LineBox {
         match field {
             FormField::Name => &self.form_name,
             FormField::Description => &self.form_description,
@@ -3950,49 +3924,31 @@ impl SystemRestoreUI {
         ])
     }
 
-    /// Where `field`'s caret is drawn: the editor's while the field has the
-    /// keyboard (its end, if its text changed under the editor), the start
-    /// of the text otherwise. One answer for the drawing and for a press.
+    /// Where `field`'s caret is drawn: the box's own while it has the
+    /// keyboard, the start of its text otherwise -- as `LineBox::press`
+    /// measures a press.
     fn form_cursor(&self, field: FormField) -> TextCursor {
-        let text = self.form_text(field);
-        if self.form_focus != FormFocus::Text(field) {
-            TextCursor::default()
-        } else if self.form_editor.text() == text {
-            self.form_editor.cursor()
+        if self.form_focus == FormFocus::Text(field) {
+            self.form_box(field).input().cursor()
         } else {
-            TextCursor::from(text.len())
+            TextCursor::default()
         }
     }
 
     /// Give `field` the keyboard, its caret at the end of its text.
     fn focus_form_field(&mut self, field: FormField) {
         self.form_focus = FormFocus::Text(field);
-        let text = self.form_text(field).to_owned();
-        self.form_editor.set_text(&text);
+        self.form_box_mut(field).caret_to_end();
     }
 
     /// A press in form field `field`, drawn at `rect`, at `x`: it takes the
-    /// keyboard, with the caret under the pointer.
+    /// keyboard, with the caret under the pointer, measured against the box
+    /// as it was drawn before the press.
     fn press_form_field(&mut self, field: FormField, rect: Rect, x: f32) {
-        let drawn = self.form_cursor(field);
-        if self.form_focus == FormFocus::Text(field) {
-            let text = self.form_text(field).to_owned();
-            if self.form_editor.text() != text {
-                self.form_editor.set_text(&text);
-            }
-        } else {
-            self.focus_form_field(field);
-        }
-        let cursor = textedit::cursor_at_click(
-            self.form_text(field),
-            drawn,
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - BOX_TEXT_INSET,
-        );
-        self.form_editor.set_selection_anchor(None);
-        self.form_editor.set_cursor(cursor);
+        let had_the_keyboard = self.form_focus == FormFocus::Text(field);
+        self.form_focus = FormFocus::Text(field);
+        let (dx, width) = (x - rect.x - BOX_TEXT_INSET, rect.w - 2.0 * BOX_TEXT_INSET);
+        self.form_box_mut(field).press(dx, width, had_the_keyboard);
     }
 
     /// How form field `field` is drawn: with the keyboard's mark while it
@@ -5399,17 +5355,16 @@ impl SystemRestoreUI {
     ) {
         let state = self.form_box_state(field);
         field::draw(rt, &self.palette, rect, state, self.focus_ring_width);
-        let anchor = if self.form_focus == FormFocus::Text(field)
-            && self.form_editor.text() == self.form_text(field)
-        {
-            self.form_editor.selection_anchor()
+        let line_box = self.form_box(field);
+        let anchor = if self.form_focus == FormFocus::Text(field) {
+            line_box.input().selection_anchor()
         } else {
             None
         };
         self.render_box_text(
             rt,
             rect,
-            (self.form_text(field), self.form_cursor(field), anchor),
+            (line_box.text(), self.form_cursor(field), anchor),
             state.focused,
             placeholder,
         );
@@ -7273,7 +7228,7 @@ working filter from a broken one"
         assert_eq!(ui.dialog, DialogKind::CreateSnapshot, "control: Ctrl+N");
         // A letter in the name, so a Backspace would have something to take.
         ui.handle_event(&types('k'));
-        let typed_before = (ui.form_name.clone(), ui.form_focus);
+        let typed_before = (ui.form_name.text().to_owned(), ui.form_focus);
         assert_eq!(typed_before.0, "k", "control: the form types");
         // After each key, not after the three: an `x` the first typed, the
         // third would delete, and the pair would cancel out.
@@ -7281,7 +7236,7 @@ working filter from a broken one"
             for (k, text) in [(Key::X, "x"), (Key::Tab, ""), (Key::Backspace, "")] {
                 ui.handle_event(&chord(k, text, m));
                 assert_eq!(
-                    (ui.form_name.clone(), ui.form_focus),
+                    (ui.form_name.text().to_owned(), ui.form_focus),
                     typed_before,
                     "{m:?} {k:?} typed, moved or deleted"
                 );
@@ -7289,7 +7244,7 @@ working filter from a broken one"
         }
         ui.handle_event(&chord(Key::L, "ł", altgr));
         assert_eq!(
-            ui.form_name,
+            ui.form_name.text(),
             format!("{}ł", typed_before.0),
             "AltGr's ł was not typed"
         );
@@ -7466,32 +7421,36 @@ working filter from a broken one"
         ui.handle_event(&press(Key::Left));
         type_text(&mut ui, "X");
         assert_eq!(
-            ui.form_name, "helXlo",
+            ui.form_name.text(),
+            "helXlo",
             "the caret keys do not move the caret"
         );
         ui.handle_event(&press(Key::Backspace));
         assert_eq!(
-            ui.form_name, "hello",
+            ui.form_name.text(),
+            "hello",
             "Backspace did not delete before the caret"
         );
         ui.handle_event(&press(Key::Delete));
         assert_eq!(
-            ui.form_name, "helo",
+            ui.form_name.text(),
+            "helo",
             "Delete did not delete after the caret"
         );
 
         ui.handle_event(&ctrl(Key::A));
         ui.handle_event(&ctrl(Key::C));
-        assert_eq!(ui.form_name, "helo", "Ctrl+C changed what it copied");
+        assert_eq!(ui.form_name.text(), "helo", "Ctrl+C changed what it copied");
         ui.handle_event(&press(Key::Tab));
         ui.handle_event(&ctrl(Key::V));
         assert_eq!(
-            ui.form_description, "helo",
+            ui.form_description.text(),
+            "helo",
             "the name copied did not paste into the description"
         );
         ui.handle_event(&ctrl(Key::A));
         ui.handle_event(&ctrl(Key::X));
-        assert_eq!(ui.form_description, "", "Ctrl+X did not cut");
+        assert_eq!(ui.form_description.text(), "", "Ctrl+X did not cut");
         // Back to the name: on from the description is the components.
         ui.handle_event(&Event::Key(KeyEvent {
             key: Key::Tab,
@@ -7505,7 +7464,8 @@ working filter from a broken one"
         ui.handle_event(&press(Key::End));
         ui.handle_event(&ctrl(Key::V));
         assert_eq!(
-            ui.form_name, "helohelo",
+            ui.form_name.text(),
+            "helohelo",
             "what was cut is not on the clipboard"
         );
 
@@ -7519,7 +7479,7 @@ working filter from a broken one"
         // A press in the description, which does not have the keyboard,
         // gives it the keyboard with the caret under the pointer -- here at
         // the start of what it holds.
-        ui.form_description = "abc".to_owned();
+        ui.form_description.set_text("abc");
         let [(_, name), (_, description)] = ui.form_boxes().unwrap();
         let y = description.y + description.h / 2.0;
         ui.handle_event(&click(description.x + BOX_TEXT_INSET + 1.0, y));
@@ -7530,7 +7490,8 @@ working filter from a broken one"
         );
         type_text(&mut ui, "X");
         assert_eq!(
-            ui.form_description, "Xabc",
+            ui.form_description.text(),
+            "Xabc",
             "the caret is not where the press was"
         );
 
@@ -7545,15 +7506,17 @@ working filter from a broken one"
         );
         type_text(&mut ui, "-");
         assert_eq!(
-            ui.form_name, "helo-helo",
+            ui.form_name.text(),
+            "helo-helo",
             "the caret is not where the press was"
         );
 
         // A box whose text changed under its editor is edited as it now reads.
-        ui.form_name = "changed".to_owned();
+        ui.form_name.set_text("changed");
         type_text(&mut ui, "!");
         assert_eq!(
-            ui.form_name, "changed!",
+            ui.form_name.text(),
+            "changed!",
             "the box was edited as it used to read"
         );
 
@@ -7562,7 +7525,7 @@ working filter from a broken one"
         ui.handle_event(&ctrl(Key::A));
         ui.handle_event(&ctrl(Key::V));
         assert_eq!(
-            ui.form_name.chars().count(),
+            ui.form_name.text().chars().count(),
             FORM_CAPACITY,
             "a box holds more than its limit"
         );
@@ -7779,7 +7742,8 @@ working filter from a broken one"
             "a letter flipped the checkbox"
         );
         assert_eq!(
-            ui.form_name, "",
+            ui.form_name.text(),
+            "",
             "a letter typed into a box without the keyboard"
         );
 
@@ -10582,12 +10546,12 @@ working filter from a broken one"
         );
         choose_row(&mut ui, EditCommand::Paste);
         assert_eq!(
-            ui.form_text(FormField::Description),
+            ui.form_box(FormField::Description).text(),
             "Weekly",
             "Paste did not paste"
         );
         assert_eq!(
-            ui.form_text(FormField::Name),
+            ui.form_box(FormField::Name).text(),
             "Before update",
             "the other box changed"
         );

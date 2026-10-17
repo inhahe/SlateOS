@@ -63,7 +63,6 @@ userspace/fuser  # bare deny(clippy::all)
 userspace/fw
 userspace/getent  # bare deny(clippy::all)
 userspace/getty
-userspace/hardlink  # bare deny(clippy::all)
 userspace/hostnamectl  # bare deny(clippy::all)
 userspace/htop
 userspace/hwclock

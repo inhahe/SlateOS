@@ -1169,6 +1169,7 @@ mod tests {
     /// its narrow one). There are exactly 73 of them.
     #[test]
     fn strftime_is_glibcs() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let oracle = include_str!("strftime_oracle.txt");
         let mut zone: Option<(&str, Zone)> = None;
         let mut failures = std::vec::Vec::new();

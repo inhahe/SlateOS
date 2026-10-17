@@ -18,7 +18,12 @@
  * uses -- has no `_FORTIFY_SOURCE`, so nothing would generate these calls.
  * Declaring them by hand is also what pins the ABI a fortified object uses.
  *
+ * The multibyte checks are about UTF-8 -- U+20AC's three bytes, an
+ * MB_CUR_MAX of 4 -- so the test asks for "C.UTF-8" first, as a program
+ * that handles text does; a program starts in "C", one byte a character.
+ *
  * Exit codes -- 42 is every check passing; otherwise the first failure:
+ *   9     setlocale(LC_ALL, "C.UTF-8") failed
  *   10+i  in-bounds call i misbehaved: wrong result, or it touched the guard
  *         byte past its object (i: 0 memcpy, 1 memmove, 2 mempcpy, 3 memset,
  *         4 strcpy, 5 stpcpy, 6 strncpy, 7 stpncpy, 8 strcat, 9 strncat)
@@ -61,6 +66,7 @@
  */
 
 #include <fcntl.h>
+#include <locale.h>
 #include <poll.h>
 #include <signal.h>
 #include <stddef.h>
@@ -447,6 +453,9 @@ static int read_clamps(void)
 
 int main(void)
 {
+    if (setlocale(LC_ALL, "C.UTF-8") == NULL) {
+        return 9;
+    }
     emit("[fz] in-bounds copies, known and unknown object size\n");
     for (int i = 0; i < NCALLS; i++) {
         if (!in_bounds(i, OBJ)) {

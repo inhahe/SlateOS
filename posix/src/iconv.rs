@@ -11,8 +11,8 @@
 //!
 //! | name (glibc's; every alias of it is in [`NAMES`]) | what it is |
 //! |---|---|
-//! | `UTF-8` | glibc's older, wider UTF-8: up to six bytes and U+7FFFFFFF; overlong forms and surrogates refused |
-//! | `ASCII` (`ANSI_X3.4-1968`) | seven bits; the C locale's character set, and so the empty name's |
+//! | `UTF-8` | glibc's older, wider UTF-8: up to six bytes and U+7FFFFFFF; overlong forms and surrogates refused; the empty name's in "C.UTF-8" |
+//! | `ASCII` (`ANSI_X3.4-1968`) | seven bits; the "C" locale's character set, and so the empty name's there |
 //! | `ISO-8859-1` | Latin-1 |
 //! | `ISO-8859-2` to `-16`, `CP1250` to `CP1257` (`WINDOWS-1252` and the rest), `KOI8-R`, `KOI8-U`, `IBM437`, `IBM850`, `MACINTOSH`, EBCDIC (`IBM037`, `IBM500`) and the rest of glibc's 141 table-driven 8-bit sets ([`crate::iconv_8bit`]) | one byte a character, by glibc's table; a byte the table leaves out is invalid |
 //! | `T.61-8BIT` (`T.61`), `ISO_6937`, `ISO_6937-2`, `ANSI_X3.110` ([`crate::iconv_prefix`]) | one byte a character, or two for a letter with a diacritic: the diacritic's byte (0xC1-0xCF), then the letter's |
@@ -444,7 +444,13 @@ fn parse_spec(spec: &[u8]) -> (Option<Charset>, bool, bool) {
     let charset = if !fits {
         None
     } else if name == b"//" {
-        Some(Charset::Ascii)
+        // The empty name is the calling thread's locale's codeset, as
+        // glibc's is: ASCII in "C", UTF-8 in "C.UTF-8".
+        Some(if crate::locale::utf8() {
+            Charset::Utf8
+        } else {
+            Charset::Ascii
+        })
     } else {
         NAMES
             .iter()
@@ -8562,5 +8568,36 @@ mod tests {
             assert_ne!(cd, ICONV_OPEN_ERR, "{name}");
             assert_eq!(iconv_close(cd), 0);
         }
+    }
+
+    /// The empty name is the calling thread's locale's codeset: ASCII in
+    /// "C", where é's UTF-8 is no character, and UTF-8 in "C.UTF-8".
+    #[test]
+    fn the_empty_name_is_the_locales_codeset() {
+        let from_locale = || {
+            let cd = open("UTF-8", "");
+            assert_ne!(cd, ICONV_OPEN_ERR);
+            let input = b"\xc3\xa9";
+            let mut inptr = input.as_ptr();
+            let mut inleft = input.len();
+            let mut out = [0u8; 8];
+            let mut outptr = out.as_mut_ptr();
+            let mut outleft = out.len();
+            // SAFETY: the live buffers above.
+            let res = unsafe {
+                iconv(
+                    cd,
+                    &raw mut inptr,
+                    &raw mut inleft,
+                    &raw mut outptr,
+                    &raw mut outleft,
+                )
+            };
+            assert_eq!(iconv_close(cd), 0);
+            (res, inleft)
+        };
+        assert_eq!(from_locale(), (usize::MAX, 2), "\"C\": ASCII");
+        let _utf8 = crate::locale::Utf8Guard::new();
+        assert_eq!(from_locale(), (0, 0), "\"C.UTF-8\": UTF-8");
     }
 }

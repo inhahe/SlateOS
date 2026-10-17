@@ -34,3 +34,26 @@ gives `C.UTF-8` unless `LC_ALL`, `LC_CTYPE` or `LANG` names "C" or "POSIX".
 osh stays UTF-8-only (design-decisions §104), and §104 and §351, which assume
 no non-UTF-8 locale, are read with "C" as the one exception. The `locale`
 command (lane B) reports what the library answers.
+
+**Built (2026-10-17, lane D),** in `posix/src/locale.rs` and the
+conversions it is consulted by:
+
+- A locale is the set of categories that are "C.UTF-8" -- a `locale_t` is
+  that set with a tag, so `newlocale`, `duplocale` and `freelocale` allocate
+  nothing; the global one is `setlocale`'s, a thread's own `uselocale`'s.
+  Each category is named, set and reported (a composite name for `LC_ALL`
+  when they differ, as musl's, and taken back); only `LC_CTYPE` changes
+  what the library does.
+- Names: "C" and "POSIX"; "C.UTF-8" and any name whose codeset is UTF-8
+  ("en_US.UTF-8"), reported as "C.UTF-8"; any other name is refused (NULL,
+  or `ENOENT` from `newlocale`), as glibc refuses a locale it lacks. For
+  `""`, each category reads `LC_ALL`, its own variable, then `LANG`.
+- Following the thread's `LC_CTYPE`: `mbrtowc` and kin, `mblen`, `mbtowc`,
+  `mbstowcs`, `wctomb`, `wcstombs`, `wcrtomb` and kin, `btowc`, `wctob`,
+  the wide streams, `<uchar.h>` (its `char8_t` side UTF-8 always, as C23
+  says), `printf`'s `%lc`, `%ls` and the wide `%c`, `MB_CUR_MAX`,
+  `nl_langinfo(CODESET)` (`nl_langinfo_l`'s from its object) and `iconv`'s
+  empty name. `swprintf` reads its own format the same in both, so
+  `swprintf(L"é")` writes `é` in "C", as glibc's and musl's do.
+- The character classes are unchanged: Unicode for wide characters, ASCII
+  for bytes, in both, as musl's.

@@ -1,14 +1,15 @@
 //! `<uchar.h>` — the Unicode code-unit conversions: `mbrtoc8` and `c8rtomb`
 //! (C23), `mbrtoc16` and `c16rtomb`, `mbrtoc32` and `c32rtomb` (C11).
 //!
-//! The multibyte encoding is UTF-8, as it is for `mbrtowc` and the rest of
-//! [`crate::wchar`], which this shares its decoder ([`crate::wchar::decode`])
-//! and its `mbstate_t` ([`MbstateT`]) with: strict UTF-8, each sequence
-//! refused at the first byte no completion could make valid. (Until
-//! 2026-09-29 these four refused every byte above 0x7F -- a C locale of
-//! ASCII, where `mbrtowc` beside them read UTF-8. Which encoding the library
-//! should *say* it has is open-questions D-Q7; that these must agree with
-//! `mbrtowc` is true either way.)
+//! The multibyte side is the calling thread's locale's encoding, as it is
+//! for `mbrtowc` and the rest of [`crate::wchar`], which this shares its
+//! decoder ([`crate::wchar::decode`]), its encoder
+//! ([`crate::wchar::mb_encode`]) and its `mbstate_t` ([`MbstateT`]) with:
+//! in "C.UTF-8" strict UTF-8, each sequence refused at the first byte no
+//! completion could make valid; in "C" one byte a character, 0x80-0xFF the
+//! U+DF80-U+DFFF musl makes of them (design-decisions §1190). `char8_t` is
+//! UTF-8 whatever the locale, as C23 has it: `c8rtomb` reads its units as
+//! UTF-8, and `mbrtoc8` refuses a character UTF-8 cannot carry.
 //!
 //! Replayed against glibc 2.39 in its C.UTF-8 locale
 //! (`posix/tools/oracle/multibyte_harness.py`, `multibyte_oracle.txt`), with
@@ -31,7 +32,7 @@
 //! thread's ([`crate::wchar::internal`]).
 
 use crate::errno::{EILSEQ, set_errno};
-use crate::wchar::{Decoded, ILSEQ, INCOMPLETE, decode, internal, state_for};
+use crate::wchar::{Decoded, ILSEQ, INCOMPLETE, decode, decode_utf8, internal, state_for};
 
 pub use crate::wchar::MbstateT;
 
@@ -48,9 +49,19 @@ pub type Char32T = u32;
 const FROM_STATE: usize = usize::MAX.wrapping_sub(2);
 
 /// `c`'s UTF-8 encoding into `out`, and its length; `None` for a surrogate
-/// or a number past U+10FFFF -- `wcrtomb`'s encoder.
+/// or a number past U+10FFFF. For `char8_t` units.
 fn utf8(c: u32, out: &mut [u8; 4]) -> Option<usize> {
     match crate::wchar::utf8_encode(c, out) {
+        0 => None,
+        len => Some(len),
+    }
+}
+
+/// `c` in the calling thread's locale's encoding into `out`, and its
+/// length; `None` for a character it has no bytes for -- `wcrtomb`'s
+/// encoder.
+fn multibyte(c: u32, out: &mut [u8; 4]) -> Option<usize> {
+    match crate::wchar::mb_encode(c, out) {
         0 => None,
         len => Some(len),
     }
@@ -121,8 +132,9 @@ pub unsafe extern "C" fn mbrtoc32(
     }
 }
 
-/// `c32rtomb`: `c32` in UTF-8 into `s`, and how many bytes; `(size_t)-1`
-/// `EILSEQ` for a surrogate or a number past U+10FFFF. A NULL `s` is
+/// `c32rtomb`: `c32` in the locale's encoding into `s`, and how many bytes;
+/// `(size_t)-1` `EILSEQ` for a character it has none for -- in UTF-8 a
+/// surrogate or a number past U+10FFFF. A NULL `s` is
 /// `c32rtomb(buf, U'\0', ps)`: the state initial again, and 1.
 ///
 /// # Safety
@@ -138,7 +150,7 @@ pub unsafe extern "C" fn c32rtomb(s: *mut u8, c32: Char32T, ps: *mut MbstateT) -
         return 1;
     }
     let mut out = [0u8; 4];
-    let Some(len) = utf8(c32, &mut out) else {
+    let Some(len) = multibyte(c32, &mut out) else {
         return ilseq();
     };
     if c32 == 0 {
@@ -199,8 +211,8 @@ pub unsafe extern "C" fn mbrtoc16(
     }
 }
 
-/// `c16rtomb`: the character `c16` ends, in UTF-8 into `s`, and how many
-/// bytes. A high surrogate begins a character and writes nothing (0); the
+/// `c16rtomb`: the character `c16` ends, in the locale's encoding into `s`,
+/// and how many bytes. A high surrogate begins a character and writes nothing (0); the
 /// low one after it ends it (4). A low surrogate with no high one before it,
 /// or anything but a low one after a high one, is `(size_t)-1` `EILSEQ`. A
 /// NULL `s` is `c16rtomb(buf, u'\0', ps)`.
@@ -240,7 +252,7 @@ pub unsafe extern "C" fn c16rtomb(s: *mut u8, c16: Char16T, ps: *mut MbstateT) -
         }
     };
     let mut out = [0u8; 4];
-    let Some(len) = utf8(c, &mut out) else {
+    let Some(len) = multibyte(c, &mut out) else {
         return ilseq();
     };
     // SAFETY: room for 4, by the contract (or `discard`).
@@ -283,8 +295,12 @@ pub unsafe extern "C" fn mbrtoc8(
     match unsafe { decode(state, s, n) } {
         Decoded::Char { cp, took } => {
             let mut out = [0u8; 4];
-            // What decode gives is a scalar value, which always encodes.
-            let len = utf8(cp, &mut out).unwrap_or(1);
+            // In "C.UTF-8" what decode gives is a scalar value, which always
+            // encodes; in "C" a byte above 0x7F is U+DF80-U+DFFF, which
+            // UTF-8 cannot carry.
+            let Some(len) = utf8(cp, &mut out) else {
+                return ilseq();
+            };
             let [first, rest @ ..] = out;
             store(first);
             if len > 1 {
@@ -297,8 +313,9 @@ pub unsafe extern "C" fn mbrtoc8(
     }
 }
 
-/// `c8rtomb` (C23): the character the code unit `c8` ends, in UTF-8 into
-/// `s`, and how many bytes; a unit that does not end one is kept in the state
+/// `c8rtomb` (C23): the character the UTF-8 code unit `c8` ends, in the
+/// locale's encoding into `s` (`EILSEQ` for one it has none for), and how
+/// many bytes; a unit that does not end one is kept in the state
 /// and writes nothing (0). A unit that cannot come where it does -- a
 /// continuation without a lead, a lead a sequence cannot start with, a
 /// second unit that makes an overlong form, a surrogate or a number past
@@ -318,12 +335,15 @@ pub unsafe extern "C" fn c8rtomb(s: *mut u8, c8: Char8T, ps: *mut MbstateT) -> u
     } else {
         (s, c8)
     };
-    // The same byte-by-byte decoding as `mbrtowc`'s, one unit at a time.
+    // The same byte-by-byte decoding as `mbrtowc`'s in UTF-8, one unit at
+    // a time: `char8_t` is UTF-8 in every locale.
     // SAFETY: one readable byte.
-    match unsafe { decode(state, &raw const c8, 1) } {
+    match unsafe { decode_utf8(state, &raw const c8, 1) } {
         Decoded::Char { cp, .. } => {
             let mut out = [0u8; 4];
-            let len = utf8(cp, &mut out).unwrap_or(1);
+            let Some(len) = multibyte(cp, &mut out) else {
+                return ilseq();
+            };
             // SAFETY: room for 4, by the contract (or `discard`).
             unsafe { put(s, out.get(..len).unwrap_or(&[])) };
             len
@@ -515,6 +535,7 @@ mod tests {
     /// rules' -1 comes where glibc still waits or reads on.
     #[test]
     fn mbrto_is_the_rules_and_the_rules_are_glibcs() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let (mut replayed, mut laxer) = (0, 0);
         for line in ORACLE.lines() {
             let Some((head, steps)) = line.split_once(" = ") else {
@@ -554,6 +575,7 @@ mod tests {
     /// begin a character, -1 at the first that cannot.
     #[test]
     fn a_sequence_is_refused_where_it_becomes_impossible() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         for (input, steps) in [
             (&b"\xE0\x80\xAF"[..], 1), // overlong: refused at its second byte
             (b"\xED\xA0\x80", 1),      // a surrogate: likewise
@@ -591,6 +613,7 @@ mod tests {
     /// U+10FFFF and `c16rtomb`'s none (glibc's c16 ones are all strict).
     #[test]
     fn c_rtomb_is_glibcs() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut replayed = 0;
         for line in ORACLE.lines() {
             let Some((head, steps)) = line.split_once(" = ") else {
@@ -649,6 +672,7 @@ mod tests {
     /// A NULL `s`: the same answers as glibc's but for the two above.
     #[test]
     fn a_null_s_is_cs() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let find = |name: &str| {
             ORACLE
                 .lines()
@@ -702,6 +726,7 @@ mod tests {
     /// waiting for its pair, as a state that is not initial.
     #[test]
     fn a_state_with_something_to_hand_out_is_not_initial() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         unsafe {
             let mut st = MbstateT::new();
             let mut u = 0u8;
@@ -730,6 +755,7 @@ mod tests {
     /// own: a character half-read by one is not another's.
     #[test]
     fn a_null_ps_is_the_functions_own_and_the_threads_own() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         unsafe {
             let mut u = 0u32;
             // mbrtoc32 begins a character; mbrtowc and mbrlen do not see it.
@@ -775,6 +801,7 @@ mod tests {
     /// through `mbrtoc32`, and through UTF-16 and UTF-8 units.
     #[test]
     fn every_scalar_value_round_trips() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         for c in (0..=0x10_FFFFu32)
             .filter(|c| !(0xD800..=0xDFFF).contains(c))
             .step_by(7)
@@ -828,5 +855,59 @@ mod tests {
                 assert_eq!(out, &buf[..n]);
             }
         }
+    }
+
+    /// In "C" the multibyte side is a byte a character, and `char8_t` stays
+    /// UTF-8: `mbrtoc32` gives the byte's U+DF80-U+DFFF and `c32rtomb` its
+    /// byte back; `mbrtoc8` refuses a byte UTF-8 cannot carry; `c8rtomb`
+    /// reads é's two units as UTF-8 and finds no byte for it.
+    #[test]
+    fn in_c_the_multibyte_side_is_a_byte_a_character() {
+        assert!(!crate::locale::utf8());
+        let mut st = MbstateT::new();
+        let mut c32: Char32T = 0;
+        // SAFETY: one readable byte.
+        assert_eq!(
+            unsafe { mbrtoc32(&raw mut c32, b"\xe9".as_ptr(), 1, &raw mut st) },
+            1
+        );
+        assert_eq!(c32, 0xDFE9);
+        let mut out = [0u8; 4];
+        // SAFETY: room for MB_CUR_MAX.
+        assert_eq!(
+            unsafe { c32rtomb(out.as_mut_ptr(), 0xDFE9, &raw mut st) },
+            1
+        );
+        assert_eq!(out[0], 0xE9);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { c32rtomb(out.as_mut_ptr(), 0xE9, &raw mut st) },
+            ILSEQ
+        );
+
+        let mut c8: Char8T = 0;
+        // SAFETY: one readable byte.
+        assert_eq!(
+            unsafe { mbrtoc8(&raw mut c8, b"\xe9".as_ptr(), 1, &raw mut st) },
+            ILSEQ
+        );
+        // SAFETY: room for MB_CUR_MAX; ASCII still passes.
+        assert_eq!(
+            unsafe { mbrtoc8(&raw mut c8, b"A".as_ptr(), 1, &raw mut st) },
+            1
+        );
+        assert_eq!(c8, b'A');
+
+        let mut st8 = MbstateT::new();
+        // SAFETY: room for MB_CUR_MAX.
+        assert_eq!(unsafe { c8rtomb(out.as_mut_ptr(), 0xC3, &raw mut st8) }, 0);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { c8rtomb(out.as_mut_ptr(), 0xA9, &raw mut st8) },
+            ILSEQ
+        );
+        // SAFETY: as above.
+        assert_eq!(unsafe { c8rtomb(out.as_mut_ptr(), b'z', &raw mut st8) }, 1);
+        assert_eq!(out[0], b'z');
     }
 }

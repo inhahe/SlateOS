@@ -3665,6 +3665,7 @@ mod tests {
 
     #[test]
     fn wide_conversions_store_wchar_t() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut w = [0x5555i32; 8];
         assert_eq!(
             sscanf_va(
@@ -4519,6 +4520,7 @@ mod tests {
     /// shows where writing stopped.
     #[test]
     fn wscanf_is_glibcs() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut failures = Vec::new();
         for &(name, fmt, input, kinds, glibc) in GLIBC_WSCANF {
             let fmt: Vec<WcharT> = fmt.iter().map(|&c| c as WcharT).chain([0]).collect();
@@ -4548,6 +4550,7 @@ mod tests {
     /// bytes given back.
     #[test]
     fn fwscanf_reads_through_the_stream_and_gives_back_a_wide_character() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut data = *b"12 \xc3\xa9\xe2\x82\xac 34\nrest";
         let s = reading(&mut data);
         let (mut a, mut b) = (0i32, 0i32);
@@ -4598,6 +4601,7 @@ mod tests {
     /// `badutf8_first`, `mismatch`).
     #[test]
     fn fwscanf_ends_at_a_sequence_that_is_no_character() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut data = *b"ab\xffcd";
         let s = reading(&mut data);
         let mut word = [0x55u8; 16];

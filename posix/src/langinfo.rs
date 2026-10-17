@@ -174,8 +174,10 @@ static NOEXPR_STR: &[u8] = b"^[nN]\0";
 static THOUSEP_STR: &[u8] = b"\0";
 /// Currency string (empty in C locale).
 static CRNCYSTR_STR: &[u8] = b"\0";
-/// Codeset in C locale.
+/// Codeset in the "C" locale: glibc's name for ASCII.
 static CODESET_STR: &[u8] = b"ANSI_X3.4-1968\0";
+/// Codeset in "C.UTF-8".
+static CODESET_UTF8_STR: &[u8] = b"UTF-8\0";
 
 // ---------------------------------------------------------------------------
 // nl_langinfo
@@ -184,25 +186,27 @@ static CODESET_STR: &[u8] = b"ANSI_X3.4-1968\0";
 /// `nl_langinfo` — query language information.
 ///
 /// Returns a pointer to a static null-terminated string for the
-/// given `item` constant.  In the C locale, all values are the
-/// POSIX-defined defaults.
+/// given `item` constant, in the calling thread's locale: the
+/// POSIX-defined defaults in both, but for `CODESET`, which is
+/// `ANSI_X3.4-1968` in "C" and `UTF-8` in "C.UTF-8".
 ///
 /// Returns a pointer to an empty string for unknown items.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn nl_langinfo(item: i32) -> *const u8 {
-    langinfo_lookup(item)
+    langinfo_lookup(item, crate::locale::current())
 }
 
-/// `nl_langinfo_l` — locale-specific language information.
-///
-/// Stub: ignores the locale parameter and delegates to `nl_langinfo`.
+/// `nl_langinfo_l` — [`nl_langinfo`] in the locale object `locale`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nl_langinfo_l(item: i32, _locale: usize) -> *const u8 {
-    langinfo_lookup(item)
+pub extern "C" fn nl_langinfo_l(item: i32, locale: usize) -> *const u8 {
+    langinfo_lookup(item, crate::locale::of_handle(locale))
 }
 
-/// Core lookup — maps an `nl_item` to the corresponding C locale string.
-fn langinfo_lookup(item: i32) -> *const u8 {
+/// Core lookup — maps an `nl_item` to its string in `locale`.
+fn langinfo_lookup(item: i32, locale: crate::locale::Locale) -> *const u8 {
+    if item == CODESET && locale.is_utf8(crate::locale::LC_CTYPE as usize) {
+        return CODESET_UTF8_STR.as_ptr();
+    }
     langinfo_bytes(item).as_ptr()
 }
 

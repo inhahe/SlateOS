@@ -783,6 +783,7 @@ mod tests {
 
     #[test]
     fn open_wmemstream_counts_wide_characters() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut p: *mut WcharT = core::ptr::null_mut();
         let mut n: usize = 0;
         let f = unsafe { open_wmemstream(&raw mut p, &raw mut n) };

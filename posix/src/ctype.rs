@@ -142,9 +142,11 @@ pub extern "C" fn tolower(c: i32) -> i32 {
 // Locale-aware variants (_l suffix)
 // ---------------------------------------------------------------------------
 //
-// POSIX.1-2008 locale-aware ctype functions.  Since we only support
-// the C/POSIX locale, these all delegate to the non-locale versions.
-// The `locale_t` parameter is accepted but ignored.
+// POSIX.1-2008 locale-aware ctype functions.  The byte classes are the
+// same in both of this library's locales, "C" and "C.UTF-8", as musl's
+// are: a byte above 0x7F is no letter by itself in either
+// (`crate::locale`).  So these delegate to the plain versions, and the
+// `locale_t` changes nothing.
 
 /// Locale type (opaque pointer).
 type LocaleT = usize;
@@ -416,12 +418,11 @@ pub extern "C" fn __ctype_toupper_loc() -> *const *const i32 {
     }
 }
 
-/// glibc: return maximum number of bytes in a multibyte character.
-///
-/// For UTF-8 (our encoding), this is always 4.
+/// `MB_CUR_MAX`: the most bytes a character takes in the calling thread's
+/// locale -- 4 in "C.UTF-8", 1 in "C", a byte a character.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __ctype_get_mb_cur_max() -> usize {
-    4 // UTF-8: up to 4 bytes per character.
+    if crate::locale::utf8() { 4 } else { 1 }
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,6 +1007,9 @@ mod tests {
 
     #[test]
     fn test_ctype_get_mb_cur_max() {
+        // "C", where a program starts: a byte a character.
+        assert_eq!(__ctype_get_mb_cur_max(), 1);
+        let _utf8 = crate::locale::Utf8Guard::new();
         assert_eq!(__ctype_get_mb_cur_max(), 4);
     }
 

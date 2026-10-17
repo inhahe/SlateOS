@@ -231,6 +231,10 @@ pub struct PerThread {
     /// ([`crate::signal`]'s `sync_kernel_blocked_mask`). Only this thread
     /// and its handlers touch it, and only atomically.
     pub mask_generation: u64,
+
+    /// The locale `uselocale` gave this thread, a `locale_t`; 0 for none,
+    /// when the global one is the thread's ([`crate::locale::current`]).
+    pub locale: usize,
 }
 
 /// `prefix` and then `n` in decimal, NUL-terminated, into one of the
@@ -302,6 +306,7 @@ impl PerThread {
         handlers_run_without_restart: 0,
         blocked: crate::signal::SigsetT::EMPTY,
         mask_generation: 0,
+        locale: 0,
     };
 }
 

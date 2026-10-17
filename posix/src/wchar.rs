@@ -1,14 +1,16 @@
 //! Wide character and multibyte string support (`<wchar.h>`, `<wctype.h>`).
 //!
-//! Full UTF-8 multibyte ↔ wchar_t (Unicode code point) conversion.
-//! Our OS uses UTF-8 throughout, and these functions correctly decode
-//! and encode UTF-8 sequences up to 4 bytes (U+10FFFF).
+//! Multibyte ↔ `wchar_t` (Unicode code point) conversion, in the calling
+//! thread's locale (`crate::locale`): strict UTF-8, up to 4 bytes and
+//! U+10FFFF, in "C.UTF-8", the user's setting; one byte a character in "C",
+//! where a program starts -- 0x80-0xFF musl's U+DF80-U+DFFF, so that every
+//! byte is a character and goes back to its byte (design-decisions §1190).
 //!
 //! ## Implemented
 //!
-//! - `mblen`, `mbtowc`, `wctomb` — multibyte ↔ wide character (UTF-8)
-//! - `mbstowcs`, `wcstombs` — multibyte ↔ wide string (UTF-8)
-//! - `mbrtowc`, `wcrtomb` — restartable multibyte conversion (UTF-8)
+//! - `mblen`, `mbtowc`, `wctomb` — multibyte ↔ wide character
+//! - `mbstowcs`, `wcstombs` — multibyte ↔ wide string
+//! - `mbrtowc`, `wcrtomb` — restartable multibyte conversion
 //! - `wcwidth`, `wcswidth` — character/string display width (Unicode)
 //! - `btowc`, `wctob` — byte ↔ wide character
 //! - `mbsinit` — check initial shift state
@@ -28,7 +30,7 @@
 //! - `wcscasecmp`, `wcsncasecmp` — case-insensitive wide string comparison
 //! - `fputwc`, `fgetwc`, `putwc`, `getwc`, `putwchar`, `getwchar` — wide char I/O
 //! - `fputws`, `fgetws` — wide string I/O
-//! - `ungetwc` — push back a wide character, whatever its UTF-8 length
+//! - `ungetwc` — push back a wide character, whatever its multibyte length
 //! - `wcsftime` — format date/time as wide string (`crate::strftime`'s, re-exported)
 
 /// Wide character type (32-bit Unicode code point).
@@ -279,14 +281,41 @@ pub(crate) enum Decoded {
 }
 
 /// Decode the character `state` has begun, or the next one, from up to `n`
-/// bytes at `s`: the heart of [`mbrtowc`], its kin and `<uchar.h>`'s
-/// `mbrtoc8`, `mbrtoc16` and `mbrtoc32`. Strict UTF-8 -- RFC 3629, Unicode's
-/// table 3-7 -- each byte checked as it comes ([`second_byte_ok`]).
+/// bytes at `s`, in the calling thread's locale: the heart of [`mbrtowc`],
+/// its kin and `<uchar.h>`'s `mbrtoc8`, `mbrtoc16` and `mbrtoc32`. In
+/// "C.UTF-8", strict UTF-8 -- RFC 3629, Unicode's table 3-7 -- each byte
+/// checked as it comes ([`second_byte_ok`]); in "C", each byte is a
+/// character ([`byte_char`]), and nothing is incomplete or invalid.
 ///
 /// # Safety
 ///
 /// `s` has `n` readable bytes.
 pub(crate) unsafe fn decode(state: &mut MbstateT, s: *const u8, n: usize) -> Decoded {
+    if crate::locale::utf8() {
+        // SAFETY: the caller's contract.
+        return unsafe { decode_utf8(state, s, n) };
+    }
+    // A sequence begun in UTF-8 before the locale changed is no character
+    // of this one: it is dropped, as the state starts again.
+    state.reset();
+    if n == 0 {
+        return Decoded::Incomplete;
+    }
+    // SAFETY: n >= 1.
+    let b = unsafe { s.read() };
+    Decoded::Char {
+        cp: byte_char(b),
+        took: 1,
+    }
+}
+
+/// [`decode`] in UTF-8, whatever the locale: for what is UTF-8 by
+/// definition, as `c8rtomb`'s `char8_t` code units are.
+///
+/// # Safety
+///
+/// `s` has `n` readable bytes.
+pub(crate) unsafe fn decode_utf8(state: &mut MbstateT, s: *const u8, n: usize) -> Decoded {
     let mut took: usize = 0;
     if state.expected() == 0 {
         if n == 0 {
@@ -420,113 +449,111 @@ pub(crate) fn utf8_encode(cp: u32, buf: &mut [u8; 4]) -> usize {
     }
 }
 
+/// The character byte `b` is in the "C" locale, one byte a character: itself
+/// below 0x80, and musl's U+DF80-U+DFFF for 0x80-0xFF, so that every byte is
+/// a character and goes back to the byte it was ([`mb_encode`];
+/// `crate::locale`'s doc).
+#[must_use]
+pub(crate) fn byte_char(b: u8) -> u32 {
+    if b < 0x80 {
+        u32::from(b)
+    } else {
+        0xDF00 | u32::from(b)
+    }
+}
+
+/// Encode `cp` in the calling thread's locale's encoding into `buf`: its
+/// length, or 0 for a character the encoding has no bytes for (`EILSEQ`).
+/// UTF-8 in "C.UTF-8"; in "C", ASCII and the U+DF80-U+DFFF that
+/// [`byte_char`] makes of the other bytes, one byte each. What `wcrtomb` and
+/// every conversion to multibyte text writes with.
+pub(crate) fn mb_encode(cp: u32, buf: &mut [u8; 4]) -> usize {
+    if crate::locale::utf8() {
+        return utf8_encode(cp, buf);
+    }
+    match u8::try_from(cp & 0xFF) {
+        Ok(b) if cp < 0x80 || (0xDF80..=0xDFFF).contains(&cp) => {
+            buf[0] = b;
+            1
+        }
+        _ => 0,
+    }
+}
+
+/// One character from at most `n` bytes at `s`, read afresh -- no state
+/// before or after -- in the calling thread's locale: its code point and how
+/// many bytes it took, or `None` when the bytes do not finish a character.
+/// The non-restartable `mblen`, `mbtowc` and `mbstowcs`.
+///
+/// # Safety
+///
+/// `s` has `n` readable bytes, or is a string whose terminator comes first.
+unsafe fn decode_fresh(s: *const u8, n: usize) -> Option<(u32, usize)> {
+    let mut state = MbstateT::new();
+    // SAFETY: the caller's contract; `decode` reads on only while a
+    // character needs more bytes, and a NUL ends any.
+    match unsafe { decode(&mut state, s, n) } {
+        Decoded::Char { cp, took } => Some((cp, took)),
+        Decoded::Incomplete | Decoded::Invalid => None,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Multibyte ↔ wide character
 // ---------------------------------------------------------------------------
 
-/// Determine the number of bytes in a UTF-8 multibyte character.
+/// The number of bytes of the multibyte character at `s`, in the calling
+/// thread's locale ([`decode_fresh`]).
 ///
-/// Returns 0 for null byte, 1..4 for valid UTF-8 lead bytes,
-/// -1 for invalid (sets errno to EILSEQ).
+/// Returns 0 for the null character, 1..=`MB_CUR_MAX` for a character, -1
+/// when the bytes are none, or more than `n` would be needed.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
 pub unsafe extern "C" fn mblen(s: *const u8, n: usize) -> i32 {
     if s.is_null() {
         return 0; // No state-dependent encoding.
     }
-    let lead = unsafe { *s };
-    if lead == 0 {
+    // SAFETY: the caller's `n` bytes, or a string.
+    if unsafe { *s } == 0 {
         return 0;
     }
-
-    let seq_len = utf8_seq_len(lead);
-    if seq_len == 0 || seq_len > n {
-        return -1;
-    }
-
-    // Verify continuation bytes.
-    let mut i = 1;
-    while i < seq_len {
-        if !is_cont(unsafe { *s.add(i) }) {
-            return -1;
-        }
-        i += 1;
-    }
-
-    // Build the byte slice and validate the code point.
-    let mut buf = [0u8; 4];
-    let mut j = 0;
-    while j < seq_len {
-        buf[j] = unsafe { *s.add(j) };
-        j += 1;
-    }
-    if utf8_decode(&buf, seq_len).is_none() {
-        return -1;
-    }
-
-    seq_len as i32
-}
-
-/// Convert a UTF-8 multibyte character to a wide character (code point).
-///
-/// Reads up to `n` bytes from `s`, decodes one UTF-8 character, and
-/// stores the Unicode code point in `*pwc`.
-///
-/// Returns the number of bytes consumed (1..4), 0 for null character,
-/// or -1 for invalid sequence.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32 {
-    if s.is_null() {
-        return 0;
-    }
-    let lead = unsafe { *s };
-    if lead == 0 {
-        if !pwc.is_null() {
-            unsafe {
-                *pwc = 0;
-            }
-        }
-        return 0;
-    }
-
-    let seq_len = utf8_seq_len(lead);
-    if seq_len == 0 || seq_len > n {
-        return -1;
-    }
-
-    let mut buf = [0u8; 4];
-    buf[0] = lead;
-    let mut i = 1;
-    while i < seq_len {
-        let b = unsafe { *s.add(i) };
-        if !is_cont(b) {
-            return -1;
-        }
-        buf[i] = b;
-        i += 1;
-    }
-
-    match utf8_decode(&buf, seq_len) {
-        Some(cp) => {
-            if !pwc.is_null() {
-                unsafe {
-                    *pwc = cp as WcharT;
-                }
-            }
-            seq_len as i32
-        }
+    // SAFETY: as above.
+    match unsafe { decode_fresh(s, n) } {
+        Some((_, took)) => i32::try_from(took).unwrap_or(-1),
         None => -1,
     }
 }
 
-/// Convert a wide character (Unicode code point) to UTF-8.
+/// The multibyte character at `s`, in the calling thread's locale, as a
+/// wide character in `*pwc` ([`decode_fresh`]).
 ///
-/// Writes the UTF-8 encoding of `wc` into `s` (which must have room
-/// for at least `MB_CUR_MAX` = 4 bytes).
+/// Returns the number of bytes it took, 0 for the null character, or -1
+/// when the bytes are no character, or more than `n` would be needed.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    // SAFETY: the caller's `n` bytes, or a string.
+    let Some((cp, took)) = (if unsafe { *s } == 0 {
+        Some((0, 0))
+    } else {
+        // SAFETY: as above.
+        unsafe { decode_fresh(s, n) }
+    }) else {
+        return -1;
+    };
+    if !pwc.is_null() {
+        // SAFETY: the caller's writable `wchar_t`; a code point fits.
+        unsafe { pwc.write(cp as WcharT) };
+    }
+    i32::try_from(took).unwrap_or(-1)
+}
+
+/// `wc` in the calling thread's locale's encoding ([`mb_encode`]), into `s`
+/// (which must have room for `MB_CUR_MAX` bytes).
 ///
-/// Returns the number of bytes written (1..4), or -1 if the code
-/// point is not valid Unicode.
+/// Returns the number of bytes written, or -1 for a character the encoding
+/// has no bytes for.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
@@ -539,7 +566,7 @@ pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
     }
     let cp = wc as u32;
     let mut buf = [0u8; 4];
-    let n = utf8_encode(cp, &mut buf);
+    let n = mb_encode(cp, &mut buf);
     if n == 0 {
         return -1;
     }
@@ -555,9 +582,9 @@ pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
     n as i32
 }
 
-/// Convert a UTF-8 multibyte string to a wide string.
+/// Convert a multibyte string, in the calling thread's locale, to a wide string.
 ///
-/// Decodes up to `n` wide characters from the UTF-8 string at `src`
+/// Decodes up to `n` wide characters from the multibyte string at `src`
 /// and stores them in `dst`.  If `dst` is null, just counts characters.
 ///
 /// Returns the number of wide characters written (not counting null),
@@ -590,44 +617,25 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
             return dst_count;
         }
 
-        let seq_len = utf8_seq_len(lead);
-        if seq_len == 0 {
-            crate::errno::set_errno(crate::errno::EILSEQ);
-            return usize::MAX; // EILSEQ.
-        }
-
-        let mut buf = [0u8; 4];
-        buf[0] = lead;
-        let mut i = 1;
-        while i < seq_len {
-            let b = unsafe { *src.add(src_off + i) };
-            if !is_cont(b) {
-                crate::errno::set_errno(crate::errno::EILSEQ);
-                return usize::MAX;
-            }
-            buf[i] = b;
-            i += 1;
-        }
-
-        if let Some(cp) = utf8_decode(&buf, seq_len) {
-            if !dst.is_null() {
-                unsafe {
-                    *dst.add(dst_count) = cp as WcharT;
-                }
-            }
-            src_off += seq_len;
-            dst_count += 1;
-        } else {
+        // SAFETY: a string, whose terminator ends any character.
+        let Some((cp, took)) = (unsafe { decode_fresh(src.add(src_off), usize::MAX) }) else {
             crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX;
+        };
+        if !dst.is_null() {
+            unsafe {
+                *dst.add(dst_count) = cp as WcharT;
+            }
         }
+        src_off += took;
+        dst_count += 1;
     }
     dst_count
 }
 
-/// Convert a wide string to a UTF-8 multibyte string.
+/// Convert a wide string to a multibyte string, in the calling thread's locale.
 ///
-/// Encodes wide characters from `src` into the UTF-8 buffer at `dst`,
+/// Encodes wide characters from `src` into the multibyte buffer at `dst`,
 /// writing at most `n` bytes.  If `dst` is null, counts the total
 /// bytes needed.
 ///
@@ -661,7 +669,7 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
         }
 
         let mut buf = [0u8; 4];
-        let enc_len = utf8_encode(wc as u32, &mut buf);
+        let enc_len = mb_encode(wc as u32, &mut buf);
         if enc_len == 0 {
             crate::errno::set_errno(crate::errno::EILSEQ);
             return usize::MAX; // Invalid code point.
@@ -695,16 +703,28 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
 // Byte ↔ wide character
 // ---------------------------------------------------------------------------
 
-/// Convert a byte to a wide character.
+/// The wide character the byte `c` is by itself in the calling thread's
+/// locale: ASCII as itself; in "C" every other byte too ([`byte_char`]); in
+/// "C.UTF-8" none of them, nor `EOF`, which are `WEOF`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn btowc(c: i32) -> WcharT {
-    if (0..=127).contains(&c) { c } else { -1 }
+    match u8::try_from(c) {
+        Ok(b) if b < 0x80 || !crate::locale::utf8() => {
+            WcharT::try_from(byte_char(b)).unwrap_or(WEOF)
+        }
+        _ => WEOF,
+    }
 }
 
-/// Convert a wide character to a byte.
+/// The byte the wide character `wc` is by itself in the calling thread's
+/// locale, or `EOF` when it is no one byte: [`btowc`] backwards.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wctob(wc: WcharT) -> i32 {
-    if (0..=127).contains(&wc) { wc } else { -1 }
+    let mut buf = [0u8; 4];
+    match u32::try_from(wc).map(|cp| mb_encode(cp, &mut buf)) {
+        Ok(1) => i32::from(buf[0]),
+        _ => -1,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -730,7 +750,7 @@ pub extern "C" fn mbsinit(ps: *const MbstateT) -> i32 {
 // Restartable multibyte conversion
 // ---------------------------------------------------------------------------
 
-/// Restartable multibyte (UTF-8) → wide character.
+/// Restartable multibyte → wide character, in the calling thread's locale.
 ///
 /// Reads up to `n` bytes from `s`, continuing from the partial state in
 /// `*ps` (this function's own per-thread state for a NULL `ps`), and stores
@@ -782,13 +802,14 @@ pub unsafe extern "C" fn mbrtowc(
     }
 }
 
-/// Restartable wide character → multibyte (UTF-8).
+/// Restartable wide character → multibyte, in the calling thread's locale.
 ///
-/// Encodes `wc` as UTF-8 into `s` (which must have room for at least
-/// `MB_CUR_MAX` = 4 bytes).  The state `ps` is currently unused since
-/// UTF-8 encoding is stateless, but accepted for API compatibility.
+/// Encodes `wc` in the locale's encoding ([`mb_encode`]) into `s` (which
+/// must have room for `MB_CUR_MAX` bytes).  The state `ps` is unused --
+/// neither encoding has shift states -- but accepted for API compatibility.
 ///
-/// Returns the number of bytes written, or `(size_t)-1` on error.
+/// Returns the number of bytes written, or `(size_t)-1`, `EILSEQ`, for a
+/// character the encoding has no bytes for.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, ps: *mut MbstateT) -> usize {
@@ -807,7 +828,7 @@ pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, ps: *mut MbstateT) -> u
     }
 
     let mut buf = [0u8; 4];
-    let n = utf8_encode(wc as u32, &mut buf);
+    let n = mb_encode(wc as u32, &mut buf);
     if n == 0 {
         crate::errno::set_errno(crate::errno::EILSEQ);
         return usize::MAX; // Invalid code point.
@@ -843,8 +864,9 @@ pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, ps: *mut MbstateT) -> u
 ///   concatenation marks take one; Hangul Jamo Extended-B's conjoining letters
 ///   take none), and Unicode 18.0's data, newer than glibc 2.39's.
 ///
-/// The libc decodes UTF-8 whatever `setlocale` reports, so a width per
-/// Unicode is what every character `mbrtowc` can produce needs.
+/// The width is Unicode's in both locales, as musl's is: what `mbrtowc`
+/// produces in "C.UTF-8", and in "C" ASCII and the U+DF80-U+DFFF of the
+/// other bytes, which are no printing characters (-1).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
     if wc == 0 {
@@ -885,9 +907,9 @@ pub unsafe extern "C" fn wcswidth(s: *const WcharT, n: usize) -> i32 {
 //
 // glibc's `C.UTF-8`: glibc's rules, applied to the system's Unicode data,
 // generated into `wctype_tables.rs` by `posix/tools/wctype_gen.py`
-// (design-decisions §1167). The library decodes UTF-8 whatever `setlocale`
-// reports, so every character `mbrtowc` can produce has its classes and its
-// case. Eight classes are stored; the other four follow from them and from
+// (design-decisions §1167), in both locales, as musl's are: every
+// character `mbrtowc` produces in "C.UTF-8" has its classes and its case,
+// and the U+DF80-U+DFFF it makes of a byte in "C" are in no class. Eight classes are stored; the other four follow from them and from
 // ASCII, as glibc's rules make them: `digit` and `xdigit` are ASCII's alone,
 // as C requires; `alnum` is `alpha` or `digit`; `punct` is `graph` and
 // neither.
@@ -3051,7 +3073,7 @@ unsafe fn wcs_to_mbs(
         let k = if wc == 0 {
             1
         } else {
-            match u32::try_from(wc).map(|cp| utf8_encode(cp, &mut buf)) {
+            match u32::try_from(wc).map(|cp| mb_encode(cp, &mut buf)) {
                 Ok(k @ 1..=4) => k,
                 _ => {
                     crate::errno::set_errno(crate::errno::EILSEQ);
@@ -3159,18 +3181,20 @@ pub unsafe extern "C" fn wcsncasecmp(s1: *const WcharT, s2: *const WcharT, n: us
 // ---------------------------------------------------------------------------
 //
 // A stream holds the multibyte form of what the wide calls read and write --
-// UTF-8 here, the only encoding this library has -- and these convert at the
-// edge, through `stdio::WideStream`: the stream is held for the call and
+// in the calling thread's locale's encoding, as musl's does: UTF-8 in
+// "C.UTF-8", a byte a character in "C" -- and these convert at the edge,
+// through `stdio::WideStream`: the stream is held for the call and
 // claimed wide, as glibc's `_IO_fwide(fp, 1)` claims it, so a wide call on a
 // byte stream fails (and a byte call on a wide one; `stdio.rs` has that half).
 // A byte sequence that is no character is `EILSEQ` and a stream error, as
 // glibc's converter makes it.
 
-/// `wc` as UTF-8 in `buf`: the length, or `None` for no character (a
-/// surrogate, or above U+10FFFF -- glibc's UTF-8 converter refuses both).
+/// `wc` in the locale's encoding in `buf` ([`mb_encode`]): the length, or
+/// `None` for no character -- in UTF-8 a surrogate, or above U+10FFFF, which
+/// glibc's UTF-8 converter refuses too.
 pub(crate) fn encode_wide(wc: WcharT, buf: &mut [u8; 4]) -> Option<usize> {
     let cp = u32::try_from(wc).ok()?;
-    match utf8_encode(cp, buf) {
+    match mb_encode(cp, buf) {
         0 => None,
         n => Some(n),
     }
@@ -3187,6 +3211,10 @@ pub(crate) fn read_wide(ws: &crate::stdio::WideStream) -> Result<Option<WcharT>,
     let Ok(b0) = u8::try_from(first) else {
         return Ok(None);
     };
+    if !crate::locale::utf8() {
+        // "C": every byte is a character ([`byte_char`]).
+        return Ok(WcharT::try_from(byte_char(b0)).ok());
+    }
     let (len, init, min) = match b0 {
         0x00..=0x7f => return Ok(Some(WcharT::from(b0))),
         0xc2..=0xdf => (2, u32::from(b0 & 0x1f), 0x80),
@@ -4347,6 +4375,7 @@ mod tests {
 
     #[test]
     fn test_wcrtomb_chk_checks_the_encoding_not_mb_cur_max() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut out = [0u8; 4];
         unsafe {
             // 'A' is one byte: a one-byte buffer is enough.
@@ -4374,6 +4403,7 @@ mod tests {
 
     #[test]
     fn test_wctomb_chk_with_mb_cur_max_of_room() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut out = [0u8; MB_CUR_MAX];
         let n = unsafe { __wctomb_chk(out.as_mut_ptr(), 0x20AC, MB_CUR_MAX) };
         assert_eq!(n, 3);
@@ -4382,6 +4412,7 @@ mod tests {
 
     #[test]
     fn test_conversion_chk_delegates_at_the_boundary() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mb = "héllo\0".as_bytes();
         let mut wide = [0 as WcharT; 5];
         unsafe {
@@ -4602,6 +4633,7 @@ mod tests {
 
     #[test]
     fn test_mblen_multibyte() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // é = C3 A9
         let s: &[u8] = &[0xC3, 0xA9];
         assert_eq!(unsafe { mblen(s.as_ptr(), 2) }, 2);
@@ -4615,6 +4647,7 @@ mod tests {
 
     #[test]
     fn test_mblen_insufficient_bytes() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // 2-byte char but n=1
         let s: &[u8] = &[0xC3, 0xA9];
         assert_eq!(unsafe { mblen(s.as_ptr(), 1) }, -1);
@@ -4632,6 +4665,7 @@ mod tests {
 
     #[test]
     fn test_mbtowc_euro() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // € = U+20AC = E2 82 AC
         let s: &[u8] = &[0xE2, 0x82, 0xAC];
         let mut wc: WcharT = 0;
@@ -4641,6 +4675,7 @@ mod tests {
 
     #[test]
     fn test_mbtowc_emoji() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // 😀 = U+1F600 = F0 9F 98 80
         let s: &[u8] = &[0xF0, 0x9F, 0x98, 0x80];
         let mut wc: WcharT = 0;
@@ -4659,6 +4694,7 @@ mod tests {
 
     #[test]
     fn test_wctomb_multibyte() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // U+20AC = € = E2 82 AC
         let mut buf = [0u8; 4];
         assert_eq!(unsafe { wctomb(buf.as_mut_ptr(), 0x20AC) }, 3);
@@ -4667,6 +4703,7 @@ mod tests {
 
     #[test]
     fn test_wctomb_emoji() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // U+1F600 = 😀 = F0 9F 98 80
         let mut buf = [0u8; 4];
         assert_eq!(unsafe { wctomb(buf.as_mut_ptr(), 0x1F600) }, 4);
@@ -4694,6 +4731,7 @@ mod tests {
 
     #[test]
     fn test_mbstowcs_utf8() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // "café" = 63 61 66 C3 A9 00
         let src: &[u8] = &[0x63, 0x61, 0x66, 0xC3, 0xA9, 0x00];
         let mut dst = [0i32; 16];
@@ -4705,6 +4743,7 @@ mod tests {
 
     #[test]
     fn test_wcstombs_roundtrip() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // U+20AC (€), U+0041 (A)
         let src: &[i32] = &[0x20AC, 0x41, 0];
         let mut dst = [0u8; 16];
@@ -5570,6 +5609,7 @@ mod tests {
     /// Counting is in *characters*, so a multibyte string counts short.
     #[test]
     fn mbstowcs_counts_characters_not_bytes() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // U+00E9, U+20AC, U+1F642 -- 2 + 3 + 4 = 9 bytes, 3 characters.
         // Written as byte values rather than escapes: this literal reached
         // the file through a shell heredoc once and came back as the decoded
@@ -5593,6 +5633,7 @@ mod tests {
     /// must ask the right one.
     #[test]
     fn wcstombs_counts_bytes_not_characters() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let src: &[WcharT] = &[0x00e9, 0x20ac, 0x1f642, 0];
         let got = unsafe { wcstombs(core::ptr::null_mut(), src.as_ptr(), 0) };
         assert_eq!(got, 9, "2 + 3 + 4 bytes");
@@ -6736,10 +6777,21 @@ mod tests {
 
     #[test]
     fn test_btowc_non_ascii() {
-        // Values > 127 return WEOF (-1).
+        // "C": every byte is a character, 0x80-0xFF musl's U+DF80-U+DFFF,
+        // and wctob gives each back; EOF and what is no byte are WEOF.
+        assert_eq!(btowc(128), 0xDF80);
+        assert_eq!(btowc(255), 0xDFFF);
+        assert_eq!(wctob(0xDF80), 128);
+        assert_eq!(wctob(0xDFFF), 255);
+        assert_eq!(wctob(0xE9), -1);
+        assert_eq!(btowc(-1), -1); // EOF
+        assert_eq!(btowc(256), -1);
+        // "C.UTF-8": no byte above 0x7F is a character by itself.
+        let _utf8 = crate::locale::Utf8Guard::new();
         assert_eq!(btowc(128), -1);
         assert_eq!(btowc(255), -1);
-        assert_eq!(btowc(-1), -1); // EOF
+        assert_eq!(wctob(0xDF80), -1);
+        assert_eq!(btowc(-1), -1);
     }
 
     #[test]
@@ -7095,6 +7147,7 @@ mod tests {
 
     #[test]
     fn test_mbrtowc_two_byte_utf8() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut wc: WcharT = 0;
         let mut state = MbstateT::new();
         // é = U+00E9 = 0xC3 0xA9
@@ -7105,6 +7158,7 @@ mod tests {
 
     #[test]
     fn test_mbrtowc_three_byte_utf8() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut wc: WcharT = 0;
         let mut state = MbstateT::new();
         // ❤ = U+2764 = 0xE2 0x9D 0xA4
@@ -7115,6 +7169,7 @@ mod tests {
 
     #[test]
     fn test_mbrtowc_four_byte_utf8() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut wc: WcharT = 0;
         let mut state = MbstateT::new();
         // 😀 = U+1F600 = 0xF0 0x9F 0x98 0x80
@@ -7125,6 +7180,7 @@ mod tests {
 
     #[test]
     fn test_mbrtowc_incomplete() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut wc: WcharT = 0;
         let mut state = MbstateT::new();
         // Only 1 byte of a 2-byte sequence.
@@ -7152,6 +7208,7 @@ mod tests {
 
     #[test]
     fn test_wcrtomb_two_byte() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut buf = [0u8; 4];
         // é = U+00E9
         let ret = unsafe { wcrtomb(buf.as_mut_ptr(), 0xE9, core::ptr::null_mut()) };
@@ -7161,6 +7218,7 @@ mod tests {
 
     #[test]
     fn test_wcrtomb_four_byte() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut buf = [0u8; 4];
         // 😀 = U+1F600
         let ret = unsafe { wcrtomb(buf.as_mut_ptr(), 0x1F600, core::ptr::null_mut()) };
@@ -7192,6 +7250,7 @@ mod tests {
 
     #[test]
     fn test_mbrlen_multibyte() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let mut state = MbstateT::new();
         // é = 0xC3 0xA9
         let ret = unsafe { mbrlen(b"\xC3\xA9".as_ptr(), 2, &mut state) };
@@ -7221,6 +7280,7 @@ mod tests {
 
     #[test]
     fn test_mbsrtowcs_utf8() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         // "é" (U+00E9) = 0xC3 0xA9
         let input = b"\xC3\xA9\0";
         let mut src: *const u8 = input.as_ptr();
@@ -7247,6 +7307,7 @@ mod tests {
 
     #[test]
     fn test_wcsrtombs_utf8() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let input: [WcharT; 2] = [0xE9, 0]; // "é"
         let mut src: *const WcharT = input.as_ptr();
         let mut dst = [0u8; 8];
@@ -7605,6 +7666,7 @@ mod tests {
     /// state alone and ignores `len`; `*src` at an invalid character.
     #[test]
     fn the_string_forms_are_glibcs() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let oracle = include_str!("multibyte_oracle.txt");
         let unhex = |h: &str| -> Vec<u8> {
             (0..h.len() / 2)
@@ -7742,6 +7804,7 @@ mod tests {
     /// and a `len` of 0 -- answers the length: `len` limited it, and it was 0.
     #[test]
     fn counting_ignores_len() {
+        let _utf8 = crate::locale::Utf8Guard::new();
         let text = "a\u{e9}\u{20ac}\u{1f600}\0";
         let mut src = text.as_ptr();
         let n = unsafe {
@@ -7766,5 +7829,108 @@ mod tests {
         };
         assert_eq!(n, 10);
         assert_eq!(wsrc, wide.as_ptr());
+    }
+
+    /// In "C", where a program starts, each byte is a character and nothing
+    /// is an encoding error: 0x80-0xFF are U+DF80-U+DFFF, as musl makes
+    /// them, every conversion takes one byte and gives it back, and a
+    /// character that is no byte has no multibyte form (design-decisions
+    /// §1190).
+    #[test]
+    fn the_c_locale_is_a_byte_a_character() {
+        assert!(!crate::locale::utf8());
+        let mut wc: WcharT = 0;
+        let mut st = MbstateT::new();
+        // é in UTF-8 is two characters here, and never incomplete.
+        let bytes = b"\xc3\xa9\x80\xff";
+        for (i, want) in [0xDFC3, 0xDFA9, 0xDF80, 0xDFFF].into_iter().enumerate() {
+            // SAFETY: the bytes left.
+            let n = unsafe {
+                mbrtowc(
+                    &raw mut wc,
+                    bytes.as_ptr().add(i),
+                    bytes.len() - i,
+                    &raw mut st,
+                )
+            };
+            assert_eq!((n, wc), (1, want), "byte {i}");
+        }
+        // SAFETY: one byte, two given.
+        assert_eq!(unsafe { mblen(b"\xe2\x82".as_ptr(), 2) }, 1);
+        // SAFETY: as above.
+        assert_eq!(unsafe { mbtowc(&raw mut wc, b"\xe2".as_ptr(), 1) }, 1);
+        assert_eq!(wc, 0xDFE2);
+
+        // Back: ASCII and U+DF80-U+DFFF are their byte; anything else none.
+        let mut out = [0u8; 4];
+        // SAFETY: room for MB_CUR_MAX.
+        assert_eq!(unsafe { wcrtomb(out.as_mut_ptr(), 0xDFC3, &raw mut st) }, 1);
+        assert_eq!(out[0], 0xC3);
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { wcrtomb(out.as_mut_ptr(), 0xE9, &raw mut st) },
+            usize::MAX
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
+        // SAFETY: as above.
+        assert_eq!(unsafe { wctomb(out.as_mut_ptr(), 0x20AC) }, -1);
+
+        // A whole string round-trips, whatever its bytes.
+        let text = b"a\xc3\xa9\xff\x80z\0";
+        let mut wide = [0 as WcharT; 8];
+        // SAFETY: a NUL-terminated string; room for it.
+        assert_eq!(unsafe { mbstowcs(wide.as_mut_ptr(), text.as_ptr(), 8) }, 6);
+        let mut back = [0u8; 8];
+        // SAFETY: a NUL-terminated wide string; room for it.
+        assert_eq!(unsafe { wcstombs(back.as_mut_ptr(), wide.as_ptr(), 8) }, 6);
+        assert_eq!(&back[..7], text);
+
+        assert_eq!(crate::ctype::__ctype_get_mb_cur_max(), 1);
+        assert_eq!(
+            cstr(crate::langinfo::nl_langinfo(crate::langinfo::CODESET)),
+            b"ANSI_X3.4-1968"
+        );
+    }
+
+    /// The same calls in "C.UTF-8" read and write UTF-8, and say so.
+    #[test]
+    fn c_utf8_is_utf8_and_says_so() {
+        let _utf8 = crate::locale::Utf8Guard::new();
+        let mut wc: WcharT = 0;
+        let mut st = MbstateT::new();
+        // SAFETY: two readable bytes.
+        assert_eq!(
+            unsafe { mbrtowc(&raw mut wc, b"\xc3\xa9".as_ptr(), 2, &raw mut st) },
+            2
+        );
+        assert_eq!(wc, 0xE9);
+        // SAFETY: one readable byte.
+        assert_eq!(
+            unsafe { mbrtowc(&raw mut wc, b"\x80".as_ptr(), 1, &raw mut st) },
+            usize::MAX
+        );
+        let mut out = [0u8; 4];
+        // SAFETY: room for MB_CUR_MAX.
+        assert_eq!(
+            unsafe { wcrtomb(out.as_mut_ptr(), 0xDF80, &raw mut st) },
+            usize::MAX
+        );
+        assert_eq!(crate::ctype::__ctype_get_mb_cur_max(), 4);
+        assert_eq!(
+            cstr(crate::langinfo::nl_langinfo(crate::langinfo::CODESET)),
+            b"UTF-8"
+        );
+        // A locale object's codeset is its own, whatever the thread's.
+        let c = crate::locale::Locale::C.to_handle();
+        assert_eq!(
+            cstr(crate::langinfo::nl_langinfo_l(crate::langinfo::CODESET, c)),
+            b"ANSI_X3.4-1968"
+        );
+    }
+
+    /// The bytes of the C string at `p`.
+    fn cstr(p: *const u8) -> &'static [u8] {
+        // SAFETY: the library's static strings.
+        unsafe { core::ffi::CStr::from_ptr(p.cast()) }.to_bytes()
     }
 }

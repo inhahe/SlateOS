@@ -702,7 +702,7 @@ MUTATIONS += [
         "a press in a box without the keyboard is measured as though it had it",
         "        .map(|(focus, area)| (focus, area, self.box_has_keyboard(focus)));\n",
         "        .map(|(focus, area)| (focus, area, true));\n",
-        [SQL_EDITS],
+        ["a_press_in_the_sql_editor_without_the_keyboard_lands_where_it_reads"],
     ),
     (
         "the value's keys edit the query",

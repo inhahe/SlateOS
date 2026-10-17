@@ -10474,6 +10474,36 @@ mod tests {
         );
     }
 
+    /// **A press in the SQL editor without the keyboard lands where it
+    /// reads**: a query longer than the editor is drawn from its start
+    /// there, so a press after its second letter puts the caret after its
+    /// second letter -- not where the query would stand scrolled under a
+    /// caret at its end.
+    #[test]
+    fn a_press_in_the_sql_editor_without_the_keyboard_lands_where_it_reads() {
+        let mut app = wired();
+        app.sql_input.set_text(&"w".repeat(200));
+        app.focus = Focus::None;
+        let area = sql_area(&app);
+        let weight = FontWeightHint::Regular;
+        assert!(
+            text::measure(app.sql_input.text(), SQL_TEXT_SIZE, weight) > area.w,
+            "control: the query fits the editor"
+        );
+        let after_two = area.x + text::measure("ww", SQL_TEXT_SIZE, weight);
+        click(&mut app, (after_two + 0.5, area.y + area.h / 2.0), FULL);
+        assert_eq!(
+            app.focus,
+            Focus::Editor,
+            "the press did not reach the editor"
+        );
+        assert_eq!(
+            app.sql_input.input().cursor().byte(),
+            2,
+            "the press was measured against the query scrolled to its end"
+        );
+    }
+
     /// **The SQL editor draws the query as it was typed**, each token in its
     /// colour. It drew the tokens the lexer handed back instead: a run of
     /// spaces as one, keywords in capitals, `''` in a string as `'`, and a

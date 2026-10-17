@@ -337,6 +337,12 @@ LINE_MUTATIONS = [
         [S_DRAWN],
     ),
     (
+        "a box given a new size keeps its old one",
+        "        self.font_size = font_size;\n",
+        "        let _ = font_size;\n",
+        ["a_resized_box_measures_and_draws_at_its_new_size"],
+    ),
+    (
         "a press with the keyboard is measured from the start",
         "        let drawn = if focused {\n",
         "        let drawn = if false {\n",

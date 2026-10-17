@@ -107,6 +107,12 @@ impl LineBox {
         self.input.text().is_empty()
     }
 
+    /// Measure, move the caret through and draw the text at `font_size` from
+    /// now on: for a box whose text follows the window's size.
+    pub fn set_font_size(&mut self, font_size: f32) {
+        self.font_size = font_size;
+    }
+
     /// The field underneath, for a caller that reads the caret or the
     /// selection.
     #[must_use]
@@ -515,6 +521,38 @@ mod tests {
             line.input().cursor().byte() > 50,
             "measured from the start: caret at {}",
             line.input().cursor().byte()
+        );
+    }
+
+    /// **A box whose size is changed measures and draws at its new size**:
+    /// a press where the fourth letter ends at the new size lands after it,
+    /// not where that distance falls at the old one, and the text is drawn
+    /// at the new size.
+    #[test]
+    fn a_resized_box_measures_and_draws_at_its_new_size() {
+        let mut line = LineBox::new(64, 10.0);
+        line.set_text("abcdefgh");
+        line.set_font_size(20.0);
+        let dx = guitk::text::measure("abcd", 20.0, FontWeightHint::Regular);
+        line.press(dx, 500.0, false);
+        assert_eq!(
+            line.input().cursor().byte(),
+            4,
+            "the press was measured at the old size"
+        );
+        let mut tree = RenderTree::new();
+        line.draw(&mut tree, &LOOK);
+        let sizes: Vec<f32> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { font_size, .. } => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !sizes.is_empty() && sizes.iter().all(|s| (s - 20.0).abs() < f32::EPSILON),
+            "drawn at {sizes:?}, not the new size"
         );
     }
 

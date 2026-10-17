@@ -89,6 +89,7 @@ use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use printjob::{ColorMode, PageRange, PrintJob, ScaleMode};
+use textline::{SearchBox, SearchLook};
 
 use std::path::{Path, PathBuf};
 
@@ -422,7 +423,6 @@ struct Edited {
 fn edit_box(
     editor: &mut TextInput,
     text: &mut String,
-    clipboard: &mut String,
     key: &KeyEvent,
     size: f32,
 ) -> Option<Edited> {
@@ -430,10 +430,7 @@ fn edit_box(
         editor.set_text(text);
     }
     let before = (editor.cursor(), editor.selection_anchor());
-    let edit = textline::apply_key(editor, key, clipboard.as_str(), size);
-    if let Some(copied) = edit.copied {
-        *clipboard = copied;
-    }
+    let edit = textline::apply_key_on_clipboard(editor, key, size);
     if !edit.handled {
         return None;
     }
@@ -1341,7 +1338,8 @@ impl DocumentTab {
 /// State of the text search feature.
 #[derive(Clone, Debug)]
 pub struct SearchState {
-    pub query: String,
+    /// The search box, which is the query.
+    pub query: SearchBox,
     pub results: Vec<SearchResult>,
     pub current_match: Option<usize>,
     pub active: bool,
@@ -1351,7 +1349,7 @@ pub struct SearchState {
 impl SearchState {
     pub fn new() -> Self {
         Self {
-            query: String::new(),
+            query: SearchBox::new(BOX_CAPACITY, SEARCH_TEXT_SIZE),
             results: Vec::new(),
             current_match: None,
             active: false,
@@ -1361,7 +1359,7 @@ impl SearchState {
 
     /// Perform search on the document.
     pub fn search(&mut self, document: &PdfDocument) {
-        self.results = document.search(&self.query);
+        self.results = document.search(self.query.text());
         self.current_match = if self.results.is_empty() {
             None
         } else {
@@ -1486,15 +1484,10 @@ pub struct PdfViewerApp {
     pub search_focused: bool,
     /// The print dialog, open or not.
     pub print_dialog: PrintDialog,
-    /// The search box's caret and selection, laid over `search.query`,
-    /// which stays the truth: reloaded whenever the query has changed under
-    /// it (Escape clears it).
-    search_editor: TextInput,
     /// The page range box's caret and selection, laid over
-    /// `print_dialog.range_text`, the same way.
+    /// `print_dialog.range_text`, which stays the truth: reloaded whenever
+    /// the text has changed under it.
     range_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from either box, for Ctrl+V.
-    clipboard: String,
     /// How wide the mark is round a box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -1563,9 +1556,7 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("can_print", &self.print.is_some())
             .field("palette", &self.palette)
             .field("wheel", &self.wheel)
-            .field("search_editor", &self.search_editor)
             .field("range_editor", &self.range_editor)
-            .field("clipboard", &self.clipboard)
             .field("focus_ring_width", &self.focus_ring_width)
             .finish()
     }
@@ -1582,9 +1573,7 @@ impl PdfViewerApp {
             search: SearchState::new(),
             search_focused: false,
             print_dialog: PrintDialog::default(),
-            search_editor: textline::field_holding("", BOX_CAPACITY),
             range_editor: textline::field_holding("", BOX_CAPACITY),
-            clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             recent_files: RecentFilesList::default(),
             print_job: PrintJob::default(),
@@ -3458,9 +3447,10 @@ impl PdfViewerApp {
 
     /// Put the caret of the box a press landed in under the pointer at `x`
     /// -- the search box or the page range box, as `target` says -- measured
-    /// against the box as it was drawn before the press (`drawn`), in the
-    /// frame that answered the press (`frame`).
-    fn place_caret(&mut self, target: Target, frame: &Frame, drawn: TextCursor, x: f32) {
+    /// against the box as it was drawn before the press, with the keyboard
+    /// or without (`had_the_keyboard`), in the frame that answered the
+    /// press (`frame`).
+    fn place_caret(&mut self, target: Target, frame: &Frame, had_the_keyboard: bool, x: f32) {
         let (rect, size) = match target {
             Target::SearchField => {
                 let Some(hit) = frame.rect_of(|t| *t == Target::SearchField) else {
@@ -3478,20 +3468,24 @@ impl PdfViewerApp {
             }
             _ => return,
         };
-        let (editor, text) = match target {
-            Target::SearchField => (&mut self.search_editor, &self.search.query),
-            _ => (&mut self.range_editor, &self.print_dialog.range_text),
-        };
+        let (dx, width) = (x - rect.x - BOX_TEXT_INSET, rect.w - 2.0 * BOX_TEXT_INSET);
+        if target == Target::SearchField {
+            self.search.query.press(dx, width, had_the_keyboard);
+            return;
+        }
+        let text = &self.print_dialog.range_text;
+        let editor = &mut self.range_editor;
+        let drawn = drawn_cursor(editor, text, had_the_keyboard);
         if editor.text() != text.as_str() {
             editor.set_text(text);
         }
         let cursor = textedit::cursor_at_click(
             text,
             drawn,
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+            width.max(0.0),
             size,
             FontWeightHint::Regular,
-            x - rect.x - BOX_TEXT_INSET,
+            dx,
         );
         editor.set_selection_anchor(None);
         editor.set_cursor(cursor);
@@ -3576,13 +3570,35 @@ impl PdfViewerApp {
 
         // The query, in the toolkit's field.
         let search_box = Self::search_box_rect(bar_x, bar_y, bar_h);
-        self.render_box(
+        let state = self.search_box_state();
+        field::draw(
             frame,
+            &self.palette,
             search_box,
-            self.search_box_state(),
-            (&self.search_editor, &self.search.query, self.search_focused),
-            ("Search...", SEARCH_TEXT_SIZE, self.palette.text),
+            state,
+            self.focus_ring_width,
         );
+        let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        let mut tree = RenderTree::new();
+        self.search.query.draw(
+            &mut tree,
+            &SearchLook {
+                x: search_box.x + BOX_TEXT_INSET,
+                y: search_box.y + (search_box.h - line) / 2.0,
+                width: search_box.w - 2.0 * BOX_TEXT_INSET,
+                line_height: line,
+                focused: state.focused,
+                placeholder: "Search...",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        for command in tree.commands {
+            frame.push(command);
+        }
 
         // Match count
         let count_label = self.search.match_count_label();
@@ -4445,7 +4461,6 @@ impl PdfViewerApp {
             _ => match edit_box(
                 &mut self.range_editor,
                 &mut self.print_dialog.range_text,
-                &mut self.clipboard,
                 event,
                 PRINT_RANGE_SIZE,
             ) {
@@ -4471,21 +4486,21 @@ impl PdfViewerApp {
             self.follow_current_match();
             return true;
         }
-        match edit_box(
-            &mut self.search_editor,
-            &mut self.search.query,
-            &mut self.clipboard,
-            event,
-            SEARCH_TEXT_SIZE,
-        ) {
-            Some(edited) => {
-                if edited.text {
-                    self.refresh_search();
-                }
-                edited.text || edited.caret
-            }
-            None => false,
+        let caret = |search: &SearchState| {
+            (
+                search.query.input().cursor(),
+                search.query.input().selection_anchor(),
+            )
+        };
+        let before = caret(&self.search);
+        let edit = self.search.query.key(event);
+        if !edit.handled {
+            return false;
         }
+        if edit.changed {
+            self.refresh_search();
+        }
+        edit.changed || caret(&self.search) != before
     }
 
     /// Route one window event.
@@ -4538,20 +4553,12 @@ impl PdfViewerApp {
                     // measured against the box as it was drawn before it.
                     Some(target @ (Target::SearchField | Target::PrintRangeField)) => {
                         let frame = self.frame(self.window_width, self.window_height);
-                        let drawn = match target {
-                            Target::SearchField => drawn_cursor(
-                                &self.search_editor,
-                                &self.search.query,
-                                self.search_focused,
-                            ),
-                            _ => drawn_cursor(
-                                &self.range_editor,
-                                &self.print_dialog.range_text,
-                                self.print_dialog.open,
-                            ),
+                        let had_the_keyboard = match target {
+                            Target::SearchField => self.search_focused,
+                            _ => self.print_dialog.open,
                         };
                         self.handle_target(target);
-                        self.place_caret(target, &frame, drawn, *x);
+                        self.place_caret(target, &frame, had_the_keyboard, *x);
                         true
                     }
                     Some(target) => self.handle_target(target),
@@ -6314,7 +6321,7 @@ mod tests {
     fn test_search_performs_search() {
         let doc = PdfDocument::create_sample(PathBuf::from("/t.pdf"), 3);
         let mut s = SearchState::new();
-        s.query = "Lorem".to_string();
+        s.query.set_text("Lorem");
         s.search(&doc);
         assert_eq!(s.results.len(), 3);
         assert_eq!(s.current_match, Some(0));
@@ -6324,7 +6331,7 @@ mod tests {
     fn test_search_next_match() {
         let doc = PdfDocument::create_sample(PathBuf::from("/t.pdf"), 3);
         let mut s = SearchState::new();
-        s.query = "Lorem".to_string();
+        s.query.set_text("Lorem");
         s.search(&doc);
         s.next_match();
         assert_eq!(s.current_match, Some(1));
@@ -6338,7 +6345,7 @@ mod tests {
     fn test_search_prev_match() {
         let doc = PdfDocument::create_sample(PathBuf::from("/t.pdf"), 3);
         let mut s = SearchState::new();
-        s.query = "Lorem".to_string();
+        s.query.set_text("Lorem");
         s.search(&doc);
         s.prev_match(); // Wrap to last
         assert_eq!(s.current_match, Some(2));
@@ -6350,7 +6357,7 @@ mod tests {
     fn test_search_match_count_label() {
         let mut s = SearchState::new();
         assert!(s.match_count_label().is_empty());
-        s.query = "xyz".to_string();
+        s.query.set_text("xyz");
         assert_eq!(s.match_count_label(), "No matches");
         s.results.push(SearchResult {
             page_index: 0,
@@ -6365,7 +6372,7 @@ mod tests {
     fn test_search_clear() {
         let doc = PdfDocument::create_sample(PathBuf::from("/t.pdf"), 2);
         let mut s = SearchState::new();
-        s.query = "Lorem".to_string();
+        s.query.set_text("Lorem");
         s.active = true;
         s.search(&doc);
         s.clear();
@@ -6599,7 +6606,7 @@ mod tests {
         let doc = PdfDocument::create_sample(PathBuf::from("/test.pdf"), 2);
         app.load_document(doc);
         app.search.active = true;
-        app.search.query = "Lorem".to_string();
+        app.search.query.set_text("Lorem");
         if let Some(doc) = &app.active_tab().unwrap().document {
             let results = doc.search("Lorem");
             app.search.results = results;
@@ -7029,7 +7036,8 @@ mod tests {
         app.handle_key(&key(Key::Escape, "", Modifiers::alt()));
         app.handle_key(&key(Key::Backspace, "", Modifiers::alt()));
         assert_eq!(
-            app.search.query, "ś",
+            app.search.query.text(),
+            "ś",
             "the search typed a command or lost AltGr's ś"
         );
         assert!(app.search.active, "Alt+Escape closed the search");
@@ -7830,13 +7838,15 @@ mod tests {
         app.handle_key(&probe::press(Key::Home));
         app.handle_key(&probe::press(Key::Delete));
         assert_eq!(
-            app.search.query, "rem",
+            app.search.query.text(),
+            "rem",
             "Home and Delete did not edit the start"
         );
         app.handle_key(&probe::ctrl(Key::A));
         typed(&mut app, "orem");
         assert_eq!(
-            app.search.query, "orem",
+            app.search.query.text(),
+            "orem",
             "typing did not replace the selection"
         );
 
@@ -7848,7 +7858,8 @@ mod tests {
         }));
         typed(&mut app, "L");
         assert_eq!(
-            app.search.query, "Lorem",
+            app.search.query.text(),
+            "Lorem",
             "the caret did not go where the press was"
         );
         assert!(
@@ -7905,7 +7916,7 @@ mod tests {
         let mut app = wired();
         probe::click(&mut app, Target::SearchToggle);
         probe::type_str(&mut app, "Lorem");
-        assert_eq!(app.search.query, "Lorem");
+        assert_eq!(app.search.query.text(), "Lorem");
         assert!(
             !app.search.results.is_empty(),
             "the query matches the sample text, so the count must not read zero"
@@ -7917,7 +7928,8 @@ mod tests {
         assert!(!app.search_focused);
         probe::type_str(&mut app, "xyz");
         assert_eq!(
-            app.search.query, "Lorem",
+            app.search.query.text(),
+            "Lorem",
             "typing leaked into an unfocused box"
         );
     }
@@ -7932,7 +7944,7 @@ mod tests {
         probe::click(&mut app, Target::SearchField);
         assert!(app.search_focused);
         probe::type_str(&mut app, "ip");
-        assert_eq!(app.search.query, "ip");
+        assert_eq!(app.search.query.text(), "ip");
     }
 
     #[test]
@@ -7954,7 +7966,8 @@ mod tests {
         probe::type_str(&mut app, "Отчёт");
         probe::key(&mut app, &probe::press(Key::Backspace));
         assert_eq!(
-            app.search.query, "Отчё",
+            app.search.query.text(),
+            "Отчё",
             "backspace cut a multi-byte character in half"
         );
     }

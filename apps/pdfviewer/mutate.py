@@ -175,8 +175,8 @@ MUTATIONS += [
     ),
     (
         "a press leaves the caret where it was",
-        '                        self.place_caret(target, &frame, drawn, *x);\n',
-        '                        let _ = (&frame, drawn, *x);\n',
+        '                        self.place_caret(target, &frame, had_the_keyboard, *x);\n',
+        '                        let _ = (&frame, had_the_keyboard, *x);\n',
         [SEARCH_EDITS],
     ),
     (

@@ -215,34 +215,21 @@ MUTATIONS += [
         [SEARCH],
     ),
     (
-        "the search's caret is at its start",
-        "            let (cursor, selection_anchor) = self.search_caret();\n",
-        "            let (cursor, selection_anchor) = (TextCursor::default(), None);\n",
+        "the box with the keyboard is drawn without it",
+        "                focused: state.focused,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [SEARCH, "the_search_edits_at_a_caret"],
     ),
     (
-        "an empty search box with the keyboard has no caret",
-        "                textedit::push_caret(\n"
-        "                    &mut tree,\n"
-        "                    x,\n"
-        "                    y,\n"
-        "                    line,\n"
-        "                    self.palette.text,\n"
-        "                    textedit::CARET_WIDTH,\n"
-        "                );\n",
-        "                let _ = (x, y, line);\n",
-        [SEARCH],
-    ),
-    (
         "the search is kept in lower case",
-        "        self.filename_search = term.to_owned();\n",
-        "        self.filename_search = term.to_lowercase();\n",
+        "        self.filename_search.set_text(term);\n",
+        "        self.filename_search.set_text(&term.to_lowercase());\n",
         [SEARCH],
     ),
     (
         "a search in capitals finds no name in small letters",
-        "                .contains(&self.filename_search.to_lowercase())\n",
-        "                .contains(&self.filename_search)\n",
+        "                .contains(&self.filename_search.text().to_lowercase())\n",
+        "                .contains(self.filename_search.text())\n",
         [SEARCH],
     ),
 ]
@@ -256,30 +243,15 @@ SHOWN = "the_search_edits_what_it_shows"
 
 MUTATIONS += [
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
-        "a key finds the editor holding another search",
-        "        if self.search_editor.text() != self.filter.filename_search {\n"
-        "            self.search_editor.set_text(&self.filter.filename_search);",
-        "        if false {\n"
-        "            self.search_editor.set_text(&self.filter.filename_search);",
-        [SHOWN],
-    ),
-    (
-        "an edit of the search does not filter",
-        "            let typed = self.search_editor.text().to_owned();\n"
-        "            self.set_search(&typed);\n",
+        "an edit of the search leaves the selection on a file it hides",
+        "        if edit.changed {\n            self.reanchor_selection();\n        }\n",
         "",
         [EDITS],
     ),
     (
         "every key the search answers is a redraw",
-        "        if after == before {\n            EventResult::Ignored\n",
-        "        if false {\n            EventResult::Ignored\n",
+        "        if edit.changed || caret(&self.filter) != before {\n",
+        "        if true {\n",
         [ENDS],
     ),
     (
@@ -299,12 +271,6 @@ MUTATIONS += [
         "                Key::Home if self.screen == UiScreen::Results => {\n",
         "                Key::Home if false => {\n",
         [ENDS],
-    ),
-    (
-        "the search's selection is not drawn",
-        "                    selection_anchor,\n",
-        "                    selection_anchor: None,\n",
-        [EDITS],
     ),
     (
         "a press puts the caret at the start",

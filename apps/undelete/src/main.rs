@@ -81,13 +81,12 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::widget::CheckState;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 use std::collections::BTreeMap;
 
@@ -2008,7 +2007,8 @@ pub struct ScanFilter {
     pub max_size: Option<u64>,
     pub min_confidence: Option<RecoveryConfidence>,
     pub source: Option<DeletionSource>,
-    pub filename_search: String,
+    /// The search box, which is the search file names are matched by.
+    pub filename_search: SearchBox,
     pub min_delete_time: Option<u64>,
     pub max_delete_time: Option<u64>,
 }
@@ -2027,7 +2027,7 @@ impl ScanFilter {
             max_size: None,
             min_confidence: None,
             source: None,
-            filename_search: String::new(),
+            filename_search: SearchBox::new(SEARCH_CAPACITY, FONT_SIZE),
             min_delete_time: None,
             max_delete_time: None,
         }
@@ -2062,7 +2062,7 @@ impl ScanFilter {
     /// was typed: it is drawn in the search box, and lowercasing it there
     /// would show the user a word they did not type.
     pub fn with_search(mut self, term: &str) -> Self {
-        self.filename_search = term.to_owned();
+        self.filename_search.set_text(term);
         self
     }
 
@@ -2102,7 +2102,7 @@ impl ScanFilter {
             && !file
                 .filename
                 .to_lowercase()
-                .contains(&self.filename_search.to_lowercase())
+                .contains(&self.filename_search.text().to_lowercase())
         {
             return false;
         }
@@ -2272,12 +2272,6 @@ pub struct UndeleteApp {
     /// The user's focus width (`App::appearance_changed`), for the
     /// toolkit's controls' keyboard rings.
     focus_ring_width: f32,
-    /// The search's editor -- its caret and selection over
-    /// `filter.filename_search` -- reloaded when the search changed under
-    /// it: cleared with the filters, or by a new scan.
-    search_editor: TextInput,
-    /// What the search's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    clipboard: String,
 }
 
 impl UndeleteApp {
@@ -2306,8 +2300,6 @@ impl UndeleteApp {
             recovery_results: Vec::new(),
             show_filter_panel: false,
             active_category_filter: None,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            clipboard: String::new(),
         }
     }
 
@@ -2553,82 +2545,43 @@ impl UndeleteApp {
         self.toggle_sort(next);
     }
 
-    /// The search's editor loaded with the search, unless it holds it
-    /// already: the caret after it.
-    fn load_search(&mut self) {
-        if self.search_editor.text() != self.filter.filename_search {
-            self.search_editor.set_text(&self.filter.filename_search);
-        }
-    }
-
     /// A key for the search: the caret keys, Backspace and Delete at the
     /// caret, Ctrl+C, X and V, and typing -- what AltGr types among it (a
     /// Polish `ą` is AltGr+A), and no command's letter, which a chord
     /// carries as text (Alt+X searched for `x`). `Consumed` where the key
     /// changed the search, its caret or its selection; a search changed
-    /// filters the files again. The search took typing at its end and
-    /// Backspace from it, and nothing else.
+    /// filters the files again. On the program's clipboard.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
-        self.load_search();
-        let editor = &self.search_editor;
-        let before = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        let edit = textline::apply_key(&mut self.search_editor, key, &self.clipboard, FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
+        let caret = |filter: &ScanFilter| {
+            (
+                filter.filename_search.input().cursor(),
+                filter.filename_search.input().selection_anchor(),
+            )
+        };
+        let before = caret(&self.filter);
+        let edit = self.filter.filename_search.key(key);
         if !edit.handled {
             return EventResult::Ignored;
         }
-        if self.search_editor.text() != self.filter.filename_search {
-            let typed = self.search_editor.text().to_owned();
-            self.set_search(&typed);
+        if edit.changed {
+            self.reanchor_selection();
         }
-        let editor = &self.search_editor;
-        let after = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        if after == before {
-            EventResult::Ignored
-        } else {
+        if edit.changed || caret(&self.filter) != before {
             EventResult::Consumed
-        }
-    }
-
-    /// Where the search's caret and selection anchor are: the editor's
-    /// while it holds the search, after it and none otherwise. One answer
-    /// for the drawing and for a press.
-    fn search_caret(&self) -> (TextCursor, Option<usize>) {
-        if self.search_editor.text() == self.filter.filename_search {
-            (
-                self.search_editor.cursor(),
-                self.search_editor.selection_anchor(),
-            )
         } else {
-            (TextCursor::from(self.filter.filename_search.len()), None)
+            EventResult::Ignored
         }
     }
 
     /// A press at `x` in the search box drawn at `rect`: the caret under the
-    /// pointer, measured against the search as it was drawn.
+    /// pointer, measured against the search as it was drawn -- with the
+    /// keyboard, which the box has while the results are up.
     fn press_search(&mut self, rect: Rect, x: f32) {
-        let (drawn, _) = self.search_caret();
-        self.load_search();
-        let cursor = textedit::cursor_at_click(
-            &self.filter.filename_search,
-            drawn,
-            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
+        self.filter.filename_search.press(
             x - rect.x - SEARCH_TEXT_INSET,
+            rect.w - 2.0 * SEARCH_TEXT_INSET,
+            true,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// Handle a mouse event.
@@ -2942,60 +2895,31 @@ impl UndeleteApp {
             rect.y + (rect.h - line) / 2.0,
             (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
-        let query = &self.filter.filename_search;
         let mut tree = RenderTree::new();
-        if query.is_empty() {
-            tree.push(RenderCommand::Text {
+        self.filter.filename_search.draw(
+            &mut tree,
+            &SearchLook {
                 x,
                 y,
-                text: "Search file names...".to_owned(),
-                color: self.palette.subtext0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if state.focused {
-                textedit::push_caret(
-                    &mut tree,
-                    x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let (cursor, selection_anchor) = self.search_caret();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: query,
-                    cursor,
-                    selection_anchor,
-                    focused: state.focused,
-                    x,
-                    y,
-                    width,
-                    line_height: line,
-                    font_size: FONT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+                width,
+                line_height: line,
+                focused: state.focused,
+                placeholder: "Search file names...",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         cmds.extend(tree.commands);
     }
 
     /// Set the filename search, and keep the selection on something visible.
     ///
-    /// Through `ScanFilter::with_search`, which is the builder this file
-    /// already had and which nothing called.
+    /// The search box is the filter's (`ScanFilter::filename_search`).
     pub fn set_search(&mut self, query: &str) {
-        self.filter = self.filter.clone().with_search(query);
+        self.filter.filename_search.set_text(query);
         self.reanchor_selection();
     }
 
@@ -5046,7 +4970,7 @@ mod tests {
                     app.engine.selected_count(),
                 ),
                 (app.sort_field, app.sort_direction, app.show_help),
-                app.filter.filename_search.clone(),
+                app.filter.filename_search.text().to_owned(),
             )
         };
         let before = state(&app);
@@ -5075,10 +4999,15 @@ mod tests {
         app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
         app.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
         app.handle_event(&chord(Key::A, "\u{105}", altgr));
-        assert_eq!(app.filter.filename_search, "\u{105}", "AltGr's ą was lost");
+        assert_eq!(
+            app.filter.filename_search.text(),
+            "\u{105}",
+            "AltGr's ą was lost"
+        );
         app.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
         assert_eq!(
-            app.filter.filename_search, "\u{105}",
+            app.filter.filename_search.text(),
+            "\u{105}",
             "Alt+Backspace deleted"
         );
         app.handle_event(&chord(Key::Backspace, "", Modifiers::NONE));
@@ -5566,7 +5495,8 @@ mod tests {
             app.handle_event(&types(c));
         }
         assert_eq!(
-            app.filter.filename_search, needle,
+            app.filter.filename_search.text(),
+            needle,
             "the search lost its case"
         );
         assert!(
@@ -5635,7 +5565,7 @@ mod tests {
         for c in needle.chars() {
             app.handle_event(&types(c));
         }
-        assert_eq!(app.filter.filename_search, needle);
+        assert_eq!(app.filter.filename_search.text(), needle);
         assert!(app.filter.is_active(), "the filter should say it is on");
         let shown = app.visible_files().len();
         assert!(shown <= all);
@@ -5647,7 +5577,10 @@ mod tests {
         );
 
         app.handle_event(&press(Key::Backspace));
-        assert_eq!(app.filter.filename_search, needle[..needle.len() - 1]);
+        assert_eq!(
+            app.filter.filename_search.text(),
+            &needle[..needle.len() - 1]
+        );
 
         app.handle_event(&press(Key::Escape));
         assert!(!app.filter.is_active(), "Escape should clear the filters");
@@ -7482,7 +7415,8 @@ mod tests {
         app.handle_event(&press(Key::Right));
         type_text(&mut app, "e");
         assert_eq!(
-            app.filter.filename_search, "report",
+            app.filter.filename_search.text(),
+            "report",
             "the caret did not move"
         );
         let rect = app.search_box_rect().expect("the search box");
@@ -7490,7 +7424,7 @@ mod tests {
             + SEARCH_TEXT_INSET
             + text::caret_x(
                 "report",
-                TextCursor::from(2),
+                guitk::text::TextCursor::from(2),
                 FONT_SIZE,
                 FontWeightHint::Regular,
             );
@@ -7503,7 +7437,11 @@ mod tests {
 
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Delete));
-        assert_eq!(app.filter.filename_search, "eport", "Delete at the caret");
+        assert_eq!(
+            app.filter.filename_search.text(),
+            "eport",
+            "Delete at the caret"
+        );
         type_text(&mut app, "r");
         app.handle_event(&held(Key::End, guitk::event::Modifiers::shift()));
         assert!(
@@ -7515,9 +7453,17 @@ mod tests {
         );
         app.handle_event(&ctrl_key(Key::C));
         app.handle_event(&ctrl_key(Key::X));
-        assert_eq!(app.filter.filename_search, "r", "Shift+End, or Ctrl+X");
+        assert_eq!(
+            app.filter.filename_search.text(),
+            "r",
+            "Shift+End, or Ctrl+X"
+        );
         app.handle_event(&ctrl_key(Key::V));
-        assert_eq!(app.filter.filename_search, "report", "Ctrl+C or Ctrl+V");
+        assert_eq!(
+            app.filter.filename_search.text(),
+            "report",
+            "Ctrl+C or Ctrl+V"
+        );
 
         // A press at the start of the search puts the caret there, and one
         // past its end at its end.
@@ -7527,7 +7473,8 @@ mod tests {
         app.handle_event(&click(rect.right() - 2.0, mid));
         type_text(&mut app, ">");
         assert_eq!(
-            app.filter.filename_search, "<report>",
+            app.filter.filename_search.text(),
+            "<report>",
             "a press did not put the caret where it landed"
         );
     }
@@ -7568,7 +7515,8 @@ mod tests {
         app.set_search("cd");
         type_text(&mut app, "!");
         assert_eq!(
-            app.filter.filename_search, "cd!",
+            app.filter.filename_search.text(),
+            "cd!",
             "the key edited another search"
         );
     }

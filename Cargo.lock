@@ -3293,12 +3293,10 @@ dependencies = [
  "appearance",
  "fieldmenu",
  "guitk",
- "libcall",
  "oswindow",
  "pathtext",
  "processctl",
  "procinfo",
- "procstop",
  "quoting",
  "textline",
 ]
@@ -4358,7 +4356,6 @@ dependencies = [
  "pathtext",
  "processctl",
  "procinfo",
- "procstop",
  "quoting",
  "textline",
 ]

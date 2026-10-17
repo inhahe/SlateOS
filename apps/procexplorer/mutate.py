@@ -647,20 +647,20 @@ MUTATIONS += [
     ),
     (
         "a process is ended through the real system, whatever was given",
-        "        let sent = processctl::end(self.stopper, pid, ending);\n",
-        "        let sent = processctl::end(&SYSTEM, pid, ending);\n",
+        "        self.status_message = processctl::end_named(self.stopper, &name, pid, ending);\n",
+        "        self.status_message = processctl::end_named(&SYSTEM, &name, pid, ending);\n",
         [ASKED, CANNOT],
     ),
     (
         "an ending says nothing of what was done",
-        "        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);\n",
-        "        drop(sent);\n",
+        "        self.status_message = processctl::end_named(self.stopper, &name, pid, ending);\n",
+        "        let _ = processctl::end_named(self.stopper, &name, pid, ending);\n",
         [CANNOT],
     ),
     (
         "a signal goes through the real system, whatever was given",
-        "        let sent = processctl::signal(self.stopper, pid, sig);\n",
-        "        let sent = processctl::signal(&SYSTEM, pid, sig);\n",
+        "        self.status_message = processctl::signal_named(self.stopper, &name, pid, sig, verb);\n",
+        "        self.status_message = processctl::signal_named(&SYSTEM, &name, pid, sig, verb);\n",
         [ASKED],
     ),
     (
@@ -674,6 +674,25 @@ MUTATIONS += [
         "            ContextAction::Pause => self.signal_pid(target_pid, processctl::SIGSTOP, \"pause\"),\n",
         "            ContextAction::Pause => self.signal_pid(target_pid, processctl::SIGCONT, \"pause\"),\n",
         [ASKED],
+    ),
+]
+
+# The process menu kept on screen (the Opus review of 007d0552c..752d46d80:
+# eight rows opened at the press ran off the bottom).
+ON_SCREEN = "the_process_menu_stays_on_screen"
+
+MUTATIONS += [
+    (
+        "the process menu runs off the bottom",
+        "            y: y.min(window.1 - h).max(0.0),\n",
+        "            y,\n",
+        [ON_SCREEN],
+    ),
+    (
+        "the process menu runs off the right",
+        "            x: x.min(window.0 - CONTEXT_MENU_W).max(0.0),\n",
+        "            x,\n",
+        [ON_SCREEN],
     ),
 ]
 

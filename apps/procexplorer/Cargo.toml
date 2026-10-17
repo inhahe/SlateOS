@@ -6,10 +6,9 @@ description = "SlateOS Process Explorer — graphical system monitor and task ma
 [dependencies]
 # What it does to a process -- close, end without asking, force, pause,
 # resume -- and the line it says about it, shared with `apps/sysmonitor`
-# (design-decisions 1072).
+# (design-decisions 1072), and the system they are asked of
+# (`processctl::System::SINGLE`).
 processctl = { path = "../processctl" }
-# The system those are asked of, `procstop::System::SINGLE`.
-procstop = { path = "../../userspace/procstop" }
 pathtext = { path = "../pathtext" }
 # The keys that edit the New Task box's command line.
 textline = { path = "../textline" }
@@ -20,9 +19,6 @@ fieldmenu = { path = "../fieldmenu" }
 # An environment variable or a mapped file's name that is not text is shown
 # by its bytes, as escapes -- the tree's one renderer for untrusted text.
 quoting = { path = "../../userspace/quoting" }
-# `kill(2)` is stateful and therefore reachable only through the C ABI,
-# per design-decisions 768. `libcall` is that door.
-libcall = { path = "../../libcall" }
 # Real processes, not invented ones. The shared `/proc` reader, which exists
 # because this lane asked for it -- see requests/c-b-the-proc-readers-in-
 # userspace-sysinfo-should-be-a-crate-both-sysinfos-can-use.md.
@@ -36,8 +32,9 @@ guitk = { path = "../../gui/toolkit" }
 oswindow = { path = "../../gui/window" }
 
 [dev-dependencies]
-# A system that records what it is asked and does nothing.
-procstop = { path = "../../userspace/procstop", features = ["fake"] }
+# A system that records what it is asked and does nothing: procstop's,
+# which processctl re-exports for tests.
+processctl = { path = "../processctl", features = ["fake"] }
 # `appearance::palette_check`, the sweep that proves this crate draws from
 # the user's palette rather than from colours of its own. Behind a feature
 # because `cfg(test)` is set only when `appearance` itself is under test.

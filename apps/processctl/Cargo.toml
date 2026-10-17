@@ -12,6 +12,10 @@ procstop = { path = "../../userspace/procstop" }
 # the C ABI (design-decisions 768).
 libcall = { path = "../../libcall" }
 
+[features]
+# procstop's fake system, re-exported for the windows' tests.
+fake = ["procstop/fake"]
+
 [dev-dependencies]
 procstop = { path = "../../userspace/procstop", features = ["fake"] }
 

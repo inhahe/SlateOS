@@ -30,8 +30,8 @@ use guitk::wheel;
 use oswindow::app::{self, App, PickRefused, PickRequest, Response};
 use oswindow::{PickOutcome, PickedWindow};
 use pathtext::ShowPath;
+use processctl::Asker;
 use processctl::Ending;
-use procstop::Asker;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -575,12 +575,32 @@ pub struct ContextMenu {
     pub hover_index: Option<usize>,
 }
 
+/// The process menu's width, and the height of each of its rows.
+const CONTEXT_MENU_W: f32 = 180.0;
+const CONTEXT_ITEM_H: f32 = 24.0;
+
+impl ContextMenu {
+    /// The process menu for `target_pid`, opened by a press at `(x, y)` in
+    /// a window `window` big: moved in from the right and bottom edges as
+    /// far as it takes for every row to be on screen, and no further.
+    #[allow(clippy::cast_precision_loss)] // a menu of a few rows
+    fn at(x: f32, y: f32, target_pid: u32, window: (f32, f32)) -> Self {
+        let h = CONTEXT_ITEM_H * ContextAction::ALL.len() as f32;
+        Self {
+            x: x.min(window.0 - CONTEXT_MENU_W).max(0.0),
+            y: y.min(window.1 - h).max(0.0),
+            target_pid,
+            hover_index: None,
+        }
+    }
+}
+
 // ============================================================================
 // Application state
 // ============================================================================
 
 /// The system processes are closed, ended and signalled through.
-static SYSTEM: procstop::System = procstop::System::SINGLE;
+static SYSTEM: processctl::System = processctl::System::SINGLE;
 
 /// The keys this window answers, as a reader sees them.
 ///
@@ -619,7 +639,7 @@ const TOOLBAR_BUTTON_H: f32 = 26.0;
 /// The press used to be tested against thresholds of its own -- 90, 170,
 /// 240 and 300 -- that did not match the buttons drawn at 8, 104, 190 and
 /// 266, so the right-hand part of a button pressed the next one, and a press
-/// in the eight pixels left of End Process ended the selected process.
+/// in the eight pixels left of End Task ended the selected process.
 fn toolbar_buttons() -> [(Rect, ToolbarAction); 5] {
     let y = (TOOLBAR_HEIGHT - TOOLBAR_BUTTON_H) / 2.0;
     let mut x = 8.0;
@@ -926,11 +946,12 @@ pub struct ProcessExplorerState {
     /// Milliseconds elapsed since last refresh.
     pub ms_since_refresh: u64,
 
-    // -- Status bar ----------------------------------------------------------
-    /// Status bar message.
     /// What processes are closed, ended and signalled through: the system,
     /// or in a test a fake that records what it was asked.
     stopper: &'static dyn Asker,
+
+    // -- Status bar ----------------------------------------------------------
+    /// Status bar message.
     pub status_message: String,
     /// Whether the last refresh could not read `/proc` at all.
     ///
@@ -1323,8 +1344,7 @@ impl ProcessExplorerState {
 
     /// The PID of the row selected, if one is.
     fn selected_pid(&self) -> Option<u32> {
-        let proc_idx = *self.visible_indices.get(self.selected_index?)?;
-        self.processes.get(proc_idx).map(|p| p.pid)
+        self.selected_process().map(|p| p.pid)
     }
 
     /// End process `pid` the way `ending` says, from the toolbar, a key or
@@ -1334,8 +1354,7 @@ impl ProcessExplorerState {
         let Some(name) = self.process_name(pid) else {
             return;
         };
-        let sent = processctl::end(self.stopper, pid, ending);
-        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);
+        self.status_message = processctl::end_named(self.stopper, &name, pid, ending);
     }
 
     /// The name of process `pid`, as the list shows it.
@@ -1373,8 +1392,7 @@ impl ProcessExplorerState {
         let Some(name) = self.process_name(pid) else {
             return;
         };
-        let sent = processctl::signal(self.stopper, pid, sig);
-        self.status_message = processctl::signal_outcome(&name, pid, verb, sent);
+        self.status_message = processctl::signal_named(self.stopper, &name, pid, sig, verb);
     }
 
     /// May this process be signalled right now?
@@ -1500,7 +1518,7 @@ impl ProcessExplorerState {
             return EventResult::Consumed;
         }
         if self.show_help {
-            // Modal, and Delete is the reason: it kills a process outright.
+            // Modal, and Delete is the reason: it ends the program selected.
             if plain && matches!(key.key, Key::Escape | Key::Enter) {
                 self.show_help = false;
             }
@@ -1772,8 +1790,8 @@ impl ProcessExplorerState {
         if let Some(ref menu) = self.context_menu.clone()
             && let MouseEventKind::Press(MouseButton::Left) = &mouse.kind
         {
-            let menu_w = 180.0;
-            let item_h = 24.0;
+            let menu_w = CONTEXT_MENU_W;
+            let item_h = CONTEXT_ITEM_H;
             let item_count = ContextAction::ALL.len() as f32;
 
             if mx >= menu.x
@@ -1856,12 +1874,8 @@ impl ProcessExplorerState {
                     self.selected_index = Some(row_idx);
                     if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
                         let pid = self.processes.get(proc_idx).map(|p| p.pid).unwrap_or(0);
-                        self.context_menu = Some(ContextMenu {
-                            x: mx,
-                            y: my,
-                            target_pid: pid,
-                            hover_index: None,
-                        });
+                        let window = (self.window_width as f32, self.window_height as f32);
+                        self.context_menu = Some(ContextMenu::at(mx, my, pid, window));
                     }
                 }
                 EventResult::Consumed
@@ -1900,8 +1914,8 @@ impl ProcessExplorerState {
 
                 // Update context menu hover.
                 if let Some(ref mut menu) = self.context_menu {
-                    let menu_w = 180.0;
-                    let item_h = 24.0;
+                    let menu_w = CONTEXT_MENU_W;
+                    let item_h = CONTEXT_ITEM_H;
                     let item_count = ContextAction::ALL.len() as f32;
                     if mx >= menu.x
                         && mx <= menu.x + menu_w
@@ -3660,8 +3674,8 @@ impl ProcessExplorerState {
             None => return,
         };
 
-        let menu_w = 180.0;
-        let item_h = 24.0;
+        let menu_w = CONTEXT_MENU_W;
+        let item_h = CONTEXT_ITEM_H;
         let item_count = ContextAction::ALL.len() as f32;
         let menu_h = item_h * item_count;
 
@@ -4656,6 +4670,36 @@ mod tests {
         assert!(said, "the dimmed row never said why");
     }
 
+    /// **The process menu opened near the window's corner stays on screen**:
+    /// moved in from the right and bottom edges, every row where it can be
+    /// pressed. It opened at the press, and Open File Location, its last
+    /// row, could not be reached near the bottom.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // window sizes and a few rows
+    fn the_process_menu_stays_on_screen() {
+        let mut app = app_with_processes(40);
+        app.window_height = 300;
+        let bottom = (0..app.window_height)
+            .rev()
+            .map(|y| y as f32)
+            .find(|&y| app.row_at(y).is_some())
+            .expect("no row on screen");
+        let right = app.window_width as f32 - 2.0;
+        event_press(&mut app, MouseButton::Right, right, bottom);
+        let menu = app.context_menu.clone().expect("no menu came up");
+        let rows = ContextAction::ALL.len() as f32;
+        assert!(
+            menu.x + CONTEXT_MENU_W <= app.window_width as f32,
+            "the menu runs off the right, at x {}",
+            menu.x
+        );
+        assert!(
+            menu.y + CONTEXT_ITEM_H * rows <= app.window_height as f32,
+            "the menu runs off the bottom, at y {}",
+            menu.y
+        );
+    }
+
     /// **A box's menu is modal, and a process keeps its own**: a right-click
     /// on a process opens the process's menu, on the filter box the box's
     /// (the process's put away), Escape puts the box's away and reaches
@@ -5241,7 +5285,7 @@ mod tests {
                 appearance::palette_check::assert_drawn_from(
                     &app.palette,
                     &app.render_tree().commands,
-                    // One colour is computed: End Process's label, the ink
+                    // One colour is computed: End Task's label, the ink
                     // `readable_on` gives its red. It happens to equal a
                     // role of the dark palette today, which the check will
                     // not always take on trust. Every other colour is a role;
@@ -5392,7 +5436,7 @@ mod tests {
     /// at the top selected; that row's PID answers requests when `answers`.
     fn on_a_fake_system(
         answers: bool,
-    ) -> (ProcessExplorerState, &'static procstop::fake::Fake, u32) {
+    ) -> (ProcessExplorerState, &'static processctl::fake::Fake, u32) {
         let mut state = ProcessExplorerState::new();
         state.load_demo_data();
         state.rebuild_visible_list();
@@ -5403,8 +5447,8 @@ mod tests {
         } else {
             Vec::new()
         };
-        let sys: &'static procstop::fake::Fake =
-            Box::leak(Box::new(procstop::fake::fake(&answering, &[])));
+        let sys: &'static processctl::fake::Fake =
+            Box::leak(Box::new(processctl::fake::fake(&answering, &[])));
         state.stopper = sys;
         (state, sys, pid)
     }
@@ -5446,10 +5490,22 @@ mod tests {
             Some(&("terminate", p, 0)),
             "Shift+Delete did not ask it to end"
         );
+        state.execute_context_action(ContextAction::End(Ending::Close), pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("close", p, 0)),
+            "the menu's Close did not ask it to close"
+        );
+        state.execute_context_action(ContextAction::End(Ending::End), pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("terminate", p, 0)),
+            "the menu's End Without Asking did not ask it to end"
+        );
         state.execute_context_action(ContextAction::End(Ending::Force), pid);
         assert_eq!(
             sys.did.borrow().last(),
-            Some(&("kill", p, procstop::SIGKILL)),
+            Some(&("kill", p, processctl::SIGKILL)),
             "Force End did not send SIGKILL"
         );
         state.execute_context_action(ContextAction::Pause, pid);
@@ -5482,14 +5538,14 @@ mod tests {
             !sys.did
                 .borrow()
                 .iter()
-                .any(|&(_, _, sig)| sig == procstop::SIGTERM || sig == procstop::SIGKILL),
+                .any(|&(_, _, sig)| sig == processctl::SIGTERM || sig == processctl::SIGKILL),
             "a close sent a signal: {:?}",
             sys.did.borrow()
         );
         state.end_selected(Ending::End);
         assert_eq!(
             sys.did.borrow().last(),
-            Some(&("kill", p, procstop::SIGTERM))
+            Some(&("kill", p, processctl::SIGTERM))
         );
     }
 
@@ -5723,7 +5779,7 @@ mod tests {
     /// Render *only* the process table, not the whole window.
     ///
     /// Rendering the app and filtering by position does not work here: the
-    /// toolbar's "End Process" button sits at x=16, which is inside the PID
+    /// toolbar's "End Task" button sits at x=16, which is inside the PID
     /// column's x-range, so a whole-window render fails a column-fit assertion
     /// on a command that is not a table cell at all. The panel is what is under
     /// test, so the panel is what gets rendered.
@@ -6979,7 +7035,7 @@ mod tests {
     /// **A toolbar button is pressed where it is drawn, and nowhere else.**
     /// The press was tested against thresholds of its own that did not match
     /// the drawing, so the right-hand part of a button pressed the next one,
-    /// and the eight pixels left of End Process ended the selected process.
+    /// and the eight pixels left of End Task ended the selected process.
     #[test]
     fn every_toolbar_button_is_pressed_where_it_is_drawn() {
         let app = app_with_processes(1);
@@ -7016,7 +7072,7 @@ mod tests {
         assert_eq!(
             toolbar_action_at(first.x - 4.0, first.y + first.h / 2.0),
             None,
-            "the margin left of End Process presses it"
+            "the margin left of End Task presses it"
         );
         for pair in toolbar_buttons().windows(2) {
             let gap = f32::midpoint(pair[0].0.right(), pair[1].0.x);

@@ -51,8 +51,8 @@ use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use processctl::Asker;
 use processctl::Ending;
-use procstop::Asker;
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -114,7 +114,7 @@ const ALERT_MAX_ROWS: usize = 5;
 const CANNOT_RENICE: &str = "this system cannot yet change another program's priority";
 
 /// The system processes are closed, ended and signalled through.
-static SYSTEM: procstop::System = procstop::System::SINGLE;
+static SYSTEM: processctl::System = processctl::System::SINGLE;
 
 /// The keys this window answers, as the F1 list shows them.
 ///
@@ -558,6 +558,26 @@ pub struct ContextMenu {
     pub hover_index: Option<usize>,
 }
 
+/// The process menu's width, and the height of each of its rows.
+const CONTEXT_MENU_W: f32 = 180.0;
+const CONTEXT_ITEM_H: f32 = 24.0;
+
+impl ContextMenu {
+    /// The process menu for `target_pid`, opened by a press at `(x, y)` in
+    /// a window `window` big: moved in from the right and bottom edges as
+    /// far as it takes for every row to be on screen, and no further.
+    #[allow(clippy::cast_precision_loss)] // a menu of a few rows
+    fn at(x: f32, y: f32, target_pid: u32, window: (f32, f32)) -> Self {
+        let h = CONTEXT_ITEM_H * ContextAction::ALL.len() as f32;
+        Self {
+            x: x.min(window.0 - CONTEXT_MENU_W).max(0.0),
+            y: y.min(window.1 - h).max(0.0),
+            target_pid,
+            hover_index: None,
+        }
+    }
+}
+
 // ============================================================================
 // Active alerts
 // ============================================================================
@@ -627,7 +647,6 @@ pub struct SysMonitorState {
     /// The filter box's caret and selection, laid over `filter_text`, which
     /// stays the truth: reloaded whenever the text changes under it.
     filter_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the filter box, for Ctrl+V.
     /// The filter box's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<()>,
     /// How wide the mark is round the box that has the keyboard: the user's
@@ -1047,8 +1066,7 @@ impl SysMonitorState {
 
     /// The PID of the row selected, if one is.
     fn selected_pid(&self) -> Option<u32> {
-        let proc_idx = *self.visible_indices.get(self.selected_index?)?;
-        self.processes.get(proc_idx).map(|p| p.pid)
+        self.selected_process().map(|p| p.pid)
     }
 
     /// End process `pid` the way `ending` says, from a key or the
@@ -1059,8 +1077,7 @@ impl SysMonitorState {
         let Some(name) = self.process_name(pid) else {
             return;
         };
-        let sent = processctl::end(self.stopper, pid, ending);
-        self.status_message = processctl::ending_outcome(&name, pid, ending, sent);
+        self.status_message = processctl::end_named(self.stopper, &name, pid, ending);
     }
 
     /// The name of process `pid`, as the list shows it.
@@ -1099,8 +1116,7 @@ impl SysMonitorState {
         let Some(name) = self.process_name(pid) else {
             return;
         };
-        let sent = processctl::signal(self.stopper, pid, sig);
-        self.status_message = processctl::signal_outcome(&name, pid, verb, sent);
+        self.status_message = processctl::signal_named(self.stopper, &name, pid, sig, verb);
     }
 
     /// May this process be signalled right now?
@@ -1483,8 +1499,8 @@ impl SysMonitorState {
         if let Some(menu) = self.context_menu.clone()
             && let MouseEventKind::Press(MouseButton::Left) = &mouse.kind
         {
-            let menu_w = 180.0;
-            let item_h = 24.0;
+            let menu_w = CONTEXT_MENU_W;
+            let item_h = CONTEXT_ITEM_H;
             let item_count = ContextAction::ALL.len() as f32;
 
             if mx >= menu.x
@@ -1568,12 +1584,8 @@ impl SysMonitorState {
                         self.selected_index = Some(row_idx);
                         if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
                             let pid = self.processes.get(proc_idx).map_or(0, |p| p.pid);
-                            self.context_menu = Some(ContextMenu {
-                                x: mx,
-                                y: my,
-                                target_pid: pid,
-                                hover_index: None,
-                            });
+                            let window = (self.window_width as f32, self.window_height as f32);
+                            self.context_menu = Some(ContextMenu::at(mx, my, pid, window));
                         }
                     }
                 }
@@ -1607,8 +1619,8 @@ impl SysMonitorState {
                 }
 
                 if let Some(menu) = &mut self.context_menu {
-                    let menu_w = 180.0;
-                    let item_h = 24.0;
+                    let menu_w = CONTEXT_MENU_W;
+                    let item_h = CONTEXT_ITEM_H;
                     let item_count = ContextAction::ALL.len() as f32;
                     if mx >= menu.x
                         && mx <= menu.x + menu_w
@@ -3119,8 +3131,8 @@ impl SysMonitorState {
             None => return,
         };
 
-        let menu_w = 180.0;
-        let item_h = 24.0;
+        let menu_w = CONTEXT_MENU_W;
+        let item_h = CONTEXT_ITEM_H;
         let item_count = ContextAction::ALL.len() as f32;
         let menu_h = item_h * item_count;
 
@@ -4671,7 +4683,7 @@ mod tests {
     /// A monitor whose processes are closed, ended and signalled through a
     /// system that records what it was asked and does nothing, with the row
     /// at the top selected; that row's PID answers requests when `answers`.
-    fn on_a_fake_system(answers: bool) -> (SysMonitorState, &'static procstop::fake::Fake, u32) {
+    fn on_a_fake_system(answers: bool) -> (SysMonitorState, &'static processctl::fake::Fake, u32) {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
         s.selected_index = Some(0);
@@ -4682,8 +4694,8 @@ mod tests {
         } else {
             Vec::new()
         };
-        let sys: &'static procstop::fake::Fake =
-            Box::leak(Box::new(procstop::fake::fake(&answering, &[])));
+        let sys: &'static processctl::fake::Fake =
+            Box::leak(Box::new(processctl::fake::fake(&answering, &[])));
         s.stopper = sys;
         (s, sys, pid)
     }
@@ -4722,10 +4734,22 @@ mod tests {
             Some(&("terminate", p, 0)),
             "Shift+Delete did not ask it to end"
         );
+        s.execute_context_action(ContextAction::End(Ending::Close), pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("close", p, 0)),
+            "the menu's Close did not ask it to close"
+        );
+        s.execute_context_action(ContextAction::End(Ending::End), pid);
+        assert_eq!(
+            sys.did.borrow().last(),
+            Some(&("terminate", p, 0)),
+            "the menu's End Without Asking did not ask it to end"
+        );
         s.execute_context_action(ContextAction::End(Ending::Force), pid);
         assert_eq!(
             sys.did.borrow().last(),
-            Some(&("kill", p, procstop::SIGKILL)),
+            Some(&("kill", p, processctl::SIGKILL)),
             "Force End did not send SIGKILL"
         );
         s.execute_context_action(ContextAction::Stop, pid);
@@ -4757,14 +4781,14 @@ mod tests {
             !sys.did
                 .borrow()
                 .iter()
-                .any(|&(_, _, sig)| sig == procstop::SIGTERM || sig == procstop::SIGKILL),
+                .any(|&(_, _, sig)| sig == processctl::SIGTERM || sig == processctl::SIGKILL),
             "a close sent a signal: {:?}",
             sys.did.borrow()
         );
         s.end_selected(Ending::End);
         assert_eq!(
             sys.did.borrow().last(),
-            Some(&("kill", p, procstop::SIGTERM))
+            Some(&("kill", p, processctl::SIGTERM))
         );
         assert!(
             s.status_message.starts_with("Sent end to "),
@@ -5541,6 +5565,40 @@ mod tests {
         };
         s.handle_filter_key(&key);
         assert!(!s.filter_focused);
+    }
+
+    /// **The process menu opened near the window's corner stays on screen**:
+    /// moved in from the right and bottom edges, every row where it can be
+    /// pressed. It opened at the press, and its last rows ran off the bottom.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // window sizes and a few rows
+    fn the_process_menu_stays_on_screen() {
+        let mut s = SysMonitorState::new();
+        s.load_demo_data();
+        s.active_tab = Tab::Processes;
+        s.window_height = 300;
+        let bottom = (0..s.window_height)
+            .rev()
+            .map(|y| y as f32)
+            .find(|&y| s.row_at(y).is_some())
+            .expect("no row on screen");
+        s.handle_mouse(&MouseEvent {
+            x: s.window_width as f32 - 2.0,
+            y: bottom,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        let menu = s.context_menu.clone().expect("no menu came up");
+        let rows = ContextAction::ALL.len() as f32;
+        assert!(
+            menu.x + CONTEXT_MENU_W <= s.window_width as f32,
+            "the menu runs off the right, at x {}",
+            menu.x
+        );
+        assert!(
+            menu.y + CONTEXT_ITEM_H * rows <= s.window_height as f32,
+            "the menu runs off the bottom, at y {}",
+            menu.y
+        );
     }
 
     #[test]

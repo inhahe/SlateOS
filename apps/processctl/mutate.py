@@ -18,7 +18,9 @@ from mutation_harness import sweep  # noqa: E402  (path set above)
 SRC = Path(__file__).parent / "src" / "lib.rs"
 
 ROUTE = "each_ending_goes_the_way_the_program_understands"
-WIDE = "a_pid_that_does_not_fit_reaches_nothing"
+WIDE = "a_pid_that_is_no_single_process_reaches_nothing"
+NAMED_CALLS = "a_named_ending_or_signal_is_sent_and_said"
+SIGNALS = "a_signals_line_says_what_was_done"
 GONE = "a_process_already_gone_is_said_to_be"
 SAID = "the_line_says_what_was_done"
 NAMED = "the_ways_are_named_gentlest_first"
@@ -50,8 +52,8 @@ MUTATIONS = [
     ),
     (
         "a pid too big wraps to a negative",
-        "    i32::try_from(pid).ok()\n",
-        "    Some(pid as i32)\n",
+        "    i32::try_from(pid).ok().filter(|&pid| pid > 0)\n",
+        "    Some(pid as i32).filter(|&pid| pid > 0)\n",
         [WIDE],
     ),
     (
@@ -82,13 +84,31 @@ MUTATIONS = [
         "already gone reads as an error number",
         '        ESRCH => format!("{name} (PID {pid}) is already gone -- nothing to {verb}"),\n',
         "",
-        [GONE, SAID],
+        [GONE, SIGNALS],
     ),
     (
         "a signal accepted says nothing of what was sent",
         '        Ok(()) => format!("Sent {verb} to {name} (PID {pid})"),\n',
         '        Ok(()) => format!("{name} (PID {pid})"),\n',
-        ["a_signals_line_says_what_was_done"],
+        [SIGNALS],
+    ),
+    (
+        "a PID of 0 reaches the caller's own process group",
+        "    i32::try_from(pid).ok().filter(|&pid| pid > 0)\n",
+        "    i32::try_from(pid).ok()\n",
+        [WIDE],
+    ),
+    (
+        "a named ending is not sent",
+        "    ending_outcome(name, pid, ending, end(sys, pid, ending))\n",
+        "    ending_outcome(name, pid, ending, Ok(Route::Signal(0)))\n",
+        [NAMED_CALLS],
+    ),
+    (
+        "a named signal is not sent",
+        "    signal_outcome(name, pid, verb, signal(sys, pid, sig))\n",
+        "    signal_outcome(name, pid, verb, Ok(()))\n",
+        [NAMED_CALLS],
     ),
 ]
 

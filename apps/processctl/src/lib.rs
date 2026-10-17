@@ -35,9 +35,16 @@
 //! ways.
 
 use libcall::{EINVAL, ENOSYS, EPERM};
-use procstop::{Asker, ESRCH, Refusal, Request, Route, Via};
+use procstop::{ESRCH, Refusal, Request, Route, Via};
 
 pub use libcall::{SIGCONT, SIGSTOP};
+/// What a task manager names the system by, and what it asks of it --
+/// re-exported so a window needs this crate alone.
+pub use procstop::{Asker, SIGKILL, SIGTERM, System};
+
+/// `procstop`'s fake system, for a window's tests (feature `fake`).
+#[cfg(feature = "fake")]
+pub use procstop::fake;
 
 /// A way to end a process.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,10 +92,13 @@ impl Ending {
     }
 }
 
-/// `pid` as `kill(2)` takes it, or `None` for one above `i32::MAX`, which
-/// would wrap to a negative -- a process group, or every process.
+/// `pid` as `kill(2)` takes it, or `None` for one that is no single
+/// process: 0, which `kill(2)` reads as the caller's own process group, and
+/// any above `i32::MAX`, which would wrap to a negative -- a process group,
+/// or every process. Refused here rather than left to the asker, so a
+/// caller handing [`end`] an asker that does reach groups still cannot.
 fn widen(pid: u32) -> Option<i32> {
-    i32::try_from(pid).ok()
+    i32::try_from(pid).ok().filter(|&pid| pid > 0)
 }
 
 /// End process `pid` -- a PID from the process table -- the way `ending`
@@ -134,11 +144,35 @@ pub fn ending_outcome(
             Ending::End.label()
         ),
         Err(Refusal::Errno(e)) => errno_outcome(name, pid, verb, e),
-        Err(other) => format!(
+        // Each named, so a refusal procstop adds is a compile error here
+        // rather than a line no one wrote for it. Each of these has a
+        // sentence; only `Errno`, answered above, has none.
+        Err(refusal @ (Refusal::NoAnswer | Refusal::Group | Refusal::NoCloseSignal)) => format!(
             "{name} (PID {pid}) was not sent {verb}: {}",
-            other.sentence().unwrap_or("refused")
+            refusal.sentence().unwrap_or("refused")
         ),
     }
+}
+
+/// End `name`, process `pid`, the way `ending` says, through `sys`: the
+/// status line for what was done ([`end`], then [`ending_outcome`]).
+#[must_use]
+pub fn end_named<A: Asker + ?Sized>(sys: &A, name: &str, pid: u32, ending: Ending) -> String {
+    ending_outcome(name, pid, ending, end(sys, pid, ending))
+}
+
+/// Send `sig` to `name`, process `pid`, through `sys`: the status line for
+/// what was done, the signal called `verb` ([`signal`], then
+/// [`signal_outcome`]).
+#[must_use]
+pub fn signal_named<A: Asker + ?Sized>(
+    sys: &A,
+    name: &str,
+    pid: u32,
+    sig: i32,
+    verb: &str,
+) -> String {
+    signal_outcome(name, pid, verb, signal(sys, pid, sig))
 }
 
 /// The status line for sending `name` (PID `pid`) the signal a status line
@@ -191,14 +225,18 @@ mod tests {
         assert!(did.contains(&("kill", 6, SIGTERM)), "{did:?}");
     }
 
-    /// **A PID too big for `kill(2)` reaches nothing**: wrapped, it would be
-    /// a negative -- a process group, or every process.
+    /// **A PID that is no single process reaches nothing**: 0 is the
+    /// caller's own process group to `kill(2)`, and one too big for it wraps
+    /// to a negative -- a process group, or every process.
     #[test]
-    fn a_pid_that_does_not_fit_reaches_nothing() {
+    fn a_pid_that_is_no_single_process_reaches_nothing() {
         let sys = fake(&[], &[]);
-        let huge = u32::try_from(i32::MAX).unwrap_or(u32::MAX) + 1;
+        let huge = 0x8000_0000_u32;
         assert_eq!(end(&sys, huge, Ending::Force), Err(Refusal::Errno(EINVAL)));
         assert_eq!(signal(&sys, huge, SIGSTOP), Err(EINVAL));
+        // 0 is the caller's own process group to kill(2).
+        assert_eq!(end(&sys, 0, Ending::Force), Err(Refusal::Errno(EINVAL)));
+        assert_eq!(signal(&sys, 0, SIGSTOP), Err(EINVAL));
         assert!(sys.did.borrow().is_empty(), "something was sent");
         assert_eq!(signal(&sys, 7, SIGSTOP), Ok(()));
         assert_eq!(sys.did.borrow().last(), Some(&("kill", 7, SIGSTOP)));
@@ -267,6 +305,23 @@ mod tests {
             said(Ending::Close, Err(Refusal::NoAnswer)),
             "editor (PID 203) was not sent close: answers no requests"
         );
+    }
+
+    /// **A named ending and a named signal do it and say it**, in one call
+    /// each, as both task managers ask for them.
+    #[test]
+    fn a_named_ending_or_signal_is_sent_and_said() {
+        let sys = fake(&[], &[]);
+        assert_eq!(
+            end_named(&sys, "editor", 203, Ending::Force),
+            "Sent force-end to editor (PID 203)"
+        );
+        assert_eq!(sys.did.borrow().last(), Some(&("kill", 203, SIGKILL)));
+        assert_eq!(
+            signal_named(&sys, "editor", 203, SIGSTOP, "stop"),
+            "Sent stop to editor (PID 203)"
+        );
+        assert_eq!(sys.did.borrow().last(), Some(&("kill", 203, SIGSTOP)));
     }
 
     #[test]

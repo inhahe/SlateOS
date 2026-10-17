@@ -12,10 +12,9 @@ pathtext = { path = "../pathtext" }
 quoting = { path = "../../userspace/quoting" }
 # What it does to a process -- close, end without asking, force, stop,
 # continue -- and the line it says about it, shared with
-# `apps/procexplorer` (design-decisions 1072).
+# `apps/procexplorer` (design-decisions 1072), and the system they are
+# asked of (`processctl::System::SINGLE`).
 processctl = { path = "../processctl" }
-# The system those are asked of, `procstop::System::SINGLE`.
-procstop = { path = "../../userspace/procstop" }
 # The user's colours, per design-decisions 822.
 appearance = { path = "../../gui/appearance" }
 guitk = { path = "../../gui/toolkit" }
@@ -32,8 +31,9 @@ procinfo = { path = "../../procinfo" }
 textline = { path = "../textline" }
 
 [dev-dependencies]
-# A system that records what it is asked and does nothing.
-procstop = { path = "../../userspace/procstop", features = ["fake"] }
+# A system that records what it is asked and does nothing: procstop's,
+# which processctl re-exports for tests.
+processctl = { path = "../processctl", features = ["fake"] }
 
 [lints]
 workspace = true

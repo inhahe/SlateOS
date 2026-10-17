@@ -40,13 +40,20 @@ what holds design recorded nowhere else.
   user chooses is lane F's to keep, or the shell's to keep and hand over, is
   the question to put to lane F before keeping any of it.
 
+**What the spec says.** `design.txt`'s "power options" asks for an action on
+the power button, an action on closing the laptop, the screen off and the
+computer asleep after N minutes, and an action on low battery -- which is
+`PowerManager`'s model, so that is specified design, not leftovers. A
+screen saver is not in it.
+
 **The proper fix:** triage each as the sibling entry did. Likely outcome,
 to confirm: `multimon.rs` goes if lane F's compositor keeps the display
-arrangement (ask first: `requests/c-f-...`); `PowerManager`'s idle half
-goes; its lid and button policy stays as the design for the day lane A
-delivers those events (a request to lane A for a power-event channel), and
-is wired then; the screen saver is a feature to decide, not code to keep by
-default.
+arrangement (asked: `requests/c-f-who-keeps-the-users-display-arrangement.md`);
+`PowerManager`'s own idle counter goes, the compositor's `watch_idle` being
+the idle source, and the rest of it is wired -- the screen-off and sleep
+delays on `watch_idle`, the lid, buttons and battery the day lane A
+delivers those events (a request to lane A for a power-event channel); the
+screen saver, unspecified, goes unless the operator wants one.
 
 **If never fixed:** 5,000 lines that read as features the desktop has, and
 a battery icon that can only ever say there is no battery.

@@ -69,3 +69,4 @@ ctest-cpu-clocks -        60
 ctest-itimers    -        60
 ctest-posix-timers -      60
 ctest-dumpable   file     30
+ctest-thread-masks -        30

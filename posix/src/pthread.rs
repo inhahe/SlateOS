@@ -1027,6 +1027,11 @@ fn launch(
         // so the lookup is safe.
         crate::tls::set_stack_guard(layout.tp, crate::crt::process_stack_guard());
         (*crate::perthread::block_at(layout.tp)).thread_slot = core::ptr::from_ref(slot) as usize;
+        // POSIX: a new thread's signal mask is its creator's. The kernel
+        // gives the new thread the creator's kernel mask, which is this
+        // same mask -- a thread in `pthread_create` waits for no signal --
+        // so the two agree from the thread's first instruction.
+        (*crate::perthread::block_at(layout.tp)).blocked = crate::signal::calling_thread_mask();
     }
     fill_slot(
         slot,

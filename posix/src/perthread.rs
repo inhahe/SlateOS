@@ -215,6 +215,22 @@ pub struct PerThread {
     /// Of [`Self::handlers_run`], those installed without `SA_RESTART` --
     /// the ones that interrupt even the calls such a flag restarts.
     pub handlers_run_without_restart: u32,
+
+    /// The thread's blocked-signal mask, as `sigprocmask` and
+    /// `pthread_sigmask` set it and its handlers' masks change it while they
+    /// run ([`crate::signal`]): POSIX's is the thread's, and so is the
+    /// kernel's since lane A's design-decisions 1542. A new thread's is its
+    /// creator's, written here by `pthread_create` before the thread runs;
+    /// all-zero, nothing blocked, is the main thread's until start-up adopts
+    /// the one the kernel holds.
+    pub blocked: crate::signal::SigsetT,
+
+    /// Bumped by every change to what this thread's kernel mask should be --
+    /// its mask, or the set it waits for -- so that a mask write its own
+    /// handler raced knows to write again
+    /// ([`crate::signal`]'s `sync_kernel_blocked_mask`). Only this thread
+    /// and its handlers touch it, and only atomically.
+    pub mask_generation: u64,
 }
 
 /// `prefix` and then `n` in decimal, NUL-terminated, into one of the
@@ -284,6 +300,8 @@ impl PerThread {
         dlerror: crate::dlfcn::DlErrorSlot::ZERO,
         handlers_run: 0,
         handlers_run_without_restart: 0,
+        blocked: crate::signal::SigsetT::EMPTY,
+        mask_generation: 0,
     };
 }
 

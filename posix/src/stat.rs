@@ -232,6 +232,8 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
         crate::dirent::KERNEL_TYPE_SYMLINK => (crate::fcntl::S_IFLNK, 0o777),
         crate::dirent::KERNEL_TYPE_CHARDEV => (crate::fcntl::S_IFCHR, 0o660),
         crate::dirent::KERNEL_TYPE_BLOCKDEV => (crate::fcntl::S_IFBLK, 0o660),
+        crate::dirent::KERNEL_TYPE_SOCKET => (crate::fcntl::S_IFSOCK, 0o755),
+        crate::dirent::KERNEL_TYPE_FIFO => (crate::fcntl::S_IFIFO, 0o644),
         // `KERNEL_TYPE_FILE`, `KERNEL_TYPE_VOLLABEL`, and any code this
         // libc does not yet know about.
         _ => (crate::fcntl::S_IFREG, 0o644),
@@ -402,10 +404,10 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, dev: u64) -> i32 {
 /// 5. A regular file -- type 0 or `S_IFREG` -- is created, as `vfs_create`
 ///    does, through `openat(O_CREAT | O_EXCL)`, and takes its errors
 ///    (`EEXIST` among them).
-/// 6. A character or block device without `CAP_MKNOD` → `EPERM`
+/// 6. A FIFO is made by the kernel's `SYS_FS_MKFIFO` ([`fifo_made`]).
+/// 7. A character or block device without `CAP_MKNOD` → `EPERM`
 ///    (`vfs_mknod`).
-/// 7. A FIFO, socket or device → `ENOSYS`: the filesystem cannot hold
-///    special files yet.
+/// 8. A socket or device → `ENOSYS`: the filesystem cannot hold them yet.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, dev: u64) -> i32 {
     match mknod_at(dirfd, pathname, mode, dev) {
@@ -433,14 +435,31 @@ fn mknod_at(dirfd: i32, pathname: *const u8, mode: u32, dev: u64) -> Result<(), 
     if first == 0 {
         return Err(crate::errno::ENOENT);
     }
+    // The name from the directory's descriptor: `pathname` joined to its
+    // path, NUL-terminated.
+    let mut joined = [0u8; crate::unistd::PATH_MAX];
+    let mut named = pathname;
     if dirfd != crate::file::AT_FDCWD && first != b'/' {
-        let mut joined = [0u8; crate::unistd::PATH_MAX];
         if crate::file::resolve_dirfd_path(dirfd, pathname, &mut joined) == 0 {
             // It set EBADF, ENOTDIR or ENAMETOOLONG.
             return Err(crate::errno::get_errno());
         }
+        named = joined.as_ptr();
     }
     let t = mode & crate::fcntl::S_IFMT;
+    if t == crate::fcntl::S_IFIFO {
+        let mut resolved = [0u8; crate::unistd::PATH_MAX];
+        // It set ENAMETOOLONG, if it fails.
+        let len = crate::file::resolve_or_err(named, &mut resolved)
+            .ok_or_else(crate::errno::get_errno)?;
+        let path = resolved.get(..len).unwrap_or_default();
+        return fifo_made(crate::syscall::syscall3(
+            crate::syscall::SYS_FS_MKFIFO,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            u64::from(mode & 0o7777),
+        ));
+    }
     if t == 0 || t == crate::fcntl::S_IFREG {
         let flags = crate::fcntl::O_CREAT
             | crate::fcntl::O_EXCL
@@ -460,6 +479,25 @@ fn mknod_at(dirfd: i32, pathname: *const u8, mode: u32, dev: u64) -> Result<(), 
         return Err(crate::errno::EPERM);
     }
     Err(crate::errno::ENOSYS)
+}
+
+/// What `mknod` answers for the kernel's answer `ret` to `SYS_FS_MKFIFO`,
+/// which made the FIFO with the permission bits asked -- less the umask, or
+/// as the directory's default ACL gives them, the kernel's to apply as for
+/// any file it creates. `EEXIST` for a name that exists, of any type; `EPERM`
+/// on a filesystem that cannot hold a FIFO (FAT), as Linux's `mknod`
+/// answers where the filesystem has no `mknod`; `ENOSYS` from a kernel
+/// without the call, as every FIFO was before it.
+fn fifo_made(ret: i64) -> Result<(), i32> {
+    if crate::syscall::lacks_call(ret) {
+        Err(crate::errno::ENOSYS)
+    } else if ret == crate::errno::native::NOT_SUPPORTED {
+        Err(crate::errno::EPERM)
+    } else if ret < 0 {
+        Err(crate::errno::errno_for(ret))
+    } else {
+        Ok(())
+    }
 }
 
 /// Create a FIFO: glibc's `mkfifo`, which is `mknod(path, mode | S_IFIFO,
@@ -585,6 +623,38 @@ mod tests {
         assert_eq!(st.st_mode, S_IFDIR | 0o755);
         assert!(st.is_dir());
         assert_eq!(st.st_nlink, 2);
+    }
+
+    /// A socket's node and a named pipe's stat as what they are -- they
+    /// read as regular files before -- with the kernel's own defaults for a
+    /// filesystem that keeps no permissions (`meta_mode_bits`).
+    #[test]
+    fn test_fill_from_fsstat_socket_and_fifo() {
+        for (code, kind, perm) in [(6, S_IFSOCK, 0o755), (7, S_IFIFO, 0o644)] {
+            let raw = raw_fsstat(0, code, 1);
+            let mut st = Stat::zeroed();
+            fill_from_fsstat(&mut st, &raw);
+            assert_eq!(st.st_mode, kind | perm, "type {code}");
+        }
+    }
+
+    /// What `mknod` makes of the kernel's answers to `SYS_FS_MKFIFO`.
+    #[test]
+    fn fifo_made_answers_as_linuxs_mknod() {
+        use crate::errno::native;
+        assert_eq!(fifo_made(0), Ok(()));
+        assert_eq!(fifo_made(native::ALREADY_EXISTS), Err(crate::errno::EEXIST));
+        assert_eq!(
+            fifo_made(native::NOT_SUPPORTED),
+            Err(crate::errno::EPERM),
+            "FAT"
+        );
+        assert_eq!(fifo_made(native::NOT_FOUND), Err(crate::errno::ENOENT));
+        assert_eq!(
+            fifo_made(crate::errno::native::NO_SUCH_SYSCALL),
+            Err(crate::errno::ENOSYS),
+            "a kernel without the call"
+        );
     }
 
     #[test]
@@ -1005,7 +1075,8 @@ mod tests {
         }
     }
 
-    // -- mknod/mkfifo stubs return ENOSYS --
+    // -- A device's mknod answers ENOSYS, and so does a FIFO's on a kernel
+    // without SYS_FS_MKFIFO -- the host's stand-in has none. --
 
     /// What `openat(O_CREAT | O_EXCL)` answers for `path` on the host --
     /// which has no kernel behind it -- and so what a regular-file `mknod`,

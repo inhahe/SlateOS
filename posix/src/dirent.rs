@@ -170,6 +170,10 @@ pub(crate) const KERNEL_TYPE_VOLLABEL: u8 = 2;
 pub(crate) const KERNEL_TYPE_SYMLINK: u8 = 3;
 pub(crate) const KERNEL_TYPE_CHARDEV: u8 = 4;
 pub(crate) const KERNEL_TYPE_BLOCKDEV: u8 = 5;
+/// A Unix-domain socket's node (lane A's design-decisions 1519).
+pub(crate) const KERNEL_TYPE_SOCKET: u8 = 6;
+/// A named pipe's node (`requests/a-d-named-pipes-have-native-calls.md`).
+pub(crate) const KERNEL_TYPE_FIFO: u8 = 7;
 
 /// Translate a kernel directory-entry type byte into a POSIX `DT_*` value.
 ///
@@ -196,6 +200,8 @@ pub(crate) fn kernel_type_to_dt(kernel_type: u8) -> u8 {
         KERNEL_TYPE_FILE => DT_REG,
         KERNEL_TYPE_CHARDEV => DT_CHR,
         KERNEL_TYPE_BLOCKDEV => DT_BLK,
+        KERNEL_TYPE_SOCKET => DT_SOCK,
+        KERNEL_TYPE_FIFO => DT_FIFO,
         // A volume label genuinely has no `DT_*`: it is not a file, has no
         // inode, and cannot be opened or statted.  `DT_UNKNOWN` is the
         // honest answer even though the follow-up stat it invites will
@@ -1895,6 +1901,15 @@ mod tests {
         assert_eq!(kernel_type_to_dt(KERNEL_TYPE_BLOCKDEV), DT_BLK);
     }
 
+    /// A socket's node and a named pipe's are listed as what they are, not
+    /// left for a `stat` to find out.
+    #[test]
+    fn socket_and_fifo_nodes_get_their_dtype() {
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_SOCKET), DT_SOCK);
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_FIFO), DT_FIFO);
+        assert_eq!(kernel_type_to_dt(8), DT_UNKNOWN);
+    }
+
     #[test]
     fn the_kernel_type_codes_match_the_serializers() {
         // These six constants are the wire values three kernel handlers
@@ -1911,6 +1926,8 @@ mod tests {
         assert_eq!(KERNEL_TYPE_SYMLINK, 3);
         assert_eq!(KERNEL_TYPE_CHARDEV, 4);
         assert_eq!(KERNEL_TYPE_BLOCKDEV, 5);
+        assert_eq!(KERNEL_TYPE_SOCKET, 6);
+        assert_eq!(KERNEL_TYPE_FIFO, 7);
     }
 
     #[test]

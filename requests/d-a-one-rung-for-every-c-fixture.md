@@ -128,6 +128,7 @@ will close them myself as each one goes on.
 | `ctest-dumpable` | -- (filed with the library passing `PR_SET_DUMPABLE` to your `SYS_PROCESS_DUMPABLE`, 2026-10-16); the flag set to 0 and back, 2 refused (`EINVAL`), a forked child seeing its parent's 0, and an `exec` of itself (through `/proc/self/exe`) starting dumpable again; passes on Linux 6.6.87 | file | 30 |
 | `ctest-thread-masks` | -- (filed with the library's signal masks becoming each thread's, 2026-10-16; your `a-d-signal-masks-are-per-thread-and-tgkill-aims-at-the-thread.md`); a thread made while its creator blocks a signal starting with it blocked, its unblocking leaving the creator's alone, a signal to the process running the handler of the one thread that lets it through and not left pending for the other, and a signal sent to one thread staying that thread's -- not run by another's handler, not taken by another's `sigtimedwait`; passes on Linux 6.6.87 | - | 30 |
 | `ctest-sigev-thread` | -- (filed with `SIGEV_THREAD` timers on your `SIGEV_THREAD_ID`, 2026-10-16; `d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`); a one-shot timer's function run with its value on a thread of its own with every signal blocked, as glibc's runs it; a periodic one run five times in 300 ms and not after its delete; attributes destroyed after `timer_create` still making threads; two timers apart; `SIGRTMIN` 34, and signal 32 refused by `sigaddset` and `sigaction`; passes on Linux 6.6.87 | - | 30 |
+| `ctest-fifo` | -- (filed with named pipes on your `SYS_FS_MKFIFO` and `SYS_FIFO_OPEN`, 2026-10-16; `a-d-named-pipes-have-native-calls.md`); `mkfifo` and `mknod(S_IFIFO)` with the umask applied, `DT_FIFO` in a listing, nonblocking opens (a reader at once, a writer `ENXIO` until there is a reader), a blocking reader meeting a forked writer, data both ways, `fstat` and `/proc/self/fd` answering for the node, `O_RDWR`, `mkfifoat`; passes on Linux 6.6.87. **Needs the File capability's CREATE and DELETE**, which the `file` grant lacks (see "The `file` grant cannot make or remove a name" below) | file | 30 |
 
 (`ctest-cwd-umask` also waits on the kernel half of design-decisions.md
 §960, as its request says; it goes on the list when that is in.)
@@ -235,3 +236,20 @@ fail every boot made from such a worktree -- yours included -- the first time
 it merged `main`. The staged list is unchanged in shape for your rung: three
 fields a line, the fourth gone.
 
+
+## Lane D — 2026-10-16: the `file` grant cannot make or remove a name
+
+`ctest_generic_grant("file")` is `READ | WRITE | EXECUTE | METADATA`, but
+the calls that make a name ask for `CREATE` (`SYS_FS_MKDIR`,
+`SYS_FS_MKDIR_MODE`, `SYS_FS_SYMLINK`, `SYS_FS_LINK`, `SYS_FS_MKFIFO`) and
+the ones that remove one for `DELETE` (`SYS_FS_DELETE`, `SYS_FS_RMDIR`).
+So a fixture with `file` cannot `mkdir`, `mkdtemp`, `mkfifo`, `link`,
+`symlink`, `unlink` or `rmdir`: `ctest-tmpfile` makes its directory with
+`mkdir`, and `ctest-fifo` (new today) makes a directory, three FIFOs and a
+file and removes them all. A fixture's own files in `/tmp` are what
+Linux's tests make and remove freely.
+
+Asked: `CREATE | DELETE` in the `file` word, so that it means what a
+program that works with files holds -- or, if you would rather keep `file`
+as it is, a new word (`files`?) with them, and lane D moves the fixtures
+that make or remove names to it. Nothing else in the list needs changing.

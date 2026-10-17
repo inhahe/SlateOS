@@ -1222,6 +1222,22 @@ pub const POSIX_TIMER_GETOVERRUN: u64 = 3;
 /// [`SYS_POSIX_TIMER`] operation: `timer_delete(a = id)`.
 pub const POSIX_TIMER_DELETE: u64 = 4;
 
+/// `SYS_FS_MKFIFO(path, len, mode)` -- make a named pipe's node, on lane A's
+/// kernel since 2026-10-08 (`requests/a-d-named-pipes-have-native-calls.md`):
+/// `mode` the permission bits as a file's create takes them, the kernel
+/// applying the creator's umask or the directory's default ACL. Native
+/// errors: `AlreadyExists` for any name that exists, `NotSupported` on a
+/// filesystem that cannot hold one (FAT).
+pub const SYS_FS_MKFIFO: u64 = 1157;
+
+/// `SYS_FIFO_OPEN(path, len, native open flags, nonblock)` -- open a named
+/// pipe, whose node `SYS_FS_OPEN` answers `NoSuchDeviceOrAddress`: a pipe
+/// handle that the `SYS_PIPE_*` calls take -- for `READ | WRITE` one handle
+/// holding both ends. It waits as POSIX says, `nonblock` bit 0 being
+/// `O_NONBLOCK`; `NoSuchDeviceOrAddress` again for a node that is no FIFO.
+/// Native errors.
+pub const SYS_FIFO_OPEN: u64 = 1158;
+
 /// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
 /// the Linux ABI's `prctl(PR_SET_DUMPABLE)` sets and `/proc` consults; on
 /// lane A's kernel since 2026-10-07. Linux's errnos as `-errno`.

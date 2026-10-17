@@ -2863,8 +2863,10 @@ D's to act on once answered).
   (`pthread_attr_setsigmask_np`); `SIGEV_THREAD` timers, glibc's way, with
   `SIGRTMIN` 34 and signals 32 and 33 the library's (design-decisions
   1193) -- with `ctest-cpu-clocks`, `ctest-itimers`, `ctest-posix-timers`,
-  `ctest-dumpable`, `ctest-thread-masks`, `ctest-sigev-thread`.
-  **Next**, in this order: named pipes (1157/1158); the set-id calls
+  `ctest-dumpable`, `ctest-thread-masks`, `ctest-sigev-thread`; named
+  pipes (`SYS_FS_MKFIFO`/`SYS_FIFO_OPEN`, 1157/1158), with the socket and
+  FIFO entry types -- `ctest-fifo`.
+  **Next**, in this order: the set-id calls
   (1159/1160, settling `posix_spawn`'s `RESETIDS` with them); getgroups
   (1143); `swapon`/`swapoff` (1175/1176); descriptor passing (1169/1170);
   the namespace calls (1161-1166); `SYS_THREAD_SCHEDULER` (1146);

@@ -209,6 +209,11 @@ pub(crate) fn open_resolved(resolved: &[u8], flags: i32, mode: ModeT) -> Fd {
         create_mode,
     );
 
+    // Nothing that opens as a file stands behind the name: a named pipe's
+    // node, if it is one.
+    if ret == errno::native::NO_SUCH_DEVICE_OR_ADDRESS && flags & fcntl::O_PATH == 0 {
+        return open_fifo(resolved, flags);
+    }
     if ret < 0 {
         return errno::translate(ret) as Fd;
     }
@@ -248,6 +253,106 @@ pub(crate) fn open_resolved(resolved: &[u8], flags: i32, mode: ModeT) -> Fd {
         errno::set_errno(errno::EMFILE);
         -1
     }
+}
+
+/// [`open_resolved`]'s way for a named pipe (FIFO), whose node the kernel's
+/// file open answers `NoSuchDeviceOrAddress`: lane A's `SYS_FIFO_OPEN` with
+/// the same path and flags, for a pipe end -- for `O_RDWR`, one handle with
+/// both -- entered as a pipe descriptor that keeps the node's path, which
+/// `fstat` and `/proc/self/fd` answer from.
+///
+/// The open waits as POSIX says: a reader until a writer opens, a writer
+/// until a reader does, `O_RDWR` never. With `O_NONBLOCK` a reader opens at
+/// once and a writer with no reader is `ENXIO`. A signal while it waits is
+/// `EINTR`, or a restart for an `SA_RESTART` handler, as Linux's
+/// `fifo_open` answers. A node that is no FIFO -- a socket's -- answers
+/// `ENXIO` again, which stands, and so does the first `ENXIO` on a kernel
+/// without the call.
+///
+/// Not Linux's: `O_PATH` on a FIFO stays `ENXIO`, the kernel having no
+/// path-only handle for one (the caller does not come here), and so does
+/// `openat2` of one, whose walk the kernel makes from a directory handle
+/// this path cannot follow (`known-issues/D-POSIX-FIFO-THROUGH-OPENAT2-OR-O-PATH-IS-ENXIO.md`).
+fn open_fifo(resolved: &[u8], flags: i32) -> Fd {
+    let nonblock = u64::from(flags & fcntl::O_NONBLOCK != 0);
+    let ret = crate::interrupt::restarting(Restart::IfAsked, || {
+        syscall4(
+            crate::syscall::SYS_FIFO_OPEN,
+            resolved.as_ptr() as u64,
+            resolved.len() as u64,
+            translate_open_flags(flags),
+            nonblock,
+        )
+    });
+    let handle = match fifo_opened(ret) {
+        Ok(h) => h,
+        Err(e) => {
+            errno::set_errno(e);
+            return -1;
+        }
+    };
+    let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Pipe, handle, fifo_status(flags))
+    else {
+        // The kernel hands a process one handle per pipe end, so another
+        // descriptor may hold this one; it is let go only if none does.
+        if !fdtable::is_handle_referenced(HandleKind::Pipe, handle) {
+            let _ = crate::pipe::pipe_kernel_close(handle);
+        }
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+    if flags & fcntl::O_CLOEXEC != 0 {
+        let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
+    }
+    fdtable::store_fd_path(fd, resolved.as_ptr(), resolved.len());
+    fd
+}
+
+/// The pipe handle `SYS_FIFO_OPEN`'s answer `ret` is, or the errno for it:
+/// `ENXIO` from a kernel without the call, the first open's answer.
+fn fifo_opened(ret: i64) -> Result<u64, i32> {
+    if crate::syscall::lacks_call(ret) {
+        Err(errno::ENXIO)
+    } else {
+        u64::try_from(ret).map_err(|_| errno::errno_for(ret))
+    }
+}
+
+/// The status flags a FIFO's descriptor keeps for `F_GETFL`, as a file's
+/// does ([`open_resolved`]): the access mode, `O_APPEND`, `O_NONBLOCK`,
+/// `O_SYNC` and `O_NOFOLLOW`.
+fn fifo_status(flags: i32) -> i32 {
+    flags
+        & (fcntl::O_ACCMODE
+            | fcntl::O_APPEND
+            | fcntl::O_NONBLOCK
+            | fcntl::O_SYNC
+            | fcntl::O_NOFOLLOW)
+}
+
+/// A named pipe's node's record, read by the path its descriptor was opened
+/// by ([`open_fifo`]): what Linux's `fstat` of the descriptor answers --
+/// unless the node has been renamed or replaced since, which a path cannot
+/// see. `false` for an anonymous pipe, or a path that names no FIFO now;
+/// errno untouched either way.
+fn named_fifo_record(fd: Fd, raw: &mut [u8; crate::stat::KERNEL_STAT_LEN]) -> bool {
+    let mut path = [0u8; crate::unistd::PATH_MAX];
+    let len = fdtable::get_fd_path(fd, &mut path);
+    if len == 0 {
+        return false;
+    }
+    let ret = syscall3(
+        SYS_FS_STAT,
+        path.as_ptr() as u64,
+        len as u64,
+        raw.as_mut_ptr() as u64,
+    );
+    if ret < 0 {
+        return false;
+    }
+    let mut st = Stat::zeroed();
+    crate::stat::fill_from_fsstat(&mut st, raw);
+    st.st_mode & fcntl::S_IFMT == fcntl::S_IFIFO
 }
 
 /// `posix_close`'s flag asking it to restart an interrupted close. Zero, as in
@@ -2494,6 +2599,9 @@ fn stat_fd_raw(fd: Fd, raw: &mut [u8; crate::stat::KERNEL_STAT_LEN]) -> Option<i
         // a record, so this is `Some(-1)` rather than `None`.
         return Some(-1);
     };
+    if entry.kind == HandleKind::Pipe && named_fifo_record(fd, raw) {
+        return Some(0);
+    }
     if entry.kind != HandleKind::File {
         return None;
     }
@@ -2559,7 +2667,14 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             0
         }
         HandleKind::Pipe => {
-            // Return minimal stat for a pipe.
+            // A named pipe's node, as Linux reports it; an anonymous pipe,
+            // the bare FIFO.
+            let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+            if named_fifo_record(fd, &mut raw) {
+                // SAFETY: `buf` was checked non-null above.
+                crate::stat::fill_from_fsstat(unsafe { &mut *buf }, &raw);
+                return 0;
+            }
             // SAFETY: buf validity checked above.
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
@@ -19684,5 +19799,45 @@ mod tests {
             assert_eq!(write(-1, buf.as_ptr(), 0), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
         }
+    }
+
+    /// What `open` makes of `SYS_FIFO_OPEN`'s answers, and the status a
+    /// FIFO's descriptor keeps for `F_GETFL`: its access mode and status
+    /// flags, not the flags that only shape the open.
+    #[test]
+    fn a_fifos_open_answers_and_its_status() {
+        use crate::errno::native;
+        assert_eq!(fifo_opened(7), Ok(7));
+        assert_eq!(
+            fifo_opened(native::NO_SUCH_DEVICE_OR_ADDRESS),
+            Err(errno::ENXIO),
+            "no FIFO there, or a writer with no reader"
+        );
+        assert_eq!(fifo_opened(native::INTERRUPTED), Err(errno::EINTR));
+        assert_eq!(
+            fifo_opened(native::NO_SUCH_SYSCALL),
+            Err(errno::ENXIO),
+            "a kernel without the call: the first open's answer"
+        );
+        let asked = fcntl::O_RDONLY
+            | fcntl::O_NONBLOCK
+            | fcntl::O_CLOEXEC
+            | fcntl::O_CREAT
+            | fcntl::O_TRUNC
+            | fcntl::O_NOCTTY;
+        assert_eq!(fifo_status(asked), fcntl::O_RDONLY | fcntl::O_NONBLOCK);
+        assert_eq!(
+            fifo_status(fcntl::O_RDWR | fcntl::O_APPEND),
+            fcntl::O_RDWR | fcntl::O_APPEND
+        );
+    }
+
+    /// The host's open of a name its kernel stand-in cannot open takes the
+    /// file open's answer: no FIFO is tried for any other error.
+    #[test]
+    fn only_enxio_tries_the_fifo_open() {
+        errno::set_errno(0);
+        assert_eq!(open_resolved(b"/no/such/fifo", fcntl::O_RDONLY, 0), -1);
+        assert_ne!(errno::get_errno(), errno::ENXIO);
     }
 }

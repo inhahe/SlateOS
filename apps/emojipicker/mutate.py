@@ -240,19 +240,13 @@ MUTATIONS += [
     ),
     (
         "what is typed does not reach the search",
-        "            self.search_query = self.search_editor.text().to_owned();\n",
-        "",
+        "        let edit = self.search.key(key);\n",
+        "        let edit = textline::SearchKey::default();\n",
         [CARET, WORD],
     ),
     (
-        "a cut takes nothing to the clipboard",
-        "            self.search_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [CARET],
-    ),
-    (
         "a word typed stays on its tab",
-        "            if !self.search_query.is_empty() {\n                self.active_tab = Tab::Search;\n            }\n",
+        "            if !self.search.is_empty() {\n                self.active_tab = Tab::Search;\n            }\n",
         "",
         [WORD],
     ),
@@ -263,15 +257,6 @@ MUTATIONS += [
         [WORD],
     ),
     (
-        "the editor is not reloaded from the query",
-        "        if self.search_editor.text() != self.search_query {\n"
-        "            self.search_editor.set_text(&self.search_query);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        let edit = textline::apply_key(\n",
-        [BACKSPACE],
-    ),
-    (
         "a press puts the caret at the start",
         "            x - field.x - SEARCH_TEXT_INSET,\n",
         "            0.0,\n",
@@ -279,8 +264,8 @@ MUTATIONS += [
     ),
     (
         "an empty box with the keyboard has no caret",
-        "            if focused {\n                let mut tree = RenderTree::new();\n",
-        "            if false {\n                let mut tree = RenderTree::new();\n",
+        "                focused,\n                placeholder: \"Search emoji...\",\n",
+        "                focused: false,\n                placeholder: \"Search emoji...\",\n",
         [CARET],
     ),
     (
@@ -291,8 +276,8 @@ MUTATIONS += [
     ),
     (
         "an empty box does not say what it is for",
-        '                "Search emoji...",\n',
-        '                "",\n',
+        '                placeholder: "Search emoji...",\n',
+        '                placeholder: "",\n',
         [CARET],
     ),
     (

@@ -24,11 +24,11 @@ use guitk::frame::Rect;
 use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text::{self, TextCursor};
+use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::{grid, wheel};
 use oswindow::app::{self, App, Response};
+use textline::{SearchBox, SearchLook};
 
 use std::num::NonZeroUsize;
 use std::process::ExitCode;
@@ -1206,13 +1206,8 @@ pub struct EmojiPickerState {
     pub active_tab: Tab,
     /// The category to show when a category tab is active.
     pub selected_category: EmojiCategory,
-    /// Current search query text.
-    pub search_query: String,
-    /// The search box's editor -- its caret and selection over
-    /// `search_query` -- reloaded when the query changed under it.
-    search_editor: TextInput,
-    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    search_clipboard: String,
+    /// The search box, which is the query.
+    pub search: SearchBox,
     /// Index of the emoji lit in the visible grid, if any: the one the
     /// pointer is over, or the one the arrow keys moved to -- the same light,
     /// so the preview names whichever the reader last pointed at, and Enter
@@ -1257,9 +1252,7 @@ impl EmojiPickerState {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: Tab::Category(EmojiCategory::SmileysAndPeople),
             selected_category: EmojiCategory::SmileysAndPeople,
-            search_query: String::new(),
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, LABEL_FONT_SIZE),
             hovered_emoji: Option::None,
             scroll_offset: 0.0,
             skin_tone: SkinToneModifier::None,
@@ -1296,7 +1289,7 @@ impl EmojiPickerState {
     pub fn visible_emoji(&self) -> Vec<&EmojiEntry> {
         match self.active_tab {
             Tab::Recent => self.database.recent_entries(),
-            Tab::Search => self.database.search(&self.search_query),
+            Tab::Search => self.database.search(self.search.text()),
             Tab::Category(cat) => self.database.by_category(cat),
         }
     }
@@ -1357,7 +1350,7 @@ impl EmojiPickerState {
         }
         self.search_focused = tab == Tab::Search;
         if self.search_focused {
-            self.search_editor.set_text(&self.search_query);
+            self.search.caret_to_end();
         }
     }
 
@@ -1438,20 +1431,7 @@ impl EmojiPickerState {
     /// Give the search box the keyboard, its caret after the query.
     fn focus_search(&mut self) {
         self.search_focused = true;
-        self.search_editor.set_text(&self.search_query);
-    }
-
-    /// Where the search box's caret is drawn: the editor's while the box has
-    /// the keyboard (the end, if the query changed under the editor), the
-    /// start otherwise. One answer for the drawing and for a press.
-    fn search_cursor(&self) -> TextCursor {
-        if !self.search_focused {
-            TextCursor::default()
-        } else if self.search_editor.text() == self.search_query {
-            self.search_editor.cursor()
-        } else {
-            TextCursor::from(self.search_query.len())
-        }
+        self.search.caret_to_end();
     }
 
     /// A key for the search box, which has the keyboard: the caret keys,
@@ -1461,21 +1441,9 @@ impl EmojiPickerState {
     ///
     /// The box took typing at its end and Backspace from it, and nothing else.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            key,
-            &self.search_clipboard,
-            LABEL_FONT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
-        if self.search_editor.text() != self.search_query {
-            self.search_query = self.search_editor.text().to_owned();
-            if !self.search_query.is_empty() {
+        let edit = self.search.key(key);
+        if edit.changed {
+            if !self.search.is_empty() {
                 self.active_tab = Tab::Search;
             }
             self.scroll_offset = 0.0;
@@ -1494,21 +1462,13 @@ impl EmojiPickerState {
         let Some(field) = self.layout().search_field() else {
             return;
         };
-        let drawn = self.search_cursor();
+        let had_the_keyboard = self.search_focused;
         self.search_focused = true;
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (field.w - SEARCH_TEXT_INSET - SEARCH_TEXT_RIGHT).max(0.0),
-            LABEL_FONT_SIZE,
-            FontWeightHint::Regular,
+        self.search.press(
             x - field.x - SEARCH_TEXT_INSET,
+            field.w - SEARCH_TEXT_INSET - SEARCH_TEXT_RIGHT,
+            had_the_keyboard,
         );
-        self.search_editor.set_selection_anchor(Option::None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// The control under `(x, y)`, or `None` for bare background.
@@ -1632,11 +1592,8 @@ impl EmojiPickerState {
             Option::None,
         );
 
-        // The query, or what the box is for, faint, while it is empty -- and,
-        // with the keyboard, the caret and the selection where they are. An
-        // empty box with the keyboard draws its caret before what it is for,
-        // as the toolkit's own input dialog does. It drew neither: the caret
-        // was nowhere, because there was no caret to move.
+        // The query, or what the box is for while it is empty -- and, with
+        // the keyboard, the caret and the selection where they are.
         let line = text::line_height(LABEL_FONT_SIZE, FontWeightHint::Regular);
         let (x, y, avail) = (
             field.x + SEARCH_TEXT_INSET,
@@ -1644,60 +1601,25 @@ impl EmojiPickerState {
             (field.w - SEARCH_TEXT_INSET - SEARCH_TEXT_RIGHT).max(0.0),
         );
         let focused = self.search_focused && !self.show_help;
-        if self.search_query.is_empty() {
-            label(
-                frame,
+        let mut tree = RenderTree::new();
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
                 x,
                 y,
-                "Search emoji...",
-                LABEL_FONT_SIZE,
-                self.palette.subtext0,
-                FontWeightHint::Regular,
-                Some(avail),
-            );
-            if focused {
-                let mut tree = RenderTree::new();
-                textedit::push_caret(
-                    &mut tree,
-                    x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-                for cmd in tree.commands {
-                    frame.push(cmd);
-                }
-            }
-        } else {
-            let editing = self.search_focused && self.search_editor.text() == self.search_query;
-            let mut tree = RenderTree::new();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: self.search_cursor(),
-                    selection_anchor: if editing {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        Option::None
-                    },
-                    focused,
-                    x,
-                    y,
-                    width: avail,
-                    line_height: line,
-                    font_size: LABEL_FONT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-            for cmd in tree.commands {
-                frame.push(cmd);
-            }
+                width: avail,
+                line_height: line,
+                focused,
+                placeholder: "Search emoji...",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        for cmd in tree.commands {
+            frame.push(cmd);
         }
 
         // The whole band, not the rounded box drawn inside it: the eight pixels
@@ -2676,7 +2598,7 @@ mod tests {
     fn every_emoji() -> EmojiPickerState {
         let mut state = EmojiPickerState::new();
         state.active_tab = Tab::Search;
-        state.search_query = String::new();
+        state.search.clear();
         state
     }
 
@@ -2834,7 +2756,7 @@ mod tests {
     #[test]
     fn render_with_search_text_shows_query() {
         let mut state = EmojiPickerState::new();
-        state.search_query = "test query".to_string();
+        state.search.set_text("test query");
         let tree = render(&state);
         // The tree should contain a text command with the query -- rich text,
         // as the toolkit's editor draws it, so the selection can be coloured
@@ -2885,7 +2807,7 @@ mod tests {
         let mut state = EmojiPickerState::new();
         state.search_focused = true;
         probe::key(&mut state, &probe::typing("a"));
-        assert_eq!(state.search_query, "a");
+        assert_eq!(state.search.text(), "a");
         assert_eq!(state.active_tab, Tab::Search);
     }
 
@@ -2893,9 +2815,9 @@ mod tests {
     fn backspace_removes_character() {
         let mut state = EmojiPickerState::new();
         state.search_focused = true;
-        state.search_query = "ab".to_string();
+        state.search.set_text("ab");
         probe::key(&mut state, &probe::press(Key::Backspace));
-        assert_eq!(state.search_query, "a");
+        assert_eq!(state.search.text(), "a");
     }
 
     /// A picker whose grid is genuinely taller than the panel it draws into.
@@ -2909,7 +2831,7 @@ mod tests {
     fn scrollable_picker() -> EmojiPickerState {
         let mut state = EmojiPickerState::new();
         state.active_tab = Tab::Search;
-        state.search_query = "a".to_string();
+        state.search.set_text("a");
         assert!(
             state.max_scroll() > CELL_SIZE,
             "the fixture must overflow the panel, or these tests prove nothing"
@@ -3418,7 +3340,7 @@ mod tests {
     fn initial_state_defaults() {
         let state = EmojiPickerState::new();
         assert!(state.is_open);
-        assert_eq!(state.search_query, "");
+        assert_eq!(state.search.text(), "");
         assert_eq!(state.scroll_offset, 0.0);
         assert_eq!(state.skin_tone, SkinToneModifier::None);
         assert!(state.hovered_emoji.is_none());
@@ -4137,16 +4059,16 @@ mod tests {
         type_in(&mut state, "o");
         plain(&mut state, Key::End);
         plain(&mut state, Key::Backspace);
-        assert_eq!(state.search_query, "dog", "the caret did not move");
+        assert_eq!(state.search.text(), "dog", "the caret did not move");
         hit(&mut state, Key::A, guitk::event::Modifiers::ctrl());
         hit(&mut state, Key::X, guitk::event::Modifiers::ctrl());
-        assert_eq!(state.search_query, "", "Ctrl+X");
+        assert_eq!(state.search.text(), "", "Ctrl+X");
         hit(&mut state, Key::V, guitk::event::Modifiers::ctrl());
         hit(&mut state, Key::V, guitk::event::Modifiers::ctrl());
-        assert_eq!(state.search_query, "dogdog", "Ctrl+V");
+        assert_eq!(state.search.text(), "dogdog", "Ctrl+V");
         plain(&mut state, Key::Home);
         plain(&mut state, Key::Delete);
-        assert_eq!(state.search_query, "ogdog", "Delete at the caret");
+        assert_eq!(state.search.text(), "ogdog", "Delete at the caret");
 
         // A press past the text's end puts the caret at its end, and one at
         // the text's start puts it there.
@@ -4160,7 +4082,8 @@ mod tests {
         );
         type_in(&mut state, "s");
         assert_eq!(
-            state.search_query, "ogdogs",
+            state.search.text(),
+            "ogdogs",
             "a press past the text did not put the caret at its end"
         );
         handle_event(
@@ -4173,7 +4096,8 @@ mod tests {
         );
         type_in(&mut state, "d");
         assert_eq!(
-            state.search_query, "dogdogs",
+            state.search.text(),
+            "dogdogs",
             "a press at the text's start did not put the caret there"
         );
         assert_eq!(carets(&state), 1, "no caret is drawn in the box");
@@ -4296,7 +4220,7 @@ mod tests {
             &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
         );
         assert!(!state.show_help, "? raised the list from the search box");
-        assert_eq!(state.search_query, "?", "? was not typed");
+        assert_eq!(state.search.text(), "?", "? was not typed");
         plain(&mut state, Key::F1);
         assert!(
             state.show_help,

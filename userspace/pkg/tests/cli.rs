@@ -211,3 +211,239 @@ fn a_font_family_is_searched_for_in_the_root_s_index() {
     assert_eq!(o.status.code(), Some(0));
     assert!(stdout(&o).starts_with("tools 1.0.0"), "{}", stdout(&o));
 }
+
+/// A package's archive, packed by `pkg pack` from `files` -- each a source
+/// name, its contents, and where it is installed.
+fn package(
+    scratch: &scratchdir::ScratchDir,
+    name: &str,
+    version: &str,
+    files: &[(&str, &str, &str)],
+) -> String {
+    let dir = scratch.path(&format!("src-{name}-{version}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut manifest = format!("name: {name}\nversion: {version}\ndescription: {name}\n");
+    for (src, contents, dst) in files {
+        std::fs::write(dir.join(src), contents).unwrap();
+        manifest.push_str(&format!("file: {src} -> {dst} 0644 -\n"));
+    }
+    let manifest_path = dir.join("manifest.txt");
+    std::fs::write(&manifest_path, manifest).unwrap();
+    let archive = scratch.path(&format!("{name}-{version}.pkg"));
+    let o = Command::new(env!("CARGO_BIN_EXE_pkg"))
+        .args([
+            "pack",
+            manifest_path.to_str().unwrap(),
+            "-o",
+            archive.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    archive.to_str().unwrap().to_string()
+}
+
+/// `pkg ARGS... --json`'s one document.
+fn json(o: &Output) -> jsonvalue::JsonValue {
+    jsonvalue::json_parse(&stdout(o)).unwrap_or_else(|e| panic!("{e}: {}", stdout(o)))
+}
+
+#[test]
+fn a_rollback_puts_the_files_back_and_records_a_new_generation() {
+    let scratch = scratchdir::ScratchDir::new("pkg-cli-rollback");
+    let root = scratch.path("root");
+    let hello1 = package(
+        &scratch,
+        "hello",
+        "1.2.3",
+        &[
+            ("hello.txt", "hello\n", "/usr/share/hello/hello.txt"),
+            ("old.txt", "old\n", "/usr/share/hello/old.txt"),
+        ],
+    );
+    let hello2 = package(
+        &scratch,
+        "hello",
+        "2.0.0",
+        &[
+            ("hello.txt", "hello 2\n", "/usr/share/hello/hello.txt"),
+            ("new.txt", "new\n", "/usr/share/hello/new.txt"),
+        ],
+    );
+    let world = package(
+        &scratch,
+        "world",
+        "1.0.0",
+        &[("world.txt", "world\n", "/usr/share/world/world.txt")],
+    );
+    for archive in [&hello1, &hello2, &world] {
+        let o = pkg(&root, &["install", archive]);
+        assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    }
+    let file = |p: &str| std::fs::read_to_string(root.join(p)).ok();
+    assert_eq!(
+        file("usr/share/hello/hello.txt").as_deref(),
+        Some("hello 2\n")
+    );
+    assert_eq!(
+        file("usr/share/world/world.txt").as_deref(),
+        Some("world\n")
+    );
+
+    // Nothing changes on a dry run, a generation that is not there, or a
+    // word that is no generation.
+    let o = pkg(&root, &["rollback", "1", "--dry-run"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    assert!(
+        stdout(&o).contains("  - world (will be removed)"),
+        "{}",
+        stdout(&o)
+    );
+    assert!(
+        stdout(&o).contains("  ~ hello (2.0.0 → 1.2.3)"),
+        "{}",
+        stdout(&o)
+    );
+    let o = pkg(&root, &["rollback", "99"]);
+    assert_eq!(
+        (o.status.code(), stderr(&o).as_str()),
+        (Some(1), "pkg: generation 99 not found\n")
+    );
+    let o = pkg(&root, &["rollback", "first"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        stderr(&o).contains("not a generation number"),
+        "{}",
+        stderr(&o)
+    );
+    let o = pkg(&root, &["rollback", "99", "--json"]);
+    assert_eq!(o.status.code(), Some(1));
+    assert_eq!(
+        json(&o).get("outcome").and_then(|v| v.as_str()),
+        Some("refused")
+    );
+    assert_eq!(
+        file("usr/share/hello/hello.txt").as_deref(),
+        Some("hello 2\n")
+    );
+    assert_eq!(
+        file("usr/share/world/world.txt").as_deref(),
+        Some("world\n")
+    );
+
+    // Back to the first generation: world goes, hello is 1.2.3 again.
+    let o = pkg(&root, &["rollback", "1", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let report = json(&o);
+    let field = |k: &str| report.get(k).cloned();
+    assert_eq!(
+        field("outcome")
+            .and_then(|v| v.as_str().map(String::from))
+            .as_deref(),
+        Some("done")
+    );
+    assert_eq!(field("from").and_then(|v| v.as_u64()), Some(3));
+    assert_eq!(field("to").and_then(|v| v.as_u64()), Some(1));
+    assert_eq!(field("generation").and_then(|v| v.as_u64()), Some(4));
+    assert_eq!(
+        report
+            .get("removed")
+            .and_then(|v| v.as_array())
+            .map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        file("usr/share/hello/hello.txt").as_deref(),
+        Some("hello\n")
+    );
+    assert_eq!(file("usr/share/hello/old.txt").as_deref(), Some("old\n"));
+    assert_eq!(
+        file("usr/share/hello/new.txt"),
+        None,
+        "2.0.0's own file goes"
+    );
+    assert_eq!(file("usr/share/world/world.txt"), None);
+
+    // And forward again, to the generation before the rollback: a new one.
+    let o = pkg(&root, &["rollback"]);
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    assert!(
+        stdout(&o).contains("Rolled back. Generation 5 created (based on 3)."),
+        "{}",
+        stdout(&o)
+    );
+    assert_eq!(
+        file("usr/share/hello/hello.txt").as_deref(),
+        Some("hello 2\n")
+    );
+    assert_eq!(file("usr/share/hello/new.txt").as_deref(), Some("new\n"));
+    assert_eq!(file("usr/share/hello/old.txt"), None);
+    assert_eq!(
+        file("usr/share/world/world.txt").as_deref(),
+        Some("world\n")
+    );
+
+    // The generations, as data: what made each, and which is current.
+    let o = pkg(&root, &["generations", "--json"]);
+    assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
+    let all = json(&o);
+    let all = all.as_array().unwrap();
+    assert_eq!(all.len(), 5);
+    let op = |i: usize| {
+        all[i]
+            .get("operation")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    assert_eq!(op(0).as_deref(), Some("install-local"));
+    assert_eq!(op(3).as_deref(), Some("rollback"));
+    let current: Vec<u64> = all
+        .iter()
+        .filter(|g| g.get("current").and_then(|v| v.as_bool()) == Some(true))
+        .filter_map(|g| g.get("generation").and_then(|v| v.as_u64()))
+        .collect();
+    assert_eq!(current, [5]);
+}
+
+#[test]
+fn an_installed_state_that_cannot_be_read_is_not_taken_for_an_empty_one() {
+    let scratch = scratchdir::ScratchDir::new("pkg-cli-corrupt");
+    let root = scratch.path("root");
+    let hello = package(
+        &scratch,
+        "hello",
+        "1.0.0",
+        &[("hello.txt", "hello\n", "/usr/share/hello/hello.txt")],
+    );
+    let o = pkg(&root, &["install", &hello]);
+    assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
+    let gens = root.join("var/pkg/generations");
+    std::fs::write(gens.join("current"), "garbage").unwrap();
+    for args in [
+        &["list", "--installed"][..],
+        &["remove", "hello"],
+        &["install", &hello],
+        &["rollback", "1"],
+    ] {
+        let o = pkg(&root, args);
+        assert_eq!(
+            o.status.code(),
+            Some(1),
+            "{args:?}: {}{}",
+            stdout(&o),
+            stderr(&o)
+        );
+        assert!(
+            stderr(&o).contains("cannot read the installed state"),
+            "{args:?}: {}",
+            stderr(&o)
+        );
+    }
+    // Generation 1's record is still the one install wrote.
+    assert!(
+        std::fs::read_to_string(gens.join("1.gen"))
+            .unwrap()
+            .contains("package: hello")
+    );
+    assert!(root.join("usr/share/hello/hello.txt").is_file());
+}

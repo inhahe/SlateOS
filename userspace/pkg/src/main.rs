@@ -15,8 +15,8 @@
 //!   pkg search <QUERY>           Search available packages
 //!   pkg search --font <FAMILY>   The packages that carry a font family
 //!   pkg info <PACKAGE>           Show package details
-//!   pkg rollback [GENERATION]    Rollback to a previous generation
-//!   pkg generations              List system generations
+//!   pkg rollback [GENERATION]    Put the system back as it was in a generation
+//!   pkg generations [--json]     List system generations
 //!   pkg gc [--keep N]            Garbage-collect old generations
 //!   pkg verify [PACKAGE...]      Verify installed package integrity
 //!   pkg files <PACKAGE>          List files owned by a package
@@ -38,6 +38,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use httpclient::Client as HttpClient;
+use jsonvalue::JsonValue;
 
 // ============================================================================
 // Configuration
@@ -858,7 +859,7 @@ impl ContentStore {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&path, data)?;
+            write_atomically(&path, data)?;
         }
         Ok(hash)
     }
@@ -984,6 +985,7 @@ impl ContentStore {
                 Err(e) => {
                     eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
                     continue;
                 }
             };
@@ -1019,6 +1021,7 @@ impl ContentStore {
                 Err(e) => {
                     eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
                 }
             }
         }
@@ -1056,6 +1059,7 @@ impl ContentStore {
                 Err(e) => {
                     eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
                     continue;
                 }
             };
@@ -1076,6 +1080,7 @@ impl ContentStore {
                     Err(e) => {
                         eprintln!("  warning: failed to deploy config {}: {e}", file.dst);
                         stats.failed += 1;
+                        stats.failed_paths.push(file.dst.clone());
                     }
                 }
                 continue;
@@ -1109,6 +1114,7 @@ impl ContentStore {
                 Err(e) => {
                     eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
                 }
             }
         }
@@ -1149,6 +1155,8 @@ struct DeployStats {
     deployed: u64,
     /// Number of files that failed to deploy.
     failed: u64,
+    /// The destinations of those that failed.
+    failed_paths: Vec<String>,
     /// Total bytes of all deployed files.
     total_bytes: u64,
     /// Bytes saved through hardlink deduplication.
@@ -1263,9 +1271,9 @@ impl Generation {
                 if let Some((key, val)) = line_trimmed.split_once(':') {
                     let val = val.trim();
                     match key.trim() {
-                        "generation" => id = val.parse().unwrap_or(0),
-                        "timestamp" => timestamp = val.parse().unwrap_or(0),
-                        "parent" => parent = val.parse().unwrap_or(0),
+                        "generation" => id = val.parse().ok()?,
+                        "timestamp" => timestamp = val.parse().ok()?,
+                        "parent" => parent = val.parse().ok()?,
                         "description" => description = val.to_string(),
                         _ => {}
                     }
@@ -1299,18 +1307,18 @@ impl Generation {
             } else if let Some((key, val)) = line_trimmed.split_once(':') {
                 let val = val.trim();
                 match key.trim() {
+                    // Written by `Version`'s `Display`: what does not read
+                    // back as it was written is a corrupt record, which
+                    // `Version::parse` alone would read as 0.0.0.
                     "version" => {
-                        if let Some(v) = Version::parse(val) {
-                            current_version = v;
-                        }
+                        current_version = Version::parse(val).filter(|v| v.to_string() == val)?;
                     }
                     "manifest" => current_manifest = val.to_string(),
-                    "installed_at" => current_installed_at = val.parse().unwrap_or(0),
+                    "installed_at" => current_installed_at = val.parse().ok()?,
                     "explicit" => current_explicit = val == "yes",
                     "file" => {
-                        if let Some((path, hash)) = val.split_once(' ') {
-                            current_files.push((path.trim().to_string(), hash.trim().to_string()));
-                        }
+                        let (path, hash) = val.split_once(' ')?;
+                        current_files.push((path.trim().to_string(), hash.trim().to_string()));
                     }
                     _ => {}
                 }
@@ -1345,6 +1353,36 @@ impl Generation {
 // Package database — manages generations and the CAS
 // ============================================================================
 
+/// Why a generation could not be made the current one.
+#[derive(Debug)]
+enum CommitError {
+    /// Its record could not be written; the pointer was not touched.
+    NotSaved(io::Error),
+    /// Its record was written, the pointer could not be moved to it.
+    NotCurrent(io::Error),
+}
+
+/// `data` written to `path` whole or not at all: to a temporary name beside
+/// it, flushed to the disk, then renamed over it -- so a crash leaves the old
+/// contents or the new, never a record cut short.
+fn write_atomically(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp{}", process::id()));
+    let tmp = PathBuf::from(tmp);
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        io::Write::write_all(&mut f, data)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        // What was half-written goes; the error that matters is the one
+        // returned.
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
 struct PackageDb {
     cas: ContentStore,
     gen_dir: PathBuf,
@@ -1373,19 +1411,45 @@ impl PackageDb {
         let _ = fs::create_dir_all(&self.repo_dir);
     }
 
-    /// Get the current (latest) generation ID.
-    fn current_generation_id(&self) -> u64 {
-        let current_path = self.gen_dir.join("current");
-        if let Ok(content) = fs::read_to_string(&current_path) {
-            content.trim().parse().unwrap_or(0)
-        } else {
-            0
+    /// The current generation's number: 0 on a system nothing was ever
+    /// installed on, which has no pointer yet.
+    ///
+    /// # Errors
+    ///
+    /// The pointer cannot be read, or holds no number. The installed state
+    /// is then unknown, which no command may take for "nothing installed":
+    /// one that did would record a system with nothing on it.
+    fn current_generation_id(&self) -> io::Result<u64> {
+        match fs::read_to_string(self.gen_dir.join("current")) {
+            Ok(content) => content.trim().parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the current-generation pointer holds no generation number",
+                )
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e),
         }
     }
 
-    /// Set the current generation pointer.
+    /// Set the current generation pointer, whole or not at all.
     fn set_current_generation(&self, id: u64) -> io::Result<()> {
-        fs::write(self.gen_dir.join("current"), id.to_string())
+        write_atomically(&self.gen_dir.join("current"), id.to_string().as_bytes())
+    }
+
+    /// Record `generation` and make it the current one: its record first,
+    /// then the pointer.
+    ///
+    /// # Errors
+    ///
+    /// [`CommitError::NotSaved`] when the record could not be written, and
+    /// [`CommitError::NotCurrent`] when it was but the pointer could not be
+    /// moved to it.
+    fn commit_generation(&self, generation: &Generation) -> Result<(), CommitError> {
+        self.save_generation(generation)
+            .map_err(CommitError::NotSaved)?;
+        self.set_current_generation(generation.id)
+            .map_err(CommitError::NotCurrent)
     }
 
     /// Load a generation by ID.
@@ -1396,36 +1460,62 @@ impl PackageDb {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid generation file"))
     }
 
-    /// Save a generation.
+    /// Save a generation, whole or not at all.
     fn save_generation(&self, generation: &Generation) -> io::Result<()> {
         let path = self.gen_dir.join(format!("{}.gen", generation.id));
-        fs::write(&path, generation.serialize())
+        write_atomically(&path, generation.serialize().as_bytes())
     }
 
-    /// Get the current generation (or create generation 0 if none exists).
-    fn current_generation(&self) -> Generation {
-        let id = self.current_generation_id();
+    /// The current generation -- an empty generation 0 on a system nothing
+    /// was ever installed on.
+    ///
+    /// # Errors
+    ///
+    /// As [`PackageDb::current_generation_id`], and the generation it names
+    /// cannot be read or parsed.
+    fn current_generation(&self) -> io::Result<Generation> {
+        let id = self.current_generation_id()?;
         if id == 0 {
-            Generation::new(0, "initial empty state", 0)
+            Ok(Generation::new(0, "initial empty state", 0))
         } else {
             self.load_generation(id)
-                .unwrap_or_else(|_| Generation::new(0, "initial empty state", 0))
         }
     }
 
-    /// Create a new generation based on the current one.
-    fn next_generation(&self, description: &str) -> Generation {
-        let current = self.current_generation();
-        let next_id = current.id + 1;
+    /// A new generation holding what the current one holds, numbered past
+    /// every generation there is -- not only past the current one, which a
+    /// rollback may have made an older one, whose successor's record must
+    /// not be written over.
+    ///
+    /// # Errors
+    ///
+    /// As [`PackageDb::current_generation`], and the generations cannot be
+    /// listed.
+    fn next_generation(&self, description: &str) -> io::Result<Generation> {
+        let current = self.current_generation()?;
+        let last = self.list_generations()?.last().copied().unwrap_or(0);
+        let next_id = last.max(current.id).checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "no generation number is left")
+        })?;
         let mut next = Generation::new(next_id, description, current.id);
         next.packages = current.packages.clone();
-        next
+        Ok(next)
     }
 
-    /// List all generation IDs.
+    /// Every generation's number, in order: none on a system with no
+    /// generation directory yet.
+    ///
+    /// # Errors
+    ///
+    /// The directory is there and cannot be read.
     fn list_generations(&self) -> io::Result<Vec<u64>> {
         let mut ids = Vec::new();
-        if let Ok(entries) = fs::read_dir(&self.gen_dir) {
+        let entries = match fs::read_dir(&self.gen_dir) {
+            Ok(entries) => Some(entries),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(entries) = entries {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Some(id_str) = name.strip_suffix(".gen")
@@ -2050,6 +2140,52 @@ impl<'a> Resolver<'a> {
 // CLI commands
 // ============================================================================
 
+/// The current generation, or the end of the command: an installed state
+/// that cannot be read is not an empty one.
+fn current_or_exit(db: &PackageDb) -> Generation {
+    db.current_generation().unwrap_or_else(|e| {
+        eprintln!("pkg: cannot read the installed state: {e}");
+        process::exit(1);
+    })
+}
+
+/// The current generation's number, or the end of the command.
+fn current_id_or_exit(db: &PackageDb) -> u64 {
+    db.current_generation_id().unwrap_or_else(|e| {
+        eprintln!("pkg: cannot read the installed state: {e}");
+        process::exit(1);
+    })
+}
+
+/// The generation a change will be recorded as, or the end of the command.
+fn next_or_exit(db: &PackageDb, description: &str) -> Generation {
+    db.next_generation(description).unwrap_or_else(|e| {
+        eprintln!("pkg: cannot read the installed state: {e}");
+        process::exit(1);
+    })
+}
+
+/// `generation`, whose files are already on disk, recorded as the current
+/// one -- or what was left undone said, and the end of the command.
+fn commit_or_exit(db: &PackageDb, generation: &Generation) {
+    match db.commit_generation(generation) {
+        Ok(()) => {}
+        Err(CommitError::NotSaved(e)) => {
+            eprintln!("pkg: failed to save generation: {e}");
+            process::exit(1);
+        }
+        Err(CommitError::NotCurrent(e)) => {
+            eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
+            eprintln!(
+                "pkg: manually run: echo {} > {}/current",
+                generation.id,
+                db.gen_dir.display()
+            );
+            process::exit(1);
+        }
+    }
+}
+
 fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
     if packages.is_empty() {
         eprintln!("pkg: no packages specified");
@@ -2058,7 +2194,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
 
     db.ensure_dirs();
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check for already-installed packages
     let mut to_install = Vec::new();
@@ -2142,7 +2278,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2266,32 +2402,15 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    // Commit generation atomically
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            if let Err(e) = db.set_current_generation(new_gen.id) {
-                eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
-                eprintln!(
-                    "pkg: manually run: echo {} > {}/current",
-                    new_gen.id,
-                    db.gen_dir.display()
-                );
-                process::exit(1);
-            }
-            log_transaction(
-                TxOperation::Install,
-                new_gen.id,
-                current.id,
-                &to_install,
-                &desc,
-            );
-            println!("\nDone. Generation {} created.", new_gen.id);
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    log_transaction(
+        TxOperation::Install,
+        new_gen.id,
+        current.id,
+        &to_install,
+        &desc,
+    );
+    println!("\nDone. Generation {} created.", new_gen.id);
 }
 
 fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
@@ -2300,7 +2419,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         process::exit(1);
     }
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check all packages exist
     for name in packages {
@@ -2310,21 +2429,32 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    // Check for reverse dependencies
-    let repo_index = db.load_repo_index().unwrap_or_default();
+    // Check for reverse dependencies: each installed package's needs, by the
+    // manifest it was installed with -- kept in the store -- or, for one
+    // installed without (a snapshot's), by the repository's. One whose needs
+    // neither can tell stops the removal: "not known" is not "none".
+    let repo_index = db.load_repo_index().ok();
     let removing: HashSet<&str> = packages.iter().map(|s| s.as_str()).collect();
 
-    for name in current.packages.keys() {
+    for (name, pkg) in &current.packages {
         if removing.contains(name.as_str()) {
             continue;
         }
-        // Find this package's manifest to check its deps
-        if let Some(manifest) = repo_index.iter().find(|m| m.name == *name) {
-            for dep in &manifest.depends {
-                if removing.contains(dep.name.as_str()) {
-                    eprintln!("pkg: cannot remove {}: required by {name}", dep.name);
-                    process::exit(1);
-                }
+        let manifest = stored_manifest(db, &pkg.manifest_hash).or_else(|| {
+            repo_index
+                .as_ref()
+                .and_then(|index| index.iter().find(|m| m.name == *name).cloned())
+        });
+        let Some(manifest) = manifest else {
+            eprintln!(
+                "pkg: cannot tell what {name} depends on: its manifest is neither in the store nor in the repository index"
+            );
+            process::exit(1);
+        };
+        for dep in &manifest.depends {
+            if removing.contains(dep.name.as_str()) {
+                eprintln!("pkg: cannot remove {}: required by {name}", dep.name);
+                process::exit(1);
             }
         }
     }
@@ -2349,7 +2479,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     for name in packages {
         // Run pre-remove hook if we can find the manifest in CAS
@@ -2398,21 +2528,13 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(new_gen.id);
-            log_transaction(TxOperation::Remove, new_gen.id, current.id, packages, &desc);
-            println!("\nDone. Generation {} created.", new_gen.id);
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    log_transaction(TxOperation::Remove, new_gen.id, current.id, packages, &desc);
+    println!("\nDone. Generation {} created.", new_gen.id);
 }
 
 fn cmd_list(db: &PackageDb, installed_only: bool) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     if installed_only || current.packages.is_empty() {
         if current.packages.is_empty() {
@@ -2465,7 +2587,7 @@ fn cmd_search(db: &PackageDb, query: &str) {
                 println!("No packages found matching {}.", quoteaf_os(query));
                 return;
             }
-            let current = db.current_generation();
+            let current = current_or_exit(db);
             for pkg in &results {
                 let status = if current.packages.contains_key(&pkg.name) {
                     "[installed]"
@@ -2483,7 +2605,7 @@ fn cmd_search(db: &PackageDb, query: &str) {
 }
 
 fn cmd_info(db: &PackageDb, name: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check installed first
     if let Some(pkg) = current.packages.get(name) {
@@ -2579,112 +2701,607 @@ fn cmd_info(db: &PackageDb, name: &str) {
     }
 }
 
-fn cmd_generations(db: &PackageDb) {
-    let current_id = db.current_generation_id();
-    match db.list_generations() {
-        Ok(ids) => {
-            if ids.is_empty() {
-                println!("No generations recorded.");
-                return;
-            }
-            println!("{:<6} {:<20} {:<8} DESCRIPTION", "GEN", "DATE", "PKGS");
-            for id in &ids {
-                if let Ok(g) = db.load_generation(*id) {
-                    let marker = if *id == current_id { " *" } else { "" };
-                    let date = format_timestamp(g.timestamp);
-                    println!(
-                        "{:<6} {:<20} {:<8} {}{}",
-                        g.id,
-                        date,
-                        g.packages.len(),
-                        g.description,
-                        marker
-                    );
-                }
-            }
+/// A number for a JSON document: an `f64`, exact to 2^53, which no
+/// generation, timestamp or count here comes near.
+#[allow(clippy::cast_precision_loss)]
+fn json_num(n: u64) -> JsonValue {
+    JsonValue::Number(n as f64)
+}
+
+/// Strings as a JSON array.
+fn json_strs<'a>(items: impl IntoIterator<Item = &'a String>) -> JsonValue {
+    JsonValue::Array(
+        items
+            .into_iter()
+            .map(|s| JsonValue::Str(s.clone()))
+            .collect(),
+    )
+}
+
+/// The transaction that made each generation, from the log: what made it,
+/// and which packages. A generation the log does not have -- one made before
+/// it was kept, or a log that cannot be read -- has none; `gc`, which makes
+/// no generation, is not one.
+fn transactions_by_generation() -> BTreeMap<u64, Transaction> {
+    // The log is an audit trail: without it, what made each generation is
+    // unknown, which `--json` says as null; the generations are still there.
+    let all = TransactionLog::read_all().unwrap_or_else(|_| Vec::new());
+    let mut by_gen = BTreeMap::new();
+    for tx in all {
+        if !matches!(tx.operation, TxOperation::GarbageCollect) {
+            by_gen.entry(tx.generation_id).or_insert(tx);
         }
-        Err(e) => {
-            eprintln!("pkg: failed to list generations: {e}");
-            process::exit(1);
+    }
+    by_gen
+}
+
+/// `pkg generations [--json]`: every generation, the current one marked --
+/// with `--json`, one array of objects on one line, for a program to read:
+/// `generation`, `parent`, `timestamp` (seconds since 1970), `description`,
+/// `packages` (how many), `current`, and from the transaction log
+/// `operation` (`install`, `install-local`, `remove`, `upgrade`,
+/// `rollback`) and `changed` (the packages it named), null where the log
+/// has no record. A generation whose record cannot be read is
+/// `{"generation": N, "error": "..."}`.
+fn cmd_generations(db: &PackageDb, json: bool) {
+    let current_id = current_id_or_exit(db);
+    let ids = db.list_generations().unwrap_or_else(|e| {
+        eprintln!("pkg: failed to list generations: {e}");
+        process::exit(1);
+    });
+    if json {
+        let made_by = transactions_by_generation();
+        let all: Vec<JsonValue> = ids
+            .iter()
+            .map(|&id| match db.load_generation(id) {
+                Ok(g) => {
+                    let tx = made_by.get(&id);
+                    JsonValue::Object(vec![
+                        ("generation".into(), json_num(g.id)),
+                        ("parent".into(), json_num(g.parent)),
+                        ("timestamp".into(), json_num(g.timestamp)),
+                        ("description".into(), JsonValue::Str(g.description.clone())),
+                        ("packages".into(), json_num(g.packages.len() as u64)),
+                        ("current".into(), JsonValue::Bool(id == current_id)),
+                        (
+                            "operation".into(),
+                            tx.map_or(JsonValue::Null, |t| {
+                                JsonValue::Str(t.operation.as_str().into())
+                            }),
+                        ),
+                        (
+                            "changed".into(),
+                            tx.map_or(JsonValue::Null, |t| json_strs(&t.packages)),
+                        ),
+                    ])
+                }
+                Err(e) => JsonValue::Object(vec![
+                    ("generation".into(), json_num(id)),
+                    ("error".into(), JsonValue::Str(e.to_string())),
+                ]),
+            })
+            .collect();
+        println!("{}", JsonValue::Array(all));
+        return;
+    }
+    if ids.is_empty() {
+        println!("No generations recorded.");
+        return;
+    }
+    println!("{:<6} {:<20} {:<8} DESCRIPTION", "GEN", "DATE", "PKGS");
+    for id in &ids {
+        match db.load_generation(*id) {
+            Ok(g) => {
+                let marker = if *id == current_id { " *" } else { "" };
+                let date = format_timestamp(g.timestamp);
+                println!(
+                    "{:<6} {:<20} {:<8} {}{}",
+                    g.id,
+                    date,
+                    g.packages.len(),
+                    g.description,
+                    marker
+                );
+            }
+            Err(e) => println!("{id:<6} (its record cannot be read: {e})"),
         }
     }
 }
 
-fn cmd_rollback(db: &PackageDb, target_gen: Option<u64>) {
-    let current_id = db.current_generation_id();
+/// What going back from one generation to another changes, package by
+/// package, in name order.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RollbackPlan {
+    /// Installed now, not then: their files go -- but for those the target
+    /// installs too.
+    remove: Vec<String>,
+    /// Not installed now, installed then: their files come back from the
+    /// store.
+    restore: Vec<String>,
+    /// Installed both now and then, but not the same copy (another version,
+    /// or other contents): the target's is deployed over the current one,
+    /// and what only the current one had goes.
+    change: Vec<String>,
+}
 
-    let target = match target_gen {
-        Some(id) => id,
-        None => {
-            // Rollback to parent
-            let current = db.current_generation();
-            if current.parent == 0 && current.id == 0 {
-                eprintln!("pkg: no previous generation to rollback to");
-                process::exit(1);
-            }
-            current.parent
+impl RollbackPlan {
+    /// The packages whose files come from the store: restored and changed.
+    fn deployed(&self) -> impl Iterator<Item = &String> {
+        self.restore.iter().chain(&self.change)
+    }
+}
+
+/// `plan_rollback (from, to)`: what going from generation `from` back to
+/// `to` changes.
+fn plan_rollback(from: &Generation, to: &Generation) -> RollbackPlan {
+    let mut plan = RollbackPlan::default();
+    for name in from.packages.keys() {
+        if !to.packages.contains_key(name) {
+            plan.remove.push(name.clone());
         }
+    }
+    for (name, then) in &to.packages {
+        match from.packages.get(name) {
+            None => plan.restore.push(name.clone()),
+            Some(now)
+                if now.manifest_hash != then.manifest_hash
+                    || now.file_hashes != then.file_hashes =>
+            {
+                plan.change.push(name.clone());
+            }
+            Some(_) => {}
+        }
+    }
+    plan
+}
+
+/// The files going from `from` back to `to` takes away: those the removed
+/// and changed packages have now that no package in `to` installs, in path
+/// order.
+fn paths_to_remove<'a>(from: &'a Generation, to: &Generation, plan: &RollbackPlan) -> Vec<&'a str> {
+    let kept: HashSet<&str> = to
+        .packages
+        .values()
+        .flat_map(|p| p.file_hashes.iter().map(|(dst, _)| dst.as_str()))
+        .collect();
+    let mut gone: Vec<&str> = plan
+        .remove
+        .iter()
+        .chain(&plan.change)
+        .filter_map(|name| from.packages.get(name))
+        .flat_map(|p| p.file_hashes.iter().map(|(dst, _)| dst.as_str()))
+        .filter(|dst| !kept.contains(dst))
+        .collect();
+    gone.sort_unstable();
+    gone.dedup();
+    gone
+}
+
+/// The manifest kept in the store under `hash`, as the install put it there.
+fn stored_manifest(db: &PackageDb, hash: &str) -> Option<PackageManifest> {
+    let data = db.cas.get(hash).ok()?;
+    PackageManifest::parse(&String::from_utf8(data).ok()?)
+}
+
+/// What going back to `to` needs from the store that is no longer there
+/// (`pkg gc` took it): each package's manifest and files, named.
+fn missing_from_store(db: &PackageDb, to: &Generation, plan: &RollbackPlan) -> Vec<String> {
+    let mut missing = Vec::new();
+    for name in plan.deployed() {
+        let Some(then) = to.packages.get(name) else {
+            continue;
+        };
+        if stored_manifest(db, &then.manifest_hash).is_none() {
+            missing.push(format!("{name}'s manifest"));
+        }
+        for (dst, hash) in &then.file_hashes {
+            if !hash.is_empty() && !db.cas.has(hash) {
+                missing.push(format!("{name}'s {dst}"));
+            }
+        }
+    }
+    missing
+}
+
+/// `paths` taken off the disk, each one that is there: those that could not
+/// be, said on stderr and returned. An emptied directory goes with its last
+/// file, as `pkg remove` takes it.
+fn remove_paths(paths: &[&str]) -> Vec<String> {
+    let mut failed = Vec::new();
+    for &dst_path in paths {
+        let dst = match under_root(dst_path) {
+            Ok(dst) => dst,
+            Err(e) => {
+                eprintln!("  warning: failed to remove {dst_path}: {e}");
+                failed.push(dst_path.to_string());
+                continue;
+            }
+        };
+        if fs::symlink_metadata(&dst).is_err() {
+            continue;
+        }
+        if let Err(e) = fs::remove_file(&dst) {
+            eprintln!("  warning: failed to remove {dst_path}: {e}");
+            failed.push(dst_path.to_string());
+            continue;
+        }
+        if let Some(parent) = dst.parent() {
+            // Succeeds only for a directory the file was the last one in.
+            let _ = fs::remove_dir(parent);
+        }
+    }
+    failed
+}
+
+/// Whether the package database may be written -- what a rollback changes
+/// first and last: a file made and removed in it. `Err` with the error when
+/// it may not.
+fn probe_writable(dir: &Path) -> io::Result<()> {
+    let probe = dir.join(format!(".pkg-write-probe{}", process::id()));
+    fs::File::create(&probe)?;
+    fs::remove_file(&probe)
+}
+
+/// How `pkg rollback` ended -- its exit status, for a program that runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RollbackOutcome {
+    /// 0: the system is the target generation's again, recorded as a new
+    /// generation -- or nothing needed doing, or it was a `--dry-run`.
+    Done,
+    /// 1: refused before anything changed: no such generation, none before
+    /// the current one, what the target needs no longer in the store, or an
+    /// argument that is no generation.
+    Refused,
+    /// 2: stopped partway. Either files could not be changed -- the record
+    /// still names the generation it started from, and running the same
+    /// rollback again finishes it -- or every file was changed and the new
+    /// generation could not be recorded.
+    Partial,
+    /// 3: not permitted: the package database cannot be written.
+    NotPermitted,
+}
+
+impl RollbackOutcome {
+    fn code(self) -> i32 {
+        match self {
+            Self::Done => 0,
+            Self::Refused => 1,
+            Self::Partial => 2,
+            Self::NotPermitted => 3,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Refused => "refused",
+            Self::Partial => "partial",
+            Self::NotPermitted => "not-permitted",
+        }
+    }
+}
+
+/// What a rollback has to say: to a person as it goes, and with `--json` as
+/// one object at the end.
+#[derive(Default)]
+struct RollbackReport {
+    json: bool,
+    dry_run: bool,
+    from: Option<u64>,
+    to: Option<u64>,
+    generation: Option<u64>,
+    removed: Vec<String>,
+    restored: Vec<String>,
+    /// `(name, version now, version then)`.
+    changed: Vec<(String, String, String)>,
+    failed: Vec<String>,
+}
+
+impl RollbackReport {
+    /// The end of `pkg rollback`: with `--json`, one object on stdout --
+    /// `outcome` (`done`, `refused`, `partial`, `not-permitted`), `from`,
+    /// `to`, `generation` (the one recorded), `dry_run`, `removed`,
+    /// `restored`, `changed` (`name`, `from`, `to`), `failed` (the files
+    /// that could not be changed) and `error` -- else `error` on stderr; and
+    /// the outcome's exit status.
+    fn finish(&self, outcome: RollbackOutcome, error: Option<&str>) -> ! {
+        if self.json {
+            let num = |n: Option<u64>| n.map_or(JsonValue::Null, json_num);
+            let changed = self
+                .changed
+                .iter()
+                .map(|(name, now, then)| {
+                    JsonValue::Object(vec![
+                        ("name".into(), JsonValue::Str(name.clone())),
+                        ("from".into(), JsonValue::Str(now.clone())),
+                        ("to".into(), JsonValue::Str(then.clone())),
+                    ])
+                })
+                .collect();
+            let doc = JsonValue::Object(vec![
+                ("outcome".into(), JsonValue::Str(outcome.word().into())),
+                ("from".into(), num(self.from)),
+                ("to".into(), num(self.to)),
+                ("generation".into(), num(self.generation)),
+                ("dry_run".into(), JsonValue::Bool(self.dry_run)),
+                ("removed".into(), json_strs(&self.removed)),
+                ("restored".into(), json_strs(&self.restored)),
+                ("changed".into(), JsonValue::Array(changed)),
+                ("failed".into(), json_strs(&self.failed)),
+                (
+                    "error".into(),
+                    error.map_or(JsonValue::Null, |e| JsonValue::Str(e.into())),
+                ),
+            ]);
+            println!("{doc}");
+        } else if let Some(e) = error {
+            eprintln!("pkg: {e}");
+        }
+        process::exit(outcome.code());
+    }
+}
+
+/// A package's hook, run as `pkg` runs the others, its outcome said unless
+/// the output is `--json`'s.
+fn run_hook(hook: &str, which: &str, name: &str, version: &str, json: bool) {
+    if hook.is_empty() {
+        return;
+    }
+    match PackageHooks::run(hook, name, version) {
+        Ok(true) if !json => println!("  {which} hook OK for {name}"),
+        Ok(_) => {}
+        Err(e) => eprintln!("  warning: {name}: {which} hook failed: {e}"),
+    }
+}
+
+/// `pkg rollback [GENERATION] [--dry-run] [--json]`: the system put back as
+/// it was in `GENERATION` -- the current one's parent by default -- and
+/// recorded as a new generation, so the history only grows. Packages
+/// installed since are taken away (their hooks run as `pkg remove` runs
+/// them), and those of the target generation are put back from the store,
+/// in the target's versions (their post-install hooks run as `pkg upgrade`
+/// runs them); a configuration file the user changed is kept, the target's
+/// saved beside it as `.pkg-new`. Nothing is changed unless everything the
+/// target needs is still in the store. Ends with [`RollbackOutcome`]'s
+/// status.
+fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) -> ! {
+    let mut report = RollbackReport {
+        json,
+        dry_run,
+        ..RollbackReport::default()
+    };
+    let current = match db.current_generation() {
+        Ok(current) => current,
+        Err(e) => report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!("cannot read the installed state: {e}")),
+        ),
+    };
+    report.from = Some(current.id);
+
+    let target_id = match arg {
+        Some(a) => match a.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => report.finish(
+                RollbackOutcome::Refused,
+                Some(&format!(
+                    "rollback: {}: not a generation number",
+                    quotef_os(a)
+                )),
+            ),
+        },
+        None if current.parent == 0 => report.finish(
+            RollbackOutcome::Refused,
+            Some("no previous generation to rollback to"),
+        ),
+        None => current.parent,
+    };
+    report.to = Some(target_id);
+    if target_id == current.id {
+        if !json {
+            println!("Already at generation {target_id}: nothing to do.");
+        }
+        report.finish(RollbackOutcome::Done, None);
+    }
+    let target = match db.load_generation(target_id) {
+        Ok(target) => target,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!("generation {target_id} not found")),
+        ),
+        Err(e) => report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!("generation {target_id}: {e}")),
+        ),
     };
 
-    // Verify target generation exists
-    if db.load_generation(target).is_err() {
-        eprintln!("pkg: generation {target} not found");
-        process::exit(1);
+    let plan = plan_rollback(&current, &target);
+    report.removed.clone_from(&plan.remove);
+    report.restored.clone_from(&plan.restore);
+    for name in &plan.change {
+        if let (Some(now), Some(then)) = (current.packages.get(name), target.packages.get(name)) {
+            report.changed.push((
+                name.clone(),
+                now.version.to_string(),
+                then.version.to_string(),
+            ));
+        }
     }
-
-    let target_gen = db.load_generation(target).expect("just checked");
-    let current_gen = db.current_generation();
-
-    // Show diff
-    println!("Rolling back from generation {current_id} to {target}:");
-
-    let current_pkgs: HashSet<&str> = current_gen.packages.keys().map(|s| s.as_str()).collect();
-    let target_pkgs: HashSet<&str> = target_gen.packages.keys().map(|s| s.as_str()).collect();
-
-    for name in current_pkgs.difference(&target_pkgs) {
-        println!("  - {name} (will be removed)");
-    }
-    for name in target_pkgs.difference(&current_pkgs) {
-        println!("  + {name} (will be restored)");
-    }
-    for name in current_pkgs.intersection(&target_pkgs) {
-        let cv = &current_gen.packages[*name].version;
-        let tv = &target_gen.packages[*name].version;
-        if cv != tv {
-            println!("  ~ {name} ({cv} → {tv})");
+    if !json {
+        println!(
+            "Rolling back from generation {} to {target_id}:",
+            current.id
+        );
+        for name in &plan.remove {
+            println!("  - {name} (will be removed)");
+        }
+        for name in &plan.restore {
+            println!("  + {name} (will be restored)");
+        }
+        for (name, now, then) in &report.changed {
+            println!("  ~ {name} ({now} → {then})");
         }
     }
 
-    // Create a new generation that represents the rollback
-    // (we don't delete generations — the history is append-only)
-    let desc = format!("rollback to generation {target}");
-    let mut rollback_gen = db.next_generation(&desc);
-    rollback_gen.packages = target_gen.packages.clone();
+    let missing = missing_from_store(db, &target, &plan);
+    if !missing.is_empty() {
+        report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!(
+                "generation {target_id} cannot be put back: no longer in the store (pkg gc removed it): {}",
+                missing.join(", ")
+            )),
+        );
+    }
+    if dry_run {
+        if !json {
+            println!("\n(dry run — no changes made)");
+        }
+        report.finish(RollbackOutcome::Done, None);
+    }
+    if let Err(e) = probe_writable(&db.gen_dir) {
+        let outcome = if matches!(
+            e.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+        ) {
+            RollbackOutcome::NotPermitted
+        } else {
+            RollbackOutcome::Refused
+        };
+        report.finish(
+            outcome,
+            Some(&format!("cannot change the installed system: {e}")),
+        );
+    }
 
-    match db.save_generation(&rollback_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(rollback_gen.id);
-            log_transaction(
-                TxOperation::Rollback,
-                rollback_gen.id,
-                current_id,
-                &[],
-                &desc,
+    // The packages taken away: their hooks around their files' removal.
+    for name in &plan.remove {
+        if let Some(now) = current.packages.get(name)
+            && let Some(manifest) = stored_manifest(db, &now.manifest_hash)
+        {
+            let version = now.version.to_string();
+            run_hook(
+                &manifest.hook_pre_remove,
+                "pre-remove",
+                name,
+                &version,
+                json,
             );
-            println!(
-                "\nRolled back. Generation {} created (based on {target}).",
-                rollback_gen.id
-            );
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save rollback generation: {e}");
-            process::exit(1);
         }
     }
+    let gone = paths_to_remove(&current, &target, &plan);
+    report.failed.extend(remove_paths(&gone));
+    for name in &plan.remove {
+        if let Some(now) = current.packages.get(name)
+            && let Some(manifest) = stored_manifest(db, &now.manifest_hash)
+        {
+            let version = now.version.to_string();
+            run_hook(
+                &manifest.hook_post_remove,
+                "post-remove",
+                name,
+                &version,
+                json,
+            );
+        }
+    }
+    // The packages put back: the target's copies, from the store.
+    for name in plan.deployed() {
+        let (Some(then), Some(manifest)) = (
+            target.packages.get(name),
+            target
+                .packages
+                .get(name)
+                .and_then(|then| stored_manifest(db, &then.manifest_hash)),
+        ) else {
+            // Checked above: both are there.
+            continue;
+        };
+        let old = current
+            .packages
+            .get(name)
+            .map(|now| now.file_hashes.clone())
+            .unwrap_or_default();
+        match db.cas.deploy_package_files_upgrade(&manifest, &old) {
+            Ok(stats) => {
+                if !json {
+                    println!(
+                        "  Put back {name} {}: {} files, {}",
+                        then.version,
+                        stats.deployed,
+                        format_size(stats.total_bytes)
+                    );
+                }
+                report.failed.extend(stats.failed_paths);
+            }
+            Err(e) => {
+                eprintln!("  warning: file deployment error for {name}: {e}");
+                report.failed.push(name.clone());
+            }
+        }
+        run_hook(
+            &manifest.hook_post_install,
+            "post-install",
+            name,
+            &then.version.to_string(),
+            json,
+        );
+    }
+    if !report.failed.is_empty() {
+        let message = format!(
+            "{} file(s) could not be changed; the record still names generation {} -- \
+             run 'pkg rollback {target_id}' again once that is put right",
+            report.failed.len(),
+            current.id
+        );
+        report.finish(RollbackOutcome::Partial, Some(&message));
+    }
+
+    // The history only grows: the target's packages, as a new generation.
+    let desc = format!("rollback to generation {target_id}");
+    let mut new_gen = match db.next_generation(&desc) {
+        Ok(new_gen) => new_gen,
+        Err(e) => report.finish(
+            RollbackOutcome::Partial,
+            Some(&format!(
+                "the files are generation {target_id}'s, but it cannot be recorded: {e}"
+            )),
+        ),
+    };
+    new_gen.packages = target.packages.clone();
+    match db.commit_generation(&new_gen) {
+        Ok(()) => {}
+        Err(CommitError::NotSaved(e)) => report.finish(
+            RollbackOutcome::Partial,
+            Some(&format!(
+                "the files are generation {target_id}'s, but it cannot be recorded: {e}; \
+                 the record still names generation {}",
+                current.id
+            )),
+        ),
+        Err(CommitError::NotCurrent(e)) => report.finish(
+            RollbackOutcome::Partial,
+            Some(&format!(
+                "CRITICAL — saved generation but failed to update pointer: {e}; \
+                 manually run: echo {} > {}/current",
+                new_gen.id,
+                db.gen_dir.display()
+            )),
+        ),
+    }
+    log_transaction(TxOperation::Rollback, new_gen.id, current.id, &[], &desc);
+    report.generation = Some(new_gen.id);
+    if !json {
+        println!(
+            "\nRolled back. Generation {} created (based on {target_id}).",
+            new_gen.id
+        );
+    }
+    report.finish(RollbackOutcome::Done, None);
 }
 
 fn cmd_gc(db: &PackageDb, keep: usize) {
-    let current_id = db.current_generation_id();
+    let current_id = current_id_or_exit(db);
     let all_ids = match db.list_generations() {
         Ok(ids) => ids,
         Err(e) => {
@@ -2774,7 +3391,7 @@ fn cmd_gc(db: &PackageDb, keep: usize) {
 }
 
 fn cmd_verify(db: &PackageDb, packages: &[String]) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     let to_verify: Vec<(&String, &InstalledPackage)> = if packages.is_empty() {
         current.packages.iter().collect()
@@ -2836,7 +3453,7 @@ fn cmd_verify(db: &PackageDb, packages: &[String]) {
 }
 
 fn cmd_files(db: &PackageDb, name: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     match current.packages.get(name) {
         Some(pkg) => {
             for (path, _hash) in &pkg.file_hashes {
@@ -2851,7 +3468,7 @@ fn cmd_files(db: &PackageDb, name: &str) {
 }
 
 fn cmd_which(db: &PackageDb, path: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     for (name, pkg) in &current.packages {
         for (file_path, _) in &pkg.file_hashes {
             if file_path == path {
@@ -2870,7 +3487,7 @@ fn cmd_which(db: &PackageDb, path: &str) {
 
 /// Find all packages that depend on a given package (reverse dependencies).
 fn cmd_rdeps(db: &PackageDb, target: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check the target exists
     if !current.packages.contains_key(target) {
@@ -2923,7 +3540,7 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
 
 /// List all shared libraries (.dso files) installed in the current generation.
 fn cmd_libs(db: &PackageDb) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     let mut libs: Vec<(String, String, String)> = Vec::new(); // (lib_path, pkg_name, version)
 
@@ -2968,7 +3585,7 @@ fn is_shared_lib_path(path: &str) -> bool {
 /// 2. Reports all reverse dependencies that will now use the new version
 /// 3. Creates a new generation (existing dynamically-linked binaries auto-use the new lib)
 fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     if !current.packages.contains_key(lib_name) {
         eprintln!("pkg: {}: not installed", quotef_os(lib_name));
@@ -3061,7 +3678,7 @@ fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
 }
 
 fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     let available = match db.load_repo_index() {
         Ok(a) => a,
         Err(e) => {
@@ -3116,7 +3733,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
     // Install the newer versions
     let names: Vec<String> = upgrades.iter().map(|(n, _, _)| n.to_string()).collect();
     let desc = format!("upgrade {}", names.join(", "));
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3305,22 +3922,14 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(new_gen.id);
-            log_transaction(TxOperation::Upgrade, new_gen.id, current.id, &names, &desc);
-            println!("\nDone. Generation {} created.", new_gen.id);
-            if total_config_preserved > 0 {
-                println!(
-                    "  {total_config_preserved} config file(s) preserved — \
-                     new versions saved as .pkg-new"
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
+    commit_or_exit(db, &new_gen);
+    log_transaction(TxOperation::Upgrade, new_gen.id, current.id, &names, &desc);
+    println!("\nDone. Generation {} created.", new_gen.id);
+    if total_config_preserved > 0 {
+        println!(
+            "  {total_config_preserved} config file(s) preserved — \
+             new versions saved as .pkg-new"
+        );
     }
 }
 
@@ -4073,7 +4682,7 @@ fn create_pkg_archive(manifest: &PackageManifest, base_dir: &Path) -> io::Result
 fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
     db.ensure_dirs();
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Parse all .pkg files first to validate them before making changes
     let mut parsed: Vec<(PathBuf, PackageManifest, PkgFileBlobs)> = Vec::new();
@@ -4145,7 +4754,7 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
     // Create new generation
     let names: Vec<&str> = parsed.iter().map(|(_, m, _)| m.name.as_str()).collect();
     let desc = format!("install (local) {}", names.join(", "));
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4242,34 +4851,16 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
         }
     }
 
-    // Commit generation atomically
-    let current_id = db.current_generation_id();
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            if let Err(e) = db.set_current_generation(new_gen.id) {
-                eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
-                eprintln!(
-                    "pkg: manually run: echo {} > {}/current",
-                    new_gen.id,
-                    db.gen_dir.display()
-                );
-                process::exit(1);
-            }
-            let pkg_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-            log_transaction(
-                TxOperation::InstallLocal,
-                new_gen.id,
-                current_id,
-                &pkg_names,
-                &desc,
-            );
-            println!("\nDone. Generation {} created.", new_gen.id);
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    let pkg_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    log_transaction(
+        TxOperation::InstallLocal,
+        new_gen.id,
+        new_gen.parent,
+        &pkg_names,
+        &desc,
+    );
+    println!("\nDone. Generation {} created.", new_gen.id);
 }
 
 // ============================================================================
@@ -4530,7 +5121,7 @@ fn cmd_search_font(db: &PackageDb, family: &str) {
         );
         process::exit(1);
     }
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     for pkg in carriers {
         let installed = current.packages.get(&pkg.name).map(|held| {
             let manifest = db
@@ -4832,7 +5423,7 @@ fn parse_snapshot(text: &str) -> Result<Vec<SnapshotEntry>, String> {
 
 /// Export current generation as a portable snapshot file.
 fn cmd_snapshot_export(db: &PackageDb, output_path: Option<&Path>) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     if current.packages.is_empty() {
         println!("No packages installed — nothing to export.");
@@ -4895,7 +5486,7 @@ fn cmd_snapshot_diff(db: &PackageDb, snapshot_path: &Path) {
         }
     };
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Build lookup for snapshot and current
     let snap_map: BTreeMap<&str, &SnapshotEntry> =
@@ -4985,7 +5576,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
         }
     };
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Determine what needs to change
     let snap_map: BTreeMap<&str, &SnapshotEntry> =
@@ -5055,7 +5646,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
     all_changed.extend(remove_names.iter().cloned());
 
     let desc = format!("snapshot apply ({})", snapshot_path.display());
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -5166,27 +5757,19 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
         }
     }
 
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(new_gen.id);
-            log_transaction(
-                TxOperation::Install, // Closest operation type
-                new_gen.id,
-                current.id,
-                &all_changed,
-                &desc,
-            );
-            println!(
-                "\nDone. Generation {} created ({} packages).",
-                new_gen.id,
-                new_gen.packages.len()
-            );
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    log_transaction(
+        TxOperation::Install, // Closest operation type
+        new_gen.id,
+        current.id,
+        &all_changed,
+        &desc,
+    );
+    println!(
+        "\nDone. Generation {} created ({} packages).",
+        new_gen.id,
+        new_gen.packages.len()
+    );
 }
 
 /// Top-level snapshot command dispatcher.
@@ -5259,8 +5842,13 @@ Commands:
   search <query>         Search available packages
   search --font <family> The packages that carry a font family
   info <pkg>             Show package details
-  rollback [gen]         Rollback to a previous generation
-  generations            List system generations
+  rollback [gen]         Put the system back as it was in a generation (by
+                         default the one before the current one), recorded as
+                         a new generation. --dry-run shows what it would do;
+                         --json reports it as one object. Exits 0 when done,
+                         1 refused (nothing changed), 2 stopped partway,
+                         3 not permitted
+  generations [--json]   List system generations
   gc [--keep N]          Garbage-collect old generations (default: keep 5)
   verify [pkg...]        Verify installed package integrity
   files <pkg>            List files owned by a package
@@ -5479,10 +6067,18 @@ fn main() {
             }
             cmd_info(&db, &rest_filtered[0]);
         }
-        "generations" | "gen" => cmd_generations(&db),
+        "generations" | "gen" => {
+            let json = rest.iter().any(|a| a == "--json");
+            cmd_generations(&db, json);
+        }
         "rollback" => {
-            let target = words().first().and_then(|s| s.parse().ok());
-            cmd_rollback(&db, target);
+            let json = rest.iter().any(|a| a == "--json");
+            let targets: Vec<String> = words().into_iter().filter(|w| w != "--json").collect();
+            if targets.len() > 1 {
+                eprintln!("pkg: rollback takes one generation at most");
+                process::exit(1);
+            }
+            cmd_rollback(&db, targets.first().map(String::as_str), dry_run, json);
         }
         "gc" => {
             let rest_filtered = words();
@@ -6187,5 +6783,138 @@ mod tests {
         assert!(!carries_font(&m, "Fira"));
         assert!(!carries_font(&m, "Fira Sans"));
         assert!(!carries_font(&manifest("name: tools\n"), "Fira Code"));
+    }
+
+    // ---- rollback: what going back changes ----
+
+    fn installed(version: &str, manifest: &str, files: &[(&str, &str)]) -> InstalledPackage {
+        InstalledPackage {
+            version: Version::parse(version).unwrap(),
+            manifest_hash: manifest.to_string(),
+            file_hashes: files
+                .iter()
+                .map(|(p, h)| (p.to_string(), h.to_string()))
+                .collect(),
+            installed_at: 0,
+            explicit: true,
+        }
+    }
+
+    fn generation(id: u64, packages: &[(&str, InstalledPackage)]) -> Generation {
+        let mut g = Generation::new(id, "test", 0);
+        for (name, pkg) in packages {
+            g.packages.insert(name.to_string(), pkg.clone());
+        }
+        g
+    }
+
+    #[test]
+    fn a_rollback_removes_restores_and_changes_by_name() {
+        let shared = installed("1.0.0", "m-shared", &[("/usr/lib/libx.so", "h1")]);
+        let now = generation(
+            3,
+            &[
+                (
+                    "a",
+                    installed(
+                        "2.0.0",
+                        "m-a2",
+                        &[("/usr/bin/a", "a2"), ("/usr/share/a/new", "n")],
+                    ),
+                ),
+                (
+                    "only-now",
+                    installed(
+                        "1.0.0",
+                        "m-n",
+                        &[("/usr/bin/n", "n1"), ("/usr/lib/libx.so", "h1")],
+                    ),
+                ),
+                ("same", shared.clone()),
+            ],
+        );
+        let then = generation(
+            1,
+            &[
+                (
+                    "a",
+                    installed(
+                        "1.0.0",
+                        "m-a1",
+                        &[("/usr/bin/a", "a1"), ("/usr/share/a/old", "o")],
+                    ),
+                ),
+                (
+                    "only-then",
+                    installed("3.0.0", "m-t", &[("/usr/bin/t", "t1")]),
+                ),
+                ("same", shared),
+            ],
+        );
+        let plan = plan_rollback(&now, &then);
+        assert_eq!(
+            plan,
+            RollbackPlan {
+                remove: vec!["only-now".into()],
+                restore: vec!["only-then".into()],
+                change: vec!["a".into()],
+            }
+        );
+        // What only the current copies have goes; a path the target
+        // installs too stays, whoever installs it now.
+        assert_eq!(
+            paths_to_remove(&now, &then, &plan),
+            ["/usr/bin/n", "/usr/share/a/new"]
+        );
+        // The same version with other contents is a change too.
+        let rebuilt = generation(
+            1,
+            &[(
+                "same",
+                installed("1.0.0", "m-shared", &[("/usr/lib/libx.so", "h2")]),
+            )],
+        );
+        let back = generation(
+            2,
+            &[(
+                "same",
+                installed("1.0.0", "m-shared", &[("/usr/lib/libx.so", "h1")]),
+            )],
+        );
+        assert_eq!(plan_rollback(&back, &rebuilt).change, ["same"]);
+        assert_eq!(plan_rollback(&back, &back), RollbackPlan::default());
+    }
+
+    #[test]
+    fn a_generation_record_that_does_not_read_is_refused_not_zeroed() {
+        let good =
+            generation(7, &[("a", installed("1.0.0", "m", &[("/usr/bin/a", "h")]))]).serialize();
+        assert_eq!(Generation::parse(&good).map(|g| g.id), Some(7));
+        for (from, to) in [
+            ("generation: 7", "generation: seven"),
+            ("parent: 0", "parent: -1"),
+            ("  version: 1.0.0", "  version: one"),
+            ("  file: /usr/bin/a h", "  file: /usr/bin/a"),
+        ] {
+            assert!(good.contains(from), "{from}");
+            let bad = good.replace(from, to);
+            assert!(Generation::parse(&bad).is_none(), "{to:?} was read");
+        }
+    }
+
+    #[test]
+    fn a_file_written_atomically_is_whole_and_leaves_no_temporary() {
+        let scratch = ScratchDir::new("pkg-atomic");
+        let path = scratch.path("current");
+        write_atomically(&path, b"1").unwrap();
+        write_atomically(&path, b"22").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"22");
+        let left: Vec<_> = fs::read_dir(scratch.path(""))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(write_atomically(&scratch.path("no/such/dir/file"), b"x").is_err());
     }
 }

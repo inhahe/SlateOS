@@ -23,6 +23,9 @@ sha2 = { path = "../../sha2" }
 # its font files the same way, so a family Settings looks up by name is found
 # in the package that installs it.
 osfont = { path = "../../gui/font" }
+# `generations --json` and `rollback --json`: written by the JSON crate the
+# desktop programs that read them parse with.
+jsonvalue = { path = "../../apps/jsonvalue" }
 # `chroot`, for a hook run inside the system `--root` names.
 libcall = { path = "../../libcall" }
 

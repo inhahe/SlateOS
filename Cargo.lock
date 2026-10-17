@@ -3231,6 +3231,7 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "httpclient",
+ "jsonvalue",
  "libcall",
  "osfont",
  "quoting",

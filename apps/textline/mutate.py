@@ -289,6 +289,18 @@ SEARCH_MUTATIONS = [
         [S_TYPING, S_WINDOWS, S_RELEASE, S_CAPACITY],
     ),
     (
+        "a copy does not say it took the selection",
+        "            copied: edit.copied.is_some(),\n",
+        "            copied: false,\n",
+        ["a_copy_or_a_cut_says_it_took_the_selection"],
+    ),
+    (
+        "a key that copies nothing says it copied",
+        "            copied: edit.copied.is_some(),\n",
+        "            copied: edit.handled,\n",
+        ["a_copy_or_a_cut_says_it_took_the_selection", S_TYPING, S_CAPACITY],
+    ),
+    (
         "a key the box does not answer is taken from the window",
         "            handled: edit.handled,\n",
         "            handled: true,\n",

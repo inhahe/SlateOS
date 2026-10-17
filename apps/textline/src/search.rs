@@ -39,6 +39,9 @@ pub struct SearchKey {
     pub handled: bool,
     /// Whether the search changed.
     pub changed: bool,
+    /// Whether the key put the selection on the clipboard (Ctrl+C, Ctrl+X):
+    /// something done that neither the search nor its caret shows.
+    pub copied: bool,
 }
 
 /// Where and how a [`SearchBox`] is drawn.
@@ -144,6 +147,7 @@ impl SearchBox {
         SearchKey {
             handled: edit.handled,
             changed: self.input.text() != before,
+            copied: edit.copied.is_some(),
         }
     }
 
@@ -301,14 +305,16 @@ mod tests {
             search.key(&press(Key::Home, "")),
             SearchKey {
                 handled: true,
-                changed: false
+                changed: false,
+                copied: false,
             }
         );
         assert_eq!(
             search.key(&press(Key::Delete, "")),
             SearchKey {
                 handled: true,
-                changed: true
+                changed: true,
+                copied: false,
             }
         );
         assert_eq!(search.text(), "ibre");
@@ -318,6 +324,34 @@ mod tests {
             "xibre",
             "typing went to the end, not the caret"
         );
+    }
+
+    #[test]
+    fn a_copy_or_a_cut_says_it_took_the_selection() {
+        let mut search = SearchBox::new(64, 13.0);
+        typed(&mut search, "tax");
+        assert!(
+            !search.key(&ctrl(Key::C, "c")).copied,
+            "a copy with nothing selected took something"
+        );
+        search.select_all();
+        assert_eq!(
+            search.key(&ctrl(Key::C, "c")),
+            SearchKey {
+                handled: true,
+                changed: false,
+                copied: true,
+            }
+        );
+        assert_eq!(
+            search.key(&ctrl(Key::X, "x")),
+            SearchKey {
+                handled: true,
+                changed: true,
+                copied: true,
+            }
+        );
+        assert_eq!(guitk::clipboard::text(), "tax");
     }
 
     #[test]
@@ -368,7 +402,8 @@ mod tests {
             search.key(&press(Key::Unknown(0), "d")),
             SearchKey {
                 handled: true,
-                changed: false
+                changed: false,
+                copied: false,
             }
         );
         assert_eq!(search.text(), "abc");

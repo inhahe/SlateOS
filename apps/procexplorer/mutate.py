@@ -424,8 +424,8 @@ MUTATIONS += [
     ),
     (
         "the filter types a chord's letter",
-        '            _ => {\n                self.sync_filter_editor();\n                let before = self.filter_editor.text().to_owned();\n',
-        '            _ => {\n                if !key.text.is_empty() && !textline::types_into_field(key) {\n                    self.filter_text.push_str(&key.text);\n                    self.rebuild_visible_list();\n                    return EventResult::Consumed;\n                }\n                self.sync_filter_editor();\n                let before = self.filter_editor.text().to_owned();\n',
+        '            _ => {\n                if self.filter.key(key).changed {\n',
+        '            _ => {\n                if !key.text.is_empty() && !textline::types_into_field(key) {\n                    let typed = format!("{}{}", self.filter.text(), key.text);\n                    self.filter.set_text(&typed);\n                    self.rebuild_visible_list();\n                    return EventResult::Consumed;\n                }\n                if self.filter.key(key).changed {\n',
         [EDITS],
     ),
     (
@@ -454,7 +454,7 @@ MUTATIONS += [
     ),
     (
         "a filter that matches nothing is not red",
-        "            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),\n",
+        "            invalid: !self.filter.is_empty() && self.visible_indices.is_empty(),\n",
         "            invalid: false,\n",
         [FILTER],
     ),
@@ -465,15 +465,15 @@ MUTATIONS += [
         [FILTER],
     ),
     (
-        "a press leaves the caret at the end",
-        "        self.filter_editor.set_selection_anchor(None);\n        self.filter_editor.set_cursor(cursor);\n",
-        "        self.filter_editor.set_selection_anchor(None);\n",
+        "a press puts the caret at the start",
+        "            x - rect.x - FILTER_TEXT_INSET,\n",
+        "            0.0,\n",
         [FILTER_PRESS],
     ),
     (
         "the filter is drawn with no caret",
-        "                focused: state.focused,\n                x: tx,\n",
-        "                focused: false,\n                x: tx,\n",
+        "                focused: state.focused,\n                placeholder: \"Filter (Ctrl+F)\",\n",
+        "                focused: false,\n                placeholder: \"Filter (Ctrl+F)\",\n",
         [CARET],
     ),
 ]
@@ -507,13 +507,11 @@ MUTATIONS += [
     ),
     (
         "the right-click leaves the filter without the keyboard",
-        "            if self.filter_focused {\n"
-        "                self.sync_filter_editor();\n"
-        "            } else {\n"
+        "            if !self.filter_focused {\n"
         "                self.focus_filter();\n"
         "            }\n"
-        "            (MenuField::Filter, self.filter_editor.edit_menu())\n",
-        "            (MenuField::Filter, self.filter_editor.edit_menu())\n",
+        "            (MenuField::Filter, self.filter.edit_menu())\n",
+        "            (MenuField::Filter, self.filter.edit_menu())\n",
         [FM_FILTER],
     ),
     (
@@ -524,18 +522,16 @@ MUTATIONS += [
     ),
     (
         'a row chosen for the filter does nothing',
-        '                if self.filter_editor.edit_command(id) == KeyEdit::Changed {\n',
+        '                if self.filter.menu_row(id) {\n',
         '                if false {\n',
         [FM_FILTER],
     ),
     (
         "an edit from the menu leaves the list unfiltered",
-        "                    self.filter_text = self.filter_editor.text().to_owned();\n"
         "                    self.rebuild_visible_list();\n"
         "                }\n"
         "            }\n"
         "            MenuField::RunBox => {\n",
-        "                    self.filter_text = self.filter_editor.text().to_owned();\n"
         "                }\n"
         "            }\n"
         "            MenuField::RunBox => {\n",
@@ -555,23 +551,8 @@ MUTATIONS += [
     ),
     (
         'the filter box holds no capacity',
-        '            filter_editor: textline::field_holding("", FILTER_CAPACITY),\n',
-        '            filter_editor: textline::field_holding("", usize::MAX),\n',
-        [FM_FILTER],
-    ),
-    (
-        "the filter's keys keep a clipboard the menu does not share",
-        "let _edit = textline::apply_key_on_clipboard(\n"
-        "                    &mut self.filter_editor,\n"
-        "                    key,\n"
-        "                    FILTER_TEXT_SIZE,\n"
-        "                );\n",
-        "let _edit = textline::apply_key(\n"
-        "                    &mut self.filter_editor,\n"
-        "                    key,\n"
-        '                    "",\n'
-        "                    FILTER_TEXT_SIZE,\n"
-        "                );\n",
+        '            filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),\n',
+        '            filter: SearchBox::new(usize::MAX, FILTER_TEXT_SIZE),\n',
         [FM_FILTER],
     ),
     (

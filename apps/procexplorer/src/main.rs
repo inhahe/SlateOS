@@ -23,9 +23,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::{KeyEdit, TextInput};
+use guitk::textinput::KeyEdit;
 use guitk::wheel;
 use oswindow::app::{self, App, PickRefused, PickRequest, Response};
 use oswindow::{PickOutcome, PickedWindow};
@@ -36,6 +35,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 use std::collections::HashMap;
 
@@ -884,8 +884,8 @@ pub struct ProcessExplorerState {
     views_pid: Option<u32>,
 
     // -- Search / filter -----------------------------------------------------
-    /// Filter text (search box content).
-    pub filter_text: String,
+    /// The filter box, which is the filter the process list is narrowed by.
+    pub filter: SearchBox,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// The New Task box while it is up.
@@ -902,11 +902,6 @@ pub struct ProcessExplorerState {
     spawner: Spawner,
     /// Whether the search box is focused.
     pub filter_focused: bool,
-    /// The filter box's caret and selection, laid over [`Self::filter_text`],
-    /// which stays the truth. Whenever the text has changed under it (Escape
-    /// in the list clears the filter), the next key or press reloads it with
-    /// the caret at the end.
-    filter_editor: TextInput,
     /// Whether the pointer is over the filter box: its edge is warmed.
     filter_hovered: bool,
     /// How wide the mark is round the filter box while it has the keyboard:
@@ -999,13 +994,12 @@ impl ProcessExplorerState {
             env_view: None,
             mem_view: None,
             views_pid: None,
-            filter_text: String::new(),
+            filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),
             show_help: false,
             run_box: None,
             field_menu: fieldmenu::FieldMenu::new(),
             spawner: spawn_program,
             filter_focused: false,
-            filter_editor: textline::field_holding("", FILTER_CAPACITY),
             filter_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             window_picker: features::WindowPicker::new(),
@@ -1168,7 +1162,7 @@ impl ProcessExplorerState {
     pub fn rebuild_visible_list(&mut self) {
         self.visible_indices.clear();
 
-        let filter_lower = self.filter_text.to_lowercase();
+        let filter_lower = self.filter.text().to_lowercase();
 
         for (i, proc) in self.processes.iter().enumerate() {
             if !filter_lower.is_empty()
@@ -1641,8 +1635,8 @@ impl ProcessExplorerState {
                     self.context_menu = None;
                 } else if self.filter_focused {
                     self.filter_focused = false;
-                } else if !self.filter_text.is_empty() {
-                    self.filter_text.clear();
+                } else if !self.filter.is_empty() {
+                    self.filter.clear();
                     self.rebuild_visible_list();
                 }
                 EventResult::Consumed
@@ -1672,15 +1666,7 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
             _ => {
-                self.sync_filter_editor();
-                let before = self.filter_editor.text().to_owned();
-                let _edit = textline::apply_key_on_clipboard(
-                    &mut self.filter_editor,
-                    key,
-                    FILTER_TEXT_SIZE,
-                );
-                if self.filter_editor.text() != before {
-                    self.filter_text = self.filter_editor.text().to_owned();
+                if self.filter.key(key).changed {
                     self.rebuild_visible_list();
                 }
                 // The box has the keyboard: a key it does not answer is no
@@ -1693,28 +1679,7 @@ impl ProcessExplorerState {
     /// Give the filter box the keyboard, its caret at the end of the text.
     fn focus_filter(&mut self) {
         self.filter_focused = true;
-        self.filter_editor.set_text(&self.filter_text);
-    }
-
-    /// Reload the filter's editor if the text has changed under it.
-    fn sync_filter_editor(&mut self) {
-        if self.filter_editor.text() != self.filter_text {
-            self.filter_editor.set_text(&self.filter_text);
-        }
-    }
-
-    /// Where the filter's caret is drawn: the editor's while the box has
-    /// the keyboard (the end, if the text changed under the editor), the
-    /// start of the text otherwise. One answer for the drawing and for a
-    /// press, so a press lands on the character drawn under it.
-    fn filter_cursor(&self) -> TextCursor {
-        if !self.filter_focused {
-            TextCursor::default()
-        } else if self.filter_editor.text() == self.filter_text {
-            self.filter_editor.cursor()
-        } else {
-            TextCursor::from(self.filter_text.len())
-        }
+        self.filter.caret_to_end();
     }
 
     /// How the filter box is drawn: lit under the pointer, with the
@@ -1727,7 +1692,7 @@ impl ProcessExplorerState {
             hovered: self.filter_hovered && !covered,
             focused: self.filter_focused && !covered,
             disabled: false,
-            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),
+            invalid: !self.filter.is_empty() && self.visible_indices.is_empty(),
         }
     }
 
@@ -1735,22 +1700,15 @@ impl ProcessExplorerState {
     /// under the pointer at `x`.
     fn press_filter(&mut self, x: f32) {
         let rect = filter_rect(self.window_width as f32);
-        let drawn = self.filter_cursor();
-        if self.filter_focused {
-            self.sync_filter_editor();
-        } else {
+        let had_the_keyboard = self.filter_focused;
+        if !had_the_keyboard {
             self.focus_filter();
         }
-        let cursor = textedit::cursor_at_click(
-            self.filter_editor.text(),
-            drawn,
-            filter_text_width(rect),
-            FILTER_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.filter.press(
             x - rect.x - FILTER_TEXT_INSET,
+            filter_text_width(rect),
+            had_the_keyboard,
         );
-        self.filter_editor.set_selection_anchor(None);
-        self.filter_editor.set_cursor(cursor);
     }
 
     /// Handle a mouse event.
@@ -2232,12 +2190,10 @@ impl ProcessExplorerState {
             }
             (MenuField::RunBox, run_box.input.edit_menu())
         } else if filter_rect(viewport.0).contains(x, y) {
-            if self.filter_focused {
-                self.sync_filter_editor();
-            } else {
+            if !self.filter_focused {
                 self.focus_filter();
             }
-            (MenuField::Filter, self.filter_editor.edit_menu())
+            (MenuField::Filter, self.filter.edit_menu())
         } else {
             return EventResult::Ignored;
         };
@@ -2252,9 +2208,7 @@ impl ProcessExplorerState {
     fn do_field_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) {
         match field {
             MenuField::Filter => {
-                self.sync_filter_editor();
-                if self.filter_editor.edit_command(id) == KeyEdit::Changed {
-                    self.filter_text = self.filter_editor.text().to_owned();
+                if self.filter.menu_row(id) {
                     self.rebuild_visible_list();
                 }
             }
@@ -2645,38 +2599,17 @@ impl ProcessExplorerState {
             filter.y + (filter.h - line) / 2.0,
             filter_text_width(filter),
         );
-        if self.filter_text.is_empty() && !state.focused {
-            tree.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: String::from("Filter (Ctrl+F)"),
-                color: self.palette.subtext0,
-                font_size: FILTER_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-            return;
-        }
-        let editing = self.filter_focused && self.filter_editor.text() == self.filter_text;
-        textedit::draw(
+        self.filter.draw(
             tree,
-            &textedit::SingleLine {
-                text: &self.filter_text,
-                cursor: self.filter_cursor(),
-                selection_anchor: if editing {
-                    self.filter_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: state.focused,
+            &SearchLook {
                 x: tx,
                 y: ty,
                 width: tw,
                 line_height: line,
-                font_size: FILTER_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused: state.focused,
+                placeholder: "Filter (Ctrl+F)",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -4567,7 +4500,7 @@ mod tests {
         );
         choose(&mut app, EditCommand::Paste);
         assert!(!app.field_menu.is_up(), "the menu stayed up");
-        assert_eq!(app.filter_text, "proc1");
+        assert_eq!(app.filter.text(), "proc1");
         assert_eq!(app.visible_indices.len(), 1, "the list was not filtered");
 
         event_press(&mut app, MouseButton::Right, fx, fy);
@@ -4590,7 +4523,7 @@ mod tests {
         // What the menu cut, the keys paste -- in the box, and in the New Task
         // box.
         app.handle_event(&Event::Key(pressed(Key::V, Modifiers::ctrl())));
-        assert_eq!(app.filter_text, "proc1", "Ctrl+V read another clipboard");
+        assert_eq!(app.filter.text(), "proc1", "Ctrl+V read another clipboard");
         app.handle_event(&Event::Key(pressed(Key::N, Modifiers::ctrl())));
         app.handle_event(&Event::Key(pressed(Key::V, Modifiers::ctrl())));
         assert_eq!(run_line(&app).as_deref(), Some("proc1"));
@@ -4600,7 +4533,7 @@ mod tests {
         guitk::clipboard::set_text(&"y".repeat(FILTER_CAPACITY + 5));
         event_press(&mut app, MouseButton::Right, fx, fy);
         choose(&mut app, EditCommand::Paste);
-        assert_eq!(app.filter_text.chars().count(), FILTER_CAPACITY);
+        assert_eq!(app.filter.text().chars().count(), FILTER_CAPACITY);
     }
 
     /// **The New Task box's menu pastes no more than the box holds**, as a
@@ -6108,12 +6041,12 @@ mod tests {
     fn the_filter_caret_follows_the_glyphs() {
         let mut app = ProcessExplorerState::new();
         app.filter_focused = true;
-        app.filter_text = String::from("\u{fc}ber");
+        app.filter.set_text("\u{fc}ber");
         let (origin, caret) = caret_after(&app, "\u{fc}ber").expect("no caret after the filter");
         // A byte count would put the caret a whole character past the glyphs,
         // because the u-umlaut is two bytes.
         let expected =
-            origin + text::measure(&app.filter_text, FILTER_TEXT_SIZE, FontWeightHint::Regular);
+            origin + text::measure(app.filter.text(), FILTER_TEXT_SIZE, FontWeightHint::Regular);
         assert!(
             (caret - expected).abs() < 0.5,
             "caret at {caret}, glyphs end at {expected}"
@@ -6275,7 +6208,7 @@ mod tests {
         app.handle_key(&chord_key(Key::F, ctrl));
         assert!(app.filter_focused, "Ctrl+F");
         type_text(&mut app, "proc");
-        assert_eq!(app.filter_text, "proc");
+        assert_eq!(app.filter.text(), "proc");
 
         for (key, text, modifiers) in [
             (Key::S, "s", ctrl),
@@ -6294,7 +6227,7 @@ mod tests {
                 modifiers,
                 text: text.to_string(),
             });
-            assert_eq!(app.filter_text, "proc", "{modifiers:?} {key:?} typed");
+            assert_eq!(app.filter.text(), "proc", "{modifiers:?} {key:?} typed");
         }
         app.handle_key(&KeyEvent {
             key: Key::N,
@@ -6303,19 +6236,21 @@ mod tests {
             text: String::from("\u{144}"),
         });
         assert!(app.run_box.is_none(), "AltGr+N opened New Task");
-        assert_eq!(app.filter_text, "proc\u{144}", "AltGr did not type");
+        assert_eq!(app.filter.text(), "proc\u{144}", "AltGr did not type");
 
         app.handle_key(&chord_key(Key::Backspace, Modifiers::NONE));
         app.handle_key(&chord_key(Key::Home, Modifiers::NONE));
         app.handle_key(&chord_key(Key::Delete, Modifiers::NONE));
         assert_eq!(
-            app.filter_text, "roc",
+            app.filter.text(),
+            "roc",
             "Home and Delete did not edit the start"
         );
         app.handle_key(&chord_key(Key::A, ctrl));
         type_text(&mut app, "proc1");
         assert_eq!(
-            app.filter_text, "proc1",
+            app.filter.text(),
+            "proc1",
             "typing did not replace the selection"
         );
         assert_eq!(app.visible_indices.len(), 1, "the filter is not applied");
@@ -6330,7 +6265,7 @@ mod tests {
     #[test]
     fn a_press_in_the_filter_puts_the_caret_under_the_pointer() {
         let mut app = app_with_processes(5);
-        app.filter_text = String::from("roc");
+        app.filter.set_text("roc");
         app.rebuild_visible_list();
         let rect = filter_rect(app.window_width as f32);
         press_at(
@@ -6340,7 +6275,8 @@ mod tests {
         assert!(app.filter_focused);
         type_text(&mut app, "p");
         assert_eq!(
-            app.filter_text, "proc",
+            app.filter.text(),
+            "proc",
             "the caret did not go where the press was"
         );
     }
@@ -7001,7 +6937,7 @@ mod tests {
         );
 
         // Hidden by the filter.
-        app.filter_text = "proc0".to_string();
+        app.filter.set_text("proc0");
         app.rebuild_visible_list();
         app.toggle_window_pick();
         app.window_picked(Ok(picked("Hidden", Some(4))));

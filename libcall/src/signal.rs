@@ -49,6 +49,10 @@ pub const SIGTTIN: i32 = 21;
 pub const SIGTTOU: i32 = 22;
 /// The window of the terminal the process is on changed size.
 pub const SIGWINCH: i32 = 28;
+/// The process used more CPU time than its limit allows.
+pub const SIGXCPU: i32 = 24;
+/// The process wrote a file past its size limit.
+pub const SIGXFSZ: i32 = 25;
 
 /// `sigaction`'s flag for "resume a call this signal interrupted, rather than
 /// failing it with `EINTR`".
@@ -749,6 +753,8 @@ mod tests {
         assert_eq!(SIGQUIT, posix::signal::SIGQUIT);
         assert_eq!(SIGALRM, posix::signal::SIGALRM);
         assert_eq!(SIGCHLD, posix::signal::SIGCHLD);
+        assert_eq!(SIGXCPU, posix::signal::SIGXCPU);
+        assert_eq!(SIGXFSZ, posix::signal::SIGXFSZ);
         assert_eq!(SIGTSTP, posix::signal::SIGTSTP);
         assert_eq!(SIGTTIN, posix::signal::SIGTTIN);
         assert_eq!(SIGTTOU, posix::signal::SIGTTOU);

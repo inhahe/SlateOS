@@ -58,6 +58,12 @@
 //!    `--help` and `--version`, and otherwise `gzip -d` (`gzip -cd` for
 //!    `zcat`) with the same arguments. The scripts' other twins (`zgrep`,
 //!    `zdiff`, `zless` and the rest) are shell scripts, not ported.
+//! 4. **With `-k`, a finished output is forgotten** once it is closed, as it
+//!    is without `-k`. Upstream forgets it only in the branch that removes
+//!    the input, which `-k` skips, so an interrupt or an abort while a later
+//!    operand is opened unlinks the output just finished and closes whatever
+//!    descriptor has reused its number -- deleting what the user asked to
+//!    keep. No run that is not interrupted or aborted there differs.
 
 #![allow(
     // The C's integer arithmetic, transcribed: every place it wraps is

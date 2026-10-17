@@ -716,6 +716,14 @@ xfail_case "$why_name" gzip "$(printf 'tab\tname')"
 SETUP="cp -p text \"\$(printf 'nl\\nname')\""
 run_case gzip -c "$(printf 'nl\nname')"
 
+# --- -k, and an abort after an output is finished ----------------------------------
+# Upstream unlinks t, which it finished and was asked to keep, when the empty
+# operand after it aborts the run.
+SETUP=': > empty.gz'
+xfail_case 'with -k a finished output is kept when a later operand aborts (deliberate difference 4)' \
+  gzip -dk t.gz empty.gz
+SETUP=': > empty.gz'; run_case gzip -d t.gz empty.gz
+
 # --- random and damaged streams ---------------------------------------------------
 for f in "$fixtures"/r*-gz.gz "$fixtures"/r*-z.Z "$fixtures"/r*-pk.z "$fixtures"/r*-lzh.lzh "$fixtures"/m*.gz; do
   b=${f##*/}

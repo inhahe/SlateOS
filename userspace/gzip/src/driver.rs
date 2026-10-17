@@ -16,7 +16,8 @@ use libcall::file::{
     AT_FDCWD, Directory, O_CREAT, O_DIRECTORY, O_EXCL, O_NOCTTY, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
     O_WRONLY,
 };
-use libcall::signal::SigSet;
+use libcall::signal::{SIGHUP, SIGINT, SIGPIPE, SIGTERM, SIGXCPU, SIGXFSZ, SigSet};
+use libcall::{EAGAIN, EBADF, EEXIST, EINVAL, ENAMETOOLONG, ENOENT};
 use std::ffi::{CString, OsString};
 use std::os::unix::ffi::OsStringExt;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
@@ -30,18 +31,7 @@ const MAX_SUFFIX: usize = 30;
 const MIN_PART: usize = 3;
 
 /// The signals gzip catches; `SIGINT` first, as `foreground` depends on it.
-const SIGINT: i32 = 2;
-const HANDLED: [i32; 6] = [SIGINT, 1, 13, 15, 24, 25];
-/// `SIGPIPE`.
-const SIGPIPE: i32 = 13;
-
-/// `ENAMETOOLONG`, `EEXIST`, `ENOENT`, `EINVAL`, `EBADF`, `EAGAIN`.
-const ENAMETOOLONG: i32 = 36;
-const EEXIST: i32 = 17;
-const ENOENT: i32 = 2;
-const EINVAL: i32 = 22;
-const EBADF: i32 = 9;
-const EAGAIN: i32 = 11;
+const HANDLED: [i32; 6] = [SIGINT, SIGHUP, SIGPIPE, SIGTERM, SIGXCPU, SIGXFSZ];
 
 /// The output file the signal handler removes, and the signal that makes
 /// it exit 2 rather than die: upstream's `remove_ofname_fd`,
@@ -311,7 +301,10 @@ fn long_code(name: &str) -> Code {
         "best" => b'9',
         "lzw" => b'Z',
         "bits" => b'b',
-        _ => return Code::Rsyncable,
+        "rsyncable" => return Code::Rsyncable,
+        // Only `LONGOPTS`' names arrive here. One added there and not here
+        // is refused (`try_help`), not taken for another option.
+        _ => 0,
     })
 }
 
@@ -666,6 +659,8 @@ impl Run {
 
     /// `sigprocmask (SIG_BLOCK, &caught_signals, &oldset)`.
     fn block(&self) -> Option<SigSet> {
+        // Upstream does not check sigprocmask either; a block that failed
+        // leaves no old mask to restore, which `unblock` takes as nothing.
         libcall::signal::block(&self.caught).ok()
     }
 
@@ -808,6 +803,7 @@ impl Run {
         match fstat(fd) {
             Ok(st) => Ok((fd, st)),
             Err(e) => {
+                // This input is given up on: its close has nothing to add.
                 let _ = libcall::fd::close(fd);
                 Err(e)
             }
@@ -1208,6 +1204,7 @@ impl Run {
                 }
                 EEXIST => {
                     if self.check_ofname() != OK {
+                        // Giving up on this input: upstream's close of it reports nothing.
                         let _ = libcall::fd::close(self.gz.ifd);
                         return Ok(ERROR);
                     }
@@ -1215,6 +1212,7 @@ impl Run {
                 _ => {
                     let name = self.gz.ofname.clone();
                     self.progerror(&name, e);
+                    // Giving up on this input: upstream's close of it reports nothing.
                     let _ = libcall::fd::close(self.gz.ifd);
                     return Ok(ERROR);
                 }
@@ -1262,6 +1260,7 @@ impl Run {
 
         // Group, then mode, then owner: the mode is right on systems that
         // let a user give a file away, without a window for set-id bits.
+        // Upstream ignores both fchowns: an owner that cannot be kept is no error.
         let _ = with_file(ofd, |f| std::os::unix::fs::fchown(f, None, Some(st.gid)));
         let chmod = with_file(ofd, |f| {
             use std::os::unix::fs::PermissionsExt;
@@ -1270,6 +1269,7 @@ impl Run {
         if let Err(e) = chmod {
             self.warn_perror(e);
         }
+        // As above: upstream ignores it.
         let _ = with_file(ofd, |f| std::os::unix::fs::fchown(f, Some(st.uid), None));
     }
 
@@ -1289,6 +1289,7 @@ impl Run {
             Ok(s) => s,
             Err(e) => {
                 self.progerror(dir, e);
+                // Done with this input: upstream ignores this close.
                 let _ = libcall::fd::close(fd);
                 return Ok(());
             }
@@ -1359,6 +1360,7 @@ impl Run {
             if self.recursive {
                 return self.treat_dir(ifd, iname);
             }
+            // Done with this input: upstream ignores this close.
             let _ = libcall::fd::close(ifd);
             let text = format!(
                 "{}: {} is a directory -- ignored\n",
@@ -1390,6 +1392,7 @@ impl Run {
             if let Some(why) = refuse {
                 let text = format!("{}: {}{why}\n", self.prog(), shown(&self.gz.ifname));
                 self.gz.warn(&text);
+                // Done with this input: upstream ignores this close.
                 let _ = libcall::fd::close(ifd);
                 return Ok(());
             }
@@ -1400,6 +1403,7 @@ impl Run {
         if self.gz.to_stdout && !self.gz.test {
             self.gz.ofname = b"stdout".to_vec();
         } else if self.make_ofname() != OK {
+            // Done with this input: upstream ignores this close.
             let _ = libcall::fd::close(ifd);
             return Ok(());
         }
@@ -1411,6 +1415,7 @@ impl Run {
             let m = self.gz.get_method(ifd)?;
             self.gz.method = m;
             if m < 0 {
+                // Done with this input: upstream ignores this close.
                 let _ = libcall::fd::close(ifd);
                 return Ok(());
             }
@@ -1489,6 +1494,13 @@ impl Run {
             }
             if let Some(e) = failed {
                 return self.gz.write_error(e);
+            }
+
+            // Whole and closed: nothing for an interrupt or an abort to
+            // remove (deliberate difference 4; without -k the branch below
+            // forgets it, with the input's removal).
+            if self.keep {
+                REMOVE_FD.store(-1, Ordering::SeqCst);
             }
 
             if !self.keep {
@@ -1759,6 +1771,7 @@ fn script_text(script: &Script, dollar0: &[u8], version: bool) -> i32 {
     let line = script.help_line + u32::from(version);
     let mut msg = dollar0.to_vec();
     msg.extend_from_slice(format!(": {line}: printf: printf: I/O error\n").as_bytes());
+    // The message about a failed write: if stderr fails too, it has nowhere to go.
     let _ = libcall::fd::write_all(2, &msg, false);
     ERROR
 }

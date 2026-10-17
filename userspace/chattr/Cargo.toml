@@ -2,8 +2,22 @@
 name = "chattr"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS file attribute tools"
+description = "e2fsprogs 1.47.0's chattr and lsattr, ported: change and list a file's attributes"
+
 [dependencies]
-# getopt's usage diagnostics, spelled once; the wording is getopt's, not
-# ours. Pure formatting over `quoting`, no I/O, so §768 exempt.
-usageerror = { path = "../usageerror" }
+# The inode-flag, version and project ioctls, directories and descriptors,
+# through the C library.
+libcall = { path = "../../libcall" }
+# The C library's FILE buffering for standard output.
+cstdio = { path = "../cstdio" }
+# glibc's getopt, for lsattr's options and its complaints.
+getoptlong = { path = "../getoptlong" }
+# strtol at base 0, for -p and -v.
+cstrtol = { path = "../cstrtol" }
+# strerror's words, as glibc's: com_err prints them.
+errmsg = { path = "../errmsg" }
+# SIGPIPE and the standard descriptors as the program was started with them.
+stdfdguard = { path = "../stdfdguard" }
+
+[lints]
+workspace = true

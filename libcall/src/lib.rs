@@ -71,6 +71,7 @@ pub mod epoll;
 pub mod fd;
 pub mod file;
 pub mod glob;
+pub mod inode;
 pub mod inotify;
 pub mod locale;
 pub mod lock;
@@ -131,6 +132,12 @@ pub const EROFS: i32 = 30;
 pub const EEXIST: i32 = 17;
 /// Bad file descriptor.
 pub const EBADF: i32 = 9;
+/// No such device or address -- an open of a FIFO or a device with nothing
+/// behind it.
+pub const ENXIO: i32 = 6;
+/// Operation not supported -- what e2fsprogs reports for a file that has no
+/// attributes to show.
+pub const EOPNOTSUPP: i32 = 95;
 
 /// No such process.
 ///
@@ -934,6 +941,8 @@ mod tests {
         assert_eq!(EROFS, posix::errno::EROFS);
         assert_eq!(EEXIST, posix::errno::EEXIST);
         assert_eq!(EBADF, posix::errno::EBADF);
+        assert_eq!(ENXIO, posix::errno::ENXIO);
+        assert_eq!(EOPNOTSUPP, posix::errno::EOPNOTSUPP);
         assert_eq!(ENAMETOOLONG, posix::errno::ENAMETOOLONG);
         assert_eq!(
             usize::try_from(posix::limits::HOST_NAME_MAX).ok(),

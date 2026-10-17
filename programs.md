@@ -41,7 +41,7 @@ two disagree.
 | `cal` | `cal`, transcribed from util-linux 2.39.3 rather than remembered. | yes | `coreutils` |  |
 | `cat` | Concatenate files and print them on the standard output. | yes | `coreutils` |  |
 | `chage` | Password-aging utility. | yes |  |  |
-| `chattr` | Ext2/ext4 file attribute utilities. | yes |  | `lsattr` |
+| `chattr` | `chattr` and `lsattr`: change and list a file's attributes. | yes |  | `lsattr` |
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |

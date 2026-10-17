@@ -612,6 +612,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "calc-diff.sh",
         "cat-diff.sh",
         "charwidth-gen.py",
+        "chattr-diff.sh",
         "check-argv-ignored.py",
         "check-cp-diff-sees-nul.py",
         "check-diff-preamble-order.py",

@@ -537,7 +537,12 @@ version = "0.1.0"
 name = "chattr"
 version = "0.1.0"
 dependencies = [
- "usageerror",
+ "cstdio",
+ "cstrtol",
+ "errmsg",
+ "getoptlong",
+ "libcall",
+ "stdfdguard",
 ]
 
 [[package]]

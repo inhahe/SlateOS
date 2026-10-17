@@ -376,23 +376,23 @@ MUTATIONS += [
     ),
     (
         "a press leaves the caret where it was",
-        "        self.text_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "        self.text_input_buffer.press(\n"
+        "            x - rect.x - TEXT_BOX_INSET,\n"
+        "            rect.w - 2.0 * TEXT_BOX_INSET,\n"
+        "            had_the_keyboard,\n"
+        "        );\n",
+        "        let _ = (x, rect, had_the_keyboard);\n",
         [WORDS_BOX],
     ),
     (
         "a press on the box does not take the keyboard back",
         "        self.text_focused = true;\n"
-        "        if self.text_editor.text() != self.text_input_buffer {\n",
-        "        if self.text_editor.text() != self.text_input_buffer {\n",
+        "        self.text_input_buffer.press(\n",
+        "        self.text_input_buffer.press(\n",
         [WORDS_BOX],
     ),
-    (
-        "a cut takes nothing to the clipboard",
-        "            self.text_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [WORDS_BOX],
-    ),
+    # The box's clipboard (the program's) and its caret and selection drawn
+    # are textline's LineBox's since 2026-10-17, which its own table covers.
     (
         "the focus mark is the toolkit's width, not the user's",
         "        self.focus_ring_width = settings.focus_ring_width();\n",

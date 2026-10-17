@@ -25,13 +25,12 @@ use guitk::field;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::undo::{Travel, UndoHistory};
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use pathtext::ShowPath;
+use textline::{LineBox, LineLook};
 
 use std::process::ExitCode;
 use std::time::Duration;
@@ -889,13 +888,9 @@ pub struct WhiteboardApp {
     pub custom_g: u8,
     pub custom_b: u8,
 
-    // Text input for text tool and sticky notes
-    pub text_input_buffer: String,
-    /// The words' box's caret and selection, laid over `text_input_buffer`,
-    /// which stays the truth.
-    text_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the words' box, for Ctrl+V.
-    text_clipboard: String,
+    /// The words' box, for the Text and Sticky Note tools: what has been
+    /// typed, and its caret.
+    pub text_input_buffer: LineBox,
     /// Whether the words' box has the keyboard: from choosing the Text or
     /// Sticky Note tool -- or a press on the box -- until Escape on an empty
     /// box gives the keyboard back to the tool letters.
@@ -1012,9 +1007,7 @@ impl WhiteboardApp {
             custom_r: 205,
             custom_g: 214,
             custom_b: 244,
-            text_input_buffer: String::new(),
-            text_editor: textline::field_holding("", TEXT_CAPACITY),
-            text_clipboard: String::new(),
+            text_input_buffer: LineBox::new(TEXT_CAPACITY, TEXT_BOX_SIZE),
             text_focused: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             active_layer_id: first_layer_id,
@@ -1657,7 +1650,7 @@ impl WhiteboardApp {
                 if !self.text_input_buffer.is_empty() {
                     self.add_shape(ShapeKind::TextLabel {
                         position: snapped,
-                        content: self.text_input_buffer.clone(),
+                        content: self.text_input_buffer.text().to_owned(),
                     });
                     self.text_input_buffer.clear();
                 }
@@ -1869,7 +1862,7 @@ impl WhiteboardApp {
                 let content = if self.text_input_buffer.is_empty() {
                     String::new()
                 } else {
-                    let c = self.text_input_buffer.clone();
+                    let c = self.text_input_buffer.text().to_owned();
                     self.text_input_buffer.clear();
                     c
                 };
@@ -2737,8 +2730,7 @@ impl WhiteboardApp {
         self.current_tool = tool;
         self.text_focused = matches!(tool, Tool::Text | Tool::StickyNote);
         if self.text_focused {
-            let text = self.text_input_buffer.clone();
-            self.text_editor.set_text(&text);
+            self.text_input_buffer.caret_to_end();
         }
     }
 
@@ -2758,62 +2750,24 @@ impl WhiteboardApp {
         ))
     }
 
-    /// Where the words' box's caret is drawn: the editor's, or the end of the
-    /// words if they changed under the editor.
-    fn text_box_cursor(&self) -> TextCursor {
-        if self.text_editor.text() == self.text_input_buffer {
-            self.text_editor.cursor()
-        } else {
-            TextCursor::from(self.text_input_buffer.len())
-        }
-    }
-
     /// `event` in the words' box, which has the keyboard: a field's keys
-    /// (`textline::apply_key`), the words written back when the key changed
-    /// them. Returns whether the key was the box's.
+    /// (`LineBox::key`, on the program's clipboard). Returns whether the
+    /// key was the box's.
     fn edit_text_box(&mut self, event: &KeyEvent) -> bool {
-        if self.text_editor.text() != self.text_input_buffer {
-            let text = self.text_input_buffer.clone();
-            self.text_editor.set_text(&text);
-        }
-        let edit = textline::apply_key(
-            &mut self.text_editor,
-            event,
-            &self.text_clipboard,
-            TEXT_BOX_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.text_clipboard = copied;
-        }
-        if self.text_editor.text() != self.text_input_buffer {
-            self.text_input_buffer = self.text_editor.text().to_owned();
-        }
-        edit.handled
+        self.text_input_buffer.key(event).handled
     }
 
     /// A press in the words' box at `x`: it takes the keyboard, the caret
-    /// under the pointer.
+    /// under the pointer, measured against the box as it was drawn before
+    /// the press.
     fn press_text_box(&mut self, rect: guitk::frame::Rect, x: f32) {
-        let drawn = if self.text_focused {
-            self.text_box_cursor()
-        } else {
-            TextCursor::default()
-        };
+        let had_the_keyboard = self.text_focused;
         self.text_focused = true;
-        if self.text_editor.text() != self.text_input_buffer {
-            let text = self.text_input_buffer.clone();
-            self.text_editor.set_text(&text);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.text_input_buffer,
-            drawn,
-            (rect.w - 2.0 * TEXT_BOX_INSET).max(0.0),
-            TEXT_BOX_SIZE,
-            FontWeightHint::Regular,
+        self.text_input_buffer.press(
             x - rect.x - TEXT_BOX_INSET,
+            rect.w - 2.0 * TEXT_BOX_INSET,
+            had_the_keyboard,
         );
-        self.text_editor.set_selection_anchor(None);
-        self.text_editor.set_cursor(cursor);
     }
 
     /// The words' strip: its label and the toolkit's field, holding the words
@@ -2863,63 +2817,23 @@ impl WhiteboardApp {
             self.focus_ring_width,
         );
         let line = text::line_height(TEXT_BOX_SIZE, FontWeightHint::Regular);
-        let (x, y, width) = (
-            rect.x + TEXT_BOX_INSET,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * TEXT_BOX_INSET).max(0.0),
-        );
         let mut tree = guitk::render::RenderTree::new();
-        if self.text_input_buffer.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: placeholder.to_owned(),
-                color: self.palette.subtext0,
-                font_size: TEXT_BOX_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(
-                    &mut tree,
-                    x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let editing = self.text_editor.text() == self.text_input_buffer;
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.text_input_buffer,
-                    cursor: if focused {
-                        self.text_box_cursor()
-                    } else {
-                        TextCursor::default()
-                    },
-                    selection_anchor: if focused && editing {
-                        self.text_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused,
-                    x,
-                    y,
-                    width,
-                    line_height: line,
-                    font_size: TEXT_BOX_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+        self.text_input_buffer.draw(
+            &mut tree,
+            &LineLook {
+                x: rect.x + TEXT_BOX_INSET,
+                y: rect.y + (rect.h - line) / 2.0,
+                width: rect.w - 2.0 * TEXT_BOX_INSET,
+                line_height: line,
+                focused,
+                placeholder,
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         cmds.extend(tree.commands);
     }
 
@@ -6249,7 +6163,7 @@ mod tests {
     fn test_text_tool_places_label() {
         let mut app = WhiteboardApp::new(1280.0, 800.0);
         app.current_tool = Tool::Text;
-        app.text_input_buffer = "Hello World".to_string();
+        app.text_input_buffer.set_text("Hello World");
         let area = app.canvas_rect();
         app.on_canvas_press(area.x + 50.0, area.y + 50.0, false);
         assert_eq!(app.current_page().shapes.len(), 1);
@@ -6264,7 +6178,7 @@ mod tests {
     fn test_sticky_note_creation() {
         let mut app = WhiteboardApp::new(1280.0, 800.0);
         app.current_tool = Tool::StickyNote;
-        app.text_input_buffer = "My Note".to_string();
+        app.text_input_buffer.set_text("My Note");
         let area = app.canvas_rect();
         app.on_canvas_press(area.x + 50.0, area.y + 50.0, false);
         app.on_canvas_move(area.x + 250.0, area.y + 200.0);
@@ -7102,7 +7016,11 @@ mod tests {
             "the Text tool did not give its box the keyboard"
         );
         type_words(&mut app, "roof");
-        assert_eq!(app.text_input_buffer, "roof", "the words were not typed");
+        assert_eq!(
+            app.text_input_buffer.text(),
+            "roof",
+            "the words were not typed"
+        );
         assert_eq!(
             app.current_tool,
             Tool::Text,
@@ -7126,7 +7044,8 @@ mod tests {
             "the press placed no label of the words"
         );
         assert_eq!(
-            app.text_input_buffer, "",
+            app.text_input_buffer.text(),
+            "",
             "the placed words stayed in the box"
         );
         assert!(app.text_focused, "placing a label gave up the keyboard");
@@ -7135,7 +7054,11 @@ mod tests {
         // keyboard back: `r` is the rectangle again.
         type_words(&mut app, "x");
         app.handle_event(&press(Key::Escape));
-        assert_eq!(app.text_input_buffer, "", "Escape did not empty the words");
+        assert_eq!(
+            app.text_input_buffer.text(),
+            "",
+            "Escape did not empty the words"
+        );
         assert!(app.text_focused, "Escape on words gave up the keyboard");
         app.handle_event(&press(Key::Escape));
         assert!(
@@ -7250,7 +7173,8 @@ mod tests {
         app.handle_event(&click_at(start + 1.0, mid));
         type_words(&mut app, "X");
         assert_eq!(
-            app.text_input_buffer, "Xabc",
+            app.text_input_buffer.text(),
+            "Xabc",
             "the caret is not where the press was"
         );
         app.handle_event(&Event::Key(KeyEvent {
@@ -7266,7 +7190,8 @@ mod tests {
             text: String::new(),
         }));
         assert_eq!(
-            app.text_input_buffer, "",
+            app.text_input_buffer.text(),
+            "",
             "Ctrl+A and Ctrl+X did not cut the words"
         );
         assert!(
@@ -7280,7 +7205,8 @@ mod tests {
             text: String::new(),
         }));
         assert_eq!(
-            app.text_input_buffer, "Xabc",
+            app.text_input_buffer.text(),
+            "Xabc",
             "Ctrl+V did not paste what was cut"
         );
 

@@ -3284,16 +3284,27 @@ pub extern "C" fn syncfs(fd: Fd) -> i32 {
 // abort
 // ---------------------------------------------------------------------------
 
-/// Write a message to standard error and abort.
-///
-/// Not exactly POSIX, but commonly needed by C runtime init code.
+/// End the process abnormally, as POSIX's `abort` does: `SIGABRT` is
+/// unblocked and raised, so that a handler for it runs; if the handler
+/// returns, or the signal was ignored, its disposition goes back to the
+/// default and it is raised again -- glibc's order -- and the process dies
+/// by it, which its parent reads as `WIFSIGNALED` with `SIGABRT` and a
+/// shell reports as "Aborted". Until 2026-10-17 this wrote "Aborted" to the
+/// console itself, ran no handler, and exited with status 134.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn abort() -> ! {
-    // Write "Aborted\n" to stderr (console).
-    let msg = b"Aborted\n";
-    let _ = syscall2(SYS_CONSOLE_WRITE, msg.as_ptr() as u64, msg.len() as u64);
-    #[allow(clippy::used_underscore_items)] // _exit is the POSIX name.
-    crate::process::_exit(134); // 128 + SIGABRT(6)
+    use crate::signal::{SIG_DFL, SIG_UNBLOCK, SIGABRT, SigsetT};
+    let mut set = SigsetT::EMPTY;
+    // SAFETY: a local set.
+    unsafe { crate::signal::sigaddset(&raw mut set, SIGABRT) };
+    // Neither can fail for SIGABRT and a valid set; the process ends below
+    // whatever they answer.
+    let _ = crate::signal::pthread_sigmask(SIG_UNBLOCK, &raw const set, core::ptr::null_mut());
+    let _ = crate::signal::raise(SIGABRT);
+    // A handler returned, or the signal was ignored: the default now.
+    let _ = crate::signal::signal(SIGABRT, SIG_DFL);
+    let _ = crate::signal::raise(SIGABRT);
+    crate::signal::exit_by_signal(SIGABRT)
 }
 
 /// glibc's `__libc_fatal`: write `message` to standard error and abort.

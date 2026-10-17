@@ -24,9 +24,10 @@
  *         4 strcpy, 5 stpcpy, 6 strncpy, 7 stpncpy, 8 strcat, 9 strncat)
  *   20+i  the same call with an UNKNOWN object size ((size_t)-1) misbehaved
  *   30+i  overflowing call i: pipe or fork failed
- *   50+i  overflowing call i: the child did not exit with 134, the code
- *         abort() gives -- it returned (the check is missing) or died
- *         otherwise
+ *   50+i  overflowing call i: the child did not die by SIGABRT, as abort()
+ *         ends one -- it returned (the check is missing) or ended
+ *         otherwise. Until 2026-10-17 this library's abort() exited with
+ *         134 instead, which this fixture took for the abort
  *   70+i  overflowing call i: its stderr was not glibc's
  *         "*** buffer overflow detected ***: terminated\n"
  *   90    __read_chk: pipe failed
@@ -34,17 +35,17 @@
  *   92    __read_chk touched the guard byte past its object
  *   93    the bytes it did not read were not left in the pipe
  *   94    __fdelt_chk (FD_SET's index) gave the wrong word for fd 1023
- *   95    __fdelt_chk(1024) did not abort its child with 134
+ *   95    __fdelt_chk(1024) did not abort its child (SIGABRT)
  *   96    __fdelt_chk(1024)'s stderr was not glibc's message
  *   97    the __fdelt_chk child's pipe or fork failed
- *   98/99 __explicit_bzero_chk one byte past its object: did not abort with
- *         134 / wrong message
+ *   98/99 __explicit_bzero_chk one byte past its object: did not abort
+ *         (SIGABRT) / wrong message
  *   100/101 __poll_chk, two entries in a one-entry object: the same
- *   102/103 __open_2 with O_CREAT (no mode): did not abort with 134 / not
+ *   102/103 __open_2 with O_CREAT (no mode): did not abort (SIGABRT) / not
  *         glibc's "invalid open call" message
  *   104   one of the last three children's pipe or fork failed
  *   106/107 __wmemcpy_chk one wide character past its object: did not abort
- *         with 134 / wrong message
+ *         (SIGABRT) / wrong message
  *   108/109 __wcscpy_chk, four characters and a terminator into four: the same
  *   110/111 __wcrtomb_chk, U+20AC (three bytes) into two: the same
  *   112/113 __mbstowcs_chk, five characters asked into four: the same
@@ -62,6 +63,7 @@
 
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
@@ -178,7 +180,7 @@ static size_t drain(int fd, char *out, size_t cap)
     return got;
 }
 
-/* What a child that was meant to abort did: 0 if it exited with 134 having
+/* What a child that was meant to abort did: 0 if it died by SIGABRT having
  * written exactly `expect` to stderr, 1 if it ended any other way, 2 if it
  * aborted but said something else, 3 if the pipe or fork failed. Case i >= 0
  * is `call(i, ...)` overflowing by one byte; the negative cases are the calls
@@ -252,7 +254,7 @@ static int child_aborts(int i, const char *expect)
     char err[256];
     drain(fds[0], err, sizeof err);
     close(fds[0]);
-    if (got != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 134) {
+    if (got != pid || !WIFSIGNALED(status) || WTERMSIG(status) != SIGABRT) {
         return 1;
     }
     if (strcmp(err, expect) != 0) {
@@ -296,7 +298,7 @@ static int fdelt_checks(void)
 }
 
 /* The calls that abort without being copies: a wipe, a poll and an open. Each
- * gets two codes, (base) did not abort with 134 and (base + 1) wrong message. */
+ * gets two codes, (base) did not abort (SIGABRT) and (base + 1) wrong message. */
 static int other_aborts(void)
 {
     static const struct {

@@ -2041,13 +2041,7 @@ fn stop_self_errno(ret: i64) -> i32 {
 /// `EINVAL` for unknown signals.
 fn apply_default_action(sig: i32) -> i32 {
     match default_action(sig) {
-        Some(DefaultAction::Terminate | DefaultAction::Core) => {
-            if sig == SIGABRT {
-                crate::unistd::abort();
-            }
-            // 128 + sig (Unix convention)
-            crate::process::_exit(128i32.wrapping_add(sig));
-        }
+        Some(DefaultAction::Terminate | DefaultAction::Core) => exit_by_signal(sig),
         Some(DefaultAction::Ignore) => 0,
         Some(DefaultAction::Stop) => stop_self(sig),
         Some(DefaultAction::Continue) => {
@@ -2064,6 +2058,23 @@ fn apply_default_action(sig: i32) -> i32 {
             -1
         }
     }
+}
+
+/// End the process as killed by `sig`, whose default action terminates and
+/// is the one that applies: `SYS_SIGNAL_EXIT_SELF`, so that its parent reads
+/// `WIFSIGNALED` with `WTERMSIG == sig` -- what GNU `timeout` and a shell's
+/// "Killed" go by -- where until 2026-10-17 it read an exit with status
+/// 128 + sig. That exit is still the end when the call returns: a kernel
+/// without it, or a system-call filter that refuses it, must not leave the
+/// process running.
+pub(crate) fn exit_by_signal(sig: i32) -> ! {
+    if let Ok(nr) = u64::try_from(sig) {
+        // Returns only when the kernel would not end the process so; the
+        // exit below ends it either way.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_EXIT_SELF, nr);
+    }
+    #[allow(clippy::used_underscore_items)] // _exit is the POSIX name.
+    crate::process::_exit(128i32.wrapping_add(sig))
 }
 
 /// Dispatch a signal to the calling process.

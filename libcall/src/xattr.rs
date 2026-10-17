@@ -257,6 +257,36 @@ mod tests {
         assert!(fiemap_extent(&map, 2).is_none(), "past the map's room");
     }
 
+    /// A file of two extents, a hole between them, mapped as two -- where
+    /// the file system maps at all (tmpfs does not).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_sparse_file_maps_as_its_extents() {
+        use std::io::{Seek, SeekFrom, Write};
+        use std::os::fd::AsRawFd;
+        let dir = std::env::temp_dir().join(format!("libcall-fiemap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("sparse")).unwrap();
+        f.write_all(&[1u8; 4096]).unwrap();
+        f.seek(SeekFrom::Start(1 << 20)).unwrap();
+        f.write_all(&[2u8; 4096]).unwrap();
+        let mut map = [0u64; FIEMAP_HEADER_WORDS + 8 * FIEMAP_EXTENT_WORDS];
+        match fiemap(f.as_raw_fd(), 0, FIEMAP_FLAG_SYNC, &mut map) {
+            Ok(n) => {
+                assert_eq!(n, 2, "two extents and a hole");
+                let second = fiemap_extent(&map, 1).unwrap();
+                assert_eq!(second.logical, 1 << 20);
+                assert_ne!(second.flags & FIEMAP_EXTENT_LAST, 0);
+            }
+            Err(e) => assert_eq!(
+                e,
+                crate::EOPNOTSUPP,
+                "only a file system that cannot map may refuse"
+            ),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_file_without_attributes_lists_none_and_has_a_file_system() {

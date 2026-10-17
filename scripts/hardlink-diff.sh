@@ -287,5 +287,20 @@ for args in '--version' '-V' '--help' '-h' '' '-q -v a' '-v -q a' '--quiet --ver
   case_ "$S_PAIR" plain "$@"
 done
 
+# An --exclude pattern too costly to decide -- a backreference searched for
+# along a path past PATH_MAX -- ours only: glibc's regexec decides it however
+# long that takes. Its warning comes once for the pattern, not once a file.
+CASE_NAME=costly
+rm -f "$DIFF_TMP"/ours.*
+side ours "$S_LONG" plain -v -x '(.*)(.*)(.*)\1y' a
+n=$(grep -c 'too costly to match' "$DIFF_TMP/ours.err" || true)
+if [ "$n" = 1 ]; then
+  pass=$((pass + 1))
+else
+  fail=$((fail + 1))
+  printf 'DIFF [costly] %s warnings for one pattern, not 1\n' "$n"
+  head -5 "$DIFF_TMP/ours.err"
+fi
+
 printf '\nhardlink-diff: %d passed, %d differed, %d broken\n' "$pass" "$fail" "$broken"
 [ "$fail" = 0 ] && [ "$broken" = 0 ]

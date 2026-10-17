@@ -42,14 +42,11 @@ use ulclosestream::{Stdout, stderr_write, warn, warnx};
 use ulstrutils::{err_exclusive_options, string_add_to_idarray};
 use ulsysfs::loopdev::{
     LO_CRYPT_NONE, LO_FLAGS_AUTOCLEAR, LO_FLAGS_DIRECT_IO, LO_FLAGS_PARTSCAN, LO_FLAGS_READ_ONLY,
-    LOOPDEV_FL_OFFSET, LOOPDEV_FL_SIZELIMIT, LOOPDEV_MAJOR, LOOPITER_FL_USED, LoopCxt, dev_ino,
-    is_loopdev,
+    LOOPDEV_FL_OFFSET, LOOPDEV_FL_SIZELIMIT, LOOPDEV_MAJOR, LOOPITER_FL_USED, LoopCxt, block_rdev,
+    dev_ino, is_loopdev,
 };
 
-/// `ENOENT` and `EBUSY`, `EAGAIN`.
-const ENOENT: i32 = 2;
-const EBUSY: i32 = 16;
-const EAGAIN: i32 = 11;
+use libcall::{EAGAIN, EBUSY, ENOENT};
 
 /// `_PATH_DEV_LOOPCTL`.
 const PATH_DEV_LOOPCTL: &std::ffi::CStr = c"/dev/loop-control";
@@ -775,6 +772,8 @@ impl Losetup {
             self.set_scols_data(lc, &mut tb, &ids)?;
         } else {
             let mut failed = None;
+            // The closure's `Err(0)` only stops the walk; the error it met is
+            // carried out in `failed`, which is what is reported.
             let _ = self.each_used(lc, file, offset, flags, |l, lc| {
                 match l.set_scols_data(lc, &mut tb, &ids) {
                     Ok(()) => Ok(()),
@@ -1268,20 +1267,6 @@ impl Losetup {
 /// `"1"` or `"0"`, for a flag column.
 fn flag(v: i32) -> Vec<u8> {
     if v != 0 { b"1".to_vec() } else { b"0".to_vec() }
-}
-
-/// Whether `m` is a block device, and its device number.
-fn block_rdev(m: &std::fs::Metadata) -> Option<u64> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        m.file_type().is_block_device().then(|| m.rdev())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = m;
-        None
-    }
 }
 
 #[cfg(test)]

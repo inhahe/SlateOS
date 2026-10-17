@@ -1744,8 +1744,9 @@ fi
 # the namespace to source. Its `devlog_start LOG` listens on /dev/log and
 # appends each datagram to LOG, a line each; it exits the case with 93 when
 # the socket never appears, so a side that logged nowhere is not compared as
-# one that logged nothing. `devlog_stop` lets the last datagram land and
-# stops the listener.
+# one that logged nothing. `devlog_stop` sends the listener a datagram that
+# stops it: the socket keeps datagrams in order, so every one the program
+# sent is written first, however long the listener takes to be scheduled.
 diff_devlog() {
   cat > "$DIFF_TMP/devlog.py" <<'PY'
 import socket, sys
@@ -1753,7 +1754,10 @@ s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 s.bind(sys.argv[1])
 with open(sys.argv[2], "ab", buffering=0) as out:
     while True:
-        out.write(s.recv(65536) + b"\n")
+        d = s.recv(65536)
+        if d == b"\0devlog-stop":
+            break
+        out.write(d + b"\n")
 PY
   cat > "$DIFF_TMP/devlog.sh" <<'SH'
 devlog_start() {
@@ -1764,8 +1768,8 @@ devlog_start() {
   exit 93
 }
 devlog_stop() {
-  sleep 0.1
-  kill "$devlog_pid" 2>/dev/null
+  python3 -c 'import socket; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b"\0devlog-stop", "/dev/log")' 2>/dev/null \
+    || kill "$devlog_pid" 2>/dev/null
   wait "$devlog_pid" 2>/dev/null
 }
 SH

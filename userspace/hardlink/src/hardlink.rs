@@ -133,11 +133,32 @@ struct FileNode {
     links: Vec<Link>,
 }
 
+/// An `--include` or `--exclude` pattern.
+struct Pattern {
+    /// As given.
+    text: Vec<u8>,
+    /// Compiled.
+    re: ere::Regex,
+    /// Whether the warning that it was too costly to decide has been given:
+    /// it is given once, not once for every file.
+    warned: std::cell::Cell<bool>,
+}
+
+impl Pattern {
+    fn new(text: Vec<u8>, re: ere::Regex) -> Self {
+        Self {
+            text,
+            re,
+            warned: std::cell::Cell::new(false),
+        }
+    }
+}
+
 /// `struct options`.
 struct Options {
-    /// `--include` and `--exclude`: each pattern as given, and compiled.
-    include: Vec<(Vec<u8>, ere::Regex)>,
-    exclude: Vec<(Vec<u8>, ere::Regex)>,
+    /// `--include` and `--exclude`.
+    include: Vec<Pattern>,
+    exclude: Vec<Pattern>,
     method: Vec<u8>,
     verbosity: i32,
     respect_mode: bool,
@@ -600,7 +621,8 @@ impl Hardlink {
     /// `handle_interrupt ()`: whether to stop -- after a `SIGINT`, which
     /// stays; a `SIGUSR1` prints the statistics, and is forgotten.
     fn handle_interrupt(&mut self) -> bool {
-        match LAST_SIGNAL.load(Ordering::Relaxed) {
+        let seen = LAST_SIGNAL.load(Ordering::Relaxed);
+        match seen {
             SIGINT | SIGTERM => return true,
             SIGUSR1 => {
                 self.print_stats();
@@ -608,7 +630,12 @@ impl Hardlink {
             }
             _ => {}
         }
-        LAST_SIGNAL.store(0, Ordering::Relaxed);
+        // Only the signal handled is forgotten. Upstream stores 0 whatever
+        // came in meanwhile, so a SIGINT caught while the statistics were
+        // being written (to a slow pipe, say) is lost and the run goes on;
+        // here it stays and stops the run at the next check. A failed
+        // exchange means exactly that: another signal is waiting.
+        let _ = LAST_SIGNAL.compare_exchange(seen, 0, Ordering::Relaxed, Ordering::Relaxed);
         false
     }
 
@@ -964,25 +991,25 @@ impl Hardlink {
     /// glibc's `regexec` goes on however long it takes: such a pattern is
     /// taken to match when `if_undecided` -- `true` for `--exclude`, `false`
     /// for `--include` -- so that a file no pattern could be decided for is
-    /// left alone, never linked; and a warning says so.
-    fn match_any_regex(
-        &self,
-        list: &[(Vec<u8>, ere::Regex)],
-        what: &[u8],
-        if_undecided: bool,
-    ) -> bool {
-        list.iter().any(|(pattern, re)| match re.is_match(what) {
+    /// left alone, never linked. A warning says so for the first such file
+    /// of each pattern; a pattern too costly for one name usually is for
+    /// thousands, and a line for each would bury every other message.
+    fn match_any_regex(&self, list: &[Pattern], what: &[u8], if_undecided: bool) -> bool {
+        list.iter().any(|pat| match pat.re.is_match(what) {
             Ok(matched) => matched,
             Err(_) => {
-                warnx(
-                    &self.short,
-                    &format!(
-                        "{}: too costly to match {}; taken as {}",
-                        escape_unprintable(pattern),
-                        escape_unprintable(what),
-                        if if_undecided { "a match" } else { "no match" }
-                    ),
-                );
+                if !pat.warned.replace(true) {
+                    warnx(
+                        &self.short,
+                        &format!(
+                            "{}: too costly to match {}; taken as {}, as it will be for every other name it is \
+                             too costly to match",
+                            escape_unprintable(&pat.text),
+                            escape_unprintable(what),
+                            if if_undecided { "a match" } else { "no match" }
+                        ),
+                    );
+                }
                 if_undecided
             }
         })
@@ -1433,13 +1460,13 @@ impl Hardlink {
                 b'x' => {
                     let pattern = os_bytes(&arg).into_owned();
                     let re = register_regex(&self.short, &pattern, utf8)?;
-                    self.opts.exclude.push((pattern, re));
+                    self.opts.exclude.push(Pattern::new(pattern, re));
                 }
                 b'y' => self.opts.method = os_bytes(&arg).into_owned(),
                 b'i' => {
                     let pattern = os_bytes(&arg).into_owned();
                     let re = register_regex(&self.short, &pattern, utf8)?;
-                    self.opts.include.push((pattern, re));
+                    self.opts.include.push(Pattern::new(pattern, re));
                 }
                 b's' => self.opts.min_size = self.size_arg(&arg, "failed to parse minimum size")?,
                 b'S' => self.opts.max_size = self.size_arg(&arg, "failed to parse maximum size")?,

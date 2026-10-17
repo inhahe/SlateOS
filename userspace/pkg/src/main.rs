@@ -1038,7 +1038,7 @@ impl ContentStore {
         &self,
         manifest: &PackageManifest,
         old_file_hashes: &[(String, String)],
-    ) -> io::Result<DeployStats> {
+    ) -> DeployStats {
         let mut stats = DeployStats::default();
 
         // Build lookup of old hashes by path
@@ -1119,32 +1119,7 @@ impl ContentStore {
             }
         }
 
-        Ok(stats)
-    }
-
-    /// Remove deployed files for a package (cleanup on remove/rollback).
-    fn undeploy_package_files(&self, file_hashes: &[(String, String)]) -> u64 {
-        let mut removed = 0u64;
-        for (dst_path, _hash) in file_hashes {
-            let dst = match under_root(dst_path) {
-                Ok(dst) => dst,
-                Err(e) => {
-                    eprintln!("  warning: failed to remove {dst_path}: {e}");
-                    continue;
-                }
-            };
-            let dst = &dst;
-            if fs::symlink_metadata(dst).is_ok() {
-                if fs::remove_file(dst).is_ok() {
-                    removed += 1;
-                }
-                // Clean up empty parent directories
-                if let Some(parent) = dst.parent() {
-                    let _ = fs::remove_dir(parent); // Only succeeds if empty
-                }
-            }
-        }
-        removed
+        stats
     }
 }
 
@@ -1981,18 +1956,21 @@ impl ConfigFileTracker {
 ///
 /// Hooks run with the package name and version as arguments.
 /// A non-zero exit code from a pre-hook aborts the operation.
-///
-/// Nothing runs them yet: no command calls [`PackageHooks::run`], so a
-/// package's hooks are ignored (known-issues `TD-B-PKG-RUNS-NO-PACKAGE-HOOKS`).
 struct PackageHooks;
 
-#[allow(dead_code)] // Called by no command: TD-B-PKG-RUNS-NO-PACKAGE-HOOKS
 impl PackageHooks {
-    /// Run a hook command if it exists.
+    /// Run a hook command if it exists; with `stdout_to_stderr`, what it
+    /// writes to its standard output goes to pkg's standard error, where it
+    /// cannot break up output a program reads (`--json`'s).
     ///
     /// Returns Ok(true) if the hook ran and succeeded,
     /// Ok(false) if no hook was defined, or Err if it failed.
-    fn run(command: &str, pkg_name: &str, pkg_version: &str) -> Result<bool, String> {
+    fn run(
+        command: &str,
+        pkg_name: &str,
+        pkg_version: &str,
+        stdout_to_stderr: bool,
+    ) -> Result<bool, String> {
         if command.is_empty() {
             return Ok(false);
         }
@@ -2001,6 +1979,9 @@ impl PackageHooks {
 
         let mut cmd = Command::new(command);
         cmd.arg(pkg_name).arg(pkg_version);
+        if stdout_to_stderr {
+            cmd.stdout(std::process::Stdio::from(io::stderr()));
+        }
         // Under `--root`, the hook is the other system's and runs inside it,
         // as `rpm --root`'s scriptlets do: changed into it, at its `/`.
         #[cfg(unix)]
@@ -2289,7 +2270,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run pre-install hook if defined
         if !manifest.hook_pre_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  pre-install hook OK for {}", manifest.name),
                 Ok(false) => {} // no hook
                 Err(e) => {
@@ -2388,7 +2369,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run post-install hook if defined
         if !manifest.hook_post_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  post-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
@@ -2490,7 +2471,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             && !manifest.hook_pre_remove.is_empty()
         {
             let ver_str = pkg.version.to_string();
-            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str, false) {
                 Ok(true) => println!("  pre-remove hook OK for {name}"),
                 Ok(false) => {}
                 Err(e) => {
@@ -2501,7 +2482,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
 
         // Undeploy files from the filesystem before removing from generation
         if let Some(pkg) = current.packages.get(name) {
-            let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
+            let removed = remove_deployed(pkg.file_hashes.iter().map(|(p, _)| p.as_str())).removed;
             if removed > 0 {
                 println!("  Removing {name}... ({removed} files removed)");
             } else {
@@ -2518,7 +2499,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             && !manifest.hook_post_remove.is_empty()
         {
             let ver_str = pkg.version.to_string();
-            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str, false) {
                 Ok(true) => println!("  post-remove hook OK for {name}"),
                 Ok(false) => {}
                 Err(e) => {
@@ -2903,34 +2884,47 @@ fn missing_from_store(db: &PackageDb, to: &Generation, plan: &RollbackPlan) -> V
     missing
 }
 
-/// `paths` taken off the disk, each one that is there: those that could not
-/// be, said on stderr and returned. An emptied directory goes with its last
-/// file, as `pkg remove` takes it.
-fn remove_paths(paths: &[&str]) -> Vec<String> {
-    let mut failed = Vec::new();
-    for &dst_path in paths {
-        let dst = match under_root(dst_path) {
-            Ok(dst) => dst,
+/// What [`remove_deployed`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Removal {
+    /// How many files it removed.
+    removed: u64,
+    /// The paths it could not remove, or could not tell were gone.
+    failed: Vec<String>,
+}
+
+/// Deployed files taken off the disk -- each of `paths` (as a package
+/// names them, under `--root`'s directory) that is there -- an emptied
+/// directory going with its last file: what remove, upgrade and rollback
+/// take away. A file already gone is no failure; any other error, from
+/// looking for the file or from removing it, is said on stderr and its
+/// path listed.
+fn remove_deployed<'a>(paths: impl IntoIterator<Item = &'a str>) -> Removal {
+    let mut done = Removal::default();
+    for dst_path in paths {
+        let gone = under_root(dst_path).and_then(|dst| {
+            match fs::symlink_metadata(&dst) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                Err(e) => return Err(e),
+                Ok(_) => {}
+            }
+            fs::remove_file(&dst)?;
+            if let Some(parent) = dst.parent() {
+                // Succeeds only for a directory the file was the last one in.
+                let _ = fs::remove_dir(parent);
+            }
+            Ok(true)
+        });
+        match gone {
+            Ok(true) => done.removed += 1,
+            Ok(false) => {}
             Err(e) => {
                 eprintln!("  warning: failed to remove {dst_path}: {e}");
-                failed.push(dst_path.to_string());
-                continue;
+                done.failed.push(dst_path.to_string());
             }
-        };
-        if fs::symlink_metadata(&dst).is_err() {
-            continue;
-        }
-        if let Err(e) = fs::remove_file(&dst) {
-            eprintln!("  warning: failed to remove {dst_path}: {e}");
-            failed.push(dst_path.to_string());
-            continue;
-        }
-        if let Some(parent) = dst.parent() {
-            // Succeeds only for a directory the file was the last one in.
-            let _ = fs::remove_dir(parent);
         }
     }
-    failed
+    done
 }
 
 /// Whether the package database may be written -- what a rollback changes
@@ -3047,7 +3041,7 @@ fn run_hook(hook: &str, which: &str, name: &str, version: &str, json: bool) {
     if hook.is_empty() {
         return;
     }
-    match PackageHooks::run(hook, name, version) {
+    match PackageHooks::run(hook, name, version, json) {
         Ok(true) if !json => println!("  {which} hook OK for {name}"),
         Ok(_) => {}
         Err(e) => eprintln!("  warning: {name}: {which} hook failed: {e}"),
@@ -3190,7 +3184,9 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
         }
     }
     let gone = paths_to_remove(&current, &target, &plan);
-    report.failed.extend(remove_paths(&gone));
+    report
+        .failed
+        .extend(remove_deployed(gone.iter().copied()).failed);
     for name in &plan.remove {
         if let Some(now) = current.packages.get(name)
             && let Some(manifest) = stored_manifest(db, &now.manifest_hash)
@@ -3217,28 +3213,31 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
             // Checked above: both are there.
             continue;
         };
+        let version = then.version.to_string();
+        // As upgrade does: a failing pre-install hook keeps the package out,
+        // so none of its files are the target's.
+        if let Err(e) = PackageHooks::run(&manifest.hook_pre_install, name, &version, json) {
+            eprintln!("  warning: {name}: pre-install hook failed: {e}");
+            report
+                .failed
+                .extend(manifest.files.iter().map(|f| f.dst.clone()));
+            continue;
+        }
         let old = current
             .packages
             .get(name)
             .map(|now| now.file_hashes.clone())
             .unwrap_or_default();
-        match db.cas.deploy_package_files_upgrade(&manifest, &old) {
-            Ok(stats) => {
-                if !json {
-                    println!(
-                        "  Put back {name} {}: {} files, {}",
-                        then.version,
-                        stats.deployed,
-                        format_size(stats.total_bytes)
-                    );
-                }
-                report.failed.extend(stats.failed_paths);
-            }
-            Err(e) => {
-                eprintln!("  warning: file deployment error for {name}: {e}");
-                report.failed.push(name.clone());
-            }
+        let stats = db.cas.deploy_package_files_upgrade(&manifest, &old);
+        if !json {
+            println!(
+                "  Put back {name} {}: {} files, {}",
+                then.version,
+                stats.deployed,
+                format_size(stats.total_bytes)
+            );
         }
+        report.failed.extend(stats.failed_paths);
         run_hook(
             &manifest.hook_post_install,
             "post-install",
@@ -3754,7 +3753,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run pre-install hook (used for upgrades too)
         if !manifest.hook_pre_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  pre-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
@@ -3814,72 +3813,48 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Build a set of new destination paths for quick lookup.
         let new_dsts: HashSet<&str> = manifest.files.iter().map(|f| f.dst.as_str()).collect();
 
-        let mut removed_stale = 0u64;
-        for (old_dst, _) in &old_file_hashes {
-            if !new_dsts.contains(old_dst.as_str()) {
-                let dst = match under_root(old_dst) {
-                    Ok(dst) => dst,
-                    Err(e) => {
-                        eprintln!("  warning: failed to remove {old_dst}: {e}");
-                        continue;
-                    }
-                };
-                let dst = &dst;
-                if fs::symlink_metadata(dst).is_ok() {
-                    if fs::remove_file(dst).is_ok() {
-                        removed_stale += 1;
-                    }
-                    if let Some(parent) = dst.parent() {
-                        let _ = fs::remove_dir(parent);
-                    }
-                }
-            }
-        }
+        let removed_stale = remove_deployed(
+            old_file_hashes
+                .iter()
+                .map(|(dst, _)| dst.as_str())
+                .filter(|dst| !new_dsts.contains(dst)),
+        )
+        .removed;
 
         // Deploy new files with config-aware upgrade logic
         if !manifest.files.is_empty() && !manifest.archive_hash.is_empty() {
-            match db
+            let stats = db
                 .cas
-                .deploy_package_files_upgrade(manifest, &old_file_hashes)
-            {
-                Ok(stats) => {
-                    let mut extras = Vec::new();
-                    if stats.dedup_bytes > 0 {
-                        extras.push(format!(
-                            "{} saved via dedup",
-                            format_size(stats.dedup_bytes)
-                        ));
-                    }
-                    if stats.config_preserved > 0 {
-                        extras.push(format!("{} config(s) preserved", stats.config_preserved));
-                        total_config_preserved += stats.config_preserved;
-                    }
-                    if removed_stale > 0 {
-                        extras.push(format!("{removed_stale} stale file(s) removed"));
-                    }
-                    let extra_str = if extras.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", extras.join(", "))
-                    };
-                    println!(
-                        "  Upgraded {} to {}: {} files, {}{}",
-                        manifest.name,
-                        manifest.version,
-                        stats.deployed,
-                        format_size(stats.total_bytes),
-                        extra_str
-                    );
-                    if stats.failed > 0 {
-                        eprintln!("    {} file(s) failed to deploy", stats.failed);
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  warning: file deployment error for {}: {e}",
-                        manifest.name
-                    );
-                }
+                .deploy_package_files_upgrade(manifest, &old_file_hashes);
+            let mut extras = Vec::new();
+            if stats.dedup_bytes > 0 {
+                extras.push(format!(
+                    "{} saved via dedup",
+                    format_size(stats.dedup_bytes)
+                ));
+            }
+            if stats.config_preserved > 0 {
+                extras.push(format!("{} config(s) preserved", stats.config_preserved));
+                total_config_preserved += stats.config_preserved;
+            }
+            if removed_stale > 0 {
+                extras.push(format!("{removed_stale} stale file(s) removed"));
+            }
+            let extra_str = if extras.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", extras.join(", "))
+            };
+            println!(
+                "  Upgraded {} to {}: {} files, {}{}",
+                manifest.name,
+                manifest.version,
+                stats.deployed,
+                format_size(stats.total_bytes),
+                extra_str
+            );
+            if stats.failed > 0 {
+                eprintln!("    {} file(s) failed to deploy", stats.failed);
             }
         } else {
             if removed_stale > 0 {
@@ -3909,7 +3884,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run post-install hook (used for upgrades too)
         if !manifest.hook_post_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  post-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
@@ -5656,7 +5631,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
     // Remove packages not in snapshot
     for name in &to_remove {
         if let Some(pkg) = current.packages.get(*name) {
-            let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
+            let removed = remove_deployed(pkg.file_hashes.iter().map(|(p, _)| p.as_str())).removed;
             println!("  Removing {name}... ({removed} files removed)");
         }
         new_gen.packages.remove(*name);
@@ -6002,6 +5977,13 @@ fn main() {
 
     let db = match PackageDb::new() {
         Ok(db) => db,
+        // `rollback --json` promises one object on stdout, whatever stops it.
+        Err(e) if args[0] == "rollback" && args.iter().any(|a| a == "--json") => RollbackReport {
+            json: true,
+            dry_run: args.iter().any(|a| a == "--dry-run"),
+            ..RollbackReport::default()
+        }
+        .finish(RollbackOutcome::Refused, Some(&e.to_string())),
         Err(e) => {
             eprintln!("pkg: {e}");
             process::exit(1);
@@ -6073,10 +6055,26 @@ fn main() {
         }
         "rollback" => {
             let json = rest.iter().any(|a| a == "--json");
-            let targets: Vec<String> = words().into_iter().filter(|w| w != "--json").collect();
+            let refuse = |why: &str| {
+                RollbackReport {
+                    json,
+                    dry_run,
+                    ..RollbackReport::default()
+                }
+                .finish(RollbackOutcome::Refused, Some(why))
+            };
+            let mut targets = Vec::new();
+            for word in rest_os.iter().filter(|w| *w != "--json") {
+                match word.to_str() {
+                    Some(w) => targets.push(w.to_string()),
+                    None => refuse(&format!(
+                        "rollback: {}: not a generation number",
+                        quotef_os(word)
+                    )),
+                }
+            }
             if targets.len() > 1 {
-                eprintln!("pkg: rollback takes one generation at most");
-                process::exit(1);
+                refuse("rollback takes one generation at most");
             }
             cmd_rollback(&db, targets.first().map(String::as_str), dry_run, json);
         }

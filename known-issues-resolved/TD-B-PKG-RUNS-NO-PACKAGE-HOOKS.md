@@ -1,6 +1,14 @@
 ## TD-B-PKG-RUNS-NO-PACKAGE-HOOKS (lane B, 2026-10-16)
 
-**Status:** OPEN
+**Status:** CLOSED 2026-10-17 -- the premise was wrong. `pkg install`,
+`pkg upgrade` and `pkg remove` have run all four hooks since 6caf6467e
+(2026-08-30) -- `cmd_install` and `cmd_upgrade` run the pre-install hook
+before deploying and skip the package when it fails, `cmd_remove` runs the
+remove hooks around the files' removal -- and `pkg rollback` runs them too.
+The review finding this entry came from saw `PackageHooks`' `#[allow
+(dead_code)]` and took it at its word; the attribute and the doc comment
+that repeated the claim are gone. What remains true is that no test runs a
+hook, under `--root` or not: that is TD-B-PKG-COMMANDS-HAVE-NO-TESTS.
 
 **In short:** a package can name scripts to run before and after it is
 installed or removed (`hook-pre-install:` and the rest), and `pkg` reads

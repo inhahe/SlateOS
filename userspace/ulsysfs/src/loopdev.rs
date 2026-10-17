@@ -307,7 +307,8 @@ fn stat(path: &[u8]) -> Option<std::fs::Metadata> {
 }
 
 /// Whether `m` is a block device, and its device number.
-fn block_rdev(m: &std::fs::Metadata) -> Option<u64> {
+#[must_use]
+pub fn block_rdev(m: &std::fs::Metadata) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -1385,22 +1386,6 @@ fn blkdev_size(fd: &File) -> Result<u64, i32> {
     #[cfg(not(unix))]
     ioctl_ptr(fd, 0, &mut size)?;
     Ok(size)
-}
-
-/// `loopcxt_get_info`'s `lo_device`, `lo_inode` and `lo_file_name` for the
-/// loop device `device` -- what `ismounted` asks -- or `None`.
-pub(crate) fn loop_info(device: &[u8]) -> Option<(u64, u64, Vec<u8>)> {
-    let mut lc = LoopCxt::new(0);
-    lc.set_device(Some(device)).ok()?;
-    let info = lc.info().ok()?;
-    let mut name = info.lo_file_name;
-    if let Some(b) = name.get_mut(LO_NAME_SIZE.saturating_sub(2)) {
-        *b = b'*';
-    }
-    if let Some(b) = name.get_mut(LO_NAME_SIZE.saturating_sub(1)) {
-        *b = 0;
-    }
-    Some((info.lo_device, info.lo_inode, crate::c_str(&name).to_vec()))
 }
 
 /// `loopdev_get_backing_file (device)`: the file behind the loop device.

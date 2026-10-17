@@ -59,6 +59,10 @@ pub struct Stat {
     reserved: [i64; 3],
 }
 
+// `fstatat` writes a whole 144-byte `struct stat` through a pointer to
+// this one: a smaller struct would be overrun.
+const _: () = assert!(size_of::<Stat>() == 144);
+
 /// `S_IFMT` and the types it masks.
 pub const S_IFMT: u32 = 0o170_000;
 /// A directory.
@@ -469,6 +473,28 @@ mod tests {
         assert_eq!(O_CLOEXEC, posix::fcntl::O_CLOEXEC);
         assert_eq!(O_WRONLY, posix::fcntl::O_WRONLY);
         assert_eq!(AT_FDCWD, posix::file::AT_FDCWD);
+    }
+
+    /// A file's status read by name, its presence and absence told.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_s_status_and_presence_are_read_by_name() {
+        extern crate std;
+        let base = std::env::temp_dir().join(std::format!("libcall-stat-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("scratch directory");
+        std::fs::write(base.join("five"), b"12345").expect("a file");
+        let path = std::ffi::CString::new(base.join("five").to_str().expect("UTF-8 temp"))
+            .expect("no NUL");
+        let missing = std::ffi::CString::new(base.join("none").to_str().expect("UTF-8 temp"))
+            .expect("no NUL");
+
+        let st = fstatat(AT_FDCWD, &path, 0).expect("fstatat");
+        assert_eq!((st.st_size, st.st_mode & S_IFMT), (5, S_IFREG));
+        assert_eq!(fstatat(AT_FDCWD, &missing, 0), Err(crate::ENOENT));
+
+        assert_eq!(access(&path, F_OK), Ok(()));
+        assert_eq!(access(&missing, F_OK), Err(crate::ENOENT));
+        std::fs::remove_dir_all(&base).expect("cleaned up");
     }
 
     /// A file made, read back, timed, flagged and removed through a

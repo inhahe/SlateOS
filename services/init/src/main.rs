@@ -1526,25 +1526,58 @@ impl ServiceRegistry {
     /// Stop a service as services are stopped (B-Q22, design-decisions
     /// §1072): asked to terminate -- through its lifecycle endpoint, or with
     /// `SIGTERM` -- then forced after its stop timeout ([`init::stop_all`]);
-    /// and marked for no restart. The console says which it took.
-    fn stop_service(&mut self, idx: usize) {
+    /// and marked for no restart. The console says which it took, and so
+    /// does the answer: `None` when it was not running.
+    fn stop_service(&mut self, idx: usize) -> Option<init::Ended> {
         if idx >= MAX_SERVICES || !self.services[idx].active {
-            return;
+            return None;
         }
 
         let svc = &mut self.services[idx];
         svc.auto_restart = false;
 
-        if svc.pid != 0 {
-            let mut ended = [None];
-            init::stop_all(&mut Kernel, &[(svc.pid, svc.stop_timeout_ms)], &mut ended);
-            let name = &svc.name[..svc.name_len];
+        if svc.pid == 0 {
+            return None;
+        }
+        let mut ended = [None];
+        init::stop_all(&mut Kernel, &[(svc.pid, svc.stop_timeout_ms)], &mut ended);
+        let name = &svc.name[..svc.name_len];
+        print("[svc] Stopped ");
+        console_write(name);
+        print(" (PID ");
+        print_u64(svc.pid);
+        print("): ");
+        print_ended(ended[0], svc.stop_timeout_ms);
+        print("\n");
+        svc.pid = 0;
+        ended[0]
+    }
+
+    /// Stop every running service at once, as a power-off does
+    /// ([`init::stop_all`]): the longest stop timeout, not their sum. Each is
+    /// marked for no restart, and the console says how each ended.
+    fn stop_every_service(&mut self) {
+        let mut targets = [(0u64, 0u32); MAX_SERVICES];
+        for (target, svc) in targets.iter_mut().zip(self.services.iter_mut()) {
+            if svc.active && svc.pid != 0 {
+                svc.auto_restart = false;
+                *target = (svc.pid, svc.stop_timeout_ms);
+            }
+        }
+        let mut ended = [None; MAX_SERVICES];
+        init::stop_all(&mut Kernel, &targets, &mut ended);
+        for ((svc, how), &(pid, timeout_ms)) in
+            self.services.iter_mut().zip(ended).zip(targets.iter())
+        {
+            if pid == 0 {
+                continue;
+            }
             print("[svc] Stopped ");
-            console_write(name);
+            console_write(&svc.name[..svc.name_len]);
             print(" (PID ");
-            print_u64(svc.pid);
+            print_u64(pid);
             print("): ");
-            print_ended(ended[0], svc.stop_timeout_ms);
+            print_ended(how, timeout_ms);
             print("\n");
             svc.pid = 0;
         }
@@ -2096,7 +2129,10 @@ fn cmd_svc(args: &[u8], registry: &mut ServiceRegistry) {
             return;
         }
         match registry.find_by_name(rest) {
-            Some(idx) => registry.stop_service(idx),
+            Some(idx) => {
+                // The console line says how it ended.
+                let _ = registry.stop_service(idx);
+            }
             None => {
                 print("svc stop: unknown service '");
                 console_write(rest);
@@ -2543,6 +2579,10 @@ fn report_record_failure(path: &[u8], what: &[u8]) {
 ///     when asked before it forces it: whole milliseconds up to ten
 ///     minutes, 10 000 if not given (`init::stop_all`)
 ///
+/// A service named in `/etc/startup.disabled` (one name a line, which
+/// `service enable` and `disable` change; design-decisions 1196) is
+/// registered but not started.
+///
 /// A line init cannot read -- an unknown keyword, one given twice, a
 /// `caps:` entry it does not know -- is refused: its service is not started,
 /// and the console says which word. Services with no dependencies are
@@ -2551,6 +2591,9 @@ fn report_record_failure(path: &[u8], what: &[u8]) {
 ///
 /// If the file doesn't exist, this is a no-op.
 fn load_startup_services(registry: &mut ServiceRegistry) {
+    let mut list = [0u8; init::MAX_DISABLED_LIST];
+    let len = read_disabled_list(&mut list);
+    let disabled = &list[..len];
     // The whole file, however long (`with_whole_file`): until 2026-10-06 it
     // was read into 2 KiB, and the services past that were never started.
     let read = with_whole_file::<STARTUP_CONF_STACK, _>(b"/etc/startup.conf", |data| {
@@ -2562,7 +2605,11 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
                 continue;
             }
             match init::parse_service_line(line) {
-                Ok(parsed) => register_startup_service(registry, &parsed),
+                Ok(parsed) => {
+                    let name = init::service_name(parsed.path);
+                    let disabled = init::names_disabled(disabled, name);
+                    register_startup_service(registry, &parsed, disabled);
+                }
                 Err(e) => report_refused_line(line, e),
             }
         }
@@ -2584,13 +2631,46 @@ fn load_startup_services(registry: &mut ServiceRegistry) {
     }
 }
 
+/// Read `/etc/startup.disabled` into `list`, and say how much of it there
+/// is: 0 for no file. One that cannot be read, or is longer than
+/// `init::MAX_DISABLED_LIST`, disables nothing, and the console says so --
+/// a list init cannot trust starts every service rather than none.
+fn read_disabled_list(list: &mut [u8; init::MAX_DISABLED_LIST]) -> usize {
+    let read = with_whole_file::<{ init::MAX_DISABLED_LIST }, _>(init::STARTUP_DISABLED, |data| {
+        let fits = list
+            .get_mut(..data.len())
+            .map(|dst| dst.copy_from_slice(data));
+        fits.map(|()| data.len())
+    });
+    match read {
+        Ok(Some(len)) => len,
+        Err(ERR_NOT_FOUND) => 0,
+        Ok(None) => {
+            print("[init] /etc/startup.disabled is longer than init reads; ");
+            print("every service in /etc/startup.conf starts\n");
+            0
+        }
+        Err(e) => {
+            print("[init] /etc/startup.disabled could not be read (error ");
+            print_i64(e);
+            print("); every service in /etc/startup.conf starts\n");
+            0
+        }
+    }
+}
+
 /// How much of `/etc/startup.conf` is read on the stack; a longer file is
 /// read into a mapping.
 const STARTUP_CONF_STACK: usize = 4096;
 
 /// Register one service `/etc/startup.conf` names, and start it unless it
-/// waits on others.
-fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::ServiceLine<'_>) {
+/// waits on others -- or `disabled`, named in `/etc/startup.disabled`: then
+/// it is registered, to be started when asked, and not started.
+fn register_startup_service(
+    registry: &mut ServiceRegistry,
+    parsed: &init::ServiceLine<'_>,
+    disabled: bool,
+) {
     match registry.register(parsed.path) {
         Ok(idx) => {
             if !parsed.deps.is_empty() {
@@ -2605,7 +2685,12 @@ fn register_startup_service(registry: &mut ServiceRegistry, parsed: &init::Servi
             registry.set_caps(idx, parsed.caps());
             registry.services[idx].stop_timeout_ms = parsed.stop_timeout_ms;
 
-            if registry.services[idx].dep_count > 0 {
+            if disabled {
+                registry.services[idx].auto_restart = false;
+                print("[init] ");
+                console_write(parsed.path);
+                print(" is disabled (/etc/startup.disabled): not started\n");
+            } else if registry.services[idx].dep_count > 0 {
                 // Has dependencies — don't start yet, mark as waiting.
                 registry.services[idx].waiting_on_deps = true;
                 print("[init] ");
@@ -2738,24 +2823,490 @@ fn print_line_error(e: init::LineError<'_>) {
 /// as it was, or forced -- after `timeout_ms`, or at once when it could not
 /// be asked.
 fn print_ended(ended: Option<init::Ended>, timeout_ms: u32) {
+    let mut line = Line::new();
+    ended_text(&mut line, ended, timeout_ms);
+    console_write(line.as_bytes());
+}
+
+/// [`print_ended`]'s words, onto `line`.
+fn ended_text(line: &mut Line, ended: Option<init::Ended>, timeout_ms: u32) {
     match ended {
-        Some(init::Ended::Exited(init::Asked::Request)) => print("ended when asked to terminate"),
-        Some(init::Ended::Exited(init::Asked::Signal)) => print("ended on SIGTERM"),
-        Some(init::Ended::Exited(init::Asked::Failed(_))) => print("ended"),
+        Some(init::Ended::Exited(init::Asked::Request)) => {
+            line.push(b"ended when asked to terminate");
+        }
+        Some(init::Ended::Exited(init::Asked::Signal)) => {
+            line.push(b"ended on SIGTERM");
+        }
+        Some(init::Ended::Exited(init::Asked::Failed(_))) => {
+            line.push(b"ended");
+        }
         Some(init::Ended::Forced(init::Asked::Failed(e))) => {
-            print("forced, as it could not be asked to terminate (");
-            print_i64(e);
-            print(")");
+            line.push(b"forced, as it could not be asked to terminate (");
+            line.push_i64(e);
+            line.push(b")");
         }
         Some(init::Ended::Forced(_)) => {
-            print("forced after ");
-            print_u64(u64::from(timeout_ms));
-            print(" ms");
+            line.push(b"forced after ");
+            line.push_u64(u64::from(timeout_ms));
+            line.push(b" ms");
         }
         // `stop_all` answers for every non-zero pid it is given.
-        None => print("not stopped"),
+        None => {
+            line.push(b"not stopped");
+        }
     }
 }
+
+/// A line of text built in a fixed buffer -- init has no heap -- for the
+/// console or a bus client. Its longest use, a service's name and a stop's
+/// outcome, is under 160 bytes; past [`Line::CAP`] the end is cut.
+struct Line {
+    buf: [u8; Line::CAP],
+    len: usize,
+}
+
+impl Line {
+    const CAP: usize = 192;
+
+    const fn new() -> Self {
+        Self {
+            buf: [0; Self::CAP],
+            len: 0,
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8]) -> &mut Self {
+        let room = Self::CAP.saturating_sub(self.len);
+        let take = bytes.len().min(room);
+        if let (Some(dst), Some(src)) = (
+            self.buf.get_mut(self.len..self.len + take),
+            bytes.get(..take),
+        ) {
+            dst.copy_from_slice(src);
+            self.len += take;
+        }
+        self
+    }
+
+    fn push_u64(&mut self, mut v: u64) -> &mut Self {
+        let mut digits = [0u8; 20];
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (v % 10) as u8;
+            v /= 10;
+            if v == 0 {
+                break;
+            }
+        }
+        self.push(&digits[i..])
+    }
+
+    fn push_i64(&mut self, v: i64) -> &mut Self {
+        if v < 0 {
+            self.push(b"-");
+        }
+        self.push_u64(v.unsigned_abs())
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+// ---------------------------------------------------------------------------
+// org.slateos.ServiceManager: the service bus's way to init
+// ---------------------------------------------------------------------------
+
+const SYS_CHANNEL_SEND: u64 = 201;
+const SYS_CHANNEL_TRY_RECV: u64 = 203;
+const SYS_CHANNEL_CLOSE: u64 = 204;
+const SYS_SERVICE_REGISTER: u64 = 280;
+const SYS_SERVICE_TRY_ACCEPT: u64 = 283;
+const SYS_CHANNEL_PEER_CRED: u64 = 286;
+const SYS_POWER_OFF: u64 = 1167;
+const SYS_POWER_REBOOT: u64 = 1168;
+/// The signal that asks a service to read its configuration again.
+const SIGHUP: u64 = 1;
+
+/// How many clients may be connected to the service manager at once. Each
+/// asks a thing or two and goes; one past this is turned away -- its
+/// connection closed -- and can ask again.
+const MAX_BUS_CLIENTS: usize = 8;
+
+/// The largest request init reads. None of its requests comes near it; one
+/// that is longer is not one of them, and its client is turned away.
+const BUS_BUFFER: usize = 4096;
+
+/// A client connected to the service manager.
+#[derive(Clone, Copy)]
+struct BusClient {
+    /// Its channel; 0 for a free slot.
+    handle: u64,
+    /// Its uid when it connected, from the kernel's record
+    /// (`SYS_CHANNEL_PEER_CRED`), never from anything it sent; `None` when
+    /// the kernel had none, which is refused as a caller who is not root.
+    uid: Option<u32>,
+}
+
+/// init on the service bus, as `org.slateos.ServiceManager`: what
+/// `powerctl` and `service` ask (`init::bus`). Root alone may ask anything;
+/// the policy for anyone else is logind's, which asks as root.
+struct Bus {
+    /// The name's listener; 0 when it could not be registered.
+    listener: u64,
+    clients: [BusClient; MAX_BUS_CLIENTS],
+    /// The last reply's serial; replies are numbered from 1.
+    serial: u64,
+    /// A power-off or reboot it was asked to schedule: when (the monotonic
+    /// clock's nanoseconds) and which.
+    scheduled: Option<(u64, init::bus::Power)>,
+}
+
+impl Bus {
+    /// Answer on `org.slateos.ServiceManager`. When the name cannot be had,
+    /// the console says so and init goes on: `powerctl` and `service` then
+    /// say there is no service manager, as they did before.
+    fn register() -> Self {
+        let name = init::bus::SERVICE_MANAGER;
+        let ret = syscall2(
+            SYS_SERVICE_REGISTER,
+            name.as_ptr() as u64,
+            name.len() as u64,
+        );
+        let listener = u64::try_from(ret).unwrap_or(0);
+        if listener == 0 {
+            print("[init] cannot answer org.slateos.ServiceManager: error ");
+            print_i64(ret);
+            print("\n");
+        } else {
+            print("[init] answering org.slateos.ServiceManager\n");
+        }
+        Self {
+            listener,
+            clients: [BusClient {
+                handle: 0,
+                uid: None,
+            }; MAX_BUS_CLIENTS],
+            serial: 0,
+            scheduled: None,
+        }
+    }
+
+    /// Take the clients waiting, answer what each has asked, and carry out
+    /// a scheduled power-off that is due. Nothing here waits.
+    fn poll(&mut self, registry: &mut ServiceRegistry) {
+        if self.listener == 0 {
+            return;
+        }
+        self.accept();
+        let mut buf = [0u8; BUS_BUFFER];
+        for i in 0..MAX_BUS_CLIENTS {
+            let handle = self.clients[i].handle;
+            if handle == 0 {
+                continue;
+            }
+            let ret = syscall3(
+                SYS_CHANNEL_TRY_RECV,
+                handle,
+                buf.as_mut_ptr() as u64,
+                BUS_BUFFER as u64,
+            );
+            match usize::try_from(ret) {
+                // Nothing queued.
+                Ok(0) => {}
+                // The receive copies what fits and says how long the
+                // message was: one longer is none of this interface's.
+                Ok(len) if len <= BUS_BUFFER => self.answer(i, &buf[..len], registry),
+                // Too long, or closed by its client.
+                _ => self.drop_client(i),
+            }
+        }
+        if let Some((due, power)) = self.scheduled
+            && u64::try_from(clock_monotonic()).unwrap_or(0) >= due
+        {
+            self.scheduled = None;
+            print("[init] the scheduled time has come\n");
+            power_down(power, registry);
+        }
+    }
+
+    /// Take every client waiting to connect, noting who each is.
+    fn accept(&mut self) {
+        // A positive answer is a client's channel; none waiting, or the
+        // listener gone, ends it.
+        while let Ok(handle) = u64::try_from(syscall1(SYS_SERVICE_TRY_ACCEPT, self.listener)) {
+            if handle == 0 {
+                return;
+            }
+            let uid = peer_uid(handle);
+            match self.clients.iter_mut().find(|c| c.handle == 0) {
+                Some(slot) => {
+                    *slot = BusClient { handle, uid };
+                }
+                None => close_channel(handle),
+            }
+        }
+    }
+
+    /// Forget client `i`, closing its channel.
+    fn drop_client(&mut self, i: usize) {
+        if let Some(c) = self.clients.get_mut(i) {
+            close_channel(c.handle);
+            *c = BusClient {
+                handle: 0,
+                uid: None,
+            };
+        }
+    }
+
+    /// Answer what client `i` sent, `data`.
+    fn answer(&mut self, i: usize, data: &[u8], registry: &mut ServiceRegistry) {
+        use init::bus::{MessageType, Request, error};
+        let Some(msg) = init::bus::decode(data) else {
+            // Not this protocol: nothing can be answered to it.
+            self.drop_client(i);
+            return;
+        };
+        if msg.msg_type != MessageType::MethodCall {
+            // A reply or a signal asks nothing.
+            return;
+        }
+        if self.clients[i].uid != Some(0) {
+            self.reply(
+                i,
+                msg.serial,
+                Some(error::DENIED),
+                &[b"only root may ask the service manager"],
+            );
+            return;
+        }
+        let request = match init::bus::read_request(msg.member, msg.payload) {
+            Ok(request) => request,
+            Err(e) => {
+                self.reply(i, msg.serial, Some(e), &[]);
+                return;
+            }
+        };
+        match request {
+            Request::Power(power) => {
+                // Accepted, as the clients expect, before it is done: done,
+                // nothing would be left to hear the answer.
+                self.reply(i, msg.serial, None, &[]);
+                power_down(power, registry);
+            }
+            Request::Sleep => self.reply(
+                i,
+                msg.serial,
+                Some(error::NOT_SUPPORTED),
+                &[b"this machine cannot suspend or hibernate yet"],
+            ),
+            Request::Schedule { minutes, power } => {
+                let due = u64::try_from(clock_monotonic())
+                    .unwrap_or(0)
+                    .saturating_add(u64::from(minutes).saturating_mul(60_000_000_000));
+                self.scheduled = Some((due, power));
+                print("[init] scheduled to ");
+                print(power_word(power));
+                print(" in ");
+                print_u64(u64::from(minutes));
+                print(" minute(s)\n");
+                self.reply(i, msg.serial, None, &[]);
+            }
+            Request::CancelSchedule => {
+                if self.scheduled.take().is_some() {
+                    print("[init] the scheduled power change is cancelled\n");
+                }
+                self.reply(i, msg.serial, None, &[]);
+            }
+            Request::Service(op, name) => {
+                let mut text = Line::new();
+                let refusal = service_request(registry, op, name, &mut text);
+                self.reply(i, msg.serial, refusal, &[text.as_bytes()]);
+            }
+        }
+    }
+
+    /// Send client `i` the reply to its call `call_serial`: a return, or the
+    /// error `error`, with `fields`. A client whose channel will not take it
+    /// is dropped.
+    fn reply(&mut self, i: usize, call_serial: u64, error: Option<&[u8]>, fields: &[&[u8]]) {
+        self.serial = self.serial.wrapping_add(1).max(1);
+        let mut out = [0u8; 512];
+        let Some(len) = init::bus::encode_reply(&mut out, self.serial, call_serial, error, fields)
+        else {
+            return;
+        };
+        let handle = self.clients[i].handle;
+        if syscall3(SYS_CHANNEL_SEND, handle, out.as_ptr() as u64, len as u64) < 0 {
+            self.drop_client(i);
+        }
+    }
+}
+
+/// The uid the kernel recorded for the other end of channel `handle` when
+/// it connected; `None` when it has no record.
+fn peer_uid(handle: u64) -> Option<u32> {
+    let mut record = [0u8; 16];
+    // The record: little-endian pid, uid, gid, and a reserved word.
+    if syscall2(SYS_CHANNEL_PEER_CRED, handle, record.as_mut_ptr() as u64) != 0 {
+        return None;
+    }
+    Some(u32::from_le_bytes([
+        record[4], record[5], record[6], record[7],
+    ]))
+}
+
+/// Close channel `handle`. A close cannot be retried and has nobody to
+/// report to: the kernel's answers 0 whatever it finds.
+fn close_channel(handle: u64) {
+    let _ = syscall1(SYS_CHANNEL_CLOSE, handle);
+}
+
+/// The word for `power` on the console.
+fn power_word(power: init::bus::Power) -> &'static str {
+    match power {
+        init::bus::Power::Off => "power off",
+        init::bus::Power::Reboot => "reboot",
+    }
+}
+
+/// Stop every service, then switch the machine off or restart it. Returns
+/// only when the kernel could not; the console says why, and the services
+/// stay stopped.
+fn power_down(power: init::bus::Power, registry: &mut ServiceRegistry) {
+    print("[init] stopping every service to ");
+    print(power_word(power));
+    print("\n");
+    registry.stop_every_service();
+    let nr = match power {
+        init::bus::Power::Off => SYS_POWER_OFF,
+        init::bus::Power::Reboot => SYS_POWER_REBOOT,
+    };
+    let ret = syscall1(nr, 0);
+    print("[init] could not ");
+    print(power_word(power));
+    print(": error ");
+    print_i64(ret);
+    print("\n");
+}
+
+/// Carry out `op` on the service `name` for a bus client: `None` and what
+/// was done in `text`, or the error to answer with and why in `text`.
+fn service_request(
+    registry: &mut ServiceRegistry,
+    op: init::bus::ServiceOp,
+    name: &[u8],
+    text: &mut Line,
+) -> Option<&'static [u8]> {
+    use init::bus::{ServiceOp, error};
+    let Some(idx) = registry.find_by_name(name) else {
+        text.push(b"no ").push(name);
+        return Some(error::NO_SUCH_SERVICE);
+    };
+    let running = registry.services[idx].pid != 0;
+    match op {
+        ServiceOp::Start | ServiceOp::Restart => {
+            if running && op == ServiceOp::Start {
+                text.push(name).push(b" is already running (PID ");
+                text.push_u64(registry.services[idx].pid).push(b")");
+                return None;
+            }
+            if running {
+                let ended = registry.stop_service(idx);
+                text.push(b"stopped: ");
+                ended_text(text, ended, registry.services[idx].stop_timeout_ms);
+                text.push(b"; ");
+            }
+            registry.services[idx].auto_restart = true;
+            registry.services[idx].backoff_ns = BACKOFF_INITIAL_NS;
+            registry.services[idx].restart_after_ns = 0;
+            let pid = registry.start_service(idx);
+            if pid < 0 {
+                text.push(b"could not start ").push(name).push(b": error ");
+                text.push_i64(pid);
+                return Some(error::FAILED);
+            }
+            text.push(b"started ").push(name).push(b" (PID ");
+            text.push_i64(pid).push(b")");
+            None
+        }
+        ServiceOp::Stop => {
+            if !running {
+                text.push(name).push(b" is not running");
+                registry.services[idx].auto_restart = false;
+                return None;
+            }
+            let ended = registry.stop_service(idx);
+            text.push(b"stopped ").push(name).push(b": ");
+            ended_text(text, ended, registry.services[idx].stop_timeout_ms);
+            None
+        }
+        ServiceOp::Reload => {
+            if !running {
+                text.push(name).push(b" is not running");
+                return Some(error::FAILED);
+            }
+            let ret = syscall2(SYS_SIGNAL_SEND, registry.services[idx].pid, SIGHUP);
+            if ret < 0 {
+                text.push(b"could not signal ").push(name).push(b": error ");
+                text.push_i64(ret);
+                return Some(error::FAILED);
+            }
+            text.push(b"asked ").push(name).push(b" to reload (SIGHUP)");
+            None
+        }
+        ServiceOp::Enable | ServiceOp::Disable => {
+            let disabled = op == ServiceOp::Disable;
+            match set_disabled_at_boot(name, disabled) {
+                Ok(()) => {
+                    text.push(name).push(if disabled {
+                        b" will not start at boot".as_slice()
+                    } else {
+                        b" will start at boot"
+                    });
+                    None
+                }
+                Err(e) => {
+                    text.push(b"could not change ");
+                    text.push(init::STARTUP_DISABLED).push(b": error ");
+                    text.push_i64(e);
+                    Some(error::FAILED)
+                }
+            }
+        }
+    }
+}
+
+/// Name `name` in `/etc/startup.disabled`, or take it out: rewrite the
+/// file with every other line kept (`init::set_disabled`). A file that is
+/// not there is an empty list; one longer than `init::MAX_DISABLED_LIST`
+/// is not init's to rewrite (`ERR_TOO_LARGE`).
+fn set_disabled_at_boot(name: &[u8], disabled: bool) -> Result<(), i64> {
+    let mut out = [0u8; init::MAX_DISABLED_LIST];
+    let rewrite = |list: &[u8], out: &mut [u8; init::MAX_DISABLED_LIST]| {
+        if list.len() > init::MAX_DISABLED_LIST {
+            return Err(ERR_TOO_LARGE);
+        }
+        init::set_disabled(list, name, disabled, out).ok_or(ERR_TOO_LARGE)
+    };
+    let len =
+        match with_whole_file::<{ init::MAX_DISABLED_LIST }, _>(init::STARTUP_DISABLED, |list| {
+            rewrite(list, &mut out)
+        }) {
+            Ok(len) => len?,
+            Err(ERR_NOT_FOUND) => rewrite(b"", &mut out)?,
+            Err(e) => return Err(e),
+        };
+    match fs_write_file(init::STARTUP_DISABLED, &out[..len]) {
+        0 => Ok(()),
+        e => Err(e),
+    }
+}
+
+/// [`set_disabled_at_boot`]'s own failure: the list would be longer than
+/// `init::MAX_DISABLED_LIST`. The kernel's `InvalidArgument`.
+const ERR_TOO_LARGE: i64 = -3;
 
 /// Process entry point.  Called by the kernel via IRETQ to ring 3.
 ///
@@ -2783,6 +3334,9 @@ pub extern "C" fn _start() -> ! {
 
     // Auto-start services from /etc/startup.conf (if it exists).
     load_startup_services(&mut registry);
+
+    // And answer the bus's requests about them, and about switching off.
+    let mut bus = Bus::register();
 
     print("Type 'help' for available commands.\n\n");
     let mut line_buf = [0u8; MAX_LINE];
@@ -2838,6 +3392,9 @@ pub extern "C" fn _start() -> ! {
         if registry.count > 0 {
             registry.poll();
         }
+
+        // 3b. Answer the service bus.
+        bus.poll(&mut registry);
 
         // 4. If nothing happened this iteration, sleep briefly to
         //    yield the CPU.  Use a shorter sleep when the user might

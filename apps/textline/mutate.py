@@ -265,6 +265,8 @@ S_DRAWN = "a_press_is_measured_against_the_text_as_it_was_drawn"
 S_MENU = "the_menu_edits_the_search"
 S_FOCUSED = "a_box_with_the_keyboard_draws_its_caret_on_the_line"
 S_UNFOCUSED = "a_box_without_the_keyboard_draws_the_search_or_its_placeholder"
+S_EMPTY_FOCUSED = "an_empty_box_with_the_keyboard_says_what_it_is_for_under_its_caret"
+S_SELECT_ALL = "select_all_types_over_the_search"
 
 SEARCH_MUTATIONS = [
     (
@@ -329,33 +331,51 @@ SEARCH_MUTATIONS = [
     ),
     (
         "an empty box draws no placeholder",
-        "            (look.placeholder, look.placeholder_color)\n",
-        "            (self.input.text(), look.placeholder_color)\n",
+        "        if self.is_empty() {\n            push_line(\n",
+        "        if false {\n            push_line(\n",
+        [S_UNFOCUSED, S_EMPTY_FOCUSED],
+    ),
+    (
+        "the placeholder is drawn over a search",
+        "        if self.is_empty() {\n            push_line(\n",
+        "        if true {\n            push_line(\n",
         [S_UNFOCUSED],
     ),
     (
         "the placeholder is drawn in the search's colour",
-        "            (look.placeholder, look.placeholder_color)\n",
-        "            (look.placeholder, look.color)\n",
+        "                look.placeholder_color,\n",
+        "                look.color,\n",
+        [S_UNFOCUSED, S_EMPTY_FOCUSED],
+    ),
+    (
+        "a search without the keyboard is not drawn",
+        "            push_line(tree, look, self.input.text(), look.color, self.font_size);\n",
+        "",
         [S_UNFOCUSED],
     ),
     (
         "the text drops a pixel when the box has not the keyboard",
-        "            y: look.y,\n            text: text.to_string(),\n",
-        "            y: look.y + 1.0,\n            text: text.to_string(),\n",
+        "        y: look.y,\n        text: text.to_string(),\n",
+        "        y: look.y + 1.0,\n        text: text.to_string(),\n",
         [S_UNFOCUSED],
     ),
     (
         "a long search runs out of the box",
-        "            max_width: Some(look.width.max(0.0)),\n",
-        "            max_width: None,\n",
+        "        max_width: Some(look.width.max(0.0)),\n",
+        "        max_width: None,\n",
         [S_UNFOCUSED],
     ),
     (
         "a long search is cut without saying so",
-        "            overflow: TextOverflow::Ellipsis,\n",
-        "            overflow: TextOverflow::Clip,\n",
+        "        overflow: TextOverflow::Ellipsis,\n",
+        "        overflow: TextOverflow::Clip,\n",
         [S_UNFOCUSED],
+    ),
+    (
+        "select_all selects nothing",
+        "        self.input.select_all();\n",
+        "",
+        [S_SELECT_ALL],
     ),
 ]
 

@@ -56,8 +56,8 @@ pub struct SearchLook<'a> {
     /// Whether the box has the keyboard, which is what draws the caret and
     /// the selection.
     pub focused: bool,
-    /// What an empty box without the keyboard says -- what it searches, and
-    /// the key that reaches it.
+    /// What an empty box says, with the keyboard or without -- what it
+    /// searches, and, while it has not the keyboard, the key that reaches it.
     pub placeholder: &'a str,
     /// The search's colour, and the caret's.
     pub color: Color,
@@ -121,6 +121,12 @@ impl SearchBox {
         self.set_text("")
     }
 
+    /// Select the whole search, for the next key to type over -- what
+    /// Ctrl+F does in a program whose box has the keyboard already.
+    pub fn select_all(&mut self) {
+        self.input.select_all();
+    }
+
     /// Apply `key` to the box -- on the program's clipboard, as its menu is
     /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
     /// and whether the search changed.
@@ -168,12 +174,24 @@ impl SearchBox {
         self.input.edit_command(id) == KeyEdit::Changed
     }
 
-    /// Draw the box's text into `tree` as `look` says: with its caret and
-    /// selection while it has the keyboard, else the search -- or, empty,
-    /// the placeholder -- cut to the width with `…`. The text sits on the
-    /// same line either way, so it does not move when the box takes the
-    /// keyboard. The frame round it is the caller's (`guitk::field::draw`).
+    /// Draw the box's text into `tree` as `look` says: an empty box says
+    /// what it is for, with the keyboard or without; a box with the keyboard
+    /// draws its search with its caret and selection, and one without it the
+    /// search cut to the width with `…`. The text sits on the same line
+    /// either way, so it does not move when the box takes the keyboard. The
+    /// frame round it is the caller's (`guitk::field::draw`).
     pub fn draw(&self, tree: &mut RenderTree, look: &SearchLook<'_>) {
+        // The placeholder under the caret too: a box that has just taken the
+        // keyboard still says what to type into it.
+        if self.is_empty() {
+            push_line(
+                tree,
+                look,
+                look.placeholder,
+                look.placeholder_color,
+                self.font_size,
+            );
+        }
         if look.focused {
             textedit::draw(
                 tree,
@@ -194,24 +212,31 @@ impl SearchBox {
                     caret_width: look.caret_width,
                 },
             );
-            return;
+        } else if !self.is_empty() {
+            push_line(tree, look, self.input.text(), look.color, self.font_size);
         }
-        let (text, color) = if self.is_empty() {
-            (look.placeholder, look.placeholder_color)
-        } else {
-            (self.input.text(), look.color)
-        };
-        tree.push(RenderCommand::Text {
-            x: look.x,
-            y: look.y,
-            text: text.to_string(),
-            font_size: self.font_size,
-            color,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(look.width.max(0.0)),
-            overflow: TextOverflow::Ellipsis,
-        });
     }
+}
+
+/// One line of `text` in `color` where `look` puts the box's text, cut to
+/// its width with `…`.
+fn push_line(
+    tree: &mut RenderTree,
+    look: &SearchLook<'_>,
+    text: &str,
+    color: Color,
+    font_size: f32,
+) {
+    tree.push(RenderCommand::Text {
+        x: look.x,
+        y: look.y,
+        text: text.to_string(),
+        font_size,
+        color,
+        font_weight: FontWeightHint::Regular,
+        max_width: Some(look.width.max(0.0)),
+        overflow: TextOverflow::Ellipsis,
+    });
 }
 
 #[cfg(test)]
@@ -478,6 +503,42 @@ mod tests {
                 .any(|c| matches!(c, RenderCommand::Line { .. })),
             "no caret"
         );
+    }
+
+    #[test]
+    fn an_empty_box_with_the_keyboard_says_what_it_is_for_under_its_caret() {
+        let search = SearchBox::new(64, 13.0);
+        let mut tree = RenderTree::new();
+        search.draw(
+            &mut tree,
+            &SearchLook {
+                focused: true,
+                ..LOOK
+            },
+        );
+        assert!(
+            tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, color, .. }
+                    if text == LOOK.placeholder && *color == LOOK.placeholder_color
+            )),
+            "the placeholder went when the box took the keyboard"
+        );
+        assert!(
+            tree.commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Line { .. })),
+            "no caret"
+        );
+    }
+
+    #[test]
+    fn select_all_types_over_the_search() {
+        let mut search = SearchBox::new(64, 13.0);
+        typed(&mut search, "DOLLAR");
+        search.select_all();
+        typed(&mut search, "E");
+        assert_eq!(search.text(), "E");
     }
 
     #[test]

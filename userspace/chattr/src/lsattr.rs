@@ -87,10 +87,10 @@ impl Lsattr {
             }
             padded.push(b' ');
             self.out.write(&padded);
-            e2p::print_flags(&mut self.out, flags, true);
+            crate::flags::print_flags(&mut self.out, flags, true);
             self.out.write(b"\n");
         } else {
-            e2p::print_flags(&mut self.out, flags, false);
+            crate::flags::print_flags(&mut self.out, flags, false);
             self.out.write(b" ");
             self.out.write(name);
             self.out.write(b"\n");
@@ -143,7 +143,9 @@ impl Lsattr {
 /// `main (argc, argv)`: the exit status.
 pub fn main(argv: &[Vec<u8>]) -> i32 {
     let mut l = Lsattr {
-        program_name: argv.first().cloned().unwrap_or_default(),
+        // `static const char *program_name = "lsattr"`, kept when argv is
+        // empty -- whose `usage ()` then names it.
+        program_name: argv.first().cloned().unwrap_or_else(|| b"lsattr".to_vec()),
         opt: Options::default(),
         out: Output::stdout(),
         err: Output::stderr(),

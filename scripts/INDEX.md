@@ -49,7 +49,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/canary-spread-survey.py` | Survey the canary's observed spread across every recorded run. |
 | `scripts/cat-diff.sh` | Differential test: our cat against GNU coreutils' cat. |
 | `scripts/charwidth-gen.py` | Generate the terminal-column width tables of `userspace/charwidth`. |
-| `scripts/chattr-diff.sh` | Differential test: our chattr and lsattr against Ubuntu 24.04's, side by |
+| `scripts/chattr-diff.sh` | Differential test: our chattr and lsattr against Ubuntu 24.04's, in WSL. |
 | `scripts/check-absent-operand-default.py` | Refuse a missing shell operand that silently becomes a number. |
 | `scripts/check-accidental-headings.py` | Refuse to build when a `---` separator has silently become an `<h2>`. |
 | `scripts/check-ansic-quoting-vs-bash.py` | Pin bash's `$'...'` (ANSI-C quoting) rules, for TD-SHELLQUOTE-NO-ANSI-C-QUOTING. |

@@ -22,6 +22,15 @@ stdfdguard::guard_std_fds!();
 mod chattr;
 #[cfg(unix)]
 mod e2p;
+// On every host, for its tests: the programs that use it are Unix's alone.
+#[cfg_attr(
+    not(unix),
+    allow(
+        dead_code,
+        reason = "used by the Unix-only programs; built here for its tests"
+    )
+)]
+mod flags;
 #[cfg(unix)]
 mod lsattr;
 

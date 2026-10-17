@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Differential test: our chattr and lsattr against Ubuntu 24.04's, side by
-# side in WSL.
+# Differential test: our chattr and lsattr against Ubuntu 24.04's, in WSL.
 #
 # Ours is `userspace/chattr`, e2fsprogs 1.47.0's `misc/chattr.c` and
 # `misc/lsattr.c` ported -- one binary, `lsattr` by the name it is called.
@@ -97,6 +96,7 @@ compare_same_files() {
   (
     cd "$work" || exit 99
     fixture
+    if [ -n "${SETUP:-}" ]; then eval "$SETUP"; fi
     env -i PATH="$bindir/ours:/usr/bin:/bin" HOME="$work" /usr/bin/timeout -k 2 10 "$@" </dev/null >"$o_out" 2>"$o_err"
     echo $? > "$DIFF_TMP/o.rc"
     env -i PATH="$bindir/gnu:/usr/bin:/bin" HOME="$work" /usr/bin/timeout -k 2 10 "$@" </dev/null >"$g_out" 2>"$g_err"
@@ -113,6 +113,7 @@ compare_same_files() {
     printf '  ours rc=%s out={%s} err={%s}\n' "$o_rc" "$(head -c 400 "$o_out" | tr '\n' '|')" "$(head -c 300 "$o_err" | tr '\n' '|')"
     printf '  gnu  rc=%s out={%s} err={%s}\n' "$g_rc" "$(head -c 400 "$g_out" | tr '\n' '|')" "$(head -c 300 "$g_err" | tr '\n' '|')"
   )
+  SETUP=''
 }
 
 run_case() {

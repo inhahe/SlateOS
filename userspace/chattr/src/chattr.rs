@@ -2,43 +2,9 @@
 
 use cstdio::Output;
 
-use crate::e2p::{
-    self, EXT2_APPEND_FL, EXT2_COMPR_FL, EXT2_DIRSYNC_FL, EXT2_IMMUTABLE_FL, EXT2_NOATIME_FL,
-    EXT2_NOCOMPR_FL, EXT2_NODUMP_FL, EXT2_NOTAIL_FL, EXT2_SECRM_FL, EXT2_SYNC_FL, EXT2_TOPDIR_FL,
-    EXT2_UNRM_FL, EXT3_JOURNAL_DATA_FL, EXT4_CASEFOLD_FL, EXT4_EXTENTS_FL, EXT4_PROJINHERIT_FL,
-    FS_DAX_FL, FS_NOCOW_FL,
-};
+use crate::e2p;
+use crate::flags::{EXT2_DIRSYNC_FL, get_flag, print_flags};
 use crate::{E2FSPROGS_DATE, E2FSPROGS_VERSION};
-
-/// `flags_array`: the letters `chattr` takes, and their flags.
-const FLAGS_ARRAY: [(u64, u8); 18] = [
-    (EXT2_NOATIME_FL, b'A'),
-    (EXT2_SYNC_FL, b'S'),
-    (EXT2_DIRSYNC_FL, b'D'),
-    (EXT2_APPEND_FL, b'a'),
-    (EXT2_COMPR_FL, b'c'),
-    (EXT2_NOCOMPR_FL, b'm'),
-    (EXT2_NODUMP_FL, b'd'),
-    (EXT4_EXTENTS_FL, b'e'),
-    (EXT2_IMMUTABLE_FL, b'i'),
-    (EXT3_JOURNAL_DATA_FL, b'j'),
-    (EXT4_PROJINHERIT_FL, b'P'),
-    (EXT2_SECRM_FL, b's'),
-    (EXT2_UNRM_FL, b'u'),
-    (EXT2_NOTAIL_FL, b't'),
-    (EXT2_TOPDIR_FL, b'T'),
-    (FS_NOCOW_FL, b'C'),
-    (FS_DAX_FL, b'x'),
-    (EXT4_CASEFOLD_FL, b'F'),
-];
-
-/// `get_flag (c)`: 0 for a letter that is no flag.
-fn get_flag(c: u8) -> u64 {
-    FLAGS_ARRAY
-        .iter()
-        .find(|&&(_, letter)| letter == c)
-        .map_or(0, |&(flag, _)| flag)
-}
 
 /// The run's state: upstream's globals.
 #[derive(Default)]
@@ -184,7 +150,7 @@ impl Chattr {
         self.out.write(b"Flags of ");
         self.out.write(name);
         self.out.write(b" set as ");
-        e2p::print_flags(&mut self.out, flags, false);
+        print_flags(&mut self.out, flags, false);
         self.out.write(b"\n");
     }
 
@@ -321,18 +287,4 @@ pub fn main(argv: &[Vec<u8>]) -> i32 {
     }
     c.out.flush();
     retval
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn each_letter_is_its_flag_and_others_are_none() {
-        assert_eq!(get_flag(b'i'), EXT2_IMMUTABLE_FL);
-        assert_eq!(get_flag(b'm'), EXT2_NOCOMPR_FL);
-        assert_eq!(get_flag(b'F'), EXT4_CASEFOLD_FL);
-        assert_eq!(get_flag(b'E'), 0, "lsattr shows it; chattr cannot set it");
-        assert_eq!(get_flag(b'z'), 0);
-    }
 }

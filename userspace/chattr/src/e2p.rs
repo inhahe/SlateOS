@@ -1,5 +1,5 @@
 //! What `chattr` and `lsattr` take from e2fsprogs' libraries: `lib/e2p`'s
-//! `pf.c` (`print_flags`), `fgetflags.c`, `fsetflags.c`, `fgetversion.c`,
+//! `fgetflags.c`, `fsetflags.c`, `fgetversion.c`,
 //! `fsetversion.c`, `fgetproject.c`, `fsetproject.c` and `iod.c`
 //! (`iterate_on_dir`), and `lib/et`'s `com_err`.
 
@@ -16,82 +16,6 @@ use libcall::{ENXIO, EOPNOTSUPP};
 /// `ELOOP` and `ENOTTY`, which the wrappers turn into [`EOPNOTSUPP`].
 const ELOOP: i32 = libcall::pty::ELOOP;
 const ENOTTY: i32 = libcall::pty::ENOTTY;
-
-// The flags, as `lib/ext2fs/ext2_fs.h` numbers them.
-pub const EXT2_SECRM_FL: u64 = 0x0000_0001;
-pub const EXT2_UNRM_FL: u64 = 0x0000_0002;
-pub const EXT2_COMPR_FL: u64 = 0x0000_0004;
-pub const EXT2_SYNC_FL: u64 = 0x0000_0008;
-pub const EXT2_IMMUTABLE_FL: u64 = 0x0000_0010;
-pub const EXT2_APPEND_FL: u64 = 0x0000_0020;
-pub const EXT2_NODUMP_FL: u64 = 0x0000_0040;
-pub const EXT2_NOATIME_FL: u64 = 0x0000_0080;
-pub const EXT2_NOCOMPR_FL: u64 = 0x0000_0400;
-pub const EXT4_ENCRYPT_FL: u64 = 0x0000_0800;
-pub const EXT2_INDEX_FL: u64 = 0x0000_1000;
-pub const EXT3_JOURNAL_DATA_FL: u64 = 0x0000_4000;
-pub const EXT2_NOTAIL_FL: u64 = 0x0000_8000;
-pub const EXT2_DIRSYNC_FL: u64 = 0x0001_0000;
-pub const EXT2_TOPDIR_FL: u64 = 0x0002_0000;
-pub const EXT4_EXTENTS_FL: u64 = 0x0008_0000;
-pub const EXT4_VERITY_FL: u64 = 0x0010_0000;
-pub const FS_NOCOW_FL: u64 = 0x0080_0000;
-pub const FS_DAX_FL: u64 = 0x0200_0000;
-pub const EXT4_INLINE_DATA_FL: u64 = 0x1000_0000;
-pub const EXT4_PROJINHERIT_FL: u64 = 0x2000_0000;
-pub const EXT4_CASEFOLD_FL: u64 = 0x4000_0000;
-
-/// `pf.c`'s `flags_array`: each flag's letter and long name, in the order
-/// `lsattr` prints them.
-const FLAGS_ARRAY: [(u64, &str, &str); 22] = [
-    (EXT2_SECRM_FL, "s", "Secure_Deletion"),
-    (EXT2_UNRM_FL, "u", "Undelete"),
-    (EXT2_SYNC_FL, "S", "Synchronous_Updates"),
-    (EXT2_DIRSYNC_FL, "D", "Synchronous_Directory_Updates"),
-    (EXT2_IMMUTABLE_FL, "i", "Immutable"),
-    (EXT2_APPEND_FL, "a", "Append_Only"),
-    (EXT2_NODUMP_FL, "d", "No_Dump"),
-    (EXT2_NOATIME_FL, "A", "No_Atime"),
-    (EXT2_COMPR_FL, "c", "Compression_Requested"),
-    (EXT4_ENCRYPT_FL, "E", "Encrypted"),
-    (EXT3_JOURNAL_DATA_FL, "j", "Journaled_Data"),
-    (EXT2_INDEX_FL, "I", "Indexed_directory"),
-    (EXT2_NOTAIL_FL, "t", "No_Tailmerging"),
-    (EXT2_TOPDIR_FL, "T", "Top_of_Directory_Hierarchies"),
-    (EXT4_EXTENTS_FL, "e", "Extents"),
-    (FS_NOCOW_FL, "C", "No_COW"),
-    (FS_DAX_FL, "x", "DAX"),
-    (EXT4_CASEFOLD_FL, "F", "Casefold"),
-    (EXT4_INLINE_DATA_FL, "N", "Inline_Data"),
-    (EXT4_PROJINHERIT_FL, "P", "Project_Hierarchy"),
-    (EXT4_VERITY_FL, "V", "Verity"),
-    (EXT2_NOCOMPR_FL, "m", "Dont_Compress"),
-];
-
-/// `print_flags (f, flags, options)`: a letter or a `-` for each flag, or
-/// (`long`) the long names of those set, `, `-separated, `---` for none.
-pub fn print_flags(out: &mut Output, flags: u64, long: bool) {
-    let mut first = true;
-    for (flag, short, long_name) in FLAGS_ARRAY {
-        if flags & flag != 0 {
-            if long {
-                if first {
-                    first = false;
-                } else {
-                    out.write(b", ");
-                }
-                out.write(long_name.as_bytes());
-            } else {
-                out.write(short.as_bytes());
-            }
-        } else if !long {
-            out.write(b"-");
-        }
-    }
-    if long && first {
-        out.write(b"---");
-    }
-}
 
 /// `name` as a path.
 fn path(name: &[u8]) -> &std::path::Path {
@@ -266,31 +190,4 @@ fn needs_carriage_return() -> bool {
 /// `lstat (name)`.
 pub fn lstat(name: &[u8]) -> Result<std::fs::Metadata, i32> {
     std::fs::symlink_metadata(path(name)).map_err(|e| e.raw_os_error().unwrap_or(libcall::EINVAL))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cstdio::Sink;
-
-    fn flags(f: u64, long: bool) -> Vec<u8> {
-        let mut out = Output::new(Sink::Memory(Vec::new()), false, false);
-        print_flags(&mut out, f, long);
-        out.take_written()
-    }
-
-    #[test]
-    fn flags_print_as_lsattr_prints_them() {
-        assert_eq!(flags(0, false), b"----------------------");
-        assert_eq!(flags(EXT4_EXTENTS_FL, false), b"--------------e-------");
-        assert_eq!(
-            flags(EXT2_IMMUTABLE_FL | EXT2_NOCOMPR_FL, false),
-            b"----i----------------m"
-        );
-        assert_eq!(flags(0, true), b"---");
-        assert_eq!(
-            flags(EXT2_APPEND_FL | EXT4_EXTENTS_FL, true),
-            b"Append_Only, Extents"
-        );
-    }
 }

@@ -74,6 +74,14 @@ this order, a commit each:
    *Done 2026-10-17.*
 2. Give it the needs above, each with its tests: `set_font_size`, a weight,
    `set_caret`, a check an edit must pass (`key_checked`), a mask, and a
-   look that elides at the start.
+   look that elides at the start. *Each lands with the first application
+   that uses it, so none is built without a caller.* Done so far:
+   `LineKey::moved`, whether a key moved the caret or the selection, which
+   eight programs had computed beside the box (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
+   *Moved (2026-10-17):* rssreader's prompt, pdfviewer's page range,
+   systemrestore's form (two boxes), defrag's exclude pattern, screenshot's
+   text annotation. A row that stood for the second copy -- a reload, a
+   write-back, a private clipboard -- goes with it; the rest move onto the
+   box.

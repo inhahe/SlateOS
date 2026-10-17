@@ -36,13 +36,13 @@ use guitk::render::{FontWeightHint, RenderTree, TextSpan};
 use guitk::tabs::Tabs;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::undo::{Travel, UndoHistory};
 use highlight::{HighlightState, StyledToken, Theme, Token};
 use input::FindField;
 use oswindow::app::Response;
 use pathtext::ShowPath;
 use syntree::{Pos, SyntaxTree};
+use textline::{LineBox, LineLook};
 
 use diffcore::{
     ConflictChoice, DiskChange, FileSync, MergeOutcome, MergeReview, ThreeWayMerge,
@@ -1426,8 +1426,11 @@ fn word_class(c: char) -> u8 {
 // ============================================================================
 
 pub struct FindState {
-    pub query: String,
-    pub replace_text: String,
+    /// What is searched for: the find field's text, caret and selection.
+    pub query: LineBox,
+    /// What a match is replaced with: the replace field's text, caret and
+    /// selection.
+    pub replace_text: LineBox,
     pub case_sensitive: bool,
     // `use_regex` was here and is deleted. `Ctrl+E` toggled it, no search
     // code ever read it, and the find bar drew no indicator -- so the key did
@@ -1449,8 +1452,8 @@ impl Default for FindState {
 impl FindState {
     pub fn new() -> Self {
         Self {
-            query: String::new(),
-            replace_text: String::new(),
+            query: LineBox::new(FIND_CAPACITY, FIND_TEXT_SIZE),
+            replace_text: LineBox::new(FIND_CAPACITY, FIND_TEXT_SIZE),
             case_sensitive: false,
             matches: Vec::new(),
             current_match: 0,
@@ -1468,14 +1471,14 @@ impl FindState {
             let mut start = 0;
             while let Some(rest) = line.get(start..) {
                 let hit = if self.case_sensitive {
-                    rest.find(&self.query).map(|p| {
+                    rest.find(self.query.text()).map(|p| {
                         let at = start.saturating_add(p);
-                        (at, at.saturating_add(self.query.len()))
+                        (at, at.saturating_add(self.query.text().len()))
                     })
                 } else {
                     rest.char_indices().find_map(|(off, _)| {
                         let at = start.saturating_add(off);
-                        folded_match_end(line, at, &self.query).map(|end| (at, end))
+                        folded_match_end(line, at, self.query.text()).map(|end| (at, end))
                     })
                 };
                 let Some((at, end)) = hit else { break };
@@ -1538,7 +1541,7 @@ impl FindState {
         let Some(&(line, start, end)) = self.matches.get(self.current_match) else {
             return;
         };
-        if doc.replace_in_line(line, start, end, &self.replace_text) {
+        if doc.replace_in_line(line, start, end, self.replace_text.text()) {
             doc.modified = true;
         }
         self.find_all(doc);
@@ -1555,7 +1558,7 @@ impl FindState {
         // replaced would be a lie the user can see in the buffer.
         let mut count = 0_usize;
         for &(line, start, end) in self.matches.iter().rev() {
-            if doc.replace_in_line(line, start, end, &self.replace_text) {
+            if doc.replace_in_line(line, start, end, self.replace_text.text()) {
                 count = count.saturating_add(1);
             }
         }
@@ -1721,23 +1724,8 @@ pub struct EditorState {
     /// position and a kind — so shift-click can only be recognised from what the
     /// keyboard last said. Tracked in `input`, read by the mouse handling there.
     pub modifiers: oswindow::Modifiers,
-    /// The editor's own clipboard.
-    ///
-    /// Not the system clipboard: `gui/clipboard` is a *service binary*, not a
-    /// library, and reaching it needs an IPC transport that does not exist yet
-    /// (see `known-issues.md`, the transport step). Cut/copy/paste therefore
-    /// work within this editor and nowhere else. When the clipboard protocol
-    /// lands, this field becomes the local cache in front of it rather than the
-    /// whole story.
-    pub clipboard: String,
     /// Which of the find bar's two fields the keyboard is typing into.
     pub find_field: FindField,
-    /// The find bar's editor: the caret and selection of the field the
-    /// keyboard is typing into, loaded whenever the keyboard moves to the
-    /// other field or the field's text changed under it.
-    pub(crate) find_editor: TextInput,
-    /// Which field `find_editor` holds.
-    pub(crate) find_editor_for: Option<FindField>,
     /// Where the pointer is, while it is over the window: the find bar's box
     /// under it is drawn lit.
     pub pointer: Option<(f32, f32)>,
@@ -1838,10 +1826,7 @@ impl EditorState {
             status: None,
             dragging: false,
             modifiers: oswindow::Modifiers::NONE,
-            clipboard: String::new(),
             find_field: FindField::Query,
-            find_editor: textline::field_holding("", FIND_CAPACITY),
-            find_editor_for: None,
             pointer: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             dialog: None,
@@ -2778,60 +2763,43 @@ impl EditorState {
         let open = !self.find_covered();
         guitk::field::State {
             hovered: open && self.find_box_under_pointer() == Some(field),
-            focused: open && self.find_field == field,
+            focused: self.find_box_has_keyboard(field),
             disabled: false,
             invalid: false,
         }
     }
 
-    /// What one of the find bar's fields holds.
-    pub(crate) fn find_text(&self, field: FindField) -> &str {
+    /// Whether one of the find bar's fields has the keyboard: what it is
+    /// drawn with, and its presses measured against -- neither while
+    /// something takes the keys ahead of the bar.
+    pub(crate) fn find_box_has_keyboard(&self, field: FindField) -> bool {
+        !self.find_covered() && self.find_field == field
+    }
+
+    /// One of the find bar's fields.
+    pub(crate) fn find_line(&self, field: FindField) -> &LineBox {
         match field {
             FindField::Query => &self.find.query,
             FindField::Replace => &self.find.replace_text,
         }
     }
 
-    /// Where a find field's caret is: the editor's, for the field it holds
-    /// while its text is the field's; the end otherwise -- the field the
-    /// keyboard moves to types after what it holds. One answer for the
-    /// drawing and for a press.
-    pub(crate) fn find_cursor(&self, field: FindField) -> text::TextCursor {
-        let held = self.find_text(field);
-        if self.find_editor_for == Some(field) && self.find_editor.text() == held {
-            self.find_editor.cursor()
-        } else {
-            text::TextCursor::from(held.len())
-        }
-    }
-
     /// A find field's text in its box at `rect`, with the caret -- while it
-    /// has the keyboard -- and the selection where they are, scrolled so the
-    /// caret stays in view. The two fields were plain text with no caret at
-    /// all: nothing said where typing would go, and only the end could take
-    /// it.
+    /// has the keyboard (`focused`) -- and the selection where they are,
+    /// scrolled so the caret stays in view.
     fn draw_find_text(&self, tree: &mut RenderTree, field: FindField, rect: Rect, focused: bool) {
-        let held = self.find_text(field);
         let line = text::line_height(FIND_TEXT_SIZE, FontWeightHint::Regular);
-        let editing = self.find_editor_for == Some(field) && self.find_editor.text() == held;
-        textedit::draw(
+        self.find_line(field).draw(
             tree,
-            &textedit::SingleLine {
-                text: held,
-                cursor: self.find_cursor(field),
-                selection_anchor: if editing && focused {
-                    self.find_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused,
+            &LineLook {
                 x: rect.x + FIND_TEXT_INSET,
                 y: rect.y + (rect.h - line) / 2.0,
                 width: (rect.w - 2.0 * FIND_TEXT_INSET).max(0.0),
                 line_height: line,
-                font_size: FIND_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused,
+                placeholder: "",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -6117,7 +6085,7 @@ mod tab_tests {
         let mut doc = Document::new();
         doc.lines = vec!["aaaa".to_string(), "aaaa".to_string()];
         let mut find = FindState::new();
-        find.query = "aa".to_string();
+        find.query.set_text("aa");
         find.find_all(&doc);
         assert_eq!(find.matches.len(), 4);
 
@@ -6136,7 +6104,7 @@ mod tab_tests {
         let mut doc = Document::new();
         doc.lines = vec!["xx".to_string()];
         let mut find = FindState::new();
-        find.query = "x".to_string();
+        find.query.set_text("x");
         find.find_all(&doc);
         doc.lines = vec!["é".to_string()]; // two bytes, one character
         assert_eq!(find.replace_all(&mut doc), 0);
@@ -6171,8 +6139,8 @@ mod tab_tests {
         let mut doc = Document::new();
         doc.lines = vec!["aaaa".to_string()];
         let mut find = FindState::new();
-        find.query = "aa".to_string();
-        find.replace_text = "b".to_string();
+        find.query.set_text("aa");
+        find.replace_text.set_text("b");
         find.find_all(&doc);
         assert_eq!(find.matches, [(0, 0, 2), (0, 2, 4)]);
         assert_eq!(find.replace_all(&mut doc), 2);
@@ -6189,8 +6157,8 @@ mod tab_tests {
         let mut doc = Document::new();
         doc.lines = vec!["İx".to_string()];
         let mut find = FindState::new();
-        find.query = "X".to_string();
-        find.replace_text = "y".to_string();
+        find.query.set_text("X");
+        find.replace_text.set_text("y");
         find.find_all(&doc);
         assert_eq!(find.matches, [(0, 2, 3)]);
         assert_eq!(find.replace_all(&mut doc), 1);
@@ -6205,7 +6173,7 @@ mod tab_tests {
         let mut doc = Document::new();
         doc.lines = vec!["日本日本".to_string()];
         let mut find = FindState::new();
-        find.query = "日本".to_string();
+        find.query.set_text("日本");
         find.find_all(&doc);
         assert_eq!(find.matches, [(0, 0, 6), (0, 6, 12)]);
     }

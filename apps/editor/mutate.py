@@ -195,8 +195,8 @@ MAIN_MUTATIONS += [
     ),
     (
         "both find boxes are marked",
-        "            focused: open && self.find_field == field,\n",
-        "            focused: open,\n",
+        "        !self.find_covered() && self.find_field == field\n",
+        "        !self.find_covered()\n",
         [FIND_BAR],
     ),
     (
@@ -323,23 +323,21 @@ MAIN_MUTATIONS += [
 # known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
 # were plain text with no caret, typed only at their end -- and a chord with
 # Alt typed its letter into them, and AltGr+R replaced the match.
+# No rows for the find fields' caret and selection drawn, the editor kept
+# for a field or reloaded, or a copy in a field reaching the clipboard: since
+# 2026-10-17 each field is a textline LineBox, whose own table
+# (apps/textline/mutate.py) holds those.
 MAIN_MUTATIONS += [
     (
-        "the find fields draw no caret",
-        "                cursor: self.find_cursor(field),\n",
-        "                cursor: text::TextCursor::from(held.len()),\n",
-        [CARET],
-    ),
-    (
-        "the find fields draw no selection",
-        "                selection_anchor: if editing && focused {\n",
-        "                selection_anchor: if false {\n",
-        [CARET],
-    ),
-    (
         "both find fields draw a caret",
-        "                focused,\n                x: rect.x + FIND_TEXT_INSET,\n",
-        "                focused: true,\n                x: rect.x + FIND_TEXT_INSET,\n",
+        "                line_height: line,\n                focused,\n                placeholder: \"\",\n",
+        "                line_height: line,\n                focused: true,\n                placeholder: \"\",\n",
+        [CARET],
+    ),
+    (
+        "the replacement is drawn from the search",
+        "            FindField::Replace => &self.find.replace_text,\n",
+        "            FindField::Replace => &self.find.query,\n",
         [CARET],
     ),
 ]
@@ -364,15 +362,21 @@ INPUT_MUTATIONS += [
         [CHORDS],
     ),
     (
-        "a copy in a field takes nothing to the clipboard",
-        "            self.clipboard = copied;\n        }\n        if !edit.handled {\n",
-        "            let _ = copied;\n        }\n        if !edit.handled {\n",
-        [CARET],
+        "a copy of the text takes nothing to the clipboard",
+        "        guitk::clipboard::set_text(&text);\n        true\n",
+        "        let _ = &text;\n        true\n",
+        ["cut_and_paste_move_text_through_the_clipboard"],
+    ),
+    (
+        "a paste into the text takes nothing from the clipboard",
+        "        let text = guitk::clipboard::text();\n",
+        "        let text = String::new();\n",
+        ["cut_and_paste_move_text_through_the_clipboard"],
     ),
     (
         "an answered key that changes nothing reaches the text",
         "        if !edit.handled {\n            return None;\n        }\n",
-        "        if !edit.handled || self.find_editor.text() == self.find_text(field) {\n            return None;\n        }\n",
+        "        if !edit.handled || (!edit.changed && !edit.moved) {\n            return None;\n        }\n",
         [CARET],
     ),
     (
@@ -382,9 +386,9 @@ INPUT_MUTATIONS += [
         [CARET],
     ),
     (
-        "the editor is kept for the field the keyboard moved to",
-        "        if self.find_editor_for != Some(field) || self.find_editor.text() != self.find_text(field) {\n",
-        "        if self.find_editor.text() != self.find_text(field) {\n",
+        "the two find fields type into one box",
+        "            FindField::Replace => &mut self.find.replace_text,\n",
+        "            FindField::Replace => &mut self.find.query,\n",
         ["the_find_field_the_keyboard_moves_to_types_after_what_it_holds"],
     ),
     (
@@ -394,8 +398,14 @@ INPUT_MUTATIONS += [
         [CARET],
     ),
     (
+        "a press in a find field without the keyboard is measured as though it had it",
+        "        let had_the_keyboard = self.find_box_has_keyboard(field);\n",
+        "        let had_the_keyboard = true;\n",
+        ["a_press_in_a_find_field_without_the_keyboard_lands_where_it_reads"],
+    ),
+    (
         "Ctrl+F does not select what the field holds",
-        "        self.find_editor.select_all();\n",
+        "        self.find_field_box(field).select_all();\n",
         "",
         [CHORDS],
     ),

@@ -153,7 +153,9 @@ every record, not only `sigqueue`'s. Tested in ring 3 through the Linux ABI
   after the library's own `EFAULT`.
 - `SIGEV_THREAD` is not yet: glibc's helper thread blocks its signal, and
   the library's mask is still the process's where yours is the thread's.
-  Per-thread masks come first.
+  Per-thread masks come first. *(2026-10-16: both done; each such timer
+  is one of yours with `SIGEV_THREAD_ID` aimed at the library's helper
+  thread and signal 32 -- `ctest-sigev-thread`.)*
 - `prctl(PR_SET_DUMPABLE)` and `PR_GET_DUMPABLE` are your flag now, through
   `SYS_PROCESS_DUMPABLE`; the library's copy stays for a kernel without the
   call.

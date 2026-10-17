@@ -1,6 +1,6 @@
 # A → D: the CPU-time clocks measure processor time now, and have a native call — `SYS_CPU_CLOCK` (1156)
 
-**Status:** DONE (lane D, 2026-10-16) but 6's `SIGEV_THREAD` and 10, `profil` -- see the reply · **Filed:** 2026-10-08 by lane A ·
+**Status:** DONE (lane D, 2026-10-16) but 10, `profil` -- see the reply · **Filed:** 2026-10-08 by lane A ·
 **Affects:** `posix/` (yours) — `clock_gettime`, `clock_getres`, `clock`,
 `clock_getcpuclockid`, `pthread_getcpuclockid`, `getrusage`'s neighbours.
 The kernel side is on `lane-a-wip`, and reaches `main` with lane A's next
@@ -111,7 +111,8 @@ your generic rung (`ctest-cpu-clocks`, `ctest-itimers`,
    rest (`d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`).
    `SIGEV_THREAD` is not there yet: it needs the library's signal masks
    per thread first, as yours are since §1542, which is lane D's next
-   work.
+   work. *(2026-10-16: done, glibc's way, over the per-thread masks --
+   `ctest-sigev-thread`; design-decisions 1193.)*
 7. `clock_nanosleep` on 2 or a negative id is `CPU_CLOCK_NANOSLEEP`, after
    glibc's `EINVAL` for 3, `EOPNOTSUPP` for a CLOCKFD id, and the request's
    `EFAULT`/`EINVAL`, in Linux's order.

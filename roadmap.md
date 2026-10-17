@@ -2857,15 +2857,14 @@ D's to act on once answered).
   **Done 2026-10-16:** `SYS_MEMORY_LOCK` (1145, closing D-Q8), the power
   calls (1167/1168/1139), the six `posix_spawn` attribute fields, the
   CPU-time clocks (`SYS_CPU_CLOCK`, 1156), `ITIMER_VIRTUAL`/`ITIMER_PROF`,
-  POSIX timers (`SYS_POSIX_TIMER`, 1141; all but `SIGEV_THREAD`), the
-  dumpable flag (`SYS_PROCESS_DUMPABLE`, 1142), "now" as the set-times calls'
-  request -- with `ctest-cpu-clocks`, `ctest-itimers`, `ctest-posix-timers`,
-  `ctest-dumpable`.
-  **Next**, in this order: per-thread signal masks in the library (the
-  kernel's are per thread since §1542, the library's `blocked_mask_ptr` is
-  still the process's; `requests/a-d-signal-masks-are-per-thread-and-tgkill-aims-at-the-thread.md`),
-  then `SIGEV_THREAD` on them with `SIGRTMIN` reported as 34 and 32/33 the
-  library's (glibc's numbering); named pipes (1157/1158); the set-id calls
+  POSIX timers (`SYS_POSIX_TIMER`, 1141), the dumpable flag
+  (`SYS_PROCESS_DUMPABLE`, 1142), "now" as the set-times calls' request;
+  each thread's own signal mask (§1542), with the attribute's
+  (`pthread_attr_setsigmask_np`); `SIGEV_THREAD` timers, glibc's way, with
+  `SIGRTMIN` 34 and signals 32 and 33 the library's (design-decisions
+  1193) -- with `ctest-cpu-clocks`, `ctest-itimers`, `ctest-posix-timers`,
+  `ctest-dumpable`, `ctest-thread-masks`, `ctest-sigev-thread`.
+  **Next**, in this order: named pipes (1157/1158); the set-id calls
   (1159/1160, settling `posix_spawn`'s `RESETIDS` with them); getgroups
   (1143); `swapon`/`swapoff` (1175/1176); descriptor passing (1169/1170);
   the namespace calls (1161-1166); `SYS_THREAD_SCHEDULER` (1146);

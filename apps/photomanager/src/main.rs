@@ -101,6 +101,7 @@ use appearance::Edge;
 use appearance::Palette;
 use appearance::Surface;
 use pathtext::ShowPath;
+use textline::{LineBox, LineLook};
 // The toolkit's rectangle rather than a private copy: this crate had
 // the same four floats under `width`/`height`, with the same half-open
 // `contains`. See `known-issues.md`
@@ -116,9 +117,7 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
@@ -247,24 +246,16 @@ const MENU_ADD_TAG: u64 = u64::MAX;
 ///
 /// A tag was a third, typed into the status bar with no box of its own; it
 /// is asked for in the toolkit's input dialog now (`PhotoApp::ask_tag`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum TextEntry {
-    /// The toolbar's search box. Filters as it is typed.
-    Search,
-    /// A new album's name, in the sidebar row it will become.
-    AlbumName(String),
-}
-
-/// Which box a `TextEntry` is typed into, without what is typed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EntryBox {
-    /// The toolbar's search box.
+pub enum TextEntry {
+    /// The toolbar's search box (`search_query`). Filters as it is typed.
     Search,
-    /// The sidebar row a new album's name is typed into.
+    /// A new album's name (`album_name`), in the sidebar row it will
+    /// become.
     AlbumName,
 }
 
-impl EntryBox {
+impl TextEntry {
     /// The size the box's text is drawn at.
     const fn text_size(self) -> f32 {
         match self {
@@ -1311,7 +1302,8 @@ pub struct PhotoApp {
     pub sidebar_selection: SidebarItem,
     pub view_mode: ViewMode,
     pub sort_order: PhotoSort,
-    pub search_query: String,
+    /// The search box: the query the library is filtered by, and its caret.
+    pub search_query: LineBox,
     pub active_panel: ActivePanel,
     pub thumb_size_idx: usize,
     /// First row of thumbnails drawn in the grid.
@@ -1430,12 +1422,8 @@ pub struct PhotoApp {
     /// the library while the user thought they were typing.
     /// What the keyboard is typing into, if anything.
     text_entry: Option<TextEntry>,
-    /// The caret and selection of the box `text_entry` names, laid over its
-    /// text -- `search_query`, or the album name -- which stays the truth:
-    /// reloaded whenever the box changes or its text changes under it.
-    entry_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from a box, for Ctrl+V.
-    entry_clipboard: String,
+    /// The name a new album is being given, while `text_entry` says so.
+    album_name: LineBox,
     /// The tag being asked for, while the dialog asking is up. It has every
     /// key and press until it is answered.
     asking_tag: Option<InputDialog>,
@@ -1489,8 +1477,7 @@ impl PhotoApp {
             library_note: None,
             library_unread: 0,
             text_entry: None,
-            entry_editor: textline::field_holding("", ENTRY_CAPACITY),
-            entry_clipboard: String::new(),
+            album_name: LineBox::new(ENTRY_CAPACITY, ALBUM_TEXT_SIZE),
             asking_tag: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             photo_menu: None,
@@ -1505,7 +1492,7 @@ impl PhotoApp {
             sidebar_selection: SidebarItem::AllPhotos,
             view_mode: ViewMode::Grid,
             sort_order: PhotoSort::DateAdded,
-            search_query: String::new(),
+            search_query: LineBox::new(ENTRY_CAPACITY, SEARCH_TEXT_SIZE),
             active_panel: ActivePanel::PhotoGrid,
             thumb_size_idx: 1,
             grid_scroll: 0,
@@ -2268,7 +2255,7 @@ impl PhotoApp {
 
         // Apply search filter
         if !self.search_query.is_empty() {
-            photos.retain(|p| p.matches_search(&self.search_query));
+            photos.retain(|p| p.matches_search(self.search_query.text()));
         }
 
         // Sort
@@ -2285,7 +2272,7 @@ impl PhotoApp {
 
     /// Set search query.
     pub fn set_search(&mut self, query: &str) {
-        self.search_query = query.to_owned();
+        self.search_query.set_text(query);
     }
 
     /// Cycle sort order.
@@ -3030,7 +3017,7 @@ impl PhotoApp {
     /// boxes typed whatever text a key carried, a command's letter among it,
     /// and had no caret: Backspace from the end was their only edit.
     fn handle_text_entry_key(&mut self, event: &KeyEvent) -> bool {
-        let Some(entry) = self.text_entry.clone() else {
+        let Some(entry) = self.text_entry else {
             return false;
         };
         let plain = textline::is_plain(event.modifiers);
@@ -3052,7 +3039,10 @@ impl PhotoApp {
                     // The filter is already applied; Enter just puts the
                     // keyboard down.
                     TextEntry::Search => {}
-                    TextEntry::AlbumName(name) => self.commit_album_name(&name),
+                    TextEntry::AlbumName => {
+                        let name = self.album_name.text().to_owned();
+                        self.commit_album_name(&name);
+                    }
                 }
                 true
             }
@@ -3063,46 +3053,27 @@ impl PhotoApp {
         }
     }
 
-    /// `event` in the box that has the keyboard, through its editor: the
-    /// box's text written back when the key changed it.
+    /// `event` in the box that has the keyboard (`LineBox::key`, on the
+    /// program's clipboard).
     fn edit_entry_key(&mut self, event: &KeyEvent) {
-        let Some((target, text)) = self.entry_text().map(|(t, s)| (t, s.to_owned())) else {
-            return;
-        };
-        if self.entry_editor.text() != text {
-            self.entry_editor.set_text(&text);
-        }
-        let edit = textline::apply_key(
-            &mut self.entry_editor,
-            event,
-            &self.entry_clipboard,
-            target.text_size(),
-        );
-        if let Some(copied) = edit.copied {
-            self.entry_clipboard = copied;
-        }
-        if self.entry_editor.text() != text {
-            let edited = self.entry_editor.text().to_owned();
-            self.edit_entry(|text| *text = edited);
+        if let Some(entry) = self.text_entry {
+            self.entry_box_mut(entry).key(event);
         }
     }
 
-    /// The box that has the keyboard, and what is in it.
-    fn entry_text(&self) -> Option<(EntryBox, &str)> {
-        match self.text_entry.as_ref()? {
-            TextEntry::Search => Some((EntryBox::Search, &self.search_query)),
-            TextEntry::AlbumName(name) => Some((EntryBox::AlbumName, name)),
+    /// Box `which`.
+    fn entry_box(&self, which: TextEntry) -> &LineBox {
+        match which {
+            TextEntry::Search => &self.search_query,
+            TextEntry::AlbumName => &self.album_name,
         }
     }
 
-    /// Where the caret of the box that has the keyboard is drawn: the
-    /// editor's, or the end of the text if it changed under the editor. One
-    /// answer for the drawing and for a press.
-    fn entry_cursor(&self) -> TextCursor {
-        match self.entry_text() {
-            Some((_, text)) if self.entry_editor.text() == text => self.entry_editor.cursor(),
-            Some((_, text)) => TextCursor::from(text.len()),
-            None => TextCursor::default(),
+    /// Box `which`, to change.
+    fn entry_box_mut(&mut self, which: TextEntry) -> &mut LineBox {
+        match which {
+            TextEntry::Search => &mut self.search_query,
+            TextEntry::AlbumName => &mut self.album_name,
         }
     }
 
@@ -3125,7 +3096,7 @@ impl PhotoApp {
 
     /// The sidebar row a new album's name is typed into, while one is.
     fn album_name_row(&self) -> Option<Rect> {
-        if !matches!(self.text_entry, Some(TextEntry::AlbumName(_))) {
+        if self.text_entry != Some(TextEntry::AlbumName) {
             return None;
         }
         let mut row_y = TOOLBAR_HEIGHT;
@@ -3162,48 +3133,35 @@ impl PhotoApp {
     /// The box a press at `(x, y)` lands in, and where that box is drawn:
     /// the search box, or -- anywhere in its row -- the album name being
     /// typed.
-    fn entry_box_at(&self, x: f32, y: f32) -> Option<(EntryBox, Rect)> {
+    fn entry_box_at(&self, x: f32, y: f32) -> Option<(TextEntry, Rect)> {
         let search = self.search_box_rect();
         if search.contains(x, y) {
-            return Some((EntryBox::Search, search));
+            return Some((TextEntry::Search, search));
         }
         let row = self.album_name_row()?;
         let drawn = self.album_name_box()?;
-        row.contains(x, y).then_some((EntryBox::AlbumName, drawn))
+        row.contains(x, y).then_some((TextEntry::AlbumName, drawn))
     }
 
     /// A press at `x` in box `target`, drawn at `rect`: it takes the
     /// keyboard -- the search box from whatever had it -- with the caret
     /// under the pointer, measured against the box as it was drawn before
     /// the press.
-    fn press_entry(&mut self, target: EntryBox, rect: Rect, x: f32) {
-        let has_keys = self.entry_text().is_some_and(|(t, _)| t == target);
-        let drawn = if has_keys {
-            self.entry_cursor()
-        } else {
-            TextCursor::default()
-        };
+    fn press_entry(&mut self, target: TextEntry, rect: Rect, x: f32) {
+        let has_keys = self.text_entry == Some(target);
         if !has_keys {
             // Only the search box can be pressed without the keyboard: the
             // album's row is a box only while its name is being typed.
             self.text_entry = Some(TextEntry::Search);
         }
-        let Some(text) = self.entry_text().map(|(_, s)| s.to_owned()) else {
+        let Some(entry) = self.text_entry else {
             return;
         };
-        if self.entry_editor.text() != text {
-            self.entry_editor.set_text(&text);
-        }
-        let cursor = textedit::cursor_at_click(
-            &text,
-            drawn,
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
-            target.text_size(),
-            FontWeightHint::Regular,
+        self.entry_box_mut(entry).press(
             x - rect.x - BOX_TEXT_INSET,
+            rect.w - 2.0 * BOX_TEXT_INSET,
+            has_keys,
         );
-        self.entry_editor.set_selection_anchor(None);
-        self.entry_editor.set_cursor(cursor);
     }
 
     /// How the search box is drawn: with the keyboard's mark while it has
@@ -3219,79 +3177,37 @@ impl PhotoApp {
         }
     }
 
-    /// Draw the box `target` at `rect`, in `state`, holding `text` -- or
+    /// Draw the box `target` at `rect`, in `state` -- what it holds, or
     /// `placeholder`, faint, while it is empty -- with the caret and the
-    /// selection while it has the keyboard. An empty box with the keyboard
-    /// draws the caret before its placeholder, where the first character
-    /// typed will appear, as the toolkit's own input dialog does.
+    /// selection while it has the keyboard (`LineBox::draw`). An empty box
+    /// with the keyboard draws the caret before its placeholder, where the
+    /// first character typed will appear, as the toolkit's own input dialog
+    /// does.
     fn render_entry_box(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        (target, rect, state): (EntryBox, Rect, field::State),
-        text: &str,
+        (target, rect, state): (TextEntry, Rect, field::State),
         placeholder: &str,
     ) {
         field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
-        let size = target.text_size();
-        let line = text::line_height(size, FontWeightHint::Regular);
-        let (x, y, width) = (
-            rect.x + BOX_TEXT_INSET,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
-        );
+        let line = text::line_height(target.text_size(), FontWeightHint::Regular);
         let mut tree = guitk::render::RenderTree::new();
-        if text.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: placeholder.to_owned(),
-                color: self.palette.subtext0,
-                font_size: size,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if state.focused {
-                textedit::push_caret(
-                    &mut tree,
-                    x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let has_keys = self.entry_text().is_some_and(|(t, _)| t == target);
-            let editing = has_keys && self.entry_editor.text() == text;
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text,
-                    cursor: if has_keys {
-                        self.entry_cursor()
-                    } else {
-                        TextCursor::default()
-                    },
-                    selection_anchor: if editing {
-                        self.entry_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: state.focused,
-                    x,
-                    y,
-                    width,
-                    line_height: line,
-                    font_size: size,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+        self.entry_box(target).draw(
+            &mut tree,
+            &LineLook {
+                x: rect.x + BOX_TEXT_INSET,
+                y: rect.y + (rect.h - line) / 2.0,
+                width: rect.w - 2.0 * BOX_TEXT_INSET,
+                line_height: line,
+                focused: state.focused,
+                placeholder,
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         cmds.extend(tree.commands);
     }
 
@@ -3338,23 +3254,6 @@ impl PhotoApp {
             self.commit_tag(&typed);
         }
         true
-    }
-
-    /// Change the text being typed, wherever it lives.
-    ///
-    /// The search box is the odd one out: its text is `search_query`, because
-    /// the filter reads that on every frame, and a second copy would be a
-    /// second answer to the same question.
-    fn edit_entry(&mut self, change: impl FnOnce(&mut String)) {
-        if matches!(self.text_entry, Some(TextEntry::Search)) {
-            let mut query = self.search_query.clone();
-            change(&mut query);
-            self.set_search(&query);
-            return;
-        }
-        if let Some(TextEntry::AlbumName(text)) = self.text_entry.as_mut() {
-            change(text);
-        }
     }
 
     /// Raise the album menu over a photograph.
@@ -3502,7 +3401,8 @@ impl PhotoApp {
     /// Start naming a new album.
     fn begin_naming_album(&mut self) {
         // Assigning the field is what takes the keyboard off whatever had it.
-        self.text_entry = Some(TextEntry::AlbumName(String::new()));
+        self.album_name.clear();
+        self.text_entry = Some(TextEntry::AlbumName);
     }
 
     /// Put the typed tag on everything selected.
@@ -3971,8 +3871,7 @@ impl PhotoApp {
         let search = rect_of(ToolbarControl::Search);
         self.render_entry_box(
             cmds,
-            (EntryBox::Search, search, self.search_box_state()),
-            &self.search_query,
+            (TextEntry::Search, search, self.search_box_state()),
             "Search photos...",
         );
 
@@ -4187,8 +4086,8 @@ impl PhotoApp {
                     // mark and a caret -- and otherwise the offer to take
                     // one: an empty row waiting for a name and an idle row
                     // offering to take one are otherwise the same picture.
-                    if let (Some(rect), Some(TextEntry::AlbumName(typed))) =
-                        (self.album_name_box(), &self.text_entry)
+                    if let (Some(rect), Some(TextEntry::AlbumName)) =
+                        (self.album_name_box(), self.text_entry)
                     {
                         let state = field::State {
                             hovered: false,
@@ -4198,8 +4097,7 @@ impl PhotoApp {
                         };
                         self.render_entry_box(
                             cmds,
-                            (EntryBox::AlbumName, rect, state),
-                            typed,
+                            (TextEntry::AlbumName, rect, state),
                             "Album name",
                         );
                     } else {
@@ -6304,10 +6202,7 @@ mod tests {
 
     /// The album name being typed, if that is what has the keyboard.
     fn naming_album(app: &PhotoApp) -> Option<&str> {
-        match &app.text_entry {
-            Some(TextEntry::AlbumName(text)) => Some(text.as_str()),
-            _ => None,
-        }
+        (app.text_entry == Some(TextEntry::AlbumName)).then(|| app.album_name.text())
     }
 
     /// Whether the search box has the keyboard.
@@ -6800,7 +6695,7 @@ mod tests {
             app.handle_event(&typed(k, ch));
         }
 
-        assert_eq!(app.search_query, "pier");
+        assert_eq!(app.search_query.text(), "pier");
         assert_eq!(
             app.visible_photos().len(),
             1,
@@ -6836,7 +6731,11 @@ mod tests {
             5,
             "typing into the search box changed a photograph's rating"
         );
-        assert_eq!(app.search_query, "3", "and the digit went into the query");
+        assert_eq!(
+            app.search_query.text(),
+            "3",
+            "and the digit went into the query"
+        );
     }
 
     /// `f` does not flag a photograph while the box has the keyboard either.
@@ -6854,7 +6753,7 @@ mod tests {
             !app.find_photo(pid).expect("one").flagged,
             "typing into the search box flagged a photograph"
         );
-        assert_eq!(app.search_query, "f");
+        assert_eq!(app.search_query.text(), "f");
     }
 
     /// Backspace removes the last character.
@@ -6864,10 +6763,10 @@ mod tests {
         focus_search(&mut app);
         app.handle_event(&typed(Key::P, 'p'));
         app.handle_event(&typed(Key::I, 'i'));
-        assert_eq!(app.search_query, "pi");
+        assert_eq!(app.search_query.text(), "pi");
 
         app.handle_event(&key(Key::Backspace));
-        assert_eq!(app.search_query, "p");
+        assert_eq!(app.search_query.text(), "p");
     }
 
     /// Escape abandons the search rather than merely leaving the box.
@@ -7099,9 +6998,9 @@ mod tests {
         focus_search(&mut app);
         app.handle_event(&chord(Key::S, "s", Modifiers::ctrl()));
         app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
-        assert_eq!(app.search_query, "", "a command typed its letter");
+        assert_eq!(app.search_query.text(), "", "a command typed its letter");
         app.handle_event(&chord(Key::Q, "@", ALTGR));
-        assert_eq!(app.search_query, "@", "AltGr did not type");
+        assert_eq!(app.search_query.text(), "@", "AltGr did not type");
         app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
         assert!(searching(&app), "Alt+Escape left the search");
         app.handle_event(&key(Key::Escape));
@@ -7216,16 +7115,18 @@ mod tests {
         app.handle_event(&key(Key::Home));
         app.handle_event(&key(Key::Delete));
         assert_eq!(
-            app.search_query, "rem",
+            app.search_query.text(),
+            "rem",
             "Home and Delete did not edit the start"
         );
         app.handle_event(&chord(Key::A, "", Modifiers::ctrl()));
         app.handle_event(&chord(Key::X, "", Modifiers::ctrl()));
-        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        assert_eq!(app.search_query.text(), "", "Ctrl+A and Ctrl+X did not cut");
         app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
         app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
         assert_eq!(
-            app.search_query, "remrem",
+            app.search_query.text(),
+            "remrem",
             "Ctrl+V did not paste what was cut"
         );
 
@@ -7233,22 +7134,24 @@ mod tests {
         app.handle_event(&click(rect.x + BOX_TEXT_INSET + 1.0, rect.y + rect.h / 2.0));
         type_text(&mut app, "L");
         assert_eq!(
-            app.search_query, "Lremrem",
+            app.search_query.text(),
+            "Lremrem",
             "the caret did not go where the press was"
         );
 
         app.set_search("new");
         type_text(&mut app, "!");
         assert_eq!(
-            app.search_query, "new!",
+            app.search_query.text(),
+            "new!",
             "the box was edited as it used to read"
         );
 
-        app.entry_clipboard = "x".repeat(ENTRY_CAPACITY + 5);
+        guitk::clipboard::set_text(&"x".repeat(ENTRY_CAPACITY + 5));
         app.handle_event(&chord(Key::A, "", Modifiers::ctrl()));
         app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
         assert_eq!(
-            app.search_query.chars().count(),
+            app.search_query.text().chars().count(),
             ENTRY_CAPACITY,
             "the box holds more than its limit"
         );

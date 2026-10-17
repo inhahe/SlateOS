@@ -298,20 +298,20 @@ MUTATIONS += [
         # What the boxes did before the editor: type whatever text a key
         # carried, at the end.
         "a box types a command's letter, at its end",
-        "        if self.entry_editor.text() != text {\n"
-        "            self.entry_editor.set_text(&text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        if event.types_text() {\n"
-        "            let typed: String = event.typed().collect();\n"
-        "            self.edit_entry(|t| t.push_str(&typed));\n"
-        "            return;\n"
-        "        }\n"
-        "        if self.entry_editor.text() != text {\n"
-        "            self.entry_editor.set_text(&text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        [CHORDS, EDITS],
+        "            self.entry_box_mut(entry).key(event);\n",
+        "            if !event.text.is_empty() && !textline::types_into_field(event) {\n"
+        "                let at_end = format!(\"{}{}\", self.entry_box(entry).text(), event.text);\n"
+        "                self.entry_box_mut(entry).set_text(&at_end);\n"
+        "                return;\n"
+        "            }\n"
+        "            if event.types_text() {\n"
+        "                let typed: String = event.typed().collect();\n"
+        "                let at_end = format!(\"{}{}\", self.entry_box(entry).text(), typed);\n"
+        "                self.entry_box_mut(entry).set_text(&at_end);\n"
+        "                return;\n"
+        "            }\n"
+        "            self.entry_box_mut(entry).key(event);\n",
+        [CHORDS, EDITS, ALBUM],
     ),
     (
         "the tag dialog types a command's letter",
@@ -361,8 +361,8 @@ MUTATIONS += [
     ),
     (
         "the album's row is a label, not a field",
-        "                        (self.album_name_box(), &self.text_entry)\n",
-        "                        (None::<Rect>, &self.text_entry)\n",
+        "                        (self.album_name_box(), self.text_entry)\n",
+        "                        (None::<Rect>, self.text_entry)\n",
         [ALBUM],
     ),
     (
@@ -372,25 +372,6 @@ MUTATIONS += [
         [ALBUM],
     ),
     (
-        "an empty box with the keyboard has no caret",
-        "                textedit::push_caret(\n"
-        "                    &mut tree,\n"
-        "                    x,\n"
-        "                    y,\n"
-        "                    line,\n"
-        "                    self.palette.text,\n"
-        "                    textedit::CARET_WIDTH,\n"
-        "                );\n",
-        "                let _ = (x, y, line);\n",
-        [SEARCH, ALBUM],
-    ),
-    (
-        "a box's caret is drawn at its start",
-        "                    cursor: if has_keys {\n",
-        "                    cursor: if false {\n",
-        [SEARCH],
-    ),
-    (
         "a press in a box does nothing",
         "            self.press_entry(target, rect, event.x);\n",
         "            let _ = (target, rect);\n",
@@ -398,8 +379,12 @@ MUTATIONS += [
     ),
     (
         "a press leaves the caret where it was",
-        "        self.entry_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "        self.entry_box_mut(entry).press(\n"
+        "            x - rect.x - BOX_TEXT_INSET,\n"
+        "            rect.w - 2.0 * BOX_TEXT_INSET,\n"
+        "            has_keys,\n"
+        "        );\n",
+        "        let _ = (x, rect, has_keys, entry);\n",
         [EDITS, ALBUM],
     ),
     (
@@ -410,37 +395,20 @@ MUTATIONS += [
     ),
     (
         "a press beside the album's box starts a new name",
-        "        row.contains(x, y).then_some((EntryBox::AlbumName, drawn))\n",
-        "        drawn.contains(x, y).then_some((EntryBox::AlbumName, drawn))\n",
+        "        row.contains(x, y).then_some((TextEntry::AlbumName, drawn))\n",
+        "        drawn.contains(x, y).then_some((TextEntry::AlbumName, drawn))\n",
         [ALBUM],
     ),
     (
-        "a box whose text changed is edited as it used to read",
-        "        if self.entry_editor.text() != text {\n"
-        "            self.entry_editor.set_text(&text);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        let edit = textline::apply_key(\n",
-        [EDITS],
-    ),
-    (
         "a box holds any length",
-        'entry_editor: textline::field_holding("", ENTRY_CAPACITY),',
-        'entry_editor: textline::field_holding("", usize::MAX),',
+        'search_query: LineBox::new(ENTRY_CAPACITY, SEARCH_TEXT_SIZE),',
+        'search_query: LineBox::new(usize::MAX, SEARCH_TEXT_SIZE),',
         [EDITS],
     ),
-    (
-        "a copy or a cut takes nothing to the clipboard",
-        "            self.entry_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
-        "an edit is not written back to its box",
-        "            self.edit_entry(|text| *text = edited);\n",
-        "            let _ = edited;\n",
-        [EDITS, ALBUM],
-    ),
+    # The boxes are textline LineBoxes since 2026-10-17, one each: their
+    # clipboard (the program's), their caret and selection drawn, and the
+    # text each edits being its own are LineBox's, which textline's own
+    # table covers.
     (
         "a box keeps the keyboard under the picker",
         "        self.text_entry = None;\n        self.picker.open_to_read();\n",

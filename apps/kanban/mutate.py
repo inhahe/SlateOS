@@ -424,47 +424,26 @@ MUTATIONS += [
         "        let _ = settings;\n",
         [FIELD],
     ),
-    (
-        "the caret is at the start of the typing",
-        "            cursor: input_cursor(app),\n",
-        "            cursor: text::TextCursor::from(0),\n",
-        [CARET, EDITS],
-    ),
 ]
 
 # The input dialog's box edits at a caret (2026-10-04,
 # known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
-# took typing at its end and Backspace from it, and nothing else.
+# took typing at its end and Backspace from it, and nothing else. It is a
+# textline LineBox since 2026-10-17: its clipboard (the program's), its caret
+# and selection drawn, and the text it edits being the one it shows are
+# LineBox's, which textline's own table covers.
 MUTATIONS += [
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "        app.input_clipboard = copied;\n",
-        "        let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "a caret moved is not drawn",
-        "    before\n        != (\n            app.input_editor.cursor(),\n            app.input_editor.selection_anchor(),\n        )\n}\n",
-        "    false\n}\n",
+        "    edit.changed || edit.moved\n}\n",
+        "    edit.changed\n}\n",
         [FROM_END],
     ),
     (
         "a key that changes nothing is a redraw",
-        "    before\n        != (\n            app.input_editor.cursor(),\n            app.input_editor.selection_anchor(),\n        )\n}\n",
+        "    edit.changed || edit.moved\n}\n",
         "    edit.handled\n}\n",
         [FROM_END],
-    ),
-    (
-        "a key finds the editor holding another text",
-        "fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {\n    if app.input_editor.text() != app.input_buffer {\n",
-        "fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {\n    if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another text",
-        "    let drawn = input_cursor(app);\n    if app.input_editor.text() != app.input_buffer {\n",
-        "    let drawn = input_cursor(app);\n    if false {\n",
-        [SHOWN],
     ),
     (
         "a press puts the caret at the start",
@@ -489,12 +468,6 @@ MUTATIONS += [
         "                    && self.input_mode != InputMode::None\n",
         "",
         [FROM_END],
-    ),
-    (
-        "the selection is not drawn",
-        "            selection_anchor: if app.input_editor.text() == app.input_buffer {\n",
-        "            selection_anchor: if false {\n",
-        [EDITS],
     ),
 ]
 

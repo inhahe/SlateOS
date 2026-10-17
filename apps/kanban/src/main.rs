@@ -40,11 +40,11 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{LineBox, LineLook};
 
 use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -2104,13 +2104,9 @@ struct KanbanApp {
     /// board's column set to a row of the list.
     board_cursor: usize,
     show_filter_bar: bool,
-    input_buffer: String,
-    /// The input dialog's editor -- its caret and selection over
-    /// `input_buffer` -- reloaded when the buffer changed under it: seeded
-    /// with a title to edit, or emptied.
-    input_editor: TextInput,
-    /// What the input dialog's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    input_clipboard: String,
+    /// The input dialog's box, whichever mode it is in: what is typed, and
+    /// its caret. Seeded with a title to edit, a search, an assignee.
+    input_buffer: LineBox,
     input_mode: InputMode,
     /// How wide the mark is round the input dialog's box while it has the
     /// keyboard: the user's focus width (`App::appearance_changed`), the
@@ -2202,9 +2198,7 @@ impl KanbanApp {
             archive_cursor: 0,
             board_cursor: 0,
             show_filter_bar: false,
-            input_buffer: String::new(),
-            input_editor: textline::field_holding("", INPUT_CAPACITY),
-            input_clipboard: String::new(),
+            input_buffer: LineBox::new(INPUT_CAPACITY, INPUT_TEXT_SIZE),
             input_mode: InputMode::None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             last_stamp: 0,
@@ -4648,27 +4642,18 @@ fn render_input_overlay(tree: &mut RenderTree, app: &KanbanApp, width: f32, heig
     let input = input_field_rect(width, height);
     let state = input_field_state(app);
     field::draw(tree, &app.palette, input, state, app.focus_ring_width);
-    let line = text::line_height(13.0, FontWeightHint::Regular);
-    textedit::draw(
+    let line = text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
+    app.input_buffer.draw(
         tree,
-        &textedit::SingleLine {
-            text: &app.input_buffer,
-            cursor: input_cursor(app),
-            // The editor's selection only while it is the box's: a buffer
-            // changed under it has not been reloaded into it yet.
-            selection_anchor: if app.input_editor.text() == app.input_buffer {
-                app.input_editor.selection_anchor()
-            } else {
-                None
-            },
-            focused: state.focused,
+        &LineLook {
             x: input.x + INPUT_TEXT_INSET,
             y: input.y + (input.h - line) / 2.0,
-            width: (input.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
+            width: input.w - 2.0 * INPUT_TEXT_INSET,
             line_height: line,
-            font_size: 13.0,
-            weight: FontWeightHint::Regular,
+            focused: state.focused,
+            placeholder: "",
             color: app.palette.text,
+            placeholder_color: app.palette.subtext0,
             selection_bg: app.palette.accent,
             selection_fg: app.palette.crust,
             caret_width: textedit::CARET_WIDTH,
@@ -5099,7 +5084,7 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                 return false;
             };
             app.input_mode = InputMode::RenameColumn;
-            app.input_buffer = name;
+            app.input_buffer.set_text(&name);
             true
         }
 
@@ -5178,7 +5163,7 @@ fn handle_ctrl_chord(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         Key::S => {
             if app.show_filter_bar {
                 app.input_mode = InputMode::SearchFilter;
-                app.input_buffer = app.filter.search_text.clone();
+                app.input_buffer.set_text(&app.filter.search_text);
                 return true;
             }
             false
@@ -5222,7 +5207,7 @@ fn handle_ctrl_chord(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         }
         Key::U if app.show_filter_bar => {
             app.input_mode = InputMode::AssigneeFilter;
-            app.input_buffer = app.filter.assignee_filter.clone();
+            app.input_buffer.set_text(&app.filter.assignee_filter);
             true
         }
         Key::L if app.show_filter_bar => {
@@ -5363,7 +5348,7 @@ fn handle_detail_key(app: &mut KanbanApp, key: &KeyEvent) -> Option<bool> {
         _ => return None,
     };
     app.input_mode = mode;
-    app.input_buffer = seed;
+    app.input_buffer.set_text(&seed);
     Some(true)
 }
 
@@ -5453,62 +5438,20 @@ const INPUT_TEXT_INSET: f32 = 8.0;
 /// The box took typing at its end and Backspace from it, and nothing else:
 /// a typo at the start of a card's title was fixed by deleting the title.
 fn input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
-    if app.input_editor.text() != app.input_buffer {
-        app.input_editor.set_text(&app.input_buffer);
-    }
-    let before = (
-        app.input_editor.cursor(),
-        app.input_editor.selection_anchor(),
-    );
-    let edit = textline::apply_key(
-        &mut app.input_editor,
-        key,
-        &app.input_clipboard,
-        INPUT_TEXT_SIZE,
-    );
-    if let Some(copied) = edit.copied {
-        app.input_clipboard = copied;
-    }
-    if app.input_editor.text() != app.input_buffer {
-        app.input_buffer = app.input_editor.text().to_owned();
-        return true;
-    }
-    before
-        != (
-            app.input_editor.cursor(),
-            app.input_editor.selection_anchor(),
-        )
-}
-
-/// Where the input dialog's caret is: the editor's, or the end of the text
-/// where the text changed under the editor -- a title to edit is edited from
-/// its end. One answer for the drawing and for a press.
-fn input_cursor(app: &KanbanApp) -> text::TextCursor {
-    if app.input_editor.text() == app.input_buffer {
-        app.input_editor.cursor()
-    } else {
-        text::TextCursor::from(app.input_buffer.len())
-    }
+    let edit = app.input_buffer.key(key);
+    edit.changed || edit.moved
 }
 
 /// A press in the input dialog's box at `x`: the caret under the pointer,
-/// measured against the box as it was drawn.
+/// measured against the box as it was drawn -- with the keyboard, which it
+/// has while the dialog is up.
 fn press_input(app: &mut KanbanApp, x: f32) {
     let rect = input_field_rect(app.win_width, app.win_height);
-    let drawn = input_cursor(app);
-    if app.input_editor.text() != app.input_buffer {
-        app.input_editor.set_text(&app.input_buffer);
-    }
-    let cursor = textedit::cursor_at_click(
-        &app.input_buffer,
-        drawn,
-        (rect.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
-        INPUT_TEXT_SIZE,
-        FontWeightHint::Regular,
+    app.input_buffer.press(
         x - rect.x - INPUT_TEXT_INSET,
+        rect.w - 2.0 * INPUT_TEXT_INSET,
+        true,
     );
-    app.input_editor.set_selection_anchor(None);
-    app.input_editor.set_cursor(cursor);
 }
 
 /// Handle key events during input mode: Escape and Enter, plain -- Alt+Enter
@@ -5524,7 +5467,7 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
             true
         }
         Key::Enter => {
-            let text = app.input_buffer.clone();
+            let text = app.input_buffer.text().to_owned();
             let mode = app.input_mode;
             app.input_mode = InputMode::None;
             app.input_buffer.clear();
@@ -5949,7 +5892,8 @@ mod tests {
         handle_key_event(&mut app, &key(Key::S, "ś", altgr));
         handle_key_event(&mut app, &key(Key::Enter, "", Modifiers::alt()));
         assert_eq!(
-            app.input_buffer, "ś",
+            app.input_buffer.text(),
+            "ś",
             "the line typed a command or lost AltGr's ś"
         );
         assert_eq!(
@@ -8011,7 +7955,7 @@ mod tests {
     fn test_render_input_overlay_visible() {
         let mut app = KanbanApp::new();
         app.input_mode = InputMode::NewCardTitle;
-        app.input_buffer = "New task".to_string();
+        app.input_buffer.set_text("New task");
         let mut tree = RenderTree::new();
         render_input_overlay(&mut tree, &app, 800.0, 600.0);
         assert!(!tree.is_empty());
@@ -8187,7 +8131,7 @@ mod tests {
     fn test_input_mode_escape() {
         let mut app = KanbanApp::new();
         app.input_mode = InputMode::NewCardTitle;
-        app.input_buffer = "partial".to_string();
+        app.input_buffer.set_text("partial");
         handle_key_event(&mut app, &make_key(Key::Escape, Modifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
         assert!(app.input_buffer.is_empty());
@@ -8197,7 +8141,7 @@ mod tests {
     fn test_input_mode_enter_creates_card() {
         let mut app = KanbanApp::new();
         app.input_mode = InputMode::NewCardTitle;
-        app.input_buffer = "New Task".to_string();
+        app.input_buffer.set_text("New Task");
         app.selected_column = 0;
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.input_mode, InputMode::None);
@@ -8228,18 +8172,18 @@ mod tests {
     fn test_input_mode_backspace() {
         let mut app = KanbanApp::new();
         app.input_mode = InputMode::NewCardTitle;
-        app.input_buffer = "abc".to_string();
+        app.input_buffer.set_text("abc");
         handle_key_event(&mut app, &make_key(Key::Backspace, Modifiers::NONE));
-        assert_eq!(app.input_buffer, "ab");
+        assert_eq!(app.input_buffer.text(), "ab");
     }
 
     #[test]
     fn test_input_mode_char_append() {
         let mut app = KanbanApp::new();
         app.input_mode = InputMode::NewCardTitle;
-        app.input_buffer = "he".to_string();
+        app.input_buffer.set_text("he");
         handle_key_event(&mut app, &make_char_key('l'));
-        assert_eq!(app.input_buffer, "hel");
+        assert_eq!(app.input_buffer.text(), "hel");
     }
 
     #[test]
@@ -8247,7 +8191,7 @@ mod tests {
         let mut app = KanbanApp::new();
         let initial_cols = app.active_board().columns.len();
         app.input_mode = InputMode::NewColumnName;
-        app.input_buffer = "Testing".to_string();
+        app.input_buffer.set_text("Testing");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.active_board().columns.len(), initial_cols + 1);
     }
@@ -8256,7 +8200,7 @@ mod tests {
     fn test_input_mode_new_board() {
         let mut app = KanbanApp::new();
         app.input_mode = InputMode::NewBoardName;
-        app.input_buffer = "Second Project".to_string();
+        app.input_buffer.set_text("Second Project");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.boards.len(), 2);
     }
@@ -8267,7 +8211,7 @@ mod tests {
         let id = app.add_card("Task", 0).unwrap();
         app.selected_card = Some(id);
         app.input_mode = InputMode::AddComment;
-        app.input_buffer = "Great progress!".to_string();
+        app.input_buffer.set_text("Great progress!");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.active_board().cards.get(&id).unwrap().comments.len(), 1);
     }
@@ -8278,7 +8222,7 @@ mod tests {
         let id = app.add_card("Task", 0).unwrap();
         app.selected_card = Some(id);
         app.input_mode = InputMode::AddChecklistItem;
-        app.input_buffer = "Write tests".to_string();
+        app.input_buffer.set_text("Write tests");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(
             app.active_board().cards.get(&id).unwrap().checklist.len(),
@@ -8292,7 +8236,7 @@ mod tests {
         let id = app.add_card("Old Title", 0).unwrap();
         app.selected_card = Some(id);
         app.input_mode = InputMode::EditCardTitle;
-        app.input_buffer = "New Title".to_string();
+        app.input_buffer.set_text("New Title");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(
             app.active_board().cards.get(&id).unwrap().title,
@@ -8306,7 +8250,7 @@ mod tests {
         let id = app.add_card("Task", 0).unwrap();
         app.selected_card = Some(id);
         app.input_mode = InputMode::CardDescription;
-        app.input_buffer = "New description".to_string();
+        app.input_buffer.set_text("New description");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(
             app.active_board().cards.get(&id).unwrap().description,
@@ -8319,7 +8263,7 @@ mod tests {
         let mut app = KanbanApp::new();
         app.selected_column = 0;
         app.input_mode = InputMode::RenameColumn;
-        app.input_buffer = "Inbox".to_string();
+        app.input_buffer.set_text("Inbox");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert_eq!(app.active_board().columns.first().unwrap().name, "Inbox");
     }
@@ -8785,7 +8729,8 @@ mod tests {
         tap(&mut app, Key::E);
         assert_eq!(app.input_mode, InputMode::EditCardTitle);
         assert_eq!(
-            app.input_buffer, "Draft",
+            app.input_buffer.text(),
+            "Draft",
             "an edit that starts empty is a retype"
         );
         type_text(&mut app, " two");
@@ -8803,7 +8748,7 @@ mod tests {
         assert_eq!(card_of(&app, id).description, "What it is for");
 
         tap(&mut app, Key::D);
-        assert_eq!(app.input_buffer, "What it is for");
+        assert_eq!(app.input_buffer.text(), "What it is for");
         for _ in 0.."What it is for".len() {
             tap(&mut app, Key::Backspace);
         }
@@ -9097,7 +9042,7 @@ mod tests {
         let name = app.active_board().columns[1].name.clone();
         tap(&mut app, Key::R);
         assert_eq!(app.input_mode, InputMode::RenameColumn);
-        assert_eq!(app.input_buffer, name);
+        assert_eq!(app.input_buffer.text(), name);
         type_text(&mut app, "!");
         tap(&mut app, Key::Enter);
         assert_eq!(app.active_board().columns[1].name, format!("{name}!"));
@@ -10197,7 +10142,7 @@ mod tests {
             let at = cmds
                 .iter()
                 .position(
-                    |c| matches!(c, RenderCommand::RichText { text, .. } if *text == app.input_buffer),
+                    |c| matches!(c, RenderCommand::RichText { text, .. } if *text == app.input_buffer.text()),
                 )
                 .expect("the typing is not drawn in the box");
             match cmds.get(at + 1) {
@@ -10205,14 +10150,14 @@ mod tests {
                 other => panic!("no caret after the typing: {other:?}"),
             }
         };
-        app.input_buffer = "Plan".to_string();
+        app.input_buffer.set_text("Plan");
         let end = rect.x + 8.0 + text::measure("Plan", 13.0, FontWeightHint::Regular);
         let caret = caret_after(&app);
         assert!(
             (caret - end).abs() < 0.5,
             "the caret is at {caret}, not after the typing at {end}"
         );
-        app.input_buffer = "w".repeat(200);
+        app.input_buffer.set_text(&"w".repeat(200));
         let caret = caret_after(&app);
         assert!(
             caret > rect.x && caret < rect.right(),
@@ -10276,7 +10221,7 @@ mod tests {
             handle_key_event(&mut app, &make_key(Key::Left, Modifiers::NONE));
         }
         type_into(&mut app, "i");
-        assert_eq!(app.input_buffer, "Fix bug", "the caret did not move");
+        assert_eq!(app.input_buffer.text(), "Fix bug", "the caret did not move");
         let rect = input_field_rect(app.win_width, app.win_height);
         let at = rect.x
             + INPUT_TEXT_INSET
@@ -10290,7 +10235,7 @@ mod tests {
 
         handle_key_event(&mut app, &make_key(Key::Home, Modifiers::NONE));
         handle_key_event(&mut app, &make_key(Key::Delete, Modifiers::NONE));
-        assert_eq!(app.input_buffer, "ix bug", "Delete at the caret");
+        assert_eq!(app.input_buffer.text(), "ix bug", "Delete at the caret");
         handle_key_event(&mut app, &make_key(Key::End, Modifiers::NONE));
         handle_key_event(&mut app, &make_key(Key::Home, Modifiers::shift()));
         let line = text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
@@ -10311,14 +10256,14 @@ mod tests {
         );
         handle_key_event(&mut app, &make_key(Key::C, Modifiers::ctrl()));
         type_into(&mut app, "F");
-        assert_eq!(app.input_buffer, "F", "Shift+Home did not select");
+        assert_eq!(app.input_buffer.text(), "F", "Shift+Home did not select");
         handle_key_event(&mut app, &make_key(Key::V, Modifiers::ctrl()));
-        assert_eq!(app.input_buffer, "Fix bug", "Ctrl+C or Ctrl+V");
+        assert_eq!(app.input_buffer.text(), "Fix bug", "Ctrl+C or Ctrl+V");
         handle_key_event(&mut app, &make_key(Key::A, Modifiers::ctrl()));
         handle_key_event(&mut app, &make_key(Key::X, Modifiers::ctrl()));
-        assert_eq!(app.input_buffer, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.input_buffer.text(), "", "Ctrl+A and Ctrl+X");
         handle_key_event(&mut app, &make_key(Key::V, Modifiers::ctrl()));
-        assert_eq!(app.input_buffer, "Fix bug", "Ctrl+X took nothing");
+        assert_eq!(app.input_buffer.text(), "Fix bug", "Ctrl+X took nothing");
 
         // A press at the start of the text puts the caret there, and one past
         // its end at its end.
@@ -10328,12 +10273,13 @@ mod tests {
         );
         type_into(&mut app, "<");
         assert_eq!(
-            app.input_buffer, "<Fix bug",
+            app.input_buffer.text(),
+            "<Fix bug",
             "the press did not put the caret there"
         );
         press_box_at(&mut app, rect.right() - 2.0);
         type_into(&mut app, ">");
-        assert_eq!(app.input_buffer, "<Fix bug>");
+        assert_eq!(app.input_buffer.text(), "<Fix bug>");
         handle_key_event(&mut app, &make_key(Key::Enter, Modifiers::NONE));
         assert!(
             app.active_board()
@@ -10369,7 +10315,7 @@ mod tests {
             "an arrow at the end is a redraw"
         );
         type_into(&mut app, "!");
-        assert_eq!(app.input_buffer, "Write tests!");
+        assert_eq!(app.input_buffer.text(), "Write tests!");
         assert!(
             handle_key_event(&mut app, &make_key(Key::Left, Modifiers::NONE)),
             "a caret moved is not drawn"
@@ -10389,13 +10335,21 @@ mod tests {
     fn the_input_box_edits_the_text_it_shows() {
         let mut app = KanbanApp::new();
         handle_key_event(&mut app, &make_key(Key::N, Modifiers::NONE));
-        app.input_buffer = String::from("Plan");
+        app.input_buffer.set_text("Plan");
         let rect = input_field_rect(app.win_width, app.win_height);
         press_box_at(&mut app, rect.x + INPUT_TEXT_INSET + 0.5);
         type_into(&mut app, "<");
-        assert_eq!(app.input_buffer, "<Plan", "the press missed the shown text");
-        app.input_buffer = String::from("Ship");
+        assert_eq!(
+            app.input_buffer.text(),
+            "<Plan",
+            "the press missed the shown text"
+        );
+        app.input_buffer.set_text("Ship");
         type_into(&mut app, "?");
-        assert_eq!(app.input_buffer, "Ship?", "the key edited another text");
+        assert_eq!(
+            app.input_buffer.text(),
+            "Ship?",
+            "the key edited another text"
+        );
     }
 }

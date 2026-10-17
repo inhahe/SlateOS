@@ -1,0 +1,36 @@
+# sshwire's cargo-fuzz harness, run by `scripts/fuzz.py run userspace/sshwire/fuzz`.
+# Installed as ~/fuzz/sshwire-fuzz/tree/fuzz/Cargo.toml in WSL; the `path`s
+# below are relative to that place. Kept under this name so that nothing in the
+# real workspace mistakes this directory for a package. Seeds: `seeds.py`.
+[package]
+name = "sshwire-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sshwire = { path = "../userspace/sshwire" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "packet"
+path = "fuzz_targets/packet.rs"
+test = false
+doc = false
+bench = false

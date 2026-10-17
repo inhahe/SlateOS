@@ -108,9 +108,10 @@ MUTATIONS += [
         "Escape leaves a query in the search",
         "        if event.key == Key::Escape\n"
         "            && textline::is_plain(event.modifiers)\n"
-        "            && !self.search_query.is_empty()\n"
+        "            && !self.search.is_empty()\n"
         "        {\n"
-        "            self.set_search_query(String::new());\n"
+        "            self.search.clear();\n"
+        "            self.search_changed();\n"
         "            return true;\n"
         "        }\n",
         "",
@@ -118,23 +119,8 @@ MUTATIONS += [
     ),
     (
         "the query is not searched again as it is typed",
-        "        self.search_query = query;\n        self.perform_search();\n",
-        "        self.search_query = query;\n",
-        [TYPING],
-    ),
-    (
-        "the search box's editor is not reloaded",
-        "        if self.search_editor.text() != self.search_query {\n"
-        "            self.search_editor.set_text(&self.search_query);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        let edit = textline::apply_key(\n",
-        [TYPING, RESULTS],
-    ),
-    (
-        "a cut takes nothing to the clipboard",
-        "            self.search_clipboard = copied;\n",
-        "            let _ = copied;\n",
+        "    fn search_changed(&mut self) {\n        self.perform_search();\n",
+        "    fn search_changed(&mut self) {\n",
         [TYPING],
     ),
     (
@@ -211,33 +197,26 @@ MUTATIONS += [
     ),
     (
         "a search that finds nothing is not red",
-        "            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: !self.search.is_empty() && self.search_results.is_empty(),\n",
         "            invalid: false,\n",
         [FIELD],
     ),
     (
-        "an empty box with the keyboard has no caret",
-        "                textedit::push_caret(\n"
-        "                    &mut tree,\n"
-        "                    x,\n"
-        "                    y,\n"
-        "                    line,\n"
-        "                    self.palette.text,\n"
-        "                    textedit::CARET_WIDTH,\n"
-        "                );\n",
-        "                let _ = (x, y, line);\n",
+        "the box with the keyboard is drawn without it",
+        "                focused,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [FIELD],
     ),
     (
-        "the search's caret is at its start",
-        "                    cursor: self.search_cursor(),\n",
-        "                    cursor: TextCursor::default(),\n",
+        "a press is measured as the box was not drawn",
+        "            true,\n        );\n",
+        "            false,\n        );\n",
         [FIELD],
     ),
     (
-        "a press leaves the caret where it was",
-        "        self.search_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "a press puts the caret at the start",
+        "            x - rect.x - SEARCH_TEXT_INSET,\n",
+        "            0.0,\n",
         [FIELD],
     ),
     (

@@ -37,13 +37,12 @@ use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textline::{SearchBox, SearchLook};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1032,13 +1031,9 @@ pub struct PodcastApp {
     pub main_view: MainView,
     pub episode_filter: EpisodeFilter,
     pub selected_episode_id: Option<u64>,
-    pub search_query: String,
+    /// The search box, which is the query.
+    pub search: SearchBox,
     pub search_results: Vec<(u64, u64)>, // (podcast_id, episode_id)
-    /// The search box's caret and selection, laid over `search_query`,
-    /// which stays the truth: reloaded whenever the query changes under it.
-    search_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
-    search_clipboard: String,
     /// How wide the mark is round the box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -1095,9 +1090,7 @@ impl PodcastApp {
             main_view: MainView::EpisodeList,
             episode_filter: EpisodeFilter::All,
             selected_episode_id: None,
-            search_query: String::new(),
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             detail_from: MainView::EpisodeList,
             search_results: Vec::new(),
@@ -1872,10 +1865,10 @@ impl PodcastApp {
     /// Search across podcast names and episode titles.
     pub fn perform_search(&mut self) {
         self.search_results.clear();
-        if self.search_query.is_empty() {
+        if self.search.is_empty() {
             return;
         }
-        let query = self.search_query.to_lowercase();
+        let query = self.search.text().to_lowercase();
         for podcast in &self.podcasts {
             for ep in &podcast.episodes {
                 let title_match = ep.title.to_lowercase().contains(&query);
@@ -2432,33 +2425,21 @@ impl PodcastApp {
     fn handle_search_key(&mut self, event: &KeyEvent) -> bool {
         if event.key == Key::Escape
             && textline::is_plain(event.modifiers)
-            && !self.search_query.is_empty()
+            && !self.search.is_empty()
         {
-            self.set_search_query(String::new());
+            self.search.clear();
+            self.search_changed();
             return true;
         }
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            event,
-            &self.search_clipboard,
-            SEARCH_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
-        if self.search_editor.text() != self.search_query {
-            let query = self.search_editor.text().to_owned();
-            self.set_search_query(query);
+        let edit = self.search.key(event);
+        if edit.changed {
+            self.search_changed();
         }
         edit.handled
     }
 
-    /// Search for `query`, from the top of its results.
-    fn set_search_query(&mut self, query: String) {
-        self.search_query = query;
+    /// The query changed: searched again, from the top of its results.
+    fn search_changed(&mut self) {
         self.perform_search();
         self.episode_list_scroll = 0;
     }
@@ -2473,35 +2454,16 @@ impl PodcastApp {
         )
     }
 
-    /// Where the search box's caret is drawn: the editor's, or the end of
-    /// the query if the query changed under the editor. One answer for the
-    /// drawing and for a press.
-    fn search_cursor(&self) -> TextCursor {
-        if self.search_editor.text() == self.search_query {
-            self.search_editor.cursor()
-        } else {
-            TextCursor::from(self.search_query.len())
-        }
-    }
-
     /// A press in the search box at `x`: the caret goes under the pointer,
-    /// measured against the box as it was drawn before the press.
+    /// measured against the box as it was drawn -- with the keyboard, which
+    /// it has whenever the search is showing.
     fn press_search_box(&mut self, x: f32) {
         let rect = self.search_box_rect();
-        let drawn = self.search_cursor();
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.search.press(
             x - rect.x - SEARCH_TEXT_INSET,
+            rect.w - 2.0 * SEARCH_TEXT_INSET,
+            true,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// How the search box is drawn: with the keyboard whenever the search is
@@ -2515,7 +2477,7 @@ impl PodcastApp {
                 && !self.show_help
                 && !self.picker.is_open(),
             disabled: false,
-            invalid: !self.search_query.is_empty() && self.search_results.is_empty(),
+            invalid: !self.search.is_empty() && self.search_results.is_empty(),
         }
     }
 
@@ -2977,7 +2939,7 @@ impl PodcastApp {
                 self.main_view = MainView::Search;
                 // The results of the query as it stands, the caret after it.
                 self.perform_search();
-                self.search_editor.set_text(&self.search_query);
+                self.search.caret_to_end();
             }
             SidebarTarget::AllEpisodes => {
                 self.sidebar_selection = SidebarSelection::AllEpisodes;
@@ -4329,7 +4291,7 @@ impl PodcastApp {
 
         // Results.
         let results_y = rect.y + SEARCH_BAR_HEIGHT + 12.0;
-        if self.search_query.is_empty() {
+        if self.search.is_empty() {
             cmds.push(RenderCommand::Text {
                 x: pad,
                 y: results_y,
@@ -4406,53 +4368,22 @@ impl PodcastApp {
             (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
         let mut tree = guitk::render::RenderTree::new();
-        if self.search_query.is_empty() {
-            tree.push(RenderCommand::Text {
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
                 x,
                 y,
-                text: "Search podcasts and episodes...".to_string(),
-                color: self.palette.subtext0,
-                font_size: SEARCH_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(
-                    &mut tree,
-                    x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let editing = self.search_editor.text() == self.search_query;
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: self.search_cursor(),
-                    selection_anchor: if editing {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused,
-                    x,
-                    y,
-                    width,
-                    line_height: line,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+                width,
+                line_height: line,
+                focused,
+                placeholder: "Search podcasts and episodes...",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         cmds.extend(tree.commands);
     }
 
@@ -6303,7 +6234,7 @@ mod tests {
     #[test]
     fn test_search_finds_by_title() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
-        app.search_query = "Rust".to_string();
+        app.search.set_text("Rust");
         app.perform_search();
         assert!(!app.search_results.is_empty());
     }
@@ -6311,7 +6242,7 @@ mod tests {
     #[test]
     fn test_search_finds_by_podcast_name() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
-        app.search_query = "StarTalk".to_string();
+        app.search.set_text("StarTalk");
         app.perform_search();
         assert!(!app.search_results.is_empty());
     }
@@ -6319,7 +6250,7 @@ mod tests {
     #[test]
     fn test_search_empty_query() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
-        app.search_query.clear();
+        app.search.clear();
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -6327,7 +6258,7 @@ mod tests {
     #[test]
     fn test_search_no_results() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
-        app.search_query = "xyznonexistent123".to_string();
+        app.search.set_text("xyznonexistent123");
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -6335,10 +6266,10 @@ mod tests {
     #[test]
     fn test_search_case_insensitive() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
-        app.search_query = "rust".to_string();
+        app.search.set_text("rust");
         app.perform_search();
         let lower_count = app.search_results.len();
-        app.search_query = "RUST".to_string();
+        app.search.set_text("RUST");
         app.perform_search();
         assert_eq!(app.search_results.len(), lower_count);
     }
@@ -6524,7 +6455,7 @@ mod tests {
     fn test_render_search_with_results() {
         let mut app = PodcastApp::with_sample_data(800.0, 600.0);
         app.main_view = MainView::Search;
-        app.search_query = "Rust".to_string();
+        app.search.set_text("Rust");
         app.perform_search();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -8179,7 +8110,7 @@ mod tests {
         };
         let before = state(&app);
         type_into(&mut app, "async rust");
-        assert_eq!(app.search_query, "async rust", "the search took no typing");
+        assert_eq!(app.search.text(), "async rust", "the search took no typing");
         assert_eq!(
             state(&app),
             before,
@@ -8192,15 +8123,20 @@ mod tests {
 
         app.handle_event(&chord(Key::S, "s", Modifiers::alt()));
         app.handle_event(&chord(Key::X, "x", Modifiers::ctrl()));
-        assert_eq!(app.search_query, "async rust", "a command typed its letter");
+        assert_eq!(
+            app.search.text(),
+            "async rust",
+            "a command typed its letter"
+        );
         app.handle_event(&chord(Key::Q, "@", ALTGR));
-        assert_eq!(app.search_query, "async rust@", "AltGr did not type");
+        assert_eq!(app.search.text(), "async rust@", "AltGr did not type");
         app.handle_event(&key(Key::Backspace));
 
         app.handle_event(&key(Key::Home));
         type_into(&mut app, "x");
         assert_eq!(
-            app.search_query, "xasync rust",
+            app.search.text(),
+            "xasync rust",
             "Home did not move the caret"
         );
         assert!(
@@ -8209,27 +8145,30 @@ mod tests {
         );
         app.handle_event(&key(Key::Delete));
         assert_eq!(
-            app.search_query, "xsync rust",
+            app.search.text(),
+            "xsync rust",
             "Delete did not delete after the caret"
         );
         app.handle_event(&chord(Key::A, "", Modifiers::ctrl()));
         app.handle_event(&chord(Key::X, "", Modifiers::ctrl()));
-        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        assert_eq!(app.search.text(), "", "Ctrl+A and Ctrl+X did not cut");
         app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
         assert_eq!(
-            app.search_query, "xsync rust",
+            app.search.text(),
+            "xsync rust",
             "Ctrl+V did not paste what was cut"
         );
 
         app.handle_event(&key(Key::Escape));
-        assert_eq!(app.search_query, "", "Escape did not empty the search");
+        assert_eq!(app.search.text(), "", "Escape did not empty the search");
         assert!(
             app.search_results.is_empty(),
             "an empty search still lists results"
         );
         type_into(&mut app, "a");
         assert_eq!(
-            app.search_query, "a",
+            app.search.text(),
+            "a",
             "typing after Escape edited the query as it read before"
         );
 
@@ -8351,7 +8290,7 @@ mod tests {
         app.handle_event(&key(Key::Escape));
         let playing = app.player_state;
         app.handle_event(&typed(Key::Space, ' '));
-        assert_eq!(app.search_query, " ", "Space did not type into the search");
+        assert_eq!(app.search.text(), " ", "Space did not type into the search");
         assert_eq!(app.player_state, playing, "Space played from the search");
     }
 
@@ -8434,7 +8373,8 @@ mod tests {
         app.handle_event(&click_at(start + 1.0, rect.y + rect.h / 2.0));
         type_into(&mut app, "a");
         assert_eq!(
-            app.search_query, "azz",
+            app.search.text(),
+            "azz",
             "the caret did not go where the press was"
         );
 

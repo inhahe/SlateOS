@@ -316,7 +316,7 @@ MUTATIONS = [
         'the search box draws no caret while it has the keyboard',
         '                focused: self.search_active,\n                placeholder:',
         '                focused: false,\n                placeholder:',
-        ['the_search_box_edits_at_a_caret'],
+        ['a_press_in_the_search_box_puts_the_caret_there'],
     ),
     (
         'an editor field is drawn the same wherever the pointer is',
@@ -647,7 +647,7 @@ MUTATIONS += [
         "a change to the search keeps the card that was chosen",
         "        if edit.changed {\n            self.search_changed();\n        }\n",
         "",
-        [CARET],
+        ["typing_a_filter_puts_the_selection_back_on_the_first_card"],
     ),
     (
         "a letter in the search is also its command",

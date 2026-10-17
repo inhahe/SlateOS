@@ -447,7 +447,7 @@ MUTATIONS = [
         'the search box draws no caret while it has the keyboard',
         '                focused: self.search_active,\n                placeholder:',
         '                focused: false,\n                placeholder:',
-        ['the_search_box_edits_at_a_caret'],
+        ['a_press_in_the_search_box_puts_the_caret_there'],
     ),
     (
         'a form field is not marked while it has the keyboard',
@@ -681,7 +681,7 @@ MUTATIONS += [
         "a change to the search leaves the selection where it was",
         "                if edit.changed {\n                    self.reanchor_selection();\n                }\n",
         "",
-        [CARET],
+        ["a_search_that_hides_the_chosen_transaction_chooses_one_it_shows"],
     ),
     (
         "the search box takes no keys",

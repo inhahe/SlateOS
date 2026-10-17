@@ -7003,6 +7003,30 @@ mod tests {
             "zabc",
             "the caret did not go where the press was"
         );
+        // Between two letters, between them; and the box with the keyboard
+        // draws its caret.
+        let after_za = guitk::text::measure("za", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        app.handle_event(&Event::Mouse(MouseEvent {
+            x: search.x + 8.0 + after_za + 0.5,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        type_text(&mut app, "y");
+        assert_eq!(
+            app.search.text(),
+            "zaybc",
+            "a press between two letters did not put the caret between them"
+        );
+        assert!(
+            App::render(&mut app, 1000.0, 700.0)
+                .commands
+                .iter()
+                .any(|c| matches!(
+                    c,
+                    RenderCommand::Line { x1, y1, .. } if search.contains(*x1, *y1)
+                )),
+            "the box with the keyboard draws no caret"
+        );
     }
 
     /// **A press in the search box is measured in the frame it landed in**:

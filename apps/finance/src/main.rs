@@ -6605,7 +6605,8 @@ mod tests {
     }
 
     /// **A press in the search box puts the caret where it lands**: at the
-    /// start of the text, what is typed goes in first.
+    /// start of the text, what is typed goes in first; between two letters,
+    /// between them. And the box with the keyboard draws its caret.
     #[test]
     fn a_press_in_the_search_box_puts_the_caret_there() {
         let mut app = FinanceApp::with_sample_data();
@@ -6619,6 +6620,54 @@ mod tests {
             app.search.text(),
             "grocery",
             "the caret did not go where the press was"
+        );
+        app.search.set_text("grcery");
+        let after_gr = guitk::text::measure("gr", SEARCH_TEXT_SIZE, FontWeightHint::Regular);
+        press_at(
+            &mut app,
+            search.x + 12.0 + after_gr + 0.5,
+            search.y + search.h / 2.0,
+        );
+        probe::type_str(&mut app, "o");
+        assert_eq!(
+            app.search.text(),
+            "grocery",
+            "a press between two letters did not put the caret between them"
+        );
+        assert!(
+            app.frame().commands().iter().any(|c| matches!(
+                c,
+                RenderCommand::Line { x1, y1, .. } if search.contains(*x1, *y1)
+            )),
+            "the box with the keyboard draws no caret"
+        );
+    }
+
+    /// **A search that hides the transaction chosen chooses one it shows**:
+    /// the selection follows what the search finds, rather than staying on
+    /// a row nobody can see -- which Delete would then delete.
+    #[test]
+    fn a_search_that_hides_the_chosen_transaction_chooses_one_it_shows() {
+        let mut app = FinanceApp::with_sample_data();
+        app.screen = Screen::Transactions;
+        let hidden = app
+            .visible_ids()
+            .into_iter()
+            .find(|&id| {
+                app.transactions
+                    .iter()
+                    .find(|t| t.id == id)
+                    .is_some_and(|t| !t.description.to_lowercase().contains("rent"))
+            })
+            .expect("a transaction a search for rent hides");
+        app.selected_id = Some(hidden);
+        probe::click(&mut app, Target::Search);
+        probe::type_str(&mut app, "rent");
+        let shown = app.visible_ids();
+        assert!(!shown.is_empty(), "the fixture has no rent to find");
+        assert!(
+            app.selected_id.is_some_and(|id| shown.contains(&id)),
+            "the selection stayed on a transaction the search hides"
         );
     }
 

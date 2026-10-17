@@ -705,7 +705,7 @@ MUTATIONS += [
         "a change to the search does not search again",
         "    if edit.changed {\n        state.search_changed();\n    }\n",
         "",
-        [CARET],
+        ["a_search_puts_its_results_where_they_can_be_seen"],
     ),
     (
         "the search box takes no plain keys",

@@ -217,14 +217,14 @@ MUTATIONS = [
     ),
     (
         "a command's letter is typed into the search",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        self.search_editor.insert_text(&key.text);\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        let edit = self.search.key(key);\n",
+        "        let typed = format!(\"{}{}\", self.search.text(), key.text);\n        self.search.set_text(&typed);\n        let edit = self.search.key(key);\n",
         ['a_chord_is_neither_a_mail_key_nor_typing'],
     ),
     (
         'a chord works the search box',
-        "            Key::Escape if plain => {\n                self.searching = false;\n                self.set_search(\"\");\n",
-        "            Key::Escape => {\n                self.searching = false;\n                self.set_search(\"\");\n",
+        "            Key::Escape if plain => {\n                self.searching = false;\n                if self.search.clear() {\n",
+        "            Key::Escape => {\n                self.searching = false;\n                if self.search.clear() {\n",
         ['a_chord_is_neither_a_mail_key_nor_typing'],
     ),
     (
@@ -260,8 +260,8 @@ MUTATIONS = [
     ),
     (
         'the search box is not marked while it has the keyboard',
-        '                focused: self.searching,',
-        '                focused: false,',
+        '                focused: self.searching,\n                disabled: false,',
+        '                focused: false,\n                disabled: false,',
         ['the_text_boxes_are_the_toolkits_fields'],
     ),
     (
@@ -491,39 +491,27 @@ S_MENU = "the_search_boxs_right_click_menu_edits_the_search"
 
 MUTATIONS += [
     (
-        "the search types only at its end",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        let end = self.search_editor.text().len();\n        self.search_editor.set_cursor(text::TextCursor::from(end));\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        [S_CARET],
-    ),
-    (
-        "the search box's editor is not reloaded",
-        "        self.sync_search_editor();\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        [S_SYNC],
-    ),
-    (
-        "what is typed is not searched for",
-        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n        if edit.handled {\n",
+        "a change to the search by a key does not follow it",
+        "        if edit.changed {\n            self.search_changed();\n        }\n        if edit.handled {\n",
         "        if edit.handled {\n",
         [S_CARET],
     ),
     (
         "a key typed into the search is reported unanswered",
-        "        self.set_search(&typed);\n        if edit.handled {\n",
-        "        self.set_search(&typed);\n        if false {\n",
+        "            self.search_changed();\n        }\n        if edit.handled {\n",
+        "            self.search_changed();\n        }\n        if false {\n",
         [S_CARET],
     ),
     (
         "the search box answers the window's chords",
-        "        self.set_search(&typed);\n        if edit.handled {\n",
-        "        self.set_search(&typed);\n        if true {\n",
+        "            self.search_changed();\n        }\n        if edit.handled {\n",
+        "            self.search_changed();\n        }\n        if true {\n",
         [S_CARET],
     ),
     (
         "the box with the keyboard is drawn as any other",
-        "        if self.searching {\n            // The box with the keyboard:",
-        "        if false {\n            // The box with the keyboard:",
+        "                focused: self.searching,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [S_CARET],
     ),
     (
@@ -540,20 +528,20 @@ MUTATIONS += [
     ),
     (
         "the search's right-click leaves the keyboard where it was",
-        "                self.searching = true;\n                let menu = self.search_editor.edit_menu();\n",
-        "                let menu = self.search_editor.edit_menu();\n",
+        "                self.searching = true;\n                let menu = self.search.edit_menu();\n",
+        "                let menu = self.search.edit_menu();\n",
         [S_MENU],
     ),
     (
         "a row chosen does nothing to the search",
-        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if self.search.menu_row(id) {\n",
         "                if false {\n",
         [S_MENU],
     ),
     (
         "a paste from the menu is not searched for",
-        "                    let typed = self.search_editor.text().to_owned();\n                    self.set_search(&typed);\n                }\n                return EventResult::Consumed;\n",
-        "                }\n                return EventResult::Consumed;\n",
+        "                if self.search.menu_row(id) {\n                    self.search_changed();\n",
+        "                if self.search.menu_row(id) {\n",
         [S_MENU],
     ),
 ]
@@ -569,13 +557,13 @@ S_LONG = "a_long_search_scrolls_back_to_the_chosen_message"
 MUTATIONS += [
     (
         "a changed search leaves the chosen message off screen",
-        "            self.list_scroll = self.list_scroll.min(last);\n            self.follow_selection();\n",
-        "            self.list_scroll = self.list_scroll.min(last);\n",
+        "        self.list_scroll = self.list_scroll.min(last);\n        self.follow_selection();\n",
+        "        self.list_scroll = self.list_scroll.min(last);\n",
         [S_LONG],
     ),
     (
         "a changed search leaves the list past its end",
-        "            self.list_scroll = self.list_scroll.min(last);\n",
+        "        self.list_scroll = self.list_scroll.min(last);\n",
         "",
         [S_FOUND],
     ),

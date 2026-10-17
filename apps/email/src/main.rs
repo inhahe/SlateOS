@@ -1852,6 +1852,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textline::{SearchBox, SearchLook};
 
 /// What the window says above the mail, before anything is pressed.
 ///
@@ -2364,7 +2365,8 @@ pub struct EmailApp {
     pub selected_message: Option<u64>,
     pub selected_account: Option<u32>,
     pub active_panel: Panel,
-    pub search_query: String,
+    /// The search box, which is the search the message list is filtered by.
+    pub search: SearchBox,
     pub sort_order: SortOrder,
     /// The message being written, when one is.
     pub compose: Option<Compose>,
@@ -2382,10 +2384,6 @@ pub struct EmailApp {
     pub unread_count: u32,
     /// Whether the search box has the keyboard.
     pub searching: bool,
-    /// The search box's caret and selection: reloaded from `search_query`
-    /// when that changed underneath it -- the list's Escape empties the
-    /// search.
-    search_editor: TextInput,
 
     // -- Mail kept in files ------------------------------------------------------
     /// Where the folders are: `~/Mail`. `None` with no home to find it in.
@@ -2461,7 +2459,7 @@ impl EmailApp {
             selected_message: None,
             selected_account: None,
             active_panel: Panel::MessageList,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             sort_order: SortOrder::DateDesc,
             compose: None,
             filter_rules: Vec::new(),
@@ -2477,7 +2475,6 @@ impl EmailApp {
             reading_pane_position: ReadingPanePosition::Right,
             unread_count: 0,
             searching: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             mail_dir: None,
             folders: Vec::new(),
             opened: Vec::new(),
@@ -3067,10 +3064,8 @@ impl EmailApp {
             fieldmenu::Outcome::Window => {}
             fieldmenu::Outcome::Taken => return EventResult::Consumed,
             fieldmenu::Outcome::Chosen(MenuField::Search, id) => {
-                self.sync_search_editor();
-                if self.search_editor.edit_command(id) == KeyEdit::Changed {
-                    let typed = self.search_editor.text().to_owned();
-                    self.set_search(&typed);
+                if self.search.menu_row(id) {
+                    self.search_changed();
                 }
                 return EventResult::Consumed;
             }
@@ -3186,8 +3181,7 @@ impl EmailApp {
             Key::Escape => {
                 if self.active_panel == Panel::Reading {
                     self.active_panel = Panel::MessageList;
-                } else if !self.search_query.is_empty() {
-                    self.search_query.clear();
+                } else if self.search.clear() {
                     self.reanchor_selection();
                 } else {
                     return EventResult::Ignored;
@@ -3246,7 +3240,7 @@ impl EmailApp {
 
     /// Keys while the search box has the keyboard: Escape empties it and
     /// leaves, Enter leaves keeping the search, and the rest is the box's
-    /// (`textline::apply_key_on_clipboard`), at its caret, on the program's
+    /// (`SearchBox::key`), at its caret, on the program's
     /// clipboard -- which types what a key typed, AltGr's among it, and not
     /// a command's letter. Answers whether the box did anything with it.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -3254,7 +3248,9 @@ impl EmailApp {
         match key.key {
             Key::Escape if plain => {
                 self.searching = false;
-                self.set_search("");
+                if self.search.clear() {
+                    self.search_changed();
+                }
                 return EventResult::Consumed;
             }
             Key::Enter if plain => {
@@ -3263,10 +3259,10 @@ impl EmailApp {
             }
             _ => {}
         }
-        self.sync_search_editor();
-        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
-        let typed = self.search_editor.text().to_owned();
-        self.set_search(&typed);
+        let edit = self.search.key(key);
+        if edit.changed {
+            self.search_changed();
+        }
         if edit.handled {
             EventResult::Consumed
         } else {
@@ -3274,51 +3270,26 @@ impl EmailApp {
         }
     }
 
-    /// Load the search box's editor from `search_query` when the search
-    /// changed underneath it, its caret at the end.
-    fn sync_search_editor(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-    }
-
-    /// The search changed to `text`: the list follows it, its selection on a
-    /// message it still shows and scrolled to have that message on screen,
-    /// never past its end -- whether the change came by key or from the
-    /// menu.
-    fn set_search(&mut self, text: &str) {
-        if self.search_query != text {
-            text.clone_into(&mut self.search_query);
-            self.reanchor_selection();
-            let last = self
-                .current_messages()
-                .len()
-                .saturating_sub(self.list_rows());
-            self.list_scroll = self.list_scroll.min(last);
-            self.follow_selection();
-        }
+    /// The search changed: the list follows it, its selection on a message
+    /// it still shows and scrolled to have that message on screen, never
+    /// past its end -- whether the change came by key or from the menu.
+    fn search_changed(&mut self) {
+        self.reanchor_selection();
+        let last = self
+            .current_messages()
+            .len()
+            .saturating_sub(self.list_rows());
+        self.list_scroll = self.list_scroll.min(last);
+        self.follow_selection();
     }
 
     /// A press in the search box `rect` at `x`: the box takes the
     /// keyboard, its caret where the press landed.
     fn place_search_caret(&mut self, rect: Rect, x: f32) {
-        let drawn = if self.searching {
-            self.search_editor.cursor()
-        } else {
-            text::TextCursor::default()
-        };
-        self.sync_search_editor();
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (rect.w - 24.0).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - 12.0,
-        );
+        let had_the_keyboard = self.searching;
         self.searching = true;
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
+        self.search
+            .press(x - rect.x - 12.0, rect.w - 24.0, had_the_keyboard);
     }
 
     /// Keys while a message is being written.
@@ -3609,10 +3580,10 @@ impl EmailApp {
                     && mailbox.is_none_or(|mb| m.mailbox == mb)
             })
             .filter(|m| {
-                if self.search_query.is_empty() {
+                if self.search.is_empty() {
                     true
                 } else {
-                    let q = self.search_query.to_lowercase();
+                    let q = self.search.text().to_lowercase();
                     m.subject.to_lowercase().contains(&q)
                         || m.from.to_string().to_lowercase().contains(&q)
                         || m.preview.to_lowercase().contains(&q)
@@ -4095,57 +4066,25 @@ impl EmailApp {
             },
             self.focus_ring_width,
         );
-        if self.searching {
-            // The box with the keyboard: its text, with the caret and the
-            // selection where they are -- the end of the text if the search
-            // changed under the box's editor.
-            let synced = self.search_editor.text() == self.search_query;
-            let mut tree = RenderTree::new();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: if synced {
-                        self.search_editor.cursor()
-                    } else {
-                        text::TextCursor::from(self.search_query.len())
-                    },
-                    selection_anchor: if synced {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: true,
-                    x: search.x + 12.0,
-                    y: search.y + 6.0,
-                    width: (search.w - 24.0).max(0.0),
-                    line_height: 16.0,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.blue,
-                    selection_fg: self.palette.crust,
-                    caret_width: self.caret_width,
-                },
-            );
-            for command in tree.commands {
-                f.push(command);
-            }
-        } else {
-            let (shown, color) = if self.search_query.is_empty() {
-                ("Search mail (Ctrl+F)".to_string(), self.palette.subtext0)
-            } else {
-                (self.search_query.clone(), self.palette.text)
-            };
-            self.line(
-                f,
-                search.x + 12.0,
-                search.y + 7.0,
-                shown,
-                SEARCH_TEXT_SIZE,
-                color,
-                search.w - 24.0,
-            );
+        let mut tree = RenderTree::new();
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
+                x: search.x + 12.0,
+                y: search.y + 6.0,
+                width: search.w - 24.0,
+                line_height: 16.0,
+                focused: self.searching,
+                placeholder: "Search mail (Ctrl+F)",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: self.caret_width,
+            },
+        );
+        for command in tree.commands {
+            f.push(command);
         }
         f.hit(Target::SearchBox, search);
         self.button(
@@ -4337,10 +4276,10 @@ impl EmailApp {
         let messages = self.current_messages();
         if messages.is_empty() {
             let why = match &self.selected_mailbox {
-                Some(name) if !self.search_query.is_empty() => {
+                Some(name) if !self.search.is_empty() => {
                     format!(
                         "Nothing in {name} matches \u{201C}{}\u{201D}.",
-                        self.search_query
+                        self.search.text()
                     )
                 }
                 Some(name) => format!("No messages in {name}."),
@@ -4925,9 +4864,8 @@ impl EmailApp {
         let field = match self.target_at(x, y) {
             Some(Target::Field(field)) => field,
             Some(Target::SearchBox) if self.compose.is_none() => {
-                self.sync_search_editor();
                 self.searching = true;
-                let menu = self.search_editor.edit_menu();
+                let menu = self.search.edit_menu();
                 self.field_menu
                     .open(MenuField::Search, menu, x, y, viewport);
                 return EventResult::Consumed;
@@ -5869,12 +5807,13 @@ mod tests {
         app.handle_event(&typed(Key::X, "x", Modifiers::alt()));
         app.handle_event(&typed(Key::S, "ś", altgr));
         assert_eq!(
-            app.search_query, "ś",
+            app.search.text(),
+            "ś",
             "the search typed a command or lost AltGr's ś"
         );
         app.handle_event(&typed(Key::Backspace, "", Modifiers::alt()));
         app.handle_event(&typed(Key::Escape, "", Modifiers::alt()));
-        assert_eq!(app.search_query, "ś", "Alt+Backspace deleted");
+        assert_eq!(app.search.text(), "ś", "Alt+Backspace deleted");
         assert!(app.searching, "Alt+Escape closed the search");
 
         // So does a message, and AltGr+S saves no draft.
@@ -6314,7 +6253,7 @@ mod tests {
         for c in needle.chars() {
             app.handle_event(&types(c));
         }
-        assert_eq!(app.search_query, needle);
+        assert_eq!(app.search.text(), needle);
         assert!(app.current_messages().len() <= all);
 
         app.handle_event(&press(Key::Escape));
@@ -6334,7 +6273,7 @@ mod tests {
         app.handle_event(&key_ev(Key::F, true));
         app.handle_event(&types('r'));
         assert!(app.compose.is_none(), "typing `r` opened a reply");
-        assert_eq!(app.search_query, "r");
+        assert_eq!(app.search.text(), "r");
     }
 
     #[test]
@@ -7007,7 +6946,7 @@ mod tests {
         for msg in create_sample_messages(acct_id) {
             app.add_message(msg);
         }
-        app.search_query = "meeting".to_string();
+        app.search.set_text("meeting");
         let results = app.current_messages();
         assert_eq!(results.len(), 1);
         assert!(results[0].subject.contains("Meeting"));
@@ -8153,7 +8092,8 @@ mod tests {
             "a letter typed into the search is reported unanswered, so nothing redraws"
         );
         assert_eq!(
-            app.search_query, "leak",
+            app.search.text(),
+            "leak",
             "typing did not go in at the caret"
         );
         assert_eq!(
@@ -8191,13 +8131,15 @@ mod tests {
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Delete));
         assert_eq!(
-            app.search_query, "eak",
+            app.search.text(),
+            "eak",
             "Delete did not take the first character"
         );
         app.handle_event(&key_ev(Key::A, true));
         app.handle_event(&types('x'));
         assert_eq!(
-            app.search_query, "x",
+            app.search.text(),
+            "x",
             "typing did not replace the selection"
         );
     }
@@ -8225,7 +8167,8 @@ mod tests {
         ));
         app.handle_event(&types('x'));
         assert_eq!(
-            app.search_query, "xab",
+            app.search.text(),
+            "xab",
             "the press did not put the caret at the start"
         );
     }
@@ -8242,16 +8185,18 @@ mod tests {
         }
         app.handle_event(&press(Key::Enter));
         assert!(!app.searching, "control: Enter leaves the box");
-        assert_eq!(app.search_query, "meet");
+        assert_eq!(app.search.text(), "meet");
         app.handle_event(&press(Key::Escape));
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "control: the list's Escape empties the search"
         );
         app.handle_event(&key_ev(Key::F, true));
         app.handle_event(&types('p'));
         assert_eq!(
-            app.search_query, "p",
+            app.search.text(),
+            "p",
             "the box brought back the search the list emptied"
         );
     }
@@ -8278,7 +8223,8 @@ mod tests {
         );
         app.handle_event(&types('x'));
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "a key reached the box through the menu"
         );
         app.handle_event(&press(Key::Escape));
@@ -8288,7 +8234,7 @@ mod tests {
         guitk::clipboard::set_text("leak");
         app.handle_event(&mouse_at(x, y, MouseEventKind::Press(MouseButton::Right)));
         choose(&mut app, EditCommand::Paste);
-        assert_eq!(app.search_query, "leak", "Paste did not paste");
+        assert_eq!(app.search.text(), "leak", "Paste did not paste");
         assert!(
             app.current_messages().iter().all(|m| format!(
                 "{} {} {}",

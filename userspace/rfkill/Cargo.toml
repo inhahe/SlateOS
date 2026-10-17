@@ -20,6 +20,8 @@ ulstrutils = { path = "../ulstrutils" }
 ulclosestream = { path = "../ulclosestream" }
 # A standard descriptor rfkill was started without stays closed.
 stdfdguard = { path = "../stdfdguard" }
+# util-linux's write_all, which a request is written with.
+ulallio = { path = "../ulallio" }
 # /dev/rfkill: open, read, write and poll it, through the C library.
 libcall = { path = "../../libcall" }
 # The block and unblock requests logged, through the C library's syslog.

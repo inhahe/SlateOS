@@ -6,10 +6,6 @@
 //! 2.39.3) by `scripts/rfkill-diff.sh`, on a `/dev/rfkill` and a
 //! `/sys/class/rfkill` of the harness's own.
 //!
-//! This replaces a hand-written program that read `/sys/class/rfkill` alone
-//! and never opened `/dev/rfkill`, where the kernel lists the devices and
-//! takes the requests to block them.
-//!
 //! # How it talks to the kernel
 //!
 //! `/dev/rfkill` is a stream of 8-byte events (`struct rfkill_event`: the
@@ -56,7 +52,8 @@
 stdfdguard::guard_std_fds!();
 
 use getoptlong::{Opt, Program, Takes};
-use quoting::{escape_unprintable, os_bytes};
+use libcall::{EAGAIN, EINVAL};
+use quoting::{escape_unprintable, os_bytes, os_from_bytes};
 use smartcols::{FL_RIGHT, JsonType, Table};
 use std::ffi::{CString, OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
@@ -90,14 +87,6 @@ const RFKILL_OP_ADD: u8 = 0;
 const RFKILL_OP_CHANGE: u8 = 2;
 const RFKILL_OP_CHANGE_ALL: u8 = 3;
 
-/// `EAGAIN`.
-const EAGAIN: i32 = 11;
-/// `EINVAL`.
-const EINVAL: i32 = 22;
-
-/// syslog's `LOG_USER` and `LOG_NOTICE`.
-const LOG_USER: i32 = 1 << 3;
-const LOG_NOTICE: i32 = 5;
 
 /// `struct rfkill_type_str`.
 struct TypeStr {
@@ -369,6 +358,16 @@ struct Rfkill {
     raw: bool,
     /// `columns[]` and `ncolumns`.
     columns: Vec<Col>,
+    /// Where a request is logged: [`syslog_notice`], or a test's own.
+    log: fn(&[u8]),
+}
+
+/// A request logged as `__rfkill_block` logs it: `openlog ("rfkill", 0,
+/// LOG_USER)`, the line at `LOG_NOTICE`, `closelog ()`.
+fn syslog_notice(line: &[u8]) {
+    libcsyslog::openlog(b"rfkill", 0, libcsyslog::LOG_USER);
+    libcsyslog::syslog(libcsyslog::LOG_NOTICE, line);
+    libcsyslog::closelog();
 }
 
 fn main() -> ExitCode {
@@ -422,7 +421,15 @@ fn column_name_to_id(name: &[u8], rest: &[u8], short: &[u8]) -> Option<Col> {
 
 /// A column's `infos[]` entry.
 fn info(col: Col) -> &'static ColInfo {
-    INFOS.iter().find(|i| i.id == col).unwrap_or(&INFOS[0])
+    // `infos[]` is in `enum` order (a test holds it to that).
+    match col {
+        Col::Device => &INFOS[0],
+        Col::Id => &INFOS[1],
+        Col::Type => &INFOS[2],
+        Col::Desc => &INFOS[3],
+        Col::Soft => &INFOS[4],
+        Col::Hard => &INFOS[5],
+    }
 }
 
 /// `string_to_action(str)`.
@@ -564,6 +571,7 @@ impl Rfkill {
             no_headings: false,
             raw: false,
             columns: Vec::new(),
+            log: syslog_notice,
         }
     }
 
@@ -595,11 +603,13 @@ impl Rfkill {
         match s {
             Some(s) => Ok(s.as_bytes().to_vec()),
             None => {
-                let mut msg = self.short.clone();
-                msg.extend_from_slice(
-                    b": ./include/xalloc.h:68: xstrdup: Assertion `str' failed.\n",
+                stderr_write(
+                    format!(
+                        "{}: ./include/xalloc.h:68: xstrdup: Assertion `str' failed.\n",
+                        shown(&self.short)
+                    )
+                    .as_bytes(),
                 );
-                stderr_write(&msg);
                 Err(Stop::Abort)
             }
         }
@@ -613,6 +623,8 @@ impl Rfkill {
         } else {
             libcall::fd::O_RDWR
         };
+        // `_PATH_DEV_RFKILL`, or a test's `/proc/self/fd/N`: no NUL in
+        // either, so the empty fallback is never taken.
         let path = CString::new(self.dev.as_bytes()).unwrap_or_default();
         let fd = match libcall::file::openat(libcall::file::AT_FDCWD, &path, flags, 0) {
             Ok(fd) => Device(fd),
@@ -699,11 +711,8 @@ impl Rfkill {
             let Some(event) = event else {
                 continue;
             };
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default();
-            let sec = i64::try_from(now.as_secs()).unwrap_or(i64::MAX);
-            let date = timestamp(&zone, sec, now.subsec_micros());
+            let (sec, usec) = timeval(std::time::SystemTime::now());
+            let date = timestamp(&zone, sec, usec);
             self.out.write(
                 format!(
                     "{date}: idx {} type {} op {} soft {} hard {}\n",
@@ -725,6 +734,12 @@ impl Rfkill {
                 // `fgets (name, 128, f)`: at most 127 bytes, to a newline.
                 let mut line = Vec::new();
                 let read = BufReader::new(file.take(127)).read_until(b'\n', &mut line);
+                // A directory opens, and its read fails: `errno` is `EISDIR`.
+                if let Err(e) = &read
+                    && let Some(e) = e.raw_os_error()
+                {
+                    self.errno = e;
+                }
                 if matches!(read, Ok(n) if n > 0) {
                     let line = smartcols::mbs::c_str(&line);
                     let end = line.iter().position(|&b| b == b'\n').unwrap_or(line.len());
@@ -821,8 +836,19 @@ impl Rfkill {
         Ok(())
     }
 
-    /// `rfkill_list_old (param)`: the old format, one paragraph a device.
-    fn rfkill_list_old(&mut self, param: Option<&[u8]>) -> Result<i32, Stop> {
+    /// The loop `rfkill_list_old`, `rfkill_list_fill` and `rfkill_toggle`
+    /// share: the identifier checked (`None` names all), the device opened
+    /// without waiting -- read-only to list, for writing too to toggle --
+    /// and its events read until there are no more, `each` called for every
+    /// one that adds a device the identifier names. `-EINVAL` for an
+    /// identifier that names nothing, the open's or a read's `-errno`, else
+    /// 0.
+    fn for_each_matching(
+        &mut self,
+        param: Option<&[u8]>,
+        rdonly: bool,
+        mut each: impl FnMut(&mut Self, &Device, &Event, RfkillId) -> Result<(), Stop>,
+    ) -> Result<i32, Stop> {
         let mut id = RfkillId::All;
         if let Some(param) = param {
             id = self.rfkill_id_to_type(param)?;
@@ -831,49 +857,52 @@ impl Rfkill {
                 return Ok(-EINVAL);
             }
         }
-        let fd = match self.rfkill_open(true, true) {
+        let fd = match self.rfkill_open(rdonly, true) {
             Ok(fd) => fd,
             Err(rc) => return Ok(rc),
         };
-        let rc;
         loop {
             match self.rfkill_read_event(&fd) {
-                Err(e) => {
-                    rc = e;
-                    break;
-                }
+                Err(e) => return Ok(e),
+                // Nothing there, or a short event: read again -- unless
+                // `errno` says `EAGAIN`, whichever call left it there.
                 Ok(None) => {
                     if self.errno == EAGAIN {
-                        rc = 0;
-                        break;
+                        return Ok(0);
                     }
                 }
                 Ok(Some(event)) => {
                     if event_match(&event, id) {
-                        let name = self.get_sys_attr(event.idx, "name");
-                        // Upstream falls back to sysfs's type name when there
-                        // is no description -- after `xstrdup` has already
-                        // failed its assertion on the `NULL`.
-                        let ty = self.xstrdup(rfkill_type_to_desc(u32::from(event.ty)))?;
-                        let mut text = format!("{}: ", event.idx).into_bytes();
-                        text.extend_from_slice(&name);
-                        text.extend_from_slice(b": ");
-                        text.extend_from_slice(&ty);
-                        text.extend_from_slice(
-                            format!(
-                                "\n\tSoft blocked: {}\n\tHard blocked: {}\n",
-                                yes_no(event.soft),
-                                yes_no(event.hard)
-                            )
-                            .as_bytes(),
-                        );
-                        self.out.write(&text);
+                        each(self, &fd, &event, id)?;
                     }
                 }
             }
         }
-        drop(fd);
-        Ok(rc)
+    }
+
+    /// `rfkill_list_old (param)`: the old format, one paragraph a device.
+    fn rfkill_list_old(&mut self, param: Option<&[u8]>) -> Result<i32, Stop> {
+        self.for_each_matching(param, true, |rf, _, event, _| {
+            let name = rf.get_sys_attr(event.idx, "name");
+            // Upstream falls back to sysfs's type name when there is no
+            // description -- after `xstrdup` has already failed its
+            // assertion on the `NULL`.
+            let ty = rf.xstrdup(rfkill_type_to_desc(u32::from(event.ty)))?;
+            let mut text = format!("{}: ", event.idx).into_bytes();
+            text.extend_from_slice(&name);
+            text.extend_from_slice(b": ");
+            text.extend_from_slice(&ty);
+            text.extend_from_slice(
+                format!(
+                    "\n\tSoft blocked: {}\n\tHard blocked: {}\n",
+                    yes_no(event.soft),
+                    yes_no(event.hard)
+                )
+                .as_bytes(),
+            );
+            rf.out.write(&text);
+            Ok(())
+        })
     }
 
     /// `rfkill_list_init (ctrl)`: the table and its columns.
@@ -903,45 +932,13 @@ impl Rfkill {
         ids: &[(Col, smartcols::ColumnId)],
         param: Option<&[u8]>,
     ) -> Result<i32, Stop> {
-        let mut id = RfkillId::All;
-        if let Some(param) = param {
-            id = self.rfkill_id_to_type(param)?;
-            if id == RfkillId::Invalid {
-                self.warnx(&format!("invalid identifier: {}", shown(param)));
-                return Ok(-EINVAL);
-            }
-        }
-        let fd = match self.rfkill_open(true, true) {
-            Ok(fd) => fd,
-            Err(rc) => return Ok(rc),
-        };
-        let rc;
-        loop {
-            match self.rfkill_read_event(&fd) {
-                Err(e) => {
-                    rc = e;
-                    break;
-                }
-                Ok(None) => {
-                    if self.errno == EAGAIN {
-                        rc = 0;
-                        break;
-                    }
-                }
-                Ok(Some(event)) => {
-                    if event_match(&event, id) {
-                        self.fill_table_row(tb, ids, &event)?;
-                    }
-                }
-            }
-        }
-        drop(fd);
-        Ok(rc)
+        self.for_each_matching(param, true, |rf, _, event, _| rf.fill_table_row(tb, ids, event))
     }
 
     /// `__rfkill_block (fd, id, block, param)`: one request written, and
-    /// logged. Always 0 once the identifier is valid.
-    fn rfkill_block_on(&mut self, fd: &Device, id: RfkillId, block: u8, param: &[u8]) -> i32 {
+    /// logged. Upstream's -1 for an invalid identifier, which both callers
+    /// have already refused, and its 0 otherwise, are read by neither.
+    fn rfkill_block_on(&mut self, fd: &Device, id: RfkillId, block: u8, param: &[u8]) {
         let mut event = Event {
             op: RFKILL_OP_CHANGE_ALL,
             soft: block,
@@ -950,7 +947,7 @@ impl Rfkill {
         let message = match id {
             RfkillId::Invalid => {
                 self.warnx(&format!("invalid identifier: {}", shown(param)));
-                return -1;
+                return;
             }
             RfkillId::Type(ty) => {
                 event.ty = u8::try_from(ty).unwrap_or(u8::MAX);
@@ -966,7 +963,7 @@ impl Rfkill {
             }
             RfkillId::All => b"all".to_vec(),
         };
-        match write_all(fd.0, &event.to_bytes()) {
+        match ulallio::write_all(fd.0, &event.to_bytes()) {
             Err(e) => {
                 self.errno = e;
                 self.warn(&format!("write failed: {}", self.dev), e);
@@ -974,7 +971,6 @@ impl Rfkill {
             Ok(()) => {
                 // `write_all` sets `errno` to 0 before each write.
                 self.errno = 0;
-                libcsyslog::openlog(b"rfkill", 0, LOG_USER);
                 let mut line = if block == 0 {
                     b"unblock".to_vec()
                 } else {
@@ -982,11 +978,9 @@ impl Rfkill {
                 };
                 line.extend_from_slice(b" set for ");
                 line.extend_from_slice(&message);
-                libcsyslog::syslog(LOG_NOTICE, &line);
-                libcsyslog::closelog();
+                (self.log)(&line);
             }
         }
-        0
     }
 
     /// `rfkill_block (block, param)`.
@@ -1007,38 +1001,11 @@ impl Rfkill {
     /// `rfkill_toggle (param)`: each matching device's soft block, turned
     /// over -- by a request of the identifier's kind, for each.
     fn rfkill_toggle(&mut self, param: &[u8]) -> Result<i32, Stop> {
-        let id = self.rfkill_id_to_type(param)?;
-        if id == RfkillId::Invalid {
-            self.warnx(&format!("invalid identifier: {}", shown(param)));
-            return Ok(-EINVAL);
-        }
-        let fd = match self.rfkill_open(false, true) {
-            Ok(fd) => fd,
-            Err(rc) => return Ok(rc),
-        };
-        let rc;
-        loop {
-            match self.rfkill_read_event(&fd) {
-                Err(e) => {
-                    rc = e;
-                    break;
-                }
-                Ok(None) => {
-                    if self.errno == EAGAIN {
-                        rc = 0;
-                        break;
-                    }
-                }
-                Ok(Some(event)) => {
-                    if event_match(&event, id) {
-                        let block = u8::from(event.soft == 0);
-                        self.rfkill_block_on(&fd, id, block, param);
-                    }
-                }
-            }
-        }
-        drop(fd);
-        Ok(rc)
+        self.for_each_matching(Some(param), false, |rf, fd, event, id| {
+            let block = u8::from(event.soft == 0);
+            rf.rfkill_block_on(fd, id, block, param);
+            Ok(())
+        })
     }
 
     /// `main()`, to the point of its `return`.
@@ -1208,37 +1175,24 @@ fn yes_no(state: u8) -> &'static str {
     if state == 0 { "no" } else { "yes" }
 }
 
-/// `argv` bytes as an `OsString`, for a diagnostic's quoting. Off Unix,
-/// where argv is not bytes and the program never runs, bytes that are not
-/// UTF-8 are dropped.
-fn os_from_bytes(bytes: &[u8]) -> OsString {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStringExt;
-        OsString::from_vec(bytes.to_vec())
-    }
-    #[cfg(not(unix))]
-    {
-        std::str::from_utf8(bytes)
-            .map(OsString::from)
-            .unwrap_or_default()
-    }
-}
-
-/// util-linux's `write_all (fd, buf, count)`: again after a short write,
-/// after `EINTR`, and a quarter of a second after `EAGAIN`. A write of
-/// nothing fails, with the `errno` of 0 it set before the write.
-fn write_all(fd: i32, mut buf: &[u8]) -> Result<(), i32> {
-    while !buf.is_empty() {
-        match libcall::fd::write(fd, buf) {
-            Ok(0) => return Err(0),
-            Ok(n) => buf = buf.get(n..).unwrap_or_default(),
-            Err(e) if e == EAGAIN => std::thread::sleep(std::time::Duration::from_millis(250)),
-            Err(e) if e == libcall::EINTR => {}
-            Err(e) => return Err(e),
+/// `gettimeofday`'s `struct timeval` of `t`: seconds and microseconds since
+/// the epoch -- the seconds negative, and the microseconds still counting
+/// up, for a time before 1970.
+fn timeval(t: std::time::SystemTime) -> (i64, u32) {
+    match t.duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => (i64::try_from(d.as_secs()).unwrap_or(i64::MAX), d.subsec_micros()),
+        Err(e) => {
+            let d = e.duration();
+            let secs = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);
+            match d.subsec_micros() {
+                0 => (secs.saturating_neg(), 0),
+                us => (
+                    secs.saturating_neg().saturating_sub(1),
+                    1_000_000u32.saturating_sub(us),
+                ),
+            }
         }
     }
-    Ok(())
 }
 
 #[cfg(test)]

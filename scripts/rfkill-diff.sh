@@ -9,14 +9,17 @@
 # its events written first through a descriptor the case keeps open (so a
 # read of what is left says EAGAIN, as the kernel's device does), and a tmpfs
 # over /sys/class holding the devices' files. What is left in the FIFO
-# afterwards -- the requests block and unblock wrote -- is compared too.
+# afterwards -- the requests block and unblock wrote -- is compared too, and
+# so is what each side logged: the tmpfs holds a /dev/log the harness
+# listens on, and each request's line (its timestamp masked) is kept. The
+# log is what shows toggle's requests, which it reads back out of the FIFO.
 #
 # Mounts made in a user namespace are nodev, so nothing in the case may open
 # a device by name: /dev/null, /dev/full and the terminal are reached through
 # descriptors opened outside.
 #
-# What is compared: stdout, stderr, the exit status, and what is left in the
-# FIFO --
+# What is compared: stdout, stderr, the exit status, what is left in the
+# FIFO, and the syslog lines --
 #
 #   * the table (the default, -o in each form, --output-all, -J, -r, -n, the
 #     exclusive pair) and the old `list` format, for every identifier kind --
@@ -78,6 +81,16 @@ while True:
     data += chunk
 print(data.hex())
 EOF
+# listen.py PATH OUT: every datagram sent to the Unix socket PATH, a line
+# each, until it is killed.
+cat > "$DIFF_TMP/listen.py" <<'EOF'
+import os, socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind(sys.argv[1])
+with open(sys.argv[2], "ab", buffering=0) as out:
+    while True:
+        out.write(s.recv(65536) + b"\n")
+EOF
 # noreader.py ARGV...: ARGV with stdout a pipe whose reader has gone.
 cat > "$DIFF_TMP/noreader.py" <<'EOF'
 import os, subprocess, sys
@@ -92,6 +105,10 @@ cat > "$DIFF_TMP/inner.sh" <<'EOF'
 set -u
 here=$(dirname "$0")
 scen=$1 out=$2 err=$3 left=$4 how=$5; shift 5
+# The namespace came up: a side without this file compared nothing.
+: > "${out%.out}.ran"
+log=${out%.out}.log
+: > "$log"
 mount -t tmpfs tmpfs /dev || exit 90
 mount -t tmpfs tmpfs /sys/class || exit 91
 mkdir /sys/class/rfkill
@@ -135,6 +152,9 @@ case $scen in
     ;;
   *) echo "inner.sh: no scenario $scen" >&2; exit 92 ;;
 esac
+python3 "$here/listen.py" /dev/log "$log" < /dev/null > /dev/null 2>&1 &
+lp=$!
+for _ in $(seq 1 50); do [ -S /dev/log ] && break; sleep 0.02; done
 # --foreground: timeout kills only the program, not itself as well, so the
 # shell has no `Killed` notice -- which names a PID -- to print. The python
 # helper is the one case with a child of its own, and needs the group killed.
@@ -150,6 +170,7 @@ case $how in
 esac
 rc=$?
 if [ "$scen" = nodev ]; then : > "$left"; else python3 "$here/drain.py" > "$left"; fi
+sleep 0.1; kill "$lp" 2>/dev/null; wait "$lp" 2>/dev/null
 exit "$rc"
 EOF
 
@@ -182,21 +203,24 @@ mask_times() {
 
 judge() {
   local o_rc=$1 g_rc=$2
-  # 90-92: the namespace could not be set up; 126 and 127: the program was
-  # never run -- either way nothing was compared.
-  if [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ] || [ "$g_rc" -ge 90 ] && [ "$g_rc" -le 92 ] \
+  # No `.ran`: the namespace never came up (`unshare` refused). 90-92: it
+  # could not be set up; 126 and 127: the program was never run -- either
+  # way nothing was compared.
+  if [ ! -f "$DIFF_TMP/ours.ran" ] || [ ! -f "$DIFF_TMP/gnu.ran" ] \
+     || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ]; } || { [ "$g_rc" -ge 90 ] && [ "$g_rc" -le 92 ]; } \
      || [ "$o_rc" = 126 ] || [ "$o_rc" = 127 ] || [ "$g_rc" = 126 ] || [ "$g_rc" = 127 ]; then
     AGREED=broken
   elif cmp -s "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out" \
      && cmp -s "$DIFF_TMP/ours.err" "$DIFF_TMP/gnu.err" \
-     && cmp -s "$DIFF_TMP/ours.left" "$DIFF_TMP/gnu.left" && [ "$o_rc" = "$g_rc" ]; then
+     && cmp -s "$DIFF_TMP/ours.left" "$DIFF_TMP/gnu.left" \
+     && cmp -s "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log" && [ "$o_rc" = "$g_rc" ]; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours (rc=%s): out %q err %q left %q\n  gnu  (rc=%s): out %q err %q left %q' \
-    "$o_rc" "$(head -c 1500 "$DIFF_TMP/ours.out")" "$(head -c 600 "$DIFF_TMP/ours.err")" "$(cat "$DIFF_TMP/ours.left")" \
-    "$g_rc" "$(head -c 1500 "$DIFF_TMP/gnu.out")" "$(head -c 600 "$DIFF_TMP/gnu.err")" "$(cat "$DIFF_TMP/gnu.left")")
+  REPORT=$(printf '  ours (rc=%s): out %q err %q left %q log %q\n  gnu  (rc=%s): out %q err %q left %q log %q' \
+    "$o_rc" "$(head -c 1500 "$DIFF_TMP/ours.out")" "$(head -c 600 "$DIFF_TMP/ours.err")" "$(cat "$DIFF_TMP/ours.left")" "$(cat "$DIFF_TMP/ours.log")" \
+    "$g_rc" "$(head -c 1500 "$DIFF_TMP/gnu.out")" "$(head -c 600 "$DIFF_TMP/gnu.err")" "$(cat "$DIFF_TMP/gnu.left")" "$(cat "$DIFF_TMP/gnu.log")")
 }
 
 # case_ SCENARIO HOW ARGV...: both sides, judged.
@@ -205,11 +229,14 @@ case_() {
   rm -f "$DIFF_TMP"/ours.* "$DIFF_TMP"/gnu.*
   side ours "$scen" "$how" "$@"; o_rc=$?
   side gnu "$scen" "$how" "$@"; g_rc=$?
-  for f in out err left; do
+  for f in out err left log; do
     [ -f "$DIFF_TMP/ours.$f" ] || : > "$DIFF_TMP/ours.$f"
     [ -f "$DIFF_TMP/gnu.$f" ] || : > "$DIFF_TMP/gnu.$f"
   done
   [ -n "${MASK:-}" ] && mask_times "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out"
+  # A logged line's timestamp, `Mmm dd hh:mm:ss`, differs between the sides.
+  sed -E -i 's/^(<[0-9]+>)[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} /\1TS /' \
+    "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log"
   # The shell's notice of a program killed by a signal names its PID.
   sed -E -i 's/^(.*inner\.sh: line [0-9]+: +)[0-9]+ /\1PID /' "$DIFF_TMP/ours.err" "$DIFF_TMP/gnu.err"
   judge "$o_rc" "$g_rc"

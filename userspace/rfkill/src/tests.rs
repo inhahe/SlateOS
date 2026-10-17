@@ -5,7 +5,25 @@ use super::*;
 /// A program whose `/sys/class/rfkill` is `sys`, and whose `/dev/rfkill`
 /// is `dev`.
 fn rfkill_at(dev: &str, sys: &std::path::Path) -> Rfkill {
-    Rfkill::new(b"rfkill".to_vec(), 0, dev, sys)
+    let mut rf = Rfkill::new(b"rfkill".to_vec(), 0, dev, sys);
+    rf.log = keep_log;
+    rf
+}
+
+thread_local! {
+    /// What this test thread's program logged, a line each.
+    static LOGGED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The tests' log: kept for them to read, never the machine's syslog.
+fn keep_log(line: &[u8]) {
+    LOGGED.with(|l| l.borrow_mut().push(String::from_utf8_lossy(line).into_owned()));
+}
+
+/// What was logged since the last call.
+#[cfg(unix)]
+fn logged() -> Vec<String> {
+    LOGGED.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
 /// A scratch sysfs: `rfkillN/name` and `rfkillN/type` for each device.
@@ -147,6 +165,93 @@ fn the_timestamp_is_iso_with_a_comma_and_the_zone() {
 }
 
 #[test]
+fn the_zone_is_hours_and_minutes_and_half_an_hour_west_is_plus() {
+    let east = localtime::Zone::from_tz(Some(b"<+0530>-5:30"));
+    assert_eq!(timestamp(&east, 0, 0), "1970-01-01 05:30:00,000000+05:30");
+    let west = localtime::Zone::from_tz(Some(b"<-0330>3:30"));
+    assert_eq!(timestamp(&west, 0, 0), "1969-12-31 20:30:00,000000-03:30");
+    // The minutes are always positive, and the hours of half an hour west
+    // are 0, which `%+03d` prints with a plus: util-linux's own quirk.
+    let half = localtime::Zone::from_tz(Some(b"<-0030>0:30"));
+    assert_eq!(timestamp(&half, 0, 0), "1969-12-31 23:30:00,000000+00:30");
+}
+
+#[test]
+fn states_are_worded_as_upstream_words_them() {
+    assert_eq!(blocked(0), b"unblocked");
+    assert_eq!(blocked(1), b"blocked");
+    assert_eq!(blocked(2), b"blocked");
+    assert_eq!(yes_no(0), "no");
+    assert_eq!(yes_no(1), "yes");
+}
+
+#[test]
+fn options_decode_to_upstream_s_values() {
+    assert_eq!(option_to_longopt(i32::from(b'J')), Some("json"));
+    assert_eq!(option_to_longopt(OPT_LIST_TYPES), Some("output-all"));
+    assert_eq!(option_to_longopt(i32::from(b'x')), None);
+    let id = Some(OsString::from("ID"));
+    assert_eq!(
+        option_code(&Opt::Short(b'o', id.clone())),
+        Some((i32::from(b'o'), id.clone()))
+    );
+    assert_eq!(
+        option_code(&Opt::Long("output", id.clone())),
+        Some((i32::from(b'o'), id))
+    );
+    assert_eq!(option_code(&Opt::Long("output-all", None)), Some((OPT_LIST_TYPES, None)));
+    assert_eq!(option_code(&Opt::Long("nosuch", None)), None);
+}
+
+#[test]
+fn the_program_is_named_by_argv0_s_last_component_escaped() {
+    assert_eq!(short_name(OsStr::new("/usr/sbin/rfkill")), b"rfkill");
+    assert_eq!(short_name(OsStr::new("rfkill")), b"rfkill");
+    assert_eq!(short_name(OsStr::new("dir/")), b"");
+    assert_eq!(shown(b"a\nb"), "a\\012b");
+}
+
+#[test]
+fn xstrdup_copies_a_string_and_aborts_on_none() {
+    let rf = rfkill_at("/nonexistent", std::path::Path::new("/nonexistent"));
+    assert_eq!(rf.xstrdup(Some("WiMAX")), Ok(b"WiMAX".to_vec()));
+    assert_eq!(rf.xstrdup(None), Err(Stop::Abort));
+}
+
+#[test]
+fn the_switch_sets_what_upstream_s_sets() {
+    let sys = sysfs("switch", &[]);
+    let argv = |a: &[&str]| -> Vec<OsString> { a.iter().map(OsString::from).collect() };
+    let mut rf = rfkill_at("/nonexistent", &sys);
+    // `help` prints the usage into a buffer the test never flushes.
+    assert_eq!(rf.run(&argv(&["rfkill", "-J", "-n", "help"])), Stop::Exit(0));
+    assert!(rf.json && rf.no_headings && !rf.raw);
+    let mut rf = rfkill_at("/nonexistent", &sys);
+    assert_eq!(rf.run(&argv(&["rfkill", "-r", "help"])), Stop::Exit(0));
+    assert!(rf.raw && !rf.json && !rf.no_headings);
+    for refused in [
+        &["rfkill", "-J", "-r"][..],
+        &["rfkill", "--bogus"],
+        &["rfkill", "-x"],
+        &["rfkill", "bogus"],
+        &["rfkill", "LIST"],
+    ] {
+        let mut rf = rfkill_at("/nonexistent", &sys);
+        assert_eq!(rf.run(&argv(refused)), Stop::Exit(1), "{refused:?}");
+    }
+    for fine in [&["rfkill", "-V"][..], &["rfkill", "--help"], &["rfkill", "-h", "bogus"]] {
+        let mut rf = rfkill_at("/nonexistent", &sys);
+        assert_eq!(rf.run(&argv(fine)), Stop::Exit(0), "{fine:?}");
+    }
+    // No device: listing and blocking fail, as `-errno` ORed into 1.
+    for failing in [&["rfkill"][..], &["rfkill", "list"], &["rfkill", "--output-all"], &["rfkill", "block", "all"]] {
+        let mut rf = rfkill_at("/nonexistent", &sys);
+        assert_eq!(rf.run(&argv(failing)), Stop::Exit(1), "{failing:?}");
+    }
+    std::fs::remove_dir_all(&sys).unwrap();
+}
+
+#[test]
 fn usage_lists_every_column_and_command() {
     let text = String::from_utf8(usage(b"rfkill")).unwrap();
     assert!(text.starts_with("\nUsage:\n rfkill [options] command [identifier ...]\n"));
@@ -265,6 +370,11 @@ fn block_writes_one_request_of_the_identifier_s_kind() {
     want.extend_from_slice(&ev(0, 2, RFKILL_OP_CHANGE_ALL, 0, 0).to_bytes());
     want.extend_from_slice(&ev(0, 0, RFKILL_OP_CHANGE_ALL, 1, 0).to_bytes());
     assert_eq!(dev.drain(), want);
+    // Each request logged as upstream words it: the index as a signed `%d`.
+    assert_eq!(
+        logged(),
+        ["block set for id 3", "unblock set for type bluetooth", "block set for all"]
+    );
     std::fs::remove_dir_all(&sys).unwrap();
 }
 
@@ -279,9 +389,35 @@ fn toggle_turns_each_matching_device_s_block_over() {
     let mut rf = rfkill_at(&dev.path(), &sys);
     assert_eq!(rf.rfkill_toggle(b"wlan"), Ok(0));
     // The request went into the same pipe, and was read back as an event
-    // that matches nothing -- as on a FIFO, not on the kernel's device.
+    // that matches nothing -- as on a FIFO, not on the kernel's device; the
+    // log says which way it went: the blocked LAN unblocked, as a type.
     assert_eq!(dev.drain(), Vec::<u8>::new());
+    assert_eq!(logged(), ["unblock set for type wlan"]);
+    let dev = FakeDevice::with(&[ev(1, 2, RFKILL_OP_ADD, 0, 0)]);
+    let mut rf = rfkill_at(&dev.path(), &sys);
+    assert_eq!(rf.rfkill_toggle(b"1"), Ok(0));
+    assert_eq!(logged(), ["block set for id 1"]);
     std::fs::remove_dir_all(&sys).unwrap();
+}
+
+#[test]
+fn the_column_table_is_in_enum_order() {
+    for (i, col) in [Col::Device, Col::Id, Col::Type, Col::Desc, Col::Soft, Col::Hard]
+        .into_iter()
+        .enumerate()
+    {
+        assert_eq!(INFOS[i].id, col);
+        assert_eq!(info(col).id, col);
+        assert_eq!(info(col).name, INFOS[i].name);
+    }
+}
+
+#[test]
+fn a_clock_before_1970_counts_back_whole_seconds() {
+    use std::time::{Duration, UNIX_EPOCH};
+    assert_eq!(timeval(UNIX_EPOCH + Duration::from_millis(2_500)), (2, 500_000));
+    assert_eq!(timeval(UNIX_EPOCH - Duration::from_millis(1_500)), (-2, 500_000));
+    assert_eq!(timeval(UNIX_EPOCH - Duration::from_secs(3)), (-3, 0));
 }
 
 #[test]

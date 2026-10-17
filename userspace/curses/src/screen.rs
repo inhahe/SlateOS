@@ -915,6 +915,28 @@ impl Screen {
         self.t.idcok = on;
     }
 
+    /// `use_legacy_coding (level)` on this screen: how bytes from 128 to
+    /// 255 are shown from now on. The level before, or `ERR` (-1) -- and
+    /// nothing changed -- for a level other than 0, 1 or 2.
+    pub fn use_legacy_coding(&mut self, level: i32) -> i32 {
+        if (0..=2).contains(&level) {
+            std::mem::replace(&mut self.t.legacy_coding, level)
+        } else {
+            -1
+        }
+    }
+
+    /// `tigetstr (name)` of this screen's terminal, as curses holds it
+    /// once set up.
+    #[must_use]
+    pub fn tigetstr(&self, name: &[u8]) -> crate::TermString {
+        match self.t.entry.tigetstr(name) {
+            terminfo::TiString::NotAString => crate::TermString::Cancelled,
+            terminfo::TiString::Absent => crate::TermString::Absent,
+            terminfo::TiString::Value(v) => crate::TermString::Value(v.to_vec()),
+        }
+    }
+
     /// `cbreak ()`: input a character at a time, interrupt characters still
     /// signals, carriage return not made newline.
     pub fn cbreak(&mut self) -> bool {
@@ -1482,6 +1504,33 @@ mod tests {
         assert_eq!(t.c_lflag, !(tc::ECHO | tc::ECHONL));
         assert_eq!(t.c_oflag, !tc::ONLCR);
         assert_eq!(t.c_cflag, !0);
+    }
+
+    /// A level of 0 to 2 is set and the one before answered; any other is
+    /// refused and changes nothing.
+    #[test]
+    fn legacy_coding_takes_three_levels_and_answers_the_last() {
+        let mut s = xterm(Box::new(Utf8));
+        assert_eq!(s.t.legacy_coding, 0, "a UTF-8 locale's");
+        assert_eq!(s.use_legacy_coding(2), 0);
+        assert_eq!(s.use_legacy_coding(3), -1);
+        assert_eq!(s.use_legacy_coding(-1), -1);
+        assert_eq!(s.t.legacy_coding, 2, "a refused level changes nothing");
+        assert_eq!(s.use_legacy_coding(1), 2);
+        assert_eq!(s.use_legacy_coding(0), 1);
+        let mut c = xterm(Box::new(CLocale));
+        assert_eq!(c.use_legacy_coding(0), 1, "the C locale's");
+    }
+
+    /// A string the terminal has, one it has not, and a name that is no
+    /// string capability.
+    #[test]
+    fn tigetstr_tells_a_missing_string_from_a_name_that_is_none() {
+        let s = xterm(Box::new(CLocale));
+        assert_eq!(s.tigetstr(b"bel"), crate::TermString::Value(vec![7]));
+        assert_eq!(s.tigetstr(b"dial"), crate::TermString::Absent);
+        assert_eq!(s.tigetstr(b"cols"), crate::TermString::Cancelled, "a number");
+        assert_eq!(s.tigetstr(b"nosuch"), crate::TermString::Cancelled);
     }
 
     /// With no terminal there are no modes to keep: `def_shell_mode` is

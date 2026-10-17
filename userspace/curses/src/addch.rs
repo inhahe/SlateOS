@@ -61,8 +61,8 @@ pub trait Ctype {
 pub struct AddCtx<'a> {
     /// The locale.
     pub ctype: &'a dyn Ctype,
-    /// `sp->_legacy_coding`: 1 in the `C` or `POSIX` locale, else 0 (2 only
-    /// after `use_legacy_coding (2)`, which nothing here calls).
+    /// `sp->_legacy_coding`: 1 in the `C` or `POSIX` locale, else 0, until
+    /// the program sets 0, 1 or 2 with `use_legacy_coding`.
     pub legacy_coding: i32,
     /// `TABSIZE`.
     pub tabsize: i32,

@@ -452,14 +452,7 @@ pub fn idcok(flag: bool) {
 /// they are. The level before, or `ERR` (-1) for any other level and
 /// without a screen.
 pub fn use_legacy_coding(level: i32) -> i32 {
-    signals::with(|sp| {
-        if (0..=2).contains(&level) {
-            std::mem::replace(&mut sp.t.legacy_coding, level)
-        } else {
-            -1
-        }
-    })
-    .unwrap_or(-1)
+    signals::with(|sp| sp.use_legacy_coding(level)).unwrap_or(-1)
 }
 
 /// What [`tigetstr`] answers.
@@ -479,12 +472,7 @@ pub enum TermString {
 /// `tigetstr (name)`: the string capability `name` of the screen's
 /// terminal, as curses holds it once set up.
 pub fn tigetstr(name: &[u8]) -> TermString {
-    signals::with(|sp| match sp.t.entry.tigetstr(name) {
-        terminfo::TiString::NotAString => TermString::Cancelled,
-        terminfo::TiString::Absent => TermString::Absent,
-        terminfo::TiString::Value(v) => TermString::Value(v.to_vec()),
-    })
-    .unwrap_or(TermString::Cancelled)
+    signals::with(|sp| sp.tigetstr(name)).unwrap_or(TermString::Cancelled)
 }
 
 /// `beep ()`.

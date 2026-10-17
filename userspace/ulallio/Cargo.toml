@@ -1,0 +1,12 @@
+[package]
+name = "ulallio"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux's all-io.h: read_all and write_all, with its quarter-second wait before a retry"
+
+[lints]
+workspace = true
+
+[dependencies]
+# read, write and nanosleep, through the C library.
+libcall = { path = "../../libcall" }

@@ -161,26 +161,15 @@ pub struct Inotify {
 
 #[cfg(unix)]
 mod sys {
-    /// C's `struct pollfd`.
-    #[repr(C)]
-    pub struct PollFd {
-        pub fd: i32,
-        pub events: i16,
-        pub revents: i16,
-    }
-
     unsafe extern "C" {
         pub fn inotify_init1(flags: i32) -> i32;
         pub fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> i32;
-        pub fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
         // `void *`, as the C library and Rust's own runtime declare it: a test
         // build links the runtime, which checks that the two agree.
         pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         pub fn close(fd: i32) -> i32;
     }
 
-    /// `poll`: there is data to read.
-    pub const POLLIN: i16 = 0x0001;
     /// `EAGAIN`: a non-blocking read with nothing to return.
     pub const EAGAIN: i32 = 11;
     /// `EINTR`: interrupted before anything happened.
@@ -258,36 +247,21 @@ impl Inotify {
     ///
     /// # Errors
     ///
-    /// The `errno` set by `poll`.
-    #[cfg(unix)]
+    /// The `errno` set by `poll`; [`ENOSYS`](crate::ENOSYS) off Unix.
     pub fn wait(&self, timeout_ms: i32) -> Result<bool, i32> {
-        let mut fd = sys::PollFd {
+        let mut fds = [crate::fd::PollFd {
             fd: self.fd,
-            events: sys::POLLIN,
+            events: crate::fd::POLLIN,
             revents: 0,
-        };
-        // SAFETY: one `pollfd`, owned by this frame and alive for the call,
-        // and the count says one.
-        let n = unsafe { sys::poll(&raw mut fd, 1, timeout_ms) };
-        if n < 0 {
-            let errno = crate::last_errno();
-            return if errno == sys::EINTR {
-                Ok(false)
-            } else {
-                Err(errno)
-            };
+        }];
+        match crate::fd::poll(&mut fds, timeout_ms) {
+            Ok(n) => {
+                let [fd] = fds;
+                Ok(n > 0 && fd.revents & crate::fd::POLLIN != 0)
+            }
+            Err(crate::EINTR) => Ok(false),
+            Err(e) => Err(e),
         }
-        Ok(n > 0 && fd.revents & sys::POLLIN != 0)
-    }
-
-    /// Wait for something to read.
-    ///
-    /// # Errors
-    ///
-    /// Always [`ENOSYS`](crate::ENOSYS).
-    #[cfg(not(unix))]
-    pub fn wait(&self, _timeout_ms: i32) -> Result<bool, i32> {
-        Err(crate::ENOSYS)
     }
 
     /// Read what has happened into `buf`, without blocking: nothing yet is an

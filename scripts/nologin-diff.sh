@@ -39,6 +39,8 @@ cat > "$DIFF_TMP/inner.sh" <<'EOF'
 set -u
 here=$(dirname "$0")
 bin=$1 out=$2 err=$3 log=$4 how=$5; shift 5
+# The namespace came up: a side without this file compared nothing.
+: > "${out%.out}.ran"
 nolog=
 if [ "${1:-}" = nolog ]; then nolog=1; shift; fi
 mkdir -p "$here/pts.$$" && mount --bind /dev/pts "$here/pts.$$" || exit 90
@@ -99,7 +101,8 @@ case_() {
   for s in ours gnu; do for f in out err log; do [ -f "$DIFF_TMP/$s.$f" ] || : > "$DIFF_TMP/$s.$f"; done; done
   mask "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log"
   label="[$how${CASE_ENV:+ $CASE_ENV}] nologin $(printf '%q ' "$@")"
-  if [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ] || [ "$g_rc" = 127 ] || [ "$o_rc" = 127 ]; then
+  if [ ! -f "$DIFF_TMP/ours.ran" ] || [ ! -f "$DIFF_TMP/gnu.ran" ] \
+     || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ]; } || [ "$g_rc" = 127 ] || [ "$o_rc" = 127 ]; then
     broken=$((broken + 1)); printf 'BROKEN %s (rc %s/%s)\n' "$label" "$o_rc" "$g_rc"
   elif cmp -s "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out" && cmp -s "$DIFF_TMP/ours.err" "$DIFF_TMP/gnu.err" \
      && cmp -s "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log" && [ "$o_rc" = "$g_rc" ]; then

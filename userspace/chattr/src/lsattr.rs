@@ -143,16 +143,14 @@ impl Lsattr {
 /// `main (argc, argv)`: the exit status.
 pub fn main(argv: &[Vec<u8>]) -> i32 {
     let mut l = Lsattr {
-        // `static const char *program_name = "lsattr"`, kept when argv is
-        // empty -- whose `usage ()` then names it.
-        program_name: argv.first().cloned().unwrap_or_else(|| b"lsattr".to_vec()),
+        // Never empty: `main` runs lsattr only when argv[0] names it. (An
+        // empty argv runs chattr, whose usage it then prints: one binary
+        // cannot tell which name it was started by without one.)
+        program_name: argv.first().cloned().unwrap_or_default(),
         opt: Options::default(),
         out: Output::stdout(),
         err: Output::stderr(),
     };
-    if argv.is_empty() {
-        l.usage();
-    }
     const LSATTR: Program = Program::new("lsattr", 1);
     let words: Vec<OsString> = argv
         .iter()

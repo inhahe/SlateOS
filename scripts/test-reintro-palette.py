@@ -144,7 +144,7 @@ def main() -> int:
         crate.mkdir(parents=True)
         (crate / "lib.rs").write_text(
             "fn f() {}\n\n#[test]\n#[should_panic(expected = \"[x]\")]\nfn real_one() {}\n",
-            encoding="utf-8")
+            encoding="utf-8", newline="")
         here = {"c/src/lib.rs": b"alpha\n"}
         try:
             status, out = checked(rp, [("G: names a gone test", "c/src/lib.rs",

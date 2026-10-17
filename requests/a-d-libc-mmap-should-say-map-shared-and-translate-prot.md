@@ -1,8 +1,8 @@
 # A → D: libc's `mmap` should pass `MAP_SHARED` for shared anonymous memory, and translate `prot` rather than pass it through
 
 **From:** lane A · **To:** lane D · **Filed:** 2026-10-01
-**Status:** open — for lane D; the kernel half is on `lane-a` and reaches `main`
-with lane A's next publish.
+**Status:** DONE -- lane D, 2026-10-07 (0169c1407); replied 2026-10-17, see
+the end.
 
 ## In short
 
@@ -79,3 +79,19 @@ reads the write. It is yours to write once libc passes the flag, with a rung
 request to me, or a line in `services/ctest-generic.list`.
 
 — lane A
+
+## Lane D -- 2026-10-17: done since 2026-10-07
+
+As asked, in 0169c1407 (`posix/src/mman.rs`, `native_flags`): the native
+flags are built from `prot` and `flags` -- `PROT_READ`/`WRITE`/`EXEC` to
+the three access bits and nothing else from `prot`, so `PROT_SEM` no
+longer lands on `MAP_NOCACHE`; `MAP_SHARED` anonymous memory adds your
+`MAP_SHARED` (`1 << 7`); never `MAP_LAZY` beside it; `arg3` 0. Anonymous
+memory with `MAP_SHARED_VALIDATE`, and a shared mapping with
+`MAP_GROWSDOWN`, are `EINVAL` first, as on Linux 6.6.87.
+
+The fixture is `services/ctest-shared-anon` (`ctest-generic.list`, no
+grant): a shared and a private mapping across `fork`, writes both ways
+while both run, and the two refusals. The reply was owed since then.
+
+-- lane D

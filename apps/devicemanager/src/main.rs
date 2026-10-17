@@ -6834,10 +6834,33 @@ desktop: 3840x1200 at (-1920,0)
         );
     }
 
+    /// **A press in a long search lands where it was drawn**: the box with
+    /// the keyboard draws a search too long for it scrolled to the caret at
+    /// its end, and a press near its right edge is measured against that --
+    /// near the end, not a box's width from the start.
+    #[test]
+    fn a_press_in_a_long_search_lands_where_it_was_drawn() {
+        let mut state = DeviceManagerState::with_sample_devices();
+        handle_event(&mut state, &chord(Key::F, "", Modifiers::ctrl()));
+        type_into(&mut state, &"w".repeat(120));
+        let rect = search_box();
+        handle_event(
+            &mut state,
+            &click_at(
+                rect.right() - SEARCH_TEXT_INSET - 1.0,
+                rect.y + rect.h / 2.0,
+            ),
+        );
+        let at = state.search.input().cursor().byte();
+        assert!(
+            at > 90,
+            "the press landed at {at}, measured from the start of the search"
+        );
+    }
+
     /// **The box edits the search it shows**, however the search came to be
-    /// in it: its editor is loaded from the query whenever a press or a key
-    /// finds the two apart, so a press lands in what is shown and a key
-    /// types after it.
+    /// in it: a search set from outside the box puts its caret at the end,
+    /// so a press lands in what is shown and a key types after it.
     #[test]
     fn the_box_edits_the_search_it_shows() {
         let mut state = DeviceManagerState::with_sample_devices();

@@ -37,6 +37,7 @@ use guitk::text::TextCursor;
 use guitk::textedit;
 use guitk::textinput::{KeyEdit, TextInput};
 use oswindow::app::{self, App, Response};
+use textline::SearchBox;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2002,8 +2003,9 @@ pub struct SystemRestoreUI {
     pub selected_id: Option<u64>,
     /// Second selected snapshot (for comparison).
     pub compare_id: Option<u64>,
-    /// Search query.
-    pub search_query: String,
+    /// The search box, which is the search the restore points are
+    /// filtered by.
+    pub search: SearchBox,
     /// Type filter (None = show all).
     pub type_filter: Option<SnapshotType>,
     /// Current dialog.
@@ -2029,9 +2031,6 @@ pub struct SystemRestoreUI {
     /// typing into (`form_text_mut`), whose string stays the truth:
     /// reloaded whenever the field changes or its text changes under it.
     form_editor: TextInput,
-    /// The search box's caret and selection: reloaded from `search_query`
-    /// when that changed underneath it.
-    search_editor: TextInput,
     /// The search box's or a form box's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<MenuField>,
     /// How wide the mark is round a box that has the keyboard: the user's
@@ -2124,7 +2123,7 @@ impl SystemRestoreUI {
             view_mode: ViewMode::Tree,
             selected_id,
             compare_id: None,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, FONT_SIZE),
             type_filter: None,
             dialog: DialogKind::None,
             progress: None,
@@ -2136,7 +2135,6 @@ impl SystemRestoreUI {
             current_timestamp: 0,
             form_focus: FormFocus::Text(FormField::Name),
             form_editor: textline::field_holding("", FORM_CAPACITY),
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             field_menu: fieldmenu::FieldMenu::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             locations,
@@ -2355,12 +2353,12 @@ impl SystemRestoreUI {
         {
             return false;
         }
-        if self.search_query.is_empty() {
+        if self.search.is_empty() {
             return true;
         }
         // Every letter folded, not only ASCII's: `to_ascii_lowercase` left
         // `SÃO` and `são` different words.
-        let q = self.search_query.to_lowercase();
+        let q = self.search.text().to_lowercase();
         snap.name.to_lowercase().contains(&q) || snap.description.to_lowercase().contains(&q)
     }
 
@@ -3118,10 +3116,10 @@ impl SystemRestoreUI {
                 // The search box is the only thing Escape can clear here, and
                 // clearing it is the only way to get back to the whole list
                 // once a query has hidden most of it.
-                if self.search_query.is_empty() {
+                if !self.search.clear() {
                     return EventResult::Ignored;
                 }
-                self.set_search("");
+                self.reanchor_selection();
                 EventResult::Consumed
             }
             // What was typed goes to the search, AltGr's letters among it; the
@@ -3134,17 +3132,17 @@ impl SystemRestoreUI {
     /// A key for the search box -- which has the keyboard whenever the list
     /// is on screen, so not in the Schedule view, which lists no restore
     /// point and takes Space, Left and Right for its own controls -- at its
-    /// caret, on the program's clipboard
-    /// (`textline::apply_key_on_clipboard`): the list follows a change to
-    /// the search. Answers whether the box did anything with the key.
+    /// caret, on the program's clipboard (`SearchBox::key`): the list, and
+    /// the selection with it, follows a change to the search. Answers
+    /// whether the box did anything with the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
         if self.view_mode == ViewMode::Schedule {
             return EventResult::Ignored;
         }
-        self.sync_search_editor();
-        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);
-        let typed = self.search_editor.text().to_owned();
-        self.set_search(&typed);
+        let edit = self.search.key(key);
+        if edit.changed {
+            self.reanchor_selection();
+        }
         if edit.handled {
             EventResult::Consumed
         } else {
@@ -3152,38 +3150,16 @@ impl SystemRestoreUI {
         }
     }
 
-    /// Load the search box's editor from `search_query` when the search
-    /// changed underneath it -- Escape empties it -- its caret at the end.
-    fn sync_search_editor(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-    }
-
-    /// The search changed to `text`: the list, and the selection with it,
-    /// follows.
-    fn set_search(&mut self, text: &str) {
-        if self.search_query != text {
-            text.clone_into(&mut self.search_query);
-            self.reanchor_selection();
-        }
-    }
-
     /// A press in the search box at `x`: its caret where the press landed,
-    /// against the text as the box draws it.
+    /// against the text as the box drew it -- scrolled to its caret, which
+    /// `render_box_text` does with the keyboard or without.
     fn press_search_box(&mut self, x: f32) {
         let rect = self.search_box_rect();
-        self.sync_search_editor();
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            self.search_editor.cursor(),
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
+        self.search.press(
             x - rect.x - BOX_TEXT_INSET,
+            rect.w - 2.0 * BOX_TEXT_INSET,
+            true,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// A right press at `(x, y)`: over a box of the new-snapshot form, or
@@ -3214,8 +3190,7 @@ impl SystemRestoreUI {
         if self.progress.is_some() || !self.search_box_rect().contains(x, y) {
             return EventResult::Ignored;
         }
-        self.sync_search_editor();
-        let menu = self.search_editor.edit_menu();
+        let menu = self.search.edit_menu();
         self.field_menu
             .open(MenuField::Search, menu, x, y, viewport);
         EventResult::Consumed
@@ -3227,10 +3202,8 @@ impl SystemRestoreUI {
     fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
         match field {
             MenuField::Search => {
-                self.sync_search_editor();
-                if self.search_editor.edit_command(id) == KeyEdit::Changed {
-                    let typed = self.search_editor.text().to_owned();
-                    self.set_search(&typed);
+                if self.search.menu_row(id) {
+                    self.reanchor_selection();
                 }
             }
             MenuField::Form(form_field) => {
@@ -4058,7 +4031,7 @@ impl SystemRestoreUI {
                 && !self.show_help
                 && self.view_mode != ViewMode::Schedule,
             disabled: false,
-            invalid: !self.search_query.is_empty() && self.visible_rows().is_empty(),
+            invalid: !self.search.is_empty() && self.visible_rows().is_empty(),
         }
     }
 
@@ -4145,27 +4118,18 @@ impl SystemRestoreUI {
             overflow: TextOverflow::Ellipsis,
         });
 
-        // Search box: with its caret and selection where they are -- the
-        // end of the text if the search changed under the box's editor.
+        // Search box: with its caret and selection where they are, drawn as
+        // the form's boxes are.
         let rect = self.search_box_rect();
         let state = self.search_box_state();
         field::draw(rt, &self.palette, rect, state, self.focus_ring_width);
-        let synced = self.search_editor.text() == self.search_query;
         self.render_box_text(
             rt,
             rect,
             (
-                &self.search_query,
-                if synced {
-                    self.search_editor.cursor()
-                } else {
-                    TextCursor::from(self.search_query.len())
-                },
-                if synced {
-                    self.search_editor.selection_anchor()
-                } else {
-                    None
-                },
+                self.search.text(),
+                self.search.input().cursor(),
+                self.search.input().selection_anchor(),
             ),
             state.focused,
             "Search snapshots...",
@@ -7149,7 +7113,7 @@ working filter from a broken one"
         for c in "Network".chars() {
             ui.handle_event(&types(c));
         }
-        assert_eq!(ui.search_query, "Network");
+        assert_eq!(ui.search.text(), "Network");
         let rows = ui.visible_rows();
         assert_eq!(rows.len(), 1, "one snapshot mentions the network");
         assert_eq!(
@@ -7159,7 +7123,7 @@ working filter from a broken one"
         );
 
         ui.handle_event(&press(Key::Escape));
-        assert_eq!(ui.search_query, "", "Escape clears the query");
+        assert_eq!(ui.search.text(), "", "Escape clears the query");
         assert!(ui.visible_rows().len() > 1);
     }
 
@@ -7167,7 +7131,7 @@ working filter from a broken one"
     fn a_key_that_carries_no_text_is_not_typed_into_the_search_box() {
         let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         assert_eq!(ui.handle_event(&press(Key::F5)), EventResult::Ignored);
-        assert_eq!(ui.search_query, "");
+        assert_eq!(ui.search.text(), "");
     }
 
     // -- dialogs --
@@ -7231,7 +7195,11 @@ working filter from a broken one"
         let state = |ui: &SystemRestoreUI| {
             (
                 (ui.manager.tree.count(), ui.selected_id, ui.view_mode),
-                (ui.dialog.clone(), ui.search_query.clone(), ui.type_filter),
+                (
+                    ui.dialog.clone(),
+                    ui.search.text().to_owned(),
+                    ui.type_filter,
+                ),
                 (
                     ui.show_help,
                     ui.manager.tree.get_snapshot(id).map(|s| s.locked),
@@ -7271,11 +7239,12 @@ working filter from a broken one"
         ui.handle_event(&chord(Key::X, "x", Modifiers::super_key()));
         ui.handle_event(&chord(Key::Q, "@", altgr));
         assert_eq!(
-            ui.search_query, "@",
+            ui.search.text(),
+            "@",
             "the search typed a command's letter, or lost AltGr's"
         );
         ui.handle_event(&chord(Key::Backspace, "", Modifiers::alt()));
-        assert_eq!(ui.search_query, "@", "Alt+Backspace deleted from it");
+        assert_eq!(ui.search.text(), "@", "Alt+Backspace deleted from it");
         ui.handle_event(&press(Key::Escape));
 
         // The question before a deletion answers plain keys only. (The search
@@ -9137,7 +9106,7 @@ working filter from a broken one"
     #[test]
     fn test_ui_visible_ids_with_search() {
         let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
-        ui.search_query = "Update".to_string();
+        ui.search.set_text("Update");
         let ids = ui.visible_ids();
         for id in &ids {
             let snap = ui.manager.tree.get_snapshot(*id).unwrap();
@@ -10432,7 +10401,8 @@ working filter from a broken one"
             "a letter typed into the search is reported unanswered, so nothing redraws"
         );
         assert_eq!(
-            ui.search_query, "Network",
+            ui.search.text(),
+            "Network",
             "typing did not go in at the caret"
         );
         assert_eq!(
@@ -10442,12 +10412,17 @@ working filter from a broken one"
         );
         ui.handle_event(&press(Key::Backspace));
         assert_eq!(
-            ui.search_query, "Netwrk",
+            ui.search.text(),
+            "Netwrk",
             "Backspace did not take the character before the caret"
         );
         ui.handle_event(&ctrl(Key::A));
         type_text(&mut ui, "x");
-        assert_eq!(ui.search_query, "x", "typing did not replace the selection");
+        assert_eq!(
+            ui.search.text(),
+            "x",
+            "typing did not replace the selection"
+        );
 
         ui.handle_event(&ctrl(Key::A));
         ui.handle_event(&ctrl(Key::C));
@@ -10459,7 +10434,8 @@ working filter from a broken one"
         guitk::clipboard::set_text("Network");
         ui.handle_event(&ctrl(Key::V));
         assert_eq!(
-            ui.search_query, "Network",
+            ui.search.text(),
+            "Network",
             "Ctrl+V did not paste the program's clipboard"
         );
     }
@@ -10474,7 +10450,8 @@ working filter from a broken one"
         ui.handle_event(&click(rect.x + BOX_TEXT_INSET + 1.0, rect.y + rect.h / 2.0));
         type_text(&mut ui, "x");
         assert_eq!(
-            ui.search_query, "xab",
+            ui.search.text(),
+            "xab",
             "the press did not put the caret at the start"
         );
     }
@@ -10487,9 +10464,9 @@ working filter from a broken one"
         let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
         type_text(&mut ui, "Net");
         ui.handle_event(&press(Key::Escape));
-        assert_eq!(ui.search_query, "", "control: Escape empties the search");
+        assert_eq!(ui.search.text(), "", "control: Escape empties the search");
         type_text(&mut ui, "w");
-        assert_eq!(ui.search_query, "w", "the old search came back");
+        assert_eq!(ui.search.text(), "w", "the old search came back");
     }
 
     /// **The search box has a right-click menu** -- Cut, Copy, Paste, Delete
@@ -10508,7 +10485,7 @@ working filter from a broken one"
         ui.view_mode = ViewMode::Schedule;
         assert!(!ui.search_box_state().focused, "the box has the keyboard");
         assert_eq!(ui.handle_event(&types('w')), EventResult::Ignored);
-        assert_eq!(ui.search_query, "Net", "typing reached the box");
+        assert_eq!(ui.search.text(), "Net", "typing reached the box");
         let frequency = ui.manager.schedule.frequency;
         ui.handle_event(&press(Key::Right));
         assert_ne!(
@@ -10524,7 +10501,7 @@ working filter from a broken one"
         );
         assert!(ui.search_box_state().focused);
         type_text(&mut ui, "w");
-        assert!(ui.search_query.contains('w'), "the box took no typing");
+        assert!(ui.search.text().contains('w'), "the box took no typing");
     }
 
     #[test]
@@ -10546,7 +10523,8 @@ working filter from a broken one"
         );
         type_text(&mut ui, "x");
         assert_eq!(
-            ui.search_query, "",
+            ui.search.text(),
+            "",
             "a key reached the box through the menu"
         );
         ui.handle_event(&press(Key::Escape));
@@ -10555,7 +10533,7 @@ working filter from a broken one"
         guitk::clipboard::set_text("Network");
         ui.handle_event(&right_click(x, y));
         choose_row(&mut ui, EditCommand::Paste);
-        assert_eq!(ui.search_query, "Network", "Paste did not paste");
+        assert_eq!(ui.search.text(), "Network", "Paste did not paste");
         assert_eq!(
             ui.visible_rows().len(),
             1,

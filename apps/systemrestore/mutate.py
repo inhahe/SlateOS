@@ -391,20 +391,20 @@ MAIN += [
     ),
     (
         "a search that finds nothing is not red",
-        "            invalid: !self.search_query.is_empty() && self.visible_rows().is_empty(),\n",
+        "            invalid: !self.search.is_empty() && self.visible_rows().is_empty(),\n",
         "            invalid: false,\n",
         [SEARCH],
     ),
     (
-        "the search's caret is at its start",
-        "                if synced {\n                    self.search_editor.cursor()\n",
-        "                if synced {\n                    TextCursor::default()\n",
+        "the search's caret is drawn at its start",
+        "                self.search.input().cursor(),\n",
+        "                TextCursor::default(),\n",
         [SEARCH],
     ),
     (
         "the search folds only ASCII's letters",
-        "        let q = self.search_query.to_lowercase();\n",
-        "        let q = self.search_query.to_ascii_lowercase();\n",
+        "        let q = self.search.text().to_lowercase();\n",
+        "        let q = self.search.text().to_ascii_lowercase();\n",
         [FOLDS],
     ),
     (
@@ -602,27 +602,9 @@ F_MENU = "the_forms_right_click_menu_edits_its_boxes"
 
 MAIN += [
     (
-        "the search types only at its end",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
-        "        let end = self.search_editor.text().len();\n        self.search_editor.set_cursor(TextCursor::from(end));\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
-        [S_CARET],
-    ),
-    (
-        "the search's editor is not reloaded",
-        "        self.sync_search_editor();\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);\n",
-        [S_SYNC],
-    ),
-    (
-        "what is typed is not searched for",
-        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n        if edit.handled {\n",
-        "        if edit.handled {\n",
-        [S_CARET],
-    ),
-    (
         "a key typed into the search is reported unanswered",
-        "        self.set_search(&typed);\n        if edit.handled {\n",
-        "        self.set_search(&typed);\n        if false {\n",
+        "            self.reanchor_selection();\n        }\n        if edit.handled {\n",
+        "            self.reanchor_selection();\n        }\n        if false {\n",
         [S_CARET],
     ),
     (
@@ -639,8 +621,8 @@ MAIN += [
     ),
     (
         "the list does not follow the search",
-        "            text.clone_into(&mut self.search_query);\n            self.reanchor_selection();\n",
-        "            text.clone_into(&mut self.search_query);\n",
+        "        if edit.changed {\n            self.reanchor_selection();\n        }\n",
+        "",
         ["typing_filters_the_list_and_the_selection_stays_on_something_visible"],
     ),
     (
@@ -663,7 +645,7 @@ MAIN += [
     ),
     (
         "a row chosen does nothing to the search",
-        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if self.search.menu_row(id) {\n",
         "                if false {\n",
         [S_MENU],
     ),
@@ -707,8 +689,8 @@ MAIN += [
     ),
     (
         "the search box takes keys in the Schedule view",
-        "        if self.view_mode == ViewMode::Schedule {\n            return EventResult::Ignored;\n        }\n        self.sync_search_editor();\n",
-        "        self.sync_search_editor();\n",
+        "        if self.view_mode == ViewMode::Schedule {\n            return EventResult::Ignored;\n        }\n        let edit = self.search.key(key);\n",
+        "        let edit = self.search.key(key);\n",
         [SCHEDULE_BOX],
     ),
     (

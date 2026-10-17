@@ -877,6 +877,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "check-overlay0-ink.py",
         "check-tested-but-uncalled.py",
         "check-text-ink.py",
+        "check-undeclared-modules.py",
         "check-window-wiring.py",
         "contrast-explorer.html",
         "fields-written-never-read-baseline.txt",

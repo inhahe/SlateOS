@@ -45,7 +45,6 @@ userspace/backup
 userspace/bootctl  # bare deny(clippy::all)
 userspace/cgroup  # bare deny(clippy::all)
 userspace/chage  # bare deny(clippy::all)
-userspace/chattr  # bare deny(clippy::all)
 userspace/coredumpctl  # bare deny(clippy::all)
 userspace/cpio
 userspace/crond

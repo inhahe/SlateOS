@@ -4098,6 +4098,32 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         return;
     }
 
+    // A kernel access to user memory inside a user-access window (`stac`, so
+    // RFLAGS.AC is set): `copy_to_user` and its kin. The page was usable when
+    // the copy was validated, but need not be now: a shared file mapping's
+    // page is made read-only again whenever it is saved, by another thread or
+    // the background pass (design-decisions §1572), and the next store to it
+    // must fault to be seen. So the fault is resolved as the program's own
+    // would be, as Linux's `do_user_addr_fault` resolves one raised under
+    // uaccess. Only with interrupts on, since the resolver may wait; a task
+    // holding the process table gets `Busy` rather than waiting for itself.
+    // Whatever cannot be resolved stays the fatal fault below.
+    const RFLAGS_AC: u64 = 1 << 18;
+    if error & 4 == 0
+        && frame.rflags & RFLAGS_AC != 0
+        && frame.rflags & RFLAGS_IF != 0
+        && cr2 < mm::page_table::USER_SPACE_END
+    {
+        let pid = crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0);
+        if pid != 0
+            && crate::proc::pcb::resolve_fault(pid, cr2, error | 4, true)
+                == crate::proc::pcb::FaultOutcome::Resolved
+        {
+            mm::fault::record_user_resolved();
+            return;
+        }
+    }
+
     // For user-mode page faults, try swap-in, demand paging, stack
     // growth, then SEH.
     let is_user = error & 4 != 0;

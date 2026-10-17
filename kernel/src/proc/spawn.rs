@@ -24644,7 +24644,12 @@ pub fn self_test_linux_shared_file_maps() -> KernelResult<()> {
 /// (`fs::sealing`): a writable shared mapping of it is `EPERM`, and a
 /// read-only one cannot be made writable. And a memfd (design-decisions
 /// §1573): mapped shared and writable across a `fork`, refused
-/// `F_SEAL_WRITE` while so mapped, sealed once unmapped.
+/// `F_SEAL_WRITE` while so mapped, sealed once unmapped. Then the kernel's
+/// own stores: a `pread` into the mapping, into a page mapped read-only and
+/// into one not mapped yet, reaches the file too. `msync` walks mappings, not
+/// pages: past the file's end is no error, a hole is `ENOMEM`. And an
+/// append-only file is refused a shared mapping through a descriptor open
+/// for writing.
 pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 60_000_000_000;
@@ -24652,15 +24657,20 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
     const SEALED: &str = "/tmp/shmapw-sealed";
     const PG: usize = 4096;
     // Each store the program made, as (offset, byte); every other byte of
-    // the file's five pages is zero.
-    const STORES: [(usize, u8); 8] = [
+    // the file's five pages is zero. The last four are the kernel's, a
+    // `pread` of the file's first two bytes into the mapping.
+    const STORES: [(usize, u8); 12] = [
         (0, b'A'),
         (1, b'H'),
         (100, b'E'),
         (200, b'F'),
+        (300, b'A'),
+        (301, b'H'),
         (PG - 1, b'B'),
         (PG, b'G'),
         (4 * PG, b'C'),
+        (4 * PG + 300, b'A'),
+        (4 * PG + 301, b'H'),
         (5 * PG - 1, b'D'),
     ];
 
@@ -24757,6 +24767,22 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
                 Some(0x58 | 0x59) => "F_SEAL_WRITE on an unmapped memfd failed, or F_GET_SEALS",
                 Some(0x5A) => "a writable shared mapping of a write-sealed memfd was not EPERM",
                 Some(0x5B) => "a memfd lost a store at its unmapping",
+                Some(0x60..=0x62) => "the file could not be opened again, or mapped shared",
+                Some(0x63) => "a pread into a page mapped read-only, not yet written, failed",
+                Some(0x64) => "a pread into a shared page not mapped yet failed",
+                Some(0x65) => "a pread into the mapping did not reach the file",
+                Some(0x66 | 0x69 | 0x6B | 0x70) => "munmap failed",
+                Some(0x67) => "a read-only shared mapping running past the file's end failed",
+                Some(0x68) => "msync(MS_SYNC) past the file's end was not 0",
+                Some(0x6A) => "msync(MS_SYNC) over a range with a hole was not ENOMEM",
+                Some(0x6C | 0x71 | 0x72) => "FS_IOC_GETFLAGS or FS_IOC_SETFLAGS failed",
+                Some(0x6D) => {
+                    "a shared mapping of an append-only file through a writable descriptor was \
+                     not EACCES"
+                }
+                Some(0x6E | 0x6F) => {
+                    "a shared mapping of an append-only file through a read-only descriptor failed"
+                }
                 Some(0x5F) => "a pread failed",
                 None => "no exit code: the program died",
                 _ => "unexpected exit code",
@@ -24819,7 +24845,8 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux writable shared file mappings (ring 3: stores read at once, fork, \
          msync, a second view, EACCES on a read-only descriptor, saved by the last unmap, \
-         a write seal refused, a memfd mapped and sealed): OK"
+         a write seal refused, a memfd mapped and sealed, a pread into the mapping, msync \
+         past the end and over a hole, an append-only file): OK"
     );
     Ok(())
 }

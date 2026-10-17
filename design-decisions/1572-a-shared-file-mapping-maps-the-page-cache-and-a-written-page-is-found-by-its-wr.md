@@ -39,7 +39,8 @@ and in the background. The other choices, and why not, are below.
 2. **A write to the file reaches the mapped copy.** For a file with a live
    shared mapping, a VFS change updates the cached frames in place instead of
    invalidating them: a write copies its bytes into each resident frame it
-   covers (after the filesystem write) and marks it dirty; a truncate zeroes
+   covers (after the filesystem write, under the filesystem's lock), and
+   leaves it clean, since the file has them already; a truncate zeroes
    a partial last page's tail and drops the pages wholly past the new end,
    first unmapping them everywhere (an access there is then `SIGBUS`, as on
    Linux); unlinking or renaming over the file leaves its pages, which the
@@ -55,8 +56,10 @@ and in the background. The other choices, and why not, are below.
    entry dirty and makes that PTE writable. Saving a page first takes the
    write permission back from every PTE mapping it, flushes the TLBs, then
    copies the frame out and writes it, so a store after the copy traps and
-   dirties the page again. Linux does the same (`page_mkclean`,
-   `page_mkwrite`). The mappings are found object-first, as Linux's `i_mmap`
+   dirties the page again. The copy and the write are made under the
+   filesystem's lock, so a `write(2)` to the file is wholly before the copy
+   or wholly after the write, and a save cannot put back older bytes over
+   it. Linux does the same (`page_mkclean`, `page_mkwrite`). The mappings are found object-first, as Linux's `i_mmap`
    finds them: each process whose VMAs map the file, its address space held
    by `AsPin` while its page tables are edited.
 5. **When pages are saved.** `msync(MS_SYNC)` saves the dirty pages of its
@@ -130,7 +133,9 @@ and in the background. The other choices, and why not, are below.
   The race is closed on both sides:
   - The mapping counts itself (`writable_maps`) before it reads the seals
     a second time (`linux::count_shared_map`).
-  - `add_seals_to` reads the count while it holds the seal table.
+  - `add_seals_to` reads the count while it holds the seal table. So
+    neither seal table (`SEAL_TABLE`, `MEMFD_SEALS`) is a leaf lock: both
+    are lockdep mutexes, ordered before the page cache's.
 
   Either the seal sees the mapping or the mapping sees the seal. A
   mapping's stores are saved past the seal rules: they were allowed when
@@ -142,7 +147,8 @@ and in the background. The other choices, and why not, are below.
   `Writeback:` would always read 0 and is not added.
 - Tests: `page_cache::writeback_self_test` (dirty marks, eviction and the
   shrinker passing dirty pages, a ranged save, the end of the file, a write
-  marking a page dirty, the last writable mapping's save) and the ring-3
+  landing in a mapped page and leaving it clean, the last writable mapping's
+  save) and the ring-3
   `spawn::self_test_linux_writable_shared_file_maps` (`build/shmapwtest.c`),
   which reads the file past the cache afterwards.
 
@@ -172,6 +178,45 @@ and in the background. The other choices, and why not, are below.
 - Tested in `writeback_self_test`: a file dirty since after the cut-off
   is left, one dirty since before it is saved, and a file saved whole
   ages again from its next dirty page.
+
+### As built after review (2026-10-17)
+
+- **A save copies and writes under the filesystem's lock**
+  (`Vfs::object_write_back`, through `handle::write_back_at`). It writes
+  nothing if a cut has dropped pages since it picked them (the cache's
+  `cuts` count, read under that lock), and stops at the file's end as it
+  is then. So a `write(2)` no longer marks the pages it lands in dirty: it
+  cannot race the copy. One file's saves run one at a time
+  (`FileState::saving`), and each takes write permission from all its pages
+  in one walk of the process table (`pcb::write_protect_file_pages`), with
+  one TLB flush per run of pages. A page whose write fails is dirty again;
+  the save goes on with the rest and answers the first error.
+- **The kernel's own stores into a shared mapping**, such as a `read(2)`
+  into a mapped buffer. `validate_user_range` resolves a write to a
+  read-only `CACHED` page as the write fault would. A ring-0 fault on a
+  user address while user access is open (`RFLAGS.AC`) is resolved as the
+  user's own fault would be, so a page write-protected by a save between
+  the check and the copy is not `EFAULT`. Remote access
+  (`process_vm_writev`, `/proc/<pid>/mem`) resolves up to twice per page:
+  the protection fault, then the write fault.
+- **`fork`** copies a shared `CACHED` PTE into the child read-only. The
+  child's first store then faults and marks the page dirty, even when a
+  save's write-protect pass ran before the child existed.
+- **One fault, not two**, for a write to a page of a writable shared mapping
+  that is not mapped yet: the fault marks it dirty and maps it writable, as
+  Linux's `do_shared_fault` calls `page_mkwrite`.
+- **A write fault whose page a truncate has dropped** (`MarkDirty::Gone`)
+  unmaps the stale part and runs the access again, which finds what the
+  file holds now: `SIGBUS` past its end.
+- **An append-only file** is refused a shared mapping through a descriptor
+  open for writing (`EACCES`, whatever `prot` asks), as Linux's `do_mmap`
+  refuses it: a store through the mapping would write anywhere in the file.
+- **`msync` walks the mappings, not the pages**, as Linux does. A range
+  running past the file's end is no error; a range with a hole in it is
+  `ENOMEM`, answered after the mapped parts are saved.
+- Tests: the ring-3 fixture's steps 11-13 (a `pread` into a page mapped
+  read-only and into one not mapped yet; `msync` past the end and over a
+  hole; an append-only file), checked against Linux 6.6 on ext4.
 
 ### The alternatives not taken
 

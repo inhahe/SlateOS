@@ -6074,6 +6074,26 @@ fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) ->
     true
 }
 
+/// Whether `pid`'s VMAs cover all of `[start, end)`, with no hole: what
+/// `msync` asks (Linux answers `ENOMEM` for a range with unmapped parts),
+/// without touching a page. False for a process that is gone.
+#[must_use]
+pub fn vmas_cover(pid: ProcessId, start: u64, end: u64) -> bool {
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid) else {
+        return false;
+    };
+    // The list is sorted by start and has no overlaps.
+    let mut at = start;
+    for v in proc.vmas.iter().filter(|v| v.end > start && v.start < end) {
+        if v.start > at {
+            return false;
+        }
+        at = at.max(v.end);
+    }
+    at >= end
+}
+
 /// What `pid`'s shared file mappings map of `[start, end)`: for each, its file
 /// and the file's bytes `[from, to)` there -- what `msync` saves. Empty for a
 /// process that is gone.

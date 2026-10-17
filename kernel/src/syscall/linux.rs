@@ -14270,6 +14270,18 @@ fn linux_file_mmap(
     }
     // A shared map whose handle may write: it is, or may be made, writable,
     // and the page cache keeps a writer for the file's dirty pages.
+    // An append-only file is not mapped shared through a descriptor that may
+    // write it: a store through the mapping is a write anywhere in it, which
+    // the attribute forbids, and a save of one would fail for good. Linux's
+    // `do_mmap` answers EACCES, whatever `prot` asks. (An immutable file
+    // cannot be open for writing at all.)
+    if shared_file.is_some()
+        && writable
+        && crate::fs::handle::fstat(entry.raw_handle)
+            .is_ok_and(|m| m.attributes.contains(crate::fs::vfs::FileAttr::APPEND_ONLY))
+    {
+        return linux_err(errno::EACCES);
+    }
     let may_write = shared_file.is_some() && writable && !sealed;
 
     let frame_size = FRAME_SIZE as u64;
@@ -19169,7 +19181,9 @@ fn mmap_lock_gate(pid: u64, len: u64, flags: u64) -> Result<(), i32> {
     })
 }
 
-/// `msync(addr, len, flags)` — accept after validating shape.
+/// `msync(addr, len, flags)` — with `MS_SYNC`, save the dirty pages the
+/// range's shared file mappings map; `ENOMEM` when part of the range is not
+/// mapped, answered after the mapped parts are done.
 ///
 /// Linux's `mm/msync.c::SYSCALL_DEFINE3(msync)` gate order:
 ///   1. `flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)` -> `-EINVAL`.
@@ -19272,18 +19286,20 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
     if end == addr {
         return SyscallResult::ok(0);
     }
-    // 6. We have no real file-backed VMA tracking and no page cache to
-    //    flush, but every mapped range qualifies as a "successful sync"
-    //    in this kernel.  Still range-check the user range so a probe
-    //    passing wildly-unmapped addresses sees ENOMEM (Linux's
-    //    VM_BAD_AREA path also produces ENOMEM).
-    let len_usize = match usize::try_from(len_aligned) {
-        Ok(v) => v,
-        Err(_) => return linux_err(errno::ENOMEM),
+    // 6. Walk the VMAs, as Linux does, never the pages: a range with
+    //    unmapped parts is ENOMEM (Linux's VM_BAD_AREA path), answered after
+    //    the mapped parts are done. Touching the pages instead would read the
+    //    whole of a mostly untouched file mapping to check the range, and
+    //    find a page past the file's end a fault (EFAULT). A kernel task has
+    //    no VMAs to walk.
+    let Some(pid) = caller_pid() else {
+        return if (flags & MS_SYNC) != 0 {
+            linux_err(errno::ESRCH)
+        } else {
+            SyscallResult::ok(0)
+        };
     };
-    if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
-        return linux_err(linux_errno_for(e));
-    }
+    let covered = pcb::vmas_cover(pid, addr, end);
     // 7. MS_SYNC saves the dirty pages the range's shared file mappings map,
     //    before returning (design-decisions §1572). MS_ASYNC asks for nothing
     //    more than the kernel does anyway, as on Linux since 2.6.19: the
@@ -19291,14 +19307,16 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
     //    fsync and the background pass. MS_INVALIDATE has nothing to drop:
     //    every mapping of a file maps the one copy.
     if (flags & MS_SYNC) != 0 {
-        let Some(pid) = caller_pid() else {
-            return linux_err(errno::ESRCH);
-        };
+        let mut failed = false;
         for (file, from, to) in pcb::shared_file_ranges(pid, addr, end) {
-            if crate::mm::page_cache::writeback(file, from, to).is_err() {
-                return linux_err(errno::EIO);
-            }
+            failed |= crate::mm::page_cache::writeback(file, from, to).is_err();
         }
+        if failed {
+            return linux_err(errno::EIO);
+        }
+    }
+    if !covered {
+        return linux_err(errno::ENOMEM);
     }
     SyscallResult::ok(0)
 }

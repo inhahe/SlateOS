@@ -733,7 +733,18 @@ unsafe fn clone_frame_group(
                 PageFlags::from_bits(e.flags().bits() & !PageFlags::MLOCKED.bits()),
             )
         };
-        let child_entry = unlocked(if shared {
+        let child_entry = unlocked(if shared && pte.flags().contains(PageFlags::CACHED) {
+            // A shared file mapping's page (design-decisions §1572): the child
+            // gets it read-only, so that its first store faults and marks the
+            // page dirty. Writable, it would be a writable mapping no save
+            // knows of: a save that took write permission from the mappings it
+            // found before the child was in the process table would leave this
+            // one, and the child's stores would never be seen.
+            PageTableEntry::new(
+                phys,
+                PageFlags::from_bits(pte.flags().bits() & !PageFlags::WRITABLE.bits()),
+            )
+        } else if shared {
             // Shared by design: the child sees the same frame with the same
             // permissions, and the parent keeps its writable mapping.
             PageTableEntry::new(phys, pte.flags())

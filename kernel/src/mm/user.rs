@@ -270,6 +270,20 @@ fn validate_user_range(ptr: u64, len: usize, need_writable: bool) -> KernelResul
                         super::cow::resolve_cow_fault(pml4, addr)?;
                         // CoW now broken; the page is privately mapped
                         // and writable.  Fall through to the next page.
+                    } else if flags.contains(PageFlags::CACHED) {
+                        // A writable shared file mapping's clean page, mapped
+                        // read-only so that its first store is seen
+                        // (design-decisions §1572): the write fault marks it
+                        // dirty and makes it writable, as a store by the
+                        // program would -- Linux's `get_user_pages(FOLL_WRITE)`
+                        // calling `page_mkwrite`. A mapping that may not
+                        // write stays read-only: a real EFAULT.
+                        let writable = try_fault_in_user_page_present(addr)
+                            && page_flags(pml4, virt)
+                                .is_some_and(|f| f.contains(PageFlags::WRITABLE));
+                        if !writable {
+                            return Err(KernelError::InvalidAddress);
+                        }
                     } else {
                         // Genuinely read-only mapping (e.g. a read-only
                         // file or PROT_READ region) → real EFAULT.
@@ -390,6 +404,18 @@ fn try_fault_in_user_page(addr: u64, need_writable: bool) -> bool {
         error_code |= 1 << 1; // write access
     }
     crate::proc::pcb::try_resolve_fault(pid, addr, error_code)
+}
+
+/// [`try_fault_in_user_page`] for a write to a page that **is** present but
+/// read-only: the fault a store to it raises (present, write, user), which
+/// the resolver answers for a shared file mapping's clean page by marking it
+/// dirty and making it writable (`pcb::resolve_shared_write`).
+fn try_fault_in_user_page_present(addr: u64) -> bool {
+    let task_id = sched::current_task_id();
+    let Some(pid) = thread::owner_process(task_id) else {
+        return false;
+    };
+    crate::proc::pcb::try_resolve_fault(pid, addr, 0b111)
 }
 
 /// Read the page table flags for a virtual address.
@@ -583,7 +609,7 @@ fn touch_remote_page<R>(
 
     let hhdm = page_table::hhdm().ok_or(KernelError::InvalidAddress)?;
     let mut touch = Some(touch);
-    let mut resolved = false;
+    let mut resolutions = 0u8;
     for _ in 0..REMOTE_PAGE_ATTEMPTS {
         let found = crate::cpu::without_interrupts(|| -> KernelResult<Found<R>> {
             // Dropped at the end of this closure, before interrupts return.
@@ -603,8 +629,8 @@ fn touch_remote_page<R>(
         match found {
             Found::Touched(result) => return Ok(result),
             Found::Moved => {}
-            Found::Absent(_) if !resolved => {
-                resolved = true;
+            Found::Absent(_) if resolutions < MAX_REMOTE_RESOLUTIONS => {
+                resolutions = resolutions.saturating_add(1);
                 if !try_resolve_remote(pml4, va, need_writable) {
                     return Err(KernelError::InvalidAddress);
                 }
@@ -614,6 +640,14 @@ fn touch_remote_page<R>(
     }
     Err(KernelError::InvalidAddress)
 }
+
+/// How many times [`touch_remote_page`] asks the owning process to resolve a
+/// page it could not use: two, since a write to a not-present page of a
+/// writable shared file mapping takes two -- the first maps it read-only, the
+/// second marks it dirty and makes it writable (design-decisions §1572). Any
+/// other page is usable after one, and a page still unusable after these is
+/// unusable.
+const MAX_REMOTE_RESOLUTIONS: u8 = 2;
 
 /// How many times [`touch_remote_page`] looks a page up before calling it
 /// unusable: a page that moves between the two walks of every one of them
@@ -654,11 +688,13 @@ fn user_page_phys_once(pml4: u64, va: u64, need_writable: bool) -> KernelResult<
 /// `None`; copying that convention here would silently turn every CoW page into
 /// an unresolvable demand-page request.
 ///
-/// # Why one retry, not a loop
+/// # Why a bounded count, not a loop
 ///
-/// Each of the two resolvable states is cleared outright by its resolver — a
-/// populated page is present, a broken CoW page is writable and no longer `COW`
-/// — so a second failure means the address is genuinely unusable (an unmapped
+/// Each resolvable state is cleared outright by its resolver — a populated
+/// page is present, a broken CoW page is writable and no longer `COW`, a
+/// shared file page's write fault leaves it writable — so the count is how
+/// many of them one access can pass through ([`MAX_REMOTE_RESOLUTIONS`]); a
+/// failure after that means the address is genuinely unusable (an unmapped
 /// hole, or a read-only VMA), and retrying would spin rather than converge.
 fn try_resolve_remote(pml4: u64, va: u64, need_writable: bool) -> bool {
     let Some(pid) = crate::proc::pcb::pid_for_pml4(pml4) else {

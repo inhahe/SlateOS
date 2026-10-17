@@ -230,7 +230,9 @@ def main():
                 "ROW", '("misfiled", "    let x = 1;", "", ["a_test"])'
             ),
             1,
-            "[SIBLING] ANCHOR lib.rs x0: misfiled",
+            # By where it is from the harness, not `lib.rs`, which would read
+            # as the harness's own crate's.
+            "[SIBLING] ANCHOR ../sibling/src/lib.rs x0: misfiled",
         ),
         case(
             "...and a test only that other crate has is not one the sweep runs",

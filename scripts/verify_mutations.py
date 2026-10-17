@@ -31,6 +31,7 @@ Exit 0 when every row is sound, 1 when any is not, 2 when a harness cannot be re
 """
 
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -152,6 +153,14 @@ def check(path):
     # its anchors are looked for there, but the sweep's `cargo test` does not
     # run its tests, so they stay out of `tests`.
     outside = {f: read(f) for f in set(own_file.values()) if f not in texts}
+
+    def shown(src):
+        """A source as a finding names it: the harness's own by its name, one
+        outside them by where it is from the harness -- another crate's
+        `lib.rs` is not the crate's own."""
+        if src in texts:
+            return src.name
+        return Path(os.path.relpath(src, Path(path).parent)).as_posix()
     # A named test may live anywhere a sweep's `cargo test` runs it: in the
     # sources the harness breaks, or in its crate's other files and `tests/`.
     tests = set()
@@ -178,7 +187,7 @@ def check(path):
                 for text in looked.values()
             ]
             if 1 not in counts:
-                where = ", ".join(f"{s.name} x{c}" for s, c in zip(looked, counts))
+                where = ", ".join(f"{shown(s)} x{c}" for s, c in zip(looked, counts))
                 print(f"{path} [{table}] ANCHOR {where}: {name}")
                 bad += 1
             for t in expect:

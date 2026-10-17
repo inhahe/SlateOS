@@ -735,15 +735,17 @@ pub(crate) unsafe fn recv(
     info: *mut u8,
 ) -> isize {
     // SAFETY: forwarded.
-    unsafe { recv_taking(fd, handle, buf, len, flags, info, None) }
+    unsafe { recv_taking(fd, handle, buf, len, flags, info, None).0 }
 }
 
 /// [`recv`], taking into `rights` the descriptors a message carries, through
-/// `SYS_UNIX_RECVMSG` -- from a kernel without that call, none, as before
-/// it. Every receive of a stream's `MSG_WAITALL` loop can take them, and the
-/// loop ends after the one that brought some, as Linux's
-/// `unix_stream_read_generic` ends after the message whose descriptors it
-/// took: a later message's are the next call's, not released unseen.
+/// `SYS_UNIX_RECVMSG` -- with no `rights`, no room, so that the kernel
+/// releases them and says so; from a kernel without that call, none, as
+/// before it. A stream's `MSG_WAITALL` loop ends after the receive that
+/// brought some, taken or released, as Linux's `unix_stream_read_generic`
+/// ends after the message whose descriptors it took: a later message's are
+/// the next call's. Answers what [`recv`] does, and whether a receive
+/// brought descriptors.
 ///
 /// # Safety
 ///
@@ -756,16 +758,16 @@ unsafe fn recv_taking(
     flags: i32,
     info: *mut u8,
     mut rights: Option<&mut RightsIn<'_>>,
-) -> isize {
+) -> (isize, bool) {
     if flags & MSG_OOB != 0 {
         // No out-of-band data is ever queued here.
         errno::set_errno(errno::EINVAL);
-        return -1;
+        return (-1, false);
     }
     if flags & MSG_ERRQUEUE != 0 {
         // Nor any error queue.
         errno::set_errno(errno::EAGAIN);
-        return -1;
+        return (-1, false);
     }
     let nb = nonblocking(fd) || flags & MSG_DONTWAIT != 0;
     let peek = flags & MSG_PEEK != 0;
@@ -781,62 +783,49 @@ unsafe fn recv_taking(
     };
     let wait_all = stream && flags & MSG_WAITALL != 0 && !nb && !peek;
     let mut got = 0usize;
+    let mut brought = false;
     loop {
         let at = buf.wrapping_add(got) as u64;
         let rest = len.saturating_sub(got) as u64;
         let call = || syscall5(SYS_UNIX_RECV, handle, at, rest, info_ptr as u64, call_flags);
         let rule = crate::socket::wait_rule(fd, true);
-        let ret = match rights.as_deref_mut() {
-            Some(taken) => {
-                let mut record: [u64; 7] = [
-                    at,
-                    rest,
-                    info_ptr as u64,
-                    taken.recs.as_mut_ptr() as u64,
-                    taken.recs.len() as u64,
-                    0,
-                    0,
-                ];
-                let at_record = record.as_mut_ptr() as u64;
-                let call_rights = || syscall3(SYS_UNIX_RECVMSG, handle, at_record, call_flags);
-                let ret = if nb {
-                    call_rights()
-                } else {
-                    crate::interrupt::restarting(rule, call_rights)
-                };
-                if crate::syscall::lacks_call(ret) {
-                    if nb {
-                        call()
-                    } else {
-                        crate::interrupt::restarting(rule, call)
-                    }
-                } else {
-                    if ret >= 0 {
-                        let [.., written, msg_flags] = record;
-                        taken.got = usize::try_from(written).unwrap_or(0).min(taken.recs.len());
-                        taken.cut = msg_flags & UNIX_MSG_CTRUNC != 0;
-                    }
-                    ret
-                }
-            }
-            None => {
-                if nb {
-                    call()
-                } else {
-                    crate::interrupt::restarting(rule, call)
-                }
-            }
+        let (recs, room) = match rights.as_deref_mut() {
+            Some(taken) => (taken.recs.as_mut_ptr() as u64, taken.recs.len() as u64),
+            None => (0, 0),
         };
+        let mut record: [u64; 7] = [at, rest, info_ptr as u64, recs, room, 0, 0];
+        let at_record = record.as_mut_ptr() as u64;
+        let call_rights = || syscall3(SYS_UNIX_RECVMSG, handle, at_record, call_flags);
+        let mut ret = if nb {
+            call_rights()
+        } else {
+            crate::interrupt::restarting(rule, call_rights)
+        };
+        let mut came = false;
+        if crate::syscall::lacks_call(ret) {
+            ret = if nb {
+                call()
+            } else {
+                crate::interrupt::restarting(rule, call)
+            };
+        } else if ret >= 0 {
+            let [.., written, msg_flags] = record;
+            if let Some(taken) = rights.as_deref_mut() {
+                taken.got = usize::try_from(written).unwrap_or(0).min(taken.recs.len());
+                taken.cut = msg_flags & UNIX_MSG_CTRUNC != 0;
+            }
+            came = descriptors_came(written, msg_flags);
+        }
         if ret < 0 {
             if got > 0 {
-                return got as isize;
+                return (got as isize, brought);
             }
             errno::set_errno(errno_of(ret));
-            return -1;
+            return (-1, brought);
         }
         got = got.saturating_add(ret as usize);
-        let brought = rights.as_deref().is_some_and(RightsIn::brought);
-        if !wait_all || ret == 0 || got >= len || brought {
+        brought |= came;
+        if !wait_all || ret == 0 || got >= len || came {
             break;
         }
     }
@@ -844,9 +833,12 @@ unsafe fn recv_taking(
         // SAFETY: `info_ptr` is writable -- so readable -- for the record's
         // bytes, of which the first eight are the whole length.
         let whole = unsafe { core::ptr::read_unaligned(info_ptr.cast::<u64>()) };
-        return isize::try_from(u64::from_le(whole)).unwrap_or(isize::MAX);
+        return (
+            isize::try_from(u64::from_le(whole)).unwrap_or(isize::MAX),
+            brought,
+        );
     }
-    got as isize
+    (got as isize, brought)
 }
 
 /// Take descriptor `fd`, which holds Unix socket `handle` and came from
@@ -854,9 +846,8 @@ unsafe fn recv_taking(
 /// stream socket, the only kind that travels
 /// (`known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md`), and a
 /// listening one if it listens, which the kernel says by refusing to count a
-/// listener's bytes (`UNIX_OPT_INQ`). Until 2026-10-17 none was taken to
-/// listen, and a listener handed to a server answered `SO_ACCEPTCONN` 0
-/// (Fable's review of lane D's round 205).
+/// listener's bytes (`UNIX_OPT_INQ`): a listener handed to a server must
+/// answer `SO_ACCEPTCONN` 1 and accept.
 pub(crate) fn adopt(fd: i32, handle: u64) {
     crate::socket::set_unix_meta(fd, SOCK_STREAM);
     if syscall2(SYS_UNIX_GET_OPTION, handle, UNIX_OPT_INQ) == native::INVALID_ARGUMENT {
@@ -948,8 +939,8 @@ const UCRED_LEN: usize = 12;
 /// `__scm_send`, `scm_fp_copy` and `scm_check_creds` -- every `SCM_RIGHTS`
 /// message's descriptors appended to one list of at most [`SCM_MAX_FD`]
 /// (`EINVAL` beyond), each open (`EBADF`) and of a kind that can travel
-/// ([`right_of`]); `SCM_CREDENTIALS` stating only the sender's own, which
-/// the kernel records anyway.
+/// ([`right_of`]); `SCM_CREDENTIALS` stating only what the receiver will
+/// be told ([`may_state`]).
 ///
 /// # Safety
 ///
@@ -1023,20 +1014,17 @@ unsafe fn check_control(
 }
 
 /// Whether a sender whose pid is `own_pid` and whose ids are `ids` may state
-/// the credentials `(pid, uid, gid)` in an `SCM_CREDENTIALS` message:
-/// Linux's `scm_check_creds` -- its own pid, a uid among its real, effective
-/// and saved ones, a gid among its -- or any, for root, whose `CAP_SYS_ADMIN`,
-/// `CAP_SETUID` and `CAP_SETGID` allow them. Whatever it states, the kernel
-/// tells the receiver the sender's real ones.
+/// the credentials `(pid, uid, gid)` in an `SCM_CREDENTIALS` message: only
+/// what the receiver will be told -- its own pid and real ids -- since the
+/// native send carries no stated credentials, and the kernel tells the
+/// receiver the sender's real ones. Linux's `scm_check_creds` lets a sender
+/// state its effective or saved ids too, and root anything, and passes on
+/// what was stated; here that is refused (`EPERM`) rather than accepted and
+/// then replaced
+/// (`known-issues/D-POSIX-STATED-CREDENTIALS-ARE-ONLY-THE-REAL-ONES.md`).
 fn may_state(own_pid: i32, ids: &crate::unistd::Ids, (pid, uid, gid): (i32, u32, u32)) -> bool {
-    use crate::unistd::{EFFECTIVE, REAL, SAVED};
-    let among = |list: &[u32; 4], id: u32| {
-        [REAL, EFFECTIVE, SAVED]
-            .iter()
-            .any(|&i| list.get(i) == Some(&id))
-    };
-    ids.uid.get(EFFECTIVE) == Some(&0)
-        || (pid == own_pid && among(&ids.uid, uid) && among(&ids.gid, gid))
+    use crate::unistd::REAL;
+    pid == own_pid && ids.uid.get(REAL) == Some(&uid) && ids.gid.get(REAL) == Some(&gid)
 }
 
 /// Linux's `SCM_MAX_FD`: the most descriptors one message may carry.
@@ -1145,12 +1133,13 @@ impl<'a> RightsIn<'a> {
         // them (`SYS_UNIX_RECVMSG`).
         unsafe { written(self.recs, self.got) }
     }
+}
 
-    /// Whether a receive brought descriptors -- taken, or released for want
-    /// of room -- after which a stream's receive goes no further.
-    fn brought(&self) -> bool {
-        self.got > 0 || self.cut
-    }
+/// Whether a receive's message brought descriptors, by `SYS_UNIX_RECVMSG`'s
+/// record: `written` taken, or some released for want of room (`msg_flags`'
+/// `UNIX_MSG_CTRUNC`) -- after which a stream's receive goes no further.
+fn descriptors_came(written: u64, msg_flags: u64) -> bool {
+    written > 0 || msg_flags & UNIX_MSG_CTRUNC != 0
 }
 
 /// How many descriptors fit in `msg`'s control buffer after the
@@ -1284,13 +1273,47 @@ unsafe fn iov_total(msg: &Msghdr) -> Result<usize, i32> {
 /// `msg` must be a valid `msghdr` whose buffers are readable as stated.
 pub(crate) unsafe fn sendmsg(fd: i32, handle: u64, msg: &Msghdr, flags: i32) -> isize {
     // SAFETY: forwarded.
+    if unsafe { carries_rights(msg) } {
+        // SAFETY: forwarded.
+        return unsafe { sendmsg_with_rights(fd, handle, msg, flags) };
+    }
+    // SAFETY: forwarded.
     match unsafe { check_control(msg, None) } {
         // SAFETY: forwarded.
-        Ok(0) => unsafe { sendmsg_carrying(fd, handle, msg, flags, &[]) },
-        // SAFETY: forwarded.
-        Ok(_) => unsafe { sendmsg_with_rights(fd, handle, msg, flags) },
+        Ok(_) => unsafe { sendmsg_carrying(fd, handle, msg, flags, &[]) },
         Err(e) => refuse(e) as isize,
     }
+}
+
+/// Whether `msg`'s control data holds an `SCM_RIGHTS` message: its headers
+/// read as far as they lie inside the buffer, and nothing else -- no
+/// descriptor looked up, no credential checked -- so that a send is checked
+/// once, by [`check_control`], with records only where there are
+/// descriptors. A header [`check_control`] refuses ends the scan: the check
+/// then answers for it.
+///
+/// # Safety
+///
+/// As [`check_control`].
+unsafe fn carries_rights(msg: &Msghdr) -> bool {
+    let base = msg.msg_control.cast_const();
+    let total = msg.msg_controllen;
+    if base.is_null() {
+        return false;
+    }
+    let mut off = 0usize;
+    while off.saturating_add(CMSG_HDR) <= total {
+        // SAFETY: a header's bytes lie inside the buffer (the loop bound).
+        let (len, level, kind) = unsafe { cmsg_header(base.add(off)) };
+        if len < CMSG_HDR || off.saturating_add(len) > total {
+            return false;
+        }
+        if level == SOL_SOCKET && kind == SCM_RIGHTS {
+            return true;
+        }
+        off = off.saturating_add(cmsg_align(len));
+    }
+    false
 }
 
 /// [`sendmsg`] of a message that carries descriptors: their records, 4 KB
@@ -1568,6 +1591,7 @@ unsafe fn recvmsg_into(
                 info.as_mut_ptr(),
                 rights.as_deref_mut(),
             )
+            .0
         }
     } else if stream && flags & MSG_PEEK == 0 {
         // SAFETY: forwarded; `info` is the record's length.
@@ -1601,6 +1625,7 @@ unsafe fn recvmsg_into(
                 info.as_mut_ptr(),
                 rights.as_deref_mut(),
             )
+            .0
         };
         if n > 0 {
             let mut left = n as usize;
@@ -1707,7 +1732,7 @@ unsafe fn recv_scatter(
         };
         let record = if first { info } else { core::ptr::null_mut() };
         // SAFETY: forwarded.
-        let n = unsafe {
+        let (n, brought) = unsafe {
             recv_taking(
                 fd,
                 handle,
@@ -1730,7 +1755,7 @@ unsafe fn recv_scatter(
         }
         first = false;
         got = got.saturating_add(n as usize);
-        if (n as usize) < iov.iov_len || rights.as_deref().is_some_and(RightsIn::brought) {
+        if (n as usize) < iov.iov_len || brought {
             break;
         }
     }
@@ -2121,9 +2146,7 @@ pub(crate) unsafe fn write(fd: i32, handle: u64, buf: *const u8, count: usize) -
 /// `FIONREAD`: the kernel's count (`UNIX_OPT_INQ`), as Linux's
 /// `unix_inq_len` counts them -- everything queued at a stream or
 /// sequenced-packet socket, the next datagram at a datagram one, 0 at one
-/// not connected -- and `EINVAL` at a listener. Until 2026-10-17 the library
-/// peeked to count them, and answered a sequenced-packet socket's next
-/// record alone.
+/// not connected -- and `EINVAL` at a listener.
 pub(crate) fn bytes_waiting(handle: u64) -> Result<usize, i32> {
     let ret = syscall2(SYS_UNIX_GET_OPTION, handle, UNIX_OPT_INQ);
     if ret < 0 {
@@ -2258,24 +2281,29 @@ mod tests {
     /// the sender's real, effective and saved ids, with its own pid -- not
     /// its filesystem id, nor another's pid -- and anything for root.
     #[test]
-    fn a_sender_may_state_any_of_its_own_ids() {
+    fn a_sender_may_state_only_what_the_receiver_is_told() {
         let ids = crate::unistd::Ids {
             uid: [1000, 1002, 1001, 1004],
             gid: [100, 101, 102, 104],
         };
         let me = 77;
         assert!(may_state(me, &ids, (me, 1000, 100)), "the real ones");
-        assert!(may_state(me, &ids, (me, 1002, 101)), "the effective ones");
-        assert!(may_state(me, &ids, (me, 1001, 102)), "the saved ones");
-        assert!(!may_state(me, &ids, (me, 1004, 100)), "not the fs uid");
-        assert!(!may_state(me, &ids, (me, 1000, 104)), "not the fs gid");
-        assert!(!may_state(me, &ids, (me, 1003, 100)), "another uid");
+        assert!(
+            !may_state(me, &ids, (me, 1002, 101)),
+            "not the effective ones"
+        );
+        assert!(!may_state(me, &ids, (me, 1001, 102)), "not the saved ones");
+        assert!(!may_state(me, &ids, (me, 1004, 104)), "nor the fs ones");
+        assert!(!may_state(me, &ids, (me, 1002, 100)), "an effective uid");
+        assert!(!may_state(me, &ids, (me, 1001, 100)), "a saved uid");
+        assert!(!may_state(me, &ids, (me, 1000, 101)), "a gid not the real");
         assert!(!may_state(me, &ids, (78, 1000, 100)), "another pid");
         let root = crate::unistd::Ids {
             uid: [1000, 0, 1000, 0],
             gid: [100, 100, 100, 100],
         };
-        assert!(may_state(me, &root, (5, 6, 7)), "root states any");
+        assert!(!may_state(me, &root, (5, 6, 7)), "root states no other");
+        assert!(may_state(me, &root, (me, 1000, 100)));
     }
 
     /// A received message's sender without a name is no address at all, as
@@ -2522,6 +2550,35 @@ mod tests {
         }
     }
 
+    /// Only an `SCM_RIGHTS` message makes a send gather records; the scan
+    /// reads headers alone, and stops at one the check refuses.
+    #[test]
+    fn a_send_carries_rights_only_with_an_scm_rights_message() {
+        let mut rights = rights_message(&[0]);
+        let msg = with_control(rights.as_mut_ptr(), rights.len());
+        // SAFETY: the control buffer is `rights`.
+        assert!(unsafe { carries_rights(&msg) });
+        let mut both = std::vec![0u8; CMSG_HDR + 16];
+        both[..8].copy_from_slice(&(CMSG_HDR + UCRED_LEN).to_ne_bytes());
+        both[8..12].copy_from_slice(&SOL_SOCKET.to_ne_bytes());
+        both[12..16].copy_from_slice(&SCM_CREDENTIALS.to_ne_bytes());
+        let msg = with_control(both.as_mut_ptr(), both.len());
+        // SAFETY: the control buffer is `both`.
+        assert!(!unsafe { carries_rights(&msg) }, "credentials alone");
+        both.extend(rights_message(&[0]));
+        let msg = with_control(both.as_mut_ptr(), both.len());
+        // SAFETY: as above.
+        assert!(unsafe { carries_rights(&msg) }, "credentials, then rights");
+        let msg = with_control(core::ptr::null_mut(), 64);
+        // SAFETY: no buffer is read.
+        assert!(!unsafe { carries_rights(&msg) }, "no control data");
+        let mut short = rights_message(&[0]);
+        short[..8].copy_from_slice(&4usize.to_ne_bytes());
+        let msg = with_control(short.as_mut_ptr(), short.len());
+        // SAFETY: as above.
+        assert!(!unsafe { carries_rights(&msg) }, "a header too short");
+    }
+
     /// What a receive's control buffer has room for: the descriptors that
     /// fit after the header and, when asked for, the credentials.
     #[test]
@@ -2625,17 +2682,14 @@ mod tests {
     }
 
     /// What a receive brought, as a stream's receive reads it to decide
-    /// whether to go on: descriptors taken, or only released.
+    /// whether to go on: descriptors taken, or only released -- with room
+    /// or without; and never more records than its room.
     #[test]
     fn a_receive_brought_descriptors_when_it_took_or_released_some() {
-        let mut recs = [MaybeUninit::<Right>::uninit(); 2];
-        let mut rights = RightsIn::new(&mut recs);
-        assert!(!rights.brought());
-        rights.cut = true;
-        assert!(rights.brought(), "released for want of room");
-        rights.cut = false;
-        rights.got = 1;
-        assert!(rights.brought());
+        assert!(!descriptors_came(0, 0));
+        assert!(descriptors_came(0, UNIX_MSG_CTRUNC), "released, no room");
+        assert!(descriptors_came(2, 0), "taken");
+        assert!(!descriptors_came(0, !UNIX_MSG_CTRUNC), "another flag");
         let mut none = RightsIn::new(&mut []);
         none.got = 5;
         assert!(none.taken().is_empty(), "never more than its room");

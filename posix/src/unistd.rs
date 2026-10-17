@@ -3289,8 +3289,7 @@ pub extern "C" fn syncfs(fd: Fd) -> i32 {
 /// returns, or the signal was ignored, its disposition goes back to the
 /// default and it is raised again -- glibc's order -- and the process dies
 /// by it, which its parent reads as `WIFSIGNALED` with `SIGABRT` and a
-/// shell reports as "Aborted". Until 2026-10-17 this wrote "Aborted" to the
-/// console itself, ran no handler, and exited with status 134.
+/// shell reports as "Aborted" -- so nothing here says it too.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn abort() -> ! {
     use crate::signal::{SIG_DFL, SIG_UNBLOCK, SIGABRT, SigsetT};

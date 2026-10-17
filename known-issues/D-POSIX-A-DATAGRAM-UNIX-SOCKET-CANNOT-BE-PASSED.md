@@ -9,8 +9,10 @@ several pieces (`iovec`s) behaves: one message, or a run of bytes. A socket
 handed over arrives with no type, and the kernel has no call that reports
 one. So only a stream socket -- the common case, an accepted connection
 handed to a worker -- is handed over, and installed as one. A datagram or
-sequenced-packet socket is refused by `sendmsg` (`EOPNOTSUPP`) and is not
-open in the child (`EBADF`). Linux hands over both.
+sequenced-packet socket is refused by `sendmsg` (`EOPNOTSUPP`), is not open
+in a child (`EBADF`), and is closed by an `exec` whether or not it was
+close-on-exec; a `posix_spawn` file action that names one fails
+(`EOPNOTSUPP`). Linux hands over both.
 
 Taking it for a stream instead, as the library did on 2026-10-16, broke
 its messages silently: a `sendmsg` of a header and a body went as two
@@ -19,7 +21,8 @@ cutting the first to the first piece's length without `MSG_TRUNC`
 (Opus's review of lane D's round 205).
 
 **Where:** `posix/src/unix_socket.rs` -- `right_of`, which refuses it;
-`posix/src/spawn.rs` -- `inheritable_fds`, which skips it;
+`posix/src/spawn.rs` -- `inheritable_fds`, which keeps it back (`held`,
+closed at `exec` with the close-on-exec ones), and `apply_file_actions`;
 `land_rights` and `posix/src/crt.rs`'s `retrieve_initial_fds`, which
 install what arrives as a stream socket.
 

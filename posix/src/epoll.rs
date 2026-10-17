@@ -358,12 +358,12 @@ fn fdget(fd: i32) -> Option<fdtable::FdEntry> {
 /// Upstream's `file_can_poll` (include/linux/poll.h): whether the file has a
 /// `poll` operation, which `epoll_ctl` requires of its target.
 ///
-/// Everything here does except a filesystem file.  Regular files and
-/// directories have no `poll` on Linux (ext4's `file_operations` define
-/// none), so `epoll_ctl` refuses them with `EPERM`, even though `poll(2)`
-/// calls them always ready.
+/// Everything here does except a filesystem file and a namespace's.
+/// Regular files and directories have no `poll` on Linux (ext4's
+/// `file_operations` define none), nor has nsfs's file, so `epoll_ctl`
+/// refuses them with `EPERM`, even though `poll(2)` calls them always ready.
 fn kind_can_poll(kind: HandleKind) -> bool {
-    kind != HandleKind::File
+    !matches!(kind, HandleKind::File | HandleKind::Namespace)
 }
 
 /// Create an epoll file descriptor.
@@ -3192,6 +3192,16 @@ pub extern "C" fn inotify_rm_watch(fd: i32, wd: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Neither a filesystem file nor a namespace's has a `poll`, so
+    /// `epoll_ctl` refuses both (`EPERM`); the other kinds have one.
+    #[test]
+    fn only_files_and_namespaces_cannot_be_polled() {
+        assert!(!kind_can_poll(HandleKind::File));
+        assert!(!kind_can_poll(HandleKind::Namespace));
+        assert!(kind_can_poll(HandleKind::Pipe));
+        assert!(kind_can_poll(HandleKind::UnixSocket));
+    }
 
     extern "C" fn nothing(_: i32) {}
 

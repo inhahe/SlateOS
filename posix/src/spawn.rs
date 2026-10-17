@@ -1732,22 +1732,42 @@ impl Drop for OpenedHandles {
 /// descriptor whose table entry -- and so whose recorded path -- it shares. An
 /// `addfchdir_np` action needs a path, since the kernel is told the child's
 /// directory by name.
+///
+/// `held` is the descriptors that are open but cannot cross because the
+/// child could not learn what they are -- a datagram or sequenced-packet Unix
+/// socket ([`crosses`]) -- though the kernel knows their handle's type: no
+/// child is handed one, and an `exec` closes them with the close-on-exec
+/// ones, so that no handle outlives its descriptor. A number is in at most
+/// one of the three arrays.
 struct ChildFds {
     virt: [Option<(u8, u64)>; MAX_FD_MAP],
     cloexec: [Option<(u8, u64)>; MAX_FD_MAP],
+    held: [Option<(u8, u64)>; MAX_FD_MAP],
     from: [Option<Fd>; MAX_FD_MAP],
 }
 
 impl ChildFds {
+    /// No descriptors at all.
+    const fn empty() -> Self {
+        Self {
+            virt: [None; MAX_FD_MAP],
+            cloexec: [None; MAX_FD_MAP],
+            held: [None; MAX_FD_MAP],
+            from: [None; MAX_FD_MAP],
+        }
+    }
+
     /// Close `fd` in the child, whether or not it was close-on-exec.
     fn close(&mut self, fd: usize) {
-        if let (Some(v), Some(c), Some(f)) = (
+        if let (Some(v), Some(c), Some(h), Some(f)) = (
             self.virt.get_mut(fd),
             self.cloexec.get_mut(fd),
+            self.held.get_mut(fd),
             self.from.get_mut(fd),
         ) {
             *v = None;
             *c = None;
+            *h = None;
             *f = None;
         }
     }
@@ -1760,54 +1780,53 @@ impl ChildFds {
     }
 }
 
+/// Whether descriptor `fd`, whose entry is `entry`, can be handed to a child.
+///
+/// Not epoll, timerfd or inotify descriptors: the instance state lives in the
+/// parent's userspace memory, and there is no kernel object to hand over.
+///
+/// A `PtyMaster` crosses, as `fd_handle_type::PTY`. A `PtySlave` crosses too,
+/// deliberately not as `PTY`: `kind_to_handle_type` maps it to `CONSOLE`,
+/// which the kernel resolves through `current_tty()`, and `login_tty` has
+/// already made the pty the child's controlling terminal -- so that mapping
+/// is exact rather than approximate.
+///
+/// Not a sound card's device (`DevicePcm`, `DeviceControl`) nor a namespace's
+/// descriptor: the kernel's map has no type for their handles, so a child
+/// that needs one opens it itself
+/// (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
+///
+/// Not a datagram or sequenced-packet Unix socket: the child could not learn
+/// its type, and would drive it as a stream's
+/// (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
+fn crosses(fd: Fd, entry: &crate::fdtable::FdEntry) -> bool {
+    use crate::fdtable::HandleKind;
+    !matches!(
+        entry.kind,
+        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify | HandleKind::Namespace
+    ) && !crate::device_door::is_device(entry.kind)
+        && !is_a_message_socket(fd, entry)
+}
+
+/// Whether `fd` is a datagram or sequenced-packet Unix socket: one the kernel
+/// can close at `exec` ([`ChildFds`]'s `held`), but no child can be handed.
+fn is_a_message_socket(fd: Fd, entry: &crate::fdtable::FdEntry) -> bool {
+    entry.kind == crate::fdtable::HandleKind::UnixSocket
+        && crate::unix_socket::sock_type(fd) != crate::socket::SOCK_STREAM
+}
+
 fn inheritable_fds() -> ChildFds {
     use crate::fdtable;
 
-    let mut out = ChildFds {
-        virt: [None; MAX_FD_MAP],
-        cloexec: [None; MAX_FD_MAP],
-        from: [None; MAX_FD_MAP],
-    };
+    let mut out = ChildFds::empty();
     let mut idx = 0usize;
     while idx < MAX_FD_MAP {
         #[allow(clippy::cast_possible_wrap)]
         let fd = idx as i32;
         if let Some(entry) = fdtable::get_fd(fd) {
-            // Skip epoll/timerfd/inotify fds — the instance state lives
-            // in the parent's userspace memory and cannot be transferred
-            // to the child.  For those three the filter is honest: there
-            // is no kernel object to hand over.
-            //
-            // `PtyMaster` used to be in the same list for a different and worse
-            // reason — it *does* have a kernel identity, but no
-            // `fd_handle_type` named a pty end, so dropping it was a lie of
-            // convenience.  `fd_handle_type::PTY` closed that gap, so a master
-            // is inherited like anything else now and
-            // `TD-B-PTY-MASTER-CANNOT-BE-INHERITED-ACROSS-SPAWN` is fixed.
-            //
-            // `PtySlave` deliberately is *not* skipped and deliberately does
-            // *not* travel as `PTY`: `kind_to_handle_type` maps it to
-            // `CONSOLE`, which the kernel resolves through `current_tty()`, and
-            // `login_tty` has already made the pty the child's controlling
-            // terminal — so that mapping is exact rather than approximate.
-            //
-            // A sound card's device (`DevicePcm`, `DeviceControl`) is skipped
-            // for the same reason: the kernel's map has no type for its
-            // handle, so a child that needs the card opens it itself
-            // (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
-            //
-            // A datagram or sequenced-packet Unix socket is skipped: the child
-            // could not learn its type, and would drive it as a stream's
-            // (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
-            let transferable = entry.kind != fdtable::HandleKind::Epoll
-                && entry.kind != fdtable::HandleKind::Timerfd
-                && entry.kind != fdtable::HandleKind::Inotify
-                // A namespace's handle has no type in the kernel's spawn yet.
-                && entry.kind != fdtable::HandleKind::Namespace
-                && !(entry.kind == fdtable::HandleKind::UnixSocket
-                    && crate::unix_socket::sock_type(fd) != crate::socket::SOCK_STREAM)
-                && !crate::device_door::is_device(entry.kind);
-            if transferable {
+            if is_a_message_socket(fd, &entry) {
+                out.held[idx] = Some((fd_handle_type::UNIX_SOCKET, entry.handle));
+            } else if crosses(fd, &entry) {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // Close-on-exec fds are not inherited unless an action says so.
                 if entry.flags & fdtable::FD_CLOEXEC == 0 {
@@ -1956,10 +1975,15 @@ fn apply_file_actions(
                 } else {
                     child.virt[src]
                 };
+                // Open, but not one a child can be handed.
+                if entry.is_none() && child.held[src].is_some() {
+                    return Err(errno::EOPNOTSUPP);
+                }
                 child.virt[dst] = Some(entry.ok_or(errno::EBADF)?);
                 // `dup2` clears `FD_CLOEXEC` on the new descriptor, and it now
                 // shares `src`'s table entry and path.
                 child.cloexec[dst] = None;
+                child.held[dst] = None;
                 child.from[dst] = child.from[src];
             }
             3 => {
@@ -1981,6 +2005,11 @@ fn apply_file_actions(
                 }
                 opened.push(fd)?;
                 let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
+                // A namespace's link, or a sound card's device: nothing the
+                // kernel's map could hand over.
+                if !crosses(fd, &entry) {
+                    return Err(errno::EOPNOTSUPP);
+                }
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // `O_CLOEXEC` on an action's open means the child's exec
                 // closes it at once, so the kernel is not handed it; but it is
@@ -2053,22 +2082,22 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
 
 /// The handles an `exec` drops a descriptor of, written to `out` (each
 /// entry's `fd` 0, which the kernel ignores), and how many: those of
-/// `child`'s close-on-exec descriptors, each once.
+/// `child`'s close-on-exec descriptors and of those it holds but cannot
+/// hand over (`held`), each once.
 ///
 /// A handle a kept descriptor also names is listed too. The kernel keeps it
 /// open, as Linux keeps an open file description while any descriptor
 /// refers to it -- `dup2(fd, 1)` of a close-on-exec `fd` must leave standard
 /// output working -- but still counts the dropped descriptor as closed for
 /// what any close does: the process's record locks on the file are released
-/// (`pcb::ExecCloseList`'s `shared`). Leaving such a handle off the list, as
-/// this did until 2026-10-16, kept the locks across the `exec` (Opus's
-/// review of lane D's round 202). Kinds with no `fd_handle_type` -- named
-/// Unix sockets, and the userspace-only epoll, timerfd and inotify -- never
-/// reach the list, since [`inheritable_fds`] leaves them out of both halves:
-/// the kernel refuses a list naming a type it does not know.
+/// (`pcb::ExecCloseList`'s `shared`); left off, the locks would outlive the
+/// `exec`. Kinds with no `fd_handle_type` -- a namespace, a sound card's
+/// device, and the userspace-only epoll, timerfd and inotify -- never reach
+/// the list, since [`inheritable_fds`] leaves them out of every array: the
+/// kernel refuses a list naming a type it does not know.
 fn exec_close_list(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize {
     let mut count = 0usize;
-    for &(handle_type, handle) in child.cloexec.iter().flatten() {
+    for &(handle_type, handle) in child.cloexec.iter().chain(&child.held).flatten() {
         let listed = out
             .get(..count)
             .unwrap_or_default()
@@ -5959,6 +5988,13 @@ mod tests {
             set_unix_meta(fd, kind);
         }
         let child = inheritable_fds();
+        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        posix_spawn_file_actions_init(&raw mut acts);
+        assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 44, 3), 0);
+        let mut out = empty_map();
+        let mut opened = OpenedHandles::new();
+        let dup = build_fd_map(&raw const acts, &mut out, &mut opened).map(|_| ());
+        posix_spawn_file_actions_destroy(&raw mut acts);
         for fd in [43, 44, 45] {
             clear_meta(fd);
             let _ = crate::fdtable::close_fd(fd);
@@ -5966,6 +6002,16 @@ mod tests {
         assert!(child.is_open(43), "a stream's");
         assert!(!child.is_open(44), "a datagram's");
         assert!(!child.is_open(45), "a sequenced-packet one's");
+        // Held for the exec to close, which the kernel can: its type is known.
+        assert_eq!(
+            child.held[44],
+            Some((fd_handle_type::UNIX_SOCKET, 0x5000 | 44))
+        );
+        assert_eq!(
+            child.held[45],
+            Some((fd_handle_type::UNIX_SOCKET, 0x5000 | 45))
+        );
+        assert_eq!(dup, Err(errno::EOPNOTSUPP), "dup2 of one is refused");
     }
 
     /// Every descriptor from 32 up used to be dropped from every child.
@@ -5989,31 +6035,35 @@ mod tests {
     #[test]
     fn exec_lists_every_close_on_exec_handle_once() {
         use fd_handle_type::{FILE, PIPE};
-        let mut child = ChildFds {
-            virt: [None; MAX_FD_MAP],
-            cloexec: [None; MAX_FD_MAP],
-            from: [None; MAX_FD_MAP],
-        };
+        let mut child = ChildFds::empty();
         child.virt[1] = Some((PIPE, 11)); // standard output, kept
         child.cloexec[3] = Some((PIPE, 10)); // a pipe end, close-on-exec
         child.cloexec[5] = Some((PIPE, 11)); // dup of fd 1: the kept one
         child.cloexec[6] = Some((PIPE, 10)); // dup of fd 3: listed once
         child.cloexec[9] = Some((FILE, 12));
         child.virt[10] = Some((FILE, 13)); // kept, and no close-on-exec twin
+        child.held[12] = Some((fd_handle_type::UNIX_SOCKET, 14)); // cannot cross
         let mut out = empty_map();
         let count = exec_close_list(&child, &mut out);
         let listed: std::vec::Vec<(u8, u64)> = out[..count]
             .iter()
             .map(|e| (e.handle_type, e.handle))
             .collect();
-        assert_eq!(listed, [(PIPE, 10), (PIPE, 11), (FILE, 12)]);
+        assert_eq!(
+            listed,
+            [
+                (PIPE, 10),
+                (PIPE, 11),
+                (FILE, 12),
+                (fd_handle_type::UNIX_SOCKET, 14)
+            ]
+        );
         assert!(out[..count].iter().all(|e| e.fd == 0));
 
         // Nothing close-on-exec: an empty list, which clears the kernel's.
         let kept_only = ChildFds {
             virt: child.virt,
-            cloexec: [None; MAX_FD_MAP],
-            from: [None; MAX_FD_MAP],
+            ..ChildFds::empty()
         };
         assert_eq!(exec_close_list(&kept_only, &mut out), 0);
     }

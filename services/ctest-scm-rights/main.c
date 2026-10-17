@@ -43,7 +43,9 @@
  *       whose descriptors it took, leaving the next message's for the next
  *       receive -- with MSG_WAITALL (92), or with a second piece (93). Until
  *       2026-10-17 only the first receive of such a call took descriptors,
- *       and a later one's were released unseen.
+ *       and a later one's were released unseen. With no room for them at
+ *       all it stops there too, the descriptors released: recv with
+ *       MSG_WAITALL (94), readv into two pieces (95).
  *  10x  (exit 100-109) a listening socket sent and received still listens:
  *       SO_ACCEPTCONN is 1 (100), FIONREAD is EINVAL (101), and it accepts
  *       a connection to its name (102). Until 2026-10-17 the library took a
@@ -58,6 +60,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -271,6 +274,17 @@ int main(void)
         return 93;
     if (recv_stream(2, 0, &nfds) != 1 || nfds != 1)
         return 93;
+    if (write(sv[0], "a", 1) != 1 || send_fds(&p[1], 1) != 0 || write(sv[0], "c", 1) != 1)
+        return 94;
+    char three[3];
+    if (recv(sv[1], three, 3, MSG_WAITALL) != 2 || recv(sv[1], three, 3, 0) != 1 || three[0] != 'c')
+        return 94;
+    if (send_fds(&p[1], 1) != 0 || write(sv[0], "c", 1) != 1)
+        return 95;
+    char one[2];
+    struct iovec pieces[2] = {{&one[0], 1}, {&one[1], 1}};
+    if (readv(sv[1], pieces, 2) != 1 || one[0] != 'x' || read(sv[1], one, 2) != 1 || one[0] != 'c')
+        return 95;
 
     /* 10x */
     struct sockaddr_un name;

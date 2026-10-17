@@ -2481,33 +2481,32 @@ pub extern "C" fn closefrom(lowfd: i32) {
 // stat / fstat / lstat
 // ---------------------------------------------------------------------------
 
-/// Resolve `path` and fill `raw` with the kernel's `FsStatResult`.
-///
-/// `SYS_FS_STAT`/`SYS_FS_LSTAT` write a compact, kernel-defined 80-byte
-/// `FsStatResult` (see [`crate::stat`]), not a POSIX `struct stat`.  This
-/// helper centralises the resolve+syscall step so `stat`, `lstat`, and
-/// `statx` can share it without duplicating logic; callers translate the
-/// raw bytes via [`crate::stat::fill_from_fsstat`] (and, for `statx`,
-/// read the birth time via [`crate::stat::btime_from_fsstat`]).
-///
-/// `follow` selects `SYS_FS_STAT` (follow the final symlink) versus
-/// `SYS_FS_LSTAT` (do not follow).  Returns 0 on success, or -1 with
-/// `errno` set on failure.
 /// `crate::fdname`'s `stat` (`follow`) or `lstat` for `path`, if it names one
 /// of this process's own descriptors -- `/dev/fd/N`, `/dev/stdin`, the
-/// directory -- and `None` for any other path, or one that does not resolve,
-/// which the caller's own resolution then reports.
+/// directory -- or, followed, `crate::nsfs`'s for a namespace's link; `None`
+/// for any other path, or one that does not resolve, which the caller's own
+/// resolution then reports.
 fn fdname_stat(path: *const u8, buf: *mut Stat, follow: bool) -> Option<i32> {
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_or_err(path, &mut resolved)?;
-    crate::fdname::stat(resolved.get(..len)?, buf, follow)
+    let named = resolved.get(..len)?;
+    if follow {
+        // A namespace's link, followed: the namespace's own record.
+        // SAFETY: `buf` is the caller's writable `struct stat`.
+        if let Some(ret) = unsafe { crate::nsfs::stat_path(named, buf) } {
+            return Some(ret);
+        }
+    }
+    crate::fdname::stat(named, buf, follow)
 }
 
 /// `statx`'s answer for one of `crate::fdname`'s names: `(result, whether
 /// raw holds a kernel record)`, or `None` for any other path. Through a
 /// descriptor's link (`follow`) it is that descriptor's own record, its birth
 /// time included, exactly as `statx(fd, "", AT_EMPTY_PATH, ...)` reads it; a
-/// link itself, or the directory, is what `crate::fdname::stat` makes.
+/// link itself, or the directory, is what `crate::fdname::stat` makes; a
+/// namespace's link, followed, is the namespace's record (`crate::nsfs`), as
+/// `stat` makes it.
 fn statx_fdname(
     path: *const u8,
     follow: bool,
@@ -2518,6 +2517,11 @@ fn statx_fdname(
     let len = resolve_or_err(path, &mut resolved)?;
     let named = resolved.get(..len)?;
     if follow {
+        // A namespace's link, followed, as `stat` follows it.
+        // SAFETY: `st` is a live `struct stat`.
+        if let Some(ret) = unsafe { crate::nsfs::stat_path(named, &raw mut *st) } {
+            return Some((ret, false));
+        }
         if let Some(n) = crate::fdname::descriptor_of(named) {
             if fdtable::get_fd(n).is_none() {
                 errno::set_errno(errno::ENOENT);
@@ -2532,6 +2536,18 @@ fn statx_fdname(
     crate::fdname::stat(named, &raw mut *st, follow).map(|ret| (ret, false))
 }
 
+/// Resolve `path` and fill `raw` with the kernel's `FsStatResult`.
+///
+/// `SYS_FS_STAT`/`SYS_FS_LSTAT` write a compact, kernel-defined 80-byte
+/// `FsStatResult` (see [`crate::stat`]), not a POSIX `struct stat`.  This
+/// helper centralises the resolve+syscall step so `stat`, `lstat`, and
+/// `statx` can share it without duplicating logic; callers translate the
+/// raw bytes via [`crate::stat::fill_from_fsstat`] (and, for `statx`,
+/// read the birth time via [`crate::stat::btime_from_fsstat`]).
+///
+/// `follow` selects `SYS_FS_STAT` (follow the final symlink) versus
+/// `SYS_FS_LSTAT` (do not follow).  Returns 0 on success, or -1 with
+/// `errno` set on failure.
 fn stat_path_raw(
     path: *const u8,
     follow: bool,
@@ -2602,16 +2618,6 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     }
     if let Some(ret) = fdname_stat(path, buf, true) {
         return ret;
-    }
-    // A namespace's link, followed: the namespace's own record.
-    let mut resolved = [0u8; crate::unistd::PATH_MAX];
-    if let Some(len) = resolve_or_err(path, &mut resolved) {
-        // SAFETY: `buf` was checked non-null above, and is the caller's.
-        if let Some(ret) =
-            unsafe { crate::nsfs::stat_path(resolved.get(..len).unwrap_or(&[]), buf) }
-        {
-            return ret;
-        }
     }
 
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
@@ -8478,6 +8484,18 @@ fn openat2_forward_inner(
             return fd;
         }
         // A kernel without the door: its walk answers for the name, below.
+    }
+    // A namespace's link, `/proc/<pid>/ns/<kind>`, as `open` takes it
+    // (`crate::nsfs`) -- by a plain walk only, as the names above: a
+    // restricted walk cannot be confined to a link whose text names nothing.
+    if crate::nsfs::has_a_namespace_shape(name) {
+        if k_resolve != 0 {
+            errno::set_errno(errno::EOPNOTSUPP);
+            return -1;
+        }
+        if let Some(fd) = crate::nsfs::open(name, posix_flags) {
+            return fd;
+        }
     }
 
     let native_flags = translate_open_flags(posix_flags);

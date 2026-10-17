@@ -1602,40 +1602,20 @@ pub(crate) fn thread_is_live(thread: PthreadT) -> bool {
 /// Returns 0 on success or a positive errno.  Like the rest of the
 /// `pthread_*` family, and unlike `kill(2)`, this does **not** set `errno`.
 ///
-/// * `EINVAL` — `sig` is outside `[0, NSIG)`.
+/// * `EINVAL` — `sig` is outside `[0, NSIG)`, or is one of the library's
+///   own two, 32 and 33, as glibc's refuses them.
 /// * `ESRCH`  — no such thread in this process.
 ///
 /// `sig == 0` performs the existence check without delivering anything,
 /// exactly as `kill(pid, 0)` does.
 ///
-/// # What "to a specific thread" means here
-///
-/// Signal delivery in this system is **process-directed**: the kernel sets a
-/// signal pending on a process, not on a task (see this crate's `signal`
-/// module header on `SYS_SIGNAL_SEND`).  So:
-///
-/// * `thread == pthread_self()` is exact.  The signal is dispatched
-///   synchronously on this thread through the same path `raise(3)` uses,
-///   which is precisely what `pthread_kill(pthread_self(), sig)` means.
-///   This is also the overwhelmingly common call: CPython's
-///   `signal.pthread_kill` in a single-threaded interpreter, every
-///   `raise`-alike, and the whole "deliver to myself" idiom land here.
-/// * For any **other** thread of this process the signal is delivered
-///   process-directed, so the disposition runs on whichever thread next
-///   dispatches rather than necessarily on the named one.  The signal is
-///   not lost and the process-visible effect — handler runs, or the default
-///   action is taken — is right; what is approximate is *which* thread runs
-///   the handler.
-///
-/// That approximation is deliberate.  Refusing a peer thread with `ENOSYS`
-/// would be more precise about our limitation and less useful about the
-/// caller's intent: `pthread_kill(t, SIGTERM)` as a shutdown request works
-/// correctly under process-directed delivery, while a caller told `ENOSYS`
-/// learns only that it must find another way to do something we could in
-/// fact do.  The use the approximation genuinely fails — "interrupt the
-/// blocking call *in thread t*" — needs per-thread pending sets in the
-/// kernel; that is tracked in `todo.txt`, and when it lands this function
-/// targets the task directly with no change to any caller.
+/// To the calling thread the signal is dispatched synchronously, through
+/// the same path `raise(3)` uses, which is precisely what
+/// `pthread_kill(pthread_self(), sig)` means. To another thread it goes
+/// through [`crate::signal::tgkill`], lane A's `SYS_SIGNAL_TGKILL`, which
+/// posts it on that thread's own queue: that thread takes it, and it stays
+/// pending while that thread blocks it -- so it interrupts that thread's
+/// blocking call, as on Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
     // Signal number first: an out-of-range signal is a programming error
@@ -1669,10 +1649,9 @@ pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
         let e = errno::get_errno();
         return if e == 0 { errno::EINVAL } else { e };
     }
-    // Peer thread: process-directed delivery (see the doc comment above),
-    // through `tgkill` -- the kernel's `SYS_SIGNAL_TGKILL` where it has it,
-    // which checks the thread is this process's and tells the receiver
-    // `SI_TKILL`, as glibc's `pthread_kill` does with Linux's `tgkill`.
+    // Another thread: `tgkill`, which aims at that thread, checks it is this
+    // process's and tells the receiver `SI_TKILL`, as glibc's `pthread_kill`
+    // does with Linux's `tgkill`.
     let Ok(tid) = crate::types::PidT::try_from(thread) else {
         return errno::ESRCH;
     };
@@ -1696,10 +1675,9 @@ fn is_internal_signal(sig: i32) -> bool {
 /// signal 0 -- the existence probe, answered here.
 ///
 /// Sent as [`crate::signal::sigqueue`] sends, through lane A's
-/// `SYS_SIGNAL_QUEUE`, to this process: signals here are process-directed,
-/// as [`pthread_kill`] explains, so whichever thread next returns to
-/// userspace runs it -- the value and the code are what glibc's
-/// `rt_tgsigqueueinfo` would give.  On a kernel without that call it answers
+/// `SYS_SIGNAL_QUEUE`, to this process -- the kernel has no call that queues
+/// a value to one thread -- so whichever thread does not block it runs it;
+/// the value and the code are what glibc's `rt_tgsigqueueinfo` would give.  On a kernel without that call it answers
 /// `ENOSYS`: a send without the value would hand the handler a `si_value`
 /// the caller did not give.
 ///

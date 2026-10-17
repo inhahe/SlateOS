@@ -3157,13 +3157,12 @@ fn timer_answer(answer: Result<i64, i32>) -> i32 {
 /// `SIGTIMER` (32). Each timer is a record of the library's -- the function,
 /// its value, the attributes its threads are made with -- and a kernel timer
 /// that sends `SIGTIMER` to the helper alone (`SIGEV_THREAD_ID`), carrying
-/// the record's address as its value. At each expiry the helper makes a new
-/// detached thread, which runs the function with every signal blocked --
-/// the helper's mask, which it starts with, as glibc's do (Linux 6.6.87,
-/// `build/d-tools/oracle-sigev-mask.c` in lane D's scratch tree). A `timer_t`
-/// is the record's address, halved, with
-/// its top bit set -- glibc's `timer_to_timerid` -- where a kernel timer's is
-/// its id.
+/// the record's serial number as its value (`NEXT_SERIAL`). At each expiry
+/// the helper makes a new detached thread, which runs the function with
+/// every signal blocked -- the helper's mask, which it starts with, as
+/// glibc's do (Linux 6.6.87, `build/d-tools/oracle-sigev-mask.c` in lane D's
+/// scratch tree). A `timer_t` is the record's address, halved, with its top
+/// bit set -- glibc's `timer_to_timerid` -- where a kernel timer's is its id.
 ///
 /// Records live on a list the helper looks a signal's up in, so that one
 /// sent before its timer was deleted starts nothing. Not inherited by
@@ -3214,11 +3213,10 @@ pub(crate) mod thread_timers {
         r
     }
     /// The serial number the next record is given, which its timer's signal
-    /// carries to the helper: never given twice. A record's address, which
-    /// the signal carried until 2026-10-17, is given again -- freed by
-    /// `timer_delete`, a block `malloc` may hand the next `timer_create` --
-    /// and an expiry of the deleted timer the helper had already taken then
-    /// ran the new timer's function (Fable's review of lane D's round 205).
+    /// carries to the helper: never given twice, where a record's address is
+    /// -- freed by `timer_delete`, a block `malloc` may hand the next
+    /// `timer_create` -- and an expiry of the deleted timer the helper had
+    /// already taken would run the new timer's function.
     static NEXT_SERIAL: AtomicUsize = AtomicUsize::new(1);
 
     /// The helper thread's kernel id; 0 before it has started.

@@ -36,7 +36,7 @@ mod menu;
 
 use std::cell::Cell;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufRead, IsTerminal, Read, Seek, SeekFrom};
+use std::io::{IsTerminal, Read, Seek, SeekFrom};
 use std::rc::Rc;
 
 use fdisk::Term;
@@ -92,34 +92,6 @@ pub struct Fdisk {
 /// wait for a reply.
 extern "C" fn reply_sighandler(_sig: i32) {}
 
-/// `fgets (buf, bufsz, stdin)`: the next line of standard input, through its
-/// `\n`, or the first `bufsz - 1` bytes of it; none at its end or on an
-/// error (a signal's interruption included) before a byte is read.
-fn fgets_stdin(bufsz: usize) -> Option<Vec<u8>> {
-    let max = bufsz.saturating_sub(1);
-    let stdin = std::io::stdin();
-    let mut lock = stdin.lock();
-    let mut line = Vec::new();
-    while line.len() < max {
-        let Ok(data) = lock.fill_buf() else { break };
-        if data.is_empty() {
-            break;
-        }
-        let room = max.saturating_sub(line.len());
-        let take = data
-            .iter()
-            .position(|&c| c == b'\n')
-            .map_or(data.len(), |i| i.saturating_add(1))
-            .min(room);
-        line.extend_from_slice(data.get(..take).unwrap_or_default());
-        lock.consume(take);
-        if line.last() == Some(&b'\n') {
-            break;
-        }
-    }
-    (!line.is_empty()).then_some(line)
-}
-
 /// `poll` of standard input for `POLLIN`, as `get_user_reply` waits: `Err`
 /// with the `errno` when it fails. A host without `poll` does not wait.
 fn poll_stdin() -> Result<(), i32> {
@@ -160,7 +132,7 @@ pub fn get_user_reply(sh: &Shared, prompt: &[u8], bufsz: usize) -> Result<Vec<u8
         Err(e) if e != EAGAIN => Err(e.wrapping_neg()),
         _ => {
             // The reply is the C string fgets left: up to a NUL in it.
-            let line = fgets_stdin(bufsz).unwrap_or_default();
+            let line = fdisk::fgets_stdin(bufsz).line;
             let line = libfdisk::utils::c_str(&line);
             if line.is_empty() {
                 // ^D.
@@ -378,30 +350,6 @@ fn rpmatch(s: &[u8]) -> i32 {
     }
 }
 
-/// A warning to standard error, coloured as the `warn` scheme says.
-fn put_warning(sh: &Shared, text: &[u8]) {
-    sh.term.flush();
-    let seq = sh.term.color_scheme_get_sequence(b"warn", ulcolors::RED);
-    let (on, off) = {
-        let colors = sh.term.colors.borrow();
-        let c = colors.as_ref();
-        (
-            seq.as_deref()
-                .and_then(|s| c.map(|c| c.enable(s).to_vec()))
-                .unwrap_or_default(),
-            c.map(|c| {
-                if seq.is_some() {
-                    c.disable().to_vec()
-                } else {
-                    Vec::new()
-                }
-            })
-            .unwrap_or_default(),
-        )
-    };
-    stderr_write(&[&on[..], text, &off[..]].concat());
-}
-
 /// `ask_callback (cxt, ask, data)`: libfdisk's questions, answered from
 /// standard input, and its messages printed.
 fn ask_callback(sh: &Shared, cxt: &mut Context, ask: &mut Ask) -> i32 {
@@ -421,7 +369,7 @@ fn ask_callback(sh: &Shared, cxt: &mut Context, ask: &mut Ask) -> i32 {
         }
         AskType::Warnx => {
             let msg = ask.print_get_mesg().unwrap_or_default().to_vec();
-            put_warning(sh, &msg);
+            sh.term.warning(&msg);
             stderr_write(b"\n");
             0
         }
@@ -429,7 +377,7 @@ fn ask_callback(sh: &Shared, cxt: &mut Context, ask: &mut Ask) -> i32 {
             let mut msg = ask.print_get_mesg().unwrap_or_default().to_vec();
             let e = std::io::Error::from_raw_os_error(ask.print_get_errno());
             msg.extend_from_slice(format!(": {}\n", errmsg::strerror(&e)).as_bytes());
-            put_warning(sh, &msg);
+            sh.term.warning(&msg);
             0
         }
         AskType::YesNo => {

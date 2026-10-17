@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**502 programs; 342 on the image, 6 carried inside the kernel.**
+**503 programs; 343 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 317
+## Userland utilities and services (`userspace/`, lane B) -- 318
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -242,6 +242,7 @@ two disagree.
 | `sed` | The stream editor. | yes | `coreutils` |  |
 | `seq` | Print numbers from FIRST to LAST, in steps of INCREMENT. | yes | `coreutils` |  |
 | `service` | Service Management CLI | yes |  |  |
+| `sfdisk` | Display or manipulate a disk partition table from a script. | yes |  |  |
 | `sftp` | `Slate OS` SFTP Client | yes |  |  |
 | `sh` | A small POSIX shell. |  | `coreutils` |  |
 | `sha1sum` | Print or check SHA-1 (160-bit) checksums. | yes | `coreutils` |  |

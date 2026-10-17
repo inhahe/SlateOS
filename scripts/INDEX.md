@@ -453,6 +453,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/seq-diff.sh` | Differential test: our `seq` against GNU's. |
 | `scripts/seq-probe.sh` | One side of the `seq` differential test. |
 | `scripts/setup-toolchain.sh` | Install the Rust toolchain and other dependencies needed to build the kernel. |
+| `scripts/sfdisk-diff.sh` | Differential test: our `sfdisk` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/sh-diff.sh` | Differential test: our sh against dash. |
 | `scripts/sharutils-ref.sh` | Unpacks Ubuntu's sharutils package, without root, as the uuencode/uudecode harness reference. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
@@ -600,4 +601,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_590 scripts._
+_591 scripts._

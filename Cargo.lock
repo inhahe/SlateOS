@@ -3945,6 +3945,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "sfdisk"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "fdisk",
+ "getoptlong",
+ "libfdisk",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulcolors",
+ "ulstrutils",
+ "ulsysfs",
+]
+
+[[package]]
 name = "sftp"
 version = "0.1.0"
 dependencies = [

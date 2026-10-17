@@ -802,6 +802,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "seq-cases.py",
         "seq-diff.sh",
         "seq-probe.sh",
+        "sfdisk-diff.sh",
         "sh-diff.sh",
         "sharutils-ref.sh",
         "shred-diff.sh",

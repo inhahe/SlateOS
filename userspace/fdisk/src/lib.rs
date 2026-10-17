@@ -1,14 +1,89 @@
 //! What `fdisk` and `sfdisk` share: util-linux 2.39.3's
-//! `disk-utils/fdisk-list.c` ([`list`]), and the standard output both
+//! `disk-utils/fdisk-list.c` ([`list`]), the standard output both
 //! programs, and the libfdisk dialog callback they install, write to
-//! ([`Term`]).
+//! ([`Term`]), and standard input read as `fgets` reads it
+//! ([`fgets_stdin`], [`StdinInput`]).
 
 pub mod list;
 
 use std::cell::RefCell;
+use std::io::BufRead;
 
+use libfdisk::script::ScriptInput;
 use ulclosestream::Stdout;
 use ulcolors::Colors;
+
+/// What [`fgets_stdin`] read.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fgets {
+    /// The line, through its `\n`, or as much of it as fitted; empty when
+    /// nothing was read.
+    pub line: Vec<u8>,
+    /// Whether a read met the end of the input (`feof`).
+    pub eof: bool,
+}
+
+/// `fgets (buf, bufsz, stdin)`: the next line of standard input, through its
+/// `\n`, or the first `bufsz - 1` bytes of it. It reads through std's
+/// buffer of standard input, which every reader in the program shares, as
+/// a C program's readers share `stdin`'s: a script line and a yes-or-no
+/// answer come from the one stream in order. An error -- a signal's
+/// interruption included -- ends the line where it stands, as `fgets`
+/// returns what it has.
+#[must_use]
+pub fn fgets_stdin(bufsz: usize) -> Fgets {
+    let max = bufsz.saturating_sub(1);
+    let stdin = std::io::stdin();
+    let mut lock = stdin.lock();
+    let mut got = Fgets::default();
+    while got.line.len() < max {
+        let Ok(data) = lock.fill_buf() else { break };
+        if data.is_empty() {
+            got.eof = true;
+            break;
+        }
+        let room = max.saturating_sub(got.line.len());
+        let take = data
+            .iter()
+            .position(|&c| c == b'\n')
+            .map_or(data.len(), |i| i.saturating_add(1))
+            .min(room);
+        got.line
+            .extend_from_slice(data.get(..take).unwrap_or_default());
+        lock.consume(take);
+        if got.line.last() == Some(&b'\n') {
+            break;
+        }
+    }
+    got
+}
+
+/// A libfdisk script reading standard input, through [`fgets_stdin`].
+#[derive(Debug, Default)]
+pub struct StdinInput {
+    eof: bool,
+}
+
+impl ScriptInput for StdinInput {
+    fn fgets(&mut self, buf: &mut [u8]) -> bool {
+        let got = fgets_stdin(buf.len());
+        self.eof |= got.eof;
+        if got.line.is_empty() {
+            return false;
+        }
+        if let Some(d) = buf.get_mut(..got.line.len()) {
+            d.copy_from_slice(&got.line);
+        }
+        if let Some(nul) = buf.get_mut(got.line.len()) {
+            *nul = 0;
+        }
+        true
+    }
+
+    fn feof(&self) -> bool {
+        self.eof
+    }
+}
 
 /// A program's standard output, its colours and its name: what the program
 /// and its libfdisk dialog callback (which libfdisk calls with only the
@@ -82,6 +157,19 @@ impl Term {
             .map(Colors::disable)
             .unwrap_or_default();
         self.write(off);
+    }
+
+    /// A warning to standard error, as the dialog callbacks print one:
+    /// standard output flushed first, and the text coloured as the `warn`
+    /// scheme says (red by default) when colours are on.
+    pub fn warning(&self, text: &[u8]) {
+        self.flush();
+        let seq = self.color_scheme_get_sequence(b"warn", ulcolors::RED);
+        let (on, off) = match (seq.as_deref(), self.colors.borrow().as_ref()) {
+            (Some(s), Some(c)) => (c.enable(s).to_vec(), c.disable().to_vec()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        ulclosestream::stderr_write(&[&on[..], text, &off[..]].concat());
     }
 
     /// `exit (status)`: standard output flushed and closed as `atexit`'s

@@ -19,7 +19,8 @@
 #
 # Some columns are read from the running system even with --sysroot (the
 # device nodes' owners, FSAVAIL and friends, a loop device's backing file);
-# both sides read the same system, so they agree or differ together.
+# both sides read the same system, so they agree or differ together -- unless
+# it changes between the two runs, for which a case that differs is run again.
 set -u
 
 DIFF_PROG='lsblk'
@@ -43,13 +44,23 @@ for t in "$dumpsrc"/*.tar.xz; do
   tar -C "$dumps" --xz -xf "$t"
 done
 
+# run_both LOC ARGV...: each side once, its out, err and status kept.
+run_both() {
+  local loc=$1; shift
+  diff_run timeout -k 2 30 env LC_ALL="$loc" PATH="$bindir/ours" lsblk "$@" </dev/null >"$o_out" 2>"$o_err"; o_rc=$?
+  diff_run timeout -k 2 30 env LC_ALL="$loc" PATH="$bindir/gnu" lsblk "$@" </dev/null >"$g_out" 2>"$g_err"; g_rc=$?
+  cmp -s "$o_out" "$g_out" && cmp -s "$o_err" "$g_err" && [ "$o_rc" = "$g_rc" ]
+}
+
 compare() {
   local o_out=$DIFF_TMP/o.out g_out=$DIFF_TMP/g.out o_err=$DIFF_TMP/o.err g_err=$DIFF_TMP/g.err
   local o_rc g_rc loc
   for loc in C.UTF-8 C; do
-    diff_run timeout -k 2 30 env LC_ALL=$loc PATH="$bindir/ours" lsblk "$@" </dev/null >"$o_out" 2>"$o_err"; o_rc=$?
-    diff_run timeout -k 2 30 env LC_ALL=$loc PATH="$bindir/gnu" lsblk "$@" </dev/null >"$g_out" 2>"$g_err"; g_rc=$?
-    if cmp -s "$o_out" "$g_out" && cmp -s "$o_err" "$g_err" && [ "$o_rc" = "$g_rc" ]; then
+    # The filesystems' use is read live, and the disk may fill between the
+    # two runs (FSUSED 280.7G against 280.8G): a case that differs is run
+    # once more, and said to have been.
+    if run_both "$loc" "$@" \
+       || { run_both "$loc" "$@" && printf 'AGAIN [%s] lsblk %s (agreed when run again)\n' "$loc" "$*"; }; then
       pass=$((pass + 1))
       [ -n "${VERBOSE:-}" ] && printf 'OK   [%s] lsblk %s\n' "$loc" "$*"
     else
@@ -127,11 +138,61 @@ for dump in "$dumps"/*/; do
 done
 
 # --- this machine ----------------------------------------------------------------------
+# Here SUBSYSTEMS cannot be compared byte for byte. util-linux 2.39.3's
+# sysfs_blkdev_get_devchain (lib/sysfs.c:409) copies the chain into its
+# caller's buffer without the terminating NUL, so the path it then looks up
+# runs on into whatever that stack buffer last held. Where that is not a
+# NUL, the device's own `subsystem` link is missed and the column loses its
+# leading `block` -- for some devices and not others, as what ran before
+# decides: loop0 and the ram disks here, and not loop1. (The snapshots read
+# with --sysroot have always found a NUL there, and keep the column.) So the
+# cases below leave SUBSYSTEMS out -- `-O` becomes every other column -- and
+# `compare_subsystems` checks it device by device.
+all_but_subsystems=$("$bindir/gnu/lsblk" --help \
+  | awk '/Available output columns/{p=1; next} p && /^ +[A-Z]/{print $1}' | grep -vx SUBSYSTEMS | paste -sd, -)
+case $all_but_subsystems in
+  *,MODEL,*) ;;
+  *) echo "lsblk-diff: no column list in lsblk --help: '$all_but_subsystems'"; exit 1 ;;
+esac
+
+# compare_subsystems: SUBSYSTEMS of every device, ours against upstream's,
+# where upstream's may lack the leading `block` its own link gives.
+compare_subsystems() {
+  local o g on ov gn gv bad=0 lost=0
+  o=$(LC_ALL=C PATH="$bindir/ours" lsblk -r -n -a -o NAME,SUBSYSTEMS 2>&1)
+  g=$(LC_ALL=C PATH="$bindir/gnu" lsblk -r -n -a -o NAME,SUBSYSTEMS 2>&1)
+  if [ "$(printf '%s\n' "$o" | wc -l)" != "$(printf '%s\n' "$g" | wc -l)" ]; then
+    bad=1
+  else
+    while read -r on ov && read -r gn gv <&3; do
+      if [ "$on" != "$gn" ]; then
+        bad=1
+      elif [ "$ov" = "$gv" ]; then
+        :
+      elif [ "$ov" = "block${gv:+:$gv}" ]; then
+        lost=$((lost + 1))
+      else
+        bad=1
+      fi
+    done < <(printf '%s\n' "$o") 3< <(printf '%s\n' "$g")
+  fi
+  if [ "$bad" = 0 ]; then
+    pass=$((pass + 1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   lsblk -o NAME,SUBSYSTEMS (upstream lost its leading block for %d)\n' "$lost"
+  else
+    fail=$((fail + 1))
+    printf 'DIFF lsblk -r -n -a -o NAME,SUBSYSTEMS\n'
+    diff -u <(printf '%s\n' "$g") <(printf '%s\n' "$o") | sed -n '3,30p' | sed 's/^/  out /'
+  fi
+}
+compare_subsystems
+
 for args in '' '-a' '-l' '-r' '-P' '-J' '-i' '-n' '-b' '-p' '-d' '-s' '-M' '-A' \
-            '-f' '-m' '-t' '-D' '-z' '-S' '-N' '-v' '-O' '-J -O' '-l -O' \
+            '-f' '-m' '-t' '-D' '-z' '-S' '-N' '-v' \
+            "-o $all_but_subsystems" "-J -o $all_but_subsystems" "-l -o $all_but_subsystems" \
             '-x NAME' '-x SIZE' '-l -x SIZE' '-E TYPE' '-T PKNAME' '-w 40' '-w 80' '-w 200' \
             '-o NAME,FSTYPE,FSVER,LABEL,UUID,FSAVAIL,FSUSE%,MOUNTPOINT,MOUNTPOINTS,FSROOTS' \
-            '-o NAME,MODEL,SERIAL,WWN,HCTL,TRAN,SUBSYSTEMS,ID-LINK,ID,OWNER,GROUP,MODE' \
+            '-o NAME,MODEL,SERIAL,WWN,HCTL,TRAN,ID-LINK,ID,OWNER,GROUP,MODE' \
             '-e 7' '-I 8' '-a -I 7'; do
   # shellcheck disable=SC2086
   compare $args
@@ -140,7 +201,7 @@ for d in /dev/sda /dev/sdb /dev/sdc /dev/sdd /dev/loop0; do
   [ -b "$d" ] || continue
   compare "$d"
   compare -s "$d"
-  compare -J -O "$d"
+  compare -J -o "$all_but_subsystems" "$d"
 done
 compare /dev/sda /dev/null
 compare /dev/sda /nonexistent

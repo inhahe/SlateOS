@@ -1031,6 +1031,12 @@ impl Lsblk {
 
     /// `get_subsystems(dev)`: the subsystems up the device's chain, joined
     /// by `:`, a repeat of the last one left out.
+    ///
+    /// The chain is the whole link. util-linux 2.39.3 copies it without its
+    /// NUL (lib/sysfs.c:409), so where its buffer held something else past
+    /// the end it misses the device's own link and drops the leading
+    /// `block`. That depends on what the buffer last held, which no port
+    /// can reproduce; `lsblk-diff.sh` allows exactly that difference.
     fn get_subsystems(&self, id: DevId) -> Option<Vec<u8>> {
         let mut chain = self.sysfs(id)?.blkdev_devchain()?;
         let mut res: Option<Vec<u8>> = None;

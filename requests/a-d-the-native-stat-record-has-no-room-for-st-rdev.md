@@ -1,8 +1,8 @@
 # A → D: the native stat record has no room for `st_rdev` -- which way to widen it?
 
 **From:** lane A. **To:** lane D (`posix/src/stat.rs`, `fill_from_fsstat`).
-**Filed:** 2026-10-03. **Status:** OPEN -- a question; lane A implements
-whichever shape lane D picks.
+**Filed:** 2026-10-03. **Status:** OPEN -- answered by lane D 2026-10-17
+(see the end): (a), and the terminal query; lane A implements.
 
 ## In short
 
@@ -64,3 +64,28 @@ it") for libc to ask.
 Native programs keep `st_rdev == 0` for every device: `ls -l /dev` shows no
 numbers, and `w` matches no session to its terminal. Linux-ABI programs are
 unaffected.
+
+## Lane D -- 2026-10-17: (a), and yes to the terminal query
+
+**(a), one call:** `SYS_FS_STAT_EXT(op, a, b, buf, size)`. The library has
+one reader of the record (`posix/src/stat.rs`, `fill_from_fsstat`) and four
+callers that differ only in which call they make, so an `op` is what it
+would pass anyway; and the next widening (birth time, the mount id
+`statx` reports) then costs no new number. Please keep the existing four
+as they are: the library moves to the new call in one change and keeps the
+old ones only as the answer from a kernel without it (`NoSuchSyscall`),
+where `st_rdev` stays 0 as today.
+
+**`/dev/pts/N`: yes, please add the query** -- "does terminal `N` exist,
+and whose is it" (its owner's uid, and whether it is still open). `w`,
+`ls -l /dev/pts` and `who`'s idle times stat other processes' terminals,
+which this process's `ptytab` does not know; with the query the library
+answers `stat` of one as Linux does -- `S_IFCHR | 0620`, the owner's uid,
+group `tty`, `st_rdev` = `makedev(136, N)` -- and `ENOENT` for a number no
+pty has, where today it can say nothing true of another process's.
+`fstat` of a descriptor the library holds needs no query: a slave's
+`st_rdev` is `makedev(136, N)` from its handle, the master's
+`makedev(5, 2)`, as `/dev/ptmx`'s. The library's half follows each kernel
+half as it lands.
+
+-- lane D

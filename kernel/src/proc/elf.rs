@@ -1255,8 +1255,6 @@ pub fn build_linux_fork_wait_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_madvise_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 701] = [
         0xE8, 0x78, 0x02, 0x00, 0x00, 0x49, 0x89, 0xC4, 0xE8, 0x70, 0x02, 0x00, 0x00, 0x49, 0x89,
         0xC5, 0xE8, 0x68, 0x02, 0x00, 0x00, 0x49, 0x89, 0xC6, 0x48, 0xB8, 0xE7, 0xC2, 0x5E, 0xE7,
@@ -1306,53 +1304,7 @@ pub fn build_linux_madvise_test_elf() -> alloc::vec::Vec<u8> {
         0xF0, 0xFF, 0xFF, 0x77, 0x01, 0xC3, 0xBF, 0x30, 0x00, 0x00, 0x00, 0xEB, 0xC5, 0xBE, 0x00,
         0x10, 0x00, 0x00, 0xB8, 0x1C, 0x00, 0x00, 0x00, 0x0F, 0x05, 0xC3,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a **Linux-ABI** `ET_EXEC` test ELF for the names that stand for a
@@ -1553,8 +1505,6 @@ pub fn build_linux_madvise_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_dev_stdin_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 703] = [
         0x48, 0x81, 0xEC, 0x00, 0x01, 0x00, 0x00, 0x48, 0x8D, 0x3D, 0x7C, 0x02, 0x00, 0x00, 0xBE,
         0x42, 0x02, 0x00, 0x00, 0xBA, 0xA4, 0x01, 0x00, 0x00, 0xB8, 0x02, 0x00, 0x00, 0x00, 0x0F,
@@ -1604,53 +1554,7 @@ pub fn build_linux_dev_stdin_test_elf() -> alloc::vec::Vec<u8> {
         0x73, 0x74, 0x64, 0x69, 0x6E, 0x00, 0x2F, 0x64, 0x65, 0x76, 0x2F, 0x66, 0x64, 0x2F, 0x39,
         0x00, 0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x77, 0x6F, 0x72, 0x6C, 0x64, 0x51,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ELF that exercises POSIX timers end to end:
@@ -2006,8 +1910,6 @@ pub fn build_linux_dev_stdin_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_posix_timers_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 5096] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xD2, 0x01, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -2350,53 +2252,7 @@ pub fn build_linux_posix_timers_test_elf() -> alloc::vec::Vec<u8> {
         0xFF, 0x48, 0x85, 0xC0, 0x74, 0x0A, 0xBF, 0x66, 0x00, 0x00, 0x00, 0xE8, 0x2F, 0xEC, 0xFF,
         0xFF, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8, 0x25, 0xEC, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ELF that checks a signal reaches a thread making no system
@@ -2737,8 +2593,6 @@ pub fn build_linux_posix_timers_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_signal_from_interrupt_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 2042] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xF4, 0x03, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -2878,53 +2732,7 @@ pub fn build_linux_signal_from_interrupt_test_elf() -> alloc::vec::Vec<u8> {
         0x00, 0x00, 0xE8, 0x1D, 0xF8, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8, 0x13, 0xF8,
         0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ELF that checks signals are per thread: masks, queues and
@@ -3172,8 +2980,6 @@ pub fn build_linux_signal_from_interrupt_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_thread_signals_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 1881] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xE6, 0x01, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -3302,53 +3108,7 @@ pub fn build_linux_thread_signals_test_elf() -> alloc::vec::Vec<u8> {
         0x0A, 0xBF, 0x4A, 0x00, 0x00, 0x00, 0xE8, 0xBE, 0xF8, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00,
         0x00, 0xE8, 0xB4, 0xF8, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ring-3 test of the alternate signal stack, a freestanding C
@@ -3890,8 +3650,6 @@ pub fn build_linux_thread_signals_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_sigaltstack_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 5434] = [
         0x48, 0x89, 0xE7, 0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x2C, 0x06, 0x00, 0x00, 0x0F, 0x0B, 0x0F,
         0x0B, 0x53, 0x48, 0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00,
@@ -4257,53 +4015,7 @@ pub fn build_linux_sigaltstack_test_elf() -> alloc::vec::Vec<u8> {
         0xA7, 0x00, 0x00, 0x00, 0xE8, 0xE0, 0xEA, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8,
         0xD6, 0xEA, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ring-3 test of `SIGPIPE`, a freestanding C program: a
@@ -4583,8 +4295,6 @@ pub fn build_linux_sigaltstack_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_sigpipe_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3214] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x22, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -4802,53 +4512,7 @@ pub fn build_linux_sigpipe_test_elf() -> alloc::vec::Vec<u8> {
         0x00, 0x4C, 0x89, 0xE7, 0x48, 0x89, 0xD6, 0x0F, 0x05, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8,
         0x7F, 0xF3, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ring-3 test of locked memory, a freestanding C program:
@@ -5184,8 +4848,6 @@ pub fn build_linux_sigpipe_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_mlock_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 5836] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xC5, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -5578,53 +5240,7 @@ pub fn build_linux_mlock_test_elf() -> alloc::vec::Vec<u8> {
         0x72, 0x6F, 0x63, 0x2F, 0x73, 0x65, 0x6C, 0x66, 0x2F, 0x73, 0x74, 0x61, 0x74, 0x75, 0x73,
         0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ring-3 test of reads and writes whose buffer cannot be
@@ -5842,8 +5458,6 @@ pub fn build_linux_mlock_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_null_buffer_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 2511] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x9A, 0x00, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -6014,53 +5628,7 @@ pub fn build_linux_null_buffer_test_elf() -> alloc::vec::Vec<u8> {
         0x64, 0x65, 0x76, 0x2F, 0x6E, 0x75, 0x6C, 0x6C, 0x00, 0x2F, 0x64, 0x65, 0x76, 0x2F, 0x7A,
         0x65, 0x72, 0x6F, 0x00, 0x79, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of real-time scheduling
@@ -6399,8 +5967,6 @@ pub fn build_linux_null_buffer_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_rt_sched_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3969] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xC8, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -6668,53 +6234,7 @@ pub fn build_linux_rt_sched_test_elf() -> alloc::vec::Vec<u8> {
         0x85, 0xC0, 0x74, 0x0A, 0xBF, 0x73, 0x00, 0x00, 0x00, 0xE8, 0x96, 0xF0, 0xFF, 0xFF, 0xBF,
         0x2A, 0x00, 0x00, 0x00, 0xE8, 0x8C, 0xF0, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of restartable sequences
@@ -7188,8 +6708,6 @@ pub fn build_linux_rt_sched_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_rseq_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3832] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x93, 0x03, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -7448,53 +6966,7 @@ pub fn build_linux_rseq_test_elf() -> alloc::vec::Vec<u8> {
         0x4C, 0x8B, 0x28, 0x4D, 0x85, 0xED, 0x0F, 0x84, 0x1D, 0xFA, 0xFF, 0xFF, 0xBF, 0x5B, 0x00,
         0x00, 0x00, 0xE8, 0x15, 0xF1, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of ptrace (`spawn::self_test_linux_ptrace`): a child
@@ -8068,8 +7540,6 @@ pub fn build_linux_rseq_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_ptrace_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 7442] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xA6, 0x01, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -8569,53 +8039,7 @@ pub fn build_linux_ptrace_test_elf() -> alloc::vec::Vec<u8> {
         0x00, 0x00, 0xE8, 0x05, 0xE3, 0xFF, 0xFF, 0xBF, 0xA2, 0x00, 0x00, 0x00, 0xE8, 0xFB, 0xE2,
         0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of `exit_group` and `exit` with threads
@@ -8893,8 +8317,6 @@ pub fn build_linux_ptrace_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_exit_group_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 1716] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x5F, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -9012,53 +8434,7 @@ pub fn build_linux_exit_group_test_elf() -> alloc::vec::Vec<u8> {
         0xFF, 0xBF, 0x47, 0x00, 0x00, 0x00, 0xE8, 0x63, 0xF9, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00,
         0x00, 0xE8, 0x59, 0xF9, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of `execve` in a process with more than one thread
@@ -9362,8 +8738,6 @@ pub fn build_linux_exit_group_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_exec_threads_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 1895] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x5E, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -9493,53 +8867,7 @@ pub fn build_linux_exec_threads_test_elf() -> alloc::vec::Vec<u8> {
         0xBF, 0x3F, 0x00, 0x00, 0x00, 0xE8, 0xB0, 0xF8, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00, 0x00,
         0xE8, 0xA6, 0xF8, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of ptrace's threads, forks, system-call stops and
@@ -10303,8 +9631,6 @@ pub fn build_linux_exec_threads_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_ptrace_tier2_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 10687] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x3F, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -11020,53 +10346,7 @@ pub fn build_linux_ptrace_tier2_test_elf() -> alloc::vec::Vec<u8> {
         0x74, 0x0A, 0xBF, 0xDE, 0x00, 0x00, 0x00, 0xE8, 0x58, 0xD6, 0xFF, 0xFF, 0xBF, 0x2A, 0x00,
         0x00, 0x00, 0xE8, 0x4E, 0xD6, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of named pipes (`spawn::self_test_linux_fifo`,
@@ -11484,8 +10764,6 @@ pub fn build_linux_ptrace_tier2_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_fifo_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 4683] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x5C, 0x00, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -11801,53 +11079,7 @@ pub fn build_linux_fifo_test_elf() -> alloc::vec::Vec<u8> {
         0x00, 0x2F, 0x70, 0x72, 0x6F, 0x63, 0x2F, 0x73, 0x65, 0x6C, 0x66, 0x2F, 0x66, 0x64, 0x2F,
         0x00, 0x7A, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of real, effective, saved and filesystem ids
@@ -12138,8 +11370,6 @@ pub fn build_linux_fifo_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_setid_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 2732] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x03, 0x01, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -12325,53 +11555,7 @@ pub fn build_linux_setid_test_elf() -> alloc::vec::Vec<u8> {
         0x70, 0x6F, 0x73, 0x69, 0x78, 0x5F, 0x61, 0x63, 0x6C, 0x5F, 0x61, 0x63, 0x63, 0x65, 0x73,
         0x73, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ELF that tests UTS namespaces and the handles on them
@@ -12785,8 +11969,6 @@ pub fn build_linux_setid_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_uts_namespaces_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 4044] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x67, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -13059,53 +12241,7 @@ pub fn build_linux_uts_namespaces_test_elf() -> alloc::vec::Vec<u8> {
         0x74, 0x65, 0x73, 0x74, 0x2D, 0x63, 0x68, 0x69, 0x6C, 0x64, 0x00, 0x6E, 0x73, 0x74, 0x65,
         0x73, 0x74, 0x2D, 0x64, 0x00, 0x67, 0x00, 0x78, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ELF that tests shared file mappings from ring 3
@@ -13792,8 +12928,6 @@ pub fn build_linux_shared_file_maps_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_mount_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3266] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x0D, 0x03, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -14014,53 +13148,7 @@ pub fn build_linux_mount_test_elf() -> alloc::vec::Vec<u8> {
         0x6F, 0x6E, 0x65, 0x00, 0x61, 0x62, 0x63, 0x00, 0x78, 0x00, 0x6C, 0x61, 0x7A, 0x79, 0x00,
         0x6E, 0x6F, 0x2D, 0x73, 0x75, 0x63, 0x68, 0x2D, 0x66, 0x73, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ELF that tests mount namespaces from ring 3, as root:
@@ -14375,8 +13463,6 @@ pub fn build_linux_mount_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_mount_namespaces_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3054] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x20, 0x04, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -14583,53 +13669,7 @@ pub fn build_linux_mount_namespaces_test_elf() -> alloc::vec::Vec<u8> {
         0x62, 0x00, 0x2F, 0x62, 0x2F, 0x69, 0x6E, 0x6E, 0x65, 0x72, 0x00, 0x2F, 0x00, 0x74, 0x6D,
         0x70, 0x66, 0x73, 0x00, 0x6E, 0x6F, 0x6E, 0x65, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ring-3 ELF that tests bind and move mounts: a directory
@@ -15111,8 +14151,6 @@ pub fn build_linux_mount_namespaces_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_bind_mounts_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 7682] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x57, 0x05, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -15628,53 +14666,7 @@ pub fn build_linux_bind_mounts_test_elf() -> alloc::vec::Vec<u8> {
         0x2F, 0x6D, 0x66, 0x00, 0x6D, 0x6F, 0x76, 0x65, 0x64, 0x00, 0x2F, 0x69, 0x6E, 0x00, 0x2F,
         0x6B, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build a Linux-ABI ring-3 ELF that tests stacked mounts and `pivot_root(2)`:
@@ -16077,8 +15069,6 @@ pub fn build_linux_bind_mounts_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_stacked_mounts_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 6138] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x25, 0x04, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -16491,53 +15481,7 @@ pub fn build_linux_stacked_mounts_test_elf() -> alloc::vec::Vec<u8> {
         0x2F, 0x74, 0x6D, 0x70, 0x00, 0x2E, 0x00, 0x2F, 0x70, 0x72, 0x6F, 0x63, 0x2F, 0x73, 0x65,
         0x6C, 0x66, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of the `SIGCHLD` a parent is sent when its child
@@ -16807,8 +15751,6 @@ pub fn build_linux_stacked_mounts_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_sigchld_stop_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 1885] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xBC, 0x01, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -16937,53 +15879,7 @@ pub fn build_linux_sigchld_stop_test_elf() -> alloc::vec::Vec<u8> {
         0x07, 0x00, 0x00, 0x74, 0x0A, 0xBF, 0x52, 0x00, 0x00, 0x00, 0xE8, 0xBA, 0xF8, 0xFF, 0xFF,
         0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8, 0xB0, 0xF8, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of signals sent to a stopped process
@@ -17295,8 +16191,6 @@ pub fn build_linux_sigchld_stop_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_stopped_signals_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 2258] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xBB, 0x05, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -17450,53 +16344,7 @@ pub fn build_linux_stopped_signals_test_elf() -> alloc::vec::Vec<u8> {
         0x00, 0x75, 0x0A, 0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8, 0x45, 0xF7, 0xFF, 0xFF, 0xBF, 0x54,
         0x00, 0x00, 0x00, 0xE8, 0x3B, 0xF7, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// A Linux-ABI ring-3 test of signals whose action is to be ignored, sent to a
@@ -17771,8 +16619,6 @@ pub fn build_linux_stopped_signals_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_ignored_at_send_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 1450] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x18, 0x04, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -17872,53 +16718,7 @@ pub fn build_linux_ignored_at_send_test_elf() -> alloc::vec::Vec<u8> {
         0x83, 0xF8, 0x01, 0x74, 0x0A, 0xBF, 0x48, 0x00, 0x00, 0x00, 0xE8, 0x6D, 0xFA, 0xFF, 0xFF,
         0xBF, 0x2A, 0x00, 0x00, 0x00, 0xE8, 0x63, 0xFA, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build the Linux-ABI ring-3 test of the CPU-time clocks
@@ -18298,8 +17098,6 @@ pub fn build_linux_ignored_at_send_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_cpu_clocks_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3155] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x84, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -18513,53 +17311,7 @@ pub fn build_linux_cpu_clocks_test_elf() -> alloc::vec::Vec<u8> {
         0xBF, 0x66, 0x00, 0x00, 0x00, 0xE8, 0xC4, 0xF3, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00, 0x00,
         0xE8, 0xBA, 0xF3, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build the Linux-ABI ring-3 test of the CPU-time timers
@@ -19106,8 +17858,6 @@ pub fn build_linux_cpu_clocks_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_cpu_timers_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 6027] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0x86, 0x04, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0xE7, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -19512,53 +18262,7 @@ pub fn build_linux_cpu_timers_test_elf() -> alloc::vec::Vec<u8> {
         0x48, 0x89, 0xDF, 0x4C, 0x89, 0xF6, 0x0F, 0x05, 0x48, 0x85, 0xC0, 0x0F, 0x84, 0x5F, 0xF9,
         0xFF, 0xFF, 0xBF, 0x73, 0x00, 0x00, 0x00, 0xE8, 0x82, 0xE8, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU; // tag Linux/GNU so detect_linux_abi() is true
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    linux_code_elf(&CODE)
 }
 
 /// Build the native ring-3 test of `SYS_CPU_CLOCK`
@@ -19818,8 +18522,6 @@ pub fn build_linux_cpu_timers_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_native_cpu_clock_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 2106] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xE6, 0x00, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0x01, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -19963,52 +18665,7 @@ pub fn build_native_cpu_clock_test_elf() -> alloc::vec::Vec<u8> {
         0x0A, 0xBF, 0x78, 0x00, 0x00, 0x00, 0xE8, 0xDD, 0xF7, 0xFF, 0xFF, 0xBF, 0x2A, 0x00, 0x00,
         0x00, 0xE8, 0xD3, 0xF7, 0xFF, 0xFF,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    code_elf(&CODE, ELFOSABI_SYSV)
 }
 
 /// Build a **Linux-ABI** `ET_EXEC` test ELF that exercises the full
@@ -20210,12 +18867,6 @@ pub fn build_linux_fork_execve_wait_test_elf(path_nul: &[u8]) -> alloc::vec::Vec
     clippy::cast_possible_truncation
 )]
 pub fn build_linux_write_byte_exit_elf(byte: u8) -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     // sub rsp, 16
     code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x10]);
@@ -20230,45 +18881,7 @@ pub fn build_linux_write_byte_exit_elf(byte: u8) -> alloc::vec::Vec<u8> {
     code.extend_from_slice(&[0xBF, byte, 0x00, 0x00, 0x00]); // mov edi, byte
     code.extend_from_slice(&[0xB8, 0x3C, 0x00, 0x00, 0x00, 0x0F, 0x05]); // mov eax,60; syscall
     code.push(0xCC); // int3
-
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0);
-    write_u32(&mut buf, 48, 0);
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1);
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_len as u64);
-    write_u64(&mut buf, ph + 40, code_len as u64);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-    buf
+    linux_code_elf(&code)
 }
 
 /// Build a **Linux-ABI** `ET_EXEC` program that drives the SlateOS channel
@@ -20306,15 +18919,10 @@ pub fn build_linux_write_byte_exit_elf(byte: u8) -> alloc::vec::Vec<u8> {
     clippy::cast_possible_wrap
 )]
 pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
     /// `jnz rel32`'s second opcode byte.
     const JNZ: u8 = 0x85;
     /// `js rel32`'s second opcode byte.
     const JS: u8 = 0x88;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     // (offset of a rel32 to patch, the failure sentinel it jumps to)
@@ -20420,45 +19028,7 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
             patch(&mut code, at, target);
         }
     }
-
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0);
-    write_u32(&mut buf, 48, 0);
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1);
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_len as u64);
-    write_u64(&mut buf, ph + 40, code_len as u64);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-    buf
+    linux_code_elf(&code)
 }
 
 /// Build a **Linux-ABI** `ET_EXEC` that drives Unix-domain sockets by name
@@ -20539,7 +19109,6 @@ pub fn build_linux_slate_channel_test_elf() -> alloc::vec::Vec<u8> {
     clippy::too_many_lines
 )]
 pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
     /// `jnz rel32`'s second opcode byte.
     const JNZ: u8 = 0x85;
     /// `js rel32`'s second opcode byte.
@@ -20600,10 +19169,6 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
     const PING_WORD: u32 = 0x676E_6970;
     /// "pong", little-endian.
     const PONG_WORD: u32 = 0x676E_6F70;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut fail_jumps: alloc::vec::Vec<(usize, u8)> = alloc::vec::Vec::new();
@@ -21224,42 +19789,7 @@ pub fn build_linux_unix_socket_test_elf() -> alloc::vec::Vec<u8> {
             code[at..at + 4].copy_from_slice(&disp.to_le_bytes());
         }
     }
-
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr);
-    write_u64(&mut buf, 32, phdr_offset);
-    write_u64(&mut buf, 40, 0);
-    write_u32(&mut buf, 48, 0);
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1);
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_len as u64);
-    write_u64(&mut buf, ph + 40, code_len as u64);
-    write_u64(&mut buf, ph + 48, 0x1000);
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-    buf
+    linux_code_elf(&code)
 }
 
 /// Build a **Linux-ABI** `ET_EXEC` that passes descriptors over Unix-domain
@@ -22774,8 +21304,6 @@ pub fn build_native_device_door_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_native_cap_broker_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3327] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xDD, 0x01, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0x01, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -23000,52 +21528,7 @@ pub fn build_native_cap_broker_test_elf() -> alloc::vec::Vec<u8> {
         0x68, 0x65, 0x20, 0x77, 0x65, 0x62, 0x00, 0x72, 0x65, 0x61, 0x64, 0x20, 0x74, 0x68, 0x65,
         0x20, 0x63, 0x6C, 0x6F, 0x63, 0x6B, 0x00, 0x6D, 0x69, 0x6E, 0x65, 0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    code_elf(&CODE, ELFOSABI_SYSV)
 }
 
 // ---- freezer fixtures (generated from build/freezetest.c, build/freezenative.c) ----
@@ -23845,8 +22328,6 @@ pub fn build_native_freezer_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_native_namespaces_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
     const CODE: [u8; 3016] = [
         0x48, 0x83, 0xE4, 0xF0, 0xE8, 0xD0, 0x02, 0x00, 0x00, 0x0F, 0x0B, 0x0F, 0x0B, 0x53, 0x48,
         0x63, 0xFF, 0xBB, 0x01, 0x00, 0x00, 0x00, 0x41, 0xBA, 0x00, 0x00, 0x00, 0x00, 0x41, 0xB8,
@@ -24051,52 +22532,7 @@ pub fn build_native_namespaces_test_elf() -> alloc::vec::Vec<u8> {
         0x76, 0x65, 0x2D, 0x69, 0x6E, 0x6E, 0x65, 0x72, 0x00, 0x2F, 0x70, 0x72, 0x6F, 0x63, 0x2F,
         0x00,
     ];
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let code_size = CODE.len() as u64;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
-    let mut buf = vec![0u8; (code_offset + code_size) as usize];
-
-    // --- ELF header ---
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    // --- Program header (PT_LOAD: R+X) ---
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_size);
-    write_u64(&mut buf, ph + 40, code_size);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    // --- Code ---
-    let cs = code_offset as usize;
-    buf[cs..(cs + CODE.len())].copy_from_slice(&CODE);
-
-    buf
+    code_elf(&CODE, ELFOSABI_SYSV)
 }
 
 /// Build a **Linux-ABI** `ET_EXEC` launcher ELF that exercises the canonical
@@ -26278,12 +24714,6 @@ fn build_linux_seg_base_test_elf(
     sentinel: u64,
     fail_code: u8,
 ) -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120;
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
     // sub rsp, 16  (arch_prctl GET output slot at [rsp+0])
@@ -26341,45 +24771,7 @@ fn build_linux_seg_base_test_elf(
     // Patch the two sentinel imm64 slots.
     code[set_imm..set_imm + 8].copy_from_slice(&sentinel.to_le_bytes());
     code[cmp_imm..cmp_imm + 8].copy_from_slice(&sentinel.to_le_bytes());
-
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0);
-    write_u32(&mut buf, 48, 0);
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1);
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0);
-    write_u16(&mut buf, 62, 0);
-
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset);
-    write_u64(&mut buf, ph + 16, load_vaddr);
-    write_u64(&mut buf, ph + 24, 0);
-    write_u64(&mut buf, ph + 32, code_len as u64);
-    write_u64(&mut buf, ph + 40, code_len as u64);
-    write_u64(&mut buf, ph + 48, 0x1000);
-
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-    buf
+    linux_code_elf(&code)
 }
 
 /// Build a minimal **Linux-ABI** `ET_EXEC` test ELF that simply calls
@@ -28976,12 +27368,6 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120; // 64 + 56
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
     /// A canonical user address that is never mapped in a fresh process, so
     /// touching it yields `InvalidAddress` rather than a fault or a success.
     const UNMAPPED: u64 = 0x0000_0030_0000_0000;
@@ -29222,44 +27608,7 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     code.push(0xCC); // int3
 
     // --- file image ---------------------------------------------------------
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0); // e_shnum
-    write_u16(&mut buf, 62, 0); // e_shstrndx
-
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset); // p_offset
-    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
-    write_u64(&mut buf, ph + 24, 0); // p_paddr
-    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
-    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
-    write_u64(&mut buf, ph + 48, 0x1000); // p_align
-
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-
-    buf
+    code_elf(&code, ELFOSABI_SYSV)
 }
 
 /// Wrap ring-3 test `code` in a one-segment ELF image loaded, read and
@@ -29563,12 +27912,6 @@ pub fn build_shm_map_at_probe_elf(shm_handle: u64) -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120; // 64 + 56
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
     /// Native `SYS_MUNMAP` (`syscall::number`).
     const SYS_MUNMAP: u32 = 21;
     /// `KernelError::InvalidArgument` as it arrives in `rax`.
@@ -29620,44 +27963,7 @@ pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
     code.push(0xCC); // int3
 
     // --- file image ---------------------------------------------------------
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0); // e_shnum
-    write_u16(&mut buf, 62, 0); // e_shstrndx
-
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset); // p_offset
-    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
-    write_u64(&mut buf, ph + 24, 0); // p_paddr
-    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
-    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
-    write_u64(&mut buf, ph + 48, 0x1000); // p_align
-
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-
-    buf
+    code_elf(&code, ELFOSABI_SYSV)
 }
 
 /// Build the ring-3 probe for the payload size gates of the channel and UDP
@@ -29698,12 +28004,6 @@ pub fn build_munmap_abi_test_elf() -> alloc::vec::Vec<u8> {
     clippy::cast_possible_truncation
 )]
 pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
-    use alloc::vec;
-
-    let phdr_offset: u64 = 64;
-    let code_offset: u64 = 120; // 64 + 56
-    let load_vaddr: u64 = 0x0000_0040_0000_0000;
-
     const MESSAGE_TOO_LARGE: i32 = -302;
     const EINVAL: i32 = -3;
     const EFAULT: i32 = -101;
@@ -29854,44 +28154,7 @@ pub fn build_sizegate_abi_test_elf() -> alloc::vec::Vec<u8> {
     code.push(0xCC); // int3
 
     // --- file image ---------------------------------------------------------
-    let code_len = code.len();
-    let file_size = code_offset as usize + code_len;
-    let mut buf = vec![0u8; file_size];
-
-    buf[0] = 0x7F;
-    buf[1] = b'E';
-    buf[2] = b'L';
-    buf[3] = b'F';
-    buf[EI_CLASS] = ELFCLASS64;
-    buf[EI_DATA] = ELFDATA2LSB;
-    buf[EI_VERSION] = EV_CURRENT;
-    write_u16(&mut buf, 16, ET_EXEC);
-    write_u16(&mut buf, 18, EM_X86_64);
-    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
-    write_u64(&mut buf, 24, load_vaddr); // e_entry
-    write_u64(&mut buf, 32, phdr_offset); // e_phoff
-    write_u64(&mut buf, 40, 0); // e_shoff
-    write_u32(&mut buf, 48, 0); // e_flags
-    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
-    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
-    write_u16(&mut buf, 56, 1); // e_phnum
-    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
-    write_u16(&mut buf, 60, 0); // e_shnum
-    write_u16(&mut buf, 62, 0); // e_shstrndx
-
-    let ph = phdr_offset as usize;
-    write_u32(&mut buf, ph, PT_LOAD);
-    write_u32(&mut buf, ph + 4, PF_R | PF_X);
-    write_u64(&mut buf, ph + 8, code_offset); // p_offset
-    write_u64(&mut buf, ph + 16, load_vaddr); // p_vaddr
-    write_u64(&mut buf, ph + 24, 0); // p_paddr
-    write_u64(&mut buf, ph + 32, code_len as u64); // p_filesz
-    write_u64(&mut buf, ph + 40, code_len as u64); // p_memsz
-    write_u64(&mut buf, ph + 48, 0x1000); // p_align
-
-    buf[code_offset as usize..file_size].copy_from_slice(&code);
-
-    buf
+    code_elf(&code, ELFOSABI_SYSV)
 }
 
 /// Build the ring-3 probe for the per-call copy bound of the pipe and
@@ -30769,17 +29032,24 @@ fn build_test_elf_with_bss() -> alloc::vec::Vec<u8> {
     buf
 }
 
-/// A Linux-ABI ELF of `code` alone: one `PT_LOAD` segment, readable and
-/// executable, at 0x40_0000_0000, entered at its first byte, tagged
-/// `ELFOSABI_GNU` so `spawn_process` routes it through the Linux ABI. What the
-/// ring-3 test programs built from `build/*.c` with `posix_timers.ld` are
-/// wrapped in: their `.text`, rodata included, is all they have.
+/// A Linux-ABI ELF of `code` alone ([`code_elf`]), tagged `ELFOSABI_GNU` so
+/// `spawn_process` routes it through the Linux ABI. What the ring-3 test
+/// programs built from `build/*.c` with `posix_timers.ld` are wrapped in:
+/// their `.text`, rodata included, is all they have.
+fn linux_code_elf(code: &[u8]) -> alloc::vec::Vec<u8> {
+    code_elf(code, ELFOSABI_GNU)
+}
+
+/// An ELF of `code` alone: one `PT_LOAD` segment, readable and executable, at
+/// 0x40_0000_0000, entered at its first byte, `osabi` in `e_ident`
+/// (`ELFOSABI_SYSV` for a native program). What every hand-built ring-3 test
+/// program is wrapped in.
 #[allow(
     clippy::indexing_slicing,
     clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation
 )]
-fn linux_code_elf(code: &[u8]) -> alloc::vec::Vec<u8> {
+fn code_elf(code: &[u8], osabi: u8) -> alloc::vec::Vec<u8> {
     use alloc::vec;
 
     let phdr_offset: u64 = 64;
@@ -30797,7 +29067,7 @@ fn linux_code_elf(code: &[u8]) -> alloc::vec::Vec<u8> {
     buf[EI_CLASS] = ELFCLASS64;
     buf[EI_DATA] = ELFDATA2LSB;
     buf[EI_VERSION] = EV_CURRENT;
-    buf[EI_OSABI] = ELFOSABI_GNU;
+    buf[EI_OSABI] = osabi;
 
     write_u16(&mut buf, 16, ET_EXEC);
     write_u16(&mut buf, 18, EM_X86_64);

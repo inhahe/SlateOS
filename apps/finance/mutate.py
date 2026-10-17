@@ -439,9 +439,15 @@ MUTATIONS = [
     ),
     (
         'the search box is not marked while it has the keyboard',
-        '                focused: self.search_active,',
-        '                focused: false,',
+        '                focused: self.search_active,\n                disabled: false,',
+        '                focused: false,\n                disabled: false,',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box draws no caret while it has the keyboard',
+        '                focused: self.search_active,\n                placeholder:',
+        '                focused: false,\n                placeholder:',
+        ['the_search_box_edits_at_a_caret'],
     ),
     (
         'a form field is not marked while it has the keyboard',
@@ -672,15 +678,9 @@ MENU_CLOCK = "the_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
 
 MUTATIONS += [
     (
-        "the search types only at its end",
-        "                self.sync_search_editor();\n"
-        "                let edit = textline::apply_key_on_clipboard(\n"
-        "                    &mut self.search_editor,\n",
-        "                self.sync_search_editor();\n"
-        "                let end = self.search_editor.text().len();\n"
-        "                self.search_editor.set_cursor(TextCursor::from(end));\n"
-        "                let edit = textline::apply_key_on_clipboard(\n"
-        "                    &mut self.search_editor,\n",
+        "a change to the search leaves the selection where it was",
+        "                if edit.changed {\n                    self.reanchor_selection();\n                }\n",
+        "",
         [CARET],
     ),
     (
@@ -691,8 +691,8 @@ MUTATIONS += [
     ),
     (
         "a press in the search puts the caret nowhere",
-        "        self.search_editor.set_cursor(cursor);\n",
-        "",
+        "            .press(x - rect.x - 12.0, rect.w - 110.0, self.search_active);\n",
+        "            .press(0.0, rect.w - 110.0, self.search_active);\n",
         [PRESSED],
     ),
     (
@@ -709,7 +709,7 @@ MUTATIONS += [
     ),
     (
         "a row chosen does nothing to the search",
-        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if self.search.menu_row(id) {\n",
         "                if false {\n",
         [MENU, MENU_CLOCK],
     ),

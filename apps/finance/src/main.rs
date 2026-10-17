@@ -34,6 +34,7 @@ use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
+use textline::{SearchBox, SearchLook};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 
@@ -590,7 +591,8 @@ struct FinanceApp {
     /// positions into a container that moves. `None` means nothing is selected,
     /// which is the honest state for an empty or fully-filtered-out list.
     selected_id: Option<u64>,
-    search_query: String,
+    /// The search box, which is the search the list is filtered by.
+    search: SearchBox,
     search_active: bool,
     category_filter: Option<Category>,
     status_msg: String,
@@ -599,9 +601,6 @@ struct FinanceApp {
     form: Option<Form>,
     field: FormField,
     form_error: Option<String>,
-    /// The search box's caret and selection: reloaded from `search_query`
-    /// when that changed underneath it.
-    search_editor: TextInput,
     /// A text field's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<MenuField>,
     /// A delete waiting on its answer.
@@ -718,14 +717,13 @@ impl FinanceApp {
             current_date: today,
             view_month: SimpleDate::new(today.year, today.month, 1),
             selected_id: None,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_active: false,
             category_filter: None,
             status_msg: String::from("Personal Finance"),
             form: None,
             field: FormField::Date,
             form_error: None,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             field_menu: fieldmenu::FieldMenu::new(),
             pending_delete: None,
             selected_account: None,
@@ -1401,7 +1399,7 @@ impl FinanceApp {
     /// It showed every month in the order things were typed in, under a
     /// header naming one month whose arrows changed nothing in the list.
     fn filtered_transactions(&self) -> Vec<(usize, &Transaction)> {
-        let query = self.search_query.to_lowercase();
+        let query = self.search.text().to_lowercase();
         let mut rows: Vec<(usize, &Transaction)> = self
             .transactions
             .iter()
@@ -1866,7 +1864,7 @@ impl FinanceApp {
         if !self.visible_ids().contains(&id) {
             // A filter or a search would hide it: show its month, whole.
             self.category_filter = None;
-            self.search_query.clear();
+            self.search.clear();
             self.search_active = false;
             self.view_month = month;
         }
@@ -2073,7 +2071,7 @@ impl FinanceApp {
             "/" => {
                 self.screen = Screen::Transactions;
                 self.search_active = true;
-                self.search_query.clear();
+                self.search.clear();
             }
             "c" | "C" => self.cycle_category_filter(),
             "n" | "N" if !ctrl => {
@@ -2091,18 +2089,10 @@ impl FinanceApp {
         self.keep_lists_in_view();
     }
 
-    /// Reload the search box's editor from the search, if the search
-    /// changed underneath it.
-    fn sync_search_editor(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-    }
-
-    /// The search changed to `text`: the list follows it.
+    /// The search set to `text` from outside the box: the list follows
+    /// it.
     fn set_search(&mut self, text: &str) {
-        if self.search_query != text {
-            self.search_query = text.to_owned();
+        if self.search.set_text(text) {
             self.reanchor_selection();
         }
     }
@@ -2121,14 +2111,10 @@ impl FinanceApp {
             }
             Key::Enter if plain => self.search_active = false,
             _ => {
-                self.sync_search_editor();
-                let edit = textline::apply_key_on_clipboard(
-                    &mut self.search_editor,
-                    key,
-                    SEARCH_TEXT_SIZE,
-                );
-                let typed = self.search_editor.text().to_owned();
-                self.set_search(&typed);
+                let edit = self.search.key(key);
+                if edit.changed {
+                    self.reanchor_selection();
+                }
                 if !edit.handled {
                     return EventResult::Ignored;
                 }
@@ -2140,22 +2126,8 @@ impl FinanceApp {
 
     /// A press in the search box at `x`: the caret where it landed.
     fn place_search_caret(&mut self, rect: Rect, x: f32) {
-        let drawn = if self.search_active {
-            self.search_editor.cursor()
-        } else {
-            TextCursor::default()
-        };
-        self.sync_search_editor();
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (rect.w - 110.0).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - 12.0,
-        );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
+        self.search
+            .press(x - rect.x - 12.0, rect.w - 110.0, self.search_active);
     }
 
     /// A right press: over the search box or one of the form's text
@@ -2173,7 +2145,6 @@ impl FinanceApp {
             Some(Target::Search) if self.form.is_none() => {
                 self.screen = Screen::Transactions;
                 self.search_active = true;
-                self.sync_search_editor();
                 MenuField::Search
             }
             Some(Target::Field(field)) if field.is_text() && self.form.is_some() => {
@@ -2183,7 +2154,7 @@ impl FinanceApp {
             _ => return EventResult::Ignored,
         };
         let rows = match field {
-            MenuField::Search => self.search_editor.edit_menu(),
+            MenuField::Search => self.search.edit_menu(),
             MenuField::Form(which) => {
                 let Some(input) = self.form.as_mut().and_then(|form| form.input(which)) else {
                     return EventResult::Ignored;
@@ -2202,10 +2173,8 @@ impl FinanceApp {
     fn do_menu_row(&mut self, field: MenuField, id: guitk::menu::MenuItemId) -> EventResult {
         match field {
             MenuField::Search => {
-                self.sync_search_editor();
-                if self.search_editor.edit_command(id) == KeyEdit::Changed {
-                    let typed = self.search_editor.text().to_owned();
-                    self.set_search(&typed);
+                if self.search.menu_row(id) {
+                    self.reanchor_selection();
                     self.keep_lists_in_view();
                 }
             }
@@ -2451,7 +2420,7 @@ impl FinanceApp {
             screen: self.screen,
             selected_id: self.selected_id,
             search_active: self.search_active,
-            search_query: self.search_query.clone(),
+            search_query: self.search.text().to_owned(),
             transactions: self.transactions.len(),
             category_filter: self.category_filter,
             year: self.view_month.year,
@@ -3160,10 +3129,10 @@ impl FinanceApp {
             String::from(
                 "No accounts yet: a transaction goes into one. The accounts screen (4) adds one.",
             )
-        } else if !self.search_query.is_empty() {
+        } else if !self.search.is_empty() {
             format!(
                 "Nothing in any month matches \u{201C}{}\u{201D}.",
-                self.search_query
+                self.search.text()
             )
         } else if let Some(cat) = self.category_filter {
             format!("No {} in {month}. C shows the next category.", cat.label())
@@ -3331,63 +3300,25 @@ impl FinanceApp {
             },
             self.focus_ring_width,
         );
-        let room = (rect.w - 110.0).max(0.0);
-        if self.search_active {
-            // The box with the keyboard: its text, with the caret and the
-            // selection where they are -- the end of the text if the search
-            // changed under the box's editor.
-            let synced = self.search_editor.text() == self.search_query;
-            let mut tree = RenderTree::new();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: if synced {
-                        self.search_editor.cursor()
-                    } else {
-                        TextCursor::from(self.search_query.len())
-                    },
-                    selection_anchor: if synced {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: true,
-                    x: rect.x + 12.0,
-                    y: rect.y + 7.0,
-                    width: room,
-                    line_height: 18.0,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.blue,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-            f.extend(tree.commands);
-        } else {
-            let placeholder = self.search_query.is_empty();
-            f.push(RenderCommand::Text {
+        let mut tree = RenderTree::new();
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
                 x: rect.x + 12.0,
-                y: rect.y + 8.0,
-                text: if placeholder {
-                    String::from("Search every month  ( / )")
-                } else {
-                    self.search_query.clone()
-                },
-                font_size: SEARCH_TEXT_SIZE,
-                color: if placeholder {
-                    self.palette.subtext0
-                } else {
-                    self.palette.text
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(room),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        if !self.search_query.is_empty() {
+                y: rect.y + 7.0,
+                width: rect.w - 110.0,
+                line_height: 18.0,
+                focused: self.search_active,
+                placeholder: "Search every month  ( / )",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
+        if !self.search.is_empty() {
             Self::right_text(
                 f,
                 rect.right() - 10.0,
@@ -5296,20 +5227,20 @@ mod tests {
         assert!(app.search_active, "`/` did not open the search box");
 
         app.handle_event(&keyed(Key::Unknown(0), "g"));
-        assert_eq!(app.search_query, "g", "the box did not take the character");
+        assert_eq!(app.search.text(), "g", "the box did not take the character");
 
         assert_eq!(
             app.handle_event(&keyed(Key::Backspace, "")),
             EventResult::Consumed,
             "backspacing did not read as a redraw, so the deleted character stays on screen"
         );
-        assert!(app.search_query.is_empty(), "the character was not deleted");
+        assert!(app.search.is_empty(), "the character was not deleted");
     }
 
     #[test]
     fn test_filtered_by_search() {
         let mut app = FinanceApp::with_sample_data();
-        app.search_query = String::from("grocery");
+        app.search.set_text("grocery");
         let f = app.filtered_transactions();
         assert!(!f.is_empty());
         for (_, tx) in &f {
@@ -5585,7 +5516,7 @@ mod tests {
         let mut app = FinanceApp::with_sample_data();
         app.screen = Screen::Transactions;
         app.search_active = true;
-        app.search_query = String::from("grocery");
+        app.search.set_text("grocery");
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
@@ -5863,7 +5794,8 @@ mod tests {
         app.handle_key_event(&key(Key::X, "x", Modifiers::alt()));
         app.handle_key_event(&key(Key::S, "ś", altgr));
         assert_eq!(
-            app.search_query, "ś",
+            app.search.text(),
+            "ś",
             "the search typed a command or refused AltGr's ś"
         );
     }
@@ -6652,19 +6584,22 @@ mod tests {
         probe::key(&mut app, &probe::press(Key::Left));
         probe::type_str(&mut app, "e");
         assert_eq!(
-            app.search_query, "grocery",
+            app.search.text(),
+            "grocery",
             "typing did not go in at the caret"
         );
         probe::key(&mut app, &probe::press(Key::Home));
         probe::key(&mut app, &probe::press(Key::Delete));
         assert_eq!(
-            app.search_query, "rocery",
+            app.search.text(),
+            "rocery",
             "Delete did not take the first character"
         );
         probe::key(&mut app, &probe::ctrl(Key::A));
         probe::type_str(&mut app, "rent");
         assert_eq!(
-            app.search_query, "rent",
+            app.search.text(),
+            "rent",
             "typing did not replace the selection"
         );
     }
@@ -6681,7 +6616,8 @@ mod tests {
         press_at(&mut app, search.x + 12.0, search.y + search.h / 2.0);
         probe::type_str(&mut app, "groc");
         assert_eq!(
-            app.search_query, "grocery",
+            app.search.text(),
+            "grocery",
             "the caret did not go where the press was"
         );
     }
@@ -6718,13 +6654,15 @@ mod tests {
         );
         probe::type_str(&mut app, "x");
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "a key reached the box through the menu"
         );
         choose(&mut app, EditCommand::Paste);
         assert!(!app.field_menu.is_up());
         assert_eq!(
-            app.search_query, "grocery",
+            app.search.text(),
+            "grocery",
             "Paste did not paste into the search"
         );
         probe::key(&mut app, &probe::press(Key::Escape));
@@ -6825,7 +6763,7 @@ mod tests {
             .row_middle(EditCommand::Paste)
             .expect("Paste");
         press_at(&mut app, x, y);
-        assert_eq!(app.search_query.chars().count(), SEARCH_CAPACITY);
+        assert_eq!(app.search.text().chars().count(), SEARCH_CAPACITY);
     }
 
     #[test]
@@ -6838,14 +6776,14 @@ mod tests {
         probe::click(&mut app, Target::Search);
         assert!(app.search_active);
         probe::type_str(&mut app, "grocery");
-        assert_eq!(app.search_query, "grocery");
+        assert_eq!(app.search.text(), "grocery");
         let found = app.visible_ids();
         assert_eq!(found.len(), 2, "the search did not reach May from July");
         assert!(texts(&app).iter().any(|t| t == "every month"));
         // A press elsewhere takes the keys out of the box and keeps the search.
         probe::click(&mut app, Target::TxRow(found[0]));
         assert!(!app.search_active);
-        assert_eq!(app.search_query, "grocery");
+        assert_eq!(app.search.text(), "grocery");
         assert_eq!(app.selected_id, Some(found[0]));
     }
 

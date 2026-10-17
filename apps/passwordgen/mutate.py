@@ -206,8 +206,32 @@ MUTATIONS = [
     # in its own crate and with its own tests.
     (
         "the analyser draws the password in the clear",
-        "        let (shown, cursor, selection_anchor) = if self.analyzer_revealed {",
-        "        let (shown, cursor, selection_anchor) = if true {",
+        "                .masked(MASK),\n",
+        "                ,\n",
+        [DOTS],
+    ),
+    (
+        "the analyser is drawn in the regular weight",
+        "                .with_weight(FontWeightHint::Bold)\n",
+        "",
+        ["the_password_box_is_the_toolkits_field"],
+    ),
+    (
+        "Ctrl+R does not show the password",
+        "                    } else {\n                        None\n                    };\n",
+        "                    } else {\n                        Some(MASK)\n                    };\n",
+        [DOTS, "the_password_being_measured_edits_at_a_caret"],
+    ),
+    (
+        "a second Ctrl+R does not hide it again",
+        "                    let mask = if self.analyzer_revealed() {\n                        Some(MASK)\n",
+        "                    let mask = if self.analyzer_revealed() {\n                        None\n",
+        [DOTS],
+    ),
+    (
+        "the analyser says it is shown while it is hidden",
+        "        self.analyzer_input.mask().is_none()\n",
+        "        true\n",
         [DOTS],
     ),
     (
@@ -218,8 +242,8 @@ MUTATIONS = [
     ),
     (
         "every tab judges the generated password",
-        "        if self.active_tab == ActiveTab::Analyzer {\n            &self.analyzer_input",
-        "        if false {\n            &self.analyzer_input",
+        "        if self.active_tab == ActiveTab::Analyzer {\n            self.analyzer_input.text()",
+        "        if false {\n            self.analyzer_input.text()",
         [EACH_TAB, STATUS],
     ),
     (
@@ -230,8 +254,8 @@ MUTATIONS = [
     ),
     (
         "an emptied field is given a strength",
-        "            (!self.analyzer_input.is_empty()).then(|| analyze_password(&self.analyzer_input));",
-        "            Some(analyze_password(&self.analyzer_input));",
+        "            (!self.analyzer_input.is_empty()).then(|| analyze_password(self.analyzer_input.text()));",
+        "            Some(analyze_password(self.analyzer_input.text()));",
         [EMPTIED],
     ),
     (
@@ -349,12 +373,6 @@ MUTATIONS += [
         "        let _ = settings;\n",
         [BOX],
     ),
-    (
-        "the caret is at the start of the password",
-        "        let (cursor, anchor) = self.analyzer_caret();\n",
-        "        let (cursor, anchor) = (text::TextCursor::from(0), None::<usize>);\n",
-        ["the_password_being_measured_edits_at_a_caret"],
-    ),
 ]
 
 # The analyser's box edits at a caret, the dots standing for characters
@@ -364,50 +382,34 @@ EDITS = "the_password_being_measured_edits_at_a_caret"
 DOT = "a_dot_is_a_character_and_the_caret_steps_over_it"
 SHOWN = "the_analyser_edits_what_it_shows"
 
+# No rows for a hidden password copying, or a shown one not: since
+# 2026-10-17 the analyser is a textline LineBox, masked while hidden, and
+# what a masked box refuses to copy is in apps/textline/mutate.py. Ctrl+R
+# putting the mask on and taking it off is above.
 MUTATIONS += [
     (
-        "a hidden password copies",
-        "        let edit = if self.analyzer_revealed {\n",
-        "        let edit = if true {\n",
-        [EDITS],
-    ),
-    (
-        "a shown password does not copy",
-        "        let edit = if self.analyzer_revealed {\n",
-        "        let edit = if false {\n",
-        [EDITS],
-    ),
-    (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
-        "an edit is not measured",
-        "            self.set_analyzer_input(&typed);\n            self.analyze_input();\n",
-        "            self.set_analyzer_input(&typed);\n",
-        [EDITS],
-    ),
-    (
-        "a key finds the editor holding another password",
-        "        if self.analyzer_editor.text() != self.analyzer_input {\n"
-        "            self.analyzer_editor.set_text(&self.analyzer_input);",
-        "        if false {\n"
-        "            self.analyzer_editor.set_text(&self.analyzer_input);",
+        "a password set from outside is not put in the box",
+        "        self.analyzer_input.set_text(input);\n",
+        "        let _ = input;\n",
         [SHOWN],
     ),
     (
+        "an edit is not measured",
+        "        if edit.changed {\n            self.analyze_input();\n",
+        "        if false {\n            self.analyze_input();\n",
+        ["typing_on_the_analyser_tab_measures_rather_than_generates"],
+    ),
+    (
         "every key the box answers is a redraw",
-        "        if after == before {\n",
-        "        if false {\n",
+        "        if edit.changed || edit.moved {\n",
+        "        if edit.handled {\n",
         [DOT],
     ),
     (
-        "the selection is not drawn on the dots",
-        "                textline::masked(&self.analyzer_input, cursor.byte(), anchor, MASK);\n",
-        "                textline::masked(&self.analyzer_input, cursor.byte(), None, MASK);\n",
-        [EDITS],
+        "a step of the caret is not a redraw",
+        "        if edit.changed || edit.moved {\n",
+        "        if edit.changed {\n",
+        [DOT],
     ),
 ]
 

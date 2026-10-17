@@ -554,6 +554,34 @@ impl ContextMenu {
             .then(|| crate::frame::Rect::new(self.x, self.y, self.width, self.panel_height()))
     }
 
+    /// The action row at `(mx, my)`, without choosing it: `None` off the
+    /// rows, on a separator, a submenu's row or a disabled one.
+    ///
+    /// For a host that acts on the release rather than the press -- a row
+    /// that can also be dragged somewhere, whose press must not yet know
+    /// which it is. [`handle_click`](Self::handle_click) chooses and closes.
+    #[must_use]
+    pub fn item_at(&self, mx: f32, my: f32) -> Option<MenuItemId> {
+        if !self.visible {
+            return None;
+        }
+        // The submenu is drawn on top, so it answers first.
+        if let Some((_, submenu)) = &self.open_submenu
+            && submenu.point_in_bounds(mx, my)
+        {
+            return submenu.item_at(mx, my);
+        }
+        if !self.point_in_bounds(mx, my) {
+            return None;
+        }
+        match self.items.get(self.index_at_y(my)?) {
+            Some(MenuItem::Action {
+                id, enabled: true, ..
+            }) => Some(*id),
+            _ => None,
+        }
+    }
+
     /// Handle a mouse click. Returns the selected item ID if an action item was clicked.
     ///
     /// A click that opened a submenu answers `None`, as a miss does: a host
@@ -2813,6 +2841,45 @@ mod tests {
         // Show near bottom edge — should flip upward.
         menu.show(100.0, SCREEN.1 - 10.0, SCREEN);
         assert!(menu.y < SCREEN.1 - 10.0);
+    }
+
+    /// **`item_at` names the row a click would choose, and chooses
+    /// nothing**: the menu stays open, and a separator, a disabled row and
+    /// the space outside answer `None`.
+    #[test]
+    fn item_at_names_a_row_without_choosing_it() {
+        let action = |id: MenuItemId, enabled: bool| MenuItem::Action {
+            id,
+            label: format!("row {id}"),
+            shortcut: None,
+            icon: None,
+            enabled,
+            checked: None,
+        };
+        let mut menu = ContextMenu::new(vec![
+            action(1, true),
+            MenuItem::Separator,
+            action(2, false),
+            action(3, true),
+        ]);
+        assert_eq!(menu.item_at(10.0, 10.0), None, "a hidden menu has no rows");
+        menu.show(100.0, 100.0, SCREEN);
+        for index in 0..4 {
+            let at = menu
+                .item_rect(index)
+                .map(|r| (r.x + r.w / 2.0, r.y + r.h / 2.0));
+            let named = at.and_then(|(x, y)| menu.item_at(x, y));
+            let clicked = at.and_then(|(x, y)| {
+                let mut copy = ContextMenu::new(menu.items().to_vec());
+                copy.show(100.0, 100.0, SCREEN);
+                copy.handle_click(x, y)
+            });
+            assert_eq!(named, clicked, "row {index}");
+        }
+        let first = menu.item_rect(0).unwrap();
+        assert_eq!(menu.item_at(first.x + 2.0, first.y + 2.0), Some(1));
+        assert!(menu.is_visible(), "asking chose");
+        assert_eq!(menu.item_at(first.x - 5.0, first.y + 2.0), None);
     }
 
     /// **The width a menu reports before it is shown is the width it is

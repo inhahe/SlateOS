@@ -329,8 +329,8 @@ impl TrayDropTarget {
 /// **`owner` is a process id, so this identifies an icon for as long as the
 /// program runs and no longer.** It is deliberately not a persistence key:
 /// the same program started tomorrow has a different pid, so an order saved
-/// under these keys would restore onto nothing. See the note on
-/// [`TrayIconArrangement`].
+/// under these keys would restore onto nothing. [`TrayIconName`] is the
+/// name that lasts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TrayIconKey {
     /// The process that registered the icon. Filled in by the compositor from
@@ -391,13 +391,12 @@ impl TrayIconSlot {
 /// programs and the shell. It deliberately carries no position, so that the
 /// order can be the user's -- and the user is who the shell answers to.
 ///
-/// **This is session-scoped, and cannot yet be otherwise.** Keys are
-/// `(pid, id)` pairs, so an order written to disk would restore onto pids
-/// that no longer exist. Persisting it needs the compositor to report a
-/// *stable* name for the program behind a connection, which it does not have:
-/// `ClientLink` carries `client_pid` and nothing else. Until it does, saving
-/// this would produce a settings file that silently does nothing, which is
-/// worse than not saving it.
+/// **This is the session's; [`TrayChoices`] is what lasts.** Keys are
+/// `(pid, id)` pairs, which a program started again does not keep, so the
+/// arrangement itself is never saved. What is saved is the same order and
+/// hiding by each icon's [`TrayIconName`] -- its program's app id and its
+/// own id -- and [`sync_with`](Self::sync_with) puts an icon arriving from a
+/// program started again back where that says.
 ///
 /// Icons that don't fit in the visible area are placed into an overflow
 /// set accessible via a chevron popup.
@@ -438,15 +437,46 @@ impl TrayIconArrangement {
     /// New icons append in the order the compositor reported, departed icons
     /// drop out, and every icon the user placed stays where the user put it.
     pub fn sync(&mut self, icons: &[guiremote::tray::TrayIcon]) -> bool {
+        self.sync_with(icons, &TrayChoices::default())
+    }
+
+    /// [`sync`](Self::sync), with what the user decided about these programs'
+    /// icons before: an icon arriving whose program and id `choices`
+    /// remembers comes in hidden if it was hidden, and in its remembered
+    /// place among the icons already here -- before the first whose
+    /// remembered place is later than its own. An icon `choices` does not
+    /// know appends, as with `sync`.
+    pub fn sync_with(
+        &mut self,
+        icons: &[guiremote::tray::TrayIcon],
+        choices: &TrayChoices,
+    ) -> bool {
         let before = self.icons.clone();
         // Departed first, so that a program which exited and re-registered
         // within one frame is treated as new rather than silently keeping a
-        // slot whose `pinned`/`visible` the user set for the old instance.
+        // slot whose `visible` the user set for the old instance.
         let live: Vec<TrayIconKey> = icons.iter().map(TrayIconKey::of).collect();
         self.icons.retain(|slot| live.contains(&slot.key));
-        for key in live {
-            if !self.icons.iter().any(|slot| slot.key == key) {
-                self.icons.push(TrayIconSlot::showing(key));
+        let rank_of = |key: TrayIconKey| -> Option<usize> {
+            let icon = icons.iter().find(|icon| TrayIconKey::of(icon) == key)?;
+            choices.rank(&TrayIconName::of(icon)?)
+        };
+        for icon in icons {
+            let key = TrayIconKey::of(icon);
+            if self.icons.iter().any(|slot| slot.key == key) {
+                continue;
+            }
+            let name = TrayIconName::of(icon);
+            let mut slot = TrayIconSlot::showing(key);
+            slot.visible = !name.as_ref().is_some_and(|name| choices.is_hidden(name));
+            let at = name.and_then(|name| choices.rank(&name)).and_then(|rank| {
+                self.icons
+                    .iter()
+                    .position(|other| rank_of(other.key).is_some_and(|theirs| theirs > rank))
+            });
+            match at {
+                Some(at) => self.icons.insert(at, slot),
+                None => self.icons.push(slot),
             }
         }
         self.icons != before
@@ -589,13 +619,26 @@ impl TrayIconArrangement {
             .collect()
     }
 
-    /// Return icons the user has not hidden but the bar has no room for.
+    /// Return the icons the overflow lists, in order: the ones the user hid,
+    /// and the shown ones past the first `limit` -- every icon the bar's
+    /// chevron reaches and the bar does not draw.
+    ///
+    /// A hidden icon is here, not nowhere: moved off the bar, it is still
+    /// its program's to be reached through, as the reference's "hidden
+    /// icons" keep it (`design.txt`: "can drag and drop icons into and out of
+    /// the system tray").
     #[must_use]
     pub fn overflow_icons(&self, limit: usize) -> Vec<&TrayIconSlot> {
+        let mut shown = 0_usize;
         self.icons
             .iter()
-            .filter(|s| s.visible)
-            .skip(limit)
+            .filter(|s| {
+                if !s.visible {
+                    return true;
+                }
+                shown = shown.saturating_add(1);
+                shown > limit
+            })
             .collect()
     }
 
@@ -605,10 +648,11 @@ impl TrayIconArrangement {
         self.icons.iter().filter(|s| !s.visible).collect()
     }
 
-    /// Whether any shown icon has no room on the bar.
+    /// Whether the overflow lists anything: an icon the user hid, or a
+    /// shown one the bar has no room for.
     #[must_use]
     pub fn has_overflow(&self, limit: usize) -> bool {
-        self.icons.iter().filter(|s| s.visible).count() > limit
+        self.icons.iter().any(|s| !s.visible) || self.shown_keys().len() > limit
     }
 
     /// Find an icon by key.
@@ -620,6 +664,201 @@ impl TrayIconArrangement {
 impl Default for TrayIconArrangement {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+// ============================================================================
+// TrayChoices
+// ============================================================================
+
+/// The most icons [`TrayChoices`] remembers. Each program that ever showed
+/// an icon and was placed adds one, and a program names itself, so without
+/// a bound the list -- and the file it is saved in -- grows with every
+/// program a user ever ran. Past it, the icons of programs not running now
+/// are forgotten from the end of the list.
+pub const MAX_REMEMBERED_TRAY_ICONS: usize = 128;
+
+/// An icon's name that outlasts its program: the program's app id and the
+/// icon's own id, which are the same when the program runs again, where a
+/// [`TrayIconKey`]'s process id is not.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TrayIconName {
+    /// The program's own name for itself (`TrayIcon::app_id`), unverified.
+    app_id: String,
+    /// The program's own name for the icon.
+    id: u32,
+}
+
+impl TrayIconName {
+    /// The lasting name of `icon`, or `None` when it has none: its program
+    /// gave no app id -- the shell's own entries for windows minimised to
+    /// the tray give none -- or one with a control character in it, which
+    /// would not survive a line of the settings file.
+    #[must_use]
+    pub fn of(icon: &guiremote::tray::TrayIcon) -> Option<Self> {
+        if icon.app_id.is_empty() || icon.app_id.chars().any(char::is_control) {
+            return None;
+        }
+        Some(Self {
+            app_id: icon.app_id.clone(),
+            id: icon.id,
+        })
+    }
+
+    /// As the settings file writes it: `<app id>#<id>`.
+    fn to_text(&self) -> String {
+        format!("{}#{}", self.app_id, self.id)
+    }
+
+    /// Read back what [`to_text`](Self::to_text) wrote. The id is after the
+    /// *last* `#`, so an app id with a `#` in it reads back whole; `None` for
+    /// a line that is not such a name.
+    fn from_text(text: &str) -> Option<Self> {
+        let (app_id, id) = text.rsplit_once('#')?;
+        if app_id.is_empty() || app_id.chars().any(char::is_control) {
+            return None;
+        }
+        Some(Self {
+            app_id: app_id.to_owned(),
+            id: id.parse().ok()?,
+        })
+    }
+}
+
+/// One remembered icon: where it stands is its place in the list.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TrayChoice {
+    name: TrayIconName,
+    hidden: bool,
+}
+
+/// What the user decided about the tray's icons, kept across restarts: the
+/// order they stand in and which are hidden, by [`TrayIconName`].
+///
+/// Icons of programs not running now are kept in their places, so that
+/// moving the icons that are here does not lose where an absent one stood:
+/// [`record`](Self::record) refills the places present icons held, in their
+/// new order, and leaves the others where they are.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrayChoices {
+    entries: Vec<TrayChoice>,
+}
+
+impl TrayChoices {
+    /// Read the two lists the settings file keeps: every remembered icon in
+    /// order, and the hidden ones. A hidden name the order does not list is
+    /// kept at the end; a line that is not a name, and a name listed twice,
+    /// are passed over.
+    #[must_use]
+    pub fn from_lists(order: &[String], hidden: &[String]) -> Self {
+        let hidden: Vec<TrayIconName> = hidden
+            .iter()
+            .filter_map(|text| TrayIconName::from_text(text))
+            .collect();
+        let mut entries: Vec<TrayChoice> = Vec::new();
+        let names = order
+            .iter()
+            .filter_map(|text| TrayIconName::from_text(text))
+            .chain(hidden.iter().cloned());
+        for name in names {
+            if entries.len() >= MAX_REMEMBERED_TRAY_ICONS {
+                break;
+            }
+            if entries.iter().any(|entry| entry.name == name) {
+                continue;
+            }
+            let is_hidden = hidden.contains(&name);
+            entries.push(TrayChoice {
+                name,
+                hidden: is_hidden,
+            });
+        }
+        Self { entries }
+    }
+
+    /// The two lists to write: every remembered icon in order, and the
+    /// hidden ones in the same order.
+    #[must_use]
+    pub fn to_lists(&self) -> (Vec<String>, Vec<String>) {
+        let order = self.entries.iter().map(|e| e.name.to_text()).collect();
+        let hidden = self
+            .entries
+            .iter()
+            .filter(|e| e.hidden)
+            .map(|e| e.name.to_text())
+            .collect();
+        (order, hidden)
+    }
+
+    /// Where `name` stands among the remembered icons, if it is one.
+    fn rank(&self, name: &TrayIconName) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.name == *name)
+    }
+
+    /// Whether `name` is remembered as hidden.
+    fn is_hidden(&self, name: &TrayIconName) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.name == *name && entry.hidden)
+    }
+
+    /// Take in the arrangement as it stands now, for the icons `icons` (the
+    /// compositor's list) can name, and say whether anything changed.
+    ///
+    /// The places in the list that present icons held are refilled with the
+    /// present icons in the arrangement's order; a present icon new to the
+    /// list goes after them all; an absent one keeps its place and its
+    /// hidden mark. Two icons with one name -- the same program running
+    /// twice -- count once, as the first.
+    pub fn record(
+        &mut self,
+        arrangement: &TrayIconArrangement,
+        icons: &[guiremote::tray::TrayIcon],
+    ) -> bool {
+        let mut present: Vec<TrayChoice> = Vec::new();
+        for slot in &arrangement.icons {
+            let Some(name) = icons
+                .iter()
+                .find(|icon| TrayIconKey::of(icon) == slot.key)
+                .and_then(TrayIconName::of)
+            else {
+                continue;
+            };
+            if present.iter().any(|choice| choice.name == name) {
+                continue;
+            }
+            present.push(TrayChoice {
+                name,
+                hidden: !slot.visible,
+            });
+        }
+        let mut refill = present.iter();
+        let mut entries: Vec<TrayChoice> = Vec::with_capacity(self.entries.len());
+        for entry in &self.entries {
+            if present.iter().any(|choice| choice.name == entry.name) {
+                if let Some(next) = refill.next() {
+                    entries.push(next.clone());
+                }
+            } else {
+                entries.push(entry.clone());
+            }
+        }
+        entries.extend(refill.cloned());
+        // Over the bound, the absent icons go first, from the end; only then
+        // the last of the present ones, which are the newest to the list.
+        while entries.len() > MAX_REMEMBERED_TRAY_ICONS {
+            let Some(last_absent) = entries
+                .iter()
+                .rposition(|entry| !present.iter().any(|choice| choice.name == entry.name))
+            else {
+                break;
+            };
+            entries.remove(last_absent);
+        }
+        entries.truncate(MAX_REMEMBERED_TRAY_ICONS);
+        let changed = entries != self.entries;
+        self.entries = entries;
+        changed
     }
 }
 
@@ -1197,16 +1436,41 @@ mod tests {
         assert!(!arr.has_overflow(10));
     }
 
+    /// **A hidden icon is in the overflow, not on the bar and not nowhere**
+    /// -- listed in its place in the order, among the shown icons the bar
+    /// has no room for -- and its being hidden is an overflow on its own,
+    /// with room to spare.
     #[test]
-    fn arrangement_hidden_icons_not_in_visible_or_overflow() {
+    fn a_hidden_icon_is_in_the_overflow_and_not_on_the_bar() {
         let mut arr = TrayIconArrangement::new();
         arr.add_icon(make_slot(1, true, false));
         arr.add_icon(make_slot(2, false, false)); // hidden
         arr.add_icon(make_slot(3, true, false));
+        arr.add_icon(make_slot(4, true, false));
 
-        assert_eq!(arr.visible_icons(5).len(), 2);
+        assert_eq!(arr.visible_icons(5).len(), 3);
         assert_eq!(arr.hidden_icons().len(), 1);
         assert_eq!(arr.hidden_icons()[0].key.id, 2);
+        let ids = |slots: Vec<&TrayIconSlot>| slots.iter().map(|s| s.key.id).collect::<Vec<_>>();
+        assert_eq!(
+            ids(arr.overflow_icons(5)),
+            [2],
+            "room for all the shown ones"
+        );
+        assert!(
+            arr.has_overflow(5),
+            "a hidden icon is an overflow with room to spare"
+        );
+        assert_eq!(
+            ids(arr.overflow_icons(1)),
+            [2, 3, 4],
+            "in the arrangement's order"
+        );
+        assert_eq!(ids(arr.visible_icons(1)), [1]);
+
+        arr.show_icon(key(2));
+        assert!(arr.overflow_icons(5).is_empty());
+        assert!(!arr.has_overflow(5));
     }
 
     #[test]
@@ -1627,5 +1891,126 @@ mod tests {
         let menu_full = TrayContextMenu::build(key(1), false, false, true, true);
         // Open, Settings, TogglePin, ToggleStartInTray, HideIcon, ShowHiddenIcons, Exit = 7
         assert_eq!(menu_full.actionable_count(), 7);
+    }
+
+    // ---- TrayChoices -------------------------------------------------------
+
+    /// Icon `id` of the program `app`, running as process `owner`.
+    fn named(owner: u64, id: u32, app: &str) -> guiremote::tray::TrayIcon {
+        guiremote::tray::TrayIcon::new(owner, id, "X", "").with_app_id(app)
+    }
+
+    fn strings(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| (*s).to_owned()).collect()
+    }
+
+    /// **What is written reads back the same**, an app id with a `#` in it
+    /// included: the id is after the last one.
+    #[test]
+    fn tray_choices_read_back_what_they_write() {
+        let order = strings(&["mail#1", "chat#room#7", "vol#2"]);
+        let hidden = strings(&["chat#room#7"]);
+        let choices = TrayChoices::from_lists(&order, &hidden);
+        assert_eq!(choices.to_lists(), (order, hidden));
+        let name = TrayIconName::from_text("chat#room#7").unwrap();
+        assert_eq!((name.app_id.as_str(), name.id), ("chat#room", 7));
+    }
+
+    /// **A line that is not a name is passed over**, and so is a name listed
+    /// twice; a hidden name the order lacks is kept, at the end.
+    #[test]
+    fn tray_choices_pass_over_what_is_not_a_name() {
+        let choices = TrayChoices::from_lists(
+            &strings(&["mail#1", "no id", "#3", "x#y", "mail#1", "vol#2"]),
+            &strings(&["late#4"]),
+        );
+        assert_eq!(
+            choices.to_lists(),
+            (
+                strings(&["mail#1", "vol#2", "late#4"]),
+                strings(&["late#4"])
+            )
+        );
+    }
+
+    /// **An icon whose program gave no name has none that lasts**, and nor
+    /// does one whose name holds a control character.
+    #[test]
+    fn an_icon_without_an_app_id_has_no_lasting_name() {
+        assert!(TrayIconName::of(&reported(OWNER, 1, "X")).is_none());
+        assert!(TrayIconName::of(&named(OWNER, 1, "bad\nname")).is_none());
+        assert!(TrayIconName::of(&named(OWNER, 1, "mail")).is_some());
+    }
+
+    /// **Moving the icons that are here keeps where an absent one stood**:
+    /// the places present icons held are refilled in their new order.
+    #[test]
+    fn recording_keeps_an_absent_icons_place() {
+        let mut choices = TrayChoices::from_lists(&strings(&["a#1", "gone#9", "b#2", "c#3"]), &[]);
+        let icons = vec![named(1, 1, "a"), named(2, 2, "b"), named(3, 3, "c")];
+        let mut arr = TrayIconArrangement::new();
+        arr.sync_with(&icons, &choices);
+        // c to the front, b hidden.
+        assert!(arr.move_before(
+            TrayIconKey { owner: 3, id: 3 },
+            Some(TrayIconKey { owner: 1, id: 1 })
+        ));
+        arr.hide_icon(TrayIconKey { owner: 2, id: 2 });
+
+        assert!(choices.record(&arr, &icons));
+        assert_eq!(
+            choices.to_lists(),
+            (strings(&["c#3", "gone#9", "a#1", "b#2"]), strings(&["b#2"]))
+        );
+        assert!(
+            !choices.record(&arr, &icons),
+            "nothing changed, yet it says so"
+        );
+    }
+
+    /// **An icon arriving takes its remembered place among those here**, and
+    /// comes in hidden if it was hidden; one nothing remembers appends.
+    #[test]
+    fn sync_with_puts_an_arriving_icon_where_it_was() {
+        let choices = TrayChoices::from_lists(&strings(&["c#3", "a#1", "b#2"]), &strings(&["b#2"]));
+        let mut arr = TrayIconArrangement::new();
+        arr.sync_with(&[named(11, 1, "a"), named(14, 4, "new")], &choices);
+        arr.sync_with(
+            &[
+                named(11, 1, "a"),
+                named(14, 4, "new"),
+                named(13, 3, "c"),
+                named(12, 2, "b"),
+            ],
+            &choices,
+        );
+        assert_eq!(ids(&arr), [3, 1, 4, 2]);
+        assert_eq!(
+            arr.shown_keys().iter().map(|k| k.id).collect::<Vec<_>>(),
+            [3, 1, 4],
+            "the icon remembered as hidden came in shown"
+        );
+    }
+
+    /// **The list is bounded**, and an absent icon goes before a present one.
+    #[test]
+    fn the_remembered_icons_are_bounded() {
+        let many: Vec<String> = (0..MAX_REMEMBERED_TRAY_ICONS + 10)
+            .map(|i| format!("old{i}#1"))
+            .collect();
+        let mut choices = TrayChoices::from_lists(&many, &[]);
+        assert_eq!(choices.to_lists().0.len(), MAX_REMEMBERED_TRAY_ICONS);
+
+        let icons = vec![named(1, 1, "here")];
+        let mut arr = TrayIconArrangement::new();
+        arr.sync_with(&icons, &choices);
+        assert!(choices.record(&arr, &icons));
+        let (order, _) = choices.to_lists();
+        assert_eq!(order.len(), MAX_REMEMBERED_TRAY_ICONS);
+        assert!(
+            order.contains(&"here#1".to_owned()),
+            "the present icon was forgotten"
+        );
+        assert_eq!(order.first().map(String::as_str), Some("old0#1"));
     }
 }

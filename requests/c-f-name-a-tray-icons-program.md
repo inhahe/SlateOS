@@ -54,6 +54,8 @@ what letting go will do -- tested, and shelved on lane C's local branch
 a name to save the choice under it would last only until the program or the
 desktop restarted. The day `app_id` reaches `TrayIcon`, lane C adds the
 saving and merges it.
+*2026-10-16: done* -- merged with the saving (`tray_dnd::TrayChoices`,
+`taskbar.yaml`'s `tray_order` and `tray_hidden`).
 
 ## If this is never done
 

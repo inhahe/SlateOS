@@ -171,6 +171,8 @@ mod service_menu_tests;
 #[cfg(test)]
 mod shortcut_card_tests;
 #[cfg(test)]
+mod tray_hiding_tests;
+#[cfg(test)]
 mod tray_window_tests;
 #[cfg(test)]
 mod volume_wiring_tests;
@@ -2328,6 +2330,11 @@ pub struct DesktopShell {
     /// told about, or a drag, which is the shell's own and which the program
     /// never hears about at all.
     tray_drag: Option<TrayDrag>,
+    /// A press on a row of the tray's overflow list, in flight: a click on
+    /// the icon the row names, or that icon carried out of the list onto the
+    /// bar -- which, as for an icon on the bar, only the release can tell
+    /// apart (`finish_overflow_press`).
+    overflow_press: Option<tray_dnd::TrayDragSource>,
     /// The order the shell shows those icons in, which is the user's.
     ///
     /// Separate from the list above because the two answer different
@@ -2336,6 +2343,10 @@ pub struct DesktopShell {
     /// its own; the arrangement says where they sit, and changes only when
     /// the user moves one.
     tray_arrangement: tray_dnd::TrayIconArrangement,
+    /// The same order and hiding by each icon's lasting name, as
+    /// `taskbar.yaml` keeps it: what puts a program's icon back in its place
+    /// when the program, or the desktop, starts again.
+    tray_choices: tray_dnd::TrayChoices,
     pub alt_tab_active: bool,
     /// The window a switch would pick, as an index into
     /// [`switcher_windows`](Self::switcher_windows) -- most recently used
@@ -3018,7 +3029,9 @@ impl DesktopShell {
             window_tray_ids: BTreeMap::new(),
             next_window_tray_id: 1,
             tray_arrangement: tray_dnd::TrayIconArrangement::new(),
+            tray_choices: tray_dnd::TrayChoices::default(),
             tray_drag: None,
+            overflow_press: None,
             tray_overflow_menu: None,
             pin_menu: None,
             taskbar_menu: None,
@@ -5521,6 +5534,23 @@ impl DesktopShell {
         // The overflow list, ahead of everything below it for the same reason
         // the desktop menu is: it is drawn over the bar, so a press either
         // landed on it or dismissed it.
+        // A press on a row of the overflow list owns the pointer until the
+        // button comes up, as a press on an icon of the bar does: only the
+        // release knows whether the row was clicked or its icon carried out.
+        // The list stays open meanwhile, so its surface -- the whole screen
+        // -- is still under the pointer for the release, wherever it goes.
+        if self.overflow_press.is_some() {
+            match event.kind {
+                MouseEventKind::Move => {
+                    self.drag_overflow_row_to(event.x, event.y);
+                    return ShellAction::Consumed;
+                }
+                MouseEventKind::Release(_) => {
+                    return self.finish_overflow_press(event.x, event.y);
+                }
+                _ => return ShellAction::Consumed,
+            }
+        }
         if self.tray_overflow_menu.is_some() {
             match event.kind {
                 MouseEventKind::Move => {
@@ -6134,19 +6164,66 @@ impl DesktopShell {
     /// layer's own ghost is hidden under the bar.
     #[must_use]
     pub fn render_carry(&self) -> Option<RenderTree> {
-        let (name, at) = if let Some(drag) = self.start_drag.as_ref() {
+        let program_hint = |at: (f32, f32)| match self.carry_target(at.0, at.1) {
+            Some(CarryTarget::Taskbar) => Some("Pin to taskbar"),
+            Some(CarryTarget::Desktop) => Some("Add to desktop"),
+            Some(CarryTarget::StartMenu) => Some("Pin to Start menu"),
+            None => None,
+        };
+        let (name, at, hint) = if let Some(drag) = self.start_drag.as_ref() {
             // An action's row is carried nowhere, so nothing follows the
             // pointer to say where it would go.
             if !drag.source.is_dragging() || drag.action.is_some() {
                 return None;
             }
-            (drag.name.clone(), self.carry_at)
+            (
+                drag.name.clone(),
+                self.carry_at,
+                program_hint(self.carry_at),
+            )
         } else if let Some(drag) = self.pin_drag.as_ref() {
             if !drag.is_dragging() || !self.pin_drag_off_bar {
                 return None;
             }
             let exec = drag.pressed_key()?;
-            (self.app_name_for(&exec), self.carry_at)
+            (
+                self.app_name_for(&exec),
+                self.carry_at,
+                program_hint(self.carry_at),
+            )
+        } else if let Some(press) = self.overflow_press.as_ref() {
+            // An icon carried out of the overflow list: named, since the
+            // list's row was its only name, and over the bar's icons it is
+            // shown there if let go.
+            if !press.is_dragging() || self.tray_overflow_menu.is_none() {
+                return None;
+            }
+            let (x, y) = self.carry_at;
+            let over_bar = self
+                .tray_drop_zone()
+                .is_some_and(|zone| zone.contains(x, y));
+            (
+                self.tray_icon_name(press.pressed_key()?)?,
+                self.carry_at,
+                over_bar.then_some("Show on the taskbar"),
+            )
+        } else if let Some(drag) = self.tray_drag.as_ref() {
+            // An icon of the bar says nothing while the row rearranges under
+            // it -- that is its own feedback -- but over the chevron, where
+            // letting go takes it off the bar, it says so.
+            let (x, y) = self.carry_at;
+            if !self.tray_icon_dragged()
+                || !self
+                    .tray_overflow_rect()
+                    .is_some_and(|chevron| chevron.contains(x, y))
+            {
+                return None;
+            }
+            (
+                self.tray_icon_name(drag.source.pressed_key()?)?,
+                self.carry_at,
+                Some("Move to hidden icons"),
+            )
         } else {
             let (at, ids) = self.icons.drag_in_progress()?;
             if !self.taskbar_rect().contains(at.0, at.1) {
@@ -6155,13 +6232,11 @@ impl DesktopShell {
             let program = ids
                 .into_iter()
                 .find(|id| self.icon_program(*id).is_some())?;
-            (self.icons.get_icon(program)?.label.clone(), at)
-        };
-        let hint = match self.carry_target(at.0, at.1) {
-            Some(CarryTarget::Taskbar) => Some("Pin to taskbar"),
-            Some(CarryTarget::Desktop) => Some("Add to desktop"),
-            Some(CarryTarget::StartMenu) => Some("Pin to Start menu"),
-            None => None,
+            (
+                self.icons.get_icon(program)?.label.clone(),
+                at,
+                program_hint(at),
+            )
         };
         let p = Palette::from_settings(&self.appearance);
         let size = self.font_size(TextRole::Body);
@@ -11306,8 +11381,42 @@ impl DesktopShell {
         }
         // Whether the arrangement changed is not asked: the callers repaint
         // on any change to the list, which this is.
-        let _rearranged = self.tray_arrangement.sync(&icons);
+        let _rearranged = self.tray_arrangement.sync_with(&icons, &self.tray_choices);
         self.tray_icons = icons;
+    }
+
+    /// Read back where the user put the tray's icons and which they hid,
+    /// from `taskbar.yaml` (`tray_order`, `tray_hidden`). Icons already in
+    /// the tray keep their places; the choices apply to each that arrives.
+    pub fn load_tray(&mut self) {
+        let doc = config::load(TASKBAR_CONFIG_NAME);
+        let order = doc.get_seq(&["tray_order"]).unwrap_or_default();
+        let hidden = doc.get_seq(&["tray_hidden"]).unwrap_or_default();
+        self.tray_choices = tray_dnd::TrayChoices::from_lists(&order, &hidden);
+    }
+
+    /// Remember the tray as the user has just left it, and write it to
+    /// `taskbar.yaml` if that changed anything. Called when a move, a hiding
+    /// or a showing is finished -- not on each step of a drag.
+    ///
+    /// A failed write is reported and the arrangement still holds for this
+    /// session, as with the pins ([`save_pinned`](Self::save_pinned)).
+    fn save_tray(&mut self) {
+        if !self
+            .tray_choices
+            .record(&self.tray_arrangement, &self.tray_icons)
+        {
+            return;
+        }
+        let (order, hidden) = self.tray_choices.to_lists();
+        let order: Vec<&str> = order.iter().map(String::as_str).collect();
+        let hidden: Vec<&str> = hidden.iter().map(String::as_str).collect();
+        let mut doc = config::load(TASKBAR_CONFIG_NAME);
+        doc.set_seq(&["tray_order"], &order);
+        doc.set_seq(&["tray_hidden"], &hidden);
+        if let Err(err) = config::store(TASKBAR_CONFIG_NAME, &doc) {
+            eprintln!("desktop: could not save taskbar.yaml: {err}");
+        }
     }
 
     /// The window whose tray entry has `entry` for its id, if it is still
@@ -12245,20 +12354,140 @@ impl DesktopShell {
     }
 
     /// A press while the overflow list is open.
+    ///
+    /// On a row, it takes hold of the icon the row names: the release
+    /// decides whether that was a click, which the icon's program hears
+    /// about as choosing the row always told it, or the icon carried out of
+    /// the list onto the bar (`finish_overflow_press`). A press that names
+    /// no row -- on the panel's own padding, or outside it -- closes the
+    /// list, as the desktop menu does.
     fn click_tray_overflow(&mut self, x: f32, y: f32) -> ShellAction {
-        let Some((menu, _)) = self.tray_overflow_menu.as_mut() else {
-            return ShellAction::Consumed;
-        };
-        // A press that named no row: on the panel's own padding, or outside
-        // it. Either way the list closes, as the desktop menu does.
-        let Some(id) = menu.handle_click(x, y) else {
+        let key = self.tray_overflow_menu.as_ref().and_then(|(menu, keys)| {
+            let id = menu.item_at(x, y)?;
+            keys.get(usize::try_from(id).ok()?).copied()
+        });
+        let Some(key) = key else {
             self.tray_overflow_menu = None;
             return ShellAction::Consumed;
         };
-        match self.take_overflow_row(id) {
-            Some(request) => ShellAction::Control(request),
-            None => ShellAction::Consumed,
+        let mut source = tray_dnd::TrayDragSource::new();
+        source.on_press(key, x, y);
+        self.overflow_press = Some(source);
+        ShellAction::Consumed
+    }
+
+    /// Carry a pressed row of the overflow list to `(x, y)`: the list stays
+    /// up, and past the drag threshold a label follows the pointer naming the
+    /// icon, and saying where letting go there would show it
+    /// (`render_carry`).
+    fn drag_overflow_row_to(&mut self, x: f32, y: f32) {
+        if let Some(source) = self.overflow_press.as_mut() {
+            source.on_move(x, y);
+            self.carry_at = (x, y);
         }
+    }
+
+    /// Let go of a pressed row of the overflow list, closing the list.
+    ///
+    /// A click -- let go before the drag threshold -- tells the icon's
+    /// program it was clicked, as choosing the row always has. Carried onto
+    /// the bar's icons, the icon is shown there, between the two icons it
+    /// was let go between (`design.txt`: "can drag and drop icons into and
+    /// out of the system tray"): a hidden one comes out of hiding, and one
+    /// that was only out of room displaces the bar's last. Let go anywhere
+    /// else, it stays where it was.
+    ///
+    /// Nothing at all once the list has been closed some other way while
+    /// the button was down, or once the icon's program has gone.
+    fn finish_overflow_press(&mut self, x: f32, y: f32) -> ShellAction {
+        let Some(mut source) = self.overflow_press.take() else {
+            return ShellAction::Consumed;
+        };
+        let key = source.pressed_key();
+        // Read before `on_release`, which resets the source.
+        let was_drag = source.on_release();
+        let list_was_open = self.tray_overflow_menu.take().is_some();
+        let Some(key) = key.filter(|_| list_was_open) else {
+            return ShellAction::Consumed;
+        };
+        if !self
+            .tray_icons
+            .iter()
+            .any(|icon| tray_dnd::TrayIconKey::of(icon) == key)
+        {
+            return ShellAction::Consumed;
+        }
+        if !was_drag {
+            return ShellAction::Control(ShellRequest::ClickTrayIcon {
+                owner: key.owner,
+                id: key.id,
+                button: MouseButton::Left,
+            });
+        }
+        if self
+            .tray_drop_zone()
+            .is_some_and(|zone| zone.contains(x, y))
+        {
+            self.show_tray_icon_at(key, self.tray_drop_boundary(x));
+        }
+        ShellAction::Consumed
+    }
+
+    /// Show `key` on the bar at `boundary` -- the gap between drawn icons it
+    /// was let go in, `0..=` the number drawn -- measured on the bar as it
+    /// was drawn before it arrived.
+    ///
+    /// The place is clamped to the bar's last drawn slot, so an icon let go
+    /// past the end of a full bar is drawn there and the icon it displaces
+    /// goes to the overflow, rather than landing just past the end and
+    /// staying out of sight -- which would be a drop onto the bar that
+    /// showed nothing.
+    fn show_tray_icon_at(&mut self, key: tray_dnd::TrayIconKey, boundary: usize) {
+        self.tray_arrangement.show_icon(key);
+        // After showing it: an icon out of hiding can change whether the
+        // chevron still needs a slot.
+        let at = boundary.min(self.tray_icon_capacity().saturating_sub(1));
+        let others: Vec<tray_dnd::TrayIconKey> = self
+            .tray_arrangement
+            .shown_keys()
+            .into_iter()
+            .filter(|other| *other != key)
+            .collect();
+        self.tray_arrangement
+            .move_before(key, others.get(at).copied());
+        self.save_tray();
+    }
+
+    /// Where an icon carried out of the overflow list is shown if let go:
+    /// the run of icons on the bar, full height -- or, with none drawn, the
+    /// slot beside the chevron where the first would be. `None` with no
+    /// icons and no chevron, when there is no overflow to carry one from.
+    fn tray_drop_zone(&self) -> Option<Rect> {
+        let rects = self.tray_icon_rects();
+        let bar = self.taskbar_rect();
+        let start = match (rects.first(), self.tray_overflow_rect()) {
+            (Some(first), _) => first.x,
+            (None, Some(chevron)) => chevron.x + chevron.w,
+            (None, None) => return None,
+        };
+        let end = rects
+            .last()
+            .map_or(start + self.tray_icon_slot(), |last| last.x + last.w);
+        Some(Rect::new(start, bar.y, (end - start).max(0.0), bar.h))
+    }
+
+    /// A tray icon's name, as its overflow row shows it: the tooltip its
+    /// program registered, or its glyph when it registered none.
+    fn tray_icon_name(&self, key: tray_dnd::TrayIconKey) -> Option<String> {
+        let icon = self
+            .tray_icons
+            .iter()
+            .find(|icon| tray_dnd::TrayIconKey::of(icon) == key)?;
+        Some(if icon.tooltip.is_empty() {
+            icon.glyph.clone()
+        } else {
+            icon.tooltip.clone()
+        })
     }
 
     /// Resolve a chosen row, closing the list either way.
@@ -12329,6 +12558,17 @@ impl DesktopShell {
         let Some(key) = drag.source.pressed_key() else {
             return false;
         };
+        self.carry_at = (x, y);
+        // Over the chevron the icon is on its way into hiding
+        // (`finish_tray_press`), so the row stays as it is: rearranging it
+        // under a pointer that is not over it would move the icon for a drop
+        // that is about to take it off the bar.
+        if self
+            .tray_overflow_rect()
+            .is_some_and(|chevron| chevron.contains(x, y))
+        {
+            return false;
+        }
         // The boundary is measured over the icons *on the bar*, which are a
         // filtered slice of the arrangement -- the user may have hidden one,
         // and the rest may not fit. So it is turned into the name of the icon
@@ -12676,9 +12916,15 @@ impl DesktopShell {
             .unwrap_or(count)
     }
 
-    /// Release a pressed tray icon at `(x, y)`: either a reorder just ended,
-    /// or the icon was clicked -- see [`click_tray_icon`](Self::click_tray_icon).
+    /// Release a pressed tray icon at `(x, y)`: a reorder just ended -- or,
+    /// let go on the chevron, the icon goes into hiding -- or the icon was
+    /// clicked: see [`click_tray_icon`](Self::click_tray_icon).
     fn finish_tray_press(&mut self, x: f32, y: f32) -> ShellAction {
+        // Where the chevron is, asked while the drag still holds it up: it
+        // is shown for the drag even when nothing is in the overflow.
+        let on_chevron = self
+            .tray_overflow_rect()
+            .is_some_and(|chevron| chevron.contains(x, y));
         let Some(mut drag) = self.tray_drag.take() else {
             return ShellAction::Consumed;
         };
@@ -12686,7 +12932,17 @@ impl DesktopShell {
         // Read before `on_release`, which resets the source.
         let was_drag = drag.source.on_release();
         if was_drag {
-            // The row already rearranged itself on the way here.
+            // Carried onto the chevron: into the overflow, "hidden icons",
+            // as the reference's tray takes an icon dropped on its arrow
+            // (`design.txt`: "can drag and drop icons into and out of the
+            // system tray"). Elsewhere the row already rearranged itself on
+            // the way here.
+            if on_chevron && let Some(key) = key {
+                self.tray_arrangement.hide_icon(key);
+            }
+            // Moved along the row on the way, or hidden: either is the
+            // user's, and lasts.
+            self.save_tray();
             return ShellAction::Consumed;
         }
         let Some(key) = key else {
@@ -12810,26 +13066,50 @@ impl DesktopShell {
 
     /// How many application icons are actually drawn on the bar.
     ///
-    /// When they all fit, all of them. When they do not, one slot goes to the
-    /// chevron that reaches the rest -- so the run is never silently truncated
-    /// into icons the user has no way to click.
+    /// All the shown ones when they fit and the chevron is not up. When the
+    /// chevron is up -- they do not all fit, one is hidden, or one is being
+    /// dragged ([`tray_shows_chevron`](Self::tray_shows_chevron)) -- it takes
+    /// a slot of its own, so the run is never silently truncated into icons
+    /// the user has no way to click.
     fn tray_icon_capacity(&self) -> usize {
         let budget = self.tray_slot_budget();
         let shown = self.tray_arrangement.shown_keys().len();
-        if shown <= budget {
-            shown
+        let chevron = shown > budget
+            || !self.tray_arrangement.hidden_icons().is_empty()
+            || self.tray_icon_dragged();
+        if chevron {
+            shown.min(budget.saturating_sub(1))
         } else {
-            budget.saturating_sub(1)
+            shown
         }
     }
 
-    /// Whether some icon the user has not hidden has no room on the bar.
+    /// Whether the overflow lists anything: an icon the user hid, or one
+    /// the bar has no room for.
     #[must_use]
     pub fn tray_overflows(&self) -> bool {
-        self.tray_arrangement.shown_keys().len() > self.tray_icon_capacity()
+        self.tray_arrangement
+            .has_overflow(self.tray_icon_capacity())
     }
 
-    /// The icons the bar has no room for, in order.
+    /// Whether the chevron is on the bar: something is in the overflow, or
+    /// an icon is being dragged -- which may be let go on the chevron to hide
+    /// it, and needs somewhere to be let go even when nothing is hidden yet.
+    #[must_use]
+    pub fn tray_shows_chevron(&self) -> bool {
+        self.tray_overflows() || self.tray_icon_dragged()
+    }
+
+    /// Whether an icon on the bar is being dragged, past the threshold that
+    /// makes a press a drag.
+    fn tray_icon_dragged(&self) -> bool {
+        self.tray_drag
+            .as_ref()
+            .is_some_and(|drag| drag.button == MouseButton::Left && drag.source.is_dragging())
+    }
+
+    /// The icons the overflow lists, in order: the hidden ones, and the ones
+    /// the bar has no room for.
     #[must_use]
     pub fn overflowed_tray_icons(&self) -> Vec<&guiremote::tray::TrayIcon> {
         self.join_tray(
@@ -12846,7 +13126,7 @@ impl DesktopShell {
     fn app_tray_width(&self) -> f32 {
         let slots = self
             .tray_icon_capacity()
-            .saturating_add(usize::from(self.tray_overflows()));
+            .saturating_add(usize::from(self.tray_shows_chevron()));
         if slots == 0 {
             return 0.0;
         }
@@ -12881,7 +13161,7 @@ impl DesktopShell {
         // The chevron, when there is one, sits at the *left* of the run: it is
         // the edge the run grows from, so the icons that do fit keep the same
         // position as icons appear and depart behind it.
-        if self.tray_overflows() {
+        if self.tray_shows_chevron() {
             x += slot;
         }
         let capacity = self.tray_icon_capacity();
@@ -12917,7 +13197,7 @@ impl DesktopShell {
     /// glyph that represents it.
     #[must_use]
     pub fn tray_overflow_rect(&self) -> Option<Rect> {
-        if !self.tray_overflows() {
+        if !self.tray_shows_chevron() {
             return None;
         }
         let slot = self.tray_icon_slot();
@@ -15794,6 +16074,9 @@ impl DesktopShell {
         let any = self.any_popup_open();
         self.desktop_menu.hide();
         self.tray_overflow_menu = None;
+        // A press held on one of its rows goes with it: let go, it would
+        // otherwise click or place an icon from a list no longer there.
+        self.overflow_press = None;
         self.pin_menu = None;
         self.taskbar_menu = None;
         self.close_notification_menu();

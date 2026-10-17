@@ -796,6 +796,8 @@ impl<T: Transport> ShellSession<T> {
         // a key got their binding written to `shortcuts.yaml` and thrown away
         // at the next start.
         shell.load_pinned();
+        // Where the tray's icons stand and which are hidden, by program.
+        shell.load_tray();
         shell.load_start_menu();
         shell.load_shortcuts();
         // The Run box's history, which its Up key walks: written on every

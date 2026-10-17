@@ -849,6 +849,14 @@ pub const SYS_SIGNAL_PENDING: u64 = 526;
 /// `SIG_DFL`.  See the kernel's `SYS_SIGNAL_STOP_SELF` docs.
 pub const SYS_SIGNAL_STOP_SELF: u64 = 1062;
 
+/// End the calling process as killed by `arg0`, a signal whose default
+/// action terminates, on a disposition this crate has *already* resolved to
+/// that default: the parent's `wait` then reads `WIFSIGNALED` with
+/// `WTERMSIG == sig`, which an exit status cannot say (128 to 255 is an
+/// exit). Does not return; `InvalidArgument` for a signal that is not fatal
+/// by default. Lane A's (1136); a kernel without it answers `NoSuchSyscall`.
+pub const SYS_SIGNAL_EXIT_SELF: u64 = 1136;
+
 /// Fork the calling process (copy-on-write).  Returns the child PID to
 /// the parent and 0 to the child, or a negative error code to the
 /// parent on failure.

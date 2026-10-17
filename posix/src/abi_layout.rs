@@ -1036,6 +1036,18 @@ pub(crate) fn abi_asserts() -> String {
         msg_controllen,
         msg_flags
     );
+    // musl's `cmsg_len` is a `socklen_t` and four bytes of padding, glibc's a
+    // `size_t`: the same eight bytes on x86-64 little-endian, the level at 8.
+    abi!(
+        out,
+        hdrs,
+        crate::socket::Cmsghdr,
+        "struct cmsghdr",
+        "sys/socket.h",
+        cmsg_len,
+        cmsg_level,
+        cmsg_type
+    );
     // `struct mmsghdr` is in <sys/socket.h> only under _GNU_SOURCE, which the
     // fixture defines. Its second field is `unsigned int`, not `size_t`: the
     // obvious guess is wrong and would move nothing on x86-64 while breaking

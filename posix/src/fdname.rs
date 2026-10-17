@@ -177,7 +177,7 @@ fn put(out: &mut [u8], text: &[u8]) -> usize {
 }
 
 /// `prefix`, `value` in decimal, `suffix`, into `out`; the full length.
-fn put_tagged(out: &mut [u8], prefix: &[u8], value: u64, suffix: &[u8]) -> usize {
+pub(crate) fn put_tagged(out: &mut [u8], prefix: &[u8], value: u64, suffix: &[u8]) -> usize {
     let mut digits = [0u8; 20];
     let mut i = digits.len();
     let mut v = value;

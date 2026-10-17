@@ -32,6 +32,9 @@
  *       EINVAL (33)
  *   5x  a dup of it is the same namespace (50), and outlives the close of
  *       the first (51)
+ *   6x  openat through /proc/self's descriptor opens the same namespace (60);
+ *       open's rules for a link to a regular file: O_DIRECTORY is ENOTDIR
+ *       (61), O_NOFOLLOW ELOOP (62), O_CREAT|O_EXCL EEXIST (63)
  */
 
 #define _GNU_SOURCE
@@ -113,5 +116,22 @@ int main(void)
     if (fstat(again, &d) != 0 || d.st_ino != a.st_ino || ioctl(again, NS_GET_NSTYPE) != CLONE_NEWUTS)
         return 51;
     close(again);
+
+    int dir = open("/proc/self", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    int via = dir < 0 ? -1 : openat(dir, "ns/uts", O_RDONLY | O_CLOEXEC);
+    struct stat v;
+    if (via < 0 || fstat(via, &v) != 0 || v.st_ino != a.st_ino || ioctl(via, NS_GET_NSTYPE) != CLONE_NEWUTS)
+        return 60;
+    close(via);
+    close(dir);
+    errno = 0;
+    if (!fails_with(open("/proc/self/ns/uts", O_RDONLY | O_DIRECTORY), ENOTDIR))
+        return 61;
+    errno = 0;
+    if (!fails_with(open("/proc/self/ns/uts", O_RDONLY | O_NOFOLLOW), ELOOP))
+        return 62;
+    errno = 0;
+    if (!fails_with(open("/proc/self/ns/uts", O_RDONLY | O_CREAT | O_EXCL, 0600), EEXIST))
+        return 63;
     return 42;
 }

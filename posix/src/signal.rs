@@ -318,9 +318,10 @@ fn seed_inherited_ignored() {
 
 /// Set `SIG_IGN` in the table for each signal `inherited` names (bit `n - 1`
 /// for signal `n`), never `SIGKILL` or `SIGSTOP`, which cannot be ignored,
-/// nor the library's own two, which no program's action may touch -- an
-/// inherited `SIG_IGN` on 32 would have the kernel discard every
-/// `SIGEV_THREAD` timer's signal.
+/// nor the library's own two, which no program's action may touch. When
+/// `inherited` names one of those, the kernel -- whose set it is, and which
+/// discards a signal it holds ignored -- is told the set again without it:
+/// an ignored 32 would lose every `SIGEV_THREAD` timer's signal.
 #[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
 fn adopt_inherited_ignored(inherited: u64) {
     // SAFETY: `actions_ptr()` is this process's; start-up has one thread.
@@ -342,6 +343,9 @@ fn adopt_inherited_ignored(inherited: u64) {
             };
         }
     }
+    if inherited & INTERNAL_BITS != 0 {
+        ignored_changed();
+    }
 }
 
 /// How many threads may wait in `sigtimedwait` and its kin at once, the
@@ -350,7 +354,7 @@ fn adopt_inherited_ignored(inherited: u64) {
 /// library's ([`take_internal`]), which no program's wait takes: 31 waiting
 /// threads of a program's would otherwise keep the timer thread from its
 /// wait, and it would spin, refused at once, while no `SIGEV_THREAD` timer
-/// ran (Fable's review of lane D's round 205).
+/// ran.
 const ACCEPTORS: usize = 32;
 
 /// `got`'s value once its waiter has stopped waiting: it takes nothing more,
@@ -583,11 +587,10 @@ impl Acceptor {
 /// ([`opened_by_waiters`]), here, before the dispatch returns: a second
 /// signal of it the kernel holds already stays there, with its record and
 /// its thread, for the next wait. Left open until the waiter withdrew it,
-/// the set let the kernel deliver that signal at the dispatch's return, to
-/// be kept in `extra` without them -- two timers' expiries arriving together
-/// lost the second (Opus's review of lane D's round 205). `extra` is left
-/// for one that comes in the instructions before the close: the kernel does
-/// not block a signal while it delivers it.
+/// the set would let the kernel deliver that signal at the dispatch's
+/// return, to be kept in `extra` without them. `extra` is left for one that
+/// comes in the instructions before the close: the kernel does not block a
+/// signal while it delivers it.
 fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
     use core::sync::atomic::Ordering::SeqCst;
     let bit = sigmask_bit(sig);
@@ -784,8 +787,7 @@ fn keep_pending(sig: i32) {
 /// The signals the calling thread's waiter has opened at the kernel: the
 /// set of the waiter it owns, while it waits for one -- not once one has been
 /// handed to it ([`hand_to_a_waiter`]). Another thread's waiter opens its set
-/// in that thread's kernel mask, not this one's -- until 2026-10-16 every
-/// waiter's set was opened in whichever thread wrote the mask.
+/// in that thread's kernel mask, not this one's.
 fn opened_by_waiters() -> u64 {
     use core::sync::atomic::Ordering::SeqCst;
     let me = this_thread();
@@ -2041,13 +2043,7 @@ fn stop_self_errno(ret: i64) -> i32 {
 /// `EINVAL` for unknown signals.
 fn apply_default_action(sig: i32) -> i32 {
     match default_action(sig) {
-        Some(DefaultAction::Terminate | DefaultAction::Core) => {
-            if sig == SIGABRT {
-                crate::unistd::abort();
-            }
-            // 128 + sig (Unix convention)
-            crate::process::_exit(128i32.wrapping_add(sig));
-        }
+        Some(DefaultAction::Terminate | DefaultAction::Core) => exit_by_signal(sig),
         Some(DefaultAction::Ignore) => 0,
         Some(DefaultAction::Stop) => stop_self(sig),
         Some(DefaultAction::Continue) => {
@@ -2064,6 +2060,23 @@ fn apply_default_action(sig: i32) -> i32 {
             -1
         }
     }
+}
+
+/// End the process as killed by `sig`, whose default action terminates and
+/// is the one that applies: `SYS_SIGNAL_EXIT_SELF`, so that its parent reads
+/// `WIFSIGNALED` with `WTERMSIG == sig` -- what GNU `timeout` and a shell's
+/// "Killed" go by -- which an exit status cannot say. An exit with status
+/// 128 + sig is still the end when the call returns: a kernel without it,
+/// or a system-call filter that refuses it, must not leave the process
+/// running.
+pub(crate) fn exit_by_signal(sig: i32) -> ! {
+    if let Ok(nr) = u64::try_from(sig) {
+        // Returns only when the kernel would not end the process so; the
+        // exit below ends it either way.
+        let _ = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_EXIT_SELF, nr);
+    }
+    #[allow(clippy::used_underscore_items)] // _exit is the POSIX name.
+    crate::process::_exit(128i32.wrapping_add(sig))
 }
 
 /// Dispatch a signal to the calling process.
@@ -2820,10 +2833,9 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 /// (1087), which checks that `tid` is a thread of `tgid` and posts in the
 /// same step, so that a thread id reused since the caller learnt it cannot
 /// carry the signal into some other process, and the receiver is told
-/// `SI_TKILL` with this process's pid and uid. The signal goes to the
-/// thread's process, and whichever of its threads next returns to userspace
-/// runs it: signals here are process-directed, as
-/// [`crate::pthread::pthread_kill`] explains.
+/// `SI_TKILL` with this process's pid and uid. The kernel posts it on that
+/// thread's own queue: that thread takes it, and it stays pending while
+/// that thread blocks it.
 ///
 /// On a kernel without that call, the check is this library's: this
 /// process's threads are its own to know ([`crate::pthread::thread_is_live`]);
@@ -6586,7 +6598,15 @@ mod tests {
                 assert_eq!(errno::get_errno(), errno::EINVAL);
             }
         }
-        adopt_inherited_ignored(sigmask_bit(SIGTIMER) | sigmask_bit(SIGUSR2));
+        // The kernel's set, as an earlier image left it.
+        let inherited = sigmask_bit(SIGTIMER) | sigmask_bit(SIGUSR2);
+        HOST_KERNEL_IGNORED.with(|k| k.set((inherited, 0)));
+        adopt_inherited_ignored(inherited);
+        assert_eq!(
+            kernel_ignored(),
+            (sigmask_bit(SIGUSR2), 0),
+            "the kernel is told the set without the library's"
+        );
         let mut old = DEFAULT_SIGACTION;
         // SAFETY: a local action to read into.
         unsafe { sigaction(SIGUSR2, core::ptr::null(), &raw mut old) };

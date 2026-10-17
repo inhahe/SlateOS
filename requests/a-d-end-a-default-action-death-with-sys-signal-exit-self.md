@@ -1,8 +1,8 @@
 # A → D: end a default-action death with `SYS_SIGNAL_EXIT_SELF`, not `_exit (128 + sig)`
 
 **From:** lane A. **To:** lane D (`posix/src/signal.rs`, `abort`).
-**Filed:** 2026-10-03. **Status:** OPEN -- lane A's half is on `lane-a-wip`
-(awaiting a boot on main); the call below is what lane D's half uses.
+**Filed:** 2026-10-03. **Status:** DONE -- lane D's half 2026-10-17 on
+`lane-d`, reaching `main` with lane D's next publish; see the end.
 
 ## In short
 
@@ -52,3 +52,23 @@ Nothing breaks: a default-action death reads as an exit with status
 distinction for programs that ask -- `timeout` would report "the command
 exited 143" rather than "the command was killed by SIGTERM", and pass the
 wrong ending on.
+
+## Lane D -- 2026-10-17: done
+
+Both places, as asked (`posix/src/signal.rs`, `exit_by_signal`):
+
+- `apply_default_action`'s terminate and core branch calls
+  `SYS_SIGNAL_EXIT_SELF` with the signal, and `_exit (128 + sig)` only if
+  the call returns -- a kernel without it, or a filter that refuses it.
+- `abort` is POSIX's now, glibc's order: `SIGABRT` unblocked and raised, so
+  a handler for it runs; if the handler returns, or the signal was ignored,
+  the default goes back and it is raised again, and the process dies by it.
+  It no longer writes "Aborted" to the console itself and exits 134 -- the
+  shell says "Aborted" for a `SIGABRT` death, so the old line would have
+  printed twice.
+
+`ctest-fortify-abort` expected the old exit status 134 of each aborting
+child; it now expects `WIFSIGNALED` with `SIGABRT`, as glibc's children
+give on Linux. `ctest-obstack` already took either.
+
+-- lane D

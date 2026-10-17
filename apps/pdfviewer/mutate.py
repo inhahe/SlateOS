@@ -126,18 +126,16 @@ MUTATIONS = [
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
-        # What the boxes did before the editor: type whatever text a key
-        # carried, a command's letter among it. Both go through `edit_box`.
+        # What the range box did before the editor: type whatever text a key
+        # carried, a command's letter among it.
         "a command's letter is typed into a box",
-        '    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n',
-        '    if !key.text.is_empty() && !textline::types_into_field(key) {\n'
-        '        text.push_str(&key.text);\n'
-        '        return Some(Edited {\n'
-        '            text: true,\n'
-        '            caret: false,\n'
-        '        });\n'
-        '    }\n'
-        '    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n',
+        '                let edit = self.print_dialog.range_box.key(event);\n',
+        '                if !event.text.is_empty() && !textline::types_into_field(event) {\n'
+        '                    let typed = format!("{}{}", self.print_dialog.range_box.text(), event.text);\n'
+        '                    self.print_dialog.range_box.set_text(&typed);\n'
+        '                    return true;\n'
+        '                }\n'
+        '                let edit = self.print_dialog.range_box.key(event);\n',
         ['a_chord_is_neither_a_viewer_key_nor_typing'],
     ),
     (
@@ -193,8 +191,8 @@ MUTATIONS += [
     ),
     (
         "typing in the range box chooses no range",
-        '                    if edited.text {\n                        self.print_dialog.choice = RangeChoice::Custom;\n',
-        '                    if false {\n                        self.print_dialog.choice = RangeChoice::Custom;\n',
+        '                if edit.changed {\n                    self.print_dialog.choice = RangeChoice::Custom;\n',
+        '                if false {\n                    self.print_dialog.choice = RangeChoice::Custom;\n',
         [RANGE],
     ),
     (

@@ -82,10 +82,8 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
 use guitk::textfind;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use printjob::{ColorMode, PageRange, PrintJob, ScaleMode};
@@ -291,15 +289,15 @@ impl RangeChoice {
 pub struct PrintDialog {
     pub open: bool,
     pub choice: RangeChoice,
-    /// What the user typed, kept as their words rather than as a rendering of
-    /// the parsed range.
+    /// The page range box: what the user typed, kept as their words rather
+    /// than as a rendering of the parsed range, and its caret.
     ///
     /// [`PageRange`] has no `Display` and should not grow one for this:
     /// `parse("1-3,5")` is `Custom([(0, 2), (4, 4)])`, and writing that back
     /// out is a second conversion that can disagree with the first --
     /// re-rendering `7-7` as `7` would quietly edit what the user typed. The
     /// text is the input and the range is derived from it, once, on Print.
-    pub range_text: String,
+    pub range_box: LineBox,
     pub copies: u32,
     pub color: ColorMode,
     pub duplex: bool,
@@ -311,7 +309,7 @@ impl Default for PrintDialog {
         Self {
             open: false,
             choice: RangeChoice::All,
-            range_text: String::new(),
+            range_box: LineBox::new(BOX_CAPACITY, PRINT_RANGE_SIZE),
             copies: 1,
             color: ColorMode::Color,
             duplex: false,
@@ -386,7 +384,7 @@ impl PrintDialog {
         match self.choice {
             RangeChoice::All => PageRange::All,
             RangeChoice::CurrentPage => PageRange::CurrentPage,
-            RangeChoice::Custom => PageRange::parse(&self.range_text),
+            RangeChoice::Custom => PageRange::parse(self.range_box.text()),
         }
     }
 }
@@ -403,59 +401,6 @@ const BOX_TEXT_INSET: f32 = 8.0;
 /// The most characters a box holds: far more than any search or range, and
 /// a stop for a paste of something that is neither.
 const BOX_CAPACITY: usize = 512;
-
-/// What one key did to a box.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct Edited {
-    /// The text changed.
-    text: bool,
-    /// The caret or the selection moved.
-    caret: bool,
-}
-
-/// Apply an editing key to a box whose text is `text`, with `editor` laid
-/// over it: the caret keys, Backspace and Delete, Ctrl+A, C, X and V, and
-/// typing, which knows a command from AltGr (`textline::apply_key`). The
-/// editor is reloaded first if the text has changed under it.
-///
-/// `None` when the key is not the box's. Each box had no caret: Backspace
-/// from the end was the only edit.
-fn edit_box(
-    editor: &mut TextInput,
-    text: &mut String,
-    key: &KeyEvent,
-    size: f32,
-) -> Option<Edited> {
-    if editor.text() != text.as_str() {
-        editor.set_text(text);
-    }
-    let before = (editor.cursor(), editor.selection_anchor());
-    let edit = textline::apply_key_on_clipboard(editor, key, size);
-    if !edit.handled {
-        return None;
-    }
-    let changed = editor.text() != text.as_str();
-    if changed {
-        *text = editor.text().to_owned();
-    }
-    Some(Edited {
-        text: changed,
-        caret: (editor.cursor(), editor.selection_anchor()) != before,
-    })
-}
-
-/// Where a box's caret is drawn: the editor's while the box has the
-/// keyboard (its end, if the text changed under the editor), the start of
-/// the text otherwise. One answer for the drawing and for a press.
-fn drawn_cursor(editor: &TextInput, text: &str, focused: bool) -> TextCursor {
-    if !focused {
-        TextCursor::default()
-    } else if editor.text() == text {
-        editor.cursor()
-    } else {
-        TextCursor::from(text.len())
-    }
-}
 
 /// The four page-navigation buttons.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1484,10 +1429,6 @@ pub struct PdfViewerApp {
     pub search_focused: bool,
     /// The print dialog, open or not.
     pub print_dialog: PrintDialog,
-    /// The page range box's caret and selection, laid over
-    /// `print_dialog.range_text`, which stays the truth: reloaded whenever
-    /// the text has changed under it.
-    range_editor: TextInput,
     /// How wide the mark is round a box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -1556,7 +1497,6 @@ impl std::fmt::Debug for PdfViewerApp {
             .field("can_print", &self.print.is_some())
             .field("palette", &self.palette)
             .field("wheel", &self.wheel)
-            .field("range_editor", &self.range_editor)
             .field("focus_ring_width", &self.focus_ring_width)
             .finish()
     }
@@ -1573,7 +1513,6 @@ impl PdfViewerApp {
             search: SearchState::new(),
             search_focused: false,
             print_dialog: PrintDialog::default(),
-            range_editor: textline::field_holding("", BOX_CAPACITY),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             recent_files: RecentFilesList::default(),
             print_job: PrintJob::default(),
@@ -3226,25 +3165,39 @@ impl PdfViewerApp {
         // dimmed while another choice than the range is in force. It was a
         // box whose edge turned blue for the range choice, with no caret.
         let box_rect = Rect::new(value_x, y, value_w, row_h - 4.0);
-        self.render_box(
-            frame,
-            box_rect,
-            self.range_box_state(),
-            (
-                &self.range_editor,
-                &self.print_dialog.range_text,
-                self.print_dialog.open,
-            ),
-            (
-                "e.g. 1-3, 5, 7-9",
-                PRINT_RANGE_SIZE,
-                if custom {
+        let state = self.range_box_state();
+        field::draw(frame, &self.palette, box_rect, state, self.focus_ring_width);
+        let line = text::line_height(PRINT_RANGE_SIZE, FontWeightHint::Regular);
+        let mut tree = RenderTree::new();
+        self.print_dialog.range_box.draw(
+            &mut tree,
+            &LineLook {
+                x: box_rect.x + BOX_TEXT_INSET,
+                y: box_rect.y + (box_rect.h - line) / 2.0,
+                width: box_rect.w - 2.0 * BOX_TEXT_INSET,
+                line_height: line,
+                focused: state.focused,
+                // The example only while the box lacks the keyboard: with it,
+                // an empty box is its caret.
+                placeholder: if state.focused {
+                    ""
+                } else {
+                    "e.g. 1-3, 5, 7-9"
+                },
+                color: if custom {
                     self.palette.text
                 } else {
                     self.palette.overlay0
                 },
-            ),
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
         );
+        for command in tree.commands {
+            frame.push(command);
+        }
         frame.hit(Target::PrintRangeField, box_rect);
         y += row_h;
 
@@ -3378,70 +3331,8 @@ impl PdfViewerApp {
             focused: self.print_dialog.open && !self.show_help,
             disabled: false,
             invalid: custom
-                && !self.print_dialog.range_text.trim().is_empty()
+                && !self.print_dialog.range_box.text().trim().is_empty()
                 && self.print_dialog.range() == PageRange::Custom(Vec::new()),
-        }
-    }
-
-    /// A box at `rect` in `state`: the toolkit's field, holding `text` --
-    /// with `editor`'s caret and selection while `has_keys` -- drawn in
-    /// `color` at `size`, scrolled to keep the caret in view; or
-    /// `placeholder`, grey, while it is empty and idle.
-    fn render_box(
-        &self,
-        frame: &mut Frame,
-        rect: Rect,
-        state: field::State,
-        (editor, text, has_keys): (&TextInput, &str, bool),
-        (placeholder, size, color): (&str, f32, Color),
-    ) {
-        field::draw(frame, &self.palette, rect, state, self.focus_ring_width);
-        let line = text::line_height(size, FontWeightHint::Regular);
-        let (tx, ty, tw) = (
-            rect.x + BOX_TEXT_INSET,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
-        );
-        if text.is_empty() && !state.focused {
-            frame.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: placeholder.to_string(),
-                color: self.palette.subtext0,
-                font_size: size,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-            return;
-        }
-        let editing = has_keys && editor.text() == text;
-        let mut tree = RenderTree::new();
-        textedit::draw(
-            &mut tree,
-            &textedit::SingleLine {
-                text,
-                cursor: drawn_cursor(editor, text, has_keys),
-                selection_anchor: if editing {
-                    editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: state.focused,
-                x: tx,
-                y: ty,
-                width: tw,
-                line_height: line,
-                font_size: size,
-                weight: FontWeightHint::Regular,
-                color,
-                selection_bg: self.palette.accent,
-                selection_fg: self.palette.crust,
-                caret_width: textedit::CARET_WIDTH,
-            },
-        );
-        for command in tree.commands {
-            frame.push(command);
         }
     }
 
@@ -3451,44 +3342,28 @@ impl PdfViewerApp {
     /// or without (`had_the_keyboard`), in the frame that answered the
     /// press (`frame`).
     fn place_caret(&mut self, target: Target, frame: &Frame, had_the_keyboard: bool, x: f32) {
-        let (rect, size) = match target {
+        let (rect, line) = match target {
             Target::SearchField => {
                 let Some(hit) = frame.rect_of(|t| *t == Target::SearchField) else {
                     return;
                 };
                 // The hit box is the bar's left part, as tall as the bar; the
                 // box is inside it.
-                (Self::search_box_rect(hit.x, hit.y, hit.h), SEARCH_TEXT_SIZE)
+                (
+                    Self::search_box_rect(hit.x, hit.y, hit.h),
+                    &mut self.search.query,
+                )
             }
             Target::PrintRangeField => {
                 let Some(rect) = frame.rect_of(|t| *t == Target::PrintRangeField) else {
                     return;
                 };
-                (rect, PRINT_RANGE_SIZE)
+                (rect, &mut self.print_dialog.range_box)
             }
             _ => return,
         };
         let (dx, width) = (x - rect.x - BOX_TEXT_INSET, rect.w - 2.0 * BOX_TEXT_INSET);
-        if target == Target::SearchField {
-            self.search.query.press(dx, width, had_the_keyboard);
-            return;
-        }
-        let text = &self.print_dialog.range_text;
-        let editor = &mut self.range_editor;
-        let drawn = drawn_cursor(editor, text, had_the_keyboard);
-        if editor.text() != text.as_str() {
-            editor.set_text(text);
-        }
-        let cursor = textedit::cursor_at_click(
-            text,
-            drawn,
-            width.max(0.0),
-            size,
-            FontWeightHint::Regular,
-            dx,
-        );
-        editor.set_selection_anchor(None);
-        editor.set_cursor(cursor);
+        line.press(dx, width, had_the_keyboard);
     }
 
     /// Render the search bar overlay.
@@ -4458,20 +4333,13 @@ impl PdfViewerApp {
                 true
             }
             Key::Enter if plain => self.commit_print(),
-            _ => match edit_box(
-                &mut self.range_editor,
-                &mut self.print_dialog.range_text,
-                event,
-                PRINT_RANGE_SIZE,
-            ) {
-                Some(edited) => {
-                    if edited.text {
-                        self.print_dialog.choice = RangeChoice::Custom;
-                    }
-                    edited.text || edited.caret
+            _ => {
+                let edit = self.print_dialog.range_box.key(event);
+                if edit.changed {
+                    self.print_dialog.choice = RangeChoice::Custom;
                 }
-                None => false,
-            },
+                edit.changed || edit.moved
+            }
         }
     }
 
@@ -7009,13 +6877,14 @@ mod tests {
 
         // The print dialog's range types what a key typed.
         app.print_dialog.open = true;
-        app.print_dialog.range_text.clear();
+        app.print_dialog.range_box.clear();
         app.handle_key(&key(Key::P, "p", Modifiers::ctrl()));
         app.handle_key(&key(Key::X, "x", Modifiers::alt()));
         app.handle_key(&key(Key::Num2, "2", Modifiers::NONE));
         app.handle_key(&key(Key::Enter, "", Modifiers::alt()));
         assert_eq!(
-            app.print_dialog.range_text, "2",
+            app.print_dialog.range_box.text(),
+            "2",
             "the range typed a command's letter"
         );
         assert!(app.print_dialog.open, "Alt+Enter printed");
@@ -7868,7 +7737,7 @@ mod tests {
     fn the_page_range_box_is_the_toolkits_field() {
         let (mut app, p) = ringed();
         app.print_dialog.open = true;
-        app.print_dialog.range_text.clear();
+        app.print_dialog.range_box.clear();
         let rect = probe::rect_of(&app, Target::PrintRangeField).expect("the range box");
         let focused = field::State {
             focused: true,
@@ -7894,12 +7763,13 @@ mod tests {
         );
         app.handle_key(&probe::ctrl(Key::A));
         typed(&mut app, "2-4");
-        assert_eq!(app.print_dialog.range_text, "2-4");
+        assert_eq!(app.print_dialog.range_box.text(), "2-4");
         assert!(draws_box(&app, &p, rect, focused), "a good range is red");
         app.handle_key(&probe::press(Key::Home));
         typed(&mut app, "1,");
         assert_eq!(
-            app.print_dialog.range_text, "1,2-4",
+            app.print_dialog.range_box.text(),
+            "1,2-4",
             "Home did not move the caret"
         );
     }

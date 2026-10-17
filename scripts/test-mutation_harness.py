@@ -1,4 +1,9 @@
-"""Tests for mutation_harness.check_the_table: where a table's tests are found.
+"""Tests for mutation_harness: its table check, failures, cargo and guest wait.
+
+Where a table's tests are found (`check_the_table`), how a run's failures are
+read, the cargo a sweep runs, and its wait for a QEMU guest.
+
+`check_the_table`: where a table's tests are found.
 
 A row names the tests that must fail when its mutation is applied, and the
 table check refuses a row naming a test that does not exist -- up front,
@@ -17,7 +22,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mutation_harness import cargo_test_command, check_the_table, failed_tests  # noqa: E402  (path set above)
+from mutation_harness import (  # noqa: E402  (path set above)
+    cargo_test_command,
+    check_the_table,
+    failed_tests,
+    wait_while_a_guest_is_up,
+)
 
 # `cargo test`'s report when a unit test in a submodule and an integration
 # test both fail -- two binaries, each with its own `failures:` summary. The
@@ -169,6 +179,18 @@ def main() -> int:
     ]:
         ok = got == want
         print(f"  {'ok  ' if ok else 'FAIL'}  {label} (got {got})")
+        results.append(ok)
+    # The wait for a guest: none when no guest is up, and while one is, a
+    # sleep per poll that still finds it -- returning only once it is gone.
+    for label, ups, want in [
+        ("no guest up: nothing is waited for", [False], 0),
+        ("a guest up for two polls: two sleeps, then on", [True, True, True, False], 2),
+    ]:
+        polls = iter(ups)
+        sleeps = []
+        got = wait_while_a_guest_is_up(lambda: next(polls), sleeps.append, poll=7)
+        ok = got == want and sleeps == [7] * want and next(polls, None) is None
+        print(f"  {'ok  ' if ok else 'FAIL'}  {label} (slept {sleeps})")
         results.append(ok)
     passed = sum(results)
     print(f"all {passed} mutation_harness tests passed" if all(results)

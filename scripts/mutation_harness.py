@@ -52,6 +52,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -196,6 +197,44 @@ def build_tests(crate, timeout=1800, targets=()):
         cwd=REPO,
         env=cargo_env(),
     )
+
+
+#: The images a QEMU guest runs as, on Windows.
+QEMU_IMAGES = ("qemu-system-x86_64.exe", "qemu-system-x86_64w.exe")
+
+
+def qemu_running():
+    """Whether a QEMU guest is up anywhere on the machine, any lane's."""
+    if os.name != "nt":
+        return subprocess.run(["pgrep", "-f", "qemu-system"], capture_output=True).returncode == 0
+    out = subprocess.run(
+        ["tasklist", "/NH"], capture_output=True, text=True, encoding="utf-8", errors="replace"
+    ).stdout.lower()
+    return any(name in out for name in QEMU_IMAGES)
+
+
+def wait_while_a_guest_is_up(running=qemu_running, sleep=time.sleep, poll=60):
+    """Return once no QEMU guest is up, saying so when it had to wait.
+
+    Nothing is built beside a QEMU guest (the projects' `CLAUDE.md`): a build
+    takes the CPU a boot test's timings are measured on, and a sweep is one
+    build after another for hours.  `sweep` waits before its warm-up and
+    before it writes each mutant -- before, so that a guest's boot is not
+    sat out with a broken program on disk, where an edit to the crate would
+    be made over the mutant.  A guest that comes up during a row shares the
+    machine with that row alone.
+
+    `running` says whether a guest is up and `sleep` waits `poll` seconds:
+    the machine's, but for a test.  Returns how many times it slept.
+    """
+    slept = 0
+    if running():
+        print("[wait] a QEMU guest is up: nothing is built until it is gone", flush=True)
+        while running():
+            sleep(poll)
+            slept += 1
+        print("[wait] no QEMU guest is up", flush=True)
+    return slept
 
 
 def failed_tests(stdout):
@@ -488,6 +527,7 @@ def sweep(src, mutations, crate, timeout=240, only=None, targets=()):
     # `[ok] caught -- the harness died` and the run exited 0 without compiling a
     # single test.  One run against the unmutated source, up front, is the
     # cheapest possible check and it is the one that catches that whole class.
+    wait_while_a_guest_is_up()
     print(f"warm-up: building {crate}'s tests, outside the sweep's timeout ...")
     b = build_tests(crate, targets=targets)
     if b.returncode != 0:
@@ -517,6 +557,7 @@ def sweep(src, mutations, crate, timeout=240, only=None, targets=()):
         # rule that already holds (`known-issues.md` lesson 51), and one no test
         # could reach to own.  The check moved up rather than being duplicated.
         for name, old, new, expect in selected:
+            wait_while_a_guest_is_up()
             src.write_text(original.replace(old, new), encoding="utf-8", newline="")
             # Build this mutant OUTSIDE the timed window, every time -- not just
             # once at startup.  The timeout is there to catch a mutant that loops

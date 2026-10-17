@@ -393,6 +393,55 @@ pub(crate) fn take_internal(sig: i32) -> Result<(i32, Record), i32> {
     accept(sigmask_bit(sig), None, crate::interrupt::Mark::now())
 }
 
+/// `set` less the library's own signals: what a program's mask may hold
+/// (`pthread_attr_setsigmask_np` stores it so, as glibc's).
+pub(crate) fn without_internal(mut set: SigsetT) -> SigsetT {
+    set.bits[0] &= !INTERNAL_BITS;
+    set
+}
+
+/// The mask a new thread starts with: `asked`, its attribute's, or else the
+/// calling thread's -- less `SIGKILL` and `SIGSTOP`, which no mask holds,
+/// and less the library's own signals, as glibc's `pthread_create` takes
+/// its cancellation signal out: a timer thread, made by the helper that
+/// blocks them, does not block them.
+pub(crate) fn new_thread_mask(asked: Option<SigsetT>) -> SigsetT {
+    let mut m = asked.unwrap_or_else(calling_thread_mask);
+    m.bits[0] &= !(INTERNAL_BITS | sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
+    m
+}
+
+/// A new thread's first step once its thread pointer is in place: the
+/// kernel's mask from the one its creator left in its block
+/// ([`new_thread_mask`]). Until then every signal is blocked
+/// ([`AllBlocked`]).
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+pub(crate) fn thread_started() {
+    sync_kernel_blocked_mask();
+}
+
+/// While it lives, the calling thread's kernel mask blocks every signal --
+/// the program's mask untouched -- and dropping it writes the kernel's back
+/// from the program's. `pthread_create` holds one across the call that
+/// makes a thread, which starts with its creator's kernel mask: so the new
+/// thread takes no signal before it has written its own
+/// ([`thread_started`]), glibc's way.
+pub(crate) struct AllBlocked(());
+
+impl AllBlocked {
+    /// Block every signal in the calling thread's kernel mask.
+    pub(crate) fn new() -> Self {
+        write_kernel_mask(u64::MAX);
+        Self(())
+    }
+}
+
+impl Drop for AllBlocked {
+    fn drop(&mut self) {
+        sync_kernel_blocked_mask();
+    }
+}
+
 /// The calling thread's blocked mask, whole: what `pthread_create` gives the
 /// thread it makes.
 pub(crate) fn calling_thread_mask() -> SigsetT {
@@ -2367,31 +2416,36 @@ pub fn init_signals() {}
 /// maps exactly to `SigsetT::bits[0]` (signal N → bit N-1).  Higher
 /// realtime signals are not deliverable asynchronously yet, so only the
 /// low word is synchronised.
-#[cfg(target_os = "none")]
 fn sync_kernel_blocked_mask() {
     use core::sync::atomic::Ordering::SeqCst;
     let generation = mask_generation();
     loop {
         let seen = generation.load(SeqCst);
-        let mut old: u64 = 0;
-        // The kernel's answer is not needed: the call fails only for a bad
-        // out-pointer, and this one is a local.
-        let _ = crate::syscall::syscall2(
-            crate::syscall::SYS_SIGNAL_MASK,
-            kernel_mask_now(),
-            core::ptr::addr_of_mut!(old) as u64,
-        );
+        write_kernel_mask(kernel_mask_now());
         if generation.load(SeqCst) == seen {
             break;
         }
     }
 }
 
+/// Make `mask` the calling thread's kernel mask (`SYS_SIGNAL_MASK`).
+#[cfg(target_os = "none")]
+fn write_kernel_mask(mask: u64) {
+    let mut old: u64 = 0;
+    // The kernel's answer is not needed: the call fails only for a bad
+    // out-pointer, and this one is a local.
+    let _ = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_MASK,
+        mask,
+        core::ptr::addr_of_mut!(old) as u64,
+    );
+}
+
 /// The host's stand-in: there is no kernel, so the mask is only kept, for
 /// the tests to read ([`kernel_blocked_low`]).
 #[cfg(not(target_os = "none"))]
-fn sync_kernel_blocked_mask() {
-    HOST_KERNEL_MASK.with(|m| m.set(kernel_mask_now()));
+fn write_kernel_mask(mask: u64) {
+    HOST_KERNEL_MASK.with(|m| m.set(mask));
 }
 
 #[cfg(not(target_os = "none"))]
@@ -6472,6 +6526,51 @@ mod tests {
         };
         assert_eq!(text(strsignal(32)), "Unknown signal 32");
         assert_eq!(text(strsignal(34)), "Real-time signal 0");
+    }
+
+    /// A new thread's mask is its attribute's or its creator's, less KILL,
+    /// STOP and the library's own signals -- so a timer thread, made by the
+    /// helper that blocks those, does not block them, as glibc's does not --
+    /// and while a thread is made its creator's kernel mask blocks every
+    /// signal, written back afterwards from the creator's own.
+    #[test]
+    fn a_new_threads_mask_and_the_quiet_while_it_is_made() {
+        let saved = calling_thread_mask();
+        let mut asked = SigsetT::EMPTY;
+        asked.bits[0] =
+            sigmask_bit(SIGUSR2) | sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP) | INTERNAL_BITS;
+        asked.bits[1] = 2;
+        let made = new_thread_mask(Some(asked));
+        assert_eq!(made.bits[0], sigmask_bit(SIGUSR2));
+        assert_eq!(made.bits[1], 2, "the high words as asked");
+
+        let mut raw = SigsetT::EMPTY;
+        raw.bits[0] = sigmask_bit(SIGUSR1);
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const raw, core::ptr::null_mut()),
+            0
+        );
+        block_internal_signals();
+        assert_eq!(
+            new_thread_mask(None).bits[0],
+            sigmask_bit(SIGUSR1),
+            "the creator's, less the library's own"
+        );
+
+        let before = kernel_blocked_low();
+        assert_eq!(before, kernel_mask_now());
+        {
+            let _quiet = AllBlocked::new();
+            assert_eq!(kernel_blocked_low(), u64::MAX, "every signal");
+        }
+        assert_eq!(kernel_blocked_low(), before, "and back");
+        write_kernel_mask(u64::MAX);
+        thread_started();
+        assert_eq!(kernel_blocked_low(), before, "a new thread's own");
+
+        // SAFETY: `blocked_mask_ptr()` is this thread's own.
+        unsafe { blocked_mask_ptr().write(saved) };
+        mask_changed();
     }
 
     #[test]

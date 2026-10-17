@@ -30,6 +30,11 @@
  *   5x  a signal sent to the main thread while another thread waits for it
  *       in sigtimedwait is not that thread's: its wait runs out (50), and
  *       the main thread takes the signal (51)
+ *   6x  an attribute answers PTHREAD_ATTR_NO_SIGMASK_NP until it is given a
+ *       signal mask (60), then that mask (61); a thread made with it starts
+ *       with that mask, not its creator's (62), and the kernel's agrees from
+ *       its start: a signal its creator blocks and it does not runs its
+ *       handler on it (63); an empty mask blocks nothing (65)
  */
 
 #define _GNU_SOURCE
@@ -46,6 +51,7 @@ static atomic_int usr1_tid, usr2_runs;
 static atomic_int stop_helper, helper_ready;
 static atomic_int born_blocked = -1, unblocked = -1;
 static atomic_int helper_waited = -1;
+static atomic_int saw_usr1 = -1, saw_usr2 = -1, handled_here = -1;
 
 static void pause_ms(long ms)
 {
@@ -105,6 +111,33 @@ static void *waiter(void *arg)
     int got = sigtimedwait(&set, 0, &limit);
     atomic_store(&helper_waited, got == -1 && errno == EAGAIN ? 0 : got);
     return 0;
+}
+
+/* Says what it blocks, then waits up to a second for SIGUSR1 to run its
+ * handler on this thread. */
+static void *masked(void *arg)
+{
+    (void)arg;
+    atomic_store(&saw_usr1, blocks(SIGUSR1));
+    atomic_store(&saw_usr2, blocks(SIGUSR2));
+    atomic_store(&helper_ready, 1);
+    int me = (int)gettid();
+    for (int i = 0; i < 200 && atomic_load(&usr1_tid) != me; i++)
+        pause_ms(5);
+    atomic_store(&handled_here, atomic_load(&usr1_tid) == me);
+    return 0;
+}
+
+/* Makes a thread running masked with attr, and waits for it to start. */
+static int start_masked(pthread_t *t, pthread_attr_t *attr)
+{
+    atomic_store(&helper_ready, 0);
+    atomic_store(&usr1_tid, 0);
+    if (pthread_create(t, attr, masked, 0) != 0)
+        return 0;
+    while (!atomic_load(&helper_ready))
+        pause_ms(1);
+    return 1;
 }
 
 static int take(int sig)
@@ -176,5 +209,36 @@ int main(void)
         return 50;
     if (!take(SIGUSR2))
         return 51;
+
+    /* 6x: the main thread blocks SIGUSR1 and SIGUSR2 here. */
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    sigset_t got;
+    if (pthread_attr_getsigmask_np(&attr, &got) != PTHREAD_ATTR_NO_SIGMASK_NP)
+        return 60;
+    if (pthread_attr_setsigmask_np(&attr, &usr2) != 0 || pthread_attr_getsigmask_np(&attr, &got) != 0
+        || !sigismember(&got, SIGUSR2) || sigismember(&got, SIGUSR1))
+        return 61;
+    pthread_t m;
+    if (!start_masked(&m, &attr))
+        return 19;
+    int as_asked = atomic_load(&saw_usr1) == 0 && atomic_load(&saw_usr2) == 1;
+    pthread_kill(m, SIGUSR1);
+    pthread_join(m, 0);
+    if (!as_asked)
+        return 62;
+    if (atomic_load(&handled_here) != 1)
+        return 63;
+    sigset_t empty;
+    sigemptyset(&empty);
+    pthread_attr_setsigmask_np(&attr, &empty);
+    if (!start_masked(&m, &attr))
+        return 19;
+    int nothing = atomic_load(&saw_usr1) == 0 && atomic_load(&saw_usr2) == 0;
+    pthread_kill(m, SIGUSR1);
+    pthread_join(m, 0);
+    if (!nothing)
+        return 65;
+    pthread_attr_destroy(&attr);
     return 42;
 }

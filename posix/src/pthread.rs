@@ -143,6 +143,7 @@
 
 use crate::errno;
 use crate::sched::CpuSetT;
+use crate::signal::SigsetT;
 // The stack floor lives with the other pthread limits; `pthread_attr_setstack`
 // and `pthread_attr_setstacksize` are the only users, and they must agree with
 // it rather than carry a second, hardcoded value of their own.
@@ -727,6 +728,10 @@ pub extern "C" fn __pthread_thread_start(
     // only a defensive guard against a bad `fs_base` install.
     if tp != 0 {
         let _ = crate::tls::install(tp);
+        // The kernel's mask from the one the creator left in the block,
+        // which needs the thread pointer: until here every signal is
+        // blocked.
+        crate::signal::thread_started();
     }
     let ret = start(arg);
     pthread_exit(ret);
@@ -790,10 +795,16 @@ pub extern "C" fn pthread_create(
 pub(crate) struct LaterAttr(CreateAttr);
 
 impl LaterAttr {
-    /// `attr` (NULL for the defaults), read now, detached.
+    /// `attr` (NULL for the defaults), read now, detached -- its stack, guard
+    /// and scheduling, which is all glibc's `timer_create` copies: a CPU set
+    /// or a signal mask in it reaches no timer thread there, and so none
+    /// here. A timer thread starts with the helper's mask: every signal
+    /// blocked but the library's own.
     pub(crate) fn detached(attr: *const PthreadAttrT) -> Self {
         let mut want = CreateAttr::read(attr);
         want.detached = true;
+        want.affinity = None;
+        want.sigmask = None;
         Self(want)
     }
 
@@ -867,6 +878,9 @@ struct CreateAttr {
     /// is kept and any other refused -- `ENOSYS`, or `EINVAL` for one with no
     /// CPU there is (`crate::sched::affinity_change`).
     affinity: Option<i32>,
+    /// The signal mask asked for (`pthread_attr_setsigmask_np`); `None` for
+    /// the creator's.
+    sigmask: Option<SigsetT>,
 }
 
 impl CreateAttr {
@@ -882,6 +896,7 @@ impl CreateAttr {
         detached: false,
         explicit_sched: None,
         affinity: None,
+        sigmask: None,
     };
 
     /// What `attr` asks for; NULL stands for the process's default
@@ -912,6 +927,8 @@ impl CreateAttr {
                 .and_then(|mask| crate::sched::affinity_change(&mask, crate::sched::online_cpus()))
                 .err()
         });
+        // SAFETY: as above.
+        let sigmask = unsafe { attr_sigmask(buf) };
         Self {
             stack_size,
             guard_size: attr_read_guardsize(buf),
@@ -928,6 +945,7 @@ impl CreateAttr {
                 },
             ),
             affinity,
+            sigmask,
         }
     }
 }
@@ -1069,11 +1087,12 @@ fn launch(
         // so the lookup is safe.
         crate::tls::set_stack_guard(layout.tp, crate::crt::process_stack_guard());
         (*crate::perthread::block_at(layout.tp)).thread_slot = core::ptr::from_ref(slot) as usize;
-        // POSIX: a new thread's signal mask is its creator's. The kernel
-        // gives the new thread the creator's kernel mask, which is this
-        // same mask -- a thread in `pthread_create` waits for no signal --
-        // so the two agree from the thread's first instruction.
-        (*crate::perthread::block_at(layout.tp)).blocked = crate::signal::calling_thread_mask();
+        // POSIX: a new thread's signal mask is its creator's, unless the
+        // attribute gives one. The thread writes the kernel's from it first
+        // thing (`__pthread_thread_start`); until then it has its creator's
+        // kernel mask at `SYS_THREAD_CREATE`, which blocks every signal.
+        (*crate::perthread::block_at(layout.tp)).blocked =
+            crate::signal::new_thread_mask(want.sigmask);
     }
     fill_slot(
         slot,
@@ -1111,12 +1130,15 @@ fn launch(
     // Create the kernel thread, counted first: it may end before the
     // syscall returns (`LIVE_THREADS`).
     live_threads_add(&LIVE_THREADS);
-    let ret = syscall::syscall3(
-        syscall::SYS_THREAD_CREATE,
-        entry,
-        user_rsp,
-        u64::MAX, // default priority
-    );
+    let ret = {
+        let _quiet = crate::signal::AllBlocked::new();
+        syscall::syscall3(
+            syscall::SYS_THREAD_CREATE,
+            entry,
+            user_rsp,
+            u64::MAX, // default priority
+        )
+    };
     if ret < 0 {
         // It never ran, so it can never be the last; the result is moot.
         let _ = live_threads_remove(&LIVE_THREADS);
@@ -3284,15 +3306,29 @@ const ATTR_OFF_SCOPE: usize = 44;
 const ATTR_OFF_EXT: usize = 48;
 
 /// What an attribute object holds out of line (glibc's
-/// `struct pthread_attr_extension`, less the signal mask this library cannot
-/// give one thread alone -- signal masks are the process's here, see
-/// `signal.rs`'s `pthread_sigmask`).
+/// `struct pthread_attr_extension`). All zeros is one that asks for nothing.
 #[repr(C)]
 struct AttrExt {
     /// The CPU set's bytes, `malloc`ed, or NULL for none.
     cpuset: *mut u8,
     /// How many.
     cpusetsize: usize,
+    /// The signal mask threads made with the object start with, when
+    /// `sigmask_set` (`pthread_attr_setsigmask_np`).
+    sigmask: SigsetT,
+    /// Whether the object has a signal mask.
+    sigmask_set: bool,
+}
+
+/// Give the attribute object, which has no extension, one that asks for
+/// nothing: it, or `ENOMEM`.
+fn attr_make_ext(buf: &mut PthreadAttrT) -> Result<*mut AttrExt, i32> {
+    let ext = crate::malloc::calloc(1, core::mem::size_of::<AttrExt>()).cast::<AttrExt>();
+    if ext.is_null() {
+        return Err(errno::ENOMEM);
+    }
+    attr_write_ext(buf, ext);
+    Ok(ext)
 }
 
 /// The attribute object's extension, or NULL.
@@ -3354,11 +3390,7 @@ unsafe fn attr_set_cpuset(buf: &mut PthreadAttrT, set: &[u8]) -> Result<(), i32>
         return Ok(());
     }
     if ext.is_null() {
-        ext = crate::malloc::calloc(1, core::mem::size_of::<AttrExt>()).cast::<AttrExt>();
-        if ext.is_null() {
-            return Err(errno::ENOMEM);
-        }
-        attr_write_ext(buf, ext);
+        ext = attr_make_ext(buf)?;
     }
     // SAFETY: the caller's contract, or the zeroed extension just made
     // (a NULL set of 0 bytes).
@@ -3372,6 +3404,44 @@ unsafe fn attr_set_cpuset(buf: &mut PthreadAttrT, set: &[u8]) -> Result<(), i32>
             (*ext).cpusetsize = set.len();
         }
         core::ptr::copy_nonoverlapping(set.as_ptr(), (*ext).cpuset, set.len());
+    }
+    Ok(())
+}
+
+/// The attribute object's signal mask, if it has one.
+///
+/// # Safety
+///
+/// As [`attr_cpuset`].
+unsafe fn attr_sigmask(buf: &PthreadAttrT) -> Option<SigsetT> {
+    let ext = attr_read_ext(buf);
+    if ext.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's contract.
+    let e = unsafe { &*ext };
+    e.sigmask_set.then_some(e.sigmask)
+}
+
+/// Give the attribute object `mask` as the signal mask of the threads made
+/// with it, or none -- `ENOMEM` if there is no memory for it, the object as
+/// it was.
+///
+/// # Safety
+///
+/// As [`attr_cpuset`].
+unsafe fn attr_set_sigmask(buf: &mut PthreadAttrT, mask: Option<SigsetT>) -> Result<(), i32> {
+    let mut ext = attr_read_ext(buf);
+    if ext.is_null() {
+        if mask.is_none() {
+            return Ok(());
+        }
+        ext = attr_make_ext(buf)?;
+    }
+    // SAFETY: the caller's contract, or the extension just made.
+    unsafe {
+        (*ext).sigmask_set = mask.is_some();
+        (*ext).sigmask = mask.unwrap_or(SigsetT::EMPTY);
     }
     Ok(())
 }
@@ -3402,10 +3472,18 @@ unsafe fn attr_free_ext(buf: &mut PthreadAttrT) {
 unsafe fn attr_deep_copy(buf: &PthreadAttrT) -> Result<PthreadAttrT, i32> {
     let mut copy = *buf;
     attr_write_ext(&mut copy, core::ptr::null_mut());
-    // SAFETY: the caller's contract.
-    if let Some(set) = unsafe { attr_cpuset(buf) } {
-        // SAFETY: `copy` has no extension yet; `set` is `buf`'s.
-        unsafe { attr_set_cpuset(&mut copy, set) }?;
+    // SAFETY: the caller's contract; `copy`'s extension is one made here,
+    // freed again if the copy cannot be finished.
+    unsafe {
+        let made = match attr_cpuset(buf) {
+            Some(set) => attr_set_cpuset(&mut copy, set),
+            None => Ok(()),
+        }
+        .and_then(|()| attr_set_sigmask(&mut copy, attr_sigmask(buf)));
+        if let Err(e) = made {
+            attr_free_ext(&mut copy);
+            return Err(e);
+        }
     }
     Ok(copy)
 }
@@ -3883,6 +3961,74 @@ pub unsafe extern "C" fn pthread_attr_getaffinity_np(
         None => unsafe { core::ptr::write_bytes(out, 0xff, cpusetsize) },
     }
     0
+}
+
+/// What `pthread_attr_getsigmask_np` answers for an attribute object with no
+/// signal mask, whose threads start with their creator's.
+pub const PTHREAD_ATTR_NO_SIGMASK_NP: i32 = -1;
+
+/// `pthread_attr_setsigmask_np(attr, mask)` (GNU): the signal mask threads
+/// made with `attr` start with, instead of their creator's. Stored less the
+/// library's own two signals, 32 and 33, as glibc's stores it; `SIGKILL`
+/// and `SIGSTOP` are kept, and left out of the thread's mask as every mask
+/// leaves them out. A NULL `mask` takes the mask away -- on an object that
+/// never had one too, which crashes glibc 2.39 and is a no-op here. 0, or
+/// `ENOMEM`.
+///
+/// # Safety
+///
+/// `attr` is NULL or an initialised attribute object; `sigmask` is NULL or
+/// a readable `sigset_t`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_attr_setsigmask_np(
+    attr: *mut PthreadAttrT,
+    sigmask: *const SigsetT,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    // SAFETY: NULL or the caller's set.
+    let mask = unsafe { sigmask.as_ref() }.map(|&m| crate::signal::without_internal(m));
+    // SAFETY: an initialised attribute object.
+    match unsafe { attr_set_sigmask(buf, mask) } {
+        Ok(()) => 0,
+        Err(e) => e,
+    }
+}
+
+/// `pthread_attr_getsigmask_np(attr, mask)` (GNU): the object's signal mask
+/// into `*mask`, and 0 -- or, for an object with none, an empty set and
+/// [`PTHREAD_ATTR_NO_SIGMASK_NP`].
+///
+/// # Safety
+///
+/// `attr` is NULL or an initialised attribute object; `sigmask` is NULL or
+/// a writable `sigset_t`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn pthread_attr_getsigmask_np(
+    attr: *const PthreadAttrT,
+    sigmask: *mut SigsetT,
+) -> i32 {
+    // SAFETY: NULL or the caller's attribute object.
+    let Some(buf) = (unsafe { attr.as_ref() }) else {
+        return errno::EFAULT;
+    };
+    // SAFETY: NULL or the caller's set.
+    let Some(out) = (unsafe { sigmask.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    // SAFETY: an initialised attribute object.
+    match unsafe { attr_sigmask(buf) } {
+        Some(mask) => {
+            *out = mask;
+            0
+        }
+        None => {
+            *out = SigsetT::EMPTY;
+            PTHREAD_ATTR_NO_SIGMASK_NP
+        }
+    }
 }
 
 /// Get the guard size from a thread attribute object.
@@ -9064,6 +9210,7 @@ mod tests {
                 detached: true,
                 explicit_sched: None,
                 affinity: None,
+                sigmask: None,
             }
         );
         assert_eq!(
@@ -9096,6 +9243,7 @@ mod tests {
             detached: false,
             explicit_sched: None,
             affinity: None,
+            sigmask: None,
         };
         let plan = plan_thread(&want, &TEST_TLS).expect("fits");
         assert_eq!(plan.guard, page, "the guard rounds up to a page");
@@ -9135,6 +9283,7 @@ mod tests {
             detached: false,
             explicit_sched: None,
             affinity: None,
+            sigmask: None,
         };
         let plan = plan_thread(&want, &TEST_TLS).expect("fits");
         assert_eq!(plan.guard, 0);
@@ -10802,6 +10951,117 @@ mod tests {
         assert_eq!(pthread_attr_destroy(&mut a), 0);
         assert!(attr_read_ext(&a).is_null(), "destroyed: nothing held");
         assert_eq!(pthread_attr_destroy(&mut a), 0, "twice: nothing to free");
+    }
+
+    /// The attribute's signal mask, as glibc 2.39 keeps it
+    /// (`build/d-tools/oracle-attr-sigmask.c`): none until one is set, which
+    /// reads back as an empty set and `PTHREAD_ATTR_NO_SIGMASK_NP`; stored
+    /// less 32 and 33, `SIGKILL` and `SIGSTOP` kept; an empty mask a mask;
+    /// NULL taking it away -- on an object that never had one too, where
+    /// glibc's crashes.
+    #[test]
+    fn attr_sigmask_is_kept_less_the_librarys_own_as_glibcs() {
+        let bit = |sig: u32| 1u64 << (sig - 1);
+        let mut a = fresh_attr();
+        let mut got = SigsetT::EMPTY;
+        got.bits[0] = u64::MAX;
+        let none = SigsetT::EMPTY;
+        // SAFETY: a fresh attribute and local sets throughout.
+        unsafe {
+            assert_eq!(
+                pthread_attr_getsigmask_np(&a, &raw mut got),
+                PTHREAD_ATTR_NO_SIGMASK_NP
+            );
+            assert_eq!(got, SigsetT::EMPTY, "none: an empty set");
+            assert_eq!(pthread_attr_setsigmask_np(&mut a, core::ptr::null()), 0);
+            assert!(
+                attr_read_ext(&a).is_null(),
+                "nothing to take away, nothing made"
+            );
+
+            let mut asked = SigsetT::EMPTY;
+            asked.bits[0] = bit(12) | bit(9) | bit(19) | bit(32) | bit(33);
+            asked.bits[1] = 1;
+            assert_eq!(pthread_attr_setsigmask_np(&mut a, &raw const asked), 0);
+            assert_eq!(pthread_attr_getsigmask_np(&a, &raw mut got), 0);
+            assert_eq!(
+                got.bits[0],
+                bit(12) | bit(9) | bit(19),
+                "32 and 33 left out, KILL and STOP kept"
+            );
+            assert_eq!(got.bits[1], 1);
+
+            assert_eq!(pthread_attr_setsigmask_np(&mut a, &raw const none), 0);
+            got.bits[0] = 7;
+            assert_eq!(pthread_attr_getsigmask_np(&a, &raw mut got), 0, "a mask");
+            assert_eq!(got, SigsetT::EMPTY);
+
+            assert_eq!(pthread_attr_setsigmask_np(&mut a, core::ptr::null()), 0);
+            assert_eq!(
+                pthread_attr_getsigmask_np(&a, &raw mut got),
+                PTHREAD_ATTR_NO_SIGMASK_NP,
+                "taken away"
+            );
+
+            // NULLs, where glibc's fault.
+            assert_eq!(
+                pthread_attr_setsigmask_np(core::ptr::null_mut(), &raw const none),
+                errno::EFAULT
+            );
+            assert_eq!(
+                pthread_attr_getsigmask_np(core::ptr::null(), &raw mut got),
+                errno::EFAULT
+            );
+            assert_eq!(
+                pthread_attr_getsigmask_np(&a, core::ptr::null_mut()),
+                errno::EFAULT
+            );
+        }
+        assert_eq!(pthread_attr_destroy(&mut a), 0);
+        assert!(attr_read_ext(&a).is_null(), "destroyed: nothing held");
+    }
+
+    /// The mask goes with a copy of the object (the defaults',
+    /// `pthread_setattr_default_np`), with the CPU set or without one, and
+    /// `pthread_create` reads it; a `SIGEV_THREAD` timer's threads take
+    /// neither, as glibc's `timer_create` copies neither.
+    #[test]
+    fn attr_sigmask_reaches_copies_and_pthread_create_but_not_timer_threads() {
+        let mut a = fresh_attr();
+        let mut asked = SigsetT::EMPTY;
+        asked.bits[0] = 1 << 11;
+        let cpus: [u8; 1] = [1];
+        // SAFETY: a fresh attribute and local sets.
+        unsafe {
+            assert_eq!(pthread_attr_setsigmask_np(&mut a, &raw const asked), 0);
+            assert_eq!(
+                pthread_attr_setaffinity_np(&mut a, 1, cpus.as_ptr().cast()),
+                0
+            );
+        }
+        assert_eq!(CreateAttr::read(&a).sigmask, Some(asked));
+        let later = LaterAttr::detached(&a).0;
+        assert_eq!(
+            (later.sigmask, later.affinity, later.detached),
+            (None, None, true)
+        );
+
+        for with_cpus in [true, false] {
+            if !with_cpus {
+                // SAFETY: as above.
+                unsafe { pthread_attr_setaffinity_np(&mut a, 0, core::ptr::null()) };
+            }
+            // SAFETY: an initialised attribute object.
+            let mut copy = unsafe { attr_deep_copy(&a) }.unwrap();
+            assert_ne!(attr_read_ext(&copy), attr_read_ext(&a), "its own");
+            // SAFETY: the copy's own extension.
+            unsafe {
+                assert_eq!(attr_sigmask(&copy), Some(asked));
+                assert_eq!(attr_cpuset(&copy), with_cpus.then_some(&cpus[..]));
+            }
+            assert_eq!(pthread_attr_destroy(&mut copy), 0);
+        }
+        assert_eq!(pthread_attr_destroy(&mut a), 0);
     }
 
     /// `pthread_create` keeps a set of every CPU and refuses any other --

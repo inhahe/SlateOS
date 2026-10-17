@@ -8181,6 +8181,17 @@ mod tests {
             (ROOT_FONT_SIZE, FontWeightHint::Bold),
             "drawn at the zoom before the view was reset"
         );
+
+        // A rename begun while zoomed starts at the zoomed size.
+        app.handle_event(&press(Key::Escape));
+        assert_eq!(app.editing_node, None, "control: Escape ends the rename");
+        app.zoom_in();
+        app.handle_event(&press(Key::F2));
+        assert_eq!(
+            drawn(&app),
+            (ROOT_FONT_SIZE * app.zoom, FontWeightHint::Bold),
+            "a rename begun while zoomed is typed at the unzoomed size"
+        );
     }
 
     /// **A node's text being typed edits at a caret**: the arrows, Home and

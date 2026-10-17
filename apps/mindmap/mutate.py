@@ -690,7 +690,8 @@ MUTATIONS += [
         "a node's text starts from the last node's caret",
         "            self.edit_buffer = LineBox::holding(&node.text, BOX_CAPACITY, font_size * self.zoom)\n"
         "                .with_weight(weight);\n",
-        "            self.edit_buffer.set_text(&node.text);\n"
+        "            let text = node.text.clone();\n"
+        "            self.edit_buffer.set_text(&text);\n"
         "            let _ = (font_size, weight);\n",
         [STARTS],
     ),

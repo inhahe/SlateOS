@@ -716,6 +716,69 @@ pub fn measure_in(text: &str, size: f32, weight: FontWeightHint, family: FontFam
     with_font(size, weight, family, |font| font.measure(text))
 }
 
+/// `text` laid out as the shapes of its glyphs rather than drawn: each
+/// glyph's outline in `family` at `size` pixels and `weight`, moved to where
+/// the glyph stands along a pen starting at the origin on the baseline, `y`
+/// down as a drawing's user space has it -- and how far the run moves the
+/// pen. For a drawing that fills and strokes its text as any other shape (an
+/// SVG's `<text>`); the outlines are not hinted, as such drawings' are not.
+/// The built-in bitmap face has no outlines, so its run is an advance alone.
+pub(crate) fn outlined(
+    text: &str,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> (Vec<osfont::sfnt::PathCmd>, f32) {
+    use osfont::sfnt::{PathCmd, Point};
+    with_font(size, weight, family, |font| {
+        let run = font.shape(text);
+        let mut pen = 0.0_f32;
+        let mut commands = Vec::new();
+        for glyph in run.draw_order() {
+            if let Some(outline) = font.outline(glyph.key) {
+                let (ox, oy) = glyph.offset;
+                let at = |p: Point| Point {
+                    x: pen + ox + p.x,
+                    y: -(oy + p.y),
+                };
+                commands.extend(outline.commands.into_iter().map(|command| match command {
+                    PathCmd::MoveTo(p) => PathCmd::MoveTo(at(p)),
+                    PathCmd::LineTo(p) => PathCmd::LineTo(at(p)),
+                    PathCmd::QuadTo(c, p) => PathCmd::QuadTo(at(c), at(p)),
+                    PathCmd::CurveTo(c1, c2, p) => PathCmd::CurveTo(at(c1), at(c2), at(p)),
+                    PathCmd::Close => PathCmd::Close,
+                }));
+            }
+            pen += glyph.advance;
+        }
+        (commands, pen)
+    })
+}
+
+/// The family a CSS `font-family` list asks for, as this machine can draw
+/// it: the first name in the list that is installed -- `serif`,
+/// `sans-serif`, `system-ui` and the other generic names being the UI face,
+/// `monospace` the fixed-pitch one -- and the UI face when none is.
+pub(crate) fn family_from_list(list: &str) -> FontFamily {
+    for name in list.split(',') {
+        let name = name.trim().trim_matches(['"', '\'']).trim();
+        match name.to_ascii_lowercase().as_str() {
+            "" => {}
+            "serif" | "sans-serif" | "system-ui" | "ui-serif" | "ui-sans-serif" | "ui-rounded"
+            | "cursive" | "fantasy" | "math" | "emoji" | "fangsong" => return FontFamily::Ui,
+            "monospace" | "ui-monospace" => return FontFamily::Mono,
+            _ => {
+                if font_db().has_family(name)
+                    && let Some(family) = FontFamily::named(name)
+                {
+                    return family;
+                }
+            }
+        }
+    }
+    FontFamily::Ui
+}
+
 /// An ARGB pixel buffer an application can draw text into directly.
 ///
 /// # Why this exists

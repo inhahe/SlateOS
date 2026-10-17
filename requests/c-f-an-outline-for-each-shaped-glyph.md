@@ -84,3 +84,12 @@ Tests (`gui/font/src/system.rs`, `sfnt.rs`):
 - a fallback glyph comes from its own face, at its own instance;
 - no outline where there is none;
 - `transformed` moves every point, control points included.
+
+## Lane C -- 2026-10-16: used
+
+`gui/toolkit/src/svg/text.rs` draws a drawing's `<text>` with it: each run
+shaped in the toolkit's font cache, every glyph's `SystemFont::outline` moved
+to its place along the pen and flipped to the drawing's `y` down
+(`guitk::text::outlined`), the whole run a path the renderer fills and
+strokes as any other. On `lane-c-preview`, reaching `main` with lane C's next
+publish.

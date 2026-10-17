@@ -5177,6 +5177,15 @@ lane C's `guitk`.
   gives any glyph the font shaped as a path in pixels, y up, from whichever
   face drew it and at that face's weight, unhinted.
 
+- `[x]` `[C]` **SVG text** -- done 2026-10-16, on lane F's outline above.
+  A drawing's `<text>` and `<tspan>`s are laid out when it is built -- `x`,
+  `y`, `dx`, `dy`, `text-anchor`, and the font properties inherited from any
+  element -- and drawn as their glyphs' outlines, so filled, stroked, dashed
+  and painted with gradients as any shape (`gui/toolkit/src/svg/text.rs`,
+  whose docs list what is not read yet: lines, `<textPath>`, per-character
+  positions, spacing, italic). An icon or a picture with words in it showed
+  none of them.
+
 - `[-]` `[F]` **A consent prompt takes the keyboard only on purpose -- lane
   F's part** (the operator's rule, `design-decisions.md` §1242;
   `requests/e-cf-a-consent-prompt-is-answered-only-on-purpose.md`).

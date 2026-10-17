@@ -9690,6 +9690,18 @@ fn print_security_posture() {
     }
 }
 
+/// Whether the console shows [`console::AUTOLOGIN_HINT`]: `/etc/autologin-hint`
+/// is on the root, which is there exactly when an account will sign in by
+/// itself, and the start is not for repair -- the command line has neither
+/// `recovery` nor `single`, the words the recovery boot entry adds.
+fn autologin_hint_wanted() -> bool {
+    let repair = boot::kernel_cmdline_bytes().is_some_and(|line| {
+        line.split(u8::is_ascii_whitespace)
+            .any(|word| word == b"recovery" || word == b"single")
+    });
+    !repair && fs::Vfs::metadata("/etc/autologin-hint").is_ok()
+}
+
 /// Make the system image the root, just before init: the ext4 filesystem the
 /// boot mounted at `/mnt` becomes `/`, and the in-memory root the self-tests
 /// ran on moves to `/.bootfs` and is unmounted there unless a file on it is
@@ -9707,18 +9719,6 @@ fn print_security_posture() {
 ///
 /// A boot with no image (`--no-rootfs`, a diskless machine) keeps the
 /// in-memory root, and so does one whose pivot is refused, which is logged.
-/// Whether the console shows [`console::AUTOLOGIN_HINT`]: `/etc/autologin-hint`
-/// is on the root, which is there exactly when an account will sign in by
-/// itself, and the start is not for repair -- the command line has neither
-/// `recovery` nor `single`, the words the recovery boot entry adds.
-fn autologin_hint_wanted() -> bool {
-    let repair = boot::kernel_cmdline_bytes().is_some_and(|line| {
-        line.split(u8::is_ascii_whitespace)
-            .any(|word| word == b"recovery" || word == b"single")
-    });
-    !repair && fs::Vfs::metadata("/etc/autologin-hint").is_ok()
-}
-
 fn switch_root_to_image() -> bool {
     let image_at_mnt = fs::Vfs::mounts()
         .iter()

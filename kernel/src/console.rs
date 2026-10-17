@@ -349,6 +349,8 @@ fn apply_scheme() {
     con.blank_buffer(bg);
     con.cursor_col = 0;
     con.cursor_row = 0;
+    // The whole framebuffer was repainted, the hint's row with it.
+    draw_hint(&con);
 }
 
 /// Look up the ANSI color at index `idx` (0–15) from the console's palette.
@@ -1121,14 +1123,26 @@ pub const AUTOLOGIN_HINT: &str = "Hold Shift to choose an account";
 /// the screen first, as a line fed at the bottom would. One hint at a time;
 /// a console of one row shows none.
 pub fn show_hint(text: &'static str) {
-    show_hint_on(&mut CONSOLE.lock_irqsave(), text);
+    let mut con = CONSOLE.lock_irqsave();
+    show_hint_on(&mut con, text);
+    HINT_SHOWN.store(con.hint.is_some(), core::sync::atomic::Ordering::Release);
 }
 
 /// Give the bottom row back to the console, blank ([`show_hint`]). Nothing,
-/// when there is no hint.
+/// when there is no hint -- without taking the console's lock, since every
+/// page flip and commit a program makes asks.
 pub fn hide_hint() {
-    hide_hint_on(&mut CONSOLE.lock_irqsave());
+    if !HINT_SHOWN.load(core::sync::atomic::Ordering::Acquire) {
+        return;
+    }
+    let mut con = CONSOLE.lock_irqsave();
+    hide_hint_on(&mut con);
+    HINT_SHOWN.store(false, core::sync::atomic::Ordering::Release);
 }
+
+/// Whether the live console shows a hint ([`show_hint`]): what lets
+/// [`hide_hint`] answer without the console's lock.
+static HINT_SHOWN: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 fn show_hint_on(con: &mut ConsoleInner, text: &'static str) {
     if !con.initialized || con.hint.is_some() || con.rows < 2 {
@@ -1136,7 +1150,15 @@ fn show_hint_on(con: &mut ConsoleInner, text: &'static str) {
     }
     let last = con.rows.saturating_sub(1);
     if con.cursor_row >= last {
+        // The whole screen moves up a row, whatever scroll region a program
+        // set, and the cursor keeps its column.
+        let (top, bottom, col) = (con.scroll_top, con.scroll_bottom, con.cursor_col);
+        con.scroll_top = 0;
+        con.scroll_bottom = last;
         scroll_up_locked(con);
+        con.scroll_top = top;
+        con.scroll_bottom = bottom;
+        con.cursor_col = col;
     }
     let whole = con.scroll_bottom >= last;
     con.rows = last;
@@ -2917,8 +2939,10 @@ pub fn snapshot_state() -> Option<ConsoleSnapshot> {
 /// Overwrites the screen buffer, cursor, colors, attributes, and scroll
 /// region, then repaints the entire framebuffer from the snapshot data.
 ///
-/// Does nothing if the console is not initialized or if the snapshot
-/// dimensions don't match the current console.
+/// Does nothing if the console is not initialized or if the snapshot is of
+/// another resolution. One taken before or after the hint row came or went
+/// ([`show_hint`]) is a row taller or shorter: the rows both have are
+/// restored, the cursor and scroll region kept inside the console's.
 pub fn restore_state(snap: &ConsoleSnapshot) {
     let mut con = CONSOLE.lock_irqsave();
     if !con.initialized {
@@ -2927,12 +2951,12 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
     // Dimension mismatch guard — the framebuffer size cannot change at
     // runtime, but a stale snapshot from a different resolution must not
     // be blindly applied.
-    if snap.cols != con.cols || snap.rows != con.rows {
+    if snap.cols != con.cols || snap.rows.abs_diff(con.rows) > 1 {
         return;
     }
 
-    let expected_len = (con.cols as usize).saturating_mul(con.rows as usize);
-    if snap.screen.len() != expected_len {
+    let snap_len = (snap.cols as usize).saturating_mul(snap.rows as usize);
+    if snap.screen.len() < snap_len {
         return;
     }
 
@@ -2950,12 +2974,22 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
     con.reverse = snap.reverse;
     con.invisible = snap.invisible;
     con.strikethrough = snap.strikethrough;
-    con.scroll_top = snap.scroll_top;
-    con.scroll_bottom = snap.scroll_bottom;
+    let last = con.rows.saturating_sub(1);
+    con.cursor_row = con.cursor_row.min(last);
+    con.scroll_bottom = snap.scroll_bottom.min(last);
+    con.scroll_top = snap.scroll_top.min(con.scroll_bottom);
 
-    // Copy screen buffer.
+    // The screen buffer: what the snapshot has of the rows both have, the
+    // rest blank.
+    let cells = (con.cols as usize).saturating_mul(con.rows as usize);
+    let have = cells.min(snap.screen.len());
     con.screen_buf.clear();
-    con.screen_buf.extend_from_slice(&snap.screen);
+    con.screen_buf
+        .extend_from_slice(snap.screen.get(..have).unwrap_or(&[]));
+    let short = cells.saturating_sub(con.screen_buf.len());
+    if short > 0 && con.screen_buf.try_reserve_exact(short).is_ok() {
+        con.screen_buf.resize(cells, ScrollCell::EMPTY);
+    }
 
     // Repaint the entire framebuffer from the screen buffer.
     let fb = con.fb_addr;
@@ -2977,6 +3011,7 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
             }
         }
     }
+    draw_hint(&con);
 
     // Reset ANSI parser to clean state so the restored session doesn't
     // inherit a partial escape sequence from the previous session.
@@ -3309,11 +3344,6 @@ impl Drop for RestoreTerminal {
     }
 }
 
-/// Boot steps on a scratch console, 40 columns by 6 rows, drawing into
-/// memory: steps nested as the boot nests them, text and a scroll between a
-/// step's start and its end, a region scroll, an erase, and more open steps
-/// than are remembered. Each update must land on its own step's line, or on
-/// a line of its own when that line is gone.
 /// The hint row ([`show_hint`]) on a console of the test's own: the console
 /// is a row shorter while it shows -- its size, its scroll region -- and the
 /// text on the row it takes moves up; lines fed past the bottom scroll above
@@ -3390,6 +3420,11 @@ fn test_hint_row() -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Boot steps on a scratch console, 40 columns by 6 rows, drawing into
+/// memory: steps nested as the boot nests them, text and a scroll between a
+/// step's start and its end, a region scroll, an erase, and more open steps
+/// than are remembered. Each update must land on its own step's line, or on
+/// a line of its own when that line is gone.
 fn test_boot_steps() -> Result<(), &'static str> {
     const COLS: u32 = 40;
     const ROWS: u32 = 6;

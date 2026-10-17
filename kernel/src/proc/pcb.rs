@@ -5954,9 +5954,10 @@ fn shared_range(vma: &Vma, lo: u64, hi: u64) -> Option<(u64, u64)> {
 /// flush per run of pages. The next store to a page then faults, and marks it
 /// dirty again (`resolve_shared_write`). What `page_cache::writeback` does
 /// before it copies pages out: one walk of the process table for them all.
-/// `pages` is in ascending offset order, as the save picks them: each
-/// mapping finds its own by search, so the work under the process table's
-/// lock is the mappings' and the pages they map, not their product.
+/// Each mapping finds its own pages by search -- `pages` in offset order,
+/// as the save picks them, or sorted here first -- so the work under the
+/// process table's lock is the mappings' and the pages they map, not their
+/// product.
 ///
 /// Called with no lock held: it takes the process table, then each address
 /// space's page-table lock, never both.
@@ -5969,6 +5970,17 @@ pub fn write_protect_file_pages(
     if pages.is_empty() {
         return;
     }
+    // Each mapping finds its pages by search, which needs them in offset
+    // order, as a save picks them; given out of order, they are sorted here.
+    let sorted: Vec<(u64, crate::mm::frame::PhysFrame)>;
+    let pages = if pages.is_sorted_by_key(|&(offset, _)| offset) {
+        pages
+    } else {
+        let mut copy = pages.to_vec();
+        copy.sort_unstable_by_key(|&(offset, _)| offset);
+        sorted = copy;
+        sorted.as_slice()
+    };
     let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
     let hw = HW_PAGE_SIZE as u64;
     let writes = |v: &Vma| {
@@ -6124,9 +6136,14 @@ fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) ->
 /// parts). By its VMAs, and in a hole between them by its page tables, page
 /// by page, present or swapped out: the main stack and the ELF image are
 /// mapped here without VMAs, where Linux has one for each. A hole is walked
-/// only up to its first unmapped page. False for a process that is gone.
+/// only up to its first unmapped page. False for a process that is gone, and
+/// for a range reaching past user space: nothing there is the process's
+/// (Linux has no VMA there), and its page tables there are the kernel's.
 #[must_use]
 pub fn range_mapped(pid: ProcessId, start: u64, end: u64) -> bool {
+    if end > crate::mm::page_table::USER_SPACE_END {
+        return false;
+    }
     let holes: Vec<(u64, u64)> = {
         let table = PROCESS_TABLE.lock();
         let Some(proc) = table.get(&pid) else {

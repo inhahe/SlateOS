@@ -12289,7 +12289,13 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             if render_node {
                 return linux_err(errno::EACCES);
             }
-            drm_card_ioctl_mode_page_flip(handle, argp)
+            let flipped = drm_card_ioctl_mode_page_flip(handle, argp);
+            // A program shows its own frame: the screen is its now, and the
+            // console's hint (`console::show_hint`) is not drawn over it.
+            if flipped.value >= 0 {
+                crate::console::hide_hint();
+            }
+            flipped
         }
         // --- virtio-gpu driver-specific ioctls (render-allowed) ---
         //

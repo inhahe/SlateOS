@@ -997,8 +997,12 @@ pub fn close(handle: u64) -> KernelResult<()> {
         // inotify IN_CLOSE_WRITE / IN_CLOSE_NOWRITE on the final close of the
         // open file description.  Directory handles report the close too and
         // are tagged `is_dir` so the inotify adapter ORs in IN_ISDIR.  Gated
-        // lock-free on the matching CLOSE interest count.
-        crate::fs::notify::emit_closed(p, writable, is_dir);
+        // lock-free on the matching CLOSE interest count. Not for a file
+        // whose name is only shown (a memfd: `FileObject::announced`), which
+        // no watcher of a path could ask about.
+        if object.as_ref().is_none_or(|held| held.announced()) {
+            crate::fs::notify::emit_closed(p, writable, is_dir);
+        }
 
         // Last: this description's reference to the file's hold. A file
         // whose last name went while it was open goes with the last

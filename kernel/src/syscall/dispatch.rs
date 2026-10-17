@@ -5049,7 +5049,9 @@ fn test_dispatch_inode_flags() -> KernelResult<()> {
     fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
         serial_println!("[syscall]   FAIL: inode flags: {}", msg);
         pcb::destroy(pid);
-        // Best effort: the file is this test's own scratch.
+        // Best effort: the file is this test's own scratch, and may still be
+        // append-only, which would refuse its removal.
+        let _ = crate::fs::Vfs::set_attributes(PATH, FileAttr::NONE);
         let _ = crate::fs::Vfs::remove(PATH);
         Err(KernelError::InternalError)
     }

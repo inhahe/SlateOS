@@ -272,9 +272,15 @@ S_TO_END = "caret_to_end_types_after_the_text_and_over_no_selection"
 LINE_MUTATIONS = [
     (
         "the box holds no capacity",
+        '            input: crate::field_holding(text, capacity),\n',
+        '            input: crate::field_holding(text, usize::MAX),\n',
+        [S_CAPACITY, "a_box_made_holding_text_types_after_it"],
+    ),
+    (
+        "a box made holding text holds none",
+        '            input: crate::field_holding(text, capacity),\n',
         '            input: crate::field_holding("", capacity),\n',
-        '            input: crate::field_holding("", usize::MAX),\n',
-        [S_CAPACITY],
+        ["a_box_made_holding_text_types_after_it"],
     ),
     (
         "setting the same text counts as a change",

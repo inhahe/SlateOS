@@ -89,8 +89,17 @@ impl LineBox {
     /// at.
     #[must_use]
     pub fn new(capacity: usize, font_size: f32) -> Self {
+        Self::holding("", capacity, font_size)
+    }
+
+    /// A box holding `text`, its caret after it, which typing and pasting
+    /// then fill to at most `capacity` characters -- `text` itself is not
+    /// cut, as [`crate::field_holding`] does not cut it -- drawn at
+    /// `font_size`: a box that starts from something, an address to look up.
+    #[must_use]
+    pub fn holding(text: &str, capacity: usize, font_size: f32) -> Self {
         Self {
-            input: crate::field_holding("", capacity),
+            input: crate::field_holding(text, capacity),
             font_size,
         }
     }
@@ -447,6 +456,19 @@ mod tests {
             }
         );
         assert_eq!(line.text(), "abc");
+    }
+
+    /// **A box made holding text types after it, up to its capacity.**
+    #[test]
+    fn a_box_made_holding_text_types_after_it() {
+        let mut line = LineBox::holding("8.8.8.8", 9, 13.0);
+        assert_eq!(line.text(), "8.8.8.8");
+        typed(&mut line, "xy");
+        assert_eq!(line.text(), "8.8.8.8xy", "the caret was not after the text");
+        assert!(
+            !line.key(&press(Key::Unknown(0), "z")).changed,
+            "typing went past the capacity"
+        );
     }
 
     #[test]

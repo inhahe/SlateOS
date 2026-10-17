@@ -149,8 +149,12 @@ pub struct Window {
     pub sync: bool,
     /// `_use_keypad`.
     pub use_keypad: bool,
-    /// `_delay`.
+    /// `_delay`: how long `wgetch` waits for input, in milliseconds; -1 for
+    /// as long as it takes.
     pub delay: i32,
+    /// `_notimeout`: `wgetch` waits for the rest of a key sequence as long
+    /// as it takes, rather than `ESCDELAY`.
+    pub notimeout: bool,
     /// `_line`.
     pub lines: Vec<Line>,
     /// `_regtop`, `_regbottom`: the scrolling region.
@@ -213,6 +217,7 @@ impl Window {
             sync: false,
             use_keypad: false,
             delay: -1,
+            notimeout: false,
             lines: Vec::with_capacity(rows),
             regtop: 0,
             regbottom: short(num_lines.wrapping_sub(1)),

@@ -429,7 +429,7 @@ impl Term {
     /// Whether a delay that is not mandatory is padded: `normal_delay` --
     /// no `xon`, a `pb` that is not 0 (an absent one is -1, which C counts as
     /// true), no `NCURSES_NO_PADDING`, and a speed at least `pb`.
-    fn normal_delay(&self) -> bool {
+    pub(crate) fn normal_delay(&self) -> bool {
         let pb = self.num(number::PADDING_BAUD_RATE);
         !self.flag(boolean::XON_XOFF) && pb != 0 && !self.no_padding && self.padding.baud >= pb
     }

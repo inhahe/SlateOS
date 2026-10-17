@@ -25,8 +25,8 @@ what it draws; the first waits for PROG to have written something at all.
 (A step that makes PROG draw nothing new is then followed by the next all
 the same.) A step is one or more actions, separated by `;`, done together:
 
-  keys:TEXT     TEXT typed at the terminal, with \\n, \\t, \\e, \\\\ and \\xHH
-                (\\x3b for a `;`)
+  keys:TEXT     TEXT typed at the terminal, with \\r, \\n, \\t, \\e, \\\\ and
+                \\xHH (\\x3b for a `;`); any other backslash is an error
   resize:RxC    the terminal made R rows by C columns (the kernel then
                 sends the foreground group SIGWINCH)
   signal:NAME   the signal sent to PROG (INT, TERM, HUP, WINCH, ...)
@@ -72,7 +72,7 @@ def unescape(text):
             i += 1
             continue
         nxt = raw[i + 1]
-        simple = {0x6E: 0x0A, 0x74: 0x09, 0x65: 0x1B, 0x5C: 0x5C}
+        simple = {0x72: 0x0D, 0x6E: 0x0A, 0x74: 0x09, 0x65: 0x1B, 0x5C: 0x5C}
         if nxt in simple:
             out.append(simple[nxt])
             i += 2
@@ -81,9 +81,21 @@ def unescape(text):
             out.append(int(raw[i + 2 : i + 4].decode("ascii"), 16))
             i += 4
         else:
-            out.append(c)
-            i += 1
+            # Typed as it stands, an escape this does not know would make a
+            # case press other keys than it says -- and both sides of a
+            # comparison would agree on them.
+            raise ValueError("unknown escape in keys: " + text)
     return bytes(out)
+
+
+def check(step):
+    """Raise ValueError for a --then STEP `act` could not do."""
+    for action in step.split(";"):
+        kind, _, arg = action.partition(":")
+        if kind == "keys":
+            unescape(arg)
+        elif kind not in ("resize", "signal", "sleep", "copy"):
+            raise ValueError("unknown action: " + action)
 
 
 def act(step, pid, master):
@@ -130,6 +142,12 @@ def main(argv):
             break
     if len(args) < 5:
         sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
+        return 1
+    try:
+        for step in actions:
+            check(step)
+    except ValueError as e:
+        sys.stderr.write("curses-ptyrun: %s\n" % e)
         return 1
     rows, cols = int(args[0]), int(args[1])
     out_path, err_path, prog = args[2], args[3], args[4:]

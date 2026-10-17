@@ -12,12 +12,10 @@
 //! keeps it. The one screen the C interface implies -- `initscr`'s, which
 //! the signal handlers reach -- is the crate root's.
 //!
-//! What this crate leaves out of `SCREEN` it leaves out because it reads no
-//! input: there is no `getch`, so no key table, no input queue, no
-//! `ESCDELAY`, no mouse; and so `KEY_RESIZE`, which upstream queues as input
-//! when the window changes size, is not queued anywhere. Nor are there soft
-//! labels or lines ripped off the screen, so `stdscr` is always the whole
-//! screen.
+//! What this crate leaves out of `SCREEN`: the mouse -- nothing here calls
+//! `mousemask`, so the mouse hooks stay `lib_set_term.c`'s `no_mouse_*`
+//! ([`crate::input`]) -- soft labels, and lines ripped off the screen, so
+//! `stdscr` is always the whole screen.
 
 use libcall::termios::{self as tc, Termios};
 use terminfo::{Entry, Padding};
@@ -77,13 +75,17 @@ pub struct Tty {
     pub ottyb: Termios,
     /// `Nttyb`: the program's.
     pub nttyb: Termios,
+    /// `SCREEN`'s `_notty`: setting the modes once failed because the
+    /// descriptor is no terminal -- which keeps `wgetch` out of cooked
+    /// mode, where it would read a line for itself.
+    pub notty: bool,
 }
 
 impl Tty {
     /// `_nc_get_tty_mode (buf)`: the terminal's modes, read again after an
     /// interruption; `None` when they cannot be read at all, which upstream
     /// reports by zeroing the buffer.
-    fn get_mode(&self) -> Option<Termios> {
+    pub(crate) fn get_mode(&self) -> Option<Termios> {
         if self.fd < 0 {
             return None;
         }
@@ -97,12 +99,8 @@ impl Tty {
     }
 
     /// `_nc_set_tty_mode (buf)`: `tcsetattr (Filedes, TCSADRAIN, buf)`,
-    /// again after an interruption.
-    ///
-    /// Upstream also remembers an `ENOTTY` (`_notty`) and fails every later
-    /// call on it -- which the same descriptor would fail with `ENOTTY`
-    /// anyway, so nothing here keeps it.
-    fn set_mode(&mut self, buf: &Termios) -> bool {
+    /// again after an interruption; an `ENOTTY` remembered (`_notty`).
+    pub(crate) fn set_mode(&mut self, buf: &Termios) -> bool {
         if self.fd < 0 {
             return false;
         }
@@ -110,7 +108,12 @@ impl Tty {
             match tc::set_attr(self.fd, tc::TCSADRAIN, buf) {
                 Ok(()) => return true,
                 Err(libcall::EINTR) => {}
-                Err(_) => return false,
+                Err(e) => {
+                    if e == libcall::ENOTTY {
+                        self.notty = true;
+                    }
+                    return false;
+                }
             }
         }
     }
@@ -211,6 +214,33 @@ pub struct Screen {
     /// watches.
     pub ifd: i32,
     pub checkfd: i32,
+    /// `_ofd`: the output descriptor the screen was made on -- not the one
+    /// the modes are set on, which is standard error when standard output
+    /// is no terminal; -1 for output kept in memory.
+    pub ofd: i32,
+    /// `_fifo`, `_fifohead`, `_fifotail`, `_fifopeek`: what was read and
+    /// not yet returned, and what was pushed back.
+    pub fifo: crate::input::Fifo,
+    /// `_keytry`: the key sequences, made by the first `keypad (win, TRUE)`.
+    pub keytry: crate::input::Tries,
+    /// `_tried`: they have been made.
+    pub tried: bool,
+    /// `_called_wgetch`: `wgetch` is reading a line in cooked mode.
+    pub called_wgetch: bool,
+    /// `_maxclick`: how long, in milliseconds, to wait for more of a mouse
+    /// gesture.
+    pub maxclick: i32,
+    /// What a [`crate::input::Need`] got, waiting for the call that needed
+    /// it.
+    pub fed: crate::input::Fed,
+    /// The bytes of a character `wget_wch` has begun and not finished.
+    pub wch_bytes: Vec<u8>,
+    /// A line `wgetch` is part way through reading in cooked mode.
+    pub cooked: Option<crate::input::CookedLine>,
+    /// The sub-windows, the newest first ([`crate::windows`]).
+    pub subwins: Vec<crate::windows::SubWin>,
+    /// The number the next sub-window gets.
+    pub next_win: u64,
     /// `TABSIZE`.
     pub tabsize: i32,
     /// `_sig_winch`: a `SIGWINCH` caught and not yet acted on.
@@ -222,7 +252,7 @@ pub struct Screen {
     pub cols: i32,
     /// `resizeterm.c`'s `current_lines` and `current_cols`: the size being
     /// resized from.
-    resize_from: (i32, i32),
+    pub(crate) resize_from: (i32, i32),
     /// What `_nc_signal_handler` keeps of `SIGTSTP`.
     pub tstp: Tstp,
 }
@@ -465,6 +495,8 @@ const WACS_TABLE: [(u8, u8, u32); 54] = [
 /// the "PC ROM" characters where the Linux console's coincidence allows,
 /// then the terminal's own `acsc` -- and `enacs` sent.
 fn init_acs(t: &mut Term) {
+    // The program's map: every letter, as itself in the alternate set.
+    crate::windows::fill_acs_map();
     for j in 1..ACS_LEN {
         if let Some(m) = t.acs_map.get_mut(j) {
             *m = 0;
@@ -702,6 +734,7 @@ impl Screen {
             fd: tty_fd,
             ottyb: Termios::default(),
             nttyb: Termios::default(),
+            notty: false,
         };
         // `_nc_setupterm`: on a terminal, its modes kept now.
         if tty_fd >= 0 && libcall::fd::is_terminal(tty_fd) {
@@ -826,6 +859,20 @@ impl Screen {
             topstolen: 0,
             ifd: opts.input,
             checkfd: opts.input,
+            ofd: match opts.output {
+                Sink::Fd(fd) => fd,
+                Sink::Memory(_) => -1,
+            },
+            fifo: crate::input::Fifo::default(),
+            keytry: crate::input::Tries::default(),
+            tried: false,
+            called_wgetch: false,
+            maxclick: crate::input::DEFAULT_MAXCLICK,
+            fed: crate::input::Fed::Nothing,
+            wch_bytes: Vec::new(),
+            cooked: None,
+            subwins: Vec::new(),
+            next_win: 1,
             tabsize,
             sig_winch: false,
             use_env: opts.use_env,
@@ -834,6 +881,11 @@ impl Screen {
             resize_from: (slines, scolumns),
             tstp: Tstp::default(),
         };
+        // "allow user to set maximum escape delay from the environment"
+        let escdelay = getenv_num(c"ESCDELAY");
+        if escdelay >= 0 {
+            crate::input::set_escdelay(escdelay);
+        }
         // "Initialize the terminal line settings."
         sp.initscr_modes();
         Ok(sp)
@@ -885,7 +937,8 @@ impl Screen {
     }
 
     /// `_nc_keypad (sp, flag)`: `smkx`, or else `rmkx`, each flushed when
-    /// the terminal has it.
+    /// the terminal has it; and the first time keypad mode goes on, the
+    /// terminal's key sequences learned (`_nc_init_keytry`).
     pub fn keypad(&mut self, flag: bool) {
         let cap = if flag {
             string::KEYPAD_XMIT
@@ -894,6 +947,10 @@ impl Screen {
         };
         if self.t.putp_cap(cap) {
             self.t.flush();
+        }
+        if flag && !self.tried {
+            self.keytry = crate::input::Tries::for_terminal(&self.t.entry);
+            self.tried = true;
         }
         self.keypad_on = flag;
     }
@@ -986,59 +1043,27 @@ impl Screen {
         }
     }
 
-    /// `flushinp ()`: what has been typed and not read, thrown away.
+    /// `flushinp ()`: what has been typed and not read thrown away -- the
+    /// terminal's, from the input descriptor if that is a terminal, else
+    /// from the output one if that is, and curses' own queue.
     pub fn flushinp(&mut self) {
-        // A descriptor that is no terminal has no typed-ahead input to lose;
-        // upstream does not look at the result either.
-        let _ = tc::flush_input(self.ifd);
+        // Upstream does not look at the result of either flush.
+        if libcall::fd::is_terminal(self.ifd) {
+            let _ = tc::flush_input(self.ifd);
+        } else if libcall::fd::is_terminal(self.ofd) {
+            let _ = tc::flush_input(self.ofd);
+        }
+        self.fifo = crate::input::Fifo::default();
+        // A byte read for a `wgetch` that has not yet taken it was typed
+        // and not read, too.
+        self.fed = crate::input::Fed::Nothing;
     }
 
     // ---- refreshing
 
-    /// `wnoutrefresh (stdscr)`: `stdscr`'s changes copied into `newscr`,
-    /// whole wide characters at either edge, and its cursor with them.
+    /// `wnoutrefresh (stdscr)`.
     pub fn wnoutrefresh(&mut self) {
-        let win = &mut self.stdscr;
-        let newscr = &mut self.newscr;
-        let begx = i32::from(win.begx);
-        let begy = i32::from(win.begy);
-        newscr.bkgd = win.bkgd;
-        newscr.attrs = win.attrs;
-        win.flags &= !HASMOVED;
-        let mut limit_x = i32::from(win.maxx);
-        if limit_x > i32::from(newscr.maxx).wrapping_sub(begx) {
-            limit_x = i32::from(newscr.maxx).wrapping_sub(begx);
-        }
-        let mut src_row = 0i32;
-        let mut dst_row = begy.wrapping_add(i32::from(win.yoffset));
-        while src_row <= i32::from(win.maxy) && dst_row <= i32::from(newscr.maxy) {
-            let (first, last) = win
-                .line(src_row)
-                .map_or((NOCHANGE, NOCHANGE), |l| (l.firstchar, l.lastchar));
-            if first != NOCHANGE {
-                let changed = (i32::from(first), i32::from(last));
-                copy_changes(win, newscr, (src_row, dst_row), changed, limit_x);
-            }
-            if let Some(oline) = win.line_mut(src_row) {
-                oline.firstchar = NOCHANGE;
-                oline.lastchar = NOCHANGE;
-            }
-            src_row = src_row.wrapping_add(1);
-            dst_row = dst_row.wrapping_add(1);
-        }
-        if win.clear {
-            win.clear = false;
-            newscr.clear = true;
-        }
-        if !win.leaveok {
-            newscr.cury = short(
-                i32::from(win.cury)
-                    .wrapping_add(begy)
-                    .wrapping_add(i32::from(win.yoffset)),
-            );
-            newscr.curx = short(i32::from(win.curx).wrapping_add(begx));
-        }
-        newscr.leaveok = win.leaveok;
+        wnoutrefresh_into(&mut self.stdscr, &mut self.newscr);
     }
 
     /// `doupdate ()`: the terminal brought into line with `newscr` -- back
@@ -1091,7 +1116,7 @@ impl Screen {
 
     /// `_nc_handle_sigwinch (sp)`: a `SIGWINCH` the handler caught noted
     /// against the screen; whether one is noted.
-    fn handle_sigwinch(&mut self) -> bool {
+    pub(crate) fn handle_sigwinch(&mut self) -> bool {
         if crate::signals::take_sigwinch() {
             self.sig_winch = true;
         }
@@ -1108,16 +1133,17 @@ impl Screen {
 
     /// `_nc_update_screensize (sp)`: the screen's size asked for again, and
     /// the screen resized to it if it changed.
-    fn update_screensize(&mut self) {
+    pub(crate) fn update_screensize(&mut self) {
         let old_lines = self.t.num(number::LINES);
         let old_cols = self.t.num(number::COLUMNS);
         let (new_lines, new_cols, tabsize) =
             get_screensize(&mut self.t.entry, self.tty.fd, self.use_env);
         self.tabsize = tabsize;
-        // Upstream queues `KEY_RESIZE` when the size is the same but a
-        // `SIGWINCH` came; this crate reads no input (module docs).
         if new_lines != old_lines || new_cols != old_cols {
             self.resizeterm(new_lines, new_cols);
+        } else if self.sig_winch {
+            // "so application can know this"; a full queue loses it.
+            self.fifo.unget(crate::keys::KEY_RESIZE);
         }
         self.sig_winch = false;
     }
@@ -1146,17 +1172,6 @@ impl Screen {
         to_lines > 0 && to_cols > 0 && (to_lines != self.t.lines || to_cols != self.t.columns)
     }
 
-    /// Every window adjusted, in the order upstream's window list holds
-    /// them -- the newest first: `stdscr`, `curscr`, `newscr`. (With no
-    /// subwindows, `increase_size` and `decrease_size` visit each once.)
-    fn adjust_all(&mut self, to: (i32, i32), stolen: i32) -> bool {
-        let from = self.resize_from;
-        let top = i32::from(self.topstolen);
-        adjust_window(&mut self.stdscr, to, stolen, from, top)
-            && adjust_window(&mut self.curscr, to, stolen, from, top)
-            && adjust_window(&mut self.newscr, to, stolen, from, top)
-    }
-
     /// `resize_term (lines, cols)`: the screen and its windows made the new
     /// size -- grown in lines, then in columns, then shrunk -- with no
     /// repainting.
@@ -1172,16 +1187,16 @@ impl Screen {
             self.resize_from = (my_lines, my_cols);
             if to_lines > self.t.lines {
                 my_lines = to_lines;
-                ok = self.adjust_all((my_lines, my_cols), was_stolen);
+                ok = self.increase_size((my_lines, my_cols), was_stolen);
                 self.resize_from = (my_lines, my_cols);
             }
             if ok && to_cols > self.t.columns {
                 my_cols = to_cols;
-                ok = self.adjust_all((my_lines, my_cols), was_stolen);
+                ok = self.increase_size((my_lines, my_cols), was_stolen);
                 self.resize_from = (my_lines, my_cols);
             }
             if ok && (to_lines < my_lines || to_cols < my_cols) {
-                ok = self.adjust_all((to_lines, to_cols), was_stolen);
+                ok = self.decrease_size((to_lines, to_cols), was_stolen);
             }
             if ok {
                 self.t.lines = to_lines;
@@ -1216,7 +1231,9 @@ impl Screen {
             ok = self.resize_term(to_lines, to_cols);
             self.curscr.clear = true;
         }
-        // Upstream queues `KEY_RESIZE` here (module docs).
+        // "so application can know this" -- whether or not the size changed.
+        // A full queue loses it, as upstream's does.
+        self.fifo.unget(crate::keys::KEY_RESIZE);
         ok
     }
 
@@ -1324,6 +1341,51 @@ fn initscr_termios(mut buf: Termios) -> Termios {
     buf
 }
 
+/// `wnoutrefresh (win)`: `win`'s changes copied into `newscr`, whole wide
+/// characters at either edge, and its cursor with them. `win`'s cells must
+/// be current: a sub-window's are copied in first ([`crate::windows`]).
+pub(crate) fn wnoutrefresh_into(win: &mut Window, newscr: &mut Window) {
+    let begx = i32::from(win.begx);
+    let begy = i32::from(win.begy);
+    newscr.bkgd = win.bkgd;
+    newscr.attrs = win.attrs;
+    win.flags &= !HASMOVED;
+    let mut limit_x = i32::from(win.maxx);
+    if limit_x > i32::from(newscr.maxx).wrapping_sub(begx) {
+        limit_x = i32::from(newscr.maxx).wrapping_sub(begx);
+    }
+    let mut src_row = 0i32;
+    let mut dst_row = begy.wrapping_add(i32::from(win.yoffset));
+    while src_row <= i32::from(win.maxy) && dst_row <= i32::from(newscr.maxy) {
+        let (first, last) = win
+            .line(src_row)
+            .map_or((NOCHANGE, NOCHANGE), |l| (l.firstchar, l.lastchar));
+        if first != NOCHANGE {
+            let changed = (i32::from(first), i32::from(last));
+            copy_changes(win, newscr, (src_row, dst_row), changed, limit_x);
+        }
+        if let Some(oline) = win.line_mut(src_row) {
+            oline.firstchar = NOCHANGE;
+            oline.lastchar = NOCHANGE;
+        }
+        src_row = src_row.wrapping_add(1);
+        dst_row = dst_row.wrapping_add(1);
+    }
+    if win.clear {
+        win.clear = false;
+        newscr.clear = true;
+    }
+    if !win.leaveok {
+        newscr.cury = short(
+            i32::from(win.cury)
+                .wrapping_add(begy)
+                .wrapping_add(i32::from(win.yoffset)),
+        );
+        newscr.curx = short(i32::from(win.curx).wrapping_add(begx));
+    }
+    newscr.leaveok = win.leaveok;
+}
+
 /// One line of `wnoutrefresh`: the changed columns `changed` of `win`'s row
 /// copied into `newscr`'s, `rows` being the two, widened to whole wide
 /// characters, and the rest of any wide character the copy cuts into
@@ -1414,15 +1476,17 @@ fn copy_changes(
     }
 }
 
-/// `adjust_window (win, to_lines, to_cols, stolen)`: one window made to fit
-/// a screen going from `from` lines and columns to `to`.
-fn adjust_window(
+/// `adjust_window (win, to_lines, to_cols, stolen)` but for its last step:
+/// one window made to fit a screen going from `from` lines and columns to
+/// `to` -- moved up if it is below the new bottom -- and the size to
+/// `wresize` it to.
+pub(crate) fn adjust_window(
     win: &mut Window,
     to: (i32, i32),
     stolen: i32,
     from: (i32, i32),
     topstolen: i32,
-) -> bool {
+) -> (i32, i32) {
     let (to_lines, to_cols) = to;
     let (cur_lines, cur_cols) = from;
     let bottom = cur_lines.wrapping_add(topstolen).wrapping_sub(stolen);
@@ -1446,7 +1510,7 @@ fn adjust_window(
     if my_cols == cur_cols && to_cols != cur_cols {
         my_cols = to_cols;
     }
-    win.wresize(my_lines, my_cols)
+    (my_lines, my_cols)
 }
 
 #[cfg(test)]

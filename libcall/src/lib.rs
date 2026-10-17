@@ -142,6 +142,9 @@ pub const ENXIO: i32 = 6;
 /// Operation not supported -- what e2fsprogs reports for a file that has no
 /// attributes to show.
 pub const EOPNOTSUPP: i32 = 95;
+/// Not a terminal: a terminal's modes asked of, or set on, a descriptor
+/// that is something else.
+pub const ENOTTY: i32 = 25;
 
 /// No such process.
 ///

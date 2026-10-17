@@ -123,6 +123,15 @@ const fn rc(ok: bool) -> i32 {
     if ok { 0 } else { -1 }
 }
 
+/// The window numbered `n`, as the C probe's `win_of` finds it: 0 is
+/// `stdscr`, the rest the windows the script made, `None` for one deleted
+/// or never made.
+fn win_of(wins: &[Option<curses::Win>], n: i32) -> Option<curses::Win> {
+    usize::try_from(n)
+        .ok()
+        .and_then(|n| wins.get(n).copied().flatten())
+}
+
 /// A line's words, the rest of it kept whole for text.
 struct Line<'a> {
     rest: &'a [u8],
@@ -175,6 +184,7 @@ fn main() {
     let mut buf = [0u8; 256];
     // As the C probe: whatever the environment selects, or the C locale.
     let _ = libcall::locale::select_from_env(libcall::locale::LC_ALL, &mut buf);
+    let mut wins: Vec<Option<curses::Win>> = vec![Some(curses::STDSCR)];
     for raw in script.split(|&b| b == b'\n') {
         if raw.is_empty() || raw.first() == Some(&b'#') {
             continue;
@@ -194,7 +204,10 @@ fn main() {
             b"endwin" => say(name, rc(curses::endwin())),
             b"isendwin" => say(name, i32::from(curses::isendwin())),
             b"refresh" => say(name, rc(curses::refresh())),
-            b"wnoutrefresh" => say(name, rc(curses::wnoutrefresh())),
+            b"wnoutrefresh" => {
+                let w = win_of(&wins, line.n());
+                say(name, rc(w.is_some_and(curses::wnoutrefresh)));
+            }
             b"doupdate" => say(name, rc(curses::doupdate())),
             b"move" => {
                 let (y, x) = (line.n(), line.n());
@@ -395,6 +408,157 @@ fn main() {
                 let _ = libcall::signal::raise(libcall::signal::SIGWINCH);
                 say(name, 0);
             }
+            // Windows: "subwin W L C Y X" and "derwin W L C Y X" print the
+            // new window's number, or -1.
+            b"subwin" | b"derwin" => {
+                let o = win_of(&wins, line.n());
+                let (l, c, y, x) = (line.n(), line.n(), line.n(), line.n());
+                let made = o.and_then(|o| {
+                    if cmd == b"subwin" {
+                        curses::subwin(o, l, c, y, x)
+                    } else {
+                        curses::derwin(o, l, c, y, x)
+                    }
+                });
+                match made {
+                    Some(w) if wins.len() < 64 => {
+                        wins.push(Some(w));
+                        say(
+                            name,
+                            i32::try_from(wins.len().saturating_sub(1)).unwrap_or(-1),
+                        );
+                    }
+                    _ => say(name, -1),
+                }
+            }
+            b"delwin" => {
+                let n = line.n();
+                let ok = win_of(&wins, n).is_some_and(curses::delwin);
+                if ok
+                    && n > 0
+                    && let Some(slot) = usize::try_from(n).ok().and_then(|n| wins.get_mut(n))
+                {
+                    *slot = None;
+                }
+                say(name, rc(ok));
+            }
+            b"touchwin" => say(
+                name,
+                rc(win_of(&wins, line.n()).is_some_and(curses::touchwin)),
+            ),
+            b"wrefresh" => say(
+                name,
+                rc(win_of(&wins, line.n()).is_some_and(curses::wrefresh)),
+            ),
+            b"wclear" => say(
+                name,
+                rc(win_of(&wins, line.n()).is_some_and(curses::wclear)),
+            ),
+            b"werase" => say(
+                name,
+                rc(win_of(&wins, line.n()).is_some_and(curses::werase)),
+            ),
+            b"wmove" => {
+                let w = win_of(&wins, line.n());
+                let (y, x) = (line.n(), line.n());
+                say(name, rc(w.is_some_and(|w| curses::wmove(w, y, x))));
+            }
+            b"waddch" => {
+                let w = win_of(&wins, line.n());
+                let ch = line.h();
+                say(name, rc(w.is_some_and(|w| curses::waddch(w, ch))));
+            }
+            b"waddstr" => {
+                let w = win_of(&wins, line.n());
+                let text = line.text();
+                say(name, rc(w.is_some_and(|w| curses::waddstr(w, &text))));
+            }
+            b"mvwaddstr" => {
+                let w = win_of(&wins, line.n());
+                let (y, x) = (line.n(), line.n());
+                let text = line.text();
+                say(
+                    name,
+                    rc(w.is_some_and(|w| curses::mvwaddstr(w, y, x, &text))),
+                );
+            }
+            b"wclrtoeol" => say(
+                name,
+                rc(win_of(&wins, line.n()).is_some_and(curses::wclrtoeol)),
+            ),
+            b"wattron" => {
+                let w = win_of(&wins, line.n());
+                let a = line.h();
+                say(name, rc(w.is_some_and(|w| curses::wattron(w, a))));
+            }
+            b"box" => {
+                let w = win_of(&wins, line.n());
+                let (v, h) = (line.h(), line.h());
+                say(name, rc(w.is_some_and(|w| curses::box_(w, v, h))));
+            }
+            b"wborder" => {
+                let w = win_of(&wins, line.n());
+                let e: [curses::Attr; 8] = core::array::from_fn(|_| line.h());
+                let [ls, rs, ts, bs, tl, tr, bl, br] = e;
+                say(
+                    name,
+                    rc(w.is_some_and(|w| curses::wborder(w, ls, rs, ts, bs, tl, tr, bl, br))),
+                );
+            }
+            // "acs C": what acs_map holds for the letter C.
+            b"acs" => {
+                let c = line.word();
+                let mut out = b"acs ".to_vec();
+                out.extend_from_slice(c);
+                let v = curses::acs(c.first().copied().unwrap_or(0));
+                out.extend_from_slice(format!(" {v:x}\n").as_bytes());
+                let _ = std::io::stderr().write_all(&out);
+            }
+            b"wgetyx" => {
+                let (y, x) = win_of(&wins, line.n()).map_or((-1, -1), curses::wgetyx);
+                let _ = writeln!(std::io::stderr(), "wgetyx {y} {x}");
+            }
+            b"wgetmaxyx" => {
+                let w = win_of(&wins, line.n());
+                let (my, mx) = w.map_or((-1, -1), curses::wgetmaxyx);
+                let (by, bx) = w.map_or((-1, -1), curses::wgetbegyx);
+                let _ = writeln!(std::io::stderr(), "wgetmaxyx {my} {mx} {by} {bx}");
+            }
+            // The keyboard.
+            b"getch" => say(name, curses::getch()),
+            b"wgetch" => say(name, win_of(&wins, line.n()).map_or(-1, curses::wgetch)),
+            b"get_wch" => {
+                let (code, value) = curses::get_wch();
+                let _ = writeln!(std::io::stderr(), "get_wch {code} {value:x}");
+            }
+            b"ungetch" => say(name, rc(curses::ungetch(line.n()))),
+            b"keypad" => {
+                let w = win_of(&wins, line.n());
+                let f = line.n() != 0;
+                say(name, rc(w.is_some_and(|w| curses::keypad(w, f))));
+            }
+            b"nodelay" => {
+                let w = win_of(&wins, line.n());
+                let f = line.n() != 0;
+                say(name, rc(w.is_some_and(|w| curses::nodelay(w, f))));
+            }
+            b"notimeout" => {
+                let w = win_of(&wins, line.n());
+                let f = line.n() != 0;
+                say(name, rc(w.is_some_and(|w| curses::notimeout(w, f))));
+            }
+            b"wtimeout" => {
+                let w = win_of(&wins, line.n());
+                let delay = line.n();
+                if let Some(w) = w {
+                    curses::wtimeout(w, delay);
+                }
+                say(name, 0);
+            }
+            b"halfdelay" => say(name, rc(curses::halfdelay(line.n()))),
+            b"meta" => say(name, rc(curses::meta(line.n() != 0))),
+            b"set_escdelay" => say(name, rc(curses::set_escdelay(line.n()))),
+            b"flushinp" => say(name, rc(curses::flushinp())),
             b"suspend" | b"interrupt" | b"terminate" => {
                 let signal = match cmd {
                     b"suspend" => libcall::signal::SIGTSTP,

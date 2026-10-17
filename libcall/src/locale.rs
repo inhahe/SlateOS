@@ -73,6 +73,7 @@ mod sys {
         pub fn mbrtowc(pwc: *mut i32, s: *const u8, n: usize, ps: *mut MbState) -> usize;
         pub fn wcrtomb(s: *mut u8, wc: i32, ps: *mut MbState) -> usize;
         pub fn wcwidth(wc: i32) -> i32;
+        pub fn __ctype_get_mb_cur_max() -> usize;
         pub fn iswprint(wc: u32) -> i32;
         pub fn isprint(c: i32) -> i32;
         pub fn iscntrl(c: i32) -> i32;
@@ -312,6 +313,21 @@ pub fn wcrtomb(wc: i32, state: &mut MbState, buf: &mut [u8; MB_LEN_MAX]) -> Opti
         let b = u8::try_from(wc).ok().filter(|b| *b < 0x80)?;
         buf[0] = b;
         Some(1)
+    }
+}
+
+/// `MB_CUR_MAX`: the most bytes a character of the selected locale takes --
+/// 1 in the C locale, 6 in glibc's UTF-8 ones.
+#[must_use]
+pub fn mb_cur_max() -> usize {
+    #[cfg(unix)]
+    {
+        // SAFETY: no arguments; it reads the selected locale.
+        unsafe { sys::__ctype_get_mb_cur_max() }
+    }
+    #[cfg(not(unix))]
+    {
+        1
     }
 }
 

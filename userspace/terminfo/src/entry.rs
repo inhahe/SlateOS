@@ -124,6 +124,22 @@ impl Entry {
         }
     }
 
+    /// The entry's own string capabilities, in the order it holds them:
+    /// each one's place among them (from 0, after the standard ones), its
+    /// name, and its value or `None` (absent or cancelled). One whose name
+    /// the table does not end is left out -- a null name upstream, which
+    /// every reader skips.
+    pub fn ext_strings(&self) -> impl Iterator<Item = (usize, &[u8], Option<&[u8]>)> {
+        let first_name = self.ext_booleans.saturating_add(self.ext_numbers);
+        (0..self.ext_strings).filter_map(move |j| {
+            let name = self
+                .ext_names
+                .get(first_name.saturating_add(j))?
+                .as_deref()?;
+            Some((j, name, self.string(STRCOUNT.saturating_add(j))))
+        })
+    }
+
     /// `tigetflag (name)`: 1 or 0 for a boolean capability, standard or the
     /// entry's own, and -1 (`ABSENT_BOOLEAN`) for a name that is neither.
     #[must_use]
@@ -500,6 +516,9 @@ pub(crate) mod tests {
         assert_eq!(e.tigetstr(b"cbt"), TiString::Value(b"std"));
         assert_eq!(e.tigetstr(b"bel"), TiString::Absent);
         assert_eq!(e.tigetstr(b"cols"), TiString::NotAString);
+        // The strings by place, the boolean's name skipped.
+        let ext: Vec<_> = e.ext_strings().collect();
+        assert_eq!(ext, vec![(0, &b"xm"[..], Some(&b"X"[..]))]);
     }
 
     #[test]

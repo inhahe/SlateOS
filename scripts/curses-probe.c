@@ -22,6 +22,13 @@
  * "tigetstr NAME" prints "tigetstr NAME" and the string's bytes in
  * hexadecimal, or "absent" or "cancelled" for what ncurses answers with a
  * null pointer and with (char *) -1.
+ *
+ * The calls on a window name it by number, first: 0 is stdscr, and each
+ * window "subwin" or "derwin" makes gets the next, which the call prints
+ * (-1 when it made none). "acs C" prints what acs_map holds for the letter
+ * C; "wgetyx W" a window's cursor; "wgetmaxyx W" its size and where it
+ * begins. The keyboard calls read standard input; "get_wch" prints what it
+ * returned and the character or key, in hexadecimal.
  */
 #define _XOPEN_SOURCE_EXTENDED 1
 #include <curses.h>
@@ -121,6 +128,18 @@ static void say (const char *name, int value)
   fprintf (stderr, "%s %d\n", name, value);
 }
 
+/* Windows by number: 0 is stdscr, and each subwin or derwin the script
+ * makes gets the next. A window deleted names none any more. */
+static WINDOW *wins[64];
+static int nwins = 1;
+
+static WINDOW *win_of (int n)
+{
+  if (n == 0)
+    return stdscr;
+  return n > 0 && n < nwins ? wins[n] : NULL;
+}
+
 /* The next space-separated word of *p, advanced past it. */
 static char *word (char **p)
 {
@@ -158,6 +177,7 @@ int main (int argc, char **argv)
 #define N() atoi (word (&p))
 #define H() ((chtype) strtoul (word (&p), NULL, 16))
 #define TEXT() unescape (p, text)
+#define W() win_of (atoi (word (&p)))
       if (!strcmp (cmd, "use_env"))
         { use_env (N () != 0); say (cmd, 0); }
       else if (!strcmp (cmd, "initscr"))
@@ -169,7 +189,7 @@ int main (int argc, char **argv)
       else if (!strcmp (cmd, "refresh"))
         say (cmd, refresh ());
       else if (!strcmp (cmd, "wnoutrefresh"))
-        say (cmd, wnoutrefresh (stdscr));
+        say (cmd, wnoutrefresh (W ()));
       else if (!strcmp (cmd, "doupdate"))
         say (cmd, doupdate ());
       else if (!strcmp (cmd, "move"))
@@ -361,6 +381,115 @@ int main (int argc, char **argv)
           raise (SIGWINCH);
           say (cmd, 0);
         }
+      /* Windows: "subwin W L C Y X" and "derwin W L C Y X" print the new
+       * window's number, or -1. */
+      else if (!strcmp (cmd, "subwin") || !strcmp (cmd, "derwin"))
+        {
+          WINDOW *o = W (), *w;
+          int l = N (), c = N (), y = N (), x = N ();
+          w = cmd[0] == 's' ? subwin (o, l, c, y, x) : derwin (o, l, c, y, x);
+          if (w && nwins < 64)
+            {
+              wins[nwins] = w;
+              say (cmd, nwins++);
+            }
+          else
+            say (cmd, -1);
+        }
+      else if (!strcmp (cmd, "delwin"))
+        {
+          int n = N ();
+          int rc = delwin (win_of (n));
+          if (rc == OK && n > 0 && n < nwins)
+            wins[n] = NULL;
+          say (cmd, rc);
+        }
+      else if (!strcmp (cmd, "touchwin"))
+        say (cmd, touchwin (W ()));
+      else if (!strcmp (cmd, "wrefresh"))
+        say (cmd, wrefresh (W ()));
+      else if (!strcmp (cmd, "wclear"))
+        say (cmd, wclear (W ()));
+      else if (!strcmp (cmd, "werase"))
+        say (cmd, werase (W ()));
+      else if (!strcmp (cmd, "wmove"))
+        { WINDOW *w = W (); int y = N (), x = N (); say (cmd, wmove (w, y, x)); }
+      else if (!strcmp (cmd, "waddch"))
+        { WINDOW *w = W (); say (cmd, waddch (w, H ())); }
+      else if (!strcmp (cmd, "waddstr"))
+        { WINDOW *w = W (); TEXT (); say (cmd, waddstr (w, text)); }
+      else if (!strcmp (cmd, "mvwaddstr"))
+        {
+          WINDOW *w = W ();
+          int y = N (), x = N ();
+          TEXT ();
+          say (cmd, mvwaddstr (w, y, x, text));
+        }
+      else if (!strcmp (cmd, "wclrtoeol"))
+        say (cmd, wclrtoeol (W ()));
+      else if (!strcmp (cmd, "wattron"))
+        { WINDOW *w = W (); say (cmd, wattron (w, (int) H ())); }
+      else if (!strcmp (cmd, "box"))
+        { WINDOW *w = W (); chtype v = H (), h = H (); say (cmd, box (w, v, h)); }
+      else if (!strcmp (cmd, "wborder"))
+        {
+          WINDOW *w = W ();
+          chtype e[8];
+          int i;
+          for (i = 0; i < 8; i++)
+            e[i] = H ();
+          say (cmd, wborder (w, e[0], e[1], e[2], e[3], e[4], e[5], e[6], e[7]));
+        }
+      /* "acs C": what acs_map holds for the letter C. */
+      else if (!strcmp (cmd, "acs"))
+        {
+          char *c = word (&p);
+          fprintf (stderr, "acs %s %lx\n", c,
+                   (unsigned long) NCURSES_ACS ((unsigned char) c[0]));
+        }
+      else if (!strcmp (cmd, "wgetyx"))
+        {
+          WINDOW *w = W ();
+          int y = -1, x = -1;
+          if (w)
+            getyx (w, y, x);
+          fprintf (stderr, "wgetyx %d %d\n", y, x);
+        }
+      else if (!strcmp (cmd, "wgetmaxyx"))
+        {
+          WINDOW *w = W ();
+          fprintf (stderr, "wgetmaxyx %d %d %d %d\n", getmaxy (w), getmaxx (w),
+                   getbegy (w), getbegx (w));
+        }
+      /* The keyboard. */
+      else if (!strcmp (cmd, "getch"))
+        say (cmd, getch ());
+      else if (!strcmp (cmd, "wgetch"))
+        say (cmd, wgetch (W ()));
+      else if (!strcmp (cmd, "get_wch"))
+        {
+          wint_t c = 0;
+          int rc = get_wch (&c);
+          fprintf (stderr, "get_wch %d %lx\n", rc, (unsigned long) c);
+        }
+      else if (!strcmp (cmd, "ungetch"))
+        say (cmd, ungetch (N ()));
+      else if (!strcmp (cmd, "keypad"))
+        { WINDOW *w = W (); say (cmd, keypad (w, N () != 0)); }
+      else if (!strcmp (cmd, "nodelay"))
+        { WINDOW *w = W (); say (cmd, nodelay (w, N () != 0)); }
+      else if (!strcmp (cmd, "notimeout"))
+        { WINDOW *w = W (); say (cmd, notimeout (w, N () != 0)); }
+      else if (!strcmp (cmd, "wtimeout"))
+        { WINDOW *w = W (); wtimeout (w, N ()); say (cmd, 0); }
+      else if (!strcmp (cmd, "halfdelay"))
+        say (cmd, halfdelay (N ()));
+      else if (!strcmp (cmd, "meta"))
+        say (cmd, meta (stdscr, N () != 0));
+      else if (!strcmp (cmd, "set_escdelay"))
+        say (cmd, set_escdelay (N ()));
+      else if (!strcmp (cmd, "flushinp"))
+        say (cmd, flushinp ());
       else if (!strcmp (cmd, "suspend"))
         { raise (SIGTSTP); say (cmd, 0); }
       else if (!strcmp (cmd, "interrupt"))

@@ -1,8 +1,10 @@
 //! ncursesw 6.4's screen library -- the `libncursesw.so.6` of Ubuntu's
 //! ncurses 6.4+20240113-1ubuntu2.2 -- as far as procps' `watch` and
-//! `slabtop` use it: a screen and its window, characters added to it,
-//! attributes and colours, the refresh that brings the terminal into line
-//! with them, `endwin`, resizing, and the signals curses handles.
+//! `slabtop` and util-linux's `cfdisk` use it: a screen, its window and the
+//! sub-windows made inside it, characters added to them, attributes,
+//! colours and line drawing, the refresh that brings the terminal into line
+//! with them, `endwin`, resizing, the signals curses handles, and the
+//! keyboard -- bytes, key sequences, wide characters, and cooked lines.
 //!
 //! A full-screen program's output *is* what ncurses writes: which cursor
 //! movements it chose, which attribute strings, which lines it scrolled
@@ -23,14 +25,19 @@
 //!
 //! # The interface
 //!
-//! The free functions below are the C interface's, on `stdscr` and the one
-//! screen [`initscr`] makes, under C's names -- but for `move`, a Rust
-//! keyword, which is [`mv`]. Each returns what C's returns, `OK` and `ERR`
-//! being `true` and `false`; before `initscr` (or after it failed) every one
-//! fails, as C's do on a null screen. They may be called from any thread,
-//! and a screen in use by one call is refused to another, so a program's
-//! own signal handler must not draw: it may only ask for [`end_and_exit`].
-//! A screen of one's own, kept as a value, is [`Screen::newterm`]'s.
+//! The free functions below are the C interface's, on `stdscr` -- or on the
+//! window a [`Win`] names -- and the one screen [`initscr`] makes, under C's
+//! names, but for `move` and `box`, Rust keywords, which are [`mv`] and
+//! [`box_`]. Each returns what C's returns, `OK` and `ERR` being `true` and
+//! `false`; before `initscr` (or after it failed) every one fails, as C's do
+//! on a null screen. They may be called from any thread, and a screen in use
+//! by one call is refused to another, so a program's own signal handler must
+//! not draw: it may only ask for [`end_and_exit`]. A screen of one's own,
+//! kept as a value, is [`Screen::newterm`]'s.
+//!
+//! A read waits with the screen let go ([`input::Need`]), as upstream's
+//! handlers run inside its `read`: curses' own `SIGTSTP` and `SIGINT`
+//! handlers can then suspend or end the program while it waits for a key.
 //!
 //! # The locale
 //!
@@ -49,6 +56,11 @@
 //! - [`update`]: `doupdate`'s work -- each changed line rewritten.
 //! - [`hashmap`]: finding the lines that moved, and scrolling them.
 //! - [`screen`]: `SCREEN` -- setup, modes, refresh, `endwin`, resizing.
+//! - [`windows`]: windows by handle -- sub-windows, `box`, refreshing one,
+//!   resizing them all.
+//! - [`input`]: the keyboard -- `getch`, `get_wch`, the key tries and the
+//!   input queue.
+//! - [`keys`]: the key codes.
 //! - [`signals`]: the process's screen, and `SIGTSTP`, `SIGINT`,
 //!   `SIGTERM` and `SIGWINCH`.
 //! - [`libc`]: the locale, from the C library.
@@ -60,6 +72,8 @@ pub mod addch;
 pub mod caps;
 pub mod cell;
 pub mod hashmap;
+pub mod input;
+pub mod keys;
 pub mod libc;
 pub mod mvcur;
 pub mod screen;
@@ -69,6 +83,7 @@ pub mod term;
 mod testing;
 pub mod update;
 pub mod window;
+pub mod windows;
 
 /// The unit tests' allocator, which counts on request: what lets a test
 /// show that the work a signal handler does allocates nothing.
@@ -81,10 +96,17 @@ pub use cell::{
     A_NORMAL, A_PROTECT, A_REVERSE, A_STANDOUT, A_UNDERLINE, Attr, Cell, WChar, color_pair,
     pair_number,
 };
+pub use input::{ERR, OK, get_escdelay, set_escdelay};
+pub use keys::*;
 pub use libc::Libc;
 pub use screen::{NoTerminal, Options, Screen};
 pub use signals::end_and_exit;
 pub use term::Sink;
+pub use windows::{
+    ACS_BLOCK, ACS_BTEE, ACS_BULLET, ACS_CKBOARD, ACS_DARROW, ACS_DIAMOND, ACS_HLINE, ACS_LARROW,
+    ACS_LLCORNER, ACS_LRCORNER, ACS_LTEE, ACS_PLUS, ACS_RARROW, ACS_RTEE, ACS_TTEE, ACS_UARROW,
+    ACS_ULCORNER, ACS_URCORNER, ACS_VLINE, Win, acs,
+};
 
 use addch::AddCtx;
 use window::Window;
@@ -181,12 +203,9 @@ pub fn refresh() -> bool {
     })
 }
 
-/// `wnoutrefresh (stdscr)`.
-pub fn wnoutrefresh() -> bool {
-    ok(|sp| {
-        sp.wnoutrefresh();
-        true
-    })
+/// `wnoutrefresh (win)`.
+pub fn wnoutrefresh(w: Win) -> bool {
+    ok(|sp| sp.wnoutrefresh_win(w))
 }
 
 /// `doupdate ()`.
@@ -574,6 +593,343 @@ pub fn resize_term(lines: i32, cols: i32) -> bool {
 /// `resizeterm (lines, cols)`.
 pub fn resizeterm(lines: i32, cols: i32) -> bool {
     ok(|sp| sp.resizeterm(lines, cols))
+}
+
+// ---- windows
+
+/// `stdscr`.
+pub const STDSCR: Win = Win::Stdscr;
+
+/// `f` on the window `w`, with what adding to it needs; `ERR` without a
+/// screen, or for a window since deleted.
+fn on_win(w: Win, f: impl FnOnce(&mut Window, &AddCtx<'_>) -> bool) -> bool {
+    signals::with(|sp| sp.with_win(w, f))
+        .flatten()
+        .unwrap_or(false)
+}
+
+/// `subwin (orig, lines, cols, begy, begx)`: a window inside `orig`,
+/// sharing its cells, placed on the screen; `None` for one that would not
+/// fit inside it.
+pub fn subwin(orig: Win, lines: i32, cols: i32, begy: i32, begx: i32) -> Option<Win> {
+    signals::with(|sp| sp.subwin(orig, lines, cols, begy, begx)).flatten()
+}
+
+/// `derwin (orig, lines, cols, begy, begx)`: likewise, placed within
+/// `orig`.
+pub fn derwin(orig: Win, lines: i32, cols: i32, begy: i32, begx: i32) -> Option<Win> {
+    signals::with(|sp| sp.derwin(orig, lines, cols, begy, begx)).flatten()
+}
+
+/// `delwin (win)`: [`Screen::delwin`].
+pub fn delwin(w: Win) -> bool {
+    ok(|sp| sp.delwin(w))
+}
+
+/// `getyx (win, y, x)`: the cursor; -1, -1 without a screen or the window.
+#[must_use]
+pub fn wgetyx(w: Win) -> (i32, i32) {
+    signals::with(|sp| {
+        sp.window(w)
+            .map(|win| (i32::from(win.cury), i32::from(win.curx)))
+    })
+    .flatten()
+    .unwrap_or((-1, -1))
+}
+
+/// `getmaxyx (win, y, x)`: the window's size; -1, -1 without a screen or
+/// the window.
+#[must_use]
+pub fn wgetmaxyx(w: Win) -> (i32, i32) {
+    signals::with(|sp| {
+        sp.window(w).map(|win| {
+            (
+                i32::from(win.maxy).wrapping_add(1),
+                i32::from(win.maxx).wrapping_add(1),
+            )
+        })
+    })
+    .flatten()
+    .unwrap_or((-1, -1))
+}
+
+/// `getbegyx (win, y, x)`: where the window is on the screen; -1, -1
+/// without a screen or the window.
+#[must_use]
+pub fn wgetbegyx(w: Win) -> (i32, i32) {
+    signals::with(|sp| {
+        sp.window(w)
+            .map(|win| (i32::from(win.begy), i32::from(win.begx)))
+    })
+    .flatten()
+    .unwrap_or((-1, -1))
+}
+
+/// `clearok (win, flag)`: whether the next refresh of `w` repaints the
+/// whole screen.
+pub fn clearok(w: Win, flag: bool) -> bool {
+    ok(|sp| {
+        sp.window_mut(w).is_some_and(|win| {
+            win.clear = flag;
+            true
+        })
+    })
+}
+
+/// `mvcur (oldrow, oldcol, newrow, newcol)`: the terminal's cursor moved
+/// the cheapest way that overwrites nothing -- the move written through
+/// `putchar`, which for upstream is the C library's `putchar`: the
+/// program's standard output, buffered as the program buffers it, not the
+/// screen's own output.
+pub fn mvcur(
+    oldrow: i32,
+    oldcol: i32,
+    newrow: i32,
+    newcol: i32,
+    putchar: &mut dyn FnMut(u8),
+) -> bool {
+    ok(|sp| {
+        let Screen {
+            t, newscr, ctype, ..
+        } = sp;
+        t.mvcur_putchar(
+            newscr,
+            &**ctype,
+            (oldrow, oldcol),
+            (newrow, newcol),
+            putchar,
+        )
+    })
+}
+
+/// `touchwin (win)`.
+pub fn touchwin(w: Win) -> bool {
+    ok(|sp| sp.touchwin(w))
+}
+
+/// `wrefresh (win)`.
+pub fn wrefresh(w: Win) -> bool {
+    ok(|sp| sp.wrefresh(w))
+}
+
+/// `wclear (win)`.
+pub fn wclear(w: Win) -> bool {
+    ok(|sp| sp.wclear(w))
+}
+
+/// `werase (win)`.
+pub fn werase(w: Win) -> bool {
+    ok(|sp| sp.werase(w))
+}
+
+/// `wmove (win, y, x)`.
+pub fn wmove(w: Win, y: i32, x: i32) -> bool {
+    on_win(w, |win, _| win.wmove(y, x))
+}
+
+/// `waddch (win, ch)`.
+pub fn waddch(w: Win, ch: Attr) -> bool {
+    on_win(w, |win, ctx| addch::waddch(win, ctx, ch))
+}
+
+/// `mvwaddch (win, y, x, ch)`.
+pub fn mvwaddch(w: Win, y: i32, x: i32, ch: Attr) -> bool {
+    on_win(w, |win, ctx| win.wmove(y, x) && addch::waddch(win, ctx, ch))
+}
+
+/// `waddnstr (win, str, n)`.
+pub fn waddnstr(w: Win, s: &[u8], n: i32) -> bool {
+    on_win(w, |win, ctx| addch::waddnstr(win, ctx, s, n))
+}
+
+/// `waddstr (win, str)`.
+pub fn waddstr(w: Win, s: &[u8]) -> bool {
+    waddnstr(w, s, -1)
+}
+
+/// `mvwaddnstr (win, y, x, str, n)`.
+pub fn mvwaddnstr(w: Win, y: i32, x: i32, s: &[u8], n: i32) -> bool {
+    on_win(w, |win, ctx| {
+        win.wmove(y, x) && addch::waddnstr(win, ctx, s, n)
+    })
+}
+
+/// `mvwaddstr (win, y, x, str)`.
+pub fn mvwaddstr(w: Win, y: i32, x: i32, s: &[u8]) -> bool {
+    mvwaddnstr(w, y, x, s, -1)
+}
+
+/// `wclrtoeol (win)`.
+pub fn wclrtoeol(w: Win) -> bool {
+    on_win(w, |win, _| win.wclrtoeol())
+}
+
+/// `wattron (win, attrs)`.
+pub fn wattron(w: Win, attrs: Attr) -> bool {
+    on_win(w, |win, _| {
+        win.wattr_on(attrs);
+        true
+    })
+}
+
+/// `wattroff (win, attrs)`.
+pub fn wattroff(w: Win, attrs: Attr) -> bool {
+    on_win(w, |win, _| {
+        win.wattr_off(attrs);
+        true
+    })
+}
+
+/// `wattrset (win, attrs)`.
+pub fn wattrset(w: Win, attrs: Attr) -> bool {
+    on_win(w, |win, _| {
+        win.wattrset(attrs);
+        true
+    })
+}
+
+/// `wborder (win, ls, rs, ts, bs, tl, tr, bl, br)`: the window's edges,
+/// each 0 drawn with the line-drawing default.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "upstream's eight edges, in its order"
+)]
+pub fn wborder(
+    w: Win,
+    ls: Attr,
+    rs: Attr,
+    ts: Attr,
+    bs: Attr,
+    tl: Attr,
+    tr: Attr,
+    bl: Attr,
+    br: Attr,
+) -> bool {
+    ok(|sp| sp.wborder(w, [ls, rs, ts, bs, tl, tr, bl, br]))
+}
+
+/// `box (win, verch, horch)`.
+pub fn box_(w: Win, verch: Attr, horch: Attr) -> bool {
+    wborder(w, verch, verch, horch, horch, 0, 0, 0, 0)
+}
+
+// ---- the keyboard
+
+/// `step` on the screen until it needs nothing more from the terminal --
+/// each time it must wait, the wait done with the screen let go: a real
+/// `read` or `poll`, as upstream's, during which curses' own signal
+/// handlers find the screen free and suspend or end the program at once,
+/// and after which a signal's `SA_RESTART` has decided, as for upstream,
+/// whether the wait ended. `None` without a screen.
+fn reading<R>(mut step: impl FnMut(&mut Screen) -> Result<R, input::Need>) -> Option<R> {
+    let mut fed = input::Fed::Nothing;
+    let mut first = true;
+    loop {
+        let r = signals::with(|sp| {
+            if first {
+                sp.begin_read();
+            }
+            if fed != input::Fed::Nothing {
+                sp.fed = fed;
+            }
+            step(sp).map_err(|need| (need, sp.ifd))
+        })?;
+        first = false;
+        match r {
+            Ok(v) => return Some(v),
+            Err((need, fd)) => fed = need.satisfy(fd),
+        }
+    }
+}
+
+/// `wgetch (win)`: the next byte or key, or `ERR`.
+pub fn wgetch(w: Win) -> i32 {
+    reading(|sp| sp.wgetch_step(w)).unwrap_or(ERR)
+}
+
+/// `getch ()`.
+pub fn getch() -> i32 {
+    wgetch(STDSCR)
+}
+
+/// `wget_wch (win, &wch)`: `OK` and a character, `KEY_CODE_YES` and a key,
+/// or `ERR` and 0.
+pub fn wget_wch(w: Win) -> (i32, u32) {
+    reading(|sp| sp.wget_wch_step(w)).unwrap_or((ERR, 0))
+}
+
+/// `get_wch (&wch)`.
+pub fn get_wch() -> (i32, u32) {
+    wget_wch(STDSCR)
+}
+
+/// `ungetch (ch)`.
+pub fn ungetch(ch: i32) -> bool {
+    ok(|sp| sp.ungetch(ch))
+}
+
+/// `keypad (win, flag)`: whether `wgetch` on `w` turns key sequences into
+/// key codes; keypad mode set on the terminal now.
+pub fn keypad(w: Win, flag: bool) -> bool {
+    ok(|sp| {
+        let Some(win) = sp.window_mut(w) else {
+            return false;
+        };
+        win.use_keypad = flag;
+        sp.keypad(flag);
+        true
+    })
+}
+
+/// `nodelay (win, flag)`: whether `wgetch` on `w` returns `ERR` at once
+/// when nothing was typed.
+pub fn nodelay(w: Win, flag: bool) -> bool {
+    ok(|sp| {
+        sp.window_mut(w).is_some_and(|win| {
+            win.delay = if flag { 0 } else { -1 };
+            true
+        })
+    })
+}
+
+/// `wtimeout (win, delay)`: how long `wgetch` on `w` waits, in
+/// milliseconds; -1 for as long as it takes.
+pub fn wtimeout(w: Win, delay: i32) {
+    ok(|sp| {
+        sp.window_mut(w).is_some_and(|win| {
+            win.delay = delay;
+            true
+        })
+    });
+}
+
+/// `timeout (delay)`.
+pub fn timeout(delay: i32) {
+    wtimeout(STDSCR, delay);
+}
+
+/// `notimeout (win, flag)`: whether `wgetch` on `w` waits for the rest of a
+/// key sequence as long as it takes.
+pub fn notimeout(w: Win, flag: bool) -> bool {
+    ok(|sp| {
+        sp.window_mut(w).is_some_and(|win| {
+            win.notimeout = flag;
+            true
+        })
+    })
+}
+
+/// `halfdelay (tenths)`.
+pub fn halfdelay(tenths: i32) -> bool {
+    ok(|sp| sp.halfdelay(tenths))
+}
+
+/// `meta (win, flag)`.
+pub fn meta(flag: bool) -> bool {
+    ok(|sp| {
+        sp.meta(flag);
+        true
+    })
 }
 
 #[cfg(test)]

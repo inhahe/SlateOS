@@ -18,7 +18,7 @@
 use crate::addch::Ctype;
 use crate::caps::{boolean, string};
 use crate::cell::A_ALTCHARSET;
-use crate::term::{INFINITY, Term};
+use crate::term::{INFINITY, Output, Term};
 use crate::window::Window;
 
 /// `OPT_SIZE`.
@@ -582,6 +582,7 @@ impl Term {
         old: (i32, i32),
         new: (i32, i32),
         ovw: bool,
+        putchar: Option<&mut dyn FnMut(u8)>,
     ) -> bool {
         let (yold, xold) = old;
         let (ynew, xnew) = new;
@@ -717,7 +718,10 @@ impl Term {
             }
         }
         if usecost != INFINITY {
-            self.tputs(c_string(&buffer), 1);
+            match putchar {
+                None => self.tputs(c_string(&buffer), 1),
+                Some(f) => self.tputs_putchar(c_string(&buffer), f),
+            }
             self.cursrow = ynew;
             self.curscol = xnew;
             true
@@ -738,6 +742,66 @@ impl Term {
         ynew: i32,
         xnew: i32,
     ) -> bool {
+        self.real_mvcur(newscr, ctype, (yold, xold), (ynew, xnew), true, None)
+    }
+
+    /// `_nc_real_mvcur (yold, xold, ynew, xnew, _nc_putchar, FALSE)` -- the
+    /// program's `mvcur`: no character may be overwritten to move, and the
+    /// move itself goes out through `putchar`, the C library's standard
+    /// output rather than the screen's buffer (attribute changes, and the
+    /// `cr` and `nel` that round out a wrap, still go to the buffer, as
+    /// upstream's do).
+    pub fn mvcur_putchar(
+        &mut self,
+        newscr: &Window,
+        ctype: &dyn Ctype,
+        old: (i32, i32),
+        new: (i32, i32),
+        putchar: &mut dyn FnMut(u8),
+    ) -> bool {
+        self.real_mvcur(newscr, ctype, old, new, false, Some(putchar))
+    }
+
+    /// `tputs (string, 1, myOutCh)` with `myOutCh` a program's `putchar`:
+    /// every byte through it, padding included, and the screen's buffer
+    /// flushed where a delay waits.
+    fn tputs_putchar(&mut self, string: &[u8], putchar: &mut dyn FnMut(u8)) {
+        /// `putchar`, with the screen's buffer to flush for a delay.
+        struct PutChar<'a> {
+            putchar: &'a mut dyn FnMut(u8),
+            output: &'a mut Output,
+        }
+        impl terminfo::Outc for PutChar<'_> {
+            fn put(&mut self, bytes: &[u8]) {
+                for &b in bytes {
+                    (self.putchar)(b);
+                }
+            }
+            fn flush(&mut self) {
+                self.output.flush();
+            }
+        }
+        let apply = self.normal_delay();
+        let padding = self.padding;
+        let mut out = PutChar {
+            putchar,
+            output: &mut self.output,
+        };
+        terminfo::tputs_with(string, 1, &padding, &mut out, apply);
+    }
+
+    /// `_nc_real_mvcur (yold, xold, ynew, xnew, myOutCh, ovw)`: `putchar`
+    /// is `myOutCh` when it is not the screen's own buffer.
+    fn real_mvcur(
+        &mut self,
+        newscr: &Window,
+        ctype: &dyn Ctype,
+        old: (i32, i32),
+        new: (i32, i32),
+        ovw: bool,
+        mut putchar: Option<&mut dyn FnMut(u8)>,
+    ) -> bool {
+        let ((yold, xold), (ynew, xnew)) = (old, new);
         if yold == ynew && xold == xnew {
             return true;
         }
@@ -765,6 +829,8 @@ impl Term {
             if l > 0 {
                 if self.has(string::CARRIAGE_RETURN) {
                     self.putp_cap(string::CARRIAGE_RETURN);
+                } else if let Some(f) = putchar.as_mut() {
+                    f(b'\r');
                 } else {
                     self.outch(b'\r');
                 }
@@ -772,6 +838,8 @@ impl Term {
                 while l > 0 {
                     if self.has(string::NEWLINE) {
                         self.putp_cap(string::NEWLINE);
+                    } else if let Some(f) = putchar.as_mut() {
+                        f(b'\n');
                     } else {
                         self.outch(b'\n');
                     }
@@ -785,7 +853,7 @@ impl Term {
         if ynew > self.lines.wrapping_sub(1) {
             ynew = self.lines.wrapping_sub(1);
         }
-        let code = self.onscreen_mvcur(newscr, ctype, (yold, xold), (ynew, xnew), true);
+        let code = self.onscreen_mvcur(newscr, ctype, (yold, xold), (ynew, xnew), ovw, putchar);
         // "Restore attributes if we disabled them before moving."
         if !oldattr.same_attr(&self.current_attr) {
             self.vid_puts(oldattr.attr, oldattr.pair());

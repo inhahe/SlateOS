@@ -11,10 +11,6 @@ use crate::{E2FSPROGS_DATE, E2FSPROGS_VERSION};
 
 /// The run's options: upstream's globals.
 #[derive(Default)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "upstream's globals, flag for flag"
-)]
 struct Options {
     all: bool,
     dirs_opt: bool,
@@ -53,8 +49,7 @@ impl Lsattr {
     fn complain(&mut self, code: i32, what: &[u8], name: &[u8]) {
         let mut msg = what.to_vec();
         msg.extend_from_slice(name);
-        let program = self.program_name.clone();
-        e2p::com_err(&mut self.err, &program, code, &msg);
+        e2p::com_err(&mut self.err, &self.program_name, code, &msg);
     }
 
     /// `list_attributes (name)`: 0, or -1 for a failure.
@@ -127,7 +122,7 @@ impl Lsattr {
         }
         path.extend_from_slice(entry);
         match e2p::lstat(&path) {
-            Err(e) => e2p::perror(&mut self.err, &path, e),
+            Err(e) => cstdio::perror(&mut self.err, &path, e),
             Ok(md) => {
                 if entry.first() != Some(&b'.') || self.opt.all {
                     self.list_attributes(&path);

@@ -7,15 +7,15 @@ use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 
 use cstdio::Output;
-use libcall::file::{AT_FDCWD, Directory, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_RDONLY};
+// `O_CLOEXEC` is what `opendir` opens with.
+use libcall::file::{
+    AT_FDCWD, Directory, O_CLOEXEC, O_DIRECTORY, O_NOFOLLOW, O_NONBLOCK, O_RDONLY,
+};
 use libcall::{ENXIO, EOPNOTSUPP};
 
 /// `ELOOP` and `ENOTTY`, which the wrappers turn into [`EOPNOTSUPP`].
 const ELOOP: i32 = libcall::pty::ELOOP;
 const ENOTTY: i32 = libcall::pty::ENOTTY;
-
-/// `O_CLOEXEC`, which `opendir` opens with.
-const O_CLOEXEC: i32 = 0o2_000_000;
 
 // The flags, as `lib/ext2fs/ext2_fs.h` numbers them.
 pub const EXT2_SECRM_FL: u64 = 0x0000_0001;
@@ -161,8 +161,7 @@ pub fn fgetflags(name: &[u8]) -> Result<u64, i32> {
 /// `fsetflags (name, flags)`: set as an `int`.
 pub fn fsetflags(name: &[u8], flags: u64) -> Result<(), i32> {
     let fd = open_for_flags(name)?;
-    let [a, b, c, d, ..] = flags.to_le_bytes();
-    let set = libcall::inode::set_flags(fd, i32::from_le_bytes([a, b, c, d]))
+    let set = libcall::inode::set_flags(fd, cstrtol::low_i32(flags.cast_signed()))
         .map_err(|e| if e == ENOTTY { EOPNOTSUPP } else { e });
     close(fd);
     set
@@ -179,8 +178,7 @@ pub fn fgetversion(name: &[u8]) -> Result<u64, i32> {
 /// `fsetversion (name, version)`: set as an `int`.
 pub fn fsetversion(name: &[u8], version: u64) -> Result<(), i32> {
     let fd = open(name, O_RDONLY | O_NONBLOCK)?;
-    let [a, b, c, d, ..] = version.to_le_bytes();
-    let set = libcall::inode::set_version(fd, i32::from_le_bytes([a, b, c, d]));
+    let set = libcall::inode::set_version(fd, cstrtol::low_i32(version.cast_signed()));
     close(fd);
     set
 }
@@ -197,8 +195,8 @@ pub fn fgetproject(name: &[u8]) -> Result<u64, i32> {
 /// bits.
 pub fn fsetproject(name: &[u8], project: u64) -> Result<(), i32> {
     let fd = open(name, O_RDONLY | O_NONBLOCK)?;
-    let [a, b, c, d, ..] = project.to_le_bytes();
-    let set = libcall::inode::set_project(fd, u32::from_le_bytes([a, b, c, d]));
+    let set =
+        libcall::inode::set_project(fd, cstrtol::low_i32(project.cast_signed()).cast_unsigned());
     close(fd);
     set
 }
@@ -222,8 +220,7 @@ pub fn iterate_on_dir(dir_name: &[u8], func: &mut dyn FnMut(&[u8], &[u8]) -> i32
     let mut buf = [0u8; 256];
     // A read error ends the walk, as `readdir`'s NULL does.
     while let Some(Ok(name)) = dir.next_name(&mut buf) {
-        let name = name.to_vec();
-        if func(dir_name, &name) != 0 {
+        if func(dir_name, name) != 0 {
             ret = ret.saturating_add(1);
         }
     }
@@ -264,15 +261,6 @@ fn needs_carriage_return() -> bool {
         }
         Err(_) => true,
     }
-}
-
-/// `perror (name)`.
-pub fn perror(err: &mut Output, name: &[u8], code: i32) {
-    let mut line = name.to_vec();
-    line.extend_from_slice(b": ");
-    line.extend_from_slice(errmsg::strerror(&std::io::Error::from_raw_os_error(code)).as_bytes());
-    line.push(b'\n');
-    err.write(&line);
 }
 
 /// `lstat (name)`.

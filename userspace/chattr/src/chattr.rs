@@ -42,10 +42,6 @@ fn get_flag(c: u8) -> u64 {
 
 /// The run's state: upstream's globals.
 #[derive(Default)]
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "upstream's globals, flag for flag"
-)]
 struct State {
     add: bool,
     rem: bool,
@@ -105,8 +101,7 @@ impl Chattr {
             msg.extend_from_slice(b" - ");
             msg.extend_from_slice(arg);
             msg.push(b'\n');
-            let name = self.program_name.clone();
-            e2p::com_err(&mut self.err, &name, 0, &msg);
+            e2p::com_err(&mut self.err, &self.program_name, 0, &msg);
             self.usage();
         }
         value.cast_unsigned()
@@ -114,7 +109,7 @@ impl Chattr {
 
     /// `decode_arg (&i, argc, argv)`.
     fn decode_arg(&mut self, i: &mut usize, argv: &[Vec<u8>]) -> Arg {
-        let arg = argv.get(*i).cloned().unwrap_or_default();
+        let arg = argv.get(*i).map(Vec::as_slice).unwrap_or_default();
         let rest = arg.get(1..).unwrap_or_default();
         match arg.first() {
             Some(b'-') => {
@@ -125,14 +120,14 @@ impl Chattr {
                         b'f' => self.st.silent = true,
                         b'p' | b'v' => {
                             *i = i.saturating_add(1);
-                            let Some(value) = argv.get(*i).cloned() else {
+                            let Some(value) = argv.get(*i) else {
                                 self.usage();
                             };
                             if c == b'p' {
-                                self.st.project = self.number(b"project", &value);
+                                self.st.project = self.number(b"project", value);
                                 self.st.set_project = true;
                             } else {
-                                self.st.version = self.number(b"version", &value);
+                                self.st.version = self.number(b"version", value);
                                 self.st.set_version = true;
                             }
                         }
@@ -181,8 +176,7 @@ impl Chattr {
         }
         let mut msg = what.to_vec();
         msg.extend_from_slice(name);
-        let program = self.program_name.clone();
-        e2p::com_err(&mut self.err, &program, code, &msg);
+        e2p::com_err(&mut self.err, &self.program_name, code, &msg);
     }
 
     /// `printf ("Flags of %s set as "); print_flags; printf ("\n")`.
@@ -217,7 +211,7 @@ impl Chattr {
             if let Err(e) = e2p::fsetflags(name, self.st.sf) {
                 // `perror`, which `-f` does not silence, and the run goes
                 // on to the version and the project.
-                e2p::perror(&mut self.err, name, e);
+                cstdio::perror(&mut self.err, name, e);
             }
         } else {
             if self.st.rem {

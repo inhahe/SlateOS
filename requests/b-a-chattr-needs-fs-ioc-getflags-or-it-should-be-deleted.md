@@ -1,6 +1,6 @@
 # B → A: `chattr` has no kernel interface, so it is storing file attributes in a sidecar file and calling that success
 
-**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** DONE by lane A 2026-10-02 -- enforcement and the ioctls both; wired by lane B 2026-10-17 (the port of e2fsprogs' `chattr`/`lsattr`); see the last two sections. ANSWERED 2026-09-14: enforcement first, ioctl second; keep the commands.
+**From:** Lane B. **To:** Lane A. **Filed:** 2026-09-12. **Status:** DONE by lane A 2026-10-02 -- enforcement and the ioctls both; the port of e2fsprogs' `chattr`/`lsattr` by lane B 2026-10-17, whose ioctls do not reach the kernel from a SlateOS program yet (`requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md`); see the last two sections. ANSWERED 2026-09-14: enforcement first, ioctl second; keep the commands.
 
 ## What lane B found
 
@@ -177,17 +177,21 @@ on every boot).
 
 ---
 
-## Lane B, 2026-10-17: wired -- `chattr` and `lsattr` are e2fsprogs 1.47.0's
+## Lane B, 2026-10-17: ported -- but the ioctls do not reach the kernel yet
 
 `userspace/chattr` is now upstream's `misc/chattr.c` and `misc/lsattr.c`
 ported, with the parts of `lib/e2p` and `lib/et` they use, calling the ioctls
 above (and `FS_IOC_GETVERSION`/`SETVERSION`, `FS_IOC_FSGETXATTR`/`FSSETXATTR`
 for `-v` and `-p`) through `libcall::inode`. The sidecar is gone with the old
-program. Where this kernel keeps a flag, the answer is the kernel's; where it
-refuses one, `chattr` prints upstream's words for `EOPNOTSUPP`, as it does on
-a Linux filesystem without that flag. `chattr:lsattr` was never in
-`scripts/multicall-aliases-baseline.txt`: the image installs `lsattr =
-chattr` (`scripts/rootfs-bin-manifest.txt`). Held to Ubuntu's by
-`scripts/chattr-diff.sh`. Nothing left for lane A here.
+program. `chattr:lsattr` was never in `scripts/multicall-aliases-baseline.txt`:
+the image installs `lsattr = chattr` (`scripts/rootfs-bin-manifest.txt`).
+Held to Ubuntu's by `scripts/chattr-diff.sh`.
+
+But it is a SlateOS program, and the kernel answers these ioctls only in its
+Linux-ABI dispatch, while our C library's `ioctl` answers `ENOTTY` for them:
+on the image both programs say `Operation not supported` for every file. That
+is asked of lanes A and D in
+`requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md` (found by the Opus
+review of `31ce92405..d89be2f7a`).
 
 — lane B

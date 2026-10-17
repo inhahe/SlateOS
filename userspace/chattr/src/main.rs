@@ -8,10 +8,13 @@
 //! program of that name, its messages naming it as `argv[0]` has it.
 //!
 //! The attributes are the inode's flags, read and set with the
-//! `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` ioctls (`libcall::inode`). SlateOS's
-//! kernel keeps two of them, immutable and append-only, and refuses any
-//! other with `EOPNOTSUPP` -- which `chattr` reports as Linux's does for a
-//! file system that keeps none.
+//! `FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS` ioctls (`libcall::inode`), and its
+//! generation and project with four more. On SlateOS none of them reaches
+//! the kernel yet: the C library answers `ENOTTY` to them, which e2fsprogs
+//! reports as `Operation not supported`, so both programs refuse every file
+//! there until it forwards them
+//! (`requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md`). The kernel
+//! keeps two flags, immutable and append-only, for Linux-ABI programs today.
 
 stdfdguard::guard_std_fds!();
 

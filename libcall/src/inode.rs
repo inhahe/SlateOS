@@ -4,10 +4,12 @@
 //! (`FS_IOC_FSGETXATTR`/`FS_IOC_FSSETXATTR`) -- each an `ioctl` on a
 //! descriptor of the file, through the linked C library.
 //!
-//! The numbers are Linux's, which SlateOS's kernel answers for the flags it
-//! keeps (`requests/b-a-chattr-needs-fs-ioc-getflags-or-it-should-be-deleted.md`:
-//! immutable and append-only; any other bit is `EOPNOTSUPP`). Off Unix every
-//! call answers [`ENOSYS`](crate::ENOSYS).
+//! The numbers are Linux's. On SlateOS they do not reach the kernel yet: its
+//! C library's `ioctl` answers `ENOTTY` for anything but a terminal's
+//! requests, and the kernel answers the flags (immutable and append-only)
+//! only to Linux-ABI programs, and the generation and project to none
+//! (`requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md`). Off Unix
+//! every call answers [`ENOSYS`](crate::ENOSYS).
 
 #[cfg(not(unix))]
 use crate::ENOSYS;
@@ -50,10 +52,15 @@ mod sys {
 }
 
 /// `ioctl (fd, request, arg)`: 0, or the `errno`.
+///
+/// # Safety
+///
+/// `arg` must point at a live, writable `T` that is what `request` reads and
+/// writes -- as many bytes as the request's size field says.
 #[cfg(unix)]
-fn ioctl_ptr<T>(fd: i32, request: u64, arg: *mut T) -> Result<(), i32> {
-    // SAFETY: each caller passes a request whose argument is the `T` that
-    // `arg` points at, alive and writable for the call.
+unsafe fn ioctl_ptr<T>(fd: i32, request: u64, arg: *mut T) -> Result<(), i32> {
+    // SAFETY: the caller's promise, above: `arg` is the argument `request`
+    // takes, alive and writable for the call, which keeps no pointer to it.
     let rc = unsafe { sys::ioctl(fd, request, arg) };
     if rc == -1 { Err(last_errno()) } else { Ok(()) }
 }
@@ -68,7 +75,8 @@ pub fn get_flags(fd: i32) -> Result<i32, i32> {
     #[cfg(unix)]
     {
         let mut flags: i32 = 0;
-        ioctl_ptr(fd, FS_IOC_GETFLAGS, &raw mut flags).map(|()| flags)
+        // SAFETY: `FS_IOC_GETFLAGS` writes an `int`, which `flags` is.
+        unsafe { ioctl_ptr(fd, FS_IOC_GETFLAGS, &raw mut flags) }.map(|()| flags)
     }
     #[cfg(not(unix))]
     {
@@ -87,7 +95,8 @@ pub fn set_flags(fd: i32, flags: i32) -> Result<(), i32> {
     #[cfg(unix)]
     {
         let mut flags = flags;
-        ioctl_ptr(fd, FS_IOC_SETFLAGS, &raw mut flags)
+        // SAFETY: `FS_IOC_SETFLAGS` reads an `int`, which `flags` is.
+        unsafe { ioctl_ptr(fd, FS_IOC_SETFLAGS, &raw mut flags) }
     }
     #[cfg(not(unix))]
     {
@@ -105,7 +114,8 @@ pub fn get_version(fd: i32) -> Result<u32, i32> {
     #[cfg(unix)]
     {
         let mut version: u32 = u32::MAX;
-        ioctl_ptr(fd, FS_IOC_GETVERSION, &raw mut version).map(|()| version)
+        // SAFETY: `FS_IOC_GETVERSION` writes an `int`, as wide as `version`.
+        unsafe { ioctl_ptr(fd, FS_IOC_GETVERSION, &raw mut version) }.map(|()| version)
     }
     #[cfg(not(unix))]
     {
@@ -123,7 +133,8 @@ pub fn set_version(fd: i32, version: i32) -> Result<(), i32> {
     #[cfg(unix)]
     {
         let mut version = version;
-        ioctl_ptr(fd, FS_IOC_SETVERSION, &raw mut version)
+        // SAFETY: `FS_IOC_SETVERSION` reads an `int`, which `version` is.
+        unsafe { ioctl_ptr(fd, FS_IOC_SETVERSION, &raw mut version) }
     }
     #[cfg(not(unix))]
     {
@@ -141,7 +152,9 @@ pub fn get_project(fd: i32) -> Result<u32, i32> {
     #[cfg(unix)]
     {
         let mut attr = FsXattr::default();
-        ioctl_ptr(fd, FS_IOC_FSGETXATTR, &raw mut attr).map(|()| attr.projid)
+        // SAFETY: `FS_IOC_FSGETXATTR` writes a `struct fsxattr`, which `attr`
+        // is, all 28 bytes of it.
+        unsafe { ioctl_ptr(fd, FS_IOC_FSGETXATTR, &raw mut attr) }.map(|()| attr.projid)
     }
     #[cfg(not(unix))]
     {
@@ -156,14 +169,19 @@ pub fn get_project(fd: i32) -> Result<u32, i32> {
 ///
 /// # Errors
 ///
-/// The first `ioctl`'s failure; [`ENOSYS`](crate::ENOSYS) off Unix.
+/// Either `ioctl`'s failure: reading, `ENOTTY` for a file that has no such
+/// attributes; writing, `EPERM` for a change the caller may not make and
+/// `EINVAL` for a project the file system will not take.
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
 pub fn set_project(fd: i32, project: u32) -> Result<(), i32> {
     #[cfg(unix)]
     {
         let mut attr = FsXattr::default();
-        ioctl_ptr(fd, FS_IOC_FSGETXATTR, &raw mut attr)?;
+        // SAFETY: both requests take a `struct fsxattr`, which `attr` is.
+        unsafe { ioctl_ptr(fd, FS_IOC_FSGETXATTR, &raw mut attr) }?;
         attr.projid = project;
-        ioctl_ptr(fd, FS_IOC_FSSETXATTR, &raw mut attr)
+        // SAFETY: as above.
+        unsafe { ioctl_ptr(fd, FS_IOC_FSSETXATTR, &raw mut attr) }
     }
     #[cfg(not(unix))]
     {
@@ -174,6 +192,8 @@ pub fn set_project(fd: i32, project: u32) -> Result<(), i32> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -197,18 +217,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_pipe_has_no_flags() {
-        let mut fds = [0i32; 2];
-        // SAFETY: two ints for the two ends.
-        assert_eq!(unsafe { libc_pipe(fds.as_mut_ptr()) }, 0);
-        assert_eq!(get_flags(fds[0]), Err(25), "ENOTTY");
-        for fd in fds {
-            let _ = crate::fd::close(fd);
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    unsafe extern "C" {
-        #[link_name = "pipe"]
-        fn libc_pipe(fds: *mut i32) -> i32;
+        let (r, w) = crate::fd::pipe().unwrap();
+        assert_eq!(get_flags(r), Err(crate::pty::ENOTTY));
+        crate::fd::close(r).unwrap();
+        crate::fd::close(w).unwrap();
     }
 }

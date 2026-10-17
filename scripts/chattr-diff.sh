@@ -23,6 +23,14 @@ DIFF_NEED='timeout'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
+# The cases count on `+i` and `+a` being refused; as root they succeed, and
+# the next case cannot remove the immutable file to start afresh.
+if [ "$(id -u)" = "0" ]; then
+  echo "chattr-diff: refusing to run as root: +i and +a would succeed and leave" >&2
+  echo "  files no case can remove." >&2
+  exit 2
+fi
+
 # lsattr: ours is chattr by another name; Ubuntu's its own program.
 ln -sfn chattr "$bindir/ours/lsattr"
 ln -sfn "$(command -v lsattr)" "$bindir/gnu/lsattr"

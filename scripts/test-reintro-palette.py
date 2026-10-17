@@ -83,9 +83,10 @@ def main() -> int:
     last = (out.strip().splitlines() or [""])[-1]
     report = "\n".join(
         "    " + line for line in out.splitlines()
-        if line.startswith(("PATTERN NOT FOUND", "AMBIGUOUS", "NO-OP", "    edit", "    every"))
+        if line.startswith(("PATTERN NOT FOUND", "AMBIGUOUS", "NO-OP", "DANGLING", "    edit",
+                            "    every", "    no such test"))
     )
-    expect(status == 0 and last.endswith("0 stale, 0 ambiguous, 0 no-op"),
+    expect(status == 0 and last.endswith("0 stale, 0 ambiguous, 0 no-op, 0 dangling"),
            f"the harness has rotted -- {last or 'no summary line'}; "
            "re-derive or retire each entry below (see this file's docstring)",
            report)
@@ -94,7 +95,7 @@ def main() -> int:
     snap = {"f.rs": b"alpha\nbeta\nbeta\n"}
 
     status, out = checked(rp, [("A: applies once", "f.rs", [("alpha\n", "gamma\n")], [], [])], snap)
-    expect(status == 0 and "0 stale, 0 ambiguous, 0 no-op" in out,
+    expect(status == 0 and "0 stale, 0 ambiguous, 0 no-op, 0 dangling" in out,
            "a defect that applies once and changes the file was reported", out)
 
     status, out = checked(rp, [("B: stale", "f.rs", [("delta\n", "gamma\n")], [], [])], snap)
@@ -131,6 +132,31 @@ def main() -> int:
     status, out = checked(rp, [("F: file gone", "gone.rs", [("alpha\n", "gamma\n")], [], [])], gone)
     expect(gone == {"gone.rs": b""} and status == 1 and "PATTERN NOT FOUND  F: file gone" in out,
            "a defect aimed at a deleted file was not reported as stale", out)
+
+    # A defect naming a test that is nowhere -- renamed or deleted from under
+    # it -- is refused; one naming a test that is there is not. Judged against
+    # a scratch tree, so the control does not depend on what the real one
+    # holds.
+    saved_root = rp.ROOT
+    with tempfile.TemporaryDirectory(prefix="reintro_palette_test_") as tmp:
+        rp.ROOT = Path(tmp)
+        crate = Path(tmp) / "c" / "src"
+        crate.mkdir(parents=True)
+        (crate / "lib.rs").write_text(
+            "fn f() {}\n\n#[test]\n#[should_panic(expected = \"[x]\")]\nfn real_one() {}\n",
+            encoding="utf-8")
+        here = {"c/src/lib.rs": b"alpha\n"}
+        try:
+            status, out = checked(rp, [("G: names a gone test", "c/src/lib.rs",
+                                        [("alpha\n", "gamma\n")], [], ["no_such_test"])], here)
+            expect(status == 1 and "DANGLING  no_such_test" in out and "1 dangling" in out,
+                   "a defect naming a test that does not exist was not refused", out)
+            status, out = checked(rp, [("H: names a real test", "c/src/lib.rs",
+                                        [("alpha\n", "gamma\n")], [], ["real_one"])], here)
+            expect(status == 0 and "0 dangling" in out,
+                   "a defect naming a test that exists was refused", out)
+        finally:
+            rp.ROOT = saved_root
 
     if failures:
         print("test-reintro-palette: FAILED")

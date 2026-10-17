@@ -242,3 +242,26 @@ Net effect on the campaign: unproved **2473 → 2442**, proved **15.7 % →
 ambiguous, 0 no-op`. The single-prover rise is expected and is not a
 regression: fifteen new defects against a module with one view of each
 behaviour produce mostly-sole catchers, exactly as `blur.rs` did.
+
+**RE-MEASURED 2026-10-17 (lane C): 26 dangling had crept in, and are gone.**
+Fifteen defects named 26 tests that no longer existed anywhere -- renamed
+(the clipboard's filter-tab test, focus assist's suppressed line, the
+calendar's unresolvable zone) or deleted with the code they tested (the
+Catppuccin mode tests, `parse_hex_color_*`, the accessibility panel's
+`test_ui_render_*`). `--coverage` says so and exits 1, but nothing runs it:
+the pre-push tooling suite runs `test-reintro-palette.py` and `--check`, and
+neither looks. Each of the fifteen was planted again; its list now holds the
+declared tests that still fail, and the renamed successor where there is
+one. The broad contrast defects lost the most (43 -> 16, 53 -> 26), which
+is a shrunken blast radius recorded rather than hidden.
+
+```
+3914 tests in the swept packages, 3427 unproved (12.4% proved),
+0 dangling, 170 single-prover   (1282 defects)
+```
+
+**And the creep is stopped where it is caused**, the same day: `--check`,
+which the pre-push tooling suite runs, now refuses a declared test that
+exists nowhere (`DANGLING`), as it refuses a pattern that stopped matching,
+so the commit that renames or deletes such a test is the one that hears of
+it (`test-reintro-palette.py` holds a control each way).

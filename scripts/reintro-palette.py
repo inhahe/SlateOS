@@ -29,7 +29,8 @@ Three modes, cheapest first.
 
 - `--check` matches every defect's pattern against the snapshot and builds
   nothing. Seconds, no toolchain, and it answers the only question that rots
-  on its own: has a rename or a rustfmt pass stopped this defect applying?
+  on its own: has a rename or a rustfmt pass stopped this defect applying --
+  or taken away a test it names?
 - `--compile [names…]` applies each defect and runs `cargo check --all-targets`
   on its packages. This is the question `--check` *cannot* answer, and the
   distinction is not academic: a pattern can be findable, unambiguous and
@@ -1322,8 +1323,8 @@ DEFECTS = [
         [("            Self::PlainText => p.blue,", "            Self::PlainText => p.accent,")],
         ["desktop"],
         [
-            "only_the_active_filter_tab_follows_the_accent",
             "the_format_badges_stay_distinct_under_every_accent",
+            'only_the_active_filter_tab_and_the_selected_row_follow_the_accent',
         ],
     ),
     (
@@ -1335,8 +1336,8 @@ DEFECTS = [
         )],
         ["desktop"],
         [
-            "only_the_active_filter_tab_follows_the_accent",
             "the_active_filter_tabs_label_is_legible_on_it",
+            'only_the_active_filter_tab_and_the_selected_row_follow_the_accent',
         ],
     ),
     (
@@ -1357,7 +1358,9 @@ DEFECTS = [
             '                        text: "S".to_string(),\n                        color: p.ink(p.accent),',
         )],
         ["desktop"],
-        ["only_the_active_filter_tab_follows_the_accent"],
+        [
+            'only_the_active_filter_tab_and_the_selected_row_follow_the_accent',
+        ],
     ),
     (
         "AAAAA: the destructive \"Clear All\" is repainted the user's accent",
@@ -1370,7 +1373,7 @@ DEFECTS = [
         [
             # Re-derived 2026-09-27 against the code as it now reads.
             # Hue text is inked now (`p.ink`).
-            'only_the_active_filter_tab_follows_the_accent',
+            'only_the_active_filter_tab_and_the_selected_row_follow_the_accent',
         ],
     ),
     (
@@ -11409,7 +11412,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
-            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+            'the_suppressed_line_is_readable_and_only_drawn_when_there_is_one',
         ],
     ),
     (
@@ -11533,10 +11536,10 @@ DEFECTS = [
             'the_current_line_is_quiet_when_off_and_never_the_accent',
             'the_mode_hues_are_a_severity_code_and_never_the_accent',
             'the_picker_marks_the_chosen_row_with_the_accent',
-            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
             'the_tray_icon_is_inked_for_its_own_pill',
             'tray_indicator_hidden_when_off',
             'tray_indicator_shown_when_active',
+            'the_suppressed_line_is_readable_and_only_drawn_when_there_is_one',
         ],
     ),
     (
@@ -11715,7 +11718,7 @@ DEFECTS = [
         ["desktop"],
         [
             'every_site_draws_the_role_it_claims',
-            'the_suppressed_line_is_overlay_and_only_drawn_when_there_is_one',
+            'the_suppressed_line_is_readable_and_only_drawn_when_there_is_one',
         ],
     ),
     (
@@ -15690,11 +15693,14 @@ DEFECTS = [
             'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
             'the_knob_follows_the_track_rather_than_the_theme',
-            # The one call-site test that pins the ink by equality with
-            # readable_on(pill) rather than by a contrast floor, so it fails
-            # for any change to that line at all. It is the inheritor of the
-            # fourteen per-panel knob defects this module retired.
-            'the_knob_is_legible_on_both_pills',
+            # Re-derived 2026-10-17: the call-site test this named, which
+            # pinned the ink by equality with readable_on(pill), is gone; the
+            # call sites that catch the change now are the quick settings'
+            # switch and the OSD.
+            'a_quick_setting_switch_that_is_on_shows_its_knob',
+            'every_colour_the_osd_draws_comes_from_its_palette',
+            'every_rectangle_the_osd_draws_is_in_the_role_it_claims',
+            'the_control_lights_rings_and_dims',
         ],
     ),
     # RETIRED by 536: `readable_on` has no threshold left to drift. It now
@@ -15915,49 +15921,22 @@ DEFECTS = [
             'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
             'a_bright_green_custom_accent_does_not_get_pale_ink',
             'readable_on_answers_with_the_palettes_own_extremes',
-            'green_means_on_and_the_accent_means_chosen',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
             # Everything below was found by the sweep of 2026-08-24, not
             # predicted: an ink rule that is wrong for every colour is
             # visible from every site that inks anything, so the blast
             # radius is the whole shell. Recorded in full so that a
             # *shrinking* radius shows up as a regression in coverage.
-            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
-            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
             'a_title_is_readable_on_every_bar_the_settings_can_produce',
             'a_transport_button_is_lettered_for_its_own_fill',
             'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
             'an_accented_taskbar_keeps_its_glyph_visible',
-            'an_empty_search_box_is_dimmer_than_a_typed_query',
-            'every_colour_both_renderers_draw_comes_from_their_palette',
-            'every_colour_the_dialog_draws_comes_from_its_palette',
-            'every_colour_the_module_draws_comes_from_its_palette',
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'every_colour_the_popup_draws_comes_from_its_palette',
-            'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
-            'every_colour_the_taskbar_draws_comes_from_its_palette',
-            'every_colour_this_panel_draws_comes_from_its_palette',
             'every_pairing_the_calendar_draws_clears_the_contrast_floor',
-            'every_site_draws_the_role_it_claims',
-            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
             'exactly_seven_things_in_the_full_render_sit_on_the_background',
             'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
-            'none_of_the_nine_deleted_constants_is_still_drawn',
-            'test_ui_render_audio',
-            'test_ui_render_input',
-            'test_ui_render_magnifier',
-            'test_ui_render_reader',
-            'test_ui_render_visual',
-            'test_ui_render_with_active_features',
             'text_beats_readable_on_the_fill_against_the_card',
-            'the_accent_marks_which_app_is_in_force_and_nothing_else',
-            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
-            'the_content_well_is_deeper_than_the_panel_it_sits_in',
-            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
             'the_knob_follows_the_track_rather_than_the_theme',
             'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
-            'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
         ],
@@ -16001,25 +15980,15 @@ DEFECTS = [
             'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
             'a_title_is_readable_on_every_bar_the_settings_can_produce',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
-            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
-            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
             # Everything below was found by the sweep of 2026-08-24. The
             # eighteen constants that flip are concentrated in the light
             # palette, which is why the mode-sensitive tests dominate.
             'a_transport_button_is_lettered_for_its_own_fill',
             'an_accented_taskbar_keeps_its_glyph_visible',
             'each_badges_mark_can_be_read_on_the_badge',
-            'every_colour_both_renderers_draw_comes_from_their_palette',
             'every_colour_the_dialog_draws_comes_from_its_palette',
-            'every_colour_the_module_draws_comes_from_its_palette',
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'every_colour_the_popup_draws_comes_from_its_palette',
-            'every_pairing_the_calendar_draws_clears_the_contrast_floor',
             'every_site_changes_when_the_mode_does',
-            'green_means_on_and_the_accent_means_chosen',
-            'text_beats_readable_on_the_fill_against_the_card',
             'the_badge_ink_is_computed_from_the_badge_it_sits_on',
-            'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
         ],
     ),
@@ -16048,8 +16017,8 @@ DEFECTS = [
             # including the six hand-picked ones they pin. The rule they encode
             # is "these particular colours get this particular ink", which is
             # blind to how the answer was reached and sharp about the answer.
-            'test_catppuccin_latte_is_light_mode',
-            'test_catppuccin_mocha_is_dark_mode',
+            # (Four remain: the two Catppuccin mode tests were gone by
+            # 2026-10-17.)
             'test_contrast_text_on_dark_bg',
             'test_contrast_text_on_light_bg',
             'test_is_dark_black',
@@ -16062,48 +16031,23 @@ DEFECTS = [
             'the_published_ratios_are_what_this_crate_computes',
             'the_chosen_ink_is_the_more_legible_of_the_two_for_any_colour_at_all',
             'a_bright_green_custom_accent_does_not_get_pale_ink',
-            'green_means_on_and_the_accent_means_chosen',
-            'none_of_the_eleven_deleted_constants_is_still_drawn',
             'the_knob_is_legible_on_every_track_a_panel_can_choose',
             # Everything below was found by the sweep of 2026-08-24. A
             # reciprocal ratio fails every floor assertion in the tree at
             # once, so this is the widest blast radius of the four.
-            'a_category_with_no_default_app_is_not_accented_as_if_it_had_one',
-            'a_selected_pattern_chip_is_lettered_for_its_own_fill',
             'a_title_is_readable_on_every_bar_the_settings_can_produce',
             'a_transport_button_is_lettered_for_its_own_fill',
             'a_zone_label_is_lettered_for_the_scrim_and_not_for_the_mode',
             'an_accented_taskbar_keeps_its_glyph_visible',
-            'an_empty_search_box_is_dimmer_than_a_typed_query',
-            'every_colour_both_renderers_draw_comes_from_their_palette',
             'every_colour_the_dialog_draws_comes_from_its_palette',
-            'every_colour_the_module_draws_comes_from_its_palette',
-            'every_colour_the_panel_draws_comes_from_its_palette',
-            'every_colour_the_popup_draws_comes_from_its_palette',
             'every_colour_the_screen_saver_draws_is_a_dark_role_or_one_of_its_two_ramps',
-            'every_colour_the_taskbar_draws_comes_from_its_palette',
-            'every_colour_this_panel_draws_comes_from_its_palette',
             'every_pairing_the_calendar_draws_clears_the_contrast_floor',
             'every_site_draws_the_role_it_claims',
-            'exactly_one_tab_is_accented_and_it_is_the_chosen_one',
             'exactly_seven_things_in_the_full_render_sit_on_the_background',
             'ink_drawn_on_a_coloured_fill_is_readable_in_both_modes',
-            'none_of_the_nine_deleted_constants_is_still_drawn',
             'readable_on_answers_with_the_palettes_own_extremes',
-            'test_ui_render_audio',
-            'test_ui_render_input',
-            'test_ui_render_magnifier',
-            'test_ui_render_reader',
-            'test_ui_render_visual',
-            'test_ui_render_with_active_features',
             'text_beats_readable_on_the_fill_against_the_card',
-            'the_accent_marks_which_app_is_in_force_and_nothing_else',
-            'the_active_feature_line_is_green_and_only_drawn_when_there_is_one',
-            'the_content_well_is_deeper_than_the_panel_it_sits_in',
-            'the_crosshairs_are_legible_on_the_lens_in_both_modes',
             'the_knob_follows_the_track_rather_than_the_theme',
-            'the_knob_is_the_more_legible_of_the_two_inks_on_offer',
-            'the_section_headings_keep_their_hue_in_both_modes',
             'the_wordmark_is_legible_on_the_logo_tile',
             'what_is_drawn_on_the_accent_is_chosen_for_the_accent',
         ],
@@ -16153,8 +16097,6 @@ DEFECTS = [
             'test_contrast_text_on_light_bg',
             'test_is_dark_black',
             'test_is_dark_white',
-            'test_catppuccin_mocha_is_dark_mode',
-            'test_catppuccin_latte_is_light_mode',
         ],
     ),
     (
@@ -16447,7 +16389,6 @@ DEFECTS = [
             # taskbar and the world-clock rows go wrong together. Twelve
             # catchers for a two-token edit is a fair measure of how central it
             # is -- and of how little any one of them was proving alone.
-            'an_unresolvable_zone_falls_back_to_utc_rather_than_inventing_an_offset',
             'clock_24h_format',
             'clock_24h_with_seconds',
             'clock_follows_a_daylight_saving_transition',
@@ -16459,6 +16400,7 @@ DEFECTS = [
             'the_taskbar_reading_crosses_midnight_with_the_zone',
             'the_taskbar_reading_follows_the_switches',
             'timestamp_with_time',
+            'an_unresolvable_zone_falls_back_to_the_machines_rather_than_inventing_an_offset',
         ],
     ),
     (
@@ -16478,10 +16420,7 @@ DEFECTS = [
             # import path notices too, since a colour written out and read
             # back no longer matches what went in.
             'a_colours_hex_text_reads_back_as_the_same_colour',
-            'export_import_roundtrip',
             'hex_text_reads_either_case_and_refuses_anything_else',
-            'import_single_event',
-            'parse_hex_color_valid',
         ],
     ),
     (
@@ -17679,7 +17618,6 @@ DEFECTS = [
             # All three at once on purpose: `?` on the first channel hides a
             # broken second and third, so patching one is untestable.
             'hex_text_reads_either_case_and_refuses_anything_else',
-            'parse_hex_color_invalid_chars',
         ],
     ),
     # ------------------------------------------------------------------
@@ -18500,7 +18438,9 @@ def check(snap):
     to happen — a rustfmt pass, a rename, or (as actually happened here) two
     file constants given the same name will rot a defect that nobody looks at
     again until the module it guards is next touched. This pass is seconds,
-    takes no toolchain, and answers the only question that rots.
+    takes no toolchain, and answers the only question that rots -- twice
+    over: whether each defect still applies, and whether each test it names
+    still exists.
     """
     bad = 0
     amb = 0
@@ -18556,8 +18496,20 @@ def check(snap):
         if not stale and text == original:
             print(f"NO-OP  {name}\n    every edit was undone by a later one")
             noop += 1
-    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op")
-    return 1 if bad or amb or noop else 0
+    # A declared test that exists nowhere was renamed or deleted out from
+    # under its defect, which can then only come back MISSING at the end of
+    # an hour's run. Refused here, in seconds, by the commit that did it:
+    # `--coverage` has always reported it, but nothing runs `--coverage`, and
+    # 26 had crept in by 2026-10-17.
+    everywhere = names_in_tree()
+    dangling = sorted({t for d in DEFECTS for t in d[4] if t not in everywhere})
+    for t in dangling:
+        users = [d[0] for d in DEFECTS if t in d[4]]
+        more = f" and {len(users) - 1} more" if len(users) > 1 else ""
+        print(f"DANGLING  {t}\n    no such test; declared by {users[0]}{more}")
+    print(f"\n{len(DEFECTS)} defects, {bad} stale, {amb} ambiguous, {noop} no-op, "
+          f"{len(dangling)} dangling")
+    return 1 if bad or amb or noop or dangling else 0
 
 
 # A `#[test]` may carry further attributes before the function, and
@@ -18657,8 +18609,8 @@ def coverage():
     1. **Unproved** -- a test whose name no defect names anywhere. Nothing has
        ever asked it anything.
     2. **Dangling** -- a declared name matching no test in the tree, i.e. a
-       test renamed out from under a defect. Today this surfaces only as a
-       `[MISSING: ...]` at the end of a run that takes hours. Judged against
+       test renamed out from under a defect. `check()` refuses it too, since
+       2026-10-17, so a commit that does it is stopped. Judged against
        every crate any defect patches (`names_in_tree`), not against the two
        swept for (1) -- those are different questions and conflating them
        reported fifteen live guitk tests as dangling.

@@ -3,11 +3,10 @@
  *
  * Until 2026-10-06 the C library handed a file mapping to the native
  * SYS_MMAP, which has no file to map from: the descriptor went where nothing
- * reads it, and the mapping was anonymous memory -- zeros, and no error. The
- * library now copies the file into fresh memory (posix/src/mman/file_map.rs)
- * until the kernel maps files for native programs
- * (requests/d-a-a-native-program-cannot-map-a-file.md). The decisive check is
- * 12: the bytes are the file's, which zeros are not.
+ * reads it, and the mapping was anonymous memory -- zeros, and no error. Then
+ * it copied the file into fresh memory; since 2026-10-17 the kernel maps it
+ * (SYS_MMAP_FILE, posix/src/mman/file_map.rs), a page at a time. The
+ * decisive check is 12: the bytes are the file's, which zeros are not.
  *
  * Exit code 42 == every check passed.  Anything else is the first failing
  * check and step: the tens digit names the check, the units the step.  No
@@ -23,9 +22,11 @@
  *   5x  shared and read-only (50), the file's bytes too (51)
  *   6x  refused as Linux refuses, in its order: shared and writable on a
  *       read-only descriptor, EACCES (61); shared and writable on a
- *       read-write one, ENODEV -- this library cannot write it back (62); a
- *       write-only descriptor, EACCES (63); a pipe, ENODEV (64); a directory
- *       (65: it could not be opened), ENODEV (66)
+ *       read-write one (62), either ENODEV, from a kernel that cannot save
+ *       its stores yet, or mapped, as on Linux, and then a store to it is in
+ *       the file after msync(MS_SYNC) (67: msync, 68: the file), and put
+ *       back (69); a write-only descriptor, EACCES (63); a pipe, ENODEV
+ *       (64); a directory (65: it could not be opened), ENODEV (66)
  *   7x  a read-only private file mapping made writable by mprotect (71) and
  *       written; made inaccessible (72)
  */
@@ -122,9 +123,24 @@ int main(void)
     if (!refused(mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED, rd, 0), EACCES))
         return 61;
     int rw = open(PATH, O_RDWR);
-    errno = 0;
-    if (rw < 0 || !refused(mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED, rw, 0), ENODEV))
+    if (rw < 0)
         return 62;
+    errno = 0;
+    unsigned char *sw = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED, rw, 0);
+    if (sw == MAP_FAILED) {
+        if (errno != ENODEV)
+            return 62;
+    } else {
+        sw[2] = (unsigned char)~pattern(2);
+        if (msync(sw, page, MS_SYNC) != 0)
+            return 67;
+        unsigned char c = 0;
+        if (pread(rw, &c, 1, 2) != 1 || c != (unsigned char)~pattern(2))
+            return 68;
+        sw[2] = pattern(2);
+        if (msync(sw, page, MS_SYNC) != 0 || munmap(sw, page) != 0)
+            return 69;
+    }
     int wo = open(PATH, O_WRONLY);
     errno = 0;
     if (wo < 0 || !refused(mmap(NULL, page, PROT_READ, MAP_PRIVATE, wo, 0), EACCES))

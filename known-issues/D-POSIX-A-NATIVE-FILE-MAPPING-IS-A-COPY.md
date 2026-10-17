@@ -1,6 +1,7 @@
 ## D-POSIX-A-NATIVE-FILE-MAPPING-IS-A-COPY — a native program's `mmap` of a file is a copy read in at once, and a writable shared one is refused (lane D, 2026-10-06)
 
-**Status:** OPEN -- waiting on lane A (`requests/d-a-a-native-program-cannot-map-a-file.md`).
+**Status:** OPEN -- fixed on lane-d (`mmap` of a file is the kernel's,
+`SYS_MMAP_FILE`, demand-paged), awaiting a boot on main. See "Fixed" at the end.
 
 **In short:** programs read files by mapping them into memory (`mmap`). For
 a native SlateOS program, that used to give memory full of zeros instead of
@@ -38,3 +39,18 @@ nothing noticed; `services/ctest-mmap-file` does now.
 (`VmaKind::FileBacked` already serves the Linux ABI), `MAP_PRIVATE` first,
 then a writable `MAP_SHARED`. Then `mmap` hands a file mapping to the kernel,
 and `file_map.rs` goes.
+
+**Fixed (2026-10-17, lane D):** lane A's kernel has mapped files for native
+programs since 2026-10-07 (`SYS_MMAP_FILE`, 1144), and `file_map.rs` now
+hands it every mapping that passes this library's refusals -- the ones only
+it can make, from the descriptor's kind and access mode, in Linux's order --
+instead of copying. A private mapping is demand-paged, a shared one maps the
+page cache and shows others' writes, and the mapping keeps its own
+reference to the file. A writable shared mapping is the kernel's to grant:
+main's kernel answers `ENOSYS`, still reported as `ENODEV`, and lane A's next
+(lane-a-wip `9b218f242`, design-decisions §1572) saves its stores, which
+`msync` now saves at once through `SYS_MSYNC` (1177; a kernel without it has
+nothing to save). `services/ctest-mmap-file` takes either answer at 62 and,
+when mapped, checks a store reaches the file after `msync(MS_SYNC)`; it
+passes on Linux that way. Of the table above, the rows that remain this
+library's are none; `madvise(MADV_DONTNEED)` and `mremap` are the kernel's.

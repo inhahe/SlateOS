@@ -1,41 +1,26 @@
-//! File-backed `mmap`, made the one way the native kernel allows until it
-//! maps files itself: anonymous memory where the mapping goes, filled from
-//! the file, then given the protection asked for.
+//! File-backed `mmap`: the kernel's (`SYS_MMAP_FILE`), after the refusals
+//! only this library can make.
 //!
-//! # Why
+//! # What a mapping is
 //!
-//! The native `SYS_MMAP` makes anonymous memory, or maps device registers; it
-//! has no file to map from. (The Linux ABI's `mmap` maps files, a page at a
-//! time as they are touched -- known-issues TD22 -- but a native program does
-//! not reach it.) Until 2026-10-06 this library passed a file mapping's
-//! descriptor to that call anyway, where nothing read it: a native program
-//! that mapped a file was given memory full of zeros, and no error. Lane A
-//! is asked for native file mappings
+//! The kernel's, as the Linux ABI's `mmap` makes it: a private mapping is
+//! demand-paged from the file, each page read at its first touch; a shared
+//! one maps the file's pages in the page cache, so it shows what others
+//! write to the file. A page past the end of the file reads as zeros. The
+//! mapping holds its own reference to the file, so the descriptor may be
+//! closed after.
+//!
+//! A shared, writable mapping is the kernel's to grant: one that saves its
+//! stores to the file maps it (and `msync` saves them at once,
+//! `SYS_MSYNC`); one that cannot yet answers `ENOSYS`, which `mmap` never
+//! answers on Linux, so it is reported as `ENODEV` -- "the file system does
+//! not support memory mapping" -- and a program is not told its data are
+//! saved when they are not.
+//!
+//! Until 2026-10-17 this library copied the file into anonymous memory at
+//! `mmap`, all of it at once, and refused every shared, writable mapping:
+//! the native kernel had no way to map a file until 2026-10-07
 //! (`requests/d-a-a-native-program-cannot-map-a-file.md`).
-//!
-//! # What a mapping is here
-//!
-//! Linux without an MMU maps a private file the same way, by copying it in.
-//!
-//! - `MAP_PRIVATE`: the file's bytes from `offset`, as they are when it is
-//!   mapped. Past the end of the file it reads as zeros, and writes stay in
-//!   the mapping, as on Linux.
-//! - `MAP_SHARED` without `PROT_WRITE`: the same. Unlike Linux's, it does
-//!   not show writes made to the file after it was mapped.
-//! - `MAP_SHARED` with `PROT_WRITE`: refused, `ENODEV` -- "the file system
-//!   does not support memory mapping". Writes to the mapping would never
-//!   reach the file, so a program is not told its data are saved when they
-//!   are not; it uses `write`, or says what failed.
-//!
-//! Where it differs from Linux besides:
-//! - A page wholly past the end of the file reads as zeros, where Linux
-//!   raises SIGBUS.
-//! - The whole range is read when it is mapped, where Linux reads each page
-//!   at its first touch: mapping a large file costs its size in memory, and
-//!   the time to read it, at once.
-//! - `madvise(MADV_DONTNEED)` is refused (`EINVAL`), as it is for all memory
-//!   here, where Linux reads the file again; and an `mremap` that grows the
-//!   mapping is refused too (`ENOSYS`).
 //!
 //! # The refusals, in Linux's order
 //!
@@ -51,22 +36,17 @@
 //!    directory: `ENODEV`.
 //! 6. `PROT_GROWSDOWN` or `PROT_GROWSUP`: `EINVAL`.
 //!
-//! Then this library's own: `MAP_SHARED` with `PROT_WRITE`, `ENODEV`.
+//! The descriptor's kind and its access mode are this library's to know --
+//! the kernel sees a handle -- so these are decided here, and only a mapping
+//! that passes them reaches the kernel, which answers the rest.
 
 use core::ffi::c_void;
 
-use super::{
-    MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, MAP_TYPE, PROT_GROWSDOWN, PROT_GROWSUP, PROT_READ,
-    PROT_WRITE,
-};
+use super::{MAP_FAILED, MAP_PRIVATE, MAP_TYPE, PROT_GROWSDOWN, PROT_GROWSUP, PROT_WRITE};
 use crate::errno;
 use crate::fcntl::{O_ACCMODE, O_RDONLY, O_RDWR, O_WRONLY, S_IFDIR, S_IFMT};
 use crate::fdtable::{self, HandleKind};
-use crate::types::{Fd, OffT, SizeT, SsizeT};
-
-/// The page a mapping is made of: the kernel maps whole ones, so a mapping's
-/// last page is all there, past `length`.
-const PAGE: SizeT = crate::unistd::PAGE_SIZE;
+use crate::types::{Fd, OffT, SizeT};
 
 /// Map `length` bytes of `fd`'s file from `offset` (`mmap` with
 /// `MAP_ANONYMOUS` clear, past its own checks).
@@ -81,46 +61,54 @@ pub(super) fn map(
     map_with(&System, addr, length, prot, flags, fd, offset)
 }
 
-/// What a mapping is made with: the library's own calls, or the tests'
-/// stand-ins.
+/// What a mapping is made with: the kernel, or the tests' stand-in.
 trait Calls {
-    /// Anonymous memory, readable and writable, as `flags` asks for it;
-    /// `MAP_FAILED` with `errno` set if not.
-    fn anonymous(&self, addr: *mut c_void, length: SizeT, flags: i32) -> *mut c_void;
-    /// `pread`.
-    fn read_at(&self, fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT;
-    /// `mprotect`.
-    fn protect(&self, p: *mut c_void, length: SizeT, prot: i32) -> i32;
-    /// `munmap`.
-    fn unmap(&self, p: *mut c_void, length: SizeT) -> i32;
+    /// `SYS_MMAP_FILE`: the address mapped, or Linux's errno as `-errno` (or
+    /// a native code from past the call's body).
+    fn map_file(
+        &self,
+        addr: *mut c_void,
+        length: SizeT,
+        prot: i32,
+        flags: i32,
+        handle: u64,
+        offset: OffT,
+    ) -> i64;
     /// Whether `fd` is a directory.
     fn is_directory(&self, fd: Fd) -> bool;
 }
 
-/// The library's own calls.
+/// The kernel.
 struct System;
 
 impl Calls for System {
-    fn anonymous(&self, addr: *mut c_void, length: SizeT, flags: i32) -> *mut c_void {
-        super::mmap(addr, length, PROT_READ | PROT_WRITE, flags, -1, 0)
-    }
-
-    fn read_at(&self, fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> SsizeT {
-        crate::file::pread(fd, buf, count, offset)
-    }
-
-    fn protect(&self, p: *mut c_void, length: SizeT, prot: i32) -> i32 {
-        super::mprotect(p, length, prot)
-    }
-
-    fn unmap(&self, p: *mut c_void, length: SizeT) -> i32 {
-        super::munmap(p, length)
+    fn map_file(
+        &self,
+        addr: *mut c_void,
+        length: SizeT,
+        prot: i32,
+        flags: i32,
+        handle: u64,
+        offset: OffT,
+    ) -> i64 {
+        // `prot` and `flags` are Linux's bits, which the kernel reads as
+        // they are; their `u32` is the same bits. `offset` is non-negative
+        // ([`refusal`]).
+        crate::syscall::syscall6(
+            crate::syscall::SYS_MMAP_FILE,
+            addr as u64,
+            length as u64,
+            u64::from(prot.cast_unsigned()),
+            u64::from(flags.cast_unsigned()),
+            handle,
+            offset.cast_unsigned(),
+        )
     }
 
     fn is_directory(&self, fd: Fd) -> bool {
         let mut st = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
         // A file that cannot be asked about is taken for one that is not a
-        // directory: a directory's read fails, and the mapping with it.
+        // directory: the kernel then answers for it.
         crate::file::fstat(fd, st.as_mut_ptr()) == 0
             // SAFETY: `fstat` filled it; all zeros was a valid `Stat` already.
             && unsafe { st.assume_init() }.st_mode & S_IFMT == S_IFDIR
@@ -137,43 +125,37 @@ fn map_with(
     fd: Fd,
     offset: OffT,
 ) -> *mut c_void {
-    if let Err(e) = refusal(calls, length, prot, flags, fd, offset) {
-        errno::set_errno(e);
-        return MAP_FAILED;
-    }
-    // Private and anonymous, wherever the caller's placement flags
-    // (`MAP_FIXED`, `MAP_FIXED_NOREPLACE`) and hints (`MAP_POPULATE`,
-    // `MAP_NORESERVE`) put it.
-    let p = calls.anonymous(
-        addr,
-        length,
-        (flags & !MAP_TYPE) | MAP_PRIVATE | MAP_ANONYMOUS,
-    );
-    if p == MAP_FAILED {
-        return MAP_FAILED;
-    }
-    // Whole pages, as Linux maps them: the bytes from `length` to the end of
-    // its last page are the file's too, where the file has bytes there.
-    let span = length.checked_next_multiple_of(PAGE).unwrap_or(length);
-    let made = fill(calls, p.cast(), span, fd, offset).and_then(|()| {
-        if prot == PROT_READ | PROT_WRITE || calls.protect(p, length, prot) == 0 {
-            Ok(())
-        } else {
-            Err(errno::get_errno())
+    let handle = match refusal(calls, length, prot, flags, fd, offset) {
+        Ok(handle) => handle,
+        Err(e) => {
+            errno::set_errno(e);
+            return MAP_FAILED;
         }
-    });
-    if let Err(e) = made {
-        // What went wrong first is what is reported; a failed unmap has no
-        // errno of its own to give, and the memory is the process's either
-        // way.
-        let _ = calls.unmap(p, length);
-        errno::set_errno(e);
-        return MAP_FAILED;
+    };
+    match mapped_at(calls.map_file(addr, length, prot, flags, handle, offset)) {
+        Ok(at) => at as *mut c_void,
+        Err(e) => {
+            errno::set_errno(e);
+            MAP_FAILED
+        }
     }
-    p
 }
 
-/// Why `fd` cannot be mapped so, in Linux's order (the module's doc).
+/// `SYS_MMAP_FILE`'s answer `ret`: the address, or the errno -- its Linux
+/// errnos as they are, but `ENOSYS`, a kernel's that cannot save a shared
+/// mapping's stores yet (or has no such call), as `ENODEV`.
+fn mapped_at(ret: i64) -> Result<usize, i32> {
+    if ret >= 0 {
+        return usize::try_from(ret).map_err(|_| errno::ENOMEM);
+    }
+    match errno::door_errno(ret) {
+        errno::ENOSYS => Err(errno::ENODEV),
+        e => Err(e),
+    }
+}
+
+/// Why `fd` cannot be mapped so, in Linux's order (the module's doc); or the
+/// handle of the file to map.
 fn refusal(
     calls: &dyn Calls,
     length: SizeT,
@@ -181,7 +163,7 @@ fn refusal(
     flags: i32,
     fd: Fd,
     offset: OffT,
-) -> Result<(), i32> {
+) -> Result<u64, i32> {
     let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
     let end = u64::try_from(offset)
         .ok()
@@ -203,36 +185,7 @@ fn refusal(
     if prot & (PROT_GROWSDOWN | PROT_GROWSUP) != 0 {
         return Err(errno::EINVAL);
     }
-    if shared_write {
-        return Err(errno::ENODEV);
-    }
-    Ok(())
-}
-
-/// Read the file into `dst` from `offset`, until `length` bytes (`dst`'s
-/// whole pages) or the end of the file. What lies past the end stays as the
-/// anonymous memory came: zeros.
-fn fill(calls: &dyn Calls, dst: *mut u8, length: SizeT, fd: Fd, offset: OffT) -> Result<(), i32> {
-    let mut done: SizeT = 0;
-    while done < length {
-        let at = OffT::try_from(done)
-            .ok()
-            .and_then(|d| offset.checked_add(d))
-            .ok_or(errno::EOVERFLOW)?;
-        // SAFETY: `dst` is `length` writable bytes, the mapping just made,
-        // and `done < length`.
-        let into = unsafe { dst.add(done) };
-        let n = calls.read_at(fd, into, length.saturating_sub(done), at);
-        match SizeT::try_from(n) {
-            Ok(0) => break,
-            Ok(n) => done = done.saturating_add(n),
-            Err(_) => match errno::get_errno() {
-                errno::EINTR => {}
-                e => return Err(e),
-            },
-        }
-    }
-    Ok(())
+    Ok(entry.handle)
 }
 
 #[cfg(test)]

@@ -156,6 +156,18 @@ pub const SYS_LOG_READ: u64 = 102;
 pub const SYS_MMAP: u64 = 20;
 pub const SYS_MUNMAP: u64 = 21;
 pub const SYS_MPROTECT: u64 = 22;
+/// `SYS_MMAP_FILE(addr, length, prot, flags, handle, offset) -> address` --
+/// map part of the file a handle holds, with Linux's `mmap(2)` values and its
+/// errnos as `-errno`: a private mapping demand-paged from the file, a shared
+/// one the file's pages in the page cache, and the address space keeps its
+/// own reference to the file. A writable shared mapping is `ENOSYS` on a
+/// kernel that cannot yet save its stores. Lane A's (1144, since 2026-10-07).
+pub const SYS_MMAP_FILE: u64 = 1144;
+/// `SYS_MSYNC(addr, length, flags) -> 0` -- Linux's `msync(2)`, its values
+/// and its errnos as `-errno`: `MS_SYNC` saves the dirty pages of the
+/// range's shared file mappings before it returns; `ENOMEM` when part of the
+/// range is not mapped, `EIO` when a save failed. Lane A's (1177).
+pub const SYS_MSYNC: u64 = 1177;
 
 // Scheduler / thread
 pub const SYS_SCHED_SET_PROFILE: u64 = 53;

@@ -17,6 +17,8 @@ loginusers = { path = "../../gui/loginusers" }
 libservicebus = { path = "../../userspace/libservicebus" }
 # Waiting for the programs it starts.
 libcall = { path = "../../libcall" }
+# The login records' boot record, which names this start of the machine.
+utmpfile = { path = "../../utmpfile" }
 
 [dev-dependencies]
 # A database of the tests' own.

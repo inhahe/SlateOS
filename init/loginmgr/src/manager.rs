@@ -14,6 +14,11 @@
 //!   [`protocol::ERR_NOT_THE_LOGIN_SCREEN`]. A caller the kernel cannot
 //!   name gets the same: assuming it is the screen would let anything that
 //!   can open a channel start the automatic account's desktop.
+//! - **Only the accounts offered.** `Authenticate` and every session start
+//!   take only an account the screen offers ([`Accounts::offered`]: people,
+//!   not root or a service). A name off the list is refused without its
+//!   password being checked, so the screen cannot sign in as -- or test
+//!   passwords for -- an account no one is offered.
 //! - **A session needs a proof.** `StartSession(user)` starts `user`'s
 //!   desktop only when the same screen process had `user`'s password
 //!   accepted within [`PROOF_LIFETIME_SECS`]. A proof is spent by the start,
@@ -308,7 +313,14 @@ impl<V: Verifier, A: Accounts, S: Sessions, L: Launcher> Manager<V, A, S, L> {
                 self.sessions.end(&s.id);
                 // A log-out: the next screen is a chooser.
                 self.automatic = None;
-                Next::ShowLoginScreen
+                // A desktop that ended before the screen that started it
+                // exited: that screen is still on the seat, and its exit,
+                // with no session now, shows the next one.
+                if self.screen.is_some() {
+                    Next::Nothing
+                } else {
+                    Next::ShowLoginScreen
+                }
             }
             other => {
                 self.session = other;
@@ -357,7 +369,11 @@ impl<V: Verifier, A: Accounts, S: Sessions, L: Launcher> Manager<V, A, S, L> {
         // Whatever this answer is, an earlier proof is no longer the latest
         // word from this screen.
         self.proof = None;
-        let outcome = self.verifier.verify(user, password);
+        let outcome = if self.is_offered(user) {
+            self.verifier.verify(user, password)
+        } else {
+            Outcome::Rejected
+        };
         let verdict = match outcome {
             Outcome::Accepted | Outcome::NoPassword => {
                 self.proof = Some(Proof {
@@ -408,6 +424,9 @@ impl<V: Verifier, A: Accounts, S: Sessions, L: Launcher> Manager<V, A, S, L> {
         if self.session.is_some() {
             return not_started("Someone is signed in already.");
         }
+        if !self.is_offered(user) {
+            return not_started("This account cannot be signed in to.");
+        }
         let Some(person) = self.accounts.person(user) else {
             return not_started("This account cannot be signed in to.");
         };
@@ -434,6 +453,11 @@ impl<V: Verifier, A: Accounts, S: Sessions, L: Launcher> Manager<V, A, S, L> {
         });
         Reply::Return(Vec::new())
     }
+
+    /// Whether the screen offers `user` now.
+    fn is_offered(&self, user: &str) -> bool {
+        self.accounts.offered().iter().any(|a| a.username == user)
+    }
 }
 
 #[cfg(test)]
@@ -456,8 +480,8 @@ mod tests {
     impl Verifier for Passwords {
         fn verify(&mut self, user: &str, password: &[u8]) -> Outcome {
             match (user, password) {
-                ("ada", b"right") | ("bob", b"right") => Outcome::Accepted,
-                ("guest", _) => Outcome::NoPassword,
+                ("ada" | "bob" | "root", b"right") => Outcome::Accepted,
+                ("guest" | "daemon", _) => Outcome::NoPassword,
                 ("eve", _) => Outcome::Locked,
                 ("slow", _) => Outcome::RateLimited {
                     retry_after_secs: 30,
@@ -469,27 +493,34 @@ mod tests {
 
     struct Db;
     impl Accounts for Db {
+        /// The people: ada marked to sign in by herself. root and daemon
+        /// are in the database ([`Db::person`]) but not offered.
         fn offered(&self) -> Vec<Account> {
-            vec![Account {
-                uid: Some(1000),
-                username: "ada".to_owned(),
-                display_name: "Ada".to_owned(),
-                has_password: true,
-                is_admin: false,
-                auto_login: true,
-                last_login: 0,
-                avatar: None,
-                is_locked: false,
-            }]
+            ["ada", "bob", "guest", "eve", "slow"]
+                .iter()
+                .map(|&name| Account {
+                    uid: Some(1000),
+                    username: name.to_owned(),
+                    display_name: name.to_owned(),
+                    has_password: name != "guest",
+                    is_admin: false,
+                    auto_login: name == "ada",
+                    last_login: 0,
+                    avatar: None,
+                    is_locked: name == "eve",
+                })
+                .collect()
         }
         fn person(&self, user: &str) -> Option<Person> {
-            ["ada", "bob", "guest"].contains(&user).then(|| Person {
-                username: user.to_owned(),
-                uid: 1000,
-                gid: 1000,
-                home: format!("/home/{user}"),
-                shell: "/bin/sh".to_owned(),
-            })
+            ["ada", "bob", "guest", "root", "daemon"]
+                .contains(&user)
+                .then(|| Person {
+                    username: user.to_owned(),
+                    uid: 1000,
+                    gid: 1000,
+                    home: format!("/home/{user}"),
+                    shell: "/bin/sh".to_owned(),
+                })
         }
         fn signed_in(&self, _: &str, _: u64) {}
     }
@@ -671,6 +702,50 @@ mod tests {
         );
         assert_eq!(m.take_started(), [101, 102], "both are to be waited for");
         assert_eq!(m.take_started(), [], "once");
+    }
+
+    #[test]
+    fn an_account_the_screen_does_not_offer_is_neither_checked_nor_started() {
+        let (mut m, log) = manager(None);
+        let screen = m.show_login_screen().unwrap();
+        for (user, password) in [(&b"root"[..], &b"right"[..]), (b"daemon", b"")] {
+            let answer = m.call(
+                the(screen),
+                protocol::AUTHENTICATE,
+                &args(&[user, password]),
+            );
+            assert_eq!(verdict(&answer), Verdict::Rejected, "{user:?}");
+            assert_eq!(
+                m.call(the(screen), protocol::START_SESSION, &args(&[user])),
+                Reply::Error(protocol::ERR_NOT_AUTHENTICATED, None)
+            );
+        }
+        assert_eq!(log.borrow().len(), 1, "no session was asked for: {log:?}");
+        // Taken off the list between the password and the start.
+        let (mut m, _) = manager(None);
+        assert_eq!(
+            m.start("root"),
+            Reply::Error(
+                protocol::ERR_SESSION_NOT_STARTED,
+                Some("This account cannot be signed in to.".to_owned())
+            )
+        );
+    }
+
+    #[test]
+    fn a_desktop_that_ends_before_its_screen_shows_no_second_screen() {
+        let (mut m, _) = manager(None);
+        let screen = m.show_login_screen().unwrap();
+        m.call(
+            the(screen),
+            protocol::AUTHENTICATE,
+            &args(&[b"ada", b"right"]),
+        );
+        m.call(the(screen), protocol::START_SESSION, &args(&[b"ada"]));
+        let desktop = m.session().unwrap().pid;
+        assert_eq!(m.exited(desktop), Next::Nothing, "its screen is still up");
+        assert!(m.session().is_none());
+        assert_eq!(m.exited(screen), Next::ShowLoginScreen, "now it is gone");
     }
 
     #[test]

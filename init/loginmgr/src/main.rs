@@ -9,6 +9,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -25,11 +26,37 @@ type Shared = Arc<Mutex<Manager<authlib::Authenticator, Database, Logind, Kernel
 /// for repair.
 const KERNEL_COMMAND_LINE: &str = "/proc/cmdline";
 
-/// Present once someone has signed in since the machine started: a
-/// `loginmgr` started again then (it failed, and init restarted it) signs no
-/// one in by itself. Under `/var/run`, which a start of the machine empties,
-/// as `authlib`'s tally is.
+/// Holds this start of the machine's stamp ([`this_start`]) once someone has
+/// signed in since it started: a `loginmgr` started again then (it failed,
+/// and init restarted it) signs no one in by itself. A mark holding another
+/// start's stamp is a previous start's: nothing empties `/var/run` when the
+/// machine starts (lane D's init empties only utmp), so the mark cannot rely
+/// on vanishing.
 const SIGNED_IN_MARK: &str = "/var/run/loginmgr/signed-in";
+
+/// The login records, whose boot record names this start of the machine.
+const UTMP: &str = "/var/run/utmp";
+
+/// This start of the machine: the time of the last boot record init wrote
+/// to utmp when it started (`seconds.microseconds`), or nothing when there
+/// is none to read -- and then a mark holding nothing counts, as it did
+/// before marks held anything.
+fn this_start() -> Vec<u8> {
+    let Ok(records) = std::fs::read(UTMP) else {
+        return Vec::new();
+    };
+    utmpfile::parse(&records)
+        .iter()
+        .rev()
+        .find(|r| r.record_type == utmpfile::BOOT_TIME)
+        .map(|r| format!("{}.{:06}", r.tv_sec, r.login_usec).into_bytes())
+        .unwrap_or_default()
+}
+
+/// Whether someone has signed in since this start of the machine.
+fn signed_in_this_start() -> bool {
+    std::fs::read(SIGNED_IN_MARK).is_ok_and(|mark| mark == this_start())
+}
 
 /// A login screen that exits sooner than this after it started is started
 /// again only after this long, so that one which cannot run is not started
@@ -87,17 +114,20 @@ fn watch(pids: Vec<u32>, exits: &Sender<u32>) {
     }
 }
 
+/// Whether this process has marked a sign-in: once is enough.
+static MARKED: AtomicBool = AtomicBool::new(false);
+
 /// Mark that someone has signed in since the machine started
-/// ([`SIGNED_IN_MARK`]).
+/// ([`SIGNED_IN_MARK`]), the first time this process sees a session.
 fn mark_signed_in() {
-    let path = Path::new(SIGNED_IN_MARK);
-    if path.exists() {
+    if MARKED.swap(true, Ordering::SeqCst) {
         return;
     }
+    let path = Path::new(SIGNED_IN_MARK);
     let made = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, b""));
+        .and_then(|()| std::fs::write(path, this_start()));
     if let Err(e) = made {
         say(&format!("cannot mark {SIGNED_IN_MARK}: {e}"));
     }
@@ -115,14 +145,15 @@ fn serve(mut conn: Connection, m: Shared, exits: Sender<u32>) {
             libservicebus::wipe(&mut msg.payload);
             continue;
         }
-        let (reply, started) = {
+        let (reply, started, signed_in) = {
             let mut g = lock(&m);
             let reply = g.call(caller, &msg.member, &msg.payload);
-            if g.session().is_some() {
-                mark_signed_in();
-            }
-            (reply, g.take_started())
+            (reply, g.take_started(), g.session().is_some())
         };
+        // Outside the lock: a slow file system holds up no other call.
+        if signed_in {
+            mark_signed_in();
+        }
         // `Authenticate`'s payload is a password.
         libservicebus::wipe(&mut msg.payload);
         watch(started, &exits);
@@ -203,7 +234,7 @@ fn main() -> ExitCode {
         ));
         b"recovery".to_vec()
     });
-    let automatic = automatic_account(&db.offered(), &cmdline, Path::new(SIGNED_IN_MARK).exists());
+    let automatic = automatic_account(&db.offered(), &cmdline, signed_in_this_start());
     let m: Shared = Arc::new(Mutex::new(Manager::new(
         authlib::Authenticator::new(),
         db,

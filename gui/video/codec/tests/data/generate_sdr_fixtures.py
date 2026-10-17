@@ -33,8 +33,10 @@ import tempfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "..", "..")))
+import fixture_tools  # noqa: E402  (gui/video: where the generators find mkvmerge)
+
 CHROME = "C:/Program Files/Google/Chrome/Application/chrome.exe"
-MKVMERGE = "D:/utils/mkvtoolnix-99.0/mkvmerge.exe"
 PATCH, COLS, ROWS = 8, 32, 16
 
 VP9 = ["-c:v", "libvpx-vp9", "-lossless", "1", "-profile:v", "1"]
@@ -116,7 +118,7 @@ def make(name, encoder, bitstream, file_tags, work):
         # ffmpeg convert the samples.
         args += ["-vf", "setparams=" + bitstream]
     subprocess.run(args + encoder + ["-f", "ivf", ivf], input=raw, check=True)
-    margs = [MKVMERGE, "-q", "--webm", "-o", os.path.join(HERE, name)]
+    margs = [fixture_tools.tool("mkvmerge"), "-q", "--webm", "-o", os.path.join(HERE, name)]
     if file_tags:
         flags = ("--colour-primaries", "--colour-transfer-characteristics",
                  "--colour-matrix-coefficients", "--colour-range")

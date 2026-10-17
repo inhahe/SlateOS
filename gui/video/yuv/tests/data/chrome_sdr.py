@@ -35,9 +35,11 @@ import tempfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.normpath(os.path.join(HERE, "..", "..", "..")))
+import fixture_tools  # noqa: E402  (gui/video: where the generators find mkvmerge)
+
 OUT = os.path.join(HERE, "chrome_sdr.bin")
 CHROME = "C:/Program Files/Google/Chrome/Application/chrome.exe"
-MKVMERGE = "D:/utils/mkvtoolnix-99.0/mkvmerge.exe"
 PATCH, COLS, ROWS = 8, 64, 32
 
 # primaries, transfer, matrix, range -- each said, as Chrome needs.
@@ -128,7 +130,7 @@ def measure(tags, cs, work):
                     "-c:v", "libvpx-vp9", "-lossless", "1", "-profile:v", "1", tmp],
                    input=raw, check=True)
     p, t, m, rng = tags
-    subprocess.run([MKVMERGE, "-q", "--webm", "-o", video,
+    subprocess.run([fixture_tools.tool("mkvmerge"), "-q", "--webm", "-o", video,
                     "--colour-primaries", f"0:{p}", "--colour-transfer-characteristics", f"0:{t}",
                     "--colour-matrix-coefficients", f"0:{m}", "--colour-range", f"0:{rng}", tmp],
                    check=True)

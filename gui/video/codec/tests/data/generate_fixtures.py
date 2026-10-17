@@ -705,12 +705,15 @@ def write_mp4s(tools):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ffmpeg", default="D:/utils")
+    parser.add_argument("--ffmpeg", default=None, help="ffmpeg's folder (default: fixture_tools' lookup)")
     parser.add_argument("--harness",
                         default="/home/inhahe/avifref/reformatharness/libavif_reformat_reference")
     args = parser.parse_args()
-    os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    tools = Tools(args.ffmpeg, args.harness)
+    here = os.path.dirname(os.path.abspath(__file__))
+    sys.path.insert(0, os.path.normpath(os.path.join(here, "..", "..", "..")))
+    import fixture_tools  # gui/video: where the generators find ffmpeg
+    os.chdir(here)
+    tools = Tools(args.ffmpeg or fixture_tools.tool_dir("ffmpeg"), args.harness)
     for name, (source, encode, pix_fmt, (fmt, depth, alpha), colour, decoder) in FIXTURES.items():
         tools.encode(name, source, encode)
         # FFmpeg's own decoders where the pixels need libvpx's (for the

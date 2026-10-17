@@ -78,18 +78,21 @@ this order, a commit each:
    that uses it, so none is built without a caller.* Done so far:
    `LineKey::moved`, whether a key moved the caret or the selection, which
    eight programs had computed beside the box; `set_font_size`, for a
-   box sized with its window (dictionary); and `LineBox::holding`, a box
-   made with something in it (2026-10-17).
+   box sized with its window (dictionary); `LineBox::holding`, a box
+   made with something in it; and `LineBox::key_checked`, a key whose
+   edit a check must accept or it is undone whole (vpnmanager's number
+   boxes) (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
-   *Moved (2026-10-17), sixteen of the twenty-eight:* rssreader's prompt,
+   *Moved (2026-10-17), eighteen of the twenty-eight:* rssreader's prompt,
    pdfviewer's page range, systemrestore's form (two boxes), defrag's
    exclude pattern, screenshot's text annotation, whiteboard's words,
    ircclient's message line, kanban's input dialog, filesearch's query (in
    its criteria), hexeditor's find and go-to boxes (two), dictionary's
    query, photomanager's search and album name (two), netscan's five,
    startupmanager's search and dialog (six), clipmanager's four, qrcode's
-   eight. A row that stood for the second copy -- a reload, a write-back, a
+   eight, netmanager's address and DNS boxes (four), vpnmanager's search,
+   split-tunnel and dialog boxes (six). A row that stood for the second copy -- a reload, a write-back, a
    private clipboard, a caret or selection drawn by hand -- goes with it;
    the rest move onto the box. Two drawings changed: hexeditor's box
    without the keyboard is drawn from its start, as every LineBox is, not
@@ -97,8 +100,8 @@ this order, a commit each:
    3 px higher. Where a box's text is a model's data -- qrcode's WiFi and
    contact codes, compared and kept in history -- the box is the record
    and the model is made from it when it is needed
-   (`QrApp::wifi_config`); a dialog's state that only held its boxes
+   (`QrApp::wifi_config`, netmanager's `IpEdit::to_config`, vpnmanager's
+   `ProfileEdit::to_profile`); a dialog's state that only held its boxes
    drops its equality instead (startupmanager). *Left:* contacts,
-   dbviewer, mindmap, netmanager, taskscheduler, vpnmanager,
-   colorpicker, diskanalyzer, editor, lockscreen, passwordgen,
-   stickynotes.
+   dbviewer, mindmap, taskscheduler, colorpicker, diskanalyzer, editor,
+   lockscreen, passwordgen, stickynotes.

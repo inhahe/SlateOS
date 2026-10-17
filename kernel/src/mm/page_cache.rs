@@ -71,7 +71,7 @@
 #![allow(clippy::module_name_repetitions)]
 
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::sync::PreemptSpinMutex as Mutex;
 
@@ -154,6 +154,10 @@ struct FileState {
     /// that [`writeback`] saves dirty pages through: kept from the first
     /// writable mapping until the last is gone and its pages are saved.
     writer: Option<u64>,
+    /// When the first of the file's pages went dirty since none was
+    /// (`hrtimer::now_ns`): what the background pass ages the file by
+    /// ([`writeback_expired`]), as Linux ages an inode by its `dirtied_when`.
+    dirtied_at: Option<u64>,
 }
 
 impl FileState {
@@ -179,6 +183,16 @@ impl CacheState {
             TRACKED_FILES.fetch_add(1, Ordering::Relaxed);
         }
         files.entry(file).or_default()
+    }
+
+    /// A page of `file` went dirty: the file's [`FileState::dirtied_at`],
+    /// if it had none.
+    fn note_dirtied(&mut self, file: FileId) {
+        if let Some(state) = self.files.get_mut(&file)
+            && state.dirtied_at.is_none()
+        {
+            state.dirtied_at = Some(crate::hrtimer::now_ns());
+        }
     }
 
     /// Drop file `file`'s state if there is nothing left in it to keep.
@@ -741,6 +755,7 @@ pub fn shared_map_added(file: FileId, writer: Option<u64>) {
     if let Some(extra) = spare {
         let _ = crate::fs::handle::close(extra);
     }
+    start_writeback_worker();
 }
 
 /// One shared mapping of `file` is gone (see [`shared_map_added`]);
@@ -816,6 +831,7 @@ pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> bool {
     match cache.pages.get_mut(&key) {
         Some(entry) if entry.frame == frame => {
             entry.set_dirty(true);
+            cache.note_dirtied(file);
             true
         }
         _ => false,
@@ -927,6 +943,21 @@ pub fn writeback(file: FileId, from: u64, to: u64) -> KernelResult<()> {
         Ok(())
     })();
     let _ = crate::fs::handle::close(writer);
+    if result.is_ok() {
+        // The file's age for the background pass: none once nothing is
+        // dirty. After a whole-file save every page dirty now went dirty
+        // during it, so the age starts again from now.
+        let mut cache = PAGE_CACHE.lock();
+        let still_dirty = file_has_dirty(&cache, file);
+        let whole = from == 0 && to == u64::MAX;
+        if let Some(state) = cache.files.get_mut(&file) {
+            if !still_dirty {
+                state.dirtied_at = None;
+            } else if whole {
+                state.dirtied_at = Some(crate::hrtimer::now_ns());
+            }
+        }
+    }
     result
 }
 
@@ -938,6 +969,7 @@ fn mark_dirty_again(cache: &mut CacheState, file: FileId, index: u64) {
     };
     if let Some(entry) = cache.pages.get_mut(&key) {
         entry.set_dirty(true);
+        cache.note_dirtied(file);
     }
 }
 
@@ -964,6 +996,87 @@ pub fn writeback_all() -> KernelResult<()> {
         }
     }
     first_error
+}
+
+/// How long a file's pages may stay dirty before the background pass saves
+/// them: Linux's default `dirty_expire_centisecs`, 30 s. A page a mapping
+/// stores to again and again is saved, and its next store faults, at most
+/// this often, not at every pass.
+const DIRTY_EXPIRE_NS: u64 = 30_000_000_000;
+
+/// How often the background pass looks: Linux's default
+/// `dirty_writeback_centisecs`, 5 s.
+const WRITEBACK_INTERVAL_SECS: u64 = 5;
+
+/// The background writeback worker ([`start_writeback_worker`]); 0 before it
+/// starts.
+static WRITEBACK_TID: AtomicU64 = AtomicU64::new(0);
+
+/// Set to have the worker's next pass save every dirty file however young:
+/// memory is short ([`shrink`]), and dirty pages are the ones the shrinker
+/// cannot drop.
+static WRITEBACK_ALL: AtomicBool = AtomicBool::new(false);
+
+/// Save every file whose pages went dirty at `cutoff` (`hrtimer::now_ns`
+/// time) or before ([`FileState::dirtied_at`]): the background pass, which
+/// asks with "30 s ago" ([`DIRTY_EXPIRE_NS`]), or with `u64::MAX` for every
+/// dirty file. Answers how many files it saved without error; one that fails
+/// keeps its pages dirty and its age, for the next pass.
+pub fn writeback_expired(cutoff: u64) -> usize {
+    let files: alloc::vec::Vec<FileId> = PAGE_CACHE
+        .lock()
+        .files
+        .iter()
+        .filter(|(_, st)| st.writer.is_some() && st.dirtied_at.is_some_and(|t| t <= cutoff))
+        .map(|(f, _)| *f)
+        .collect();
+    files
+        .into_iter()
+        .filter(|&file| writeback(file, 0, u64::MAX).is_ok())
+        .count()
+}
+
+/// Start the background writeback worker, once: when the first writable
+/// shared mapping gives the cache a writer, so a system that never maps a
+/// file writable runs none. One that fails to start is said; pages are then
+/// saved only by `msync`, `fsync`, `sync` and the last writable unmapping.
+fn start_writeback_worker() {
+    if WRITEBACK_TID.load(Ordering::Acquire) != 0 {
+        return;
+    }
+    let priority = crate::sched::task::DEFAULT_PRIORITY.saturating_add(4);
+    // In the kernel's address space (0): not the mapping process's, which
+    // goes when the process does.
+    match crate::sched::spawn(b"page-writeback", priority, writeback_worker, 0, 0) {
+        // Two first writers at once may start two workers: both pass over
+        // the files correctly, and only the first is woken.
+        Ok(tid) => {
+            let _ = WRITEBACK_TID.compare_exchange(0, tid, Ordering::AcqRel, Ordering::Acquire);
+        }
+        Err(e) => crate::serial_println!(
+            "[page_cache] the background writeback worker did not start: {:?}",
+            e
+        ),
+    }
+}
+
+/// The background writeback worker: every [`WRITEBACK_INTERVAL_SECS`], save
+/// the files dirty for longer than [`DIRTY_EXPIRE_NS`] -- or every dirty
+/// file, when [`WRITEBACK_ALL`] asks.
+extern "C" fn writeback_worker(_arg: u64) {
+    let interval = u64::from(crate::apic::TICK_RATE_HZ).saturating_mul(WRITEBACK_INTERVAL_SECS);
+    loop {
+        let cutoff = if WRITEBACK_ALL.swap(false, Ordering::AcqRel) {
+            u64::MAX
+        } else {
+            crate::hrtimer::now_ns().saturating_sub(DIRTY_EXPIRE_NS)
+        };
+        let _saved = writeback_expired(cutoff);
+        if !WRITEBACK_ALL.load(Ordering::Acquire) {
+            let now = crate::apic::tick_count();
+            crate::sched::sleep_until_tick_interruptible(now.saturating_add(interval));
+        }
+    }
 }
 
 /// How many cached pages are dirty now: `/proc/meminfo`'s `Dirty:`, in
@@ -1235,6 +1348,9 @@ fn collect_writes<'a>(
                 entry.set_dirty(true);
             }
             updates.push((entry.frame, in_page, len, Some(bytes)));
+            if dirty {
+                cache.note_dirtied(file);
+            }
         }
         done = done.saturating_add(len);
     }
@@ -1333,6 +1449,23 @@ fn resize_in_place(
 /// established cache → allocator ordering; pressure events are rare, so the
 /// `O(n)` sweep under the lock is acceptable.
 pub fn shrink(level: crate::mm::pressure::PressureLevel) -> usize {
+    use crate::mm::pressure::PressureLevel;
+    // Dirty pages are passed by: from Medium up, have the worker save them
+    // all now, so that a later shrink can drop them, rather than when they
+    // come of age.
+    if matches!(level, PressureLevel::Medium | PressureLevel::Critical) && dirty_pages() > 0 {
+        WRITEBACK_ALL.store(true, Ordering::Release);
+        let tid = WRITEBACK_TID.load(Ordering::Acquire);
+        if tid != 0 {
+            let _ = crate::sched::try_wake(tid);
+        }
+    }
+    drop_idle(level)
+}
+
+/// [`shrink`]'s eviction, without asking for dirty pages to be saved: the
+/// idle, clean pages dropped, in proportion to `level`. Answers how many.
+fn drop_idle(level: crate::mm::pressure::PressureLevel) -> usize {
     use crate::mm::pressure::PressureLevel;
     let pct: usize = match level {
         PressureLevel::None => return 0,
@@ -1995,7 +2128,9 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
         if try_evict(file, 0) {
             return test_fail("a dirty page was evicted");
         }
-        let _ = shrink(crate::mm::pressure::PressureLevel::Critical);
+        // Not `shrink`, which would have the worker save the dirty pages
+        // under the checks below.
+        let _ = drop_idle(crate::mm::pressure::PressureLevel::Critical);
         if !is_resident(file, 0) || !is_resident(file, page.saturating_mul(2)) {
             return test_fail("the shrinker dropped a dirty page");
         }
@@ -2012,11 +2147,29 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
             );
         }
 
+        // The background pass: a file dirty since after the cut-off is left,
+        // one dirty since before it is saved; saved whole, its age is gone,
+        // and a page that goes dirty afterwards ages from then.
+        let _ = writeback_expired(0);
+        if dirty_pages() != dirty_before.saturating_add(1) {
+            return test_fail("the background pass saved a file younger than its cut-off");
+        }
+        if writeback_expired(u64::MAX) == 0
+            || dirty_pages() != dirty_before
+            || byte(&disk()?, 5) != Some(b'X')
+        {
+            return test_fail("the background pass did not save a file older than its cut-off");
+        }
+        let before_write = crate::hrtimer::now_ns();
         crate::fs::Vfs::write_at(path, page.saturating_add(7), b"W")?;
-        if dirty_pages() != dirty_before.saturating_add(2) {
+        if dirty_pages() != dirty_before.saturating_add(1) {
             return test_fail(
                 "a write to a file a mapping may write did not mark its cached page dirty",
             );
+        }
+        let _ = writeback_expired(before_write.saturating_sub(1));
+        if dirty_pages() != dirty_before.saturating_add(1) {
+            return test_fail("a file saved whole kept the age of its first dirty page");
         }
 
         mapped = false;

@@ -117,13 +117,41 @@ and in the background. The other choices, and why not, are below.
   more, as on Linux since 2.6.19 (the pages are dirty in the cache, and the
   last unmapping, `fsync` and step 3's background pass save them).
 - **`Dirty:`** is in `/proc/meminfo` (`page_cache::dirty_pages`, a counter,
-  so that `top` reading it once a second does not walk the cache). Saving is
-  synchronous, so `Writeback:` would always read 0 and is not added.
+  so that `top` reading it once a second does not walk the cache). A save
+  is synchronous, its page dirty until the call that saves it returns, so
+  `Writeback:` would always read 0 and is not added.
 - Tests: `page_cache::writeback_self_test` (dirty marks, eviction and the
   shrinker passing dirty pages, a ranged save, the end of the file, a write
   marking a page dirty, the last writable mapping's save) and the ring-3
   `spawn::self_test_linux_writable_shared_file_maps` (`build/shmapwtest.c`),
   which reads the file past the cache afterwards.
+
+### As built in step 3 (2026-10-16)
+
+- **The background pass** is a kernel thread, `page-writeback`
+  (`page_cache::writeback_worker`). It is started by the first writable
+  mapping that gives the cache a writer, so a system that never maps a file
+  writable runs none. Every 5 s it saves the files whose pages have been
+  dirty for 30 s (`writeback_expired`). Those are Linux's defaults,
+  `dirty_writeback_centisecs` and `dirty_expire_centisecs`. A page a mapping
+  stores to again and again is then saved, and faulted writable again, at
+  most every 30 s, not at every pass.
+- **A file is aged as a whole**, as Linux ages an inode by its
+  `dirtied_when`. `FileState::dirtied_at` is set when the file's first
+  page goes dirty, cleared when a save leaves none dirty, and restarted
+  from the time a whole-file save ends if some page went dirty again
+  during it.
+- **Memory pressure** at `Medium` or `Critical` (`page_cache::shrink`) has
+  the worker save every dirty file at once, however young, so that the
+  next shrink can drop the pages: the shrinker cannot drop dirty ones
+  (`drop_idle`).
+- **No throttling of writers** (Linux's `balance_dirty_pages`). A mapping
+  can dirty only the pages of the file it maps, each once until it is
+  saved. So dirty memory is bounded by what is mapped writable, not by
+  how fast a program stores.
+- Tested in `writeback_self_test`: a file dirty since after the cut-off
+  is left, one dirty since before it is saved, and a file saved whole
+  ages again from its next dirty page.
 
 ### The alternatives not taken
 

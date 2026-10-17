@@ -570,9 +570,15 @@ MUTATIONS = [
     ),
     (
         'the search box is not marked while it has the keyboard',
-        '                    focused: self.search_focused,',
-        '                    focused: false,',
+        '                    focused: self.search_focused,\n                    disabled: false,',
+        '                    focused: false,\n                    disabled: false,',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box draws no caret while it has the keyboard',
+        '                    focused: self.search_focused,\n                    placeholder: "Search events",',
+        '                    focused: false,\n                    placeholder: "Search events",',
+        ["a_longer_search_is_drawn_and_measured_in_the_boxs_width"],
     ),
     (
         'a form field is drawn the same wherever the pointer is',
@@ -696,11 +702,9 @@ MENU_CLOCK = "the_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
 
 MUTATIONS += [
     (
-        "the search types only at its end",
-        "    let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "    let end = state.search_editor.text().len();\n"
-        "    state.search_editor.set_cursor(guitk::text::TextCursor::from(end));\n"
-        "    let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "a change to the search does not search again",
+        "    if edit.changed {\n        state.search_changed();\n    }\n",
+        "",
         [CARET],
     ),
     (
@@ -741,7 +745,7 @@ MUTATIONS += [
     ),
     (
         "a row chosen does nothing to the search",
-        "            if state.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "            if state.search.menu_row(id) {\n",
         "            if false {\n",
         [MENU, MENU_CLOCK],
     ),
@@ -825,14 +829,14 @@ MUTATIONS += [
     # The two mutants cargo-mutants found missed in the review.
     (
         "a press in the search box is measured in a sixteenth of its width",
-        "            (search.w - 16.0).max(0.0),\n",
-        "            (search.w / 16.0).max(0.0),\n",
+        "            .press(x - search.x - 8.0, search.w - 16.0, self.search_focused);\n",
+        "            .press(x - search.x - 8.0, search.w / 16.0, self.search_focused);\n",
         [WIDTH],
     ),
     (
         "the search box is drawn in a sixteenth of its width",
-        "                        width: (search.w - 16.0).max(0.0),\n",
-        "                        width: (search.w / 16.0).max(0.0),\n",
+        "                    width: search.w - 16.0,\n",
+        "                    width: search.w / 16.0,\n",
         [WIDTH],
     ),
 ]

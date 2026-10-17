@@ -30,6 +30,7 @@ use guitk::textedit;
 use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use textline::{SearchBox, SearchLook};
 
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -998,7 +999,8 @@ pub struct CalendarApp {
     pub sidebar_visible: bool,
     /// Whether the shortcut list is up.
     pub show_help: bool,
-    pub search_query: String,
+    /// The search box, which is the search.
+    pub search: SearchBox,
     pub search_results: Vec<u64>,
     pub selected_event_id: Option<u64>,
     pub category_filter: Option<EventCategory>,
@@ -1041,9 +1043,6 @@ pub struct CalendarApp {
     pub form_error: Option<String>,
     /// The event a delete is waiting on its answer for.
     pub pending_delete: Option<u64>,
-    /// The search box's caret and selection: reloaded from `search_query`
-    /// when that changed underneath it.
-    search_editor: TextInput,
     /// A text field's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<MenuField>,
     /// The user's colours, replaced whenever the theme changes.
@@ -1076,7 +1075,7 @@ impl CalendarApp {
             store: EventStore::new(),
             sidebar_visible: true,
             show_help: false,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_results: Vec::new(),
             selected_event_id: None,
             category_filter: None,
@@ -1096,7 +1095,6 @@ impl CalendarApp {
             form_field: FormField::Title,
             form_error: None,
             pending_delete: None,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             field_menu: fieldmenu::FieldMenu::new(),
         }
     }
@@ -1378,12 +1376,12 @@ impl CalendarApp {
     }
 
     pub fn search(&mut self) {
-        if self.search_query.is_empty() {
+        if self.search.is_empty() {
             self.search_results.clear();
         } else {
             self.search_results = self
                 .store
-                .search(&self.search_query)
+                .search(self.search.text())
                 .iter()
                 .map(|e| e.id)
                 .collect();
@@ -1405,23 +1403,11 @@ impl CalendarApp {
         self.clamp_scroll();
     }
 
-    /// Reload the search box's editor from the search, if the search
-    /// changed underneath it.
-    fn sync_search_editor(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-    }
-
-    /// The search changed to `text`: searched again, on the agenda while
-    /// there is a search, from its top.
-    fn set_search(&mut self, text: &str) {
-        if self.search_query == text {
-            return;
-        }
-        self.search_query = text.to_owned();
+    /// The search changed: searched again, on the agenda while there is a
+    /// search, from its top.
+    fn search_changed(&mut self) {
         self.search();
-        if !self.search_query.is_empty() {
+        if !self.search.is_empty() {
             self.view = CalendarView::Agenda;
         }
         self.content_scroll = 0.0;
@@ -1432,22 +1418,8 @@ impl CalendarApp {
         let Some(search) = self.layout().search else {
             return;
         };
-        let drawn = if self.search_focused {
-            self.search_editor.cursor()
-        } else {
-            guitk::text::TextCursor::default()
-        };
-        self.sync_search_editor();
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (search.w - 16.0).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - search.x - 8.0,
-        );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
+        self.search
+            .press(x - search.x - 8.0, search.w - 16.0, self.search_focused);
     }
 
     /// Where everything goes at the current window size.
@@ -1540,7 +1512,7 @@ impl CalendarApp {
     ///
     /// `search_results` was computed and then never read by anything.
     pub fn agenda_events(&self) -> Vec<&CalendarEvent> {
-        let base: Vec<&CalendarEvent> = if self.search_query.is_empty() {
+        let base: Vec<&CalendarEvent> = if self.search.is_empty() {
             self.store.upcoming(self.view_date, 30)
         } else {
             self.search_results
@@ -1664,10 +1636,10 @@ impl CalendarApp {
             }
             CalendarView::Day => self.view_date.format_long(),
             CalendarView::Agenda => {
-                if self.search_query.is_empty() {
+                if self.search.is_empty() {
                     format!("Agenda from {}", self.view_date.format_short())
                 } else {
-                    format!("Search: {}", self.search_query)
+                    format!("Search: {}", self.search.text())
                 }
             }
         }
@@ -2252,61 +2224,24 @@ impl CalendarApp {
                 },
                 self.focus_ring_width,
             );
-            let empty = self.search_query.is_empty();
-            if self.search_focused && !empty {
-                // The box with the keyboard: its text, with the caret and
-                // the selection where they are -- the end of the text if
-                // the search changed under the box's editor.
-                let synced = self.search_editor.text() == self.search_query;
-                let mut tree = RenderTree::new();
-                textedit::draw(
-                    &mut tree,
-                    &textedit::SingleLine {
-                        text: &self.search_query,
-                        cursor: if synced {
-                            self.search_editor.cursor()
-                        } else {
-                            guitk::text::TextCursor::from(self.search_query.len())
-                        },
-                        selection_anchor: if synced {
-                            self.search_editor.selection_anchor()
-                        } else {
-                            None
-                        },
-                        focused: true,
-                        x: search.x + 8.0,
-                        y: search.y + 7.0,
-                        width: (search.w - 16.0).max(0.0),
-                        line_height: 15.0,
-                        font_size: SEARCH_TEXT_SIZE,
-                        weight: FontWeightHint::Regular,
-                        color: self.palette.text,
-                        selection_bg: self.palette.blue,
-                        selection_fg: self.palette.crust,
-                        caret_width: textedit::CARET_WIDTH,
-                    },
-                );
-                frame.extend(tree.commands);
-            } else {
-                label(
-                    frame,
-                    search.x + 8.0,
-                    search.y + 8.0,
-                    if empty {
-                        String::from("Search events")
-                    } else {
-                        self.search_query.clone()
-                    },
-                    SEARCH_TEXT_SIZE,
-                    if empty {
-                        self.palette.overlay0
-                    } else {
-                        self.palette.text
-                    },
-                    FontWeightHint::Regular,
-                    Some(search.w - 16.0),
-                );
-            }
+            let mut tree = RenderTree::new();
+            self.search.draw(
+                &mut tree,
+                &SearchLook {
+                    x: search.x + 8.0,
+                    y: search.y + 7.0,
+                    width: search.w - 16.0,
+                    line_height: 15.0,
+                    focused: self.search_focused,
+                    placeholder: "Search events",
+                    color: self.palette.text,
+                    placeholder_color: self.palette.subtext0,
+                    selection_bg: self.palette.blue,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            frame.extend(tree.commands);
             frame.hit(Target::SearchField, search);
         }
 
@@ -3055,10 +2990,10 @@ impl CalendarApp {
             frame,
             area.x + 16.0,
             area.y + 8.0,
-            if self.search_query.is_empty() {
+            if self.search.is_empty() {
                 format!("Upcoming Events ({})", events.len())
             } else {
-                format!("{} matching \"{}\"", events.len(), self.search_query)
+                format!("{} matching \"{}\"", events.len(), self.search.text())
             },
             14.0,
             self.palette.text,
@@ -3166,7 +3101,7 @@ impl CalendarApp {
                 frame,
                 area.x + area.w / 2.0 - 60.0,
                 area.y + 100.0,
-                if self.search_query.is_empty() {
+                if self.search.is_empty() {
                     "No upcoming events"
                 } else {
                     "Nothing matches that search"
@@ -3852,7 +3787,7 @@ fn search_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
     let plain = textline::is_plain(key.modifiers);
     match key.key {
         Key::Escape if plain => {
-            state.search_query.clear();
+            state.search.clear();
             state.search();
             state.search_focused = false;
             state.clamp_scroll();
@@ -3864,10 +3799,10 @@ fn search_key(state: &mut CalendarApp, key: &KeyEvent) -> EventResult {
         }
         _ => {}
     }
-    state.sync_search_editor();
-    let edit = textline::apply_key_on_clipboard(&mut state.search_editor, key, SEARCH_TEXT_SIZE);
-    let typed = state.search_editor.text().to_owned();
-    state.set_search(&typed);
+    let edit = state.search.key(key);
+    if edit.changed {
+        state.search_changed();
+    }
     if edit.handled {
         EventResult::Consumed
     } else {
@@ -3884,7 +3819,6 @@ fn open_field_menu(state: &mut CalendarApp, x: f32, y: f32) -> EventResult {
     let field = match state.target_at(x, y) {
         Some(Target::SearchField) if state.form.is_none() => {
             state.search_focused = true;
-            state.sync_search_editor();
             MenuField::Search
         }
         Some(Target::Field(field)) if field.is_text() && state.form.is_some() => {
@@ -3894,7 +3828,7 @@ fn open_field_menu(state: &mut CalendarApp, x: f32, y: f32) -> EventResult {
         _ => return EventResult::Ignored,
     };
     let rows = match field {
-        MenuField::Search => state.search_editor.edit_menu(),
+        MenuField::Search => state.search.edit_menu(),
         MenuField::Form(which) => {
             let Some(input) = state.form.as_mut().and_then(|form| form.input(which)) else {
                 return EventResult::Ignored;
@@ -3917,10 +3851,8 @@ fn do_menu_row(
 ) -> EventResult {
     match field {
         MenuField::Search => {
-            state.sync_search_editor();
-            if state.search_editor.edit_command(id) == KeyEdit::Changed {
-                let typed = state.search_editor.text().to_owned();
-                state.set_search(&typed);
+            if state.search.menu_row(id) {
+                state.search_changed();
             }
         }
         MenuField::Form(which) => {
@@ -5654,11 +5586,11 @@ mod tests {
         let mut app = CalendarApp::new(800.0, 600.0, today);
         sample_events(&mut app.store, today);
 
-        app.search_query = "Lunch".to_string();
+        app.search.set_text("Lunch");
         app.search();
         assert!(!app.search_results.is_empty());
 
-        app.search_query = "zzzzz".to_string();
+        app.search.set_text("zzzzz");
         app.search();
         assert!(app.search_results.is_empty());
     }
@@ -6505,7 +6437,7 @@ mod tests {
             !help_text(&app).contains("? closes this"),
             "the help key was taken out of somebody's search query"
         );
-        assert!(app.search_query.contains('?'), "the `?` was dropped");
+        assert!(app.search.text().contains('?'), "the `?` was dropped");
     }
 
     /// Every string the window is drawing, joined.
@@ -6550,7 +6482,7 @@ mod tests {
         assert!(app.search_focused);
 
         probe::type_str(&mut app, "Lunch");
-        assert_eq!(app.search_query, "Lunch");
+        assert_eq!(app.search.text(), "Lunch");
         assert_eq!(app.view, CalendarView::Agenda);
         assert!(!app.search_results.is_empty());
         let listed = app.agenda_events();
@@ -6559,7 +6491,7 @@ mod tests {
 
         // Escape empties the box and hands the keyboard back.
         probe::key(&mut app, &probe::press(Key::Escape));
-        assert!(app.search_query.is_empty());
+        assert!(app.search.is_empty());
         assert!(!app.search_focused);
     }
 
@@ -6576,7 +6508,8 @@ mod tests {
         );
         probe::type_str(&mut app, "w");
         assert_eq!(
-            app.search_query, "w",
+            app.search.text(),
+            "w",
             "a letter the calendar binds did not type"
         );
         assert_eq!(
@@ -6612,19 +6545,22 @@ mod tests {
         }
         probe::type_str(&mut app, "u");
         assert_eq!(
-            app.search_query, "Lunch",
+            app.search.text(),
+            "Lunch",
             "typing did not go in at the caret"
         );
         probe::key(&mut app, &probe::press(Key::Home));
         probe::key(&mut app, &probe::press(Key::Delete));
         assert_eq!(
-            app.search_query, "unch",
+            app.search.text(),
+            "unch",
             "Delete did not take the first character"
         );
         probe::key(&mut app, &probe::ctrl(Key::A));
         probe::type_str(&mut app, "x");
         assert_eq!(
-            app.search_query, "x",
+            app.search.text(),
+            "x",
             "typing did not replace the selection"
         );
     }
@@ -6647,7 +6583,8 @@ mod tests {
         );
         probe::type_str(&mut app, "Lu");
         assert_eq!(
-            app.search_query, "Lunch",
+            app.search.text(),
+            "Lunch",
             "the caret did not go where the press was"
         );
     }
@@ -6687,7 +6624,8 @@ mod tests {
         );
         probe::type_str(&mut app, "Lu");
         assert_eq!(
-            app.search_query, "Lunch with the whole team",
+            app.search.text(),
+            "Lunch with the whole team",
             "the press was measured in another width than the box's"
         );
     }
@@ -6731,13 +6669,15 @@ mod tests {
         );
         probe::type_str(&mut app, "x");
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "a key reached the box through the menu"
         );
         choose(&mut app, EditCommand::Paste);
         assert!(!app.field_menu.is_up());
         assert_eq!(
-            app.search_query, "Lunch",
+            app.search.text(),
+            "Lunch",
             "Paste did not paste into the search"
         );
         assert_eq!(
@@ -6868,7 +6808,7 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             }),
         );
-        assert_eq!(app.search_query.chars().count(), SEARCH_CAPACITY);
+        assert_eq!(app.search.text().chars().count(), SEARCH_CAPACITY);
     }
 
     #[test]
@@ -7824,9 +7764,9 @@ mod tests {
         };
         probe::key(&mut app, &typed(Key::W, "w", Modifiers::alt()));
         probe::key(&mut app, &typed(Key::W, "w", Modifiers::super_key()));
-        assert_eq!(app.search_query, "", "a command's letter was typed");
+        assert_eq!(app.search.text(), "", "a command's letter was typed");
         probe::key(&mut app, &typed(Key::S, "ś", altgr));
-        assert_eq!(app.search_query, "ś", "AltGr's ś was not typed");
+        assert_eq!(app.search.text(), "ś", "AltGr's ś was not typed");
         assert!(!app.picker.is_open(), "AltGr+S opened the save dialog");
     }
 

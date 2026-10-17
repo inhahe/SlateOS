@@ -44,9 +44,9 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow, Tex
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use textline::{LineBox, LineLook};
 
 use std::ops::Range;
 use std::process::ExitCode;
@@ -3606,7 +3606,8 @@ pub struct DbViewerApp {
     pub file_intent: FileIntent,
     pub tabs: Vec<DbTab>,
     pub active_tab: usize,
-    pub sql_input: String,
+    /// The SQL editor's query: its text, its caret and its selection.
+    pub sql_input: LineBox,
     pub query_result: Option<QueryResult>,
     pub history: Vec<HistoryEntry>,
     pub history_counter: u64,
@@ -3614,7 +3615,8 @@ pub struct DbViewerApp {
     pub show_filter_builder: bool,
     pub filter_column_idx: usize,
     pub filter_op_idx: usize,
-    pub filter_value: String,
+    /// The filter builder's value: its text, its caret and its selection.
+    pub filter_value: LineBox,
     /// What the keyboard is reaching.
     pub focus: Focus,
     /// What the last press did, shown along the bottom.
@@ -3647,15 +3649,6 @@ pub struct DbViewerApp {
     /// The user's focus width, which the text boxes draw their focus mark
     /// at (`appearance_changed`).
     focus_ring_width: f32,
-    /// The editor of the box with the keyboard -- the SQL editor or the
-    /// filter's value: its caret and selection over that box's text,
-    /// reloaded when the keyboard moved to the other box or the text changed
-    /// under it (a query recalled from the history).
-    editor: TextInput,
-    /// Which box `editor` holds.
-    editor_for: Option<Focus>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
 }
 
 impl Default for DbViewerApp {
@@ -3681,7 +3674,7 @@ impl DbViewerApp {
             // Empty. It was `SELECT * FROM users`, which names a table --
             // a query written against a schema nothing has read reads as an
             // invitation to run it.
-            sql_input: String::new(),
+            sql_input: LineBox::new(BOX_CAPACITY, SQL_TEXT_SIZE),
             query_result: None,
             history: Vec::new(),
             history_counter: 0,
@@ -3689,11 +3682,8 @@ impl DbViewerApp {
             show_filter_builder: false,
             filter_column_idx: 0,
             filter_op_idx: 0,
-            filter_value: String::new(),
+            filter_value: LineBox::new(BOX_CAPACITY, VALUE_TEXT_SIZE),
             focus: Focus::Editor,
-            editor: textline::field_holding("", BOX_CAPACITY),
-            editor_for: None,
-            clipboard: String::new(),
             status: String::from("Ready"),
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
@@ -3725,7 +3715,7 @@ impl DbViewerApp {
 
     /// Execute the current SQL query.
     pub fn execute_query(&mut self) {
-        let sql = self.sql_input.clone();
+        let sql = self.sql_input.text().to_owned();
         if sql.trim().is_empty() {
             self.query_result = Some(QueryResult::error("Empty query"));
             return;
@@ -3844,7 +3834,7 @@ impl DbViewerApp {
         let filter = ActiveFilter {
             column_idx: self.filter_column_idx,
             op,
-            value_str: self.filter_value.clone(),
+            value_str: self.filter_value.text().to_owned(),
         };
 
         if let Some(tab) = self.active_db_tab_mut() {
@@ -4763,10 +4753,16 @@ impl DbViewerApp {
                     );
                 }
             } else {
+                let input = self.sql_input.input();
+                let caret = if focused {
+                    (input.cursor(), input.selection_anchor())
+                } else {
+                    (text::TextCursor::default(), None)
+                };
                 draw_sql_line(
                     &mut tree,
-                    &self.sql_input,
-                    self.drawn_caret(Focus::Editor),
+                    self.sql_input.text(),
+                    caret,
                     focused,
                     line,
                     &self.palette,
@@ -5502,21 +5498,23 @@ impl DbViewerApp {
         let Some(target) = frame.hit_test(event.x, event.y) else {
             return;
         };
-        // A box pressed: where its text is, and where its caret was drawn --
-        // asked before the press gives it the keyboard, which moves that.
+        // A box pressed: where its text is, and whether it had the keyboard
+        // -- asked before the press gives it the keyboard, since that is how
+        // it was drawn.
         let pressed = match target {
             Target::SqlEditor => frame
                 .rect_of(|t| *t == target)
-                .map(|r| (Focus::Editor, sql_text_area(r), SQL_TEXT_SIZE)),
+                .map(|r| (Focus::Editor, sql_text_area(r))),
             Target::FilterValue => frame
                 .rect_of(|t| *t == target)
-                .map(|r| (Focus::FilterValue, value_text_area(r), VALUE_TEXT_SIZE)),
+                .map(|r| (Focus::FilterValue, value_text_area(r))),
             _ => None,
         }
-        .map(|(focus, area, size)| (focus, area, size, self.drawn_caret(focus).0));
+        .map(|(focus, area)| (focus, area, self.box_has_keyboard(focus)));
         self.activate(target);
-        if let Some((focus, area, size, drawn)) = pressed {
-            self.press_box(focus, (area, size), drawn, event.x);
+        if let Some((focus, area, had_the_keyboard)) = pressed {
+            self.typed_box(focus)
+                .press(event.x - area.x, area.w, had_the_keyboard);
         }
     }
 
@@ -5792,7 +5790,7 @@ impl DbViewerApp {
             }
             Target::HistoryEntry(i) => {
                 if let Some(entry) = self.history.get(i) {
-                    self.sql_input = entry.sql.clone();
+                    self.sql_input.set_text(&entry.sql);
                     self.focus = Focus::Editor;
                     self.bottom_panel = BottomPanel::SqlEditor;
                     self.status = String::from("Query recalled");
@@ -5809,21 +5807,11 @@ impl DbViewerApp {
         }
     }
 
-    /// What box `focus` holds: the query, or the filter's value.
-    fn box_text(&self, focus: Focus) -> &str {
+    /// Box `focus`: the filter's value, or the query.
+    fn typed_box(&mut self, focus: Focus) -> &mut LineBox {
         match focus {
-            Focus::FilterValue => &self.filter_value,
-            _ => &self.sql_input,
-        }
-    }
-
-    /// Load box `focus` into the editor unless it holds it already, the
-    /// caret after its text.
-    fn load_editor(&mut self, focus: Focus) {
-        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {
-            let held = self.box_text(focus).to_owned();
-            self.editor.set_text(&held);
-            self.editor_for = Some(focus);
+            Focus::FilterValue => &mut self.filter_value,
+            _ => &mut self.sql_input,
         }
     }
 
@@ -5831,70 +5819,13 @@ impl DbViewerApp {
     /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing.
     /// Whether the box answered it.
     fn box_key(&mut self, focus: Focus, event: &KeyEvent) -> bool {
-        self.load_editor(focus);
-        let size = if focus == Focus::FilterValue {
-            VALUE_TEXT_SIZE
-        } else {
-            SQL_TEXT_SIZE
-        };
-        let edit = textline::apply_key(&mut self.editor, event, &self.clipboard, size);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        if self.editor.text() != self.box_text(focus) {
-            let typed = self.editor.text().to_owned();
-            match focus {
-                Focus::FilterValue => self.filter_value = typed,
-                _ => self.sql_input = typed,
-            }
-        }
-        edit.handled
+        self.typed_box(focus).key(event).handled
     }
 
-    /// Where box `focus`'s caret and selection anchor are: the editor's
-    /// while it holds the box's text, after the text and none otherwise.
-    fn box_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
-        let held = self.box_text(focus);
-        if self.editor_for == Some(focus) && self.editor.text() == held {
-            (self.editor.cursor(), self.editor.selection_anchor())
-        } else {
-            (text::TextCursor::from(held.len()), None)
-        }
-    }
-
-    /// Where box `focus`'s caret and selection anchor are drawn: where they
-    /// are (`box_caret`) while the box has the keyboard, and at the start,
-    /// nothing selected, while it has not -- a box without the keyboard
-    /// reads from its beginning. One answer for the drawing and for a press.
-    fn drawn_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
-        if self.focus == focus && !self.covered() {
-            self.box_caret(focus)
-        } else {
-            (text::TextCursor::default(), None)
-        }
-    }
-
-    /// A press at `x` in box `focus`, its text drawn at `area` and `size`
-    /// with the caret at `drawn`: the caret under the pointer, measured
-    /// against the box as it was drawn.
-    fn press_box(
-        &mut self,
-        focus: Focus,
-        (area, size): (Rect, f32),
-        drawn: text::TextCursor,
-        x: f32,
-    ) {
-        self.load_editor(focus);
-        let cursor = textedit::cursor_at_click(
-            self.box_text(focus),
-            drawn,
-            area.w,
-            size,
-            FontWeightHint::Regular,
-            x - area.x,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
+    /// Whether box `focus` has the keyboard: what it is drawn with, and its
+    /// presses measured against -- not while something covers the window.
+    fn box_has_keyboard(&self, focus: Focus) -> bool {
+        self.focus == focus && !self.covered()
     }
 
     /// The filter's value in its row at `row`, after the row's label: with
@@ -5907,10 +5838,7 @@ impl DbViewerApp {
         if area.is_empty() || !f.is_visible(area) {
             return;
         }
-        let focused = self
-            .field_state(Target::FilterValue, Focus::FilterValue)
-            .focused;
-        let mut tree = RenderTree::new();
+        let focused = self.box_has_keyboard(Focus::FilterValue);
         if self.filter_value.is_empty() {
             put_text(
                 f,
@@ -5922,38 +5850,24 @@ impl DbViewerApp {
                 self.palette.subtext0,
                 FontWeightHint::Regular,
             );
-            if focused {
-                textedit::push_caret(
-                    &mut tree,
-                    area.x,
-                    area.y,
-                    area.h,
-                    color,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let (cursor, selection_anchor) = self.drawn_caret(Focus::FilterValue);
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.filter_value,
-                    cursor,
-                    selection_anchor,
-                    focused,
-                    x: area.x,
-                    y: area.y,
-                    width: area.w,
-                    line_height: area.h,
-                    font_size: VALUE_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
         }
+        let mut tree = RenderTree::new();
+        self.filter_value.draw(
+            &mut tree,
+            &LineLook {
+                x: area.x,
+                y: area.y,
+                width: area.w,
+                line_height: area.h,
+                focused,
+                placeholder: "",
+                color,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         for command in tree.commands {
             f.push(command);
         }
@@ -6532,7 +6446,7 @@ mod tests {
 
         // The editor has the keys to start with.
         assert_eq!(app.focus, Focus::Editor);
-        let query = app.sql_input.clone();
+        let query = app.sql_input.text().to_owned();
         let ran = app.query_result.is_some();
         for m in [Modifiers::alt(), Modifiers::ctrl(), Modifiers::super_key()] {
             app.handle_event(&key(Key::S, "s", m), size);
@@ -6540,13 +6454,13 @@ mod tests {
             app.handle_event(&key(Key::Escape, "", m), size);
             app.handle_event(&key(Key::F1, "", m), size);
         }
-        assert_eq!(app.sql_input, query, "a command's letter was typed");
+        assert_eq!(app.sql_input.text(), query, "a command's letter was typed");
         assert_eq!(app.query_result.is_some(), ran, "a chord ran the query");
         assert_eq!(app.focus, Focus::Editor, "a chord let go of the editor");
         assert!(!app.show_help, "a chord raised the list");
         app.handle_event(&key(Key::E, "€", altgr), size);
         assert_eq!(
-            app.sql_input,
+            app.sql_input.text(),
             format!("{query}€"),
             "AltGr's € was not typed"
         );
@@ -7835,7 +7749,7 @@ mod tests {
     #[test]
     fn test_app_execute_query() {
         let mut app = DbViewerApp::with_sample_database();
-        app.sql_input = "SELECT * FROM users".to_owned();
+        app.sql_input.set_text("SELECT * FROM users");
         app.execute_query();
         assert!(app.query_result.is_some());
         let result = app.query_result.as_ref().unwrap();
@@ -7997,7 +7911,7 @@ mod tests {
     #[test]
     fn test_app_execute_bad_query() {
         let mut app = DbViewerApp::with_sample_database();
-        app.sql_input = "INVALID SQL".to_owned();
+        app.sql_input.set_text("INVALID SQL");
         app.execute_query();
         assert!(app.query_result.as_ref().unwrap().is_error);
     }
@@ -8070,7 +7984,7 @@ mod tests {
         let mut app = DbViewerApp::with_sample_database();
         app.filter_column_idx = 3; // age
         app.filter_op_idx = 0; // Equal
-        app.filter_value = "30".to_owned();
+        app.filter_value.set_text("30");
         app.add_filter();
         assert_eq!(app.active_db_tab().unwrap().filters.len(), 1);
     }
@@ -8078,7 +7992,7 @@ mod tests {
     #[test]
     fn test_app_remove_filter() {
         let mut app = DbViewerApp::with_sample_database();
-        app.filter_value = "test".to_owned();
+        app.filter_value.set_text("test");
         app.add_filter();
         app.remove_filter(0);
         assert!(app.active_db_tab().unwrap().filters.is_empty());
@@ -8146,7 +8060,7 @@ mod tests {
     #[test]
     fn test_app_toggle_favorite() {
         let mut app = DbViewerApp::with_sample_database();
-        app.sql_input = "SELECT 1".to_owned();
+        app.sql_input.set_text("SELECT 1");
         app.execute_query();
         assert!(!app.history[0].favorite);
         app.toggle_favorite(0);
@@ -8156,9 +8070,9 @@ mod tests {
     #[test]
     fn test_app_history() {
         let mut app = DbViewerApp::with_sample_database();
-        app.sql_input = "SELECT * FROM users".to_owned();
+        app.sql_input.set_text("SELECT * FROM users");
         app.execute_query();
-        app.sql_input = "SELECT * FROM products".to_owned();
+        app.sql_input.set_text("SELECT * FROM products");
         app.execute_query();
         assert_eq!(app.history.len(), 2);
     }
@@ -8173,7 +8087,7 @@ mod tests {
     #[test]
     fn test_app_render_results_panel() {
         let mut app = DbViewerApp::with_sample_database();
-        app.sql_input = "SELECT * FROM users".to_owned();
+        app.sql_input.set_text("SELECT * FROM users");
         app.execute_query();
         let cmds = app.render(1200.0, 800.0);
         assert!(!cmds.is_empty());
@@ -8184,7 +8098,7 @@ mod tests {
         let mut app = DbViewerApp::with_sample_database();
         app.filter_column_idx = 3; // age
         app.filter_op_idx = 5; // GreaterOrEqual (FilterOp::all() index)
-        app.filter_value = "35".to_owned();
+        app.filter_value.set_text("35");
         app.add_filter();
         let (_, rows) = app.active_db_tab().unwrap().current_table_data().unwrap();
         for (_, row) in &rows {
@@ -8406,7 +8320,7 @@ mod tests {
         let mut filtered = wired();
         filtered.filter_column_idx = 1;
         filtered.filter_op_idx = 0;
-        filtered.filter_value = String::from("nobody at all");
+        filtered.filter_value.set_text("nobody at all");
         filtered.add_filter();
         filtered.show_filter_builder = true;
         out.push(("filtered down to nothing", filtered));
@@ -8414,13 +8328,13 @@ mod tests {
         let mut many_filters = wired();
         many_filters.show_filter_builder = true;
         for _ in 0..8 {
-            many_filters.filter_value = String::from("x");
+            many_filters.filter_value.set_text("x");
             many_filters.add_filter();
         }
         out.push(("the filter builder, eight filters deep", many_filters));
 
         let mut results = wired();
-        results.sql_input = String::from("SELECT * FROM users");
+        results.sql_input.set_text("SELECT * FROM users");
         results.execute_query();
         out.push(("a result showing", results));
 
@@ -8445,7 +8359,9 @@ mod tests {
 
         let mut history = wired();
         for i in 0..20 {
-            history.sql_input = format!("SELECT {i} FROM users WHERE name LIKE '%{i}%'");
+            history
+                .sql_input
+                .set_text(&format!("SELECT {i} FROM users WHERE name LIKE '%{i}%'"));
             history.execute_query();
         }
         history.bottom_panel = BottomPanel::SqlEditor;
@@ -9096,7 +9012,7 @@ mod tests {
         // `SELECT * FROM users` -- a query written against a schema nothing
         // had read, which reads as an invitation to run it. A test named for
         // the query the editor holds should put one in the editor.
-        app.sql_input = String::from("SELECT * FROM users");
+        app.sql_input.set_text("SELECT * FROM users");
 
         click_text(&mut app, FULL, "Execute");
         let result = app.query_result.as_ref().expect("Execute ran nothing");
@@ -9112,7 +9028,7 @@ mod tests {
     #[test]
     fn a_query_that_does_not_parse_is_reported_and_still_remembered() {
         let mut app = wired();
-        app.sql_input = String::from("this is not a query");
+        app.sql_input.set_text("this is not a query");
         click_text(&mut app, FULL, "Execute");
         assert!(
             app.query_result.as_ref().is_some_and(|r| r.is_error),
@@ -9439,7 +9355,11 @@ mod tests {
             "the value box took no keyboard"
         );
         probe::type_str(&mut app, "Alice");
-        assert_eq!(app.filter_value, "Alice", "the typing went somewhere else");
+        assert_eq!(
+            app.filter_value.text(),
+            "Alice",
+            "the typing went somewhere else"
+        );
         assert!(
             shows(&app, FULL, VALUE_LABEL) && typed_run(&app, "Alice").is_some(),
             "the builder does not show what was typed"
@@ -9477,8 +9397,8 @@ mod tests {
     #[test]
     fn exporting_opens_a_picker_and_does_not_eat_the_query() {
         let mut app = wired();
-        app.sql_input = String::from("SELECT * FROM users WHERE age > 30");
-        let before = app.sql_input.clone();
+        app.sql_input.set_text("SELECT * FROM users WHERE age > 30");
+        let before = app.sql_input.text().to_owned();
 
         click_text(&mut app, FULL, "Export CSV");
         assert!(app.picker.is_open(), "no picker came up");
@@ -9487,7 +9407,11 @@ mod tests {
             FileIntent::Export(ExportFormat::Csv),
             "the picker does not know what it is for"
         );
-        assert_eq!(app.sql_input, before, "the export overwrote the query");
+        assert_eq!(
+            app.sql_input.text(),
+            before,
+            "the export overwrote the query"
+        );
     }
 
     /// Importing opens a picker rather than reading the editor.
@@ -9505,12 +9429,13 @@ mod tests {
     fn the_picker_takes_the_keyboard_from_the_editor_behind_it() {
         let mut app = wired();
         app.focus = Focus::Editor;
-        app.sql_input = String::from("SELECT");
+        app.sql_input.set_text("SELECT");
         click_text(&mut app, FULL, "Import");
 
         probe::type_str(&mut app, "abc");
         assert_eq!(
-            app.sql_input, "SELECT",
+            app.sql_input.text(),
+            "SELECT",
             "typing at the picker reached the editor behind it"
         );
     }
@@ -9625,13 +9550,13 @@ mod tests {
         click_target(&mut app, FULL, Target::SqlEditor);
         assert_eq!(app.focus, Focus::Editor, "the editor took no keyboard");
 
-        for _ in 0..app.sql_input.chars().count() {
+        for _ in 0..app.sql_input.text().chars().count() {
             probe::key(&mut app, &probe::press(Key::Backspace));
         }
         assert!(app.sql_input.is_empty(), "backspace did not empty the box");
 
         probe::type_str(&mut app, "SELECT * FROM products");
-        assert_eq!(app.sql_input, "SELECT * FROM products");
+        assert_eq!(app.sql_input.text(), "SELECT * FROM products");
 
         probe::key(&mut app, &probe::press(Key::Enter));
         let result = app.query_result.as_ref().expect("Enter ran nothing");
@@ -9647,13 +9572,14 @@ mod tests {
     fn escape_releases_the_keyboard_and_typing_then_goes_nowhere() {
         let mut app = wired();
         click_target(&mut app, FULL, Target::SqlEditor);
-        let before = app.sql_input.clone();
+        let before = app.sql_input.text().to_owned();
 
         probe::key(&mut app, &probe::press(Key::Escape));
         assert_eq!(app.focus, Focus::None, "escape released nothing");
         probe::type_str(&mut app, "zzz");
         assert_eq!(
-            app.sql_input, before,
+            app.sql_input.text(),
+            before,
             "typing reached the editor after the keyboard was released"
         );
     }
@@ -9661,9 +9587,9 @@ mod tests {
     #[test]
     fn the_history_puts_a_query_back_and_the_star_is_its_own_control() {
         let mut app = wired();
-        app.sql_input = String::from("SELECT * FROM products");
+        app.sql_input.set_text("SELECT * FROM products");
         app.execute_query();
-        app.sql_input = String::from("SELECT * FROM orders");
+        app.sql_input.set_text("SELECT * FROM orders");
         app.execute_query();
         app.bottom_panel = BottomPanel::SqlEditor;
         assert_eq!(app.history.len(), 2);
@@ -9673,7 +9599,8 @@ mod tests {
         // wrong query here and nowhere else.
         click_target(&mut app, FULL, Target::HistoryEntry(0));
         assert_eq!(
-            app.sql_input, "SELECT * FROM products",
+            app.sql_input.text(),
+            "SELECT * FROM products",
             "recall fetched the wrong query"
         );
 
@@ -9683,7 +9610,8 @@ mod tests {
         app.sql_input.clear();
         click_target(&mut app, FULL, Target::HistoryEntry(1));
         assert_eq!(
-            app.sql_input, "SELECT * FROM orders",
+            app.sql_input.text(),
+            "SELECT * FROM orders",
             "the second history row recalled something else"
         );
 
@@ -9691,14 +9619,15 @@ mod tests {
         // Whatever the editor happens to hold, the star must leave it alone.
         // Stated as "unchanged" rather than against a literal, so the check
         // cannot quietly turn into a check on which row was recalled last.
-        let before = app.sql_input.clone();
+        let before = app.sql_input.text().to_owned();
         click_target(&mut app, FULL, Target::FavoriteEntry(0));
         assert!(
             app.history.first().is_some_and(|e| e.favorite),
             "the star did not star"
         );
         assert_eq!(
-            app.sql_input, before,
+            app.sql_input.text(),
+            before,
             "the star also recalled the query, so the row swallowed its own star"
         );
     }
@@ -9886,7 +9815,7 @@ mod tests {
     fn the_history_heading_is_never_a_title_over_an_empty_strip() {
         let mut app = wired();
         for i in 0..20 {
-            app.sql_input = format!("SELECT {i} FROM users");
+            app.sql_input.set_text(&format!("SELECT {i} FROM users"));
             app.execute_query();
         }
         app.bottom_panel = BottomPanel::SqlEditor;
@@ -9921,7 +9850,7 @@ mod tests {
     fn the_history_heading_counts_queries_when_it_is_showing_all_of_them() {
         let mut app = wired();
         for i in 0..2 {
-            app.sql_input = format!("SELECT {i} FROM users");
+            app.sql_input.set_text(&format!("SELECT {i} FROM users"));
             app.execute_query();
         }
         app.bottom_panel = BottomPanel::SqlEditor;
@@ -10488,7 +10417,8 @@ mod tests {
         }
         probe::type_str(&mut app, "O");
         assert_eq!(
-            app.sql_input, "SELECT * FROM users",
+            app.sql_input.text(),
+            "SELECT * FROM users",
             "the caret did not move"
         );
         let area = sql_area(&app);
@@ -10508,7 +10438,11 @@ mod tests {
 
         probe::key(&mut app, &probe::press(Key::Home));
         probe::key(&mut app, &probe::press(Key::Delete));
-        assert_eq!(app.sql_input, "ELECT * FROM users", "Delete at the caret");
+        assert_eq!(
+            app.sql_input.text(),
+            "ELECT * FROM users",
+            "Delete at the caret"
+        );
         probe::type_str(&mut app, "S");
         probe::key(&mut app, &probe::ctrl(Key::A));
         let (_, spans) = typed_run(&app, "SELECT * FROM users").expect("the query");
@@ -10518,9 +10452,13 @@ mod tests {
         );
         probe::key(&mut app, &probe::ctrl(Key::C));
         probe::key(&mut app, &probe::ctrl(Key::X));
-        assert_eq!(app.sql_input, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.sql_input.text(), "", "Ctrl+A and Ctrl+X");
         probe::key(&mut app, &probe::ctrl(Key::V));
-        assert_eq!(app.sql_input, "SELECT * FROM users", "Ctrl+C or Ctrl+V");
+        assert_eq!(
+            app.sql_input.text(),
+            "SELECT * FROM users",
+            "Ctrl+C or Ctrl+V"
+        );
 
         // A press at the start of the query puts the caret there, and one
         // past its end at its end.
@@ -10530,7 +10468,8 @@ mod tests {
         click(&mut app, (area.right() - 1.0, mid), FULL);
         probe::type_str(&mut app, ";");
         assert_eq!(
-            app.sql_input, " SELECT * FROM users;",
+            app.sql_input.text(),
+            " SELECT * FROM users;",
             "a press did not put the caret where it landed"
         );
     }
@@ -10606,7 +10545,7 @@ mod tests {
         probe::key(&mut app, &probe::press(Key::Left));
         probe::key(&mut app, &probe::press(Key::Left));
         probe::type_str(&mut app, "i");
-        assert_eq!(app.filter_value, "Alice", "the caret did not move");
+        assert_eq!(app.filter_value.text(), "Alice", "the caret did not move");
         let row = app
             .frame(FULL.0, FULL.1)
             .rect_of(|t| *t == Target::FilterValue)
@@ -10635,7 +10574,8 @@ mod tests {
         click(&mut app, (area.x + 0.5, area.y + area.h / 2.0), FULL);
         probe::type_str(&mut app, "<");
         assert_eq!(
-            app.filter_value, "<Alice",
+            app.filter_value.text(),
+            "<Alice",
             "the press did not put the caret there"
         );
     }
@@ -10663,8 +10603,8 @@ mod tests {
     }
 
     /// **A box edits the text it shows**, however the text came to be in
-    /// it: its editor is loaded from the box whenever a key finds the two
-    /// apart, or finds it holding the other box's text.
+    /// it: what is put there from outside is what a key then edits, in that
+    /// box and not the other.
     #[test]
     fn a_box_edits_the_text_it_shows() {
         let mut app = wired();
@@ -10674,14 +10614,19 @@ mod tests {
         probe::key(&mut app, &probe::press(Key::Home));
         probe::key(&mut app, &probe::press(Key::Tab));
         assert_eq!(app.focus, Focus::FilterValue);
-        app.filter_value = String::from("ab");
+        app.filter_value.set_text("ab");
         probe::type_str(&mut app, "!");
         assert_eq!(
-            app.filter_value, "ab!",
+            app.filter_value.text(),
+            "ab!",
             "the value was typed at the query's caret"
         );
-        app.filter_value = String::from("cd");
+        app.filter_value.set_text("cd");
         probe::type_str(&mut app, "?");
-        assert_eq!(app.filter_value, "cd?", "the key edited another text");
+        assert_eq!(
+            app.filter_value.text(),
+            "cd?",
+            "the key edited another text"
+        );
     }
 }

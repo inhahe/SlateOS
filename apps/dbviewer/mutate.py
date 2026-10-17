@@ -662,15 +662,9 @@ MUTATIONS += [
     ),
     (
         "the query's caret is drawn at its end",
-        "                    self.drawn_caret(Focus::Editor),\n",
-        "                    (text::TextCursor::from(self.sql_input.len()), None),\n",
+        "                    (input.cursor(), input.selection_anchor())\n",
+        "                    (text::TextCursor::from(self.sql_input.text().len()), None)\n",
         [SQL_EDITS],
-    ),
-    (
-        "the value's caret is drawn at its end",
-        "            let (cursor, selection_anchor) = self.drawn_caret(Focus::FilterValue);\n",
-        "            let (cursor, selection_anchor) = (text::TextCursor::from(self.filter_value.len()), None);\n",
-        [VALUE_EDITS],
     ),
     (
         "the value is typed over its label",
@@ -679,24 +673,6 @@ MUTATIONS += [
         [VALUE_EDITS],
     ),
     # -- the keys
-    (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [SQL_EDITS],
-    ),
-    (
-        "the editor is kept for the box the keyboard moved to",
-        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
-        "        if self.editor.text() != self.box_text(focus) {\n",
-        [SHOWN],
-    ),
-    (
-        "a key finds the editor holding another text",
-        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
-        "        if self.editor_for != Some(focus) {\n",
-        [SHOWN],
-    ),
     (
         "a key the box does not answer is a shortcut under it",
         "            if !matches!(event.key, Key::PageUp | Key::PageDown) {\n                return;\n            }\n",
@@ -712,15 +688,27 @@ MUTATIONS += [
     # -- the pointer
     (
         "a press puts the caret at the start",
-        "            x - area.x,\n",
-        "            0.0,\n",
+        "                .press(event.x - area.x, area.w, had_the_keyboard);\n",
+        "                .press(0.0, area.w, had_the_keyboard);\n",
         [SQL_EDITS],
     ),
     (
         "a press in a box does not place the caret",
-        "            self.press_box(focus, (area, size), drawn, event.x);\n",
-        "            let _ = (focus, area, size, drawn);\n",
+        "            self.typed_box(focus)\n                .press(event.x - area.x, area.w, had_the_keyboard);\n",
+        "            let _ = (focus, area, had_the_keyboard);\n",
         [SQL_EDITS, VALUE_EDITS],
+    ),
+    (
+        "a press in a box without the keyboard is measured as though it had it",
+        "        .map(|(focus, area)| (focus, area, self.box_has_keyboard(focus)));\n",
+        "        .map(|(focus, area)| (focus, area, true));\n",
+        [SQL_EDITS],
+    ),
+    (
+        "the value's keys edit the query",
+        "            Focus::FilterValue => &mut self.filter_value,\n",
+        "            Focus::FilterValue => &mut self.sql_input,\n",
+        [SHOWN, VALUE_EDITS],
     ),
 ]
 

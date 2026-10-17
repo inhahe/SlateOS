@@ -439,6 +439,25 @@ MUTATIONS += [
     ),
 ]
 
+# The palette sidebar, which the review of 007d0552c..752d46d80 found no test
+# drew (cargo-mutants: render_palette replaced with ()).
+PALETTE = "the_palette_draws_its_shapes_and_each_layers_swatch"
+
+MUTATIONS += [
+    (
+        "the palette sidebar is not drawn",
+        "        self.render_palette(&mut cmds);\n",
+        "",
+        [PALETTE],
+    ),
+    (
+        "a hidden layer's swatch looks shown",
+        "                self.palette.overlay0\n            };\n",
+        "                self.palette.subtext0\n            };\n",
+        [PALETTE],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "diagram", timeout=900, only=only))

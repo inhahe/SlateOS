@@ -3295,10 +3295,12 @@ impl DiagramApp {
             });
 
             // Visibility indicator.
+            // A swatch, not text: the switched-off grey is what "hidden"
+            // looks like.
             let vis_color = if layer.visible {
                 self.palette.green
             } else {
-                self.palette.subtext0
+                self.palette.overlay0
             };
             cmds.push(RenderCommand::FillRect {
                 x: 14.0,
@@ -4876,6 +4878,49 @@ mod tests {
     /// painted nothing. Deleting the `picker.render` line in the renderer
     /// leaves `is_open()` true and every other test green; this is the one
     /// that notices.
+    /// **The palette sidebar is drawn**: its Shapes heading, a button for
+    /// every shape, and a swatch by each layer saying whether it is shown --
+    /// green for a shown layer, the switched-off grey for a hidden one.
+    #[test]
+    fn the_palette_draws_its_shapes_and_each_layers_swatch() {
+        let mut app = DiagramApp::new(1280.0, 800.0);
+        let hidden = app.add_layer(String::from("Hidden"));
+        app.toggle_layer_visibility(hidden);
+        let cmds = app.render_commands();
+        let texts: Vec<&str> = cmds
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&"Shapes"), "no Shapes heading");
+        for shape in NodeShape::all() {
+            assert!(
+                texts.contains(&shape.label()),
+                "no button for {}",
+                shape.label()
+            );
+        }
+        let swatch = |wanted: Color| {
+            cmds.iter().any(|c| {
+                matches!(c, RenderCommand::FillRect { x, width, height, color, .. }
+                    if (*x - 14.0).abs() < f32::EPSILON
+                        && (*width - 12.0).abs() < f32::EPSILON
+                        && (*height - 12.0).abs() < f32::EPSILON
+                        && *color == wanted)
+            })
+        };
+        assert!(
+            swatch(app.palette.green),
+            "a shown layer's swatch is not green"
+        );
+        assert!(
+            swatch(app.palette.overlay0),
+            "a hidden layer's swatch is not the switched-off grey"
+        );
+    }
+
     #[test]
     fn the_picker_is_drawn_when_it_is_open() {
         let mut app = DiagramApp::new(1280.0, 800.0);

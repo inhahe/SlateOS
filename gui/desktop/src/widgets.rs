@@ -4451,7 +4451,7 @@ mod tests {
 
     /// An empty note and a written one never look alike.
     ///
-    /// The placeholder is `overlay0` and the note is `text`, which is the same
+    /// The placeholder is `subtext0` and the note is `text`, which is the same
     /// judgement the rest of the shell makes about prompt text: a prompt is not
     /// content, and the difference has to be visible without reading the words.
     #[test]

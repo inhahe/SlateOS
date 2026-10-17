@@ -35,7 +35,7 @@
 //!    structure, not decoration, and specifically is *not* the accent: a
 //!    heading does not move when the selection does.
 //! 5. **An absent value is dimmer than a present one.** The search box's
-//!    placeholder is `p.overlay0` and text the user actually typed is
+//!    placeholder is `p.subtext0` and text the user actually typed is
 //!    `p.text`, so "Search languages…" cannot be mistaken for a query.
 
 use appearance::{Palette, Surface, readable_on};

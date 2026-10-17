@@ -2851,11 +2851,12 @@ DEFECTS = [
         ],
     ),
     (
-        "CCCCCCCCCCCCC: the search placeholder keeps Mocha's overlay0",
+        # Re-derived 2026-10-16: a placeholder is read, so subtext0.
+        "CCCCCCCCCCCCC: the search placeholder keeps Mocha's subtext0",
         OV,
         [
-            ('("Search windows...".to_string(), p.overlay0)',
-             '("Search windows...".to_string(), Color::from_hex(0x6C7086))'),
+            ('("Search windows...".to_string(), p.subtext0)',
+             '("Search windows...".to_string(), Color::from_hex(0xA6ADC8))'),
         ],
         ["desktop"],
         [
@@ -2912,11 +2913,13 @@ DEFECTS = [
         ],
     ),
     (
-        "HHHHHHHHHHHHH: a dimmed card's title keeps Mocha's overlay0",
+        # Re-derived 2026-10-16: a dimmed title is subtext0, quieter but read
+        # (check-overlay0-ink.py follows a `let` to its draw now).
+        "HHHHHHHHHHHHH: a dimmed card's title keeps Mocha's subtext0",
         OV,
         [
-            ('let title_color = if is_dimmed { p.overlay0 } else { p.text };',
-             'let title_color = if is_dimmed { Color::from_hex(0x6C7086) } else { p.text };'),
+            ('let title_color = if is_dimmed { p.subtext0 } else { p.text };',
+             'let title_color = if is_dimmed { Color::from_hex(0xA6ADC8) } else { p.text };'),
         ],
         ["desktop"],
         [
@@ -2927,8 +2930,8 @@ DEFECTS = [
         "IIIIIIIIIIIII: a card's title keeps Mocha's text",
         OV,
         [
-            ('let title_color = if is_dimmed { p.overlay0 } else { p.text };',
-             'let title_color = if is_dimmed { p.overlay0 } else { Color::from_hex(0xCDD6F4) };'),
+            ('let title_color = if is_dimmed { p.subtext0 } else { p.text };',
+             'let title_color = if is_dimmed { p.subtext0 } else { Color::from_hex(0xCDD6F4) };'),
         ],
         ["desktop"],
         [
@@ -12551,11 +12554,13 @@ DEFECTS = [
         ],
     ),
     (
-        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the tagline is still Mocha OVERLAY0',
+        # Re-derived 2026-10-16: the tagline is live text, subtext0 like the
+        # build line above it (check-overlay0-ink.py follows a `let` now).
+        'HHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHHH: the tagline is still Mocha SUBTEXT0',
         ABOUT,
         [
-            ('        let tagline_ink = p.overlay0;',
-             '        let tagline_ink = guitk::color::Color::from_hex(0x6C7086);'),
+            ('        let tagline_ink = p.subtext0;',
+             '        let tagline_ink = guitk::color::Color::from_hex(0xA6ADC8);'),
         ],
         ["desktop"],
         [
@@ -12977,18 +12982,10 @@ DEFECTS = [
             'every_site_draws_the_role_it_claims',
         ],
     ),
-    (
-        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the tagline is a rung louder than the quietest text on the page',
-        ABOUT,
-        [
-            ('        let tagline_ink = p.overlay0;',
-             '        let tagline_ink = p.subtext0;'),
-        ],
-        ["desktop"],
-        [
-            'every_site_draws_the_role_it_claims',
-        ],
-    ),
+    # LLLL... retired 2026-10-16: it planted the tagline in subtext0 as a
+    # defect, when overlay0 was its role; overlay0 is the disabled grey,
+    # 2.30:1 on base, and the tagline is a sentence to read, so subtext0 is
+    # the code now (found when check-overlay0-ink.py began following a `let`).
     (
         "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the Hardware tab's heading is as quiet as the labels under it",
         ABOUT,

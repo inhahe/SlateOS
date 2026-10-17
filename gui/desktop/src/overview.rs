@@ -1086,7 +1086,8 @@ fn render_search_bar(
 
     // Text.
     let (display_text, text_color) = if state.search_query.is_empty() {
-        ("Search windows...".to_string(), p.overlay0)
+        // A placeholder is the field's instruction, read like any label.
+        ("Search windows...".to_string(), p.subtext0)
     } else {
         (state.search_query.clone(), p.text)
     };
@@ -1181,7 +1182,8 @@ fn render_thumbnail_card(
     // Title inside card, cut at the card's edge with a mark when it does not
     // fit. It was cut at thirty characters first, unmarked -- so a title of
     // forty on a card with room for all of it read as a title of thirty.
-    let title_color = if is_dimmed { p.overlay0 } else { p.text };
+    // Dimmed is quieter, not disabled: still a title to read.
+    let title_color = if is_dimmed { p.subtext0 } else { p.text };
     cmds.push(RenderCommand::Text {
         x: x + 8.0,
         y: y + 8.0,

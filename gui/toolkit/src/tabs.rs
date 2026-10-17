@@ -464,10 +464,12 @@ impl TabView {
             // Close button
             if let Some(close) = place.close {
                 let (close_x, close_y) = (close.x, close.y);
+                // A control, which must read at 3:1 hovered or not; the
+                // disabled grey would not.
                 let close_color = if self.hover_close == Some(tab.id) {
                     palette.red
                 } else {
-                    palette.overlay0
+                    palette.subtext0
                 };
                 // Render X as text
                 commands.push(RenderCommand::Text {

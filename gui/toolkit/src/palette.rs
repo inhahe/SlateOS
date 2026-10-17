@@ -1166,9 +1166,9 @@ impl Palette {
     /// optional card theme it is real and deliberate, because the alternative
     /// is accent text at 2.9:1 on a card, which is the defect this removes.
     ///
-    /// `overlay0` is deliberately *not* adjusted. It is the muted ink -- the
-    /// placeholder in an empty field, the label of a disabled control -- and
-    /// WCAG 1.4.3 exempts inactive controls. Making it legible would make a
+    /// `overlay0` is deliberately *not* adjusted. It is the disabled ink --
+    /// the label of a control that cannot be used -- and WCAG 1.4.3 exempts
+    /// inactive controls. (A placeholder is read, so it is `subtext0`.) Making it legible would make a
     /// disabled control look enabled, which is a worse failure than a faint
     /// one.
     #[must_use]

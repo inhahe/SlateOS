@@ -471,8 +471,10 @@ impl NetworkIndicator {
     /// Render the tray icon (compact, ~24x24).
     pub fn render_icon(&self, p: &Palette, x: f32, y: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
+        // Airplane mode is information -- the network is off -- not a
+        // switched-off control, and is drawn to be read.
         let icon_color = if self.state.airplane_mode {
-            p.overlay0
+            p.subtext0
         } else {
             match self.state.connection_type {
                 ConnectionType::None => p.red,
@@ -576,10 +578,11 @@ impl NetworkIndicator {
         } else {
             "✈ Airplane OFF"
         };
+        // A toggle that is off is still a label to read.
         let airplane_color = if self.state.airplane_mode {
             p.peach
         } else {
-            p.overlay0
+            p.subtext0
         };
         p.push_surface(
             &mut cmds,
@@ -607,10 +610,13 @@ impl NetworkIndicator {
         } else {
             "Wi-Fi OFF"
         };
+        // Off like the airplane toggle beside it: a state to read. (The
+        // toggle itself works either way, so this is not the disabled grey,
+        // however the flag is named.)
         let wifi_color = if self.wifi_enabled {
             p.green
         } else {
-            p.overlay0
+            p.subtext0
         };
         p.push_surface(
             &mut cmds,
@@ -993,6 +999,50 @@ mod tests {
         ind.toggle_flyout();
         let cmds = ind.render_flyout(&test_palette(), 0.0, 0.0, 300.0);
         assert!(!cmds.is_empty());
+    }
+
+    /// The ink of the one text draw saying `label`.
+    fn ink_of(cmds: &[RenderCommand], label: &str) -> Option<Color> {
+        let mut found = cmds.iter().filter_map(|c| match c {
+            RenderCommand::Text { text, color, .. } if text == label => Some(*color),
+            _ => None,
+        });
+        let ink = found.next();
+        assert!(found.next().is_none(), "{label:?} is drawn twice");
+        ink
+    }
+
+    /// "Off" is a state to read, not a disabled control: both toggles work
+    /// either way they are set, and airplane mode is news about the network.
+    /// So none of the three is `overlay0`, the disabled grey at 2.30:1 on the
+    /// page. `check-overlay0-ink.py` cannot see the Wi-Fi label -- its flag
+    /// is named `wifi_enabled`, which reads to the gate as a disabled state
+    /// -- so this pins all three.
+    #[test]
+    fn an_off_state_reads_in_secondary_text() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+
+            let mut ind = NetworkIndicator::new();
+            ind.set_wifi_enabled(false);
+            ind.toggle_flyout();
+            let flyout = ind.render_flyout(&p, 0.0, 0.0, 300.0);
+            for label in ["\u{2708} Airplane OFF", "Wi-Fi OFF"] {
+                assert_eq!(
+                    ink_of(&flyout, label),
+                    Some(p.subtext0),
+                    "{label} (light = {light})"
+                );
+            }
+
+            ind.toggle_airplane_mode();
+            let icon = ind.render_icon(&p, 0.0, 0.0);
+            assert_eq!(
+                ink_of(&icon, "\u{2708}"),
+                Some(p.subtext0),
+                "the airplane icon (light = {light})"
+            );
+        }
     }
 
     #[test]

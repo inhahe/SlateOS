@@ -42,6 +42,19 @@ all of these wrong and let live text through:
   * **Proximity at all.** A nine-line window missed `fn render_disabled_button`
     by one line.
 
+**An ink bound first and drawn later** -- `let label = p.overlay0;` and then
+`color: label` -- is judged as if its binding were written at the draw: the
+nearest `let` of that name above the draw in the same function, over as many
+lines as it runs, its expression standing for the ink, and the draw's own
+function and enclosing blocks for the rest. A tuple binding --
+`let (label, ink) = if empty { ("Search", p.overlay0) } else { .. };` -- is
+followed too: the ink is the element at the name's place in each tuple the
+expression writes out, and the whole expression is what may exempt it. A tuple
+that comes back from a call is not followed; nothing here can see inside it. Only a text draw's binding: one
+that fills a rectangle is a separator, as an inline one is. Seventeen live
+labels passed this way until 2026-10-16 (lane E's request,
+`requests/e-c-the-overlay0-gate-does-not-see-an-ink-bound-by-let.md`).
+
 Usage:  python scripts/check-overlay0-ink.py [--list]
 """
 import collections
@@ -128,8 +141,9 @@ def arg_spans(text, start):
     return None
 
 
-def verdict(lines, i):
-    """`exempt` or `live` for a draw whose ink is on line `i`.
+def verdict(lines, i, ink=None):
+    """`exempt` or `live` for a draw whose ink is on line `i` -- or, for an
+    ink drawn through a `let` above it, whose expression is `ink`.
 
     There is no third answer any more. The old `ambiguous` verdict meant "a
     disabled-word occurs somewhere in this function", which described 169 live
@@ -137,8 +151,9 @@ def verdict(lines, i):
     `fn render_disabled_button` by a single line.
     """
     # The ink expression itself: `if self.enabled { .. } else { p.overlay0 }`,
-    # which may run over a few lines.
-    if EXEMPT.search(code_only(NL.join(lines[max(0, i - 3):i + 1]))):
+    # which may run over a few lines -- or the binding it was drawn through.
+    own = ink if ink is not None else NL.join(lines[max(0, i - 3):i + 1])
+    if EXEMPT.search(code_only(own)):
         return "exempt"
     start = 0
     # `-1` as the stop, not `0`: a `range(i, 0, -1)` never yields index 0, and
@@ -160,6 +175,105 @@ def verdict(lines, i):
         if EXEMPT.search(code_only(opener)):
             return "exempt"
     return "live"
+
+
+# An ink that is a name alone, the binding being somewhere above.
+IDENT = re.compile(r"^\s*([a-z_][a-z0-9_]*)\s*,?\s*$")
+
+# How far below its `let` a binding's expression may still run.
+MAX_BINDING_LINES = 40
+
+
+def fn_start(lines, i):
+    """The line the function enclosing line `i` starts on (0 at the top)."""
+    for k in range(i, max(-1, i - 400), -1):
+        if FN.match(lines[k]):
+            return k
+    return 0
+
+
+# `let (a, mut b, _) =`: the pattern, for a name's place in it.
+TUPLE_LET = re.compile(r"\blet\s+\(([^()=;]*)\)\s*(?::[^=;]*)?=(?!=)")
+PATTERN_NAME = re.compile(r"^\s*(?:ref\s+)?(?:mut\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+
+def expression_from(lines, k, text):
+    """The expression starting at `text` on line `k`, to its `;` at depth 0
+    (or `MAX_BINDING_LINES` further on), as code."""
+    parts, depth, j = [], 0, k
+    while True:
+        for pos, ch in enumerate(text):
+            if ch in "([{":
+                depth += 1
+            elif ch in ")]}":
+                depth -= 1
+            elif ch == ";" and depth <= 0:
+                parts.append(text[:pos])
+                return NL.join(parts)
+        parts.append(text)
+        j += 1
+        if j >= len(lines) or j > k + MAX_BINDING_LINES:
+            return NL.join(parts)
+        text = code_only(lines[j])
+
+
+def tuple_elements(expr, place, arity):
+    """Element `place` of every `arity`-tuple `expr` writes out, joined; `None`
+    when it writes none. A parenthesis right after a name, `!`, `>`, `)` or `]`
+    opens a call's arguments, not a tuple, and is passed over."""
+    found = []
+    for start, ch in enumerate(expr):
+        if ch != "(" or (start and (expr[start - 1].isalnum() or expr[start - 1] in "_!>)]")):
+            continue
+        spans = arg_spans(expr, start + 1)
+        if spans is not None and len(spans) == arity:
+            begin, end = spans[place]
+            found.append(expr[begin:end])
+    return NL.join(found) if found else None
+
+
+def binding(lines, i, name):
+    """The nearest `let` above line `i` in its function that binds `name`, as
+    `(expression, ink)`: the expression is code (strings and comments
+    blanked) over as many lines as it runs to its `;`, and the ink is the part
+    of it that becomes `name` -- all of it for `let name =`, the element at
+    `name`'s place in each tuple for `let (.., name, ..) =`. `None` when
+    nothing binds the name, or a tuple binding's value is not written out."""
+    head = re.compile(
+        r"\blet\s+(?:mut\s+)?" + re.escape(name) + r"\b\s*(?::[^=;]*)?=(?!=)")
+    for k in range(i, fn_start(lines, i) - 1, -1):
+        code = code_only(lines[k])
+        m = head.search(code)
+        if m:
+            expr = expression_from(lines, k, code[m.end():])
+            return expr, expr
+        m = TUPLE_LET.search(code)
+        if not m:
+            continue
+        names = [PATTERN_NAME.match(part) for part in m.group(1).split(",")]
+        names = [n.group(1) if n else None for n in names]
+        if names and names[-1] is None and not m.group(1).split(",")[-1].strip():
+            names.pop()  # a trailing comma: `let (a, b,) =`
+        if name not in names:
+            continue
+        expr = expression_from(lines, k, code[m.end():])
+        ink = tuple_elements(expr, names.index(name), len(names))
+        return None if ink is None else (expr, ink)
+    return None
+
+
+def bound_ink(lines, i, ink_text):
+    """The binding a name-alone ink is drawn through, when what it binds the
+    name to names `overlay0`; `None` for an ink that is not a name, or a
+    binding that does not name it. The whole expression is returned, since a
+    condition outside the tuples -- `if self.enabled` -- is what exempts."""
+    m = IDENT.match(ink_text)
+    if not m:
+        return None
+    found = binding(lines, i, m.group(1))
+    if found is None or not OV.search(found[1]):
+        return None
+    return found[0]
 
 
 def sites(path):
@@ -198,8 +312,13 @@ def sites(path):
             j += 1
             if j < end:
                 value += NL + lines[j]
+        # Named in the ink itself, or in the binding a name alone is drawn
+        # through.
+        ink = None
         if not OV.search(value):
-            continue
+            ink = bound_ink(lines, i, fm.group(1))
+            if ink is None:
+                continue
         kind = None
         for k in range(i, max(0, i - 24), -1):
             km = re.search(r"RenderCommand::(\w+)", lines[k])
@@ -209,7 +328,7 @@ def sites(path):
         # A `Rect`'s `color` is a fill, not an ink, and a faint separator is
         # exactly what `overlay0` is for.
         if kind == "Text":
-            found.append((i + 1, verdict(lines, i), lines[i].strip()[:72]))
+            found.append((i + 1, verdict(lines, i, ink), lines[i].strip()[:72]))
 
     # The positional form.
     blob = NL.join(lines[:end])
@@ -218,10 +337,16 @@ def sites(path):
         if spans is None:
             continue
         idx = COLOR_ARG[m.group(1)]
-        if idx >= len(spans) or not OV.search(blob[spans[idx][0]:spans[idx][1]]):
+        if idx >= len(spans):
             continue
+        arg = blob[spans[idx][0]:spans[idx][1]]
         i = blob.count(NL, 0, m.start())
-        found.append((i + 1, verdict(lines, i), lines[i].strip()[:72]))
+        ink = None
+        if not OV.search(arg):
+            ink = bound_ink(lines, i, arg)
+            if ink is None:
+                continue
+        found.append((i + 1, verdict(lines, i, ink), lines[i].strip()[:72]))
 
     return sorted(found)
 
@@ -376,6 +501,142 @@ SELF_TESTS = [
 }
 """,
         {},
+    ),
+    (
+        "an ink bound by let and drawn later is live text",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let field_label_color = self.palette.overlay0;
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: "Due".to_string(),
+        color: field_label_color,
+        font_size: 13.0,
+    });
+}
+""",
+        {"live": 1},
+    ),
+    (
+        "a binding running over lines, chosen by emptiness, is live too",
+        """fn render(&self, tree: &mut RenderTree) {
+    let ink = if self.query.is_empty() {
+        self.palette.overlay0
+    } else {
+        self.palette.text
+    };
+    tree.text(8.0, 8.0, &label, ink, 11.0);
+}
+""",
+        {"live": 1},
+    ),
+    (
+        "a binding's own enabled test exempts what draws through it",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let fg = if enabled { p.text } else { p.overlay0 };
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: "Extract".to_string(),
+        color: fg,
+        font_size: 13.0,
+    });
+}
+""",
+        {"exempt": 1},
+    ),
+    (
+        "a binding that fills a swatch is not an ink",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let vis_color = if layer.visible { p.green } else { p.overlay0 };
+    cmds.push(RenderCommand::FillRect {
+        x: 8.0,
+        y: 8.0,
+        color: vis_color,
+    });
+}
+""",
+        {},
+    ),
+    (
+        "the nearest binding of the name is the one drawn",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let ink = self.palette.overlay0;
+    let ink = self.palette.subtext0;
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: "Due".to_string(),
+        color: ink,
+        font_size: 13.0,
+    });
+}
+""",
+        {},
+    ),
+    (
+        "a tuple binding's ink is the element at the name's place",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let (display_text, text_color) = if state.search_query.is_empty() {
+        ("Search windows...".to_string(), p.overlay0)
+    } else {
+        (state.search_query.clone(), p.text)
+    };
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: display_text,
+        color: text_color,
+        font_size: 13.0,
+    });
+}
+""",
+        {"live": 1},
+    ),
+    (
+        "overlay0 at another place in the tuple is not the ink",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let (ink, rule) = if wide { (p.text, p.overlay0) } else { (p.text, p.surface2) };
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: "Due".to_string(),
+        color: ink,
+        font_size: 13.0,
+    });
+}
+""",
+        {},
+    ),
+    (
+        "a call's arguments are not a tuple",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let (label, ink) = pick(p.overlay0, p.text);
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: label,
+        color: ink,
+        font_size: 13.0,
+    });
+}
+""",
+        {},
+    ),
+    (
+        "a tuple binding chosen by an enabled test is exempt",
+        """fn render(&self, cmds: &mut Vec<RenderCommand>) {
+    let (label, ink) = if self.enabled { ("On", p.text) } else { ("Off", p.overlay0) };
+    cmds.push(RenderCommand::Text {
+        x: 8.0,
+        y: 8.0,
+        text: label.to_string(),
+        color: ink,
+        font_size: 13.0,
+    });
+}
+""",
+        {"exempt": 1},
     ),
     (
         "a draw inside the test module is not production code",

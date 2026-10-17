@@ -834,6 +834,11 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Integrity,
                 || mm::user::self_test(),
             );
+            selftest::dispatch(
+                "User-memory access fixups",
+                selftest::Severity::Integrity,
+                || mm::uaccess::self_test(),
+            );
 
             // Step 8c: Initialize kernel stack allocator with hardware guard pages.
             // Must be after fault::init() since it registers Guard VMAs.

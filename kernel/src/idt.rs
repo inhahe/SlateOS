@@ -4023,7 +4023,12 @@ extern "C" fn handle_general_protection(frame: &InterruptStackFrame, error: u64)
 /// Tries in order: kernel VMA resolve, swap-in, demand paging (VMAs),
 /// stack growth, SEH dispatch.  Ring 0 faults halt.
 #[unsafe(no_mangle)]
-extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
+extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64) {
+    // SAFETY: the stub's saved frame on this kernel stack, ours until its
+    // `iretq`. Read through this reference; written through `frame_ptr` only
+    // to resume a user-memory access at its fixup, after which the handler
+    // returns and the reference is not used again.
+    let frame: &InterruptStackFrame = unsafe { &*frame_ptr };
     count_vector(14);
 
     // CR2 contains the faulting virtual address.
@@ -4098,30 +4103,35 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
         return;
     }
 
-    // A kernel access to user memory inside a user-access window (`stac`, so
-    // RFLAGS.AC is set): `copy_to_user` and its kin. The page was usable when
-    // the copy was validated, but need not be now: a shared file mapping's
-    // page is made read-only again whenever it is saved, by another thread or
-    // the background pass (design-decisions §1572), and the next store to it
-    // must fault to be seen. So the fault is resolved as the program's own
-    // would be, as Linux's `do_user_addr_fault` resolves one raised under
-    // uaccess. Only with interrupts on, since the resolver may wait; a task
-    // holding the process table gets `Busy` rather than waiting for itself.
-    // Whatever cannot be resolved stays the fatal fault below.
-    const RFLAGS_AC: u64 = 1 << 18;
+    // A fault in one of the kernel's accesses to user memory (`mm::uaccess`:
+    // `copy_to_user` and its kin, the futex word's atomics), known by its
+    // instruction, with SMAP or without. The page was usable when the access
+    // was validated, but need not be now: another thread unmapped it, a
+    // truncate dropped it, it was swapped out, or a save made a shared file
+    // mapping's page read-only again (design-decisions §1572), so that the
+    // next store to it faults to be seen. So the fault is first resolved as
+    // the program's own would be, as Linux's `do_user_addr_fault` resolves
+    // one raised under uaccess -- only with interrupts on, since resolving
+    // may wait. What cannot be resolved resumes at the routine's fixup, and
+    // the system call answers EFAULT: Linux's exception table. Never the
+    // fatal fault below, which a program racing its own munmap could reach.
     if error & 4 == 0
-        && frame.rflags & RFLAGS_AC != 0
-        && frame.rflags & RFLAGS_IF != 0
-        && cr2 < mm::page_table::USER_SPACE_END
+        && let Some(fixup) = mm::uaccess::fixup_for(frame.rip)
     {
-        let pid = crate::proc::thread::owner_process(sched::current_task_id()).unwrap_or(0);
-        if pid != 0
-            && crate::proc::pcb::resolve_fault(pid, cr2, error | 4, true)
-                == crate::proc::pcb::FaultOutcome::Resolved
+        if frame.rflags & RFLAGS_IF != 0
+            && cr2 < mm::page_table::USER_SPACE_END
+            && resolve_user_access(cr2, error | 4)
         {
             mm::fault::record_user_resolved();
             return;
         }
+        // SAFETY: the stub's saved frame, as above; `frame` is not used after
+        // this write. The fixup is in the same routine's function, on the same
+        // stack, so it returns to the routine's caller.
+        unsafe {
+            (*frame_ptr).rip = fixup;
+        }
+        return;
     }
 
     // For user-mode page faults, try swap-in, demand paging, stack
@@ -4501,6 +4511,50 @@ extern "C" fn handle_page_fault(frame: &InterruptStackFrame, error: u64) {
 ///
 /// Returns `true` if the stack was successfully grown, `false` if the
 /// address is outside the stack region or allocation failed.
+/// A kernel access to the current process's user address `cr2` faulted
+/// (`error` with the user bit set, as the program's own access would have
+/// it), inside one of `mm::uaccess`'s routines: resolve it as the program's
+/// fault would be -- a page swapped out brought back, a demand-paged or
+/// shared file page mapped, a page a save made read-only marked dirty and
+/// made writable, the main stack grown. True when the access may run again.
+/// Called with interrupts on; it may wait.
+fn resolve_user_access(cr2: u64, error: u64) -> bool {
+    let Some(pid) =
+        crate::proc::thread::owner_process(sched::current_task_id()).filter(|&p| p != 0)
+    else {
+        return false;
+    };
+    if error & 1 == 0 {
+        use mm::page_table::{VirtAddr, cr3_to_pml4, read_cr3};
+        let pml4 = cr3_to_pml4(read_cr3());
+        let virt = VirtAddr::new(cr2 & !(mm::frame::FRAME_SIZE as u64 - 1));
+        // SAFETY: `pml4` is the current process's page table (from CR3).
+        if unsafe { mm::swap::is_swapped(pml4, virt) } {
+            // SAFETY: `pml4` is valid and its entry holds a swap entry.
+            return match unsafe { mm::swap::swap_in_page(pml4, virt) } {
+                Ok(swapped) => {
+                    if let Some(flags) = swapped {
+                        mm::swap::register_reclaimable(pml4, virt.as_u64(), flags);
+                    }
+                    mm::fault::record_swap_in();
+                    true
+                }
+                Err(_) => false,
+            };
+        }
+    }
+    if crate::proc::pcb::resolve_fault(pid, cr2, error, true)
+        == crate::proc::pcb::FaultOutcome::Resolved
+    {
+        return true;
+    }
+    if try_grow_user_stack(cr2, error, pid) {
+        mm::fault::record_stack_growth();
+        return true;
+    }
+    false
+}
+
 fn try_grow_user_stack(cr2: u64, error: u64, pid: u64) -> bool {
     // Only handle not-present faults (bit 0 clear = page not mapped).
     // A present-page violation (protection fault) is not stack growth.

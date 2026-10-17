@@ -70,6 +70,7 @@ pub mod scrub;
 pub mod swap;
 pub mod swapctl;
 pub mod tlb_gather;
+pub mod uaccess;
 pub mod user;
 pub mod vma;
 pub mod vmalloc;

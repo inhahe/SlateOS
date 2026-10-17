@@ -1,5 +1,7 @@
-## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13) -- FIXED 2026-10-02
-**Status:** FIXED by lane A on lane-a-wip 2026-10-02, awaiting a boot -- the Linux `access` answers the gates a real open or exec meets (`Vfs::access_gates`): `EPERM` for `W_OK` on an immutable file, the ACLs and capability tags (`EACCES`), `EROFS` for `W_OK` on a read-only mount; not the mode bits (design-decisions §1524)
+## TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED (lane B, 2026-09-13) — FIXED
+
+**Status:** FIXED 2026-10-16 -- the fix (lane A's Vfs::access_gates) is on `main` and has survived its boot (`a8e08c3f9`).
+**Was:** FIXED by lane A on lane-a-wip 2026-10-02, awaiting a boot -- the Linux `access` answers the gates a real open or exec meets (`Vfs::access_gates`): `EPERM` for `W_OK` on an immutable file, the ACLs and capability tags (`EACCES`), `EROFS` for `W_OK` on a read-only mount; not the mode bits (design-decisions §1524)
 
 **In short:** `access(path, W_OK)` answers "yes" for any file that exists. On a
 stock system that is correct. On a system where someone has set an ACL or a

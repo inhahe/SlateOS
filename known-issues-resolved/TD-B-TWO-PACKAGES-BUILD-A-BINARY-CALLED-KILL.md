@@ -1,7 +1,7 @@
-## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL (lane B, 2026-09-16) — FIXED on lane-b, pending a boot test on main
+## TD-B-TWO-PACKAGES-BUILD-A-BINARY-CALLED-KILL (lane B, 2026-09-16) — FIXED
 
-**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
-then it moves to `known-issues-resolved/`. The operator answered B-Q22
+**Status:** FIXED 2026-10-16 -- on `main` since `865e0ab83`, and booted there
+(the boot of `a8e08c3f9`). Fixed on `lane-b` 2026-10-09. The operator answered B-Q22
 (design-decisions §1072): one `kill`, and SlateOS's message route and the
 Linux signal route both inside it, chosen per program. The one `kill` is now
 procps-ng 4.0.4's, ported into coreutils and held to Ubuntu's by

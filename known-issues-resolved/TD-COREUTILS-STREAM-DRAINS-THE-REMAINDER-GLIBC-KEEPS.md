@@ -1,6 +1,8 @@
-## TD-COREUTILS-STREAM-DRAINS-THE-REMAINDER-GLIBC-KEEPS (lane B, 2026-10-07)
+## TD-COREUTILS-STREAM-DRAINS-THE-REMAINDER-GLIBC-KEEPS (lane B, 2026-10-07) — FIXED
 
-**Status:** FIXED 2026-10-07 (lane B), pending a boot test on `main` before
+**Status:** FIXED 2026-10-16 -- the fix (c779f83d7) is on `main` and has survived its boot (`a8e08c3f9`).
+
+**Was:** FIXED 2026-10-07 (lane B), pending a boot test on `main` before
 the move to `known-issues-resolved/`. `stdfd::Stream` now writes by glibc's
 own arithmetic, the one copy of it in `coreutils::stdio::xsputn`, which
 `StdioFile` uses too.

@@ -1,6 +1,8 @@
-## B-THIRTEEN-PROGRAMS-HAVE-NO-DIFFERENTIAL-HARNESS (lane B, 2026-10-07) -- FIXED on lane-b, pending a boot test on main
+## B-THIRTEEN-PROGRAMS-HAVE-NO-DIFFERENTIAL-HARNESS (lane B, 2026-10-07) — FIXED
 
-**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
+**Status:** FIXED 2026-10-16 -- the fix (865e0ab83) is on `main` and has survived its boot (`a8e08c3f9`).
+
+**Was:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
 then it moves to `known-issues-resolved/`. The last of them, `kill`, has
 `scripts/kill-diff.sh` now: B-Q22's answer (design-decisions §1072) made it
 procps-ng 4.0.4's, ported, and the harness holds it to Ubuntu's

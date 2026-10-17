@@ -1,6 +1,8 @@
-## B-CHECK-DOC-LINKS-BARE-RUN-PRINTED-HELP-AND-PASSED
+## B-CHECK-DOC-LINKS-BARE-RUN-PRINTED-HELP-AND-PASSED — FIXED
 
-**Filed:** 2026-09-02 by Lane B. **Status: FIXED** same day in `165766dbf`;
+**Status:** FIXED 2026-10-16 -- the fix (165766dbf) is on `main` and has survived its boot (`a8e08c3f9`).
+
+**Filed:** 2026-09-02 by Lane B. **Was: FIXED** same day in `165766dbf`;
 kept here until it has survived a boot test on `main`.
 
 **In short:** `scripts/check-doc-links.py`, run with no arguments, scanned the

@@ -1,6 +1,8 @@
-## TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER (lane B, 2026-10-09) — FIXED on lane-b, pending a boot test on main
+## TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER (lane B, 2026-10-09) — FIXED
 
-**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
+**Status:** FIXED 2026-10-16 -- the fix (624273c51) is on `main` and has survived its boot (`a8e08c3f9`).
+
+**Was:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
 then it moves to `known-issues-resolved/`. Once a screen has been drawn, the work
 a handler does -- `endwin`, and the repaint after a suspension -- allocates
 and frees nothing, which

@@ -430,6 +430,14 @@ impl Context {
         self.label_ref().map_or(0, |l| l.nparts_max)
     }
 
+    /// `fdisk_label_set_changed (cxt->label, 1)`: the current label marked
+    /// as changed in memory, to be written.
+    pub(crate) fn set_label_changed(&mut self) {
+        if let Some(lb) = self.label_mut() {
+            lb.changed = true;
+        }
+    }
+
     /// `fdisk_is_labeltype (cxt, id)`.
     #[must_use]
     pub fn is_labeltype(&self, id: LabelType) -> bool {
@@ -616,9 +624,15 @@ impl Context {
             return -EINVAL;
         };
         let rdonly = self.readonly;
-        let file = self.dev.clone();
         let privdev = self.is_priv;
+        // Only a descriptor the program gave is kept: one of the library's
+        // own is closed by `deassign_device`, as upstream's is, so that its
+        // exclusive open of a block device is let go before the reopen asks
+        // for it again.
+        let file = if privdev { None } else { self.dev.clone() };
         let excl = self.is_excl;
+        // What could fail there -- the fsync of a writable device -- it has
+        // said; upstream does not look at the result either.
         let _ = self.deassign_device(true);
         if privdev {
             self.assign_device(&devname, rdonly)
@@ -923,6 +937,9 @@ impl Context {
             let devno = self.get_devno();
             if devno != 0 {
                 if let Some(pc) = ulsysfs::new_sysfs_path(devno, None, None) {
+                    // A model that cannot be read is none: upstream's
+                    // ul_path_read_string failing leaves it NULL, and the
+                    // listing then has no `Disk model:` line.
                     self.dev_model = pc.read_string(b"device/model").ok().flatten();
                 }
             }

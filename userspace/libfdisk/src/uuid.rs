@@ -59,15 +59,42 @@ pub fn is_null(uu: &Uuid) -> bool {
     uu.iter().all(|&b| b == 0)
 }
 
-/// `uuid_generate_random (out)`: a version-4 UUID from the kernel's random
-/// bytes. Upstream generates one even when the randomness fails (from the
-/// bytes it has); so does this, from whatever was read.
+/// `ul_random_get_bytes (buf, nbytes)`: `buf` filled from the kernel --
+/// `getrandom`, else `/dev/urandom`, else `/dev/random` -- and then, always,
+/// mixed with a generator seeded from the process and the time, as upstream
+/// mixes `rand ()` in: "the only source of randomness if
+/// /dev/random/urandom is out to lunch", so that no two disks get the same
+/// identifier even then.
+pub fn random_get_bytes(buf: &mut [u8]) {
+    use randrange::RandomSource;
+    if randrange::fill_secret(buf).is_err() {
+        for path in ["/dev/urandom", "/dev/random"] {
+            if let Ok(mut f) = std::fs::File::open(path)
+                && f.read_exact(buf).is_ok()
+            {
+                break;
+            }
+        }
+    }
+    // `crank_random`'s seed: the process, and the time to the microsecond.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let seed =
+        (u64::from(std::process::id()) << 16) ^ now.as_secs() ^ u64::from(now.subsec_micros());
+    let mut rng = randrange::SeededRng::new(seed);
+    for b in buf.iter_mut() {
+        // `(rand () >> 7) & 0xFF`.
+        *b ^= u8::try_from((rng.next_u32() >> 7) & 0xFF).unwrap_or(0);
+    }
+}
+
+/// `uuid_generate_random (out)`: a version-4 UUID from
+/// [`random_get_bytes`].
 #[must_use]
 pub fn generate_random() -> Uuid {
     let mut buf = [0u8; 16];
-    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
-        let _ = f.read_exact(&mut buf);
-    }
+    random_get_bytes(&mut buf);
     // uu.time_hi_and_version = (... & 0x0FFF) | 0x4000.
     if let Some(b) = buf.get_mut(6) {
         *b = (*b & 0x0F) | 0x40;

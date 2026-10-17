@@ -7,6 +7,7 @@
 
 use std::io::BufRead;
 
+use libcall::EACCES;
 use libfdisk::{Context, Partition, Table, fieldtype};
 use quoting::escape_unprintable;
 use smartcols::{FL_RIGHT, FL_TRUNC};
@@ -16,9 +17,6 @@ use ulstrutils::{
 };
 
 use crate::Term;
-
-/// `EACCES`.
-const EACCES: i32 = 13;
 
 /// `_PATH_PROC_PARTITIONS`.
 const PATH_PROC_PARTITIONS: &str = "/proc/partitions";
@@ -70,7 +68,10 @@ pub fn list_disk_geometry(cxt: &mut Context, term: &Term) {
     if let Some(model) = cxt.get_devmodel().map(<[u8]>::to_vec) {
         info(cxt, &[b"Disk model: ", &model]);
     }
-    if cxt.label_ref().is_some_and(|lb| lb.require_geometry()) || cxt.use_cylinders() {
+    if cxt
+        .label_ref()
+        .is_some_and(|lb| lb.require_geometry() || cxt.use_cylinders())
+    {
         let heads = i32::from_ne_bytes(cxt.get_geom_heads().to_ne_bytes());
         let m = format!(
             "Geometry: {heads} heads, {} sectors/track, {} cylinders",

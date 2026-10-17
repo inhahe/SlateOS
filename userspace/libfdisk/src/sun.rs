@@ -127,16 +127,6 @@ fn update_checksum(cxt: &Context) {
     });
 }
 
-fn set_changed(cxt: &mut Context) {
-    if let Some(lb) = cxt.label_mut() {
-        lb.changed = true;
-    }
-}
-
-fn nmax(cxt: &Context) -> usize {
-    cxt.label_ref().map_or(0, |l| l.nparts_max)
-}
-
 /// `vtoc.infos[i].id`.
 fn info_id_at(i: usize) -> usize {
     off::INFOS.wrapping_add(i.wrapping_mul(4))
@@ -165,11 +155,6 @@ fn cylsize(cxt: &Context) -> u64 {
 /// `cylinders * heads * sectors`, as the `uint32_t` it is stored in.
 fn disk_sectors(cxt: &Context) -> u32 {
     u64_as_u32(cxt.geom.cylinders.wrapping_mul(cylsize(cxt)))
-}
-
-/// An `unsigned int` printed with `%d`.
-fn as_int(n: u32) -> i32 {
-    i32::from_ne_bytes(n.to_ne_bytes())
 }
 
 /// `set_partition (cxt, i, start, stop, sysid)`: `stop` is one past the
@@ -203,14 +188,14 @@ fn set_partition(cxt: &mut Context, i: usize, start: u64, stop: u64, sysid: u32)
     cxt.set_firstsector_be(info_flags_at(i), 2, 0);
     cxt.set_firstsector_be(start_cyl_at(i), 4, u64_as_u32(cyl));
     cxt.set_firstsector_be(nsect_at(i), 4, u64_as_u32(stop.wrapping_sub(start)));
-    set_changed(cxt);
+    cxt.set_label_changed();
     let num = i64::try_from(i.wrapping_add(1)).unwrap_or(0);
     cxt.info_new_partition(num, start, stop, t.as_ref());
 }
 
 /// `count_used_partitions (cxt)`.
 fn count_used_partitions(cxt: &Context) -> usize {
-    (0..nmax(cxt))
+    (0..cxt.get_npartitions())
         .filter(|&i| cxt.firstsector_be(nsect_at(i), 4) != 0)
         .count()
 }
@@ -248,7 +233,7 @@ fn sun_probe_label(cxt: &mut Context) -> i32 {
         cxt.warnx(
             format!(
                 "Detected sun disklabel with wrong version [{}].",
-                as_int(version)
+                (version).cast_signed()
             )
             .as_bytes(),
         );
@@ -272,7 +257,7 @@ fn sun_probe_label(cxt: &mut Context) -> i32 {
         cxt.set_firstsector_be(off::SANITY, 4, VTOC_SANITY);
         cxt.set_firstsector_be(off::NPARTS, 2, 8);
         update_checksum(cxt);
-        set_changed(cxt);
+        cxt.set_label_changed();
     }
     let n = count_used_partitions(cxt);
     if let Some(lb) = cxt.label_mut() {
@@ -385,7 +370,7 @@ fn sun_create_disklabel(cxt: &mut Context) -> i32 {
     }
 
     update_checksum(cxt);
-    set_changed(cxt);
+    cxt.set_label_changed();
     let n = count_used_partitions(cxt);
     if let Some(lb) = cxt.label_mut() {
         lb.nparts_cur = n;
@@ -397,7 +382,7 @@ fn sun_create_disklabel(cxt: &mut Context) -> i32 {
 /// `sun_toggle_partition_flag (cxt, i, flag)`: [`FLAG_UNMNT`] or
 /// [`FLAG_RONLY`].
 fn sun_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return -EINVAL;
     }
     let bit = match flag {
@@ -407,7 +392,7 @@ fn sun_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
     };
     let flags = cxt.firstsector_be(info_flags_at(i), 2);
     cxt.set_firstsector_be(info_flags_at(i), 2, flags ^ bit);
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -432,7 +417,7 @@ fn fetch_sun(cxt: &Context) -> Fetched {
         stop: u64_as_u32(cxt.geom.cylinders).wrapping_mul(spc),
     };
     let mut continuous = true;
-    for i in 0..nmax(cxt).min(MAXPARTITIONS) {
+    for i in 0..cxt.get_npartitions().min(MAXPARTITIONS) {
         let nsec = cxt.firstsector_be(nsect_at(i), 4);
         let id = cxt.firstsector_be(info_id_at(i), 2);
         let (s, l) = if nsec != 0 && id != TAG_UNASSIGNED && id != TAG_WHOLEDISK {
@@ -595,7 +580,7 @@ fn sun_verify_disklabel(cxt: &mut Context) -> i32 {
 
 /// `is_free_sector (cxt, s, starts, lens)`.
 fn is_free_sector(cxt: &Context, s: u64, f: &Fetched) -> bool {
-    !(0..nmax(cxt)).any(|i| {
+    !(0..cxt.get_npartitions()).any(|i| {
         let (st, l) = (
             f.starts.get(i).copied().unwrap_or(0),
             f.lens.get(i).copied().unwrap_or(0),
@@ -712,14 +697,14 @@ fn sun_add_partition(
                 whole_disk = true;
                 break;
             }
-            cxt.warnx(format!("Sector {} is already allocated", as_int(first)).as_bytes());
+            cxt.warnx(format!("Sector {} is already allocated", (first).cast_signed()).as_bytes());
         }
     }
 
     // "ancient"
     let stop2 = disk_sectors(cxt);
     let mut stop = stop2;
-    for i in 0..nmax(cxt) {
+    for i in 0..cxt.get_npartitions() {
         let st = f.starts.get(i).copied().unwrap_or(0);
         if st > first && st < stop {
             stop = st;
@@ -839,7 +824,7 @@ fn sun_delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
     if let Some(lb) = cxt.label_mut() {
         lb.nparts_cur = n;
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -875,7 +860,7 @@ fn sun_get_disklabel_item(cxt: &mut Context, it: &mut LabelItem) -> i32 {
 
 /// `sun_get_parttype (cxt, n)`.
 fn get_parttype(cxt: &Context, n: usize) -> Option<PartType> {
-    if n >= nmax(cxt) {
+    if n >= cxt.get_npartitions() {
         return None;
     }
     let id = cxt.firstsector_be(info_id_at(n), 2);
@@ -889,7 +874,7 @@ fn get_parttype(cxt: &Context, n: usize) -> Option<PartType> {
 
 /// `sun_get_partition (cxt, n, pa)`.
 fn sun_get_partition(cxt: &mut Context, n: usize, pa: &mut Partition) -> i32 {
-    if n >= nmax(cxt) {
+    if n >= cxt.get_npartitions() {
         return -EINVAL;
     }
     let nsec = cxt.firstsector_be(nsect_at(n), 4);
@@ -993,7 +978,7 @@ fn sun_write_disklabel(cxt: &mut Context) -> i32 {
 
 /// `sun_set_partition (cxt, i, pa)`.
 fn sun_set_partition(cxt: &mut Context, i: usize, pa: &Partition) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return -EINVAL;
     }
     if let Some(t) = pa.ty.as_ref() {
@@ -1034,7 +1019,7 @@ fn sun_set_partition(cxt: &mut Context, i: usize, pa: &Partition) -> i32 {
     if pa.has_size() {
         cxt.set_firstsector_be(nsect_at(i), 4, u64_as_u32(pa.size));
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -1046,7 +1031,7 @@ fn sun_reset_alignment(cxt: &mut Context) -> i32 {
 
 /// `sun_partition_is_used (cxt, i)`.
 fn sun_partition_is_used(cxt: &mut Context, i: usize) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return 0;
     }
     i32::from(cxt.firstsector_be(nsect_at(i), 4) != 0)

@@ -2837,12 +2837,19 @@ fn plan_rollback(from: &Generation, to: &Generation) -> RollbackPlan {
 }
 
 /// The files going from `from` back to `to` takes away: those the removed
-/// and changed packages have now that no package in `to` installs, in path
-/// order.
-fn paths_to_remove<'a>(from: &'a Generation, to: &Generation, plan: &RollbackPlan) -> Vec<&'a str> {
+/// and changed packages have now that no package in `to` installs, and that
+/// no package `held` back -- one its pre-install hook refused -- has now, in
+/// path order.
+fn paths_to_remove<'a>(
+    from: &'a Generation,
+    to: &Generation,
+    plan: &RollbackPlan,
+    held: &HashSet<&str>,
+) -> Vec<&'a str> {
     let kept: HashSet<&str> = to
         .packages
         .values()
+        .chain(held.iter().filter_map(|name| from.packages.get(*name)))
         .flat_map(|p| p.file_hashes.iter().map(|(dst, _)| dst.as_str()))
         .collect();
     let mut gone: Vec<&str> = plan
@@ -2904,7 +2911,16 @@ fn remove_deployed<'a>(paths: impl IntoIterator<Item = &'a str>) -> Removal {
     for dst_path in paths {
         let gone = under_root(dst_path).and_then(|dst| {
             match fs::symlink_metadata(&dst) {
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+                // A path through something that is no directory cannot
+                // exist either.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    return Ok(false);
+                }
                 Err(e) => return Err(e),
                 Ok(_) => {}
             }
@@ -2996,7 +3012,8 @@ impl RollbackReport {
     /// `outcome` (`done`, `refused`, `partial`, `not-permitted`), `from`,
     /// `to`, `generation` (the one recorded), `dry_run`, `removed`,
     /// `restored`, `changed` (`name`, `from`, `to`), `failed` (the files
-    /// that could not be changed) and `error` -- else `error` on stderr; and
+    /// that could not be changed, and `NAME (pre-install hook)` for a
+    /// package its hook refused) and `error` -- else `error` on stderr; and
     /// the outcome's exit status.
     fn finish(&self, outcome: RollbackOutcome, error: Option<&str>) -> ! {
         if self.json {
@@ -3036,15 +3053,21 @@ impl RollbackReport {
 }
 
 /// A package's hook, run as `pkg` runs the others, its outcome said unless
-/// the output is `--json`'s.
-fn run_hook(hook: &str, which: &str, name: &str, version: &str, json: bool) {
+/// the output is `--json`'s; `false` when it ran and failed.
+fn run_hook(hook: &str, which: &str, name: &str, version: &str, json: bool) -> bool {
     if hook.is_empty() {
-        return;
+        return true;
     }
     match PackageHooks::run(hook, name, version, json) {
-        Ok(true) if !json => println!("  {which} hook OK for {name}"),
-        Ok(_) => {}
-        Err(e) => eprintln!("  warning: {name}: {which} hook failed: {e}"),
+        Ok(true) if !json => {
+            println!("  {which} hook OK for {name}");
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("  warning: {name}: {which} hook failed: {e}");
+            false
+        }
     }
 }
 
@@ -3168,6 +3191,35 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
         );
     }
 
+    // As upgrade does, every pre-install hook runs before any file is
+    // touched: a package its hook refuses keeps the files it has now, none
+    // of the target's are put in their place, and the rollback stops partway
+    // with the package named among what could not be changed.
+    let mut held: HashSet<&str> = HashSet::new();
+    for name in plan.deployed() {
+        let (Some(then), Some(manifest)) = (
+            target.packages.get(name),
+            target
+                .packages
+                .get(name)
+                .and_then(|then| stored_manifest(db, &then.manifest_hash)),
+        ) else {
+            // Checked above: both are there.
+            continue;
+        };
+        let version = then.version.to_string();
+        if !run_hook(
+            &manifest.hook_pre_install,
+            "pre-install",
+            name,
+            &version,
+            json,
+        ) {
+            report.failed.push(format!("{name} (pre-install hook)"));
+            held.insert(name.as_str());
+        }
+    }
+
     // The packages taken away: their hooks around their files' removal.
     for name in &plan.remove {
         if let Some(now) = current.packages.get(name)
@@ -3183,7 +3235,7 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
             );
         }
     }
-    let gone = paths_to_remove(&current, &target, &plan);
+    let gone = paths_to_remove(&current, &target, &plan, &held);
     report
         .failed
         .extend(remove_deployed(gone.iter().copied()).failed);
@@ -3203,6 +3255,9 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
     }
     // The packages put back: the target's copies, from the store.
     for name in plan.deployed() {
+        if held.contains(name.as_str()) {
+            continue;
+        }
         let (Some(then), Some(manifest)) = (
             target.packages.get(name),
             target
@@ -3213,16 +3268,6 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
             // Checked above: both are there.
             continue;
         };
-        let version = then.version.to_string();
-        // As upgrade does: a failing pre-install hook keeps the package out,
-        // so none of its files are the target's.
-        if let Err(e) = PackageHooks::run(&manifest.hook_pre_install, name, &version, json) {
-            eprintln!("  warning: {name}: pre-install hook failed: {e}");
-            report
-                .failed
-                .extend(manifest.files.iter().map(|f| f.dst.clone()));
-            continue;
-        }
         let old = current
             .packages
             .get(name)
@@ -3247,10 +3292,19 @@ fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) ->
         );
     }
     if !report.failed.is_empty() {
+        let hooks = held.len();
+        let files = report.failed.len().saturating_sub(hooks);
+        let what = match (files, hooks) {
+            (_, 0) => format!("{files} file(s) could not be changed"),
+            (0, _) => format!("{hooks} package(s) refused by their pre-install hook"),
+            _ => format!(
+                "{files} file(s) could not be changed and {hooks} package(s) were refused by \
+                 their pre-install hook"
+            ),
+        };
         let message = format!(
-            "{} file(s) could not be changed; the record still names generation {} -- \
-             run 'pkg rollback {target_id}' again once that is put right",
-            report.failed.len(),
+            "{what}; the record still names generation {} -- run 'pkg rollback {target_id}' \
+             again once that is put right",
             current.id
         );
         report.finish(RollbackOutcome::Partial, Some(&message));
@@ -6861,8 +6915,13 @@ mod tests {
         // What only the current copies have goes; a path the target
         // installs too stays, whoever installs it now.
         assert_eq!(
-            paths_to_remove(&now, &then, &plan),
+            paths_to_remove(&now, &then, &plan, &HashSet::new()),
             ["/usr/bin/n", "/usr/share/a/new"]
+        );
+        // A package its pre-install hook held back keeps what it has.
+        assert_eq!(
+            paths_to_remove(&now, &then, &plan, &HashSet::from(["a"])),
+            ["/usr/bin/n"]
         );
         // The same version with other contents is a change too.
         let rebuilt = generation(

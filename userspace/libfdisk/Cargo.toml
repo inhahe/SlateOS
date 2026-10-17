@@ -22,6 +22,10 @@ crc32 = { path = "../../crc32" }
 smartcols = { path = "../smartcols" }
 # A partition's letter in a message, escaped like any value shown.
 quoting = { path = "../quoting" }
+# The kernel's random bytes, for new disk and partition identifiers.
+randrange = { path = "../../randrange" }
+# C's strtol and strtoul, as the label drivers and scripts read numbers.
+cstrtol = { path = "../cstrtol" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

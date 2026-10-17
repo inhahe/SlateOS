@@ -243,6 +243,8 @@ s empty.img '/dev/sdz1 : start=2048, size=4096\n/dev/sdz5 : start=10000, size=10
 s empty.img ',,0\n'
 s empty.img 'start=0 size=0\n,1M\n'
 s empty.img ',99999M\n'
+s empty.img 'size=100K\nsize=1K\n,512K\n'
+s empty.img 'label: gpt\nsize=100K\n'
 s full.img ',1M\n'
 s dos.img ',1M\n' -a
 s dos.img ',2M\n' -N 1

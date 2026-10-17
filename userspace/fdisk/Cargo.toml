@@ -32,6 +32,3 @@ ulblkid = { path = "../ulblkid" }
 errmsg = { path = "../errmsg" }
 # poll and sigaction, for a reply ^C cancels.
 libcall = { path = "../../libcall" }
-
-[dev-dependencies]
-scratchdir = { path = "../scratchdir" }

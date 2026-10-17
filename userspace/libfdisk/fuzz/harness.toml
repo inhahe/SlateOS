@@ -1,0 +1,42 @@
+# The cargo-fuzz harness's manifest. `scripts/fuzz.py` installs it as
+# ~/fuzz/libfdisk-fuzz/tree/fuzz/Cargo.toml, and the `path`s below are
+# relative to that place, not to this file: kept under another name here so
+# that nothing in the real workspace mistakes this directory for a package.
+# See README.md.
+[package]
+name = "libfdisk-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Seeds are made by `seeds.py`. Nothing here reaches `unsafe` code but
+# libcall's system calls, which take no input from the disk: no target
+# needs the address sanitizer.
+[package.metadata.slateos-fuzz]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+libfdisk = { path = "../userspace/libfdisk" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "probe"
+path = "fuzz_targets/probe.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "script"
+path = "fuzz_targets/script.rs"
+test = false
+doc = false
+bench = false

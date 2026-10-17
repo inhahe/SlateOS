@@ -144,6 +144,7 @@ for f in empty.img dos.img gpt.img bsd.img full.img tiny.img; do
 done
 l dos.img -l --bytes
 l dos.img -l -u=cylinders
+l empty.img -l -u=cylinders
 l dos.img -l -o Device,Start,Size
 l dos.img -l -o +Id
 l dos.img -l -o Device,Bogus
@@ -190,6 +191,8 @@ d empty.img 'o\nn\np\n1\n\n+10M\nn\np\n2\n\n+5M\nn\ne\n3\n\n\nn\n\n+2M\nn\n\n\np
 d empty.img 'o\nn\n\n\n\n\np\nw\n'
 d empty.img 'o\nn\np\n1\n4096\n+1G\n+1M\nw\n'
 d empty.img 'o\nn\np\n1\n100\n-1M\nw\n'
+d empty.img 'o\nn\np\n1\n\n+512K\nn\np\n2\n\n+1K\nw\n'
+d empty.img 'g\nn\n1\n\n+512K\nw\n'
 d empty.img 'o\nn\np\n5\n\n\nw\n'
 d full.img 'n\nq\n'
 d dos.img 't\n1\n7\np\nw\n'

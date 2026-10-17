@@ -325,3 +325,44 @@ fn an_applied_script_makes_the_table_and_a_dump_describes_it() {
     assert!(json.contains("\"start\": 2048,\n            \"size\": 4096,\n            \"type\": \"83\",\n            \"bootable\": true\n"), "{json}");
     assert!(json.ends_with("      ]\n   }\n}\n"), "{json}");
 }
+
+#[test]
+fn random_identifiers_differ_and_say_they_are_random() {
+    let (a, b) = (
+        crate::uuid::generate_random(),
+        crate::uuid::generate_random(),
+    );
+    assert_ne!(a, b);
+    assert_eq!(a[6] >> 4, 4, "version 4");
+    assert_eq!(a[8] >> 6, 2, "the DCE variant");
+    let mut x = [0u8; 4];
+    let mut y = [0u8; 4];
+    crate::uuid::random_get_bytes(&mut x);
+    crate::uuid::random_get_bytes(&mut y);
+    assert_ne!(x, y);
+}
+
+#[test]
+fn a_gpt_table_grown_back_after_a_shrink_has_none_of_the_entries_it_hid() {
+    let dir = scratchdir::ScratchDir::new("libfdisk-gpt-regrow");
+    let img = image(&dir, "disk.img", 16);
+    let (mut cxt, _) = context(&img, None);
+    assert_eq!(cxt.create_disklabel(Some(b"gpt")), 0);
+    let mut pa = part(
+        &cxt,
+        100,
+        2048,
+        4096,
+        b"0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+    );
+    assert_eq!(cxt.add_partition(Some(&mut pa), None), 0);
+    assert_eq!(partitions(&mut cxt), vec![(100, 2048, 4096, 0)]);
+    assert_eq!(gpt::set_npartitions(&mut cxt, 64), 0);
+    assert_eq!(partitions(&mut cxt), vec![]);
+    assert_eq!(gpt::set_npartitions(&mut cxt, 128), 0);
+    assert_eq!(
+        partitions(&mut cxt),
+        vec![],
+        "the hidden entry comes back empty"
+    );
+}

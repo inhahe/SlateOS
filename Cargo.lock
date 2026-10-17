@@ -1369,7 +1369,6 @@ dependencies = [
  "libcall",
  "libfdisk",
  "quoting",
- "scratchdir",
  "smartcols",
  "stdfdguard",
  "ulblkid",
@@ -2214,7 +2213,9 @@ name = "libfdisk"
 version = "0.1.0"
 dependencies = [
  "crc32",
+ "cstrtol",
  "quoting",
+ "randrange",
  "scratchdir",
  "smartcols",
  "ulblkid",

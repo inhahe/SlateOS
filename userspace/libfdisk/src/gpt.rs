@@ -18,7 +18,7 @@ use crate::item::{ItemData, LabelItem};
 use crate::label::{Label, LabelData, LabelOps, Located};
 use crate::partition::Partition;
 use crate::parttype::{PartType, Shortcut};
-use crate::utils::{div, strtol, trunc_i32};
+use crate::utils::{div, le_get, le_put, strtol, trunc_i32};
 use crate::{
     GPT_FLAG_GUIDSPECIFIC, GPT_FLAG_LEGACYBOOT, GPT_FLAG_NOBLOCK, GPT_FLAG_REQUIRED,
     GPT_NPARTITIONS_DEFAULT, Geometry, LabelType, fieldtype, is_undef,
@@ -63,23 +63,6 @@ const ATTRSTR_REQ_TYPO: &str = "RequiredPartiton";
 const ATTRSTR_NOBLOCK: &str = "NoBlockIOProtocol";
 const ATTRSTR_LEGACY: &str = "LegacyBIOSBootable";
 
-/// A little-endian field of `n` bytes at `off`.
-fn get_le(b: &[u8], off: usize, n: usize) -> u64 {
-    let mut v = [0u8; 8];
-    if let (Some(src), Some(dst)) = (b.get(off..off.wrapping_add(n)), v.get_mut(..n)) {
-        dst.copy_from_slice(src);
-    }
-    u64::from_le_bytes(v)
-}
-
-/// Writes a little-endian field of `n` bytes at `off`.
-fn put_le(b: &mut [u8], off: usize, n: usize, val: u64) {
-    let v = val.to_le_bytes();
-    if let (Some(dst), Some(src)) = (b.get_mut(off..off.wrapping_add(n)), v.get(..n)) {
-        dst.copy_from_slice(src);
-    }
-}
-
 /// 16 bytes at `off`.
 fn get16(b: &[u8], off: usize) -> [u8; 16] {
     let mut g = [0u8; 16];
@@ -110,82 +93,82 @@ impl Hdr {
         ])
     }
     fn signature(&self) -> u64 {
-        get_le(&self.0, 0, 8)
+        le_get(&self.0, 0, 8)
     }
     fn revision(&self) -> u32 {
-        crate::utils::u64_as_u32(get_le(&self.0, 8, 4))
+        crate::utils::u64_as_u32(le_get(&self.0, 8, 4))
     }
     fn size(&self) -> u32 {
-        crate::utils::u64_as_u32(get_le(&self.0, 12, 4))
+        crate::utils::u64_as_u32(le_get(&self.0, 12, 4))
     }
     fn crc32(&self) -> u32 {
-        crate::utils::u64_as_u32(get_le(&self.0, 16, 4))
+        crate::utils::u64_as_u32(le_get(&self.0, 16, 4))
     }
     fn my_lba(&self) -> u64 {
-        get_le(&self.0, 24, 8)
+        le_get(&self.0, 24, 8)
     }
     fn alternative_lba(&self) -> u64 {
-        get_le(&self.0, 32, 8)
+        le_get(&self.0, 32, 8)
     }
     fn first_usable_lba(&self) -> u64 {
-        get_le(&self.0, 40, 8)
+        le_get(&self.0, 40, 8)
     }
     fn last_usable_lba(&self) -> u64 {
-        get_le(&self.0, 48, 8)
+        le_get(&self.0, 48, 8)
     }
     fn disk_guid(&self) -> [u8; 16] {
         get16(&self.0, 56)
     }
     fn partition_entry_lba(&self) -> u64 {
-        get_le(&self.0, 72, 8)
+        le_get(&self.0, 72, 8)
     }
     fn npartition_entries(&self) -> u32 {
-        crate::utils::u64_as_u32(get_le(&self.0, 80, 4))
+        crate::utils::u64_as_u32(le_get(&self.0, 80, 4))
     }
     fn sizeof_partition_entry(&self) -> u32 {
-        crate::utils::u64_as_u32(get_le(&self.0, 84, 4))
+        crate::utils::u64_as_u32(le_get(&self.0, 84, 4))
     }
     fn partition_entry_array_crc32(&self) -> u32 {
-        crate::utils::u64_as_u32(get_le(&self.0, 88, 4))
+        crate::utils::u64_as_u32(le_get(&self.0, 88, 4))
     }
     fn set_signature(&mut self, v: u64) {
-        put_le(&mut self.0, 0, 8, v);
+        le_put(&mut self.0, 0, 8, v);
     }
     fn set_revision(&mut self, v: u32) {
-        put_le(&mut self.0, 8, 4, u64::from(v));
+        le_put(&mut self.0, 8, 4, u64::from(v));
     }
     fn set_size(&mut self, v: u32) {
-        put_le(&mut self.0, 12, 4, u64::from(v));
+        le_put(&mut self.0, 12, 4, u64::from(v));
     }
     fn set_crc32(&mut self, v: u32) {
-        put_le(&mut self.0, 16, 4, u64::from(v));
+        le_put(&mut self.0, 16, 4, u64::from(v));
     }
     fn set_my_lba(&mut self, v: u64) {
-        put_le(&mut self.0, 24, 8, v);
+        le_put(&mut self.0, 24, 8, v);
     }
     fn set_alternative_lba(&mut self, v: u64) {
-        put_le(&mut self.0, 32, 8, v);
+        le_put(&mut self.0, 32, 8, v);
     }
     fn set_first_usable_lba(&mut self, v: u64) {
-        put_le(&mut self.0, 40, 8, v);
+        le_put(&mut self.0, 40, 8, v);
     }
     fn set_last_usable_lba(&mut self, v: u64) {
-        put_le(&mut self.0, 48, 8, v);
+        le_put(&mut self.0, 48, 8, v);
     }
     fn set_disk_guid(&mut self, g: &[u8; 16]) {
         put16(&mut self.0, 56, g);
     }
     fn set_partition_entry_lba(&mut self, v: u64) {
-        put_le(&mut self.0, 72, 8, v);
+        le_put(&mut self.0, 72, 8, v);
     }
     fn set_npartition_entries(&mut self, v: u32) {
-        put_le(&mut self.0, 80, 4, u64::from(v));
+        le_put(&mut self.0, 80, 4, u64::from(v));
     }
     fn set_sizeof_partition_entry(&mut self, v: u32) {
-        put_le(&mut self.0, 84, 4, u64::from(v));
+        le_put(&mut self.0, 84, 4, u64::from(v));
     }
     fn set_partition_entry_array_crc32(&mut self, v: u32) {
-        put_le(&mut self.0, 88, 4, u64::from(v));
+        le_put(&mut self.0, 88, 4, u64::from(v));
     }
 }
 
@@ -244,17 +227,17 @@ impl GptLabel {
         )
     }
     fn e_start(&self, i: usize) -> u64 {
-        get_le(
+        le_get(
             self.ents(),
             self.entry_off(i).wrapping_add(ent::LBA_START),
             8,
         )
     }
     fn e_end(&self, i: usize) -> u64 {
-        get_le(self.ents(), self.entry_off(i).wrapping_add(ent::LBA_END), 8)
+        le_get(self.ents(), self.entry_off(i).wrapping_add(ent::LBA_END), 8)
     }
     fn e_attrs(&self, i: usize) -> u64 {
-        get_le(self.ents(), self.entry_off(i).wrapping_add(ent::ATTRS), 8)
+        le_get(self.ents(), self.entry_off(i).wrapping_add(ent::ATTRS), 8)
     }
     fn e_name(&self, i: usize) -> Vec<u8> {
         let off = self.entry_off(i).wrapping_add(ent::NAME);
@@ -264,14 +247,27 @@ impl GptLabel {
             .unwrap_or_default()
     }
 
+    /// `f` on entry `i`, as upstream's `struct gpt_entry` sees it: the
+    /// 128 bytes at the entry's place in the array, whatever the entry size
+    /// the header gives. Of a smaller entry at the end of the array, what
+    /// lies in the array is written back, and what lies past it -- which
+    /// upstream writes past the array's end -- is dropped.
     fn with_entry(&mut self, i: usize, f: impl FnOnce(&mut [u8])) {
         let off = self.entry_off(i);
-        if let Some(e) = self
-            .ents
-            .as_mut()
-            .and_then(|e| e.get_mut(off..off.wrapping_add(GPT_ENTRY_SIZE)))
-        {
-            f(e);
+        let Some(ents) = self.ents.as_mut() else {
+            return;
+        };
+        let avail = ents
+            .get(off..)
+            .map_or(0, |rest| rest.len().min(GPT_ENTRY_SIZE));
+        let end = off.wrapping_add(avail);
+        let mut e = [0u8; GPT_ENTRY_SIZE];
+        if let (Some(dst), Some(src)) = (e.get_mut(..avail), ents.get(off..end)) {
+            dst.copy_from_slice(src);
+        }
+        f(&mut e);
+        if let (Some(dst), Some(src)) = (ents.get_mut(off..end), e.get(..avail)) {
+            dst.copy_from_slice(src);
         }
     }
 
@@ -358,7 +354,7 @@ fn entry_set_name(gpt: &mut GptLabel, i: usize, s: &[u8]) -> Result<usize, i32> 
     }
     gpt.with_entry(i, |e| {
         for (j, u) in name.iter().enumerate() {
-            put_le(
+            le_put(
                 e,
                 ent::NAME.wrapping_add(j.wrapping_mul(2)),
                 2,
@@ -388,13 +384,6 @@ fn gptm(cxt: &mut Context) -> Option<&mut GptLabel> {
     match &mut cxt.label_mut()?.data {
         LabelData::Gpt(g) => Some(g),
         _ => None,
-    }
-}
-
-/// Marks the label changed.
-fn set_changed(cxt: &mut Context) {
-    if let Some(lb) = cxt.label_mut() {
-        lb.changed = true;
     }
 }
 
@@ -465,15 +454,15 @@ fn build_pmbr(b: &mut [u8], total_sectors: u64) {
     if let Some(r) = b.get_mut(0x1be..0x1fe) {
         r.fill(0);
     }
-    put_le(b, 510, 2, 0xaa55);
+    le_put(b, 510, 2, 0xaa55);
     let rec: usize = 0x1be;
-    put_le(b, rec.wrapping_add(4), 1, u64::from(EFI_PMBR_OSTYPE));
-    put_le(b, rec.wrapping_add(2), 1, 2);
-    put_le(b, rec.wrapping_add(5), 1, 0xff);
-    put_le(b, rec.wrapping_add(6), 1, 0xff);
-    put_le(b, rec.wrapping_add(7), 1, 0xff);
-    put_le(b, rec.wrapping_add(8), 4, 1);
-    put_le(
+    le_put(b, rec.wrapping_add(4), 1, u64::from(EFI_PMBR_OSTYPE));
+    le_put(b, rec.wrapping_add(2), 1, 2);
+    le_put(b, rec.wrapping_add(5), 1, 0xff);
+    le_put(b, rec.wrapping_add(6), 1, 0xff);
+    le_put(b, rec.wrapping_add(7), 1, 0xff);
+    le_put(b, rec.wrapping_add(8), 4, 1);
+    le_put(
         b,
         rec.wrapping_add(12),
         4,
@@ -553,7 +542,7 @@ fn minimize_alternative_lba(cxt: &mut Context) -> i32 {
     if let Err(rc) = fix_alternative_lba(g, min, ss) {
         return rc;
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -749,7 +738,7 @@ fn mknew_header(cxt: &mut Context, header: &mut Hdr, lba: u64) -> i32 {
 /// warning.
 fn valid_pmbr(cxt: &mut Context) -> i32 {
     let fs = cxt.firstsector();
-    if fs.is_empty() || get_le(&fs, 510, 2) != 0xaa55 {
+    if fs.is_empty() || le_get(&fs, 510, 2) != 0xaa55 {
         return 0;
     }
     let rec_off = |i: usize| 0x1be_usize.wrapping_add(i.wrapping_mul(16));
@@ -761,13 +750,13 @@ fn valid_pmbr(cxt: &mut Context) -> i32 {
         return GPT_MBR_HYBRID;
     }
     let rec = rec_off(part);
-    if get_le(&fs, rec.wrapping_add(8), 4) != PRIMARY_LBA {
+    if le_get(&fs, rec.wrapping_add(8), 4) != PRIMARY_LBA {
         return GPT_MBR_PROTECTIVE;
     }
     // A protective MBR covers the disk or 2 TiB, whichever is less; some
     // tools write the 32-bit maximum regardless. A wrong size is only
     // warned about, so that an image of a smaller disk can be copied.
-    let sz_lba = get_le(&fs, rec.wrapping_add(12), 4);
+    let sz_lba = le_get(&fs, rec.wrapping_add(12), 4);
     let total = cxt.total_sectors;
     if sz_lba != total.wrapping_sub(1) && sz_lba != 0xffff_ffff {
         cxt.warnx(
@@ -779,14 +768,14 @@ fn valid_pmbr(cxt: &mut Context) -> i32 {
         );
         // Corrected in memory too, so that the warning is not given again.
         cxt.with_firstsector(|b| {
-            put_le(
+            le_put(
                 b,
                 rec.wrapping_add(12),
                 4,
                 total.wrapping_sub(1).min(0xffff_ffff),
             );
         });
-        set_changed(cxt);
+        cxt.set_label_changed();
     }
     GPT_MBR_PROTECTIVE
 }
@@ -1223,7 +1212,7 @@ fn gpt_probe_label(cxt: &mut Context) -> i32 {
         g.ents = ents;
     }
     if changed {
-        set_changed(cxt);
+        cxt.set_label_changed();
     }
 
     // The headers may be right and the backup still not at the end of the
@@ -1248,11 +1237,11 @@ fn gpt_probe_label(cxt: &mut Context) -> i32 {
             if let Some(g) = gptm(cxt) {
                 recompute_both(g);
             }
-            set_changed(cxt);
+            cxt.set_label_changed();
         }
     }
     if minimize && gpt(cxt).is_some_and(|g| possible_minimize(g, total, ss)) {
-        set_changed(cxt);
+        cxt.set_label_changed();
     }
     let (nmax, ncur) = gpt(cxt).map_or((0, 0), |g| (g.nentries(), partitions_in_use(g)));
     if let Some(lb) = cxt.label_mut() {
@@ -1464,7 +1453,7 @@ fn gpt_set_partition(cxt: &mut Context, n: usize, pa: &Partition) -> i32 {
         match attrs_from_string(cxt, a) {
             Ok(v) => {
                 if let Some(g) = gptm(cxt) {
-                    g.with_entry(n, |e| put_le(e, ent::ATTRS, 8, v));
+                    g.with_entry(n, |e| le_put(e, ent::ATTRS, 8, v));
                 }
             }
             Err(rc) => return rc,
@@ -1496,7 +1485,7 @@ fn gpt_set_partition(cxt: &mut Context, n: usize, pa: &Partition) -> i32 {
             return -EINVAL;
         }
         if let Some(g) = gptm(cxt) {
-            g.with_entry(n, |e| put_le(e, ent::LBA_START, 8, start));
+            g.with_entry(n, |e| le_put(e, ent::LBA_START, 8, start));
         }
     }
     if !is_undef(end) {
@@ -1505,13 +1494,13 @@ fn gpt_set_partition(cxt: &mut Context, n: usize, pa: &Partition) -> i32 {
             return -EINVAL;
         }
         if let Some(g) = gptm(cxt) {
-            g.with_entry(n, |e| put_le(e, ent::LBA_END, 8, end));
+            g.with_entry(n, |e| le_put(e, ent::LBA_END, 8, end));
         }
     }
     if let Some(g) = gptm(cxt) {
         recompute_both(g);
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -1981,19 +1970,22 @@ fn gpt_add_partition(
     };
     if let Some(gm) = gptm(cxt) {
         gm.with_entry(partnum, |e| {
-            put_le(e, ent::LBA_END, 8, user_l);
-            put_le(e, ent::LBA_START, 8, user_f);
+            le_put(e, ent::LBA_END, 8, user_l);
+            le_put(e, ent::LBA_START, 8, user_f);
             put16(e, ent::TYPE, &typeid);
             put16(e, ent::PARTITION_GUID, &uuid);
         });
         if let Some(name) = pa.and_then(|p| p.name.as_deref()).filter(|n| !n.is_empty()) {
+            // A name that is no UTF-8 is left off, as upstream leaves it
+            // when gpt_entry_set_name fails: the partition is made all the
+            // same, and the name was the user's to see in the listing.
             let _ = entry_set_name(gm, partnum, name);
         }
     }
     if let Some(a) = pa.and_then(|p| p.attrs.clone()) {
         if let Ok(v) = attrs_from_string(cxt, &a) {
             if let Some(gm) = gptm(cxt) {
-                gm.with_entry(partnum, |e| put_le(e, ent::ATTRS, 8, v));
+                gm.with_entry(partnum, |e| le_put(e, ent::ATTRS, 8, v));
             }
         }
     }
@@ -2096,7 +2088,7 @@ fn gpt_set_disklabel_id(cxt: &mut Context, s: Option<&[u8]>) -> i32 {
     m.extend_from_slice(&new);
     m.push(b'.');
     cxt.info(&m);
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -2181,9 +2173,12 @@ pub fn set_npartitions(cxt: &mut Context, nents: u32) -> i32 {
         Err(rc) => return rc,
     };
     if nents > old_nents {
-        let rc = match calculate_sizeof_entries(Some(&p), old_nents) {
-            Ok(_) => check_table_overlap(cxt, first_usable, last_usable),
-            Err(rc) => rc,
+        let (rc, old_size) = match calculate_sizeof_entries(Some(&p), old_nents) {
+            Ok(old_size) => (
+                check_table_overlap(cxt, first_usable, last_usable),
+                old_size,
+            ),
+            Err(rc) => (rc, 0),
         };
         if rc != 0 {
             return rc;
@@ -2198,7 +2193,12 @@ pub fn set_npartitions(cxt: &mut Context, nents: u32) -> i32 {
                 cxt.warnx(b"Cannot allocate memory!");
                 return -ENOMEM;
             }
-            ents.resize(new_size, 0);
+            // `memset (ents + old_size, 0, new_size - old_size)`: entries a
+            // shrink hid, still in the array, come back empty.
+            ents.resize(new_size.max(ents.len()), 0);
+            if let Some(grown) = ents.get_mut(old_size..new_size) {
+                grown.fill(0);
+            }
             g.ents = Some(ents);
         }
     }
@@ -2225,7 +2225,7 @@ pub fn set_npartitions(cxt: &mut Context, nents: u32) -> i32 {
         lb.nparts_max = nmax;
     }
     cxt.info(format!("Partition table length changed from {old_nents} to {nents}.").as_bytes());
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -2264,7 +2264,7 @@ pub fn set_partition_attrs(cxt: &mut Context, partnum: usize, attrs: u64) -> i32
     if partnum >= g.nentries() {
         return -EINVAL;
     }
-    g.with_entry(partnum, |e| put_le(e, ent::ATTRS, 8, attrs));
+    g.with_entry(partnum, |e| le_put(e, ent::ATTRS, 8, attrs));
     cxt.info(
         format!(
             "The attributes on partition {} changed to 0x{attrs:016x}.",
@@ -2275,7 +2275,7 @@ pub fn set_partition_attrs(cxt: &mut Context, partnum: usize, attrs: u64) -> i32
     if let Some(g) = gptm(cxt) {
         recompute_both(g);
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -2320,7 +2320,7 @@ fn gpt_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
     let mask = 1u64.checked_shl(bitu).unwrap_or(0);
     attrs ^= mask;
     if let Some(g) = gptm(cxt) {
-        g.with_entry(i, |e| put_le(e, ent::ATTRS, 8, attrs));
+        g.with_entry(i, |e| le_put(e, ent::ATTRS, 8, attrs));
     }
     let on = attrs & mask != 0;
     let pn = i.wrapping_add(1);
@@ -2339,7 +2339,7 @@ fn gpt_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
     if let Some(g) = gptm(cxt) {
         recompute_both(g);
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -2366,7 +2366,7 @@ fn gpt_reorder(cxt: &mut Context) -> i32 {
             (false, false) => Ordering::Equal,
             (false, true) => Ordering::Greater,
             (true, false) => Ordering::Less,
-            (true, true) => get_le(a, ent::LBA_START, 8).cmp(&get_le(b, ent::LBA_START, 8)),
+            (true, true) => le_get(a, ent::LBA_START, 8).cmp(&le_get(b, ent::LBA_START, 8)),
         }
     };
     let ents = g.ents.clone().unwrap_or_default();
@@ -2387,7 +2387,7 @@ fn gpt_reorder(cxt: &mut Context) -> i32 {
     }
     g.ents = Some(new);
     recompute_both(g);
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 

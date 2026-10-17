@@ -15,7 +15,7 @@ use crate::item::{ItemData, LabelItem};
 use crate::label::{Label, LabelData, LabelOps};
 use crate::partition::Partition;
 use crate::parttype::PartType;
-use crate::utils::{partname, u64_as_u32};
+use crate::utils::{le_get, le_put, partname, u64_as_u32};
 use crate::{
     Geometry, LABEL_FL_INCHARS_PARTNO, LABEL_FL_REQUIRE_GEOMETRY, LabelType, NLABELITEMS, fieldtype,
 };
@@ -122,23 +122,6 @@ mod poff {
     pub const CPG: usize = 14;
 }
 
-/// A little-endian field.
-fn get(b: &[u8], at: usize, n: usize) -> u64 {
-    let mut v = [0u8; 8];
-    if let (Some(s), Some(d)) = (b.get(at..at.wrapping_add(n)), v.get_mut(..n)) {
-        d.copy_from_slice(s);
-    }
-    u64::from_le_bytes(v)
-}
-
-/// Writes a little-endian field.
-fn put(b: &mut [u8], at: usize, n: usize, val: u64) {
-    let v = val.to_le_bytes();
-    if let (Some(d), Some(s)) = (b.get_mut(at..at.wrapping_add(n)), v.get(..n)) {
-        d.copy_from_slice(s);
-    }
-}
-
 /// `struct fdisk_bsd_label`'s own part.
 #[derive(Clone, Debug)]
 pub struct BsdLabel {
@@ -162,16 +145,16 @@ impl Default for BsdLabel {
 
 impl BsdLabel {
     fn u32_at(&self, at: usize) -> u32 {
-        u64_as_u32(get(&self.bsd, at, 4))
+        u64_as_u32(le_get(&self.bsd, at, 4))
     }
     fn u16_at(&self, at: usize) -> u16 {
-        u16::try_from(get(&self.bsd, at, 2)).unwrap_or(0)
+        u16::try_from(le_get(&self.bsd, at, 2)).unwrap_or(0)
     }
     fn set32(&mut self, at: usize, v: u32) {
-        put(&mut self.bsd, at, 4, u64::from(v));
+        le_put(&mut self.bsd, at, 4, u64::from(v));
     }
     fn set16(&mut self, at: usize, v: u16) {
-        put(&mut self.bsd, at, 2, u64::from(v));
+        le_put(&mut self.bsd, at, 2, u64::from(v));
     }
     fn d_type(&self) -> i16 {
         i16::from_le_bytes(self.u16_at(off::TYPE).to_le_bytes())
@@ -762,8 +745,13 @@ fn get_bootstrap(cxt: &mut Context, path: &[u8], size: usize) -> Result<Vec<u8>,
             return Err(n.wrapping_neg());
         }
     };
-    let mut buf = vec![0u8; size];
-    if let Err(e) = f.read_exact(&mut buf) {
+    // `read_all`: as much as there is, up to `size` -- a shorter file is
+    // read whole, and what is past it is left as it was.
+    let mut buf = Vec::new();
+    if let Err(e) = (&mut f)
+        .take(u64::try_from(size).unwrap_or(u64::MAX))
+        .read_to_end(&mut buf)
+    {
         let n = crate::utils::errno_of(&e);
         cxt.warn(n, &with_arg("cannot read {}", path));
         return Err(n.wrapping_neg());
@@ -799,6 +787,15 @@ pub fn write_bootstrap(cxt: &mut Context) -> i32 {
         p
     };
     let secsize = usize::try_from(d.u32_at(off::SECSIZE)).unwrap_or(0);
+    let bbsize = usize::try_from(d.u32_at(off::BBSIZE)).unwrap_or(0);
+    // Both stages are read into the boot area: the first into its first
+    // sector, the second after it up to the boot-area size the label gives.
+    // Upstream reads past its buffer when the label's sizes do not fit in
+    // it; here they are refused.
+    if secsize > BBSIZE || bbsize < secsize || bbsize > BBSIZE {
+        cxt.warnx(b"The disklabel's sector and boot-area sizes do not fit its boot area.");
+        return -EINVAL;
+    }
     let first = match get_bootstrap(cxt, &path(&name, b"boot"), secsize) {
         Ok(b) => b,
         Err(rc) => return rc,
@@ -815,7 +812,6 @@ pub fn write_bootstrap(cxt: &mut Context) -> i32 {
     if let Some(dp) = buf.get_mut(LABEL_AT..LABEL_AT + LABEL_SIZE) {
         dp.fill(0);
     }
-    let bbsize = usize::try_from(d.u32_at(off::BBSIZE)).unwrap_or(0);
     let second = match get_bootstrap(cxt, &path(b"boot", &name), bbsize.wrapping_sub(secsize)) {
         Ok(b) => b,
         Err(rc) => return rc,
@@ -977,9 +973,9 @@ fn readlabel(cxt: &mut Context) -> i32 {
 fn bsd_write_disklabel(cxt: &mut Context) -> i32 {
     let offset = dos_part(cxt).map_or(0, |p| u64::from(p.start).wrapping_mul(cxt.sector_size));
     let Some(l) = blm(cxt) else { return -EINVAL };
-    put(&mut l.bsd, off::CHECKSUM, 2, 0);
+    le_put(&mut l.bsd, off::CHECKSUM, 2, 0);
     let sum = dkcksum(l);
-    put(&mut l.bsd, off::CHECKSUM, 2, u64::from(sum));
+    le_put(&mut l.bsd, off::CHECKSUM, 2, u64::from(sum));
     // The label updated within the boot area.
     let label = l.bsd.clone();
     if let Some(dst) = l.bsdbuffer.get_mut(LABEL_AT..LABEL_AT + LABEL_SIZE) {

@@ -53,75 +53,17 @@ pub fn u64_as_u32(v: u64) -> u32 {
 /// C's `isspace` in the C locale.
 #[must_use]
 pub fn c_isspace(c: u8) -> bool {
-    matches!(c, b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r')
+    cstrtol::isspace(c)
 }
 
-/// glibc's `strtol (s, &end, base)` for bases 0, 8, 10 and 16: the value,
-/// the index `end` points at, and the errno (`ERANGE` on overflow, the
-/// value then clamped). With no digits, 0 and `end` 0 -- the start of the
-/// string, whitespace and sign included, as glibc leaves it.
+/// glibc's `strtol (s, &end, base)`: the value, the index `end` points at,
+/// and the errno (`ERANGE` on overflow, the value then clamped). With no
+/// digits, 0 and `end` 0 -- the start of the string, whitespace and sign
+/// included, as glibc leaves it.
 #[must_use]
 pub fn strtol(s: &[u8], base: u32) -> (i64, usize, i32) {
-    let mut i = 0;
-    while s.get(i).copied().is_some_and(c_isspace) {
-        i = i.wrapping_add(1);
-    }
-    let mut neg = false;
-    match s.get(i) {
-        Some(b'-') => {
-            neg = true;
-            i = i.wrapping_add(1);
-        }
-        Some(b'+') => i = i.wrapping_add(1),
-        _ => {}
-    }
-    let mut base = base;
-    let hexdigit = |c: Option<&u8>| c.is_some_and(u8::is_ascii_hexdigit);
-    if (base == 0 || base == 16)
-        && s.get(i) == Some(&b'0')
-        && matches!(s.get(i.wrapping_add(1)), Some(b'x' | b'X'))
-        && hexdigit(s.get(i.wrapping_add(2)))
-    {
-        i = i.wrapping_add(2);
-        base = 16;
-    } else if base == 0 {
-        base = if s.get(i) == Some(&b'0') { 8 } else { 10 };
-    }
-    let start = i;
-    let mut acc: u64 = 0;
-    let mut overflow = false;
-    while let Some(&c) = s.get(i) {
-        let d = match c {
-            b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
-            b'a'..=b'z' => u32::from(c.wrapping_sub(b'a')).wrapping_add(10),
-            b'A'..=b'Z' => u32::from(c.wrapping_sub(b'A')).wrapping_add(10),
-            _ => break,
-        };
-        if d >= base {
-            break;
-        }
-        match acc
-            .checked_mul(u64::from(base))
-            .and_then(|a| a.checked_add(u64::from(d)))
-        {
-            Some(a) => acc = a,
-            None => overflow = true,
-        }
-        i = i.wrapping_add(1);
-    }
-    if i == start {
-        return (0, 0, 0);
-    }
-    let limit = if neg { 1u64 << 63 } else { (1u64 << 63) - 1 };
-    if overflow || acc > limit {
-        return (
-            if neg { i64::MIN } else { i64::MAX },
-            i,
-            crate::errno::ERANGE,
-        );
-    }
-    let v = i64::try_from(acc).map_or(i64::MIN, |v| if neg { v.wrapping_neg() } else { v });
-    (v, i, 0)
+    let (v, end, overflow) = cstrtol::strtol_overflow(s, base);
+    (v, end, if overflow { crate::errno::ERANGE } else { 0 })
 }
 
 /// glibc's `strtoul (s, &end, base)`: as [`strtol`], but unsigned -- a
@@ -129,59 +71,8 @@ pub fn strtol(s: &[u8], base: u32) -> (i64, usize, i32) {
 /// with `ERANGE`.
 #[must_use]
 pub fn strtoul(s: &[u8], base: u32) -> (u64, usize, i32) {
-    let mut i = 0;
-    while s.get(i).copied().is_some_and(c_isspace) {
-        i = i.wrapping_add(1);
-    }
-    let mut neg = false;
-    match s.get(i) {
-        Some(b'-') => {
-            neg = true;
-            i = i.wrapping_add(1);
-        }
-        Some(b'+') => i = i.wrapping_add(1),
-        _ => {}
-    }
-    let mut base = base;
-    if (base == 0 || base == 16)
-        && s.get(i) == Some(&b'0')
-        && matches!(s.get(i.wrapping_add(1)), Some(b'x' | b'X'))
-        && s.get(i.wrapping_add(2)).is_some_and(u8::is_ascii_hexdigit)
-    {
-        i = i.wrapping_add(2);
-        base = 16;
-    } else if base == 0 {
-        base = if s.get(i) == Some(&b'0') { 8 } else { 10 };
-    }
-    let start = i;
-    let mut acc: u64 = 0;
-    let mut overflow = false;
-    while let Some(&c) = s.get(i) {
-        let d = match c {
-            b'0'..=b'9' => u32::from(c.wrapping_sub(b'0')),
-            b'a'..=b'z' => u32::from(c.wrapping_sub(b'a')).wrapping_add(10),
-            b'A'..=b'Z' => u32::from(c.wrapping_sub(b'A')).wrapping_add(10),
-            _ => break,
-        };
-        if d >= base {
-            break;
-        }
-        match acc
-            .checked_mul(u64::from(base))
-            .and_then(|a| a.checked_add(u64::from(d)))
-        {
-            Some(a) => acc = a,
-            None => overflow = true,
-        }
-        i = i.wrapping_add(1);
-    }
-    if i == start {
-        return (0, 0, 0);
-    }
-    if overflow {
-        return (u64::MAX, i, crate::errno::ERANGE);
-    }
-    (if neg { acc.wrapping_neg() } else { acc }, i, 0)
+    let (v, end, overflow) = cstrtol::strtoull(s, base);
+    (v, end, if overflow { crate::errno::ERANGE } else { 0 })
 }
 
 /// `strcasecmp`, in the C locale: the sign of the first difference.
@@ -227,6 +118,26 @@ pub fn c_str(b: &[u8]) -> &[u8] {
     b.iter()
         .position(|&c| c == 0)
         .map_or(b, |n| b.get(..n).unwrap_or(b))
+}
+
+/// A little-endian field of `n` (at most 8) bytes at `at`; 0 for one past
+/// the end of `b`.
+#[must_use]
+pub fn le_get(b: &[u8], at: usize, n: usize) -> u64 {
+    let mut v = [0u8; 8];
+    if let (Some(s), Some(d)) = (b.get(at..at.wrapping_add(n)), v.get_mut(..n)) {
+        d.copy_from_slice(s);
+    }
+    u64::from_le_bytes(v)
+}
+
+/// Writes the low `n` (at most 8) bytes of `val` at `at`, little-endian;
+/// nothing for a field past the end of `b`.
+pub fn le_put(b: &mut [u8], at: usize, n: usize, val: u64) {
+    let v = val.to_le_bytes();
+    if let (Some(d), Some(s)) = (b.get_mut(at..at.wrapping_add(n)), v.get(..n)) {
+        d.copy_from_slice(s);
+    }
 }
 
 /// The `n`-byte (1 to 4) big-endian field at `at` of an on-disk structure

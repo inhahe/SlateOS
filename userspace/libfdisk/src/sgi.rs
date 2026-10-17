@@ -111,16 +111,6 @@ fn slm(cxt: &mut Context) -> Option<&mut SgiLabel> {
     }
 }
 
-fn set_changed(cxt: &mut Context) {
-    if let Some(lb) = cxt.label_mut() {
-        lb.changed = true;
-    }
-}
-
-fn nmax(cxt: &Context) -> usize {
-    cxt.label_ref().map_or(0, |l| l.nparts_max)
-}
-
 /// `set_freelist (cxt, i, f, l)`.
 fn set_freelist(cxt: &mut Context, i: usize, f: u32, l: u32) {
     if let Some(e) = slm(cxt).and_then(|s| s.freelist.get_mut(i)) {
@@ -208,7 +198,9 @@ fn lastblock(cxt: &Context) -> u32 {
 
 /// `count_used_partitions (cxt)`.
 fn count_used_partitions(cxt: &Context) -> usize {
-    (0..nmax(cxt)).filter(|&i| num_sectors(cxt, i) > 0).count()
+    (0..cxt.get_npartitions())
+        .filter(|&i| num_sectors(cxt, i) > 0)
+        .count()
 }
 
 /// The boot file, as the C string upstream prints: a 16-byte field with
@@ -217,11 +209,6 @@ fn count_used_partitions(cxt: &Context) -> usize {
 fn boot_file(cxt: &Context) -> Vec<u8> {
     let fs = cxt.firstsector();
     c_str(fs.get(off::BOOT_FILE..).unwrap_or(&[])).to_vec()
-}
-
-/// An `unsigned int` printed with `%d`.
-fn as_int(n: u32) -> i32 {
-    i32::from_ne_bytes(n.to_ne_bytes())
 }
 
 /// `fdisk_sgi_create_info (cxt)`: the "sgilabel" volume in the second
@@ -322,7 +309,7 @@ fn sgi_get_disklabel_item(cxt: &mut Context, it: &mut LabelItem) -> i32 {
 
 /// `sgi_get_parttype (cxt, n)`.
 fn get_parttype(cxt: &Context, n: usize) -> Option<PartType> {
-    if n >= nmax(cxt) {
+    if n >= cxt.get_npartitions() {
         return None;
     }
     let id = sysid(cxt, n);
@@ -437,7 +424,7 @@ fn sgi_write_disklabel(cxt: &mut Context) -> i32 {
         // Upstream keeps "this habit of first writing the sgilabel" from
         // the original fdisk. The block number is an `int`: a negative
         // offset is lseek's EINVAL.
-        let block = as_int(be(&fs, off::VOLUME + 8, 4));
+        let block = (be(&fs, off::VOLUME + 8, 4)).cast_signed();
         let Ok(at) = u64::try_from(i64::from(block).wrapping_mul(512)) else {
             return -EINVAL;
         };
@@ -560,7 +547,7 @@ fn verify_disklabel(cxt: &mut Context, verbose: bool) -> i32 {
             cxt.info(
                 format!(
                     "The entire disk partition should start at block 0, not at block {}.",
-                    as_int(start_sector(cxt, at(0)))
+                    (start_sector(cxt, at(0))).cast_signed()
                 )
                 .as_bytes(),
             );
@@ -586,8 +573,14 @@ fn verify_disklabel(cxt: &mut Context, verbose: bool) -> i32 {
                 cxt.info(
                     plural(
                         n,
-                        format!("Partitions {a} and {b} overlap by {} sector.", as_int(n)),
-                        format!("Partitions {a} and {b} overlap by {} sectors.", as_int(n)),
+                        format!(
+                            "Partitions {a} and {b} overlap by {} sector.",
+                            (n).cast_signed()
+                        ),
+                        format!(
+                            "Partitions {a} and {b} overlap by {} sectors.",
+                            (n).cast_signed()
+                        ),
                     )
                     .as_bytes(),
                 );
@@ -686,7 +679,7 @@ fn set_partition(cxt: &mut Context, i: usize, start: u32, length: u32, sys: u32)
     cxt.set_firstsector_be(base.wrapping_add(8), 4, sys);
     cxt.set_firstsector_be(base, 4, length);
     cxt.set_firstsector_be(base.wrapping_add(4), 4, start);
-    set_changed(cxt);
+    cxt.set_label_changed();
     // The free list rebuilt.
     if gaps(cxt) < 0 {
         cxt.warnx(b"Partition overlap on the disk.");
@@ -707,7 +700,7 @@ fn set_partition(cxt: &mut Context, i: usize, start: u32, length: u32, sys: u32)
 
 /// `sgi_set_entire (cxt)`: partition 11 the whole disk, if free.
 fn set_entire(cxt: &mut Context) {
-    for n in 10..nmax(cxt) {
+    for n in 10..cxt.get_npartitions() {
         if num_sectors(cxt, n) == 0 {
             let lb = lastblock(cxt);
             set_partition(cxt, n, 0, lb, TYPE_ENTIRE_DISK);
@@ -719,7 +712,7 @@ fn set_entire(cxt: &mut Context) {
 /// `sgi_set_volhdr (cxt)`: partition 9 a 4096-sector volume header, if
 /// free.
 fn set_volhdr(cxt: &mut Context) {
-    for n in 8..nmax(cxt) {
+    for n in 8..cxt.get_npartitions() {
         if num_sectors(cxt, n) == 0 {
             // The size IRIX fx uses.
             if 4096 < lastblock(cxt) {
@@ -732,7 +725,7 @@ fn set_volhdr(cxt: &mut Context) {
 
 /// `sgi_delete_partition (cxt, partnum)`.
 fn sgi_delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
-    if partnum > nmax(cxt) {
+    if partnum > cxt.get_npartitions() {
         return -EINVAL;
     }
     let rc = set_partition(cxt, partnum, 0, 0, 0);
@@ -966,7 +959,7 @@ fn sgi_create_disklabel(cxt: &mut Context) -> i32 {
 
 /// `sgi_set_partition (cxt, i, pa)`.
 fn sgi_set_partition(cxt: &mut Context, i: usize, pa: &Partition) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return -EINVAL;
     }
     let base = off::PARTITIONS.wrapping_add(i.wrapping_mul(12));
@@ -1006,13 +999,13 @@ fn sgi_set_partition(cxt: &mut Context, i: usize, pa: &Partition) -> i32 {
     if pa.has_size() {
         cxt.set_firstsector_be(base, 4, u64_as_u32(pa.size));
     }
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
 /// `sgi_partition_is_used (cxt, i)`.
 fn sgi_partition_is_used(cxt: &mut Context, i: usize) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return 0;
     }
     i32::from(num_sectors(cxt, i) != 0)
@@ -1021,7 +1014,7 @@ fn sgi_partition_is_used(cxt: &mut Context, i: usize) -> i32 {
 /// `sgi_toggle_partition_flag (cxt, i, flag)`: the boot or swap partition
 /// set to `i`, or back to 0 when it is `i`.
 fn sgi_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return -EINVAL;
     }
     let at = match flag {
@@ -1032,7 +1025,7 @@ fn sgi_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
     let cur = cxt.firstsector_be(at, 2);
     let iu = u32::try_from(i).unwrap_or(u32::MAX);
     cxt.set_firstsector_be(at, 2, if cur == iu { 0 } else { iu & 0xffff });
-    set_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 

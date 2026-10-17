@@ -42,6 +42,7 @@ use std::rc::Rc;
 use fdisk::Term;
 use fdisk::list::{self, Fields, WIPEMODE_ALWAYS, WIPEMODE_AUTO, WIPEMODE_NEVER};
 use getoptlong::{LongVals, Opt, Program, Takes};
+use libcall::{EACCES, EAGAIN, EINTR, ENOSYS};
 use libfdisk::errno::{ECANCELED, EINVAL};
 use libfdisk::parttype::{PARSE_ALIAS, PARSE_DATA, PARSE_NAME, PARSE_SEQNUM};
 use libfdisk::{Ask, AskType, Context, LabelType, PartType, Table};
@@ -53,12 +54,6 @@ const PACKAGE_STRING: &str = "util-linux 2.39.3";
 
 /// glibc's `BUFSIZ`: the reply buffer of most questions.
 const BUFSIZ: usize = 8192;
-
-/// `EACCES` and `EAGAIN`, `EINTR`, `ENOSYS`.
-const EACCES: i32 = 13;
-const EAGAIN: i32 = 11;
-const EINTR: i32 = 4;
-const ENOSYS: i32 = 38;
 
 /// What the dialog callback shares with the rest of the program: upstream's
 /// globals.
@@ -786,11 +781,16 @@ fn short_name(arg0: &OsStr) -> Vec<u8> {
 
 /// `usage ()`.
 fn usage(short: &[u8]) -> Vec<u8> {
-    let p = String::from_utf8_lossy(short).into_owned();
-    let mut out = format!(
-        "\nUsage:\n {p} [options] <disk>         change partition table\n {p} [options] -l [<disk>...] list \
-         partition table(s)\n\nDisplay or manipulate a disk partition table.\n\nOptions:\n"
+    // The program's name as it was invoked, byte for byte.
+    let mut head = b"\nUsage:\n ".to_vec();
+    head.extend_from_slice(short);
+    head.extend_from_slice(b" [options] <disk>         change partition table\n ");
+    head.extend_from_slice(short);
+    head.extend_from_slice(
+        b" [options] -l [<disk>...] list partition table(s)\n\nDisplay or manipulate a disk partition \
+          table.\n\nOptions:\n",
     );
+    let mut out = String::new();
     out.push_str(
         " -b, --sector-size <size>      physical and logical sector size\n -B, --protect-boot            don't \
          erase bootbits when creating a new label\n -c, --compatibility[=<mode>]  mode is 'dos' or 'nondos' \
@@ -817,7 +817,8 @@ fn usage(short: &[u8]) -> Vec<u8> {
         "{:<31}{}\n{:<31}{}\n",
         " -h, --help", "display this help", " -V, --version", "display version"
     ));
-    let mut out = out.into_bytes();
+    head.extend_from_slice(out.as_bytes());
+    let mut out = head;
     list::list_available_columns(&mut out);
     out.extend_from_slice(b"\nFor more details see fdisk(8).\n");
     out
@@ -1071,13 +1072,10 @@ impl Fdisk {
                     self.cxt.set_unit(unit);
                 }
                 c if c == i32::from(b'V') || c == i32::from(b'v') => {
-                    self.sh.term.write(
-                        format!(
-                            "{} from {PACKAGE_STRING}\n",
-                            String::from_utf8_lossy(&self.sh.term.short)
-                        )
-                        .as_bytes(),
-                    );
+                    self.sh.term.write(&self.sh.term.short);
+                    self.sh
+                        .term
+                        .write(format!(" from {PACKAGE_STRING}\n").as_bytes());
                     return Ok(0);
                 }
                 c if c == i32::from(b'w') => {

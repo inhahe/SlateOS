@@ -342,22 +342,10 @@ fn partition(cxt: &Context, i: usize) -> Option<DosPart> {
     pte(cxt, i)?.pt()
 }
 
-/// The label's `nparts_max`.
-fn nmax(cxt: &Context) -> usize {
-    cxt.label_ref().map_or(0, |l| l.nparts_max)
-}
-
 /// Sets the label's `nparts_max`.
 fn set_nmax(cxt: &mut Context, n: usize) {
     if let Some(lb) = cxt.label_mut() {
         lb.nparts_max = n;
-    }
-}
-
-/// Marks the label changed.
-fn set_label_changed(cxt: &mut Context) {
-    if let Some(lb) = cxt.label_mut() {
-        lb.changed = true;
     }
 }
 
@@ -409,13 +397,13 @@ pub fn partition_set_changed(cxt: &mut Context, i: usize, changed: bool) {
     }
     pte_mut(cxt, i, |pe| pe.changed = changed);
     if changed {
-        set_label_changed(cxt);
+        cxt.set_label_changed();
     }
 }
 
 /// `get_partition_unused_primary (cxt, pa, &partno)`.
 fn get_partition_unused_primary(cxt: &mut Context, pa: Option<&Partition>) -> Result<usize, i32> {
-    let org = nmax(cxt);
+    let org = cxt.get_npartitions();
     set_nmax(cxt, 4);
     let rc = cxt.partition_next_partno(pa);
     set_nmax(cxt, org);
@@ -568,7 +556,7 @@ fn delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
 
     if partnum < 4 {
         if pe.pt().is_some_and(|p| is_extended(u32::from(p.sys_ind))) && partnum == ext_index {
-            for i in 4..nmax(cxt) {
+            for i in 4..cxt.get_npartitions() {
                 reset_pte(cxt, i);
             }
             set_nmax(cxt, 4);
@@ -583,7 +571,7 @@ fn delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
     } else if pe.ex().is_some_and(|q| q.sys_ind == 0) && partnum > 4 {
         // The last in the chain.
         reset_pte(cxt, partnum);
-        set_nmax(cxt, nmax(cxt).wrapping_sub(1));
+        set_nmax(cxt, cxt.get_npartitions().wrapping_sub(1));
         partnum = partnum.wrapping_sub(1);
         // The link to the deleted one, cleared.
         if let Some(prev) = pte(cxt, partnum) {
@@ -599,7 +587,7 @@ fn delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
                 prev.put(prev.ex_entry, &p);
             }
             partition_set_changed(cxt, partnum.wrapping_sub(1), true);
-        } else if nmax(cxt) > 5 {
+        } else if cxt.get_npartitions() > 5 {
             // The first logical's link.
             if let Some(second) = pte(cxt, 5) {
                 let abs = second.abs_start();
@@ -612,8 +600,8 @@ fn delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
             partition_set_changed(cxt, 5, true);
         }
 
-        if nmax(cxt) > 5 {
-            let n = nmax(cxt).wrapping_sub(1);
+        if cxt.get_npartitions() > 5 {
+            let n = cxt.get_npartitions().wrapping_sub(1);
             set_nmax(cxt, n);
             reset_pte(cxt, partnum);
             if let Some(l) = lm(cxt) {
@@ -634,14 +622,14 @@ fn delete_partition(cxt: &mut Context, partnum: usize) -> i32 {
             if let Some(p) = pte(cxt, partnum) {
                 clear(&p, p.pt_entry);
             }
-            set_nmax(cxt, nmax(cxt).wrapping_sub(1));
+            set_nmax(cxt, cxt.get_npartitions().wrapping_sub(1));
             if partnum == 4 {
                 reset_pte(cxt, partnum);
                 partition_set_changed(cxt, ext_index, true);
             }
         }
     }
-    set_label_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
@@ -672,7 +660,7 @@ fn read_extended(cxt: &mut Context, ext_i: usize) {
     };
 
     while entry_of(cxt, p).is_some_and(|e| is_extended(u32::from(e.sys_ind))) {
-        let n = nmax(cxt);
+        let n = cxt.get_npartitions();
         if n >= MAXIMUM_PARTS {
             // Not a Linux restriction: this program's arrays are that size.
             cxt.warnx(
@@ -751,7 +739,7 @@ fn read_extended(cxt: &mut Context, ext_i: usize) {
     }
 
     // The last EBR, if empty, removed.
-    let n = nmax(cxt);
+    let n = cxt.get_npartitions();
     if let Some(pe) = pte(cxt, n.wrapping_sub(1)) {
         let ex_cleared = pe.ex().is_some_and(|e| e.is_cleared());
         if ex_cleared && pe.pt_cleared() {
@@ -766,10 +754,10 @@ fn read_extended(cxt: &mut Context, ext_i: usize) {
     // Empty links removed.
     'remove: loop {
         let q = partition(cxt, 4);
-        for i in 4..nmax(cxt) {
+        for i in 4..cxt.get_npartitions() {
             let p = partition(cxt, i);
             if p.is_some_and(|p| p.size == 0)
-                && (nmax(cxt) > 5 || q.is_some_and(|q| q.sys_ind != 0))
+                && (cxt.get_npartitions() > 5 || q.is_some_and(|q| q.sys_ind != 0))
             {
                 cxt.info(format!("omitting empty partition ({})", i.wrapping_add(1)).as_bytes());
                 delete_partition(cxt, i);
@@ -783,8 +771,9 @@ fn read_extended(cxt: &mut Context, ext_i: usize) {
 
 /// `ul_random_get_bytes (&id, sizeof (id))`.
 fn random_u32() -> u32 {
-    let u = crate::uuid::generate_random();
-    u32::from_le_bytes([u[0], u[1], u[2], u[3]])
+    let mut id = [0u8; 4];
+    crate::uuid::random_get_bytes(&mut id);
+    u32::from_ne_bytes(id)
 }
 
 /// `dos_create_disklabel (cxt)`.
@@ -816,7 +805,7 @@ fn dos_create_disklabel(cxt: &mut Context) -> i32 {
     if let Some(l) = lm(cxt) {
         l.non_pt_changed = true;
     }
-    set_label_changed(cxt);
+    cxt.set_label_changed();
     cxt.with_firstsector(|b| mbr_set_magic(b));
     cxt.info(
         format!("Created a new DOS (MBR) disklabel with disk identifier 0x{id:08x}.").as_bytes(),
@@ -848,7 +837,7 @@ fn dos_set_disklabel_id(cxt: &mut Context, s: Option<&[u8]>) -> i32 {
     if let Some(l) = lm(cxt) {
         l.non_pt_changed = true;
     }
-    set_label_changed(cxt);
+    cxt.set_label_changed();
     cxt.info(format!("Disk identifier changed from 0x{old:08x} to 0x{id:08x}.").as_bytes());
     0
 }
@@ -995,7 +984,7 @@ fn dos_probe_label(cxt: &mut Context) -> i32 {
             }
         }
         if is_extended(u32::from(p.sys_ind)) {
-            if nmax(cxt) != 4 {
+            if cxt.get_npartitions() != 4 {
                 cxt.warnx(
                     format!("Ignoring extra extended partition {}", i.wrapping_add(1)).as_bytes(),
                 );
@@ -1004,7 +993,7 @@ fn dos_probe_label(cxt: &mut Context) -> i32 {
             }
         }
     }
-    for i in 3..nmax(cxt) {
+    for i in 3..cxt.get_npartitions() {
         let Some(pe) = pte(cxt, i) else { continue };
         let buf = pe
             .sectorbuffer
@@ -1109,7 +1098,7 @@ fn get_start_from_user(
 /// extents, an EBR counted as used from a first LBA before its partition.
 fn used_extents(cxt: &Context, logical: bool) -> Vec<(Sector, Sector)> {
     let from = if logical { 4 } else { 0 };
-    (from..nmax(cxt))
+    (from..cxt.get_npartitions())
         .filter_map(|i| pte(cxt, i))
         .filter(|pe| !pe.pt_cleared())
         .map(|pe| {
@@ -1132,7 +1121,7 @@ fn find_last_free(
 ) -> Result<Sector, i32> {
     let mut last = stop;
     let from = if logical { 4 } else { 0 };
-    for i in from..nmax(cxt) {
+    for i in from..cxt.get_npartitions() {
         let Some(pe) = pte(cxt, i) else { continue };
         let mut p_start = pe.abs_start();
         let p_end = pe.abs_end();
@@ -1510,13 +1499,13 @@ fn add_partition(cxt: &mut Context, n: usize, pa: Option<&Partition>) -> i32 {
         }
         pte_mut(cxt, n, |pe| pe.ex_entry = pe.pt_entry);
     }
-    set_label_changed(cxt);
+    cxt.set_label_changed();
     0
 }
 
 /// `add_logical (cxt, pa, &partno)`.
 fn add_logical(cxt: &mut Context, pa: Option<&Partition>) -> Result<usize, i32> {
-    let n = nmax(cxt);
+    let n = cxt.get_npartitions();
     if n >= MAXIMUM_PARTS {
         return Err(-EINVAL);
     }
@@ -1672,7 +1661,7 @@ fn check_consistency(cxt: &mut Context, p: &DosPart, partition: usize) -> i32 {
 
 /// `fill_bounds (cxt, first, last)`.
 fn fill_bounds(cxt: &Context) -> (Vec<Sector>, Vec<Sector>) {
-    let n = nmax(cxt);
+    let n = cxt.get_npartitions();
     let mut first = vec![0; n];
     let mut last = vec![0; n];
     for i in 0..n {
@@ -1702,7 +1691,7 @@ fn dos_verify_disklabel(cxt: &mut Context) -> i32 {
     let la = |i: usize| last.get(i).copied().unwrap_or(0);
     let mut nerrors: i32 = 0;
 
-    for i in 0..nmax(cxt) {
+    for i in 0..cxt.get_npartitions() {
         let Some(pe) = pte(cxt, i) else { continue };
         let Some(p) = pe.pt() else { continue };
         if !p.is_used() || is_extended(u32::from(p.sys_ind)) {
@@ -1754,11 +1743,11 @@ fn dos_verify_disklabel(cxt: &mut Context) -> i32 {
     let (ext_offset, ext_index) = ext(cxt);
     if ext_offset != 0 {
         let e_last = pte(cxt, ext_index).map_or(0, |pe| pe.abs_end());
-        for i in 4..nmax(cxt) {
+        for i in 4..cxt.get_npartitions() {
             total = total.wrapping_add(1);
             let Some(p) = partition(cxt, i) else { continue };
             if p.sys_ind == 0 {
-                if i != 4 || i.wrapping_add(1) < nmax(cxt) {
+                if i != 4 || i.wrapping_add(1) < cxt.get_npartitions() {
                     cxt.warnx(format!("Partition {}: empty.", i.wrapping_add(1)).as_bytes());
                     nerrors = nerrors.wrapping_add(1);
                 }
@@ -1815,7 +1804,7 @@ fn dos_add_partition(
     partno: Option<&mut usize>,
 ) -> i32 {
     let mut pa = pa;
-    if nmax(cxt) >= MAXIMUM_PARTS {
+    if cxt.get_npartitions() >= MAXIMUM_PARTS {
         cxt.warnx(b"The maximum number of partitions has been created.");
         return -EINVAL;
     }
@@ -2077,7 +2066,7 @@ fn dos_write_disklabel(cxt: &mut Context) -> i32 {
         }
     }
     let (ext_offset, ext_index) = ext(cxt);
-    if nmax(cxt) <= 4 && ext_offset != 0 {
+    if cxt.get_npartitions() <= 4 && ext_offset != 0 {
         // An empty extended partition: clear any EBR left in it.
         if let Some(pe) = pte(cxt, ext_index) {
             let off = pe.abs_start();
@@ -2088,7 +2077,7 @@ fn dos_write_disklabel(cxt: &mut Context) -> i32 {
             }
         }
     }
-    for i in 4..nmax(cxt) {
+    for i in 4..cxt.get_npartitions() {
         let Some(pe) = pte(cxt, i) else { continue };
         let Some(buf) = pe.sectorbuffer.as_ref() else {
             continue;
@@ -2116,7 +2105,7 @@ fn dos_locate_disklabel(cxt: &mut Context, n: i32) -> Result<Located, i32> {
         .and_then(|n| n.checked_sub(1))
         .map(|n| n.wrapping_add(4));
     match i {
-        Some(i) if i < nmax(cxt) => {
+        Some(i) if i < cxt.get_npartitions() => {
             let pe = pte(cxt, i).ok_or(-EINVAL)?;
             Ok(("EBR", pe.offset.wrapping_mul(cxt.sector_size), 512))
         }
@@ -2130,7 +2119,7 @@ fn dos_locate_disklabel(cxt: &mut Context, n: i32) -> Result<Located, i32> {
 fn wrong_p_order(cxt: &Context) -> (usize, usize) {
     let mut last_start = 0;
     let mut last_i = 0;
-    for i in 0..nmax(cxt) {
+    for i in 0..cxt.get_npartitions() {
         let Some(pe) = pte(cxt, i) else { continue };
         if i == 4 {
             last_i = 4;
@@ -2195,12 +2184,12 @@ fn dos_get_partition(cxt: &mut Context, n: usize, pa: &mut Partition) -> i32 {
 
 /// `has_logical (cxt)`.
 fn has_logical(cxt: &Context) -> bool {
-    (4..nmax(cxt)).any(|i| pte(cxt, i).is_some_and(|pe| pe.pt_entry.is_some()))
+    (4..cxt.get_npartitions()).any(|i| pte(cxt, i).is_some_and(|pe| pe.pt_entry.is_some()))
 }
 
 /// `dos_set_partition (cxt, n, pa)`.
 fn dos_set_partition(cxt: &mut Context, n: usize, pa: &Partition) -> i32 {
-    if n >= nmax(cxt) {
+    if n >= cxt.get_npartitions() {
         return -EINVAL;
     }
     let Some(pe) = pte(cxt, n) else {
@@ -2309,7 +2298,7 @@ fn cmp_ebr_offsets(a: &Pte, b: &Pte) -> std::cmp::Ordering {
 /// `fix_chain_of_logicals (cxt)`: the EBRs sorted by offset, the data
 /// partitions by start among them, and the links redone.
 fn fix_chain_of_logicals(cxt: &mut Context) {
-    let n = nmax(cxt);
+    let n = cxt.get_npartitions();
     if let Some(l) = lm(cxt) {
         if let Some(chain) = l.ptes.get_mut(4..n) {
             chain.sort_by(cmp_ebr_offsets);
@@ -2408,7 +2397,7 @@ fn dos_reorder(cxt: &mut Context) -> i32 {
 /// LBA; the number changed.
 pub fn fix_chs(cxt: &mut Context) -> i32 {
     let mut changed: i32 = 0;
-    for i in 0..nmax(cxt) {
+    for i in 0..cxt.get_npartitions() {
         let Some(pe) = pte(cxt, i) else { continue };
         let Some(p) = pe.pt().filter(DosPart::is_used) else {
             continue;
@@ -2466,7 +2455,7 @@ pub fn move_begin(cxt: &mut Context, i: usize) -> i32 {
         0
     };
     let curr_start = u64_as_u32(pe.abs_start());
-    for x in 0..nmax(cxt) {
+    for x in 0..cxt.get_npartitions() {
         let Some(prev) = pte(cxt, x) else { continue };
         let Some(pp) = prev.pt() else { continue };
         let end = u64_as_u32(prev.abs_start()).wrapping_add(pp.size);
@@ -2506,7 +2495,7 @@ pub fn move_begin(cxt: &mut Context, i: usize) -> i32 {
 
 /// `dos_partition_is_used (cxt, i)`.
 fn dos_partition_is_used(cxt: &mut Context, i: usize) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return 0;
     }
     i32::from(partition(cxt, i).is_some_and(|p| !p.is_cleared()))
@@ -2514,7 +2503,7 @@ fn dos_partition_is_used(cxt: &mut Context, i: usize) -> i32 {
 
 /// `dos_toggle_partition_flag (cxt, i, flag)`.
 fn dos_toggle_partition_flag(cxt: &mut Context, i: usize, flag: u64) -> i32 {
-    if i >= nmax(cxt) {
+    if i >= cxt.get_npartitions() {
         return -EINVAL;
     }
     let Some(pe) = pte(cxt, i) else {

@@ -255,8 +255,8 @@ MUTATIONS = [
     ),
     (
         "a pattern minds case where the text search does not",
-        "        Some(ere::Regex::new_flags(self.search_query.as_bytes(), true)",
-        "        Some(ere::Regex::new_flags(self.search_query.as_bytes(), false)",
+        "        Some(ere::Regex::new_flags(self.search.text().as_bytes(), true)",
+        "        Some(ere::Regex::new_flags(self.search.text().as_bytes(), false)",
         ["the_pattern_switch_makes_the_search_a_regular_expression"],
     ),
     (
@@ -530,9 +530,9 @@ MUTATIONS += [
         [FIELD],
     ),
     (
-        "the caret is at the start of the query",
-        "                cursor: self.search_cursor(),\n",
-        "                cursor: text::TextCursor::default(),\n",
+        "the box with the keyboard is drawn without it",
+        "                focused: state.focused,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [CARET],
     ),
 ]
@@ -566,33 +566,21 @@ MUTATIONS += [
     ),
     (
         "/ does not select what the box holds",
-        "        self.search_editor.select_all();\n",
+        "        self.filter.search.select_all();\n",
         "",
         [SLASH],
     ),
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.search_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "an edit does not count the matches again",
-        "            self.filter.search_query = self.search_editor.text().to_owned();\n            self.update_search();\n",
-        "            self.filter.search_query = self.search_editor.text().to_owned();\n",
+        "        if edit.changed {\n            self.update_search();\n",
+        "        if edit.changed {\n",
         [EDITS],
     ),
     (
-        "a key finds the editor holding another search",
-        "        if self.search_editor.text() != self.filter.search_query {\n            self.search_editor.set_text(&self.filter.search_query);\n        }\n        let before = (\n",
-        "        let before = (\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another search",
-        "        self.search_focused = true;\n        if self.search_editor.text() != self.filter.search_query {\n",
-        "        self.search_focused = true;\n        if false {\n",
-        [SHOWN],
+        "a press is measured as the box was not drawn",
+        "            had_the_keyboard,\n",
+        "            !had_the_keyboard,\n",
+        [EDITS],
     ),
     (
         "a press puts the caret at the start",
@@ -604,12 +592,6 @@ MUTATIONS += [
         "a press in the box does not place the caret",
         "                    self.press_search(rect, event.x);\n                    return EventResult::Consumed;\n",
         "                    let _ = rect;\n",
-        [EDITS],
-    ),
-    (
-        "the selection is not drawn",
-        "                selection_anchor: if editing {\n",
-        "                selection_anchor: if false {\n",
         [EDITS],
     ),
 ]
@@ -628,6 +610,19 @@ MUTATIONS += [
         "                _ => member.text.to_owned(),\n",
         "                other => other.to_string(),\n",
         ["a_value_is_shown_as_the_line_wrote_it"],
+    ),
+]
+
+# The filter holds the search box (2026-10-17), and is one filter whatever
+# the box's caret.
+SAME_FILTER = "a_filter_is_the_same_filter_wherever_its_caret_is"
+
+MUTATIONS += [
+    (
+        "two searches make one filter",
+        "            && self.search.text() == other.search.text()\n",
+        "",
+        [SAME_FILTER],
     ),
 ]
 

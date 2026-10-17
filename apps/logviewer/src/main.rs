@@ -51,12 +51,12 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -799,10 +799,12 @@ fn contains_ignore_ascii_case(hay: &str, needle: &str) -> bool {
             .any(|w| w.eq_ignore_ascii_case(needle))
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct FilterState {
     min_level: LogLevel,
-    search_query: String,
+    /// The search box, which is the search: the text a passing entry
+    /// holds, or the pattern it matches.
+    search: SearchBox,
     source_filter: Option<String>,
     time_start: Option<u64>,
     time_end: Option<u64>,
@@ -818,7 +820,7 @@ impl Default for FilterState {
     fn default() -> Self {
         Self {
             min_level: LogLevel::Trace,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SMALL_TEXT),
             source_filter: None,
             time_start: None,
             time_end: None,
@@ -828,16 +830,31 @@ impl Default for FilterState {
     }
 }
 
+/// Equal when they pass the same entries: the search compared by its text,
+/// not by where its caret is, which filters nothing -- so a caret moved in
+/// the box keeps the list worked out for the filter.
+impl PartialEq for FilterState {
+    fn eq(&self, other: &Self) -> bool {
+        self.min_level == other.min_level
+            && self.search.text() == other.search.text()
+            && self.source_filter == other.source_filter
+            && self.time_start == other.time_start
+            && self.time_end == other.time_end
+            && self.show_bookmarked_only == other.show_bookmarked_only
+            && self.regex == other.regex
+    }
+}
+
 impl FilterState {
     /// The search as a compiled pattern, when it is a regular expression.
     ///
     /// `Err` carries why the pattern is not one; a search that does not
     /// compile matches nothing rather than quietly becoming a text search.
     fn pattern(&self) -> Option<Result<ere::Regex, &'static str>> {
-        if !self.regex || self.search_query.is_empty() {
+        if !self.regex || self.search.is_empty() {
             return None;
         }
-        Some(ere::Regex::new_flags(self.search_query.as_bytes(), true).map_err(|e| e.message()))
+        Some(ere::Regex::new_flags(self.search.text().as_bytes(), true).map_err(|e| e.message()))
     }
 
     /// Whether `entry` passes, compiling the search if it is a pattern. For
@@ -867,7 +884,7 @@ impl FilterState {
             }
             Some(Err(_)) => false,
             None => {
-                let needle = self.search_query.as_str();
+                let needle = self.search.text();
                 contains_ignore_ascii_case(&entry.message, needle)
                     || contains_ignore_ascii_case(&entry.source, needle)
                     || entry
@@ -913,7 +930,7 @@ impl FilterState {
         }
 
         // Text search
-        if !self.search_query.is_empty() && !self.text_matches(entry, pattern) {
+        if !self.search.is_empty() && !self.text_matches(entry, pattern) {
             return false;
         }
 
@@ -922,7 +939,7 @@ impl FilterState {
 
     fn is_active(&self) -> bool {
         self.min_level != LogLevel::Trace
-            || !self.search_query.is_empty()
+            || !self.search.is_empty()
             || self.source_filter.is_some()
             || self.time_start.is_some()
             || self.time_end.is_some()
@@ -1036,11 +1053,6 @@ struct App {
     /// floor to Warn instead — the app had no input at all, so nothing had ever
     /// needed to make the distinction.
     search_focused: bool,
-    /// The search box's editor -- its caret and selection over the
-    /// filter's `search_query` -- reloaded when the query changed under it.
-    search_editor: TextInput,
-    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    search_clipboard: String,
     /// Whether the shortcut list is up.
     show_help: bool,
     /// How wide the mark is round the search box while it has the keyboard:
@@ -1141,8 +1153,6 @@ impl App {
             search_results: Vec::new(),
             current_search_result: 0,
             search_focused: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
         }
     }
 
@@ -1233,7 +1243,7 @@ impl App {
     fn update_search(&mut self) {
         self.search_results.clear();
         self.current_search_result = 0;
-        if self.filter.search_query.is_empty() {
+        if self.filter.search.is_empty() {
             return;
         }
         // The same test the filter applies, so the hit count and the list
@@ -1524,29 +1534,16 @@ impl App {
             self.search_focused = false;
             return Some(EventResult::Consumed);
         }
-        if self.search_editor.text() != self.filter.search_query {
-            self.search_editor.set_text(&self.filter.search_query);
-        }
-        let before = (
-            self.search_editor.cursor(),
-            self.search_editor.selection_anchor(),
-        );
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            key,
-            &self.search_clipboard,
-            SMALL_TEXT,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
-        let moved = before
-            != (
-                self.search_editor.cursor(),
-                self.search_editor.selection_anchor(),
-            );
-        if self.search_editor.text() != self.filter.search_query {
-            self.filter.search_query = self.search_editor.text().to_owned();
+        let caret = |filter: &FilterState| {
+            (
+                filter.search.input().cursor(),
+                filter.search.input().selection_anchor(),
+            )
+        };
+        let before = caret(&self.filter);
+        let edit = self.filter.search.key(key);
+        let moved = before != caret(&self.filter);
+        if edit.changed {
             self.update_search();
             self.reanchor_selection();
             return Some(EventResult::Consumed);
@@ -1569,43 +1566,20 @@ impl App {
     /// edit.
     fn focus_search(&mut self) {
         self.search_focused = true;
-        self.search_editor.set_text(&self.filter.search_query);
-        self.search_editor.select_all();
-    }
-
-    /// Where the search box's caret is drawn: the editor's while the box has
-    /// the keyboard (the end, if the query changed under the editor), the
-    /// start otherwise, which shows the start of what the box holds. One
-    /// answer for the drawing and for a press.
-    fn search_cursor(&self) -> text::TextCursor {
-        if !self.search_focused {
-            text::TextCursor::default()
-        } else if self.search_editor.text() == self.filter.search_query {
-            self.search_editor.cursor()
-        } else {
-            text::TextCursor::from(self.filter.search_query.len())
-        }
+        self.filter.search.select_all();
     }
 
     /// A press in the search box, drawn at `rect`, at `x`: it takes the
     /// keyboard, with the caret under the pointer, measured against the box
     /// as it was drawn.
     fn press_search(&mut self, rect: Rect, x: f32) {
-        let drawn = self.search_cursor();
+        let had_the_keyboard = self.search_focused;
         self.search_focused = true;
-        if self.search_editor.text() != self.filter.search_query {
-            self.search_editor.set_text(&self.filter.search_query);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.filter.search_query,
-            drawn,
-            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
-            SMALL_TEXT,
-            FontWeightHint::Regular,
+        self.filter.search.press(
             x - rect.x - SEARCH_TEXT_INSET,
+            rect.w - 2.0 * SEARCH_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// Switch views, reporting whether anything changed.
@@ -2110,43 +2084,20 @@ impl App {
             search.y + (search.h - line) / 2.0,
             (search.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
-        if self.filter.search_query.is_empty() && !state.focused {
-            cmds.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: "Search logs...  /".into(),
-                font_size: SMALL_TEXT,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        // The query, with its caret and selection where they are, scrolled
-        // so the caret stays in view. The caret was fixed at the end, the
-        // only place the keys could type. The editor's selection only while
-        // it is the box's: a query changed under it has not been reloaded
-        // into it yet.
-        let editing = self.search_focused && self.search_editor.text() == self.filter.search_query;
+        // The query, with its caret and selection where they are while the
+        // box has the keyboard, scrolled so the caret stays in view.
         let mut typed = RenderTree::new();
-        textedit::draw(
+        self.filter.search.draw(
             &mut typed,
-            &textedit::SingleLine {
-                text: &self.filter.search_query,
-                cursor: self.search_cursor(),
-                selection_anchor: if editing {
-                    self.search_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: state.focused,
+            &SearchLook {
                 x: tx,
                 y: ty,
                 width: tw,
                 line_height: line,
-                font_size: SMALL_TEXT,
-                weight: FontWeightHint::Regular,
+                focused: state.focused,
+                placeholder: "Search logs...  /",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -4226,7 +4177,7 @@ mod tests {
         assert!(app.search_focused);
         app.handle_event(&typed('w'));
         app.handle_event(&typed('a'));
-        assert_eq!(app.filter.search_query, "wa");
+        assert_eq!(app.filter.search.text(), "wa");
         assert_eq!(app.filter.min_level, floor, "the floor moved while typing");
         app.handle_event(&press(Key::Enter));
         assert!(!app.search_focused);
@@ -4271,7 +4222,7 @@ mod tests {
                 "AltGr+{k:?} was not typed"
             );
         }
-        assert_eq!(app.filter.search_query, "\u{142}\u{15b}|");
+        assert_eq!(app.filter.search.text(), "\u{142}\u{15b}|");
         assert_eq!(app.files.len(), tabs, "AltGr+W closed a tab");
         assert_eq!(
             (app.show_source, app.show_line_numbers),
@@ -4316,7 +4267,7 @@ mod tests {
         ] {
             app.handle_event(&held(k, modifiers, text));
         }
-        assert_eq!(app.filter.search_query, "", "a command's letter was typed");
+        assert_eq!(app.filter.search.text(), "", "a command's letter was typed");
     }
 
     #[test]
@@ -4333,7 +4284,7 @@ mod tests {
         for _ in 0..4 {
             app.handle_event(&press(Key::Backspace));
         }
-        assert_eq!(app.filter.search_query, "");
+        assert_eq!(app.filter.search.text(), "");
         assert_eq!(app.filtered_entries().len(), all);
         assert_eq!(
             app.handle_event(&press(Key::Backspace)),
@@ -4745,12 +4696,25 @@ mod tests {
         assert!(!filter.matches(&net));
     }
 
+    /// **A filter is the same whatever its caret**: the list worked out for a
+    /// filter is kept while only the search box's caret or selection moves,
+    /// and worked out again when the search itself changes.
+    #[test]
+    fn a_filter_is_the_same_filter_wherever_its_caret_is() {
+        let mut filter = FilterState::default();
+        filter.search.set_text("error");
+        let mut moved = filter.clone();
+        moved.search.select_all();
+        assert!(filter == moved, "a caret moved made another filter");
+        let mut other = filter.clone();
+        other.search.set_text("warn");
+        assert!(filter != other, "another search made the same filter");
+    }
+
     #[test]
     fn test_filter_by_search() {
-        let filter = FilterState {
-            search_query: "error".into(),
-            ..Default::default()
-        };
+        let mut filter = FilterState::default();
+        filter.search.set_text("error");
         let match_entry = make_entry(LogLevel::Info, "", "an error occurred");
         let no_match = make_entry(LogLevel::Info, "", "all is well");
         assert!(filter.matches(&match_entry));
@@ -4816,7 +4780,7 @@ mod tests {
     #[test]
     fn test_app_search() {
         let mut app = App::with_sample();
-        app.filter.search_query = "error".into();
+        app.filter.search.set_text("error");
         app.update_search();
         assert!(!app.search_results.is_empty());
     }
@@ -4828,7 +4792,7 @@ mod tests {
         // field — levels are handled by the level filter). "net" is the source
         // of several sample entries, so it yields multiple matches, which is
         // what we need to exercise next/prev wrap-around below.
-        app.filter.search_query = "net".into();
+        app.filter.search.set_text("net");
         app.update_search();
         let count = app.search_results.len();
         assert!(count > 1);
@@ -5840,7 +5804,7 @@ mod tests {
         for c in "usb".chars() {
             app.handle_event(&typed(c));
         }
-        assert_eq!(app.filter.search_query, "usb");
+        assert_eq!(app.filter.search.text(), "usb");
         assert_eq!(shown(&app), [4]);
         // A press on nothing at all takes it back too, and is a redraw: the
         // caret goes.
@@ -5851,7 +5815,7 @@ mod tests {
     #[test]
     fn the_pattern_switch_makes_the_search_a_regular_expression() {
         let mut app = App::with_sample();
-        app.filter.search_query = "fail(ed|ure)".into();
+        app.filter.search.set_text("fail(ed|ure)");
         app.update_search();
         assert!(
             shown(&app).is_empty(),
@@ -5888,7 +5852,7 @@ mod tests {
     fn a_pattern_that_does_not_compile_matches_nothing_and_says_why() {
         let mut app = App::with_sample();
         app.filter.regex = true;
-        app.filter.search_query = "fail(".into();
+        app.filter.search.set_text("fail(");
         app.update_search();
         assert!(shown(&app).is_empty());
         let red = app.palette.red;
@@ -6401,7 +6365,7 @@ mod tests {
         // With the search box holding the keyboard under it.
         app.handle_event(&press(Key::Slash));
         assert!(app.search_focused);
-        let query = app.filter.search_query.clone();
+        let query = app.filter.search.text().to_owned();
         app.handle_event(&press(Key::F1));
         app.handle_event(&Event::Key(KeyEvent {
             key: Key::X,
@@ -6410,7 +6374,8 @@ mod tests {
             text: String::from("x"),
         }));
         assert_eq!(
-            app.filter.search_query, query,
+            app.filter.search.text(),
+            query,
             "a letter was typed under the list"
         );
         app.handle_event(&press(Key::F1));
@@ -6447,7 +6412,7 @@ mod tests {
     fn n_and_p_go_to_the_match_as_well_as_counting_it() {
         let mut app = App::with_sample();
         app.auto_scroll = false;
-        app.filter.search_query = "mm".into();
+        app.filter.search.set_text("mm");
         app.update_search();
         assert!(app.search_results.len() >= 2);
         app.handle_event(&press(Key::N));
@@ -6530,7 +6495,7 @@ mod tests {
         );
 
         app.filter.regex = true;
-        app.filter.search_query = String::from("([");
+        app.filter.search.set_text("([");
         assert!(matches!(app.filter.pattern(), Some(Err(_))));
         assert!(
             draws(
@@ -6570,7 +6535,7 @@ mod tests {
             let at = cmds
                 .iter()
                 .position(|c| {
-                    matches!(c, RenderCommand::RichText { text, .. } if *text == app.filter.search_query)
+                    matches!(c, RenderCommand::RichText { text, .. } if *text == app.filter.search.text())
                 })
                 .expect("the query is not drawn in its box");
             match cmds.get(at + 1) {
@@ -6578,14 +6543,14 @@ mod tests {
                 other => panic!("no caret after the query: {other:?}"),
             }
         };
-        app.filter.search_query = String::from("error");
+        app.filter.search.set_text("error");
         let end = rect.x + 10.0 + text::measure("error", SMALL_TEXT, FontWeightHint::Regular);
         let caret = caret_after(&app);
         assert!(
             (caret - end).abs() < 0.5,
             "the caret is at {caret}, not after the query at {end}"
         );
-        app.filter.search_query = "w".repeat(200);
+        app.filter.search.set_text(&"w".repeat(200));
         let caret = caret_after(&app);
         assert!(
             caret > rect.x && caret < rect.right(),
@@ -6651,7 +6616,7 @@ mod tests {
         );
         app.handle_event(&press(Key::Left));
         type_text(&mut app, "h");
-        assert_eq!(app.filter.search_query, "dhcp", "the caret did not move");
+        assert_eq!(app.filter.search.text(), "dhcp", "the caret did not move");
         let hits = app.filtered_entries().len();
         assert!(hits > 0 && hits < all, "the edit did not search");
         assert_eq!(
@@ -6671,7 +6636,7 @@ mod tests {
 
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Delete));
-        assert_eq!(app.filter.search_query, "hcp", "Delete at the caret");
+        assert_eq!(app.filter.search.text(), "hcp", "Delete at the caret");
         app.handle_event(&press(Key::End));
         app.handle_event(&held(Key::Home, Modifiers::shift(), ""));
         let line = text::line_height(SMALL_TEXT, FontWeightHint::Regular);
@@ -6689,19 +6654,19 @@ mod tests {
         );
         app.handle_event(&ctrl(Key::C));
         type_text(&mut app, "d");
-        assert_eq!(app.filter.search_query, "d", "Shift+Home did not select");
+        assert_eq!(app.filter.search.text(), "d", "Shift+Home did not select");
         app.handle_event(&ctrl(Key::V));
-        assert_eq!(app.filter.search_query, "dhcp", "Ctrl+C or Ctrl+V");
+        assert_eq!(app.filter.search.text(), "dhcp", "Ctrl+C or Ctrl+V");
         app.handle_event(&ctrl(Key::A));
         app.handle_event(&ctrl(Key::X));
-        assert_eq!(app.filter.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.filter.search.text(), "", "Ctrl+A and Ctrl+X");
         assert_eq!(app.filtered_entries().len(), all, "the cut did not search");
         assert!(
             app.search_results.is_empty(),
             "the cut left the matches counted"
         );
         app.handle_event(&ctrl(Key::V));
-        assert_eq!(app.filter.search_query, "dhcp", "Ctrl+X took nothing");
+        assert_eq!(app.filter.search.text(), "dhcp", "Ctrl+X took nothing");
 
         // A press at the start of the text puts the caret there, and one
         // past its end at its end.
@@ -6709,12 +6674,13 @@ mod tests {
         press_at(&mut app, rect.x + SEARCH_TEXT_INSET + 0.5, mid);
         type_text(&mut app, "<");
         assert_eq!(
-            app.filter.search_query, "<dhcp",
+            app.filter.search.text(),
+            "<dhcp",
             "the press did not put the caret there"
         );
         press_at(&mut app, rect.right() - 2.0, mid);
         type_text(&mut app, ">");
-        assert_eq!(app.filter.search_query, "<dhcp>");
+        assert_eq!(app.filter.search.text(), "<dhcp>");
     }
 
     /// **A key that changes nothing in the box is not a redraw, and the
@@ -6765,7 +6731,8 @@ mod tests {
         app.handle_event(&press(Key::Slash));
         type_text(&mut app, "boot");
         assert_eq!(
-            app.filter.search_query, "boot",
+            app.filter.search.text(),
+            "boot",
             "/ did not select the search"
         );
     }
@@ -6777,7 +6744,7 @@ mod tests {
     #[test]
     fn the_box_edits_the_search_it_shows() {
         let mut app = App::with_sample();
-        app.filter.search_query = String::from("dhcp");
+        app.filter.search.set_text("dhcp");
         let rect = search_rect(&app);
         press_at(
             &mut app,
@@ -6787,13 +6754,15 @@ mod tests {
         assert!(app.search_focused);
         type_text(&mut app, "<");
         assert_eq!(
-            app.filter.search_query, "<dhcp",
+            app.filter.search.text(),
+            "<dhcp",
             "the press missed the shown text"
         );
-        app.filter.search_query = String::from("boot");
+        app.filter.search.set_text("boot");
         type_text(&mut app, "?");
         assert_eq!(
-            app.filter.search_query, "boot?",
+            app.filter.search.text(),
+            "boot?",
             "the key edited another search"
         );
     }

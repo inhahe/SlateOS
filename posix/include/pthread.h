@@ -66,6 +66,15 @@ int pthread_attr_setstackaddr(pthread_attr_t *, void *)
 int pthread_attr_setaffinity_np(pthread_attr_t *, size_t, const cpu_set_t *);
 int pthread_attr_getaffinity_np(const pthread_attr_t *, size_t, cpu_set_t *);
 
+/* The signal mask threads created with the attributes start with, instead
+ * of their creator's; pthread_attr_getsigmask_np answers
+ * PTHREAD_ATTR_NO_SIGMASK_NP for attributes that have none. */
+#define __NEED_sigset_t
+#include <bits/alltypes.h>
+#define PTHREAD_ATTR_NO_SIGMASK_NP (-1)
+int pthread_attr_setsigmask_np(pthread_attr_t *, const sigset_t *);
+int pthread_attr_getsigmask_np(const pthread_attr_t *, sigset_t *);
+
 /* pthread_timedjoin_np against CLOCK_REALTIME or CLOCK_MONOTONIC. */
 int pthread_clockjoin_np(pthread_t, void **, clockid_t, const struct timespec *);
 

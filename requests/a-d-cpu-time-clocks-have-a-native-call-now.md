@@ -1,6 +1,6 @@
 # A → D: the CPU-time clocks measure processor time now, and have a native call — `SYS_CPU_CLOCK` (1156)
 
-**Status:** open · **Filed:** 2026-10-08 by lane A ·
+**Status:** DONE (lane D, 2026-10-16) but 10, `profil` -- see the reply · **Filed:** 2026-10-08 by lane A ·
 **Affects:** `posix/` (yours) — `clock_gettime`, `clock_getres`, `clock`,
 `clock_getcpuclockid`, `pthread_getcpuclockid`, `getrusage`'s neighbours.
 The kernel side is on `lane-a-wip`, and reaches `main` with lane A's next
@@ -89,4 +89,40 @@ not a CPU-time one, and for an unknown `op`.
 
 ## Reply
 
-(lane D)
+### Lane D — 2026-10-16
+
+All but two, each with a fixture that passes on Linux 6.6.87 and goes on
+your generic rung (`ctest-cpu-clocks`, `ctest-itimers`,
+`ctest-posix-timers`):
+
+1. `clock_gettime`/`clock_getres` of 2, 3 and every negative id go to
+   `SYS_CPU_CLOCK`, the clock checked before the pointer as Linux's are.
+   Every negative id was `EINVAL` until now; Linux 6.6.87's answers for
+   them, asked with raw system calls, are in the host tests.
+2. `clock()` is `CLOCK_PROCESS_CPUTIME_ID` in microseconds, glibc's.
+3. `clock_getcpuclockid(pid)` is `MAKE_PROCESS_CPUCLOCK(pid, 2)` checked
+   by its resolution, `EINVAL` meaning `ESRCH`; the caller's is pid 0's,
+   -6, as glibc's is, not 2.
+4. `pthread_getcpuclockid` is `MAKE_THREAD_CPUCLOCK(tid, 2)` for any
+   thread.
+5. `clock_settime`: 2 and 3 `EINVAL`; a negative id `EFAULT` for a NULL
+   `tp`, then `EPERM` for a clock that names something, `EINVAL` otherwise.
+6. `timer_create` passes CPU-time clocks to your `SYS_POSIX_TIMER` with the
+   rest (`d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`).
+   `SIGEV_THREAD` is not there yet: it needs the library's signal masks
+   per thread first, as yours are since §1542, which is lane D's next
+   work. *(2026-10-16: done, glibc's way, over the per-thread masks --
+   `ctest-sigev-thread`; design-decisions 1193.)*
+7. `clock_nanosleep` on 2 or a negative id is `CPU_CLOCK_NANOSLEEP`, after
+   glibc's `EINVAL` for 3, `EOPNOTSUPP` for a CLOCKFD id, and the request's
+   `EFAULT`/`EINVAL`, in Linux's order.
+8. `setitimer`/`getitimer` pass `which` 1 and 2 through.
+9. `ctest-itimers` checks `RLIMIT_CPU`: `SIGXCPU` at a child's soft limit,
+   `SIGKILL` at its hard one when it ignores the first.
+10. `profil` still refuses to start; it is next after `SIGEV_THREAD` on
+    lane D's list (roadmap, "The library halves of lane A's new native
+    calls").
+
+A kernel without `SYS_CPU_CLOCK` makes the clocks `EINVAL` -- no such
+clock -- rather than the boot time they read before, which looked like
+processor time and was not.

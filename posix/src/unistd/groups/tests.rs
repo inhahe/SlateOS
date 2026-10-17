@@ -307,3 +307,90 @@ fn the_hosts_list_is_empty() {
     assert!(!in_supplementary_groups(super::super::getegid()));
     assert_eq!(super::super::getgroups(0, core::ptr::null_mut()), 0);
 }
+
+/// A stand-in for `SYS_PROCESS_GETGROUPS` over `lists`: the list as it
+/// stands at each step -- asking its length is a step, and the read after
+/// it sees the next list, so a list that grew in between is too long for
+/// the buffer and answers `InvalidArgument`, as the kernel's does.
+fn kernel(lists: Vec<Vec<GidT>>) -> impl FnMut(usize, *mut GidT) -> i64 {
+    let last = lists.len() - 1;
+    let mut queries = 0usize;
+    move |count, list| {
+        if count == 0 {
+            let len = lists[queries.min(last)].len();
+            queries += 1;
+            return i64::try_from(len).unwrap();
+        }
+        // The list as it is by the read: the next one.
+        let now = &lists[queries.min(last)];
+        if count < now.len() {
+            return errno::native::INVALID_ARGUMENT;
+        }
+        // SAFETY: the caller's buffer holds `count >= now.len()` gids.
+        unsafe { core::ptr::copy_nonoverlapping(now.as_ptr(), list, now.len()) };
+        i64::try_from(now.len()).unwrap()
+    }
+}
+
+/// The kernel's list reaches the sink as the kernel holds it -- a short
+/// one on the stack, a long one through the heap -- and an empty one is
+/// empty, not unreadable.
+#[test]
+fn the_kernels_list_is_read_whole() {
+    for list in [vec![], vec![27, 4, 100], (0..1000).collect::<Vec<GidT>>()] {
+        let mut got = Got::default();
+        assert_eq!(
+            groups_from_call(kernel(vec![list.clone()]), &mut got),
+            Some(Ok(()))
+        );
+        assert_eq!(got.0, list);
+    }
+}
+
+/// A list that grew between asking its length and reading it is asked for
+/// again; one that never stops growing is `EIO`.
+#[test]
+fn a_list_that_grew_is_asked_for_again() {
+    let mut got = Got::default();
+    let lists = vec![vec![1, 2], vec![1, 2, 3], vec![1, 2, 3]];
+    assert_eq!(groups_from_call(kernel(lists), &mut got), Some(Ok(())));
+    assert_eq!(got.0, [1, 2, 3]);
+
+    let mut n = 0usize;
+    let growing = |count: usize, _list: *mut GidT| {
+        if count == 0 {
+            n += 1;
+            i64::try_from(n).unwrap()
+        } else {
+            errno::native::INVALID_ARGUMENT
+        }
+    };
+    assert_eq!(
+        groups_from_call(growing, &mut Got::default()),
+        Some(Err(errno::EIO))
+    );
+}
+
+/// A kernel without the call is `None`, for `/proc/self/status` to answer;
+/// any other failure is `EIO`.
+#[test]
+fn without_the_call_the_status_file_answers() {
+    let lacking = |_: usize, _: *mut GidT| errno::native::NO_SUCH_SYSCALL;
+    assert_eq!(groups_from_call(lacking, &mut Got::default()), None);
+    let broken = |count: usize, _: *mut GidT| {
+        if count == 0 {
+            2
+        } else {
+            errno::native::IO_ERROR
+        }
+    };
+    assert_eq!(
+        groups_from_call(broken, &mut Got::default()),
+        Some(Err(errno::EIO))
+    );
+    let refused = |_: usize, _: *mut GidT| errno::native::PERMISSION_DENIED;
+    assert_eq!(
+        groups_from_call(refused, &mut Got::default()),
+        Some(Err(errno::EIO))
+    );
+}

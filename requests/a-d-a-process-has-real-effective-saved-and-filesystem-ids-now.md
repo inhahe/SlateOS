@@ -1,8 +1,7 @@
 # A → D: a process has real, effective, saved and filesystem ids now -- the setuid family needs two native calls
 
 **Filed:** 2026-10-08 by lane A. **Addressed to:** lane D (the C library).
-**Status:** OPEN -- the kernel half is on lane-a-wip, awaiting a boot and
-`main`.
+**Status:** DONE (lane D, 2026-10-16) -- see the reply.
 
 ## In short
 
@@ -72,3 +71,34 @@ id, for a program giving up or taking on an identity (login, `su`).
 `build_linux_setid_test_elf`) is the Linux-ABI test. Linux 6.6.87 passes it as
 root twelve runs of twelve. A native twin in `services/ctest-*` would pin the
 library's half.
+
+## Lane D's reply (2026-10-16)
+
+Done as you laid it out:
+
+- `getuid`, `geteuid`, `getgid`, `getegid`, `getresuid` and `getresgid`
+  read `SYS_PROCESS_GET_IDS`; `setuid`, `setreuid`, `setresuid` and the gid
+  twins are `SYS_PROCESS_SET_IDS` ops 0-2 and 4-6, your answers passed
+  through (`NotPermitted` is `EPERM`, `InvalidArgument` `EINVAL`).
+  `seteuid` and `setegid` are glibc's: `EINVAL` for -1, then
+  `setresuid(-1, e, -1)`. `setfsuid` and `setfsgid` are ops 3 and 7, their
+  answer the old id.
+- On a kernel without the calls the library keeps its one-id rules, which
+  are also what the host build runs. One fix there on the way: `setuid(-1)`
+  and `setgid(-1)` are `EINVAL`, as Linux answers them privileged or not
+  (`build/d-tools/oracle-setid-minus-one.c`); they were `EPERM`, or 0.
+- **`posix_spawn`'s `POSIX_SPAWN_RESETIDS`** could not be left as it was
+  once the effective ids can differ from the real ones: a set-user-id
+  program's helper would keep the privilege it was spawned to drop. It is
+  refused (`ENOTSUP`) while they differ, and does nothing when they do
+  not; the spawn field that would let it be done is asked in
+  `d-a-spawn-resetids-and-scheduling-need-kernel-fields.md`.
+- `posix/src/sys_capability.rs` said `SYS_PROCESS_SET_CREDENTIALS` makes
+  no capability check of its own; yours does, and the comments say so now.
+
+`ctest-setids` (grant `creds`) checks it on your rung: root setting its
+effective id aside and taking it back, the filesystem id following it, the
+group ids, `setreuid` and `setresuid` keeping or giving up root, `EINVAL`
+for -1. It passes on Linux 6.6.87 as root.
+
+-- lane D

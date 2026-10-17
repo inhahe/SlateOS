@@ -753,18 +753,18 @@ pub mod kernel_view {
         // Changing your own uid/gid is what CAP_SETUID/CAP_SETGID gate, and
         // SET_CREDENTIALS is the kernel's name for permission to do so.
         //
-        // Both caps from one predicate is deliberate: the credential model is
-        // flat — one real uid, one real gid, and `SYS_PROCESS_SET_CREDENTIALS`
-        // writes both in a single call — so there is no state in which a
-        // process may set one and not the other. Splitting the predicate would
-        // claim a distinction the kernel cannot enforce; if they ever do
-        // diverge, split the *right* instead.
+        // Both caps from one predicate is deliberate: one right is what the
+        // kernel asks for both, in `SYS_PROCESS_SET_CREDENTIALS` and
+        // `SYS_PROCESS_SET_IDS` alike, so there is no state in which a
+        // process may set its user ids and not its group ids. Splitting the
+        // predicate would claim a distinction the kernel cannot enforce; if
+        // they ever do diverge, split the *right* instead.
         //
         // Unlike SIGNAL and DEBUG above, this predicate is *not* qualified by
         // `resource_id`, and the reason is the object it names rather than the
         // absence of an auto-grant. CAP_SETUID is authority over the *caller* —
-        // `SYS_PROCESS_SET_CREDENTIALS` rewrites the calling process's own uid
-        // and gid — so a grant naming a specific pid, if one is ever written,
+        // both calls rewrite the calling process's own ids — so a grant naming
+        // a specific pid, if one is ever written,
         // will be naming the holder itself and will be the entire authority.
         // Requiring id 0 there would refuse the grant it was written for. (No
         // spawn or fork path confers SET_CREDENTIALS today, so the two readings
@@ -1339,13 +1339,12 @@ mod projection_tests {
 
     #[test]
     fn test_set_credentials_is_not_reachable_from_any_other_right() {
-        // This is the one projected right that gates a *libc-side* check with
-        // no kernel fallback: `SYS_PROCESS_SET_CREDENTIALS` performs no
-        // capability test of its own (handlers.rs — "the cap/identity
-        // permission check is performed by the userspace posix wrappers"), so
-        // a predicate that fired too easily would not merely mis-report, it
-        // would hand out uid 0.  Every other Process right must leave it
-        // clear, and METADATA especially: choosing a dedicated bit over
+        // On a kernel without `SYS_PROCESS_SET_IDS` this projected right is
+        // the library's own gate for moving between ids
+        // (`unistd::set_ids_without_call`), so a predicate that fired too
+        // easily would let the library rewrite ids the caller may not take.
+        // Every other Process right must leave it clear, and METADATA
+        // especially: choosing a dedicated bit over
         // METADATA is the whole of design-decisions.md §207, and this is the
         // test that would fail if someone later "simplified" it back.
         for r in [

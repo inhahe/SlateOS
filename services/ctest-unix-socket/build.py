@@ -16,7 +16,8 @@ the kernel's Unix-domain sockets. Its host tests check the library's own
 arithmetic; this checks the library and the kernel together: a stream server
 and a client in two processes with the peer's credentials, datagrams by
 abstract name with their senders and their whole lengths, SCM_CREDENTIALS, a
-sequenced-packet pair under poll, autobind, and SO_RCVTIMEO. The legend of
+sequenced-packet pair under poll, autobind, SO_RCVTIMEO, and what FIONREAD
+counts at each kind of socket and refuses at a listener. The legend of
 exit codes is at the top of `main.c`; 42 is every check.
 
 The same source compiles and passes on Linux (gcc main.c && ./a.out), which

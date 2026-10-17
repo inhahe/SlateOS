@@ -2,12 +2,13 @@
 //!
 //! The kernel keeps a list of supplementary groups for each process.
 //! [`setgroups`](super::setgroups) and `initgroups` install it through
-//! `SYS_PROCESS_SETGROUPS`, and the kernel's file access gate consults it
-//! (`check_path_access`, `kernel/src/fs/vfs.rs`). But the native ABI has no
-//! call that reports it, as it has none that reports the hostname: its one
-//! read path is `/proc/self/status`, whose `Groups:` line lists it.
+//! `SYS_PROCESS_SETGROUPS`, the kernel's file access gate consults it
+//! (`check_path_access`, `kernel/src/fs/vfs.rs`), and `SYS_PROCESS_GETGROUPS`
+//! reports it, needing no capability ([`groups_from_call`]).
 //!
-//! **The last `Groups:` line is the kernel's.** The file's first line is
+//! A kernel without that call -- before lane A's of 2026-10-07 -- reports
+//! the list only in `/proc/self/status`, whose `Groups:` line lists it, and
+//! that is read instead. **The last `Groups:` line is the kernel's.** The file's first line is
 //! `Name:` and the task's name, written raw, and a name may hold a newline:
 //! a program run as `x\nGroups:\t0 27` has a `Groups:` line of its own
 //! choosing ahead of the real one. Nothing a process controls follows the
@@ -16,12 +17,10 @@
 //! `requests/d-a-proc-status-writes-the-name-raw-so-a-newline-in-it-forges-lines.md`.)
 //!
 //! A list that cannot be read is `EIO`, never an empty list: "no groups" is
-//! a claim about the process, and nobody asked the kernel. Opening any file
-//! takes a File capability, so a confined process that holds none cannot
-//! read it, nor can one in a `chroot` without `/proc`; a native call would
-//! need neither (`known-issues/D-POSIX-GETGROUPS-NEEDS-A-FILE-CAPABILITY.md`,
-//! `requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md`).
-//! A file with no well-formed `Groups:` line last is `EIO` too.
+//! a claim about the process, and nobody asked the kernel. On a kernel
+//! without the call that is a confined process holding no File capability,
+//! or one in a `chroot` without `/proc`, or a file with no well-formed
+//! `Groups:` line last.
 //!
 //! The host build has no kernel and no `/proc`, and nothing can install a
 //! group there ([`setgroups`](super::setgroups) answers `ENOSYS` once its
@@ -188,11 +187,90 @@ fn read_status(
     }
 }
 
-/// Feed the kernel's list of this process's supplementary groups to `sink`.
-/// `Err(EIO)` when it cannot be read; the caller's `errno` is kept either
-/// way.
+/// Feed `call`'s list of supplementary groups to `sink` -- `call` being
+/// `SYS_PROCESS_GETGROUPS(count, list)` or a stand-in for it -- or `None`
+/// for a kernel without the call. `Err(EIO)` when the list cannot be read:
+/// the call fails otherwise, there is no memory for a long list, or the list
+/// keeps growing between asking its length and reading it.
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+fn groups_from_call(
+    mut call: impl FnMut(usize, *mut GidT) -> i64,
+    sink: &mut dyn GroupSink,
+) -> Option<Result<(), i32>> {
+    // How many times a list that grew between asking its length and reading
+    // it -- another thread having called `setgroups` meanwhile -- is asked
+    // for again.
+    const GROWN_RETRIES: usize = 8;
+    // How many groups are read on the stack; a longer list goes to the heap.
+    const ON_STACK: usize = 64;
+    for _ in 0..GROWN_RETRIES {
+        let asked = call(0, core::ptr::null_mut());
+        if crate::syscall::lacks_call(asked) {
+            return None;
+        }
+        let Ok(n) = usize::try_from(asked) else {
+            return Some(Err(errno::EIO));
+        };
+        let mut stack: [GidT; ON_STACK] = [0; ON_STACK];
+        let heap = if n > ON_STACK {
+            let Some(bytes) = n.checked_mul(core::mem::size_of::<GidT>()) else {
+                return Some(Err(errno::EIO));
+            };
+            let p = crate::malloc::malloc(bytes).cast::<GidT>();
+            if p.is_null() {
+                return Some(Err(errno::EIO));
+            }
+            p
+        } else {
+            core::ptr::null_mut()
+        };
+        let list = if heap.is_null() {
+            stack.as_mut_ptr()
+        } else {
+            heap
+        };
+        let got = if n == 0 { 0 } else { call(n, list) };
+        let answer = match usize::try_from(got) {
+            Ok(m) if m <= n => {
+                sink.restart();
+                // SAFETY: `list` holds `n >= m` gids, the first `m` written
+                // by the call.
+                for &gid in unsafe { core::slice::from_raw_parts(list, m) } {
+                    sink.gid(gid);
+                }
+                Some(Ok(()))
+            }
+            // It grew: ask again.
+            _ if got == errno::native::INVALID_ARGUMENT => None,
+            _ => Some(Err(errno::EIO)),
+        };
+        if !heap.is_null() {
+            // SAFETY: `heap` came from `malloc` above and is freed once.
+            unsafe { crate::malloc::free(heap.cast()) };
+        }
+        if let Some(answer) = answer {
+            return Some(answer);
+        }
+    }
+    Some(Err(errno::EIO))
+}
+
+/// Feed the kernel's list of this process's supplementary groups to `sink`:
+/// from `SYS_PROCESS_GETGROUPS`, or on a kernel without it from
+/// `/proc/self/status`. `Err(EIO)` when it cannot be read; the caller's
+/// `errno` is kept either way.
 #[cfg(target_os = "none")]
 pub(crate) fn supplementary_groups(sink: &mut dyn GroupSink) -> Result<(), i32> {
+    let call = |count: usize, list: *mut GidT| {
+        crate::syscall::syscall2(
+            crate::syscall::SYS_PROCESS_GETGROUPS,
+            count as u64,
+            list as u64,
+        )
+    };
+    if let Some(answer) = groups_from_call(call, sink) {
+        return answer;
+    }
     let saved = errno::get_errno();
     let fd = crate::file::open(
         b"/proc/self/status\0".as_ptr(),

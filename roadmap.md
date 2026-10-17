@@ -2854,13 +2854,29 @@ D's to act on once answered).
   readiness; `requests/e-ad-no-application-can-reach-the-sound-device.md`,
   its two gaps asked in `requests/d-a-the-device-door-s-two-gaps.md`).
   **Closes** as each fixture passes in a lane D boot on lane A's kernel.
-  **Next:** lane A's calls of 2026-10-07 on `lane-a-wip` -- `SYS_MEMORY_LOCK`
-  (1145; `mlock` and kin pass straight through, closing D-Q8),
-  `SYS_PROCESS_GETGROUPS` (1143), `SYS_MMAP_FILE` (1144), the null-buffer
-  shortcuts in `posix/src/file.rs` that lane A's `cc3806b84` makes
-  unnecessary, and the PI-futex fast path (`a6e37445d`) -- then
-  `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential service, and the
-  deferred filesystem operations (1126-1128) if a C caller needs them.
+  **Done 2026-10-16:** `SYS_MEMORY_LOCK` (1145, closing D-Q8), the power
+  calls (1167/1168/1139), the six `posix_spawn` attribute fields, the
+  CPU-time clocks (`SYS_CPU_CLOCK`, 1156), `ITIMER_VIRTUAL`/`ITIMER_PROF`,
+  POSIX timers (`SYS_POSIX_TIMER`, 1141), the dumpable flag
+  (`SYS_PROCESS_DUMPABLE`, 1142), "now" as the set-times calls' request;
+  each thread's own signal mask (§1542), with the attribute's
+  (`pthread_attr_setsigmask_np`); `SIGEV_THREAD` timers, glibc's way, with
+  `SIGRTMIN` 34 and signals 32 and 33 the library's (design-decisions
+  1193) -- with `ctest-cpu-clocks`, `ctest-itimers`, `ctest-posix-timers`,
+  `ctest-dumpable`, `ctest-thread-masks`, `ctest-sigev-thread`; named
+  pipes (`SYS_FS_MKFIFO`/`SYS_FIFO_OPEN`, 1157/1158), with the socket and
+  FIFO entry types -- `ctest-fifo`; the set-id calls (1159/1160), with
+  `posix_spawn`'s `RESETIDS` refused while it would change an id --
+  `ctest-setids`, `ctest-spawn-attrs`; getgroups (1143); `swapon`/`swapoff` (1175/1176) --
+  `ctest-swap`; descriptor passing (1169/1170) -- `ctest-scm-rights`; Unix
+  sockets crossing spawn and exec, and a stream `socketpair` made of them;
+  the namespace calls (1161-1163, 1165, 1166) -- `ctest-uts-namespace`.
+  **Next**, in this order: `SYS_THREAD_SCHEDULER` (1146);
+  `SYS_MMAP_FILE` (1144); `profil` over `ITIMER_PROF`; the null-buffer
+  shortcuts `cc3806b84` makes unnecessary; the PI-futex fast path
+  (`a6e37445d`); `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential
+  service; and the deferred filesystem operations (1126-1128) if a C caller
+  needs them.
 
 - `[D]` Enough of POSIX libc for gcc/coreutils/bash/CPython (line ~2151).
   **CPython half measured and closed 2026-08-16:** CPython 3.12.3 links against

@@ -46,9 +46,9 @@ fn bsd_set(mask: i32) -> SigsetT {
     set
 }
 
-/// The BSD mask of a signal set: its signals 1 to 32. Signal 32 is
-/// `SIGRTMIN` here; glibc's keeps 32 and 33 for its threads and leaves bit
-/// 31 clear.
+/// The BSD mask of a signal set: its signals 1 to 32. Signal 32 is the
+/// library's own, as glibc's, so bit 31 is never set: `sigprocmask` leaves
+/// it out.
 fn bsd_mask(set: &SigsetT) -> i32 {
     ((set.bits[0] & 0xFFFF_FFFF) as u32).cast_signed()
 }
@@ -721,8 +721,8 @@ mod tests {
             );
         });
         with_mask(|| {
-            // Every signal but KILL and STOP -- and 32, SIGRTMIN here, where
-            // glibc keeps 32 for its threads: bit 31 is the one difference.
+            // Every signal but KILL and STOP, and 32, the library's own, as
+            // glibc's.
             sigblock(!0);
             let glibc = u32::from_str_radix(
                 oracle("sigblock-all")
@@ -733,7 +733,7 @@ mod tests {
                 16,
             )
             .unwrap();
-            assert_eq!(siggetmask().cast_unsigned(), glibc | 1 << 31);
+            assert_eq!(siggetmask().cast_unsigned(), glibc);
         });
         with_mask(|| {
             // sigsetmask replaces the whole mask: a real-time signal past 32

@@ -215,10 +215,11 @@ pub(crate) fn link_target_of_kind(entry: &FdEntry, out: &mut [u8]) -> Option<usi
     Some(match entry.kind {
         HandleKind::File | HandleKind::DevicePcm | HandleKind::DeviceControl => return None,
         HandleKind::Pipe => put_tagged(out, b"pipe:[", entry.handle, b"]"),
+        // `uts:[4026531838]`, as Linux names a namespace's file.
+        HandleKind::Namespace => return crate::nsfs::link_text(entry.handle, out),
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket => put_tagged(out, b"socket:[", entry.handle, b"]"),
         HandleKind::Console => put(out, b"/dev/console"),
         HandleKind::PtyMaster => put(out, b"/dev/ptmx"),
@@ -581,10 +582,20 @@ pub(crate) fn readlink(resolved: &[u8], out: &mut [u8]) -> Option<isize> {
         ),
         FdName::Fd(n) => match crate::fdtable::get_fd(n) {
             None => return Some(fail(errno::ENOENT) as isize),
-            Some(e) => match link_target_of_kind(&e, out) {
-                Some(len) => len,
-                None => crate::fdtable::get_fd_path(n, out),
-            },
+            Some(e) => {
+                let mut path = [0u8; crate::unistd::PATH_MAX];
+                let named = crate::fdtable::get_fd_path(n, &mut path);
+                if e.kind == HandleKind::Pipe && named > 0 {
+                    // A named pipe's descriptor names its node, as Linux's
+                    // does; an anonymous one is `pipe:[N]`.
+                    put(out, path.get(..named).unwrap_or_default())
+                } else {
+                    match link_target_of_kind(&e, out) {
+                        Some(len) => len,
+                        None => crate::fdtable::get_fd_path(n, out),
+                    }
+                }
+            }
         },
         FdName::Dir => return Some(fail(errno::EINVAL) as isize),
         FdName::Missing => return Some(fail(errno::ENOENT) as isize),
@@ -897,6 +908,23 @@ mod tests {
         let before = open_count();
         assert_eq!(open_errno(&link, O_RDWR), (-1, errno::ENOENT));
         assert_eq!(open_count(), before);
+        crate::fdtable::clear_fd_path(fd);
+        assert!(crate::fdtable::close_fd(fd).is_some());
+    }
+
+    /// A named pipe's descriptor links to its node, as Linux's does, cut
+    /// short as any link is; `stat` through it is the bare FIFO where the
+    /// node cannot be read, as on the host.
+    #[test]
+    fn a_named_pipes_link_is_its_node() {
+        let node = b"/tmp/jobs.fifo";
+        let fd = crate::fdtable::alloc_fd_with_flags(HandleKind::Pipe, 0x5150, O_RDONLY).unwrap();
+        crate::fdtable::store_fd_path(fd, node.as_ptr(), node.len());
+        let link = std::format!("/dev/fd/{fd}");
+        assert_eq!(readlink_of(&link, 64).unwrap(), node);
+        assert_eq!(readlink_of(&link, 4).unwrap(), b"/tmp");
+        let st = stat_of(&link, true).unwrap();
+        assert_eq!(st.st_mode, crate::fcntl::S_IFIFO);
         crate::fdtable::clear_fd_path(fd);
         assert!(crate::fdtable::close_fd(fd).is_some());
     }

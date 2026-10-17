@@ -55134,7 +55134,8 @@ cleared -- so the risk is a future edit, not the present state.
 ## Where: gui/font/tools/gen_use_probe.py (new), harfbuzz_sweep.py --fonts.
 
 ## ---------------------------------------------------------------------------
-## [B] 2026-08-16 -- pthread_kill delivers process-directed, not thread-directed
+## [B] 2026-08-16 -- pthread_kill delivers process-directed, not thread-directed -- DONE 2026-10-16
+## (lane D: step 2, SYS_SIGNAL_TGKILL, since round 201; step 3, each thread's own mask, in round 204)
 ## ---------------------------------------------------------------------------
 ## posix/src/pthread.rs::pthread_kill validates the target thread and the signal
 ## number exactly as Linux does, but the delivery it performs for a *peer* thread

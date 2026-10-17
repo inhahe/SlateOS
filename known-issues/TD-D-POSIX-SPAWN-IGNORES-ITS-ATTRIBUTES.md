@@ -3,8 +3,11 @@
 **Status:** OPEN — three of seven attributes left. `POSIX_SPAWN_SETPGROUP`,
 `SETSIGMASK`, `SETSIGDEF` and `SETSID` are applied since 2026-10-16, through
 lane A's `SpawnEx2Args` fields (`requests/d-a-ignored-signals-and-spawn-attributes-need-a-kernel-record.md`).
-`RESETIDS`, `SETSCHEDPARAM` and `SETSCHEDULER` are still recorded and not
-applied.
+`RESETIDS` is refused (`ENOTSUP`) while the caller's effective ids are not
+its real ones, since the library took up lane A's separate ids the same
+day, and does nothing when they are; `SETSCHEDPARAM` and `SETSCHEDULER` are
+still recorded and not applied. The kernel fields for all three are asked
+in `requests/d-a-spawn-resetids-and-scheduling-need-kernel-fields.md`.
 
 **In short:** a program can ask `posix_spawn` to start its child with its
 effective user and group reset to its real ones, or with a scheduling policy
@@ -26,13 +29,11 @@ would be to refuse); one that spawns a real-time worker with
 `SETSCHEDULER`, as `rtkit`-style tools do (the child runs at the parent's
 policy).
 
-Today the library reports a process's effective ids as its real ones
-(`posix/src/unistd.rs`, `geteuid`), not having taken up lane A's separate
-ids (`SYS_PROCESS_GET_IDS`, 1160), so as far as it can see `RESETIDS` has
-nothing to reset. **Taking up 1160 must settle `RESETIDS` in the same
-change** -- apply it, or refuse a spawn that asks for it while the ids
-differ -- or a set-user-id program's helper will silently keep the
-privilege it was meant to drop.
+Since the library reads lane A's separate ids (`SYS_PROCESS_GET_IDS`,
+1160, 2026-10-16), a spawn that asks `RESETIDS` while the effective ids
+differ from the real ones is refused (`spawn::resetids_refused`), so a
+set-user-id program's helper never silently keeps the privilege it was
+meant to drop; the program sees `ENOTSUP` instead of a child.
 
 **Proper fix:** `RESETIDS` is "effective ids := real ids" before the first
 instruction, which needs either a `SpawnEx2Args` field or the child's own

@@ -1,6 +1,6 @@
 ## D-POSIX-GETGROUPS-NEEDS-A-FILE-CAPABILITY — `getgroups` fails with `EIO` in a process that holds no File capability, or has no `/proc` (lane D, 2026-10-06)
 
-**Status:** OPEN -- waiting on lane A (`requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md`).
+**Status:** OPEN -- fixed on lane D's branch 2026-10-16 (`SYS_PROCESS_GETGROUPS`, 1143, which lane A added 2026-10-07), awaiting a boot on main; `ctest-setids` checks it with no File capability.
 
 **In short:** `getgroups` reports a process's supplementary groups (the
 extra groups it belongs to). The kernel has no call that reports them, so

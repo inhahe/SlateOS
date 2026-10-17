@@ -6,11 +6,11 @@
 //! effective UID).  Their original purpose was NFS daemons that needed
 //! to act on behalf of remote users without losing root privileges.
 //!
-//! Modern code generally uses `seteuid()`/`setegid()` instead; setfsuid
-//! survives chiefly for ABI compatibility.  We track the current
-//! filesystem credential in a process-global pair of atomics, default
-//! 0 (matching `getuid()`/`getgid()`).  POSIX semantics: each call
-//! returns the *previous* fsuid/fsgid value.
+//! The kernel keeps the filesystem ids with the others since lane A's
+//! design-decisions 1552, and these ask it (`SYS_PROCESS_SET_IDS`). On a
+//! kernel without the call -- the host's stand-in among them -- the library
+//! keeps them itself, in the pair of atomics below, by Linux's rules; each
+//! call returns the *previous* id either way.
 
 use crate::perprocess::process_global;
 use crate::types::GidT;
@@ -18,17 +18,10 @@ use crate::types::UidT;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
-// Per-process filesystem credentials
+// The library's own filesystem ids, for a kernel without SYS_PROCESS_SET_IDS
 // ---------------------------------------------------------------------------
 //
-// The credentials are process-global atomics rather than per-thread.
-// Linux's setfsuid is per-thread, but our thread model does not yet
-// expose per-thread credentials; using a process-wide value matches
-// `getuid()` (which currently always returns 0) and is a safe
-// approximation.  When per-thread credentials land, switch to
-// `current_thread_creds()` lookups here.
-//
-// The values stay `AtomicU32` — `process_global!` only changes *where*
+// The values stay `AtomicU32` -- `process_global!` only changes *where*
 // they live, so the target build keeps exactly the atomics it had.
 
 process_global! {
@@ -44,19 +37,15 @@ process_global! {
 // is thread-local, so a `'static` borrow of it would be a lie that
 // outlives the thread.  The atomic itself makes concurrent access sound.
 
-/// Get the current process-wide filesystem UID.
-///
-/// Helper for the filesystem layer to consult when checking access
-/// permissions.  Not a POSIX/Linux API — internal to posix.
+/// The library's own filesystem uid, which stands for the kernel's on a
+/// kernel without `SYS_PROCESS_SET_IDS` (`crate::unistd::ids`).
 #[must_use]
 pub fn current_fsuid() -> UidT {
     // SAFETY: this process's own storage, borrowed only for this call.
     unsafe { (*fsuid_cell()).load(Ordering::Relaxed) }
 }
 
-/// Get the current process-wide filesystem GID.
-///
-/// See [`current_fsuid`].
+/// The library's own filesystem gid: see [`current_fsuid`].
 #[must_use]
 pub fn current_fsgid() -> GidT {
     // SAFETY: as above.
@@ -80,60 +69,53 @@ pub const INVALID_UID: UidT = UidT::MAX;
 /// The "invalid GID" sentinel — see [`INVALID_UID`].
 pub const INVALID_GID: GidT = GidT::MAX;
 
-/// Set filesystem UID.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setfsuid`)
-///
-/// ```text
-/// SYSCALL_DEFINE1(setfsuid, uid_t, uid) {
-///     old_fsuid = current->fsuid;
-///     kuid = make_kuid(ns, uid);
-///     if (uid_valid(kuid) && (uid == ruid || uid == euid ||
-///                              uid == suid || uid == fsuid ||
-///                              ns_capable_setid(CAP_SETUID))) {
-///         current->fsuid = kuid;
-///     }
-///     return old_fsuid;          // always, even when the assignment was skipped
-/// }
-/// ```
-///
-/// Four observable behaviours follow:
-///
-/// 1. `setfsuid((uid_t)-1)` (i.e. `u32::MAX`) is the conventional
-///    "invalid UID" sentinel — `uid_valid(kuid)` is false, so the
-///    assignment is silently skipped.  The previous fsuid is still
-///    returned; the stored value does *not* become `u32::MAX`.
-/// 2. The function *never* sets errno on a well-formed call.  Even
-///    "not permitted" cases return the previous value rather than
-///    `-1` — `setfsuid` predates POSIX `setuid` and chose this
-///    quirky interface because NFS daemons need to discover the
-///    previous value to put it back.
-/// 3. The return value is the *previous* fsuid, not the new one.
-/// 4. **Phase 198**: when the caller does not hold CAP_SETUID and
-///    the requested uid does not match one of {ruid, euid, suid,
-///    fsuid}, the assignment is silently skipped.  No errno set;
-///    the old fsuid is still returned.  Probing with `(uid_t)-1`
-///    remains the canonical "read without changing" idiom.
-///
-/// Since our credential model exposes only `getuid()`/`geteuid()`
-/// (both 0) and the tracked fsuid, the cred-match set we compare
-/// against is `{getuid(), geteuid(), prev_fsuid}` — the saved uid
-/// (suid) is folded into the real uid (Linux at process start sets
-/// suid == euid == ruid).
-///
-/// # Safety
-///
-/// Changes process-wide filesystem identity; subsequent file
-/// permission checks will use the new value.
+/// Set the filesystem uid -- the one file access goes by, which follows the
+/// effective uid unless set apart -- by Linux's rules (`kernel/sys.c`'s
+/// `setfsuid`), which the kernel applies: privileged, any id; otherwise one
+/// of the real, effective, saved or filesystem ids, and any other is
+/// silently left as it was. -1 changes nothing, the way to read the id.
+/// Never fails and never sets errno: the answer is the *previous* id, which
+/// an NFS-style daemon puts back afterwards.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
+    match crate::unistd::set_ids(crate::syscall::SET_IDS_FSUID, [fsuid, UidT::MAX, UidT::MAX]) {
+        Some(answer) => previous_id(answer),
+        None => setfsuid_without_ids(fsuid),
+    }
+}
+
+/// Set the filesystem gid: [`setfsuid`]'s rules for the group ids.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
+    match crate::unistd::set_ids(
+        crate::syscall::SET_IDS_FSUID + crate::syscall::SET_IDS_GROUP,
+        [fsgid, GidT::MAX, GidT::MAX],
+    ) {
+        Some(answer) => previous_id(answer),
+        None => setfsgid_without_ids(fsgid),
+    }
+}
+
+/// `setfsuid`'s answer from the kernel's: the previous id, as Linux's `int`
+/// -- an id above `INT_MAX` reads negative there too. The call never fails;
+/// if it ever did, -1, which no id is.
+fn previous_id(answer: Result<i64, i32>) -> i32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
+    answer.map_or(-1, |old| old as u32 as i32)
+}
+
+/// [`setfsuid`] on a kernel without `SYS_PROCESS_SET_IDS`: the library's own
+/// id, moved by Linux's rule -- to the real, effective or filesystem uid, or
+/// anywhere with `CAP_SETUID` (the one-id model's saved uid is its real
+/// one) -- and the previous one answered.
+fn setfsuid_without_ids(fsuid: UidT) -> i32 {
     // SAFETY: this process's own storage, borrowed only for this call.
     let prev = unsafe { (*fsuid_cell()).load(Ordering::Relaxed) };
     if fsuid != INVALID_UID {
-        // Phase 198: Linux requires the requested uid to match one
-        // of {ruid, euid, suid, fsuid} OR the caller to hold
-        // CAP_SETUID.  Otherwise the assignment is silently skipped
-        // (no errno).
         let ruid = crate::unistd::getuid();
         let euid = crate::unistd::geteuid();
         let matches_cred = fsuid == ruid || fsuid == euid || fsuid == prev;
@@ -143,20 +125,15 @@ pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
             unsafe { (*fsuid_cell()).store(fsuid, Ordering::Relaxed) };
         }
     }
-    // Linux returns the previous fsuid as an int.  Personality / UID
-    // values fit in the low 31 bits; `as i32` is safe.
-    prev as i32
+    // Linux returns the previous fsuid as an int.
+    #[allow(clippy::cast_possible_wrap)]
+    let prev = prev as i32;
+    prev
 }
 
-/// Set filesystem GID.
-///
-/// Atomically replaces the current filesystem GID with `fsgid` and
-/// returns the previous value.  Same `(gid_t)-1` sentinel and
-/// errno-untouched contract as [`setfsuid`].  **Phase 198**: also
-/// gated on CAP_SETGID via the matching `{rgid, egid, sgid, fsgid}`
-/// cred-set or capability.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
+/// [`setfsgid`] on a kernel without `SYS_PROCESS_SET_IDS`: as
+/// [`setfsuid_without_ids`], with `CAP_SETGID`.
+fn setfsgid_without_ids(fsgid: GidT) -> i32 {
     // SAFETY: this process's own storage, borrowed only for this call.
     let prev = unsafe { (*fsgid_cell()).load(Ordering::Relaxed) };
     if fsgid != INVALID_GID {
@@ -169,7 +146,9 @@ pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
             unsafe { (*fsgid_cell()).store(fsgid, Ordering::Relaxed) };
         }
     }
-    prev as i32
+    #[allow(clippy::cast_possible_wrap)]
+    let prev = prev as i32;
+    prev
 }
 
 // ---------------------------------------------------------------------------

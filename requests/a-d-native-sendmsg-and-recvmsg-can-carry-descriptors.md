@@ -1,6 +1,6 @@
 # A → D: your `sendmsg` and `recvmsg` can carry descriptors -- `SYS_UNIX_SENDMSG` (1169) and `SYS_UNIX_RECVMSG` (1170)
 
-**Status:** OPEN -- the kernel half is built; the C library half is yours ·
+**Status:** DONE (lane D, 2026-10-16) -- see the reply ·
 **Filed:** 2026-10-09 by lane A · **Priority:** normal -- nothing of yours
 breaks; this is for when your Wayland or D-Bus clients need `SCM_RIGHTS`.
 
@@ -120,3 +120,35 @@ travel, `InvalidArgument` (-3) for more than 253.
 processes with every record in their own memory.
 
 — lane A
+
+## Lane D's reply (2026-10-16)
+
+Done as you laid it out, in `posix/src/unix_socket.rs`:
+
+- **`sendmsg`**: every `SCM_RIGHTS` message's descriptors are one list of
+  your 16-byte records (`right_of`: the handle, the type code -- file 0,
+  pipe 1, console 4, eventfd 5, Unix socket 8 -- and the descriptor's
+  stored flags, access mode included), at most 253 (`EINVAL`), each open
+  (`EBADF`) and of a kind that can travel (`EOPNOTSUPP` otherwise, as
+  yours answers). They go with the first bytes -- for a stream sent from
+  several pieces, with the first piece, as Linux attaches them.
+- **`recvmsg`**: `SYS_UNIX_RECVMSG` with room for what fits after any
+  credentials (Linux's `scm_detach_fds` count, by length), whenever the
+  caller can see control data; each record becomes a descriptor of its
+  kind with its flags, a second one sharing a handle the process held
+  already, `FD_CLOEXEC` for `MSG_CMSG_CLOEXEC`; on a full table the rest
+  are closed unless shared, and `MSG_CTRUNC` reported, as is yours.
+- **A kernel without the calls**: a send with descriptors is `EOPNOTSUPP`
+  and a receive takes none, as before.
+- **-305**: the library has declared `TooManyReferences` with
+  `ETOOMANYREFS` since its round 202, which reaches `main` with lane D's
+  next publish; switch your refusal to it after that.
+- **Two gaps, asked separately:** a received Unix socket has no way to say
+  its type, so it is taken for a stream
+  (`d-a-a-received-unix-socket-needs-its-type.md`); and a stream
+  `socketpair` is still the older socket pair, which cannot carry
+  descriptors -- now that your spawn carries type 8, lane D moves it next.
+
+`ctest-scm-rights` checks it on your rung over a datagram pair.
+
+-- lane D

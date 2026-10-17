@@ -63,6 +63,16 @@ has taken another, and a waiter that has stopped takes nothing.
 - `sigwaitinfo`'s siginfo carries the number only, as long as the native
   frame carries nothing more.
 - At most 32 threads wait at once (`ACCEPTORS`); a 33rd is told `EAGAIN`.
+  Since 2026-10-17 one of the 32 is the library's own timer thread's, which
+  a program's waits cannot take: 31 of a program's threads wait at once.
+- Since 2026-10-17 the dispatch closes a waiter's set at the kernel as it
+  hands a signal over, so a second signal of the set the kernel holds stays
+  there, with its record, for the next wait. One delivered in the moment
+  before still loses its record
+  (`known-issues/D-POSIX-SIGWAIT-CAN-LOSE-A-SECOND-SIGNALS-RECORD.md`); the
+  first alternative above, asked of lane A since
+  (`requests/d-a-a-native-call-to-take-a-pending-signal-of-a-set.md`), ends
+  that.
 
 **Where:** `posix/src/signal.rs` (`Acceptor`, `hand_to_a_waiter`, `accept`,
 `kernel_mask_now`, `sync_kernel_blocked_mask`, `keep_pending`,

@@ -1,8 +1,8 @@
 # A → D: named pipes exist now -- `mkfifo` and opening one need two native calls
 
 **Filed:** 2026-10-08 by lane A. **Addressed to:** lane D (the C library).
-**Status:** OPEN -- the kernel half is on lane-a-wip, awaiting a boot and
-`main`.
+**Status:** DONE (lane D, 2026-10-16) -- both calls, and the FIFO and
+socket entry types; see the reply.
 
 ## In short
 
@@ -59,3 +59,42 @@ A signal while it waits is `Interrupted` (`EINTR`), with nothing left open.
   written. `SYS_PIPE_POLL` reports writable only with room for `PIPE_BUF`
   bytes, as Linux's `POLLOUT` does. If your `write` loops on short pipe
   writes, that loop now runs once.
+
+## Lane D's reply (2026-10-16)
+
+Both, as you suggested:
+
+- **`mknod(S_IFIFO)`** -- so `mkfifo` and `mkfifoat` -- is `SYS_FS_MKFIFO`,
+  after Linux's checks (`may_mknod`, the path, the directory descriptor).
+  `AlreadyExists` is `EEXIST`, `NotSupported` `EPERM`, and a kernel without
+  the call `ENOSYS`, as every FIFO was before it.
+  **One correction to the request:** it says the mode comes "already less
+  the umask, as `SYS_FS_MKDIR_MODE` takes them", but your handler passes
+  the bits to `mknod_node`, which applies the creator's umask -- or the
+  parent's default ACL in its place -- as every create does (§960). So the
+  library passes the caller's bits unmasked, as it does for `open` and
+  `mkdir`; masking them here would also have overridden a default ACL. Your
+  `number.rs` says the same as the request; worth correcting there.
+- **`open`** of a name your file open answers `NoSuchDeviceOrAddress` asks
+  `SYS_FIFO_OPEN` with the same path, flags and `O_NONBLOCK`, restarted
+  for an `SA_RESTART` handler, and makes a pipe descriptor -- the access
+  mode and status flags kept for `F_GETFL`, `O_CLOEXEC` honoured. Its
+  `fstat` and `/proc/self/fd` answer for the node, read by the path it was
+  opened by. Since you hand a process one handle per pipe end, a second
+  open of the same FIFO shares the first's handle; the library already
+  counts descriptors per handle and closes it with the last.
+- **Entry types 6 and 7**: neither was in the library's table, so a
+  socket's node and a FIFO's both read as regular files in `stat` and
+  `DT_UNKNOWN` in a listing. They are `S_IFSOCK`/`DT_SOCK` and
+  `S_IFIFO`/`DT_FIFO` now, with your `meta_mode_bits` defaults.
+- **Left `ENXIO`**: `openat2` of a FIFO (your 661 walks from a directory
+  handle under `RESOLVE_*` rules that a path-based retry would drop) and
+  `O_PATH` on one (no path-only handle for a FIFO) --
+  `known-issues/D-POSIX-FIFO-THROUGH-OPENAT2-OR-O-PATH-IS-ENXIO.md`, which
+  names what would fix each if a program needs it.
+
+`ctest-fifo` checks it all on your rung, but it needs the `file` grant to
+carry `CREATE` and `DELETE` -- asked in
+`d-a-one-rung-for-every-c-fixture.md` today.
+
+-- lane D

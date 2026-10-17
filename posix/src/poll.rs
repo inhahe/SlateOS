@@ -19,17 +19,19 @@
 //!   `0x02` there, where a pipe puts `POLLPRI`. Hangup is folded into
 //!   readable on purpose; see `check_readiness` for why that is the right
 //!   shape for an event loop and not a lost condition.
-//! - **Unix-domain stream sockets** (`socketpair`): kernel-queried via
-//!   `SYS_SOCKETPAIR_POLL`, whose layout matches TCP's (writable at
-//!   `0x04`) rather than the pty's.
+//! - **Unix-domain sockets** (named, accepted, or `socketpair`'s):
+//!   kernel-queried via `SYS_UNIX_POLL`, whose layout matches TCP's
+//!   (writable at `0x04`) rather than the pty's.
 //! - **`eventfd` / `timerfd` / `inotify` / `epoll`**: answered from the
 //!   userspace-side state `crate::epoll` keeps for each.
+//! - **A sound card's devices**: the kernel's word for a PCM's ring
+//!   (`crate::device_door::readiness`).
 //!
-//! That is all thirteen `HandleKind` variants — and the enumeration is
+//! That is all fifteen `HandleKind` variants — and the enumeration is
 //! kept complete on purpose, because this doc has been wrong by omission
 //! twice. Pty support existed here for some time while the list still
 //! implied `poll` could not see a terminal, and the entry that corrected
-//! that omission introduced another by leaving out `UnixStream`. A missing
+//! that omission introduced another by leaving out a Unix socket. A missing
 //! line here is not a cosmetic gap: it makes a caller design around a hole
 //! that is not there, which is how sshd nearly grew a second event loop.
 //!
@@ -533,6 +535,10 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
         // File: always ready (POSIX says regular files are always "ready").
         HandleKind::Console | HandleKind::File => (true, true, false, false),
 
+        // A namespace's descriptor has no poll of its own: always ready, as
+        // Linux's DEFAULT_POLLMASK makes nsfs's file.
+        HandleKind::Namespace => (true, true, false, false),
+
         // Pipe: query kernel for actual readiness.
         HandleKind::Pipe => {
             if handle == 0 {
@@ -549,26 +555,10 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             (readable, writable, hangup, error)
         }
 
-        // Unix stream socket: query kernel for actual rx/tx readiness.
-        // The SYS_SOCKETPAIR_POLL bitmask matches the pipe layout:
-        //   bit 0 (0x01) = readable (data available or read-side EOF)
-        //   bit 2 (0x04) = writable (buffer space, or write would error)
-        //   bit 3 (0x08) = POLLERR (broken — peer read side gone)
-        //   bit 4 (0x10) = POLLHUP (peer write side gone)
-        HandleKind::UnixStream => {
-            if handle == 0 {
-                return (false, false, true, true);
-            }
-            let status = syscall1(SYS_SOCKETPAIR_POLL, handle) as u16;
-            let readable = (status & 0x0001) != 0;
-            let writable = (status & 0x0004) != 0;
-            let error = (status & 0x0008) != 0;
-            let hangup = (status & 0x0010) != 0;
-            (readable, writable, hangup, error)
-        }
-
-        // A Unix socket that can have a name: `SYS_UNIX_POLL`, the same bit
-        // layout (a listener is readable when a connection waits).
+        // A Unix socket: `SYS_UNIX_POLL`, the pipe's bit layout -- bit 0
+        // readable (data, or the peer's end of writing), bit 2 writable, bit
+        // 3 an error, bit 4 hung up -- and a listener readable when a
+        // connection waits.
         HandleKind::UnixSocket => crate::unix_socket::readiness(handle),
 
         // TCP stream: query kernel for actual rx/tx readiness.

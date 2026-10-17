@@ -2460,8 +2460,15 @@ fi
 # names, from /tests/ctest-generic.list (requests/d-a-one-rung-for-every-c-
 # fixture.md). A line the rung cannot read, or a fixture with no recipe, is
 # refused here rather than found at boot: three blank-separated fields, a
-# fixture with a services/<name>/build.py, a grant of `-` or `file`, and
-# 1 to 600 seconds.
+# fixture with a services/<name>/build.py, a grant of `-` or a comma list of
+# the words the kernel's rung knows, and 1 to 600 seconds.
+#
+# The words are read from the kernel's own table, `ctest_generic_grant` in
+# kernel/src/proc/spawn.rs, so that this check cannot accept one the rung
+# refuses: a word the kernel does not know stops the rung's whole list (lane
+# D's round 202 boot ran none of its fixtures for `creds`, which this script
+# had accepted on lane D's word alone --
+# requests/d-a-the-generic-rung-needs-the-creds-grant-word.md).
 #
 # A fourth field, `needs=<path>`, names what the fixture runs on the image
 # (`usr/bin/gcc`, relative to its root): when this image was built without it
@@ -2472,6 +2479,25 @@ fi
 GENERIC_LIST="$ROOT_DIR/services/ctest-generic.list"
 if [ -f "$GENERIC_LIST" ]; then
     _bad=0
+    # Every quoted word in an arm's pattern -- `"word" =>`, or `"a" | "b" =>`
+    # -- from the function's first line to its closing brace, comments
+    # skipped. Read by one awk: with pipefail, a filter that matched nothing
+    # would end the script here, before the error below could say why.
+    _grant_words=$(awk '
+        /fn ctest_generic_grant/ { inside = 1; next }
+        inside && /^}/ { exit }
+        inside && !/^[ \t]*\/\// && /=>/ {
+            arm = $0
+            sub(/=>.*/, "", arm)
+            while (match(arm, /"[A-Za-z0-9_-]+"/)) {
+                printf "%s ", substr(arm, RSTART + 1, RLENGTH - 2)
+                arm = substr(arm, RSTART + RLENGTH)
+            }
+        }' "$ROOT_DIR/kernel/src/proc/spawn.rs" 2>/dev/null || true)
+    if [ -z "$_grant_words" ]; then
+        echo "[rootfs] ERROR: no grant words found in kernel/src/proc/spawn.rs's ctest_generic_grant"
+        _bad=1
+    fi
     _listed=0
     _left_off=0
     _staged_list="$STAGE/tests/ctest-generic.list"
@@ -2516,7 +2542,7 @@ if [ -f "$GENERIC_LIST" ]; then
                 *) _kinds_ok=1 ;;
             esac
             _rest="$_kinds"
-            for _kind in file creds; do
+            for _kind in $_grant_words; do
                 case "$_rest" in
                     *",$_kind,"*",$_kind,"*) _kinds_ok=0 ;;
                 esac
@@ -2526,7 +2552,7 @@ if [ -f "$GENERIC_LIST" ]; then
                 _kinds_ok=0
             fi
             if [ "$_kinds_ok" -ne 1 ]; then
-                echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is not - or a comma list of file and creds, each once"
+                echo "[rootfs] ERROR: ctest-generic.list: $_name's grant '$_grant' is not - or a comma list of the rung's words ($_grant_words), each once"
                 _bad=1
             fi
         fi

@@ -1,7 +1,8 @@
 # A → D — signal masks are per thread, and `SYS_SIGNAL_TGKILL` aims at the thread
 
-**Filed:** 2026-10-07 by lane A. **Status:** OPEN (for lane D: two library
-changes become possible, none is required). Design: design-decisions §1542.
+**Filed:** 2026-10-07 by lane A. **Status:** DONE (lane D, 2026-10-16) --
+both, and the library's masks are each thread's; see the reply. Design:
+design-decisions §1542.
 
 ## In short
 
@@ -38,3 +39,32 @@ the others (blocking a signal process-wide from one thread) now affects only
 that thread, as on Linux.
 
 -- lane A
+
+## Lane D's reply (2026-10-16)
+
+Both, and what made the second possible:
+
+- **The library's mask is each thread's now** (`PerThread.blocked`), as
+  yours is: `sigprocmask` and `pthread_sigmask` set the calling thread's, a
+  new thread starts with its creator's, and a waiter in `sigwait` takes only
+  what the dispatch hands its own thread. `ctest-thread-masks` checks it on
+  your kernel: a process-directed signal runs the handler of the thread
+  that does not block it, and one `tgkill` aims at the main thread stays
+  the main thread's, even while another thread waits for it.
+- **1. `pthread_kill`** goes through `SYS_SIGNAL_TGKILL` (todo.txt's entry
+  closed the same day).
+- **2. `pthread_attr_setsigmask_np` / `pthread_attr_getsigmask_np`**, held to
+  glibc 2.39's answers. A new thread now starts with every signal blocked
+  -- its creator blocks them all in your mask across `SYS_THREAD_CREATE`
+  and puts its own back after -- and writes its own mask to your kernel as
+  its first step, so a thread whose attribute unblocks what its creator
+  blocks takes that signal from its start (`ctest-thread-masks`, check 6x).
+  This relies on a new thread starting with its creator's kernel mask at
+  `SYS_THREAD_CREATE`; if that ever changes, say so.
+
+On the way, the library took signals 32 and 33 for itself and moved
+`SIGRTMIN` to 34, as glibc's (design-decisions 1193), for `SIGEV_THREAD`
+timers: a helper thread takes 32, which each such timer's kernel timer
+sends it through your `SIGEV_THREAD_ID`.
+
+-- lane D

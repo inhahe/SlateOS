@@ -21,18 +21,24 @@
 //!
 //! ## POSIX Timers
 //!
-//! There are none yet. `timer_create` checks its arguments in Linux's order
-//! and answers `ENOSYS`; `timer_settime`, `timer_gettime`, `timer_delete` and
-//! `timer_getoverrun` answer `EINVAL`, there being no timer to name -- the
-//! kernel's Linux ABI answers the same. The kernel has no timer of this kind
-//! on either ABI, and
-//! `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`
-//! asks lane A for native ones. Until 2026-10-05 these were stubs that
-//! reported a timer armed and armed nothing.
+//! `timer_create` and its family are the kernel's (`SYS_POSIX_TIMER`), on
+//! every clock it can arm -- the wall clock, the monotonic and boot clocks,
+//! and the CPU-time clocks -- with `SIGEV_SIGNAL`, `SIGEV_NONE` and
+//! `SIGEV_THREAD_ID`. `SIGEV_THREAD` is the library's, glibc's way, over
+//! `SIGEV_THREAD_ID` ([`thread_timers`]): a helper thread takes the
+//! library's own signal (32) and starts a thread for each expiry.
 //!
-//! `alarm`, `ualarm` and `setitimer` do arm a timer that fires: the kernel's
-//! one `ITIMER_REAL` per process (`SYS_ITIMER_SET`), whose `SIGALRM` arrives
-//! through `signal.rs`'s trampoline.
+//! `alarm`, `ualarm` and `setitimer` arm the kernel's interval timers
+//! (`SYS_ITIMER_SET`): `ITIMER_REAL` (`alarm`'s too) on the wall clock, and
+//! `ITIMER_VIRTUAL` and `ITIMER_PROF` on the processor time used. Their
+//! signals arrive through `signal.rs`'s trampoline.
+//!
+//! ## CPU-time clocks
+//!
+//! `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the ids
+//! `clock_getcpuclockid` and `pthread_getcpuclockid` make read the processor
+//! time used, as the kernel measures it (`SYS_CPU_CLOCK`); `clock()` is the
+//! process's, in microseconds.
 
 use crate::errno;
 use crate::interrupt::Mark;
@@ -48,15 +54,10 @@ use crate::types::*;
 pub const CLOCK_REALTIME: ClockidT = 0;
 /// Monotonic clock (does not set wall time, cannot go backward).
 pub const CLOCK_MONOTONIC: ClockidT = 1;
-/// Process-wide CPU-time clock.
-///
-/// Programs use this to measure their own CPU usage.  We map it to
-/// CLOCK_MONOTONIC since we don't have per-process CPU accounting yet.
+/// The calling process's CPU-time clock: the processor time all its threads
+/// have used, the exited ones included, to the nanosecond (`SYS_CPU_CLOCK`).
 pub const CLOCK_PROCESS_CPUTIME_ID: ClockidT = 2;
-/// Thread-specific CPU-time clock.
-///
-/// We map it to CLOCK_MONOTONIC (single-threaded, no per-thread
-/// accounting yet).
+/// The calling thread's CPU-time clock: the processor time it has used.
 pub const CLOCK_THREAD_CPUTIME_ID: ClockidT = 3;
 /// Like CLOCK_MONOTONIC but provides raw hardware time without NTP
 /// adjustments.  We use the same monotonic source for all clocks.
@@ -206,14 +207,35 @@ pub extern "C" fn usleep(usec: u32) -> i32 {
 
 /// Get time from a specific clock.
 ///
-/// All supported clock IDs (`CLOCK_REALTIME`, `CLOCK_MONOTONIC`,
-/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`,
-/// `CLOCK_MONOTONIC_RAW`, `CLOCK_*_COARSE`, `CLOCK_BOOTTIME`)
-/// currently map to the same underlying monotonic clock.
+/// `CLOCK_REALTIME` and its coarse twin read the wall clock; the CPU-time
+/// clocks -- `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID`, and the
+/// ids `clock_getcpuclockid` and `pthread_getcpuclockid` make -- the
+/// processor time used, through `SYS_CPU_CLOCK`; every other clock the
+/// monotonic one.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
+    // A CPU-time clock is the kernel's to check and to read, and Linux reads
+    // it before it copies the answer out, so a NULL `tp` is EFAULT only for a
+    // clock that exists.
+    if is_cpu_clock(clk_id) {
+        let ns = match cpu_clock(CPU_CLOCK_GETTIME, clk_id) {
+            Ok(ns) => ns,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        };
+        if tp.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        // SAFETY: `tp` is non-null, and the caller's contract makes it a
+        // writable `timespec`; written unaligned, as a C caller's may not be.
+        unsafe { core::ptr::write_unaligned(tp, ns_to_timespec(ns)) };
+        return 0;
+    }
     // Linux validation order (kernel/time/posix-timers.c
     // SYSCALL_DEFINE2(clock_gettime, ...)):
     //
@@ -397,11 +419,154 @@ fn is_settable_clock(clk_id: ClockidT) -> bool {
     clk_id == CLOCK_REALTIME
 }
 
+// ---------------------------------------------------------------------------
+// CPU-time clocks
+// ---------------------------------------------------------------------------
+//
+// How much processor time a process, or one of its threads, has used: the
+// kernel measures each thread's run time at every context switch and answers
+// through `SYS_CPU_CLOCK`, which takes Linux's clock ids and answers Linux's
+// errnos (`requests/a-d-cpu-time-clocks-have-a-native-call-now.md`). The two
+// ids every program knows, `CLOCK_PROCESS_CPUTIME_ID` and
+// `CLOCK_THREAD_CPUTIME_ID`, are the caller's; any other process's or
+// thread's clock is a negative id, built as Linux's
+// `include/linux/posix-timers_types.h` builds it, which the kernel decodes.
+
+/// A CPU-time clock id's kind, in its low two bits: user plus system time
+/// sampled at the tick (`CPUCLOCK_PROF`, 0), user time so sampled
+/// (`CPUCLOCK_VIRT`, 1), or the precise run time (`CPUCLOCK_SCHED`, 2), which
+/// is what `CLOCK_PROCESS_CPUTIME_ID` and `CLOCK_THREAD_CPUTIME_ID` read.
+pub(crate) const CPUCLOCK_SCHED: ClockidT = 2;
+/// A CPU-time clock id's bit for "a thread's clock, not a process's".
+const CPUCLOCK_PERTHREAD_MASK: ClockidT = 4;
+/// The low three bits of a negative clock id that names a clock by file
+/// descriptor (`CLOCKFD`, Linux's dynamic clocks), which is no CPU-time
+/// clock: `SYS_CPU_CLOCK` refuses it.
+const CLOCKFD: ClockidT = 3;
+/// The mask [`CLOCKFD`] is tested under.
+const CLOCKFD_MASK: ClockidT = 7;
+
+/// `MAKE_PROCESS_CPUCLOCK(pid, clock)`: the id of process `pid`'s CPU-time
+/// clock of kind `clock` (0 being the caller), as glibc and Linux build it --
+/// the pid complemented, shifted past the three kind bits.
+pub(crate) const fn make_process_cpuclock(pid: PidT, clock: ClockidT) -> ClockidT {
+    (!pid).wrapping_shl(3) | clock
+}
+
+/// `MAKE_THREAD_CPUCLOCK(tid, clock)`: thread `tid`'s clock of kind `clock`.
+pub(crate) const fn make_thread_cpuclock(tid: PidT, clock: ClockidT) -> ClockidT {
+    make_process_cpuclock(tid, clock | CPUCLOCK_PERTHREAD_MASK)
+}
+
+/// Is `clk_id` one `SYS_CPU_CLOCK` answers for: the caller's two CPU-time
+/// clocks, or a negative id -- another process's or thread's clock, or a
+/// [`CLOCKFD`] one, which the kernel refuses as Linux does a descriptor that
+/// is no clock's.
+fn is_cpu_clock(clk_id: ClockidT) -> bool {
+    clk_id == CLOCK_PROCESS_CPUTIME_ID || clk_id == CLOCK_THREAD_CPUTIME_ID || clk_id < 0
+}
+
+/// Is `clk_id` a negative id naming a clock by file descriptor.
+fn is_clockfd(clk_id: ClockidT) -> bool {
+    clk_id < 0 && clk_id & CLOCKFD_MASK == CLOCKFD
+}
+
+/// One `SYS_CPU_CLOCK` question, `op` ([`CPU_CLOCK_GETTIME`] or
+/// [`CPU_CLOCK_GETRES`]) about clock `clk_id`: the nanoseconds the kernel
+/// answers, or the errno it refuses with.
+///
+/// A kernel without the call answers that it has no such call, which is
+/// `EINVAL` here -- "no such clock" -- rather than the boot-relative time
+/// these clocks gave until 2026-10-16, which looked like processor time and
+/// was not.
+fn cpu_clock(op: u64, clk_id: ClockidT) -> Result<u64, i32> {
+    #[cfg(target_os = "none")]
+    let ret = syscall2(SYS_CPU_CLOCK, op, u64::from(clk_id.cast_unsigned()));
+    #[cfg(not(target_os = "none"))]
+    let ret = host_cpu_clock::answer(op, clk_id);
+    cpu_clock_answer(ret)
+}
+
+/// [`cpu_clock`]'s reading of the kernel's answer `ret`: nanoseconds, a
+/// negated Linux errno, or the native "no such call".
+fn cpu_clock_answer(ret: i64) -> Result<u64, i32> {
+    if crate::syscall::lacks_call(ret) {
+        return Err(errno::EINVAL);
+    }
+    u64::try_from(ret).map_err(|_| errno::door_errno(ret))
+}
+
+/// Nanoseconds as a `timespec`.
+fn ns_to_timespec(ns: u64) -> Timespec {
+    Timespec {
+        // Below 2^64 / 10^9, so it fits.
+        tv_sec: TimeT::try_from(ns / 1_000_000_000).unwrap_or(TimeT::MAX),
+        // Below 10^9, so it fits.
+        tv_nsec: i64::try_from(ns % 1_000_000_000).unwrap_or(0),
+    }
+}
+
+/// A host build's stand-in for `SYS_CPU_CLOCK`, so that `cargo test`
+/// exercises the library's half -- which ids it sends, how it reads the
+/// answers, the checks it makes first. The host's processor time is not
+/// within `std`'s reach, so the value read is the host's monotonic clock;
+/// whether the kernel measures processor time is the kernel's own
+/// self-test's to show, and `services/ctest-cpu-clocks`'.
+#[cfg(not(target_os = "none"))]
+mod host_cpu_clock {
+    use super::{CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID, ClockidT};
+    use super::{CPU_CLOCK_GETRES, CPU_CLOCK_GETTIME, is_clockfd};
+
+    /// The answer the kernel would give: the caller's own clocks and those
+    /// of id 0 are readable, a thread's or a process's of any other id is
+    /// gone (`-EINVAL`), as is one of no kind (3, `CPUCLOCK_MAX`), a
+    /// `CLOCKFD` id, and an unknown `op`.
+    pub(super) fn answer(op: u64, clk_id: ClockidT) -> i64 {
+        let einval = i64::from(crate::errno::EINVAL).wrapping_neg();
+        let own = clk_id == CLOCK_PROCESS_CPUTIME_ID
+            || clk_id == CLOCK_THREAD_CPUTIME_ID
+            || (clk_id < 0 && !is_clockfd(clk_id) && clk_id & 3 != 3 && who(clk_id) == 0);
+        if !own {
+            return einval;
+        }
+        match op {
+            CPU_CLOCK_GETTIME => crate::syscall::syscall0(crate::syscall::SYS_CLOCK_MONOTONIC),
+            CPU_CLOCK_GETRES => 1,
+            _ => einval,
+        }
+    }
+
+    /// The process or thread id a negative clock id names (Linux's
+    /// `CPUCLOCK_PID`), whichever of the two it is.
+    fn who(clk_id: ClockidT) -> ClockidT {
+        !clk_id.wrapping_shr(3)
+    }
+}
+
 /// Get the resolution of a clock.
 ///
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
+    // A CPU-time clock's resolution is the kernel's: a nanosecond for the
+    // precise run time, a tick for the sampled kinds. The clock is checked
+    // whether or not `res` asks for the answer, which is how
+    // `clock_getcpuclockid` tells a live pid from a gone one.
+    if is_cpu_clock(clk_id) {
+        let ns = match cpu_clock(CPU_CLOCK_GETRES, clk_id) {
+            Ok(ns) => ns,
+            Err(e) => {
+                errno::set_errno(e);
+                return -1;
+            }
+        };
+        if !res.is_null() {
+            // SAFETY: `res` is non-null, and the caller's contract makes it
+            // a writable `timespec`; written unaligned, as in clock_gettime.
+            unsafe { core::ptr::write_unaligned(res, ns_to_timespec(ns)) };
+        }
+        return 0;
+    }
     if !is_valid_clock(clk_id) {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -465,6 +630,20 @@ pub extern "C" fn clock_getres(clk_id: ClockidT, res: *mut Timespec) -> i32 {
 /// positive on the "permission denied" path.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
+    // Another process's or thread's CPU-time clock has a `clock_set` in
+    // Linux -- one that refuses: `posix_cpu_clock_set` answers EINVAL for a
+    // clock that names nothing and EPERM for one that does. Its `tp` is
+    // copied in first, so a NULL one is EFAULT. (The caller's own two CPU
+    // clocks have no `clock_set`, and are refused as read-only below.)
+    if clk_id < 0 {
+        if tp.is_null() {
+            errno::set_errno(errno::EFAULT);
+            return -1;
+        }
+        let named = !is_clockfd(clk_id) && cpu_clock(CPU_CLOCK_GETRES, clk_id).is_ok();
+        errno::set_errno(if named { errno::EPERM } else { errno::EINVAL });
+        return -1;
+    }
     // 1. Unknown clock → EINVAL.  Linux's clockid_to_kclock runs
     //    before the get_timespec64 user-copy step.
     if !is_valid_clock(clk_id) {
@@ -610,6 +789,39 @@ pub extern "C" fn clock_nanosleep(
     // calling thread's CPU clock itself, before any other check.
     if clk_id == CLOCK_THREAD_CPUTIME_ID {
         return errno::EINVAL;
+    }
+    // Any other CPU-time clock sleeps in the kernel, which alone sees it
+    // advance (`CPU_CLOCK_NANOSLEEP`). Linux's order: a clock named by
+    // descriptor has no `nsleep`, then the request is copied in and checked,
+    // then the clock (`-EINVAL` for one that names nothing, or the caller's
+    // own thread's, which could never advance while it sleeps).
+    if is_cpu_clock(clk_id) {
+        if is_clockfd(clk_id) {
+            return errno::EOPNOTSUPP;
+        }
+        if request.is_null() {
+            return errno::EFAULT;
+        }
+        // SAFETY: `request` is non-null, and the caller's contract makes it a
+        // readable `timespec`; read unaligned, as a C caller's may not be.
+        let req = unsafe { core::ptr::read_unaligned(request) };
+        if req.tv_sec < 0 || !valid_nanoseconds(req.tv_nsec) {
+            return errno::EINVAL;
+        }
+        // The kernel writes the time left through `remain` itself, for a
+        // relative sleep a signal ended, as Linux's does.
+        let ret = syscall5(
+            SYS_CPU_CLOCK,
+            CPU_CLOCK_NANOSLEEP,
+            u64::from(clk_id.cast_unsigned()),
+            u64::from((flags & TIMER_ABSTIME).cast_unsigned()),
+            request as u64,
+            remain as u64,
+        );
+        return match cpu_clock_answer(ret) {
+            Ok(_) => 0,
+            Err(e) => e,
+        };
     }
     // Linux 6.6 (kernel/time/posix-timers.c:1373): an unknown clock, then a
     // clock that cannot be slept on -- `CLOCK_MONOTONIC_RAW` and the two
@@ -1625,23 +1837,23 @@ fn mon_full(mon: i32) -> &'static [u8] {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub static CLOCKS_PER_SEC: i64 = 1_000_000;
 
-/// Return an approximation of CPU time used by the process.
-///
-/// Returns microseconds elapsed since an arbitrary point (we use
-/// `CLOCK_MONOTONIC` as a proxy since we don't track per-process
-/// CPU time yet).  Returns -1 on failure.
+/// The processor time the calling process has used, in `CLOCKS_PER_SEC`
+/// units (microseconds): `CLOCK_PROCESS_CPUTIME_ID`, as glibc's `clock` reads
+/// it, and -1 if that clock cannot be read. Until 2026-10-16 this was the
+/// time since boot, so a program comparing its CPU time with the time that
+/// passed saw the two equal.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn clock() -> i64 {
     let mut ts = Timespec {
         tv_sec: 0,
         tv_nsec: 0,
     };
-    if clock_gettime(CLOCK_MONOTONIC, &raw mut ts) != 0 {
+    if clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &raw mut ts) != 0 {
         return -1;
     }
-    // Convert to microseconds (CLOCKS_PER_SEC = 1_000_000).
-    ts.tv_sec * 1_000_000 + ts.tv_nsec / 1_000
+    ts.tv_sec
+        .saturating_mul(1_000_000)
+        .saturating_add(ts.tv_nsec / 1_000)
 }
 
 // ---------------------------------------------------------------------------
@@ -2549,12 +2761,15 @@ fn first_weekday(tm_year: i32, mon: i32, wday: i32) -> i32 {
 }
 
 // ---------------------------------------------------------------------------
-// POSIX per-process timers (none until the kernel has them)
+// POSIX per-process timers
 // ---------------------------------------------------------------------------
 //
-// `timer_create` refuses with ENOSYS after Linux's argument checks, and the
-// other four answer EINVAL; `timer_create`'s doc says why, and what these
-// were until 2026-10-05.
+// The kernel's: `SYS_POSIX_TIMER` (1141) runs the Linux ABI's own `timer_*`
+// bodies and answers Linux's errnos as `-errno` (lane A's answer in
+// `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`).
+// A `timer_t` is the kernel's id for the timer. The library makes Linux's
+// argument checks first, in Linux's order, so that a call the kernel would
+// refuse is refused the same way where there is no kernel (the host tests).
 
 /// Timer ID type: pointer-wide, as musl's `<time.h>` makes `timer_t` a
 /// `void *`. It was an `i32` until 2026-09-29, and `timer_create` stored
@@ -2587,6 +2802,50 @@ pub struct Sigevent {
     _pad: [u8; 48],
 }
 
+impl Sigevent {
+    /// `sigev_notify_function`, at offset 16: what a `SIGEV_THREAD` timer's
+    /// threads run, given `sigev_value` by value (a `union sigval`, one
+    /// register).
+    fn notify_function(&self) -> Option<extern "C" fn(usize)> {
+        let word = u64::from_ne_bytes(self.union_word(0));
+        // SAFETY: a `void (*)(union sigval)` or NULL, as the caller's
+        // contract has `sigev_notify_function`; an address of 0 is `None`.
+        unsafe { core::mem::transmute::<u64, Option<extern "C" fn(usize)>>(word) }
+    }
+
+    /// `sigev_notify_attributes`, at offset 24: the attributes of a
+    /// `SIGEV_THREAD` timer's threads, or NULL.
+    fn notify_attributes(&self) -> *const crate::pthread::PthreadAttrT {
+        core::ptr::with_exposed_provenance(
+            usize::try_from(u64::from_ne_bytes(self.union_word(8))).unwrap_or(0),
+        )
+    }
+
+    /// The eight bytes at `at` in the union after `sigev_notify`.
+    fn union_word(&self, at: usize) -> [u8; 8] {
+        let mut w = [0u8; 8];
+        if let Some(b) = self._pad.get(at..at.saturating_add(8)) {
+            w.copy_from_slice(b);
+        }
+        w
+    }
+
+    /// A `SIGEV_THREAD_ID` event: signal `signo` to thread `tid`, carrying
+    /// `value`.
+    fn to_thread(signo: i32, tid: i32, value: usize) -> Self {
+        let mut pad = [0u8; 48];
+        if let Some(b) = pad.get_mut(..4) {
+            b.copy_from_slice(&tid.to_ne_bytes());
+        }
+        Self {
+            sigev_value: value,
+            sigev_signo: signo,
+            sigev_notify: SIGEV_THREAD_ID,
+            _pad: pad,
+        }
+    }
+}
+
 /// No notification on timer expiration.
 pub const SIGEV_NONE: i32 = 1;
 /// Deliver a signal on timer expiration.
@@ -2609,80 +2868,149 @@ fn is_valid_sigev_notify(notify: i32) -> bool {
     )
 }
 
-/// Create a per-process timer: refused with `ENOSYS`, after Linux's
-/// argument checks, because SlateOS has no timer of this kind yet.
+/// One `SYS_POSIX_TIMER` call, `op` with its four arguments: the kernel's
+/// answer, or the errno it refused with.
 ///
-/// The kernel has none on either ABI: its Linux ABI's `timer_create`
-/// (`kernel/src/syscall/linux.rs`, `sys_timer_create`) makes these same
-/// checks and then answers `ENOSYS`, and no native call arms a timer that
-/// signals on expiry -- `SYS_TIMER_CREATE` notifies a completion port, and
-/// `SYS_ITIMER_SET` is the one `ITIMER_REAL` that `alarm` and `setitimer`
-/// share. `requests/d-a-posix-timers-and-the-dumpable-flag-need-native-calls.md`
-/// asks lane A for native per-process timers; this is rewritten over them
-/// when they land.
+/// A kernel without the call can have made no timer, so it answers `ENOSYS`
+/// to `timer_create` -- the answer callers fall back on (GNU `timeout`
+/// falls back to `alarm` silently on exactly it) -- and to the other four
+/// `EINVAL`, Linux's answer for an id that names no timer. A host build has
+/// no kernel; [`host_posix_timer`] stands in for one without the call.
+fn posix_timer(op: u64, a: u64, b: u64, c: u64, d: u64) -> Result<i64, i32> {
+    #[cfg(target_os = "none")]
+    let ret = syscall5(SYS_POSIX_TIMER, op, a, b, c, d);
+    #[cfg(not(target_os = "none"))]
+    let ret = host_posix_timer::answer(op, a, b, c, d);
+    posix_timer_answer(op, ret)
+}
+
+/// [`posix_timer`]'s reading of the kernel's answer `ret` to `op`.
+fn posix_timer_answer(op: u64, ret: i64) -> Result<i64, i32> {
+    if crate::syscall::lacks_call(ret) {
+        return Err(if op == POSIX_TIMER_CREATE {
+            errno::ENOSYS
+        } else {
+            errno::EINVAL
+        });
+    }
+    if ret >= 0 {
+        Ok(ret)
+    } else {
+        Err(errno::door_errno(ret))
+    }
+}
+
+/// The kernel's id for `timerid`, as glibc's `timerid_to_kernel_timer` makes
+/// it: the `int` in the pointer-wide `timer_t`, which is all the kernel's
+/// ABI takes.
+fn kernel_timer(timerid: TimerT) -> u64 {
+    if let Some(record) = thread_timers::decode(timerid) {
+        return thread_timers::kernel_id(record);
+    }
+    // Truncation intended: Linux's `timer_t` is an `int`, and glibc keeps it
+    // in the low half of the pointer-wide one.
+    #[allow(clippy::cast_possible_truncation)]
+    let id = timerid as u32;
+    u64::from(id)
+}
+
+/// A host build's stand-in for a kernel without `SYS_POSIX_TIMER`: no timer
+/// can be made, and every id names none -- save that, as the kernel's
+/// `timer_create` checks a CPU-time clock's id before anything is made, one
+/// naming nothing is `EINVAL` here too (`host_cpu_clock`).
+#[cfg(not(target_os = "none"))]
+mod host_posix_timer {
+    use super::{CPU_CLOCK_GETRES, POSIX_TIMER_CREATE, cpu_clock};
+
+    /// What a kernel without the call answers `op` with arguments `a`..`d`.
+    pub(super) fn answer(op: u64, a: u64, _b: u64, _c: u64, _d: u64) -> i64 {
+        // The clock id is an `int`: the register's low half.
+        #[allow(clippy::cast_possible_truncation)]
+        let clock = (a as u32).cast_signed();
+        if op == POSIX_TIMER_CREATE && clock < 0 && cpu_clock(CPU_CLOCK_GETRES, clock).is_err() {
+            return i64::from(crate::errno::EINVAL).wrapping_neg();
+        }
+        crate::errno::native::NO_SUCH_SYSCALL
+    }
+}
+
+/// Create a per-process timer on clock `clockid`, which notifies as `*sevp`
+/// says (a NULL `sevp` is `SIGEV_SIGNAL` with `SIGALRM`, its value the
+/// timer's id), and put its id in `*timerid`: 0, or -1 with `errno` set.
 ///
-/// `ENOSYS` is what a Linux kernel built without `CONFIG_POSIX_TIMERS`
-/// answers, and the answer callers are written to fall back on: GNU
-/// `timeout` (coreutils 9.5, `settimeout`) falls back to `alarm` silently
-/// on exactly this errno and prints a warning on any other, and on any
-/// failure of `timer_settime`. That is why the refusal is here and not at
-/// arming time.
+/// The kernel's timer (`SYS_POSIX_TIMER`): `CLOCK_REALTIME`,
+/// `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` and the CPU-time clocks --
+/// `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the ids
+/// `clock_getcpuclockid` and `pthread_getcpuclockid` make; `SIGEV_SIGNAL`,
+/// `SIGEV_NONE`, and `SIGEV_THREAD_ID` naming one of this process's
+/// threads, whose signal then waits for that thread alone. An expiry's
+/// signal carries `SI_TIMER`, the timer's id in `si_timerid`, the overrun in
+/// `si_overrun` and the event's value in `si_value`. Timers are not
+/// inherited by `fork` and are deleted by `exec`.
 ///
-/// Until 2026-10-05 this claimed a slot in a table and succeeded, and
-/// [`timer_settime`] stored its value there and succeeded too: a timer
-/// reported armed that could never fire
+/// `SIGEV_THREAD` -- a function run on a thread at each expiry -- is the C
+/// library's, glibc's way ([`thread_timers`]): a new detached thread for
+/// each expiry, made with the event's attributes, runs the function.
+///
+/// Until 2026-10-16 every timer was `ENOSYS`, after these same checks, the
+/// kernel having none for native programs; until 2026-10-05 this claimed a
+/// slot in a table and reported a timer armed that could never fire
 /// (`known-issues-resolved/B-POSIX-TIMER-SETTIME-REPORTS-SUCCESS-AND-ARMS-NOTHING.md`).
 ///
 /// # Linux validation order
 ///
-/// `kernel/time/posix-timers.c::sys_timer_create` -> `do_timer_create`,
-/// so that a malformed call gets the answer it would get from Linux:
+/// `kernel/time/posix-timers.c::sys_timer_create` -> `do_timer_create`, as
+/// Linux 6.6.87 answers it:
 ///
 /// 1. `copy_from_user(&event, timer_event_spec, ...)` -> `EFAULT`: not
 ///    simulated; a non-null `sevp` is read.
-/// 2. `clockid_to_kclock(which_clock)` unknown -> `EINVAL`.
+/// 2. `clockid_to_kclock(which_clock)` unknown -> `EINVAL`. A negative id is
+///    a CPU-time clock's, which Linux knows whatever pid it names.
 /// 3. the clock has no `timer_create` -> `EOPNOTSUPP`:
-///    `CLOCK_MONOTONIC_RAW` and the two `_COARSE` clocks, which can be read
-///    but not armed.
+///    `CLOCK_MONOTONIC_RAW`, the two `_COARSE` clocks, and a clock named by
+///    descriptor.
 /// 4. `alloc_posix_timer` and `posix_timer_add` -> `EAGAIN` when there is
-///    no room: nothing is allocated here, so never.
+///    no room: the kernel's.
 /// 5. `good_sigevent(event)` -> `EINVAL`: an unrecognised `sigev_notify`,
 ///    or a signal outside `1..=SIGRTMAX` when one is to be sent
 ///    (`SIGEV_SIGNAL`, `SIGEV_THREAD_ID`). `SIGEV_NONE` sends none, and a
 ///    `SIGEV_THREAD` caller's signal is never the kernel's to see -- glibc
-///    hands it `SIGTIMER` instead -- so neither is looked at. Nor is the
-///    thread a `SIGEV_THREAD_ID` event names, which Linux checks belongs
-///    to the caller's process.
+///    hands it `SIGTIMER` instead -- so neither is looked at. That the
+///    thread a `SIGEV_THREAD_ID` event names is one of this process's is
+///    the kernel's to check, after step 6 here where Linux checks it before:
+///    such an event with a NULL `timerid` is `EFAULT` here, `EINVAL` there.
 /// 6. `copy_to_user(created_timer_id, ...)` -> `EFAULT` for a NULL
-///    `timerid` (Phase 147; it was `EINVAL` before).
-/// 7. `ENOSYS`.
-///
-/// `*timerid` is never written.
+///    `timerid`.
+/// 7. the clock's own `timer_create`: a CPU-time clock naming no process or
+///    thread, or of no kind, is `EINVAL` -- the kernel's.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_create(
     clockid: ClockidT,
     sevp: *const Sigevent,
     timerid: *mut TimerT,
 ) -> i32 {
-    // Step 2.
-    if !is_valid_clock(clockid) {
+    // Steps 2 and 3.
+    if !is_valid_clock(clockid) && clockid >= 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Step 3.
-    if matches!(
-        clockid,
-        CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
-    ) {
+    if is_clockfd(clockid)
+        || matches!(
+            clockid,
+            CLOCK_MONOTONIC_RAW | CLOCK_REALTIME_COARSE | CLOCK_MONOTONIC_COARSE
+        )
+    {
         errno::set_errno(errno::EOPNOTSUPP);
         return -1;
     }
     // Step 5. A null sevp is SIGEV_SIGNAL with SIGALRM, per POSIX, and
     // needs no check.
+    let mut notify = SIGEV_SIGNAL;
     if !sevp.is_null() {
         // SAFETY: the caller asserts sevp points to a valid Sigevent; only
         // two `i32` fields are read, and no pointer inside it.
-        let (notify, signo) = unsafe { ((*sevp).sigev_notify, (*sevp).sigev_signo) };
+        let (event_notify, signo) = unsafe { ((*sevp).sigev_notify, (*sevp).sigev_signo) };
+        notify = event_notify;
         if !is_valid_sigev_notify(notify) {
             errno::set_errno(errno::EINVAL);
             return -1;
@@ -2698,64 +3026,471 @@ pub extern "C" fn timer_create(
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // Step 7.
-    errno::set_errno(errno::ENOSYS);
-    -1
+    if notify == SIGEV_THREAD {
+        // SAFETY: `notify` came from a non-null `sevp`, the caller's
+        // `struct sigevent`.
+        return match thread_timers::create(clockid, unsafe { &*sevp }) {
+            Ok(id) => {
+                // SAFETY: as below.
+                unsafe { core::ptr::write_unaligned(timerid, id) };
+                0
+            }
+            Err(e) => {
+                errno::set_errno(e);
+                -1
+            }
+        };
+    }
+    // Step 7, and the timer.
+    match posix_timer(
+        POSIX_TIMER_CREATE,
+        u64::from(clockid.cast_unsigned()),
+        sevp as u64,
+        0,
+        0,
+    ) {
+        Ok(id) => {
+            // SAFETY: `timerid` is non-null (step 6) and, by the caller's
+            // contract, a writable `timer_t`; written unaligned, as a C
+            // caller's may not be.
+            unsafe { core::ptr::write_unaligned(timerid, TimerT::try_from(id).unwrap_or(0)) };
+            0
+        }
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
 }
 
-/// Arm or disarm a per-process timer: `EINVAL`, since no timer exists.
+/// Arm, re-arm or disarm timer `timerid` (`TIMER_ABSTIME` in `flags` makes
+/// `it_value` a time on the timer's clock rather than an interval from now),
+/// and tell `*old_value` what it held, when that is not NULL: 0, or -1 with
+/// `errno` set. The kernel's, with Linux's answers: `EINVAL` for a NULL or
+/// malformed `new_value` and for an id that names no timer, `EFAULT` for a
+/// pointer it cannot read or write.
 ///
-/// [`timer_create`] makes none, so every `timerid` names no timer, and
-/// Linux's `do_timer_settime` answers that `EINVAL` (`lock_timer` finds
-/// nothing). Its other refusals are `EINVAL` as well -- a NULL
-/// `new_value`, an invalid `it_value` or `it_interval`, an unknown flag --
-/// all but `EFAULT` for an unreadable `new_value`, which could not be told
-/// from a readable one without reading it. So neither pointer is touched,
-/// and every call answers `EINVAL`, as the kernel's Linux ABI answers
-/// every call whose `new_value` it can read.
-///
-/// Until 2026-10-05 this stored the value in [`timer_create`]'s table and
-/// reported success; see there.
+/// Until 2026-10-16 every call was `EINVAL`, there being no timer to name.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn timer_settime(
-    _timerid: TimerT,
-    _flags: i32,
-    _new_value: *const Itimerspec,
-    _old_value: *mut Itimerspec,
+    timerid: TimerT,
+    flags: i32,
+    new_value: *const Itimerspec,
+    old_value: *mut Itimerspec,
 ) -> i32 {
-    errno::set_errno(errno::EINVAL);
-    -1
+    timer_answer(posix_timer(
+        POSIX_TIMER_SETTIME,
+        kernel_timer(timerid),
+        u64::from(flags.cast_unsigned()),
+        new_value as u64,
+        old_value as u64,
+    ))
 }
 
-/// Read a per-process timer: `EINVAL`, since no timer exists.
+/// What timer `timerid` holds, into `*curr_value`: the time to its next
+/// expiry and its period, zeros for a disarmed one. 0, or -1 with `errno`
+/// set: `EINVAL` for an id that names no timer, `EFAULT` for an unwritable
+/// `curr_value`. The kernel's.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) -> i32 {
+    timer_answer(posix_timer(
+        POSIX_TIMER_GETTIME,
+        kernel_timer(timerid),
+        curr_value as u64,
+        0,
+        0,
+    ))
+}
+
+/// Delete timer `timerid`, disarming it first: 0, or -1 with `EINVAL` for an
+/// id that names no timer. The kernel's.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn timer_delete(timerid: TimerT) -> i32 {
+    let ret = timer_answer(posix_timer(
+        POSIX_TIMER_DELETE,
+        kernel_timer(timerid),
+        0,
+        0,
+        0,
+    ));
+    // A `SIGEV_THREAD` timer's record goes with it, once the kernel's timer
+    // can send nothing more.
+    if ret == 0 {
+        thread_timers::forget(timerid);
+    }
+    ret
+}
+
+/// How many expiries of timer `timerid` its last signal stood for beyond
+/// the one it reported -- Linux's model: a periodic timer re-arms when its
+/// signal is taken, and the expiries it missed meanwhile are its overrun --
+/// or -1 with `EINVAL` for an id that names no timer. The kernel's.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn timer_getoverrun(timerid: TimerT) -> i32 {
+    match posix_timer(POSIX_TIMER_GETOVERRUN, kernel_timer(timerid), 0, 0, 0) {
+        Ok(n) => i32::try_from(n).unwrap_or(i32::MAX),
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// 0 for a done `answer`, or -1 with its errno set.
+fn timer_answer(answer: Result<i64, i32>) -> i32 {
+    match answer {
+        Ok(_) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SIGEV_THREAD timers
+// ---------------------------------------------------------------------------
+
+/// `SIGEV_THREAD` timers, glibc's way (`sysdeps/unix/sysv/linux/timer_*.c`,
+/// for its behaviour): one helper thread per process, made at the first
+/// such timer, blocks every signal and waits for the library's own,
+/// `SIGTIMER` (32). Each timer is a record of the library's -- the function,
+/// its value, the attributes its threads are made with -- and a kernel timer
+/// that sends `SIGTIMER` to the helper alone (`SIGEV_THREAD_ID`), carrying
+/// the record's address as its value. At each expiry the helper makes a new
+/// detached thread, which runs the function with every signal blocked --
+/// the helper's mask, which it starts with, as glibc's do (Linux 6.6.87,
+/// `build/d-tools/oracle-sigev-mask.c` in lane D's scratch tree). A `timer_t`
+/// is the record's address, halved, with
+/// its top bit set -- glibc's `timer_to_timerid` -- where a kernel timer's is
+/// its id.
 ///
-/// Linux's `do_timer_gettime` looks the timer up before
-/// `put_itimerspec64` writes `curr_value`, so an unknown `timerid` is
-/// `EINVAL` whatever `curr_value` is, and `curr_value` is not written --
-/// the kernel's Linux ABI answers the same.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn timer_gettime(_timerid: TimerT, _curr_value: *mut Itimerspec) -> i32 {
-    errno::set_errno(errno::EINVAL);
-    -1
-}
+/// Records live on a list the helper looks a signal's up in, so that one
+/// sent before its timer was deleted starts nothing. Not inherited by
+/// `fork`, as no timer is: the child forgets the list and the helper.
+pub(crate) mod thread_timers {
+    use super::{POSIX_TIMER_CREATE, Sigevent, TimerT, posix_timer};
+    use crate::errno;
+    use crate::signal::{SI_TIMER, SIGTIMER};
+    use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
-/// Delete a per-process timer: `EINVAL`, since no timer exists -- Linux's
-/// answer for an unknown `timerid`.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn timer_delete(_timerid: TimerT) -> i32 {
-    errno::set_errno(errno::EINVAL);
-    -1
-}
+    /// One `SIGEV_THREAD` timer.
+    pub(crate) struct Record {
+        /// The kernel's id for the timer behind it.
+        kernel_id: i32,
+        /// What its timer's signal carries ([`NEXT_SERIAL`]).
+        serial: usize,
+        /// `sigev_notify_function`.
+        function: extern "C" fn(usize),
+        /// `sigev_value`.
+        value: usize,
+        /// What its threads are made with.
+        attr: crate::pthread::LaterAttr,
+        /// The next on the list.
+        next: *mut Record,
+    }
 
-/// Read a per-process timer's overrun count: `EINVAL`, since no timer
-/// exists -- `sys_timer_getoverrun`'s `lock_timer` finds nothing.
-///
-/// Phase 149 made this look the id up instead of answering 0 for any;
-/// with no timers the lookup always misses.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn timer_getoverrun(_timerid: TimerT) -> i32 {
-    errno::set_errno(errno::EINVAL);
-    -1
+    /// What a timer's thread is started with.
+    struct Start {
+        function: extern "C" fn(usize),
+        value: usize,
+    }
+
+    /// The live records, newest first, under [`LOCK`].
+    static LIST: AtomicPtr<Record> = AtomicPtr::new(core::ptr::null_mut());
+    /// Guards [`LIST`] and the records on it. Taken only through [`held`],
+    /// with every signal blocked: `timer_settime` and its kin, which take
+    /// it, are async-signal-safe, and a handler calling one on a thread that
+    /// holds it would otherwise wait for itself.
+    static LOCK: AtomicI32 = AtomicI32::new(0);
+
+    /// Run `f` with [`LOCK`] held and every signal blocked in the calling
+    /// thread's kernel mask, so that no handler runs while it is held.
+    fn held<R>(f: impl FnOnce() -> R) -> R {
+        let _quiet = crate::signal::AllBlocked::new();
+        crate::lowlevellock::lll_lock(&LOCK);
+        let r = f();
+        crate::lowlevellock::lll_unlock(&LOCK);
+        r
+    }
+    /// The serial number the next record is given, which its timer's signal
+    /// carries to the helper: never given twice. A record's address, which
+    /// the signal carried until 2026-10-17, is given again -- freed by
+    /// `timer_delete`, a block `malloc` may hand the next `timer_create` --
+    /// and an expiry of the deleted timer the helper had already taken then
+    /// ran the new timer's function (Fable's review of lane D's round 205).
+    static NEXT_SERIAL: AtomicUsize = AtomicUsize::new(1);
+
+    /// The helper thread's kernel id; 0 before it has started.
+    static HELPER: AtomicI32 = AtomicI32::new(0);
+    /// Serialises the helper's start.
+    static START_LOCK: AtomicI32 = AtomicI32::new(0);
+
+    /// The top bit of a `timer_t` that names a record.
+    const RECORD_BIT: usize = 1 << (usize::BITS - 1);
+
+    /// `timer_create` of a `SIGEV_THREAD` event on clock `clockid`: the
+    /// `timer_t`, or the errno. `EINVAL` for an event with no function,
+    /// whose expiry glibc would call address 0 for; `EAGAIN` when the helper
+    /// thread cannot be made, as glibc answers; `ENOMEM` for no memory.
+    pub(crate) fn create(clockid: crate::types::ClockidT, ev: &Sigevent) -> Result<TimerT, i32> {
+        let function = ev.notify_function().ok_or(errno::EINVAL)?;
+        let attr = crate::pthread::LaterAttr::detached(ev.notify_attributes());
+        let helper = helper_tid()?;
+        let record = crate::malloc::malloc(core::mem::size_of::<Record>()).cast::<Record>();
+        if record.is_null() {
+            return Err(errno::ENOMEM);
+        }
+        let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
+        let event = Sigevent::to_thread(SIGTIMER, helper, serial);
+        let id = match posix_timer(
+            POSIX_TIMER_CREATE,
+            u64::from(clockid.cast_unsigned()),
+            (&raw const event) as u64,
+            0,
+            0,
+        ) {
+            Ok(id) => i32::try_from(id).unwrap_or(-1),
+            Err(e) => {
+                // SAFETY: the block malloc gave above, never shared.
+                unsafe { crate::malloc::free(record.cast()) };
+                return Err(e);
+            }
+        };
+        held(|| {
+            // SAFETY: `record` is a fresh block of a `Record`'s size, and the
+            // list is held.
+            unsafe {
+                record.write(Record {
+                    kernel_id: id,
+                    serial,
+                    function,
+                    value: ev.sigev_value,
+                    attr,
+                    next: LIST.load(Ordering::Relaxed),
+                });
+            }
+            LIST.store(record, Ordering::Relaxed);
+        });
+        Ok(RECORD_BIT | (record.addr() >> 1))
+    }
+
+    /// The record a `timer_t` names, if its top bit says it names one.
+    pub(crate) fn decode(timerid: TimerT) -> Option<*mut Record> {
+        (timerid & RECORD_BIT != 0).then(|| core::ptr::with_exposed_provenance_mut(timerid << 1))
+    }
+
+    /// The kernel's id for the timer behind `record` -- looked up on the
+    /// list, so that a `timer_t` naming no live record (deleted, or made up)
+    /// reaches the kernel as an id naming no timer, and is `EINVAL` there.
+    pub(crate) fn kernel_id(record: *mut Record) -> u64 {
+        let id = held(|| {
+            find(|r| r == record).map(|r| {
+                // SAFETY: a record on the list, which is held.
+                unsafe { (*r).kernel_id }
+            })
+        });
+        id.map_or(u64::from(u32::MAX), |id| u64::from(id.cast_unsigned()))
+    }
+
+    /// Take a deleted timer's record off the list and free it; nothing for a
+    /// `timer_t` that names no record.
+    pub(crate) fn forget(timerid: TimerT) {
+        let Some(record) = decode(timerid) else {
+            return;
+        };
+        let gone = held(|| unlink(record));
+        if gone {
+            // SAFETY: off the list now, so no one else reaches it; malloc's.
+            unsafe { crate::malloc::free(record.cast()) };
+        }
+    }
+
+    /// In a `fork`'s child: no timer and no helper came with it, so the list
+    /// and the helper are forgotten (the parent's records stay the
+    /// parent's; the child's copies of them are not freed, as nothing of
+    /// the child's names them).
+    pub(crate) fn forget_after_fork() {
+        LIST.store(core::ptr::null_mut(), Ordering::Relaxed);
+        HELPER.store(0, Ordering::Relaxed);
+        LOCK.store(0, Ordering::Relaxed);
+        START_LOCK.store(0, Ordering::Relaxed);
+    }
+
+    /// The first record on the list that `matches`, if one does. The list is
+    /// held.
+    fn find(matches: impl Fn(*mut Record) -> bool) -> Option<*mut Record> {
+        let mut at = LIST.load(Ordering::Relaxed);
+        while !at.is_null() {
+            if matches(at) {
+                return Some(at);
+            }
+            // SAFETY: a record on the list, which is held.
+            at = unsafe { (*at).next };
+        }
+        None
+    }
+
+    /// The live record whose timer's signal carries `serial`, if there is
+    /// one. The list is held.
+    fn find_serial(serial: usize) -> Option<*mut Record> {
+        find(|r| {
+            // SAFETY: a record on the list, which is held.
+            unsafe { (*r).serial == serial }
+        })
+    }
+
+    /// Take `record` off the list; whether it was on it. The list is held.
+    fn unlink(record: *mut Record) -> bool {
+        let mut prev: *mut Record = core::ptr::null_mut();
+        let mut at = LIST.load(Ordering::Relaxed);
+        while !at.is_null() {
+            // SAFETY: a record on the list, which is held.
+            let next = unsafe { (*at).next };
+            if at == record {
+                if prev.is_null() {
+                    LIST.store(next, Ordering::Relaxed);
+                } else {
+                    // SAFETY: `prev` is on the list, which is held.
+                    unsafe { (*prev).next = next };
+                }
+                return true;
+            }
+            prev = at;
+            at = next;
+        }
+        false
+    }
+
+    /// The helper thread's kernel id, starting it first if it has not
+    /// started: `EAGAIN` when it cannot be made.
+    fn helper_tid() -> Result<i32, i32> {
+        let tid = HELPER.load(Ordering::Acquire);
+        if tid != 0 {
+            return Ok(tid);
+        }
+        crate::lowlevellock::lll_lock(&START_LOCK);
+        let started = start_helper();
+        crate::lowlevellock::lll_unlock(&START_LOCK);
+        started
+    }
+
+    /// Make the helper, which runs with every signal blocked -- its
+    /// attribute's mask, which takes no signal before the thread has set it
+    /// -- and wait for it to say who it is. Under [`START_LOCK`].
+    fn start_helper() -> Result<i32, i32> {
+        let tid = HELPER.load(Ordering::Acquire);
+        if tid != 0 {
+            return Ok(tid);
+        }
+        crate::pthread::LaterAttr::detached(core::ptr::null())
+            .every_signal_blocked()
+            .create(helper_main, core::ptr::null_mut())
+            .map_err(|_| errno::EAGAIN)?;
+        loop {
+            let tid = HELPER.load(Ordering::Acquire);
+            if tid != 0 {
+                return Ok(tid);
+            }
+            let _ = crate::pthread::sched_yield();
+        }
+    }
+
+    /// The helper: block the library's own signals too, say who it is, and
+    /// for each `SIGTIMER` a live timer sent, start that timer's thread.
+    extern "C" fn helper_main(_: *mut u8) -> *mut u8 {
+        crate::signal::block_internal_signals();
+        HELPER.store(crate::process::gettid(), Ordering::Release);
+        loop {
+            let Ok((_, record)) = crate::signal::take_internal(SIGTIMER) else {
+                continue;
+            };
+            if record.code == SI_TIMER {
+                start_one(usize::try_from(record.value).unwrap_or(0));
+            }
+        }
+    }
+
+    /// One expiry of the timer whose signal carries `serial`: a thread to run
+    /// its function, if its record is still live. A thread that cannot be
+    /// made, or a start record that cannot be allocated, loses that expiry,
+    /// as glibc's does.
+    fn start_one(serial: usize) {
+        let found = held(|| {
+            find_serial(serial).map(|r| {
+                // SAFETY: a record on the list, which is held.
+                unsafe { ((*r).function, (*r).value, (*r).attr) }
+            })
+        });
+        let Some((function, value, attr)) = found else {
+            return;
+        };
+        let start = crate::malloc::malloc(core::mem::size_of::<Start>()).cast::<Start>();
+        if start.is_null() {
+            return;
+        }
+        // SAFETY: a fresh block of a `Start`'s size.
+        unsafe { start.write(Start { function, value }) };
+        if attr.create(timer_thread, start.cast()).is_err() {
+            // SAFETY: never handed to a thread.
+            unsafe { crate::malloc::free(start.cast()) };
+        }
+    }
+
+    /// A timer's thread: the function run, with every signal blocked -- the
+    /// helper's mask, which a thread starts with, as glibc's timer threads
+    /// run theirs.
+    extern "C" fn timer_thread(arg: *mut u8) -> *mut u8 {
+        let start = arg.cast::<Start>();
+        // SAFETY: the block `start_one` filled and handed over, freed once.
+        let Start { function, value } = unsafe { start.read() };
+        // SAFETY: as above.
+        unsafe { crate::malloc::free(arg) };
+        function(value);
+        core::ptr::null_mut()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        extern "C" fn nothing(_: usize) {}
+
+        /// An expiry finds its timer's record by the serial its signal
+        /// carries, not by the record's address: a record made in a deleted
+        /// one's block, as `malloc` may make it, is not found for the deleted
+        /// timer's expiry.
+        #[test]
+        fn an_expiry_finds_its_record_by_serial() {
+            let block = crate::malloc::malloc(core::mem::size_of::<Record>()).cast::<Record>();
+            assert!(!block.is_null());
+            let make = |serial: usize| {
+                held(|| {
+                    // SAFETY: a block of a `Record`'s size, off the list.
+                    unsafe {
+                        block.write(Record {
+                            kernel_id: 1,
+                            serial,
+                            function: nothing,
+                            value: 0,
+                            attr: crate::pthread::LaterAttr::detached(core::ptr::null()),
+                            next: LIST.load(Ordering::Relaxed),
+                        });
+                    }
+                    LIST.store(block, Ordering::Relaxed);
+                });
+            };
+            make(11);
+            assert_eq!(held(|| find_serial(11)), Some(block));
+            assert!(held(|| unlink(block)));
+            make(12);
+            assert_eq!(held(|| find_serial(11)), None, "the deleted timer's");
+            assert_eq!(held(|| find_serial(12)), Some(block));
+            assert!(held(|| unlink(block)));
+            // SAFETY: off the list, malloc's.
+            unsafe { crate::malloc::free(block.cast()) };
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2779,15 +3514,11 @@ pub const ITIMER_VIRTUAL: i32 = 1;
 /// Profiling timer (user + system CPU time).
 pub const ITIMER_PROF: i32 = 2;
 
-// There is no per-timer-type storage here any more. `setitimer`/`getitimer`
-// reach the kernel's one real interval timer through `SYS_ITIMER_SET` and
-// `SYS_ITIMER_GET`; the table that used to answer for all three types, while
-// arming nothing, is gone with the doc comment that counted them.
-
-/// Ask the kernel to arm, re-arm or disarm the real interval timer.
+/// Ask the kernel to arm, re-arm or disarm interval timer `which` --
+/// `ITIMER_REAL`, `ITIMER_VIRTUAL` or `ITIMER_PROF`, already checked.
 ///
 /// Returns `(prev_value_ns, prev_interval_ns)`, or a negative first element
-/// carrying `-errno`.
+/// carrying the native error.
 ///
 /// **On a host build there is no kernel, so this simulates.** That is the same
 /// split `pipe.rs` uses, and it is not a return of the bug this replaced: the
@@ -2795,16 +3526,22 @@ pub const ITIMER_PROF: i32 = 2;
 /// success. Here the target really arms, and the host keeps a store so that
 /// `cargo test` still exercises the validation order and the `Timeval`↔ns
 /// conversions either side of it -- which is the libc-side logic, and the only
-/// part a host test can be about. Whether a `SIGALRM` actually arrives is a
-/// kernel question, answered by the kernel's own self-test for 1069/1070.
-pub(crate) fn itimer_kernel_set(value_ns: u64, interval_ns: u64) -> (i64, i64) {
+/// part a host test can be about. Whether a signal actually arrives is a
+/// kernel question, answered by the kernel's own self-tests for 1069/1070 and
+/// by `services/ctest-itimers`.
+pub(crate) fn itimer_kernel_set(which: i32, value_ns: u64, interval_ns: u64) -> (i64, i64) {
     #[cfg(target_os = "none")]
     {
-        crate::syscall::syscall3_2ret(crate::syscall::SYS_ITIMER_SET, 0, value_ns, interval_ns)
+        crate::syscall::syscall3_2ret(
+            crate::syscall::SYS_ITIMER_SET,
+            u64::from(which.cast_unsigned()),
+            value_ns,
+            interval_ns,
+        )
     }
     #[cfg(not(target_os = "none"))]
     {
-        let prev = host_itimer::swap(value_ns, interval_ns);
+        let prev = host_itimer::swap(which, value_ns, interval_ns);
         (
             i64::try_from(prev.0).unwrap_or(i64::MAX),
             i64::try_from(prev.1).unwrap_or(i64::MAX),
@@ -2812,16 +3549,21 @@ pub(crate) fn itimer_kernel_set(value_ns: u64, interval_ns: u64) -> (i64, i64) {
     }
 }
 
-/// Read the real interval timer without disturbing it. See
+/// Read interval timer `which` without disturbing it. See
 /// [`itimer_kernel_set`] for why the host arm simulates.
-fn itimer_kernel_get() -> (i64, i64) {
+fn itimer_kernel_get(which: i32) -> (i64, i64) {
     #[cfg(target_os = "none")]
     {
-        crate::syscall::syscall3_2ret(crate::syscall::SYS_ITIMER_GET, 0, 0, 0)
+        crate::syscall::syscall3_2ret(
+            crate::syscall::SYS_ITIMER_GET,
+            u64::from(which.cast_unsigned()),
+            0,
+            0,
+        )
     }
     #[cfg(not(target_os = "none"))]
     {
-        let cur = host_itimer::peek();
+        let cur = host_itimer::peek(which);
         (
             i64::try_from(cur.0).unwrap_or(i64::MAX),
             i64::try_from(cur.1).unwrap_or(i64::MAX),
@@ -2829,7 +3571,7 @@ fn itimer_kernel_get() -> (i64, i64) {
     }
 }
 
-/// Host-only stand-in for the kernel's one real interval timer.
+/// Host-only stand-in for the kernel's three interval timers.
 ///
 /// Per-*thread* rather than per-process: `cargo test` runs every test on its
 /// own thread inside one process, so a process-global store would let one
@@ -2839,17 +3581,31 @@ mod host_itimer {
     use core::cell::Cell;
 
     std::thread_local! {
-        static REAL: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+        static TIMERS: [Cell<(u64, u64)>; 3] = const {
+            [Cell::new((0, 0)), Cell::new((0, 0)), Cell::new((0, 0))]
+        };
     }
 
-    /// Install `(value_ns, interval_ns)`, returning what was there before.
-    pub(super) fn swap(value_ns: u64, interval_ns: u64) -> (u64, u64) {
-        REAL.with(|r| r.replace((value_ns, interval_ns)))
+    /// Install `(value_ns, interval_ns)` in timer `which`, returning what
+    /// was there before. Disarming `ITIMER_REAL` drops its interval; a
+    /// CPU-time timer keeps it, as Linux's `do_setitimer` does.
+    pub(super) fn swap(which: i32, value_ns: u64, interval_ns: u64) -> (u64, u64) {
+        let kept = if value_ns == 0 && which == super::ITIMER_REAL {
+            (0, 0)
+        } else {
+            (value_ns, interval_ns)
+        };
+        TIMERS.with(|t| t.get(slot(which)).map_or((0, 0), |c| c.replace(kept)))
     }
 
-    /// Read without disturbing.
-    pub(super) fn peek() -> (u64, u64) {
-        REAL.with(Cell::get)
+    /// Read timer `which` without disturbing it.
+    pub(super) fn peek(which: i32) -> (u64, u64) {
+        TIMERS.with(|t| t.get(slot(which)).map_or((0, 0), Cell::get))
+    }
+
+    /// `which`'s place in [`TIMERS`]; the callers have checked it.
+    fn slot(which: i32) -> usize {
+        usize::try_from(which).unwrap_or(usize::MAX)
     }
 }
 
@@ -2891,18 +3647,14 @@ fn itimer_timeval_valid(tv: &Timeval) -> bool {
     tv.tv_sec >= 0 && tv.tv_usec >= 0 && tv.tv_usec < 1_000_000
 }
 
-/// Set an interval timer.
-///
-/// Stores the timer value so `getitimer` can retrieve it.  The timer never
-/// actually fires, so programs using `setitimer` for periodic alarms get no
-/// SIGALRM/SIGVTALRM/SIGPROF -- though they do see their own settings
-/// reflected back, which is the part that makes this hard to notice.
-///
-/// **Not "because we don't have signal delivery", which is what this said
-/// until 2026-09-09.** Signals are delivered (`signal.rs`'s trampoline).
-/// Nothing here asks the kernel for a timer: `proc/itimer.rs` implements this
-/// with a real `SIGALRM` but is reachable only through the Linux-ABI table.
-/// See [`crate::unistd::alarm`] for the full position and the request.
+/// Set an interval timer, the kernel's (`SYS_ITIMER_SET`): `ITIMER_REAL`
+/// counts wall-clock time and raises `SIGALRM` -- it is `alarm`'s timer too
+/// -- `ITIMER_VIRTUAL` the process's user time and raises `SIGVTALRM`, and
+/// `ITIMER_PROF` its user plus system time and raises `SIGPROF`, the last two
+/// checked at the kernel's 10 ms tick. A non-zero `it_interval` re-arms it
+/// after each signal; a zero `it_value` disarms it. `*old_value`, when
+/// asked, is what the timer held before. Until 2026-10-16 the two CPU-time
+/// timers were `ENOSYS`, the kernel keeping no processor time to count.
 ///
 /// Argument-domain validation (Linux-matching):
 ///   - `which` ∉ {ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF} → EINVAL.
@@ -2952,20 +3704,9 @@ pub extern "C" fn setitimer(
         return -1;
     }
 
-    // Only ITIMER_REAL exists. The kernel refuses the other two outright, and
-    // the previous code answered for all three out of a table it kept itself --
-    // which is how a program could set a profiling timer, read it back
-    // unchanged, and wait forever for a signal that nothing was going to send.
-    // Refusing is the same call `setgroups` made (design-decisions.md §1004):
-    // a caller told ENOSYS can choose a fallback, a caller told 0 cannot.
-    if which != ITIMER_REAL {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
-    }
-
     let value_ns = itimer_timeval_to_ns(&val.it_value);
     let interval_ns = itimer_timeval_to_ns(&val.it_interval);
-    let (prev_value, prev_interval) = itimer_kernel_set(value_ns, interval_ns);
+    let (prev_value, prev_interval) = itimer_kernel_set(which, value_ns, interval_ns);
     // `rax` carries the previous value on success and `-errno` on failure.
     // The two can never be confused: the kernel saturates its nanosecond
     // answer at `i64::MAX`, so a success is never negative.
@@ -2990,10 +3731,10 @@ pub extern "C" fn setitimer(
     0
 }
 
-/// Get the current value of an interval timer.
-///
-/// Returns the value last set by `setitimer`, or zeros if never set.
-/// The timer never actually counts down (no kernel timer integration).
+/// Get the current value of an interval timer: the kernel's, the time still
+/// to go before its next signal (for a CPU-time one, the processor time still
+/// to use) and its period; zeros when it is disarmed, though a disarmed
+/// CPU-time timer still reports the period it was given, as Linux's does.
 ///
 /// # Safety
 ///
@@ -3009,12 +3750,7 @@ pub extern "C" fn getitimer(which: i32, curr_value: *mut Itimerval) -> i32 {
         return -1;
     }
 
-    if which != ITIMER_REAL {
-        errno::set_errno(errno::ENOSYS);
-        return -1;
-    }
-
-    let (value_ns, interval_ns) = itimer_kernel_get();
+    let (value_ns, interval_ns) = itimer_kernel_get(which);
     if crate::errno::translate(value_ns) < 0 {
         return -1;
     }
@@ -3098,27 +3834,29 @@ pub extern "C" fn stime(t: *const TimeT) -> i32 {
     settimeofday(&raw const tv, core::ptr::null())
 }
 
-/// The CPU-time clock of process `pid`, into `*clock_id`; the error number
-/// on failure, as POSIX has it return. The calling process's own clock is
-/// `CLOCK_PROCESS_CPUTIME_ID`. Another process's CPU time is not something
-/// this system can read -- `clock_gettime` has no clock for it -- so an
-/// existing other process is `EPERM` (the error POSIX gives for "may not
-/// access that clock") rather than a clock id every later call would refuse,
-/// and one that does not exist is `ESRCH`.
+/// The CPU-time clock of process `pid` (0 the caller), into `*clock_id`; the
+/// error number on failure, as POSIX has it return, `errno` untouched.
+///
+/// glibc's: the id is computed from the pid (`MAKE_PROCESS_CPUCLOCK(pid,
+/// CPUCLOCK_SCHED)`, so the caller's is that of pid 0, not
+/// `CLOCK_PROCESS_CPUTIME_ID`), and asking the kernel for its resolution
+/// checks it -- `EINVAL` there means no such process, `ESRCH`. Any process's
+/// clock may be read, as on Linux. `EFAULT` for a NULL `clock_id`, where
+/// glibc's writes through it.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_getcpuclockid(pid: PidT, clock_id: *mut ClockidT) -> i32 {
-    if pid == 0 || pid == crate::process::getpid() {
-        // SAFETY: NULL or the caller's `clockid_t`.
-        let Some(out) = (unsafe { clock_id.as_mut() }) else {
-            return errno::EFAULT;
-        };
-        *out = CLOCK_PROCESS_CPUTIME_ID;
-        return 0;
+    let pidclock = make_process_cpuclock(pid, CPUCLOCK_SCHED);
+    match cpu_clock(CPU_CLOCK_GETRES, pidclock) {
+        Ok(_) => {}
+        Err(errno::EINVAL) => return errno::ESRCH,
+        Err(e) => return e,
     }
-    let saved = errno::get_errno();
-    let exists = crate::signal::kill(pid, 0) == 0 || errno::get_errno() == errno::EPERM;
-    errno::set_errno(saved);
-    if exists { errno::EPERM } else { errno::ESRCH }
+    // SAFETY: NULL or the caller's `clockid_t`.
+    let Some(out) = (unsafe { clock_id.as_mut() }) else {
+        return errno::EFAULT;
+    };
+    *out = pidclock;
+    0
 }
 
 #[cfg(test)]
@@ -3161,12 +3899,146 @@ mod tests {
         }
     }
 
+    /// glibc's id for the caller's clock is pid 0's, `(~0 << 3) | 2`, not
+    /// `CLOCK_PROCESS_CPUTIME_ID`, and it reads as a clock.
     #[test]
-    fn clock_getcpuclockid_of_self_is_the_process_clock() {
-        let mut id: ClockidT = -1;
+    fn clock_getcpuclockid_of_self_is_pid_zeros_clock() {
+        let mut id: ClockidT = 99;
         assert_eq!(clock_getcpuclockid(0, &raw mut id), 0);
-        assert_eq!(id, CLOCK_PROCESS_CPUTIME_ID);
+        assert_eq!(id, -6);
+        let mut ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
+        assert_eq!(clock_gettime(id, &raw mut ts), 0);
+        assert!(ts.tv_sec >= 0 && valid_nanoseconds(ts.tv_nsec), "{ts:?}");
         assert_eq!(clock_getcpuclockid(0, core::ptr::null_mut()), errno::EFAULT);
+    }
+
+    /// A pid the kernel answers `EINVAL` for is no process: `ESRCH`, and
+    /// `*clock_id` untouched.
+    #[test]
+    fn clock_getcpuclockid_of_a_gone_process_is_esrch() {
+        let mut id: ClockidT = 99;
+        errno::set_errno(0);
+        assert_eq!(clock_getcpuclockid(31_337, &raw mut id), errno::ESRCH);
+        assert_eq!(id, 99);
+        assert_eq!(errno::get_errno(), 0, "errno is the return value's");
+    }
+
+    /// The ids are Linux's (`include/linux/posix-timers_types.h`), for a
+    /// process and for a thread.
+    #[test]
+    fn cpu_clock_ids_are_linuxs() {
+        assert_eq!(make_process_cpuclock(0, CPUCLOCK_SCHED), -6);
+        assert_eq!(make_process_cpuclock(1, CPUCLOCK_SCHED), -14);
+        assert_eq!(make_process_cpuclock(1234, 0), !1234 << 3);
+        assert_eq!(make_thread_cpuclock(1234, CPUCLOCK_SCHED), (!1234 << 3) | 6);
+        assert!(is_clockfd((!5 << 3) | 3));
+        assert!(!is_clockfd(make_thread_cpuclock(5, CPUCLOCK_SCHED)));
+        assert!(!is_clockfd(CLOCK_THREAD_CPUTIME_ID));
+        for id in [
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            -6,
+            (!5 << 3) | 3,
+        ] {
+            assert!(is_cpu_clock(id), "{id}");
+        }
+        for id in [CLOCK_REALTIME, CLOCK_MONOTONIC, CLOCK_BOOTTIME, 11] {
+            assert!(!is_cpu_clock(id), "{id}");
+        }
+    }
+
+    /// The kernel's answers: nanoseconds, a negated Linux errno, or -- from
+    /// a kernel without the call -- no such clock.
+    #[test]
+    fn cpu_clock_answers_are_read_as_linuxs() {
+        assert_eq!(cpu_clock_answer(0), Ok(0));
+        assert_eq!(cpu_clock_answer(1_500_000_000), Ok(1_500_000_000));
+        assert_eq!(cpu_clock_answer(-22), Err(errno::EINVAL));
+        assert_eq!(cpu_clock_answer(-1), Err(errno::EPERM));
+        assert_eq!(
+            cpu_clock_answer(errno::native::NO_SUCH_SYSCALL),
+            Err(errno::EINVAL)
+        );
+    }
+
+    /// A CPU-time clock's errors come before the copy-out, as Linux's do: a
+    /// clock naming nothing is EINVAL even with a NULL `tp`, an existing one
+    /// with a NULL `tp` EFAULT; `clock_getres` takes a NULL `res`.
+    #[test]
+    fn cpu_clock_reads_check_the_clock_before_the_pointer() {
+        let gone = make_process_cpuclock(31_337, CPUCLOCK_SCHED);
+        errno::set_errno(0);
+        assert_eq!(clock_gettime(gone, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(
+            clock_gettime(CLOCK_PROCESS_CPUTIME_ID, core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(
+            clock_getres(CLOCK_THREAD_CPUTIME_ID, core::ptr::null_mut()),
+            0
+        );
+        let mut res = Timespec {
+            tv_sec: 9,
+            tv_nsec: 9,
+        };
+        assert_eq!(clock_getres(-6, &raw mut res), 0);
+        assert_eq!((res.tv_sec, res.tv_nsec), (0, 1));
+        errno::set_errno(0);
+        assert_eq!(clock_getres(gone, &raw mut res), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `clock_settime` of another process's clock is EPERM, of one naming
+    /// nothing EINVAL, both after a NULL `tp`'s EFAULT; the caller's own two
+    /// stay read-only, EINVAL.
+    #[test]
+    fn cpu_clocks_cannot_be_set() {
+        let ts = Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        };
+        for (id, want) in [
+            (-6, errno::EPERM),
+            (make_process_cpuclock(31_337, CPUCLOCK_SCHED), errno::EINVAL),
+            ((!0 << 3) | 3, errno::EINVAL),
+            (CLOCK_PROCESS_CPUTIME_ID, errno::EINVAL),
+            (CLOCK_THREAD_CPUTIME_ID, errno::EINVAL),
+        ] {
+            errno::set_errno(0);
+            assert_eq!(clock_settime(id, &raw const ts), -1, "{id}");
+            assert_eq!(errno::get_errno(), want, "{id}");
+        }
+        errno::set_errno(0);
+        assert_eq!(clock_settime(-6, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// `clock_nanosleep` on a CPU-time clock: a clock named by descriptor
+    /// cannot sleep, then the request is checked, before the kernel is asked.
+    #[test]
+    fn cpu_clock_sleeps_check_in_linuxs_order() {
+        let bad = Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
+        assert_eq!(
+            clock_nanosleep((!0 << 3) | 3, 0, core::ptr::null(), core::ptr::null_mut()),
+            errno::EOPNOTSUPP
+        );
+        assert_eq!(
+            clock_nanosleep(-6, 0, core::ptr::null(), core::ptr::null_mut()),
+            errno::EFAULT
+        );
+        assert_eq!(
+            clock_nanosleep(-6, 0, &raw const bad, core::ptr::null_mut()),
+            errno::EINVAL
+        );
     }
 
     /// Create a zeroed Tm.
@@ -5515,15 +6387,20 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
-    /// Per-error-class: negative clock_id → EINVAL.
+    /// A negative clock id is a CPU-time clock's, which Linux reads when it
+    /// names one: -7 is the caller's own process clock of user time
+    /// (`(~0 << 3) | CPUCLOCK_VIRT`), and -1, of kind 3 (`CPUCLOCK_MAX`), is
+    /// no clock at all -- EINVAL. (Every negative id was EINVAL until
+    /// 2026-10-16; Linux 6.6.87's answers, `build/d-tools/oracle-negclock.c`.)
     #[test]
     fn test_clock_gettime_negative_clock_einval_phase150() {
         let mut ts = Timespec {
             tv_sec: 0,
             tv_nsec: 0,
         };
+        assert_eq!(clock_gettime(-7, &raw mut ts), 0);
         crate::errno::set_errno(0);
-        let ret = clock_gettime(-7, &raw mut ts);
+        let ret = clock_gettime(-1, &raw mut ts);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -5698,8 +6575,11 @@ mod tests {
     /// past that boundary. Safe to call unilaterally: libtest gives each
     /// test its own thread, so this cannot disarm another test's timer.
     fn reset_itimer() {
-        // The previous value is not wanted: this only disarms.
-        let _ = super::host_itimer::swap(0, 0);
+        // The previous values are not wanted: this only disarms, and drops
+        // the periods a disarmed CPU-time timer keeps.
+        for which in [ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF] {
+            let _ = super::host_itimer::swap(which, 0, 0);
+        }
     }
 
     /// A `Sigevent` with only the two fields `timer_create` reads set.
@@ -5710,6 +6590,15 @@ mod tests {
             sigev_notify: notify,
             _pad: [0u8; 48],
         }
+    }
+
+    /// A `SIGEV_THREAD` event with a function, `signo` in it.
+    fn sev_thread(signo: i32) -> Sigevent {
+        extern "C" fn notified(_: usize) {}
+        let mut ev = sev(SIGEV_THREAD, signo);
+        let f = notified as extern "C" fn(usize) as usize as u64;
+        ev._pad[..8].copy_from_slice(&f.to_ne_bytes());
+        ev
     }
 
     /// `timer_create`'s call, with `*timerid` preset to a sentinel: the
@@ -5734,9 +6623,11 @@ mod tests {
 
     /// Every clock that can be armed, with every well-formed event --
     /// none, `SIGEV_NONE`, `SIGEV_SIGNAL` at both ends of the signal
-    /// range, `SIGEV_THREAD`, `SIGEV_THREAD_ID` -- passes the checks and is
-    /// refused ENOSYS, and `*timerid` is never written. Each was a slot
-    /// and 0 until 2026-10-05.
+    /// range, `SIGEV_THREAD`, `SIGEV_THREAD_ID` -- passes the checks and
+    /// reaches the kernel, which on a host is one without the call: ENOSYS,
+    /// and `*timerid` is never written. (`SIGEV_THREAD` is the library's
+    /// own: `test_a_sigev_thread_timer_needs_its_function_and_its_helper`.)
+    /// Each was a slot and 0 until 2026-10-05.
     #[test]
     fn test_timer_create_answers_enosys_once_its_checks_pass() {
         let events = [
@@ -5745,7 +6636,6 @@ mod tests {
             Some(sev(SIGEV_SIGNAL, crate::signal::SIGALRM)),
             Some(sev(SIGEV_SIGNAL, 1)),
             Some(sev(SIGEV_SIGNAL, crate::signal::SIGRTMAX)),
-            Some(sev(SIGEV_THREAD, 0)),
             Some(sev(SIGEV_THREAD_ID, crate::signal::SIGALRM)),
         ];
         for clock in ARMABLE_CLOCKS {
@@ -5793,10 +6683,12 @@ mod tests {
     /// An unknown clock is EINVAL, and is checked first: a bad event and a
     /// NULL `timerid` beside it do not change the answer. 8 and 9 are
     /// Linux's `_ALARM` clocks and 11 is `CLOCK_TAI`, which this library
-    /// does not know; 10 is `CLOCK_SGI_CYCLE`, which Linux does not.
+    /// does not know; 10 is `CLOCK_SGI_CYCLE`, which Linux does not. A
+    /// negative id is no unknown clock but a CPU-time clock's:
+    /// `test_timer_create_on_cpu_clock_ids_checks_in_linuxs_order`.
     #[test]
     fn test_timer_create_unknown_clock_einval_before_everything() {
-        for clock in [8, 9, 10, 11, 42, 99, 0x4243, -1, i32::MIN, i32::MAX] {
+        for clock in [8, 9, 10, 11, 42, 99, 0x4243, i32::MAX] {
             for ev in [None, Some(sev(99, 0)), Some(sev(SIGEV_SIGNAL, 0))] {
                 let (r, e, untouched) = create(clock, ev.as_ref());
                 assert_eq!((r, e), (-1, crate::errno::EINVAL), "clock {clock}");
@@ -5813,6 +6705,78 @@ mod tests {
                 "clock {clock}"
             );
         }
+    }
+
+    /// A negative clock id is a CPU-time clock's, which Linux 6.6.87 orders
+    /// so: a clock named by descriptor has no `timer_create`, EOPNOTSUPP
+    /// before anything; a NULL `timerid` is EFAULT before the clock is
+    /// looked at; then one naming no process or thread, or of no kind, is
+    /// EINVAL -- the kernel's answer, which the host's stand-in gives too.
+    /// The caller's own clock (-6) reaches the kernel: on a host, ENOSYS.
+    #[test]
+    fn test_timer_create_on_cpu_clock_ids_checks_in_linuxs_order() {
+        let gone = make_process_cpuclock(31_337, CPUCLOCK_SCHED);
+        for clock in [-1, i32::MIN, gone] {
+            assert_eq!(
+                create(clock, None),
+                (-1, crate::errno::EINVAL, true),
+                "{clock}"
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(
+                timer_create(clock, core::ptr::null(), core::ptr::null_mut()),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT, "{clock}");
+        }
+        let fd_clock = (!3 << 3) | 3;
+        assert_eq!(create(fd_clock, None), (-1, crate::errno::EOPNOTSUPP, true));
+        crate::errno::set_errno(0);
+        assert_eq!(
+            timer_create(fd_clock, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        assert_eq!(create(-6, None), (-1, crate::errno::ENOSYS, true));
+    }
+
+    /// The kernel's answers to `SYS_POSIX_TIMER`: a value, a negated Linux
+    /// errno, or -- from a kernel without the call -- ENOSYS for a create
+    /// and EINVAL, no such timer, for the rest.
+    #[test]
+    fn posix_timer_answers_are_read_as_linuxs() {
+        assert_eq!(posix_timer_answer(POSIX_TIMER_CREATE, 3), Ok(3));
+        assert_eq!(
+            posix_timer_answer(POSIX_TIMER_CREATE, -11),
+            Err(crate::errno::EAGAIN)
+        );
+        let none = crate::errno::native::NO_SUCH_SYSCALL;
+        assert_eq!(
+            posix_timer_answer(POSIX_TIMER_CREATE, none),
+            Err(crate::errno::ENOSYS)
+        );
+        for op in [
+            POSIX_TIMER_SETTIME,
+            POSIX_TIMER_GETTIME,
+            POSIX_TIMER_GETOVERRUN,
+            POSIX_TIMER_DELETE,
+        ] {
+            assert_eq!(
+                posix_timer_answer(op, none),
+                Err(crate::errno::EINVAL),
+                "{op}"
+            );
+        }
+        assert_eq!(posix_timer_answer(POSIX_TIMER_GETOVERRUN, 5), Ok(5));
+    }
+
+    /// A `timer_t` reaches the kernel as the `int` in it, as glibc's does.
+    #[test]
+    fn a_timer_t_is_the_kernels_int() {
+        assert_eq!(kernel_timer(0), 0);
+        assert_eq!(kernel_timer(7), 7);
+        assert_eq!(kernel_timer(0x1_0000_0007), 7);
+        assert_eq!(kernel_timer(usize::MAX), u64::from(u32::MAX));
     }
 
     /// An unrecognised `sigev_notify` is EINVAL (`good_sigevent`), and
@@ -5856,17 +6820,56 @@ mod tests {
                 assert!(untouched, "notify {notify}, signo {signo}");
             }
         }
-        for notify in [SIGEV_NONE, SIGEV_THREAD] {
-            for signo in [0, -1, past, i32::MAX, i32::MIN] {
-                let (r, e, untouched) = create(CLOCK_MONOTONIC, Some(&sev(notify, signo)));
-                assert_eq!(
-                    (r, e),
-                    (-1, crate::errno::ENOSYS),
-                    "notify {notify}, signo {signo}"
-                );
-                assert!(untouched, "notify {notify}, signo {signo}");
-            }
+        for signo in [0, -1, past, i32::MAX, i32::MIN] {
+            let (r, e, untouched) = create(CLOCK_MONOTONIC, Some(&sev(SIGEV_NONE, signo)));
+            assert_eq!(
+                (r, e),
+                (-1, crate::errno::ENOSYS),
+                "SIGEV_NONE, signo {signo}"
+            );
+            assert!(untouched, "SIGEV_NONE, signo {signo}");
+            // A SIGEV_THREAD event's number is not looked at: on a host its
+            // helper thread cannot be made, which is EAGAIN, never EINVAL.
+            let (r, e, untouched) = create(CLOCK_MONOTONIC, Some(&sev_thread(signo)));
+            assert_eq!(
+                (r, e),
+                (-1, crate::errno::EAGAIN),
+                "SIGEV_THREAD, signo {signo}"
+            );
+            assert!(untouched, "SIGEV_THREAD, signo {signo}");
         }
+    }
+
+    /// A `SIGEV_THREAD` event needs a function -- glibc's would call address
+    /// 0 at the first expiry; here it is EINVAL -- and a helper thread to
+    /// take its timers' signal, which a host cannot make: EAGAIN, glibc's
+    /// answer when it cannot make its own.
+    #[test]
+    fn test_a_sigev_thread_timer_needs_its_function_and_its_helper() {
+        assert_eq!(
+            create(CLOCK_MONOTONIC, Some(&sev(SIGEV_THREAD, 0))),
+            (-1, crate::errno::EINVAL, true)
+        );
+        assert_eq!(
+            create(CLOCK_MONOTONIC, Some(&sev_thread(0))),
+            (-1, crate::errno::EAGAIN, true)
+        );
+    }
+
+    /// A `timer_t` names a `SIGEV_THREAD` timer's record as glibc's does:
+    /// the address halved, its top bit set. One naming no live record
+    /// reaches the kernel as an id naming no timer, and deleting one frees
+    /// nothing.
+    #[test]
+    fn test_a_thread_timers_timer_t_is_its_record() {
+        let top = 1usize << (usize::BITS - 1);
+        let addr = 0x7f00_1234_5670usize;
+        let id = top | (addr >> 1);
+        assert_eq!(thread_timers::decode(id).map(|p| p.addr()), Some(addr));
+        assert!(thread_timers::decode(7).is_none(), "a kernel timer's id");
+        assert_eq!(kernel_timer(id), u64::from(u32::MAX), "no live record");
+        assert_eq!(kernel_timer(7), 7);
+        thread_timers::forget(id);
     }
 
     /// Phase 147: a NULL `timerid` is EFAULT, as Linux's `copy_to_user`
@@ -5952,7 +6955,7 @@ mod tests {
         assert_eq!(warnings, 0, "timeout would print a warning on every run");
         // The fallback: alarm (5), which arms the one real interval timer.
         assert_eq!(crate::unistd::alarm(5), 0);
-        assert_eq!(super::host_itimer::peek(), (5_000_000_000, 0));
+        assert_eq!(super::host_itimer::peek(ITIMER_REAL), (5_000_000_000, 0));
         reset_itimer();
     }
 
@@ -6085,28 +7088,50 @@ mod tests {
                 tv_usec: 0,
             },
         };
-        // ITIMER_REAL is the one that exists.
-        assert_eq!(
-            setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()),
-            0
-        );
-        // The other two are accepted by the ARGUMENT check -- they are valid
-        // `which` values, so this is not EINVAL -- and then refused, because
-        // neither is implemented. Until 2026-09-12 all three returned 0 out of
-        // a table this module kept, so a program could set a profiling timer,
-        // read it back unchanged, and wait forever for a signal nothing was
-        // going to send. The errno is the assertion that matters here: ENOSYS
-        // and not EINVAL is what distinguishes "not built" from "you asked
-        // wrongly", and only the first is true of these.
-        for which in [ITIMER_VIRTUAL, ITIMER_PROF] {
-            errno::set_errno(0);
+        // All three are the kernel's now: the CPU-time two were ENOSYS until
+        // 2026-10-16, the kernel keeping no processor time to count.
+        for which in [ITIMER_REAL, ITIMER_VIRTUAL, ITIMER_PROF] {
             assert_eq!(
                 setitimer(which, &raw const val, core::ptr::null_mut()),
-                -1,
-                "setitimer({which}) must not claim to have armed a timer"
+                0,
+                "which={which}"
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS, "which={which}");
         }
+    }
+
+    /// Each of the three is its own timer, and `which` reaches the kernel:
+    /// what one is set to the others do not report. A disarmed CPU-time
+    /// timer keeps its period, as Linux's does; a disarmed real one does not.
+    #[test]
+    fn test_setitimer_reaches_the_timer_it_names() {
+        reset_itimer();
+        for (which, secs) in [(ITIMER_REAL, 3), (ITIMER_VIRTUAL, 5), (ITIMER_PROF, 7)] {
+            let val = itimerval(secs, 0, secs * 10, 0);
+            assert_eq!(setitimer(which, &raw const val, core::ptr::null_mut()), 0);
+        }
+        for (which, secs) in [(ITIMER_REAL, 3), (ITIMER_VIRTUAL, 5), (ITIMER_PROF, 7)] {
+            let mut out = itimerval(-1, -1, -1, -1);
+            assert_eq!(getitimer(which, &raw mut out), 0);
+            assert_eq!(
+                (out.it_interval.tv_sec, out.it_value.tv_sec),
+                (secs, secs * 10),
+                "which={which}"
+            );
+        }
+        let off = itimerval(9, 0, 0, 0);
+        for (which, kept) in [(ITIMER_REAL, 0), (ITIMER_VIRTUAL, 9), (ITIMER_PROF, 9)] {
+            let mut old = itimerval(-1, -1, -1, -1);
+            assert_eq!(setitimer(which, &raw const off, &raw mut old), 0);
+            assert!(old.it_value.tv_sec > 0, "which={which} was armed");
+            let mut out = itimerval(-1, -1, -1, -1);
+            assert_eq!(getitimer(which, &raw mut out), 0);
+            assert_eq!(
+                (out.it_interval.tv_sec, out.it_value.tv_sec),
+                (kept, 0),
+                "which={which}"
+            );
+        }
+        reset_itimer();
     }
 
     #[test]
@@ -6274,15 +7299,9 @@ mod tests {
                 tv_usec: 0,
             },
         };
-        // There is no longer anything to be isolated FROM: the virtual and
-        // profiling timers are not implemented, so reading one is a refusal
-        // rather than a report of zeros. That distinction is the point. Zeros
-        // are a plausible answer -- "no timer is set" -- and a caller cannot
-        // tell them from "this kind of timer does not exist here", which is
-        // how the old behaviour stayed invisible for as long as it did.
-        errno::set_errno(0);
-        assert_eq!(getitimer(ITIMER_VIRTUAL, &raw mut out), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        // The virtual timer was never set, so it reads as disarmed.
+        assert_eq!(getitimer(ITIMER_VIRTUAL, &raw mut out), 0);
+        assert_eq!((out.it_interval.tv_sec, out.it_value.tv_sec), (0, 0));
 
         // And the real one still reads back what was just set, so this test
         // still covers what its name says.
@@ -6967,11 +7986,18 @@ mod tests {
 
     #[test]
     fn test_clock_nanosleep_negative_clock_beats_null_request_phase153() {
-        // Negative clock id (e.g., -1) is a common bug — must yield
-        // EINVAL via the clock check, not EFAULT via NULL.
+        // A negative id is a CPU-time clock's, whose `nsleep` copies the
+        // request in before it looks at the clock, so even -1 -- of no kind,
+        // no clock at all -- is EFAULT for a NULL request on Linux 6.6.87,
+        // and EINVAL for a readable one. Only a clock named by descriptor
+        // has no `nsleep`, EOPNOTSUPP ahead of everything.
         assert_eq!(
             clock_nanosleep(-1, 0, core::ptr::null(), core::ptr::null_mut()),
-            crate::errno::EINVAL
+            crate::errno::EFAULT
+        );
+        assert_eq!(
+            clock_nanosleep(-5, 0, core::ptr::null(), core::ptr::null_mut()),
+            crate::errno::EOPNOTSUPP
         );
     }
 
@@ -7931,13 +8957,17 @@ mod tests {
         );
     }
 
-    /// Ordering: negative clock id BEATS NULL tp.
+    /// Ordering: a negative clock id has a `clock_set` in Linux (the CPU-time
+    /// clocks' and the descriptor clocks'), which copies `tp` in first, so a
+    /// NULL one is EFAULT for each -- -5 is a descriptor clock's id.
     #[test]
     fn test_clock_settime_negative_clock_beats_null_tp_phase151() {
-        errno::set_errno(0);
-        let ret = clock_settime(-5, core::ptr::null());
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        for id in [-5, -1, -6] {
+            errno::set_errno(0);
+            let ret = clock_settime(id, core::ptr::null());
+            assert_eq!(ret, -1, "{id}");
+            assert_eq!(errno::get_errno(), errno::EFAULT, "{id}");
+        }
     }
 
     /// Ordering: NULL tp BEATS bad timespec (no way to construct;

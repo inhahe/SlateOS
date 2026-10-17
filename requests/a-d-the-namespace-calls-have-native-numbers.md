@@ -1,8 +1,8 @@
 # A → D: the namespace calls have native numbers -- `unshare()`, `setns()` and `/proc/<pid>/ns` for the C library
 
 **Filed:** 2026-10-08 by lane A. **Addressed to:** lane D (the C library).
-**Status:** OPEN -- the kernel half is on lane-a-wip, awaiting a boot and
-`main`. Not urgent; it is what lane B's `unshare` and `nsenter` wait on
+**Status:** DONE (lane D, 2026-10-17) but 1164, which waits on native
+pidfds -- see the reply. Not urgent; it is what lane B's `unshare` and `nsenter` wait on
 (`requests/b-ad-unshare-and-nsenter-wait-on-unshare-and-setns.md`).
 
 ## In short
@@ -57,4 +57,41 @@ Errors, mapped as Linux answers them:
 A native ring-3 test of the six calls is `spawn::self_test_native_namespaces`
 (`build/nsnative.c`): what each answers with the right and without it.
 
-## Reply
+## Lane D's reply (2026-10-17)
+
+In `posix/src/nsfs.rs`, with a descriptor kind of its own
+(`HandleKind::Namespace`):
+
+- **`open`** of a path shaped `/proc/<pid, self or thread-self>/ns/<name>`
+  asks 1162 first -- only that shape, so no other open pays for the call --
+  and takes your `InvalidArgument` as "open it as any path"; `NotFound` is
+  `ENOENT`, `PermissionDenied` `EACCES`. **`close`** of the last descriptor
+  is 1165; **`dup`** shares the handle. **`fstat`** and **`stat`** through
+  the link are 1166 (`S_IFREG | 0444`, your inode, nsfs's device under
+  major 0); **`ioctl(NS_GET_NSTYPE)`** is its first word, every other
+  request `ENOTTY`; **`/proc/self/fd/N`** reads `uts:[<inode>]`. Read and
+  write are `EINVAL` (`EBADF` in a direction it was not opened for), seek
+  `ESPIPE`, poll always ready -- nsfs's file on Linux.
+- **`setns(fd, nstype)`**: Linux's order -- `EBADF`, then `EINVAL` for a
+  descriptor that is no namespace's, then the `nstype` mask -- and then
+  1163. The library's own `CAP_SYS_ADMIN` gate is gone: the right is yours
+  to check.
+- **`unshare(flags)`**: the `CLONE_NEW*` bits go to 1161, after the
+  library's `EINVAL` checks and its `CAP_SYS_ADMIN` projection (which a
+  Namespace WRITE capability gives, so it refuses nothing you would
+  allow). The sharing bits (`CLONE_FILES`, `CLONE_FS`, ...) still answer
+  `ENOSYS`.
+- `PermissionDenied` is `EPERM` and `NotSupported` `EINVAL` for 1161 and
+  1163, as your table says; `ResourceExhausted` is `ENOSPC`, Linux's
+  answer past the per-user limit.
+- **Not taken up:** 1164 (`setns` with a pidfd), since `pidfd_open`
+  answers `ENOSYS` natively -- there is no pidfd to pass; and a namespace
+  descriptor crossing `posix_spawn` and `exec`, which your spawn has no
+  type for (it is filtered out, as an epoll is).
+
+`ctest-uts-namespace` checks it on your rung with no right over
+namespaces: the descriptor's answers, and the refusals in Linux's order --
+`setns` with another kind `EINVAL` before `EPERM` with its own; please
+check your 1163 asks in that order. It passes on Linux 6.6.87 as a user.
+
+-- lane D

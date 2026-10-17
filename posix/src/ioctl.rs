@@ -703,6 +703,10 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
     if crate::device_door::is_device(entry.kind) && request != FIONBIO {
         return crate::device_door::ioctl(&entry, request, arg);
     }
+    // A namespace's are nsfs's (`NS_GET_NSTYPE`), and nothing else.
+    if entry.kind == HandleKind::Namespace && request != FIONBIO {
+        return crate::nsfs::ioctl(entry.handle, request);
+    }
 
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
@@ -932,6 +936,8 @@ fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
 
     match kind {
         HandleKind::Console => Ok(0),
+        // Answered by `crate::nsfs::ioctl` before this is reached.
+        HandleKind::Namespace => Err(errno::ENOTTY),
         HandleKind::Pipe => {
             // Query actual buffered byte count from the kernel.
             use crate::syscall::{SYS_PIPE_READABLE_BYTES, syscall1};
@@ -952,24 +958,10 @@ fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
             }
             fionread_for_file(st.st_mode, st.st_size, offset)
         }
-        HandleKind::UnixStream => {
-            // Query actual buffered byte count from the kernel.
-            let bytes = if handle == 0 {
-                0
-            } else {
-                use crate::syscall::{SYS_SOCKETPAIR_READABLE_BYTES, syscall1};
-                syscall1(SYS_SOCKETPAIR_READABLE_BYTES, handle) as i32
-            };
-            Ok(bytes)
-        }
+        // The kernel's count; a listener's is `EINVAL`, as `unix_ioctl`'s
+        // `SIOCINQ` refuses it.
         HandleKind::UnixSocket => {
-            // A listening socket has nothing to read: `unix_ioctl`'s
-            // `SIOCINQ` refuses it, as `tcp_ioctl` refuses a TCP listener.
-            if crate::socket::get_meta(fd).is_some_and(|m| m.unix_listening) {
-                return Err(errno::EINVAL);
-            }
-            crate::unix_socket::bytes_waiting(fd, handle)
-                .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
+            crate::unix_socket::bytes_waiting(handle).map(|n| i32::try_from(n).unwrap_or(i32::MAX))
         }
         HandleKind::TcpStream => {
             if handle == 0 {

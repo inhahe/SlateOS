@@ -66,11 +66,12 @@
 //! - `posix_spawnattr`'s process group, session, signal mask and signals
 //!   to reset (`SETPGROUP`, `SETSID`, `SETSIGMASK`, `SETSIGDEF`) are applied
 //!   by the kernel before the child's first instruction, through
-//!   `SpawnEx2Args`; until 2026-10-16 none was. `RESETIDS`, `SETSCHEDPARAM`
-//!   and `SETSCHEDULER` are recorded and not applied
-//!   (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES). What cannot be done at all
-//!   is refused instead: a cgroup (`ENOTSUP`) and a terminal's foreground
-//!   group (`ENOSYS`).
+//!   `SpawnEx2Args`; until 2026-10-16 none was. `SETSCHEDPARAM` and
+//!   `SETSCHEDULER` are recorded and not applied
+//!   (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES). What cannot be done is
+//!   refused instead: `RESETIDS` while the effective ids are not the real
+//!   ones (`ENOTSUP` -- when they are, it has nothing to do), a cgroup
+//!   (`ENOTSUP`) and a terminal's foreground group (`ENOSYS`).
 
 use crate::errno;
 use crate::mman;
@@ -359,9 +360,10 @@ pub mod fd_handle_type {
     /// Eventfd counter handle (raw pass-through — no kernel-level dup
     /// yet; closing from either side closes for both).
     pub const EVENTFD: u8 = 5;
-    /// Unix-domain stream socket endpoint (`socketpair`).  The kernel
-    /// dups the endpoint into the child via `stream_socket::dup()`,
-    /// which bumps the endpoint refcount.
+    /// The kernel's older Unix-domain stream pair (`SYS_SOCKETPAIR_*`),
+    /// which this library no longer makes -- every `socketpair` is
+    /// [`UNIX_SOCKET`]'s since 2026-10-16 -- so it never sends nor expects
+    /// one; kept so that the table lists the kernel's every number.
     pub const STREAM_SOCKET: u8 = 6;
     /// Either end of a pty.  One constant covers both because `PtyHandle` is
     /// `(tty_id << 1) | end` — the low bit already distinguishes them, and a
@@ -384,6 +386,12 @@ pub mod fd_handle_type {
     /// dedups aliases, since that path moves one handle into several
     /// descriptors and so registers once, while this one dups per entry.
     pub const PTY: u8 = 7;
+    /// A Unix-domain socket of the `SYS_UNIX_*` calls -- named, accepted, or
+    /// either end of a pair (`HandleKind::UnixSocket`). The kernel dups it as
+    /// one more holder of the same socket, so the child's handle is the
+    /// parent's (lane A's, `requests/d-a-a-named-unix-socket-must-cross-
+    /// spawn-and-count-its-bytes.md`).
+    pub const UNIX_SOCKET: u8 = 8;
 }
 
 /// A file descriptor mapping entry for `SYS_PROCESS_SPAWN_EX`.
@@ -1231,7 +1239,22 @@ pub extern "C" fn posix_spawnattr_getcgroup_np(
     0
 }
 
-/// What this system cannot do of what a spawn asks: `ENOTSUP` for a cgroup
+/// Whether `POSIX_SPAWN_RESETIDS` must be refused for a caller whose ids
+/// are `ids`: the child is to start with the caller's real user and group
+/// ids as its effective ones, and the kernel's spawn cannot yet set them
+/// before its first instruction -- the child inherits the caller's
+/// effective ids. So a reset that would change one is refused rather than
+/// carried out wrongly, which would leave a set-user-id program's helper the
+/// privilege it was spawned to drop; one that changes nothing is done by
+/// doing nothing (`requests/d-a-spawn-resetids-and-scheduling-need-kernel-fields.md`).
+fn resetids_refused(ids: &crate::unistd::Ids) -> bool {
+    use crate::unistd::{EFFECTIVE, REAL};
+    ids.uid[EFFECTIVE] != ids.uid[REAL] || ids.gid[EFFECTIVE] != ids.gid[REAL]
+}
+
+/// What this system cannot do of what a spawn asks: `ENOTSUP` for
+/// `POSIX_SPAWN_RESETIDS` while the caller's effective ids are not its real
+/// ones ([`resetids_refused`]), `ENOTSUP` for a cgroup
 /// (`POSIX_SPAWN_SETCGROUP` -- there are none; glibc answers the same on a
 /// kernel without `clone3`), `ENOSYS` for a terminal's foreground group
 /// (`posix_spawn_file_actions_addtcsetpgrp_np` -- the kernel's spawn cannot
@@ -1245,6 +1268,9 @@ fn refused_request(
     if !attrp.is_null() {
         // SAFETY: non-null, the caller's attribute object.
         let flags = unsafe { (*attrp).flags };
+        if flags & POSIX_SPAWN_RESETIDS != 0 && resetids_refused(&crate::unistd::ids()) {
+            return Some(errno::ENOTSUP);
+        }
         if flags & POSIX_SPAWN_SETCGROUP != 0 {
             return Some(errno::ENOTSUP);
         }
@@ -1263,8 +1289,9 @@ fn refused_request(
 /// first instruction: [`SpawnEx2Args`]'s last six fields, in its terms.
 ///
 /// `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF` and `SETSID`.
-/// `RESETIDS`, `SETSCHEDPARAM` and `SETSCHEDULER` are recorded and not
-/// applied (known-issues `TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`).
+/// `SETSCHEDPARAM` and `SETSCHEDULER` are recorded and not applied
+/// (known-issues `TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`); `RESETIDS` is
+/// [`refused_request`]'s.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SpawnAttrFields {
     pgid_mode: u64,
@@ -1543,7 +1570,6 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::TcpStream | HandleKind::TcpListener => fd_handle_type::TCP_SOCKET,
         HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
         HandleKind::Eventfd => fd_handle_type::EVENTFD,
-        HandleKind::UnixStream => fd_handle_type::STREAM_SOCKET,
         // A pty *slave* crosses as a console handle, and that is exact
         // rather than approximate.  `CONSOLE` does not name a specific
         // device: the kernel resolves every console read and write
@@ -1564,14 +1590,15 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         // one, and which is what stopped `script -f`-shaped programs (where the
         // *child* is the master holder) from working at all.
         HandleKind::PtyMaster => fd_handle_type::PTY,
+        HandleKind::UnixSocket => fd_handle_type::UNIX_SOCKET,
         // Epoll, Timerfd, and Inotify fds are per-process userspace
         // state and cannot be meaningfully transferred to a child.  Map
         // to FILE so the function is total; build_fd_map filters these
         // entries out before they reach this conversion.
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
-        // Not transferable yet either (see `inheritable_fds`): filtered out
+        // Not transferable either (see `inheritable_fds`): filtered out
         // before this conversion, and mapped only so that it is total.
-        HandleKind::UnixSocket | HandleKind::DevicePcm | HandleKind::DeviceControl => {
+        HandleKind::DevicePcm | HandleKind::DeviceControl | HandleKind::Namespace => {
             fd_handle_type::FILE
         }
     }
@@ -1619,10 +1646,7 @@ pub fn handle_type_to_kind_for(handle_type: u8, handle: u64) -> crate::fdtable::
         fd_handle_type::UDP_SOCKET => HandleKind::UdpSocket,
         fd_handle_type::CONSOLE => HandleKind::Console,
         fd_handle_type::EVENTFD => HandleKind::Eventfd,
-        // Unix-domain stream endpoint (`socketpair`).  Reconstructing this
-        // as `File` would route the child's read/write/recv through the
-        // file path with the wrong semantics (EBADF or silent misbehaviour).
-        fd_handle_type::STREAM_SOCKET => HandleKind::UnixStream,
+        fd_handle_type::UNIX_SOCKET => HandleKind::UnixSocket,
         fd_handle_type::PTY => {
             if handle & 1 == 0 {
                 HandleKind::PtyMaster
@@ -1767,21 +1791,21 @@ fn inheritable_fds() -> ChildFds {
             // `login_tty` has already made the pty the child's controlling
             // terminal — so that mapping is exact rather than approximate.
             //
-            // `UnixSocket` is skipped for the reason `PtyMaster` once was, and
-            // says so: it has a kernel identity, but no `fd_handle_type` names
-            // one yet, so the child does not get it. Asked of lane A in
-            // `requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-
-            // its-bytes.md`; until then `socketpair(AF_UNIX, SOCK_STREAM)`
-            // stays `UnixStream`, which does cross.
-            //
             // A sound card's device (`DevicePcm`, `DeviceControl`) is skipped
             // for the same reason: the kernel's map has no type for its
             // handle, so a child that needs the card opens it itself
             // (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
+            //
+            // A datagram or sequenced-packet Unix socket is skipped: the child
+            // could not learn its type, and would drive it as a stream's
+            // (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
             let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
-                && entry.kind != fdtable::HandleKind::UnixSocket
+                // A namespace's handle has no type in the kernel's spawn yet.
+                && entry.kind != fdtable::HandleKind::Namespace
+                && !(entry.kind == fdtable::HandleKind::UnixSocket
+                    && crate::unix_socket::sock_type(fd) != crate::socket::SOCK_STREAM)
                 && !crate::device_door::is_device(entry.kind);
             if transferable {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
@@ -3956,7 +3980,7 @@ mod tests {
             HandleKind::TcpStream,
             HandleKind::UdpSocket,
             HandleKind::Eventfd,
-            HandleKind::UnixStream,
+            HandleKind::UnixSocket,
         ] {
             assert_eq!(
                 handle_type_to_kind(kind_to_handle_type(kind)),
@@ -3966,18 +3990,18 @@ mod tests {
         }
     }
 
-    /// The regression itself: an inherited `AF_UNIX` endpoint must come back
-    /// as `UnixStream`, not silently degrade to `File`.
+    /// An inherited `AF_UNIX` socket must come back as one, not silently
+    /// degrade to `File`: the kernel's type 8 both ways.
     #[test]
-    fn unix_stream_is_not_rebuilt_as_a_plain_file() {
+    fn a_unix_socket_is_not_rebuilt_as_a_plain_file() {
         use crate::fdtable::HandleKind;
         assert_eq!(
-            kind_to_handle_type(HandleKind::UnixStream),
-            fd_handle_type::STREAM_SOCKET
+            kind_to_handle_type(HandleKind::UnixSocket),
+            fd_handle_type::UNIX_SOCKET
         );
         assert_eq!(
-            handle_type_to_kind(fd_handle_type::STREAM_SOCKET),
-            HandleKind::UnixStream
+            handle_type_to_kind(fd_handle_type::UNIX_SOCKET),
+            HandleKind::UnixSocket
         );
     }
 
@@ -5196,6 +5220,13 @@ mod tests {
 
         // Without the flag the descriptor is only stored.
         assert_eq!(refused_request(core::ptr::null(), &raw const attr), None);
+        // RESETIDS with nothing to reset -- the host's ids are one -- is
+        // done by doing nothing.
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_RESETIDS),
+            0
+        );
+        assert_eq!(refused_request(core::ptr::null(), &raw const attr), None);
         assert_eq!(
             posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_SETCGROUP | POSIX_SPAWN_SETSID),
             0
@@ -5910,6 +5941,33 @@ mod tests {
         );
     }
 
+    /// A Unix socket reaches a child only as a stream: a datagram or
+    /// sequenced-packet one's child could not learn its type, and would
+    /// drive it as a stream's
+    /// (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
+    #[test]
+    fn only_a_stream_unix_socket_reaches_the_child() {
+        use crate::fdtable::{HandleKind, install_fd};
+        use crate::socket::{SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM, clear_meta, set_unix_meta};
+        ensure_std_fds();
+        for (fd, kind) in [(43, SOCK_STREAM), (44, SOCK_DGRAM), (45, SOCK_SEQPACKET)] {
+            let _ = install_fd(
+                fd,
+                HandleKind::UnixSocket,
+                0x5000 | u64::try_from(fd).unwrap(),
+            );
+            set_unix_meta(fd, kind);
+        }
+        let child = inheritable_fds();
+        for fd in [43, 44, 45] {
+            clear_meta(fd);
+            let _ = crate::fdtable::close_fd(fd);
+        }
+        assert!(child.is_open(43), "a stream's");
+        assert!(!child.is_open(44), "a datagram's");
+        assert!(!child.is_open(45), "a sequenced-packet one's");
+    }
+
     /// Every descriptor from 32 up used to be dropped from every child.
     #[test]
     fn a_descriptor_above_32_reaches_the_child() {
@@ -6316,6 +6374,26 @@ mod tests {
             ),
             (1, 0, 1, 1 << 16, 6, 0)
         );
+    }
+
+    /// `RESETIDS` is refused exactly when it would change an effective id.
+    #[test]
+    fn resetids_is_refused_only_when_it_would_change_an_id() {
+        use crate::unistd::{EFFECTIVE, Ids, REAL, SAVED};
+        let same = Ids {
+            uid: [1000; 4],
+            gid: [100; 4],
+        };
+        assert!(!resetids_refused(&same));
+        let mut ids = same;
+        ids.uid[SAVED] = 0;
+        assert!(!resetids_refused(&ids), "the saved id is not reset");
+        ids = same;
+        ids.uid[EFFECTIVE] = 0;
+        assert!(resetids_refused(&ids), "a set-user-id program's root");
+        ids = same;
+        ids.gid[REAL] = 5;
+        assert!(resetids_refused(&ids), "a set-group-id program's group");
     }
 
     /// The attribute object's flags decide which of its values are sent:

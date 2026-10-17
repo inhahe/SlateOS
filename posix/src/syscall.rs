@@ -52,6 +52,26 @@ pub const SYS_SIGNAL_ALTSTACK: u64 = 1071;
 /// right that governs uid/gid changes -- and capped at Linux's NGROUPS_MAX.
 pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 
+/// `(count, list_ptr) -> n`. The calling process's supplementary groups, as
+/// [`SYS_PROCESS_SETGROUPS`] stored them -- in that order, not sorted -- by
+/// Linux's `getgroups(2)` contract: `count == 0` answers how many and writes
+/// nothing; a `count` short of that is native `InvalidArgument`; otherwise
+/// the gids go to `list_ptr` as `u32`s and their number is the answer. No
+/// capability, as the uid and gid need none. On lane A's kernel since
+/// 2026-10-07 (`requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md`).
+pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
+
+/// `(path_ptr, path_len, flags) -> 0`. Turn swap on at the absolute path --
+/// a block device or a regular file with a swap header -- with Linux's
+/// `swapon` flags, which the kernel checks; symbolic links followed. Root
+/// only. On lane A's kernel since 2026-10-09
+/// (`requests/a-d-swapon-and-swapoff-are-kernel-calls-now.md`).
+pub const SYS_SWAP_ON: u64 = 1175;
+
+/// `(path_ptr, path_len) -> 0`. Turn swap off at the absolute path, every
+/// page brought back into memory first. Root only.
+pub const SYS_SWAP_OFF: u64 = 1176;
+
 /// `(path_ptr) -> 0`. Change the calling process's filesystem root to the
 /// NUL-terminated absolute path at `path_ptr`, which must name an existing
 /// directory. Gated on `(Process, SET_CREDENTIALS)`. Note that the Linux-ABI
@@ -1190,6 +1210,108 @@ pub const MEMORY_LOCK_ALL: u64 = 2;
 /// [`SYS_MEMORY_LOCK`] operation: unlock every mapping, `munlockall()`.
 pub const MEMORY_UNLOCK_ALL: u64 = 3;
 
+/// `SYS_CPU_CLOCK(op, clockid, ...)` -- the CPU-time clocks, on lane A's
+/// kernel since 2026-10-08 (`requests/a-d-cpu-time-clocks-have-a-native-call-now.md`):
+/// how much processor time a process or one of its threads has used.
+/// `clockid` is Linux's -- 2, 3, or the negative ids `clock_getcpuclockid`
+/// and `pthread_getcpuclockid` make -- and the answers are Linux's errnos as
+/// `-errno`; any other clock is `-EINVAL`.
+pub const SYS_CPU_CLOCK: u64 = 1156;
+/// [`SYS_CPU_CLOCK`] operation: the clock's value, in nanoseconds.
+pub const CPU_CLOCK_GETTIME: u64 = 0;
+/// [`SYS_CPU_CLOCK`] operation: its resolution, in nanoseconds.
+pub const CPU_CLOCK_GETRES: u64 = 1;
+/// [`SYS_CPU_CLOCK`] operation: `clock_nanosleep` -- `arg2` the flags,
+/// `arg3` the request, `arg4` where the time left goes (or 0).
+pub const CPU_CLOCK_NANOSLEEP: u64 = 2;
+
+/// `SYS_POSIX_TIMER(op, a, b, c, d)` -- the per-process POSIX timers, on lane
+/// A's kernel since 2026-10-07: the Linux ABI's `timer_*` bodies, Linux's
+/// structures (`struct sigevent` 64 bytes, `struct itimerspec` 32) and its
+/// errnos as `-errno`. `timer_create` answers the new id rather than writing
+/// it through a pointer.
+pub const SYS_POSIX_TIMER: u64 = 1141;
+/// [`SYS_POSIX_TIMER`] operation: `timer_create(a = clock, b = sigevent * or 0)`.
+pub const POSIX_TIMER_CREATE: u64 = 0;
+/// [`SYS_POSIX_TIMER`] operation: `timer_settime(a = id, b = flags, c = new, d = old or 0)`.
+pub const POSIX_TIMER_SETTIME: u64 = 1;
+/// [`SYS_POSIX_TIMER`] operation: `timer_gettime(a = id, b = itimerspec *)`.
+pub const POSIX_TIMER_GETTIME: u64 = 2;
+/// [`SYS_POSIX_TIMER`] operation: `timer_getoverrun(a = id)`.
+pub const POSIX_TIMER_GETOVERRUN: u64 = 3;
+/// [`SYS_POSIX_TIMER`] operation: `timer_delete(a = id)`.
+pub const POSIX_TIMER_DELETE: u64 = 4;
+
+/// `SYS_FS_MKFIFO(path, len, mode)` -- make a named pipe's node, on lane A's
+/// kernel since 2026-10-08 (`requests/a-d-named-pipes-have-native-calls.md`):
+/// `mode` the permission bits as a file's create takes them, the kernel
+/// applying the creator's umask or the directory's default ACL. Native
+/// errors: `AlreadyExists` for any name that exists, `NotSupported` on a
+/// filesystem that cannot hold one (FAT).
+pub const SYS_FS_MKFIFO: u64 = 1157;
+
+/// `SYS_FIFO_OPEN(path, len, native open flags, nonblock)` -- open a named
+/// pipe, whose node `SYS_FS_OPEN` answers `NoSuchDeviceOrAddress`: a pipe
+/// handle that the `SYS_PIPE_*` calls take -- for `READ | WRITE` one handle
+/// holding both ends. It waits as POSIX says, `nonblock` bit 0 being
+/// `O_NONBLOCK`; `NoSuchDeviceOrAddress` again for a node that is no FIFO.
+/// Native errors.
+pub const SYS_FIFO_OPEN: u64 = 1158;
+
+/// `SYS_PROCESS_SET_IDS(op, a, b, c)` -- move between user or group ids by
+/// Linux's rules, on lane A's kernel since 2026-10-08
+/// (`requests/a-d-a-process-has-real-effective-saved-and-filesystem-ids-now.md`,
+/// lane A's design-decisions 1552): the kernel keeps a real, an effective, a
+/// saved and a filesystem id of each kind, and applies the permission check
+/// itself -- privilege is the `SET_CREDENTIALS` right, not an id of 0.
+/// `0xFFFF_FFFF` leaves an id as it is. Answers 0 -- `SET_IDS_FSUID` the old
+/// filesystem id -- or native `NotPermitted`, or `InvalidArgument` for
+/// `SET_IDS_UID` of -1.
+pub const SYS_PROCESS_SET_IDS: u64 = 1159;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setuid(a)`.
+pub const SET_IDS_UID: u64 = 0;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setreuid(a, b)`.
+pub const SET_IDS_REUID: u64 = 1;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setresuid(a, b, c)`.
+pub const SET_IDS_RESUID: u64 = 2;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setfsuid(a)`.
+pub const SET_IDS_FSUID: u64 = 3;
+/// Added to a [`SYS_PROCESS_SET_IDS`] user operation: its group twin.
+pub const SET_IDS_GROUP: u64 = 4;
+
+/// `SYS_PROCESS_GET_IDS(buf)` -- the caller's ids into eight `u32`s: the
+/// real, effective, saved and filesystem user ids, then the group ids.
+pub const SYS_PROCESS_GET_IDS: u64 = 1160;
+
+/// `SYS_NAMESPACE_UNSHARE(kinds)` -- the caller's process into new
+/// namespaces, one of each kind `kinds` names by its `CLONE_NEW*` bit; on
+/// lane A's kernel since 2026-10-08
+/// (`requests/a-d-the-namespace-calls-have-native-numbers.md`). `CLONE_NEWUTS`
+/// is the kind built so far. Needs a Namespace capability with WRITE.
+pub const SYS_NAMESPACE_UNSHARE: u64 = 1161;
+/// `SYS_NAMESPACE_OPEN(path, len)` -- a handle on the namespace a
+/// `/proc/<pid>/ns/<kind>` path names; native `InvalidArgument` for a path
+/// that names none.
+pub const SYS_NAMESPACE_OPEN: u64 = 1162;
+/// `SYS_NAMESPACE_ENTER(handle, nstype)` -- the caller's process into the
+/// namespace a handle holds; `nstype` 0 or the handle's kind's bit.
+pub const SYS_NAMESPACE_ENTER: u64 = 1163;
+/// `SYS_NAMESPACE_CLOSE(handle)` -- give a namespace handle back.
+pub const SYS_NAMESPACE_CLOSE: u64 = 1165;
+/// `SYS_NAMESPACE_INFO(handle, buf)` -- three u64s at `buf`: the kind's
+/// `CLONE_NEW*` bit, the inode number, nsfs's device minor.
+pub const SYS_NAMESPACE_INFO: u64 = 1166;
+
+/// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
+/// the Linux ABI's `prctl(PR_SET_DUMPABLE)` sets and `/proc` consults; on
+/// lane A's kernel since 2026-10-07. Linux's errnos as `-errno`.
+pub const SYS_PROCESS_DUMPABLE: u64 = 1142;
+/// [`SYS_PROCESS_DUMPABLE`] operation: the flag (0, 1, or 2 if the kernel
+/// set it so).
+pub const DUMPABLE_GET: u64 = 0;
+/// [`SYS_PROCESS_DUMPABLE`] operation: set it to `value`, 0 or 1.
+pub const DUMPABLE_SET: u64 = 1;
+
 /// `SYS_POWER_OFF(flags)` -- flush every filesystem and switch the machine
 /// off; does not return on success. Needs the `POWER_OFF` right on a
 /// class-wide `Process` capability (`PermissionDenied`); `NotSupported`, the
@@ -1207,20 +1329,6 @@ pub const SYS_POWER_RELOAD: u64 = 1139;
 // buffered bytes without consuming, wait_readable blocks for data/EOF.
 pub const SYS_PIPE_PEEK: u64 = 657;
 pub const SYS_PIPE_WAIT_READABLE: u64 = 658;
-
-// Stream sockets (IPC range 300-310) — bidirectional byte streams backing
-// socketpair(AF_UNIX, SOCK_STREAM, ...).  Mirrors kernel/src/syscall/number.rs.
-pub const SYS_SOCKETPAIR_CREATE: u64 = 300;
-pub const SYS_SOCKETPAIR_SEND: u64 = 301;
-pub const SYS_SOCKETPAIR_RECV: u64 = 302;
-pub const SYS_SOCKETPAIR_TRY_SEND: u64 = 303;
-pub const SYS_SOCKETPAIR_TRY_RECV: u64 = 304;
-pub const SYS_SOCKETPAIR_CLOSE: u64 = 305;
-pub const SYS_SOCKETPAIR_SEND_TIMEOUT: u64 = 306;
-pub const SYS_SOCKETPAIR_RECV_TIMEOUT: u64 = 307;
-pub const SYS_SOCKETPAIR_POLL: u64 = 308;
-pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
-pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
 
 // Unix-domain sockets by name (1104-1118): the kernel's `ipc::unix_socket`,
 // which `crate::unix_socket` builds `socket(AF_UNIX, ...)` on. Mirrors
@@ -1280,6 +1388,11 @@ pub const UNIX_OPT_PASSCRED: u64 = 1;
 pub const UNIX_OPT_RCVTIMEO: u64 = 2;
 /// Option: the same for a blocking send or connect (`SO_SNDTIMEO`).
 pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+/// Option, read only: the bytes a receive would find waiting -- everything
+/// queued at a stream or sequenced-packet socket, the next datagram at a
+/// datagram one -- and `InvalidArgument` at a listener, as Linux's
+/// `unix_inq_len` answers `FIONREAD`.
+pub const UNIX_OPT_INQ: u64 = 4;
 /// An address record: kind (u32: 0 unnamed, 1 path, 2 abstract), length
 /// (u32), then 108 bytes, the unused ones zero.
 pub const UNIX_ADDR_LEN: usize = 116;
@@ -1287,6 +1400,27 @@ pub const UNIX_ADDR_LEN: usize = 116;
 /// sender's pid (u64), uid (u32), gid (u32), whether those are known (u32),
 /// then the sender's address as a [`UNIX_ADDR_LEN`]-byte record.
 pub const UNIX_RECV_INFO_LEN: usize = 144;
+
+/// `SYS_UNIX_SENDMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_SEND`] carrying
+/// descriptors, on lane A's kernel since 2026-10-09
+/// (`requests/a-d-native-sendmsg-and-recvmsg-can-carry-descriptors.md`).
+/// `msg_ptr` points at six u64s: `buf`, `len`, `name_ptr`, `name_len` (as
+/// `SYS_UNIX_SEND` takes them), `rights_ptr`, `rights_count` -- that many
+/// [`UNIX_RIGHT_LEN`]-byte records. Bytes sent; the descriptors go with
+/// them, all or none.
+pub const SYS_UNIX_SENDMSG: u64 = 1169;
+/// `SYS_UNIX_RECVMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_RECV`] taking the
+/// descriptors a message carries. `msg_ptr` points at seven u64s: `buf`,
+/// `cap`, `info_ptr` (as `SYS_UNIX_RECV` takes them), `rights_ptr`,
+/// `rights_cap`, then two the kernel writes: `rights_got` and `msg_flags`
+/// ([`UNIX_MSG_CTRUNC`]). Each record names a handle the caller now holds.
+pub const SYS_UNIX_RECVMSG: u64 = 1170;
+/// Bytes of one descriptor record: handle (u64), type (u32, the codes
+/// `posix_spawn`'s `fd_map` uses), status flags (u32).
+pub const UNIX_RIGHT_LEN: usize = 16;
+/// `SYS_UNIX_RECVMSG`'s `msg_flags`: some descriptors were released -- no
+/// room for them, or a kind with no native type.
+pub const UNIX_MSG_CTRUNC: u64 = 1;
 
 // The device door (1119-1123): the Linux device ABI, reached natively --
 // today the sound card's ALSA nodes, which `crate::device_door` opens and

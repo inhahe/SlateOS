@@ -166,39 +166,15 @@ process_global! {
     /// returns the correct `sa_mask`, `sa_flags`, and `sa_restorer`.
     fn actions_ptr() -> [Sigaction; NSIG as usize] = [DEFAULT_SIGACTION; NSIG as usize];
 
-    /// Process-wide blocked signal mask.
-    ///
-    /// Updated by `sigprocmask`.  Read back by `sigprocmask` (old mask)
-    /// and `sigpending` (which returns the intersection of blocked and
-    /// pending signals — but since we have no signal delivery, pending
-    /// is always empty, so `sigpending` still returns empty).
-    ///
-    /// Storing the mask is important for programs that do
-    /// `sigprocmask(SIG_BLOCK, ..., &old)` and later restore with
-    /// `sigprocmask(SIG_SETMASK, &old, NULL)` — the old mask must
-    /// round-trip correctly.
-    ///
-    /// (The paragraph above used to end "but since we have no signal
-    /// delivery, pending is always empty, so `sigpending` still returns
-    /// empty". That was contradicted by [`sigpending`] itself, twelve
-    /// hundred lines below, which asks the kernel via `SYS_SIGNAL_PENDING`.)
-    fn blocked_mask_ptr() -> SigsetT = SigsetT::EMPTY;
-
     /// The threads waiting in `sigtimedwait` and its kin, as the dispatch
     /// finds them ([`hand_to_a_waiter`]).  Atomics, and no lock: the
     /// dispatch runs in signal context, on any thread, and must never wait
     /// on a lock the thread it interrupted may hold.
     fn acceptors_ptr() -> [Acceptor; ACCEPTORS] = [const { Acceptor::free() }; ACCEPTORS];
 
-    /// Bumped by every change to what the kernel's blocked mask should be --
-    /// the program's mask, or a set a waiter has opened -- so that a
-    /// [`sync_kernel_blocked_mask`] another one raced knows to write again.
-    fn mask_generation_ptr() -> core::sync::atomic::AtomicU64 =
-        core::sync::atomic::AtomicU64::new(0);
-
     /// Bumped by every change to a disposition, so that a
     /// [`sync_kernel_ignored`] another one raced knows to report again --
-    /// [`mask_generation_ptr`]'s pattern, for the ignored set.
+    /// [`mask_generation`]'s pattern, for the ignored set.
     fn ignored_generation_ptr() -> core::sync::atomic::AtomicU64 =
         core::sync::atomic::AtomicU64::new(0);
 
@@ -341,7 +317,10 @@ fn seed_inherited_ignored() {
 }
 
 /// Set `SIG_IGN` in the table for each signal `inherited` names (bit `n - 1`
-/// for signal `n`), never `SIGKILL` or `SIGSTOP`, which cannot be ignored.
+/// for signal `n`), never `SIGKILL` or `SIGSTOP`, which cannot be ignored,
+/// nor the library's own two, which no program's action may touch -- an
+/// inherited `SIG_IGN` on 32 would have the kernel discard every
+/// `SIGEV_THREAD` timer's signal.
 #[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
 fn adopt_inherited_ignored(inherited: u64) {
     // SAFETY: `actions_ptr()` is this process's; start-up has one thread.
@@ -349,7 +328,11 @@ fn adopt_inherited_ignored(inherited: u64) {
         return;
     };
     for sig in 1..=64i32 {
-        if inherited & sigmask_bit(sig) == 0 || sig == SIGKILL || sig == SIGSTOP {
+        if inherited & sigmask_bit(sig) == 0
+            || sig == SIGKILL
+            || sig == SIGSTOP
+            || is_internal_signal(sig)
+        {
             continue;
         }
         if let Some(slot) = actions.get_mut(sig as usize) {
@@ -361,8 +344,13 @@ fn adopt_inherited_ignored(inherited: u64) {
     }
 }
 
-/// How many threads may wait in `sigtimedwait` and its kin at once.  A
-/// thread past it is told `EAGAIN`, as if its wait had timed out at once.
+/// How many threads may wait in `sigtimedwait` and its kin at once, the
+/// library's own timer thread among them. A thread past it is told
+/// `EAGAIN`, as if its wait had timed out at once. The first slot is the
+/// library's ([`take_internal`]), which no program's wait takes: 31 waiting
+/// threads of a program's would otherwise keep the timer thread from its
+/// wait, and it would spin, refused at once, while no `SIGEV_THREAD` timer
+/// ran (Fable's review of lane D's round 205).
 const ACCEPTORS: usize = 32;
 
 /// `got`'s value once its waiter has stopped waiting: it takes nothing more,
@@ -378,19 +366,140 @@ const CLAIMING: i32 = -2;
 /// A thread waiting to take a signal (`sigtimedwait`, `sigwaitinfo`,
 /// `sigwait`), as the trampoline's dispatch sees it.
 ///
+/// The calling thread's blocked mask ([`crate::perthread::PerThread::blocked`]).
+///
+/// The thread's, as POSIX makes it and as the kernel's is since lane A's
+/// design-decisions 1542: `sigprocmask` and `pthread_sigmask` set the
+/// caller's, its handlers' masks change it while they run, and `sigsuspend`
+/// replaces it for its wait. Until 2026-10-16 it was one value for the
+/// process, so one thread's `sigprocmask` was what every other thread read
+/// back, and the next mask any thread wrote to the kernel.
+///
+/// Storing it is what makes `sigprocmask(SIG_BLOCK, ..., &old)` and a later
+/// `sigprocmask(SIG_SETMASK, &old, NULL)` round-trip.
+fn blocked_mask_ptr() -> *mut SigsetT {
+    // SAFETY: the calling thread's own block, which outlives every call the
+    // thread makes; only it and its handlers touch this field.
+    unsafe { &raw mut (*crate::perthread::current()).blocked }
+}
+
+/// Block the library's own signals in the calling thread, which no
+/// program's `sigprocmask` can: what the timer thread does first, so that
+/// the timers' signal waits for its `sigwait` ([`take_internal`]).
+pub(crate) fn block_internal_signals() {
+    // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
+    unsafe {
+        let mut m = blocked_mask_ptr().read();
+        m.bits[0] |= INTERNAL_BITS;
+        blocked_mask_ptr().write(m);
+    }
+    mask_changed();
+}
+
+/// Wait for the library's own signal `sig` -- one a program's `sigwait`
+/// cannot ask for, its sets refusing it -- with no deadline, and take it:
+/// the signal and its record. `Err` only for a handler that ran on this
+/// thread meanwhile (a thread that blocks every signal runs none), or a
+/// second such wait at once, which the library's one timer thread never
+/// makes: the library's waits have one slot of the table ([`ACCEPTORS`]).
+pub(crate) fn take_internal(sig: i32) -> Result<(i32, Record), i32> {
+    accept(sigmask_bit(sig), None, crate::interrupt::Mark::now(), true)
+}
+
+/// `set` less the library's own signals: what a program's mask may hold
+/// (`pthread_attr_setsigmask_np` stores it so, as glibc's).
+pub(crate) fn without_internal(mut set: SigsetT) -> SigsetT {
+    set.bits[0] &= !INTERNAL_BITS;
+    set
+}
+
+/// The mask a new thread starts with: `asked`, its attribute's, or else the
+/// calling thread's -- less `SIGKILL` and `SIGSTOP`, which no mask holds,
+/// and less the library's own signals, as glibc's `pthread_create` takes
+/// its cancellation signal out: a timer thread, made by the helper that
+/// blocks them, does not block them.
+pub(crate) fn new_thread_mask(asked: Option<SigsetT>) -> SigsetT {
+    let mut m = asked.unwrap_or_else(calling_thread_mask);
+    m.bits[0] &= !(INTERNAL_BITS | sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
+    m
+}
+
+/// A new thread's first step once its thread pointer is in place: the
+/// kernel's mask from the one its creator left in its block
+/// ([`new_thread_mask`]). Until then every signal is blocked
+/// ([`AllBlocked`]).
+#[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
+pub(crate) fn thread_started() {
+    sync_kernel_blocked_mask();
+}
+
+/// While it lives, the calling thread's kernel mask blocks every signal --
+/// the program's mask untouched -- and dropping it writes the kernel's back
+/// from the program's. `pthread_create` holds one across the call that
+/// makes a thread, which starts with its creator's kernel mask: so the new
+/// thread takes no signal before it has written its own
+/// ([`thread_started`]), glibc's way.
+pub(crate) struct AllBlocked(());
+
+impl AllBlocked {
+    /// Block every signal in the calling thread's kernel mask.
+    pub(crate) fn new() -> Self {
+        write_kernel_mask(u64::MAX);
+        Self(())
+    }
+}
+
+impl Drop for AllBlocked {
+    fn drop(&mut self) {
+        sync_kernel_blocked_mask();
+    }
+}
+
+/// The calling thread's blocked mask, whole: what `pthread_create` gives the
+/// thread it makes.
+pub(crate) fn calling_thread_mask() -> SigsetT {
+    // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
+    unsafe { blocked_mask_ptr().read() }
+}
+
+/// Bumped by every change to what the calling thread's kernel mask should
+/// be -- its mask, or the set it waits for -- so that a
+/// [`sync_kernel_blocked_mask`] its own handler raced knows to write again
+/// ([`crate::perthread::PerThread::mask_generation`]).
+fn mask_generation() -> &'static core::sync::atomic::AtomicU64 {
+    // SAFETY: the calling thread's own block, valid for as long as the
+    // thread; 8-aligned (`PerThread` is `repr(C)` and the field a `u64`), and
+    // touched only atomically, by this thread and its handlers.
+    unsafe {
+        core::sync::atomic::AtomicU64::from_ptr(
+            &raw mut (*crate::perthread::current()).mask_generation,
+        )
+    }
+}
+
+/// Who a waiter is, in [`Acceptor::owner`]: the calling thread's block's
+/// address, which no other live thread shares and which a dispatch -- in
+/// signal context, on the thread the kernel chose -- finds with no call.
+fn this_thread() -> usize {
+    crate::perthread::current().addr()
+}
+
 /// The native kernel cannot take a pending signal off the pending set
-/// without delivering it, and its mask is the process's, not a thread's.
-/// So a waiter publishes its set; the kernel's mask lets the set through
-/// for as long as it is published ([`kernel_mask_now`]) -- the program's
-/// own mask, which `sigprocmask` reports and handlers set and restore, is
-/// left as it was -- and the kernel delivers a signal of it to whichever
-/// thread it chooses, where the dispatch hands the signal to the waiter
-/// instead of running its disposition.
+/// without delivering it. So a waiter publishes its set; its own thread's
+/// kernel mask lets the set through for as long as it is published
+/// ([`kernel_mask_now`]) -- the thread's own mask, which `sigprocmask`
+/// reports and handlers set and restore, is left as it was -- and the
+/// kernel delivers a signal of it to that thread, where the dispatch hands
+/// the signal to the waiter instead of running its disposition. A waiter
+/// is its thread's alone ([`Acceptor::owner`]): a signal the kernel gave
+/// another thread is that thread's, aimed at it or let through by it.
 pub(crate) struct Acceptor {
     /// Claimed by a waiter.
     busy: core::sync::atomic::AtomicBool,
+    /// The waiting thread ([`this_thread`]); 0 while not claimed.
+    owner: core::sync::atomic::AtomicUsize,
     /// The signals it takes (signal N at bit N - 1), which the kernel lets
-    /// through meanwhile; 0 while not published.
+    /// through while `got` is 0; 0 while not published.
     set: core::sync::atomic::AtomicU64,
     /// 0 while it waits, [`CLAIMING`] while a signal is handed over, the
     /// signal handed to it, or [`CLOSED`].  The futex word it sleeps on.
@@ -412,6 +521,7 @@ impl Acceptor {
     const fn free() -> Self {
         Self {
             busy: core::sync::atomic::AtomicBool::new(false),
+            owner: core::sync::atomic::AtomicUsize::new(0),
             set: core::sync::atomic::AtomicU64::new(0),
             got: core::sync::atomic::AtomicI32::new(0),
             extra: core::sync::atomic::AtomicU64::new(0),
@@ -468,6 +578,16 @@ impl Acceptor {
 /// [`CLAIMING`], the record written, and then the signal.  A signal kept in
 /// `extra` is handed back to the kernel as this process's own, and its record
 /// goes with that.
+///
+/// Claimed, the waiter's set closes in this thread's kernel mask at once
+/// ([`opened_by_waiters`]), here, before the dispatch returns: a second
+/// signal of it the kernel holds already stays there, with its record and
+/// its thread, for the next wait. Left open until the waiter withdrew it,
+/// the set let the kernel deliver that signal at the dispatch's return, to
+/// be kept in `extra` without them -- two timers' expiries arriving together
+/// lost the second (Opus's review of lane D's round 205). `extra` is left
+/// for one that comes in the instructions before the close: the kernel does
+/// not block a signal while it delivers it.
 fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
     use core::sync::atomic::Ordering::SeqCst;
     let bit = sigmask_bit(sig);
@@ -476,9 +596,11 @@ fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
     }
     // SAFETY: this process's table of waiters; every field is an atomic.
     let waiters = unsafe { &*acceptors_ptr() };
-    let wants = |a: &&Acceptor| a.set.load(SeqCst) & bit != 0;
+    let me = this_thread();
+    let wants = |a: &&Acceptor| a.owner.load(SeqCst) == me && a.set.load(SeqCst) & bit != 0;
     for a in waiters.iter().filter(wants) {
         if a.got.compare_exchange(0, CLAIMING, SeqCst, SeqCst).is_ok() {
+            mask_changed();
             a.store_record(origin.record());
             a.got.store(sig, SeqCst);
             crate::lowlevellock::futex_wake_all(&a.got);
@@ -511,25 +633,27 @@ fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
 /// `SA_RESTART` or not -- a handler for a signal outside the set, since one
 /// of the set is taken, not handled -- as glibc's answers on Linux have it;
 /// `Err(EAGAIN)` when the time runs out, or when every one of the
-/// [`ACCEPTORS`] slots is in use.  `SIGKILL` and `SIGSTOP` cannot be taken,
+/// [`ACCEPTORS`] slots it may use is in use -- `library`'s, the library's
+/// one, or else the program's.  `SIGKILL` and `SIGSTOP` cannot be taken,
 /// and are dropped from the set, as the kernel drops them.
 fn accept(
     set: u64,
     deadline: Option<&crate::stat::Timespec>,
     mark: crate::interrupt::Mark,
+    library: bool,
 ) -> Result<(i32, Record), i32> {
     use core::sync::atomic::Ordering::SeqCst;
     let wanted = set & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
     // SAFETY: this process's table of waiters; every field is an atomic.
     let waiters = unsafe { &*acceptors_ptr() };
-    let Some(a) = waiters
-        .iter()
-        .find(|a| a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok())
-    else {
+    let Some(a) = claim(waiters, library) else {
         return Err(errno::EAGAIN);
     };
     a.got.store(0, SeqCst);
     a.extra.store(0, SeqCst);
+    // This thread's: only a dispatch on it hands `a` a signal, and only its
+    // kernel mask opens `a`'s set.
+    a.owner.store(this_thread(), SeqCst);
     // Published: the dispatch hands the set's signals to `a` from here, and
     // the kernel lets them through -- a pending one at once, as its mask is
     // written.
@@ -602,6 +726,7 @@ fn accept(
             keep_pending(n);
         }
     }
+    a.owner.store(0, SeqCst);
     a.busy.store(false, SeqCst);
     // A signal handed over as the wait decided otherwise is still this
     // call's to answer.
@@ -610,6 +735,22 @@ fn accept(
     } else {
         outcome.map(|sig| (sig, record))
     }
+}
+
+/// A free slot of `waiters` claimed for a wait: the library's own, the
+/// first, for `library` -- the timer thread's -- and otherwise one of the
+/// program's, the rest. `None` when every one it may use is claimed.
+fn claim(waiters: &[Acceptor], library: bool) -> Option<&Acceptor> {
+    use core::sync::atomic::Ordering::SeqCst;
+    let slots = if library {
+        waiters.get(..1)
+    } else {
+        waiters.get(1..)
+    }
+    .unwrap_or_default();
+    slots
+        .iter()
+        .find(|a| a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok())
 }
 
 /// In a child of `fork`: forget the parent's waiters, whose threads the
@@ -623,6 +764,7 @@ pub(crate) fn forget_waiters_after_fork() {
         a.set.store(0, SeqCst);
         a.got.store(0, SeqCst);
         a.extra.store(0, SeqCst);
+        a.owner.store(0, SeqCst);
         a.busy.store(false, SeqCst);
     }
     mask_changed();
@@ -639,18 +781,24 @@ fn keep_pending(sig: i32) {
     set_pending_self(sig);
 }
 
-/// The signals waiters have opened at the kernel: the union of their sets.
+/// The signals the calling thread's waiter has opened at the kernel: the
+/// set of the waiter it owns, while it waits for one -- not once one has been
+/// handed to it ([`hand_to_a_waiter`]). Another thread's waiter opens its set
+/// in that thread's kernel mask, not this one's -- until 2026-10-16 every
+/// waiter's set was opened in whichever thread wrote the mask.
 fn opened_by_waiters() -> u64 {
     use core::sync::atomic::Ordering::SeqCst;
+    let me = this_thread();
     // SAFETY: this process's table of waiters; every field is an atomic.
     unsafe { &*acceptors_ptr() }
         .iter()
+        .filter(|a| a.owner.load(SeqCst) == me && a.got.load(SeqCst) == 0)
         .fold(0, |union, a| union | a.set.load(SeqCst))
 }
 
-/// What the kernel's blocked mask should be now: the program's -- as
+/// What the calling thread's kernel mask should be now: its own -- as
 /// `sigprocmask`, a handler's `sa_mask` or `sigsuspend` left it -- less the
-/// sets waiters have opened.
+/// set it waits for.
 fn kernel_mask_now() -> u64 {
     current_blocked_low() & !opened_by_waiters()
 }
@@ -658,8 +806,7 @@ fn kernel_mask_now() -> u64 {
 /// One of the kernel's mask's inputs has changed -- the program's mask, or a
 /// waiter's set: bring the kernel's up to date.
 fn mask_changed() {
-    // SAFETY: an atomic, shared by every thread.
-    unsafe { &*mask_generation_ptr() }.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+    mask_generation().fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     sync_kernel_blocked_mask();
 }
 
@@ -823,7 +970,13 @@ fn install_signal_with_flags(
     flags: u32,
     mask_self: bool,
 ) -> SighandlerT {
-    if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
+    // The library's own two are refused as `sigaction` refuses them, as
+    // glibc's `signal` does through its `sigaction`.
+    if !(1..NSIG).contains(&signum)
+        || signum == SIGKILL
+        || signum == SIGSTOP
+        || is_internal_signal(signum)
+    {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
     }
@@ -972,7 +1125,12 @@ pub unsafe extern "C" fn sigaction(
     act: *const Sigaction,
     oldact: *mut Sigaction,
 ) -> i32 {
-    if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
+    // glibc's `__sigaction`: an internal signal is EINVAL, asked or set.
+    if !(1..NSIG).contains(&signum)
+        || signum == SIGKILL
+        || signum == SIGSTOP
+        || is_internal_signal(signum)
+    {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -1046,8 +1204,12 @@ fn default_action(sig: i32) -> Option<DefaultAction> {
         SIGCHLD | SIGURG | SIGWINCH => Some(DefaultAction::Ignore),
         SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => Some(DefaultAction::Stop),
         SIGCONT => Some(DefaultAction::Continue),
+        // The library's own: one no waiter of the library's took -- sent by
+        // `kill`, or a timer's after its timer went -- is dropped, as glibc's
+        // handlers for them drop one that is not theirs.
+        SIGTIMER | SIGSETXID => Some(DefaultAction::Ignore),
         _ if (1..NSIG).contains(&sig) => {
-            // RT signals (32..64) default to Terminate on Linux.
+            // The real-time signals (34..=64) terminate, as on Linux.
             Some(DefaultAction::Terminate)
         }
         _ => None,
@@ -1082,16 +1244,16 @@ fn handler_block_mask(saved: u64, sa_mask_low: u64, sa_flags: u32, sig: i32) -> 
     m
 }
 
-/// Read the current process-wide blocked mask (low 64 signals).
+/// Read the calling thread's blocked mask (low 64 signals).
 fn current_blocked_low() -> u64 {
-    // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.
+    // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
     unsafe { blocked_mask_ptr().read().bits[0] }
 }
 
-/// Replace the low 64 signals of the process-wide blocked mask and mirror
-/// the change to the kernel so asynchronous delivery honours it.
+/// Replace the low 64 signals of the calling thread's blocked mask and
+/// mirror the change to its kernel mask so asynchronous delivery honours it.
 fn apply_blocked_low(low: u64) {
-    // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.
+    // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
     unsafe {
         let mut m = blocked_mask_ptr().read();
         m.bits[0] = low;
@@ -1100,7 +1262,7 @@ fn apply_blocked_low(low: u64) {
     mask_changed();
 }
 
-/// Capture the current process-wide blocked mask for `sigsetjmp`.
+/// Capture the calling thread's blocked mask for `sigsetjmp`.
 ///
 /// Called from the `sigsetjmp` assembly when its `savemask` argument is
 /// non-zero.  Returns the low 64 signals of the blocked mask so it can be
@@ -1569,10 +1731,10 @@ impl Origin {
 /// `si_timerid` and `si_overrun` for `SI_TIMER`, at the same offsets.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Record {
-    code: i32,
+    pub(crate) code: i32,
     pid: i32,
     uid: u32,
-    value: u64,
+    pub(crate) value: u64,
 }
 
 impl Record {
@@ -2274,7 +2436,7 @@ pub fn init_signals() {
 /// image began -- and write the kernel's to match.
 #[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
 fn adopt_inherited_mask(inherited: u64) {
-    // SAFETY: `blocked_mask_ptr()` is this process's; startup has one thread.
+    // SAFETY: the main thread's own mask; startup has no other thread.
     unsafe {
         let mut m = blocked_mask_ptr().read();
         m.bits[0] = inherited & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
@@ -2300,32 +2462,36 @@ pub fn init_signals() {}
 /// maps exactly to `SigsetT::bits[0]` (signal N → bit N-1).  Higher
 /// realtime signals are not deliverable asynchronously yet, so only the
 /// low word is synchronised.
-#[cfg(target_os = "none")]
 fn sync_kernel_blocked_mask() {
     use core::sync::atomic::Ordering::SeqCst;
-    // SAFETY: an atomic, shared by every thread.
-    let generation = unsafe { &*mask_generation_ptr() };
+    let generation = mask_generation();
     loop {
         let seen = generation.load(SeqCst);
-        let mut old: u64 = 0;
-        // The kernel's answer is not needed: the call fails only for a bad
-        // out-pointer, and this one is a local.
-        let _ = crate::syscall::syscall2(
-            crate::syscall::SYS_SIGNAL_MASK,
-            kernel_mask_now(),
-            core::ptr::addr_of_mut!(old) as u64,
-        );
+        write_kernel_mask(kernel_mask_now());
         if generation.load(SeqCst) == seen {
             break;
         }
     }
 }
 
+/// Make `mask` the calling thread's kernel mask (`SYS_SIGNAL_MASK`).
+#[cfg(target_os = "none")]
+fn write_kernel_mask(mask: u64) {
+    let mut old: u64 = 0;
+    // The kernel's answer is not needed: the call fails only for a bad
+    // out-pointer, and this one is a local.
+    let _ = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_MASK,
+        mask,
+        core::ptr::addr_of_mut!(old) as u64,
+    );
+}
+
 /// The host's stand-in: there is no kernel, so the mask is only kept, for
 /// the tests to read ([`kernel_blocked_low`]).
 #[cfg(not(target_os = "none"))]
-fn sync_kernel_blocked_mask() {
-    HOST_KERNEL_MASK.with(|m| m.set(kernel_mask_now()));
+fn write_kernel_mask(mask: u64) {
+    HOST_KERNEL_MASK.with(|m| m.set(mask));
 }
 
 #[cfg(not(target_os = "none"))]
@@ -2795,9 +2961,11 @@ fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> Option
     (errno::get_errno() != errno::EACCES).then_some(false)
 }
 
-/// Examine and change blocked signals.
+/// Examine and change the calling thread's blocked signals.
 ///
-/// Stores the signal mask in process-local state so that
+/// The thread's, as on Linux and as the kernel's is (lane A's
+/// design-decisions 1542); until 2026-10-16 it was one mask for the process.
+/// Stores the signal mask in the thread's block so that
 /// `sigprocmask(SIG_BLOCK, ..., &old)` followed by
 /// `sigprocmask(SIG_SETMASK, &old, NULL)` round-trips correctly, and
 /// mirrors the low 64 bits to the kernel with `SYS_SIGNAL_MASK` so the
@@ -2811,7 +2979,7 @@ fn proc_task_exists(tgid: crate::types::PidT, tid: crate::types::PidT) -> Option
 /// asynchronously deliverable yet, so the kernel has no use for them.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut SigsetT) -> i32 {
-    // SAFETY: `blocked_mask_ptr()` is owned solely by the caller.
+    // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
     let current = unsafe { blocked_mask_ptr().read() };
 
     // Return old mask if requested.
@@ -2825,7 +2993,15 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
     // Apply new mask if set is non-null.
     if !set.is_null() {
         // SAFETY: set verified non-null.
-        let new_set = unsafe { *set };
+        let mut new_set = unsafe { *set };
+        // glibc's `__clear_internal_signals`: a program's set neither
+        // blocks nor unblocks the library's own signals, and a whole new
+        // mask keeps them as the thread had them -- the library's timer
+        // thread blocks one, which it must go on blocking.
+        new_set.bits[0] &= !INTERNAL_BITS;
+        if how == SIG_SETMASK {
+            new_set.bits[0] |= current.bits[0] & INTERNAL_BITS;
+        }
         let mut new_mask = match how {
             SIG_BLOCK => {
                 // Add signals in `set` to the blocked set.
@@ -2878,17 +3054,15 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
 
 /// Examine and change the signal mask of the calling thread.
 ///
-/// Identical to `sigprocmask` in our single-threaded implementation.
-/// POSIX specifies that `pthread_sigmask` is the thread-safe version
-/// of `sigprocmask`.
+/// `sigprocmask`, whose mask is the calling thread's too, as on Linux;
+/// POSIX leaves `sigprocmask` unspecified in a threaded program, and
+/// `pthread_sigmask` is the call for one.
 ///
 /// Returns 0 on success, or an error number directly (not via errno).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_sigmask(how: i32, set: *const SigsetT, oldset: *mut SigsetT) -> i32 {
-    // In our single-threaded model, pthread_sigmask is identical to
-    // sigprocmask.  The only difference per POSIX is that
-    // pthread_sigmask returns the error code directly instead of
-    // returning -1 and setting errno.
+    // The only difference POSIX makes is the answer: the error number,
+    // not -1 with errno.
     let ret = sigprocmask(how, set, oldset);
     if ret < 0 {
         // sigprocmask sets errno — extract it as the return value.
@@ -3014,6 +3188,8 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
     }
     unsafe {
         (*set).bits = [u64::MAX; 16];
+        // glibc's `__sigfillset` and then the internal signals out.
+        (*set).bits[0] &= !INTERNAL_BITS;
     }
     0
 }
@@ -3042,16 +3218,15 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
 /// would segfault; glibc does not, and the claim was never checked
 /// against the source.)
 ///
-/// We do not implement glibc's `is_internal_signal` rejection of
-/// SIGCANCEL/SIGSETXID: those numbers are NPTL's private property on
-/// Linux, and we have no equivalent to protect.
+/// The internal signals, 32 and 33, are EINVAL too, as glibc's
+/// `is_internal_signal` makes them ([`is_internal_signal`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if !(1..NSIG).contains(&signum) {
+    if !(1..NSIG).contains(&signum) || is_internal_signal(signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3077,7 +3252,7 @@ pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if !(1..NSIG).contains(&signum) {
+    if !(1..NSIG).contains(&signum) || is_internal_signal(signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3570,10 +3745,9 @@ static SIGNAL_NAMES: [&[u8]; 32] = [
 ];
 
 /// Return a string describing a signal number: glibc's texts, and for a
-/// real-time signal "Real-time signal N", counted from this library's
-/// `SIGRTMIN` (32, where glibc's is 34: its thread library keeps 32 and 33,
-/// this one keeps none), and "Unknown signal N" for a number that is no
-/// signal's.
+/// real-time signal "Real-time signal N", counted from `SIGRTMIN` (34, as
+/// glibc's: 32 and 33 are the library's own, and read as "Unknown signal
+/// 32"), and "Unknown signal N" for a number that is no signal's.
 ///
 /// The numbered texts are in the calling thread's own buffer, valid until
 /// its next call; the others are static.
@@ -3768,7 +3942,7 @@ pub extern "C" fn sigtimedwait(
     // SAFETY: non-null, a readable `sigset_t`; its first word is the
     // kernel's 64 signals.
     let wanted = unsafe { set.cast::<u64>().read_unaligned() };
-    match accept(wanted, deadline.as_ref(), mark) {
+    match accept(wanted, deadline.as_ref(), mark, false) {
         Ok((sig, record)) => {
             if !info.is_null() {
                 // SAFETY: a non-null `info` is a writable `siginfo_t`.
@@ -3918,24 +4092,42 @@ pub const CLD_CONTINUED: i32 = 6;
 // Realtime signal range
 // ---------------------------------------------------------------------------
 
-/// First realtime signal number (Linux x86_64).
-///
-/// Programs may reference `SIGRTMIN` as a constant.  On glibc this is
-/// actually a function call (`__libc_current_sigrtmin()`) because glibc
-/// reserves the first few RT signals for NPTL.  We expose both the
-/// constant and the function.
-pub const SIGRTMIN: i32 = 32;
+/// The first real-time signal a program may use: 34, glibc's, the C
+/// library keeping 32 and 33 for itself ([`is_internal_signal`]). A C
+/// program reads it through `__libc_current_sigrtmin()`, which `<signal.h>`'s
+/// `SIGRTMIN` calls. It was 32 until 2026-10-16, the library keeping no
+/// signal of its own.
+pub const SIGRTMIN: i32 = 34;
+
+/// The C library's signal for its timer threads, glibc's `SIGTIMER`, which
+/// glibc makes `SIGCANCEL`, 32: a `SIGEV_THREAD` timer's kernel timer aims
+/// it at the library's helper thread ([`crate::time`]).
+pub(crate) const SIGTIMER: i32 = 32;
+
+/// glibc's other internal signal, `SIGSETXID`, 33. This library does not
+/// use it; it keeps it from programs as glibc does, so that their real-time
+/// signals start where glibc's do.
+pub(crate) const SIGSETXID: i32 = 33;
+
+/// Whether `sig` is one of the library's own, 32 and 33, which -- as
+/// glibc's `is_internal_signal` -- a program cannot add to a set, give an
+/// action, or block or unblock; `kill` may still send one, and with no
+/// waiter of the library's for it, it is dropped ([`default_action`]).
+#[must_use]
+pub(crate) const fn is_internal_signal(sig: i32) -> bool {
+    sig == SIGTIMER || sig == SIGSETXID
+}
+
+/// The internal signals' bits in a set's low word.
+const INTERNAL_BITS: u64 = (1 << (SIGTIMER - 1)) | (1 << (SIGSETXID - 1));
 /// Last realtime signal number (Linux x86_64).
 pub const SIGRTMAX: i32 = 64;
 
-/// glibc: return the lowest realtime signal number.
-///
-/// SIGRTMIN is typically 32 on Linux (signals 32-64 are realtime).
-/// We don't support realtime signals, but programs that query the
-/// range need valid values.
+/// The lowest real-time signal a program may use, [`SIGRTMIN`]: 34, as
+/// glibc's answers, 32 and 33 being the library's.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_current_sigrtmin() -> i32 {
-    32
+    SIGRTMIN
 }
 
 /// glibc: return the highest realtime signal number.
@@ -4676,7 +4868,9 @@ mod tests {
         let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigfillset(&raw mut set) };
         assert_eq!(ret, 0);
-        assert!(set.bits.iter().all(|&w| w == u64::MAX));
+        // Every signal but the library's own two, as glibc's.
+        assert_eq!(set.bits[0], u64::MAX & !INTERNAL_BITS);
+        assert!(set.bits[1..].iter().all(|&w| w == u64::MAX));
     }
 
     #[test]
@@ -6278,7 +6472,11 @@ mod tests {
 
     #[test]
     fn test_sigrtmin_sigrtmax() {
-        assert_eq!(__libc_current_sigrtmin(), 32);
+        assert_eq!(
+            __libc_current_sigrtmin(),
+            34,
+            "glibc's, 32 and 33 being the library's"
+        );
         assert_eq!(__libc_current_sigrtmax(), 64);
         // rtmax > rtmin
         assert!(__libc_current_sigrtmax() > __libc_current_sigrtmin());
@@ -6288,11 +6486,165 @@ mod tests {
 
     #[test]
     fn test_sigrtmin_sigrtmax_constants() {
-        assert_eq!(SIGRTMIN, 32);
+        assert_eq!(SIGRTMIN, 34);
         assert_eq!(SIGRTMAX, 64);
         // Constants must agree with the functions.
         assert_eq!(SIGRTMIN, __libc_current_sigrtmin());
         assert_eq!(SIGRTMAX, __libc_current_sigrtmax());
+    }
+
+    /// Signals 32 and 33 are the library's, as glibc 2.39 keeps them
+    /// (`build/d-tools/oracle-internal-signals.c`'s answers): a set will not
+    /// take them, `sigfillset` leaves them out, `sigaction` refuses them
+    /// asked or set, a program's `sigprocmask` neither blocks nor unblocks
+    /// them (a whole new mask keeps them as they were), `strsignal` does not
+    /// count them as real-time, and one that comes with no waiter of the
+    /// library's for it is dropped.
+    #[test]
+    fn signals_32_and_33_are_the_librarys() {
+        let mut set = SigsetT::EMPTY;
+        for sig in [32, 33] {
+            errno::set_errno(0);
+            // SAFETY: a local set.
+            assert_eq!(unsafe { sigaddset(&raw mut set, sig) }, -1, "{sig}");
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            // SAFETY: as above.
+            assert_eq!(unsafe { sigdelset(&raw mut set, sig) }, -1, "{sig}");
+            let mut old = DEFAULT_SIGACTION;
+            errno::set_errno(0);
+            // SAFETY: a local action.
+            assert_eq!(
+                unsafe { sigaction(sig, core::ptr::null(), &raw mut old) },
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(default_action(sig), Some(DefaultAction::Ignore));
+        }
+        // SAFETY: as above.
+        assert_eq!(unsafe { sigaddset(&raw mut set, 34) }, 0);
+        let mut full = SigsetT::EMPTY;
+        // SAFETY: as above.
+        unsafe { sigfillset(&raw mut full) };
+        assert_eq!(full.bits[0] & INTERNAL_BITS, 0);
+        assert_ne!(full.bits[0] & sigmask_bit(34), 0);
+
+        let saved = calling_thread_mask();
+        let mut raw = SigsetT::EMPTY;
+        raw.bits[0] = INTERNAL_BITS | sigmask_bit(SIGUSR1);
+        assert_eq!(
+            sigprocmask(SIG_BLOCK, &raw const raw, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            current_blocked_low() & INTERNAL_BITS,
+            0,
+            "not blocked by a program"
+        );
+        assert_ne!(current_blocked_low() & sigmask_bit(SIGUSR1), 0);
+        block_internal_signals();
+        assert_eq!(current_blocked_low() & INTERNAL_BITS, INTERNAL_BITS);
+        let none = SigsetT::EMPTY;
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const none, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            current_blocked_low(),
+            INTERNAL_BITS,
+            "a whole new mask keeps the library's as they were"
+        );
+        assert_eq!(
+            sigprocmask(SIG_UNBLOCK, &raw const raw, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(current_blocked_low(), INTERNAL_BITS, "nor unblocks them");
+        // SAFETY: `blocked_mask_ptr()` is this thread's own.
+        unsafe { blocked_mask_ptr().write(saved) };
+        mask_changed();
+
+        let text = |p: *const u8| {
+            // SAFETY: strsignal's NUL-terminated answer.
+            unsafe { core::ffi::CStr::from_ptr(p.cast()) }
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(text(strsignal(32)), "Unknown signal 32");
+        assert_eq!(text(strsignal(34)), "Real-time signal 0");
+    }
+
+    /// `signal`, `bsd_signal` and `sysv_signal` refuse the library's own
+    /// two as `sigaction` does, and an inherited `SIG_IGN` on them is not
+    /// taken: either would have the kernel discard every `SIGEV_THREAD`
+    /// timer's signal, past any `sigaction`'s undoing.
+    #[test]
+    fn the_librarys_signals_take_no_handler_by_any_door() {
+        for sig in [SIGTIMER, SIGSETXID] {
+            for install in [signal, bsd_signal, sysv_signal] {
+                errno::set_errno(0);
+                assert_eq!(install(sig, SIG_IGN), SIG_ERR, "{sig}");
+                assert_eq!(errno::get_errno(), errno::EINVAL);
+            }
+        }
+        adopt_inherited_ignored(sigmask_bit(SIGTIMER) | sigmask_bit(SIGUSR2));
+        let mut old = DEFAULT_SIGACTION;
+        // SAFETY: a local action to read into.
+        unsafe { sigaction(SIGUSR2, core::ptr::null(), &raw mut old) };
+        assert_eq!(old.sa_handler, SIG_IGN, "an ordinary signal is taken");
+        // SAFETY: `actions_ptr()` is this thread's table on the host.
+        let slot = unsafe { (*actions_ptr())[SIGTIMER as usize] };
+        assert_ne!(slot.sa_handler, SIG_IGN, "the library's is not");
+        let restore = Sigaction {
+            sa_handler: SIG_DFL,
+            ..DEFAULT_SIGACTION
+        };
+        // SAFETY: as above.
+        unsafe { sigaction(SIGUSR2, &raw const restore, core::ptr::null_mut()) };
+    }
+
+    /// A new thread's mask is its attribute's or its creator's, less KILL,
+    /// STOP and the library's own signals -- so a timer thread, made by the
+    /// helper that blocks those, does not block them, as glibc's does not --
+    /// and while a thread is made its creator's kernel mask blocks every
+    /// signal, written back afterwards from the creator's own.
+    #[test]
+    fn a_new_threads_mask_and_the_quiet_while_it_is_made() {
+        let saved = calling_thread_mask();
+        let mut asked = SigsetT::EMPTY;
+        asked.bits[0] =
+            sigmask_bit(SIGUSR2) | sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP) | INTERNAL_BITS;
+        asked.bits[1] = 2;
+        let made = new_thread_mask(Some(asked));
+        assert_eq!(made.bits[0], sigmask_bit(SIGUSR2));
+        assert_eq!(made.bits[1], 2, "the high words as asked");
+
+        let mut raw = SigsetT::EMPTY;
+        raw.bits[0] = sigmask_bit(SIGUSR1);
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const raw, core::ptr::null_mut()),
+            0
+        );
+        block_internal_signals();
+        assert_eq!(
+            new_thread_mask(None).bits[0],
+            sigmask_bit(SIGUSR1),
+            "the creator's, less the library's own"
+        );
+
+        let before = kernel_blocked_low();
+        assert_eq!(before, kernel_mask_now());
+        {
+            let _quiet = AllBlocked::new();
+            assert_eq!(kernel_blocked_low(), u64::MAX, "every signal");
+        }
+        assert_eq!(kernel_blocked_low(), before, "and back");
+        write_kernel_mask(u64::MAX);
+        thread_started();
+        assert_eq!(kernel_blocked_low(), before, "a new thread's own");
+
+        // SAFETY: `blocked_mask_ptr()` is this thread's own.
+        unsafe { blocked_mask_ptr().write(saved) };
+        mask_changed();
     }
 
     #[test]
@@ -6583,7 +6935,7 @@ mod tests {
     #[test]
     fn test_sigrtmin_function() {
         let val = __libc_current_sigrtmin();
-        assert_eq!(val, 32);
+        assert_eq!(val, 34);
         assert_eq!(val, SIGRTMIN);
     }
 
@@ -7997,6 +8349,7 @@ mod tests {
         assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
         a.got.store(0, SeqCst);
         a.extra.store(0, SeqCst);
+        a.owner.store(this_thread(), SeqCst);
         a.set
             .store(sigmask_bit(SIGUSR1) | sigmask_bit(SIGUSR2), SeqCst);
 
@@ -8031,11 +8384,123 @@ mod tests {
 
         a.set.store(0, SeqCst);
         a.extra.store(0, SeqCst);
+        a.owner.store(0, SeqCst);
         a.busy.store(false, SeqCst);
         assert!(
             !hand_to_a_waiter(SIGUSR1, Origin::Kernel(core::ptr::null_mut())),
             "no one waits"
         );
+    }
+
+    /// A program's waits cannot take the library's slot: with all of
+    /// theirs claimed, the next is refused and the library's still claims
+    /// its own -- which the timer thread once could not, and spun.
+    #[test]
+    fn the_programs_waits_leave_the_librarys_slot_alone() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // SAFETY: this thread's table (the host's is per thread).
+        let waiters = unsafe { &*acceptors_ptr() };
+        let mut taken = std::vec::Vec::new();
+        while let Some(a) = claim(waiters, false) {
+            taken.push(a);
+        }
+        assert_eq!(taken.len(), ACCEPTORS - 1);
+        assert!(claim(waiters, false).is_none(), "the program's are full");
+        let own = claim(waiters, true).expect("the library's is free");
+        assert!(core::ptr::eq(own, &waiters[0]));
+        assert!(claim(waiters, true).is_none(), "one at a time");
+        for a in taken.into_iter().chain([own]) {
+            a.busy.store(false, SeqCst);
+        }
+    }
+
+    /// The set closes at the kernel as the dispatch hands a signal over,
+    /// before it returns: a second signal of the set the kernel holds stays
+    /// there, with its record, for the next wait.
+    #[test]
+    fn a_waiters_set_closes_once_a_signal_is_handed_over() {
+        use core::sync::atomic::Ordering::SeqCst;
+        let bit = sigmask_bit(SIGUSR1);
+        let program = current_blocked_low();
+        apply_blocked_low(program | bit);
+        // SAFETY: this thread's table (the host's is per thread).
+        let a = &unsafe { &*acceptors_ptr() }[0];
+        assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
+        a.got.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.owner.store(this_thread(), SeqCst);
+        a.set.store(bit, SeqCst);
+        mask_changed();
+        assert_eq!(kernel_blocked_low() & bit, 0, "open while it waits");
+
+        assert!(hand_to_a_waiter(
+            SIGUSR1,
+            Origin::Kernel(core::ptr::null_mut())
+        ));
+        assert_eq!(a.got.load(SeqCst), SIGUSR1);
+        assert_eq!(kernel_blocked_low() & bit, bit, "closed by the dispatch");
+        assert_eq!(opened_by_waiters(), 0);
+
+        a.got.store(CLOSED, SeqCst);
+        a.set.store(0, SeqCst);
+        a.owner.store(0, SeqCst);
+        a.busy.store(false, SeqCst);
+        apply_blocked_low(program);
+    }
+
+    /// Two threads are two owners: what makes a waiter its own thread's
+    /// ([`this_thread`]) differs from thread to thread, and is never 0, the
+    /// owner of a slot no one has claimed.
+    #[test]
+    fn each_thread_owns_its_waiters_by_a_mark_of_its_own() {
+        let here = this_thread();
+        let there = std::thread::spawn(this_thread)
+            .join()
+            .expect("the other thread");
+        assert_ne!(here, there);
+        assert_ne!(here, 0);
+        assert_ne!(there, 0);
+        assert_eq!(this_thread(), here, "the same thread, the same mark");
+    }
+
+    /// A waiter is its own thread's: a dispatch here does not hand another
+    /// thread's waiter a signal the kernel gave this thread, and this
+    /// thread's kernel mask does not open another thread's set -- both did
+    /// while the mask was the process's, until 2026-10-16. (The host's table
+    /// is per test thread, so the other thread is stood in for by an owner
+    /// that is not this one.)
+    #[test]
+    fn a_waiter_is_its_own_threads() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // SAFETY: this thread's table (the host's is per thread).
+        let a = &unsafe { &*acceptors_ptr() }[0];
+        assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
+        a.got.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.owner.store(this_thread().wrapping_add(4096), SeqCst);
+        a.set.store(sigmask_bit(SIGUSR1), SeqCst);
+
+        assert_eq!(
+            opened_by_waiters(),
+            0,
+            "another thread's set is not opened here"
+        );
+        assert!(
+            !hand_to_a_waiter(SIGUSR1, Origin::Kernel(core::ptr::null_mut())),
+            "nor is it handed a signal this thread was given"
+        );
+        assert_eq!(a.got.load(SeqCst), 0);
+
+        a.owner.store(this_thread(), SeqCst);
+        assert_eq!(
+            opened_by_waiters(),
+            sigmask_bit(SIGUSR1),
+            "this thread's is"
+        );
+
+        a.set.store(0, SeqCst);
+        a.owner.store(0, SeqCst);
+        a.busy.store(false, SeqCst);
     }
 
     /// While a thread waits for a set, the kernel lets the set through and
@@ -8094,8 +8559,8 @@ mod tests {
         signal(SIGUSR2, old);
     }
 
-    /// The kernel lets through the union of the sets waited for: one waiter
-    /// that stops leaves open what another still waits for.
+    /// A thread's kernel mask lets through the union of the sets it waits
+    /// for: one waiter that stops leaves open what another still waits for.
     #[test]
     fn the_kernel_lets_through_every_set_waited_for() {
         use core::sync::atomic::Ordering::SeqCst;
@@ -8106,6 +8571,10 @@ mod tests {
         // SAFETY: this thread's table (the host's is per thread).
         let table = unsafe { &*acceptors_ptr() };
         let (a, b) = (&table[0], &table[1]);
+        // Both this thread's, as a wait and one a handler starts inside it
+        // are; another thread's sets are its own kernel mask's.
+        a.owner.store(this_thread(), SeqCst);
+        b.owner.store(this_thread(), SeqCst);
         a.set.store(both, SeqCst);
         b.set.store(usr2, SeqCst);
         mask_changed();
@@ -8120,6 +8589,8 @@ mod tests {
         b.set.store(0, SeqCst);
         mask_changed();
         assert_eq!(kernel_blocked_low() & both, both);
+        a.owner.store(0, SeqCst);
+        b.owner.store(0, SeqCst);
         apply_blocked_low(saved);
     }
 
@@ -8134,6 +8605,7 @@ mod tests {
         let (a, b) = (&table[0], &table[1]);
         for w in [a, b] {
             w.extra.store(0, SeqCst);
+            w.owner.store(this_thread(), SeqCst);
             w.set.store(usr2, SeqCst);
         }
         a.got.store(SIGUSR1, SeqCst);
@@ -8156,6 +8628,7 @@ mod tests {
             w.set.store(0, SeqCst);
             w.got.store(0, SeqCst);
             w.extra.store(0, SeqCst);
+            w.owner.store(0, SeqCst);
         }
     }
 
@@ -8202,6 +8675,7 @@ mod tests {
         let table = unsafe { &*acceptors_ptr() };
         let w = &table[3];
         w.busy.store(true, SeqCst);
+        w.owner.store(this_thread(), SeqCst);
         w.set.store(usr2, SeqCst);
         mask_changed();
         assert_eq!(kernel_blocked_low() & usr2, 0);
@@ -8209,6 +8683,7 @@ mod tests {
         forget_waiters_after_fork();
         assert!(!w.busy.load(SeqCst));
         assert_eq!(w.set.load(SeqCst), 0);
+        assert_eq!(w.owner.load(SeqCst), 0);
         assert_ne!(
             kernel_blocked_low() & usr2,
             0,
@@ -8541,6 +9016,7 @@ mod tests {
         assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
         a.got.store(0, SeqCst);
         a.extra.store(0, SeqCst);
+        a.owner.store(this_thread(), SeqCst);
         a.set.store(sigmask_bit(SIGUSR1), SeqCst);
 
         let mut frame = ExtendedFrame::with(SignalInfoTail {
@@ -8585,6 +9061,7 @@ mod tests {
 
         a.set.store(0, SeqCst);
         a.got.store(0, SeqCst);
+        a.owner.store(0, SeqCst);
         a.busy.store(false, SeqCst);
     }
 
@@ -9155,13 +9632,6 @@ mod tests {
                 "sigabbrev_np" => text(sigabbrev_np(n)),
                 "sigdescr_np" => text(sigdescr_np(n)),
                 _ => continue,
-            };
-            // The one difference, on purpose: a real-time signal is counted
-            // from this library's SIGRTMIN, 32, and glibc's is 34.
-            let want = if func == "strsignal" && (SIGRTMIN..=SIGRTMAX).contains(&n) {
-                Some(format!("Real-time signal {}", n - SIGRTMIN))
-            } else {
-                want
             };
             assert_eq!(got, want, "{func}({n})");
             seen += 1;

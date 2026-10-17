@@ -7,13 +7,11 @@
 # One fixture a line, three fields separated by blanks:
 #
 #   name      the fixture, services/<name>/: its ELF, and its argv[0]
-#   grants    "-" for none, or a comma-separated list of kinds, each at
-#             most once:
-#               file   one wildcard File capability
-#                      (READ | WRITE | EXECUTE | METADATA)
-#               creds  (Process, SET_CREDENTIALS): set its own uid, gid and
-#                      supplementary groups, as the fastpy-setuid rung grants
-#             e.g. "file,creds"
+#   grants    "-" for none, or a comma-separated list of the words the
+#             kernel's rung knows (`ctest_generic_grant`, kernel/src/proc/
+#             spawn.rs, which the rootfs script reads), each at most once:
+#             `file` is one wildcard File capability (READ | WRITE |
+#             EXECUTE | METADATA)
 #   seconds   how long it may take, from spawn to exit: 1 to 600
 #
 # and a fourth, for a fixture that runs a port only some worktrees build:
@@ -44,8 +42,12 @@ ctest-rusage     -        60
 ctest-pi-mutex   -        60
 ctest-system     file     60
 ctest-mmap-file  file     30
-ctest-resuid     creds    30
-ctest-groups     file,creds 30
+# Waiting on lane A's `creds` grant word -- (Process, SET_CREDENTIALS), to
+# set their own ids -- which the rung does not know yet, and a word it does
+# not know stops the whole list
+# (requests/d-a-the-generic-rung-needs-the-creds-grant-word.md):
+# ctest-resuid     creds    30
+# ctest-groups     file,creds 30
 ctest-fallocate  file     30
 ctest-string     -        60
 ctest-gdb-runs   file     300  needs=bin/gnu-gdb
@@ -72,7 +74,7 @@ ctest-dumpable   file     30
 ctest-thread-masks -        30
 ctest-sigev-thread -        30
 ctest-fifo       file     30
-ctest-setids     creds    30
+# ctest-setids     creds    30  (waiting on `creds`, as ctest-resuid above)
 ctest-spawn-attrs file     30
-ctest-swap       file,creds 30
+# ctest-swap       file,creds 30  (waiting on `creds`, as ctest-resuid above)
 ctest-scm-rights file     30

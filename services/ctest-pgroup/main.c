@@ -41,12 +41,11 @@
  * `ESRCH` when it does not. The last one sends a real signal to the child's
  * thread and reads the death it causes back from `waitpid`.
  *
- * Another process's thread is looked for in /proc/<pid>/task/<tid>, which
- * wants a File capability this fixture may not have: the rung starts it with
- * none. Then 84-87 check the refusal instead -- EPERM, never a false ESRCH,
- * and nothing sent, so the child ends on the pipe's close -- and 88 that a
- * process that is not there is ESRCH either way. (Until 2026-09-30 libc read
- * the refusal as "no such thread", and 84 failed on the rung.)
+ * The C library asks the kernel's SYS_SIGNAL_TGKILL, which checks the
+ * thread itself, so these hold with no File capability, as on Linux; the
+ * rung starts the fixture with none. (Until 2026-10-16 the library looked
+ * for another process's thread in /proc, which wants one, and 84-87 checked
+ * its EPERM refusal instead when the fixture could not look.)
  *
  * Exit code 42 == every check passed; anything else identifies the first
  * failing check (see the `FAIL`/`return` values below and the legend in
@@ -255,7 +254,9 @@ done:
             close(hold[1]);
             if (write(tid_pipe[1], &mine, sizeof mine) != (ssize_t)sizeof mine)
                 _exit(1);
-            (void)read(hold[0], &c, 1);
+            /* What it reads does not matter: it returns at the close. */
+            if (read(hold[0], &c, 1) < 0) {
+            }
             _exit(0);
         }
         close(tid_pipe[1]);
@@ -265,38 +266,17 @@ done:
         if (read(tid_pipe[0], &kid_tid, sizeof kid_tid) != (ssize_t)sizeof kid_tid)
             return 83;
 
-        /* Whether this process may look at /proc, which is how libc checks
-         * another process's thread (see the header). */
+        /* 84. The child's thread, named against the child: there. */
+        if (tgkill(kid, kid_tid, 0) != 0)                       return 84;
+        /* 85. This thread, named against the child: not the child's. */
         errno = 0;
-        const int may_look = access("/proc/self", F_OK) == 0 || errno != EACCES;
-
-        if (may_look) {
-            /* 84. The child's thread, named against the child: there. */
-            if (tgkill(kid, kid_tid, 0) != 0)                       return 84;
-            /* 85. This thread, named against the child: not the child's. */
-            errno = 0;
-            if (tgkill(kid, self_tid, 0) != -1 || errno != ESRCH)  return 85;
-            /* 86. A real signal reaches it: SIGUSR1's default ends it. */
-            if (tgkill(kid, kid_tid, SIGUSR1) != 0)                 return 86;
-            close(hold[1]);
-            if (waitpid(kid, &status, 0) != kid)                    return 86;
-            /* 87. ...and the death is SIGUSR1's -- not the close's exit. */
-            if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGUSR1) return 87;
-        } else {
-            /* 84-86. Neither thread can be checked, so neither is
-             * signalled: EPERM for each -- not the ESRCH that would say
-             * the child's thread is not there. */
-            errno = 0;
-            if (tgkill(kid, kid_tid, 0) != -1 || errno != EPERM)       return 84;
-            errno = 0;
-            if (tgkill(kid, self_tid, 0) != -1 || errno != EPERM)      return 85;
-            errno = 0;
-            if (tgkill(kid, kid_tid, SIGUSR1) != -1 || errno != EPERM) return 86;
-            close(hold[1]);
-            if (waitpid(kid, &status, 0) != kid)                        return 86;
-            /* 87. Nothing was sent: the child ends on the close, exit 0. */
-            if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)         return 87;
-        }
+        if (tgkill(kid, self_tid, 0) != -1 || errno != ESRCH)  return 85;
+        /* 86. A real signal reaches it: SIGUSR1's default ends it. */
+        if (tgkill(kid, kid_tid, SIGUSR1) != 0)                 return 86;
+        close(hold[1]);
+        if (waitpid(kid, &status, 0) != kid)                    return 86;
+        /* 87. ...and the death is SIGUSR1's -- not the close's exit. */
+        if (!WIFSIGNALED(status) || WTERMSIG(status) != SIGUSR1) return 87;
         close(tid_pipe[0]);
 
         /* 88. A process that is not there is ESRCH, capability or not. */

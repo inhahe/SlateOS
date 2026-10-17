@@ -159,8 +159,8 @@ esac
 # where upstream's may lack the leading `block` its own link gives.
 compare_subsystems() {
   local o g on ov gn gv bad=0 lost=0
-  o=$(LC_ALL=C PATH="$bindir/ours" lsblk -r -n -a -o NAME,SUBSYSTEMS 2>&1)
-  g=$(LC_ALL=C PATH="$bindir/gnu" lsblk -r -n -a -o NAME,SUBSYSTEMS 2>&1)
+  o=$(env LC_ALL=C PATH="$bindir/ours" lsblk -r -n -a -o NAME,SUBSYSTEMS 2>&1)
+  g=$(env LC_ALL=C PATH="$bindir/gnu" lsblk -r -n -a -o NAME,SUBSYSTEMS 2>&1)
   if [ "$(printf '%s\n' "$o" | wc -l)" != "$(printf '%s\n' "$g" | wc -l)" ]; then
     bad=1
   else

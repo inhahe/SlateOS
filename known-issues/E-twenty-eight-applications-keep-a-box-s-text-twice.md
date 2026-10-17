@@ -82,17 +82,23 @@ this order, a commit each:
    made with something in it (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
-   *Moved (2026-10-17), thirteen of the twenty-eight:* rssreader's prompt,
+   *Moved (2026-10-17), sixteen of the twenty-eight:* rssreader's prompt,
    pdfviewer's page range, systemrestore's form (two boxes), defrag's
    exclude pattern, screenshot's text annotation, whiteboard's words,
    ircclient's message line, kanban's input dialog, filesearch's query (in
    its criteria), hexeditor's find and go-to boxes (two), dictionary's
-   query, photomanager's search and album name (two), netscan's five. A
-   row that stood for the second copy -- a reload, a write-back, a private
-   clipboard, a caret or selection drawn by hand -- goes with it; the rest
-   move onto the box. One drawing changed: hexeditor's box
+   query, photomanager's search and album name (two), netscan's five,
+   startupmanager's search and dialog (six), clipmanager's four, qrcode's
+   eight. A row that stood for the second copy -- a reload, a write-back, a
+   private clipboard, a caret or selection drawn by hand -- goes with it;
+   the rest move onto the box. Two drawings changed: hexeditor's box
    without the keyboard is drawn from its start, as every LineBox is, not
-   scrolled to its end. *Left:* clipmanager, contacts, dbviewer, mindmap,
-   netmanager, qrcode, startupmanager, taskscheduler, vpnmanager,
+   scrolled to its end, and qrcode's placeholder sits on its text's line,
+   3 px higher. Where a box's text is a model's data -- qrcode's WiFi and
+   contact codes, compared and kept in history -- the box is the record
+   and the model is made from it when it is needed
+   (`QrApp::wifi_config`); a dialog's state that only held its boxes
+   drops its equality instead (startupmanager). *Left:* contacts,
+   dbviewer, mindmap, netmanager, taskscheduler, vpnmanager,
    colorpicker, diskanalyzer, editor, lockscreen, passwordgen,
    stickynotes.

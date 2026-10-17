@@ -13,9 +13,9 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**503 programs; 343 on the image, 6 carried inside the kernel.**
+**504 programs; 344 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 318
+## Userland utilities and services (`userspace/`, lane B) -- 319
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
@@ -40,6 +40,7 @@ two disagree.
 | `bootctl` | EFI boot manager control. | yes |  |  |
 | `cal` | `cal`, transcribed from util-linux 2.39.3 rather than remembered. | yes | `coreutils` |  |
 | `cat` | Concatenate files and print them on the standard output. | yes | `coreutils` |  |
+| `cfdisk` | Display or manipulate a disk partition table, full screen. | yes |  |  |
 | `chage` | Password-aging utility. | yes |  |  |
 | `chattr` | `chattr` and `lsattr`: change and list a file's attributes. | yes |  | `lsattr` |
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |

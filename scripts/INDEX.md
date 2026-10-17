@@ -48,6 +48,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/canary-load.py` | Hold the host CPU busy across a *named window* of a `--bench` run. |
 | `scripts/canary-spread-survey.py` | Survey the canary's observed spread across every recorded run. |
 | `scripts/cat-diff.sh` | Differential test: our cat against GNU coreutils' cat. |
+| `scripts/cfdisk-diff.sh` | Differential test: our `cfdisk` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/charwidth-gen.py` | Generate the terminal-column width tables of `userspace/charwidth`. |
 | `scripts/chattr-diff.sh` | Differential test: our chattr and lsattr against Ubuntu 24.04's, in WSL. |
 | `scripts/check-absent-operand-default.py` | Refuse a missing shell operand that silently becomes a number. |
@@ -601,4 +602,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_591 scripts._
+_592 scripts._

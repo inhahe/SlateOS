@@ -474,6 +474,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfdisk"
+version = "0.1.0"
+dependencies = [
+ "curses",
+ "errmsg",
+ "fdisk",
+ "getoptlong",
+ "libcall",
+ "libfdisk",
+ "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulcolors",
+ "ulmount",
+ "ulstrutils",
+ "ulsysfs",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 

@@ -1543,10 +1543,12 @@ impl FileDialog {
         // visibly does nothing, which is what a disabled button is. Dropping
         // the target instead would let the click fall through to the toolbar,
         // which is not different here but would be if anything were behind it.
-        let back_color = if self.history_back.is_empty() {
-            palette.overlay0
-        } else {
+        // With nothing to go back to the button is disabled, and drawn so.
+        let back_enabled = !self.history_back.is_empty();
+        let back_color = if back_enabled {
             palette.text
+        } else {
+            palette.overlay0
         };
         frame.push(RenderCommand::Text {
             x,
@@ -1565,10 +1567,11 @@ impl FileDialog {
         x += scaled(NAV_BUTTON_WIDTH);
 
         // Forward button
-        let fwd_color = if self.history_forward.is_empty() {
-            palette.overlay0
-        } else {
+        let fwd_enabled = !self.history_forward.is_empty();
+        let fwd_color = if fwd_enabled {
             palette.text
+        } else {
+            palette.overlay0
         };
         frame.push(RenderCommand::Text {
             x,
@@ -1986,8 +1989,9 @@ impl FileDialog {
             } else {
                 self.filename_input.clone()
             };
+            // A placeholder is text to read, not a switched-off control.
             let text_color = if self.filename_input.is_empty() {
-                palette.overlay0
+                palette.subtext0
             } else {
                 palette.text
             };

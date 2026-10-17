@@ -1168,7 +1168,7 @@ impl AccountSettingsUI {
             let status_color = if acct.is_logged_in {
                 p.green
             } else {
-                p.overlay0
+                p.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: x + width - 80.0,

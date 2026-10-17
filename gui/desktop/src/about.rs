@@ -467,7 +467,7 @@ impl AboutDialog {
         let wordmark = readable_on(logo);
         let version_ink = p.text;
         let built_ink = p.subtext0;
-        let tagline_ink = p.overlay0;
+        let tagline_ink = p.subtext0;
 
         cmds.push(RenderCommand::FillRect {
             x: logo_x,
@@ -1546,7 +1546,7 @@ mod tests {
             let p = accented(light);
 
             let mut want = chrome(&p, AboutTab::Overview);
-            want.extend([p.blue, readable_on(p.blue), p.text, p.subtext0, p.overlay0]);
+            want.extend([p.blue, readable_on(p.blue), p.text, p.subtext0, p.subtext0]);
             assert_eq!(
                 colors(
                     &dialog_with_licenses(AboutTab::Overview).render(&p, 0.0, 0.0, 500.0, 400.0)

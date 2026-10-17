@@ -690,10 +690,11 @@ impl DeviceSettingsUI {
             (
                 "Problems",
                 format!("{}", self.manager.problem_count()),
+                // "0" is a count to read, not a switched-off control.
                 if self.manager.problem_count() > 0 {
                     p.red
                 } else {
-                    p.overlay0
+                    p.subtext0
                 },
             ),
             (
@@ -1751,5 +1752,56 @@ mod tests {
             accented(mauve),
             "nothing followed the accent, so this test measures nothing"
         );
+    }
+
+    /// The figure under the overview's "Problems" label, and its ink.
+    fn problems_figure(devices: Vec<DeviceInfo>, p: &Palette) -> (String, Color) {
+        let ui = wound_panel(
+            devices,
+            DeviceSettingsTab::Overview,
+            false,
+            false,
+            "",
+            false,
+        );
+        let texts: Vec<(String, Color)> = ui
+            .render(p, 0.0, 0.0, 600.0, 800.0)
+            .into_iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } => Some((text, color)),
+                _ => None,
+            })
+            .collect();
+        let at = texts
+            .iter()
+            .position(|(t, _)| t == "Problems")
+            .expect("the overview draws no Problems label");
+        texts[at + 1].clone()
+    }
+
+    /// "0" problems is a count to read -- the figure that says all is well --
+    /// so it is `subtext0`, not `overlay0`, the disabled grey at 2.30:1 on the
+    /// page; one problem turns it red. The figures are a table of tuples,
+    /// which `check-overlay0-ink.py` does not follow, so this pins it.
+    #[test]
+    fn no_problems_is_a_figure_to_read() {
+        for light in [false, true] {
+            let p = Palette::for_mode(light);
+
+            let healthy = vec![sample_device("a", DeviceCategory::Usb)];
+            assert_eq!(
+                problems_figure(healthy, &p),
+                ("0".to_string(), p.subtext0),
+                "light = {light}"
+            );
+
+            let mut broken = sample_device("b", DeviceCategory::Usb);
+            broken.status = DeviceStatus::Error;
+            assert_eq!(
+                problems_figure(vec![broken], &p),
+                ("1".to_string(), p.red),
+                "light = {light}"
+            );
+        }
     }
 }

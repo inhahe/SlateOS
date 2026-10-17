@@ -1248,7 +1248,7 @@ impl SecurityDialog {
             let time_color = if timeout_remaining <= TIMEOUT_WARN_SECS {
                 p.yellow
             } else {
-                p.overlay0
+                p.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: dx + PADDING + dp,

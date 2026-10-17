@@ -3450,6 +3450,11 @@ pub(crate) mod thread_timers {
         core::ptr::null_mut()
     }
 
+    /// Serialises the tests that reach [`LIST`]: one puts a record on it,
+    /// and the others' `timer_create` could.
+    #[cfg(test)]
+    pub(super) static LIST_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -3462,6 +3467,9 @@ pub(crate) mod thread_timers {
         /// timer's expiry.
         #[test]
         fn an_expiry_finds_its_record_by_serial() {
+            let _list = LIST_TEST_LOCK
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let block = crate::malloc::malloc(core::mem::size_of::<Record>()).cast::<Record>();
             assert!(!block.is_null());
             let make = |serial: usize| {
@@ -6604,6 +6612,10 @@ mod tests {
     /// `timer_create`'s call, with `*timerid` preset to a sentinel: the
     /// result, errno, and whether the sentinel survived.
     fn create(clock: ClockidT, ev: Option<&Sigevent>) -> (i32, i32, bool) {
+        // A `SIGEV_THREAD` timer's record goes on the library's list.
+        let _list = thread_timers::LIST_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let p = ev.map_or(core::ptr::null(), core::ptr::from_ref);
         let mut id: TimerT = 0xDEAD;
         crate::errno::set_errno(0);

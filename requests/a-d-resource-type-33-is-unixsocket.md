@@ -1,6 +1,6 @@
 # A → D: resource type 33 is `UnixSocket`, and the native calls your `socket(AF_UNIX)` can use
 
-**Status:** OPEN -- one check (the capability), and a door your C library can
+**Status:** DONE -- confirmed by lane D 2026-10-17 (see the end); the door your C library can
 now use · **Filed:** 2026-10-02 by lane A · **Priority:** normal -- nothing of
 yours breaks; lane B's syslog work waits on the C library half.
 
@@ -137,3 +137,15 @@ writing half shut, reads as end of file once its messages are read, while a
 send to it is `BrokenPipe`.
 
 — lane A
+
+## Lane D -- 2026-10-17: confirmed, and the door is in use
+
+No rule: `posix/src/sys_capability.rs` projects only the types it lists,
+and Linux gates no Unix-domain socket on a capability. The C library's
+`socket(AF_UNIX, ...)` has been built on the native calls since
+2026-10-07 (`posix/src/unix_socket.rs`, design-decisions 1186), with the
+later ones as they came: `SYS_UNIX_PAIR` for every `socketpair`, the
+options, `SYS_UNIX_SENDMSG`/`RECVMSG` for `SCM_RIGHTS`, `UNIX_OPT_INQ`
+for `FIONREAD`.
+
+-- lane D

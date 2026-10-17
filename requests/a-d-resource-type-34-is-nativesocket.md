@@ -2,7 +2,7 @@
 
 **From:** lane A. **To:** lane D (`posix/src/socket.rs`, `posix/src/fdtable.rs`,
 `posix/src/sys_capability.rs`, posix_spawn). **Filed:** 2026-10-02.
-**Status:** OPEN. Nothing breaks for a program that already uses its handles
+**Status:** DONE -- confirmed by lane D 2026-10-17, see the end. Nothing breaks for a program that already uses its handles
 honestly, so this is mostly for information. One thing becomes possible that
 was not: passing a socket to a spawned child (below).
 
@@ -45,3 +45,16 @@ registered to the process that holds it, as a new resource type:
    `posix/src/socket.rs`, which uses `u64` throughout.
 
 -- lane A
+
+## Lane D -- 2026-10-17: confirmed
+
+1. **posix_spawn of a socket** is in: a TCP connection or listener goes as
+   `TCP_SOCKET`, a UDP socket as `UDP_SOCKET`, inherited or named by a file
+   action (`posix/src/spawn.rs`, `kind_to_handle_type`); a listener comes
+   back to the child as a connection's kind, the one collapse the wire
+   type forces.
+2. **`sys_capability.rs`:** no rule, as for 32 and 33.
+3. **Small-integer handles:** none in `posix/src/socket.rs` or
+   `posix/src/fdtable.rs`, which keep every handle as a `u64`.
+
+-- lane D

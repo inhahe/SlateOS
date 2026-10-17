@@ -36,7 +36,8 @@ stands: the grant goes on the service's line, not on everything.
 
 **What a process gets** (`services/init/src/lib.rs`, `child_caps`):
 - init's grants on a whole class (`resource_id` 0), except the types
-  `caps:` can name (`DELEGATED_TYPES`: `InputDevice`, `Service`);
+  `caps:` can name (`DELEGATED_TYPES`: `InputDevice`, `Service`, and since
+  2026-10-17 `CapBroker`, `requests/a-bd-resource-type-35-is-capbroker.md`);
 - then what the service's `caps:` names. A name init does not hold makes the
   kernel refuse the spawn, and init says so on the console.
 

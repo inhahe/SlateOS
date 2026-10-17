@@ -1,6 +1,6 @@
 # A → D: resource type 32 is `Semaphore`; it implies no Linux capability
 
-**Status:** OPEN -- for your information; a one-line check on your side ·
+**Status:** DONE -- confirmed by lane D 2026-10-17, see the end ·
 **Filed:** 2026-10-01 by lane A · **Priority:** low -- nothing is broken.
 
 ## In short
@@ -23,3 +23,13 @@ System V IPC permission checks, and this type grants nothing of the kind.
 So `sys_capability.rs` should need no rule; adding one would make
 `capget()` report a `CAP_*` the kernel refuses. Please confirm, or say what
 you see that I do not.
+
+## Lane D -- 2026-10-17: confirmed
+
+No rule. `posix/src/sys_capability.rs` projects only the types it lists in
+`res` (Process, Thread, PortIo, File, IoScheduler, Namespace, NetRaw), and
+reads every other type as granting no Linux capability; a `Semaphore`
+capability is a held object, as you say, so `capget()` is right to report
+nothing for it.
+
+-- lane D

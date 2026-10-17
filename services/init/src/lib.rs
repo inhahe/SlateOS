@@ -280,15 +280,19 @@ pub struct CapEntryInfo {
 
 /// The capability types a service is given only by naming them in `caps:`,
 /// by the names `caps:` spells them: init holds these to hand to the one
-/// service that needs each -- the keyboard and mouse to the compositor -- and
-/// starts every other process without them (design-decisions 706 and 1174).
+/// service that needs each -- the keyboard and mouse to the compositor, the
+/// right to answer programs' requests for capabilities (`CapBroker`, which
+/// can approve anything) to the session manager for the desktop's session --
+/// and starts every other process without them (design-decisions 706, 1174
+/// and 1548).
 ///
 /// The table holds what init delegates, not every type the kernel has: "list
 /// what you use, not what exists" (706). A name not here refuses the line, so
 /// a type the kernel renumbers or a name misspelt is a service that does not
 /// start, said so on the console -- not one that starts without what it was
 /// meant to have. The numbers are the kernel's `cap::ResourceType`.
-pub const DELEGATED_TYPES: &[(&[u8], u16)] = &[(b"InputDevice", 30), (b"Service", 14)];
+pub const DELEGATED_TYPES: &[(&[u8], u16)] =
+    &[(b"InputDevice", 30), (b"Service", 14), (b"CapBroker", 35)];
 
 /// The rights `caps:` spells, by letter: the kernel's `cap::Rights` bits.
 const CAP_RIGHTS: &[(u8, u64)] = &[(b'r', 1 << 0), (b'w', 1 << 1)];
@@ -736,6 +740,17 @@ mod tests {
                 rights: 3
             }]
         );
+        // The session manager's, as lane A's request spells it: the right to
+        // register as the one that answers capability requests.
+        let l = line(b"/bin/loginmgr caps:CapBroker/0/w");
+        assert_eq!(
+            l.caps(),
+            [CapGrant {
+                resource_type: 35,
+                resource_id: 0,
+                rights: 2
+            }]
+        );
     }
 
     /// What refuses a line -- the service is not started, and init says
@@ -898,11 +913,16 @@ Service/6/r,Service/7/r,Service/8/r,Service/9/r",
             entry(30, 0, 1),      // InputDevice
             entry(14, 0, 2),      // Service
             entry(14, 12_345, 1), // Service, one key
+            entry(35, 0, 0x42),   // CapBroker
         ];
         let mut out = [CapEntryInfo::default(); 16];
 
         let n = child_caps(&held, &[], &mut out).expect("fits");
-        assert_eq!(out[..n], [held[0], held[1], held[2]]);
+        assert_eq!(
+            out[..n],
+            [held[0], held[1], held[2]],
+            "no InputDevice, Service or CapBroker"
+        );
 
         let grants = [CapGrant {
             resource_type: 30,

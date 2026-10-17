@@ -10716,18 +10716,36 @@ pub fn self_test_blk_discard_range() -> crate::error::KernelResult<()> {
 /// descriptor holds, whatever its name now (`fs::handle::HandleFile`), as
 /// `fchmod` acts. Not a regular file or a directory: `ENOTTY`.
 fn file_flags_ioctl(pid: u64, fd: i32, request: u32, arg: u64) -> SyscallResult {
-    /// `FS_IMMUTABLE_FL`.
-    const FS_IMMUTABLE_FL: u32 = 0x10;
-    /// `FS_APPEND_FL`.
-    const FS_APPEND_FL: u32 = 0x20;
-    use crate::fs::FileAttr;
     let Some(entry) = pcb::linux_fd_lookup(pid, fd) else {
         return linux_err(errno::EBADF);
     };
     if entry.kind != HandleKind::File {
         return linux_err(errno::ENOTTY);
     }
-    let file = match crate::fs::handle::HandleFile::of(entry.raw_handle) {
+    file_flags_of(pid, entry.raw_handle, request, arg)
+}
+
+/// [`file_flags_ioctl`] for process `pid`'s file handle `handle`: also the
+/// native ABI's `SYS_FS_INODE_FLAGS`, with the same requests and answers. A
+/// request other than the flags' -- the generation (`FS_IOC_GETVERSION`),
+/// the project (`FS_IOC_FSGETXATTR`) and the rest -- is `ENOTTY`, Linux's
+/// answer on a filesystem that keeps neither: no filesystem here shows them.
+pub(crate) fn file_flags_of(pid: u64, handle: u64, request: u32, arg: u64) -> SyscallResult {
+    /// `FS_IMMUTABLE_FL`.
+    const FS_IMMUTABLE_FL: u32 = 0x10;
+    /// `FS_APPEND_FL`.
+    const FS_APPEND_FL: u32 = 0x20;
+    use crate::fs::FileAttr;
+    if !matches!(
+        request,
+        ioctl_cmd::FS_IOC_GETFLAGS
+            | ioctl_cmd::FS_IOC32_GETFLAGS
+            | ioctl_cmd::FS_IOC_SETFLAGS
+            | ioctl_cmd::FS_IOC32_SETFLAGS
+    ) {
+        return linux_err(errno::ENOTTY);
+    }
+    let file = match crate::fs::handle::HandleFile::of(handle) {
         Ok(f) => f,
         Err(e) => return linux_err(linux_errno_for(e)),
     };

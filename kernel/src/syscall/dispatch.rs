@@ -121,8 +121,8 @@ use super::number::{
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
     SYS_FS_ADD_SEALS, SYS_FS_DEFER, SYS_FS_DEFER_CANCEL, SYS_FS_DEFER_LIST, SYS_FS_GET_SEALS,
-    SYS_LIFECYCLE_QUERY, SYS_LIFECYCLE_REGISTER, SYS_LIFECYCLE_REQUEST, SYS_MSYNC,
-    SYS_RESTART_SYSCALL, SYS_SWAP_OFF, SYS_SWAP_ON,
+    SYS_FS_INODE_FLAGS, SYS_LIFECYCLE_QUERY, SYS_LIFECYCLE_REGISTER, SYS_LIFECYCLE_REQUEST,
+    SYS_MSYNC, SYS_RESTART_SYSCALL, SYS_SWAP_OFF, SYS_SWAP_ON,
 };
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
@@ -798,6 +798,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GETGROUPS as usize] = Some(handlers::sys_process_getgroups);
     handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
     handlers[SYS_MSYNC as usize] = Some(handlers::sys_msync);
+    handlers[SYS_FS_INODE_FLAGS as usize] = Some(handlers::sys_fs_inode_flags);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
@@ -1368,6 +1369,7 @@ pub fn self_test_fs() -> KernelResult<()> {
     // would have failed there for want of a filesystem).
     test_dispatch_record_lock()?;
     test_dispatch_seals()?;
+    test_dispatch_inode_flags()?;
     test_dispatch_deferred()?;
     test_dispatch_flock()?;
     test_dispatch_fs_gates()?;
@@ -5014,6 +5016,157 @@ fn test_dispatch_seals() -> KernelResult<()> {
     serial_println!(
         "[syscall]   SYS_FS_ADD_SEALS/GET_SEALS (1124-1125): refusals, a seal by a writable \
          handle, read back by another, binding the VFS: OK"
+    );
+    Ok(())
+}
+
+/// `SYS_FS_INODE_FLAGS` (1178), as a scratch root process calls it, its flags
+/// word in its own memory: a handle it does not hold is `EBADF`, a request
+/// other than the flags' (`FS_IOC_GETVERSION`) `ENOTTY`; it sets
+/// `FS_APPEND_FL` on a file it holds, which the VFS then keeps, and reads it
+/// back; an unsupported flag (`FS_NODUMP_FL`) is `EOPNOTSUPP`; and setting 0
+/// lifts it. The rules themselves are the Linux ABI's, tested in ring 3
+/// (`spawn::self_test_linux_file_flags`); this is the native door.
+fn test_dispatch_inode_flags() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE, SYS_FS_INODE_FLAGS};
+    use crate::cap::ResourceType;
+    use crate::fs::FileAttr;
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::mm::user::{copy_from_user_as, copy_to_user_as};
+    use crate::proc::pcb;
+    use crate::proc::thread::{self, self_test_as_process};
+
+    const PATH: &str = "/tmp/_inode_flags_door";
+    const FS_IOC_GETFLAGS: u64 = 0x8008_6601;
+    const FS_IOC_SETFLAGS: u64 = 0x4008_6602;
+    const FS_IOC_GETVERSION: u64 = 0x8008_7601;
+    const FS_APPEND_FL: u32 = 0x20;
+    const FS_NODUMP_FL: u32 = 0x40;
+    const EBADF: i64 = -9;
+    const ENOTTY: i64 = -25;
+    const EOPNOTSUPP: i64 = -95;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: inode flags: {}", msg);
+        pcb::destroy(pid);
+        // Best effort: the file is this test's own scratch.
+        let _ = crate::fs::Vfs::remove(PATH);
+        Err(KernelError::InternalError)
+    }
+    let pid = pcb::create("inode-flags-door", 0);
+    // Best effort: a leftover from an earlier boot's failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    if crate::fs::Vfs::write_file(PATH, b"flags").is_err() {
+        return fail("could not create the scratch file", pid);
+    }
+    let Ok(h) = handle::open(PATH, OpenFlags::READ.union(OpenFlags::WRITE)) else {
+        return fail("could not open the scratch file", pid);
+    };
+    // Given to the process as an open would give it; its teardown closes it.
+    pcb::register_ipc_handle(pid, ResourceType::File, h);
+    let map = self_test_as_process(pid, || {
+        dispatch(
+            SYS_MMAP,
+            &SyscallArgs {
+                arg0: 0,
+                arg1: 0x4000,
+                arg2: MAP_READ | MAP_WRITE,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    });
+    let Ok(word) = u64::try_from(map) else {
+        return fail("could not map the scratch process's memory", pid);
+    };
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    let call = |handle: u64, request: u64| {
+        thread::self_test_in_process(pid, || {
+            dispatch(
+                SYS_FS_INODE_FLAGS,
+                &SyscallArgs {
+                    arg0: handle,
+                    arg1: request,
+                    arg2: word,
+                    arg3: 0,
+                    arg4: 0,
+                    arg5: 0,
+                },
+            )
+            .value
+        })
+        .unwrap_or(i64::MIN)
+    };
+    let put = |flags: u32| copy_to_user_as(pml4, word, &flags.to_ne_bytes()).is_ok();
+
+    let not_held = call(u64::MAX, FS_IOC_GETFLAGS);
+    let other = call(h, FS_IOC_GETVERSION);
+    if not_held != EBADF || other != ENOTTY {
+        serial_println!(
+            "[syscall]     not held {}, FS_IOC_GETVERSION {}",
+            not_held,
+            other
+        );
+        return fail("a refusal answered wrongly", pid);
+    }
+    let set = if put(FS_APPEND_FL) {
+        call(h, FS_IOC_SETFLAGS)
+    } else {
+        i64::MIN
+    };
+    let kept =
+        crate::fs::Vfs::metadata(PATH).is_ok_and(|m| m.attributes.contains(FileAttr::APPEND_ONLY));
+    let got = if put(0) {
+        call(h, FS_IOC_GETFLAGS)
+    } else {
+        i64::MIN
+    };
+    let mut back = [0u8; 4];
+    let read = copy_from_user_as(pml4, word, &mut back).is_ok();
+    if set != 0 || !kept || got != 0 || !read || u32::from_ne_bytes(back) != FS_APPEND_FL {
+        serial_println!(
+            "[syscall]     set {}, kept {}, get {}, read back {:#x}",
+            set,
+            kept,
+            got,
+            u32::from_ne_bytes(back)
+        );
+        return fail("FS_APPEND_FL did not go through the door and back", pid);
+    }
+    let nodump = if put(FS_APPEND_FL | FS_NODUMP_FL) {
+        call(h, FS_IOC_SETFLAGS)
+    } else {
+        i64::MIN
+    };
+    let lifted = if put(0) {
+        call(h, FS_IOC_SETFLAGS)
+    } else {
+        i64::MIN
+    };
+    let free =
+        crate::fs::Vfs::metadata(PATH).is_ok_and(|m| !m.attributes.contains(FileAttr::APPEND_ONLY));
+    if nodump != EOPNOTSUPP || lifted != 0 || !free {
+        serial_println!(
+            "[syscall]     FS_NODUMP_FL {}, lift {}, free {}",
+            nodump,
+            lifted,
+            free
+        );
+        return fail(
+            "an unsupported flag was taken, or the flag would not lift",
+            pid,
+        );
+    }
+    pcb::destroy(pid);
+    // Best effort: the test's own scratch file.
+    let _ = crate::fs::Vfs::remove(PATH);
+    serial_println!(
+        "[syscall]   SYS_FS_INODE_FLAGS (1178): refusals, FS_APPEND_FL set, kept and read \
+         back, an unsupported flag refused, lifted: OK"
     );
     Ok(())
 }

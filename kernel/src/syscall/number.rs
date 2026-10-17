@@ -7305,6 +7305,23 @@ pub const SYS_SWAP_OFF: u64 = 1176;
 /// when a save failed. The same body as the Linux ABI's `msync`.
 pub const SYS_MSYNC: u64 = 1177;
 
+/// `SYS_FS_INODE_FLAGS(handle, request, arg) -> 0` -- a file's inode flags,
+/// as `lsattr` reads and `chattr` sets them, for a native program: Linux's
+/// `ioctl` requests `FS_IOC_GETFLAGS` (`0x80086601`) and `FS_IOC_SETFLAGS`
+/// (`0x40086602`), or their 32-bit twins, `arg` pointing at an `int`, with
+/// Linux's answers as `-errno` -- the Linux ABI's own body, on the file the
+/// handle holds. Kept, read and set: `FS_IMMUTABLE_FL` (0x10) and
+/// `FS_APPEND_FL` (0x20), which every filesystem here enforces
+/// (design-decisions §1524); setting another is `EOPNOTSUPP`; the two need
+/// root, and anyone but the owner may change nothing (`EPERM`). Any other
+/// request -- the generation (`FS_IOC_GETVERSION`), the project
+/// (`FS_IOC_FSGETXATTR`) -- is `ENOTTY`, as Linux answers on a filesystem that
+/// keeps neither. `EBADF` for a handle the caller does not hold, `ENOTTY` for
+/// one that is not a regular file or a directory, `EFAULT` for an `arg` that
+/// cannot be read or written
+/// (requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md).
+pub const SYS_FS_INODE_FLAGS: u64 = 1178;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

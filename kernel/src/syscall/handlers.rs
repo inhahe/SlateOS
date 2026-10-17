@@ -22001,6 +22001,25 @@ pub fn sys_msync(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_FS_INODE_FLAGS` (1178) -- `lsattr`'s and `chattr`'s requests on a file
+/// the caller holds, for a native program: the Linux ABI's body
+/// (`linux::file_flags_of`), its answers Linux errnos. See
+/// [`SYS_FS_INODE_FLAGS`](super::number::SYS_FS_INODE_FLAGS).
+pub fn sys_fs_inode_flags(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{errno, linux_err};
+    let handle = args.arg0;
+    if require_file_handle_owner(handle).is_err() {
+        return linux_err(errno::EBADF);
+    }
+    // A request Linux would read as an `unsigned int`: anything wider is
+    // none of the flags'.
+    let Ok(request) = u32::try_from(args.arg1) else {
+        return linux_err(errno::ENOTTY);
+    };
+    let pid = caller_pid().unwrap_or(0);
+    super::linux::file_flags_of(pid, handle, request, args.arg2)
+}
+
 /// `SYS_MMAP_FILE` (1144) — map part of a file the caller holds open, with
 /// Linux's `mmap(2)` values and errnos. `arg4` is the file handle; the rest
 /// are `mmap`'s (`addr`, `length`, `prot`, `flags`, then `offset` in `arg5`).

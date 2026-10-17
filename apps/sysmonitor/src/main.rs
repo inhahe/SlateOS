@@ -45,9 +45,7 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
@@ -55,6 +53,7 @@ use processctl::Asker;
 use processctl::Ending;
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 // ============================================================================
 // Layout constants
@@ -642,11 +641,9 @@ pub struct SysMonitorState {
     /// stream of 0.2-notch events scrolled fifteen times too far and a single
     /// row could not be reached at all.
     wheel: wheel::Accumulator,
-    pub filter_text: String,
+    /// The filter box, which is the filter the process list is narrowed by.
+    pub filter: SearchBox,
     pub filter_focused: bool,
-    /// The filter box's caret and selection, laid over `filter_text`, which
-    /// stays the truth: reloaded whenever the text changes under it.
-    filter_editor: TextInput,
     /// The filter box's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<()>,
     /// How wide the mark is round the box that has the keyboard: the user's
@@ -729,9 +726,8 @@ impl SysMonitorState {
             sort_direction: SortDirection::Descending,
             scroll_offset: 0,
             wheel: wheel::Accumulator::default(),
-            filter_text: String::new(),
+            filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),
             filter_focused: false,
-            filter_editor: textline::field_holding("", FILTER_CAPACITY),
             field_menu: fieldmenu::FieldMenu::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             context_menu: None,
@@ -876,7 +872,7 @@ impl SysMonitorState {
     /// Rebuild the filtered and sorted visible process index list.
     pub fn rebuild_visible_list(&mut self) {
         self.visible_indices.clear();
-        let filter_lower = self.filter_text.to_lowercase();
+        let filter_lower = self.filter.text().to_lowercase();
 
         for (i, proc) in self.processes.iter().enumerate() {
             if !filter_lower.is_empty()
@@ -1337,8 +1333,8 @@ impl SysMonitorState {
             Key::Escape => {
                 if self.context_menu.is_some() {
                     self.context_menu = None;
-                } else if !self.filter_text.is_empty() {
-                    self.filter_text.clear();
+                } else if !self.filter.is_empty() {
+                    self.filter.clear();
                     self.rebuild_visible_list();
                 }
                 EventResult::Consumed
@@ -1361,26 +1357,10 @@ impl SysMonitorState {
             self.filter_focused = false;
             return EventResult::Consumed;
         }
-        self.sync_filter_editor();
-        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);
-        self.take_filter_edit();
-        EventResult::Consumed
-    }
-
-    /// Load the filter box's editor from `filter_text` when that changed
-    /// underneath it.
-    fn sync_filter_editor(&mut self) {
-        if self.filter_editor.text() != self.filter_text {
-            self.filter_editor.set_text(&self.filter_text);
-        }
-    }
-
-    /// What the editor holds is the filter: the list follows a change.
-    fn take_filter_edit(&mut self) {
-        if self.filter_editor.text() != self.filter_text {
-            self.filter_text = self.filter_editor.text().to_owned();
+        if self.filter.key(key).changed {
             self.rebuild_visible_list();
         }
+        EventResult::Consumed
     }
 
     /// A right press at `(x, y)`: over the filter box, its menu where the
@@ -1394,19 +1374,17 @@ impl SysMonitorState {
         }
         self.context_menu = None;
         self.filter_focused = true;
-        self.sync_filter_editor();
         let viewport = (self.window_width as f32, self.window_height as f32);
         self.field_menu
-            .open((), self.filter_editor.edit_menu(), x, y, viewport);
+            .open((), self.filter.edit_menu(), x, y, viewport);
         true
     }
 
     /// The menu's row `id`, chosen: done to the filter box as its key
     /// would be, the list following a change.
     fn do_menu_row(&mut self, id: guitk::menu::MenuItemId) -> EventResult {
-        self.sync_filter_editor();
-        if self.filter_editor.edit_command(id) == KeyEdit::Changed {
-            self.take_filter_edit();
+        if self.filter.menu_row(id) {
+            self.rebuild_visible_list();
         }
         EventResult::Consumed
     }
@@ -1414,7 +1392,7 @@ impl SysMonitorState {
     /// Give the filter box the keyboard, its caret after what it holds.
     fn focus_filter(&mut self) {
         self.filter_focused = true;
-        self.filter_editor.set_text(&self.filter_text);
+        self.filter.caret_to_end();
     }
 
     /// Where the filter box is drawn, and pressed: at the right of the
@@ -1429,38 +1407,17 @@ impl SysMonitorState {
         )
     }
 
-    /// Where the filter box's caret is drawn: the editor's while the box has
-    /// the keyboard (the end, if the text changed under the editor), the
-    /// start otherwise. One answer for the drawing and for a press.
-    fn filter_cursor(&self) -> TextCursor {
-        if !self.filter_focused {
-            TextCursor::default()
-        } else if self.filter_editor.text() == self.filter_text {
-            self.filter_editor.cursor()
-        } else {
-            TextCursor::from(self.filter_text.len())
-        }
-    }
-
     /// A press in the filter box at `x`: it takes the keyboard, with the
     /// caret under the pointer, measured against the box as it was drawn.
     fn press_filter(&mut self, x: f32) {
         let rect = self.filter_rect();
-        let drawn = self.filter_cursor();
+        let had_the_keyboard = self.filter_focused;
         self.filter_focused = true;
-        if self.filter_editor.text() != self.filter_text {
-            self.filter_editor.set_text(&self.filter_text);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.filter_text,
-            drawn,
-            (rect.w - 2.0 * FILTER_TEXT_INSET).max(0.0),
-            FILTER_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.filter.press(
             x - rect.x - FILTER_TEXT_INSET,
+            rect.w - 2.0 * FILTER_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.filter_editor.set_selection_anchor(None);
-        self.filter_editor.set_cursor(cursor);
     }
 
     /// How the filter box is drawn: with the keyboard's mark while it has
@@ -1472,7 +1429,7 @@ impl SysMonitorState {
             hovered: false,
             focused: self.filter_focused && !self.show_help,
             disabled: false,
-            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),
+            invalid: !self.filter.is_empty() && self.visible_indices.is_empty(),
         }
     }
 
@@ -2286,41 +2243,17 @@ impl SysMonitorState {
             rect.y + (rect.h - line) / 2.0,
             (rect.w - 2.0 * FILTER_TEXT_INSET).max(0.0),
         );
-        if self.filter_text.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: "Filter (Ctrl+F)".to_owned(),
-                color: self.palette.subtext0,
-                font_size: FILTER_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(tree, x, y, line, self.palette.text, textedit::CARET_WIDTH);
-            }
-            return;
-        }
-        let editing = self.filter_focused && self.filter_editor.text() == self.filter_text;
-        textedit::draw(
+        self.filter.draw(
             tree,
-            &textedit::SingleLine {
-                text: &self.filter_text,
-                cursor: self.filter_cursor(),
-                selection_anchor: if editing {
-                    self.filter_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused,
+            &SearchLook {
                 x,
                 y,
                 width,
                 line_height: line,
-                font_size: FILTER_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused,
+                placeholder: "Filter (Ctrl+F)",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -3961,14 +3894,14 @@ mod tests {
             })
         };
         let mut m = running();
-        m.filter_text = String::from("a");
+        m.filter.set_text("a");
         m.rebuild_visible_list();
         m.selected_index = Some(0);
         let state = |m: &SysMonitorState| {
             (
                 (m.active_tab, m.selected_index, m.scroll_offset),
                 (
-                    m.filter_text.clone(),
+                    m.filter.text().to_owned(),
                     m.filter_focused,
                     m.context_menu.is_some(),
                 ),
@@ -4008,7 +3941,8 @@ mod tests {
         m.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
         m.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
         assert_eq!(
-            m.filter_text, "a@",
+            m.filter.text(),
+            "a@",
             "the filter typed a command's letter, or lost AltGr's"
         );
         assert!(
@@ -4083,7 +4017,7 @@ mod tests {
         let mut app = SysMonitorState::new();
         app.active_tab = Tab::Processes;
         app.filter_focused = true;
-        app.filter_text = String::from("\u{fc}ber");
+        app.filter.set_text("\u{fc}ber");
         let rect = app.filter_rect();
         let tree = app.render_tree();
         let carets: Vec<f32> = tree
@@ -4105,7 +4039,7 @@ mod tests {
         // u-umlaut is two bytes.
         let expected = rect.x
             + FILTER_TEXT_INSET
-            + text::measure(&app.filter_text, FILTER_TEXT_SIZE, FontWeightHint::Regular);
+            + text::measure(app.filter.text(), FILTER_TEXT_SIZE, FontWeightHint::Regular);
         assert!(
             matches!(carets.as_slice(), [at] if (at - expected).abs() < 0.5),
             "carets at {carets:?}, glyphs end at {expected}"
@@ -4223,7 +4157,8 @@ mod tests {
         m.handle_event(&press_at(rect.x + FILTER_TEXT_INSET + 1.0, cy));
         type_into_filter(&mut m, "Q");
         assert_eq!(
-            m.filter_text, "Qzz-no-such-process",
+            m.filter.text(),
+            "Qzz-no-such-process",
             "the caret did not go where the press was"
         );
 
@@ -4246,27 +4181,34 @@ mod tests {
         assert!(m.filter_focused, "control: Ctrl+F");
         type_into_filter(&mut m, "\u{fc}ber");
         assert_eq!(
-            m.filter_text, "\u{fc}ber",
+            m.filter.text(),
+            "\u{fc}ber",
             "a letter outside ASCII was refused"
         );
         m.handle_event(&filter_key(Key::Home, "", Modifiers::NONE));
         m.handle_event(&filter_key(Key::Delete, "", Modifiers::NONE));
         assert_eq!(
-            m.filter_text, "ber",
+            m.filter.text(),
+            "ber",
             "Home and Delete did not edit the start"
         );
         m.handle_event(&filter_key(Key::A, "", Modifiers::ctrl()));
         m.handle_event(&filter_key(Key::X, "", Modifiers::ctrl()));
-        assert_eq!(m.filter_text, "", "Ctrl+A and Ctrl+X did not cut");
+        assert_eq!(m.filter.text(), "", "Ctrl+A and Ctrl+X did not cut");
         m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
         m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
-        assert_eq!(m.filter_text, "berber", "Ctrl+V did not paste what was cut");
+        assert_eq!(
+            m.filter.text(),
+            "berber",
+            "Ctrl+V did not paste what was cut"
+        );
 
         // The filter changed under the editor is edited as it now reads.
-        m.filter_text = String::from("init");
+        m.filter.set_text("init");
         type_into_filter(&mut m, "!");
         assert_eq!(
-            m.filter_text, "init!",
+            m.filter.text(),
+            "init!",
             "the filter was edited as it used to read"
         );
 
@@ -4278,7 +4220,8 @@ mod tests {
         m.handle_event(&filter_key(Key::F, "f", Modifiers::ctrl()));
         type_into_filter(&mut m, "?");
         assert_eq!(
-            m.filter_text, "init!?",
+            m.filter.text(),
+            "init!?",
             "Ctrl+F left the caret where it was"
         );
 
@@ -4286,7 +4229,7 @@ mod tests {
         m.handle_event(&filter_key(Key::A, "", Modifiers::ctrl()));
         m.handle_event(&filter_key(Key::V, "", Modifiers::ctrl()));
         assert_eq!(
-            m.filter_text.chars().count(),
+            m.filter.text().chars().count(),
             FILTER_CAPACITY,
             "the filter holds more than its limit"
         );
@@ -4589,7 +4532,7 @@ mod tests {
         assert!(s.visible_indices.is_empty());
         assert_eq!(s.sort_column, ProcessColumn::Cpu);
         assert_eq!(s.sort_direction, SortDirection::Descending);
-        assert!(s.filter_text.is_empty());
+        assert!(s.filter.is_empty());
         assert!(!s.filter_focused);
         assert!(s.context_menu.is_none());
     }
@@ -4869,7 +4812,7 @@ mod tests {
     fn test_filter_narrows_list() {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
-        s.filter_text = "http".to_string();
+        s.filter.set_text("http");
         s.rebuild_visible_list();
         assert!(s.visible_indices.len() < s.processes.len());
         assert!(!s.visible_indices.is_empty());
@@ -4879,7 +4822,7 @@ mod tests {
     fn test_filter_no_match() {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
-        s.filter_text = "zzz_nonexistent_zzz".to_string();
+        s.filter.set_text("zzz_nonexistent_zzz");
         s.rebuild_visible_list();
         assert!(s.visible_indices.is_empty());
     }
@@ -5534,14 +5477,14 @@ mod tests {
             text: "a".to_string(),
         };
         s.handle_filter_key(&key);
-        assert_eq!(s.filter_text, "a");
+        assert_eq!(s.filter.text(), "a");
     }
 
     #[test]
     fn test_filter_key_backspace() {
         let mut s = SysMonitorState::new();
         s.load_demo_data();
-        s.filter_text = "abc".to_string();
+        s.filter.set_text("abc");
         s.filter_focused = true;
         let key = KeyEvent {
             key: Key::Backspace,
@@ -5550,7 +5493,7 @@ mod tests {
             text: String::new(),
         };
         s.handle_filter_key(&key);
-        assert_eq!(s.filter_text, "ab");
+        assert_eq!(s.filter.text(), "ab");
     }
 
     #[test]
@@ -5848,7 +5791,7 @@ mod tests {
         assert!(app.filter_focused);
         app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
         assert!(!app.show_help, "? raised the list from the filter box");
-        assert_eq!(app.filter_text, "?", "? was not typed");
+        assert_eq!(app.filter.text(), "?", "? was not typed");
         app.handle_key(&key_of(Key::F1, Modifiers::NONE, ""));
         assert!(
             app.show_help,
@@ -6261,7 +6204,11 @@ mod tests {
             modifiers: Modifiers::NONE,
             text: String::from("x"),
         }));
-        assert_eq!(m.filter_text, "", "a key reached the box through the menu");
+        assert_eq!(
+            m.filter.text(),
+            "",
+            "a key reached the box through the menu"
+        );
 
         // Put away, by Escape or by the key, and asked for again.
         m.handle_event(&Event::Key(KeyEvent {
@@ -6279,7 +6226,7 @@ mod tests {
         );
         let (px, py) = m.field_menu.row_middle(EditCommand::Paste).expect("Paste");
         press(&mut m, px, py, MouseButton::Left);
-        assert_eq!(m.filter_text, "init", "Paste did not paste");
+        assert_eq!(m.filter.text(), "init", "Paste did not paste");
         assert!(
             !m.visible_indices.is_empty() && m.visible_indices.len() < m.processes.len(),
             "the list did not follow the paste"

@@ -74,15 +74,8 @@ MUTATIONS = [
     # program's is handing the editor the key as it came -- chord and all.
     (
         "the filter's editor is given the key without its chord",
-        '        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n',
-        '        textline::apply_key_on_clipboard(\n'
-        '            &mut self.filter_editor,\n'
-        '            &KeyEvent {\n'
-        '                modifiers: Modifiers::NONE,\n'
-        '                ..key.clone()\n'
-        '            },\n'
-        '            FILTER_TEXT_SIZE,\n'
-        '        );\n',
+        '        if self.filter.key(key).changed {\n',
+        '        if self.filter.key(&KeyEvent { modifiers: Modifiers::NONE, ..key.clone() }).changed {\n',
         ['a_chord_is_neither_a_monitor_key_nor_typing'],
     ),
 ]
@@ -108,7 +101,7 @@ MUTATIONS += [
     ),
     (
         "a filter that matches nothing is not red",
-        "            invalid: !self.filter_text.is_empty() && self.visible_indices.is_empty(),\n",
+        "            invalid: !self.filter.is_empty() && self.visible_indices.is_empty(),\n",
         "            invalid: false,\n",
         [FIELD],
     ),
@@ -125,40 +118,32 @@ MUTATIONS += [
         [FIELD],
     ),
     (
-        "a press leaves the caret where it was",
-        "        self.filter_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "a press puts the caret at the start",
+        "            x - rect.x - FILTER_TEXT_INSET,\n",
+        "            0.0,\n",
         [FIELD],
     ),
     (
-        "the filter's caret is at its start",
-        "                cursor: self.filter_cursor(),\n",
-        "                cursor: TextCursor::default(),\n",
+        "the box with the keyboard is drawn without it",
+        "                focused,\n                placeholder: \"Filter (Ctrl+F)\",\n",
+        "                focused: false,\n                placeholder: \"Filter (Ctrl+F)\",\n",
         [CARET],
     ),
     (
-        "the filter's editor is not reloaded",
-        "        self.sync_filter_editor();\n"
-        "        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n",
-        "        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n",
-        [EDITS],
-    ),
-    (
         "the filter holds any length",
-        'filter_editor: textline::field_holding("", FILTER_CAPACITY),',
-        'filter_editor: textline::field_holding("", usize::MAX),',
+        'filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),',
+        'filter: SearchBox::new(usize::MAX, FILTER_TEXT_SIZE),',
         [EDITS],
     ),
     (
         "an edit does not filter again",
-        "            self.filter_text = self.filter_editor.text().to_owned();\n"
-        "            self.rebuild_visible_list();\n",
-        "            self.filter_text = self.filter_editor.text().to_owned();\n",
+        "        if self.filter.key(key).changed {\n            self.rebuild_visible_list();\n        }\n",
+        "        let _ = self.filter.key(key);\n",
         [FIELD],
     ),
     (
-        "Ctrl+F leaves the editor with the last text",
-        "        self.filter_focused = true;\n        self.filter_editor.set_text(&self.filter_text);\n",
+        "Ctrl+F leaves the caret where it was",
+        "        self.filter_focused = true;\n        self.filter.caret_to_end();\n",
         "        self.filter_focused = true;\n",
         [EDITS],
     ),
@@ -319,7 +304,7 @@ MUTATIONS += [
     ),
     (
         "a row chosen does nothing to the filter",
-        "        if self.filter_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "        if self.filter.menu_row(id) {\n",
         "        if false {\n",
         [F_MENU],
     ),
@@ -328,12 +313,6 @@ MUTATIONS += [
         "        self.context_menu = None;\n        self.filter_focused = true;\n",
         "        self.context_menu = None;\n",
         [F_MENU],
-    ),
-    (
-        "the filter keeps a clipboard of its own",
-        "        textline::apply_key_on_clipboard(&mut self.filter_editor, key, FILTER_TEXT_SIZE);\n",
-        "        textline::apply_key(&mut self.filter_editor, key, \"\", FILTER_TEXT_SIZE);\n",
-        [EDITS_LIKE_A_FIELD],
     ),
 ]
 

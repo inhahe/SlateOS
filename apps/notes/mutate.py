@@ -373,21 +373,22 @@ MUTATIONS = [
     ),
     (
         "a field refuses what AltGr types",
-        "                self.sync_search_editor();\n                let before = (\n",
+        "                let before = (\n                    self.search.input().cursor(),\n",
         "                if key.modifiers.ctrl {\n"
         "                    return EventResult::Ignored;\n"
         "                }\n"
-        "                self.sync_search_editor();\n                let before = (\n",
+        "                let before = (\n                    self.search.input().cursor(),\n",
         ["altgr_types_into_a_field_and_runs_no_shortcut"],
     ),
     (
         "a field types a command's letter",
-        "                self.sync_search_editor();\n                let before = (\n",
+        "                let before = (\n                    self.search.input().cursor(),\n",
         "                if key.types_text() && !textline::types_into_field(key) {\n"
-        "                    self.search_query.push_str(&key.text);\n"
+        "                    let typed = format!(\"{}{}\", self.search.text(), key.text);\n"
+        "                    self.search.set_text(&typed);\n"
         "                    return EventResult::Consumed;\n"
         "                }\n"
-        "                self.sync_search_editor();\n                let before = (\n",
+        "                let before = (\n                    self.search.input().cursor(),\n",
         ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut", "the_search_box_edits_like_a_field"],
     ),
     # -- the shortcut card's hold on the pointer
@@ -548,7 +549,7 @@ MUTATIONS += [
     ),
     (
         "a query that finds nothing is not red",
-        "            invalid: !self.search_query.is_empty() && self.visible_notes().is_empty(),\n",
+        "            invalid: !self.search.is_empty() && self.visible_notes().is_empty(),\n",
         "            invalid: false,\n",
         [SEARCH_FIELD],
     ),
@@ -559,9 +560,9 @@ MUTATIONS += [
         [SEARCH_FIELD],
     ),
     (
-        "a press in the search box leaves the caret at the end",
-        "        self.search_editor.set_selection_anchor(None);\n        self.search_editor.set_cursor(cursor);\n",
-        "        self.search_editor.set_selection_anchor(None);\n",
+        "a press in the search box puts the caret at its start",
+        "            x - SEARCH_X - SEARCH_TEXT_INSET,\n",
+        "            0.0,\n",
         [SEARCH_EDITS],
     ),
 ]

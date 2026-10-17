@@ -97,15 +97,14 @@ use guitk::modal::{DialogResult, InputDialog};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textarea::{self, TextArea};
-use guitk::textedit;
-use guitk::textinput::{KeyEdit, TextInput};
+use guitk::textinput::KeyEdit;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
+use textline::{SearchBox, SearchLook};
 
 use std::collections::{HashMap, HashSet};
 
@@ -164,7 +163,7 @@ const STATUS_BAR_HEIGHT: f32 = 24.0;
 /// collected; this is the same collection, done at two.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextEntry {
-    /// The search box. Filters as it is typed, so its text is `search_query`.
+    /// The search box. Filters as it is typed: its text is the search.
     Search,
     /// The body of a note, committed when the mode is left.
     ///
@@ -1636,7 +1635,8 @@ pub struct NotesApp {
     pub notes: Vec<Note>,
     pub selected_notebook: Option<NotebookId>,
     pub selected_note: Option<NoteId>,
-    pub search_query: String,
+    /// The search box, which is the search the notes are filtered by.
+    pub search: SearchBox,
     pub active_tag_filter: Option<String>,
     pub sort_order: SortOrder,
     /// Whether the shortcut card is up.
@@ -1711,14 +1711,8 @@ pub struct NotesApp {
     question: Option<unsaved::Question<Pending>>,
     /// A name being asked for, and the dialog asking.
     asking: Option<(Asking, InputDialog)>,
-    /// The search box's caret and selection, laid over `search_query`,
-    /// which stays the truth: reloaded whenever the query has changed under
-    /// it (Escape in the list clears the search).
-    search_editor: TextInput,
     /// Whether the pointer is over the search box: its edge is warmed.
     search_hovered: bool,
-    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
-    search_clipboard: String,
     /// How wide the mark is round what has the keyboard in the name dialog:
     /// the user's focus width, the toolkit's until it is known.
     focus_ring_width: f32,
@@ -1748,7 +1742,7 @@ impl NotesApp {
             notes: Vec::new(),
             selected_notebook: None,
             selected_note: None,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             active_tag_filter: None,
             sort_order: SortOrder::DateModified,
             show_help: false,
@@ -1775,9 +1769,7 @@ impl NotesApp {
             store_error: None,
             question: None,
             asking: None,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             search_hovered: false,
-            search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             quit: false,
         }
@@ -2623,7 +2615,7 @@ impl NotesApp {
 
     /// Set the search query.
     pub fn set_search_query(&mut self, query: &str) {
-        self.search_query = query.to_owned();
+        self.search.set_text(query);
     }
 
     // -----------------------------------------------------------------------
@@ -2647,8 +2639,8 @@ impl NotesApp {
         }
 
         // Filter by search query.
-        if !self.search_query.is_empty() {
-            notes.retain(|n| n.matches_search(&self.search_query));
+        if !self.search.is_empty() {
+            notes.retain(|n| n.matches_search(self.search.text()));
         }
 
         // Filter favorites only.
@@ -3335,10 +3327,10 @@ impl NotesApp {
                 EventResult::Consumed
             }
             Key::Escape => {
-                if self.search_query.is_empty() && self.active_tag_filter.is_none() {
+                if self.search.is_empty() && self.active_tag_filter.is_none() {
                     return EventResult::Ignored;
                 }
-                self.search_query.clear();
+                self.search.clear();
                 self.active_tag_filter = None;
                 self.reanchor_selection();
                 EventResult::Consumed
@@ -3648,31 +3640,21 @@ impl NotesApp {
                 EventResult::Consumed
             }
             _ => {
-                self.sync_search_editor();
                 let before = (
-                    self.search_editor.cursor(),
-                    self.search_editor.selection_anchor(),
+                    self.search.input().cursor(),
+                    self.search.input().selection_anchor(),
                 );
-                let edit = textline::apply_key(
-                    &mut self.search_editor,
-                    key,
-                    &self.search_clipboard,
-                    SEARCH_TEXT_SIZE,
-                );
-                if let Some(copied) = edit.copied {
-                    self.search_clipboard = copied;
-                }
+                let edit = self.search.key(key);
                 if !edit.handled {
                     return EventResult::Ignored;
                 }
-                if self.search_editor.text() != self.search_query {
-                    self.search_query = self.search_editor.text().to_owned();
+                if edit.changed {
                     self.reanchor_selection();
                     return EventResult::Consumed;
                 }
                 if (
-                    self.search_editor.cursor(),
-                    self.search_editor.selection_anchor(),
+                    self.search.input().cursor(),
+                    self.search.input().selection_anchor(),
                 ) == before
                 {
                     EventResult::Ignored
@@ -4090,14 +4072,7 @@ impl NotesApp {
     /// Give the search box the keyboard, its caret at the end of the query.
     fn focus_search(&mut self) {
         self.text_entry = Some(TextEntry::Search);
-        self.search_editor.set_text(&self.search_query);
-    }
-
-    /// Reload the search's editor if the query has changed under it.
-    fn sync_search_editor(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
+        self.search.caret_to_end();
     }
 
     /// Whether the search box has the keyboard.
@@ -4105,40 +4080,20 @@ impl NotesApp {
         self.text_entry == Some(TextEntry::Search)
     }
 
-    /// Where the search's caret is drawn: the editor's while the box has the
-    /// keyboard (the end, if the query changed under the editor), the start
-    /// otherwise. One answer for the drawing and for a press.
-    fn search_cursor(&self) -> TextCursor {
-        if !self.searching() {
-            TextCursor::default()
-        } else if self.search_editor.text() == self.search_query {
-            self.search_editor.cursor()
-        } else {
-            TextCursor::from(self.search_query.len())
-        }
-    }
-
     /// A press in the search box at `x`: it takes the keyboard, with the
     /// caret under the pointer.
     fn press_search(&mut self, x: f32) {
-        let drawn = self.search_cursor();
-        if self.searching() {
-            self.sync_search_editor();
-        } else {
+        let had_the_keyboard = self.searching();
+        if !had_the_keyboard {
             // Writing in a note ends where the keyboard goes elsewhere.
             self.finish_note_body();
             self.focus_search();
         }
-        let cursor = textedit::cursor_at_click(
-            self.search_editor.text(),
-            drawn,
-            (SEARCH_W - 2.0 * SEARCH_TEXT_INSET).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.search.press(
             x - SEARCH_X - SEARCH_TEXT_INSET,
+            SEARCH_W - 2.0 * SEARCH_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// How the search box is drawn: lit under the pointer, with the
@@ -4151,7 +4106,7 @@ impl NotesApp {
             hovered: self.search_hovered && !covered,
             focused: self.searching() && !covered,
             disabled: false,
-            invalid: !self.search_query.is_empty() && self.visible_notes().is_empty(),
+            invalid: !self.search.is_empty() && self.visible_notes().is_empty(),
         }
     }
 
@@ -4168,39 +4123,18 @@ impl NotesApp {
             y + (h - line) / 2.0,
             (w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
-        if self.search_query.is_empty() && !state.focused {
-            cmds.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: "Search notes...".to_owned(),
-                color: self.palette.subtext0,
-                font_size: SEARCH_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-            return;
-        }
-        let editing = self.searching() && self.search_editor.text() == self.search_query;
         let mut typed = RenderTree::new();
-        textedit::draw(
+        self.search.draw(
             &mut typed,
-            &textedit::SingleLine {
-                text: &self.search_query,
-                cursor: self.search_cursor(),
-                selection_anchor: if editing {
-                    self.search_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: state.focused,
+            &SearchLook {
                 x: tx,
                 y: ty,
                 width: tw,
                 line_height: line,
-                font_size: SEARCH_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused: state.focused,
+                placeholder: "Search notes...",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: self.caret_width,
@@ -6252,7 +6186,7 @@ mod tests {
                     // moves the selection first.
                     let mut app = seeded();
                     if moved {
-                        app.search_query = "a".to_string();
+                        app.search.set_text("a");
                         app.handle_key(&key_of(Key::Down, Modifiers::NONE));
                     }
                     app.handle_key(&stroke) == EventResult::Consumed
@@ -6428,7 +6362,7 @@ mod tests {
         assert_eq!(app.text_entry, Some(TextEntry::Search));
         app.handle_event(&typed('s'));
         app.handle_event(&typed('p'));
-        assert_eq!(app.search_query, "sp");
+        assert_eq!(app.search.text(), "sp");
         assert_eq!(app.sort_order, order, "the sort order changed while typing");
         app.handle_event(&press(Key::Enter));
         assert_eq!(app.text_entry, None);
@@ -6481,7 +6415,7 @@ mod tests {
                 "AltGr+{k:?} was not typed"
             );
         }
-        assert_eq!(app.search_query, "\u{15b}\u{144}");
+        assert_eq!(app.search.text(), "\u{15b}\u{144}");
     }
 
     /// **A command types nothing into a field, and a key held with Alt or
@@ -6513,7 +6447,7 @@ mod tests {
                 "{modifiers:?}+{k:?} was typed"
             );
         }
-        assert_eq!(app.search_query, "");
+        assert_eq!(app.search.text(), "");
     }
 
     #[test]
@@ -6532,7 +6466,7 @@ mod tests {
         for _ in 0.."welcome".len() {
             app.handle_event(&press(Key::Backspace));
         }
-        assert_eq!(app.search_query, "");
+        assert_eq!(app.search.text(), "");
         assert_eq!(app.visible_notes().len(), all);
         assert_eq!(
             app.handle_event(&press(Key::Backspace)),
@@ -6589,9 +6523,9 @@ mod tests {
         app.handle_event(&press(Key::Slash));
         app.handle_event(&typed('w'));
         app.handle_event(&press(Key::Enter));
-        assert!(!app.search_query.is_empty());
+        assert!(!app.search.is_empty());
         assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
-        assert!(app.search_query.is_empty());
+        assert!(app.search.is_empty());
     }
 
     #[test]
@@ -7656,7 +7590,7 @@ mod tests {
         // dialog takes the pointer, so nothing under it is lit -- nor marked.
         // With nothing in the box, which would be red: red is the edge
         // whether the box is lit or not.
-        app.search_query.clear();
+        app.search.clear();
         app.handle_event(&moved(MouseEventKind::Move));
         app.ask(Asking::NewNotebook, "");
         assert!(
@@ -7689,20 +7623,22 @@ mod tests {
             })
         };
         app.handle_event(&held(Key::S, "s", true, false));
-        assert_eq!(app.search_query, "note", "Ctrl+S typed its letter");
+        assert_eq!(app.search.text(), "note", "Ctrl+S typed its letter");
         app.handle_event(&held(Key::S, "\u{15b}", true, true));
-        assert_eq!(app.search_query, "note\u{15b}", "AltGr did not type");
+        assert_eq!(app.search.text(), "note\u{15b}", "AltGr did not type");
         app.handle_event(&plain_key(Key::Backspace));
         app.handle_event(&plain_key(Key::Home));
         app.handle_event(&plain_key(Key::Delete));
         assert_eq!(
-            app.search_query, "ote",
+            app.search.text(),
+            "ote",
             "Home and Delete did not edit the start"
         );
         app.handle_event(&held(Key::A, "a", true, false));
         app.handle_event(&typed_key("A"));
         assert_eq!(
-            app.search_query, "A",
+            app.search.text(),
+            "A",
             "typing did not replace the selection"
         );
 
@@ -7711,7 +7647,8 @@ mod tests {
         app.handle_event(&click_at(SEARCH_X + SEARCH_TEXT_INSET + 1.0, 18.0));
         app.handle_event(&typed_key(" "));
         assert_eq!(
-            app.search_query, " A",
+            app.search.text(),
+            " A",
             "the caret did not go where the press was"
         );
     }
@@ -7799,7 +7736,7 @@ mod tests {
 
         app.handle_event(&typed_key("a"));
 
-        assert_eq!(app.search_query, "a", "the search box lost its typing");
+        assert_eq!(app.search.text(), "a", "the search box lost its typing");
     }
 
     fn ctrl_key(k: Key, shift: bool) -> Event {

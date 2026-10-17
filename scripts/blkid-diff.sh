@@ -19,7 +19,8 @@
 #   * images made here with whatever `mkfs.*`, `mkswap` and `sfdisk` WSL
 #     has, where the corpus has no example (a DOS table with logical
 #     partitions, a GPT with many entries) -- skipped, not failed, for a
-#     tool that is missing;
+#     tool that is missing -- and DOS tables written entry by entry, for
+#     the malformed chains of logical partitions no tool makes;
 #   * every corpus image again, truncated at a few sizes, so that the "short
 #     read is nothing, not an error" paths are compared as well.
 #
@@ -91,6 +92,27 @@ mk() { # mk NAME SIZE_MIB COMMAND... : a zeroed image, then COMMAND on it
     rm -f "$img/mk-$name.img"
   fi
 }
+# mbr SECTOR:INDEX:TYPE:START:SIZE... IMAGE: DOS partition entries written
+# into IMAGE, each sector they are in given the 55AA magic -- for the chains
+# of extended boot records no partitioning tool would make.
+mbr() {
+  python3 - "$@" <<'PY'
+import struct, sys
+with open(sys.argv[-1], "r+b") as f:
+    for spec in sys.argv[1:-1]:
+        sector, i, ty, start, size = (int(v) for v in spec.split(":"))
+        f.seek(sector * 512 + 446 + 16 * i)
+        f.write(struct.pack("<B3sB3sII", 0, bytes(3), ty, bytes(3), start, size))
+        f.seek(sector * 512 + 510)
+        f.write(b"\x55\xaa")
+PY
+}
+# Extended partition 4096..5096. CVE-2026-53615, which Ubuntu's libblkid has
+# fixed: a logical whose start wraps past 2^32, one past the extended
+# partition, a link back to an earlier record -- and a link past the end.
+mk ebr-bounds 4 mbr 0:0:5:4096:1000 4096:0:131:4294963300:10 4096:1:5:200:60 \
+  4296:0:131:2000:50 4296:1:5:100:60 4196:0:130:1:20
+mk ebr-link-out 4 mbr 0:0:5:4096:1000 4096:0:131:1:50 4096:1:5:2000:60 6096:0:131:1:20
 if command -v sfdisk > /dev/null; then
   mk dos-logicals 64 sh -c 'printf "label: dos\nlabel-id: 0x1234abcd\n,8M,L,*\n,8M,S\n,,E\n,4M,L\n,4M,83\n,,b\n" | sfdisk -q "$0"'
   mk gpt-many 64 sh -c 'printf "label: gpt\nlabel-id: 01234567-89ab-cdef-0123-456789abcdef\n,4M,L,name=root\n,4M,S,name=swap\n,4M,U\n,4M,L,attrs=RequiredPartition\n,,L,name=\"with space\"\n" | sfdisk -q "$0"'

@@ -50,18 +50,23 @@ screen saver is not in it.
 to confirm: `multimon.rs` goes if lane F's compositor keeps the display
 arrangement (asked: `requests/c-f-who-keeps-the-users-display-arrangement.md`);
 `PowerManager`'s own idle counter goes, the compositor's `watch_idle` being
-the idle source, and the rest of it is wired -- the screen-off and sleep
-delays on `watch_idle`, the lid, buttons and battery the day lane A
+the idle source, and the rest of it is wired -- the screen-off delay on
+`watch_idle` (done, below), the sleep delay likewise, the lid, buttons and battery the day lane A
 delivers those events (a request to lane A for a power-event channel); the
 screen saver, unspecified, goes unless the operator wants one.
 
-**For the screen-off and sleep delays, one thing to settle first.**
-`EventLoop::watch_idle(window, after)` holds one delay per window, and the
-session's lock already claims the panel's (`idle_lock::lock_after`). A
-second delay could be claimed on another of the shell's windows -- if
-`Event::SessionIdle` arrives tagged with the window whose watch fired; the
-event itself carries nothing (`gui/remote/src/input.rs`, tag `0x0D`). If it
-is not tagged, the call needs a delay id or a list from lane F.
+**The screen-off delay is done (2026-10-17)**, without `PowerManager`:
+`EventLoop::watch_idle(window, after)` holds one delay per window, and an
+event reaches the session with the window it was told to
+(`ShellSession::dispatch`), so the displays' delay is claimed on the
+background's window beside the lock's on the panel. `idle_lock::displays_off_after`
+reads `displays.off_after_minutes` in the `session` group, and the idle
+event for the background puts the displays to sleep as "Sleep the display"
+does. The Settings page that writes it is asked of lane E
+(`requests/c-e-settings-offers-turning-the-screen-off-after-n-minutes.md`).
+"Put the computer to sleep after N minutes" can take the same shape on a
+third window, once the shell can ask `powerctl` to suspend from idle (the
+power menu's Sleep already runs it).
 
 **If never fixed:** 5,000 lines that read as features the desktop has, and
 a battery icon that can only ever say there is no battery.

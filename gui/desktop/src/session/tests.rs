@@ -6950,6 +6950,74 @@ fn an_idle_session_with_no_password_does_not_lock() {
     );
 }
 
+/// **The displays' idle delay puts them to sleep, and locks nothing** -- its
+/// watch is the background's, so a `SessionIdle` told to the background is
+/// that delay and not the lock's.
+#[test]
+fn the_displays_idle_delay_sleeps_them_and_locks_nothing() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    drop(session.take_launches());
+
+    let window = session.background().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, guitk::event::Event::SessionIdle)]);
+    session.pump().expect("pump");
+    assert_eq!(
+        sleeps_asked(&desktop),
+        1,
+        "the displays were not put to sleep"
+    );
+    assert!(
+        session.take_launches().is_empty(),
+        "the displays' delay locked the session"
+    );
+}
+
+/// **Each delay is claimed on its own window, and a change re-claims both**:
+/// the lock's on the panel, the displays' on the background, in minutes from
+/// the `session` group.
+#[test]
+fn the_two_idle_delays_are_claimed_on_their_own_windows() {
+    settingsfile::testing::with_scratch_config("session-idle-delays", |_root| {
+        let mut doc = settingsfile::load(crate::idle_lock::CONFIG_NAME);
+        doc.set_i64(&["lock", "after_minutes"], 15);
+        doc.set_i64(&["displays", "off_after_minutes"], 5);
+        settingsfile::store(crate::idle_lock::CONFIG_NAME, &doc).expect("store");
+
+        let (mut session, desktop, _turn) = session();
+        let watches = |desktop: &Desktop| -> Vec<(u64, u32)> {
+            desktop
+                .borrow()
+                .seen
+                .iter()
+                .filter_map(|r| match r.body {
+                    RequestBody::WatchIdle { window, after_ms } => Some((window, after_ms)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let panel = session.panel().window();
+        let background = session.background().window();
+        let claimed = watches(&desktop);
+        assert!(claimed.contains(&(panel, 15 * 60_000)), "{claimed:?}");
+        assert!(claimed.contains(&(background, 5 * 60_000)), "{claimed:?}");
+
+        // "Never" for the displays: the change withdraws their watch.
+        let mut doc = settingsfile::load(crate::idle_lock::CONFIG_NAME);
+        doc.set_i64(&["displays", "off_after_minutes"], 0);
+        settingsfile::store(crate::idle_lock::CONFIG_NAME, &doc).expect("store");
+        announce(&desktop, session.panel(), SettingsGroup::Session);
+        session.pump().expect("pump");
+        assert_eq!(
+            watches(&desktop).last(),
+            Some(&(background, 0)),
+            "the displays' watch was not withdrawn"
+        );
+    });
+}
+
 /// Deliver the notification the compositor sends a window that claimed an
 /// idle watch.
 fn send_session_idle(desktop: &Desktop, session: &mut Session) {

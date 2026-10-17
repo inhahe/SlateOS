@@ -975,6 +975,12 @@ impl<T: Transport> ShellSession<T> {
         if let Some(after) = crate::idle_lock::lock_after() {
             events.watch_idle(panel.window, after)?;
         }
+        // The displays' delay, on the background's window: the compositor
+        // keeps one watch per window and tells each window of its own, which
+        // is how `Event::SessionIdle` says which of the two came due.
+        if let Some(after) = crate::idle_lock::displays_off_after() {
+            events.watch_idle(background.window, after)?;
+        }
 
         // Taken before `events` moves into the session. A transport that
         // cannot make one -- out of descriptors, most likely -- costs only
@@ -4011,6 +4017,13 @@ impl<T: Transport> ShellSession<T> {
             // without being restated: `queue_launches` drops the lock for an
             // account with no password, so an idle session that cannot be
             // locked simply is not.
+            // The displays' delay came due (its watch is the background's):
+            // put them to sleep as "Sleep the display" does, through the same
+            // request, so waking them is the same wake -- and locks the
+            // session as that does, `lock.on_display_wake` permitting.
+            Event::SessionIdle if window == self.background.window => {
+                self.request(ShellRequest::SleepDisplays)?;
+            }
             Event::SessionIdle => {
                 self.queue_launches(vec![crate::hotkeys::Launch::program(
                     crate::hotkeys::LOCK_COMMAND,
@@ -4066,6 +4079,8 @@ impl<T: Transport> ShellSession<T> {
             } => {
                 let after = crate::idle_lock::lock_after().unwrap_or_default();
                 self.events.watch_idle(self.panel.window, after)?;
+                let after = crate::idle_lock::displays_off_after().unwrap_or_default();
+                self.events.watch_idle(self.background.window, after)?;
             }
             Event::SettingsChanged {
                 group: SettingsGroup::Notifications,

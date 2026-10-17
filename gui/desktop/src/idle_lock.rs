@@ -1,11 +1,13 @@
-//! How long the session waits before locking itself -- and whether waking
-//! the displays from "Sleep the display" locks it.
+//! How long the session waits before locking itself, and before putting the
+//! displays to sleep -- and whether waking the displays locks it.
 //!
-//! An integer and a switch, read from the `session` settings group. The
-//! Settings application writes them; this reads them. The delay is handed to
+//! Two integers and a switch, read from the `session` settings group. The
+//! Settings application writes them; this reads them. Each delay is handed to
 //! `EventLoop::watch_idle`, after which the compositor says when it has
-//! passed and [`crate::session`] queues the lock; the switch is asked when
-//! the displays wake ([`lock_on_display_wake`]).
+//! passed: [`crate::session`] queues the lock, or puts the displays to sleep
+//! as "Sleep the display" does (`design.txt`'s "turn off screen after N
+//! minutes (disablable)"). The switch is asked when the displays wake
+//! ([`lock_on_display_wake`]).
 //!
 //! # Why a settings group and not a crate
 //!
@@ -35,8 +37,11 @@ use std::time::Duration;
 /// same warning, as `fileassoc`.
 pub const CONFIG_NAME: &str = "session";
 
-/// The key holding the delay, in whole minutes.
+/// The key holding the lock's delay, in whole minutes.
 const LOCK_AFTER_MINUTES: [&str; 2] = ["lock", "after_minutes"];
+
+/// The key holding the displays' delay, in whole minutes.
+const DISPLAYS_OFF_AFTER_MINUTES: [&str; 2] = ["displays", "off_after_minutes"];
 
 /// The key saying whether waking the displays locks the session.
 const LOCK_ON_DISPLAY_WAKE: [&str; 2] = ["lock", "on_display_wake"];
@@ -73,8 +78,22 @@ pub fn lock_on_display_wake() -> bool {
 /// without another machine.
 #[must_use]
 pub fn lock_after() -> Option<Duration> {
+    minutes_at(&LOCK_AFTER_MINUTES)
+}
+
+/// Minutes before the displays go to sleep, or `None` for never -- read as
+/// [`lock_after`] reads its delay, for the same reasons: absent, unreadable,
+/// zero or not a number all mean "never", and nought is not "at once".
+#[must_use]
+pub fn displays_off_after() -> Option<Duration> {
+    minutes_at(&DISPLAYS_OFF_AFTER_MINUTES)
+}
+
+/// The whole minutes at `key` in the `session` group, as a delay; `None` for
+/// absent, unreadable, zero or negative.
+fn minutes_at(key: &[&str; 2]) -> Option<Duration> {
     let doc = settingsfile::load(CONFIG_NAME);
-    let minutes = doc.get_i64(&LOCK_AFTER_MINUTES)?;
+    let minutes = doc.get_i64(key)?;
     let minutes = u64::try_from(minutes).ok()?;
     if minutes == 0 {
         return None;

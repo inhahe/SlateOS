@@ -15,7 +15,9 @@ The rows cover:
 - the Recycle Bin page (design-decisions §1238, §1240): every drive's bin,
   the default limits and each drive's own, in `main.rs`; what each limit
   offers and how it reads, in `recyclebins.rs`;
-- the window rules, their editor and their file, in `main.rs` and `rules.rs`.
+- the window rules, their editor and their file, in `main.rs` and `rules.rs`;
+- the session's idle delays and switch -- the Power page's screen and sleep,
+  the lock screen's switch for waking displays -- in `main.rs` and `idle.rs`.
 Tests older than the table have no rows.
 
 Run it with no arguments to sweep everything, or with substrings of the
@@ -295,7 +297,7 @@ MUTATIONS = [
     ),
     (
         'session.yaml is not read again when announced',
-        '        } else if name == lockscreen::CONFIG_NAME {',
+        '        } else if name == idle::CONFIG_NAME {',
         '        } else if name == "" {',
         ['every_file_settings_shows_is_read_again_when_it_changes'],
     ),
@@ -337,7 +339,7 @@ MUTATIONS = [
     ),
     (
         'session.yaml read again says it changed nothing',
-        '            before != self.lock_after_minutes\n',
+        '            before != self.idle\n',
         '            false\n',
         ['every_file_settings_shows_is_read_again_when_it_changes'],
     ),
@@ -2848,6 +2850,110 @@ MUTATIONS += [
 ]
 
 
+# The session's idle delays and switch (lane C's request
+# c-e-settings-offers-turning-the-screen-off-after-n-minutes): the Power
+# page's two delays, the lock screen's switch, and how each is written.
+IDLE_EVENT = "the_idle_choices_are_written_key_by_key_and_announced"
+IDLE_ORDER = "the_power_page_says_whether_the_screen_turns_off_before_the_lock"
+
+MUTATIONS += [
+    (
+        "an idle choice is not written",
+        "        if changed.idle {\n            self.save_idle(&before.idle);\n        }\n",
+        "",
+        [IDLE_EVENT],
+    ),
+    (
+        "an idle choice is not announced",
+        "    fn save_idle(&mut self, before: &idle::Idle) {\n        if let Err(err) = self.idle.store_changes(before) {\n            eprintln!(\"settings: could not save session.yaml: {err}\");\n        }\n",
+        "    fn save_idle(&mut self, before: &idle::Idle) {\n        if let Err(err) = self.idle.store_changes(before) {\n            eprintln!(\"settings: could not save session.yaml: {err}\");\n        }\n        return;\n",
+        [IDLE_EVENT],
+    ),
+    (
+        "a delay chosen is put on the lock's",
+        "                    self.idle.set_minutes(delay, minutes);\n",
+        "                    self.idle.set_minutes(idle::Delay::Lock, minutes);\n",
+        [IDLE_EVENT],
+    ),
+    (
+        "the display-wake switch moves another switch",
+        "            ToggleId::LockOnDisplayWake => &mut self.idle.lock_on_display_wake,\n",
+        "            ToggleId::LockOnDisplayWake => &mut self.lock_clock_date,\n",
+        [IDLE_EVENT],
+    ),
+    (
+        "the Power page is a placeholder",
+        "            SettingsPage::Power => self.build_power_page(sink),\n",
+        "",
+        [IDLE_ORDER, "the_placeholder_pages_are_exactly_these"],
+    ),
+    (
+        "the Power page has the order backwards",
+        "            let order = if off < lock {\n",
+        "            let order = if off > lock {\n",
+        [IDLE_ORDER],
+    ),
+    (
+        "the Power page gives an order while the lock is never",
+        "        if off != 0 && lock != 0 {\n",
+        "        if off != 0 {\n",
+        [IDLE_ORDER],
+    ),
+]
+
+IDLE = [
+    (
+        "every delay is written when one changes",
+        "            if self.minutes(delay) != before.minutes(delay) {\n",
+        "            if self.minutes(delay) != before.minutes(delay) || delay == Delay::Lock {\n",
+        ["a_choice_writes_its_own_key_alone", IDLE_EVENT],
+    ),
+    (
+        "the switch is written when it did not change",
+        "        if self.lock_on_display_wake != before.lock_on_display_wake {\n",
+        "        if true {\n",
+        ["a_choice_writes_its_own_key_alone"],
+    ),
+    (
+        "Never is omitted rather than written",
+        "                doc.set_i64(&delay.key(), i64::from(self.minutes(delay)));\n",
+        "                if self.minutes(delay) != 0 {\n                    doc.set_i64(&delay.key(), i64::from(self.minutes(delay)));\n                }\n",
+        ["never_is_written_not_omitted"],
+    ),
+    (
+        "the displays' delay is written at the sleep's key",
+        "            Self::DisplaysOff => [\"displays\", \"off_after_minutes\"],\n",
+        "            Self::DisplaysOff => [\"sleep\", \"after_minutes\"],\n",
+        ["each_delay_round_trips_at_the_shells_key"],
+    ),
+    (
+        "an unset switch reads as off",
+        "doc.get_bool(&LOCK_ON_DISPLAY_WAKE).unwrap_or(true)",
+        "doc.get_bool(&LOCK_ON_DISPLAY_WAKE).unwrap_or(false)",
+        ["an_unset_machine_reads_as_the_shells_defaults", IDLE_EVENT],
+    ),
+    (
+        "the sleep's delay is set on the lock",
+        "            Delay::Sleep => self.sleep = minutes,\n",
+        "            Delay::Sleep => self.lock = minutes,\n",
+        ["every_offered_choice_round_trips"],
+    ),
+    (
+        "an hour reads as sixty minutes",
+        "        60 => \"1 hour\".to_string(),\n",
+        "",
+        ["labels_read_as_english"],
+    ),
+    (
+        "two hours read as minutes",
+        "        n if n > 60 && n % 60 == 0 =>",
+        "        n if false && n % 60 == 0 =>",
+        ["labels_read_as_english"],
+    ),
+    # No row for `store_changes` returning early when nothing changed: without
+    # it the file is written again as it was, which no reader can tell.
+]
+
 RECYCLEBINS = [
     (
         "a limit written by hand is not offered",
@@ -3093,6 +3199,7 @@ RULES = [
 
 TABLES = {
     "main.rs": MUTATIONS,
+    "idle.rs": IDLE,
     "recyclebins.rs": RECYCLEBINS,
     "rules.rs": RULES,
     "thumbs.rs": THUMBS,

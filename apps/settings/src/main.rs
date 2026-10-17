@@ -7,6 +7,7 @@
 //! Uses the guitk library for rendering. Dark theme (Catppuccin Mocha) by default.
 
 mod dyndns;
+mod idle;
 mod lockscreen;
 mod recyclebins;
 mod remote;
@@ -947,11 +948,13 @@ pub struct SettingsState {
     /// fonts. A test's state answers from a fixture instead, so what it sees
     /// does not hang on the fonts of the machine running it.
     family_check: fn(&str) -> bool,
-    /// Minutes before the session locks itself; nought is never.
+    /// Minutes before the session locks itself, the displays sleep and the
+    /// computer sleeps, and whether waking the displays locks it: the
+    /// `session` group.
     ///
     /// Held rather than re-read while drawing, like the two lists above:
     /// `build_page` runs on every repaint and again for every hit test.
-    lock_after_minutes: u32,
+    idle: idle::Idle,
     /// Whether the lock screen's clock shows seconds, and the date: the lock
     /// screen program's own settings (`lockscreen.yaml`), which until
     /// 2026-09-27 were compiled in and the same for everyone (C-Q26).
@@ -960,7 +963,7 @@ pub struct SettingsState {
     /// `session.yaml` was rewritten and the shell has not been told.
     ///
     /// Without the telling, a delay the user just chose takes effect at the
-    /// next sign-in -- the shell claims its idle watch once, at startup.
+    /// next sign-in -- the shell claims its idle watches once, at startup.
     session_dirty: bool,
     /// The recycle-bin limits for a drive with none of its own:
     /// `recyclebin.yaml`'s `default_limits` (design-decisions §1240).
@@ -1125,8 +1128,9 @@ pub enum DropdownId {
     WallpaperFit,
     /// The family all interface text is drawn in.
     UiFont,
-    /// How long the session waits before locking itself.
-    LockAfter,
+    /// How long the session waits, untouched, before locking itself, putting
+    /// the displays to sleep, or putting the computer to sleep.
+    IdleDelay(idle::Delay),
     /// The family fixed-pitch text is drawn in.
     ///
     /// Offered only because `guitk::text::available_mono_families` can now
@@ -1183,8 +1187,8 @@ impl DropdownId {
     /// may be empty, so there is no fixed value to walk.
     ///
     /// **Five more used to be absent for no reason anybody had written down**
-    /// -- `RotationInterval`, `LoginBackground`, `UiFont`, `LockAfter` and
-    /// `MonoFont`. Each is drawn by a `dropdown_row`, opens, and has a value
+    /// -- `RotationInterval`, `LoginBackground`, `UiFont`, the lock's delay
+    /// and `MonoFont`. Each is drawn by a `dropdown_row`, opens, and has a value
     /// handler, so each was working; none of them was covered by the sweep
     /// below, which is the guarantee this list exists to give. They were found
     /// by `scripts/check-variant-lists.py` once it began asking which variants
@@ -1198,7 +1202,7 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 50] = [
+    pub const FIXED: [Self; 52] = [
         Self::SoundTheme,
         Self::FontTheme,
         Self::EventSound(0),
@@ -1244,7 +1248,9 @@ impl DropdownId {
         Self::RotationInterval,
         Self::LoginBackground,
         Self::UiFont,
-        Self::LockAfter,
+        Self::IdleDelay(idle::Delay::Lock),
+        Self::IdleDelay(idle::Delay::DisplaysOff),
+        Self::IdleDelay(idle::Delay::Sleep),
         Self::MonoFont,
         Self::BinDefault(recyclebins::LimitKind::Age),
         Self::BinDefault(recyclebins::LimitKind::Size),
@@ -1262,6 +1268,8 @@ struct SettingsSnapshot {
     /// The lock screen's clock: (seconds, date) -- `lockscreen.yaml`.
     lock_clock: (bool, bool),
     datetime: datetimesettings::DateTimeSettings,
+    /// The idle delays and switch -- `session.yaml`.
+    idle: idle::Idle,
 }
 
 /// Which of them an event changed.
@@ -1275,6 +1283,7 @@ struct ChangedDocuments {
     notif: bool,
     lock_clock: bool,
     datetime: bool,
+    idle: bool,
 }
 
 impl Default for SettingsState {
@@ -1293,11 +1302,12 @@ impl SettingsState {
         self.appearance = AppearanceFile::load();
     }
 
-    /// Read the stored screen-lock delay.
+    /// Read the stored idle delays and switch, and what the lock screen's
+    /// clock shows.
     ///
     /// I/O, and so out of [`new`](Self::new) with the rest of it.
-    pub fn load_lock_delay(&mut self) {
-        self.lock_after_minutes = lockscreen::stored_minutes();
+    pub fn load_idle(&mut self) {
+        self.idle = idle::Idle::stored();
         (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
     }
 
@@ -2268,10 +2278,10 @@ impl SettingsState {
             let before = self.datetime.settings.clone();
             self.load_datetime();
             before != self.datetime.settings
-        } else if name == lockscreen::CONFIG_NAME {
-            let before = self.lock_after_minutes;
-            self.lock_after_minutes = lockscreen::stored_minutes();
-            before != self.lock_after_minutes
+        } else if name == idle::CONFIG_NAME {
+            let before = self.idle;
+            self.idle = idle::Idle::stored();
+            before != self.idle
         } else if name == recyclebin::USER_SETTINGS {
             let before = self.bin_default;
             self.bin_default = recyclebin::Limits::user_default();
@@ -2402,23 +2412,27 @@ impl SettingsState {
         core::mem::take(&mut self.input_dirty)
     }
 
-    /// Write the notification rules back to `notifications.yaml`.
-    ///
-    /// A failed write is reported and otherwise dropped, as the other two
-    /// savers do: the alternative is a settings application that refuses to
-    /// close because a disk is full.
-    ///
-    /// **There is no reload verb for this file yet**, so the desktop picks the
-    /// change up at the next login rather than immediately. That is a missing
-    /// `SettingsGroup` and control verb, not a missing write, and the shell
-    /// end is already built -- `DesktopShell::poll_notification_rules` exists
-    /// and answers correctly; nothing tells it to run.
     /// Write the lock screen's clock to `lockscreen.yaml`, which the lock
     /// screen reads when it starts -- so nothing needs telling.
     fn save_lock_clock(&mut self) {
         if let Err(err) = lockscreen::store_clock(self.lock_clock_seconds, self.lock_clock_date) {
             eprintln!("settings: could not save lockscreen.yaml: {err}");
         }
+    }
+
+    /// Write what changed in `session.yaml` since `before` -- the delay or
+    /// switch the user changed, and no other key -- and flag it for
+    /// [`Self::take_reloads`] to announce, so the shell claims its idle
+    /// watches again.
+    fn save_idle(&mut self, before: &idle::Idle) {
+        if let Err(err) = self.idle.store_changes(before) {
+            eprintln!("settings: could not save session.yaml: {err}");
+        }
+        // Flagged even when the write failed, for the reason `save_appearance`
+        // gives: the shell answers by re-reading the file, and after a failed
+        // write the honest answer is still "look again" -- it will find what is
+        // actually stored, which is the state the user now has.
+        self.session_dirty = true;
     }
 
     /// Write `datetime.yaml`. The running desktop reads it when it starts:
@@ -2431,6 +2445,13 @@ impl SettingsState {
         }
     }
 
+    /// Write the notification rules back to `notifications.yaml`, and flag
+    /// it for [`Self::take_reloads`] to announce, so the desktop reads the
+    /// rules again at once.
+    ///
+    /// A failed write is reported and otherwise dropped, as the other savers
+    /// do: the alternative is a settings application that refuses to close
+    /// because a disk is full.
     fn save_notifications(&mut self) {
         if let Err(err) = self.notif.save() {
             eprintln!("settings: could not save notifications.yaml: {err}");
@@ -2577,7 +2598,7 @@ impl SettingsState {
             service_error: None,
             mono_families: Vec::new(),
             family_check: guitk::text::family_installed,
-            lock_after_minutes: 0,
+            idle: idle::Idle::default(),
             lock_clock_seconds: false,
             lock_clock_date: true,
             session_dirty: false,
@@ -3512,6 +3533,9 @@ enum ToggleId {
     LockClockSeconds,
     /// Whether it shows the date under the clock.
     LockClockDate,
+    /// Whether waking the displays from a sleep they were put in locks the
+    /// session (`session.yaml`).
+    LockOnDisplayWake,
     /// Slide the taskbar out of the way when it is not in use.
     ///
     /// Unlike its neighbours here, the field behind this one lives in the
@@ -5073,6 +5097,7 @@ impl SettingsState {
             SettingsPage::RecycleBin => self.build_recycle_bin_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
             SettingsPage::LockScreen => self.build_lockscreen_page(sink),
+            SettingsPage::Power => self.build_power_page(sink),
             SettingsPage::UserAccounts | SettingsPage::LoginOptions => {
                 self.build_accounts_page(sink);
             }
@@ -5142,25 +5167,17 @@ impl SettingsState {
             // configuration. Neither a second copy of the working half nor a
             // second copy of the refusals belongs here.
             //
-            // `Power`: blocked on lane A, not on judgement.
-            // `gui/desktop/src/power_settings.rs` has `set_brightness_ac` and
-            // `set_brightness_battery` and there is no syscall under them --
-            // filed as `requests/c-a-brightness-has-setters-and-no-door.md`,
-            // still unconsumed. This is the one placeholder whose page gets
-            // written the day another lane answers, rather than the day this
-            // lane builds something.
-            //
-            // That accounts for all six that still fall through here: one
+            // That accounts for all five that still fall through here: one
             // waiting on a consumer (StartupApps), one on a source
-            // (InstalledApps), three on a write path the dedicated app has
-            // already declared missing (WiFi, Ethernet, VPN), and one on lane A
-            // (Power).
+            // (InstalledApps), and three on a write path the dedicated app has
+            // already declared missing (WiFi, Ethernet, VPN).
             //
-            // Two left on 2026-09-16 by the same route, which is the only route
-            // out of this arm: Fonts when `set_font_family` got a caller, and
-            // LockScreen when the compositor learned to report an idle session
-            // and the shell learned to lock on it. Neither was unblocked by
-            // deciding to build the page.
+            // Three left by the same route, which is the only route out of this
+            // arm: Fonts when `set_font_family` got a caller, LockScreen when
+            // the compositor learned to report an idle session and the shell
+            // learned to lock on it, and Power when the shell learned to put
+            // the displays and the computer to sleep after a delay of their
+            // own. None was unblocked by deciding to build the page.
             //
             // The set is asserted by `the_placeholder_pages_are_exactly_these`
             // rather than counted in prose here, the count having drifted three
@@ -7826,37 +7843,24 @@ impl SettingsState {
         }
     }
 
-    /// The Dynamic DNS page: the entries the kernel actually has.
+    /// When the screen locks itself, whether waking the displays locks it,
+    /// and what the lock screen's clock shows.
     ///
-    /// The kernel implements dynamic DNS (`kernel/src/fs/dyndns.rs`) and
-    /// publishes its state at `/proc/dyndns`; this reads that. `remote.rs`
-    /// contains a second, unreachable implementation of the same page over an
-    /// in-memory model -- see `known-issues.md`
-    /// `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` -- which
-    /// this deliberately does not use, for the reason the snapshots page gives:
-    /// invented system state is worse than none, because the user acts on it.
-    ///
-    /// Read-only. Adding and removing entries needs a syscall the kernel does
-    /// not expose to userspace yet; `known-issues.md` carries that as
-    /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
-    /// When the screen locks itself.
-    ///
-    /// A page rather than a placeholder since 2026-09-16, because the setting
-    /// finally has a consumer: the desktop shell claims an idle watch for this
-    /// delay, the compositor reports when the session has been that quiet, and
-    /// the shell runs the lock screen. Before that chain existed, a control
-    /// here would have been the echoed-setting defect -- which is what the
-    /// note on `build_page`'s `_ =>` arm said while this page was blank.
+    /// Each has a consumer: the desktop shell claims an idle watch for the
+    /// delay, the compositor reports when the session has been that quiet,
+    /// and the shell runs the lock screen; and the shell asks the switch when
+    /// the displays wake from a sleep they were put in (`crate::idle`).
     fn build_lockscreen_page<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
+        let lock = self.idle.minutes(idle::Delay::Lock);
         s.section("Screen Lock");
         s.dropdown_row(
             "Lock the screen",
-            DropdownId::LockAfter,
-            &lockscreen::label(self.lock_after_minutes),
+            DropdownId::IdleDelay(idle::Delay::Lock),
+            &idle::label(lock),
         );
 
-        if self.lock_after_minutes == 0 {
+        if lock == 0 {
             s.note(
                 "The screen will not lock on its own. It can still be locked at any time from the start menu's power menu, or with a shortcut if you set one.",
                 40.0,
@@ -7864,17 +7868,23 @@ impl SettingsState {
         } else {
             s.value_row(
                 "Locks after",
-                &format!("{} of no keyboard or mouse activity", {
-                    let m = self.lock_after_minutes;
-                    if m == 1 {
-                        "1 minute".to_string()
-                    } else {
-                        format!("{m} minutes")
-                    }
-                }),
+                &format!("{} of no keyboard or mouse activity", idle::duration(lock)),
                 pal.text,
             );
         }
+        s.toggle_row(
+            "Lock when the displays wake",
+            ToggleId::LockOnDisplayWake,
+            self.idle.lock_on_display_wake,
+        );
+        s.note(
+            if self.idle.lock_on_display_wake {
+                "Displays put to sleep -- from the power menu, with a shortcut, or after the delay on the Power page -- ask for the password when they wake."
+            } else {
+                "Displays put to sleep -- from the power menu, with a shortcut, or after the delay on the Power page -- wake without asking for the password."
+            },
+            40.0,
+        );
 
         s.section("Lock Screen Clock");
         s.toggle_row(
@@ -7896,6 +7906,57 @@ impl SettingsState {
             "An account with no password is never locked, so this has no effect on one. Give the account a password on the Accounts page first.",
             44.0,
         );
+    }
+
+    /// When the displays and the computer go to sleep on their own
+    /// (`design.txt`'s power options: "turn off screen after N minutes" and
+    /// "put computer to sleep after N minutes", both "disablable").
+    ///
+    /// The shell claims an idle watch for each delay and, when the session
+    /// has been that quiet, puts the displays to sleep as "Sleep the display"
+    /// does, or sleeps the computer as the power menu's Sleep does
+    /// (`crate::idle`). Brightness is not here: `gui/desktop/src/power_settings.rs`
+    /// has setters for it and there is no syscall under them
+    /// (`requests/c-a-brightness-has-setters-and-no-door.md`), so a row for it
+    /// would be a setting that changes nothing.
+    fn build_power_page<S: PageSink>(&self, s: &mut S) {
+        let (off, sleep, lock) = (
+            self.idle.minutes(idle::Delay::DisplaysOff),
+            self.idle.minutes(idle::Delay::Sleep),
+            self.idle.minutes(idle::Delay::Lock),
+        );
+        s.section("Screen and Sleep");
+        s.dropdown_row(
+            "Turn off the screen",
+            DropdownId::IdleDelay(idle::Delay::DisplaysOff),
+            &idle::label(off),
+        );
+        s.dropdown_row(
+            "Put the computer to sleep",
+            DropdownId::IdleDelay(idle::Delay::Sleep),
+            &idle::label(sleep),
+        );
+        s.note(
+            "Each counts the time with no keyboard or mouse activity.",
+            24.0,
+        );
+        // Said rather than enforced, as lane C's request suggests: the two
+        // delays work together, and a screen that turns off before the lock
+        // is the usual choice, not the only one.
+        if off != 0 && lock != 0 {
+            let order = if off < lock {
+                "The screen turns off before the session locks itself"
+            } else {
+                "The session locks itself before the screen turns off"
+            };
+            s.note(
+                &format!(
+                    "{order} (after {} -- the Lock Screen page).",
+                    idle::duration(lock)
+                ),
+                40.0,
+            );
+        }
     }
 
     /// Every drive's recycle bin, what it holds, and how long it keeps what
@@ -8504,6 +8565,19 @@ impl SettingsState {
         self.open_notice = Some((index, texts));
     }
 
+    /// The Dynamic DNS page: the entries the kernel actually has.
+    ///
+    /// The kernel implements dynamic DNS (`kernel/src/fs/dyndns.rs`) and
+    /// publishes its state at `/proc/dyndns`; this reads that. `remote.rs`
+    /// contains a second, unreachable implementation of the same page over an
+    /// in-memory model -- see `known-issues.md`
+    /// `TD-C-THREE-SETTINGS-PAGES-ARE-BUILT-AND-REACHED-BY-NOTHING` -- which
+    /// this deliberately does not use, for the reason the snapshots page gives:
+    /// invented system state is worse than none, because the user acts on it.
+    ///
+    /// Read-only. Adding and removing entries needs a syscall the kernel does
+    /// not expose to userspace yet; `known-issues.md` carries that as
+    /// `TD-C-DYNDNS-PAGE-IS-READ-ONLY`.
     fn build_dyndns_page<S: PageSink>(s: &mut S, pal: &Palette) {
         let (summary, rows) = dyndns::system_dyndns();
 
@@ -9015,14 +9089,11 @@ impl SettingsState {
                     .unwrap_or(0);
                 (items, current)
             }
-            DropdownId::LockAfter => {
-                let items: Vec<String> = lockscreen::CHOICES
+            DropdownId::IdleDelay(delay) => {
+                let items: Vec<String> = idle::CHOICES.iter().map(|m| idle::label(*m)).collect();
+                let current = idle::CHOICES
                     .iter()
-                    .map(|m| lockscreen::label(*m))
-                    .collect();
-                let current = lockscreen::CHOICES
-                    .iter()
-                    .position(|m| *m == self.lock_after_minutes)
+                    .position(|m| *m == self.idle.minutes(delay))
                     .unwrap_or(0);
                 (items, current)
             }
@@ -9323,6 +9394,9 @@ impl SettingsState {
         if changed.datetime {
             self.save_datetime();
         }
+        if changed.idle {
+            self.save_idle(&before.idle);
+        }
         result
     }
 
@@ -9340,6 +9414,7 @@ impl SettingsState {
             notif: self.notif.settings.clone(),
             lock_clock: (self.lock_clock_seconds, self.lock_clock_date),
             datetime: self.datetime.settings.clone(),
+            idle: self.idle,
         }
     }
 
@@ -9356,6 +9431,7 @@ impl SettingsState {
             notif: self.notif.settings != before.notif,
             lock_clock: (self.lock_clock_seconds, self.lock_clock_date) != before.lock_clock,
             datetime: self.datetime.settings != before.datetime,
+            idle: self.idle != before.idle,
         }
     }
 
@@ -10205,6 +10281,7 @@ impl SettingsState {
             ToggleId::TaskbarLabels => &mut self.appearance.settings.taskbar_labels,
             ToggleId::LockClockSeconds => &mut self.lock_clock_seconds,
             ToggleId::LockClockDate => &mut self.lock_clock_date,
+            ToggleId::LockOnDisplayWake => &mut self.idle.lock_on_display_wake,
             // Not a `bool` of this state's: whether the drive's bin holds a
             // `limits.yaml`, flipped by `set_bin_own_limits`.
             ToggleId::BinOwnLimits(_) => return None,
@@ -10569,18 +10646,10 @@ impl SettingsState {
                     self.appearance.settings.wallpaper_fit = *fit;
                 }
             }
-            DropdownId::LockAfter => {
-                if let Some(minutes) = lockscreen::CHOICES.get(index).copied() {
-                    self.lock_after_minutes = minutes;
-                    if let Err(err) = lockscreen::store_minutes(minutes) {
-                        eprintln!("settings: could not save session.yaml: {err}");
-                    }
-                    // Flagged even when the write failed, for the reason
-                    // `save_appearance` gives: the shell answers by re-reading
-                    // the file, and after a failed write the honest answer is
-                    // still "look again" -- it will find what is actually
-                    // stored, which is the state the user now has.
-                    self.session_dirty = true;
+            // Written by `handle_event`, from what changed: see `save_idle`.
+            DropdownId::IdleDelay(delay) => {
+                if let Some(minutes) = idle::CHOICES.get(index).copied() {
+                    self.idle.set_minutes(delay, minutes);
                 }
             }
             // A family of one's own is one's own fonts: a theme left chosen
@@ -11306,7 +11375,7 @@ fn main() -> ExitCode {
     state.refresh_themes();
 
     // The screen-lock delay, for the Lock Screen page.
-    state.load_lock_delay();
+    state.load_idle();
 
     // The machine's recycle bins and the default limits, for the Recycle Bin
     // page; each bin is read when the page is opened.
@@ -12470,7 +12539,6 @@ mod tests {
         const EXPECTED: &[SettingsPage] = &[
             SettingsPage::Ethernet,
             SettingsPage::InstalledApps,
-            SettingsPage::Power,
             SettingsPage::StartupApps,
             SettingsPage::VPN,
             SettingsPage::WiFi,
@@ -12776,7 +12844,7 @@ mod tests {
             app.load_input();
             app.load_notifications();
             app.load_datetime();
-            app.load_lock_delay();
+            app.load_idle();
             app.refresh_default_apps();
 
             other.input.settings.mouse.double_click_ms += 100;
@@ -12785,12 +12853,15 @@ mod tests {
             other.save_notifications();
             other.datetime.settings.show_seconds = !other.datetime.settings.show_seconds;
             other.save_datetime();
-            let minutes = lockscreen::CHOICES
+            let mut idle = app.idle;
+            let minutes = idle::CHOICES
                 .iter()
                 .copied()
-                .find(|&m| m != app.lock_after_minutes)
+                .find(|&m| m != app.idle.minutes(idle::Delay::DisplaysOff))
                 .expect("a second delay to choose");
-            lockscreen::store_minutes(minutes).expect("the scratch config is writable");
+            idle.set_minutes(idle::Delay::DisplaysOff, minutes);
+            idle.store_changes(&app.idle)
+                .expect("the scratch config is writable");
             let clock = (!app.lock_clock_seconds, !app.lock_clock_date);
             lockscreen::store_clock(clock.0, clock.1).expect("the scratch config is writable");
             let mut doc = settingsfile::load(associations::CONFIG_NAME);
@@ -12810,9 +12881,7 @@ mod tests {
                 (datetimesettings::CONFIG_NAME, |a, o| {
                     a.datetime.settings == o.datetime.settings
                 }),
-                (lockscreen::CONFIG_NAME, |a, _| {
-                    a.lock_after_minutes == lockscreen::stored_minutes()
-                }),
+                (idle::CONFIG_NAME, |a, _| a.idle == idle::Idle::stored()),
                 (lockscreen::CLOCK_CONFIG, |a, _| {
                     (a.lock_clock_seconds, a.lock_clock_date) == lockscreen::stored_clock()
                 }),
@@ -21574,6 +21643,104 @@ mod tests {
                 "the event did not save it"
             );
         });
+    }
+
+    /// **The Power page's delays and the lock screen's switch are written
+    /// where the shell reads them, each key alone, and announced.** Choosing
+    /// when the screen turns off writes `displays.off_after_minutes` and no
+    /// other key -- the sleep and the lock stay unset, which the shell reads
+    /// as its default rather than as a "Never" nobody chose -- and flipping
+    /// "Lock when the displays wake" writes `lock.on_display_wake`.
+    #[test]
+    fn the_idle_choices_are_written_key_by_key_and_announced() {
+        settingsfile::testing::with_scratch_config("settings-idle-event", |_root| {
+            let mut state = SettingsState::new();
+            state.load_idle();
+            state.go_to_page(SettingsPage::Power);
+            let ten = idle::CHOICES
+                .iter()
+                .position(|&m| m == 10)
+                .expect("ten minutes is offered");
+            choose(
+                &mut state,
+                DropdownId::IdleDelay(idle::Delay::DisplaysOff),
+                ten,
+            );
+            assert_eq!(state.idle.minutes(idle::Delay::DisplaysOff), 10);
+            assert!(
+                std::mem::take(&mut state.session_dirty),
+                "the change was not announced"
+            );
+            let doc = settingsfile::load(idle::CONFIG_NAME);
+            assert_eq!(doc.get_i64(&["displays", "off_after_minutes"]), Some(10));
+            assert_eq!(doc.get_i64(&["sleep", "after_minutes"]), None);
+            assert_eq!(doc.get_i64(&["lock", "after_minutes"]), None);
+
+            let two_hours = idle::CHOICES
+                .iter()
+                .position(|&m| m == 120)
+                .expect("two hours is offered");
+            choose(
+                &mut state,
+                DropdownId::IdleDelay(idle::Delay::Sleep),
+                two_hours,
+            );
+            let doc = settingsfile::load(idle::CONFIG_NAME);
+            assert_eq!(doc.get_i64(&["sleep", "after_minutes"]), Some(120));
+            assert_eq!(doc.get_i64(&["displays", "off_after_minutes"]), Some(10));
+
+            state.go_to_page(SettingsPage::LockScreen);
+            assert!(
+                state.idle.lock_on_display_wake,
+                "unset is not the shell's default"
+            );
+            press_on(&mut state, RowHit::Toggle(ToggleId::LockOnDisplayWake));
+            assert!(!state.idle.lock_on_display_wake, "the switch did not move");
+            assert!(
+                std::mem::take(&mut state.session_dirty),
+                "the switch was not announced"
+            );
+            let doc = settingsfile::load(idle::CONFIG_NAME);
+            assert_eq!(doc.get_bool(&["lock", "on_display_wake"]), Some(false));
+            assert_eq!(doc.get_i64(&["lock", "after_minutes"]), None);
+        });
+    }
+
+    /// **The Power page says which comes first**, the screen turning off or
+    /// the lock, once both have a delay -- and says nothing while either is
+    /// never.
+    #[test]
+    fn the_power_page_says_whether_the_screen_turns_off_before_the_lock() {
+        // The page's text as one string: a note is wrapped at its spaces, a
+        // line to a text command.
+        let shown = |lock: u32, off: u32| {
+            let mut state = SettingsState::new();
+            state.idle.set_minutes(idle::Delay::Lock, lock);
+            state.idle.set_minutes(idle::Delay::DisplaysOff, off);
+            state.go_to_page(SettingsPage::Power);
+            drawn_texts(&state).join(" ")
+        };
+        assert!(
+            shown(15, 5)
+                .contains("The screen turns off before the session locks itself (after 15 minutes"),
+            "{}",
+            shown(15, 5)
+        );
+        assert!(
+            shown(5, 15)
+                .contains("The session locks itself before the screen turns off (after 5 minutes"),
+            "{}",
+            shown(5, 15)
+        );
+        let never = shown(0, 5);
+        assert!(
+            !never.contains("before the session locks") && !never.contains("before the screen"),
+            "{never}"
+        );
+        assert!(
+            never.contains("Turn off the screen") && never.contains("Put the computer to sleep"),
+            "the page does not draw its rows: {never}"
+        );
     }
 
     // == settings --page <name> (lane C's request, 2026-09-27) =================

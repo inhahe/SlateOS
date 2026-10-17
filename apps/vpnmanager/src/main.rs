@@ -29,12 +29,11 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use textline::{LineBox, LineLook};
 
 use std::collections::VecDeque;
 use std::process::ExitCode;
@@ -337,6 +336,71 @@ impl ProtocolSettings {
     }
 }
 
+/// What a number's box shows for `n`: its digits, and nothing for 0, which
+/// no port or MTU is -- so that deleting every digit leaves the box empty
+/// rather than holding a 0 typed after.
+fn digits(n: u16) -> String {
+    if n == 0 { String::new() } else { n.to_string() }
+}
+
+/// The number a number's box stands for: 0 for an empty box, and 65535
+/// for one too big -- holding a digit key must not wrap round to a port
+/// that works.
+fn number(text: &str) -> u16 {
+    if text.is_empty() {
+        0
+    } else {
+        text.parse().unwrap_or(u16::MAX)
+    }
+}
+
+/// A profile in the add/edit dialog: its four boxes -- name, server, port,
+/// MTU, what is typed into each and its caret -- and the rest of it. The
+/// edit's one record: [`ProfileEdit::to_profile`] makes the profile Save
+/// keeps. The four fields the boxes stand for are blank in `rest`, so
+/// nothing can read a value the boxes have since changed.
+#[derive(Clone, Debug)]
+pub struct ProfileEdit {
+    pub rest: VpnProfile,
+    pub name: LineBox,
+    pub server: LineBox,
+    pub port: LineBox,
+    pub mtu: LineBox,
+}
+
+impl ProfileEdit {
+    /// An edit starting from `profile`, each box's caret after its text.
+    #[must_use]
+    pub fn from_profile(profile: VpnProfile) -> Self {
+        let field = |text: &str| LineBox::holding(text, FIELD_CAPACITY, FIELD_TEXT_SIZE);
+        Self {
+            name: field(&profile.name),
+            server: field(&profile.server_address),
+            port: field(&digits(profile.port)),
+            mtu: field(&digits(profile.mtu)),
+            rest: VpnProfile {
+                name: String::new(),
+                server_address: String::new(),
+                port: 0,
+                mtu: 0,
+                ..profile
+            },
+        }
+    }
+
+    /// The profile the edit stands for.
+    #[must_use]
+    pub fn to_profile(&self) -> VpnProfile {
+        VpnProfile {
+            name: self.name.text().to_owned(),
+            server_address: self.server.text().to_owned(),
+            port: number(self.port.text()),
+            mtu: number(self.mtu.text()),
+            ..self.rest.clone()
+        }
+    }
+}
+
 /// A VPN profile containing all configuration needed to establish a connection.
 #[derive(Clone, Debug)]
 pub struct VpnProfile {
@@ -607,7 +671,7 @@ pub struct VpnManager {
     pub last_connected_id: Option<u32>,
     next_profile_id: u32,
     next_log_timestamp: u64,
-    pub editing_profile: Option<VpnProfile>,
+    pub editing_profile: Option<ProfileEdit>,
     pub show_add_dialog: bool,
     pub scroll_offset: f32,
     /// First log row drawn, counted in rows rather than pixels: the log
@@ -615,7 +679,8 @@ pub struct VpnManager {
     /// express positions the renderer then rounds away. A value past the end
     /// is not an error, and shows the last page.
     pub log_scroll_offset: usize,
-    pub search_query: String,
+    /// The search box: what the list is filtered by, and its caret.
+    pub search_query: LineBox,
     /// Which text box holds the keyboard, if any.
     pub focus: Option<Field>,
     /// Why the last Save was refused, shown inside the dialog.
@@ -624,8 +689,8 @@ pub struct VpnManager {
     /// window, and the status bar is behind it. A complaint the user cannot
     /// read is a Save button that does nothing.
     pub dialog_error: String,
-    /// What has been typed into the split-tunnel tab's new-range box.
-    pub allowed_ip_input: String,
+    /// The split-tunnel tab's new-range box.
+    pub allowed_ip_input: LineBox,
     /// The last thing the user did, or the reason the last thing failed.
     ///
     /// Every state method that can fail returns `Err(String)`. Before the
@@ -661,11 +726,6 @@ pub struct VpnManager {
     focus_ring_width: f32,
     /// Whether the list of keys is up.
     show_help: bool,
-    /// The editor of the box with the keyboard: its caret and selection over
-    /// the box's text, loaded whenever the keyboard moves to another box.
-    editor: TextInput,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
 }
 
 /// The size the boxes draw their text at.
@@ -729,8 +789,6 @@ impl VpnManager {
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_help: false,
-            editor: textline::field_holding("", FIELD_CAPACITY),
-            clipboard: String::new(),
             profiles,
             connections,
             log,
@@ -745,10 +803,10 @@ impl VpnManager {
             show_add_dialog: false,
             scroll_offset: 0.0,
             log_scroll_offset: 0,
-            search_query: String::new(),
+            search_query: LineBox::new(FIELD_CAPACITY, FIELD_TEXT_SIZE),
             focus: None,
             dialog_error: String::new(),
-            allowed_ip_input: String::new(),
+            allowed_ip_input: LineBox::new(FIELD_CAPACITY, FIELD_TEXT_SIZE),
             status_message: String::new(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             picker: None,
@@ -1252,7 +1310,7 @@ impl VpnManager {
         if self.search_query.is_empty() {
             return (0..self.profiles.len()).collect();
         }
-        let query = self.search_query.to_lowercase();
+        let query = self.search_query.text().to_lowercase();
         self.profiles
             .iter()
             .enumerate()
@@ -1303,7 +1361,7 @@ impl VpnManager {
     /// Begin editing by opening the add dialog with a new blank profile.
     pub fn start_add_profile(&mut self) {
         let proto = VpnProtocol::WireGuard;
-        self.editing_profile = Some(VpnProfile::new(0, "", "", proto));
+        self.editing_profile = Some(ProfileEdit::from_profile(VpnProfile::new(0, "", "", proto)));
         self.show_add_dialog = true;
         self.dialog_error.clear();
     }
@@ -1311,7 +1369,7 @@ impl VpnManager {
     /// Begin editing the currently selected profile.
     pub fn start_edit_profile(&mut self) {
         if let Some(profile) = self.selected().cloned() {
-            self.editing_profile = Some(profile);
+            self.editing_profile = Some(ProfileEdit::from_profile(profile));
             self.show_add_dialog = true;
             self.dialog_error.clear();
         }
@@ -1337,7 +1395,7 @@ impl VpnManager {
             .editing_profile
             .as_ref()
             .ok_or("No profile being edited")?
-            .clone();
+            .to_profile();
 
         // A profile that already exists is an update; one the list has never
         // seen is an addition. New profiles carry id 0, which `add_profile`
@@ -1710,9 +1768,6 @@ impl Field {
 /// it is for, faint, while it is empty -- and, with the keyboard, the caret
 /// and the selection where they are. An empty box with the keyboard draws
 /// its caret before what it is for, as the toolkit's own input dialog does.
-///
-/// The caret was a `|` appended to the text, so it stood at the end whatever
-/// the keys did -- which was nothing, as the boxes typed only there.
 fn render_box_text(
     frame: &mut Frame,
     app: &VpnManager,
@@ -1721,61 +1776,27 @@ fn render_box_text(
     placeholder: &str,
 ) {
     let focused = app.focus == Some(field) && !app.show_help;
-    let text = app.field_text(field).unwrap_or_default();
+    let Some(line_box) = app.field_box(field) else {
+        return;
+    };
     let line = text::line_height(FIELD_TEXT_SIZE, FontWeightHint::Regular);
-    let (x, y, width) = (
-        rect.x + FIELD_TEXT_INSET,
-        rect.y + (rect.h - line) / 2.0,
-        (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
-    );
     let mut tree = RenderTree::new();
-    if text.is_empty() {
-        frame.push(RenderCommand::Text {
-            x,
-            y,
-            text: placeholder.to_string(),
-            font_size: FIELD_TEXT_SIZE,
-            color: app.palette.subtext0,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(width),
-            overflow: TextOverflow::Ellipsis,
-        });
-        if focused {
-            textedit::push_caret(
-                &mut tree,
-                x,
-                y,
-                line,
-                app.palette.text,
-                textedit::CARET_WIDTH,
-            );
-        }
-    } else {
-        let editing = app.focus == Some(field) && app.editor.text() == text;
-        textedit::draw(
-            &mut tree,
-            &textedit::SingleLine {
-                text: &text,
-                cursor: app.field_cursor(field, &text),
-                selection_anchor: if editing {
-                    app.editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused,
-                x,
-                y,
-                width,
-                line_height: line,
-                font_size: FIELD_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
-                color: app.palette.text,
-                selection_bg: app.palette.accent,
-                selection_fg: app.palette.crust,
-                caret_width: textedit::CARET_WIDTH,
-            },
-        );
-    }
+    line_box.draw(
+        &mut tree,
+        &LineLook {
+            x: rect.x + FIELD_TEXT_INSET,
+            y: rect.y + (rect.h - line) / 2.0,
+            width: rect.w - 2.0 * FIELD_TEXT_INSET,
+            line_height: line,
+            focused,
+            placeholder,
+            color: app.palette.text,
+            placeholder_color: app.palette.subtext0,
+            selection_bg: app.palette.accent,
+            selection_fg: app.palette.crust,
+            caret_width: textedit::CARET_WIDTH,
+        },
+    );
     for command in tree.commands {
         frame.push(command);
     }
@@ -3533,7 +3554,7 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
     frame.push(RenderCommand::Text {
         x: dx + 20.0,
         y: dy + 16.0,
-        text: if app.editing_profile.as_ref().is_some_and(|p| p.id != 0) {
+        text: if app.editing_profile.as_ref().is_some_and(|p| p.rest.id != 0) {
             String::from("Edit VPN Profile")
         } else {
             String::from("Add VPN Profile")
@@ -3546,25 +3567,27 @@ fn render_add_dialog(frame: &mut Frame, app: &VpnManager) {
     });
 
     // Form fields
-    if let Some(profile) = &app.editing_profile {
+    if let Some(edit) = &app.editing_profile {
+        let profile = &edit.rest;
         let mut y = dy + 50.0;
         let fw = dialog_w - 40.0;
 
         // Four typed fields, then two that cycle through a fixed set. Protocol
         // and auth method are enums with no free-text form, so a box to type
         // into would only be a box to type a wrong answer into.
-        let typed: [(&str, String, Field); 4] = [
-            ("Name:", profile.name.clone(), Field::Name),
-            ("Server:", profile.server_address.clone(), Field::Server),
-            ("Port:", profile.port.to_string(), Field::Port),
-            ("MTU:", profile.mtu.to_string(), Field::Mtu),
+        // A box draws what it holds itself (`render_box_text`).
+        let typed: [(&str, Field); 4] = [
+            ("Name:", Field::Name),
+            ("Server:", Field::Server),
+            ("Port:", Field::Port),
+            ("MTU:", Field::Mtu),
         ];
-        for (label, value, field) in typed {
+        for (label, field) in typed {
             y = render_dialog_field(
                 frame,
                 app,
                 label,
-                &value,
+                "",
                 dx + 20.0,
                 y,
                 fw,
@@ -4172,62 +4195,36 @@ impl VpnManager {
             return Action::None;
         }
         self.focus = Some(field);
-        self.load_editor(field);
+        if let Some(line) = self.field_box_mut(field) {
+            line.caret_to_end();
+        }
         Action::Redraw
     }
 
-    /// What `field`'s box shows: its text, or a number's digits -- nothing
-    /// for 0, which no port or MTU is, so that deleting every digit leaves
-    /// the box empty rather than holding a 0 typed after. `None` for a
-    /// dialog row with no profile being edited.
-    fn field_text(&self, field: Field) -> Option<String> {
-        let digits = |n: u16| if n == 0 { String::new() } else { n.to_string() };
+    /// `field`'s box: `None` for a dialog box with no profile being
+    /// edited.
+    fn field_box(&self, field: Field) -> Option<&LineBox> {
+        let edit = self.editing_profile.as_ref();
         match field {
-            Field::Search => Some(self.search_query.clone()),
-            Field::AllowedIp => Some(self.allowed_ip_input.clone()),
-            Field::Name => self.editing_profile.as_ref().map(|p| p.name.clone()),
-            Field::Server => self
-                .editing_profile
-                .as_ref()
-                .map(|p| p.server_address.clone()),
-            Field::Port => self.editing_profile.as_ref().map(|p| digits(p.port)),
-            Field::Mtu => self.editing_profile.as_ref().map(|p| digits(p.mtu)),
+            Field::Search => Some(&self.search_query),
+            Field::AllowedIp => Some(&self.allowed_ip_input),
+            Field::Name => edit.map(|e| &e.name),
+            Field::Server => edit.map(|e| &e.server),
+            Field::Port => edit.map(|e| &e.port),
+            Field::Mtu => edit.map(|e| &e.mtu),
         }
     }
 
-    /// Write `text` back to `field`. A number box's digits are parsed, and
-    /// a number too big for the box ends at 65535: holding a digit key must
-    /// not wrap round to a port that works. An empty number box is 0.
-    fn set_field_text(&mut self, field: Field, text: &str) {
-        if let Some(slot) = self.number_field_mut(field) {
-            *slot = if text.is_empty() {
-                0
-            } else {
-                text.parse().unwrap_or(u16::MAX)
-            };
-        } else if let Some(slot) = self.text_field_mut(field) {
-            text.clone_into(slot);
-        }
-    }
-
-    /// Load `field`'s text into the editor, its caret after it.
-    fn load_editor(&mut self, field: Field) {
-        if let Some(text) = self.field_text(field) {
-            self.editor.set_text(&text);
-        }
-    }
-
-    /// Where `field`'s caret is drawn, over `text`, what the box holds: the
-    /// editor's while the box has the keyboard and the editor holds its
-    /// text, its end if the text changed under the editor, its start without
-    /// the keyboard. One answer for the drawing and for a press.
-    fn field_cursor(&self, field: Field, text: &str) -> TextCursor {
-        if self.focus != Some(field) {
-            TextCursor::default()
-        } else if self.editor.text() == text {
-            self.editor.cursor()
-        } else {
-            TextCursor::from(text.len())
+    /// [`Self::field_box`], to change.
+    fn field_box_mut(&mut self, field: Field) -> Option<&mut LineBox> {
+        let edit = self.editing_profile.as_mut();
+        match field {
+            Field::Search => Some(&mut self.search_query),
+            Field::AllowedIp => Some(&mut self.allowed_ip_input),
+            Field::Name => edit.map(|e| &mut e.name),
+            Field::Server => edit.map(|e| &mut e.server),
+            Field::Port => edit.map(|e| &mut e.port),
+            Field::Mtu => edit.map(|e| &mut e.mtu),
         }
     }
 
@@ -4237,41 +4234,31 @@ impl VpnManager {
     /// and Backspace from it, and nothing else.
     ///
     /// A number box takes digits only: an edit that would leave anything but
-    /// digits in it -- a letter typed, a paste -- is refused whole, as a
-    /// letter in a port box always was, rather than shown and failing the
-    /// save with a number nobody typed.
+    /// digits in it -- a letter typed, a paste -- is refused whole
+    /// (`LineBox::key_checked`), as a letter in a port box always was,
+    /// rather than shown and failing the save with a number nobody typed.
+    /// And it shows the number it stands for: 65535 where the digits run
+    /// past it, nothing for 0.
     fn edit_field(&mut self, field: Field, key: &KeyEvent) -> Action {
-        let Some(before) = self.field_text(field) else {
+        let is_number = matches!(field, Field::Port | Field::Mtu);
+        let Some(line) = self.field_box_mut(field) else {
             return Action::None;
         };
-        if self.editor.text() != before {
-            self.editor.set_text(&before);
+        let edit = if is_number {
+            line.key_checked(key, |text| text.chars().all(|c| c.is_ascii_digit()))
+        } else {
+            line.key(key)
+        };
+        if is_number && edit.changed {
+            let shown = digits(number(line.text()));
+            line.set_text(&shown);
         }
-        let kept = self.editor.clone();
-        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FIELD_TEXT_SIZE);
-        if self.number_field_mut(field).is_some()
-            && !self.editor.text().chars().all(|c| c.is_ascii_digit())
-        {
-            self.editor = kept;
-            return Action::None;
-        }
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        let typed = self.editor.text().to_owned();
-        if typed != before {
+        if edit.changed {
             // Editing a dialog field is the user answering the complaint, so
             // the complaint goes away rather than sitting under the corrected
             // value still saying the field is blank.
             if field.is_dialog() {
                 self.dialog_error.clear();
-            }
-            self.set_field_text(field, &typed);
-            // A number too big for its box shows where it stopped.
-            if let Some(shown) = self.field_text(field)
-                && shown != typed
-            {
-                self.editor.set_text(&shown);
             }
             if field == Field::Search {
                 // The list just shrank under the selection. Selection is by
@@ -4294,10 +4281,10 @@ impl VpnManager {
     /// was drawn.
     fn press_field(&mut self, field: Field, x: f32, size: (f32, f32)) -> Action {
         let rect = render_frame(self, size.0, size.1).rect_of(|t| *t == Target::Focus(field));
-        let Some(text) = self.field_text(field) else {
+        if self.field_box(field).is_none() {
             return Action::None;
-        };
-        let drawn = self.field_cursor(field, &text);
+        }
+        let had_the_keyboard = self.focus == Some(field);
         let action = self.focus_field(field);
         if self.focus != Some(field) {
             return action;
@@ -4305,47 +4292,14 @@ impl VpnManager {
         let Some(rect) = rect else {
             return Action::Redraw;
         };
-        if self.editor.text() != text {
-            self.editor.set_text(&text);
+        if let Some(line) = self.field_box_mut(field) {
+            line.press(
+                x - rect.x - FIELD_TEXT_INSET,
+                rect.w - 2.0 * FIELD_TEXT_INSET,
+                had_the_keyboard,
+            );
         }
-        let cursor = textedit::cursor_at_click(
-            &text,
-            drawn,
-            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
-            FIELD_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - FIELD_TEXT_INSET,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
         Action::Redraw
-    }
-
-    /// The `u16` behind a numeric dialog field.
-    ///
-    /// Port and MTU are numbers, and are edited as numbers — `n * 10 + digit`
-    /// going in, `n / 10` coming out. A `String` beside the `u16` would be a
-    /// second copy of the same value that has to be parsed back on save, and
-    /// the two would disagree the moment anything but the keyboard wrote it —
-    /// which `start_edit_profile` does, every time the dialog opens.
-    fn number_field_mut(&mut self, field: Field) -> Option<&mut u16> {
-        let profile = self.editing_profile.as_mut()?;
-        match field {
-            Field::Port => Some(&mut profile.port),
-            Field::Mtu => Some(&mut profile.mtu),
-            _ => None,
-        }
-    }
-
-    /// The `String` behind a textual field, if that field edits one.
-    fn text_field_mut(&mut self, field: Field) -> Option<&mut String> {
-        match field {
-            Field::Search => Some(&mut self.search_query),
-            Field::AllowedIp => Some(&mut self.allowed_ip_input),
-            Field::Name => Some(&mut self.editing_profile.as_mut()?.name),
-            Field::Server => Some(&mut self.editing_profile.as_mut()?.server_address),
-            Field::Port | Field::Mtu => None,
-        }
     }
 
     /// Commit the split-tunnel tab's new-range box.
@@ -4353,7 +4307,7 @@ impl VpnManager {
         let Some(index) = self.require_selection() else {
             return Action::Redraw;
         };
-        let typed = self.allowed_ip_input.trim().to_string();
+        let typed = self.allowed_ip_input.text().trim().to_string();
         if typed.is_empty() {
             self.status_message = String::from("Type an IP or CIDR range first");
             return Action::Redraw;
@@ -4671,23 +4625,24 @@ impl VpnManager {
                 Action::Redraw
             }
             Target::CycleProtocol => {
-                let Some(profile) = self.editing_profile.as_mut() else {
+                let Some(edit) = self.editing_profile.as_mut() else {
                     return Action::None;
                 };
+                let profile = &mut edit.rest;
                 profile.protocol = profile.protocol.next();
                 // The port and the protocol-specific settings follow the
                 // protocol, because a WireGuard profile carrying OpenVPN's
                 // 1194 and an `OpenVpn { cipher }` block is not a profile any
                 // back end could use.
-                profile.port = profile.protocol.default_port();
+                edit.port.set_text(&digits(profile.protocol.default_port()));
                 profile.protocol_settings = ProtocolSettings::for_protocol(profile.protocol);
                 Action::Redraw
             }
             Target::CycleAuth => {
-                let Some(profile) = self.editing_profile.as_mut() else {
+                let Some(edit) = self.editing_profile.as_mut() else {
                     return Action::None;
                 };
-                profile.auth_method = profile.auth_method.next();
+                edit.rest.auth_method = edit.rest.auth_method.next();
                 Action::Redraw
             }
             Target::DialogToggleKillSwitch => {
@@ -4747,10 +4702,10 @@ impl VpnManager {
 
     /// Run `change` against the profile in the dialog, if one is open.
     fn on_editing(&mut self, change: impl FnOnce(&mut VpnProfile)) -> Action {
-        let Some(profile) = self.editing_profile.as_mut() else {
+        let Some(edit) = self.editing_profile.as_mut() else {
             return Action::None;
         };
-        change(profile);
+        change(&mut edit.rest);
         Action::Redraw
     }
 
@@ -4895,7 +4850,9 @@ impl VpnManager {
             Key::Tab => {
                 let next = self.next_box(field);
                 self.focus = Some(next);
-                self.load_editor(next);
+                if let Some(line) = self.field_box_mut(next) {
+                    line.caret_to_end();
+                }
                 Action::Redraw
             }
             Key::Enter => match field {
@@ -6446,7 +6403,7 @@ mod tests {
     #[test]
     fn test_filtered_profiles_name_match() {
         let mut mgr = VpnManager::with_sample_profiles();
-        mgr.search_query = String::from("Work");
+        mgr.search_query.set_text("Work");
         let filtered = mgr.filtered_profiles();
         assert!(!filtered.is_empty());
         for &idx in &filtered {
@@ -6462,7 +6419,7 @@ mod tests {
     #[test]
     fn test_filtered_profiles_protocol_match() {
         let mut mgr = VpnManager::with_sample_profiles();
-        mgr.search_query = String::from("WireGuard");
+        mgr.search_query.set_text("WireGuard");
         let filtered = mgr.filtered_profiles();
         assert!(!filtered.is_empty());
         for &idx in &filtered {
@@ -6473,7 +6430,7 @@ mod tests {
     #[test]
     fn test_filtered_profiles_no_match() {
         let mut mgr = VpnManager::with_sample_profiles();
-        mgr.search_query = String::from("zzzznonexistent");
+        mgr.search_query.set_text("zzzznonexistent");
         assert!(mgr.filtered_profiles().is_empty());
     }
 
@@ -6485,7 +6442,7 @@ mod tests {
         mgr.start_add_profile();
         assert!(mgr.show_add_dialog);
         assert!(mgr.editing_profile.is_some());
-        assert_eq!(mgr.editing_profile.as_ref().unwrap().id, 0);
+        assert_eq!(mgr.editing_profile.as_ref().unwrap().rest.id, 0);
     }
 
     #[test]
@@ -6494,7 +6451,7 @@ mod tests {
         mgr.start_edit_profile();
         assert!(mgr.show_add_dialog);
         let editing = mgr.editing_profile.as_ref().unwrap();
-        assert_eq!(editing.name, mgr.profiles[0].name);
+        assert_eq!(editing.name.text(), mgr.profiles[0].name);
     }
 
     #[test]
@@ -6510,12 +6467,12 @@ mod tests {
     fn test_confirm_edit_add() {
         let mut mgr = VpnManager::with_sample_profiles();
         let initial = mgr.profiles.len();
-        mgr.editing_profile = Some(VpnProfile::new(
+        mgr.editing_profile = Some(ProfileEdit::from_profile(VpnProfile::new(
             0,
             "Confirmed",
             "1.2.3.4",
             VpnProtocol::PPTP,
-        ));
+        )));
         mgr.show_add_dialog = true;
         assert!(mgr.confirm_edit().is_ok());
         assert_eq!(mgr.profiles.len(), initial + 1);
@@ -6527,7 +6484,7 @@ mod tests {
         let mut mgr = VpnManager::with_sample_profiles();
         let mut edit = mgr.profiles[0].clone();
         edit.name = String::from("Edited Name");
-        mgr.editing_profile = Some(edit);
+        mgr.editing_profile = Some(ProfileEdit::from_profile(edit));
         mgr.show_add_dialog = true;
         assert!(mgr.confirm_edit().is_ok());
         assert_eq!(mgr.profiles[0].name, "Edited Name");
@@ -7252,7 +7209,7 @@ mod tests {
         assert_eq!(app.focus, Some(Field::Search));
 
         type_str(&mut app, "gam");
-        assert_eq!(app.search_query, "gam");
+        assert_eq!(app.search_query.text(), "gam");
 
         let shown: Vec<&str> = app
             .filtered_profiles()
@@ -7271,7 +7228,7 @@ mod tests {
         // Office", so the search is a substring match anywhere in the name and
         // not a prefix one.
         app.handle_key(&press(Key::Backspace));
-        assert_eq!(app.search_query, "ga");
+        assert_eq!(app.search_query.text(), "ga");
         let widened: Vec<&str> = app
             .filtered_profiles()
             .iter()
@@ -7479,7 +7436,8 @@ mod tests {
             app.editing_profile
                 .as_ref()
                 .expect("a profile in the dialog")
-                .name,
+                .name
+                .text(),
             name
         );
         assert_eq!(app.focus, Some(Field::Name));
@@ -7541,7 +7499,7 @@ mod tests {
         );
         assert_eq!(app.focus, Some(Field::AllowedIp));
         type_str(&mut app, "192.168.5.0/24");
-        assert_eq!(app.allowed_ip_input, "192.168.5.0/24");
+        assert_eq!(app.allowed_ip_input.text(), "192.168.5.0/24");
 
         click(&mut app, Target::AddAllowedIp);
         assert_eq!(
@@ -7577,7 +7535,8 @@ mod tests {
             before
         );
         assert_eq!(
-            app.allowed_ip_input, "not-an-address",
+            app.allowed_ip_input.text(),
+            "not-an-address",
             "a rejected range must stay in the box: retyping it is the user's work, not ours"
         );
         assert!(app.status_message.contains("not-an-address"));
@@ -7741,7 +7700,11 @@ mod tests {
             "a refused Save must not throw away the rest of the form"
         );
         assert_eq!(
-            app.editing_profile.as_ref().expect("still editing").name,
+            app.editing_profile
+                .as_ref()
+                .expect("still editing")
+                .name
+                .text(),
             "Half Filled"
         );
         assert_eq!(app.profiles.len(), before);
@@ -7783,17 +7746,17 @@ mod tests {
         for _ in 0..6 {
             app.handle_key(&press(Key::Backspace));
         }
-        assert_eq!(app.editing_profile.as_ref().expect("editing").port, 0);
+        assert_eq!(draft(&app).port, 0);
 
         type_str(&mut app, "4a4b3");
         assert_eq!(
-            app.editing_profile.as_ref().expect("editing").port,
+            draft(&app).port,
             443,
             "letters in a port box are not an edit"
         );
 
         app.handle_key(&press(Key::Backspace));
-        assert_eq!(app.editing_profile.as_ref().expect("editing").port, 44);
+        assert_eq!(draft(&app).port, 44);
     }
 
     #[test]
@@ -7807,10 +7770,29 @@ mod tests {
 
         type_str(&mut app, "99999999");
         assert_eq!(
-            app.editing_profile.as_ref().expect("editing").port,
+            draft(&app).port,
             u16::MAX,
             "holding a digit key must end at 65535, not roll through zero"
         );
+        assert_eq!(
+            app.editing_profile.as_ref().expect("editing").port.text(),
+            "65535",
+            "the box shows digits that are not the port Save keeps"
+        );
+    }
+
+    /// **The MTU box is a number box too**: it takes digits, and a letter
+    /// typed into it is not an edit.
+    #[test]
+    fn the_mtu_box_takes_digits_and_ignores_everything_else() {
+        use guitk::event::Modifiers;
+        let mut app = VpnManager::with_sample_profiles();
+        click(&mut app, Target::AddProfile);
+        click(&mut app, Target::Focus(Field::Mtu));
+        app.handle_key(&with_mods(Key::A, Modifiers::ctrl()));
+        app.handle_key(&press(Key::Backspace));
+        type_str(&mut app, "14a00");
+        assert_eq!(draft(&app).mtu, 1400, "a letter in the MTU box was an edit");
     }
 
     #[test]
@@ -7820,7 +7802,7 @@ mod tests {
 
         let mut seen = Vec::new();
         for _ in 0..VpnProtocol::all().len() {
-            let profile = app.editing_profile.as_ref().expect("editing");
+            let profile = draft(&app);
             seen.push(profile.protocol);
             assert_eq!(
                 profile.port,
@@ -7835,7 +7817,7 @@ mod tests {
             assert!(seen.contains(protocol), "{protocol:?} is unreachable");
         }
         assert_eq!(
-            app.editing_profile.as_ref().expect("editing").protocol,
+            draft(&app).protocol,
             seen[0],
             "a full lap comes back to where it started"
         );
@@ -7846,22 +7828,11 @@ mod tests {
         let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
 
-        let start = app
-            .editing_profile
-            .as_ref()
-            .expect("editing")
-            .auth_method
-            .label();
+        let start = draft(&app).auth_method.label();
         let mut seen = vec![start];
         for _ in 0..4 {
             click(&mut app, Target::CycleAuth);
-            seen.push(
-                app.editing_profile
-                    .as_ref()
-                    .expect("editing")
-                    .auth_method
-                    .label(),
-            );
+            seen.push(draft(&app).auth_method.label());
         }
 
         assert_eq!(
@@ -7909,10 +7880,10 @@ mod tests {
             let selected_before = read(app.selected().expect("a selection"));
             click(&mut app, Target::AddProfile);
 
-            let before = read(app.editing_profile.as_ref().expect("editing"));
+            let before = read(&draft(&app));
             assert_eq!(click(&mut app, target), Action::Redraw);
             assert_ne!(
-                read(app.editing_profile.as_ref().expect("editing")),
+                read(&draft(&app)),
                 before,
                 "{target:?} did not flip the field it is labelled with"
             );
@@ -8922,7 +8893,7 @@ mod tests {
         click(&mut app, Target::Focus(Field::Search));
         app.handle_key(&key_of(Key::Slash, Modifiers::shift(), "?"));
         assert!(!app.show_help, "? raised the list from the search box");
-        assert_eq!(app.search_query, "?", "? was not typed");
+        assert_eq!(app.search_query.text(), "?", "? was not typed");
         hit(&mut app, Key::F1, Modifiers::NONE);
         assert!(
             app.show_help,
@@ -9112,6 +9083,14 @@ mod tests {
         }
     }
 
+    /// The profile the dialog's edit stands for: what Save would keep.
+    fn draft(app: &VpnManager) -> VpnProfile {
+        app.editing_profile
+            .as_ref()
+            .expect("a profile in the dialog")
+            .to_profile()
+    }
+
     /// The caret lines drawn inside `rect`: the toolkit draws a caret as a
     /// vertical line.
     fn carets_in(app: &VpnManager, rect: Rect) -> usize {
@@ -9148,7 +9127,7 @@ mod tests {
         type_str(&mut app, "a");
         app.handle_key(&press(Key::Right));
         type_str(&mut app, "i");
-        assert_eq!(app.search_query, "gaming", "the caret did not move");
+        assert_eq!(app.search_query.text(), "gaming", "the caret did not move");
         assert_eq!(carets_in(&app, search), 1, "no caret is drawn in the box");
         let caret = render_frame(&app, WINDOW_WIDTH, WINDOW_HEIGHT)
             .commands()
@@ -9177,12 +9156,12 @@ mod tests {
         assert_eq!(shown, vec!["Gaming VPN"]);
         app.handle_key(&press(Key::Home));
         app.handle_key(&press(Key::Delete));
-        assert_eq!(app.search_query, "aming", "Delete at the caret");
+        assert_eq!(app.search_query.text(), "aming", "Delete at the caret");
         app.handle_key(&with_mods(Key::A, Modifiers::ctrl()));
         app.handle_key(&with_mods(Key::X, Modifiers::ctrl()));
-        assert_eq!(app.search_query, "", "Ctrl+X");
+        assert_eq!(app.search_query.text(), "", "Ctrl+X");
         app.handle_key(&with_mods(Key::V, Modifiers::ctrl()));
-        assert_eq!(app.search_query, "aming", "Ctrl+V");
+        assert_eq!(app.search_query.text(), "aming", "Ctrl+V");
 
         // A press past the text's end puts the caret at its end, and one at
         // its start puts it there.
@@ -9198,58 +9177,92 @@ mod tests {
         press_at(&mut app, search.right() - 2.0);
         type_str(&mut app, "!");
         assert_eq!(
-            app.search_query, "aming!",
+            app.search_query.text(),
+            "aming!",
             "a press past the text did not put the caret at its end"
         );
         press_at(&mut app, search.x + FIELD_TEXT_INSET);
         type_str(&mut app, "g");
         assert_eq!(
-            app.search_query, "gaming!",
+            app.search_query.text(),
+            "gaming!",
             "a press at the text's start did not put the caret there"
         );
     }
 
+    /// **A press in a box with the keyboard lands where the text was drawn**:
+    /// a query wider than its box is drawn scrolled to its caret, so a press
+    /// at the box's right edge is near the query's end, not a box's width
+    /// from its start.
+    #[test]
+    fn a_press_in_a_long_query_lands_where_it_was_drawn() {
+        let mut app = VpnManager::with_sample_profiles();
+        let search = rect_of(&app, Target::Focus(Field::Search)).expect("the search box");
+        click(&mut app, Target::Focus(Field::Search));
+        let long = "W".repeat(200);
+        type_str(&mut app, &long);
+        assert_eq!(app.search_query.text(), long, "control: the query typed");
+        assert!(
+            text::measure(&long, FIELD_TEXT_SIZE, FontWeightHint::Regular) > 2.0 * search.w,
+            "control: the query is wider than the box"
+        );
+        let at = Event::Mouse(MouseEvent {
+            x: search.right() - FIELD_TEXT_INSET - 1.0,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        app.handle_event(&at, (WINDOW_WIDTH, WINDOW_HEIGHT));
+        let caret = app.search_query.input().cursor().byte();
+        assert!(
+            caret > long.len() / 2,
+            "the press was measured from the query's start: caret at {caret} of {}",
+            long.len()
+        );
+    }
+
     /// **A box the keyboard moves to types after what it holds**, wherever
-    /// the caret stood in the box it came from -- by Tab, or by Ctrl+F --
-    /// even when the two hold the same text, which is when an editor left
-    /// as it was would go on typing at the old box's caret.
+    /// its caret stood when it last had the keyboard -- by Tab, or by
+    /// Ctrl+F.
     #[test]
     fn a_box_the_keyboard_moves_to_types_after_what_it_holds() {
         use guitk::event::Modifiers;
         let mut app = VpnManager::with_sample_profiles();
         click(&mut app, Target::AddProfile);
         assert_eq!(app.focus, Some(Field::Name));
-        type_str(&mut app, "ab");
-        app.editing_profile
-            .as_mut()
-            .expect("editing")
-            .server_address = String::from("ab");
-        app.handle_key(&press(Key::Home));
         app.handle_key(&press(Key::Tab));
         assert_eq!(app.focus, Some(Field::Server));
+        type_str(&mut app, "ab");
+        app.handle_key(&press(Key::Home));
+        // Round the ring and back to the server's box.
+        for _ in 0..4 {
+            app.handle_key(&press(Key::Tab));
+        }
+        assert_eq!(
+            app.focus,
+            Some(Field::Server),
+            "control: a lap of four boxes"
+        );
         type_str(&mut app, "c");
         assert_eq!(
-            app.editing_profile
-                .as_ref()
-                .expect("editing")
-                .server_address,
+            draft(&app).server_address,
             "abc",
-            "Tab left the caret where the last box had it"
+            "Tab left the caret where the box last had it"
         );
         click(&mut app, Target::DialogCancel);
 
         app.select_profile(0);
         app.set_tab(DetailTab::SplitTunnel);
-        app.search_query = String::from("ab");
-        click(&mut app, Target::Focus(Field::AllowedIp));
+        click(&mut app, Target::Focus(Field::Search));
         type_str(&mut app, "ab");
         app.handle_key(&press(Key::Home));
+        click(&mut app, Target::Focus(Field::AllowedIp));
         hit(&mut app, Key::F, Modifiers::ctrl());
         assert_eq!(app.focus, Some(Field::Search));
         type_str(&mut app, "c");
         assert_eq!(
-            app.search_query, "abc",
-            "Ctrl+F left the caret where the last box had it"
+            app.search_query.text(),
+            "abc",
+            "Ctrl+F left the caret where the box last had it"
         );
     }
 
@@ -9267,7 +9280,7 @@ mod tests {
         app.handle_key(&with_mods(Key::A, Modifiers::ctrl()));
         app.handle_key(&with_mods(Key::C, Modifiers::ctrl()));
         click(&mut app, Target::Focus(Field::Port));
-        let port = |app: &VpnManager| app.editing_profile.as_ref().expect("editing").port;
+        let port = |app: &VpnManager| draft(app).port;
         let was = port(&app);
         assert!(was > 999, "the test needs a port of four digits or more");
         app.handle_key(&press(Key::Home));

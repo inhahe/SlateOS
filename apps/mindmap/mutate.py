@@ -551,20 +551,14 @@ MUTATIONS += [
     # toolkit's field (2026-10-04; lane C, c-e-a-theme-can-shape-the-controls).
     (
         "the node being renamed never has the keyboard",
-        "            focused: !self.show_help,\n",
-        "            focused: false,\n",
+        "            TypedBox::Name => !self.show_help,\n",
+        "            TypedBox::Name => false,\n",
         [RENAME],
     ),
     (
         "the node being renamed keeps its mark under the shortcut list",
-        "            focused: !self.show_help,\n",
-        "            focused: true,\n",
-        [RENAME],
-    ),
-    (
-        "the caret is at the start of the name",
-        "        let (cursor, selection_anchor) = self.box_caret(TypedBox::Name);\n",
-        "        let (cursor, selection_anchor) = (text::TextCursor::from(0), None::<usize>);\n",
+        "            TypedBox::Name => !self.show_help,\n",
+        "            TypedBox::Name => true,\n",
         [RENAME],
     ),
     (
@@ -604,6 +598,7 @@ REDRAW = "a_key_that_changes_nothing_in_a_box_is_not_a_redraw"
 QUERY = "the_query_edits_at_a_caret"
 BAR = "a_press_on_the_find_bar_is_the_bars"
 SHOWN = "a_box_edits_the_text_it_shows"
+ROOT = "the_roots_name_is_typed_bold_at_the_zoomed_size"
 ORDER = "search_results_come_in_the_order_the_outline_reads"
 AGAIN = "a_change_with_the_find_bar_up_is_searched_again"
 NEXT = "test_app_search_next_prev"
@@ -681,46 +676,29 @@ MUTATIONS += [
     ),
     (
         "Ctrl+F with the bar up does not select the query",
-        "                self.editor.select_all();\n",
+        "                self.search_query.select_all();\n",
         "",
         [QUERY, REDRAW],
     ),
     (
         "every key a box answers is a redraw",
-        "        Some(self.editor_state() != before)\n",
+        "        Some(edit.changed || edit.moved)\n",
         "        Some(true)\n",
         [REDRAW],
     ),
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
-        "the editor is kept for the box the keyboard moved to",
-        "        if self.editor_for != Some(which) || self.editor.text() != self.box_text(which) {\n",
-        "        if self.editor.text() != self.box_text(which) {\n",
-        [SHOWN],
-    ),
-    (
-        "a key finds the editor holding another text",
-        "        if self.editor_for != Some(which) || self.editor.text() != self.box_text(which) {\n",
-        "        if self.editor_for != Some(which) {\n",
-        [SHOWN],
-    ),
-    (
         "a node's text starts from the last node's caret",
-        "            self.editor.set_text(&self.edit_buffer);\n"
-        "            self.editor_for = Some(TypedBox::Name);\n",
-        "",
+        "            self.edit_buffer = LineBox::holding(&node.text, BOX_CAPACITY, font_size * self.zoom)\n"
+        "                .with_weight(weight);\n",
+        "            self.edit_buffer.set_text(&node.text);\n"
+        "            let _ = (font_size, weight);\n",
         [STARTS],
     ),
     # -- the pointer
     (
         "a press puts the caret at the start",
-        "            x - area.x,\n",
-        "            0.0,\n",
+        "        self.typed_box(which).press(x - area.x, area.width, focused);\n",
+        "        self.typed_box(which).press(0.0, area.width, focused);\n",
         [EDITS, QUERY],
     ),
     (
@@ -760,24 +738,6 @@ MUTATIONS += [
     ),
     # -- the drawing
     (
-        "the name's caret is drawn at its end and its selection not at all",
-        "        let (cursor, selection_anchor) = self.box_caret(TypedBox::Name);\n",
-        "        let (cursor, selection_anchor) = (text::TextCursor::from(self.edit_buffer.len()), None::<usize>);\n",
-        [EDITS],
-    ),
-    (
-        "the query's caret is drawn at its end",
-        "                cursor: self.box_caret(TypedBox::Query).0,\n",
-        "                cursor: text::TextCursor::from(self.search_query.len()),\n",
-        [QUERY],
-    ),
-    (
-        "the query's selection is not drawn",
-        "                selection_anchor: self.box_caret(TypedBox::Query).1,\n",
-        "                selection_anchor: None,\n",
-        [QUERY],
-    ),
-    (
         "the root's text is typed at a node's size",
         "        (ROOT_FONT_SIZE, FontWeightHint::Bold)\n",
         "        (NODE_FONT_SIZE, FontWeightHint::Bold)\n",
@@ -788,6 +748,54 @@ MUTATIONS += [
         "            x: r.x + NAME_TEXT_INSET,\n",
         "            x: r.x,\n",
         [RENAME],
+    ),
+    (
+        "the root's name is typed in the regular weight",
+        "                .with_weight(weight);\n",
+        ";\n",
+        [ROOT],
+    ),
+    (
+        "the name is typed at the unzoomed size",
+        "            self.edit_buffer = LineBox::holding(&node.text, BOX_CAPACITY, font_size * self.zoom)\n",
+        "            self.edit_buffer = LineBox::holding(&node.text, BOX_CAPACITY, font_size)\n",
+        [ROOT],
+    ),
+    (
+        "a zoom leaves the name at the old size",
+        "        self.zoom = new_zoom.clamp(MIN_ZOOM, MAX_ZOOM);\n        self.size_the_name_box();\n",
+        "        self.zoom = new_zoom.clamp(MIN_ZOOM, MAX_ZOOM);\n",
+        [ROOT],
+    ),
+    (
+        "a view reset leaves the name at the zoomed size",
+        "        self.zoom = 1.0;\n        self.size_the_name_box();\n",
+        "        self.zoom = 1.0;\n",
+        [ROOT],
+    ),
+    (
+        "the name box is sized without the zoom",
+        "            .map(|node| node_font(node).0 * self.zoom);\n",
+        "            .map(|node| node_font(node).0);\n",
+        [ROOT],
+    ),
+    (
+        "the query's keys edit the name",
+        "            TypedBox::Query => &mut self.search_query,\n",
+        "            TypedBox::Query => &mut self.edit_buffer,\n",
+        [SHOWN, QUERY],
+    ),
+    (
+        "a query typed is not searched for",
+        "        if edit.changed && which == TypedBox::Query {\n",
+        "        if false {\n",
+        [QUERY],
+    ),
+    (
+        "a query set from outside is not put in the box",
+        "        self.search_query.set_text(query);\n",
+        "",
+        ["test_app_search", NEXT],
     ),
 ]
 

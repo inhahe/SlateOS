@@ -48,7 +48,6 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::undo::{Travel, UndoHistory};
 use pathtext::ShowPath;
 
@@ -57,6 +56,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{LineBox, LineLook};
 use unsaved::{Choice, Question};
 
 // ============================================================================
@@ -1435,8 +1435,8 @@ pub struct MindMapApp {
     /// The id the next map is given (see [`MindMap::id`]).
     next_map_id: u64,
 
-    /// Search query.
-    pub search_query: String,
+    /// The find bar's query: its text, its caret and its selection.
+    pub search_query: LineBox,
     /// Node IDs matching the current search.
     pub search_results: Vec<NodeId>,
     /// Index into search_results for cycling.
@@ -1449,18 +1449,11 @@ pub struct MindMapApp {
     /// Whether the search bar is visible.
     pub show_search: bool,
 
-    /// Text input buffer for editing node text.
-    pub edit_buffer: String,
+    /// The text of the node being renamed: its caret and its selection,
+    /// in the node's weight at the size the node is drawn at.
+    pub edit_buffer: LineBox,
     /// Whether we are in text editing mode.
     pub editing_node: Option<NodeId>,
-    /// The editor of the box with the keyboard -- its caret and selection
-    /// over that box's text -- reloaded when the keyboard moved to the other
-    /// box or the text changed under it.
-    editor: TextInput,
-    /// Which box `editor` holds.
-    editor_for: Option<TypedBox>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
     /// How wide the mark is round a box while it has the keyboard -- the
     /// node being renamed, the find bar's query: the user's focus width
     /// (`App::appearance_changed`), the toolkit's until it is known.
@@ -1495,8 +1488,7 @@ enum PickerFor {
     SaveThenQuit(u64),
 }
 
-/// The boxes typed into. The one with the keyboard is the one
-/// `MindMapApp::editor` holds.
+/// The boxes typed into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TypedBox {
     /// The text of the node being renamed (`MindMapApp::edit_buffer`).
@@ -1505,14 +1497,12 @@ enum TypedBox {
     Query,
 }
 
-/// Where a box's text is drawn: from `x`, `width` wide, at `size` and
-/// `weight`. One answer for the drawing and for a press.
+/// Where a box's text is drawn: from `x`, `width` wide. One answer for the
+/// drawing and for a press.
 #[derive(Clone, Copy, Debug)]
 struct BoxText {
     x: f32,
     width: f32,
-    size: f32,
-    weight: FontWeightHint,
 }
 
 /// What the unsaved-changes question would close.
@@ -1547,17 +1537,14 @@ impl MindMapApp {
             question: None,
             quit: false,
             next_map_id: 2,
-            search_query: String::new(),
+            search_query: LineBox::new(BOX_CAPACITY, QUERY_TEXT_SIZE),
             search_results: Vec::new(),
             search_index: 0,
             show_sidebar: true,
             show_help: false,
             show_search: false,
-            edit_buffer: String::new(),
+            edit_buffer: LineBox::new(BOX_CAPACITY, NODE_FONT_SIZE),
             editing_node: None,
-            editor: textline::field_holding("", BOX_CAPACITY),
-            editor_for: None,
-            clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
         };
         // Auto-layout the initial map
@@ -1679,8 +1666,7 @@ impl MindMapApp {
         self.editing_node = None;
         self.drag = DragState::None;
         if self.show_search {
-            let query = self.search_query.clone();
-            self.set_search_query(query);
+            self.run_search();
         }
     }
 
@@ -1841,12 +1827,27 @@ impl MindMapApp {
 
     pub fn set_zoom(&mut self, new_zoom: f32) {
         self.zoom = new_zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+        self.size_the_name_box();
     }
 
     pub fn reset_view(&mut self) {
         self.pan_x = 0.0;
         self.pan_y = 0.0;
         self.zoom = 1.0;
+        self.size_the_name_box();
+    }
+
+    /// The box of the node being renamed, at the size the node is drawn at
+    /// now: its font's size times the zoom. A box measured at the old zoom
+    /// would step its caret and take a press at the old one.
+    fn size_the_name_box(&mut self) {
+        let size = self
+            .editing_node
+            .and_then(|id| self.active_map_ref().node(id))
+            .map(|node| node_font(node).0 * self.zoom);
+        if let Some(size) = size {
+            self.edit_buffer.set_font_size(size);
+        }
     }
 
     // ========================================================================
@@ -1935,23 +1936,23 @@ impl MindMapApp {
         }
     }
 
-    /// Start editing the selected node's text, the caret after it --
-    /// whatever the last node renamed left in the editor.
+    /// Start editing the selected node's text, in a box of its own with the
+    /// caret after it, in the node's weight at the size it is drawn at.
     pub fn start_editing(&mut self) {
         if let Some(sel) = self.selected_node
             && let Some(node) = self.active_map_ref().node(sel)
         {
-            self.edit_buffer = node.text.clone();
+            let (font_size, weight) = node_font(node);
+            self.edit_buffer = LineBox::holding(&node.text, BOX_CAPACITY, font_size * self.zoom)
+                .with_weight(weight);
             self.editing_node = Some(sel);
-            self.editor.set_text(&self.edit_buffer);
-            self.editor_for = Some(TypedBox::Name);
         }
     }
 
     /// Finish editing and apply text change.
     pub fn finish_editing(&mut self) {
         if let Some(node_id) = self.editing_node.take() {
-            let new_text = self.edit_buffer.clone();
+            let new_text = self.edit_buffer.text().to_owned();
             if let Some(old_text) = self.active_map_mut().edit_text(node_id, new_text.clone())
                 && old_text != new_text
             {
@@ -2378,9 +2379,15 @@ impl MindMapApp {
     /// away from a node the word still finds -- and the first result in the
     /// outline otherwise. The bar counted "1/2" before anything was selected,
     /// and the first Enter went to the second result.
-    pub fn set_search_query(&mut self, query: String) {
-        self.search_query = query;
-        self.search_results = self.active_map_ref().search(&self.search_query);
+    pub fn set_search_query(&mut self, query: &str) {
+        self.search_query.set_text(query);
+        self.run_search();
+    }
+
+    /// Search for the query in the box, and go to what it finds, as
+    /// [`set_search_query`](Self::set_search_query) does.
+    fn run_search(&mut self) {
+        self.search_results = self.active_map_ref().search(self.search_query.text());
         self.search_index = self
             .selected_node
             .and_then(|id| self.search_results.iter().position(|&r| r == id))
@@ -2399,7 +2406,7 @@ impl MindMapApp {
     /// added was never found.
     fn refresh_search(&mut self) {
         let current = self.search_results.get(self.search_index).copied();
-        self.search_results = self.active_map_ref().search(&self.search_query);
+        self.search_results = self.active_map_ref().search(self.search_query.text());
         self.search_index = current
             .and_then(|id| self.search_results.iter().position(|&r| r == id))
             .unwrap_or(0);
@@ -3323,12 +3330,7 @@ impl MindMapApp {
                 self.cancel_editing();
                 EventResult::Consumed
             }
-            _ => {
-                let size = self
-                    .renaming_box()
-                    .map_or(NODE_FONT_SIZE, |(_, area)| area.size);
-                redraw_if(self.box_key(TypedBox::Name, key, size) == Some(true))
-            }
+            _ => redraw_if(self.box_key(TypedBox::Name, key) == Some(true)),
         }
     }
 
@@ -3358,14 +3360,14 @@ impl MindMapApp {
             // Ctrl+F with the bar up does what it does in a browser: the
             // query, selected, to type a new one over it.
             Key::F if textline::is_ctrl_chord(key.modifiers) => {
-                self.load_box(TypedBox::Query);
-                let before = self.editor_state();
-                self.editor.select_all();
-                return Some(redraw_if(self.editor_state() != before));
+                let caret = |b: &LineBox| (b.input().cursor(), b.input().selection_anchor());
+                let before = caret(&self.search_query);
+                self.search_query.select_all();
+                return Some(redraw_if(caret(&self.search_query) != before));
             }
             _ => {}
         }
-        match self.box_key(TypedBox::Query, key, QUERY_TEXT_SIZE) {
+        match self.box_key(TypedBox::Query, key) {
             Some(changed) => Some(redraw_if(changed)),
             None if textline::is_ctrl_chord(key.modifiers) => None,
             None => Some(EventResult::Ignored),
@@ -3374,98 +3376,53 @@ impl MindMapApp {
 
     // ------ The boxes typed into ------
 
-    /// What box `which` holds.
-    fn box_text(&self, which: TypedBox) -> &str {
+    /// Box `which`.
+    fn typed_box(&mut self, which: TypedBox) -> &mut LineBox {
         match which {
-            TypedBox::Name => &self.edit_buffer,
-            TypedBox::Query => &self.search_query,
+            TypedBox::Name => &mut self.edit_buffer,
+            TypedBox::Query => &mut self.search_query,
         }
     }
 
-    /// Load box `which` into the editor unless it holds it already, the
-    /// caret after its text.
-    fn load_box(&mut self, which: TypedBox) {
-        if self.editor_for != Some(which) || self.editor.text() != self.box_text(which) {
-            let held = self.box_text(which).to_owned();
-            self.editor.set_text(&held);
-            self.editor_for = Some(which);
+    /// Whether box `which` has the keyboard: what it is drawn with, and its
+    /// presses measured against.
+    fn box_has_keyboard(&self, which: TypedBox) -> bool {
+        match which {
+            TypedBox::Name => !self.show_help,
+            TypedBox::Query => self.search_box_state().focused,
         }
     }
 
-    /// The editor's text, caret and selection anchor: whether a key changed
-    /// anything is whether these did.
-    fn editor_state(&self) -> (String, text::TextCursor, Option<usize>) {
-        (
-            self.editor.text().to_owned(),
-            self.editor.cursor(),
-            self.editor.selection_anchor(),
-        )
-    }
-
-    /// Apply `key` to box `which`, drawn at `size`: the caret keys,
-    /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
-    /// what AltGr types among it (Polish `ż` is AltGr+Z), and no command's
-    /// letter, which a chord carries as text. `None` for a key the box does
-    /// not answer; else whether the key changed the text, the caret or the
-    /// selection -- Backspace at the start changes nothing, and is no
-    /// redraw. A query changed is searched for again.
-    fn box_key(&mut self, which: TypedBox, key: &KeyEvent, size: f32) -> Option<bool> {
-        self.load_box(which);
-        let before = self.editor_state();
-        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, size);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
+    /// Apply `key` to box `which`: the caret keys, Backspace and Delete at
+    /// the caret, Ctrl+A, C, X and V, and typing -- what AltGr types among
+    /// it (Polish `ż` is AltGr+Z), and no command's letter, which a chord
+    /// carries as text. `None` for a key the box does not answer; else
+    /// whether the key changed the text, the caret or the selection --
+    /// Backspace at the start changes nothing, and is no redraw. A query
+    /// changed is searched for again.
+    fn box_key(&mut self, which: TypedBox, key: &KeyEvent) -> Option<bool> {
+        let edit = self.typed_box(which).key(key);
         if !edit.handled {
             return None;
         }
-        if self.editor.text() != self.box_text(which) {
-            let typed = self.editor.text().to_owned();
-            match which {
-                TypedBox::Name => self.edit_buffer = typed,
-                TypedBox::Query => self.set_search_query(typed),
-            }
+        if edit.changed && which == TypedBox::Query {
+            self.run_search();
         }
-        Some(self.editor_state() != before)
-    }
-
-    /// Where box `which`'s caret and selection anchor are: the editor's
-    /// while it holds the box's text, after the text and none otherwise. One
-    /// answer for the drawing and for a press.
-    fn box_caret(&self, which: TypedBox) -> (text::TextCursor, Option<usize>) {
-        let held = self.box_text(which);
-        if self.editor_for == Some(which) && self.editor.text() == held {
-            (self.editor.cursor(), self.editor.selection_anchor())
-        } else {
-            (text::TextCursor::from(held.len()), None)
-        }
+        Some(edit.changed || edit.moved)
     }
 
     /// A press at `x` in box `which`, its text drawn at `area`: the caret
     /// under the pointer, measured against the box as it was drawn.
     fn press_box(&mut self, which: TypedBox, area: BoxText, x: f32) {
-        let (drawn, _) = self.box_caret(which);
-        self.load_box(which);
-        let cursor = textedit::cursor_at_click(
-            self.box_text(which),
-            drawn,
-            area.width,
-            area.size,
-            area.weight,
-            x - area.x,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
+        let focused = self.box_has_keyboard(which);
+        self.typed_box(which).press(x - area.x, area.width, focused);
     }
 
-    /// The text inside the box at `r` a node's text is typed into, at `size`
-    /// and `weight`.
-    fn name_text(r: Rect, size: f32, weight: FontWeightHint) -> BoxText {
+    /// The text inside the box at `r` a node's text is typed into.
+    fn name_text(r: Rect) -> BoxText {
         BoxText {
             x: r.x + NAME_TEXT_INSET,
             width: (r.w - 2.0 * NAME_TEXT_INSET).max(0.0),
-            size,
-            weight,
         }
     }
 
@@ -3482,7 +3439,7 @@ impl MindMapApp {
             size,
             weight,
         );
-        Some((field, Self::name_text(field, size, weight)))
+        Some((field, Self::name_text(field)))
     }
 
     /// The text inside the find bar's query box at `search`.
@@ -3490,8 +3447,6 @@ impl MindMapApp {
         BoxText {
             x: search.x + QUERY_TEXT_INSET,
             width: (search.w - 2.0 * QUERY_TEXT_INSET).max(0.0),
-            size: QUERY_TEXT_SIZE,
-            weight: FontWeightHint::Regular,
         }
     }
 
@@ -4221,31 +4176,25 @@ impl MindMapApp {
         let r = Self::node_editor_rect(node, size, weight);
         let state = field::State {
             hovered: false,
-            focused: !self.show_help,
+            focused: self.box_has_keyboard(TypedBox::Name),
             disabled: false,
             invalid: false,
         };
         field::draw(cmds, &self.palette, r, state, self.focus_ring_width);
         let line = text::line_height(size, weight);
-        let area = Self::name_text(r, size, weight);
-        let (cursor, selection_anchor) = self.box_caret(TypedBox::Name);
+        let area = Self::name_text(r);
         let mut typed = RenderTree::new();
-        textedit::draw(
+        self.edit_buffer.draw(
             &mut typed,
-            &textedit::SingleLine {
-                text: &self.edit_buffer,
-                // Where the caret and the selection are; the caret was fixed
-                // at the end, the only place the keys could type.
-                cursor,
-                selection_anchor,
-                focused: state.focused,
+            &LineLook {
                 x: area.x,
                 y: r.y + (r.h - line) / 2.0,
                 width: area.width,
                 line_height: line,
-                font_size: size,
-                weight,
+                focused: state.focused,
+                placeholder: "",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -4313,44 +4262,26 @@ impl MindMapApp {
             overflow: TextOverflow::Clip,
         });
 
-        // The query, in the toolkit's field, with the caret after it --
-        // scrolled so the end being typed stays in view -- or, empty, what
-        // it is for.
+        // The query, in the toolkit's field, with its caret and selection
+        // -- scrolled so the caret stays in view -- or, empty, what it is
+        // for.
         let search = Self::search_box_rect(bar);
         let state = self.search_box_state();
         field::draw(cmds, &self.palette, search, state, self.focus_ring_width);
         let line = text::line_height(QUERY_TEXT_SIZE, FontWeightHint::Regular);
         let area = Self::query_text(search);
-        let (tx, ty, tw) = (area.x, search.y + (search.h - line) / 2.0, area.width);
-        if self.search_query.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: "type to search...".to_string(),
-                font_size: 12.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
         let mut typed = RenderTree::new();
-        textedit::draw(
+        self.search_query.draw(
             &mut typed,
-            &textedit::SingleLine {
-                text: &self.search_query,
-                // Where the caret and the selection are; the caret was fixed
-                // at the end, the only place the keys could type.
-                cursor: self.box_caret(TypedBox::Query).0,
-                selection_anchor: self.box_caret(TypedBox::Query).1,
-                focused: state.focused,
-                x: tx,
-                y: ty,
-                width: tw,
+            &LineLook {
+                x: area.x,
+                y: search.y + (search.h - line) / 2.0,
+                width: area.width,
                 line_height: line,
-                font_size: 12.0,
-                weight: FontWeightHint::Regular,
+                focused: state.focused,
+                placeholder: "type to search...",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -5119,10 +5050,10 @@ mod tests {
         assert!(app.editing_node.is_some(), "F2 should start editing");
         // Editing starts from the existing text, so the typed characters are
         // appended to it rather than replacing it.
-        let seeded = app.edit_buffer.clone();
+        let seeded = app.edit_buffer.text().to_owned();
         app.handle_event(&typed('c'));
         app.handle_event(&typed('s'));
-        assert_eq!(app.edit_buffer, format!("{seeded}cs"));
+        assert_eq!(app.edit_buffer.text(), format!("{seeded}cs"));
         let n = app.active_map_ref().node(root).expect("the root exists");
         assert_eq!(n.color, colour, "the colour changed while typing");
         assert_eq!(n.shape, shape, "the shape changed while typing");
@@ -5339,13 +5270,13 @@ mod tests {
         assert_eq!(app.handle_event(&press_ctrl(Key::F)), EventResult::Consumed);
         assert!(app.show_search);
         app.handle_event(&typed('a'));
-        assert_eq!(app.search_query, "a");
+        assert_eq!(app.search_query.text(), "a");
         assert!(
             app.editing_node.is_none(),
             "search must not open the editor"
         );
         app.handle_event(&press(Key::Backspace));
-        assert_eq!(app.search_query, "");
+        assert_eq!(app.search_query.text(), "");
         app.handle_event(&press(Key::Escape));
         assert!(!app.show_search);
     }
@@ -5380,7 +5311,7 @@ mod tests {
         let root = app.active_map_ref().root_id;
         app.selected_node = Some(root);
         app.handle_event(&press(Key::F2));
-        let seeded = app.edit_buffer.clone();
+        let seeded = app.edit_buffer.text().to_owned();
         assert_eq!(
             app.handle_event(&held(Key::Z, altgr, "\u{17c}")),
             EventResult::Consumed
@@ -5392,7 +5323,7 @@ mod tests {
                 "{modifiers:?}+{k:?} was typed into the node"
             );
         }
-        assert_eq!(app.edit_buffer, format!("{seeded}\u{17c}"));
+        assert_eq!(app.edit_buffer.text(), format!("{seeded}\u{17c}"));
         app.handle_event(&press(Key::Escape));
 
         app.handle_event(&press_ctrl(Key::F));
@@ -5408,7 +5339,7 @@ mod tests {
                 "{modifiers:?}+{k:?} was typed into the search"
             );
         }
-        assert_eq!(app.search_query, "\u{17c}");
+        assert_eq!(app.search_query.text(), "\u{17c}");
     }
 
     #[test]
@@ -6366,8 +6297,8 @@ mod tests {
         app.selected_node = Some(root);
         app.start_editing();
         assert_eq!(app.editing_node, Some(root));
-        assert_eq!(app.edit_buffer, "Central Idea");
-        app.edit_buffer = "New Idea".to_string();
+        assert_eq!(app.edit_buffer.text(), "Central Idea");
+        app.edit_buffer.set_text("New Idea");
         app.finish_editing();
         assert!(app.editing_node.is_none());
         assert_eq!(app.active_map_ref().node(root).unwrap().text, "New Idea");
@@ -6379,7 +6310,7 @@ mod tests {
         let root = app.active_map_ref().root_id;
         app.selected_node = Some(root);
         app.start_editing();
-        app.edit_buffer = "Changed".to_string();
+        app.edit_buffer.set_text("Changed");
         app.cancel_editing();
         assert!(app.editing_node.is_none());
         assert_eq!(
@@ -6458,7 +6389,7 @@ mod tests {
         let root = app.active_map_ref().root_id;
         app.selected_node = Some(root);
         app.start_editing();
-        app.edit_buffer = "Changed".to_string();
+        app.edit_buffer.set_text("Changed");
         app.finish_editing();
         assert_eq!(app.active_map_ref().node(root).unwrap().text, "Changed");
         app.undo();
@@ -6550,7 +6481,7 @@ mod tests {
         let mut app = MindMapApp::new();
         app.add_child_to_selected("Alpha".to_string());
         app.add_child_to_selected("Beta".to_string());
-        app.set_search_query("alpha".to_string());
+        app.set_search_query("alpha");
         assert_eq!(app.search_results.len(), 1);
     }
 
@@ -6566,7 +6497,7 @@ mod tests {
         app.selected_node = None;
         let two = app.add_child_to_selected("Alpha Two".to_string()).unwrap();
         app.selected_node = None;
-        app.set_search_query("Alpha".to_string());
+        app.set_search_query("Alpha");
         assert_eq!(app.search_results, vec![alpha, two]);
         assert_eq!(
             (app.search_index, app.selected_node),
@@ -6585,9 +6516,9 @@ mod tests {
         app.prev_search_result();
         assert_eq!((app.search_index, app.selected_node), (1, Some(two)));
 
-        app.set_search_query("Alpha T".to_string());
+        app.set_search_query("Alpha T");
         assert_eq!((app.search_index, app.selected_node), (0, Some(two)));
-        app.set_search_query("Alpha".to_string());
+        app.set_search_query("Alpha");
         assert_eq!(
             (app.search_index, app.selected_node),
             (1, Some(two)),
@@ -6674,7 +6605,7 @@ mod tests {
         assert!(!app.show_search);
         app.toggle_search();
         assert!(app.show_search);
-        app.search_query = "test".to_string();
+        app.search_query.set_text("test");
         app.toggle_search();
         assert!(!app.show_search);
         assert!(app.search_query.is_empty());
@@ -6864,7 +6795,7 @@ mod tests {
     fn test_render_with_search() {
         let mut app = MindMapApp::new();
         app.show_search = true;
-        app.search_query = "test".to_string();
+        app.search_query.set_text("test");
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
@@ -8199,6 +8130,59 @@ mod tests {
         app.active_map_ref().node(id).map(|n| n.text.as_str())
     }
 
+    /// **The root's name is typed as the root is drawn**: bold, at the
+    /// root's size times the zoom -- and, zoomed while it is being renamed,
+    /// at the new size, where a press lands after the letters it was drawn
+    /// after.
+    #[test]
+    fn the_roots_name_is_typed_bold_at_the_zoomed_size() {
+        let mut app = MindMapApp::new();
+        let root = app.active_map_ref().root_id;
+        app.selected_node = Some(root);
+        app.handle_event(&press(Key::F2));
+        assert_eq!(app.editing_node, Some(root));
+        let name = app.edit_buffer.text().to_owned();
+        assert!(name.len() > 8, "control: a name of more than eight letters");
+        let drawn = |app: &MindMapApp| {
+            app.render_commands()
+                .iter()
+                .find_map(|c| match c {
+                    RenderCommand::RichText {
+                        text,
+                        font_size,
+                        font_weight,
+                        ..
+                    } if *text == name => Some((*font_size, *font_weight)),
+                    _ => None,
+                })
+                .expect("the name being typed is not drawn")
+        };
+        assert_eq!(drawn(&app), (ROOT_FONT_SIZE, FontWeightHint::Bold));
+        app.zoom_in();
+        app.zoom_in();
+        assert!(app.zoom > 1.4, "control: zoomed in");
+        assert_eq!(
+            drawn(&app),
+            (ROOT_FONT_SIZE * app.zoom, FontWeightHint::Bold),
+            "drawn at the old zoom"
+        );
+        let (field, area) = app.renaming_box().expect("the box");
+        let eight = text::measure(&name[..8], ROOT_FONT_SIZE * app.zoom, FontWeightHint::Bold);
+        app.handle_event(&press(Key::Home));
+        press_at(&mut app, area.x + eight + 0.5, field.y + field.h / 2.0);
+        assert_eq!(
+            app.edit_buffer.input().cursor().byte(),
+            8,
+            "the press was measured at the old zoom"
+        );
+        app.reset_view();
+        assert_eq!(
+            drawn(&app),
+            (ROOT_FONT_SIZE, FontWeightHint::Bold),
+            "drawn at the zoom before the view was reset"
+        );
+    }
+
     /// **A node's text being typed edits at a caret**: the arrows, Home and
     /// End move it, typing goes where it is, Delete deletes at it, Ctrl+A,
     /// C, X and V select, copy, cut and paste, a press puts it where it
@@ -8214,10 +8198,16 @@ mod tests {
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Right));
         app.handle_event(&typing("r"));
-        assert_eq!(app.edit_buffer, "Process", "the caret did not move");
+        assert_eq!(app.edit_buffer.text(), "Process", "the caret did not move");
         let (field, area) = app.renaming_box().expect("the box");
-        let at =
-            area.x + text::caret_x("Process", text::TextCursor::from(2), area.size, area.weight);
+        let size = NODE_FONT_SIZE * app.zoom;
+        let at = area.x
+            + text::caret_x(
+                "Process",
+                text::TextCursor::from(2),
+                size,
+                FontWeightHint::Regular,
+            );
         let carets = carets_in(&app, field);
         assert_eq!(carets.len(), 1, "one caret in the box");
         assert!(
@@ -8229,7 +8219,7 @@ mod tests {
         app.handle_event(&typing(" step"));
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Delete));
-        assert_eq!(app.edit_buffer, "rocess step", "Delete at the caret");
+        assert_eq!(app.edit_buffer.text(), "rocess step", "Delete at the caret");
         app.handle_event(&press_ctrl(Key::A));
         assert!(
             drawn_selected(&app, "rocess step"),
@@ -8237,10 +8227,10 @@ mod tests {
         );
         app.handle_event(&press_ctrl(Key::C));
         app.handle_event(&press_ctrl(Key::X));
-        assert_eq!(app.edit_buffer, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.edit_buffer.text(), "", "Ctrl+A and Ctrl+X");
         app.handle_event(&typing("P"));
         app.handle_event(&press_ctrl(Key::V));
-        assert_eq!(app.edit_buffer, "Process step", "Ctrl+C or Ctrl+V");
+        assert_eq!(app.edit_buffer.text(), "Process step", "Ctrl+C or Ctrl+V");
 
         // A press past the end of the text puts the caret at its end.
         app.handle_event(&press(Key::Home));
@@ -8258,8 +8248,8 @@ mod tests {
         );
     }
 
-    /// **A node's text starts with the caret after it**, whatever the last
-    /// node renamed left in the editor.
+    /// **A node's text starts with the caret after it**, wherever the last
+    /// node renamed left its caret.
     #[test]
     fn a_nodes_text_starts_with_the_caret_after_it() {
         let mut app = MindMapApp::new();
@@ -8344,11 +8334,17 @@ mod tests {
         app.handle_event(&typing("lpha"));
         app.handle_event(&press(Key::Home));
         app.handle_event(&typing("A"));
-        assert_eq!(app.search_query, "Alpha", "the caret did not move");
+        assert_eq!(app.search_query.text(), "Alpha", "the caret did not move");
         assert_eq!(app.search_results, vec![alpha]);
         let search = MindMapApp::search_box_rect(app.search_bar_rect());
         let area = MindMapApp::query_text(search);
-        let at = area.x + text::caret_x("Alpha", text::TextCursor::from(1), area.size, area.weight);
+        let at = area.x
+            + text::caret_x(
+                "Alpha",
+                text::TextCursor::from(1),
+                QUERY_TEXT_SIZE,
+                FontWeightHint::Regular,
+            );
         let carets = carets_in(&app, search);
         assert_eq!(carets.len(), 1, "one caret in the box");
         assert!(
@@ -8360,13 +8356,17 @@ mod tests {
         assert!(app.show_search, "Ctrl+F put the bar away");
         assert!(drawn_selected(&app, "Alpha"), "the selection is not drawn");
         app.handle_event(&typing("Beta"));
-        assert_eq!(app.search_query, "Beta", "Ctrl+F did not select the query");
+        assert_eq!(
+            app.search_query.text(),
+            "Beta",
+            "Ctrl+F did not select the query"
+        );
         assert_eq!(app.search_results, vec![beta]);
         app.handle_event(&press_ctrl(Key::A));
         app.handle_event(&press_ctrl(Key::X));
-        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.search_query.text(), "", "Ctrl+A and Ctrl+X");
         app.handle_event(&press_ctrl(Key::V));
-        assert_eq!(app.search_query, "Beta", "Ctrl+X took nothing");
+        assert_eq!(app.search_query.text(), "Beta", "Ctrl+X took nothing");
 
         // A press past the end of the query puts the caret at its end.
         app.handle_event(&press(Key::Home));
@@ -8376,7 +8376,8 @@ mod tests {
         );
         app.handle_event(&press(Key::Backspace));
         assert_eq!(
-            app.search_query, "Bet",
+            app.search_query.text(),
+            "Bet",
             "the press did not put the caret at the end"
         );
 
@@ -8389,7 +8390,7 @@ mod tests {
             nodes,
             "a key in the query reached the map's"
         );
-        assert_eq!(app.search_query, "Bet");
+        assert_eq!(app.search_query.text(), "Bet");
     }
 
     /// **A press on the find bar is the bar's**: off its query's box it
@@ -8427,8 +8428,8 @@ mod tests {
     }
 
     /// **A box edits the text it shows**, however the text came to be in
-    /// it: its editor is loaded from the box whenever a key finds the two
-    /// apart, or finds it holding the other box's text.
+    /// it: what is put there from outside is what a key then edits, in that
+    /// box and not the other.
     #[test]
     fn a_box_edits_the_text_it_shows() {
         let mut app = MindMapApp::new();
@@ -8437,14 +8438,19 @@ mod tests {
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Enter));
         app.handle_event(&press_ctrl(Key::F));
-        app.search_query = String::from("ab");
+        app.search_query.set_text("ab");
         app.handle_event(&typing("!"));
         assert_eq!(
-            app.search_query, "ab!",
+            app.search_query.text(),
+            "ab!",
             "the query was typed at the node's caret"
         );
-        app.search_query = String::from("cd");
+        app.search_query.set_text("cd");
         app.handle_event(&typing("?"));
-        assert_eq!(app.search_query, "cd?", "the key edited another text");
+        assert_eq!(
+            app.search_query.text(),
+            "cd?",
+            "the key edited another text"
+        );
     }
 }

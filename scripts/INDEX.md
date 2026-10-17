@@ -27,7 +27,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bash-spike/syms.sh` | Spike helper: what does SlateOS's libc.a define, and what does bash need? |
 | `scripts/bashprobe.py` | Faithful transport to real bash, plus an arity-exact word probe. |
 | `scripts/bc-diff.sh` | Differential test: our bc against Ubuntu 24.04's, side by side in WSL. |
-| `scripts/bc-tables.py` | Write `userspace/bc/src/tables.rs`: the parse tables of GNU bc 1.07.1's |
+| `scripts/bc-tables.py` | Write `userspace/gnubc/src/tables.rs`: the parse tables of GNU bc 1.07.1's |
 | `scripts/bench-history.py` | Record and diff the kernel micro-benchmark scorecard across boots. |
 | `scripts/binutils-spike/run.sh` | Cross-compile GNU binutils (as, ld, ar, nm, objdump ...) and link them against SlateOS's libc.a. |
 | `scripts/binutils-spike/slatelink.sh` | Link binutils' built objects against the CURRENT libc.a, and stage its programs. |

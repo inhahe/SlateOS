@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Write `userspace/bc/src/tables.rs`: the parse tables of GNU bc 1.07.1's
+"""Write `userspace/gnubc/src/tables.rs`: the parse tables of GNU bc 1.07.1's
 generated parser (`bc/bc.c`, Bison 3.0.2, as Ubuntu's patched source ships
 it), so that the port parses -- and recovers from syntax errors -- exactly as
 the C parser does.

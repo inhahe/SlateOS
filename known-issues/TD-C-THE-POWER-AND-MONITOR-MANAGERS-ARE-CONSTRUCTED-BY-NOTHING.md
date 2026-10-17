@@ -55,5 +55,13 @@ delays on `watch_idle`, the lid, buttons and battery the day lane A
 delivers those events (a request to lane A for a power-event channel); the
 screen saver, unspecified, goes unless the operator wants one.
 
+**For the screen-off and sleep delays, one thing to settle first.**
+`EventLoop::watch_idle(window, after)` holds one delay per window, and the
+session's lock already claims the panel's (`idle_lock::lock_after`). A
+second delay could be claimed on another of the shell's windows -- if
+`Event::SessionIdle` arrives tagged with the window whose watch fired; the
+event itself carries nothing (`gui/remote/src/input.rs`, tag `0x0D`). If it
+is not tagged, the call needs a delay id or a list from lane F.
+
 **If never fixed:** 5,000 lines that read as features the desktop has, and
 a battery icon that can only ever say there is no battery.

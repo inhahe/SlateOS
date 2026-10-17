@@ -4006,7 +4006,7 @@ word; text inside them that says "lane C" is history.
   toolkit's code editor serves them better
   (`requests/c-e-the-toolkit-has-a-code-editor.md`).
 
-- `[ ]` `[E]` **One search box, not twenty-four copies of it** -- 2026-10-16,
+- `[-]` `[E]` **One search box, not twenty-four copies of it** -- 2026-10-16,
   from the Opus review of `7e588d1a3..ff34c8565`. Twenty-four applications
   (calendar, charmap, devicemanager, ebook, email, emojipicker, filediff,
   finance, flashcards, logviewer, musicplayer, notes, pdfviewer, podcast,
@@ -4023,6 +4023,18 @@ word; text inside them that says "lane C" is history.
   the box took the key and whether the search changed, a key it does not
   answer being the window's; `press(rect, x)`; `draw`; and the menu's rows
   -- and the twenty-four moved to it, each with its tests kept.
+  **2026-10-17:** `textline::SearchBox` is in (`apps/textline/src/search.rs`:
+  `key`, `set_text`, `clear`, `select_all`, `caret_to_end`, `press`,
+  `edit_menu`, `menu_row`, `draw`), and nineteen have moved: calendar,
+  devicemanager, ebook, email, emojipicker, finance, flashcards,
+  musicplayer, notes, podcast, procexplorer, radio, reminders, snippets,
+  sysinfo, sysmonitor, systemrestore, torrent -- and charmap's copies now
+  go on the program's clipboard, the box itself still to move. Left, each
+  with a shape the others did not have: charmap, whose Ctrl+C is the box's
+  only while part of the query is selected; filediff, logviewer, pdfviewer
+  and undelete, which keep the query in a model struct their tests build
+  (`SearchState`, a filter) rather than in the window; and rssreader, whose
+  search box and entry box share one editing and drawing path.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

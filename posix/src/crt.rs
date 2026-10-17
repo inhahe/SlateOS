@@ -746,9 +746,17 @@ pub unsafe extern "C" fn __libc_start_main(
     main: extern "C" fn(i32, *const *const u8, *const *const u8) -> i32,
     arg_count: i32,
     arg_vec: *const *const u8,
-    _init: usize,      // Unused (glibc compat).
-    _fini: usize,      // Unused (glibc compat).
-    _rtld_fini: usize, // Unused (glibc compat).
+    _init: usize, // Unused (glibc compat).
+    _fini: usize, // Unused (glibc compat).
+    // glibc registers this with `atexit` -- the dynamic loader's finaliser,
+    // which System V's x86-64 entry hands over in `rdx`, a function pointer
+    // or zero. Ignoring it is load-bearing: this library's `_start` passes 0,
+    // but a glibc `crt1.o` passes the entry `rdx` on, which held the user
+    // data selector (0x1B) until the kernel zeroed every register but `rsp`
+    // at ring-3 entry (b6aa3df7d, scripts/check-ring3-entry-regs.py).
+    // Calling it means trusting that, for every way a process starts
+    // (requests/a-d-rdx-at-process-entry-violates-the-sysv-atexit-contract.md).
+    _rtld_fini: usize,
     _stack_end: *mut u8,
 ) -> ! {
     // Install main-thread ELF TLS first of all.  The kernel gives a native

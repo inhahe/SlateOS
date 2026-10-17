@@ -28891,7 +28891,10 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
     };
 
     // A memfd is a file (design-decisions §1573), open read-write: the fd
-    // table keeps, forks and closes it as any file's.
+    // table keeps, forks and closes it as any file's, and the process holds
+    // its handle as it holds an open's (`sys_openat`), which the file calls
+    // that take a handle check (`require_file_handle_owner`).
+    pcb::register_ipc_handle(caller, crate::cap::ResourceType::File, raw_handle);
     let mut entry = crate::proc::linux_fd::FdEntry::file(raw_handle, oflags::O_RDWR);
     if (flags & MFD_CLOEXEC) != 0 {
         entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
@@ -28901,7 +28904,9 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
         Ok(fd) => SyscallResult::ok(i64::from(fd)),
         Err(e) => {
             // Install failed (e.g. table full): the handle is the file's only
-            // reference, and its close ends the file.
+            // reference, and its close ends the file. A close fails only for
+            // a handle already gone.
+            pcb::deregister_ipc_handle(caller, crate::cap::ResourceType::File, raw_handle);
             let _ = crate::fs::handle::close(raw_handle);
             linux_err(linux_errno_for(e))
         }

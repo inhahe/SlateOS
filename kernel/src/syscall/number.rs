@@ -6469,9 +6469,12 @@ pub const SYS_DEVICE_CLOSE: u64 = 1123;
 /// whatever its name now. `seals` in Linux's `F_SEAL_*` bits: `0x01`
 /// `F_SEAL_SEAL` (no more seals), `0x02` `F_SEAL_SHRINK`, `0x04`
 /// `F_SEAL_GROW`, `0x08` `F_SEAL_WRITE` (no write, and here no truncate
-/// either), `0x20` `F_SEAL_EXEC` (no change to an execute bit). Seals add up
-/// and are never removed; they end with the file. The VFS refuses what they
-/// forbid with `NotPermitted`, on every route to the file.
+/// either), `0x20` `F_SEAL_EXEC` (no change to an execute bit); for a memfd
+/// alone, `0x10` `F_SEAL_FUTURE_WRITE` (no new write or writable mapping).
+/// A memfd's seals follow Linux's rules exactly (design-decisions 1573): its
+/// `F_SEAL_WRITE` leaves the size to `F_SEAL_SHRINK` and `F_SEAL_GROW`.
+/// Seals add up and are never removed; they end with the file. The VFS
+/// refuses what they forbid with `NotPermitted`, on every route to the file.
 ///
 /// The handle must be the caller's and open for writing -- Linux's rule for
 /// `F_ADD_SEALS` -- else `NotPermitted`; any other bit, or none,

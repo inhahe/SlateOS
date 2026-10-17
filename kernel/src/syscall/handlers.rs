@@ -16861,21 +16861,13 @@ pub fn sys_fs_link_handle(args: &SyscallArgs) -> SyscallResult {
 
 // Seals on a file (SYS_FS_ADD_SEALS / SYS_FS_GET_SEALS, 1124-1125)
 
-/// Linux's `F_SEAL_*` bits, which the door speaks, as `fs::sealing`'s flags:
-/// `None` for a bit Linux does not define.
-fn seals_from_linux(bits: u64) -> Option<crate::fs::sealing::SealFlags> {
-    crate::fs::sealing::SealFlags::from_linux(bits)
-}
-
-/// `fs::sealing`'s flags as Linux's `F_SEAL_*` bits.
-fn seals_to_linux(flags: crate::fs::sealing::SealFlags) -> u64 {
-    flags.to_linux()
-}
-
 /// `SYS_FS_ADD_SEALS(handle, seals)` (1124). See the number's doc.
 pub fn sys_fs_add_seals(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
-    let Some(seals) = seals_from_linux(args.arg1).filter(|s| !s.is_empty()) else {
+    // The door speaks Linux's `F_SEAL_*` bits.
+    let Some(seals) =
+        crate::fs::sealing::SealFlags::from_linux(args.arg1).filter(|s| !s.is_empty())
+    else {
         return SyscallResult::err(KernelError::InvalidArgument);
     };
     if let Err(e) = require_file_handle_owner(handle) {
@@ -16905,7 +16897,7 @@ pub fn sys_fs_add_seals(args: &SyscallArgs) -> SyscallResult {
         None => crate::fs::sealing::add_seals_to(id, &path, seals),
     };
     match added {
-        Ok(all) => SyscallResult::ok(i64::try_from(seals_to_linux(all)).unwrap_or(0)),
+        Ok(all) => SyscallResult::ok(i64::try_from(all.to_linux()).unwrap_or(0)),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -16923,7 +16915,7 @@ pub fn sys_fs_get_seals(args: &SyscallArgs) -> SyscallResult {
     match file.identity() {
         Ok((id, path)) => {
             let seals = crate::fs::sealing::seals_of(id, &path);
-            SyscallResult::ok(i64::try_from(seals_to_linux(seals)).unwrap_or(0))
+            SyscallResult::ok(i64::try_from(seals.to_linux()).unwrap_or(0))
         }
         Err(e) => SyscallResult::err(e),
     }

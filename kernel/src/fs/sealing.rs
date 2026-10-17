@@ -72,7 +72,6 @@ use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use super::path::{Path, PathBuf};
 use crate::error::{KernelError, KernelResult};
 use crate::serial_println;
-use crate::sync::PreemptSpinMutex;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -281,9 +280,12 @@ struct SealEntry {
     sealed_at_ns: u64,
 }
 
-/// Sealed file table.
-static SEAL_TABLE: PreemptSpinMutex<Vec<SealEntry>> =
-    PreemptSpinMutex::named(Vec::new(), b"SEAL_TABLE");
+/// Sealed file table. Not a leaf lock: a `WRITE` seal asks the page cache
+/// whether a mapping may write the file while it holds the table
+/// ([`add_seals_to`]), so lockdep orders the two (seal table, then page
+/// cache).
+static SEAL_TABLE: crate::sync::Mutex<Vec<SealEntry>> =
+    crate::sync::Mutex::named(Vec::new(), b"SEAL_TABLE");
 
 /// How many entries [`SEAL_TABLE`] holds, kept beside it so a write can ask
 /// [`any_sealed`] without taking the lock. Written under the lock after each
@@ -341,10 +343,11 @@ pub fn seals_of_file(id: crate::fs::vfs::FileId) -> SealFlags {
 /// a memfd from another file, which answers `EINVAL`, as on Linux. Apart
 /// from [`SEAL_TABLE`] because their rules are Linux's ([`SealFlags::MEMFD`]),
 /// and because a program may have hundreds: a map, not that table's scan,
-/// and none of its [`MAX_SEALED_FILES`].
-static MEMFD_SEALS: PreemptSpinMutex<
+/// and none of its [`MAX_SEALED_FILES`]. Not a leaf lock, for the reason
+/// [`SEAL_TABLE`] is not one ([`memfd_add_seals`]).
+static MEMFD_SEALS: crate::sync::Mutex<
     alloc::collections::BTreeMap<crate::fs::vfs::FileId, SealFlags>,
-> = PreemptSpinMutex::named(alloc::collections::BTreeMap::new(), b"MEMFD_SEALS");
+> = crate::sync::Mutex::named(alloc::collections::BTreeMap::new(), b"MEMFD_SEALS");
 
 /// How many memfds carry a seal: [`any_sealed`]'s other half. Kept under
 /// [`MEMFD_SEALS`]'s lock.
@@ -499,8 +502,9 @@ static DENIED_OPS: AtomicU64 = AtomicU64::new(0);
 ///
 /// # Errors
 ///
-/// `InvalidArgument` for an empty path or no seals; `NotPermitted` once
-/// `SEAL` is set; `ResourceExhausted` past [`MAX_SEALED_FILES`].
+/// `InvalidArgument` for an empty path, no seals, or `FUTURE_WRITE`, which
+/// is a memfd's alone ([`memfd_add_seals`]); `NotPermitted` once `SEAL` is
+/// set; `ResourceExhausted` past [`MAX_SEALED_FILES`].
 pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<SealFlags> {
     let path = path.as_ref();
     // Derived before the lock: `Vfs::file_identity` calls into the VFS,
@@ -523,7 +527,9 @@ pub fn add_seals_to(
     path: &Path,
     new_seals: SealFlags,
 ) -> KernelResult<SealFlags> {
-    if path.is_empty() || new_seals.is_empty() {
+    // `FUTURE_WRITE` is Linux's, for a memfd (design-decisions §1573); a
+    // file in general has `WRITE`, which here freezes its contents outright.
+    if path.is_empty() || new_seals.is_empty() || new_seals.contains(SealFlags::FUTURE_WRITE) {
         return Err(KernelError::InvalidArgument);
     }
 

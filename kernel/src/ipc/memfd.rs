@@ -27,7 +27,6 @@ use crate::error::KernelResult;
 use crate::fs::handle::OpenFlags;
 use crate::fs::path::PathBuf;
 use crate::fs::sealing::SealFlags;
-use crate::sync::PreemptSpinMutex as Mutex;
 use alloc::vec::Vec;
 
 /// How `memfd_create`'s flags shape the file.
@@ -42,17 +41,16 @@ pub struct CreateFlags {
 }
 
 /// The kernel's memfs that memfds are made on: its mount id
-/// ([`crate::fs::Vfs::mount_internal`]), 0 until the first memfd.
-static MOUNT: Mutex<u64> = Mutex::new(0);
+/// ([`crate::fs::Vfs::mount_internal`]), mounted by the first memfd. A
+/// `Once`, not a spin lock held across the mount: the mount takes the VFS's
+/// own locks, which nest under no leaf lock.
+static MOUNT: spin::Once<u64> = spin::Once::new();
 
 /// The memfd memfs's mount, mounted at the first call.
 fn mount() -> u64 {
-    let mut mount = MOUNT.lock();
-    if *mount == 0 {
-        *mount =
-            crate::fs::Vfs::mount_internal(alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()));
-    }
-    *mount
+    *MOUNT.call_once(|| {
+        crate::fs::Vfs::mount_internal(alloc::boxed::Box::new(crate::fs::memfs::MemFs::new()))
+    })
 }
 
 /// The name a memfd made as `name` is shown under: `/memfd:<name> (deleted)`.

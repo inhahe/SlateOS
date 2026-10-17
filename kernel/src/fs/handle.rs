@@ -1129,7 +1129,7 @@ pub fn read_precheck(handle: u64, at: Option<u64>, len: usize) -> KernelResult<b
 ///
 /// As above.
 pub fn write_precheck(handle: u64, len: usize) -> KernelResult<Option<usize>> {
-    let path = {
+    let (held, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
         if file.is_directory {
@@ -1138,8 +1138,16 @@ pub fn write_precheck(handle: u64, len: usize) -> KernelResult<Option<usize>> {
         if !file.flags.is_writable() {
             return Err(KernelError::InvalidHandle);
         }
-        file.path.clone()
+        (file.object.is_some(), file.path.clone())
     };
+    // A held file is a regular file (`Vfs::open_object`), whose write reads
+    // what it is given: the sinks are device nodes. Asked by name, an
+    // unnamed or renamed file would be asked about whatever the name finds
+    // now -- for a memfd, nothing, and a refusal once file tags or ACLs make
+    // the name's access check look it up.
+    if held {
+        return Ok(None);
+    }
     match crate::fs::Vfs::write_without_data_resolved(&path) {
         Some(Ok(())) => Ok(Some(len)),
         Some(Err(e)) => Err(e),

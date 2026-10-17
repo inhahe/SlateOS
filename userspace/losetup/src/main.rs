@@ -342,11 +342,6 @@ fn short_name(arg0: &OsStr) -> Vec<u8> {
     bytes.get(start..).unwrap_or_default().to_vec()
 }
 
-/// Bytes shown in a diagnostic: upstream's text, unprintable bytes escaped.
-fn shown(text: &[u8]) -> String {
-    escape_unprintable(text)
-}
-
 /// `column_name_to_id (name, namesz)`: a column by its whole name, in any
 /// case. Unknown, it is reported with the rest of the list after it, as
 /// upstream's C string runs on to the list's end.
@@ -356,7 +351,10 @@ fn column_name_to_id(name: &[u8], rest: &[u8], short: &[u8]) -> Option<Col> {
         .find(|i| i.name.as_bytes().eq_ignore_ascii_case(name))
         .map(|i| i.id);
     if found.is_none() {
-        warnx(short, &format!("unknown column: {}", shown(rest)));
+        warnx(
+            short,
+            &format!("unknown column: {}", escape_unprintable(rest)),
+        );
     }
     found
 }
@@ -421,7 +419,7 @@ fn parse_switch(arg: &[u8], errmesg: &str) -> Result<u64, String> {
     match arg {
         b"on" => Ok(1),
         b"off" => Ok(0),
-        _ => Err(format!("{errmesg}: '{}'", shown(arg))),
+        _ => Err(format!("{errmesg}: '{}'", escape_unprintable(arg))),
     }
 }
 
@@ -447,12 +445,12 @@ fn warn_size_message(
     if size < 512 {
         Some(format!(
             "{}: Warning: file is smaller than 512 bytes; the loop device may be useless or invisible for system tools.",
-            shown(filename)
+            escape_unprintable(filename)
         ))
     } else if !size.is_multiple_of(512) {
         Some(format!(
             "{}: Warning: file does not fit into a 512-byte sector; the end of the file will be ignored.",
-            shown(filename)
+            escape_unprintable(filename)
         ))
     } else {
         None
@@ -535,7 +533,7 @@ impl Losetup {
         stderr_write(
             format!(
                 "Try '{} --help' for more information.\n",
-                shown(&self.short)
+                escape_unprintable(&self.short)
             )
             .as_bytes(),
         );
@@ -674,7 +672,10 @@ impl Losetup {
             Ok(()) => 0,
             Err(e) => {
                 let device = lc.device().unwrap_or_default().to_vec();
-                self.warn(&format!("{}: detach failed", shown(&device)), e);
+                self.warn(
+                    &format!("{}: detach failed", escape_unprintable(&device)),
+                    e,
+                );
                 -1
             }
         }
@@ -851,7 +852,7 @@ impl Losetup {
         blocksize: u64,
     ) -> Result<i32, Exit> {
         let hasdev = lc.has_device();
-        let shown_file = shown(file);
+        let shown_file = escape_unprintable(file);
         // "losetup --find --noverlap file.img"
         if !hasdev && nooverlap {
             match lc.find_overlap(file, offset, sizelimit) {
@@ -938,7 +939,7 @@ impl Losetup {
                     Ok(()) => shown_file.clone(),
                     Err(e) => {
                         errno = e;
-                        shown(lc.device().unwrap_or_default())
+                        escape_unprintable(lc.device().unwrap_or_default())
                     }
                 }
             } else {
@@ -979,7 +980,8 @@ impl Losetup {
                 Err(e) => {
                     // glibc names the program by argv[0] as given.
                     stderr_write(
-                        format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes(),
+                        format!("{}: {}\n", escape_unprintable(&os_bytes(arg0)), e.sentence)
+                            .as_bytes(),
                     );
                     return Err(self.errtryhelp());
                 }
@@ -1029,18 +1031,20 @@ impl Losetup {
                     b'c' => {
                         act = Act::SetCapacity;
                         if let Err(e) = Self::use_device(&mut lc, &argb) {
-                            return Err(
-                                self.err(&format!("{}: failed to use device", shown(&argb)), e)
-                            );
+                            return Err(self.err(
+                                &format!("{}: failed to use device", escape_unprintable(&argb)),
+                                e,
+                            ));
                         }
                     }
                     b'r' => lo_flags |= LO_FLAGS_READ_ONLY,
                     b'd' => {
                         act = Act::Delete;
                         if let Err(e) = Self::use_device(&mut lc, &argb) {
-                            return Err(
-                                self.err(&format!("{}: failed to use device", shown(&argb)), e)
-                            );
+                            return Err(self.err(
+                                &format!("{}: failed to use device", escape_unprintable(&argb)),
+                                e,
+                            ));
                         }
                     }
                     b'D' => act = Act::DeleteAll,
@@ -1126,7 +1130,10 @@ impl Losetup {
             }
             let dev = ops.next().unwrap_or_default();
             if let Err(e) = Self::use_device(&mut lc, &dev) {
-                return Err(self.err(&format!("{}: failed to use device", shown(&dev)), e));
+                return Err(self.err(
+                    &format!("{}: failed to use device", escape_unprintable(&dev)),
+                    e,
+                ));
             }
         }
         if act == Act::None {
@@ -1137,7 +1144,10 @@ impl Losetup {
             };
             // "don't use is_loopdev() here, the device does not have exist yet"
             if let Err(e) = lc.set_device(Some(&dev)) {
-                return Err(self.err(&format!("{}: failed to use device", shown(&dev)), e));
+                return Err(self.err(
+                    &format!("{}: failed to use device", escape_unprintable(&dev)),
+                    e,
+                ));
             }
             let Some(f) = ops.next() else {
                 return Err(self.errx("no file specified"));
@@ -1192,7 +1202,10 @@ impl Losetup {
                 let mut res = self.delete_loop(&mut lc);
                 for dev in ops {
                     if let Err(e) = Self::use_device(&mut lc, &dev) {
-                        self.warn(&format!("{}: failed to use device", shown(&dev)), e);
+                        self.warn(
+                            &format!("{}: failed to use device", escape_unprintable(&dev)),
+                            e,
+                        );
                     }
                     res = res.saturating_add(self.delete_loop(&mut lc));
                 }
@@ -1229,7 +1242,7 @@ impl Losetup {
                     Ok(()) => 0,
                     Err(e) => {
                         let dev = lc.device().unwrap_or_default().to_vec();
-                        self.warn(&shown(&dev), e);
+                        self.warn(&escape_unprintable(&dev), e);
                         -1
                     }
                 }
@@ -1263,7 +1276,7 @@ impl Losetup {
             Ok(()) => 0,
             Err(e) => {
                 let dev = lc.device().unwrap_or_default().to_vec();
-                self.warn(&format!("{}: {what}", shown(&dev)), e);
+                self.warn(&format!("{}: {what}", escape_unprintable(&dev)), e);
                 -1
             }
         }

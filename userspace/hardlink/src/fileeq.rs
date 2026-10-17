@@ -116,6 +116,39 @@ pub struct FileEq {
     filesiz: u64,
     blocksmax: u64,
     method: &'static Method,
+    /// `buf_a` and `buf_b`: the two buffers `memcmp`'s blocks are read
+    /// into, made when first needed and handed out in turn -- one for each
+    /// side of a comparison.
+    bufs: [Vec<u8>; 2],
+    /// `buf_last`: the one handed out last.
+    last: usize,
+}
+
+/// Where one side's bytes of a comparison are: what `get_cmp_data`'s
+/// `block` points at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cmp {
+    /// The file's first 32 bytes, kept in its [`Data`].
+    Intro,
+    /// The first `.1` bytes of buffer `.0`.
+    Buf(usize, usize),
+    /// `.1` bytes of the file's digests, from `.0`.
+    Digest(usize, usize),
+    /// Nothing: the file's end.
+    End,
+}
+
+/// `buf` made `len` bytes long, if it is not -- or `None` where the memory
+/// cannot be had, as upstream's `malloc` answers `NULL` and the comparison
+/// then says "not equal" rather than the program ending.
+fn sized(buf: &mut Vec<u8>, len: usize) -> Option<()> {
+    if buf.len() != len {
+        let mut v = Vec::new();
+        v.try_reserve_exact(len).ok()?;
+        v.resize(len, 0);
+        *buf = v;
+    }
+    Some(())
 }
 
 impl FileEq {
@@ -129,13 +162,29 @@ impl FileEq {
         } else {
             Some(Hash::open(m.kname).ok()?)
         };
-        Some(FileEq {
+        Some(FileEq::new(m, hash))
+    }
+
+    /// `ul_fileeq_init (eq, "memcmp")`, which needs nothing set up and so
+    /// cannot fail.
+    pub fn memcmp() -> FileEq {
+        let m = METHODS
+            .iter()
+            .find(|m| m.id == Id::Memcmp)
+            .unwrap_or(&METHODS[0]);
+        FileEq::new(m, None)
+    }
+
+    fn new(method: &'static Method, hash: Option<Hash>) -> FileEq {
+        FileEq {
             hash,
             readsiz: 0,
             filesiz: 0,
             blocksmax: 0,
-            method: m,
-        })
+            method,
+            bufs: [Vec::new(), Vec::new()],
+            last: 0,
+        }
     }
 
     /// `ul_fileeq_set_size (eq, filesiz, readsiz, memsiz)`: the files to be
@@ -183,6 +232,17 @@ impl FileEq {
         self.blocksmax = per(aligned, readsiz);
     }
 
+    /// `get_buffer (eq)`: the other of the two block buffers, `readsiz`
+    /// bytes long -- `None` where the memory cannot be had.
+    fn get_buffer(&mut self) -> Option<usize> {
+        let readsiz = self.readsiz;
+        for buf in &mut self.bufs {
+            sized(buf, readsiz)?;
+        }
+        self.last = if self.last == 1 { 0 } else { 1 };
+        Some(self.last)
+    }
+
     /// `get_cached_offset (eq, data)`: where in the file the next block
     /// starts, given what has been read of it.
     fn cached_offset(&self, data: &Data) -> u64 {
@@ -226,57 +286,60 @@ impl FileEq {
         data.is_eof = false;
     }
 
-    /// `read_block (eq, data, n, &block)`: the file's next block, or empty
-    /// at its end; `None` for an error.
-    fn read_block(&self, data: &mut Data, n: u64) -> Option<Vec<u8>> {
+    /// `read_block (eq, data, n, &block)`: the file's next block, read into
+    /// one of the two buffers -- nothing at its end; `None` for an error.
+    fn read_block(&mut self, data: &mut Data, n: u64) -> Option<Cmp> {
         if data.is_eof || n > self.blocksmax {
-            return Some(Vec::new());
+            return Some(Cmp::End);
         }
         let off = self.get_fd(data)?;
-        let mut block = vec![0u8; self.readsiz];
+        let i = self.get_buffer()?;
         let fd = data.file.as_ref()?.as_raw_fd();
-        let rsz = ulallio::read_all(fd, &mut block).ok()?;
-        block.truncate(rsz);
+        let rsz = ulallio::read_all(fd, self.bufs.get_mut(i)?).ok()?;
         data.nblocks = data.nblocks.saturating_add(1);
         if rsz == 0 || off.saturating_add(rsz as u64) >= self.filesiz {
             data.is_eof = true;
             data.close_file();
         }
-        Some(block)
+        Some(Cmp::Buf(i, rsz))
     }
 
     /// `get_digest (eq, data, n, &block)`: the digest of the file's block
     /// `n`, from those already made or by sending the next block to the
-    /// kernel; empty at the file's end, `None` for an error.
-    fn get_digest(&self, data: &mut Data, n: u64) -> Option<Vec<u8>> {
+    /// kernel; nothing at the file's end, `None` for an error.
+    fn get_digest(&self, data: &mut Data, n: u64) -> Option<Cmp> {
         let digsiz = self.method.digsiz;
         if n > self.blocksmax {
-            return Some(Vec::new());
+            return Some(Cmp::End);
         }
         let at = usize::try_from(n).ok()?.saturating_mul(digsiz);
         // "return already cached if available"
         if usize::try_from(n).ok()? < data.nblocks.saturating_sub(1) {
-            return data
-                .blocks
-                .get(at..at.saturating_add(digsiz))
-                .map(<[u8]>::to_vec);
+            return Some(Cmp::Digest(at, digsiz));
         }
         if data.is_eof {
-            return Some(Vec::new());
+            return Some(Cmp::End);
         }
         let off = self.get_fd(data)?;
         if data.blocks.is_empty() {
             let max = usize::try_from(self.blocksmax).unwrap_or(0);
-            data.blocks = vec![0u8; max.saturating_mul(digsiz)];
+            sized(&mut data.blocks, max.saturating_mul(digsiz))?;
         }
         let hash = self.hash.as_ref()?;
         let fd = data.file.as_ref()?.as_raw_fd();
         let rsz = hash.send_file(fd, self.readsiz).ok()?;
         let off = off.saturating_add(rsz as u64);
-        if data.blocks.len() < at.saturating_add(digsiz) {
-            data.blocks.resize(at.saturating_add(digsiz), 0);
+        // Past what the sizes promised -- a file that grew: more room.
+        let end = at.saturating_add(digsiz);
+        if data.blocks.len() < end {
+            data.blocks
+                .try_reserve(end.saturating_sub(data.blocks.len()))
+                .ok()?;
+            data.blocks.resize(end, 0);
         }
-        let slot = data.blocks.get_mut(at..at.saturating_add(digsiz))?;
+        let slot = data.blocks.get_mut(at..end)?;
+        // `rsz = read_all (...)`: the digest's length, which the end test
+        // below then reads, as upstream's does.
         let got = ulallio::read_all(hash.op(), slot).ok();
         if got.is_some_and(|g| g > 0) {
             data.nblocks = data.nblocks.saturating_add(1);
@@ -285,14 +348,12 @@ impl FileEq {
             data.is_eof = true;
             data.close_file();
         }
-        data.blocks
-            .get(at..at.saturating_add(got?))
-            .map(<[u8]>::to_vec)
+        Some(Cmp::Digest(at, got?))
     }
 
     /// `get_intro (eq, data, &block)`: the file's first 32 bytes, read once
     /// and kept -- zeros past a shorter file's end.
-    fn get_intro(&self, data: &mut Data) -> Option<Vec<u8>> {
+    fn get_intro(&self, data: &mut Data) -> Option<Cmp> {
         if data.nblocks == 0 {
             self.get_fd(data)?;
             let mut intro = [0u8; INTROSIZ];
@@ -304,11 +365,11 @@ impl FileEq {
             data.intro = intro;
             data.nblocks = 1;
         }
-        Some(data.intro.to_vec())
+        Some(Cmp::Intro)
     }
 
     /// `get_cmp_data (eq, data, blockno, &block)`.
-    fn get_cmp_data(&self, data: &mut Data, blockno: u64) -> Option<Vec<u8>> {
+    fn get_cmp_data(&mut self, data: &mut Data, blockno: u64) -> Option<Cmp> {
         if blockno == 0 {
             return self.get_intro(data);
         }
@@ -320,10 +381,27 @@ impl FileEq {
         }
     }
 
+    /// The bytes `at` names, of `data` or of the buffers.
+    fn bytes<'a>(&'a self, data: &'a Data, at: Cmp) -> &'a [u8] {
+        match at {
+            Cmp::Intro => &data.intro,
+            Cmp::Buf(i, len) => self
+                .bufs
+                .get(i)
+                .and_then(|b| b.get(..len))
+                .unwrap_or_default(),
+            Cmp::Digest(start, len) => data
+                .blocks
+                .get(start..start.saturating_add(len))
+                .unwrap_or_default(),
+            Cmp::End => &[],
+        }
+    }
+
     /// `ul_fileeq (eq, a, b)`: whether the two files are the same, block by
     /// block -- and both read to their end, so that a file that grew or
     /// shrank since it was measured is not taken for its twin.
-    pub fn equal(&self, a: &mut Data, b: &mut Data) -> bool {
+    pub fn equal(&mut self, a: &mut Data, b: &mut Data) -> bool {
         if self.method.id == Id::Memcmp {
             self.memcmp_reset(a);
             self.memcmp_reset(b);
@@ -331,12 +409,13 @@ impl FileEq {
         let mut n = 0u64;
         loop {
             // b is read only when a could be.
-            let Some(da) = self.get_cmp_data(a, n) else {
+            let Some(ca) = self.get_cmp_data(a, n) else {
                 return false;
             };
-            let Some(db) = self.get_cmp_data(b, n) else {
+            let Some(cb) = self.get_cmp_data(b, n) else {
                 return false;
             };
+            let (da, db) = (self.bytes(a, ca), self.bytes(b, cb));
             if da.len() != db.len() {
                 return false;
             }
@@ -381,6 +460,9 @@ mod tests {
         b.close_file();
         let r2 = eq.equal(&mut a, &mut b);
         assert_eq!(r, r2, "the second round agrees");
+        for p in [pa, pb] {
+            std::fs::remove_file(std::ffi::OsStr::from_bytes(&p)).unwrap();
+        }
         Some(r)
     }
 

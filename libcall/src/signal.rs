@@ -35,6 +35,8 @@ pub use crate::{SIGCONT, SIGKILL, SIGPIPE, SIGSTOP, SIGTERM};
 
 /// Interrupt from the keyboard: Ctrl-C.
 pub const SIGINT: i32 = 2;
+/// `SIGUSR1`: the first signal left to programs' own use.
+pub const SIGUSR1: i32 = 10;
 /// Quit from the keyboard: Ctrl-\.
 pub const SIGQUIT: i32 = 3;
 /// A timer set by [`set_alarm_timer`] or [`alarm`] has run out.
@@ -798,7 +800,6 @@ mod tests {
     #[test]
     fn a_blocked_signal_waits_and_suspend_delivers_it() {
         use core::sync::atomic::{AtomicUsize, Ordering};
-        const SIGUSR1: i32 = 10;
         static RAN: AtomicUsize = AtomicUsize::new(0);
         extern "C" fn count(_sig: i32) {
             RAN.fetch_add(1, Ordering::SeqCst);

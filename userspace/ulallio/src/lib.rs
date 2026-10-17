@@ -89,13 +89,12 @@ mod tests {
     }
 
     #[test]
-    fn a_closed_descriptor_fails_with_its_errno() {
-        let (r, w) = libcall::fd::pipe().unwrap();
-        libcall::fd::close(r).unwrap();
-        libcall::fd::close(w).unwrap();
-        const EBADF: i32 = 9;
-        assert_eq!(read_all(r, &mut [0u8; 4]), Err(EBADF));
-        assert_eq!(write_all(w, b"x"), Err(EBADF));
-        assert_eq!(write_all(w, b""), Ok(()), "nothing to write is no write");
+    fn a_bad_descriptor_fails_with_its_errno() {
+        // -1, never a descriptor: one just closed could be reused at once by
+        // a test running beside this one.
+        use libcall::EBADF;
+        assert_eq!(read_all(-1, &mut [0u8; 4]), Err(EBADF));
+        assert_eq!(write_all(-1, b"x"), Err(EBADF));
+        assert_eq!(write_all(-1, b""), Ok(()), "nothing to write is no write");
     }
 }

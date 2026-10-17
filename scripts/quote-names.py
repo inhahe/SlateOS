@@ -330,7 +330,12 @@ def positional_name_arg(line: str) -> str | None:
 
 
 def quotes_around_placeholder(fmt: str) -> bool:
-    """Do hand-written single quotes wrap an actual format *placeholder*?
+    """Do hand-written single quotes wrap an actual format *placeholder*?"""
+    return quoted_placeholders(fmt) > 0
+
+
+def quoted_placeholders(fmt: str) -> int:
+    """How many format *placeholders* hand-written single quotes wrap.
 
     Scanned the way Rust scans a format string, because the naive test --
     "contains `'{` and contains `}'`" -- cannot tell a placeholder from a
@@ -345,8 +350,10 @@ def quotes_around_placeholder(fmt: str) -> bool:
     "declined" by hand on every pass. eventbridge-cli's help text has two.
 
     The scan skips a doubled brace and, at a real placeholder, asks only
-    whether the characters immediately around it are quotes.
+    whether the characters immediately around it are quotes. It stops at an
+    unterminated `{`, past which nothing is a placeholder it can read.
     """
+    count = 0
     i, n = 0, len(fmt)
     while i < n:
         c = fmt[i]
@@ -356,16 +363,16 @@ def quotes_around_placeholder(fmt: str) -> bool:
                 continue
             j = fmt.find("}", i)
             if j == -1:
-                return False
+                break
             if i and fmt[i - 1] == "'" and j + 1 < n and fmt[j + 1] == "'":
-                return True
+                count += 1
             i = j + 1
             continue
         if c == "}" and i + 1 < n and fmt[i + 1] == "}":
             i += 2
             continue
         i += 1
-    return False
+    return count
 
 
 def hand_written_quotes(line: str) -> bool:
@@ -382,7 +389,42 @@ def hand_written_quotes(line: str) -> bool:
     m = _MESSAGE_OPEN.search(line)
     if m is None:
         return False
-    return quotes_around_placeholder(line[m.end() :])
+    return quotes_around_placeholder(line[m.end() :]) and not _quotes_wrap_only_escaped(line)
+
+
+# An argument `escape_unprintable` has rendered: one line of printable bytes,
+# every control byte -- the newline among them -- spelt `\ooo`. Nothing in it
+# can end the line, so it cannot forge one, quotes or no quotes; and the
+# quotes around it are then a port's upstream text (util-linux's `'%s'`),
+# which `quoteaf_os` would change for every value rather than only for the
+# hostile ones. Only that function, by name: a wrapper around it is not
+# known to escape anything.
+_ESCAPED_ARG = re.compile(r"^&?escape_unprintable\([^()]*\)$")
+
+
+def _quotes_wrap_only_escaped(line: str) -> bool:
+    """Whether every hand-quoted placeholder on `line` is a positional slot
+    filled by `escape_unprintable(..)`.
+
+    False whenever the call cannot be read with certainty -- a quoted named
+    capture (`'{name}'`, which no argument fills), an argument list holding
+    a literal, a slot count that does not match the arguments -- so that an
+    uncertain site stays reported.
+    """
+    call = _macro_call(line)
+    if call is None:
+        return False
+    _start, _mac, fmt, args_text, _close = call
+    slots = _positional_slots(fmt)
+    args = _split_args(args_text)
+    if slots is None or args is None or len(slots) != len(args):
+        return False
+    quoted = [arg for is_quoted, arg in zip(slots, args) if is_quoted]
+    return (
+        len(quoted) == quoted_placeholders(fmt)
+        and bool(quoted)
+        and all(_ESCAPED_ARG.match(arg) for arg in quoted)
+    )
 
 
 def is_prose(line: str) -> bool:
@@ -1297,6 +1339,21 @@ def selftest() -> int:
     # Already routed through the helpers: the whole point, not a violation.
     expect("positional-quoted", 'eprintln!("cut: {}: {e}", quotef_os(path));', 0)
     expect("positional-quoted-a", 'eprintln!("cut: {}: {e}", quoteaf_os(path));', 0)
+    # Hand-written quotes around a value `escape_unprintable` has rendered: no
+    # byte of it can end the line, and the quotes are the port's upstream
+    # text (losetup's `parse_switch`, util-linux's `"%s: '%s'"`).
+    expect("quoted-escaped",
+           "_ => Err(format!(\"{errmesg}: '{}'\", escape_unprintable(arg))),", 0)
+    # ...but only that function by name, only when every quoted placeholder
+    # is such a slot, and only a slot: a named capture has no argument.
+    expect("quoted-wrapper-of-escape",
+           "_ => Err(format!(\"{errmesg}: '{}'\", shown(arg))),", 1)
+    expect("quoted-escaped-beside-raw",
+           "eprintln!(\"x: '{}' '{}'\", escape_unprintable(a), b);", 1)
+    expect("quoted-escaped-beside-named",
+           "eprintln!(\"x: '{}' '{name}'\", escape_unprintable(a));", 1)
+    expect("quoted-escaped-unquoted-raw",
+           "eprintln!(\"x: '{}' {}\", escape_unprintable(a), b);", 0)
     # `.display()` is what identifies a file name. Without that qualifier this
     # would flag every integer and enum in a `{}`, and a gate that cries wolf
     # gets switched off.

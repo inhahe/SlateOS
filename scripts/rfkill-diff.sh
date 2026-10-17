@@ -81,16 +81,7 @@ while True:
     data += chunk
 print(data.hex())
 EOF
-# listen.py PATH OUT: every datagram sent to the Unix socket PATH, a line
-# each, until it is killed.
-cat > "$DIFF_TMP/listen.py" <<'EOF'
-import os, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-s.bind(sys.argv[1])
-with open(sys.argv[2], "ab", buffering=0) as out:
-    while True:
-        out.write(s.recv(65536) + b"\n")
-EOF
+diff_devlog
 # noreader.py ARGV...: ARGV with stdout a pipe whose reader has gone.
 cat > "$DIFF_TMP/noreader.py" <<'EOF'
 import os, subprocess, sys
@@ -104,6 +95,7 @@ EOF
 cat > "$DIFF_TMP/inner.sh" <<'EOF'
 set -u
 here=$(dirname "$0")
+. "$here/devlog.sh"
 scen=$1 out=$2 err=$3 left=$4 how=$5; shift 5
 # The namespace came up: a side without this file compared nothing.
 : > "${out%.out}.ran"
@@ -152,9 +144,7 @@ case $scen in
     ;;
   *) echo "inner.sh: no scenario $scen" >&2; exit 92 ;;
 esac
-python3 "$here/listen.py" /dev/log "$log" < /dev/null > /dev/null 2>&1 &
-lp=$!
-for _ in $(seq 1 50); do [ -S /dev/log ] && break; sleep 0.02; done
+devlog_start "$log"
 # --foreground: timeout kills only the program, not itself as well, so the
 # shell has no `Killed` notice -- which names a PID -- to print. The python
 # helper is the one case with a child of its own, and needs the group killed.
@@ -170,7 +160,7 @@ case $how in
 esac
 rc=$?
 if [ "$scen" = nodev ]; then : > "$left"; else python3 "$here/drain.py" > "$left"; fi
-sleep 0.1; kill "$lp" 2>/dev/null; wait "$lp" 2>/dev/null
+devlog_stop
 exit "$rc"
 EOF
 
@@ -203,11 +193,11 @@ mask_times() {
 
 judge() {
   local o_rc=$1 g_rc=$2
-  # No `.ran`: the namespace never came up (`unshare` refused). 90-92: it
+  # No `.ran`: the namespace never came up (`unshare` refused). 90-93: it
   # could not be set up; 126 and 127: the program was never run -- either
   # way nothing was compared.
   if [ ! -f "$DIFF_TMP/ours.ran" ] || [ ! -f "$DIFF_TMP/gnu.ran" ] \
-     || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ]; } || { [ "$g_rc" -ge 90 ] && [ "$g_rc" -le 92 ]; } \
+     || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 93 ]; } || { [ "$g_rc" -ge 90 ] && [ "$g_rc" -le 93 ]; } \
      || [ "$o_rc" = 126 ] || [ "$o_rc" = 127 ] || [ "$g_rc" = 126 ] || [ "$g_rc" = 127 ]; then
     AGREED=broken
   elif cmp -s "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out" \
@@ -234,21 +224,21 @@ case_() {
     [ -f "$DIFF_TMP/gnu.$f" ] || : > "$DIFF_TMP/gnu.$f"
   done
   [ -n "${MASK:-}" ] && mask_times "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out"
-  # A logged line's timestamp, `Mmm dd hh:mm:ss`, differs between the sides.
-  sed -E -i 's/^(<[0-9]+>)[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} /\1TS /' \
-    "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log"
+  diff_mask_logged_time "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log"
   # The shell's notice of a program killed by a signal names its PID.
   sed -E -i 's/^(.*inner\.sh: line [0-9]+: +)[0-9]+ /\1PID /' "$DIFF_TMP/ours.err" "$DIFF_TMP/gnu.err"
   judge "$o_rc" "$g_rc"
   label="[$scen ${how}${COLS:+ $COLS cols}] rfkill $(printf '%q ' "$@")"
-  if [ -n "${WHY:-}" ]; then
+  # A case that never ran is broken whether or not it was expected to
+  # differ: nothing was compared.
+  if [ "$AGREED" = broken ]; then
+    broken=$((broken + 1)); printf 'BROKEN %s\n%s\n' "$label" "$REPORT"
+  elif [ -n "${WHY:-}" ]; then
     if [ "$AGREED" = yes ]; then
       fail=$((fail + 1)); printf 'XPASS %s (expected to differ: %s)\n' "$label" "$WHY"
     else
       xfail=$((xfail + 1)); [ -n "${VERBOSE:-}" ] && printf 'xfail %s (%s)\n%s\n' "$label" "$WHY" "$REPORT"
     fi
-  elif [ "$AGREED" = broken ]; then
-    broken=$((broken + 1)); printf 'BROKEN %s\n%s\n' "$label" "$REPORT"
   elif [ "$AGREED" = yes ]; then
     pass=$((pass + 1)); [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$label"
   else

@@ -1735,3 +1735,44 @@ then
 else
   DIFF_FOREIGN_LINK=
 fi
+
+# --- 9. a system log of the harness's own -------------------------------------
+# For a program that writes to the system log: each side runs in a mount
+# namespace whose /dev is a tmpfs, and logs to a socket bound there.
+#
+# `diff_devlog` writes `$DIFF_TMP/devlog.sh`, for a case script run inside
+# the namespace to source. Its `devlog_start LOG` listens on /dev/log and
+# appends each datagram to LOG, a line each; it exits the case with 93 when
+# the socket never appears, so a side that logged nowhere is not compared as
+# one that logged nothing. `devlog_stop` lets the last datagram land and
+# stops the listener.
+diff_devlog() {
+  cat > "$DIFF_TMP/devlog.py" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind(sys.argv[1])
+with open(sys.argv[2], "ab", buffering=0) as out:
+    while True:
+        out.write(s.recv(65536) + b"\n")
+PY
+  cat > "$DIFF_TMP/devlog.sh" <<'SH'
+devlog_start() {
+  python3 "$(dirname "$0")/devlog.py" /dev/log "$1" < /dev/null > /dev/null 2>&1 &
+  devlog_pid=$!
+  for _ in $(seq 1 100); do [ -S /dev/log ] && return 0; sleep 0.02; done
+  kill "$devlog_pid" 2>/dev/null
+  exit 93
+}
+devlog_stop() {
+  sleep 0.1
+  kill "$devlog_pid" 2>/dev/null
+  wait "$devlog_pid" 2>/dev/null
+}
+SH
+}
+
+# diff_mask_logged_time FILE...: a logged line's timestamp, `Mmm dd
+# hh:mm:ss` after the priority, differs between the sides.
+diff_mask_logged_time() {
+  sed -E -i 's/^(<[0-9]+>)[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} /\1TS /' "$@"
+}

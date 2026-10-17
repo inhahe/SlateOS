@@ -59,14 +59,26 @@ case $mode in
   nocaps) setpriv --bounding-set -all --inh-caps -all timeout -k 1 20 hardlink "$@" > "$out" 2> "$err" ;;
 esac
 rc=$?
-find . -mindepth 1 | LC_ALL=C sort | while IFS= read -r p; do
-  if [ -f "$p" ] && [ ! -L "$p" ]; then
-    stat -c '%n %F %i %h %s %a %Y' "$p"
-  else
-    stat -c '%n %F %i %h %s %a' "$p"
-  fi
-done > "$state"
+python3 "$(dirname "$0")/state.py" > "$state"
 exit "$rc"
+EOF
+
+# state.py: every entry below the current directory, a line each in byte
+# order -- its path, type, inode, link count, size and mode, and a regular
+# file's mtime. Each is read relative to its directory's descriptor, so an
+# entry past PATH_MAX is recorded like any other.
+cat > "$DIFF_TMP/state.py" <<'EOF'
+import os, stat, sys
+lines = []
+for top, dirs, files, fd in os.fwalk(b".", follow_symlinks=False):
+    for name in dirs + files:
+        st = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        line = b"%s %o %d %d %d %o" % (top + b"/" + name, stat.S_IFMT(st.st_mode), st.st_ino,
+                                       st.st_nlink, st.st_size, stat.S_IMODE(st.st_mode))
+        if stat.S_ISREG(st.st_mode):
+            line += b" %d" % int(st.st_mtime)
+        lines.append(line + b"\n")
+sys.stdout.buffer.write(b"".join(sorted(lines)))
 EOF
 
 # side SIDE SETUP MODE ARGV...: one side's out, err, state and status.
@@ -90,14 +102,15 @@ case_() {
   rm -f "$DIFF_TMP"/ours.* "$DIFF_TMP"/gnu.*
   side ours "$setup" "$mode" "$@"; o_rc=$?
   side gnu "$setup" "$mode" "$@"; g_rc=$?
-  # inner.sh writes the state last: a side without it never ran there
-  # (`unshare` refused), and compared nothing.
+  # inner.sh writes the state last, after the program: a side without it
+  # never ran -- `unshare` refused, or the tmpfs or the setup failed (90-92)
+  # -- and compared nothing.
   local ran=yes
-  [ -f "$DIFF_TMP/ours.state" ] && [ -f "$DIFF_TMP/gnu.state" ] || ran=no
+  [ -s "$DIFF_TMP/ours.state" ] && [ -s "$DIFF_TMP/gnu.state" ] || ran=no
   for s in ours gnu; do for f in out err state; do [ -f "$DIFF_TMP/$s.$f" ] || : > "$DIFF_TMP/$s.$f"; done; done
   mask "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out"
   label="[${CASE_NAME:-?} $mode] hardlink $(printf '%q ' "$@")"
-  if [ "$ran" = no ] || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ]; } || [ "$g_rc" = 126 ] || [ "$g_rc" = 127 ] \
+  if [ "$ran" = no ] || [ "$g_rc" = 126 ] || [ "$g_rc" = 127 ] \
      || [ "$o_rc" = 126 ] || [ "$o_rc" = 127 ] || [ "$o_rc" = 124 ] || [ "$g_rc" = 124 ]; then
     broken=$((broken + 1)); printf 'BROKEN %s (rc %s/%s)\n' "$label" "$o_rc" "$g_rc"
   elif cmp -s "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out" && cmp -s "$DIFF_TMP/ours.err" "$DIFF_TMP/gnu.err" \
@@ -139,6 +152,16 @@ S_MANY='for i in $(seq 1 30); do mk m/f$i "content $((i % 4))"; done
   for i in $(seq 1 9); do mk m/h$i "$((i % 2))"; done'
 S_DENIED='mk a/x hello; mk a/y hello; mk a/locked/f hello; chmod 000 a/locked
   mk a/noexec/f hello; chmod 444 a/noexec; mk a/unread hello; chmod 000 a/unread'
+# b is a bind mount of a, the same files by a second name, across which no
+# link can be made; c is a tmpfs of its own, another device.
+S_BIND='mk a/x hello; mk a/y hello; mk a/sub/z hello; mkdir b && mount --bind a b
+  mkdir c && mount -t tmpfs tmpfs c && mk c/w hello'
+# Files past PATH_MAX: a/ then sixteen directories of 250 bytes' name is
+# 4018 bytes, g in the last; f is in a seventeenth, at 4271. (Bash cannot
+# `cd` past PATH_MAX, so the last level is made from its parent.)
+S_LONG='mk a/x hello; n=$(printf "d%.0s" $(seq 1 250))
+  ( cd a && for _ in $(seq 1 16); do mkdir "$n" && cd "$n" || exit 1; done && mkdir "$n" \
+    && printf hello > g && printf hello > "$n/f" && touch -d @1700000000 g "$n/f" )'
 
 CASE_NAME=pair
 for args in '' '-n' '-v' '-vv' '-vvv' '-q' '-c' '-n -v' '-y memcmp -v' '-y sha1 -v' '-y crc32 -v' \
@@ -240,6 +263,21 @@ case_ "$S_DENIED" nocaps -v a
 case_ "$S_DENIED" nocaps -vvv a
 case_ "$S_DENIED" nocaps -v a/locked a/x
 case_ "$S_DENIED" plain -v a
+
+CASE_NAME=bind
+for args in '-v' '-vvv' '-n -vv' '-c -v'; do
+  # shellcheck disable=SC2086
+  case_ "$S_BIND" plain $args a b c
+done
+case_ "$S_BIND" plain -vv .
+case_ "$S_BIND" plain -vv b a
+
+CASE_NAME=long
+for args in '-v' '-vvv' '-n -v' '-y memcmp -v'; do
+  # shellcheck disable=SC2086
+  case_ "$S_LONG" plain $args a
+done
+case_ "$S_LONG" plain -v .
 
 CASE_NAME=usage
 for args in '--version' '-V' '--help' '-h' '' '-q -v a' '-v -q a' '--quiet --verbose a' '--reflink=bad a' \

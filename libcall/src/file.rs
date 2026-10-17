@@ -20,6 +20,53 @@ use core::ffi::CStr;
 /// `openat`'s and `unlinkat`'s "the working directory" in place of a
 /// directory descriptor.
 pub const AT_FDCWD: i32 = -100;
+/// `fstatat`'s flag: a symbolic link's own status, not its target's.
+pub const AT_SYMLINK_NOFOLLOW: i32 = 0x100;
+
+/// `struct stat` as glibc and SlateOS's C library lay it out on x86-64:
+/// 144 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stat {
+    /// `st_dev`: the device the file is on.
+    pub st_dev: u64,
+    /// `st_ino`: its inode.
+    pub st_ino: u64,
+    /// `st_nlink`: how many names it has.
+    pub st_nlink: u64,
+    /// `st_mode`: its type (`S_IFMT`) and permissions.
+    pub st_mode: u32,
+    /// `st_uid`.
+    pub st_uid: u32,
+    /// `st_gid`.
+    pub st_gid: u32,
+    pad0: i32,
+    /// `st_rdev`: the device a device file is.
+    pub st_rdev: u64,
+    /// `st_size`: its size in bytes.
+    pub st_size: i64,
+    pub st_blksize: i64,
+    pub st_blocks: i64,
+    /// `st_atim`: seconds and nanoseconds.
+    pub st_atime: i64,
+    pub st_atime_nsec: i64,
+    /// `st_mtim`: seconds and nanoseconds.
+    pub st_mtime: i64,
+    pub st_mtime_nsec: i64,
+    /// `st_ctim`: seconds and nanoseconds.
+    pub st_ctime: i64,
+    pub st_ctime_nsec: i64,
+    reserved: [i64; 3],
+}
+
+/// `S_IFMT` and the types it masks.
+pub const S_IFMT: u32 = 0o170_000;
+/// A directory.
+pub const S_IFDIR: u32 = 0o040_000;
+/// A regular file.
+pub const S_IFREG: u32 = 0o100_000;
+/// A symbolic link.
+pub const S_IFLNK: u32 = 0o120_000;
 
 /// `open`'s access modes and flags, as Linux and SlateOS's C library number
 /// them.
@@ -65,6 +112,12 @@ mod sys {
         pub fn unlinkat(dir: i32, path: *const core::ffi::c_char, flags: i32) -> i32;
         pub fn unlink(path: *const core::ffi::c_char) -> i32;
         pub fn access(path: *const core::ffi::c_char, mode: i32) -> i32;
+        pub fn fstatat(
+            dir: i32,
+            path: *const core::ffi::c_char,
+            buf: *mut super::Stat,
+            flags: i32,
+        ) -> i32;
         // Two `struct timespec`s as four 64-bit words, as `fd.rs` declares
         // it: one symbol may have only one declaration in a crate.
         pub fn futimens(fd: i32, times: *const [i64; 4]) -> i32;
@@ -144,6 +197,35 @@ pub fn unlink(path: &CStr) -> Result<(), i32> {
     #[cfg(not(unix))]
     {
         let _ = path;
+        Err(ENOSYS)
+    }
+}
+
+/// `fstatat (dir, name, &st, flags)`: the status of `name`, relative to the
+/// directory open on `dir` ([`AT_FDCWD`] for the working directory) -- of a
+/// symbolic link itself with [`AT_SYMLINK_NOFOLLOW`]. Relative to a
+/// directory's descriptor a name is not limited by `PATH_MAX`, where a
+/// whole path is.
+///
+/// # Errors
+///
+/// `ENOENT`, `EACCES`, `ENAMETOOLONG` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn fstatat(dir: i32, name: &CStr, flags: i32) -> Result<Stat, i32> {
+    #[cfg(unix)]
+    {
+        let mut st = Stat::default();
+        // SAFETY: `name` is NUL-terminated and only read; `st` is a whole
+        // `struct stat`, which is all the call writes.
+        if unsafe { sys::fstatat(dir, name.as_ptr(), &raw mut st, flags) } == 0 {
+            Ok(st)
+        } else {
+            Err(last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (dir, name, flags);
         Err(ENOSYS)
     }
 }

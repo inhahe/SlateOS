@@ -13,7 +13,7 @@ use crate::ENOSYS;
 use crate::last_errno;
 
 /// `AF_ALG`.
-pub const AF_ALG: i32 = 38;
+pub const AF_ALG: u16 = 38;
 /// `SOCK_SEQPACKET`, the type an `AF_ALG` socket is.
 #[cfg(unix)]
 const SOCK_SEQPACKET: i32 = 5;
@@ -75,7 +75,7 @@ impl Hash {
                 return Err(crate::ENAMETOOLONG);
             }
             let mut sa = SockaddrAlg {
-                salg_family: 38,
+                salg_family: AF_ALG,
                 salg_type: [0; 14],
                 salg_feat: 0,
                 salg_mask: 0,
@@ -88,7 +88,7 @@ impl Hash {
                 n.copy_from_slice(kname);
             }
             // SAFETY: plain values; the call creates a descriptor or fails.
-            let api = unsafe { sys::socket(AF_ALG, SOCK_SEQPACKET, 0) };
+            let api = unsafe { sys::socket(i32::from(AF_ALG), SOCK_SEQPACKET, 0) };
             if api < 0 {
                 return Err(last_errno());
             }

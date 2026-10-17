@@ -12,9 +12,9 @@
 //! made under a temporary name and renamed over the old one.
 
 use std::ffi::{CString, OsStr, OsString};
-use std::fs::{File, Metadata, OpenOptions, Permissions};
+use std::fs::{File, OpenOptions, Permissions};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
@@ -31,19 +31,18 @@ use ulstrutils::{
 use crate::fileeq::{Data, FileEq};
 use crate::tree::{Tree, Visit};
 use crate::walk::{Ftw, Kind, nftw};
+use libcall::file::{S_IFMT, S_IFREG, Stat};
 
-/// `SIGINT` and `SIGUSR1`.
-const SIGINT: i32 = libcall::signal::SIGINT;
-const SIGUSR1: i32 = 10;
 /// `SIGTERM`, which `handle_interrupt` honours though nothing catches it.
-const SIGTERM: i32 = 15;
+use libcall::SIGTERM;
+use libcall::signal::{SIGINT, SIGUSR1};
+/// `EACCES`, which a directory `nftw` could not read failed with, and
+/// `ENOTSUP` (`EOPNOTSUPP`): a file system that keeps no extended
+/// attributes.
+use libcall::{EACCES, EOPNOTSUPP as ENOTSUP};
 
-/// `EACCES`, which a directory `nftw` could not read failed with.
-const EACCES: i32 = 13;
 /// `EMLINK`: a file has as many links as it may.
 const EMLINK: i32 = 31;
-/// `ENOTSUP`: a file system that keeps no extended attributes.
-const ENOTSUP: i32 = 95;
 
 /// `STATFS_BTRFS_MAGIC` and `STATFS_XFS_MAGIC`: the file systems a clone
 /// is tried on.
@@ -59,9 +58,11 @@ static LAST_SIGNAL: AtomicI32 = AtomicI32::new(0);
 /// `sighandler (i)`: the signal kept, a `SIGINT` not overwritten -- and,
 /// for one, a newline written straight to the descriptor.
 extern "C" fn sighandler(i: i32) {
-    if LAST_SIGNAL.load(Ordering::Relaxed) != SIGINT {
-        LAST_SIGNAL.store(i, Ordering::Relaxed);
-    }
+    // One atomic step: a SIGINT that lands inside a SIGUSR1's handler, as
+    // this one blocks nothing, is not overwritten when it resumes.
+    let _ = LAST_SIGNAL.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |cur| {
+        (cur != SIGINT).then_some(i)
+    });
     if i == SIGINT {
         // "can't use stdio on signal handler": `ignore_result (write
         // (STDOUT_FILENO, "\n", 1))`.
@@ -97,16 +98,16 @@ struct St {
 }
 
 impl St {
-    fn of(m: &Metadata) -> Self {
+    fn of(m: &Stat) -> Self {
         St {
-            dev: m.dev(),
-            ino: m.ino(),
-            mode: m.mode(),
-            uid: m.uid(),
-            gid: m.gid(),
-            nlink: m.nlink(),
-            size: m.size(),
-            mtime: m.mtime(),
+            dev: m.st_dev,
+            ino: m.st_ino,
+            mode: m.st_mode,
+            uid: m.st_uid,
+            gid: m.st_gid,
+            nlink: m.st_nlink,
+            size: u64::try_from(m.st_size).unwrap_or(0),
+            mtime: m.st_mtime,
         }
     }
 }
@@ -121,8 +122,9 @@ struct Link {
 }
 
 /// `struct file`: a file (an inode, or with `--respect-name` an inode and a
-/// name), its names -- the first is `links`, the head of upstream's list --
-/// and the next file of its size.
+/// name), its names -- upstream's list kept backwards, its head `links`'
+/// last element, so that adding a name in front, taking the head away and
+/// putting one after it are each O(1) -- and the next file of its size.
 #[derive(Debug)]
 struct FileNode {
     st: St,
@@ -133,8 +135,9 @@ struct FileNode {
 
 /// `struct options`.
 struct Options {
-    include: Vec<ere::Regex>,
-    exclude: Vec<ere::Regex>,
+    /// `--include` and `--exclude`: each pattern as given, and compiled.
+    include: Vec<(Vec<u8>, ere::Regex)>,
+    exclude: Vec<(Vec<u8>, ere::Regex)>,
     method: Vec<u8>,
     verbosity: i32,
     respect_mode: bool,
@@ -220,7 +223,7 @@ fn strncmp(a: &[u8], b: &[u8], n: usize) -> i32 {
 
 /// `filename_strcmp (a, b)`: the last components of the first names.
 fn filename_strcmp(a: &FileNode, b: &FileNode) -> i32 {
-    match (a.links.first(), b.links.first()) {
+    match (a.links.last(), b.links.last()) {
         (Some(x), Some(y)) => cmp(tail(&x.path, x.basename), tail(&y.path, y.basename)),
         _ => 0,
     }
@@ -231,7 +234,7 @@ fn filename_strcmp(a: &FileNode, b: &FileNode) -> i32 {
 /// bytes. A file named as an operand has a negative length, and then the
 /// whole rest of the path is compared, as `strncmp` takes it as a `size_t`.
 fn dirname_strcmp(a: &FileNode, b: &FileNode) -> i32 {
-    let (Some(x), Some(y)) = (a.links.first(), b.links.first()) else {
+    let (Some(x), Some(y)) = (a.links.last(), b.links.last()) else {
         return 0;
     };
     // `int` differences, as upstream's.
@@ -480,7 +483,7 @@ pub fn main(argv: &[OsString]) -> u8 {
     );
     // `sigaction (SIGINT, &sa, NULL)` and `SIGUSR1`, `SA_RESTART`. Upstream
     // blocks every signal while the handler runs (`sigfillset`); this one
-    // blocks none, which a handler of two stores and a write cannot tell.
+    // blocks none, and keeps a SIGINT by updating the signal atomically.
     // Upstream ignores a failure, which none of these can have.
     let _ = libcall::signal::set_handler(SIGINT, sighandler, true);
     let _ = libcall::signal::set_handler(SIGUSR1, sighandler, true);
@@ -541,6 +544,16 @@ impl Hardlink {
     /// `is_log_enabled (level)`.
     fn is_log_enabled(&self, level: i32) -> bool {
         !self.quiet && level <= self.opts.verbosity
+    }
+
+    /// `jlog (level, ...)` for a line that costs something to make: made
+    /// only when it will be printed, as upstream's `vfprintf` is reached
+    /// only then.
+    fn jlog_with(&mut self, level: i32, line: impl FnOnce(&Self) -> Vec<u8>) {
+        if self.is_log_enabled(level) {
+            let line = line(self);
+            self.jlog(level, &line);
+        }
     }
 
     /// `jlog (level, ...)`: a line to stdout, at `level` or more verbose.
@@ -655,7 +668,7 @@ impl Hardlink {
     fn path(&self, i: usize) -> &[u8] {
         self.files
             .get(i)
-            .and_then(|f| f.links.first())
+            .and_then(|f| f.links.last())
             .map_or(&[][..], |l| &l.path)
     }
 
@@ -946,16 +959,15 @@ impl Hardlink {
             if let Some(fb) = self.files.get_mut(b) {
                 fb.st.nlink = fb.st.nlink.wrapping_sub(1);
                 emptied = fb.st.nlink == 0;
-                // "Move the link from file b to a"
-                if !fb.links.is_empty() {
-                    moved = Some(fb.links.remove(0));
-                }
+                // "Move the link from file b to a": b's head...
+                moved = fb.links.pop();
             }
             if emptied {
                 self.stats.saved = add_saved(self.stats.saved, size);
             }
+            // ...put just after a's head.
             if let (Some(link), Some(fa)) = (moved, self.files.get_mut(a)) {
-                let at = fa.links.len().min(1);
+                let at = fa.links.len().saturating_sub(1);
                 fa.links.insert(at, link);
             }
             // "Do it again"
@@ -965,9 +977,33 @@ impl Hardlink {
         }
     }
 
-    /// `match_any_regex (pregs, what)`.
-    fn match_any_regex(list: &[ere::Regex], what: &[u8]) -> bool {
-        list.iter().any(|re| matches!(re.is_match(what), Ok(true)))
+    /// `match_any_regex (pregs, what)`: whether a pattern of `list` matches
+    /// `what`. `ere` gives up a backreference search past its budget, where
+    /// glibc's `regexec` goes on however long it takes: such a pattern is
+    /// taken to match when `if_undecided` -- `true` for `--exclude`, `false`
+    /// for `--include` -- so that a file no pattern could be decided for is
+    /// left alone, never linked; and a warning says so.
+    fn match_any_regex(
+        &self,
+        list: &[(Vec<u8>, ere::Regex)],
+        what: &[u8],
+        if_undecided: bool,
+    ) -> bool {
+        list.iter().any(|(pattern, re)| match re.is_match(what) {
+            Ok(matched) => matched,
+            Err(_) => {
+                warnx(
+                    &self.short,
+                    &format!(
+                        "{}: too costly to match {}; taken as {}",
+                        escape_unprintable(pattern),
+                        escape_unprintable(what),
+                        if if_undecided { "a match" } else { "no match" }
+                    ),
+                );
+                if_undecided
+            }
+        })
     }
 
     /// `inserter (fpath, sb, typeflag, ftwbuf)`: a file the walk found,
@@ -977,7 +1013,7 @@ impl Hardlink {
         by_ino: &mut Tree<usize>,
         by_size: &mut Tree<usize>,
         fpath: &[u8],
-        sb: Option<&Metadata>,
+        sb: Option<&Stat>,
         typeflag: Kind,
         ftw: Ftw,
     ) -> i32 {
@@ -992,12 +1028,13 @@ impl Hardlink {
             Kind::NoStat(e) => self.warn(&format!("cannot read {}", escape_unprintable(fpath)), e),
             _ => {}
         }
-        let Some(sb) = sb.filter(|s| typeflag == Kind::File && s.file_type().is_file()) else {
+        let Some(sb) = sb.filter(|s| typeflag == Kind::File && s.st_mode & S_IFMT == S_IFREG)
+        else {
             return 0;
         };
 
-        let included = Self::match_any_regex(&self.opts.include, fpath);
-        let excluded = Self::match_any_regex(&self.opts.exclude, fpath);
+        let included = self.match_any_regex(&self.opts.include, fpath, false);
+        let excluded = self.match_any_regex(&self.opts.exclude, fpath, true);
         let (has_exclude, has_include) =
             (!self.opts.exclude.is_empty(), !self.opts.include.is_empty());
         // Upstream's `(exclude && excluded && !included) || (!exclude &&
@@ -1010,26 +1047,26 @@ impl Hardlink {
         let st = St::of(sb);
 
         if st.size < self.opts.min_size {
-            let mut line = b"Skipped ".to_vec();
-            line.extend_from_slice(fpath);
-            line.extend_from_slice(b" (smaller than configured size)");
-            self.jlog(JLOG_VERBOSE1, &line);
+            self.jlog_with(JLOG_VERBOSE1, |_| {
+                [&b"Skipped "[..], fpath, b" (smaller than configured size)"].concat()
+            });
             return 0;
         }
 
-        let mut line = format!(
-            " {:5}: [{}/{}/{}] ",
-            self.stats.files, st.dev, st.ino, st.nlink
-        )
-        .into_bytes();
-        line.extend_from_slice(fpath);
-        self.jlog(JLOG_VERBOSE2, &line);
+        self.jlog_with(JLOG_VERBOSE2, |h| {
+            let mut line = format!(
+                " {:5}: [{}/{}/{}] ",
+                h.stats.files, st.dev, st.ino, st.nlink
+            )
+            .into_bytes();
+            line.extend_from_slice(fpath);
+            line
+        });
 
         if self.opts.max_size > 0 && st.size > self.opts.max_size {
-            let mut line = b"Skipped ".to_vec();
-            line.extend_from_slice(fpath);
-            line.extend_from_slice(b" (greater than configured size)");
-            self.jlog(JLOG_VERBOSE1, &line);
+            self.jlog_with(JLOG_VERBOSE1, |_| {
+                [&b"Skipped "[..], fpath, b" (greater than configured size)"].concat()
+            });
             return 0;
         }
 
@@ -1055,12 +1092,12 @@ impl Hardlink {
                 .get(known)
                 .is_some_and(|k| k.links.iter().any(|l| l.path == fpath));
             if seen {
-                let mut line = b"Skipped ".to_vec();
-                line.extend_from_slice(fpath);
-                line.extend_from_slice(b" (specified more than once)");
-                self.jlog(JLOG_VERBOSE1, &line);
+                self.jlog_with(JLOG_VERBOSE1, |_| {
+                    [&b"Skipped "[..], fpath, b" (specified more than once)"].concat()
+                });
             } else if let (Some(link), Some(k)) = (link, self.files.get_mut(known)) {
-                k.links.insert(0, link);
+                // The new head.
+                k.links.push(link);
             }
             return 0;
         }
@@ -1188,7 +1225,7 @@ impl Hardlink {
 
     /// `ul_fileeq (&fileeq, &a->data, &b->data)`.
     fn contents_equal(&mut self, a: usize, b: usize) -> bool {
-        let Some(eq) = self.fileeq.as_ref() else {
+        let Some(eq) = self.fileeq.as_mut() else {
             return false;
         };
         let mut da = self
@@ -1255,25 +1292,25 @@ impl Hardlink {
                 }
                 // "check file attributes, etc."
                 if !self.file_may_link_to(master, other)? {
-                    let mut line = b"Skipped (attributes mismatch) ".to_vec();
-                    line.extend_from_slice(self.path(other));
-                    self.jlog(JLOG_VERBOSE2, &line);
+                    self.jlog_with(JLOG_VERBOSE2, |h| {
+                        [&b"Skipped (attributes mismatch) "[..], h.path(other)].concat()
+                    });
                     continue;
                 }
                 if may_reflink && self.reflinks_skip && self.is_reflink(master, other) {
-                    let mut line = b"Skipped (already reflink) ".to_vec();
-                    line.extend_from_slice(self.path(other));
-                    self.jlog(JLOG_VERBOSE2, &line);
+                    self.jlog_with(JLOG_VERBOSE2, |h| {
+                        [&b"Skipped (already reflink) "[..], h.path(other)].concat()
+                    });
                     self.stats.ignored_reflinks = self.stats.ignored_reflinks.saturating_add(1);
                     continue;
                 }
                 // "initialize content comparison"
                 for i in [master, other] {
-                    let name = self.path(i).to_vec();
-                    if let Some(f) = self.files.get_mut(i)
-                        && !f.data.associated()
-                    {
-                        f.data.set_file(&name);
+                    if self.files.get(i).is_some_and(|f| !f.data.associated()) {
+                        let name = self.path(i).to_vec();
+                        if let Some(f) = self.files.get_mut(i) {
+                            f.data.set_file(&name);
+                        }
                     }
                 }
                 // "compare files"
@@ -1284,9 +1321,9 @@ impl Hardlink {
                 }
                 self.stats.comparisons = self.stats.comparisons.saturating_add(1);
                 if !eq {
-                    let mut line = b"Skipped (content mismatch) ".to_vec();
-                    line.extend_from_slice(self.path(other));
-                    self.jlog(JLOG_VERBOSE2, &line);
+                    self.jlog_with(JLOG_VERBOSE2, |h| {
+                        [&b"Skipped (content mismatch) "[..], h.path(other)].concat()
+                    });
                     continue;
                 }
                 // "link files"
@@ -1412,13 +1449,15 @@ impl Hardlink {
                 b'c' => content_only = true,
                 b'n' => self.opts.dry_run = true,
                 b'x' => {
-                    let re = register_regex(&self.short, &os_bytes(&arg), utf8)?;
-                    self.opts.exclude.push(re);
+                    let pattern = os_bytes(&arg).into_owned();
+                    let re = register_regex(&self.short, &pattern, utf8)?;
+                    self.opts.exclude.push((pattern, re));
                 }
                 b'y' => self.opts.method = os_bytes(&arg).into_owned(),
                 b'i' => {
-                    let re = register_regex(&self.short, &os_bytes(&arg), utf8)?;
-                    self.opts.include.push(re);
+                    let pattern = os_bytes(&arg).into_owned();
+                    let re = register_regex(&self.short, &pattern, utf8)?;
+                    self.opts.include.push((pattern, re));
                 }
                 b's' => self.opts.min_size = self.size_arg(&arg, "failed to parse minimum size")?,
                 b'S' => self.opts.max_size = self.size_arg(&arg, "failed to parse maximum size")?,
@@ -1473,21 +1512,20 @@ impl Hardlink {
 
         self.stats.start_time = Instant::now();
 
-        let mut eq = FileEq::init(&self.opts.method);
-        if eq.is_none() && self.opts.method != b"memcmp" {
-            let mut line = b"cannot initialize ".to_vec();
-            line.extend_from_slice(&self.opts.method);
-            line.extend_from_slice(b" method, use 'memcmp' fallback");
-            self.jlog(JLOG_INFO, &line);
-            self.opts.method = b"memcmp".to_vec();
-            eq = FileEq::init(&self.opts.method);
-        }
-        if eq.is_none() {
-            // `memcmp` needs nothing to be set up: it cannot fail.
-            self.warn("failed to initialize files comparior", libcall::EINVAL);
-            return 1;
-        }
-        self.fileeq = eq;
+        let eq = match FileEq::init(&self.opts.method) {
+            Some(eq) => eq,
+            None => {
+                let mut line = b"cannot initialize ".to_vec();
+                line.extend_from_slice(&self.opts.method);
+                line.extend_from_slice(b" method, use 'memcmp' fallback");
+                self.jlog(JLOG_INFO, &line);
+                self.opts.method = b"memcmp".to_vec();
+                // Upstream's "failed to initialize files comparior" follows
+                // a memcmp that fails to set up, which nothing can.
+                FileEq::memcmp()
+            }
+        };
+        self.fileeq = Some(eq);
 
         // "defautl I/O size"
         if self.opts.io_size == 0 {
@@ -1519,7 +1557,7 @@ impl Hardlink {
             }
             let walked =
                 nftw(&path, &mut |fpath: &[u8],
-                                  sb: Option<&Metadata>,
+                                  sb: Option<&Stat>,
                                   kind: Kind,
                                   ftw: Ftw| {
                     self.inserter(&mut by_ino, &mut by_size, fpath, sb, kind, ftw)

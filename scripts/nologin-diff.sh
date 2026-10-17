@@ -23,21 +23,13 @@ DIFF_NEED='timeout unshare mount script python3'
 
 pass=0; fail=0; broken=0
 
-# listen.py PATH OUT: every datagram sent to the Unix socket PATH, a line
-# each, until it is killed.
-cat > "$DIFF_TMP/listen.py" <<'EOF'
-import os, socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-s.bind(sys.argv[1])
-with open(sys.argv[2], "ab", buffering=0) as out:
-    while True:
-        out.write(s.recv(65536) + b"\n")
-EOF
+diff_devlog
 
 # inner.sh BIN OUT ERR LOG HOW [nolog] ARGV...: one case, in the namespace.
 cat > "$DIFF_TMP/inner.sh" <<'EOF'
 set -u
 here=$(dirname "$0")
+. "$here/devlog.sh"
 bin=$1 out=$2 err=$3 log=$4 how=$5; shift 5
 # The namespace came up: a side without this file compared nothing.
 : > "${out%.out}.ran"
@@ -50,11 +42,7 @@ mkdir /dev/pts && mount --bind "$here/pts.$$" /dev/pts || exit 92
 # device cannot be had here, so a file.
 : > /dev/null && chmod 666 /dev/null
 : > "$log"
-if [ -z "$nolog" ]; then
-  python3 "$here/listen.py" /dev/log "$log" < /dev/null > /dev/null 2>&1 &
-  lp=$!
-  for _ in $(seq 1 50); do [ -S /dev/log ] && break; sleep 0.02; done
-fi
+[ -n "$nolog" ] || devlog_start "$log"
 run() { timeout -k 1 5 "$bin" "$@"; }
 case $how in
   plain) run "$@" > "$out" 2> "$err" < "$0" ;;
@@ -63,7 +51,7 @@ case $how in
   full) run "$@" >&5 2> "$err" < "$0" ;;
 esac
 rc=$?
-if [ -z "$nolog" ]; then sleep 0.2; kill "$lp" 2>/dev/null; wait "$lp" 2>/dev/null; fi
+[ -n "$nolog" ] || devlog_stop
 exit "$rc"
 EOF
 
@@ -88,21 +76,17 @@ side() {
   esac
 }
 
-# A logged line's timestamp, `Mmm dd hh:mm:ss`, differs between the sides.
-mask() {
-  sed -E -i 's/^(<[0-9]+>)[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} /\1TS /' "$@"
-}
-
 case_() {
   local how=$1 o_rc g_rc label; shift
   rm -f "$DIFF_TMP"/ours.* "$DIFF_TMP"/gnu.*
   side ours "$how" "$@"; o_rc=$?
   side gnu "$how" "$@"; g_rc=$?
   for s in ours gnu; do for f in out err log; do [ -f "$DIFF_TMP/$s.$f" ] || : > "$DIFF_TMP/$s.$f"; done; done
-  mask "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log"
+  diff_mask_logged_time "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log"
   label="[$how${CASE_ENV:+ $CASE_ENV}] nologin $(printf '%q ' "$@")"
   if [ ! -f "$DIFF_TMP/ours.ran" ] || [ ! -f "$DIFF_TMP/gnu.ran" ] \
-     || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 92 ]; } || [ "$g_rc" = 127 ] || [ "$o_rc" = 127 ]; then
+     || { [ "$o_rc" -ge 90 ] && [ "$o_rc" -le 93 ]; } || { [ "$g_rc" -ge 90 ] && [ "$g_rc" -le 93 ]; } \
+     || [ "$g_rc" = 127 ] || [ "$o_rc" = 127 ]; then
     broken=$((broken + 1)); printf 'BROKEN %s (rc %s/%s)\n' "$label" "$o_rc" "$g_rc"
   elif cmp -s "$DIFF_TMP/ours.out" "$DIFF_TMP/gnu.out" && cmp -s "$DIFF_TMP/ours.err" "$DIFF_TMP/gnu.err" \
      && cmp -s "$DIFF_TMP/ours.log" "$DIFF_TMP/gnu.log" && [ "$o_rc" = "$g_rc" ]; then

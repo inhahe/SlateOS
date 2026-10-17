@@ -12,20 +12,17 @@ fn rfkill_at(dev: &str, sys: &std::path::Path) -> Rfkill {
 
 thread_local! {
     /// What this test thread's program logged, a line each.
-    static LOGGED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    static LOGGED: std::cell::RefCell<Vec<Vec<u8>>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// The tests' log: kept for them to read, never the machine's syslog.
 fn keep_log(line: &[u8]) {
-    LOGGED.with(|l| {
-        l.borrow_mut()
-            .push(String::from_utf8_lossy(line).into_owned())
-    });
+    LOGGED.with(|l| l.borrow_mut().push(line.to_vec()));
 }
 
 /// What was logged since the last call.
 #[cfg(unix)]
-fn logged() -> Vec<String> {
+fn logged() -> Vec<Vec<u8>> {
     LOGGED.with(|l| std::mem::take(&mut *l.borrow_mut()))
 }
 
@@ -392,9 +389,9 @@ fn block_writes_one_request_of_the_identifier_s_kind() {
     assert_eq!(
         logged(),
         [
-            "block set for id 3",
-            "unblock set for type bluetooth",
-            "block set for all"
+            &b"block set for id 3"[..],
+            b"unblock set for type bluetooth",
+            b"block set for all"
         ]
     );
     std::fs::remove_dir_all(&sys).unwrap();
@@ -414,11 +411,11 @@ fn toggle_turns_each_matching_device_s_block_over() {
     // that matches nothing -- as on a FIFO, not on the kernel's device; the
     // log says which way it went: the blocked LAN unblocked, as a type.
     assert_eq!(dev.drain(), Vec::<u8>::new());
-    assert_eq!(logged(), ["unblock set for type wlan"]);
+    assert_eq!(logged(), [b"unblock set for type wlan"]);
     let dev = FakeDevice::with(&[ev(1, 2, RFKILL_OP_ADD, 0, 0)]);
     let mut rf = rfkill_at(&dev.path(), &sys);
     assert_eq!(rf.rfkill_toggle(b"1"), Ok(0));
-    assert_eq!(logged(), ["block set for id 1"]);
+    assert_eq!(logged(), [b"block set for id 1"]);
     std::fs::remove_dir_all(&sys).unwrap();
 }
 

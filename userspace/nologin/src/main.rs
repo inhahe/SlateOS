@@ -12,22 +12,12 @@
 //! (util-linux has a `nologin` too, which reads `/etc/nologin.txt` and has
 //! options; Ubuntu installs shadow's.) Measured against Ubuntu's by
 //! `scripts/nologin-diff.sh`, the log line included.
-//!
-//! This replaces a program written here that printed to standard error,
-//! read `/etc/nologin.txt`, answered `--help` and `--version`, and logged
-//! nothing.
 
 stdfdguard::guard_std_fds!();
 
+use libcsyslog::{LOG_AUTH, LOG_CONS, LOG_CRIT};
 use std::io::Write;
 use std::process::ExitCode;
-
-/// syslog's `LOG_CONS`: on the console when the log cannot be reached.
-const LOG_CONS: i32 = 0x02;
-/// syslog's `LOG_AUTH` facility.
-const LOG_AUTH: i32 = 4 << 3;
-/// syslog's `LOG_CRIT` level.
-const LOG_CRIT: i32 = 2;
 
 /// `UT_NAMESIZE + 1`: the buffer glibc's `getlogin` keeps the name in, so a
 /// longer name is no name, as it is there.

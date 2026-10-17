@@ -267,12 +267,14 @@ MAIN = [
     # What is this program's is handing the editor the key as it came.
     (
         "a command's letter is typed into the search",
-        '            &mut self.search_editor,\n            event,\n',
-        '            &mut self.search_editor,\n'
-        '            &KeyEvent {\n'
+        '        self.search.key(event).handled.then_some(true)\n',
+        '        self.search\n'
+        '            .key(&KeyEvent {\n'
         '                modifiers: guitk::event::Modifiers::NONE,\n'
         '                ..event.clone()\n'
-        '            },\n',
+        '            })\n'
+        '            .handled\n'
+        '            .then_some(true)\n',
         ['a_chord_is_neither_a_readers_key_nor_typing'],
     ),
     (
@@ -314,13 +316,13 @@ MAIN += [
     ),
     (
         "a search that found nothing is not red",
-        "                    && self.searched.as_deref() == Some(self.search_query.as_str()),\n",
+        "                    && self.searched.as_deref() == Some(self.search.text()),\n",
         "                    && false,\n",
         [SEARCH_BOX],
     ),
     (
         "a query not yet searched for is red",
-        "                    && self.searched.as_deref() == Some(self.search_query.as_str()),\n",
+        "                    && self.searched.as_deref() == Some(self.search.text()),\n",
         "                    && true,\n",
         [SEARCH_BOX],
     ),
@@ -328,21 +330,6 @@ MAIN += [
         "a sepia page's box is the desktop's",
         "        p.crust = tc.background;\n",
         "",
-        [SEARCH_BOX],
-    ),
-    (
-        "the search's editor is not reloaded",
-        "        if self.search_editor.text() != self.search_query {\n"
-        "            self.search_editor.set_text(&self.search_query);\n"
-        "        }\n"
-        "        let edit = textline::apply_key(\n",
-        "        let edit = textline::apply_key(\n",
-        ["test_search_backspace"],
-    ),
-    (
-        "a cut takes nothing to the clipboard",
-        "            self.search_clipboard = copied;\n",
-        "            let _ = copied;\n",
         [SEARCH_BOX],
     ),
     (

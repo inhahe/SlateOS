@@ -46,15 +46,15 @@ use guitk::field;
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text::{self, TextCursor};
+use guitk::text;
 use guitk::textedit;
 use guitk::textfind;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 use guitk::dialog::{FilePicker, Picked};
 use pathtext::ShowPath;
@@ -1357,17 +1357,13 @@ pub struct EbookApp {
     pub paginated: Option<PaginatedBook>,
 
     // Search state
-    pub search_query: String,
+    /// The search box, which is the query.
+    pub search: SearchBox,
     pub search_active: bool,
     pub search_matches: Vec<SearchMatch>,
     /// The query `search_matches` were found for: a query that has not been
     /// searched since it was typed is not yet "found nothing".
     searched: Option<String>,
-    /// The search box's caret and selection, laid over `search_query`, which
-    /// stays the truth: reloaded whenever the query changes under it.
-    search_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
-    search_clipboard: String,
     /// How wide the mark is round the box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -1514,12 +1510,10 @@ impl EbookApp {
             theme: ThemeKind::System,
             keeps_settings: false,
             paginated: None,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_active: false,
             search_matches: Vec::new(),
             searched: None,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             current_match_idx: None,
             list_selection: 0,
@@ -1850,11 +1844,10 @@ impl EbookApp {
     /// Open the search bar.
     pub fn open_search(&mut self) {
         self.search_active = true;
-        self.search_query.clear();
+        self.search.clear();
         self.search_matches.clear();
         self.searched = None;
         self.current_match_idx = None;
-        self.search_editor.set_text("");
     }
 
     /// Close the search bar.
@@ -1865,8 +1858,8 @@ impl EbookApp {
     /// Execute a search with the current query.
     pub fn execute_search(&mut self) {
         if let Some(book) = self.library.get(self.selected_book) {
-            self.search_matches = find_all_matches(&book.text, &self.search_query);
-            self.searched = Some(self.search_query.clone());
+            self.search_matches = find_all_matches(&book.text, self.search.text());
+            self.searched = Some(self.search.text().to_owned());
             if self.search_matches.is_empty() {
                 self.current_match_idx = None;
             } else {
@@ -2472,22 +2465,7 @@ impl EbookApp {
         if textline::is_plain(event.modifiers) && matches!(event.key, Key::Escape | Key::Enter) {
             return Some(self.handle_search_key(event));
         }
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            event,
-            &self.search_clipboard,
-            SEARCH_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
-        if self.search_editor.text() != self.search_query {
-            self.search_query = self.search_editor.text().to_owned();
-        }
-        edit.handled.then_some(true)
+        self.search.key(event).handled.then_some(true)
     }
 
     /// Where the search box is drawn: along the foot of the page, above the
@@ -3286,9 +3264,9 @@ impl EbookApp {
                 hovered: false,
                 focused: !self.show_help,
                 disabled: false,
-                invalid: !self.search_query.is_empty()
+                invalid: !self.search.is_empty()
                     && self.search_matches.is_empty()
-                    && self.searched.as_deref() == Some(self.search_query.as_str()),
+                    && self.searched.as_deref() == Some(self.search.text()),
             };
             field::draw(
                 cmds,
@@ -3339,50 +3317,22 @@ impl EbookApp {
             (rect.w - SEARCH_TEXT_INSET - 120.0).max(0.0),
         );
         let mut tree = guitk::render::RenderTree::new();
-        if self.search_query.is_empty() {
-            tree.push(RenderCommand::Text {
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
                 x,
                 y,
-                text: String::from("Search the book"),
-                color: tc.text_dim,
-                font_size: SEARCH_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(&mut tree, x, y, line, tc.text, textedit::CARET_WIDTH);
-            }
-        } else {
-            let synced = self.search_editor.text() == self.search_query;
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: if synced {
-                        self.search_editor.cursor()
-                    } else {
-                        TextCursor::from(self.search_query.len())
-                    },
-                    selection_anchor: if synced {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused,
-                    x,
-                    y,
-                    width,
-                    line_height: line,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: tc.text,
-                    selection_bg: tc.accent,
-                    selection_fg: tc.background,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+                width,
+                line_height: line,
+                focused,
+                placeholder: "Search the book",
+                color: tc.text,
+                placeholder_color: tc.text_dim,
+                selection_bg: tc.accent,
+                selection_fg: tc.background,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         cmds.extend(tree.commands);
     }
 
@@ -3972,7 +3922,8 @@ mod tests {
         app.handle_key_event(&typed(Key::B, "b", Modifiers::ctrl()));
         app.handle_key_event(&typed(Key::O, "ó", altgr));
         assert_eq!(
-            app.search_query, "ó",
+            app.search.text(),
+            "ó",
             "the search typed a command or lost AltGr's ó"
         );
         assert!(!app.picker.is_open(), "AltGr+O opened a file");
@@ -4450,7 +4401,7 @@ mod tests {
         assert!(app.search_active);
 
         // Type search query.
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
         assert!(!app.search_matches.is_empty());
         assert_eq!(app.current_match_idx, Some(0));
@@ -4460,7 +4411,7 @@ mod tests {
     fn test_search_next_prev_match() {
         let mut app = make_app();
         app.open_book(0);
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
 
         if app.search_matches.len() > 1 {
@@ -4475,7 +4426,7 @@ mod tests {
     fn test_search_wraps_around() {
         let mut app = make_app();
         app.open_book(0);
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
 
         let count = app.search_matches.len();
@@ -4493,7 +4444,7 @@ mod tests {
     fn test_search_prev_wraps_to_end() {
         let mut app = make_app();
         app.open_book(0);
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
 
         if !app.search_matches.is_empty() {
@@ -4539,7 +4490,7 @@ mod tests {
         app.open_search();
         app.handle_key_event(&make_key_with_text(Key::H, 'h'));
         app.handle_key_event(&make_key_with_text(Key::I, 'i'));
-        assert_eq!(app.search_query, "hi");
+        assert_eq!(app.search.text(), "hi");
     }
 
     /// **The search box is the toolkit's field, in the reading theme's
@@ -4591,7 +4542,8 @@ mod tests {
         app.handle_key_event(&make_key(Key::Home));
         app.handle_key_event(&make_key(Key::Delete));
         assert_eq!(
-            app.search_query, "rem",
+            app.search.text(),
+            "rem",
             "Home and Delete did not edit the start"
         );
         let ctrl = |k: Key| KeyEvent {
@@ -4602,11 +4554,12 @@ mod tests {
         };
         app.handle_key_event(&ctrl(Key::A));
         app.handle_key_event(&ctrl(Key::X));
-        assert_eq!(app.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        assert_eq!(app.search.text(), "", "Ctrl+A and Ctrl+X did not cut");
         app.handle_key_event(&ctrl(Key::V));
         app.handle_key_event(&ctrl(Key::V));
         assert_eq!(
-            app.search_query, "remrem",
+            app.search.text(),
+            "remrem",
             "Ctrl+V did not paste what was cut"
         );
 
@@ -4650,9 +4603,9 @@ mod tests {
         let mut app = make_app();
         app.open_book(0);
         app.open_search();
-        app.search_query = "hello".to_owned();
+        app.search.set_text("hello");
         app.handle_key_event(&make_key(Key::Backspace));
-        assert_eq!(app.search_query, "hell");
+        assert_eq!(app.search.text(), "hell");
     }
 
     #[test]
@@ -5147,7 +5100,7 @@ mod tests {
         let mut app = make_app();
         app.open_book(0);
         app.open_search();
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
@@ -5546,7 +5499,7 @@ mod tests {
     fn test_search_n_key_next_match() {
         let mut app = make_app();
         app.open_book(0);
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
         if app.search_matches.len() > 1 {
             app.handle_key_event(&make_key(Key::N));
@@ -5558,7 +5511,7 @@ mod tests {
     fn test_search_shift_n_prev_match() {
         let mut app = make_app();
         app.open_book(0);
-        app.search_query = "the".to_owned();
+        app.search.set_text("the");
         app.execute_search();
         if !app.search_matches.is_empty() {
             let last = app.search_matches.len() - 1;

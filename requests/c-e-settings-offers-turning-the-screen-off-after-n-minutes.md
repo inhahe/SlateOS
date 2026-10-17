@@ -23,8 +23,8 @@ second control beside it.
 | | |
 |---|---|
 | group | `session` (`idle_lock::CONFIG_NAME`) |
-| key | `displays` → `off_after_minutes`, an integer |
-| meaning | minutes of no input before the displays sleep |
+| keys | `displays` → `off_after_minutes`, and (added the same day, design.txt's "put computer to sleep after N minutes") `sleep` → `after_minutes`; integers |
+| meaning | minutes of no input before the displays sleep; before the computer sleeps, as the power menu's Sleep puts it |
 | never | `0`, absent, negative or not a number -- the same rule as `lock.after_minutes`: nought is "never", not "at once" |
 
 Announce `SettingsGroup::Session` after writing, as the lock delay's page

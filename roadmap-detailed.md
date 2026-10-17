@@ -3607,7 +3607,7 @@ rather than the pair-at-a-time composition dead keys reuse._
 - [ ] Action on power button press (shutdown/sleep/hibernate/run program)
 - [ ] Action on laptop lid close
 - [-] Turn off screen after N minutes (disableable) — *2026-10-17: the shell's half is done on lane-c-preview (3261d697e): `displays.off_after_minutes` in the `session` group, claimed on the compositor's idle watch, sleeps the displays as "Sleep the display" does; 0 is never. The Settings page that writes it is asked of lane E (`requests/c-e-settings-offers-turning-the-screen-off-after-n-minutes.md`).*
-- [ ] Put computer to sleep after N minutes (disableable)
+- [-] Put computer to sleep after N minutes (disableable) — *2026-10-17: the shell's half is done on lane-c-preview: `sleep.after_minutes` in the `session` group, claimed on the compositor's idle watch, runs the power menu's Sleep; 0 is never. The Settings page is asked of lane E (`requests/c-e-settings-offers-turning-the-screen-off-after-n-minutes.md`).*
 - [ ] Action on battery low (configurable threshold: minutes or percentage)
 - [ ] Webcam/mic wake (opt-in only, with privacy warning):
   - [ ] Separate toggles for webcam wake and mic wake

@@ -975,11 +975,16 @@ impl<T: Transport> ShellSession<T> {
         if let Some(after) = crate::idle_lock::lock_after() {
             events.watch_idle(panel.window, after)?;
         }
-        // The displays' delay, on the background's window: the compositor
-        // keeps one watch per window and tells each window of its own, which
-        // is how `Event::SessionIdle` says which of the two came due.
+        // The displays' delay, on the background's window, and the
+        // computer's, on the on-screen display's: the compositor keeps one
+        // watch per window and tells each window of its own, which is how
+        // `Event::SessionIdle` says which of the three came due. Both
+        // surfaces last the whole session, as the panel does.
         if let Some(after) = crate::idle_lock::displays_off_after() {
             events.watch_idle(background.window, after)?;
+        }
+        if let Some(after) = crate::idle_lock::sleep_after() {
+            events.watch_idle(osd.window, after)?;
         }
 
         // Taken before `events` moves into the session. A transport that
@@ -4024,6 +4029,13 @@ impl<T: Transport> ShellSession<T> {
             Event::SessionIdle if window == self.background.window => {
                 self.request(ShellRequest::SleepDisplays)?;
             }
+            // The computer's delay (its watch is the OSD's): the power menu's
+            // Sleep, the same command through the same queue.
+            Event::SessionIdle if window == self.osd.window => {
+                if let Some(sleep) = crate::power::PowerChoice::Sleep.command() {
+                    self.queue_launches(vec![sleep]);
+                }
+            }
             Event::SessionIdle => {
                 self.queue_launches(vec![crate::hotkeys::Launch::program(
                     crate::hotkeys::LOCK_COMMAND,
@@ -4081,6 +4093,8 @@ impl<T: Transport> ShellSession<T> {
                 self.events.watch_idle(self.panel.window, after)?;
                 let after = crate::idle_lock::displays_off_after().unwrap_or_default();
                 self.events.watch_idle(self.background.window, after)?;
+                let after = crate::idle_lock::sleep_after().unwrap_or_default();
+                self.events.watch_idle(self.osd.window, after)?;
             }
             Event::SettingsChanged {
                 group: SettingsGroup::Notifications,

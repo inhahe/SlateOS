@@ -1,12 +1,14 @@
-//! How long the session waits before locking itself, and before putting the
-//! displays to sleep -- and whether waking the displays locks it.
+//! How long the session waits before locking itself, before putting the
+//! displays to sleep, and before putting the computer to sleep -- and
+//! whether waking the displays locks it.
 //!
-//! Two integers and a switch, read from the `session` settings group. The
+//! Three integers and a switch, read from the `session` settings group. The
 //! Settings application writes them; this reads them. Each delay is handed to
 //! `EventLoop::watch_idle`, after which the compositor says when it has
-//! passed: [`crate::session`] queues the lock, or puts the displays to sleep
-//! as "Sleep the display" does (`design.txt`'s "turn off screen after N
-//! minutes (disablable)"). The switch is asked when the displays wake
+//! passed: [`crate::session`] queues the lock, puts the displays to sleep as
+//! "Sleep the display" does, or runs the power menu's Sleep (`design.txt`'s
+//! "turn off screen after N minutes" and "put computer to sleep after N
+//! minutes", both "disablable"). The switch is asked when the displays wake
 //! ([`lock_on_display_wake`]).
 //!
 //! # Why a settings group and not a crate
@@ -42,6 +44,9 @@ const LOCK_AFTER_MINUTES: [&str; 2] = ["lock", "after_minutes"];
 
 /// The key holding the displays' delay, in whole minutes.
 const DISPLAYS_OFF_AFTER_MINUTES: [&str; 2] = ["displays", "off_after_minutes"];
+
+/// The key holding the computer's sleep delay, in whole minutes.
+const SLEEP_AFTER_MINUTES: [&str; 2] = ["sleep", "after_minutes"];
 
 /// The key saying whether waking the displays locks the session.
 const LOCK_ON_DISPLAY_WAKE: [&str; 2] = ["lock", "on_display_wake"];
@@ -87,6 +92,13 @@ pub fn lock_after() -> Option<Duration> {
 #[must_use]
 pub fn displays_off_after() -> Option<Duration> {
     minutes_at(&DISPLAYS_OFF_AFTER_MINUTES)
+}
+
+/// Minutes before the computer goes to sleep, as the power menu's Sleep puts
+/// it, or `None` for never -- read as [`lock_after`] reads its delay.
+#[must_use]
+pub fn sleep_after() -> Option<Duration> {
+    minutes_at(&SLEEP_AFTER_MINUTES)
 }
 
 /// The whole minutes at `key` in the `session` group, as a delay; `None` for

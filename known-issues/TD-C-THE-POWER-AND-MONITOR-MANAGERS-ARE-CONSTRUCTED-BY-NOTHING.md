@@ -50,8 +50,8 @@ screen saver is not in it.
 to confirm: `multimon.rs` goes if lane F's compositor keeps the display
 arrangement (asked: `requests/c-f-who-keeps-the-users-display-arrangement.md`);
 `PowerManager`'s own idle counter goes, the compositor's `watch_idle` being
-the idle source, and the rest of it is wired -- the screen-off delay on
-`watch_idle` (done, below), the sleep delay likewise, the lid, buttons and battery the day lane A
+the idle source, and the rest of it is wired -- the screen-off and sleep
+delays on `watch_idle` (done, below), the lid, buttons and battery the day lane A
 delivers those events (a request to lane A for a power-event channel); the
 screen saver, unspecified, goes unless the operator wants one.
 
@@ -64,9 +64,11 @@ reads `displays.off_after_minutes` in the `session` group, and the idle
 event for the background puts the displays to sleep as "Sleep the display"
 does. The Settings page that writes it is asked of lane E
 (`requests/c-e-settings-offers-turning-the-screen-off-after-n-minutes.md`).
-"Put the computer to sleep after N minutes" can take the same shape on a
-third window, once the shell can ask `powerctl` to suspend from idle (the
-power menu's Sleep already runs it).
+"Put the computer to sleep after N minutes" took the same shape the same
+day: `sleep.after_minutes`, claimed on the on-screen display's window, runs
+the power menu's Sleep (`PowerChoice::Sleep.command()`, `powerctl`). What
+is left of `PowerManager`'s model is the lid, the buttons and the battery,
+which wait on lane A's events.
 
 **If never fixed:** 5,000 lines that read as features the desktop has, and
 a battery icon that can only ever say there is no battery.

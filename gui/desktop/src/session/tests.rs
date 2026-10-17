@@ -6975,15 +6975,16 @@ fn the_displays_idle_delay_sleeps_them_and_locks_nothing() {
     );
 }
 
-/// **Each delay is claimed on its own window, and a change re-claims both**:
-/// the lock's on the panel, the displays' on the background, in minutes from
-/// the `session` group.
+/// **Each delay is claimed on its own window, and a change re-claims them**:
+/// the lock's on the panel, the displays' on the background, the computer's
+/// on the OSD, in minutes from the `session` group.
 #[test]
 fn the_two_idle_delays_are_claimed_on_their_own_windows() {
     settingsfile::testing::with_scratch_config("session-idle-delays", |_root| {
         let mut doc = settingsfile::load(crate::idle_lock::CONFIG_NAME);
         doc.set_i64(&["lock", "after_minutes"], 15);
         doc.set_i64(&["displays", "off_after_minutes"], 5);
+        doc.set_i64(&["sleep", "after_minutes"], 30);
         settingsfile::store(crate::idle_lock::CONFIG_NAME, &doc).expect("store");
 
         let (mut session, desktop, _turn) = session();
@@ -7003,6 +7004,8 @@ fn the_two_idle_delays_are_claimed_on_their_own_windows() {
         let claimed = watches(&desktop);
         assert!(claimed.contains(&(panel, 15 * 60_000)), "{claimed:?}");
         assert!(claimed.contains(&(background, 5 * 60_000)), "{claimed:?}");
+        let osd = session.osd().window();
+        assert!(claimed.contains(&(osd, 30 * 60_000)), "{claimed:?}");
 
         // "Never" for the displays: the change withdraws their watch.
         let mut doc = settingsfile::load(crate::idle_lock::CONFIG_NAME);
@@ -7010,12 +7013,44 @@ fn the_two_idle_delays_are_claimed_on_their_own_windows() {
         settingsfile::store(crate::idle_lock::CONFIG_NAME, &doc).expect("store");
         announce(&desktop, session.panel(), SettingsGroup::Session);
         session.pump().expect("pump");
-        assert_eq!(
-            watches(&desktop).last(),
-            Some(&(background, 0)),
-            "the displays' watch was not withdrawn"
+        let after = watches(&desktop);
+        assert!(
+            after.iter().rev().take(3).any(|w| *w == (background, 0)),
+            "the displays' watch was not withdrawn: {after:?}"
         );
     });
+}
+
+/// **The computer's idle delay runs the power menu's Sleep** -- the same
+/// command, queued as any launch is -- and puts nothing else to sleep.
+#[test]
+fn the_computers_idle_delay_runs_the_power_menus_sleep() {
+    let (mut session, desktop, _dir, _turn) = session_with_login();
+    type_password(&desktop, &mut session, "password");
+    drop(session.take_launches());
+
+    let window = session.osd().window();
+    desktop
+        .borrow_mut()
+        .send_input(&[InputEvent::new(window, guitk::event::Event::SessionIdle)]);
+    session.pump().expect("pump");
+    let sleep = crate::power::PowerChoice::Sleep
+        .command()
+        .expect("the power menu's Sleep runs a command");
+    assert_eq!(
+        session
+            .take_launches()
+            .into_iter()
+            .map(|l| (l.program, l.args))
+            .collect::<Vec<_>>(),
+        vec![(sleep.program, sleep.args)],
+        "the computer's delay did not run Sleep"
+    );
+    assert_eq!(
+        sleeps_asked(&desktop),
+        0,
+        "it put the displays to sleep instead"
+    );
 }
 
 /// Deliver the notification the compositor sends a window that claimed an

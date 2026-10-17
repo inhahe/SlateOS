@@ -2287,6 +2287,7 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 /// The window size to ask for.
 const WINDOW_WIDTH: f32 = 1300.0;
@@ -2622,7 +2623,8 @@ pub struct TorrentApp {
     pub selected_torrent: Option<u32>,
     pub next_id: u32,
     pub peer_id: [u8; 20],
-    pub search_query: String,
+    /// The search box, which is the search the list is filtered by.
+    pub search: SearchBox,
     pub sort_column: SortColumn,
     /// Whether the shortcut card is up.
     pub show_help: bool,
@@ -2642,9 +2644,6 @@ pub struct TorrentApp {
     since_sample_ms: u64,
     /// Whether the search box has the keys.
     pub search_active: bool,
-    /// The search box's caret and selection: reloaded from `search_query`
-    /// when that changed underneath it.
-    search_editor: TextInput,
     /// How far the transfer list is scrolled, in rows. It did not scroll:
     /// rows past the bottom were not drawn.
     pub transfer_scroll: usize,
@@ -2837,7 +2836,7 @@ impl TorrentApp {
             selected_torrent: None,
             next_id: 1,
             peer_id,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             sort_column: SortColumn::Added,
             show_help: false,
             sort_ascending: false,
@@ -2851,7 +2850,6 @@ impl TorrentApp {
             sessions: HashMap::new(),
             since_sample_ms: 0,
             search_active: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             transfer_scroll: 0,
             field_menu: fieldmenu::FieldMenu::new(),
             hover: None,
@@ -3404,10 +3402,10 @@ impl TorrentApp {
             .iter()
             .filter(|t| self.filter.matches(t.state))
             .filter(|t| {
-                if self.search_query.is_empty() {
+                if self.search.is_empty() {
                     true
                 } else {
-                    let q = self.search_query.to_lowercase();
+                    let q = self.search.text().to_lowercase();
                     t.name.to_lowercase().contains(&q) || t.label.to_lowercase().contains(&q)
                 }
             })
@@ -3665,62 +3663,25 @@ impl TorrentApp {
             },
             self.focus_ring_width,
         );
-        if self.search_active {
-            // The box with the keys: its text, with the caret and the
-            // selection where they are -- the end of the text if the search
-            // changed under the box's editor.
-            let synced = self.search_editor.text() == self.search_query;
-            let mut tree = RenderTree::new();
-            guitk::textedit::draw(
-                &mut tree,
-                &guitk::textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: if synced {
-                        self.search_editor.cursor()
-                    } else {
-                        text::TextCursor::from(self.search_query.len())
-                    },
-                    selection_anchor: if synced {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: true,
-                    x: search.x + 10.0,
-                    y: search.y + 8.0,
-                    width: (search.w - 20.0).max(0.0),
-                    line_height: 16.0,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.blue,
-                    selection_fg: self.palette.crust,
-                    caret_width: guitk::textedit::CARET_WIDTH,
-                },
-            );
-            for command in tree.commands {
-                f.push(command);
-            }
-        } else {
-            let placeholder = self.search_query.is_empty();
-            f.push(RenderCommand::Text {
+        let mut tree = RenderTree::new();
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
                 x: search.x + 10.0,
-                y: search.y + 9.0,
-                text: if placeholder {
-                    String::from("Search names and labels  ( / )")
-                } else {
-                    self.search_query.clone()
-                },
-                font_size: SEARCH_TEXT_SIZE,
-                color: if placeholder {
-                    self.palette.subtext0
-                } else {
-                    self.palette.text
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(search.w - 20.0),
-                overflow: TextOverflow::Ellipsis,
-            });
+                y: search.y + 8.0,
+                width: search.w - 20.0,
+                line_height: 16.0,
+                focused: self.search_active,
+                placeholder: "Search names and labels  ( / )",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: guitk::textedit::CARET_WIDTH,
+            },
+        );
+        for command in tree.commands {
+            f.push(command);
         }
         f.hit(Target::Search, search);
     }
@@ -5089,9 +5050,8 @@ impl TorrentApp {
         let (field, menu) = match target {
             Some(Target::MagnetField) => (MenuField::Magnet, self.magnet_input.edit_menu()),
             Some(Target::Search) => {
-                self.sync_search_editor();
                 self.search_active = true;
-                (MenuField::Search, self.search_editor.edit_menu())
+                (MenuField::Search, self.search.edit_menu())
             }
             _ => return EventResult::Ignored,
         };
@@ -5110,10 +5070,8 @@ impl TorrentApp {
                 }
             }
             MenuField::Search => {
-                self.sync_search_editor();
-                if self.search_editor.edit_command(id) == KeyEdit::Changed {
-                    let typed = self.search_editor.text().to_owned();
-                    self.set_search(&typed);
+                if self.search.menu_row(id) {
+                    self.search_changed();
                 }
             }
         }
@@ -5175,7 +5133,9 @@ impl TorrentApp {
         match key.key {
             Key::Escape if plain => {
                 self.search_active = false;
-                self.set_search("");
+                if self.search.clear() {
+                    self.search_changed();
+                }
                 return EventResult::Consumed;
             }
             Key::Enter | Key::Tab if plain => {
@@ -5184,10 +5144,10 @@ impl TorrentApp {
             }
             _ => {}
         }
-        self.sync_search_editor();
-        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
-        let typed = self.search_editor.text().to_owned();
-        self.set_search(&typed);
+        let edit = self.search.key(key);
+        if edit.changed {
+            self.search_changed();
+        }
         if edit.handled {
             EventResult::Consumed
         } else {
@@ -5195,41 +5155,16 @@ impl TorrentApp {
         }
     }
 
-    /// Load the search box's editor from `search_query` when the search
-    /// changed underneath it, its caret at the end.
-    fn sync_search_editor(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-    }
-
-    /// The search changed to `text`: the list follows it, from its top.
-    fn set_search(&mut self, text: &str) {
-        if self.search_query != text {
-            text.clone_into(&mut self.search_query);
-            self.transfer_scroll = 0;
-        }
+    /// The search changed: the list follows it, from its top.
+    fn search_changed(&mut self) {
+        self.transfer_scroll = 0;
     }
 
     /// A press in the search box `rect` at `x`: its caret where the press
     /// landed, against the text as the box draws it.
     fn place_search_caret(&mut self, rect: Rect, x: f32) {
-        let drawn = if self.search_active {
-            self.search_editor.cursor()
-        } else {
-            text::TextCursor::default()
-        };
-        self.sync_search_editor();
-        let cursor = guitk::textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (rect.w - 20.0).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - 10.0,
-        );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
+        self.search
+            .press(x - rect.x - 10.0, rect.w - 20.0, self.search_active);
     }
 }
 
@@ -6207,7 +6142,7 @@ about anything -- it drew {} text command(s)",
         app.handle_event(&chord(Key::Enter, "", Modifiers::alt()));
         app.handle_event(&chord(Key::Escape, "", Modifiers::super_key()));
         assert!(app.search_active, "a chorded Enter or Escape closed it");
-        assert_eq!(app.search_query, "@", "a command's letter, or AltGr lost");
+        assert_eq!(app.search.text(), "@", "a command's letter, or AltGr lost");
         app.handle_event(&press(Key::Escape));
 
         // The magnet dialog's Enter and Escape are plain.
@@ -6787,7 +6722,7 @@ about anything -- it drew {} text command(s)",
         let meta2 = create_sample_torrent("Fedora Server", 2000, 256, "http://t.co/a");
         app.add_torrent(meta1, None);
         app.add_torrent(meta2, None);
-        app.search_query = "ubuntu".to_string();
+        app.search.set_text("ubuntu");
         let filtered = app.filtered_torrents();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].name.contains("Ubuntu"));
@@ -7744,7 +7679,7 @@ about anything -- it drew {} text command(s)",
         probe::click(&mut app, Target::Search);
         assert!(app.search_active);
         probe::type_str(&mut app, "libre");
-        assert_eq!(app.search_query, "libre");
+        assert_eq!(app.search.text(), "libre");
         let names: Vec<&str> = app
             .filtered_torrents()
             .iter()
@@ -7762,17 +7697,14 @@ about anything -- it drew {} text command(s)",
             "Delete in the search removed a transfer"
         );
         probe::key(&mut app, &probe::press(Key::Escape));
-        assert!(!app.search_active && app.search_query.is_empty());
+        assert!(!app.search_active && app.search.is_empty());
         probe::key(&mut app, &probe::press(Key::Slash));
         assert!(app.search_active, "/ did not start a search");
         // A press anywhere else takes the keys back from the box.
         probe::click(&mut app, Target::TransferList);
         assert!(!app.search_active, "the search box kept the keys");
         probe::type_str(&mut app, "q");
-        assert!(
-            app.search_query.is_empty(),
-            "a key went into the search box"
-        );
+        assert!(app.search.is_empty(), "a key went into the search box");
     }
 
     #[test]
@@ -8075,7 +8007,8 @@ about anything -- it drew {} text command(s)",
             "a letter typed into the search is reported unanswered, so nothing redraws"
         );
         assert_eq!(
-            app.search_query, "libre",
+            app.search.text(),
+            "libre",
             "typing did not go in at the caret"
         );
         assert_eq!(
@@ -8089,13 +8022,15 @@ about anything -- it drew {} text command(s)",
         probe::key(&mut app, &probe::press(Key::Home));
         probe::key(&mut app, &probe::press(Key::Delete));
         assert_eq!(
-            app.search_query, "ibre",
+            app.search.text(),
+            "ibre",
             "Delete did not take the first character"
         );
         probe::key(&mut app, &probe::ctrl(Key::A));
         probe::type_str(&mut app, "x");
         assert_eq!(
-            app.search_query, "x",
+            app.search.text(),
+            "x",
             "typing did not replace the selection"
         );
         assert!(
@@ -8120,22 +8055,49 @@ about anything -- it drew {} text command(s)",
         press_at(&mut app, start, y);
         probe::type_str(&mut app, "x");
         assert_eq!(
-            app.search_query, "xab",
+            app.search.text(),
+            "xab",
             "the press did not put the caret at the start"
         );
     }
 
-    /// **A search set from outside the box is the box's too**: what the box
-    /// edits is reloaded from the search, its caret at the end, so typing
-    /// carries on from it rather than from what the box last held.
+    /// **A press in a long search set from outside lands where it was
+    /// drawn** (the Fable review of 007d0552c..752d46d80): with the box's
+    /// editor a second copy of the search, a search set from outside drew
+    /// scrolled to its end while a press was measured from the editor's old
+    /// caret, so the caret went to the wrong letter. The search and its
+    /// caret are one field now; a press near the right edge of a long one
+    /// lands near its end.
+    #[test]
+    fn a_press_in_a_long_search_set_from_outside_lands_where_it_was_drawn() {
+        let mut app = seeded();
+        let search = probe::rect_of(&app, Target::Search).expect("the search box");
+        let y = search.y + search.h / 2.0;
+        press_at(&mut app, search.x + 11.0, y);
+        assert!(
+            app.search_active,
+            "control: the press gave the box the keys"
+        );
+        app.search.set_text(&"w".repeat(120));
+        press_at(&mut app, search.right() - 11.0, y);
+        let at = app.search.input().cursor().byte();
+        assert!(
+            at > 90,
+            "the press landed at {at}, measured from where the search was not drawn"
+        );
+    }
+
+    /// **A search set from outside the box is the box's too**: its caret goes
+    /// to the end, so typing carries on from it rather than from where the
+    /// caret was before.
     #[test]
     fn a_search_set_from_outside_is_the_boxs_too() {
         let mut app = seeded();
-        app.search_query = String::from("ubuntu");
+        app.search.set_text("ubuntu");
         probe::key(&mut app, &probe::press(Key::Slash));
         assert!(app.search_active, "control: / gives the search the keys");
         probe::type_str(&mut app, "x");
-        assert_eq!(app.search_query, "ubuntux");
+        assert_eq!(app.search.text(), "ubuntux");
     }
 
     /// **A change to the search shows the list from its top**, where what it
@@ -8153,7 +8115,7 @@ about anything -- it drew {} text command(s)",
         assert_eq!(app.transfer_scroll, 2, "a caret move scrolled the list");
         probe::key(&mut app, &probe::press(Key::End));
         probe::type_str(&mut app, "m");
-        assert_eq!(app.search_query, "Item");
+        assert_eq!(app.search.text(), "Item");
         assert_eq!(
             app.transfer_scroll, 0,
             "the list did not go back to its top"
@@ -8176,7 +8138,8 @@ about anything -- it drew {} text command(s)",
         assert!(app.search_active, "the box was not given the keys");
         probe::type_str(&mut app, "x");
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "a key reached the box through the menu"
         );
         probe::key(&mut app, &probe::press(Key::Escape));
@@ -8190,6 +8153,6 @@ about anything -- it drew {} text command(s)",
             .row_middle(EditCommand::Paste)
             .expect("Paste");
         press_at(&mut app, x, y);
-        assert_eq!(app.search_query, "libre", "Paste did not paste");
+        assert_eq!(app.search.text(), "libre", "Paste did not paste");
     }
 }

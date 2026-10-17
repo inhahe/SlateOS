@@ -351,8 +351,8 @@ MAIN = [
     ),
     (
         "the search types a command's letter",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        self.search_editor.insert_text(&key.text);\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "        let edit = self.search.key(key);\n",
+        "        let typed = format!(\"{}{}\", self.search.text(), key.text);\n        self.search.set_text(&typed);\n        let edit = self.search.key(key);\n",
         ['a_chord_is_neither_a_torrent_key_nor_typing'],
     ),
     # -- the text boxes, the toolkit's fields (c-e-a-theme-can-shape-the-controls)
@@ -364,9 +364,15 @@ MAIN = [
     ),
     (
         "the search box is not marked while it has the keyboard",
-        '                focused: self.search_active,',
-        '                focused: false,',
+        '                focused: self.search_active,\n                disabled: false,',
+        '                focused: false,\n                disabled: false,',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        "a press is measured as the box was not drawn",
+        "            .press(x - rect.x - 10.0, rect.w - 20.0, self.search_active);\n",
+        "            .press(x - rect.x - 10.0, rect.w - 20.0, !self.search_active);\n",
+        ["a_press_in_a_long_search_set_from_outside_lands_where_it_was_drawn"],
     ),
     (
         "a link this client cannot read is not drawn red",
@@ -456,39 +462,27 @@ S_SCROLL = "a_change_to_the_search_shows_the_list_from_its_top"
 
 MAIN += [
     (
-        "the search types only at its end",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        let end = self.search_editor.text().len();\n        self.search_editor.set_cursor(text::TextCursor::from(end));\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        [S_CARET],
-    ),
-    (
-        "the search box's editor is not reloaded",
-        "        self.sync_search_editor();\n        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        [S_SYNC],
-    ),
-    (
-        "what is typed is not searched for",
-        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n        if edit.handled {\n",
+        "a change to the search by a key leaves the list where it was",
+        "        if edit.changed {\n            self.search_changed();\n        }\n        if edit.handled {\n",
         "        if edit.handled {\n",
-        [S_CARET],
+        [S_SCROLL],
     ),
     (
         "a key typed into the search is reported unanswered",
-        "        self.set_search(&typed);\n        if edit.handled {\n",
-        "        self.set_search(&typed);\n        if false {\n",
+        "            self.search_changed();\n        }\n        if edit.handled {\n",
+        "            self.search_changed();\n        }\n        if false {\n",
         [S_CARET],
     ),
     (
         "the search box answers the window's chords",
-        "        self.set_search(&typed);\n        if edit.handled {\n",
-        "        self.set_search(&typed);\n        if true {\n",
+        "            self.search_changed();\n        }\n        if edit.handled {\n",
+        "            self.search_changed();\n        }\n        if true {\n",
         [S_CARET],
     ),
     (
         "the box with the keys is drawn as any other",
-        "        if self.search_active {\n            // The box with the keys:",
-        "        if false {\n            // The box with the keys:",
+        "                focused: self.search_active,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [S_CARET],
     ),
     (
@@ -505,20 +499,20 @@ MAIN += [
     ),
     (
         "the search's right-click leaves the keys where they were",
-        "                self.search_active = true;\n                (MenuField::Search, self.search_editor.edit_menu())\n",
-        "                (MenuField::Search, self.search_editor.edit_menu())\n",
+        "                self.search_active = true;\n                (MenuField::Search, self.search.edit_menu())\n",
+        "                (MenuField::Search, self.search.edit_menu())\n",
         [S_MENU],
     ),
     (
         "a row chosen does nothing to the search",
-        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if self.search.menu_row(id) {\n",
         "                if false {\n",
         [S_MENU],
     ),
     (
         "a change to the search leaves the list where it was",
-        "            text.clone_into(&mut self.search_query);\n            self.transfer_scroll = 0;\n",
-        "            text.clone_into(&mut self.search_query);\n",
+        "    fn search_changed(&mut self) {\n        self.transfer_scroll = 0;\n",
+        "    fn search_changed(&mut self) {\n",
         [S_SCROLL],
     ),
 ]

@@ -22,7 +22,10 @@ const NLMSG_HDRLEN: usize = 16;
 mod sys {
     unsafe extern "C" {
         pub fn socket(domain: i32, kind: i32, protocol: i32) -> i32;
-        pub fn bind(fd: i32, addr: *const SockaddrNl, len: u32) -> i32;
+        // An untyped address, as `alg` declares it too: one symbol
+        // declared two ways in one crate is what
+        // `clashing_extern_declarations` refuses.
+        pub fn bind(fd: i32, addr: *const core::ffi::c_void, len: u32) -> i32;
         pub fn recv(fd: i32, buf: *mut core::ffi::c_void, len: usize, flags: i32) -> isize;
         pub fn close(fd: i32) -> i32;
     }
@@ -75,7 +78,7 @@ pub fn open_route(groups: u32) -> Result<i32, i32> {
         };
         // SAFETY: `addr` is a whole `sockaddr_nl` alive for the call, which
         // only reads it, and the length is its size.
-        let rc = unsafe { sys::bind(fd, &raw const addr, 12) };
+        let rc = unsafe { sys::bind(fd, (&raw const addr).cast(), 12) };
         if rc < 0 {
             let errno = crate::last_errno();
             // SAFETY: `fd` is the socket made above, closed once.

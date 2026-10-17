@@ -63,6 +63,7 @@
 
 use core::ffi::CStr;
 
+pub mod alg;
 pub mod clock;
 pub mod conf;
 pub mod crypt;
@@ -89,6 +90,7 @@ pub mod termios;
 pub mod tty;
 pub mod utmp;
 pub mod uts;
+pub mod xattr;
 
 // ---------------------------------------------------------------------------
 // Values

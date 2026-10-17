@@ -16,7 +16,9 @@ testing does not run. `chattr` is the first case and has its own entry
 | Crate | What is Unix-only | What checks it |
 |---|---|---|
 | `userspace/rfkill` | the device loops, `rfkill_block_on`, `rfkill_event`, `fill_table_row` (`tests.rs`'s `FakeDevice` tests are `#[cfg(unix)]`) | `scripts/rfkill-diff.sh`; the unit tests under WSL |
+| `userspace/hardlink` | everything but `tree.rs`: `hardlink.rs`, `walk.rs`, `fileeq.rs` | `scripts/hardlink-diff.sh`; the unit tests under WSL |
 | `userspace/ulallio` | `read_all`, `write_all` (libcall answers `ENOSYS` off Unix) | its unit tests under WSL |
+| `libcall/src/{alg,xattr}.rs` | every call | their unit tests under WSL; `hardlink-diff.sh` |
 | `libcall/src/fd.rs` | `poll` (6 mutants survived the review of `b50f04266..07e9cfcd0`) | its unit test under WSL; `rfkill-diff.sh`'s `event` cases |
 | `userspace/curses/src/lib.rs` | not Unix-only, but as far out of reach: the wrappers around the one process-wide screen (`use_legacy_coding`, `tigetstr`), which no unit test may install beside the others | `Screen`'s own methods' tests; `curses-diff.sh` |
 

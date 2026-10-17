@@ -6431,7 +6431,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] dmsetup/dmstats/kpartx: device mapper control (19 commands, 12 target types, MBR/GPT partition parsing, 190 tests)
   - [x] lsirq: IRQ information display (/proc/interrupts + softirqs, JSON/pairs output) -- since 2026-09-26 a port of util-linux 2.39.3's `lsirq.c` and `irq-common.c` on `smartcols`; `scripts/lsirq-diff.sh` (fake `/proc` files bound in a user namespace): 212 cases agree, 1 more where only upstream never finishes
   - [x] irqbalance: IRQ balancing daemon (load imbalance detection, CPU affinity migration)
-  - [x] hardlink: duplicate file deduplication (FNV-1a hashing, byte-verify, dry-run mode)
+  - [x] hardlink: duplicate file deduplication -- since 2026-10-17 a port of util-linux 2.39.3's `hardlink.c` with `lib/fileeq.c` (contents compared block by block, digests made by the kernel's `AF_ALG` where it has one, else `memcmp`) and glibc's `tsearch`/`twalk` and `nftw`, whose orders decide which file is kept and in what order they are linked; `scripts/hardlink-diff.sh` (each tree built afresh in a tmpfs of its own, the trees left behind compared too): 158 cases agree
   - [x] dmidecode/biosdecode: SMBIOS/DMI table decoder (type filtering, string keyword lookup, JSON output, hex dump)
   - [x] efibootmgr/efivar: EFI boot variable manager (boot entry CRUD, boot order, UCS-2 label parsing)
   - [x] inotifywait/inotifywatch: filesystem event monitoring (14 event types, glob filtering, CSV/custom output, statistics)

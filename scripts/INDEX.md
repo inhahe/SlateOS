@@ -258,6 +258,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/guest.py` | A SlateOS guest that stays up, and a way into it from the host. |
 | `scripts/gzip-diff.sh` | Differential test: our `gzip` (and `gunzip`, `zcat`, `uncompress`) against |
 | `scripts/hang-repro-loop.sh` | hang-repro-loop.sh — Repeatedly boot the (already-built) kernel to try to |
+| `scripts/hardlink-diff.sh` | Differential test: our `hardlink` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
 | `scripts/hexdump-diff.sh` | Differential test: our `hexdump` against util-linux 2.39.3's. |
 | `scripts/host-errmsg.py` | Find utilities that print the *host's* error text instead of POSIX's. |
@@ -597,4 +598,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_587 scripts._
+_588 scripts._

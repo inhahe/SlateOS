@@ -30,12 +30,12 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 // ── Layout ─────────────────────────────────────────────────────────────────
 //
@@ -582,18 +582,13 @@ struct RadioApp {
     spectrum_rng: SeededRng,
 
     // Search
-    search_query: String,
+    /// The search box, which is the query.
+    search: SearchBox,
     search_results: Vec<usize>,
     search_selected: usize,
     /// Whether the shortcut card is up.
     show_help: bool,
     search_active: bool,
-    /// The search box's caret and selection, laid over `search_query`,
-    /// which stays the truth: reloaded whenever the query has changed under
-    /// it (`/` opens the search empty).
-    search_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
-    search_clipboard: String,
     /// How wide the mark is round the search box while it has the keyboard:
     /// the user's focus width (`App::appearance_changed`), the toolkit's
     /// until it is known.
@@ -657,13 +652,11 @@ impl RadioApp {
             record_duration_secs: 0,
             spectrum_bars,
             spectrum_rng: seeded_from_system(FALLBACK_SEED),
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_results: Vec::new(),
             search_selected: 0,
             show_help: false,
             search_active: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             screen: Screen::Browse,
             status_message: "Select a station and press Enter to play".into(),
@@ -982,7 +975,7 @@ impl RadioApp {
     fn perform_search(&mut self) {
         self.search_results.clear();
         self.search_selected = 0;
-        let query = self.search_query.trim().to_lowercase();
+        let query = self.search.text().trim().to_lowercase();
         if query.is_empty() {
             return;
         }
@@ -998,7 +991,7 @@ impl RadioApp {
         }
 
         self.status_message = if self.search_results.is_empty() {
-            format!("No stations found for '{}'", self.search_query)
+            format!("No stations found for '{}'", self.search.text())
         } else {
             format!("{} stations found", self.search_results.len())
         };
@@ -1207,7 +1200,7 @@ impl RadioApp {
             match event.key {
                 Key::Escape if plain => {
                     self.search_active = false;
-                    self.search_query.clear();
+                    self.search.clear();
                     self.search_results.clear();
                     self.screen = Screen::Browse;
                     return true;
@@ -1290,7 +1283,7 @@ impl RadioApp {
             '3' => self.show_screen(Screen::Recent),
             '/' => {
                 self.search_active = true;
-                self.search_query.clear();
+                self.search.clear();
                 self.status_message = "Type to search stations...".into();
             }
             't' => self.set_sleep_timer(),
@@ -1961,35 +1954,24 @@ impl RadioApp {
     /// Delete, Ctrl+A, C, X and V, and typing, which knows a command from
     /// AltGr (`textline::apply_key`). Polish `ś` is AltGr+S, which arrives as
     /// Ctrl+Alt -- and was refused as Ctrl -- while Alt+X searched for `x`.
-    /// The box had no caret: Backspace from the end was its only edit.
+    /// On the program's clipboard. Whether the key changed what is drawn:
+    /// the search, its caret or its selection.
     fn edit_search(&mut self, event: &KeyEvent) -> bool {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
         let before = (
-            self.search_editor.cursor(),
-            self.search_editor.selection_anchor(),
+            self.search.input().cursor(),
+            self.search.input().selection_anchor(),
         );
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            event,
-            &self.search_clipboard,
-            SEARCH_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
+        let edit = self.search.key(event);
         if !edit.handled {
             return false;
         }
-        if self.search_editor.text() != self.search_query {
-            self.search_query = self.search_editor.text().to_owned();
+        if edit.changed {
             self.perform_search();
             return true;
         }
         (
-            self.search_editor.cursor(),
-            self.search_editor.selection_anchor(),
+            self.search.input().cursor(),
+            self.search.input().selection_anchor(),
         ) != before
     }
 
@@ -2013,7 +1995,7 @@ impl RadioApp {
             hovered: false,
             focused: self.search_active && !self.show_help,
             disabled: false,
-            invalid: !self.search_query.trim().is_empty() && self.search_results.is_empty(),
+            invalid: !self.search.text().trim().is_empty() && self.search_results.is_empty(),
         }
     }
 
@@ -2038,49 +2020,24 @@ impl RadioApp {
             rect.y + (rect.h - line) / 2.0,
             (rect.w - 16.0).max(0.0),
         );
-        if self.search_query.is_empty() && !state.focused {
-            cmds.push(RenderCommand::Text {
+        let mut typed = RenderTree::new();
+        self.search.draw(
+            &mut typed,
+            &SearchLook {
                 x: tx,
                 y: ty,
-                text: "Type to search stations...".to_string(),
-                font_size: SEARCH_TEXT_SIZE,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            let editing = self.search_editor.text() == self.search_query;
-            let mut typed = RenderTree::new();
-            textedit::draw(
-                &mut typed,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: if editing {
-                        self.search_editor.cursor()
-                    } else {
-                        text::TextCursor::from(self.search_query.len())
-                    },
-                    selection_anchor: if editing {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: state.focused,
-                    x: tx,
-                    y: ty,
-                    width: tw,
-                    line_height: line,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-            cmds.extend(typed.commands);
-        }
+                width: tw,
+                line_height: line,
+                focused: state.focused,
+                placeholder: "Type to search stations...",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(typed.commands);
 
         if !self.search_results.is_empty() {
             cmds.push(RenderCommand::Text {
@@ -2524,7 +2481,7 @@ mod tests {
     #[test]
     fn test_search() {
         let mut app = RadioApp::new();
-        app.search_query = "jazz".into();
+        app.search.set_text("jazz");
         app.perform_search();
         assert!(!app.search_results.is_empty());
         for &idx in &app.search_results {
@@ -2539,7 +2496,7 @@ mod tests {
     #[test]
     fn test_search_no_results() {
         let mut app = RadioApp::new();
-        app.search_query = "xyzzyplugh".into();
+        app.search.set_text("xyzzyplugh");
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -2547,7 +2504,7 @@ mod tests {
     #[test]
     fn test_search_empty() {
         let mut app = RadioApp::new();
-        app.search_query = String::new();
+        app.search.clear();
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -3365,9 +3322,9 @@ mod tests {
         assert_eq!(app.play_state, PlayState::Stopped);
 
         app.search_active = true;
-        app.search_query = "jazz".into();
+        app.search.set_text("jazz");
         assert!(app.handle_key(&key(Key::Backspace)));
-        assert_eq!(app.search_query, "jaz");
+        assert_eq!(app.search.text(), "jaz");
 
         app.search_active = false;
         assert!(app.handle_key(&key(Key::PageDown)));
@@ -3436,7 +3393,7 @@ mod tests {
     fn backspace_on_an_empty_search_asks_for_no_frame() {
         let mut app = sized();
         app.search_active = true;
-        app.search_query.clear();
+        app.search.clear();
         assert!(!app.handle_key(&key(Key::Backspace)));
     }
 
@@ -3448,10 +3405,10 @@ mod tests {
         for ch in "jazz".chars() {
             app.handle_key(&typed(Key::J, ch));
         }
-        assert_eq!(app.search_query, "jazz");
+        assert_eq!(app.search.text(), "jazz");
         assert!(app.handle_key(&key(Key::Escape)));
         assert!(!app.search_active);
-        assert_eq!(app.search_query, "");
+        assert_eq!(app.search.text(), "");
     }
 
     #[test]
@@ -3765,12 +3722,13 @@ mod tests {
         };
         assert!(!app.handle_key(&ctrl(Key::K, "k")));
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "Ctrl+K is a command nobody has bound, not the letter K"
         );
         // Ctrl+A is the box's -- it selects everything -- and still no letter.
         app.handle_key(&ctrl(Key::A, "a"));
-        assert_eq!(app.search_query, "", "Ctrl+A typed the letter A");
+        assert_eq!(app.search.text(), "", "Ctrl+A typed the letter A");
     }
 
     /// **The search box is the toolkit's field, and edits like one**: with
@@ -3828,7 +3786,7 @@ mod tests {
                 ..Modifiers::NONE
             },
         ));
-        assert_eq!(app.search_query, "jazz", "Alt+X searched for x");
+        assert_eq!(app.search.text(), "jazz", "Alt+X searched for x");
         let cmds = app.render_commands();
         let at = cmds
             .iter()
@@ -3847,7 +3805,8 @@ mod tests {
         app.handle_key(&held(Key::Home, "", Modifiers::NONE));
         app.handle_key(&held(Key::Delete, "", Modifiers::NONE));
         assert_eq!(
-            app.search_query, "azz",
+            app.search.text(),
+            "azz",
             "Home and Delete did not edit the start"
         );
         app.handle_key(&held(
@@ -3859,7 +3818,7 @@ mod tests {
                 ..Modifiers::NONE
             },
         ));
-        assert_eq!(app.search_query, "\u{15b}azz", "AltGr did not type");
+        assert_eq!(app.search.text(), "\u{15b}azz", "AltGr did not type");
 
         app.handle_key(&held(
             Key::A,
@@ -3873,7 +3832,8 @@ mod tests {
             app.handle_key(&typed(Key::Unknown(0), c));
         }
         assert_eq!(
-            app.search_query, "zzq",
+            app.search.text(),
+            "zzq",
             "typing did not replace the selection"
         );
         assert!(app.search_results.is_empty());

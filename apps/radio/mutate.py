@@ -120,7 +120,8 @@ MUTATIONS += [
         "                    if typed.is_empty() || event.modifiers.ctrl {\n"
         "                        return self.edit_search(event);\n"
         "                    }\n"
-        "                    self.search_query.push_str(&typed);\n"
+        "                    let typed = format!(\"{}{}\", self.search.text(), typed);\n"
+        "                    self.search.set_text(&typed);\n"
         "                    return true;\n"
         "                }\n",
         [FIELD],
@@ -139,7 +140,7 @@ MUTATIONS += [
     ),
     (
         "a search that finds nothing is not red",
-        "            invalid: !self.search_query.trim().is_empty() && self.search_results.is_empty(),\n",
+        "            invalid: !self.search.text().trim().is_empty() && self.search_results.is_empty(),\n",
         "            invalid: false,\n",
         [FIELD],
     ),
@@ -150,9 +151,9 @@ MUTATIONS += [
         [FIELD],
     ),
     (
-        "the caret is drawn at the start of the search",
-        "                        self.search_editor.cursor()\n",
-        "                        text::TextCursor::default()\n",
+        "the box with the keyboard is drawn without it",
+        "                focused: state.focused,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [FIELD],
     ),
 ]

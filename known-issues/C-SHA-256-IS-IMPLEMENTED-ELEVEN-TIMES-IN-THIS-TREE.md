@@ -12,7 +12,7 @@ of them guard logging in and unlocking the screen.
 | `kernel/src/crypto.rs` | A | one-shot |
 | `posix/src/sha2.rs` | B | one-shot, has the FIPS million-`a` vector |
 | `posix/src/crypt.rs` | B | via `sha2` |
-| `init/loginmgr/src/main.rs` | B | block compression + one-shot |
+| `init/loginmgr/src/main.rs` | B | block compression + one-shot -- **gone by 2026-10-16**: `loginmgr` checks passwords through `authlib` (lane B) |
 | `userspace/coreutils/src/bin/sha256sum.rs` | B | one-shot |
 | `userspace/backup/src/main.rs` | B | streaming |
 | `kernel/src/oci.rs` | A | digest string |

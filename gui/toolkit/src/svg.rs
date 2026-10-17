@@ -69,6 +69,11 @@
 //!   the first of its children whose conditions hold -- `systemLanguage` and
 //!   `requiredExtensions`, which decide on any element whether it is drawn
 //!   (the `conditions` module)
+//! - Text: a `<text>` and its `<tspan>`s, laid out when the document is
+//!   built -- `x`, `y`, `dx`, `dy`, `text-anchor`, and `font-family`,
+//!   `font-size` and `font-weight` inherited from any element -- and drawn as
+//!   the outlines of their glyphs, so filled, stroked and painted as any
+//!   shape is (the `text` module says what of it is drawn)
 //! - Color parsing: hex, named colors, rgb(), rgba(), none, transparent, currentColor
 //! - XML namespaces: an element is SVG's by its namespace, not by how it is
 //!   written -- `<svg:rect>` with `svg` bound to SVG's namespace is drawn,
@@ -111,6 +116,7 @@ mod paint;
 #[cfg(test)]
 mod painting_tests;
 mod pattern;
+mod text;
 #[cfg(test)]
 mod use_tests;
 #[cfg(test)]
@@ -1585,6 +1591,7 @@ impl SvgDocument {
         let marker_ids = Referable::collect(first, &by_id, "marker");
         // Every picture named, decoded once however many name it.
         let pictures = Pictures::collect(first);
+        let fonts = text::Fonts::new();
         let tables = Tables {
             defs: &defs,
             reusable: &reusable,
@@ -1594,12 +1601,14 @@ impl SvgDocument {
             filter_lists: &filter_lists,
             markers: &marker_ids,
             pictures: &pictures,
+            fonts: &fonts,
         };
         let builder = Builder {
             tables: &tables,
             ancestors: None,
             viewport: (view_w, view_h),
             outermost: true,
+            font: text::Fonts::INHERITED_BY_THE_ROOT,
         };
         let reused = reusable
             .targets
@@ -2143,9 +2152,9 @@ struct XmlElement {
     tag: String,
     attrs: Vec<(String, String)>,
     children: Vec<XmlElement>,
-    /// The text a `<style>` element holds, its CDATA sections with it; empty
-    /// for every other element -- this renderer draws no text, and a sheet is
-    /// the one text it reads.
+    /// The text a `<style>` element holds, its CDATA sections with it, or
+    /// the characters of a run inside a `<text>` (a child tagged
+    /// `text::TEXT_NODE`); empty for every other element.
     text: String,
 }
 
@@ -2503,8 +2512,11 @@ fn parse_element(
         .collect();
 
     let mut children = Vec::new();
-    // A style sheet is the one text this renderer reads.
+    // A style sheet's text is read whole; a `<text>`'s or a `<tspan>`'s is
+    // kept in order among its children, its white space with it, for the
+    // `text` module to lay out.
     let keeps_text = tag == "style";
+    let mixed = text::holds_text(&tag);
     let mut text = String::new();
     if c.eat(b'/') {
         // Self-closing, `<tag ... />`. If the document ends before the '>',
@@ -2512,12 +2524,16 @@ fn parse_element(
         c.eat(b'>');
     } else if c.eat(b'>') {
         loop {
-            c.skip_whitespace();
+            if !mixed {
+                c.skip_whitespace();
+            }
             let Some(byte) = c.peek() else { break };
             if byte != b'<' {
                 if keeps_text {
                     text.push_str(&decode_entities(&c.take_while(|b| b != b'<')));
                     text.push('\n');
+                } else if mixed {
+                    children.push(text_node(decode_entities(&c.take_while(|b| b != b'<'))));
                 } else {
                     // Text content, which this parser has no use for.
                     c.bump();
@@ -2538,6 +2554,9 @@ fn parse_element(
                     text.push_str(take_cdata(c));
                     text.push('\n');
                 }
+                Some(b'!') if mixed && c.starts_with(CDATA_OPEN) => {
+                    children.push(text_node(take_cdata(c).to_owned()));
+                }
                 Some(b'!' | b'?') => skip_special(c),
                 _ => children.push(parse_element(c, depth.saturating_add(1), scope)?),
             }
@@ -2550,6 +2569,16 @@ fn parse_element(
         children,
         text,
     })
+}
+
+/// A run of characters inside a `<text>` or a `<tspan>`, as a child.
+fn text_node(text: String) -> XmlElement {
+    XmlElement {
+        tag: text::TEXT_NODE.to_owned(),
+        attrs: Vec::new(),
+        children: Vec::new(),
+        text,
+    }
 }
 
 /// How a CDATA section opens, and closes.
@@ -2691,6 +2720,9 @@ struct Tables<'b> {
     markers: &'b Referable<'b>,
     /// The pictures its `<image>`s name, decoded, by `href`.
     pictures: &'b Pictures,
+    /// Every font an element in it changes to, for a builder to name by its
+    /// place ([`Builder::font`]).
+    fonts: &'b text::Fonts,
 }
 
 /// What building an element's node needs beyond the element: what the whole
@@ -2711,6 +2743,11 @@ struct Builder<'b> {
     /// Whether the element is the document's outermost, whose `<svg>` the
     /// renderer places itself; an `<svg>` inside it is placed by its parent.
     outermost: bool,
+    /// The font properties the element inherits, and passes on as it changes
+    /// them -- what a `<text>` in it is laid out in -- by its place among
+    /// [`Tables::fonts`]: a font is some seventy bytes, and a builder is
+    /// copied into every frame of the recursion.
+    font: u32,
 }
 
 impl Builder<'_> {
@@ -3147,8 +3184,17 @@ fn build_node(elem: &XmlElement, b: Builder<'_>) -> Result<SvgNode, SvgError> {
         }
         None => b,
     };
+    // The font it passes on, as CSS inherits it: a `<g font-size>` sizes the
+    // text inside it.
+    let b = match text::changed_font(elem, b) {
+        Some(font) => Builder { font, ..b },
+        None => b,
+    };
     match elem.tag.as_str() {
         "svg" => build_svg(elem, b),
+        "text" => text::build(elem, b),
+        // Only inside a `<text>`, which lays them out itself.
+        "tspan" | text::TEXT_NODE => Ok(nothing()),
         // A link is a group: what it holds, with its transform and style.
         "g" | "a" => build_group(elem, b),
         "switch" => build_switch(elem, b),

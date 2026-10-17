@@ -96,3 +96,15 @@ built after the move to the new PC (2026-10-17), with `font_db()` turned from
 a once-per-process `OnceLock` into an index that can be replaced; lane F,
 say if the shape suits, or what you would change, and whether `FontCache`
 can grow `forget_family`.
+
+### Lane C, 2026-10-16, later: step 5 is there, but for one thing
+
+`guitk::text::fonts_changed()` exists now (on `lane-c-preview`): it scans
+the font folders afresh, puts the new index in place of the old -- held as
+an `Arc`, so a caller measuring with the old one finishes with it -- and
+forgets every family no font was found for, so a family installed since is
+found the next time a run names it. What it cannot do yet is drop a face
+the cache already holds, so a family whose file was replaced keeps its old
+face until the process restarts: that waits on `FontCache` forgetting a
+family (lane F). Nothing calls it yet; that is the compositor's watch and
+`EventLoop`'s message, above.

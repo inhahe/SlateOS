@@ -164,10 +164,13 @@ pub struct LoginUser {
     pub display_name: String,
     /// Username (for authentication).
     pub username: String,
-    /// A character the account chose to be shown as, or empty for none: an
-    /// account with no avatar of its own is drawn with the icon theme's
-    /// `avatar-default`. It was a person emoji for everyone, which no font the
-    /// desktop has can draw (design-decisions.md §881).
+    /// The picture the account chose to be shown with -- the path the
+    /// account database's `avatar_path` names -- or empty for none. Drawn
+    /// round ([`appearance::icons::IconRegistry::round_or`]); an account with
+    /// none, or whose picture is missing or will not decode, is drawn with the
+    /// icon theme's `avatar-default`. It was drawn as text, the path itself in
+    /// large letters, from a reading of the field as a character to show
+    /// (design-decisions.md §881 replaced a person emoji for everyone).
     pub avatar: String,
     /// Whether this is the account that signs in by itself as the machine
     /// starts ([`crate::autologin`]).
@@ -723,6 +726,36 @@ impl LoginScreen {
             width: side,
             height: side,
             image_id: self.icon_registry.icon(name, px, color),
+        });
+    }
+
+    /// `user`'s picture, `side` square at `(x, y)`: the account's own, round,
+    /// with the icon theme's `avatar-default` in `color` standing in when it
+    /// has none or its file will not draw.
+    fn avatar(
+        &self,
+        commands: &mut Vec<RenderCommand>,
+        user: &LoginUser,
+        x: f32,
+        y: f32,
+        side: f32,
+        color: Color,
+    ) {
+        if user.avatar.is_empty() {
+            self.icon(commands, x, y, side, AVATAR_ICON, color);
+            return;
+        }
+        // A few dozen pixels; `as` saturates rather than wrapping.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = side.round().max(1.0) as u32;
+        commands.push(RenderCommand::Image {
+            x,
+            y,
+            width: side,
+            height: side,
+            image_id: self
+                .icon_registry
+                .round_or(user.avatar.clone(), AVATAR_ICON, px, color),
         });
     }
 
@@ -1794,27 +1827,7 @@ impl LoginScreen {
             } else {
                 p.subtext0
             };
-            if user.avatar.is_empty() {
-                self.icon(
-                    commands,
-                    row_x + 12.0,
-                    uy + 18.0,
-                    28.0,
-                    AVATAR_ICON,
-                    avatar_ink,
-                );
-            } else {
-                commands.push(RenderCommand::Text {
-                    x: row_x + 12.0,
-                    y: uy + 14.0,
-                    text: user.avatar.clone(),
-                    font_size: 28.0,
-                    color: avatar_ink,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                    overflow: TextOverflow::Clip,
-                });
-            }
+            self.avatar(commands, user, row_x + 12.0, uy + 18.0, 28.0, avatar_ink);
 
             // Name: the account's own, or its login name where it gives
             // none -- an account with no display name was a blank row.
@@ -1863,30 +1876,8 @@ impl LoginScreen {
                     AVATAR_ICON,
                     p.text_shadow(),
                 );
-                self.icon(
-                    commands,
-                    cx - 24.0,
-                    cy - 80.0,
-                    48.0,
-                    AVATAR_ICON,
-                    p.ink(p.accent),
-                );
-            } else {
-                push_on_background(
-                    commands,
-                    p,
-                    RenderCommand::Text {
-                        x: cx - 24.0,
-                        y: cy - 80.0,
-                        text: user.avatar.clone(),
-                        font_size: 48.0,
-                        color: p.ink(p.accent),
-                        font_weight: FontWeightHint::Regular,
-                        max_width: None,
-                        overflow: TextOverflow::Clip,
-                    },
-                );
             }
+            self.avatar(commands, user, cx - 24.0, cy - 80.0, 48.0, p.ink(p.accent));
 
             // Name.
             push_on_background(
@@ -2637,16 +2628,63 @@ mod tests {
         assert!(s.submit_password().is_none());
     }
 
+    /// **An account's picture is drawn from the path the database names,
+    /// round** -- in the list and as the one signing in -- not as the path in
+    /// large letters, with `avatar-default` standing in for a file that will
+    /// not draw; an account with none is drawn with `avatar-default` itself.
+    #[test]
+    fn an_accounts_picture_is_drawn_round_from_its_path() {
+        let ada = LoginUser::new(Some(1), "ada", "Ada").with_avatar("/home/ada/me.png");
+        let bob = LoginUser::new(Some(2), "bob", "Bob");
+        let mut screen = LoginScreen::new(1920.0, 1080.0, vec![ada, bob]);
+        let p = Palette::for_mode(false);
+        let pictures = |screen: &LoginScreen,
+                        cmds: &[RenderCommand]|
+         -> Vec<(f32, bool, Option<&'static str>)> {
+            cmds.iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Image {
+                        width, image_id, ..
+                    } => screen
+                        .icon_request(*image_id)
+                        .filter(|r| r.name == "/home/ada/me.png")
+                        .map(|r| (*width, r.round, r.fallback)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let cmds = screen.render(&p);
+        assert_eq!(pictures(&screen, &cmds), [(28.0, true, Some(AVATAR_ICON))]);
+        assert_eq!(
+            icons(&screen, &cmds, AVATAR_ICON, 28.0).len(),
+            1,
+            "Bob has none"
+        );
+        assert!(
+            !cmds
+                .iter()
+                .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("me.png"))),
+            "the path was drawn as text"
+        );
+
+        screen.select_user(0);
+        let cmds = screen.render(&p);
+        assert!(
+            pictures(&screen, &cmds).contains(&(48.0, true, Some(AVATAR_ICON))),
+            "the one signing in"
+        );
+    }
+
     // ---- LoginUser ----
 
     #[test]
     fn login_user_builder() {
         let u = LoginUser::new(Some(1), "test", "Test User")
-            .with_avatar("\u{1F468}")
+            .with_avatar("/home/test/me.png")
             .with_admin()
             .with_autologin()
             .with_no_password();
-        assert_eq!(u.avatar, "\u{1F468}");
+        assert_eq!(u.avatar, "/home/test/me.png");
         assert_eq!(u.account_type, "Administrator");
         assert!(u.autologin);
         assert!(!u.has_password);

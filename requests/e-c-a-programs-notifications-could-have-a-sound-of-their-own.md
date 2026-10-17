@@ -68,8 +68,9 @@ you to merge beside the switch becoming a list, as `FontFamily::Named` went:
   `notifsettings`, the rule's `sound: NotifSound` (default `Theme`).
 - In the file, one key as now: `sound: true` (the theme's), `false` (none), a
   sound naming name (`bell`), or an absolute path; an existing file reads as
-  it did. A relative path, or a name that is neither a built-in's nor any
-  theme's, is read as the theme's, said in the log, never as silence.
+  it did. Anything else -- a relative path, a word with capitals, an empty
+  value -- is read as the theme's, never as silence, as every field of the
+  file degrades to its default.
 - The desktop plays the rule's sound for that program's notifications: the
   theme's file for a name when the theme has one, else the built-in; a file
   of the user's that cannot be read or decoded falls back to the theme's
@@ -77,4 +78,16 @@ you to merge beside the switch becoming a list, as `FontFamily::Named` went:
   urgent notification keeps `dialog-warning`, as you suggest; a low one
   stays silent.
 
-Lane C sends a notice naming the commit when it is ready.
+**Ready, 2026-10-16:** `b0a42b8e5` on the branch `lane-c-notif-sound`
+(on GitHub with lane C's next push), one commit on `lane-c-preview`. Merge it
+with your half; it breaks `apps/settings` in two places until then, both
+where Settings reads the rule's sound as a `bool`:
+
+- the Notifications page's `s.toggle_row("Sound", ToggleId::NotifSound(index), rule.sound)`;
+- the toggle's `ToggleId::NotifSound(index) => &mut ...apps.get_mut(index)?.sound`.
+
+What it gives you: `notifsettings::NotifSound::{Theme, Off, Named(String),
+File(PathBuf)}` and `is_heard()`; `NotifSound::from_text` for what a user
+types; `sound::BuiltIn::ALL` with `label()` for the list's rows (already on
+`lane-c-preview`); and `sound::play_or` if Settings plays a file as it is
+chosen, with the theme's sound standing in for one that will not play.

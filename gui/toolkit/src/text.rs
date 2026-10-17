@@ -30,7 +30,7 @@
 //! [`pathbar`]: crate::pathbar
 
 use std::cell::Cell;
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 
 pub use osfont::colr::ColourPalette;
 pub use osfont::raster::{Rendering, Subpixel};
@@ -190,7 +190,7 @@ pub fn install_fallback_faces(cache: &mut FontCache) -> Vec<&'static str> {
     let db = font_db();
     let mut installed = Vec::new();
     let mut faces = Vec::new();
-    for family in resolve_fallback_families(db) {
+    for family in resolve_fallback_families(&db) {
         // A face that will not load is one fewer fallback, not a failure of
         // the rest: see the doc above.
         if let Ok(face) = db.load(family, Query::regular()) {
@@ -213,13 +213,49 @@ pub fn fallback_families() -> Vec<&'static str> {
         .clone()
 }
 
-/// The index of installed fonts, built once per process.
+/// The index of installed fonts: built when it is first asked for, and
+/// again when the fonts change ([`fonts_changed`]).
 ///
 /// Separate from the cache so that changing the UI font later does not
-/// re-walk the font directories.
-fn font_db() -> &'static FontDb {
-    static DB: OnceLock<FontDb> = OnceLock::new();
-    DB.get_or_init(FontDb::scan_system)
+/// re-walk the font directories. Handed out as an `Arc`, so a caller keeps
+/// the index it began with while another is put in place.
+fn font_db() -> Arc<FontDb> {
+    if let Some(db) = FONT_DB
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+    {
+        return Arc::clone(db);
+    }
+    let mut slot = FONT_DB.write().unwrap_or_else(PoisonError::into_inner);
+    Arc::clone(slot.get_or_insert_with(|| Arc::new(FontDb::scan_system())))
+}
+
+/// The process's index of installed fonts; `None` until it is first asked
+/// for.
+static FONT_DB: RwLock<Option<Arc<FontDb>>> = RwLock::new(None);
+
+/// The fonts installed here changed -- one added or removed, in a font
+/// folder -- so read them again: the index is scanned afresh, and the
+/// families no font was found for are forgotten, so a family installed since
+/// is found the next time a run names it.
+///
+/// What it does not do yet: a face already loaded stays in the font cache,
+/// so a family whose file was *replaced* -- a user's newer copy of a font the
+/// system has -- is drawn in the old file until the process starts again;
+/// dropping it needs `osfont`'s cache to forget a family
+/// (`requests/e-cf-a-font-installed-while-the-desktop-runs-is-drawn-only-after-a-restart.md`).
+/// Who calls this, and when, is the window system's to say: the compositor
+/// first, then every program it tells.
+pub fn fonts_changed() {
+    // Scanned before the lock is taken: a scan reads every font directory,
+    // and nothing measuring text should wait on it.
+    let fresh = Arc::new(FontDb::scan_system());
+    *FONT_DB.write().unwrap_or_else(PoisonError::into_inner) = Some(fresh);
+    missing_families()
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .forget_all();
 }
 
 /// The process-wide font state: rasterized glyphs, and which family they came
@@ -405,6 +441,12 @@ struct MissingFamilies {
 impl MissingFamilies {
     fn contains(&self, name: FamilyName) -> bool {
         self.names.contains(&name)
+    }
+
+    /// Forget every name: the fonts changed, and any of them may be
+    /// installed now.
+    fn forget_all(&mut self) {
+        self.names.clear();
     }
 
     /// Remember `name`, forgetting the earliest once
@@ -714,6 +756,69 @@ pub fn measure(text: &str, size: f32, weight: FontWeightHint) -> f32 {
 /// one class of bug this whole module exists to remove.
 pub fn measure_in(text: &str, size: f32, weight: FontWeightHint, family: FontFamily) -> f32 {
     with_font(size, weight, family, |font| font.measure(text))
+}
+
+/// `text` laid out as the shapes of its glyphs rather than drawn: each
+/// glyph's outline in `family` at `size` pixels and `weight`, moved to where
+/// the glyph stands along a pen starting at the origin on the baseline, `y`
+/// down as a drawing's user space has it -- and how far the run moves the
+/// pen. For a drawing that fills and strokes its text as any other shape (an
+/// SVG's `<text>`); the outlines are not hinted, as such drawings' are not.
+/// The built-in bitmap face has no outlines, so its run is an advance alone.
+pub(crate) fn outlined(
+    text: &str,
+    size: f32,
+    weight: FontWeightHint,
+    family: FontFamily,
+) -> (Vec<osfont::sfnt::PathCmd>, f32) {
+    use osfont::sfnt::{PathCmd, Point};
+    with_font(size, weight, family, |font| {
+        let run = font.shape(text);
+        let mut pen = 0.0_f32;
+        let mut commands = Vec::new();
+        for glyph in run.draw_order() {
+            if let Some(outline) = font.outline(glyph.key) {
+                let (ox, oy) = glyph.offset;
+                let at = |p: Point| Point {
+                    x: pen + ox + p.x,
+                    y: -(oy + p.y),
+                };
+                commands.extend(outline.commands.into_iter().map(|command| match command {
+                    PathCmd::MoveTo(p) => PathCmd::MoveTo(at(p)),
+                    PathCmd::LineTo(p) => PathCmd::LineTo(at(p)),
+                    PathCmd::QuadTo(c, p) => PathCmd::QuadTo(at(c), at(p)),
+                    PathCmd::CurveTo(c1, c2, p) => PathCmd::CurveTo(at(c1), at(c2), at(p)),
+                    PathCmd::Close => PathCmd::Close,
+                }));
+            }
+            pen += glyph.advance;
+        }
+        (commands, pen)
+    })
+}
+
+/// The family a CSS `font-family` list asks for, as this machine can draw
+/// it: the first name in the list that is installed -- `serif`,
+/// `sans-serif`, `system-ui` and the other generic names being the UI face,
+/// `monospace` the fixed-pitch one -- and the UI face when none is.
+pub(crate) fn family_from_list(list: &str) -> FontFamily {
+    for name in list.split(',') {
+        let name = name.trim().trim_matches(['"', '\'']).trim();
+        match name.to_ascii_lowercase().as_str() {
+            "" => {}
+            "serif" | "sans-serif" | "system-ui" | "ui-serif" | "ui-sans-serif" | "ui-rounded"
+            | "cursive" | "fantasy" | "math" | "emoji" | "fangsong" => return FontFamily::Ui,
+            "monospace" | "ui-monospace" => return FontFamily::Mono,
+            _ => {
+                if font_db().has_family(name)
+                    && let Some(family) = FontFamily::named(name)
+                {
+                    return family;
+                }
+            }
+        }
+    }
+    FontFamily::Ui
 }
 
 /// An ARGB pixel buffer an application can draw text into directly.
@@ -2643,6 +2748,20 @@ mod tests {
         assert!(missing.contains(name(1)), "a repeat forgot another name");
     }
 
+    /// **When the fonts change, every family not found is forgotten**, so
+    /// one installed since is searched for again (`fonts_changed`; the
+    /// process-wide call is not made here, since the tests beside this one
+    /// read the same memo).
+    #[test]
+    fn a_change_of_fonts_forgets_the_families_not_found() {
+        let name = |s: &str| FamilyName::new(s).unwrap();
+        let mut missing = MissingFamilies::default();
+        missing.note(name("Not Installed Yet"));
+        missing.forget_all();
+        assert!(!missing.contains(name("Not Installed Yet")));
+        assert!(missing.names.is_empty());
+    }
+
     /// **A family is installed, and fixed-pitch, as this system's font list
     /// says** -- the picker's lists and these answers come from one index,
     /// so a family a picker offers is one these call installed, and a
@@ -2694,7 +2813,7 @@ mod tests {
     /// host has installed; on a host with none of them the list is empty.
     #[test]
     fn this_processs_fallbacks_are_the_ones_its_fonts_resolve_to() {
-        let resolved = resolve_fallback_families(font_db());
+        let resolved = resolve_fallback_families(&font_db());
         let installed = fallback_families();
         // Installed is resolved with any face that failed to load left out,
         // so it is an ordered subsequence -- on a healthy host, all of it.

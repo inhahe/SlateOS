@@ -983,6 +983,9 @@ pub struct IconRequest {
     /// The colour a `currentColor` icon is drawn in; its alpha fades the
     /// whole icon.
     pub color: Color,
+    /// Clipped to the circle its square holds: an account's picture, drawn
+    /// round as every login screen draws one ([`IconRegistry::round_or`]).
+    pub round: bool,
 }
 
 /// The icons a part of a program has drawn, by the image id each was given.
@@ -1007,6 +1010,7 @@ impl IconRegistry {
             fallback: None,
             px,
             color,
+            round: false,
         })
     }
 
@@ -1025,6 +1029,27 @@ impl IconRegistry {
             fallback: Some(fallback),
             px,
             color,
+            round: false,
+        })
+    }
+
+    /// [`Self::icon_or`], clipped to a circle: a picture named by its path --
+    /// an account's, from the account database -- drawn round, and `fallback`
+    /// in its place when the file is missing or will not decode, so an
+    /// account whose picture has gone is still drawn.
+    pub fn round_or(
+        &self,
+        name: impl Into<Cow<'static, str>>,
+        fallback: &'static str,
+        px: u32,
+        color: Color,
+    ) -> u64 {
+        self.remember(IconRequest {
+            name: name.into(),
+            fallback: Some(fallback),
+            px,
+            color,
+            round: true,
         })
     }
 
@@ -1091,7 +1116,10 @@ pub fn upload_missing<E>(
                     .fallback
                     .and_then(|fallback| theme.render(fallback, request.px, request.color))
             });
-        if let Some(icon) = icon {
+        if let Some(mut icon) = icon {
+            if request.round {
+                clip_to_circle(&mut icon.argb, icon.size);
+            }
             upload(id, &icon)?;
         }
     }

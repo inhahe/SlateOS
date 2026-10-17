@@ -84,7 +84,7 @@ this order, a commit each:
    boxes) (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
-   *Moved (2026-10-17), eighteen of the twenty-eight:* rssreader's prompt,
+   *Moved (2026-10-17), nineteen of the twenty-eight:* rssreader's prompt,
    pdfviewer's page range, systemrestore's form (two boxes), defrag's
    exclude pattern, screenshot's text annotation, whiteboard's words,
    ircclient's message line, kanban's input dialog, filesearch's query (in
@@ -92,7 +92,9 @@ this order, a commit each:
    query, photomanager's search and album name (two), netscan's five,
    startupmanager's search and dialog (six), clipmanager's four, qrcode's
    eight, netmanager's address and DNS boxes (four), vpnmanager's search,
-   split-tunnel and dialog boxes (six). A row that stood for the second copy -- a reload, a write-back, a
+   split-tunnel and dialog boxes (six), taskscheduler's form (five: the
+   Param box is whichever of three its frequency asks for). A row that
+   stood for the second copy -- a reload, a write-back, a
    private clipboard, a caret or selection drawn by hand -- goes with it;
    the rest move onto the box. Two drawings changed: hexeditor's box
    without the keyboard is drawn from its start, as every LineBox is, not
@@ -102,6 +104,9 @@ this order, a commit each:
    and the model is made from it when it is needed
    (`QrApp::wifi_config`, netmanager's `IpEdit::to_config`, vpnmanager's
    `ProfileEdit::to_profile`); a dialog's state that only held its boxes
-   drops its equality instead (startupmanager). *Left:* contacts,
-   dbviewer, mindmap, taskscheduler, colorpicker, diskanalyzer, editor,
-   lockscreen, passwordgen, stickynotes.
+   drops its equality instead (startupmanager). taskscheduler's text
+   field had lost the guard that draws its text only where the line fits,
+   unseen because its containment sweep read neither `RichText` nor
+   lines; both are read now. *Left:* contacts, dbviewer, mindmap,
+   colorpicker, diskanalyzer, editor, lockscreen, passwordgen,
+   stickynotes.

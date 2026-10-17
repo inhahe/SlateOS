@@ -90,9 +90,15 @@ MUTATIONS += [
     ),
     (
         "a dot per byte",
-        "            let dot_count = self.password_buffer.chars().count();\n",
-        "            let dot_count = self.password_buffer.len();\n",
+        "            let dot_count = self.password_buffer.text().chars().count();\n",
+        "            let dot_count = self.password_buffer.text().len();\n",
         [DOTS],
+    ),
+    (
+        "the characters read out are counted in bytes",
+        "        self.password_buffer.text().chars().count()\n",
+        "        self.password_buffer.text().len()\n",
+        ["test_accessibility_password_state"],
     ),
     (
         "there is no caret",
@@ -126,28 +132,56 @@ HOLDS = "the_password_edits_what_it_holds"
 MUTATIONS += [
     (
         "a lockout lets the password's keys through",
-        "        if self.lockout.is_active() {\n            return EventResult::Ignored;\n        }\n        self.load_password();\n",
-        "        self.load_password();\n",
+        "        if self.lockout.is_active() || textline::pastes(key) {\n",
+        "        if textline::pastes(key) {\n",
         [LOCKOUT],
     ),
     (
-        "a key finds the editor holding another password",
-        "        if self.password_editor.text() != self.password_buffer {\n"
-        "            self.password_editor.set_text(&self.password_buffer);",
-        "        if false {\n"
-        "            self.password_editor.set_text(&self.password_buffer);",
-        [HOLDS],
+        "clearing the password leaves it",
+        "    pub fn clear_password(&mut self) {\n        self.password_buffer.clear();\n",
+        "    pub fn clear_password(&mut self) {\n",
+        [HOLDS, "test_clear_password"],
+    ),
+    (
+        "a paste reaches the password",
+        "        if self.lockout.is_active() || textline::pastes(key) {\n",
+        "        if self.lockout.is_active() {\n",
+        [EDITS],
+    ),
+    (
+        "a key typed leaves the error up",
+        "        if edit.changed {\n            self.show_error = false;\n",
+        "        if false {\n            self.show_error = false;\n",
+        ["test_submit_wrong_password"],
+    ),
+    (
+        "a key that changes nothing puts the error away",
+        "        if edit.changed {\n            self.show_error = false;\n",
+        "        if edit.handled {\n            self.show_error = false;\n",
+        ["test_submit_wrong_password"],
+    ),
+    (
+        "type_char leaves the error up",
+        "            .changed\n        {\n            self.show_error = false;\n",
+        "            .changed\n            && false\n        {\n            self.show_error = false;\n",
+        ["test_submit_wrong_password"],
     ),
     (
         "every key the box answers is a redraw",
-        "        if after == before {\n",
-        "        if false {\n",
+        "        if edit.changed || edit.moved {\n",
+        "        if edit.handled {\n",
         [PRESS],
+    ),
+    (
+        "a step of the caret is not a redraw",
+        "        if edit.changed || edit.moved {\n",
+        "        if edit.changed {\n",
+        [EDITS],
     ),
     (
         "the caret is drawn after the last dot",
         "                x + PASSWORD_DOTS_INSET + self.caret_dots().0 as f32 * PASSWORD_DOT_SPACING\n",
-        "                x + PASSWORD_DOTS_INSET + self.password_buffer.chars().count() as f32 * PASSWORD_DOT_SPACING\n",
+        "                x + PASSWORD_DOTS_INSET + self.password_buffer.text().chars().count() as f32 * PASSWORD_DOT_SPACING\n",
         [EDITS],
     ),
     (
@@ -170,8 +204,8 @@ MUTATIONS += [
     ),
     (
         "a press puts the caret at the end",
-        "            .unwrap_or(count);\n        self.load_password();\n",
-        "            .map(|_| count)\n            .unwrap_or(count);\n        self.load_password();\n",
+        "            .unwrap_or(count);\n        let password = self.password_buffer.text();\n",
+        "            .map(|_| count)\n            .unwrap_or(count);\n        let password = self.password_buffer.text();\n",
         [PRESS],
     ),
     (

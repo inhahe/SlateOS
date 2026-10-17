@@ -28,8 +28,6 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
-use guitk::textinput::TextInput;
 use oswindow::app::Response;
 #[cfg(test)]
 use pwkdf::{KdfError, KdfParams, PasswordVerifier};
@@ -37,6 +35,7 @@ use pwkdf::{KdfError, KdfParams, PasswordVerifier};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textline::LineBox;
 
 // ============================================================================
 // Layout constants
@@ -862,7 +861,7 @@ fn build_accessibility_text(lock_screen: &LockScreen) -> String {
                     lock_screen.lockout.format_remaining()
                 ));
             } else {
-                let char_count = lock_screen.password_buffer.len();
+                let char_count = lock_screen.password_len();
                 parts.push(format!(
                     "Password field: {} characters entered.",
                     char_count
@@ -988,12 +987,10 @@ pub struct LockScreen {
     pub users: UserList,
     /// Index of the currently selected user.
     pub selected_user_index: usize,
-    /// Password input buffer (plaintext, never displayed).
-    password_buffer: String,
-    /// The password's editor -- its caret and selection over
-    /// `password_buffer` -- reloaded when the password changed under it:
-    /// cleared, refused, or typed through [`LockScreen::type_char`].
-    password_editor: TextInput,
+    /// The password typed (plaintext, never displayed), its caret and its
+    /// selection: a masked box, whose caret steps a character at a time and
+    /// from which nothing is copied or cut. Drawn as this screen's dots.
+    password_buffer: LineBox,
     /// Number of consecutive failed password attempts.
     pub failed_attempts: u32,
     /// Whether to display the "wrong password" error message.
@@ -1072,8 +1069,10 @@ impl LockScreen {
             config,
             users,
             selected_user_index: 0,
-            password_buffer: String::new(),
-            password_editor: textline::field_holding("", MAX_PASSWORD_LENGTH),
+            // Masked for its keys: the box itself is never drawn, its
+            // `•`s neither, and the dots are this screen's own.
+            password_buffer: LineBox::new(MAX_PASSWORD_LENGTH, PASSWORD_FONT_SIZE)
+                .masked('\u{2022}'),
             failed_attempts: 0,
             show_error: false,
             shake: ShakeAnimation::new(),
@@ -1224,59 +1223,42 @@ impl LockScreen {
         }
     }
 
-    /// Append a character to the password buffer.
+    /// Type `ch` into the password at its caret, up to the password's
+    /// length -- characters, as the keys count it. Refused while a lockout
+    /// runs.
     pub fn type_char(&mut self, ch: char) {
         if self.lockout.is_active() {
             return;
         }
-        if self.password_buffer.len() < MAX_PASSWORD_LENGTH {
+        if self
+            .password_buffer
+            .insert(ch.encode_utf8(&mut [0; 4]))
+            .changed
+        {
             self.show_error = false;
-            self.password_buffer.push(ch);
-        }
-    }
-
-    /// Delete the last character from the password buffer.
-    pub fn backspace(&mut self) {
-        if self.lockout.is_active() {
-            return;
-        }
-        self.password_buffer.pop();
-        self.show_error = false;
-    }
-
-    /// The password's editor loaded with the password, unless it holds it
-    /// already: the caret after it.
-    fn load_password(&mut self) {
-        if self.password_editor.text() != self.password_buffer {
-            self.password_editor.set_text(&self.password_buffer);
         }
     }
 
     /// Where the caret and the selection's other end are in the password,
-    /// counted in dots: how many characters come before each. The editor's
-    /// while it holds the password; after the last dot, nothing selected,
-    /// otherwise.
+    /// counted in dots: how many characters come before each.
     fn caret_dots(&self) -> (usize, Option<usize>) {
+        let password = self.password_buffer.text();
         let dots = |byte: usize| {
-            self.password_buffer.get(..byte).map_or_else(
-                || self.password_buffer.chars().count(),
-                |head| head.chars().count(),
-            )
+            password
+                .get(..byte)
+                .map_or_else(|| password.chars().count(), |head| head.chars().count())
         };
-        if self.password_editor.text() == self.password_buffer {
-            (
-                dots(self.password_editor.cursor().byte()),
-                self.password_editor.selection_anchor().map(dots),
-            )
-        } else {
-            (self.password_buffer.chars().count(), None)
-        }
+        let input = self.password_buffer.input();
+        (
+            dots(input.cursor().byte()),
+            input.selection_anchor().map(dots),
+        )
     }
 
     /// How far the dots are scrolled left, so the caret stays in view. One
     /// answer for the drawing and for a press.
     fn dots_scroll(&self) -> f32 {
-        let total = self.password_buffer.chars().count() as f32 * PASSWORD_DOT_SPACING;
+        let total = self.password_buffer.text().chars().count() as f32 * PASSWORD_DOT_SPACING;
         let caret = self.caret_dots().0 as f32 * PASSWORD_DOT_SPACING;
         guitk::textedit::horizontal_scroll(total, PASSWORD_DOTS_WIDTH, caret)
     }
@@ -1287,41 +1269,25 @@ impl LockScreen {
     /// selects it all, and typing goes where the caret is: what AltGr types
     /// among it (German `@` is AltGr+Q), and no command's letter (Ctrl+K put
     /// a `k` in a password nobody could see to take out). Nothing is copied
-    /// or cut from it, and there is no clipboard here to paste from. Refused
-    /// while a lockout runs, as typing always was. `Consumed` where the key
-    /// changed the password, its caret or its selection.
+    /// or cut from it, and nothing is pasted into it: a lock screen takes a
+    /// password from the keys alone. Refused while a lockout runs, as typing
+    /// always was. `Consumed` where the key changed the password, its caret
+    /// or its selection.
     ///
     /// The box took typing at its end and Backspace from it, and Delete
     /// threw away the whole password.
     fn password_key(&mut self, key: &KeyEvent) -> EventResult {
-        if self.lockout.is_active() {
+        if self.lockout.is_active() || textline::pastes(key) {
             return EventResult::Ignored;
         }
-        self.load_password();
-        let editor = &self.password_editor;
-        let before = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        let edit = textline::apply_masked_key(&mut self.password_editor, key, "");
-        if !edit.handled {
-            return EventResult::Ignored;
-        }
-        if self.password_editor.text() != self.password_buffer {
-            self.password_buffer = self.password_editor.text().to_owned();
+        let edit = self.password_buffer.key(key);
+        if edit.changed {
             self.show_error = false;
         }
-        let editor = &self.password_editor;
-        let after = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        if after == before {
-            EventResult::Ignored
-        } else {
+        if edit.changed || edit.moved {
             EventResult::Consumed
+        } else {
+            EventResult::Ignored
         }
     }
 
@@ -1330,7 +1296,7 @@ impl LockScreen {
     /// they were drawn.
     fn press_password(&mut self, field_x: f32, x: f32) {
         let scroll = self.dots_scroll();
-        let count = self.password_buffer.chars().count();
+        let count = self.password_buffer.text().chars().count();
         let offset = x - field_x - PASSWORD_DOTS_INSET + scroll;
         let index = (0..=count)
             .min_by(|a, b| {
@@ -1338,14 +1304,12 @@ impl LockScreen {
                 gap(a).total_cmp(&gap(b))
             })
             .unwrap_or(count);
-        self.load_password();
-        let byte = self
-            .password_buffer
+        let password = self.password_buffer.text();
+        let byte = password
             .char_indices()
             .nth(index)
-            .map_or(self.password_buffer.len(), |(byte, _)| byte);
-        self.password_editor.set_selection_anchor(None);
-        self.password_editor.set_cursor(TextCursor::from(byte));
+            .map_or(password.len(), |(byte, _)| byte);
+        self.password_buffer.put_caret(byte);
     }
 
     /// Clear the entire password buffer.
@@ -1354,9 +1318,9 @@ impl LockScreen {
         self.show_error = false;
     }
 
-    /// Get the number of characters currently in the password buffer.
+    /// How many characters the password holds -- what its dots count.
     pub fn password_len(&self) -> usize {
-        self.password_buffer.len()
+        self.password_buffer.text().chars().count()
     }
 
     /// This screen's policy on an outcome that is not, by itself, a verdict.
@@ -1441,7 +1405,7 @@ impl LockScreen {
             // and "nothing here can check a password" into one answer, and the
             // second needs an administrator rather than another guess.
             AuthOutcome::Unusable,
-            |authority| authority.authenticate(&username, self.password_buffer.as_bytes()),
+            |authority| authority.authenticate(&username, self.password_buffer.text().as_bytes()),
         );
         self.settle(outcome)
     }
@@ -2045,7 +2009,7 @@ impl LockScreen {
             // A dot for each character entered -- characters, not bytes: an
             // `é` is two bytes and was two dots, so the count on screen was
             // not the count typed.
-            let dot_count = self.password_buffer.chars().count();
+            let dot_count = self.password_buffer.text().chars().count();
             let dots_start_x = x + PASSWORD_DOTS_INSET;
             let dot_cy = y + PASSWORD_FIELD_HEIGHT / 2.0;
             let dot_radius = PASSWORD_DOT_DIAMETER / 2.0;
@@ -3018,7 +2982,7 @@ mod tests {
         ls.enter_password_mode();
         ls.type_char('a');
         ls.type_char('b');
-        ls.backspace();
+        key_in(&mut ls, Key::Backspace, Modifiers::NONE);
         assert_eq!(ls.password_len(), 1);
     }
 
@@ -3026,7 +2990,7 @@ mod tests {
     fn test_backspace_on_empty() {
         let mut ls = single_user_lockscreen();
         ls.enter_password_mode();
-        ls.backspace(); // Should not panic.
+        key_in(&mut ls, Key::Backspace, Modifiers::NONE); // Should not panic.
         assert_eq!(ls.password_len(), 0);
     }
 
@@ -3075,6 +3039,18 @@ mod tests {
         assert_eq!(ls.failed_attempts, 1);
         assert!(ls.show_error);
         assert!(!ls.take_unlock_request());
+        // An edit puts the error away, by a key or by `type_char`; a key
+        // that changes nothing leaves it up.
+        key_in(&mut ls, Key::Left, Modifiers::NONE);
+        assert!(
+            ls.show_error,
+            "a key that changed nothing put the error away"
+        );
+        type_keys(&mut ls, "a");
+        assert!(!ls.show_error, "a key typed left the error up");
+        ls.show_error = true;
+        ls.type_char('b');
+        assert!(!ls.show_error, "type_char left the error up");
     }
 
     #[test]
@@ -3798,9 +3774,10 @@ mod tests {
         let mut ls = single_user_lockscreen();
         ls.enter_password_mode();
         ls.type_char('a');
+        ls.type_char('\u{e9}');
         let text = ls.accessibility_text();
         assert!(text.contains("Unlock screen"));
-        assert!(text.contains("1 characters entered"));
+        assert!(text.contains("2 characters entered"), "{text}");
     }
 
     #[test]
@@ -4463,7 +4440,8 @@ mod tests {
             );
         }
         assert_eq!(
-            ls.password_buffer, "",
+            ls.password_buffer.text(),
+            "",
             "a chord's letter went into the password"
         );
         ls.handle_event(&chord_key(
@@ -4475,13 +4453,13 @@ mod tests {
                 ..Modifiers::NONE
             },
         ));
-        assert_eq!(ls.password_buffer, "@", "AltGr+Q did not type its @");
+        assert_eq!(ls.password_buffer.text(), "@", "AltGr+Q did not type its @");
 
         // From the clock, a chord still brings the password up, and types
         // nothing into it.
         let mut ls = single_user_lockscreen();
         ls.handle_event(&chord_key(Key::K, "k", Modifiers::ctrl()));
-        assert_eq!(ls.password_buffer, "");
+        assert_eq!(ls.password_buffer.text(), "");
     }
 
     /// The password's dots as the screen draws them: every fill the size of
@@ -4593,18 +4571,27 @@ mod tests {
     /// Home and End go to the ends, typing goes where the caret is, Delete
     /// deletes at it -- it threw away the whole password -- Ctrl+A selects
     /// it all, and the caret and the selection are drawn between and behind
-    /// the dots. Nothing leaves it for a clipboard. The box took typing at
-    /// its end and Backspace from it, and nothing else.
+    /// the dots. Nothing leaves it for a clipboard, and nothing is pasted
+    /// into it. The box took typing at its end and Backspace from it, and
+    /// nothing else.
     #[test]
     fn the_password_edits_at_a_caret() {
         let mut ls = single_user_lockscreen();
         ls.enter_password_mode();
         type_keys(&mut ls, "pasword");
         for _ in 0..4 {
-            key_in(&mut ls, Key::Left, Modifiers::NONE);
+            assert_eq!(
+                key_in(&mut ls, Key::Left, Modifiers::NONE),
+                EventResult::Consumed,
+                "a step of the caret is not a redraw"
+            );
         }
         type_keys(&mut ls, "s");
-        assert_eq!(ls.password_buffer, "password", "the caret did not move");
+        assert_eq!(
+            ls.password_buffer.text(),
+            "password",
+            "the caret did not move"
+        );
         let rect = password_box(&mut ls);
         let at = rect.x + PASSWORD_DOTS_INSET + 4.0 * PASSWORD_DOT_SPACING;
         let carets = box_carets(&mut ls);
@@ -4616,7 +4603,7 @@ mod tests {
 
         key_in(&mut ls, Key::Home, Modifiers::NONE);
         key_in(&mut ls, Key::Delete, Modifiers::NONE);
-        assert_eq!(ls.password_buffer, "assword", "Delete at the caret");
+        assert_eq!(ls.password_buffer.text(), "assword", "Delete at the caret");
         type_keys(&mut ls, "p");
         key_in(&mut ls, Key::A, Modifiers::ctrl());
         let accent = ls.palette.accent;
@@ -4629,11 +4616,35 @@ mod tests {
             Some(8.0 * PASSWORD_DOT_SPACING),
             "the selection is not drawn behind the eight dots"
         );
+        guitk::clipboard::set_text("on the clipboard before");
         key_in(&mut ls, Key::C, Modifiers::ctrl());
         key_in(&mut ls, Key::X, Modifiers::ctrl());
-        assert_eq!(ls.password_buffer, "password", "Ctrl+X cut the password");
+        assert_eq!(
+            ls.password_buffer.text(),
+            "password",
+            "Ctrl+X cut the password"
+        );
+        assert_eq!(
+            guitk::clipboard::text(),
+            "on the clipboard before",
+            "the password reached the clipboard"
+        );
+        assert_eq!(
+            key_in(&mut ls, Key::V, Modifiers::ctrl()),
+            EventResult::Ignored,
+            "Ctrl+V is a redraw"
+        );
+        assert_eq!(
+            ls.password_buffer.text(),
+            "password",
+            "Ctrl+V pasted into the password"
+        );
         key_in(&mut ls, Key::Backspace, Modifiers::NONE);
-        assert_eq!(ls.password_buffer, "", "Backspace over the selection");
+        assert_eq!(
+            ls.password_buffer.text(),
+            "",
+            "Backspace over the selection"
+        );
     }
 
     /// **A press between the dots puts the caret there**, and a key that
@@ -4651,7 +4662,11 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
         }));
         type_keys(&mut ls, "!");
-        assert_eq!(ls.password_buffer, "a!bcd", "the press missed the dots");
+        assert_eq!(
+            ls.password_buffer.text(),
+            "a!bcd",
+            "the press missed the dots"
+        );
         key_in(&mut ls, Key::End, Modifiers::NONE);
         assert_eq!(
             key_in(&mut ls, Key::End, Modifiers::NONE),
@@ -4690,7 +4705,8 @@ mod tests {
         }));
         type_keys(&mut ls, "!");
         assert_eq!(
-            ls.password_buffer, "ab!cd",
+            ls.password_buffer.text(),
+            "ab!cd",
             "the press was measured from the box at rest"
         );
     }
@@ -4706,7 +4722,8 @@ mod tests {
         key_in(&mut ls, Key::Backspace, Modifiers::NONE);
         type_keys(&mut ls, "c");
         assert_eq!(
-            ls.password_buffer, "ab",
+            ls.password_buffer.text(),
+            "ab",
             "a key edited the password in a lockout"
         );
     }
@@ -4723,7 +4740,8 @@ mod tests {
         ls.type_char('x');
         type_keys(&mut ls, "y");
         assert_eq!(
-            ls.password_buffer, "xy",
+            ls.password_buffer.text(),
+            "xy",
             "the key edited the password the editor held"
         );
     }

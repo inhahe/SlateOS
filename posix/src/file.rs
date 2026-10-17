@@ -419,7 +419,6 @@ pub extern "C" fn close(fd: Fd) -> i32 {
     let ret = match entry.kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(entry.handle),
-        HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, entry.handle),
         HandleKind::UnixSocket => crate::unix_socket::close(entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
@@ -604,24 +603,6 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             } else {
                 crate::interrupt::restarting(Restart::IfAsked, || {
                     syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
-                })
-            }
-        }
-        HandleKind::UnixStream => {
-            // Stream socket: blocking recv unless O_NONBLOCK is set.
-            // A return of 0 is EOF (peer's write side closed), which
-            // read() reports as 0 — matching pipe/socket semantics.
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            if is_nb {
-                syscall3(
-                    SYS_SOCKETPAIR_TRY_RECV,
-                    entry.handle,
-                    buf as u64,
-                    count as u64,
-                )
-            } else {
-                crate::interrupt::restarting(crate::socket::wait_rule(fd, true), || {
-                    syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
                 })
             }
         }
@@ -1027,29 +1008,6 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             ret
         }
-        HandleKind::UnixStream => {
-            // Stream socket: blocking send unless O_NONBLOCK is set.
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let ret = if is_nb {
-                syscall3(
-                    SYS_SOCKETPAIR_TRY_SEND,
-                    entry.handle,
-                    buf as u64,
-                    count as u64,
-                )
-            } else {
-                crate::interrupt::restarting(crate::socket::wait_rule(fd, false), || {
-                    syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
-                })
-            };
-            if ret == errno::native::CHANNEL_CLOSED {
-                // Peer's read side is gone: `SIGPIPE`, then EPIPE, as
-                // Linux's `unix_stream_sendmsg` answers a `write` (which
-                // never carries `MSG_NOSIGNAL`).
-                return crate::signal::broken_pipe(false);
-            }
-            ret
-        }
         HandleKind::UnixSocket => {
             // Its own errno (and SIGPIPE), already dealt with.
             // SAFETY: `buf` is readable for `count` bytes (write's contract).
@@ -1277,7 +1235,6 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
@@ -1986,7 +1943,6 @@ pub(crate) fn has_iter_ops(kind: HandleKind, is_write: bool) -> bool {
         | HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave => true,
@@ -2117,21 +2073,6 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // kernel handle when the last fd referencing it is closed.
             if let Some(fd) =
                 fdtable::alloc_fd_with_flags(HandleKind::Pipe, entry.handle, src_status)
-            {
-                fdtable::copy_fd_path(oldfd, fd);
-                fd
-            } else {
-                errno::set_errno(errno::EMFILE);
-                -1
-            }
-        }
-        HandleKind::UnixStream => {
-            // No userspace dup syscall for stream sockets.  Share the
-            // endpoint handle; close() uses is_handle_referenced() so the
-            // kernel SYS_SOCKETPAIR_CLOSE (which drops the endpoint
-            // refcount) fires exactly once, when the last fd is closed.
-            if let Some(fd) =
-                fdtable::alloc_fd_with_flags(HandleKind::UnixStream, entry.handle, src_status)
             {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
@@ -2285,7 +2226,6 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
         | HandleKind::Eventfd
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
@@ -2697,7 +2637,6 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket => {
             // Return minimal stat for a socket.
             unsafe {
@@ -3072,7 +3011,6 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
@@ -3121,7 +3059,6 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
@@ -3247,7 +3184,6 @@ pub(crate) fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
     match kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(handle),
-        HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, handle),
         HandleKind::UnixSocket => crate::unix_socket::close(handle),
         HandleKind::Console => 0, // Console handles are not closeable.
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
@@ -5862,7 +5798,6 @@ fn fallocate_on(
         | HandleKind::Epoll
         | HandleKind::Timerfd
         | HandleKind::Inotify
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
@@ -10410,7 +10345,7 @@ mod tests {
         for kind in [
             HandleKind::Eventfd,
             HandleKind::TcpStream,
-            HandleKind::UnixStream,
+            HandleKind::UnixSocket,
             HandleKind::PtySlave,
             HandleKind::DevicePcm,
             HandleKind::DeviceControl,
@@ -12166,7 +12101,7 @@ mod tests {
             HandleKind::TcpStream,
             HandleKind::UdpSocket,
             HandleKind::Eventfd,
-            HandleKind::UnixStream,
+            HandleKind::UnixSocket,
             HandleKind::PtySlave,
             HandleKind::DevicePcm,
             HandleKind::DeviceControl,

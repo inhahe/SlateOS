@@ -383,11 +383,6 @@ pub struct SockaddrStorage {
     __ss_padding: [u8; 126],
 }
 
-/// The longest address a call takes: `sizeof(struct sockaddr_storage)`,
-/// beyond which Linux's `move_addr_to_kernel` answers `EINVAL`.
-#[allow(clippy::cast_possible_truncation)] // 128 fits
-const SOCKADDR_STORAGE_LEN: SocklenT = core::mem::size_of::<SockaddrStorage>() as SocklenT;
-
 /// IPv6 "any" address (all zeros).
 pub const IN6ADDR_ANY_INIT: In6Addr = In6Addr { s6_addr: [0; 16] };
 /// IPv6 loopback address (::1).
@@ -632,7 +627,6 @@ fn socket_fd_is_valid(fd: i32) -> bool {
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket
-        | HandleKind::UnixStream
         | HandleKind::UnixSocket => true,
         _ => {
             errno::set_errno(errno::ENOTSOCK);
@@ -1635,7 +1629,7 @@ pub unsafe extern "C" fn accept4(
 ///
 /// `buf` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind send handling.
+#[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UDP / error cases); splitting would scatter related per-kind send handling.
 pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize {
     // Handlers counted from here (`crate::interrupt`).
     let mark = Mark::now();
@@ -1751,30 +1745,6 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
             }
             len as isize
         }
-        HandleKind::UnixStream => {
-            // Stream socket endpoint: blocking unless MSG_DONTWAIT or
-            // O_NONBLOCK.  Returns partial writes like a pipe/TCP stream.
-            let is_nb = (flags & MSG_DONTWAIT) != 0
-                || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-            let ret = if is_nb {
-                syscall3(
-                    SYS_SOCKETPAIR_TRY_SEND,
-                    entry.handle,
-                    buf as u64,
-                    len as u64,
-                )
-            } else {
-                syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, len as u64)
-            };
-            if ret == errno::native::CHANNEL_CLOSED {
-                // Peer's read side gone: EPIPE, and SIGPIPE unless
-                // MSG_NOSIGNAL, as Linux's `unix_stream_sendmsg` answers.
-                return crate::signal::broken_pipe(nosignal);
-            }
-            // translate() sets errno and returns -1 for negative codes,
-            // or passes through the byte count for ret >= 0.
-            errno::translate(ret) as isize
-        }
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             -1
@@ -1792,7 +1762,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -
 ///
 /// `buf` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind recv handling.
+#[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UDP / error cases); splitting would scatter related per-kind recv handling.
 pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize {
     // Handlers counted from here (`crate::interrupt`).
     let mark = Mark::now();
@@ -1941,26 +1911,6 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> 
             }
             errno::set_errno(err);
             -1
-        }
-        HandleKind::UnixStream => {
-            // Stream socket endpoint: blocking recv unless MSG_DONTWAIT
-            // or O_NONBLOCK.  A return of 0 is EOF (peer write side gone).
-            // MSG_PEEK/MSG_WAITALL are not supported by the kernel
-            // stream-socket recv path; they are ignored.
-            let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
-            let ret = if is_nb {
-                syscall3(
-                    SYS_SOCKETPAIR_TRY_RECV,
-                    entry.handle,
-                    buf as u64,
-                    len as u64,
-                )
-            } else {
-                syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, len as u64)
-            };
-            // translate() sets errno and returns -1 for negative codes,
-            // or passes through the byte count (0 = EOF) for ret >= 0.
-            errno::translate(ret) as isize
         }
         HandleKind::TcpListener => {
             // A listener carries no data: Linux's `tcp_recvmsg` answers
@@ -2378,28 +2328,6 @@ pub unsafe extern "C" fn sendto(
         return tcp_send_failed(entry.handle, ret, nosignal);
     }
 
-    // A connected stream socket of the local kind is sent to as `send`
-    // sends; naming a destination for it is `EISCONN`, as Linux's
-    // `unix_stream_sendmsg` answers a `msg_namelen` on an established
-    // socket. (Every UnixStream here is connected: they are made in pairs.)
-    // `__sys_sendto` takes the address only when there is one, and refuses
-    // one longer than a `sockaddr_storage` first; a NULL address, or a zero
-    // length, is no address.
-    if entry.kind == HandleKind::UnixStream {
-        if !dest_addr.is_null() {
-            if addrlen > SOCKADDR_STORAGE_LEN {
-                errno::set_errno(errno::EINVAL);
-                return -1;
-            }
-            if addrlen != 0 {
-                errno::set_errno(errno::EISCONN);
-                return -1;
-            }
-        }
-        // SAFETY: the caller's contract for `buf` and `len` is `send`'s.
-        return unsafe { send(fd, buf, len, flags) };
-    }
-
     if entry.kind != HandleKind::UdpSocket {
         errno::set_errno(errno::ENOTSOCK);
         return -1;
@@ -2734,20 +2662,6 @@ pub unsafe extern "C" fn recvfrom(
             -1
         }
 
-        HandleKind::UnixStream => {
-            // A stream socket of the local kind receives as `recv` does; its
-            // peer here is a socketpair's, which has no address, so the
-            // length written back is 0 -- `__sys_recvfrom` starts the name
-            // empty and `unix_copy_addr` leaves it so. This was ENOTSOCK.
-            // SAFETY: the caller's contract for `buf` and `len` is `recv`'s.
-            let got = unsafe { recv(fd, buf, len, flags) };
-            if got >= 0 && !src_addr.is_null() && !addrlen.is_null() {
-                // SAFETY: the caller passed `addrlen` for writing.
-                unsafe { *addrlen = 0 };
-            }
-            got
-        }
-
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             -1
@@ -2821,31 +2735,6 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
                 }
                 set_meta(fd, meta);
             }
-            0
-        }
-        HandleKind::UnixStream => {
-            if entry.handle == 0 {
-                errno::set_errno(errno::ENOTCONN);
-                return -1;
-            }
-
-            // Delegate to the kernel for proper half-close semantics.
-            // The kernel's stream-socket `how` values match POSIX exactly
-            // (SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2):
-            // - SHUT_RD: further recv on this endpoint returns EOF.
-            // - SHUT_WR: further send fails (EPIPE); the peer reading our
-            //   ring drains remaining bytes then sees EOF.
-            // - SHUT_RDWR: both of the above.
-            let ret = syscall2(SYS_SOCKETPAIR_SHUTDOWN, entry.handle, how as u64);
-            if ret < 0 {
-                // Negative kernel codes (e.g. CHANNEL_CLOSED, INVALID_HANDLE)
-                // map to errno and -1 via the generic translation table.
-                return errno::translate(ret) as i32;
-            }
-
-            // Do NOT zero the handle here: close() still needs to release the
-            // kernel endpoint refcount.  The kernel enforces post-shutdown
-            // semantics on subsequent send/recv against the same handle.
             0
         }
         _ => {
@@ -3681,19 +3570,17 @@ pub const EAI_OVERFLOW: i32 = -12;
 // socketpair
 // ---------------------------------------------------------------------------
 
-/// Create a pair of connected sockets.
-///
-/// Backed by the kernel stream-socket object (`SYS_SOCKETPAIR_CREATE`),
-/// which returns two bonded endpoint handles.  Bytes written on one fd
-/// are read on the other and vice-versa.
+/// Create a pair of connected sockets: two of the Unix-domain sockets
+/// `crate::unix_socket` makes (`SYS_UNIX_PAIR`), so they cross
+/// `posix_spawn` and `exec` and carry descriptors (`SCM_RIGHTS`).
 ///
 /// Supported arguments:
 /// - `domain`: `AF_UNIX` / `AF_LOCAL` only (other families →
 ///   `EAFNOSUPPORT`).
-/// - `sock_type`: `SOCK_STREAM`, optionally OR-ed with `SOCK_NONBLOCK`
-///   and/or `SOCK_CLOEXEC`.  `SOCK_DGRAM` / `SOCK_SEQPACKET` are not
-///   implemented (→ `EOPNOTSUPP`); see the limitation note in todo.txt.
-/// - `protocol`: must be 0 (`EPROTONOSUPPORT` otherwise).
+/// - `sock_type`: `SOCK_STREAM`, `SOCK_DGRAM` or `SOCK_SEQPACKET`
+///   (`SOCK_RAW` a datagram pair, as Linux's `unix_create` makes it),
+///   optionally OR-ed with `SOCK_NONBLOCK` and/or `SOCK_CLOEXEC`.
+/// - `protocol`: 0 or `PF_UNIX` (`EPROTONOSUPPORT` otherwise).
 ///
 /// On success writes the two fds into `sv[0]`/`sv[1]` and returns 0.
 /// On failure returns -1 with `errno` set.
@@ -3740,76 +3627,16 @@ pub extern "C" fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mu
         errno::set_errno(errno::EPROTONOSUPPORT);
         return -1;
     }
-    // A datagram or sequenced-packet pair is a pair of the sockets that can
-    // have names ([`crate::unix_socket`]). A stream pair stays the older kind
-    // below, which crosses `posix_spawn` and `exec` and those do not yet
-    // (`fdtable::HandleKind::UnixSocket` says why).
-    if base_type != SOCK_STREAM {
-        // SAFETY: `sv` is non-null (checked above) and, by the caller's
-        // contract, writable for two ints.
-        return unsafe {
-            crate::unix_socket::socketpair(
-                base_type,
-                type_flags & SOCK_NONBLOCK != 0,
-                type_flags & SOCK_CLOEXEC != 0,
-                sv,
-            )
-        };
-    }
-
-    // ---- Create the kernel endpoint pair ----
-    let (raw0, raw1) = syscall3_2ret(SYS_SOCKETPAIR_CREATE, 0, 0, 0);
-    if raw0 < 0 {
-        // The kernel create path does not currently fail, but guard
-        // defensively so a future failure surfaces a real errno.
-        return errno::translate(raw0) as i32;
-    }
-    let h0 = raw0 as u64;
-    let h1 = raw1 as u64;
-
-    let initial_flags = crate::fcntl::O_RDWR
-        | if (type_flags & SOCK_NONBLOCK) != 0 {
-            crate::fcntl::O_NONBLOCK
-        } else {
-            0
-        };
-
-    // Allocate the first fd.
-    let Some(fd0) = fdtable::alloc_fd_with_flags(HandleKind::UnixStream, h0, initial_flags) else {
-        // Could not install fd0 — release both kernel endpoints.
-        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h0);
-        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h1);
-        errno::set_errno(errno::EMFILE);
-        return -1;
-    };
-
-    // Allocate the second fd.
-    let Some(fd1) = fdtable::alloc_fd_with_flags(HandleKind::UnixStream, h1, initial_flags) else {
-        // Roll back fd0 (frees its table slot) and close both endpoints.
-        let _ = fdtable::close_fd(fd0);
-        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h0);
-        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h1);
-        errno::set_errno(errno::EMFILE);
-        return -1;
-    };
-
-    // Apply FD_CLOEXEC to both fds if requested.
-    if (type_flags & SOCK_CLOEXEC) != 0 {
-        let _ = fdtable::set_fd_flags(fd0, fdtable::FD_CLOEXEC);
-        let _ = fdtable::set_fd_flags(fd1, fdtable::FD_CLOEXEC);
-    }
-
-    // Write the fd pair into the caller's array.  Use raw writes (rather
-    // than indexing) to satisfy the indexing_slicing lint and to avoid
-    // assuming alignment of the user pointer.
-    // SAFETY: `sv` was null-checked above; the caller guarantees it
-    // points to a writable `[i32; 2]`.
+    // SAFETY: `sv` is non-null (checked above) and, by the caller's
+    // contract, writable for two ints.
     unsafe {
-        let out = sv.cast::<i32>();
-        core::ptr::write(out, fd0);
-        core::ptr::write(out.add(1), fd1);
+        crate::unix_socket::socketpair(
+            base_type,
+            type_flags & SOCK_NONBLOCK != 0,
+            type_flags & SOCK_CLOEXEC != 0,
+            sv,
+        )
     }
-    0
 }
 
 // ---------------------------------------------------------------------------
@@ -5310,52 +5137,6 @@ pub unsafe extern "C" fn recvmmsg(
 mod tests {
     use super::*;
 
-    /// `sendto` on a connected local stream socket sends as `send` does,
-    /// refusing a destination with `EISCONN` -- and one longer than a
-    /// `sockaddr_storage` with `EINVAL` first -- as Linux's
-    /// `move_addr_to_kernel` and `unix_stream_sendmsg` answer. A NULL
-    /// destination, or a zero length, is none. (It was `ENOTSOCK` whatever
-    /// was given.)
-    #[test]
-    fn sendto_on_a_local_stream_socket_is_send() {
-        let fd = fdtable::alloc_fd(HandleKind::UnixStream, 0x1234).expect("fd table full");
-        let byte = [7u8];
-        let raw = [0u8; 16];
-        let dest = raw.as_ptr().cast::<Sockaddr>();
-        let send_to = |dest: *const Sockaddr, len: SocklenT| {
-            errno::set_errno(0);
-            // SAFETY: a one-byte buffer, and a 16-byte destination or none.
-            let r = unsafe { sendto(fd, byte.as_ptr(), 1, 0, dest, len) };
-            (r, errno::get_errno())
-        };
-        assert_eq!(send_to(dest, 16), (-1, errno::EISCONN));
-        assert_eq!(send_to(dest, SOCKADDR_STORAGE_LEN + 1), (-1, errno::EINVAL));
-        // No destination: `send`'s path, which on the host reaches a kernel
-        // that is not there.
-        for (d, len) in [(core::ptr::null(), 0), (core::ptr::null(), 16), (dest, 0)] {
-            let (r, e) = send_to(d, len);
-            assert_eq!(r, -1);
-            assert!(
-                ![errno::ENOTSOCK, errno::EISCONN, errno::EINVAL].contains(&e),
-                "{e}: sendto went where send goes"
-            );
-        }
-        let _ = fdtable::close_fd(fd);
-    }
-
-    std::thread_local! {
-        static SIGPIPES: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
-    }
-
-    extern "C" fn count_sigpipe(_sig: i32) {
-        SIGPIPES.with(|p| p.set(p.get() + 1));
-    }
-
-    /// The `SIGPIPE`s this thread has had since the last call.
-    fn sigpipes() -> u32 {
-        SIGPIPES.with(|p| p.replace(0))
-    }
-
     /// A TCP socket never connected, or listening, is no connection: sending
     /// is EPIPE with `SIGPIPE` (none for `MSG_NOSIGNAL`), and receiving from
     /// a listener ENOTCONN -- what Linux 6.6 answers (measured), where these
@@ -5431,29 +5212,6 @@ mod tests {
         let _ = fdtable::close_fd(fresh);
         let _ = fdtable::close_fd(listener);
         signal(SIGPIPE, old);
-    }
-
-    /// `recvfrom` on a local stream socket receives as `recv` does (it was
-    /// ENOTSOCK); on the host there is no kernel behind the receive.
-    #[test]
-    fn recvfrom_on_a_local_stream_socket_is_recv() {
-        let fd = fdtable::alloc_fd(HandleKind::UnixStream, 0x1234).expect("fd table full");
-        let mut into = [0u8; 4];
-        errno::set_errno(0);
-        // SAFETY: a four-byte buffer; no source wanted.
-        let r = unsafe {
-            recvfrom(
-                fd,
-                into.as_mut_ptr(),
-                4,
-                0,
-                core::ptr::null_mut(),
-                core::ptr::null_mut(),
-            )
-        };
-        assert_eq!(r, -1);
-        assert_ne!(errno::get_errno(), errno::ENOTSOCK);
-        let _ = fdtable::close_fd(fd);
     }
 
     /// `MSG_NOSIGNAL` is what keeps a send to a broken connection from
@@ -5831,7 +5589,7 @@ mod tests {
     // -- socketpair argument validation --
     //
     // These tests exercise only the pre-syscall validation branches.
-    // The happy path issues SYS_SOCKETPAIR_CREATE via a raw `syscall`
+    // The happy path issues SYS_UNIX_PAIR via a raw `syscall`
     // instruction, which cannot run under the host test harness, so it
     // is covered by the in-kernel boot/integration path instead.
 

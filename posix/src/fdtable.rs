@@ -144,19 +144,6 @@ pub enum HandleKind {
     /// does not propagate them to the child.
     Inotify,
 
-    /// A connected Unix-domain stream socket endpoint, created by
-    /// `socketpair(AF_UNIX, SOCK_STREAM, ...)` (uses `SYS_SOCKETPAIR_*`).
-    ///
-    /// The `handle` is a kernel stream-socket endpoint handle
-    /// (`(pair_id << 1) | endpoint_bit`).  Bytes written on one endpoint
-    /// are read on its peer.  `read`/`write` map to `SYS_SOCKETPAIR_RECV`/
-    /// `SYS_SOCKETPAIR_SEND` (or the `TRY_` variants when `O_NONBLOCK` is
-    /// set); `poll` maps to `SYS_SOCKETPAIR_POLL`.  Unlike epoll/timerfd/
-    /// inotify, the endpoint handle is a real kernel resource and IS
-    /// inherited across `posix_spawn`/`exec` (the kernel bumps the
-    /// endpoint refcount when it dups the handle into the child).
-    UnixStream,
-
     /// A Unix-domain socket of any kind -- stream, datagram or sequenced
     /// packet -- that can have a name: `socket(AF_UNIX, ...)` and what
     /// `accept` gives back (uses `SYS_UNIX_*`, [`crate::unix_socket`]).
@@ -164,12 +151,9 @@ pub enum HandleKind {
     /// The `handle` is the kernel's socket handle. Its kind (`SOCK_STREAM`,
     /// `SOCK_DGRAM`, `SOCK_SEQPACKET`) is in the socket's metadata
     /// ([`crate::socket::get_meta`]); its name, peer, options and queues are
-    /// the kernel's. A `fork` gives the child one more holder. It does **not**
-    /// cross `posix_spawn` or `exec` yet: the kernel's spawn has no handle
-    /// type for it (`requests/d-a-a-named-unix-socket-must-cross-spawn-and-
-    /// count-its-bytes.md`), so `socketpair(AF_UNIX, SOCK_STREAM)` -- whose
-    /// ends a parent often hands a child -- stays [`Self::UnixStream`] until
-    /// it does.
+    /// the kernel's. A `fork`, a `posix_spawn` and an `exec` give the child one
+    /// more holder (`fd_handle_type::UNIX_SOCKET`); every `socketpair` is a
+    /// pair of these since 2026-10-16.
     UnixSocket,
 
     /// The **master** end of a pseudo-terminal (uses `SYS_PTY_*`).

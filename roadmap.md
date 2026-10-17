@@ -2868,9 +2868,9 @@ D's to act on once answered).
   FIFO entry types -- `ctest-fifo`; the set-id calls (1159/1160), with
   `posix_spawn`'s `RESETIDS` refused while it would change an id --
   `ctest-setids`, `ctest-spawn-attrs`; getgroups (1143); `swapon`/`swapoff` (1175/1176) --
-  `ctest-swap`; descriptor passing (1169/1170) -- `ctest-scm-rights`.
-  **Next**, in this order: a stream `socketpair` on the named sockets'
-  calls, now that they cross spawn (and so carry descriptors too);
+  `ctest-swap`; descriptor passing (1169/1170) -- `ctest-scm-rights`; Unix
+  sockets crossing spawn and exec, and a stream `socketpair` made of them.
+  **Next**, in this order:
   the namespace calls (1161-1166); `SYS_THREAD_SCHEDULER` (1146);
   `SYS_MMAP_FILE` (1144); `profil` over `ITIMER_PROF`; the null-buffer
   shortcuts `cc3806b84` makes unnecessary; the PI-futex fast path

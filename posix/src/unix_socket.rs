@@ -53,12 +53,6 @@
 //! # Not yet
 //!
 //! - Stating credentials other than one's own (`EPERM`).
-//! - Crossing `posix_spawn` and `exec`: the kernel's spawn has no handle type
-//!   for these sockets, so a child does not inherit one
-//!   (`requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-its-bytes.md`).
-//!   `socketpair(AF_UNIX, SOCK_STREAM)` stays on the older socket pair,
-//!   [`HandleKind::UnixStream`], until it does; datagram and sequenced-packet
-//!   pairs, which that one never had, are made here.
 //! - Disconnecting a datagram socket by connecting it to `AF_UNSPEC`: there is
 //!   no native call for it (`EOPNOTSUPP`).
 

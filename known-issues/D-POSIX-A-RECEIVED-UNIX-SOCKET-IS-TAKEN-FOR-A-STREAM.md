@@ -13,9 +13,14 @@ rest of the message for the next receive instead of discarding it, and
 `MSG_TRUNC` is not reported. A stream socket -- the common case, an
 accepted connection handed to a worker -- is right.
 
+The same holds for one a child inherits across `posix_spawn` or `exec`:
+its crt0 learns the handle and nothing of the type.
+
 **Where:** `posix/src/unix_socket.rs` -- `land_rights`, which installs
-what `SYS_UNIX_RECVMSG` hands back.
+what `SYS_UNIX_RECVMSG` hands back; `posix/src/crt.rs` --
+`retrieve_initial_fds`, which installs what a child inherits.
 
 **The proper fix:** lane A's `UNIX_OPT_TYPE` for `SYS_UNIX_GET_OPTION`
-(the request above); `land_rights` asks it for each Unix socket it
-installs, and `getsockopt(SO_TYPE)` can answer from it.
+(the request above); `land_rights` and `retrieve_initial_fds` ask it
+for each Unix socket they install, and `getsockopt(SO_TYPE)` can answer
+from it.

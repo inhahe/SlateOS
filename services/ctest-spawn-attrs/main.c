@@ -30,6 +30,8 @@
  *   5x  SETSIGMASK gives it the mask asked (50); SETSIGDEF gives a signal
  *       the parent ignores its default action (51)
  *   6x  RESETIDS with nothing to reset starts it as before (60)
+ *   7x  an end of a stream socket pair crosses posix_spawn, as fd 3, and
+ *       what the child writes on it arrives at the other end (70)
  */
 
 #define _GNU_SOURCE
@@ -38,6 +40,7 @@
 #include <spawn.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -69,6 +72,8 @@ static int child(const char *what)
         return usr2.sa_handler == SIG_DFL ? 0 : 1;
     if (strcmp(what, "ids") == 0)
         return geteuid() == getuid() && getegid() == getgid() ? 0 : 1;
+    if (strcmp(what, "socket") == 0)
+        return write(3, "hi", 2) == 2 ? 0 : 1;
     return 2;
 }
 
@@ -146,5 +151,24 @@ int main(int argc, char **argv)
             return 60;
     }
     posix_spawnattr_destroy(&attr);
+
+    /* 7x */
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0)
+        return 70;
+    posix_spawn_file_actions_t acts;
+    posix_spawn_file_actions_init(&acts);
+    posix_spawn_file_actions_adddup2(&acts, sv[1], 3);
+    char *cargv[] = {self, (char *)"child", (char *)"socket", 0};
+    pid_t pid;
+    if (posix_spawn(&pid, self, &acts, 0, cargv, environ) != 0)
+        return 70;
+    posix_spawn_file_actions_destroy(&acts);
+    int status = 0;
+    char buf[4];
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return 70;
+    if (read(sv[0], buf, sizeof buf) != 2 || memcmp(buf, "hi", 2) != 0)
+        return 70;
     return 42;
 }

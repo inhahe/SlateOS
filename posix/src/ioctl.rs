@@ -952,16 +952,6 @@ fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
             }
             fionread_for_file(st.st_mode, st.st_size, offset)
         }
-        HandleKind::UnixStream => {
-            // Query actual buffered byte count from the kernel.
-            let bytes = if handle == 0 {
-                0
-            } else {
-                use crate::syscall::{SYS_SOCKETPAIR_READABLE_BYTES, syscall1};
-                syscall1(SYS_SOCKETPAIR_READABLE_BYTES, handle) as i32
-            };
-            Ok(bytes)
-        }
         HandleKind::UnixSocket => {
             // A listening socket has nothing to read: `unix_ioctl`'s
             // `SIOCINQ` refuses it, as `tcp_ioctl` refuses a TCP listener.

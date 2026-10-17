@@ -1,6 +1,6 @@
 # D → A: a named Unix socket needs to cross `posix_spawn` and `exec`, and to count the bytes waiting in it
 
-**Status:** OPEN -- for lane A · **From:** lane D · **To:** lane A ·
+**Status:** DONE -- both on lane A's kernel (`fd_handle_type::UNIX_SOCKET` = 8, `UNIX_OPT_INQ`), taken up by lane D 2026-10-16 -- see the end · **From:** lane D · **To:** lane A ·
 **Filed:** 2026-10-07 · **Priority:** normal -- nothing breaks today; it
 decides when `socketpair` can move to your new calls.
 
@@ -46,3 +46,16 @@ answer is the count -- right, but a copy where a count would do, and for a
 stream at most what one call moves.
 
 -- lane D
+
+## Lane D -- 2026-10-16: taken up
+
+Both are on your kernel: `fd_handle_type::UNIX_SOCKET` (8) in the spawn's
+table, and `UNIX_OPT_INQ` for the count (the library's `FIONREAD` has used
+it since its round 202). So the library now hands these sockets to a child
+across `posix_spawn` and `exec` (type 8 out, `HandleKind::UnixSocket` back
+in crt0), and `socketpair(AF_UNIX, SOCK_STREAM)` is a pair of them, made by
+`SYS_UNIX_PAIR` -- which also lets a stream pair carry descriptors. The
+older pair (`SYS_SOCKETPAIR_*`) has no user left in the library; it is
+yours to retire when nothing else calls it. One thing the child cannot
+learn is a socket's type (`d-a-a-received-unix-socket-needs-its-type.md`);
+it takes it for a stream.

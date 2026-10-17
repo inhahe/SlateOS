@@ -1311,20 +1311,6 @@ pub const SYS_POWER_RELOAD: u64 = 1139;
 pub const SYS_PIPE_PEEK: u64 = 657;
 pub const SYS_PIPE_WAIT_READABLE: u64 = 658;
 
-// Stream sockets (IPC range 300-310) — bidirectional byte streams backing
-// socketpair(AF_UNIX, SOCK_STREAM, ...).  Mirrors kernel/src/syscall/number.rs.
-pub const SYS_SOCKETPAIR_CREATE: u64 = 300;
-pub const SYS_SOCKETPAIR_SEND: u64 = 301;
-pub const SYS_SOCKETPAIR_RECV: u64 = 302;
-pub const SYS_SOCKETPAIR_TRY_SEND: u64 = 303;
-pub const SYS_SOCKETPAIR_TRY_RECV: u64 = 304;
-pub const SYS_SOCKETPAIR_CLOSE: u64 = 305;
-pub const SYS_SOCKETPAIR_SEND_TIMEOUT: u64 = 306;
-pub const SYS_SOCKETPAIR_RECV_TIMEOUT: u64 = 307;
-pub const SYS_SOCKETPAIR_POLL: u64 = 308;
-pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
-pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
-
 // Unix-domain sockets by name (1104-1118): the kernel's `ipc::unix_socket`,
 // which `crate::unix_socket` builds `socket(AF_UNIX, ...)` on. Mirrors
 // kernel/src/syscall/number.rs (lane A's `requests/a-d-resource-type-33-is-

@@ -360,9 +360,10 @@ pub mod fd_handle_type {
     /// Eventfd counter handle (raw pass-through — no kernel-level dup
     /// yet; closing from either side closes for both).
     pub const EVENTFD: u8 = 5;
-    /// Unix-domain stream socket endpoint (`socketpair`).  The kernel
-    /// dups the endpoint into the child via `stream_socket::dup()`,
-    /// which bumps the endpoint refcount.
+    /// The kernel's older Unix-domain stream pair (`SYS_SOCKETPAIR_*`),
+    /// which this library no longer makes -- every `socketpair` is
+    /// [`UNIX_SOCKET`]'s since 2026-10-16 -- so it never sends nor expects
+    /// one; kept so that the table lists the kernel's every number.
     pub const STREAM_SOCKET: u8 = 6;
     /// Either end of a pty.  One constant covers both because `PtyHandle` is
     /// `(tty_id << 1) | end` — the low bit already distinguishes them, and a
@@ -385,6 +386,12 @@ pub mod fd_handle_type {
     /// dedups aliases, since that path moves one handle into several
     /// descriptors and so registers once, while this one dups per entry.
     pub const PTY: u8 = 7;
+    /// A Unix-domain socket of the `SYS_UNIX_*` calls -- named, accepted, or
+    /// either end of a pair (`HandleKind::UnixSocket`). The kernel dups it as
+    /// one more holder of the same socket, so the child's handle is the
+    /// parent's (lane A's, `requests/d-a-a-named-unix-socket-must-cross-
+    /// spawn-and-count-its-bytes.md`).
+    pub const UNIX_SOCKET: u8 = 8;
 }
 
 /// A file descriptor mapping entry for `SYS_PROCESS_SPAWN_EX`.
@@ -1563,7 +1570,6 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::TcpStream | HandleKind::TcpListener => fd_handle_type::TCP_SOCKET,
         HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
         HandleKind::Eventfd => fd_handle_type::EVENTFD,
-        HandleKind::UnixStream => fd_handle_type::STREAM_SOCKET,
         // A pty *slave* crosses as a console handle, and that is exact
         // rather than approximate.  `CONSOLE` does not name a specific
         // device: the kernel resolves every console read and write
@@ -1584,16 +1590,15 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         // one, and which is what stopped `script -f`-shaped programs (where the
         // *child* is the master holder) from working at all.
         HandleKind::PtyMaster => fd_handle_type::PTY,
+        HandleKind::UnixSocket => fd_handle_type::UNIX_SOCKET,
         // Epoll, Timerfd, and Inotify fds are per-process userspace
         // state and cannot be meaningfully transferred to a child.  Map
         // to FILE so the function is total; build_fd_map filters these
         // entries out before they reach this conversion.
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
-        // Not transferable yet either (see `inheritable_fds`): filtered out
+        // Not transferable either (see `inheritable_fds`): filtered out
         // before this conversion, and mapped only so that it is total.
-        HandleKind::UnixSocket | HandleKind::DevicePcm | HandleKind::DeviceControl => {
-            fd_handle_type::FILE
-        }
+        HandleKind::DevicePcm | HandleKind::DeviceControl => fd_handle_type::FILE,
     }
 }
 
@@ -1639,10 +1644,7 @@ pub fn handle_type_to_kind_for(handle_type: u8, handle: u64) -> crate::fdtable::
         fd_handle_type::UDP_SOCKET => HandleKind::UdpSocket,
         fd_handle_type::CONSOLE => HandleKind::Console,
         fd_handle_type::EVENTFD => HandleKind::Eventfd,
-        // Unix-domain stream endpoint (`socketpair`).  Reconstructing this
-        // as `File` would route the child's read/write/recv through the
-        // file path with the wrong semantics (EBADF or silent misbehaviour).
-        fd_handle_type::STREAM_SOCKET => HandleKind::UnixStream,
+        fd_handle_type::UNIX_SOCKET => HandleKind::UnixSocket,
         fd_handle_type::PTY => {
             if handle & 1 == 0 {
                 HandleKind::PtyMaster
@@ -1787,13 +1789,6 @@ fn inheritable_fds() -> ChildFds {
             // `login_tty` has already made the pty the child's controlling
             // terminal — so that mapping is exact rather than approximate.
             //
-            // `UnixSocket` is skipped for the reason `PtyMaster` once was, and
-            // says so: it has a kernel identity, but no `fd_handle_type` names
-            // one yet, so the child does not get it. Asked of lane A in
-            // `requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-
-            // its-bytes.md`; until then `socketpair(AF_UNIX, SOCK_STREAM)`
-            // stays `UnixStream`, which does cross.
-            //
             // A sound card's device (`DevicePcm`, `DeviceControl`) is skipped
             // for the same reason: the kernel's map has no type for its
             // handle, so a child that needs the card opens it itself
@@ -1801,7 +1796,6 @@ fn inheritable_fds() -> ChildFds {
             let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
-                && entry.kind != fdtable::HandleKind::UnixSocket
                 && !crate::device_door::is_device(entry.kind);
             if transferable {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
@@ -3976,7 +3970,7 @@ mod tests {
             HandleKind::TcpStream,
             HandleKind::UdpSocket,
             HandleKind::Eventfd,
-            HandleKind::UnixStream,
+            HandleKind::UnixSocket,
         ] {
             assert_eq!(
                 handle_type_to_kind(kind_to_handle_type(kind)),
@@ -3986,18 +3980,18 @@ mod tests {
         }
     }
 
-    /// The regression itself: an inherited `AF_UNIX` endpoint must come back
-    /// as `UnixStream`, not silently degrade to `File`.
+    /// An inherited `AF_UNIX` socket must come back as one, not silently
+    /// degrade to `File`: the kernel's type 8 both ways.
     #[test]
-    fn unix_stream_is_not_rebuilt_as_a_plain_file() {
+    fn a_unix_socket_is_not_rebuilt_as_a_plain_file() {
         use crate::fdtable::HandleKind;
         assert_eq!(
-            kind_to_handle_type(HandleKind::UnixStream),
-            fd_handle_type::STREAM_SOCKET
+            kind_to_handle_type(HandleKind::UnixSocket),
+            fd_handle_type::UNIX_SOCKET
         );
         assert_eq!(
-            handle_type_to_kind(fd_handle_type::STREAM_SOCKET),
-            HandleKind::UnixStream
+            handle_type_to_kind(fd_handle_type::UNIX_SOCKET),
+            HandleKind::UnixSocket
         );
     }
 

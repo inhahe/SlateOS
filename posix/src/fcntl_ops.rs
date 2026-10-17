@@ -903,7 +903,6 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::TcpListener
         | fdtable::HandleKind::UdpSocket
         | fdtable::HandleKind::Eventfd
-        | fdtable::HandleKind::UnixStream
         | fdtable::HandleKind::UnixSocket
         | fdtable::HandleKind::PtyMaster
         | fdtable::HandleKind::PtySlave

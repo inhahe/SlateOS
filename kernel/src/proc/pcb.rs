@@ -8133,10 +8133,8 @@ fn resolve_file_shared(
         }
         let page_off = fo & !frame_mask;
         let in_page = fo & frame_mask;
-        let handle = fault.handle;
-        let Ok(frame) = crate::mm::page_cache::get_or_fill(fault.file_id, page_off, |buf| {
-            crate::fs::handle::fill_read(handle, fault.file_id, page_off, buf)
-        }) else {
+        let Ok(frame) = crate::fs::handle::cached_page(fault.handle, fault.file_id, page_off)
+        else {
             return faulting_mapped;
         };
         // Under the address space's page-table lock: whether this virtual
@@ -8268,9 +8266,7 @@ fn resolve_file_cached(
     // the frame's tail zero, matching Linux's page zero-fill semantics.
     // Fill via the *uncached* read so we don't re-enter the page cache for the
     // very page we're filling (read_at now routes through get_or_fill — §38).
-    let phys_frame = match crate::mm::page_cache::get_or_fill(file_id, page_file_off, |buf| {
-        crate::fs::handle::fill_read(handle, file_id, page_file_off, buf)
-    }) {
+    let phys_frame = match crate::fs::handle::cached_page(handle, file_id, page_file_off) {
         Ok(f) => f,
         Err(_) => return false,
     };

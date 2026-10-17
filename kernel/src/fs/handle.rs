@@ -1414,6 +1414,38 @@ pub fn fill_read(
     }
 }
 
+/// The page cache's frame for the page at `offset` (16 KiB-aligned) of
+/// `file`, the file the mapping's handle `handle` holds, a reference taken
+/// for the caller: what a mapping's fault maps. The filesystem's own frame,
+/// shared, where it keeps one (`Vfs::object_page_frame`, design-decisions
+/// §1574); else a frame the cache fills from the file ([`fill_read`]).
+///
+/// # Errors
+///
+/// As [`fill_read`] and `mm::page_cache::get_or_fill_from`.
+pub fn cached_page(
+    handle: u64,
+    file: crate::fs::vfs::FileId,
+    offset: u64,
+) -> KernelResult<crate::mm::frame::PhysFrame> {
+    let object = OPEN_FILES
+        .lock()
+        .get(&handle)
+        .ok_or(KernelError::InvalidHandle)?
+        .object
+        .clone();
+    crate::mm::page_cache::get_or_fill_from(
+        file,
+        offset,
+        || {
+            object
+                .as_ref()
+                .and_then(|obj| crate::fs::Vfs::object_page_frame(obj, offset))
+        },
+        |buf| fill_read(handle, file, offset, buf),
+    )
+}
+
 /// Write bytes at an explicit `offset`, **without** modifying the
 /// file's current offset.
 ///

@@ -1,6 +1,21 @@
 ## TD-A-MEMFS-PAGES-ARE-KEPT-TWICE (lane A, 2026-10-17) — OPEN
 
-**Status:** OPEN.
+**Status:** OPEN -- fixed on lane-a-wip 2026-10-17 (design-decisions
+§1574), awaiting a boot on main. memfs reads skip the page cache, and a
+mapped memfs file keeps its pages in frames of its own, which the cache
+adopts rather than copies. This differs from the fix proposed below: §1574
+says why the cache did not become memfs's store.
+
+**Mutation proofs still owed (cut off by the PC move, 2026-10-17):** a
+boot showed memfs's frames test failing when `FileFrames::frame` hands a
+page a new frame each time ("a page was given two frames"). Still to
+boot, each expected to fail its test:
+- `handle::cached_page`'s adopt closure answering `None` -- page_cache's
+  "a mapping's page of a memfs file is a copy, not the file's own frame";
+- `get_or_fill_from` ignoring what `adopt` offers -- "a filesystem's own
+  frame was copied, or adopted twice";
+- memfs's `caches_contents` answering true -- "a read of a memfs file left
+  a copy in the page cache".
 
 **In short:** a file on a memory filesystem (memfs: `/tmp`, and every memfd
 since design-decisions §1573) keeps its bytes in memfs's own buffer. The

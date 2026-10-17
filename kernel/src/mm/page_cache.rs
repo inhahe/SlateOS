@@ -396,8 +396,33 @@ pub fn lookup(file: FileId, file_offset: u64) -> KernelResult<Option<PhysFrame>>
 /// - Whatever `fill` returns on a read error (the just-allocated frame is freed
 ///   before propagating).
 /// - Frame-allocation / HHDM / reference-bump errors.
-pub fn get_or_fill<F>(file: FileId, file_offset: u64, mut fill: F) -> KernelResult<PhysFrame>
+pub fn get_or_fill<F>(file: FileId, file_offset: u64, fill: F) -> KernelResult<PhysFrame>
 where
+    F: FnMut(&mut [u8]) -> KernelResult<ReadPoint>,
+{
+    get_or_fill_from(file, file_offset, || None, fill)
+}
+
+/// [`get_or_fill`], first asking `adopt` for the filesystem's own frame of
+/// the page (design-decisions §1574): `Some` with a frame, a reference taken
+/// on it for the cache, and the point the filesystem had it at, which then
+/// becomes the cache's entry for the page -- shared with the file, not
+/// copied, so the file, the cache and every mapping are one copy. `None`
+/// when the filesystem keeps no frames: `fill` fills a frame of the cache's
+/// own. Either way the frame is answered with one reference added for the
+/// caller.
+///
+/// # Errors
+///
+/// As [`get_or_fill`]; `adopt`'s.
+pub fn get_or_fill_from<A, F>(
+    file: FileId,
+    file_offset: u64,
+    mut adopt: A,
+    mut fill: F,
+) -> KernelResult<PhysFrame>
+where
+    A: FnMut() -> Option<KernelResult<(PhysFrame, ReadPoint)>>,
     F: FnMut(&mut [u8]) -> KernelResult<ReadPoint>,
 {
     let key = key_for(file, file_offset)?;
@@ -423,7 +448,12 @@ where
         }
 
         STAT_MISSES.fetch_add(1, Ordering::Relaxed);
-        let filled = fill_new_frame(hhdm, &mut fill);
+        // The filesystem's own frame, or one of the cache's, filled. Either
+        // carries one reference, the cache's, published or given back below.
+        let filled = match adopt() {
+            Some(adopted) => adopted,
+            None => fill_new_frame(hhdm, &mut fill),
+        };
 
         // Re-acquire, end this fill's count, and insert, resolving the races.
         let mut cache = PAGE_CACHE.lock();
@@ -446,7 +476,9 @@ where
             let bumped = unsafe { frame::ref_inc(winner) };
             drop(cache);
             STAT_RACES_LOST.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: `new_frame` (refcount 1) was never mapped or published.
+            // SAFETY: our reference on `new_frame` was never published: a
+            // frame of our own (refcount 1) is freed, an adopted one keeps
+            // the filesystem's.
             let _ = unsafe { frame::free_frame(new_frame) };
             bumped?;
             return Ok(winner);
@@ -456,7 +488,8 @@ where
             // what the change replaced. Read again.
             drop(cache);
             STAT_REFILLS.fetch_add(1, Ordering::Relaxed);
-            // SAFETY: `new_frame` (refcount 1) was never mapped or published.
+            // SAFETY: our reference on `new_frame` was never published, as
+            // above.
             let _ = unsafe { frame::free_frame(new_frame) };
             continue;
         }
@@ -465,7 +498,7 @@ where
         // SAFETY: `new_frame` is a freshly allocated, valid frame; cache lock held.
         if let Err(e) = unsafe { frame::ref_inc(new_frame) } {
             drop(cache);
-            // SAFETY: never mapped or published.
+            // SAFETY: our reference was never published, as above.
             let _ = unsafe { frame::free_frame(new_frame) };
             return Err(e);
         }
@@ -1728,6 +1761,10 @@ pub fn self_test() -> KernelResult<()> {
         fs_id: 0,
         ino: 0xC0DE_0006,
     };
+    let file_g = FileId {
+        fs_id: 0,
+        ino: 0xC0DE_0007,
+    };
 
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
 
@@ -1931,6 +1968,10 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!(
             "[page_cache]   a fill reads again for a change after its read, not one before: OK"
         );
+        adopted_frame_is_shared(file_g)?;
+        serial_println!(
+            "[page_cache]   a filesystem's own frame is the cache's entry, shared, not copied: OK"
+        );
 
         Ok(())
     })();
@@ -1943,6 +1984,7 @@ pub fn self_test() -> KernelResult<()> {
     let _ = invalidate_file(file_d);
     let _ = invalidate_file(file_e);
     let _ = invalidate_file(file_f);
+    let _ = invalidate_file(file_g);
     // A body that bailed between adding and removing its shared mapping.
     while has_shared_maps(file_e) {
         shared_map_removed(file_e, false);
@@ -2124,6 +2166,65 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
     result
 }
 
+/// For [`self_test`]: a frame the filesystem keeps of its own (design-
+/// decisions §1574) is the cache's entry for the page -- the very frame, no
+/// fill and no copy -- a second lookup finds it without asking again, and
+/// dropping the cache's entry leaves the filesystem's reference.
+fn adopted_frame_is_shared(file: FileId) -> KernelResult<()> {
+    let fail = |what: &str| -> KernelResult<()> {
+        crate::serial_println!("[page_cache]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    };
+    // The "filesystem's" frame: its own reference, then the cache's.
+    let own = frame::alloc_frame_zeroed()?;
+    let result = (|| {
+        // SAFETY: a frame we allocated and hold; the reference is the
+        // cache's, given to it below.
+        unsafe { frame::ref_inc(own)? };
+        let mut fills = 0u32;
+        let got = get_or_fill_from(
+            file,
+            0,
+            || Some(Ok((own, read_point(file)))),
+            |_| {
+                fills = fills.saturating_add(1);
+                Ok(read_point(file))
+            },
+        )?;
+        let mut asked = 0u32;
+        let again = get_or_fill_from(
+            file,
+            0,
+            || {
+                asked = asked.saturating_add(1);
+                None
+            },
+            |_| Ok(read_point(file)),
+        )?;
+        // The filesystem's, the cache's and the two lookups'.
+        let shared = frame::refcount(own);
+        release(got);
+        release(again);
+        if got != own || again != own || fills != 0 || asked != 0 {
+            return fail("a filesystem's own frame was copied, or adopted twice");
+        }
+        if shared != 4 {
+            crate::serial_println!("[page_cache]     the frame's references: {}", shared);
+            return fail("an adopted frame does not carry the cache's and the callers' references");
+        }
+        let _ = invalidate_file(file);
+        if frame::refcount(own) != 1 {
+            return fail(
+                "dropping the cache's entry did not leave the filesystem's reference alone",
+            );
+        }
+        Ok(())
+    })();
+    // SAFETY: the filesystem's reference, given back once.
+    let _ = unsafe { frame::free_frame(own) };
+    result
+}
+
 /// For [`self_test`]: a fill whose read the file changed after reads it
 /// again, and what it inserts is the second read; one the file changed
 /// before -- while it waited for the filesystem's lock -- reads once, and
@@ -2180,6 +2281,52 @@ fn fill_racing_a_change(file: FileId) -> KernelResult<()> {
     Ok(())
 }
 
+/// A memfs file is kept once (design-decisions §1574): a read of it leaves
+/// no copy in the cache, and a mapping's page of it is the file's own frame,
+/// got the way a mapping's fault gets it
+/// (`handle::cached_page`), it shows a write to the file at once -- with no
+/// shared mapping counted, which is when the cache would drop a copy of its
+/// own rather than update it, so a copy would show the old byte.
+fn memfs_mapping_is_the_file() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags};
+    const PATH: &str = "/tmp/memfs-one-copy";
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    // Best effort: a leftover from an earlier failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    crate::fs::Vfs::write_file(PATH, b"one copy")?;
+    let file = crate::fs::Vfs::file_identity(PATH)?.ok_or(KernelError::InternalError)?;
+    let reader = handle::open(PATH, OpenFlags::READ)?;
+    let result = (|| {
+        // A read of it goes past the cache, leaving no copy there.
+        let _ = crate::fs::Vfs::read_file(PATH)?;
+        if is_resident(file, 0) {
+            return test_fail("a read of a memfs file left a copy in the page cache");
+        }
+        let page = handle::cached_page(reader, file, 0)?;
+        let written = crate::fs::Vfs::write_at(PATH, 0, b"O");
+        // SAFETY: a frame we hold a reference on; byte 0 is inside its alias.
+        let seen = unsafe { core::ptr::read_volatile(page.to_virt(hhdm) as *const u8) };
+        release(page);
+        written?;
+        if seen != b'O' {
+            return test_fail(
+                "a mapping's page of a memfs file is a copy, not the file's own frame",
+            );
+        }
+        Ok(())
+    })();
+    // The test's own handle and scratch file: a close fails only for a
+    // handle already gone, and the removal only matters to a next run.
+    let _ = handle::close(reader);
+    let _ = crate::fs::Vfs::remove(PATH);
+    let _ = invalidate_file(file);
+    result?;
+    crate::serial_println!(
+        "[page_cache]   a mapping's page of a memfs file is the file's own frame: OK"
+    );
+    Ok(())
+}
+
 /// Dirty pages and their writeback (design-decisions §1572, step 2), on a
 /// real file in `/tmp`, a caller reference on a page standing in for a
 /// mapping's: a page is marked dirty only through the frame the cache holds
@@ -2195,6 +2342,7 @@ fn fill_racing_a_change(file: FileId) -> KernelResult<()> {
 /// `InternalError` for a failed check; the VFS's error when the file cannot
 /// be made or read.
 pub fn writeback_self_test() -> KernelResult<()> {
+    memfs_mapping_is_the_file()?;
     const PATH: &str = "/tmp/page-cache-writeback";
     let size = FRAME_SIZE.saturating_mul(2).saturating_add(100);
     crate::serial_println!("[page_cache] Running dirty-page writeback self-test...");
@@ -2249,13 +2397,27 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
     let disk = || crate::fs::Vfs::read_at_uncached(path, 0, size.saturating_add(16));
     let byte = |d: &[u8], at: u64| usize::try_from(at).ok().and_then(|i| d.get(i).copied());
     let result = (|| {
-        // The pages, filled by a read through the cache.
-        let _ = crate::fs::Vfs::read_file(path)?;
-        for (i, slot) in held.iter_mut().enumerate() {
-            *slot = lookup(file, (i as u64).saturating_mul(page))?;
-        }
+        // The pages, filled from the file into frames of the cache's own, as
+        // a filesystem that caches its contents has them. (memfs, where the
+        // file is, is read past the cache, and a mapping of it shares its own
+        // frames: design-decisions §1574. The machinery tested here is the
+        // one every other filesystem's pages go through.)
+        let reader = handle::open(path, OpenFlags::READ)?;
+        let filled = (|| -> KernelResult<()> {
+            for (i, slot) in held.iter_mut().enumerate() {
+                let at = (i as u64).saturating_mul(page);
+                *slot = Some(get_or_fill(file, at, |buf| {
+                    handle::fill_read(reader, file, at, buf)
+                })?);
+            }
+            Ok(())
+        })();
+        // The test's own handle, opened above: a close fails only for one
+        // already gone.
+        let _ = handle::close(reader);
+        filled?;
         let [Some(f0), Some(_), Some(f2)] = held else {
-            return test_fail("a read through the cache did not leave the file's pages in it");
+            return test_fail("the file's pages could not be filled into the cache");
         };
 
         // A mapping may write the file: a WRITE seal must wait for it

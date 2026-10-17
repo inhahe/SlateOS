@@ -707,6 +707,37 @@ pub trait FileSystem: Send {
         None
     }
 
+    /// Whether the VFS keeps this filesystem's file contents in the page
+    /// cache for `read(2)` (§38). True, the default, for a filesystem whose
+    /// reads cost a device; false for one whose contents are memory already
+    /// -- memfs (design-decisions §1574) -- which caching would only keep
+    /// twice. Such a filesystem is read and written directly; a mapping of
+    /// its files still goes through the cache, by [`page_frame`](Self::page_frame).
+    fn caches_contents(&self) -> bool {
+        true
+    }
+
+    /// The frame holding page `offset` (16 KiB-aligned) of file `ino`, for a
+    /// filesystem that keeps its contents in frames of its own (design-
+    /// decisions §1574): a reference taken on it for the caller -- the page
+    /// cache, which then shares the frame instead of copying it, so a mapping
+    /// and the file are one copy. A hole is given a frame of zeros, which is
+    /// the file's from then on. `None`, the default, for a filesystem that
+    /// does not: the cache fills a frame of its own from `read_ino`.
+    ///
+    /// # Errors
+    ///
+    /// `InvalidAddress` for a page wholly past the file's end; the
+    /// allocation's.
+    fn page_frame(
+        &mut self,
+        ino: u64,
+        offset: u64,
+    ) -> Option<KernelResult<crate::mm::frame::PhysFrame>> {
+        let _ = (ino, offset);
+        None
+    }
+
     /// Pre-allocate space for a file without writing data.
     ///
     /// Ensures that at least `size` bytes are allocated for the file.
@@ -4430,7 +4461,9 @@ impl Vfs {
             let (fs, fs_id, _opts, relative) = resolve_mount(path)?;
             let mut guard = fs.lock();
             let meta = guard.metadata(&relative)?;
-            if meta.entry_type != EntryType::File || meta.ino == 0 {
+            // A filesystem whose contents are memory already is read directly
+            // (design-decisions §1574).
+            if meta.entry_type != EntryType::File || meta.ino == 0 || !guard.caches_contents() {
                 return guard.read_file(&relative);
             }
             (
@@ -5084,7 +5117,7 @@ impl Vfs {
             let meta = guard.metadata(&relative)?;
             // Only stable-identity regular files are page-cacheable; anything
             // else reads straight from the filesystem (current behaviour).
-            if meta.entry_type != EntryType::File || meta.ino == 0 {
+            if meta.entry_type != EntryType::File || meta.ino == 0 || !guard.caches_contents() {
                 return guard.read_at(&relative, offset, len);
             }
             (
@@ -5792,7 +5825,22 @@ impl Vfs {
         if len == 0 {
             return Ok(Vec::new());
         }
-        let size = obj.fs.lock().metadata_ino(obj.ino)?.size;
+        let size = {
+            let mut guard = obj.fs.lock();
+            // Memory already: read directly (design-decisions §1574).
+            if !guard.caches_contents() {
+                let read = guard.read_ino(obj.ino, offset, len);
+                drop(guard);
+                if read.is_ok()
+                    && obj.announced
+                    && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
+                {
+                    super::notify::emit(super::notify::FsEventType::Accessed, path, None);
+                }
+                return read;
+            }
+            guard.metadata_ino(obj.ino)?.size
+        };
         if offset >= size {
             return Ok(Vec::new());
         }
@@ -5811,6 +5859,25 @@ impl Vfs {
             super::notify::emit(super::notify::FsEventType::Accessed, path, None);
         }
         Ok(buf)
+    }
+
+    /// The page at `offset` (16 KiB-aligned) of a held file, as the
+    /// filesystem keeps it in a frame of its own, a reference taken on it for
+    /// the page cache to share (`FileSystem::page_frame`, design-decisions
+    /// §1574), with the point in the file's changes it was had at. `None` for
+    /// a filesystem that does not keep frames: the cache fills one.
+    pub fn object_page_frame(
+        obj: &FileObject,
+        offset: u64,
+    ) -> Option<
+        KernelResult<(
+            crate::mm::frame::PhysFrame,
+            crate::mm::page_cache::ReadPoint,
+        )>,
+    > {
+        let mut guard = obj.fs.lock();
+        let held = guard.page_frame(obj.ino, offset)?;
+        Some(held.map(|f| (f, crate::mm::page_cache::read_point(obj.id()))))
     }
 
     /// [`fill_read_resolved`](Self::fill_read_resolved) through an object:

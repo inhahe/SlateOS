@@ -14,7 +14,7 @@
 //! **Names and objects are separate.** [`MemFs`] owns a flat inode table
 //! (`BTreeMap<ino, `[`MemFsNode`]`>`); a directory holds
 //! `BTreeMap<name, ino>`, not the objects themselves.  Each node is a
-//! [`File`](MemFsNodeKind::File) (data: `Vec<u8>`), a
+//! [`File`](MemFsNodeKind::File) (data: [`MemData`]), a
 //! [`Dir`](MemFsNodeKind::Dir) (children: `BTreeMap<name, ino>`),
 //! or a [`Symlink`](MemFsNodeKind::Symlink) (target path string).
 //!
@@ -45,6 +45,14 @@
 //! exact (case-sensitive) matching.  Symlinks are followed
 //! transparently during resolution (up to [`MAX_SYMLINK_DEPTH`]
 //! hops to prevent loops).
+//!
+//! **A file is kept once, mapped or not** (design-decisions §1574). Its
+//! contents are bytes, exactly as long as the file, until it is mapped; a
+//! mapping's first fault turns them into frames of the file's own
+//! ([`FileFrames`]), and the page cache takes a reference on a frame instead
+//! of copying it ([`FileSystem::page_frame`]). The VFS reads and writes a
+//! memfs file directly, past the page cache ([`FileSystem::caches_contents`]),
+//! so a write and every mapping reach the same memory.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
@@ -58,6 +66,8 @@ use crate::fs::vfs::{
     DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp, metadata_now_ns,
     normalize_path,
 };
+use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+use crate::mm::page_table;
 
 /// Maximum number of symlinks followed during a single path resolution.
 ///
@@ -88,8 +98,8 @@ fn alloc_memfs_ino() -> u64 {
 
 /// Kind of a memory filesystem node.
 enum MemFsNodeKind {
-    /// A regular file with byte contents.
-    File(Vec<u8>),
+    /// A regular file, its contents.
+    File(MemData),
     /// A directory: names to inode numbers.
     ///
     /// The map holds `ino`s rather than nodes so that two entries — in this
@@ -110,6 +120,258 @@ enum MemFsNodeKind {
     /// the pipe opening it leads to is [`crate::ipc::fifo`]'s, found by this
     /// node's inode number.
     Fifo,
+}
+
+/// A memfs file's contents (design-decisions §1574).
+enum MemData {
+    /// The bytes, as many as the file is long: a file never mapped. Exactly
+    /// sized, as most files here are small, and a frame is 16 KiB.
+    Bytes(Vec<u8>),
+    /// A mapped file's pages, each in a frame of its own, which the page
+    /// cache and every mapping share.
+    Frames(FileFrames),
+}
+
+/// A mapped memfs file's contents: its length, and the frame holding each
+/// page it has, by page index (`offset / FRAME_SIZE`); a page with none is a
+/// hole, zeros. Each frame carries one reference, the file's; the page cache
+/// and the mappings take their own.
+///
+/// **A page's frame is never replaced while the file has the page:** the
+/// cache and the mappings hold that very frame, so a write that went to
+/// another would never reach them. Frames are only freed, past a cut.
+struct FileFrames {
+    /// The file's length in bytes.
+    len: u64,
+    /// The frame of each page the file has, by page index.
+    pages: BTreeMap<u64, PhysFrame>,
+}
+
+/// A frame's length, as a file offset.
+const PAGE: u64 = FRAME_SIZE as u64;
+
+impl Drop for FileFrames {
+    fn drop(&mut self) {
+        for (_, held) in core::mem::take(&mut self.pages) {
+            release_frame(held);
+        }
+    }
+}
+
+/// Give back the file's reference on `held`.
+fn release_frame(held: PhysFrame) {
+    // SAFETY: a frame of a `FileFrames`, which carries one reference on it,
+    // given back once: here, as the page leaves the file. The cache's and
+    // the mappings' references keep it while they hold it.
+    // A failure is a frame already gone, which leaves nothing to give back.
+    let _ = unsafe { frame::free_frame(held) };
+}
+
+/// The kernel's alias of `held`'s bytes, `FRAME_SIZE` of them.
+fn frame_bytes(held: PhysFrame) -> KernelResult<*mut u8> {
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    Ok(held.to_virt(hhdm) as *mut u8)
+}
+
+impl FileFrames {
+    /// Each page of `bytes` in a frame of its own, zeros past its end.
+    fn from_bytes(bytes: &[u8]) -> KernelResult<Self> {
+        let mut frames = Self {
+            len: 0,
+            pages: BTreeMap::new(),
+        };
+        frames.write(0, bytes)?;
+        Ok(frames)
+    }
+
+    /// The frame of page `index`, made -- zeros -- for a hole.
+    fn frame(&mut self, index: u64) -> KernelResult<PhysFrame> {
+        if let Some(&held) = self.pages.get(&index) {
+            return Ok(held);
+        }
+        let made = frame::alloc_frame_zeroed()?;
+        self.pages.insert(index, made);
+        Ok(made)
+    }
+
+    /// `len` bytes from `offset`, fewer at the end, none past it.
+    fn read(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        let end = offset
+            .saturating_add(u64::try_from(len).unwrap_or(u64::MAX))
+            .min(self.len);
+        let total =
+            usize::try_from(end.saturating_sub(offset)).map_err(|_| KernelError::FileTooLarge)?;
+        let mut out = Vec::new();
+        out.try_reserve_exact(total)
+            .map_err(|_| KernelError::OutOfMemory)?;
+        out.resize(total, 0);
+        let mut done = 0usize;
+        while done < total {
+            let at = offset.saturating_add(done as u64);
+            let in_page = usize::try_from(at % PAGE).unwrap_or(0);
+            let n = (FRAME_SIZE.saturating_sub(in_page)).min(total.saturating_sub(done));
+            if let Some(&held) = self.pages.get(&(at / PAGE))
+                && let Some(dst) = out.get_mut(done..done.saturating_add(n))
+            {
+                // SAFETY: a frame of the file's, its reference held; its alias
+                // is FRAME_SIZE bytes and `in_page + n <= FRAME_SIZE`.
+                let src =
+                    unsafe { core::slice::from_raw_parts(frame_bytes(held)?.add(in_page), n) };
+                dst.copy_from_slice(src);
+            }
+            done = done.saturating_add(n);
+        }
+        Ok(out)
+    }
+
+    /// Zero the bytes of the last page from the file's end on, when the
+    /// file is about to grow past it: a store a mapping made there, past the
+    /// end, is not the file's, and what the file grows into reads zeros.
+    fn zero_tail(&mut self) -> KernelResult<()> {
+        let in_page = usize::try_from(self.len % PAGE).unwrap_or(0);
+        if in_page == 0 {
+            return Ok(());
+        }
+        if let Some(&held) = self.pages.get(&(self.len / PAGE)) {
+            // SAFETY: a frame of the file's; `in_page < FRAME_SIZE`.
+            unsafe {
+                core::ptr::write_bytes(frame_bytes(held)?.add(in_page), 0, FRAME_SIZE - in_page);
+            }
+        }
+        Ok(())
+    }
+
+    /// Write `data` at `offset`, into the pages' own frames, growing the file.
+    fn write(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
+        let end = offset
+            .checked_add(u64::try_from(data.len()).map_err(|_| KernelError::FileTooLarge)?)
+            .ok_or(KernelError::FileTooLarge)?;
+        if offset > self.len {
+            self.zero_tail()?;
+        }
+        let mut done = 0usize;
+        while done < data.len() {
+            let at = offset.saturating_add(done as u64);
+            let in_page = usize::try_from(at % PAGE).unwrap_or(0);
+            let n = (FRAME_SIZE.saturating_sub(in_page)).min(data.len().saturating_sub(done));
+            let held = self.frame(at / PAGE)?;
+            if let Some(src) = data.get(done..done.saturating_add(n)) {
+                // SAFETY: a frame of the file's; its alias is FRAME_SIZE bytes
+                // and `in_page + n <= FRAME_SIZE`; `src` is `n` bytes.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src.as_ptr(),
+                        frame_bytes(held)?.add(in_page),
+                        n,
+                    );
+                }
+            }
+            done = done.saturating_add(n);
+        }
+        self.len = self.len.max(end);
+        Ok(())
+    }
+
+    /// Cut or grow the file to `size`: the pages wholly past it freed, the
+    /// rest of the last zeroed, so that the file and every mapping read zeros
+    /// there; growth adds a hole.
+    fn set_len(&mut self, size: u64) -> KernelResult<()> {
+        if size < self.len {
+            for (_, held) in self.pages.split_off(&size.div_ceil(PAGE)) {
+                release_frame(held);
+            }
+            self.len = size;
+            self.zero_tail()?;
+        } else if size > self.len {
+            self.zero_tail()?;
+        }
+        self.len = size;
+        Ok(())
+    }
+}
+
+impl MemData {
+    /// The file's length in bytes.
+    fn len(&self) -> u64 {
+        match self {
+            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Frames(frames) => frames.len,
+        }
+    }
+
+    /// `len` bytes from `offset`, fewer at the end; none past it.
+    fn read(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
+        match self {
+            Self::Bytes(bytes) => {
+                let start = usize::try_from(offset)
+                    .unwrap_or(usize::MAX)
+                    .min(bytes.len());
+                let end = start.saturating_add(len).min(bytes.len());
+                Ok(bytes.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec))
+            }
+            Self::Frames(frames) => frames.read(offset, len),
+        }
+    }
+
+    /// Write `data` at `offset`, growing the file as needed.
+    fn write(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
+        match self {
+            Self::Bytes(bytes) => {
+                let start = usize::try_from(offset).map_err(|_| KernelError::FileTooLarge)?;
+                let end = start
+                    .checked_add(data.len())
+                    .ok_or(KernelError::FileTooLarge)?;
+                if end > bytes.len() {
+                    bytes.resize(end, 0);
+                }
+                if let Some(dest) = bytes.get_mut(start..end) {
+                    dest.copy_from_slice(data);
+                }
+                Ok(())
+            }
+            Self::Frames(frames) => frames.write(offset, data),
+        }
+    }
+
+    /// Cut or zero-extend the file to `size` bytes.
+    fn set_len(&mut self, size: u64) -> KernelResult<()> {
+        match self {
+            Self::Bytes(bytes) => {
+                let size = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
+                bytes.resize(size, 0);
+                Ok(())
+            }
+            Self::Frames(frames) => frames.set_len(size),
+        }
+    }
+
+    /// The file's contents become `data`, whole. A mapped file's pages are
+    /// written in place -- cut to the new length, then written -- since the
+    /// cache and the mappings hold its frames.
+    fn replace(&mut self, data: &[u8]) -> KernelResult<()> {
+        match self {
+            Self::Bytes(bytes) => {
+                bytes.clear();
+                bytes.extend_from_slice(data);
+                Ok(())
+            }
+            Self::Frames(frames) => {
+                frames.set_len(u64::try_from(data.len()).unwrap_or(u64::MAX))?;
+                frames.write(0, data)
+            }
+        }
+    }
+
+    /// The frames, the bytes turned into them first: a mapping's first fault.
+    fn frames(&mut self) -> KernelResult<&mut FileFrames> {
+        if let Self::Bytes(bytes) = self {
+            *self = Self::Frames(FileFrames::from_bytes(bytes)?);
+        }
+        match self {
+            Self::Frames(frames) => Ok(frames),
+            Self::Bytes(_) => Err(KernelError::InternalError),
+        }
+    }
 }
 
 /// A single node in the memory filesystem tree.
@@ -244,12 +506,9 @@ impl MemFsNode {
 
     /// `len` bytes of the file from `offset`, fewer at its end; none past it.
     fn read_range(&self, offset: u64, len: usize) -> KernelResult<Vec<u8>> {
-        let data = self.file_data().ok_or_else(|| self.not_a_file())?;
-        let start = usize::try_from(offset)
-            .unwrap_or(usize::MAX)
-            .min(data.len());
-        let end = start.saturating_add(len).min(data.len());
-        Ok(data.get(start..end).map_or_else(Vec::new, <[u8]>::to_vec))
+        self.file_data()
+            .ok_or_else(|| self.not_a_file())?
+            .read(offset, len)
     }
 
     /// Write `data` at `offset`, growing the file as needed, under its
@@ -260,18 +519,10 @@ impl MemFsNode {
             return Err(self.not_a_file());
         }
         attr_policy::may_write_at(self.attributes, offset, self.size())?;
-        let start = usize::try_from(offset).map_err(|_| KernelError::FileTooLarge)?;
-        let end = start
-            .checked_add(data.len())
-            .ok_or(KernelError::FileTooLarge)?;
         let not_a_file = self.not_a_file();
-        let file_data = self.file_data_mut().ok_or(not_a_file)?;
-        if end > file_data.len() {
-            file_data.resize(end, 0);
-        }
-        if let Some(dest) = file_data.get_mut(start..end) {
-            dest.copy_from_slice(data);
-        }
+        self.file_data_mut()
+            .ok_or(not_a_file)?
+            .write(offset, data)?;
         self.touch_modified();
         Ok(())
     }
@@ -280,10 +531,8 @@ impl MemFsNode {
     /// not an immutable or append-only one (`fs::attr_policy::may_rewrite`).
     fn set_len(&mut self, size: u64) -> KernelResult<()> {
         attr_policy::may_rewrite(self.attributes)?;
-        let size = usize::try_from(size).map_err(|_| KernelError::FileTooLarge)?;
         let not_a_file = self.not_a_file();
-        let file_data = self.file_data_mut().ok_or(not_a_file)?;
-        file_data.resize(size, 0);
+        self.file_data_mut().ok_or(not_a_file)?.set_len(size)?;
         self.touch_modified();
         Ok(())
     }
@@ -316,7 +565,7 @@ impl MemFsNode {
     }
 
     fn new_file(data: Vec<u8>) -> Self {
-        Self::new(MemFsNodeKind::File(data), 0o644)
+        Self::new(MemFsNodeKind::File(MemData::Bytes(data)), 0o644)
     }
 
     fn new_dir() -> Self {
@@ -341,14 +590,14 @@ impl MemFsNode {
         matches!(self.kind, MemFsNodeKind::Symlink(_))
     }
 
-    fn file_data(&self) -> Option<&Vec<u8>> {
+    fn file_data(&self) -> Option<&MemData> {
         match &self.kind {
             MemFsNodeKind::File(data) => Some(data),
             _ => None,
         }
     }
 
-    fn file_data_mut(&mut self) -> Option<&mut Vec<u8>> {
+    fn file_data_mut(&mut self) -> Option<&mut MemData> {
         match &mut self.kind {
             MemFsNodeKind::File(data) => Some(data),
             _ => None,
@@ -387,7 +636,7 @@ impl MemFsNode {
     /// - Sockets: 0.
     fn size(&self) -> u64 {
         match &self.kind {
-            MemFsNodeKind::File(data) => data.len() as u64,
+            MemFsNodeKind::File(data) => data.len(),
             MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
             MemFsNodeKind::Symlink(target) => target.len() as u64,
         }
@@ -402,7 +651,7 @@ impl MemFsNode {
     /// way.
     fn held_bytes(&self) -> u64 {
         match &self.kind {
-            MemFsNodeKind::File(data) => data.len() as u64,
+            MemFsNodeKind::File(data) => data.len(),
             MemFsNodeKind::Symlink(target) if target.len() >= SHORT_SYMLINK_LEN => {
                 target.len() as u64
             }
@@ -1211,7 +1460,7 @@ impl FileSystem for MemFs {
         let data = {
             let node = self.resolve(path)?;
             let d = node.file_data().ok_or_else(|| node.not_a_file())?;
-            d.clone()
+            d.read(0, usize::try_from(d.len()).unwrap_or(usize::MAX))?
         };
         // Relatime: update access timestamp if stale.
         if let Ok(node) = self.resolve_mut(path) {
@@ -1264,10 +1513,7 @@ impl FileSystem for MemFs {
                 self.room_for(old, new)?;
                 let existing = self.node_mut(existing_ino)?;
                 let not_a_file = existing.not_a_file();
-                let file_data = existing.file_data_mut().ok_or(not_a_file)?;
-                file_data.clear();
-                file_data.extend_from_slice(data);
-                // NLL: file_data borrow ends here (last use above).
+                existing.file_data_mut().ok_or(not_a_file)?.replace(data)?;
                 existing.touch_modified();
                 self.account(old, new);
                 // Only the inode changed, so the directory's mtime is left
@@ -1373,6 +1619,27 @@ impl FileSystem for MemFs {
 
     // --- An open file, by inode: what `fs::handle` uses for a file it holds ---
 
+    fn caches_contents(&self) -> bool {
+        // Memory already: read and written directly (design-decisions §1574).
+        false
+    }
+
+    fn page_frame(&mut self, ino: u64, offset: u64) -> Option<KernelResult<PhysFrame>> {
+        Some((|| {
+            let node = self.node_mut(ino)?;
+            let not_a_file = node.not_a_file();
+            let data = node.file_data_mut().ok_or(not_a_file)?;
+            if offset >= data.len().div_ceil(PAGE).saturating_mul(PAGE) {
+                return Err(KernelError::InvalidAddress);
+            }
+            let held = data.frames()?.frame(offset / PAGE)?;
+            // SAFETY: a frame the file holds a reference on, so live; the one
+            // taken here is the caller's.
+            unsafe { frame::ref_inc(held)? };
+            Ok(held)
+        })())
+    }
+
     fn pin_ino(&mut self, ino: u64) -> KernelResult<()> {
         let node = self.node_mut(ino)?;
         // Regular files and named pipes' nodes are held; anything else stays
@@ -1437,7 +1704,10 @@ impl FileSystem for MemFs {
         // Nothing is made in an immutable directory, named or not.
         attr_policy::may_create(parent.attributes)?;
         self.room_for_inode()?;
-        let mut node = MemFsNode::new(MemFsNodeKind::File(Vec::new()), mode & 0o7777);
+        let mut node = MemFsNode::new(
+            MemFsNodeKind::File(MemData::Bytes(Vec::new())),
+            mode & 0o7777,
+        );
         // No name, and one hold: the caller's (`pin_ino`'s count).
         node.links = 0;
         node.opens = 1;
@@ -1660,7 +1930,7 @@ impl FileSystem for MemFs {
             match &node.kind {
                 MemFsNodeKind::File(data) => {
                     files = files.wrapping_add(1);
-                    bytes = bytes.wrapping_add(data.len() as u64);
+                    bytes = bytes.wrapping_add(data.len());
                 }
                 MemFsNodeKind::Dir(_) => dirs = dirs.wrapping_add(1),
                 MemFsNodeKind::Symlink(_) => links = links.wrapping_add(1),
@@ -2258,6 +2528,7 @@ pub fn self_test() -> KernelResult<()> {
     // --- The size and object limits ---
     test_limits()?;
     test_mount_data()?;
+    test_frames()?;
 
     crate::serial_println!("[memfs] Self-test PASSED");
     Ok(())
@@ -2277,6 +2548,94 @@ fn walked_blocks(fs: &MemFs) -> u64 {
 /// when contents shrink or go; the object limit refuses a create past it;
 /// the running block count agrees with a walk throughout; and `statvfs`
 /// reports the limits as tmpfs does.
+/// A mapped file's pages are its own frames, shared (design-decisions
+/// §1574): the frame a mapping is given (`page_frame`) is the one a write
+/// lands in and a read reads, asked twice it is the same, the partial
+/// last page has one, a page wholly past the end is refused, and a cut
+/// gives back the file's reference on the pages past it while keeping the
+/// rest in place, its tail zeroed.
+fn test_frames() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        crate::serial_println!("[memfs]   FAILED: frames: {}", what);
+        Err(KernelError::IoError)
+    }
+    let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
+    // A byte of `held` at `at`, as a mapping reads it.
+    let peek = |held: PhysFrame, at: usize| -> u8 {
+        if at >= FRAME_SIZE {
+            return 0;
+        }
+        // SAFETY: a frame we hold a reference on; `at` is inside its alias.
+        unsafe { core::ptr::read_volatile((held.to_virt(hhdm) as *const u8).add(at)) }
+    };
+    let mut fs = MemFs::new();
+    let path = Path::new("/mapped");
+    // Two pages and a bit: the third page partial.
+    let len = FRAME_SIZE.saturating_mul(2).saturating_add(100);
+    let mut bytes = alloc::vec![0u8; len];
+    if let Some(b) = bytes.get_mut(5) {
+        *b = b'a';
+    }
+    fs.write_file(path, &bytes)?;
+    let ino = fs.resolve_ino(path)?;
+    let Some(Ok(first)) = fs.page_frame(ino, 0) else {
+        return fail("the first page's frame was not given");
+    };
+    let again = fs.page_frame(ino, 0);
+    let last_page = fs.page_frame(ino, PAGE.saturating_mul(2));
+    let past = fs.page_frame(ino, PAGE.saturating_mul(3));
+    // The references the test took: given back whatever happens below.
+    let mut held = alloc::vec![first];
+    let result = (|| {
+        let Some(Ok(second)) = again else {
+            return fail("the page's frame was not given a second time");
+        };
+        held.push(second);
+        let Some(Ok(third)) = last_page else {
+            return fail("the partial last page was not given a frame");
+        };
+        held.push(third);
+        if second != first {
+            return fail("a page was given two frames");
+        }
+        if !matches!(past, Some(Err(KernelError::InvalidAddress))) {
+            return fail("a page wholly past the end was given a frame");
+        }
+        if peek(first, 5) != b'a' {
+            return fail("the frame does not hold the file's bytes");
+        }
+        // A write lands in the very frame, and a read reads it.
+        fs.write_at(path, 9, b"w")?;
+        if peek(first, 9) != b'w' || fs.read_at(path, 9, 1)? != b"w" {
+            return fail("a write did not land in the page's own frame");
+        }
+        // A cut into the first page keeps it, its tail zeroed; the pages
+        // past it lose the file's reference (the test's keeps them).
+        let before = frame::refcount(third);
+        fs.truncate(path, 7)?;
+        if frame::refcount(third) >= before {
+            return fail("a cut kept the file's reference on a page past the end");
+        }
+        if peek(first, 5) != b'a' || peek(first, 9) != 0 || fs.read_at(path, 0, 64)?.len() != 7 {
+            return fail("a cut did not keep its page in place, its tail zeroed");
+        }
+        // Growth reads zeros where the cut was.
+        fs.truncate(path, 20)?;
+        if fs.read_at(path, 0, 20)?.get(9).copied() != Some(0) {
+            return fail("a file grown again does not read zeros past the cut");
+        }
+        Ok(())
+    })();
+    for f in held {
+        // SAFETY: references this test took through `page_frame`, each given
+        // back once.
+        let _ = unsafe { frame::free_frame(f) };
+    }
+    result?;
+    crate::serial_println!("[memfs]   frames: shared, past the end refused, cut in place: OK");
+    Ok(())
+}
+
 fn test_limits() -> KernelResult<()> {
     fn fail(what: &str) -> KernelResult<()> {
         crate::serial_println!("[memfs]   FAILED: limits: {}", what);

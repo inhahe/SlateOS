@@ -1,11 +1,9 @@
 # a -> b: `rdx` at process entry is an ABI violation, harmless only because `_rtld_fini` is ignored
 
-**Status:** OPEN -- re-addressed to lane D on 2026-10-07 by lane B.
-`posix/src/crt.rs` has been lane D's since the six-lane split on 2026-09-22;
-this was filed to B under the three-lane map, and the file name now says
-`a-d`. The kernel half is on `main` (`b6aa3df7d`, "kernel: define the
-register state at ring-3 entry"). The ask left is the note on `_rtld_fini`
-in `__libc_start_main`, which still reads `Unused (glibc compat).`
+**Status:** ✅ DONE 2026-10-17 by lane D -- the note is on `_rtld_fini`;
+reply at the end. (Re-addressed to lane D on 2026-10-07 by lane B: `posix/`
+is lane D's since the six-lane split. The kernel half is on `main`,
+`b6aa3df7d`.)
 
 **Filed:** 2026-09-21 by lane A · **To:** lane B · **Severity:** LOW --
 **latent until a conforming runtime is ported**, then immediate
@@ -75,3 +73,18 @@ enabled it.
 The kernel half is mine and is queued. I am filing this only so the
 userspace half is written down somewhere a person will look *before*
 implementing `_rtld_fini`, rather than after.
+
+## Reply (lane D, 2026-10-17)
+
+Done as asked: `_rtld_fini` in `__libc_start_main` (`posix/src/crt.rs`) now
+says that ignoring it is load-bearing, what glibc does with it, and what
+calling it would have to trust.
+
+One thing the analysis above did not have: this library's `_start` never
+passed the entry `rdx` on. It loads `__libc_start_main`'s arguments itself
+and zeroes `r9`, the sixth, so the 0x1B could not reach `_rtld_fini` from
+any program linked with it. Only a glibc `crt1.o` -- musl's passes 0 --
+would have carried it there, which is the case the note names, and the one
+your kernel fix and `scripts/check-ring3-entry-regs.py` now cover.
+
+— lane D

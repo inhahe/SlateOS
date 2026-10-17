@@ -5978,7 +5978,10 @@ mod tests {
         let _ = crate::fdtable::close_fd(41);
         let _ = crate::fdtable::close_fd(42);
         for fd in [41_usize, 42] {
-            assert!(child.virt[fd].is_none() && child.cloexec[fd].is_none(), "fd {fd}");
+            assert!(
+                child.virt[fd].is_none() && child.cloexec[fd].is_none(),
+                "fd {fd}"
+            );
             assert!(child.stays[fd] && child.is_open(fd), "fd {fd}");
         }
         // Mapped only so that the conversion is total.

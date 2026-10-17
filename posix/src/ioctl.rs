@@ -19,6 +19,9 @@
 //! - **`FIONREAD`**: bytes available to read without blocking.
 //! - **`TCGETS`/`TCSETS`**: termios get/set — real, via the kernel's
 //!   `SYS_TTY_GET_TERMIOS`/`SYS_TTY_SET_TERMIOS` (541/542).
+//! - **`FS_IOC_GETFLAGS`/`FS_IOC_SETFLAGS`**, the generation's and the
+//!   project's: a file's or a directory's, the kernel's answers
+//!   (`SYS_FS_INODE_FLAGS`) -- `lsattr`'s and `chattr`'s.
 //! - All other requests return `ENOTTY`.
 //!
 //! ## Terminal Model
@@ -99,6 +102,30 @@ pub const TIOCGPGRP: u64 = 0x540F;
 pub const TIOCSPGRP: u64 = 0x5410;
 /// Release controlling terminal.
 pub const TIOCNOTTY: u64 = 0x5422;
+
+// A file's inode requests (`<linux/fs.h>`), which the kernel answers
+// (`SYS_FS_INODE_FLAGS`): `lsattr` and `chattr`.
+/// A file's inode flags (`FS_*_FL`) into the `int` at `arg`.
+pub const FS_IOC_GETFLAGS: u64 = 0x8008_6601;
+/// Set a file's inode flags from the `int` at `arg`.
+pub const FS_IOC_SETFLAGS: u64 = 0x4008_6602;
+/// [`FS_IOC_GETFLAGS`]'s 32-bit number, which means the same.
+pub const FS_IOC32_GETFLAGS: u64 = 0x8004_6601;
+/// [`FS_IOC_SETFLAGS`]'s 32-bit number, which means the same.
+pub const FS_IOC32_SETFLAGS: u64 = 0x4004_6602;
+/// A file's generation into the `int` at `arg` (`lsattr -v`).
+pub const FS_IOC_GETVERSION: u64 = 0x8008_7601;
+/// Set a file's generation (`chattr -v`).
+pub const FS_IOC_SETVERSION: u64 = 0x4008_7602;
+/// [`FS_IOC_GETVERSION`]'s 32-bit number.
+pub const FS_IOC32_GETVERSION: u64 = 0x8004_7601;
+/// [`FS_IOC_SETVERSION`]'s 32-bit number.
+pub const FS_IOC32_SETVERSION: u64 = 0x4004_7602;
+/// A file's project and extended flags into the `struct fsxattr` at `arg`
+/// (`lsattr -p`).
+pub const FS_IOC_FSGETXATTR: u64 = 0x801C_581F;
+/// Set a file's project and extended flags (`chattr -p`).
+pub const FS_IOC_FSSETXATTR: u64 = 0x401C_5820;
 
 // ---------------------------------------------------------------------------
 // tcsetattr `optional_actions` constants
@@ -707,6 +734,9 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
     if entry.kind == HandleKind::Namespace && request != FIONBIO {
         return crate::nsfs::ioctl(entry.handle, request);
     }
+    if is_inode_request(request) {
+        return handle_inode_request(entry.kind, entry.handle, request, arg);
+    }
 
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
@@ -725,6 +755,68 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
             -1
         }
     }
+}
+
+/// Whether `request` is one of a file's inode requests: its flags, its
+/// generation, its project (`FS_IOC_*`, both sizes).
+fn is_inode_request(request: u64) -> bool {
+    matches!(
+        request,
+        FS_IOC_GETFLAGS
+            | FS_IOC_SETFLAGS
+            | FS_IOC32_GETFLAGS
+            | FS_IOC32_SETFLAGS
+            | FS_IOC_GETVERSION
+            | FS_IOC_SETVERSION
+            | FS_IOC32_GETVERSION
+            | FS_IOC32_SETVERSION
+            | FS_IOC_FSGETXATTR
+            | FS_IOC_FSSETXATTR
+    )
+}
+
+/// Whether the kernel is asked a file's inode request on a descriptor of
+/// kind `kind`: a file's or a directory's. A pipe's, a socket's or a
+/// terminal's answer `ENOTTY`, as Linux's do.
+fn asks_the_kernel_about_its_inode(kind: HandleKind) -> bool {
+    kind == HandleKind::File
+}
+
+/// The errno for `SYS_FS_INODE_FLAGS`'s answer `ret`, or `None` for success:
+/// its Linux errnos as they are, and `ENOTTY` from a kernel without the call,
+/// which is what every such request answered before it.
+fn inode_request_errno(ret: i64) -> Option<i32> {
+    if ret >= 0 {
+        None
+    } else if crate::syscall::lacks_call(ret) {
+        Some(errno::ENOTTY)
+    } else {
+        Some(errno::door_errno(ret))
+    }
+}
+
+/// A file's inode request `request` ([`is_inode_request`]) on a descriptor
+/// of kind `kind` holding `handle`, `arg` its argument: the kernel's
+/// answer (`SYS_FS_INODE_FLAGS`) -- the flags kept, read and set, root's
+/// alone to change, the generation and project `ENOTTY`, `EFAULT` for an
+/// `arg` it cannot reach -- or `ENOTTY`. 0, or -1 with `errno` set.
+fn handle_inode_request(kind: HandleKind, handle: u64, request: u64, arg: *mut u8) -> i32 {
+    let e = if asks_the_kernel_about_its_inode(kind) {
+        let ret = crate::syscall::syscall3(
+            crate::syscall::SYS_FS_INODE_FLAGS,
+            handle,
+            request,
+            arg as u64,
+        );
+        match inode_request_errno(ret) {
+            None => return 0,
+            Some(e) => e,
+        }
+    } else {
+        errno::ENOTTY
+    };
+    errno::set_errno(e);
+    -1
 }
 
 /// TIOCGWINSZ — get terminal window size.
@@ -2838,6 +2930,59 @@ mod tests {
         };
         let ret = ioctl(0, TIOCSWINSZ, (&raw const ws).cast::<u8>().cast_mut());
         assert_eq!(ret, 0, "TIOCSWINSZ on console should succeed (no-op)");
+    }
+
+    /// A file's inode requests, both sizes of each, are the kernel's for a
+    /// file or a directory, its Linux errnos passed on; anything else's, and
+    /// any request on a kernel without the call, are `ENOTTY`.
+    #[test]
+    fn a_files_inode_requests_are_the_kernels() {
+        for request in [
+            FS_IOC_GETFLAGS,
+            FS_IOC_SETFLAGS,
+            FS_IOC32_GETFLAGS,
+            FS_IOC32_SETFLAGS,
+            FS_IOC_GETVERSION,
+            FS_IOC_SETVERSION,
+            FS_IOC32_GETVERSION,
+            FS_IOC32_SETVERSION,
+            FS_IOC_FSGETXATTR,
+            FS_IOC_FSSETXATTR,
+        ] {
+            assert!(is_inode_request(request), "{request:#x}");
+        }
+        assert!(!is_inode_request(TIOCGWINSZ));
+        assert!(!is_inode_request(FIONREAD));
+
+        assert!(asks_the_kernel_about_its_inode(HandleKind::File));
+        for kind in [
+            HandleKind::Pipe,
+            HandleKind::Console,
+            HandleKind::UnixSocket,
+        ] {
+            assert!(!asks_the_kernel_about_its_inode(kind), "{kind:?}");
+        }
+
+        assert_eq!(inode_request_errno(0), None);
+        assert_eq!(inode_request_errno(-1), Some(crate::errno::EPERM));
+        assert_eq!(inode_request_errno(-95), Some(crate::errno::EOPNOTSUPP));
+        assert_eq!(inode_request_errno(-25), Some(crate::errno::ENOTTY));
+        assert_eq!(
+            inode_request_errno(crate::errno::native::NO_SUCH_SYSCALL),
+            Some(crate::errno::ENOTTY)
+        );
+
+        // A pipe's is ENOTTY; on the host, with no kernel, a file's too.
+        let mut flags: i32 = -1;
+        for kind in [HandleKind::Pipe, HandleKind::File] {
+            let fd = fdtable::alloc_fd(kind, 302).unwrap();
+            crate::errno::set_errno(0);
+            let ret = ioctl(fd, FS_IOC_GETFLAGS, (&raw mut flags).cast::<u8>());
+            let e = crate::errno::get_errno();
+            let _ = fdtable::close_fd(fd);
+            assert_eq!((ret, e), (-1, crate::errno::ENOTTY), "{kind:?}");
+        }
+        assert_eq!(flags, -1);
     }
 
     #[test]

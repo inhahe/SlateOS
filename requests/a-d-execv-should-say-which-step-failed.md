@@ -1,13 +1,9 @@
 # a -> b: `execv` returns -1 without saying which step failed
 
-**Status:** OPEN -- re-addressed to lane D on 2026-10-07 by lane B. The exec
-path is `posix/src/spawn.rs`, which has been lane D's since the six-lane split
-on 2026-09-22; this was filed to B under the three-lane map, and the file name
-now says `a-d`. The bug that prompted it was root-caused on 2026-09-24 as the
-test step's missing `(File, METADATA)` grant
-(`known-issues/A-exit-11-narrowed-the-exec-syscall-is-never-reached-so-the-bug-is-upstream-of-exec.md`),
-so nothing is blocked on this now. The ask, one line naming the failed step
-and its errno, stands on its own merits.
+**Status:** ✅ ANSWERED 2026-10-17 by lane D -- the caller says which step
+failed, from errno, and the library does not print; reply at the end. (Re-
+addressed to lane D on 2026-10-07 by lane B: the exec path is
+`posix/src/spawn.rs`, lane D's.)
 
 **Filed:** 2026-09-21 by lane A · **To:** lane B · **Severity:** LOW as a
 defect, but it is the one thing blocking a bug that has been misattributed
@@ -59,3 +55,27 @@ diagnosis the code did not make.
 
 This request claims only what the log shows, and the useful part is a
 negative: the syscall is not involved.
+
+## Reply (lane D, 2026-10-17)
+
+What this asked for is in place, one level up, and that is where it
+belongs:
+
+- **`ctest-coreutils-runs` prints the path and the errno** on its exit 11
+  (`report_exec_failure`, "... failed in the child: errno N (strerror)"),
+  and its header says that is what ended the bug in four minutes: an
+  `EACCES` from a `stat` the rung gave no right to make. A caller reporting
+  errno is how every Unix program says which step failed.
+- **The errno names the step.** `load_program` -- everything before the
+  kernel's exec -- answers in Linux's order and with Linux's errnos: the
+  file's own first (`ENOENT`, `EACCES`, `ENOTDIR`, `ENAMETOOLONG`), then
+  what it is (`ENOEXEC` for neither ELF nor `#!`, `ELOOP` for an interpreter
+  chain too deep), then the argument list (`E2BIG`), and the kernel's exec
+  its own. No two steps share an answer that matters.
+- **The library prints nothing on a failed exec, deliberately.** `execvp`
+  fails on every `PATH` entry before the one that works -- `ENOENT` is the
+  normal case there -- and a shell's `command -v`, `env` and every
+  `posix_spawnp` caller would leave a line on the program's stderr for each.
+  glibc and musl print nothing either; a program's stderr is the program's.
+
+— lane D

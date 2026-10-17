@@ -580,7 +580,6 @@ MAIN += [
 # clipboard, and both have right-click menus (2026-10-16).
 S_CARET = "the_search_box_edits_at_a_caret"
 S_PRESS = "a_press_in_the_search_box_puts_the_caret_there"
-S_SYNC = "a_search_emptied_by_escape_is_empty_in_the_box"
 S_MENU = "the_search_boxs_right_click_menu_edits_the_search"
 F_MENU = "the_forms_right_click_menu_edits_its_boxes"
 

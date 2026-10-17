@@ -6717,10 +6717,12 @@ pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
 /// its `MAP_SHARED`/`MAP_PRIVATE`/`MAP_FIXED`, `offset` 4 KiB-aligned, and
 /// Linux errnos as `-errno` (`EACCES` for a handle not open for reading,
 /// `EBADF` for one the caller does not hold, `ENOSYS` for a writable shared
-/// mapping, which nothing writes back yet). The same body as the Linux ABI's
-/// file `mmap`: a private mapping is demand-paged from the file, and the
-/// address space keeps its own reference to the file, so the handle may be
-/// closed after. Until 2026-10-07 a native program could not map a file at
+/// mapping of a handle not open for writing). The same body as the Linux
+/// ABI's file `mmap`: a private mapping is demand-paged from the file, a
+/// shared one maps the file's pages in the page cache and its stores are
+/// saved to the file (design-decisions §1572; [`SYS_MSYNC`] saves them at
+/// once), and the address space keeps its own reference to the file, so the
+/// handle may be closed after. Until 2026-10-07 a native program could not map a file at
 /// all (requests/d-a-a-native-program-cannot-map-a-file.md).
 pub const SYS_MMAP_FILE: u64 = 1144;
 
@@ -7290,6 +7292,18 @@ pub const SYS_SWAP_ON: u64 = 1175;
 /// `OutOfMemory` when memory and the other areas cannot hold what it holds;
 /// the path's own.
 pub const SYS_SWAP_OFF: u64 = 1176;
+
+/// `SYS_MSYNC(addr, length, flags) -> 0` -- Linux's `msync(2)`, with its
+/// values and its answers as `-errno`, for a native program's shared file
+/// mappings ([`SYS_MMAP_FILE`]). `MS_SYNC` (4) saves the dirty pages the
+/// range's shared mappings map before it returns (design-decisions §1572);
+/// `MS_ASYNC` (1) and `MS_INVALIDATE` (2) ask nothing more, the pages being
+/// dirty in the page cache, saved by the last unmapping, `fsync` and the
+/// background pass. `EINVAL` for an unknown flag, both `MS_SYNC` and
+/// `MS_ASYNC`, or an address not 4 KiB-aligned; `ENOMEM` when part of the
+/// range is not mapped, answered after the mapped parts are saved; `EIO`
+/// when a save failed. The same body as the Linux ABI's `msync`.
+pub const SYS_MSYNC: u64 = 1177;
 
 // ---------------------------------------------------------------------------
 // Version info

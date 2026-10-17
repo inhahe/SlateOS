@@ -149,10 +149,11 @@ BASELINE: dict[str, str] = {
     "ipc::inotify": "no native inotify by design -- fs watches are a service",
     "ipc::memfd": "no native memfd by design -- anonymous memory is shm + caps",
     # --- a compatibility shim over a stack native code reaches elsewhere ----
-    # 46 native net handlers exist; they reach other modules. linux.rs carries
-    # its own BSD-sockets layer, which is the point of a compatibility table.
-    "net::socket": "linux.rs's own BSD-sockets shim; native net uses SYS_NET_*",
-    "net::netstack_client": "same shim; native net reaches the stack elsewhere",
+    # The native net handlers reach the stack through net::socket (the
+    # daemon's sockets) and others; linux.rs's BSD-sockets layer alone talks
+    # to the client directly, which is the point of a compatibility table.
+    "net::netstack_client": "linux.rs's BSD-sockets shim; native net reaches the "
+    "stack through net::socket",
     # --- Linux-specific thread machinery ------------------------------------
     "proc::thread_clone": "rseq, robust futex lists and prctl are Linux TLS/futex "
     "machinery with no native equivalent intended",

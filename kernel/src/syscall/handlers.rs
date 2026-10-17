@@ -21858,6 +21858,149 @@ pub fn sys_process_getgroups(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(n_i64)
 }
 
+/// `SYS_MSYNC` (1177), and the Linux ABI's `msync(addr, len, flags)`: one
+/// body, its answers Linux errnos ([`SYS_MSYNC`](super::number::SYS_MSYNC)).
+/// With `MS_SYNC`, save the dirty pages the
+/// range's shared file mappings map; `ENOMEM` when part of the range is not
+/// mapped, answered after the mapped parts are done.
+///
+/// Linux's `mm/msync.c::SYSCALL_DEFINE3(msync)` gate order:
+///   1. `flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)` -> `-EINVAL`.
+///   2. `offset_in_page(start)`                          -> `-EINVAL`.
+///   3. `(flags & MS_ASYNC) && (flags & MS_SYNC)`        -> `-EINVAL`.
+///   4. `len = (len + ~PAGE_MASK) & PAGE_MASK; end = start + len;`
+///      `end < start`                                    -> `-ENOMEM`.
+///   5. `end == start`                                   ->  `0`.
+///   6. Walk VMAs.
+///
+/// Critically, Linux does **not** require either of `MS_SYNC` or
+/// `MS_ASYNC` to be set: `flags == 0` and `flags == MS_INVALIDATE`
+/// alone are both accepted (the VMA walker still iterates; the
+/// sync-vs-async distinction only matters within each VMA's
+/// fsync_range call).  Pre-batch we incorrectly rejected `flags == 0`
+/// with EINVAL.  Also: overflow on `start + len` returns `-ENOMEM`
+/// on Linux, not `-EINVAL`.
+///
+/// Linux's `PAGE_SIZE` for x86_64 is 4096 — that is the size visible
+/// to userspace via `sysconf(_SC_PAGESIZE)`.  Our kernel uses 16 KiB
+/// internal frames, but ABI probes do their alignment math against
+/// 4 KiB; reject only sub-4-KiB-aligned addresses so a probe passing
+/// a 4 KiB-aligned address (correct per the Linux ABI) is not
+/// spuriously rejected by our larger frame size.
+pub fn sys_msync(args: &SyscallArgs) -> SyscallResult {
+    use super::linux::{errno, linux_err};
+    // Linux ABI: `int msync(void *addr, size_t length, int flags)`.
+    // `flags` is a C `int` parameter, so the kernel function body only
+    // observes the low 32 bits of the syscall register — the high 32
+    // bits of RDX are caller-uninitialised garbage from the surrounding
+    // x86_64 register state.  Linux's SYSCALL_DEFINE3(msync, ..., int,
+    // flags) macro truncates on entry; the mask check `flags & ~MS_ALL`
+    // then runs at 32-bit width.
+    //
+    // Pre-batch we held `flags` as `u64` and ran the mask check at
+    // 64-bit width:
+    //     let flags = args.arg2;
+    //     if (flags & !MS_ALL) != 0 { return EINVAL; }
+    // so a caller passing 0x1_0000_0001 (high-half garbage + MS_ASYNC)
+    // saw EINVAL where Linux returns 0.  Same shape as the batch-308
+    // mlockall fix.
+    const MS_ASYNC: u32 = 1;
+    const MS_INVALIDATE: u32 = 2;
+    const MS_SYNC: u32 = 4;
+    const MS_ALL: u32 = MS_ASYNC | MS_INVALIDATE | MS_SYNC;
+    // Linux ABI page size on x86_64 (sysconf(_SC_PAGESIZE)); the
+    // internal frame size of this kernel is larger but is not
+    // observable through this syscall.
+    const ABI_PAGE_SIZE: u64 = 4096;
+
+    let addr = args.arg0;
+    let len = args.arg1;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let flags_i32 = args.arg2 as i32;
+    #[allow(clippy::cast_sign_loss)]
+    let flags = flags_i32 as u32;
+
+    // 1. Validate flag mask.
+    if (flags & !MS_ALL) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 2. addr must be ABI-page-aligned (offset_in_page == 0).
+    if (addr & (ABI_PAGE_SIZE - 1)) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 3. MS_SYNC and MS_ASYNC are mutually exclusive.  Linux does NOT
+    //    require either to be set; flags = 0 or flags = MS_INVALIDATE
+    //    alone are both valid.
+    if (flags & MS_SYNC) != 0 && (flags & MS_ASYNC) != 0 {
+        return linux_err(errno::EINVAL);
+    }
+    // 4. Round len up to a page boundary.  Linux:
+    //        len = (len + ~PAGE_MASK) & PAGE_MASK;
+    //        end = start + len;
+    //        if (end < start) goto out;          // -ENOMEM
+    //        error = 0;
+    //        if (end == start) goto out;         // success
+    //    Both arithmetic operations use C unsigned-long wrap.  When
+    //    `len` is close to u64::MAX the `+ ~PAGE_MASK` step wraps past
+    //    2^64; the result `& PAGE_MASK` zeroes the bottom 12 bits, so
+    //    e.g. len = u64::MAX rounds to len_aligned = 0 (since
+    //    u64::MAX.wrapping_add(0xFFF) = 0xFFE and 0xFFE & ~0xFFF = 0).
+    //    With len_aligned == 0, end = start, end < start is false, and
+    //    the routine returns 0 via the end==start exit.
+    //
+    //    Pre-batch we used `checked_add` and returned ENOMEM for both
+    //    the rounding overflow AND the end-overflow case, so a probe
+    //    with (addr=0x4000, len=u64::MAX, flags=MS_ASYNC) saw ENOMEM
+    //    where Linux returns 0.  Switching to `wrapping_add` mirrors
+    //    Linux's C semantics exactly — len wraps to 0, end==start
+    //    fires, success.
+    //
+    //    The end<start check (the genuine "addr+len exceeds u64::MAX
+    //    with non-trivial len") still produces ENOMEM, matching Linux.
+    let len_aligned = len.wrapping_add(ABI_PAGE_SIZE - 1) & !(ABI_PAGE_SIZE - 1);
+    let end = addr.wrapping_add(len_aligned);
+    if end < addr {
+        return linux_err(errno::ENOMEM);
+    }
+    // 5. end == start -> trivial success (no VMAs to walk).
+    if end == addr {
+        return SyscallResult::ok(0);
+    }
+    // 6. Walk the VMAs, as Linux does, never the pages: a range with
+    //    unmapped parts is ENOMEM (Linux's VM_BAD_AREA path), answered after
+    //    the mapped parts are done. Touching the pages instead would read the
+    //    whole of a mostly untouched file mapping to check the range, and
+    //    find a page past the file's end a fault (EFAULT). A kernel task has
+    //    no VMAs to walk.
+    let Some(pid) = caller_pid() else {
+        return if (flags & MS_SYNC) != 0 {
+            linux_err(errno::ESRCH)
+        } else {
+            SyscallResult::ok(0)
+        };
+    };
+    let covered = pcb::vmas_cover(pid, addr, end);
+    // 7. MS_SYNC saves the dirty pages the range's shared file mappings map,
+    //    before returning (design-decisions §1572). MS_ASYNC asks for nothing
+    //    more than the kernel does anyway, as on Linux since 2.6.19: the
+    //    pages are dirty in the page cache and saved by the last unmap,
+    //    fsync and the background pass. MS_INVALIDATE has nothing to drop:
+    //    every mapping of a file maps the one copy.
+    if (flags & MS_SYNC) != 0 {
+        let mut failed = false;
+        for (file, from, to) in pcb::shared_file_ranges(pid, addr, end) {
+            failed |= crate::mm::page_cache::writeback(file, from, to).is_err();
+        }
+        if failed {
+            return linux_err(errno::EIO);
+        }
+    }
+    if !covered {
+        return linux_err(errno::ENOMEM);
+    }
+    SyscallResult::ok(0)
+}
+
 /// `SYS_MMAP_FILE` (1144) — map part of a file the caller holds open, with
 /// Linux's `mmap(2)` values and errnos. `arg4` is the file handle; the rest
 /// are `mmap`'s (`addr`, `length`, `prot`, `flags`, then `offset` in `arg5`).

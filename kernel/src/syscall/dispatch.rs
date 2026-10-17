@@ -121,8 +121,8 @@ use super::number::{
 use super::number::{
     SYS_DEVICE_CLOSE, SYS_DEVICE_IOCTL, SYS_DEVICE_OPEN, SYS_DEVICE_READ, SYS_DEVICE_WRITE,
     SYS_FS_ADD_SEALS, SYS_FS_DEFER, SYS_FS_DEFER_CANCEL, SYS_FS_DEFER_LIST, SYS_FS_GET_SEALS,
-    SYS_LIFECYCLE_QUERY, SYS_LIFECYCLE_REGISTER, SYS_LIFECYCLE_REQUEST, SYS_RESTART_SYSCALL,
-    SYS_SWAP_OFF, SYS_SWAP_ON,
+    SYS_LIFECYCLE_QUERY, SYS_LIFECYCLE_REGISTER, SYS_LIFECYCLE_REQUEST, SYS_MSYNC,
+    SYS_RESTART_SYSCALL, SYS_SWAP_OFF, SYS_SWAP_ON,
 };
 use super::number::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
@@ -797,6 +797,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_DUMPABLE as usize] = Some(handlers::sys_process_dumpable);
     handlers[SYS_PROCESS_GETGROUPS as usize] = Some(handlers::sys_process_getgroups);
     handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
+    handlers[SYS_MSYNC as usize] = Some(handlers::sys_msync);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);

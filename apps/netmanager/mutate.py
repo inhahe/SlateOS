@@ -290,7 +290,6 @@ RED = "an_address_box_is_red_while_it_is_not_an_address"
 CARD = "the_shortcut_card_takes_a_press_rather_than_passing_it_on"
 WALK = "tab_walks_the_ip_fields_and_typing_lands_in_the_focused_one"
 CARET = "a_focused_field_shows_a_caret_so_the_keyboard_has_somewhere_visible_to_go"
-ADD = "the_dns_box_takes_typing_and_add_moves_it_into_the_list"
 
 MAIN += [
     (
@@ -334,16 +333,18 @@ MAIN += [
     ),
     (
         "a press leaves the caret at the end",
-        "        self.editor.set_selection_anchor(None);\n        self.editor.set_cursor(cursor);\n",
-        "        self.editor.set_selection_anchor(None);\n",
+        "        self.field_box_mut(field).press(\n"
+        "            x - rect.x - BOX_TEXT_INSET,\n"
+        "            box_text_width(rect),\n"
+        "            had_the_keyboard,\n"
+        "        );\n",
+        "        self.field_box_mut(field).caret_to_end();\n"
+        "        let _ = (x, rect, had_the_keyboard);\n",
         [PRESS],
     ),
-    (
-        "the editor keeps text the box no longer holds",
-        "        if self.editor.text() != self.field_text(field) {\n            self.load_editor(field);\n",
-        "        if false {\n            self.load_editor(field);\n",
-        [ADD],
-    ),
+    # The boxes are textline LineBoxes since 2026-10-17, one each: the text
+    # each edits being its own, its clipboard (the program's) and its caret
+    # and selection drawn are LineBox's, which textline's own table covers.
     (
         "a box is never lit",
         "            hovered: enabled && self.hover == Some(field),\n",
@@ -396,8 +397,8 @@ MAIN += [
     ),
     (
         "the box is drawn with no caret",
-        "            focused: state.focused,\n            x: tx,\n",
-        "            focused: false,\n            x: tx,\n",
+        "            focused: state.focused,\n            // What the box is for",
+        "            focused: false,\n            // What the box is for",
         [CARET],
     ),
     (
@@ -575,7 +576,7 @@ MAIN += [
         "        self.editing_ip\n"
         "            && self\n"
         "                .selected_iface()\n"
-        "                .is_some_and(|iface| iface.ip_config != self.edit_ip_config)\n",
+        "                .is_some_and(|iface| iface.ip_config != self.edit_ip_config.to_config())\n",
         "        self.editing_ip\n",
         [ONLY],
     ),

@@ -23,7 +23,7 @@ fn image(dir: &scratchdir::ScratchDir, name: &str, mib: u64) -> Vec<u8> {
         .unwrap()
         .set_len(mib * 1024 * 1024)
         .unwrap();
-    p.to_str().unwrap().as_bytes().to_vec()
+    p.into_os_string().into_encoded_bytes()
 }
 
 /// A context on `path` that records every message and answers no

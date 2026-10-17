@@ -350,15 +350,33 @@ SEARCH_MUTATIONS = [
     ),
     (
         "an empty box draws no placeholder",
-        "        if self.is_empty() {\n            push_line(\n",
-        "        if false {\n            push_line(\n",
+        "            if !look.placeholder.is_empty() {\n",
+        "            if false {\n",
         [S_UNFOCUSED, S_EMPTY_FOCUSED],
     ),
     (
+        "an empty placeholder is drawn",
+        "            if !look.placeholder.is_empty() {\n",
+        "            if true {\n",
+        [S_EMPTY_FOCUSED],
+    ),
+    (
         "the placeholder is drawn over a search",
-        "        if self.is_empty() {\n            push_line(\n",
-        "        if true {\n            push_line(\n",
-        [S_UNFOCUSED],
+        "        if self.is_empty() {\n            // The placeholder",
+        "        if true {\n            // The placeholder",
+        [S_UNFOCUSED, S_FOCUSED],
+    ),
+    (
+        "an empty box with the keyboard draws no caret",
+        "            if look.focused {\n                textedit::push_caret(\n",
+        "            if false {\n                textedit::push_caret(\n",
+        [S_EMPTY_FOCUSED],
+    ),
+    (
+        "an empty box draws a line of text of its own",
+        "            }\n            return;\n        }\n        if look.focused {\n",
+        "            }\n        }\n        if look.focused {\n",
+        [S_EMPTY_FOCUSED],
     ),
     (
         "the placeholder is drawn in the search's colour",

@@ -187,22 +187,37 @@ impl SearchBox {
     }
 
     /// Draw the box's text into `tree` as `look` says: an empty box says
-    /// what it is for, with the keyboard or without; a box with the keyboard
+    /// what it is for -- with its caret before that while it has the
+    /// keyboard -- and draws no text of its own; a box with the keyboard
     /// draws its search with its caret and selection, and one without it the
     /// search cut to the width with `…`. The text sits on the same line
     /// either way, so it does not move when the box takes the keyboard. The
     /// frame round it is the caller's (`guitk::field::draw`).
     pub fn draw(&self, tree: &mut RenderTree, look: &SearchLook<'_>) {
-        // The placeholder under the caret too: a box that has just taken the
-        // keyboard still says what to type into it.
         if self.is_empty() {
-            push_line(
-                tree,
-                look,
-                look.placeholder,
-                look.placeholder_color,
-                self.font_size,
-            );
+            // The placeholder under the caret too: a box that has just taken
+            // the keyboard still says what to type into it. A box with none
+            // draws no text at all, not an empty one.
+            if !look.placeholder.is_empty() {
+                push_line(
+                    tree,
+                    look,
+                    look.placeholder,
+                    look.placeholder_color,
+                    self.font_size,
+                );
+            }
+            if look.focused {
+                textedit::push_caret(
+                    tree,
+                    look.x,
+                    look.y,
+                    look.line_height,
+                    look.color,
+                    look.caret_width,
+                );
+            }
+            return;
         }
         if look.focused {
             textedit::draw(
@@ -224,7 +239,7 @@ impl SearchBox {
                     caret_width: look.caret_width,
                 },
             );
-        } else if !self.is_empty() {
+        } else {
             push_line(tree, look, self.input.text(), look.color, self.font_size);
         }
     }
@@ -570,8 +585,32 @@ mod tests {
         assert!(
             tree.commands
                 .iter()
-                .any(|c| matches!(c, RenderCommand::Line { .. })),
-            "no caret"
+                .any(|c| matches!(c, RenderCommand::Line { x1, .. } if (*x1 - LOOK.x).abs() < 0.5)),
+            "no caret where the first letter will go"
+        );
+        assert!(
+            !tree
+                .commands
+                .iter()
+                .any(|c| matches!(c, RenderCommand::RichText { .. })),
+            "an empty box drew a line of text of its own"
+        );
+        // With nothing to say, it draws no text at all.
+        let mut tree = RenderTree::new();
+        search.draw(
+            &mut tree,
+            &SearchLook {
+                placeholder: "",
+                focused: true,
+                ..LOOK
+            },
+        );
+        assert!(
+            !tree.commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { .. } | RenderCommand::RichText { .. }
+            )),
+            "an empty placeholder was drawn"
         );
     }
 

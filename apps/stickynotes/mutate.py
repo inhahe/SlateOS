@@ -241,8 +241,8 @@ MUTATIONS = [
     ),
     (
         "a journey does not mark the notes",
-        "            self.clamp_caret();\n            self.store.mark_dirty();",
-        "            self.clamp_caret();",
+        "            self.refill_title();\n            self.store.mark_dirty();",
+        "            self.refill_title();",
         [TREE],
     ),
     (
@@ -283,12 +283,24 @@ MUTATIONS = [
         ["redo_keeps_a_title_being_typed", "the_toolbar_undo_while_writing_takes_the_writing_back"],
     ),
     (
-        "a commit leaves the title's starting point empty",
-        "        self.title_before = note.title.clone();\n        self.store.mark_dirty();",
-        "        self.store.mark_dirty();",
+        "a commit leaves the title's starting point empty, and its box as typed",
+        "        // as typed over nothing, and undoing that blanked it.\n        self.refill_title();\n",
+        "        // as typed over nothing, and undoing that blanked it.\n",
         # Not the second-undo test: the undo moves the note, and the title's
         # starting point is taken again from where it moved to.
-        ["a_save_while_typing_a_title_keeps_its_starting_point", "redo_keeps_a_title_being_typed"],
+        [
+            "a_save_while_typing_a_title_keeps_its_starting_point",
+            "a_title_changed_under_its_box_is_typed_from_what_it_now_reads",
+        ],
+    ),
+    (
+        "a title taken up again keeps its old starting point",
+        "            self.title_before = note.title.clone();\n            self.title.set_text(&note.title);\n",
+        "            self.title.set_text(&note.title);\n",
+        [
+            "a_save_while_typing_a_title_keeps_its_starting_point",
+            "leaving_a_title_after_undoing_its_typing_keeps_the_redo",
+        ],
     ),
     (
         "a title left as it was loses its starting point",
@@ -338,68 +350,51 @@ MUTATIONS += [
     ),
     (
         "a query that finds nothing is not red",
-        "                invalid: !query.is_empty() && self.store.search_results().is_empty(),\n",
+        "                invalid: !query.is_empty() && self.store.search_results(query).is_empty(),\n",
         "                invalid: false,\n",
         [SEARCH],
     ),
-    (
-        "an empty search box with the keyboard has no caret",
-        "                textedit::push_caret(&mut tree, tx, ty, line, self.palette.text, self.caret_width);\n",
-        "                let _ = (tx, ty, line);\n",
-        [SEARCH],
-    ),
-    (
-        "the search's caret is drawn at its start",
-        "                        TextCursor::from(self.line_cursor())\n"
-        "                    } else {\n"
-        "                        TextCursor::default()\n"
-        "                    },\n"
-        "                    selection_anchor: if searching {",
-        "                        TextCursor::default()\n"
-        "                    } else {\n"
-        "                        TextCursor::default()\n"
-        "                    },\n"
-        "                    selection_anchor: if searching {",
-        [SEARCH],
-    ),
+    # No rows for the search's caret drawn by hand, the editor shared by the
+    # search and a title and reloaded from them, or a copy reaching the
+    # clipboard: since 2026-10-17 the search and the title being typed are
+    # textline LineBoxes, and those are their own table's rows
+    # (apps/textline/mutate.py). Nor for the title's box in bold at the
+    # note's size (`with_weight`, `set_font_size`): the note draws the title
+    # itself, so the box's weight and size reach only its caret's steps,
+    # which no test tells apart on a line that runs one way.
     (
         "a press on the search box puts the caret at the end",
-        "                    x - rect.x - SEARCH_TEXT_INSET,\n"
-        "                )\n"
-        "                .byte;\n",
-        "                    f32::MAX,\n"
-        "                )\n"
-        "                .byte;\n",
+        "                    x - rect.x - SEARCH_TEXT_INSET,\n",
+        "                    f32::MAX,\n",
         [SEARCH],
     ),
     (
-        "a line's editor is not reloaded from the line",
-        "        if let Some(text) = self.line_text()\n"
-        "            && self.line_editor.text() != text\n"
-        "        {\n"
-        "            self.line_editor.set_text(&text);\n"
-        "        }\n",
-        "        let _ = self.line_text();\n",
+        "a press in the search without the keyboard is measured as though it had it",
+        "                let had_the_keyboard = self.focus == Some(Focus::Search);\n",
+        "                let had_the_keyboard = true;\n",
+        ["a_press_in_the_search_without_the_keyboard_lands_where_it_reads"],
+    ),
+    (
+        "a tag chosen is not put in the search",
+        "                    self.search.set_text(&filter);\n",
+        "                    let _ = &filter;\n",
         ["a_tag_chosen_while_typing_a_search_is_what_the_next_key_edits"],
     ),
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.line_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [SEARCH, TITLE],
-    ),
-    (
-        "the search is not written back",
-        "        if let Some(query) = changed {\n            self.store.set_search(&query);\n",
-        "        if let Some(query) = changed {\n            let _ = query;\n",
-        [SEARCH],
-    ),
-    (
-        "a title is not written back",
-        "            if let Some(note) = self.store.get_note_mut(id) {\n                note.title = title;\n            }\n",
-        "            let _ = title;\n",
+        "a title is not written into its note",
+        "                self.title.text().clone_into(&mut note.title);\n",
+        "                let _ = &note;\n",
         [TITLE],
     ),
+    (
+        "a title changed under its box is not put back in it",
+        "            self.title_before = note.title.clone();\n            self.title.set_text(&note.title);\n",
+        "            self.title_before = note.title.clone();\n",
+        ["a_title_changed_under_its_box_is_typed_from_what_it_now_reads"],
+    ),
+    # No row for "a title's box is put back from its note when it holds the
+    # note": `LineBox::set_text` leaves a box that holds the text, and its
+    # caret, alone, so a guard against it here would be the same check twice.
     (
         "a title's Ctrl+A, C, X and V are the board's",
         "                Key::A | Key::C | Key::X | Key::V => match self.focus {\n",
@@ -426,27 +421,21 @@ MUTATIONS += [
     ),
 ]
 
-# A line's limit (2026-10-10): the search and a title share one editor, which
-# takes the limit of the line the keyboard moves into.
+# A line's limit (2026-10-10): the search and a title each stop at their
+# own.
 LIMITS = "the_search_and_a_title_each_stop_at_their_own_limit"
 
 MUTATIONS += [
     (
-        "a line's editor is given no capacity",
-        "        self.line_editor.set_capacity(Some(capacity));\n",
-        "",
-        [LIMITS],
-    ),
-    (
         "the search is held to a title's limit",
-        "            Focus::Search => SEARCH_CAPACITY,\n",
-        "            Focus::Search => MAX_TITLE_LEN,\n",
+        "            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),\n",
+        "            search: LineBox::new(MAX_TITLE_LEN, SEARCH_TEXT_SIZE),\n",
         [LIMITS],
     ),
     (
         "a title is held to the search's limit",
-        "            Focus::Title(_) | Focus::Body(_) => MAX_TITLE_LEN,\n",
-        "            Focus::Title(_) | Focus::Body(_) => SEARCH_CAPACITY,\n",
+        "LineBox::holding(&title, MAX_TITLE_LEN, size)",
+        "LineBox::holding(&title, SEARCH_CAPACITY, size)",
         [LIMITS],
     ),
 ]

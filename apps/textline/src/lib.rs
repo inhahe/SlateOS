@@ -147,6 +147,19 @@ pub fn apply_key(
     clipboard: &str,
     font_size: f32,
 ) -> LineEdit {
+    apply_key_in(input, key, clipboard, font_size, FontWeightHint::Regular)
+}
+
+/// [`apply_key`] for a field drawn in `weight`, which its caret's steps
+/// through text that runs both ways are measured in, as they are at
+/// `font_size`.
+pub(crate) fn apply_key_in(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    clipboard: &str,
+    font_size: f32,
+    weight: FontWeightHint,
+) -> LineEdit {
     debug_assert!(
         input.capacity().is_some(),
         "a one-line field without a capacity: build it with textline::field_holding"
@@ -162,8 +175,8 @@ pub fn apply_key(
     let chord = is_ctrl_chord(key.modifiers);
     let mut copied = None;
     match key.key {
-        Key::Left => input.move_cursor_left(shift, font_size, FontWeightHint::Regular),
-        Key::Right => input.move_cursor_right(shift, font_size, FontWeightHint::Regular),
+        Key::Left => input.move_cursor_left(shift, font_size, weight),
+        Key::Right => input.move_cursor_right(shift, font_size, weight),
         Key::Home => input.move_home(shift),
         Key::End => input.move_end(shift),
         Key::Backspace => input.backspace(),
@@ -200,6 +213,17 @@ pub fn apply_key(
 /// pastes from (`TextInput::edit_command`), so the keys and the menu agree;
 /// a window keeping a clipboard of its own for the keys has two that do not.
 pub fn apply_key_on_clipboard(input: &mut TextInput, key: &KeyEvent, font_size: f32) -> LineEdit {
+    apply_key_on_clipboard_in(input, key, font_size, FontWeightHint::Regular)
+}
+
+/// [`apply_key_on_clipboard`] for a field drawn in `weight`
+/// ([`apply_key_in`]).
+pub(crate) fn apply_key_on_clipboard_in(
+    input: &mut TextInput,
+    key: &KeyEvent,
+    font_size: f32,
+    weight: FontWeightHint,
+) -> LineEdit {
     // Read for the key that pastes alone: the clipboard may hold megabytes,
     // and every other key -- each letter typed -- would copy them for nothing.
     let clipboard = if pastes(key) {
@@ -207,7 +231,7 @@ pub fn apply_key_on_clipboard(input: &mut TextInput, key: &KeyEvent, font_size: 
     } else {
         String::new()
     };
-    let edit = apply_key(input, key, &clipboard, font_size);
+    let edit = apply_key_in(input, key, &clipboard, font_size, weight);
     if let Some(copied) = &edit.copied {
         guitk::clipboard::set_text(copied);
     }

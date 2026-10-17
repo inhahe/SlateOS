@@ -27,11 +27,13 @@ use guitk::textinput::{KeyEdit, TextInput};
 /// What a box read from its end draws in place of the text it cuts.
 const ELLIPSIS: &str = "…";
 
-/// A one-line box's text, caret and selection, and the size it is drawn at.
+/// A one-line box's text, caret and selection, and the size and weight it
+/// is drawn at.
 #[derive(Clone, Debug)]
 pub struct LineBox {
     input: TextInput,
     font_size: f32,
+    weight: FontWeightHint,
     /// Whether text too long for the box is cut at its front while the box
     /// has not the keyboard ([`LineBox::from_its_end`]).
     from_end: bool,
@@ -107,8 +109,18 @@ impl LineBox {
         Self {
             input: crate::field_holding(text, capacity),
             font_size,
+            weight: FontWeightHint::Regular,
             from_end: false,
         }
+    }
+
+    /// The box in `weight` -- bold, for a title -- rather than the regular
+    /// one: its text drawn in it, and its presses and its caret's steps
+    /// measured in it.
+    #[must_use]
+    pub fn with_weight(mut self, weight: FontWeightHint) -> Self {
+        self.weight = weight;
+        self
     }
 
     /// The box, read from its end while it has not the keyboard: text too
@@ -183,8 +195,8 @@ impl LineBox {
     /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
     /// and what it did.
     pub fn key(&mut self, key: &KeyEvent) -> LineKey {
-        let font_size = self.font_size;
-        self.edited(|input| crate::apply_key_on_clipboard(input, key, font_size))
+        let (font_size, weight) = (self.font_size, self.weight);
+        self.edited(|input| crate::apply_key_on_clipboard_in(input, key, font_size, weight))
     }
 
     /// Make `change` to the field, and say what it did: `handled` and
@@ -259,7 +271,7 @@ impl LineBox {
                 drawn,
                 width,
                 self.font_size,
-                FontWeightHint::Regular,
+                self.weight,
                 dx,
             )
         };
@@ -274,7 +286,7 @@ impl LineBox {
     /// where not even the `…` fits and nothing was drawn, the end.
     fn press_in_tail(&self, dx: f32, width: f32) -> TextCursor {
         let text = self.input.text();
-        let weight = FontWeightHint::Regular;
+        let weight = self.weight;
         if guitk::text::measure(text, self.font_size, weight) <= width {
             return guitk::text::cursor_at(text, dx, self.font_size, weight);
         }
@@ -323,7 +335,7 @@ impl LineBox {
                     look,
                     look.placeholder,
                     look.placeholder_color,
-                    self.font_size,
+                    (self.font_size, self.weight),
                 );
             }
             if look.focused {
@@ -351,7 +363,7 @@ impl LineBox {
                     width: look.width.max(0.0),
                     line_height: look.line_height,
                     font_size: self.font_size,
-                    weight: FontWeightHint::Regular,
+                    weight: self.weight,
                     color: look.color,
                     selection_bg: look.selection_bg,
                     selection_fg: look.selection_fg,
@@ -371,30 +383,43 @@ impl LineBox {
                     width,
                     ELLIPSIS,
                     self.font_size,
-                    FontWeightHint::Regular,
+                    self.weight,
                 ),
                 font_size: self.font_size,
                 color: look.color,
-                font_weight: FontWeightHint::Regular,
+                font_weight: self.weight,
                 max_width: Some(width),
                 overflow: TextOverflow::Clip,
             });
         } else {
-            push_line(tree, look, self.input.text(), look.color, self.font_size);
+            push_line(
+                tree,
+                look,
+                self.input.text(),
+                look.color,
+                (self.font_size, self.weight),
+            );
         }
     }
 }
 
-/// One line of `text` in `color` where `look` puts the box's text, cut to
-/// its width with `…`.
-fn push_line(tree: &mut RenderTree, look: &LineLook<'_>, text: &str, color: Color, font_size: f32) {
+/// One line of `text` in `color` where `look` puts the box's text, at the
+/// box's size and weight (`font`), cut to its width with `…`.
+fn push_line(
+    tree: &mut RenderTree,
+    look: &LineLook<'_>,
+    text: &str,
+    color: Color,
+    font: (f32, FontWeightHint),
+) {
+    let (font_size, font_weight) = font;
     tree.push(RenderCommand::Text {
         x: look.x,
         y: look.y,
         text: text.to_string(),
         font_size,
         color,
-        font_weight: FontWeightHint::Regular,
+        font_weight,
         max_width: Some(look.width.max(0.0)),
         overflow: TextOverflow::Ellipsis,
     });
@@ -851,6 +876,70 @@ mod tests {
             2,
             "text that fits is not measured from its start"
         );
+    }
+
+    /// **A box in a weight is drawn and pressed in it**: with the keyboard
+    /// and without, read from its end and cut, its placeholder too -- and a
+    /// press after the tenth of a row of `W`s, which bold and regular set
+    /// at different widths, lands after the tenth.
+    #[test]
+    fn a_box_in_a_weight_is_drawn_and_pressed_in_it() {
+        let bold = FontWeightHint::Bold;
+        let wide = "W".repeat(20);
+        let weights = |line: &LineBox, focused: bool, width: f32| -> Vec<FontWeightHint> {
+            let mut tree = RenderTree::new();
+            line.draw(
+                &mut tree,
+                &LineLook {
+                    width,
+                    focused,
+                    ..LOOK
+                },
+            );
+            tree.commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text { font_weight, .. }
+                    | RenderCommand::RichText { font_weight, .. } => Some(*font_weight),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut line = LineBox::holding(&wide, 64, 13.0).with_weight(bold);
+        assert_eq!(
+            weights(&line, false, 1000.0),
+            [bold],
+            "without the keyboard"
+        );
+        assert_eq!(weights(&line, true, 1000.0), [bold], "with the keyboard");
+        let empty = LineBox::new(64, 13.0).with_weight(bold);
+        assert_eq!(weights(&empty, false, 1000.0), [bold], "the placeholder");
+        let tail = LineBox::holding(&wide, 64, 13.0)
+            .with_weight(bold)
+            .from_its_end();
+        assert_eq!(weights(&tail, false, 100.0), [bold], "read from its end");
+        let cut = shown(&tail);
+        assert!(cut.starts_with(ELLIPSIS), "control: cut at the front");
+        assert!(
+            guitk::text::measure(&cut, 13.0, bold) <= LOOK.width,
+            "cut in the regular weight, wider than the box in bold: {cut}"
+        );
+
+        let tenth = guitk::text::measure(&wide[..10], 13.0, bold) + 0.5;
+        assert_ne!(
+            guitk::text::cursor_at(&wide, tenth, 13.0, FontWeightHint::Regular).byte(),
+            10,
+            "control: the two weights set a W alike"
+        );
+        let caret = |line: &LineBox| line.input().cursor().byte();
+        line.press(tenth, 1000.0, false);
+        assert_eq!(caret(&line), 10, "without the keyboard");
+        line.key(&press(Key::Home, ""));
+        line.press(tenth, 1000.0, true);
+        assert_eq!(caret(&line), 10, "with the keyboard");
+        let mut tail = tail;
+        tail.press(tenth, 1000.0, false);
+        assert_eq!(caret(&tail), 10, "read from its end");
     }
 
     /// **A box whose size is changed measures and draws at its new size**:

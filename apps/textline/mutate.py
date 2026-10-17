@@ -32,14 +32,14 @@ TABLE = "a_chord_a_command_and_typing_by_modifiers"
 MUTATIONS = [
     (
         "the caret does not move",
-        "        Key::Left => input.move_cursor_left(shift, font_size, FontWeightHint::Regular),",
+        "        Key::Left => input.move_cursor_left(shift, font_size, weight),",
         "        Key::Left => {}",
         [TYPING, SELECT, DELETE],
     ),
     (
         "shift does not select",
-        "        Key::Left => input.move_cursor_left(shift, font_size, FontWeightHint::Regular),",
-        "        Key::Left => input.move_cursor_left(false, font_size, FontWeightHint::Regular),",
+        "        Key::Left => input.move_cursor_left(shift, font_size, weight),",
+        "        Key::Left => input.move_cursor_left(false, font_size, weight),",
         [SELECT],
     ),
     (
@@ -274,6 +274,11 @@ INSERT = "a_box_types_what_it_is_given_at_its_caret"
 # the keyboard, and pressed where that was drawn.
 S_FROM_END = "a_box_read_from_its_end_is_cut_at_the_front_without_the_keyboard"
 S_TAIL_PRESS = "a_press_in_a_box_read_from_its_end_lands_on_the_tail_it_showed"
+# A box in a weight of its own (mindmap's root). Its caret's steps are
+# measured in it too, as the toolkit asks (TextInput::move_cursor_left), but
+# have no row: on a line that runs one way they step the same in either
+# weight, and the built-in face is the only one.
+S_WEIGHT = "a_box_in_a_weight_is_drawn_and_pressed_in_it"
 
 LINE_MUTATIONS = [
     (
@@ -344,8 +349,8 @@ LINE_MUTATIONS = [
     ),
     (
         "the box keeps a clipboard of its own",
-        "        self.edited(|input| crate::apply_key_on_clipboard(input, key, font_size))\n",
-        '        self.edited(|input| crate::apply_key(input, key, "", font_size))\n',
+        "        self.edited(|input| crate::apply_key_on_clipboard_in(input, key, font_size, weight))\n",
+        '        self.edited(|input| crate::apply_key_in(input, key, "", font_size, weight))\n',
         ["a_copy_or_a_cut_says_it_took_the_selection"],
     ),
     (
@@ -446,7 +451,8 @@ LINE_MUTATIONS = [
     ),
     (
         "text without the keyboard is not drawn",
-        "            push_line(tree, look, self.input.text(), look.color, self.font_size);\n",
+        "            push_line(\n                tree,\n                look,\n                self.input.text(),\n"
+        "                look.color,\n                (self.font_size, self.weight),\n            );\n",
         "",
         [S_UNFOCUSED],
     ),
@@ -485,6 +491,48 @@ LINE_MUTATIONS = [
         "        self.input.select_all();\n",
         "",
         [S_SELECT_ALL],
+    ),
+    (
+        "a box in a weight is in the regular one",
+        "        self.weight = weight;\n",
+        "",
+        [S_WEIGHT],
+    ),
+    (
+        "a press is measured in the regular weight",
+        "                self.weight,\n                dx,\n",
+        "                FontWeightHint::Regular,\n                dx,\n",
+        [S_WEIGHT],
+    ),
+    (
+        "a press in a box read from its end is measured in the regular weight",
+        "        let weight = self.weight;\n",
+        "        let weight = FontWeightHint::Regular;\n",
+        [S_WEIGHT],
+    ),
+    (
+        "the text with the keyboard is drawn in the regular weight",
+        "                    weight: self.weight,\n",
+        "                    weight: FontWeightHint::Regular,\n",
+        [S_WEIGHT],
+    ),
+    (
+        "a box read from its end is cut in the regular weight",
+        "                    self.font_size,\n                    self.weight,\n                ),\n",
+        "                    self.font_size,\n                    FontWeightHint::Regular,\n                ),\n",
+        [S_WEIGHT],
+    ),
+    (
+        "a box read from its end is drawn in the regular weight",
+        "                font_weight: self.weight,\n",
+        "                font_weight: FontWeightHint::Regular,\n",
+        [S_WEIGHT],
+    ),
+    (
+        "the text without the keyboard and the placeholder are drawn in the regular weight",
+        "        font_weight,\n        max_width: Some(look.width.max(0.0)),\n",
+        "        font_weight: FontWeightHint::Regular,\n        max_width: Some(look.width.max(0.0)),\n",
+        [S_WEIGHT],
     ),
     (
         "a box read from its end is read from its start",

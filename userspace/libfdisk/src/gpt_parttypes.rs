@@ -4,7 +4,7 @@
 use crate::parttype::PartType;
 
 /// `gpt_parttypes`.
-pub(crate) static GPT_PARTTYPES: [PartType; 217] = [
+pub(crate) static GPT_PARTTYPES: [PartType; 215] = [
     PartType::guid(b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B", b"EFI System"),
     PartType::guid(
         b"024DEE41-33E7-11D3-9D69-0008C781F39F",
@@ -506,11 +506,6 @@ pub(crate) static GPT_PARTTYPES: [PartType; 217] = [
         b"4EDE75E2-6CCC-4CC8-B9C7-70334B087510",
         b"Linux /usr verity sign. (TILE-Gx)",
     ),
-    PartType::guid(
-        b"7FFEC5C9-2D00-49B7-8941-3EA10A5586B7",
-        b"Linux plain dm-crypt",
-    ),
-    PartType::guid(b"CA7D7CCB-63ED-4C53-861C-1742536059CC", b"Linux LUKS"),
     PartType::guid(
         b"BC13C2FF-59E6-4262-A352-B275FD6F7172",
         b"Linux extended boot",

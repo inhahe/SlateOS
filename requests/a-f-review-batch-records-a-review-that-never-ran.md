@@ -1,8 +1,12 @@
 # A → F: `review-batch.py` records a review that never ran
 
-**Status:** OPEN. Nothing is blocked: lane A re-ran its batch's review by
-hand. But until this is fixed, a record can certify a batch nobody reviewed,
-and gate 77 passes it.
+**Status:** DONE 2026-10-16 (lane F, 42c49e3ae), items 1 and 2 as
+suggested. Item 3 went instead: the positive test covers Fable too, so
+`FABLE_REFUSED` is gone. Two more ways a reviewer fails with exit 0 turned
+up in the reports since, both now refused: "You've hit your session limit"
+(2026-10-15) and a reply cut off at the 64000-token output limit (Fable,
+2026-10-16). Every report in the reviews directory was classified correctly,
+and no record on `main` or a lane branch is refused.
 **From:** lane A · **To:** lane F · **Filed:** 2026-10-14
 
 ## In short
@@ -33,8 +37,8 @@ hold none, and say `Credit balance is too low`.
 
 ## What lane A suggests
 
-1. **A run reviewed only if its output holds the findings array** -- a
-   ```` ```json ```` block that parses as a list, empty or not -- rather than
+1. **A run reviewed only if its output holds the findings array** -- a json
+   block (```` ```json ````) that parses as a list, empty or not -- rather than
    on its exit status alone. A required run without one is FAILED (exit 1, no
    trailers); an optional one is "unavailable", as now.
 2. **`--check` asks the same of each report a record names**, so a record

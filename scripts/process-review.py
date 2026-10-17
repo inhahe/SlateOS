@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -47,6 +48,7 @@ import sys
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import NamedTuple
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parent
@@ -54,8 +56,41 @@ sys.path.insert(0, str(HERE))
 import gitenv  # noqa: E402
 import selftestflag  # noqa: E402
 
-#: The operator's usage analyzer: `python -m cua report` there.
-CUA_DIR = Path(os.environ.get("CUA_DIR", "D:/visual studio projects/claude-usage-analysis"))
+
+def _load(name: str, file: str):
+    """A sibling script, as a module."""
+    spec = importlib.util.spec_from_file_location(name, HERE / file)
+    if spec is None or spec.loader is None:
+        raise SystemExit(f"process-review: scripts/{file} cannot be loaded")
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+#: For `integration_tree()`: the repository's main worktree, found and checked
+#: the one way every script here finds it.
+SIGNALS = _load("check_lane_signals", "check-lane-signals.py")
+
+
+def cua_dir(places: list[Path] | None = None) -> Path:
+    """The operator's usage analyzer (`python -m cua report` there): `CUA_DIR`
+    if set, else the first of `places` that holds it -- by default beside this
+    worktree, beside the integration tree (where it is on a one-drive machine),
+    then where it was first kept. A folder counts only if it holds the `cua`
+    package: an empty or stray one of that name is not the analyzer. None
+    holding it: the first place, which the report names as missing."""
+    if os.environ.get("CUA_DIR"):
+        return Path(os.environ["CUA_DIR"])
+    if places is None:
+        tree = SIGNALS.integration_tree(REPO)
+        places = [REPO.parent / "claude-usage-analysis"]
+        if tree is not None:
+            places.append(tree.parent / "claude-usage-analysis")
+        places.append(Path("D:/visual studio projects/claude-usage-analysis"))
+    return next((p for p in places if (p / "cua").is_dir()), places[0])
+
+
 #: Seconds of usage summed per fitted window: long enough that the whole
 #: points the meter reports in mean something, short enough to give many.
 FIT_WINDOW = 2 * 3600
@@ -120,6 +155,42 @@ def meter_windows(samples: list[dict], calls: list[tuple[float, float, float]],
     return out
 
 
+class Request(NamedTuple):
+    """One API request a session made: when, on which model, and its tokens
+    by kind (input, output, cache writes of 5 min and 1 h, cache reads)."""
+    ts: float
+    model: str
+    inp: int
+    outp: int
+    cw5: int
+    cw1h: int
+    cr: int
+
+
+def requests_since(db: sqlite3.Connection, since: float) -> dict[tuple[str, str], Request]:
+    """Every API request in the usage analyzer's database after `since`
+    (epoch seconds), keyed by (transcript path, request id). A transcript
+    repeats a request's usage on every line of its response, so the line with
+    the most tokens stands for it."""
+    best: dict[tuple[str, str], Request] = {}
+    for path, req, ts, model, inp, outp, cw5, cw1h, cr in db.execute(
+            "select path, req_id, ts, model, inp, outp, cw5, cw1h, cr from lines "
+            "where ts > ? and req_id is not null", (since,)):
+        row = Request(ts, model or "", inp or 0, outp or 0, cw5 or 0, cw1h or 0, cr or 0)
+        prev = best.get((path, req))
+        if prev is None or sum(row[2:]) > sum(prev[2:]):
+            best[(path, req)] = row
+    return best
+
+
+def dollars(req: Request, price_for) -> tuple[float, float]:
+    """A request's cost at API prices, as (cache reads, everything else);
+    `price_for` is the analyzer's per-model price table."""
+    p_in, p_out, p_w5, p_w1h, p_r = price_for(req.model)
+    return (req.cr * p_r / 1e6,
+            (req.inp * p_in + req.outp * p_out + req.cw5 * p_w5 + req.cw1h * p_w1h) / 1e6)
+
+
 def meter_fit(cua: Path) -> str:
     """How heavily the weekly meter weighs cache reads, from the analyzer's
     database and usage samples; a paragraph, or why there is none."""
@@ -141,19 +212,9 @@ def meter_fit(cua: Path) -> str:
     since = min((s["ts"] for ss in samples.values() for s in ss), default=0)
     db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
     account_of = dict(db.execute("select path, account from files"))
-    best: dict[tuple[str, str], tuple] = {}
-    for path, req, ts, model, inp, outp, cw5, cw1h, cr in db.execute(
-            "select path, req_id, ts, model, inp, outp, cw5, cw1h, cr from lines "
-            "where ts > ? and req_id is not null", (since,)):
-        row = (ts, model or "", inp or 0, outp or 0, cw5 or 0, cw1h or 0, cr or 0)
-        prev = best.get((path, req))
-        if prev is None or sum(row[2:]) > sum(prev[2:]):
-            best[(path, req)] = row
     calls: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
-    for (path, _), (ts, model, inp, outp, cw5, cw1h, cr) in best.items():
-        p_in, p_out, p_w5, p_w1h, p_r = config.price_for(model)
-        calls[account_of.get(path)].append(
-            (ts, cr * p_r / 1e6, (inp * p_in + outp * p_out + cw5 * p_w5 + cw1h * p_w1h) / 1e6))
+    for (path, _), req in requests_since(db, since).items():
+        calls[account_of.get(path)].append((req.ts, *dollars(req, config.price_for)))
     rows = []
     for account, ss in samples.items():
         rows += meter_windows(ss, sorted(calls.get(account, [])), FIT_WINDOW)
@@ -175,7 +236,8 @@ def meter_fit(cua: Path) -> str:
 
 def usage_section(cua: Path) -> str:
     if not (cua / "cua").is_dir():
-        return "## Usage\n\nThe usage analyzer is not at `CUA_DIR`; no usage numbers.\n"
+        return (f"## Usage\n\nThe usage analyzer is not at `{cua.as_posix()}` (set `CUA_DIR` to "
+                f"where it is); no usage numbers.\n")
     r = subprocess.run([sys.executable, "-m", "cua", "report"], cwd=cua, capture_output=True,
                        text=True, encoding="utf-8", errors="replace", stdin=subprocess.DEVNULL)
     m = re.search(r"report: (.+\.md)", r.stdout + r.stderr)
@@ -340,19 +402,118 @@ def backlog_section(root: Path, today: dt.date) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Context per lane: what the context trial compares
+# ---------------------------------------------------------------------------
+
+#: A lane's session, by its title: `OS A` as `go.bat` names them, or the
+#: agent names `Lane A` and `Lane-A`.
+LANE_TITLE = re.compile(r"^(?:OS|Lane)[ -]([A-F])$", re.I)
+
+
+def context_rows(db: sqlite3.Connection, since: float, price_for) -> dict[str, list[float]]:
+    """Per lane, from the usage analyzer's database after `since` (epoch
+    seconds): [API calls, context tokens summed over them, compactions, API
+    $]. A session is a lane's by its title (`LANE_TITLE`)."""
+    lane_of: dict[str, str] = {}
+    for path, title in db.execute("select path, title from titles"):
+        m = LANE_TITLE.match((title or "").strip())
+        if m:
+            lane_of[path] = m.group(1).upper()
+    rows: dict[str, list[float]] = {}
+    for (path, _), req in requests_since(db, since).items():
+        if path not in lane_of:
+            continue
+        r = rows.setdefault(lane_of[path], [0, 0, 0, 0.0])
+        r[0] += 1
+        r[1] += req.inp + req.cw5 + req.cw1h + req.cr
+        r[3] += sum(dollars(req, price_for))
+    for (path,) in db.execute("select path from prompts where kind = 'compact' and ts > ?",
+                              (since,)):
+        if path in lane_of:
+            rows.setdefault(lane_of[path], [0, 0, 0, 0.0])[2] += 1
+    return rows
+
+
+def lane_commits(logs: Path, lane: str, since: float) -> int:
+    """How many commits lane `lane` (`A`) made after `since` (epoch seconds),
+    on `lane-<x>` and its own `lane-<x>-*` branches, read from their reflogs
+    in `logs` (`<git-common-dir>/logs/refs/heads`). Only an entry `git commit`
+    wrote counts: the lane's own work. What reached the branch by a merge, a
+    fast-forward to `main` (which brings every other lane's commits), a
+    cherry-pick of a commit already counted, or an amend, does not."""
+    n = 0
+    for f in logs.glob(f"lane-{lane.lower()}*"):
+        if f.name != f"lane-{lane.lower()}" and not f.name.startswith(f"lane-{lane.lower()}-"):
+            continue
+        for line in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            head, _, message = line.partition("\t")
+            fields = head.split()
+            if (len(fields) >= 2 and fields[-2].isdigit() and int(fields[-2]) > since
+                    and (message.startswith("commit: ") or message.startswith("commit (initial): "))):
+                n += 1
+    return n
+
+
+def context_section(cua: Path, since: float) -> str:
+    """The report's context section: per lane, the API calls made after
+    `since` (epoch seconds), their context, compactions and cost, and the
+    commits the lane made in the same time. `cua` is the usage analyzer's
+    directory."""
+    db_path = cua / "state" / "cua.sqlite"
+    if not db_path.is_file():
+        return "## Context per lane\n\nThe usage analyzer's database is missing.\n"
+    sys.path.insert(0, str(cua))
+    try:
+        from cua import config  # type: ignore[import-not-found]
+    except ImportError:
+        return "## Context per lane\n\nThe usage analyzer could not be imported.\n"
+    db = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+    rows = context_rows(db, since, config.price_for)
+    tree = SIGNALS.integration_tree(REPO)
+    if tree is None:
+        return "## Context per lane\n\nThe repository's shared .git could not be found.\n"
+    logs = tree / ".git" / "logs" / "refs" / "heads"
+    lines = ["## Context per lane",
+             "",
+             "What the context trial compares (`os/go.bat`: account c's lanes, E and F, "
+             "compact at 300k tokens from 2026-10-12; the others at 950k). A shorter "
+             "context should show as a smaller context per call and a lower cost per "
+             "commit; forgetting, as more compactions, more cost per commit, and more "
+             "review findings and failed boots (above) for the same lanes.",
+             "",
+             "| lane | API calls | context per call | compactions | API $ | commits | API $ per commit |",
+             "|---|---:|---:|---:|---:|---:|---:|"]
+    if not rows:
+        lines[-2:] = ["No session titled `OS A` to `OS F` (or `Lane A`) made an API call "
+                      "in this time, so there is nothing to compare."]
+    for lane in sorted(rows):
+        calls, ctx, compactions, cost = rows[lane]
+        commits = lane_commits(logs, lane, since)
+        per = f"{cost / commits:.2f}" if commits else "-"
+        lines.append(f"| {lane} | {calls} | {ctx / calls / 1000:.0f}k | {compactions} | "
+                     f"{cost:.0f} | {commits} | {per} |" if calls else
+                     f"| {lane} | 0 | - | {compactions} | 0 | {commits} | - |")
+    return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
 # The report, and the proposals
 # ---------------------------------------------------------------------------
 
 def report(today: dt.date, cua: Path) -> str:
     since = (today - dt.timedelta(days=7)).isoformat()
+    # The context section's costs and commits are both counted from this one
+    # instant, midnight UTC: a `--since=<date>` would mean that date at the
+    # current local time to git, and the two would cover different spans.
+    start = dt.datetime.fromisoformat(since).replace(tzinfo=dt.timezone.utc).timestamp()
     history = REPO / "bench" / "boot-history.jsonl"
     rows = load_history(history)
     log = git("log", f"--since={since}", "--grep=^Reviewed: ", "--format=%x1e%H%n%B",
               "refs/remotes/origin/main")
     return "\n".join([
         f"# How SlateOS is being built: the week to {today.isoformat()}", "",
-        usage_section(cua), boot_section(rows, since), review_section(log),
-        backlog_section(REPO, today)])
+        usage_section(cua), context_section(cua, start), boot_section(rows, since),
+        review_section(log), backlog_section(REPO, today)])
 
 
 PROPOSE = """You are reviewing how an autonomous six-lane Claude development effort \
@@ -387,8 +548,11 @@ def propose(text: str) -> str:
     import proctree  # the timeout that kills the whole tree before draining
     head = "## Three changes to make first (Claude, from the numbers above)\n\n"
     try:
-        r = proctree.run_captured([newest_claude(), "-p", "--model", "opus", "--effort",
-                                   "medium"], input=(PROPOSE + text).encode("utf-8"),
+        # --no-session-persistence: the weekly run starts in System32, and a
+        # saved session would turn up in the operator's session lists each week.
+        r = proctree.run_captured([newest_claude(), "-p", "--no-session-persistence", "--model",
+                                   "opus", "--effort", "medium"],
+                                  input=(PROPOSE + text).encode("utf-8"),
                                   timeout=1800, env=gitenv.clean_env())
     except OSError as e:
         return head + f"The proposal run could not start: {e}\n"
@@ -401,11 +565,32 @@ def propose(text: str) -> str:
     return head + out + "\n"
 
 
+def task_script(tree: Path | None) -> Path:
+    """The copy of this script the weekly task runs: the integration tree's
+    (*tree*, `integration_tree()`), which is kept at main. Refused, rather than
+    registered to fail every week unseen, when there is no such tree, it has
+    another branch checked out (a stale copy, a scratch clone), or the script
+    is not in it."""
+    if tree is None:
+        raise SystemExit("process-review: this repository's main worktree cannot be found; "
+                         "run --register from a worktree of the SlateOS repository")
+    branch = subprocess.run(["git", "-C", str(tree), "symbolic-ref", "--short", "HEAD"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace",
+                            env=gitenv.clean_env(), stdin=subprocess.DEVNULL).stdout.strip()
+    if branch != "main":
+        raise SystemExit(f"process-review: {tree} has {branch or 'no branch'} checked out, not "
+                         "main: it is not the integration tree")
+    script = tree / "scripts" / "process-review.py"
+    if not script.is_file():
+        raise SystemExit(f"process-review: {script} is not there")
+    return script
+
+
 def register(out: str) -> int:
     """Register the weekly Task Scheduler entry: Mondays 06:30, after the
-    curator, from the integration tree, which is kept at main. The task
-    starts in System32, so `out` is made absolute here."""
-    script = Path("E:/visual studio projects/os/scripts/process-review.py")
+    curator, from the integration tree. The task starts in System32, so
+    `out` is made absolute here."""
+    script = task_script(SIGNALS.integration_tree(REPO))
     pyw = Path(sys.executable).with_name("pythonw.exe")
     cmd = f'"{pyw}" "{script}" --out "{Path(out).resolve()}" --propose'
     r = subprocess.run(["schtasks", "/create", "/f", "/tn", TASK, "/sc", "weekly", "/d", "MON",
@@ -484,6 +669,74 @@ def self_test() -> int:
                            encoding="utf-8", newline="\n")
         expect("malformed history lines skipped", [r["ts"] for r in load_history(history)],
                ["a", "c"])
+        # Context per lane: requests deduplicated, sessions by their title.
+        db = sqlite3.connect(":memory:")
+        db.executescript(
+            "create table titles(path text, ts real, kind text, title text);"
+            "create table lines(path text, req_id text, ts real, model text, inp int, outp int,"
+            " cw5 int, cw1h int, cr int);"
+            "create table prompts(path text, uuid text, ts real, kind text, native int);")
+        db.executemany("insert into titles values (?, 0, 'custom-title', ?)",
+                       [("e.jsonl", "OS E"), ("x.jsonl", "something else"),
+                        ("b.jsonl", "Lane-B"), ("c.jsonl", "lane c")])
+        db.executemany("insert into lines values (?, ?, ?, 'm', ?, 0, 0, 0, ?)", [
+            ("e.jsonl", "r1", 100, 1000, 299000),   # one request, logged twice
+            ("e.jsonl", "r1", 100, 1000, 299000),
+            ("e.jsonl", "r2", 100, 0, 100000),
+            ("e.jsonl", "r0", 1, 0, 9),             # before the window
+            ("x.jsonl", "r9", 100, 0, 1),           # not a lane
+            ("b.jsonl", "r5", 100, 0, 7),           # the agent names count too
+            ("c.jsonl", "r6", 100, 0, 7)])
+        db.executemany("insert into prompts values (?, 'u', ?, ?, 0)",
+                       [("e.jsonl", 100, "compact"), ("e.jsonl", 100, "human")])
+        got = context_rows(db, 50, lambda m: (0, 0, 0, 0, 1.0))
+        expect("context rows", {k: v[:3] for k, v in got.items()},
+               {"E": [2, 400000, 1], "B": [1, 7, 0], "C": [1, 7, 0]})
+        expect("context cost", round(got["E"][3], 6), 0.399)
+        # A lane's commits are the ones `git commit` made on its branches: not
+        # a fast-forward to main, a merge, a cherry-pick, an amend, or another
+        # lane's branch, nor anything before the window.
+        logs = root / "logs"
+        logs.mkdir()
+        z = "0" * 40
+        entry = "{z} {z} T <t@t> {ts} +0000\t{msg}\n"
+        (logs / "lane-e").write_text("".join(entry.format(z=z, ts=ts, msg=msg) for ts, msg in (
+            (40, "commit: too early"), (60, "commit: one"), (61, "commit (initial): two"),
+            (62, "merge origin/main: Fast-forward"), (63, "commit (merge): Merge main"),
+            (64, "cherry-pick: moved"), (65, "commit (amend): fixed"))),
+            encoding="utf-8", newline="\n")
+        (logs / "lane-e-wip").write_text(entry.format(z=z, ts=70, msg="commit: three"),
+                                         encoding="utf-8", newline="\n")
+        (logs / "lane-ex").write_text(entry.format(z=z, ts=70, msg="commit: not E's"),
+                                      encoding="utf-8", newline="\n")
+        expect("a lane's own commits", lane_commits(logs, "E", 50), 3)
+        # The usage analyzer: a folder of its name counts only if it holds it.
+        stray, real = root / "stray" / "claude-usage-analysis", root / "real" / "claude-usage-analysis"
+        stray.mkdir(parents=True)
+        (real / "cua").mkdir(parents=True)
+        saved_env = os.environ.pop("CUA_DIR", None)
+        try:
+            expect("the analyzer, not a stray folder of its name", cua_dir([stray, real]), real)
+            expect("none: the first place, named as missing", cua_dir([stray]), stray)
+        finally:
+            if saved_env is not None:
+                os.environ["CUA_DIR"] = saved_env
+        # The weekly task runs the integration tree's copy, which has main
+        # checked out; anything else is refused, not registered to fail.
+        tree = root / "tree"
+        (tree / "scripts").mkdir(parents=True)
+        (tree / "scripts" / "process-review.py").write_text("", encoding="utf-8", newline="\n")
+        genv = {**gitenv.clean_env(), "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(["git", "init", "-q", "-b", "main", str(tree)], env=genv, check=True)
+        expect("the integration tree's script", task_script(tree), tree / "scripts" / "process-review.py")
+        subprocess.run(["git", "-C", str(tree), "checkout", "-q", "-b", "other"], env=genv, check=True)
+        for label, arg in (("another branch is refused", tree), ("no tree is refused", None)):
+            try:
+                task_script(arg)
+                expect(label, "registered", "refused")
+            except SystemExit:
+                pass
         # A proposal that cannot run still leaves the numbers written.
         global newest_claude
         saved = newest_claude
@@ -517,12 +770,12 @@ def main(argv: list[str]) -> int:
         return register(a.register)
     today = dt.date.today()
     if not a.out:
-        text = report(today, CUA_DIR)
+        text = report(today, cua_dir())
         print(text + ("\n" + propose(text) if a.propose else ""))
         return 0
     out = Path(a.out)
     try:
-        text = report(today, CUA_DIR)
+        text = report(today, cua_dir())
         # The numbers are written before the proposal is asked for, so a
         # failed or slow proposal cannot lose them.
         dated = write_report(out, today, text)

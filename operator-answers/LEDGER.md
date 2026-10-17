@@ -10,6 +10,23 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-16: the logo is `xor2.png`; LithicBackup backs up on the writer's "done"
+
+- **Given:** 2026-10-16, in chat to lane F's session. Neither part answers a
+  queued question but C-Q28, which asked for the logo file. The operator
+  wrote `.gif`; the two files in the integration tree are PNGs, `xor.png` and
+  `xor2.png`.
+- **Processed:** 2026-10-16 by lane F: copied; the request written into
+  `roadmap-detailed.md` (LithicBackup's entry, §6.13); lanes C and E told by
+  notice.
+- **Copy:** `operator-answers/2026-10-16-chat-to-lane-f.txt`
+- **Content:** sha256 `880dba4f25724cb267f0368a947f1d975f7512db2134a57996a0854f9112fc64`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| C-Q28: the logo is `xor2.png`, not `xor.png` (both at the integration tree's root, untracked) | C | -- | relayed 2026-10-16 |
+| LithicBackup's port backs a file up, or makes its new version, when its writer finalizes it, and keeps its quiet-time rules for writers that never do: Linux programs, Windows programs under Wine, and the rest | E | `roadmap-detailed.md`, LithicBackup's entry | recorded by lane F; relayed 2026-10-16 to lane E, whose item it is |
+
 ## open-questions/answers.3.txt
 
 - **Written:** 2026-10-11 02:14, as `open-questions/answers.3.txt` in the
@@ -141,7 +158,8 @@ fill in. Section numbers (§) are `design-decisions/` entries.
   up; every other lane sent its answers and questions by notice.
 - **Copy:** `operator-answers/2026-10-09-open-questions-answers.txt`
 - **Content:** sha256 `6302a9fc6df72bd6bcc87acf588378e75fb974ac3525522bea8ffaaebac2f63c`
-- **Also left in the integration tree that day:** `xor.png` (C-Q28's logo),
+- **Also left in the integration tree that day:** `xor.png` (taken that day
+  for C-Q28's logo, which is `xor2.png`: the operator, 2026-10-16, above),
   and an untracked `LICENSE` (MIT, dated 2026-09-16) that no question asked
   for -- lane A asked the operator whether it is to be committed; the answer
   was yes, and it is (section above).
@@ -158,7 +176,7 @@ fill in. Section numbers (§) are `design-decisions/` entries.
 | A-Q26 | A | §1568 (B, and the operator's "Allow" for this run only) | recorded |
 | B-Q22 | B | §1072 (your design). Your questions, answered: yes to each -- one `kill`, procps-ng's with SlateOS's options; the system picks the route (SlateOS's message to a program that answers it, the Linux signal to one that does not), and an option forces either; and the third strength is *terminate* -- stop now, ask nothing -- between *close* (may ask "save first?") and *force*. The task manager gets the same three (asked of lane E). Done 2026-10-09: procps-ng's `kill` ported, so `kill PID` is `SIGTERM` everywhere, never the forced end; the message waits on lane A's kernel half, then lane B's library | recorded |
 | B-Q25 | B | §1071 (A: a lost output is reported, in `which`, `ed`, `hostname` and `patch`; done 2026-10-09) | recorded |
-| C-Q28 | C | -- | relayed 2026-10-09 (`xor.png` is at the integration tree's root) |
+| C-Q28 | C | -- | relayed 2026-10-09 (`xor.png` is at the integration tree's root; the logo is `xor2.png`, beside it -- the operator, 2026-10-16) |
 | C-Q29 | C | -- | relayed 2026-10-09 (A, with questions) |
 | C-Q32 | C | -- | relayed 2026-10-09 (A) |
 | C-Q33 | C | -- | relayed 2026-10-09 (C if startup programs depend on each other, else A) |

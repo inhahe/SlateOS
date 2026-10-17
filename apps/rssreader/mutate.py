@@ -421,9 +421,8 @@ MUTATIONS += [
 ]
 
 # The search box and the prompt's box are the toolkit's field (2026-10-04;
-# lane C, c-e-a-theme-can-shape-the-controls): the search box textline's
-# `LineBox`, the prompt's box edited by textline's editor through
-# `edit_box`.
+# lane C, c-e-a-theme-can-shape-the-controls), each a textline `LineBox`
+# (the prompt's since 2026-10-17).
 BOXES = "the_search_and_the_prompt_are_the_toolkits_field"
 CHORDS = "a_chord_is_neither_a_reader_key_nor_typing"
 
@@ -432,24 +431,29 @@ MUTATIONS += [
         # What the prompt's box did before the editor: Backspace with any
         # chord.
         "Alt+Backspace deletes from the prompt's box",
-        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
-        "    if key.key == Key::Backspace {\n"
-        "        text.pop();\n"
-        "        return true;\n"
-        "    }\n"
-        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
+        "            _ if self.entry_box.key(key).handled => EventResult::Consumed,\n",
+        "            Key::Backspace => {\n"
+        "                let mut text = self.entry_box.text().to_owned();\n"
+        "                text.pop();\n"
+        "                self.entry_box.set_text(&text);\n"
+        "                EventResult::Consumed\n"
+        "            }\n"
+        "            _ if self.entry_box.key(key).handled => EventResult::Consumed,\n",
         [CHORDS],
     ),
     (
         # What the prompt's box did before the editor: type whatever text a
-        # key carried, a command's letter among it.
+        # key carried, a command's letter among it. The key's raw text, not
+        # `types_text()`, which leaves a command's letter out already.
         "the prompt's box types a command's letter",
-        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
-        "    if key.types_text() && !textline::types_into_field(key) {\n"
-        "        text.push_str(&key.text);\n"
-        "        return true;\n"
-        "    }\n"
-        "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
+        "            _ if self.entry_box.key(key).handled => EventResult::Consumed,\n",
+        "            _ if !key.text.is_empty() && !textline::types_into_field(key) => {\n"
+        "                let mut text = self.entry_box.text().to_owned();\n"
+        "                text.push_str(&key.text);\n"
+        "                self.entry_box.set_text(&text);\n"
+        "                EventResult::Consumed\n"
+        "            }\n"
+        "            _ if self.entry_box.key(key).handled => EventResult::Consumed,\n",
         [CHORDS],
     ),
     (
@@ -460,20 +464,20 @@ MUTATIONS += [
     ),
     (
         "a press is measured as the box was drawn with the keyboard",
-        "            self.search.press(dx, width, had_the_keyboard);\n",
-        "            self.search.press(dx, width, true);\n",
+        "        line.press(dx, width, had_the_keyboard);\n",
+        "        line.press(dx, width, true);\n",
         ["a_press_in_a_long_search_lands_where_it_was_drawn"],
     ),
     (
         "a press is measured as the box was drawn without the keyboard",
-        "            self.search.press(dx, width, had_the_keyboard);\n",
-        "            self.search.press(dx, width, false);\n",
+        "        line.press(dx, width, had_the_keyboard);\n",
+        "        line.press(dx, width, false);\n",
         ["a_press_in_a_long_search_lands_where_it_was_drawn"],
     ),
     (
         "a press leaves the caret where it was",
-        "                    self.place_caret(t, rect, drawn, event.x);\n",
-        "                    let _ = (t, rect, drawn);\n",
+        "                    self.place_caret(t, rect, had_the_keyboard, event.x);\n",
+        "                    let _ = (t, rect, had_the_keyboard);\n",
         [BOXES],
     ),
     (

@@ -58,7 +58,6 @@ use guitk::text;
 use guitk::text::TextCursor;
 use guitk::textedit;
 use guitk::textfind;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 
 // ============================================================================
@@ -2308,13 +2307,10 @@ pub struct RssReaderApp {
     pub prompt: Option<Prompt>,
     /// The prompt at the foot of the window, if one is up.
     pub text_entry: Option<TextEntry>,
-    /// What has been typed into that prompt.
-    pub text_buffer: String,
+    /// That prompt's box: what has been typed into it, and its caret. A
+    /// rename starts it at the feed's title.
+    pub entry_box: LineBox,
     pub search_results: Vec<SearchResult>,
-    /// The prompt's box's caret and selection, laid over `text_buffer`,
-    /// which stays the truth: reloaded whenever the text has changed under
-    /// it -- a rename seeds the buffer with the feed's title.
-    entry_editor: TextInput,
     /// How wide the mark is round a box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -2402,9 +2398,8 @@ impl RssReaderApp {
             search_active: false,
             prompt: None,
             text_entry: None,
-            text_buffer: String::new(),
+            entry_box: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             search_results: Vec::new(),
-            entry_editor: textline::field_holding("", BOX_CAPACITY),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_help: false,
             show_feed_health: false,
@@ -3486,7 +3481,7 @@ impl RssReaderApp {
                 // never be made.
                 Key::R => self.begin_rename_feed(),
                 Key::N => {
-                    self.text_buffer.clear();
+                    self.entry_box.clear();
                     self.text_entry = Some(TextEntry::NewFolder);
                     EventResult::Consumed
                 }
@@ -3608,7 +3603,7 @@ impl RssReaderApp {
             // callers and every one of them was the OPML importer, so a
             // subscription could arrive in a file and never be typed.
             Key::A => {
-                self.text_buffer.clear();
+                self.entry_box.clear();
                 self.text_entry = Some(TextEntry::AddFeed);
                 EventResult::Consumed
             }
@@ -3883,16 +3878,14 @@ impl RssReaderApp {
         match key.key {
             Key::Escape if plain => {
                 self.text_entry = None;
-                self.text_buffer.clear();
+                self.entry_box.clear();
                 EventResult::Consumed
             }
             Key::Enter if plain => {
                 self.commit_text_entry();
                 EventResult::Consumed
             }
-            _ if edit_box(&mut self.entry_editor, &mut self.text_buffer, key) => {
-                EventResult::Consumed
-            }
+            _ if self.entry_box.key(key).handled => EventResult::Consumed,
             _ => EventResult::Ignored,
         }
     }
@@ -3906,8 +3899,8 @@ impl RssReaderApp {
         let Some(entry) = self.text_entry.take() else {
             return;
         };
-        let text = self.text_buffer.trim().to_string();
-        self.text_buffer.clear();
+        let text = self.entry_box.text().trim().to_string();
+        self.entry_box.clear();
         if text.is_empty() {
             return;
         }
@@ -3958,7 +3951,7 @@ impl RssReaderApp {
         let Some(feed) = self.feeds.iter().find(|f| f.id == id) else {
             return EventResult::Ignored;
         };
-        self.text_buffer = feed.title.clone();
+        self.entry_box.set_text(&feed.title);
         self.text_entry = Some(TextEntry::RenameFeed(id));
         EventResult::Consumed
     }
@@ -6092,88 +6085,30 @@ const BOX_TEXT_INSET: f32 = 8.0;
 /// stop for a paste of something that is not one.
 const BOX_CAPACITY: usize = 2048;
 
-/// Apply an editing key to the prompt's box, whose text is `text`, with
-/// `editor` laid over it: the caret keys, Backspace and Delete, Ctrl+A, C, X
-/// and V on the program's clipboard, and typing, which knows a command from
-/// AltGr (`textline::apply_key`) -- Alt+X types nothing, AltGr types. The
-/// editor is reloaded first if the text has changed under it.
-///
-/// Whether the key was the box's.
-fn edit_box(editor: &mut TextInput, text: &mut String, key: &KeyEvent) -> bool {
-    if editor.text() != text.as_str() {
-        editor.set_text(text);
-    }
-    let edit = textline::apply_key_on_clipboard(editor, key, BOX_TEXT_SIZE);
-    if edit.handled && editor.text() != text.as_str() {
-        *text = editor.text().to_owned();
-    }
-    edit.handled
-}
-
-/// Where a box's caret is drawn: the editor's while the box has the
-/// keyboard (its end, if the text changed under the editor), the start of
-/// the text otherwise. One answer for the drawing and for a press.
-fn drawn_cursor(editor: &TextInput, text: &str, focused: bool) -> TextCursor {
-    if !focused {
-        TextCursor::default()
-    } else if editor.text() == text {
-        editor.cursor()
-    } else {
-        TextCursor::from(text.len())
-    }
-}
-
 impl RssReaderApp {
-    /// The editor, the text and whether it has the keyboard, for the box
-    /// `target` names.
-    fn box_parts(&self, target: Target) -> Option<(&TextInput, &str, bool)> {
+    /// The box `target` names, and whether it has the keyboard.
+    fn box_parts(&self, target: Target) -> Option<(&LineBox, bool)> {
         match target {
-            Target::SearchBox => {
-                Some((self.search.input(), self.search.text(), self.search_active))
-            }
-            Target::EntryBox => Some((
-                &self.entry_editor,
-                &self.text_buffer,
-                self.text_entry.is_some(),
-            )),
+            Target::SearchBox => Some((&self.search, self.search_active)),
+            Target::EntryBox => Some((&self.entry_box, self.text_entry.is_some())),
             _ => None,
         }
     }
 
-    /// Put the caret of the box `target`, drawn at `rect` with its caret at
-    /// `drawn` before the press -- with the keyboard or without
-    /// (`had_the_keyboard`) -- under the pointer at `x`, if the press gave
-    /// the box the keyboard.
-    fn place_caret(
-        &mut self,
-        target: Target,
-        rect: Rect,
-        (drawn, had_the_keyboard): (TextCursor, bool),
-        x: f32,
-    ) {
-        let Some((_, text, true)) = self.box_parts(target) else {
+    /// Put the caret of the box `target`, drawn at `rect` -- with the
+    /// keyboard or without (`had_the_keyboard`) before the press -- under
+    /// the pointer at `x`, if the press gave the box the keyboard.
+    fn place_caret(&mut self, target: Target, rect: Rect, had_the_keyboard: bool, x: f32) {
+        if !self.box_parts(target).is_some_and(|(_, has_keys)| has_keys) {
             return;
-        };
+        }
         let (dx, width) = (x - rect.x - BOX_TEXT_INSET, rect.w - 2.0 * BOX_TEXT_INSET);
-        if target == Target::SearchBox {
-            self.search.press(dx, width, had_the_keyboard);
-            return;
-        }
-        let text = text.to_owned();
-        let editor = &mut self.entry_editor;
-        if editor.text() != text {
-            editor.set_text(&text);
-        }
-        let cursor = textedit::cursor_at_click(
-            &text,
-            drawn,
-            width.max(0.0),
-            BOX_TEXT_SIZE,
-            FontWeightHint::Regular,
-            dx,
-        );
-        editor.set_selection_anchor(None);
-        editor.set_cursor(cursor);
+        let line = match target {
+            Target::SearchBox => &mut self.search,
+            Target::EntryBox => &mut self.entry_box,
+            _ => return,
+        };
+        line.press(dx, width, had_the_keyboard);
     }
 
     /// How a box is drawn: lit under the pointer, with the keyboard's mark
@@ -6203,9 +6138,10 @@ impl RssReaderApp {
     /// scrolled to keep the caret in view -- or `placeholder`, grey, while
     /// it is empty and idle.
     fn render_box(&self, cmds: &mut Frame<Target>, target: Target, rect: Rect, placeholder: &str) {
-        let Some((editor, text, has_keys)) = self.box_parts(target) else {
+        let Some((line_box, has_keys)) = self.box_parts(target) else {
             return;
         };
+        let (editor, text) = (line_box.input(), line_box.text());
         let state = self.box_state(target);
         field::draw(cmds, &self.palette, rect, state, self.focus_ring_width);
         let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
@@ -6227,14 +6163,19 @@ impl RssReaderApp {
             });
             return;
         }
-        let editing = has_keys && editor.text() == text;
         let mut tree = RenderTree::new();
         textedit::draw(
             &mut tree,
             &textedit::SingleLine {
                 text,
-                cursor: drawn_cursor(editor, text, has_keys),
-                selection_anchor: if editing {
+                // From the start without the keyboard, as `LineBox::press`
+                // measures a press on a box that had none.
+                cursor: if has_keys {
+                    editor.cursor()
+                } else {
+                    TextCursor::default()
+                },
+                selection_anchor: if has_keys {
                     editor.selection_anchor()
                 } else {
                     None
@@ -6278,13 +6219,13 @@ impl RssReaderApp {
                 // A press in a box puts its caret under the pointer, measured
                 // against the box as it was drawn before the press.
                 let caret = target.and_then(|t| {
-                    let (editor, text, has_keys) = self.box_parts(t)?;
+                    let (_, has_keys) = self.box_parts(t)?;
                     let rect = frame.rect_of(|u| *u == t)?;
-                    Some((t, rect, (drawn_cursor(editor, text, has_keys), has_keys)))
+                    Some((t, rect, has_keys))
                 });
                 let result = self.press(target);
-                if let Some((t, rect, drawn)) = caret {
-                    self.place_caret(t, rect, drawn, event.x);
+                if let Some((t, rect, had_the_keyboard)) = caret {
+                    self.place_caret(t, rect, had_the_keyboard, event.x);
                 }
                 result
             }
@@ -6394,7 +6335,7 @@ impl RssReaderApp {
                 }
                 Some(Target::EntryCancel) => {
                     self.text_entry = None;
-                    self.text_buffer.clear();
+                    self.entry_box.clear();
                     EventResult::Consumed
                 }
                 // The box keeps the keyboard; the caret goes under the
@@ -7135,7 +7076,11 @@ mod tests {
         app.handle_event(&key(Key::Backspace, "", Modifiers::alt()));
         app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
         app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
-        assert_eq!(app.text_buffer, "ś", "the prompt typed a command's letter");
+        assert_eq!(
+            app.entry_box.text(),
+            "ś",
+            "the prompt typed a command's letter"
+        );
         assert!(
             app.text_entry.is_some(),
             "a chorded Enter or Escape closed it"
@@ -7436,12 +7381,12 @@ mod tests {
 
         a.handle_event(&key_ev(Key::R, true, false));
         assert_eq!(
-            a.text_buffer,
+            a.entry_box.text(),
             a.feeds.iter().find(|f| f.id == id).unwrap().title,
             "the box did not open seeded with the current title"
         );
 
-        a.text_buffer.clear();
+        a.entry_box.clear();
         for c in "Morning news".chars() {
             a.handle_event(&types(c));
         }
@@ -7486,7 +7431,7 @@ mod tests {
         a.sidebar_selection = SidebarSelection::Feed(id);
 
         a.handle_event(&key_ev(Key::R, true, false));
-        a.text_buffer.clear();
+        a.entry_box.clear();
         a.handle_event(&press(Key::Enter));
 
         assert_eq!(
@@ -7513,7 +7458,11 @@ mod tests {
 
         assert!(a.sidebar_visible, "typing hid the sidebar");
         assert_eq!(a.sort_order, sort_before, "typing changed the sort order");
-        assert_eq!(a.text_buffer, "Books", "the letters did not reach the box");
+        assert_eq!(
+            a.entry_box.text(),
+            "Books",
+            "the letters did not reach the box"
+        );
     }
 
     /// Ctrl+N makes a folder and selects it.
@@ -7713,7 +7662,8 @@ mod tests {
         );
         a.handle_event(&types('B'));
         assert_eq!(
-            a.text_buffer, "Books",
+            a.entry_box.text(),
+            "Books",
             "the caret did not go where the press was"
         );
         a.show_help = true;

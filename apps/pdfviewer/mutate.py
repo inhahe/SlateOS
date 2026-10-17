@@ -130,7 +130,7 @@ MUTATIONS = [
         # carried, a command's letter among it. Both go through `edit_box`.
         "a command's letter is typed into a box",
         '    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n',
-        '    if key.types_text() && !textline::types_into_field(key) {\n'
+        '    if !key.text.is_empty() && !textline::types_into_field(key) {\n'
         '        text.push_str(&key.text);\n'
         '        return Some(Edited {\n'
         '            text: true,\n'

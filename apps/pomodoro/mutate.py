@@ -104,7 +104,7 @@ MUTATIONS = [
         "the task name types a command's letter",
         "            _ => {\n                if self.task_editor.text() != self.current_task {\n",
         "            _ => {\n"
-        "                if key.types_text() && !textline::types_into_field(key) {\n"
+        "                if !key.text.is_empty() && !textline::types_into_field(key) {\n"
         "                    self.current_task.push_str(&key.text);\n"
         "                    return EventResult::Consumed;\n"
         "                }\n"

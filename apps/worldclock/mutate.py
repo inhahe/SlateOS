@@ -67,7 +67,7 @@ MUTATIONS = [
         '        if self.picker_editor.text() != self.picker_search {\n'
         '            self.picker_editor.set_text(&self.picker_search);\n'
         '        }\n',
-        '        if key.types_text() && !textline::types_into_field(key) {\n'
+        '        if !key.text.is_empty() && !textline::types_into_field(key) {\n'
         '            self.picker_search.push_str(&key.text);\n'
         '            return EventResult::Consumed;\n'
         '        }\n'

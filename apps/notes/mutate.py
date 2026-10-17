@@ -383,7 +383,7 @@ MUTATIONS = [
     (
         "a field types a command's letter",
         "                let before = (\n                    self.search.input().cursor(),\n",
-        "                if key.types_text() && !textline::types_into_field(key) {\n"
+        "                if !key.text.is_empty() && !textline::types_into_field(key) {\n"
         "                    let typed = format!(\"{}{}\", self.search.text(), key.text);\n"
         "                    self.search.set_text(&typed);\n"
         "                    return EventResult::Consumed;\n"

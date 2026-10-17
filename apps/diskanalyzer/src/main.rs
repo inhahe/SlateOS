@@ -42,10 +42,10 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::{scroll_window, text, wheel};
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
+use textline::{LineBox, LineLook};
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -1238,17 +1238,13 @@ pub struct DiskAnalyzerUI {
     pub complete: bool,
     /// Why the last scan produced nothing, if it did.
     pub scan_error: Option<String>,
-    /// Text in the path input field.
-    pub path_input: String,
+    /// The path field: the path typed into it, its caret and its
+    /// selection.
+    pub path_input: LineBox,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// Whether the path field has the keyboard.
     pub path_focused: bool,
-    /// The path field's editor -- its caret and selection over
-    /// `path_input` -- reloaded when the path changed under it.
-    path_editor: TextInput,
-    /// What the path field's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    path_clipboard: String,
     /// Whether the pointer is over the path field, which lights its edge.
     pub path_hovered: bool,
     /// How wide the mark is round the path field while it has the keyboard:
@@ -1303,7 +1299,14 @@ impl DiskAnalyzerUI {
     #[must_use]
     pub fn new() -> Self {
         let config = AnalyzerConfig::default();
-        let path_input = config.scan_path.shown().to_string();
+        // Read from its end: a path's tail is the part that says which
+        // directory it is, and the head is the part every sibling shares.
+        let path_input = LineBox::holding(
+            &config.scan_path.shown().to_string(),
+            MAX_PATH_INPUT,
+            FONT_SIZE,
+        )
+        .from_its_end();
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             view_mode: ViewMode::Treemap,
@@ -1330,8 +1333,6 @@ impl DiskAnalyzerUI {
             path_input,
             show_help: false,
             path_focused: false,
-            path_editor: textline::field_holding("", MAX_PATH_INPUT),
-            path_clipboard: String::new(),
             path_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             scroll_offset: 0,
@@ -1389,10 +1390,10 @@ impl DiskAnalyzerUI {
     /// path would name some other folder. So an unedited field means the
     /// folder it was filled from, not the text it shows.
     fn path_field_target(&self) -> PathBuf {
-        if self.path_input == self.config.scan_path.shown().to_string() {
+        if self.path_input.text() == self.config.scan_path.shown().to_string() {
             self.config.scan_path.clone()
         } else {
-            PathBuf::from(&self.path_input)
+            PathBuf::from(self.path_input.text())
         }
     }
 
@@ -1404,7 +1405,7 @@ impl DiskAnalyzerUI {
     pub fn start_scan(&mut self, root: PathBuf) {
         self.cancel_scan();
         self.config.scan_path.clone_from(&root);
-        self.path_input = root.shown().to_string();
+        self.path_input.set_text(&root.shown().to_string());
         self.scan_error = None;
         self.unreadable.clear();
         self.unreadable_count = 0;
@@ -1720,60 +1721,28 @@ impl DiskAnalyzerUI {
             (input.w - 2.0 * PATH_TEXT_INSET).max(0.0),
             0.0,
         );
-        if state.focused {
-            // The path, with its caret and selection where they are -- and
-            // scrolled once it is wider than the field, so the caret stays in
-            // view. The caret was fixed at the end, the only place the keys
-            // could type. The editor's selection only while it is the
-            // field's: a path changed under it has not been reloaded into it
-            // yet.
-            let mut tree = RenderTree::new();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.path_input,
-                    cursor: self.path_cursor(),
-                    selection_anchor: if self.path_editor.text() == self.path_input {
-                        self.path_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: true,
-                    x: inner.x,
-                    y: inner.y,
-                    width: inner.w,
-                    line_height: text::line_height(FONT_SIZE, FontWeightHint::Regular),
-                    font_size: FONT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-            frame.extend(tree.commands);
-        } else {
-            // Cut at the front: a path's tail is the part that says which
-            // directory it is, and the head is the part every sibling shares.
-            // An ellipsis at the end -- which is what this drew, under this
-            // same comment -- kept the shared head and cut off the name.
-            frame.push(RenderCommand::Text {
+        // The path, with the keyboard its caret and selection where they
+        // are, scrolled once it is wider than the field so the caret stays
+        // in view; without it, cut at the front, its tail shown
+        // (`LineBox::from_its_end`).
+        let mut tree = RenderTree::new();
+        self.path_input.draw(
+            &mut tree,
+            &LineLook {
                 x: inner.x,
                 y: inner.y,
-                text: text::elide_start(
-                    &self.path_input,
-                    inner.w,
-                    "…",
-                    FONT_SIZE,
-                    FontWeightHint::Regular,
-                ),
+                width: inner.w,
+                line_height: text::line_height(FONT_SIZE, FontWeightHint::Regular),
+                focused: state.focused,
+                placeholder: "",
                 color: self.palette.text,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(inner.w),
-                overflow: TextOverflow::Clip,
-            });
-        }
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        frame.extend(tree.commands);
         frame.hit(Target::PathInput, input);
 
         // Scan button — which is a Cancel button while a scan is running,
@@ -2631,7 +2600,8 @@ impl DiskAnalyzerUI {
             Key::Escape => {
                 // Put back what is actually being shown, rather than leaving a
                 // half-typed path in a field that no longer describes anything.
-                self.path_input = self.config.scan_path.shown().to_string();
+                let shown = self.config.scan_path.shown().to_string();
+                self.path_input.set_text(&shown);
                 self.path_focused = false;
                 Action::Redraw
             }
@@ -2660,31 +2630,9 @@ impl DiskAnalyzerUI {
     /// composing, a paste delivered as text), and no command's letter.
     /// Whether the path changed, or its caret or selection moved: a key that
     /// changes nothing is not a redraw.
-    ///
-    /// The field took typing at its end and Backspace from it, and nothing
-    /// else -- a typo at the start of a long path was fixed by deleting the
-    /// whole path.
     fn path_key(&mut self, key: &KeyEvent) -> bool {
-        if self.path_editor.text() != self.path_input {
-            self.path_editor.set_text(&self.path_input);
-        }
-        let before = (
-            self.path_editor.cursor(),
-            self.path_editor.selection_anchor(),
-        );
-        let edit = textline::apply_key(&mut self.path_editor, key, &self.path_clipboard, FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.path_clipboard = copied;
-        }
-        if self.path_editor.text() != self.path_input {
-            self.path_input = self.path_editor.text().to_owned();
-            return true;
-        }
-        before
-            != (
-                self.path_editor.cursor(),
-                self.path_editor.selection_anchor(),
-            )
+        let edit = self.path_input.key(key);
+        edit.changed || edit.moved
     }
 
     /// Ctrl+L: the path field takes the keyboard with the path selected, as
@@ -2692,43 +2640,22 @@ impl DiskAnalyzerUI {
     /// to edit.
     fn focus_path(&mut self) {
         self.path_focused = true;
-        self.path_editor.set_text(&self.path_input);
-        self.path_editor.select_all();
-    }
-
-    /// Where the path field's caret is: the editor's while the field has the
-    /// keyboard, and the end otherwise -- the field without the keyboard
-    /// reads from the path's tail, and the end is where the field opens. One
-    /// answer for the drawing and for a press.
-    fn path_cursor(&self) -> text::TextCursor {
-        if self.path_focused && self.path_editor.text() == self.path_input {
-            self.path_editor.cursor()
-        } else {
-            text::TextCursor::from(self.path_input.len())
-        }
+        self.path_input.select_all();
     }
 
     /// A press in the path field at `x`: it takes the keyboard, with the
-    /// caret under the pointer, measured against the field as it reads with
-    /// the caret where it was -- for a field that did not have the keyboard,
-    /// at the end, which shows the path's tail as the field without it does.
+    /// caret under the pointer, measured against the field as it was drawn
+    /// -- for a field that did not have the keyboard, from its end, which
+    /// shows the path's tail.
     fn press_path(&mut self, x: f32, width: f32) {
         let rect = path_input_rect(width);
-        let drawn = self.path_cursor();
+        let had_the_keyboard = self.path_field_state().focused;
         self.path_focused = true;
-        if self.path_editor.text() != self.path_input {
-            self.path_editor.set_text(&self.path_input);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.path_input,
-            drawn,
-            (rect.w - 2.0 * PATH_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
+        self.path_input.press(
             x - rect.x - PATH_TEXT_INSET,
+            rect.w - 2.0 * PATH_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.path_editor.set_selection_anchor(None);
-        self.path_editor.set_cursor(cursor);
     }
 
     /// Move the view tab `step` places, wrapping.
@@ -3025,8 +2952,8 @@ fn main() -> ExitCode {
 
     let mut ui = DiskAnalyzerUI::new();
     if let Some(root) = root {
+        ui.path_input.set_text(&root.shown().to_string());
         ui.config.scan_path = root;
-        ui.path_input = ui.config.scan_path.shown().to_string();
     }
 
     // Start scanning immediately rather than opening on an empty window with a
@@ -4733,7 +4660,7 @@ mod tests {
         probe::click(&mut ui, Target::PathInput);
         ui.path_input.clear();
         probe::type_str(&mut ui, "/home/pics");
-        assert_eq!(ui.path_input, "/home/pics");
+        assert_eq!(ui.path_input.text(), "/home/pics");
         // Tab cycles views when the field does *not* have focus; while it does,
         // it must not.
         let view = ui.view_mode;
@@ -4744,12 +4671,12 @@ mod tests {
     #[test]
     fn escape_in_the_path_field_puts_back_what_is_being_shown() {
         let mut ui = loaded();
-        let original = ui.path_input.clone();
+        let original = ui.path_input.text().to_owned();
         probe::click(&mut ui, Target::PathInput);
         probe::type_str(&mut ui, "junk");
-        assert_ne!(ui.path_input, original);
+        assert_ne!(ui.path_input.text(), original);
         probe::key(&mut ui, &press(Key::Escape));
-        assert_eq!(ui.path_input, original);
+        assert_eq!(ui.path_input.text(), original);
         assert!(!ui.path_focused);
     }
 
@@ -4759,9 +4686,9 @@ mod tests {
         // keyboard attached to it.
         let mut ui = loaded();
         probe::click(&mut ui, Target::PathInput);
-        ui.path_input = "x".repeat(MAX_PATH_INPUT);
+        ui.path_input.set_text(&"x".repeat(MAX_PATH_INPUT));
         probe::type_str(&mut ui, "yz");
-        assert_eq!(ui.path_input.len(), MAX_PATH_INPUT);
+        assert_eq!(ui.path_input.text().len(), MAX_PATH_INPUT);
     }
 
     /// An unedited path field scans the folder it was filled from, exactly:
@@ -4773,10 +4700,10 @@ mod tests {
         let mut ui = loaded();
         let odd = PathBuf::from("/data/tab\there");
         ui.config.scan_path.clone_from(&odd);
-        ui.path_input = odd.shown().to_string();
-        assert_eq!(ui.path_input, r"/data/tab\011here");
+        ui.path_input.set_text(&odd.shown().to_string());
+        assert_eq!(ui.path_input.text(), r"/data/tab\011here");
         assert_eq!(ui.path_field_target(), odd);
-        ui.path_input = String::from("/data/typed");
+        ui.path_input.set_text("/data/typed");
         assert_eq!(ui.path_field_target(), PathBuf::from("/data/typed"));
     }
 
@@ -4787,9 +4714,9 @@ mod tests {
         // next draw.
         let mut ui = loaded();
         probe::click(&mut ui, Target::PathInput);
-        ui.path_input = "/é".to_string();
+        ui.path_input.set_text("/é");
         probe::key(&mut ui, &press(Key::Backspace));
-        assert_eq!(ui.path_input, "/");
+        assert_eq!(ui.path_input.text(), "/");
     }
 
     /// A pointer event at `(x, y)`.
@@ -4911,7 +4838,7 @@ mod tests {
     fn a_long_path_shows_its_end_and_the_typing_its_caret() {
         let mut ui = loaded();
         let long = format!("/{}/the-folder-that-matters", "shared-head/".repeat(12));
-        ui.path_input.clone_from(&long);
+        ui.path_input.set_text(&long);
         let shown = words(&ui)
             .into_iter()
             .find(|t| t.ends_with("the-folder-that-matters"))
@@ -4941,7 +4868,7 @@ mod tests {
             "the caret of a long path is at {x}, outside the field {rect:?}"
         );
 
-        ui.path_input = String::from("/home");
+        ui.path_input.set_text("/home");
         let end = rect.x + 8.0 + text::measure("/home", FONT_SIZE, FontWeightHint::Regular);
         let x = caret(&ui, "/home");
         assert!(
@@ -5315,7 +5242,7 @@ mod tests {
     fn clicking_scan_starts_a_scan_of_whatever_the_path_field_says() {
         let dir = scratchdir::ScratchDir::new("diskanalyzer-start");
         let mut ui = DiskAnalyzerUI::new();
-        ui.path_input = dir.dir().shown().to_string();
+        ui.path_input.set_text(&dir.dir().shown().to_string());
         assert_eq!(probe::click(&mut ui, Target::Scan), Action::Redraw);
         assert!(ui.scanning());
         assert_eq!(ui.config.scan_path, dir.dir());
@@ -5467,7 +5394,7 @@ mod tests {
         probe::key(&mut ui, &probe::press(Key::Left));
         probe::key(&mut ui, &probe::press(Key::Left));
         probe::type_str(&mut ui, "o");
-        assert_eq!(ui.path_input, "/home", "the caret did not move");
+        assert_eq!(ui.path_input.text(), "/home", "the caret did not move");
         let rect = path_input_rect(WINDOW_WIDTH);
         let at =
             rect.x + PATH_TEXT_INSET + text::measure("/ho", FONT_SIZE, FontWeightHint::Regular);
@@ -5480,7 +5407,7 @@ mod tests {
 
         probe::key(&mut ui, &probe::press(Key::Home));
         probe::key(&mut ui, &probe::press(Key::Delete));
-        assert_eq!(ui.path_input, "home", "Delete at the caret");
+        assert_eq!(ui.path_input.text(), "home", "Delete at the caret");
         probe::key(&mut ui, &probe::press(Key::End));
         probe::key(&mut ui, &probe::shift(Key::Home));
         let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
@@ -5501,14 +5428,14 @@ mod tests {
         );
         probe::key(&mut ui, &probe::ctrl(Key::C));
         probe::type_str(&mut ui, "/");
-        assert_eq!(ui.path_input, "/", "Shift+Home did not select");
+        assert_eq!(ui.path_input.text(), "/", "Shift+Home did not select");
         probe::key(&mut ui, &probe::ctrl(Key::V));
-        assert_eq!(ui.path_input, "/home", "Ctrl+C or Ctrl+V");
+        assert_eq!(ui.path_input.text(), "/home", "Ctrl+C or Ctrl+V");
         probe::key(&mut ui, &probe::ctrl(Key::A));
         probe::key(&mut ui, &probe::ctrl(Key::X));
-        assert_eq!(ui.path_input, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(ui.path_input.text(), "", "Ctrl+A and Ctrl+X");
         probe::key(&mut ui, &probe::ctrl(Key::V));
-        assert_eq!(ui.path_input, "/home", "Ctrl+X took nothing");
+        assert_eq!(ui.path_input.text(), "/home", "Ctrl+X took nothing");
 
         // A press at the start of the path puts the caret there, and one past
         // its end at its end.
@@ -5518,12 +5445,13 @@ mod tests {
         );
         probe::type_str(&mut ui, "<");
         assert_eq!(
-            ui.path_input, "</home",
+            ui.path_input.text(),
+            "</home",
             "the press did not put the caret there"
         );
         press_path_at(&mut ui, rect.right() - 2.0);
         probe::type_str(&mut ui, ">");
-        assert_eq!(ui.path_input, "</home>");
+        assert_eq!(ui.path_input.text(), "</home>");
     }
 
     /// **Ctrl+L selects the path, as an address bar does**, so typing
@@ -5533,11 +5461,15 @@ mod tests {
     #[test]
     fn ctrl_l_selects_the_path() {
         let mut ui = loaded();
-        let shown = ui.path_input.clone();
+        let shown = ui.path_input.text().to_owned();
         assert!(!shown.is_empty());
         probe::key(&mut ui, &probe::ctrl(Key::L));
         probe::type_str(&mut ui, "/tmp");
-        assert_eq!(ui.path_input, "/tmp", "Ctrl+L did not select the path");
+        assert_eq!(
+            ui.path_input.text(),
+            "/tmp",
+            "Ctrl+L did not select the path"
+        );
         assert_eq!(probe::key(&mut ui, &probe::press(Key::Right)), Action::None);
         assert_eq!(
             probe::key(&mut ui, &probe::press(Key::Left)),
@@ -5547,38 +5479,59 @@ mod tests {
     }
 
     /// **A press in a field without the keyboard lands where the field
-    /// reads**: the field shows a long path's tail, cut at the front, so a
-    /// press at its right end puts the caret at the path's end -- not at
-    /// whatever character the press would have hit in the path's head.
+    /// reads**: the field shows a long path's tail, cut at the front,
+    /// wherever its caret was left, so a press at its right end puts the
+    /// caret at the path's end -- not at whatever character the press would
+    /// have hit in the path's head, or in the path scrolled to the caret.
     #[test]
     fn a_press_in_a_field_without_the_keyboard_lands_where_it_reads() {
         let mut ui = loaded();
-        ui.path_input = format!("/{}/end", "deep/".repeat(40));
-        assert!(!ui.path_focused);
+        ui.path_input
+            .set_text(&format!("/{}/end", "deep/".repeat(40)));
+        // The caret left at the path's start, as Home and then a click
+        // elsewhere leave it.
+        ui.path_focused = true;
+        probe::key(&mut ui, &press(Key::Home));
+        assert_eq!(ui.path_input.input().cursor().byte(), 0, "control: Home");
+        ui.path_focused = false;
         let rect = path_input_rect(WINDOW_WIDTH);
         press_path_at(&mut ui, rect.right() - 2.0);
         assert!(ui.path_focused);
         probe::type_str(&mut ui, "!");
         assert!(
-            ui.path_input.ends_with("/end!"),
+            ui.path_input.text().ends_with("/end!"),
             "the press missed the tail the field shows: {}",
-            ui.path_input
+            ui.path_input.text()
+        );
+        // With the keyboard and its caret at the start, the field shows the
+        // head, and a press lands in it.
+        probe::key(&mut ui, &press(Key::Home));
+        let third = text::measure("/de", FONT_SIZE, FontWeightHint::Regular);
+        press_path_at(&mut ui, rect.x + PATH_TEXT_INSET + third + 0.5);
+        assert_eq!(
+            ui.path_input.input().cursor().byte(),
+            3,
+            "a press with the keyboard missed the head the field shows"
         );
     }
 
     /// **The field edits the path it shows**, however the path came to be in
-    /// it: its editor is loaded from the field whenever a press or a key
-    /// finds the two apart.
+    /// it: what is put there from outside is what a press or a key then
+    /// edits.
     #[test]
     fn the_path_field_edits_the_path_it_shows() {
         let mut ui = loaded();
-        ui.path_input = String::from("/home");
+        ui.path_input.set_text("/home");
         let rect = path_input_rect(WINDOW_WIDTH);
         press_path_at(&mut ui, rect.x + PATH_TEXT_INSET + 0.5);
         probe::type_str(&mut ui, "<");
-        assert_eq!(ui.path_input, "</home", "the press missed the shown path");
-        ui.path_input = String::from("/srv");
+        assert_eq!(
+            ui.path_input.text(),
+            "</home",
+            "the press missed the shown path"
+        );
+        ui.path_input.set_text("/srv");
         probe::type_str(&mut ui, "?");
-        assert_eq!(ui.path_input, "/srv?", "the key edited another path");
+        assert_eq!(ui.path_input.text(), "/srv?", "the key edited another path");
     }
 }

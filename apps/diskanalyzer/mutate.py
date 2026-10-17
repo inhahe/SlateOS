@@ -130,16 +130,10 @@ MUTATIONS += [
         [FIELD],
     ),
     (
-        "a long path is cut at its end",
-        "                text: text::elide_start(\n",
-        "                text: text::elide(\n",
-        [TAIL],
-    ),
-    (
-        "the caret is at the start of the typing",
-        "                    cursor: self.path_cursor(),\n",
-        "                    cursor: text::TextCursor::from(0),\n",
-        [TAIL, EDITS],
+        "the path field is read from its start",
+        "        .from_its_end();\n",
+        "        ;\n",
+        [TAIL, READS],
     ),
 ]
 
@@ -149,45 +143,39 @@ MUTATIONS += [
 MUTATIONS += [
     (
         "Ctrl+L does not select the path",
-        "        self.path_editor.select_all();\n",
+        "        self.path_input.select_all();\n",
         "",
         [CTRL_L],
     ),
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.path_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "a caret moved is not drawn",
-        "        before\n            != (\n                self.path_editor.cursor(),\n                self.path_editor.selection_anchor(),\n            )\n    }\n",
-        "        false\n    }\n",
+        "        edit.changed || edit.moved\n",
+        "        edit.changed\n",
         [CTRL_L],
     ),
     (
         "a key that changes nothing is a redraw",
-        "        before\n            != (\n                self.path_editor.cursor(),\n                self.path_editor.selection_anchor(),\n            )\n    }\n",
-        "        edit.handled\n    }\n",
+        "        edit.changed || edit.moved\n",
+        "        edit.handled\n",
         [CTRL_L],
     ),
     (
-        "a key finds the editor holding another path",
-        "    fn path_key(&mut self, key: &KeyEvent) -> bool {\n        if self.path_editor.text() != self.path_input {\n",
-        "    fn path_key(&mut self, key: &KeyEvent) -> bool {\n        if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another path",
-        "        self.path_focused = true;\n        if self.path_editor.text() != self.path_input {\n",
-        "        self.path_focused = true;\n        if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press in a field without the keyboard is read from its head",
-        "        if self.path_focused && self.path_editor.text() == self.path_input {\n            self.path_editor.cursor()\n        } else {\n            text::TextCursor::from(self.path_input.len())\n        }\n",
-        "        if self.path_focused && self.path_editor.text() == self.path_input {\n            self.path_editor.cursor()\n        } else {\n            text::TextCursor::default()\n        }\n",
+        "a press in a field without the keyboard is measured as though it had it",
+        "        let had_the_keyboard = self.path_field_state().focused;\n",
+        "        let had_the_keyboard = true;\n",
         [READS],
+    ),
+    (
+        "a press in a field with the keyboard is measured as though it had not",
+        "        let had_the_keyboard = self.path_field_state().focused;\n",
+        "        let had_the_keyboard = false;\n",
+        [READS],
+    ),
+    (
+        "the field is drawn without the keyboard while it has it",
+        "                focused: state.focused,\n",
+        "                focused: false,\n",
+        [TAIL],
     ),
     (
         "a press puts the caret at the start",
@@ -200,12 +188,6 @@ MUTATIONS += [
         "                self.press_path(x, size.0);\n",
         "                self.path_focused = true;\n",
         [EDITS, SHOWN],
-    ),
-    (
-        "the selection is not drawn",
-        "                    selection_anchor: if self.path_editor.text() == self.path_input {\n",
-        "                    selection_anchor: if false {\n",
-        [EDITS],
     ),
 ]
 

@@ -55,7 +55,7 @@ lockscreen pastes nothing, and stays so.
 | A check that refuses an edit whole, or rewrites the text | colorpicker (hex digits and `#`, upper-cased; a paste of anything else refused), taskscheduler (digits within a maximum), vpnmanager (digits, clamped to 65535) |
 | Masking, and switching it | passwordgen (hidden until Ctrl+R), lockscreen (drawn as dots of its own, a press to the nearest dot, no paste) |
 | The caret put at a byte | stickynotes (Up from the body, a double-click), lockscreen |
-| Drawn unfocused from its end, elided at the start | diskanalyzer (a path) |
+| Drawn unfocused from its end, elided at the start | diskanalyzer (a path) -- met, `from_its_end` |
 | Drawn by the program, from `input()` | dbviewer's SQL line (coloured spans), stickynotes' titles (on the note, "[P] " when pinned), lockscreen's dots |
 
 A placeholder shown only while the box lacks the keyboard (netmanager,
@@ -79,12 +79,15 @@ this order, a commit each:
    `LineKey::moved`, whether a key moved the caret or the selection, which
    eight programs had computed beside the box; `set_font_size`, for a
    box sized with its window (dictionary); `LineBox::holding`, a box
-   made with something in it; and `LineBox::key_checked`, a key whose
+   made with something in it; `LineBox::key_checked`, a key whose
    edit a check must accept or it is undone whole (vpnmanager's number
-   boxes) (2026-10-17).
+   boxes); `LineBox::insert`, text the program decides typed at the caret
+   (colorpicker's hex, filtered and upper-cased); and
+   `LineBox::from_its_end`, a box cut at its front without the keyboard
+   and pressed where that was drawn (diskanalyzer's path) (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
-   *Moved (2026-10-17), nineteen of the twenty-eight:* rssreader's prompt,
+   *Moved (2026-10-17), twenty-one of the twenty-eight:* rssreader's prompt,
    pdfviewer's page range, systemrestore's form (two boxes), defrag's
    exclude pattern, screenshot's text annotation, whiteboard's words,
    ircclient's message line, kanban's input dialog, filesearch's query (in
@@ -93,14 +96,19 @@ this order, a commit each:
    startupmanager's search and dialog (six), clipmanager's four, qrcode's
    eight, netmanager's address and DNS boxes (four), vpnmanager's search,
    split-tunnel and dialog boxes (six), taskscheduler's form (five: the
-   Param box is whichever of three its frequency asks for). A row that
-   stood for the second copy -- a reload, a write-back, a
-   private clipboard, a caret or selection drawn by hand -- goes with it;
+   Param box is whichever of three its frequency asks for), colorpicker's
+   hex box (its Copy button now fills the program's clipboard, which the
+   box pastes from), diskanalyzer's path. A row that stood for the second
+   copy -- a reload, a write-back, a private clipboard, a caret or
+   selection drawn by hand -- goes with it;
    the rest move onto the box. Two drawings changed: hexeditor's box
    without the keyboard is drawn from its start, as every LineBox is, not
    scrolled to its end, and qrcode's placeholder sits on its text's line,
-   3 px higher. Where a box's text is a model's data -- qrcode's WiFi and
-   contact codes, compared and kept in history -- the box is the record
+   3 px higher; diskanalyzer's path, pressed without the keyboard, is
+   measured against the `…` and tail it shows rather than the path
+   scrolled to its end, which put a press an ellipsis's width off. Where
+   a box's text is a model's data -- qrcode's WiFi and contact codes,
+   compared and kept in history -- the box is the record
    and the model is made from it when it is needed
    (`QrApp::wifi_config`, netmanager's `IpEdit::to_config`, vpnmanager's
    `ProfileEdit::to_profile`); a dialog's state that only held its boxes
@@ -108,5 +116,4 @@ this order, a commit each:
    field had lost the guard that draws its text only where the line fits,
    unseen because its containment sweep read neither `RichText` nor
    lines; both are read now. *Left:* contacts, dbviewer, mindmap,
-   colorpicker, diskanalyzer, editor, lockscreen, passwordgen,
-   stickynotes.
+   editor, lockscreen, passwordgen, stickynotes.

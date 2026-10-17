@@ -1656,6 +1656,12 @@ pub struct FileObject {
     /// to, and whose options (read-only) govern writes through it.
     mnt_id: u64,
     ino: u64,
+    /// Whether what is done to the file is announced by its name: inotify
+    /// and the change journal. False for a file on one of the kernel's own
+    /// mounts (a memfd, design-decisions §1573), whose name is only shown --
+    /// `/memfd:<name> (deleted)`, which no path leads to and every memfd of
+    /// that name shares.
+    announced: bool,
 }
 
 impl FileObject {
@@ -1667,6 +1673,13 @@ impl FileObject {
             fs_id: self.fs_id,
             ino: self.ino,
         }
+    }
+
+    /// Whether what is done to the file is announced by its name
+    /// ([`FileObject::announced`]'s field).
+    #[must_use]
+    pub fn announced(&self) -> bool {
+        self.announced
     }
 }
 
@@ -5428,6 +5441,7 @@ impl Vfs {
                     fs_id,
                     mnt_id,
                     ino,
+                    announced: true,
                 })))
             }
             Ok(None) | Err(KernelError::NotSupported) => {
@@ -5480,6 +5494,7 @@ impl Vfs {
                     fs_id,
                     mnt_id,
                     ino,
+                    announced: true,
                 }))
             }
             Ok(None) => {
@@ -5592,6 +5607,7 @@ impl Vfs {
             fs_id,
             mnt_id,
             ino,
+            announced: true,
         }))
     }
 
@@ -5681,6 +5697,7 @@ impl Vfs {
             fs_id,
             mnt_id,
             ino,
+            announced: false,
         }))
     }
 
@@ -5790,7 +5807,7 @@ impl Vfs {
         crate::mm::page_cache::read_through(obj.id(), offset, &mut buf, |page_off, page_buf| {
             Self::object_fill_read(obj, page_off, page_buf)
         })?;
-        if super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
+        if obj.announced && super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
             super::notify::emit(super::notify::FsEventType::Accessed, path, None);
         }
         Ok(buf)
@@ -5853,7 +5870,7 @@ impl Vfs {
                 },
             )
         };
-        Self::object_written(path, data.len(), after);
+        Self::object_written(obj, path, data.len(), after);
         Ok(())
     }
 
@@ -5899,12 +5916,12 @@ impl Vfs {
         Ok(true)
     }
 
-    /// Announce a change to the file at `path` that went past the VFS's
-    /// write paths -- a shared mapping's stores, saved: its `IN_MODIFY` and
-    /// its change-journal record.
-    pub fn announce_modified(path: &Path) {
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+    /// Announce a change to the held file `obj`, named `path`, that went
+    /// past the VFS's write paths -- a shared mapping's stores, saved: its
+    /// `IN_MODIFY` and its change-journal record, where it is announced at
+    /// all ([`FileObject::announced`]).
+    pub fn object_announce_modified(obj: &FileObject, path: &Path) {
+        Self::object_announce(obj, path, false);
     }
 
     /// Write through an object at the file's end, found and written in one
@@ -5934,7 +5951,7 @@ impl Vfs {
             (at, after)
         };
         let (at, after) = at;
-        Self::object_written(path, data.len(), after);
+        Self::object_written(obj, path, data.len(), after);
         Ok(at)
     }
 
@@ -5959,8 +5976,7 @@ impl Vfs {
             )
         };
         after_cache_change(after);
-        super::notify::emit_modified(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Self::object_announce(obj, path, false);
         Ok(())
     }
 
@@ -5987,8 +6003,7 @@ impl Vfs {
             guard.chmod_ino(obj.ino, permissions)?;
             acl_follow_chmod(Some(obj.id()), path, permissions);
         }
-        super::notify::emit_metadata(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Self::object_announce(obj, path, true);
         Ok(())
     }
 
@@ -6017,8 +6032,7 @@ impl Vfs {
             };
             fs.chown_ino(obj.ino, uid, gid)?;
         }
-        super::notify::emit_metadata(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Self::object_announce(obj, path, true);
         Ok(())
     }
 
@@ -6106,8 +6120,7 @@ impl Vfs {
                 fs.set_xattr_ino(ino, name, value)
             })?;
         }
-        super::notify::emit_metadata(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Self::object_announce(obj, path, true);
         Ok(())
     }
 
@@ -6133,8 +6146,7 @@ impl Vfs {
                 fs.remove_xattr_ino(ino, name)
             })?;
         }
-        super::notify::emit_metadata(path);
-        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Self::object_announce(obj, path, true);
         Ok(())
     }
 
@@ -6253,10 +6265,31 @@ impl Vfs {
     /// After a write to a held file, with the filesystem's lock let go: what
     /// the page cache left to do ([`after_cache_change`]), and the write is
     /// counted and announced.
-    fn object_written(path: &Path, len: usize, after: crate::mm::page_cache::AfterChange) {
+    fn object_written(
+        obj: &FileObject,
+        path: &Path,
+        len: usize,
+        after: crate::mm::page_cache::AfterChange,
+    ) {
         after_cache_change(after);
         super::quota::charge_bytes(0, 0, len as u64);
-        super::notify::emit_modified(path);
+        Self::object_announce(obj, path, false);
+    }
+
+    /// Announce a change to the held file `obj` under `path`: its inotify
+    /// event (`IN_ATTRIB` for a `metadata` change, else `IN_MODIFY`) and its
+    /// change-journal record -- unless it is a file whose name is only shown
+    /// ([`FileObject::announced`]), which no watcher of a path could ask
+    /// about.
+    fn object_announce(obj: &FileObject, path: &Path, metadata: bool) {
+        if !obj.announced {
+            return;
+        }
+        if metadata {
+            super::notify::emit_metadata(path);
+        } else {
+            super::notify::emit_modified(path);
+        }
         super::journal::record(super::journal::JournalEventType::Modified, path);
     }
 
@@ -11977,6 +12010,16 @@ fn seal_mode_guard(
     }
 }
 
+/// A page-cache fill's copy: what the filesystem read, into the front of
+/// `buf`, which is the length asked for; a short read (the file's end) leaves
+/// the rest of `buf` as it was, zeros.
+fn fill_page_buf(buf: &mut [u8], data: &[u8]) {
+    let n = data.len().min(buf.len());
+    if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(..n)) {
+        dst.copy_from_slice(src);
+    }
+}
+
 /// The single permission gate every path operation passes through.
 ///
 /// Two independent checks live here, and they live *together* on purpose:
@@ -11993,16 +12036,6 @@ fn seal_mode_guard(
 /// Both checks bypass for kernel tasks (no owning process) and for uid 0, and
 /// both fail *open* when no tag/ACL covers the path — deferring to the
 /// traditional permission bits checked elsewhere.
-/// A page-cache fill's copy: what the filesystem read, into the front of
-/// `buf`, which is the length asked for; a short read (the file's end) leaves
-/// the rest of `buf` as it was, zeros.
-fn fill_page_buf(buf: &mut [u8], data: &[u8]) {
-    let n = data.len().min(buf.len());
-    if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(..n)) {
-        dst.copy_from_slice(src);
-    }
-}
-
 pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<()> {
     // Fast path: nothing is configured, so nothing can deny. Both counts are
     // relaxed atomic loads, so an unconfigured system pays two loads per VFS

@@ -6119,24 +6119,50 @@ fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) ->
     true
 }
 
-/// Whether `pid`'s VMAs cover all of `[start, end)`, with no hole: what
-/// `msync` asks (Linux answers `ENOMEM` for a range with unmapped parts),
-/// without touching a page. False for a process that is gone.
+/// Whether all of `[start, end)` is mapped in `pid`, without touching a page:
+/// what `msync` asks (Linux answers `ENOMEM` for a range with unmapped
+/// parts). By its VMAs, and in a hole between them by its page tables, page
+/// by page, present or swapped out: the main stack and the ELF image are
+/// mapped here without VMAs, where Linux has one for each. A hole is walked
+/// only up to its first unmapped page. False for a process that is gone.
 #[must_use]
-pub fn vmas_cover(pid: ProcessId, start: u64, end: u64) -> bool {
-    let table = PROCESS_TABLE.lock();
-    let Some(proc) = table.get(&pid) else {
+pub fn range_mapped(pid: ProcessId, start: u64, end: u64) -> bool {
+    let holes: Vec<(u64, u64)> = {
+        let table = PROCESS_TABLE.lock();
+        let Some(proc) = table.get(&pid) else {
+            return false;
+        };
+        // The list is sorted by start and has no overlaps.
+        let mut holes = Vec::new();
+        let mut at = start;
+        for v in proc.vmas.iter().filter(|v| v.end > start && v.start < end) {
+            if v.start > at {
+                holes.push((at, v.start));
+            }
+            at = at.max(v.end);
+        }
+        if at < end {
+            holes.push((at, end));
+        }
+        holes
+    };
+    if holes.is_empty() {
+        return true;
+    }
+    let Some(pin) = pin_address_space(pid) else {
         return false;
     };
-    // The list is sorted by start and has no overlaps.
-    let mut at = start;
-    for v in proc.vmas.iter().filter(|v| v.end > start && v.start < end) {
-        if v.start > at {
-            return false;
+    let page = crate::mm::page_table::HW_PAGE_SIZE as u64;
+    holes.into_iter().all(|(lo, hi)| {
+        let mut va = lo & !page.wrapping_sub(1);
+        while va < hi {
+            if !crate::mm::mlock::entry_held(pin.pml4(), va) {
+                return false;
+            }
+            va = va.saturating_add(page);
         }
-        at = at.max(v.end);
-    }
-    at >= end
+        true
+    })
 }
 
 /// What `pid`'s shared file mappings map of `[start, end)`: for each, its file

@@ -349,22 +349,50 @@ static MEMFD_SEALS: crate::sync::Mutex<
     alloc::collections::BTreeMap<crate::fs::vfs::FileId, SealFlags>,
 > = crate::sync::Mutex::named(alloc::collections::BTreeMap::new(), b"MEMFD_SEALS");
 
-/// How many memfds carry a seal: [`any_sealed`]'s other half. Kept under
-/// [`MEMFD_SEALS`]'s lock.
+/// How many memfds carry a seal that restricts a write, a resize or a mode
+/// change -- not `SEAL` alone, which forbids only more seals and which every
+/// memfd made without `MFD_ALLOW_SEALING` carries: [`any_sealed`]'s other
+/// half. Kept under [`MEMFD_SEALS`]'s lock.
 static SEALED_MEMFDS: AtomicUsize = AtomicUsize::new(0);
 
-/// Recount [`SEALED_MEMFDS`]; called with [`MEMFD_SEALS`] locked.
-fn recount_memfds(map: &alloc::collections::BTreeMap<crate::fs::vfs::FileId, SealFlags>) {
-    let sealed = map.values().filter(|s| !s.is_empty()).count();
-    SEALED_MEMFDS.store(sealed, Ordering::Relaxed);
+/// How many memfds carry a seal that restricts a write, a resize or a mode
+/// change ([`SEALED_MEMFDS`]): for the memfd self-test.
+#[must_use]
+pub fn restricting_memfds() -> usize {
+    SEALED_MEMFDS.load(Ordering::Relaxed)
+}
+
+/// The seals the write paths ask about ([`may_write`], [`may_resize`],
+/// [`may_change_mode`]): every one but `SEAL`.
+const RESTRICTING: SealFlags = SealFlags(
+    SealFlags::SHRINK.0
+        | SealFlags::GROW.0
+        | SealFlags::WRITE.0
+        | SealFlags::EXEC.0
+        | SealFlags::FUTURE_WRITE.0,
+);
+
+/// A memfd's seals went from `before` to `after` (`None`: no memfd): keep
+/// [`SEALED_MEMFDS`] counting it. Called with [`MEMFD_SEALS`] locked.
+fn note_memfd_seals(before: Option<SealFlags>, after: Option<SealFlags>) {
+    let restricts = |s: Option<SealFlags>| s.is_some_and(|s| s.intersects(RESTRICTING));
+    match (restricts(before), restricts(after)) {
+        (false, true) => {
+            SEALED_MEMFDS.fetch_add(1, Ordering::Relaxed);
+        }
+        (true, false) => {
+            SEALED_MEMFDS.fetch_sub(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
 }
 
 /// File `id` is a new memfd, its seals `initial`: `SEAL` when it was made
 /// without `MFD_ALLOW_SEALING`, `EXEC` with `MFD_NOEXEC_SEAL`.
 pub fn memfd_created(id: crate::fs::vfs::FileId, initial: SealFlags) {
     let mut map = MEMFD_SEALS.lock();
-    map.insert(id, initial.seals_only());
-    recount_memfds(&map);
+    let before = map.insert(id, initial.seals_only());
+    note_memfd_seals(before, Some(initial.seals_only()));
 }
 
 /// The seals of memfd `id`; `None` for a file that is not a memfd.
@@ -412,10 +440,11 @@ pub fn memfd_add_seals(
             .union(SealFlags::WRITE)
             .union(SealFlags::FUTURE_WRITE);
     }
+    let before = *seals;
     *seals = seals.union(add);
     let all = *seals;
     SEAL_OPS.fetch_add(1, Ordering::Relaxed);
-    recount_memfds(&map);
+    note_memfd_seals(Some(before), Some(all));
     Ok(all)
 }
 
@@ -672,8 +701,8 @@ fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
     // A memfd goes with its last hold, which sends this.
     if let Some(id) = id {
         let mut map = MEMFD_SEALS.lock();
-        if map.remove(&id).is_some() {
-            recount_memfds(&map);
+        if let Some(before) = map.remove(&id) {
+            note_memfd_seals(Some(before), None);
         }
     }
 }

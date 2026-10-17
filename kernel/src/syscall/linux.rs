@@ -3553,6 +3553,15 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
             // names it as Linux's does, `/memfd:<name> (deleted)`. It was
             // `EACCES` until 2026-10-08, which no Linux program expects of
             // a memfd created executable (runc and systemd exec from one).
+            // A memfd with no execute bit is not executed (EACCES), as on
+            // Linux: that is all `MFD_NOEXEC_SEAL` sets, and its EXEC seal
+            // keeps it so. (Exec does not read a file's mode bits otherwise:
+            // known-issues
+            // TD-B-ACCESS-CANNOT-SEE-THE-ONE-PERMISSION-MECHANISM-THAT-IS-ENFORCED.)
+            if !crate::fs::handle::fstat(entry.raw_handle).is_ok_and(|m| m.permissions & 0o111 != 0)
+            {
+                return -i64::from(errno::EACCES);
+            }
             let data = match whole_file_of(entry.raw_handle) {
                 Ok(d) => d,
                 Err(e) => return i64::from(linux_errno_for(e)).wrapping_neg(),
@@ -5987,22 +5996,24 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
         fcntl_cmd::F_ADD_SEALS => {
             // Only a memfd takes seals this way: Linux answers EINVAL for
             // any other file (the seal API is shmem's). Its seals keep
-            // Linux's rules (`fs::sealing::memfd_add_seals`, §1573).
+            // Linux's rules (`fs::sealing::memfd_add_seals`, §1573). Linux's
+            // `memfd_add_seals` asks in this order, whatever the file: open
+            // for writing (EPERM), a known bit (EINVAL), a memfd (EINVAL)
+            // -- checked in WSL on 6.6.
             let entry = match pcb::linux_fd_lookup(pid, fd) {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
             };
-            let Some(memfd) = memfd_of(&entry) else {
-                return linux_err(errno::EINVAL);
-            };
+            if !mmap_access(&entry).is_ok_and(|(_, writable)| writable) {
+                return linux_err(errno::EPERM);
+            }
             // arg is unsigned int: truncated to u32, as Linux reads it.
             let Some(add) = crate::fs::sealing::SealFlags::from_linux(u64::from(arg as u32)) else {
                 return linux_err(errno::EINVAL);
             };
-            // Open for writing, or EPERM, as Linux's `memfd_add_seals`.
-            if !crate::fs::handle::open_flags(entry.raw_handle).is_ok_and(|f| f.is_writable()) {
-                return linux_err(errno::EPERM);
-            }
+            let Some(memfd) = memfd_of(&entry) else {
+                return linux_err(errno::EINVAL);
+            };
             let executable = crate::fs::handle::fstat(entry.raw_handle)
                 .is_ok_and(|m| m.permissions & 0o111 != 0);
             match crate::fs::sealing::memfd_add_seals(memfd, add, executable) {
@@ -6916,11 +6927,10 @@ fn procfs_number(s: &[u8]) -> Option<u64> {
 /// | a pipe end | that end, or the other -- Linux opens a pipe through `/proc` as a FIFO; `EACCES` for both at once (`O_RDWR`), `ENXIO` if the other end is gone |
 /// | the console | the console |
 /// | an ALSA, DRM or input device | its device node, opened again |
-/// | a socket, a memfd, or an eventfd, timerfd, signalfd, epoll, inotify or pidfd | `ENXIO` |
+/// | a socket, or an eventfd, timerfd, signalfd, epoll, inotify or pidfd | `ENXIO` |
 ///
-/// Linux reopens a memfd (it is a file on tmpfs); here a memfd's offset lives
-/// in its one handle, so a second description of it cannot yet be made.
-/// Lane D's C library answers the same names for native programs, whose
+/// A memfd is a file (design-decisions §1573), and reopens as one, as Linux
+/// reopens it. Lane D's C library answers the same names for native programs, whose
 /// descriptors the kernel does not see (`posix/src/fdname.rs`, which has
 /// Linux's answers as measured); this differs from it only where the kernel
 /// can do more (a pipe's other end).
@@ -23799,7 +23809,12 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
             if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
                 return linux_err(e);
             }
-            if let Err(r) = require_fs_write() {
+            // A memfd is the process's own memory, not one of the
+            // filesystem's files: no File capability to size it, as none to
+            // write it (design-decisions §1573).
+            if memfd_of(&entry).is_none()
+                && let Err(r) = require_fs_write()
+            {
                 return r;
             }
             // Through the file the descriptor holds, whatever its name now
@@ -46000,7 +46015,10 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
         }
         match entry.kind {
             HandleKind::File => {
-                if let Err(r) = require_fs_write() {
+                // A memfd needs no File capability: see `sys_ftruncate`.
+                if memfd_of(&entry).is_none()
+                    && let Err(r) = require_fs_write()
+                {
                     return r;
                 }
                 // Through the file the descriptor holds, whatever its name

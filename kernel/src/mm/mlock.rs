@@ -231,7 +231,7 @@ fn first_hole(pid: ProcessId, pml4: u64, start: u64, end: u64) -> Option<u64> {
 }
 
 /// Whether the 4 KiB page at `va` is mapped: present, or swapped out.
-fn entry_held(pml4: u64, va: u64) -> bool {
+pub(crate) fn entry_held(pml4: u64, va: u64) -> bool {
     let frame = FRAME_SIZE as u64;
     let frame_va = va & !frame.wrapping_sub(1);
     let part = usize::try_from(va.wrapping_sub(frame_va) / PAGE).unwrap_or(0);

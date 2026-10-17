@@ -21966,12 +21966,12 @@ pub fn sys_msync(args: &SyscallArgs) -> SyscallResult {
     if end == addr {
         return SyscallResult::ok(0);
     }
-    // 6. Walk the VMAs, as Linux does, never the pages: a range with
-    //    unmapped parts is ENOMEM (Linux's VM_BAD_AREA path), answered after
-    //    the mapped parts are done. Touching the pages instead would read the
-    //    whole of a mostly untouched file mapping to check the range, and
-    //    find a page past the file's end a fault (EFAULT). A kernel task has
-    //    no VMAs to walk.
+    // 6. Walk the mappings, as Linux does, never touch the pages: a range
+    //    with unmapped parts is ENOMEM (Linux's VM_BAD_AREA path), answered
+    //    after the mapped parts are done (`pcb::range_mapped`). Touching the
+    //    pages instead would read the whole of a mostly untouched file
+    //    mapping to check the range, and find a page past the file's end a
+    //    fault (EFAULT). A kernel task has no mappings to walk.
     let Some(pid) = caller_pid() else {
         return if (flags & MS_SYNC) != 0 {
             linux_err(errno::ESRCH)
@@ -21979,7 +21979,7 @@ pub fn sys_msync(args: &SyscallArgs) -> SyscallResult {
             SyscallResult::ok(0)
         };
     };
-    let covered = pcb::vmas_cover(pid, addr, end);
+    let covered = pcb::range_mapped(pid, addr, end);
     // 7. MS_SYNC saves the dirty pages the range's shared file mappings map,
     //    before returning (design-decisions §1572). MS_ASYNC asks for nothing
     //    more than the kernel does anyway, as on Linux since 2.6.19: the

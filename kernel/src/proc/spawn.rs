@@ -24783,6 +24783,12 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
                 Some(0x6E | 0x6F) => {
                     "a shared mapping of an append-only file through a read-only descriptor failed"
                 }
+                Some(0x73) => "msync(MS_SYNC) of a page of the main stack was not 0",
+                Some(0x74) => "memfd_create(MFD_NOEXEC_SEAL) failed",
+                Some(0x75) => "an MFD_NOEXEC_SEAL memfd's execveat was not EACCES",
+                Some(0x76) => "the file could not be opened read-only",
+                Some(0x77) => "F_ADD_SEALS through a read-only descriptor was not EPERM",
+                Some(0x78) => "F_ADD_SEALS on a file that is no memfd was not EINVAL",
                 Some(0x5F) => "a pread failed",
                 None => "no exit code: the program died",
                 _ => "unexpected exit code",
@@ -24846,7 +24852,8 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
         "[spawn]   Linux writable shared file mappings (ring 3: stores read at once, fork, \
          msync, a second view, EACCES on a read-only descriptor, saved by the last unmap, \
          a write seal refused, a memfd mapped and sealed, a pread into the mapping, msync \
-         past the end and over a hole, an append-only file): OK"
+         past the end, over a hole and of the stack, an append-only file, an \
+         MFD_NOEXEC_SEAL memfd not executed, F_ADD_SEALS's order): OK"
     );
     Ok(())
 }

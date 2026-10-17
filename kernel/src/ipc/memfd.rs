@@ -95,7 +95,8 @@ pub fn create(name: &[u8], flags: CreateFlags) -> KernelResult<u64> {
 /// under `WRITE` and under `FUTURE_WRITE`; born sealed with `SEAL` without
 /// `MFD_ALLOW_SEALING`, and with `EXEC` and mode `0666` with
 /// `MFD_NOEXEC_SEAL`; shown as `/memfd:<name> (deleted)`; and gone, its seals
-/// with it, at its last close.
+/// with it, at its last close. `SEAL` alone leaves the write paths' fast path
+/// on (`fs::sealing::any_sealed`); `WRITE` takes it off until the file goes.
 ///
 /// # Errors
 ///
@@ -114,6 +115,7 @@ pub fn self_test() -> KernelResult<()> {
         Ok(crate::fs::sealing::memfd_seals(id))
     };
 
+    let restricting = crate::fs::sealing::restricting_memfds();
     let h = create(
         b"selftest",
         CreateFlags {
@@ -140,6 +142,9 @@ pub fn self_test() -> KernelResult<()> {
         if handle::write_at(h, 0, b"x").is_ok() {
             return fail("a WRITE-sealed memfd was written");
         }
+        if crate::fs::sealing::restricting_memfds() != restricting.saturating_add(1) {
+            return fail("a WRITE-sealed memfd is not counted for the write paths");
+        }
         handle::ftruncate(h, 2)?;
         handle::ftruncate(h, 9)?;
         if handle::fstat(h)?.size != 9 {
@@ -160,7 +165,9 @@ pub fn self_test() -> KernelResult<()> {
     })();
     let _ = handle::close(h);
     result?;
-    if crate::fs::sealing::memfd_seals(id).is_some() {
+    if crate::fs::sealing::memfd_seals(id).is_some()
+        || crate::fs::sealing::restricting_memfds() != restricting
+    {
         return fail("a memfd's seals outlived its last close");
     }
 
@@ -168,6 +175,9 @@ pub fn self_test() -> KernelResult<()> {
     let checks = (|| {
         if seals_of(born_sealed)? != Some(SealFlags::SEAL) {
             return fail("a memfd made without MFD_ALLOW_SEALING is not sealed with SEAL");
+        }
+        if crate::fs::sealing::restricting_memfds() != restricting {
+            return fail("a memfd sealed with SEAL alone took the write paths' fast path away");
         }
         Ok(())
     })();

@@ -2320,14 +2320,18 @@ pub fn write_back_at(
 /// mapping, now saved (`mm::page_cache::writeback`): its change-journal
 /// record and its `IN_MODIFY`, once per save rather than per page.
 pub fn announce_written_back(handle: u64) {
-    let path = {
+    let (object, path) = {
         let table = OPEN_FILES.lock();
         let Some(file) = table.get(&handle) else {
             return;
         };
-        file.path.clone()
+        (file.object.clone(), file.path.clone())
     };
-    crate::fs::Vfs::announce_modified(&path);
+    // A save goes only through a held file ([`write_back_at`]): one without
+    // an object saved nothing to announce.
+    if let Some(obj) = object {
+        crate::fs::Vfs::object_announce_modified(&obj, &path);
+    }
 }
 
 /// Make what has been written to the file `handle` names stable: its dirty

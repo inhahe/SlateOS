@@ -8076,10 +8076,26 @@ mod tests {
 
     /// **The search box edits at a caret**, as every other box does: the
     /// arrows and Home move it, typing goes in where it is, Delete takes the
-    /// character after it, and Ctrl+A selects what typing then replaces.
+    /// character after it, and Ctrl+A selects what typing then replaces. A
+    /// search typed that hides the chosen message chooses one it shows.
     #[test]
     fn the_search_box_edits_at_a_caret() {
         let mut app = seeded();
+        let about_a_leak = |m: &MessageSummary| {
+            format!("{} {} {}", m.subject, m.from, m.preview)
+                .to_lowercase()
+                .contains("leak")
+        };
+        let elsewhere = app
+            .current_messages()
+            .into_iter()
+            .find(|m| !about_a_leak(m))
+            .map(|m| m.id);
+        assert!(
+            elsewhere.is_some(),
+            "control: some mail is not about a leak"
+        );
+        app.selected_message = elsewhere;
         app.handle_event(&key_ev(Key::F, true));
         for c in "lak".chars() {
             app.handle_event(&types(c));
@@ -8109,12 +8125,13 @@ mod tests {
         let listed = app.current_messages();
         assert!(!listed.is_empty(), "control: some mail mentions a leak");
         assert!(
-            listed
-                .iter()
-                .all(|m| format!("{} {} {}", m.subject, m.from, m.preview)
-                    .to_lowercase()
-                    .contains("leak")),
+            listed.iter().all(|m| about_a_leak(m)),
             "the list does not follow the search"
+        );
+        assert!(
+            app.selected_message
+                .is_some_and(|id| listed.iter().any(|m| m.id == id)),
+            "the search hid the chosen message and left it chosen"
         );
         assert!(
             !drawn(&app).contains('\u{258F}'),

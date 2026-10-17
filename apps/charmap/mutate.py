@@ -119,8 +119,8 @@ MUTATIONS += [
     ),
     (
         "a press in an open search's box closes it",
-        "                if !self.search_active {\n                    self.set_search_active(true);\n                }\n",
-        "                let open = self.search_active;\n                self.set_search_active(!open);\n",
+        "                if !was_open {\n                    self.set_search_active(true);\n                }\n",
+        "                self.set_search_active(!was_open);\n",
         [CLOSE],
     ),
     (
@@ -149,21 +149,15 @@ MUTATIONS += [
     ),
     (
         "Ctrl+C copies the query with none of it selected",
-        "                self.search_editor.text() == self.search_query && self.search_editor.has_selection()\n",
-        "                self.search_editor.text() == self.search_query\n",
+        "                self.search.input().has_selection()\n",
+        "                true\n",
         [COPY],
     ),
     (
         "Ctrl+C never copies the query",
-        "                self.search_editor.text() == self.search_query && self.search_editor.has_selection()\n",
+        "                self.search.input().has_selection()\n",
         "                false\n",
         [EDITS],
-    ),
-    (
-        "the search's keys are not on the program's clipboard",
-        "            textline::apply_key_on_clipboard(&mut self.search_editor, event, SEARCH_TEXT_SIZE);\n",
-        "            textline::apply_key(&mut self.search_editor, event, \"\", SEARCH_TEXT_SIZE);\n",
-        [EDITS, COPY],
     ),
     (
         "a character copied is not on the clipboard",
@@ -173,49 +167,37 @@ MUTATIONS += [
     ),
     (
         "an edit of the query is not searched for",
-        "            self.search_query = self.search_editor.text().to_owned();\n"
-        "            self.perform_search();\n",
-        "            self.search_query = self.search_editor.text().to_owned();\n",
+        "        if edit.changed {\n            self.perform_search();\n",
+        "        if edit.changed {\n",
         [EDITS],
     ),
     (
         "every key the search answers is a redraw",
-        "            ) != before,\n",
-        "            ) != before || true,\n",
+        "        Some(edit.changed || caret(&self.search) != before)\n",
+        "        Some(true)\n",
         [GRID],
     ),
     (
-        "a key finds the editor holding another query",
-        "        if self.search_editor.text() != self.search_query {\n"
-        "            self.search_editor.set_text(&self.search_query);",
-        "        if false {\n"
-        "            self.search_editor.set_text(&self.search_query);",
-        [SHOWN],
-    ),
-    (
         "Ctrl+F with the search open does not select the query",
-        "                self.search_editor.select_all();\n",
+        "                self.search.select_all();\n",
         "",
         [CTRL_F],
     ),
     (
-        "the query's caret is drawn at its end",
-        "            let (cursor, selection_anchor) = self.search_caret();\n",
-        "            let (cursor, selection_anchor) = (\n"
-        "                guitk::text::TextCursor::from(self.search_query.len()),\n"
-        "                None,\n"
-        "            );\n",
+        "the open search is drawn without the keyboard",
+        "                    focused: state.focused,\n                    placeholder:",
+        "                    focused: false,\n                    placeholder:",
         [EDITS],
     ),
     (
         "a press puts the caret at the start",
-        "            x - area.x,\n",
-        "            0.0,\n",
+        "        self.search.press(x - area.x, area.w, was_open);\n",
+        "        self.search.press(0.0, area.w, was_open);\n",
         [EDITS],
     ),
     (
         "a press in the box does not place the caret",
-        "                self.press_search(self.layout().search, x);\n",
+        "                self.press_search(self.layout().search, x, was_open);\n",
         "",
         [EDITS],
     ),

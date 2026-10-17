@@ -29,9 +29,9 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
+use textline::{SearchBox, SearchLook};
 
 use std::num::NonZeroUsize;
 use std::process::ExitCode;
@@ -769,7 +769,8 @@ struct CharMapApp {
     category_filter: CategoryFilter,
 
     // Search
-    search_query: String,
+    /// The search box, which is the query.
+    search: SearchBox,
     search_results: Vec<u32>,
     /// Whether the shortcut card is up.
     show_help: bool,
@@ -791,11 +792,6 @@ struct CharMapApp {
     // Favorites
     favorites: Vec<u32>,
 
-    /// The search's editor -- its caret and selection over `search_query`
-    /// -- reloaded when the query changed under it. Its keys cut, copy and
-    /// paste on the program's clipboard, where a character copied goes too,
-    /// so it pastes into the search.
-    search_editor: TextInput,
     status_message: String,
 
     // Active panel
@@ -832,7 +828,7 @@ impl CharMapApp {
             selected_char: 0,
             grid_scroll: 0,
             category_filter: CategoryFilter::All,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_results: Vec::new(),
             show_help: false,
             search_active: false,
@@ -842,7 +838,6 @@ impl CharMapApp {
             recent: Vec::new(),
             max_recent: 64,
             favorites: Vec::new(),
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             status_message: "Select a character to view details".into(),
             active_panel: Panel::Grid,
             preview_size: PreviewSize::Medium,
@@ -959,7 +954,7 @@ impl CharMapApp {
     fn perform_search(&mut self) {
         self.search_results.clear();
         self.search_selected = 0;
-        let query = self.search_query.trim().to_lowercase();
+        let query = self.search.text().trim().to_lowercase();
 
         if query.is_empty() {
             return;
@@ -1006,12 +1001,12 @@ impl CharMapApp {
         }
 
         if self.search_results.is_empty() {
-            self.status_message = format!("No results for '{}'", self.search_query);
+            self.status_message = format!("No results for '{}'", self.search.text());
         } else {
             self.status_message = format!(
                 "Found {} results for '{}'",
                 self.search_results.len(),
-                self.search_query
+                self.search.text()
             );
         }
     }
@@ -1166,8 +1161,7 @@ impl CharMapApp {
             // With the search open, its query selected to type over, as a
             // browser's find does.
             Key::F if ctrl && self.search_active => {
-                self.load_search();
-                self.search_editor.select_all();
+                self.search.select_all();
             }
             Key::F if ctrl => self.set_search_active(true),
             Key::C if ctrl => self.copy_selected(),
@@ -1238,17 +1232,9 @@ impl CharMapApp {
     fn search_takes(&self, event: &KeyEvent) -> bool {
         match event.key {
             Key::C if textline::is_ctrl_chord(event.modifiers) => {
-                self.search_editor.text() == self.search_query && self.search_editor.has_selection()
+                self.search.input().has_selection()
             }
             _ => true,
-        }
-    }
-
-    /// The search's editor loaded with the query, unless it holds it
-    /// already: the caret after it.
-    fn load_search(&mut self) {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
         }
     }
 
@@ -1262,44 +1248,17 @@ impl CharMapApp {
     /// else whether it changed the query, its caret or its selection. A
     /// query changed is searched for again.
     fn search_key(&mut self, event: &KeyEvent) -> Option<bool> {
-        self.load_search();
-        let editor = &self.search_editor;
-        let before = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        let edit =
-            textline::apply_key_on_clipboard(&mut self.search_editor, event, SEARCH_TEXT_SIZE);
+        let caret =
+            |search: &SearchBox| (search.input().cursor(), search.input().selection_anchor());
+        let before = caret(&self.search);
+        let edit = self.search.key(event);
         if !edit.handled {
             return None;
         }
-        if self.search_editor.text() != self.search_query {
-            self.search_query = self.search_editor.text().to_owned();
+        if edit.changed {
             self.perform_search();
         }
-        let editor = &self.search_editor;
-        Some(
-            (
-                editor.text().to_owned(),
-                editor.cursor(),
-                editor.selection_anchor(),
-            ) != before,
-        )
-    }
-
-    /// Where the search's caret and selection anchor are: the editor's
-    /// while it holds the query, after it and none otherwise. One answer
-    /// for the drawing and for a press.
-    fn search_caret(&self) -> (guitk::text::TextCursor, Option<usize>) {
-        if self.search_editor.text() == self.search_query {
-            (
-                self.search_editor.cursor(),
-                self.search_editor.selection_anchor(),
-            )
-        } else {
-            (guitk::text::TextCursor::from(self.search_query.len()), None)
-        }
+        Some(edit.changed || caret(&self.search) != before)
     }
 
     /// Where the query is drawn in the search box at `search`: inside it,
@@ -1321,21 +1280,11 @@ impl CharMapApp {
     }
 
     /// A press at `x` in the search box at `search`: the caret under the
-    /// pointer, measured against the query as it is drawn.
-    fn press_search(&mut self, search: Rect, x: f32) {
-        let (drawn, _) = self.search_caret();
-        self.load_search();
+    /// pointer, measured against the query as it was drawn -- with the
+    /// keyboard if the search was open (`was_open`).
+    fn press_search(&mut self, search: Rect, x: f32, was_open: bool) {
         let area = self.search_text_area(search);
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            area.w,
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - area.x,
-        );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
+        self.search.press(x - area.x, area.w, was_open);
     }
 
     // ── Scrolling ──────────────────────────────────────────────────────────
@@ -1448,10 +1397,11 @@ impl CharMapApp {
             // A press in the box opens the search, and puts the caret under
             // the pointer; it does not close an open one. The × closes it.
             Target::SearchBox => {
-                if !self.search_active {
+                let was_open = self.search_active;
+                if !was_open {
                     self.set_search_active(true);
                 }
-                self.press_search(self.layout().search, x);
+                self.press_search(self.layout().search, x, was_open);
             }
             Target::SearchClose => self.set_search_active(false),
             Target::PreviewSize => {
@@ -1704,7 +1654,7 @@ impl CharMapApp {
             focused: open && self.search_active,
             disabled: false,
             invalid: self.search_active
-                && !self.search_query.trim().is_empty()
+                && !self.search.text().trim().is_empty()
                 && self.search_results.is_empty(),
         }
     }
@@ -1728,16 +1678,14 @@ impl CharMapApp {
         let line = guitk::text::line_height(size, FontWeightHint::Regular);
         let close = Self::search_close_rect(search);
         let inner = self.search_text_area(search);
-        if self.search_query.is_empty() {
+        // A closed search shows what the box is for and nothing it held:
+        // the grid it filtered is back to every character.
+        if !self.search_active && self.search.is_empty() {
             label(
                 frame,
                 inner.x,
                 inner.y,
-                if self.search_active {
-                    "A name, U+XXXX or a character"
-                } else {
-                    "Search (Ctrl+F)"
-                },
+                "Search (Ctrl+F)",
                 size,
                 self.palette.subtext0,
                 FontWeightHint::Regular,
@@ -1746,23 +1694,17 @@ impl CharMapApp {
         }
         if self.search_active {
             let mut tree = RenderTree::new();
-            // Where the caret and the selection are; the caret was fixed at
-            // the end, the only place the keys could type.
-            let (cursor, selection_anchor) = self.search_caret();
-            textedit::draw(
+            self.search.draw(
                 &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor,
-                    selection_anchor,
-                    focused: state.focused,
+                &SearchLook {
                     x: inner.x,
                     y: inner.y,
                     width: inner.w,
                     line_height: line,
-                    font_size: size,
-                    weight: FontWeightHint::Regular,
+                    focused: state.focused,
+                    placeholder: "A name, U+XXXX or a character",
                     color: self.palette.text,
+                    placeholder_color: self.palette.subtext0,
                     selection_bg: self.palette.accent,
                     selection_fg: self.palette.crust,
                     caret_width: textedit::CARET_WIDTH,
@@ -3209,7 +3151,7 @@ mod tests {
     #[test]
     fn test_search_by_codepoint() {
         let mut app = CharMapApp::new();
-        app.search_query = "U+0041".into();
+        app.search.set_text("U+0041");
         app.perform_search();
         assert!(app.search_results.contains(&0x0041));
     }
@@ -3217,7 +3159,7 @@ mod tests {
     #[test]
     fn test_search_by_hex() {
         let mut app = CharMapApp::new();
-        app.search_query = "0x20AC".into();
+        app.search.set_text("0x20AC");
         app.perform_search();
         assert!(app.search_results.contains(&0x20AC));
     }
@@ -3225,7 +3167,7 @@ mod tests {
     #[test]
     fn test_search_by_name() {
         let mut app = CharMapApp::new();
-        app.search_query = "DOLLAR".into();
+        app.search.set_text("DOLLAR");
         app.perform_search();
         assert!(app.search_results.contains(&0x0024));
     }
@@ -3233,7 +3175,7 @@ mod tests {
     #[test]
     fn test_search_by_literal_char() {
         let mut app = CharMapApp::new();
-        app.search_query = "A".into();
+        app.search.set_text("A");
         app.perform_search();
         assert!(app.search_results.contains(&0x0041));
     }
@@ -3241,7 +3183,7 @@ mod tests {
     #[test]
     fn test_search_empty_query() {
         let mut app = CharMapApp::new();
-        app.search_query = String::new();
+        app.search.clear();
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -3250,7 +3192,7 @@ mod tests {
     fn test_search_result_limit() {
         let mut app = CharMapApp::new();
         // This should match many characters
-        app.search_query = "LATIN".into();
+        app.search.set_text("LATIN");
         app.perform_search();
         assert!(app.search_results.len() <= 500);
     }
@@ -3312,13 +3254,13 @@ mod tests {
     fn a_space_typed_into_a_search_is_a_space_not_a_favourite() {
         let mut app = CharMapApp::new();
         app.set_search_active(true);
-        app.search_query = "LATIN".into();
+        app.search.set_text("LATIN");
         // A real Space keystroke carries its own text; `press` alone does not,
         // because a key name is not what a keyboard layout produces.
         let mut space = probe::press(Key::Space);
         space.text = " ".into();
         probe::key(&mut app, &space);
-        assert_eq!(app.search_query, "LATIN ");
+        assert_eq!(app.search.text(), "LATIN ");
         assert!(app.favorites.is_empty());
     }
 
@@ -3343,7 +3285,7 @@ mod tests {
         let mut app = CharMapApp::new();
         app.set_search_active(true);
         probe::type_str(&mut app, "DOL");
-        assert_eq!(app.search_query, "DOL");
+        assert_eq!(app.search.text(), "DOL");
     }
 
     /// A key with no `text` cannot type, whatever its name is.
@@ -3356,16 +3298,16 @@ mod tests {
         let mut app = CharMapApp::new();
         app.set_search_active(true);
         probe::key(&mut app, &probe::press(Key::F5));
-        assert!(app.search_query.is_empty());
+        assert!(app.search.is_empty());
     }
 
     #[test]
     fn test_search_backspace() {
         let mut app = CharMapApp::new();
         app.set_search_active(true);
-        app.search_query = "DOL".into();
+        app.search.set_text("DOL");
         probe::key(&mut app, &probe::press(Key::Backspace));
-        assert_eq!(app.search_query, "DO");
+        assert_eq!(app.search.text(), "DO");
     }
 
     /// A key release does nothing, so no keystroke happens twice.
@@ -3377,7 +3319,7 @@ mod tests {
         probe::key(&mut app, &down);
         down.pressed = false;
         probe::key(&mut app, &down);
-        assert_eq!(app.search_query, "A");
+        assert_eq!(app.search.text(), "A");
     }
 
     // ── Preview size tests ─────────────────────────────────────────────
@@ -3436,7 +3378,7 @@ mod tests {
     fn test_render_with_search_active() {
         let mut app = CharMapApp::new();
         app.set_search_active(true);
-        app.search_query = "DOLLAR".into();
+        app.search.set_text("DOLLAR");
         app.perform_search();
         assert_frame_ok(&app.draw(CharMapApp::SIZE));
     }
@@ -3821,7 +3763,7 @@ mod tests {
     fn test_search_navigation_in_results() {
         let mut app = CharMapApp::new();
         app.search_active = true;
-        app.search_query = "DOLLAR".into();
+        app.search.set_text("DOLLAR");
         app.perform_search();
         if !app.search_results.is_empty() {
             app.grid_right();
@@ -4047,7 +3989,7 @@ mod tests {
             "a press on the box did not open the search"
         );
         probe::key(&mut app, &probe::typing("latin"));
-        assert_eq!(app.search_query, "latin");
+        assert_eq!(app.search.text(), "latin");
         let size = <CharMapApp as Probe>::SIZE;
         let f = app.frame(size.0, size.1);
         let cmds = f.commands();
@@ -4105,7 +4047,8 @@ mod tests {
         let before = clipboard();
         probe::key(&mut app, &chord(Key::C, "\u{107}", altgr));
         assert_eq!(
-            app.search_query, "\u{107}",
+            app.search.text(),
+            "\u{107}",
             "AltGr+C did not type its letter"
         );
         assert_eq!(clipboard(), before, "AltGr+C copied");
@@ -4137,7 +4080,7 @@ mod tests {
         ] {
             probe::key(&mut app, &chord(k, t, m));
         }
-        assert_eq!(app.search_query, "\u{107}", "a command's letter was typed");
+        assert_eq!(app.search.text(), "\u{107}", "a command's letter was typed");
     }
 
     /// **A press on the box opens the search and does not close it; the ×
@@ -4210,7 +4153,7 @@ mod tests {
         key_in(&mut app, Key::Left, Modifiers::NONE);
         key_in(&mut app, Key::Left, Modifiers::NONE);
         type_in(&mut app, "L");
-        assert_eq!(app.search_query, "DOLLAR", "the caret did not move");
+        assert_eq!(app.search.text(), "DOLLAR", "the caret did not move");
         assert!(
             app.search_results.contains(&0x0024),
             "the edit was not searched for"
@@ -4233,7 +4176,7 @@ mod tests {
 
         key_in(&mut app, Key::Home, Modifiers::NONE);
         key_in(&mut app, Key::Delete, Modifiers::NONE);
-        assert_eq!(app.search_query, "OLLAR", "Delete at the caret");
+        assert_eq!(app.search.text(), "OLLAR", "Delete at the caret");
         type_in(&mut app, "D");
         key_in(&mut app, Key::A, Modifiers::ctrl());
         assert!(
@@ -4251,9 +4194,9 @@ mod tests {
             "Ctrl+C with the query selected did not copy it"
         );
         key_in(&mut app, Key::X, Modifiers::ctrl());
-        assert_eq!(app.search_query, "", "Ctrl+X");
+        assert_eq!(app.search.text(), "", "Ctrl+X");
         key_in(&mut app, Key::V, Modifiers::ctrl());
-        assert_eq!(app.search_query, "DOLLAR", "Ctrl+V");
+        assert_eq!(app.search.text(), "DOLLAR", "Ctrl+V");
 
         // A press at the start of the query puts the caret there, and one
         // past its end at its end.
@@ -4273,7 +4216,8 @@ mod tests {
         );
         type_in(&mut app, ">");
         assert_eq!(
-            app.search_query, "<DOLLAR>",
+            app.search.text(),
+            "<DOLLAR>",
             "a press did not put the caret where it landed"
         );
     }
@@ -4303,7 +4247,7 @@ mod tests {
         key_in(&mut app, Key::A, Modifiers::ctrl());
         key_in(&mut app, Key::V, Modifiers::ctrl());
         assert_eq!(
-            Some(app.search_query.clone()),
+            Some(app.search.text().to_owned()),
             selected,
             "the character copied did not paste over the query"
         );
@@ -4329,7 +4273,7 @@ mod tests {
         key_in(&mut app, Key::Left, Modifiers::NONE);
         assert_eq!(app.selection(), at, "Left moved the selection");
         type_in(&mut app, "!");
-        assert_eq!(app.search_query, "LATI!N", "Left did not move the caret");
+        assert_eq!(app.search.text(), "LATI!N", "Left did not move the caret");
         key_in(&mut app, Key::End, Modifiers::NONE);
         assert!(
             !key_in(&mut app, Key::End, Modifiers::NONE),
@@ -4347,7 +4291,7 @@ mod tests {
         key_in(&mut app, Key::F, Modifiers::ctrl());
         assert!(app.search_active, "Ctrl+F closed the search");
         type_in(&mut app, "EURO");
-        assert_eq!(app.search_query, "EURO", "Ctrl+F did not select the query");
+        assert_eq!(app.search.text(), "EURO", "Ctrl+F did not select the query");
     }
 
     /// **The search edits what it shows**, however it came to be what it is.
@@ -4358,10 +4302,11 @@ mod tests {
         key_in(&mut app, Key::F, Modifiers::ctrl());
         type_in(&mut app, "ab");
         key_in(&mut app, Key::Home, Modifiers::NONE);
-        app.search_query = String::from("SIGN");
+        app.search.set_text("SIGN");
         type_in(&mut app, "!");
         assert_eq!(
-            app.search_query, "SIGN!",
+            app.search.text(),
+            "SIGN!",
             "the key edited the query the editor held"
         );
     }

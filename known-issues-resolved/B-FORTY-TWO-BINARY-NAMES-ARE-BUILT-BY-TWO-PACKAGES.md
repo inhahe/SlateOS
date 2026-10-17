@@ -1,4 +1,11 @@
-## B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES (lane B, 2026-08-22) — harnesses fixed, the duplication itself is open
+## B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES (lane B, 2026-08-22) — FIXED
+
+**Status:** FIXED 2026-10-16 -- no binary name is built by two packages:
+`scripts/check-bin-collisions.py` finds none, with `KNOWN_COLLISIONS` empty.
+The last two pairs went in `865e0ab83` (`kill`: procps-ng's, `userspace/kill`
+deleted) and `f98b0f95f` (`logger`: coreutils' applet deleted), both on `main`
+and booted since; `bc`, the first, is coreutils' alone (GNU bc's port since
+2026-10-16). The gate refuses a new pair.
 
 **Status (lane D, 2026-09-28):** two pairs are left, `kill` and `logger`,
 and both are on the image now, so "nothing we *install* is affected" below no

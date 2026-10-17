@@ -1,4 +1,11 @@
-## TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH (lane B, 2026-09-10)
+## TD-B-THIRTY-NINE-COMMAND-NAMES-ARE-BUILT-BY-TWO-CRATES-EACH (lane B, 2026-09-10) — FIXED
+
+**Status:** FIXED 2026-10-16 -- the operator chose (§1005, B-Q7): coreutils is
+the one home and the better half of each pair survives in it. Every pair
+has been measured and merged since; `scripts/check-bin-collisions.py` finds
+no name built twice (`B-FORTY-TWO-BINARY-NAMES-ARE-BUILT-BY-TWO-PACKAGES`,
+closed with this one, has the last two). The tables below are how each was
+decided.
 
 **In short:** thirty-nine command names are produced by two different crates in
 this tree. `free`, `ps`, `df`, `sed`, `tar`, `wc`, `who`, `uname` and thirty-one

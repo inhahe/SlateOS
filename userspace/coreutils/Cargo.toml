@@ -196,6 +196,8 @@ optionalfile = { path = "../../optionalfile" }
 scratchdir = { path = "../scratchdir" }
 # Its system that signals nothing, for the requests' tests.
 procstop = { path = "../procstop", features = ["fake"] }
+# A standard output kept in memory, for what `bc`'s usage writes.
+cstdio = { path = "../cstdio" }
 
 [lints]
 workspace = true

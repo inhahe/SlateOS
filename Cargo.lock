@@ -703,6 +703,7 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "cstdio",
  "cstrtol",
  "curses",
  "embed-manifest",

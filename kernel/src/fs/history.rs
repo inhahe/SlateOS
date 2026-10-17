@@ -457,9 +457,11 @@ fn spawn_worker() -> KernelResult<()> {
     if WORKER_TID.load(Ordering::Acquire) != 0 {
         return Ok(());
     }
-    let pml4 = crate::mm::page_table::active_pml4_phys();
     let priority = crate::sched::task::DEFAULT_PRIORITY.saturating_add(4);
-    let tid = crate::sched::spawn(b"fs-history", priority, history_worker, 0, pml4)?;
+    // In the kernel's address space (0), not the one active now: enrolment
+    // may come from a process's call, and a worker left in that process's
+    // page tables would run on freed ones once it exits.
+    let tid = crate::sched::spawn(b"fs-history", priority, history_worker, 0, 0)?;
     // A race between two first enrolments could spawn two workers; both would
     // drain the same queue correctly, and only the first id is kept for wakes.
     if WORKER_TID

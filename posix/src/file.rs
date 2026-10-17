@@ -3243,7 +3243,7 @@ pub(crate) fn resolve_or_err(
 ///
 /// Used when tearing down an fd entry (e.g., during dup2 when the
 /// target fd was previously open).
-fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
+pub(crate) fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
     match kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(handle),

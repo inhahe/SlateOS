@@ -1391,6 +1391,27 @@ pub const UNIX_ADDR_LEN: usize = 116;
 /// then the sender's address as a [`UNIX_ADDR_LEN`]-byte record.
 pub const UNIX_RECV_INFO_LEN: usize = 144;
 
+/// `SYS_UNIX_SENDMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_SEND`] carrying
+/// descriptors, on lane A's kernel since 2026-10-09
+/// (`requests/a-d-native-sendmsg-and-recvmsg-can-carry-descriptors.md`).
+/// `msg_ptr` points at six u64s: `buf`, `len`, `name_ptr`, `name_len` (as
+/// `SYS_UNIX_SEND` takes them), `rights_ptr`, `rights_count` -- that many
+/// [`UNIX_RIGHT_LEN`]-byte records. Bytes sent; the descriptors go with
+/// them, all or none.
+pub const SYS_UNIX_SENDMSG: u64 = 1169;
+/// `SYS_UNIX_RECVMSG(handle, msg_ptr, flags)` -- [`SYS_UNIX_RECV`] taking the
+/// descriptors a message carries. `msg_ptr` points at seven u64s: `buf`,
+/// `cap`, `info_ptr` (as `SYS_UNIX_RECV` takes them), `rights_ptr`,
+/// `rights_cap`, then two the kernel writes: `rights_got` and `msg_flags`
+/// ([`UNIX_MSG_CTRUNC`]). Each record names a handle the caller now holds.
+pub const SYS_UNIX_RECVMSG: u64 = 1170;
+/// Bytes of one descriptor record: handle (u64), type (u32, the codes
+/// `posix_spawn`'s `fd_map` uses), status flags (u32).
+pub const UNIX_RIGHT_LEN: usize = 16;
+/// `SYS_UNIX_RECVMSG`'s `msg_flags`: some descriptors were released -- no
+/// room for them, or a kind with no native type.
+pub const UNIX_MSG_CTRUNC: u64 = 1;
+
 // The device door (1119-1123): the Linux device ABI, reached natively --
 // today the sound card's ALSA nodes, which `crate::device_door` opens and
 // drives. Every call answers as the device does: a value of 0 or more, or a

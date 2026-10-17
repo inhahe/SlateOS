@@ -39,6 +39,12 @@
 //!   out across them, since a datagram cannot be taken in parts; a stream's
 //!   are sent and received one by one, in place, with no bound on the total
 //!   -- only the first receive waits, unless `MSG_WAITALL`.
+//! - **Descriptors** travel (`SCM_RIGHTS`) through `SYS_UNIX_SENDMSG` and
+//!   `SYS_UNIX_RECVMSG`: a file, a pipe end, the console, an eventfd or one of
+//!   these sockets -- each as its handle, its type and its status flags, never
+//!   its number, which only this library knows. A received socket is taken
+//!   for a stream socket, the kernel having no call that tells its type yet
+//!   (`known-issues/D-POSIX-A-RECEIVED-UNIX-SOCKET-IS-TAKEN-FOR-A-STREAM.md`).
 //! - **Errors** are the kernel's, through [`errno::errno_for`], but two:
 //!   `ConnectAlready` is `EISCONN` here (it is `EALREADY` for TCP), and a
 //!   stream or sequenced-packet socket whose peer has gone (`ChannelClosed`,
@@ -46,8 +52,7 @@
 //!
 //! # Not yet
 //!
-//! - Passing descriptors (`SCM_RIGHTS`, `EOPNOTSUPP`) and stating credentials
-//!   other than one's own (`EPERM`): `SYS_UNIX_SEND` has no room for either.
+//! - Stating credentials other than one's own (`EPERM`).
 //! - Crossing `posix_spawn` and `exec`: the kernel's spawn has no handle type
 //!   for these sockets, so a child does not inherit one
 //!   (`requests/d-a-a-named-unix-socket-must-cross-spawn-and-count-its-bytes.md`).
@@ -69,10 +74,11 @@ use crate::syscall::{SYS_MMAP, SYS_MUNMAP};
 use crate::syscall::{
     SYS_UNIX_ACCEPT, SYS_UNIX_BIND, SYS_UNIX_CLOSE, SYS_UNIX_CONNECT, SYS_UNIX_GET_OPTION,
     SYS_UNIX_LISTEN, SYS_UNIX_NAME, SYS_UNIX_PAIR, SYS_UNIX_PEER_CRED, SYS_UNIX_POLL,
-    SYS_UNIX_RECV, SYS_UNIX_SEND, SYS_UNIX_SET_OPTION, SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET,
-    UNIX_ADDR_LEN, UNIX_NAME_ABSTRACT, UNIX_NONBLOCK, UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO,
-    UNIX_OPT_SNDTIMEO, UNIX_PEEK, UNIX_RECV_INFO_LEN, syscall1, syscall2, syscall3, syscall3_2ret,
-    syscall4, syscall5, syscall6,
+    SYS_UNIX_RECV, SYS_UNIX_RECVMSG, SYS_UNIX_SEND, SYS_UNIX_SENDMSG, SYS_UNIX_SET_OPTION,
+    SYS_UNIX_SHUTDOWN, SYS_UNIX_SOCKET, UNIX_ADDR_LEN, UNIX_MSG_CTRUNC, UNIX_NAME_ABSTRACT,
+    UNIX_NONBLOCK, UNIX_OPT_PASSCRED, UNIX_OPT_RCVTIMEO, UNIX_OPT_SNDTIMEO, UNIX_PEEK,
+    UNIX_RECV_INFO_LEN, UNIX_RIGHT_LEN, syscall1, syscall2, syscall3, syscall3_2ret, syscall4,
+    syscall5, syscall6,
 };
 
 /// The bytes of `sun_path`.
@@ -626,6 +632,26 @@ pub(crate) unsafe fn send(
     flags: i32,
     dest: Option<&Name>,
 ) -> isize {
+    // SAFETY: forwarded.
+    unsafe { send_carrying(fd, handle, buf, len, flags, dest, &[]) }
+}
+
+/// [`send`], carrying `rights` with the first bytes -- all or none, as the
+/// kernel takes them -- through `SYS_UNIX_SENDMSG`. A kernel without that
+/// call answers `EOPNOTSUPP` for them, as this library did before it.
+///
+/// # Safety
+///
+/// As [`send`].
+unsafe fn send_carrying(
+    fd: i32,
+    handle: u64,
+    buf: *const u8,
+    len: usize,
+    flags: i32,
+    dest: Option<&Name>,
+    rights: &[Right],
+) -> isize {
     if flags & MSG_OOB != 0 {
         errno::set_errno(errno::EOPNOTSUPP);
         return -1;
@@ -636,19 +662,32 @@ pub(crate) unsafe fn send(
         dest.map_or((0, 0), |n| (n.as_bytes().as_ptr() as u64, n.len as u64));
     let stream = sock_type(fd) == SOCK_STREAM;
     let mut sent = 0usize;
+    let mut carry = rights;
     loop {
         let rest = len.saturating_sub(sent);
         let at = buf.wrapping_add(sent) as u64;
+        let record: [u64; 6] = [
+            at,
+            rest as u64,
+            name_ptr,
+            name_len,
+            carry.as_ptr() as u64,
+            carry.len() as u64,
+        ];
         let call = || {
-            syscall6(
-                SYS_UNIX_SEND,
-                handle,
-                at,
-                rest as u64,
-                name_ptr,
-                name_len,
-                call_flags,
-            )
+            if carry.is_empty() {
+                syscall6(
+                    SYS_UNIX_SEND,
+                    handle,
+                    at,
+                    rest as u64,
+                    name_ptr,
+                    name_len,
+                    call_flags,
+                )
+            } else {
+                syscall3(SYS_UNIX_SENDMSG, handle, record.as_ptr() as u64, call_flags)
+            }
         };
         let ret = if nb {
             call()
@@ -661,6 +700,10 @@ pub(crate) unsafe fn send(
             if sent > 0 {
                 return sent as isize;
             }
+            if !carry.is_empty() && crate::syscall::lacks_call(ret) {
+                errno::set_errno(errno::EOPNOTSUPP);
+                return -1;
+            }
             if ret == native::CHANNEL_CLOSED || ret == native::BROKEN_PIPE {
                 return crate::signal::broken_pipe(flags & MSG_NOSIGNAL != 0);
             }
@@ -668,6 +711,8 @@ pub(crate) unsafe fn send(
             return -1;
         }
         sent = sent.saturating_add(ret as usize);
+        // The descriptors went with the first bytes.
+        carry = &[];
         // A blocking stream send moves all of it, a call at a time; anything
         // else is one call.
         if !stream || nb || ret == 0 || sent >= len {
@@ -692,6 +737,26 @@ pub(crate) unsafe fn recv(
     len: usize,
     flags: i32,
     info: *mut u8,
+) -> isize {
+    // SAFETY: forwarded.
+    unsafe { recv_taking(fd, handle, buf, len, flags, info, None) }
+}
+
+/// [`recv`], taking into `rights` the descriptors the first receive's
+/// message carries, through `SYS_UNIX_RECVMSG`; from a kernel without that
+/// call, none, as before it.
+///
+/// # Safety
+///
+/// As [`recv`].
+unsafe fn recv_taking(
+    fd: i32,
+    handle: u64,
+    buf: *mut u8,
+    len: usize,
+    flags: i32,
+    info: *mut u8,
+    mut rights: Option<&mut RightsIn>,
 ) -> isize {
     if flags & MSG_OOB != 0 {
         // No out-of-band data is ever queued here.
@@ -721,10 +786,47 @@ pub(crate) unsafe fn recv(
         let at = buf.wrapping_add(got) as u64;
         let rest = len.saturating_sub(got) as u64;
         let call = || syscall5(SYS_UNIX_RECV, handle, at, rest, info_ptr as u64, call_flags);
-        let ret = if nb {
-            call()
-        } else {
-            crate::interrupt::restarting(crate::socket::wait_rule(fd, true), call)
+        let rule = crate::socket::wait_rule(fd, true);
+        let ret = match rights.take() {
+            Some(taken) => {
+                let mut record: [u64; 7] = [
+                    at,
+                    rest,
+                    info_ptr as u64,
+                    taken.recs.as_mut_ptr() as u64,
+                    taken.cap as u64,
+                    0,
+                    0,
+                ];
+                let at_record = record.as_mut_ptr() as u64;
+                let call_rights = || syscall3(SYS_UNIX_RECVMSG, handle, at_record, call_flags);
+                let ret = if nb {
+                    call_rights()
+                } else {
+                    crate::interrupt::restarting(rule, call_rights)
+                };
+                if crate::syscall::lacks_call(ret) {
+                    if nb {
+                        call()
+                    } else {
+                        crate::interrupt::restarting(rule, call)
+                    }
+                } else {
+                    if ret >= 0 {
+                        let [.., written, msg_flags] = record;
+                        taken.got = usize::try_from(written).unwrap_or(0).min(taken.cap);
+                        taken.cut = msg_flags & UNIX_MSG_CTRUNC != 0;
+                    }
+                    ret
+                }
+            }
+            None => {
+                if nb {
+                    call()
+                } else {
+                    crate::interrupt::restarting(rule, call)
+                }
+            }
         };
         if ret < 0 {
             if got > 0 {
@@ -825,19 +927,23 @@ const CMSG_HDR: usize = 16;
 /// A `struct ucred`: pid, uid, gid.
 const UCRED_LEN: usize = 12;
 
-/// Check `msg`'s control messages before a send: `SCM_RIGHTS` cannot go
-/// (descriptors have no native passage yet), and `SCM_CREDENTIALS` can only
-/// state the sender's own, which the kernel records anyway. Linux's
-/// `__scm_send` and `scm_check_creds`.
+/// Check `msg`'s control messages before a send, and gather the descriptors
+/// its `SCM_RIGHTS` messages name into `rights`: their number. Linux's
+/// `__scm_send`, `scm_fp_copy` and `scm_check_creds` -- every `SCM_RIGHTS`
+/// message's descriptors appended to one list of at most [`SCM_MAX_FD`]
+/// (`EINVAL` beyond), each open (`EBADF`) and of a kind that can travel
+/// ([`right_of`]); `SCM_CREDENTIALS` stating only the sender's own, which
+/// the kernel records anyway.
 ///
 /// # Safety
 ///
 /// `msg`'s control buffer must be readable for its stated length.
-unsafe fn check_control(msg: &Msghdr) -> Result<(), i32> {
+unsafe fn check_control(msg: &Msghdr, rights: &mut [Right; SCM_MAX_FD]) -> Result<usize, i32> {
     let base = msg.msg_control.cast_const();
     let total = msg.msg_controllen;
+    let mut count = 0usize;
     if base.is_null() || total == 0 {
-        return Ok(());
+        return Ok(count);
     }
     let mut off = 0usize;
     while off.saturating_add(CMSG_HDR) <= total {
@@ -847,9 +953,27 @@ unsafe fn check_control(msg: &Msghdr) -> Result<(), i32> {
             return Err(errno::EINVAL);
         }
         if level == SOL_SOCKET && kind == SCM_RIGHTS {
-            return Err(errno::EOPNOTSUPP);
-        }
-        if level == SOL_SOCKET && kind == SCM_CREDENTIALS {
+            let n = len.saturating_sub(CMSG_HDR) / 4;
+            if count.saturating_add(n) > SCM_MAX_FD {
+                return Err(errno::EINVAL);
+            }
+            for i in 0..n {
+                // SAFETY: the `n` ints lie inside this message, which lies
+                // inside the buffer.
+                let fd = unsafe {
+                    core::ptr::read_unaligned(
+                        base.add(
+                            off.saturating_add(CMSG_HDR)
+                                .saturating_add(i.saturating_mul(4)),
+                        )
+                        .cast::<i32>(),
+                    )
+                };
+                let slot = rights.get_mut(count).ok_or(errno::EINVAL)?;
+                *slot = right_of(fd)?;
+                count = count.saturating_add(1);
+            }
+        } else if level == SOL_SOCKET && kind == SCM_CREDENTIALS {
             if len != CMSG_HDR + UCRED_LEN {
                 return Err(errno::EINVAL);
             }
@@ -873,7 +997,189 @@ unsafe fn check_control(msg: &Msghdr) -> Result<(), i32> {
         }
         off = off.saturating_add(cmsg_align(len));
     }
-    Ok(())
+    Ok(count)
+}
+
+/// Linux's `SCM_MAX_FD`: the most descriptors one message may carry.
+const SCM_MAX_FD: usize = 253;
+
+/// One descriptor as the kernel carries it: its handle (u64), its type
+/// (u32, [`TRAVELLING`]'s codes) and its open file description's status
+/// flags (u32), little-endian, [`UNIX_RIGHT_LEN`] bytes.
+type Right = [u8; UNIX_RIGHT_LEN];
+
+/// The kinds of descriptor that can travel, and the type code each goes as
+/// -- the codes `posix_spawn`'s `fd_map` uses: a file, a pipe end, the
+/// console, an eventfd, one of these sockets. The kernel refuses the rest.
+const TRAVELLING: [(u32, HandleKind); 5] = [
+    (0, HandleKind::File),
+    (1, HandleKind::Pipe),
+    (4, HandleKind::Console),
+    (5, HandleKind::Eventfd),
+    (8, HandleKind::UnixSocket),
+];
+
+/// The record that carries descriptor `fd`, or what a send of it answers:
+/// `EBADF` for one that is not open, `EOPNOTSUPP` for a kind that cannot
+/// travel -- a TCP or UDP socket, a stream pair's end, a terminal, an epoll
+/// -- as the kernel answers it. The status flags go with it, the access mode
+/// among them, for the receiver's descriptor.
+fn right_of(fd: i32) -> Result<Right, i32> {
+    let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
+    let (code, _) = TRAVELLING
+        .iter()
+        .find(|&&(_, kind)| kind == entry.kind)
+        .ok_or(errno::EOPNOTSUPP)?;
+    let status = fdtable::get_status_flags(fd).unwrap_or(0).cast_unsigned();
+    let mut right = [0u8; UNIX_RIGHT_LEN];
+    let bytes = entry
+        .handle
+        .to_le_bytes()
+        .into_iter()
+        .chain(code.to_le_bytes())
+        .chain(status.to_le_bytes());
+    for (to, from) in right.iter_mut().zip(bytes) {
+        *to = from;
+    }
+    Ok(right)
+}
+
+/// A record's handle, type code and status flags.
+fn decode_right(right: &Right) -> (u64, u32, i32) {
+    let word = |at: usize| {
+        right
+            .get(at..at.saturating_add(4))
+            .and_then(|b| <[u8; 4]>::try_from(b).ok())
+            .map_or(0, u32::from_le_bytes)
+    };
+    let handle = right
+        .first_chunk::<8>()
+        .copied()
+        .map_or(0, u64::from_le_bytes);
+    (handle, word(8), word(12).cast_signed())
+}
+
+/// The descriptors a receive may take (`SYS_UNIX_RECVMSG`), and what came.
+struct RightsIn {
+    /// The kernel's records.
+    recs: [Right; SCM_MAX_FD],
+    /// Room for this many: what the caller's control buffer can hold.
+    cap: usize,
+    /// How many the kernel wrote.
+    got: usize,
+    /// Whether the kernel released some: no room for them, or a kind with
+    /// no type here.
+    cut: bool,
+}
+
+impl RightsIn {
+    /// Room for `cap` descriptors, none taken yet.
+    fn new(cap: usize) -> Self {
+        Self {
+            recs: [[0; UNIX_RIGHT_LEN]; SCM_MAX_FD],
+            cap: cap.min(SCM_MAX_FD),
+            got: 0,
+            cut: false,
+        }
+    }
+}
+
+/// How many descriptors fit in `msg`'s control buffer after the
+/// credentials [`write_credentials`] puts first: an `SCM_RIGHTS` header and
+/// an `int` each -- Linux's `scm_detach_fds` count -- at most
+/// [`SCM_MAX_FD`].
+fn rights_room(msg: &Msghdr, passcred: bool) -> usize {
+    if msg.msg_control.is_null() {
+        return 0;
+    }
+    let room = msg.msg_controllen;
+    let credentials = if passcred && room >= CMSG_HDR {
+        cmsg_align(CMSG_HDR + UCRED_LEN).min(room)
+    } else {
+        0
+    };
+    (room.saturating_sub(credentials).saturating_sub(CMSG_HDR) / 4).min(SCM_MAX_FD)
+}
+
+/// Install the descriptors a receive brought, and write their `SCM_RIGHTS`
+/// message into `msg`'s control buffer at `at`, after the credentials: the
+/// control data's new length, and whether any were cut -- released by the
+/// kernel for want of room or of a type, or here for want of a free
+/// descriptor, where Linux stops and closes the rest (`EMFILE`). A handle
+/// this process held already comes back as itself, and is installed as a
+/// second descriptor sharing it, as `dup` installs one, so that only the
+/// last close releases it. `cloexec` is `MSG_CMSG_CLOEXEC`.
+///
+/// # Safety
+///
+/// `msg.msg_control` must be writable for `msg.msg_controllen` bytes, and
+/// `at` within them.
+unsafe fn land_rights(msg: &Msghdr, rights: &RightsIn, at: usize, cloexec: bool) -> (usize, bool) {
+    let mut fds = [0i32; SCM_MAX_FD];
+    let mut landed = 0usize;
+    let mut cut = rights.cut;
+    let mut full = false;
+    for right in rights.recs.iter().take(rights.got) {
+        let (handle, code, status) = decode_right(right);
+        // The kernel sends only the types it was given; any other it
+        // released itself and reported as cut.
+        let Some(&(_, kind)) = TRAVELLING.iter().find(|&&(c, _)| c == code) else {
+            cut = true;
+            continue;
+        };
+        let fd = if full {
+            None
+        } else {
+            fdtable::alloc_fd_with_flags(kind, handle, status)
+        };
+        let Some(fd) = fd else {
+            full = true;
+            cut = true;
+            if !fdtable::is_handle_referenced(kind, handle) {
+                // Nobody here holds it: its close cannot fail in a way
+                // anyone could act on.
+                let _ = crate::file::close_kernel_handle(kind, handle);
+            }
+            continue;
+        };
+        if cloexec {
+            let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
+        }
+        if kind == HandleKind::UnixSocket {
+            crate::socket::set_unix_meta(fd, SOCK_STREAM);
+        }
+        if let Some(slot) = fds.get_mut(landed) {
+            *slot = fd;
+            landed = landed.saturating_add(1);
+        }
+    }
+    if landed == 0 || msg.msg_control.is_null() {
+        return (at, cut);
+    }
+    let data = landed.saturating_mul(4);
+    let len = CMSG_HDR.saturating_add(data);
+    let room = msg.msg_controllen.saturating_sub(at);
+    let mut header = [0u8; CMSG_HDR];
+    let bytes = len
+        .to_ne_bytes()
+        .into_iter()
+        .chain(SOL_SOCKET.to_ne_bytes())
+        .chain(SCM_RIGHTS.to_ne_bytes());
+    for (to, from) in header.iter_mut().zip(bytes) {
+        *to = from;
+    }
+    // SAFETY: the caller's contract; `rights_room` gave the kernel room for
+    // no more than fit after `at`, so `len <= room`.
+    unsafe {
+        let to = msg.msg_control.add(at);
+        core::ptr::copy_nonoverlapping(header.as_ptr(), to, CMSG_HDR.min(room));
+        core::ptr::copy_nonoverlapping(
+            fds.as_ptr().cast::<u8>(),
+            to.add(CMSG_HDR),
+            data.min(room.saturating_sub(CMSG_HDR)),
+        );
+    }
+    (at.saturating_add(cmsg_align(len).min(room)), cut)
 }
 
 /// The `iovec`s of `msg` as (base, length) pairs, and their total.
@@ -903,10 +1209,12 @@ unsafe fn iov_total(msg: &Msghdr) -> Result<usize, i32> {
 ///
 /// `msg` must be a valid `msghdr` whose buffers are readable as stated.
 pub(crate) unsafe fn sendmsg(fd: i32, handle: u64, msg: &Msghdr, flags: i32) -> isize {
+    let mut gathered = [[0u8; UNIX_RIGHT_LEN]; SCM_MAX_FD];
     // SAFETY: forwarded.
-    if let Err(e) = unsafe { check_control(msg) } {
-        return refuse(e) as isize;
-    }
+    let rights = match unsafe { check_control(msg, &mut gathered) } {
+        Ok(n) => gathered.get(..n).unwrap_or_default(),
+        Err(e) => return refuse(e) as isize,
+    };
     let dest = if msg.msg_name.is_null() || msg.msg_namelen == 0 {
         None
     } else {
@@ -936,11 +1244,11 @@ pub(crate) unsafe fn sendmsg(fd: i32, handle: u64, msg: &Msghdr, flags: i32) -> 
             (core::ptr::null(), 0)
         };
         // SAFETY: forwarded.
-        return unsafe { send(fd, handle, base, len, flags, dest.as_ref()) };
+        return unsafe { send_carrying(fd, handle, base, len, flags, dest.as_ref(), rights) };
     }
     if sock_type(fd) == SOCK_STREAM {
         // SAFETY: forwarded.
-        return unsafe { send_gather(fd, handle, msg, flags, dest.as_ref()) };
+        return unsafe { send_gather(fd, handle, msg, flags, dest.as_ref(), rights) };
     }
     if total > MAX_DGRAM {
         return refuse(errno::EMSGSIZE) as isize;
@@ -966,7 +1274,7 @@ pub(crate) unsafe fn sendmsg(fd: i32, handle: u64, msg: &Msghdr, flags: i32) -> 
         }
     }
     // SAFETY: `bounce` holds `total` initialised bytes.
-    unsafe { send(fd, handle, bounce.ptr, total, flags, dest.as_ref()) }
+    unsafe { send_carrying(fd, handle, bounce.ptr, total, flags, dest.as_ref(), rights) }
 }
 
 /// A stream's `sendmsg` from several pieces: each sent in turn, as Linux's
@@ -974,7 +1282,8 @@ pub(crate) unsafe fn sendmsg(fd: i32, handle: u64, msg: &Msghdr, flags: i32) -> 
 /// stream, unlike a datagram, has no bound on. A piece that goes short (a
 /// non-blocking socket whose peer's buffer filled) ends it. Only a call that
 /// sent nothing raises `SIGPIPE` for a closed peer; one that had sent some
-/// returns the count, as Linux's does.
+/// returns the count, as Linux's does. `rights` go with the first piece,
+/// as Linux's attach them to the first buffer.
 ///
 /// # Safety
 ///
@@ -985,6 +1294,7 @@ unsafe fn send_gather(
     msg: &Msghdr,
     flags: i32,
     dest: Option<&Name>,
+    rights: &[Right],
 ) -> isize {
     let caller_errno = errno::get_errno();
     let mut sent = 0usize;
@@ -999,15 +1309,17 @@ unsafe fn send_gather(
         } else {
             flags
         };
+        let carried = if sent == 0 { rights } else { &[] };
         // SAFETY: forwarded.
         let n = unsafe {
-            send(
+            send_carrying(
                 fd,
                 handle,
                 iov.iov_base.cast_const(),
                 iov.iov_len,
                 piece_flags,
                 dest,
+                carried,
             )
         };
         if n < 0 {
@@ -1067,6 +1379,10 @@ unsafe fn recvmsg_reporting(
     };
     let mut info = [0u8; UNIX_RECV_INFO_LEN];
     let stream = sock_type(fd) == SOCK_STREAM;
+    let passcred = control && syscall2(SYS_UNIX_GET_OPTION, handle, UNIX_OPT_PASSCRED) == 1;
+    // Descriptors are taken only where the caller sees the control data; a
+    // message's that are not are released by the kernel, as Linux's are.
+    let mut rights = control.then(|| RightsIn::new(rights_room(msg, passcred)));
     let got = if msg.msg_iovlen <= 1 || total == 0 {
         let (base, len) = if msg.msg_iovlen == 1 {
             // SAFETY: one iovec, checked by iov_total.
@@ -1076,10 +1392,20 @@ unsafe fn recvmsg_reporting(
             (core::ptr::null_mut(), 0)
         };
         // SAFETY: forwarded; `info` is the record's length.
-        unsafe { recv(fd, handle, base, len, flags & !MSG_TRUNC, info.as_mut_ptr()) }
+        unsafe {
+            recv_taking(
+                fd,
+                handle,
+                base,
+                len,
+                flags & !MSG_TRUNC,
+                info.as_mut_ptr(),
+                rights.as_mut(),
+            )
+        }
     } else if stream && flags & MSG_PEEK == 0 {
         // SAFETY: forwarded; `info` is the record's length.
-        unsafe { recv_scatter(fd, handle, msg, flags, info.as_mut_ptr()) }
+        unsafe { recv_scatter(fd, handle, msg, flags, info.as_mut_ptr(), rights.as_mut()) }
     } else {
         // Received whole into one buffer and handed out across the pieces: a
         // datagram cannot be taken in parts, and a peek at a stream would see
@@ -1091,13 +1417,14 @@ unsafe fn recvmsg_reporting(
         };
         // SAFETY: the bounce buffer is writable for `cap`.
         let n = unsafe {
-            recv(
+            recv_taking(
                 fd,
                 handle,
                 bounce.ptr,
                 cap,
                 flags & !MSG_TRUNC,
                 info.as_mut_ptr(),
+                rights.as_mut(),
             )
         };
         if n > 0 {
@@ -1150,9 +1477,15 @@ unsafe fn recvmsg_reporting(
         };
         msg.msg_namelen = len;
     }
-    let passcred = control && syscall2(SYS_UNIX_GET_OPTION, handle, UNIX_OPT_PASSCRED) == 1;
     // SAFETY: `msg_control` is writable for `msg_controllen` bytes.
-    let (written, cut) = unsafe { write_credentials(msg, passcred, &info) };
+    let (mut written, mut cut) = unsafe { write_credentials(msg, passcred, &info) };
+    if let Some(rights) = &rights {
+        let cloexec = flags & crate::socket::MSG_CMSG_CLOEXEC != 0;
+        // SAFETY: as above; `written` is within the buffer.
+        let (now, cut_now) = unsafe { land_rights(msg, rights, written, cloexec) };
+        written = now;
+        cut |= cut_now;
+    }
     msg.msg_controllen = written;
     if cut {
         msg.msg_flags |= MSG_CTRUNC;
@@ -1166,13 +1499,21 @@ unsafe fn recvmsg_reporting(
 /// rest without waiting, so the call returns what had arrived; with
 /// `MSG_WAITALL` every piece waits, until all of them are full. A piece that
 /// comes back short ends it. `info` gets the first receive's record, which
-/// carries the peer's address and credentials.
+/// carries the peer's address and credentials, and `rights` the descriptors
+/// its message brought.
 ///
 /// # Safety
 ///
 /// `msg.msg_iov` must be `msg.msg_iovlen` `iovec`s, each writable as stated,
 /// and `info` writable for [`UNIX_RECV_INFO_LEN`] bytes.
-unsafe fn recv_scatter(fd: i32, handle: u64, msg: &Msghdr, flags: i32, info: *mut u8) -> isize {
+unsafe fn recv_scatter(
+    fd: i32,
+    handle: u64,
+    msg: &Msghdr,
+    flags: i32,
+    info: *mut u8,
+    mut rights: Option<&mut RightsIn>,
+) -> isize {
     let wait_all = flags & MSG_WAITALL != 0;
     let caller_errno = errno::get_errno();
     let mut got = 0usize;
@@ -1189,8 +1530,19 @@ unsafe fn recv_scatter(fd: i32, handle: u64, msg: &Msghdr, flags: i32, info: *mu
             flags | MSG_DONTWAIT
         };
         let record = if first { info } else { core::ptr::null_mut() };
+        let taking = if first { rights.take() } else { None };
         // SAFETY: forwarded.
-        let n = unsafe { recv(fd, handle, iov.iov_base, iov.iov_len, piece_flags, record) };
+        let n = unsafe {
+            recv_taking(
+                fd,
+                handle,
+                iov.iov_base,
+                iov.iov_len,
+                piece_flags,
+                record,
+                taking,
+            )
+        };
         if n < 0 {
             if got == 0 {
                 return n;
@@ -1965,5 +2317,153 @@ mod tests {
         let msg = with_control(buf.as_mut_ptr(), 30);
         // SAFETY: the buffer is 64 bytes.
         assert_eq!(unsafe { write_credentials(&msg, true, &info) }, (30, false));
+    }
+
+    /// An `SCM_RIGHTS` message's bytes: the header, then the descriptors.
+    fn rights_message(fds: &[i32]) -> std::vec::Vec<u8> {
+        let len = CMSG_HDR + 4 * fds.len();
+        let mut m = len.to_ne_bytes().to_vec();
+        m.extend_from_slice(&SOL_SOCKET.to_ne_bytes());
+        m.extend_from_slice(&SCM_RIGHTS.to_ne_bytes());
+        for fd in fds {
+            m.extend_from_slice(&fd.to_ne_bytes());
+        }
+        m.resize(cmsg_align(len), 0);
+        m
+    }
+
+    /// A send's `SCM_RIGHTS` messages become one list of records, in order --
+    /// handle, type code and status flags -- every message's appended, as
+    /// Linux's `scm_fp_copy` appends them; a descriptor not open is `EBADF`,
+    /// one of a kind that cannot travel `EOPNOTSUPP`, more than 253 in all
+    /// `EINVAL`.
+    #[test]
+    fn a_sends_descriptors_are_gathered_as_records() {
+        use crate::fcntl::{O_APPEND, O_NONBLOCK, O_RDONLY, O_WRONLY};
+        let file =
+            fdtable::alloc_fd_with_flags(HandleKind::File, 0x51, O_WRONLY | O_APPEND).unwrap();
+        let pipe =
+            fdtable::alloc_fd_with_flags(HandleKind::Pipe, 0x52, O_RDONLY | O_NONBLOCK).unwrap();
+        let epoll = fdtable::alloc_fd_with_flags(HandleKind::Epoll, 0x53, O_RDONLY).unwrap();
+        let mut control = rights_message(&[file, pipe]);
+        control.extend(rights_message(&[file]));
+        let msg = with_control(control.as_mut_ptr(), control.len());
+        let mut rights = [[0u8; UNIX_RIGHT_LEN]; SCM_MAX_FD];
+        // SAFETY: the control buffer is `control`.
+        assert_eq!(unsafe { check_control(&msg, &mut rights) }, Ok(3));
+        assert_eq!(decode_right(&rights[0]), (0x51, 0, O_WRONLY | O_APPEND));
+        assert_eq!(decode_right(&rights[1]), (0x52, 1, O_RDONLY | O_NONBLOCK));
+        assert_eq!(decode_right(&rights[2]), (0x51, 0, O_WRONLY | O_APPEND));
+
+        let mut control = rights_message(&[file, 9_999]);
+        let msg = with_control(control.as_mut_ptr(), control.len());
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { check_control(&msg, &mut rights) },
+            Err(errno::EBADF)
+        );
+        let mut control = rights_message(&[epoll]);
+        let msg = with_control(control.as_mut_ptr(), control.len());
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { check_control(&msg, &mut rights) },
+            Err(errno::EOPNOTSUPP)
+        );
+        let mut control = rights_message(&[file; 200]);
+        control.extend(rights_message(&[file; 54]));
+        let msg = with_control(control.as_mut_ptr(), control.len());
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { check_control(&msg, &mut rights) },
+            Err(errno::EINVAL)
+        );
+        let mut control = rights_message(&[]);
+        let msg = with_control(control.as_mut_ptr(), control.len());
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { check_control(&msg, &mut rights) },
+            Ok(0),
+            "none is none"
+        );
+
+        for fd in [file, pipe, epoll] {
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+    }
+
+    /// What a receive's control buffer has room for: the descriptors that
+    /// fit after the header and, when asked for, the credentials.
+    #[test]
+    fn the_room_for_descriptors_is_what_follows_the_credentials() {
+        let mut buf = [0u8; 256];
+        let mut room = |len: usize, passcred: bool| {
+            let msg = with_control(buf.as_mut_ptr(), len);
+            rights_room(&msg, passcred)
+        };
+        assert_eq!(room(0, false), 0);
+        assert_eq!(room(16, false), 0, "a header and no int");
+        assert_eq!(room(20, false), 1);
+        assert_eq!(room(24, false), 2);
+        assert_eq!(room(52, true), 1, "32 for the credentials, then 16 and 4");
+        assert_eq!(room(20, true), 0, "the credentials take it all");
+        let msg = with_control(core::ptr::null_mut(), 64);
+        assert_eq!(rights_room(&msg, false), 0, "no buffer");
+        let mut big = std::vec![0u8; 16 + 4 * 300];
+        let msg = with_control(big.as_mut_ptr(), big.len());
+        assert_eq!(rights_room(&msg, false), SCM_MAX_FD);
+    }
+
+    /// The descriptors a receive brought become descriptors here, each of
+    /// its kind with its handle and status flags, and one `SCM_RIGHTS`
+    /// message lists them after the credentials; `MSG_CMSG_CLOEXEC` marks
+    /// them close-on-exec, a socket is a stream's until the kernel can say,
+    /// and what the kernel released is reported as cut.
+    #[test]
+    fn received_descriptors_are_installed_and_listed() {
+        use crate::fcntl::{O_RDONLY, O_RDWR, O_WRONLY};
+        let record = |handle: u64, code: u32, status: i32| {
+            let mut r = [0u8; UNIX_RIGHT_LEN];
+            r[..8].copy_from_slice(&handle.to_le_bytes());
+            r[8..12].copy_from_slice(&code.to_le_bytes());
+            r[12..].copy_from_slice(&status.cast_unsigned().to_le_bytes());
+            r
+        };
+        let mut rights = RightsIn::new(8);
+        rights.recs[0] = record(0x61, 0, O_RDONLY);
+        rights.recs[1] = record(0x62, 1, O_WRONLY);
+        rights.recs[2] = record(0x63, 8, O_RDWR);
+        rights.got = 3;
+        rights.cut = true;
+        let mut buf = [0xAAu8; 64];
+        let msg = with_control(buf.as_mut_ptr(), 64);
+        // SAFETY: the buffer is 64 bytes; the records are made up, and
+        // nothing here asks the kernel about them.
+        let (written, cut) = unsafe { land_rights(&msg, &rights, 8, true) };
+        assert_eq!((written, cut), (8 + 32, true), "16 and three ints, padded");
+        let word = |at: usize| i32::from_ne_bytes(buf[at..at + 4].try_into().unwrap());
+        assert_eq!(usize::from_ne_bytes(buf[8..16].try_into().unwrap()), 28);
+        assert_eq!((word(16), word(20)), (SOL_SOCKET, SCM_RIGHTS));
+        let fds = [word(24), word(28), word(32)];
+        let want = [
+            (HandleKind::File, 0x61, O_RDONLY),
+            (HandleKind::Pipe, 0x62, O_WRONLY),
+            (HandleKind::UnixSocket, 0x63, O_RDWR),
+        ];
+        for (fd, (kind, handle, status)) in fds.into_iter().zip(want) {
+            let entry = fdtable::get_fd(fd).unwrap();
+            assert_eq!((entry.kind, entry.handle), (kind, handle));
+            assert_eq!(fdtable::get_status_flags(fd), Some(status));
+            assert_eq!(fdtable::get_fd_flags(fd), Some(fdtable::FD_CLOEXEC));
+        }
+        assert_eq!(sock_type(fds[2]), SOCK_STREAM);
+        crate::socket::clear_meta(fds[2]);
+        for fd in fds {
+            assert!(fdtable::close_fd(fd).is_some());
+        }
+
+        // Nothing came: nothing written, and only the kernel's word on cuts.
+        let none = RightsIn::new(8);
+        // SAFETY: as above.
+        assert_eq!(unsafe { land_rights(&msg, &none, 8, false) }, (8, false));
     }
 }

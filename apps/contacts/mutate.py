@@ -649,7 +649,7 @@ MUTATIONS = [
     ),
     (
         'a text box is not marked while it has the keyboard',
-        '            focused: open && self.focus == focus,\n',
+        '            focused: self.box_has_keyboard(focus),\n',
         '            focused: false,\n',
         [FIELDS],
     ),
@@ -661,8 +661,8 @@ MUTATIONS = [
     ),
     (
         'a text box is marked under a cover',
-        '            focused: open && self.focus == focus,\n',
-        '            focused: self.focus == focus,\n',
+        '        !self.covered() && self.focus == focus\n',
+        '        self.focus == focus\n',
         [FIELDS],
     ),
     (
@@ -757,41 +757,39 @@ MUTATIONS += [
         "        if false {\n            let focus = self.focus;\n",
         [LINE, SEARCH],
     ),
-    (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [LINE],
-    ),
-    (
-        "the editor is kept for the box the keyboard moved to",
-        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
-        "        if self.editor.text() != self.box_text(focus) {\n",
-        [SHOWN],
-    ),
-    (
-        "a key finds the editor holding another text",
-        "        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {\n",
-        "        if self.editor_for != Some(focus) {\n",
-        [SHOWN],
-    ),
+    # No rows for the clipboard, the shared editor kept or reloaded, or the
+    # caret drawn by hand: since 2026-10-17 each box is a textline LineBox,
+    # on the program's clipboard, and those are its own table's rows
+    # (apps/textline/mutate.py).
     (
         "a press puts the caret at the start",
-        "            x - inner.x,\n",
-        "            0.0,\n",
+        "                .press(event.x - inner.x, inner.w, had_the_keyboard);\n",
+        "                .press(0.0, inner.w, had_the_keyboard);\n",
         [SEARCH],
     ),
     (
         "a press in a box does not place the caret",
-        "        if let Some(rect) = frame.rect_of(|t| *t == target) {\n            self.press_box(focus, rect, event.x);\n        }\n",
-        "",
+        "            self.typed_box(focus)\n                .press(event.x - inner.x, inner.w, had_the_keyboard);\n",
+        "            let _ = (focus, inner, had_the_keyboard);\n",
         [LINE, SEARCH],
     ),
     (
-        "the caret is drawn at the start",
-        "            let (cursor, anchor) = if focused {\n                self.box_caret(focus)\n",
-        "            let (cursor, anchor) = if false {\n                self.box_caret(focus)\n",
-        [LINE],
+        "a press in a box without the keyboard is measured as though it had it",
+        "        .map(|focus| (focus, self.box_has_keyboard(focus)));\n",
+        "        .map(|focus| (focus, true));\n",
+        ["a_press_in_a_box_without_the_keyboard_lands_where_it_reads"],
+    ),
+    (
+        "every line of the form types into one box",
+        "            Focus::Field(field) => self.field_box(field),\n",
+        "            Focus::Field(_) => &mut self.edit_first_name,\n",
+        [LINE, SHOWN],
+    ),
+    (
+        "the search types into the form",
+        "            _ => &mut self.search_query,\n",
+        "            _ => &mut self.edit_first_name,\n",
+        [SEARCH],
     ),
 ]
 

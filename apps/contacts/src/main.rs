@@ -50,13 +50,13 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 
 use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Catppuccin Mocha theme colors
@@ -2750,39 +2750,33 @@ pub struct ContactsApp {
     pub last_file_action: Option<String>,
     pub store: ContactStore,
     pub view: DetailView,
-    pub search_query: String,
-    /// The editor of the box with the keyboard -- the search, or a line of
-    /// the form: its caret and selection, loaded whenever the keyboard
-    /// moves to another box or the box's text changed under it.
-    editor: TextInput,
-    /// Which box `editor` holds.
-    editor_for: Option<Focus>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
+    /// The search: its text, its caret and its selection.
+    pub search_query: LineBox,
     pub sort_order: SortOrder,
     pub filter: ContactFilter,
     pub scroll_offset: f32,
     pub selected_letter: Option<char>,
     pub show_search: bool,
 
-    // Edit form state
-    pub edit_first_name: String,
-    pub edit_last_name: String,
-    pub edit_company: String,
-    pub edit_job_title: String,
-    pub edit_department: String,
-    pub edit_nickname: String,
-    pub edit_phone: String,
+    // Edit form state: each line its own box, its text, caret and
+    // selection.
+    pub edit_first_name: LineBox,
+    pub edit_last_name: LineBox,
+    pub edit_company: LineBox,
+    pub edit_job_title: LineBox,
+    pub edit_department: LineBox,
+    pub edit_nickname: LineBox,
+    pub edit_phone: LineBox,
     pub edit_phone_type: PhoneType,
-    pub edit_email: String,
+    pub edit_email: LineBox,
     pub edit_email_type: EmailType,
-    pub edit_notes: String,
-    pub edit_birthday: String,
-    pub edit_street: String,
-    pub edit_city: String,
-    pub edit_state: String,
-    pub edit_zip: String,
-    pub edit_country: String,
+    pub edit_notes: LineBox,
+    pub edit_birthday: LineBox,
+    pub edit_street: LineBox,
+    pub edit_city: LineBox,
+    pub edit_state: LineBox,
+    pub edit_zip: LineBox,
+    pub edit_country: LineBox,
     pub edit_address_type: AddressType,
 
     /// Where typed characters go. Without this the name field was painted,
@@ -2855,33 +2849,30 @@ impl ContactsApp {
             last_file_action: None,
             store: ContactStore::new(),
             view: DetailView::Empty,
-            search_query: String::new(),
-            editor: textline::field_holding("", BOX_CAPACITY),
-            editor_for: None,
-            clipboard: String::new(),
+            search_query: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             sort_order: SortOrder::Name,
             filter: ContactFilter::All,
             scroll_offset: 0.0,
             selected_letter: None,
             show_search: false,
 
-            edit_first_name: String::new(),
-            edit_last_name: String::new(),
-            edit_company: String::new(),
-            edit_job_title: String::new(),
-            edit_department: String::new(),
-            edit_nickname: String::new(),
-            edit_phone: String::new(),
+            edit_first_name: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_last_name: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_company: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_job_title: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_department: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_nickname: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_phone: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             edit_phone_type: PhoneType::Mobile,
-            edit_email: String::new(),
+            edit_email: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             edit_email_type: EmailType::Personal,
-            edit_notes: String::new(),
-            edit_birthday: String::new(),
-            edit_street: String::new(),
-            edit_city: String::new(),
-            edit_state: String::new(),
-            edit_zip: String::new(),
-            edit_country: String::new(),
+            edit_notes: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_birthday: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_street: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_city: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_state: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_zip: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            edit_country: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             edit_address_type: AddressType::Home,
 
             focus: Focus::None,
@@ -2903,27 +2894,29 @@ impl ContactsApp {
 
     /// Load a contact's data into the edit form fields.
     pub fn load_edit_form(&mut self, contact: &Contact) {
-        self.edit_first_name.clone_from(&contact.first_name);
-        self.edit_last_name.clone_from(&contact.last_name);
-        self.edit_company.clone_from(&contact.company);
-        self.edit_job_title.clone_from(&contact.job_title);
-        self.edit_department.clone_from(&contact.department);
-        self.edit_nickname.clone_from(&contact.nickname);
-        self.edit_notes.clone_from(&contact.notes);
-        self.edit_birthday = contact
-            .birthday
-            .map_or(String::new(), |b| b.format_display());
+        self.edit_first_name.set_text(&contact.first_name);
+        self.edit_last_name.set_text(&contact.last_name);
+        self.edit_company.set_text(&contact.company);
+        self.edit_job_title.set_text(&contact.job_title);
+        self.edit_department.set_text(&contact.department);
+        self.edit_nickname.set_text(&contact.nickname);
+        self.edit_notes.set_text(&contact.notes);
+        self.edit_birthday.set_text(
+            &contact
+                .birthday
+                .map_or(String::new(), |b| b.format_display()),
+        );
 
         // Load first phone/email if present
         if let Some(phone) = contact.phones.first() {
-            self.edit_phone.clone_from(&phone.number);
+            self.edit_phone.set_text(&phone.number);
             self.edit_phone_type = phone.phone_type;
         } else {
             self.edit_phone.clear();
             self.edit_phone_type = PhoneType::Mobile;
         }
         if let Some(email) = contact.emails.first() {
-            self.edit_email.clone_from(&email.email);
+            self.edit_email.set_text(&email.email);
             self.edit_email_type = email.email_type;
         } else {
             self.edit_email.clear();
@@ -2932,11 +2925,11 @@ impl ContactsApp {
 
         // Load first address if present
         if let Some(addr) = contact.addresses.first() {
-            self.edit_street.clone_from(&addr.street);
-            self.edit_city.clone_from(&addr.city);
-            self.edit_state.clone_from(&addr.state);
-            self.edit_zip.clone_from(&addr.zip);
-            self.edit_country.clone_from(&addr.country);
+            self.edit_street.set_text(&addr.street);
+            self.edit_city.set_text(&addr.city);
+            self.edit_state.set_text(&addr.state);
+            self.edit_zip.set_text(&addr.zip);
+            self.edit_country.set_text(&addr.country);
             self.edit_address_type = addr.address_type;
         } else {
             self.edit_street.clear();
@@ -2972,23 +2965,27 @@ impl ContactsApp {
 
     /// Apply the edit form to create a new Contact (for add).
     pub fn build_contact_from_form(&self) -> Contact {
-        let mut contact = Contact::new(0, &self.edit_first_name, &self.edit_last_name);
-        contact.company.clone_from(&self.edit_company);
-        contact.job_title.clone_from(&self.edit_job_title);
-        contact.department.clone_from(&self.edit_department);
-        contact.nickname.clone_from(&self.edit_nickname);
-        contact.notes.clone_from(&self.edit_notes);
-        contact.birthday = SimpleDate::parse(&self.edit_birthday);
+        let mut contact = Contact::new(0, self.edit_first_name.text(), self.edit_last_name.text());
+        self.edit_company.text().clone_into(&mut contact.company);
+        self.edit_job_title
+            .text()
+            .clone_into(&mut contact.job_title);
+        self.edit_department
+            .text()
+            .clone_into(&mut contact.department);
+        self.edit_nickname.text().clone_into(&mut contact.nickname);
+        self.edit_notes.text().clone_into(&mut contact.notes);
+        contact.birthday = SimpleDate::parse(self.edit_birthday.text());
 
         if !self.edit_phone.is_empty() {
-            contact
-                .phones
-                .push(PhoneNumber::new(&self.edit_phone, self.edit_phone_type).with_primary(true));
+            contact.phones.push(
+                PhoneNumber::new(self.edit_phone.text(), self.edit_phone_type).with_primary(true),
+            );
         }
         if !self.edit_email.is_empty() {
-            contact
-                .emails
-                .push(EmailAddress::new(&self.edit_email, self.edit_email_type).with_primary(true));
+            contact.emails.push(
+                EmailAddress::new(self.edit_email.text(), self.edit_email_type).with_primary(true),
+            );
         }
 
         if !self.edit_street.is_empty()
@@ -2998,11 +2995,11 @@ impl ContactsApp {
             || !self.edit_country.is_empty()
         {
             let mut addr = PostalAddress::new(self.edit_address_type);
-            addr.street.clone_from(&self.edit_street);
-            addr.city.clone_from(&self.edit_city);
-            addr.state.clone_from(&self.edit_state);
-            addr.zip.clone_from(&self.edit_zip);
-            addr.country.clone_from(&self.edit_country);
+            self.edit_street.text().clone_into(&mut addr.street);
+            self.edit_city.text().clone_into(&mut addr.city);
+            self.edit_state.text().clone_into(&mut addr.state);
+            self.edit_zip.text().clone_into(&mut addr.zip);
+            self.edit_country.text().clone_into(&mut addr.country);
             contact.addresses.push(addr);
         }
 
@@ -3271,7 +3268,7 @@ impl ContactsApp {
 
         let contacts =
             self.store
-                .filtered_sorted(&self.filter, self.sort_order, &self.search_query);
+                .filtered_sorted(&self.filter, self.sort_order, self.search_query.text());
 
         if contacts.is_empty() {
             put_text(
@@ -4121,6 +4118,11 @@ impl ContactsApp {
     /// The text currently in one form field.
     #[must_use]
     pub fn field_value(&self, field: FormField) -> &str {
+        self.field_line(field).text()
+    }
+
+    /// The box of one form field.
+    fn field_line(&self, field: FormField) -> &LineBox {
         match field {
             FormField::FirstName => &self.edit_first_name,
             FormField::LastName => &self.edit_last_name,
@@ -4140,8 +4142,8 @@ impl ContactsApp {
         }
     }
 
-    /// The same field, to write into.
-    fn field_mut(&mut self, field: FormField) -> &mut String {
+    /// The same box, to edit.
+    fn field_box(&mut self, field: FormField) -> &mut LineBox {
         match field {
             FormField::FirstName => &mut self.edit_first_name,
             FormField::LastName => &mut self.edit_last_name,
@@ -4467,7 +4469,7 @@ impl ContactsApp {
         let open = !self.covered();
         guitk::field::State {
             hovered: open && self.hover == Some(target),
-            focused: open && self.focus == focus,
+            focused: self.box_has_keyboard(focus),
             disabled: false,
             invalid: false,
         }
@@ -4495,16 +4497,23 @@ impl ContactsApp {
         let Some(target) = frame.hit_test(event.x, event.y) else {
             return;
         };
+        // A box pressed: whether it had the keyboard, asked before the
+        // press gives it the keyboard -- that is how it was drawn, and what
+        // the caret under the pointer is measured against.
+        let pressed = match target {
+            Target::Search => Some(Focus::Search),
+            Target::Field(field) => Some(Focus::Field(field)),
+            _ => None,
+        }
+        .map(|focus| (focus, self.box_has_keyboard(focus)));
         self.activate(target);
-        // A box: the caret under the pointer, measured against the box as
-        // drawn.
-        let focus = match target {
-            Target::Search => Focus::Search,
-            Target::Field(field) => Focus::Field(field),
-            _ => return,
+        let Some((focus, had_the_keyboard)) = pressed else {
+            return;
         };
         if let Some(rect) = frame.rect_of(|t| *t == target) {
-            self.press_box(focus, rect, event.x);
+            let inner = inset(rect, BOX_TEXT_INSET);
+            self.typed_box(focus)
+                .press(event.x - inner.x, inner.w, had_the_keyboard);
         }
     }
 
@@ -4679,29 +4688,29 @@ impl ContactsApp {
         let mut c = existing.clone();
         let was_default = existing.display_name
             == default_display_name(&existing.first_name, &existing.last_name);
-        c.first_name.clone_from(&self.edit_first_name);
-        c.last_name.clone_from(&self.edit_last_name);
+        self.edit_first_name.text().clone_into(&mut c.first_name);
+        self.edit_last_name.text().clone_into(&mut c.last_name);
         if was_default {
             c.display_name = default_display_name(&c.first_name, &c.last_name);
         }
-        c.company.clone_from(&self.edit_company);
-        c.job_title.clone_from(&self.edit_job_title);
-        c.department.clone_from(&self.edit_department);
-        c.nickname.clone_from(&self.edit_nickname);
-        c.notes.clone_from(&self.edit_notes);
-        c.birthday = SimpleDate::parse(&self.edit_birthday);
+        self.edit_company.text().clone_into(&mut c.company);
+        self.edit_job_title.text().clone_into(&mut c.job_title);
+        self.edit_department.text().clone_into(&mut c.department);
+        self.edit_nickname.text().clone_into(&mut c.nickname);
+        self.edit_notes.text().clone_into(&mut c.notes);
+        c.birthday = SimpleDate::parse(self.edit_birthday.text());
 
         match (self.edit_phone.is_empty(), c.phones.first_mut()) {
             (true, Some(_)) => {
                 c.phones.remove(0);
             }
             (false, Some(phone)) => {
-                phone.number.clone_from(&self.edit_phone);
+                self.edit_phone.text().clone_into(&mut phone.number);
                 phone.phone_type = self.edit_phone_type;
             }
-            (false, None) => c
-                .phones
-                .push(PhoneNumber::new(&self.edit_phone, self.edit_phone_type).with_primary(true)),
+            (false, None) => c.phones.push(
+                PhoneNumber::new(self.edit_phone.text(), self.edit_phone_type).with_primary(true),
+            ),
             (true, None) => {}
         }
         match (self.edit_email.is_empty(), c.emails.first_mut()) {
@@ -4709,20 +4718,20 @@ impl ContactsApp {
                 c.emails.remove(0);
             }
             (false, Some(email)) => {
-                email.email.clone_from(&self.edit_email);
+                self.edit_email.text().clone_into(&mut email.email);
                 email.email_type = self.edit_email_type;
             }
-            (false, None) => c
-                .emails
-                .push(EmailAddress::new(&self.edit_email, self.edit_email_type).with_primary(true)),
+            (false, None) => c.emails.push(
+                EmailAddress::new(self.edit_email.text(), self.edit_email_type).with_primary(true),
+            ),
             (true, None) => {}
         }
         let address_typed = [
-            &self.edit_street,
-            &self.edit_city,
-            &self.edit_state,
-            &self.edit_zip,
-            &self.edit_country,
+            self.edit_street.text(),
+            self.edit_city.text(),
+            self.edit_state.text(),
+            self.edit_zip.text(),
+            self.edit_country.text(),
         ]
         .iter()
         .any(|f| !f.is_empty());
@@ -4736,11 +4745,11 @@ impl ContactsApp {
                     Some(address) => address,
                     None => &mut fresh,
                 };
-                address.street.clone_from(&self.edit_street);
-                address.city.clone_from(&self.edit_city);
-                address.state.clone_from(&self.edit_state);
-                address.zip.clone_from(&self.edit_zip);
-                address.country.clone_from(&self.edit_country);
+                self.edit_street.text().clone_into(&mut address.street);
+                self.edit_city.text().clone_into(&mut address.city);
+                self.edit_state.text().clone_into(&mut address.state);
+                self.edit_zip.text().clone_into(&mut address.zip);
+                self.edit_country.text().clone_into(&mut address.country);
                 address.address_type = self.edit_address_type;
                 if c.addresses.is_empty() {
                     c.addresses.push(fresh);
@@ -4851,7 +4860,7 @@ impl ContactsApp {
         self.selected_letter = Some(letter);
         let contacts =
             self.store
-                .filtered_sorted(&self.filter, self.sort_order, &self.search_query);
+                .filtered_sorted(&self.filter, self.sort_order, self.search_query.text());
         let mut offset = 0.0_f32;
         let mut current: Option<char> = None;
         for contact in &contacts {
@@ -4942,83 +4951,41 @@ impl ContactsApp {
         }
     }
 
-    /// A keystroke: text into whatever has the keyboard, otherwise a
-    /// shortcut.
-    /// What the box `focus` names holds.
-    fn box_text(&self, focus: Focus) -> &str {
+    /// The box `focus` names: a line of the form, or the search.
+    fn typed_box(&mut self, focus: Focus) -> &mut LineBox {
         match focus {
-            Focus::Field(field) => self.field_value(field),
+            Focus::Field(field) => self.field_box(field),
+            _ => &mut self.search_query,
+        }
+    }
+
+    /// The same box, to read.
+    fn shown_box(&self, focus: Focus) -> &LineBox {
+        match focus {
+            Focus::Field(field) => self.field_line(field),
             _ => &self.search_query,
         }
     }
 
-    /// Load the box `focus` names into the editor, unless it already holds
-    /// it as it is -- the caret after the text.
-    fn load_editor(&mut self, focus: Focus) {
-        if self.editor_for != Some(focus) || self.editor.text() != self.box_text(focus) {
-            let held = self.box_text(focus).to_owned();
-            self.editor.set_text(&held);
-            self.editor_for = Some(focus);
-        }
+    /// Whether the box `focus` names has the keyboard: what it is drawn
+    /// with, and its presses measured against -- not while something covers
+    /// the window.
+    fn box_has_keyboard(&self, focus: Focus) -> bool {
+        !self.covered() && self.focus == focus
     }
 
     /// A key for the box `focus` names, which has the keyboard: `None` for
     /// one it does not answer, else whether its text changed.
     fn box_key(&mut self, focus: Focus, event: &KeyEvent) -> Option<bool> {
-        self.load_editor(focus);
-        let edit = textline::apply_key(&mut self.editor, event, &self.clipboard, BOX_TEXT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        let changed = self.editor.text() != self.box_text(focus);
-        if changed {
-            let typed = self.editor.text().to_owned();
-            match focus {
-                Focus::Field(field) => *self.field_mut(field) = typed,
-                _ => self.search_query = typed,
-            }
-        }
-        edit.handled.then_some(changed)
-    }
-
-    /// Where the caret and the selection anchor of the box `focus` names
-    /// are, while the editor holds it as it is; the end, and none,
-    /// otherwise. One answer for the drawing and for a press.
-    fn box_caret(&self, focus: Focus) -> (text::TextCursor, Option<usize>) {
-        let held = self.box_text(focus);
-        if self.editor_for == Some(focus) && self.editor.text() == held {
-            (self.editor.cursor(), self.editor.selection_anchor())
-        } else {
-            (text::TextCursor::from(held.len()), None)
-        }
-    }
-
-    /// A press in the box `focus` names, drawn at `rect`, at `x`: the
-    /// keyboard, and the caret under the pointer, measured against the box
-    /// as it was drawn.
-    fn press_box(&mut self, focus: Focus, rect: Rect, x: f32) {
-        let (drawn, _) = self.box_caret(focus);
-        self.load_editor(focus);
-        let inner = inset(rect, BOX_TEXT_INSET);
-        let cursor = textedit::cursor_at_click(
-            self.box_text(focus),
-            drawn,
-            inner.w,
-            BOX_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - inner.x,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
+        let edit = self.typed_box(focus).key(event);
+        edit.handled.then_some(edit.changed)
     }
 
     /// A box's text in `inner`: what it holds -- with its caret and
-    /// selection where they are while it has the keyboard, scrolled so the
-    /// caret stays in view -- or, empty, `placeholder`, with the caret before
-    /// it while it has the keyboard. Refused, as `put_text` refuses a run,
-    /// where the clip in force cannot show it. The boxes drew their text cut
-    /// with an ellipsis and a caret after its end -- the only place the keys
-    /// could type -- or at the box's edge, past it.
+    /// selection where they are while it has the keyboard (`focused`),
+    /// scrolled so the caret stays in view -- or, empty, `placeholder`, with
+    /// the caret before it while it has the keyboard. Refused, as `put_text`
+    /// refuses a run, where the clip in force cannot show it.
     fn draw_box_text(
         &self,
         f: &mut Frame<Target>,
@@ -5030,64 +4997,34 @@ impl ContactsApp {
         if !f.is_visible(inner) {
             return;
         }
-        let held = self.box_text(focus);
         let line = text::line_height(BOX_TEXT_SIZE, FontWeightHint::Regular);
         let y = inner.y + ((inner.h - line) / 2.0).max(0.0);
         let mut tree = RenderTree::new();
-        if held.is_empty() {
-            tree.push(RenderCommand::Text {
+        self.shown_box(focus).draw(
+            &mut tree,
+            &LineLook {
                 x: inner.x,
                 y,
-                text: placeholder.to_string(),
+                width: inner.w,
+                line_height: line,
+                focused,
+                placeholder,
+                color: self.palette.text,
                 // What the box is for, faint but readable: overlay0 is the
                 // disabled grey, 2.30:1 on the base.
-                color: self.palette.subtext0,
-                font_size: BOX_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(inner.w),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(
-                    &mut tree,
-                    inner.x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let (cursor, anchor) = if focused {
-                self.box_caret(focus)
-            } else {
-                (text::TextCursor::default(), None)
-            };
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: held,
-                    cursor,
-                    selection_anchor: anchor,
-                    focused,
-                    x: inner.x,
-                    y,
-                    width: inner.w,
-                    line_height: line,
-                    font_size: BOX_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         for command in tree.commands {
             f.push(command);
         }
     }
 
+    /// A keystroke: text into whatever has the keyboard, otherwise a
+    /// shortcut.
     fn handle_key(&mut self, event: &KeyEvent) {
         if !event.pressed {
             return;
@@ -5709,7 +5646,7 @@ mod tests {
                         // nothing at all unless there is a form to save.
                         if focus != Focus::None {
                             app.view = DetailView::EditContact(id);
-                            app.edit_first_name = String::from("Changed");
+                            app.edit_first_name.set_text("Changed");
                         }
                         // What a user could notice, which is wider than the frame.
                         // `handle_key` returns `()` and there is no consumed signal to
@@ -5724,7 +5661,7 @@ mod tests {
                                 a.frame(1000.0, 700.0).commands(),
                                 a.focus,
                                 a.view,
-                                a.search_query,
+                                a.search_query.text(),
                                 a.status
                             )
                         };
@@ -8092,8 +8029,8 @@ mod tests {
     #[test]
     fn test_app_clear_edit_form() {
         let mut app = ContactsApp::new();
-        app.edit_first_name = String::from("Test");
-        app.edit_last_name = String::from("User");
+        app.edit_first_name.set_text("Test");
+        app.edit_last_name.set_text("User");
         app.clear_edit_form();
         assert!(app.edit_first_name.is_empty());
         assert!(app.edit_last_name.is_empty());
@@ -8112,31 +8049,31 @@ mod tests {
         c.addresses.push(addr);
 
         app.load_edit_form(&c);
-        assert_eq!(app.edit_first_name, "John");
-        assert_eq!(app.edit_last_name, "Doe");
-        assert_eq!(app.edit_company, "ACME");
-        assert_eq!(app.edit_phone, "123");
+        assert_eq!(app.edit_first_name.text(), "John");
+        assert_eq!(app.edit_last_name.text(), "Doe");
+        assert_eq!(app.edit_company.text(), "ACME");
+        assert_eq!(app.edit_phone.text(), "123");
         assert_eq!(app.edit_phone_type, PhoneType::Home);
-        assert_eq!(app.edit_email, "j@d.com");
+        assert_eq!(app.edit_email.text(), "j@d.com");
         assert_eq!(app.edit_email_type, EmailType::Work);
-        assert_eq!(app.edit_birthday, "1990-05-10");
-        assert_eq!(app.edit_street, "456 Elm");
+        assert_eq!(app.edit_birthday.text(), "1990-05-10");
+        assert_eq!(app.edit_street.text(), "456 Elm");
         assert_eq!(app.edit_address_type, AddressType::Work);
     }
 
     #[test]
     fn test_app_build_contact_from_form() {
         let mut app = ContactsApp::new();
-        app.edit_first_name = String::from("Jane");
-        app.edit_last_name = String::from("Smith");
-        app.edit_company = String::from("TechCo");
-        app.edit_phone = String::from("555-0100");
+        app.edit_first_name.set_text("Jane");
+        app.edit_last_name.set_text("Smith");
+        app.edit_company.set_text("TechCo");
+        app.edit_phone.set_text("555-0100");
         app.edit_phone_type = PhoneType::Work;
-        app.edit_email = String::from("jane@tech.co");
+        app.edit_email.set_text("jane@tech.co");
         app.edit_email_type = EmailType::Work;
-        app.edit_birthday = String::from("1988-03-15");
-        app.edit_street = String::from("789 Pine");
-        app.edit_city = String::from("Portland");
+        app.edit_birthday.set_text("1988-03-15");
+        app.edit_street.set_text("789 Pine");
+        app.edit_city.set_text("Portland");
 
         let c = app.build_contact_from_form();
         assert_eq!(c.first_name, "Jane");
@@ -8155,7 +8092,7 @@ mod tests {
     #[test]
     fn test_app_build_contact_from_form_empty_phone() {
         let mut app = ContactsApp::new();
-        app.edit_first_name = String::from("Test");
+        app.edit_first_name.set_text("Test");
         let c = app.build_contact_from_form();
         assert!(c.phones.is_empty());
     }
@@ -8163,7 +8100,7 @@ mod tests {
     #[test]
     fn test_app_build_contact_from_form_empty_address() {
         let mut app = ContactsApp::new();
-        app.edit_first_name = String::from("Test");
+        app.edit_first_name.set_text("Test");
         let c = app.build_contact_from_form();
         assert!(c.addresses.is_empty());
     }
@@ -8477,7 +8414,7 @@ mod tests {
     /// The id of the first contact the list would show, at the default size.
     fn first_listed(app: &ContactsApp) -> u64 {
         app.store
-            .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+            .filtered_sorted(&app.filter, app.sort_order, app.search_query.text())
             .first()
             .expect("the sample data has contacts")
             .id
@@ -8518,7 +8455,7 @@ mod tests {
         let mut adding = wired();
         adding.start_new_contact();
         for field in FormField::ALL {
-            *adding.field_mut(field) = "0123456789".repeat(4);
+            adding.field_box(field).set_text(&"0123456789".repeat(4));
         }
         out.push(("adding, every field full", adding));
 
@@ -8534,7 +8471,7 @@ mod tests {
 
         let mut searching = wired();
         searching.focus = Focus::Search;
-        searching.search_query = String::from("qqqqqqqqqqqqqqqqqqqq");
+        searching.search_query.set_text("qqqqqqqqqqqqqqqqqqqq");
         out.push(("searching, nothing matches", searching));
 
         let mut scrolled = wired();
@@ -9326,7 +9263,7 @@ mod tests {
         let mut app = wired();
         let names: Vec<(u64, String)> = app
             .store
-            .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+            .filtered_sorted(&app.filter, app.sort_order, app.search_query.text())
             .iter()
             .map(|c| (c.id, c.computed_display_name()))
             .collect();
@@ -9536,7 +9473,7 @@ mod tests {
         let mut app = wired();
         let all = app
             .store
-            .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+            .filtered_sorted(&app.filter, app.sort_order, app.search_query.text())
             .len();
         let wanted = app
             .store
@@ -9556,10 +9493,10 @@ mod tests {
         for ch in wanted.chars() {
             app.key_at(&typing(&ch.to_string()), SIZE);
         }
-        assert_eq!(app.search_query, wanted);
+        assert_eq!(app.search_query.text(), wanted);
         let narrowed = app
             .store
-            .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+            .filtered_sorted(&app.filter, app.sort_order, app.search_query.text())
             .len();
         assert!(
             narrowed < all,
@@ -9568,7 +9505,7 @@ mod tests {
 
         app.key_at(&key_press(Key::Backspace), SIZE);
         assert_eq!(
-            app.search_query.len(),
+            app.search_query.text().len(),
             wanted.len() - wanted.chars().last().map_or(0, char::len_utf8),
             "backspace did not reach the search box"
         );
@@ -9851,7 +9788,7 @@ mod tests {
 
         app.select_contact(id);
         click_text(&mut app, SIZE, "Edit");
-        *app.field_mut(FormField::FirstName) = String::from("Renamed");
+        app.field_box(FormField::FirstName).set_text("Renamed");
         click_text(&mut app, SIZE, "Save");
 
         let saved = app.store.get_contact(id).expect("the contact was deleted");
@@ -10247,7 +10184,8 @@ mod tests {
         app.handle_event(&held(Key::S, "ś", altgr), SIZE);
         app.handle_event(&held(Key::S, "s", Modifiers::ctrl()), SIZE);
         assert_eq!(
-            app.edit_first_name, "ś",
+            app.edit_first_name.text(),
+            "ś",
             "the field typed a command or lost AltGr's ś"
         );
         assert!(!app.picker.is_open(), "a key opened a dialog");
@@ -10778,11 +10716,11 @@ mod tests {
             );
             // A key under the question reaches nothing.
             app.on_event(&key_event(Key::Unknown(0), false, "x"));
-            assert_eq!(app.edit_first_name, "Half");
+            assert_eq!(app.edit_first_name.text(), "Half");
             // Cancel: the window stays, the form as it was.
             app.on_event(&key_event(Key::Escape, false, ""));
             assert!(app.question.is_none() && !app.quit);
-            assert_eq!(app.edit_first_name, "Half");
+            assert_eq!(app.edit_first_name.text(), "Half");
             // Save: the contact is added, kept, and the window goes.
             app.on_event(&Event::CloseRequested);
             assert!(matches!(
@@ -10869,7 +10807,7 @@ mod tests {
         press(&mut app, Key::E);
         assert_eq!(app.view, DetailView::EditContact(id));
         // Change one thing: the first name.
-        app.edit_first_name = String::from("Augusta");
+        app.edit_first_name.set_text("Augusta");
         press(&mut app, Key::Enter);
         let after = app.store.get_contact(id).unwrap();
         assert_eq!(after.first_name, "Augusta");
@@ -10894,7 +10832,7 @@ mod tests {
         let plain = app.store.add_contact(Contact::new(0, "Ada", "Byron"));
         app.view = DetailView::ViewContact(plain);
         press(&mut app, Key::E);
-        app.edit_last_name = String::from("King");
+        app.edit_last_name.set_text("King");
         press(&mut app, Key::Enter);
         assert_eq!(
             app.store
@@ -11105,10 +11043,10 @@ mod tests {
         app.select_contact(id);
         app.start_editing();
         assert_eq!(app.focus, Focus::Field(FormField::FirstName));
-        assert_eq!(app.edit_first_name, "Ada");
+        assert_eq!(app.edit_first_name.text(), "Ada");
         chord_in(&mut app, Key::Home, Modifiers::NONE);
         chord_in(&mut app, Key::Delete, Modifiers::NONE);
-        assert_eq!(app.edit_first_name, "da", "Delete at the caret");
+        assert_eq!(app.edit_first_name.text(), "da", "Delete at the caret");
         assert_eq!(
             app.store.contact_count(),
             1,
@@ -11118,7 +11056,7 @@ mod tests {
         // a shortcut under a box: N started a new contact over this one.
         chord_in(&mut app, Key::N, Modifiers::NONE);
         assert_eq!(
-            (app.focus, app.edit_first_name.as_str()),
+            (app.focus, app.edit_first_name.text()),
             (Focus::Field(FormField::FirstName), "da"),
             "a letter that typed nothing reached the shortcuts"
         );
@@ -11126,7 +11064,7 @@ mod tests {
         chord_in(&mut app, Key::End, Modifiers::NONE);
         chord_in(&mut app, Key::Left, Modifiers::NONE);
         typed_in(&mut app, "!");
-        assert_eq!(app.edit_first_name, "Ad!a", "the caret did not move");
+        assert_eq!(app.edit_first_name.text(), "Ad!a", "the caret did not move");
         let rect = probe::rect_of(&app, Target::Field(FormField::FirstName)).expect("the box");
         let inner = inset(rect, BOX_TEXT_INSET);
         let at = inner.x
@@ -11145,11 +11083,11 @@ mod tests {
 
         chord_in(&mut app, Key::A, Modifiers::ctrl());
         chord_in(&mut app, Key::X, Modifiers::ctrl());
-        assert_eq!(app.edit_first_name, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.edit_first_name.text(), "", "Ctrl+A and Ctrl+X");
         chord_in(&mut app, Key::Tab, Modifiers::NONE);
         assert_eq!(app.focus, Focus::Field(FormField::LastName));
         chord_in(&mut app, Key::V, Modifiers::ctrl());
-        assert_eq!(app.edit_last_name, "LovelaceAd!a", "Ctrl+V");
+        assert_eq!(app.edit_last_name.text(), "LovelaceAd!a", "Ctrl+V");
 
         // A press at the start of the last name, whose caret the paste left
         // at its end, puts it there.
@@ -11163,7 +11101,8 @@ mod tests {
         );
         typed_in(&mut app, "<");
         assert_eq!(
-            app.edit_last_name, "<LovelaceAd!a",
+            app.edit_last_name.text(),
+            "<LovelaceAd!a",
             "the press did not put the caret at the start"
         );
 
@@ -11179,7 +11118,7 @@ mod tests {
         typed_in(&mut app, "Ada");
         chord_in(&mut app, Key::Home, Modifiers::NONE);
         typed_in(&mut app, "<");
-        assert_eq!(app.edit_first_name, "<Ada");
+        assert_eq!(app.edit_first_name.text(), "<Ada");
     }
 
     /// **The search box edits at a caret**, and every edit searches.
@@ -11195,17 +11134,17 @@ mod tests {
             chord_in(&mut app, Key::Left, Modifiers::NONE);
         }
         typed_in(&mut app, "u");
-        assert_eq!(app.search_query, "Turing", "the caret did not move");
+        assert_eq!(app.search_query.text(), "Turing", "the caret did not move");
         assert_eq!(
             app.store
-                .filtered_sorted(&app.filter, app.sort_order, &app.search_query)
+                .filtered_sorted(&app.filter, app.sort_order, app.search_query.text())
                 .len(),
             1
         );
         chord_in(&mut app, Key::End, Modifiers::NONE);
         chord_in(&mut app, Key::Home, Modifiers::shift());
         typed_in(&mut app, "Ada");
-        assert_eq!(app.search_query, "Ada", "Shift+Home did not select");
+        assert_eq!(app.search_query.text(), "Ada", "Shift+Home did not select");
         // From the start, so a press past the end has somewhere to move it.
         chord_in(&mut app, Key::Home, Modifiers::NONE);
         let rect = probe::rect_of(&app, Target::Search).expect("the search box");
@@ -11217,14 +11156,49 @@ mod tests {
         );
         typed_in(&mut app, "!");
         assert_eq!(
-            app.search_query, "Ada!",
+            app.search_query.text(),
+            "Ada!",
             "the press did not put the caret at the end"
         );
     }
 
+    /// **A press in a box without the keyboard lands where the box reads**:
+    /// a text longer than the box is drawn from its start there, so a press
+    /// after its second letter puts the caret after its second letter -- not
+    /// where the text would stand scrolled under a caret at its end.
+    #[test]
+    fn a_press_in_a_box_without_the_keyboard_lands_where_it_reads() {
+        let mut app = ContactsApp::new();
+        app.search_query.set_text(&"w".repeat(80));
+        app.focus = Focus::None;
+        let rect = probe::rect_of(&app, Target::Search).expect("the search box");
+        let inner = inset(rect, BOX_TEXT_INSET);
+        assert!(
+            text::measure(
+                app.search_query.text(),
+                BOX_TEXT_SIZE,
+                FontWeightHint::Regular
+            ) > inner.w,
+            "control: the text fits the box"
+        );
+        let after_two = inner.x + text::measure("ww", BOX_TEXT_SIZE, FontWeightHint::Regular);
+        app.click_at(
+            after_two + 0.5,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            SIZE,
+        );
+        assert_eq!(app.focus, Focus::Search);
+        assert_eq!(
+            app.search_query.input().cursor().byte(),
+            2,
+            "the press was measured against the text scrolled to its end"
+        );
+    }
+
     /// **A box edits the text it shows**, however that text came to be in
-    /// it: its editor is loaded from the box whenever a key finds the two
-    /// apart -- and a box the keyboard moves to types after what it holds.
+    /// it: a text put in it from outside has its caret after it, and a box
+    /// the keyboard moves to types at its own caret, not the last box's.
     #[test]
     fn a_box_edits_the_text_it_shows() {
         use guitk::event::Modifiers;
@@ -11232,15 +11206,20 @@ mod tests {
         app.start_new_contact();
         typed_in(&mut app, "Ada");
         chord_in(&mut app, Key::Home, Modifiers::NONE);
-        app.edit_last_name = String::from("Ada");
+        app.edit_last_name.set_text("Ada");
         chord_in(&mut app, Key::Tab, Modifiers::NONE);
         typed_in(&mut app, "!");
         assert_eq!(
-            app.edit_last_name, "Ada!",
+            app.edit_last_name.text(),
+            "Ada!",
             "Tab kept the first name's caret"
         );
-        app.edit_last_name = String::from("Byron");
+        app.edit_last_name.set_text("Byron");
         typed_in(&mut app, "?");
-        assert_eq!(app.edit_last_name, "Byron?", "the key edited another text");
+        assert_eq!(
+            app.edit_last_name.text(),
+            "Byron?",
+            "the key edited another text"
+        );
     }
 }

@@ -308,9 +308,15 @@ MUTATIONS = [
     ),
     (
         'the search box is not marked while it has the keyboard',
-        '                focused: self.search_active,',
-        '                focused: false,',
+        '                focused: self.search_active,\n                disabled: false,',
+        '                focused: false,\n                disabled: false,',
         ['the_text_boxes_are_the_toolkits_fields'],
+    ),
+    (
+        'the search box draws no caret while it has the keyboard',
+        '                focused: self.search_active,\n                placeholder:',
+        '                focused: false,\n                placeholder:',
+        ['the_search_box_edits_at_a_caret'],
     ),
     (
         'an editor field is drawn the same wherever the pointer is',
@@ -638,11 +644,9 @@ MENU_CLOCK = "the_menu_says_why_on_the_clock_and_pastes_to_the_capacity"
 
 MUTATIONS += [
     (
-        "the search types only at its end",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        let end = self.search_editor.text().len();\n"
-        "        self.search_editor.set_cursor(TextCursor::from(end));\n"
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
+        "a change to the search keeps the card that was chosen",
+        "        if edit.changed {\n            self.search_changed();\n        }\n",
+        "",
         [CARET],
     ),
     (
@@ -659,8 +663,8 @@ MUTATIONS += [
     ),
     (
         "a press in the search puts the caret nowhere",
-        "        self.search_editor.set_cursor(cursor);\n",
-        "",
+        "            .press(x - rect.x - 8.0, rect.w - 16.0, had_the_keyboard);\n",
+        "            .press(0.0, rect.w - 16.0, had_the_keyboard);\n",
         [PRESSED],
     ),
     (
@@ -677,7 +681,7 @@ MUTATIONS += [
     ),
     (
         "a row chosen does nothing to the search",
-        "                if self.search_editor.edit_command(id) == KeyEdit::Changed {\n",
+        "                if self.search.menu_row(id) {\n",
         "                if false {\n",
         [MENU, MENU_CLOCK],
     ),
@@ -743,8 +747,8 @@ MUTATIONS += [
     ),
     (
         "a press in the search box says nothing",
-        "        self.search_active = true;\n        self.status_msg = String::from(SEARCH_HINT);\n        self.sync_search_editor();\n",
-        "        self.search_active = true;\n        self.sync_search_editor();\n",
+        "        self.search_active = true;\n        self.status_msg = String::from(SEARCH_HINT);\n",
+        "        self.search_active = true;\n",
         [HINT],
     ),
 ]

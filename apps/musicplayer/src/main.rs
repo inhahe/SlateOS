@@ -5303,9 +5303,8 @@ mod tests {
     }
 
     /// **The box edits the search it shows**, however the search came to be
-    /// in it: its editor is loaded from the query whenever a press or a key
-    /// finds the two apart, so a press lands in what is shown and a key
-    /// types after it.
+    /// in it: a search set from outside the box puts its caret at the end,
+    /// so a press lands in what is shown and a key types after it.
     #[test]
     fn the_box_edits_the_search_it_shows() {
         let mut state = PlayerState::new();
@@ -5325,6 +5324,31 @@ mod tests {
             state.search.text(),
             "blues?",
             "the key edited another search"
+        );
+    }
+
+    /// **A press in a long search lands where it was drawn**: the box with
+    /// the keyboard draws a search too long for it scrolled to the caret at
+    /// its end, and a press near its right edge is measured against that --
+    /// near the end, not a box's width from the start.
+    #[test]
+    fn a_press_in_a_long_search_lands_where_it_was_drawn() {
+        let mut state = PlayerState::new();
+        load_demo_library(&mut state);
+        state.active_tab = Tab::Library;
+        handle_key(&mut state, &pressed(Key::F, true));
+        handle_key(&mut state, &typing(&"w".repeat(120)));
+        let rect = search_box_rect(state.width);
+        let mid = rect.y + rect.h / 2.0;
+        assert!(press_at(
+            &mut state,
+            rect.right() - SEARCH_TEXT_INSET - 1.0,
+            mid
+        ));
+        let at = state.search.input().cursor().byte();
+        assert!(
+            at > 90,
+            "the press landed at {at}, measured from the start of the search"
         );
     }
 

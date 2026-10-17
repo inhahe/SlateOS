@@ -148,7 +148,7 @@ MUTATIONS += [
         "a press is measured as the box was not drawn",
         "            had_the_keyboard,\n",
         "            !had_the_keyboard,\n",
-        [EDITS],
+        ["a_press_in_a_long_search_lands_where_it_was_drawn"],
     ),
     (
         "a press puts the caret at the start",

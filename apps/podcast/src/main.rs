@@ -8083,6 +8083,27 @@ mod tests {
     }
 
     /// The window with the sample library, in the search.
+    /// **A press in a long search lands where it was drawn**: the box, which
+    /// has the keyboard whenever the search shows, draws a search too long
+    /// for it scrolled to the caret at its end, and a press near its right
+    /// edge is measured against that -- near the end, not a box's width from
+    /// the start.
+    #[test]
+    fn a_press_in_a_long_search_lands_where_it_was_drawn() {
+        let mut app = searching_app();
+        type_into(&mut app, &"w".repeat(120));
+        let rect = app.search_box_rect();
+        app.handle_event(&click_at(
+            rect.right() - SEARCH_TEXT_INSET - 1.0,
+            rect.y + rect.h / 2.0,
+        ));
+        let at = app.search.input().cursor().byte();
+        assert!(
+            at > 90,
+            "the press landed at {at}, measured from the start of the search"
+        );
+    }
+
     fn searching_app() -> PodcastApp {
         let mut app = PodcastApp::with_sample_data(1000.0, 700.0);
         app.select_sidebar(SidebarTarget::Search);

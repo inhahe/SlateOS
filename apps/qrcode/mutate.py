@@ -84,7 +84,7 @@ MUTATIONS = [
     # -- nothing to encode -----------------------------------------------------------------------------------------
     (
         "an empty box is encoded as its prefix",
-        "                self.input_text.is_empty().then_some(NOTHING_TYPED)",
+        "                self.boxes.text.is_empty().then_some(NOTHING_TYPED)",
         "                false.then_some(NOTHING_TYPED)",
         ["an_empty_box_is_no_code_in_any_kind", "test_app_generate_empty"],
     ),
@@ -170,15 +170,9 @@ MUTATIONS = [
     # -- the boxes -------------------------------------------------------------------------------------------------------
     (
         "the field is given no keys",
-        "        let done = textline::apply_key_on_clipboard(&mut self.editor, key, 12.0);",
-        "        let done = textline::LineEdit::default();",
+        "        let edit = self.boxes.get_mut(field).key(key);",
+        "        let edit = textline::LineKey::default();",
         ["the_caret_moves_and_typing_goes_where_it_is", "every_advertised_key_does_something"],
-    ),
-    (
-        "a box changed from outside is typed over",
-        "        if self.editor.text() != self.field_text(field) {\n            // Changed from outside the box",
-        "        if false {\n            // Changed from outside the box",
-        ["a_box_changed_from_outside_is_typed_onto"],
     ),
     (
         "Escape empties nothing",
@@ -320,20 +314,6 @@ MUTATIONS = [
         "        let _ = settings;",
         ["the_input_boxes_are_the_toolkits_fields"],
     ),
-    (
-        # 2026-10-04: an idle box was drawn scrolled to its end, and a press
-        # measured as if it showed its start.
-        "an idle box is drawn scrolled to its end",
-        "                    } else if focused {\n"
-        "                        TextCursor::from(value.len())\n"
-        "                    } else {\n"
-        "                        TextCursor::default()\n"
-        "                    },\n",
-        "                    } else {\n"
-        "                        TextCursor::from(value.len())\n"
-        "                    },\n",
-        ["a_press_in_an_idle_box_lands_on_the_character_drawn_under_it"],
-    ),
 ]
 
 # A box's right-click menu (2026-10-10, requests/c-e-text-fields-have-a-
@@ -354,15 +334,15 @@ MUTATIONS += [
     ),
     (
         'a row chosen does nothing',
-        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n',
+        '        if self.boxes.get_mut(field).menu_row(id) {\n',
         '        if false {\n',
         [QR_MENU, QR_CAP],
     ),
     (
         'the code does not follow the menu',
-        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n            *self.field_text_mut(field) = self.editor.text().to_owned();\n',
-        '        if self.editor.edit_command(id) == KeyEdit::Changed {\n',
-        [QR_MENU, QR_CAP],
+        '        if self.boxes.get_mut(field).menu_row(id) {\n            self.notice = None;\n            self.generate();\n',
+        '        if self.boxes.get_mut(field).menu_row(id) {\n            self.notice = None;\n',
+        [QR_MENU],
     ),
     (
         "the right-click leaves the keys where they were",
@@ -384,8 +364,8 @@ MUTATIONS += [
     ),
     (
         'the box holds no capacity',
-        '            editor: textline::field_holding("", MAX_FIELD_CHARS),\n',
-        '            editor: textline::field_holding("", usize::MAX),\n',
+        '        let empty = || LineBox::new(MAX_FIELD_CHARS, FIELD_TEXT_SIZE);\n',
+        '        let empty = || LineBox::new(usize::MAX, FIELD_TEXT_SIZE);\n',
         [QR_CAP],
     ),
     (

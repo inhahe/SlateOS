@@ -42,6 +42,7 @@ use appearance::Palette;
 use appearance::Surface;
 use core::num::NonZeroUsize;
 use pathtext::ShowPath;
+use textline::{LineBox, LineLook};
 
 use guitk::Color;
 use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
@@ -50,9 +51,8 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::frame::{Frame, Rect};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text::{self, TextCursor};
+use guitk::text;
 use guitk::textedit;
-use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::path::Path;
@@ -1552,6 +1552,71 @@ pub enum Field {
     Organization,
 }
 
+/// The size the boxes' text is drawn at, which their caret keys and a
+/// press measure against as well.
+const FIELD_TEXT_SIZE: f32 = 12.0;
+
+/// The boxes, one for each [`Field`]: what is typed into each, and its
+/// caret. The one record of what is typed: a code's data
+/// ([`QrApp::wifi_config`], [`QrApp::vcard_info`]) is made from them.
+#[derive(Clone, Debug)]
+pub struct FieldBoxes {
+    pub text: LineBox,
+    pub ssid: LineBox,
+    pub password: LineBox,
+    pub first_name: LineBox,
+    pub last_name: LineBox,
+    pub phone: LineBox,
+    pub email: LineBox,
+    pub organization: LineBox,
+}
+
+impl FieldBoxes {
+    /// Every box empty.
+    fn new() -> Self {
+        let empty = || LineBox::new(MAX_FIELD_CHARS, FIELD_TEXT_SIZE);
+        Self {
+            text: empty(),
+            ssid: empty(),
+            password: empty(),
+            first_name: empty(),
+            last_name: empty(),
+            phone: empty(),
+            email: empty(),
+            organization: empty(),
+        }
+    }
+
+    /// `field`'s box.
+    #[must_use]
+    pub fn get(&self, field: Field) -> &LineBox {
+        match field {
+            Field::Text => &self.text,
+            Field::Ssid => &self.ssid,
+            Field::Password => &self.password,
+            Field::FirstName => &self.first_name,
+            Field::LastName => &self.last_name,
+            Field::Phone => &self.phone,
+            Field::Email => &self.email,
+            Field::Organization => &self.organization,
+        }
+    }
+
+    /// `field`'s box, to change.
+    pub fn get_mut(&mut self, field: Field) -> &mut LineBox {
+        match field {
+            Field::Text => &mut self.text,
+            Field::Ssid => &mut self.ssid,
+            Field::Password => &mut self.password,
+            Field::FirstName => &mut self.first_name,
+            Field::LastName => &mut self.last_name,
+            Field::Phone => &mut self.phone,
+            Field::Email => &mut self.email,
+            Field::Organization => &mut self.organization,
+        }
+    }
+}
+
 impl Field {
     /// The label above the box.
     #[must_use]
@@ -1756,7 +1821,8 @@ impl HistoryEntry {
 // ============================================================================
 
 pub struct QrApp {
-    pub input_text: String,
+    /// The boxes, each with what is typed into it.
+    pub boxes: FieldBoxes,
     pub input_mode: InputMode,
     /// Which of this mode's boxes the keyboard is typing into.
     pub focused_field: usize,
@@ -1767,8 +1833,10 @@ pub struct QrApp {
     pub module_size: ModuleSize,
     pub fg_color: Color,
     pub bg_color: Color,
-    pub wifi_config: WifiConfig,
-    pub vcard_info: VCardInfo,
+    /// The WiFi code's security and whether its network is hidden: the
+    /// rest of its `WifiConfig` is in the boxes.
+    pub wifi_encryption: WifiEncryption,
+    pub wifi_hidden: bool,
     pub current_qr: Option<QrCode>,
     pub current_barcode: Option<Code128Barcode>,
     pub history: Vec<HistoryEntry>,
@@ -1780,10 +1848,6 @@ pub struct QrApp {
     pub waiting_for: Option<&'static str>,
     pub window_width: f32,
     pub window_height: f32,
-    /// The box being typed into, as a field with a caret and a selection. It
-    /// edits the text of `focused_field()`, and is reloaded from it whenever
-    /// the two differ, so the strings stay the one record of what is typed.
-    editor: TextInput,
     /// The box's right-click menu -- Cut, Copy, Paste, Delete, Select all --
     /// while it is up, and the box it is for
     /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
@@ -1826,7 +1890,7 @@ impl QrApp {
     pub fn new() -> Self {
         Self {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
-            input_text: String::new(),
+            boxes: FieldBoxes::new(),
             input_mode: InputMode::Text,
             focused_field: 0,
             show_help: false,
@@ -1835,8 +1899,8 @@ impl QrApp {
             module_size: ModuleSize::Medium,
             fg_color: Color::BLACK,
             bg_color: Color::WHITE,
-            wifi_config: WifiConfig::default(),
-            vcard_info: VCardInfo::default(),
+            wifi_encryption: WifiConfig::default().encryption,
+            wifi_hidden: WifiConfig::default().hidden,
             current_qr: None,
             current_barcode: None,
             history: Vec::new(),
@@ -1844,7 +1908,6 @@ impl QrApp {
             waiting_for: Some(NOTHING_TYPED),
             window_width: 1100.0,
             window_height: 700.0,
-            editor: textline::field_holding("", MAX_FIELD_CHARS),
             field_menu: fieldmenu::FieldMenu::new(),
             history_open: false,
             history_scroll: 0,
@@ -1862,15 +1925,15 @@ impl QrApp {
     fn missing_input(&self) -> Option<&'static str> {
         match self.input_mode {
             InputMode::Text | InputMode::Url | InputMode::Email | InputMode::Phone => {
-                self.input_text.is_empty().then_some(NOTHING_TYPED)
+                self.boxes.text.is_empty().then_some(NOTHING_TYPED)
             }
             InputMode::Wifi => self
-                .wifi_config
+                .boxes
                 .ssid
                 .is_empty()
                 .then_some("A WiFi code needs the network's name (SSID)"),
             InputMode::VCard => {
-                let v = &self.vcard_info;
+                let v = &self.boxes;
                 [
                     &v.first_name,
                     &v.last_name,
@@ -1905,9 +1968,9 @@ impl QrApp {
 
         let data = format_qr_data(
             self.input_mode,
-            &self.input_text,
-            &self.wifi_config,
-            &self.vcard_info,
+            self.boxes.text.text(),
+            &self.wifi_config(),
+            &self.vcard_info(),
         );
 
         match self.code_type {
@@ -1961,9 +2024,9 @@ impl QrApp {
             mode: self.input_mode,
             code_type: self.code_type,
             ec_level: self.ec_level,
-            input_text: self.input_text.clone(),
-            wifi: self.wifi_config.clone(),
-            vcard: self.vcard_info.clone(),
+            input_text: self.boxes.text.text().to_owned(),
+            wifi: self.wifi_config(),
+            vcard: self.vcard_info(),
         };
         match self.history.last_mut() {
             Some(last) if self.history_open => *last = entry,
@@ -1997,15 +2060,13 @@ impl QrApp {
         self.input_mode = entry.mode;
         self.code_type = entry.code_type;
         self.ec_level = entry.ec_level;
-        self.input_text.clone_from(&entry.input_text);
-        self.wifi_config = entry.wifi.clone();
-        self.vcard_info = entry.vcard.clone();
+        self.fill_boxes(&entry);
         self.focused_field = 0;
         self.history.push(entry);
         self.history_open = true;
         self.history_scroll = 0;
         self.notice = None;
-        self.load_editor();
+        self.caret_to_end();
         self.generate();
     }
 
@@ -2014,9 +2075,9 @@ impl QrApp {
     /// A whole new text, not an edit of the last, so it starts a new
     /// history entry.
     pub fn set_input(&mut self, text: &str) {
-        self.input_text = text.to_owned();
+        self.boxes.text.set_text(text);
         self.history_open = false;
-        self.load_editor();
+        self.caret_to_end();
     }
 
     /// The box the keyboard is typing into.
@@ -2036,29 +2097,45 @@ impl QrApp {
     /// What is in a box.
     #[must_use]
     pub fn field_text(&self, field: Field) -> &str {
-        match field {
-            Field::Text => &self.input_text,
-            Field::Ssid => &self.wifi_config.ssid,
-            Field::Password => &self.wifi_config.password,
-            Field::FirstName => &self.vcard_info.first_name,
-            Field::LastName => &self.vcard_info.last_name,
-            Field::Phone => &self.vcard_info.phone,
-            Field::Email => &self.vcard_info.email,
-            Field::Organization => &self.vcard_info.organization,
+        self.boxes.get(field).text()
+    }
+
+    /// The WiFi code's data: what its two boxes hold, and its settings.
+    #[must_use]
+    pub fn wifi_config(&self) -> WifiConfig {
+        WifiConfig {
+            ssid: self.boxes.ssid.text().to_owned(),
+            password: self.boxes.password.text().to_owned(),
+            encryption: self.wifi_encryption,
+            hidden: self.wifi_hidden,
         }
     }
 
-    fn field_text_mut(&mut self, field: Field) -> &mut String {
-        match field {
-            Field::Text => &mut self.input_text,
-            Field::Ssid => &mut self.wifi_config.ssid,
-            Field::Password => &mut self.wifi_config.password,
-            Field::FirstName => &mut self.vcard_info.first_name,
-            Field::LastName => &mut self.vcard_info.last_name,
-            Field::Phone => &mut self.vcard_info.phone,
-            Field::Email => &mut self.vcard_info.email,
-            Field::Organization => &mut self.vcard_info.organization,
+    /// The contact code's data: what its five boxes hold.
+    #[must_use]
+    pub fn vcard_info(&self) -> VCardInfo {
+        VCardInfo {
+            first_name: self.boxes.first_name.text().to_owned(),
+            last_name: self.boxes.last_name.text().to_owned(),
+            phone: self.boxes.phone.text().to_owned(),
+            email: self.boxes.email.text().to_owned(),
+            organization: self.boxes.organization.text().to_owned(),
         }
+    }
+
+    /// Put a kept code's boxes and settings back.
+    fn fill_boxes(&mut self, entry: &HistoryEntry) {
+        let b = &mut self.boxes;
+        b.text.set_text(&entry.input_text);
+        b.ssid.set_text(&entry.wifi.ssid);
+        b.password.set_text(&entry.wifi.password);
+        b.first_name.set_text(&entry.vcard.first_name);
+        b.last_name.set_text(&entry.vcard.last_name);
+        b.phone.set_text(&entry.vcard.phone);
+        b.email.set_text(&entry.vcard.email);
+        b.organization.set_text(&entry.vcard.organization);
+        self.wifi_encryption = entry.wifi.encryption;
+        self.wifi_hidden = entry.wifi.hidden;
     }
 
     /// Move the keyboard to the next box of this mode, wrapping.
@@ -2088,7 +2165,7 @@ impl QrApp {
         self.focused_field = 0;
         // The same text as a URL is a different code from it as text.
         self.history_open = false;
-        self.load_editor();
+        self.caret_to_end();
         self.generate();
     }
 
@@ -2099,41 +2176,24 @@ impl QrApp {
         self.history_scroll = 0;
     }
 
-    /// Load the box being typed into from what it holds, caret at the end.
-    fn load_editor(&mut self) {
-        let text = self.field_text(self.focused_field()).to_owned();
-        self.editor.set_text(&text);
+    /// The caret of the box being typed into after what it holds: where a
+    /// box that takes the keyboard by a key, not a press, puts it.
+    fn caret_to_end(&mut self) {
+        let field = self.focused_field();
+        self.boxes.get_mut(field).caret_to_end();
     }
 
-    /// Apply a keystroke to the box being typed into, and answer whether it
-    /// changed anything.
+    /// Apply a keystroke to the box being typed into -- on the program's
+    /// clipboard, which the box's right-click menu copies to and pastes
+    /// from too -- and answer whether it changed anything.
     fn edit(&mut self, key: &KeyEvent) -> EventResult {
         let field = self.focused_field();
-        if self.editor.text() != self.field_text(field) {
-            // Changed from outside the box -- a restore, a test -- so start
-            // from what it holds, not from what the editor last saw.
-            self.load_editor();
-        }
-        let before = (
-            self.editor.text().to_owned(),
-            self.editor.cursor(),
-            self.editor.selection_anchor(),
-        );
-        // On the program's clipboard, which the box's right-click menu
-        // copies to and pastes from too.
-        let done = textline::apply_key_on_clipboard(&mut self.editor, key, 12.0);
-        let copied = done.copied.is_some();
-        let typed = self.editor.text() != before.0;
-        if typed {
-            *self.field_text_mut(field) = self.editor.text().to_owned();
+        let edit = self.boxes.get_mut(field).key(key);
+        if edit.changed {
             self.notice = None;
             self.generate();
         }
-        if typed
-            || copied
-            || self.editor.cursor() != before.1
-            || self.editor.selection_anchor() != before.2
-        {
+        if edit.changed || edit.copied || edit.moved {
             EventResult::Consumed
         } else {
             EventResult::Ignored
@@ -2153,38 +2213,28 @@ impl QrApp {
         }
         let viewport = (self.window_width, self.window_height);
         self.field_menu
-            .open(field, self.editor.edit_menu(), x, y, viewport);
+            .open(field, self.boxes.get(field).edit_menu(), x, y, viewport);
         EventResult::Consumed
     }
 
-    /// Give the box `field` the keys -- with what it holds, loaded afresh
-    /// when it is another box or was changed from outside -- as a press on it
-    /// does, with either button. The box that had them, or `None` for a box
-    /// this mode does not show.
+    /// Give the box `field` the keys, its caret and selection as they were,
+    /// as a press on it does, with either button. The box that had them, or
+    /// `None` for a box this mode does not show.
     fn focus_field(&mut self, field: Field) -> Option<Field> {
         let at = self.input_mode.fields().iter().position(|f| *f == field)?;
         let was = self.focused_field();
         self.focused_field = at;
-        if was != field || self.editor.text() != self.field_text(field) {
-            self.load_editor();
-        }
         Some(was)
     }
 
     /// The menu's row `id`, chosen for the box `field`: done to it as its key
     /// would be, and the code made again from what it then holds.
     fn do_menu_row(&mut self, field: Field, id: guitk::menu::MenuItemId) -> EventResult {
-        // The menu is modal, so the box it was opened on still has the keys;
-        // a box changed from outside meanwhile is reloaded first, as typing
-        // reloads it.
+        // The menu is modal, so the box it was opened on still has the keys.
         if self.focused_field() != field {
             return EventResult::Consumed;
         }
-        if self.editor.text() != self.field_text(field) {
-            self.load_editor();
-        }
-        if self.editor.edit_command(id) == KeyEdit::Changed {
-            *self.field_text_mut(field) = self.editor.text().to_owned();
+        if self.boxes.get_mut(field).menu_row(id) {
             self.notice = None;
             self.generate();
         }
@@ -2194,11 +2244,9 @@ impl QrApp {
     /// Empty the box being typed into.
     fn clear_box(&mut self) -> EventResult {
         let field = self.focused_field();
-        if self.field_text(field).is_empty() {
+        if !self.boxes.get_mut(field).clear() {
             return EventResult::Ignored;
         }
-        self.field_text_mut(field).clear();
-        self.load_editor();
         self.generate();
         EventResult::Consumed
     }
@@ -2208,7 +2256,7 @@ impl QrApp {
         if self.input_mode != InputMode::Wifi {
             return EventResult::Ignored;
         }
-        self.wifi_config.encryption = match self.wifi_config.encryption {
+        self.wifi_encryption = match self.wifi_encryption {
             WifiEncryption::None => WifiEncryption::Wep,
             WifiEncryption::Wep => WifiEncryption::Wpa,
             WifiEncryption::Wpa => WifiEncryption::None,
@@ -2222,7 +2270,7 @@ impl QrApp {
         if self.input_mode != InputMode::Wifi {
             return EventResult::Ignored;
         }
-        self.wifi_config.hidden = !self.wifi_config.hidden;
+        self.wifi_hidden = !self.wifi_hidden;
         self.generate();
         EventResult::Consumed
     }
@@ -2475,7 +2523,7 @@ impl QrApp {
                     return EventResult::Ignored;
                 }
                 self.step_field(!key.modifiers.shift);
-                self.load_editor();
+                self.caret_to_end();
                 EventResult::Consumed
             }
             // The box the cursor is on, for the same reason Backspace works
@@ -2608,7 +2656,7 @@ impl QrApp {
                     return EventResult::Ignored;
                 };
                 if let Some(rect) = rect {
-                    self.place_caret(rect, x, was == field);
+                    self.place_caret(field, rect, x, was == field);
                 }
             }
             Target::Encryption => return self.step_encryption(),
@@ -2656,22 +2704,10 @@ impl QrApp {
     /// Put the box's caret under the pointer at `x`, measured against the
     /// box as it was drawn: from its start when the keys were elsewhere,
     /// scrolled to its caret when they were in it.
-    fn place_caret(&mut self, rect: Rect, x: f32, was_focused: bool) {
-        let drawn = if was_focused {
-            self.editor.cursor()
-        } else {
-            TextCursor::default()
-        };
-        let cursor = textedit::cursor_at_click(
-            self.editor.text(),
-            drawn,
-            (rect.w - 16.0).max(0.0),
-            12.0,
-            FontWeightHint::Regular,
-            x - rect.x - 8.0,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
+    fn place_caret(&mut self, field: Field, rect: Rect, x: f32, was_focused: bool) {
+        self.boxes
+            .get_mut(field)
+            .press(x - rect.x - 8.0, rect.w - 16.0, was_focused);
     }
 
     /// The wheel over the history.
@@ -3137,14 +3173,14 @@ impl QrApp {
             self.button(
                 f,
                 Rect::new(lx, row_y, half, 24.0),
-                &format!("Security: {}", self.wifi_config.encryption.label()),
+                &format!("Security: {}", self.wifi_encryption.label()),
                 Target::Encryption,
                 true,
             );
             self.button(
                 f,
                 Rect::new(lx + half + 6.0, row_y, half, 24.0),
-                if self.wifi_config.hidden {
+                if self.wifi_hidden {
                     "Hidden network: yes"
                 } else {
                     "Hidden network: no"
@@ -3272,61 +3308,26 @@ impl QrApp {
             },
             self.focus_ring_width,
         );
-        let value = if focused && self.editor.text() == self.field_text(field) {
-            self.editor.text()
-        } else {
-            self.field_text(field)
-        };
-        if value.is_empty() && !focused {
-            f.push(RenderCommand::Text {
+        // What the box is for, only while it lacks the keyboard: with it, an
+        // empty box is its caret.
+        let mut tree = RenderTree::new();
+        self.boxes.get(field).draw(
+            &mut tree,
+            &LineLook {
                 x: rect.x + 8.0,
-                y: rect.y + 8.0,
-                text: self.placeholder(field).to_owned(),
-                color: self.palette.subtext0,
-                font_size: 12.0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some((rect.w - 16.0).max(0.0)),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            let editing = focused && self.editor.text() == value;
-            let mut tree = RenderTree::new();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: value,
-                    // An idle box shows the start of its text, as
-                    // `place_caret` measures a press on one: drawn with the
-                    // caret at the end, a long text was scrolled to its end,
-                    // and a press landed as many characters from what was
-                    // under it as the scroll had hidden.
-                    cursor: if editing {
-                        self.editor.cursor()
-                    } else if focused {
-                        TextCursor::from(value.len())
-                    } else {
-                        TextCursor::default()
-                    },
-                    selection_anchor: if editing {
-                        self.editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused,
-                    x: rect.x + 8.0,
-                    y: rect.y + 5.0,
-                    width: (rect.w - 16.0).max(0.0),
-                    line_height: 18.0,
-                    font_size: 12.0,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.blue,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-            f.extend(tree.commands);
-        }
+                y: rect.y + 5.0,
+                width: rect.w - 16.0,
+                line_height: 18.0,
+                focused,
+                placeholder: if focused { "" } else { self.placeholder(field) },
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        f.extend(tree.commands);
         // A press puts the keys in the box, and the caret under the pointer.
         f.hit(Target::Field(field), rect);
     }
@@ -3847,7 +3848,7 @@ mod tests {
         for c in "HI".chars() {
             assert_eq!(app.handle_event(&typed(c)), EventResult::Consumed);
         }
-        assert_eq!(app.input_text, "HI");
+        assert_eq!(app.boxes.text.text(), "HI");
         assert!(
             app.current_qr.is_some(),
             "typing should have produced a code"
@@ -3864,9 +3865,9 @@ mod tests {
             app.handle_event(&press(Key::Backspace)),
             EventResult::Consumed
         );
-        assert_eq!(app.input_text, "H");
+        assert_eq!(app.boxes.text.text(), "H");
         app.handle_event(&press(Key::Backspace));
-        assert_eq!(app.input_text, "");
+        assert_eq!(app.boxes.text.text(), "");
         assert_eq!(
             app.handle_event(&press(Key::Backspace)),
             EventResult::Ignored,
@@ -3880,7 +3881,7 @@ mod tests {
         assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Ignored);
         app.handle_event(&typed('X'));
         assert_eq!(app.handle_event(&press(Key::Escape)), EventResult::Consumed);
-        assert!(app.input_text.is_empty());
+        assert!(app.boxes.text.text().is_empty());
     }
 
     #[test]
@@ -3896,7 +3897,11 @@ mod tests {
             app.current_barcode.is_some(),
             "switching should have re-encoded the same text as a barcode"
         );
-        assert_eq!(app.input_text, "ABC123", "the text should be untouched");
+        assert_eq!(
+            app.boxes.text.text(),
+            "ABC123",
+            "the text should be untouched"
+        );
         // Asking again for the kind already showing is not a redraw.
         assert_eq!(app.handle_event(&press_ctrl(Key::B)), EventResult::Ignored);
         assert_eq!(app.handle_event(&press_ctrl(Key::Q)), EventResult::Consumed);
@@ -3916,7 +3921,7 @@ mod tests {
         });
         assert_eq!(app.handle_event(&chord), EventResult::Ignored);
         assert!(
-            app.input_text.is_empty(),
+            app.boxes.text.text().is_empty(),
             "a chord was typed into the field"
         );
     }
@@ -3963,7 +3968,7 @@ mod tests {
             text: "z".to_owned(),
         });
         assert_eq!(app.handle_event(&release), EventResult::Ignored);
-        assert!(app.input_text.is_empty());
+        assert!(app.boxes.text.text().is_empty());
     }
 
     #[test]
@@ -4502,7 +4507,7 @@ mod tests {
     #[test]
     fn test_app_new() {
         let app = QrApp::new();
-        assert!(app.input_text.is_empty());
+        assert!(app.boxes.text.text().is_empty());
         assert_eq!(app.input_mode, InputMode::Text);
         assert_eq!(app.code_type, CodeType::QrCode);
         assert_eq!(app.ec_level, EcLevel::M);
@@ -4759,7 +4764,7 @@ mod tests {
         // In WiFi mode, so `Ctrl+T`, `Ctrl+H` and `Tab` have a reason to act.
         let mut wifi = QrApp::new();
         wifi.set_input_mode(InputMode::Wifi);
-        wifi.wifi_config.ssid = String::from("net");
+        wifi.boxes.ssid.set_text("net");
         // With the list up, so `Escape` has something to close.
         let mut helping = QrApp::new();
         helping.show_help = true;
@@ -4873,9 +4878,9 @@ mod tests {
             }
             encoded.push(format_qr_data(
                 a.input_mode,
-                &a.input_text,
-                &a.wifi_config,
-                &a.vcard_info,
+                a.boxes.text.text(),
+                &a.wifi_config(),
+                &a.vcard_info(),
             ));
         }
         for (i, one) in encoded.iter().enumerate() {
@@ -5005,9 +5010,15 @@ mod tests {
     fn the_wifi_settings_reach_the_encoded_text() {
         let mut app = QrApp::new();
         app.set_input_mode(InputMode::Wifi);
-        app.wifi_config.ssid = String::from("net");
-        let encoded =
-            |a: &QrApp| format_qr_data(a.input_mode, &a.input_text, &a.wifi_config, &a.vcard_info);
+        app.boxes.ssid.set_text("net");
+        let encoded = |a: &QrApp| {
+            format_qr_data(
+                a.input_mode,
+                a.boxes.text.text(),
+                &a.wifi_config(),
+                &a.vcard_info(),
+            )
+        };
 
         assert!(encoded(&app).contains("T:WPA"), "control: WPA by default");
         app.handle_key(&ctrl_key(Key::T));
@@ -5255,12 +5266,9 @@ mod tests {
             "home",
             "Paste did not paste"
         );
-        let encoded = format_qr_data(
-            app.input_mode,
-            &app.input_text,
-            &app.wifi_config,
-            &app.vcard_info,
-        );
+        // The code the program made, not one made here from the boxes: the
+        // newest history entry is what it last encoded.
+        let encoded = app.history.last().map_or("", |e| e.data.as_str());
         assert!(
             encoded.contains("P:home"),
             "the code did not follow: {encoded}"
@@ -5425,9 +5433,9 @@ mod tests {
     fn a_box_changed_from_outside_is_typed_onto() {
         let mut app = QrApp::new();
         probe::type_str(&mut app, "x");
-        app.input_text = String::from("abc");
+        app.boxes.text.set_text("abc");
         probe::type_str(&mut app, "d");
-        assert_eq!(app.input_text, "abcd");
+        assert_eq!(app.boxes.text.text(), "abcd");
     }
 
     /// The label under a barcode is in the code's own ink: it was black
@@ -5476,9 +5484,9 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::Text);
         probe::click(&mut app, Target::HistoryRow(wifi_entry));
         assert_eq!(app.input_mode, InputMode::Wifi);
-        assert_eq!(app.wifi_config.ssid, "Home");
-        assert_eq!(app.wifi_config.password, "secret");
-        assert!(app.wifi_config.hidden);
+        assert_eq!(app.boxes.ssid.text(), "Home");
+        assert_eq!(app.boxes.password.text(), "secret");
+        assert!(app.wifi_hidden);
         assert!(app.current_qr.is_some());
         let kinds: Vec<InputMode> = app.history.iter().map(|e| e.mode).collect();
         assert_eq!(
@@ -5489,7 +5497,7 @@ mod tests {
         assert_eq!(app.history[0].data, "something else");
         // And the box has it, caret at the end, so typing adds to it.
         probe::type_str(&mut app, "2");
-        assert_eq!(app.wifi_config.ssid, "Home2");
+        assert_eq!(app.boxes.ssid.text(), "Home2");
     }
 
     /// Emptying the box left the last code on screen: a code for text that
@@ -5575,14 +5583,15 @@ mod tests {
         app.handle_key(&press_key(Key::Left));
         app.handle_key(&press_key(Key::Left));
         probe::type_str(&mut app, "x");
-        assert_eq!(app.input_text, "hexld");
+        assert_eq!(app.boxes.text.text(), "hexld");
         app.handle_key(&press_key(Key::Home));
         app.handle_key(&press_key(Key::Delete));
-        assert_eq!(app.input_text, "exld");
+        assert_eq!(app.boxes.text.text(), "exld");
         app.handle_key(&ctrl_key(Key::A));
         probe::type_str(&mut app, "new");
         assert_eq!(
-            app.input_text, "new",
+            app.boxes.text.text(),
+            "new",
             "typing over a selection did not replace it"
         );
     }
@@ -5595,10 +5604,10 @@ mod tests {
         assert_eq!(app.handle_key(&ctrl_key(Key::C)), EventResult::Consumed);
         probe::click(&mut app, Target::Mode(InputMode::VCard));
         assert_eq!(app.handle_key(&ctrl_key(Key::V)), EventResult::Consumed);
-        assert_eq!(app.vcard_info.first_name, "Ada");
+        assert_eq!(app.boxes.first_name.text(), "Ada");
         app.handle_key(&ctrl_key(Key::A));
         app.handle_key(&ctrl_key(Key::X));
-        assert!(app.vcard_info.first_name.is_empty(), "cut left the text");
+        assert!(app.boxes.first_name.text().is_empty(), "cut left the text");
     }
 
     /// **A press in an idle box lands on the character drawn under it**,
@@ -5611,14 +5620,18 @@ mod tests {
         let mut app = QrApp::new();
         probe::click(&mut app, Target::Mode(InputMode::VCard));
         let long = "a-name-far-longer-than-its-box-will-ever-show-at-once";
-        app.vcard_info.email = String::from(long);
+        app.boxes.email.set_text(long);
         let rect = probe::rect_of(&app, Target::Field(Field::Email)).expect("the email box");
         let frame = probe::Probe::draw(&app, <QrApp as probe::Probe>::SIZE);
         let origin = frame
             .commands()
             .iter()
             .find_map(|c| match c {
-                RenderCommand::RichText { text, x, .. } if text == long => Some(*x),
+                RenderCommand::Text { text, x, .. } | RenderCommand::RichText { text, x, .. }
+                    if text == long =>
+                {
+                    Some(*x)
+                }
                 _ => None,
             })
             .expect("the email is drawn");
@@ -5639,9 +5652,9 @@ mod tests {
         assert_eq!(app.focused_field(), Field::Email);
         probe::type_str(&mut app, "X");
         assert!(
-            app.vcard_info.email.starts_with("Xa-name"),
+            app.boxes.email.text().starts_with("Xa-name"),
             "the caret went somewhere else: {}",
-            app.vcard_info.email
+            app.boxes.email.text()
         );
     }
 
@@ -5652,16 +5665,17 @@ mod tests {
         probe::click(&mut app, Target::Field(Field::Email));
         assert_eq!(app.focused_field(), Field::Email);
         probe::type_str(&mut app, "ada@example.com");
-        assert_eq!(app.vcard_info.email, "ada@example.com");
+        assert_eq!(app.boxes.email.text(), "ada@example.com");
         assert!(
             app.current_qr.is_some(),
             "a contact with an email made no code"
         );
         probe::click(&mut app, Target::Field(Field::FirstName));
         probe::type_str(&mut app, "Ada");
-        assert_eq!(app.vcard_info.first_name, "Ada");
+        assert_eq!(app.boxes.first_name.text(), "Ada");
         assert_eq!(
-            app.vcard_info.email, "ada@example.com",
+            app.boxes.email.text(),
+            "ada@example.com",
             "the other box changed"
         );
     }
@@ -5681,9 +5695,9 @@ mod tests {
         probe::click(&mut app, Target::Mode(InputMode::Wifi));
         probe::type_str(&mut app, "net");
         probe::click(&mut app, Target::Encryption);
-        assert_eq!(app.wifi_config.encryption, WifiEncryption::None);
+        assert_eq!(app.wifi_encryption, WifiEncryption::None);
         probe::click(&mut app, Target::Hidden);
-        assert!(app.wifi_config.hidden);
+        assert!(app.wifi_hidden);
         assert!(!app.history.is_empty());
         probe::click(&mut app, Target::ClearHistory);
         assert!(app.history.is_empty());
@@ -5703,7 +5717,7 @@ mod tests {
         app.handle_key(&press_key(Key::F1));
         assert_eq!(app.handle_key(&typed_key('x')), EventResult::Ignored);
         assert!(
-            app.input_text.is_empty(),
+            app.boxes.text.text().is_empty(),
             "a key reached the box under the list"
         );
         let mode = probe::rect_of(&app, Target::HelpCard).unwrap();
@@ -5742,7 +5756,7 @@ mod tests {
         assert_eq!(app.history_scroll, 40 - rows);
         // The oldest is on screen now, and a press brings it back.
         probe::click(&mut app, Target::HistoryRow(0));
-        assert_eq!(app.input_text, "code 0");
+        assert_eq!(app.boxes.text.text(), "code 0");
     }
 
     #[test]

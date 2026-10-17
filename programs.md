@@ -284,7 +284,7 @@ two disagree.
 | `tee` | Copy standard input to each FILE, and also to standard output. | yes | `coreutils` |  |
 | `telnet` | `Slate OS` Telnet Client | yes |  |  |
 | `test` | Evaluate a conditional expression. | yes | `coreutils` |  |
-| `tic` | `tic`: ncurses 6.4's (`progs/tic.c`, 20240113), ported -- with its aliases `captoinfo` (`-I`) and `infotocap` (`-C`). | yes | `coreutils` |  |
+| `tic` | `tic`: ncurses 6.4's (`progs/tic.c`, 20240113), ported -- with its aliases `captoinfo` (`-I`) and `infotocap` (`-C`). | yes | `coreutils` | `captoinfo`, `infotocap` |
 | `time_cmd` | Run a command and report its resource usage. | yes | `coreutils` |  |
 | `timeout` | Run a command, and stop it if it is still running after a time limit. | yes | `coreutils` |  |
 | `tload` | Graph the system load average on a terminal: procps-ng 4.0.4's, ported. | yes | `coreutils` |  |

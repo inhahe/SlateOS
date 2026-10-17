@@ -791,12 +791,10 @@ struct CharMapApp {
     // Favorites
     favorites: Vec<u32>,
 
-    // Clipboard history (last copied)
-    clipboard: Option<String>,
     /// The search's editor -- its caret and selection over `search_query`
-    /// -- reloaded when the query changed under it. Its Ctrl+C and Ctrl+X
-    /// share `clipboard` with the characters copied, so a character copied
-    /// pastes into the search.
+    /// -- reloaded when the query changed under it. Its keys cut, copy and
+    /// paste on the program's clipboard, where a character copied goes too,
+    /// so it pastes into the search.
     search_editor: TextInput,
     status_message: String,
 
@@ -844,7 +842,6 @@ impl CharMapApp {
             recent: Vec::new(),
             max_recent: 64,
             favorites: Vec::new(),
-            clipboard: None,
             search_editor: textline::field_holding("", SEARCH_CAPACITY),
             status_message: "Select a character to view details".into(),
             active_panel: Panel::Grid,
@@ -930,7 +927,7 @@ impl CharMapApp {
             && let Some(ch) = char::from_u32(cp)
         {
             let s = ch.to_string();
-            self.clipboard = Some(s.clone());
+            guitk::clipboard::set_text(&s);
             self.add_to_recent(cp);
             self.status_message = format!("Copied '{s}' (U+{cp:04X}) to clipboard");
         }
@@ -1272,15 +1269,8 @@ impl CharMapApp {
             editor.cursor(),
             editor.selection_anchor(),
         );
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            event,
-            self.clipboard.as_deref().unwrap_or(""),
-            SEARCH_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.clipboard = Some(copied);
-        }
+        let edit =
+            textline::apply_key_on_clipboard(&mut self.search_editor, event, SEARCH_TEXT_SIZE);
         if !edit.handled {
             return None;
         }
@@ -1480,7 +1470,7 @@ impl CharMapApp {
             && let Some(ch) = char::from_u32(cp)
         {
             let s = ch.to_string();
-            self.clipboard = Some(s.clone());
+            guitk::clipboard::set_text(&s);
             self.add_to_recent(cp);
             self.status_message = format!("Copied '{s}' (U+{cp:04X}) to clipboard");
         }
@@ -2661,6 +2651,12 @@ mod tests {
     use super::*;
     use guitk::probe;
 
+    /// What is on the program's clipboard, `None` while nothing is.
+    fn clipboard() -> Option<String> {
+        let text = guitk::clipboard::text();
+        (!text.is_empty()).then_some(text)
+    }
+
     /// **Every key the card advertises is answered by this window.**
     ///
     /// Two states, because `Esc` leaves the search box and correctly reports
@@ -3139,7 +3135,7 @@ mod tests {
             app.selected_char = pos;
         }
         app.copy_selected();
-        assert_eq!(app.clipboard, Some("A".to_string()));
+        assert_eq!(clipboard(), Some("A".to_string()));
         assert!(app.status_message.contains("Copied"));
     }
 
@@ -3295,7 +3291,7 @@ mod tests {
             app.selected_char = pos;
         }
         probe::key(&mut app, &probe::press(Key::Enter));
-        assert_eq!(app.clipboard, Some("A".to_string()));
+        assert_eq!(clipboard(), Some("A".to_string()));
     }
 
     #[test]
@@ -3509,9 +3505,9 @@ mod tests {
             .position(|&cp| cp == 0x0041)
             .expect("basic latin contains A");
         probe::click(&mut app, Target::Cell(index));
-        assert_eq!(app.clipboard, None);
+        assert_eq!(clipboard(), None);
         probe::click(&mut app, Target::Cell(index));
-        assert_eq!(app.clipboard, Some("A".to_string()));
+        assert_eq!(clipboard(), Some("A".to_string()));
     }
 
     /// A favourite tile copies on one click rather than selecting.
@@ -3524,7 +3520,7 @@ mod tests {
         app.favorites.push(0x20AC);
         let before = app.selected_char;
         probe::click(&mut app, Target::FavoriteTile(0));
-        assert_eq!(app.clipboard, Some("\u{20AC}".to_string()));
+        assert_eq!(clipboard(), Some("\u{20AC}".to_string()));
         assert_eq!(app.selected_char, before);
         assert!(app.recent.contains(&0x20AC));
     }
@@ -3533,11 +3529,13 @@ mod tests {
     #[test]
     fn the_copy_button_and_the_shortcut_agree() {
         let mut by_button = CharMapApp::new();
-        let mut by_key = CharMapApp::new();
         probe::click(&mut by_button, Target::Copy);
+        let copied = clipboard();
+        assert!(copied.is_some(), "the button copied nothing");
+        guitk::clipboard::set_text("");
+        let mut by_key = CharMapApp::new();
         probe::key(&mut by_key, &probe::ctrl(Key::C));
-        assert!(by_button.clipboard.is_some());
-        assert_eq!(by_button.clipboard, by_key.clipboard);
+        assert_eq!(clipboard(), copied);
     }
 
     /// A click on empty background changes nothing.
@@ -3808,7 +3806,7 @@ mod tests {
         let mut app = CharMapApp::new();
         app.grid_chars.clear();
         app.copy_selected(); // should not panic
-        assert!(app.clipboard.is_none());
+        assert!(clipboard().is_none());
     }
 
     #[test]
@@ -4103,17 +4101,14 @@ mod tests {
         // With the search closed, AltGr+C is no Ctrl+C either.
         let mut closed = CharMapApp::new();
         probe::key(&mut closed, &chord(Key::C, "\u{107}", altgr));
-        assert_eq!(
-            closed.clipboard, None,
-            "AltGr+C copied with the search closed"
-        );
-        let clipboard = app.clipboard.clone();
+        assert_eq!(clipboard(), None, "AltGr+C copied with the search closed");
+        let before = clipboard();
         probe::key(&mut app, &chord(Key::C, "\u{107}", altgr));
         assert_eq!(
             app.search_query, "\u{107}",
             "AltGr+C did not type its letter"
         );
-        assert_eq!(app.clipboard, clipboard, "AltGr+C copied");
+        assert_eq!(clipboard(), before, "AltGr+C copied");
         for (k, t, m) in [
             (
                 Key::X,
@@ -4251,7 +4246,7 @@ mod tests {
         );
         key_in(&mut app, Key::C, Modifiers::ctrl());
         assert_eq!(
-            app.clipboard.as_deref(),
+            clipboard().as_deref(),
             Some("DOLLAR"),
             "Ctrl+C with the query selected did not copy it"
         );
@@ -4301,7 +4296,8 @@ mod tests {
         assert!(selected.is_some(), "the search selected no character");
         key_in(&mut app, Key::C, Modifiers::ctrl());
         assert_eq!(
-            app.clipboard, selected,
+            clipboard(),
+            selected,
             "Ctrl+C with nothing selected copied no character"
         );
         key_in(&mut app, Key::A, Modifiers::ctrl());

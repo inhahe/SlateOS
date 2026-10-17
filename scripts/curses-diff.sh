@@ -86,9 +86,9 @@ done
 # defined by hue, lightness and saturation (`hls`), direct colour (`RGB`,
 # 2^24 colours), no cursor addressing but a home-down (`cup` gone, `ll`), no
 # way to end every attribute at once (`sgr0` and `sgr` gone), an `RGB`
-# string that names no bits, insertion by `ich1` with insert mode half there
-# (`smir` without `rmir`), and lines that can be deleted but not inserted,
-# with no other way to scroll. `tic` compiles them into a directory of the
+# string that names no bits, insertion by an `ich1` cheap enough to win, with
+# insert mode half there (`smir` without `rmir`), and lines that can be
+# inserted but not deleted, with no scrolling region for part of the screen. `tic` compiles them into a directory of the
 # harness's own, which both sides are pointed at with `TERMINFO`.
 synth=$DIFF_TMP/terminfo
 mkdir -p "$synth"
@@ -115,12 +115,12 @@ slate-nosgr0|attributes ended one at a time,
 	sgr0@, sgr@, use=vt100,
 slate-rgb0|an RGB string that gives each colour no bits,
 	RGB=0/0/0, use=xterm-256color,
-slate-ich1|characters inserted one at a time, insert mode entered but never left,
-	ich@, rmir@, ich1=\E[@, use=xterm-color,
-slate-dlonly|lines deleted but not inserted and no other way to scroll,
-	il@, il1@, csr@, ind@, indn@, ri@, rin@, use=xterm-color,
+slate-ich1|characters inserted one at a time by one byte, insert mode entered but never left,
+	ich@, rmir@, ich1=^E, use=xterm-color,
+slate-ilonly|lines inserted but not deleted and no scrolling region,
+	dl@, dl1@, csr@, use=xterm-color,
 EOF
-SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct slate-nocup slate-nosgr0 slate-rgb0 slate-ich1 slate-dlonly'
+SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct slate-nocup slate-nosgr0 slate-rgb0 slate-ich1 slate-ilonly'
 if ! tic -x -o "$synth" "$DIFF_TMP/synth.ti" 2> "$DIFF_TMP/synth.err"; then
   echo "curses-diff: tic could not compile the made-up terminal types:" >&2
   cat "$DIFF_TMP/synth.err" >&2
@@ -472,6 +472,21 @@ scenario scrolling-more 'C' < <(
   shifted 3 20 -5;  echo refresh
   echo 'mvaddstr 12 0 a line of its own'
   shifted 13 23 1;  echo refresh
+  echo 'endwin'
+)
+
+# The same with idlok on, so that an update may scroll by deleting and
+# inserting lines where a scrolling region will not do -- and on
+# slate-ilonly, which can insert lines but not delete them, must not.
+scenario scrolling-idl 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  echo 'idlok 1'
+  shifted 0 23 0;   echo refresh
+  shifted 5 15 3;   echo refresh
+  shifted 10 22 -2; echo refresh
+  shifted 0 23 1;   echo refresh
+  shifted 3 20 -5;  echo refresh
   echo 'endwin'
 )
 
@@ -994,20 +1009,27 @@ scenario tab-stops 'C' <<< "$tab_script"
 scenario tab-stops-expanded 'C' pty-only <<< "tab3
 $tab_script"
 
-# Characters inserted into a line, which curses sends as an insertion where
-# that is cheaper than writing the rest of the line again: by `ich`, by
-# insert mode, by `ich1` (slate-ich1), and not at all where the terminal has
-# no way to insert (vt100).
+# Characters inserted into a line. curses inserts only where the line's end
+# changed too -- text added to a line that was not blank -- and only where
+# that costs no more than writing the characters: by `ich`, by insert mode,
+# by `ich1` (slate-ich1), and not at all where the terminal has no way to
+# insert (vt100). The first lines change in the middle, which is written.
 scenario insertion 'C' <<'EOF'
 use_env 0
 initscr
 mvaddstr 0 0 abcdefghijklmnopqrstuvwxyz the quick brown fox jumps over the lazy dog
 mvaddstr 1 0 0123456789 the quick brown fox jumps over the lazy dog
 mvaddstr 2 0 a short line
+mvaddstr 3 0 short
+mvaddstr 4 0 abc
+mvaddstr 5 0 the end of a line
 refresh
 mvaddstr 0 0 abcXdefghijklmnopqrstuvwxyz the quick brown fox jumps over the lazy dog
 mvaddstr 1 0 01234XYZ56789 the quick brown fox jumps over the lazy dog
 mvaddstr 2 0 a shorter line
+mvaddstr 3 0 shortX
+mvaddstr 4 0 abcdefghijklmnopqrstuvwxyz
+mvaddstr 5 0 the end of a lineXY
 refresh
 endwin
 EOF
@@ -1027,9 +1049,9 @@ endwin
 EOF
 
 # A character written in the last column of a terminal with the newline
-# glitch (vt100's xenl) leaves the cursor's row known and its column not; on
-# a terminal with no cursor addressing (slate-nocup) the next move must then
-# start from the margin.
+# glitch (vt100's xenl) leaves the cursor nowhere known; on a terminal with
+# no cursor addressing (slate-nocup) the next move must then start from home
+# or the margin.
 scenario unknown-column 'C' <<'EOF'
 use_env 0
 initscr
@@ -1041,9 +1063,10 @@ refresh
 endwin
 EOF
 
-# use_legacy_coding: in a locale with no width for bytes from 128 up, level 1
-# shows those from 160 as they are and the rest as blanks, level 2 all of
-# them; a level past 2 is refused.
+# use_legacy_coding: the level before, which in the C locale is 1 from the
+# start; a level past 2 refused; and bytes from 128 through the byte calls
+# at each level. (What a level does to a wide character from 160 up, the
+# byte calls never make, is wide-calls-one-byte-locale's.)
 scenario legacy-coding 'C' <<'EOF'
 use_env 0
 initscr

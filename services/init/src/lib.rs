@@ -308,7 +308,7 @@ pub fn is_delegated_type(resource_type: u16) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LineError<'a> {
     /// A word after the path that is not `keyword:value` with a keyword
-    /// init knows -- `args`, `env`, `depends` or `caps`.
+    /// init knows -- `args`, `env`, `depends`, `caps` or `stop_timeout`.
     UnknownKeyword(&'a [u8]),
     /// A keyword given twice.
     Repeated(&'a [u8]),
@@ -334,6 +334,9 @@ pub enum LineError<'a> {
     EntryTooLong(&'a [u8], &'a [u8]),
     /// An `env:` entry that is not `KEY=VALUE` with a key.
     BadEnv(&'a [u8]),
+    /// A `stop_timeout:` (the word) that is not a whole number of
+    /// milliseconds up to [`MAX_STOP_TIMEOUT_MS`].
+    BadStopTimeout(&'a [u8]),
 }
 
 /// A line of `/etc/startup.conf`, read: the program's path, then each
@@ -348,6 +351,9 @@ pub struct ServiceLine<'a> {
     /// `caps:`, read: the first `cap_count` entries.
     pub caps: [CapGrant; MAX_SVC_CAPS],
     pub cap_count: usize,
+    /// `stop_timeout:`, or [`DEFAULT_STOP_TIMEOUT_MS`]: how long a stop
+    /// waits for the service to end by itself before it forces it.
+    pub stop_timeout_ms: u32,
 }
 
 impl ServiceLine<'_> {
@@ -362,6 +368,7 @@ impl ServiceLine<'_> {
 /// ```text
 /// /bin/webserver args:--port,8080 env:PORT=8080 depends:logger,network
 /// /bin/compositor depends:logger caps:InputDevice/0/r,Service/0/w
+/// /bin/database stop_timeout:30000
 /// ```
 ///
 /// The first word is the program; each word after it is `keyword:value`,
@@ -385,9 +392,10 @@ pub fn parse_service_line(line: &[u8]) -> Result<ServiceLine<'_>, LineError<'_>>
         deps: &[],
         caps: [CapGrant::NONE; MAX_SVC_CAPS],
         cap_count: 0,
+        stop_timeout_ms: DEFAULT_STOP_TIMEOUT_MS,
     };
     check_path(out.path)?;
-    let mut seen = [false; 4];
+    let mut seen = [false; 5];
     for word in words {
         let Some(colon) = word.iter().position(|&b| b == b':') else {
             return Err(LineError::UnknownKeyword(word));
@@ -401,6 +409,7 @@ pub fn parse_service_line(line: &[u8]) -> Result<ServiceLine<'_>, LineError<'_>>
             b"env" => 1,
             b"depends" => 2,
             b"caps" => 3,
+            b"stop_timeout" => 4,
             _ => return Err(LineError::UnknownKeyword(word)),
         };
         if let Some(seen) = seen.get_mut(slot) {
@@ -413,13 +422,41 @@ pub fn parse_service_line(line: &[u8]) -> Result<ServiceLine<'_>, LineError<'_>>
             0 => out.args = value,
             1 => out.env = value,
             2 => out.deps = value,
-            _ => out.cap_count = parse_caps(value, &mut out.caps)?,
+            3 => out.cap_count = parse_caps(value, &mut out.caps)?,
+            _ => {
+                out.stop_timeout_ms =
+                    parse_stop_timeout(value).ok_or(LineError::BadStopTimeout(word))?;
+            }
         }
     }
     check_list(b"args", out.args, MAX_SVC_ARGS, MAX_SVC_ARG_LEN)?;
     check_list(b"env", out.env, MAX_SVC_ENV, MAX_SVC_ENV_LEN)?;
     check_list(b"depends", out.deps, MAX_DEPS, MAX_SVC_NAME)?;
     Ok(out)
+}
+
+/// How many services init keeps: its table, and the most one [`stop_all`]
+/// stops.
+pub const MAX_SERVICES: usize = 16;
+
+/// How long a stop waits for a service to end by itself before it forces
+/// it, when its line names no `stop_timeout:` -- lane B's suggestion
+/// (`requests/b-d-init-stops-a-service-with-terminate-then-force.md`):
+/// systemd's 90 s suits a server better than a desktop being shut down.
+pub const DEFAULT_STOP_TIMEOUT_MS: u32 = 10_000;
+/// The longest `stop_timeout:` init takes: ten minutes.
+pub const MAX_STOP_TIMEOUT_MS: u32 = 600_000;
+
+/// A `stop_timeout:` value: whole milliseconds, decimal, up to
+/// [`MAX_STOP_TIMEOUT_MS`]; `None` for anything else.
+fn parse_stop_timeout(value: &[u8]) -> Option<u32> {
+    if value.is_empty() || value.len() > 6 || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    let ms = value.iter().try_fold(0u32, |n, &d| {
+        n.checked_mul(10)?.checked_add(u32::from(d & 0x0F))
+    })?;
+    (ms <= MAX_STOP_TIMEOUT_MS).then_some(ms)
 }
 
 /// Read a `caps:` value -- `Type/id/rights` entries, comma-separated, as
@@ -533,6 +570,136 @@ pub fn child_caps(
         n = n.saturating_add(1);
     }
     Some(n)
+}
+
+/// The kernel's "operation not supported": a process that does not answer
+/// lifecycle requests, from `SYS_LIFECYCLE_REQUEST`.
+pub const ERR_NOT_SUPPORTED: i64 = -2;
+
+/// What a stop asks of the kernel, so that the sequence runs on the host in
+/// the tests as it does in init.
+pub trait StopCalls {
+    /// `SYS_LIFECYCLE_QUERY(pid)`: 1 when `pid` answers lifecycle requests,
+    /// 0 when not, or a negative kernel error.
+    fn lifecycle_query(&mut self, pid: u64) -> i64;
+    /// `SYS_LIFECYCLE_REQUEST(pid, LIFECYCLE_TERMINATE)`: the request's id,
+    /// or a negative kernel error ([`ERR_NOT_SUPPORTED`] when `pid` does not
+    /// answer them).
+    fn request_terminate(&mut self, pid: u64) -> i64;
+    /// `SYS_SIGNAL_SEND(pid, SIGTERM)`: 0, or a negative kernel error.
+    fn send_sigterm(&mut self, pid: u64) -> i64;
+    /// Reap `pid` if it has ended: whether it has, or is gone.
+    fn reaped(&mut self, pid: u64) -> bool;
+    /// `SYS_PROCESS_KILL(pid)`: 0, or a negative kernel error.
+    fn kill(&mut self, pid: u64) -> i64;
+    /// The monotonic clock, in nanoseconds.
+    fn now_ns(&mut self) -> u64;
+    /// Sleep `ns` nanoseconds.
+    fn sleep_ns(&mut self, ns: u64);
+}
+
+/// How a service was asked to terminate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Asked {
+    /// Through its lifecycle endpoint (`LIFECYCLE_TERMINATE`).
+    Request,
+    /// With `SIGTERM`, as on Linux.
+    Signal,
+    /// Neither reached it: the signal's error. Nothing is waited for.
+    Failed(i64),
+}
+
+/// Ask `pid` to terminate as `kill` does (`userspace/procstop`'s
+/// `deliver`): through its lifecycle endpoint when it answers one, and
+/// otherwise -- it does not, the query failed, or the request was refused,
+/// `NotSupported` included -- with `SIGTERM`.
+pub fn ask_to_terminate(calls: &mut dyn StopCalls, pid: u64) -> Asked {
+    if calls.lifecycle_query(pid) == 1 && calls.request_terminate(pid) >= 0 {
+        return Asked::Request;
+    }
+    match calls.send_sigterm(pid) {
+        r if r >= 0 => Asked::Signal,
+        e => Asked::Failed(e),
+    }
+}
+
+/// How a service a stop was asked of ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// By itself, asked as it was.
+    Exited(Asked),
+    /// Forced (`SYS_PROCESS_KILL`) after its stop timeout -- at once when
+    /// it could not be asked.
+    Forced(Asked),
+}
+
+/// How often a stop looks whether what it asked has ended: 10 ms.
+pub const STOP_POLL_NS: u64 = 10_000_000;
+
+/// How long a forced service is waited for to be reaped: a kill ends it
+/// at once, and this is only the moment that takes. 1 s.
+pub const REAP_AFTER_KILL_NS: u64 = 1_000_000_000;
+
+/// Stop each of `targets` -- a pid and its stop timeout in milliseconds --
+/// as the operator decided services are stopped (B-Q22, design-decisions
+/// §1072): ask each to terminate, all at once, then wait until each has
+/// ended or its own timeout has passed, and force what is left. `out[i]`
+/// says how `targets[i]` ended; a pid of 0 is skipped. Asking them all
+/// before waiting on any means a shutdown takes the longest timeout, not
+/// their sum.
+pub fn stop_all(calls: &mut dyn StopCalls, targets: &[(u64, u32)], out: &mut [Option<Ended>]) {
+    let start = calls.now_ns();
+    debug_assert!(targets.len() <= MAX_SERVICES, "more targets than services");
+    let mut asked = [Asked::Signal; MAX_SERVICES];
+    for (i, &(pid, _)) in targets.iter().enumerate().take(MAX_SERVICES) {
+        if pid != 0
+            && let Some(slot) = asked.get_mut(i)
+        {
+            *slot = ask_to_terminate(calls, pid);
+        }
+    }
+    loop {
+        let now = calls.now_ns();
+        let mut waiting = false;
+        for (i, &(pid, timeout_ms)) in targets.iter().enumerate().take(MAX_SERVICES) {
+            let (Some(slot), Some(&how)) = (out.get_mut(i), asked.get(i)) else {
+                continue;
+            };
+            if pid == 0 || slot.is_some() {
+                continue;
+            }
+            if calls.reaped(pid) {
+                *slot = Some(Ended::Exited(how));
+                continue;
+            }
+            let deadline = match how {
+                Asked::Failed(_) => start,
+                _ => start.saturating_add(u64::from(timeout_ms).saturating_mul(1_000_000)),
+            };
+            if now >= deadline {
+                force(calls, pid);
+                *slot = Some(Ended::Forced(how));
+            } else {
+                waiting = true;
+            }
+        }
+        if !waiting {
+            return;
+        }
+        calls.sleep_ns(STOP_POLL_NS);
+    }
+}
+
+/// Kill `pid` and reap it, waiting at most [`REAP_AFTER_KILL_NS`]. A kill
+/// that fails -- it ended in between -- leaves only the reaping.
+fn force(calls: &mut dyn StopCalls, pid: u64) {
+    // Its answer changes nothing: a process that ended meanwhile is reaped
+    // below, and one that cannot be killed is not init's to end.
+    let _ = calls.kill(pid);
+    let until = calls.now_ns().saturating_add(REAP_AFTER_KILL_NS);
+    while !calls.reaped(pid) && calls.now_ns() < until {
+        calls.sleep_ns(STOP_POLL_NS);
+    }
 }
 
 #[cfg(test)]
@@ -989,5 +1156,206 @@ Service/6/r,Service/7/r,Service/8/r,Service/9/r",
             );
         }
         assert_eq!(CAP_RIGHTS, &[(b'r', 1u64 << 0), (b'w', 1 << 1)][..]);
+    }
+
+    /// `stop_timeout:` takes whole milliseconds up to ten minutes, once;
+    /// without it a service gets the default.
+    #[test]
+    fn a_stop_timeout_is_read_and_held_to_its_limits() {
+        let read = |line: &'static [u8]| parse_service_line(line).map(|l| l.stop_timeout_ms);
+        assert_eq!(read(b"/bin/x"), Ok(DEFAULT_STOP_TIMEOUT_MS));
+        assert_eq!(read(b"/bin/x stop_timeout:30000"), Ok(30_000));
+        assert_eq!(read(b"/bin/x stop_timeout:0"), Ok(0));
+        assert_eq!(read(b"/bin/x stop_timeout:600000"), Ok(600_000));
+        for bad in [
+            &b"stop_timeout:600001"[..],
+            b"stop_timeout:",
+            b"stop_timeout:10s",
+            b"stop_timeout:-1",
+            b"stop_timeout:99999999999",
+        ] {
+            let mut line = b"/bin/x ".to_vec();
+            line.extend_from_slice(bad);
+            assert_eq!(
+                parse_service_line(&line).map(|l| l.stop_timeout_ms),
+                Err(LineError::BadStopTimeout(bad)),
+                "{}",
+                String::from_utf8_lossy(bad)
+            );
+        }
+        assert_eq!(
+            read(b"/bin/x stop_timeout:1 stop_timeout:2"),
+            Err(LineError::Repeated(b"stop_timeout:2"))
+        );
+    }
+
+    /// One process in the stand-in kernel.
+    #[derive(Clone, Copy, Default)]
+    struct Proc {
+        /// It answers lifecycle requests.
+        answers: bool,
+        /// What a terminate request gets: its id, or an error.
+        request: i64,
+        /// What `SIGTERM` gets: 0, or an error.
+        sigterm: i64,
+        /// When it ends by itself, this long after it was asked; never if
+        /// `None`.
+        ends_after_ns: Option<u64>,
+        /// When it was asked.
+        asked_at: Option<u64>,
+        /// It was killed.
+        killed: bool,
+    }
+
+    /// A kernel with a clock that moves only when slept on.
+    struct Fake {
+        now: u64,
+        procs: std::collections::BTreeMap<u64, Proc>,
+        log: std::vec::Vec<std::string::String>,
+    }
+
+    impl Fake {
+        fn new(procs: &[(u64, Proc)]) -> Self {
+            Self {
+                now: 1_000,
+                procs: procs.iter().copied().collect(),
+                log: std::vec::Vec::new(),
+            }
+        }
+    }
+
+    impl StopCalls for Fake {
+        fn lifecycle_query(&mut self, pid: u64) -> i64 {
+            i64::from(self.procs[&pid].answers)
+        }
+        fn request_terminate(&mut self, pid: u64) -> i64 {
+            self.log.push(std::format!("request {pid}"));
+            let p = self.procs.get_mut(&pid).unwrap();
+            if p.request >= 0 {
+                p.asked_at = Some(self.now);
+            }
+            p.request
+        }
+        fn send_sigterm(&mut self, pid: u64) -> i64 {
+            self.log.push(std::format!("SIGTERM {pid}"));
+            let p = self.procs.get_mut(&pid).unwrap();
+            if p.sigterm >= 0 {
+                p.asked_at = Some(self.now);
+            }
+            p.sigterm
+        }
+        fn reaped(&mut self, pid: u64) -> bool {
+            let p = self.procs[&pid];
+            p.killed
+                || matches!((p.asked_at, p.ends_after_ns), (Some(at), Some(after)) if self.now >= at + after)
+        }
+        fn kill(&mut self, pid: u64) -> i64 {
+            self.log.push(std::format!("kill {pid} at {}", self.now));
+            self.procs.get_mut(&pid).unwrap().killed = true;
+            0
+        }
+        fn now_ns(&mut self) -> u64 {
+            self.now
+        }
+        fn sleep_ns(&mut self, ns: u64) {
+            self.now += ns;
+        }
+    }
+
+    const MS: u64 = 1_000_000;
+
+    fn stop(fake: &mut Fake, targets: &[(u64, u32)]) -> std::vec::Vec<Option<Ended>> {
+        let mut out = std::vec![None; targets.len()];
+        stop_all(fake, targets, &mut out);
+        out
+    }
+
+    /// A service that answers lifecycle requests is asked through them, one
+    /// that does not -- or refuses the request -- with SIGTERM; each that
+    /// ends within its timeout is not forced.
+    #[test]
+    fn a_service_is_asked_to_terminate_the_way_it_answers() {
+        let polite = Proc {
+            answers: true,
+            request: 7,
+            ends_after_ns: Some(30 * MS),
+            ..Proc::default()
+        };
+        let plain = Proc {
+            ends_after_ns: Some(30 * MS),
+            ..Proc::default()
+        };
+        let refuses = Proc {
+            answers: true,
+            request: ERR_NOT_SUPPORTED,
+            ends_after_ns: Some(30 * MS),
+            ..Proc::default()
+        };
+        let mut fake = Fake::new(&[(10, polite), (11, plain), (12, refuses)]);
+        let out = stop(&mut fake, &[(10, 1000), (11, 1000), (12, 1000)]);
+        assert_eq!(
+            out,
+            [
+                Some(Ended::Exited(Asked::Request)),
+                Some(Ended::Exited(Asked::Signal)),
+                Some(Ended::Exited(Asked::Signal)),
+            ]
+        );
+        assert_eq!(
+            fake.log,
+            ["request 10", "SIGTERM 11", "request 12", "SIGTERM 12"]
+        );
+    }
+
+    /// One that does not end is forced when its own timeout has passed, and
+    /// all are asked before any is waited for, so the stop takes the longest
+    /// timeout, not their sum.
+    #[test]
+    fn what_does_not_end_is_forced_after_its_own_timeout() {
+        let stubborn = Proc::default();
+        let mut fake = Fake::new(&[(20, stubborn), (21, stubborn)]);
+        let start = fake.now;
+        let out = stop(&mut fake, &[(20, 100), (21, 300)]);
+        assert_eq!(
+            out,
+            [
+                Some(Ended::Forced(Asked::Signal)),
+                Some(Ended::Forced(Asked::Signal))
+            ]
+        );
+        assert_eq!(
+            fake.log.get(..2),
+            Some(&["SIGTERM 20".into(), "SIGTERM 21".into()][..])
+        );
+        let killed_at = |pid: u64| {
+            fake.log
+                .iter()
+                .find_map(|l| {
+                    l.strip_prefix(&std::format!("kill {pid} at "))
+                        .map(|t| t.parse::<u64>().unwrap())
+                })
+                .unwrap()
+        };
+        assert!((start + 100 * MS..start + 100 * MS + STOP_POLL_NS).contains(&killed_at(20)));
+        assert!((start + 300 * MS..start + 300 * MS + STOP_POLL_NS).contains(&killed_at(21)));
+        assert!(fake.now < start + 400 * MS, "the timeouts overlapped");
+    }
+
+    /// One that cannot be asked at all is forced at once, and a pid of 0 is
+    /// nobody's.
+    #[test]
+    fn what_cannot_be_asked_is_forced_at_once() {
+        let deaf = Proc {
+            sigterm: -400,
+            ..Proc::default()
+        };
+        let mut fake = Fake::new(&[(30, deaf)]);
+        let start = fake.now;
+        let out = stop(&mut fake, &[(0, 1000), (30, 10_000)]);
+        assert_eq!(out, [None, Some(Ended::Forced(Asked::Failed(-400)))]);
+        assert_eq!(
+            fake.log,
+            ["SIGTERM 30".to_string(), std::format!("kill 30 at {start}")]
+        );
     }
 }

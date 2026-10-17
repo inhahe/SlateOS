@@ -99,8 +99,8 @@ pub const MAP_FAILED: *mut core::ffi::c_void = usize::MAX as *mut core::ffi::c_v
 /// Until 2026-10-06 `prot` went whole into arg2 and `flags` into arg3, and a
 /// `PROT_SEM` mapping would have been uncached; until 2026-10-07 a shared
 /// anonymous mapping was private, and a `fork` copied it. Where the mapping
-/// goes is `place`'s, as Linux places it. A file mapping goes to `file_map`:
-/// the native call takes no file.
+/// goes is `place`'s, as Linux places it. A file mapping goes to `file_map`,
+/// and from there to the kernel's `SYS_MMAP_FILE`: `SYS_MMAP` takes no file.
 ///
 /// Argument-domain validation (Linux-matching, before the syscall):
 /// * `length == 0` → `EINVAL`.  Linux's
@@ -634,8 +634,11 @@ pub extern "C" fn munlockall() -> i32 {
 ///   (EINVAL if neither, EINVAL if both, EINVAL if any unknown bits).
 ///   `MS_INVALIDATE` may be combined with either.
 ///
-/// Otherwise no-op: we don't have file-backed mmap yet, so there's
-/// nothing to flush.  When that's wired up, this surface stays correct.
+/// Then the kernel's (`SYS_MSYNC`): `MS_SYNC` saves the dirty pages of the
+/// range's shared file mappings before it returns, `ENOMEM` when part of the
+/// range is not mapped, `EIO` when a save failed. A kernel without the call
+/// has no shared mapping that could be written (`SYS_MMAP_FILE` refuses
+/// one), so there is nothing to save: 0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn msync(addr: *mut core::ffi::c_void, length: SizeT, flags: i32) -> i32 {
     if !is_page_aligned(addr) || range_overflows(addr, length) {
@@ -653,7 +656,23 @@ pub extern "C" fn msync(addr: *mut core::ffi::c_void, length: SizeT, flags: i32)
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    0
+    let ret = syscall3(
+        crate::syscall::SYS_MSYNC,
+        addr as u64,
+        length as u64,
+        u64::from(flags.cast_unsigned()),
+    );
+    msync_answer(ret)
+}
+
+/// `msync`'s answer to `SYS_MSYNC`'s `ret`: 0, or -1 with its Linux errno;
+/// and 0 from a kernel without the call, which has nothing to save.
+fn msync_answer(ret: i64) -> i32 {
+    if ret >= 0 || crate::syscall::lacks_call(ret) {
+        return 0;
+    }
+    errno::set_errno(errno::door_errno(ret));
+    -1
 }
 
 /// Recognized madvise advice values.  Returns `true` if `advice` is
@@ -1201,6 +1220,20 @@ mod tests {
     #[test]
     fn test_msync_stub_succeeds() {
         assert_eq!(msync(core::ptr::null_mut(), 4096, MS_SYNC), 0);
+    }
+
+    /// `SYS_MSYNC`'s answers: success, its Linux errnos passed on, and a
+    /// kernel without the call -- nothing it could save -- success too.
+    #[test]
+    fn msync_passes_the_kernels_answer_on() {
+        errno::set_errno(0);
+        assert_eq!(msync_answer(0), 0);
+        assert_eq!(msync_answer(errno::native::NO_SUCH_SYSCALL), 0);
+        assert_eq!(errno::get_errno(), 0);
+        assert_eq!(msync_answer(-12), -1);
+        assert_eq!(errno::get_errno(), errno::ENOMEM);
+        assert_eq!(msync_answer(-5), -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
     }
 
     #[test]

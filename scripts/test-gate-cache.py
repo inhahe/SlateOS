@@ -109,6 +109,24 @@ def vanished_trace() -> None:
     inputs, why = gc.merge(gone)
     check("a vanished trace directory is an untraced run, not an error",
           (inputs, any("vanished" in w for w in why)), (None, True))
+    # Two writers' output in one record -- what a repeated spawn id did to a
+    # tee's temporary -- is an untraced run too, not a crash that refuses a
+    # boot whose gate passed (requests/f-a-gate-cache-trace-records-can-
+    # collide.md).
+    torn = tempfile.mkdtemp(prefix="gate-trace-torn-")
+    try:
+        with open(os.path.join(torn, "git-root.1.json"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write('{"argv": ["git"], "rc": 0}{"argv": ["git"], "rc": 0}')
+        try:
+            inputs, why = gc.merge(torn)
+            got = (inputs, any("could not be read: git-root.1.json" in w for w in why))
+        except ValueError as exc:
+            got = f"raised {type(exc).__name__}"
+        check("a trace file holding two writers' output is an untraced run, not an error",
+              got, (None, True))
+    finally:
+        gitenv.remove_tree(torn)
 
 
 def main() -> int:
@@ -673,6 +691,8 @@ def reason_kinds() -> None:
         f"shadowed: {path}* would shadow the json module the tracer loaded first":
             "a file would shadow a module the tracer loaded",
         "traced exit 1, untraced 0": "traced and untraced runs disagreed",
+        "a trace file could not be read: git-root.1.json (JSONDecodeError)":
+            "a trace file could not be read",
         "something nobody has written yet": "other",
     }
     got = {r: gc.reason_kind(r) for r in samples}

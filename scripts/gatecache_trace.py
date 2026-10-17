@@ -904,9 +904,13 @@ def _classify(t: _Tracer, args, a, k, site_dir: str, tee: str):
     else:
         argv = [os.fsdecode(x) for x in args]
     exe = os.fsdecode(k["executable"]) if k.get("executable") else (argv[0] if argv else "")
+    # Unique whatever happens: the process id too, since two processes can
+    # inherit one GATE_CACHE_SPAWN without the patched Popen (a fork, a
+    # spawn by another route) and each count from 1 -- and a git child's
+    # record is named by its id (`git-<sid>.json`).
     with t.lock:
         t.counter += 1
-        sid = f"{t.spawn_id or 'root'}.{t.counter}"
+        sid = f"{t.spawn_id or 'root'}.{os.getpid()}.{t.counter}"
     base_env = dict(os.environ) if env is None else {
         os.fsdecode(n): os.fsdecode(v) for n, v in env.items()}
     overlay = sorted(n for n in set(base_env) | set(os.environ)

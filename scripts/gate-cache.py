@@ -244,12 +244,23 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
         path = os.path.join(trace_dir, name)
         if name.endswith(".tmp"):
             why.append(f"a trace file was never finished: {name}")
-        elif name.startswith("proc-"):
+            continue
+        if not name.startswith(("proc-", "git-")):
+            continue
+        # A trace that cannot be read -- two writers' output in one file, say
+        # -- is a run untraced, as a vanished trace directory is: not stored,
+        # its verdict standing. Raising here refused a boot whose gate had
+        # passed (requests/f-a-gate-cache-trace-records-can-collide.md).
+        try:
             with open(path, encoding="utf-8") as fh:
-                procs.append(json.load(fh))
-        elif name.startswith("git-"):
-            with open(path, encoding="utf-8") as fh:
-                records[gt.norm(path)] = json.load(fh)
+                data = json.load(fh)
+        except (OSError, ValueError) as exc:
+            why.append(f"a trace file could not be read: {name} ({type(exc).__name__})")
+            continue
+        if name.startswith("proc-"):
+            procs.append(data)
+        else:
+            records[gt.norm(path)] = data
     spawned = {p["spawn"] for p in procs}
     if "root" not in spawned:
         why.append("the checker's own trace is missing (it exited before its exit handlers)")
@@ -371,6 +382,7 @@ REASON_KINDS: tuple[tuple[str, str], ...] = (
     (r"left .* behind", "left a directory behind"),
     (re.escape(gt.SHADOWED), "a file would shadow a module the tracer loaded"),
     (r"a trace file was never finished", "a trace file was never finished"),
+    (r"a trace file could not be read", "a trace file could not be read"),
     (r"the checker's own trace is missing", "the checker's own trace is missing"),
     (r"the trace directory vanished", "the trace directory vanished"),
     (r"traced exit -?\d+, untraced -?\d+$", "traced and untraced runs disagreed"),

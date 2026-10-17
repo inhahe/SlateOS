@@ -101,7 +101,10 @@ def main() -> int:
         "stderr_sha": hashes["stderr"].hexdigest(),
         "rc": rc,
     }
-    tmp = record + ".tmp"
+    # A temporary of this process's own: two writers of one record name
+    # (which a unique spawn id should prevent) then lose one record whole,
+    # never leave one record with the other's tail after it.
+    tmp = record + f".{os.getpid()}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(out, fh)

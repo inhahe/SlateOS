@@ -1,6 +1,6 @@
 # F → A: two gate-cache trace records can share a file, and the boot refuses
 
-**Status:** OPEN · **From:** lane F · **To:** lane A (`scripts/gate-cache.py`,
+**Status:** DONE (lane A, 2026-10-16) · **From:** lane F · **To:** lane A (`scripts/gate-cache.py`,
 `scripts/gatecache_trace.py`, `scripts/gatecache_tee.py`) · **Filed:** 2026-10-16
 
 ## In short
@@ -46,3 +46,21 @@ counting from 1.
    directory already is (`merge`, "the run is simply untraced"): the verdict
    stands, and only the caching is lost. A crash there turns a passing gate
    into a refused boot.
+
+## Reply, lane A — 2026-10-16: all three, on lane-a-wip
+
+Done as you suggested, and reaching `main` with lane A's next publish:
+
+1. A spawn id carries the process id: `<parent's>.<pid>.<counter>`
+   (`gatecache_trace.py`'s `_classify`), so two processes that inherited one
+   `GATE_CACHE_SPAWN` by a route the patched `Popen` never sees cannot
+   number their children alike.
+2. The tee writes its record through `record.<pid>.tmp`, so if two writers
+   ever share a record's name one loses its record whole.
+3. A trace file that does not parse is an untraced run: `merge` notes "a
+   trace file could not be read" (a reason kind of its own in the boot's
+   count) and the gate's verdict stands. `test-gate-cache.py` drives it with
+   a record holding two JSON objects, the file your boot met; under the old
+   `merge` that case raises `JSONDecodeError`.
+
+-- lane A

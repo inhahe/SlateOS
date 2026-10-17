@@ -7,7 +7,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 /// `pkg --root ROOT ARGS...`.
-fn pkg(root: &Path, args: &[&str]) -> Output {
+fn pkg<S: AsRef<std::ffi::OsStr>>(root: &Path, args: &[S]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_pkg"))
         .arg("--root")
         .arg(root)
@@ -219,7 +219,7 @@ fn package(
     name: &str,
     version: &str,
     files: &[(&str, &str, &str)],
-) -> String {
+) -> std::path::PathBuf {
     let dir = scratch.path(&format!("src-{name}-{version}"));
     std::fs::create_dir_all(&dir).unwrap();
     let mut manifest = format!("name: {name}\nversion: {version}\ndescription: {name}\n");
@@ -231,16 +231,19 @@ fn package(
     std::fs::write(&manifest_path, manifest).unwrap();
     let archive = scratch.path(&format!("{name}-{version}.pkg"));
     let o = Command::new(env!("CARGO_BIN_EXE_pkg"))
-        .args([
-            "pack",
-            manifest_path.to_str().unwrap(),
-            "-o",
-            archive.to_str().unwrap(),
-        ])
+        .arg("pack")
+        .arg(&manifest_path)
+        .arg("-o")
+        .arg(&archive)
         .output()
         .unwrap();
     assert_eq!(o.status.code(), Some(0), "{}", stderr(&o));
-    archive.to_str().unwrap().to_string()
+    archive
+}
+
+/// `pkg install ARCHIVE`'s arguments.
+fn install(archive: &Path) -> [&std::ffi::OsStr; 2] {
+    [std::ffi::OsStr::new("install"), archive.as_os_str()]
 }
 
 /// `pkg ARGS... --json`'s one document.
@@ -277,7 +280,7 @@ fn a_rollback_puts_the_files_back_and_records_a_new_generation() {
         &[("world.txt", "world\n", "/usr/share/world/world.txt")],
     );
     for archive in [&hello1, &hello2, &world] {
-        let o = pkg(&root, &["install", archive]);
+        let o = pkg(&root, &install(archive));
         assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
     }
     let file = |p: &str| std::fs::read_to_string(root.join(p)).ok();
@@ -415,15 +418,16 @@ fn an_installed_state_that_cannot_be_read_is_not_taken_for_an_empty_one() {
         "1.0.0",
         &[("hello.txt", "hello\n", "/usr/share/hello/hello.txt")],
     );
-    let o = pkg(&root, &["install", &hello]);
+    let o = pkg(&root, &install(&hello));
     assert_eq!(o.status.code(), Some(0), "{}{}", stdout(&o), stderr(&o));
     let gens = root.join("var/pkg/generations");
     std::fs::write(gens.join("current"), "garbage").unwrap();
+    let os = std::ffi::OsStr::new;
     for args in [
-        &["list", "--installed"][..],
-        &["remove", "hello"],
-        &["install", &hello],
-        &["rollback", "1"],
+        &[os("list"), os("--installed")][..],
+        &[os("remove"), os("hello")],
+        &install(&hello),
+        &[os("rollback"), os("1")],
     ] {
         let o = pkg(&root, args);
         assert_eq!(

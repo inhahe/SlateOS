@@ -85,6 +85,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
 use guitk::textinput::TextInput;
+use textline::{SearchBox, SearchLook};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -2381,14 +2382,10 @@ pub struct RemindersApp {
     pub store: TaskStore,
     pub view: ViewFilter,
     pub sort_mode: SortMode,
-    pub search_query: String,
+    /// The search box, which is the search the tasks are filtered by.
+    pub search: SearchBox,
     /// Whether the search box has the keyboard.
     search_focused: bool,
-    /// The search box's text, caret and selection. Loaded from
-    /// `search_query` when the box takes the keyboard; while it has it, the
-    /// box's keys are the only thing that changes the search, and they change
-    /// both.
-    search_editor: TextInput,
     pub selected_task_id: Option<u64>,
     pub notifications: Vec<Notification>,
     pub sidebar_visible: bool,
@@ -2453,9 +2450,8 @@ impl RemindersApp {
             store: TaskStore::new(),
             view: ViewFilter::Today,
             sort_mode: SortMode::DueDate,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_focused: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
             selected_task_id: None,
             notifications: Vec::new(),
             sidebar_visible: true,
@@ -2849,10 +2845,10 @@ impl RemindersApp {
 
     /// Get the filtered and sorted task list for the current view.
     pub fn current_tasks(&self) -> Vec<&Task> {
-        let filtered = if self.search_query.is_empty() {
+        let filtered = if self.search.is_empty() {
             self.store.filtered(self.view, self.now)
         } else {
-            let search_results = self.store.search(&self.search_query);
+            let search_results = self.store.search(self.search.text());
             // Apply view filter to search results too
             search_results
                 .into_iter()
@@ -3361,20 +3357,22 @@ impl RemindersApp {
     fn focus_search(&mut self) {
         if !self.search_focused {
             self.search_focused = true;
-            self.search_editor.set_text(&self.search_query);
+            self.search.caret_to_end();
         }
     }
 
     /// A key for the search box while it has the keyboard: Escape empties it
     /// and leaves, Enter leaves keeping the search, and the rest is the box's
-    /// (`textline::apply_key_on_clipboard`), on the program's clipboard.
+    /// (`SearchBox::key`), on the program's clipboard.
     /// Answers whether the box did anything with the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
         let plain = textline::is_plain(key.modifiers);
         match key.key {
             Key::Escape if plain => {
                 self.search_focused = false;
-                self.set_search("");
+                if self.search.clear() {
+                    self.reanchor_selection();
+                }
                 return EventResult::Consumed;
             }
             Key::Enter if plain => {
@@ -3383,21 +3381,14 @@ impl RemindersApp {
             }
             _ => {}
         }
-        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);
-        let typed = self.search_editor.text().to_owned();
-        self.set_search(&typed);
+        let edit = self.search.key(key);
+        if edit.changed {
+            self.reanchor_selection();
+        }
         if edit.handled {
             EventResult::Consumed
         } else {
             EventResult::Ignored
-        }
-    }
-
-    /// The search changed to `text`: the list follows it.
-    fn set_search(&mut self, text: &str) {
-        if self.search_query != text {
-            text.clone_into(&mut self.search_query);
-            self.reanchor_selection();
         }
     }
 
@@ -4140,51 +4131,24 @@ impl RemindersApp {
             line_width: 1.0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
-        if self.search_focused {
-            // The box with the keyboard: its text, with the caret and the
-            // selection where they are.
-            let mut tree = RenderTree::new();
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: self.search_editor.text(),
-                    cursor: self.search_editor.cursor(),
-                    selection_anchor: self.search_editor.selection_anchor(),
-                    focused: true,
-                    x: search_x + 12.0,
-                    y: y_offset + 19.0,
-                    width: search_w - 24.0,
-                    line_height: 18.0,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.blue,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-            cmds.extend(tree.commands);
-        } else {
-            let empty = self.search_query.is_empty();
-            cmds.push(RenderCommand::Text {
+        let mut tree = RenderTree::new();
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
                 x: search_x + 12.0,
-                y: y_offset + 20.0,
-                text: if empty {
-                    "Search tasks (Ctrl+F)".to_string()
-                } else {
-                    self.search_query.clone()
-                },
-                font_size: SEARCH_TEXT_SIZE,
-                color: if empty {
-                    self.palette.subtext0
-                } else {
-                    self.palette.text
-                },
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(search_w - 24.0),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
+                y: y_offset + 19.0,
+                width: search_w - 24.0,
+                line_height: 18.0,
+                focused: self.search_focused,
+                placeholder: "Search tasks (Ctrl+F)",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.blue,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
+        cmds.extend(tree.commands);
 
         // Sort indicator
         let sort_x = search_x + search_w + 20.0;
@@ -5804,7 +5768,8 @@ mod tests {
         let detail = app.detail_visible;
         type_text(&mut app, "d");
         assert_eq!(
-            app.search_query, "d",
+            app.search.text(),
+            "d",
             "a letter the list binds did not type"
         );
         assert_eq!(app.detail_visible, detail, "the d typed was the list's too");
@@ -5834,7 +5799,7 @@ mod tests {
         )));
         app.handle_event(&ctrl_key(Key::F));
         type_text(&mut app, "z");
-        assert_eq!(app.search_query, "z", "Ctrl+F dropped the selection");
+        assert_eq!(app.search.text(), "z", "Ctrl+F dropped the selection");
     }
 
     /// **The search box can be reached, and it searches** (Ctrl+F). While it
@@ -5871,7 +5836,7 @@ mod tests {
             app.form.is_none(),
             "an n typed into the search started a new reminder"
         );
-        assert_eq!(app.search_query, "n");
+        assert_eq!(app.search.text(), "n");
         assert_eq!(
             app.handle_event(&Event::Key(guitk::probe::press_with(
                 Key::F4,
@@ -5886,7 +5851,8 @@ mod tests {
         app.handle_event(&press(Key::Left));
         type_text(&mut app, "gr");
         assert_eq!(
-            app.search_query, "groc",
+            app.search.text(),
+            "groc",
             "the search does not type at its caret"
         );
 
@@ -5908,21 +5874,23 @@ mod tests {
 
         app.handle_event(&press(Key::Enter));
         assert!(!app.search_focused, "Enter did not leave the search");
-        assert_eq!(app.search_query, "groc", "Enter did not keep the search");
+        assert_eq!(app.search.text(), "groc", "Enter did not keep the search");
         app.handle_event(&ctrl_key(Key::F));
         type_text(&mut app, "e");
         assert_eq!(
-            app.search_query, "groce",
+            app.search.text(),
+            "groce",
             "the box came back without its caret at the end of the search"
         );
         app.handle_event(&press(Key::Escape));
         assert!(!app.search_focused, "Escape did not leave the search");
-        assert_eq!(app.search_query, "", "Escape did not empty the search");
+        assert_eq!(app.search.text(), "", "Escape did not empty the search");
         assert_eq!(app.current_tasks().len(), all);
         app.handle_event(&ctrl_key(Key::F));
         type_text(&mut app, "tax");
         assert_eq!(
-            app.search_query, "tax",
+            app.search.text(),
+            "tax",
             "the box came back holding the search Escape emptied"
         );
     }
@@ -5937,7 +5905,8 @@ mod tests {
         app.handle_event(&ctrl_key(Key::F));
         app.handle_event(&ctrl_key(Key::V));
         assert_eq!(
-            app.search_query, "groceries",
+            app.search.text(),
+            "groceries",
             "Ctrl+V did not paste into the search"
         );
 
@@ -5945,7 +5914,8 @@ mod tests {
         app.handle_event(&ctrl_key(Key::A));
         app.handle_event(&ctrl_key(Key::X));
         assert_eq!(
-            app.search_query, "",
+            app.search.text(),
+            "",
             "Ctrl+A and Ctrl+X did not cut the search"
         );
         assert_eq!(

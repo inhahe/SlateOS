@@ -529,15 +529,15 @@ MUTATIONS += [
         [SEARCH_CLIP],
     ),
     (
-        "the box comes back holding an old search",
-        "            self.search_focused = true;\n            self.search_editor.set_text(&self.search_query);\n",
+        "Ctrl+F leaves the caret where it was",
+        "            self.search_focused = true;\n            self.search.caret_to_end();\n",
         "            self.search_focused = true;\n",
         [SEARCH],
     ),
     (
         "Escape keeps the search",
-        "                self.search_focused = false;\n                self.set_search(\"\");\n",
-        "                self.search_focused = false;\n",
+        "                self.search_focused = false;\n                if self.search.clear() {\n",
+        "                self.search_focused = false;\n                if false {\n",
         [SEARCH],
     ),
     (
@@ -550,23 +550,9 @@ MUTATIONS += [
         [SEARCH, SEARCH_DRAWN],
     ),
     (
-        "the search types only at its end",
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        "        let end = self.search_editor.text().len();\n"
-        "        self.search_editor.set_cursor(guitk::text::TextCursor::from(end));\n"
-        "        let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, SEARCH_TEXT_SIZE);\n",
-        [SEARCH],
-    ),
-    (
-        "what is typed is not searched for",
-        "        let typed = self.search_editor.text().to_owned();\n        self.set_search(&typed);\n",
-        "",
-        [SEARCH, SEARCH_CLIP],
-    ),
-    (
         "the selection stays on a reminder the search hides",
-        "            text.clone_into(&mut self.search_query);\n            self.reanchor_selection();\n",
-        "            text.clone_into(&mut self.search_query);\n",
+        "        if edit.changed {\n            self.reanchor_selection();\n        }\n",
+        "",
         [SEARCH],
     ),
     (
@@ -583,8 +569,8 @@ MUTATIONS += [
     ),
     (
         "the box with the keyboard is drawn as any other",
-        "        if self.search_focused {\n            // The box with the keyboard:",
-        "        if false {\n            // The box with the keyboard:",
+        "                focused: self.search_focused,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [SEARCH_DRAWN],
     ),
     (
@@ -595,8 +581,8 @@ MUTATIONS += [
     ),
     (
         "the empty box does not name its key",
-        "                    \"Search tasks (Ctrl+F)\".to_string()\n",
-        "                    \"Search tasks...\".to_string()\n",
+        "                placeholder: \"Search tasks (Ctrl+F)\",\n",
+        "                placeholder: \"Search tasks...\",\n",
         [SEARCH_DRAWN],
     ),
     (

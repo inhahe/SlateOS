@@ -290,7 +290,7 @@ impl Directory {
                     break;
                 }
                 *slot = b;
-                len += 1;
+                len = len.saturating_add(1);
             }
             let (dst, _) = buf.split_at_mut(len);
             Some(Ok(dst))

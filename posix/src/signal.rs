@@ -371,6 +371,19 @@ fn blocked_mask_ptr() -> *mut SigsetT {
     unsafe { &raw mut (*crate::perthread::current()).blocked }
 }
 
+/// Block the library's own signals in the calling thread, which no
+/// program's `sigprocmask` can: what the timer thread does first, so that
+/// the timers' signal waits for its `sigwait`.
+pub(crate) fn block_internal_signals() {
+    // SAFETY: `blocked_mask_ptr()` is the calling thread's own.
+    unsafe {
+        let mut m = blocked_mask_ptr().read();
+        m.bits[0] |= INTERNAL_BITS;
+        blocked_mask_ptr().write(m);
+    }
+    mask_changed();
+}
+
 /// The calling thread's blocked mask, whole: what `pthread_create` gives the
 /// thread it makes.
 pub(crate) fn calling_thread_mask() -> SigsetT {
@@ -1008,7 +1021,12 @@ pub unsafe extern "C" fn sigaction(
     act: *const Sigaction,
     oldact: *mut Sigaction,
 ) -> i32 {
-    if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
+    // glibc's `__sigaction`: an internal signal is EINVAL, asked or set.
+    if !(1..NSIG).contains(&signum)
+        || signum == SIGKILL
+        || signum == SIGSTOP
+        || is_internal_signal(signum)
+    {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -1082,6 +1100,10 @@ fn default_action(sig: i32) -> Option<DefaultAction> {
         SIGCHLD | SIGURG | SIGWINCH => Some(DefaultAction::Ignore),
         SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => Some(DefaultAction::Stop),
         SIGCONT => Some(DefaultAction::Continue),
+        // The library's own: one no waiter of the library's took -- sent by
+        // `kill`, or a timer's after its timer went -- is dropped, as glibc's
+        // handlers for them drop one that is not theirs.
+        SIGTIMER | SIGSETXID => Some(DefaultAction::Ignore),
         _ if (1..NSIG).contains(&sig) => {
             // RT signals (32..64) default to Terminate on Linux.
             Some(DefaultAction::Terminate)
@@ -2862,7 +2884,15 @@ pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut Sigset
     // Apply new mask if set is non-null.
     if !set.is_null() {
         // SAFETY: set verified non-null.
-        let new_set = unsafe { *set };
+        let mut new_set = unsafe { *set };
+        // glibc's `__clear_internal_signals`: a program's set neither
+        // blocks nor unblocks the library's own signals, and a whole new
+        // mask keeps them as the thread had them -- the library's timer
+        // thread blocks one, which it must go on blocking.
+        new_set.bits[0] &= !INTERNAL_BITS;
+        if how == SIG_SETMASK {
+            new_set.bits[0] |= current.bits[0] & INTERNAL_BITS;
+        }
         let mut new_mask = match how {
             SIG_BLOCK => {
                 // Add signals in `set` to the blocked set.
@@ -3049,6 +3079,8 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
     }
     unsafe {
         (*set).bits = [u64::MAX; 16];
+        // glibc's `__sigfillset` and then the internal signals out.
+        (*set).bits[0] &= !INTERNAL_BITS;
     }
     0
 }
@@ -3077,16 +3109,15 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
 /// would segfault; glibc does not, and the claim was never checked
 /// against the source.)
 ///
-/// We do not implement glibc's `is_internal_signal` rejection of
-/// SIGCANCEL/SIGSETXID: those numbers are NPTL's private property on
-/// Linux, and we have no equivalent to protect.
+/// The internal signals, 32 and 33, are EINVAL too, as glibc's
+/// `is_internal_signal` makes them ([`is_internal_signal`]).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if !(1..NSIG).contains(&signum) {
+    if !(1..NSIG).contains(&signum) || is_internal_signal(signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3112,7 +3143,7 @@ pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    if !(1..NSIG).contains(&signum) {
+    if !(1..NSIG).contains(&signum) || is_internal_signal(signum) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -3953,24 +3984,42 @@ pub const CLD_CONTINUED: i32 = 6;
 // Realtime signal range
 // ---------------------------------------------------------------------------
 
-/// First realtime signal number (Linux x86_64).
-///
-/// Programs may reference `SIGRTMIN` as a constant.  On glibc this is
-/// actually a function call (`__libc_current_sigrtmin()`) because glibc
-/// reserves the first few RT signals for NPTL.  We expose both the
-/// constant and the function.
-pub const SIGRTMIN: i32 = 32;
+/// The first real-time signal a program may use: 34, glibc's, the C
+/// library keeping 32 and 33 for itself ([`is_internal_signal`]). A C
+/// program reads it through `__libc_current_sigrtmin()`, which `<signal.h>`'s
+/// `SIGRTMIN` calls. It was 32 until 2026-10-16, the library keeping no
+/// signal of its own.
+pub const SIGRTMIN: i32 = 34;
+
+/// The C library's signal for its timer threads, glibc's `SIGTIMER`, which
+/// glibc makes `SIGCANCEL`, 32: a `SIGEV_THREAD` timer's kernel timer aims
+/// it at the library's helper thread ([`crate::time`]).
+pub(crate) const SIGTIMER: i32 = 32;
+
+/// glibc's other internal signal, `SIGSETXID`, 33. This library does not
+/// use it; it keeps it from programs as glibc does, so that their real-time
+/// signals start where glibc's do.
+pub(crate) const SIGSETXID: i32 = 33;
+
+/// Whether `sig` is one of the library's own, 32 and 33, which -- as
+/// glibc's `is_internal_signal` -- a program cannot add to a set, give an
+/// action, or block or unblock; `kill` may still send one, and with no
+/// waiter of the library's for it, it is dropped ([`default_action`]).
+#[must_use]
+pub(crate) const fn is_internal_signal(sig: i32) -> bool {
+    sig == SIGTIMER || sig == SIGSETXID
+}
+
+/// The internal signals' bits in a set's low word.
+const INTERNAL_BITS: u64 = (1 << (SIGTIMER - 1)) | (1 << (SIGSETXID - 1));
 /// Last realtime signal number (Linux x86_64).
 pub const SIGRTMAX: i32 = 64;
 
-/// glibc: return the lowest realtime signal number.
-///
-/// SIGRTMIN is typically 32 on Linux (signals 32-64 are realtime).
-/// We don't support realtime signals, but programs that query the
-/// range need valid values.
+/// The lowest real-time signal a program may use, [`SIGRTMIN`]: 34, as
+/// glibc's answers, 32 and 33 being the library's.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn __libc_current_sigrtmin() -> i32 {
-    32
+    SIGRTMIN
 }
 
 /// glibc: return the highest realtime signal number.
@@ -4711,7 +4760,9 @@ mod tests {
         let mut set = SigsetT::EMPTY;
         let ret = unsafe { sigfillset(&raw mut set) };
         assert_eq!(ret, 0);
-        assert!(set.bits.iter().all(|&w| w == u64::MAX));
+        // Every signal but the library's own two, as glibc's.
+        assert_eq!(set.bits[0], u64::MAX & !INTERNAL_BITS);
+        assert!(set.bits[1..].iter().all(|&w| w == u64::MAX));
     }
 
     #[test]
@@ -6313,7 +6364,11 @@ mod tests {
 
     #[test]
     fn test_sigrtmin_sigrtmax() {
-        assert_eq!(__libc_current_sigrtmin(), 32);
+        assert_eq!(
+            __libc_current_sigrtmin(),
+            34,
+            "glibc's, 32 and 33 being the library's"
+        );
         assert_eq!(__libc_current_sigrtmax(), 64);
         // rtmax > rtmin
         assert!(__libc_current_sigrtmax() > __libc_current_sigrtmin());
@@ -6323,11 +6378,91 @@ mod tests {
 
     #[test]
     fn test_sigrtmin_sigrtmax_constants() {
-        assert_eq!(SIGRTMIN, 32);
+        assert_eq!(SIGRTMIN, 34);
         assert_eq!(SIGRTMAX, 64);
         // Constants must agree with the functions.
         assert_eq!(SIGRTMIN, __libc_current_sigrtmin());
         assert_eq!(SIGRTMAX, __libc_current_sigrtmax());
+    }
+
+    /// Signals 32 and 33 are the library's, as glibc 2.39 keeps them
+    /// (`build/d-tools/oracle-internal-signals.c`'s answers): a set will not
+    /// take them, `sigfillset` leaves them out, `sigaction` refuses them
+    /// asked or set, a program's `sigprocmask` neither blocks nor unblocks
+    /// them (a whole new mask keeps them as they were), `strsignal` does not
+    /// count them as real-time, and one that comes with no waiter of the
+    /// library's for it is dropped.
+    #[test]
+    fn signals_32_and_33_are_the_librarys() {
+        let mut set = SigsetT::EMPTY;
+        for sig in [32, 33] {
+            errno::set_errno(0);
+            // SAFETY: a local set.
+            assert_eq!(unsafe { sigaddset(&raw mut set, sig) }, -1, "{sig}");
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            // SAFETY: as above.
+            assert_eq!(unsafe { sigdelset(&raw mut set, sig) }, -1, "{sig}");
+            let mut old = DEFAULT_SIGACTION;
+            errno::set_errno(0);
+            // SAFETY: a local action.
+            assert_eq!(
+                unsafe { sigaction(sig, core::ptr::null(), &raw mut old) },
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+            assert_eq!(default_action(sig), Some(DefaultAction::Ignore));
+        }
+        // SAFETY: as above.
+        assert_eq!(unsafe { sigaddset(&raw mut set, 34) }, 0);
+        let mut full = SigsetT::EMPTY;
+        // SAFETY: as above.
+        unsafe { sigfillset(&raw mut full) };
+        assert_eq!(full.bits[0] & INTERNAL_BITS, 0);
+        assert_ne!(full.bits[0] & sigmask_bit(34), 0);
+
+        let saved = calling_thread_mask();
+        let mut raw = SigsetT::EMPTY;
+        raw.bits[0] = INTERNAL_BITS | sigmask_bit(SIGUSR1);
+        assert_eq!(
+            sigprocmask(SIG_BLOCK, &raw const raw, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            current_blocked_low() & INTERNAL_BITS,
+            0,
+            "not blocked by a program"
+        );
+        assert_ne!(current_blocked_low() & sigmask_bit(SIGUSR1), 0);
+        block_internal_signals();
+        assert_eq!(current_blocked_low() & INTERNAL_BITS, INTERNAL_BITS);
+        let none = SigsetT::EMPTY;
+        assert_eq!(
+            sigprocmask(SIG_SETMASK, &raw const none, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            current_blocked_low(),
+            INTERNAL_BITS,
+            "a whole new mask keeps the library's as they were"
+        );
+        assert_eq!(
+            sigprocmask(SIG_UNBLOCK, &raw const raw, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(current_blocked_low(), INTERNAL_BITS, "nor unblocks them");
+        // SAFETY: `blocked_mask_ptr()` is this thread's own.
+        unsafe { blocked_mask_ptr().write(saved) };
+        mask_changed();
+
+        let text = |p: *const u8| {
+            // SAFETY: strsignal's NUL-terminated answer.
+            unsafe { core::ffi::CStr::from_ptr(p.cast()) }
+                .to_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(text(strsignal(32)), "Unknown signal 32");
+        assert_eq!(text(strsignal(34)), "Real-time signal 0");
     }
 
     #[test]
@@ -6618,7 +6753,7 @@ mod tests {
     #[test]
     fn test_sigrtmin_function() {
         let val = __libc_current_sigrtmin();
-        assert_eq!(val, 32);
+        assert_eq!(val, 34);
         assert_eq!(val, SIGRTMIN);
     }
 
@@ -9244,13 +9379,6 @@ mod tests {
                 "sigabbrev_np" => text(sigabbrev_np(n)),
                 "sigdescr_np" => text(sigdescr_np(n)),
                 _ => continue,
-            };
-            // The one difference, on purpose: a real-time signal is counted
-            // from this library's SIGRTMIN, 32, and glibc's is 34.
-            let want = if func == "strsignal" && (SIGRTMIN..=SIGRTMAX).contains(&n) {
-                Some(format!("Real-time signal {}", n - SIGRTMIN))
-            } else {
-                want
             };
             assert_eq!(got, want, "{func}({n})");
             seen += 1;

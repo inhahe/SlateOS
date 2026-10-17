@@ -1603,10 +1603,10 @@ pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
     }
 }
 
-/// glibc's internal signals -- `SIGCANCEL` (32) and `SIGSETXID` (33) -- which
-/// its `pthread_kill` and `pthread_sigqueue` refuse to send.
+/// The library's internal signals, 32 and 33, which glibc's `pthread_kill`
+/// and `pthread_sigqueue` refuse to send ([`crate::signal::is_internal_signal`]).
 fn is_internal_signal(sig: i32) -> bool {
-    sig == 32 || sig == 33
+    crate::signal::is_internal_signal(sig)
 }
 
 /// Send `sig` with `value` to `thread`, a thread of this process (glibc 2.11's

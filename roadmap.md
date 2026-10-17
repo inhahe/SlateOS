@@ -4004,7 +4004,12 @@ word; text inside them that says "lane C" is history.
   face of its own (lane C's step 2 of
   `requests/e-c-the-multi-line-field-needs-a-font-family.md`) unless the
   toolkit's code editor serves them better
-  (`requests/c-e-the-toolkit-has-a-code-editor.md`).
+  (`requests/c-e-the-toolkit-has-a-code-editor.md`). **Blocked
+  (2026-10-17)** for regextester and slides on lane C: both hold their text
+  to a limit, and the toolkit's field has none to hold it to
+  (`requests/e-c-the-multi-line-field-needs-a-capacity.md`). Lane E's three
+  `Metrics` sites already use `Metrics::new`, so lane C's step 2 is not
+  waiting on lane E.
 
 - `[x]` `[E]` **One search box, not twenty-four copies of it** -- 2026-10-16,
   from the Opus review of `7e588d1a3..ff34c8565`. Twenty-four applications

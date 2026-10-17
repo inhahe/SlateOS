@@ -256,14 +256,14 @@ MUTATIONS += [
     (
         "a search that found nothing is not red",
         "            invalid: self.search.match_count == 0\n"
-        "                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),\n",
+        "                && self.search.searched.as_deref() == Some(self.search.input_text.text()),\n",
         "            invalid: false,\n",
         [FIND],
     ),
     (
         "the box is red before its text is searched for",
         "            invalid: self.search.match_count == 0\n"
-        "                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),\n",
+        "                && self.search.searched.as_deref() == Some(self.search.input_text.text()),\n",
         "            invalid: self.search.match_count == 0,\n",
         [FIND],
     ),
@@ -311,8 +311,8 @@ MUTATIONS += [
     ),
     (
         "Enter on what is not an offset closes the box",
-        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.trim());\n            return;\n",
-        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.trim());\n            self.goto_visible = false;\n            return;\n",
+        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.text().trim());\n            return;\n",
+        "            self.status_message = format!(\"Not an offset: {}\", self.goto_text.text().trim());\n            self.goto_visible = false;\n            return;\n",
         [GOTO],
     ),
     (
@@ -341,17 +341,15 @@ MUTATIONS += [
         "            FocusedPanel::SearchBar => Some(FocusedPanel::SearchBar),\n",
         [EDITS],
     ),
+    # The boxes are textline LineBoxes since 2026-10-17, one each: their
+    # clipboard (the program's), their caret and selection drawn, and the
+    # text each edits being its own are LineBox's, which textline's own
+    # table covers.
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.box_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
-        "the editor is kept for the box the keyboard moved to",
-        "        if self.box_editor_for != Some(panel) || self.box_editor.text() != self.box_text(panel) {\n",
-        "        if self.box_editor.text() != self.box_text(panel) {\n",
-        [EDITS],
+        "a box given the keyboard by a key keeps its caret where it was",
+        "        self.line_box_mut(panel).caret_to_end();\n",
+        "",
+        ["a_box_given_the_keyboard_by_its_key_types_after_what_it_holds"],
     ),
     (
         "a press puts the caret at the start",
@@ -364,12 +362,6 @@ MUTATIONS += [
         "                    self.press_box(FocusedPanel::GoToDialog, input, x);\n",
         "                    self.focused_panel = FocusedPanel::GoToDialog;\n",
         [GOTO_EDITS],
-    ),
-    (
-        "the caret is drawn at the end",
-        "                cursor: self.box_cursor(panel),\n",
-        "                cursor: text::TextCursor::from(typed.len()),\n",
-        [EDITS],
     ),
 ]
 

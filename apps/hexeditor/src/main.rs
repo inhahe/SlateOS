@@ -40,7 +40,6 @@ use guitk::render::{FontFamily, FontWeightHint, RenderCommand, RenderTree, TextO
 use guitk::style::{Borders, CornerRadii, Edges, FontWeight, Style, TextAlign};
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::undo::{Travel, UndoHistory};
 use guitk::wheel;
 #[allow(unused_imports)]
@@ -50,6 +49,7 @@ use pathtext::ShowPath;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{LineBox, LineLook};
 use unsaved::{Choice, Question};
 
 use std::collections::VecDeque;
@@ -418,21 +418,37 @@ impl Default for SearchQuery {
 }
 
 /// State of an active search / replace dialog.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SearchState {
     pub query: SearchQuery,
     pub replace_pattern: Option<Vec<u8>>,
     pub last_match: Option<usize>,
     pub match_count: usize,
     pub visible: bool,
-    /// Text in the search input field.
-    pub input_text: String,
+    /// The search box: what is typed into it, and its caret.
+    pub input_text: LineBox,
     /// Text in the replace input field.
     pub replace_text: String,
     /// What the box held when the last search ran, so the box can say that
     /// *this* text found nothing -- and stop saying it the moment the text
     /// changes, without a search per keystroke over a whole file.
     pub searched: Option<String>,
+}
+
+impl Default for SearchState {
+    /// No search, the bar hidden, its box empty.
+    fn default() -> Self {
+        Self {
+            query: SearchQuery::default(),
+            replace_pattern: None,
+            last_match: None,
+            match_count: 0,
+            visible: false,
+            input_text: LineBox::new(BOX_CAPACITY, UI_FONT_SIZE),
+            replace_text: String::new(),
+            searched: None,
+        }
+    }
 }
 
 // ============================================================================
@@ -1507,17 +1523,10 @@ pub struct HexEditor {
     pub focused_panel: FocusedPanel,
     /// Go-to-offset dialog state.
     pub goto_visible: bool,
-    /// Go-to-offset input text.
-    pub goto_text: String,
-    /// The editor of the box with the keyboard -- the find bar's or the
-    /// go-to dialog's: its caret and selection, loaded whenever the
-    /// keyboard moves to the other box or the box's text changed under it.
-    box_editor: TextInput,
-    /// Which box `box_editor` holds.
-    box_editor_for: Option<FocusedPanel>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V. Text, and
-    /// so apart from `clipboard`, which holds bytes.
-    box_clipboard: String,
+    /// The go-to box: the offset typed, and its caret. Its Ctrl+C, X and V,
+    /// and the find bar's, are on the program's clipboard, which holds text
+    /// -- apart from `clipboard`, which holds bytes.
+    pub goto_text: LineBox,
     /// Whether the pointer is over the find bar's box, and over the go-to
     /// box, which lights its edge.
     pub query_hovered: bool,
@@ -1672,10 +1681,7 @@ impl HexEditor {
             window_height: height,
             focused_panel: FocusedPanel::HexView,
             goto_visible: false,
-            goto_text: String::new(),
-            box_editor: textline::field_holding("", BOX_CAPACITY),
-            box_editor_for: None,
-            box_clipboard: String::new(),
+            goto_text: LineBox::new(BOX_CAPACITY, UI_FONT_SIZE),
             query_hovered: false,
             goto_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -2045,7 +2051,7 @@ impl HexEditor {
                 Key::F => {
                     self.search.visible = !self.search.visible;
                     if self.search.visible {
-                        self.focused_panel = FocusedPanel::SearchBar;
+                        self.focus_box(FocusedPanel::SearchBar);
                     } else {
                         self.focused_panel = FocusedPanel::HexView;
                     }
@@ -2054,7 +2060,7 @@ impl HexEditor {
                 Key::G => {
                     self.goto_visible = !self.goto_visible;
                     if self.goto_visible {
-                        self.focused_panel = FocusedPanel::GoToDialog;
+                        self.focus_box(FocusedPanel::GoToDialog);
                     } else {
                         self.focused_panel = FocusedPanel::HexView;
                     }
@@ -2253,71 +2259,47 @@ impl HexEditor {
         }
     }
 
-    /// What `panel`'s box holds.
-    fn box_text(&self, panel: FocusedPanel) -> &str {
+    /// `panel`'s box: the go-to dialog's, or the find bar's.
+    fn line_box(&self, panel: FocusedPanel) -> &LineBox {
         match panel {
             FocusedPanel::GoToDialog => &self.goto_text,
             _ => &self.search.input_text,
         }
     }
 
-    /// Load `panel`'s box into the editor, unless it already holds it as it
-    /// is -- the caret after the text.
-    fn load_box_editor(&mut self, panel: FocusedPanel) {
-        if self.box_editor_for != Some(panel) || self.box_editor.text() != self.box_text(panel) {
-            let held = self.box_text(panel).to_owned();
-            self.box_editor.set_text(&held);
-            self.box_editor_for = Some(panel);
+    /// `panel`'s box, to change.
+    fn line_box_mut(&mut self, panel: FocusedPanel) -> &mut LineBox {
+        match panel {
+            FocusedPanel::GoToDialog => &mut self.goto_text,
+            _ => &mut self.search.input_text,
         }
     }
 
     /// A key for `panel`'s box, which has the keyboard: `None` for one the
     /// box does not answer, which goes on to the window.
     fn box_key(&mut self, panel: FocusedPanel, key: &KeyEvent) -> Option<EventResult> {
-        self.load_box_editor(panel);
-        let edit =
-            textline::apply_key(&mut self.box_editor, key, &self.box_clipboard, UI_FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.box_clipboard = copied;
-        }
-        if self.box_editor.text() != self.box_text(panel) {
-            let typed = self.box_editor.text().to_owned();
-            match panel {
-                FocusedPanel::GoToDialog => self.goto_text = typed,
-                _ => self.search.input_text = typed,
-            }
-        }
+        let edit = self.line_box_mut(panel).key(key);
         edit.handled.then_some(EventResult::Consumed)
     }
 
-    /// Where `panel`'s box's caret is: the editor's, for the box it holds
-    /// while its text is the box's; the end otherwise. One answer for the
-    /// drawing and for a press.
-    fn box_cursor(&self, panel: FocusedPanel) -> text::TextCursor {
-        let held = self.box_text(panel);
-        if self.box_editor_for == Some(panel) && self.box_editor.text() == held {
-            self.box_editor.cursor()
-        } else {
-            text::TextCursor::from(held.len())
-        }
+    /// Give `panel`'s box the keyboard by a key or a button, its caret after
+    /// what it holds.
+    fn focus_box(&mut self, panel: FocusedPanel) {
+        self.focused_panel = panel;
+        self.line_box_mut(panel).caret_to_end();
     }
 
     /// A press in `panel`'s box, drawn at `r`, at `x`: the keyboard, and the
-    /// caret under the pointer, measured against the box as it was drawn.
+    /// caret under the pointer, measured against the box as it was drawn
+    /// before the press -- with the keyboard or without.
     fn press_box(&mut self, panel: FocusedPanel, r: Rect, x: f32) {
-        let drawn = self.box_cursor(panel);
+        let had_the_keyboard = self.focused_panel == panel;
         self.focused_panel = panel;
-        self.load_box_editor(panel);
-        let cursor = textedit::cursor_at_click(
-            self.box_text(panel),
-            drawn,
-            (r.w - FIELD_INSET * 2.0).max(0.0),
-            UI_FONT_SIZE,
-            FontWeightHint::Regular,
+        self.line_box_mut(panel).press(
             x - r.x - FIELD_INSET,
+            r.w - FIELD_INSET * 2.0,
+            had_the_keyboard,
         );
-        self.box_editor.set_selection_anchor(None);
-        self.box_editor.set_cursor(cursor);
     }
 
     /// Handle cursor navigation keys.
@@ -2607,7 +2589,7 @@ impl HexEditor {
 
     /// Perform search based on current search state.
     fn perform_search(&mut self) {
-        let input = self.search.input_text.clone();
+        let input = self.search.input_text.text().to_owned();
         if input.is_empty() {
             return;
         }
@@ -2645,7 +2627,7 @@ impl HexEditor {
     /// The offset the go-to box names, if it names one: hex after `0x` or
     /// `$`, decimal otherwise.
     fn goto_offset(&self) -> Option<usize> {
-        let text = self.goto_text.trim();
+        let text = self.goto_text.text().trim();
         match text
             .strip_prefix("0x")
             .or_else(|| text.strip_prefix("0X"))
@@ -2659,19 +2641,19 @@ impl HexEditor {
     /// Whether the go-to box holds something that is not an offset, which
     /// its edge says while it is typed.
     fn goto_text_is_wrong(&self) -> bool {
-        !self.goto_text.trim().is_empty() && self.goto_offset().is_none()
+        !self.goto_text.text().trim().is_empty() && self.goto_offset().is_none()
     }
 
     /// Perform go-to-offset.
     fn perform_goto(&mut self) {
-        if self.goto_text.trim().is_empty() {
+        if self.goto_text.text().trim().is_empty() {
             return;
         }
         let Some(off) = self.goto_offset() else {
             // Not an offset: say so, and leave the box up to be corrected. It
             // used to close, having gone nowhere and said nothing, so a typo
             // looked exactly like the file's first byte being the answer.
-            self.status_message = format!("Not an offset: {}", self.goto_text.trim());
+            self.status_message = format!("Not an offset: {}", self.goto_text.text().trim());
             return;
         };
         let vis = self.visible_lines();
@@ -3014,11 +2996,11 @@ impl HexEditor {
             }
             ToolbarAction::Find => {
                 self.search.visible = true;
-                self.focused_panel = FocusedPanel::SearchBar;
+                self.focus_box(FocusedPanel::SearchBar);
             }
             ToolbarAction::GoTo => {
                 self.goto_visible = true;
-                self.focused_panel = FocusedPanel::GoToDialog;
+                self.focus_box(FocusedPanel::GoToDialog);
             }
         }
     }
@@ -3839,7 +3821,7 @@ impl HexEditor {
             focused: open && self.focused_panel == FocusedPanel::SearchBar,
             disabled: false,
             invalid: self.search.match_count == 0
-                && self.search.searched.as_deref() == Some(self.search.input_text.as_str()),
+                && self.search.searched.as_deref() == Some(self.search.input_text.text()),
         }
     }
 
@@ -3861,8 +3843,9 @@ impl HexEditor {
         !self.show_help && self.question.is_none() && !self.picker.is_open()
     }
 
-    /// The typing in a box, with the caret after it while the box has the
-    /// keyboard and scrolled so the end being typed stays in view -- or, in
+    /// `panel`'s box's text (`LineBox::draw`): with its caret and selection,
+    /// scrolled to keep the caret in view, while the box has the keyboard
+    /// (`focused`); from its start, cut with `…`, while it has not; and in
     /// an empty box, what it is for.
     fn render_box_text(
         &self,
@@ -3872,49 +3855,18 @@ impl HexEditor {
         placeholder: &str,
         focused: bool,
     ) {
-        let typed = self.box_text(panel);
         let line = text::line_height(UI_FONT_SIZE, FontWeightHint::Regular);
-        let (x, y, w) = (
-            r.x + FIELD_INSET,
-            r.y + (r.h - line) / 2.0,
-            (r.w - FIELD_INSET * 2.0).max(0.0),
-        );
-        if typed.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: placeholder.to_string(),
-                color: self.palette.subtext0,
-                font_size: UI_FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        textedit::draw(
+        self.line_box(panel).draw(
             tree,
-            &textedit::SingleLine {
-                text: typed,
-                // Where the caret and the selection are; they were fixed at
-                // the end, the only place the keys could type. The editor's
-                // selection only while it holds this box as it is.
-                cursor: self.box_cursor(panel),
-                selection_anchor: if focused
-                    && self.box_editor_for == Some(panel)
-                    && self.box_editor.text() == typed
-                {
-                    self.box_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused,
-                x,
-                y,
-                width: w,
+            &LineLook {
+                x: r.x + FIELD_INSET,
+                y: r.y + (r.h - line) / 2.0,
+                width: r.w - FIELD_INSET * 2.0,
                 line_height: line,
-                font_size: UI_FONT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused,
+                placeholder,
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -6906,7 +6858,7 @@ mod tests {
         }
         let mut editor = make_test_editor(data);
         editor.focused_panel = FocusedPanel::SearchBar;
-        editor.search.input_text = String::from("zz");
+        editor.search.input_text.set_text("zz");
 
         // Forward to the second and third.
         editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
@@ -6947,7 +6899,7 @@ mod tests {
         data[1] = b'z';
         let mut editor = make_test_editor(data);
         editor.focused_panel = FocusedPanel::SearchBar;
-        editor.search.input_text = String::from("zz");
+        editor.search.input_text.set_text("zz");
 
         // Past the only match, wrapping on: it comes back round to it.
         editor.active_doc_mut().cursor = 20;
@@ -7195,7 +7147,7 @@ mod tests {
         assert!(
             editor.search.input_text.is_empty(),
             "Ctrl+I typed into the box: {:?}",
-            editor.search.input_text
+            editor.search.input_text.text()
         );
     }
 
@@ -7206,9 +7158,7 @@ mod tests {
     #[test]
     fn a_case_insensitive_search_finds_what_a_sensitive_one_misses() {
         let mut editor = editor_searching("Hello");
-        for c in "hello".chars() {
-            editor.search.input_text.push(c);
-        }
+        editor.search.input_text.set_text("hello");
 
         editor.perform_search();
         assert_eq!(
@@ -7445,7 +7395,7 @@ mod tests {
         let mut editor = make_test_editor(vec![0; 1024]);
         editor.goto_visible = true;
         editor.focused_panel = FocusedPanel::GoToDialog;
-        editor.goto_text = String::from("0x100");
+        editor.goto_text.set_text("0x100");
         editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
         assert_eq!(editor.active_doc().cursor, 0x100);
         assert!(!editor.goto_visible);
@@ -7456,7 +7406,7 @@ mod tests {
         let mut editor = make_test_editor(vec![0; 1024]);
         editor.goto_visible = true;
         editor.focused_panel = FocusedPanel::GoToDialog;
-        editor.goto_text = String::from("256");
+        editor.goto_text.set_text("256");
         editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
         assert_eq!(editor.active_doc().cursor, 256);
     }
@@ -7466,7 +7416,7 @@ mod tests {
         let mut editor = make_test_editor(vec![0; 1024]);
         editor.goto_visible = true;
         editor.focused_panel = FocusedPanel::GoToDialog;
-        editor.goto_text = String::from("$FF");
+        editor.goto_text.set_text("$FF");
         editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
         assert_eq!(editor.active_doc().cursor, 0xFF);
     }
@@ -7476,7 +7426,7 @@ mod tests {
         let mut editor = make_test_editor(vec![0; 100]);
         editor.goto_visible = true;
         editor.focused_panel = FocusedPanel::GoToDialog;
-        editor.goto_text = String::from("9999");
+        editor.goto_text.set_text("9999");
         editor.handle_key(&key_press(Key::Enter, Modifiers::NONE));
         assert_eq!(editor.active_doc().cursor, 99);
     }
@@ -7712,8 +7662,8 @@ mod tests {
             }
             editor.handle_key(&chord(Key::Q, "@", altgr));
             let typed = match panel {
-                FocusedPanel::SearchBar => editor.search.input_text.clone(),
-                _ => editor.goto_text.clone(),
+                FocusedPanel::SearchBar => editor.search.input_text.text().to_owned(),
+                _ => editor.goto_text.text().to_owned(),
             };
             assert_eq!(typed, "@", "{panel:?}: a command's letter was typed");
         }
@@ -7730,7 +7680,7 @@ mod tests {
         );
         editor.handle_key(&chord(Key::I, "\u{ed}", altgr));
         editor.handle_key(&chord(Key::W, "\u{e5}", altgr));
-        assert_eq!(editor.search.input_text, "\u{ed}\u{e5}");
+        assert_eq!(editor.search.input_text.text(), "\u{ed}\u{e5}");
         assert_eq!(
             (
                 editor.search.query.case_sensitive,
@@ -8112,7 +8062,11 @@ mod tests {
             editor.handle_key(&chord(Key::Left, "", Modifiers::NONE));
         }
         type_text(&mut editor, "o");
-        assert_eq!(editor.search.input_text, "world", "the caret did not move");
+        assert_eq!(
+            editor.search.input_text.text(),
+            "world",
+            "the caret did not move"
+        );
         let rect = FindBar::at(editor.window_width).query;
         let at = rect.x
             + FIELD_INSET
@@ -8137,14 +8091,22 @@ mod tests {
             "Ctrl+Home moved the file's cursor"
         );
         editor.handle_key(&chord(Key::Delete, "", Modifiers::NONE));
-        assert_eq!(editor.search.input_text, "orld", "Delete at the caret");
+        assert_eq!(
+            editor.search.input_text.text(),
+            "orld",
+            "Delete at the caret"
+        );
         editor.handle_key(&chord(Key::End, "", Modifiers::NONE));
         editor.handle_key(&chord(Key::Home, "", Modifiers::shift()));
         editor.handle_key(&chord(Key::C, "", Modifiers::ctrl()));
         type_text(&mut editor, "w");
-        assert_eq!(editor.search.input_text, "w", "Shift+Home did not select");
+        assert_eq!(
+            editor.search.input_text.text(),
+            "w",
+            "Shift+Home did not select"
+        );
         editor.handle_key(&chord(Key::V, "", Modifiers::ctrl()));
-        assert_eq!(editor.search.input_text, "world", "Ctrl+C or Ctrl+V");
+        assert_eq!(editor.search.input_text.text(), "world", "Ctrl+C or Ctrl+V");
         assert_eq!(
             editor.active_doc().data,
             b"hello world".to_vec(),
@@ -8152,9 +8114,13 @@ mod tests {
         );
         editor.handle_key(&chord(Key::A, "", Modifiers::ctrl()));
         editor.handle_key(&chord(Key::X, "", Modifiers::ctrl()));
-        assert_eq!(editor.search.input_text, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(editor.search.input_text.text(), "", "Ctrl+A and Ctrl+X");
         editor.handle_key(&chord(Key::V, "", Modifiers::ctrl()));
-        assert_eq!(editor.search.input_text, "world", "Ctrl+X took nothing");
+        assert_eq!(
+            editor.search.input_text.text(),
+            "world",
+            "Ctrl+X took nothing"
+        );
 
         // A press at the start of the box puts the caret there.
         click(
@@ -8164,7 +8130,8 @@ mod tests {
         );
         type_text(&mut editor, "<");
         assert_eq!(
-            editor.search.input_text, "<world",
+            editor.search.input_text.text(),
+            "<world",
             "the press did not put the caret there"
         );
 
@@ -8172,7 +8139,8 @@ mod tests {
         editor.search.visible = false;
         type_text(&mut editor, "z");
         assert_eq!(
-            editor.search.input_text, "<world",
+            editor.search.input_text.text(),
+            "<world",
             "a hidden box took a key"
         );
     }
@@ -8209,13 +8177,18 @@ mod tests {
         editor.handle_key(&chord(Key::Left, "", Modifiers::NONE));
         editor.handle_key(&chord(Key::Left, "", Modifiers::NONE));
         type_text(&mut editor, "2");
-        assert_eq!(editor.goto_text, "0x210", "the caret did not move");
-        assert_eq!(editor.search.input_text, "ab", "the find box changed");
+        assert_eq!(editor.goto_text.text(), "0x210", "the caret did not move");
+        assert_eq!(
+            editor.search.input_text.text(),
+            "ab",
+            "the find box changed"
+        );
         let (_, input) = HexEditor::goto_rects(editor.window_width, editor.window_height);
         click(&mut editor, input.right() - 2.0, input.y + input.h / 2.0);
         type_text(&mut editor, "0");
         assert_eq!(
-            editor.goto_text, "0x2100",
+            editor.goto_text.text(),
+            "0x2100",
             "the press did not put the caret at the end"
         );
         editor.handle_key(&chord(Key::Backspace, "", Modifiers::NONE));
@@ -8224,6 +8197,31 @@ mod tests {
             editor.active_doc().cursor,
             0x210,
             "Enter did not go to the offset"
+        );
+    }
+
+    /// **A box given the keyboard by its key types after what it holds**,
+    /// wherever its caret was left: Ctrl+F bringing the find bar back puts
+    /// the caret at the end, as a box taking the keyboard by a key does.
+    #[test]
+    fn a_box_given_the_keyboard_by_its_key_types_after_what_it_holds() {
+        let mut editor = make_test_editor(vec![0x00; 1024]);
+        editor.handle_key(&chord(Key::F, "", Modifiers::ctrl()));
+        type_text(&mut editor, "ab");
+        editor.handle_key(&chord(Key::Home, "", Modifiers::NONE));
+        editor.handle_key(&chord(Key::F, "", Modifiers::ctrl()));
+        assert!(!editor.search.visible, "control: Ctrl+F put the bar away");
+        editor.handle_key(&chord(Key::F, "", Modifiers::ctrl()));
+        assert_eq!(
+            editor.focused_panel,
+            FocusedPanel::SearchBar,
+            "control: Ctrl+F gave the box the keyboard"
+        );
+        type_text(&mut editor, "c");
+        assert_eq!(
+            editor.search.input_text.text(),
+            "abc",
+            "the typing went where Home had left the caret"
         );
     }
 }

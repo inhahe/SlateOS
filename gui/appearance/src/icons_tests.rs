@@ -741,3 +741,51 @@ fn a_translucent_colour_draws_a_translucent_icon() {
     let red = render_svg(RED_DOT, 20, half).expect("draws");
     assert_eq!(red.argb[(10 * 20 + 10) as usize], 0x80FF_0000);
 }
+
+/// **A picture asked for round is uploaded clipped to its circle**, and the
+/// same picture asked for plainly is not: an account's picture on the login
+/// screen, and any other picture by its path.
+#[test]
+fn a_round_request_is_uploaded_clipped_to_its_circle() {
+    let f = Fixture::new("round");
+    let path = f.install("pictures/me.png", &png(32, [200, 10, 10, 255]));
+    let name = path.to_str().expect("a scratch path is text").to_owned();
+    let registry = IconRegistry::default();
+    let round = registry.round_or(name.clone(), "avatar-default", 32, INK);
+    let square = registry.icon(name, 32, INK);
+    assert_ne!(round, square, "round is part of what was asked for");
+
+    let image = |image_id: u64| RenderCommand::Image {
+        x: 0.0,
+        y: 0.0,
+        width: 32.0,
+        height: 32.0,
+        image_id,
+    };
+    let mut uploaded: Vec<(u64, Vec<u32>)> = Vec::new();
+    let result: Result<(), ()> = upload_missing(
+        &[image(round), image(square)],
+        &f.theme(),
+        |id| registry.request(id),
+        |_| true,
+        |id, icon| {
+            uploaded.push((id, icon.argb.clone()));
+            Ok(())
+        },
+    );
+    assert!(result.is_ok());
+    let pixels = |id: u64| {
+        &uploaded
+            .iter()
+            .find(|(got, _)| *got == id)
+            .expect("uploaded")
+            .1
+    };
+    assert_eq!(pixels(round)[0] >> 24, 0, "round: its corner is clear");
+    assert_eq!(
+        pixels(round)[16 * 32 + 16] >> 24,
+        0xFF,
+        "round: its middle is drawn"
+    );
+    assert_eq!(pixels(square)[0] >> 24, 0xFF, "plain: its corner is drawn");
+}

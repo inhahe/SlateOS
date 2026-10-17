@@ -77,20 +77,22 @@ this order, a commit each:
    look that elides at the start. *Each lands with the first application
    that uses it, so none is built without a caller.* Done so far:
    `LineKey::moved`, whether a key moved the caret or the selection, which
-   eight programs had computed beside the box, and `set_font_size`, for a
-   box sized with its window (dictionary) (2026-10-17).
+   eight programs had computed beside the box; `set_font_size`, for a
+   box sized with its window (dictionary); and `LineBox::holding`, a box
+   made with something in it (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
-   *Moved (2026-10-17), eleven of the twenty-eight:* rssreader's prompt,
+   *Moved (2026-10-17), thirteen of the twenty-eight:* rssreader's prompt,
    pdfviewer's page range, systemrestore's form (two boxes), defrag's
    exclude pattern, screenshot's text annotation, whiteboard's words,
    ircclient's message line, kanban's input dialog, filesearch's query (in
    its criteria), hexeditor's find and go-to boxes (two), dictionary's
-   query. A row that stood for the second copy -- a reload, a write-back, a
-   private clipboard, a caret or selection drawn by hand -- goes with it;
-   the rest move onto the box. One drawing changed: hexeditor's box
+   query, photomanager's search and album name (two), netscan's five. A
+   row that stood for the second copy -- a reload, a write-back, a private
+   clipboard, a caret or selection drawn by hand -- goes with it; the rest
+   move onto the box. One drawing changed: hexeditor's box
    without the keyboard is drawn from its start, as every LineBox is, not
    scrolled to its end. *Left:* clipmanager, contacts, dbviewer, mindmap,
-   netmanager, netscan, qrcode, startupmanager, taskscheduler, vpnmanager,
+   netmanager, qrcode, startupmanager, taskscheduler, vpnmanager,
    colorpicker, diskanalyzer, editor, lockscreen, passwordgen,
-   photomanager, stickynotes.
+   stickynotes.

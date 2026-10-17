@@ -23,15 +23,14 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::theme::with_alpha;
 #[allow(unused_imports)]
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{LineBox, LineLook};
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -862,13 +861,8 @@ pub struct ScreenshotApp {
     pub annotations: Vec<Annotation>,
     /// Annotation currently being drawn (not yet committed).
     pub pending_annotation: Option<Annotation>,
-    /// Text being typed for a text annotation.
-    pub annotation_text_input: String,
-    /// The text box's caret and selection, laid over
-    /// `annotation_text_input`, which stays the truth.
-    annotation_text_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the text box, for Ctrl+V.
-    annotation_text_clipboard: String,
+    /// The box the text of a text annotation is typed into, and its caret.
+    pub annotation_text_input: LineBox,
     /// Whether the text box has the keyboard: from choosing the text tool --
     /// or a press on the box -- until Escape on an empty box gives the
     /// keyboard back to the tool keys.
@@ -919,9 +913,7 @@ impl ScreenshotApp {
             annotation_color: ANNOTATION_RED,
             annotations: Vec::new(),
             pending_annotation: None,
-            annotation_text_input: String::new(),
-            annotation_text_editor: textline::field_holding("", TEXT_CAPACITY),
-            annotation_text_clipboard: String::new(),
+            annotation_text_input: LineBox::new(TEXT_CAPACITY, TEXT_BOX_SIZE),
             annotation_text_focused: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             settings: Settings::default(),
@@ -1217,8 +1209,7 @@ impl ScreenshotApp {
         self.annotation_tool = tool;
         self.annotation_text_focused = tool == AnnotationTool::Text;
         if self.annotation_text_focused {
-            let text = self.annotation_text_input.clone();
-            self.annotation_text_editor.set_text(&text);
+            self.annotation_text_input.caret_to_end();
         }
     }
 
@@ -1237,62 +1228,24 @@ impl ScreenshotApp {
         ))
     }
 
-    /// Where the text box's caret is drawn: the editor's, or the end of the
-    /// text if the text changed under the editor.
-    fn text_box_cursor(&self) -> TextCursor {
-        if self.annotation_text_editor.text() == self.annotation_text_input {
-            self.annotation_text_editor.cursor()
-        } else {
-            TextCursor::from(self.annotation_text_input.len())
-        }
-    }
-
     /// `event` in the text box, which has the keyboard: a field's keys
-    /// (`textline::apply_key`), the text written back when the key changed
-    /// it. Returns whether the key was the box's.
+    /// (`LineBox::key`, on the program's clipboard). Returns whether the
+    /// key was the box's.
     fn edit_annotation_text(&mut self, event: &KeyEvent) -> bool {
-        if self.annotation_text_editor.text() != self.annotation_text_input {
-            let text = self.annotation_text_input.clone();
-            self.annotation_text_editor.set_text(&text);
-        }
-        let edit = textline::apply_key(
-            &mut self.annotation_text_editor,
-            event,
-            &self.annotation_text_clipboard,
-            TEXT_BOX_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.annotation_text_clipboard = copied;
-        }
-        if self.annotation_text_editor.text() != self.annotation_text_input {
-            self.annotation_text_input = self.annotation_text_editor.text().to_owned();
-        }
-        edit.handled
+        self.annotation_text_input.key(event).handled
     }
 
     /// A press in the text box at `x`: it takes the keyboard, the caret under
-    /// the pointer.
+    /// the pointer, measured against the box as it was drawn before the
+    /// press.
     fn press_text_box(&mut self, rect: Rect, x: f32) {
-        let drawn = if self.annotation_text_focused {
-            self.text_box_cursor()
-        } else {
-            TextCursor::default()
-        };
+        let had_the_keyboard = self.annotation_text_focused;
         self.annotation_text_focused = true;
-        if self.annotation_text_editor.text() != self.annotation_text_input {
-            let text = self.annotation_text_input.clone();
-            self.annotation_text_editor.set_text(&text);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.annotation_text_input,
-            drawn,
-            (rect.w - 2.0 * TEXT_BOX_INSET).max(0.0),
-            TEXT_BOX_SIZE,
-            FontWeightHint::Regular,
+        self.annotation_text_input.press(
             x - rect.x - TEXT_BOX_INSET,
+            rect.w - 2.0 * TEXT_BOX_INSET,
+            had_the_keyboard,
         );
-        self.annotation_text_editor.set_selection_anchor(None);
-        self.annotation_text_editor.set_cursor(cursor);
     }
 
     // ========================================================================
@@ -1619,13 +1572,13 @@ impl ScreenshotApp {
                             draw_y,
                             self.annotation_color,
                         );
-                        ann.text = self.annotation_text_input.clone();
+                        ann.text = self.annotation_text_input.text().to_owned();
                         // The annotation's box is the box its text will
                         // actually occupy when drawn, not one guessed from the
                         // byte count.
                         ann.end_x = draw_x
                             + text::measure(
-                                &self.annotation_text_input,
+                                self.annotation_text_input.text(),
                                 ANNOTATION_TEXT_SIZE,
                                 FontWeightHint::Regular,
                             );
@@ -2039,50 +1992,17 @@ impl ScreenshotApp {
     /// as the toolkit's own input dialog does.
     fn render_text_box_text(&self, tree: &mut RenderTree, rect: Rect, focused: bool) {
         let line = text::line_height(TEXT_BOX_SIZE, FontWeightHint::Regular);
-        let (x, y, width) = (
-            rect.x + TEXT_BOX_INSET,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * TEXT_BOX_INSET).max(0.0),
-        );
-        if self.annotation_text_input.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: "Type the text, then click where it goes".to_owned(),
-                color: self.palette.subtext0,
-                font_size: TEXT_BOX_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(tree, x, y, line, self.palette.text, textedit::CARET_WIDTH);
-            }
-            return;
-        }
-        let editing = self.annotation_text_editor.text() == self.annotation_text_input;
-        textedit::draw(
+        self.annotation_text_input.draw(
             tree,
-            &textedit::SingleLine {
-                text: &self.annotation_text_input,
-                cursor: if focused {
-                    self.text_box_cursor()
-                } else {
-                    TextCursor::default()
-                },
-                selection_anchor: if focused && editing {
-                    self.annotation_text_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused,
-                x,
-                y,
-                width,
+            &LineLook {
+                x: rect.x + TEXT_BOX_INSET,
+                y: rect.y + (rect.h - line) / 2.0,
+                width: rect.w - 2.0 * TEXT_BOX_INSET,
                 line_height: line,
-                font_size: TEXT_BOX_SIZE,
-                weight: FontWeightHint::Regular,
+                focused,
+                placeholder: "Type the text, then click where it goes",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -3343,7 +3263,11 @@ mod tests {
                 text: ch.to_string(),
             });
         }
-        assert_eq!(app.annotation_text_input, "2nd", "a digit did not type");
+        assert_eq!(
+            app.annotation_text_input.text(),
+            "2nd",
+            "a digit did not type"
+        );
         assert_eq!(
             app.annotation_tool,
             AnnotationTool::Text,
@@ -3352,7 +3276,8 @@ mod tests {
 
         app.handle_key(&key(Key::Escape));
         assert_eq!(
-            app.annotation_text_input, "",
+            app.annotation_text_input.text(),
+            "",
             "Escape did not abandon the text"
         );
         assert!(
@@ -3394,7 +3319,8 @@ mod tests {
             "the press placed no text"
         );
         assert_eq!(
-            app.annotation_text_input, "",
+            app.annotation_text_input.text(),
+            "",
             "the placed text stayed in the box"
         );
         assert!(
@@ -3495,18 +3421,21 @@ mod tests {
         app.handle_event(&click(start + 1.0, rect.y + rect.h / 2.0));
         type_text(&mut app, "X");
         assert_eq!(
-            app.annotation_text_input, "Xabc",
+            app.annotation_text_input.text(),
+            "Xabc",
             "the caret is not where the press was"
         );
         app.handle_key(&ctrl(Key::A));
         app.handle_key(&ctrl(Key::X));
         assert_eq!(
-            app.annotation_text_input, "",
+            app.annotation_text_input.text(),
+            "",
             "Ctrl+A and Ctrl+X did not cut"
         );
         app.handle_key(&ctrl(Key::V));
         assert_eq!(
-            app.annotation_text_input, "Xabc",
+            app.annotation_text_input.text(),
+            "Xabc",
             "Ctrl+V did not paste what was cut"
         );
 
@@ -3532,7 +3461,8 @@ mod tests {
         );
         type_text(&mut app, "7");
         assert_eq!(
-            app.annotation_text_input, "7",
+            app.annotation_text_input.text(),
+            "7",
             "the box did not take the typing back"
         );
     }
@@ -3646,7 +3576,7 @@ mod tests {
                     AnnotationTool::Text,
                     "{m:?} {k:?} changed the tool"
                 );
-                assert_eq!(app.annotation_text_input, "a", "{m:?} {k:?} edited");
+                assert_eq!(app.annotation_text_input.text(), "a", "{m:?} {k:?} edited");
                 assert!(!app.show_help, "{m:?} {k:?} raised the list of keys");
             }
         }
@@ -3654,7 +3584,8 @@ mod tests {
         app.handle_key(&chord(Key::X, "x", Modifiers::super_key()));
         app.handle_key(&chord(Key::Z, "ż", altgr));
         assert_eq!(
-            app.annotation_text_input, "aż",
+            app.annotation_text_input.text(),
+            "aż",
             "the text typed a command's letter, or lost AltGr's"
         );
         assert_eq!(app.annotations.len(), 1, "AltGr+Z undid the annotation");

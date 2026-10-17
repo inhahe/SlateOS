@@ -275,13 +275,14 @@ MUTATIONS += [
     # typed: the rule is textline's, and its own table covers it. What is this
     # program's is handing the editor the key as it came -- chord and all.
     (
-        "the text box's editor is given the key without its chord",
-        '            &mut self.annotation_text_editor,\n            event,\n',
-        '            &mut self.annotation_text_editor,\n'
-        '            &KeyEvent {\n'
+        "the text box is given the key without its chord",
+        '        self.annotation_text_input.key(event).handled\n',
+        '        self.annotation_text_input\n'
+        '            .key(&KeyEvent {\n'
         '                modifiers: guitk::event::Modifiers::NONE,\n'
         '                ..event.clone()\n'
-        '            },\n',
+        '            })\n'
+        '            .handled\n',
         ['a_chord_is_not_a_capture_key_and_altgr_is_not_ctrl'],
     ),
 ]
@@ -336,7 +337,10 @@ MUTATIONS += [
 # keyboard from choosing the text tool: a digit types, and Escape abandons the
 # text, not the picture (2026-10-04; known-issues
 # E-the-screenshot-tools-text-annotation-cannot-take-a-digit-and-escape-throws-the-picture-away).
-DIGITS = "a_text_annotation_takes_digits_and_escape_abandons_only_the_text"
+# The box is a textline LineBox since 2026-10-17: its clipboard (the
+# program's) and its caret and selection drawn are LineBox's, which
+# textline's own table covers.
+DIGITS ="a_text_annotation_takes_digits_and_escape_abandons_only_the_text"
 TEXT_BOX = "the_text_box_is_the_toolkits_field"
 
 MUTATIONS += [
@@ -405,21 +409,19 @@ MUTATIONS += [
     ),
     (
         "a press leaves the caret where it was",
-        "        self.annotation_text_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "        self.annotation_text_input.press(\n"
+        "            x - rect.x - TEXT_BOX_INSET,\n"
+        "            rect.w - 2.0 * TEXT_BOX_INSET,\n"
+        "            had_the_keyboard,\n"
+        "        );\n",
+        "        let _ = (x, rect, had_the_keyboard);\n",
         [TEXT_BOX],
     ),
     (
         "a press on the box does not take the keyboard back",
         "        self.annotation_text_focused = true;\n"
-        "        if self.annotation_text_editor.text() != self.annotation_text_input {\n",
-        "        if self.annotation_text_editor.text() != self.annotation_text_input {\n",
-        [TEXT_BOX],
-    ),
-    (
-        "a cut takes nothing to the clipboard",
-        "            self.annotation_text_clipboard = copied;\n",
-        "            let _ = copied;\n",
+        "        self.annotation_text_input.press(\n",
+        "        self.annotation_text_input.press(\n",
         [TEXT_BOX],
     ),
     (
@@ -438,12 +440,6 @@ MUTATIONS += [
         "the text box shows without the text tool",
         "        if self.view != AppView::Preview || self.annotation_tool != AnnotationTool::Text {\n",
         "        if self.view != AppView::Preview {\n",
-        [TEXT_BOX],
-    ),
-    (
-        "the text box's caret is at its start",
-        "                cursor: if focused {\n                    self.text_box_cursor()\n",
-        "                cursor: if false {\n                    self.text_box_cursor()\n",
         [TEXT_BOX],
     ),
     (

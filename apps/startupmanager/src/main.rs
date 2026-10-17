@@ -35,9 +35,9 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Colours come from `appearance::Palette` -- see design-decisions 822.
@@ -983,28 +983,36 @@ impl core::fmt::Display for ConfigError {
 // ============================================================================
 
 /// Which dialog is currently open, if any.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub enum DialogState {
     /// No dialog is open.
     Closed,
-    /// Add/edit entry dialog.
-    AddEdit(AddEditDialog),
+    /// Add/edit entry dialog: boxed, its five boxes being far larger than
+    /// what the other variants hold.
+    AddEdit(Box<AddEditDialog>),
     /// Confirm delete dialog.
     ConfirmDelete(u64),
 }
 
-/// State for the add/edit entry dialog.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// An empty or filled box for the search or the dialog: every one holds up
+/// to `BOX_CAPACITY` characters, drawn at `FONT_SIZE`.
+fn field_box(text: &str) -> LineBox {
+    LineBox::holding(text, BOX_CAPACITY, FONT_SIZE)
+}
+
+/// State for the add/edit entry dialog. Its text fields are boxes, each
+/// what is typed into it and its caret.
+#[derive(Clone, Debug)]
 pub struct AddEditDialog {
     /// `None` for add, `Some(id)` for edit.
     pub editing_id: Option<u64>,
-    pub name: String,
-    pub path: String,
-    pub args: String,
+    pub name: LineBox,
+    pub path: LineBox,
+    pub args: LineBox,
     pub startup_type_index: usize,
     pub impact_index: usize,
-    pub publisher: String,
-    pub description: String,
+    pub publisher: LineBox,
+    pub description: LineBox,
     /// Which field is currently focused (0=name, 1=path, 2=args, 3=publisher, 4=description).
     pub focused_field: usize,
 }
@@ -1014,13 +1022,13 @@ impl AddEditDialog {
     pub fn new_add() -> Self {
         Self {
             editing_id: Option::None,
-            name: String::new(),
-            path: String::new(),
-            args: String::new(),
+            name: field_box(""),
+            path: field_box(""),
+            args: field_box(""),
             startup_type_index: 0,
             impact_index: 1, // Default to Low
-            publisher: String::new(),
-            description: String::new(),
+            publisher: field_box(""),
+            description: field_box(""),
             focused_field: 0,
         }
     }
@@ -1037,13 +1045,13 @@ impl AddEditDialog {
             .unwrap_or(0);
         Self {
             editing_id: Some(entry.id),
-            name: entry.name.clone(),
-            path: entry.path.clone(),
-            args: entry.args.clone(),
+            name: field_box(&entry.name),
+            path: field_box(&entry.path),
+            args: field_box(&entry.args),
             startup_type_index,
             impact_index,
-            publisher: entry.publisher.clone(),
-            description: entry.description.clone(),
+            publisher: field_box(&entry.publisher),
+            description: field_box(&entry.description),
             focused_field: 0,
         }
     }
@@ -1066,10 +1074,10 @@ impl AddEditDialog {
 
     /// Validate the dialog fields. Returns an error message if invalid.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.name.trim().is_empty() {
+        if self.name.text().trim().is_empty() {
             return Err("Name is required");
         }
-        if self.path.trim().is_empty() {
+        if self.path.text().trim().is_empty() {
             return Err("Path is required");
         }
         Ok(())
@@ -1098,9 +1106,9 @@ impl AddEditDialog {
 
     /// The text fields in focus order, as `(caption, value)`.
     ///
-    /// The renderer, the hit test and `focused_text_mut` all walk this one
+    /// The renderer, the hit test and `field_mut` all walk this one
     /// list, so a sixth field cannot be drawn without also being typeable.
-    pub fn fields(&self) -> [(&'static str, &str); Self::FIELD_COUNT] {
+    pub fn fields(&self) -> [(&'static str, &LineBox); Self::FIELD_COUNT] {
         [
             ("Name", &self.name),
             ("Path", &self.path),
@@ -1110,9 +1118,9 @@ impl AddEditDialog {
         ]
     }
 
-    /// The focused field's text, to type into.
-    pub fn focused_text_mut(&mut self) -> &mut String {
-        match self.focused_field {
+    /// Field `i`'s box, to type into.
+    pub fn field_mut(&mut self, i: usize) -> &mut LineBox {
+        match i {
             1 => &mut self.path,
             2 => &mut self.args,
             3 => &mut self.publisher,
@@ -1130,20 +1138,28 @@ impl AddEditDialog {
 
     /// Move focus to the next field.
     pub fn focus_next(&mut self) {
-        self.focused_field = self
+        let next = self
             .focused_field
             .saturating_add(1)
             .checked_rem(Self::FIELD_COUNT)
             .unwrap_or(0);
+        self.focus_field(next);
     }
 
     /// Move focus to the previous field.
     pub fn focus_prev(&mut self) {
-        self.focused_field = if self.focused_field == 0 {
+        let prev = if self.focused_field == 0 {
             Self::FIELD_COUNT.saturating_sub(1)
         } else {
             self.focused_field.saturating_sub(1)
         };
+        self.focus_field(prev);
+    }
+
+    /// Give field `i` the keyboard by a key, its caret after what it holds.
+    fn focus_field(&mut self, i: usize) {
+        self.focused_field = i;
+        self.field_mut(i).caret_to_end();
     }
 }
 
@@ -1506,7 +1522,8 @@ pub struct StartupUI {
     pub manager: StartupManager,
     pub sort_column: SortColumn,
     pub sort_order: SortOrder,
-    pub search_query: String,
+    /// The search box: what the list is filtered by, and its caret.
+    pub search_query: LineBox,
     pub selected_id: Option<u64>,
     /// Whether the shortcut card is up.
     pub show_help: bool,
@@ -1522,15 +1539,6 @@ pub struct StartupUI {
     /// a click anywhere else takes it away, so keystrokes meant for the table
     /// cannot silently filter it instead.
     pub search_focused: bool,
-    /// The editor of the box with the keyboard -- the search, or a field of
-    /// the add or edit dialog: its caret and selection, loaded whenever the
-    /// keyboard moves to another box or the box's text changed under it.
-    editor: TextInput,
-    /// Which box `editor` holds: `Target::Search` or a
-    /// `Target::DialogField`.
-    editor_for: Option<Target>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
     /// The last thing the app has to say — a validation refusal, or the result
     /// of an action. Drawn in the dialog footer while a dialog is open, and in
     /// the header otherwise.
@@ -1557,7 +1565,7 @@ impl StartupUI {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             sort_column: SortColumn::Name,
             sort_order: SortOrder::Ascending,
-            search_query: String::new(),
+            search_query: field_box(""),
             selected_id: Option::None,
             show_help: false,
             dialog: DialogState::Closed,
@@ -1566,9 +1574,6 @@ impl StartupUI {
             window_width: WINDOW_WIDTH,
             window_height: WINDOW_HEIGHT,
             search_focused: false,
-            editor: textline::field_holding("", BOX_CAPACITY),
-            editor_for: Option::None,
-            clipboard: String::new(),
             status: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             hover: Option::None,
@@ -1606,7 +1611,7 @@ impl StartupUI {
     /// The filtered, sorted list in full.
     fn all_entries(&self) -> Vec<&StartupEntry> {
         self.manager
-            .filtered_sorted(&self.search_query, self.sort_column, self.sort_order)
+            .filtered_sorted(self.search_query.text(), self.sort_column, self.sort_order)
     }
 
     /// The slice of the list that `l`'s viewport shows.
@@ -1624,7 +1629,7 @@ impl StartupUI {
 
     /// Total number of filtered entries.
     pub fn filtered_count(&self) -> usize {
-        self.manager.search_entries(&self.search_query).len()
+        self.manager.search_entries(self.search_query.text()).len()
     }
 
     /// The largest first-visible-row index that still fills the viewport.
@@ -1711,7 +1716,7 @@ impl StartupUI {
     /// Open the add dialog.
     pub fn open_add_dialog(&mut self) {
         self.status.clear();
-        self.dialog = DialogState::AddEdit(AddEditDialog::new_add());
+        self.dialog = DialogState::AddEdit(Box::new(AddEditDialog::new_add()));
     }
 
     /// Open the edit dialog for the selected entry.
@@ -1719,7 +1724,7 @@ impl StartupUI {
         if let Some(id) = self.selected_id
             && let Some(entry) = self.manager.get_entry(id)
         {
-            self.dialog = DialogState::AddEdit(AddEditDialog::new_edit(entry));
+            self.dialog = DialogState::AddEdit(Box::new(AddEditDialog::new_edit(entry)));
             self.status.clear();
         }
     }
@@ -1751,23 +1756,23 @@ impl StartupUI {
         if let Some(id) = dlg.editing_id {
             self.manager.update_entry(
                 id,
-                dlg.name.trim(),
-                dlg.path.trim(),
-                dlg.args.trim(),
+                dlg.name.text().trim(),
+                dlg.path.text().trim(),
+                dlg.args.text().trim(),
                 dlg.selected_type(),
                 dlg.selected_impact(),
-                dlg.publisher.trim(),
-                dlg.description.trim(),
+                dlg.publisher.text().trim(),
+                dlg.description.text().trim(),
             );
         } else {
             let new_id = self.manager.add_entry(
-                dlg.name.trim(),
-                dlg.path.trim(),
-                dlg.args.trim(),
+                dlg.name.text().trim(),
+                dlg.path.text().trim(),
+                dlg.args.text().trim(),
                 dlg.selected_type(),
                 dlg.selected_impact(),
-                dlg.publisher.trim(),
-                dlg.description.trim(),
+                dlg.publisher.text().trim(),
+                dlg.description.text().trim(),
                 0, // Timestamp would come from system clock in production.
             );
             self.selected_id = Some(new_id);
@@ -2020,9 +2025,16 @@ impl StartupUI {
 
         match target {
             Some(Target::Search) => {
+                let had_the_keyboard = self.search_focused;
                 self.search_focused = true;
                 let l = self.layout();
-                self.press_box(Target::Search, l.search, SEARCH_TEXT_INSET, x);
+                self.press_box(
+                    Target::Search,
+                    l.search,
+                    SEARCH_TEXT_INSET,
+                    x,
+                    had_the_keyboard,
+                );
                 EventResult::Consumed
             }
             Some(Target::Toolbar(action)) => {
@@ -2044,10 +2056,12 @@ impl StartupUI {
             }
             Some(Target::DialogField(i)) => {
                 if let DialogState::AddEdit(dlg) = &mut self.dialog {
-                    dlg.focused_field = i.min(AddEditDialog::FIELD_COUNT.saturating_sub(1));
-                    let field = Target::DialogField(dlg.focused_field);
+                    let at = i.min(AddEditDialog::FIELD_COUNT.saturating_sub(1));
+                    let had_the_keyboard = dlg.focused_field == at;
+                    dlg.focused_field = at;
+                    let field = Target::DialogField(at);
                     let rect = self.layout().dialog_field(i);
-                    self.press_box(field, rect, FIELD_TEXT_INSET, x);
+                    self.press_box(field, rect, FIELD_TEXT_INSET, x, had_the_keyboard);
                 }
                 EventResult::Consumed
             }
@@ -2157,93 +2171,42 @@ impl StartupUI {
         EventResult::Consumed
     }
 
-    /// What `target`'s box holds: the search, or a field of the open dialog.
-    fn box_text(&self, target: Target) -> &str {
-        match (target, &self.dialog) {
-            (Target::DialogField(i), DialogState::AddEdit(dlg)) => {
-                dlg.fields().get(i).map_or("", |(_, value)| value)
-            }
-            _ => &self.search_query,
-        }
-    }
-
-    /// Replace what `target`'s box holds.
-    fn set_box_text(&mut self, target: Target, text: &str) {
+    /// `target`'s box, to change: a field of the open dialog, or else the
+    /// search.
+    fn line_box_mut(&mut self, target: Target) -> &mut LineBox {
         match (target, &mut self.dialog) {
-            (Target::DialogField(i), DialogState::AddEdit(dlg)) => {
-                let keep = dlg.focused_field;
-                dlg.focused_field = i;
-                text.clone_into(dlg.focused_text_mut());
-                dlg.focused_field = keep;
-            }
-            _ => text.clone_into(&mut self.search_query),
-        }
-    }
-
-    /// Load `target`'s box into the editor, unless it already holds it as it
-    /// is -- the caret after the text.
-    fn load_editor(&mut self, target: Target) {
-        if self.editor_for != Some(target) || self.editor.text() != self.box_text(target) {
-            let held = self.box_text(target).to_owned();
-            self.editor.set_text(&held);
-            self.editor_for = Some(target);
+            (Target::DialogField(i), DialogState::AddEdit(dlg)) => dlg.field_mut(i),
+            _ => &mut self.search_query,
         }
     }
 
     /// A key for `target`'s box, which has the keyboard: `None` for one the
     /// box does not answer, else whether the text changed.
     fn box_key(&mut self, target: Target, key: &KeyEvent) -> Option<bool> {
-        self.load_editor(target);
-        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        let changed = self.editor.text() != self.box_text(target);
-        if changed {
-            let typed = self.editor.text().to_owned();
-            self.set_box_text(target, &typed);
-        }
-        edit.handled.then_some(changed)
-    }
-
-    /// Where `target`'s box's caret and selection anchor are, while it has
-    /// the keyboard and the editor holds it as it is; the end, and none,
-    /// otherwise. One answer for the drawing and for a press.
-    fn box_caret(&self, target: Target) -> (text::TextCursor, Option<usize>) {
-        let held = self.box_text(target);
-        if self.editor_for == Some(target) && self.editor.text() == held {
-            (self.editor.cursor(), self.editor.selection_anchor())
-        } else {
-            (text::TextCursor::from(held.len()), Option::None)
-        }
+        let edit = self.line_box_mut(target).key(key);
+        edit.handled.then_some(edit.changed)
     }
 
     /// A press in `target`'s box, drawn at `rect` with its text `inset`
     /// in, at `x`: the caret under the pointer, measured against the box as
-    /// it was drawn.
-    fn press_box(&mut self, target: Target, rect: Rect, inset: f32, x: f32) {
-        let (drawn, _) = self.box_caret(target);
-        self.load_editor(target);
-        let cursor = textedit::cursor_at_click(
-            self.box_text(target),
-            drawn,
-            (rect.w - 2.0 * inset).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - inset,
-        );
-        self.editor.set_selection_anchor(Option::None);
-        self.editor.set_cursor(cursor);
+    /// it was drawn -- with the keyboard (`had_the_keyboard`) or without.
+    fn press_box(
+        &mut self,
+        target: Target,
+        rect: Rect,
+        inset: f32,
+        x: f32,
+        had_the_keyboard: bool,
+    ) {
+        self.line_box_mut(target)
+            .press(x - rect.x - inset, rect.w - 2.0 * inset, had_the_keyboard);
     }
 
     /// Ctrl+F: the search box takes the keyboard with what it holds selected,
     /// so typing starts a new search and an arrow key keeps the old one.
     fn focus_search(&mut self) {
         self.search_focused = true;
-        let held = self.search_query.clone();
-        self.editor.set_text(&held);
-        self.editor.select_all();
-        self.editor_for = Some(Target::Search);
+        self.search_query.select_all();
     }
 
     fn handle_table_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -2438,7 +2401,7 @@ impl StartupUI {
 
         // The status line only lives here while no dialog is open; a dialog
         // shows it in its own footer, next to the button that produced it.
-        if !self.status.is_empty() && self.dialog == DialogState::Closed {
+        if !self.status.is_empty() && matches!(self.dialog, DialogState::Closed) {
             let w = text::measure(&self.status, FONT_SIZE_SMALL, FontWeightHint::Regular);
             frame.push(RenderCommand::Text {
                 x: (l.width - PADDING - w).max(PADDING),
@@ -2573,7 +2536,7 @@ impl StartupUI {
             SEARCH_TEXT_INSET,
             &self.search_query,
             "Search by name, publisher, or path...  (Ctrl+F)",
-            state.focused.then(|| self.box_caret(Target::Search)),
+            state.focused,
         );
         frame.hit(Target::Search, l.search);
     }
@@ -3068,9 +3031,6 @@ impl StartupUI {
                 (label, value),
                 state,
                 self.focus_ring_width,
-                state
-                    .focused
-                    .then(|| self.box_caret(Target::DialogField(i))),
             );
         }
 
@@ -3131,10 +3091,9 @@ impl StartupUI {
         target: Target,
         input: Rect,
         label_y: f32,
-        (label, value): (&str, &str),
+        (label, value): (&str, &LineBox),
         state: guitk::field::State,
         focus_ring_width: f32,
-        caret: Option<(text::TextCursor, Option<usize>)>,
     ) {
         if input.is_empty() {
             return;
@@ -3150,67 +3109,51 @@ impl StartupUI {
             overflow: TextOverflow::Ellipsis,
         });
         guitk::field::draw(frame, pal, input, state, focus_ring_width);
-        Self::draw_box_text(frame, pal, input, FIELD_TEXT_INSET, value, label, caret);
+        Self::draw_box_text(
+            frame,
+            pal,
+            input,
+            FIELD_TEXT_INSET,
+            value,
+            label,
+            state.focused,
+        );
         frame.hit(target, input);
     }
 
-    /// A box's text in `rect`, `inset` in: what it holds, with the caret and
-    /// the selection where they are while it has the keyboard (`caret`), and
-    /// scrolled so the caret stays in view -- or, empty, `placeholder`, with
-    /// the caret before it. The boxes drew their text cut with an ellipsis
-    /// and no caret: the end was the only place the keys could type.
+    /// A box's text in `rect`, `inset` in (`LineBox::draw`): what it holds,
+    /// with the caret and the selection where they are while it has the
+    /// keyboard (`focused`), scrolled so the caret stays in view -- or,
+    /// empty, `placeholder`, with the caret before it while it has the
+    /// keyboard. The boxes drew their text cut with an ellipsis and no
+    /// caret: the end was the only place the keys could type.
     fn draw_box_text(
         frame: &mut Frame,
         pal: &Palette,
         rect: Rect,
         inset: f32,
-        value: &str,
+        line_box: &LineBox,
         placeholder: &str,
-        caret: Option<(text::TextCursor, Option<usize>)>,
+        focused: bool,
     ) {
         let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
-        let (x, y, w) = (
-            rect.x + inset,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * inset).max(0.0),
-        );
         let mut tree = RenderTree::new();
-        if value.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: placeholder.to_string(),
-                color: pal.subtext0,
-                font_size: FONT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(w),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if caret.is_some() {
-                textedit::push_caret(&mut tree, x, y, line, pal.text, textedit::CARET_WIDTH);
-            }
-        } else {
-            let (cursor, anchor) = caret.unwrap_or((text::TextCursor::default(), Option::None));
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: value,
-                    cursor,
-                    selection_anchor: anchor,
-                    focused: caret.is_some(),
-                    x,
-                    y,
-                    width: w,
-                    line_height: line,
-                    font_size: FONT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: pal.text,
-                    selection_bg: pal.accent,
-                    selection_fg: pal.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+        line_box.draw(
+            &mut tree,
+            &LineLook {
+                x: rect.x + inset,
+                y: rect.y + (rect.h - line) / 2.0,
+                width: rect.w - 2.0 * inset,
+                line_height: line,
+                focused,
+                placeholder,
+                color: pal.text,
+                placeholder_color: pal.subtext0,
+                selection_bg: pal.accent,
+                selection_fg: pal.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         frame.extend(tree.commands);
     }
 
@@ -3565,7 +3508,7 @@ mod tests {
                 (
                     matches!(ui.dialog, DialogState::Closed),
                     ui.search_focused,
-                    ui.search_query.clone(),
+                    ui.search_query.text().to_owned(),
                     ui.status.clone(),
                 ),
             )
@@ -3632,7 +3575,8 @@ mod tests {
         ui.handle_key(&chord(Key::A, "ą", altgr));
         ui.handle_key(&chord(Key::Backspace, "", Modifiers::alt()));
         assert_eq!(
-            ui.search_query, "ą",
+            ui.search_query.text(),
+            "ą",
             "the search typed a command's letter, or lost AltGr's"
         );
         ui.handle_key(&chord(Key::Escape, "", Modifiers::NONE));
@@ -3641,14 +3585,14 @@ mod tests {
         // The dialog's own keys are plain, and it types what was typed.
         ui.handle_key(&chord(Key::N, "n", Modifiers::ctrl()));
         let dialog = |ui: &StartupUI| match &ui.dialog {
-            DialogState::AddEdit(d) => Some((d.focused_field, d.name.clone())),
+            DialogState::AddEdit(d) => Some((d.focused_field, d.name.text().to_owned())),
             _ => None,
         };
         assert_eq!(dialog(&ui), Some((0, String::new())), "control: Ctrl+N");
         // Filled in, so a save would go through and close it.
         if let DialogState::AddEdit(d) = &mut ui.dialog {
-            d.name = String::from("kept");
-            d.path = String::from("/bin/kept");
+            d.name.set_text("kept");
+            d.path.set_text("/bin/kept");
         }
         let filled = Some((0, String::from("kept")));
         for m in [Modifiers::alt(), Modifiers::super_key(), altgr] {
@@ -4718,9 +4662,9 @@ mod tests {
         );
         let dlg = AddEditDialog::new_edit(&entry);
         assert_eq!(dlg.editing_id, Some(5));
-        assert_eq!(dlg.name, "Test");
-        assert_eq!(dlg.path, "/test");
-        assert_eq!(dlg.args, "--arg");
+        assert_eq!(dlg.name.text(), "Test");
+        assert_eq!(dlg.path.text(), "/test");
+        assert_eq!(dlg.args.text(), "--arg");
         assert_eq!(dlg.selected_type(), StartupType::Service);
         assert_eq!(dlg.selected_impact(), StartupImpact::High);
     }
@@ -4734,15 +4678,15 @@ mod tests {
     #[test]
     fn test_dialog_validate_empty_path() {
         let mut dlg = AddEditDialog::new_add();
-        dlg.name = "Test".to_string();
+        dlg.name.set_text("Test");
         assert!(dlg.validate().is_err());
     }
 
     #[test]
     fn test_dialog_validate_ok() {
         let mut dlg = AddEditDialog::new_add();
-        dlg.name = "Test".to_string();
-        dlg.path = "/bin/test".to_string();
+        dlg.name.set_text("Test");
+        dlg.path.set_text("/bin/test");
         assert!(dlg.validate().is_ok());
     }
 
@@ -4828,7 +4772,7 @@ mod tests {
         ui.open_add_dialog();
         assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
         ui.close_dialog();
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
     }
 
     #[test]
@@ -4837,13 +4781,13 @@ mod tests {
         let count_before = ui.manager.entry_count();
         ui.open_add_dialog();
         if let DialogState::AddEdit(ref mut dlg) = ui.dialog {
-            dlg.name = "New Entry".to_string();
-            dlg.path = "/bin/new".to_string();
+            dlg.name.set_text("New Entry");
+            dlg.path.set_text("/bin/new");
         }
         let result = ui.confirm_add_edit();
         assert!(result.is_ok());
         assert_eq!(ui.manager.entry_count(), count_before + 1);
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
     }
 
     #[test]
@@ -4866,7 +4810,7 @@ mod tests {
         assert!(matches!(ui.dialog, DialogState::ConfirmDelete(_)));
         ui.confirm_delete();
         assert_eq!(ui.manager.entry_count(), count_before - 1);
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
     }
 
     #[test]
@@ -4940,7 +4884,7 @@ mod tests {
         let mut ui = StartupUI::with_sample_entries();
         let total = ui.filtered_count();
         assert_eq!(total, ui.manager.entry_count());
-        ui.search_query = "zzzznotfound".to_string();
+        ui.search_query.set_text("zzzznotfound");
         assert_eq!(ui.filtered_count(), 0);
     }
 
@@ -5168,12 +5112,12 @@ mod tests {
     fn typing_only_reaches_the_search_box_once_it_has_been_clicked() {
         let mut ui = StartupUI::with_sample_entries();
         probe::type_str(&mut ui, "audio");
-        assert_eq!(ui.search_query, "", "the table stole the keystrokes");
+        assert_eq!(ui.search_query.text(), "", "the table stole the keystrokes");
 
         probe::click(&mut ui, Target::Search);
         assert!(ui.search_focused);
         probe::type_str(&mut ui, "audio");
-        assert_eq!(ui.search_query, "audio");
+        assert_eq!(ui.search_query.text(), "audio");
         assert_eq!(ui.filtered_count(), 1);
         assert_eq!(
             ui.visible_entries().first().map(|e| e.name.as_str()),
@@ -5189,7 +5133,7 @@ mod tests {
         probe::click(&mut ui, Target::Column(SortColumn::Name));
         assert!(!ui.search_focused);
         probe::type_str(&mut ui, "x");
-        assert_eq!(ui.search_query, "");
+        assert_eq!(ui.search_query.text(), "");
     }
 
     #[test]
@@ -5201,7 +5145,7 @@ mod tests {
         for _ in 0..5 {
             probe::key(&mut ui, &probe::press(Key::Backspace));
         }
-        assert_eq!(ui.search_query, "");
+        assert_eq!(ui.search_query.text(), "");
         assert_eq!(ui.scroll_offset, 0);
         assert_eq!(ui.filtered_count(), ui.manager.entry_count());
     }
@@ -5220,10 +5164,14 @@ mod tests {
             EventResult::Consumed
         );
         assert!(!ui.search_focused, "first escape gives up the caret");
-        assert_eq!(ui.search_query, "s");
+        assert_eq!(ui.search_query.text(), "s");
 
         probe::key(&mut ui, &probe::press(Key::Escape));
-        assert_eq!(ui.search_query, "", "second escape clears the filter");
+        assert_eq!(
+            ui.search_query.text(),
+            "",
+            "second escape clears the filter"
+        );
         assert!(ui.selected_id.is_some());
 
         probe::key(&mut ui, &probe::press(Key::Escape));
@@ -5278,7 +5226,7 @@ mod tests {
         probe::type_str(&mut ui, "BackupCo");
         probe::click(&mut ui, Target::DialogSave);
 
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
         assert_eq!(ui.manager.entry_count(), before + 1);
         let added = ui
             .selected_id
@@ -5368,7 +5316,7 @@ mod tests {
         // And typing lands in whichever field the focus reached.
         probe::type_str(&mut ui, "notes");
         match &ui.dialog {
-            DialogState::AddEdit(d) => assert_eq!(d.description, "notes"),
+            DialogState::AddEdit(d) => assert_eq!(d.description.text(), "notes"),
             _ => panic!("dialog closed"),
         }
     }
@@ -5389,7 +5337,7 @@ mod tests {
         probe::click(&mut ui, Target::DialogField(3));
         probe::type_str(&mut ui, "!");
         probe::click(&mut ui, Target::DialogSave);
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
         assert!(ui.manager.get_entry(id).unwrap().publisher.ends_with('!'));
         assert_eq!(
             ui.manager.entry_count(),
@@ -5405,13 +5353,21 @@ mod tests {
         let before = ui.manager.entry_count();
 
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Remove));
-        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        assert!(
+            matches!(ui.dialog, DialogState::ConfirmDelete(d) if d == id),
+            "{:?}",
+            ui.dialog
+        );
         probe::click(&mut ui, Target::DeleteCancel);
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
         assert_eq!(ui.manager.entry_count(), before, "cancel deleted it anyway");
 
         probe::key(&mut ui, &probe::press(Key::Delete));
-        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        assert!(
+            matches!(ui.dialog, DialogState::ConfirmDelete(d) if d == id),
+            "{:?}",
+            ui.dialog
+        );
         probe::click(&mut ui, Target::DeleteConfirm);
         assert_eq!(ui.manager.entry_count(), before - 1);
         assert!(ui.manager.get_entry(id).is_none());
@@ -5432,7 +5388,11 @@ mod tests {
         // A press, on the question's Remove.
         let id = select_first_row(&mut ui);
         probe::key(&mut ui, &probe::press(Key::Delete));
-        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        assert!(
+            matches!(ui.dialog, DialogState::ConfirmDelete(d) if d == id),
+            "{:?}",
+            ui.dialog
+        );
         f1(&mut ui);
         assert!(ui.show_help);
         assert_eq!(
@@ -5445,7 +5405,11 @@ mod tests {
             before,
             "the press removed the entry under the list"
         );
-        assert_eq!(ui.dialog, DialogState::ConfirmDelete(id));
+        assert!(
+            matches!(ui.dialog, DialogState::ConfirmDelete(d) if d == id),
+            "{:?}",
+            ui.dialog
+        );
         f1(&mut ui);
         probe::click_with(&mut ui, Target::DeleteConfirm, MouseButton::Right);
         assert!(!ui.show_help, "a right-button press left the list up");
@@ -5488,7 +5452,7 @@ mod tests {
         let mut ui = StartupUI::with_sample_entries();
         assert!(ui.selected_id.is_none());
         probe::click(&mut ui, Target::Toolbar(ToolbarAction::Remove));
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
         assert!(ui.status.contains("Select"), "status is {:?}", ui.status);
     }
 
@@ -5596,7 +5560,7 @@ mod tests {
         turn(&mut ui, -0.25);
         turn(&mut ui, -0.25);
         assert_eq!(ui.scroll_offset, 1, "half a notch is a row and a half");
-        ui.search_query = String::from("a");
+        ui.search_query.set_text("a");
         ui.key_at(&probe::press(Key::Escape), SHORT);
         assert!(
             ui.search_query.is_empty(),
@@ -5793,7 +5757,7 @@ mod tests {
         probe::key(&mut ui, &probe::ctrl(Key::N));
         assert!(matches!(ui.dialog, DialogState::AddEdit(_)));
         probe::key(&mut ui, &probe::press(Key::Escape));
-        assert_eq!(ui.dialog, DialogState::Closed);
+        assert!(matches!(ui.dialog, DialogState::Closed), "{:?}", ui.dialog);
 
         probe::key(&mut ui, &probe::ctrl(Key::F));
         assert!(ui.search_focused);
@@ -6106,7 +6070,7 @@ mod tests {
             probe::key(&mut ui, &probe::press(Key::Left));
         }
         probe::type_str(&mut ui, "d");
-        assert_eq!(ui.search_query, "update", "the caret did not move");
+        assert_eq!(ui.search_query.text(), "update", "the caret did not move");
         let rect = ui.layout().search;
         let at = rect.x
             + SEARCH_TEXT_INSET
@@ -6125,7 +6089,7 @@ mod tests {
 
         probe::key(&mut ui, &probe::press(Key::Home));
         probe::key(&mut ui, &probe::press(Key::Delete));
-        assert_eq!(ui.search_query, "pdate", "Delete at the caret");
+        assert_eq!(ui.search_query.text(), "pdate", "Delete at the caret");
         assert_eq!(
             ui.manager.entry_count(),
             entries,
@@ -6135,14 +6099,14 @@ mod tests {
         probe::key(&mut ui, &probe::shift(Key::Home));
         probe::key(&mut ui, &probe::ctrl(Key::C));
         probe::type_str(&mut ui, "u");
-        assert_eq!(ui.search_query, "u", "Shift+Home did not select");
+        assert_eq!(ui.search_query.text(), "u", "Shift+Home did not select");
         probe::key(&mut ui, &probe::ctrl(Key::V));
-        assert_eq!(ui.search_query, "update", "Ctrl+C or Ctrl+V");
+        assert_eq!(ui.search_query.text(), "update", "Ctrl+C or Ctrl+V");
         probe::key(&mut ui, &probe::ctrl(Key::A));
         probe::key(&mut ui, &probe::ctrl(Key::X));
-        assert_eq!(ui.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(ui.search_query.text(), "", "Ctrl+A and Ctrl+X");
         probe::key(&mut ui, &probe::ctrl(Key::V));
-        assert_eq!(ui.search_query, "update", "Ctrl+X took nothing");
+        assert_eq!(ui.search_query.text(), "update", "Ctrl+X took nothing");
 
         // A press at the start of the box puts the caret there.
         let size = <StartupUI as Probe>::SIZE;
@@ -6154,7 +6118,8 @@ mod tests {
         );
         probe::type_str(&mut ui, "<");
         assert_eq!(
-            ui.search_query, "<update",
+            ui.search_query.text(),
+            "<update",
             "the press did not put the caret there"
         );
         // And one past its end at its end.
@@ -6166,14 +6131,19 @@ mod tests {
         );
         probe::type_str(&mut ui, ">");
         assert_eq!(
-            ui.search_query, "<update>",
+            ui.search_query.text(),
+            "<update>",
             "the press did not put the caret at the end"
         );
 
         // Ctrl+F selects what the box holds, so typing starts a new search.
         probe::key(&mut ui, &probe::ctrl(Key::F));
         probe::type_str(&mut ui, "x");
-        assert_eq!(ui.search_query, "x", "Ctrl+F did not select the search");
+        assert_eq!(
+            ui.search_query.text(),
+            "x",
+            "Ctrl+F did not select the search"
+        );
     }
 
     /// **The add dialog's fields edit at a caret, each its own**: the
@@ -6192,9 +6162,14 @@ mod tests {
         let DialogState::AddEdit(dlg) = &ui.dialog else {
             panic!("the dialog is not up");
         };
-        assert_eq!(dlg.name, "Backup", "the caret did not move in the name");
         assert_eq!(
-            dlg.path, "/bin/backup",
+            dlg.name.text(),
+            "Backup",
+            "the caret did not move in the name"
+        );
+        assert_eq!(
+            dlg.path.text(),
+            "/bin/backup",
             "Tab took the name's caret to the path"
         );
 
@@ -6220,7 +6195,8 @@ mod tests {
             panic!("the dialog is not up");
         };
         assert_eq!(
-            dlg.name, ">Backups",
+            dlg.name.text(),
+            ">Backups",
             "a press did not put the caret where it landed in the name"
         );
         assert_eq!(dlg.focused_field, 0);
@@ -6253,17 +6229,19 @@ mod tests {
         probe::type_str(&mut ui, "up");
         ui.scroll_offset = 2;
         probe::type_str(&mut ui, "d");
-        assert_eq!(ui.search_query, "upd");
+        assert_eq!(ui.search_query.text(), "upd");
         assert_eq!(ui.scroll_offset, 0, "the search left the table scrolled");
     }
 
-    /// **A field moved to is edited from its end**, even where it holds what
-    /// the field left holds, caret and all.
+    /// **A field moved to is edited from its end**, wherever its own caret
+    /// was left, and even where it holds what the field left holds, caret
+    /// and all.
     #[test]
     fn a_dialog_field_moved_to_is_edited_from_its_end() {
         let mut ui = StartupUI::with_sample_entries();
         ui.open_add_dialog();
         probe::type_str(&mut ui, "ab");
+        probe::key(&mut ui, &probe::press(Key::Home));
         probe::key(&mut ui, &probe::press(Key::Tab));
         probe::type_str(&mut ui, "ab");
         probe::key(&mut ui, &probe::press(Key::Home));
@@ -6273,7 +6251,7 @@ mod tests {
             panic!("the dialog is not up");
         };
         assert_eq!(
-            (dlg.name.as_str(), dlg.path.as_str()),
+            (dlg.name.text(), dlg.path.text()),
             ("ab!", "ab"),
             "the name was typed at the path's caret"
         );

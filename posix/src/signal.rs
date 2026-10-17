@@ -317,7 +317,10 @@ fn seed_inherited_ignored() {
 }
 
 /// Set `SIG_IGN` in the table for each signal `inherited` names (bit `n - 1`
-/// for signal `n`), never `SIGKILL` or `SIGSTOP`, which cannot be ignored.
+/// for signal `n`), never `SIGKILL` or `SIGSTOP`, which cannot be ignored,
+/// nor the library's own two, which no program's action may touch -- an
+/// inherited `SIG_IGN` on 32 would have the kernel discard every
+/// `SIGEV_THREAD` timer's signal.
 #[cfg_attr(all(not(target_os = "none"), not(test)), allow(dead_code))]
 fn adopt_inherited_ignored(inherited: u64) {
     // SAFETY: `actions_ptr()` is this process's; start-up has one thread.
@@ -325,7 +328,11 @@ fn adopt_inherited_ignored(inherited: u64) {
         return;
     };
     for sig in 1..=64i32 {
-        if inherited & sigmask_bit(sig) == 0 || sig == SIGKILL || sig == SIGSTOP {
+        if inherited & sigmask_bit(sig) == 0
+            || sig == SIGKILL
+            || sig == SIGSTOP
+            || is_internal_signal(sig)
+        {
             continue;
         }
         if let Some(slot) = actions.get_mut(sig as usize) {
@@ -337,8 +344,13 @@ fn adopt_inherited_ignored(inherited: u64) {
     }
 }
 
-/// How many threads may wait in `sigtimedwait` and its kin at once.  A
-/// thread past it is told `EAGAIN`, as if its wait had timed out at once.
+/// How many threads may wait in `sigtimedwait` and its kin at once, the
+/// library's own timer thread among them. A thread past it is told
+/// `EAGAIN`, as if its wait had timed out at once. The first slot is the
+/// library's ([`take_internal`]), which no program's wait takes: 31 waiting
+/// threads of a program's would otherwise keep the timer thread from its
+/// wait, and it would spin, refused at once, while no `SIGEV_THREAD` timer
+/// ran (Fable's review of lane D's round 205).
 const ACCEPTORS: usize = 32;
 
 /// `got`'s value once its waiter has stopped waiting: it takes nothing more,
@@ -387,10 +399,11 @@ pub(crate) fn block_internal_signals() {
 /// Wait for the library's own signal `sig` -- one a program's `sigwait`
 /// cannot ask for, its sets refusing it -- with no deadline, and take it:
 /// the signal and its record. `Err` only for a handler that ran on this
-/// thread meanwhile (a thread that blocks every signal runs none) or a full
-/// table of waiters.
+/// thread meanwhile (a thread that blocks every signal runs none), or a
+/// second such wait at once, which the library's one timer thread never
+/// makes: the library's waits have one slot of the table ([`ACCEPTORS`]).
 pub(crate) fn take_internal(sig: i32) -> Result<(i32, Record), i32> {
-    accept(sigmask_bit(sig), None, crate::interrupt::Mark::now())
+    accept(sigmask_bit(sig), None, crate::interrupt::Mark::now(), true)
 }
 
 /// `set` less the library's own signals: what a program's mask may hold
@@ -486,7 +499,7 @@ pub(crate) struct Acceptor {
     /// The waiting thread ([`this_thread`]); 0 while not claimed.
     owner: core::sync::atomic::AtomicUsize,
     /// The signals it takes (signal N at bit N - 1), which the kernel lets
-    /// through meanwhile; 0 while not published.
+    /// through while `got` is 0; 0 while not published.
     set: core::sync::atomic::AtomicU64,
     /// 0 while it waits, [`CLAIMING`] while a signal is handed over, the
     /// signal handed to it, or [`CLOSED`].  The futex word it sleeps on.
@@ -565,6 +578,16 @@ impl Acceptor {
 /// [`CLAIMING`], the record written, and then the signal.  A signal kept in
 /// `extra` is handed back to the kernel as this process's own, and its record
 /// goes with that.
+///
+/// Claimed, the waiter's set closes in this thread's kernel mask at once
+/// ([`opened_by_waiters`]), here, before the dispatch returns: a second
+/// signal of it the kernel holds already stays there, with its record and
+/// its thread, for the next wait. Left open until the waiter withdrew it,
+/// the set let the kernel deliver that signal at the dispatch's return, to
+/// be kept in `extra` without them -- two timers' expiries arriving together
+/// lost the second (Opus's review of lane D's round 205). `extra` is left
+/// for one that comes in the instructions before the close: the kernel does
+/// not block a signal while it delivers it.
 fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
     use core::sync::atomic::Ordering::SeqCst;
     let bit = sigmask_bit(sig);
@@ -577,6 +600,7 @@ fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
     let wants = |a: &&Acceptor| a.owner.load(SeqCst) == me && a.set.load(SeqCst) & bit != 0;
     for a in waiters.iter().filter(wants) {
         if a.got.compare_exchange(0, CLAIMING, SeqCst, SeqCst).is_ok() {
+            mask_changed();
             a.store_record(origin.record());
             a.got.store(sig, SeqCst);
             crate::lowlevellock::futex_wake_all(&a.got);
@@ -609,21 +633,20 @@ fn hand_to_a_waiter(sig: i32, origin: Origin) -> bool {
 /// `SA_RESTART` or not -- a handler for a signal outside the set, since one
 /// of the set is taken, not handled -- as glibc's answers on Linux have it;
 /// `Err(EAGAIN)` when the time runs out, or when every one of the
-/// [`ACCEPTORS`] slots is in use.  `SIGKILL` and `SIGSTOP` cannot be taken,
+/// [`ACCEPTORS`] slots it may use is in use -- `library`'s, the library's
+/// one, or else the program's.  `SIGKILL` and `SIGSTOP` cannot be taken,
 /// and are dropped from the set, as the kernel drops them.
 fn accept(
     set: u64,
     deadline: Option<&crate::stat::Timespec>,
     mark: crate::interrupt::Mark,
+    library: bool,
 ) -> Result<(i32, Record), i32> {
     use core::sync::atomic::Ordering::SeqCst;
     let wanted = set & !(sigmask_bit(SIGKILL) | sigmask_bit(SIGSTOP));
     // SAFETY: this process's table of waiters; every field is an atomic.
     let waiters = unsafe { &*acceptors_ptr() };
-    let Some(a) = waiters
-        .iter()
-        .find(|a| a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok())
-    else {
+    let Some(a) = claim(waiters, library) else {
         return Err(errno::EAGAIN);
     };
     a.got.store(0, SeqCst);
@@ -714,6 +737,22 @@ fn accept(
     }
 }
 
+/// A free slot of `waiters` claimed for a wait: the library's own, the
+/// first, for `library` -- the timer thread's -- and otherwise one of the
+/// program's, the rest. `None` when every one it may use is claimed.
+fn claim(waiters: &[Acceptor], library: bool) -> Option<&Acceptor> {
+    use core::sync::atomic::Ordering::SeqCst;
+    let slots = if library {
+        waiters.get(..1)
+    } else {
+        waiters.get(1..)
+    }
+    .unwrap_or_default();
+    slots
+        .iter()
+        .find(|a| a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok())
+}
+
 /// In a child of `fork`: forget the parent's waiters, whose threads the
 /// child does not have, and make the kernel's mask -- copied from the
 /// parent's, with their sets let through -- the program's again.
@@ -743,16 +782,17 @@ fn keep_pending(sig: i32) {
 }
 
 /// The signals the calling thread's waiter has opened at the kernel: the
-/// set of the waiter it owns, while it waits. Another thread's waiter opens
-/// its set in that thread's kernel mask, not this one's -- until 2026-10-16
-/// every waiter's set was opened in whichever thread wrote the mask.
+/// set of the waiter it owns, while it waits for one -- not once one has been
+/// handed to it ([`hand_to_a_waiter`]). Another thread's waiter opens its set
+/// in that thread's kernel mask, not this one's -- until 2026-10-16 every
+/// waiter's set was opened in whichever thread wrote the mask.
 fn opened_by_waiters() -> u64 {
     use core::sync::atomic::Ordering::SeqCst;
     let me = this_thread();
     // SAFETY: this process's table of waiters; every field is an atomic.
     unsafe { &*acceptors_ptr() }
         .iter()
-        .filter(|a| a.owner.load(SeqCst) == me)
+        .filter(|a| a.owner.load(SeqCst) == me && a.got.load(SeqCst) == 0)
         .fold(0, |union, a| union | a.set.load(SeqCst))
 }
 
@@ -930,7 +970,13 @@ fn install_signal_with_flags(
     flags: u32,
     mask_self: bool,
 ) -> SighandlerT {
-    if !(1..NSIG).contains(&signum) || signum == SIGKILL || signum == SIGSTOP {
+    // The library's own two are refused as `sigaction` refuses them, as
+    // glibc's `signal` does through its `sigaction`.
+    if !(1..NSIG).contains(&signum)
+        || signum == SIGKILL
+        || signum == SIGSTOP
+        || is_internal_signal(signum)
+    {
         errno::set_errno(errno::EINVAL);
         return SIG_ERR;
     }
@@ -1163,7 +1209,7 @@ fn default_action(sig: i32) -> Option<DefaultAction> {
         // handlers for them drop one that is not theirs.
         SIGTIMER | SIGSETXID => Some(DefaultAction::Ignore),
         _ if (1..NSIG).contains(&sig) => {
-            // RT signals (32..64) default to Terminate on Linux.
+            // The real-time signals (34..=64) terminate, as on Linux.
             Some(DefaultAction::Terminate)
         }
         _ => None,
@@ -3699,10 +3745,9 @@ static SIGNAL_NAMES: [&[u8]; 32] = [
 ];
 
 /// Return a string describing a signal number: glibc's texts, and for a
-/// real-time signal "Real-time signal N", counted from this library's
-/// `SIGRTMIN` (32, where glibc's is 34: its thread library keeps 32 and 33,
-/// this one keeps none), and "Unknown signal N" for a number that is no
-/// signal's.
+/// real-time signal "Real-time signal N", counted from `SIGRTMIN` (34, as
+/// glibc's: 32 and 33 are the library's own, and read as "Unknown signal
+/// 32"), and "Unknown signal N" for a number that is no signal's.
 ///
 /// The numbered texts are in the calling thread's own buffer, valid until
 /// its next call; the others are static.
@@ -3897,7 +3942,7 @@ pub extern "C" fn sigtimedwait(
     // SAFETY: non-null, a readable `sigset_t`; its first word is the
     // kernel's 64 signals.
     let wanted = unsafe { set.cast::<u64>().read_unaligned() };
-    match accept(wanted, deadline.as_ref(), mark) {
+    match accept(wanted, deadline.as_ref(), mark, false) {
         Ok((sig, record)) => {
             if !info.is_null() {
                 // SAFETY: a non-null `info` is a writable `siginfo_t`.
@@ -6528,6 +6573,35 @@ mod tests {
         assert_eq!(text(strsignal(34)), "Real-time signal 0");
     }
 
+    /// `signal`, `bsd_signal` and `sysv_signal` refuse the library's own
+    /// two as `sigaction` does, and an inherited `SIG_IGN` on them is not
+    /// taken: either would have the kernel discard every `SIGEV_THREAD`
+    /// timer's signal, past any `sigaction`'s undoing.
+    #[test]
+    fn the_librarys_signals_take_no_handler_by_any_door() {
+        for sig in [SIGTIMER, SIGSETXID] {
+            for install in [signal, bsd_signal, sysv_signal] {
+                errno::set_errno(0);
+                assert_eq!(install(sig, SIG_IGN), SIG_ERR, "{sig}");
+                assert_eq!(errno::get_errno(), errno::EINVAL);
+            }
+        }
+        adopt_inherited_ignored(sigmask_bit(SIGTIMER) | sigmask_bit(SIGUSR2));
+        let mut old = DEFAULT_SIGACTION;
+        // SAFETY: a local action to read into.
+        unsafe { sigaction(SIGUSR2, core::ptr::null(), &raw mut old) };
+        assert_eq!(old.sa_handler, SIG_IGN, "an ordinary signal is taken");
+        // SAFETY: `actions_ptr()` is this thread's table on the host.
+        let slot = unsafe { (*actions_ptr())[SIGTIMER as usize] };
+        assert_ne!(slot.sa_handler, SIG_IGN, "the library's is not");
+        let restore = Sigaction {
+            sa_handler: SIG_DFL,
+            ..DEFAULT_SIGACTION
+        };
+        // SAFETY: as above.
+        unsafe { sigaction(SIGUSR2, &raw const restore, core::ptr::null_mut()) };
+    }
+
     /// A new thread's mask is its attribute's or its creator's, less KILL,
     /// STOP and the library's own signals -- so a timer thread, made by the
     /// helper that blocks those, does not block them, as glibc's does not --
@@ -8316,6 +8390,77 @@ mod tests {
             !hand_to_a_waiter(SIGUSR1, Origin::Kernel(core::ptr::null_mut())),
             "no one waits"
         );
+    }
+
+    /// A program's waits cannot take the library's slot: with all of
+    /// theirs claimed, the next is refused and the library's still claims
+    /// its own -- which the timer thread once could not, and spun.
+    #[test]
+    fn the_programs_waits_leave_the_librarys_slot_alone() {
+        use core::sync::atomic::Ordering::SeqCst;
+        // SAFETY: this thread's table (the host's is per thread).
+        let waiters = unsafe { &*acceptors_ptr() };
+        let mut taken = std::vec::Vec::new();
+        while let Some(a) = claim(waiters, false) {
+            taken.push(a);
+        }
+        assert_eq!(taken.len(), ACCEPTORS - 1);
+        assert!(claim(waiters, false).is_none(), "the program's are full");
+        let own = claim(waiters, true).expect("the library's is free");
+        assert!(core::ptr::eq(own, &waiters[0]));
+        assert!(claim(waiters, true).is_none(), "one at a time");
+        for a in taken.into_iter().chain([own]) {
+            a.busy.store(false, SeqCst);
+        }
+    }
+
+    /// The set closes at the kernel as the dispatch hands a signal over,
+    /// before it returns: a second signal of the set the kernel holds stays
+    /// there, with its record, for the next wait.
+    #[test]
+    fn a_waiters_set_closes_once_a_signal_is_handed_over() {
+        use core::sync::atomic::Ordering::SeqCst;
+        let bit = sigmask_bit(SIGUSR1);
+        let program = current_blocked_low();
+        apply_blocked_low(program | bit);
+        // SAFETY: this thread's table (the host's is per thread).
+        let a = &unsafe { &*acceptors_ptr() }[0];
+        assert!(a.busy.compare_exchange(false, true, SeqCst, SeqCst).is_ok());
+        a.got.store(0, SeqCst);
+        a.extra.store(0, SeqCst);
+        a.owner.store(this_thread(), SeqCst);
+        a.set.store(bit, SeqCst);
+        mask_changed();
+        assert_eq!(kernel_blocked_low() & bit, 0, "open while it waits");
+
+        assert!(hand_to_a_waiter(
+            SIGUSR1,
+            Origin::Kernel(core::ptr::null_mut())
+        ));
+        assert_eq!(a.got.load(SeqCst), SIGUSR1);
+        assert_eq!(kernel_blocked_low() & bit, bit, "closed by the dispatch");
+        assert_eq!(opened_by_waiters(), 0);
+
+        a.got.store(CLOSED, SeqCst);
+        a.set.store(0, SeqCst);
+        a.owner.store(0, SeqCst);
+        a.busy.store(false, SeqCst);
+        apply_blocked_low(program);
+    }
+
+    /// Two threads are two owners: what makes a waiter its own thread's
+    /// ([`this_thread`]) differs from thread to thread, and is never 0, the
+    /// owner of a slot no one has claimed.
+    #[test]
+    fn each_thread_owns_its_waiters_by_a_mark_of_its_own() {
+        let here = this_thread();
+        let there = std::thread::spawn(this_thread)
+            .join()
+            .expect("the other thread");
+        assert_ne!(here, there);
+        assert_ne!(here, 0);
+        assert_ne!(there, 0);
+        assert_eq!(this_thread(), here, "the same thread, the same mark");
     }
 
     /// A waiter is its own thread's: a dispatch here does not hand another

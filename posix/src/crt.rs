@@ -443,10 +443,10 @@ unsafe fn retrieve_initial_fds() {
         // Install this fd at the specified number.
         fdtable::set_fd(entry.fd, kind, entry.handle);
         // A Unix socket's type is the library's to keep, and no call tells
-        // it to the child yet: a stream's, as most handed-down sockets are
-        // (known-issues/D-POSIX-A-RECEIVED-UNIX-SOCKET-IS-TAKEN-FOR-A-STREAM.md).
+        // it to the child: a stream's, the only kind the parent hands down
+        // (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
         if kind == fdtable::HandleKind::UnixSocket {
-            crate::socket::set_unix_meta(entry.fd, crate::socket::SOCK_STREAM);
+            crate::unix_socket::adopt(entry.fd, entry.handle);
         }
     }
 }

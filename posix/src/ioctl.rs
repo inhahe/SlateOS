@@ -958,14 +958,10 @@ fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
             }
             fionread_for_file(st.st_mode, st.st_size, offset)
         }
+        // The kernel's count; a listener's is `EINVAL`, as `unix_ioctl`'s
+        // `SIOCINQ` refuses it.
         HandleKind::UnixSocket => {
-            // A listening socket has nothing to read: `unix_ioctl`'s
-            // `SIOCINQ` refuses it, as `tcp_ioctl` refuses a TCP listener.
-            if crate::socket::get_meta(fd).is_some_and(|m| m.unix_listening) {
-                return Err(errno::EINVAL);
-            }
-            crate::unix_socket::bytes_waiting(fd, handle)
-                .map(|n| i32::try_from(n).unwrap_or(i32::MAX))
+            crate::unix_socket::bytes_waiting(handle).map(|n| i32::try_from(n).unwrap_or(i32::MAX))
         }
         HandleKind::TcpStream => {
             if handle == 0 {

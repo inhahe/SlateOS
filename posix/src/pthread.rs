@@ -808,6 +808,17 @@ impl LaterAttr {
         Self(want)
     }
 
+    /// This attribute with every signal blocked in the threads it makes --
+    /// but the library's own, which no new thread blocks
+    /// (`crate::signal::new_thread_mask`): the timer helper's, which then
+    /// blocks those itself.
+    pub(crate) fn every_signal_blocked(mut self) -> Self {
+        self.0.sigmask = Some(SigsetT {
+            bits: [u64::MAX; 16],
+        });
+        self
+    }
+
     /// Make a thread running `start(arg)` as `pthread_create` with this
     /// attribute would: its id, or the error number.
     pub(crate) fn create(
@@ -1631,6 +1642,11 @@ pub extern "C" fn pthread_kill(thread: PthreadT, sig: i32) -> i32 {
     // worth reporting even when the thread id is also stale, and Linux's
     // `tgkill` likewise rejects the signal independently of the lookup.
     if !(0..crate::signal::NSIG).contains(&sig) {
+        return errno::EINVAL;
+    }
+    // The library's own signals, before the thread is looked for, as
+    // glibc's `pthread_kill` refuses them.
+    if is_internal_signal(sig) {
         return errno::EINVAL;
     }
     if !thread_is_live(thread) {
@@ -10951,6 +10967,16 @@ mod tests {
         assert_eq!(pthread_attr_destroy(&mut a), 0);
         assert!(attr_read_ext(&a).is_null(), "destroyed: nothing held");
         assert_eq!(pthread_attr_destroy(&mut a), 0, "twice: nothing to free");
+    }
+
+    /// `pthread_kill` refuses the library's own signals before it looks for
+    /// the thread, as glibc's does: even a thread that is not there is
+    /// `EINVAL` for them.
+    #[test]
+    fn pthread_kill_refuses_the_librarys_signals() {
+        assert_eq!(pthread_kill(pthread_self(), 32), errno::EINVAL);
+        assert_eq!(pthread_kill(pthread_self(), 33), errno::EINVAL);
+        assert_eq!(pthread_kill(0x7fff_fff0, 32), errno::EINVAL);
     }
 
     /// The attribute's signal mask, as glibc 2.39 keeps it

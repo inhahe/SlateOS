@@ -17,8 +17,11 @@ the library now sends and installs them. The host has no kernel to carry
 one, so only here are they seen: a pipe end sent and received into a new
 descriptor that reaches the same pipe, two in one message in order, room
 for fewer than came (`MSG_CTRUNC`), `MSG_CMSG_CLOEXEC`, the refusals
-(`EBADF`, `EINVAL` beyond 253), and a read end passed from a child that has
-exited. `main.c`'s header numbers the checks; it passes on Linux.
+(`EBADF`, `EINVAL` beyond 253), a read end passed from a child that has
+exited -- and on a stream pair, a receive that goes on into a message that
+carries descriptors and stops after it, and a listening socket that still
+listens once received. `main.c`'s header numbers the checks; it passes on
+Linux.
 
 ## It cannot hang
 

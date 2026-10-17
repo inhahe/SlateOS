@@ -964,7 +964,8 @@ fn process_credentials() -> (UidT, GidT) {
 
 /// The caller's user and group ids, as the kernel keeps them since lane A's
 /// design-decisions 1552: the real, effective, saved and filesystem id of
-/// each kind, indexed by [`REAL`], [`EFFECTIVE`], [`SAVED`] and [`FS`].
+/// each kind, indexed by [`REAL`], [`EFFECTIVE`], [`SAVED`] and, for the
+/// filesystem id, `FS`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Ids {
     /// The user ids.
@@ -991,7 +992,9 @@ pub(crate) const REAL: usize = 0;
 pub(crate) const EFFECTIVE: usize = 1;
 /// [`Ids`]'s index of the saved id.
 pub(crate) const SAVED: usize = 2;
-/// [`Ids`]'s index of the filesystem id.
+/// [`Ids`]'s index of the filesystem id: the tests' alone, since the library
+/// learns a filesystem id from `setfsuid`'s and `setfsgid`'s answers.
+#[cfg(test)]
 pub(crate) const FS: usize = 3;
 
 /// The caller's ids (`SYS_PROCESS_GET_IDS`). From a kernel without the call

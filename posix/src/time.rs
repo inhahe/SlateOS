@@ -24,9 +24,9 @@
 //! `timer_create` and its family are the kernel's (`SYS_POSIX_TIMER`), on
 //! every clock it can arm -- the wall clock, the monotonic and boot clocks,
 //! and the CPU-time clocks -- with `SIGEV_SIGNAL`, `SIGEV_NONE` and
-//! `SIGEV_THREAD_ID`; `SIGEV_THREAD` is not yet, `ENOSYS`. Until 2026-10-16
-//! every timer was `ENOSYS`, and until 2026-10-05 these were stubs that
-//! reported a timer armed and armed nothing.
+//! `SIGEV_THREAD_ID`. `SIGEV_THREAD` is the library's, glibc's way, over
+//! `SIGEV_THREAD_ID` ([`thread_timers`]): a helper thread takes the
+//! library's own signal (32) and starts a thread for each expiry.
 //!
 //! `alarm`, `ualarm` and `setitimer` arm the kernel's interval timers
 //! (`SYS_ITIMER_SET`): `ITIMER_REAL` (`alarm`'s too) on the wall clock, and
@@ -3172,12 +3172,14 @@ pub(crate) mod thread_timers {
     use super::{POSIX_TIMER_CREATE, Sigevent, TimerT, posix_timer};
     use crate::errno;
     use crate::signal::{SI_TIMER, SIGTIMER};
-    use core::sync::atomic::{AtomicI32, AtomicPtr, Ordering};
+    use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicUsize, Ordering};
 
     /// One `SIGEV_THREAD` timer.
     pub(crate) struct Record {
         /// The kernel's id for the timer behind it.
         kernel_id: i32,
+        /// What its timer's signal carries ([`NEXT_SERIAL`]).
+        serial: usize,
         /// `sigev_notify_function`.
         function: extern "C" fn(usize),
         /// `sigev_value`.
@@ -3196,8 +3198,29 @@ pub(crate) mod thread_timers {
 
     /// The live records, newest first, under [`LOCK`].
     static LIST: AtomicPtr<Record> = AtomicPtr::new(core::ptr::null_mut());
-    /// Guards [`LIST`] and the records on it.
+    /// Guards [`LIST`] and the records on it. Taken only through [`held`],
+    /// with every signal blocked: `timer_settime` and its kin, which take
+    /// it, are async-signal-safe, and a handler calling one on a thread that
+    /// holds it would otherwise wait for itself.
     static LOCK: AtomicI32 = AtomicI32::new(0);
+
+    /// Run `f` with [`LOCK`] held and every signal blocked in the calling
+    /// thread's kernel mask, so that no handler runs while it is held.
+    fn held<R>(f: impl FnOnce() -> R) -> R {
+        let _quiet = crate::signal::AllBlocked::new();
+        crate::lowlevellock::lll_lock(&LOCK);
+        let r = f();
+        crate::lowlevellock::lll_unlock(&LOCK);
+        r
+    }
+    /// The serial number the next record is given, which its timer's signal
+    /// carries to the helper: never given twice. A record's address, which
+    /// the signal carried until 2026-10-17, is given again -- freed by
+    /// `timer_delete`, a block `malloc` may hand the next `timer_create` --
+    /// and an expiry of the deleted timer the helper had already taken then
+    /// ran the new timer's function (Fable's review of lane D's round 205).
+    static NEXT_SERIAL: AtomicUsize = AtomicUsize::new(1);
+
     /// The helper thread's kernel id; 0 before it has started.
     static HELPER: AtomicI32 = AtomicI32::new(0);
     /// Serialises the helper's start.
@@ -3218,7 +3241,8 @@ pub(crate) mod thread_timers {
         if record.is_null() {
             return Err(errno::ENOMEM);
         }
-        let event = Sigevent::to_thread(SIGTIMER, helper, record.addr());
+        let serial = NEXT_SERIAL.fetch_add(1, Ordering::Relaxed);
+        let event = Sigevent::to_thread(SIGTIMER, helper, serial);
         let id = match posix_timer(
             POSIX_TIMER_CREATE,
             u64::from(clockid.cast_unsigned()),
@@ -3233,20 +3257,21 @@ pub(crate) mod thread_timers {
                 return Err(e);
             }
         };
-        crate::lowlevellock::lll_lock(&LOCK);
-        // SAFETY: `record` is a fresh block of a `Record`'s size, and the
-        // list is held.
-        unsafe {
-            record.write(Record {
-                kernel_id: id,
-                function,
-                value: ev.sigev_value,
-                attr,
-                next: LIST.load(Ordering::Relaxed),
-            });
-        }
-        LIST.store(record, Ordering::Relaxed);
-        crate::lowlevellock::lll_unlock(&LOCK);
+        held(|| {
+            // SAFETY: `record` is a fresh block of a `Record`'s size, and the
+            // list is held.
+            unsafe {
+                record.write(Record {
+                    kernel_id: id,
+                    serial,
+                    function,
+                    value: ev.sigev_value,
+                    attr,
+                    next: LIST.load(Ordering::Relaxed),
+                });
+            }
+            LIST.store(record, Ordering::Relaxed);
+        });
         Ok(RECORD_BIT | (record.addr() >> 1))
     }
 
@@ -3259,12 +3284,12 @@ pub(crate) mod thread_timers {
     /// list, so that a `timer_t` naming no live record (deleted, or made up)
     /// reaches the kernel as an id naming no timer, and is `EINVAL` there.
     pub(crate) fn kernel_id(record: *mut Record) -> u64 {
-        crate::lowlevellock::lll_lock(&LOCK);
-        let id = find(record).map(|r| {
-            // SAFETY: a record on the list, which is held.
-            unsafe { (*r).kernel_id }
+        let id = held(|| {
+            find(|r| r == record).map(|r| {
+                // SAFETY: a record on the list, which is held.
+                unsafe { (*r).kernel_id }
+            })
         });
-        crate::lowlevellock::lll_unlock(&LOCK);
         id.map_or(u64::from(u32::MAX), |id| u64::from(id.cast_unsigned()))
     }
 
@@ -3274,9 +3299,7 @@ pub(crate) mod thread_timers {
         let Some(record) = decode(timerid) else {
             return;
         };
-        crate::lowlevellock::lll_lock(&LOCK);
-        let gone = unlink(record);
-        crate::lowlevellock::lll_unlock(&LOCK);
+        let gone = held(|| unlink(record));
         if gone {
             // SAFETY: off the list now, so no one else reaches it; malloc's.
             unsafe { crate::malloc::free(record.cast()) };
@@ -3294,17 +3317,27 @@ pub(crate) mod thread_timers {
         START_LOCK.store(0, Ordering::Relaxed);
     }
 
-    /// `record`, if it is on the list. The list is held.
-    fn find(record: *mut Record) -> Option<*mut Record> {
+    /// The first record on the list that `matches`, if one does. The list is
+    /// held.
+    fn find(matches: impl Fn(*mut Record) -> bool) -> Option<*mut Record> {
         let mut at = LIST.load(Ordering::Relaxed);
         while !at.is_null() {
-            if at == record {
+            if matches(at) {
                 return Some(at);
             }
             // SAFETY: a record on the list, which is held.
             at = unsafe { (*at).next };
         }
         None
+    }
+
+    /// The live record whose timer's signal carries `serial`, if there is
+    /// one. The list is held.
+    fn find_serial(serial: usize) -> Option<*mut Record> {
+        find(|r| {
+            // SAFETY: a record on the list, which is held.
+            unsafe { (*r).serial == serial }
+        })
     }
 
     /// Take `record` off the list; whether it was on it. The list is held.
@@ -3342,32 +3375,18 @@ pub(crate) mod thread_timers {
         started
     }
 
-    /// Make the helper, which runs with every signal blocked from its first
-    /// instruction (the creator blocks them while it makes it, and the new
-    /// thread starts with its creator's mask), and wait for it to say who it
-    /// is. Under [`START_LOCK`].
+    /// Make the helper, which runs with every signal blocked -- its
+    /// attribute's mask, which takes no signal before the thread has set it
+    /// -- and wait for it to say who it is. Under [`START_LOCK`].
     fn start_helper() -> Result<i32, i32> {
         let tid = HELPER.load(Ordering::Acquire);
         if tid != 0 {
             return Ok(tid);
         }
-        let mut all = crate::signal::SigsetT::EMPTY;
-        let mut old = crate::signal::SigsetT::EMPTY;
-        // SAFETY: two local sets.
-        unsafe { crate::signal::sigfillset(&raw mut all) };
-        let _ = crate::signal::pthread_sigmask(
-            crate::signal::SIG_SETMASK,
-            &raw const all,
-            &raw mut old,
-        );
-        let made = crate::pthread::LaterAttr::detached(core::ptr::null())
-            .create(helper_main, core::ptr::null_mut());
-        let _ = crate::signal::pthread_sigmask(
-            crate::signal::SIG_SETMASK,
-            &raw const old,
-            core::ptr::null_mut(),
-        );
-        made.map_err(|_| errno::EAGAIN)?;
+        crate::pthread::LaterAttr::detached(core::ptr::null())
+            .every_signal_blocked()
+            .create(helper_main, core::ptr::null_mut())
+            .map_err(|_| errno::EAGAIN)?;
         loop {
             let tid = HELPER.load(Ordering::Acquire);
             if tid != 0 {
@@ -3387,23 +3406,22 @@ pub(crate) mod thread_timers {
                 continue;
             };
             if record.code == SI_TIMER {
-                start_one(core::ptr::with_exposed_provenance_mut(
-                    usize::try_from(record.value).unwrap_or(0),
-                ));
+                start_one(usize::try_from(record.value).unwrap_or(0));
             }
         }
     }
 
-    /// One expiry of `record`'s timer: a thread to run its function, if the
-    /// record is still live. A thread that cannot be made, or a start record
-    /// that cannot be allocated, loses that expiry, as glibc's does.
-    fn start_one(record: *mut Record) {
-        crate::lowlevellock::lll_lock(&LOCK);
-        let found = find(record).map(|r| {
-            // SAFETY: a record on the list, which is held.
-            unsafe { ((*r).function, (*r).value, (*r).attr) }
+    /// One expiry of the timer whose signal carries `serial`: a thread to run
+    /// its function, if its record is still live. A thread that cannot be
+    /// made, or a start record that cannot be allocated, loses that expiry,
+    /// as glibc's does.
+    fn start_one(serial: usize) {
+        let found = held(|| {
+            find_serial(serial).map(|r| {
+                // SAFETY: a record on the list, which is held.
+                unsafe { ((*r).function, (*r).value, (*r).attr) }
+            })
         });
-        crate::lowlevellock::lll_unlock(&LOCK);
         let Some((function, value, attr)) = found else {
             return;
         };
@@ -3430,6 +3448,48 @@ pub(crate) mod thread_timers {
         unsafe { crate::malloc::free(arg) };
         function(value);
         core::ptr::null_mut()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        extern "C" fn nothing(_: usize) {}
+
+        /// An expiry finds its timer's record by the serial its signal
+        /// carries, not by the record's address: a record made in a deleted
+        /// one's block, as `malloc` may make it, is not found for the deleted
+        /// timer's expiry.
+        #[test]
+        fn an_expiry_finds_its_record_by_serial() {
+            let block = crate::malloc::malloc(core::mem::size_of::<Record>()).cast::<Record>();
+            assert!(!block.is_null());
+            let make = |serial: usize| {
+                held(|| {
+                    // SAFETY: a block of a `Record`'s size, off the list.
+                    unsafe {
+                        block.write(Record {
+                            kernel_id: 1,
+                            serial,
+                            function: nothing,
+                            value: 0,
+                            attr: crate::pthread::LaterAttr::detached(core::ptr::null()),
+                            next: LIST.load(Ordering::Relaxed),
+                        });
+                    }
+                    LIST.store(block, Ordering::Relaxed);
+                });
+            };
+            make(11);
+            assert_eq!(held(|| find_serial(11)), Some(block));
+            assert!(held(|| unlink(block)));
+            make(12);
+            assert_eq!(held(|| find_serial(11)), None, "the deleted timer's");
+            assert_eq!(held(|| find_serial(12)), Some(block));
+            assert!(held(|| unlink(block)));
+            // SAFETY: off the list, malloc's.
+            unsafe { crate::malloc::free(block.cast()) };
+        }
     }
 }
 

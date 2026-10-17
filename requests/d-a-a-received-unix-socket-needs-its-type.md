@@ -2,8 +2,8 @@
 
 **Filed:** 2026-10-16 by lane D. **For:** lane A (`SYS_UNIX_GET_OPTION`,
 `kernel/src/syscall/number.rs`'s `UNIX_OPT_*`). **Status:** OPEN.
-**Priority:** normal -- a received stream socket works meanwhile; a
-received datagram or sequenced-packet one is driven as a stream.
+**Priority:** normal -- a stream socket travels meanwhile; a datagram or
+sequenced-packet one is refused (`EOPNOTSUPP`) and does not cross spawn.
 
 ## In short
 
@@ -24,7 +24,10 @@ ask the same with `getsockopt(SO_TYPE)`.
 only. The library will ask it for every Unix socket it receives, and could
 answer `getsockopt(SO_TYPE)` from it too.
 
-Until then a received Unix socket is installed as a stream socket, which
-is what most passed sockets are (an accepted connection handed to a
-worker); `known-issues/D-POSIX-A-RECEIVED-UNIX-SOCKET-IS-TAKEN-FOR-A-STREAM.md`
-says so.
+Until then only a stream socket travels, which is what most passed
+sockets are (an accepted connection handed to a worker), and is installed
+as one: a datagram or sequenced-packet socket is refused by `sendmsg`
+(`EOPNOTSUPP`) and skipped by `posix_spawn` and `exec`, since its receiver
+would drive it as a stream's -- one message sent as several, or cut to
+its first piece. `known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md` says so. With
+`UNIX_OPT_TYPE`, both travel.

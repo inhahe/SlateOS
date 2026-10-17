@@ -1388,6 +1388,11 @@ pub const UNIX_OPT_PASSCRED: u64 = 1;
 pub const UNIX_OPT_RCVTIMEO: u64 = 2;
 /// Option: the same for a blocking send or connect (`SO_SNDTIMEO`).
 pub const UNIX_OPT_SNDTIMEO: u64 = 3;
+/// Option, read only: the bytes a receive would find waiting -- everything
+/// queued at a stream or sequenced-packet socket, the next datagram at a
+/// datagram one -- and `InvalidArgument` at a listener, as Linux's
+/// `unix_inq_len` answers `FIONREAD`.
+pub const UNIX_OPT_INQ: u64 = 4;
 /// An address record: kind (u32: 0 unnamed, 1 path, 2 abstract), length
 /// (u32), then 108 bytes, the unused ones zero.
 pub const UNIX_ADDR_LEN: usize = 116;

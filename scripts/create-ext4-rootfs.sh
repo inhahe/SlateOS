@@ -2479,10 +2479,21 @@ fi
 GENERIC_LIST="$ROOT_DIR/services/ctest-generic.list"
 if [ -f "$GENERIC_LIST" ]; then
     _bad=0
-    # Each `"word" =>` arm of the function, one word a line.
-    _grant_words=$(awk '/fn ctest_generic_grant/,/_ => None/' \
-        "$ROOT_DIR/kernel/src/proc/spawn.rs" 2>/dev/null |
-        sed -n 's/^ *"\([a-z_]*\)" =>.*/\1/p' | tr '\n' ' ')
+    # Every quoted word in an arm's pattern -- `"word" =>`, or `"a" | "b" =>`
+    # -- from the function's first line to its closing brace, comments
+    # skipped. Read by one awk: with pipefail, a filter that matched nothing
+    # would end the script here, before the error below could say why.
+    _grant_words=$(awk '
+        /fn ctest_generic_grant/ { inside = 1; next }
+        inside && /^}/ { exit }
+        inside && !/^[ \t]*\/\// && /=>/ {
+            arm = $0
+            sub(/=>.*/, "", arm)
+            while (match(arm, /"[A-Za-z0-9_-]+"/)) {
+                printf "%s ", substr(arm, RSTART + 1, RLENGTH - 2)
+                arm = substr(arm, RSTART + RLENGTH)
+            }
+        }' "$ROOT_DIR/kernel/src/proc/spawn.rs" 2>/dev/null || true)
     if [ -z "$_grant_words" ]; then
         echo "[rootfs] ERROR: no grant words found in kernel/src/proc/spawn.rs's ctest_generic_grant"
         _bad=1

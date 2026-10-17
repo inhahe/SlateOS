@@ -170,8 +170,7 @@ fn open_tmpfile(dir: &[u8], flags: i32) -> Fd {
     if ret < 0 {
         return errno::translate(ret) as Fd;
     }
-    let stored_flags =
-        flags & (fcntl::O_ACCMODE | fcntl::O_APPEND | fcntl::O_NONBLOCK | fcntl::O_SYNC);
+    let stored_flags = flags & KEPT_STATUS_FLAGS;
     let kernel_handle = ret as u64;
     let Some(fd_num) = fdtable::alloc_fd_with_flags(HandleKind::File, kernel_handle, stored_flags)
     else {
@@ -234,13 +233,7 @@ pub(crate) fn open_resolved(resolved: &[u8], flags: i32, mode: ModeT) -> Fd {
     // nothing else, which is what this mask produces since `O_RDONLY` is 0.
     // And it is what [`reject_path_fd_entry`] reads to give the descriptor its
     // `EBADF` on every operation that would touch the file rather than name it.
-    let stored_flags = flags
-        & (fcntl::O_ACCMODE
-            | fcntl::O_APPEND
-            | fcntl::O_NONBLOCK
-            | fcntl::O_SYNC
-            | fcntl::O_NOFOLLOW
-            | fcntl::O_PATH);
+    let stored_flags = flags & (KEPT_STATUS_FLAGS | fcntl::O_PATH);
     let kernel_handle = ret as u64;
     if let Some(fd_num) =
         fdtable::alloc_fd_with_flags(HandleKind::File, kernel_handle, stored_flags)
@@ -296,7 +289,8 @@ fn open_fifo(resolved: &[u8], flags: i32) -> Fd {
             return -1;
         }
     };
-    let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Pipe, handle, fifo_status(flags))
+    let Some(fd) =
+        fdtable::alloc_fd_with_flags(HandleKind::Pipe, handle, flags & KEPT_STATUS_FLAGS)
     else {
         // The kernel hands a process one handle per pipe end, so another
         // descriptor may hold this one; it is let go only if none does.
@@ -323,17 +317,13 @@ fn fifo_opened(ret: i64) -> Result<u64, i32> {
     }
 }
 
-/// The status flags a FIFO's descriptor keeps for `F_GETFL`, as a file's
-/// does ([`open_resolved`]): the access mode, `O_APPEND`, `O_NONBLOCK`,
-/// `O_SYNC` and `O_NOFOLLOW`.
-fn fifo_status(flags: i32) -> i32 {
-    flags
-        & (fcntl::O_ACCMODE
-            | fcntl::O_APPEND
-            | fcntl::O_NONBLOCK
-            | fcntl::O_SYNC
-            | fcntl::O_NOFOLLOW)
-}
+/// The flags an open's descriptor keeps for `F_GETFL` -- the access mode,
+/// `O_APPEND`, `O_NONBLOCK`, `O_SYNC` and `O_NOFOLLOW` -- whatever it opened:
+/// a file, a FIFO, a nameless file, a terminal's slave. The flags that only
+/// shape the open (`O_CREAT`, `O_TRUNC`, `O_CLOEXEC`...) are not kept.
+/// `O_PATH` is a file open's alone ([`open_resolved`]).
+pub(crate) const KEPT_STATUS_FLAGS: i32 =
+    fcntl::O_ACCMODE | fcntl::O_APPEND | fcntl::O_NONBLOCK | fcntl::O_SYNC | fcntl::O_NOFOLLOW;
 
 /// A named pipe's node's record, read by the path its descriptor was opened
 /// by ([`open_fifo`]): what Linux's `fstat` of the descriptor answers --
@@ -3345,7 +3335,7 @@ fn open_pty_device(resolved: &[u8], flags: i32) -> Option<Fd> {
         return Some(-1);
     };
 
-    let status = flags & (fcntl::O_ACCMODE | fcntl::O_APPEND | fcntl::O_NONBLOCK | fcntl::O_SYNC);
+    let status = flags & KEPT_STATUS_FLAGS;
     let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::PtySlave, handle, status) else {
         // The claim is not rolled back.  A claimed-but-unopened slave is
         // still closed by the master's `close_pty_handle`, whereas an
@@ -7120,9 +7110,11 @@ fn timespec_nsec_valid(nsec: i64) -> bool {
 /// append-only file, which may not be set to any *given* time — that could
 /// backdate a log (Linux's `ATTR_TOUCH`). A clock read here would arrive as a
 /// given time and be refused.
+#[cfg(any(target_os = "none", test))]
 const KERNEL_TIME_NOW: u64 = u64::MAX;
 
 /// The native set-times calls' "leave this time as it is".
+#[cfg(any(target_os = "none", test))]
 const KERNEL_TIME_UNCHANGED: u64 = 0;
 
 /// A given time, `sec` seconds and `sub_ns` nanoseconds after the epoch, as
@@ -8582,12 +8574,7 @@ fn openat2_forward_inner(
     // Registration is `open`'s, deliberately identical: the same status flags
     // survive, the same creation-only flags are stripped, the same
     // `FD_CLOEXEC`, the same stored path, and the same close-on-overflow.
-    let stored_flags = posix_flags
-        & (fcntl::O_ACCMODE
-            | fcntl::O_APPEND
-            | fcntl::O_NONBLOCK
-            | fcntl::O_SYNC
-            | fcntl::O_NOFOLLOW);
+    let stored_flags = posix_flags & KEPT_STATUS_FLAGS;
     #[allow(clippy::cast_sign_loss)]
     let kernel_handle = ret as u64;
     if let Some(fd_num) =
@@ -19831,9 +19818,12 @@ mod tests {
             | fcntl::O_CREAT
             | fcntl::O_TRUNC
             | fcntl::O_NOCTTY;
-        assert_eq!(fifo_status(asked), fcntl::O_RDONLY | fcntl::O_NONBLOCK);
         assert_eq!(
-            fifo_status(fcntl::O_RDWR | fcntl::O_APPEND),
+            asked & KEPT_STATUS_FLAGS,
+            fcntl::O_RDONLY | fcntl::O_NONBLOCK
+        );
+        assert_eq!(
+            (fcntl::O_RDWR | fcntl::O_APPEND) & KEPT_STATUS_FLAGS,
             fcntl::O_RDWR | fcntl::O_APPEND
         );
     }

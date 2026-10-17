@@ -37,14 +37,28 @@
  *       parent the read end and exits, and the parent reads what the child
  *       wrote (70)
  *   8x  a stream socket pair carries one too (80)
+ *   9x  on the stream, a receive goes on past a message with no descriptors
+ *       into one with some -- by MSG_WAITALL into one buffer (90), or into
+ *       a second piece (91) -- and takes them; and it stops after a message
+ *       whose descriptors it took, leaving the next message's for the next
+ *       receive -- with MSG_WAITALL (92), or with a second piece (93). Until
+ *       2026-10-17 only the first receive of such a call took descriptors,
+ *       and a later one's were released unseen.
+ *  10x  (exit 100-109) a listening socket sent and received still listens:
+ *       SO_ACCEPTCONN is 1 (100), FIONREAD is EINVAL (101), and it accepts
+ *       a connection to its name (102). Until 2026-10-17 the library took a
+ *       received socket for one that never listened.
  */
 
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <stddef.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -105,6 +119,44 @@ static int recv_fds(int *out, int room, int recv_flags, int *flags)
         int k = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
         memcpy(out + n, CMSG_DATA(c), sizeof(int) * k);
         n += k;
+    }
+    return n;
+}
+
+/* Receive on sv[1] into two bytes -- one buffer, or two pieces of one
+ * byte -- with room for four descriptors: the bytes received (-1 for a
+ * failed receive); the descriptors that came are counted in *nfds and
+ * closed. */
+static long recv_stream(int pieces, int recv_flags, int *nfds)
+{
+    char bytes[2];
+    struct iovec iov[2] = {{&bytes[0], 1}, {&bytes[1], 1}};
+    if (pieces == 1)
+        iov[0].iov_len = 2;
+    union {
+        char buf[CMSG_SPACE(sizeof(int) * 4)];
+        struct cmsghdr align;
+    } u;
+    struct msghdr msg;
+    memset(&msg, 0, sizeof msg);
+    msg.msg_iov = iov;
+    msg.msg_iovlen = pieces;
+    msg.msg_control = u.buf;
+    msg.msg_controllen = sizeof u.buf;
+    *nfds = 0;
+    ssize_t n = recvmsg(sv[1], &msg, recv_flags);
+    if (n < 0)
+        return -1;
+    for (struct cmsghdr *c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS)
+            continue;
+        int k = (int)((c->cmsg_len - CMSG_LEN(0)) / sizeof(int));
+        for (int i = 0; i < k; i++) {
+            int fd;
+            memcpy(&fd, CMSG_DATA(c) + sizeof(int) * i, sizeof fd);
+            close(fd);
+        }
+        *nfds += k;
     }
     return n;
 }
@@ -195,6 +247,59 @@ int main(void)
         return 80;
     if (write(got[0], "st", 2) != 2 || read(p[0], buf, sizeof buf) != 2 || memcmp(buf, "st", 2) != 0)
         return 80;
+    close(got[0]);
+
+    /* 9x */
+    int nfds = 0;
+    if (write(sv[0], "a", 1) != 1 || send_fds(&p[1], 1) != 0)
+        return 90;
+    if (recv_stream(1, MSG_WAITALL, &nfds) != 2 || nfds != 1)
+        return 90;
+    if (write(sv[0], "a", 1) != 1 || send_fds(&p[1], 1) != 0)
+        return 91;
+    if (recv_stream(2, 0, &nfds) != 2 || nfds != 1)
+        return 91;
+    if (send_fds(&p[1], 1) != 0 || send_fds(&p[1], 1) != 0)
+        return 92;
+    if (recv_stream(1, MSG_WAITALL, &nfds) != 1 || nfds != 1)
+        return 92;
+    if (recv_stream(1, 0, &nfds) != 1 || nfds != 1)
+        return 92;
+    if (send_fds(&p[1], 1) != 0 || send_fds(&p[1], 1) != 0)
+        return 93;
+    if (recv_stream(2, 0, &nfds) != 1 || nfds != 1)
+        return 93;
+    if (recv_stream(2, 0, &nfds) != 1 || nfds != 1)
+        return 93;
+
+    /* 10x */
+    struct sockaddr_un name;
+    memset(&name, 0, sizeof name);
+    name.sun_family = AF_UNIX;
+    memcpy(name.sun_path + 1, "ctest-scm-listener", 18);
+    socklen_t name_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + 18);
+    int l = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (l < 0 || bind(l, (struct sockaddr *)&name, name_len) != 0 || listen(l, 1) != 0)
+        return 100;
+    if (send_fds(&l, 1) != 0 || recv_fds(got, 2, 0, &flags) != 1)
+        return 100;
+    close(l);
+    int acc = -1;
+    socklen_t acc_len = sizeof acc;
+    if (getsockopt(got[0], SOL_SOCKET, SO_ACCEPTCONN, &acc, &acc_len) != 0 || acc != 1)
+        return 100;
+    int waiting = 0;
+    errno = 0;
+    if (ioctl(got[0], FIONREAD, &waiting) != -1 || errno != EINVAL)
+        return 101;
+    int c = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (c < 0 || connect(c, (struct sockaddr *)&name, name_len) != 0)
+        return 102;
+    int conn = accept(got[0], NULL, NULL);
+    if (conn < 0 || write(c, "z", 1) != 1 || read(conn, buf, sizeof buf) != 1 || buf[0] != 'z')
+        return 102;
+    close(conn);
+    close(c);
     close(got[0]);
     return 42;
 }

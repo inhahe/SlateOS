@@ -1795,11 +1795,17 @@ fn inheritable_fds() -> ChildFds {
             // for the same reason: the kernel's map has no type for its
             // handle, so a child that needs the card opens it itself
             // (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
+            //
+            // A datagram or sequenced-packet Unix socket is skipped: the child
+            // could not learn its type, and would drive it as a stream's
+            // (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
             let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
                 // A namespace's handle has no type in the kernel's spawn yet.
                 && entry.kind != fdtable::HandleKind::Namespace
+                && !(entry.kind == fdtable::HandleKind::UnixSocket
+                    && crate::unix_socket::sock_type(fd) != crate::socket::SOCK_STREAM)
                 && !crate::device_door::is_device(entry.kind);
             if transferable {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
@@ -5933,6 +5939,33 @@ mod tests {
             kind_to_handle_type(HandleKind::DevicePcm),
             fd_handle_type::FILE
         );
+    }
+
+    /// A Unix socket reaches a child only as a stream: a datagram or
+    /// sequenced-packet one's child could not learn its type, and would
+    /// drive it as a stream's
+    /// (known-issues/D-POSIX-A-DATAGRAM-UNIX-SOCKET-CANNOT-BE-PASSED.md).
+    #[test]
+    fn only_a_stream_unix_socket_reaches_the_child() {
+        use crate::fdtable::{HandleKind, install_fd};
+        use crate::socket::{SOCK_DGRAM, SOCK_SEQPACKET, SOCK_STREAM, clear_meta, set_unix_meta};
+        ensure_std_fds();
+        for (fd, kind) in [(43, SOCK_STREAM), (44, SOCK_DGRAM), (45, SOCK_SEQPACKET)] {
+            let _ = install_fd(
+                fd,
+                HandleKind::UnixSocket,
+                0x5000 | u64::try_from(fd).unwrap(),
+            );
+            set_unix_meta(fd, kind);
+        }
+        let child = inheritable_fds();
+        for fd in [43, 44, 45] {
+            clear_meta(fd);
+            let _ = crate::fdtable::close_fd(fd);
+        }
+        assert!(child.is_open(43), "a stream's");
+        assert!(!child.is_open(44), "a datagram's");
+        assert!(!child.is_open(45), "a sequenced-packet one's");
     }
 
     /// Every descriptor from 32 up used to be dropped from every child.

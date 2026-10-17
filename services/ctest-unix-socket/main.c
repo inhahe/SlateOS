@@ -23,18 +23,20 @@
  *    5x  datagrams by abstract name: one socket bound to "\0ctest-unix-dgram",
  *        another sends it two; recvfrom names the sender (bound, so the
  *        name comes back), and a short buffer with MSG_TRUNC is told the
- *        whole length
+ *        whole length; FIONREAD counts the next datagram alone (56)
  *    6x  credentials: with SO_PASSCRED on, recvmsg carries SCM_CREDENTIALS
  *        with this process's pid, uid and gid
  *    7x  a sequenced-packet pair keeps each message whole; poll sees the
- *        receiver readable, and not before
+ *        receiver readable, and not before; FIONREAD counts every record
+ *        waiting (76)
  *    8x  autobind: bind with the family alone gives an abstract name of five
  *        hex digits; SO_RCVTIMEO of 100 ms makes an empty receive EAGAIN
  *    9x  a stream in pieces: sendmsg from three iovecs (one empty) and
  *        recvmsg into three, in order; then MSG_WAITALL fills two iovecs
  *        from 100000 bytes a child sends in two parts, a pause between --
  *        more than the 64 KiB a datagram may be, which the library once
- *        capped a stream's recvmsg at
+ *        capped a stream's recvmsg at; FIONREAD counts the bytes waiting
+ *        (98), and is EINVAL on the listener (99)
  *
  * There is no check 4, so no failure is 42.
  *
@@ -48,6 +50,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
@@ -289,6 +292,10 @@ static int check_dgram(void)
         || sendto(tx, "0123456789", 10, 0, (struct sockaddr *)&a, len) != 10) {
         return fail(53, "sendto by name, twice");
     }
+    int waiting = -1;
+    if (ioctl(rx, FIONREAD, &waiting) != 0 || waiting != 5) {
+        return fail(56, "FIONREAD counts the next datagram alone");
+    }
     char buf[16];
     struct sockaddr_un from;
     socklen_t from_len = sizeof from;
@@ -354,6 +361,10 @@ static int check_seqpacket(void)
     }
     if (poll(&p, 1, 1000) != 1 || !(p.revents & POLLIN)) {
         return fail(74, "poll sees the receiver readable");
+    }
+    int waiting = -1;
+    if (ioctl(sv[1], FIONREAD, &waiting) != 0 || waiting != 9) {
+        return fail(76, "FIONREAD counts every record waiting");
     }
     char buf[16];
     if (recv(sv[1], buf, sizeof buf, 0) != 3 || recv(sv[1], buf, sizeof buf, 0) != 6
@@ -467,6 +478,14 @@ static int check_stream_pieces(void)
     m.msg_iovlen = 3;
     if (sendmsg(tx, &m, 0) != 8) {
         return fail(93, "sendmsg from three pieces, one empty, sends all eight bytes");
+    }
+    int waiting = -1;
+    if (ioctl(rx, FIONREAD, &waiting) != 0 || waiting != 8) {
+        return fail(98, "FIONREAD counts the bytes waiting");
+    }
+    errno = 0;
+    if (ioctl(l, FIONREAD, &waiting) != -1 || errno != EINVAL) {
+        return fail(99, "FIONREAD on a listener is EINVAL");
     }
     char q1[3], q2[2], q3[10];
     struct iovec in[3] = { { q1, sizeof q1 }, { q2, sizeof q2 }, { q3, sizeof q3 } };

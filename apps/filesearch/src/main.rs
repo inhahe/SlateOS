@@ -45,6 +45,7 @@ use appearance::Surface;
 use pathtext::ShowPath;
 use std::collections::BTreeMap;
 use std::fmt;
+use textline::{LineBox, LineLook};
 
 // ─── Glob Pattern Matching ───────────────────────────────────────────
 //
@@ -888,7 +889,8 @@ impl DateFilter {
 /// Full search criteria
 #[derive(Debug, Clone)]
 pub struct SearchCriteria {
-    pub query: String,
+    /// The query's box: what is searched for, and its caret.
+    pub query: LineBox,
     pub mode: SearchMode,
     pub case_sensitive: bool,
     pub include_hidden: bool,
@@ -904,8 +906,10 @@ pub struct SearchCriteria {
 impl SearchCriteria {
     #[must_use]
     pub fn new(query: &str) -> Self {
+        let mut query_box = LineBox::new(QUERY_CAPACITY, QUERY_TEXT_SIZE);
+        query_box.set_text(query);
         Self {
-            query: query.to_string(),
+            query: query_box,
             mode: SearchMode::Substring,
             case_sensitive: false,
             include_hidden: false,
@@ -941,7 +945,7 @@ impl SearchCriteria {
         }
         let mut words = Vec::new();
         let mut narrowed = false;
-        for word in self.query.split_whitespace() {
+        for word in self.query.text().split_whitespace() {
             if let Some(ext) = word.strip_prefix("ext:") {
                 narrowed = true;
                 let ext = ext.trim_start_matches('.');
@@ -958,7 +962,7 @@ impl SearchCriteria {
             }
         }
         if narrowed {
-            out.query = words.join(" ");
+            out.query.set_text(&words.join(" "));
         }
         out
     }
@@ -980,24 +984,24 @@ impl SearchCriteria {
         match self.mode {
             SearchMode::Substring => {
                 if self.case_sensitive {
-                    entry.name.contains(&self.query)
+                    entry.name.contains(self.query.text())
                 } else {
-                    entry.name_lower.contains(&self.query.to_lowercase())
+                    entry.name_lower.contains(&self.query.text().to_lowercase())
                 }
             }
             SearchMode::Glob => {
                 if self.case_sensitive {
-                    glob_match(&self.query, &entry.name)
+                    glob_match(self.query.text(), &entry.name)
                 } else {
-                    glob_match(&self.query.to_lowercase(), &entry.name_lower)
+                    glob_match(&self.query.text().to_lowercase(), &entry.name_lower)
                 }
             }
-            SearchMode::Regex => regex_match(&self.query, &entry.name),
+            SearchMode::Regex => regex_match(self.query.text(), &entry.name),
             SearchMode::Content => {
                 !entry.is_directory
                     && file_contains(
                         std::path::Path::new(&entry.path),
-                        &self.query,
+                        self.query.text(),
                         self.case_sensitive,
                         MAX_CONTENT_BYTES,
                     ) == Ok(true)
@@ -1471,7 +1475,6 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
@@ -1633,12 +1636,6 @@ pub struct FileSearchApp {
     /// The largest file a content search reads; [`MAX_CONTENT_BYTES`] but for
     /// the tests that need a small one.
     content_limit: u64,
-    /// The query's editor -- its caret and selection over `criteria.query`
-    /// -- reloaded when the query changed under it: cleared, or a saved
-    /// search brought back.
-    query_editor: TextInput,
-    /// What the query's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    clipboard: String,
 }
 
 impl Default for FileSearchApp {
@@ -1680,8 +1677,6 @@ impl FileSearchApp {
             launch: spawn_program,
             content: None,
             content_limit: MAX_CONTENT_BYTES,
-            query_editor: textline::field_holding("", QUERY_CAPACITY),
-            clipboard: String::new(),
         }
     }
 
@@ -1743,7 +1738,7 @@ impl FileSearchApp {
             hovered: open && self.hover == Some(Target::SearchBox),
             focused: open,
             disabled: false,
-            invalid: !self.criteria.query.trim().is_empty()
+            invalid: !self.criteria.query.text().trim().is_empty()
                 && self.results.is_empty()
                 && self.content.is_none(),
         }
@@ -1770,7 +1765,7 @@ impl FileSearchApp {
         self.results_scroll = 0;
         self.content = Some(ContentSearch::start(
             candidates,
-            &criteria.query,
+            criteria.query.text(),
             criteria.case_sensitive,
             self.content_limit,
         ));
@@ -2180,87 +2175,30 @@ impl FileSearchApp {
         }
     }
 
-    /// The query's editor loaded with the query, unless it holds it
-    /// already: the caret after it.
-    fn load_query(&mut self) {
-        if self.query_editor.text() != self.criteria.query {
-            self.query_editor.set_text(&self.criteria.query);
-        }
-    }
-
     /// A key for the query: `None` for one it does not answer; else
     /// `Consumed` where the key changed the query, its caret or its
     /// selection. A query changed is searched for again.
     fn query_key(&mut self, key: &KeyEvent) -> Option<EventResult> {
-        self.load_query();
-        let editor = &self.query_editor;
-        let before = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        let edit = textline::apply_key(
-            &mut self.query_editor,
-            key,
-            &self.clipboard,
-            QUERY_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
+        let edit = self.criteria.query.key(key);
         if !edit.handled {
             return None;
         }
-        if self.query_editor.text() != self.criteria.query {
-            self.criteria.query = self.query_editor.text().to_owned();
+        if edit.changed {
             self.execute_search();
         }
-        let editor = &self.query_editor;
-        let after = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        Some(if after == before {
-            EventResult::Ignored
-        } else {
+        Some(if edit.changed || edit.moved {
             EventResult::Consumed
+        } else {
+            EventResult::Ignored
         })
     }
 
-    /// Where the query's caret and selection anchor are: the editor's while
-    /// it holds the query, after it and none otherwise. One answer for the
-    /// drawing and for a press.
-    fn query_caret(&self) -> (guitk::text::TextCursor, Option<usize>) {
-        if self.query_editor.text() == self.criteria.query {
-            (
-                self.query_editor.cursor(),
-                self.query_editor.selection_anchor(),
-            )
-        } else {
-            (
-                guitk::text::TextCursor::from(self.criteria.query.len()),
-                None,
-            )
-        }
-    }
-
     /// A press at `x` in the query's box: the caret under the pointer,
-    /// measured against the query as it was drawn.
+    /// measured against the query as it was drawn -- with the keyboard,
+    /// which the box always has.
     fn press_query(&mut self, x: f32) {
-        let (drawn, _) = self.query_caret();
-        self.load_query();
         let area = query_text_area(search_box_rect(self.window.0));
-        let cursor = textedit::cursor_at_click(
-            &self.criteria.query,
-            drawn,
-            area.w,
-            QUERY_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - area.x,
-        );
-        self.query_editor.set_selection_anchor(None);
-        self.query_editor.set_cursor(cursor);
+        self.criteria.query.press(x - area.x, area.w, true);
     }
 
     /// Run the search again after a filter moved, and say it was handled.
@@ -2503,36 +2441,18 @@ impl FileSearchApp {
         // scrolled so the caret stays in view -- up to the switches; empty,
         // what it is for.
         let inner = query_text_area(search);
-        let line = inner.h;
-        if self.criteria.query.is_empty() {
-            f.push(RenderCommand::Text {
-                x: inner.x,
-                y: inner.y,
-                text: "Search files...  ext:pdf or in:Documents narrow it".to_string(),
-                font_size: 13.0,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(inner.w),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
         let mut tree = RenderTree::new();
-        textedit::draw(
+        self.criteria.query.draw(
             &mut tree,
-            &textedit::SingleLine {
-                text: &self.criteria.query,
-                // Where the caret and the selection are; the caret was fixed
-                // at the end, the only place the keys could type.
-                cursor: self.query_caret().0,
-                selection_anchor: self.query_caret().1,
-                focused: state.focused,
+            &LineLook {
                 x: inner.x,
                 y: inner.y,
                 width: inner.w,
-                line_height: line,
-                font_size: 13.0,
-                weight: FontWeightHint::Regular,
+                line_height: inner.h,
+                focused: state.focused,
+                placeholder: "Search files...  ext:pdf or in:Documents narrow it",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -3442,7 +3362,7 @@ impl FileSearchApp {
         if self.criteria.query.is_empty() {
             return;
         }
-        let (query, mode) = (self.criteria.query.clone(), self.criteria.mode);
+        let (query, mode) = (self.criteria.query.text().to_owned(), self.criteria.mode);
         let count = self.results.len();
         let now = self.criteria.current_time;
         if let Some(pos) = self
@@ -3487,7 +3407,7 @@ impl FileSearchApp {
     /// Whether the search in the query box is a saved one.
     fn current_search_is_saved(&self) -> bool {
         self.search_history.iter().any(|s| {
-            s.is_bookmarked && s.query == self.criteria.query && s.mode == self.criteria.mode
+            s.is_bookmarked && s.query == self.criteria.query.text() && s.mode == self.criteria.mode
         })
     }
 
@@ -3500,7 +3420,7 @@ impl FileSearchApp {
             self.status_message = "Type a search to save it".to_string();
             return EventResult::Consumed;
         }
-        let (query, mode) = (self.criteria.query.clone(), self.criteria.mode);
+        let (query, mode) = (self.criteria.query.text().to_owned(), self.criteria.mode);
         match self
             .search_history
             .iter()
@@ -3529,7 +3449,7 @@ impl FileSearchApp {
         let Some(search) = self.search_history.iter().find(|s| s.id == id) else {
             return EventResult::Ignored;
         };
-        self.criteria.query = search.query.clone();
+        self.criteria.query.set_text(&search.query);
         self.criteria.mode = search.mode;
         self.execute_search();
         EventResult::Consumed
@@ -3741,7 +3661,7 @@ impl App for FileSearchApp {
         } else {
             format!(
                 "File Search — {} ({} result{})",
-                self.criteria.query,
+                self.criteria.query.text(),
                 self.results.len(),
                 if self.results.len() == 1 { "" } else { "s" }
             )
@@ -4416,7 +4336,7 @@ mod tests {
         for c in "config".chars() {
             assert_eq!(app.handle_event(&typed(c)), EventResult::Consumed);
         }
-        assert_eq!(app.criteria.query, "config");
+        assert_eq!(app.criteria.query.text(), "config");
         assert!(
             app.results.len() < all,
             "a query should narrow the results ({} of {all})",
@@ -4438,7 +4358,7 @@ mod tests {
         for _ in 0.."config".len() {
             let _ = app.handle_event(&press(Key::Backspace));
         }
-        assert_eq!(app.criteria.query, "");
+        assert_eq!(app.criteria.query.text(), "");
         assert_eq!(app.results.len(), all);
         assert_eq!(
             app.handle_event(&press(Key::Backspace)),
@@ -4462,7 +4382,11 @@ mod tests {
         // on Ctrl — and Ctrl+S must not put an "s" in the box.
         let mut app = indexed();
         assert_eq!(app.handle_event(&press_ctrl(Key::S)), EventResult::Consumed);
-        assert_eq!(app.criteria.query, "", "a shortcut leaked into the query");
+        assert_eq!(
+            app.criteria.query.text(),
+            "",
+            "a shortcut leaked into the query"
+        );
         assert_eq!(app.sort_column, SortColumn::Size);
     }
 
@@ -4482,7 +4406,8 @@ mod tests {
         });
         assert_eq!(app.handle_event(&chord), EventResult::Ignored);
         assert_eq!(
-            app.criteria.query, "",
+            app.criteria.query.text(),
+            "",
             "a Ctrl chord control character was typed into the query"
         );
     }
@@ -4584,7 +4509,7 @@ mod tests {
         assert_eq!(app.show_preview, preview, "Ctrl+F touched the preview");
         let _ = app.handle_event(&press_ctrl(Key::P));
         assert_ne!(app.show_preview, preview);
-        assert_eq!(app.criteria.query, "");
+        assert_eq!(app.criteria.query.text(), "");
     }
 
     #[test]
@@ -4597,7 +4522,7 @@ mod tests {
             text: "x".to_owned(),
         });
         assert_eq!(app.handle_event(&release), EventResult::Ignored);
-        assert_eq!(app.criteria.query, "");
+        assert_eq!(app.criteria.query.text(), "");
     }
 
     #[test]
@@ -5232,7 +5157,7 @@ mod tests {
     fn test_app_search() {
         let mut app = FileSearchApp::new();
         populate_sample_index(&mut app.index);
-        app.criteria.query = "config".to_string();
+        app.criteria.query.set_text("config");
         app.execute_search();
         assert!(app.results.len() >= 2); // config.yaml, config.toml, config.sh
     }
@@ -5241,7 +5166,7 @@ mod tests {
     fn test_app_glob_search() {
         let mut app = FileSearchApp::new();
         populate_sample_index(&mut app.index);
-        app.criteria.query = "*.rs".to_string();
+        app.criteria.query.set_text("*.rs");
         app.criteria.mode = SearchMode::Glob;
         app.execute_search();
         assert_eq!(app.results.len(), 2); // main.rs, lib.rs
@@ -5304,7 +5229,7 @@ mod tests {
     fn test_app_bookmark() {
         let mut app = FileSearchApp::new();
         populate_sample_index(&mut app.index);
-        app.criteria.query = "test".to_string();
+        app.criteria.query.set_text("test");
         app.execute_search();
         app.remember_search();
         let id = app.search_history[0].id;
@@ -5856,7 +5781,7 @@ mod tests {
             let _ = root;
 
             let mut app = wired();
-            app.criteria.query = "report".to_string();
+            app.criteria.query.set_text("report");
             app.execute_search();
             probe::key(&mut app, &probe::press(Key::Enter));
             assert!(
@@ -5903,7 +5828,7 @@ mod tests {
                 1_779_000_000,
                 true,
             ));
-            app.criteria.query = "Projects".to_string();
+            app.criteria.query.set_text("Projects");
             app.execute_search();
             let folder = app
                 .results
@@ -5924,7 +5849,7 @@ mod tests {
     fn a_file_nothing_opens_says_so() {
         settingsfile::testing::with_scratch_config("fs_no_opener", |_| {
             let mut app = wired();
-            app.criteria.query = "report".to_string();
+            app.criteria.query.set_text("report");
             app.execute_search();
             app.selected_result = Some(0);
             probe::key(&mut app, &probe::press(Key::Enter));
@@ -5944,7 +5869,7 @@ mod tests {
     fn a_saved_search_outlives_the_window() {
         settingsfile::testing::with_scratch_config("fs_saved", |_| {
             let mut app = wired();
-            app.criteria.query = "*.rs".to_string();
+            app.criteria.query.set_text("*.rs");
             app.criteria.mode = SearchMode::Glob;
             app.execute_search();
             probe::click(&mut app, Target::SaveSearch);
@@ -5961,7 +5886,7 @@ mod tests {
                 .expect("the saved search did not survive");
             reveal(&mut next, Target::Saved(id));
             probe::click(&mut next, Target::Saved(id));
-            assert_eq!(next.criteria.query, "*.rs");
+            assert_eq!(next.criteria.query.text(), "*.rs");
             assert_eq!(next.criteria.mode, SearchMode::Glob);
             assert_eq!(next.results.len(), 2);
 
@@ -5992,7 +5917,7 @@ mod tests {
                     .count(),
                 1
             );
-            app.criteria.query = "notes".to_string();
+            app.criteria.query.set_text("notes");
             app.toggle_saved();
             let kept = settingsfile::load(CONFIG_NAME).get_seq(&SAVED_KEY).unwrap();
             assert!(kept.contains(&"fuzzy:repor".to_string()), "{kept:?}");
@@ -6039,7 +5964,7 @@ mod tests {
             second.load_saved_searches(&settingsfile::load(CONFIG_NAME));
 
             // The second window has run `*.rs` and opened what it found.
-            second.criteria.query = "*.rs".to_string();
+            second.criteria.query.set_text("*.rs");
             second.criteria.mode = SearchMode::Glob;
             second.execute_search();
             second.selected_result = Some(0);
@@ -6057,7 +5982,7 @@ mod tests {
                 ("*.rs", SearchMode::Glob),
                 ("budget", SearchMode::Substring),
             ] {
-                first.criteria.query = query.to_string();
+                first.criteria.query.set_text(query);
                 first.criteria.mode = mode;
                 first.toggle_saved();
             }
@@ -6098,7 +6023,7 @@ mod tests {
             );
 
             // The second's own save keeps the first's.
-            second.criteria.query = "notes".to_string();
+            second.criteria.query.set_text("notes");
             second.criteria.mode = SearchMode::Substring;
             second.toggle_saved();
             first.handle_event(&announce(b"filesearch"));
@@ -6109,7 +6034,7 @@ mod tests {
 
             // The first forgets `*.rs`, and so does the second -- which still
             // offers it as a search it ran.
-            first.criteria.query = "*.rs".to_string();
+            first.criteria.query.set_text("*.rs");
             first.criteria.mode = SearchMode::Glob;
             first.toggle_saved();
             assert_eq!(
@@ -6218,7 +6143,7 @@ mod tests {
     #[test]
     fn a_recent_search_can_be_run_again() {
         let mut app = wired();
-        app.criteria.query = "budget".to_string();
+        app.criteria.query.set_text("budget");
         app.execute_search();
         app.selected_result = Some(0);
         app.open_selected();
@@ -6227,7 +6152,7 @@ mod tests {
         let id = app.search_history[0].id;
         reveal(&mut app, Target::Recent(id));
         probe::click(&mut app, Target::Recent(id));
-        assert_eq!(app.criteria.query, "budget");
+        assert_eq!(app.criteria.query.text(), "budget");
         assert_eq!(app.results.len(), 1);
     }
 
@@ -6387,7 +6312,7 @@ mod tests {
             ],
         );
         let mut app = content_app(&files);
-        app.criteria.query = "hello".to_string();
+        app.criteria.query.set_text("hello");
         app.execute_search();
         assert!(
             app.is_searching_contents(),
@@ -6407,7 +6332,7 @@ mod tests {
         let files = Contents::new("case", &[("a.txt", b"hello"), ("b.txt", b"HELLO")]);
         let mut app = content_app(&files);
         app.criteria.case_sensitive = true;
-        app.criteria.query = "hello".to_string();
+        app.criteria.query.set_text("hello");
         app.execute_search();
         finish_content_search(&mut app);
         assert_eq!(result_names(&app), vec!["a.txt"]);
@@ -6425,12 +6350,12 @@ mod tests {
             ],
         );
         let mut app = content_app(&files);
-        app.criteria.query = "école".to_string();
+        app.criteria.query.set_text("école");
         app.execute_search();
         finish_content_search(&mut app);
         assert_eq!(result_names(&app), vec!["french.txt"]);
 
-        app.criteria.query = "secret".to_string();
+        app.criteria.query.set_text("secret");
         app.execute_search();
         finish_content_search(&mut app);
         assert_eq!(result_names(&app), vec!["binary.bin"]);
@@ -6451,9 +6376,9 @@ mod tests {
         with_beta.push(("only.txt", b"beta"));
         let files = Contents::new("cancel", &with_beta);
         let mut app = content_app(&files);
-        app.criteria.query = "alpha".to_string();
+        app.criteria.query.set_text("alpha");
         app.execute_search();
-        app.criteria.query = "beta".to_string();
+        app.criteria.query.set_text("beta");
         app.execute_search();
         finish_content_search(&mut app);
         assert_eq!(
@@ -6472,7 +6397,7 @@ mod tests {
             &[("inside.txt", b"target"), ("target.txt", b"nothing")],
         );
         let mut app = content_app(&files);
-        app.criteria.query = "target".to_string();
+        app.criteria.query.set_text("target");
         app.execute_search();
         app.criteria.mode = SearchMode::Substring;
         app.execute_search();
@@ -6491,7 +6416,7 @@ mod tests {
         );
         let mut app = content_app(&files);
         app.content_limit = 8;
-        app.criteria.query = "needle".to_string();
+        app.criteria.query.set_text("needle");
         app.execute_search();
         finish_content_search(&mut app);
         assert_eq!(result_names(&app), vec!["small.txt"]);
@@ -6509,7 +6434,7 @@ mod tests {
         let files = Contents::new("clock", &[("a.txt", b"x")]);
         let mut app = content_app(&files);
         assert!(app.tick_interval().is_none());
-        app.criteria.query = "x".to_string();
+        app.criteria.query.set_text("x");
         app.execute_search();
         assert!(app.tick_interval().is_some());
         finish_content_search(&mut app);
@@ -6532,7 +6457,7 @@ mod tests {
         );
         std::fs::create_dir_all(files.dir.join("word")).unwrap();
         let mut app = content_app(&files);
-        app.criteria.query = "word".to_string();
+        app.criteria.query.set_text("word");
         app.criteria.extension_filter = Some("txt".to_string());
         app.execute_search();
         finish_content_search(&mut app);
@@ -6545,25 +6470,25 @@ mod tests {
     fn ext_and_in_words_narrow_the_search_and_leave_the_query() {
         let mut c = SearchCriteria::new("report ext:.PDF in:2025");
         let e = c.effective();
-        assert_eq!(e.query, "report");
+        assert_eq!(e.query.text(), "report");
         assert_eq!(e.extension_filter.as_deref(), Some("pdf"));
         assert_eq!(e.path_contains.as_deref(), Some("2025"));
 
         // A query with neither is left exactly as typed.
-        c.query = "two  spaces".to_string();
-        assert_eq!(c.effective().query, "two  spaces");
+        c.query.set_text("two  spaces");
+        assert_eq!(c.effective().query.text(), "two  spaces");
 
         // In regex mode the whole query is the pattern.
-        c.query = "ext:x".to_string();
+        c.query.set_text("ext:x");
         c.mode = SearchMode::Regex;
-        assert_eq!(c.effective().query, "ext:x");
+        assert_eq!(c.effective().query.text(), "ext:x");
         assert_eq!(c.effective().extension_filter, None);
 
         // A word with nothing after the colon narrows nothing and is not searched for.
         c.mode = SearchMode::Substring;
-        c.query = "notes ext:".to_string();
+        c.query.set_text("notes ext:");
         let e = c.effective();
-        assert_eq!(e.query, "notes");
+        assert_eq!(e.query.text(), "notes");
         assert_eq!(e.extension_filter, None);
     }
 
@@ -6577,7 +6502,7 @@ mod tests {
         ] {
             app.index.add(IndexEntry::new(path, name, 10, 0, 0, false));
         }
-        app.criteria.query = "report ext:pdf in:2025".to_string();
+        app.criteria.query.set_text("report ext:pdf in:2025");
         app.execute_search();
         let found: Vec<&str> = app
             .results
@@ -6591,7 +6516,7 @@ mod tests {
             app.status_message
         );
         // The box still shows what was typed.
-        assert_eq!(app.criteria.query, "report ext:pdf in:2025");
+        assert_eq!(app.criteria.query.text(), "report ext:pdf in:2025");
     }
     // -- The query's box is the toolkit's field (lane C,
     //    c-e-a-theme-can-shape-the-controls)
@@ -6737,7 +6662,8 @@ mod tests {
         app.handle_event(&key_with(Key::S, "\u{15b}", altgr));
         app.handle_event(&key_with(Key::Q, "@", altgr));
         assert_eq!(
-            app.criteria.query, "\u{15b}@",
+            app.criteria.query.text(),
+            "\u{15b}@",
             "AltGr's letters were not typed"
         );
         assert_eq!(
@@ -6775,7 +6701,8 @@ mod tests {
             app.handle_event(&key_with(k, t, m));
         }
         assert_eq!(
-            app.criteria.query, "\u{15b}@",
+            app.criteria.query.text(),
+            "\u{15b}@",
             "a command's letter was typed"
         );
     }
@@ -6850,7 +6777,11 @@ mod tests {
         key_in(&mut app, probe::press(Key::Home));
         key_in(&mut app, probe::press(Key::Right));
         typing_in(&mut app, "o");
-        assert_eq!(app.criteria.query, "config", "the caret did not move");
+        assert_eq!(
+            app.criteria.query.text(),
+            "config",
+            "the caret did not move"
+        );
         assert!(
             app.results.iter().all(|&r| {
                 app.index.entries[r].name.to_lowercase().contains("config")
@@ -6875,7 +6806,7 @@ mod tests {
 
         key_in(&mut app, probe::press(Key::Home));
         key_in(&mut app, probe::press(Key::Delete));
-        assert_eq!(app.criteria.query, "onfig", "Delete at the caret");
+        assert_eq!(app.criteria.query.text(), "onfig", "Delete at the caret");
         typing_in(&mut app, "c");
         key_in(&mut app, probe::ctrl(Key::A));
         assert!(
@@ -6887,11 +6818,11 @@ mod tests {
             "the selection is not drawn"
         );
         key_in(&mut app, probe::ctrl(Key::C));
-        assert_eq!(app.clipboard, "config", "Ctrl+C copied nothing");
+        assert_eq!(guitk::clipboard::text(), "config", "Ctrl+C copied nothing");
         key_in(&mut app, probe::ctrl(Key::X));
-        assert_eq!(app.criteria.query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.criteria.query.text(), "", "Ctrl+A and Ctrl+X");
         key_in(&mut app, probe::ctrl(Key::V));
-        assert_eq!(app.criteria.query, "config", "Ctrl+V");
+        assert_eq!(app.criteria.query.text(), "config", "Ctrl+V");
 
         // A press at the start of the query puts the caret there, and one
         // past its end at its end.
@@ -6902,7 +6833,8 @@ mod tests {
         app.click_at(area.right() - 1.0, mid, MouseButton::Left, size);
         typing_in(&mut app, ">");
         assert_eq!(
-            app.criteria.query, "<config>",
+            app.criteria.query.text(),
+            "<config>",
             "a press did not put the caret where it landed"
         );
     }
@@ -6951,7 +6883,8 @@ mod tests {
         assert_eq!(app.selected_result, at, "Home moved the selection");
         typing_in(&mut app, "x");
         assert_eq!(
-            app.criteria.query, "xe",
+            app.criteria.query.text(),
+            "xe",
             "Home did not take the caret to the start"
         );
         key_in(&mut app, probe::press(Key::Home));
@@ -6968,10 +6901,11 @@ mod tests {
         let mut app = indexed();
         typing_in(&mut app, "ab");
         key_in(&mut app, probe::press(Key::Home));
-        app.criteria.query = String::from("notes");
+        app.criteria.query.set_text("notes");
         typing_in(&mut app, "!");
         assert_eq!(
-            app.criteria.query, "notes!",
+            app.criteria.query.text(),
+            "notes!",
             "the key edited the query the editor held"
         );
     }

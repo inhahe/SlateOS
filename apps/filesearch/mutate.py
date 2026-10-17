@@ -287,7 +287,6 @@ MUTATIONS = [
 
 FIELD = 'the_query_box_is_the_toolkits_field'
 ALTGR = 'altgr_types_into_the_query_and_a_command_does_not'
-CARET = 'the_caret_follows_the_query_in_its_box'
 
 MUTATIONS += [
     # The query's box is the toolkit's field, with a caret, and takes what
@@ -321,12 +320,6 @@ MUTATIONS += [
         '        self.focus_ring_width = settings.focus_ring_width();\n',
         '        let _ = settings;\n',
         [FIELD],
-    ),
-    (
-        'the caret is at the start of the query',
-        '                cursor: self.query_caret().0,\n',
-        '                cursor: guitk::text::TextCursor::from(0),\n',
-        [CARET],
     ),
     (
         'AltGr+S sorts',
@@ -382,43 +375,25 @@ MUTATIONS += [
         "",
         [EDITS, BESIDE],
     ),
-    (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
+    # The query's box is a textline LineBox since 2026-10-17: its clipboard
+    # (the program's), its caret and selection drawn, and the query it edits
+    # being the one it shows are LineBox's, which textline's own table covers.
     (
         "an edit of the query is not searched for",
-        "            self.criteria.query = self.query_editor.text().to_owned();\n"
-        "            self.execute_search();\n",
-        "            self.criteria.query = self.query_editor.text().to_owned();\n",
+        "        if edit.changed {\n            self.execute_search();\n        }\n",
+        "",
         [EDITS],
     ),
     (
         "every key the query answers is a redraw",
-        "        Some(if after == before {\n",
-        "        Some(if false {\n",
+        "        Some(if edit.changed || edit.moved {\n",
+        "        Some(if true {\n",
         [BESIDE],
     ),
     (
-        "a key finds the editor holding another query",
-        "        if self.query_editor.text() != self.criteria.query {\n"
-        "            self.query_editor.set_text(&self.criteria.query);",
-        "        if false {\n"
-        "            self.query_editor.set_text(&self.criteria.query);",
-        [SHOWN],
-    ),
-    (
-        "the query's selection is not drawn",
-        "                selection_anchor: self.query_caret().1,\n",
-        "                selection_anchor: None,\n",
-        [EDITS],
-    ),
-    (
         "a press puts the caret at the start",
-        "            x - area.x,\n",
-        "            0.0,\n",
+        "        self.criteria.query.press(x - area.x, area.w, true);\n",
+        "        self.criteria.query.press(0.0, area.w, true);\n",
         [EDITS],
     ),
     (

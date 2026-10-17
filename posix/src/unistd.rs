@@ -4476,9 +4476,10 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 // a non-consuming, sequence-cursored read of the JSON-lines ring buffer that
 // returns `(entry_count, newest_seq)` and fills the buffer with one JSON
 // object per line (each terminated with `\n`).  Linux `klogctl` instead has a
-// *consuming* READ cursor, an explicit buffer *clear*, and byte-count return
-// values.  We bridge the two with per-process cursors and on-the-fly byte
-// counting:
+// *consuming* READ cursor, an explicit buffer *clear*, byte-count return
+// values, and syslog(2) records -- `<6>[    1.234000] text\n` -- the format
+// `dmesg`, `klogd` and `imklog` parse.  We bridge the two with per-process
+// cursors, and render each JSON line as a record ([`syslog_record`]):
 //
 //   • READ          → consuming read from `klog_read_cursor()`, advance it.
 //   • READ_ALL      → non-consuming read from `klog_clear_floor()`.
@@ -4492,8 +4493,9 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 // JUDGMENT CALLS (see todo.txt): the READ cursor and clear floor are
 // per-process rather than the global kernel state Linux uses; "clear" is
 // emulated by hiding entries below a floor (the kernel has no clear syscall);
-// truncated READ_ALL returns the *oldest* entries that fit rather than the
-// newest; SIZE_BUFFER reports currently-buffered bytes rather than the ring's
+// a record longer than a READ's whole buffer is cut to fit and consumed,
+// where Linux remembers where it stopped; SIZE_BUFFER reports
+// currently-buffered bytes rather than the ring's
 // fixed capacity (the kernel does not expose capacity).  These serve `dmesg`
 // and `journald`'s read paths correctly; CONSOLE_* level control remains
 // unimplemented pending a kernel syscall.
@@ -4565,87 +4567,325 @@ fn klog_read_batch(after_seq: u64, buf: *mut u8, cap: usize) -> (i64, i64) {
     )
 }
 
-/// Host build: no kernel log ring — report an empty log (zero entries,
-/// cursor unchanged).
+/// Host build: no kernel, so a ring of the tests' own ([`HOST_KLOG`]),
+/// served as `SYS_LOG_READ` serves its own: the entries after `after_seq`
+/// that fit `cap`, each a line, numbered from 1.
 #[cfg(not(target_os = "none"))]
-fn klog_read_batch(_after_seq: u64, _buf: *mut u8, _cap: usize) -> (i64, i64) {
-    (0, 0)
+fn klog_read_batch(after_seq: u64, buf: *mut u8, cap: usize) -> (i64, i64) {
+    HOST_KLOG.with(|ring| {
+        let ring = ring.borrow();
+        let first = if after_seq == u64::MAX {
+            0
+        } else {
+            usize::try_from(after_seq).unwrap_or(usize::MAX)
+        };
+        let (mut at, mut count, mut newest) = (0usize, 0i64, after_seq);
+        for (i, line) in ring.iter().enumerate().skip(first) {
+            let end = at.saturating_add(line.len()).saturating_add(1);
+            if end > cap {
+                break;
+            }
+            // SAFETY: the caller's buffer is writable for `cap` bytes, and
+            // `end <= cap`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(line.as_ptr(), buf.add(at), line.len());
+                *buf.add(end.saturating_sub(1)) = b'\n';
+            }
+            at = end;
+            count = count.saturating_add(1);
+            newest = u64::try_from(i).unwrap_or(0).saturating_add(1);
+        }
+        (count, newest.cast_signed())
+    })
 }
 
-/// Count the bytes of the first `count` JSON-lines the kernel wrote into
-/// `buf`.  Each entry ends with `\n`; JSON escaping guarantees no raw `\n`
-/// inside an entry, so the `count`-th newline marks the end of valid data.
-/// Returns the offset just past that newline (or `buf.len()` if fewer than
-/// `count` newlines are present — which should not happen in practice).
-fn klog_json_lines_len(buf: &[u8], count: usize) -> usize {
-    if count == 0 {
-        return 0;
+#[cfg(not(target_os = "none"))]
+std::thread_local! {
+    /// The host's stand-in for the kernel's log ring: its JSON lines, the
+    /// first at sequence number 1. Empty unless a test fills it.
+    static HOST_KLOG: core::cell::RefCell<std::vec::Vec<std::vec::Vec<u8>>> =
+        const { core::cell::RefCell::new(std::vec::Vec::new()) };
+}
+
+/// The longest record [`syslog_record`] makes of one kernel entry: its
+/// message is at most 200 bytes and its module 24 (`kernel/src/klog.rs`),
+/// and a `\uXXXX` escape decodes to at most three.
+const SYSLOG_RECORD_MAX: usize = 512;
+
+/// One kernel log line, `{"t":MS,"l":"LEVEL","m":"MODULE","msg":"TEXT"}`,
+/// as the syslog(2) record Linux's `klogctl` reads give, into `out`:
+/// `<P>[SSSSS.UUUUUU] MODULE: TEXT\n` -- `P` the level's priority in
+/// facility `kern` ([`syslog_priority`]), the time since boot in seconds
+/// right-aligned in five columns and microseconds, the module the kernel
+/// names as the message's subsystem, and the text with its escapes undone,
+/// an embedded newline kept and exactly one at the end. The record's full
+/// length, as much as fits written; `None` for a line that is no entry.
+fn syslog_record(line: &[u8], out: &mut [u8]) -> Option<usize> {
+    let ms = json_number(line, b"\"t\":")?;
+    let level = json_string_start(line, b"\"l\":\"")?;
+    let module = json_string_start(line, b"\"m\":\"")?;
+    let text = json_string_start(line, b"\"msg\":\"")?;
+    let mut w = RecordWriter { out, len: 0 };
+    w.push(b'<');
+    w.push_decimal(u64::from(syslog_priority(raw_until_quote(level))), 1, b'0');
+    w.push_all(b">[");
+    w.push_decimal(ms / 1000, 5, b' ');
+    w.push(b'.');
+    w.push_decimal((ms % 1000).saturating_mul(1000), 6, b'0');
+    w.push_all(b"] ");
+    let module = raw_until_quote(module);
+    if !module.is_empty() {
+        w.push_all(module);
+        w.push_all(b": ");
     }
-    let mut seen = 0usize;
-    for (i, &b) in buf.iter().enumerate() {
-        if b == b'\n' {
-            seen = seen.saturating_add(1);
-            if seen == count {
-                return i.saturating_add(1);
+    let ended_with_newline = w.push_json_string(text)?;
+    if !ended_with_newline {
+        w.push(b'\n');
+    }
+    Some(w.len)
+}
+
+/// The syslog(2) priority of the kernel's level `level`, as Linux's kernel
+/// messages carry it -- facility 0, `kern`, so the level alone: `error` 3,
+/// `warn` 4, `info` 6, `debug` and `trace` 7; a level the kernel adds later
+/// reads as `info`.
+fn syslog_priority(level: &[u8]) -> u8 {
+    match level {
+        b"error" => 3,
+        b"warn" => 4,
+        b"debug" | b"trace" => 7,
+        _ => 6,
+    }
+}
+
+/// Where `needle` first begins in `hay`.
+fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// The decimal number after `key` in `line`.
+fn json_number(line: &[u8], key: &[u8]) -> Option<u64> {
+    let at = find_bytes(line, key)?.saturating_add(key.len());
+    let digits = line.get(at..)?;
+    let end = digits
+        .iter()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(digits.len());
+    if end == 0 {
+        return None;
+    }
+    digits.get(..end)?.iter().try_fold(0u64, |n, &d| {
+        n.checked_mul(10)?
+            .checked_add(u64::from(d.wrapping_sub(b'0')))
+    })
+}
+
+/// What follows `key` -- a key and the quote that opens its string -- in
+/// `line`: the string's text, escaped, up to the end of the line.
+fn json_string_start<'a>(line: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    line.get(find_bytes(line, key)?.saturating_add(key.len())..)
+}
+
+/// A string's text up to its closing quote, for one with no escapes in it:
+/// the kernel's level and module names.
+fn raw_until_quote(s: &[u8]) -> &[u8] {
+    s.get(..s.iter().position(|&b| b == b'"').unwrap_or(s.len()))
+        .unwrap_or(&[])
+}
+
+/// Bytes written into a buffer as far as it reaches, the full length kept:
+/// a record's length is known even when it is cut.
+struct RecordWriter<'a> {
+    out: &'a mut [u8],
+    len: usize,
+}
+
+impl RecordWriter<'_> {
+    fn push(&mut self, b: u8) {
+        if let Some(slot) = self.out.get_mut(self.len) {
+            *slot = b;
+        }
+        self.len = self.len.saturating_add(1);
+    }
+
+    fn push_all(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.push(b);
+        }
+    }
+
+    /// `n` in decimal, at least `width` wide, padded on the left with `pad`.
+    fn push_decimal(&mut self, n: u64, width: usize, pad: u8) {
+        let mut digits = [0u8; 20];
+        let mut i = digits.len();
+        let mut v = n;
+        loop {
+            i = i.saturating_sub(1);
+            if let Some(d) = digits.get_mut(i) {
+                // `v % 10` is below 10: it fits a `u8`, and `b'0'` plus it
+                // is at most `b'9'`.
+                *d = b'0'.saturating_add(u8::try_from(v % 10).unwrap_or(0));
+            }
+            v /= 10;
+            if v == 0 || i == 0 {
+                break;
             }
         }
+        let number = digits.get(i..).unwrap_or_default();
+        for _ in number.len()..width {
+            self.push(pad);
+        }
+        self.push_all(number);
     }
-    buf.len()
+
+    /// A JSON string's text, `s` from just after its opening quote, with its
+    /// escapes undone, up to its closing quote: whether the last byte it
+    /// wrote was a newline, or `None` for a string that does not close.
+    fn push_json_string(&mut self, s: &[u8]) -> Option<bool> {
+        let mut last = 0u8;
+        let mut i = 0usize;
+        loop {
+            let b = *s.get(i)?;
+            i = i.saturating_add(1);
+            let out = match b {
+                b'"' => return Some(last == b'\n'),
+                b'\\' => {
+                    let e = *s.get(i)?;
+                    i = i.saturating_add(1);
+                    match e {
+                        b'n' => b'\n',
+                        b't' => b'\t',
+                        b'r' => b'\r',
+                        b'b' => 8,
+                        b'f' => 12,
+                        b'u' => {
+                            let hex = s.get(i..i.saturating_add(4))?;
+                            i = i.saturating_add(4);
+                            let code = hex.iter().try_fold(0u32, |n, &h| {
+                                n.checked_mul(16)?.checked_add(char::from(h).to_digit(16)?)
+                            })?;
+                            let c = char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER);
+                            let mut utf8 = [0u8; 4];
+                            let bytes = c.encode_utf8(&mut utf8).as_bytes();
+                            self.push_all(bytes);
+                            last = bytes.last().copied().unwrap_or(0);
+                            continue;
+                        }
+                        other => other,
+                    }
+                }
+                other => other,
+            };
+            self.push(out);
+            last = out;
+        }
+    }
 }
 
-/// Drain every entry after `start_seq` into a scratch buffer (discarding the
-/// text) to total their bytes and find the newest sequence number currently
-/// buffered.  Returns `(total_bytes, newest_seq)`.  Used by CLEAR and the
-/// SIZE_* queries, which need aggregate information rather than the data.
-fn klog_drain(start_seq: u64) -> (usize, u64) {
+/// Each kernel log entry after sequence number `after` (`u64::MAX`: from the
+/// oldest), oldest first, as its syslog(2) record: `visit(record)` takes it
+/// and answers whether to go on. The sequence number of the last entry
+/// taken -- `after` when none was -- for a cursor to move to. An entry that
+/// is no record ([`syslog_record`]) is passed over, as taken.
+///
+/// A batch's entries are numbered up to the newest the kernel reports for
+/// it, one apart, as its ring numbers them.
+fn klog_walk(after: u64, mut visit: impl FnMut(&[u8]) -> bool) -> u64 {
     // Worst-case JSON line is ~484 bytes (MAX_MSG_LEN 200 + module 24 +
-    // overhead); 2 KiB guarantees at least one full line per batch so the
-    // loop always makes progress.
+    // overhead); 2 KiB holds at least one, so every batch moves on.
     let mut scratch = [0u8; 2048];
-    let mut after = start_seq;
-    let mut total = 0usize;
-    // The kernel ring holds 256 entries; cap iterations generously so a
-    // misbehaving cursor can never spin forever.
+    let mut record = [0u8; SYSLOG_RECORD_MAX];
+    let mut cursor = after;
+    let mut taken = after;
+    // The kernel ring holds 256 entries; a bound so that a cursor that does
+    // not move cannot spin.
     for _ in 0..1024 {
-        let (count, newest) = klog_read_batch(after, scratch.as_mut_ptr(), scratch.len());
-        if count <= 0 {
+        let (count, newest) = klog_read_batch(cursor, scratch.as_mut_ptr(), scratch.len());
+        let Ok(count) = u64::try_from(count) else {
+            break;
+        };
+        if count == 0 {
             break;
         }
-        let count_usize = usize::try_from(count).unwrap_or(0);
-        total = total.saturating_add(klog_json_lines_len(&scratch, count_usize));
-        #[allow(clippy::cast_sign_loss)]
-        let newest_u = newest as u64;
-        if newest_u == after {
-            // No forward progress — stop (defensive; should not happen).
+        let newest = newest.cast_unsigned();
+        let first = newest.wrapping_sub(count.saturating_sub(1));
+        let lines = scratch.split(|&b| b == b'\n');
+        for (i, line) in (0u64..count).zip(lines) {
+            let seq = first.wrapping_add(i);
+            if let Some(n) = syslog_record(line, &mut record) {
+                if !visit(record.get(..n).unwrap_or(&record)) {
+                    return taken;
+                }
+            }
+            taken = seq;
+        }
+        if newest == cursor {
             break;
         }
-        after = newest_u;
+        cursor = newest;
     }
-    (total, after)
+    taken
 }
 
-/// Shared READ / READ_ALL / READ_CLEAR body: one `SYS_LOG_READ` from
-/// `after` into the caller's `buf`/`len`.  Returns
-/// `(result, entry_count, newest_seq)` where `result` is the byte count to
-/// return to the caller (`>= 0`) or `-1` with `errno` already set on a
-/// kernel error.
-fn klog_read_user(after: u64, buf: *mut u8, len: i32) -> (i32, i64, u64) {
-    let cap = usize::try_from(len).unwrap_or(0);
-    let (count, newest) = klog_read_batch(after, buf, cap);
-    if count < 0 {
-        // Kernel error in `value` (e.g. EFAULT from buffer validation).
-        let _ = errno::translate(count);
-        return (-1, count, after);
+/// The bytes of every record after `after`, and the sequence number of the
+/// newest entry: what `SIZE_UNREAD`, `SIZE_BUFFER` and a clear need.
+fn klog_total(after: u64) -> (usize, u64) {
+    let mut total = 0usize;
+    let newest = klog_walk(after, |record| {
+        total = total.saturating_add(record.len());
+        true
+    });
+    (total, newest)
+}
+
+/// `READ_ALL`'s answer from `after` into `out`: the newest records that fit,
+/// whole, oldest first -- Linux drops from the front -- and their bytes.
+fn klog_read_all(after: u64, out: &mut [u8]) -> usize {
+    let (mut left, _) = klog_total(after);
+    let mut at = 0usize;
+    klog_walk(after, |record| {
+        if left > out.len() {
+            // Older than the newest that fit: passed over.
+            left = left.saturating_sub(record.len());
+            return true;
+        }
+        let end = at.saturating_add(record.len());
+        let Some(slot) = out.get_mut(at..end) else {
+            // Logged since the count: not room for it.
+            return false;
+        };
+        slot.copy_from_slice(record);
+        at = end;
+        true
+    });
+    at
+}
+
+/// `READ`'s answer from this process's cursor into `out`: the oldest unread
+/// records that fit, whole, the cursor moved past them -- or, when the first
+/// alone is longer than `out`, as much of it as fits, consumed.
+fn klog_read_consuming(out: &mut [u8]) -> usize {
+    let start = klog_read_cursor_get();
+    let mut at = 0usize;
+    let taken = klog_walk(start, |record| {
+        let room = out.len().saturating_sub(at);
+        let n = if record.len() <= room {
+            record.len()
+        } else if at == 0 {
+            room
+        } else {
+            return false;
+        };
+        if let (Some(dst), Some(src)) = (out.get_mut(at..at.saturating_add(n)), record.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        at = at.saturating_add(n);
+        true
+    });
+    if taken != start {
+        klog_read_cursor_set(taken);
     }
-    // SAFETY: per the klogctl READ contract `buf` points to `len` writable
-    // bytes; the kernel filled the first portion with `count` JSON-lines.
-    // We only scan within `cap` bytes.
-    let view = unsafe { core::slice::from_raw_parts(buf, cap) };
-    let count_usize = usize::try_from(count).unwrap_or(0);
-    let nbytes = klog_json_lines_len(view, count_usize);
-    let nbytes_i32 = i32::try_from(nbytes).unwrap_or(i32::MAX);
-    #[allow(clippy::cast_sign_loss)]
-    (nbytes_i32, count, newest as u64)
+    at
 }
 
 /// Control the kernel log.
@@ -4755,60 +4995,59 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         // CLOSE / OPEN are no-ops on Linux — report success.
         SYSLOG_ACTION_CLOSE | SYSLOG_ACTION_OPEN => 0,
 
-        // Consuming read: start at the per-process cursor, advance it past
-        // whatever we returned so the next READ continues forward.
+        // Consuming read: from the per-process cursor, moved past what was
+        // returned so the next READ continues forward.
         SYSLOG_ACTION_READ => {
-            let after = klog_read_cursor_get();
-            let (result, count, newest) = klog_read_user(after, buf, len);
-            if result >= 0 && count > 0 {
-                klog_read_cursor_set(newest);
-            }
-            result
+            // SAFETY: the READ family's contract: `buf` is writable for
+            // `len` bytes, checked non-null and non-negative above.
+            let out =
+                unsafe { core::slice::from_raw_parts_mut(buf, usize::try_from(len).unwrap_or(0)) };
+            i32::try_from(klog_read_consuming(out)).unwrap_or(i32::MAX)
         }
 
-        // Non-consuming read of everything still "in the buffer" (i.e. above
-        // the clear floor).  Does not move any cursor.
+        // Non-consuming read of everything still "in the buffer" (above the
+        // clear floor): the newest records that fit.  Moves no cursor.
         SYSLOG_ACTION_READ_ALL => {
-            let after = klog_clear_floor_get();
-            let (result, _count, _newest) = klog_read_user(after, buf, len);
-            result
+            // SAFETY: as READ's.
+            let out =
+                unsafe { core::slice::from_raw_parts_mut(buf, usize::try_from(len).unwrap_or(0)) };
+            i32::try_from(klog_read_all(klog_clear_floor_get(), out)).unwrap_or(i32::MAX)
         }
 
         // Read everything, then clear: advance both the clear floor and the
         // read cursor past every currently-buffered entry.
         SYSLOG_ACTION_READ_CLEAR => {
             let after = klog_clear_floor_get();
-            let (result, _count, _newest) = klog_read_user(after, buf, len);
-            if result >= 0 {
-                let (_total, true_newest) = klog_drain(after);
-                klog_clear_floor_set(true_newest);
-                klog_read_cursor_set(true_newest);
-            }
-            result
+            // SAFETY: as READ's.
+            let out =
+                unsafe { core::slice::from_raw_parts_mut(buf, usize::try_from(len).unwrap_or(0)) };
+            let n = klog_read_all(after, out);
+            let (_total, newest) = klog_total(after);
+            klog_clear_floor_set(newest);
+            klog_read_cursor_set(newest);
+            i32::try_from(n).unwrap_or(i32::MAX)
         }
 
         // Clear: hide every currently-buffered entry from future reads.
         SYSLOG_ACTION_CLEAR => {
-            let after = klog_clear_floor_get();
-            let (_total, true_newest) = klog_drain(after);
-            klog_clear_floor_set(true_newest);
-            klog_read_cursor_set(true_newest);
+            let (_total, newest) = klog_total(klog_clear_floor_get());
+            klog_clear_floor_set(newest);
+            klog_read_cursor_set(newest);
             0
         }
 
-        // Bytes available to the next consuming READ.
+        // Bytes of the records available to the next consuming READ.
         SYSLOG_ACTION_SIZE_UNREAD => {
-            let after = klog_read_cursor_get();
-            let (total, _newest) = klog_drain(after);
+            let (total, _newest) = klog_total(klog_read_cursor_get());
             i32::try_from(total).unwrap_or(i32::MAX)
         }
 
-        // Bytes currently buffered (since the clear floor).  The kernel does
-        // not expose the ring's fixed capacity, so report live contents —
-        // which is what dmesg needs to size its READ_ALL buffer.
+        // Bytes of the records currently buffered (since the clear floor).
+        // The kernel does not expose the ring's fixed capacity, so report
+        // live contents -- which is what dmesg needs to size its READ_ALL
+        // buffer.
         SYSLOG_ACTION_SIZE_BUFFER => {
-            let after = klog_clear_floor_get();
-            let (total, _newest) = klog_drain(after);
+            let (total, _newest) = klog_total(klog_clear_floor_get());
             i32::try_from(total).unwrap_or(i32::MAX)
         }
 
@@ -13198,5 +13437,118 @@ SwapTotal:      262144 kB\nSwapFree:       200000 kB\nSwapUsed:       62144 kB\n
                 crate::sys_capability::CAP_SYSLOG,
             ));
         }
+    }
+}
+
+/// `klogctl`'s records: the kernel's JSON lines as syslog(2) gives them.
+#[cfg(test)]
+mod syslog_records {
+    use super::*;
+
+    fn record(line: &[u8]) -> std::vec::Vec<u8> {
+        let mut out = [0u8; SYSLOG_RECORD_MAX];
+        let n = syslog_record(line, &mut out).expect("an entry");
+        out[..n].to_vec()
+    }
+
+    fn entry(t: u64, msg: &str) -> std::string::String {
+        std::format!(r#"{{"t":{t},"l":"info","m":"k","msg":"{msg}"}}"#)
+    }
+
+    /// The host's ring holds `lines`, numbered from 1.
+    fn ring(lines: &[std::string::String]) {
+        HOST_KLOG.with(|r| *r.borrow_mut() = lines.iter().map(|l| l.as_bytes().to_vec()).collect());
+    }
+
+    #[test]
+    fn a_kernel_entry_is_a_syslog_record() {
+        assert_eq!(
+            record(br#"{"t":1234,"l":"warn","m":"acpi","msg":"_OSC failed"}"#),
+            b"<4>[    1.234000] acpi: _OSC failed\n"
+        );
+        assert_eq!(
+            record(br#"{"t":0,"l":"info","m":"","msg":"boot"}"#),
+            b"<6>[    0.000000] boot\n",
+            "no module, no prefix"
+        );
+        assert_eq!(
+            record(br#"{"t":123456789,"l":"error","m":"x","msg":"y"}"#),
+            b"<3>[123456.789000] x: y\n",
+            "seconds past five columns"
+        );
+        for (level, priority) in [("trace", b"<7>"), ("debug", b"<7>"), ("novel", b"<6>")] {
+            let line = std::format!(r#"{{"t":5,"l":"{level}","m":"m","msg":"a"}}"#);
+            assert_eq!(record(line.as_bytes())[..3], *priority, "{level}");
+        }
+    }
+
+    #[test]
+    fn its_text_is_unescaped_and_ends_with_one_newline() {
+        assert_eq!(
+            record(br#"{"t":1,"l":"info","m":"m","msg":"say \"hi\"\\ok"}"#),
+            b"<6>[    0.001000] m: say \"hi\"\\ok\n"
+        );
+        assert_eq!(
+            record(br#"{"t":1,"l":"info","m":"m","msg":"two\nlines\n"}"#),
+            b"<6>[    0.001000] m: two\nlines\n",
+            "one record, one newline at its end"
+        );
+        assert_eq!(
+            record(br#"{"t":1,"l":"info","m":"m","msg":"\u0007bell \u00e9"}"#),
+            "<6>[    0.001000] m: \u{7}bell \u{e9}\n".as_bytes()
+        );
+    }
+
+    #[test]
+    fn a_line_that_is_no_entry_is_none_and_a_cut_record_says_its_length() {
+        let mut out = [0u8; 8];
+        assert_eq!(syslog_record(b"{\"t\":1}", &mut out), None);
+        assert_eq!(
+            syslog_record(br#"{"t":1,"l":"info","m":"m","msg":"open"#, &mut out),
+            None,
+            "a string that does not close"
+        );
+        let line = br#"{"t":1,"l":"info","m":"m","msg":"hello"}"#;
+        let whole = b"<6>[    0.001000] m: hello\n";
+        assert_eq!(syslog_record(line, &mut out), Some(whole.len()));
+        assert_eq!(out, whole[..8]);
+    }
+
+    /// The reads and sizes over a ring of three: `READ_ALL` too small for
+    /// all gives the newest that fit, whole; `READ` consumes, oldest first;
+    /// the sizes count records; a clear leaves nothing to read.
+    #[test]
+    fn klogctl_reads_the_rings_records() {
+        let lines = [entry(1000, "one"), entry(2000, "two"), entry(3000, "three")];
+        ring(&lines);
+        let recs: std::vec::Vec<std::vec::Vec<u8>> =
+            lines.iter().map(|l| record(l.as_bytes())).collect();
+        let all = recs.concat();
+        let len = |v: &[u8]| i32::try_from(v.len()).unwrap();
+        let null = core::ptr::null_mut();
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_BUFFER, null, 0), len(&all));
+        let mut buf = [0u8; 256];
+        let n = klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 256);
+        assert_eq!(&buf[..usize::try_from(n).unwrap()], &all[..]);
+
+        let last_two = recs[1..].concat();
+        let n = klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), len(&last_two) + 3);
+        assert_eq!(
+            &buf[..usize::try_from(n).unwrap()],
+            &last_two[..],
+            "the newest that fit, whole"
+        );
+
+        let n = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), len(&recs[0]) + 2);
+        assert_eq!(&buf[..usize::try_from(n).unwrap()], &recs[0][..]);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_UNREAD, null, 0), len(&last_two));
+        let n = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 256);
+        assert_eq!(&buf[..usize::try_from(n).unwrap()], &last_two[..]);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_UNREAD, null, 0), 0);
+
+        assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, null, 0), 0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 256), 0);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_BUFFER, null, 0), 0);
+        ring(&[]);
     }
 }

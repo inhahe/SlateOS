@@ -27,14 +27,13 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{SearchBox, SearchLook};
 
 use std::path::PathBuf;
 
@@ -397,16 +396,11 @@ pub struct PlayerState {
 
     // UI
     pub active_tab: Tab,
-    /// What is in the search box: the library is filtered by it, whether or
-    /// not the box has the keyboard.
-    pub search_query: String,
+    /// The search box, which is the search: the library is filtered by it,
+    /// whether or not the box has the keyboard.
+    pub search: SearchBox,
     /// Whether the search box has the keyboard.
     pub searching: bool,
-    /// The search box's editor -- its caret and selection over
-    /// `search_query` -- reloaded when the query changed under it.
-    search_editor: TextInput,
-    /// What the search box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    search_clipboard: String,
     /// How wide the mark is round the search box while it has the keyboard:
     /// the user's focus width (`App::appearance_changed`), the toolkit's
     /// until it is known.
@@ -494,10 +488,8 @@ impl PlayerState {
             library: Vec::new(),
             library_sort: SortBy::Title,
             active_tab: Tab::NowPlaying,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             searching: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             library_selection: None,
             playlist_selection: None,
@@ -868,7 +860,7 @@ impl PlayerState {
     /// The library's tracks the Library tab lists, by their places in
     /// `library`: those the search finds, in the library's order.
     fn library_rows(&self) -> Vec<usize> {
-        let query = self.search_query.to_lowercase();
+        let query = self.search.text().to_lowercase();
         self.library
             .iter()
             .enumerate()
@@ -964,7 +956,7 @@ impl PlayerState {
     /// back and keeps the search, and took the box away with it -- leaving a
     /// library filtered by a query nothing on screen showed.
     fn search_box_shown(&self) -> bool {
-        self.searching || !self.search_query.is_empty()
+        self.searching || !self.search.is_empty()
     }
 
     /// Ctrl+F: the search box takes the keyboard -- appearing, if there was
@@ -972,68 +964,28 @@ impl PlayerState {
     /// search and an arrow key keeps the old one to edit.
     fn focus_search(&mut self) {
         self.searching = true;
-        self.search_editor.set_text(&self.search_query);
-        self.search_editor.select_all();
-    }
-
-    /// Where the search box's caret is drawn: the editor's while the box has
-    /// the keyboard (the end, if the query changed under the editor), the
-    /// start otherwise, which shows the start of what the box holds. One
-    /// answer for the drawing and for a press.
-    fn search_cursor(&self) -> TextCursor {
-        if !self.searching {
-            TextCursor::default()
-        } else if self.search_editor.text() == self.search_query {
-            self.search_editor.cursor()
-        } else {
-            TextCursor::from(self.search_query.len())
-        }
+        self.search.select_all();
     }
 
     /// A key for the search box, which has the keyboard: the caret keys,
     /// Backspace and Delete at the caret, Ctrl+A, C, X and V, and typing --
-    /// AltGr's among it, and no command's letter. Whether the box took it.
-    ///
-    /// The box took typing at its end and Backspace from it, and nothing
-    /// else.
+    /// AltGr's among it, and no command's letter, on the program's
+    /// clipboard. Whether the box took it.
     fn search_key(&mut self, key: &KeyEvent) -> bool {
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            key,
-            &self.search_clipboard,
-            SEARCH_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
-        if self.search_editor.text() != self.search_query {
-            self.search_query = self.search_editor.text().to_owned();
-        }
-        edit.handled
+        self.search.key(key).handled
     }
 
     /// A press in the search box at `x`: it takes the keyboard, with the
     /// caret under the pointer, measured against the box as it was drawn.
     fn press_search(&mut self, x: f32) {
         let rect = search_box_rect(self.width);
-        let drawn = self.search_cursor();
+        let had_the_keyboard = self.searching;
         self.searching = true;
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.search.press(
             x - rect.x - SEARCH_TEXT_INSET,
+            rect.w - 2.0 * SEARCH_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     // ------------------------------------------------------------------
@@ -1383,39 +1335,17 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
             search.y + (search.h - line) / 2.0,
             (search.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
-        if state.search_query.is_empty() {
-            tree.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: "Search the library".to_string(),
-                color: state.palette.subtext0,
-                font_size: SEARCH_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
-        // The editor's selection only while it is the box's: a query changed
-        // under it has not been reloaded into it yet.
-        let editing = state.searching && state.search_editor.text() == state.search_query;
-        textedit::draw(
+        state.search.draw(
             tree,
-            &textedit::SingleLine {
-                text: &state.search_query,
-                cursor: state.search_cursor(),
-                selection_anchor: if editing {
-                    state.search_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: field_state.focused,
+            &SearchLook {
                 x: tx,
                 y: ty,
                 width: tw,
                 line_height: line,
-                font_size: SEARCH_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused: field_state.focused,
+                placeholder: "Search the library",
                 color: state.palette.text,
+                placeholder_color: state.palette.subtext0,
                 selection_bg: state.palette.accent,
                 selection_fg: state.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -1458,7 +1388,7 @@ fn search_box_state(state: &PlayerState) -> field::State {
         hovered: false,
         focused: state.searching && !state.show_help,
         disabled: false,
-        invalid: !state.search_query.is_empty() && state.filtered_library().is_empty(),
+        invalid: !state.search.is_empty() && state.filtered_library().is_empty(),
     }
 }
 
@@ -2491,7 +2421,7 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
             match key_event.key {
                 Key::Escape => {
                     state.searching = false;
-                    state.search_query.clear();
+                    state.search.clear();
                     return true;
                 }
                 Key::Enter => {
@@ -2544,8 +2474,8 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
         // A search the box no longer has the keyboard for, which still
         // filters the library -- ahead of the selection, which Escape clears
         // below, so it backs out one step at a time.
-        Key::Escape if !state.search_query.is_empty() => {
-            state.search_query.clear();
+        Key::Escape if !state.search.is_empty() => {
+            state.search.clear();
             true
         }
         Key::Space => {
@@ -3330,14 +3260,15 @@ mod tests {
         handle_key(&mut state, &key(Key::X, "x", Modifiers::super_key()));
         handle_key(&mut state, &key(Key::S, "ś", altgr));
         assert_eq!(
-            state.search_query, "ś",
+            state.search.text(),
+            "ś",
             "the search typed a command or lost AltGr's ś"
         );
         // Its own keys are plain: Alt+Backspace and Alt+Escape leave it be.
         handle_key(&mut state, &key(Key::Backspace, "", Modifiers::alt()));
         handle_key(&mut state, &key(Key::Escape, "", Modifiers::alt()));
         assert!(state.searching, "Alt+Escape ended the search");
-        assert_eq!(state.search_query, "ś", "Alt+Backspace deleted");
+        assert_eq!(state.search.text(), "ś", "Alt+Backspace deleted");
     }
 
     /// **The shortcut list reaches the window, and nothing acts behind it.**
@@ -4801,7 +4732,7 @@ mod tests {
         t2.title = String::from("Goodbye");
         state.library.push(t1);
         state.library.push(t2);
-        state.search_query = String::from("hello");
+        state.search.set_text("hello");
         assert_eq!(state.filtered_library().len(), 1);
     }
 
@@ -5024,7 +4955,7 @@ mod tests {
     fn the_search_caret_is_a_caret_after_the_query() {
         let mut state = PlayerState::new();
         state.searching = true;
-        state.search_query = String::from("jazz");
+        state.search.set_text("jazz");
         let cmds = render(&state).commands;
         assert!(
             !cmds
@@ -5117,7 +5048,7 @@ mod tests {
         handle_key(&mut state, &typing("nn"));
         handle_key(&mut state, &pressed(Key::Left, false));
         handle_key(&mut state, &typing("eo"));
-        assert_eq!(state.search_query, "neon", "the caret did not move");
+        assert_eq!(state.search.text(), "neon", "the caret did not move");
         assert_eq!(state.filtered_library().len(), 2);
         let rect = search_box_rect(state.width);
         let at = rect.x
@@ -5132,7 +5063,7 @@ mod tests {
 
         handle_key(&mut state, &pressed(Key::Home, false));
         handle_key(&mut state, &pressed(Key::Delete, false));
-        assert_eq!(state.search_query, "eon", "Delete at the caret");
+        assert_eq!(state.search.text(), "eon", "Delete at the caret");
         handle_key(&mut state, &pressed(Key::End, false));
         handle_key(&mut state, &chord(Key::Home, Modifiers::shift()));
         // The selection drawn where it is: over the whole of `eon`.
@@ -5151,14 +5082,14 @@ mod tests {
         );
         handle_key(&mut state, &pressed(Key::C, true));
         handle_key(&mut state, &typing("x"));
-        assert_eq!(state.search_query, "x", "Shift+Home did not select");
+        assert_eq!(state.search.text(), "x", "Shift+Home did not select");
         handle_key(&mut state, &pressed(Key::V, true));
-        assert_eq!(state.search_query, "xeon", "Ctrl+C or Ctrl+V");
+        assert_eq!(state.search.text(), "xeon", "Ctrl+C or Ctrl+V");
         handle_key(&mut state, &pressed(Key::A, true));
         handle_key(&mut state, &pressed(Key::X, true));
-        assert_eq!(state.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(state.search.text(), "", "Ctrl+A and Ctrl+X");
         handle_key(&mut state, &pressed(Key::V, true));
-        assert_eq!(state.search_query, "xeon", "Ctrl+X took nothing");
+        assert_eq!(state.search.text(), "xeon", "Ctrl+X took nothing");
 
         // A press at the start of the text puts the caret there, and one
         // past its end at its end.
@@ -5166,12 +5097,13 @@ mod tests {
         assert!(press_at(&mut state, rect.x + SEARCH_TEXT_INSET + 0.5, mid));
         handle_key(&mut state, &typing("<"));
         assert_eq!(
-            state.search_query, "<xeon",
+            state.search.text(),
+            "<xeon",
             "the press did not put the caret there"
         );
         assert!(press_at(&mut state, rect.right() - 2.0, mid));
         handle_key(&mut state, &typing(">"));
-        assert_eq!(state.search_query, "<xeon>");
+        assert_eq!(state.search.text(), "<xeon>");
     }
 
     /// **Enter keeps the search on screen.** It gives the keyboard back to
@@ -5199,10 +5131,11 @@ mod tests {
             "Enter dropped the search"
         );
         assert!(
-            render(&state)
-                .commands
-                .iter()
-                .any(|c| matches!(c, RenderCommand::RichText { text, .. } if text == "neon")),
+            render(&state).commands.iter().any(|c| matches!(
+                c,
+                RenderCommand::Text { text, .. } | RenderCommand::RichText { text, .. }
+                    if text == "neon"
+            )),
             "the search went from the screen and still filters the library"
         );
         assert!(
@@ -5220,7 +5153,8 @@ mod tests {
         assert!(state.searching);
         handle_key(&mut state, &typing("storm"));
         assert_eq!(
-            state.search_query, "storm",
+            state.search.text(),
+            "storm",
             "Ctrl+F did not select what the box holds"
         );
         handle_key(&mut state, &pressed(Key::Enter, false));
@@ -5230,7 +5164,7 @@ mod tests {
         assert_eq!(state.selected_row(), None);
         handle_key(&mut state, &pressed(Key::Down, false));
         assert!(handle_key(&mut state, &pressed(Key::Escape, false)));
-        assert!(state.search_query.is_empty(), "Escape kept the search");
+        assert!(state.search.is_empty(), "Escape kept the search");
         assert_eq!(state.filtered_library().len(), 10);
         assert!(
             !search_box_drawn_as(&state, field::State::default()),
@@ -5273,7 +5207,11 @@ mod tests {
         assert!(!state.searching, "the search kept the keyboard");
         state.status_message.clear();
         handle_key(&mut state, &pressed(Key::Space, false));
-        assert_eq!(state.search_query, "digital", "Space typed into the search");
+        assert_eq!(
+            state.search.text(),
+            "digital",
+            "Space typed into the search"
+        );
         assert!(
             !state.status_message.is_empty(),
             "Space did not reach the player"
@@ -5371,19 +5309,21 @@ mod tests {
     #[test]
     fn the_box_edits_the_search_it_shows() {
         let mut state = PlayerState::new();
-        state.search_query = String::from("jazz");
+        state.search.set_text("jazz");
         let rect = search_box_rect(state.width);
         let mid = rect.y + rect.h / 2.0;
         assert!(press_at(&mut state, rect.x + SEARCH_TEXT_INSET + 0.5, mid));
         handle_key(&mut state, &typing("!"));
         assert_eq!(
-            state.search_query, "!jazz",
+            state.search.text(),
+            "!jazz",
             "the press missed the shown text"
         );
-        state.search_query = String::from("blues");
+        state.search.set_text("blues");
         handle_key(&mut state, &typing("?"));
         assert_eq!(
-            state.search_query, "blues?",
+            state.search.text(),
+            "blues?",
             "the key edited another search"
         );
     }
@@ -5441,13 +5381,13 @@ mod tests {
         // gives it, and is neither shown nor answered by Enter while the
         // search hides it.
         handle_key(&mut state, &pressed(Key::Num2, false));
-        state.search_query = String::from("summer");
+        state.search.set_text("summer");
         assert_eq!(
             state.selected_row(),
             Some(0),
             "the search moved the selection"
         );
-        state.search_query = String::from("storm");
+        state.search.set_text("storm");
         assert_eq!(
             state.selected_row(),
             None,
@@ -5459,7 +5399,7 @@ mod tests {
             state.current_track_index, current,
             "Enter chose a track the search hides"
         );
-        state.search_query.clear();
+        state.search.clear();
         assert_eq!(selected_title(&state).as_deref(), Some("Summer Rain"));
     }
 

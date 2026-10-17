@@ -102,7 +102,7 @@ MUTATIONS += [
     ),
     (
         "a query that finds nothing is not red",
-        "        invalid: !state.search_query.is_empty() && state.filtered_library().is_empty(),\n",
+        "        invalid: !state.search.is_empty() && state.filtered_library().is_empty(),\n",
         "        invalid: false,\n",
         [FIELD],
     ),
@@ -117,12 +117,6 @@ MUTATIONS += [
         "        self.focus_ring_width = settings.focus_ring_width();\n",
         "        let _ = settings;\n",
         [FIELD],
-    ),
-    (
-        "the caret is at the start of the query",
-        "                cursor: state.search_cursor(),\n",
-        "                cursor: TextCursor::default(),\n",
-        [CARET],
     ),
 ]
 
@@ -140,33 +134,21 @@ SHOWN = "the_box_edits_the_search_it_shows"
 MUTATIONS += [
     (
         "Enter takes the box away with the search still on",
-        "        self.searching || !self.search_query.is_empty()\n",
+        "        self.searching || !self.search.is_empty()\n",
         "        self.searching\n",
         [ENTER],
     ),
     (
         "Ctrl+F does not select what the box holds",
-        "        self.search_editor.select_all();\n",
+        "        self.search.select_all();\n",
         "",
         [ENTER],
     ),
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.search_clipboard = copied;\n",
-        "            let _ = copied;\n",
+        "a press is measured as the box was not drawn",
+        "            had_the_keyboard,\n",
+        "            !had_the_keyboard,\n",
         [EDITS],
-    ),
-    (
-        "a key finds the editor holding another search",
-        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if self.search_editor.text() != self.search_query {\n",
-        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another search",
-        "        self.searching = true;\n        if self.search_editor.text() != self.search_query {\n",
-        "        self.searching = true;\n        if false {\n",
-        [SHOWN],
     ),
     (
         "a press puts the caret at the start",
@@ -206,14 +188,14 @@ MUTATIONS += [
     ),
     (
         "Escape leaves a search the box has no keyboard for",
-        "        Key::Escape if !state.search_query.is_empty() => {\n",
+        "        Key::Escape if !state.search.is_empty() => {\n",
         "        Key::Escape if false => {\n",
         [ENTER],
     ),
     (
-        "the selection is not drawn",
-        "                selection_anchor: if editing {\n",
-        "                selection_anchor: if false {\n",
+        "the box with the keyboard is drawn without it",
+        "                focused: field_state.focused,\n",
+        "                focused: false,\n",
         [EDITS],
     ),
     (

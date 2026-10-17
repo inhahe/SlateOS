@@ -2281,27 +2281,50 @@ pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>
     }
 }
 
-/// Save `data`, bytes a shared mapping wrote, at `offset` of the file
-/// `handle` holds, past the page cache (`Vfs::object_write_back`): what
-/// `mm::page_cache::writeback` writes a dirty page through. The handle's
-/// cursor is not moved.
+/// Save a page a shared mapping wrote at `offset` of the file `handle`
+/// holds, past the page cache (`Vfs::object_write_back`): what
+/// `mm::page_cache::writeback` writes a dirty page through. `fill` copies the
+/// page's bytes into `buf`, under the filesystem's lock with the write.
+/// `cuts` is the file's count of length changes (`page_cache::cuts`) when
+/// the page was picked: if it moved, nothing is written. The handle's cursor
+/// is not moved. Answers whether anything was written.
 ///
 /// # Errors
 ///
 /// `InvalidHandle` for an unknown handle or one not open for writing;
 /// `NotSupported` for one that holds no file (a shared mapping always does);
 /// the filesystem's own.
-pub fn write_back_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
-    let (object, path) = {
+pub fn write_back_at(
+    handle: u64,
+    offset: u64,
+    buf: &mut [u8],
+    fill: &mut dyn FnMut(&mut [u8]),
+    cuts: u64,
+) -> KernelResult<bool> {
+    let object = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
         if !file.flags.is_writable() {
             return Err(KernelError::InvalidHandle);
         }
-        (file.object.clone(), file.path.clone())
+        file.object.clone()
     };
     let object = object.ok_or(KernelError::NotSupported)?;
-    crate::fs::Vfs::object_write_back(&object, &path, offset, data)
+    crate::fs::Vfs::object_write_back(&object, offset, buf, fill, cuts)
+}
+
+/// Announce that the file `handle` holds was changed through a shared
+/// mapping, now saved (`mm::page_cache::writeback`): its change-journal
+/// record and its `IN_MODIFY`, once per save rather than per page.
+pub fn announce_written_back(handle: u64) {
+    let path = {
+        let table = OPEN_FILES.lock();
+        let Some(file) = table.get(&handle) else {
+            return;
+        };
+        file.path.clone()
+    };
+    crate::fs::Vfs::announce_modified(&path);
 }
 
 /// Make what has been written to the file `handle` names stable: its dirty

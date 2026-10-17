@@ -5876,27 +5876,54 @@ impl Vfs {
         Ok(())
     }
 
-    /// Save bytes a shared mapping wrote into the page cache to a held file:
-    /// `data` at `offset`, all within the file's length
-    /// (`mm::page_cache::writeback`). Unlike [`object_write`](Self::object_write)
-    /// it tells the page cache nothing -- the bytes came from its own page,
-    /// and copying them back in could undo a store a mapping made since -- and
-    /// charges no quota, the file not growing. The change is announced.
+    /// Save a page a shared mapping wrote to a held file
+    /// (`mm::page_cache::writeback`): `fill` copies the page's bytes into
+    /// `buf` (as much of it as is asked), and they are written at `offset`.
+    /// The copy and the write are one hold of the filesystem's lock. A
+    /// `write(2)`, which updates the page under that lock too
+    /// (`page_cache::file_changed`), then lands wholly before the copy or
+    /// wholly after the write, never between, so the file never gets the
+    /// page's older bytes back. Under the same hold:
+    /// - nothing is written if the file's length was set since the page was
+    ///   picked (`cuts`, `page_cache::cuts`): the page may be one the cut
+    ///   dropped, its bytes no longer the file's;
+    /// - nothing is written past the file's end, which a save does not move.
+    ///
+    /// Unlike [`object_write`](Self::object_write) it tells the page cache
+    /// nothing, the bytes being its own, and charges no quota. Answers
+    /// whether anything was written.
     ///
     /// # Errors
     ///
     /// `ReadOnlyFilesystem`; the filesystem's own.
     pub fn object_write_back(
         obj: &FileObject,
-        path: &Path,
         offset: u64,
-        data: &[u8],
-    ) -> KernelResult<()> {
+        buf: &mut [u8],
+        fill: &mut dyn FnMut(&mut [u8]),
+        cuts: u64,
+    ) -> KernelResult<bool> {
         check_writable_mount(obj.mnt_id)?;
-        obj.fs.lock().write_ino(obj.ino, offset, data)?;
+        let mut guard = obj.fs.lock();
+        if crate::mm::page_cache::cuts(obj.id()) != cuts {
+            return Ok(false);
+        }
+        let size = guard.metadata_ino(obj.ino)?.size;
+        let len = usize::try_from(size.saturating_sub(offset)).unwrap_or(usize::MAX);
+        let Some(out) = buf.get_mut(..len.min(buf.len())).filter(|d| !d.is_empty()) else {
+            return Ok(false);
+        };
+        fill(out);
+        guard.write_ino(obj.ino, offset, out)?;
+        Ok(true)
+    }
+
+    /// Announce a change to the file at `path` that went past the VFS's
+    /// write paths -- a shared mapping's stores, saved: its `IN_MODIFY` and
+    /// its change-journal record.
+    pub fn announce_modified(path: &Path) {
         super::notify::emit_modified(path);
         super::journal::record(super::journal::JournalEventType::Modified, path);
-        Ok(())
     }
 
     /// Write through an object at the file's end, found and written in one

@@ -26,9 +26,11 @@
 //! ## Changes racing fills
 //!
 //! A fill reads the file with the cache unlocked, and a change can land
-//! between that read and the insert. Each fill notes the file's change count
-//! ([`FileState::changes`]) when it begins and reads again if the count moved
-//! by the insert, so no fill installs bytes a change replaced.
+//! between that read and the insert. Each fill answers where in the file's
+//! changes its read was -- a [`ReadPoint`], the file's change count
+//! ([`FileState::changes`]) taken with the filesystem's lock still held from
+//! the read -- and reads again if the count has moved past it by the insert,
+//! so no fill installs bytes a change replaced.
 //!
 //! ## Refcount model (design-decisions §37)
 //!
@@ -100,9 +102,9 @@ struct CacheEntry {
     /// The physical frame holding this page's bytes (zero-padded past EOF).
     frame: PhysFrame,
     /// The frame holds bytes the file does not have yet: a writable shared
-    /// mapping wrote it ([`mark_dirty`]), or a write to the file landed in
-    /// it while such a mapping could ([`file_changed`]). Saved by
-    /// [`writeback`]; never evicted while set. Changed only through
+    /// mapping wrote it ([`mark_dirty`]). A write to the file never sets it:
+    /// its bytes reach the file and the frame together ([`file_changed`]).
+    /// Saved by [`writeback`]; never evicted while set. Changed only through
     /// [`set_dirty`](Self::set_dirty), which keeps [`DIRTY_COUNT`] in step.
     dirty: bool,
 }
@@ -158,6 +160,13 @@ struct FileState {
     /// (`hrtimer::now_ns`): what the background pass ages the file by
     /// ([`writeback_expired`]), as Linux ages an inode by its `dirtied_when`.
     dirtied_at: Option<u64>,
+    /// A save of the file's pages is under way ([`writeback`]). Saves of one
+    /// file go one at a time, so that one that finds a page clean knows its
+    /// bytes are on their way to the file -- not still being written by
+    /// another save -- by the time it returns: `fsync` may not answer before
+    /// the background pass's write of a page has landed. Linux's
+    /// `PG_writeback`, for the file rather than the page.
+    saving: bool,
 }
 
 impl FileState {
@@ -753,6 +762,8 @@ pub fn shared_map_added(file: FileId, writer: Option<u64>) {
         }
     };
     if let Some(extra) = spare {
+        // The reference just taken, not needed: a close fails only for a
+        // handle already gone.
         let _ = crate::fs::handle::close(extra);
     }
     start_writeback_worker();
@@ -777,26 +788,12 @@ pub fn shared_map_removed(file: FileId, writable: bool) {
         cache.forget_if_idle(file);
         last
     };
-    if !last_writer {
-        return;
-    }
-    // A failure leaves the pages dirty, and the writer kept for the next
-    // writeback (a sync, a later mapping's last unmap): nothing is dropped.
-    if writeback(file, 0, u64::MAX).is_err() {
-        return;
-    }
-    let done = {
-        let mut cache = PAGE_CACHE.lock();
-        let still_clean = !file_has_dirty(&cache, file);
-        let writer = match cache.files.get_mut(&file) {
-            Some(state) if state.writable_maps == 0 && still_clean => state.writer.take(),
-            _ => None,
-        };
-        cache.forget_if_idle(file);
-        writer
-    };
-    if let Some(handle) = done {
-        let _ = crate::fs::handle::close(handle);
+    if last_writer {
+        // Its pages saved, and the writer let go with the last of them
+        // (`writeback`). A failure leaves them dirty and the writer kept, for
+        // the next save to finish -- a sync, the background pass -- so it is
+        // nothing to answer here.
+        let _ = writeback(file, 0, u64::MAX);
     }
 }
 
@@ -813,47 +810,69 @@ fn file_has_dirty(cache: &CacheState, file: FileId) -> bool {
     cache.pages.range(lo..=hi).any(|(_, e)| e.dirty)
 }
 
+/// What [`mark_dirty`] found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub enum MarkDirty {
+    /// The page is dirty now: the write may be let through.
+    Marked,
+    /// The cache no longer holds that frame for that page: the mapping maps
+    /// a page the file has dropped (a cut racing the write). The access is
+    /// to run again once the stale part is unmapped, and find what the file
+    /// holds now -- `SIGBUS`, past its new end.
+    Gone,
+    /// The cache holds no writer for the file, which nothing could then save
+    /// the page through: the write is refused.
+    NoWriter,
+}
+
 /// A writable shared mapping is about to write the page of `file` at
 /// `page_offset` (16 KiB-aligned), which it maps from `frame`: mark it dirty,
-/// to be saved ([`writeback`]). False, and the write is not to be let
-/// through, when the cache no longer holds that frame for that page -- the
-/// mapping maps a page the file has dropped -- or holds no writer for the
-/// file, which nothing could then save the page through.
-#[must_use]
-pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> bool {
+/// to be saved ([`writeback`]), unless [`MarkDirty`] says otherwise.
+pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty {
     let Ok(key) = key_for(file, page_offset) else {
-        return false;
+        return MarkDirty::Gone;
     };
     let mut cache = PAGE_CACHE.lock();
     if cache.files.get(&file).is_none_or(|st| st.writer.is_none()) {
-        return false;
+        return MarkDirty::NoWriter;
     }
     match cache.pages.get_mut(&key) {
         Some(entry) if entry.frame == frame => {
             entry.set_dirty(true);
             cache.note_dirtied(file);
-            true
+            MarkDirty::Marked
         }
-        _ => false,
+        _ => MarkDirty::Gone,
     }
 }
 
 /// Save the dirty pages of `file` from byte `from` to byte `to` (exclusive;
 /// `u64::MAX` for the rest of it) to the file, through the cache's writer
-/// for it (design-decisions §1572). For each page: the dirty mark is cleared,
-/// write permission taken back from every mapping of it
-/// (`pcb::write_protect_file_page`, which flushes the TLBs), then its bytes
-/// copied out -- up to the file's end, never past it -- and written. A store
-/// after the copy faults and marks the page dirty again; one before it is in
-/// the copy. Nothing to do, and `Ok`, for a file with no writer.
+/// for it (design-decisions §1572):
+/// - The pages' dirty marks are cleared and write permission is taken back
+///   from every mapping of them, all at once (`pcb::write_protect_file_pages`,
+///   which flushes the TLBs). Then each page's bytes are copied out and
+///   written. A store after the copy faults and marks its page dirty again;
+///   one before it is in the copy.
+/// - A write never reaches past the file's end, and none is made if the
+///   file's length was set since the copy (`Vfs::object_write_back`); such a
+///   page is marked dirty again, for the next save.
+/// - A page whose write fails is marked dirty again too, and the rest still
+///   go. The first failure is answered.
+/// - Saves of one file go one at a time ([`FileState::saving`]).
+/// - When no mapping may write the file any more and nothing of it is left
+///   dirty, the cache's writer is let go.
+///
+/// Nothing to do, and `Ok`, for a file with no writer.
 ///
 /// Called with no lock held: it takes the process table, address spaces'
-/// page-table locks and the filesystem's.
+/// page-table locks and the filesystem's, and may wait for another save of
+/// the file.
 ///
 /// # Errors
 ///
-/// The filesystem's write error; the page is marked dirty again, and the
-/// rest left for the next writeback.
+/// The filesystem's write error, its page marked dirty again.
 pub fn writeback(file: FileId, from: u64, to: u64) -> KernelResult<()> {
     let page = FRAME_SIZE as u64;
     let first = from.checked_div(page).unwrap_or(0);
@@ -861,104 +880,172 @@ pub fn writeback(file: FileId, from: u64, to: u64) -> KernelResult<()> {
     let Some(hhdm) = page_table::hhdm() else {
         return Ok(());
     };
-    // The writer, a reference of this call's own so a last unmap cannot
-    // close it under the writes.
-    let writer = {
-        let cache = PAGE_CACHE.lock();
-        cache.files.get(&file).and_then(|st| st.writer)
-    };
-    let Some(writer) = writer else {
+    let Some(writer) = begin_save(file)? else {
         return Ok(());
     };
-    crate::fs::handle::dup_shared(writer)?;
-    let result = (|| {
-        let mut buf = crate::mm::user::alloc_zeroed_vec(FRAME_SIZE)?;
-        let mut next = first;
-        while next <= last {
-            // The next dirty page at or after `next`: its mark cleared, a
-            // reference taken on its frame.
-            let found = {
-                let mut cache = PAGE_CACHE.lock();
-                let lo = PageKey {
-                    file,
-                    page_index: next,
-                };
-                let hi = PageKey {
-                    file,
-                    page_index: last,
-                };
-                let hit = cache
-                    .pages
-                    .range_mut(lo..=hi)
-                    .find(|(_, e)| e.dirty)
-                    .map(|(k, e)| {
-                        e.set_dirty(false);
-                        (k.page_index, e.frame)
-                    });
-                match hit {
-                    // SAFETY: resident entry ⇒ allocated frame; cache lock held.
-                    Some((index, frame)) if unsafe { frame::ref_inc(frame) }.is_ok() => {
-                        Some((index, frame))
-                    }
-                    Some((index, _)) => {
-                        mark_dirty_again(&mut cache, file, index);
-                        None
-                    }
-                    None => None,
-                }
-            };
-            let Some((index, frame)) = found else {
-                break;
-            };
-            let offset = index.saturating_mul(page);
-            crate::proc::pcb::write_protect_file_page(file, offset, frame);
-            let saved = (|| {
-                let size = crate::fs::handle::fstat(writer)?.size;
-                let len = usize::try_from(size.saturating_sub(offset))
-                    .unwrap_or(usize::MAX)
-                    .min(FRAME_SIZE);
-                if len == 0 {
-                    return Ok(());
-                }
-                let out = buf.get_mut(..len).ok_or(KernelError::InternalError)?;
-                // SAFETY: a frame we hold a reference on; its HHDM alias is
-                // FRAME_SIZE bytes and `len <= FRAME_SIZE`.
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        frame.to_virt(hhdm) as *const u8,
-                        out.as_mut_ptr(),
-                        len,
-                    );
-                }
-                crate::fs::handle::write_back_at(writer, offset, out)
-            })();
-            release(frame);
-            if let Err(e) = saved {
-                mark_dirty_again(&mut PAGE_CACHE.lock(), file, index);
-                return Err(e);
-            }
-            STAT_WRITTEN_BACK.fetch_add(1, Ordering::Relaxed);
-            next = index.saturating_add(1);
-        }
-        Ok(())
-    })();
+    let (result, wrote) = save_pages(file, first, last, hhdm, writer);
+    let let_go = end_save(file, from == 0 && to == u64::MAX, result.is_ok());
+    if wrote {
+        crate::fs::handle::announce_written_back(writer);
+    }
+    // This call's own reference, and the cache's when it let the writer go.
+    // A close fails only for a handle already gone, which leaves nothing to
+    // give back.
     let _ = crate::fs::handle::close(writer);
-    if result.is_ok() {
-        // The file's age for the background pass: none once nothing is
-        // dirty. After a whole-file save every page dirty now went dirty
-        // during it, so the age starts again from now.
+    if let Some(handle) = let_go {
+        let _ = crate::fs::handle::close(handle);
+    }
+    result
+}
+
+/// Begin a save of `file` ([`writeback`]): wait for one already under way to
+/// end, then mark this one. Answers the cache's writer for the file, with a
+/// reference of the caller's own taken on it, so that no last unmapping can
+/// close it under the writes; `None` for a file with no writer, which has
+/// nothing to save.
+///
+/// # Errors
+///
+/// The reference's (`InvalidHandle`), the save unmarked.
+fn begin_save(file: FileId) -> KernelResult<Option<u64>> {
+    loop {
+        {
+            let mut cache = PAGE_CACHE.lock();
+            let Some(state) = cache.files.get_mut(&file) else {
+                return Ok(None);
+            };
+            let Some(writer) = state.writer else {
+                return Ok(None);
+            };
+            if !state.saving {
+                state.saving = true;
+                drop(cache);
+                // Only the save under way lets the writer go (`end_save`),
+                // so it is still the cache's here.
+                if let Err(e) = crate::fs::handle::dup_shared(writer) {
+                    if let Some(state) = PAGE_CACHE.lock().files.get_mut(&file) {
+                        state.saving = false;
+                    }
+                    return Err(e);
+                }
+                return Ok(Some(writer));
+            }
+        }
+        // Another save of the file is under way: it is short, and this one
+        // must not answer before it has landed.
+        crate::sched::yield_now();
+    }
+}
+
+/// The save itself, for [`writeback`], with `file`'s save marked: its dirty
+/// pages from index `first` to `last`, their marks cleared and frames
+/// referenced together, write-protected together, then each copied and
+/// written through `writer`. Answers the first failure, and whether anything
+/// was written.
+fn save_pages(
+    file: FileId,
+    first: u64,
+    last: u64,
+    hhdm: u64,
+    writer: u64,
+) -> (KernelResult<()>, bool) {
+    let page = FRAME_SIZE as u64;
+    let mut buf = match crate::mm::user::alloc_zeroed_vec(FRAME_SIZE) {
+        Ok(b) => b,
+        Err(e) => return (Err(e), false),
+    };
+    // The dirty pages, and the count of length changes they are copied
+    // under (`Vfs::object_write_back` writes nothing if it moved).
+    let (picked, cuts) = {
         let mut cache = PAGE_CACHE.lock();
-        let still_dirty = file_has_dirty(&cache, file);
-        let whole = from == 0 && to == u64::MAX;
-        if let Some(state) = cache.files.get_mut(&file) {
-            if !still_dirty {
-                state.dirtied_at = None;
-            } else if whole {
-                state.dirtied_at = Some(crate::hrtimer::now_ns());
+        let cuts = cache.files.get(&file).map_or(0, |st| st.cuts);
+        let lo = PageKey {
+            file,
+            page_index: first,
+        };
+        let hi = PageKey {
+            file,
+            page_index: last,
+        };
+        let mut picked: alloc::vec::Vec<(u64, PhysFrame)> = alloc::vec::Vec::new();
+        for (key, entry) in cache.pages.range_mut(lo..=hi) {
+            // SAFETY: resident entry ⇒ allocated frame; cache lock held. A
+            // page whose reference cannot be had stays dirty, for the next
+            // save.
+            if entry.dirty && unsafe { frame::ref_inc(entry.frame) }.is_ok() {
+                entry.set_dirty(false);
+                picked.push((key.page_index.saturating_mul(page), entry.frame));
+            }
+        }
+        (picked, cuts)
+    };
+    crate::proc::pcb::write_protect_file_pages(file, &picked);
+    let mut result = Ok(());
+    let mut wrote = false;
+    for &(offset, frame) in &picked {
+        // The copy, made under the filesystem's lock with the write.
+        let mut fill = |out: &mut [u8]| {
+            let len = out.len().min(FRAME_SIZE);
+            // SAFETY: a frame we hold a reference on; its HHDM alias is
+            // FRAME_SIZE bytes, and `len` is at most that and `out`'s length.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    frame.to_virt(hhdm) as *const u8,
+                    out.as_mut_ptr(),
+                    len,
+                );
+            }
+        };
+        let saved = crate::fs::handle::write_back_at(writer, offset, &mut buf, &mut fill, cuts);
+        release(frame);
+        let index = offset.checked_div(page).unwrap_or(0);
+        match saved {
+            Ok(true) => {
+                STAT_WRITTEN_BACK.fetch_add(1, Ordering::Relaxed);
+                wrote = true;
+            }
+            // Nothing written: a cut since the copy, after which the page --
+            // if the file still has it -- is saved again with the new length;
+            // or a page wholly past the end, which has nothing to save.
+            Ok(false) => {
+                if self::cuts(file) != cuts {
+                    mark_dirty_again(&mut PAGE_CACHE.lock(), file, index);
+                }
+            }
+            Err(e) => {
+                mark_dirty_again(&mut PAGE_CACHE.lock(), file, index);
+                if result.is_ok() {
+                    result = Err(e);
+                }
             }
         }
     }
-    result
+    (result, wrote)
+}
+
+/// End a save of `file` ([`begin_save`]). Its age for the background pass
+/// ([`FileState::dirtied_at`]) is none once nothing is dirty; after a whole
+/// save that succeeded, every page dirty now went dirty during it, so the age
+/// starts again from now. When no mapping may write the file and nothing of
+/// it is dirty, the cache's writer is taken out, answered for the caller to
+/// close with no lock held.
+fn end_save(file: FileId, whole: bool, ok: bool) -> Option<u64> {
+    let mut cache = PAGE_CACHE.lock();
+    let still_dirty = file_has_dirty(&cache, file);
+    let state = cache.files.get_mut(&file)?;
+    state.saving = false;
+    if !still_dirty {
+        state.dirtied_at = None;
+    } else if whole && ok {
+        state.dirtied_at = Some(crate::hrtimer::now_ns());
+    }
+    let let_go = if state.writable_maps == 0 && !still_dirty {
+        state.writer.take()
+    } else {
+        None
+    };
+    cache.forget_if_idle(file);
+    let_go
 }
 
 /// Put back the dirty mark of page `index` of `file`, whose save failed.
@@ -1064,18 +1151,25 @@ fn start_writeback_worker() {
 /// the files dirty for longer than [`DIRTY_EXPIRE_NS`] -- or every dirty
 /// file, when [`WRITEBACK_ALL`] asks.
 extern "C" fn writeback_worker(_arg: u64) {
-    let interval = u64::from(crate::apic::TICK_RATE_HZ).saturating_mul(WRITEBACK_INTERVAL_SECS);
+    let hz = u64::from(crate::apic::TICK_RATE_HZ);
+    let interval = hz.saturating_mul(WRITEBACK_INTERVAL_SECS);
+    let mut last_all: Option<u64> = None;
     loop {
-        let cutoff = if WRITEBACK_ALL.swap(false, Ordering::AcqRel) {
+        // An every-file pass at most once a second: memory pressure asks at
+        // every slow allocation, and each pass write-protects every mapped
+        // page, which only makes the mappings fault again.
+        let now = crate::apic::tick_count();
+        let may_all = last_all.is_none_or(|t| now.saturating_sub(t) >= hz);
+        let cutoff = if may_all && WRITEBACK_ALL.swap(false, Ordering::AcqRel) {
+            last_all = Some(now);
             u64::MAX
         } else {
             crate::hrtimer::now_ns().saturating_sub(DIRTY_EXPIRE_NS)
         };
         let _saved = writeback_expired(cutoff);
-        if !WRITEBACK_ALL.load(Ordering::Acquire) {
-            let now = crate::apic::tick_count();
-            crate::sched::sleep_until_tick_interruptible(now.saturating_add(interval));
-        }
+        // A wake (`shrink`) ends the sleep early.
+        let now = crate::apic::tick_count();
+        crate::sched::sleep_until_tick_interruptible(now.saturating_add(interval));
     }
 }
 
@@ -1232,7 +1326,7 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
     let mut after = AfterChange::Done;
     {
         let mut cache = PAGE_CACHE.lock();
-        let (shared, writable) = match cache.files.get_mut(&file) {
+        let shared = match cache.files.get_mut(&file) {
             Some(state) => {
                 state.changes = state.changes.wrapping_add(1);
                 if matches!(
@@ -1245,13 +1339,9 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
                 // save failed: the pages it left dirty are kept, and changed
                 // in place, as a mapped file's are, for the next writeback
                 // to save.
-                let pending = state.writer.is_some();
-                (
-                    state.shared_maps > 0 || pending,
-                    state.writable_maps > 0 || pending,
-                )
+                state.shared_maps > 0 || state.writer.is_some()
             }
-            None => (false, false),
+            None => false,
         };
         match change {
             FileChange::Dropped => cache.take_file_pages(file, &mut dropped),
@@ -1268,7 +1358,7 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
                 {
                     zero_past_end(&mut cache, file, old, &mut updates);
                 }
-                collect_writes(&mut cache, file, offset, data, writable, &mut updates);
+                collect_writes(&mut cache, file, offset, data, &mut updates);
             }
             FileChange::Resized {
                 size,
@@ -1289,7 +1379,7 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
                     &mut dropped,
                     &mut updates,
                 );
-                collect_writes(&mut cache, file, 0, data, writable, &mut updates);
+                collect_writes(&mut cache, file, 0, data, &mut updates);
             }
         }
         RESIDENT_COUNT.fetch_sub(dropped.len(), Ordering::Relaxed);
@@ -1323,16 +1413,15 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
 /// and those bytes of `data`. Pages not resident are skipped: a fill reads
 /// the file, which holds the write already.
 ///
-/// With `dirty` (the file has a writable mapping) each page is marked dirty
-/// too: a writeback that copied the page before this write's bytes landed
-/// in it may write after the filesystem's write, putting the old bytes
-/// back, and the mark has the page saved again.
+/// No page is marked dirty: the write is in the file already, and a save of
+/// the page copies and writes it under the filesystem's lock, which this
+/// write holds too (`Vfs::object_write_back`), so the save cannot put the
+/// page's older bytes back over this write's.
 fn collect_writes<'a>(
     cache: &mut CacheState,
     file: FileId,
     offset: u64,
     data: &'a [u8],
-    dirty: bool,
     updates: &mut alloc::vec::Vec<(PhysFrame, usize, usize, Option<&'a [u8]>)>,
 ) {
     let size = FRAME_SIZE as u64;
@@ -1352,17 +1441,11 @@ fn collect_writes<'a>(
         let Some(bytes) = data.get(done..done.saturating_add(len)) else {
             return;
         };
-        if let Some(entry) = cache.pages.get_mut(&key)
+        if let Some(entry) = cache.pages.get(&key)
             // SAFETY: resident entry ⇒ allocated frame; cache lock held.
             && unsafe { frame::ref_inc(entry.frame) }.is_ok()
         {
-            if dirty {
-                entry.set_dirty(true);
-            }
             updates.push((entry.frame, in_page, len, Some(bytes)));
-            if dirty {
-                cache.note_dirtied(file);
-            }
         }
         done = done.saturating_add(len);
     }
@@ -1469,6 +1552,8 @@ pub fn shrink(level: crate::mm::pressure::PressureLevel) -> usize {
         WRITEBACK_ALL.store(true, Ordering::Release);
         let tid = WRITEBACK_TID.load(Ordering::Acquire);
         if tid != 0 {
+            // A wake lost to a busy scheduler costs only the rest of the
+            // worker's sleep: it sees the flag at its next pass.
             let _ = crate::sched::try_wake(tid);
         }
     }
@@ -2054,9 +2139,9 @@ fn fill_racing_a_change(file: FileId) -> KernelResult<()> {
 /// mapping's: a page is marked dirty only through the frame the cache holds
 /// for it; a dirty page is neither evicted nor shrunk away; a writeback saves
 /// the range asked for and no more, and nothing past the file's end; a write
-/// to the file while a mapping may write it marks the page it lands in dirty;
-/// and the last writable mapping's going saves the rest and lets the cache's
-/// writer go. Needs the VFS, so it runs with the ring-3 tests, not with
+/// to the file lands in its mapped page in place and leaves it clean; a page
+/// dirtied after a save ages from then; and the last writable mapping's going
+/// saves the rest and lets the cache's writer go. Needs the VFS, so it runs with the ring-3 tests, not with
 /// [`self_test`].
 ///
 /// # Errors
@@ -2105,6 +2190,15 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
             }
         }
     };
+    // A byte of `frame` at `at`, as a mapping would read it.
+    let peek = |frame: PhysFrame, at: usize| -> u8 {
+        if at >= FRAME_SIZE {
+            return 0;
+        }
+        // SAFETY: a frame we hold a reference on; `at` is inside its HHDM
+        // alias of FRAME_SIZE bytes.
+        unsafe { core::ptr::read_volatile((frame.to_virt(hhdm) as *const u8).add(at)) }
+    };
     // The file's bytes on the filesystem, read past the cache.
     let disk = || crate::fs::Vfs::read_at_uncached(path, 0, size.saturating_add(16));
     let byte = |d: &[u8], at: u64| usize::try_from(at).ok().and_then(|i| d.get(i).copied());
@@ -2131,13 +2225,15 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
             return test_fail("a WRITE seal was not refused while a mapping may write the file");
         }
 
-        if mark_dirty(file, page, f0) {
+        if mark_dirty(file, page, f0) != MarkDirty::Gone {
             return test_fail("a page was marked dirty through a frame that is not its own");
         }
         poke(f0, 5, b"X");
         poke(f2, 99, b"Y");
         poke(f2, 100, b"ZZZZ");
-        if !mark_dirty(file, 0, f0) || !mark_dirty(file, page.saturating_mul(2), f2) {
+        if mark_dirty(file, 0, f0) != MarkDirty::Marked
+            || mark_dirty(file, page.saturating_mul(2), f2) != MarkDirty::Marked
+        {
             return test_fail("a page was not marked dirty through its own frame");
         }
         if dirty_pages() != dirty_before.saturating_add(2) {
@@ -2185,14 +2281,24 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
         {
             return test_fail("the background pass did not save a file older than its cut-off");
         }
-        let before_write = crate::hrtimer::now_ns();
+        // A write to the file lands in its cached page, in place, and leaves
+        // it clean: the bytes are in the file already.
+        let Some(f1) = held.get(1).copied().flatten() else {
+            return test_fail("the file's middle page is not held");
+        };
         crate::fs::Vfs::write_at(path, page.saturating_add(7), b"W")?;
-        if dirty_pages() != dirty_before.saturating_add(1) {
+        if peek(f1, 7) != b'W' || dirty_pages() != dirty_before {
             return test_fail(
-                "a write to a file a mapping may write did not mark its cached page dirty",
+                "a write to a mapped file did not land in its cached page, or marked it dirty",
             );
         }
-        let _ = writeback_expired(before_write.saturating_sub(1));
+        // A page that goes dirty after a whole save ages from then.
+        let before_store = crate::hrtimer::now_ns();
+        poke(f1, 9, b"V");
+        if mark_dirty(file, page, f1) != MarkDirty::Marked {
+            return test_fail("a page was not marked dirty through its own frame");
+        }
+        let _ = writeback_expired(before_store.saturating_sub(1));
         if dirty_pages() != dirty_before.saturating_add(1) {
             return test_fail("a file saved whole kept the age of its first dirty page");
         }
@@ -2203,6 +2309,7 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
         if d.len() != size
             || byte(&d, 5) != Some(b'X')
             || byte(&d, page.saturating_add(7)) != Some(b'W')
+            || byte(&d, page.saturating_add(9)) != Some(b'V')
             || dirty_pages() != dirty_before
             || tracked_files() != tracked_before
         {

@@ -59,9 +59,9 @@ use guitk::table::{Column, Fit, Table};
 #[allow(unused_imports)]
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use textline::{LineBox, LineLook};
 
 #[allow(unused_imports)]
 use std::collections::BTreeMap;
@@ -1472,13 +1472,8 @@ pub struct DefragUI {
     pub show_ssd_warning: bool,
     /// Whether the exclude editor is shown.
     pub show_exclude_editor: bool,
-    /// Text input for new exclude pattern.
-    pub exclude_input: String,
-    /// The pattern box's editor -- its caret and selection over
-    /// `exclude_input` -- reloaded when the pattern changed under it.
-    exclude_editor: TextInput,
-    /// What the pattern box's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    exclude_clipboard: String,
+    /// The box a new exclude pattern is typed into, and its caret.
+    pub exclude_input: LineBox,
     /// Window width in pixels, as of the last frame or resize.
     ///
     /// Only the *event* path reads these -- a click arrives with a point and
@@ -1555,9 +1550,7 @@ impl DefragUI {
             show_help: false,
             show_ssd_warning: false,
             show_exclude_editor: false,
-            exclude_input: String::new(),
-            exclude_editor: textline::field_holding("", EXCLUDE_CAPACITY),
-            exclude_clipboard: String::new(),
+            exclude_input: LineBox::new(EXCLUDE_CAPACITY, FONT_SIZE),
             exclude_input_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             width: WINDOW_WIDTH,
@@ -1906,7 +1899,8 @@ impl DefragUI {
                     // `add_exclude` ignores an empty pattern, so Enter on an
                     // empty field closes the editor rather than adding a
                     // pattern that matches everything.
-                    self.add_exclude(&self.exclude_input.clone());
+                    let pattern = self.exclude_input.text().to_owned();
+                    self.add_exclude(&pattern);
                     self.show_exclude_editor = false;
                     self.exclude_input.clear();
                 }
@@ -1917,8 +1911,11 @@ impl DefragUI {
                 // character, which would be invisible in the field and
                 // meaningless in a glob, and no command's letter (Alt+X typed
                 // an `x` into the pattern). The box took typing at its end
-                // and Backspace from it, and nothing else.
-                _ => self.exclude_key(key),
+                // and Backspace from it, and nothing else. A key the box does
+                // not answer goes nowhere: the editor has the window's keys.
+                _ => {
+                    self.exclude_input.key(key);
+                }
             }
             return EventResult::Consumed;
         }
@@ -2150,39 +2147,9 @@ impl DefragUI {
         frame
     }
 
-    /// A key for the pattern box, which has the keyboard while the
-    /// exclusion editor is open.
-    fn exclude_key(&mut self, key: &KeyEvent) {
-        if self.exclude_editor.text() != self.exclude_input {
-            self.exclude_editor.set_text(&self.exclude_input);
-        }
-        let edit = textline::apply_key(
-            &mut self.exclude_editor,
-            key,
-            &self.exclude_clipboard,
-            FONT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.exclude_clipboard = copied;
-        }
-        if self.exclude_editor.text() != self.exclude_input {
-            self.exclude_input = self.exclude_editor.text().to_owned();
-        }
-    }
-
-    /// Where the pattern box's caret is: the editor's, or the end of the
-    /// pattern where the pattern changed under the editor. One answer for
-    /// the drawing and for a press.
-    fn exclude_cursor(&self) -> text::TextCursor {
-        if self.exclude_editor.text() == self.exclude_input {
-            self.exclude_editor.cursor()
-        } else {
-            text::TextCursor::from(self.exclude_input.len())
-        }
-    }
-
     /// A press in the pattern box at `x`: the caret under the pointer,
-    /// measured against the box as it was drawn.
+    /// measured against the box as it was drawn -- with the keyboard, which
+    /// it has whenever it is shown.
     fn press_exclude(&mut self, x: f32) {
         let Some(rect) = self
             .frame(self.width, self.height)
@@ -2190,20 +2157,11 @@ impl DefragUI {
         else {
             return;
         };
-        let drawn = self.exclude_cursor();
-        if self.exclude_editor.text() != self.exclude_input {
-            self.exclude_editor.set_text(&self.exclude_input);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.exclude_input,
-            drawn,
-            (rect.w - 2.0 * EXCLUDE_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
+        self.exclude_input.press(
             x - rect.x - EXCLUDE_TEXT_INSET,
+            rect.w - 2.0 * EXCLUDE_TEXT_INSET,
+            true,
         );
-        self.exclude_editor.set_selection_anchor(None);
-        self.exclude_editor.set_cursor(cursor);
     }
 
     /// Which control is at `(x, y)`, at the size the last frame was drawn.
@@ -3639,24 +3597,17 @@ impl DefragUI {
             // went under an ellipsis.
             let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
             let mut tree = RenderTree::new();
-            textedit::draw(
+            self.exclude_input.draw(
                 &mut tree,
-                &textedit::SingleLine {
-                    text: &self.exclude_input,
-                    cursor: self.exclude_cursor(),
-                    selection_anchor: if self.exclude_editor.text() == self.exclude_input {
-                        self.exclude_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: state.focused,
+                &LineLook {
                     x: card_x + PADDING + EXCLUDE_TEXT_INSET,
                     y: ey + (22.0 - line) / 2.0,
-                    width: (field_w - 2.0 * EXCLUDE_TEXT_INSET).max(0.0),
+                    width: field_w - 2.0 * EXCLUDE_TEXT_INSET,
                     line_height: line,
-                    font_size: FONT_SIZE,
-                    weight: FontWeightHint::Regular,
+                    focused: state.focused,
+                    placeholder: "",
                     color: self.palette.text,
+                    placeholder_color: self.palette.subtext0,
                     selection_bg: self.palette.accent,
                     selection_fg: self.palette.crust,
                     caret_width: textedit::CARET_WIDTH,
@@ -4832,7 +4783,7 @@ mod tests {
 
         let count = ui.excludes.len();
         probe::type_str(&mut ui, "*.iso");
-        assert_eq!(ui.exclude_input, "*.iso");
+        assert_eq!(ui.exclude_input.text(), "*.iso");
         probe::key(&mut ui, &probe::press(Key::Enter));
 
         assert_eq!(ui.excludes.len(), count + 1);
@@ -4913,7 +4864,8 @@ mod tests {
         assert!(ui.show_exclude_editor, "a chord closed the field");
         probe::key(&mut ui, &key(Key::Q, "@", altgr));
         assert_eq!(
-            ui.exclude_input, "@",
+            ui.exclude_input.text(),
+            "@",
             "the field typed a command or lost AltGr's @"
         );
     }
@@ -4953,7 +4905,7 @@ mod tests {
         probe::click(&mut ui, Target::ExcludeAdd);
         probe::type_str(&mut ui, "abc");
         probe::key(&mut ui, &probe::press(Key::Backspace));
-        assert_eq!(ui.exclude_input, "ab");
+        assert_eq!(ui.exclude_input.text(), "ab");
     }
 
     #[test]
@@ -6673,7 +6625,7 @@ mod tests {
         probe::type_str(&mut ui, "*.io");
         probe::key(&mut ui, &probe::press(Key::Left));
         probe::type_str(&mut ui, "s");
-        assert_eq!(ui.exclude_input, "*.iso", "the caret did not move");
+        assert_eq!(ui.exclude_input.text(), "*.iso", "the caret did not move");
         let at =
             rect.x + EXCLUDE_TEXT_INSET + text::measure("*.is", FONT_SIZE, FontWeightHint::Regular);
         let carets = carets_in(&ui, rect);
@@ -6693,7 +6645,7 @@ mod tests {
 
         probe::key(&mut ui, &probe::press(Key::Home));
         probe::key(&mut ui, &probe::press(Key::Delete));
-        assert_eq!(ui.exclude_input, ".iso", "Delete at the caret");
+        assert_eq!(ui.exclude_input.text(), ".iso", "Delete at the caret");
         probe::key(&mut ui, &probe::press(Key::End));
         probe::key(&mut ui, &probe::shift(Key::Home));
         let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
@@ -6714,14 +6666,14 @@ mod tests {
         );
         probe::key(&mut ui, &probe::ctrl(Key::C));
         probe::type_str(&mut ui, "*");
-        assert_eq!(ui.exclude_input, "*", "Shift+Home did not select");
+        assert_eq!(ui.exclude_input.text(), "*", "Shift+Home did not select");
         probe::key(&mut ui, &probe::ctrl(Key::V));
-        assert_eq!(ui.exclude_input, "*.iso", "Ctrl+C or Ctrl+V");
+        assert_eq!(ui.exclude_input.text(), "*.iso", "Ctrl+C or Ctrl+V");
         probe::key(&mut ui, &probe::ctrl(Key::A));
         probe::key(&mut ui, &probe::ctrl(Key::X));
-        assert_eq!(ui.exclude_input, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(ui.exclude_input.text(), "", "Ctrl+A and Ctrl+X");
         probe::key(&mut ui, &probe::ctrl(Key::V));
-        assert_eq!(ui.exclude_input, "*.iso", "Ctrl+X took nothing");
+        assert_eq!(ui.exclude_input.text(), "*.iso", "Ctrl+X took nothing");
 
         // A press at the start of the pattern puts the caret there, and one
         // past its end at its end.
@@ -6734,22 +6686,52 @@ mod tests {
         );
         probe::type_str(&mut ui, "/");
         assert_eq!(
-            ui.exclude_input, "/*.iso",
+            ui.exclude_input.text(),
+            "/*.iso",
             "the press did not put the caret there"
         );
         ui.click_at(rect.right() - 2.0, mid, MouseButton::Left, size);
         probe::type_str(&mut ui, "x");
-        assert_eq!(ui.exclude_input, "/*.isox");
+        assert_eq!(ui.exclude_input.text(), "/*.isox");
+    }
+
+    /// **A press in a long pattern lands where it was drawn**: a pattern
+    /// wider than the box is drawn scrolled to keep the caret in view, so a
+    /// press at the box's right edge is near the caret at the pattern's end,
+    /// not a box's width from its start.
+    #[test]
+    fn a_press_in_a_long_pattern_lands_where_it_was_drawn() {
+        let (mut ui, rect) = editing_patterns();
+        let size = <DefragUI as Probe>::SIZE;
+        let long = "W".repeat(600);
+        probe::type_str(&mut ui, &long);
+        assert_eq!(ui.exclude_input.text(), long, "control: the pattern typed");
+        assert!(
+            text::measure(&long, FONT_SIZE, FontWeightHint::Regular) > 2.0 * rect.w,
+            "control: the pattern is wider than the box"
+        );
+        ui.click_at(
+            rect.right() - EXCLUDE_TEXT_INSET - 1.0,
+            rect.y + rect.h / 2.0,
+            MouseButton::Left,
+            size,
+        );
+        let at = ui.exclude_input.input().cursor().byte();
+        assert!(
+            at > long.len() / 2,
+            "the press was measured from the pattern's start: caret at {at} of {}",
+            long.len()
+        );
     }
 
     /// **The box edits the pattern it shows**, however the pattern came to
-    /// be in it: its editor is loaded from the box whenever a press or a key
-    /// finds the two apart.
+    /// be in it: one put there from outside is the one a press or a key
+    /// then edits.
     #[test]
     fn the_pattern_box_edits_the_pattern_it_shows() {
         let (mut ui, rect) = editing_patterns();
         let size = <DefragUI as Probe>::SIZE;
-        ui.exclude_input = String::from("*.iso");
+        ui.exclude_input.set_text("*.iso");
         ui.click_at(
             rect.x + EXCLUDE_TEXT_INSET + 0.5,
             rect.y + rect.h / 2.0,
@@ -6758,11 +6740,16 @@ mod tests {
         );
         probe::type_str(&mut ui, "/");
         assert_eq!(
-            ui.exclude_input, "/*.iso",
+            ui.exclude_input.text(),
+            "/*.iso",
             "the press missed the shown pattern"
         );
-        ui.exclude_input = String::from("*.tmp");
+        ui.exclude_input.set_text("*.tmp");
         probe::type_str(&mut ui, "~");
-        assert_eq!(ui.exclude_input, "*.tmp~", "the key edited another pattern");
+        assert_eq!(
+            ui.exclude_input.text(),
+            "*.tmp~",
+            "the key edited another pattern"
+        );
     }
 }

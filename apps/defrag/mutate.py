@@ -145,25 +145,10 @@ MUTATIONS += [
 EDITS = "the_pattern_box_edits_at_a_caret"
 SHOWN = "the_pattern_box_edits_the_pattern_it_shows"
 
+# The box is a textline LineBox since 2026-10-17: its clipboard (the
+# program's), its caret and selection drawn, and the pattern it edits being
+# the one it shows are LineBox's, which textline's own table covers.
 MUTATIONS += [
-    (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.exclude_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
-        "a key finds the editor holding another pattern",
-        "    fn exclude_key(&mut self, key: &KeyEvent) {\n        if self.exclude_editor.text() != self.exclude_input {\n",
-        "    fn exclude_key(&mut self, key: &KeyEvent) {\n        if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another pattern",
-        "        let drawn = self.exclude_cursor();\n        if self.exclude_editor.text() != self.exclude_input {\n",
-        "        let drawn = self.exclude_cursor();\n        if false {\n",
-        [SHOWN],
-    ),
     (
         "a press puts the caret at the start",
         "            x - rect.x - EXCLUDE_TEXT_INSET,\n",
@@ -177,22 +162,16 @@ MUTATIONS += [
         [EDITS, SHOWN],
     ),
     (
-        "the caret is drawn at the start",
-        "                    cursor: self.exclude_cursor(),\n",
-        "                    cursor: text::TextCursor::default(),\n",
-        [EDITS],
-    ),
-    (
-        "the selection is not drawn",
-        "                    selection_anchor: if self.exclude_editor.text() == self.exclude_input {\n",
-        "                    selection_anchor: if false {\n",
-        [EDITS],
-    ),
-    (
         "the box with the keys draws no caret",
-        "                    focused: state.focused,\n                    x: card_x + PADDING + EXCLUDE_TEXT_INSET,\n",
-        "                    focused: false,\n                    x: card_x + PADDING + EXCLUDE_TEXT_INSET,\n",
+        '                    focused: state.focused,\n                    placeholder: "",\n',
+        '                    focused: false,\n                    placeholder: "",\n',
         [EDITS],
+    ),
+    (
+        "a press is measured as from the start of a long pattern",
+        "            rect.w - 2.0 * EXCLUDE_TEXT_INSET,\n            true,\n",
+        "            rect.w - 2.0 * EXCLUDE_TEXT_INSET,\n            false,\n",
+        ["a_press_in_a_long_pattern_lands_where_it_was_drawn"],
     ),
 ]
 

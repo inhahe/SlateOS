@@ -4441,7 +4441,7 @@ impl Vfs {
             .map_err(|_| crate::error::KernelError::OutOfMemory)?;
         buf.resize(out_len, 0u8);
         crate::mm::page_cache::read_through(file_id, 0, &mut buf, |page_off, page_buf| {
-            Self::fill_file_page(path, page_off, page_buf)
+            Self::fill_file_page(path, file_id, page_off, page_buf)
         })?;
         Ok(buf)
     }
@@ -5103,7 +5103,7 @@ impl Vfs {
             .map_err(|_| crate::error::KernelError::OutOfMemory)?;
         buf.resize(out_len, 0u8);
         crate::mm::page_cache::read_through(file_id, offset, &mut buf, |page_off, page_buf| {
-            Self::fill_file_page(path, page_off, page_buf)
+            Self::fill_file_page(path, file_id, page_off, page_buf)
         })?;
         Ok(buf)
     }
@@ -5116,40 +5116,45 @@ impl Vfs {
     /// [`read_file_routed`](Self::read_file_routed).  Bytes past EOF are left as
     /// the caller's pre-zeroed page (demand-paging zero-fill semantics).  The
     /// mount is re-resolved under the VFS lock here; the page-cache lock is
-    /// already dropped before this runs, so the cache and VFS locks never nest.
+    /// already dropped before this runs, and taken again under the
+    /// filesystem's for the read's point in `file`'s changes
+    /// ([`crate::mm::page_cache::read_point`]), the order `file_changed` takes
+    /// them in.
     fn fill_file_page(
         path: impl AsRef<Path>,
+        file: FileId,
         page_off: u64,
         page_buf: &mut [u8],
-    ) -> KernelResult<()> {
+    ) -> KernelResult<crate::mm::page_cache::ReadPoint> {
         let path = path.as_ref();
-        let data = {
+        let (data, point) = {
             let (fs, _id, _opts, relative) = resolve_mount(path)?;
-            fs.lock().read_at(&relative, page_off, page_buf.len())?
+            let mut guard = fs.lock();
+            let data = guard.read_at(&relative, page_off, page_buf.len())?;
+            (data, crate::mm::page_cache::read_point(file))
         };
         let n = data.len().min(page_buf.len());
         if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
             dst.copy_from_slice(src);
         }
-        Ok(())
+        Ok(point)
     }
 
     /// Read a range of bytes from a file **directly from the backing
     /// filesystem**, bypassing the page cache.
     ///
-    /// This is the fill primitive behind the page cache itself: the `mmap`
-    /// fault path and [`read_at_routed`](Self::read_at_routed)'s page-fill
-    /// closure both need to read a file's data *without* re-entering
-    /// [`crate::mm::page_cache::get_or_fill`] (which would recurse on the same
-    /// key).  It performs the same path resolution and tag check as
-    /// [`read_at`](Self::read_at) but goes straight to `mp.fs.read_at`, so for
-    /// regular files it reads through the filesystem's *data* path (which, after
-    /// §38, bypasses the block buffer cache too — a genuinely uncached read).
+    /// What the filesystem holds, not what the page cache does: the tests
+    /// that check a mapping's stores were saved read with it. (The cache's
+    /// own fills read through [`fill_read_resolved`](Self::fill_read_resolved)
+    /// and [`object_fill_read`](Self::object_fill_read), which answer the
+    /// read's point in the file's changes too.) It performs the same path
+    /// resolution and tag check as [`read_at`](Self::read_at) but goes
+    /// straight to `mp.fs.read_at`, so for regular files it reads through the
+    /// filesystem's *data* path (which, after §38, bypasses the block buffer
+    /// cache too — a genuinely uncached read).
     ///
-    /// It deliberately does **not** emit the inotify `IN_ACCESS` event: callers
-    /// are internal cache fills, not user-visible reads (the user-visible read
-    /// that triggered the fill emits `ACCESS` at the [`read_at`](Self::read_at)
-    /// layer).
+    /// It deliberately does **not** emit the inotify `IN_ACCESS` event: it is
+    /// the kernel's look at the file, not a user-visible read.
     pub fn read_at_uncached(
         path: impl AsRef<Path>,
         offset: u64,
@@ -5172,6 +5177,28 @@ impl Vfs {
         check_path_access(path, PathAccess::Read)?;
         let (fs, _id, _opts, relative) = resolve_mount(path)?;
         fs.lock().read_at(&relative, offset, len)
+    }
+
+    /// [`read_at_uncached_resolved`](Self::read_at_uncached_resolved) for a
+    /// page-cache fill of `file`, the file at `path`: with the bytes, the
+    /// read's point in the file's changes, taken under the filesystem's lock
+    /// with the read ([`crate::mm::page_cache::read_point`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`read_at_uncached_resolved`](Self::read_at_uncached_resolved).
+    pub fn fill_read_resolved(
+        path: impl AsRef<Path>,
+        file: FileId,
+        offset: u64,
+        len: usize,
+    ) -> KernelResult<(Vec<u8>, crate::mm::page_cache::ReadPoint)> {
+        let path = path.as_ref();
+        check_path_access(path, PathAccess::Read)?;
+        let (fs, _id, _opts, relative) = resolve_mount(path)?;
+        let mut guard = fs.lock();
+        let data = guard.read_at(&relative, offset, len)?;
+        Ok((data, crate::mm::page_cache::read_point(file)))
     }
 
     /// What a write through the **already-resolved** `path` answers without
@@ -5217,10 +5244,19 @@ impl Vfs {
             if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
                 super::sealing::may_write(seals, offset, data.len() as u64, meta.size)?;
             }
+            let before = cache_identity_sized(&mut guard, fs_id, &relative);
             guard.write_at(&relative, offset, data)?;
+            // A file made by the write has no identity before it.
+            let id = before
+                .map(|(id, _)| id)
+                .or_else(|| cache_identity(&mut guard, fs_id, &relative));
             cache_changed(
-                cache_identity(&mut guard, fs_id, &relative),
-                crate::mm::page_cache::FileChange::Written { offset, data },
+                id,
+                crate::mm::page_cache::FileChange::Written {
+                    offset,
+                    data,
+                    old_size: before.map(|(_, size)| size),
+                },
             )
         };
         after_cache_change(cache_inval);
@@ -5291,7 +5327,12 @@ impl Vfs {
                 at,
                 cache_changed(
                     id,
-                    crate::mm::page_cache::FileChange::Written { offset: at, data },
+                    // The write landed at the old end.
+                    crate::mm::page_cache::FileChange::Written {
+                        offset: at,
+                        data,
+                        old_size: Some(at),
+                    },
                 ),
             )
         };
@@ -5327,10 +5368,14 @@ impl Vfs {
             if let Some((seals, meta)) = seals_at(&mut **guard, fs_id, &relative, path) {
                 super::sealing::may_resize(seals, meta.size, size)?;
             }
+            let before = cache_identity_sized(&mut guard, fs_id, &relative);
             guard.truncate(&relative, size)?;
             cache_changed(
-                cache_identity(&mut guard, fs_id, &relative),
-                crate::mm::page_cache::FileChange::Resized { size },
+                before.map(|(id, _)| id),
+                crate::mm::page_cache::FileChange::Resized {
+                    size,
+                    old_size: before.map(|(_, old)| old),
+                },
             )
         };
         after_cache_change(cache_inval);
@@ -5664,12 +5709,12 @@ impl Vfs {
             .map_err(|_| KernelError::OutOfMemory)?;
         buf.resize(out_len, 0u8);
         crate::mm::page_cache::read_through(obj.id(), offset, &mut buf, |page_off, page_buf| {
-            let data = obj.fs.lock().read_ino(obj.ino, page_off, page_buf.len())?;
+            let (data, point) = Self::object_fill_read(obj, page_off, page_buf.len())?;
             let n = data.len().min(page_buf.len());
             if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
                 dst.copy_from_slice(src);
             }
-            Ok(())
+            Ok(point)
         })?;
         if super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
             super::notify::emit(super::notify::FsEventType::Accessed, path, None);
@@ -5678,17 +5723,21 @@ impl Vfs {
     }
 
     /// [`object_read`](Self::object_read) straight from the filesystem, past
-    /// the page cache: the cache's own fill, for an `mmap` fault.
+    /// the page cache: the cache's own fill. With the bytes, the read's point
+    /// in the file's changes, taken under the filesystem's lock with the read
+    /// ([`crate::mm::page_cache::read_point`]).
     ///
     /// # Errors
     ///
     /// The filesystem's own.
-    pub fn object_read_uncached(
+    pub fn object_fill_read(
         obj: &FileObject,
         offset: u64,
         len: usize,
-    ) -> KernelResult<Vec<u8>> {
-        obj.fs.lock().read_ino(obj.ino, offset, len)
+    ) -> KernelResult<(Vec<u8>, crate::mm::page_cache::ReadPoint)> {
+        let mut guard = obj.fs.lock();
+        let data = guard.read_ino(obj.ino, offset, len)?;
+        Ok((data, crate::mm::page_cache::read_point(obj.id())))
     }
 
     /// Write through an object at `offset`.
@@ -5715,10 +5764,15 @@ impl Vfs {
             if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
                 super::sealing::may_write(seals, offset, data.len() as u64, meta.size)?;
             }
+            let old_size = object_old_size(&mut guard, obj)?;
             guard.write_ino(obj.ino, offset, data)?;
             Self::object_changed(
                 obj,
-                crate::mm::page_cache::FileChange::Written { offset, data },
+                crate::mm::page_cache::FileChange::Written {
+                    offset,
+                    data,
+                    old_size,
+                },
             )
         };
         Self::object_written(path, data.len(), after);
@@ -5765,7 +5819,12 @@ impl Vfs {
             let at = guard.append_ino(obj.ino, data)?;
             let after = Self::object_changed(
                 obj,
-                crate::mm::page_cache::FileChange::Written { offset: at, data },
+                // The write landed at the old end.
+                crate::mm::page_cache::FileChange::Written {
+                    offset: at,
+                    data,
+                    old_size: Some(at),
+                },
             );
             (at, after)
         };
@@ -5787,8 +5846,12 @@ impl Vfs {
             if let Some((seals, meta)) = seals_held(&mut **guard, obj) {
                 super::sealing::may_resize(seals, meta.size, size)?;
             }
+            let old_size = object_old_size(&mut guard, obj)?;
             guard.truncate_ino(obj.ino, size)?;
-            Self::object_changed(obj, crate::mm::page_cache::FileChange::Resized { size })
+            Self::object_changed(
+                obj,
+                crate::mm::page_cache::FileChange::Resized { size, old_size },
+            )
         };
         after_cache_change(after);
         super::notify::emit_modified(path);
@@ -10705,14 +10768,39 @@ fn normalize_mount_path(p: &Path) -> PathBuf {
 /// hot paths pay almost nothing.  Returns `None` for `ino == 0` (no stable
 /// identity, never cacheable).
 fn cache_identity(fs: &mut Box<dyn FileSystem>, fs_id: u64, relative: &Path) -> Option<(u64, u64)> {
+    cache_identity_sized(fs, fs_id, relative).map(|(id, _)| id)
+}
+
+/// [`cache_identity`], with the file's length: asked before a change, that is
+/// the change's `old_size` (`page_cache::FileChange`), at no cost beyond the
+/// look-up the identity needs anyway.
+fn cache_identity_sized(
+    fs: &mut Box<dyn FileSystem>,
+    fs_id: u64,
+    relative: &Path,
+) -> Option<((u64, u64), u64)> {
     if !crate::mm::page_cache::is_populated() {
         return None;
     }
-    let ino = fs.metadata(relative).ok()?.ino;
-    if ino == 0 {
+    let meta = fs.metadata(relative).ok()?;
+    if meta.ino == 0 {
         return None;
     }
-    Some((fs_id, ino))
+    Some(((fs_id, meta.ino), meta.size))
+}
+
+/// The length of the file `obj` holds before a change to it, for the
+/// change's `old_size` (`page_cache::FileChange`): read only when the cache
+/// keeps the file's pages in place, which is when it needs it.
+///
+/// # Errors
+///
+/// The filesystem's, reading the length.
+fn object_old_size(fs: &mut Box<dyn FileSystem>, obj: &FileObject) -> KernelResult<Option<u64>> {
+    if !crate::mm::page_cache::keeps_pages_in_place(obj.fs_id, obj.ino) {
+        return Ok(None);
+    }
+    Ok(Some(fs.metadata_ino(obj.ino)?.size))
 }
 
 /// Tell the page cache how the file `id` names ([`cache_identity`]) changed

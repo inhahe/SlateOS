@@ -140,6 +140,13 @@ struct FileState {
     /// that finds the count moved since it began read bytes a change
     /// replaced, and reads again.
     changes: u64,
+    /// The changes among [`changes`](Self::changes) that set the file's
+    /// length ([`FileChange::Resized`], [`FileChange::Replaced`]) or dropped
+    /// its pages ([`FileChange::Dropped`]). A shared mapping's fault that
+    /// read the file's length before one of them may be about to map a page
+    /// the file no longer reaches, and maps nothing if the count moved
+    /// ([`cuts`]).
+    cuts: u64,
     /// The shared mappings among [`shared_maps`](Self::shared_maps) whose
     /// handle may write: those that are, or may be made, writable.
     writable_maps: u32,
@@ -349,9 +356,13 @@ pub fn lookup(file: FileId, file_offset: u64) -> KernelResult<Option<PhysFrame>>
 /// semantics), inserted, and returned with the caller's reference; racing CPUs
 /// are resolved so only one frame survives per key.
 ///
-/// `fill` receives the full `FRAME_SIZE`-byte, already-zeroed page buffer. It
-/// runs again, into a fresh buffer, when the file changed while it read
-/// ([`file_changed`]): what it read may be what the change replaced.
+/// `fill` receives the full `FRAME_SIZE`-byte, already-zeroed page buffer,
+/// and answers the [`ReadPoint`] its read of the file was at. It runs again,
+/// into a fresh buffer, when the file changed after that point
+/// ([`file_changed`]): what it read may be what the change replaced. A change
+/// before the point -- one the fill waited behind for the filesystem's lock
+/// -- is in what it read, and costs no second read, so a file written without
+/// pause still has its pages filled.
 ///
 /// The caller owns one reference: map the frame (teardown then owns it) or call
 /// [`release`].
@@ -364,7 +375,7 @@ pub fn lookup(file: FileId, file_offset: u64) -> KernelResult<Option<PhysFrame>>
 /// - Frame-allocation / HHDM / reference-bump errors.
 pub fn get_or_fill<F>(file: FileId, file_offset: u64, mut fill: F) -> KernelResult<PhysFrame>
 where
-    F: FnMut(&mut [u8]) -> KernelResult<()>,
+    F: FnMut(&mut [u8]) -> KernelResult<ReadPoint>,
 {
     let key = key_for(file, file_offset)?;
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
@@ -372,9 +383,9 @@ where
     loop {
         // Fast path: already resident.  Bump under the cache lock (closes the
         // evict-vs-map race; eviction also locks the cache first).  On a
-        // miss, the fill is counted under the same hold, with the file's
-        // change count it starts from.
-        let seen = {
+        // miss, the fill is counted under the same hold: the file's state,
+        // and so its change count, is kept while a fill is in flight.
+        {
             let mut cache = PAGE_CACHE.lock();
             if let Some(entry) = cache.pages.get(&key) {
                 let frame = entry.frame;
@@ -386,20 +397,25 @@ where
             }
             let state = cache.file_mut(file);
             state.fills = state.fills.saturating_add(1);
-            state.changes
-        };
+        }
 
         STAT_MISSES.fetch_add(1, Ordering::Relaxed);
         let filled = fill_new_frame(hhdm, &mut fill);
 
         // Re-acquire, end this fill's count, and insert, resolving the races.
         let mut cache = PAGE_CACHE.lock();
-        let moved = cache.files.get(&file).is_none_or(|st| st.changes != seen);
+        let moved = match &filled {
+            Ok((_, point)) => cache
+                .files
+                .get(&file)
+                .is_none_or(|st| st.changes != point.0),
+            Err(_) => false,
+        };
         if let Some(state) = cache.files.get_mut(&file) {
             state.fills = state.fills.saturating_sub(1);
         }
         cache.forget_if_idle(file);
-        let new_frame = filled?;
+        let (new_frame, _) = filled?;
         if let Some(entry) = cache.pages.get(&key) {
             // Another CPU filled this page first; adopt theirs and discard ours.
             let winner = entry.frame;
@@ -443,11 +459,12 @@ where
     }
 }
 
-/// A fresh frame, zeroed, then filled by `fill`: refcount 1, published nowhere.
-/// The frame is freed again if `fill` fails.
-fn fill_new_frame<F>(hhdm: u64, fill: &mut F) -> KernelResult<PhysFrame>
+/// A fresh frame, zeroed, then filled by `fill`: refcount 1, published nowhere,
+/// with the point the fill read the file at. The frame is freed again if
+/// `fill` fails.
+fn fill_new_frame<F>(hhdm: u64, fill: &mut F) -> KernelResult<(PhysFrame, ReadPoint)>
 where
-    F: FnMut(&mut [u8]) -> KernelResult<()>,
+    F: FnMut(&mut [u8]) -> KernelResult<ReadPoint>,
 {
     // Allocated and filled with the cache lock dropped (alloc_frame is
     // expensive, and the fill reads the file; neither nests under the lock).
@@ -460,12 +477,38 @@ where
         core::ptr::write_bytes(ptr, 0, FRAME_SIZE);
         core::slice::from_raw_parts_mut(ptr, FRAME_SIZE)
     };
-    if let Err(e) = fill(buf) {
-        // SAFETY: just allocated (refcount 1), never mapped or shared.
-        let _ = unsafe { frame::free_frame(new_frame) };
-        return Err(e);
+    match fill(buf) {
+        Ok(point) => Ok((new_frame, point)),
+        Err(e) => {
+            // SAFETY: just allocated (refcount 1), never mapped or shared.
+            let _ = unsafe { frame::free_frame(new_frame) };
+            Err(e)
+        }
     }
-    Ok(new_frame)
+}
+
+/// Where in a file's changes a read of it was: the file's change count
+/// ([`FileState::changes`]) taken with the filesystem's lock held, beside the
+/// read. Every change is counted under that lock ([`file_changed`]), so the
+/// count moves past the point exactly when the file changed after the read.
+/// What a fill answers ([`get_or_fill`]); made only by [`read_point`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[must_use]
+pub struct ReadPoint(u64);
+
+/// The [`ReadPoint`] of a read of `file` just made: call it with the
+/// filesystem's lock still held from the read (the cache's lock nests under
+/// it, as in [`file_changed`]). Taken after the lock is let go, a change in
+/// between would be counted as read, and the fill keep the bytes it
+/// replaced.
+pub fn read_point(file: FileId) -> ReadPoint {
+    ReadPoint(
+        PAGE_CACHE
+            .lock()
+            .files
+            .get(&file)
+            .map_or(0, |st| st.changes),
+    )
 }
 
 /// Copy `dest.len()` bytes starting at byte offset `file_offset` of `file` out
@@ -481,7 +524,8 @@ where
 /// page, `fill_page(page_file_off, page_buf)` is invoked **only on a cache
 /// miss**, where `page_file_off` is the frame-aligned start of that page and
 /// `page_buf` is the full, already-zeroed `FRAME_SIZE`-byte page buffer (a short
-/// fill past EOF leaves the tail zero, matching demand-paging semantics).
+/// fill past EOF leaves the tail zero, matching demand-paging semantics). It
+/// answers its read's [`ReadPoint`], as [`get_or_fill`]'s fill does.
 ///
 /// The caller is responsible for clamping `dest.len()` to the bytes that
 /// actually exist in the file (this routine zero-extends past EOF, like the
@@ -504,7 +548,7 @@ pub fn read_through<F>(
     fill_page: F,
 ) -> KernelResult<()>
 where
-    F: Fn(u64, &mut [u8]) -> KernelResult<()>,
+    F: Fn(u64, &mut [u8]) -> KernelResult<ReadPoint>,
 {
     if dest.is_empty() {
         return Ok(());
@@ -952,6 +996,19 @@ pub fn shared_mapped_files() -> usize {
         .count()
 }
 
+/// How many times `file`'s length has been set, or its pages dropped, while
+/// the cache kept state about it ([`FileState::cuts`]); 0 for a file it
+/// keeps none about. A shared mapping's fault reads it before the file's
+/// length and again under the address space's page-table lock, before it
+/// maps: a cut in between may have left the page past the file's new end,
+/// and the unmapping the cut owes (`pcb::unmap_file_from`) may have passed
+/// the address already. Cuts are rare, so unlike [`ReadPoint`]'s count,
+/// a file written without pause does not make the fault start over.
+#[must_use]
+pub fn cuts(file: FileId) -> u64 {
+    PAGE_CACHE.lock().files.get(&file).map_or(0, |st| st.cuts)
+}
+
 /// How many files the cache keeps state about ([`FileState`]): what a test
 /// compares before and after a program that maps files shared, since state
 /// never dropped -- a mapping's count, a writer -- keeps a file's pages in
@@ -962,6 +1019,13 @@ pub fn tracked_files() -> usize {
 }
 
 /// How a file's bytes changed, for [`file_changed`].
+///
+/// `old_size`, where a change has one, is the file's length just before it,
+/// read under the same hold of the filesystem's lock; `None` when the caller
+/// did not read it, which it need not when [`keeps_pages_in_place`] is false.
+/// A file that grows reads zeros from its old end, but a shared mapping may
+/// have stored past that end in the last page (those bytes are never saved):
+/// with the old length, the cache zeroes them as the file grows over them.
 #[derive(Clone, Copy, Debug)]
 pub enum FileChange<'a> {
     /// `data` was written at byte `offset`.
@@ -970,11 +1034,15 @@ pub enum FileChange<'a> {
         offset: u64,
         /// What it wrote.
         data: &'a [u8],
+        /// The file's length before the write.
+        old_size: Option<u64>,
     },
     /// The file was cut, or extended, to `size` bytes.
     Resized {
         /// Its length now.
         size: u64,
+        /// Its length before.
+        old_size: Option<u64>,
     },
     /// The whole file now holds `data` and nothing more.
     Replaced {
@@ -1018,8 +1086,9 @@ pub enum AfterChange {
 /// holds. One with either keeps them --
 /// the mappings map those frames, and a dropped page would stay mapped,
 /// showing old bytes -- and they are changed to match: a write's bytes are
-/// copied into each cached page it covers; a resize drops the pages wholly
-/// past the new end and zeroes the rest of the last one; an unlink leaves
+/// copied into each cached page it covers; a cut drops the pages wholly past
+/// the new end and zeroes the rest of the last one; growth zeroes the rest of
+/// the page the old end was in (see [`FileChange`]); an unlink leaves
 /// them, the mappings' holds keeping the file. Either way the file's change
 /// count moves, so a fill reading the file meanwhile reads again.
 ///
@@ -1041,6 +1110,12 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
         let (shared, writable) = match cache.files.get_mut(&file) {
             Some(state) => {
                 state.changes = state.changes.wrapping_add(1);
+                if matches!(
+                    change,
+                    FileChange::Resized { .. } | FileChange::Replaced { .. } | FileChange::Dropped
+                ) {
+                    state.cuts = state.cuts.wrapping_add(1);
+                }
                 // A writer outliving the last writable mapping is one whose
                 // save failed: the pages it left dirty are kept, and changed
                 // in place, as a mapped file's are, for the next writeback
@@ -1057,10 +1132,28 @@ pub fn file_changed(fs_id: u64, ino: u64, change: FileChange<'_>) -> AfterChange
             FileChange::Dropped => cache.take_file_pages(file, &mut dropped),
             _ if !shared => cache.take_file_pages(file, &mut dropped),
             FileChange::Unlinked => {}
-            FileChange::Written { offset, data } => {
+            FileChange::Written {
+                offset,
+                data,
+                old_size,
+            } => {
+                // Zeroed first, so the write's own bytes land over the zeros.
+                if let Some(old) = old_size
+                    && offset.saturating_add(data.len() as u64) > old
+                {
+                    zero_past_end(&mut cache, file, old, &mut updates);
+                }
                 collect_writes(&mut cache, file, offset, data, writable, &mut updates);
             }
-            FileChange::Resized { size } => {
+            FileChange::Resized {
+                size,
+                old_size: Some(old),
+            } if size >= old => {
+                // Grown: nothing to drop or unmap, only what a mapping stored
+                // past the old end to clear.
+                zero_past_end(&mut cache, file, old, &mut updates);
+            }
+            FileChange::Resized { size, .. } => {
                 after = resize_in_place(&mut cache, file, size, &mut dropped, &mut updates);
             }
             FileChange::Replaced { data } => {
@@ -1129,10 +1222,12 @@ fn collect_writes<'a>(
             file,
             page_index: at.checked_div(size).unwrap_or(0),
         };
-        if let (Some(entry), Some(bytes)) = (
-            cache.pages.get_mut(&key),
-            data.get(done..done.saturating_add(len)),
-        )
+        // `done + len <= data.len()` by `len`'s definition: a slice that
+        // fails says the arithmetic is wrong, and nothing after it is right.
+        let Some(bytes) = data.get(done..done.saturating_add(len)) else {
+            return;
+        };
+        if let Some(entry) = cache.pages.get_mut(&key)
             // SAFETY: resident entry ⇒ allocated frame; cache lock held.
             && unsafe { frame::ref_inc(entry.frame) }.is_ok()
         {
@@ -1143,6 +1238,51 @@ fn collect_writes<'a>(
         }
         done = done.saturating_add(len);
     }
+}
+
+/// For `file`, about to grow past `old`, its length: note the rest of the
+/// page holding byte `old`, if that page is resident, to be zeroed (into
+/// `updates`). It lies past the end, where a shared mapping's stores are
+/// never saved, and the file grows over it reading zeros. Pages wholly past
+/// `old` hold nothing to clear: a mapping cannot reach them (`SIGBUS`), and
+/// a fill past the end fills zeros.
+fn zero_past_end(
+    cache: &mut CacheState,
+    file: FileId,
+    old: u64,
+    updates: &mut alloc::vec::Vec<(PhysFrame, usize, usize, Option<&[u8]>)>,
+) {
+    let page = FRAME_SIZE as u64;
+    let tail = (old & page.wrapping_sub(1)) as usize;
+    if tail == 0 {
+        return;
+    }
+    let key = PageKey {
+        file,
+        page_index: old.checked_div(page).unwrap_or(0),
+    };
+    if let Some(entry) = cache.pages.get(&key)
+        // SAFETY: resident entry ⇒ allocated frame; cache lock held.
+        && unsafe { frame::ref_inc(entry.frame) }.is_ok()
+    {
+        updates.push((entry.frame, tail, FRAME_SIZE.saturating_sub(tail), None));
+    }
+}
+
+/// Whether a change to file `(fs_id, ino)` keeps its cached pages, changing
+/// them in place ([`file_changed`]): it has a shared mapping, or a writer
+/// kept for pages a save left dirty. A caller of [`file_changed`] that would
+/// have to read the file's length for a change's `old_size` asks this first.
+#[must_use]
+pub fn keeps_pages_in_place(fs_id: u64, ino: u64) -> bool {
+    if ino == 0 || !is_populated() {
+        return false;
+    }
+    PAGE_CACHE
+        .lock()
+        .files
+        .get(&FileId { fs_id, ino })
+        .is_some_and(|st| st.shared_maps > 0 || st.writer.is_some())
 }
 
 /// For `file`, now `size` bytes long: take its pages wholly past the end out
@@ -1334,7 +1474,7 @@ pub fn self_test() -> KernelResult<()> {
                 *b1 = 0xCD;
                 *last = 0xEF; // whole-page fill marker
             }
-            Ok(())
+            Ok(read_point(file_a))
         })?;
         if fill_calls != 1 {
             serial_println!("[page_cache]   FAIL: expected 1 fill, got {fill_calls}");
@@ -1353,7 +1493,7 @@ pub fn self_test() -> KernelResult<()> {
         // (2) Hit: same frame, no new fill, refcount 3 (cache + two callers).
         let f1 = get_or_fill(file_a, 0, |_buf| {
             fill_calls = fill_calls.saturating_add(1); // must NOT run on a hit
-            Ok(())
+            Ok(read_point(file_a))
         })?;
         if fill_calls != 1 {
             serial_println!("[page_cache]   FAIL: hit re-filled the page");
@@ -1374,7 +1514,7 @@ pub fn self_test() -> KernelResult<()> {
             if let [b0, ..] = buf {
                 *b0 = 0x11;
             }
-            Ok(())
+            Ok(read_point(file_a))
         })?;
         if f2 == f0 {
             serial_println!("[page_cache]   FAIL: distinct page shares a frame");
@@ -1412,7 +1552,7 @@ pub fn self_test() -> KernelResult<()> {
             if let [b0, ..] = buf {
                 *b0 = 0x22;
             }
-            Ok(())
+            Ok(read_point(file_b))
         })?;
         if try_evict(file_b, 0) {
             serial_println!("[page_cache]   FAIL: try_evict evicted a referenced page");
@@ -1451,7 +1591,7 @@ pub fn self_test() -> KernelResult<()> {
             if let [b0, ..] = buf {
                 *b0 = 0x33;
             }
-            Ok(())
+            Ok(read_point(file_c))
         })?;
         if !is_populated() {
             serial_println!("[page_cache]   FAIL: is_populated false with a resident page");
@@ -1464,6 +1604,7 @@ pub fn self_test() -> KernelResult<()> {
             FileChange::Written {
                 offset: 0,
                 data: b"x",
+                old_size: None,
             },
         );
         if is_resident(file_c, 0) {
@@ -1480,14 +1621,14 @@ pub fn self_test() -> KernelResult<()> {
             if let [b0, ..] = buf {
                 *b0 = 0x44;
             }
-            Ok(())
+            Ok(read_point(file_d))
         })?;
         release(idle); // now cache holds the sole reference (idle)
         let live = get_or_fill(file_d, FRAME_SIZE as u64, |buf| {
             if let [b0, ..] = buf {
                 *b0 = 0x55;
             }
-            Ok(())
+            Ok(read_point(file_d))
         })?; // caller reference retained ⇒ refcount 2 (a "mapped" page)
         let freed = shrink(crate::mm::pressure::PressureLevel::Critical);
         if freed == 0 {
@@ -1511,7 +1652,9 @@ pub fn self_test() -> KernelResult<()> {
             "[page_cache]   a shared-mapped file's pages change in place, and stop when unshared: OK"
         );
         fill_racing_a_change(file_f)?;
-        serial_println!("[page_cache]   a fill that raced a change reads again: OK");
+        serial_println!(
+            "[page_cache]   a fill reads again for a change after its read, not one before: OK"
+        );
 
         Ok(())
     })();
@@ -1587,7 +1730,7 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
         let fill_byte = 0xA0u8.saturating_add(i as u8);
         match get_or_fill(file, (i as u64).saturating_mul(page), |buf| {
             buf.fill(fill_byte);
-            Ok(())
+            Ok(read_point(file))
         }) {
             Ok(f) => *slot = Some(f),
             Err(e) => result = Err(e),
@@ -1601,6 +1744,7 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
                 FileChange::Written {
                     offset: page.saturating_sub(2),
                     data: b"wxyz",
+                    old_size: None,
                 },
             );
             let in_place = after == AfterChange::Done
@@ -1617,6 +1761,7 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
                 file.ino,
                 FileChange::Resized {
                     size: page.saturating_add(10),
+                    old_size: None,
                 },
             );
             let cut = after
@@ -1634,6 +1779,47 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
                     "a cut of a shared-mapped file did not drop, zero and ask to unmap",
                 );
             }
+            // Stores a mapping made past the end (never saved): growth over
+            // them must read zeros, by a write past a gap and by a resize.
+            let poke = |at: usize| {
+                if at < FRAME_SIZE {
+                    // SAFETY: `f1` is a frame we hold a reference on, `at` is
+                    // inside its HHDM alias of FRAME_SIZE bytes.
+                    unsafe {
+                        core::ptr::write_volatile((f1.to_virt(hhdm) as *mut u8).add(at), 0x77);
+                    }
+                }
+            };
+            poke(20);
+            poke(30);
+            let after = file_changed(
+                file.fs_id,
+                file.ino,
+                FileChange::Written {
+                    offset: page.saturating_add(40),
+                    data: b"g",
+                    old_size: Some(page.saturating_add(10)),
+                },
+            );
+            let written = after == AfterChange::Done
+                && byte(f1, 20) == 0
+                && byte(f1, 30) == 0
+                && byte(f1, 40) == b'g';
+            poke(60);
+            let after = file_changed(
+                file.fs_id,
+                file.ino,
+                FileChange::Resized {
+                    size: page.saturating_add(100),
+                    old_size: Some(page.saturating_add(41)),
+                },
+            );
+            let grown = after == AfterChange::Done && byte(f1, 60) == 0 && byte(f1, 40) == b'g';
+            if !written || !grown {
+                return test_fail(
+                    "growing a shared-mapped file kept what a mapping stored past its old end",
+                );
+            }
             let after = file_changed(file.fs_id, file.ino, FileChange::Unlinked);
             if after != AfterChange::Done || !is_resident(file, 0) {
                 return test_fail("an unlink dropped a shared-mapped file's pages");
@@ -1645,6 +1831,7 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
                 FileChange::Written {
                     offset: 0,
                     data: b"q",
+                    old_size: None,
                 },
             );
             if is_resident(file, 0) || is_resident(file, page) || byte(f0, 0) != 0xA0 {
@@ -1661,36 +1848,58 @@ fn shared_file_changes(file: FileId, hhdm: u64) -> KernelResult<()> {
     result
 }
 
-/// For [`self_test`]: a fill during which the file changes reads it again,
-/// and what it inserts is the second read.
+/// For [`self_test`]: a fill whose read the file changed after reads it
+/// again, and what it inserts is the second read; one the file changed
+/// before -- while it waited for the filesystem's lock -- reads once, and
+/// inserts that.
 fn fill_racing_a_change(file: FileId) -> KernelResult<()> {
-    let mut calls = 0u32;
-    let frame = get_or_fill(file, 0, |buf| {
-        calls = calls.saturating_add(1);
-        let first = calls == 1;
-        if first {
-            // A write landing while this fill reads the file.
-            let _ = file_changed(
-                file.fs_id,
-                file.ino,
-                FileChange::Written {
-                    offset: 0,
-                    data: b"n",
-                },
-            );
-        }
-        if let Some(b) = buf.first_mut() {
-            *b = if first { b'o' } else { b'n' };
-        }
-        Ok(())
-    })?;
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
-    // SAFETY: a frame we hold a reference on; byte 0 of its HHDM alias.
-    let got = unsafe { core::ptr::read_volatile(frame.to_virt(hhdm) as *const u8) };
-    release(frame);
-    let _ = invalidate_file(file);
-    if calls != 2 || got != b'n' {
+    let write_n = || {
+        let _ = file_changed(
+            file.fs_id,
+            file.ino,
+            FileChange::Written {
+                offset: 0,
+                data: b"n",
+                old_size: None,
+            },
+        );
+    };
+    // Each run: how many reads the fill made, and the byte it inserted.
+    let run = |change_before_read: bool| -> KernelResult<(u32, u8)> {
+        let mut calls = 0u32;
+        let frame = get_or_fill(file, 0, |buf| {
+            calls = calls.saturating_add(1);
+            let first = calls == 1;
+            if first && change_before_read {
+                write_n();
+            }
+            // The read, and its point, with the "filesystem's lock" held.
+            if let Some(b) = buf.first_mut() {
+                *b = if first && !change_before_read {
+                    b'o'
+                } else {
+                    b'n'
+                };
+            }
+            let point = read_point(file);
+            if first && !change_before_read {
+                // A write landing after the read, before the insert.
+                write_n();
+            }
+            Ok(point)
+        })?;
+        // SAFETY: a frame we hold a reference on; byte 0 of its HHDM alias.
+        let got = unsafe { core::ptr::read_volatile(frame.to_virt(hhdm) as *const u8) };
+        release(frame);
+        let _ = invalidate_file(file);
+        Ok((calls, got))
+    };
+    if run(false)? != (2, b'n') {
         return test_fail("a fill that raced a change kept what it read before the change");
+    }
+    if run(true)? != (1, b'n') {
+        return test_fail("a fill read again for a change it had read");
     }
     Ok(())
 }

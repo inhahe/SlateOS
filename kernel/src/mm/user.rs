@@ -1388,6 +1388,14 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
     let mut unmapped = 0usize;
     let mut va = start & !(hw.wrapping_sub(1));
     while va < end {
+        // Each page's clearing and the look at its siblings run under the
+        // address space's page-table lock, as a fault's install does
+        // (`mm::as_lock`): a fault mapping a sibling part into the same
+        // frame decides whether it needs a reference of its own by that
+        // look (`pcb::resolve_file_shared`), so the two must not interleave,
+        // or the frame is mapped with no reference held for it. Per page, so
+        // a large unmap does not hold the lock throughout.
+        let held = crate::mm::as_lock::lock(pml4);
         // SAFETY: `pml4` is the caller's live page table and `va` is below
         // USER_SPACE_END (clamped above), so this never touches the shared
         // kernel half.  `unmap_4k` reports an absent page as `Err`.  The TLB
@@ -1431,6 +1439,7 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
                 unmapped = unmapped.saturating_add(1);
             }
         }
+        drop(held);
         va = match va.checked_add(hw) {
             Some(next) => next,
             None => break,

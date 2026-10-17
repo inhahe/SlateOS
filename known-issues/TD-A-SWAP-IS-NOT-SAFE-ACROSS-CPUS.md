@@ -19,7 +19,12 @@ seen in a boot test.
   (`pcb::remove_vma_range`). A fault between the two finds the VMA still
   there and populates the range being unmapped: the frame stays mapped with
   no VMA, and leaks until teardown. Linux holds `mmap_lock` across the
-  whole fault, slow half included, and munmap takes it for writing.
+  whole fault, slow half included, and munmap takes it for writing. Since
+  2026-10-16 `unmap_user_range` clears each page under the page-table lock
+  (`mm::as_lock`), so an unmap's clearing and a fault's install no longer
+  interleave inside one frame (a shared file fault decides whether it needs
+  a reference of its own by looking at the frame's other parts); that does
+  not order the VMA's removal against a fault, which is what leaks.
 - **Two first faults on one straddling frame** (a 16 KiB frame whose 4 KiB
   parts belong to two VMAs: `pcb::resolve_subpaged_fault`) can each
   allocate a frame and back different parts with different frames. The

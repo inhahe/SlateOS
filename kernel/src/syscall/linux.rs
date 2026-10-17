@@ -14302,9 +14302,12 @@ fn linux_file_mmap(
     // file (§1572). One of a file without a stable identity is served as the
     // private copy it always was: such a file has no cache to share.
     let shared_file = if shared && matches!(entry.kind, HandleKind::File) {
-        crate::fs::handle::held_identity(entry.raw_handle)
-            .ok()
-            .flatten()
+        // A handle the table no longer has is the descriptor's error, not a
+        // reason to serve a private copy that never sees the file change.
+        match crate::fs::handle::held_identity(entry.raw_handle) {
+            Ok(id) => id,
+            Err(_) => return linux_err(errno::EBADF),
+        }
     } else {
         None
     };

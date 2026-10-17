@@ -1339,14 +1339,13 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
     Ok(copy_len)
 }
 
-/// Read up to `buf.len()` bytes at an explicit `offset` **directly from the
-/// backing filesystem**, bypassing the page cache.
-///
-/// Identical to [`read_at`] except it routes through
-/// [`crate::fs::Vfs::read_at_uncached`].  Used by the `mmap` fault path's
-/// page-cache fill closure, which must read a file's data *without* re-entering
-/// [`crate::mm::page_cache::get_or_fill`] — calling the cached [`read_at`] there
-/// would recurse on the very page being filled (design-decisions §38).
+/// Fill `buf` with the bytes at `offset` of `file`, the file `handle` holds,
+/// **directly from the backing filesystem**, past the page cache: a
+/// page-cache fill (`mm::page_cache::get_or_fill`) for an `mmap` fault, which
+/// must not re-enter the cache -- the cached [`read_at`] would recurse on the
+/// very page being filled (design-decisions §38). Bytes past the end of the
+/// file are left as they are. Answers the read's point in the file's changes,
+/// taken under the filesystem's lock with the read.
 ///
 /// # Errors
 ///
@@ -1354,7 +1353,12 @@ pub fn read_at(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> 
 /// - [`KernelError::IsADirectory`] — `handle` refers to a directory.
 /// - [`KernelError::InvalidHandle`] — handle was not opened for reading.
 /// - VFS errors propagated unchanged.
-pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResult<usize> {
+pub fn fill_read(
+    handle: u64,
+    file: crate::fs::vfs::FileId,
+    offset: u64,
+    buf: &mut [u8],
+) -> KernelResult<crate::mm::page_cache::ReadPoint> {
     let (object, path) = {
         let table = OPEN_FILES.lock();
         let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
@@ -1368,20 +1372,20 @@ pub fn read_at_uncached(handle: u64, offset: u64, buf: &mut [u8]) -> KernelResul
     };
     let (path, binding) = path;
     if buf.is_empty() || !binding_holds(binding, &path) {
-        return Ok(0);
+        // Nothing to read through it: the page stays zeros, as a read through
+        // the handle finds the file empty.
+        return Ok(crate::mm::page_cache::read_point(file));
     }
     // Past the end, the filesystem itself returns nothing.
-    let data = match &object {
-        Some(obj) => crate::fs::Vfs::object_read_uncached(obj, offset, buf.len())?,
-        None => crate::fs::Vfs::read_at_uncached_resolved(&path, offset, buf.len())?,
+    let (data, point) = match &object {
+        Some(obj) => crate::fs::Vfs::object_fill_read(obj, offset, buf.len())?,
+        None => crate::fs::Vfs::fill_read_resolved(&path, file, offset, buf.len())?,
     };
     let copy_len = data.len().min(buf.len());
-    if let Some(dest) = buf.get_mut(..copy_len) {
-        if let Some(src) = data.get(..copy_len) {
-            dest.copy_from_slice(src);
-        }
+    if let (Some(dest), Some(src)) = (buf.get_mut(..copy_len), data.get(..copy_len)) {
+        dest.copy_from_slice(src);
     }
-    Ok(copy_len)
+    Ok(point)
 }
 
 /// Write bytes at an explicit `offset`, **without** modifying the

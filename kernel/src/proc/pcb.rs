@@ -7966,7 +7966,9 @@ struct SharedFault {
 ///
 /// A part at or past the file's end is left unmapped; when it is the faulting
 /// one, `note` becomes [`FaultNote::BeyondEnd`] (`SIGBUS`). True when the
-/// faulting part is mapped now, by this call or another CPU's.
+/// access may run again: the faulting part is mapped now, by this call or
+/// another CPU's, or the file's length was set while this call ran, and the
+/// access's next fault reads it afresh.
 fn resolve_file_shared(
     pml4_phys: u64,
     frame_base: u64,
@@ -7983,6 +7985,9 @@ fn resolve_file_shared(
     if !crate::fs::handle::open_flags(fault.handle).is_ok_and(|f| f.is_readable()) {
         return false;
     }
+    // Before the length: a cut after this is seen under the page-table lock
+    // below, where the cut's unmapping cannot pass the install.
+    let cuts = crate::mm::page_cache::cuts(fault.file_id);
     let Ok(size) = crate::fs::handle::fstat(fault.handle).map(|m| m.size) else {
         return false;
     };
@@ -8019,15 +8024,26 @@ fn resolve_file_shared(
         let in_page = fo & frame_mask;
         let handle = fault.handle;
         let Ok(frame) = crate::mm::page_cache::get_or_fill(fault.file_id, page_off, |buf| {
-            crate::fs::handle::read_at_uncached(handle, page_off, buf).map(|_| ())
+            crate::fs::handle::fill_read(handle, fault.file_id, page_off, buf)
         }) else {
             return faulting_mapped;
         };
         // Under the address space's page-table lock: whether this virtual
         // frame maps into `frame` already, and the mapping, must be one step,
-        // or two CPUs mapping parts of it at once would each keep a reference.
+        // or two CPUs mapping parts of it at once would each keep a reference
+        // (and an unmap clearing a sibling meanwhile would take the one this
+        // part relies on: `unmap_user_range` looks under the same lock).
         let (mapped, held_already) = {
-            let _held = crate::mm::as_lock::lock(pml4_phys);
+            let held = crate::mm::as_lock::lock(pml4_phys);
+            if crate::mm::page_cache::cuts(fault.file_id) != cuts {
+                // The file's length was set since it was read: this part may
+                // be past its end now, and the cut's unmapping
+                // (`unmap_file_from`) past this address. Map nothing; the
+                // access runs again and its fault reads the length afresh.
+                drop(held);
+                crate::mm::page_cache::release(frame);
+                return true;
+            }
             let held_already = (0..HW_PAGES_PER_FRAME).any(|j| {
                 let sibling = frame_base.saturating_add((j as u64).saturating_mul(hw));
                 page_table::translate(pml4_phys, VirtAddr::new(sibling))
@@ -8113,7 +8129,7 @@ fn resolve_file_cached(
 
     // The mapping's handle must be one that may read the file. `mmap` checks
     // this (EACCES), but the cache below runs the fill -- and with it
-    // `read_at_uncached`'s own check -- only on a miss: a page another process
+    // `fill_read`'s own check -- only on a miss: a page another process
     // had cached would otherwise be handed to a mapping of a write-only
     // handle. Checked here too, so no path round `mmap` can do that.
     if !crate::fs::handle::open_flags(handle).is_ok_and(|f| f.is_readable()) {
@@ -8126,7 +8142,7 @@ fn resolve_file_cached(
     // Fill via the *uncached* read so we don't re-enter the page cache for the
     // very page we're filling (read_at now routes through get_or_fill — §38).
     let phys_frame = match crate::mm::page_cache::get_or_fill(file_id, page_file_off, |buf| {
-        crate::fs::handle::read_at_uncached(handle, page_file_off, buf).map(|_| ())
+        crate::fs::handle::fill_read(handle, file_id, page_file_off, buf)
     }) {
         Ok(f) => f,
         Err(_) => return false,

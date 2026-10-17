@@ -273,14 +273,26 @@ impl Directory {
                 let e = last_errno();
                 return if e == 0 { None } else { Some(Err(e)) };
             }
+            // A pointer to the name, not a reference to `d_name`: glibc's
+            // record is only `d_reclen` long, and may end -- near the end
+            // of its buffer -- well short of the 256 bytes the field
+            // declares, which a reference would claim.
             // SAFETY: a non-null result points at an entry that stays valid
-            // until the next `readdir` on this stream; its name is
-            // NUL-terminated within `d_name`, and is copied out at once.
-            let name = unsafe { &(*entry).d_name };
-            let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            // until the next `readdir` on this stream; taking a field's
+            // address reads nothing.
+            let name = unsafe { &raw const (*entry).d_name }.cast::<u8>();
+            let mut len = 0;
+            while let Some(slot) = buf.get_mut(len) {
+                // SAFETY: the name is NUL-terminated within the record, and
+                // every byte up to its NUL is read here, none past it.
+                let b = unsafe { name.add(len).read() };
+                if b == 0 {
+                    break;
+                }
+                *slot = b;
+                len += 1;
+            }
             let (dst, _) = buf.split_at_mut(len);
-            let (src, _) = name.split_at(len);
-            dst.copy_from_slice(src);
             Some(Ok(dst))
         }
         #[cfg(not(unix))]

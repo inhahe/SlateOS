@@ -415,8 +415,11 @@ def log(outcome: str, label: str, started: float, reason: str = "") -> None:
     path = os.environ.get("GATE_CACHE_LOG")
     if not path:
         return
-    detail = " ".join(reason.split())[:LOG_REASON_WIDTH]
-    kind = reason_kind(detail) if detail else ""
+    # Classified whole: a long path cut short would lose the tail the
+    # patterns anchor on, and count as "other".
+    whole = " ".join(reason.split())
+    detail = whole[:LOG_REASON_WIDTH]
+    kind = reason_kind(whole) if whole else ""
     try:
         with open(path, "a", encoding="utf-8", newline="\n") as fh:
             fh.write(f"{label}\t{outcome}\t{time.monotonic() - started:.1f}\t{kind}\t{detail}\n")

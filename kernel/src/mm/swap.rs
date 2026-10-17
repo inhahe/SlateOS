@@ -1423,9 +1423,11 @@ pub fn register_reclaimable(pml4_phys: u64, vaddr: u64, flags: PageFlags) {
     state.active_count = state.active_count.saturating_add(1);
 }
 
-/// Victims in a row a reclaim pass may fail to keep for want of memory before
-/// it ends ([`try_reclaim`]).
-const SHORT_IN_A_ROW: u32 = 8;
+/// Victims a reclaim pass may fail to keep for want of memory, since the
+/// last it kept, before it ends ([`try_reclaim`]). Victims passed over for
+/// another reason (in use, refused as incompressible, not swappable) do not
+/// reset it: they say nothing of whether memory came back.
+const SHORT_SINCE_KEPT: u32 = 8;
 
 /// Unregister a page from the reclaimable set.
 ///
@@ -1737,11 +1739,11 @@ pub fn try_reclaim(target: usize) -> usize {
         crate::sysctl::get(crate::sysctl::PARAM_MM_SWAP_BATCH_SIZE).unwrap_or(4) as usize;
     let batch_size = if batch_size == 0 { 1 } else { batch_size };
     let mut batch_count = 0usize;
-    // Victims in a row that could not be kept for want of memory (or room):
-    // the pass goes on past a few, since the next may be one of zeros, kept
-    // in nothing, and ends at `SHORT_IN_A_ROW`, rather than compress every
-    // victim on the list for nothing while memory is short.
-    let mut short_in_a_row = 0u32;
+    // Victims that could not be kept for want of memory (or room) since the
+    // last one kept: the pass goes on past a few, since the next may be one
+    // of zeros, kept in nothing, and ends at `SHORT_SINCE_KEPT`, rather than
+    // compress every victim on the list for nothing while memory is short.
+    let mut short_since_kept = 0u32;
 
     // Now swap out each victim, yielding the CPU after each batch
     // to prevent swap I/O from monopolizing the CPU and making the
@@ -1754,7 +1756,7 @@ pub fn try_reclaim(target: usize) -> usize {
             Ok(_entry) => {
                 reclaimed += 1;
                 batch_count += 1;
-                short_in_a_row = 0;
+                short_since_kept = 0;
                 // Mark the entry inactive (it's now in swap, not memory). The
                 // guard ends here, before any yield below: a holder of RECLAIM
                 // must not be switched out, and its mark is its CPU's
@@ -1783,12 +1785,12 @@ pub fn try_reclaim(target: usize) -> usize {
             // on the list.
             Err(KernelError::WouldBlock) => {}
             // No memory to keep it with, or every area full (or none at all),
-            // or no scratch: it stays on the list, and after a few in a row
-            // the pass ends (`short_in_a_row`). Every area full is found
-            // before any work, so those few cost nothing.
+            // or no scratch: it stays on the list, and after a few since the
+            // last kept the pass ends (`short_since_kept`). Every area full is
+            // found before any work, so those few cost nothing.
             Err(KernelError::OutOfMemory) => {
-                short_in_a_row = short_in_a_row.saturating_add(1);
-                if short_in_a_row >= SHORT_IN_A_ROW {
+                short_since_kept = short_since_kept.saturating_add(1);
+                if short_since_kept >= SHORT_SINCE_KEPT {
                     break;
                 }
             }

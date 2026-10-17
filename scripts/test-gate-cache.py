@@ -698,6 +698,25 @@ def reason_kinds() -> None:
     got = {r: gc.reason_kind(r) for r in samples}
     check("each reason is counted under its kind", got, samples)
 
+    # A reason longer than a log row keeps is cut in the row, but counted
+    # whole: the patterns anchor on its end.
+    logf = os.path.join(tempfile.mkdtemp(), "gate-log")
+    long_path = os.path.join(tempfile.gettempdir(), "d" * 400, "x.py")
+    saved = os.environ.get("GATE_CACHE_LOG")
+    os.environ["GATE_CACHE_LOG"] = logf
+    try:
+        gc.log("MISS", "t", 0.0, f"{long_path} changed")
+    finally:
+        if saved is None:
+            os.environ.pop("GATE_CACHE_LOG", None)
+        else:
+            os.environ["GATE_CACHE_LOG"] = saved
+    with open(logf, encoding="utf-8") as fh:
+        row = fh.read().rstrip("\n").split("\t")
+    shutil.rmtree(os.path.dirname(logf), ignore_errors=True)
+    check("a reason longer than a log row is still counted under its kind",
+          (row[3], len(row[4]) == gc.LOG_REASON_WIDTH), ("a file it read changed", True))
+
 
 def _lookup_reason(fx: Fixture, entry: dict) -> str:
     """Ask the driver's own validate() about an entry, as a lookup would."""

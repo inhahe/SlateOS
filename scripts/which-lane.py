@@ -599,6 +599,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "basenc-diff.sh",
         "bashprobe.py",
         "bc-diff.sh",
+        "bc-tables.py",
         "blkdiscard-diff.sh",
         "blkid-cli-diff.sh",
         "blkid-diff.sh",

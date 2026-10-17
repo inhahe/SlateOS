@@ -33,7 +33,7 @@ two disagree.
 | `base64` | Encode or decode FILE, or standard input, to standard output. | yes | `coreutils` |  |
 | `basename` | Strip the directory and an optional suffix from a name. | yes | `coreutils` |  |
 | `basenc` | Encode or decode FILE, or standard input, to standard output. | yes | `coreutils` |  |
-| `bc` | Arbitrary-precision calculator | yes | `coreutils` |  |
+| `bc` | An arbitrary-precision calculator language: GNU bc 1.07.1, ported. | yes | `coreutils` |  |
 | `blkdiscard` | Discard the content of sectors on a device. | yes |  |  |
 | `blkid` | Locate and print block device attributes. | yes |  |  |
 | `blockdev` | Call block device ioctls from the command line. | yes |  |  |

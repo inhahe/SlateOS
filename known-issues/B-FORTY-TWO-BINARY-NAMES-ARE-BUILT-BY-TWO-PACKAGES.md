@@ -64,7 +64,9 @@ then a later `cargo build --workspace` quietly replaces the file.
 
 **The full list** as first filed (42 names; every one is `coreutils` vs a
 standalone `userspace/<name>`). `bc` is since resolved — one producer,
-`userspace/bc` — leaving **41**:
+`coreutils` (`bf06e2656` folded `userspace/bc` into it; since 2026-10-16 it
+is GNU bc's port, its interpreter the library `userspace/gnubc`) — leaving
+**41**:
 
 ```
 awk bc cal chown cmp comm cut date dd df diff du env expand fold free head

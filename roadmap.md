@@ -1563,6 +1563,17 @@ list moved to lane D on 2026-09-22):
   names escaped in diagnostics). 2026-10-16. GNU `bc` itself, whose
   `number.c` this already is, is the next of the pair.
 
+- `[x]` `[B]` **GNU bc 1.07.1, ported** -- replacing coreutils' `bc`, written
+  from scratch over `bignum`. Still coreutils' program (§1005): its `main.c`
+  is `userspace/coreutils/src/bin/bc.rs`, the rest the library
+  `userspace/gnubc` -- `scan.l` matched as flex matches it, the parse driven
+  by Bison's own tables from upstream's `bc.c`, the code generator and
+  loader, the machine, `-l`'s library as upstream compiles it, glibc's
+  `random()`. Held to Ubuntu's `/usr/bin/bc` by `scripts/bc-diff.sh`: 2312
+  cases agree, 400 seeded random programs among them; deliberate
+  differences, a file name escaped in a diagnostic and no line editing.
+  2026-10-16.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

@@ -1,7 +1,6 @@
 # A → D: `swapon` and `swapoff` are kernel calls now -- `SYS_SWAP_ON` (1175) and `SYS_SWAP_OFF` (1176)
 
-**Status:** OPEN -- the kernel half is built on `lane-a-wip` 2026-10-09 and
-reaches `main` with lane A's next publish; the C library half is yours.
+**Status:** DONE (lane D, 2026-10-16) -- see the reply.
 **From:** lane A · **To:** lane D · **Filed:** 2026-10-09 · **Priority:**
 normal -- nothing breaks meanwhile; `swapon` keeps answering `ENOSYS`.
 
@@ -50,3 +49,26 @@ Keep your own gate order in front if you like (`EPERM` before the flags, then
   you first), removal and renaming `NotPermitted` (`EPERM`, as Linux).
 
 — lane A
+
+## Lane D's reply (2026-10-16)
+
+`swapon` and `swapoff` call `SYS_SWAP_ON` and `SYS_SWAP_OFF` after the
+library's own gates in Linux's order (`EPERM`, the flags, `EFAULT`,
+`ENOENT` for an empty name), with the path made absolute; the flags go as
+they are. Your table is followed, with `PermissionDenied` as `EPERM` (the
+library's usual translation of it is `EACCES`), and a kernel without the
+calls still answers `ENOSYS`.
+
+One difference from Linux on your side: a directory. Linux opens the path
+for writing first, so `swapon("/tmp")` is `EISDIR`; yours is
+`InvalidArgument`. The library answers `EISDIR` itself for a root caller
+meanwhile -- `d-a-swapon-of-a-directory-is-eisdir-on-linux.md` asks for it
+in the kernel, for the Linux ABI's sake.
+
+`ctest-swap` checks the answers on your rung without turning an area on:
+a directory, a missing name and `/dev/null` for both calls, and a child
+that gave root up. On `mlock`: D-Q8 was closed with `SYS_MEMORY_LOCK` on
+2026-10-16. On `ETXTBSY` for a swap file's writers: no program ported so
+far looks for it.
+
+-- lane D

@@ -4268,12 +4268,10 @@ pub const SWAP_FLAGS_VALID: i32 = SWAP_FLAG_PREFER
     | SWAP_FLAG_DISCARD_PAGES
     | SWAP_FLAG_PRIO_MASK;
 
-/// Enable swapping on a device.
-///
-/// Stub: validates arguments per Linux `mm/swapfile.c::sys_swapon`, then
-/// returns `-1` with `ENOSYS`.  Our OS uses committed memory and has no
-/// swap subsystem (design.txt: lazy allocation is opt-in, never silent
-/// overcommit).
+/// Turn swap on at `path` -- a block device, or a regular file with a swap
+/// header (`mkswap`'s) and no holes -- with `swapflags`' priority and
+/// discard flags: the kernel's `SYS_SWAP_ON`, whose answers are Linux's
+/// ([`swap_answer`]). A kernel without the call answers `ENOSYS`.
 ///
 /// Errors (Linux-matching priority order — `sys_swapon` performs the
 /// `CAP_SYS_ADMIN` check first, then the flag-mask check *before*
@@ -4315,14 +4313,70 @@ pub extern "C" fn swapon(path: *const u8, swapflags: i32) -> i32 {
         errno::set_errno(errno::ENOENT);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
+    let mut resolved = [0u8; PATH_MAX];
+    let Some(len) = crate::file::resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+    if names_a_directory(path) {
+        errno::set_errno(errno::EISDIR);
+        return -1;
+    }
+    // The flags passed the mask above, so they are not negative.
+    let flags = u64::from(swapflags.cast_unsigned());
+    swap_answer(crate::syscall::syscall3(
+        crate::syscall::SYS_SWAP_ON,
+        resolved.as_ptr() as u64,
+        len as u64,
+        flags,
+    ))
+}
+
+/// Whether `path` names a directory, following links: `swapon` and
+/// `swapoff` of one are `EISDIR` on Linux, which opens the path for writing
+/// before anything else, where the kernel here answers `InvalidArgument`
+/// (`requests/d-a-swapon-of-a-directory-is-eisdir-on-linux.md`). Asked only
+/// of a caller the kernel would not refuse first -- it wants root, an
+/// effective uid of 0 -- so that `EPERM` still comes before the path.
+/// `errno` is left as it was.
+fn names_a_directory(path: *const u8) -> bool {
+    if ids().uid[EFFECTIVE] != 0 {
+        return false;
+    }
+    let saved = errno::get_errno();
+    let mut st = crate::stat::Stat::zeroed();
+    let dir = crate::file::stat(path, &raw mut st) == 0 && st.is_dir();
+    errno::set_errno(saved);
+    dir
+}
+
+/// What `swapon` and `swapoff` answer for the kernel's answer `ret`: 0, or
+/// -1 with Linux's errno -- `EPERM` for a caller that is not root
+/// (`PermissionDenied`, Linux's `CAP_SYS_ADMIN` answer, not the usual
+/// `EACCES`), `EINVAL` for a file on a filesystem that cannot give its
+/// blocks (`NotSupported`), `EPERM` for too many areas (`ResourceExhausted`,
+/// Linux's `MAX_SWAPFILES` answer), `EBUSY`, `ENOMEM` and the path's own as
+/// they come -- and `ENOSYS` from a kernel without the calls.
+fn swap_answer(ret: i64) -> i32 {
+    if ret >= 0 {
+        return 0;
+    }
+    errno::set_errno(if crate::syscall::lacks_call(ret) {
+        errno::ENOSYS
+    } else if ret == errno::native::NOT_SUPPORTED {
+        errno::EINVAL
+    } else if ret == errno::native::RESOURCE_EXHAUSTED || ret == errno::native::PERMISSION_DENIED {
+        errno::EPERM
+    } else {
+        errno::errno_for(ret)
+    });
     -1
 }
 
-/// Disable swapping on a device.
-///
-/// Stub: validates arguments per Linux `mm/swapfile.c::sys_swapoff`,
-/// then returns `-1` with `ENOSYS`.
+/// Turn swap off at `path`, every page in the area brought back into
+/// memory first: the kernel's `SYS_SWAP_OFF` -- a file is found by identity,
+/// so any name for it will do. `EINVAL` when it is not swap, `EBUSY` when
+/// its pages could not all come back, `ENOMEM` when nothing can hold them
+/// ([`swap_answer`]).
 ///
 /// Errors (Linux-matching priority order — `sys_swapoff` performs the
 /// `CAP_SYS_ADMIN` check first, then `getname`):
@@ -4351,8 +4405,19 @@ pub extern "C" fn swapoff(path: *const u8) -> i32 {
         errno::set_errno(errno::ENOENT);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+    let mut resolved = [0u8; PATH_MAX];
+    let Some(len) = crate::file::resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+    if names_a_directory(path) {
+        errno::set_errno(errno::EISDIR);
+        return -1;
+    }
+    swap_answer(crate::syscall::syscall2(
+        crate::syscall::SYS_SWAP_OFF,
+        resolved.as_ptr() as u64,
+        len as u64,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -10264,6 +10329,38 @@ SwapTotal:      262144 kB\nSwapFree:       200000 kB\nSwapUsed:       62144 kB\n
         errno::set_errno(0);
         assert_eq!(swapoff(b"/dev/sda2\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    /// What `swapon` and `swapoff` make of the kernel's answers: Linux's
+    /// errnos, two of them not the usual translation, and `ENOSYS` -- what
+    /// the two tests above see on the host -- only from a kernel without
+    /// the calls.
+    #[test]
+    fn swap_answers_are_linuxs() {
+        use crate::errno::native;
+        let of = |ret: i64| {
+            errno::set_errno(0);
+            (swap_answer(ret), errno::get_errno())
+        };
+        assert_eq!(of(0), (0, 0));
+        assert_eq!(
+            of(native::NOT_SUPPORTED),
+            (-1, errno::EINVAL),
+            "a file it cannot map"
+        );
+        assert_eq!(
+            of(native::RESOURCE_EXHAUSTED),
+            (-1, errno::EPERM),
+            "too many areas"
+        );
+        assert_eq!(
+            of(native::PERMISSION_DENIED),
+            (-1, errno::EPERM),
+            "not root"
+        );
+        assert_eq!(of(native::RESOURCE_BUSY), (-1, errno::EBUSY));
+        assert_eq!(of(native::NOT_FOUND), (-1, errno::ENOENT));
+        assert_eq!(of(native::NO_SUCH_SYSCALL), (-1, errno::ENOSYS));
     }
 
     // ------------------------------------------------------------------

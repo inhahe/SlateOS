@@ -74,3 +74,4 @@ ctest-sigev-thread -        30
 ctest-fifo       file     30
 ctest-setids     creds    30
 ctest-spawn-attrs file     30
+ctest-swap       file,creds 30

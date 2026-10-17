@@ -61,6 +61,17 @@ pub const SYS_PROCESS_SETGROUPS: u64 = 1067;
 /// 2026-10-07 (`requests/d-a-a-process-cannot-ask-for-its-own-supplementary-groups.md`).
 pub const SYS_PROCESS_GETGROUPS: u64 = 1143;
 
+/// `(path_ptr, path_len, flags) -> 0`. Turn swap on at the absolute path --
+/// a block device or a regular file with a swap header -- with Linux's
+/// `swapon` flags, which the kernel checks; symbolic links followed. Root
+/// only. On lane A's kernel since 2026-10-09
+/// (`requests/a-d-swapon-and-swapoff-are-kernel-calls-now.md`).
+pub const SYS_SWAP_ON: u64 = 1175;
+
+/// `(path_ptr, path_len) -> 0`. Turn swap off at the absolute path, every
+/// page brought back into memory first. Root only.
+pub const SYS_SWAP_OFF: u64 = 1176;
+
 /// `(path_ptr) -> 0`. Change the calling process's filesystem root to the
 /// NUL-terminated absolute path at `path_ptr`, which must name an existing
 /// directory. Gated on `(Process, SET_CREDENTIALS)`. Note that the Linux-ABI

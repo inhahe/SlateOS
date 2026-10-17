@@ -36,8 +36,8 @@ use guitk::event::{Event, EventResult, Key, KeyEvent, MouseButton, MouseEvent, M
 use guitk::field;
 use guitk::frame::Rect;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use pathtext::ShowPath;
+use textline::{SearchBox, SearchLook};
 // Only the tests build a modifier set by hand; the handlers read the one on
 // the event they were given.
 #[cfg(test)]
@@ -557,10 +557,10 @@ pub struct SearchMatch {
 }
 
 /// Search state for find-in-diff.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SearchState {
-    /// Current search query.
-    pub query: String,
+    /// The find bar's box, which is the query.
+    pub query: SearchBox,
     /// Whether search is case-sensitive.
     pub case_sensitive: bool,
     /// All matches found.
@@ -569,6 +569,18 @@ pub struct SearchState {
     pub current_match: usize,
     /// Whether the search bar is visible.
     pub visible: bool,
+}
+
+impl Default for SearchState {
+    fn default() -> Self {
+        Self {
+            query: SearchBox::new(SEARCH_CAPACITY, CONTENT_FONT_SIZE),
+            case_sensitive: false,
+            matches: Vec::new(),
+            current_match: 0,
+            visible: false,
+        }
+    }
 }
 
 impl SearchState {
@@ -592,7 +604,7 @@ impl SearchState {
         let case = textfind::Case::sensitive(self.case_sensitive);
         // Cloned because `push_matches_for_edit` takes `&mut self`; the search
         // itself borrows nothing but the edit's own text.
-        let query = self.query.clone();
+        let query = self.query.text().to_owned();
         for (i, edit) in edits.iter().enumerate() {
             for (start, end) in textfind::matches(&edit.text, &query, case) {
                 self.push_matches_for_edit(i, edit.op, start, end.saturating_sub(start));
@@ -1099,11 +1111,6 @@ pub struct FileDiffApp {
     pub ignore_opts: IgnoreOptions,
     /// Search state.
     pub search: SearchState,
-    /// The find bar's editor -- its caret and selection over the query --
-    /// reloaded when the query changed under it.
-    search_editor: TextInput,
-    /// What the find bar's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    search_clipboard: String,
 
     /// Directory comparison result (when in directory mode).
     pub dir_compare: Option<DirCompareResult>,
@@ -1171,8 +1178,6 @@ impl FileDiffApp {
             change_indices: Vec::new(),
             ignore_opts: IgnoreOptions::default(),
             search: SearchState::default(),
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
             dir_compare: None,
             dir_mode: false,
             dir_scroll: 0.0,
@@ -1880,20 +1885,8 @@ impl FileDiffApp {
     /// A key for the find bar's box: whether the box took it. A query that
     /// changed is searched for again.
     fn search_key(&mut self, key: &KeyEvent) -> bool {
-        if self.search_editor.text() != self.search.query {
-            self.search_editor.set_text(&self.search.query);
-        }
-        let edit = textline::apply_key(
-            &mut self.search_editor,
-            key,
-            &self.search_clipboard,
-            CONTENT_FONT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.search_clipboard = copied;
-        }
-        if self.search_editor.text() != self.search.query {
-            self.search.query = self.search_editor.text().to_owned();
+        let edit = self.search.query.key(key);
+        if edit.changed {
             self.rerun_search();
         }
         edit.handled
@@ -1904,39 +1897,19 @@ impl FileDiffApp {
     /// the old one to edit.
     fn focus_search(&mut self) {
         self.search.visible = true;
-        self.search_editor.set_text(&self.search.query);
-        self.search_editor.select_all();
-    }
-
-    /// Where the find bar's caret is: the editor's, or the end of the query
-    /// where the query changed under the editor. One answer for the drawing
-    /// and for a press.
-    fn search_cursor(&self) -> text::TextCursor {
-        if self.search_editor.text() == self.search.query {
-            self.search_editor.cursor()
-        } else {
-            text::TextCursor::from(self.search.query.len())
-        }
+        self.search.query.select_all();
     }
 
     /// A press in the find bar's box at `x`: the caret under the pointer,
-    /// measured against the box as it was drawn.
+    /// measured against the box as it was drawn -- with the keyboard,
+    /// which the box has whenever the bar is open.
     fn press_search(&mut self, x: f32) {
         let rect = FindBar::at(self.width).query;
-        let drawn = self.search_cursor();
-        if self.search_editor.text() != self.search.query {
-            self.search_editor.set_text(&self.search.query);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.search.query,
-            drawn,
-            (rect.w - FindBar::INSET * 2.0).max(0.0),
-            CONTENT_FONT_SIZE,
-            FontWeightHint::Regular,
+        self.search.query.press(
             x - rect.x - FindBar::INSET,
+            rect.w - FindBar::INSET * 2.0,
+            true,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// Handle mouse input.
@@ -2918,32 +2891,21 @@ impl FileDiffApp {
         words(tree, l.label, "Find:".to_string());
 
         // The query, in the toolkit's field, with its caret and selection
-        // where they are and scrolled so the caret stays in view. The caret
-        // was fixed at the end, the only place the keys could type. The
-        // editor's selection only while it is the box's: a query changed
-        // under it has not been reloaded into it yet.
+        // where they are and scrolled so the caret stays in view.
         let state = self.query_box_state();
         field::draw(tree, &self.palette, l.query, state, self.focus_ring_width);
         let line = text::line_height(CONTENT_FONT_SIZE, FontWeightHint::Regular);
-        let editing = self.search_editor.text() == self.search.query;
-        textedit::draw(
+        self.search.query.draw(
             tree,
-            &textedit::SingleLine {
-                text: &self.search.query,
-                cursor: self.search_cursor(),
-                selection_anchor: if editing {
-                    self.search_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: state.focused,
+            &SearchLook {
                 x: l.query.x + FindBar::INSET,
                 y: l.query.y + (l.query.h - line) / 2.0,
-                width: (l.query.w - FindBar::INSET * 2.0).max(0.0),
+                width: l.query.w - FindBar::INSET * 2.0,
                 line_height: line,
-                font_size: CONTENT_FONT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused: state.focused,
+                placeholder: "",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -3647,6 +3609,16 @@ mod tests {
 
     use super::*;
 
+    /// A search for `query`, minding case or not, ready to be run.
+    fn search_for(query: &str, case_sensitive: bool) -> SearchState {
+        let mut search = SearchState {
+            case_sensitive,
+            ..SearchState::default()
+        };
+        search.query.set_text(query);
+        search
+    }
+
     /// A fresh window compares nothing, and says why.
     ///
     /// `main` called `load_sample_comparison`, so the window opened on a diff
@@ -4011,10 +3983,7 @@ mod tests {
         let right = "hello earth\nfoo baz";
         let opts = IgnoreOptions::default();
         let diff = compute_diff(left, right, &opts);
-        let mut search = SearchState {
-            query: "foo".to_string(),
-            ..Default::default()
-        };
+        let mut search = search_for("foo", false);
         search.search(&diff.edits);
         assert!(!search.matches.is_empty());
     }
@@ -4025,11 +3994,7 @@ mod tests {
         let right = "hello world";
         let opts = IgnoreOptions::default();
         let diff = compute_diff(left, right, &opts);
-        let mut search = SearchState {
-            query: "hello".to_string(),
-            case_sensitive: false,
-            ..Default::default()
-        };
+        let mut search = search_for("hello", false);
         search.search(&diff.edits);
         assert!(!search.matches.is_empty());
     }
@@ -4051,11 +4016,7 @@ mod tests {
         let right = "aaa\naaa\naaa";
         let opts = IgnoreOptions::default();
         let diff = compute_diff(left, right, &opts);
-        let mut search = SearchState {
-            query: "aaa".to_string(),
-            case_sensitive: true,
-            ..Default::default()
-        };
+        let mut search = search_for("aaa", true);
         search.search(&diff.edits);
         let count = search.matches.len();
         assert!(count > 0);
@@ -4071,11 +4032,7 @@ mod tests {
         let right = "abc\ndef";
         let opts = IgnoreOptions::default();
         let diff = compute_diff(left, right, &opts);
-        let mut search = SearchState {
-            query: "abc".to_string(),
-            case_sensitive: true,
-            ..Default::default()
-        };
+        let mut search = search_for("abc", true);
         search.search(&diff.edits);
         let count = search.matches.len();
         assert!(count > 0);
@@ -4101,10 +4058,7 @@ mod tests {
         // so an offset measured in a lower-cased copy of this line is one byte
         // past the truth — enough to slice inside a character and panic the
         // highlighter.
-        let mut search = SearchState {
-            query: "ABC".to_string(),
-            ..Default::default()
-        };
+        let mut search = search_for("ABC", false);
         search.search(&edit(DiffOp::Delete, "\u{130}abc"));
         assert_eq!(search.matches.len(), 1);
         let m = &search.matches[0];
@@ -4117,10 +4071,7 @@ mod tests {
         // The query is three bytes (`i` + a combining dot); what it matches is
         // the two-byte `İ`. Taking the length from the query would over-run the
         // character by a byte.
-        let mut search = SearchState {
-            query: "i\u{307}".to_string(),
-            ..Default::default()
-        };
+        let mut search = search_for("i\u{307}", false);
         search.search(&edit(DiffOp::Delete, "x\u{130}y"));
         assert_eq!(search.matches.len(), 1);
         let m = &search.matches[0];
@@ -4132,11 +4083,7 @@ mod tests {
     fn matches_do_not_overlap_one_another() {
         // Resuming one byte past a match's *start* reported `aa` three times in
         // `aaaa`, so the highlighter painted overlapping runs.
-        let mut search = SearchState {
-            query: "aa".to_string(),
-            case_sensitive: true,
-            ..Default::default()
-        };
+        let mut search = search_for("aa", true);
         search.search(&edit(DiffOp::Delete, "aaaa"));
         let spans: Vec<(usize, usize)> = search
             .matches
@@ -4148,11 +4095,7 @@ mod tests {
 
     #[test]
     fn an_equal_line_is_highlighted_in_both_panels() {
-        let mut search = SearchState {
-            query: "b".to_string(),
-            case_sensitive: true,
-            ..Default::default()
-        };
+        let mut search = search_for("b", true);
         search.search(&edit(DiffOp::Equal, "abc"));
         assert_eq!(search.matches.len(), 2);
         assert_eq!(search.matches[0].panel, 0);
@@ -4886,11 +4829,7 @@ mod tests {
         let right = "hello";
         let opts = IgnoreOptions::default();
         let diff = compute_diff(left, right, &opts);
-        let mut search = SearchState {
-            query: "hello".to_string(),
-            case_sensitive: true,
-            ..Default::default()
-        };
+        let mut search = search_for("hello", true);
         search.search(&diff.edits);
         assert!(search.current().is_some());
     }
@@ -5290,7 +5229,7 @@ mod tests {
         app.view_mode = mode;
         app.load_files("a", left, "b", right);
         app.search.visible = true;
-        app.search.query = query.to_string();
+        app.search.query.set_text(query);
         app.refresh_search_matches();
         app
     }
@@ -5421,7 +5360,7 @@ mod tests {
             "the box of a bar that is up does not have the keyboard"
         );
 
-        app.search.query = String::from("nowhere");
+        app.search.query.set_text("nowhere");
         app.refresh_search_matches();
         assert!(app.search.matches.is_empty());
         assert!(
@@ -5589,7 +5528,7 @@ mod tests {
         // "ééé" is three characters and six bytes; the hit starts after them.
         app.load_files("a", "éééNEEDLE\n", "b", "éééNEEDLE\n");
         app.search.visible = true;
-        app.search.query = "NEEDLE".to_string();
+        app.search.query.set_text("NEEDLE");
         app.refresh_search_matches();
 
         let m = app.search.matches.first().copied().expect("a match");
@@ -5715,7 +5654,7 @@ mod tests {
         app.load_files("a", &left, "b", &left);
         app.height = TOOLBAR_HEIGHT + STATUS_BAR_HEIGHT + LINE_HEIGHT * 10.0;
         app.search.visible = true;
-        app.search.query = "needle".to_string();
+        app.search.query.set_text("needle");
         app.rerun_search();
 
         let first = app.scroll_left;
@@ -5788,7 +5727,7 @@ mod tests {
         right.push_str("needle\n");
         app.load_files("a", &left, "b", &right);
         app.search.visible = true;
-        app.search.query = "needle".to_string();
+        app.search.query.set_text("needle");
         app.refresh_search_matches();
         assert!(
             app.search.matches.iter().any(|m| m.edit_index >= 11),
@@ -5888,7 +5827,7 @@ mod tests {
         // `F3` can act in.
         let mut searching = differing();
         searching.search.visible = true;
-        searching.search.query = "changed".to_string();
+        searching.search.query.set_text("changed");
         searching.rerun_search();
 
         vec![top, scrolled, inline, searching]
@@ -6040,7 +5979,8 @@ mod tests {
         app.handle_event(&held(Key::C, "ć", altgr));
         app.handle_event(&held(Key::I, "í", altgr));
         assert_eq!(
-            app.search.query, "ćí",
+            app.search.query.text(),
+            "ćí",
             "the search typed a command or lost AltGr's characters"
         );
         assert_eq!(app.search.case_sensitive, case, "AltGr+I toggled the case");
@@ -6343,7 +6283,7 @@ mod tests {
         send(&mut app, key(Key::Left));
         send(&mut app, key(Key::Left));
         type_into(&mut app, "u");
-        assert_eq!(app.search.query, "zulu", "the caret did not move");
+        assert_eq!(app.search.query.text(), "zulu", "the caret did not move");
         assert_eq!(app.search.matches.len(), 1, "the edit was not searched for");
         let rect = FindBar::at(app.width).query;
         let at = rect.x
@@ -6358,7 +6298,7 @@ mod tests {
 
         send(&mut app, key(Key::Home));
         send(&mut app, key(Key::Delete));
-        assert_eq!(app.search.query, "ulu", "Delete at the caret");
+        assert_eq!(app.search.query.text(), "ulu", "Delete at the caret");
         send(&mut app, key(Key::End));
         let mut shift_home = key(Key::Home);
         shift_home.modifiers.shift = true;
@@ -6378,18 +6318,18 @@ mod tests {
         );
         send(&mut app, ctrl(Key::C));
         type_into(&mut app, "z");
-        assert_eq!(app.search.query, "z", "Shift+Home did not select");
+        assert_eq!(app.search.query.text(), "z", "Shift+Home did not select");
         send(&mut app, ctrl(Key::V));
-        assert_eq!(app.search.query, "zulu", "Ctrl+C or Ctrl+V");
+        assert_eq!(app.search.query.text(), "zulu", "Ctrl+C or Ctrl+V");
         send(&mut app, ctrl(Key::A));
         send(&mut app, ctrl(Key::X));
-        assert_eq!(app.search.query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.search.query.text(), "", "Ctrl+A and Ctrl+X");
         assert!(
             app.search.matches.is_empty(),
             "the cut was not searched for"
         );
         send(&mut app, ctrl(Key::V));
-        assert_eq!(app.search.query, "zulu", "Ctrl+X took nothing");
+        assert_eq!(app.search.query.text(), "zulu", "Ctrl+X took nothing");
 
         // A press at the start of the text puts the caret there, and one past
         // its end at its end.
@@ -6400,12 +6340,13 @@ mod tests {
         );
         type_into(&mut app, "<");
         assert_eq!(
-            app.search.query, "<zulu",
+            app.search.query.text(),
+            "<zulu",
             "the press did not put the caret there"
         );
         press_at(&mut app, rect.right() - 2.0, mid);
         type_into(&mut app, ">");
-        assert_eq!(app.search.query, "<zulu>");
+        assert_eq!(app.search.query.text(), "<zulu>");
     }
 
     /// **Ctrl+F selects what the find bar holds**, opening it or not, so
@@ -6422,20 +6363,29 @@ mod tests {
         send(&mut app, ctrl(Key::F));
         assert!(app.search.visible);
         type_into(&mut app, "zulu");
-        assert_eq!(app.search.query, "zulu", "Ctrl+F did not select the search");
+        assert_eq!(
+            app.search.query.text(),
+            "zulu",
+            "Ctrl+F did not select the search"
+        );
         // Again, with the bar open.
         send(&mut app, ctrl(Key::F));
         type_into(&mut app, "z");
         assert_eq!(
-            app.search.query, "z",
+            app.search.query.text(),
+            "z",
             "Ctrl+F in the open bar did not select the search"
         );
         send(&mut app, ctrl(Key::F));
         send(&mut app, key(Key::Right));
         type_into(&mut app, "!");
-        assert_eq!(app.search.query, "z!", "an arrow did not keep the search");
+        assert_eq!(
+            app.search.query.text(),
+            "z!",
+            "an arrow did not keep the search"
+        );
         assert_eq!(send(&mut app, key(Key::Enter)), EventResult::Consumed);
-        assert_eq!(app.search.query, "z!", "Enter went into the box");
+        assert_eq!(app.search.query.text(), "z!", "Enter went into the box");
     }
 
     /// **The box edits the search it shows**, however the search came to be
@@ -6454,12 +6404,17 @@ mod tests {
         );
         type_into(&mut app, "<");
         assert_eq!(
-            app.search.query, "<alpha",
+            app.search.query.text(),
+            "<alpha",
             "the press missed the shown text"
         );
-        app.search.query = String::from("zulu");
+        app.search.query.set_text("zulu");
         type_into(&mut app, "?");
-        assert_eq!(app.search.query, "zulu?", "the key edited another search");
+        assert_eq!(
+            app.search.query.text(),
+            "zulu?",
+            "the key edited another search"
+        );
 
         assert_eq!(
             press_at(&mut app, rect.x - 4.0, rect.y + rect.h / 2.0),

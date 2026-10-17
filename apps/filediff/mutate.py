@@ -210,8 +210,8 @@ MUTATIONS += [
     ),
     (
         "the caret is at the start of the query",
-        "                cursor: self.search_cursor(),\n",
-        "                cursor: text::TextCursor::from(0),\n",
+        "                focused: state.focused,\n                placeholder:",
+        "                focused: false,\n                placeholder:",
         [CARET, EDITS],
     ),
 ]
@@ -222,7 +222,7 @@ MUTATIONS += [
 MUTATIONS += [
     (
         "Ctrl+F does not select what the box holds",
-        "        self.search_editor.select_all();\n",
+        "        self.search.query.select_all();\n",
         "",
         [CTRL_F],
     ),
@@ -233,28 +233,16 @@ MUTATIONS += [
         [CTRL_F],
     ),
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.search_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "an edit is not searched for",
-        "            self.search.query = self.search_editor.text().to_owned();\n            self.rerun_search();\n",
-        "            self.search.query = self.search_editor.text().to_owned();\n",
+        "        if edit.changed {\n            self.rerun_search();\n",
+        "        if edit.changed {\n",
         [EDITS],
     ),
     (
-        "a key finds the editor holding another search",
-        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if self.search_editor.text() != self.search.query {\n",
-        "    fn search_key(&mut self, key: &KeyEvent) -> bool {\n        if false {\n",
-        [SHOWN],
-    ),
-    (
-        "a press finds the editor holding another search",
-        "        let drawn = self.search_cursor();\n        if self.search_editor.text() != self.search.query {\n",
-        "        let drawn = self.search_cursor();\n        if false {\n",
-        [SHOWN],
+        "a press is measured as the box was not drawn",
+        "            true,\n        );\n",
+        "            false,\n        );\n",
+        [EDITS],
     ),
     (
         "a press puts the caret at the start",
@@ -273,12 +261,6 @@ MUTATIONS += [
         "                if self.search.visible\n                    && FindBar::at(self.width).query.contains(mouse.x, mouse.y) =>\n",
         "                if FindBar::at(self.width).query.contains(mouse.x, mouse.y) =>\n",
         [SHOWN],
-    ),
-    (
-        "the selection is not drawn",
-        "                selection_anchor: if editing {\n",
-        "                selection_anchor: if false {\n",
-        [EDITS],
     ),
 ]
 

@@ -8,6 +8,7 @@ use libfdisk::{Context, LabelType, Partition, fieldtype};
 
 use crate::{BUFSIZ, Fdisk, get_user_reply, rpmatch};
 use fdisk::list::{self, WIPEMODE_ALWAYS, WIPEMODE_AUTO};
+use quoting::escape_unprintable;
 
 /// `enum fdisk_labeltype` as the bits menus test.
 fn bits(t: LabelType) -> u32 {
@@ -397,10 +398,12 @@ impl Fdisk {
         }
         term.write(b"\n");
         if let Some(parent) = self.cxt.get_parent() {
-            let l = self.cxt.label_ref().map_or("", |l| l.get_name());
-            let p = parent.label_ref().map_or("", |l| l.get_name());
+            let l = self.cxt.label_ref().map_or("", |l| l.get_name()).as_bytes();
+            let p = parent.label_ref().map_or("", |l| l.get_name()).as_bytes();
             let m = format!(
-                "You're editing nested '{l}' partition table, primary partition table is '{p}'."
+                "You're editing nested '{}' partition table, primary partition table is '{}'.",
+                escape_unprintable(l),
+                escape_unprintable(p)
             );
             self.cxt.info(m.as_bytes());
         }
@@ -965,7 +968,11 @@ impl Fdisk {
         if let Some(wanted) = wanted {
             rc = self.cxt.create_disklabel(Some(wanted.as_bytes()));
             if rc != 0 {
-                let m = format!("Failed to create '{wanted}' disk label");
+                let shown = wanted.as_bytes();
+                let m = format!(
+                    "Failed to create '{}' disk label",
+                    escape_unprintable(shown)
+                );
                 self.cxt.warn(rc.wrapping_neg(), m.as_bytes());
             }
         }

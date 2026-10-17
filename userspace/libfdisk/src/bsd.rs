@@ -19,6 +19,7 @@ use crate::utils::{partname, u64_as_u32};
 use crate::{
     Geometry, LABEL_FL_INCHARS_PARTNO, LABEL_FL_REQUIRE_GEOMETRY, LabelType, NLABELITEMS, fieldtype,
 };
+use quoting::escape_unprintable;
 
 /// `BSD_MAXPARTITIONS`.
 const MAXPARTITIONS: usize = 16;
@@ -1062,10 +1063,11 @@ pub fn link_partition(cxt: &mut Context) -> i32 {
     }
     let n = usize::from(l.npartitions());
     set_counts(cxt, n, None, true);
-    let c = char::from(b'a'.wrapping_add(u8::try_from(i).unwrap_or(0)));
+    let c = b'a'.wrapping_add(u8::try_from(i).unwrap_or(0));
     cxt.info(
         format!(
-            "BSD partition '{c}' linked to DOS partition {}.",
+            "BSD partition '{}' linked to DOS partition {}.",
+            escape_unprintable(&[c]),
             k.wrapping_add(1)
         )
         .as_bytes(),

@@ -1588,7 +1588,8 @@ impl Sfdisk {
             }
             if self.cxt.is_partition_used(p) == 0 {
                 let m = format!(
-                    "warning: {shown}: partition {} is not defined yet",
+                    "warning: {}: partition {} is not defined yet",
+                    escape_unprintable(&devname),
                     partno.wrapping_add(1)
                 );
                 self.cxt.warnx(m.as_bytes());
@@ -2186,7 +2187,10 @@ impl Sfdisk {
                 c if c == ch(b'u') => {
                     let unit = argb.first().copied().unwrap_or(0);
                     if unit != b'S' {
-                        self.errx(&format!("unsupported unit '{}'", char::from(unit)));
+                        self.errx(&format!(
+                            "unsupported unit '{}'",
+                            escape_unprintable(&[unit])
+                        ));
                     }
                 }
                 c if c == ch(b'v') => {

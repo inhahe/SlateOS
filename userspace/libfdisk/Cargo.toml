@@ -20,6 +20,8 @@ ulsysfs = { path = "../ulsysfs" }
 crc32 = { path = "../../crc32" }
 # lib/jsonwrt.c and carefulputc.h's fputs_quoted, for dumping scripts.
 smartcols = { path = "../smartcols" }
+# A partition's letter in a message, escaped like any value shown.
+quoting = { path = "../quoting" }
 
 [dev-dependencies]
 scratchdir = { path = "../scratchdir" }

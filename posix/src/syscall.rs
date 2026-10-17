@@ -316,6 +316,16 @@ pub const SYS_FS_ADD_SEALS: u64 = 1124;
 /// The seals of the file a handle holds: `fs_get_seals(handle) -> seals`, in
 /// [`SYS_FS_ADD_SEALS`]'s bits; 0 for none. Lane A's (1125).
 pub const SYS_FS_GET_SEALS: u64 = 1125;
+/// `SYS_FS_INODE_FLAGS(handle, request, arg)` -- `lsattr`'s and `chattr`'s
+/// requests on the file or directory a handle holds: `request`
+/// `FS_IOC_GETFLAGS` or `FS_IOC_SETFLAGS`, or their 32-bit twins, `arg`
+/// pointing at an `int`; Linux's errnos as `-errno`, the Linux ABI's own
+/// body. `FS_IMMUTABLE_FL` and `FS_APPEND_FL` are kept, read and set (root
+/// alone may change them, `EPERM`; another flag is `EOPNOTSUPP`); the
+/// generation and the project (`FS_IOC_GETVERSION`, `FS_IOC_FSGETXATTR`)
+/// are `ENOTTY`, as Linux answers on a filesystem keeping neither. Lane A's
+/// (1178, requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md).
+pub const SYS_FS_INODE_FLAGS: u64 = 1178;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 /// Get the calling process's real uid/gid, packed as gid<<32 | uid.

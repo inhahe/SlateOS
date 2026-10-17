@@ -42,11 +42,10 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
+use textline::{LineBox, LineLook};
 
 use std::collections::BTreeMap;
 use std::process::ExitCode;
@@ -1681,30 +1680,75 @@ pub enum UiDialog {
     ConfirmDelete(u64),
 }
 
-/// Form state for the add/edit task dialog.
+/// What a number's box shows for `n`: its digits, and nothing for 0, which
+/// no day of the month or interval is -- so that deleting every digit
+/// empties the box rather than leaving a 0 typed after.
+fn digits(n: u32) -> String {
+    if n == 0 { String::new() } else { n.to_string() }
+}
+
+/// Whether a number's box may hold `text`: digits only, standing for no
+/// more than `max` -- an edit past it is refused whole rather than
+/// wrapping the value round to something small, since silently
+/// rescheduling a monthly job from the 31st to the 3rd is the kind of
+/// edit a user would not notice until it had already run. An empty box
+/// is 0.
+fn holds_number(text: &str, max: u32) -> bool {
+    if !text.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    text.is_empty() || text.parse::<u32>().is_ok_and(|n| n <= max)
+}
+
+/// The number a number's box stands for: 0 while it is empty. Its check
+/// (`holds_number`) keeps all but digits out of it, so nothing else is
+/// read as 0.
+fn box_number(line: &LineBox) -> u32 {
+    line.text().parse().unwrap_or(0)
+}
+
+/// Form state for the add/edit task dialog: its boxes -- what is typed
+/// into each and its caret -- and its choices. The boxes are the form's
+/// record; the numbers are read from theirs.
 #[derive(Clone, Debug)]
 pub struct TaskFormState {
-    pub name: String,
-    pub command: String,
+    pub name: LineBox,
+    pub command: LineBox,
     pub frequency_index: usize,
     pub enabled: bool,
-    pub cron_expr: String,
+    pub cron_expr: LineBox,
     pub weekly_day: u8,
-    pub monthly_day: u8,
-    pub interval_minutes: u32,
+    /// The day of the month's box, its digits.
+    pub monthly_day: LineBox,
+    /// The interval's box, its digits: minutes.
+    pub interval_minutes: LineBox,
 }
 
 impl TaskFormState {
     pub fn new() -> Self {
+        Self::holding("", "", 0, "0 * * * *", 1, 1, 30)
+    }
+
+    /// A form holding these, each box's caret after its text.
+    fn holding(
+        name: &str,
+        command: &str,
+        frequency_index: usize,
+        cron_expr: &str,
+        weekly_day: u8,
+        monthly_day: u8,
+        interval_minutes: u32,
+    ) -> Self {
+        let field = |text: &str| LineBox::holding(text, FIELD_CAPACITY, FONT_SIZE);
         Self {
-            name: String::new(),
-            command: String::new(),
-            frequency_index: 0,
+            name: field(name),
+            command: field(command),
+            frequency_index,
             enabled: true,
-            cron_expr: String::from("0 * * * *"),
-            weekly_day: 1,
-            monthly_day: 1,
-            interval_minutes: 30,
+            cron_expr: field(cron_expr),
+            weekly_day,
+            monthly_day: field(&digits(u32::from(monthly_day))),
+            interval_minutes: field(&digits(interval_minutes)),
         }
     }
 
@@ -1720,16 +1764,71 @@ impl TaskFormState {
                 ScheduleFrequency::EveryNMinutes(n) => (5, String::new(), 1, 1, *n),
                 ScheduleFrequency::Cron(expr) => (6, expr.to_string_repr(), 1, 1, 30),
             };
-
         Self {
-            name: task.name.clone(),
-            command: task.command.clone(),
-            frequency_index: freq_index,
             enabled: task.enabled,
-            cron_expr,
-            weekly_day,
-            monthly_day,
-            interval_minutes,
+            ..Self::holding(
+                &task.name,
+                &task.command,
+                freq_index,
+                &cron_expr,
+                weekly_day,
+                monthly_day,
+                interval_minutes,
+            )
+        }
+    }
+
+    /// The day of the month its box stands for: 0 while it is empty.
+    #[must_use]
+    pub fn day_of_month(&self) -> u32 {
+        box_number(&self.monthly_day)
+    }
+
+    /// The interval its box stands for, in minutes: 0 while it is empty.
+    #[must_use]
+    pub fn interval(&self) -> u32 {
+        box_number(&self.interval_minutes)
+    }
+
+    /// `field`'s box: the Param box is the one the frequency asks for, and
+    /// `None` where it asks for none, or picks its parameter.
+    fn field_box(&self, field: FormField) -> Option<&LineBox> {
+        match field {
+            FormField::Name => Some(&self.name),
+            FormField::Command => Some(&self.command),
+            FormField::Param => match self.frequency_index {
+                3 => Some(&self.monthly_day),
+                5 => Some(&self.interval_minutes),
+                6 => Some(&self.cron_expr),
+                _ => None,
+            },
+        }
+    }
+
+    /// [`Self::field_box`], to change.
+    fn field_box_mut(&mut self, field: FormField) -> Option<&mut LineBox> {
+        match field {
+            FormField::Name => Some(&mut self.name),
+            FormField::Command => Some(&mut self.command),
+            FormField::Param => match self.frequency_index {
+                3 => Some(&mut self.monthly_day),
+                5 => Some(&mut self.interval_minutes),
+                6 => Some(&mut self.cron_expr),
+                _ => None,
+            },
+        }
+    }
+
+    /// The most `field`'s box may stand for, if it holds a number: the day
+    /// of the month's 31, and the interval's [`MAX_INTERVAL_MINUTES`] -- a
+    /// minute count past a year is not a schedule anybody means; the cap
+    /// is there to stop arithmetic downstream from having to think about
+    /// overflow, not to be a policy.
+    fn number_bound(&self, field: FormField) -> Option<u32> {
+        match (field, self.frequency_index) {
+            (FormField::Param, 3) => Some(31),
+            (FormField::Param, 5) => Some(MAX_INTERVAL_MINUTES),
+            _ => None,
         }
     }
 
@@ -1744,15 +1843,17 @@ impl TaskFormState {
             // typing "5". Rejecting it here rather than clamping it is what
             // makes Save grey out while the field is still half-typed, instead
             // of quietly scheduling the job for a day the user did not choose.
-            3 => (1..=31)
-                .contains(&self.monthly_day)
-                .then_some(ScheduleFrequency::Monthly(self.monthly_day)),
+            3 => u8::try_from(self.day_of_month())
+                .ok()
+                .filter(|day| (1..=31).contains(day))
+                .map(ScheduleFrequency::Monthly),
             4 => Some(ScheduleFrequency::Hourly),
             // Same reasoning: "every 0 minutes" is not an interval, and it is
             // what the field reads for as long as it is empty.
-            5 => (self.interval_minutes > 0)
-                .then_some(ScheduleFrequency::EveryNMinutes(self.interval_minutes)),
-            6 => CronExpr::parse(&self.cron_expr)
+            5 => Some(self.interval())
+                .filter(|minutes| *minutes > 0)
+                .map(ScheduleFrequency::EveryNMinutes),
+            6 => CronExpr::parse(self.cron_expr.text())
                 .ok()
                 .map(ScheduleFrequency::Cron),
             _ => None,
@@ -1839,16 +1940,6 @@ pub struct SchedulerUI {
     hover: Option<Target>,
     /// Whether the list of keys is up.
     pub show_help: bool,
-    /// The editor of the box with the keyboard: its caret and selection over
-    /// the box's text.
-    editor: TextInput,
-    /// Which box the editor was loaded for. A box the keyboard moves to is
-    /// loaded afresh even when it holds the same text as the last one, so
-    /// its caret starts after what it holds and not where the last box's
-    /// stood.
-    editor_for: Option<FormField>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
 }
 
 /// The most a box holds, in characters: a task's name or command, a cron
@@ -1882,9 +1973,6 @@ impl SchedulerUI {
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             hover: None,
             show_help: false,
-            editor: textline::field_holding("", FIELD_CAPACITY),
-            editor_for: None,
-            clipboard: String::new(),
             tab: UiTab::Tasks,
             dialog: UiDialog::None,
             scheduler: TaskScheduler::new(),
@@ -1986,16 +2074,16 @@ impl SchedulerUI {
                 return None;
             }
         };
-        let id = self
-            .scheduler
-            .add_task(&self.form.name, &self.form.command, freq, now);
+        let id =
+            self.scheduler
+                .add_task(self.form.name.text(), self.form.command.text(), freq, now);
         if self.form.enabled {
             self.scheduler.enable_task(id);
         } else {
             self.scheduler.disable_task(id);
         }
         self.set_dialog(UiDialog::None);
-        self.status_message = Some(format!("Task '{}' added", self.form.name));
+        self.status_message = Some(format!("Task '{}' added", self.form.name.text()));
         Some(id)
     }
 
@@ -2012,9 +2100,13 @@ impl SchedulerUI {
                 return false;
             }
         };
-        let updated =
-            self.scheduler
-                .update_task(id, &self.form.name, &self.form.command, freq, now);
+        let updated = self.scheduler.update_task(
+            id,
+            self.form.name.text(),
+            self.form.command.text(),
+            freq,
+            now,
+        );
         if updated {
             if self.form.enabled {
                 self.scheduler.enable_task(id);
@@ -2022,7 +2114,7 @@ impl SchedulerUI {
                 self.scheduler.disable_task(id);
             }
             self.set_dialog(UiDialog::None);
-            self.status_message = Some(format!("Task '{}' updated", self.form.name));
+            self.status_message = Some(format!("Task '{}' updated", self.form.name.text()));
         }
         updated
     }
@@ -2141,137 +2233,55 @@ impl SchedulerUI {
             return;
         }
         let has_param = param_kind(self.form.frequency_index) == ParamKind::Text;
-        self.focus = Some(match self.focus {
+        let next = match self.focus {
             Some(FormField::Name) => FormField::Command,
             Some(FormField::Command) if has_param => FormField::Param,
             // From an unfocused form Tab lands on Name, which is also where
             // it lands from the last field: one cycle, entered at the top.
             _ => FormField::Name,
-        });
-    }
-
-    /// What `field`'s box shows: its text, or a number's digits -- nothing
-    /// for 0, which no day of the month or interval is, so that deleting
-    /// every digit empties the box rather than leaving a 0 typed after.
-    fn field_text(&self, field: FormField) -> String {
-        let digits = |n: u32| {
-            if n == 0 { String::new() } else { n.to_string() }
         };
-        match field {
-            FormField::Name => self.form.name.clone(),
-            FormField::Command => self.form.command.clone(),
-            FormField::Param => match self.form.frequency_index {
-                3 => digits(u32::from(self.form.monthly_day)),
-                5 => digits(self.form.interval_minutes),
-                6 => self.form.cron_expr.clone(),
-                _ => String::new(),
-            },
-        }
-    }
-
-    /// Write `text` to `field`, if the field can hold it, and say whether it
-    /// did. The numeric fields take digits only and are parsed rather than
-    /// stored as text, so the form can never hold a "day of month" that is
-    /// not a number; and an edit that would push the value past what the
-    /// field can hold is refused whole rather than wrapping the value round
-    /// to something small -- silently rescheduling a monthly job from the
-    /// 31st to the 3rd is the kind of edit a user would not notice until it
-    /// had already run. An empty number box is 0.
-    fn set_field_text(&mut self, field: FormField, text: &str) -> bool {
-        let number = |max: u32| -> Option<u32> {
-            if !text.chars().all(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            if text.is_empty() {
-                return Some(0);
-            }
-            text.parse::<u32>().ok().filter(|n| *n <= max)
-        };
-        match field {
-            FormField::Name => text.clone_into(&mut self.form.name),
-            FormField::Command => text.clone_into(&mut self.form.command),
-            FormField::Param => match self.form.frequency_index {
-                3 => {
-                    let Some(day) = number(31).and_then(|n| u8::try_from(n).ok()) else {
-                        return false;
-                    };
-                    self.form.monthly_day = day;
-                }
-                5 => {
-                    // A minute count past a year is not a schedule anybody
-                    // means; the cap is there to stop arithmetic downstream
-                    // from having to think about overflow, not to be a
-                    // policy.
-                    let Some(minutes) = number(MAX_INTERVAL_MINUTES) else {
-                        return false;
-                    };
-                    self.form.interval_minutes = minutes;
-                }
-                6 => text.clone_into(&mut self.form.cron_expr),
-                _ => return false,
-            },
-        }
-        true
-    }
-
-    /// Load `field`'s text into the editor if the editor holds another box's,
-    /// or this box's text changed under it -- the caret after the text.
-    fn sync_editor(&mut self, field: FormField) {
-        let text = self.field_text(field);
-        if self.editor_for != Some(field) || self.editor.text() != text {
-            self.editor.set_text(&text);
-            self.editor_for = Some(field);
-        }
-    }
-
-    /// Where `field`'s caret is drawn, over `text`, what the box holds: the
-    /// editor's while the box has the keyboard and the editor holds its
-    /// text, after the text if not, at its start without the keyboard. One
-    /// answer for the drawing and for a press.
-    fn field_cursor(&self, field: FormField, text: &str) -> TextCursor {
-        if self.focus != Some(field) {
-            TextCursor::default()
-        } else if self.editor_for == Some(field) && self.editor.text() == text {
-            self.editor.cursor()
-        } else {
-            TextCursor::from(text.len())
+        self.focus = Some(next);
+        // The box types after what it holds, wherever its caret stood when
+        // it last had the keyboard.
+        if let Some(line) = self.form.field_box_mut(next) {
+            line.caret_to_end();
         }
     }
 
     /// A key for the box with the keyboard: the caret keys, Backspace and
     /// Delete at the caret, Ctrl+A, C, X and V, and typing -- AltGr's among
     /// it, and no command's letter: Ctrl-N while filling in the Name field
-    /// must not put an `n` in it. An edit the box cannot hold is refused
-    /// whole (`set_field_text`). Whether anything changed.
-    ///
-    /// The boxes took typing at their end and Backspace from it, and nothing
-    /// else.
+    /// must not put an `n` in it. A number box takes an edit that leaves it
+    /// holding a number within its bound only (`holds_number`), refusing
+    /// any other whole, and shows the number it stands for. Whether
+    /// anything changed: the text, or the caret or the selection.
     fn edit_field(&mut self, key: &KeyEvent) -> bool {
         let Some(field) = self.focus else {
             return false;
         };
-        self.sync_editor(field);
-        let before = self.field_text(field);
-        let kept = self.editor.clone();
-        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FONT_SIZE);
-        let typed = self.editor.text().to_owned();
-        if typed != before && !self.set_field_text(field, &typed) {
-            self.editor = kept;
+        let bound = self.form.number_bound(field);
+        let Some(line) = self.form.field_box_mut(field) else {
             return false;
-        }
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        edit.handled
+        };
+        let edit = match bound {
+            Some(max) => {
+                let edit = line.key_checked(key, |text| holds_number(text, max));
+                if edit.changed {
+                    let shown = digits(box_number(line));
+                    line.set_text(&shown);
+                }
+                edit
+            }
+            None => line.key(key),
+        };
+        edit.changed || edit.moved
     }
 
     /// A press on `field`'s box at `x`: it takes the keyboard, if it is on
     /// screen, with the caret under the pointer, measured against the box as
     /// it was drawn.
     fn press_field(&mut self, field: FormField, x: f32) -> bool {
-        let text = self.field_text(field);
-        let drawn = self.field_cursor(field, &text);
-        let was = (self.focus, self.editor.cursor());
+        let had_the_keyboard = self.focus == Some(field);
         self.focus_field(field);
         if self.focus != Some(field) {
             return false;
@@ -2280,19 +2290,15 @@ impl SchedulerUI {
             .frame(self.window_width, self.window_height)
             .rect_of(|t| *t == Target::Field(field))
         else {
-            return was.0 != self.focus;
+            return !had_the_keyboard;
         };
-        self.sync_editor(field);
-        let cursor = textedit::cursor_at_click(
-            &text,
-            drawn,
-            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
-            FONT_SIZE,
-            FontWeightHint::Regular,
-            x - rect.x - FIELD_TEXT_INSET,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
+        if let Some(line) = self.form.field_box_mut(field) {
+            line.press(
+                x - rect.x - FIELD_TEXT_INSET,
+                rect.w - 2.0 * FIELD_TEXT_INSET,
+                had_the_keyboard,
+            );
+        }
         true
     }
 
@@ -3487,21 +3493,23 @@ impl SchedulerUI {
         );
     }
 
-    /// Draw an editable field, highlighting it and drawing a caret when it has
-    /// the focus.
-    ///
-    /// The caret is drawn at the end of the text because that is where the
-    /// insertion point is: this form appends and backspaces rather than
-    /// offering a movable cursor, so a caret anywhere else would promise an
-    /// edit the field cannot make.
+    /// Draw `field`'s box at `rect`, lit while it has the keyboard, with its
+    /// text and, while it has the keyboard, its caret and selection.
     fn render_text_field(&self, frame: &mut Frame, field: FormField, rect: Rect) {
-        let text = self.field_text(field);
-        self.render_text_field_with(frame, field, rect, &text);
+        if let Some(line) = self.form.field_box(field) {
+            self.render_text_field_with(frame, field, rect, line);
+        }
     }
 
-    /// [`render_text_field`](Self::render_text_field) with the text given --
+    /// [`render_text_field`](Self::render_text_field) with the box given --
     /// for the containment sweep, which needs a text wider than the box.
-    fn render_text_field_with(&self, frame: &mut Frame, field: FormField, rect: Rect, text: &str) {
+    fn render_text_field_with(
+        &self,
+        frame: &mut Frame,
+        field: FormField,
+        rect: Rect,
+        line_box: &LineBox,
+    ) {
         // A control with no area draws nothing and answers nothing. Returning
         // here rather than pushing zero-sized commands is the difference
         // between a field that has been squeezed out of the dialog and one
@@ -3528,58 +3536,39 @@ impl SchedulerUI {
             self.focus_ring_width,
         );
 
-        // The text, and with the keyboard the caret and the selection where
-        // they are, drawn by the toolkit's editor and clipped to the box. The
-        // caret was a bar drawn at the end of the measured text, because the
-        // end was the only place it could be.
+        // The text, and with the keyboard the caret and the selection, only
+        // where the line fits inside the box: one squeezed shorter than a
+        // line, or narrower than its insets, draws none rather than ink
+        // outside itself.
         let line = text::line_height(FONT_SIZE, FontWeightHint::Regular);
-        let (x, y, width) = (
-            rect.x + FIELD_TEXT_INSET,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
-        );
-        let mut tree = RenderTree::new();
-        if text.is_empty() {
-            if focused {
-                textedit::push_caret(
-                    &mut tree,
-                    x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let editing = self.focus == Some(field)
-                && self.editor_for == Some(field)
-                && self.editor.text() == text;
-            textedit::draw(
+        if let (Some(y), Some((x, width))) = (
+            centre_line(rect, line),
+            span(
+                rect,
+                rect.x + FIELD_TEXT_INSET,
+                rect.w - 2.0 * FIELD_TEXT_INSET,
+            ),
+        ) {
+            let mut tree = RenderTree::new();
+            line_box.draw(
                 &mut tree,
-                &textedit::SingleLine {
-                    text,
-                    cursor: self.field_cursor(field, text),
-                    selection_anchor: if editing {
-                        self.editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused,
+                &LineLook {
                     x,
                     y,
                     width,
                     line_height: line,
-                    font_size: FONT_SIZE,
-                    weight: FontWeightHint::Regular,
+                    focused,
+                    placeholder: "",
                     color: self.palette.text,
+                    placeholder_color: self.palette.subtext0,
                     selection_bg: self.palette.accent,
                     selection_fg: self.palette.crust,
                     caret_width: textedit::CARET_WIDTH,
                 },
             );
-        }
-        for command in tree.commands {
-            frame.push(command);
+            for command in tree.commands {
+                frame.push(command);
+            }
         }
 
         frame.hit(target, rect);
@@ -5042,8 +5031,8 @@ mod tests {
         ui.open_add_dialog();
         assert_eq!(ui.dialog, UiDialog::AddTask);
 
-        ui.form.name = String::from("test_task");
-        ui.form.command = String::from("/bin/test");
+        ui.form.name.set_text("test_task");
+        ui.form.command.set_text("/bin/test");
         ui.form.frequency_index = 1; // Daily
 
         let id = ui.commit_add_task(1000);
@@ -5056,7 +5045,7 @@ mod tests {
     fn test_ui_add_task_requires_name() {
         let mut ui = SchedulerUI::new();
         ui.open_add_dialog();
-        ui.form.command = String::from("/bin/test");
+        ui.form.command.set_text("/bin/test");
         // name is empty
         let id = ui.commit_add_task(1000);
         assert!(id.is_none());
@@ -5072,7 +5061,7 @@ mod tests {
         ui.open_edit_dialog(id);
         assert!(matches!(ui.dialog, UiDialog::EditTask(_)));
 
-        ui.form.name = String::from("updated");
+        ui.form.name.set_text("updated");
         let ok = ui.commit_edit_task(id, 2000);
         assert!(ok);
         assert_eq!(
@@ -5126,7 +5115,7 @@ mod tests {
             1000,
         );
         let form = TaskFormState::from_task(&task);
-        assert_eq!(form.name, "weekly_backup");
+        assert_eq!(form.name.text(), "weekly_backup");
         assert_eq!(form.frequency_index, 2);
         assert_eq!(form.weekly_day, 5); // Friday
     }
@@ -5141,7 +5130,7 @@ mod tests {
         assert_eq!(form.build_frequency(), Some(ScheduleFrequency::Hourly));
 
         form.frequency_index = 5;
-        form.interval_minutes = 10;
+        form.interval_minutes.set_text("10");
         assert_eq!(
             form.build_frequency(),
             Some(ScheduleFrequency::EveryNMinutes(10))
@@ -5152,7 +5141,7 @@ mod tests {
     fn test_form_state_build_cron_frequency() {
         let mut form = TaskFormState::new();
         form.frequency_index = 6;
-        form.cron_expr = String::from("*/5 * * * *");
+        form.cron_expr.set_text("*/5 * * * *");
         let freq = form.build_frequency();
         assert!(matches!(freq, Some(ScheduleFrequency::Cron(_))));
     }
@@ -5161,7 +5150,7 @@ mod tests {
     fn test_form_state_invalid_cron_returns_none() {
         let mut form = TaskFormState::new();
         form.frequency_index = 6;
-        form.cron_expr = String::from("invalid");
+        form.cron_expr.set_text("invalid");
         assert!(form.build_frequency().is_none());
     }
 
@@ -5923,10 +5912,10 @@ mod tests {
         probe::click(&mut ui, Target::Field(FormField::Param));
         // Clear the default before typing, the way a user retyping a field does.
         probe::key(&mut ui, &probe::press(Key::Backspace));
-        assert_eq!(ui.form.monthly_day, 0);
+        assert_eq!(ui.form.day_of_month(), 0);
 
         probe::type_str(&mut ui, "31");
-        assert_eq!(ui.form.monthly_day, 31);
+        assert_eq!(ui.form.day_of_month(), 31);
         // 311 is not a day. Dropped rather than wrapped: silently moving a
         // monthly job from the 31st to the 3rd is an edit nobody would notice
         // until it had already run.
@@ -5934,10 +5923,10 @@ mod tests {
             probe::key(&mut ui, &probe::typing("1")),
             EventResult::Ignored
         );
-        assert_eq!(ui.form.monthly_day, 31);
+        assert_eq!(ui.form.day_of_month(), 31);
         // And a letter is not a digit.
         probe::key(&mut ui, &probe::typing("x"));
-        assert_eq!(ui.form.monthly_day, 31);
+        assert_eq!(ui.form.day_of_month(), 31);
     }
 
     /// A day of 0 is not a date, and it is reachable -- the field is typed one
@@ -5951,11 +5940,11 @@ mod tests {
         probe::click(&mut ui, Target::Field(FormField::Command));
         probe::type_str(&mut ui, "/bin/backup");
         ui.form.frequency_index = 3;
-        ui.form.monthly_day = 0;
+        ui.form.monthly_day.set_text("0");
         assert!(!ui.form_is_valid());
-        ui.form.monthly_day = 32;
+        ui.form.monthly_day.set_text("32");
         assert!(!ui.form_is_valid());
-        ui.form.monthly_day = 15;
+        ui.form.monthly_day.set_text("15");
         assert!(ui.form_is_valid());
     }
 
@@ -6050,7 +6039,7 @@ mod tests {
                 "{modifiers:?}+{key:?} was typed"
             );
         }
-        assert_eq!(ui.form.name, "\u{142}");
+        assert_eq!(ui.form.name.text(), "\u{142}");
     }
 
     /// **A key held with Alt or the Windows key is not the main window's.**
@@ -6281,7 +6270,9 @@ mod tests {
         let mut add = SchedulerUI::new();
         add.open_add_dialog();
         add.focus = Some(FormField::Name);
-        add.form.name = "a name far wider than the field it is typed into".to_string();
+        add.form
+            .name
+            .set_text("a name far wider than the field it is typed into");
 
         let mut cron = SchedulerUI::new();
         cron.open_add_dialog();
@@ -6370,13 +6361,13 @@ mod tests {
         // it, and in a window too short for the header that put the title above
         // the header and over the toolbar.
         //
-        // Text and hit boxes are checked as well as fills, because whole passes
-        // here paint no fill of their own -- a list row's five cells are five
-        // runs and nothing else. Note the asymmetry: `frame()` clips the content
-        // area, and a clip hides an overrun from text and from hit boxes but not
-        // from fills, which is why the top-level test above can only ask about
-        // fills. Here each pass is handed an *unclipped* frame, so all three
-        // witnesses are available.
+        // Text, lines and hit boxes are checked as well as fills, because whole
+        // passes here paint no fill of their own -- a list row's five cells are
+        // five runs and nothing else, and a box's caret is a line. Note the
+        // asymmetry: `frame()` clips the content area, and a clip hides an
+        // overrun from text and from hit boxes but not from fills, which is why
+        // the top-level test above can only ask about fills. Here each pass is
+        // handed an *unclipped* frame, so every witness is available.
         /// `margin` is how far a pass may fill outside its box, and only a
         /// text field has one: the toolkit's field draws its focus mark that
         /// far outside the box it is given (`guitk::field::draw`). Its text,
@@ -6394,29 +6385,89 @@ mod tests {
                     "{state}: the {pass} pass, given {region:?}, filled {r:?}"
                 );
             }
+            // A run or a line under a clip is painted only where it meets the
+            // clip -- a box's text scrolled to its caret starts left of the
+            // box, and the clip is what holds it in -- so that is what must lie
+            // inside.
+            let mut clips: Vec<Rect> = Vec::new();
             for c in f.commands() {
-                let RenderCommand::Text {
-                    text,
-                    x,
-                    y,
-                    max_width,
-                    font_size,
-                    font_weight,
-                    ..
-                } = c
-                else {
-                    continue;
+                let (what, drawn) = match c {
+                    RenderCommand::PushClip {
+                        x,
+                        y,
+                        width,
+                        height,
+                    } => {
+                        clips.push(Rect::new(*x, *y, *width, *height));
+                        continue;
+                    }
+                    RenderCommand::PopClip => {
+                        clips.pop();
+                        continue;
+                    }
+                    RenderCommand::Text {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        font_size,
+                        font_weight,
+                        ..
+                    }
+                    | RenderCommand::RichText {
+                        text,
+                        x,
+                        y,
+                        max_width,
+                        font_size,
+                        font_weight,
+                        ..
+                    } => {
+                        // A run has no height in the command stream, so the
+                        // height has to be supplied before the question can be
+                        // asked at all -- which is exactly why the centring bug
+                        // went unseen.
+                        let bound = max_width
+                            .unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
+                        (
+                            format!("inked {text:?}"),
+                            Rect::new(*x, *y, bound, *font_size),
+                        )
+                    }
+                    // A caret is a line, and is held to its box as its text is.
+                    // A line is as wide as its stroke across it, or it would be
+                    // an empty rectangle, which is inside every region.
+                    RenderCommand::Line {
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        width,
+                        ..
+                    } => {
+                        let (left, top) = (x1.min(*x2), y1.min(*y2));
+                        let (w, h) = ((x2 - x1).abs(), (y2 - y1).abs());
+                        let line = if w < f32::EPSILON {
+                            Rect::new(left - width / 2.0, top, *width, h)
+                        } else if h < f32::EPSILON {
+                            Rect::new(left, top - width / 2.0, w, *width)
+                        } else {
+                            Rect::new(left, top, w, h)
+                        };
+                        (String::from("drew a line"), line)
+                    }
+                    _ => continue,
                 };
-                // A run has no height in the command stream, so the height has
-                // to be supplied before the question can be asked at all --
-                // which is exactly why the centring bug went unseen.
-                let bound =
-                    max_width.unwrap_or_else(|| text::measure(text, *font_size, *font_weight));
-                let run = Rect::new(*x, *y, bound, *font_size);
-                assert!(
-                    inside(region, run),
-                    "{state}: the {pass} pass, given {region:?}, inked {text:?} at {run:?}"
-                );
+                let painted = match clips.last() {
+                    Some(clip) => drawn.intersect(*clip),
+                    None => Some(drawn),
+                };
+                if let Some(painted) = painted {
+                    assert!(
+                        inside(region, painted),
+                        "{state}: the {pass} pass, given {region:?}, {what} at {painted:?}"
+                    );
+                }
             }
             for (target, rect) in f.hits() {
                 assert!(
@@ -6518,15 +6569,20 @@ mod tests {
             type Control = fn(&SchedulerUI, &mut Frame, Rect);
             let controls: [(&'static str, Control); 6] = [
                 ("text field", |u, f, r| {
+                    let wide = LineBox::holding(
+                        "a value far wider than the field",
+                        FIELD_CAPACITY,
+                        FONT_SIZE,
+                    );
+                    u.render_text_field_with(f, FormField::Name, r, &wide);
+                }),
+                ("empty text field", |u, f, r| {
                     u.render_text_field_with(
                         f,
                         FormField::Name,
                         r,
-                        "a value far wider than the field",
+                        &LineBox::new(FIELD_CAPACITY, FONT_SIZE),
                     );
-                }),
-                ("empty text field", |u, f, r| {
-                    u.render_text_field_with(f, FormField::Name, r, "");
                 }),
                 ("picker", |u, f, r| {
                     u.render_picker(f, Target::FrequencyCycle, r, "Every N minutes");
@@ -6773,7 +6829,7 @@ mod tests {
             &Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")),
         );
         assert!(!ui.show_help, "? raised the list from the name box");
-        assert_eq!(ui.form.name, "?", "? was not typed");
+        assert_eq!(ui.form.name.text(), "?", "? was not typed");
         hit(&mut ui, Key::F1, Modifiers::NONE);
         assert!(ui.show_help, "F1 did not raise the list from the name box");
         assert!(
@@ -6917,7 +6973,7 @@ mod tests {
             hit(&mut ui, Key::Left, Modifiers::NONE);
         }
         type_text(&mut ui, "c");
-        assert_eq!(ui.form.name, "Backup", "the caret did not move");
+        assert_eq!(ui.form.name.text(), "Backup", "the caret did not move");
         let at =
             name.x + FIELD_TEXT_INSET + text::measure("Bac", FONT_SIZE, FontWeightHint::Regular);
         let carets = caret_xs_in(&ui, name);
@@ -6928,16 +6984,16 @@ mod tests {
         );
         hit(&mut ui, Key::Home, Modifiers::NONE);
         hit(&mut ui, Key::Delete, Modifiers::NONE);
-        assert_eq!(ui.form.name, "ackup", "Delete at the caret");
+        assert_eq!(ui.form.name.text(), "ackup", "Delete at the caret");
         hit(&mut ui, Key::A, Modifiers::ctrl());
         hit(&mut ui, Key::C, Modifiers::ctrl());
         hit(&mut ui, Key::Tab, Modifiers::NONE);
         assert_eq!(ui.focus, Some(FormField::Command));
         hit(&mut ui, Key::V, Modifiers::ctrl());
-        assert_eq!(ui.form.command, "ackup", "Ctrl+V");
+        assert_eq!(ui.form.command.text(), "ackup", "Ctrl+V");
         hit(&mut ui, Key::A, Modifiers::ctrl());
         hit(&mut ui, Key::X, Modifiers::ctrl());
-        assert_eq!(ui.form.command, "", "Ctrl+X");
+        assert_eq!(ui.form.command.text(), "", "Ctrl+X");
 
         // A press past the name's end puts the caret at its end, and one at
         // its start puts it there.
@@ -6949,7 +7005,7 @@ mod tests {
             MouseEventKind::Press(MouseButton::Left),
         );
         type_text(&mut ui, "!");
-        assert_eq!(ui.form.name, "ackup!");
+        assert_eq!(ui.form.name.text(), "ackup!");
         mouse(
             &mut ui,
             name.x + FIELD_TEXT_INSET,
@@ -6958,7 +7014,8 @@ mod tests {
         );
         type_text(&mut ui, "B");
         assert_eq!(
-            ui.form.name, "Backup!",
+            ui.form.name.text(),
+            "Backup!",
             "the press did not put the caret there"
         );
     }
@@ -6975,30 +7032,32 @@ mod tests {
         assert_eq!(ui.focus, Some(FormField::Param));
         hit(&mut ui, Key::A, Modifiers::ctrl());
         type_text(&mut ui, "3");
-        assert_eq!(ui.form.monthly_day, 3);
+        assert_eq!(ui.form.day_of_month(), 3);
         type_text(&mut ui, "2");
         assert_eq!(
-            ui.form.monthly_day, 3,
+            ui.form.day_of_month(),
+            3,
             "a day of the month past 31 was taken"
         );
         type_text(&mut ui, "1");
-        assert_eq!(ui.form.monthly_day, 31);
+        assert_eq!(ui.form.day_of_month(), 31);
         hit(&mut ui, Key::Home, Modifiers::NONE);
         type_text(&mut ui, "x");
-        assert_eq!(ui.form.monthly_day, 31, "a letter was taken");
+        assert_eq!(ui.form.day_of_month(), 31, "a letter was taken");
         // `+31` parses as 31, and `+` is no digit: refused, which leaves the
         // caret at the start for the Delete below. Taken, it would stand in
         // the editor in front of a 31 the box does not show.
         type_text(&mut ui, "+");
         hit(&mut ui, Key::Delete, Modifiers::NONE);
         assert_eq!(
-            ui.form.monthly_day, 1,
+            ui.form.day_of_month(),
+            1,
             "Delete at the caret, or a + was taken"
         );
         hit(&mut ui, Key::Backspace, Modifiers::NONE);
-        assert_eq!(ui.form.monthly_day, 1, "Backspace at the start deleted");
+        assert_eq!(ui.form.day_of_month(), 1, "Backspace at the start deleted");
         hit(&mut ui, Key::Delete, Modifiers::NONE);
-        assert_eq!(ui.form.monthly_day, 0);
+        assert_eq!(ui.form.day_of_month(), 0);
         let param = probe::rect_of(&ui, Target::Field(FormField::Param)).expect("the day box");
         assert!(
             !commands(&ui).iter().any(|c| matches!(c,
@@ -7007,25 +7066,115 @@ mod tests {
             "the emptied box shows a 0 nobody typed"
         );
         assert_eq!(carets_in(&ui, param), 1);
+        type_text(&mut ui, "0");
+        assert_eq!(
+            ui.form.monthly_day.text(),
+            "",
+            "a 0 typed into the empty box is shown"
+        );
+        type_text(&mut ui, "7");
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        type_text(&mut ui, "0");
+        assert_eq!(
+            ui.form.monthly_day.text(),
+            "7",
+            "the box shows digits that are not its day"
+        );
+    }
+
+    /// **The interval's box takes minutes, and the cron box takes text**: the
+    /// Param box is the one the frequency asks for, and holds what that one
+    /// may -- digits up to [`MAX_INTERVAL_MINUTES`] for an interval, anything
+    /// for a cron expression.
+    #[test]
+    fn the_param_box_is_the_one_the_frequency_asks_for() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        ui.form.frequency_index = 5;
+        ui.focus_field(FormField::Param);
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        type_text(&mut ui, "45x");
+        assert_eq!(ui.form.interval(), 45, "a letter in the interval was taken");
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        type_text(&mut ui, &(MAX_INTERVAL_MINUTES + 1).to_string());
+        assert_eq!(
+            ui.form.interval(),
+            MAX_INTERVAL_MINUTES / 10,
+            "the digit taking the interval past its bound was taken"
+        );
+        assert_eq!(
+            ui.form.build_frequency(),
+            Some(ScheduleFrequency::EveryNMinutes(MAX_INTERVAL_MINUTES / 10))
+        );
+
+        ui.form.frequency_index = 6;
+        hit(&mut ui, Key::A, Modifiers::ctrl());
+        type_text(&mut ui, "*/5 * * * *");
+        assert_eq!(ui.form.cron_expr.text(), "*/5 * * * *");
+        assert_eq!(
+            ui.form.interval(),
+            MAX_INTERVAL_MINUTES / 10,
+            "the cron went to the interval"
+        );
+        assert!(matches!(
+            ui.form.build_frequency(),
+            Some(ScheduleFrequency::Cron(_))
+        ));
+    }
+
+    /// **A press in a box with the keyboard lands where the text was drawn**:
+    /// a name wider than its box is drawn scrolled to its caret, so a press at
+    /// the box's right edge is near the name's end, not a box's width from its
+    /// start.
+    #[test]
+    fn a_press_in_a_long_name_lands_where_it_was_drawn() {
+        let mut ui = SchedulerUI::new();
+        ui.open_add_dialog();
+        let name = probe::rect_of(&ui, Target::Field(FormField::Name)).expect("the name box");
+        let long = "W".repeat(200);
+        type_text(&mut ui, &long);
+        assert_eq!(ui.form.name.text(), long, "control: the name typed");
+        assert!(
+            text::measure(&long, FONT_SIZE, FontWeightHint::Regular) > 2.0 * name.w,
+            "control: the name is wider than the box"
+        );
+        mouse(
+            &mut ui,
+            name.right() - FIELD_TEXT_INSET - 1.0,
+            name.y + name.h / 2.0,
+            MouseEventKind::Press(MouseButton::Left),
+        );
+        let caret = ui.form.name.input().cursor().byte();
+        assert!(
+            caret > long.len() / 2,
+            "the press was measured from the name's start: caret at {caret} of {}",
+            long.len()
+        );
     }
 
     /// **A box the keyboard moves to types after what it holds**, wherever
-    /// the caret stood in the box it came from -- even when the two hold the
-    /// same text, which is when an editor left as it was would type at the
-    /// old box's caret.
+    /// its caret stood when it last had the keyboard.
     #[test]
     fn a_box_the_keyboard_moves_to_types_after_what_it_holds() {
         let mut ui = SchedulerUI::new();
         ui.open_add_dialog();
-        type_text(&mut ui, "ab");
-        ui.form.command = String::from("ab");
-        hit(&mut ui, Key::Home, Modifiers::NONE);
         hit(&mut ui, Key::Tab, Modifiers::NONE);
         assert_eq!(ui.focus, Some(FormField::Command));
+        type_text(&mut ui, "ab");
+        hit(&mut ui, Key::Home, Modifiers::NONE);
+        // Round the ring -- Once asks for no parameter -- and back.
+        hit(&mut ui, Key::Tab, Modifiers::NONE);
+        hit(&mut ui, Key::Tab, Modifiers::NONE);
+        assert_eq!(
+            ui.focus,
+            Some(FormField::Command),
+            "control: a lap of two boxes"
+        );
         type_text(&mut ui, "c");
         assert_eq!(
-            ui.form.command, "abc",
-            "Tab left the caret where the last box had it"
+            ui.form.command.text(),
+            "abc",
+            "Tab left the caret where the box last had it"
         );
     }
 }

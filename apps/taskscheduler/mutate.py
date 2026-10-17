@@ -645,61 +645,82 @@ MUTATIONS += [
     ),
 ]
 
-# The boxes edit at a caret (2026-10-04,
-# known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): they
-# took typing at their end and Backspace from it, and nothing else.
+# The boxes edit at a caret: they are textline LineBoxes, whose own table
+# (apps/textline/mutate.py) holds the rows for the editing and the drawing.
+# These are the rows for what taskscheduler does with them.
 CARET = "a_box_edits_at_a_caret"
 NUMBER = "a_number_box_edits_its_digits_and_refuses_the_rest"
 MOVES_TO = "a_box_the_keyboard_moves_to_types_after_what_it_holds"
+PARAM = "the_param_box_is_the_one_the_frequency_asks_for"
+LONG_PRESS = "a_press_in_a_long_name_lands_where_it_was_drawn"
+SWEEP = "no_pass_paints_outside_the_region_it_owns"
 
 MUTATIONS += [
     (
         "a number box takes a letter",
-        "            if !text.chars().all(|c| c.is_ascii_digit()) {\n",
-        "            if false {\n",
+        "    if !text.chars().all(|c| c.is_ascii_digit()) {\n",
+        "    if false {\n",
         [NUMBER],
     ),
     (
         "a number past what the box holds is taken",
-        "            text.parse::<u32>().ok().filter(|n| *n <= max)\n",
-        "            text.parse::<u32>().ok()\n",
-        [NUMBER],
-    ),
-    (
-        "a refused edit stays in the editor",
-        "            self.editor = kept;\n",
-        "            let _ = kept;\n",
+        "    text.is_empty() || text.parse::<u32>().is_ok_and(|n| n <= max)\n",
+        "    text.is_empty() || text.parse::<u32>().is_ok()\n",
         [NUMBER],
     ),
     (
         "an edit the box refuses is kept anyway",
-        "        if typed != before && !self.set_field_text(field, &typed) {\n",
-        "        if typed != before && !self.set_field_text(field, &typed) && false {\n",
+        "                let edit = line.key_checked(key, |text| holds_number(text, max));\n",
+        "                let edit = line.key(key);\n",
+        [NUMBER, PARAM],
+    ),
+    (
+        "the interval is not a number",
+        "            (FormField::Param, 5) => Some(MAX_INTERVAL_MINUTES),\n",
+        "            (FormField::Param, 5) => None,\n",
+        [PARAM],
+    ),
+    (
+        "the Param box is the day's whatever the frequency",
+        "                5 => Some(&mut self.interval_minutes),\n",
+        "                5 => Some(&mut self.monthly_day),\n",
+        [PARAM],
+    ),
+    (
+        "a number box shows digits that are not its number",
+        "                    line.set_text(&shown);\n",
+        "                    let _ = &shown;\n",
         [NUMBER],
     ),
     (
         "an emptied number box shows a 0",
-        "                3 => digits(u32::from(self.form.monthly_day)),\n",
-        "                3 => self.form.monthly_day.to_string(),\n",
+        "    if n == 0 { String::new() } else { n.to_string() }\n",
+        "    n.to_string()\n",
         [NUMBER],
     ),
     (
-        "the editor is kept for the box the keyboard moved to",
-        "        if self.editor_for != Some(field) || self.editor.text() != text {\n",
-        "        if self.editor.text() != text {\n",
+        "a refused key is said to change the box",
+        "        edit.changed || edit.moved\n",
+        "        edit.handled\n",
+        ["a_numeric_field_refuses_a_digit_that_would_take_it_past_its_bound"],
+    ),
+    (
+        "Tab leaves a box's caret where it last stood",
+        "        if let Some(line) = self.form.field_box_mut(next) {\n            line.caret_to_end();\n        }\n",
+        "",
         [MOVES_TO],
     ),
     (
-        "a cut takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
+        "a press puts the caret at the start",
+        "                x - rect.x - FIELD_TEXT_INSET,\n",
+        "                0.0,\n",
         [CARET],
     ),
     (
-        "a press puts the caret at the start",
-        "            x - rect.x - FIELD_TEXT_INSET,\n",
-        "            0.0,\n",
-        [CARET],
+        "a press in a box with the keyboard is measured from the text's start",
+        "                had_the_keyboard,\n",
+        "                false,\n",
+        [LONG_PRESS],
     ),
     (
         "a press does not place the caret",
@@ -708,16 +729,26 @@ MUTATIONS += [
         [CARET],
     ),
     (
-        "the caret is drawn at the start",
-        "                    cursor: self.field_cursor(field, text),\n",
-        "                    cursor: TextCursor::default(),\n",
-        [CARET],
+        "a box with the keyboard is drawn without it",
+        "                    focused,\n                    placeholder: \"\",\n",
+        "                    focused: false,\n                    placeholder: \"\",\n",
+        [CARET, NUMBER],
     ),
     (
-        "an empty box with the keyboard has no caret",
-        "        if text.is_empty() {\n            if focused {\n",
-        "        if text.is_empty() {\n            if false {\n",
-        [CARET, NUMBER],
+        "a box shorter than its line draws its text outside itself",
+        "            centre_line(rect, line),\n",
+        "            Some(rect.y + (rect.h - line) / 2.0),\n",
+        [SWEEP],
+    ),
+    (
+        "a box narrower than its insets draws its caret outside itself",
+        "            span(\n"
+        "                rect,\n"
+        "                rect.x + FIELD_TEXT_INSET,\n"
+        "                rect.w - 2.0 * FIELD_TEXT_INSET,\n"
+        "            ),\n",
+        "            Some((rect.x + FIELD_TEXT_INSET, rect.w - 2.0 * FIELD_TEXT_INSET)),\n",
+        [SWEEP],
     ),
 ]
 

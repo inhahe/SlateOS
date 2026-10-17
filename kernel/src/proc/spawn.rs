@@ -24789,6 +24789,10 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
                 Some(0x76) => "the file could not be opened read-only",
                 Some(0x77) => "F_ADD_SEALS through a read-only descriptor was not EPERM",
                 Some(0x78) => "F_ADD_SEALS on a file that is no memfd was not EINVAL",
+                Some(0x79) => "a memfd could not be made, or written",
+                Some(0x7A) => "a memfd could not be reopened through /proc/self/fd/N",
+                Some(0x7B) => "a memfd reopened read-only did not read its bytes from offset 0",
+                Some(0x7C) => "a memfd reopened read-only took a write",
                 Some(0x5F) => "a pread failed",
                 None => "no exit code: the program died",
                 _ => "unexpected exit code",
@@ -24853,7 +24857,8 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
          msync, a second view, EACCES on a read-only descriptor, saved by the last unmap, \
          a write seal refused, a memfd mapped and sealed, a pread into the mapping, msync \
          past the end, over a hole and of the stack, an append-only file, an \
-         MFD_NOEXEC_SEAL memfd not executed, F_ADD_SEALS's order): OK"
+         MFD_NOEXEC_SEAL memfd not executed, F_ADD_SEALS's order, a memfd reopened \
+         read-only): OK"
     );
     Ok(())
 }

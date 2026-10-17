@@ -28,13 +28,12 @@ use guitk::field;
 use guitk::frame::Rect;
 use guitk::render::{FontWeightHint, RenderCommand, TextOverflow};
 use guitk::style::CornerRadii;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{LineBox, LineLook};
 
 mod net;
 
@@ -998,13 +997,8 @@ pub struct IrcClientApp {
     /// Counted backwards because a chat pins to its bottom: zero is "showing
     /// the latest message", which is where every conversation opens.
     pub chat_scroll: usize,
-    pub input_text: String,
-    /// The message line's editor -- its caret and selection over
-    /// `input_text` -- reloaded when the line changed under it: a line
-    /// recalled from history, or sent.
-    input_editor: TextInput,
-    /// What the message line's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    input_clipboard: String,
+    /// The message line: what is being written, and its caret.
+    pub input_text: LineBox,
     pub input_history: Vec<String>,
     pub input_history_idx: Option<usize>,
     pub nick_list_visible: bool,
@@ -1080,9 +1074,7 @@ impl IrcClientApp {
             channel_list_visible: false,
             channel_list_filter: String::new(),
             chat_scroll: 0,
-            input_text: String::new(),
-            input_editor: textline::field_holding("", INPUT_CAPACITY),
-            input_clipboard: String::new(),
+            input_text: LineBox::new(INPUT_CAPACITY, INPUT_TEXT_SIZE),
             input_history: Vec::new(),
             input_history_idx: None,
             nick_list_visible: true,
@@ -2082,67 +2074,27 @@ impl IrcClientApp {
     /// The line took typing at its end and Backspace from it, and nothing
     /// else.
     fn input_key(&mut self, event: &KeyEvent) -> bool {
-        if self.input_editor.text() != self.input_text {
-            self.input_editor.set_text(&self.input_text);
-        }
-        let before = (
-            self.input_editor.cursor(),
-            self.input_editor.selection_anchor(),
-        );
-        let edit = textline::apply_key(
-            &mut self.input_editor,
-            event,
-            &self.input_clipboard,
-            INPUT_TEXT_SIZE,
-        );
-        if let Some(copied) = edit.copied {
-            self.input_clipboard = copied;
-        }
-        if self.input_editor.text() != self.input_text {
-            self.input_text = self.input_editor.text().to_owned();
+        let edit = self.input_text.key(event);
+        if edit.changed {
             // Editing leaves the history: the line being edited is the
             // user's own, not the recalled one it started from.
             self.input_history_idx = None;
             return true;
         }
-        before
-            != (
-                self.input_editor.cursor(),
-                self.input_editor.selection_anchor(),
-            )
-    }
-
-    /// Where the message line's caret is: the editor's, or the end of the
-    /// line where the line changed under the editor -- a line recalled from
-    /// history is edited from its end. One answer for the drawing and for a
-    /// press.
-    fn input_cursor(&self) -> TextCursor {
-        if self.input_editor.text() == self.input_text {
-            self.input_editor.cursor()
-        } else {
-            TextCursor::from(self.input_text.len())
-        }
+        edit.moved
     }
 
     /// A press in the message line at `x`: the caret under the pointer,
-    /// measured against the line as it was drawn.
+    /// measured against the line as it was drawn -- with the keyboard,
+    /// which the line always has.
     fn press_input(&mut self, x: f32) {
         let band = self.input_band();
         let rect = Self::input_field_rect(band.x, band.y, band.w, band.h);
-        let drawn = self.input_cursor();
-        if self.input_editor.text() != self.input_text {
-            self.input_editor.set_text(&self.input_text);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.input_text,
-            drawn,
-            (rect.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
-            INPUT_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.input_text.press(
             x - rect.x - INPUT_TEXT_INSET,
+            rect.w - 2.0 * INPUT_TEXT_INSET,
+            true,
         );
-        self.input_editor.set_selection_anchor(None);
-        self.input_editor.set_cursor(cursor);
     }
 
     /// Step back (`1`) or forward (`-1`) through what has been typed before.
@@ -2170,16 +2122,19 @@ impl IrcClientApp {
             return false;
         }
         self.input_history_idx = next;
-        self.input_text = next
+        // Edited from its end, as a line put in the box from outside is.
+        let recalled = next
             .and_then(|i| self.input_history.get(i))
             .cloned()
             .unwrap_or_default();
+        self.input_text.set_text(&recalled);
         true
     }
 
     /// Send whatever has been typed. Returns whether anything changed.
     pub fn submit_input(&mut self) -> bool {
-        let line = std::mem::take(&mut self.input_text);
+        let line = self.input_text.text().to_owned();
+        self.input_text.clear();
         self.input_history_idx = None;
         if line.trim().is_empty() {
             return false;
@@ -3058,44 +3013,18 @@ impl IrcClientApp {
         // or, empty, what it is for. The caret was fixed at the end, the only
         // place the keys could type.
         let line = guitk::text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
-        let (tx, ty, tw) = (
-            field_rect.x + INPUT_TEXT_INSET,
-            field_rect.y + (field_rect.h - line) / 2.0,
-            (field_rect.w - 2.0 * INPUT_TEXT_INSET).max(0.0),
-        );
-        if self.input_text.is_empty() {
-            cmds.push(RenderCommand::Text {
-                x: tx,
-                y: ty,
-                text: "Type a message... (/help for commands)".to_string(),
-                font_size: INPUT_TEXT_SIZE,
-                color: self.palette.subtext0,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-        }
         let mut tree = RenderTree::new();
-        textedit::draw(
+        self.input_text.draw(
             &mut tree,
-            &textedit::SingleLine {
-                text: &self.input_text,
-                cursor: self.input_cursor(),
-                // The editor's selection only while it is the line's: a line
-                // changed under it has not been reloaded into it yet.
-                selection_anchor: if self.input_editor.text() == self.input_text {
-                    self.input_editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused: state.focused,
-                x: tx,
-                y: ty,
-                width: tw,
+            &LineLook {
+                x: field_rect.x + INPUT_TEXT_INSET,
+                y: field_rect.y + (field_rect.h - line) / 2.0,
+                width: field_rect.w - 2.0 * INPUT_TEXT_INSET,
                 line_height: line,
-                font_size: INPUT_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused: state.focused,
+                placeholder: "Type a message... (/help for commands)",
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -3903,7 +3832,7 @@ mod tests {
                 );
             }
             let before = app.server_messages.len();
-            app.input_text = line;
+            app.input_text.set_text(&line);
             app.submit_input();
             let after = &app.server_messages[before..];
             assert!(
@@ -3926,7 +3855,7 @@ mod tests {
     #[test]
     fn the_timestamps_command_shows_and_hides_them() {
         let mut app = joined();
-        app.input_text = String::from("hello");
+        app.input_text.set_text("hello");
         app.submit_input();
 
         let stamped = drawn_text(&app);
@@ -3935,7 +3864,7 @@ mod tests {
             "control: timestamps start on in this program"
         );
 
-        app.input_text = String::from("/timestamps");
+        app.input_text.set_text("/timestamps");
         app.submit_input();
         assert!(!app.show_timestamps, "/timestamps did not turn them off");
         let unstamped = drawn_text(&app);
@@ -3944,7 +3873,7 @@ mod tests {
             "/timestamps changed the setting and not the window"
         );
 
-        app.input_text = String::from("/timestamps");
+        app.input_text.set_text("/timestamps");
         app.submit_input();
         assert!(app.show_timestamps, "/timestamps is a switch, not a door");
     }
@@ -3954,7 +3883,7 @@ mod tests {
     fn help_prints_every_command() {
         let mut app = joined();
         let before = app.server_messages.len();
-        app.input_text = String::from("/help");
+        app.input_text.set_text("/help");
         app.submit_input();
         let printed: String = app.server_messages[before..]
             .iter()
@@ -4008,13 +3937,13 @@ mod tests {
     fn key_states() -> Vec<IrcClientApp> {
         let typed = || {
             let mut app = joined();
-            app.input_text = String::from("something");
+            app.input_text.set_text("something");
             app
         };
         // With a conversation long enough to scroll...
         let mut long = joined();
         for i in 0..200 {
-            long.input_text = format!("line {i}");
+            long.input_text.set_text(&format!("line {i}"));
             long.submit_input();
         }
         // ...and a second one already scrolled up, so `PageDown` has
@@ -4025,19 +3954,19 @@ mod tests {
         // fixture would be the test deciding the type's interface.
         let mut scrolled_up = joined();
         for i in 0..200 {
-            scrolled_up.input_text = format!("line {i}");
+            scrolled_up.input_text.set_text(&format!("line {i}"));
             scrolled_up.submit_input();
         }
         scrolled_up.handle_event(&key(Key::PageUp));
         // With something in the history to walk back into...
         let mut recalled = joined();
-        recalled.input_text = String::from("earlier");
+        recalled.input_text.set_text("earlier");
         recalled.submit_input();
         // ...and already walked back, so `Down` has somewhere forward to go.
         // It declines otherwise, correctly: there is no line after the one
         // being typed. The guard found that before this state existed.
         let mut walked_back = joined();
-        walked_back.input_text = String::from("earlier");
+        walked_back.input_text.set_text("earlier");
         walked_back.submit_input();
         walked_back.handle_event(&key(Key::Up));
         // With the list up, so Escape has it to close.
@@ -4054,7 +3983,7 @@ mod tests {
     #[test]
     fn the_shortcut_card_takes_every_key_and_press_while_it_is_up() {
         let mut app = joined();
-        app.input_text = String::from("hello");
+        app.input_text.set_text("hello");
         let panel = app.active_panel.clone();
         // A sidebar row naming some other panel, found with the geometry the
         // press is read with.
@@ -4085,7 +4014,8 @@ mod tests {
         app.handle_event(&typed_h);
         app.handle_event(&key(Key::Enter));
         assert_eq!(
-            app.input_text, "hello",
+            app.input_text.text(),
+            "hello",
             "a key typed or sent the line under the card"
         );
         app.handle_event(&key(Key::Tab));
@@ -4363,11 +4293,12 @@ mod tests {
         let mut app = joined();
         type_line(&mut app, "hi");
         assert_eq!(
-            app.input_text, "hi",
+            app.input_text.text(),
+            "hi",
             "`input_text` was drawn by the renderer and written by nobody"
         );
         assert!(app.handle_event(&key(Key::Backspace)));
-        assert_eq!(app.input_text, "h");
+        assert_eq!(app.input_text.text(), "h");
     }
 
     #[test]
@@ -4382,7 +4313,11 @@ mod tests {
         let before = app.find_channel("#one").map_or(0, |ch| ch.messages.len());
         type_line(&mut app, "hello everyone");
         assert!(app.handle_event(&key(Key::Enter)));
-        assert_eq!(app.input_text, "", "the line is sent, not left behind");
+        assert_eq!(
+            app.input_text.text(),
+            "",
+            "the line is sent, not left behind"
+        );
         let ch = app.find_channel("#one").expect("the channel");
         assert_eq!(ch.messages.len(), before + 1);
         let last = ch.messages.last().expect("a message");
@@ -4410,7 +4345,7 @@ mod tests {
         let before = app.find_channel("#one").map_or(0, |ch| ch.messages.len());
         type_line(&mut app, "never mind");
         assert!(app.handle_event(&key(Key::Escape)));
-        assert_eq!(app.input_text, "");
+        assert_eq!(app.input_text.text(), "");
         assert_eq!(
             app.find_channel("#one").map_or(0, |ch| ch.messages.len()),
             before
@@ -4430,11 +4365,12 @@ mod tests {
 
         assert!(app.handle_event(&key(Key::Up)));
         assert_eq!(
-            app.input_text, "second",
+            app.input_text.text(),
+            "second",
             "the most recent line comes back first"
         );
         assert!(app.handle_event(&key(Key::Up)));
-        assert_eq!(app.input_text, "first");
+        assert_eq!(app.input_text.text(), "first");
         assert!(
             !app.handle_event(&key(Key::Up)),
             "there is nothing older to recall"
@@ -4451,12 +4387,13 @@ mod tests {
 
         app.handle_event(&key(Key::Up));
         app.handle_event(&key(Key::Up));
-        assert_eq!(app.input_text, "first");
+        assert_eq!(app.input_text.text(), "first");
         assert!(app.handle_event(&key(Key::Down)));
-        assert_eq!(app.input_text, "second");
+        assert_eq!(app.input_text.text(), "second");
         assert!(app.handle_event(&key(Key::Down)));
         assert_eq!(
-            app.input_text, "",
+            app.input_text.text(),
+            "",
             "past the newest is the empty line again"
         );
     }
@@ -4476,7 +4413,7 @@ mod tests {
         app.handle_event(&key(Key::Up));
         assert_eq!(app.input_history_idx, Some(0));
         type_line(&mut app, "!");
-        assert_eq!(app.input_text, "hello!");
+        assert_eq!(app.input_text.text(), "hello!");
         assert_eq!(
             app.input_history_idx, None,
             "the line being edited is the user's, not the recalled one it \
@@ -5362,16 +5299,20 @@ mod tests {
         for (k, t, m) in [(Key::K, "k", ctrl), (Key::X, "x", alt), (Key::E, "e", win)] {
             assert!(!app.handle_event(&chord(k, t, m)), "{m:?}+{k:?} was taken");
         }
-        assert_eq!(app.input_text, "", "a command's letter was typed");
+        assert_eq!(app.input_text.text(), "", "a command's letter was typed");
         app.handle_event(&chord(Key::Q, "@", altgr));
-        assert_eq!(app.input_text, "@", "AltGr+Q did not type its @");
+        assert_eq!(app.input_text.text(), "@", "AltGr+Q did not type its @");
 
-        app.input_text = String::from("hello");
+        app.input_text.set_text("hello");
         let sent = app.outbox.len();
         for m in [ctrl, alt, win] {
             app.handle_event(&chord(Key::Enter, "\r", m));
         }
-        assert_eq!(app.input_text, "hello", "a chord on Enter sent the line");
+        assert_eq!(
+            app.input_text.text(),
+            "hello",
+            "a chord on Enter sent the line"
+        );
         assert_eq!(app.outbox.len(), sent);
         let shown = app.nick_list_visible;
         app.handle_event(&chord(Key::Tab, "\t", ctrl));
@@ -5456,7 +5397,7 @@ mod tests {
             let at = cmds
                 .iter()
                 .position(|c| {
-                    matches!(c, RenderCommand::RichText { text, .. } if *text == app.input_text)
+                    matches!(c, RenderCommand::RichText { text, .. } if *text == app.input_text.text())
                 })
                 .expect("the line is not drawn in its box");
             match cmds.get(at + 1) {
@@ -5515,7 +5456,7 @@ mod tests {
         type_line(&mut app, "helo");
         app.handle_event(&key(Key::Left));
         type_line(&mut app, "l");
-        assert_eq!(app.input_text, "hello", "the caret did not move");
+        assert_eq!(app.input_text.text(), "hello", "the caret did not move");
         let rect = input_rect(&app);
         let at = rect.x
             + INPUT_TEXT_INSET
@@ -5529,7 +5470,7 @@ mod tests {
 
         app.handle_event(&key(Key::Home));
         app.handle_event(&key(Key::Delete));
-        assert_eq!(app.input_text, "ello", "Delete at the caret");
+        assert_eq!(app.input_text.text(), "ello", "Delete at the caret");
         app.handle_event(&key(Key::End));
         app.handle_event(&chord(Key::Home, "", Modifiers::shift()));
         let line = guitk::text::line_height(INPUT_TEXT_SIZE, FontWeightHint::Regular);
@@ -5547,14 +5488,14 @@ mod tests {
         );
         app.handle_event(&chord(Key::C, "", Modifiers::ctrl()));
         type_line(&mut app, "h");
-        assert_eq!(app.input_text, "h", "Shift+Home did not select");
+        assert_eq!(app.input_text.text(), "h", "Shift+Home did not select");
         app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
-        assert_eq!(app.input_text, "hello", "Ctrl+C or Ctrl+V");
+        assert_eq!(app.input_text.text(), "hello", "Ctrl+C or Ctrl+V");
         app.handle_event(&chord(Key::A, "", Modifiers::ctrl()));
         app.handle_event(&chord(Key::X, "", Modifiers::ctrl()));
-        assert_eq!(app.input_text, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(app.input_text.text(), "", "Ctrl+A and Ctrl+X");
         app.handle_event(&chord(Key::V, "", Modifiers::ctrl()));
-        assert_eq!(app.input_text, "hello", "Ctrl+X took nothing");
+        assert_eq!(app.input_text.text(), "hello", "Ctrl+X took nothing");
 
         // A press at the start of the line puts the caret there, and one
         // past its end at its end.
@@ -5562,12 +5503,13 @@ mod tests {
         assert!(app.handle_event(&click(rect.x + INPUT_TEXT_INSET + 0.5, mid)));
         type_line(&mut app, "<");
         assert_eq!(
-            app.input_text, "<hello",
+            app.input_text.text(),
+            "<hello",
             "the press did not put the caret there"
         );
         app.handle_event(&click(rect.right() - 2.0, mid));
         type_line(&mut app, ">");
-        assert_eq!(app.input_text, "<hello>");
+        assert_eq!(app.input_text.text(), "<hello>");
     }
 
     /// **A line recalled from history is edited from its end, and editing it
@@ -5583,10 +5525,11 @@ mod tests {
         type_line(&mut app, "draft");
         app.handle_event(&key(Key::Home));
         app.handle_event(&key(Key::Up));
-        assert_eq!(app.input_text, "first");
+        assert_eq!(app.input_text.text(), "first");
         type_line(&mut app, "!");
         assert_eq!(
-            app.input_text, "first!",
+            app.input_text.text(),
+            "first!",
             "the recalled line was not edited at its end"
         );
         assert_eq!(
@@ -5597,7 +5540,7 @@ mod tests {
             !app.handle_event(&key(Key::Down)),
             "Down went on through the history from an edited line"
         );
-        assert_eq!(app.input_text, "first!");
+        assert_eq!(app.input_text.text(), "first!");
     }
 
     /// **A key that changes nothing in the line is not a redraw**, while one
@@ -5621,16 +5564,20 @@ mod tests {
     #[test]
     fn the_message_line_edits_the_text_it_shows() {
         let mut app = joined();
-        app.input_text = String::from("hello");
+        app.input_text.set_text("hello");
         let rect = input_rect(&app);
         app.handle_event(&click(
             rect.x + INPUT_TEXT_INSET + 0.5,
             rect.y + rect.h / 2.0,
         ));
         type_line(&mut app, "<");
-        assert_eq!(app.input_text, "<hello", "the press missed the shown text");
-        app.input_text = String::from("bye");
+        assert_eq!(
+            app.input_text.text(),
+            "<hello",
+            "the press missed the shown text"
+        );
+        app.input_text.set_text("bye");
         type_line(&mut app, "?");
-        assert_eq!(app.input_text, "bye?", "the key edited another line");
+        assert_eq!(app.input_text.text(), "bye?", "the key edited another line");
     }
 }

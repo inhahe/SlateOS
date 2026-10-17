@@ -220,12 +220,6 @@ MAIN = [
         ["the_message_line_is_the_toolkits_field"],
     ),
     (
-        "the caret is at the start of the line",
-        "                cursor: self.input_cursor(),\n",
-        "                cursor: TextCursor::from(0),\n",
-        ["the_caret_follows_the_typing_and_a_long_line_scrolls", EDITS],
-    ),
-    (
         "a press goes through the card",
         "                MouseEventKind::Press(_) | MouseEventKind::DoubleClick(_) => {\n"
         "                    self.show_help = false;\n"
@@ -250,43 +244,31 @@ MAIN = [
 
 # The message line edits at a caret (2026-10-04,
 # known-issues/E-twenty-nine-applications-type-only-at-the-end-of-a-box): it
-# took typing at its end and Backspace from it, and nothing else.
+# took typing at its end and Backspace from it, and nothing else. It is a
+# textline LineBox since 2026-10-17: its clipboard (the program's), its caret
+# and selection drawn, and the line it edits being the one it shows are
+# LineBox's, which textline's own table covers.
 MAIN += [
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.input_clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "an edit keeps the line in the history",
-        "            self.input_text = self.input_editor.text().to_owned();\n            // Editing leaves the history: the line being edited is the\n            // user's own, not the recalled one it started from.\n            self.input_history_idx = None;\n",
-        "            self.input_text = self.input_editor.text().to_owned();\n",
+        "        if edit.changed {\n"
+        "            // Editing leaves the history: the line being edited is the\n"
+        "            // user's own, not the recalled one it started from.\n"
+        "            self.input_history_idx = None;\n",
+        "        if edit.changed {\n",
         [RECALLED],
     ),
     (
         "a caret moved is not drawn",
-        "        before\n            != (\n                self.input_editor.cursor(),\n                self.input_editor.selection_anchor(),\n            )\n    }\n",
+        "        edit.moved\n    }\n",
         "        false\n    }\n",
         [NOTHING],
     ),
     (
         "a key that changes nothing is a redraw",
-        "        before\n            != (\n                self.input_editor.cursor(),\n                self.input_editor.selection_anchor(),\n            )\n    }\n",
+        "        edit.moved\n    }\n",
         "        edit.handled\n    }\n",
         [NOTHING],
-    ),
-    (
-        "a key finds the editor holding another line",
-        "    fn input_key(&mut self, event: &KeyEvent) -> bool {\n        if self.input_editor.text() != self.input_text {\n",
-        "    fn input_key(&mut self, event: &KeyEvent) -> bool {\n        if false {\n",
-        [SHOWN, RECALLED],
-    ),
-    (
-        "a press finds the editor holding another line",
-        "        let drawn = self.input_cursor();\n        if self.input_editor.text() != self.input_text {\n",
-        "        let drawn = self.input_cursor();\n        if false {\n",
-        [SHOWN],
     ),
     (
         "a press puts the caret at the start",
@@ -299,12 +281,6 @@ MAIN += [
         "                    self.press_input(x);\n                    return true;\n",
         "",
         [EDITS, SHOWN],
-    ),
-    (
-        "the selection is not drawn",
-        "                selection_anchor: if self.input_editor.text() == self.input_text {\n",
-        "                selection_anchor: if false {\n",
-        [EDITS],
     ),
 ]
 

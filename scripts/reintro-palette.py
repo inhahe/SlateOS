@@ -15495,8 +15495,8 @@ DEFECTS = [
         "JJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJJ: a fresh configuration names the Mocha base as the user's choice",
         WP,
         [
-            ('            color: None,\n            slideshow_dir: PathBuf::new(),\n',
-             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_dir: PathBuf::new(),\n'),
+            ('            color: None,\n            slideshow_interval_secs: 300,\n',
+             '            color: Some(Color::from_hex(0x1E1E2E)),\n            slideshow_interval_secs: 300,\n'),
         ],
         ["desktop"],
         [
@@ -15510,8 +15510,8 @@ DEFECTS = [
         "KKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKKK: a fresh configuration names the Latte base as the user's choice",
         WP,
         [
-            ('            color: None,\n            slideshow_dir: PathBuf::new(),\n',
-             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_dir: PathBuf::new(),\n'),
+            ('            color: None,\n            slideshow_interval_secs: 300,\n',
+             '            color: Some(Color::from_hex(0xEFF1F5)),\n            slideshow_interval_secs: 300,\n'),
         ],
         ["desktop"],
         [

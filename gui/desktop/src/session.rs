@@ -3733,7 +3733,6 @@ impl<T: Transport> ShellSession<T> {
 
         let pictures = Self::pictures_in(folder, &self.shell.appearance.wallpaper_exclusions);
         self.wallpaper.set_slideshow(
-            folder,
             self.shell.appearance.wallpaper_interval_secs,
             self.shell.appearance.wallpaper_shuffle,
         );

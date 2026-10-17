@@ -4837,9 +4837,7 @@ fn the_picture_goes_up_before_the_frame_that_draws_it() {
 fn the_picture_on_screen_stays_up_while_the_next_one_decodes() {
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
-    session
-        .wallpaper_mut()
-        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session.wallpaper_mut().set_slideshow(60, false);
     session
         .wallpaper_mut()
         .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
@@ -5028,9 +5026,7 @@ fn a_slideshow_step_releases_the_old_picture_before_uploading_the_new_one() {
     // wallpaper would refuse every slide after the first.
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
-    session
-        .wallpaper_mut()
-        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session.wallpaper_mut().set_slideshow(60, false);
     session
         .wallpaper_mut()
         .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);
@@ -5370,9 +5366,7 @@ fn a_photo_frame_shows_the_folder_the_pictures_place_opens() {
 fn an_idle_desktop_is_woken_for_the_slideshows_next_picture() {
     let (mut session, desktop, _turn) = session();
     let background = session.background().window();
-    session
-        .wallpaper_mut()
-        .set_slideshow(std::path::Path::new("/pics"), 60, false);
+    session.wallpaper_mut().set_slideshow(60, false);
     session
         .wallpaper_mut()
         .populate_slideshow_paths(vec![fixture("rgb8"), fixture("gray8")]);

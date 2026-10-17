@@ -10,7 +10,7 @@
 //!
 //! ```ignore
 //! let mut wp = WallpaperManager::new();
-//! wp.set_slideshow(Path::new("/wallpapers"), 300, true);
+//! wp.set_slideshow(300, true);
 //!
 //! // Each frame:
 //! let changed = wp.tick(current_time_secs);
@@ -573,8 +573,6 @@ pub struct WallpaperConfig {
     /// -- the same reasoning as design-decisions.md §528, where a calendar
     /// event's colour became an `Option` for exactly this reason.
     pub color: Option<Color>,
-    /// Slideshow directory path.
-    pub slideshow_dir: PathBuf,
     /// Slideshow interval in seconds.
     pub slideshow_interval_secs: u64,
     /// Whether slideshow order is shuffled.
@@ -600,7 +598,6 @@ impl Default for WallpaperConfig {
             // field must be able to say "ask one later" rather than name a
             // value now.
             color: None,
-            slideshow_dir: PathBuf::new(),
             slideshow_interval_secs: 300,
             slideshow_shuffle: false,
             fit: ImageFit::Fill,
@@ -761,9 +758,13 @@ impl WallpaperManager {
         self.config.position = position;
     }
 
-    pub fn set_slideshow(&mut self, directory: &Path, interval_secs: u64, shuffle: bool) {
+    /// Rotate pictures every `interval_secs` (at least one), shuffled or in
+    /// order -- the pictures handed over by
+    /// [`populate_slideshow_paths`](Self::populate_slideshow_paths). Which
+    /// folder they came from is the caller's to remember: this manager reads
+    /// no folder.
+    pub fn set_slideshow(&mut self, interval_secs: u64, shuffle: bool) {
         self.config.mode = WallpaperMode::Slideshow;
-        self.config.slideshow_dir = directory.to_path_buf();
         self.config.slideshow_interval_secs = interval_secs.max(1);
         self.config.slideshow_shuffle = shuffle;
         // Start with an empty slideshow -- the caller populates paths.
@@ -1899,9 +1900,8 @@ mod tests {
     #[test]
     fn manager_set_slideshow() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wallpapers"), 60, true);
+        mgr.set_slideshow(60, true);
         assert_eq!(*mgr.mode(), WallpaperMode::Slideshow);
-        assert_eq!(mgr.config.slideshow_dir, Path::new("/wallpapers"));
         assert_eq!(mgr.config.slideshow_interval_secs, 60);
         assert!(mgr.config.slideshow_shuffle);
         assert!(mgr.slideshow.is_some());
@@ -1965,7 +1965,7 @@ mod tests {
     #[test]
     fn a_rotation_advances_when_time_passes() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/pics"), 30, false);
+        mgr.set_slideshow(30, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
 
         let first = mgr.current_image_path().map(Path::to_path_buf);
@@ -1994,7 +1994,7 @@ mod tests {
     #[test]
     fn a_slideshow_says_when_its_next_picture_is_due() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/pics"), 30, false);
+        mgr.set_slideshow(30, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into()]);
         assert_eq!(
             mgr.next_change_in(0),
@@ -2025,7 +2025,7 @@ mod tests {
     #[test]
     fn a_slideshow_of_one_picture_does_not_change_or_ask_to() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/pics"), 10, false);
+        mgr.set_slideshow(10, false);
         mgr.populate_slideshow_paths(vec!["only.png".into()]);
         let id = mgr.current_image_id();
         assert_eq!(mgr.next_change_in(0), None);
@@ -2061,7 +2061,7 @@ mod tests {
     #[test]
     fn a_zero_interval_is_clamped() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/pics"), 0, false);
+        mgr.set_slideshow(0, false);
         assert!(
             mgr.config.slideshow_interval_secs >= 1,
             "a zero interval would decode a new picture every frame"
@@ -2082,7 +2082,7 @@ mod tests {
         mgr.set_solid_color(Color::from_hex(0x102030));
         let after_choice = mgr.history.len();
 
-        mgr.set_slideshow(Path::new("/wp"), 10, false);
+        mgr.set_slideshow(10, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
         assert_eq!(
             mgr.history.len(),
@@ -2115,7 +2115,7 @@ mod tests {
     #[test]
     fn stepping_by_hand_does_enter_the_history() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wp"), 10, false);
+        mgr.set_slideshow(10, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into()]);
         let before = mgr.history.len();
 
@@ -2129,7 +2129,7 @@ mod tests {
     #[test]
     fn tick_slideshow_advances_on_interval() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wp"), 10, false);
+        mgr.set_slideshow(10, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
 
         // First tick initialises the timestamp.
@@ -2153,7 +2153,7 @@ mod tests {
     #[test]
     fn next_previous_wallpaper() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wp"), 300, false);
+        mgr.set_slideshow(300, false);
         mgr.populate_slideshow_paths(vec!["a.png".into(), "b.png".into(), "c.png".into()]);
 
         assert_eq!(mgr.current_image_path(), Some(Path::new("a.png")));
@@ -2171,7 +2171,7 @@ mod tests {
     #[test]
     fn random_wallpaper_changes_image() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wp"), 300, false);
+        mgr.set_slideshow(300, false);
         mgr.populate_slideshow_paths(vec![
             "a.png".into(),
             "b.png".into(),
@@ -2193,7 +2193,7 @@ mod tests {
         // not divide the generator's range. With five wallpapers and forty
         // jumps off one generator, every one of them should come up.
         let mut mgr = WallpaperManager::with_seed(0x9E37_79B9_7F4A_7C15);
-        mgr.set_slideshow(Path::new("/wp"), 300, false);
+        mgr.set_slideshow(300, false);
         let paths: Vec<PathBuf> = (0..5).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         mgr.populate_slideshow_paths(paths.clone());
 
@@ -2234,7 +2234,7 @@ mod tests {
         let mut from_literal = WallpaperManager::with_seed(42);
         let paths: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         for mgr in [&mut from_system, &mut from_fallback, &mut from_literal] {
-            mgr.set_slideshow(Path::new("/wp"), 300, false);
+            mgr.set_slideshow(300, false);
             mgr.populate_slideshow_paths(paths.clone());
         }
 
@@ -2270,7 +2270,7 @@ mod tests {
         // would not have failed on it. `with_seed(0)` stands in for the
         // desktop shell that had not been written yet.
         let order = |mgr: &mut WallpaperManager| -> Vec<PathBuf> {
-            mgr.set_slideshow(Path::new("/wp"), 300, true);
+            mgr.set_slideshow(300, true);
             mgr.populate_slideshow_paths(
                 (0..12).map(|i| PathBuf::from(format!("{i}.png"))).collect(),
             );
@@ -2309,7 +2309,7 @@ mod tests {
         // would silently consume one draw.
         let jumps = |shuffle: bool| -> Vec<usize> {
             let mut mgr = WallpaperManager::with_seed(0xA11C_E5EE_D123_4567);
-            mgr.set_slideshow(Path::new("/wp"), 300, shuffle);
+            mgr.set_slideshow(300, shuffle);
             mgr.populate_slideshow_paths(
                 (0..9).map(|i| PathBuf::from(format!("{i}.png"))).collect(),
             );
@@ -2336,7 +2336,7 @@ mod tests {
         let paths: Vec<PathBuf> = (0..7).map(|i| PathBuf::from(format!("{i}.png"))).collect();
         for seed in 0..24u64 {
             let mut mgr = WallpaperManager::with_seed(seed);
-            mgr.set_slideshow(Path::new("/wp"), 300, true);
+            mgr.set_slideshow(300, true);
             mgr.populate_slideshow_paths(paths.clone());
             mgr.random_wallpaper();
 
@@ -2356,7 +2356,7 @@ mod tests {
     #[test]
     fn a_random_jump_on_an_empty_slideshow_changes_nothing() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wp"), 300, false);
+        mgr.set_slideshow(300, false);
         mgr.populate_slideshow_paths(Vec::new());
         let id_before = mgr.current_image_id();
         let history_before = mgr.history.len();
@@ -2577,7 +2577,7 @@ mod tests {
     #[test]
     fn render_slideshow_without_images_still_renders() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/empty"), 300, false);
+        mgr.set_slideshow(300, false);
         // No paths populated -- should still render a background color.
         let cmds = mgr.get_render_commands(&dark(), 1920.0, 1080.0, 0);
         assert!(!cmds.is_empty());
@@ -2592,7 +2592,7 @@ mod tests {
         // slideshow renders pictures at all. This is the other half: with a
         // path populated, the underlay must be followed by the image.
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/walls"), 300, false);
+        mgr.set_slideshow(300, false);
         mgr.populate_slideshow_paths(vec![PathBuf::from("/walls/one.png")]);
         // What the session says once the slide is decoded and uploaded.
         mgr.picture_ready(mgr.current_image_id(), 1920.0, 1080.0);
@@ -2623,7 +2623,7 @@ mod tests {
         image.set_image(Path::new("/wall.png"), ImageFit::Fill);
 
         let mut slideshow = WallpaperManager::new();
-        slideshow.set_slideshow(Path::new("/walls"), 300, false);
+        slideshow.set_slideshow(300, false);
 
         // Left on whatever `DynamicTheme::default()` supplies rather than
         // handed the pinned table, so that the sweep sees the module's own
@@ -2948,7 +2948,7 @@ mod tests {
     #[test]
     fn slideshow_interval_minimum_is_one() {
         let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/wp"), 0, false);
+        mgr.set_slideshow(0, false);
         assert_eq!(mgr.config.slideshow_interval_secs, 1);
     }
 }

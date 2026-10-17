@@ -1365,6 +1365,9 @@ list moved to lane D on 2026-09-22):
     allowed to the active seat's session -- the login screen's among them --
     and carried out through the service manager, as `powerctl` does
     (todo.txt, "loginctl can inspect sessions and cannot change them").
+    Waits on something answering `org.slateos.ServiceManager`: proposed
+    to lane D's init 2026-10-16
+    (`requests/b-d-init-could-answer-org-slateos-servicemanager.md`).
   - `[ ]` `loginmgr`'s line in `/etc/startup.conf` and a `greeter` account
     on the image: lane D's, to ask once the launcher works.
 

@@ -9,7 +9,7 @@
 //! image's end is aligned and covers every segment.
 #![no_main]
 
-use elfparse::{is_linux_interp, notes_contain, ElfError, ElfFile, USER_SPACE_END};
+use elfparse::{ElfError, ElfFile, USER_SPACE_END, is_linux_interp, notes_contain};
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {

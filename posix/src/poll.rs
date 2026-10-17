@@ -535,6 +535,10 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
         // File: always ready (POSIX says regular files are always "ready").
         HandleKind::Console | HandleKind::File => (true, true, false, false),
 
+        // A namespace's descriptor has no poll of its own: always ready, as
+        // Linux's DEFAULT_POLLMASK makes nsfs's file.
+        HandleKind::Namespace => (true, true, false, false),
+
         // Pipe: query kernel for actual readiness.
         HandleKind::Pipe => {
             if handle == 0 {

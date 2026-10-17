@@ -129,6 +129,11 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     if let Some(fd) = crate::device_door::open(resolved, flags) {
         return fd;
     }
+    // A namespace's link, `/proc/<pid>/ns/<kind>`, whose text names nothing
+    // a file open could follow: the kernel's handle on it (`crate::nsfs`).
+    if let Some(fd) = crate::nsfs::open(resolved, flags) {
+        return fd;
+    }
     open_resolved(resolved, flags, mode)
 }
 
@@ -420,6 +425,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(entry.handle),
         HandleKind::UnixSocket => crate::unix_socket::close(entry.handle),
+        HandleKind::Namespace => crate::nsfs::close(entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
             if entry.handle == 0 {
@@ -546,6 +552,18 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         HandleKind::DevicePcm | HandleKind::DeviceControl => {
             return crate::device_door::read(&entry, buf, count);
         }
+        HandleKind::Namespace => {
+            // A namespace's file has no read: EBADF if it was not opened for
+            // reading (`vfs_read`'s FMODE_READ comes first), else EINVAL
+            // (FMODE_CAN_READ), whatever the count or buffer.
+            let mode = fdtable::get_status_flags(fd).unwrap_or(0) & fcntl::O_ACCMODE;
+            errno::set_errno(if mode == fcntl::O_WRONLY {
+                errno::EBADF
+            } else {
+                errno::EINVAL
+            });
+            return -1;
+        }
         HandleKind::Epoll => {
             // An epoll file has no read: EINVAL whatever the count or buffer
             // (`vfs_read`'s FMODE_CAN_READ, ahead of `access_ok`).
@@ -668,7 +686,8 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         | HandleKind::Eventfd
         | HandleKind::Inotify
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => {
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => {
             // Answered before the buffer was looked at, above; here only so
             // that this match stays exhaustive.
             errno::set_errno(errno::EBADF);
@@ -929,6 +948,17 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         HandleKind::DevicePcm | HandleKind::DeviceControl => {
             return crate::device_door::write(&entry, buf, count);
         }
+        HandleKind::Namespace => {
+            // A namespace's file has no write: EBADF if it was not opened for
+            // writing (`vfs_write`'s FMODE_WRITE comes first), else EINVAL.
+            let mode = fdtable::get_status_flags(fd).unwrap_or(0) & fcntl::O_ACCMODE;
+            errno::set_errno(if mode == fcntl::O_RDONLY {
+                errno::EBADF
+            } else {
+                errno::EINVAL
+            });
+            return -1;
+        }
         HandleKind::Timerfd | HandleKind::Epoll => {
             // No write: EINVAL whatever the count or buffer (`vfs_write`'s
             // FMODE_CAN_WRITE, ahead of `access_ok`).
@@ -1056,7 +1086,8 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         | HandleKind::Inotify
         | HandleKind::Eventfd
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => {
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => {
             // Answered before the buffer was looked at, above; here only so
             // that this match stays exhaustive.
             errno::set_errno(errno::EBADF);
@@ -1239,7 +1270,8 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => {
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -1935,7 +1967,8 @@ pub(crate) fn has_iter_ops(kind: HandleKind, is_write: bool) -> bool {
         HandleKind::Timerfd
         | HandleKind::Inotify
         | HandleKind::Epoll
-        | HandleKind::DeviceControl => false,
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => false,
         HandleKind::DevicePcm => true,
         HandleKind::File
         | HandleKind::Pipe
@@ -2098,6 +2131,18 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::Namespace => {
+            // A namespace's handle is shared, as an eventfd's: the last close
+            // gives it back.
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Namespace, entry.handle, src_status)
+            {
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
         HandleKind::Eventfd => {
             // No kernel-level dup for eventfds.  Share the handle;
             // close() uses is_handle_referenced() to only close the
@@ -2230,7 +2275,8 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => entry.handle,
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => entry.handle,
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Share the epoll/timerfd/inotify instance.  No addref
             // needed: dup2 calls is_handle_referenced() before tearing
@@ -2567,6 +2613,16 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     if let Some(ret) = fdname_stat(path, buf, true) {
         return ret;
     }
+    // A namespace's link, followed: the namespace's own record.
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    if let Some(len) = resolve_or_err(path, &mut resolved) {
+        // SAFETY: `buf` was checked non-null above, and is the caller's.
+        if let Some(ret) =
+            unsafe { crate::nsfs::stat_path(resolved.get(..len).unwrap_or(&[]), buf) }
+        {
+            return ret;
+        }
+    }
 
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
     let ret = stat_path_raw(path, true, &mut raw);
@@ -2645,6 +2701,17 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
+        HandleKind::Namespace => match crate::nsfs::info(entry.handle) {
+            Ok(info) => {
+                // SAFETY: `buf` was checked non-null above.
+                crate::nsfs::fill_stat(unsafe { &mut *buf }, info);
+                0
+            }
+            Err(e) => {
+                errno::set_errno(e);
+                -1
+            }
+        },
         HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Linux fstat on an eventfd / epollfd / timerfd / inotifyfd
             // returns a character device.  Zero the struct and set
@@ -3015,7 +3082,8 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => {
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -3063,7 +3131,8 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => {
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -3185,6 +3254,7 @@ pub(crate) fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
         HandleKind::Pipe => crate::pipe::pipe_kernel_close(handle),
         HandleKind::UnixSocket => crate::unix_socket::close(handle),
+        HandleKind::Namespace => crate::nsfs::close(handle),
         HandleKind::Console => 0, // Console handles are not closeable.
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
         HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),
@@ -5802,7 +5872,8 @@ fn fallocate_on(
         | HandleKind::PtyMaster
         | HandleKind::PtySlave
         | HandleKind::DevicePcm
-        | HandleKind::DeviceControl => return Err(errno::ENODEV),
+        | HandleKind::DeviceControl
+        | HandleKind::Namespace => return Err(errno::ENODEV),
     }
     let (kind, size, blocks, blksize) = file.stat()?;
     match kind {

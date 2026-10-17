@@ -2869,9 +2869,9 @@ D's to act on once answered).
   `posix_spawn`'s `RESETIDS` refused while it would change an id --
   `ctest-setids`, `ctest-spawn-attrs`; getgroups (1143); `swapon`/`swapoff` (1175/1176) --
   `ctest-swap`; descriptor passing (1169/1170) -- `ctest-scm-rights`; Unix
-  sockets crossing spawn and exec, and a stream `socketpair` made of them.
-  **Next**, in this order:
-  the namespace calls (1161-1166); `SYS_THREAD_SCHEDULER` (1146);
+  sockets crossing spawn and exec, and a stream `socketpair` made of them;
+  the namespace calls (1161-1163, 1165, 1166) -- `ctest-uts-namespace`.
+  **Next**, in this order: `SYS_THREAD_SCHEDULER` (1146);
   `SYS_MMAP_FILE` (1144); `profil` over `ITIMER_PROF`; the null-buffer
   shortcuts `cc3806b84` makes unnecessary; the PI-futex fast path
   (`a6e37445d`); `SYS_CHANNEL_PEER_HAS_KEY` (1103) for the credential

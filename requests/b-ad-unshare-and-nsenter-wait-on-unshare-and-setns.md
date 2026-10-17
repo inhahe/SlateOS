@@ -71,3 +71,15 @@ other kind still answers `EINVAL` (`EPERM` to a caller without the
 privilege), never a namespace that is not there. What remains is listed in
 `known-issues/A-LINUX-NAMESPACE-KINDS-NOT-BUILT-YET.md`. This file stays
 open until the rest of the kinds land.
+
+## Lane D -- 2026-10-17
+
+The C library's half exists for the one kind lane A has built, UTS: a
+native `unshare(CLONE_NEWUTS)` and `setns` with a descriptor opened from
+`/proc/<pid>/ns/uts` reach lane A's calls (1161-1166), with a Namespace
+capability with WRITE, not an id of 0. Every other kind answers `EINVAL`
+(Linux's answer without that `CONFIG_*_NS`), `setns` with a pidfd waits on
+native pidfds, and `unshare --fork`'s `CLONE_NEWPID` waits on PID
+namespaces. So `nsenter --uts` and `unshare --uts` can work today, given the
+capability.
+

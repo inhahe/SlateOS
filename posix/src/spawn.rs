@@ -1598,7 +1598,9 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
         // Not transferable either (see `inheritable_fds`): filtered out
         // before this conversion, and mapped only so that it is total.
-        HandleKind::DevicePcm | HandleKind::DeviceControl => fd_handle_type::FILE,
+        HandleKind::DevicePcm | HandleKind::DeviceControl | HandleKind::Namespace => {
+            fd_handle_type::FILE
+        }
     }
 }
 
@@ -1796,6 +1798,8 @@ fn inheritable_fds() -> ChildFds {
             let transferable = entry.kind != fdtable::HandleKind::Epoll
                 && entry.kind != fdtable::HandleKind::Timerfd
                 && entry.kind != fdtable::HandleKind::Inotify
+                // A namespace's handle has no type in the kernel's spawn yet.
+                && entry.kind != fdtable::HandleKind::Namespace
                 && !crate::device_door::is_device(entry.kind);
             if transferable {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));

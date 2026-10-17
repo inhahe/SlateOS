@@ -1283,6 +1283,25 @@ pub const SET_IDS_GROUP: u64 = 4;
 /// real, effective, saved and filesystem user ids, then the group ids.
 pub const SYS_PROCESS_GET_IDS: u64 = 1160;
 
+/// `SYS_NAMESPACE_UNSHARE(kinds)` -- the caller's process into new
+/// namespaces, one of each kind `kinds` names by its `CLONE_NEW*` bit; on
+/// lane A's kernel since 2026-10-08
+/// (`requests/a-d-the-namespace-calls-have-native-numbers.md`). `CLONE_NEWUTS`
+/// is the kind built so far. Needs a Namespace capability with WRITE.
+pub const SYS_NAMESPACE_UNSHARE: u64 = 1161;
+/// `SYS_NAMESPACE_OPEN(path, len)` -- a handle on the namespace a
+/// `/proc/<pid>/ns/<kind>` path names; native `InvalidArgument` for a path
+/// that names none.
+pub const SYS_NAMESPACE_OPEN: u64 = 1162;
+/// `SYS_NAMESPACE_ENTER(handle, nstype)` -- the caller's process into the
+/// namespace a handle holds; `nstype` 0 or the handle's kind's bit.
+pub const SYS_NAMESPACE_ENTER: u64 = 1163;
+/// `SYS_NAMESPACE_CLOSE(handle)` -- give a namespace handle back.
+pub const SYS_NAMESPACE_CLOSE: u64 = 1165;
+/// `SYS_NAMESPACE_INFO(handle, buf)` -- three u64s at `buf`: the kind's
+/// `CLONE_NEW*` bit, the inode number, nsfs's device minor.
+pub const SYS_NAMESPACE_INFO: u64 = 1166;
+
 /// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
 /// the Linux ABI's `prctl(PR_SET_DUMPABLE)` sets and `/proc` consults; on
 /// lane A's kernel since 2026-10-07. Linux's errnos as `-errno`.

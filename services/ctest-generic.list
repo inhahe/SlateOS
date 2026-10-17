@@ -78,3 +78,4 @@ ctest-fifo       file     30
 ctest-spawn-attrs file     30
 # ctest-swap       file,creds 30  (waiting on `creds`, as ctest-resuid above)
 ctest-scm-rights file     30
+ctest-uts-namespace file     30

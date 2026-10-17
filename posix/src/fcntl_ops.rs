@@ -907,7 +907,8 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::PtyMaster
         | fdtable::HandleKind::PtySlave
         | fdtable::HandleKind::DevicePcm
-        | fdtable::HandleKind::DeviceControl => entry.handle,
+        | fdtable::HandleKind::DeviceControl
+        | fdtable::HandleKind::Namespace => entry.handle,
         fdtable::HandleKind::Epoll
         | fdtable::HandleKind::Timerfd
         | fdtable::HandleKind::Inotify => {

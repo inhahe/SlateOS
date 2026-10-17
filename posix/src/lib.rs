@@ -460,6 +460,7 @@ pub mod fts;
 pub mod ftw;
 pub mod gai;
 pub mod gai_a;
+pub(crate) mod nsfs;
 // libxcrypt's crypt_gensalt, crypt_checksalt and crypt_preferred_method.
 pub mod gensalt;
 pub mod getopt;

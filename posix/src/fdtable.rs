@@ -200,6 +200,12 @@ pub enum HandleKind {
     /// the device door: the card's identity and its controls, through
     /// `ioctl`. The kernel keeps nothing per open, so `handle` is always 1.
     DeviceControl,
+
+    /// A namespace, opened as `/proc/<pid>/ns/<kind>` (`crate::nsfs`): the
+    /// kernel's handle, which holds the namespace alive until the last close
+    /// and is what `setns` enters. It cannot be read or written, as Linux's
+    /// nsfs file cannot; it does not cross spawn or `exec` yet.
+    Namespace,
 }
 
 /// An entry in the file descriptor table.

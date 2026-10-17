@@ -703,6 +703,10 @@ pub extern "C" fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32 {
     if crate::device_door::is_device(entry.kind) && request != FIONBIO {
         return crate::device_door::ioctl(&entry, request, arg);
     }
+    // A namespace's are nsfs's (`NS_GET_NSTYPE`), and nothing else.
+    if entry.kind == HandleKind::Namespace && request != FIONBIO {
+        return crate::nsfs::ioctl(entry.handle, request);
+    }
 
     match request {
         TIOCGWINSZ => handle_tiocgwinsz(entry.kind, entry.handle, arg),
@@ -932,6 +936,8 @@ fn fionread_count(fd: i32, kind: HandleKind, handle: u64) -> Result<i32, i32> {
 
     match kind {
         HandleKind::Console => Ok(0),
+        // Answered by `crate::nsfs::ioctl` before this is reached.
+        HandleKind::Namespace => Err(errno::ENOTTY),
         HandleKind::Pipe => {
             // Query actual buffered byte count from the kernel.
             use crate::syscall::{SYS_PIPE_READABLE_BYTES, syscall1};

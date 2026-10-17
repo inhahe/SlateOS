@@ -1982,67 +1982,59 @@ pub extern "C" fn unshare(flags: i32) -> i32 {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    // Arguments validated; namespace subsystem not implemented.
-    errno::set_errno(errno::ENOSYS);
-    -1
-}
-
-/// Linux `setns` — reassociate a thread with a namespace.
-///
-/// # Linux behaviour
-///
-/// `setns(int fd, int nstype)` (added in Linux 3.0) joins the namespace
-/// referenced by `fd`.  Argument-domain checks:
-///
-/// * `fd < 0`                              → `EBADF`
-/// * `nstype & ~SETNS_NSTYPE_VALID`         → `EINVAL`
-///
-/// `nstype == 0` is the "any namespace, infer from fd" form and is
-/// accepted — used by container runtimes that don't know the namespace
-/// type in advance.  In Linux 5.8+ `nstype` may also be a `pidfd` that
-/// triggers entering *all* of the target's namespaces; we accept fds
-/// from `pidfd_open` the same way.
-///
-/// After arguments validate we return `ENOSYS` (no namespace subsystem).
-///
-/// # Capability gate (Phase 176)
-///
-/// Linux's `SYSCALL_DEFINE2(setns, ...)` in `kernel/nsproxy.c` delegates
-/// to per-namespace `install` ops; every implementation
-/// (`mntns_install`, `utsns_install`, `ipcns_install`, `pidns_install`,
-/// `netns_install`, `cgroupns_install`, `userns_install`, `timens_install`)
-/// invokes `ns_capable(.. , CAP_SYS_ADMIN)` against the user namespace
-/// owning the target namespace. Joining *any* namespace therefore
-/// requires `CAP_SYS_ADMIN` in the caller's current user namespace.
-/// (This is in addition to the per-namespace owner check which we cannot
-/// model without a real namespace subsystem.)
-///
-/// The cap probe runs *after* `EBADF` and `EINVAL` argument-domain
-/// checks so callers passing obviously-bad arguments still get the
-/// argument errno regardless of privilege (matches Linux: argument
-/// validation happens before the namespace install op is dispatched).
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setns(fd: i32, nstype: i32) -> i32 {
-    // fd must be non-negative.
-    if fd < 0 {
-        errno::set_errno(errno::EBADF);
+    // The bits that unshare what a process shares with its threads -- its
+    // descriptors, its directory, its signal handlers -- have no native
+    // call: a process's are its threads' here.
+    if bits & !NAMESPACE_BITS != 0 {
+        errno::set_errno(errno::ENOSYS);
         return -1;
     }
-    // Reject any bit outside the setns-accepted namespace set.
+    // The namespaces are the kernel's, which checks the right to make them.
+    match crate::nsfs::unshare(u64::from(bits & NAMESPACE_BITS)) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// The `CLONE_NEW*` bits: what `unshare` asks the kernel for.
+const NAMESPACE_BITS: u32 = SETNS_NSTYPE_VALID;
+
+/// Linux `setns(fd, nstype)` -- move into the namespace `fd` names: the
+/// kernel's `SYS_NAMESPACE_ENTER` for a namespace's descriptor, opened from
+/// `/proc/<pid>/ns/<kind>` (`crate::nsfs`).
+///
+/// Linux's order (`kernel/nsproxy.c`): the descriptor (`EBADF`), then what it
+/// is -- a namespace's, anything else `EINVAL` (a pidfd's would do too, but a
+/// native program cannot make one) -- then `nstype`, which must be 0 or the
+/// namespace's kind (`EINVAL`), then the right to enter it (`EPERM`), which
+/// the kernel checks: a Namespace capability with WRITE, not an id of 0. The
+/// whole process moves, every thread (lane A's design-decisions 1554).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn setns(fd: i32, nstype: i32) -> i32 {
+    let Some(entry) = (fd >= 0).then(|| crate::fdtable::get_fd(fd)).flatten() else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if entry.kind != crate::fdtable::HandleKind::Namespace {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Bit-pattern preserved, so that a high bit is caught here.
     let bits = nstype as u32;
     if (bits & !SETNS_NSTYPE_VALID) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Phase 176: every namespace's install op requires CAP_SYS_ADMIN
-    // in the caller's current user namespace.
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
-        errno::set_errno(errno::EPERM);
-        return -1;
+    match crate::nsfs::enter(entry.handle, u64::from(bits)) {
+        Ok(()) => 0,
+        Err(e) => {
+            errno::set_errno(e);
+            -1
+        }
     }
-    // Arguments validated; namespace subsystem not implemented.
-    errno::set_errno(errno::ENOSYS);
-    -1
 }
 
 /// Linux's `PATH_MAX`: 4096 bytes, *including* the terminating NUL.
@@ -4423,7 +4415,7 @@ mod tests {
 
     #[test]
     fn test_setns_returns_enosys() {
-        assert_eq!(setns(0, 0), -1);
+        assert_eq!(setns(namespace_fd(), 0), -1);
     }
 
     #[test]
@@ -5186,7 +5178,7 @@ mod tests {
     #[test]
     fn test_setns_sets_enosys() {
         crate::errno::set_errno(0);
-        setns(0, 0);
+        setns(namespace_fd(), 0);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -6988,13 +6980,43 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
+    /// A descriptor of a namespace's kind, whose handle no kernel holds: on
+    /// the host, `setns` on it reaches the kernel's absence (`ENOSYS`) once
+    /// the library's own checks pass.
+    fn namespace_fd() -> i32 {
+        crate::fdtable::alloc_fd(crate::fdtable::HandleKind::Namespace, 0x6e73)
+            .expect("fd table full")
+    }
+
+    /// Linux's order: the descriptor (`EBADF`), then what it is -- anything
+    /// but a namespace's `EINVAL`, whatever `nstype` says -- then `nstype`.
+    #[test]
+    fn setns_asks_of_the_descriptor_first() {
+        crate::errno::set_errno(0);
+        assert_eq!(setns(4_000, crate::linux_clone_args::CLONE_VM as i32), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF, "not open");
+        let pipe_end = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::Pipe, 0x70)
+            .expect("fd table full");
+        crate::errno::set_errno(0);
+        assert_eq!(
+            setns(pipe_end, crate::linux_clone_args::CLONE_VM as i32),
+            -1
+        );
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "no namespace's, whatever nstype"
+        );
+        let _ = crate::fdtable::close_fd(pipe_end);
+    }
+
     // --- setns: nstype mask ---
 
     #[test]
     fn test_setns_clone_io_in_nstype_einval() {
         // CLONE_IO is not a namespace type.
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_IO as i32);
+        let ret = setns(namespace_fd(), crate::linux_clone_args::CLONE_IO as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7003,7 +7025,7 @@ mod tests {
     fn test_setns_clone_vm_in_nstype_einval() {
         // Sharing flags (CLONE_VM) are not namespace types.
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_VM as i32);
+        let ret = setns(namespace_fd(), crate::linux_clone_args::CLONE_VM as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7011,7 +7033,7 @@ mod tests {
     #[test]
     fn test_setns_clone_files_in_nstype_einval() {
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_FILES as i32);
+        let ret = setns(namespace_fd(), crate::linux_clone_args::CLONE_FILES as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7020,14 +7042,14 @@ mod tests {
     fn test_setns_zero_nstype_passes() {
         // nstype == 0 means "infer from fd", accepted by Linux.
         crate::errno::set_errno(0);
-        assert_eq!(setns(3, 0), -1);
+        assert_eq!(setns(namespace_fd(), 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_setns_clone_newns_passes() {
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_NEWNS as i32);
+        let ret = setns(namespace_fd(), crate::linux_clone_args::CLONE_NEWNS as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -7035,7 +7057,7 @@ mod tests {
     #[test]
     fn test_setns_clone_newpid_passes() {
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_NEWPID as i32);
+        let ret = setns(namespace_fd(), crate::linux_clone_args::CLONE_NEWPID as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -7043,7 +7065,10 @@ mod tests {
     #[test]
     fn test_setns_clone_newuser_passes() {
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_NEWUSER as i32);
+        let ret = setns(
+            namespace_fd(),
+            crate::linux_clone_args::CLONE_NEWUSER as i32,
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -7051,7 +7076,10 @@ mod tests {
     #[test]
     fn test_setns_clone_newtime_passes() {
         crate::errno::set_errno(0);
-        let ret = setns(3, crate::linux_clone_args::CLONE_NEWTIME as i32);
+        let ret = setns(
+            namespace_fd(),
+            crate::linux_clone_args::CLONE_NEWTIME as i32,
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -7059,7 +7087,7 @@ mod tests {
     #[test]
     fn test_setns_all_valid_nstypes_combined_passes() {
         crate::errno::set_errno(0);
-        let ret = setns(3, SETNS_NSTYPE_VALID as i32);
+        let ret = setns(namespace_fd(), SETNS_NSTYPE_VALID as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -7067,7 +7095,7 @@ mod tests {
     #[test]
     fn test_setns_minus_one_nstype_einval() {
         crate::errno::set_errno(0);
-        let ret = setns(3, -1);
+        let ret = setns(namespace_fd(), -1);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7169,7 +7197,7 @@ mod tests {
     #[test]
     fn test_setns_workflow_nsenter_join_net_namespace() {
         crate::errno::set_errno(0);
-        let fd = 4; // hypothetical /proc/<pid>/ns/net fd
+        let fd = namespace_fd(); // as /proc/<pid>/ns/net opens
         let ret = setns(fd, crate::linux_clone_args::CLONE_NEWNET as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
@@ -7182,26 +7210,29 @@ mod tests {
     #[test]
     fn test_setns_workflow_runc_join_inferred_type() {
         crate::errno::set_errno(0);
-        let fd = 5;
+        let fd = namespace_fd();
         let ret = setns(fd, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     /// CRIU `criu restore` re-enters the target's namespaces via
-    /// `setns(pidfd, CLONE_NEWPID | CLONE_NEWNET | ...)` — the Linux
-    /// 5.8+ pidfd-with-multiple-nstypes form.  Must validate as a
-    /// combined valid namespace mask and reach ENOSYS.
+    /// `setns(pidfd, CLONE_NEWPID | CLONE_NEWNET | ...)` — the Linux 5.8+
+    /// pidfd form. A native program cannot make a pidfd (`pidfd_open` is
+    /// `ENOSYS`), so the descriptor it holds instead is no namespace's:
+    /// `EINVAL`, as Linux answers a descriptor of neither kind.
     #[test]
     fn test_setns_workflow_criu_pidfd_multi_ns() {
         crate::errno::set_errno(0);
-        let pidfd = 7;
+        let not_a_pidfd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0x71)
+            .expect("fd table full");
         let nstype = (crate::linux_clone_args::CLONE_NEWPID
             | crate::linux_clone_args::CLONE_NEWNET
             | crate::linux_clone_args::CLONE_NEWNS) as i32;
-        let ret = setns(pidfd, nstype);
+        let ret = setns(not_a_pidfd, nstype);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = crate::fdtable::close_fd(not_a_pidfd);
     }
 
     /// Buggy caller from a Stack Overflow snippet: `unshare(CLONE_VM
@@ -13347,9 +13378,10 @@ mod tests {
     // they only touch the caller's own task.  The cap probe runs after
     // EINVAL flag validation and the unshare(0) success short-circuit.
     //
-    // setns(): every per-namespace install op invokes
-    // ns_capable(.., CAP_SYS_ADMIN), so every valid setns call requires
-    // the cap.  The probe runs after EBADF and EINVAL argument checks.
+    // setns(): the right to enter is the kernel's to check (a Namespace
+    // capability with WRITE), so the library has no gate of its own; the
+    // tests below pin that its argument checks come first and that a
+    // caller without the capability still reaches the kernel.
     //
     // Uses the established CapGuard snapshot/restore pattern from
     // Phases 165–175 and must run with `--test-threads=1`.
@@ -13628,37 +13660,6 @@ mod tests {
 
         // -- setns: per-namespace EPERM without cap ------------------------
 
-        #[test]
-        fn test_setns_phase176_newns_no_cap_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_admin();
-            crate::errno::set_errno(0);
-            assert_eq!(setns(3, CLONE_NEWNS_I32), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-        }
-
-        #[test]
-        fn test_setns_phase176_newuser_no_cap_eperm() {
-            // Unlike unshare, setns(.., CLONE_NEWUSER) does require
-            // CAP_SYS_ADMIN — userns_install calls ns_capable.
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_admin();
-            crate::errno::set_errno(0);
-            assert_eq!(setns(3, CLONE_NEWUSER_I32), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-        }
-
-        /// nstype=0 ("infer from fd") still goes through an install op
-        /// which checks CAP_SYS_ADMIN.
-        #[test]
-        fn test_setns_phase176_zero_nstype_no_cap_eperm() {
-            let _g = CapGuard::snapshot();
-            drop_cap_sys_admin();
-            crate::errno::set_errno(0);
-            assert_eq!(setns(3, 0), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-        }
-
         // -- setns: error-priority ordering --------------------------------
 
         /// EBADF beats EPERM: fd domain checked first.
@@ -13680,7 +13681,7 @@ mod tests {
             // CLONE_VM is a sharing flag, not a namespace — not in
             // SETNS_NSTYPE_VALID.
             crate::errno::set_errno(0);
-            assert_eq!(setns(3, CLONE_VM_I32), -1);
+            assert_eq!(setns(namespace_fd(), CLONE_VM_I32), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
@@ -13695,45 +13696,28 @@ mod tests {
                 crate::sys_capability::CAP_SYS_ADMIN,
             ));
             crate::errno::set_errno(0);
-            assert_eq!(setns(3, CLONE_NEWNS_I32), -1);
+            assert_eq!(setns(namespace_fd(), CLONE_NEWNS_I32), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
 
         // -- setns: workflow / recovery ------------------------------------
 
-        #[test]
-        fn test_setns_phase176_drop_then_restore_workflow() {
-            {
-                let _g = CapGuard::snapshot();
-                drop_cap_sys_admin();
-                crate::errno::set_errno(0);
-                assert_eq!(setns(3, CLONE_NEWNS_I32), -1);
-                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
-            }
-            assert!(crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SYS_ADMIN,
-            ));
-            crate::errno::set_errno(0);
-            assert_eq!(setns(3, CLONE_NEWNS_I32), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-        }
-
         // -- cross-checks --------------------------------------------------
 
-        /// unshare and setns disagree on CLONE_NEWUSER: unshare bypasses,
-        /// setns requires the cap.  Document this asymmetry in a test.
+        /// Without the capability, `unshare(CLONE_NEWUSER)` is not
+        /// refused by the library (rootless containers), and nor is any
+        /// `setns`: both reach the kernel, whose absence on the host is
+        /// `ENOSYS` and whose right it is to refuse.
         #[test]
-        fn test_phase176_newuser_asymmetry_between_unshare_and_setns() {
+        fn test_phase176_newuser_and_setns_reach_the_kernel_without_the_cap() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
-            // unshare(CLONE_NEWUSER) without cap → ENOSYS (bypass)
             crate::errno::set_errno(0);
             assert_eq!(unshare(CLONE_NEWUSER_I32), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-            // setns(.., CLONE_NEWUSER) without cap → EPERM
             crate::errno::set_errno(0);
-            assert_eq!(setns(3, CLONE_NEWUSER_I32), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            assert_eq!(setns(namespace_fd(), CLONE_NEWUSER_I32), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
     }
 

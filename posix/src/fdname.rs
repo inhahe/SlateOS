@@ -215,6 +215,8 @@ pub(crate) fn link_target_of_kind(entry: &FdEntry, out: &mut [u8]) -> Option<usi
     Some(match entry.kind {
         HandleKind::File | HandleKind::DevicePcm | HandleKind::DeviceControl => return None,
         HandleKind::Pipe => put_tagged(out, b"pipe:[", entry.handle, b"]"),
+        // `uts:[4026531838]`, as Linux names a namespace's file.
+        HandleKind::Namespace => return crate::nsfs::link_text(entry.handle, out),
         HandleKind::TcpStream
         | HandleKind::TcpListener
         | HandleKind::UdpSocket

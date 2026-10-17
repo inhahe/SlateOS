@@ -1009,7 +1009,7 @@ impl MetronomeApp {
         let (status_text, status_color) = if self.playing {
             ("● PLAYING", self.palette.green)
         } else {
-            ("○ STOPPED", self.palette.overlay0)
+            ("○ STOPPED", self.palette.subtext0)
         };
         f.push(RenderCommand::Text {
             x: 250.0,

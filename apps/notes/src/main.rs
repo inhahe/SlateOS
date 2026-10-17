@@ -4699,7 +4699,7 @@ impl NotesApp {
 
                 // Kind badge
                 let kind_color = match &note.kind {
-                    NoteKind::PlainText => self.palette.overlay0,
+                    NoteKind::PlainText => self.palette.subtext0,
                     NoteKind::Markdown => self.palette.blue,
                     NoteKind::Checklist => self.palette.green,
                     NoteKind::Table => self.palette.teal,
@@ -5057,7 +5057,7 @@ impl NotesApp {
             }
             // Text
             let text_color = if item.checked {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.text
             };

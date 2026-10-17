@@ -1258,16 +1258,16 @@ fn button_width(label: &str) -> f32 {
     guitk::text::padded_width(label, 14.0, TEXT_SIZE, FontWeightHint::Regular)
 }
 
-/// A push button: the accent's colour if `primary`, dimmed if not `live`.
+/// A push button: the accent's colour if `primary`, dimmed if not `enabled`.
 fn button(
     tree: &mut RenderTree,
     pal: &Palette,
     rect: Rect,
     label: &str,
     primary: bool,
-    live: bool,
+    enabled: bool,
 ) {
-    let (fill, ink) = match (live, primary) {
+    let (fill, ink) = match (enabled, primary) {
         (false, _) => (pal.surface0, pal.overlay0),
         (true, true) => (pal.accent, appearance::readable_on(pal.accent)),
         (true, false) => (pal.surface1, pal.text),

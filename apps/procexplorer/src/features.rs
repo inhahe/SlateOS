@@ -1548,7 +1548,7 @@ impl EnvViewer {
             self.filter.clone()
         };
         let filter_color = if self.filter.is_empty() {
-            palette.overlay0
+            palette.subtext0
         } else {
             palette.text
         };

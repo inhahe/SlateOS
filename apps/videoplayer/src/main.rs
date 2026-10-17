@@ -6097,16 +6097,16 @@ impl VideoPlayerApp {
         // Reset All: lit while there is something to reset.
         let reset = self.reset_button();
         let reset_y = reset.y;
-        let is_default = self.video_adjustments.is_default();
-        let reset_bg = if is_default {
-            self.palette.surface0
-        } else {
+        let enabled = !self.video_adjustments.is_default();
+        let reset_bg = if enabled {
             self.palette.peach
-        };
-        let reset_fg = if is_default {
-            self.palette.overlay0
         } else {
+            self.palette.surface0
+        };
+        let reset_fg = if enabled {
             self.palette.crust
+        } else {
+            self.palette.overlay0
         };
 
         cmds.push(RenderCommand::FillRect {

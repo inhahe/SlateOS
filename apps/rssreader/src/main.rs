@@ -5396,7 +5396,7 @@ impl RssReaderApp {
             // Status badges, which are also the buttons that change them.
             let status_text = if article.is_read { "Read" } else { "Unread" };
             let status_color = if article.is_read {
-                self.palette.overlay0
+                self.palette.subtext0
             } else {
                 self.palette.blue
             };

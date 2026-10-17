@@ -2158,7 +2158,7 @@ impl HabitTrackerApp {
             let streak_color = if streak > 0 {
                 self.palette.peach
             } else {
-                self.palette.overlay0
+                self.palette.subtext0
             };
             cmds.push(RenderCommand::Text {
                 x: stats_x,

@@ -2307,11 +2307,13 @@ impl Pinball {
             width: 1.0,
         });
         for (i, entry) in self.high_scores.iter().enumerate() {
+            // Gold, silver and bronze, then the rest: every score readable,
+            // the first three apart from it.
             let rank_color = match i {
                 0 => self.colours.yellow,
-                1 => self.colours.subtext0,
+                1 => self.colours.text,
                 2 => self.colours.peach,
-                _ => self.colours.overlay0,
+                _ => self.colours.subtext0,
             };
             cmds.push(RenderCommand::Text {
                 x: sx + 10.0,

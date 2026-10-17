@@ -1959,7 +1959,7 @@ fn render_title_bar(frame: &mut Frame, app: &VpnManager) {
     let indicator_color = if active > 0 {
         app.palette.green
     } else {
-        app.palette.overlay0
+        app.palette.subtext0
     };
 
     frame.push(RenderCommand::Text {

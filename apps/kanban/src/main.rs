@@ -2994,7 +2994,7 @@ fn render_filter_bar(tree: &mut RenderTree, app: &KanbanApp, width: f32, y_offse
         &app.filter.search_text
     };
     let search_color = if app.filter.search_text.is_empty() {
-        app.palette.overlay0
+        app.palette.subtext0
     } else {
         app.palette.text
     };
@@ -4145,7 +4145,7 @@ fn render_card_detail_body(
                 });
             }
             let check_mark = if item.done { "[x]" } else { "[ ]" };
-            let item_color = if item.done { pal.overlay0 } else { pal.text };
+            let item_color = if item.done { pal.subtext0 } else { pal.text };
             tree.push(RenderCommand::Text {
                 x: content_x + 4.0,
                 y: cy,

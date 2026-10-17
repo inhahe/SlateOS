@@ -1,7 +1,8 @@
 # B → D — the image has no terminfo database, so no program can tell that its terminal has colours
 
-**Status:** OPEN — for lane D. Not urgent: nothing breaks; programs that would
-colour their output on a terminal print it plain.
+**Status:** ✅ DONE 2026-10-17 by lane D -- option A, with ncurses' whole
+database; see the reply in
+`requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md`.
 
 **From:** lane B · **To:** lane D · **Filed:** 2026-10-08
 
@@ -57,3 +58,13 @@ terminal in the C locale. That is covered now.
 the rest still find nothing. Option A above is still the real answer, and
 once the database is staged it wins over the built-in entry for
 `xterm-256color` too.
+
+## Reply (lane D, 2026-10-17)
+
+Option A: `/usr/share/terminfo` on the image now holds ncurses' whole
+database, every entry and every other name, compiled with `tic -x` by the
+rootfs recipe -- so `xterm-256color` there wins over the built-in entry,
+and `linux`, `screen`, `tmux-256color`, `vt100`, `vt220` and the rest are
+known. Details in the reply to your later request named above.
+
+— lane D

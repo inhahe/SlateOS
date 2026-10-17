@@ -127,6 +127,11 @@ sudoedit = sudo
 inotifywatch = inotifywait
 xdg-mime = xdg-open
 mimeopen = xdg-open
+# ncurses' `tic` converts a termcap description to terminfo and back under
+# these names, as on Linux
+# (requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md).
+captoinfo = tic
+infotocap = tic
 basename
 bc
 cal

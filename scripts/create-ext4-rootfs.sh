@@ -3366,13 +3366,14 @@ fi
 # bitmap face, and a boot test still passes.
 FONT_CACHE="${FONT_CACHE:-$HOME/.cache/slateos/fonts}"
 
-# Put the file whose SHA-256 is <sum> in $FONT_CACHE, fetching it from <url> if
-# it is not already there -- unless a third argument, `cached-only`, says the
-# network has already failed once. 0: it is there; 1: it could not be fetched;
-# 2: what arrived is not that file.
-font_fetch() {
-    local url=$1 sum=$2 mode=${3:-}
-    local dest="$FONT_CACHE/$sum"
+# Put the file whose SHA-256 is <sum> in directory <cache>, fetching it from
+# <url> if it is not already there -- unless a fourth argument, `cached-only`,
+# says the network has already failed once. 0: it is there, as <cache>/<sum>;
+# 1: it could not be fetched; 2: what arrived is not that file. The fonts
+# fetch with it, and the terminfo database's source below.
+pinned_fetch() {
+    local cache=$1 url=$2 sum=$3 mode=${4:-}
+    local dest="$cache/$sum"
     local got
     if [ -f "$dest" ]; then
         got=$(sha256sum < "$dest" | cut -d' ' -f1)
@@ -3380,7 +3381,7 @@ font_fetch() {
         echo "[rootfs] cached $dest is $got: fetching it again"
     fi
     [ "$mode" = cached-only ] && return 1
-    mkdir -p "$FONT_CACHE" || return 1
+    mkdir -p "$cache" || return 1
     # `.part` and a rename (as diff-wsl.sh fetches), so an interrupted fetch is
     # never mistaken for a whole file on the next run. The timeouts bound a
     # network that drops packets rather than refusing them: curl's own connect
@@ -3434,7 +3435,7 @@ else
     while read -r font_rel font_url font_sum; do
         [ -n "$font_rel" ] || continue
         font_rc=0
-        font_fetch "$font_url" "$font_sum" ${font_mode:+"$font_mode"} || font_rc=$?
+        pinned_fetch "$FONT_CACHE" "$font_url" "$font_sum" ${font_mode:+"$font_mode"} || font_rc=$?
         if [ "$font_rc" -eq 2 ]; then
             exit 1
         elif [ "$font_rc" -ne 0 ]; then
@@ -3453,6 +3454,80 @@ else
         exit 1
     fi
     echo "[rootfs] staged $FONTS_STAGED font files under /usr/share/fonts (cache: $FONT_CACHE)"
+fi
+
+# --- terminfo: what each kind of terminal is -----------------------------------
+#
+# Every program that draws on a terminal -- tput, tset, clear, reset, infocmp,
+# pstree -G, util-linux's colours -- looks $TERM up in the terminfo database:
+# one small compiled file per terminal type, saying which bytes clear the
+# screen, move the cursor, change colours, and what each key sends. Without it
+# the only terminal anything here knows is xterm-256color, built into
+# userspace/terminfo as a fallback (design-decisions §1066), and a session from
+# a Linux console (TERM=linux), screen, tmux, or a serial console's vt220 is
+# "unknown terminal". Lane B's requests:
+# requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md
+# requests/b-d-the-image-has-no-terminfo-so-no-program-can-tell-a-colour-terminal.md
+#
+# The whole database ncurses ships -- 1828 entries and 1038 symbolic links for
+# their other names, 2.1 MiB of data, 7.4 MiB at the image's 4 KiB blocks --
+# compiled from upstream's misc/terminfo.src of ncurses 6.4-20240113, the
+# release lane B's `tic` is a port of. It is Ubuntu 24.04's orig tarball,
+# pinned by SHA-256 and fetched once per machine as the fonts are (the same
+# one scripts/tic-diff.sh compares against). `tic -x` keeps the extended
+# capabilities (XT, Ms, Ss, RGB ...) tmux, kitty and the 24-bit-colour entries
+# carry. The build host's tic compiles it; scripts/tic-diff.sh shows ours
+# writing the same tree byte for byte, so the image does not depend on which.
+#
+# /usr/share/terminfo is the last of the compiled-in search list
+# (/etc/terminfo:/lib/terminfo:/usr/share/terminfo), so $TERMINFO, ~/.terminfo
+# and /etc/terminfo still come first.
+#
+# SLATEOS_ROOTFS_NO_TERMINFO=1 builds the image without it, for a machine that
+# is offline and has never fetched the source -- explicitly, as for the fonts,
+# because nothing at boot notices its absence.
+TERMINFO_CACHE="${TERMINFO_CACHE:-$HOME/.cache/slateos/ncurses}"
+TERMINFO_URL="http://archive.ubuntu.com/ubuntu/pool/main/n/ncurses/ncurses_6.4+20240113.orig.tar.gz"
+TERMINFO_SUM=37a12a0f8ae2605012c9a164dd286b0cfa02b51b5055836d09eb3d597fc351b1
+TERMINFO_MEMBER=ncurses-6.4-20240113/misc/terminfo.src
+if [ "${SLATEOS_ROOTFS_NO_TERMINFO:-0}" = "1" ]; then
+    echo "[rootfs] WARNING: SLATEOS_ROOTFS_NO_TERMINFO=1 -- the image carries NO terminfo"
+    echo "[rootfs]          database; every TERM but xterm-256color is an unknown terminal."
+else
+    if ! command -v tic >/dev/null 2>&1; then
+        echo "[rootfs] ERROR: no tic to compile the terminfo database with: install ncurses-bin,"
+        echo "[rootfs]        or set SLATEOS_ROOTFS_NO_TERMINFO=1 to build without it, knowingly."
+        exit 1
+    fi
+    terminfo_rc=0
+    pinned_fetch "$TERMINFO_CACHE" "$TERMINFO_URL" "$TERMINFO_SUM" || terminfo_rc=$?
+    if [ "$terminfo_rc" -eq 1 ]; then
+        echo "[rootfs] ERROR: could not fetch $TERMINFO_URL, and it is not cached."
+        echo "[rootfs]        Fix the network, or set SLATEOS_ROOTFS_NO_TERMINFO=1 to build"
+        echo "[rootfs]        an image without the terminfo database, knowingly."
+        exit 1
+    elif [ "$terminfo_rc" -ne 0 ]; then
+        exit 1
+    fi
+    # Inside $STAGE, which the exit trap removes whatever happens, and out
+    # of it again before the image is packed.
+    TERMINFO_SRC="$STAGE/.terminfo.src"
+    tar -xzOf "$TERMINFO_CACHE/$TERMINFO_SUM" "$TERMINFO_MEMBER" > "$TERMINFO_SRC"
+    mkdir -p "$STAGE/usr/share/terminfo"
+    if ! tic -x -o "$STAGE/usr/share/terminfo" "$TERMINFO_SRC"; then
+        echo "[rootfs] ERROR: $(tic -V) could not compile $TERMINFO_MEMBER (above)."
+        exit 1
+    fi
+    rm -f "$TERMINFO_SRC"
+    for terminfo_name in x/xterm-256color l/linux v/vt220 s/screen t/tmux-256color d/dumb; do
+        if [ ! -f "$STAGE/usr/share/terminfo/$terminfo_name" ]; then
+            echo "[rootfs] ERROR: tic wrote no /usr/share/terminfo/$terminfo_name."
+            exit 1
+        fi
+    done
+    echo "[rootfs] staged the terminfo database under /usr/share/terminfo:" \
+         "$(find "$STAGE/usr/share/terminfo" -type f | wc -l) entries," \
+         "$(find "$STAGE/usr/share/terminfo" -type l | wc -l) other names ($(tic -V))"
 fi
 
 # --- themes: the desktop's colour themes --------------------------------------

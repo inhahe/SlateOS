@@ -81,3 +81,4 @@ ctest-scm-rights file     30
 ctest-uts-namespace file     30
 ctest-secureboot file,secureboot 30
 ctest-signal-deaths -        30
+ctest-terminfo   file     60

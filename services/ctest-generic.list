@@ -72,3 +72,5 @@ ctest-dumpable   file     30
 ctest-thread-masks -        30
 ctest-sigev-thread -        30
 ctest-fifo       file     30
+ctest-setids     creds    30
+ctest-spawn-attrs file     30

@@ -2865,9 +2865,10 @@ D's to act on once answered).
   1193) -- with `ctest-cpu-clocks`, `ctest-itimers`, `ctest-posix-timers`,
   `ctest-dumpable`, `ctest-thread-masks`, `ctest-sigev-thread`; named
   pipes (`SYS_FS_MKFIFO`/`SYS_FIFO_OPEN`, 1157/1158), with the socket and
-  FIFO entry types -- `ctest-fifo`.
-  **Next**, in this order: the set-id calls
-  (1159/1160, settling `posix_spawn`'s `RESETIDS` with them); getgroups
+  FIFO entry types -- `ctest-fifo`; the set-id calls (1159/1160), with
+  `posix_spawn`'s `RESETIDS` refused while it would change an id --
+  `ctest-setids`, `ctest-spawn-attrs`.
+  **Next**, in this order: getgroups
   (1143); `swapon`/`swapoff` (1175/1176); descriptor passing (1169/1170);
   the namespace calls (1161-1166); `SYS_THREAD_SCHEDULER` (1146);
   `SYS_MMAP_FILE` (1144); `profil` over `ITIMER_PROF`; the null-buffer

@@ -962,19 +962,153 @@ fn process_credentials() -> (UidT, GidT) {
     }
 }
 
-/// Apply new real credentials via the kernel (`SYS_PROCESS_SET_CREDENTIALS`).
-///
-/// `new_uid`/`new_gid` use `UidT::MAX`/`GidT::MAX` (POSIX `(id_t)-1`) as the
-/// "leave unchanged" sentinel — the same encoding the kernel expects.  The
-/// `set*id` wrappers call this only *after* their capability/identity check
-/// has authorised the change; the kernel performs the mutation and (per its
-/// thin-primitive contract) does not re-run the policy check.
-///
-/// On bare metal this issues the syscall (0 on success; the only failure is
-/// the caller having no owning process).  In host tests there is no kernel
-/// and no persisted credential state, so it is a no-op that reports success
-/// — preserving the flat "current uid == 0" model the permission tests rely
-/// on (`getuid()` stays 0, so the identity-match arm keeps working).
+/// The caller's user and group ids, as the kernel keeps them since lane A's
+/// design-decisions 1552: the real, effective, saved and filesystem id of
+/// each kind, indexed by [`REAL`], [`EFFECTIVE`], [`SAVED`] and [`FS`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Ids {
+    /// The user ids.
+    pub(crate) uid: [UidT; 4],
+    /// The group ids.
+    pub(crate) gid: [GidT; 4],
+}
+
+impl Ids {
+    /// The ids `SYS_PROCESS_GET_IDS` writes: the real, effective, saved and
+    /// filesystem user ids, then the same group ids.
+    fn from_kernel(words: [u32; 8]) -> Self {
+        let [ru, eu, su, fu, rg, eg, sg, fg] = words;
+        Self {
+            uid: [ru, eu, su, fu],
+            gid: [rg, eg, sg, fg],
+        }
+    }
+}
+
+/// [`Ids`]'s index of the real id.
+pub(crate) const REAL: usize = 0;
+/// [`Ids`]'s index of the effective id.
+pub(crate) const EFFECTIVE: usize = 1;
+/// [`Ids`]'s index of the saved id.
+pub(crate) const SAVED: usize = 2;
+/// [`Ids`]'s index of the filesystem id.
+pub(crate) const FS: usize = 3;
+
+/// The caller's ids (`SYS_PROCESS_GET_IDS`). From a kernel without the call
+/// -- the host's stand-in among them -- the one uid and gid
+/// `SYS_PROCESS_GET_CREDENTIALS` reports are the real, effective and saved
+/// ids, and the filesystem ids are the library's own (`setfsuid`).
+pub(crate) fn ids() -> Ids {
+    let mut buf = [0u32; 8];
+    let ret =
+        crate::syscall::syscall1(crate::syscall::SYS_PROCESS_GET_IDS, buf.as_mut_ptr() as u64);
+    // The call fails only for a buffer it cannot write, which this local is
+    // not: a failure is a kernel without it.
+    if ret >= 0 {
+        return Ids::from_kernel(buf);
+    }
+    let (uid, gid) = process_credentials();
+    Ids {
+        uid: [uid, uid, uid, crate::sys_fsuid::current_fsuid()],
+        gid: [gid, gid, gid, crate::sys_fsuid::current_fsgid()],
+    }
+}
+
+/// `SYS_PROCESS_SET_IDS`'s answer to operation `op` with `ids`
+/// (`0xFFFF_FFFF` leaving one as it is): `Some` of the answer or of the
+/// errno -- `EPERM` for a move the caller may not make, `EINVAL` -- or
+/// `None` from a kernel without the call. The kernel applies Linux's rules,
+/// the permission check included.
+pub(crate) fn set_ids(op: u64, ids: [u32; 3]) -> Option<Result<i64, i32>> {
+    let [a, b, c] = ids;
+    let ret = crate::syscall::syscall4(
+        crate::syscall::SYS_PROCESS_SET_IDS,
+        op,
+        u64::from(a),
+        u64::from(b),
+        u64::from(c),
+    );
+    if crate::syscall::lacks_call(ret) {
+        None
+    } else if ret < 0 {
+        Some(Err(crate::errno::errno_for(ret)))
+    } else {
+        Some(Ok(ret))
+    }
+}
+
+/// What a `set*id` call answers: `SYS_PROCESS_SET_IDS`'s verdict on `op`
+/// with `ids`, or, from a kernel without it, [`set_ids_without_call`]'s.
+fn set_ids_answer(op: u64, ids: [u32; 3]) -> i32 {
+    let verdict = match set_ids(op, ids) {
+        Some(answer) => answer.map(|_| ()),
+        None => set_ids_without_call(op, ids),
+    };
+    match verdict {
+        Ok(()) => 0,
+        Err(e) => {
+            crate::errno::set_errno(e);
+            -1
+        }
+    }
+}
+
+/// The `set*id` calls on a kernel without `SYS_PROCESS_SET_IDS` -- the
+/// host's stand-in among them -- which keeps one uid and one gid a process,
+/// set by `SYS_PROCESS_SET_CREDENTIALS`: `setuid` of -1 is `EINVAL`; each
+/// id asked (not -1) must be that one id, or the caller hold `CAP_SETUID`
+/// (`CAP_SETGID` for a group operation), else `EPERM` with nothing changed;
+/// then the one id becomes the effective id asked, else the real, else the
+/// saved. `op` is a [`SYS_PROCESS_SET_IDS`](crate::syscall::SYS_PROCESS_SET_IDS)
+/// operation other than the filesystem ids', `ids` its real, effective and
+/// saved ids.
+fn set_ids_without_call(op: u64, ids: [u32; 3]) -> Result<(), i32> {
+    use crate::syscall::{SET_IDS_GROUP, SET_IDS_UID};
+    let group = op >= SET_IDS_GROUP;
+    // `setuid` names the id it sets first; the others name the real id first.
+    let [real, effective, saved] = if op % SET_IDS_GROUP == SET_IDS_UID {
+        if ids[0] == u32::MAX {
+            return Err(crate::errno::EINVAL);
+        }
+        [u32::MAX, ids[0], u32::MAX]
+    } else {
+        ids
+    };
+    let (uid, gid) = process_credentials();
+    let (current, cap) = if group {
+        (gid, crate::sys_capability::CAP_SETGID)
+    } else {
+        (uid, crate::sys_capability::CAP_SETUID)
+    };
+    let asked = [real, effective, saved];
+    if asked
+        .iter()
+        .any(|&id| id != u32::MAX && id != current && !crate::sys_capability::has_capability(cap))
+    {
+        return Err(crate::errno::EPERM);
+    }
+    let Some(target) = [effective, real, saved]
+        .into_iter()
+        .find(|&id| id != u32::MAX)
+    else {
+        return Ok(());
+    };
+    let (new_uid, new_gid) = if group {
+        (UidT::MAX, target)
+    } else {
+        (target, GidT::MAX)
+    };
+    if set_real_credentials(new_uid, new_gid) < 0 {
+        return Err(crate::errno::EPERM);
+    }
+    Ok(())
+}
+
+/// Set the one uid and gid of a kernel without `SYS_PROCESS_SET_IDS`
+/// (`SYS_PROCESS_SET_CREDENTIALS`), `UidT::MAX`/`GidT::MAX` leaving one as
+/// it is: the kernel's answer, negative only for a caller with no process
+/// or without the `SET_CREDENTIALS` right. The host's stand-in keeps no
+/// ids and answers 0.
 fn set_real_credentials(new_uid: UidT, new_gid: GidT) -> i64 {
     #[cfg(target_os = "none")]
     {
@@ -991,303 +1125,91 @@ fn set_real_credentials(new_uid: UidT, new_gid: GidT) -> i64 {
     }
 }
 
-/// Whether the caller may set its uid to `target`, given its live current
-/// uid `cur`: allowed iff the target equals the current uid (re-asserting an
-/// identity the caller already holds) or the caller holds `CAP_SETUID`.
-///
-/// This is the uid analogue of Linux's per-field "match any current id OR
-/// `CAP_SETUID`" rule; in our flat single-uid model the three match arms
-/// (real/effective/saved) collapse to the single live uid.  `cur` is read
-/// from the kernel via [`getuid`], so a non-root process correctly succeeds
-/// when re-asserting its *own* uid (the pre-mutation stubs compared against a
-/// hardcoded 0, which wrongly `EPERM`ed a non-root caller setting its own id).
-#[inline]
-fn uid_change_permitted(target: UidT, cur: UidT) -> bool {
-    target == cur || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
-}
-
-/// Gid analogue of [`uid_change_permitted`], gated by `CAP_SETGID`.
-#[inline]
-fn gid_change_permitted(target: GidT, cur: GidT) -> bool {
-    target == cur || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
-}
-
-/// Get the real user ID of the calling process.
-///
-/// Reads the process's kernel credentials (set at spawn / from
-/// `SpawnOptions.uid_gid`).  Reports root (0) for the kernel's own tasks and
-/// in host tests.
+/// The real user id of the calling process.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getuid() -> UidT {
-    process_credentials().0
+    ids().uid[REAL]
 }
 
-/// Get the effective user ID of the calling process.
-///
-/// Aliased to the real uid until the kernel tracks a separate effective uid.
+/// The effective user id of the calling process: the one its permissions
+/// go by, its filesystem id apart.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn geteuid() -> UidT {
-    process_credentials().0
+    ids().uid[EFFECTIVE]
 }
 
-/// Get the real group ID of the calling process.
-///
-/// Reads the process's kernel credentials (set at spawn / from
-/// `SpawnOptions.uid_gid`).  Reports root (0) for the kernel's own tasks and
-/// in host tests.
+/// The real group id of the calling process.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getgid() -> GidT {
-    process_credentials().1
+    ids().gid[REAL]
 }
 
-/// Get the effective group ID of the calling process.
-///
-/// Aliased to the real gid until the kernel tracks a separate effective gid.
+/// The effective group id of the calling process.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getegid() -> GidT {
-    process_credentials().1
+    ids().gid[EFFECTIVE]
 }
 
-/// Set the user ID of the calling process.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setuid`)
-///
-/// ```text
-/// if (kuid == cred->uid || kuid == cred->euid || kuid == cred->suid ||
-///     ns_capable_setid(ns, CAP_SETUID))
-///     return commit_creds(new);
-/// return -EPERM;
-/// ```
-///
-/// The kernel allows the syscall when the requested uid matches *any*
-/// of the caller's real/effective/saved uids (in which case no
-/// capability is needed — the call is just toggling between identities
-/// the caller already legitimately holds), or when the caller holds
-/// `CAP_SETUID`.  Anything else fails with `EPERM`.
-///
-/// The kernel keeps one uid a process -- real, effective and saved are the
-/// same -- which collapses the three matching arms into "uid == the
-/// current uid", so:
-///
-/// * `setuid(getuid())` — always succeeds, no cap required (target equals
-///                        current).
-/// * any other uid — requires `CAP_SETUID`, else `EPERM`.
-///
-/// **Phase 192:** pre-Phase-192 we returned `0` for *every* uid value,
-/// ignoring caps.  That let an unprivileged sandbox call
-/// `setuid(1000)` and continue to think it had successfully dropped
-/// privilege when in fact nothing changed — exactly the kind of silent
-/// "permission boundary skipped" bug containers care about.  The cap
-/// gate now matches Linux's behaviour for the typical "drop to
-/// nobody / unprivileged user" use case: callers without CAP_SETUID
-/// see EPERM and surface the misconfiguration loudly.
+/// Set the user id, by Linux's rules (`kernel/sys.c`'s `setuid`), which the
+/// kernel applies: a privileged caller -- holding the `SET_CREDENTIALS`
+/// right, not an id of 0 -- sets all four ids, and gives root up for good;
+/// any other moves its effective id to its real or saved id, and is
+/// `EPERM` asking for another. -1 is `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setuid(uid: UidT) -> i32 {
-    // Target uid != the live current uid → needs CAP_SETUID.  `getuid()`
-    // reads the real kernel credential (usually 0, but a process spawned
-    // non-root sees its own uid), so re-asserting one's own uid always
-    // succeeds — covering Linux's real/effective/saved match arms, which
-    // collapse to the single uid in our flat model.
-    let cur = getuid();
-    if !uid_change_permitted(uid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    // The check passed — actually apply the change so `getuid()` reflects
-    // it (the pre-mutation stub silently succeeded without changing state).
-    if set_real_credentials(uid, GidT::MAX) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    set_ids_answer(crate::syscall::SET_IDS_UID, [uid, UidT::MAX, UidT::MAX])
 }
 
-/// Set the effective user ID of the calling process.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setreuid` / `sys_seteuid`)
-///
-/// `seteuid(uid)` is a thin wrapper around `setreuid(-1, uid)` in
-/// glibc; the kernel implements both via the same permission table.
-/// For the effective-uid field specifically:
-///
-/// ```text
-/// if (euid != (uid_t)-1 &&
-///     euid != cred->uid && euid != cred->euid && euid != cred->suid &&
-///     !ns_capable_setid(ns, CAP_SETUID))
-///     return -EPERM;
-/// ```
-///
-/// Match-against-any-current-uid OR `CAP_SETUID`.  Same collapse as
-/// [`setuid`]'s: the process's one uid is all three, so "uid == the current
-/// uid".
-///
-/// **Phase 192:** the previous "succeeds silently" stub had the same
-/// hole as [`setuid`] — `seteuid(1000)` looked like it dropped
-/// privilege but did nothing.  The cap gate restores Linux's EPERM on
-/// the privilege-boundary path.
+/// Set the effective user id: glibc's `seteuid`, `EINVAL` for -1 and
+/// otherwise `setresuid(-1, uid, -1)` -- so root that sets its effective id
+/// aside (`seteuid(1000)`) can take it back (`seteuid(0)`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn seteuid(uid: UidT) -> i32 {
-    // Same rule as setuid; effective == real in our flat single-uid model,
-    // so this sets the one uid field after the identity/cap check passes.
-    let cur = getuid();
-    if !uid_change_permitted(uid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
+    if uid == UidT::MAX {
+        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
-    if set_real_credentials(uid, GidT::MAX) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    setresuid(UidT::MAX, uid, UidT::MAX)
 }
 
-/// Set the group ID of the calling process.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setgid`)
-///
-/// Linux's `sys_setgid` allows the call when the target gid matches
-/// the real, effective, or saved gid OR the caller holds `CAP_SETGID`;
-/// otherwise `-EPERM`.  This is the gid analogue of `setuid`'s rule.
-///
-/// The kernel keeps one gid a process -- real, effective and saved are the
-/// same -- so the three match arms collapse to "target == the current gid
-/// always OK; any other requires CAP_SETGID".
-///
-/// **Phase 193:** pre-Phase-193 the stub returned `0` for every gid
-/// value, mirroring the silent-success bug Phase 192 fixed for
-/// `setuid`.  An unprivileged caller could call `setgid(1000)` and
-/// believe it had successfully dropped to an unprivileged group while
-/// in fact nothing had changed.  The cap gate restores Linux's EPERM
-/// for the privilege-boundary path.
+/// Set the group id: [`setuid`]'s rules for the group ids.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgid(gid: GidT) -> i32 {
-    // Target gid != the live current gid → needs CAP_SETGID.  `getgid()`
-    // reads the real kernel credential, so re-asserting one's own gid always
-    // succeeds — covering Linux's real/effective/saved gid match arms, which
-    // collapse to the single gid in our flat model.
-    let cur = getgid();
-    if !gid_change_permitted(gid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if set_real_credentials(UidT::MAX, gid) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    set_ids_answer(
+        crate::syscall::SET_IDS_UID + crate::syscall::SET_IDS_GROUP,
+        [gid, GidT::MAX, GidT::MAX],
+    )
 }
 
-/// Set the effective group ID of the calling process.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setregid` / `sys_setegid`)
-///
-/// `setegid(gid)` is a thin wrapper around `setregid(-1, gid)` in
-/// glibc; the kernel implements both via the same permission table.
-/// For the effective-gid field:
-///
-/// ```text
-/// if (egid != (gid_t)-1 &&
-///     egid != cred->gid && egid != cred->egid && egid != cred->sgid &&
-///     !ns_capable_setid(ns, CAP_SETGID))
-///     return -EPERM;
-/// ```
-///
-/// Same collapse as [`setgid`]'s: "gid == the current gid".
-///
-/// **Phase 193:** the previous "succeeds silently" stub had the same
-/// hole as [`setgid`] — `setegid(1000)` looked like it changed the
-/// effective gid but did nothing.  The cap gate restores Linux's
-/// EPERM on the privilege-boundary path.
+/// Set the effective group id: glibc's `setegid`, `EINVAL` for -1 and
+/// otherwise `setresgid(-1, gid, -1)`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setegid(gid: GidT) -> i32 {
-    // Same rule as setgid; effective == real in our flat single-gid model.
-    let cur = getgid();
-    if !gid_change_permitted(gid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
+    if gid == GidT::MAX {
+        crate::errno::set_errno(crate::errno::EINVAL);
         return -1;
     }
-    if set_real_credentials(UidT::MAX, gid) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    setresgid(GidT::MAX, gid, GidT::MAX)
 }
 
-/// Set the real and effective user IDs.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setreuid`)
-///
-/// Each field is independently permission-checked.  A value of
-/// `(uid_t)-1` (= `UidT::MAX` here) means "leave this field alone"
-/// and bypasses its check entirely.  For the ruid field:
-///
-/// ```text
-/// if (ruid_set &&                                /* ruid != -1 */
-///     !uid_eq(old->uid, new_ruid) &&
-///     !uid_eq(old->euid, new_ruid) &&
-///     !ns_capable_setid(ns, CAP_SETUID))
-///     return -EPERM;
-/// ```
-///
-/// For the euid field the match list also includes `suid`.  With the
-/// kernel's one uid a process, both arms collapse to "value == the current
-/// uid or value == -1 always OK; any other value requires CAP_SETUID".
-///
-/// **Phase 194:** pre-Phase-194 we returned `0` for every (ruid,
-/// euid) pair, masking the same silent privilege-skip bug Phase 192
-/// fixed for `setuid`.
+/// Set the real and effective user ids, -1 leaving one as it is, by Linux's
+/// rules (`setreuid`), which the kernel applies: unprivileged, the real id
+/// may become the effective one, and the effective id the real or saved
+/// one; the saved id follows the effective id when the real id is set or
+/// the effective id moves from the real one. `EPERM` for anything else.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setreuid(ruid: UidT, euid: UidT) -> i32 {
-    // -1 (`UidT::MAX`) sentinel skips the check for that field; otherwise the
-    // field must match the live current uid or the caller must hold
-    // CAP_SETUID.  Linux evaluates ruid before euid; either failing returns
-    // EPERM before any mutation.
-    let cur = getuid();
-    if ruid != UidT::MAX && !uid_change_permitted(ruid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if euid != UidT::MAX && !uid_change_permitted(euid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    // Both checks passed — apply.  Our single uid field holds the effective
-    // uid (which `getuid` also reports); prefer euid when given, else ruid.
-    // If both are the sentinel there is nothing to change.
-    let target = if euid != UidT::MAX { euid } else { ruid };
-    if target != UidT::MAX && set_real_credentials(target, GidT::MAX) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    set_ids_answer(crate::syscall::SET_IDS_REUID, [ruid, euid, UidT::MAX])
 }
 
-/// Set the real and effective group IDs.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setregid`)
-///
-/// Mirror of [`setreuid`] for gids.  Each field independently
-/// permission-checked; `(gid_t)-1` (= `GidT::MAX`) means "leave
-/// alone".  Gated by `CAP_SETGID`.
-///
-/// **Phase 194:** previous stub silently succeeded for any pair.
+/// Set the real and effective group ids: [`setreuid`]'s rules for the
+/// group ids.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setregid(rgid: GidT, egid: GidT) -> i32 {
-    let cur = getgid();
-    if rgid != GidT::MAX && !gid_change_permitted(rgid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if egid != GidT::MAX && !gid_change_permitted(egid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    let target = if egid != GidT::MAX { egid } else { rgid };
-    if target != GidT::MAX && set_real_credentials(UidT::MAX, target) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    set_ids_answer(
+        crate::syscall::SET_IDS_REUID + crate::syscall::SET_IDS_GROUP,
+        [rgid, egid, GidT::MAX],
+    )
 }
 
 mod groups;
@@ -3720,150 +3642,55 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
 // Linux misc: setresuid/setresgid/getresuid/getresgid
 // ---------------------------------------------------------------------------
 
-/// Set real, effective, and saved set-user-ID.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setresuid`)
-///
-/// Each of `ruid`, `euid`, `suid` is independently permission-checked.
-/// A value of `(uid_t)-1` (= `UidT::MAX`) means "leave this field
-/// alone" and bypasses its check.  Linux uses a single CAP_SETUID
-/// fast-path that skips all three field checks if the cap is held:
-///
-/// ```text
-/// if (!ns_capable_setid(old->user_ns, CAP_SETUID)) {
-///     if (ruid != (uid_t)-1 && !uid_eq(kruid, old->uid) &&
-///         !uid_eq(kruid, old->euid) && !uid_eq(kruid, old->suid))
-///         return -EPERM;
-///     if (euid != (uid_t)-1 && !uid_eq(keuid, old->uid) &&
-///         !uid_eq(keuid, old->euid) && !uid_eq(keuid, old->suid))
-///         return -EPERM;
-///     if (suid != (uid_t)-1 && !uid_eq(ksuid, old->uid) &&
-///         !uid_eq(ksuid, old->euid) && !uid_eq(ksuid, old->suid))
-///         return -EPERM;
-/// }
-/// ```
-///
-/// With the kernel's one uid a process, each non-sentinel field must be
-/// that uid (it is the current uid, euid and suid at once) OR the caller
-/// must hold CAP_SETUID.  Order: ruid → euid → suid (matches Linux).
-///
-/// **Phase 195:** pre-Phase-195 returned `0` for every triple,
-/// continuing the silent-success bug pattern Phases 192-194 fixed
-/// for setuid/seteuid/setreuid.  Worth flagging because setresuid
-/// is the syscall sandbox/jail code uses to clamp all three uids
-/// simultaneously — a silent no-op here was particularly dangerous.
+/// Set the real, effective and saved user ids, -1 leaving one as it is, by
+/// Linux's rules (`setresuid`), which the kernel applies: unprivileged,
+/// each may become any of the three the caller has; `EPERM` for another,
+/// nothing changed. What sandboxes use to clamp all three at once.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresuid(ruid: UidT, euid: UidT, suid: UidT) -> i32 {
-    // Each non-sentinel field must match the live current uid or the caller
-    // must hold CAP_SETUID (`uid_change_permitted` folds in Linux's outer
-    // `if (!cap)` fast-path: with the cap every field is permitted).  Order
-    // ruid → euid → suid, matching Linux; first failure EPERMs before any
-    // mutation.
-    let cur = getuid();
-    if ruid != UidT::MAX && !uid_change_permitted(ruid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if euid != UidT::MAX && !uid_change_permitted(euid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if suid != UidT::MAX && !uid_change_permitted(suid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    // Apply the effective uid to our single field (euid, else ruid, else the
-    // saved uid); all-sentinel means nothing changes.
-    let target = if euid != UidT::MAX {
-        euid
-    } else if ruid != UidT::MAX {
-        ruid
-    } else {
-        suid
-    };
-    if target != UidT::MAX && set_real_credentials(target, GidT::MAX) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    set_ids_answer(crate::syscall::SET_IDS_RESUID, [ruid, euid, suid])
 }
 
-/// Set real, effective, and saved set-group-ID.
-///
-/// # Linux semantics (`kernel/sys.c::sys_setresgid`)
-///
-/// Mirror of [`setresuid`] for gids.  Gated by `CAP_SETGID`.  Each
-/// field of `(rgid, egid, sgid)` independently checked; `(gid_t)-1`
-/// (= `GidT::MAX`) means "leave alone".
-///
-/// **Phase 195:** previous stub silently succeeded.
+/// Set the real, effective and saved group ids: [`setresuid`]'s rules for
+/// the group ids.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresgid(rgid: GidT, egid: GidT, sgid: GidT) -> i32 {
-    let cur = getgid();
-    if rgid != GidT::MAX && !gid_change_permitted(rgid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if egid != GidT::MAX && !gid_change_permitted(egid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    if sgid != GidT::MAX && !gid_change_permitted(sgid, cur) {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    let target = if egid != GidT::MAX {
-        egid
-    } else if rgid != GidT::MAX {
-        rgid
-    } else {
-        sgid
-    };
-    if target != GidT::MAX && set_real_credentials(UidT::MAX, target) < 0 {
-        crate::errno::set_errno(crate::errno::EPERM);
-        return -1;
-    }
-    0
+    set_ids_answer(
+        crate::syscall::SET_IDS_RESUID + crate::syscall::SET_IDS_GROUP,
+        [rgid, egid, sgid],
+    )
 }
 
-/// Get real, effective, and saved set-user-ID.
-///
-/// The kernel keeps one uid for a process, which is all three; `getuid` and
-/// `geteuid` report it too. Until 2026-10-06 this answered 0 -- root -- for
-/// all three whatever the process was, so a program that checked its ids
-/// before doing something privileged (OpenSSH, sudo, polkit do) was told it
-/// was root after it had dropped to another user.
+/// The real, effective and saved user ids. A NULL pointer is `EFAULT`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresuid(ruid: *mut UidT, euid: *mut UidT, suid: *mut UidT) -> i32 {
     if ruid.is_null() || euid.is_null() || suid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
-    let (uid, _) = process_credentials();
+    let ids = ids();
     // SAFETY: All pointers verified non-null.
     unsafe {
-        *ruid = uid;
-        *euid = uid;
-        *suid = uid;
+        *ruid = ids.uid[REAL];
+        *euid = ids.uid[EFFECTIVE];
+        *suid = ids.uid[SAVED];
     }
     0
 }
 
-/// Get real, effective, and saved set-group-ID: the process's one gid, as
-/// [`getresuid`] reports its one uid. It answered 0 for all three until
-/// 2026-10-06.
+/// The real, effective and saved group ids. A NULL pointer is `EFAULT`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getresgid(rgid: *mut GidT, egid: *mut GidT, sgid: *mut GidT) -> i32 {
     if rgid.is_null() || egid.is_null() || sgid.is_null() {
         crate::errno::set_errno(crate::errno::EFAULT);
         return -1;
     }
-    let (_, gid) = process_credentials();
+    let ids = ids();
     // SAFETY: All pointers verified non-null.
     unsafe {
-        *rgid = gid;
-        *egid = gid;
-        *sgid = gid;
+        *rgid = ids.gid[REAL];
+        *egid = ids.gid[EFFECTIVE];
+        *sgid = ids.gid[SAVED];
     }
     0
 }
@@ -7266,18 +7093,65 @@ mod tests {
     // seteuid / setegid / setreuid / setregid — stub success tests
     // ------------------------------------------------------------------
 
+    /// On a kernel without `SYS_PROCESS_GET_IDS` -- the host's stand-in --
+    /// the real, effective and saved ids are the one id the old call
+    /// reports, and the filesystem ids the library's own, which `setfsuid`
+    /// moves; `-1` in the triple setters leaves every id as it is.
+    #[test]
+    fn the_kernels_eight_ids_are_users_then_groups() {
+        let ids = Ids::from_kernel([1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(
+            [
+                ids.uid[REAL],
+                ids.uid[EFFECTIVE],
+                ids.uid[SAVED],
+                ids.uid[FS]
+            ],
+            [1, 2, 3, 4]
+        );
+        assert_eq!(
+            [
+                ids.gid[REAL],
+                ids.gid[EFFECTIVE],
+                ids.gid[SAVED],
+                ids.gid[FS]
+            ],
+            [5, 6, 7, 8]
+        );
+    }
+
+    #[test]
+    fn ids_without_the_call_are_the_one_id_and_the_librarys_fs_ids() {
+        let (uid, gid) = process_credentials();
+        let before = ids();
+        assert_eq!(before.uid[..3], [uid; 3]);
+        assert_eq!(before.gid[..3], [gid; 3]);
+        let fs = crate::sys_fsuid::setfsuid(42);
+        assert_eq!(ids().uid[FS], 42);
+        assert_eq!(ids().uid[REAL], uid);
+        crate::sys_fsuid::setfsuid(u32::try_from(fs).unwrap_or(0));
+        assert_eq!(ids(), before);
+        assert_eq!(setresuid(u32::MAX, u32::MAX, u32::MAX), 0);
+        assert_eq!(setreuid(u32::MAX, u32::MAX), 0);
+        assert_eq!(ids(), before);
+    }
+
     #[test]
     fn test_seteuid_succeeds() {
         assert_eq!(seteuid(0), 0);
         assert_eq!(seteuid(1000), 0);
-        assert_eq!(seteuid(u32::MAX), 0);
+        errno::set_errno(0);
+        assert_eq!(seteuid(u32::MAX), -1, "-1 is glibc's EINVAL");
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_setegid_succeeds() {
         assert_eq!(setegid(0), 0);
         assert_eq!(setegid(1000), 0);
-        assert_eq!(setegid(u32::MAX), 0);
+        errno::set_errno(0);
+        assert_eq!(setegid(u32::MAX), -1, "-1 is glibc's EINVAL");
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -7985,15 +7859,16 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// Same gate at u32::MAX (often the "nobody" sentinel for
-        /// invalid mappings in user namespaces).
+        /// -1 is no id: `EINVAL` before any permission, privileged or not,
+        /// as Linux's `setuid` answers it
+        /// (`build/d-tools/oracle-setid-minus-one.c`).
         #[test]
-        fn test_setuid_phase192_no_cap_max_uid_returns_eperm() {
+        fn test_setuid_phase192_no_cap_max_uid_is_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_setuid();
             errno::set_errno(0);
             assert_eq!(setuid(u32::MAX), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         /// Same gate at uid 1 (the historical "daemon" uid — close to
@@ -8018,14 +7893,14 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        /// `seteuid(u32::MAX)` with no cap — boundary sentinel.
+        /// `seteuid(-1)` is glibc's own `EINVAL`, before the kernel is asked.
         #[test]
-        fn test_seteuid_phase192_no_cap_max_uid_returns_eperm() {
+        fn test_seteuid_phase192_no_cap_max_uid_is_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_setuid();
             errno::set_errno(0);
             assert_eq!(seteuid(u32::MAX), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         // -- Ordering / sentinel ---------------------------------------------
@@ -8343,13 +8218,14 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
+        /// -1 is no id: `EINVAL`, as for `setuid`.
         #[test]
-        fn test_setgid_phase193_no_cap_max_gid_returns_eperm() {
+        fn test_setgid_phase193_no_cap_max_gid_is_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_setgid();
             errno::set_errno(0);
             assert_eq!(setgid(u32::MAX), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         #[test]
@@ -8370,13 +8246,14 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
+        /// `setegid(-1)` is glibc's own `EINVAL`.
         #[test]
-        fn test_setegid_phase193_no_cap_max_gid_returns_eperm() {
+        fn test_setegid_phase193_no_cap_max_gid_is_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_setgid();
             errno::set_errno(0);
             assert_eq!(setegid(u32::MAX), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
         // -- Ordering / sentinel ---------------------------------------------

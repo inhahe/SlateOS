@@ -66,11 +66,12 @@
 //! - `posix_spawnattr`'s process group, session, signal mask and signals
 //!   to reset (`SETPGROUP`, `SETSID`, `SETSIGMASK`, `SETSIGDEF`) are applied
 //!   by the kernel before the child's first instruction, through
-//!   `SpawnEx2Args`; until 2026-10-16 none was. `RESETIDS`, `SETSCHEDPARAM`
-//!   and `SETSCHEDULER` are recorded and not applied
-//!   (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES). What cannot be done at all
-//!   is refused instead: a cgroup (`ENOTSUP`) and a terminal's foreground
-//!   group (`ENOSYS`).
+//!   `SpawnEx2Args`; until 2026-10-16 none was. `SETSCHEDPARAM` and
+//!   `SETSCHEDULER` are recorded and not applied
+//!   (TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES). What cannot be done is
+//!   refused instead: `RESETIDS` while the effective ids are not the real
+//!   ones (`ENOTSUP` -- when they are, it has nothing to do), a cgroup
+//!   (`ENOTSUP`) and a terminal's foreground group (`ENOSYS`).
 
 use crate::errno;
 use crate::mman;
@@ -1231,7 +1232,22 @@ pub extern "C" fn posix_spawnattr_getcgroup_np(
     0
 }
 
-/// What this system cannot do of what a spawn asks: `ENOTSUP` for a cgroup
+/// Whether `POSIX_SPAWN_RESETIDS` must be refused for a caller whose ids
+/// are `ids`: the child is to start with the caller's real user and group
+/// ids as its effective ones, and the kernel's spawn cannot yet set them
+/// before its first instruction -- the child inherits the caller's
+/// effective ids. So a reset that would change one is refused rather than
+/// carried out wrongly, which would leave a set-user-id program's helper the
+/// privilege it was spawned to drop; one that changes nothing is done by
+/// doing nothing (`requests/d-a-spawn-resetids-and-scheduling-need-kernel-fields.md`).
+fn resetids_refused(ids: &crate::unistd::Ids) -> bool {
+    use crate::unistd::{EFFECTIVE, REAL};
+    ids.uid[EFFECTIVE] != ids.uid[REAL] || ids.gid[EFFECTIVE] != ids.gid[REAL]
+}
+
+/// What this system cannot do of what a spawn asks: `ENOTSUP` for
+/// `POSIX_SPAWN_RESETIDS` while the caller's effective ids are not its real
+/// ones ([`resetids_refused`]), `ENOTSUP` for a cgroup
 /// (`POSIX_SPAWN_SETCGROUP` -- there are none; glibc answers the same on a
 /// kernel without `clone3`), `ENOSYS` for a terminal's foreground group
 /// (`posix_spawn_file_actions_addtcsetpgrp_np` -- the kernel's spawn cannot
@@ -1245,6 +1261,9 @@ fn refused_request(
     if !attrp.is_null() {
         // SAFETY: non-null, the caller's attribute object.
         let flags = unsafe { (*attrp).flags };
+        if flags & POSIX_SPAWN_RESETIDS != 0 && resetids_refused(&crate::unistd::ids()) {
+            return Some(errno::ENOTSUP);
+        }
         if flags & POSIX_SPAWN_SETCGROUP != 0 {
             return Some(errno::ENOTSUP);
         }
@@ -1263,8 +1282,9 @@ fn refused_request(
 /// first instruction: [`SpawnEx2Args`]'s last six fields, in its terms.
 ///
 /// `POSIX_SPAWN_SETPGROUP`, `SETSIGMASK`, `SETSIGDEF` and `SETSID`.
-/// `RESETIDS`, `SETSCHEDPARAM` and `SETSCHEDULER` are recorded and not
-/// applied (known-issues `TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`).
+/// `SETSCHEDPARAM` and `SETSCHEDULER` are recorded and not applied
+/// (known-issues `TD-D-POSIX-SPAWN-IGNORES-ITS-ATTRIBUTES`); `RESETIDS` is
+/// [`refused_request`]'s.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SpawnAttrFields {
     pgid_mode: u64,
@@ -5196,6 +5216,13 @@ mod tests {
 
         // Without the flag the descriptor is only stored.
         assert_eq!(refused_request(core::ptr::null(), &raw const attr), None);
+        // RESETIDS with nothing to reset -- the host's ids are one -- is
+        // done by doing nothing.
+        assert_eq!(
+            posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_RESETIDS),
+            0
+        );
+        assert_eq!(refused_request(core::ptr::null(), &raw const attr), None);
         assert_eq!(
             posix_spawnattr_setflags(&raw mut attr, POSIX_SPAWN_SETCGROUP | POSIX_SPAWN_SETSID),
             0
@@ -6316,6 +6343,26 @@ mod tests {
             ),
             (1, 0, 1, 1 << 16, 6, 0)
         );
+    }
+
+    /// `RESETIDS` is refused exactly when it would change an effective id.
+    #[test]
+    fn resetids_is_refused_only_when_it_would_change_an_id() {
+        use crate::unistd::{EFFECTIVE, Ids, REAL, SAVED};
+        let same = Ids {
+            uid: [1000; 4],
+            gid: [100; 4],
+        };
+        assert!(!resetids_refused(&same));
+        let mut ids = same;
+        ids.uid[SAVED] = 0;
+        assert!(!resetids_refused(&ids), "the saved id is not reset");
+        ids = same;
+        ids.uid[EFFECTIVE] = 0;
+        assert!(resetids_refused(&ids), "a set-user-id program's root");
+        ids = same;
+        ids.gid[REAL] = 5;
+        assert!(resetids_refused(&ids), "a set-group-id program's group");
     }
 
     /// The attribute object's flags decide which of its values are sent:

@@ -1238,6 +1238,31 @@ pub const SYS_FS_MKFIFO: u64 = 1157;
 /// Native errors.
 pub const SYS_FIFO_OPEN: u64 = 1158;
 
+/// `SYS_PROCESS_SET_IDS(op, a, b, c)` -- move between user or group ids by
+/// Linux's rules, on lane A's kernel since 2026-10-08
+/// (`requests/a-d-a-process-has-real-effective-saved-and-filesystem-ids-now.md`,
+/// lane A's design-decisions 1552): the kernel keeps a real, an effective, a
+/// saved and a filesystem id of each kind, and applies the permission check
+/// itself -- privilege is the `SET_CREDENTIALS` right, not an id of 0.
+/// `0xFFFF_FFFF` leaves an id as it is. Answers 0 -- `SET_IDS_FSUID` the old
+/// filesystem id -- or native `NotPermitted`, or `InvalidArgument` for
+/// `SET_IDS_UID` of -1.
+pub const SYS_PROCESS_SET_IDS: u64 = 1159;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setuid(a)`.
+pub const SET_IDS_UID: u64 = 0;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setreuid(a, b)`.
+pub const SET_IDS_REUID: u64 = 1;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setresuid(a, b, c)`.
+pub const SET_IDS_RESUID: u64 = 2;
+/// [`SYS_PROCESS_SET_IDS`] operation: `setfsuid(a)`.
+pub const SET_IDS_FSUID: u64 = 3;
+/// Added to a [`SYS_PROCESS_SET_IDS`] user operation: its group twin.
+pub const SET_IDS_GROUP: u64 = 4;
+
+/// `SYS_PROCESS_GET_IDS(buf)` -- the caller's ids into eight `u32`s: the
+/// real, effective, saved and filesystem user ids, then the group ids.
+pub const SYS_PROCESS_GET_IDS: u64 = 1160;
+
 /// `SYS_PROCESS_DUMPABLE(op, value)` -- the caller's dumpable flag, the one
 /// the Linux ABI's `prctl(PR_SET_DUMPABLE)` sets and `/proc` consults; on
 /// lane A's kernel since 2026-10-07. Linux's errnos as `-errno`.

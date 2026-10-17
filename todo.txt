@@ -59325,3 +59325,17 @@ is still run by hand, not by `boot-test.sh`.
   guess; tests for a video giving only its primaries, only its matrix, and
   only HDR; the player's fixtures unchanged for fully described and
   untagged video.
+
+## Lane E — what waits on lane C's next publish (2026-10-17)
+
+- **Settings' Power page and the display-wake switch reach main only after
+  lane C's idle_lock change does** (lane-e 19cce7dd8; lane C's request
+  c-e-settings-offers-turning-the-screen-off-after-n-minutes, lane-c
+  1cb129b11). The page writes `displays.off_after_minutes`,
+  `sleep.after_minutes` and `lock.on_display_wake` in the `session` group;
+  on a main without lane C's change nothing reads them, and the rows would be
+  settings that change nothing (design-decisions 856). Before lane E
+  publishes: `git show origin/main:gui/desktop/src/idle_lock.rs | grep
+  DISPLAYS_OFF_AFTER_MINUTES`. If it is not there, publish up to the commit
+  before 19cce7dd8 or wait. Then tell lane C it is on main, and the request
+  can close.

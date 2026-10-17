@@ -280,6 +280,16 @@ S_TAIL_PRESS = "a_press_in_a_box_read_from_its_end_lands_on_the_tail_it_showed"
 # weight, and the built-in face is the only one.
 S_WEIGHT = "a_box_in_a_weight_is_drawn_and_pressed_in_it"
 
+# A box masked (2026-10-17): passwordgen's analyser and lockscreen's
+# password, which moved onto it; and the caret put at a byte, for
+# lockscreen's press on its own dots.
+S_MASKED = "a_masked_box_draws_its_masks_and_gives_nothing_away"
+S_MASK_PRESS = "a_press_in_a_masked_box_lands_between_the_masks_it_drew"
+S_PUT = "the_caret_put_at_a_byte_lands_on_a_characters_boundary"
+# No row for put_caret without `.min(text.len())`: a byte past the end is
+# no character's boundary, so the search walks down to the end all the same
+# -- the bound only spares it the walk.
+
 LINE_MUTATIONS = [
     (
         "the box holds no capacity",
@@ -439,8 +449,8 @@ LINE_MUTATIONS = [
     ),
     (
         "an empty box draws a line of text of its own",
-        "            }\n            return;\n        }\n        if look.focused {\n",
-        "            }\n        }\n        if look.focused {\n",
+        "            }\n            return;\n        }\n        let (text, cursor, selection_anchor) = self.shown();\n",
+        "            }\n        }\n        let (text, cursor, selection_anchor) = self.shown();\n",
         [S_EMPTY_FOCUSED],
     ),
     (
@@ -451,8 +461,7 @@ LINE_MUTATIONS = [
     ),
     (
         "text without the keyboard is not drawn",
-        "            push_line(\n                tree,\n                look,\n                self.input.text(),\n"
-        "                look.color,\n                (self.font_size, self.weight),\n            );\n",
+        "            push_line(tree, look, &text, look.color, (self.font_size, self.weight));\n",
         "",
         [S_UNFOCUSED],
     ),
@@ -500,8 +509,8 @@ LINE_MUTATIONS = [
     ),
     (
         "a press is measured in the regular weight",
-        "                self.weight,\n                dx,\n",
-        "                FontWeightHint::Regular,\n                dx,\n",
+        "textedit::cursor_at_click(&shown, drawn, width, self.font_size, self.weight, dx)",
+        "textedit::cursor_at_click(&shown, drawn, width, self.font_size, FontWeightHint::Regular, dx)",
         [S_WEIGHT],
     ),
     (
@@ -518,8 +527,8 @@ LINE_MUTATIONS = [
     ),
     (
         "a box read from its end is cut in the regular weight",
-        "                    self.font_size,\n                    self.weight,\n                ),\n",
-        "                    self.font_size,\n                    FontWeightHint::Regular,\n                ),\n",
+        "guitk::text::elide_start(&text, width, ELLIPSIS, self.font_size, self.weight)",
+        "guitk::text::elide_start(&text, width, ELLIPSIS, self.font_size, FontWeightHint::Regular)",
         [S_WEIGHT],
     ),
     (
@@ -548,8 +557,8 @@ LINE_MUTATIONS = [
     ),
     (
         "a box read from its end is cut at its end",
-        "                text: guitk::text::elide_start(\n",
-        "                text: guitk::text::elide(\n",
+        "                text: guitk::text::elide_start(&text,",
+        "                text: guitk::text::elide(&text,",
         [S_FROM_END],
     ),
     (
@@ -560,14 +569,14 @@ LINE_MUTATIONS = [
     ),
     (
         "a press in a box read from its end is measured from its start",
-        "        let cursor = if !focused && self.from_end {\n",
-        "        let cursor = if false {\n",
+        "        let at = if !focused && self.from_end {\n",
+        "        let at = if false {\n",
         [S_TAIL_PRESS],
     ),
     (
         "a press in a box read from its end with the keyboard is measured against its tail",
-        "        let cursor = if !focused && self.from_end {\n",
-        "        let cursor = if self.from_end {\n",
+        "        let at = if !focused && self.from_end {\n",
+        "        let at = if self.from_end {\n",
         [S_TAIL_PRESS],
     ),
     (
@@ -593,6 +602,84 @@ LINE_MUTATIONS = [
         "        TextCursor::from(start.saturating_add(within.byte()))\n",
         "        within\n",
         [S_TAIL_PRESS],
+    ),
+    (
+        "a masked box is drawn in the clear",
+        "        match self.mask {\n            None => (Cow::Borrowed(text), cursor, anchor),\n",
+        "        match None::<char> {\n            None => (Cow::Borrowed(text), cursor, anchor),\n",
+        [S_MASKED, S_MASK_PRESS],
+    ),
+    (
+        "a masked box's caret is drawn where it stands on the text",
+        "                (Cow::Owned(masks), TextCursor::from(at), anchor)\n",
+        "                (Cow::Owned(masks), cursor, anchor)\n",
+        [S_MASKED],
+    ),
+    (
+        "a masked box's keys are a shown box's",
+        "        if self.mask.is_some() {\n            // Read for the paste alone",
+        "        if false {\n            // Read for the paste alone",
+        [S_MASKED],
+    ),
+    (
+        "a masked box pastes nothing",
+        "            let clipboard = if crate::pastes(key) {\n                guitk::clipboard::text()",
+        "            let clipboard = if false {\n                guitk::clipboard::text()",
+        [S_MASKED],
+    ),
+    (
+        "the menu's Cut and Copy take from a masked box",
+        "        if takes && self.mask.is_some() {\n",
+        "        if false {\n",
+        [S_MASKED],
+    ),
+    (
+        "the menu refuses every row of a masked box",
+        "        if takes && self.mask.is_some() {\n",
+        "        if self.mask.is_some() {\n",
+        [S_MASKED],
+    ),
+    (
+        "a press in a masked box lands on the byte of its masks",
+        "            Some(mask) => TextCursor::from(crate::unmasked(self.input.text(), at.byte(), mask)),\n",
+        "            Some(_) => at,\n",
+        [S_MASK_PRESS],
+    ),
+    (
+        "masked does not mask",
+        "        self.mask = Some(mask);\n",
+        "        let _ = mask;\n",
+        [S_MASKED, S_MASK_PRESS],
+    ),
+    (
+        "set_mask changes nothing",
+        "    pub fn set_mask(&mut self, mask: Option<char>) {\n        self.mask = mask;\n",
+        "    pub fn set_mask(&mut self, mask: Option<char>) {\n        let _ = mask;\n",
+        [S_MASKED],
+    ),
+    (
+        "a masked box says it is shown",
+        "    pub fn mask(&self) -> Option<char> {\n        self.mask\n",
+        "    pub fn mask(&self) -> Option<char> {\n        None\n",
+        [S_MASKED],
+    ),
+    (
+        "the caret put at a byte goes to the start",
+        "            .rev()\n            .find(|&at| text.is_char_boundary(at))\n",
+        "            .find(|&at| text.is_char_boundary(at))\n",
+        [S_PUT],
+    ),
+    (
+        "the caret put inside a character stays there",
+        "            .find(|&at| text.is_char_boundary(at))\n",
+        "            .find(|_| true)\n",
+        [S_PUT],
+    ),
+    (
+        "the caret put at a byte keeps the selection",
+        "        self.input.set_selection_anchor(None);\n        self.input.set_cursor(TextCursor::from(at));\n",
+        "        self.input.set_cursor(TextCursor::from(at));\n",
+        [S_PUT],
     ),
 ]
 

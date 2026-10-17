@@ -1,22 +1,24 @@
 //! A program's one-line box: its text itself, edited at a caret.
 //!
-//! Twenty-four applications kept their search as a `String` with a
-//! `TextInput` beside it holding the same text, reloaded from the string
-//! before every key, press and menu row, and drawn with a caret at the end
-//! whenever the two had come apart. Each also decided for itself which keys
-//! were the box's, and two of them -- calendar and reminders -- took F1 from
-//! the window while a search was being typed. Here the `TextInput` *is* the
-//! text, so there is nothing to keep in step, and [`LineBox::key`] answers
-//! which keys are the box's: one it does not answer is the window's. Every
-//! search box is one; the other one-line boxes are moving onto it
-//! (`known-issues/E-twenty-eight-applications-keep-a-box-s-text-twice.md`).
+//! The `TextInput` *is* the text: a program reads the box and keeps no copy
+//! beside it, so there is nothing to reload before a key, a press or a menu
+//! row, and nothing to come apart from what is drawn. [`LineBox::key`]
+//! answers which keys are the box's -- one it does not answer is the
+//! window's -- so no program decides that for itself, as two once did and
+//! took F1 from the window while a search was being typed. Copy and paste go
+//! through the window's clipboard (`guitk::clipboard`), the one its
+//! right-click menus and the toolkit's own fields use. A program's one-line
+//! box is one of these, not a `TextInput` of its own.
 //!
 //! **What stays with the program** is what differs between them: where the
 //! box is, whether it has the keyboard, what Escape, Enter and Tab do there,
 //! and what follows a change to the text -- a list back to its top, a
 //! selection kept on what a search still finds.
 
+use std::borrow::Cow;
+
 use guitk::color::Color;
+use guitk::editmenu::EditCommand;
 use guitk::event::KeyEvent;
 use guitk::menu::{ContextMenu, MenuItemId};
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
@@ -34,6 +36,9 @@ pub struct LineBox {
     input: TextInput,
     font_size: f32,
     weight: FontWeightHint,
+    /// What the box draws for each character while its text is hidden
+    /// ([`LineBox::masked`]), or `None` while it is shown.
+    mask: Option<char>,
     /// Whether text too long for the box is cut at its front while the box
     /// has not the keyboard ([`LineBox::from_its_end`]).
     from_end: bool,
@@ -110,6 +115,7 @@ impl LineBox {
             input: crate::field_holding(text, capacity),
             font_size,
             weight: FontWeightHint::Regular,
+            mask: None,
             from_end: false,
         }
     }
@@ -121,6 +127,31 @@ impl LineBox {
     pub fn with_weight(mut self, weight: FontWeightHint) -> Self {
         self.weight = weight;
         self
+    }
+
+    /// The box hidden, as a password's is: drawn as `mask` for each of its
+    /// characters ([`crate::masked`]) and pressed where those were drawn,
+    /// its caret stepping a character at a time, and nothing copied or cut
+    /// from it, by its keys or its menu ([`crate::apply_masked_key`]). What
+    /// is pasted into it is taken.
+    #[must_use]
+    pub fn masked(mut self, mask: char) -> Self {
+        self.mask = Some(mask);
+        self
+    }
+
+    /// Hide the box's text behind `mask` from now on, as
+    /// [`masked`](Self::masked) does, or show it with `None`: a password a
+    /// key reveals.
+    pub fn set_mask(&mut self, mask: Option<char>) {
+        self.mask = mask;
+    }
+
+    /// What the box draws for each character while its text is hidden, or
+    /// `None` while it is shown.
+    #[must_use]
+    pub fn mask(&self) -> Option<char> {
+        self.mask
     }
 
     /// The box, read from its end while it has not the keyboard: text too
@@ -191,10 +222,34 @@ impl LineBox {
             .set_cursor(TextCursor::from(self.input.text().len()));
     }
 
+    /// The caret before byte `byte` of the text, nothing selected: where a
+    /// program that measures a press against a drawing of its own puts it
+    /// (lockscreen's dots). A byte inside a character puts it before that
+    /// character, and one past the end after the text.
+    pub fn put_caret(&mut self, byte: usize) {
+        let text = self.input.text();
+        let at = (0..=byte.min(text.len()))
+            .rev()
+            .find(|&at| text.is_char_boundary(at))
+            .unwrap_or(0);
+        self.input.set_selection_anchor(None);
+        self.input.set_cursor(TextCursor::from(at));
+    }
+
     /// Apply `key` to the box -- on the program's clipboard, as its menu is
-    /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
-    /// and what it did.
+    /// (`apply_key_on_clipboard`); a [masked](Self::masked) box's keys
+    /// pasting from it and putting nothing on it -- and say whether the key
+    /// was the box's and what it did.
     pub fn key(&mut self, key: &KeyEvent) -> LineKey {
+        if self.mask.is_some() {
+            // Read for the paste alone, as `apply_key_on_clipboard` reads it.
+            let clipboard = if crate::pastes(key) {
+                guitk::clipboard::text()
+            } else {
+                String::new()
+            };
+            return self.edited(|input| crate::apply_masked_key(input, key, &clipboard));
+        }
         let (font_size, weight) = (self.font_size, self.weight);
         self.edited(|input| crate::apply_key_on_clipboard_in(input, key, font_size, weight))
     }
@@ -255,37 +310,51 @@ impl LineBox {
     /// is `width` wide: the caret goes where it landed, against the text as
     /// it was drawn -- scrolled under the caret if the box had the keyboard
     /// (`focused`); if it did not, from its start, or cut at its front for a
-    /// box [read from its end](Self::from_its_end) -- and any selection goes.
+    /// box [read from its end](Self::from_its_end); for a
+    /// [masked](Self::masked) one, against its masks -- and any selection
+    /// goes.
     pub fn press(&mut self, dx: f32, width: f32, focused: bool) {
         let width = width.max(0.0);
-        let cursor = if !focused && self.from_end {
-            self.press_in_tail(dx, width)
+        let (shown, caret, _) = self.shown();
+        let at = if !focused && self.from_end {
+            self.press_in_tail(&shown, dx, width)
         } else {
             let drawn = if focused {
-                self.input.cursor()
+                caret
             } else {
                 TextCursor::default()
             };
-            textedit::cursor_at_click(
-                self.input.text(),
-                drawn,
-                width,
-                self.font_size,
-                self.weight,
-                dx,
-            )
+            textedit::cursor_at_click(&shown, drawn, width, self.font_size, self.weight, dx)
+        };
+        let cursor = match self.mask {
+            Some(mask) => TextCursor::from(crate::unmasked(self.input.text(), at.byte(), mask)),
+            None => at,
         };
         self.input.set_selection_anchor(None);
         self.input.set_cursor(cursor);
     }
 
-    /// Where a press `dx` pixels right of the text's left edge lands in a box
-    /// read from its end, without the keyboard, `width` wide, as
-    /// [`draw`](Self::draw) drew it: text that fits from its start; `…` and
-    /// the tail after it, a press on the `…` landing before the tail; and
-    /// where not even the `…` fits and nothing was drawn, the end.
-    fn press_in_tail(&self, dx: f32, width: f32) -> TextCursor {
+    /// The text as the box draws it -- its masks while it is
+    /// [masked](Self::masked) -- with the caret and the selection's other end
+    /// where they stand on it.
+    fn shown(&self) -> (Cow<'_, str>, TextCursor, Option<usize>) {
         let text = self.input.text();
+        let (cursor, anchor) = (self.input.cursor(), self.input.selection_anchor());
+        match self.mask {
+            None => (Cow::Borrowed(text), cursor, anchor),
+            Some(mask) => {
+                let (masks, at, anchor) = crate::masked(text, cursor.byte(), anchor, mask);
+                (Cow::Owned(masks), TextCursor::from(at), anchor)
+            }
+        }
+    }
+
+    /// Where a press `dx` pixels right of the text's left edge lands in
+    /// `text`, as a box read from its end draws it without the keyboard,
+    /// `width` wide ([`draw`](Self::draw)): text that fits from its start;
+    /// `…` and the tail after it, a press on the `…` landing before the
+    /// tail; and where not even the `…` fits and nothing was drawn, the end.
+    fn press_in_tail(&self, text: &str, dx: f32, width: f32) -> TextCursor {
         let weight = self.weight;
         if guitk::text::measure(text, self.font_size, weight) <= width {
             return guitk::text::cursor_at(text, dx, self.font_size, weight);
@@ -310,8 +379,17 @@ impl LineBox {
     }
 
     /// The menu's row `id`, chosen: done to the box as its key would be.
-    /// Answers whether the text changed.
+    /// Answers whether the text changed. A [masked](Self::masked) box's Cut
+    /// and Copy do nothing, as its keys' do -- though its menu still offers
+    /// them: no program shows a masked box's menu yet.
     pub fn menu_row(&mut self, id: MenuItemId) -> bool {
+        let takes = matches!(
+            EditCommand::from_id(id),
+            Some(EditCommand::Cut | EditCommand::Copy)
+        );
+        if takes && self.mask.is_some() {
+            return false;
+        }
         self.input.edit_command(id) == KeyEdit::Changed
     }
 
@@ -320,9 +398,10 @@ impl LineBox {
     /// keyboard -- and draws no text of its own; a box with the keyboard
     /// draws its text with its caret and selection, and one without it the
     /// text cut to the width with `…`, at its end or, for a box
-    /// [read from its end](Self::from_its_end), at its front. The text sits
-    /// on the same line either way, so it does not move when the box takes
-    /// the keyboard. The frame round it is the caller's
+    /// [read from its end](Self::from_its_end), at its front -- a
+    /// [masked](Self::masked) box's masks in place of its text. The text
+    /// sits on the same line either way, so it does not move when the box
+    /// takes the keyboard. The frame round it is the caller's
     /// (`guitk::field::draw`).
     pub fn draw(&self, tree: &mut RenderTree, look: &LineLook<'_>) {
         if self.is_empty() {
@@ -350,13 +429,14 @@ impl LineBox {
             }
             return;
         }
+        let (text, cursor, selection_anchor) = self.shown();
         if look.focused {
             textedit::draw(
                 tree,
                 &textedit::SingleLine {
-                    text: self.input.text(),
-                    cursor: self.input.cursor(),
-                    selection_anchor: self.input.selection_anchor(),
+                    text: &text,
+                    cursor,
+                    selection_anchor,
                     focused: true,
                     x: look.x,
                     y: look.y,
@@ -378,13 +458,7 @@ impl LineBox {
             tree.push(RenderCommand::Text {
                 x: look.x,
                 y: look.y,
-                text: guitk::text::elide_start(
-                    self.input.text(),
-                    width,
-                    ELLIPSIS,
-                    self.font_size,
-                    self.weight,
-                ),
+                text: guitk::text::elide_start(&text, width, ELLIPSIS, self.font_size, self.weight),
                 font_size: self.font_size,
                 color: look.color,
                 font_weight: self.weight,
@@ -392,13 +466,7 @@ impl LineBox {
                 overflow: TextOverflow::Clip,
             });
         } else {
-            push_line(
-                tree,
-                look,
-                self.input.text(),
-                look.color,
-                (self.font_size, self.weight),
-            );
+            push_line(tree, look, &text, look.color, (self.font_size, self.weight));
         }
     }
 }
@@ -429,7 +497,6 @@ fn push_line(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
-    use guitk::editmenu::EditCommand;
     use guitk::event::{Key, Modifiers};
 
     fn press(key: Key, text: &str) -> KeyEvent {
@@ -1149,5 +1216,138 @@ mod tests {
         );
         typed(&mut line, "tax");
         assert_eq!(drawn(&line), (String::from("tax"), LOOK.color, LOOK.y));
+    }
+
+    /// What a masked box draws for each character, in these tests.
+    const MASK: char = '\u{2022}';
+
+    /// **A masked box draws a mask for each character and gives nothing
+    /// away**: its masks in place of its text with the keyboard and without,
+    /// the caret on them where it stands on the text; its Ctrl+C and Ctrl+X,
+    /// and its menu's Cut and Copy, put nothing on the clipboard and cut
+    /// nothing, and its Ctrl+V pastes. Shown again, it is drawn in the clear
+    /// and copies.
+    #[test]
+    fn a_masked_box_draws_its_masks_and_gives_nothing_away() {
+        let mut line = LineBox::holding("p\u{e4}ss", 64, 13.0).masked(MASK);
+        assert_eq!(line.mask(), Some(MASK));
+        let masks = MASK.to_string().repeat(4);
+        assert_eq!(shown(&line), masks, "without the keyboard");
+        line.key(&press(Key::Left, ""));
+        let mut tree = RenderTree::new();
+        line.draw(
+            &mut tree,
+            &LineLook {
+                focused: true,
+                ..LOOK
+            },
+        );
+        let drawn = tree.commands.iter().find_map(|c| match c {
+            RenderCommand::RichText { text, .. } => Some(text.clone()),
+            _ => None,
+        });
+        assert_eq!(drawn.as_deref(), Some(masks.as_str()), "with the keyboard");
+        let caret = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Line { x1, .. } => Some(*x1),
+                _ => None,
+            })
+            .expect("no caret");
+        let third = LOOK.x
+            + guitk::text::caret_x(
+                &masks,
+                TextCursor::from(3 * MASK.len_utf8()),
+                13.0,
+                FontWeightHint::Regular,
+            );
+        assert!(
+            (caret - third).abs() < 0.5,
+            "the caret is drawn at {caret}, not after the third mask at {third}"
+        );
+
+        guitk::clipboard::set_text("before");
+        line.select_all();
+        let copy = line.key(&ctrl(Key::C, "c"));
+        assert!(copy.handled && !copy.copied, "Ctrl+C took a hidden text");
+        let cut = line.key(&ctrl(Key::X, "x"));
+        assert!(cut.handled && !cut.changed, "Ctrl+X cut a hidden text");
+        assert!(!line.menu_row(EditCommand::Copy.id()));
+        assert!(
+            !line.menu_row(EditCommand::Cut.id()),
+            "the menu's Cut cut a hidden text"
+        );
+        assert_eq!(line.text(), "p\u{e4}ss");
+        assert_eq!(
+            guitk::clipboard::text(),
+            "before",
+            "a hidden text reached the clipboard"
+        );
+        assert!(
+            line.menu_row(EditCommand::Delete.id()),
+            "the menu's Delete refused a hidden text"
+        );
+        assert!(line.key(&ctrl(Key::V, "v")).changed, "Ctrl+V did not paste");
+        assert_eq!(line.text(), "before");
+
+        line.set_mask(None);
+        assert_eq!(line.mask(), None);
+        assert_eq!(shown(&line), "before", "shown again, drawn in the clear");
+        line.select_all();
+        assert!(
+            line.key(&ctrl(Key::C, "c")).copied,
+            "shown, it does not copy"
+        );
+    }
+
+    /// **A press in a masked box lands between the masks it drew**, with
+    /// the keyboard and without: after the sixth mask is after the sixth
+    /// character -- byte 7, past a two-byte `é` -- where the narrow letters
+    /// behind the masks would put it further on.
+    #[test]
+    fn a_press_in_a_masked_box_lands_between_the_masks_it_drew() {
+        let weight = FontWeightHint::Regular;
+        let text = format!("\u{e9}{}", "i".repeat(20));
+        let mut line = LineBox::holding(&text, 64, 13.0).masked(MASK);
+        let masks = MASK.to_string().repeat(21);
+        let dx = guitk::text::measure(&masks[..6 * MASK.len_utf8()], 13.0, weight) + 0.5;
+        assert!(
+            guitk::text::measure(&masks, 13.0, weight) < LOOK.width,
+            "control: the masks do not fit the box"
+        );
+        assert_ne!(
+            guitk::text::cursor_at(&text, dx, 13.0, weight).byte(),
+            7,
+            "control: the letters and the masks are set alike"
+        );
+        line.press(dx, LOOK.width, false);
+        assert_eq!(line.input().cursor().byte(), 7, "without the keyboard");
+        line.key(&press(Key::End, ""));
+        line.press(dx, LOOK.width, true);
+        assert_eq!(line.input().cursor().byte(), 7, "with the keyboard");
+    }
+
+    /// **The caret put at a byte goes there**, nothing selected -- before
+    /// the character a byte inside one falls in, and after the text for a
+    /// byte past it.
+    #[test]
+    fn the_caret_put_at_a_byte_lands_on_a_characters_boundary() {
+        let mut line = LineBox::holding("a\u{e9}b", 64, 13.0);
+        line.select_all();
+        line.put_caret(1);
+        assert_eq!(
+            (
+                line.input().cursor().byte(),
+                line.input().selection_anchor()
+            ),
+            (1, None)
+        );
+        line.put_caret(2);
+        assert_eq!(line.input().cursor().byte(), 1, "inside the \u{e9}");
+        line.put_caret(3);
+        assert_eq!(line.input().cursor().byte(), 3);
+        line.put_caret(99);
+        assert_eq!(line.input().cursor().byte(), 4, "past the end");
     }
 }

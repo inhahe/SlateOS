@@ -347,6 +347,14 @@ impl PageFlags {
     /// it that are swapped out, so they come back locked.
     pub const MLOCKED: Self = Self(1 << 11);
 
+    /// Software bit (52, one the hardware ignores in a present entry): a
+    /// page of a file's page cache, mapped by a shared mapping of the file
+    /// (design-decisions §1572). Set with [`Self::SHARED`]. A write to it
+    /// must mark the cached page dirty first, so nothing but the write fault
+    /// (`pcb::resolve_shared_write`) makes it writable: `mprotect` leaves it
+    /// as writable as it was ([`user_protect_flags`]).
+    pub const CACHED: Self = Self(1 << 52);
+
     /// No-execute: instruction fetches cause a page fault.  Requires
     /// `IA32_EFER.NXE` to be enabled (Limine does this).
     pub const NO_EXECUTE: Self = Self(1 << 63);
@@ -1847,7 +1855,13 @@ pub fn user_protect_flags(current: PageTableEntry, requested: PageFlags) -> Page
         requested.bits() & (PageFlags::USER_ACCESSIBLE.bits() | PageFlags::NO_EXECUTE.bits()),
     );
     if requested.contains(PageFlags::WRITABLE) {
-        if current.is_shared() {
+        if current.flags().contains(PageFlags::CACHED) {
+            // A shared file mapping's page is made writable by its first
+            // write, which marks it dirty; one already writable stays so.
+            if current.flags().contains(PageFlags::WRITABLE) {
+                flags |= PageFlags::WRITABLE;
+            }
+        } else if current.is_shared() {
             flags |= PageFlags::WRITABLE;
         } else if current.is_cow() || frame_is_multiply_referenced(current.phys_addr()) {
             flags |= PageFlags::COW;

@@ -752,6 +752,13 @@ fn gen_meminfo() -> Vec<u8> {
         / 1024;
     s.push_str(&format!("Cached:         {cached_kib} kB\n"));
 
+    // Dirty: cached pages written through shared mappings and not yet saved
+    // to their files (design-decisions §1572); among `Cached`.
+    let dirty_kib = (crate::mm::page_cache::dirty_pages() as u64)
+        .saturating_mul(crate::mm::frame::FRAME_SIZE as u64)
+        / 1024;
+    s.push_str(&format!("Dirty:          {dirty_kib} kB\n"));
+
     // Shmem: live shared-memory bytes.  This is a gauge, not a counter --
     // `ipc::stats` adds on region create and subtracts on destroy -- so it
     // tracks what is resident rather than what was ever allocated.
@@ -16265,6 +16272,7 @@ pub fn self_test() -> KernelResult<()> {
             "MemAvailable",
             "Buffers",
             "Cached",
+            "Dirty",
             "Shmem",
             "SReclaimable",
             "SwapTotal",
@@ -17491,6 +17499,7 @@ pub fn self_test() -> KernelResult<()> {
                         ino: 77,
                     }),
                     shared: false,
+                    may_write: false,
                 },
                 flags: PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE | PageFlags::NO_EXECUTE,
                 fork: crate::mm::vma::ForkPolicy::COPY,

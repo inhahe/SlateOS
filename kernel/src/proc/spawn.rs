@@ -24629,6 +24629,168 @@ pub fn self_test_linux_shared_file_maps() -> KernelResult<()> {
     Ok(())
 }
 
+/// Writable shared file mappings through the Linux ABI (design-decisions
+/// §1572, step 2): [`elf::build_linux_writable_shared_file_maps_test_elf`]
+/// (`build/shmapwtest.c`) writes a file through a `MAP_SHARED` read-write
+/// mapping -- seen by `pread` at once, from a forked child, through a second
+/// mapping -- syncs it with `msync`, is refused write permission on a shared
+/// mapping of a read-only descriptor, and unmaps it. Then the file is read
+/// with its cached pages dropped, from the filesystem itself: every store
+/// must be there, saved by the last unmap. Afterwards the cache keeps no
+/// state about any more files than before -- every mapping gave back its
+/// count, and the cache its writer -- and holds no more dirty pages.
+pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
+    const PASS: i32 = 0x2A;
+    const DEADLINE_NS: u64 = 60_000_000_000;
+    const PATH: &str = "/tmp/shmapw";
+    const PG: usize = 4096;
+    // Each store the program made, as (offset, byte); every other byte of
+    // the file's five pages is zero.
+    const STORES: [(usize, u8); 8] = [
+        (0, b'A'),
+        (1, b'H'),
+        (100, b'E'),
+        (200, b'F'),
+        (PG - 1, b'B'),
+        (PG, b'G'),
+        (4 * PG, b'C'),
+        (5 * PG - 1, b'D'),
+    ];
+
+    serial_println!(
+        "[spawn] Running Linux writable shared file mappings (ring 3) integration test..."
+    );
+    let exe_elf = elf::build_linux_writable_shared_file_maps_test_elf();
+    let argv: &[&[u8]] = &[b"spawn-test-linux-shmapw"];
+    let envp: &[&[u8]] = &[b"PATH=/bin"];
+    // It makes a file in /tmp.
+    let file_caps = [(ResourceType::File, 0u64, Rights::READ | Rights::WRITE)];
+    let options = SpawnOptions {
+        name: "spawn-test-linux-shmapw",
+        parent: 0,
+        priority: DEFAULT_PRIORITY,
+        capabilities: &file_caps,
+        fd_map: &[],
+        argv,
+        envp,
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let tracked_before = crate::mm::page_cache::tracked_files();
+    let dirty_before = crate::mm::page_cache::dirty_pages();
+    let result = match spawn_process(&exe_elf, &options) {
+        Ok(r) => r,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   FAIL: writable shared file mappings spawn returned {:?}",
+                e
+            );
+            return Err(e);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(DEADLINE_NS);
+    wait_for_fixture(result.pid, deadline, 5);
+    let state = pcb::state(result.pid);
+    let exit_code = pcb::exit_code(result.pid);
+    teardown_fixture(result.pid, result.task_id);
+
+    let outcome = (|| {
+        if state != Some(pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: writable shared file mappings (ring 3) — the program did not \
+                 finish in 60 s (state {:?})",
+                state
+            );
+            return Err(KernelError::InternalError);
+        }
+        if exit_code != Some(PASS) {
+            let what = match exit_code {
+                Some(0x30 | 0x31) => "the file to map could not be made",
+                Some(0x32) => "the writable shared mapping failed",
+                Some(0x33) => "a store through the mapping was not what pread read at once",
+                Some(0x34 | 0x35) => "a pwrite was not seen through the mapping",
+                Some(0x36) => "the forked child did not end 0x2D",
+                Some(0x37) => "the forked child's store was not seen by the parent",
+                Some(0x38) => "msync(MS_SYNC) failed",
+                Some(0x39..=0x3B) => {
+                    "a second mapping at offset 4096 failed, or did not write the same bytes"
+                }
+                Some(0x3C | 0x3D) => "a read-only descriptor, or its shared mapping, failed",
+                Some(0x3E) => {
+                    "mprotect(PROT_WRITE) of a read-only descriptor's shared mapping was not EACCES"
+                }
+                Some(0x3F) => {
+                    "a writable shared mapping of a read-only descriptor was not refused EACCES"
+                }
+                Some(0x40 | 0x44) => "munmap failed",
+                Some(0x41..=0x43) => "made read-only and read-write again, the mapping broke",
+                Some(0x45) => "unmapped, the file did not read back every store",
+                Some(0x5F) => "a pread failed",
+                None => "no exit code: the program died",
+                _ => "unexpected exit code",
+            };
+            serial_println!(
+                "[spawn]   FAIL: writable shared file mappings (ring 3) — exit {:?}: {}",
+                exit_code,
+                what
+            );
+            return Err(KernelError::InternalError);
+        }
+        // The file as the filesystem holds it, read past the page cache: not
+        // what the mapping stored in the cached pages, but what was saved.
+        let data = crate::fs::Vfs::read_at_uncached(PATH, 0, 5 * PG + 1)?;
+        let wrong = (0..5 * PG).find(|&at| {
+            let want = STORES
+                .iter()
+                .find(|&&(o, _)| o == at)
+                .map_or(0, |&(_, b)| b);
+            data.get(at).copied() != Some(want)
+        });
+        if data.len() != 5 * PG || wrong.is_some() {
+            serial_println!(
+                "[spawn]   FAIL: writable shared file mappings (ring 3) — the file on the \
+                 filesystem is {} bytes and wrong at {:?}: the mapping's stores were not saved",
+                data.len(),
+                wrong
+            );
+            return Err(KernelError::InternalError);
+        }
+        let tracked_after = crate::mm::page_cache::tracked_files();
+        let dirty_after = crate::mm::page_cache::dirty_pages();
+        if tracked_after != tracked_before || dirty_after != dirty_before {
+            serial_println!(
+                "[spawn]   FAIL: writable shared file mappings (ring 3) — the cache kept state \
+                 about {} files and held {} dirty pages before, {} and {} after the program ended",
+                tracked_before,
+                dirty_before,
+                tracked_after,
+                dirty_after
+            );
+            return Err(KernelError::InternalError);
+        }
+        Ok(())
+    })();
+    // The file is the test's to remove whatever happened; a failure to is
+    // reported only when nothing else failed.
+    let removed = crate::fs::Vfs::remove(PATH);
+    outcome?;
+    if let Err(e) = removed {
+        serial_println!(
+            "[spawn]   FAIL: writable shared file mappings (ring 3) — {} could not be removed: \
+             {:?}",
+            PATH,
+            e
+        );
+        return Err(e);
+    }
+    serial_println!(
+        "[spawn]   Linux writable shared file mappings (ring 3: stores read at once, fork, \
+         msync, a second view, EACCES on a read-only descriptor, saved by the last unmap): OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 test of UTS namespaces and the handles on them through the Linux
 /// ABI: [`elf::build_linux_uts_namespaces_test_elf`] (`build/nstest.c`), run
 /// as root. `/proc/self/ns/uts` is a link whose descriptor `stat`, `fstat`

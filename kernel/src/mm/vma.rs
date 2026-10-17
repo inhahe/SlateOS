@@ -105,6 +105,11 @@ pub enum VmaKind {
         /// identity of a file the handle holds. A private mapping copies on
         /// a write and never changes the file.
         shared: bool,
+        /// For a shared mapping: its handle may write the file, so the
+        /// mapping is, or may be made (`mprotect`), writable, and the page
+        /// cache keeps a writer for the file's dirty pages while it lives.
+        /// Always false for a private mapping, which never writes the file.
+        may_write: bool,
     },
 }
 

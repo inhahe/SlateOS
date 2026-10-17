@@ -5818,6 +5818,9 @@ struct Backing {
     handle: u64,
     /// The file, for a shared mapping.
     shared: Option<crate::fs::vfs::FileId>,
+    /// A shared mapping whose handle may write the file
+    /// ([`VmaKind::FileBacked`]'s `may_write`).
+    may_write: bool,
 }
 
 impl Backing {
@@ -5828,10 +5831,12 @@ impl Backing {
                 handle,
                 file_id,
                 shared,
+                may_write,
                 ..
             } => Some(Self {
                 handle,
                 shared: if shared { file_id } else { None },
+                may_write: shared && may_write,
             }),
             _ => None,
         }
@@ -5843,7 +5848,7 @@ impl Backing {
     fn retain(self) -> KernelResult<()> {
         crate::fs::handle::dup_shared(self.handle)?;
         if let Some(file) = self.shared {
-            crate::mm::page_cache::shared_map_added(file);
+            crate::mm::page_cache::shared_map_added(file, self.may_write.then_some(self.handle));
         }
         Ok(())
     }
@@ -5851,7 +5856,7 @@ impl Backing {
     /// Give back what a VMA that is gone held.
     fn release(self) {
         if let Some(file) = self.shared {
-            crate::mm::page_cache::shared_map_removed(file);
+            crate::mm::page_cache::shared_map_removed(file, self.may_write);
         }
         // Drops one reference; the underlying description is only torn down
         // on the final close. A failure means the handle was already gone,
@@ -5922,6 +5927,187 @@ pub fn unmap_file_from(file: crate::fs::vfs::FileId, from: u64) {
             crate::mm::user::unmap_user_range(pin.pml4(), lo, hi);
         }
     }
+}
+
+/// The address ranges of `vma`, a shared mapping of its file, that map the
+/// file's bytes `[lo, hi)`: none, or one `[start, end)`.
+fn shared_range(vma: &Vma, lo: u64, hi: u64) -> Option<(u64, u64)> {
+    let VmaKind::FileBacked { file_offset, .. } = vma.kind else {
+        return None;
+    };
+    let len = vma.end.saturating_sub(vma.start);
+    let from = lo.max(file_offset);
+    let to = hi.min(file_offset.saturating_add(len));
+    (from < to).then(|| {
+        (
+            vma.start.saturating_add(from.saturating_sub(file_offset)),
+            vma.start.saturating_add(to.saturating_sub(file_offset)),
+        )
+    })
+}
+
+/// Take write permission back from every mapping of `file`'s page at
+/// `page_offset` (16 KiB-aligned) in `frame`, in every process (design-
+/// decisions §1572): each present, writable PTE of a shared mapping of the
+/// file that points into the frame loses `WRITABLE`, and the TLBs are flushed
+/// for it before this returns. The next store to the page then faults, and
+/// marks it dirty again (`resolve_shared_write`). What
+/// `page_cache::writeback` does before it copies a page out.
+///
+/// Called with no lock held: it takes the process table, then each address
+/// space's page-table lock, never both.
+pub fn write_protect_file_page(
+    file: crate::fs::vfs::FileId,
+    page_offset: u64,
+    frame: crate::mm::frame::PhysFrame,
+) {
+    use crate::mm::frame::FRAME_SIZE;
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    let page_end = page_offset.saturating_add(FRAME_SIZE as u64);
+    let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
+    let writes = |v: &Vma| {
+        maps_shared(v, file)
+            && matches!(
+                v.kind,
+                VmaKind::FileBacked {
+                    may_write: true,
+                    ..
+                }
+            )
+    };
+    let pids: Vec<ProcessId> = {
+        let table = PROCESS_TABLE.lock();
+        table
+            .values()
+            .filter(|p| p.vmas.iter().any(writes))
+            .map(|p| p.pid)
+            .collect()
+    };
+    for pid in pids {
+        let Some(pin) = pin_address_space(pid) else {
+            continue;
+        };
+        let ranges: Vec<(u64, u64)> = {
+            let table = PROCESS_TABLE.lock();
+            let Some(proc) = table.get(&pid) else {
+                continue;
+            };
+            proc.vmas
+                .iter()
+                .filter(|v| writes(v))
+                .filter_map(|v| shared_range(v, page_offset, page_end))
+                .collect()
+        };
+        let pml4 = pin.pml4();
+        let mut cleared: Vec<u64> = Vec::new();
+        {
+            let _held = crate::mm::as_lock::lock(pml4);
+            for (start, end) in ranges {
+                let mut va = start;
+                while va < end {
+                    if let Some(pte) = page_table::read_leaf_pte(pml4, VirtAddr::new(va))
+                        && pte.is_present()
+                        && pte.phys_addr() & !frame_mask == frame.addr()
+                        && pte.flags().contains(PageFlags::WRITABLE)
+                    {
+                        let flags =
+                            PageFlags::from_bits(pte.flags().bits() & !PageFlags::WRITABLE.bits());
+                        // SAFETY: `pml4` is pinned (`AsPin`) and its
+                        // page-table lock held; `va` is a 4 KiB-aligned user
+                        // address whose PTE is present; it is flushed below.
+                        if unsafe { page_table::change_flags_4k(pml4, VirtAddr::new(va), flags) }
+                            .is_ok()
+                        {
+                            cleared.push(va);
+                        }
+                    }
+                    va = va.saturating_add(HW_PAGE_SIZE as u64);
+                }
+            }
+        }
+        for va in cleared {
+            crate::tlb::flush_range(va, 1);
+        }
+    }
+}
+
+/// A write to a present, read-only part of a writable shared file mapping
+/// (`fault`): the page is clean since it was last saved. Mark it dirty in
+/// the page cache, then make the part writable (design-decisions §1572), as
+/// one step under the address space's page-table lock. True when the access
+/// may run again -- the part writable now, by this call or another CPU's, or
+/// gone, so that the retry faults it in afresh; false when the part maps a
+/// page the cache no longer holds for the file.
+fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) -> bool {
+    use crate::mm::frame::{FRAME_SIZE, PhysFrame};
+    use crate::mm::page_table::{self, HW_PAGE_SIZE, PageFlags, VirtAddr};
+    let hw = HW_PAGE_SIZE as u64;
+    let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
+    let va = fault_addr & !hw.wrapping_sub(1);
+    // `va >= fault.start`: the fault is inside the VMA.
+    let fo = fault
+        .file_offset
+        .saturating_add(va.wrapping_sub(fault.start));
+    let _held = crate::mm::as_lock::lock(pml4_phys);
+    let Some(pte) = page_table::read_leaf_pte(pml4_phys, VirtAddr::new(va)) else {
+        return true;
+    };
+    if !pte.is_present() || pte.flags().contains(PageFlags::WRITABLE) {
+        return true;
+    }
+    let Some(frame) = PhysFrame::from_addr(pte.phys_addr() & !frame_mask) else {
+        return false;
+    };
+    if !crate::mm::page_cache::mark_dirty(fault.file_id, fo & !frame_mask, frame) {
+        return false;
+    }
+    let flags = pte.flags() | PageFlags::WRITABLE;
+    // SAFETY: the faulting process's PML4, its page-table lock held; `va` is
+    // a 4 KiB-aligned user address in a writable VMA whose PTE is present.
+    if unsafe { page_table::change_flags_4k(pml4_phys, VirtAddr::new(va), flags) }.is_err() {
+        return false;
+    }
+    // This CPU's entry for the address; another CPU holding a read-only one
+    // faults, finds the part writable, and runs the access again.
+    // SAFETY: invlpg is always safe in ring 0.
+    unsafe { page_table::invlpg(va) };
+    true
+}
+
+/// What `pid`'s shared file mappings map of `[start, end)`: for each, its file
+/// and the file's bytes `[from, to)` there -- what `msync` saves. Empty for a
+/// process that is gone.
+#[must_use]
+pub fn shared_file_ranges(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+) -> Vec<(crate::fs::vfs::FileId, u64, u64)> {
+    let table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get(&pid) else {
+        return Vec::new();
+    };
+    proc.vmas
+        .iter()
+        .filter(|v| v.end > start && v.start < end)
+        .filter_map(|v| match v.kind {
+            VmaKind::FileBacked {
+                file_offset,
+                file_id: Some(file),
+                shared: true,
+                ..
+            } => {
+                let lo = start.max(v.start).saturating_sub(v.start);
+                let hi = end.min(v.end).saturating_sub(v.start);
+                Some((
+                    file,
+                    file_offset.saturating_add(lo),
+                    file_offset.saturating_add(hi),
+                ))
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Give back what `vma` held of its backing file ([`Backing`]), if anything.
@@ -6506,6 +6692,7 @@ fn vma_subrange(
             file_offset,
             file_id,
             shared,
+            may_write,
         } => VmaKind::FileBacked {
             handle,
             // new_start >= orig.start by construction; wrapping_sub keeps
@@ -6515,6 +6702,7 @@ fn vma_subrange(
             // carries through unchanged.
             file_id,
             shared,
+            may_write,
         },
         other => other,
     };
@@ -6588,6 +6776,26 @@ pub fn protect_vma_range(
     {
         let mut table = PROCESS_TABLE.lock();
         let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+
+        // Write permission on a shared mapping whose handle may not write the
+        // file (Linux: `VM_MAYWRITE` clear) is refused, before anything
+        // changes -- EACCES.
+        if want_write
+            && proc.vmas.iter().any(|v| {
+                v.end > start
+                    && v.start < end
+                    && matches!(
+                        v.kind,
+                        VmaKind::FileBacked {
+                            shared: true,
+                            may_write: false,
+                            ..
+                        }
+                    )
+            })
+        {
+            return Err(KernelError::PermissionDenied);
+        }
 
         // Apply: split at the boundaries, updating flags of the covered
         // middle.  Mirrors remove_vma_range's surgery but keeps the middle
@@ -7321,7 +7529,35 @@ fn resolve_fault_inner(
             return false;
         };
         let pml4_phys = proc.pml4_phys;
+        // A writable shared file mapping maps a clean page read-only, and
+        // this is the write that dirties it (`resolve_shared_write`).
+        let shared = proc
+            .vmas
+            .iter()
+            .find(|v| v.contains(fault_addr))
+            .and_then(|v| match v.kind {
+                VmaKind::FileBacked {
+                    handle,
+                    file_offset,
+                    file_id: Some(file_id),
+                    shared: true,
+                    ..
+                } if v.flags.contains(crate::mm::page_table::PageFlags::WRITABLE) => {
+                    Some(SharedFault {
+                        start: v.start,
+                        end: v.end,
+                        flags: v.flags,
+                        handle,
+                        file_offset,
+                        file_id,
+                    })
+                }
+                _ => None,
+            });
         drop(table); // Release lock before CoW resolution (it allocates).
+        if let Some(fault) = shared {
+            return pml4_phys != 0 && resolve_shared_write(pml4_phys, fault_addr, &fault);
+        }
 
         if pml4_phys != 0 {
             if crate::mm::cow::resolve_cow_fault(pml4_phys, fault_addr).is_ok() {
@@ -7426,6 +7662,7 @@ fn resolve_fault_inner(
             file_offset,
             file_id: Some(file_id),
             shared: true,
+            ..
         } => {
             let fault = SharedFault {
                 start: vma_start,
@@ -7724,7 +7961,8 @@ struct SharedFault {
 /// a virtual frame whose parts map more than one frame. The parts are mapped
 /// `SHARED`, so `fork` shares them and reclaim passes them by, and with no
 /// reverse mapping, so compaction never moves a frame the cache names. They
-/// are read-only: a write to a shared file mapping is step 2 of §1572.
+/// are read-only (`CACHED`) whatever the VMA allows: a write faults, and
+/// `resolve_shared_write` marks the page dirty before it lets the write in.
 ///
 /// A part at or past the file's end is left unmapped; when it is the faulting
 /// one, `note` becomes [`FaultNote::BeyondEnd`] (`SIGBUS`). True when the
@@ -7751,8 +7989,11 @@ fn resolve_file_shared(
     let hw = HW_PAGE_SIZE as u64;
     let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
     let faulting_part = fault_addr & !hw.wrapping_sub(1);
+    // Read-only, whatever the VMA allows: a write faults, and marks the page
+    // dirty before it is let through (`resolve_shared_write`).
     let map_flags = PageFlags::from_bits(fault.flags.bits() & !PageFlags::WRITABLE.bits())
         | PageFlags::SHARED
+        | PageFlags::CACHED
         | PageFlags::PRESENT;
     let mut faulting_mapped = false;
     for i in 0..HW_PAGES_PER_FRAME {

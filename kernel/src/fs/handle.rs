@@ -2258,6 +2258,52 @@ pub fn file_identity(handle: u64) -> KernelResult<Option<crate::fs::vfs::FileId>
     }
 }
 
+/// Save `data`, bytes a shared mapping wrote, at `offset` of the file
+/// `handle` holds, past the page cache (`Vfs::object_write_back`): what
+/// `mm::page_cache::writeback` writes a dirty page through. The handle's
+/// cursor is not moved.
+///
+/// # Errors
+///
+/// `InvalidHandle` for an unknown handle or one not open for writing;
+/// `NotSupported` for one that holds no file (a shared mapping always does);
+/// the filesystem's own.
+pub fn write_back_at(handle: u64, offset: u64, data: &[u8]) -> KernelResult<()> {
+    let (object, path) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        if !file.flags.is_writable() {
+            return Err(KernelError::InvalidHandle);
+        }
+        (file.object.clone(), file.path.clone())
+    };
+    let object = object.ok_or(KernelError::NotSupported)?;
+    crate::fs::Vfs::object_write_back(&object, &path, offset, data)
+}
+
+/// Make what has been written to the file `handle` names stable: its dirty
+/// pages, written through shared mappings, saved to it
+/// (`mm::page_cache::writeback`), then its filesystem flushed -- `fsync`.
+///
+/// # Errors
+///
+/// `InvalidHandle` for an unknown handle; a writeback's or the filesystem's
+/// error.
+pub fn sync_file(handle: u64) -> KernelResult<()> {
+    let (object, path) = {
+        let table = OPEN_FILES.lock();
+        let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
+        (file.object.clone(), file.path.clone())
+    };
+    match object {
+        Some(obj) => {
+            crate::mm::page_cache::writeback(obj.id(), 0, u64::MAX)?;
+            crate::fs::Vfs::object_sync(&obj)
+        }
+        None => crate::fs::Vfs::sync_path(&path),
+    }
+}
+
 /// The identity of the file `handle` holds (`FileHold`), when it holds one:
 /// what a shared mapping of the file is keyed by (design-decisions §1572).
 /// `None` for a description that holds no file -- its filesystem keeps no

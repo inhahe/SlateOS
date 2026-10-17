@@ -87,6 +87,44 @@ and in the background. The other choices, and why not, are below.
    `fsync` and the last unmapping, truncate's unmapping and `SIGBUS`.
 3. The background pass, and `/proc/meminfo`'s `Dirty:` and `Writeback:`.
 
+### As built in step 2 (2026-10-16)
+
+- **A page mapped from the cache is marked `CACHED`** (`PageFlags`, software
+  bit 52, beside `SHARED`), and is mapped read-only whatever the mapping
+  allows. Only the write fault (`pcb::resolve_shared_write`) makes it
+  writable, after `page_cache::mark_dirty`; `mprotect` keeps it as writable
+  as it was (`user_protect_flags`), since letting it make the page writable
+  would let stores in that no save would see.
+- **`VmaKind::FileBacked.may_write`** is Linux's `VM_MAYWRITE`: the mapping's
+  handle may write the file. `mprotect(PROT_WRITE)` on a shared mapping
+  without it is `EACCES`; a writable shared `mmap` of a read-only descriptor
+  was `EACCES` already.
+- **The writer.** The first mapping that may write gives the cache a
+  reference of its own on its handle (`shared_map_added`); every save goes
+  through it (`handle::write_back_at`, a write that neither calls the cache's
+  change hook nor charges quota: a save never changes the file's length,
+  since the copy stops at its end). The cache lets it go when no mapping may
+  write and no page is dirty. A save that fails leaves its page dirty and
+  the writer kept; while kept, a change to the file updates its cached pages
+  in place, as for a mapped file, rather than dropping the unsaved ones. A
+  page cannot be marked dirty for a file with no writer: the write fault
+  fails instead of letting in a store nothing could save.
+- **`fsync`, `sync` and `syncfs` used to answer 0 having done nothing.** Now
+  `fsync` saves the file's dirty pages and flushes its filesystem
+  (`handle::sync_file`), and `sync` and `syncfs` save every file's and flush
+  every filesystem (`Vfs::sync`, which every caller of it now gets).
+  `msync(MS_SYNC)` saves the range's dirty pages; `MS_ASYNC` does nothing
+  more, as on Linux since 2.6.19 (the pages are dirty in the cache, and the
+  last unmapping, `fsync` and step 3's background pass save them).
+- **`Dirty:`** is in `/proc/meminfo` (`page_cache::dirty_pages`, a counter,
+  so that `top` reading it once a second does not walk the cache). Saving is
+  synchronous, so `Writeback:` would always read 0 and is not added.
+- Tests: `page_cache::writeback_self_test` (dirty marks, eviction and the
+  shrinker passing dirty pages, a ranged save, the end of the file, a write
+  marking a page dirty, the last writable mapping's save) and the ring-3
+  `spawn::self_test_linux_writable_shared_file_maps` (`build/shmapwtest.c`),
+  which reads the file past the cache afterwards.
+
 ### The alternatives not taken
 
 - **Hardware dirty bits instead of the write fault.** Saving would read and

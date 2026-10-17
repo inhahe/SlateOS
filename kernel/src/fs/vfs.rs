@@ -5725,6 +5725,29 @@ impl Vfs {
         Ok(())
     }
 
+    /// Save bytes a shared mapping wrote into the page cache to a held file:
+    /// `data` at `offset`, all within the file's length
+    /// (`mm::page_cache::writeback`). Unlike [`object_write`](Self::object_write)
+    /// it tells the page cache nothing -- the bytes came from its own page,
+    /// and copying them back in could undo a store a mapping made since -- and
+    /// charges no quota, the file not growing. The change is announced.
+    ///
+    /// # Errors
+    ///
+    /// `ReadOnlyFilesystem`; the filesystem's own.
+    pub fn object_write_back(
+        obj: &FileObject,
+        path: &Path,
+        offset: u64,
+        data: &[u8],
+    ) -> KernelResult<()> {
+        check_writable_mount(obj.mnt_id)?;
+        obj.fs.lock().write_ino(obj.ino, offset, data)?;
+        super::notify::emit_modified(path);
+        super::journal::record(super::journal::JournalEventType::Modified, path);
+        Ok(())
+    }
+
     /// Write through an object at the file's end, found and written in one
     /// call so two appenders cannot land on one offset: `O_APPEND`. Returns
     /// where it landed. Checks as [`object_write`](Self::object_write).
@@ -9538,8 +9561,11 @@ impl Vfs {
     /// Flush all dirty data and metadata across all mounted filesystems.
     ///
     /// Ensures that all pending writes are committed to stable storage.
-    /// Analogous to POSIX `sync()`.
+    /// Analogous to POSIX `sync()`. The pages shared mappings have written
+    /// go to their files first (`page_cache::writeback_all`), so that they
+    /// are among what is flushed.
     pub fn sync() -> KernelResult<()> {
+        let saved = crate::mm::page_cache::writeback_all();
         // Snapshot the handles under a brief global lock, then sync each
         // lock-free (a stacked filesystem's sync may re-enter the VFS).
         let handles: Vec<MountedFs> = {
@@ -9554,7 +9580,7 @@ impl Vfs {
                 .map(|mp| Arc::clone(&mp.fs))
                 .collect()
         };
-        let mut last_err: Option<KernelError> = None;
+        let mut last_err: Option<KernelError> = saved.err();
         for fs in handles {
             if let Err(e) = fs.lock().sync() {
                 last_err = Some(e);
@@ -9564,6 +9590,16 @@ impl Vfs {
             Some(e) => Err(e),
             None => Ok(()),
         }
+    }
+
+    /// Flush the filesystem a held file is on to stable storage: what
+    /// `fsync` does once the file's dirty pages are saved.
+    ///
+    /// # Errors
+    ///
+    /// The filesystem's own.
+    pub fn object_sync(obj: &FileObject) -> KernelResult<()> {
+        obj.fs.lock().sync()
     }
 
     /// Flush a specific filesystem (the one that `path` resolves to).

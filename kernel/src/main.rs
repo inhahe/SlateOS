@@ -3715,6 +3715,19 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_linux_shared_file_maps(),
     );
+    // Dirty pages and their writeback (design-decisions §1572 step 2).
+    selftest::dispatch_debug(
+        "page-cache writeback",
+        selftest::Severity::Diagnostic,
+        mm::page_cache::writeback_self_test,
+    );
+    // Writable shared file mappings: stores saved to the file (mm::page_cache
+    // writeback, design-decisions §1572 step 2).
+    selftest::dispatch_debug(
+        "Linux writable shared file mappings (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_linux_writable_shared_file_maps(),
+    );
     // mount(2) and umount2(2) for root: new mounts, remounts, propagation,
     // busy, lazy and expiring unmounts (fs::Vfs, fs::new_filesystem).
     selftest::dispatch_debug(

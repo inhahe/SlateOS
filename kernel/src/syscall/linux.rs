@@ -14232,11 +14232,13 @@ pub(crate) fn native_file_mmap(handle: u64, args: &SyscallArgs) -> SyscallResult
 /// ([`pcb::remove_vma_range`]) — exactly as Linux silently replaces existing
 /// mappings.
 ///
-/// ## Unsupported
+/// ## Shared mappings
 ///
-/// Writable `MAP_SHARED` (no writeback) → `ENOSYS`; non-file/memfd kinds →
-/// `ENODEV`.  Read-only `MAP_SHARED` is served as a private copy (no
-/// writeback is observable for a read-only map, so the distinction is moot).
+/// A `MAP_SHARED` mapping of a file with a stable identity maps its page cache
+/// (design-decisions §1572), writable or not. One of a file without a stable
+/// identity is served read-only as a private copy, and refused writable
+/// (`ENODEV`); a writable one of a memfd is not built (`ENOSYS`). Kinds other
+/// than files and memfds → `ENODEV`.
 #[allow(clippy::too_many_arguments)]
 fn linux_file_mmap(
     entry: &FdEntry,
@@ -14295,15 +14297,10 @@ fn linux_file_mmap(
         HandleKind::File | HandleKind::MemFd => {}
         _ => return linux_err(errno::ENODEV),
     }
-    // A writable shared map needs its stores written back (step 2 of
-    // design-decisions §1572); until then it is refused.
-    if shared && (prot & PROT_WRITE) != 0 {
-        return linux_err(errno::ENOSYS);
-    }
     // A shared map of a file the handle holds maps the page cache, so it
-    // sees every write to the file (§1572). One of a file without a stable
-    // identity is served as the private copy it always was: such a file has
-    // no cache to share.
+    // sees every write to the file and every write through it reaches the
+    // file (§1572). One of a file without a stable identity is served as the
+    // private copy it always was: such a file has no cache to share.
     let shared_file = if shared && matches!(entry.kind, HandleKind::File) {
         crate::fs::handle::held_identity(entry.raw_handle)
             .ok()
@@ -14311,6 +14308,19 @@ fn linux_file_mmap(
     } else {
         None
     };
+    if shared && (prot & PROT_WRITE) != 0 && shared_file.is_none() {
+        // Written through, a private copy would lose every store. A file
+        // without a stable identity cannot be mapped so (Linux's ENODEV); a
+        // memfd's writable shared mapping is not built.
+        return linux_err(if matches!(entry.kind, HandleKind::MemFd) {
+            errno::ENOSYS
+        } else {
+            errno::ENODEV
+        });
+    }
+    // A shared map whose handle may write: it is, or may be made, writable,
+    // and the page cache keeps a writer for the file's dirty pages.
+    let may_write = shared_file.is_some() && writable;
 
     let frame_size = FRAME_SIZE as u64;
     let hw_page = crate::mm::page_table::HW_PAGE_SIZE as u64;
@@ -14421,12 +14431,13 @@ fn linux_file_mmap(
                 file_offset: offset,
                 file_id,
                 shared: shared_file.is_some(),
+                may_write,
             };
             if let Some(file) = shared_file {
                 // The VMA's count of the file's shared mappings, which its
                 // release gives back (`pcb::Backing`). Counted before the VMA
                 // is there for another thread's `munmap` to release.
-                crate::mm::page_cache::shared_map_added(file);
+                crate::mm::page_cache::shared_map_added(file, may_write.then_some(mapped_handle));
             }
             if pcb::add_vma(
                 pid,
@@ -14442,7 +14453,7 @@ fn linux_file_mmap(
             {
                 // Drop our references and refund — the overlay never took.
                 if let Some(file) = shared_file {
-                    crate::mm::page_cache::shared_map_removed(file);
+                    crate::mm::page_cache::shared_map_removed(file, may_write);
                 }
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
@@ -14533,6 +14544,7 @@ fn linux_file_mmap(
             file_offset: offset,
             file_id,
             shared: shared_file.is_some(),
+            may_write,
         };
         // A shared mapping starts in phase with its file offset, so that each
         // virtual frame maps one page-cache frame (§1572).
@@ -14540,7 +14552,7 @@ fn linux_file_mmap(
         if let Some(file) = shared_file {
             // The VMA's count of the file's shared mappings (`pcb::Backing`),
             // counted before the VMA is there for another thread to unmap.
-            crate::mm::page_cache::shared_map_added(file);
+            crate::mm::page_cache::shared_map_added(file, may_write.then_some(mapped_handle));
         }
         let base = match pcb::reserve_unmapped_area_phased(
             pid,
@@ -14555,7 +14567,7 @@ fn linux_file_mmap(
             None => {
                 // Couldn't place the mapping — drop our references and refund.
                 if let Some(file) = shared_file {
-                    crate::mm::page_cache::shared_map_removed(file);
+                    crate::mm::page_cache::shared_map_removed(file, may_write);
                 }
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
@@ -18679,7 +18691,14 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
         Err(r) => return r,
     };
     match entry.kind {
-        HandleKind::File | HandleKind::MemFd => SyscallResult::ok(0),
+        // The file's dirty pages, written through shared mappings, are saved
+        // (design-decisions §1572), then its filesystem flushed: what fsync
+        // promises. It used to answer 0 having done neither.
+        HandleKind::File => match crate::fs::handle::sync_file(entry.raw_handle) {
+            Ok(()) => SyscallResult::ok(0),
+            Err(_) => linux_err(errno::EIO),
+        },
+        HandleKind::MemFd => SyscallResult::ok(0),
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -18715,6 +18734,10 @@ fn sys_fdatasync(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Parameterless; nothing to validate.  Returns 0 unconditionally.
 fn sys_sync(_args: &SyscallArgs) -> SyscallResult {
+    // Every file's dirty pages, then every filesystem flushed (`Vfs::sync`):
+    // it used to answer 0 having done neither. sync(2) reports no error, so
+    // a failure is the next fsync's to find.
+    let _ = crate::fs::Vfs::sync();
     SyscallResult::ok(0)
 }
 
@@ -18734,6 +18757,13 @@ fn sys_syncfs(args: &SyscallArgs) -> SyscallResult {
     let fd = args.arg0 as i32;
     if lookup_caller_fd(fd).is_err() {
         return linux_err(errno::EBADF);
+    }
+    // The filesystem the descriptor is on, flushed, every file's dirty pages
+    // saved first (the page cache does not sort them by filesystem):
+    // `Vfs::sync` does both, for every filesystem, which is more than syncfs
+    // asks and never less.
+    if crate::fs::Vfs::sync().is_err() {
+        return linux_err(errno::EIO);
     }
     SyscallResult::ok(0)
 }
@@ -19300,6 +19330,22 @@ fn sys_msync(args: &SyscallArgs) -> SyscallResult {
     };
     if let Err(e) = crate::mm::user::validate_user_read(addr, len_usize) {
         return linux_err(linux_errno_for(e));
+    }
+    // 7. MS_SYNC saves the dirty pages the range's shared file mappings map,
+    //    before returning (design-decisions §1572). MS_ASYNC asks for nothing
+    //    more than the kernel does anyway, as on Linux since 2.6.19: the
+    //    pages are dirty in the page cache and saved by the last unmap,
+    //    fsync and the background pass. MS_INVALIDATE has nothing to drop:
+    //    every mapping of a file maps the one copy.
+    if (flags & MS_SYNC) != 0 {
+        let Some(pid) = caller_pid() else {
+            return linux_err(errno::ESRCH);
+        };
+        for (file, from, to) in pcb::shared_file_ranges(pid, addr, end) {
+            if crate::mm::page_cache::writeback(file, from, to).is_err() {
+                return linux_err(errno::EIO);
+            }
+        }
     }
     SyscallResult::ok(0)
 }

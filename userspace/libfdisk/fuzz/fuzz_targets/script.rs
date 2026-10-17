@@ -16,7 +16,8 @@ fuzz_target!(|data: &[u8]| {
     if dp.read_file(&mut cxt, &mut FileInput::new(data)) != 0 {
         return;
     }
-    let path = std::env::temp_dir().join(format!("libfdisk-fuzz-script-{}.img", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("libfdisk-fuzz-script-{}.img", std::process::id()));
     let Ok(f) = std::fs::File::create(&path) else {
         return;
     };

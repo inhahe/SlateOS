@@ -1363,6 +1363,21 @@ dependencies = [
 [[package]]
 name = "fdisk"
 version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
+ "libfdisk",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulcolors",
+ "ulstrutils",
+ "ulsysfs",
+]
 
 [[package]]
 name = "fieldmenu"
@@ -2193,6 +2208,18 @@ dependencies = [
 [[package]]
 name = "libcsyslog"
 version = "0.1.0"
+
+[[package]]
+name = "libfdisk"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "scratchdir",
+ "smartcols",
+ "ulblkid",
+ "ulstrutils",
+ "ulsysfs",
+]
 
 [[package]]
 name = "libm"
@@ -4720,6 +4747,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "ulclosestream",
  "ulstrutils",
  "ulsysfs",
  "xxhash64",

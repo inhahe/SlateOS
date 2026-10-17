@@ -86,7 +86,7 @@ two disagree.
 | `expr` | Evaluate an expression given as command-line arguments. | yes | `coreutils` |  |
 | `factor` | Print the prime factors of each NUMBER. | yes | `coreutils` |  |
 | `false` | Do nothing, unsuccessfully. | yes | `coreutils` |  |
-| `fdisk` | Partition table manipulator (GPT/MBR) | yes |  |  |
+| `fdisk` | Display or manipulate a disk partition table. | yes |  |  |
 | `fetch` | HTTP fetch utility (wget/curl-like). | yes | `coreutils` |  |
 | `file` | Determine the type of a file. | yes |  |  |
 | `find` | Search for files in a directory hierarchy. | yes | `coreutils` |  |

@@ -205,6 +205,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |
+| `scripts/fdisk-diff.sh` | Differential test: our `fdisk` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/file-diff.sh` | Differential test: our `file` against file 5.45, built from the release. |
 | `scripts/file-gen-cdf.py` | Generate Composite Document Files (OLE2) for testing libmagic's readcdf.c. |
 | `scripts/file-gen-elf.py` | Generate ELF files exercising every path of libmagic's readelf.c. |
@@ -599,4 +600,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_589 scripts._
+_590 scripts._

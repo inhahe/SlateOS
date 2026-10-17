@@ -14,6 +14,8 @@ ulsysfs = { path = "../ulsysfs" }
 ulstrutils = { path = "../ulstrutils" }
 # Paths from bytes.
 quoting = { path = "../quoting" }
+# blkdev_lock's messages, written as the programs write theirs.
+ulclosestream = { path = "../ulclosestream" }
 # The superblock checksums the probers verify.
 crc32 = { path = "../../crc32" }
 crc32c = { path = "../../crc32c" }

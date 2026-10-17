@@ -662,6 +662,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "extfloat-probe.c",
         "factor-diff.sh",
         "fastpy-slateos-bundle.py",
+        "fdisk-diff.sh",
         "file-diff.sh",
         "file-gen-cdf.py",
         "file-gen-elf.py",

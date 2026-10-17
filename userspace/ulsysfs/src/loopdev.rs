@@ -110,7 +110,9 @@ mod sys {
 /// The calling thread's `errno`.
 #[cfg(unix)]
 fn last_errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(EINVAL)
+    std::io::Error::last_os_error()
+        .raw_os_error()
+        .unwrap_or(EINVAL)
 }
 
 /// `struct loop_info64`: 232 bytes, as the kernel lays it out.
@@ -241,7 +243,8 @@ fn open_flags(path: &[u8], flags: i32) -> Result<File, i32> {
         _ => o.read(true),
     };
     o.custom_flags(flags & !3);
-    o.open(path_of(path)).map_err(|e| e.raw_os_error().unwrap_or(EINVAL))
+    o.open(path_of(path))
+        .map_err(|e| e.raw_os_error().unwrap_or(EINVAL))
 }
 
 #[cfg(not(unix))]
@@ -383,7 +386,10 @@ fn loop_scandir(dir: &[u8], hasprefix: bool) -> Vec<i32> {
                 None => continue,
             }
         } else {
-            match std::str::from_utf8(&name).ok().and_then(|s| s.parse::<i64>().ok()) {
+            match std::str::from_utf8(&name)
+                .ok()
+                .and_then(|s| s.parse::<i64>().ok())
+            {
                 Some(n) => u32::try_from(n & i64::from(u32::MAX)).unwrap_or(0),
                 None => continue,
             }
@@ -776,7 +782,11 @@ impl LoopCxt {
     }
 
     /// A number from the device's sysfs directory, else from its info.
-    fn sysfs_or_info(&mut self, attr: &[u8], from_info: fn(&LoopInfo64) -> u64) -> Result<u64, i32> {
+    fn sysfs_or_info(
+        &mut self,
+        attr: &[u8],
+        from_info: fn(&LoopInfo64) -> u64,
+    ) -> Result<u64, i32> {
         if let Ok(sysfs) = self.sysfs()
             && let Some(n) = sysfs.read_u64(attr)
         {
@@ -841,7 +851,9 @@ impl LoopCxt {
 
     /// `loopcxt_get_crypt_name (lc)`.
     pub fn crypt_name(&mut self) -> Option<Vec<u8>> {
-        self.info().ok().map(|i| crate::c_str(&i.lo_crypt_name).to_vec())
+        self.info()
+            .ok()
+            .map(|i| crate::c_str(&i.lo_crypt_name).to_vec())
     }
 
     /// `loopcxt_get_backing_devno (lc, &devno)`: from the info only.
@@ -980,7 +992,10 @@ impl LoopCxt {
         let canonical = crate::canonicalize::canonicalize_path(filename).ok_or(EINVAL)?;
         // `xstrncpy (lo_file_name, filename, LO_NAME_SIZE)`: 63 bytes and a NUL.
         let mut name = [0u8; LO_NAME_SIZE];
-        for (dst, src) in name.iter_mut().zip(canonical.iter().take(LO_NAME_SIZE.saturating_sub(1))) {
+        for (dst, src) in name
+            .iter_mut()
+            .zip(canonical.iter().take(LO_NAME_SIZE.saturating_sub(1)))
+        {
             *dst = *src;
         }
         self.config.info.lo_file_name = name;
@@ -996,7 +1011,9 @@ impl LoopCxt {
         if offset == 0 && sizelimit == 0 {
             return Ok(());
         }
-        let st = file.metadata().map_err(|e| e.raw_os_error().unwrap_or(EINVAL))?;
+        let st = file
+            .metadata()
+            .map_err(|e| e.raw_os_error().unwrap_or(EINVAL))?;
         let mut expected = if block_rdev(&st).is_some() {
             blkdev_size(file)?
         } else {
@@ -1018,7 +1035,11 @@ impl LoopCxt {
         if expected != size {
             if let Err(e) = self.ioctl_capacity() {
                 // "ioctl not available"
-                return Err(if e == ENOTTY || e == EINVAL { ERANGE } else { e });
+                return Err(if e == ENOTTY || e == EINVAL {
+                    ERANGE
+                } else {
+                    e
+                });
             }
             let size = blkdev_size(self.fd()?)?;
             if expected != size {
@@ -1134,7 +1155,11 @@ impl LoopCxt {
                 // "Old deprecated way; first assign backing file FD and then
                 // in the second step set loop device properties."
                 #[cfg(unix)]
-                ioctl_int(dev, nr::LOOP_SET_FD, u64::try_from(file.as_raw_fd()).unwrap_or(0))?;
+                ioctl_int(
+                    dev,
+                    nr::LOOP_SET_FD,
+                    u64::try_from(file.as_raw_fd()).unwrap_or(0),
+                )?;
                 #[cfg(not(unix))]
                 ioctl_int(dev, 0, 0)?;
                 if self.blocksize > 0 {
@@ -1234,7 +1259,10 @@ impl LoopCxt {
             return Err(ENOSYS);
         }
         let slash = self.device.iter().rposition(|&b| b == b'/').ok_or(EINVAL)?;
-        let tail = self.device.get(slash.saturating_add(1)..).unwrap_or_default();
+        let tail = self
+            .device
+            .get(slash.saturating_add(1)..)
+            .unwrap_or_default();
         let nr = scan_loop_number(tail)
             .map(u32::cast_signed)
             .or_else(|| {

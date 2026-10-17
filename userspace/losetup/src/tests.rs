@@ -45,8 +45,14 @@ fn the_column_table_is_in_enum_order() {
 
 #[test]
 fn a_column_is_named_whole_in_any_case() {
-    assert_eq!(column_name_to_id(b"back-file", b"back-file", b"losetup"), Some(Col::BackFile));
-    assert_eq!(column_name_to_id(b"LOG-SEC", b"LOG-SEC,x", b"losetup"), Some(Col::Logsec));
+    assert_eq!(
+        column_name_to_id(b"back-file", b"back-file", b"losetup"),
+        Some(Col::BackFile)
+    );
+    assert_eq!(
+        column_name_to_id(b"LOG-SEC", b"LOG-SEC,x", b"losetup"),
+        Some(Col::Logsec)
+    );
     assert_eq!(column_name_to_id(b"NAM", b"NAM", b"losetup"), None);
     assert_eq!(column_name_to_id(b"NAMES", b"NAMES", b"losetup"), None);
 }
@@ -59,7 +65,10 @@ fn direct_io_takes_on_or_off_and_nothing_else() {
         parse_switch(b"maybe", "argument error"),
         Err("argument error: 'maybe'".to_string())
     );
-    assert!(parse_switch(b"ON", "argument error").is_err(), "case matters");
+    assert!(
+        parse_switch(b"ON", "argument error").is_err(),
+        "case matters"
+    );
 }
 
 #[test]
@@ -67,17 +76,29 @@ fn a_backing_file_that_is_not_whole_sectors_is_warned_about() {
     let none = warn_size_message(b"f", 0, 0, 0, None);
     assert_eq!(none, None, "no size to judge: a block device, or no file");
     let small = warn_size_message(b"f", 0, 0, 0, Some(100)).unwrap();
-    assert!(small.starts_with("f: Warning: file is smaller than 512 bytes"), "{small}");
+    assert!(
+        small.starts_with("f: Warning: file is smaller than 512 bytes"),
+        "{small}"
+    );
     let odd = warn_size_message(b"f", 0, 0, 0, Some(1000)).unwrap();
-    assert!(odd.starts_with("f: Warning: file does not fit into a 512-byte sector"), "{odd}");
+    assert!(
+        odd.starts_with("f: Warning: file does not fit into a 512-byte sector"),
+        "{odd}"
+    );
     assert_eq!(warn_size_message(b"f", 0, 0, 0, Some(1024)), None);
     // The part from the offset is what is judged; a size limit replaces it.
     assert!(warn_size_message(b"f", 0, 1000, LOOPDEV_FL_OFFSET, Some(1024)).is_some());
-    assert_eq!(warn_size_message(b"f", 0, 512, LOOPDEV_FL_OFFSET, Some(1024)), None);
+    assert_eq!(
+        warn_size_message(b"f", 0, 512, LOOPDEV_FL_OFFSET, Some(1024)),
+        None
+    );
     assert_eq!(warn_size_message(b"f", 2048, 0, 0, Some(1)), None);
     // Past the end, the subtraction wraps as upstream's `uint64_t` does:
     // 2^64 - 1024 is a whole number of sectors, so no warning at all.
-    assert_eq!(warn_size_message(b"f", 0, 2048, LOOPDEV_FL_OFFSET, Some(1024)), None);
+    assert_eq!(
+        warn_size_message(b"f", 0, 2048, LOOPDEV_FL_OFFSET, Some(1024)),
+        None
+    );
     assert!(warn_size_message(b"f", 0, 2000, LOOPDEV_FL_OFFSET, Some(1024)).is_some());
 }
 
@@ -130,5 +151,8 @@ fn the_refusals_are_upstream_s() {
 
 #[test]
 fn a_name_that_is_no_device_is_refused_with_enodev() {
-    assert_eq!(Losetup::use_device(&mut LoopCxt::new(0), b"/nonexistent/loop9"), Err(19));
+    assert_eq!(
+        Losetup::use_device(&mut LoopCxt::new(0), b"/nonexistent/loop9"),
+        Err(19)
+    );
 }

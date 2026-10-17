@@ -1529,7 +1529,11 @@ mod tests {
         let s = xterm(Box::new(CLocale));
         assert_eq!(s.tigetstr(b"bel"), crate::TermString::Value(vec![7]));
         assert_eq!(s.tigetstr(b"dial"), crate::TermString::Absent);
-        assert_eq!(s.tigetstr(b"cols"), crate::TermString::Cancelled, "a number");
+        assert_eq!(
+            s.tigetstr(b"cols"),
+            crate::TermString::Cancelled,
+            "a number"
+        );
         assert_eq!(s.tigetstr(b"nosuch"), crate::TermString::Cancelled);
     }
 

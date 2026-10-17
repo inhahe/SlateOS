@@ -152,7 +152,11 @@ impl FileEq {
                 .unwrap_or(0)
                 .saturating_mul(r)
         };
-        let per = |total: u64, part: usize| total.checked_div(u64::try_from(part).unwrap_or(u64::MAX)).unwrap_or(0);
+        let per = |total: u64, part: usize| {
+            total
+                .checked_div(u64::try_from(part).unwrap_or(u64::MAX))
+                .unwrap_or(0)
+        };
         self.filesiz = filesiz;
         let mut readsiz = readsiz;
         let aligned = if self.method.id == Id::Memcmp {
@@ -170,7 +174,8 @@ impl FileEq {
             let nreads = per(aligned, readsiz);
             // "enlarge readsize for large files"
             if nreads > maxdigs {
-                readsiz = usize::try_from(aligned.checked_div(maxdigs).unwrap_or(0)).unwrap_or(usize::MAX);
+                readsiz = usize::try_from(aligned.checked_div(maxdigs).unwrap_or(0))
+                    .unwrap_or(usize::MAX);
             }
             aligned
         };
@@ -251,7 +256,10 @@ impl FileEq {
         let at = usize::try_from(n).ok()?.saturating_mul(digsiz);
         // "return already cached if available"
         if usize::try_from(n).ok()? < data.nblocks.saturating_sub(1) {
-            return data.blocks.get(at..at.saturating_add(digsiz)).map(<[u8]>::to_vec);
+            return data
+                .blocks
+                .get(at..at.saturating_add(digsiz))
+                .map(<[u8]>::to_vec);
         }
         if data.is_eof {
             return Some(Vec::new());
@@ -277,7 +285,9 @@ impl FileEq {
             data.is_eof = true;
             data.close_file();
         }
-        data.blocks.get(at..at.saturating_add(got?)).map(<[u8]>::to_vec)
+        data.blocks
+            .get(at..at.saturating_add(got?))
+            .map(<[u8]>::to_vec)
     }
 
     /// `get_intro (eq, data, &block)`: the file's first 32 bytes, read once
@@ -345,7 +355,11 @@ impl FileEq {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "a test indexes what it just built")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "a test indexes what it just built"
+)]
 mod tests {
     use super::*;
 
@@ -386,7 +400,13 @@ mod tests {
             for (x, y, want) in cases {
                 // The kernel's digests are not everywhere.
                 if let Some(got) = same(method, x, y, 64) {
-                    assert_eq!(got, want, "{} {:?}", String::from_utf8_lossy(method), x.len());
+                    assert_eq!(
+                        got,
+                        want,
+                        "{} {:?}",
+                        String::from_utf8_lossy(method),
+                        x.len()
+                    );
                 }
             }
         }

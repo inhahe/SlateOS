@@ -182,7 +182,12 @@ pub fn fiemap(fd: i32, start: u64, flags: u32, map: &mut [u64]) -> Result<usize,
         .unwrap_or(0);
     // fm_start, fm_length, then fm_flags and fm_mapped_extents in one
     // word, fm_extent_count and fm_reserved in the next.
-    let header = [start, u64::MAX, u64::from(flags), u64::try_from(count).unwrap_or(0)];
+    let header = [
+        start,
+        u64::MAX,
+        u64::from(flags),
+        u64::try_from(count).unwrap_or(0),
+    ];
     let Some(head) = map.get_mut(..FIEMAP_HEADER_WORDS) else {
         return Err(crate::EINVAL);
     };
@@ -240,7 +245,8 @@ mod tests {
     #[test]
     fn the_numbers_are_linux_s() {
         // `_IOW`/`_IOWR`: direction, size, type, number.
-        let io = |dir: u64, ty: u64, nr: u64, size: u64| (dir << 30) | (size << 16) | (ty << 8) | nr;
+        let io =
+            |dir: u64, ty: u64, nr: u64, size: u64| (dir << 30) | (size << 16) | (ty << 8) | nr;
         assert_eq!(FICLONE, io(1, 0x94, 9, 4));
         assert_eq!(FS_IOC_FIEMAP, io(3, u64::from(b'f'), 11, 32));
         let mut map = [0u64; FIEMAP_HEADER_WORDS + 2 * FIEMAP_EXTENT_WORDS];

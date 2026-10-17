@@ -46,7 +46,8 @@ pub type Callback<'a> = dyn FnMut(&[u8], Option<&Metadata>, Kind, Ftw) -> i32 + 
 
 /// `lstat (path)`: its status, or the `errno`.
 fn lstat(path: &[u8]) -> Result<Metadata, i32> {
-    std::fs::symlink_metadata(OsStr::from_bytes(path)).map_err(|e| e.raw_os_error().unwrap_or(libcall::EINVAL))
+    std::fs::symlink_metadata(OsStr::from_bytes(path))
+        .map_err(|e| e.raw_os_error().unwrap_or(libcall::EINVAL))
 }
 
 /// `EACCES` and `ENOENT`, which a failed `lstat` of an entry reports as
@@ -59,7 +60,12 @@ fn read_dir(path: &[u8]) -> Result<Vec<Vec<u8>>, i32> {
     use libcall::file::{AT_FDCWD, Directory, O_CLOEXEC, O_DIRECTORY, O_NONBLOCK, O_RDONLY};
     let c = CString::new(path).map_err(|_| libcall::ENOENT)?;
     // What `opendir` opens with.
-    let fd = libcall::file::openat(AT_FDCWD, &c, O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC, 0)?;
+    let fd = libcall::file::openat(
+        AT_FDCWD,
+        &c,
+        O_RDONLY | O_NONBLOCK | O_DIRECTORY | O_CLOEXEC,
+        0,
+    )?;
     let mut dir = Directory::from_fd(fd).inspect_err(|_| {
         // Not made into a stream: closing it is all there is to do.
         let _ = libcall::fd::close(fd);
@@ -167,7 +173,11 @@ pub fn nftw(path: &[u8], func: &mut Callback<'_>) -> Result<i32, i32> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::indexing_slicing, reason = "a test indexes what it just built")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    reason = "a test indexes what it just built"
+)]
 mod tests {
     use super::*;
 
@@ -181,14 +191,30 @@ mod tests {
         std::os::unix::fs::symlink("d", root.join("l")).unwrap();
         let rootb = root.as_os_str().as_bytes().to_vec();
         let mut seen = Vec::new();
-        let rc = nftw(&rootb, &mut |p: &[u8], _st: Option<&Metadata>, k: Kind, ftw: Ftw| {
+        let rc = nftw(&rootb, &mut |p: &[u8],
+                                    _st: Option<&Metadata>,
+                                    k: Kind,
+                                    ftw: Ftw| {
             let rel = p.get(rootb.len()..).unwrap_or_default().to_vec();
-            seen.push((String::from_utf8(rel).unwrap(), k, ftw.level, p.len() - ftw.base));
+            seen.push((
+                String::from_utf8(rel).unwrap(),
+                k,
+                ftw.level,
+                p.len() - ftw.base,
+            ));
             0
         })
         .unwrap();
         assert_eq!(rc, 0);
-        assert_eq!(seen[0], (String::new(), Kind::Dir, 0, rootb.len() - rootb.iter().rposition(|&b| b == b'/').unwrap() - 1));
+        assert_eq!(
+            seen[0],
+            (
+                String::new(),
+                Kind::Dir,
+                0,
+                rootb.len() - rootb.iter().rposition(|&b| b == b'/').unwrap() - 1
+            )
+        );
         // Each directory before its entries; the link reported, not walked.
         let pos = |s: &str| seen.iter().position(|e| e.0 == s).unwrap();
         assert!(pos("/d") < pos("/d/f") && pos("/d") < pos("/d/e") && pos("/d/e") < pos("/d/e/g"));
@@ -197,11 +223,23 @@ mod tests {
         assert_eq!(seen.len(), 6);
         // A non-zero answer stops the walk and is returned.
         let mut n = 0;
-        assert_eq!(nftw(&rootb, &mut |_p: &[u8], _st: Option<&Metadata>, _k: Kind, _f: Ftw| {
-            n += 1;
-            if n == 2 { 7 } else { 0 }
-        }), Ok(7));
-        assert_eq!(nftw(b"/nonexistent/x", &mut |_p: &[u8], _st: Option<&Metadata>, _k: Kind, _f: Ftw| 0), Err(libcall::ENOENT));
+        assert_eq!(
+            nftw(&rootb, &mut |_p: &[u8],
+                               _st: Option<&Metadata>,
+                               _k: Kind,
+                               _f: Ftw| {
+                n += 1;
+                if n == 2 { 7 } else { 0 }
+            }),
+            Ok(7)
+        );
+        assert_eq!(
+            nftw(
+                b"/nonexistent/x",
+                &mut |_p: &[u8], _st: Option<&Metadata>, _k: Kind, _f: Ftw| 0
+            ),
+            Err(libcall::ENOENT)
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

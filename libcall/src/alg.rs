@@ -160,7 +160,10 @@ mod tests {
     fn the_address_is_the_kernel_s() {
         #[cfg(unix)]
         assert_eq!(core::mem::size_of::<SockaddrAlg>(), 88);
-        assert!(Hash::open(&[b'x'; 64]).is_err(), "a name the address cannot hold");
+        assert!(
+            Hash::open(&[b'x'; 64]).is_err(),
+            "a name the address cannot hold"
+        );
     }
 
     /// Where the kernel has the socket (Linux), SHA-256 of "abc" is the

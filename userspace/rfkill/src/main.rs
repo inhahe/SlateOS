@@ -87,7 +87,6 @@ const RFKILL_OP_ADD: u8 = 0;
 const RFKILL_OP_CHANGE: u8 = 2;
 const RFKILL_OP_CHANGE_ALL: u8 = 3;
 
-
 /// `struct rfkill_type_str`.
 struct TypeStr {
     ty: u32,
@@ -932,7 +931,9 @@ impl Rfkill {
         ids: &[(Col, smartcols::ColumnId)],
         param: Option<&[u8]>,
     ) -> Result<i32, Stop> {
-        self.for_each_matching(param, true, |rf, _, event, _| rf.fill_table_row(tb, ids, event))
+        self.for_each_matching(param, true, |rf, _, event, _| {
+            rf.fill_table_row(tb, ids, event)
+        })
     }
 
     /// `__rfkill_block (fd, id, block, param)`: one request written, and
@@ -1180,7 +1181,10 @@ fn yes_no(state: u8) -> &'static str {
 /// up, for a time before 1970.
 fn timeval(t: std::time::SystemTime) -> (i64, u32) {
     match t.duration_since(std::time::UNIX_EPOCH) {
-        Ok(d) => (i64::try_from(d.as_secs()).unwrap_or(i64::MAX), d.subsec_micros()),
+        Ok(d) => (
+            i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+            d.subsec_micros(),
+        ),
         Err(e) => {
             let d = e.duration();
             let secs = i64::try_from(d.as_secs()).unwrap_or(i64::MAX);

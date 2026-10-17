@@ -679,7 +679,12 @@ impl Hardlink {
 
     /// `lgetxattr_or_die (path, name, value, size)`: the length, or the
     /// status to exit with after a failure.
-    fn lgetxattr_or_die(&self, path: &[u8], name: &[u8], value: Option<&mut [u8]>) -> Result<usize, u8> {
+    fn lgetxattr_or_die(
+        &self,
+        path: &[u8],
+        name: &[u8],
+        value: Option<&mut [u8]>,
+    ) -> Result<usize, u8> {
         let c = c_path(path);
         let n = c_path(name);
         libcall::xattr::lgetxattr(&c, &n, value).map_err(|e| {
@@ -980,7 +985,10 @@ impl Hardlink {
             return 1;
         }
         match typeflag {
-            Kind::DirNotRead => self.warn(&format!("cannot read {}", escape_unprintable(fpath)), EACCES),
+            Kind::DirNotRead => self.warn(
+                &format!("cannot read {}", escape_unprintable(fpath)),
+                EACCES,
+            ),
             Kind::NoStat(e) => self.warn(&format!("cannot read {}", escape_unprintable(fpath)), e),
             _ => {}
         }
@@ -990,7 +998,8 @@ impl Hardlink {
 
         let included = Self::match_any_regex(&self.opts.include, fpath);
         let excluded = Self::match_any_regex(&self.opts.exclude, fpath);
-        let (has_exclude, has_include) = (!self.opts.exclude.is_empty(), !self.opts.include.is_empty());
+        let (has_exclude, has_include) =
+            (!self.opts.exclude.is_empty(), !self.opts.include.is_empty());
         // Upstream's `(exclude && excluded && !included) || (!exclude &&
         // include && !included)`.
         if !included && ((has_exclude && excluded) || (!has_exclude && has_include)) {
@@ -1008,7 +1017,11 @@ impl Hardlink {
             return 0;
         }
 
-        let mut line = format!(" {:5}: [{}/{}/{}] ", self.stats.files, st.dev, st.ino, st.nlink).into_bytes();
+        let mut line = format!(
+            " {:5}: [{}/{}/{}] ",
+            self.stats.files, st.dev, st.ino, st.nlink
+        )
+        .into_bytes();
         line.extend_from_slice(fpath);
         self.jlog(JLOG_VERBOSE2, &line);
 
@@ -1112,10 +1125,12 @@ impl Hardlink {
         let mut bmap = vec![0u64; BUFSIZ / 8];
         let mut start = 0u64;
         loop {
-            let Ok(na) = libcall::xattr::fiemap(af.as_raw_fd(), start, FIEMAP_FLAG_SYNC, &mut amap) else {
+            let Ok(na) = libcall::xattr::fiemap(af.as_raw_fd(), start, FIEMAP_FLAG_SYNC, &mut amap)
+            else {
                 return false;
             };
-            let Ok(nb) = libcall::xattr::fiemap(bf.as_raw_fd(), start, FIEMAP_FLAG_SYNC, &mut bmap) else {
+            let Ok(nb) = libcall::xattr::fiemap(bf.as_raw_fd(), start, FIEMAP_FLAG_SYNC, &mut bmap)
+            else {
                 return false;
             };
             if na != nb {
@@ -1176,8 +1191,16 @@ impl Hardlink {
         let Some(eq) = self.fileeq.as_ref() else {
             return false;
         };
-        let mut da = self.files.get_mut(a).map(|f| std::mem::take(&mut f.data)).unwrap_or_default();
-        let mut db = self.files.get_mut(b).map(|f| std::mem::take(&mut f.data)).unwrap_or_default();
+        let mut da = self
+            .files
+            .get_mut(a)
+            .map(|f| std::mem::take(&mut f.data))
+            .unwrap_or_default();
+        let mut db = self
+            .files
+            .get_mut(b)
+            .map(|f| std::mem::take(&mut f.data))
+            .unwrap_or_default();
         let same = eq.equal(&mut da, &mut db);
         if let Some(f) = self.files.get_mut(a) {
             f.data = da;
@@ -1206,7 +1229,10 @@ impl Hardlink {
             let nnodes = self.count_nodes(master);
             // "per-file cache size"
             let memsiz = self.opts.cache_size.checked_div(nnodes).unwrap_or(0);
-            let (size, dev) = self.files.get(master).map_or((0, 0), |f| (f.st.size, f.st.dev));
+            let (size, dev) = self
+                .files
+                .get(master)
+                .map_or((0, 0), |f| (f.st.size, f.st.dev));
             let io_size = self.opts.io_size;
             if let Some(eq) = self.fileeq.as_mut() {
                 eq.set_size(size, io_size, memsiz);
@@ -1293,7 +1319,10 @@ impl Hardlink {
     /// `strtosize_or_err (arg, errmesg)`.
     fn size_arg(&self, arg: &OsStr, errmesg: &str) -> Result<u64, u8> {
         ulstrutils::parse_size(&os_bytes(arg)).map_err(|e| {
-            warnx(&self.short, &ulstrutils::size_error_message(errmesg, arg, e));
+            warnx(
+                &self.short,
+                &ulstrutils::size_error_message(errmesg, arg, e),
+            );
             1
         })
     }
@@ -1318,7 +1347,8 @@ impl Hardlink {
                 Err(e) => {
                     // glibc names the program by argv[0] as given.
                     stderr_write(
-                        format!("{}: {}\n", escape_unprintable(&os_bytes(arg0)), e.sentence).as_bytes(),
+                        format!("{}: {}\n", escape_unprintable(&os_bytes(arg0)), e.sentence)
+                            .as_bytes(),
                     );
                     return Err(self.errtryhelp());
                 }
@@ -1329,7 +1359,9 @@ impl Hardlink {
                 }
                 continue;
             };
-            if let Some(msg) = err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short) {
+            if let Some(msg) =
+                err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short)
+            {
                 stderr_write(msg.as_bytes());
                 return Err(1);
             }
@@ -1345,7 +1377,10 @@ impl Hardlink {
                             _ => {
                                 warnx(
                                     &self.short,
-                                    &format!("unsupported reflink mode; {}", escape_unprintable(&v)),
+                                    &format!(
+                                        "unsupported reflink mode; {}",
+                                        escape_unprintable(&v)
+                                    ),
                                 );
                                 return Err(1);
                             }
@@ -1402,8 +1437,10 @@ impl Hardlink {
                 }
                 b'V' => {
                     let mut line = self.short.clone();
-                    line.extend_from_slice(b" from util-linux 2.39.3 (features: reflink, cryptoapi)
-");
+                    line.extend_from_slice(
+                        b" from util-linux 2.39.3 (features: reflink, cryptoapi)
+",
+                    );
                     self.out.write(&line);
                     return Err(0);
                 }
@@ -1480,9 +1517,13 @@ impl Hardlink {
             if self.opts.respect_dir {
                 self.rootbasesz = i64::try_from(path.len()).unwrap_or(i64::MAX);
             }
-            let walked = nftw(&path, &mut |fpath: &[u8], sb: Option<&Metadata>, kind: Kind, ftw: Ftw| {
-                self.inserter(&mut by_ino, &mut by_size, fpath, sb, kind, ftw)
-            });
+            let walked =
+                nftw(&path, &mut |fpath: &[u8],
+                                  sb: Option<&Metadata>,
+                                  kind: Kind,
+                                  ftw: Ftw| {
+                    self.inserter(&mut by_ino, &mut by_size, fpath, sb, kind, ftw)
+                });
             if let Err(e) = walked {
                 self.warn(&format!("cannot process {}", escape_unprintable(&path)), e);
             }
@@ -1528,7 +1569,6 @@ fn register_regex(short: &[u8], regex: &[u8], utf8: bool) -> Result<ere::Regex, 
         1
     })
 }
-
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]

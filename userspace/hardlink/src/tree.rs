@@ -291,7 +291,12 @@ impl<K> Tree<K> {
     }
 
     /// `trecurse (root, action, level)`.
-    fn trecurse(&self, n: usize, action: &mut impl FnMut(&K, Visit, usize) -> bool, level: usize) -> bool {
+    fn trecurse(
+        &self,
+        n: usize,
+        action: &mut impl FnMut(&K, Visit, usize) -> bool,
+        level: usize,
+    ) -> bool {
         let Some(node) = self.nodes.get(n) else {
             return true;
         };
@@ -360,9 +365,18 @@ mod tests {
     #[test]
     fn the_walk_is_glibcs() {
         assert_eq!(post_order(&built(&[1, 2, 3])), [1, 3, 2]);
-        assert_eq!(post_order(&built(&[1, 2, 3, 4, 5, 6, 7])), [1, 3, 5, 7, 6, 4, 2]);
-        assert_eq!(post_order(&built(&[7, 6, 5, 4, 3, 2, 1])), [1, 3, 2, 5, 4, 7, 6]);
-        assert_eq!(post_order(&built(&[4, 2, 6, 1, 3, 5, 7])), [1, 3, 2, 5, 7, 6, 4]);
+        assert_eq!(
+            post_order(&built(&[1, 2, 3, 4, 5, 6, 7])),
+            [1, 3, 5, 7, 6, 4, 2]
+        );
+        assert_eq!(
+            post_order(&built(&[7, 6, 5, 4, 3, 2, 1])),
+            [1, 3, 2, 5, 4, 7, 6]
+        );
+        assert_eq!(
+            post_order(&built(&[4, 2, 6, 1, 3, 5, 7])),
+            [1, 3, 2, 5, 7, 6, 4]
+        );
         assert_eq!(post_order(&built(&[1, 3, 2])), [1, 3, 2]);
         assert_eq!(post_order(&built(&[3, 1, 2])), [1, 3, 2]);
         assert_eq!(

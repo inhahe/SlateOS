@@ -17,7 +17,10 @@ thread_local! {
 
 /// The tests' log: kept for them to read, never the machine's syslog.
 fn keep_log(line: &[u8]) {
-    LOGGED.with(|l| l.borrow_mut().push(String::from_utf8_lossy(line).into_owned()));
+    LOGGED.with(|l| {
+        l.borrow_mut()
+            .push(String::from_utf8_lossy(line).into_owned())
+    });
 }
 
 /// What was logged since the last call.
@@ -199,7 +202,10 @@ fn options_decode_to_upstream_s_values() {
         option_code(&Opt::Long("output", id.clone())),
         Some((i32::from(b'o'), id))
     );
-    assert_eq!(option_code(&Opt::Long("output-all", None)), Some((OPT_LIST_TYPES, None)));
+    assert_eq!(
+        option_code(&Opt::Long("output-all", None)),
+        Some((OPT_LIST_TYPES, None))
+    );
     assert_eq!(option_code(&Opt::Long("nosuch", None)), None);
 }
 
@@ -224,7 +230,10 @@ fn the_switch_sets_what_upstream_s_sets() {
     let argv = |a: &[&str]| -> Vec<OsString> { a.iter().map(OsString::from).collect() };
     let mut rf = rfkill_at("/nonexistent", &sys);
     // `help` prints the usage into a buffer the test never flushes.
-    assert_eq!(rf.run(&argv(&["rfkill", "-J", "-n", "help"])), Stop::Exit(0));
+    assert_eq!(
+        rf.run(&argv(&["rfkill", "-J", "-n", "help"])),
+        Stop::Exit(0)
+    );
     assert!(rf.json && rf.no_headings && !rf.raw);
     let mut rf = rfkill_at("/nonexistent", &sys);
     assert_eq!(rf.run(&argv(&["rfkill", "-r", "help"])), Stop::Exit(0));
@@ -239,12 +248,21 @@ fn the_switch_sets_what_upstream_s_sets() {
         let mut rf = rfkill_at("/nonexistent", &sys);
         assert_eq!(rf.run(&argv(refused)), Stop::Exit(1), "{refused:?}");
     }
-    for fine in [&["rfkill", "-V"][..], &["rfkill", "--help"], &["rfkill", "-h", "bogus"]] {
+    for fine in [
+        &["rfkill", "-V"][..],
+        &["rfkill", "--help"],
+        &["rfkill", "-h", "bogus"],
+    ] {
         let mut rf = rfkill_at("/nonexistent", &sys);
         assert_eq!(rf.run(&argv(fine)), Stop::Exit(0), "{fine:?}");
     }
     // No device: listing and blocking fail, as `-errno` ORed into 1.
-    for failing in [&["rfkill"][..], &["rfkill", "list"], &["rfkill", "--output-all"], &["rfkill", "block", "all"]] {
+    for failing in [
+        &["rfkill"][..],
+        &["rfkill", "list"],
+        &["rfkill", "--output-all"],
+        &["rfkill", "block", "all"],
+    ] {
         let mut rf = rfkill_at("/nonexistent", &sys);
         assert_eq!(rf.run(&argv(failing)), Stop::Exit(1), "{failing:?}");
     }
@@ -373,7 +391,11 @@ fn block_writes_one_request_of_the_identifier_s_kind() {
     // Each request logged as upstream words it: the index as a signed `%d`.
     assert_eq!(
         logged(),
-        ["block set for id 3", "unblock set for type bluetooth", "block set for all"]
+        [
+            "block set for id 3",
+            "unblock set for type bluetooth",
+            "block set for all"
+        ]
     );
     std::fs::remove_dir_all(&sys).unwrap();
 }
@@ -402,9 +424,16 @@ fn toggle_turns_each_matching_device_s_block_over() {
 
 #[test]
 fn the_column_table_is_in_enum_order() {
-    for (i, col) in [Col::Device, Col::Id, Col::Type, Col::Desc, Col::Soft, Col::Hard]
-        .into_iter()
-        .enumerate()
+    for (i, col) in [
+        Col::Device,
+        Col::Id,
+        Col::Type,
+        Col::Desc,
+        Col::Soft,
+        Col::Hard,
+    ]
+    .into_iter()
+    .enumerate()
     {
         assert_eq!(INFOS[i].id, col);
         assert_eq!(info(col).id, col);
@@ -415,8 +444,14 @@ fn the_column_table_is_in_enum_order() {
 #[test]
 fn a_clock_before_1970_counts_back_whole_seconds() {
     use std::time::{Duration, UNIX_EPOCH};
-    assert_eq!(timeval(UNIX_EPOCH + Duration::from_millis(2_500)), (2, 500_000));
-    assert_eq!(timeval(UNIX_EPOCH - Duration::from_millis(1_500)), (-2, 500_000));
+    assert_eq!(
+        timeval(UNIX_EPOCH + Duration::from_millis(2_500)),
+        (2, 500_000)
+    );
+    assert_eq!(
+        timeval(UNIX_EPOCH - Duration::from_millis(1_500)),
+        (-2, 500_000)
+    );
     assert_eq!(timeval(UNIX_EPOCH - Duration::from_secs(3)), (-3, 0));
 }
 

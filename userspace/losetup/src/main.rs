@@ -41,9 +41,9 @@ use std::process::ExitCode;
 use ulclosestream::{Stdout, stderr_write, warn, warnx};
 use ulstrutils::{err_exclusive_options, string_add_to_idarray};
 use ulsysfs::loopdev::{
-    LO_CRYPT_NONE, LO_FLAGS_AUTOCLEAR, LO_FLAGS_DIRECT_IO, LO_FLAGS_PARTSCAN,
-    LO_FLAGS_READ_ONLY, LOOPDEV_FL_OFFSET, LOOPDEV_FL_SIZELIMIT, LOOPDEV_MAJOR, LOOPITER_FL_USED,
-    LoopCxt, dev_ino, is_loopdev,
+    LO_CRYPT_NONE, LO_FLAGS_AUTOCLEAR, LO_FLAGS_DIRECT_IO, LO_FLAGS_PARTSCAN, LO_FLAGS_READ_ONLY,
+    LOOPDEV_FL_OFFSET, LOOPDEV_FL_SIZELIMIT, LOOPDEV_MAJOR, LOOPITER_FL_USED, LoopCxt, dev_ino,
+    is_loopdev,
 };
 
 /// `ENOENT` and `EBUSY`, `EAGAIN`.
@@ -294,8 +294,20 @@ const EXCL: [&[i32]; 4] = [
         b'f' as i32,
         b'j' as i32,
     ],
-    &[b'D' as i32, b'c' as i32, b'd' as i32, b'f' as i32, b'l' as i32],
-    &[b'D' as i32, b'c' as i32, b'd' as i32, b'f' as i32, b'O' as i32],
+    &[
+        b'D' as i32,
+        b'c' as i32,
+        b'd' as i32,
+        b'f' as i32,
+        b'l' as i32,
+    ],
+    &[
+        b'D' as i32,
+        b'c' as i32,
+        b'd' as i32,
+        b'f' as i32,
+        b'O' as i32,
+    ],
     &[b'J' as i32, OPT_RAW],
 ];
 
@@ -352,9 +364,8 @@ fn column_name_to_id(name: &[u8], rest: &[u8], short: &[u8]) -> Option<Col> {
 /// `usage ()`'s text.
 fn usage(short: &[u8]) -> Vec<u8> {
     let s = String::from_utf8_lossy(short);
-    let mut text = format!(
-        "\nUsage:\n {s} [options] [<loopdev>]\n {s} [options] -f | <loopdev> <file>\n"
-    );
+    let mut text =
+        format!("\nUsage:\n {s} [options] [<loopdev>]\n {s} [options] -f | <loopdev> <file>\n");
     text.push_str(
         "\nSet up and control loop devices.\n\
 \nOptions:\n\
@@ -418,7 +429,13 @@ fn parse_switch(arg: &[u8], errmesg: &str) -> Result<u64, String> {
 /// file -- or the part of it from `offset` -- smaller than a sector, or not
 /// a whole number of them. `st_size` is the file's size, `None` when it
 /// cannot be had or it is a block device.
-fn warn_size_message(filename: &[u8], size: u64, offset: u64, flags: i32, st_size: Option<u64>) -> Option<String> {
+fn warn_size_message(
+    filename: &[u8],
+    size: u64,
+    offset: u64,
+    flags: i32,
+    st_size: Option<u64>,
+) -> Option<String> {
     let mut size = size;
     if size == 0 {
         size = st_size?;
@@ -444,7 +461,9 @@ fn warn_size_message(filename: &[u8], size: u64, offset: u64, flags: i32, st_siz
 
 /// `stat (path)`'s device and inode, if it can be had.
 fn stat_dev_ino(path: &[u8]) -> Option<(u64, u64)> {
-    std::fs::metadata(ulsysfs::path_of(path)).ok().map(|m| dev_ino(&m))
+    std::fs::metadata(ulsysfs::path_of(path))
+        .ok()
+        .map(|m| dev_ino(&m))
 }
 
 /// How `losetup` stops before its end: the status to exit with.
@@ -688,8 +707,14 @@ impl Losetup {
             let data: Option<Vec<u8>> = match col {
                 Col::Name => lc.device().map(<[u8]>::to_vec),
                 Col::BackFile => lc.backing_file().ok(),
-                Col::Offset => lc.offset().ok().map(|x| x.cast_signed().to_string().into_bytes()),
-                Col::Sizelimit => lc.sizelimit().ok().map(|x| x.cast_signed().to_string().into_bytes()),
+                Col::Offset => lc
+                    .offset()
+                    .ok()
+                    .map(|x| x.cast_signed().to_string().into_bytes()),
+                Col::Sizelimit => lc
+                    .sizelimit()
+                    .ok()
+                    .map(|x| x.cast_signed().to_string().into_bytes()),
                 Col::BackMajmin => lc.backing_devno().ok().filter(|&d| d != 0).map(|d| {
                     let (ma, mi) = (ulsysfs::major(d), ulsysfs::minor(d));
                     if short {
@@ -722,7 +747,10 @@ impl Losetup {
                 Col::Ro => Some(flag(lc.is_readonly())),
                 Col::Dio => Some(flag(lc.is_dio())),
                 Col::Partscan => Some(flag(lc.is_partscan())),
-                Col::Logsec => lc.blocksize().ok().map(|x| x.cast_signed().to_string().into_bytes()),
+                Col::Logsec => lc
+                    .blocksize()
+                    .ok()
+                    .map(|x| x.cast_signed().to_string().into_bytes()),
             };
             if let Some(data) = data
                 && tb.line_set_data(ln, cl, &data).is_err()
@@ -735,7 +763,13 @@ impl Losetup {
 
     /// `show_table (lc, file, offset, flags)`: the table -- of the current
     /// device if there is one, else of every used one (on `file`, if given).
-    fn show_table(&mut self, lc: &mut LoopCxt, file: Option<&[u8]>, offset: u64, flags: i32) -> Result<i32, Exit> {
+    fn show_table(
+        &mut self,
+        lc: &mut LoopCxt,
+        file: Option<&[u8]>,
+        offset: u64,
+        flags: i32,
+    ) -> Result<i32, Exit> {
         let mut tb = Table::new();
         tb.enable_raw(self.raw);
         tb.enable_json(self.json);
@@ -758,11 +792,13 @@ impl Losetup {
             self.set_scols_data(lc, &mut tb, &ids)?;
         } else {
             let mut failed = None;
-            let _ = self.each_used(lc, file, offset, flags, |l, lc| match l.set_scols_data(lc, &mut tb, &ids) {
-                Ok(()) => Ok(()),
-                Err(e) => {
-                    failed = Some(e);
-                    Err(0)
+            let _ = self.each_used(lc, file, offset, flags, |l, lc| {
+                match l.set_scols_data(lc, &mut tb, &ids) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        failed = Some(e);
+                        Err(0)
+                    }
                 }
             });
             if let Some(e) = failed {
@@ -820,7 +856,9 @@ impl Losetup {
         if !hasdev && nooverlap {
             match lc.find_overlap(file, offset, sizelimit) {
                 0 => {}
-                1 => return Err(self.errx(&format!("{shown_file}: overlapping loop device exists"))),
+                1 => {
+                    return Err(self.errx(&format!("{shown_file}: overlapping loop device exists")));
+                }
                 2 => {
                     // "Once a loop is initialized RO, there is no way to
                     // change its parameters."
@@ -838,7 +876,9 @@ impl Losetup {
                     }
                     lc.clear_flag(LO_FLAGS_AUTOCLEAR);
                     if lc.ioctl_status().is_err() {
-                        return Err(self.errx(&format!("{shown_file}: failed to re-use loop device")));
+                        return Err(
+                            self.errx(&format!("{shown_file}: failed to re-use loop device"))
+                        );
                     }
                     // "success, re-use"
                     return Ok(0);
@@ -938,7 +978,9 @@ impl Losetup {
                 Ok(opt) => opt,
                 Err(e) => {
                     // glibc names the program by argv[0] as given.
-                    stderr_write(format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes());
+                    stderr_write(
+                        format!("{}: {}\n", shown(&os_bytes(arg0)), e.sentence).as_bytes(),
+                    );
                     return Err(self.errtryhelp());
                 }
             };
@@ -948,7 +990,9 @@ impl Losetup {
                 }
                 continue;
             };
-            if let Some(msg) = err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short) {
+            if let Some(msg) =
+                err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short)
+            {
                 stderr_write(msg.as_bytes());
                 return Err(Exit(1));
             }
@@ -965,7 +1009,8 @@ impl Losetup {
                     use_dio = 1;
                     set_dio = true;
                     if value.is_some() {
-                        use_dio = parse_switch(&argb, "argument error").map_err(|m| self.errx(&m))?;
+                        use_dio =
+                            parse_switch(&argb, "argument error").map_err(|m| self.errx(&m))?;
                     }
                     if use_dio != 0 {
                         lo_flags |= LO_FLAGS_DIRECT_IO;
@@ -978,19 +1023,24 @@ impl Losetup {
                     b'a' => act = Act::Show,
                     b'b' => {
                         set_blocksize = true;
-                        blocksize = self.strtosize_or_err(&arg, "failed to parse logical block size")?;
+                        blocksize =
+                            self.strtosize_or_err(&arg, "failed to parse logical block size")?;
                     }
                     b'c' => {
                         act = Act::SetCapacity;
                         if let Err(e) = Self::use_device(&mut lc, &argb) {
-                            return Err(self.err(&format!("{}: failed to use device", shown(&argb)), e));
+                            return Err(
+                                self.err(&format!("{}: failed to use device", shown(&argb)), e)
+                            );
                         }
                     }
                     b'r' => lo_flags |= LO_FLAGS_READ_ONLY,
                     b'd' => {
                         act = Act::Delete;
                         if let Err(e) = Self::use_device(&mut lc, &argb) {
-                            return Err(self.err(&format!("{}: failed to use device", shown(&argb)), e));
+                            return Err(
+                                self.err(&format!("{}: failed to use device", shown(&argb)), e)
+                            );
                         }
                     }
                     b'D' => act = Act::DeleteAll,
@@ -1099,7 +1149,10 @@ impl Losetup {
                 "the options --{sizelimit,partscan,read-only,show} are allowed during loop device setup only",
             ));
         }
-        if flags & LOOPDEV_FL_OFFSET != 0 && act != Act::Create && (act != Act::Show || file.is_none()) {
+        if flags & LOOPDEV_FL_OFFSET != 0
+            && act != Act::Create
+            && (act != Act::Show || file.is_none())
+        {
             return Err(self.errx("the option --offset is not allowed in this context"));
         }
         if let Some(list) = outarg {
@@ -1181,7 +1234,9 @@ impl Losetup {
                     }
                 }
             }
-            Act::SetCapacity => self.device_call(&mut lc, "set capacity failed", LoopCxt::ioctl_capacity),
+            Act::SetCapacity => {
+                self.device_call(&mut lc, "set capacity failed", LoopCxt::ioctl_capacity)
+            }
             Act::SetDirectIo => {
                 self.device_call(&mut lc, "set direct io failed", |lc| lc.ioctl_dio(use_dio))
             }
@@ -1198,7 +1253,12 @@ impl Losetup {
 
     /// One change to the current device: `call`, and on its failure the
     /// device named with `what` -- 0, or -1.
-    fn device_call(&self, lc: &mut LoopCxt, what: &str, call: impl FnOnce(&mut LoopCxt) -> Result<(), i32>) -> i32 {
+    fn device_call(
+        &self,
+        lc: &mut LoopCxt,
+        what: &str,
+        call: impl FnOnce(&mut LoopCxt) -> Result<(), i32>,
+    ) -> i32 {
         match call(lc) {
             Ok(()) => 0,
             Err(e) => {

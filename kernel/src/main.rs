@@ -9255,6 +9255,15 @@ extern "C" fn kernel_main() -> ! {
     // root and the image at /mnt, and keep doing so.
     let image_is_root = switch_root_to_image();
 
+    // An account that will sign in by itself: the console's bottom row says
+    // how to choose another, until a program takes the screen
+    // (`console::hide_hint`). The accounts' save writes the file exactly then
+    // (lane B's userdb); not on a start for repair, which skips the automatic
+    // sign-in (requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md).
+    if autologin_hint_wanted() {
+        console::show_hint(console::AUTOLOGIN_HINT);
+    }
+
     // The host's way into this running system, when QEMU attached the
     // agent's port (scripts/guest.py; design-decisions §1534). Now, not
     // earlier: what it runs looks for programs on the image, at /bin.
@@ -9698,6 +9707,18 @@ fn print_security_posture() {
 ///
 /// A boot with no image (`--no-rootfs`, a diskless machine) keeps the
 /// in-memory root, and so does one whose pivot is refused, which is logged.
+/// Whether the console shows [`console::AUTOLOGIN_HINT`]: `/etc/autologin-hint`
+/// is on the root, which is there exactly when an account will sign in by
+/// itself, and the start is not for repair -- the command line has neither
+/// `recovery` nor `single`, the words the recovery boot entry adds.
+fn autologin_hint_wanted() -> bool {
+    let repair = boot::kernel_cmdline_bytes().is_some_and(|line| {
+        line.split(u8::is_ascii_whitespace)
+            .any(|word| word == b"recovery" || word == b"single")
+    });
+    !repair && fs::Vfs::metadata("/etc/autologin-hint").is_ok()
+}
+
 fn switch_root_to_image() -> bool {
     let image_at_mnt = fs::Vfs::mounts()
         .iter()

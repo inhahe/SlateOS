@@ -12227,7 +12227,13 @@ fn drm_card_ioctl(entry: &FdEntry, request: u32, argp: u64) -> SyscallResult {
             if render_node {
                 return linux_err(errno::EACCES);
             }
-            drm_card_ioctl_mode_setcrtc(handle, argp)
+            let set = drm_card_ioctl_mode_setcrtc(handle, argp);
+            // A program set a mode: the screen is its now, and the console's
+            // hint (`console::show_hint`) is not drawn over it again.
+            if set.value >= 0 {
+                crate::console::hide_hint();
+            }
+            set
         }
         uapi::DRM_IOCTL_MODE_GETPLANERESOURCES => {
             if render_node {

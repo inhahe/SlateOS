@@ -623,6 +623,10 @@ struct ConsoleInner {
     /// Whether a line scrolled off the top goes into [`SCROLLBACK`]: the live
     /// console's do; a self-test's scratch console's must not.
     keeps_scrollback: bool,
+    /// The text the framebuffer's bottom row shows ([`show_hint`]), if any:
+    /// while it does, [`rows`](Self::rows) counts one row fewer, so nothing
+    /// the console draws reaches it.
+    hint: Option<&'static str>,
 }
 
 /// A boot step on the screen as running: which step, and its text row.
@@ -868,6 +872,7 @@ impl ConsoleInner {
             screen_buf: Vec::new(),
             open_steps: [None; OPEN_STEPS],
             keeps_scrollback: true,
+            hint: None,
         }
     }
 
@@ -1095,6 +1100,112 @@ pub fn clear() {
     con.blank_buffer(bg);
     con.cursor_col = 0;
     con.cursor_row = 0;
+    // The whole framebuffer was cleared, the hint's row with it.
+    draw_hint(&con);
+}
+
+// ---------------------------------------------------------------------------
+// The hint row
+// ---------------------------------------------------------------------------
+
+/// What the console's bottom row says, from the system image's mounting until
+/// a program takes the screen, when an account will sign in by itself:
+/// holding Shift shows the account chooser instead (design-decisions §1427,
+/// requests/c-a-the-kernels-app-registry-and-the-first-screen-hint.md).
+pub const AUTOLOGIN_HINT: &str = "Hold Shift to choose an account";
+
+/// Keep the framebuffer's bottom row for `text`, centred in the default
+/// colours. The console is one row shorter for everything else until
+/// [`hide_hint`] -- its scrolling, its erasing, the size a program is told --
+/// so nothing it draws reaches the row. A cursor on that row moves up with
+/// the screen first, as a line fed at the bottom would. One hint at a time;
+/// a console of one row shows none.
+pub fn show_hint(text: &'static str) {
+    show_hint_on(&mut CONSOLE.lock_irqsave(), text);
+}
+
+/// Give the bottom row back to the console, blank ([`show_hint`]). Nothing,
+/// when there is no hint.
+pub fn hide_hint() {
+    hide_hint_on(&mut CONSOLE.lock_irqsave());
+}
+
+fn show_hint_on(con: &mut ConsoleInner, text: &'static str) {
+    if !con.initialized || con.hint.is_some() || con.rows < 2 {
+        return;
+    }
+    let last = con.rows.saturating_sub(1);
+    if con.cursor_row >= last {
+        scroll_up_locked(con);
+    }
+    let whole = con.scroll_bottom >= last;
+    con.rows = last;
+    let new_last = last.saturating_sub(1);
+    if whole {
+        con.scroll_bottom = new_last;
+    }
+    con.scroll_top = con.scroll_top.min(con.scroll_bottom);
+    con.cursor_row = con.cursor_row.min(new_last);
+    con.saved_cursor_row = con.saved_cursor_row.min(new_last);
+    con.hint = Some(text);
+    draw_hint(con);
+}
+
+fn hide_hint_on(con: &mut ConsoleInner) {
+    if con.hint.take().is_none() {
+        return;
+    }
+    let whole = con.scroll_bottom >= con.rows.saturating_sub(1);
+    fill_row_band(con, con.rows, con.default_bg);
+    con.rows = con.rows.saturating_add(1);
+    if whole {
+        con.scroll_bottom = con.rows.saturating_sub(1);
+    }
+    // A text buffer made while the console was a row shorter gains the row;
+    // one that cannot grow leaves the row's text unrecorded, which only the
+    // scrollback would have read.
+    let cells = (con.cols as usize).saturating_mul(con.rows as usize);
+    let short = cells.saturating_sub(con.screen_buf.len());
+    if !con.screen_buf.is_empty() && short > 0 && con.screen_buf.try_reserve_exact(short).is_ok() {
+        con.screen_buf.resize(cells, ScrollCell::EMPTY);
+    }
+}
+
+/// Draw the hint ([`show_hint`]), if there is one, on the row just below the
+/// console's last.
+fn draw_hint(con: &ConsoleInner) {
+    let Some(text) = con.hint else {
+        return;
+    };
+    let row = con.rows;
+    fill_row_band(con, row, con.default_bg);
+    let len = u32::try_from(text.len()).unwrap_or(u32::MAX).min(con.cols);
+    let start = con.cols.saturating_sub(len) / 2;
+    for (col, b) in (start..start.saturating_add(len)).zip(text.bytes()) {
+        draw_glyph_full(
+            con.fb_addr,
+            con.fb_pitch,
+            col,
+            row,
+            b,
+            con.default_fg,
+            con.default_bg,
+            false,
+            false,
+        );
+    }
+}
+
+/// Paint the whole band of pixels of text row `row`, across the full width,
+/// `color`.
+fn fill_row_band(con: &ConsoleInner, row: u32, color: u32) {
+    let top = row.saturating_mul(GLYPH_HEIGHT);
+    let bottom = top.saturating_add(GLYPH_HEIGHT).min(con.fb_height);
+    for y in top..bottom {
+        for x in 0..con.fb_width {
+            put_pixel(con.fb_addr, con.fb_pitch, x, y, color);
+        }
+    }
 }
 
 /// Render a single byte at the current cursor position.
@@ -2928,6 +3039,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::serial_println!("[console]   FAIL: boot steps: {}", what);
         return Err(crate::error::KernelError::InternalError);
     }
+    if let Err(what) = test_hint_row() {
+        crate::serial_println!("[console]   FAIL: hint row: {}", what);
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[console]   hint row: the console a row shorter, its text moved up, scrolled \
+         above the hint and never over it, given back blank: OK"
+    );
     crate::serial_println!(
         "[console]   boot steps: nested, with a scroll, a region scroll, an erase and text over a line between, \
          past capacity: OK"
@@ -3195,6 +3314,82 @@ impl Drop for RestoreTerminal {
 /// step's start and its end, a region scroll, an erase, and more open steps
 /// than are remembered. Each update must land on its own step's line, or on
 /// a line of its own when that line is gone.
+/// The hint row ([`show_hint`]) on a console of the test's own: the console
+/// is a row shorter while it shows -- its size, its scroll region -- and the
+/// text on the row it takes moves up; lines fed past the bottom scroll above
+/// the hint and never over it; hiding it gives the row back, blank. A second
+/// hint, and a hint on a console of one row, are refused. (`clear`, which
+/// paints the live console's whole framebuffer, redraws the hint after; it is
+/// not run on a scratch console.)
+fn test_hint_row() -> Result<(), &'static str> {
+    const COLS: u32 = 40;
+    const ROWS: u32 = 4;
+    const WIDTH: usize = (COLS * GLYPH_WIDTH) as usize;
+    const PIXELS: usize = WIDTH * (ROWS * GLYPH_HEIGHT) as usize;
+    let mut fb = alloc::vec![DEFAULT_BG; PIXELS];
+    let mut c = ConsoleInner::scratch(COLS, ROWS, &mut fb).ok_or("no scratch console")?;
+    let base = c.fb_addr as *const u32;
+    // The pixels of text row `row`, as they are now.
+    let band = |row: u32| -> alloc::vec::Vec<u32> {
+        let from = (row * GLYPH_HEIGHT) as usize * WIDTH;
+        (from..from.saturating_add(GLYPH_HEIGHT as usize * WIDTH))
+            // SAFETY: `base` is `fb`'s, which outlives the test, and every
+            // index is inside its PIXELS.
+            .map(|i| unsafe { base.add(i).read() })
+            .collect()
+    };
+    let row_text = |c: &ConsoleInner, row: u32| -> alloc::string::String {
+        let at = (row as usize).saturating_mul(COLS as usize);
+        c.screen_buf
+            .get(at..at.saturating_add(COLS as usize))
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| char::from(cell.ch))
+                    .collect::<alloc::string::String>()
+            })
+            .unwrap_or_default()
+            .trim_end()
+            .into()
+    };
+    let write = |c: &mut ConsoleInner, text: &str| {
+        for b in text.bytes() {
+            putchar_on(c, b);
+        }
+    };
+    write(&mut c, "a\r\nb\r\nc\r\nd");
+    show_hint_on(&mut c, "hint");
+    if c.rows != ROWS - 1 || c.scroll_bottom != ROWS - 2 || c.cursor_row != ROWS - 2 {
+        return Err("the console did not give up its bottom row");
+    }
+    if row_text(&c, ROWS - 2) != "d" {
+        return Err("the text on the row the hint took did not move up");
+    }
+    let shown = band(ROWS - 1);
+    if !shown.contains(&DEFAULT_FG) {
+        return Err("the hint was not drawn on the bottom row");
+    }
+    show_hint_on(&mut c, "another");
+    write(&mut c, "\r\ne\r\nf\r\ng\r\nh");
+    if c.rows != ROWS - 1 || band(ROWS - 1) != shown || row_text(&c, ROWS - 2) != "h" {
+        return Err("text fed past the bottom reached the hint, or a second hint was taken");
+    }
+    hide_hint_on(&mut c);
+    if c.rows != ROWS
+        || c.scroll_bottom != ROWS - 1
+        || band(ROWS - 1).iter().any(|&p| p != DEFAULT_BG)
+    {
+        return Err("the bottom row did not come back, blank");
+    }
+    let mut one = alloc::vec![DEFAULT_BG; WIDTH * GLYPH_HEIGHT as usize];
+    let mut tiny = ConsoleInner::scratch(COLS, 1, &mut one).ok_or("no one-row console")?;
+    show_hint_on(&mut tiny, "hint");
+    if tiny.rows != 1 || tiny.hint.is_some() {
+        return Err("a console of one row gave its only row to a hint");
+    }
+    Ok(())
+}
+
 fn test_boot_steps() -> Result<(), &'static str> {
     const COLS: u32 = 40;
     const ROWS: u32 = 6;

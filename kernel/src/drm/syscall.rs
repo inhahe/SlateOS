@@ -352,7 +352,12 @@ pub fn sys_drm_page_flip(args: &SyscallArgs) -> SyscallResult {
     let fb_id = DrmObjectId::new(args.arg2 as u32);
 
     match super::with_device_mut(index, |dev| dev.page_flip(crtc_id, fb_id)) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            // A program shows its own frame: the screen is its now, and the
+            // console's hint (`console::show_hint`) is not drawn over it.
+            crate::console::hide_hint();
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -722,7 +727,14 @@ pub fn sys_drm_atomic_commit(args: &SyscallArgs) -> SyscallResult {
     }
 
     match super::with_device_mut(index, |dev| super::atomic::atomic_commit(dev, &state)) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            // A commit, not a test: the screen is the program's now, and the
+            // console's hint (`console::show_hint`) is not drawn over it.
+            if !test_only {
+                crate::console::hide_hint();
+            }
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }

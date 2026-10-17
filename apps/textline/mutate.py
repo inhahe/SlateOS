@@ -270,6 +270,10 @@ S_SELECT_ALL = "select_all_types_over_the_text"
 S_TO_END = "caret_to_end_types_after_the_text_and_over_no_selection"
 
 INSERT = "a_box_types_what_it_is_given_at_its_caret"
+# A box read from its end (diskanalyzer's path): cut at its front without
+# the keyboard, and pressed where that was drawn.
+S_FROM_END = "a_box_read_from_its_end_is_cut_at_the_front_without_the_keyboard"
+S_TAIL_PRESS = "a_press_in_a_box_read_from_its_end_lands_on_the_tail_it_showed"
 
 LINE_MUTATIONS = [
     (
@@ -481,6 +485,66 @@ LINE_MUTATIONS = [
         "        self.input.select_all();\n",
         "",
         [S_SELECT_ALL],
+    ),
+    (
+        "a box read from its end is read from its start",
+        "        self.from_end = true;\n",
+        "",
+        [S_FROM_END, S_TAIL_PRESS],
+    ),
+    (
+        "a box read from its end is drawn as any other",
+        "        } else if self.from_end {\n",
+        "        } else if false {\n",
+        [S_FROM_END],
+    ),
+    (
+        "a box read from its end is cut at its end",
+        "                text: guitk::text::elide_start(\n",
+        "                text: guitk::text::elide(\n",
+        [S_FROM_END],
+    ),
+    (
+        "a box read from its end runs out of the box",
+        "                max_width: Some(width),\n",
+        "                max_width: None,\n",
+        [S_FROM_END],
+    ),
+    (
+        "a press in a box read from its end is measured from its start",
+        "        let cursor = if !focused && self.from_end {\n",
+        "        let cursor = if false {\n",
+        [S_TAIL_PRESS],
+    ),
+    (
+        "a press in a box read from its end with the keyboard is measured against its tail",
+        "        let cursor = if !focused && self.from_end {\n",
+        "        let cursor = if self.from_end {\n",
+        [S_TAIL_PRESS],
+    ),
+    (
+        "text that fits is pressed as though cut",
+        "        if guitk::text::measure(text, self.font_size, weight) <= width {\n",
+        "        if false {\n",
+        [S_TAIL_PRESS],
+    ),
+    (
+        "a press where nothing was drawn puts the caret at the start",
+        "            return TextCursor::from(text.len());\n",
+        "            return TextCursor::default();\n",
+        [S_TAIL_PRESS],
+    ),
+    (
+        "a press on the tail is measured from the box's edge, not after the ellipsis",
+        "        let within = guitk::text::cursor_at(tail, dx - lead, self.font_size, weight);\n",
+        "        let within = guitk::text::cursor_at(tail, dx, self.font_size, weight);\n",
+        [S_TAIL_PRESS],
+    ),
+    (
+        "a press on the tail is counted from the tail's start",
+        "        TextCursor::from(start.saturating_add(within.byte()))\n",
+        "        within\n",
+        [S_TAIL_PRESS],
     ),
 ]
 

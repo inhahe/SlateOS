@@ -24,11 +24,17 @@ use guitk::text::TextCursor;
 use guitk::textedit;
 use guitk::textinput::{KeyEdit, TextInput};
 
+/// What a box read from its end draws in place of the text it cuts.
+const ELLIPSIS: &str = "…";
+
 /// A one-line box's text, caret and selection, and the size it is drawn at.
 #[derive(Clone, Debug)]
 pub struct LineBox {
     input: TextInput,
     font_size: f32,
+    /// Whether text too long for the box is cut at its front while the box
+    /// has not the keyboard ([`LineBox::from_its_end`]).
+    from_end: bool,
 }
 
 /// What one key did to a [`LineBox`].
@@ -101,7 +107,20 @@ impl LineBox {
         Self {
             input: crate::field_holding(text, capacity),
             font_size,
+            from_end: false,
         }
+    }
+
+    /// The box, read from its end while it has not the keyboard: text too
+    /// long for it is drawn cut at the front, `…` and the tail that fits
+    /// after it, and a press lands on that tail where it was drawn -- for a
+    /// path, whose tail says which directory it is and whose head every
+    /// sibling shares. With the keyboard it is drawn as any box is,
+    /// scrolled under its caret.
+    #[must_use]
+    pub fn from_its_end(mut self) -> Self {
+        self.from_end = true;
+        self
     }
 
     /// What is in the box.
@@ -223,23 +242,52 @@ impl LineBox {
     /// A press `dx` pixels right of the text's left edge, in a box whose text
     /// is `width` wide: the caret goes where it landed, against the text as
     /// it was drawn -- scrolled under the caret if the box had the keyboard
-    /// (`focused`), from its start if it did not -- and any selection goes.
+    /// (`focused`); if it did not, from its start, or cut at its front for a
+    /// box [read from its end](Self::from_its_end) -- and any selection goes.
     pub fn press(&mut self, dx: f32, width: f32, focused: bool) {
-        let drawn = if focused {
-            self.input.cursor()
+        let width = width.max(0.0);
+        let cursor = if !focused && self.from_end {
+            self.press_in_tail(dx, width)
         } else {
-            TextCursor::default()
+            let drawn = if focused {
+                self.input.cursor()
+            } else {
+                TextCursor::default()
+            };
+            textedit::cursor_at_click(
+                self.input.text(),
+                drawn,
+                width,
+                self.font_size,
+                FontWeightHint::Regular,
+                dx,
+            )
         };
-        let cursor = textedit::cursor_at_click(
-            self.input.text(),
-            drawn,
-            width.max(0.0),
-            self.font_size,
-            FontWeightHint::Regular,
-            dx,
-        );
         self.input.set_selection_anchor(None);
         self.input.set_cursor(cursor);
+    }
+
+    /// Where a press `dx` pixels right of the text's left edge lands in a box
+    /// read from its end, without the keyboard, `width` wide, as
+    /// [`draw`](Self::draw) drew it: text that fits from its start; `…` and
+    /// the tail after it, a press on the `…` landing before the tail; and
+    /// where not even the `…` fits and nothing was drawn, the end.
+    fn press_in_tail(&self, dx: f32, width: f32) -> TextCursor {
+        let text = self.input.text();
+        let weight = FontWeightHint::Regular;
+        if guitk::text::measure(text, self.font_size, weight) <= width {
+            return guitk::text::cursor_at(text, dx, self.font_size, weight);
+        }
+        let shown = guitk::text::elide_start(text, width, ELLIPSIS, self.font_size, weight);
+        let Some(tail) = shown.strip_prefix(ELLIPSIS) else {
+            return TextCursor::from(text.len());
+        };
+        // The tail is the end of the text, so it starts on a character's
+        // boundary, and so does every place in it.
+        let start = text.len().saturating_sub(tail.len());
+        let lead = guitk::text::measure(ELLIPSIS, self.font_size, weight);
+        let within = guitk::text::cursor_at(tail, dx - lead, self.font_size, weight);
+        TextCursor::from(start.saturating_add(within.byte()))
     }
 
     /// The box's right-click menu: Cut, Copy, Paste, Delete and Select All,
@@ -259,9 +307,11 @@ impl LineBox {
     /// what it is for -- with its caret before that while it has the
     /// keyboard -- and draws no text of its own; a box with the keyboard
     /// draws its text with its caret and selection, and one without it the
-    /// text cut to the width with `…`. The text sits on the same line
-    /// either way, so it does not move when the box takes the keyboard. The
-    /// frame round it is the caller's (`guitk::field::draw`).
+    /// text cut to the width with `…`, at its end or, for a box
+    /// [read from its end](Self::from_its_end), at its front. The text sits
+    /// on the same line either way, so it does not move when the box takes
+    /// the keyboard. The frame round it is the caller's
+    /// (`guitk::field::draw`).
     pub fn draw(&self, tree: &mut RenderTree, look: &LineLook<'_>) {
         if self.is_empty() {
             // The placeholder under the caret too: a box that has just taken
@@ -308,6 +358,27 @@ impl LineBox {
                     caret_width: look.caret_width,
                 },
             );
+        } else if self.from_end {
+            // Cut here, so clipped rather than cut again: a renderer that
+            // measured a hair wider would otherwise put a second `…` over
+            // the tail's last letter.
+            let width = look.width.max(0.0);
+            tree.push(RenderCommand::Text {
+                x: look.x,
+                y: look.y,
+                text: guitk::text::elide_start(
+                    self.input.text(),
+                    width,
+                    ELLIPSIS,
+                    self.font_size,
+                    FontWeightHint::Regular,
+                ),
+                font_size: self.font_size,
+                color: look.color,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width),
+                overflow: TextOverflow::Clip,
+            });
         } else {
             push_line(tree, look, self.input.text(), look.color, self.font_size);
         }
@@ -666,6 +737,119 @@ mod tests {
             line.input().cursor().byte() > 50,
             "measured from the start: caret at {}",
             line.input().cursor().byte()
+        );
+    }
+
+    /// A path too long for [`LOOK`]'s 200 pixels, its tail `/end!`.
+    fn long_path() -> String {
+        format!("/home/{}end!", "deep/".repeat(20))
+    }
+
+    /// The text a box draws without the keyboard, held to the box's width.
+    fn shown(line: &LineBox) -> String {
+        let mut tree = RenderTree::new();
+        line.draw(&mut tree, &LOOK);
+        tree.commands
+            .into_iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text, max_width, ..
+                } => {
+                    assert_eq!(max_width, Some(LOOK.width), "not held to the box");
+                    Some(text)
+                }
+                _ => None,
+            })
+            .expect("no text drawn")
+    }
+
+    /// **A box read from its end shows its tail without the keyboard**, cut
+    /// at the front and no wider than the box -- where a box read from its
+    /// start shows its head -- and with the keyboard it is drawn as any box
+    /// is.
+    #[test]
+    fn a_box_read_from_its_end_is_cut_at_the_front_without_the_keyboard() {
+        let path = long_path();
+        let tail = LineBox::holding(&path, 256, 13.0).from_its_end();
+        let drawn = shown(&tail);
+        assert!(
+            drawn.starts_with(ELLIPSIS) && drawn.ends_with("/end!"),
+            "the tail is not what shows: {drawn}"
+        );
+        assert!(
+            guitk::text::measure(&drawn, 13.0, FontWeightHint::Regular) <= LOOK.width,
+            "wider than the box: {drawn}"
+        );
+        let head = LineBox::holding(&path, 256, 13.0);
+        assert_eq!(shown(&head), path, "control: a box read from its start");
+        let focused = LineLook {
+            focused: true,
+            ..LOOK
+        };
+        let (mut a, mut b) = (RenderTree::new(), RenderTree::new());
+        tail.draw(&mut a, &focused);
+        head.draw(&mut b, &focused);
+        assert_eq!(a.commands, b.commands, "with the keyboard, drawn otherwise");
+        let short = LineBox::holding("/tmp", 256, 13.0).from_its_end();
+        assert_eq!(shown(&short), "/tmp", "text that fits is cut");
+    }
+
+    /// **A press in a box read from its end lands on the tail it showed**:
+    /// a letter of the tail where it was drawn after the `…`, the `…`
+    /// itself before the tail, and text that fits where it was drawn from
+    /// its start. With the keyboard it is measured as any box is.
+    #[test]
+    fn a_press_in_a_box_read_from_its_end_lands_on_the_tail_it_showed() {
+        let path = long_path();
+        let weight = FontWeightHint::Regular;
+        let drawn = shown(&LineBox::holding(&path, 256, 13.0).from_its_end());
+        let tail = drawn.strip_prefix(ELLIPSIS).expect("cut at the front");
+        let start = path.len() - tail.len();
+        let lead = guitk::text::measure(ELLIPSIS, 13.0, weight);
+        let mut line = LineBox::holding(&path, 256, 13.0).from_its_end();
+        let caret = |line: &LineBox| line.input().cursor().byte();
+
+        let fifth = lead + guitk::text::measure(&tail[..5], 13.0, weight) + 0.5;
+        line.press(fifth, LOOK.width, false);
+        assert_eq!(caret(&line), start + 5, "not after the tail's fifth letter");
+        line.press(LOOK.width, LOOK.width, false);
+        assert_eq!(caret(&line), path.len(), "a press past the tail");
+        line.press(lead / 4.0, LOOK.width, false);
+        assert_eq!(
+            caret(&line),
+            start,
+            "a press on the … is not before the tail"
+        );
+        line.press(5.0, 0.0, false);
+        assert_eq!(
+            caret(&line),
+            path.len(),
+            "nothing drawn, and not at the end"
+        );
+        // With the keyboard it is scrolled under its caret as any box is:
+        // the caret at the start shows the head.
+        line.key(&press(Key::Home, ""));
+        line.press(
+            guitk::text::measure(&path[..5], 13.0, weight) + 0.5,
+            LOOK.width,
+            true,
+        );
+        assert_eq!(
+            caret(&line),
+            5,
+            "with the keyboard, measured against the tail"
+        );
+
+        let mut short = LineBox::holding("abcd", 256, 13.0).from_its_end();
+        short.press(
+            guitk::text::measure("ab", 13.0, weight) + 0.5,
+            LOOK.width,
+            false,
+        );
+        assert_eq!(
+            caret(&short),
+            2,
+            "text that fits is not measured from its start"
         );
     }
 

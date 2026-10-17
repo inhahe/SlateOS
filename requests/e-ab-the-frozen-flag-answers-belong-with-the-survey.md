@@ -33,7 +33,7 @@ re-pointed, a *gone* one deleted. None is renamed.
 | 55-56 | `lockscreen.show_clock_seconds`, `show_date` | fixed: read from the settings file and reloaded |
 | 57 | `markdowneditor.autosave_enabled` | fixed: written in fifteen places |
 | 96-98 | `fontmanager.antialiasing`, `hinting`, `subpixel_order` | gone: the font manager was rewritten round the machine's real fonts |
-| 110-111 | `email.is_html`, `email.priority` | no longer reported, and no writer was added: an `EmailDraft` is only built whole (`new`, `reply`, `forward`). Why the survey stopped reporting them is lane E's to find out when the lines go; their reason -- a header of a message that is never sent -- is kept here |
+| 110-111 | `email.is_html`, `email.priority` | no longer reported, and no writer was added: an `EmailDraft` is only built whole (`new`, `reply`, `forward`), and the survey counts a struct something replaces whole as written (`replaced_wholesale`, since it was taught that), which is why it stopped reporting them. Their reason -- a header of a message that is never sent -- is kept here |
 | 138 | `netscan.phase` | fixed: a scan sets it (`progress.phase = ScanPhase::Complete`) |
 | 165 | `mediaconvert.output_naming` | fixed: chosen from the naming rules |
 

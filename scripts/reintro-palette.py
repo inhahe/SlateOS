@@ -6695,8 +6695,10 @@ DEFECTS = [
         "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA: the signing-in user's avatar is frozen back to Mocha blue",
         LOGIN,
         [
-            ('                    48.0,\n                    AVATAR_ICON,\n                    p.ink(p.accent),\n',
-             '                    48.0,\n                    AVATAR_ICON,\n                    Color::from_hex(0x89B4FA),\n'),
+            # Re-derived 2026-10-16: the large avatar is drawn by `avatar`,
+            # which draws an account's own picture or the theme's icon.
+            ('            self.avatar(commands, user, cx - 24.0, cy - 80.0, 48.0, p.ink(p.accent));',
+             '            self.avatar(commands, user, cx - 24.0, cy - 80.0, 48.0, Color::from_hex(0x89B4FA));'),
         ],
         ["desktop"],
         [
@@ -6711,8 +6713,9 @@ DEFECTS = [
         "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB: the signing-in user's avatar loses the accent it carried in the list",
         LOGIN,
         [
-            ('                    48.0,\n                    AVATAR_ICON,\n                    p.ink(p.accent),\n',
-             '                    48.0,\n                    AVATAR_ICON,\n                    p.on_wallpaper(),\n'),
+            # Re-derived 2026-10-16, as AAAA... above.
+            ('            self.avatar(commands, user, cx - 24.0, cy - 80.0, 48.0, p.ink(p.accent));',
+             '            self.avatar(commands, user, cx - 24.0, cy - 80.0, 48.0, p.on_wallpaper());'),
         ],
         ["desktop"],
         [

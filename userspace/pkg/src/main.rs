@@ -64,17 +64,74 @@ const CONFIG_PATH: &str = "/etc/pkg.conf";
 /// The root of the system pkg manages: `/`, or the directory `--root` names
 /// -- a system that is not the running one, as an installer fills, or a
 /// test's scratch directory. Its state, its configuration and every file it
-/// installs are found under it, and its hooks run inside it. Set once, by
+/// installs are found under it. Set once, by
 /// `main`, before anything is read.
 static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 /// `path`, absolute on the system pkg manages, where it is found: under
 /// `--root`'s directory, or as it is.
+///
+/// Under `--root` it is resolved as a process chrooted there would see it
+/// ([`resolve_in_root`]), so that nothing pkg writes or removes lands outside
+/// the directory.
 fn under_root(path: &str) -> PathBuf {
     match ROOT.get() {
-        Some(root) => root.join(path.trim_start_matches('/')),
+        Some(root) => resolve_in_root(root, path),
         None => PathBuf::from(path),
     }
+}
+
+/// The most symbolic links one path is followed through: Linux's
+/// `MAXSYMLINKS`. Past it the rest of the path is taken as it stands.
+const MAX_LINKS: usize = 40;
+
+/// `path` resolved inside `root` as a process chrooted at `root` would
+/// resolve it: `..` stops at the root, and a symbolic link met on the way is
+/// followed inside it -- an absolute one from the root, not from `/`. The
+/// last component is not followed, since an install replaces it and a
+/// removal unlinks it. A link that cannot be read is taken as a name.
+fn resolve_in_root(root: &Path, path: &str) -> PathBuf {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+
+    fn parts(path: &Path) -> impl Iterator<Item = OsString> + '_ {
+        path.components().filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_owned()),
+            Component::ParentDir => Some(OsString::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        })
+    }
+
+    let mut done: Vec<OsString> = Vec::new();
+    let mut todo: VecDeque<OsString> = parts(Path::new(path)).collect();
+    let mut links = 0usize;
+    while let Some(part) = todo.pop_front() {
+        if part == ".." {
+            done.pop();
+            continue;
+        }
+        if !todo.is_empty() && links < MAX_LINKS {
+            let mut here = root.to_path_buf();
+            here.extend(&done);
+            here.push(&part);
+            let is_link = fs::symlink_metadata(&here).is_ok_and(|m| m.file_type().is_symlink());
+            if is_link && let Ok(target) = fs::read_link(&here) {
+                links += 1;
+                if target.has_root() {
+                    done.clear();
+                }
+                let rest: Vec<OsString> = todo.drain(..).collect();
+                todo.extend(parts(&target));
+                todo.extend(rest);
+                continue;
+            }
+        }
+        done.push(part);
+    }
+    let mut resolved = root.to_path_buf();
+    resolved.extend(done);
+    resolved
 }
 
 // ============================================================================
@@ -516,6 +573,11 @@ fn parse_file_entry(value: &str) -> Option<PackageFile> {
         return None;
     }
     let dst = parts[0].to_string();
+    // An absolute path that climbs nowhere: `..` in a package's destination
+    // is a package trying to write outside where files go.
+    if !dst.starts_with('/') || dst.split('/').any(|c| c == "..") {
+        return None;
+    }
     let mode = u32::from_str_radix(parts[1], 8).unwrap_or(0o644);
     let hash = parts.get(2).unwrap_or(&"").to_string();
     let size = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -844,8 +906,11 @@ impl ContentStore {
             fs::create_dir_all(parent)?;
         }
 
-        // Remove existing file at destination if any
-        if dst.exists() {
+        // Remove what is at the destination -- a symbolic link itself, not
+        // what it names, or the copy below would write through it.
+        if fs::symlink_metadata(dst).is_ok() {
+            // A failure shows below, where the link or the copy cannot
+            // replace it.
             let _ = fs::remove_file(dst);
         }
 
@@ -998,7 +1063,7 @@ impl ContentStore {
         let mut removed = 0u64;
         for (dst_path, _hash) in file_hashes {
             let dst = &under_root(dst_path);
-            if dst.exists() {
+            if fs::symlink_metadata(dst).is_ok() {
                 if fs::remove_file(dst).is_ok() {
                     removed += 1;
                 }
@@ -1756,9 +1821,12 @@ impl ConfigFileTracker {
 ///
 /// Hooks run with the package name and version as arguments.
 /// A non-zero exit code from a pre-hook aborts the operation.
+///
+/// Nothing runs them yet: no command calls [`PackageHooks::run`], so a
+/// package's hooks are ignored (known-issues `TD-B-PKG-RUNS-NO-PACKAGE-HOOKS`).
 struct PackageHooks;
 
-#[allow(dead_code)] // Infrastructure for package lifecycle hooks — wired in next
+#[allow(dead_code)] // Called by no command: TD-B-PKG-RUNS-NO-PACKAGE-HOOKS
 impl PackageHooks {
     /// Run a hook command if it exists.
     ///
@@ -3063,7 +3131,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         for (old_dst, _) in &old_file_hashes {
             if !new_dsts.contains(old_dst.as_str()) {
                 let dst = &under_root(old_dst);
-                if dst.exists() {
+                if fs::symlink_metadata(dst).is_ok() {
                     if fs::remove_file(dst).is_ok() {
                         removed_stale += 1;
                     }
@@ -5093,7 +5161,6 @@ Usage: pkg [--root <dir>] <command> [options] [arguments]
 
   --root <dir>           Manage the system under <dir> -- its packages, its
                          configuration and its files -- not the running one.
-                         Hooks run inside it.
 
 Commands:
   install <pkg>...       Install packages (names from repo, or local .pkg files)
@@ -5245,6 +5312,8 @@ fn main() {
     let args: Vec<OsString> = match take_root(&all) {
         Ok((root, rest)) => {
             if let Some(root) = root {
+                // `main` sets it once, here, before anything reads it: the
+                // set cannot find it set already.
                 let _ = ROOT.set(root);
             }
             rest.to_vec()
@@ -5448,6 +5517,62 @@ mod tests {
 
     use scratchdir::ScratchDir;
     use std::path::Path;
+
+    // ---- --root confines every path ----
+
+    #[test]
+    fn a_path_under_root_cannot_climb_out_of_it() {
+        let root = Path::new("/mnt/target");
+        assert_eq!(
+            super::resolve_in_root(root, "/../../etc/profile"),
+            root.join("etc").join("profile")
+        );
+        assert_eq!(
+            super::resolve_in_root(root, "/usr/./bin/../lib/x"),
+            root.join("usr/lib/x")
+        );
+        assert_eq!(super::resolve_in_root(root, "/"), root);
+    }
+
+    #[test]
+    fn a_destination_that_climbs_or_is_relative_is_not_an_entry() {
+        assert!(super::parse_file_entry("a -> /usr/bin/a 0755 abc 3").is_some());
+        assert!(super::parse_file_entry("a -> /../../etc/x 0644 abc 3").is_none());
+        assert!(super::parse_file_entry("a -> /usr/../../x 0644 abc 3").is_none());
+        assert!(super::parse_file_entry("a -> usr/bin/a 0755 abc 3").is_none());
+    }
+
+    /// A link inside the root -- absolute or relative -- is followed inside
+    /// it; the last component is a name, never followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_under_root_is_followed_inside_it() {
+        let scratch = ScratchDir::new("pkg-resolve-in-root");
+        let root = scratch.path("root");
+        std::fs::create_dir_all(root.join("var")).unwrap();
+        std::fs::create_dir_all(root.join("usr/lib")).unwrap();
+        std::os::unix::fs::symlink("/run", root.join("var/run")).unwrap();
+        std::os::unix::fs::symlink("usr/lib", root.join("lib")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("usr/lib/last")).unwrap();
+        std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
+        assert_eq!(
+            super::resolve_in_root(&root, "/var/run/foo"),
+            root.join("run/foo")
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/lib/libc.so"),
+            root.join("usr/lib/libc.so")
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/lib/last"),
+            root.join("usr/lib/last")
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/loop/x"),
+            root.join("loop/x"),
+            "a link that never ends is taken as a name"
+        );
+    }
 
     fn write(scratch: &ScratchDir, name: &str, body: &[u8]) -> std::path::PathBuf {
         let path = scratch.path(name);

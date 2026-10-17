@@ -119,7 +119,6 @@ MUTATIONS = [
 # typed onto the end for a caret.
 EDITS = "the_search_box_edits_at_a_caret"
 TEMPLATE = "a_templates_boxes_edit_at_a_caret"
-SHOWN = "a_box_edits_the_text_it_shows"
 
 MUTATIONS += [
     (
@@ -130,58 +129,35 @@ MUTATIONS += [
         "                    return match None::<bool> {\n",
         [EDITS],
     ),
-    (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
+    # The boxes are textline LineBoxes since 2026-10-17, one each: their
+    # clipboard (the program's), their caret and selection drawn, and the
+    # text each edits being its own are LineBox's, which textline's own
+    # table covers.
     (
         "a search edited is not filtered by",
-        "            if field == Field::Search {\n"
-        "                self.scroll_offset = 0;\n"
-        "                self.refresh_filter();\n"
-        "            }\n"
-        "        }\n"
-        "        let editor = &self.editor;\n",
-        "        }\n"
-        "        let editor = &self.editor;\n",
+        "        if edit.changed && field == Field::Search {\n"
+        "            self.scroll_offset = 0;\n"
+        "            self.refresh_filter();\n"
+        "        }\n",
+        "",
         ["typing_in_the_search_box_narrows_the_list_and_backspacing_widens_it"],
     ),
     (
-        "the editor is kept for the box the keyboard moved to",
-        "        if self.editor_for != Some(field) || self.editor.text() != self.box_value(field) {\n",
-        "        if self.editor.text() != self.box_value(field) {\n",
-        [SHOWN],
-    ),
-    (
-        "a key finds the editor holding another text",
-        "        if self.editor_for != Some(field) || self.editor.text() != self.box_value(field) {\n",
-        "        if self.editor_for != Some(field) {\n",
-        [SHOWN],
-    ),
-    (
-        "the caret is drawn at the start",
-        "        let (cursor, selection_anchor) = if focused {\n            text.caret\n",
-        "        let (cursor, selection_anchor) = if false {\n            text.caret\n",
-        [EDITS],
-    ),
-    (
         "an empty box with the keyboard draws no caret",
-        "        if focused {\n            textedit::push_caret(\n",
-        "        if false {\n            textedit::push_caret(\n",
+        "            focused,\n            placeholder: text.placeholder,\n",
+        "            focused: false,\n            placeholder: text.placeholder,\n",
         [TEMPLATE],
     ),
     (
         "a press puts the caret at the start",
-        "            x - area.x,\n",
-        "            0.0,\n",
+        "            .press(x - area.x, area.w, had_the_keyboard);\n",
+        "            .press(0.0, area.w, had_the_keyboard);\n",
         [EDITS, TEMPLATE],
     ),
     (
         "a press in a box does not place the caret",
-        "            self.press_box(field, rect, drawn, x);\n",
-        "            let _ = (field, rect, drawn);\n",
+        "            self.press_box(field, rect, had_the_keyboard, x);\n",
+        "            let _ = (field, rect, had_the_keyboard);\n",
         [EDITS, TEMPLATE],
     ),
     (

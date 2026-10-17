@@ -25,6 +25,7 @@ use pathtext::ShowPath;
 use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::time::Duration;
+use textline::{LineBox, LineLook};
 
 use guitk::color::Color;
 use guitk::dialog::{FilePicker, Picked};
@@ -34,9 +35,7 @@ use guitk::probe::Probe;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 
@@ -773,7 +772,8 @@ struct AppState {
     /// Whether the open picker is saving rather than opening.
     picker_saves: bool,
     store: ClipboardStore,
-    search_query: String,
+    /// The search box: what the list is filtered by, and its caret.
+    search_query: LineBox,
     type_filter: Option<ClipType>,
     /// Indices into the filtered result set.
     filtered_ids: Vec<u64>,
@@ -787,12 +787,12 @@ struct AppState {
     active_tab: ActiveTab,
     /// Current simulated time (seconds).
     now: u64,
-    /// Tag being added via the tag editor.
-    tag_input: String,
-    /// Template name input.
-    template_name_input: String,
-    /// Template body input.
-    template_body_input: String,
+    /// The tag box: a tag being added.
+    tag_input: LineBox,
+    /// The template's name box.
+    template_name_input: LineBox,
+    /// The template's body box.
+    template_body_input: LineBox,
     /// Template placeholder values (key, value).
     template_vars: Vec<(String, String)>,
     /// Currently selected template index.
@@ -801,14 +801,6 @@ struct AppState {
     /// Whether the shortcut card is up.
     show_help: bool,
     focus: Option<Field>,
-    /// The editor of the box with the keyboard -- its caret and selection
-    /// over that box's text -- reloaded when the keyboard moved to another
-    /// box or the text changed under it.
-    editor: TextInput,
-    /// Which box `editor` holds.
-    editor_for: Option<Field>,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
     /// The line the toolbar writes: what the last button did, or why it
     /// refused. A button that silently does nothing is indistinguishable from
     /// a button that is broken.
@@ -861,7 +853,7 @@ impl AppState {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             hover: None,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
-            search_query: String::new(),
+            search_query: Field::Search.empty_box(),
             type_filter: None,
             filtered_ids: Vec::new(),
             selected_id: None,
@@ -870,16 +862,13 @@ impl AppState {
             scroll_offset: 0,
             active_tab: ActiveTab::History,
             now: 1000,
-            tag_input: String::new(),
-            template_name_input: String::new(),
-            template_body_input: String::new(),
+            tag_input: Field::Tag.empty_box(),
+            template_name_input: Field::TemplateName.empty_box(),
+            template_body_input: Field::TemplateBody.empty_box(),
             template_vars: Vec::new(),
             selected_template: None,
             show_help: false,
             focus: None,
-            editor: textline::field_holding("", FIELD_CAPACITY),
-            editor_for: None,
-            clipboard: String::new(),
             status: String::new(),
             window_size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             tick_carry_ms: 0,
@@ -896,7 +885,7 @@ impl AppState {
     fn refresh_filter(&mut self) {
         let mut ids = self
             .store
-            .search_filtered(&self.search_query, self.type_filter);
+            .search_filtered(self.search_query.text(), self.type_filter);
         if let Some(tag) = &self.tag_filter {
             let tagged: HashSet<u64> = self.store.filter_by_tag(tag).into_iter().collect();
             ids.retain(|id| tagged.contains(id));
@@ -976,7 +965,7 @@ impl AppState {
     /// can read, which is the difference between a button that refused and a
     /// button that is broken.
     fn add_tag_to_selected(&mut self) -> Option<String> {
-        let tag = self.tag_input.trim().to_string();
+        let tag = self.tag_input.text().trim().to_string();
         if tag.is_empty() {
             return None;
         }
@@ -1003,8 +992,8 @@ impl AppState {
     /// and a user who has just lost a body they spent five minutes on deserves
     /// to be told which of the two happened.
     fn save_template(&mut self) -> Result<TemplateSaved, &'static str> {
-        let name = self.template_name_input.trim().to_string();
-        let body = self.template_body_input.trim().to_string();
+        let name = self.template_name_input.text().trim().to_string();
+        let body = self.template_body_input.text().trim().to_string();
         if name.is_empty() {
             return Err("a template needs a name");
         }
@@ -1224,6 +1213,11 @@ enum Field {
 }
 
 impl Field {
+    /// An empty box for this field, at its size.
+    fn empty_box(self) -> LineBox {
+        LineBox::new(FIELD_CAPACITY, self.text_size())
+    }
+
     /// The size the field's text is drawn at, which its caret keys and a
     /// press measure against as well.
     fn text_size(self) -> f32 {
@@ -1361,13 +1355,12 @@ impl FieldLook {
     }
 }
 
-/// A text box's text as it is drawn: what it holds, where its caret and
-/// selection are, and what it says while it is empty.
+/// A text box's text as it is drawn: the box -- what it holds, and where
+/// its caret and selection are -- and what it says while it is empty.
 #[derive(Clone, Copy)]
 struct BoxText<'a> {
     field: Field,
-    value: &'a str,
-    caret: (TextCursor, Option<usize>),
+    line_box: &'a LineBox,
     placeholder: &'a str,
 }
 
@@ -1379,56 +1372,23 @@ struct BoxText<'a> {
 /// letters being typed.
 fn draw_box_text(frame: &mut Frame, pal: &Palette, rect: Rect, focused: bool, text: BoxText<'_>) {
     let area = text.field.text_area(rect);
-    let size = text.field.text_size();
     let mut tree = RenderTree::new();
-    if text.value.is_empty() {
-        tree.push(RenderCommand::Text {
+    text.line_box.draw(
+        &mut tree,
+        &LineLook {
             x: area.x,
             y: area.y,
-            text: text.placeholder.to_string(),
-            color: pal.subtext0,
-            font_size: size,
-            font_weight: FontWeightHint::Regular,
-            max_width: Some(area.w),
-            overflow: TextOverflow::Ellipsis,
-        });
-        if focused {
-            textedit::push_caret(
-                &mut tree,
-                area.x,
-                area.y,
-                area.h,
-                pal.text,
-                textedit::CARET_WIDTH,
-            );
-        }
-    } else {
-        // A box without the keyboard reads from its start.
-        let (cursor, selection_anchor) = if focused {
-            text.caret
-        } else {
-            (TextCursor::default(), None)
-        };
-        textedit::draw(
-            &mut tree,
-            &textedit::SingleLine {
-                text: text.value,
-                cursor,
-                selection_anchor,
-                focused,
-                x: area.x,
-                y: area.y,
-                width: area.w,
-                line_height: area.h,
-                font_size: size,
-                weight: FontWeightHint::Regular,
-                color: pal.text,
-                selection_bg: pal.accent,
-                selection_fg: pal.crust,
-                caret_width: textedit::CARET_WIDTH,
-            },
-        );
-    }
+            width: area.w,
+            line_height: area.h,
+            focused,
+            placeholder: text.placeholder,
+            color: pal.text,
+            placeholder_color: pal.subtext0,
+            selection_bg: pal.accent,
+            selection_fg: pal.crust,
+            caret_width: textedit::CARET_WIDTH,
+        },
+    );
     frame.extend(tree.commands);
 }
 
@@ -2469,25 +2429,17 @@ impl AppState {
             Target::TemplateBody => Some(Field::TemplateBody),
             _ => None,
         };
-        let drawn = pressed.map(|field| {
-            if self.focus == Some(field) {
-                self.box_caret(field).0
-            } else {
-                TextCursor::default()
-            }
-        });
+        let had_the_keyboard = pressed.is_some_and(|field| self.focus == Some(field));
         let action = self.activate(target);
-        if let (Some(field), Some(drawn), Some(rect)) =
-            (pressed, drawn, frame.rect_of(|t| *t == target))
-        {
-            self.press_box(field, rect, drawn, x);
+        if let (Some(field), Some(rect)) = (pressed, frame.rect_of(|t| *t == target)) {
+            self.press_box(field, rect, had_the_keyboard, x);
             return Action::Redraw;
         }
         action
     }
 
-    /// What `field`'s box holds.
-    fn box_value(&self, field: Field) -> &str {
+    /// `field`'s box.
+    fn line_box(&self, field: Field) -> &LineBox {
         match field {
             Field::Search => &self.search_query,
             Field::Tag => &self.tag_input,
@@ -2496,52 +2448,32 @@ impl AppState {
         }
     }
 
+    /// `field`'s box, to change.
+    fn line_box_mut(&mut self, field: Field) -> &mut LineBox {
+        match field {
+            Field::Search => &mut self.search_query,
+            Field::Tag => &mut self.tag_input,
+            Field::TemplateName => &mut self.template_name_input,
+            Field::TemplateBody => &mut self.template_body_input,
+        }
+    }
+
     /// `field`'s text as it is drawn, saying `placeholder` while empty.
     fn box_text<'a>(&'a self, field: Field, placeholder: &'a str) -> BoxText<'a> {
         BoxText {
             field,
-            value: self.box_value(field),
-            caret: self.box_caret(field),
+            line_box: self.line_box(field),
             placeholder,
         }
     }
 
-    /// Load `field`'s box into the editor unless it holds it already, the
-    /// caret after its text.
-    fn load_editor(&mut self, field: Field) {
-        if self.editor_for != Some(field) || self.editor.text() != self.box_value(field) {
-            let held = self.box_value(field).to_owned();
-            self.editor.set_text(&held);
-            self.editor_for = Some(field);
-        }
-    }
-
-    /// Where `field`'s caret and selection anchor are: the editor's while it
-    /// holds the box's text, after the text and none otherwise.
-    fn box_caret(&self, field: Field) -> (TextCursor, Option<usize>) {
-        let held = self.box_value(field);
-        if self.editor_for == Some(field) && self.editor.text() == held {
-            (self.editor.cursor(), self.editor.selection_anchor())
-        } else {
-            (TextCursor::from(held.len()), None)
-        }
-    }
-
-    /// A press at `x` in `field`'s box at `rect`, its caret drawn at
-    /// `drawn`: the caret under the pointer.
-    fn press_box(&mut self, field: Field, rect: Rect, drawn: TextCursor, x: f32) {
-        self.load_editor(field);
+    /// A press at `x` in `field`'s box at `rect`: the caret under the
+    /// pointer, measured against the box as it was drawn -- with the
+    /// keyboard (`had_the_keyboard`) or without.
+    fn press_box(&mut self, field: Field, rect: Rect, had_the_keyboard: bool, x: f32) {
         let area = field.text_area(rect);
-        let cursor = textedit::cursor_at_click(
-            self.box_value(field),
-            drawn,
-            area.w,
-            field.text_size(),
-            FontWeightHint::Regular,
-            x - area.x,
-        );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
+        self.line_box_mut(field)
+            .press(x - area.x, area.w, had_the_keyboard);
     }
 
     /// A key for `field`'s box, which has the keyboard: the caret keys,
@@ -2551,41 +2483,15 @@ impl AppState {
     /// changed the text, the caret or the selection. A search changed
     /// filters the list again from its top.
     fn box_key(&mut self, field: Field, key: &KeyEvent) -> Option<bool> {
-        self.load_editor(field);
-        let editor = &self.editor;
-        let before = (
-            editor.text().to_owned(),
-            editor.cursor(),
-            editor.selection_anchor(),
-        );
-        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, field.text_size());
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
+        let edit = self.line_box_mut(field).key(key);
         if !edit.handled {
             return None;
         }
-        if self.editor.text() != self.box_value(field) {
-            let typed = self.editor.text().to_owned();
-            match field {
-                Field::Search => self.search_query = typed,
-                Field::Tag => self.tag_input = typed,
-                Field::TemplateName => self.template_name_input = typed,
-                Field::TemplateBody => self.template_body_input = typed,
-            }
-            if field == Field::Search {
-                self.scroll_offset = 0;
-                self.refresh_filter();
-            }
+        if edit.changed && field == Field::Search {
+            self.scroll_offset = 0;
+            self.refresh_filter();
         }
-        let editor = &self.editor;
-        Some(
-            (
-                editor.text().to_owned(),
-                editor.cursor(),
-                editor.selection_anchor(),
-            ) != before,
-        )
+        Some(edit.changed || edit.moved)
     }
 
     /// Do whatever the named control does.
@@ -2670,7 +2576,7 @@ impl AppState {
                 if self.selected_id.is_none() {
                     return self.refuse("select an entry to tag first");
                 }
-                if self.tag_input.trim().is_empty() {
+                if self.tag_input.text().trim().is_empty() {
                     return self.refuse("type a tag before adding it");
                 }
                 match self.add_tag_to_selected() {
@@ -3480,13 +3386,14 @@ mod tests {
         app.handle_event(&key(Key::W, "w", Modifiers::super_key()), size);
         app.handle_event(&key(Key::S, "ś", altgr), size);
         assert_eq!(
-            app.search_query, "ś",
+            app.search_query.text(),
+            "ś",
             "the field typed a command or lost AltGr's ś"
         );
         app.handle_event(&key(Key::Enter, "", Modifiers::alt()), size);
         assert_eq!(app.focus, Some(Field::Search), "Alt+Enter left the field");
         app.handle_event(&key(Key::S, "s", Modifiers::ctrl()), size);
-        assert_eq!(app.search_query, "ś", "Ctrl+S was typed");
+        assert_eq!(app.search_query.text(), "ś", "Ctrl+S was typed");
         assert!(app.picker.is_open(), "Ctrl+S in a field did not save");
     }
 
@@ -4555,7 +4462,7 @@ mod tests {
         state
             .store
             .add("beta".to_string(), ClipType::PlainText, 0, String::new());
-        state.search_query = "alpha".to_string();
+        state.search_query.set_text("alpha");
         state.refresh_filter();
         assert_eq!(state.filtered_ids.len(), 1);
     }
@@ -4640,7 +4547,7 @@ mod tests {
             .store
             .add("t".to_string(), ClipType::PlainText, 0, String::new());
         state.selected_id = Some(id);
-        state.tag_input = "work".to_string();
+        state.tag_input.set_text("work");
         assert_eq!(state.add_tag_to_selected().as_deref(), Some("work"));
         assert!(state.tag_input.is_empty());
         assert_eq!(state.store.get(id).map(|e| e.tags.len()), Some(1));
@@ -4653,7 +4560,7 @@ mod tests {
             .store
             .add("t".to_string(), ClipType::PlainText, 0, String::new());
         state.selected_id = Some(id);
-        state.tag_input = "   ".to_string();
+        state.tag_input.set_text("   ");
         assert_eq!(state.add_tag_to_selected(), None);
         assert_eq!(state.store.get(id).map(|e| e.tags.len()), Some(0));
     }
@@ -4673,8 +4580,8 @@ mod tests {
     #[test]
     fn test_app_state_save_template() {
         let mut state = AppState::new();
-        state.template_name_input = "greet".to_string();
-        state.template_body_input = "Hi {name}".to_string();
+        state.template_name_input.set_text("greet");
+        state.template_body_input.set_text("Hi {name}");
         assert_eq!(
             state.save_template(),
             Ok(TemplateSaved::Created("greet".to_string()))
@@ -4687,8 +4594,8 @@ mod tests {
     #[test]
     fn test_app_state_save_empty_template_ignored() {
         let mut state = AppState::new();
-        state.template_name_input = String::new();
-        state.template_body_input = "body".to_string();
+        state.template_name_input.clear();
+        state.template_body_input.set_text("body");
         assert_eq!(state.save_template(), Err("a template needs a name"));
         assert!(state.store.templates.is_empty());
     }
@@ -5612,7 +5519,7 @@ mod tests {
         let mut state = with_entries(3);
         click(&mut state, Target::TagField);
         type_str(&mut state, "d");
-        assert_eq!(state.tag_input, "d");
+        assert_eq!(state.tag_input.text(), "d");
         assert_eq!(state.store.total_entries(), 3, "nothing was deleted");
     }
 
@@ -5814,14 +5721,14 @@ mod tests {
         type_str(&mut state, "clp");
         key(&mut state, &press(Key::Left));
         type_str(&mut state, "i");
-        assert_eq!(state.search_query, "clip", "the caret did not move");
+        assert_eq!(state.search_query.text(), "clip", "the caret did not move");
         assert_eq!(state.filtered_ids.len(), 3, "the edit was not filtered by");
         let rect = rect_of(&state, Target::SearchBox).expect("the search box");
         let area = Field::Search.text_area(rect);
         let at = area.x
             + text::caret_x(
                 "clip",
-                TextCursor::from(3),
+                guitk::text::TextCursor::from(3),
                 Field::Search.text_size(),
                 FontWeightHint::Regular,
             );
@@ -5834,7 +5741,7 @@ mod tests {
 
         key(&mut state, &press(Key::Home));
         key(&mut state, &press(Key::Delete));
-        assert_eq!(state.search_query, "lip", "Delete at the caret");
+        assert_eq!(state.search_query.text(), "lip", "Delete at the caret");
         type_str(&mut state, "c");
         key(&mut state, &guitk::probe::ctrl(Key::A));
         assert!(
@@ -5847,9 +5754,9 @@ mod tests {
         );
         key(&mut state, &guitk::probe::ctrl(Key::C));
         key(&mut state, &guitk::probe::ctrl(Key::X));
-        assert_eq!(state.search_query, "", "Ctrl+A and Ctrl+X");
+        assert_eq!(state.search_query.text(), "", "Ctrl+A and Ctrl+X");
         key(&mut state, &guitk::probe::ctrl(Key::V));
-        assert_eq!(state.search_query, "clip", "Ctrl+C or Ctrl+V");
+        assert_eq!(state.search_query.text(), "clip", "Ctrl+C or Ctrl+V");
 
         // A press at the start of the search puts the caret there, and one
         // past its end at its end.
@@ -5859,7 +5766,8 @@ mod tests {
         state.click_at(area.right() - 1.0, mid, MouseButton::Left, SIZE);
         type_str(&mut state, ">");
         assert_eq!(
-            state.search_query, "<clip>",
+            state.search_query.text(),
+            "<clip>",
             "a press did not put the caret where it landed"
         );
     }
@@ -5883,7 +5791,7 @@ mod tests {
             SIZE,
         );
         type_str(&mut state, ">");
-        assert_eq!(state.template_name_input, "Reply>");
+        assert_eq!(state.template_name_input.text(), "Reply>");
         click(&mut state, Target::TemplateBody);
         let body = rect_of(&state, Target::TemplateBody).expect("the body box");
         assert_eq!(
@@ -5894,7 +5802,7 @@ mod tests {
         type_str(&mut state, "Dear");
         key(&mut state, &press(Key::Home));
         type_str(&mut state, "<");
-        assert_eq!(state.template_body_input, "<Dear");
+        assert_eq!(state.template_body_input.text(), "<Dear");
         assert_eq!(carets_in(&state, body).len(), 1, "no caret in the body");
     }
 
@@ -5943,16 +5851,17 @@ mod tests {
         click(&mut state, Target::SearchBox);
         type_str(&mut state, "ab");
         key(&mut state, &press(Key::Home));
-        state.tag_input = String::from("ab");
+        state.tag_input.set_text("ab");
         key(&mut state, &press(Key::Tab));
         assert_eq!(state.focus, Some(Field::Tag));
         type_str(&mut state, "!");
         assert_eq!(
-            state.tag_input, "ab!",
+            state.tag_input.text(),
+            "ab!",
             "the tag was typed at the search's caret"
         );
-        state.tag_input = String::from("cd");
+        state.tag_input.set_text("cd");
         type_str(&mut state, "?");
-        assert_eq!(state.tag_input, "cd?", "the key edited another text");
+        assert_eq!(state.tag_input.text(), "cd?", "the key edited another text");
     }
 }

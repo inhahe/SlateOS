@@ -127,6 +127,14 @@ impl SearchBox {
         self.input.select_all();
     }
 
+    /// The caret after the search, nothing selected: where a box that takes
+    /// the keyboard by a key or a tab, rather than by a press, puts it.
+    pub fn caret_to_end(&mut self) {
+        self.input.set_selection_anchor(None);
+        self.input
+            .set_cursor(TextCursor::from(self.input.text().len()));
+    }
+
     /// Apply `key` to the box -- on the program's clipboard, as its menu is
     /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
     /// and whether the search changed.
@@ -530,6 +538,24 @@ mod tests {
                 .any(|c| matches!(c, RenderCommand::Line { .. })),
             "no caret"
         );
+    }
+
+    #[test]
+    fn caret_to_end_types_after_the_search_and_over_no_selection() {
+        let mut search = SearchBox::new(64, 13.0);
+        typed(&mut search, "dog");
+        search.key(&press(Key::Home, ""));
+        search.caret_to_end();
+        typed(&mut search, "s");
+        assert_eq!(search.text(), "dogs", "the caret stayed at the start");
+        search.select_all();
+        search.caret_to_end();
+        assert!(
+            search.input().selection_anchor().is_none(),
+            "the selection stayed"
+        );
+        typed(&mut search, "!");
+        assert_eq!(search.text(), "dogs!");
     }
 
     #[test]

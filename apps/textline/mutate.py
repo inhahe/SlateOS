@@ -267,6 +267,7 @@ S_FOCUSED = "a_box_with_the_keyboard_draws_its_caret_on_the_line"
 S_UNFOCUSED = "a_box_without_the_keyboard_draws_the_search_or_its_placeholder"
 S_EMPTY_FOCUSED = "an_empty_box_with_the_keyboard_says_what_it_is_for_under_its_caret"
 S_SELECT_ALL = "select_all_types_over_the_search"
+S_TO_END = "caret_to_end_types_after_the_search_and_over_no_selection"
 
 SEARCH_MUTATIONS = [
     (
@@ -370,6 +371,18 @@ SEARCH_MUTATIONS = [
         "        overflow: TextOverflow::Ellipsis,\n",
         "        overflow: TextOverflow::Clip,\n",
         [S_UNFOCUSED],
+    ),
+    (
+        "caret_to_end leaves the caret where it was",
+        "        self.input\n            .set_cursor(TextCursor::from(self.input.text().len()));\n",
+        "",
+        [S_TO_END],
+    ),
+    (
+        "caret_to_end keeps the selection",
+        "    pub fn caret_to_end(&mut self) {\n        self.input.set_selection_anchor(None);\n",
+        "    pub fn caret_to_end(&mut self) {\n",
+        [S_TO_END],
     ),
     (
         "select_all selects nothing",

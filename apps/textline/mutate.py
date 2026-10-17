@@ -277,6 +277,24 @@ LINE_MUTATIONS = [
         [S_CAPACITY, "a_box_made_holding_text_types_after_it"],
     ),
     (
+        "an edit the check refuses is kept",
+        "            self.input = kept;\n",
+        "",
+        ["an_edit_the_check_refuses_is_undone"],
+    ),
+    (
+        "every key is checked, a caret's too",
+        "        if edit.changed && !check(self.input.text()) {\n",
+        "        if !check(self.input.text()) {\n",
+        ["an_edit_the_check_refuses_is_undone"],
+    ),
+    (
+        "a refused edit says it changed the text",
+        "                changed: false,\n                moved: false,\n                copied: edit.copied,\n",
+        "                changed: true,\n                moved: false,\n                copied: edit.copied,\n",
+        ["an_edit_the_check_refuses_is_undone"],
+    ),
+    (
         "a box made holding text holds none",
         '            input: crate::field_holding(text, capacity),\n',
         '            input: crate::field_holding("", capacity),\n',

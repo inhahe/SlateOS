@@ -176,6 +176,26 @@ impl LineBox {
         }
     }
 
+    /// [`key`](Self::key), with an edit `check` refuses undone: `check` is
+    /// given the text the key would leave, and answers whether to keep it. A
+    /// key refused is still the box's (`handled`) and changes nothing, its
+    /// caret included -- a letter typed into a number's box, a paste of what
+    /// is not a number. A key that changes no text is not checked.
+    pub fn key_checked(&mut self, key: &KeyEvent, check: impl FnOnce(&str) -> bool) -> LineKey {
+        let kept = self.input.clone();
+        let edit = self.key(key);
+        if edit.changed && !check(self.input.text()) {
+            self.input = kept;
+            return LineKey {
+                handled: true,
+                changed: false,
+                moved: false,
+                copied: edit.copied,
+            };
+        }
+        edit
+    }
+
     /// A press `dx` pixels right of the text's left edge, in a box whose text
     /// is `width` wide: the caret goes where it landed, against the text as
     /// it was drawn -- scrolled under the caret if the box had the keyboard
@@ -456,6 +476,41 @@ mod tests {
             }
         );
         assert_eq!(line.text(), "abc");
+    }
+
+    /// **An edit the check refuses is undone**, caret and all; one it keeps
+    /// is made; and a key that changes no text is not asked about.
+    #[test]
+    fn an_edit_the_check_refuses_is_undone() {
+        let digits = |t: &str| t.chars().all(|c| c.is_ascii_digit());
+        let mut line = LineBox::holding("12", 8, 13.0);
+        line.key(&press(Key::Home, ""));
+        assert_eq!(
+            line.key_checked(&press(Key::Unknown(0), "x"), digits),
+            LineKey {
+                handled: true,
+                changed: false,
+                moved: false,
+                copied: false,
+            },
+            "a refused letter was not the box's, or said it changed"
+        );
+        assert_eq!(line.text(), "12", "the refused letter was typed");
+        assert_eq!(
+            line.input().cursor().byte(),
+            0,
+            "the caret moved with the refused edit"
+        );
+        assert!(
+            line.key_checked(&press(Key::Unknown(0), "3"), digits)
+                .changed,
+            "a digit was refused"
+        );
+        assert_eq!(line.text(), "312");
+        assert!(
+            line.key_checked(&press(Key::End, ""), |_| false).moved,
+            "a key that changes no text was refused"
+        );
     }
 
     /// **A box made holding text types after it, up to its capacity.**

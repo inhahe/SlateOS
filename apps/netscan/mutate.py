@@ -225,19 +225,17 @@ MAIN += [
     ),
     (
         "a key typed into a box goes nowhere",
-        "            *self.field_text_mut(field) = typed;\n",
-        "            let _ = typed;\n",
+        "        let edit = self.field_box_mut(field).key(key);\n",
+        "        let edit = textline::LineKey {\n"
+        "            handled: true,\n"
+        "            ..textline::LineKey::default()\n"
+        "        };\n",
         [BOXES],
     ),
-    (
-        "a box's editor is not reloaded from the box",
-        "        if self.editor.text() != self.field_text(field) {\n"
-        "            let text = self.field_text(field).to_owned();\n"
-        "            self.editor.set_text(&text);\n"
-        "        }\n",
-        "        let _ = field;\n",
-        [CARET],
-    ),
+    # The boxes are textline LineBoxes since 2026-10-17, one each: their
+    # clipboard (the program's), their caret and selection drawn, and the
+    # text each edits being its own are LineBox's, which textline's own
+    # table covers.
     (
         "a press puts the caret at the start",
         "            x - rect.x - FIELD_TEXT_INSET,\n",
@@ -245,15 +243,9 @@ MAIN += [
         [CARET_AT],
     ),
     (
-        "an empty box with the keyboard has no caret",
-        "            if focused {\n                textedit::push_caret(",
-        "            if false {\n                textedit::push_caret(",
-        [CARET_AT],
-    ),
-    (
         "an empty box does not say what it is for",
-        "                text: field.placeholder().to_owned(),\n",
-        "                text: String::new(),\n",
+        "                placeholder: field.placeholder(),\n",
+        "                placeholder: \"\",\n",
         [CARET_AT],
     ),
     (

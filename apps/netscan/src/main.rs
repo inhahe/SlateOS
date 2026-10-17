@@ -53,13 +53,12 @@ use guitk::scroll_window;
 use guitk::style::CornerRadii;
 use guitk::table::{Column, Fit, Table};
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
+use textline::{LineBox, LineLook};
 
 use std::collections::VecDeque;
 
@@ -1467,8 +1466,10 @@ impl DiscoveryMethod {
 /// Full scan configuration.
 #[derive(Clone, Debug)]
 pub struct ScanConfig {
-    pub target_input: String,
-    pub port_input: String,
+    /// The target box: a host, a range or a network to scan.
+    pub target_input: LineBox,
+    /// The ports box, for a custom profile.
+    pub port_input: LineBox,
     pub profile: ScanProfile,
     pub discovery_method: DiscoveryMethod,
     pub timeout_ms: u32,
@@ -1482,8 +1483,8 @@ impl Default for ScanConfig {
             // Empty rather than someone's typical home network: the field's
             // hint shows an example, and `NetScanApp::new` fills in this
             // machine's own network when it can read one.
-            target_input: String::new(),
-            port_input: String::new(),
+            target_input: LineBox::new(FIELD_CAPACITY, FIELD_TEXT_SIZE),
+            port_input: LineBox::new(FIELD_CAPACITY, FIELD_TEXT_SIZE),
             profile: ScanProfile::Quick,
             // The one this program can do: ping and ARP need raw packets.
             discovery_method: DiscoveryMethod::TcpConnect,
@@ -2164,7 +2165,7 @@ pub struct NetScanApp {
     /// It was a pixel offset, which is what let the table be scrolled off the
     /// top of its own panel with no way back down.
     pub results_scroll: usize,
-    pub traceroute_target: String,
+    pub traceroute_target: LineBox,
     /// Why there is no traceroute, when the user has asked for one.
     ///
     /// Separate from `traceroute_result` because `None` on its own means "not
@@ -2175,11 +2176,11 @@ pub struct NetScanApp {
     pub scan_note: Option<String>,
     pub traceroute_note: Option<String>,
     pub traceroute_result: Option<Vec<TracerouteHop>>,
-    pub whois_target: String,
+    pub whois_target: LineBox,
     /// Why there is no WHOIS answer, when the user has asked for one.
     pub whois_note: Option<String>,
     pub whois_result: Option<WhoisInfo>,
-    pub wol_target_mac: String,
+    pub wol_target_mac: LineBox,
     /// What the last Wake-on-LAN press did.
     ///
     /// Replaces `wol_sent: bool`, which was set to `true` without anything
@@ -2214,11 +2215,6 @@ pub struct NetScanApp {
     /// Replaces `config_field_focus`, a number that nothing read: see
     /// [`Field`] for what that cost.
     focus: Option<Field>,
-    /// The focused box's editor -- its caret and selection over the box's
-    /// text -- reloaded whenever the keyboard moves to another box.
-    editor: TextInput,
-    /// What the boxes' Ctrl+C and Ctrl+X took, for their Ctrl+V.
-    clipboard: String,
     /// Whether the list of keys is up.
     show_help: bool,
     /// How wide the keyboard's mark around a box is: the user's setting.
@@ -2267,13 +2263,13 @@ impl Default for NetScanApp {
             window_height: WINDOW_HEIGHT,
             results_scroll: 0,
             scan_note: None,
-            traceroute_target: String::from("8.8.8.8"),
+            traceroute_target: LineBox::holding("8.8.8.8", FIELD_CAPACITY, FIELD_TEXT_SIZE),
             traceroute_note: None,
             traceroute_result: None,
-            whois_target: String::from("8.8.8.8"),
+            whois_target: LineBox::holding("8.8.8.8", FIELD_CAPACITY, FIELD_TEXT_SIZE),
             whois_note: None,
             whois_result: None,
-            wol_target_mac: String::new(),
+            wol_target_mac: LineBox::new(FIELD_CAPACITY, FIELD_TEXT_SIZE),
             wol_note: None,
             show_export_menu: false,
             history_selected_idx: None,
@@ -2283,8 +2279,6 @@ impl Default for NetScanApp {
             results_wheel: wheel::Accumulator::default(),
             ports_wheel: wheel::Accumulator::default(),
             focus: None,
-            editor: textline::field_holding("", FIELD_CAPACITY),
-            clipboard: String::new(),
             show_help: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             scan: None,
@@ -2313,7 +2307,7 @@ impl NetScanApp {
     fn on(provider: &dyn hwquery::HardwareProvider) -> Self {
         let mut app = Self::default();
         if let Some(net) = machine_subnet(provider) {
-            app.config.target_input = net;
+            app.config.target_input.set_text(&net);
         }
         app
     }
@@ -2329,10 +2323,10 @@ impl NetScanApp {
             self.stop_scan();
             return;
         }
-        let Some(target) = ScanTarget::parse(&self.config.target_input) else {
+        let Some(target) = ScanTarget::parse(self.config.target_input.text()) else {
             self.scan_note = Some(format!(
                 "Not a scannable target: {}",
-                self.config.target_input
+                self.config.target_input.text()
             ));
             return;
         };
@@ -2340,18 +2334,20 @@ impl NetScanApp {
         if hosts.is_empty() {
             self.scan_note = Some(format!(
                 "That range contains no addresses: {}",
-                self.config.target_input
+                self.config.target_input.text()
             ));
             return;
         }
         let ports = match self.config.profile {
-            ScanProfile::Custom => parse_port_spec(&self.config.port_input).unwrap_or_default(),
+            ScanProfile::Custom => {
+                parse_port_spec(self.config.port_input.text()).unwrap_or_default()
+            }
             profile => profile.ports(),
         };
         if ports.is_empty() {
             self.scan_note = Some(format!(
                 "No ports to scan: \"{}\" names none (e.g. 22,80,8000-8100)",
-                self.config.port_input
+                self.config.port_input.text()
             ));
             return;
         }
@@ -2400,7 +2396,7 @@ impl NetScanApp {
         self.results = Some(ScanResult {
             id,
             timestamp: now_stamp(),
-            target_description: self.config.target_input.clone(),
+            target_description: self.config.target_input.text().to_owned(),
             profile: self.config.profile,
             hosts: Vec::new(),
             total_ips_scanned: total_hosts,
@@ -2582,14 +2578,16 @@ impl NetScanApp {
     /// typo rather than being swallowed by the refusal.
     pub fn run_traceroute(&mut self) {
         self.traceroute_result = None;
-        self.traceroute_note = Some(if Ipv4Addr::parse(&self.traceroute_target).is_some() {
-            String::from(
-                "Cannot trace a route: that needs ICMP, which an application cannot send, \
+        self.traceroute_note = Some(
+            if Ipv4Addr::parse(self.traceroute_target.text()).is_some() {
+                String::from(
+                    "Cannot trace a route: that needs ICMP, which an application cannot send, \
                  so no packet was sent",
-            )
-        } else {
-            format!("Not an IPv4 address: {}", self.traceroute_target)
-        });
+                )
+            } else {
+                format!("Not an IPv4 address: {}", self.traceroute_target.text())
+            },
+        );
     }
 
     /// Ask the registries who holds the address typed in: IANA, then the
@@ -2602,8 +2600,8 @@ impl NetScanApp {
     /// address, and is acted on: an abuse report goes to the registry named.
     pub fn run_whois(&mut self) {
         self.whois_result = None;
-        let Some(ip) = Ipv4Addr::parse(&self.whois_target) else {
-            self.whois_note = Some(format!("Not an IPv4 address: {}", self.whois_target));
+        let Some(ip) = Ipv4Addr::parse(self.whois_target.text()) else {
+            self.whois_note = Some(format!("Not an IPv4 address: {}", self.whois_target.text()));
             return;
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2641,7 +2639,7 @@ impl NetScanApp {
             }
         };
         self.whois_pending = None;
-        let ip = Ipv4Addr::parse(&self.whois_target).unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
+        let ip = Ipv4Addr::parse(self.whois_target.text()).unwrap_or(Ipv4Addr::new(0, 0, 0, 0));
         match answer {
             Ok(answer) => {
                 let r = answer.record;
@@ -2670,8 +2668,8 @@ impl NetScanApp {
     /// believed it watched a machine that was never asked to wake, and
     /// concluded the machine was broken.)
     pub fn send_wol(&mut self) {
-        let Some(mac) = parse_mac(&self.wol_target_mac) else {
-            self.wol_note = Some(format!("Not a MAC address: {}", self.wol_target_mac));
+        let Some(mac) = parse_mac(self.wol_target_mac.text()) else {
+            self.wol_note = Some(format!("Not a MAC address: {}", self.wol_target_mac.text()));
             return;
         };
         let packet = build_wol_packet(&mac);
@@ -2836,8 +2834,8 @@ impl NetScanApp {
         })
     }
 
-    /// What `field` holds.
-    fn field_text(&self, field: Field) -> &str {
+    /// `field`'s box.
+    fn field_box(&self, field: Field) -> &LineBox {
         match field {
             Field::Target => &self.config.target_input,
             Field::Ports => &self.config.port_input,
@@ -2847,8 +2845,8 @@ impl NetScanApp {
         }
     }
 
-    /// What `field` holds, to be changed.
-    fn field_text_mut(&mut self, field: Field) -> &mut String {
+    /// `field`'s box, to change.
+    fn field_box_mut(&mut self, field: Field) -> &mut LineBox {
         match field {
             Field::Target => &mut self.config.target_input,
             Field::Ports => &mut self.config.port_input,
@@ -2862,7 +2860,7 @@ impl NetScanApp {
     /// box is red, so the reader knows before pressing anything. An empty box
     /// is not wrong -- it is waiting.
     fn field_is_wrong(&self, field: Field) -> bool {
-        let text = self.field_text(field);
+        let text = self.field_box(field).text();
         !text.trim().is_empty()
             && match field {
                 Field::Target => ScanTarget::parse(text).is_none(),
@@ -2898,8 +2896,7 @@ impl NetScanApp {
     /// Give `field` the keyboard, its caret after what it holds.
     fn focus_field(&mut self, field: Field) {
         self.focus = Some(field);
-        let text = self.field_text(field).to_owned();
-        self.editor.set_text(&text);
+        self.field_box_mut(field).caret_to_end();
     }
 
     /// Tab: the next box on screen, after the last the first -- or, from
@@ -2921,45 +2918,17 @@ impl NetScanApp {
         }
     }
 
-    /// Reload the editor if `field`'s text changed under it, caret at the
-    /// end.
-    fn sync_editor(&mut self, field: Field) {
-        if self.editor.text() != self.field_text(field) {
-            let text = self.field_text(field).to_owned();
-            self.editor.set_text(&text);
-        }
-    }
-
-    /// Where `field`'s caret is drawn: the editor's while the box has the
-    /// keyboard (its end, if the text changed under the editor), its start
-    /// otherwise. One answer for the drawing and for a press.
-    fn field_cursor(&self, field: Field) -> TextCursor {
-        if self.focus != Some(field) {
-            TextCursor::default()
-        } else if self.editor.text() == self.field_text(field) {
-            self.editor.cursor()
-        } else {
-            TextCursor::from(self.field_text(field).len())
-        }
-    }
-
     /// A press in `field`, drawn at `rect`, at `x`: it takes the keyboard,
     /// with the caret under the pointer, measured against the box as it was
-    /// drawn.
+    /// drawn -- with the keyboard or without.
     fn press_field(&mut self, field: Field, rect: Rect, x: f32) {
-        let drawn = self.field_cursor(field);
+        let had_the_keyboard = self.focus == Some(field);
         self.focus = Some(field);
-        self.sync_editor(field);
-        let cursor = textedit::cursor_at_click(
-            self.field_text(field),
-            drawn,
-            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
-            FIELD_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.field_box_mut(field).press(
             x - rect.x - FIELD_TEXT_INSET,
+            rect.w - 2.0 * FIELD_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.editor.set_selection_anchor(None);
-        self.editor.set_cursor(cursor);
     }
 
     /// A key for `field`, which has the keyboard.
@@ -2985,15 +2954,7 @@ impl NetScanApp {
                 _ => {}
             }
         }
-        self.sync_editor(field);
-        let edit = textline::apply_key(&mut self.editor, key, &self.clipboard, FIELD_TEXT_SIZE);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        if self.editor.text() != self.field_text(field) {
-            let typed = self.editor.text().to_owned();
-            *self.field_text_mut(field) = typed;
-        }
+        let edit = self.field_box_mut(field).key(key);
         if edit.handled {
             EventResult::Consumed
         } else {
@@ -3552,13 +3513,13 @@ impl NetScanApp {
         });
 
         // Bandwidth estimation
-        if let Some(target) = ScanTarget::parse(&self.config.target_input) {
+        if let Some(target) = ScanTarget::parse(self.config.target_input.text()) {
             let host_count = target.all_ips().len() as u32;
             let port_count = match self.config.profile {
                 ScanProfile::Quick => 20u32,
                 ScanProfile::Full => 65535,
                 ScanProfile::Stealth => 20,
-                ScanProfile::Custom => parse_port_spec(&self.config.port_input)
+                ScanProfile::Custom => parse_port_spec(self.config.port_input.text())
                     .map(|p| p.len() as u32)
                     .unwrap_or(20),
             };
@@ -3650,47 +3611,17 @@ impl NetScanApp {
             self.focus_ring_width,
         );
         let line = text::line_height(FIELD_TEXT_SIZE, FontWeightHint::Regular);
-        let (x, y, width) = (
-            rect.x + FIELD_TEXT_INSET,
-            rect.y + (rect.h - line) / 2.0,
-            (rect.w - 2.0 * FIELD_TEXT_INSET).max(0.0),
-        );
-        let value = self.field_text(field);
-        if value.is_empty() {
-            tree.push(RenderCommand::Text {
-                x,
-                y,
-                text: field.placeholder().to_owned(),
-                color: self.palette.subtext0,
-                font_size: FIELD_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(width),
-                overflow: TextOverflow::Ellipsis,
-            });
-            if focused {
-                textedit::push_caret(tree, x, y, line, self.palette.text, textedit::CARET_WIDTH);
-            }
-            return;
-        }
-        let editing = self.focus == Some(field) && self.editor.text() == value;
-        textedit::draw(
+        self.field_box(field).draw(
             tree,
-            &textedit::SingleLine {
-                text: value,
-                cursor: self.field_cursor(field),
-                selection_anchor: if editing {
-                    self.editor.selection_anchor()
-                } else {
-                    None
-                },
-                focused,
-                x,
-                y,
-                width,
+            &LineLook {
+                x: rect.x + FIELD_TEXT_INSET,
+                y: rect.y + (rect.h - line) / 2.0,
+                width: rect.w - 2.0 * FIELD_TEXT_INSET,
                 line_height: line,
-                font_size: FIELD_TEXT_SIZE,
-                weight: FontWeightHint::Regular,
+                focused,
+                placeholder: field.placeholder(),
                 color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
                 selection_bg: self.palette.accent,
                 selection_fg: self.palette.crust,
                 caret_width: textedit::CARET_WIDTH,
@@ -5271,7 +5202,7 @@ impl App for NetScanApp {
             Some(result) => format!(
                 "{} hosts up on {} - Network Scanner",
                 result.hosts.iter().filter(|h| h.is_up).count(),
-                self.config.target_input
+                self.config.target_input.text()
             ),
             None => "Network Scanner".to_string(),
         }
@@ -5501,7 +5432,7 @@ mod tests {
         );
         assert_eq!(machine_subnet(&provider()).as_deref(), Some("10.0.2.0/24"));
         assert_eq!(
-            NetScanApp::on(&provider()).config.target_input,
+            NetScanApp::on(&provider()).config.target_input.text(),
             "10.0.2.0/24",
             "the window did not open on the machine's network"
         );
@@ -5514,7 +5445,7 @@ mod tests {
             "an unconfigured card named a network"
         );
         // And with nothing readable, the field is empty -- not a guess.
-        assert_eq!(NetScanApp::new().config.target_input, "");
+        assert_eq!(NetScanApp::new().config.target_input.text(), "");
     }
     use std::net::SocketAddrV4;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -5568,7 +5499,7 @@ mod tests {
     fn scanned(target: &str) -> NetScanApp {
         let mut app = NetScanApp::new();
         app.prober = lan;
-        app.config.target_input = String::from(target);
+        app.config.target_input.set_text(target);
         app.start_scan();
         finish(&mut app);
         app
@@ -6530,7 +6461,7 @@ mod tests {
     #[test]
     fn test_app_start_scan() {
         let mut app = NetScanApp::new();
-        app.config.target_input = String::from("10.1.1.0/24");
+        app.config.target_input.set_text("10.1.1.0/24");
         app.start_scan();
         assert!(app.is_scanning, "Scan did not start");
         finish(&mut app);
@@ -6585,7 +6516,7 @@ mod tests {
     #[test]
     fn a_bad_target_is_reported_as_a_bad_target() {
         let mut app = NetScanApp::new();
-        app.config.target_input = String::from("not an address");
+        app.config.target_input.set_text("not an address");
 
         app.start_scan();
 
@@ -6599,7 +6530,7 @@ mod tests {
     #[test]
     fn test_app_run_traceroute() {
         let mut app = NetScanApp::new();
-        app.traceroute_target = "8.8.8.8".to_string();
+        app.traceroute_target.set_text("8.8.8.8");
         app.run_traceroute();
         // Was `is_some()`: four to twelve invented hops with invented
         // latencies, seeded from the destination so the same target always
@@ -6622,7 +6553,7 @@ mod tests {
     #[test]
     fn a_malformed_traceroute_target_is_named_as_such() {
         let mut app = NetScanApp::new();
-        app.traceroute_target = "8.8.8".to_string();
+        app.traceroute_target.set_text("8.8.8");
         app.run_traceroute();
         let note = app.traceroute_note.expect("nothing said anything");
         assert!(note.contains("Not an IPv4 address"), "{note}");
@@ -6659,7 +6590,7 @@ mod tests {
         };
         let mut app = NetScanApp::new();
         app.wol_destination = at;
-        app.wol_target_mac = "AA:BB:CC:DD:EE:FF".to_string();
+        app.wol_target_mac.set_text("AA:BB:CC:DD:EE:FF");
         app.send_wol();
         let mut got = [0_u8; 256];
         let (n, _) = listener.recv_from(&mut got).expect("no packet arrived");
@@ -6674,7 +6605,7 @@ mod tests {
                 .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == &note)),
             "the note never reached the screen",
         );
-        app.wol_target_mac = String::from("not a mac");
+        app.wol_target_mac.set_text("not a mac");
         app.send_wol();
         assert_eq!(
             app.wol_note.as_deref(),
@@ -6699,7 +6630,7 @@ mod tests {
         });
         let mut app = NetScanApp::new();
         app.whois_server = server.clone();
-        app.whois_target = "8.8.8.8".to_string();
+        app.whois_target.set_text("8.8.8.8");
         app.run_whois();
         let deadline = Instant::now() + Duration::from_secs(20);
         while !app.pump_whois() {
@@ -6719,7 +6650,7 @@ mod tests {
 
         // The test build's default server is a port nothing listens on.
         let mut app = NetScanApp::new();
-        app.whois_target = "8.8.8.8".to_string();
+        app.whois_target.set_text("8.8.8.8");
         app.run_whois();
         while !app.pump_whois() {
             assert!(Instant::now() < deadline, "no refusal came");
@@ -6793,7 +6724,7 @@ mod tests {
         let mut app = NetScanApp::new();
         // A range to scan -- the window no longer invents one; the prober
         // under test reaches no network, so nothing leaves the machine.
-        app.config.target_input = String::from("192.168.1.0/24");
+        app.config.target_input.set_text("192.168.1.0/24");
         app.prober = slow;
         app.config.concurrency = 2;
         let f5 = Event::Key(KeyEvent {
@@ -6819,7 +6750,7 @@ mod tests {
     #[test]
     fn a_scan_too_big_to_finish_is_refused() {
         let mut app = NetScanApp::new();
-        app.config.target_input = String::from("10.0.0.0/16");
+        app.config.target_input.set_text("10.0.0.0/16");
         app.config.profile = ScanProfile::Full;
         app.start_scan();
         assert!(!app.is_scanning);
@@ -6835,7 +6766,7 @@ mod tests {
         MOST_IN_FLIGHT.store(0, std::sync::atomic::Ordering::SeqCst);
         let mut app = NetScanApp::new();
         app.prober = counted;
-        app.config.target_input = String::from("10.0.0.1");
+        app.config.target_input.set_text("10.0.0.1");
         app.config.profile = ScanProfile::Stealth;
         app.start_scan();
         finish(&mut app);
@@ -7484,7 +7415,7 @@ mod tests {
         let mut app = NetScanApp::new();
         // A range to scan -- the window no longer invents one; the prober
         // under test reaches no network, so nothing leaves the machine.
-        app.config.target_input = String::from("192.168.1.0/24");
+        app.config.target_input.set_text("192.168.1.0/24");
         app.active_tab = ViewTab::Results;
         app.results = Some(ScanResult {
             id: 1,
@@ -8116,7 +8047,7 @@ mod tests {
             let mut app = boxes_on(tab);
             if field == Field::Ports {
                 // A target that would scan, so the refusal is the ports'.
-                app.config.target_input = String::from("10.0.0.1");
+                app.config.target_input.set_text("10.0.0.1");
             }
             let rect = app
                 .field_rect(field)
@@ -8144,7 +8075,7 @@ mod tests {
             );
             type_in(&mut app, typed);
             assert_eq!(
-                app.field_text(field),
+                app.field_box(field).text(),
                 typed,
                 "{field:?} did not take the typing"
             );
@@ -8162,7 +8093,7 @@ mod tests {
             );
             hit(&mut app, Key::Backspace, Modifiers::NONE);
             assert_eq!(
-                app.field_text(field),
+                app.field_box(field).text(),
                 &typed[..typed.len() - 1],
                 "Backspace did not delete in {field:?}"
             );
@@ -8187,7 +8118,7 @@ mod tests {
             hit(&mut app, Key::Escape, Modifiers::NONE);
             assert_eq!(app.focus, None, "Escape left the keyboard in {field:?}");
             assert_eq!(
-                app.field_text(field),
+                app.field_box(field).text(),
                 typed,
                 "Escape threw away what was typed"
             );
@@ -8199,7 +8130,7 @@ mod tests {
     #[test]
     fn enter_in_the_ports_box_scans_and_is_refused_for_the_ports() {
         let mut app = boxes_on(ViewTab::Results);
-        app.config.target_input = String::from("not an address");
+        app.config.target_input.set_text("not an address");
         let (x, y) = centre(app.field_rect(Field::Ports).unwrap());
         click(&mut app, MouseButton::Left, x, y);
         type_in(&mut app, "80");
@@ -8224,7 +8155,8 @@ mod tests {
         hit(&mut app, Key::Home, Modifiers::NONE);
         type_in(&mut app, "1");
         assert_eq!(
-            app.config.target_input, "110.0.0.1",
+            app.config.target_input.text(),
+            "110.0.0.1",
             "Home did not move the caret"
         );
         hit(&mut app, Key::A, Modifiers::ctrl());
@@ -8232,12 +8164,13 @@ mod tests {
         hit(&mut app, Key::Right, Modifiers::NONE);
         hit(&mut app, Key::V, Modifiers::ctrl());
         assert_eq!(
-            app.config.target_input, "110.0.0.1110.0.0.1",
+            app.config.target_input.text(),
+            "110.0.0.1110.0.0.1",
             "Ctrl+C then Ctrl+V"
         );
         hit(&mut app, Key::A, Modifiers::ctrl());
         hit(&mut app, Key::X, Modifiers::ctrl());
-        assert_eq!(app.config.target_input, "", "Ctrl+X left the text");
+        assert_eq!(app.config.target_input.text(), "", "Ctrl+X left the text");
         app.handle_event(&Event::Key(key_of(
             Key::Q,
             Modifiers {
@@ -8248,7 +8181,8 @@ mod tests {
             "@",
         )));
         assert_eq!(
-            app.config.target_input, "@",
+            app.config.target_input.text(),
+            "@",
             "AltGr's character was not typed"
         );
         assert_eq!(
@@ -8263,10 +8197,11 @@ mod tests {
         click(&mut app, MouseButton::Left, x, y);
         type_in(&mut app, "8");
         assert_eq!(
-            app.config.port_input, "8",
+            app.config.port_input.text(),
+            "8",
             "the ports box was typed into over the target's text"
         );
-        assert_eq!(app.config.target_input, "@");
+        assert_eq!(app.config.target_input.text(), "@");
     }
 
     /// **A press puts the caret where it lands, and an empty box says what it
@@ -8302,13 +8237,15 @@ mod tests {
         click(&mut app, MouseButton::Left, rect.right() - 4.0, y);
         type_in(&mut app, "9");
         assert_eq!(
-            app.wol_target_mac, "AA:BB9",
+            app.wol_target_mac.text(),
+            "AA:BB9",
             "a press past the text did not put the caret at its end"
         );
         click(&mut app, MouseButton::Left, rect.x + 1.0, y);
         type_in(&mut app, "1");
         assert_eq!(
-            app.wol_target_mac, "1AA:BB9",
+            app.wol_target_mac.text(),
+            "1AA:BB9",
             "a press at the box's left edge did not put the caret at the start"
         );
         assert_eq!(carets(&app), 1);
@@ -8319,7 +8256,7 @@ mod tests {
     #[test]
     fn enter_in_the_target_box_never_stops_a_scan() {
         let mut app = NetScanApp::new();
-        app.config.target_input = String::from("192.168.1.0/24");
+        app.config.target_input.set_text("192.168.1.0/24");
         app.prober = slow;
         app.config.concurrency = 2;
         app.focus_field(Field::Target);
@@ -8352,7 +8289,7 @@ mod tests {
     #[test]
     fn a_chord_is_not_one_of_this_windows_keys() {
         let mut app = app_with_hosts(5, 1);
-        app.config.target_input = String::from("not an address");
+        app.config.target_input.set_text("not an address");
         hit(&mut app, Key::F5, Modifiers::alt());
         hit(
             &mut app,
@@ -8704,7 +8641,7 @@ mod tests {
         for (label, what) in SHORTCUTS {
             for stroke in guitk::shortcut::keystrokes(label).unwrap_or_else(|e| panic!("{e}")) {
                 let mut app = app_with_hosts(30, 1);
-                app.config.target_input = String::from("not an address");
+                app.config.target_input.set_text("not an address");
                 if *label == "Enter" {
                     app.focus_field(Field::Target);
                 }
@@ -8759,7 +8696,7 @@ mod tests {
         hit(&mut app, Key::Tab, Modifiers::NONE);
         app.handle_event(&Event::Key(key_of(Key::Slash, Modifiers::shift(), "?")));
         assert!(!app.show_help, "? raised the list from a box");
-        assert_eq!(app.config.target_input, "?", "? was not typed");
+        assert_eq!(app.config.target_input.text(), "?", "? was not typed");
         hit(&mut app, Key::F1, Modifiers::NONE);
         assert!(app.show_help, "F1 did not raise the list from a box");
         let target = app.field_rect(Field::Target).unwrap();
@@ -8782,7 +8719,7 @@ mod tests {
     #[test]
     fn the_shortcut_list_takes_the_keys_and_a_press() {
         let mut app = app_with_hosts(60, 1);
-        app.config.target_input = String::from("not an address");
+        app.config.target_input.set_text("not an address");
         hit(&mut app, Key::F1, Modifiers::NONE);
         hit(&mut app, Key::F5, Modifiers::NONE);
         hit(&mut app, Key::Tab, Modifiers::NONE);

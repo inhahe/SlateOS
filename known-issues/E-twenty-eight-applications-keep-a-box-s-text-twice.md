@@ -1,6 +1,7 @@
 ### [E] Twenty-eight applications keep a box's text twice -- 2026-10-16
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-e (the last box moved in 6d2d0c868),
+awaiting a boot on main
 
 **In short:** a one-line text box in these programs keeps what was typed in
 two places: a plain `String` the program reads, and the toolkit's editor
@@ -51,10 +52,10 @@ lockscreen pastes nothing, and stays so.
 |---|---|
 | One editor shared by several strings, swapped as the focus moves: one box per string instead | clipmanager (4), contacts (16), dbviewer (2), mindmap (2), netmanager (4), netscan (5), qrcode (8), startupmanager (6), taskscheduler (3), vpnmanager (6), editor (2), hexeditor (2), photomanager (2: one inside `TextEntry::AlbumName`), stickynotes (the search and each note's title), systemrestore (2) |
 | A font size that changes after the box is made, or per box | dictionary (follows the window's height), mindmap (node size × zoom), stickynotes, clipmanager, dbviewer, photomanager |
-| Bold text | mindmap (the root), passwordgen, stickynotes |
+| Bold text | mindmap (the root), passwordgen, stickynotes -- met, `with_weight` |
 | A check that refuses an edit whole, or rewrites the text | colorpicker (hex digits and `#`, upper-cased; a paste of anything else refused), taskscheduler (digits within a maximum), vpnmanager (digits, clamped to 65535) |
-| Masking, and switching it | passwordgen (hidden until Ctrl+R), lockscreen (drawn as dots of its own, a press to the nearest dot, no paste) |
-| The caret put at a byte | stickynotes (Up from the body, a double-click), lockscreen |
+| Masking, and switching it | passwordgen (hidden until Ctrl+R), lockscreen (drawn as dots of its own, a press to the nearest dot, no paste) -- met, `masked` and `set_mask` |
+| The caret put at a byte | stickynotes (Up from the body, a double-click), lockscreen -- met, `put_caret` |
 | Drawn unfocused from its end, elided at the start | diskanalyzer (a path) -- met, `from_its_end` |
 | Drawn by the program, from `input()` | dbviewer's SQL line (coloured spans), stickynotes' titles (on the note, "[P] " when pinned), lockscreen's dots |
 
@@ -82,12 +83,20 @@ this order, a commit each:
    made with something in it; `LineBox::key_checked`, a key whose
    edit a check must accept or it is undone whole (vpnmanager's number
    boxes); `LineBox::insert`, text the program decides typed at the caret
-   (colorpicker's hex, filtered and upper-cased); and
+   (colorpicker's hex, filtered and upper-cased);
    `LineBox::from_its_end`, a box cut at its front without the keyboard
-   and pressed where that was drawn (diskanalyzer's path) (2026-10-17).
+   and pressed where that was drawn (diskanalyzer's path);
+   `LineBox::with_weight`, a box drawn, pressed and stepped through in a
+   weight (mindmap's root, passwordgen's analyser); `LineBox::masked`,
+   `set_mask` and `mask`, a box drawn as a mask for each character,
+   pressed where the masks were drawn, and giving nothing to the clipboard
+   (passwordgen, lockscreen) -- its menu still offers Cut and Copy, which
+   do nothing, as no program shows a masked box's menu yet; and
+   `LineBox::put_caret`, the caret at a byte the program measured itself
+   (lockscreen's dots) (2026-10-17).
 3. Move the twenty-eight, one application at a time, each with its tests and
    its `mutate.py` rows kept, and its clipboard on `guitk::clipboard`.
-   *Moved (2026-10-17), twenty-one of the twenty-eight:* rssreader's prompt,
+   *Moved (2026-10-17), all twenty-eight:* rssreader's prompt,
    pdfviewer's page range, systemrestore's form (two boxes), defrag's
    exclude pattern, screenshot's text annotation, whiteboard's words,
    ircclient's message line, kanban's input dialog, filesearch's query (in
@@ -98,15 +107,33 @@ this order, a commit each:
    split-tunnel and dialog boxes (six), taskscheduler's form (five: the
    Param box is whichever of three its frequency asks for), colorpicker's
    hex box (its Copy button now fills the program's clipboard, which the
-   box pastes from), diskanalyzer's path. A row that stood for the second
-   copy -- a reload, a write-back, a private clipboard, a caret or
-   selection drawn by hand -- goes with it;
-   the rest move onto the box. Two drawings changed: hexeditor's box
+   box pastes from), diskanalyzer's path, mindmap's name and search,
+   dbviewer's query and filter value, passwordgen's analyser (masked until
+   Ctrl+R), lockscreen's password (masked, pasting nothing), contacts'
+   search and the form's fifteen lines, editor's two find fields --
+   whose document's copy and paste moved onto `guitk::clipboard` with them,
+   so a word copied from the text still pastes into the search -- and
+   stickynotes' search (its `NoteStore` filters by the box's text, handed
+   to it) and the title being typed (a box of its own, filled from the
+   note as the keyboard moves to it, written into the note on each edit,
+   and filled again when an undo or a tag taken out of it changes the
+   title under it). A row
+   that stood for the second copy -- a reload, a write-back, a private
+   clipboard, a caret or selection drawn by hand -- goes with it; the rest
+   move onto the box. Drawings changed: hexeditor's box
    without the keyboard is drawn from its start, as every LineBox is, not
    scrolled to its end, and qrcode's placeholder sits on its text's line,
    3 px higher; diskanalyzer's path, pressed without the keyboard, is
    measured against the `…` and tail it shows rather than the path
-   scrolled to its end, which put a press an ellipsis's width off. Where
+   scrolled to its end, which put a press an ellipsis's width off;
+   contacts' and editor's boxes without the keyboard are drawn from their
+   start, cut with `…`, and pressed where they read -- a press there was
+   measured against the text scrolled to its end -- and passwordgen's
+   analyser without the keyboard is drawn from its start. A box the
+   keyboard moves to types at its own caret, not where the shared editor
+   last stood. lockscreen's read-out counted the password's bytes as its
+   characters, and its `type_char` its capacity in bytes; both count
+   characters now. Where
    a box's text is a model's data -- qrcode's WiFi and contact codes,
    compared and kept in history -- the box is the record
    and the model is made from it when it is needed
@@ -115,5 +142,4 @@ this order, a commit each:
    drops its equality instead (startupmanager). taskscheduler's text
    field had lost the guard that draws its text only where the line fits,
    unseen because its containment sweep read neither `RichText` nor
-   lines; both are read now. *Left:* contacts, dbviewer, mindmap,
-   editor, lockscreen, passwordgen, stickynotes.
+   lines; both are read now.

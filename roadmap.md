@@ -4042,8 +4042,11 @@ word; text inside them that says "lane C" is history.
   tests kept. The list, what each box needs of `LineBox`, and the three
   steps are in
   `known-issues/E-twenty-eight-applications-keep-a-box-s-text-twice.md`.
-  **In progress:** the rename is done (2026-10-17); next, what the boxes
-  need, then the twenty-eight.
+  **Done on lane-e (2026-10-17), awaiting a boot on main:** the rename,
+  each need with the first box that has it (`moved`, `set_font_size`,
+  `holding`, `key_checked`, `insert`, `from_its_end`, `with_weight`, the
+  mask, `put_caret`), and all twenty-eight boxes, their copy and paste on
+  `guitk::clipboard`. Marked `[x]` when it reaches main.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

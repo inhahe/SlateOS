@@ -76,8 +76,8 @@ fn fps(path: &PathBuf, convert: bool) -> (f64, usize) {
 #[ignore = "a measurement: run with --release --ignored --nocapture"]
 fn bench_h264() {
     let fate = std::env::var_os("H264_FATE").map(|d| PathBuf::from(d).join("h264"));
-    let encoded = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../target/h264bench/x264_1080p.mp4");
+    let encoded =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../target/h264bench/x264_1080p.mp4");
     let mut paths: Vec<PathBuf> = fate
         .iter()
         .flat_map(|d| {

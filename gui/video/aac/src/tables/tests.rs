@@ -34,8 +34,9 @@ fn bessel_i0(x: f64) -> f64 {
 fn kbd(alpha: f64, n: usize) -> Vec<f64> {
     let alpha2 = 4.0 * (alpha * PI / n as f64).powi(2);
     let half = n / 2;
-    let kernel: Vec<f64> =
-        (0..=half).map(|i| bessel_i0(((i * (n - i)) as f64 * alpha2).sqrt())).collect();
+    let kernel: Vec<f64> = (0..=half)
+        .map(|i| bessel_i0(((i * (n - i)) as f64 * alpha2).sqrt()))
+        .collect();
     // The kernel is symmetric, n + 1 samples long; its last sample, like its
     // first, is I0(0) = 1.
     let total = kernel

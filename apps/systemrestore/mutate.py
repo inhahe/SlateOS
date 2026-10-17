@@ -261,7 +261,10 @@ SEARCH = "the_search_box_is_the_toolkits_field"
 FOLDS = "the_search_finds_a_name_whatever_the_case_of_its_letters"
 CHECKS = "the_components_are_checkboxes_that_change"
 SEARCH_FOCUS = (
-    "            focused: self.dialog == DialogKind::None && self.progress.is_none() && !self.show_help,\n"
+    "            focused: self.dialog == DialogKind::None\n"
+    "                && self.progress.is_none()\n"
+    "                && !self.show_help\n"
+    "                && self.view_mode != ViewMode::Schedule,\n"
 )
 
 MAIN += [
@@ -365,19 +368,25 @@ MAIN += [
     (
         "the search box keeps its mark under a dialog",
         SEARCH_FOCUS,
-        "            focused: self.progress.is_none() && !self.show_help,\n",
+        "            focused: self.progress.is_none()\n"
+        "                && !self.show_help\n"
+        "                && self.view_mode != ViewMode::Schedule,\n",
         [SEARCH],
     ),
     (
         "the search box keeps its mark under the work",
         SEARCH_FOCUS,
-        "            focused: self.dialog == DialogKind::None && !self.show_help,\n",
+        "            focused: self.dialog == DialogKind::None\n"
+        "                && !self.show_help\n"
+        "                && self.view_mode != ViewMode::Schedule,\n",
         [SEARCH],
     ),
     (
         "the search box keeps its mark under the list of keys",
         SEARCH_FOCUS,
-        "            focused: self.dialog == DialogKind::None && self.progress.is_none(),\n",
+        "            focused: self.dialog == DialogKind::None\n"
+        "                && self.progress.is_none()\n"
+        "                && self.view_mode != ViewMode::Schedule,\n",
         [SEARCH],
     ),
     (
@@ -536,8 +545,8 @@ MAIN += [
     ),
     (
         "a checkbox's reason is given under the shortcut card",
-        '        if self.show_help {\n            return Vec::new();\n        }\n        self.component_rows()',
-        '        self.component_rows()',
+        '        if self.show_help || self.field_menu.is_up() {\n',
+        '        if self.field_menu.is_up() {\n',
         ['a_switched_off_component_says_why_while_the_pointer_rests_on_it'],
     ),
     (
@@ -618,8 +627,8 @@ MAIN += [
     ),
     (
         "the search's clipboard chords are the window's",
-        "                Key::A | Key::C | Key::X | Key::V | Key::Left | Key::Right | Key::Backspace => {\n",
-        "                Key::Left | Key::Right | Key::Backspace => {\n",
+        "                Key::A | Key::C | Key::X | Key::V => self.search_key(key),\n",
+        "",
         [S_CARET],
     ),
     (
@@ -636,8 +645,8 @@ MAIN += [
     ),
     (
         "a press in the search box puts the caret nowhere",
-        "        if self.search_box_rect().contains(x, y) {\n            self.press_search_box(x);\n",
-        "        if self.search_box_rect().contains(x, y) {\n",
+        "            }\n            self.press_search_box(x);\n",
+        "            }\n",
         [S_PRESS],
     ),
     (
@@ -686,7 +695,7 @@ TABLES = {
 # The review of 007d0552c..752d46d80: a switched-off checkbox's reason under
 # a box's menu, and the search box in the Schedule view.
 WHY = "a_switched_off_component_says_why_while_the_pointer_rests_on_it"
-SCHEDULE = "the_search_box_has_not_the_keyboard_in_the_schedule_view"
+SCHEDULE_BOX = "the_search_box_has_not_the_keyboard_in_the_schedule_view"
 
 # Extends MAIN in place, the list TABLES already holds for main.rs.
 MAIN += [
@@ -700,19 +709,19 @@ MAIN += [
         "the search box takes keys in the Schedule view",
         "        if self.view_mode == ViewMode::Schedule {\n            return EventResult::Ignored;\n        }\n        self.sync_search_editor();\n",
         "        self.sync_search_editor();\n",
-        [SCHEDULE],
+        [SCHEDULE_BOX],
     ),
     (
         "the search box is marked with the keyboard in the Schedule view",
         "                && self.view_mode != ViewMode::Schedule,\n",
         "                && true,\n",
-        [SCHEDULE],
+        [SCHEDULE_BOX],
     ),
     (
         "a press on the search stays in the Schedule view",
         "                self.view_mode = ViewMode::Tree;\n",
         "",
-        [SCHEDULE],
+        [SCHEDULE_BOX],
     ),
 ]
 

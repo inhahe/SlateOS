@@ -307,8 +307,9 @@ struct HeldDatagram {
     data: Vec<u8>,
 }
 
-/// The most datagrams a socket holds for a receiver yet to take them; the
-/// oldest is dropped for a new one, as UDP drops what nobody reads.
+/// The most datagrams a socket holds for a receiver yet to take them. When
+/// full, a new one of the other family is dropped, as UDP drops what nobody
+/// reads, and a peeked one replaces the oldest ([`dgram_recv_family`]).
 const HELD_MAX: usize = 16;
 
 impl SocketInner {
@@ -1266,6 +1267,20 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
 /// - `InvalidHandle` — closed handle.
 /// - protocol faults propagated from [`NetstackConn::poll_ready`].
 pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
+    poll_ready_counted(handle).map(|(ready, _)| ready)
+}
+
+/// [`poll_ready`], with how many bytes the same answer said a receive would
+/// find waiting ([`readable_bytes`]'s count): `None` when the daemon was not
+/// asked for it (an unbound datagram socket; a stream never connected, failed
+/// or listening) or does not count. A connected stream readable with `Some(0)` waiting is at its
+/// end: one answer says so, where a second question could find the bytes
+/// another reader took in between.
+///
+/// # Errors
+///
+/// As [`poll_ready`].
+pub fn poll_ready_counted(handle: SocketHandle) -> KernelResult<((bool, bool, bool), Option<u32>)> {
     let inner = inner_of(handle)?;
     let mut guard = inner.lock();
     // A datagram socket has no connection lifecycle: readiness is whatever the
@@ -1278,14 +1293,16 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
             // A datagram the socket holds ([`SocketInner::held`]) is one to
             // read as much as one the daemon has.
             let held = !guard.held.is_empty();
-            let (readable, writable, error) = guard.owned_conn_mut()?.poll_ready()?;
-            return Ok((readable || held, writable, error));
+            let conn = guard.owned_conn_mut()?;
+            let cid = conn.conn_id();
+            let ((readable, writable, error), count) = conn.poll_counted_on(cid)?;
+            return Ok(((readable || held, writable, error), count));
         }
-        return Ok((false, true, false));
+        return Ok(((false, true, false), None));
     }
     match guard.state {
         SockState::Connected => {
-            let ready = guard.with_stream_conn(|c, cid| c.poll_on(cid))?;
+            let (ready, count) = guard.with_stream_conn(|c, cid| c.poll_counted_on(cid))?;
             // The daemon's error bit on an established connection means it
             // timed out. Latch ETIMEDOUT for SO_ERROR -- once: the daemon keeps
             // saying so, and a poller that has read it must not read it again.
@@ -1293,10 +1310,11 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
                 guard.timeout_reported = true;
                 guard.so_error = ETIMEDOUT;
             }
-            Ok(ready)
+            Ok((ready, count))
         }
         SockState::Connecting => {
-            let (readable, writable, error) = guard.with_stream_conn(|c, cid| c.poll_on(cid))?;
+            let ((readable, writable, error), count) =
+                guard.with_stream_conn(|c, cid| c.poll_counted_on(cid))?;
             // Resolve the pending handshake: an error latches Failed; becoming
             // writable (with no error) means ESTABLISHED. Otherwise stay Connecting.
             if error {
@@ -1305,21 +1323,22 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
             } else if writable {
                 guard.state = SockState::Connected;
             }
-            Ok((readable, writable, error))
+            Ok(((readable, writable, error), count))
         }
         // A failed connect: writable + error so poll(POLLOUT) wakes and the caller
         // reads SO_ERROR.
-        SockState::Failed => Ok((false, true, true)),
+        SockState::Failed => Ok(((false, true, true), None)),
         // Created but never connected: a connect may still proceed (writable),
         // nothing to read, no error.
-        SockState::Created => Ok((false, true, false)),
+        SockState::Created => Ok(((false, true, false), None)),
         // A listener is "readable" (→ POLLIN) when a completed connection waits in
         // the backlog, so a poll-driven `accept` wakes. The daemon reports this via
         // OP_POLL on the listener id; a `NotConnected` means it has no such state to
-        // report yet — treat as not-ready rather than an error.
+        // report yet — treat as not-ready rather than an error. Its count is
+        // nothing a receive finds.
         SockState::Listening => match guard.with_stream_conn(|c, cid| c.poll_on(cid)) {
-            Ok(ready) => Ok(ready),
-            Err(KernelError::NotConnected) => Ok((false, false, false)),
+            Ok(ready) => Ok((ready, None)),
+            Err(KernelError::NotConnected) => Ok(((false, false, false), None)),
             Err(e) => Err(e),
         },
     }
@@ -1732,14 +1751,17 @@ pub fn dgram_recv_family(
     peek: bool,
 ) -> KernelResult<(usize, u16, [u8; 16], u16)> {
     let inner = inner_of(handle)?;
-    let mut landing = crate::mm::user::alloc_zeroed_vec(netipc::ring::UDP_DGRAM_MAX)?;
+    // Where the daemon's datagrams land: made at the first one this call
+    // asks the daemon for, not for one already held.
+    let mut landing: Vec<u8> = Vec::new();
     let wants = |f: u16| family.is_none_or(|want| want == f);
-    let hand_out = |d: &HeldDatagram, buf: &mut [u8]| {
-        let n = d.data.len().min(buf.len());
-        if let (Some(dst), Some(src)) = (buf.get_mut(..n), d.data.get(..n)) {
+    // Copy what `buf` takes of `data`; the datagram's whole length.
+    let copy_out = |data: &[u8], buf: &mut [u8]| {
+        let n = data.len().min(buf.len());
+        if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(..n)) {
             dst.copy_from_slice(src);
         }
-        (d.data.len(), d.family, d.from, d.port)
+        data.len()
     };
     wait_until(handle, nonblock, || {
         let mut guard = inner.lock();
@@ -1748,11 +1770,17 @@ pub fn dgram_recv_family(
         }
         ensure_bound(&mut guard)?;
         if let Some(i) = guard.held.iter().position(|d| wants(d.family)) {
-            let given = guard.held.get(i).map(|d| hand_out(d, buf));
+            let given = guard
+                .held
+                .get(i)
+                .map(|d| (copy_out(&d.data, buf), d.family, d.from, d.port));
             if !peek {
                 guard.held.remove(i);
             }
             return given.ok_or(KernelError::InternalError);
+        }
+        if landing.is_empty() {
+            landing = crate::mm::user::alloc_zeroed_vec(netipc::ring::UDP_DGRAM_MAX)?;
         }
         let peer = guard.dgram_peer;
         // An *unconnected* datagram socket delivers from any source. A
@@ -1768,19 +1796,27 @@ pub fn dgram_recv_family(
                 continue;
             }
             let len = usize::try_from(len).unwrap_or(0).min(landing.len());
-            let datagram = HeldDatagram {
-                family: got_family,
-                from,
-                port,
-                data: landing.get(..len).unwrap_or(&[]).to_vec(),
-            };
+            let data = landing.get(..len).unwrap_or(&[]);
             let take = wants(got_family);
-            let given = take.then(|| hand_out(&datagram, buf));
+            let given = take.then(|| (copy_out(data, buf), got_family, from, port));
             if !take || peek {
-                if guard.held.len() >= HELD_MAX {
+                // Full: a datagram of the other family is dropped as it comes,
+                // as UDP drops what nobody reads; a peeked one takes the place
+                // of the oldest held, which is of the other family (one of the
+                // receiver's would have been given out first). Either way the
+                // datagram a peek showed stays for the receive after it.
+                let full = guard.held.len() >= HELD_MAX;
+                if full && take {
                     guard.held.pop_front();
                 }
-                guard.held.push_back(datagram);
+                if !full || take {
+                    guard.held.push_back(HeldDatagram {
+                        family: got_family,
+                        from,
+                        port,
+                        data: data.to_vec(),
+                    });
+                }
             }
             if let Some(given) = given {
                 return Ok(given);

@@ -17866,8 +17866,9 @@ fn daemon_mcast_set(socket: DaemonSocket, set: netipc::sockopt::Set) -> SyscallR
 /// The two calls take only their own family's datagrams, as on the kernel
 /// stack, where a socket had a queue for each; the daemon's socket has one,
 /// and `net::socket` keeps a datagram of the other family for the other call
-/// (`socket::dgram_recv_family`). The kernel buffer is what a datagram can
-/// be, not what the caller says it can take.
+/// (`socket::dgram_recv_family`). The datagram arrives whole there, so its
+/// size is known whatever the caller takes; the buffer here is what the
+/// caller takes of it, at most the largest datagram.
 fn daemon_udp_recv(
     socket: DaemonSocket,
     family: u16,
@@ -20999,22 +21000,25 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
 /// stack's bits (POLLIN 1, POLLOUT 4, POLLERR 8, POLLHUP 16). The daemon
 /// reports the end of the stream as readable, so readable with nothing
 /// buffered is the peer's close: POLLHUP too, as the kernel stack answers it,
-/// beside the POLLIN that lets the read that returns 0 happen. A poll that
-/// fails -- the daemon has dropped the connection, or restarted -- is
-/// POLLERR and POLLHUP: an error code here would be read as readiness bits
-/// (libc takes the result as them, unsigned).
+/// beside the POLLIN that lets the read that returns 0 happen. Both from one
+/// answer (`poll_ready_counted`): asked twice, bytes another thread read in
+/// between would look like the close. A poll that fails -- the daemon has
+/// dropped the connection, or restarted -- is POLLERR and POLLHUP: an error
+/// code here would be read as readiness bits (libc takes the result as them,
+/// unsigned).
 fn daemon_poll_status(socket: DaemonSocket) -> SyscallResult {
     const POLLIN: i64 = 1;
     const POLLOUT: i64 = 4;
     const POLLERR: i64 = 8;
     const POLLHUP: i64 = 16;
-    let Ok((readable, writable, error)) = crate::net::socket::poll_ready(socket) else {
+    let Ok(((readable, writable, error), waiting)) = crate::net::socket::poll_ready_counted(socket)
+    else {
         return SyscallResult::ok(POLLERR | POLLHUP);
     };
     let mut bits = 0;
     if readable {
         bits |= POLLIN;
-        if crate::net::socket::readable_bytes(socket) == Ok(0) {
+        if waiting == Some(0) {
             bits |= POLLHUP;
         }
     }

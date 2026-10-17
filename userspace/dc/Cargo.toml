@@ -16,8 +16,6 @@ getoptlong = { path = "../getoptlong" }
 libcall = { path = "../../libcall" }
 # File names in diagnostics, their unprintable bytes escaped.
 quoting = { path = "../quoting" }
-# strerror's words, as glibc's.
-errmsg = { path = "../errmsg" }
 # strtol, for DC_LINE_LENGTH.
 cstrtol = { path = "../cstrtol" }
 # SIGPIPE and the standard descriptors as dc was started with them.

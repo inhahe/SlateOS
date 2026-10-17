@@ -204,8 +204,7 @@ impl Dc {
             result = -1;
         }
         // `(int) result`: the low 32 bits.
-        let [a, b, c, d, ..] = result.to_le_bytes();
-        i32::from_le_bytes([a, b, c, d])
+        cstrtol::low_i32(result)
     }
 
     /// `set_line_max_from_environment ()`: `DC_LINE_LENGTH`, if it is a
@@ -243,6 +242,8 @@ impl Dc {
             self.out_col = 1;
         }
         self.out.write(&[ch]);
+        // Both streams, as upstream's `out_char` checks them after each
+        // digit.
         self.check_stdout();
         self.check_stderr();
     }

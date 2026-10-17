@@ -14,8 +14,8 @@ cstdio = { path = "../cstdio" }
 libcall = { path = "../../libcall" }
 # File names in diagnostics, their unprintable bytes escaped.
 quoting = { path = "../quoting" }
-# strerror's words, as glibc's.
-errmsg = { path = "../errmsg" }
+# C's cast of a long to an int (`low_i32`), for storing into ibase and the rest.
+cstrtol = { path = "../cstrtol" }
 
 [lints]
 workspace = true

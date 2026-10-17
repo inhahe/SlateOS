@@ -16,6 +16,15 @@
 //!   does, but by Rust's stack-overflow abort (`SIGABRT` and a line saying
 //!   so) where C's ends in `SIGSEGV`, at a depth that differs with the frame
 //!   sizes.
+//!
+//! # Upstream's faults, kept
+//!
+//! - **`Q` counts the macro it is in among the levels it quits only when
+//!   that macro was reached by a tail call.** `eval.c` subtracts one for the
+//!   `Q` itself, then ends the macro only when what is left reaches its
+//!   tail-call depth, which starts at one: so `1Q` quits nothing, and
+//!   `[[1Q 1p]x 2p]x 3p` prints 1, 2 and 3, where the manual's "exit one
+//!   level" would print 2 and 3. Ubuntu's dc prints 1, 2 and 3 (measured).
 
 /// The C library's `FILE`s, as dc meets them.
 pub use cstdio as io;
@@ -193,13 +202,7 @@ impl Dc {
 
     /// `perror (what)`: `what`, then the words for `errno`.
     pub fn perror(&mut self, what: &[u8], errno: i32) {
-        let mut line = what.to_vec();
-        line.extend_from_slice(b": ");
-        line.extend_from_slice(
-            errmsg::strerror(&std::io::Error::from_raw_os_error(errno)).as_bytes(),
-        );
-        line.push(b'\n');
-        self.err.write(&line);
+        cstdio::perror(&mut self.err, what, errno);
     }
 
     /// `exit (code)`: standard output flushed, as the C library's `exit`

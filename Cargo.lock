@@ -874,6 +874,7 @@ dependencies = [
 name = "cstdio"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
  "libcall",
 ]
 
@@ -965,7 +966,6 @@ dependencies = [
  "bcnumber",
  "cstdio",
  "cstrtol",
- "errmsg",
  "getoptlong",
  "libcall",
  "quoting",
@@ -1690,7 +1690,7 @@ version = "0.1.0"
 dependencies = [
  "bcnumber",
  "cstdio",
- "errmsg",
+ "cstrtol",
  "libcall",
  "quoting",
 ]

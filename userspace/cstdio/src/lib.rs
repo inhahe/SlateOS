@@ -79,12 +79,27 @@ impl Output {
 
     /// `fwrite`, `putchar`, `fprintf`: `bytes` into the buffer, and out when
     /// the buffering says.
-    pub fn write(&mut self, mut bytes: &[u8]) {
+    pub fn write(&mut self, bytes: &[u8]) {
         if self.unbuffered {
             self.send(bytes);
             return;
         }
-        let newline = bytes.contains(&b'\n');
+        // Line-buffered, glibc sends what precedes the last newline and the
+        // newline itself, and keeps what follows it buffered.
+        if self.line_buffered
+            && let Some(last) = bytes.iter().rposition(|&b| b == b'\n')
+        {
+            let (through, after) = bytes.split_at(last.saturating_add(1));
+            self.buffer(through);
+            self.flush();
+            self.buffer(after);
+            return;
+        }
+        self.buffer(bytes);
+    }
+
+    /// `bytes` into the buffer, which goes out each time it fills.
+    fn buffer(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             let room = BUF_SIZE.saturating_sub(self.buf.len());
             if bytes.len() <= room {
@@ -95,9 +110,6 @@ impl Output {
             self.buf.extend_from_slice(now);
             self.flush();
             bytes = rest;
-        }
-        if self.line_buffered && newline {
-            self.flush();
         }
     }
 
@@ -150,6 +162,16 @@ impl Output {
             Sink::Fd(_) => Vec::new(),
         }
     }
+}
+
+/// `perror (what)` on `err`: `what`, a colon, `errno`'s words as glibc's
+/// `strerror` gives them, and a newline.
+pub fn perror(err: &mut Output, what: &[u8], errno: i32) {
+    let mut line = what.to_vec();
+    line.extend_from_slice(b": ");
+    line.extend_from_slice(errmsg::strerror(&std::io::Error::from_raw_os_error(errno)).as_bytes());
+    line.push(b'\n');
+    err.write(&line);
 }
 
 /// Where an [`Input`] reads from: a descriptor, or (for tests) memory.
@@ -320,6 +342,13 @@ mod tests {
             panic!()
         };
         assert_eq!(kept.as_slice(), b"x\n");
+        // What follows the last newline stays buffered, as glibc keeps it.
+        l.write(b"a\nb\nc");
+        let Sink::Memory(kept) = &l.sink else {
+            panic!()
+        };
+        assert_eq!(kept.as_slice(), b"x\na\nb\n");
+        assert_eq!(l.take_written(), b"x\na\nb\nc");
     }
 
     #[test]

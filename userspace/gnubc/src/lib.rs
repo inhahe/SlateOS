@@ -302,13 +302,7 @@ impl Bc {
 
     /// `perror (what)`.
     fn perror(&mut self, what: &[u8], errno: i32) {
-        let mut line = what.to_vec();
-        line.extend_from_slice(b": ");
-        line.extend_from_slice(
-            errmsg::strerror(&std::io::Error::from_raw_os_error(errno)).as_bytes(),
-        );
-        line.push(b'\n');
-        self.err.write(&line);
+        cstdio::perror(&mut self.err, what, errno);
     }
 
     /// `checkferror_output (stdout)`: number.c's, whose words say `dc`
@@ -492,14 +486,7 @@ impl Bc {
             return false;
         }
         if self.use_math && self.first_file {
-            // In the order of each function's first mention in libmath.b,
-            // which is how the compiled code numbers them.
-            for name in [b"e", b"l", b"s", b"a", b"c", b"j"] {
-                self.lookup(name, code::Kind::Funct);
-            }
-            for chunk in libmath::LIBMATH {
-                self.load_code(chunk);
-            }
+            self.load_math_library();
         }
         if let Some(name) = self.file_names.pop_front() {
             match scan::Scanner::open(&name) {
@@ -520,6 +507,19 @@ impl Bc {
         self.new_yy_file(scan::Source::stdin());
         self.is_std_in = true;
         true
+    }
+
+    /// The `-l` library, loaded -- and run, for its `scale=20` -- as
+    /// `open_new_file` loads it before the first file.
+    fn load_math_library(&mut self) {
+        // In the order of each function's first mention in libmath.b, which
+        // is how the compiled code numbers them.
+        for name in [b"e", b"l", b"s", b"a", b"c", b"j"] {
+            self.lookup(name, code::Kind::Funct);
+        }
+        for chunk in libmath::LIBMATH {
+            self.load_code(chunk);
+        }
     }
 
     /// `new_yy_file (file)`: the scanner reads `source` from here on.

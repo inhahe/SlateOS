@@ -728,10 +728,10 @@ impl Bc {
                         if temp >= 16 && self.warn_not_std {
                             self.rt_warn(b"ibase larger than 16 is non-standard");
                         }
-                        self.i_base = int_of_long(temp);
+                        self.i_base = cstrtol::low_i32(temp);
                     }
                 } else {
-                    self.i_base = int_of_long(temp);
+                    self.i_base = cstrtol::low_i32(temp);
                 }
             }
             1 => {
@@ -742,7 +742,7 @@ impl Bc {
                     self.o_base = BC_INT_MAX;
                     self.rt_warn(format!("obase too large, set to {BC_INT_MAX}").as_bytes());
                 } else {
-                    self.o_base = int_of_long(temp);
+                    self.o_base = cstrtol::low_i32(temp);
                 }
             }
             2 => {
@@ -750,7 +750,7 @@ impl Bc {
                     self.scale = BC_INT_MAX;
                     self.rt_warn(format!("scale too large, set to {BC_INT_MAX}").as_bytes());
                 } else {
-                    self.scale = int_of_long(temp);
+                    self.scale = cstrtol::low_i32(temp);
                 }
             }
             _ => {
@@ -759,7 +759,7 @@ impl Bc {
                 if toobig {
                     self.rt_warn(b"history too large, set to unlimited");
                 } else {
-                    self.n_history = int_of_long(temp);
+                    self.n_history = cstrtol::low_i32(temp);
                 }
             }
         }
@@ -1100,8 +1100,161 @@ fn int_of(n: usize) -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
-/// A `long` cast to `int`, as upstream's `(int) temp` is.
-fn int_of_long(n: i64) -> i32 {
-    let [a, b, c, d, ..] = n.to_le_bytes();
-    i32::from_le_bytes([a, b, c, d])
+/// The machine, run whole: each test hands a program to the scanner as bc
+/// reads standard input, and reads back what it wrote and what it said.
+/// (`bc-diff.sh` holds the port to Ubuntu's bc case by case; these keep
+/// the machine's rules under `cargo test`, where mutation testing sees
+/// them.)
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::Bc;
+    use crate::io::{Input, Output, Sink, Source as InputSource};
+    use crate::scan::Source;
+
+    /// `program` run, with `stdin` for `read()` and `setup` to set options
+    /// first: what it wrote, and what it said.
+    fn run_with(program: &str, stdin: &str, setup: impl FnOnce(&mut Bc)) -> (String, String) {
+        let mut bc = Bc::new(
+            Output::new(Sink::Memory(Vec::new()), false, false),
+            Output::new(Sink::Memory(Vec::new()), true, false),
+            Input::new(InputSource::Memory(stdin.as_bytes().to_vec(), 0)),
+        );
+        setup(&mut bc);
+        bc.init_load();
+        bc.init_gen();
+        if bc.use_math {
+            bc.load_math_library();
+        }
+        bc.scan
+            .switch(Source::Memory(program.as_bytes().to_vec(), 0), false);
+        bc.is_std_in = true;
+        bc.first_file = false;
+        bc.yyparse();
+        (
+            String::from_utf8(bc.out.take_written()).unwrap(),
+            String::from_utf8(bc.err.take_written()).unwrap(),
+        )
+    }
+
+    fn run(program: &str) -> (String, String) {
+        run_with(program, "", |_| {})
+    }
+
+    #[test]
+    fn arithmetic_at_the_scale_asked() {
+        let (out, err) = run("1+2\n2^10\nscale=5; 1/3\n7%3\n-7/2\n2^-1\n");
+        assert_eq!(out, "3\n1024\n.33333\n.00001\n-3.50000\n.50000\n");
+        assert_eq!(err, "");
+    }
+
+    #[test]
+    fn bases_in_and_out() {
+        let (out, _) = run("obase=16; 255\nibase=16; FF\nobase=A; 1F\n");
+        assert_eq!(out, "FF\nFF\n31\n");
+    }
+
+    #[test]
+    fn ibase_obase_and_scale_are_kept_in_range() {
+        for (program, printed, warning) in [
+            ("ibase=1\nibase\n", "2\n", "ibase too small, set to 2"),
+            // Two, in base two.
+            ("obase=0\nobase\n", "10\n", "obase too small, set to 2"),
+            ("scale=-1\nscale\n", "0\n", "negative scale, set to 0"),
+            ("ibase=99\nibase\n", "36\n", "ibase too large, set to 36"),
+        ] {
+            let (out, err) = run(program);
+            assert_eq!(out, printed, "{program}");
+            assert!(err.contains(warning), "{warning}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_base_ten_constant_takes_its_letters_as_upstream_does() {
+        let (out, _) = run("A\nAB\n.5\n0\n1\n12.50\n");
+        assert_eq!(out, "10\n99\n.5\n0\n1\n12.50\n");
+    }
+
+    #[test]
+    fn functions_autos_and_arrays_by_value_and_by_reference() {
+        let (out, err) = run(concat!(
+            "define f(x) { auto y; y = x * 2; return (y) }\n",
+            "f(21)\ny\n",
+            "define g(a[]) { a[0] = 9; return (a[0]) }\n",
+            "b[0] = 1; g(b[]); b[0]\n",
+            "define h(*a[]) { a[0] = 9; return (0) }\n",
+            "h(b[]); b[0]\n",
+        ));
+        assert_eq!(out, "42\n0\n9\n1\n0\n9\n");
+        assert_eq!(err, "");
+    }
+
+    #[test]
+    fn a_parameter_of_the_wrong_kind_is_named_as_upstream_names_it() {
+        let (out, err) = run("define f(x) { return (x) }\nf(a[])\n5\n");
+        assert_eq!(out, "5\n");
+        assert!(
+            err.contains("Parameter type mismatch, parameter (null)."),
+            "{err}"
+        );
+        assert!(err.contains("Parameter number mismatch"), "{err}");
+    }
+
+    #[test]
+    fn strings_and_print() {
+        let (out, _) = run("\"a\\tb\\n\"\nprint 1, \"x\\n\"\n");
+        assert_eq!(out, "a\\tb\\n1x\n");
+    }
+
+    #[test]
+    fn read_reads_standard_input_and_random_is_glibcs() {
+        let (out, _) = run_with("x = read()\nx\nrandom()\n", "42\n", |_| {});
+        assert_eq!(out, "42\n1804289383\n");
+    }
+
+    #[test]
+    fn length_scale_and_sqrt() {
+        let (out, _) =
+            run("length(123.45)\nscale(1.234)\nlength(.001)\nscale=4; sqrt(2)\nsqrt(-1)\n");
+        assert_eq!(out, "5\n3\n3\n1.4142\n");
+    }
+
+    #[test]
+    fn runtime_errors_stop_the_line_and_name_the_place() {
+        let (out, err) = run("1/0; 5\n6\n");
+        assert_eq!(out, "6\n");
+        assert!(err.starts_with("Runtime error (func=(main), adr="), "{err}");
+        assert!(err.ends_with("): Divide by zero\n"), "{err}");
+    }
+
+    #[test]
+    fn a_syntax_error_runs_nothing_of_its_line() {
+        let (out, err) = run("1+;\n2\n");
+        assert_eq!(out, "2\n");
+        assert!(err.contains("syntax error"), "{err}");
+    }
+
+    #[test]
+    fn a_long_number_is_broken_at_the_line_length() {
+        let (out, _) = run("2^300\n");
+        assert!(out.contains("\\\n"), "{out}");
+        assert_eq!(
+            out.lines().next().unwrap().len(),
+            69,
+            "68 digits and the backslash"
+        );
+    }
+
+    #[test]
+    fn the_math_library_is_upstreams() {
+        let (out, _) = run_with("e(1)\nscale\n", "", |bc| bc.use_math = true);
+        assert_eq!(out, "2.71828182845904523536\n20\n");
+    }
+
+    #[test]
+    fn compile_only_prints_the_code() {
+        let (out, _) = run_with("1+2\n", "", |bc| bc.compile_only = true);
+        assert!(out.starts_with("@i"), "{out}");
+        assert!(out.contains("@r"), "{out}");
+    }
 }

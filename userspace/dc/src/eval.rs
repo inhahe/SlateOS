@@ -382,7 +382,6 @@ impl Dc {
                 self.check_stderr();
                 self.out.write(&show_id(c, b" unimplemented\n"));
                 self.check_stdout();
-                self.check_stdout();
             }
         }
         Status::Okay
@@ -730,5 +729,76 @@ impl Dc {
         }
         restore(&default);
         Verdict::Success
+    }
+}
+
+/// The evaluator run whole: each test hands a program to `eval_string`, as
+/// `-e` does, and reads back what it wrote and what it said. (`dc-diff.sh`
+/// holds the port to Ubuntu's dc case by case; these keep the evaluator's
+/// rules under `cargo test`, where mutation testing sees them.)
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use crate::io::{Input, Output, Sink, Source};
+    use crate::{Dc, Shell, Verdict};
+
+    /// A shell that runs nothing.
+    struct NoShell;
+    impl Shell for NoShell {
+        fn system(&mut self, _command: &[u8]) {}
+    }
+
+    /// `program` evaluated as `-e`'s expression: what it wrote, what it
+    /// said, and how it ended.
+    fn dc(program: &str) -> (String, String, Verdict) {
+        let mut dc = Dc::new(
+            b"dc",
+            Output::new(Sink::Memory(Vec::new()), false, false),
+            Output::new(Sink::Memory(Vec::new()), true, false),
+            Input::new(Source::Memory(Vec::new(), 0)),
+            Box::new(NoShell),
+            None,
+        );
+        let verdict = dc.eval_string(program.as_bytes());
+        (
+            String::from_utf8(dc.out.take_written()).unwrap(),
+            String::from_utf8(dc.err.take_written()).unwrap(),
+            verdict,
+        )
+    }
+
+    #[test]
+    fn arithmetic_registers_and_arrays() {
+        let (out, err, v) = dc("2 3+p 10 3/p 3k 10 3/p 5sa la la*p 7 0:b 0;bp");
+        assert_eq!(out, "5\n3\n3.333\n25\n7\n");
+        assert_eq!(err, "");
+        assert_eq!(v, Verdict::Success);
+    }
+
+    #[test]
+    fn macros_and_their_quits_as_upstream_counts_them() {
+        assert_eq!(dc("[[1Q 1p]x 2p]x 3p").0, "1\n2\n3\n", "1Q quits nothing");
+        assert_eq!(dc("[[2Q 1p]x 2p]x 3p").0, "3\n");
+        assert_eq!(dc("[1p q 2p]x 3p").0, "1\n");
+        assert_eq!(dc("[3p]sa 1 2>a 1 2<a").0, "3\n");
+    }
+
+    #[test]
+    fn strings_and_errors() {
+        // An unterminated string takes the rest of the text, `p` and all.
+        let (out, err, _) = dc("[abc]p [abc p 1 0/ z p");
+        assert_eq!(out, "abc\n");
+        assert_eq!(err, "");
+        let (out, err, _) = dc("1 0/ 2p");
+        assert_eq!(out, "2\n");
+        assert_eq!(err, "dc: divide by zero\n");
+        let (out, err, _) = dc("G");
+        assert_eq!(out, "'G' (0107) unimplemented\n");
+        assert_eq!(err, "dc: ");
+    }
+
+    #[test]
+    fn bases_in_and_out() {
+        assert_eq!(dc("16o 255p 16i FFp 2o 5p").0, "FF\nFF\n101\n");
     }
 }

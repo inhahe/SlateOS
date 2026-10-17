@@ -27,6 +27,10 @@ pub enum Source {
         /// Whether it is the scanner's to close.
         close: bool,
     },
+    /// A program in memory, for the tests: its bytes and how far they are
+    /// read.
+    #[cfg(test)]
+    Memory(Vec<u8>, usize),
 }
 
 impl Source {
@@ -103,6 +107,16 @@ impl Scanner {
                     Ok(n) => break n,
                 }
             },
+            #[cfg(test)]
+            Some(Source::Memory(bytes, at)) => {
+                let rest = bytes.get(*at..).unwrap_or_default();
+                let n = rest.len().min(READ_SIZE);
+                if let (Some(dst), Some(src)) = (chunk.get_mut(..n), rest.get(..n)) {
+                    dst.copy_from_slice(src);
+                }
+                *at = at.saturating_add(n);
+                n
+            }
         };
         if n == 0 {
             self.eof = true;

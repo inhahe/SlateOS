@@ -7,6 +7,8 @@ description = "The C library's FILE buffering, modelled, for ports whose output 
 [dependencies]
 # Descriptors and terminals, through the C library.
 libcall = { path = "../../libcall" }
+# strerror's words, as glibc's, for perror.
+errmsg = { path = "../errmsg" }
 
 [lints]
 workspace = true

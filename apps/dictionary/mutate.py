@@ -99,11 +99,11 @@ MAIN = [
     ),
     (
         "the slash key is a shortcut again",
-        "        self.load_query();\n        let edit = textline::apply_key(",
+        "        let edit = self.query.key(ev);\n",
         "        if ev.single_char() == Some('/') {\n"
         "            return false;\n"
         "        }\n"
-        "        self.load_query();\n        let edit = textline::apply_key(",
+        "        let edit = self.query.key(ev);\n",
         ["the_slash_key_types_rather_than_being_a_shortcut_that_cannot_fire"],
     ),
     (
@@ -151,7 +151,7 @@ MAIN = [
     ),
     (
         "an answer takes the screen from a reader who moved on",
-        "                let still_there = self.screen == screen && self.query == query;",
+        "                let still_there = self.screen == screen && self.query.text() == query;",
         "                let still_there = true;",
         [MOVED_ON],
     ),
@@ -333,8 +333,8 @@ MAIN = [
     ),
     (
         "the caret shows wherever the keys go",
-        "                        focused: keyboard,\n",
-        "                        focused: true,\n",
+        "                    line_height: area.h,\n                    focused: keyboard,\n",
+        "                    line_height: area.h,\n                    focused: true,\n",
         ["the_search_field_is_the_toolkits_and_marked_while_the_keys_come_to_it"],
     ),
     (
@@ -378,22 +378,10 @@ CLICK = "the_search_field_answers_a_click_on_its_own_pixels"
 
 MAIN += [
     (
-        "a cut or a copy takes nothing to the clipboard",
-        "            self.clipboard = copied;\n",
-        "            let _ = copied;\n",
-        [EDITS],
-    ),
-    (
         "an edit of the query is not searched for",
-        "            self.query = self.query_editor.text().to_owned();\n            self.search();\n",
-        "            self.query = self.query_editor.text().to_owned();\n",
+        "        if edit.changed {\n            self.search();\n        }\n",
+        "",
         [EDITS],
-    ),
-    (
-        "a key finds the editor holding another query",
-        "        if self.query_editor.text() != self.query {\n            self.query_editor.set_text(&self.query);",
-        "        if false {\n            self.query_editor.set_text(&self.query);",
-        [SHOWN],
     ),
     (
         "the query's keys are the list's",
@@ -424,7 +412,7 @@ MAIN += [
     ),
     (
         "typing on another screen goes where the caret was left",
-        "            self.query_editor.set_text(&self.query);\n            self.query_key(ev, font);\n",
+        "            self.query.caret_to_end();\n            self.query_key(ev, font);\n",
         "            self.query_key(ev, font);\n",
         [OTHER],
     ),
@@ -441,34 +429,27 @@ MAIN += [
         [ALTGR],
     ),
     (
-        "the query's caret is drawn at its start",
-        "                let (cursor, anchor) = if keyboard {\n                    self.query_caret()",
-        "                let (cursor, anchor) = if false {\n                    self.query_caret()",
-        [EDITS],
-    ),
-    (
-        "the query's selection is not drawn",
-        "                        selection_anchor: anchor,\n",
-        "                        selection_anchor: None,\n",
-        [EDITS],
-    ),
-    (
         "an empty query's caret shows wherever the keys go",
-        "                if keyboard {\n                    textedit::push_caret(",
-        "                if true {\n                    textedit::push_caret(",
+        "                    line_height: area.h,\n                    focused: keyboard,\n",
+        "                    line_height: area.h,\n                    focused: true,\n",
         [EMPTY],
     ),
     (
         "a press puts the caret at the start",
-        "                    ev.x - area.x,\n",
-        "                    0.0,\n",
+        "                self.query.press(ev.x - area.x, area.w, had_the_keyboard);\n",
+        "                self.query.press(0.0, area.w, had_the_keyboard);\n",
         [EDITS],
     ),
     (
+        "a resize leaves the query at the size it was",
+        "        self.query.set_font_size(font);\n",
+        "",
+        ["the_query_is_drawn_at_the_windows_size"],
+    ),
+    (
         "a press in the field does not place the caret",
-        "                self.query_editor.set_selection_anchor(None);\n"
-        "                self.query_editor.set_cursor(cursor);\n",
-        "                let _ = cursor;\n",
+        "                self.query.press(ev.x - area.x, area.w, had_the_keyboard);\n",
+        "                let _ = (area, had_the_keyboard);\n",
         [EDITS, CLICK],
     ),
     # 2026-10-09: online lookups are off until the user turns them on

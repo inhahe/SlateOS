@@ -115,10 +115,10 @@ use guitk::scrollbar;
 use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
+use textline::{LineBox, LineLook};
 
 // ── Catppuccin Mocha palette ───────────────────────────────────────────────
 
@@ -1397,7 +1397,9 @@ const SHORTCUTS: &[(&str, &str)] = &[
 
 pub struct Dictionary {
     entries: Vec<DictEntry>,
-    query: String,
+    /// The search field: the query, and its caret. Drawn at the window's
+    /// size, as everything here is (`resize`).
+    query: LineBox,
     /// Indices into `entries`, best match first.
     results: Vec<usize>,
     /// The selected row and the first visible row of each list screen, indexed
@@ -1476,12 +1478,6 @@ pub struct Dictionary {
     miss: Option<Miss>,
     /// Wakes the window when a lookup's answer arrives.
     waker: Option<std::task::Waker>,
-    /// The query's editor -- its caret and selection over `query` --
-    /// reloaded when the query changed under it: cleared, or typed into from
-    /// another screen.
-    query_editor: TextInput,
-    /// What the query's Ctrl+C and Ctrl+X took, for its Ctrl+V.
-    clipboard: String,
 }
 
 /// The DICT server a lookup asks: dict.org -- or, under test, a port on
@@ -1529,7 +1525,10 @@ impl Dictionary {
             show_help: false,
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             entries: build_dictionary(),
-            query: String::new(),
+            query: LineBox::new(
+                QUERY_CAPACITY,
+                Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).font,
+            ),
             results: Vec::new(),
             sel: [0; SCREENS],
             top: [0; SCREENS],
@@ -1558,8 +1557,6 @@ impl Dictionary {
             pending: None,
             miss: None,
             waker: None,
-            query_editor: textline::field_holding("", QUERY_CAPACITY),
-            clipboard: String::new(),
         }
     }
 
@@ -1585,6 +1582,8 @@ impl Dictionary {
     /// read against the layout the reader actually saw.
     pub fn resize(&mut self, width: f32, height: f32) {
         self.size = (width.max(1.0), height.max(1.0));
+        let font = self.layout().font;
+        self.query.set_font_size(font);
     }
 
     #[must_use]
@@ -1599,7 +1598,7 @@ impl Dictionary {
 
     #[must_use]
     pub fn query(&self) -> &str {
-        &self.query
+        self.query.text()
     }
 
     /// The status line: the last file outcome if there is one, else the hint.
@@ -1695,7 +1694,7 @@ impl Dictionary {
         match screen {
             Screen::Search => {
                 let mut rows: Vec<Row> = self.results.iter().map(|&i| Row::Entry(i)).collect();
-                let query = self.query.trim();
+                let query = self.query.text().trim();
                 // Offered only when the dictionary lacks the very word: a
                 // query that is a prefix of an entry may still be a word of
                 // its own ("bank" of "bankrupt").
@@ -1832,7 +1831,7 @@ impl Dictionary {
                     word: word.to_owned(),
                     answer,
                     screen: self.screen,
-                    query: self.query.clone(),
+                    query: self.query.text().to_owned(),
                 });
             }
             Err(e) => self.status = format!("Cannot start the lookup: {e}"),
@@ -1869,7 +1868,7 @@ impl Dictionary {
                     self.entries.push(entry);
                     self.entries.len().saturating_sub(1)
                 };
-                let still_there = self.screen == screen && self.query == query;
+                let still_there = self.screen == screen && self.query.text() == query;
                 // The results are recomputed over the entry just added, so the
                 // search screen lists it where the offer to look it up was.
                 self.search();
@@ -1948,7 +1947,7 @@ impl Dictionary {
     fn search(&mut self) {
         self.results.clear();
         self.set_sel(Screen::Search, 0);
-        let query = self.query.trim().to_lowercase();
+        let query = self.query.text().trim().to_lowercase();
         if query.is_empty() {
             self.status = "Type a word, or part of one".to_string();
             return;
@@ -1965,10 +1964,10 @@ impl Dictionary {
         self.status = match self.results.len() {
             0 => format!(
                 "Nothing here matches \"{}\" \u{2014} Enter looks it up online",
-                self.query.trim()
+                self.query.text().trim()
             ),
-            1 => format!("One entry matches \"{}\"", self.query.trim()),
-            n => format!("{n} entries match \"{}\"", self.query.trim()),
+            1 => format!("One entry matches \"{}\"", self.query.text().trim()),
+            n => format!("{n} entries match \"{}\"", self.query.text().trim()),
         };
     }
 
@@ -2028,43 +2027,18 @@ impl Dictionary {
         }
     }
 
-    /// The editor loaded with the query, unless it holds it already: the
-    /// caret after it.
-    fn load_query(&mut self) {
-        if self.query_editor.text() != self.query {
-            self.query_editor.set_text(&self.query);
-        }
-    }
-
     /// A key for the query, drawn at `size`: the caret keys, Backspace and
     /// Delete at the caret, Ctrl+A, C, X and V, and typing -- what AltGr
     /// types among it, and no command's letter, which a chord carries as
     /// text. Whether the query answered it; a key that changed the query has
     /// it searched for again.
     fn query_key(&mut self, ev: &KeyEvent, size: f32) -> bool {
-        self.load_query();
-        let edit = textline::apply_key(&mut self.query_editor, ev, &self.clipboard, size);
-        if let Some(copied) = edit.copied {
-            self.clipboard = copied;
-        }
-        if self.query_editor.text() != self.query {
-            self.query = self.query_editor.text().to_owned();
+        self.query.set_font_size(size);
+        let edit = self.query.key(ev);
+        if edit.changed {
             self.search();
         }
         edit.handled
-    }
-
-    /// Where the query's caret and selection anchor are: the editor's while
-    /// it holds the query, after it and none otherwise.
-    fn query_caret(&self) -> (text::TextCursor, Option<usize>) {
-        if self.query_editor.text() == self.query {
-            (
-                self.query_editor.cursor(),
-                self.query_editor.selection_anchor(),
-            )
-        } else {
-            (text::TextCursor::from(self.query.len()), None)
-        }
     }
 
     /// Where the query is drawn in the search field: inside its padding, up
@@ -2349,16 +2323,16 @@ impl Dictionary {
     fn screen_status(&self) -> String {
         match self.screen {
             Screen::Search => {
-                if self.query.trim().is_empty() {
+                if self.query.text().trim().is_empty() {
                     "Type a word, or part of one".to_string()
                 } else {
                     match self.results.len() {
                         0 => format!(
                             "Nothing here matches \"{}\" \u{2014} Enter looks it up online",
-                            self.query.trim()
+                            self.query.text().trim()
                         ),
-                        1 => format!("One entry matches \"{}\"", self.query.trim()),
-                        n => format!("{n} entries match \"{}\"", self.query.trim()),
+                        1 => format!("One entry matches \"{}\"", self.query.text().trim()),
+                        n => format!("{n} entries match \"{}\"", self.query.text().trim()),
                     }
                 }
             }
@@ -2906,61 +2880,29 @@ impl Dictionary {
             let inner = l.pad;
             let clear_w = clear_width(l, field);
             let area = self.query_text_area(l);
+            // The query, with its caret and selection where they are while
+            // the keys come here, scrolled so the caret stays in view; from
+            // its start while they do not; empty, what it is for -- faint but
+            // readable: overlay0 is the disabled grey, 2.30:1 on the base. It
+            // is drawn at the window's size, which `resize` gave the box.
             let mut typed = RenderTree::new();
-            if self.query.is_empty() {
-                label(
-                    f,
-                    area.x,
-                    area.y,
-                    "Search a word\u{2026}",
-                    l.font,
-                    // What the field is for, faint but readable: overlay0 is
-                    // the disabled grey, 2.30:1 on the base.
-                    self.palette.subtext0,
-                    FontWeightHint::Regular,
-                    Some(area.w),
-                );
-                if keyboard {
-                    textedit::push_caret(
-                        &mut typed,
-                        area.x,
-                        area.y,
-                        area.h,
-                        self.palette.text,
-                        textedit::CARET_WIDTH,
-                    );
-                }
-            } else {
-                // The query, with its caret and selection where they are
-                // while the keys come here, scrolled so the caret stays in
-                // view; from its start while they do not. The caret was a
-                // `│` on the query's end, the only place the keys could type,
-                // and a long query was cut with an ellipsis at the letters
-                // being typed.
-                let (cursor, anchor) = if keyboard {
-                    self.query_caret()
-                } else {
-                    (text::TextCursor::default(), None)
-                };
-                textedit::draw(
-                    &mut typed,
-                    &textedit::SingleLine {
-                        text: &self.query,
-                        cursor,
-                        selection_anchor: anchor,
-                        focused: keyboard,
-                        x: area.x,
-                        y: area.y,
-                        width: area.w,
-                        line_height: area.h,
-                        font_size: l.font,
-                        weight: FontWeightHint::Regular,
-                        color: self.palette.text,
-                        selection_bg: self.palette.accent,
-                        selection_fg: self.palette.crust,
-                        caret_width: textedit::CARET_WIDTH,
-                    },
-                );
+            self.query.draw(
+                &mut typed,
+                &LineLook {
+                    x: area.x,
+                    y: area.y,
+                    width: area.w,
+                    line_height: area.h,
+                    focused: keyboard,
+                    placeholder: "Search a word\u{2026}",
+                    color: self.palette.text,
+                    placeholder_color: self.palette.subtext0,
+                    selection_bg: self.palette.accent,
+                    selection_fg: self.palette.crust,
+                    caret_width: textedit::CARET_WIDTH,
+                },
+            );
+            if !self.query.is_empty() {
                 let clear = Rect::new(
                     field.right() - inner - clear_w,
                     field.y + field.h * 0.15,
@@ -3031,7 +2973,7 @@ impl Dictionary {
         let visible = l.rows_in(pane);
         if rows.is_empty() {
             let empty = match screen {
-                Screen::Search if self.query.trim().is_empty() => {
+                Screen::Search if self.query.text().trim().is_empty() => {
                     "Start typing to search the dictionary"
                 }
                 Screen::Search => "Nothing here or in WordNet matches that",
@@ -3738,7 +3680,7 @@ impl Dictionary {
         // nor is a command's letter.
         if textline::types_into_field(ev) {
             self.screen = Screen::Search;
-            self.query_editor.set_text(&self.query);
+            self.query.caret_to_end();
             self.query_key(ev, font);
             return EventResult::Consumed;
         }
@@ -3806,24 +3748,11 @@ impl Dictionary {
             // was drawn. The field had no caret to place, and a press said so.
             Target::SearchBox => {
                 let l = self.layout();
-                let drawn = if self.search_has_keyboard() {
-                    self.query_caret().0
-                } else {
-                    text::TextCursor::default()
-                };
+                let had_the_keyboard = self.search_has_keyboard();
                 self.screen = Screen::Search;
                 let area = self.query_text_area(&l);
-                self.load_query();
-                let cursor = textedit::cursor_at_click(
-                    &self.query,
-                    drawn,
-                    area.w,
-                    l.font,
-                    FontWeightHint::Regular,
-                    ev.x - area.x,
-                );
-                self.query_editor.set_selection_anchor(None);
-                self.query_editor.set_cursor(cursor);
+                self.query.set_font_size(l.font);
+                self.query.press(ev.x - area.x, area.w, had_the_keyboard);
             }
             Target::ClearQuery => self.apply(Action::ClearQuery),
             Target::ClearHistory => self.apply(Action::ClearHistory),
@@ -4959,7 +4888,7 @@ mod tests {
             d.screen(),
             d.query(),
             // Where the query's caret and selection are drawn.
-            d.query_caret(),
+            (d.query.input().cursor(), d.query.input().selection_anchor()),
             d.current(),
             d.featured(),
             d.entry_scroll(),
@@ -7395,12 +7324,49 @@ mod tests {
         let mut d = app();
         search_for(&mut d, "ker");
         key(&mut d, &probe::press(Key::Home));
-        d.query = String::from("cache");
+        d.query.set_text("cache");
         search_for(&mut d, "s");
         assert_eq!(
             d.query(),
             "caches",
             "the key edited the query the editor held"
+        );
+    }
+
+    /// **The query is drawn at the window's size**, as everything here is:
+    /// a window made smaller draws it smaller, though no key has reached it
+    /// since.
+    #[test]
+    fn the_query_is_drawn_at_the_windows_size() {
+        // A query no entry has, so that only the field draws it -- a word
+        // the dictionary has is drawn again in its list of results.
+        let query = "qzxv";
+        let mut d = app();
+        search_for(&mut d, query);
+        let small = (400.0, 324.0);
+        d.resize(small.0, small.1);
+        let font = d.layout().font;
+        assert!(
+            (font - Layout::new(WINDOW_WIDTH, WINDOW_HEIGHT).font).abs() > 1.0,
+            "control: the two windows draw at different sizes"
+        );
+        let sizes: Vec<f32> = d
+            .draw(small)
+            .commands()
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text {
+                    text, font_size, ..
+                }
+                | RenderCommand::RichText {
+                    text, font_size, ..
+                } if text == query => Some(*font_size),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            !sizes.is_empty() && sizes.iter().all(|s| (s - font).abs() < f32::EPSILON),
+            "the query is drawn at {sizes:?}, not the window's {font}"
         );
     }
 }

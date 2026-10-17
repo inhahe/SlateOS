@@ -632,7 +632,7 @@ MAIN += [
         "the list does not follow the search",
         "            text.clone_into(&mut self.search_query);\n            self.reanchor_selection();\n",
         "            text.clone_into(&mut self.search_query);\n",
-        [S_CARET],
+        ["typing_filters_the_list_and_the_selection_stays_on_something_visible"],
     ),
     (
         "a press in the search box puts the caret nowhere",
@@ -682,6 +682,39 @@ TABLES = {
     "points.rs": POINTS,
     "main.rs": MAIN,
 }
+
+# The review of 007d0552c..752d46d80: a switched-off checkbox's reason under
+# a box's menu, and the search box in the Schedule view.
+WHY = "a_switched_off_component_says_why_while_the_pointer_rests_on_it"
+SCHEDULE = "the_search_box_has_not_the_keyboard_in_the_schedule_view"
+
+# Extends MAIN in place, the list TABLES already holds for main.rs.
+MAIN += [
+    (
+        "a switched-off reason is drawn over a box's menu",
+        "        if self.show_help || self.field_menu.is_up() {\n",
+        "        if self.show_help {\n",
+        [WHY],
+    ),
+    (
+        "the search box takes keys in the Schedule view",
+        "        if self.view_mode == ViewMode::Schedule {\n            return EventResult::Ignored;\n        }\n        self.sync_search_editor();\n",
+        "        self.sync_search_editor();\n",
+        [SCHEDULE],
+    ),
+    (
+        "the search box is marked with the keyboard in the Schedule view",
+        "                && self.view_mode != ViewMode::Schedule,\n",
+        "                && true,\n",
+        [SCHEDULE],
+    ),
+    (
+        "a press on the search stays in the Schedule view",
+        "                self.view_mode = ViewMode::Tree;\n",
+        "",
+        [SCHEDULE],
+    ),
+]
 
 if __name__ == "__main__":
     only = sys.argv[1:]

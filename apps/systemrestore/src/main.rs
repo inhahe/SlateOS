@@ -2029,7 +2029,6 @@ pub struct SystemRestoreUI {
     /// typing into (`form_text_mut`), whose string stays the truth:
     /// reloaded whenever the field changes or its text changes under it.
     form_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the form, for Ctrl+V.
     /// The search box's caret and selection: reloaded from `search_query`
     /// when that changed underneath it.
     search_editor: TextInput,
@@ -2541,9 +2540,9 @@ impl SystemRestoreUI {
     /// The component checkboxes this system cannot keep, each as drawn --
     /// its box, grown as the toolkit grows one -- with why, in a sentence:
     /// `SnapshotComponent::source`'s own answer. None with the form closed,
-    /// or with the shortcut card over it.
+    /// or with the shortcut card or a box's right-click menu over it.
     fn switched_off_components(&self) -> Vec<((f32, f32, f32, f32), String)> {
-        if self.show_help {
+        if self.show_help || self.field_menu.is_up() {
             return Vec::new();
         }
         self.component_rows()
@@ -3042,16 +3041,13 @@ impl SystemRestoreUI {
                     self.toggle_lock();
                     EventResult::Consumed
                 }
+                // The search box's own chords: select all, copy, cut, paste.
+                Key::A | Key::C | Key::X | Key::V => self.search_key(key),
                 // The snapshot-type filter. `passes_filters` has consulted it
                 // since it was written and `type_filter` was `None` at
                 // construction with no writer, so the status bar's "Filter:"
                 // half could never appear and the list could not be narrowed
                 // to, say, the snapshots taken before an update.
-                // The search box's own chords: select all, copy, cut, paste,
-                // and the caret by the word.
-                Key::A | Key::C | Key::X | Key::V | Key::Left | Key::Right | Key::Backspace => {
-                    self.search_key(key)
-                }
                 Key::F => {
                     self.type_filter = SnapshotType::step_filter(self.type_filter);
                     // The selection is a snapshot id, and the filter may have
@@ -3136,10 +3132,15 @@ impl SystemRestoreUI {
     }
 
     /// A key for the search box -- which has the keyboard whenever the list
-    /// is on screen -- at its caret, on the program's clipboard
+    /// is on screen, so not in the Schedule view, which lists no restore
+    /// point and takes Space, Left and Right for its own controls -- at its
+    /// caret, on the program's clipboard
     /// (`textline::apply_key_on_clipboard`): the list follows a change to
     /// the search. Answers whether the box did anything with the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
+        if self.view_mode == ViewMode::Schedule {
+            return EventResult::Ignored;
+        }
         self.sync_search_editor();
         let edit = textline::apply_key_on_clipboard(&mut self.search_editor, key, FONT_SIZE);
         let typed = self.search_editor.text().to_owned();
@@ -3386,6 +3387,12 @@ impl SystemRestoreUI {
         }
 
         if self.search_box_rect().contains(x, y) {
+            // From the Schedule view, a press on the search shows what it
+            // searches: the box has the keyboard where restore points are
+            // listed.
+            if self.view_mode == ViewMode::Schedule {
+                self.view_mode = ViewMode::Tree;
+            }
             self.press_search_box(x);
             return EventResult::Consumed;
         }
@@ -4046,7 +4053,10 @@ impl SystemRestoreUI {
     fn search_box_state(&self) -> field::State {
         field::State {
             hovered: false,
-            focused: self.dialog == DialogKind::None && self.progress.is_none() && !self.show_help,
+            focused: self.dialog == DialogKind::None
+                && self.progress.is_none()
+                && !self.show_help
+                && self.view_mode != ViewMode::Schedule,
             disabled: false,
             invalid: !self.search_query.is_empty() && self.visible_rows().is_empty(),
         }
@@ -6698,6 +6708,27 @@ mod tests {
             "the reason is drawn over the card"
         );
         ui.show_help = false;
+
+        // A box's right-click menu over the form takes it away too: its rows
+        // lie over the component rows, and the reason was drawn over them.
+        ui.handle_event(&mouse(x, y, MouseEventKind::Move));
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert!(ui.why_disabled.showing().is_some());
+        let (bx, by) = ui
+            .form_boxes()
+            .map(|boxes| boxes[0].1)
+            .map(|r| (r.x + 4.0, r.y + r.h / 2.0))
+            .expect("the form has boxes");
+        ui.handle_event(&mouse(bx, by, MouseEventKind::Press(MouseButton::Right)));
+        assert!(ui.field_menu.is_up(), "no menu on the form's box");
+        ui.handle_event(&mouse(x, y, MouseEventKind::Move));
+        ui.handle_event(&Event::Tick { elapsed_ms: 500 });
+        assert_eq!(
+            ui.why_disabled.showing(),
+            None,
+            "the reason is drawn over the box's menu"
+        );
+        ui.handle_event(&press(Key::Escape));
         ui.handle_event(&mouse(x, y, MouseEventKind::Move));
         ui.handle_event(&Event::Tick { elapsed_ms: 500 });
         assert!(ui.why_disabled.showing().is_some());
@@ -10464,6 +10495,38 @@ working filter from a broken one"
     /// **The search box has a right-click menu** -- Cut, Copy, Paste, Delete
     /// and Select all, on the program's clipboard -- and the list follows a
     /// paste.
+    /// **The Schedule view keeps its keys, and the search keeps its meaning**:
+    /// with no restore point listed there, the search box has not the
+    /// keyboard -- no mark, no caret, typing goes nowhere -- so Space, Left
+    /// and Right are the schedule's whatever the box holds. The box took
+    /// typing there and not the caret's keys. A press on it shows the list it
+    /// searches, with the keyboard.
+    #[test]
+    fn the_search_box_has_not_the_keyboard_in_the_schedule_view() {
+        let (_scratch, mut ui) = SystemRestoreUI::with_sample_restore_points();
+        type_text(&mut ui, "Net");
+        ui.view_mode = ViewMode::Schedule;
+        assert!(!ui.search_box_state().focused, "the box has the keyboard");
+        assert_eq!(ui.handle_event(&types('w')), EventResult::Ignored);
+        assert_eq!(ui.search_query, "Net", "typing reached the box");
+        let frequency = ui.manager.schedule.frequency;
+        ui.handle_event(&press(Key::Right));
+        assert_ne!(
+            ui.manager.schedule.frequency, frequency,
+            "Right went to the box, not the schedule"
+        );
+        let (x, y) = middle(ui.search_box_rect());
+        ui.handle_event(&click(x, y));
+        assert_eq!(
+            ui.view_mode,
+            ViewMode::Tree,
+            "the press stayed in the schedule"
+        );
+        assert!(ui.search_box_state().focused);
+        type_text(&mut ui, "w");
+        assert!(ui.search_query.contains('w'), "the box took no typing");
+    }
+
     #[test]
     fn the_search_boxs_right_click_menu_edits_the_search() {
         use guitk::editmenu::EditCommand;
@@ -10475,6 +10538,12 @@ working filter from a broken one"
             "a right-click on the box offered nothing"
         );
         assert_eq!(ui.field_menu.field(), Some(MenuField::Search));
+        let menu = ui.field_menu.render(&ui.palette);
+        let tree = ui.render_tree();
+        assert!(
+            !menu.is_empty() && tree.commands.ends_with(&menu),
+            "the menu is up and not drawn, or not drawn over the window"
+        );
         type_text(&mut ui, "x");
         assert_eq!(
             ui.search_query, "",

@@ -36,10 +36,12 @@ measured on their own against the real library by
 `scripts/smartcols-diff.sh`: 2954 tables), and so does `swapon`'s `--show`
 (`scripts/swapon-diff.sh`, 166 cases, 2026-09-27), and so does `rfkill`
 (`scripts/rfkill-diff.sh`, 341 cases, each in a namespace with a
-`/dev/rfkill` FIFO and a `/sys/class/rfkill` of its own, 2026-10-17); the
-others still do not use it.
+`/dev/rfkill` FIFO and a `/sys/class/rfkill` of its own, 2026-10-17), and so
+does `losetup` (`scripts/losetup-diff.sh`, 620 cases on WSL's loop devices
+and fake sysfs trees of its own, 2026-10-17, with `lib/loopdev.c` ported as
+`ulsysfs::loopdev`); the others still do not use it.
 
-**Where:** `losetup` (`--list`), `fdisk` (`-l`'s partition table).
+**Where:** `fdisk` (`-l`'s partition table).
 
 **The proper fix:** port each program from util-linux 2.39.3 onto
 `smartcols`, as `lsmem` was -- the program's own logic function by function,

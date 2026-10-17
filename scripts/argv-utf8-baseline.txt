@@ -66,7 +66,6 @@ userspace/lex/src/main.rs:argv-as-string
 userspace/localectl/src/main.rs:argv-as-string
 userspace/loginctl/src/main.rs:argv-as-string
 userspace/logind/src/main.rs:argv-as-string
-userspace/losetup/src/main.rs:argv-as-string
 userspace/lp/src/main.rs:argv-as-string
 userspace/lsmod/src/main.rs:argv-as-string
 userspace/lsof/src/main.rs:argv-as-string

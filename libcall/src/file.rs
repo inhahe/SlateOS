@@ -64,6 +64,7 @@ mod sys {
         pub fn openat(dir: i32, path: *const core::ffi::c_char, flags: i32, ...) -> i32;
         pub fn unlinkat(dir: i32, path: *const core::ffi::c_char, flags: i32) -> i32;
         pub fn unlink(path: *const core::ffi::c_char) -> i32;
+        pub fn access(path: *const core::ffi::c_char, mode: i32) -> i32;
         // Two `struct timespec`s as four 64-bit words, as `fd.rs` declares
         // it: one symbol may have only one declaration in a crate.
         pub fn futimens(fd: i32, times: *const [i64; 4]) -> i32;
@@ -143,6 +144,35 @@ pub fn unlink(path: &CStr) -> Result<(), i32> {
     #[cfg(not(unix))]
     {
         let _ = path;
+        Err(ENOSYS)
+    }
+}
+
+/// `access`'s `F_OK`: whether the file is there at all.
+pub const F_OK: i32 = 0;
+/// `access`'s `W_OK`: whether this process may write it.
+pub const W_OK: i32 = 2;
+
+/// `access (path, mode)`: whether this process may use `path` as `mode`
+/// asks ([`F_OK`], [`W_OK`], ...), judged by its real user and group.
+///
+/// # Errors
+///
+/// `EACCES` for a use that is not allowed, `ENOENT` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn access(path: &CStr, mode: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `path` is NUL-terminated and only read during the call.
+        if unsafe { sys::access(path.as_ptr(), mode) } == 0 {
+            Ok(())
+        } else {
+            Err(last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
         Err(ENOSYS)
     }
 }

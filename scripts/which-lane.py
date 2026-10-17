@@ -709,6 +709,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "logger-diff.sh",
         "logname-diff.sh",
         "look-diff.sh",
+        "losetup-diff.sh",
         "ls-diff.sh",
         "ls-quote-probe.py",
         "lsblk-diff.sh",

@@ -82,7 +82,6 @@ userspace/localectl  # bare deny(clippy::all)
 userspace/login
 userspace/loginctl  # bare deny(clippy::all)
 userspace/logrotate  # bare deny(clippy::all)
-userspace/losetup  # bare deny(clippy::all)
 userspace/lp
 userspace/lsmod
 userspace/lsof  # bare deny(clippy::all)

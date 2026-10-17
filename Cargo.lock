@@ -2405,7 +2405,14 @@ name = "losetup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "getoptlong",
+ "libcall",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]

@@ -156,7 +156,7 @@ two disagree.
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
 | `look` | Display lines beginning with a given string: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
-| `losetup` | Loop device management utility: `losetup`, to set up and control loop devices. | yes |  |  |
+| `losetup` | Set up and control loop devices. | yes |  |  |
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) | yes |  | `cancel`, `lpq`, `lpr`, `lprm`, `lpstat` |
 | `ls` | List directory contents. | yes | `coreutils` |  |
 | `lsblk` | List block devices. | yes |  |  |

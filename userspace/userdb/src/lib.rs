@@ -1225,7 +1225,8 @@ impl UserDb {
     /// untouched rather than after the YAML has already moved. An error
     /// removing a hint that is to go, before anything is written. Otherwise
     /// any I/O error from creating, writing or renaming a temporary file --
-    /// the hint's last, after the database is saved.
+    /// the hint's rename last, after the database is saved, its error saying
+    /// that the accounts were saved.
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         let passwd = self.to_passwd_text(path).map_err(unrepresentable)?;
@@ -1267,6 +1268,23 @@ impl UserDb {
                 }
             }
         }
+        // The hint is staged with them, so that a disk too full to hold it
+        // fails the save before anything has changed; only its rename is
+        // left for after the database's. Readable by all: it says only that
+        // someone signs in by itself, which the screen shows anyway.
+        let hint_staged = if automatic {
+            match Staged::write(&hint, AUTOLOGIN_HINT_TEXT, Access::Shared) {
+                Ok(one) => Some(one),
+                Err(e) => {
+                    for done in staged {
+                        done.abandon();
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
 
         // The database is renamed first, so that a rename that fails partway
         // leaves the truth behind its derived files rather than ahead of them:
@@ -1287,12 +1305,20 @@ impl UserDb {
             }
         }
         if let Some(e) = first_error {
+            if let Some(one) = hint_staged {
+                one.abandon();
+            }
             return Err(e);
         }
-        if automatic {
-            // Readable by all: it says only that someone signs in by itself,
-            // which the screen shows anyway.
-            Staged::write(&hint, AUTOLOGIN_HINT_TEXT, Access::Shared)?.commit()?;
+        if let Some(one) = hint_staged {
+            // The database is saved by now; an error from here says so, so
+            // that no caller reports the change as not made.
+            one.commit().map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("the accounts were saved, but {AUTOLOGIN_HINT_NAME} was not: {e}"),
+                )
+            })?;
         }
         Ok(())
     }
@@ -2464,6 +2490,42 @@ users:
             automatic(&before),
             Some("ada".to_owned()),
             "the database unchanged"
+        );
+    }
+
+    /// A hint that cannot be written fails the save before anything is
+    /// changed; one that cannot be put in place after the database was
+    /// says the accounts were saved.
+    #[test]
+    fn a_hint_that_cannot_be_written_is_said_for_what_it_is() {
+        let scratch = ScratchDir::new("userdb-autologin-hint-fail");
+        let path = scratch.path("users.yaml");
+        let hint = scratch.path(AUTOLOGIN_HINT_NAME);
+        let mut db = accounts(&[("ada", Some(1000), false, false)]);
+        db.save(&path).expect("save");
+        let before = std::fs::read_to_string(&path).expect("read");
+        // Its temporary cannot be written: nothing changes.
+        let mut temp = hint.as_os_str().to_os_string();
+        temp.push(".tmp");
+        std::fs::create_dir(&temp).expect("block the hint's temporary");
+        db.find_mut("ada").expect("ada").set_auto_login(true);
+        assert!(db.save(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "the database unchanged"
+        );
+        std::fs::remove_dir(&temp).expect("unblock");
+        // The hint's own name is a directory: the rename fails after the
+        // database is saved, and the error says so.
+        std::fs::create_dir(&hint).expect("block the hint");
+        let err = db.save(&path).expect_err("the hint cannot be put in place");
+        assert!(err.to_string().contains("the accounts were saved"), "{err}");
+        let after = UserDb::load(&path).expect("load");
+        assert_eq!(
+            automatic(&after),
+            Some("ada".to_owned()),
+            "the database saved"
         );
     }
 

@@ -1271,11 +1271,15 @@ pub fn poll_ready(handle: SocketHandle) -> KernelResult<(bool, bool, bool)> {
 }
 
 /// [`poll_ready`], with how many bytes the same answer said a receive would
-/// find waiting ([`readable_bytes`]'s count): `None` when the daemon was not
-/// asked for it (an unbound datagram socket; a stream never connected, failed
-/// or listening) or does not count. A connected stream readable with `Some(0)` waiting is at its
-/// end: one answer says so, where a second question could find the bytes
-/// another reader took in between.
+/// find waiting on a stream ([`readable_bytes`]'s count): `None` for a
+/// datagram socket, and when the daemon was not asked for it (a stream never
+/// connected, failed or listening) or does not count. A connected stream
+/// readable with `Some(0)` waiting is at its end: one answer says so, where a
+/// second question could find the bytes another reader took in between.
+///
+/// A datagram socket has no end to report, and the daemon's count leaves out
+/// the datagram the socket holds ([`SocketInner::held`]): readable with the
+/// daemon counting 0 is a held datagram, not a hang-up.
 ///
 /// # Errors
 ///
@@ -1295,8 +1299,8 @@ pub fn poll_ready_counted(handle: SocketHandle) -> KernelResult<((bool, bool, bo
             let held = !guard.held.is_empty();
             let conn = guard.owned_conn_mut()?;
             let cid = conn.conn_id();
-            let ((readable, writable, error), count) = conn.poll_counted_on(cid)?;
-            return Ok(((readable || held, writable, error), count));
+            let (readable, writable, error) = conn.poll_on(cid)?;
+            return Ok(((readable || held, writable, error), None));
         }
         return Ok(((false, true, false), None));
     }

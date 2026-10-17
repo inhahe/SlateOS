@@ -5141,10 +5141,7 @@ impl Vfs {
             let data = guard.read_at(&relative, page_off, page_buf.len())?;
             (data, crate::mm::page_cache::read_point(file))
         };
-        let n = data.len().min(page_buf.len());
-        if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
-            dst.copy_from_slice(src);
-        }
+        fill_page_buf(page_buf, &data);
         Ok(point)
     }
 
@@ -5168,45 +5165,30 @@ impl Vfs {
         offset: u64,
         len: usize,
     ) -> KernelResult<Vec<u8>> {
-        let path = path.as_ref();
-        let path = Self::resolve_follow(path)?;
-        Self::read_at_uncached_resolved(&path, offset, len)
-    }
-
-    /// Like [`read_at_uncached`](Self::read_at_uncached) but on an
-    /// **already-resolved** host path (see
-    /// [`read_at_resolved`](Self::read_at_resolved)).
-    pub fn read_at_uncached_resolved(
-        path: impl AsRef<Path>,
-        offset: u64,
-        len: usize,
-    ) -> KernelResult<Vec<u8>> {
-        let path = path.as_ref();
-        check_path_access(path, PathAccess::Read)?;
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
+        let path = Self::resolve_follow(path.as_ref())?;
+        check_path_access(&path, PathAccess::Read)?;
+        let (fs, _id, _opts, relative) = resolve_mount(&path)?;
         fs.lock().read_at(&relative, offset, len)
     }
 
-    /// [`read_at_uncached_resolved`](Self::read_at_uncached_resolved) for a
-    /// page-cache fill of `file`, the file at `path`: with the bytes, the
-    /// read's point in the file's changes, taken under the filesystem's lock
-    /// with the read ([`crate::mm::page_cache::read_point`]).
+    /// A page-cache fill of `file`, the file at the **already-resolved**
+    /// `path`: `buf` filled from the filesystem at `offset`, past the cache
+    /// (bytes past the file's end left as they are), and the read's point in
+    /// the file's changes, taken under the filesystem's lock with the read
+    /// ([`crate::mm::page_cache::read_point`]). Checked as a read of `path`.
     ///
     /// # Errors
     ///
-    /// As [`read_at_uncached_resolved`](Self::read_at_uncached_resolved).
+    /// The access check's refusal; the filesystem's own.
     pub fn fill_read_resolved(
         path: impl AsRef<Path>,
         file: FileId,
         offset: u64,
-        len: usize,
-    ) -> KernelResult<(Vec<u8>, crate::mm::page_cache::ReadPoint)> {
+        buf: &mut [u8],
+    ) -> KernelResult<crate::mm::page_cache::ReadPoint> {
         let path = path.as_ref();
         check_path_access(path, PathAccess::Read)?;
-        let (fs, _id, _opts, relative) = resolve_mount(path)?;
-        let mut guard = fs.lock();
-        let data = guard.read_at(&relative, offset, len)?;
-        Ok((data, crate::mm::page_cache::read_point(file)))
+        Self::fill_file_page(path, file, offset, buf)
     }
 
     /// What a write through the **already-resolved** `path` answers without
@@ -5806,12 +5788,7 @@ impl Vfs {
             .map_err(|_| KernelError::OutOfMemory)?;
         buf.resize(out_len, 0u8);
         crate::mm::page_cache::read_through(obj.id(), offset, &mut buf, |page_off, page_buf| {
-            let (data, point) = Self::object_fill_read(obj, page_off, page_buf.len())?;
-            let n = data.len().min(page_buf.len());
-            if let (Some(dst), Some(src)) = (page_buf.get_mut(..n), data.get(..n)) {
-                dst.copy_from_slice(src);
-            }
-            Ok(point)
+            Self::object_fill_read(obj, page_off, page_buf)
         })?;
         if super::notify::interest_includes(super::notify::FsEventMask::ACCESS) {
             super::notify::emit(super::notify::FsEventType::Accessed, path, None);
@@ -5819,10 +5796,10 @@ impl Vfs {
         Ok(buf)
     }
 
-    /// [`object_read`](Self::object_read) straight from the filesystem, past
-    /// the page cache: the cache's own fill. With the bytes, the read's point
-    /// in the file's changes, taken under the filesystem's lock with the read
-    /// ([`crate::mm::page_cache::read_point`]).
+    /// [`fill_read_resolved`](Self::fill_read_resolved) through an object:
+    /// `buf` filled straight from the filesystem at `offset`, past the page
+    /// cache (bytes past the file's end left as they are), and the read's
+    /// point in the file's changes. The open was the access check.
     ///
     /// # Errors
     ///
@@ -5830,11 +5807,15 @@ impl Vfs {
     pub fn object_fill_read(
         obj: &FileObject,
         offset: u64,
-        len: usize,
-    ) -> KernelResult<(Vec<u8>, crate::mm::page_cache::ReadPoint)> {
-        let mut guard = obj.fs.lock();
-        let data = guard.read_ino(obj.ino, offset, len)?;
-        Ok((data, crate::mm::page_cache::read_point(obj.id())))
+        buf: &mut [u8],
+    ) -> KernelResult<crate::mm::page_cache::ReadPoint> {
+        let (data, point) = {
+            let mut guard = obj.fs.lock();
+            let data = guard.read_ino(obj.ino, offset, buf.len())?;
+            (data, crate::mm::page_cache::read_point(obj.id()))
+        };
+        fill_page_buf(buf, &data);
+        Ok(point)
     }
 
     /// Write through an object at `offset`.
@@ -12012,6 +11993,16 @@ fn seal_mode_guard(
 /// Both checks bypass for kernel tasks (no owning process) and for uid 0, and
 /// both fail *open* when no tag/ACL covers the path — deferring to the
 /// traditional permission bits checked elsewhere.
+/// A page-cache fill's copy: what the filesystem read, into the front of
+/// `buf`, which is the length asked for; a short read (the file's end) leaves
+/// the rest of `buf` as it was, zeros.
+fn fill_page_buf(buf: &mut [u8], data: &[u8]) {
+    let n = data.len().min(buf.len());
+    if let (Some(dst), Some(src)) = (buf.get_mut(..n), data.get(..n)) {
+        dst.copy_from_slice(src);
+    }
+}
+
 pub(crate) fn check_path_access(path: &Path, want: PathAccess) -> KernelResult<()> {
     // Fast path: nothing is configured, so nothing can deny. Both counts are
     // relaxed atomic loads, so an unconfigured system pays two loads per VFS

@@ -14079,7 +14079,8 @@ fn mmap_access(entry: &FdEntry) -> Result<(bool, bool), i32> {
 /// Linux's `prot` and `flags` and answered in Linux errnos, as `mmap(2)`
 /// would answer for a descriptor of it. One body for both ABIs, so a native
 /// program's mapping is the Linux one: a private mapping demand-paged, a
-/// read-only shared one served as a copy, a writable shared one refused.
+/// shared one mapping the file's pages in the page cache, written back when
+/// it writes them (design-decisions §1572).
 /// The offset must be 4 KiB-aligned (`EINVAL`), as Linux's `mmap` opens with.
 ///
 /// The caller has checked that it holds `handle`.
@@ -14096,36 +14097,6 @@ pub(crate) fn native_file_mmap(handle: u64, args: &SyscallArgs) -> SyscallResult
     )
 }
 
-/// Map a regular file (or `memfd`) into the calling process — the
-/// file-backed `mmap(2)` path that backs `ld.so`'s shared-object loading
-/// (glibc `_dl_map_segments`) and `MAP_PRIVATE` data maps.
-///
-/// ## Model: eager private copy
-///
-/// We do not demand-page or write back.  Each 16 KiB frame of the mapping
-/// is allocated zeroed, the corresponding file bytes are read into it
-/// (`read_at`), and it is mapped at `prot`-derived permissions.  Bytes past
-/// EOF stay zero, matching Linux's page-tail zero-fill.  A [`Vma`] of kind
-/// [`crate::mm::vma::VmaKind::Fixed`] ("already fully backed") is registered so
-/// `/proc/<pid>/maps` reflects the mapping and the fault resolver treats a
-/// fault in the range as a bug.
-///
-/// ## `MAP_FIXED`
-///
-/// `ld.so` first reserves the whole load span (one file-backed
-/// `MAP_PRIVATE`), then overlays each segment with `MAP_FIXED`.  When
-/// `MAP_FIXED` is set we first clear the target range — unmap/free any frames
-/// there ([`crate::mm::user::unmap_user_range`]) and split/remove the covering VMAs
-/// ([`pcb::remove_vma_range`]) — exactly as Linux silently replaces existing
-/// mappings.
-///
-/// ## Shared mappings
-///
-/// A `MAP_SHARED` mapping of a file with a stable identity maps its page cache
-/// (design-decisions §1572), writable or not. One of a file without a stable
-/// identity is served read-only as a private copy, and refused writable
-/// (`ENODEV`); a writable one of a memfd is not built (`ENOSYS`). Kinds other
-/// than files and memfds → `ENODEV`.
 /// Count a shared mapping of `file` in the page cache
 /// (`page_cache::shared_map_added`, the mapping's `handle` its writer when it
 /// `may_write`), then look at the file's seals again: a `WRITE` seal added
@@ -14183,6 +14154,32 @@ fn seals_forbid_writable_maps(file: crate::fs::vfs::FileId) -> bool {
         .intersects(SealFlags::WRITE.union(SealFlags::FUTURE_WRITE))
 }
 
+/// Map a regular file (a memfd is one: design-decisions §1573) into the
+/// calling process — the file-backed `mmap(2)` behind `ld.so`'s
+/// shared-object loading (glibc `_dl_map_segments`), `MAP_PRIVATE` data maps
+/// and `MAP_SHARED` ones.
+///
+/// ## Model
+///
+/// A private mapping, and a shared one of a file with a stable identity, is
+/// demand-paged: a [`crate::mm::vma::VmaKind::FileBacked`] VMA holding its
+/// own handle on the open file, each page faulted in on first touch. A
+/// private one copies a page on its first write, which never reaches the
+/// file. A shared one maps the file's page-cache frames themselves
+/// (design-decisions §1572): it sees every write to the file, and its stores
+/// are saved to it. A shared one of a file without a stable identity has no
+/// cache to share: it is served read-only, as a copy filled now
+/// ([`crate::mm::vma::VmaKind::Fixed`], "already fully backed"), and refused
+/// writable (`ENODEV`). Kinds other than files → `ENODEV`.
+///
+/// ## `MAP_FIXED`
+///
+/// `ld.so` first reserves the whole load span (one file-backed
+/// `MAP_PRIVATE`), then overlays each segment with `MAP_FIXED`.  When
+/// `MAP_FIXED` is set we first clear the target range — unmap/free any frames
+/// there ([`crate::mm::user::unmap_user_range`]) and split/remove the covering VMAs
+/// ([`pcb::remove_vma_range`]) — exactly as Linux silently replaces existing
+/// mappings.
 #[allow(clippy::too_many_arguments)]
 fn linux_file_mmap(
     entry: &FdEntry,
@@ -14235,17 +14232,16 @@ fn linux_file_mmap(
         return linux_err(errno::EACCES);
     }
 
-    // Only regular files and memfds are mappable here.  Pipes, sockets,
+    // Only files (memfds among them) are mappable here.  Pipes, sockets,
     // eventfds, etc. are not (Linux: ENODEV).
-    match entry.kind {
-        HandleKind::File => {}
-        _ => return linux_err(errno::ENODEV),
+    if entry.kind != HandleKind::File {
+        return linux_err(errno::ENODEV);
     }
     // A shared map of a file the handle holds maps the page cache, so it
     // sees every write to the file and every write through it reaches the
     // file (§1572). One of a file without a stable identity is served as the
     // private copy it always was: such a file has no cache to share.
-    let shared_file = if shared && matches!(entry.kind, HandleKind::File) {
+    let shared_file = if shared {
         // A handle the table no longer has is the descriptor's error, not a
         // reason to serve a private copy that never sees the file change.
         match crate::fs::handle::held_identity(entry.raw_handle) {
@@ -14365,12 +14361,13 @@ fn linux_file_mmap(
         }
 
         // Private file overlay — ld.so's per-segment shared-object loading
-        // (`_dl_map_segments`).  Register a *demand-paged* `FileBacked` VMA so
-        // the per-subpage fault resolver backs it lazily: this is the only
-        // path that correctly handles a 4 KiB segment sharing a 16 KiB frame
-        // with an adjacent, differently-permissioned segment (an eager
-        // whole-16-KiB-frame fill would clobber the neighbour's subpages).
-        if matches!(entry.kind, HandleKind::File) && (private || shared_file.is_some()) {
+        // (`_dl_map_segments`) — or a shared map of the page cache.  Register
+        // a *demand-paged* `FileBacked` VMA so the per-subpage fault resolver
+        // backs it lazily: this is the only path that correctly handles a
+        // 4 KiB segment sharing a 16 KiB frame with an adjacent,
+        // differently-permissioned segment (an eager whole-16-KiB-frame fill
+        // would clobber the neighbour's subpages).
+        if private || shared_file.is_some() {
             let mapped_handle = match crate::fs::handle::dup_shared(entry.raw_handle) {
                 Ok(h) => h,
                 Err(_) => {
@@ -14401,6 +14398,8 @@ fn linux_file_mmap(
             if let Some(file) = shared_file
                 && !count_shared_map(file, may_write, mapped_handle)
             {
+                // Our own handle, opened above and not yet given to a VMA: its
+                // close can fail only on a handle that is not open, which this is.
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
                 return linux_err(errno::EPERM);
@@ -14421,6 +14420,8 @@ fn linux_file_mmap(
                 if let Some(file) = shared_file {
                     crate::mm::page_cache::shared_map_removed(file, may_write);
                 }
+                // Our own handle, opened above and not yet given to a VMA: its
+                // close can fail only on a handle that is not open, which this is.
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
                 return linux_err(errno::ENOMEM);
@@ -14429,7 +14430,8 @@ fn linux_file_mmap(
             return SyscallResult::ok(base as i64);
         }
 
-        // Eager fixed fill (memfd / read-only shared).  Maps whole 16 KiB
+        // Eager fixed fill (a read-only shared map of a file with no stable
+        // identity, so no page cache to share).  Maps whole 16 KiB
         // frames via `map_frame`, so it requires a 16 KiB-aligned base; a
         // sub-frame-aligned base here yields `BadAlignment` from the fill
         // (surfaced as the mapped errno).  glibc never takes this path.
@@ -14439,7 +14441,7 @@ fn linux_file_mmap(
             want_frames,
             frame_size,
             hhdm,
-            entry,
+            entry.raw_handle,
             offset,
             page_flags,
         ) {
@@ -14476,16 +14478,12 @@ fn linux_file_mmap(
         return linux_err(errno::ENOMEM);
     }
 
-    // Demand-paged fast path (TD22): a private mapping of a regular file is
-    // served lazily by the page-fault handler.  Reserve a `FileBacked` VMA
-    // that owns its own reference to the open file and return immediately —
-    // no frames are allocated until first touch, and private writes
-    // copy-on-fault without ever reaching the file.
-    //
-    // memfd-backed maps and read-only shared maps take the eager path
-    // below: memfd has a separate handle layer, and there is little to gain
-    // from demand-paging them.
-    if matches!(entry.kind, HandleKind::File) && (private || shared_file.is_some()) {
+    // Demand-paged (TD22): a private mapping of a file, or a shared one of
+    // its page cache, is served lazily by the page-fault handler.  Reserve a
+    // `FileBacked` VMA that owns its own reference to the open file and
+    // return immediately — no frames are allocated until first touch, and
+    // private writes copy-on-fault without ever reaching the file.
+    if private || shared_file.is_some() {
         // Take an independent reference on the open file description so the
         // mapping keeps working after the caller closes its fd.  The
         // reserved VMA owns this reference; `remove_vma` releases it.
@@ -14520,6 +14518,8 @@ fn linux_file_mmap(
         if let Some(file) = shared_file
             && !count_shared_map(file, may_write, mapped_handle)
         {
+            // Our own handle, opened above and not yet given to a VMA: its
+            // close can fail only on a handle that is not open, which this is.
             let _ = crate::fs::handle::close(mapped_handle);
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::EPERM);
@@ -14539,6 +14539,8 @@ fn linux_file_mmap(
                 if let Some(file) = shared_file {
                     crate::mm::page_cache::shared_map_removed(file, may_write);
                 }
+                // Our own handle, opened above and not yet given to a VMA: its
+                // close can fail only on a handle that is not open, which this is.
                 let _ = crate::fs::handle::close(mapped_handle);
                 pcb::linux_as_release(pid, length_aligned);
                 return linux_err(errno::ENOMEM);
@@ -14548,9 +14550,9 @@ fn linux_file_mmap(
         return SyscallResult::ok(base as i64);
     }
 
-    // Eager non-fixed map (memfd-backed, or read-only shared): reserve a
-    // `Fixed` VMA (already fully backed once filled), then fill it; on any
-    // failure remove the reservation and refund.
+    // Eager non-fixed map (a read-only shared map of a file with no stable
+    // identity): reserve a `Fixed` VMA (already fully backed once filled),
+    // then fill it; on any failure remove the reservation and refund.
     let base = match pcb::reserve_unmapped_area(
         pid,
         length_aligned,
@@ -14571,7 +14573,7 @@ fn linux_file_mmap(
         want_frames,
         frame_size,
         hhdm,
-        entry,
+        entry.raw_handle,
         offset,
         page_flags,
     ) {
@@ -14583,8 +14585,9 @@ fn linux_file_mmap(
     SyscallResult::ok(base as i64)
 }
 
-/// Allocate, fill from the backing object, and map every frame of an eager
-/// file mapping covering `[base, base + want_frames * frame_size)`.
+/// Allocate, fill from the open file `handle` at `offset` on, and map every
+/// frame of an eager file mapping covering
+/// `[base, base + want_frames * frame_size)`.
 ///
 /// On the first failure it tears down the frames already mapped in this
 /// call (via [`linux_file_mmap_rollback`]) and returns the Linux errno to
@@ -14600,13 +14603,12 @@ fn linux_file_mmap_fill(
     want_frames: usize,
     frame_size: u64,
     hhdm: u64,
-    entry: &FdEntry,
+    handle: u64,
     offset: u64,
     page_flags: crate::mm::page_table::PageFlags,
 ) -> Result<(), i32> {
     use crate::mm::frame::{self, FRAME_SIZE};
     use crate::mm::page_table::{self, VirtAddr};
-    use crate::proc::linux_fd::HandleKind;
 
     for i in 0..want_frames {
         let voff = u64::try_from(i)
@@ -14645,12 +14647,7 @@ fn linux_file_mmap_fill(
         // SAFETY: `frame_virt` is the HHDM mapping of a freshly allocated,
         // exclusively owned, zeroed frame of exactly FRAME_SIZE bytes.
         let buf = unsafe { core::slice::from_raw_parts_mut(frame_virt as *mut u8, FRAME_SIZE) };
-        let read_res = match entry.kind {
-            HandleKind::File => crate::fs::handle::read_at(entry.raw_handle, file_off, buf),
-            // Unreachable: kind validated by the caller.
-            _ => Err(crate::error::KernelError::InvalidArgument),
-        };
-        if read_res.is_err() {
+        if crate::fs::handle::read_at(handle, file_off, buf).is_err() {
             // SAFETY: `pf` was just allocated by us and is not mapped.
             let _ = unsafe { frame::free_frame(pf) };
             linux_file_mmap_rollback(pml4, base, i, frame_size);
@@ -18625,16 +18622,10 @@ fn affinity_thread(pid: i32) -> Option<crate::sched::task::TaskId> {
 // ---------------------------------------------------------------------------
 // Filesystem sync syscalls
 //
-// We don't have a unified buffer-cache flush mechanism yet, so the
-// actual durability promise is a no-op.  We *do*, however, validate
-// the fd: previously these accepted any fd unconditionally and
-// returned 0, which let bugs like fsync(closed_fd) silently "succeed"
-// instead of returning EBADF as Linux does.  After batch 50, the
-// caller sees the same error structure as Linux even though the
-// underlying flush is still a no-op for valid fds.
-//
-// Tracked in todo.txt: real durability when storage drivers + a
-// page-cache layer land.
+// What they flush: the pages shared mappings have dirtied, which the page
+// cache holds until it saves them (design-decisions §1572), then the
+// filesystem itself (`Filesystem::sync`). A `write(2)` reaches the filesystem
+// at once and needs only the second.
 // ---------------------------------------------------------------------------
 
 /// `fsync(fd)` — flush all writes for `fd` to durable storage.
@@ -18644,11 +18635,9 @@ fn affinity_thread(pid: i32) -> Option<crate::sched::task::TaskId> {
 ///   - `EINVAL` if `fd` refers to a Pipe or Console — those aren't
 ///     regular files and don't support sync (Linux's "Operation not
 ///     supported").
-///   - `0` for regular File handles.  Real persistence will land when
-///     the storage subsystem grows a write-back cache; today the FS
-///     is in-memory and writes are immediately "durable" against the
-///     only failure mode we have (process death — kernel restart
-///     wipes everything anyway).
+///   - `EIO` when a dirty page or the filesystem could not be saved.
+///   - `0` for a regular file once its dirty pages are saved and its
+///     filesystem flushed.
 fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;
@@ -18658,8 +18647,7 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
     };
     match entry.kind {
         // The file's dirty pages, written through shared mappings, are saved
-        // (design-decisions §1572), then its filesystem flushed: what fsync
-        // promises. It used to answer 0 having done neither.
+        // (design-decisions §1572), then its filesystem flushed.
         HandleKind::File => match crate::fs::handle::sync_file(entry.raw_handle) {
             Ok(()) => SyscallResult::ok(0),
             Err(_) => linux_err(errno::EIO),
@@ -18688,9 +18676,8 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Same validation surface as [`sys_fsync`]; the only Linux-side
 /// difference is that fdatasync may skip metadata writes (mtime,
-/// permissions).  Since our FS is in-memory we have no metadata
-/// write-back layer to skip either, so the two syscalls degenerate to
-/// the same implementation.
+/// permissions). The filesystems flush data and metadata in one
+/// `Filesystem::sync`, with nothing to skip, so the two are one.
 fn sys_fdatasync(args: &SyscallArgs) -> SyscallResult {
     sys_fsync(args)
 }
@@ -18699,9 +18686,9 @@ fn sys_fdatasync(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Parameterless; nothing to validate.  Returns 0 unconditionally.
 fn sys_sync(_args: &SyscallArgs) -> SyscallResult {
-    // Every file's dirty pages, then every filesystem flushed (`Vfs::sync`):
-    // it used to answer 0 having done neither. sync(2) reports no error, so
-    // a failure is the next fsync's to find.
+    // Every file's dirty pages, then every filesystem flushed (`Vfs::sync`).
+    // sync(2) reports no error, so a failure is the next fsync's to find:
+    // a page that could not be saved stays dirty.
     let _ = crate::fs::Vfs::sync();
     SyscallResult::ok(0)
 }
@@ -18710,13 +18697,11 @@ fn sys_sync(_args: &SyscallArgs) -> SyscallResult {
 ///
 /// Linux semantics that we enforce:
 ///   - `EBADF` if `fd` is not a valid file descriptor.
-///   - `0` for any valid fd, regardless of kind.  Unlike fsync, Linux
-///     does *not* require the fd to refer to a regular file: syncfs
-///     looks up the superblock containing the fd's inode and flushes
-///     that, which is sensible for any fd whose inode lives on a
-///     real filesystem.  Console/Pipe fds in our model don't have a
-///     backing FS but the syscall is best-effort anyway, so silent
-///     success matches the spirit of the Linux semantics.
+///   - `EIO` when a dirty page or a filesystem could not be saved.
+///   - `0` otherwise, for any kind of fd.  Unlike fsync, Linux does
+///     *not* require the fd to refer to a regular file: syncfs flushes
+///     the superblock holding the fd's inode, and a pipe's or a
+///     socket's is a pseudo-filesystem's with nothing to flush.
 fn sys_syncfs(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let fd = args.arg0 as i32;

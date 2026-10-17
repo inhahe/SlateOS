@@ -1396,15 +1396,10 @@ pub fn fill_read(
         return Ok(crate::mm::page_cache::read_point(file));
     }
     // Past the end, the filesystem itself returns nothing.
-    let (data, point) = match &object {
-        Some(obj) => crate::fs::Vfs::object_fill_read(obj, offset, buf.len())?,
-        None => crate::fs::Vfs::fill_read_resolved(&path, file, offset, buf.len())?,
-    };
-    let copy_len = data.len().min(buf.len());
-    if let (Some(dest), Some(src)) = (buf.get_mut(..copy_len), data.get(..copy_len)) {
-        dest.copy_from_slice(src);
+    match &object {
+        Some(obj) => crate::fs::Vfs::object_fill_read(obj, offset, buf),
+        None => crate::fs::Vfs::fill_read_resolved(&path, file, offset, buf),
     }
-    Ok(point)
 }
 
 /// Write bytes at an explicit `offset`, **without** modifying the

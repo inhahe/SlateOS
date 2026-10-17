@@ -1231,6 +1231,84 @@ mod tests {
         assert_eq!(d.0, ["warn: non-zero scale in exponent"]);
     }
 
+    /// A carry into a new leading digit, a subtrahend with more places
+    /// than the minuend, a divisor whose places end in zeros.
+    #[test]
+    fn carries_borrows_and_trailing_zeros() {
+        assert_eq!(show(&add(&n("99.5"), &n("0.5"), 0), 10), "100.0");
+        assert_eq!(show(&add(&n("9"), &n("1"), 0), 10), "10");
+        assert_eq!(show(&sub(&n("1"), &n("0.25"), 0), 10), ".75");
+        assert_eq!(show(&sub(&n("3.1"), &n("1.05"), 0), 10), "2.05");
+        assert_eq!(show(&divide(&n("1"), &n("0.05"), 2).unwrap(), 10), "20.00");
+        assert_eq!(show(&divide(&n("3"), &n("1.50"), 1).unwrap(), 10), "2.0");
+    }
+
+    /// The four operations against `i128` on seeded random operands --
+    /// many enough that Knuth's division meets its rare case, a quotient
+    /// digit guessed one too high and added back.
+    #[test]
+    fn operations_agree_with_integer_arithmetic() {
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut next = |limit: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % limit
+        };
+        // `places` digits after the point, as bc writes them: a zero as `0`.
+        let text = |v: i128, places: u32| -> String {
+            if v == 0 {
+                return "0".to_owned();
+            }
+            let neg = v < 0;
+            let mag = v.unsigned_abs();
+            let unit = 10u128.pow(places);
+            let (int, frac) = (mag / unit, mag % unit);
+            let mut s = String::new();
+            if neg && mag != 0 {
+                s.push('-');
+            }
+            if int != 0 || places == 0 {
+                s.push_str(&int.to_string());
+            }
+            if places > 0 {
+                s.push('.');
+                s.push_str(&format!("{frac:0width$}", width = places as usize));
+            }
+            s
+        };
+        for _ in 0..4000 {
+            let magnitude = i128::from(next(10u64.pow(18)));
+            let a = if next(2) == 0 { magnitude } else { -magnitude };
+            let width = next(12) as u32 + 1;
+            let b = i128::from(next(10u64.pow(width)).max(1));
+            let (pa, pb) = (next(4) as u32, next(4) as u32);
+            let (x, y) = (n(&text(a, pa)), n(&text(b, pb)));
+            // Both at the larger number of places.
+            let p = pa.max(pb);
+            let (ai, bi) = (a * 10i128.pow(p - pa), b * 10i128.pow(p - pb));
+            assert_eq!(
+                show(&add(&x, &y, 0), 10),
+                text(ai + bi, p),
+                "{a}e-{pa} + {b}e-{pb}"
+            );
+            assert_eq!(
+                show(&sub(&x, &y, 0), 10),
+                text(ai - bi, p),
+                "{a}e-{pa} - {b}e-{pb}"
+            );
+            // The quotient to `q` places, truncated toward zero.
+            let q = next(6) as u32;
+            let want = ai * 10i128.pow(q) / bi;
+            let got = divide(&x, &y, q as usize).unwrap();
+            assert_eq!(
+                show(&got, 10),
+                text(want, q),
+                "{a}e-{pa} / {b}e-{pb} to {q}"
+            );
+        }
+    }
+
     #[test]
     fn longs_overflow_at_upstream_s_bound() {
         assert_eq!(num2long(&n("2147483647")), 2_147_483_647);

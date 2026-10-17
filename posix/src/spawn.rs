@@ -1733,16 +1733,16 @@ impl Drop for OpenedHandles {
 /// `addfchdir_np` action needs a path, since the kernel is told the child's
 /// directory by name.
 ///
-/// `held` is the descriptors that are open but cannot cross because the
-/// child could not learn what they are -- a datagram or sequenced-packet Unix
-/// socket ([`crosses`]) -- though the kernel knows their handle's type: no
-/// child is handed one, and an `exec` closes them with the close-on-exec
-/// ones, so that no handle outlives its descriptor. A number is in at most
-/// one of the three arrays.
+/// `stays` marks the descriptors that are open but cannot cross
+/// ([`crosses`]): no child is handed one, and a file action that names one
+/// fails (`EOPNOTSUPP`). A datagram or sequenced-packet Unix socket is also
+/// close-on-exec here -- its handle's type is one the kernel knows, so an
+/// `exec` closes it; a namespace's or a device's is in neither array, as the
+/// kernel's map has no type for it.
 struct ChildFds {
     virt: [Option<(u8, u64)>; MAX_FD_MAP],
     cloexec: [Option<(u8, u64)>; MAX_FD_MAP],
-    held: [Option<(u8, u64)>; MAX_FD_MAP],
+    stays: [bool; MAX_FD_MAP],
     from: [Option<Fd>; MAX_FD_MAP],
 }
 
@@ -1752,22 +1752,22 @@ impl ChildFds {
         Self {
             virt: [None; MAX_FD_MAP],
             cloexec: [None; MAX_FD_MAP],
-            held: [None; MAX_FD_MAP],
+            stays: [false; MAX_FD_MAP],
             from: [None; MAX_FD_MAP],
         }
     }
 
     /// Close `fd` in the child, whether or not it was close-on-exec.
     fn close(&mut self, fd: usize) {
-        if let (Some(v), Some(c), Some(h), Some(f)) = (
+        if let (Some(v), Some(c), Some(s), Some(f)) = (
             self.virt.get_mut(fd),
             self.cloexec.get_mut(fd),
-            self.held.get_mut(fd),
+            self.stays.get_mut(fd),
             self.from.get_mut(fd),
         ) {
             *v = None;
             *c = None;
-            *h = None;
+            *s = false;
             *f = None;
         }
     }
@@ -1777,6 +1777,7 @@ impl ChildFds {
     fn is_open(&self, fd: usize) -> bool {
         self.virt.get(fd).is_some_and(Option::is_some)
             || self.cloexec.get(fd).is_some_and(Option::is_some)
+            || self.stays.get(fd).copied().unwrap_or(false)
     }
 }
 
@@ -1809,7 +1810,7 @@ fn crosses(fd: Fd, entry: &crate::fdtable::FdEntry) -> bool {
 }
 
 /// Whether `fd` is a datagram or sequenced-packet Unix socket: one the kernel
-/// can close at `exec` ([`ChildFds`]'s `held`), but no child can be handed.
+/// can close at `exec`, but no child can be handed ([`ChildFds`]' `stays`).
 fn is_a_message_socket(fd: Fd, entry: &crate::fdtable::FdEntry) -> bool {
     entry.kind == crate::fdtable::HandleKind::UnixSocket
         && crate::unix_socket::sock_type(fd) != crate::socket::SOCK_STREAM
@@ -1824,9 +1825,12 @@ fn inheritable_fds() -> ChildFds {
         #[allow(clippy::cast_possible_wrap)]
         let fd = idx as i32;
         if let Some(entry) = fdtable::get_fd(fd) {
-            if is_a_message_socket(fd, &entry) {
-                out.held[idx] = Some((fd_handle_type::UNIX_SOCKET, entry.handle));
-            } else if crosses(fd, &entry) {
+            if !crosses(fd, &entry) {
+                out.stays[idx] = true;
+                if is_a_message_socket(fd, &entry) {
+                    out.cloexec[idx] = Some((fd_handle_type::UNIX_SOCKET, entry.handle));
+                }
+            } else {
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // Close-on-exec fds are not inherited unless an action says so.
                 if entry.flags & fdtable::FD_CLOEXEC == 0 {
@@ -1968,22 +1972,19 @@ fn apply_file_actions(
                 // have left it.
                 let src = child_slot(slot.fd)?;
                 let dst = child_slot(slot.newfd)?;
-                let entry = if src == dst {
-                    // Same number: POSIX makes this the way to hand over a
-                    // close-on-exec descriptor, so look there as well.
-                    child.virt[src].or(child.cloexec[src])
-                } else {
-                    child.virt[src]
-                };
                 // Open, but not one a child can be handed.
-                if entry.is_none() && child.held[src].is_some() {
+                if child.stays[src] {
                     return Err(errno::EOPNOTSUPP);
                 }
+                // A close-on-exec source too: the actions run before the
+                // exec that would close it, and `dup2(fd, fd)` is POSIX's
+                // way to hand one over.
+                let entry = child.virt[src].or(child.cloexec[src]);
                 child.virt[dst] = Some(entry.ok_or(errno::EBADF)?);
                 // `dup2` clears `FD_CLOEXEC` on the new descriptor, and it now
                 // shares `src`'s table entry and path.
                 child.cloexec[dst] = None;
-                child.held[dst] = None;
+                child.stays[dst] = false;
                 child.from[dst] = child.from[src];
             }
             3 => {
@@ -2006,9 +2007,16 @@ fn apply_file_actions(
                 opened.push(fd)?;
                 let entry = fdtable::get_fd(fd).ok_or(errno::EBADF)?;
                 // A namespace's link, or a sound card's device: nothing the
-                // kernel's map could hand over.
+                // kernel's map could hand over -- unless the child's exec
+                // would close it anyway, before anything could use it.
                 if !crosses(fd, &entry) {
-                    return Err(errno::EOPNOTSUPP);
+                    if slot.oflag & crate::fcntl::O_CLOEXEC == 0 {
+                        return Err(errno::EOPNOTSUPP);
+                    }
+                    child.close(target);
+                    child.stays[target] = true;
+                    child.from[target] = Some(fd);
+                    continue;
                 }
                 let wire = Some((kind_to_handle_type(entry.kind), entry.handle));
                 // `O_CLOEXEC` on an action's open means the child's exec
@@ -2082,8 +2090,8 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
 
 /// The handles an `exec` drops a descriptor of, written to `out` (each
 /// entry's `fd` 0, which the kernel ignores), and how many: those of
-/// `child`'s close-on-exec descriptors and of those it holds but cannot
-/// hand over (`held`), each once.
+/// `child`'s close-on-exec descriptors -- a message socket's among them --
+/// each once.
 ///
 /// A handle a kept descriptor also names is listed too. The kernel keeps it
 /// open, as Linux keeps an open file description while any descriptor
@@ -2097,7 +2105,7 @@ fn flatten_fd_map(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize
 /// kernel refuses a list naming a type it does not know.
 fn exec_close_list(child: &ChildFds, out: &mut [FdMapEntry; MAX_FD_MAP]) -> usize {
     let mut count = 0usize;
-    for &(handle_type, handle) in child.cloexec.iter().chain(&child.held).flatten() {
+    for &(handle_type, handle) in child.cloexec.iter().flatten() {
         let listed = out
             .get(..count)
             .unwrap_or_default()
@@ -3746,6 +3754,14 @@ mod tests {
         );
     }
 
+    /// A file-actions object of all-zero bytes, for `posix_spawn_file_actions_init`
+    /// to set up.
+    fn zeroed_actions() -> PosixSpawnFileActionsT {
+        // SAFETY: the type is plain data, for which all-zero bytes are a
+        // value -- an empty action list.
+        unsafe { core::mem::zeroed() }
+    }
+
     /// No pidfds, so no pidfd spawn: `ENOSYS`, the child not started and
     /// `*pidfd` not written.
     #[test]
@@ -3849,7 +3865,7 @@ mod tests {
         // and an i32 array); an all-zero bit pattern is the same value
         // `posix_spawn_file_actions_init` writes, and a null `actions` is the
         // documented "nothing allocated yet" state.
-        let a = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let a = zeroed_actions();
         let base = (&raw const a).cast::<u8>() as usize;
         let off = |p: usize| p - base;
         assert_eq!(off((&raw const a.allocated).cast::<u8>() as usize), 0);
@@ -4123,7 +4139,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_init() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         let ret = posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(ret, 0);
         assert_eq!(acts.count(), 0);
@@ -4137,7 +4153,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_destroy() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_destroy(&raw mut acts);
         assert_eq!(ret, 0);
@@ -4155,7 +4171,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_addclose() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclose(&raw mut acts, 3);
         assert_eq!(ret, 0);
@@ -4175,7 +4191,7 @@ mod tests {
     /// opens with `if (!__spawn_valid_fd (fd)) return EBADF;`.
     #[test]
     fn test_file_actions_addclose_negative_fd() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclose(&raw mut acts, -1);
         assert_eq!(ret, errno::EBADF);
@@ -4186,7 +4202,7 @@ mod tests {
     /// above `sysconf (_SC_OPEN_MAX)`, which a `fd < 0` test misses entirely.
     #[test]
     fn test_file_actions_addclose_fd_at_open_max_is_ebadf() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let maxfd = crate::unistd::sysconf(crate::unistd::_SC_OPEN_MAX);
         assert!(maxfd > 0, "this test needs a finite _SC_OPEN_MAX");
@@ -4206,7 +4222,7 @@ mod tests {
     /// It stopped at 16 until 2026-09-25, with `ENOMEM` on the 17th.
     #[test]
     fn test_file_actions_grow_past_the_old_cap() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         for i in 0..200 {
             assert_eq!(
@@ -4230,7 +4246,7 @@ mod tests {
     #[test]
     fn test_file_action_paths_are_owned_copies_of_any_length() {
         let before = crate::malloc::live_allocations::count();
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
 
         let mut long = std::vec![b'/'];
@@ -4267,7 +4283,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_adddup2() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 3, 1);
         assert_eq!(ret, 0);
@@ -4288,7 +4304,7 @@ mod tests {
     /// `EBADF` for either.
     #[test]
     fn test_file_actions_adddup2_negative_fd() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_adddup2(&raw mut acts, -1, 1);
         assert_eq!(ret, errno::EBADF);
@@ -4296,7 +4312,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_adddup2_negative_newfd() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_adddup2(&raw mut acts, 1, -1);
         assert_eq!(ret, errno::EBADF);
@@ -4306,7 +4322,7 @@ mod tests {
     /// `newfd` is `EBADF` too — not just a negative one.
     #[test]
     fn test_file_actions_adddup2_newfd_at_open_max_is_ebadf() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let maxfd = crate::unistd::sysconf(crate::unistd::_SC_OPEN_MAX);
         assert!(maxfd > 0, "this test needs a finite _SC_OPEN_MAX");
@@ -4318,7 +4334,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_addopen() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let path = b"/dev/null\0";
         let ret = posix_spawn_file_actions_addopen(&raw mut acts, 0, path.as_ptr(), 0, 0o644);
@@ -4340,7 +4356,7 @@ mod tests {
 
     #[test]
     fn test_file_actions_addopen_null_path() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addopen(&raw mut acts, 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, errno::EFAULT);
@@ -4350,7 +4366,7 @@ mod tests {
     /// before `__strdup (path)`.
     #[test]
     fn test_file_actions_addopen_negative_fd() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let path = b"/dev/null\0";
         let ret = posix_spawn_file_actions_addopen(&raw mut acts, -1, path.as_ptr(), 0, 0);
@@ -4361,7 +4377,7 @@ mod tests {
     /// path — glibc never reaches the string at all.
     #[test]
     fn test_file_actions_addopen_bad_fd_outranks_a_null_path() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addopen(&raw mut acts, -1, core::ptr::null(), 0, 0);
         assert_eq!(ret, errno::EBADF);
@@ -4372,7 +4388,7 @@ mod tests {
     #[test]
     fn test_file_actions_ordering() {
         // POSIX requires actions to be applied in order.
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
 
         posix_spawn_file_actions_addclose(&raw mut acts, 3);
@@ -4894,7 +4910,7 @@ mod tests {
     fn test_build_fd_map_with_close() {
         ensure_std_fds();
         // Create file_actions that close fd 1 (stdout).
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
 
@@ -4922,7 +4938,7 @@ mod tests {
     fn test_build_fd_map_with_dup2() {
         ensure_std_fds();
         // Create file_actions that dup2(2, 1) — redirect stdout to stderr.
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
 
@@ -4953,7 +4969,7 @@ mod tests {
         ensure_std_fds();
         // Close fd 1, then dup2(2, 1) — common shell pattern for
         // redirecting stdout to a pipe.
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
@@ -4979,7 +4995,7 @@ mod tests {
     #[test]
     fn test_build_fd_map_close_all_standard() {
         // Close all three standard fds.
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 0);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
@@ -5040,7 +5056,7 @@ mod tests {
 
     #[test]
     fn test_addchdir_np_null_path() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, core::ptr::null());
         assert_eq!(ret, crate::errno::EFAULT);
@@ -5048,7 +5064,7 @@ mod tests {
 
     #[test]
     fn test_addchdir_np_success() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, b"/tmp\0".as_ptr());
         assert_eq!(ret, 0);
@@ -5060,7 +5076,7 @@ mod tests {
     /// array grows (it was full, and refused with `ENOMEM`, until 2026-09-25).
     #[test]
     fn test_addchdir_np_after_sixteen_actions() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         for _ in 0..16 {
             assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 0), 0);
@@ -5125,7 +5141,7 @@ mod tests {
 
     #[test]
     fn test_addclosefrom_np_negative_fd() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, -1);
         assert_eq!(ret, crate::errno::EBADF);
@@ -5133,7 +5149,7 @@ mod tests {
 
     #[test]
     fn test_addclosefrom_np_success() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
         assert_eq!(ret, 0);
@@ -5144,7 +5160,7 @@ mod tests {
 
     #[test]
     fn test_addclosefrom_np_after_sixteen_actions() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         for _ in 0..16 {
             assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 0), 0);
@@ -5292,7 +5308,7 @@ mod tests {
     /// `ENOSYS`: the group cannot be set before the child runs.
     #[test]
     fn test_addtcsetpgrp_np_is_recorded_and_a_spawn_with_it_is_refused() {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(
             posix_spawn_file_actions_addtcsetpgrp_np(&raw mut acts, -1),
@@ -5911,7 +5927,7 @@ mod tests {
     fn dup2_from_a_closed_descriptor_fails_the_spawn() {
         ensure_std_fds();
         let _ = crate::fdtable::close_fd(9);
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 9, 1), 0);
         let mut out = empty_map();
@@ -5931,7 +5947,7 @@ mod tests {
         ensure_std_fds();
         let _ = install_fd(5, HandleKind::File, 505);
         let _ = install_fd(9, HandleKind::File, 509);
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(
             posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3),
@@ -5951,6 +5967,7 @@ mod tests {
     /// A sound card's device does not reach a child, close-on-exec or not:
     /// the kernel's map has no type for its handle, so nothing names it
     /// there (known-issues/D-POSIX-A-SOUND-DEVICE-DOES-NOT-CROSS-EXEC.md).
+    /// It is open all the same, for a file action that names it to refuse.
     #[test]
     fn a_sound_device_does_not_reach_the_child() {
         use crate::fdtable::{HandleKind, install_fd};
@@ -5960,8 +5977,9 @@ mod tests {
         let child = inheritable_fds();
         let _ = crate::fdtable::close_fd(41);
         let _ = crate::fdtable::close_fd(42);
-        for fd in [41, 42] {
-            assert!(!child.is_open(fd), "fd {fd}");
+        for fd in [41_usize, 42] {
+            assert!(child.virt[fd].is_none() && child.cloexec[fd].is_none(), "fd {fd}");
+            assert!(child.stays[fd] && child.is_open(fd), "fd {fd}");
         }
         // Mapped only so that the conversion is total.
         assert_eq!(
@@ -5988,7 +6006,7 @@ mod tests {
             set_unix_meta(fd, kind);
         }
         let child = inheritable_fds();
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 44, 3), 0);
         let mut out = empty_map();
@@ -5999,19 +6017,50 @@ mod tests {
             clear_meta(fd);
             let _ = crate::fdtable::close_fd(fd);
         }
-        assert!(child.is_open(43), "a stream's");
-        assert!(!child.is_open(44), "a datagram's");
-        assert!(!child.is_open(45), "a sequenced-packet one's");
-        // Held for the exec to close, which the kernel can: its type is known.
-        assert_eq!(
-            child.held[44],
-            Some((fd_handle_type::UNIX_SOCKET, 0x5000 | 44))
-        );
-        assert_eq!(
-            child.held[45],
-            Some((fd_handle_type::UNIX_SOCKET, 0x5000 | 45))
-        );
+        assert!(child.virt[43].is_some() && !child.stays[43], "a stream's");
+        for fd in [44usize, 45] {
+            assert!(child.virt[fd].is_none() && child.stays[fd], "fd {fd} stays");
+            // For the exec to close, which the kernel can: its type is known.
+            assert_eq!(
+                child.cloexec[fd],
+                Some((
+                    fd_handle_type::UNIX_SOCKET,
+                    0x5000 | u64::try_from(fd).unwrap()
+                )),
+                "fd {fd}"
+            );
+        }
         assert_eq!(dup, Err(errno::EOPNOTSUPP), "dup2 of one is refused");
+    }
+
+    /// A dup2 action takes a close-on-exec source to another number, as
+    /// POSIX runs the actions before the exec that would close it; one that
+    /// names a namespace's descriptor, which cannot cross, is refused as
+    /// such.
+    #[test]
+    fn dup2_takes_a_close_on_exec_source_and_refuses_what_cannot_cross() {
+        use crate::fdtable::{FD_CLOEXEC, HandleKind, install_fd, set_fd_flags};
+        ensure_std_fds();
+        let _ = install_fd(46, HandleKind::Pipe, 4646);
+        assert!(set_fd_flags(46, FD_CLOEXEC));
+        let _ = install_fd(47, HandleKind::Namespace, 4747);
+        let plan = |src: i32, dst: i32| {
+            let mut acts = zeroed_actions();
+            posix_spawn_file_actions_init(&raw mut acts);
+            assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, src, dst), 0);
+            let mut out = empty_map();
+            let mut opened = OpenedHandles::new();
+            let got = build_fd_map(&raw const acts, &mut out, &mut opened)
+                .map(|count| out[..count].iter().find(|e| e.fd == dst).map(|e| e.handle));
+            posix_spawn_file_actions_destroy(&raw mut acts);
+            got
+        };
+        let onto_stdout = plan(46, 1);
+        let namespace = plan(47, 3);
+        let _ = crate::fdtable::close_fd(46);
+        let _ = crate::fdtable::close_fd(47);
+        assert_eq!(onto_stdout, Ok(Some(4646)));
+        assert_eq!(namespace, Err(errno::EOPNOTSUPP));
     }
 
     /// Every descriptor from 32 up used to be dropped from every child.
@@ -6042,7 +6091,8 @@ mod tests {
         child.cloexec[6] = Some((PIPE, 10)); // dup of fd 3: listed once
         child.cloexec[9] = Some((FILE, 12));
         child.virt[10] = Some((FILE, 13)); // kept, and no close-on-exec twin
-        child.held[12] = Some((fd_handle_type::UNIX_SOCKET, 14)); // cannot cross
+        child.cloexec[12] = Some((fd_handle_type::UNIX_SOCKET, 14)); // cannot cross
+        child.stays[12] = true;
         let mut out = empty_map();
         let count = exec_close_list(&child, &mut out);
         let listed: std::vec::Vec<(u8, u64)> = out[..count]
@@ -6083,7 +6133,7 @@ mod tests {
         assert!(!out[..count].iter().any(|e| e.fd == 6));
 
         // ...and with it, it is.
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 6, 6), 0);
         let mut opened = OpenedHandles::new();
@@ -6106,7 +6156,7 @@ mod tests {
 
     /// Plan a child whose file actions are `chdir`s to `dirs`, in order.
     fn plan_chdirs(dirs: &[&[u8]]) -> Result<ChildPlan, i32> {
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         for dir in dirs {
             let mut z = dir.to_vec();
@@ -6176,7 +6226,7 @@ mod tests {
         let _ = install_fd(41, HandleKind::File, 4141);
         store_fd_path(41, b"/srv/data".as_ptr(), 9);
 
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(posix_spawn_file_actions_addfchdir_np(&raw mut acts, 41), 0);
         let mut out = empty_map();
@@ -6199,7 +6249,7 @@ mod tests {
         let _ = install_fd(42, HandleKind::File, 4242);
         store_fd_path(42, b"/home/u".as_ptr(), 7);
 
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 42, 9), 0);
         assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 42), 0);
@@ -6220,7 +6270,7 @@ mod tests {
         ensure_std_fds();
         fresh_spawn_cwd(b"/");
         let plan_of = |fd: Fd, close_first: bool| {
-            let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+            let mut acts = zeroed_actions();
             posix_spawn_file_actions_init(&raw mut acts);
             if close_first {
                 assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, fd), 0);
@@ -6259,7 +6309,7 @@ mod tests {
         ensure_std_fds();
         let _ = install_fd(45, HandleKind::File, 4545);
         assert!(set_fd_flags(45, FD_CLOEXEC));
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(posix_spawn_file_actions_addclose(&raw mut acts, 45), 0);
         assert_eq!(posix_spawn_file_actions_adddup2(&raw mut acts, 45, 45), 0);
@@ -6503,7 +6553,7 @@ mod tests {
     #[test]
     fn a_failing_open_action_fails_the_spawn() {
         ensure_std_fds();
-        let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
+        let mut acts = zeroed_actions();
         posix_spawn_file_actions_init(&raw mut acts);
         assert_eq!(
             posix_spawn_file_actions_addopen(

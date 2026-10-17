@@ -3472,6 +3472,27 @@ pub extern "C" fn access(path: *const u8, mode: i32) -> i32 {
     if let Some(ret) = crate::fdname::access(resolved.get(..resolved_len).unwrap_or(&[]), mode) {
         return ret;
     }
+    // A namespace's link, followed: nsfs's file, mode 0444 -- readable,
+    // never executable, writable only with `CAP_DAC_OVERRIDE`.
+    match crate::nsfs::path_info(resolved.get(..resolved_len).unwrap_or(&[])) {
+        Some(Ok(_)) => {
+            let refused = mode & crate::fcntl::X_OK != 0
+                || (mode & crate::fcntl::W_OK != 0
+                    && !crate::sys_capability::has_capability(
+                        crate::sys_capability::CAP_DAC_OVERRIDE,
+                    ));
+            if refused {
+                errno::set_errno(errno::EACCES);
+                return -1;
+            }
+            return 0;
+        }
+        Some(Err(e)) => {
+            errno::set_errno(e);
+            return -1;
+        }
+        None => {}
+    }
 
     // Use stat to check if the file exists.
     let mut stat_buf = core::mem::MaybeUninit::<Stat>::zeroed();
@@ -4555,6 +4576,13 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
             stat(path, buf)
         };
     }
+    // A namespace's link under a directory of `/proc`, followed: the
+    // namespace's record, which the kernel's walk cannot follow to.
+    if flags & AT_SYMLINK_NOFOLLOW == 0 && !buf.is_null() {
+        if let Some(ret) = namespace_stat_at(dirfd, path, buf) {
+            return ret;
+        }
+    }
     // SAFETY: `path` and `buf` are this function's own contract — null or a
     // valid C string, and null or a writable `Stat` — which is what
     // `try_pinned_fstatat` requires.
@@ -4571,6 +4599,26 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
     } else {
         stat(full.as_ptr(), buf)
     }
+}
+
+/// `fstatat`'s answer, followed, for `path` under `dirfd` when the two name
+/// a namespace's link (`crate::nsfs`); `None` for anything else. The
+/// directory's recorded path is compared first, so that a name under any
+/// directory not in `/proc` -- the pinned fast path's usual callers -- costs
+/// one copy of that path and no more.
+fn namespace_stat_at(dirfd: i32, path: *const u8, buf: *mut Stat) -> Option<i32> {
+    if path.is_null() {
+        return None;
+    }
+    let mut dir = [0u8; crate::unistd::PATH_MAX];
+    let dir_len = fdtable::get_fd_path(dirfd, &mut dir);
+    if !dir.get(..dir_len)?.starts_with(b"/proc/") {
+        return None;
+    }
+    let mut full = [0u8; crate::unistd::PATH_MAX];
+    let len = build_at_path(&dir, dir_len, path, &mut full);
+    // SAFETY: `buf` is the caller's writable `Stat`, checked non-null.
+    unsafe { crate::nsfs::stat_path(full.get(..len)?, buf) }
 }
 
 /// Remove a file or directory relative to a directory fd.
@@ -8486,11 +8534,16 @@ fn openat2_forward_inner(
         // A kernel without the door: its walk answers for the name, below.
     }
     // A namespace's link, `/proc/<pid>/ns/<kind>`, as `open` takes it
-    // (`crate::nsfs`) -- by a plain walk only, as the names above: a
-    // restricted walk cannot be confined to a link whose text names nothing.
+    // (`crate::nsfs`). A restricted walk refuses it as Linux refuses a magic
+    // link: `ELOOP` when no link may be followed, ahead of `EXDEV` when the
+    // walk is held beneath its directory.
     if crate::nsfs::has_a_namespace_shape(name) {
+        if k_resolve & K_RESOLVE_NO_SYMLINKS != 0 {
+            errno::set_errno(errno::ELOOP);
+            return -1;
+        }
         if k_resolve != 0 {
-            errno::set_errno(errno::EOPNOTSUPP);
+            errno::set_errno(errno::EXDEV);
             return -1;
         }
         if let Some(fd) = crate::nsfs::open(name, posix_flags) {
@@ -14593,6 +14646,37 @@ mod tests {
     // -----------------------------------------------------------------------
     // openat2
     // -----------------------------------------------------------------------
+
+    /// A restricted walk refuses a namespace's link as Linux refuses a magic
+    /// link, before the kernel is asked: `ELOOP` when no link may be
+    /// followed, `EXDEV` when the walk is held beneath its directory.
+    #[test]
+    fn a_restricted_walk_refuses_a_namespace_link() {
+        let how = |resolve| OpenHow {
+            flags: 0,
+            mode: 0,
+            resolve,
+        };
+        let size = core::mem::size_of::<OpenHow>();
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/proc/self/ns/uts\0".as_ptr(),
+            &how(RESOLVE_NO_SYMLINKS),
+            size,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ELOOP);
+        let dir = fdtable::alloc_fd(fdtable::HandleKind::File, 0x6e5d).expect("a slot");
+        let ns = b"/proc/self/ns";
+        fdtable::store_fd_path(dir, ns.as_ptr(), ns.len());
+        crate::errno::set_errno(0);
+        let ret = openat2(dir, b"uts\0".as_ptr(), &how(RESOLVE_BENEATH), size);
+        let beneath = crate::errno::get_errno();
+        let _ = fdtable::close_fd(dir);
+        assert_eq!(ret, -1);
+        assert_eq!(beneath, crate::errno::EXDEV);
+    }
 
     #[test]
     fn test_openat2_null_how() {

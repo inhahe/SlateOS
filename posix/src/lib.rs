@@ -563,6 +563,7 @@ pub mod resource;
 pub mod scanf;
 pub mod sched;
 pub mod search;
+pub mod secureboot;
 pub mod semaphore;
 pub mod setjmp;
 pub use pwhash::sha2;

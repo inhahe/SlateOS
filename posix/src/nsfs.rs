@@ -132,22 +132,69 @@ fn open_handle(path: &[u8]) -> Option<Result<u64, i32>> {
 }
 
 /// What `open` with `flags` answers for a path that exists and is a link to
-/// nsfs's read-only file (mode 0444), as Linux's is: `EEXIST` for
-/// `O_CREAT | O_EXCL`, `ELOOP` for `O_NOFOLLOW`, `ENOTDIR` for `O_DIRECTORY`,
-/// then `EACCES` for a write -- a write mode or `O_TRUNC` -- unless
-/// `may_override` (`CAP_DAC_OVERRIDE`); nothing for the rest.
+/// nsfs's read-only file (mode 0444), in Linux 6.6's order: `EEXIST` for
+/// `O_CREAT | O_EXCL`, `ENOTDIR` for `O_DIRECTORY` -- neither a link nor what
+/// it names is a directory -- `ELOOP` for `O_NOFOLLOW`, then `EACCES` for a
+/// write (a write mode or `O_TRUNC`) unless `may_override`
+/// (`CAP_DAC_OVERRIDE`); nothing for the rest. `O_PATH` keeps only
+/// `O_DIRECTORY`'s, as Linux's `build_open_flags` keeps it.
 fn refused_by_flags(flags: i32, may_override: bool) -> Option<i32> {
-    use crate::fcntl::{O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_TRUNC};
-    if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
+    use crate::fcntl::{
+        O_ACCMODE, O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_PATH, O_RDONLY, O_TRUNC,
+    };
+    let full = flags & O_PATH == 0;
+    if full && flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
         Some(errno::EEXIST)
-    } else if flags & O_NOFOLLOW != 0 {
-        Some(errno::ELOOP)
     } else if flags & O_DIRECTORY != 0 {
         Some(errno::ENOTDIR)
-    } else if (flags & O_ACCMODE != O_RDONLY || flags & O_TRUNC != 0) && !may_override {
+    } else if full && flags & O_NOFOLLOW != 0 {
+        Some(errno::ELOOP)
+    } else if full && (flags & O_ACCMODE != O_RDONLY || flags & O_TRUNC != 0) && !may_override {
         Some(errno::EACCES)
     } else {
         None
+    }
+}
+
+/// What `open` with `flags` answers without following the link, for a
+/// namespace the caller may not look into (the kernel's `EACCES`): `EEXIST`
+/// for `O_CREAT | O_EXCL`, and for `O_NOFOLLOW` the link itself -- not a
+/// directory, `ENOTDIR`, else `ELOOP` -- as Linux answers before it asks for
+/// the right to follow; nothing for the rest.
+fn refused_without_following(flags: i32) -> Option<i32> {
+    use crate::fcntl::{O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_PATH};
+    if flags & O_PATH != 0 {
+        None
+    } else if flags & (O_CREAT | O_EXCL) == O_CREAT | O_EXCL {
+        Some(errno::EEXIST)
+    } else if flags & O_NOFOLLOW != 0 {
+        Some(if flags & O_DIRECTORY != 0 {
+            errno::ENOTDIR
+        } else {
+            errno::ELOOP
+        })
+    } else {
+        None
+    }
+}
+
+/// The status flags a namespace's descriptor keeps for `F_GETFL`: its access
+/// mode, and `O_PATH`, which makes it a descriptor only `fstat` and `close`
+/// take.
+fn kept_status(flags: i32) -> i32 {
+    use crate::fcntl::{O_ACCMODE, O_PATH};
+    flags & (O_ACCMODE | O_PATH)
+}
+
+/// After descriptor `fd` of namespace handle `handle` is made: the hold its
+/// open took goes back, through `give_back`, when another descriptor already
+/// holds the namespace -- descriptors of one namespace share one hold, which
+/// their last close gives back. Asked once `fd` is in the table, so that
+/// the other's close in between leaves `fd`'s hold, at worst one too many,
+/// never none.
+fn share_hold(handle: u64, fd: i32, give_back: impl FnOnce(u64)) {
+    if fdtable::is_handle_referenced_by_another(HandleKind::Namespace, handle, fd) {
+        give_back(handle);
     }
 }
 
@@ -161,25 +208,26 @@ fn refused_by_flags(flags: i32, may_override: bool) -> Option<i32> {
 /// this open took is given back when another descriptor already has one,
 /// and the last close gives that back.
 pub(crate) fn open(path: &[u8], flags: i32) -> Option<i32> {
-    use crate::fcntl::{O_ACCMODE, O_CLOEXEC, O_NOFOLLOW, O_PATH};
+    use crate::fcntl::{O_CLOEXEC, O_NOFOLLOW, O_PATH};
     if flags & (O_PATH | O_NOFOLLOW) == O_PATH | O_NOFOLLOW {
         return None;
     }
     let handle = match open_handle(path)? {
         Ok(handle) => handle,
         Err(e) => {
+            let e = if e == errno::EACCES {
+                refused_without_following(flags).unwrap_or(e)
+            } else {
+                e
+            };
             errno::set_errno(e);
             return Some(-1);
         }
     };
-    let refused = if flags & O_PATH == 0 {
-        refused_by_flags(
-            flags,
-            crate::sys_capability::has_capability(crate::sys_capability::CAP_DAC_OVERRIDE),
-        )
-    } else {
-        None
-    };
+    let refused = refused_by_flags(
+        flags,
+        crate::sys_capability::has_capability(crate::sys_capability::CAP_DAC_OVERRIDE),
+    );
     if let Some(e) = refused {
         // This open's own hold; a close of a hold cannot fail in a way
         // anyone could act on.
@@ -187,20 +235,17 @@ pub(crate) fn open(path: &[u8], flags: i32) -> Option<i32> {
         errno::set_errno(e);
         return Some(-1);
     }
-    let shared = fdtable::is_handle_referenced(HandleKind::Namespace, handle);
-    if shared {
-        // As above: another descriptor's hold keeps the namespace.
-        let _ = close(handle);
-    }
-    let status = flags & (O_ACCMODE | O_PATH);
+    let status = kept_status(flags);
     let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Namespace, handle, status) else {
-        if !shared {
-            // As above: ours alone, and never handed out.
-            let _ = close(handle);
-        }
+        // As above.
+        let _ = close(handle);
         errno::set_errno(errno::EMFILE);
         return Some(-1);
     };
+    share_hold(handle, fd, |h| {
+        // As above.
+        let _ = close(h);
+    });
     if flags & O_CLOEXEC != 0 {
         let _ = fdtable::set_fd_flags(fd, fdtable::FD_CLOEXEC);
     }
@@ -389,7 +434,7 @@ mod tests {
     #[test]
     fn a_namespace_link_refuses_as_a_link_to_a_file() {
         use crate::fcntl::{
-            O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
+            O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_PATH, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY,
         };
         assert_eq!(refused_by_flags(O_RDONLY, false), None);
         assert_eq!(refused_by_flags(O_RDWR | O_CREAT, true), None, "it exists");
@@ -405,7 +450,17 @@ mod tests {
         );
         assert_eq!(
             refused_by_flags(O_NOFOLLOW | O_DIRECTORY, false),
-            Some(errno::ELOOP)
+            Some(errno::ENOTDIR),
+            "do_open asks for a directory before may_open's ELOOP"
+        );
+        // O_PATH keeps O_DIRECTORY alone.
+        assert_eq!(
+            refused_by_flags(O_PATH | O_DIRECTORY, false),
+            Some(errno::ENOTDIR)
+        );
+        assert_eq!(
+            refused_by_flags(O_PATH | O_WRONLY | O_CREAT | O_EXCL, false),
+            None
         );
         // Mode 0444: a write needs the override, and comes after the rest.
         assert_eq!(refused_by_flags(O_WRONLY, false), Some(errno::EACCES));
@@ -419,6 +474,50 @@ mod tests {
             refused_by_flags(O_WRONLY | O_DIRECTORY, false),
             Some(errno::ENOTDIR)
         );
+    }
+
+    /// A namespace the caller may not look into: what needs no following
+    /// comes first; the rest is the kernel's `EACCES`.
+    #[test]
+    fn what_needs_no_following_comes_before_the_right_to_follow() {
+        use crate::fcntl::{O_CREAT, O_DIRECTORY, O_EXCL, O_NOFOLLOW, O_PATH, O_RDONLY};
+        assert_eq!(refused_without_following(O_RDONLY), None);
+        assert_eq!(
+            refused_without_following(O_CREAT | O_EXCL),
+            Some(errno::EEXIST)
+        );
+        assert_eq!(refused_without_following(O_NOFOLLOW), Some(errno::ELOOP));
+        assert_eq!(
+            refused_without_following(O_NOFOLLOW | O_DIRECTORY),
+            Some(errno::ENOTDIR)
+        );
+        assert_eq!(refused_without_following(O_DIRECTORY), None, "followed");
+        assert_eq!(refused_without_following(O_PATH | O_CREAT | O_EXCL), None);
+    }
+
+    /// A namespace's descriptor keeps its access mode and `O_PATH`, and none
+    /// of the flags that only shaped the open.
+    #[test]
+    fn a_namespace_descriptor_keeps_its_mode_and_o_path() {
+        use crate::fcntl::{O_CLOEXEC, O_NONBLOCK, O_PATH, O_RDONLY, O_RDWR};
+        assert_eq!(kept_status(O_RDWR | O_CLOEXEC | O_NONBLOCK), O_RDWR);
+        assert_eq!(kept_status(O_RDONLY | O_PATH | O_CLOEXEC), O_PATH);
+    }
+
+    /// Descriptors of one namespace share one hold: a second open gives its
+    /// own back, a first keeps it.
+    #[test]
+    fn a_second_descriptor_gives_its_hold_back() {
+        let handle = 0x6e5f_0001;
+        let first = fdtable::alloc_fd(HandleKind::Namespace, handle).expect("a slot");
+        let mut given = None;
+        share_hold(handle, first, |h| given = Some(h));
+        assert_eq!(given, None, "the first keeps its hold");
+        let second = fdtable::alloc_fd(HandleKind::Namespace, handle).expect("a slot");
+        share_hold(handle, second, |h| given = Some(h));
+        assert_eq!(given, Some(handle), "the second gives its own back");
+        let _ = fdtable::close_fd(first);
+        let _ = fdtable::close_fd(second);
     }
 
     /// On the host the kernel cannot be asked: no namespace path opens as

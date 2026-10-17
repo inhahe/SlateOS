@@ -3652,7 +3652,11 @@ pub struct Iovec {
     pub iov_len: usize,
 }
 
-/// Message header for `sendmsg`/`recvmsg`.
+/// Message header for `sendmsg`/`recvmsg`: glibc's layout. musl's -- the
+/// headers the image's C programs are built with -- has the same size and
+/// offsets, but makes `msg_iovlen` an `int` and `msg_controllen` a
+/// `socklen_t`, each followed by four bytes of padding a program need not
+/// write; [`as_c_wrote_it`] reads such a header.
 #[repr(C)]
 pub struct Msghdr {
     /// Optional address (sendto/recvfrom target).
@@ -3671,7 +3675,40 @@ pub struct Msghdr {
     pub msg_flags: i32,
 }
 
-/// Control message header (ancillary data).
+/// `msg`'s lengths as the program that filled it meant them, whichever C
+/// library's header it was built with: `msg_iovlen` and `msg_controllen`
+/// cut to their low four bytes. On x86-64 those are the value under musl's
+/// `int`/`socklen_t` and its unwritten padding and under glibc's `size_t`
+/// alike, and no length past 4 GiB is one either program could mean.
+pub(crate) fn as_c_wrote_it(msg: &Msghdr) -> Msghdr {
+    Msghdr {
+        msg_name: msg.msg_name,
+        msg_namelen: msg.msg_namelen,
+        msg_iov: msg.msg_iov,
+        msg_iovlen: msg.msg_iovlen & 0xFFFF_FFFF,
+        msg_control: msg.msg_control,
+        msg_controllen: msg.msg_controllen & 0xFFFF_FFFF,
+        msg_flags: msg.msg_flags,
+    }
+}
+
+/// A control message's `cmsg_len` at `at`, read as [`as_c_wrote_it`] reads a
+/// header's lengths: its low four bytes, since musl's is a `socklen_t`
+/// followed by padding a program need not write.
+///
+/// # Safety
+///
+/// `at` must be readable for four bytes.
+pub(crate) unsafe fn cmsg_len_at(at: *const u8) -> usize {
+    // SAFETY: the caller's contract; unaligned, as a control buffer need
+    // not be aligned.
+    let low = unsafe { at.cast::<u32>().read_unaligned() };
+    usize::try_from(low).unwrap_or(usize::MAX)
+}
+
+/// Control message header (ancillary data): glibc's layout, whose
+/// `cmsg_len` is a `size_t` where musl's is a `socklen_t` and padding
+/// ([`cmsg_len_at`]).
 #[repr(C)]
 pub struct Cmsghdr {
     /// Length of this control message (including header).
@@ -3698,12 +3735,17 @@ pub unsafe extern "C" fn __cmsg_nxthdr(mhdr: *mut Msghdr, cmsg: *mut Cmsghdr) ->
     let header = core::mem::size_of::<Cmsghdr>();
     let align = |n: usize| n.checked_add(7).map(|m| m & !7);
     // SAFETY: the caller's contract: `cmsg`'s header is inside the buffer.
-    let len = unsafe { (*cmsg).cmsg_len };
+    let len = unsafe { cmsg_len_at(cmsg.cast_const().cast()) };
     if len < header {
         return core::ptr::null_mut();
     }
     // SAFETY: the caller's contract: `mhdr` is a valid `msghdr`.
-    let (start, room) = unsafe { ((*mhdr).msg_control as usize, (*mhdr).msg_controllen) };
+    let (start, room) = unsafe {
+        (
+            (*mhdr).msg_control as usize,
+            (*mhdr).msg_controllen & 0xFFFF_FFFF,
+        )
+    };
     let Some(end) = start.checked_add(room) else {
         return core::ptr::null_mut();
     };
@@ -3717,7 +3759,7 @@ pub unsafe extern "C" fn __cmsg_nxthdr(mhdr: *mut Msghdr, cmsg: *mut Cmsghdr) ->
         .cast::<u8>()
         .wrapping_add(next.wrapping_sub(cmsg as usize));
     // SAFETY: the next header lies inside the buffer (checked above).
-    let next_len = unsafe { next_ptr.cast::<usize>().read_unaligned() };
+    let next_len = unsafe { cmsg_len_at(next_ptr.cast_const()) };
     if align(next_len)
         .and_then(|step| next.checked_add(step))
         .is_none_or(|e| e > end)
@@ -3753,6 +3795,9 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
         errno::set_errno(errno::EFAULT);
         return -1;
     }
+    // SAFETY: msg is non-null and valid (caller guarantee).
+    let read = as_c_wrote_it(unsafe { &*msg });
+    let msg: *const Msghdr = &raw const read;
 
     // A Unix socket's own, ahead of the empty-message shortcut: an empty
     // datagram is a message to send.
@@ -3969,10 +4014,37 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 /// receives into a stack buffer and copies out to each iov.
 /// Ancillary data (`msg_control`) is not populated.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
+    if msg.is_null() {
+        // SAFETY: forwarded; it answers for the null header in its order.
+        return unsafe { recvmsg_as_read(fd, msg, flags) };
+    }
+    // SAFETY: msg is non-null and valid (caller guarantee).
+    let mut read = as_c_wrote_it(unsafe { &*msg });
+    // SAFETY: forwarded, with the header as read.
+    let ret = unsafe { recvmsg_as_read(fd, &raw mut read, flags) };
+    // What a receive writes back: the sender's address's length, the control
+    // data's, and the flags -- each in full, so musl's padding after
+    // `msg_controllen` is left zero.
+    // SAFETY: as above.
+    unsafe {
+        (*msg).msg_namelen = read.msg_namelen;
+        (*msg).msg_controllen = read.msg_controllen;
+        (*msg).msg_flags = read.msg_flags;
+    }
+    ret
+}
+
+/// [`recvmsg`]'s body, for a header whose lengths have been read as the
+/// program meant them ([`as_c_wrote_it`]).
+///
+/// # Safety
+///
+/// As [`recvmsg`].
 #[allow(clippy::too_many_lines)]
 // Scatter/gather recv with multi-iov distribution and MSG_WAITALL; splitting would fragment the logic.
 #[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
-pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
+unsafe fn recvmsg_as_read(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
     const STACK_BUF_SMALL: usize = 4096;
     const STACK_BUF_LARGE: usize = 16384; // One 16 KiB page.
 
@@ -5181,6 +5253,49 @@ pub unsafe extern "C" fn recvmmsg(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A header and its control messages as a program built against musl's
+    /// headers leaves them: four bytes of each length written, the four
+    /// after them not. They are read by their low four bytes, and
+    /// `CMSG_NXTHDR` walks such a buffer as it walks any.
+    #[test]
+    fn musl_lengths_are_read_by_their_low_four_bytes() {
+        let garbage = 0xDDCC_BBAA_0000_0000usize;
+        let mut buf = [0u8; 48];
+        let msg = Msghdr {
+            msg_name: core::ptr::null_mut(),
+            msg_namelen: 0,
+            msg_iov: core::ptr::null_mut(),
+            msg_iovlen: garbage | 2,
+            msg_control: buf.as_mut_ptr(),
+            msg_controllen: garbage | 48,
+            msg_flags: 0,
+        };
+        let mut read = as_c_wrote_it(&msg);
+        assert_eq!((read.msg_iovlen, read.msg_controllen), (2, 48));
+
+        // Two control messages of 20 bytes, each with garbage after its
+        // cmsg_len.
+        for at in [0usize, 24] {
+            buf[at..at + 4].copy_from_slice(&20u32.to_ne_bytes());
+            buf[at + 4..at + 8].copy_from_slice(&[0xAA, 0xBB, 0xCC, 0xDD]);
+            buf[at + 8..at + 12].copy_from_slice(&SOL_SOCKET.to_ne_bytes());
+        }
+        // SAFETY: eight readable bytes.
+        assert_eq!(unsafe { cmsg_len_at(buf.as_ptr()) }, 20);
+        read.msg_control = buf.as_mut_ptr();
+        let first = buf.as_mut_ptr().cast::<Cmsghdr>();
+        // SAFETY: `read` names `buf`, and `first` is its first message.
+        let second = unsafe { __cmsg_nxthdr(&raw mut read, first) };
+        assert_eq!(second.cast::<u8>(), buf.as_mut_ptr().wrapping_add(24));
+        // SAFETY: as above; `second` is inside `buf`.
+        assert!(unsafe { __cmsg_nxthdr(&raw mut read, second) }.is_null());
+        let mut garbled = msg;
+        garbled.msg_control = buf.as_mut_ptr();
+        // SAFETY: as above, the header's length garbled above its low bytes.
+        let walked = unsafe { __cmsg_nxthdr(&raw mut garbled, first) };
+        assert_eq!(walked, second, "its own msg_controllen read the same way");
+    }
 
     /// `__cmsg_nxthdr` walks a buffer of control messages as glibc's does:
     /// each next one, then NULL at the end, for a message shorter than its

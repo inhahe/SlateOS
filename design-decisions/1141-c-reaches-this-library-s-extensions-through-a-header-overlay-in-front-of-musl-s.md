@@ -76,3 +76,7 @@ overlay declares it again under glibc's (31 names; a redundant declaration
 of the same type is legal C), and the gate holds those to glibc's headers as
 it does the rest. `posix/tools/oracle/header_audit.py` finds them
 (known-issues.md -> D-POSIX-MUSL-HEADERS-DECLARE-NARROWER-THAN-GLIBCS).
+
+**SlateOS's own interfaces (2026-10-17):** calls glibc has nothing like are
+declared under `posix/include/slateos/`, which the gate compiles but holds
+to no glibc name or layout (§1194).

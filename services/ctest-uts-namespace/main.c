@@ -34,7 +34,9 @@
  *       the first (51)
  *   6x  openat through /proc/self's descriptor opens the same namespace (60);
  *       open's rules for a link to a regular file: O_DIRECTORY is ENOTDIR
- *       (61), O_NOFOLLOW ELOOP (62), O_CREAT|O_EXCL EEXIST (63)
+ *       (61), O_NOFOLLOW ELOOP (62), O_CREAT|O_EXCL EEXIST (63); fstatat
+ *       through /proc/self/ns's descriptor finds the namespace (64), and
+ *       access gives R_OK (65) but not X_OK, EACCES (66)
  */
 
 #define _GNU_SOURCE
@@ -133,5 +135,15 @@ int main(void)
     errno = 0;
     if (!fails_with(open("/proc/self/ns/uts", O_RDONLY | O_CREAT | O_EXCL, 0600), EEXIST))
         return 63;
+    int nsdir = open("/proc/self/ns", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    struct stat w;
+    if (nsdir < 0 || fstatat(nsdir, "uts", &w, 0) != 0 || w.st_ino != a.st_ino)
+        return 64;
+    close(nsdir);
+    if (access("/proc/self/ns/uts", R_OK) != 0)
+        return 65;
+    errno = 0;
+    if (!fails_with(access("/proc/self/ns/uts", X_OK), EACCES))
+        return 66;
     return 42;
 }

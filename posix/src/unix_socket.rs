@@ -61,6 +61,7 @@ use core::mem::MaybeUninit;
 
 use crate::errno::{self, native};
 use crate::fdtable::{self, HandleKind};
+use crate::perprocess::process_global;
 use crate::socket::{
     AF_UNIX, MSG_CTRUNC, MSG_DONTWAIT, MSG_ERRQUEUE, MSG_NOSIGNAL, MSG_OOB, MSG_PEEK, MSG_TRUNC,
     MSG_WAITALL, Msghdr, SCM_CREDENTIALS, SCM_RIGHTS, SOCK_DGRAM, SOCK_RAW, SOCK_SEQPACKET,
@@ -738,6 +739,15 @@ pub(crate) unsafe fn recv(
     unsafe { recv_taking(fd, handle, buf, len, flags, info, None).0 }
 }
 
+process_global! {
+    /// Set once the kernel has answered `NoSuchSyscall` to
+    /// `SYS_UNIX_RECVMSG`: it has no receive that carries descriptors, and
+    /// every receive after goes straight to `SYS_UNIX_RECV` rather than ask
+    /// again.
+    fn recvmsg_missing_ptr() -> core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+}
+
 /// [`recv`], taking into `rights` the descriptors a message carries, through
 /// `SYS_UNIX_RECVMSG` -- with no `rights`, no room, so that the kernel
 /// releases them and says so; from a kernel without that call, none, as
@@ -796,13 +806,18 @@ unsafe fn recv_taking(
         let mut record: [u64; 7] = [at, rest, info_ptr as u64, recs, room, 0, 0];
         let at_record = record.as_mut_ptr() as u64;
         let call_rights = || syscall3(SYS_UNIX_RECVMSG, handle, at_record, call_flags);
-        let mut ret = if nb {
+        // SAFETY: an atomic, shared by every thread.
+        let missing = unsafe { &*recvmsg_missing_ptr() };
+        let mut ret = if missing.load(core::sync::atomic::Ordering::Relaxed) {
+            native::NO_SUCH_SYSCALL
+        } else if nb {
             call_rights()
         } else {
             crate::interrupt::restarting(rule, call_rights)
         };
         let mut came = false;
         if crate::syscall::lacks_call(ret) {
+            missing.store(true, core::sync::atomic::Ordering::Relaxed);
             ret = if nb {
                 call()
             } else {
@@ -916,7 +931,7 @@ unsafe fn cmsg_header(at: *const u8) -> (usize, i32, i32) {
     // buffer need not be aligned.
     unsafe {
         (
-            core::ptr::read_unaligned(at.cast::<usize>()),
+            crate::socket::cmsg_len_at(at),
             core::ptr::read_unaligned(at.add(8).cast::<i32>()),
             core::ptr::read_unaligned(at.add(12).cast::<i32>()),
         )
@@ -950,18 +965,15 @@ unsafe fn check_control(
     mut rights: Option<&mut [MaybeUninit<Right>; SCM_MAX_FD]>,
 ) -> Result<usize, i32> {
     let base = msg.msg_control.cast_const();
-    let total = msg.msg_controllen;
     let mut count = 0usize;
-    if base.is_null() || total == 0 {
-        return Ok(count);
-    }
-    let mut off = 0usize;
-    while off.saturating_add(CMSG_HDR) <= total {
-        // SAFETY: a header's bytes lie inside the buffer (the loop bound).
-        let (len, level, kind) = unsafe { cmsg_header(base.add(off)) };
-        if len < CMSG_HDR || off.saturating_add(len) > total {
-            return Err(errno::EINVAL);
-        }
+    // SAFETY: the caller's contract.
+    for message in unsafe { control_messages(msg) } {
+        let ControlMessage {
+            off,
+            len,
+            level,
+            kind,
+        } = message?;
         if level == SOL_SOCKET && kind == SCM_RIGHTS {
             let n = len.saturating_sub(CMSG_HDR) / 4;
             if count.saturating_add(n) > SCM_MAX_FD {
@@ -1008,9 +1020,58 @@ unsafe fn check_control(
         } else if level == SOL_SOCKET {
             return Err(errno::EINVAL);
         }
-        off = off.saturating_add(cmsg_align(len));
     }
     Ok(count)
+}
+
+/// One control message in a buffer: where it begins, its stated length,
+/// its level and its type.
+#[derive(Clone, Copy)]
+struct ControlMessage {
+    off: usize,
+    len: usize,
+    level: i32,
+    kind: i32,
+}
+
+/// `msg`'s control messages, in order, each header read where it lies inside
+/// the buffer -- or `Err(EINVAL)` at one shorter than a header or whose
+/// stated length runs past the buffer, which ends them. The one walk
+/// [`check_control`] and [`carries_rights`] take.
+///
+/// # Safety
+///
+/// `msg`'s control buffer must be readable for its stated length while the
+/// walk goes on.
+unsafe fn control_messages(msg: &Msghdr) -> impl Iterator<Item = Result<ControlMessage, i32>> {
+    let base = msg.msg_control.cast_const();
+    let total = if base.is_null() {
+        0
+    } else {
+        msg.msg_controllen
+    };
+    let mut off = 0usize;
+    let mut done = false;
+    core::iter::from_fn(move || {
+        if done || off.saturating_add(CMSG_HDR) > total {
+            return None;
+        }
+        // SAFETY: the header lies inside the buffer (the bound above), which
+        // the caller's contract makes readable.
+        let (len, level, kind) = unsafe { cmsg_header(base.add(off)) };
+        if len < CMSG_HDR || off.saturating_add(len) > total {
+            done = true;
+            return Some(Err(errno::EINVAL));
+        }
+        let message = ControlMessage {
+            off,
+            len,
+            level,
+            kind,
+        };
+        off = off.saturating_add(cmsg_align(len));
+        Some(Ok(message))
+    })
 }
 
 /// Whether a sender whose pid is `own_pid` and whose ids are `ids` may state
@@ -1296,24 +1357,10 @@ pub(crate) unsafe fn sendmsg(fd: i32, handle: u64, msg: &Msghdr, flags: i32) -> 
 ///
 /// As [`check_control`].
 unsafe fn carries_rights(msg: &Msghdr) -> bool {
-    let base = msg.msg_control.cast_const();
-    let total = msg.msg_controllen;
-    if base.is_null() {
-        return false;
-    }
-    let mut off = 0usize;
-    while off.saturating_add(CMSG_HDR) <= total {
-        // SAFETY: a header's bytes lie inside the buffer (the loop bound).
-        let (len, level, kind) = unsafe { cmsg_header(base.add(off)) };
-        if len < CMSG_HDR || off.saturating_add(len) > total {
-            return false;
-        }
-        if level == SOL_SOCKET && kind == SCM_RIGHTS {
-            return true;
-        }
-        off = off.saturating_add(cmsg_align(len));
-    }
-    false
+    // SAFETY: the caller's contract.
+    unsafe { control_messages(msg) }
+        .map_while(Result::ok)
+        .any(|m| m.level == SOL_SOCKET && m.kind == SCM_RIGHTS)
 }
 
 /// [`sendmsg`] of a message that carries descriptors: their records, 4 KB
@@ -2277,9 +2324,10 @@ mod tests {
         assert_eq!(&out[2..8], b"/run/s");
     }
 
-    /// Who may state which credentials: Linux's `scm_check_creds`. Any of
-    /// the sender's real, effective and saved ids, with its own pid -- not
-    /// its filesystem id, nor another's pid -- and anything for root.
+    /// Who may state which credentials: only what the receiver will be told
+    /// -- the sender's own pid and real ids -- not its effective, saved or
+    /// filesystem ids, and nothing else for root
+    /// (`known-issues/D-POSIX-STATED-CREDENTIALS-ARE-ONLY-THE-REAL-ONES.md`).
     #[test]
     fn a_sender_may_state_only_what_the_receiver_is_told() {
         let ids = crate::unistd::Ids {

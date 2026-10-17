@@ -53,6 +53,12 @@ What it checks
    `check-libc-abi.py` holds the library's Rust types to these, and so, one
    step removed, to glibc's.
 
+`slateos/` holds SlateOS's own interfaces, which glibc has none of
+(<slateos/secureboot.h>): check 1 compiles them as it does every header, but
+2 to 4 do not hold them to glibc, as no program written for glibc includes
+them. check-libc-abi.py holds their types to the library's Rust ones, and
+check-libc-prototypes.py their functions to its definitions.
+
 The declarations' calling conventions against the library's definitions are
 scripts/check-libc-prototypes.py's to check; this one checks what a program
 compiling against the overlay sees.
@@ -329,6 +335,16 @@ def overlay_headers(overlay: Path) -> list[str]:
                   if not p.relative_to(overlay).as_posix().startswith("bits/"))
 
 
+# Where SlateOS's own headers are, relative to the overlay.
+NATIVE = "slateos/"
+
+
+def is_native(header: str) -> bool:
+    """Whether `header`, relative to the overlay, is one of SlateOS's own,
+    which glibc has no counterpart of to be held to."""
+    return header.startswith(NATIVE)
+
+
 def compile_c(zig: str, source: str, flags: list[str], overlay: Path | None) -> tuple[int, str]:
     """Compile `source` for the target; (exit status, diagnostics). To an
     object, not -fsyntax-only, which zig's driver reports as a missing file."""
@@ -463,7 +479,8 @@ def overlay_names(zig: str, overlay: Path) -> set[str]:
     """The names the overlay's own text declares: those it adds to musl's
     headers, and those it declares under wider feature macros than musl's
     headers do (glibc's, which musl's are narrower than for some)."""
-    return visible(zig, overlay_headers(overlay), candidates(overlay), WIDEST, overlay)
+    held = [h for h in overlay_headers(overlay) if not is_native(h)]
+    return visible(zig, held, candidates(overlay), WIDEST, overlay)
 
 
 def defined_types(overlay: Path) -> list[frozenset[str]]:
@@ -471,6 +488,8 @@ def defined_types(overlay: Path) -> list[frozenset[str]]:
     tag, as `struct tag`, and the typedef naming it."""
     out = []
     for p in sorted(overlay.rglob("*.h")):
+        if is_native(p.relative_to(overlay).as_posix()):
+            continue
         text = re.sub(r"/\*.*?\*/", " ", p.read_text(encoding="utf-8"), flags=re.S)
         for m in re.finditer(r"\b(typedef\s+)?struct(?:\s+(\w+))?\s*\{", text):
             depth, i = 1, m.end()
@@ -827,6 +846,12 @@ def self_test() -> int:
             check("a wrong type is caught, a right one passes", bad == {"printf"})
             check("the overlay's names are what it adds to musl's",
                   overlay_names(zig, d) == {"fcloseall"})
+            (d / "slateos").mkdir()
+            (d / "slateos" / "own.h").write_text(
+                "struct own { int a; };\nint own_call(struct own *);\n",
+                encoding="utf-8", newline="")
+            check("a name of SlateOS's own is held to no glibc name",
+                  overlay_names(zig, d) == {"fcloseall"})
             saved_unc = dict(MUSL_UNCOMPILABLE)
             try:
                 MUSL_UNCOMPILABLE.clear()
@@ -861,6 +886,8 @@ def self_test() -> int:
                 good = {"lay_t": ("sys/lay.h", 16, [("a", 0), ("b", 8)])}
                 bad = {"lay_t": ("sys/lay.h", 16, [("a", 0), ("b", 4)])}
                 check("a layout that is glibc's passes", mislaid(zig, d, good) == [])
+                check("a struct of SlateOS's own is held to no glibc layout",
+                      not any("struct own" in p for p in mislaid(zig, d, good)))
                 check("an offset that is not is caught",
                       any("b is not at glibc's offset 4" in p for p in mislaid(zig, d, bad)))
                 # A layout otherwise on purpose: glibc's lay_t taken to be 8

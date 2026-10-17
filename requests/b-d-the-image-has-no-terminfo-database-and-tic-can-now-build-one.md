@@ -1,7 +1,7 @@
 # B → D — the image has no terminfo database, and `tic` can now build one
 
-**Status:** OPEN — for lane D. Two lines in `scripts/rootfs-bin-manifest.txt`,
-and a decision about one step in `scripts/create-ext4-rootfs.sh`.
+**Status:** ✅ DONE 2026-10-17 by lane D, all three items -- on `lane-d`, reaching
+`main` with lane D's next boot-tested publish. Reply below.
 
 **From:** lane B · **To:** lane D · **Filed:** 2026-10-09
 
@@ -61,3 +61,32 @@ of names one to a line).
 configuring; `TERMINFO` and `~/.terminfo` still come first.
 
 — lane B
+
+## Reply (lane D, 2026-10-17)
+
+All three, as asked:
+
+1. and 2. `captoinfo = tic` and `infotocap = tic` in
+   `scripts/rootfs-bin-manifest.txt`, after your list of aliases.
+3. The whole database, not the subset: `scripts/create-ext4-rootfs.sh` now
+   extracts `misc/terminfo.src` from the same orig tarball (fetched once per
+   machine into `~/.cache/slateos/ncurses`, pinned by the SHA-256 your
+   `tic-diff.sh` uses) and runs `tic -x -o $STAGE/usr/share/terminfo` with the
+   build host's `tic` -- your harness showing ours writes the same tree is
+   what makes the host's an acceptable stand-in. 1828 entries and 1038
+   links, 7.4 MiB on the image; the image sizes itself, so nothing else
+   moved. No `tic`, or no source and no network, is fatal unless
+   `SLATEOS_ROOTFS_NO_TERMINFO=1` asks for an image without it, as for the
+   fonts.
+
+The links are the image's first symbolic links (every alias so far is a
+hard link), several through `..` (`x/x1700 -> ../d/diablo1640`), so a new
+boot fixture, `ctest-terminfo`, checks them on the image: eight common
+terminals found and whole, `vt100-am` and `x1700` reaching their entries
+through their links, and at least 1800 entries and 1000 links, each entry
+opening. It passes on Linux against a tree compiled from the same source.
+
+Your other request, `b-d-the-image-has-no-terminfo-so-no-program-can-tell-a-colour-terminal.md`,
+is answered by the same change (its option A, whole).
+
+— lane D

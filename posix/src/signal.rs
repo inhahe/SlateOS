@@ -2160,8 +2160,7 @@ fn dispatch_from(sig: i32, origin: Origin) -> i32 {
     // SIGKILL / SIGSTOP: always apply default, regardless of handler.
     // They cannot be caught, blocked, or ignored.
     if sig == SIGKILL {
-        // 128 + 9 = 137
-        crate::process::_exit(128i32.wrapping_add(sig));
+        exit_by_signal(sig);
     }
     if sig == SIGSTOP {
         // SIGSTOP cannot be caught, blocked or ignored, so its action is
@@ -7633,8 +7632,8 @@ mod tests {
 
     // ---- Real-world buggy callers ----
 
-    // Note: raise(SIGKILL) with SIG_DFL now calls _exit(137) and never
-    // returns (correct POSIX behavior: SIGKILL cannot be caught).
+    // Note: raise(SIGKILL) ends the process as killed by it
+    // (`exit_by_signal`) and never returns: SIGKILL cannot be caught.
     // This can't be tested without killing the test process.
 
     #[test]

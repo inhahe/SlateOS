@@ -857,6 +857,21 @@ pub const SYS_SIGNAL_STOP_SELF: u64 = 1062;
 /// by default. Lane A's (1136); a kernel without it answers `NoSuchSyscall`.
 pub const SYS_SIGNAL_EXIT_SELF: u64 = 1136;
 
+/// `SYS_SECUREBOOT_ENROLL(type, subject_ptr, subject_len, fp_ptr, fp_len)`
+/// -- enrol a Secure Boot entry: its id. `type` 0 `PK`, 1 `KEK`, 2 `db`, 3
+/// `dbx`, 4 `MOK`; `subject` UTF-8, 1..=256 bytes; `fp` `SHA256:` and 64
+/// hex digits, or the digits alone. Needs `(Process, ENROLL_SECUREBOOT)`.
+/// Lane A's (1082, design-decisions §978).
+pub const SYS_SECUREBOOT_ENROLL: u64 = 1082;
+/// `SYS_SECUREBOOT_REMOVE(id)` -- remove the entry with that id. Needs the
+/// same right. Lane A's (1083).
+pub const SYS_SECUREBOOT_REMOVE: u64 = 1083;
+/// `SYS_SECUREBOOT_VERIFY(name_ptr, name_len, hash_ptr, hash_len, out_ptr)`
+/// -- whether an image may run: four little-endian `u32`s at `out_ptr`,
+/// listing, deciding entry, enforced, may run. Needs no right. Lane A's
+/// (1084).
+pub const SYS_SECUREBOOT_VERIFY: u64 = 1084;
+
 /// Fork the calling process (copy-on-write).  Returns the child PID to
 /// the parent and 0 to the child, or a negative error code to the
 /// parent on failure.

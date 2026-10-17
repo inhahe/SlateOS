@@ -33,7 +33,7 @@
 
 stdfdguard::guard_std_fds!();
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use smartcols::{FL_NOEXTREMES, FL_RIGHT, JsonType, Table};
 use std::ffi::{OsStr, OsString};
@@ -283,6 +283,9 @@ const LONG_VALS: [i32; 23] = [
     b'V' as i32,
 ];
 
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
+
 /// `excl[]`, as upstream has it -- its third row out of ASCII order, which
 /// is what keeps `-O` and `-D` from being refused together.
 const EXCL: [&[i32]; 4] = [
@@ -310,27 +313,6 @@ const EXCL: [&[i32]; 4] = [
     ],
     &[b'J' as i32, OPT_RAW],
 ];
-
-/// `option_to_longopt (c, longopts)`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
 
 /// `program_invocation_short_name`: argv[0] past its last `/`.
 fn short_name(arg0: &OsStr) -> Vec<u8> {
@@ -986,14 +968,14 @@ impl Losetup {
                     return Err(self.errtryhelp());
                 }
             };
-            let Some((c, value)) = option_code(&opt) else {
+            let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
                 if let Opt::Operand(w) = opt {
                     operands.push(os_bytes(w).into_owned());
                 }
                 continue;
             };
             if let Some(msg) =
-                err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short)
+                err_exclusive_options(c, &EXCL, &mut excl_st, |c| OPTIONS.name_of(c), &self.short)
             {
                 stderr_write(msg.as_bytes());
                 return Err(Exit(1));

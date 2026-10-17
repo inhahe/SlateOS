@@ -187,23 +187,23 @@ fn states_are_worded_as_upstream_words_them() {
 
 #[test]
 fn options_decode_to_upstream_s_values() {
-    assert_eq!(option_to_longopt(i32::from(b'J')), Some("json"));
-    assert_eq!(option_to_longopt(OPT_LIST_TYPES), Some("output-all"));
-    assert_eq!(option_to_longopt(i32::from(b'x')), None);
+    assert_eq!(OPTIONS.name_of(i32::from(b'J')), Some("json"));
+    assert_eq!(OPTIONS.name_of(OPT_LIST_TYPES), Some("output-all"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'x')), None);
     let id = Some(OsString::from("ID"));
     assert_eq!(
-        option_code(&Opt::Short(b'o', id.clone())),
+        OPTIONS.code::<i32>(&Opt::Short(b'o', id.clone())),
         Some((i32::from(b'o'), id.clone()))
     );
     assert_eq!(
-        option_code(&Opt::Long("output", id.clone())),
+        OPTIONS.code::<i32>(&Opt::Long("output", id.clone())),
         Some((i32::from(b'o'), id))
     );
     assert_eq!(
-        option_code(&Opt::Long("output-all", None)),
+        OPTIONS.code::<i32>(&Opt::Long("output-all", None)),
         Some((OPT_LIST_TYPES, None))
     );
-    assert_eq!(option_code(&Opt::Long("nosuch", None)), None);
+    assert_eq!(OPTIONS.code::<i32>(&Opt::Long("nosuch", None)), None);
 }
 
 #[test]

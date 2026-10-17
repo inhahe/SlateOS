@@ -23,7 +23,7 @@
 //! * **A name in a diagnostic** has its unprintable bytes escaped
 //!   (design-decisions §370).
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use smartcols::{ColumnId, JsonType, Table};
 use std::ffi::{OsStr, OsString};
@@ -77,6 +77,9 @@ const LONG_VALS: [i32; 14] = [
     b'i' as i32,
     b'O' as i32,
 ];
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`: `-O`, `-a` and `-o` exclude each other.
 const EXCL: [&[i32]; 1] = [&[b'O' as i32, b'a' as i32, b'o' as i32]];
@@ -899,27 +902,6 @@ fn do_wipe(ctl: &mut Ctl, out: &mut Stdout, short: &[u8]) -> Result<(), Fatal> {
     Ok(())
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
-/// `option_to_longopt(c, opts)`: the first long option with this `val`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 stdfdguard::guard_std_fds!();
 
 fn main() -> ExitCode {
@@ -958,14 +940,14 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
                 return errtryhelp(short);
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
             if let Opt::Operand(o) = &opt {
                 operands.push(os_bytes(o).into_owned());
             }
             continue;
         };
         if let Some(msg) =
-            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short)
+            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, |c| OPTIONS.name_of(c), short)
         {
             stderr_write(msg.as_bytes());
             return 1;

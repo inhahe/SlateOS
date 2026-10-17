@@ -19,7 +19,7 @@ use std::os::unix::io::AsRawFd;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::time::Instant;
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use libcall::xattr::{FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_SHARED, FIEMAP_FLAG_SYNC, fiemap_extent};
 use quoting::{escape_unprintable, os_bytes};
 use ulclosestream::{Stdout, stderr_write, warn, warnx};
@@ -429,29 +429,11 @@ const LONG_VALS: [i32; 24] = [
     b'r' as i32,
 ];
 
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
+
 /// `excl[]`.
 const EXCL: [&[i32]; 1] = [&[b'q' as i32, b'v' as i32]];
-
-/// `option_to_longopt (c, longopts)`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
 
 /// `program_invocation_short_name`: argv[0] past its last `/`.
 fn short_name(arg0: &OsStr) -> Vec<u8> {
@@ -1390,14 +1372,14 @@ impl Hardlink {
                     return Err(self.errtryhelp());
                 }
             };
-            let Some((c, value)) = option_code(&opt) else {
+            let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
                 if let Opt::Operand(w) = opt {
                     operands.push(os_bytes(w).into_owned());
                 }
                 continue;
             };
             if let Some(msg) =
-                err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, &self.short)
+                err_exclusive_options(c, &EXCL, &mut excl_st, |c| OPTIONS.name_of(c), &self.short)
             {
                 stderr_write(msg.as_bytes());
                 return Err(1);

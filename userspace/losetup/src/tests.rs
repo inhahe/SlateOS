@@ -116,15 +116,15 @@ fn the_usage_lists_the_columns_and_ends_with_the_manual() {
 
 #[test]
 fn options_decode_to_upstream_s_values() {
-    assert_eq!(option_to_longopt(OPT_RAW), Some("raw"));
-    assert_eq!(option_to_longopt(i32::from(b'D')), Some("detach-all"));
-    assert_eq!(option_to_longopt(i32::from(b'z')), None);
+    assert_eq!(OPTIONS.name_of(OPT_RAW), Some("raw"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'D')), Some("detach-all"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'z')), None);
     assert_eq!(
-        option_code(&Opt::Long("direct-io", None)),
+        OPTIONS.code::<i32>(&Opt::Long("direct-io", None)),
         Some((OPT_DIO, None))
     );
     assert_eq!(
-        option_code(&Opt::Short(b'o', Some(OsString::from("10")))),
+        OPTIONS.code::<i32>(&Opt::Short(b'o', Some(OsString::from("10")))),
         Some((i32::from(b'o'), Some(OsString::from("10"))))
     );
 }

@@ -27,7 +27,7 @@
 
 mod sys;
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use smartcols::{FL_RIGHT, FL_TRUNC, Table};
 use std::ffi::{OsStr, OsString};
@@ -111,6 +111,9 @@ const LONG_VALS: [i32; 23] = [
     RAW_OPTION,
     VERBOSE_OPTION,
 ];
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `struct prlimit_desc`.
 struct PrlimitDesc {
@@ -674,18 +677,6 @@ fn show_limits(lims: &[Prlimit], columns: &[Col], raw: bool, no_headings: bool) 
     text
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
 /// `main()`.
 #[allow(
     clippy::too_many_lines,
@@ -714,7 +705,7 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
                 return errtryhelp(short);
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
             // `+`: the first operand is COMMAND, and the rest its arguments.
             command = Some(parser.optind().saturating_sub(1));
             break;

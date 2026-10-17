@@ -1,18 +1,22 @@
-//! System tray drag-and-drop and icon arrangement.
+//! The system tray's arrangement, and the dragging that changes it.
 //!
-//! Provides drag-and-drop support for tray icons:
-//! - Dragging icons out of the tray to remove/hide them
-//! - Dragging icons into the tray from the taskbar to pin them
-//! - Reordering icons within the tray via drag
-//! - "Start minimized to tray" per-app configuration
-//! - Enhanced context menu with pin/unpin/hide/show actions
+//! - [`DragSource`] ([`TrayDragSource`] for the tray): whether a press on an
+//!   icon, or on a row of the overflow list, has become a drag.
+//! - [`TrayDropTarget`]: where along the tray a carried icon would land.
+//! - [`TrayIconArrangement`]: the session's order of the icons and which are
+//!   hidden in the overflow, by [`TrayIconKey`] -- process and icon id.
+//! - [`TrayChoices`]: the same order and hiding by [`TrayIconName`] -- the
+//!   program's app id and the icon's id -- which `taskbar.yaml` keeps, so
+//!   they outlast the programs and the desktop.
 //!
-//! Uses the toolkit's DnD primitives ([`DataObject`], [`DataFormat`],
-//! [`DragDropManager`]) for format negotiation and drop handling.
-
-use guitk::dnd::{DataFormat, DataObject, DragDropManager, DropEffect, DropTarget};
-
-use std::collections::HashMap;
+//! Which programs start in the tray is not here: window rules say it
+//! (`window-rules.yaml`'s `tray:`, design-decisions §1467). And no menu
+//! for an icon: a right click on a program's icon is the program's to
+//! answer, and on one of the shell's entries opens its window's menu.
+//!
+//! The shell handles the tray's presses itself rather than through the
+//! toolkit's `DragDropManager`: nothing carries a tray icon anywhere but
+//! along the tray and onto its chevron, and both are the shell's own.
 
 // ============================================================================
 // Constants
@@ -21,22 +25,10 @@ use std::collections::HashMap;
 /// Minimum pixel movement before a press becomes a drag.
 const DRAG_THRESHOLD: f32 = 5.0;
 
-/// Custom data format for tray icon drag data (icon ID + app name).
-const TRAY_ICON_FORMAT: &str = "application/x-slateos-tray-icon";
-
-/// Custom data format for taskbar app data (app ID being dragged in).
-const TASKBAR_APP_FORMAT: &str = "application/x-slateos-taskbar-app";
-
 // ============================================================================
 // TrayDragSource
 // ============================================================================
 
-/// Tracks drag initiation from tray icons and provides visual feedback.
-///
-/// When the user presses and drags a tray icon beyond the threshold,
-/// a drag operation begins carrying the icon's ID and app name.
-/// Dropping outside the tray hides the icon; dropping on another
-/// tray position reorders; pressing Escape cancels.
 /// What the tray drags: an icon, named by its owner and id.
 ///
 /// An alias rather than a distinct type, so the tray's twenty-odd call sites
@@ -122,24 +114,6 @@ impl<K: Clone + PartialEq> DragSource<K> {
         false
     }
 
-    /// Build a [`DataObject`] naming the icon being dragged.
-    ///
-    /// Carries the key and nothing else. An earlier version also carried the
-    /// program's name, which is the compositor's fact and would have been a
-    /// snapshot taken at press time -- stale by the drop if the program
-    /// relabelled its icon mid-drag. The receiver has the list; it can look
-    /// the name up.
-    #[must_use]
-    pub fn build_drag_data(&self, icon: TrayIconKey) -> DataObject {
-        let mut data = DataObject::new();
-        let payload = format!("{}:{}", icon.owner, icon.id);
-        data.set_data(
-            DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-            payload.into_bytes(),
-        );
-        data
-    }
-
     /// Cancel the current drag (e.g., Escape pressed).
     pub fn cancel(&mut self) {
         self.cancelled = true;
@@ -195,38 +169,28 @@ impl<K: Clone + PartialEq> Default for DragSource<K> {
 // TrayDropTarget
 // ============================================================================
 
-/// Accepts icons being dragged into the tray area.
+/// Which gap between the tray's icons a carried icon is over.
 ///
-/// Handles two kinds of inbound drops:
-/// - **From taskbar**: pins the app as a tray icon.
-/// - **From other tray icons**: reorders within the tray.
-///
-/// Provides visual feedback via an insertion indicator index.
+/// The icons stand in equal cells from `x`, so the gap is the nearest cell
+/// boundary to the pointer, `0..=` the icon count.
 pub struct TrayDropTarget {
-    /// Unique target ID registered with the DnD manager.
-    pub target_id: u64,
-    /// Bounding rect of the tray area.
+    /// Where the first icon's cell starts.
     pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-    /// Index where a drop-insertion indicator should be drawn (between icons).
+    /// The gap last measured by [`calc_insertion_index`](Self::calc_insertion_index).
     pub insertion_index: Option<usize>,
-    /// Number of icons currently visible (used for insertion calculation).
+    /// How many icons stand in the run.
     icon_count: usize,
-    /// Width of a single icon cell.
+    /// How wide one icon's cell is.
     icon_cell_width: f32,
 }
 
 impl TrayDropTarget {
-    /// Create a new tray drop target.
-    pub fn new(target_id: u64, x: f32, y: f32, width: f32, height: f32) -> Self {
+    /// A run of icons starting at `x`, with no icons yet and the default
+    /// cell width.
+    #[must_use]
+    pub fn new(x: f32) -> Self {
         Self {
-            target_id,
             x,
-            y,
-            width,
-            height,
             insertion_index: None,
             icon_count: 0,
             icon_cell_width: 36.0,
@@ -243,23 +207,6 @@ impl TrayDropTarget {
         self.icon_cell_width = width;
     }
 
-    /// Register this target with a [`DragDropManager`].
-    pub fn register(&self, manager: &mut DragDropManager) {
-        let target = DropTarget {
-            id: self.target_id,
-            x: self.x,
-            y: self.y,
-            width: self.width,
-            height: self.height,
-            accepted_formats: vec![
-                DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-                DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()),
-            ],
-            allowed_effects: vec![DropEffect::Move, DropEffect::Copy],
-        };
-        manager.register_target(target);
-    }
-
     /// Calculate insertion index from a pointer X position within the tray.
     pub fn calc_insertion_index(&mut self, pointer_x: f32) {
         if self.icon_cell_width <= 0.0 || self.icon_count == 0 {
@@ -270,45 +217,6 @@ impl TrayDropTarget {
         // Round to nearest boundary between icons.
         let raw = (relative_x / self.icon_cell_width + 0.5) as usize;
         self.insertion_index = Some(raw.min(self.icon_count));
-    }
-
-    /// Clear the insertion indicator.
-    pub fn clear_insertion(&mut self) {
-        self.insertion_index = None;
-    }
-
-    /// Validate that drag data represents a recognized tray-compatible app.
-    pub fn validate_drop(data: &DataObject) -> bool {
-        // Accept either tray icon reorder data or taskbar app data.
-        data.has_format(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string()))
-            || data.has_format(&DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()))
-    }
-
-    /// Parse tray icon drag data back into the key it names.
-    ///
-    /// Returns `None` for anything that is not exactly two numbers. The
-    /// earlier version accepted a missing second field and substituted an
-    /// empty string, so a payload carrying only half an identity parsed
-    /// successfully and named an icon that was not the one dragged.
-    #[must_use]
-    pub fn parse_tray_icon_data(data: &DataObject) -> Option<TrayIconKey> {
-        let bytes = data.get_data(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string()))?;
-        let text = core::str::from_utf8(bytes).ok()?;
-        let (owner, id) = text.split_once(':')?;
-        Some(TrayIconKey {
-            owner: owner.parse().ok()?,
-            id: id.parse().ok()?,
-        })
-    }
-
-    /// Parse taskbar app drag data into an app_id string.
-    pub fn parse_taskbar_app_data(data: &DataObject) -> Option<String> {
-        let bytes = data.get_data(&DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()))?;
-        let text = core::str::from_utf8(bytes).ok()?;
-        if text.is_empty() {
-            return None;
-        }
-        Some(text.to_string())
     }
 }
 
@@ -362,21 +270,16 @@ impl TrayIconKey {
 pub struct TrayIconSlot {
     /// Which icon this slot is for.
     pub key: TrayIconKey,
-    /// Whether this icon is currently visible in the tray bar.
+    /// Whether this icon is shown on the bar, rather than hidden in the
+    /// overflow.
     pub visible: bool,
-    /// Whether this icon is pinned (persists across restarts).
-    pub pinned: bool,
 }
 
 impl TrayIconSlot {
-    /// A newly-seen icon: shown, unpinned.
+    /// A newly-seen icon: shown.
     #[must_use]
     pub fn showing(key: TrayIconKey) -> Self {
-        Self {
-            key,
-            visible: true,
-            pinned: false,
-        }
+        Self { key, visible: true }
     }
 }
 
@@ -577,25 +480,6 @@ impl TrayIconArrangement {
         }
     }
 
-    /// Pin an icon so it persists across restarts.
-    pub fn pin_icon(&mut self, key: TrayIconKey) {
-        if let Some(slot) = self.icons.iter_mut().find(|s| s.key == key) {
-            slot.pinned = true;
-        }
-    }
-
-    /// Unpin an icon (it becomes transient -- disappears when its app exits).
-    pub fn unpin_icon(&mut self, key: TrayIconKey) {
-        if let Some(slot) = self.icons.iter_mut().find(|s| s.key == key) {
-            slot.pinned = false;
-        }
-    }
-
-    /// Remove an icon from the arrangement entirely.
-    pub fn remove_icon(&mut self, key: TrayIconKey) {
-        self.icons.retain(|s| s.key != key);
-    }
-
     /// Every icon the user has not hidden, in order.
     ///
     /// Not the same as what is drawn: the bar may not be wide enough for all
@@ -653,11 +537,6 @@ impl TrayIconArrangement {
     #[must_use]
     pub fn has_overflow(&self, limit: usize) -> bool {
         self.icons.iter().any(|s| !s.visible) || self.shown_keys().len() > limit
-    }
-
-    /// Find an icon by key.
-    pub fn find_icon(&self, key: TrayIconKey) -> Option<&TrayIconSlot> {
-        self.icons.iter().find(|s| s.key == key)
     }
 }
 
@@ -863,177 +742,6 @@ impl TrayChoices {
 }
 
 // ============================================================================
-// StartInTrayConfig
-// ============================================================================
-
-/// Tracks which apps should start minimized to the system tray.
-///
-/// When an app launches, it can check this config to decide whether to
-/// show its main window or hide immediately to the tray.
-pub struct StartInTrayConfig {
-    /// Per-app "start in tray" setting. Key is the app ID string.
-    pub start_in_tray: HashMap<String, bool>,
-}
-
-impl StartInTrayConfig {
-    /// Create an empty config (no apps start in tray by default).
-    pub fn new() -> Self {
-        Self {
-            start_in_tray: HashMap::new(),
-        }
-    }
-
-    /// Set whether a specific app should start minimized to the tray.
-    pub fn set_start_in_tray(&mut self, app_id: &str, enabled: bool) {
-        self.start_in_tray.insert(app_id.to_string(), enabled);
-    }
-
-    /// Query whether a specific app should start minimized to the tray.
-    /// Returns `false` if no setting exists for the app.
-    pub fn should_start_in_tray(&self, app_id: &str) -> bool {
-        self.start_in_tray.get(app_id).copied().unwrap_or(false)
-    }
-
-    /// Remove the setting for an app (reverts to default = false).
-    pub fn clear(&mut self, app_id: &str) {
-        self.start_in_tray.remove(app_id);
-    }
-
-    /// Return all app IDs that are configured to start in tray.
-    pub fn enabled_apps(&self) -> Vec<&str> {
-        self.start_in_tray
-            .iter()
-            .filter(|(_, v)| **v)
-            .map(|(k, _)| k.as_str())
-            .collect()
-    }
-}
-
-impl Default for StartInTrayConfig {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// ============================================================================
-// TrayContextMenu
-// ============================================================================
-
-/// Entries in the enhanced tray icon context menu.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TrayMenuEntry {
-    /// Open the application's main window.
-    Open,
-    /// Open the application's settings (only if available).
-    Settings,
-    /// Separator line between groups.
-    Separator,
-    /// Toggle "Pin to tray" / "Unpin from tray".
-    TogglePin,
-    /// Toggle "Start minimized to tray" (checkmark).
-    ToggleStartInTray,
-    /// Hide this icon (moves to overflow).
-    HideIcon,
-    /// Show hidden icons popup.
-    ShowHiddenIcons,
-    /// Exit the application.
-    Exit,
-}
-
-/// Built context menu for a tray icon, including state-dependent labels.
-#[derive(Clone, Debug)]
-pub struct TrayContextMenu {
-    /// Which icon this menu is for.
-    pub icon: TrayIconKey,
-    /// Ordered list of menu entries.
-    pub entries: Vec<TrayMenuEntry>,
-    /// Whether the icon is currently pinned (affects TogglePin label).
-    pub is_pinned: bool,
-    /// Whether "start in tray" is enabled (affects ToggleStartInTray checkmark).
-    pub start_in_tray_enabled: bool,
-    /// Whether there are hidden overflow icons (controls ShowHiddenIcons visibility).
-    pub has_hidden_icons: bool,
-    /// Whether the app has a settings page.
-    pub has_settings: bool,
-}
-
-impl TrayContextMenu {
-    /// Build a context menu for the given icon state.
-    #[must_use]
-    pub fn build(
-        icon: TrayIconKey,
-        is_pinned: bool,
-        start_in_tray_enabled: bool,
-        has_hidden_icons: bool,
-        has_settings: bool,
-    ) -> Self {
-        let mut entries = Vec::new();
-
-        // Group 1: Primary actions.
-        entries.push(TrayMenuEntry::Open);
-        if has_settings {
-            entries.push(TrayMenuEntry::Settings);
-        }
-
-        entries.push(TrayMenuEntry::Separator);
-
-        // Group 2: Pin/start-in-tray toggles.
-        entries.push(TrayMenuEntry::TogglePin);
-        entries.push(TrayMenuEntry::ToggleStartInTray);
-
-        entries.push(TrayMenuEntry::Separator);
-
-        // Group 3: Visibility.
-        entries.push(TrayMenuEntry::HideIcon);
-        if has_hidden_icons {
-            entries.push(TrayMenuEntry::ShowHiddenIcons);
-        }
-
-        entries.push(TrayMenuEntry::Separator);
-
-        // Group 4: Exit.
-        entries.push(TrayMenuEntry::Exit);
-
-        Self {
-            icon,
-            entries,
-            is_pinned,
-            start_in_tray_enabled,
-            has_hidden_icons,
-            has_settings,
-        }
-    }
-
-    /// Get the display label for a menu entry, accounting for toggle state.
-    pub fn label_for(&self, entry: &TrayMenuEntry) -> &'static str {
-        match entry {
-            TrayMenuEntry::Open => "Open",
-            TrayMenuEntry::Settings => "Settings",
-            TrayMenuEntry::Separator => "",
-            TrayMenuEntry::TogglePin => {
-                if self.is_pinned {
-                    "Unpin from tray"
-                } else {
-                    "Pin to tray"
-                }
-            }
-            TrayMenuEntry::ToggleStartInTray => "Start minimized to tray",
-            TrayMenuEntry::HideIcon => "Hide icon",
-            TrayMenuEntry::ShowHiddenIcons => "Show hidden icons",
-            TrayMenuEntry::Exit => "Exit",
-        }
-    }
-
-    /// Returns the number of non-separator entries (actionable items).
-    pub fn actionable_count(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| **e != TrayMenuEntry::Separator)
-            .count()
-    }
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -1051,7 +759,6 @@ mod tests {
     )]
 
     use super::*;
-    use guitk::dnd::DragEvent;
 
     /// One owner for the tests that are about order rather than ownership.
     ///
@@ -1071,11 +778,10 @@ mod tests {
     }
 
     // Helper to create a test slot.
-    fn make_slot(id: u32, visible: bool, pinned: bool) -> TrayIconSlot {
+    fn make_slot(id: u32, visible: bool) -> TrayIconSlot {
         TrayIconSlot {
             key: key(id),
             visible,
-            pinned,
         }
     }
 
@@ -1162,20 +868,6 @@ mod tests {
     }
 
     #[test]
-    fn drag_source_build_data_contains_format() {
-        let src = TrayDragSource::new();
-        let data = src.build_drag_data(key(42));
-
-        assert!(data.has_format(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string())));
-
-        let raw = data
-            .get_data(&DataFormat::Custom(TRAY_ICON_FORMAT.to_string()))
-            .expect("should have tray icon data");
-        let text = core::str::from_utf8(raw).expect("should be valid utf8");
-        assert_eq!(text, "900:42", "both halves of the identity, owner first");
-    }
-
-    #[test]
     fn drag_source_on_move_after_cancel_returns_false() {
         let mut src = TrayDragSource::new();
         src.on_press(key(1), 0.0, 0.0);
@@ -1202,87 +894,8 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn drop_target_validate_tray_icon_data() {
-        let mut data = DataObject::new();
-        data.set_data(
-            DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-            b"10:volume".to_vec(),
-        );
-        assert!(TrayDropTarget::validate_drop(&data));
-    }
-
-    #[test]
-    fn drop_target_validate_taskbar_data() {
-        let mut data = DataObject::new();
-        data.set_data(
-            DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()),
-            b"com.example.app".to_vec(),
-        );
-        assert!(TrayDropTarget::validate_drop(&data));
-    }
-
-    #[test]
-    fn drop_target_validate_rejects_unknown_data() {
-        let data = DataObject::with_text("random text");
-        assert!(!TrayDropTarget::validate_drop(&data));
-    }
-
-    #[test]
-    fn drop_target_parse_tray_icon_data() {
-        let mut data = DataObject::new();
-        data.set_data(
-            DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-            b"99:4".to_vec(),
-        );
-        let result = TrayDropTarget::parse_tray_icon_data(&data);
-        assert_eq!(result, Some(TrayIconKey { owner: 99, id: 4 }));
-    }
-
-    #[test]
-    fn drop_target_refuses_half_an_identity() {
-        // The shape the old parser accepted: one number, no separator. It
-        // returned Some with an empty name, so a drop carrying half an
-        // identity named an icon that was not the one dragged.
-        for payload in [&b"99"[..], b"99:", b":4", b"99:4:5", b"a:4", b"99:b"] {
-            let mut data = DataObject::new();
-            data.set_data(
-                DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-                payload.to_vec(),
-            );
-            assert_eq!(
-                TrayDropTarget::parse_tray_icon_data(&data),
-                None,
-                "{} should not parse",
-                String::from_utf8_lossy(payload),
-            );
-        }
-    }
-
-    #[test]
-    fn drop_target_parse_taskbar_app_data() {
-        let mut data = DataObject::new();
-        data.set_data(
-            DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()),
-            b"org.slateos.settings".to_vec(),
-        );
-        let result = TrayDropTarget::parse_taskbar_app_data(&data);
-        assert_eq!(result, Some("org.slateos.settings".to_string()));
-    }
-
-    #[test]
-    fn drop_target_parse_empty_taskbar_data_returns_none() {
-        let mut data = DataObject::new();
-        data.set_data(
-            DataFormat::Custom(TASKBAR_APP_FORMAT.to_string()),
-            Vec::new(),
-        );
-        let result = TrayDropTarget::parse_taskbar_app_data(&data);
-        assert!(result.is_none());
-    }
-
-    #[test]
     fn drop_target_insertion_index_calculation() {
-        let mut target = TrayDropTarget::new(1, 100.0, 500.0, 432.0, 40.0);
+        let mut target = TrayDropTarget::new(100.0);
         target.set_icon_count(12);
         target.set_icon_cell_width(36.0);
 
@@ -1299,31 +912,6 @@ mod tests {
         assert_eq!(target.insertion_index, Some(12));
     }
 
-    #[test]
-    fn drop_target_register_with_manager() {
-        let target = TrayDropTarget::new(42, 10.0, 20.0, 300.0, 40.0);
-        let mut manager = DragDropManager::new();
-
-        target.register(&mut manager);
-        // After registering, we can verify by starting a drag with a compatible format.
-        let mut data = DataObject::new();
-        data.set_data(
-            DataFormat::Custom(TRAY_ICON_FORMAT.to_string()),
-            b"1:test".to_vec(),
-        );
-        let ended = manager.begin_drag(1, 0.0, 0.0, data, vec![DropEffect::Move]);
-        assert!(ended.is_empty(), "no drag was under way");
-        // Move over the target area.
-        let events = manager.update_position(15.0, 25.0);
-        // Should get a DragEnter since we're over the registered target.
-        assert!(
-            events
-                .iter()
-                .any(|event| matches!(event, DragEvent::DragEnter { target_id: 42, .. })),
-            "{events:?}"
-        );
-    }
-
     // ======================================================================
     // TrayIconArrangement tests
     // ======================================================================
@@ -1331,9 +919,9 @@ mod tests {
     #[test]
     fn arrangement_reorder_forward() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-        arr.add_icon(make_slot(2, true, false));
-        arr.add_icon(make_slot(3, true, false));
+        arr.add_icon(make_slot(1, true));
+        arr.add_icon(make_slot(2, true));
+        arr.add_icon(make_slot(3, true));
 
         arr.reorder(0, 2);
 
@@ -1345,9 +933,9 @@ mod tests {
     #[test]
     fn arrangement_reorder_backward() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-        arr.add_icon(make_slot(2, true, false));
-        arr.add_icon(make_slot(3, true, false));
+        arr.add_icon(make_slot(1, true));
+        arr.add_icon(make_slot(2, true));
+        arr.add_icon(make_slot(3, true));
 
         arr.reorder(2, 0);
 
@@ -1359,8 +947,8 @@ mod tests {
     #[test]
     fn arrangement_reorder_same_index_noop() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-        arr.add_icon(make_slot(2, true, false));
+        arr.add_icon(make_slot(1, true));
+        arr.add_icon(make_slot(2, true));
 
         arr.reorder(1, 1);
 
@@ -1371,7 +959,7 @@ mod tests {
     #[test]
     fn arrangement_reorder_out_of_bounds_noop() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(1, true));
 
         arr.reorder(0, 5);
         assert_eq!(arr.icons[0].key.id, 1);
@@ -1381,23 +969,9 @@ mod tests {
     }
 
     #[test]
-    fn arrangement_pin_unpin() {
-        let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-
-        assert!(!arr.icons[0].pinned);
-
-        arr.pin_icon(key(1));
-        assert!(arr.icons[0].pinned);
-
-        arr.unpin_icon(key(1));
-        assert!(!arr.icons[0].pinned);
-    }
-
-    #[test]
     fn arrangement_hide_show() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(1, true));
 
         assert!(arr.icons[0].visible);
         assert_eq!(arr.visible_icons(usize::MAX).len(), 1);
@@ -1416,7 +990,7 @@ mod tests {
     fn arrangement_overflow() {
         let mut arr = TrayIconArrangement::new();
         for i in 0..5 {
-            arr.add_icon(make_slot(i, true, false));
+            arr.add_icon(make_slot(i, true));
         }
 
         assert_eq!(arr.visible_icons(3).len(), 3);
@@ -1428,7 +1002,7 @@ mod tests {
     fn arrangement_no_overflow_when_within_limit() {
         let mut arr = TrayIconArrangement::new();
         for i in 0..5 {
-            arr.add_icon(make_slot(i, true, false));
+            arr.add_icon(make_slot(i, true));
         }
 
         assert_eq!(arr.visible_icons(10).len(), 5);
@@ -1443,10 +1017,10 @@ mod tests {
     #[test]
     fn a_hidden_icon_is_in_the_overflow_and_not_on_the_bar() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-        arr.add_icon(make_slot(2, false, false)); // hidden
-        arr.add_icon(make_slot(3, true, false));
-        arr.add_icon(make_slot(4, true, false));
+        arr.add_icon(make_slot(1, true));
+        arr.add_icon(make_slot(2, false)); // hidden
+        arr.add_icon(make_slot(3, true));
+        arr.add_icon(make_slot(4, true));
 
         assert_eq!(arr.visible_icons(5).len(), 3);
         assert_eq!(arr.hidden_icons().len(), 1);
@@ -1473,40 +1047,6 @@ mod tests {
         assert!(!arr.has_overflow(5));
     }
 
-    #[test]
-    fn arrangement_remove_icon() {
-        let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-        arr.add_icon(make_slot(2, true, false));
-
-        arr.remove_icon(key(1));
-        assert_eq!(arr.icons.len(), 1);
-        assert_eq!(arr.icons[0].key.id, 2);
-    }
-
-    #[test]
-    fn arrangement_find_icon() {
-        let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(42, true, true));
-
-        let found = arr.find_icon(key(42));
-        assert!(found.is_some());
-        assert!(found.unwrap().pinned);
-
-        assert!(arr.find_icon(key(999)).is_none());
-
-        // The half that a single number could not express: same id, other
-        // program. An arrangement keyed on `id` alone would find this.
-        assert!(
-            arr.find_icon(TrayIconKey {
-                owner: OTHER,
-                id: 42
-            })
-            .is_none(),
-            "another program's icon 42 is not this one"
-        );
-    }
-
     // ======================================================================
     // sync -- folding the compositor's list into the shell's order
     // ======================================================================
@@ -1516,7 +1056,7 @@ mod tests {
         let mut arr = TrayIconArrangement::new();
         assert!(arr.sync(&[reported(OWNER, 1, "A"), reported(OWNER, 2, "B")]));
         assert_eq!(arr.ordered_keys(), vec![key(1), key(2)]);
-        assert!(arr.icons.iter().all(|s| s.visible && !s.pinned));
+        assert!(arr.icons.iter().all(|s| s.visible));
     }
 
     #[test]
@@ -1656,7 +1196,7 @@ mod tests {
         for &(moved, boundary, expected) in cases {
             let mut arr = TrayIconArrangement::new();
             for id in 1..=3 {
-                arr.add_icon(make_slot(id, true, false));
+                arr.add_icon(make_slot(id, true));
             }
             let changed = arr.move_to_boundary(key(moved), boundary);
             let got: Vec<u32> = arr.ordered_keys().iter().map(|k| k.id).collect();
@@ -1677,7 +1217,7 @@ mod tests {
     fn a_drop_names_the_icon_it_lands_in_front_of() {
         let mut arr = TrayIconArrangement::new();
         for id in 1..=3 {
-            arr.add_icon(make_slot(id, true, false));
+            arr.add_icon(make_slot(id, true));
         }
 
         // Rightwards: 1 lands in front of 3.
@@ -1697,7 +1237,7 @@ mod tests {
     fn a_drop_in_front_of_itself_is_not_a_move() {
         let mut arr = TrayIconArrangement::new();
         for id in 1..=3 {
-            arr.add_icon(make_slot(id, true, false));
+            arr.add_icon(make_slot(id, true));
         }
         assert!(!arr.move_before(key(2), Some(key(2))));
         assert_eq!(ids(&arr), vec![1, 2, 3]);
@@ -1707,7 +1247,7 @@ mod tests {
     fn a_drop_in_front_of_a_departed_icon_moves_nothing() {
         let mut arr = TrayIconArrangement::new();
         for id in 1..=3 {
-            arr.add_icon(make_slot(id, true, false));
+            arr.add_icon(make_slot(id, true));
         }
         // The anchor's program exited between the last motion and the release.
         assert!(!arr.move_before(key(1), Some(key(9))));
@@ -1723,9 +1263,9 @@ mod tests {
     #[test]
     fn a_hidden_icon_does_not_shift_where_a_drop_lands() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
-        arr.add_icon(make_slot(2, false, false));
-        arr.add_icon(make_slot(3, true, false));
+        arr.add_icon(make_slot(1, true));
+        arr.add_icon(make_slot(2, false));
+        arr.add_icon(make_slot(3, true));
 
         assert!(arr.move_before(key(3), Some(key(1))));
 
@@ -1740,7 +1280,7 @@ mod tests {
     #[test]
     fn a_drop_naming_no_icon_moves_nothing() {
         let mut arr = TrayIconArrangement::new();
-        arr.add_icon(make_slot(1, true, false));
+        arr.add_icon(make_slot(1, true));
         // The program exited between the press and the release.
         assert!(!arr.move_to_boundary(key(9), 0));
         assert_eq!(arr.ordered_keys(), vec![key(1)]);
@@ -1750,7 +1290,7 @@ mod tests {
     fn a_drop_past_the_end_of_the_tray_lands_at_the_end() {
         let mut arr = TrayIconArrangement::new();
         for id in 1..=3 {
-            arr.add_icon(make_slot(id, true, false));
+            arr.add_icon(make_slot(id, true));
         }
         // The pointer was well right of the last icon; the caller clamps to
         // `len`, and anything beyond must not panic or silently do nothing.
@@ -1759,138 +1299,6 @@ mod tests {
             arr.ordered_keys().iter().map(|k| k.id).collect::<Vec<_>>(),
             vec![2, 3, 1]
         );
-    }
-
-    // ======================================================================
-    // StartInTrayConfig tests
-    // ======================================================================
-
-    #[test]
-    fn start_in_tray_default_is_false() {
-        let config = StartInTrayConfig::new();
-        assert!(!config.should_start_in_tray("any.app"));
-    }
-
-    #[test]
-    fn start_in_tray_set_and_get() {
-        let mut config = StartInTrayConfig::new();
-        config.set_start_in_tray("com.example.chat", true);
-
-        assert!(config.should_start_in_tray("com.example.chat"));
-        assert!(!config.should_start_in_tray("com.example.other"));
-    }
-
-    #[test]
-    fn start_in_tray_disable_after_enable() {
-        let mut config = StartInTrayConfig::new();
-        config.set_start_in_tray("app_a", true);
-        assert!(config.should_start_in_tray("app_a"));
-
-        config.set_start_in_tray("app_a", false);
-        assert!(!config.should_start_in_tray("app_a"));
-    }
-
-    #[test]
-    fn start_in_tray_clear_reverts_to_default() {
-        let mut config = StartInTrayConfig::new();
-        config.set_start_in_tray("app_a", true);
-        config.clear("app_a");
-
-        assert!(!config.should_start_in_tray("app_a"));
-    }
-
-    #[test]
-    fn start_in_tray_enabled_apps() {
-        let mut config = StartInTrayConfig::new();
-        config.set_start_in_tray("app_a", true);
-        config.set_start_in_tray("app_b", false);
-        config.set_start_in_tray("app_c", true);
-
-        let mut enabled = config.enabled_apps();
-        enabled.sort_unstable();
-        assert_eq!(enabled, vec!["app_a", "app_c"]);
-    }
-
-    // ======================================================================
-    // TrayContextMenu tests
-    // ======================================================================
-
-    #[test]
-    fn context_menu_basic_entries() {
-        let menu = TrayContextMenu::build(key(1), false, false, false, false);
-
-        // Should have: Open, Sep, TogglePin, ToggleStartInTray, Sep, HideIcon, Sep, Exit
-        assert!(menu.entries.contains(&TrayMenuEntry::Open));
-        assert!(menu.entries.contains(&TrayMenuEntry::TogglePin));
-        assert!(menu.entries.contains(&TrayMenuEntry::ToggleStartInTray));
-        assert!(menu.entries.contains(&TrayMenuEntry::HideIcon));
-        assert!(menu.entries.contains(&TrayMenuEntry::Exit));
-    }
-
-    #[test]
-    fn context_menu_with_settings() {
-        let menu = TrayContextMenu::build(key(1), false, false, false, true);
-
-        assert!(menu.entries.contains(&TrayMenuEntry::Settings));
-        assert!(menu.has_settings);
-    }
-
-    #[test]
-    fn context_menu_without_settings() {
-        let menu = TrayContextMenu::build(key(1), false, false, false, false);
-
-        assert!(!menu.entries.contains(&TrayMenuEntry::Settings));
-        assert!(!menu.has_settings);
-    }
-
-    #[test]
-    fn context_menu_with_hidden_icons() {
-        let menu = TrayContextMenu::build(key(1), false, false, true, false);
-
-        assert!(menu.entries.contains(&TrayMenuEntry::ShowHiddenIcons));
-        assert!(menu.has_hidden_icons);
-    }
-
-    #[test]
-    fn context_menu_without_hidden_icons() {
-        let menu = TrayContextMenu::build(key(1), false, false, false, false);
-
-        assert!(!menu.entries.contains(&TrayMenuEntry::ShowHiddenIcons));
-    }
-
-    #[test]
-    fn context_menu_pin_label_when_unpinned() {
-        let menu = TrayContextMenu::build(key(1), false, false, false, false);
-        assert_eq!(menu.label_for(&TrayMenuEntry::TogglePin), "Pin to tray");
-    }
-
-    #[test]
-    fn context_menu_unpin_label_when_pinned() {
-        let menu = TrayContextMenu::build(key(1), true, false, false, false);
-        assert_eq!(menu.label_for(&TrayMenuEntry::TogglePin), "Unpin from tray");
-    }
-
-    #[test]
-    fn context_menu_separator_count() {
-        let menu = TrayContextMenu::build(key(1), false, false, true, true);
-        let sep_count = menu
-            .entries
-            .iter()
-            .filter(|e| **e == TrayMenuEntry::Separator)
-            .count();
-        // Should have 3 separators (between 4 groups).
-        assert_eq!(sep_count, 3);
-    }
-
-    #[test]
-    fn context_menu_actionable_count() {
-        let menu = TrayContextMenu::build(key(1), false, false, false, false);
-        // Open, TogglePin, ToggleStartInTray, HideIcon, Exit = 5
-        assert_eq!(menu.actionable_count(), 5);
-
-        let menu_full = TrayContextMenu::build(key(1), false, false, true, true);
-        // Open, Settings, TogglePin, ToggleStartInTray, HideIcon, ShowHiddenIcons, Exit = 7
-        assert_eq!(menu_full.actionable_count(), 7);
     }
 
     // ---- TrayChoices -------------------------------------------------------

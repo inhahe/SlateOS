@@ -1,5 +1,13 @@
 ## TD-C-FOUR-SHELL-FEATURES-ARE-BUILT-AND-NEVER-CONSTRUCTED -- ALL FOUR CONSTRUCTED 2026-09-13; tray hiding, pinning and a lasting order left
 
+**Status:** OPEN -- fixed on lane-c-preview (e24f1f8ac and the commit
+after it), awaiting a boot on `main`: an icon is hidden by dropping it on
+the chevron and shown by carrying it out of the overflow list, the order and
+the hiding outlast the programs and the desktop (`tray_dnd::TrayChoices`, by
+`TrayIcon::app_id`), and pinning -- which nothing could set and which the
+lasting order makes needless -- is gone, with `StartInTrayConfig` (window
+rules took its place, design-decisions §1467) and the shell's per-icon menu.
+
 **Status, 2026-09-29.** The title said "one left" from 2026-09-13 on; the
 one, `tray_dnd.rs`, was constructed the same day (43a651a25 "tray icons can
 be dragged", e780ed228, 1d4f23f02 -- 25 references in `lib.rs` now). What the
@@ -213,12 +221,15 @@ quarter of the bar, with a chevron for the rest — see
   airplane mode, battery saver, a brightness slider — are recorded in
   `TD-C-FIVE-TRAY-FEATURES-EXISTED-ONLY-IN-A-PROGRAM-NOTHING-LAUNCHED`, each
   needing a service that does not exist rather than a place to be drawn.
-- **Hiding and pinning have no way in.** `TrayIconSlot` carries `visible`
+- ~~**Hiding and pinning have no way in.**~~ **Done 2026-10-16** (see the
+  status): hiding by the chevron; pinning removed. `TrayIconSlot` carried `visible`
   and `pinned`, the arrangement honours both, and nothing can set either:
   right-click belongs to the program that owns the icon, so the shell's own
   per-icon menu needs a different door. Until it has one those two fields
   are exercised only by tests.
-- **The order does not survive a reboot**, and cannot yet: keys are
+- ~~**The order does not survive a reboot**~~ -- **done 2026-10-16**, by
+  app id now that a tray icon carries one (lane F, 2026-10-05). It could not
+  then: keys are
   `(pid, id)` pairs, so an order written to disk would restore onto
   processes that no longer exist. It needs the compositor to report a
   *stable* name for the program behind a connection, and `ClientLink`

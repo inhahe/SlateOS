@@ -13012,13 +13012,7 @@ impl DesktopShell {
         let Some(first) = rects.first() else {
             return 0;
         };
-        let mut target = tray_dnd::TrayDropTarget::new(
-            0,
-            first.x,
-            first.y,
-            first.w * rects.len() as f32,
-            first.h,
-        );
+        let mut target = tray_dnd::TrayDropTarget::new(first.x);
         target.set_icon_count(rects.len());
         target.set_icon_cell_width(first.w);
         target.calc_insertion_index(x);

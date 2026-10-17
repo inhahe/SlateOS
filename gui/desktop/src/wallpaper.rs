@@ -2,8 +2,9 @@
 //!
 //! Provides desktop background rendering with multiple modes: solid color,
 //! single image, slideshow, and dynamic time-of-day gradients. Supports
-//! configurable image fitting, shuffle, history navigation, and config
-//! persistence via a simple key=value text format.
+//! configurable image fitting, shuffle and history navigation. What the user
+//! chose is `appearance`'s to keep (`AppearanceSettings`, `appearance.yaml`);
+//! the session hands it to this manager.
 //!
 //! # Integration
 //!
@@ -31,8 +32,6 @@ use guitk::rng::{RandomSource, SeededRng, seeded_from_system};
 use guitk::style::CornerRadii;
 use std::path::{Path, PathBuf};
 
-use std::fmt;
-
 // ============================================================================
 // Theme
 // ============================================================================
@@ -53,34 +52,6 @@ use std::fmt;
 //   them.
 
 // ============================================================================
-// Configuration error type
-// ============================================================================
-
-/// Errors that can occur when loading or saving wallpaper configuration.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ConfigError {
-    /// A required key is missing.
-    MissingKey(String),
-    /// A value could not be parsed.
-    InvalidValue(String),
-    /// The mode string is not recognized.
-    UnknownMode(String),
-    /// The fit string is not recognized.
-    UnknownFit(String),
-}
-
-impl fmt::Display for ConfigError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::MissingKey(k) => write!(f, "missing key: {k}"),
-            Self::InvalidValue(v) => write!(f, "invalid value: {v}"),
-            Self::UnknownMode(m) => write!(f, "unknown wallpaper mode: {m}"),
-            Self::UnknownFit(v) => write!(f, "unknown image fit: {v}"),
-        }
-    }
-}
-
-// ============================================================================
 // WallpaperMode
 // ============================================================================
 
@@ -97,27 +68,6 @@ pub enum WallpaperMode {
     Dynamic,
 }
 
-impl WallpaperMode {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::SolidColor => "solid",
-            Self::SingleImage => "image",
-            Self::Slideshow => "slideshow",
-            Self::Dynamic => "dynamic",
-        }
-    }
-
-    fn from_str_config(s: &str) -> Result<Self, ConfigError> {
-        match s.trim() {
-            "solid" => Ok(Self::SolidColor),
-            "image" => Ok(Self::SingleImage),
-            "slideshow" => Ok(Self::Slideshow),
-            "dynamic" => Ok(Self::Dynamic),
-            other => Err(ConfigError::UnknownMode(other.to_string())),
-        }
-    }
-}
-
 // ============================================================================
 // ImageFit
 // ============================================================================
@@ -129,10 +79,9 @@ impl WallpaperMode {
 // it in each would be two models of one idea, which is the defect
 // design-decisions 852 refused to add a sixth of.
 //
-// Its `as_str`/`from_str_config` pair went with it, as `yaml_name`/
-// `from_yaml_name`: the same six strings, so a wallpaper config written by the
-// older code still reads. The orphan rule is why they had to move rather than
-// stay -- an inherent impl on a foreign type is not allowed here.
+// Its names went with it, as `yaml_name`/`from_yaml_name`, which is how
+// `appearance.yaml` writes a fit. The orphan rule is why they had to move
+// rather than stay -- an inherent impl on a foreign type is not allowed here.
 pub use appearance::ImageFit;
 
 // ============================================================================
@@ -617,18 +566,12 @@ pub struct WallpaperConfig {
     /// light/dark mode and any accent the user picks later.
     ///
     /// **Why this is an `Option` and not a `Color` with a sensible default.**
-    /// It used to be a `Color` initialised to Mocha's base, `#1E1E2E`, and both
-    /// halves of that were wrong. Read one way, a user on a light theme got a
-    /// near-black desktop. Read the other — and this is the worse half —
-    /// [`save_config`](WallpaperManager::save_config) writes `color=`
-    /// unconditionally, so the first time the shell saved its configuration it
-    /// wrote `#1E1E2E` into the user's file as though the user had chosen it.
-    /// From then on the desktop was pinned to one mode's base for good, and
-    /// nothing in the file recorded that this was the shell's guess rather than
-    /// a decision. A parser that substitutes the current theme cannot tell
-    /// those two apart afterwards, so it must not substitute at all — the same
-    /// reasoning as design-decisions.md §528, where a calendar event's colour
-    /// became an `Option` for exactly this reason.
+    /// A `Color` with a default would be wrong both ways it can be read: a
+    /// user on a light theme gets one mode's base, near-black; and anything
+    /// that keeps the setting cannot tell the shell's guess from the user's
+    /// choice afterwards, so the desktop stays pinned to that one mode's base
+    /// -- the same reasoning as design-decisions.md §528, where a calendar
+    /// event's colour became an `Option` for exactly this reason.
     pub color: Option<Color>,
     /// Slideshow directory path.
     pub slideshow_dir: PathBuf,
@@ -1204,184 +1147,6 @@ impl WallpaperManager {
     }
 
     // ======================================================================
-    // Configuration persistence
-    // ======================================================================
-
-    /// Serialise the current configuration to a key=value text format.
-    pub fn save_config(&self) -> String {
-        let mut out = String::new();
-
-        out.push_str(&format!("mode={}\n", self.config.mode.as_str()));
-        out.push_str(&format!("fit={}\n", self.config.fit.yaml_name()));
-        // Written only when the user actually chose one. Emitting the theme's
-        // current base for an unset colour would turn the shell's answer into
-        // the user's answer, and the next reader could not tell the difference
-        // — the file would say "this user wants #1E1E2E" when what happened is
-        // that the shell was in dark mode the day it saved.
-        if let Some(c) = self.config.color {
-            out.push_str(&format!("color={:02X}{:02X}{:02X}\n", c.r, c.g, c.b));
-        }
-
-        if !self.config.image_path.as_os_str().is_empty() {
-            // Percent-encoded per design-decisions §426, which is also what
-            // keeps this line-oriented format honest: a newline is legal in a
-            // filename here, and an un-encoded one would split a path across
-            // two config lines.
-            out.push_str(&format!(
-                "image_path={}\n",
-                pathcodec::encode_path(&self.config.image_path)
-            ));
-        }
-
-        if !self.config.slideshow_dir.as_os_str().is_empty() {
-            out.push_str(&format!(
-                "slideshow_dir={}\n",
-                pathcodec::encode_path(&self.config.slideshow_dir)
-            ));
-        }
-        out.push_str(&format!(
-            "slideshow_interval={}\n",
-            self.config.slideshow_interval_secs
-        ));
-        out.push_str(&format!(
-            "slideshow_shuffle={}\n",
-            self.config.slideshow_shuffle
-        ));
-
-        // Dynamic theme colors.
-        let dt = &self.config.dynamic_theme;
-        out.push_str(&format!(
-            "dynamic_dawn={:02X}{:02X}{:02X}\n",
-            dt.dawn.r, dt.dawn.g, dt.dawn.b
-        ));
-        out.push_str(&format!(
-            "dynamic_morning={:02X}{:02X}{:02X}\n",
-            dt.morning.r, dt.morning.g, dt.morning.b
-        ));
-        out.push_str(&format!(
-            "dynamic_afternoon={:02X}{:02X}{:02X}\n",
-            dt.afternoon.r, dt.afternoon.g, dt.afternoon.b
-        ));
-        out.push_str(&format!(
-            "dynamic_evening={:02X}{:02X}{:02X}\n",
-            dt.evening.r, dt.evening.g, dt.evening.b
-        ));
-        out.push_str(&format!(
-            "dynamic_night={:02X}{:02X}{:02X}\n",
-            dt.night.r, dt.night.g, dt.night.b
-        ));
-
-        out
-    }
-
-    /// Load configuration from a key=value text string.
-    pub fn load_config(text: &str) -> Result<WallpaperConfig, ConfigError> {
-        let mut mode: Option<WallpaperMode> = None;
-        let mut fit: Option<ImageFit> = None;
-        let mut color: Option<Color> = None;
-        let mut image_path = PathBuf::new();
-        let mut slideshow_dir = PathBuf::new();
-        let mut slideshow_interval: Option<u64> = None;
-        let mut slideshow_shuffle: Option<bool> = None;
-        let mut dt_dawn: Option<Color> = None;
-        let mut dt_morning: Option<Color> = None;
-        let mut dt_afternoon: Option<Color> = None;
-        let mut dt_evening: Option<Color> = None;
-        let mut dt_night: Option<Color> = None;
-
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-
-            let Some((key, val)) = line.split_once('=') else {
-                continue;
-            };
-            let key = key.trim();
-            let val = val.trim();
-
-            match key {
-                "mode" => mode = Some(WallpaperMode::from_str_config(val)?),
-                "fit" => {
-                    fit = Some(
-                        ImageFit::from_yaml_name(val.trim())
-                            .ok_or_else(|| ConfigError::UnknownFit(val.to_string()))?,
-                    );
-                }
-                "color" => color = Some(parse_hex_color(val)?),
-                "image_path" => image_path = pathcodec::decode_path(val),
-                "slideshow_dir" => slideshow_dir = pathcodec::decode_path(val),
-                "slideshow_interval" => {
-                    slideshow_interval = Some(val.parse::<u64>().map_err(|_| {
-                        ConfigError::InvalidValue(format!("slideshow_interval: {val}"))
-                    })?);
-                }
-                "slideshow_shuffle" => {
-                    slideshow_shuffle = Some(val.parse::<bool>().map_err(|_| {
-                        ConfigError::InvalidValue(format!("slideshow_shuffle: {val}"))
-                    })?);
-                }
-                "dynamic_dawn" => dt_dawn = Some(parse_hex_color(val)?),
-                "dynamic_morning" => dt_morning = Some(parse_hex_color(val)?),
-                "dynamic_afternoon" => dt_afternoon = Some(parse_hex_color(val)?),
-                "dynamic_evening" => dt_evening = Some(parse_hex_color(val)?),
-                "dynamic_night" => dt_night = Some(parse_hex_color(val)?),
-                _ => {
-                    // Ignore unknown keys for forward compatibility.
-                }
-            }
-        }
-
-        let mode = mode.ok_or_else(|| ConfigError::MissingKey("mode".into()))?;
-
-        let default_dt = DynamicTheme::default();
-        let dynamic_theme = DynamicTheme {
-            dawn: dt_dawn.unwrap_or(default_dt.dawn),
-            morning: dt_morning.unwrap_or(default_dt.morning),
-            afternoon: dt_afternoon.unwrap_or(default_dt.afternoon),
-            evening: dt_evening.unwrap_or(default_dt.evening),
-            night: dt_night.unwrap_or(default_dt.night),
-        };
-
-        Ok(WallpaperConfig {
-            mode,
-            image_path,
-            // Passed through, not defaulted. An absent `color:` key means the
-            // user has not chosen one, and that is a state the config can
-            // hold; substituting the theme's base here is what used to launder
-            // the shell's guess into the user's file on the next save.
-            color,
-            slideshow_dir,
-            slideshow_interval_secs: slideshow_interval.unwrap_or(300),
-            slideshow_shuffle: slideshow_shuffle.unwrap_or(false),
-            fit: fit.unwrap_or(ImageFit::Fill),
-            // The appearance settings' to say, not this file's.
-            position: (0.5, 0.5),
-            dynamic_theme,
-        })
-    }
-
-    /// Replace the current config and reinitialise state accordingly.
-    pub fn apply_config(&mut self, config: WallpaperConfig) {
-        self.config = config;
-        self.slideshow = None;
-        self.current_image_id = 0;
-
-        match self.config.mode {
-            WallpaperMode::SingleImage => {
-                if !self.config.image_path.as_os_str().is_empty() {
-                    self.current_image_id = self.alloc_image_id();
-                }
-            }
-            WallpaperMode::Slideshow => {
-                self.slideshow = Some(SlideshowState::new(Vec::new()));
-            }
-            WallpaperMode::SolidColor | WallpaperMode::Dynamic => {}
-        }
-    }
-
-    // ======================================================================
     // Accessors
     // ======================================================================
 
@@ -1459,23 +1224,6 @@ impl Default for WallpaperManager {
 // ============================================================================
 // Helper functions
 // ============================================================================
-
-/// Read a colour as the wallpaper's file keeps it: six hex digits, the `#`
-/// optional ("1E1E2E").
-///
-/// Checked as [`Color::from_hex_text`] checks, which the `from_str_radix`
-/// this used to be did not: it takes a leading `+`, so "+1E1E2" read as a
-/// colour.
-fn parse_hex_color(s: &str) -> Result<Color, ConfigError> {
-    let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
-        return Err(ConfigError::InvalidValue(format!(
-            "color: {s} (expected 6 hex digits)"
-        )));
-    }
-    Color::from_hex_text(&format!("#{s}"))
-        .ok_or_else(|| ConfigError::InvalidValue(format!("color: {s}")))
-}
 
 /// Compute the destination rectangle for an image given the display area,
 /// the image's native size, and the desired fit mode.
@@ -1613,36 +1361,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // WallpaperMode parsing
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn mode_roundtrip_solid() {
-        let mode = WallpaperMode::SolidColor;
-        let parsed = WallpaperMode::from_str_config(mode.as_str()).expect("parse");
-        assert_eq!(parsed, mode);
-    }
-
-    #[test]
-    fn mode_roundtrip_all() {
-        for mode in [
-            WallpaperMode::SolidColor,
-            WallpaperMode::SingleImage,
-            WallpaperMode::Slideshow,
-            WallpaperMode::Dynamic,
-        ] {
-            let parsed = WallpaperMode::from_str_config(mode.as_str()).expect("should parse");
-            assert_eq!(parsed, mode);
-        }
-    }
-
-    #[test]
-    fn mode_unknown_returns_error() {
-        let result = WallpaperMode::from_str_config("bogus");
-        assert!(matches!(result, Err(ConfigError::UnknownMode(_))));
-    }
-
-    // ------------------------------------------------------------------
     // ImageFit parsing
     // ------------------------------------------------------------------
 
@@ -1661,14 +1379,8 @@ mod tests {
         }
     }
 
-    /// An unrecognised fit is `None`, and the *caller* turns that into the
-    /// error the config reader reports.
-    ///
-    /// Was `from_str_config` returning `Result<_, ConfigError>` when `ImageFit`
-    /// lived here. It moved to `appearance`, which has no opinion about this
-    /// crate's config errors, so the naming half returns `Option` and
-    /// `parse_config` maps it to `ConfigError::UnknownFit` -- checked by
-    /// `config_round_trip_unknown_fit` below rather than lost in the move.
+    /// An unrecognised fit is `None`: what to make of an unknown name is the
+    /// reader's to decide (`appearance`'s, which keeps the setting).
     #[test]
     fn fit_unknown_names_nothing() {
         assert_eq!(ImageFit::from_yaml_name("unknown"), None);
@@ -3077,39 +2789,6 @@ mod tests {
     }
 
     #[test]
-    fn saving_an_unchosen_colour_writes_no_colour_key() {
-        let mgr = WallpaperManager::new();
-        let text = mgr.save_config();
-        assert!(
-            !text.contains("color="),
-            "the shell wrote a `color=` key for a colour the user never \
-             chose, which the next load cannot tell from a real choice:\n{text}"
-        );
-    }
-
-    #[test]
-    fn an_unchosen_colour_survives_a_save_and_load() {
-        // The round trip is where the old bug did its damage: the value was
-        // substituted on load and written out on save, so one save/load cycle
-        // silently converted "follow my theme" into "always #1E1E2E".
-        let mgr = WallpaperManager::new();
-        let loaded = WallpaperManager::load_config(&mgr.save_config()).expect("should parse");
-        assert_eq!(
-            loaded.color, None,
-            "a save/load cycle invented a wallpaper colour the user never chose"
-        );
-    }
-
-    #[test]
-    fn a_config_file_with_no_colour_key_loads_as_unchosen() {
-        let loaded = WallpaperManager::load_config("mode=solid\n").expect("should parse");
-        assert_eq!(
-            loaded.color, None,
-            "an absent `color:` key was read as a choice of the theme's base"
-        );
-    }
-
-    #[test]
     fn choosing_the_base_and_following_it_are_different_states() {
         // They paint identically today, which is exactly why the distinction
         // has to be tested: it is invisible until the user switches mode.
@@ -3144,83 +2823,6 @@ mod tests {
              theme, which makes the default a one-way door"
         );
         assert_eq!(*mgr.mode(), WallpaperMode::SolidColor);
-    }
-
-    // ------------------------------------------------------------------
-    // Config persistence round-trip
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn config_save_load_roundtrip_solid() {
-        let mut mgr = WallpaperManager::new();
-        mgr.set_solid_color(Color::from_hex(0x89B4FA));
-        mgr.config.fit = ImageFit::Center;
-
-        let text = mgr.save_config();
-        let loaded = WallpaperManager::load_config(&text).expect("should parse");
-
-        assert_eq!(loaded.mode, WallpaperMode::SolidColor);
-        assert_eq!(loaded.color, Some(Color::from_hex(0x89B4FA)));
-        assert_eq!(loaded.fit, ImageFit::Center);
-    }
-
-    #[test]
-    fn config_save_load_roundtrip_slideshow() {
-        let mut mgr = WallpaperManager::new();
-        mgr.set_slideshow(Path::new("/pictures/wallpapers"), 120, true);
-        mgr.config.fit = ImageFit::Fill;
-
-        let text = mgr.save_config();
-        let loaded = WallpaperManager::load_config(&text).expect("should parse");
-
-        assert_eq!(loaded.mode, WallpaperMode::Slideshow);
-        assert_eq!(loaded.slideshow_dir, Path::new("/pictures/wallpapers"));
-        assert_eq!(loaded.slideshow_interval_secs, 120);
-        assert!(loaded.slideshow_shuffle);
-        assert_eq!(loaded.fit, ImageFit::Fill);
-    }
-
-    #[test]
-    fn config_load_missing_mode_errors() {
-        let text = "fit=fill\ncolor=1E1E2E\n";
-        let result = WallpaperManager::load_config(text);
-        assert!(matches!(result, Err(ConfigError::MissingKey(_))));
-    }
-
-    #[test]
-    fn config_load_unknown_mode_errors() {
-        let text = "mode=holographic\n";
-        let result = WallpaperManager::load_config(text);
-        assert!(matches!(result, Err(ConfigError::UnknownMode(_))));
-    }
-
-    #[test]
-    fn config_load_ignores_comments_and_blanks() {
-        let text = "# Wallpaper config\nmode=solid\n\n# end\n";
-        let loaded = WallpaperManager::load_config(text).expect("should parse");
-        assert_eq!(loaded.mode, WallpaperMode::SolidColor);
-    }
-
-    #[test]
-    fn config_dynamic_theme_roundtrip() {
-        let mut mgr = WallpaperManager::new();
-        let colors = [
-            Color::rgb(10, 20, 30),
-            Color::rgb(40, 50, 60),
-            Color::rgb(70, 80, 90),
-            Color::rgb(100, 110, 120),
-            Color::rgb(5, 10, 15),
-        ];
-        mgr.set_dynamic_theme(colors);
-
-        let text = mgr.save_config();
-        let loaded = WallpaperManager::load_config(&text).expect("should parse");
-
-        assert_eq!(loaded.dynamic_theme.dawn, colors[0]);
-        assert_eq!(loaded.dynamic_theme.morning, colors[1]);
-        assert_eq!(loaded.dynamic_theme.afternoon, colors[2]);
-        assert_eq!(loaded.dynamic_theme.evening, colors[3]);
-        assert_eq!(loaded.dynamic_theme.night, colors[4]);
     }
 
     // ------------------------------------------------------------------
@@ -3318,69 +2920,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // parse_hex_color
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn parse_hex_valid() {
-        let c = parse_hex_color("1E1E2E").expect("should parse");
-        assert_eq!(c, Color::from_hex(0x1E1E2E));
-    }
-
-    #[test]
-    fn parse_hex_with_hash() {
-        let c = parse_hex_color("#89B4FA").expect("should parse");
-        assert_eq!(c, Color::from_hex(0x89B4FA));
-    }
-
-    #[test]
-    fn parse_hex_invalid_length() {
-        assert!(parse_hex_color("FFF").is_err());
-    }
-
-    #[test]
-    fn parse_hex_invalid_chars() {
-        assert!(parse_hex_color("ZZZZZZ").is_err());
-        // A sign is not a digit, though `from_str_radix` takes one.
-        assert!(parse_hex_color("+1E1E2").is_err());
-    }
-
-    // ------------------------------------------------------------------
-    // apply_config
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn apply_config_resets_state() {
-        let mut mgr = WallpaperManager::new();
-        mgr.set_image(Path::new("/test.png"), ImageFit::Fill);
-        let old_id = mgr.current_image_id();
-
-        let config = WallpaperConfig {
-            mode: WallpaperMode::SingleImage,
-            image_path: "/other.png".into(),
-            ..WallpaperConfig::default()
-        };
-        mgr.apply_config(config);
-
-        // Should have a new image ID (not the old one or zero).
-        assert_ne!(mgr.current_image_id(), 0);
-        assert_ne!(mgr.current_image_id(), old_id);
-        assert_eq!(mgr.config.image_path, Path::new("/other.png"));
-    }
-
-    #[test]
-    fn apply_config_slideshow_creates_state() {
-        let mut mgr = WallpaperManager::new();
-        let config = WallpaperConfig {
-            mode: WallpaperMode::Slideshow,
-            slideshow_dir: "/pics".into(),
-            ..WallpaperConfig::default()
-        };
-        mgr.apply_config(config);
-        assert!(mgr.slideshow.is_some());
-    }
-
-    // ------------------------------------------------------------------
     // Manager accessors
     // ------------------------------------------------------------------
 
@@ -3411,24 +2950,5 @@ mod tests {
         let mut mgr = WallpaperManager::new();
         mgr.set_slideshow(Path::new("/wp"), 0, false);
         assert_eq!(mgr.config.slideshow_interval_secs, 1);
-    }
-
-    // ------------------------------------------------------------------
-    // ConfigError display
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn config_error_display() {
-        let e = ConfigError::MissingKey("mode".into());
-        assert_eq!(format!("{e}"), "missing key: mode");
-
-        let e = ConfigError::InvalidValue("color: xyz".into());
-        assert_eq!(format!("{e}"), "invalid value: color: xyz");
-
-        let e = ConfigError::UnknownMode("plasma".into());
-        assert_eq!(format!("{e}"), "unknown wallpaper mode: plasma");
-
-        let e = ConfigError::UnknownFit("warp".into());
-        assert_eq!(format!("{e}"), "unknown image fit: warp");
     }
 }

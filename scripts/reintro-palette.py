@@ -15500,9 +15500,7 @@ DEFECTS = [
             # Re-derived 2026-09-27 against the code as it now reads. The rotation folder is a `PathBuf` now.
             'a_fresh_config_has_chosen_no_colour',
             'an_images_underlay_follows_the_theme_too',
-            'an_unchosen_colour_survives_a_save_and_load',
             'every_colour_this_module_draws_comes_from_its_palette',
-            'saving_an_unchosen_colour_writes_no_colour_key',
         ],
     ),
     (
@@ -15517,49 +15515,12 @@ DEFECTS = [
             # Re-derived 2026-09-27 against the code as it now reads. The rotation folder is a `PathBuf` now.
             'a_fresh_config_has_chosen_no_colour',
             'an_images_underlay_follows_the_theme_too',
-            'an_unchosen_colour_survives_a_save_and_load',
             'every_colour_this_module_draws_comes_from_its_palette',
-            'saving_an_unchosen_colour_writes_no_colour_key',
         ],
     ),
-    (
-        'LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL: the parser substitutes the Mocha base for an absent colour key',
-        WP,
-        [
-            ('            color,\n            slideshow_dir,',
-             '            color: color.or(Some(Color::from_hex(0x1E1E2E))),\n            slideshow_dir,'),
-        ],
-        ["desktop"],
-        [
-            'an_unchosen_colour_survives_a_save_and_load',
-            'a_config_file_with_no_colour_key_loads_as_unchosen',
-        ],
-    ),
-    (
-        'MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM: the saver writes a colour key whether or not one was chosen',
-        WP,
-        [
-            ('        if let Some(c) = self.config.color {\n            out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n        }',
-             '        let c = self.config.color.unwrap_or(Color::from_hex(0x1E1E2E));\n        out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));'),
-        ],
-        ["desktop"],
-        [
-            'saving_an_unchosen_colour_writes_no_colour_key',
-            'an_unchosen_colour_survives_a_save_and_load',
-        ],
-    ),
-    (
-        'NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN: the saver drops the colour key even when one was chosen',
-        WP,
-        [
-            ('        if let Some(c) = self.config.color {\n            out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n        }',
-             '        if false {\n            let c = self.config.color.unwrap_or(Color::BLACK);\n            out.push_str(&format!("color={:02X}{:02X}{:02X}\\n", c.r, c.g, c.b));\n        }'),
-        ],
-        ["desktop"],
-        [
-            'config_save_load_roundtrip_solid',
-        ],
-    ),
+    # LLLL..., MMMM... and NNNN... retired 2026-10-16: they planted an
+    # unchosen colour in the wallpaper's key=value parser and saver, which
+    # went -- what the user chose is appearance's to keep.
     (
         'OOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOOO: choosing a colour records no choice at all',
         WP,
@@ -15574,7 +15535,6 @@ DEFECTS = [
             'choosing_the_base_and_following_it_are_different_states',
             'following_the_theme_is_reachable_again_after_choosing',
             # A choice that was never recorded cannot survive the round trip.
-            'config_save_load_roundtrip_solid',
             # Only since its fixture stopped being the dark palette's own
             # `base`: with an off-palette choice, a discarded choice shows up
             # as the theme's colour on the screen.

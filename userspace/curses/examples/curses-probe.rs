@@ -292,6 +292,25 @@ fn main() {
                 curses::idcok(line.n() != 0);
                 say(name, 0);
             }
+            b"use_legacy_coding" => say(name, curses::use_legacy_coding(line.n())),
+            // The string's bytes in hexadecimal, or what ncurses answers
+            // with a null pointer and with `(char *) -1`.
+            b"tigetstr" => {
+                let cap = line.word();
+                let mut shown = b"tigetstr ".to_vec();
+                shown.extend_from_slice(cap);
+                match curses::tigetstr(cap) {
+                    curses::TermString::Cancelled => shown.extend_from_slice(b" cancelled"),
+                    curses::TermString::Absent => shown.extend_from_slice(b" absent"),
+                    curses::TermString::Value(v) => {
+                        for b in v {
+                            shown.extend_from_slice(format!(" {b:02x}").as_bytes());
+                        }
+                    }
+                }
+                shown.push(b'\n');
+                let _ = std::io::stderr().write_all(&shown);
+            }
             // The modes of the terminal on standard input, as the C probe
             // prints them.
             b"tty" => {

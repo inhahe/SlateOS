@@ -447,6 +447,46 @@ pub fn idcok(flag: bool) {
     });
 }
 
+/// `use_legacy_coding (level)`: how bytes from 128 to 255 are shown -- 0, as
+/// the locale has them; 1, those from 160 up as they are; 2, all of them as
+/// they are. The level before, or `ERR` (-1) for any other level and
+/// without a screen.
+pub fn use_legacy_coding(level: i32) -> i32 {
+    signals::with(|sp| {
+        if (0..=2).contains(&level) {
+            std::mem::replace(&mut sp.t.legacy_coding, level)
+        } else {
+            -1
+        }
+    })
+    .unwrap_or(-1)
+}
+
+/// What [`tigetstr`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TermString {
+    /// `(char *) -1`: the name is no string capability, or there is no
+    /// screen.
+    Cancelled,
+    /// A null pointer: the terminal has no such string -- or curses took it
+    /// away, as it takes `ht` and `cbt` from a terminal that expands tabs
+    /// itself.
+    Absent,
+    /// The string.
+    Value(Vec<u8>),
+}
+
+/// `tigetstr (name)`: the string capability `name` of the screen's
+/// terminal, as curses holds it once set up.
+pub fn tigetstr(name: &[u8]) -> TermString {
+    signals::with(|sp| match sp.t.entry.tigetstr(name) {
+        terminfo::TiString::NotAString => TermString::Cancelled,
+        terminfo::TiString::Absent => TermString::Absent,
+        terminfo::TiString::Value(v) => TermString::Value(v.to_vec()),
+    })
+    .unwrap_or(TermString::Cancelled)
+}
+
 /// `beep ()`.
 pub fn beep() -> bool {
     ok(Screen::beep)

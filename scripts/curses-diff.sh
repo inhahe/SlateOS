@@ -85,8 +85,10 @@ done
 # will not combine with some attributes (`ncv`, reverse among them), colours
 # defined by hue, lightness and saturation (`hls`), direct colour (`RGB`,
 # 2^24 colours), no cursor addressing but a home-down (`cup` gone, `ll`), no
-# way to end every attribute at once (`sgr0` and `sgr` gone), and an `RGB`
-# string that names no bits. `tic` compiles them into a directory of the
+# way to end every attribute at once (`sgr0` and `sgr` gone), an `RGB`
+# string that names no bits, insertion by `ich1` with insert mode half there
+# (`smir` without `rmir`), and lines that can be deleted but not inserted,
+# with no other way to scroll. `tic` compiles them into a directory of the
 # harness's own, which both sides are pointed at with `TERMINFO`.
 synth=$DIFF_TMP/terminfo
 mkdir -p "$synth"
@@ -113,8 +115,12 @@ slate-nosgr0|attributes ended one at a time,
 	sgr0@, sgr@, use=vt100,
 slate-rgb0|an RGB string that gives each colour no bits,
 	RGB=0/0/0, use=xterm-256color,
+slate-ich1|characters inserted one at a time, insert mode entered but never left,
+	ich@, rmir@, ich1=\E[@, use=xterm-color,
+slate-dlonly|lines deleted but not inserted and no other way to scroll,
+	il@, il1@, csr@, ind@, indn@, ri@, rin@, use=xterm-color,
 EOF
-SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct slate-nocup slate-nosgr0 slate-rgb0'
+SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct slate-nocup slate-nosgr0 slate-rgb0 slate-ich1 slate-dlonly'
 if ! tic -x -o "$synth" "$DIFF_TMP/synth.ti" 2> "$DIFF_TMP/synth.err"; then
   echo "curses-diff: tic could not compile the made-up terminal types:" >&2
   cat "$DIFF_TMP/synth.err" >&2
@@ -965,9 +971,13 @@ EOF
 
 # Moves a tab is the cheapest way to make, on a terminal that keeps tabs as
 # they are and on one that expands them itself, where curses must not use
-# them.
+# them -- and takes `ht` and `cbt` away, which `tigetstr` shows.
 tab_script='use_env 0
 initscr
+tigetstr ht
+tigetstr cbt
+tigetstr cols
+tigetstr nosuch
 mvaddstr 0 0 a
 mvaddstr 0 8 b
 mvaddstr 0 16 c
@@ -983,6 +993,72 @@ endwin'
 scenario tab-stops 'C' <<< "$tab_script"
 scenario tab-stops-expanded 'C' pty-only <<< "tab3
 $tab_script"
+
+# Characters inserted into a line, which curses sends as an insertion where
+# that is cheaper than writing the rest of the line again: by `ich`, by
+# insert mode, by `ich1` (slate-ich1), and not at all where the terminal has
+# no way to insert (vt100).
+scenario insertion 'C' <<'EOF'
+use_env 0
+initscr
+mvaddstr 0 0 abcdefghijklmnopqrstuvwxyz the quick brown fox jumps over the lazy dog
+mvaddstr 1 0 0123456789 the quick brown fox jumps over the lazy dog
+mvaddstr 2 0 a short line
+refresh
+mvaddstr 0 0 abcXdefghijklmnopqrstuvwxyz the quick brown fox jumps over the lazy dog
+mvaddstr 1 0 01234XYZ56789 the quick brown fox jumps over the lazy dog
+mvaddstr 2 0 a shorter line
+refresh
+endwin
+EOF
+
+# The same next to a wide character, where the insertion must not split one:
+# after the start of a line, and at its first column.
+scenario insertion-wide 'C.UTF-8' <<'EOF'
+use_env 0
+initscr
+mvaddnwstr 0 0 -1 abcdQxyz the quick brown fox jumps over the lazy dog
+mvaddnwstr 1 0 -1 Qxyz the quick brown fox jumps over the lazy dog
+refresh
+mvaddnwstr 0 0 -1 abcd中Rxyz the quick brown fox jumps over the lazy dog
+mvaddnwstr 1 0 -1 中Rxyz the quick brown fox jumps over the lazy dog
+refresh
+endwin
+EOF
+
+# A character written in the last column of a terminal with the newline
+# glitch (vt100's xenl) leaves the cursor's row known and its column not; on
+# a terminal with no cursor addressing (slate-nocup) the next move must then
+# start from the margin.
+scenario unknown-column 'C' <<'EOF'
+use_env 0
+initscr
+mvaddstr 2 79 Z
+mvaddstr 3 5 q
+mvaddstr 6 79 Y
+mvaddstr 7 12 r
+refresh
+endwin
+EOF
+
+# use_legacy_coding: in a locale with no width for bytes from 128 up, level 1
+# shows those from 160 as they are and the rest as blanks, level 2 all of
+# them; a level past 2 is refused.
+scenario legacy-coding 'C' <<'EOF'
+use_env 0
+initscr
+use_legacy_coding 1
+mvaddstr 0 0 \xa0\xa1\xff\x9f\x80
+refresh
+use_legacy_coding 2
+mvaddstr 1 0 \xa0\xa1\xff\x9f\x80
+refresh
+use_legacy_coding 3
+use_legacy_coding 0
+mvaddstr 2 0 \xa0\xa1\xff\x9f\x80
+refresh
+endwin
+EOF
 
 # Characters a one-byte locale has no width for, put on the screen through
 # the wide calls: those at 160 and above are written as they are there, the

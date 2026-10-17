@@ -19,6 +19,9 @@
  * the terminal on standard input -- c_iflag, c_oflag, c_cflag and c_lflag in
  * hexadecimal, then VMIN and VTIME -- or "tty -1" when it is no terminal;
  * and "tab3" sets that terminal to expand tabs itself, as `stty tab3`.
+ * "tigetstr NAME" prints "tigetstr NAME" and the string's bytes in
+ * hexadecimal, or "absent" or "cancelled" for what ncurses answers with a
+ * null pointer and with (char *) -1.
  */
 #define _XOPEN_SOURCE_EXTENDED 1
 #include <curses.h>
@@ -277,6 +280,23 @@ int main (int argc, char **argv)
         say (cmd, idlok (stdscr, N () != 0));
       else if (!strcmp (cmd, "idcok"))
         { idcok (stdscr, N () != 0); say (cmd, 0); }
+      else if (!strcmp (cmd, "use_legacy_coding"))
+        say (cmd, use_legacy_coding (N ()));
+      else if (!strcmp (cmd, "tigetstr"))
+        {
+          char *name = word (&p), *s = tigetstr (name);
+          if (s == (char *) -1)
+            fprintf (stderr, "tigetstr %s cancelled\n", name);
+          else if (!s)
+            fprintf (stderr, "tigetstr %s absent\n", name);
+          else
+            {
+              fprintf (stderr, "tigetstr %s", name);
+              for (; *s; s++)
+                fprintf (stderr, " %02x", (unsigned char) *s);
+              fprintf (stderr, "\n");
+            }
+        }
       else if (!strcmp (cmd, "tty"))
         {
           struct termios t;

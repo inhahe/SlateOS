@@ -906,10 +906,8 @@ pub struct SearchCriteria {
 impl SearchCriteria {
     #[must_use]
     pub fn new(query: &str) -> Self {
-        let mut query_box = LineBox::new(QUERY_CAPACITY, QUERY_TEXT_SIZE);
-        query_box.set_text(query);
         Self {
-            query: query_box,
+            query: LineBox::holding(query, QUERY_CAPACITY, QUERY_TEXT_SIZE),
             mode: SearchMode::Substring,
             case_sensitive: false,
             include_hidden: false,

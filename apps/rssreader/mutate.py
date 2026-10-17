@@ -420,41 +420,55 @@ MUTATIONS += [
     ),
 ]
 
-# The search box and the prompt's box are the toolkit's field, both edited
-# by textline's editor through `edit_box` (2026-10-04; lane C,
-# c-e-a-theme-can-shape-the-controls).
+# The search box and the prompt's box are the toolkit's field (2026-10-04;
+# lane C, c-e-a-theme-can-shape-the-controls): the search box textline's
+# `SearchBox`, the prompt's box edited by textline's editor through
+# `edit_box`.
 BOXES = "the_search_and_the_prompt_are_the_toolkits_field"
 CHORDS = "a_chord_is_neither_a_reader_key_nor_typing"
 
 MUTATIONS += [
     (
-        # What the boxes did before the editor: Backspace with any chord.
-        "Alt+Backspace deletes from a box",
+        # What the prompt's box did before the editor: Backspace with any
+        # chord.
+        "Alt+Backspace deletes from the prompt's box",
         "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
         "    if key.key == Key::Backspace {\n"
         "        text.pop();\n"
-        "        return Some(true);\n"
+        "        return true;\n"
         "    }\n"
         "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
         [CHORDS],
     ),
     (
-        # What the boxes did before the editor: type whatever text a key
-        # carried, a command's letter among it.
-        "a box types a command's letter",
+        # What the prompt's box did before the editor: type whatever text a
+        # key carried, a command's letter among it.
+        "the prompt's box types a command's letter",
         "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
         "    if key.types_text() && !textline::types_into_field(key) {\n"
         "        text.push_str(&key.text);\n"
-        "        return Some(true);\n"
+        "        return true;\n"
         "    }\n"
         "    if editor.text() != text.as_str() {\n        editor.set_text(text);\n    }\n",
         [CHORDS],
     ),
     (
         "a search that changes runs no search",
-        "                if changed {\n                    self.perform_search();\n                }\n",
+        "                if edit.changed {\n                    self.perform_search();\n                }\n",
         "",
         ["ctrl_f_searches_as_you_type_and_escape_clears_it"],
+    ),
+    (
+        "a press is measured as the box was drawn with the keyboard",
+        "            self.search.press(dx, width, had_the_keyboard);\n",
+        "            self.search.press(dx, width, true);\n",
+        ["a_press_in_a_long_search_lands_where_it_was_drawn"],
+    ),
+    (
+        "a press is measured as the box was drawn without the keyboard",
+        "            self.search.press(dx, width, had_the_keyboard);\n",
+        "            self.search.press(dx, width, false);\n",
+        ["a_press_in_a_long_search_lands_where_it_was_drawn"],
     ),
     (
         "a press leaves the caret where it was",
@@ -488,7 +502,7 @@ MUTATIONS += [
     ),
     (
         "a search that finds nothing is not red",
-        "                !self.search_query.is_empty() && self.search_results.is_empty(),\n",
+        "                !self.search.is_empty() && self.search_results.is_empty(),\n",
         "                false,\n",
         [BOXES],
     ),

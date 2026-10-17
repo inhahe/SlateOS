@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 use textfmt::tsv;
+use textline::SearchBox;
 use unsaved::{Choice, Question};
 // The shared civil-date arithmetic. This app carried its own copy of Howard
 // Hinnant's `days_from_civil`/`civil_from_days` pair -- a third and fourth
@@ -2300,7 +2301,8 @@ pub struct RssReaderApp {
     // Filtering/sorting
     pub sort_order: SortOrder,
     pub filter_mode: FilterMode,
-    pub search_query: String,
+    /// The search box, which is the search the articles are filtered by.
+    pub search: SearchBox,
     pub search_active: bool,
     /// A question waiting on a single keypress, if one is up.
     pub prompt: Option<Prompt>,
@@ -2309,15 +2311,10 @@ pub struct RssReaderApp {
     /// What has been typed into that prompt.
     pub text_buffer: String,
     pub search_results: Vec<SearchResult>,
-    /// The search box's caret and selection, laid over `search_query`,
-    /// which stays the truth: reloaded whenever the query has changed under
-    /// it (Escape clears it).
-    search_editor: TextInput,
-    /// The prompt's box's caret and selection, laid over `text_buffer`, the
-    /// same way: a rename seeds the buffer with the feed's title.
+    /// The prompt's box's caret and selection, laid over `text_buffer`,
+    /// which stays the truth: reloaded whenever the text has changed under
+    /// it -- a rename seeds the buffer with the feed's title.
     entry_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from either box, for Ctrl+V.
-    clipboard: String,
     /// How wide the mark is round a box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -2401,15 +2398,13 @@ impl RssReaderApp {
             article_list_width: 340.0,
             sort_order: SortOrder::DateDesc,
             filter_mode: FilterMode::All,
-            search_query: String::new(),
+            search: SearchBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             search_active: false,
             prompt: None,
             text_entry: None,
             text_buffer: String::new(),
             search_results: Vec::new(),
-            search_editor: textline::field_holding("", BOX_CAPACITY),
             entry_editor: textline::field_holding("", BOX_CAPACITY),
-            clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             show_help: false,
             show_feed_health: false,
@@ -2664,15 +2659,15 @@ impl RssReaderApp {
             })
             .filter(|(_, a)| {
                 // Filter by search query
-                if self.search_query.is_empty() {
+                if self.search.is_empty() {
                     return true;
                 }
                 // Three `String` allocations per article per frame, and each
                 // one folded the *whole* field to answer a yes/no question.
                 let case = textfind::Case::Insensitive;
-                textfind::contains(&a.title, &self.search_query, case)
-                    || textfind::contains(&a.author, &self.search_query, case)
-                    || textfind::contains(a.display_content(), &self.search_query, case)
+                textfind::contains(&a.title, self.search.text(), case)
+                    || textfind::contains(&a.author, self.search.text(), case)
+                    || textfind::contains(a.display_content(), self.search.text(), case)
             })
             .collect();
 
@@ -2913,10 +2908,10 @@ impl RssReaderApp {
 
     /// Perform a search and store results.
     pub fn perform_search(&mut self) {
-        if self.search_query.is_empty() {
+        if self.search.is_empty() {
             self.search_results.clear();
         } else {
-            self.search_results = search_articles(&self.articles, &self.search_query);
+            self.search_results = search_articles(&self.articles, self.search.text());
         }
     }
 
@@ -3664,8 +3659,8 @@ impl RssReaderApp {
                 EventResult::Consumed
             }
             Key::Escape => {
-                if !self.search_query.is_empty() {
-                    self.search_query.clear();
+                if !self.search.is_empty() {
+                    self.search.clear();
                     self.search_results.clear();
                     EventResult::Consumed
                 } else if self.show_feed_health {
@@ -3741,7 +3736,7 @@ impl RssReaderApp {
         match key.key {
             Key::Escape if plain => {
                 self.search_active = false;
-                self.search_query.clear();
+                self.search.clear();
                 self.search_results.clear();
                 EventResult::Consumed
             }
@@ -3750,19 +3745,15 @@ impl RssReaderApp {
                 EventResult::Consumed
             }
             _ => {
-                let Some(changed) = edit_box(
-                    &mut self.search_editor,
-                    &mut self.search_query,
-                    &mut self.clipboard,
-                    key,
-                ) else {
+                let edit = self.search.key(key);
+                if !edit.handled {
                     return EventResult::Ignored;
-                };
+                }
                 // `perform_search` on every change rather than on Enter: it
                 // filters an in-memory list, and a search box that shows
                 // nothing until it is submitted is a search box you have to be
                 // told how to use.
-                if changed {
+                if edit.changed {
                     self.perform_search();
                 }
                 EventResult::Consumed
@@ -3899,17 +3890,10 @@ impl RssReaderApp {
                 self.commit_text_entry();
                 EventResult::Consumed
             }
-            _ => {
-                match edit_box(
-                    &mut self.entry_editor,
-                    &mut self.text_buffer,
-                    &mut self.clipboard,
-                    key,
-                ) {
-                    Some(_) => EventResult::Consumed,
-                    None => EventResult::Ignored,
-                }
+            _ if edit_box(&mut self.entry_editor, &mut self.text_buffer, key) => {
+                EventResult::Consumed
             }
+            _ => EventResult::Ignored,
         }
     }
 
@@ -6108,36 +6092,22 @@ const BOX_TEXT_INSET: f32 = 8.0;
 /// stop for a paste of something that is not one.
 const BOX_CAPACITY: usize = 2048;
 
-/// Apply an editing key to a box whose text is `text`, with `editor` laid
-/// over it: the caret keys, Backspace and Delete, Ctrl+A, C, X and V, and
-/// typing, which knows a command from AltGr (`textline::apply_key`) -- Alt+X
-/// types nothing, AltGr types. The editor is reloaded first if the text has
-/// changed under it.
+/// Apply an editing key to the prompt's box, whose text is `text`, with
+/// `editor` laid over it: the caret keys, Backspace and Delete, Ctrl+A, C, X
+/// and V on the program's clipboard, and typing, which knows a command from
+/// AltGr (`textline::apply_key`) -- Alt+X types nothing, AltGr types. The
+/// editor is reloaded first if the text has changed under it.
 ///
-/// `None` when the key is not the box's; `Some(changed)` when it is, saying
-/// whether the text changed. Each box had no caret: Backspace from the end
-/// was its only edit.
-fn edit_box(
-    editor: &mut TextInput,
-    text: &mut String,
-    clipboard: &mut String,
-    key: &KeyEvent,
-) -> Option<bool> {
+/// Whether the key was the box's.
+fn edit_box(editor: &mut TextInput, text: &mut String, key: &KeyEvent) -> bool {
     if editor.text() != text.as_str() {
         editor.set_text(text);
     }
-    let edit = textline::apply_key(editor, key, clipboard.as_str(), BOX_TEXT_SIZE);
-    if let Some(copied) = edit.copied {
-        *clipboard = copied;
-    }
-    if !edit.handled {
-        return None;
-    }
-    let changed = editor.text() != text.as_str();
-    if changed {
+    let edit = textline::apply_key_on_clipboard(editor, key, BOX_TEXT_SIZE);
+    if edit.handled && editor.text() != text.as_str() {
         *text = editor.text().to_owned();
     }
-    Some(changed)
+    edit.handled
 }
 
 /// Where a box's caret is drawn: the editor's while the box has the
@@ -6159,7 +6129,7 @@ impl RssReaderApp {
     fn box_parts(&self, target: Target) -> Option<(&TextInput, &str, bool)> {
         match target {
             Target::SearchBox => {
-                Some((&self.search_editor, &self.search_query, self.search_active))
+                Some((self.search.input(), self.search.text(), self.search_active))
             }
             Target::EntryBox => Some((
                 &self.entry_editor,
@@ -6171,27 +6141,36 @@ impl RssReaderApp {
     }
 
     /// Put the caret of the box `target`, drawn at `rect` with its caret at
-    /// `drawn` before the press, under the pointer at `x` -- if the press
-    /// gave the box the keyboard.
-    fn place_caret(&mut self, target: Target, rect: Rect, drawn: TextCursor, x: f32) {
+    /// `drawn` before the press -- with the keyboard or without
+    /// (`had_the_keyboard`) -- under the pointer at `x`, if the press gave
+    /// the box the keyboard.
+    fn place_caret(
+        &mut self,
+        target: Target,
+        rect: Rect,
+        (drawn, had_the_keyboard): (TextCursor, bool),
+        x: f32,
+    ) {
         let Some((_, text, true)) = self.box_parts(target) else {
             return;
         };
+        let (dx, width) = (x - rect.x - BOX_TEXT_INSET, rect.w - 2.0 * BOX_TEXT_INSET);
+        if target == Target::SearchBox {
+            self.search.press(dx, width, had_the_keyboard);
+            return;
+        }
         let text = text.to_owned();
-        let editor = match target {
-            Target::SearchBox => &mut self.search_editor,
-            _ => &mut self.entry_editor,
-        };
+        let editor = &mut self.entry_editor;
         if editor.text() != text {
             editor.set_text(&text);
         }
         let cursor = textedit::cursor_at_click(
             &text,
             drawn,
-            (rect.w - 2.0 * BOX_TEXT_INSET).max(0.0),
+            width.max(0.0),
             BOX_TEXT_SIZE,
             FontWeightHint::Regular,
-            x - rect.x - BOX_TEXT_INSET,
+            dx,
         );
         editor.set_selection_anchor(None);
         editor.set_cursor(cursor);
@@ -6206,7 +6185,7 @@ impl RssReaderApp {
         let (focused, invalid, covered) = match target {
             Target::SearchBox => (
                 self.search_active,
-                !self.search_query.is_empty() && self.search_results.is_empty(),
+                !self.search.is_empty() && self.search_results.is_empty(),
                 overlay || self.prompt.is_some() || self.text_entry.is_some(),
             ),
             _ => (self.text_entry.is_some(), false, overlay),
@@ -6301,7 +6280,7 @@ impl RssReaderApp {
                 let caret = target.and_then(|t| {
                     let (editor, text, has_keys) = self.box_parts(t)?;
                     let rect = frame.rect_of(|u| *u == t)?;
-                    Some((t, rect, drawn_cursor(editor, text, has_keys)))
+                    Some((t, rect, (drawn_cursor(editor, text, has_keys), has_keys)))
                 });
                 let result = self.press(target);
                 if let Some((t, rect, drawn)) = caret {
@@ -7141,7 +7120,8 @@ mod tests {
         app.handle_event(&key(Key::Enter, "", Modifiers::alt()));
         app.handle_event(&key(Key::Escape, "", Modifiers::alt()));
         assert_eq!(
-            app.search_query, "ś",
+            app.search.text(),
+            "ś",
             "the search typed a command's letter, or lost AltGr's"
         );
         assert!(app.search_active, "a chorded Enter or Escape closed it");
@@ -7681,7 +7661,8 @@ mod tests {
         a.handle_event(&press(Key::Home));
         a.handle_event(&press(Key::Delete));
         assert_eq!(
-            a.search_query, "zqx",
+            a.search.text(),
+            "zqx",
             "Home and Delete did not edit the start"
         );
         a.handle_event(&Event::Mouse(MouseEvent {
@@ -7691,7 +7672,8 @@ mod tests {
         }));
         a.handle_event(&types('q'));
         assert_eq!(
-            a.search_query, "qzqx",
+            a.search.text(),
+            "qzqx",
             "the caret did not go where the press was"
         );
         a.handle_event(&press(Key::Escape));
@@ -7878,6 +7860,40 @@ mod tests {
         assert_ne!(a.filter_mode, before, "F did not change the filter");
     }
 
+    /// **A press in a long search lands where it was drawn**: with the
+    /// keyboard the box draws a search too long for it scrolled to the caret
+    /// at its end, so a press near its right edge lands near the end; without
+    /// it the box draws the search from its start, so a press near its left
+    /// edge -- the one that gives it the keyboard -- lands near the start.
+    #[test]
+    fn a_press_in_a_long_search_lands_where_it_was_drawn() {
+        let mut a = app();
+        probe::click(&mut a, Target::SearchBox);
+        for _ in 0..120 {
+            a.handle_event(&types('w'));
+        }
+        let search = a
+            .frame()
+            .rect_of(|t| *t == Target::SearchBox)
+            .expect("the box");
+        let at_x = |a: &mut RssReaderApp, x: f32| {
+            a.handle_event(&Event::Mouse(MouseEvent {
+                x,
+                y: search.centre().1,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            a.search.input().cursor().byte()
+        };
+        let at = at_x(&mut a, search.right() - BOX_TEXT_INSET - 1.0);
+        assert!(at > 90, "the press landed at {at}, measured from the start");
+
+        a.handle_event(&press(Key::Enter));
+        assert!(!a.search_active, "control: Enter gives the keyboard back");
+        let at = at_x(&mut a, search.x + BOX_TEXT_INSET + 1.0);
+        assert!(a.search_active, "control: the press gives it the keyboard");
+        assert!(at < 5, "the press landed at {at}, measured from the end");
+    }
+
     /// `/` opens the search box -- the half of "Ctrl+F / /" that was missing.
     #[test]
     fn slash_opens_search() {
@@ -7912,7 +7928,7 @@ mod tests {
         assert_eq!(a.active_pane, pane, "Tab changed the pane under the list");
         assert_eq!(a.filter_mode, filter, "a digit changed the filter under it");
         assert!(!a.search_active, "Ctrl+F opened a search under the list");
-        assert!(a.search_query.is_empty(), "a letter was typed under it");
+        assert!(a.search.is_empty(), "a letter was typed under it");
         a.handle_event(&key_ev(Key::Slash, false, true));
         assert!(!a.show_help, "? left the list up");
         a.handle_event(&press(Key::F1));
@@ -8281,18 +8297,18 @@ mod tests {
         for c in "rust".chars() {
             a.handle_event(&types(c));
         }
-        assert_eq!(a.search_query, "rust");
+        assert_eq!(a.search.text(), "rust");
         assert!(
             !a.search_results.is_empty(),
             "the search should have run on each keystroke"
         );
 
         a.handle_event(&press(Key::Backspace));
-        assert_eq!(a.search_query, "rus");
+        assert_eq!(a.search.text(), "rus");
 
         a.handle_event(&press(Key::Escape));
         assert!(!a.search_active);
-        assert!(a.search_query.is_empty());
+        assert!(a.search.is_empty());
         assert!(a.search_results.is_empty());
     }
 
@@ -8312,7 +8328,7 @@ mod tests {
             a.articles[idx].is_starred, starred,
             "typing `s` starred an article"
         );
-        assert_eq!(a.search_query, "s");
+        assert_eq!(a.search.text(), "s");
     }
 
     // -- the window --
@@ -9880,7 +9896,7 @@ mod tests {
     #[test]
     fn test_search_filtering() {
         let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
-        app.search_query = "Rust".to_string();
+        app.search.set_text("Rust");
         let indices = app.filtered_article_indices();
         for &idx in &indices {
             let a = &app.articles[idx];
@@ -10042,7 +10058,7 @@ mod tests {
     #[test]
     fn test_render_empty_article_list() {
         let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
-        app.search_query = "zzzzzz_no_match_ever".to_string();
+        app.search.set_text("zzzzzz_no_match_ever");
         let cmds = app.render_commands();
         assert!(!cmds.is_empty());
     }
@@ -10250,7 +10266,7 @@ mod tests {
     #[test]
     fn test_perform_search() {
         let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
-        app.search_query = "Rust".to_string();
+        app.search.set_text("Rust");
         app.perform_search();
         assert!(!app.search_results.is_empty());
     }
@@ -10258,7 +10274,7 @@ mod tests {
     #[test]
     fn test_perform_search_empty() {
         let mut app = RssReaderApp::with_sample_data(800.0, 600.0);
-        app.search_query.clear();
+        app.search.clear();
         app.perform_search();
         assert!(app.search_results.is_empty());
     }
@@ -10653,14 +10669,15 @@ mod tests {
         probe::click(&mut app, Target::SearchBox);
         assert!(app.search_active);
         probe::type_str(&mut app, "rust");
-        assert_eq!(app.search_query, "rust");
+        assert_eq!(app.search.text(), "rust");
         assert_eq!(
             probe::click(&mut app, Target::SortButton),
             EventResult::Consumed
         );
         assert!(!app.search_active);
         assert_eq!(
-            app.search_query, "rust",
+            app.search.text(),
+            "rust",
             "the query stays; only the keyboard moves"
         );
     }

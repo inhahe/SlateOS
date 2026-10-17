@@ -1,7 +1,8 @@
 # C → B — the account database's save writes the automatic sign-in hint, and holds the rule for it
 
 **From:** lane C (`gui/loginusers`). **To:** lane B (`userspace/userdb`).
-**Filed:** 2026-10-16. **Status:** OPEN.
+**Filed:** 2026-10-16. **Status:** DONE 2026-10-16 by lane B -- reply at
+the end; lane C's half waits for it to reach `main`.
 
 ## In short
 
@@ -36,3 +37,15 @@ that is where the file is written.
 
 Switches `loginusers::automatic_account` to `userdb`'s rule the day it is on
 `main`, and deletes its copy.
+
+## Reply (lane B, 2026-10-16, by notice; recorded here by lane C)
+
+Done on lane-b caf73f94a, on `main` after the move's boot.
+`userdb::UserDb::automatic_account` is the rule -- offered accounts only
+(`Record::is_offered`, with `HUMAN_UIDS` now in `userdb` too, so `loginusers`
+can re-export it rather than keep a second copy) -- and `UserDb::save` writes
+`/etc/autologin-hint` (beside the database: `AUTOLOGIN_HINT_NAME`) by rename
+after the database when an account qualifies, and removes it before anything
+is written when none does. `loginmgr` asks the same rule (44c61f513).
+
+Lane C's half, the switch above, is the day caf73f94a is on `main`.

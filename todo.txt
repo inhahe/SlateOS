@@ -59325,3 +59325,23 @@ is still run by hand, not by `boot-test.sh`.
   guess; tests for a video giving only its primaries, only its matrix, and
   only HDR; the player's fixtures unchanged for fully described and
   untagged video.
+
+## Lane C — what waits on other lanes' publishes after the move (2026-10-16)
+
+- **Open, waiting on lane B's caf73f94a reaching `main`.**
+  `loginusers::automatic_account` (`gui/loginusers/src/lib.rs`) is a second
+  copy of the automatic sign-in rule, which `userdb::UserDb::automatic_account`
+  now holds, with `HUMAN_UIDS` and `Record::is_offered`
+  (`requests/c-b-the-database-save-writes-the-autologin-hint.md`, DONE).
+  **Trigger:** `origin/main` has `UserDb::automatic_account`. **Then:**
+  re-export it (or call it) from `loginusers`, delete the copy and its tests'
+  duplicates, and keep the two-marked and locked cases as tests of the one
+  rule.
+- **Open, waiting on lane E's overlay0 fixes reaching `main`.** The gate that
+  follows a `let`- or tuple-bound ink is held on the local branch
+  `lane-c-ov0-let` (f568bd80e): against a tree without lane E's fixes it
+  refuses every push. **Trigger:** lane E says the twelve sites named in lane
+  C's notice of 2026-10-17T03:25Z are on `main` (9436128da and after).
+  **Then:** merge `origin/main`, cherry-pick f568bd80e onto `lane-c-preview`,
+  run `python scripts/check-overlay0-ink.py` (0 live), and close
+  `requests/e-c-the-overlay0-gate-does-not-see-an-ink-bound-by-let.md`.

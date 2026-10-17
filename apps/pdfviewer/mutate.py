@@ -201,6 +201,12 @@ MUTATIONS += [
         '        let _ = settings;\n',
         [SEARCH, RANGE],
     ),
+    (
+        "Ctrl+F4 does not close the tab",
+        '                    Key::W | Key::F4 => {\n',
+        '                    Key::W => {\n',
+        ["ctrl_f4_closes_the_tab_and_alt_f4_does_not", "every_advertised_key_does_something"],
+    ),
 ]
 
 if __name__ == "__main__":

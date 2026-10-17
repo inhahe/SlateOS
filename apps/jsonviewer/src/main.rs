@@ -2400,7 +2400,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+O", "Open a file"),
     ("Ctrl+S", "Save"),
     ("Ctrl+Shift+S", "Save as a new file"),
-    ("Ctrl+N / Ctrl+W", "New tab / close this tab"),
+    ("Ctrl+N", "New tab"),
+    ("Ctrl+W / Ctrl+F4", "Close this tab"),
     ("Ctrl+Tab", "Next tab"),
     ("Ctrl+F", "Find"),
     ("Ctrl+I", "Match case while searching"),
@@ -2806,7 +2807,10 @@ impl App {
                     }
                     return;
                 }
-                Key::W => {
+                // Ctrl+F4 closes the tab as well (C-Q24, §1416), the key
+                // programs with documents have used for it since before
+                // Ctrl+W.
+                Key::W | Key::F4 => {
                     self.request_close_tab(self.active_tab);
                     return;
                 }
@@ -7184,6 +7188,28 @@ mod tests {
         app.switch_to(0);
         assert_eq!(app.handle_event(&press_ctrl(Key::W)), EventResult::Consumed);
         assert_eq!(app.documents.len(), 1);
+    }
+
+    /// **Ctrl+F4 closes the tab**, as Ctrl+W does (C-Q24, §1416) -- and
+    /// Alt+F4, the window's, is not taken for it.
+    #[test]
+    fn ctrl_f4_closes_the_tab_and_alt_f4_does_not() {
+        let mut app = App::new();
+        app.new_tab();
+        let mut alt = Modifiers::NONE;
+        alt.alt = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::F4,
+            pressed: true,
+            modifiers: alt,
+            text: String::new(),
+        }));
+        assert_eq!(app.documents.len(), 2, "Alt+F4 closed a tab");
+        assert_eq!(
+            app.handle_event(&press_ctrl(Key::F4)),
+            EventResult::Consumed
+        );
+        assert_eq!(app.documents.len(), 1, "Ctrl+F4 did not close the tab");
     }
 
     /// A tree edit leaves the text in the layout it had: one line or indented,

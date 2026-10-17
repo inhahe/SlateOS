@@ -832,6 +832,12 @@ MUTATIONS += [
         "            doc.invalidate_caches();\n",
         [CAP],
     ),
+    (
+        "Ctrl+F4 does not close the tab",
+        "                Key::W | Key::F4 => {\n                    self.request_close_tab(self.active_tab);",
+        "                Key::W => {\n                    self.request_close_tab(self.active_tab);",
+        ["ctrl_f4_closes_the_tab_and_alt_f4_does_not", "every_advertised_key_does_something"],
+    ),
 ]
 
 if __name__ == "__main__":

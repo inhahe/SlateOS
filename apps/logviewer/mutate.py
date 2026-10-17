@@ -626,6 +626,16 @@ MUTATIONS += [
     ),
 ]
 
+# Ctrl+F4 closes a log as Ctrl+W does (C-Q24, design-decisions 1416).
+MUTATIONS += [
+    (
+        "Ctrl+F4 does not close the log",
+        "            Key::W | Key::F4 => self.close_tab(self.active_file),\n",
+        "            Key::W => self.close_tab(self.active_file),\n",
+        ["ctrl_f4_closes_the_log_and_alt_f4_does_not", "every_advertised_key_does_something"],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     raise SystemExit(sweep(SRC, MUTATIONS, "logviewer", timeout=900, only=only))

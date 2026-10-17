@@ -710,6 +710,26 @@ MUTATIONS += [
         "            Focus::FilterValue => &mut self.sql_input,\n",
         [SHOWN, VALUE_EDITS],
     ),
+    # Ctrl+W and Ctrl+F4 close the database tab (C-Q24, design-decisions
+    # 1416).
+    (
+        "Ctrl+F4 does not close the tab",
+        "&& matches!(event.key, Key::W | Key::F4) {",
+        "&& matches!(event.key, Key::W) {",
+        ["ctrl_w_and_ctrl_f4_close_the_tab_and_alt_f4_does_not", "every_advertised_key_changes_the_window"],
+    ),
+    (
+        "a close key held with Alt closes the tab",
+        "        if textline::is_ctrl_chord(event.modifiers) && matches!(",
+        "        if event.modifiers.ctrl && matches!(",
+        ["ctrl_w_and_ctrl_f4_close_the_tab_and_alt_f4_does_not"],
+    ),
+    (
+        "the close keys wait for the box to give the keyboard back",
+        "            self.activate(Target::CloseTab(self.active_tab));\n            return;\n        }\n\n        match event.key {",
+        "            if self.focus == Focus::None {\n                self.activate(Target::CloseTab(self.active_tab));\n            }\n            return;\n        }\n\n        match event.key {",
+        ["ctrl_w_and_ctrl_f4_close_the_tab_and_alt_f4_does_not"],
+    ),
 ]
 
 if __name__ == "__main__":

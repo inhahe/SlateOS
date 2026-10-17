@@ -159,7 +159,8 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("D", "Light or dark page colours"),
     ("Ctrl+O", "Open a document"),
     ("Ctrl+F", "Find"),
-    ("Ctrl+T / Ctrl+W", "New tab / close this tab"),
+    ("Ctrl+T", "New tab"),
+    ("Ctrl+W / Ctrl+F4", "Close this tab"),
     ("Ctrl+Q", "Quit"),
     ("Escape", "Close the search bar or this list"),
     ("F1 / ?", "This list"),
@@ -4557,7 +4558,10 @@ impl App for PdfViewerApp {
                         self.handle_target(Target::NewTab);
                         return Response::Redraw;
                     }
-                    Key::W => {
+                    // Ctrl+F4 closes the tab as well (C-Q24, §1416), the key
+                    // programs with documents have used for it since before
+                    // Ctrl+W.
+                    Key::W | Key::F4 => {
                         let i = self.active_tab;
                         self.handle_target(Target::TabClose(i));
                         return Response::Redraw;
@@ -6742,7 +6746,7 @@ mod tests {
         for k in [Key::Right, Key::Space, Key::End, Key::D] {
             key(&mut app, probe::press(k));
         }
-        for k in [Key::O, Key::W, Key::T, Key::F] {
+        for k in [Key::O, Key::W, Key::F4, Key::T, Key::F] {
             key(&mut app, probe::ctrl(k));
         }
         assert!(
@@ -8028,6 +8032,21 @@ mod tests {
         assert_eq!(app.tabs.len(), 2);
         app.on_event(&Event::Key(probe::ctrl(Key::W)));
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// **Ctrl+F4 closes the tab**, as Ctrl+W does (C-Q24, §1416) -- and
+    /// Alt+F4, the window's, is not taken for it.
+    #[test]
+    fn ctrl_f4_closes_the_tab_and_alt_f4_does_not() {
+        let mut app = wired();
+        app.on_event(&Event::Key(probe::ctrl(Key::T)));
+        assert_eq!(app.tabs.len(), 2);
+        let mut alt = probe::press(Key::F4);
+        alt.modifiers.alt = true;
+        app.on_event(&Event::Key(alt));
+        assert_eq!(app.tabs.len(), 2, "Alt+F4 closed a tab");
+        app.on_event(&Event::Key(probe::ctrl(Key::F4)));
+        assert_eq!(app.tabs.len(), 1, "Ctrl+F4 did not close the tab");
     }
 
     #[test]

@@ -3510,8 +3510,13 @@ word; text inside them that says "lane C" is history.
   gomoku, klotski, rush, sokoban, solitaire, freecell and mahjong had none,
   2048 and connect four answered only H. *Ctrl+F4:* the editor, named in its
   menu.
-  **Still open:** Ctrl+F4 in the other programs with tabs or documents (by
-  survey); the rest of the typing sites -- 124 in `apps/` append typed text,
+  *Ctrl+F4, the rest* (2026-10-17): by a survey of every crate with a list
+  of tabs or documents or a function closing one, jsonviewer, logviewer and
+  pdfviewer close the tab with it as with Ctrl+W, and dbviewer -- whose
+  database tabs closed only by their box -- with both, from the SQL editor
+  as from nowhere; editor, hexeditor and markdowneditor had it, and tmux's
+  tabs are its windows, closed with tmux's own prefix keys.
+  **Still open:** the rest of the typing sites -- 124 in `apps/` append typed text,
   counted 2026-09-28, most without asking whether the key is a command --
   and the Ctrl shortcuts matched on Ctrl alone in the 64 programs that take
   text and test Ctrl somewhere without Alt (notes' body, and every field on

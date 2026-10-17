@@ -1108,7 +1108,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("Ctrl+R", "Search with a regular expression"),
     ("Ctrl+O", "Open a log"),
     ("Ctrl+E", "Export the entries shown"),
-    ("Ctrl+W", "Close this log"),
+    ("Ctrl+W / Ctrl+F4", "Close this log"),
     ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous log"),
     ("Escape", "Clear every filter"),
     ("F1", "This list"),
@@ -1510,7 +1510,9 @@ impl App {
                 self.reanchor_selection();
                 EventResult::Consumed
             }
-            Key::W => self.close_tab(self.active_file),
+            // Ctrl+F4 closes the log as well (C-Q24, §1416), the key programs
+            // with documents have used for it since before Ctrl+W.
+            Key::W | Key::F4 => self.close_tab(self.active_file),
             Key::Tab => self.cycle_tab(!key.modifiers.shift),
             _ => EventResult::Ignored,
         }
@@ -5733,6 +5735,24 @@ mod tests {
             "closing the last log should leave the window saying how to open one"
         );
         assert_eq!(app.handle_event(&ctrl(Key::W)), EventResult::Ignored);
+    }
+
+    /// **Ctrl+F4 closes the log**, as Ctrl+W does (C-Q24, §1416) -- and
+    /// Alt+F4, the window's, is not taken for it.
+    #[test]
+    fn ctrl_f4_closes_the_log_and_alt_f4_does_not() {
+        let mut app = two_logs();
+        let mut alt = Modifiers::NONE;
+        alt.alt = true;
+        app.handle_event(&Event::Key(KeyEvent {
+            key: Key::F4,
+            pressed: true,
+            modifiers: alt,
+            text: String::new(),
+        }));
+        assert_eq!(app.files.len(), 2, "Alt+F4 closed a log");
+        app.handle_event(&ctrl(Key::F4));
+        assert_eq!(app.files.len(), 1, "Ctrl+F4 did not close the log");
     }
 
     #[test]

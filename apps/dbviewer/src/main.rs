@@ -3586,6 +3586,7 @@ impl DbTab {
 /// with the editor focused they are characters, which is why the rows say so.
 const SHORTCUTS: &[(&str, &str)] = &[
     ("N", "A new tab"),
+    ("Ctrl+W / Ctrl+F4", "Close this tab"),
     ("E", "The SQL editor"),
     ("F", "The filter builder"),
     ("R", "The results panel"),
@@ -5899,6 +5900,14 @@ impl DbViewerApp {
             return;
         }
 
+        // Ctrl+W and Ctrl+F4 close the database tab (C-Q24, §1416), with the
+        // keyboard in a box or not: neither is a key a box answers. A Ctrl
+        // chord, not Ctrl held: AltGr arrives as Ctrl+Alt and types.
+        if textline::is_ctrl_chord(event.modifiers) && matches!(event.key, Key::W | Key::F4) {
+            self.activate(Target::CloseTab(self.active_tab));
+            return;
+        }
+
         match event.key {
             _ if !plain => {}
             Key::Escape => {
@@ -7938,6 +7947,29 @@ mod tests {
         app.add_tab("second.db");
         app.close_tab(0);
         assert_eq!(app.tabs.len(), 1);
+    }
+
+    /// **Ctrl+W and Ctrl+F4 close the database tab** (C-Q24, §1416), from
+    /// the SQL editor as from nowhere -- and Alt+F4, the window's, is not
+    /// taken for it, nor AltGr+W, which types.
+    #[test]
+    fn ctrl_w_and_ctrl_f4_close_the_tab_and_alt_f4_does_not() {
+        let mut app = DbViewerApp::with_sample_database();
+        app.add_tab("second.db");
+        app.add_tab("third.db");
+        app.focus = Focus::Editor;
+        let mut alt = probe::press(Key::F4);
+        alt.modifiers.alt = true;
+        probe::key(&mut app, &alt);
+        let mut altgr = probe::ctrl(Key::W);
+        altgr.modifiers.alt = true;
+        probe::key(&mut app, &altgr);
+        assert_eq!(app.tabs.len(), 3, "Alt+F4 or AltGr+W closed a tab");
+        probe::key(&mut app, &probe::ctrl(Key::F4));
+        assert_eq!(app.tabs.len(), 2, "Ctrl+F4 did not close the tab");
+        app.focus = Focus::None;
+        probe::key(&mut app, &probe::ctrl(Key::W));
+        assert_eq!(app.tabs.len(), 1, "Ctrl+W did not close the tab");
     }
 
     #[test]

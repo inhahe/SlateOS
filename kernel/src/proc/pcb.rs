@@ -5954,6 +5954,9 @@ fn shared_range(vma: &Vma, lo: u64, hi: u64) -> Option<(u64, u64)> {
 /// flush per run of pages. The next store to a page then faults, and marks it
 /// dirty again (`resolve_shared_write`). What `page_cache::writeback` does
 /// before it copies pages out: one walk of the process table for them all.
+/// `pages` is in ascending offset order, as the save picks them: each
+/// mapping finds its own by search, so the work under the process table's
+/// lock is the mappings' and the pages they map, not their product.
 ///
 /// Called with no lock held: it takes the process table, then each address
 /// space's page-table lock, never both.
@@ -5996,17 +5999,29 @@ pub fn write_protect_file_pages(
             let Some(proc) = table.get(&pid) else {
                 continue;
             };
-            pages
-                .iter()
-                .flat_map(|&(offset, frame)| {
-                    let end = offset.saturating_add(FRAME_SIZE as u64);
-                    proc.vmas
-                        .iter()
-                        .filter(|v| writes(v))
-                        .filter_map(move |v| shared_range(v, offset, end))
-                        .map(move |(start, stop)| (start, stop, frame))
-                })
-                .collect()
+            let frame_len = FRAME_SIZE as u64;
+            let mut ranges = Vec::new();
+            for v in proc.vmas.iter().filter(|v| writes(v)) {
+                let VmaKind::FileBacked { file_offset, .. } = v.kind else {
+                    continue;
+                };
+                let file_end = file_offset.saturating_add(v.end.saturating_sub(v.start));
+                let first =
+                    pages.partition_point(|&(o, _)| o.saturating_add(frame_len) <= file_offset);
+                for &(offset, frame) in pages
+                    .get(first..)
+                    .unwrap_or_default()
+                    .iter()
+                    .take_while(|&&(o, _)| o < file_end)
+                {
+                    if let Some((start, stop)) =
+                        shared_range(v, offset, offset.saturating_add(frame_len))
+                    {
+                        ranges.push((start, stop, frame));
+                    }
+                }
+            }
+            ranges
         };
         let pml4 = pin.pml4();
         let mut cleared: Vec<u64> = Vec::new();

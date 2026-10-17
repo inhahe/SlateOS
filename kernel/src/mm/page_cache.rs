@@ -855,9 +855,11 @@ pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty
 ///   which flushes the TLBs). Then each page's bytes are copied out and
 ///   written. A store after the copy faults and marks its page dirty again;
 ///   one before it is in the copy.
-/// - A write never reaches past the file's end, and none is made if the
-///   file's length was set since the copy (`Vfs::object_write_back`); such a
-///   page is marked dirty again, for the next save.
+/// - A write never reaches past the file's end. One made after the file's
+///   length was set since the pages were picked writes nothing
+///   (`Vfs::object_write_back`): the page is written again under the new
+///   length if the file still holds it, so that the save does not answer
+///   before its bytes landed.
 /// - A page whose write fails is marked dirty again too, and the rest still
 ///   go. The first failure is answered.
 /// - Saves of one file go one at a time ([`FileState::saving`]).
@@ -926,16 +928,30 @@ fn begin_save(file: FileId) -> KernelResult<Option<u64>> {
                     if let Some(state) = PAGE_CACHE.lock().files.get_mut(&file) {
                         state.saving = false;
                     }
+                    SAVE_ENDED.wake_all();
                     return Err(e);
                 }
                 return Ok(Some(writer));
             }
         }
-        // Another save of the file is under way: it is short, and this one
-        // must not answer before it has landed.
-        crate::sched::yield_now();
+        // Another save of the file is under way, and this one must not
+        // answer before it has landed: asleep until a save ends. Not a
+        // yield, which under strict priorities would hand the CPU straight
+        // back to a waiter that outranks the saver (the background pass
+        // runs below the default priority).
+        SAVE_ENDED.wait_until(|| {
+            PAGE_CACHE
+                .lock()
+                .files
+                .get(&file)
+                .is_none_or(|st| !st.saving)
+        });
     }
 }
+
+/// Woken whenever a save of a file ends ([`end_save`]): what a save of the
+/// same file that found one under way sleeps on ([`begin_save`]).
+static SAVE_ENDED: crate::sched::waitqueue::WaitQueue = crate::sched::waitqueue::WaitQueue::new();
 
 /// The save itself, for [`writeback`], with `file`'s save marked: its dirty
 /// pages from index `first` to `last`, their marks cleared and frames
@@ -996,22 +1012,39 @@ fn save_pages(
                 );
             }
         };
-        let saved = crate::fs::handle::write_back_at(writer, offset, &mut buf, &mut fill, cuts);
-        release(frame);
         let index = offset.checked_div(page).unwrap_or(0);
+        // Nothing is written after a cut since the pages were picked: the
+        // page may be one it dropped. If the file still holds it in this
+        // frame, it is written again under the new length. Cuts are rare;
+        // a file cut again at every try is given up on, its page dirty.
+        let mut seen = cuts;
+        let mut tries = 0u32;
+        let saved = loop {
+            let saved = crate::fs::handle::write_back_at(writer, offset, &mut buf, &mut fill, seen);
+            let now = self::cuts(file);
+            match saved {
+                Ok(false) if now != seen => {
+                    if !holds_frame(file, index, frame) {
+                        break Ok(false);
+                    }
+                    tries = tries.saturating_add(1);
+                    if tries >= MAX_CUT_RETRIES {
+                        break Err(KernelError::IoError);
+                    }
+                    seen = now;
+                }
+                other => break other,
+            }
+        };
+        release(frame);
         match saved {
             Ok(true) => {
                 STAT_WRITTEN_BACK.fetch_add(1, Ordering::Relaxed);
                 wrote = true;
             }
-            // Nothing written: a cut since the copy, after which the page --
-            // if the file still has it -- is saved again with the new length;
-            // or a page wholly past the end, which has nothing to save.
-            Ok(false) => {
-                if self::cuts(file) != cuts {
-                    mark_dirty_again(&mut PAGE_CACHE.lock(), file, index);
-                }
-            }
+            // Nothing written: a page wholly past the end, or one a cut
+            // dropped, which have nothing to save.
+            Ok(false) => {}
             Err(e) => {
                 mark_dirty_again(&mut PAGE_CACHE.lock(), file, index);
                 if result.is_ok() {
@@ -1030,22 +1063,45 @@ fn save_pages(
 /// it is dirty, the cache's writer is taken out, answered for the caller to
 /// close with no lock held.
 fn end_save(file: FileId, whole: bool, ok: bool) -> Option<u64> {
-    let mut cache = PAGE_CACHE.lock();
-    let still_dirty = file_has_dirty(&cache, file);
-    let state = cache.files.get_mut(&file)?;
-    state.saving = false;
-    if !still_dirty {
-        state.dirtied_at = None;
-    } else if whole && ok {
-        state.dirtied_at = Some(crate::hrtimer::now_ns());
-    }
-    let let_go = if state.writable_maps == 0 && !still_dirty {
-        state.writer.take()
-    } else {
-        None
-    };
-    cache.forget_if_idle(file);
+    // Woken whatever the outcome, even with the file's state gone: a waiter
+    // must never sleep on a save that has ended.
+    let let_go = (|| {
+        let mut cache = PAGE_CACHE.lock();
+        let still_dirty = file_has_dirty(&cache, file);
+        let state = cache.files.get_mut(&file)?;
+        state.saving = false;
+        if !still_dirty {
+            state.dirtied_at = None;
+        } else if whole && ok {
+            state.dirtied_at = Some(crate::hrtimer::now_ns());
+        }
+        let let_go = if state.writable_maps == 0 && !still_dirty {
+            state.writer.take()
+        } else {
+            None
+        };
+        cache.forget_if_idle(file);
+        let_go
+    })();
+    SAVE_ENDED.wake_all();
     let_go
+}
+
+/// How many times one page's save is tried again after a cut lands between
+/// its pick and its write ([`save_pages`]).
+const MAX_CUT_RETRIES: u32 = 8;
+
+/// Whether the cache still holds page `index` of `file` in `frame`.
+fn holds_frame(file: FileId, index: u64, frame: PhysFrame) -> bool {
+    let key = PageKey {
+        file,
+        page_index: index,
+    };
+    PAGE_CACHE
+        .lock()
+        .pages
+        .get(&key)
+        .is_some_and(|e| e.frame == frame)
 }
 
 /// Put back the dirty mark of page `index` of `file`, whose save failed.
@@ -1167,9 +1223,17 @@ extern "C" fn writeback_worker(_arg: u64) {
             crate::hrtimer::now_ns().saturating_sub(DIRTY_EXPIRE_NS)
         };
         let _saved = writeback_expired(cutoff);
-        // A wake (`shrink`) ends the sleep early.
+        // A wake (`shrink`) ends the sleep early. An every-file pass the
+        // throttle held back runs as soon as it allows, not a whole interval
+        // later.
         let now = crate::apic::tick_count();
-        crate::sched::sleep_until_tick_interruptible(now.saturating_add(interval));
+        let mut wake = now.saturating_add(interval);
+        if WRITEBACK_ALL.load(Ordering::Acquire)
+            && let Some(t) = last_all
+        {
+            wake = wake.min(t.saturating_add(hz)).max(now.saturating_add(1));
+        }
+        crate::sched::sleep_until_tick_interruptible(wake);
     }
 }
 

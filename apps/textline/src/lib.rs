@@ -16,6 +16,9 @@
 //!
 //! The multi-line field is `apps/textarea`.
 //!
+//! A program's search box is [`SearchBox`] ([`search`]): the search and
+//! its caret in one field, its keys answered here, its drawing too.
+//!
 //! **What it does not do is draw, or decide focus.** The caller owns the
 //! rectangle, the colours and which field the keys go to, and asks this only
 //! what a key does to the field that has them.
@@ -25,6 +28,10 @@
 //! obvious from the event: a command arrives carrying its letter as text, and
 //! AltGr arrives looking like a command. And whether a key is plain enough
 //! for a binding on the key itself ([`is_plain`]).
+
+pub mod search;
+
+pub use search::{SearchBox, SearchKey, SearchLook};
 
 use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::FontWeightHint;

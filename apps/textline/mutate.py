@@ -252,6 +252,120 @@ MUTATIONS += [
     ),
 ]
 
+SEARCH_SRC = Path(__file__).parent / "src" / "search.rs"
+
+S_TYPING = "typing_edits_at_the_caret_and_says_the_search_changed"
+S_WINDOWS = "a_key_the_box_does_not_answer_is_the_windows"
+S_RELEASE = "a_release_does_nothing"
+S_CAPACITY = "typing_stops_at_the_capacity"
+S_SAME = "setting_the_same_search_keeps_the_caret"
+S_CLEAR = "clear_says_whether_there_was_a_search"
+S_PRESS = "a_press_puts_the_caret_where_it_landed"
+S_DRAWN = "a_press_is_measured_against_the_text_as_it_was_drawn"
+S_MENU = "the_menu_edits_the_search"
+S_FOCUSED = "a_box_with_the_keyboard_draws_its_caret_on_the_line"
+S_UNFOCUSED = "a_box_without_the_keyboard_draws_the_search_or_its_placeholder"
+
+SEARCH_MUTATIONS = [
+    (
+        "the search box holds no capacity",
+        '            input: crate::field_holding("", capacity),\n',
+        '            input: crate::field_holding("", usize::MAX),\n',
+        [S_CAPACITY],
+    ),
+    (
+        "setting the same search counts as a change",
+        "        if self.input.text() == text {\n            return false;\n        }\n",
+        "",
+        [S_SAME, S_CLEAR],
+    ),
+    (
+        "a key that changes nothing says the search changed",
+        "            changed: self.input.text() != before,\n",
+        "            changed: true,\n",
+        [S_TYPING, S_WINDOWS, S_RELEASE, S_CAPACITY],
+    ),
+    (
+        "a key the box does not answer is taken from the window",
+        "            handled: edit.handled,\n",
+        "            handled: true,\n",
+        [S_WINDOWS, S_RELEASE],
+    ),
+    (
+        "a press keeps the selection",
+        "        self.input.set_selection_anchor(None);\n        self.input.set_cursor(cursor);\n",
+        "        self.input.set_cursor(cursor);\n",
+        [S_PRESS],
+    ),
+    (
+        "a press without the keyboard is measured as though scrolled",
+        "        let drawn = if focused {\n",
+        "        let drawn = if true {\n",
+        [S_DRAWN],
+    ),
+    (
+        "a press with the keyboard is measured from the start",
+        "        let drawn = if focused {\n",
+        "        let drawn = if false {\n",
+        [S_DRAWN],
+    ),
+    (
+        "a menu row that changed nothing says the search changed",
+        "        self.input.edit_command(id) == KeyEdit::Changed\n",
+        "        self.input.edit_command(id) != KeyEdit::Unhandled\n",
+        [S_MENU],
+    ),
+    (
+        "the box with the keyboard draws no caret",
+        "                    focused: true,\n                    x: look.x,\n",
+        "                    focused: false,\n                    x: look.x,\n",
+        [S_FOCUSED],
+    ),
+    (
+        "a box without the keyboard draws a caret",
+        "        if look.focused {\n            textedit::draw(\n",
+        "        if true {\n            textedit::draw(\n",
+        [S_UNFOCUSED],
+    ),
+    (
+        "an empty box draws no placeholder",
+        "            (look.placeholder, look.placeholder_color)\n",
+        "            (self.input.text(), look.placeholder_color)\n",
+        [S_UNFOCUSED],
+    ),
+    (
+        "the placeholder is drawn in the search's colour",
+        "            (look.placeholder, look.placeholder_color)\n",
+        "            (look.placeholder, look.color)\n",
+        [S_UNFOCUSED],
+    ),
+    (
+        "the text drops a pixel when the box has not the keyboard",
+        "            y: look.y,\n            text: text.to_string(),\n",
+        "            y: look.y + 1.0,\n            text: text.to_string(),\n",
+        [S_UNFOCUSED],
+    ),
+    (
+        "a long search runs out of the box",
+        "            max_width: Some(look.width.max(0.0)),\n",
+        "            max_width: None,\n",
+        [S_UNFOCUSED],
+    ),
+    (
+        "a long search is cut without saying so",
+        "            overflow: TextOverflow::Ellipsis,\n",
+        "            overflow: TextOverflow::Clip,\n",
+        [S_UNFOCUSED],
+    ),
+]
+
 if __name__ == "__main__":
     only = sys.argv[1:] or None
-    raise SystemExit(sweep(SRC, MUTATIONS, "textline", timeout=600, only=only))
+    worst = 0
+    for src, rows in ((SRC, MUTATIONS), (SEARCH_SRC, SEARCH_MUTATIONS)):
+        mine = [o for o in only if any(o in r[0] for r in rows)] if only else None
+        if only and not mine:
+            continue
+        print(f"\n######## textline/{src.name} ########")
+        worst = max(worst, sweep(src, rows, "textline", timeout=600, only=mine))
+    raise SystemExit(worst)

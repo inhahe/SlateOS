@@ -2287,7 +2287,7 @@ use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 /// The window size to ask for.
 const WINDOW_WIDTH: f32 = 1300.0;
@@ -2624,7 +2624,7 @@ pub struct TorrentApp {
     pub next_id: u32,
     pub peer_id: [u8; 20],
     /// The search box, which is the search the list is filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub sort_column: SortColumn,
     /// Whether the shortcut card is up.
     pub show_help: bool,
@@ -2836,7 +2836,7 @@ impl TorrentApp {
             selected_torrent: None,
             next_id: 1,
             peer_id,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             sort_column: SortColumn::Added,
             show_help: false,
             sort_ascending: false,
@@ -3666,7 +3666,7 @@ impl TorrentApp {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: search.x + 10.0,
                 y: search.y + 8.0,
                 width: search.w - 20.0,

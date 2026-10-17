@@ -120,7 +120,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 use textarea::TextArea;
 use textfmt::tsv;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 use unsaved::{Choice, Question};
 
 // ============================================================================
@@ -1990,7 +1990,7 @@ pub struct App {
     sidebar_view: SidebarView,
     sort_order: SortOrder,
     /// The search box, which is the query the list is filtered by.
-    search: SearchBox,
+    search: LineBox,
     search_scope: SearchScope,
     /// Whether what is typed goes into the search box. A letter means "find
     /// this" while it is set and "do this" while it is not, which is the only
@@ -2213,7 +2213,7 @@ impl App {
             selected_language: None,
             sidebar_view: SidebarView::Folders,
             sort_order: SortOrder::DateDesc,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_scope: SearchScope::All,
             search_focus: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -3768,7 +3768,7 @@ impl App {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: inner.x,
                 y,
                 width: inner.w,

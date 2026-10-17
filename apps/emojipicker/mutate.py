@@ -241,7 +241,7 @@ MUTATIONS += [
     (
         "what is typed does not reach the search",
         "        let edit = self.search.key(key);\n",
-        "        let edit = textline::SearchKey::default();\n",
+        "        let edit = textline::LineKey::default();\n",
         [CARET, WORD],
     ),
     (

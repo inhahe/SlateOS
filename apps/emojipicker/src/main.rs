@@ -28,7 +28,7 @@ use guitk::text;
 use guitk::textedit;
 use guitk::{grid, wheel};
 use oswindow::app::{self, App, Response};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::num::NonZeroUsize;
 use std::process::ExitCode;
@@ -1207,7 +1207,7 @@ pub struct EmojiPickerState {
     /// The category to show when a category tab is active.
     pub selected_category: EmojiCategory,
     /// The search box, which is the query.
-    pub search: SearchBox,
+    pub search: LineBox,
     /// Index of the emoji lit in the visible grid, if any: the one the
     /// pointer is over, or the one the arrow keys moved to -- the same light,
     /// so the preview names whichever the reader last pointed at, and Enter
@@ -1252,7 +1252,7 @@ impl EmojiPickerState {
             palette: Palette::from_settings(&appearance::AppearanceSettings::default()),
             active_tab: Tab::Category(EmojiCategory::SmileysAndPeople),
             selected_category: EmojiCategory::SmileysAndPeople,
-            search: SearchBox::new(SEARCH_CAPACITY, LABEL_FONT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, LABEL_FONT_SIZE),
             hovered_emoji: Option::None,
             scroll_offset: 0.0,
             skin_tone: SkinToneModifier::None,
@@ -1604,7 +1604,7 @@ impl EmojiPickerState {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x,
                 y,
                 width: avail,

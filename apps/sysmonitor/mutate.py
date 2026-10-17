@@ -131,8 +131,8 @@ MUTATIONS += [
     ),
     (
         "the filter holds any length",
-        'filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),',
-        'filter: SearchBox::new(usize::MAX, FILTER_TEXT_SIZE),',
+        'filter: LineBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),',
+        'filter: LineBox::new(usize::MAX, FILTER_TEXT_SIZE),',
         [EDITS],
     ),
     (

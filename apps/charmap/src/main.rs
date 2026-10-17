@@ -31,7 +31,7 @@ use guitk::style::CornerRadii;
 use guitk::textedit;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::num::NonZeroUsize;
 use std::process::ExitCode;
@@ -770,7 +770,7 @@ struct CharMapApp {
 
     // Search
     /// The search box, which is the query.
-    search: SearchBox,
+    search: LineBox,
     search_results: Vec<u32>,
     /// Whether the shortcut card is up.
     show_help: bool,
@@ -828,7 +828,7 @@ impl CharMapApp {
             selected_char: 0,
             grid_scroll: 0,
             category_filter: CategoryFilter::All,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_results: Vec::new(),
             show_help: false,
             search_active: false,
@@ -1248,8 +1248,7 @@ impl CharMapApp {
     /// else whether it changed the query, its caret or its selection. A
     /// query changed is searched for again.
     fn search_key(&mut self, event: &KeyEvent) -> Option<bool> {
-        let caret =
-            |search: &SearchBox| (search.input().cursor(), search.input().selection_anchor());
+        let caret = |search: &LineBox| (search.input().cursor(), search.input().selection_anchor());
         let before = caret(&self.search);
         let edit = self.search.key(event);
         if !edit.handled {
@@ -1696,7 +1695,7 @@ impl CharMapApp {
             let mut tree = RenderTree::new();
             self.search.draw(
                 &mut tree,
-                &SearchLook {
+                &LineLook {
                     x: inner.x,
                     y: inner.y,
                     width: inner.w,

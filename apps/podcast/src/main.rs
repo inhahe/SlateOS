@@ -42,7 +42,7 @@ use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -1032,7 +1032,7 @@ pub struct PodcastApp {
     pub episode_filter: EpisodeFilter,
     pub selected_episode_id: Option<u64>,
     /// The search box, which is the query.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub search_results: Vec<(u64, u64)>, // (podcast_id, episode_id)
     /// How wide the mark is round the box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
@@ -1090,7 +1090,7 @@ impl PodcastApp {
             main_view: MainView::EpisodeList,
             episode_filter: EpisodeFilter::All,
             selected_episode_id: None,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             detail_from: MainView::EpisodeList,
             search_results: Vec::new(),
@@ -4370,7 +4370,7 @@ impl PodcastApp {
         let mut tree = guitk::render::RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x,
                 y,
                 width,

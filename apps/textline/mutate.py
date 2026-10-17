@@ -252,44 +252,44 @@ MUTATIONS += [
     ),
 ]
 
-SEARCH_SRC = Path(__file__).parent / "src" / "search.rs"
+LINE_SRC = Path(__file__).parent / "src" / "linebox.rs"
 
-S_TYPING = "typing_edits_at_the_caret_and_says_the_search_changed"
+S_TYPING = "typing_edits_at_the_caret_and_says_the_text_changed"
 S_WINDOWS = "a_key_the_box_does_not_answer_is_the_windows"
 S_RELEASE = "a_release_does_nothing"
 S_CAPACITY = "typing_stops_at_the_capacity"
-S_SAME = "setting_the_same_search_keeps_the_caret"
-S_CLEAR = "clear_says_whether_there_was_a_search"
+S_SAME = "setting_the_same_text_keeps_the_caret"
+S_CLEAR = "clear_says_whether_there_was_text"
 S_PRESS = "a_press_puts_the_caret_where_it_landed"
 S_DRAWN = "a_press_is_measured_against_the_text_as_it_was_drawn"
-S_MENU = "the_menu_edits_the_search"
+S_MENU = "the_menu_edits_the_text"
 S_FOCUSED = "a_box_with_the_keyboard_draws_its_caret_on_the_line"
-S_UNFOCUSED = "a_box_without_the_keyboard_draws_the_search_or_its_placeholder"
+S_UNFOCUSED = "a_box_without_the_keyboard_draws_its_text_or_its_placeholder"
 S_EMPTY_FOCUSED = "an_empty_box_with_the_keyboard_says_what_it_is_for_under_its_caret"
-S_SELECT_ALL = "select_all_types_over_the_search"
-S_TO_END = "caret_to_end_types_after_the_search_and_over_no_selection"
+S_SELECT_ALL = "select_all_types_over_the_text"
+S_TO_END = "caret_to_end_types_after_the_text_and_over_no_selection"
 
-SEARCH_MUTATIONS = [
+LINE_MUTATIONS = [
     (
-        "the search box holds no capacity",
+        "the box holds no capacity",
         '            input: crate::field_holding("", capacity),\n',
         '            input: crate::field_holding("", usize::MAX),\n',
         [S_CAPACITY],
     ),
     (
-        "setting the same search counts as a change",
+        "setting the same text counts as a change",
         "        if self.input.text() == text {\n            return false;\n        }\n",
         "",
         [S_SAME, S_CLEAR],
     ),
     (
-        "a key that changes nothing says the search changed",
+        "a key that changes nothing says the text changed",
         "            changed: self.input.text() != before,\n",
         "            changed: true,\n",
         [S_TYPING, S_WINDOWS, S_RELEASE, S_CAPACITY],
     ),
     (
-        "the search box keeps a clipboard of its own",
+        "the box keeps a clipboard of its own",
         "        let edit = crate::apply_key_on_clipboard(&mut self.input, key, self.font_size);\n",
         '        let edit = crate::apply_key(&mut self.input, key, "", self.font_size);\n',
         ["a_copy_or_a_cut_says_it_took_the_selection"],
@@ -331,7 +331,7 @@ SEARCH_MUTATIONS = [
         [S_DRAWN],
     ),
     (
-        "a menu row that changed nothing says the search changed",
+        "a menu row that changed nothing says the text changed",
         "        self.input.edit_command(id) == KeyEdit::Changed\n",
         "        self.input.edit_command(id) != KeyEdit::Unhandled\n",
         [S_MENU],
@@ -361,7 +361,7 @@ SEARCH_MUTATIONS = [
         [S_EMPTY_FOCUSED],
     ),
     (
-        "the placeholder is drawn over a search",
+        "the placeholder is drawn over the text",
         "        if self.is_empty() {\n            // The placeholder",
         "        if true {\n            // The placeholder",
         [S_UNFOCUSED, S_FOCUSED],
@@ -379,13 +379,13 @@ SEARCH_MUTATIONS = [
         [S_EMPTY_FOCUSED],
     ),
     (
-        "the placeholder is drawn in the search's colour",
+        "the placeholder is drawn in the text's colour",
         "                look.placeholder_color,\n",
         "                look.color,\n",
         [S_UNFOCUSED, S_EMPTY_FOCUSED],
     ),
     (
-        "a search without the keyboard is not drawn",
+        "text without the keyboard is not drawn",
         "            push_line(tree, look, self.input.text(), look.color, self.font_size);\n",
         "",
         [S_UNFOCUSED],
@@ -397,13 +397,13 @@ SEARCH_MUTATIONS = [
         [S_UNFOCUSED],
     ),
     (
-        "a long search runs out of the box",
+        "long text runs out of the box",
         "        max_width: Some(look.width.max(0.0)),\n",
         "        max_width: None,\n",
         [S_UNFOCUSED],
     ),
     (
-        "a long search is cut without saying so",
+        "long text is cut without saying so",
         "        overflow: TextOverflow::Ellipsis,\n",
         "        overflow: TextOverflow::Clip,\n",
         [S_UNFOCUSED],
@@ -431,7 +431,7 @@ SEARCH_MUTATIONS = [
 if __name__ == "__main__":
     only = sys.argv[1:] or None
     worst = 0
-    for src, rows in ((SRC, MUTATIONS), (SEARCH_SRC, SEARCH_MUTATIONS)):
+    for src, rows in ((SRC, MUTATIONS), (LINE_SRC, LINE_MUTATIONS)):
         mine = [o for o in only if any(o in r[0] for r in rows)] if only else None
         if only and not mine:
             continue

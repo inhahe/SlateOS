@@ -35,7 +35,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::collections::HashMap;
 
@@ -885,7 +885,7 @@ pub struct ProcessExplorerState {
 
     // -- Search / filter -----------------------------------------------------
     /// The filter box, which is the filter the process list is narrowed by.
-    pub filter: SearchBox,
+    pub filter: LineBox,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// The New Task box while it is up.
@@ -994,7 +994,7 @@ impl ProcessExplorerState {
             env_view: None,
             mem_view: None,
             views_pid: None,
-            filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),
+            filter: LineBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),
             show_help: false,
             run_box: None,
             field_menu: fieldmenu::FieldMenu::new(),
@@ -2601,7 +2601,7 @@ impl ProcessExplorerState {
         );
         self.filter.draw(
             tree,
-            &SearchLook {
+            &LineLook {
                 x: tx,
                 y: ty,
                 width: tw,

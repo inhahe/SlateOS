@@ -33,7 +33,7 @@ use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::path::PathBuf;
 
@@ -398,7 +398,7 @@ pub struct PlayerState {
     pub active_tab: Tab,
     /// The search box, which is the search: the library is filtered by it,
     /// whether or not the box has the keyboard.
-    pub search: SearchBox,
+    pub search: LineBox,
     /// Whether the search box has the keyboard.
     pub searching: bool,
     /// How wide the mark is round the search box while it has the keyboard:
@@ -488,7 +488,7 @@ impl PlayerState {
             library: Vec::new(),
             library_sort: SortBy::Title,
             active_tab: Tab::NowPlaying,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             searching: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             library_selection: None,
@@ -1337,7 +1337,7 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
         );
         state.search.draw(
             tree,
-            &SearchLook {
+            &LineLook {
                 x: tx,
                 y: ty,
                 width: tw,

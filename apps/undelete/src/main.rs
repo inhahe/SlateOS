@@ -86,7 +86,7 @@ use guitk::widget::CheckState;
 use oswindow::app::{self, App, Response};
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::collections::BTreeMap;
 
@@ -2008,7 +2008,7 @@ pub struct ScanFilter {
     pub min_confidence: Option<RecoveryConfidence>,
     pub source: Option<DeletionSource>,
     /// The search box, which is the search file names are matched by.
-    pub filename_search: SearchBox,
+    pub filename_search: LineBox,
     pub min_delete_time: Option<u64>,
     pub max_delete_time: Option<u64>,
 }
@@ -2027,7 +2027,7 @@ impl ScanFilter {
             max_size: None,
             min_confidence: None,
             source: None,
-            filename_search: SearchBox::new(SEARCH_CAPACITY, FONT_SIZE),
+            filename_search: LineBox::new(SEARCH_CAPACITY, FONT_SIZE),
             min_delete_time: None,
             max_delete_time: None,
         }
@@ -2898,7 +2898,7 @@ impl UndeleteApp {
         let mut tree = RenderTree::new();
         self.filter.filename_search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x,
                 y,
                 width,

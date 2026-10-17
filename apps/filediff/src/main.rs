@@ -37,7 +37,7 @@ use guitk::field;
 use guitk::frame::Rect;
 use guitk::textedit;
 use pathtext::ShowPath;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 // Only the tests build a modifier set by hand; the handlers read the one on
 // the event they were given.
 #[cfg(test)]
@@ -560,7 +560,7 @@ pub struct SearchMatch {
 #[derive(Clone, Debug)]
 pub struct SearchState {
     /// The find bar's box, which is the query.
-    pub query: SearchBox,
+    pub query: LineBox,
     /// Whether search is case-sensitive.
     pub case_sensitive: bool,
     /// All matches found.
@@ -574,7 +574,7 @@ pub struct SearchState {
 impl Default for SearchState {
     fn default() -> Self {
         Self {
-            query: SearchBox::new(SEARCH_CAPACITY, CONTENT_FONT_SIZE),
+            query: LineBox::new(SEARCH_CAPACITY, CONTENT_FONT_SIZE),
             case_sensitive: false,
             matches: Vec::new(),
             current_match: 0,
@@ -2897,7 +2897,7 @@ impl FileDiffApp {
         let line = text::line_height(CONTENT_FONT_SIZE, FontWeightHint::Regular);
         self.search.query.draw(
             tree,
-            &SearchLook {
+            &LineLook {
                 x: l.query.x + FindBar::INSET,
                 y: l.query.y + (l.query.h - line) / 2.0,
                 width: l.query.w - FindBar::INSET * 2.0,

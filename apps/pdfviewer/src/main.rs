@@ -89,7 +89,7 @@ use guitk::textinput::TextInput;
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
 use printjob::{ColorMode, PageRange, PrintJob, ScaleMode};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::path::{Path, PathBuf};
 
@@ -1339,7 +1339,7 @@ impl DocumentTab {
 #[derive(Clone, Debug)]
 pub struct SearchState {
     /// The search box, which is the query.
-    pub query: SearchBox,
+    pub query: LineBox,
     pub results: Vec<SearchResult>,
     pub current_match: Option<usize>,
     pub active: bool,
@@ -1349,7 +1349,7 @@ pub struct SearchState {
 impl SearchState {
     pub fn new() -> Self {
         Self {
-            query: SearchBox::new(BOX_CAPACITY, SEARCH_TEXT_SIZE),
+            query: LineBox::new(BOX_CAPACITY, SEARCH_TEXT_SIZE),
             results: Vec::new(),
             current_match: None,
             active: false,
@@ -3582,7 +3582,7 @@ impl PdfViewerApp {
         let mut tree = RenderTree::new();
         self.search.query.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: search_box.x + BOX_TEXT_INSET,
                 y: search_box.y + (search_box.h - line) / 2.0,
                 width: search_box.w - 2.0 * BOX_TEXT_INSET,

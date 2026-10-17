@@ -49,7 +49,7 @@ use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Constants — layout dimensions
@@ -466,7 +466,7 @@ pub struct SysInfoState {
     pub hovered_tree_row: Option<usize>,
     /// Search query text.
     /// The search box, which is the search.
-    pub search: SearchBox,
+    pub search: LineBox,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// Whether search box is focused.
@@ -585,7 +585,7 @@ impl SysInfoState {
             window_width: DEFAULT_WIDTH,
             window_height: DEFAULT_HEIGHT,
             hovered_tree_row: None,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             show_help: false,
             search_focused: false,
             search_hovered: false,
@@ -2197,7 +2197,7 @@ impl SysInfoState {
         );
         self.search.draw(
             tree,
-            &SearchLook {
+            &LineLook {
                 x: tx,
                 y: ty,
                 width: tw,

@@ -63,7 +63,7 @@ pdfviewer, rssreader, passwordgen, qrcode) needs nothing: the program passes
 an empty one while it has it.
 
 **The fix.** The twenty-four search boxes moved onto `textline::SearchBox`
-(`apps/textline/src/search.rs`, roadmap "One search box, not twenty-four
+(now `LineBox`, `apps/textline/src/linebox.rs`; roadmap "One search box, not twenty-four
 copies of it"), in which the editor *is* the text: `key` says whether the box
 took the key and whether the text changed, and `press`, `menu_row` and `draw`
 are the box's. Nothing in it is particular to searching except its name. In
@@ -71,6 +71,7 @@ this order, a commit each:
 
 1. Rename it for what it is: `LineBox`, `LineKey`, `LineLook`, in
    `apps/textline/src/linebox.rs`; the twenty-four search boxes follow.
+   *Done 2026-10-17.*
 2. Give it the needs above, each with its tests: `set_font_size`, a weight,
    `set_caret`, a check an edit must pass (`key_checked`), a mask, and a
    look that elides at the start.

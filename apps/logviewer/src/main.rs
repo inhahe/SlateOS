@@ -56,7 +56,7 @@ use oswindow::app::{self, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Catppuccin Mocha theme
@@ -804,7 +804,7 @@ struct FilterState {
     min_level: LogLevel,
     /// The search box, which is the search: the text a passing entry
     /// holds, or the pattern it matches.
-    search: SearchBox,
+    search: LineBox,
     source_filter: Option<String>,
     time_start: Option<u64>,
     time_end: Option<u64>,
@@ -820,7 +820,7 @@ impl Default for FilterState {
     fn default() -> Self {
         Self {
             min_level: LogLevel::Trace,
-            search: SearchBox::new(SEARCH_CAPACITY, SMALL_TEXT),
+            search: LineBox::new(SEARCH_CAPACITY, SMALL_TEXT),
             source_filter: None,
             time_start: None,
             time_end: None,
@@ -2089,7 +2089,7 @@ impl App {
         let mut typed = RenderTree::new();
         self.filter.search.draw(
             &mut typed,
-            &SearchLook {
+            &LineLook {
                 x: tx,
                 y: ty,
                 width: tw,

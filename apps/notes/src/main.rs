@@ -104,7 +104,7 @@ use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::collections::{HashMap, HashSet};
 
@@ -1636,7 +1636,7 @@ pub struct NotesApp {
     pub selected_notebook: Option<NotebookId>,
     pub selected_note: Option<NoteId>,
     /// The search box, which is the search the notes are filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub active_tag_filter: Option<String>,
     pub sort_order: SortOrder,
     /// Whether the shortcut card is up.
@@ -1742,7 +1742,7 @@ impl NotesApp {
             notes: Vec::new(),
             selected_notebook: None,
             selected_note: None,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             active_tag_filter: None,
             sort_order: SortOrder::DateModified,
             show_help: false,
@@ -4126,7 +4126,7 @@ impl NotesApp {
         let mut typed = RenderTree::new();
         self.search.draw(
             &mut typed,
-            &SearchLook {
+            &LineLook {
                 x: tx,
                 y: ty,
                 width: tw,

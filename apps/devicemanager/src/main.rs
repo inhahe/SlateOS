@@ -47,7 +47,7 @@ use guitk::textedit;
 use guitk::{scroll_window, wheel};
 use oswindow::app::Response;
 use pathtext::ShowPath;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -834,7 +834,7 @@ pub struct DeviceManagerState {
     /// Currently active properties tab.
     pub active_tab: PropertiesTab,
     /// The search box, which is the search the tree is filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// Whether the search bar is focused.
@@ -920,7 +920,7 @@ impl DeviceManagerState {
             tree_nodes,
             selected_tree_index: None,
             active_tab: PropertiesTab::General,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_focused: false,
             show_help: false,
             event_history: Vec::new(),
@@ -2110,7 +2110,7 @@ fn render_search_bar(state: &DeviceManagerState, cmds: &mut Vec<RenderCommand>) 
     let mut tree = RenderTree::new();
     state.search.draw(
         &mut tree,
-        &SearchLook {
+        &LineLook {
             x,
             y,
             width,

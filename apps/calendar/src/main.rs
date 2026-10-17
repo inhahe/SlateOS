@@ -30,7 +30,7 @@ use guitk::textedit;
 use guitk::textinput::{KeyEdit, TextInput};
 use guitk::wheel;
 use oswindow::app::{self, App, Response};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -1000,7 +1000,7 @@ pub struct CalendarApp {
     /// Whether the shortcut list is up.
     pub show_help: bool,
     /// The search box, which is the search.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub search_results: Vec<u64>,
     pub selected_event_id: Option<u64>,
     pub category_filter: Option<EventCategory>,
@@ -1075,7 +1075,7 @@ impl CalendarApp {
             store: EventStore::new(),
             sidebar_visible: true,
             show_help: false,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_results: Vec::new(),
             selected_event_id: None,
             category_filter: None,
@@ -2227,7 +2227,7 @@ impl CalendarApp {
             let mut tree = RenderTree::new();
             self.search.draw(
                 &mut tree,
-                &SearchLook {
+                &LineLook {
                     x: search.x + 8.0,
                     y: search.y + 7.0,
                     width: search.w - 16.0,

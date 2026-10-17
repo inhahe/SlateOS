@@ -4023,8 +4023,8 @@ word; text inside them that says "lane C" is history.
   the box took the key and whether the search changed, a key it does not
   answer being the window's; `press(rect, x)`; `draw`; and the menu's rows
   -- and the twenty-four moved to it, each with its tests kept.
-  **Done 2026-10-16:** `textline::SearchBox` is in
-  (`apps/textline/src/search.rs`: `key`, `set_text`, `clear`, `select_all`,
+  **Done 2026-10-16:** `textline::SearchBox` (since 2026-10-17 `LineBox`,
+  `apps/textline/src/linebox.rs`: `key`, `set_text`, `clear`, `select_all`,
   `caret_to_end`, `press`, `edit_menu`, `menu_row`, `draw`), and all
   twenty-four have moved to it. filediff, logviewer, pdfviewer and undelete
   hold the box in the model struct their tests build (`SearchState`, a
@@ -4034,14 +4034,16 @@ word; text inside them that says "lane C" is history.
   boxes: `known-issues/E-twenty-eight-applications-keep-a-box-s-text-twice.md`
   and the item below.
 
-- `[ ]` `[E]` **One line box, not twenty-eight more copies of it** --
+- `[-]` `[E]` **One line box, not twenty-eight more copies of it** --
   2026-10-16, following the item above. `textline::SearchBox` is a one-line
   box with nothing particular to searching but its name; rename it for what
   it is (`LineBox`) and move onto it the twenty-eight boxes that still keep
   their text as a `String` with a `TextInput` reloaded from it, each with its
-  tests kept. The list, and the two whose box is several fields sharing one
-  editor, are in
+  tests kept. The list, what each box needs of `LineBox`, and the three
+  steps are in
   `known-issues/E-twenty-eight-applications-keep-a-box-s-text-twice.md`.
+  **In progress:** the rename is done (2026-10-17); next, what the boxes
+  need, then the twenty-eight.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane

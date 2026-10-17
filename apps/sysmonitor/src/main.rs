@@ -53,7 +53,7 @@ use processctl::Asker;
 use processctl::Ending;
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Layout constants
@@ -642,7 +642,7 @@ pub struct SysMonitorState {
     /// row could not be reached at all.
     wheel: wheel::Accumulator,
     /// The filter box, which is the filter the process list is narrowed by.
-    pub filter: SearchBox,
+    pub filter: LineBox,
     pub filter_focused: bool,
     /// The filter box's right-click menu, while it is up.
     field_menu: fieldmenu::FieldMenu<()>,
@@ -726,7 +726,7 @@ impl SysMonitorState {
             sort_direction: SortDirection::Descending,
             scroll_offset: 0,
             wheel: wheel::Accumulator::default(),
-            filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),
+            filter: LineBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),
             filter_focused: false,
             field_menu: fieldmenu::FieldMenu::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
@@ -2245,7 +2245,7 @@ impl SysMonitorState {
         );
         self.filter.draw(
             tree,
-            &SearchLook {
+            &LineLook {
                 x,
                 y,
                 width,

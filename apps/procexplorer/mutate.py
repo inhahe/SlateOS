@@ -551,8 +551,8 @@ MUTATIONS += [
     ),
     (
         'the filter box holds no capacity',
-        '            filter: SearchBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),\n',
-        '            filter: SearchBox::new(usize::MAX, FILTER_TEXT_SIZE),\n',
+        '            filter: LineBox::new(FILTER_CAPACITY, FILTER_TEXT_SIZE),\n',
+        '            filter: LineBox::new(usize::MAX, FILTER_TEXT_SIZE),\n',
         [FM_FILTER],
     ),
     (

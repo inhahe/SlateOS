@@ -85,7 +85,7 @@ use guitk::style::CornerRadii;
 use guitk::text;
 use guitk::textedit;
 use guitk::textinput::TextInput;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ============================================================================
 // Catppuccin Mocha palette
@@ -2383,7 +2383,7 @@ pub struct RemindersApp {
     pub view: ViewFilter,
     pub sort_mode: SortMode,
     /// The search box, which is the search the tasks are filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     /// Whether the search box has the keyboard.
     search_focused: bool,
     pub selected_task_id: Option<u64>,
@@ -2450,7 +2450,7 @@ impl RemindersApp {
             store: TaskStore::new(),
             view: ViewFilter::Today,
             sort_mode: SortMode::DueDate,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_focused: false,
             selected_task_id: None,
             notifications: Vec::new(),
@@ -3363,7 +3363,7 @@ impl RemindersApp {
 
     /// A key for the search box while it has the keyboard: Escape empties it
     /// and leaves, Enter leaves keeping the search, and the rest is the box's
-    /// (`SearchBox::key`), on the program's clipboard.
+    /// (`LineBox::key`), on the program's clipboard.
     /// Answers whether the box did anything with the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
         let plain = textline::is_plain(key.modifiers);
@@ -4134,7 +4134,7 @@ impl RemindersApp {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: search_x + 12.0,
                 y: y_offset + 19.0,
                 width: search_w - 24.0,

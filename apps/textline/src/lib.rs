@@ -16,12 +16,12 @@
 //!
 //! The multi-line field is `apps/textarea`.
 //!
-//! A program's search box is [`SearchBox`] ([`search`]): the search and
-//! its caret in one field, its keys answered here, its drawing too.
+//! A program's one-line box is [`LineBox`] ([`linebox`]): its text and its
+//! caret in one field, its keys answered here, and its text drawn.
 //!
-//! **What it does not do is draw, or decide focus.** The caller owns the
-//! rectangle, the colours and which field the keys go to, and asks this only
-//! what a key does to the field that has them.
+//! **What none of it decides is focus.** The caller owns the box's frame, its
+//! colours and which field the keys go to, and asks this only what a key does
+//! to the field that has them.
 //!
 //! It also says, for any program, whether a keystroke is a command or typing
 //! ([`is_ctrl_chord`], [`is_command`], [`types_into_field`]), which is not
@@ -29,9 +29,9 @@
 //! AltGr arrives looking like a command. And whether a key is plain enough
 //! for a binding on the key itself ([`is_plain`]).
 
-pub mod search;
+pub mod linebox;
 
-pub use search::{SearchBox, SearchKey, SearchLook};
+pub use linebox::{LineBox, LineKey, LineLook};
 
 use guitk::event::{Key, KeyEvent, Modifiers};
 use guitk::render::FontWeightHint;

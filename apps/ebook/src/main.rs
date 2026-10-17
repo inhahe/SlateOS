@@ -54,7 +54,7 @@ use oswindow::{Event, RenderTree};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 use guitk::dialog::{FilePicker, Picked};
 use pathtext::ShowPath;
@@ -1358,7 +1358,7 @@ pub struct EbookApp {
 
     // Search state
     /// The search box, which is the query.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub search_active: bool,
     pub search_matches: Vec<SearchMatch>,
     /// The query `search_matches` were found for: a query that has not been
@@ -1510,7 +1510,7 @@ impl EbookApp {
             theme: ThemeKind::System,
             keeps_settings: false,
             paginated: None,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_active: false,
             search_matches: Vec::new(),
             searched: None,
@@ -3319,7 +3319,7 @@ impl EbookApp {
         let mut tree = guitk::render::RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x,
                 y,
                 width,

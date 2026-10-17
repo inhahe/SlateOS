@@ -1852,7 +1852,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 /// What the window says above the mail, before anything is pressed.
 ///
@@ -2366,7 +2366,7 @@ pub struct EmailApp {
     pub selected_account: Option<u32>,
     pub active_panel: Panel,
     /// The search box, which is the search the message list is filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub sort_order: SortOrder,
     /// The message being written, when one is.
     pub compose: Option<Compose>,
@@ -2459,7 +2459,7 @@ impl EmailApp {
             selected_message: None,
             selected_account: None,
             active_panel: Panel::MessageList,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             sort_order: SortOrder::DateDesc,
             compose: None,
             filter_rules: Vec::new(),
@@ -3240,7 +3240,7 @@ impl EmailApp {
 
     /// Keys while the search box has the keyboard: Escape empties it and
     /// leaves, Enter leaves keeping the search, and the rest is the box's
-    /// (`SearchBox::key`), at its caret, on the program's
+    /// (`LineBox::key`), at its caret, on the program's
     /// clipboard -- which types what a key typed, AltGr's among it, and not
     /// a command's letter. Answers whether the box did anything with it.
     fn handle_search_key(&mut self, key: &KeyEvent) -> EventResult {
@@ -4069,7 +4069,7 @@ impl EmailApp {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: search.x + 12.0,
                 y: search.y + 6.0,
                 width: search.w - 24.0,

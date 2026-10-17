@@ -41,7 +41,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 use textfmt::tsv;
-use textline::SearchBox;
+use textline::LineBox;
 use unsaved::{Choice, Question};
 // The shared civil-date arithmetic. This app carried its own copy of Howard
 // Hinnant's `days_from_civil`/`civil_from_days` pair -- a third and fourth
@@ -2302,7 +2302,7 @@ pub struct RssReaderApp {
     pub sort_order: SortOrder,
     pub filter_mode: FilterMode,
     /// The search box, which is the search the articles are filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     pub search_active: bool,
     /// A question waiting on a single keypress, if one is up.
     pub prompt: Option<Prompt>,
@@ -2398,7 +2398,7 @@ impl RssReaderApp {
             article_list_width: 340.0,
             sort_order: SortOrder::DateDesc,
             filter_mode: FilterMode::All,
-            search: SearchBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
+            search: LineBox::new(BOX_CAPACITY, BOX_TEXT_SIZE),
             search_active: false,
             prompt: None,
             text_entry: None,

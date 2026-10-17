@@ -35,7 +35,7 @@ use oswindow::app::{self, App, Response};
 use oswindow::{Event, RenderTree};
 use std::process::ExitCode;
 use std::time::Duration;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ── Layout ─────────────────────────────────────────────────────────────────
 //
@@ -583,7 +583,7 @@ struct RadioApp {
 
     // Search
     /// The search box, which is the query.
-    search: SearchBox,
+    search: LineBox,
     search_results: Vec<usize>,
     search_selected: usize,
     /// Whether the shortcut card is up.
@@ -652,7 +652,7 @@ impl RadioApp {
             record_duration_secs: 0,
             spectrum_bars,
             spectrum_rng: seeded_from_system(FALLBACK_SEED),
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_results: Vec::new(),
             search_selected: 0,
             show_help: false,
@@ -2023,7 +2023,7 @@ impl RadioApp {
         let mut typed = RenderTree::new();
         self.search.draw(
             &mut typed,
-            &SearchLook {
+            &LineLook {
                 x: tx,
                 y: ty,
                 width: tw,

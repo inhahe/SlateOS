@@ -1,4 +1,4 @@
-//! A program's search box: the search itself, edited at a caret.
+//! A program's one-line box: its text itself, edited at a caret.
 //!
 //! Twenty-four applications kept their search as a `String` with a
 //! `TextInput` beside it holding the same text, reloaded from the string
@@ -6,13 +6,15 @@
 //! whenever the two had come apart. Each also decided for itself which keys
 //! were the box's, and two of them -- calendar and reminders -- took F1 from
 //! the window while a search was being typed. Here the `TextInput` *is* the
-//! search, so there is nothing to keep in step, and [`SearchBox::key`]
-//! answers which keys are the box's: one it does not answer is the window's.
+//! text, so there is nothing to keep in step, and [`LineBox::key`] answers
+//! which keys are the box's: one it does not answer is the window's. Every
+//! search box is one; the other one-line boxes are moving onto it
+//! (`known-issues/E-twenty-eight-applications-keep-a-box-s-text-twice.md`).
 //!
 //! **What stays with the program** is what differs between them: where the
 //! box is, whether it has the keyboard, what Escape, Enter and Tab do there,
-//! and what follows a change to the search -- a list back to its top, a
-//! selection kept on what is still found.
+//! and what follows a change to the text -- a list back to its top, a
+//! selection kept on what a search still finds.
 
 use guitk::color::Color;
 use guitk::event::KeyEvent;
@@ -22,36 +24,36 @@ use guitk::text::TextCursor;
 use guitk::textedit;
 use guitk::textinput::{KeyEdit, TextInput};
 
-/// A search box's text, caret and selection, and the size it is drawn at.
+/// A one-line box's text, caret and selection, and the size it is drawn at.
 #[derive(Clone, Debug)]
-pub struct SearchBox {
+pub struct LineBox {
     input: TextInput,
     font_size: f32,
 }
 
-/// What one key did to a [`SearchBox`].
+/// What one key did to a [`LineBox`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SearchKey {
+pub struct LineKey {
     /// Whether the key was the box's: typing, the caret's keys, Backspace and
     /// Delete, Ctrl+A, C, X and V (`apply_key`). One it is not -- Enter,
     /// Escape, Tab, Up, Down, F1, any other command -- is the window's, for
     /// the program to act on as it would with the box closed.
     pub handled: bool,
-    /// Whether the search changed.
+    /// Whether the text changed.
     pub changed: bool,
     /// Whether the key put the selection on the clipboard (Ctrl+C, Ctrl+X):
-    /// something done that neither the search nor its caret shows.
+    /// something done that neither the text nor its caret shows.
     pub copied: bool,
 }
 
-/// Where and how a [`SearchBox`] is drawn.
+/// Where and how a [`LineBox`] is drawn.
 #[derive(Clone, Copy, Debug)]
-pub struct SearchLook<'a> {
+pub struct LineLook<'a> {
     /// The left edge of the box's text, inside its frame.
     pub x: f32,
     /// The top of the line the text sits on.
     pub y: f32,
-    /// How wide the text may be: a longer search scrolls under the caret
+    /// How wide the text may be: longer text scrolls under the caret
     /// while the box has the keyboard, and is cut with `…` while it does not.
     pub width: f32,
     /// The line's height: the caret's and the selection's.
@@ -59,10 +61,11 @@ pub struct SearchLook<'a> {
     /// Whether the box has the keyboard, which is what draws the caret and
     /// the selection.
     pub focused: bool,
-    /// What an empty box says, with the keyboard or without -- what it
-    /// searches, and, while it has not the keyboard, the key that reaches it.
+    /// What an empty box says, with the keyboard or without -- what it is
+    /// for (what a search searches), and, while it has not the keyboard, the
+    /// key that reaches it. Empty, it says nothing.
     pub placeholder: &'a str,
-    /// The search's colour, and the caret's.
+    /// The text's colour, and the caret's.
     pub color: Color,
     /// The placeholder's colour: a hint the user reads, so a readable one
     /// (`subtext0`), not the disabled grey.
@@ -76,7 +79,7 @@ pub struct SearchLook<'a> {
     pub caret_width: f32,
 }
 
-impl SearchBox {
+impl LineBox {
     /// An empty box holding at most `capacity` characters, its text drawn at
     /// `font_size` -- the size its caret moves and its presses are measured
     /// at.
@@ -88,13 +91,13 @@ impl SearchBox {
         }
     }
 
-    /// The search.
+    /// What is in the box.
     #[must_use]
     pub fn text(&self) -> &str {
         self.input.text()
     }
 
-    /// Whether nothing is being searched for.
+    /// Whether the box is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.input.text().is_empty()
@@ -107,9 +110,9 @@ impl SearchBox {
         &self.input
     }
 
-    /// Search for `text` instead, set from outside the box -- a link
-    /// followed, a filter chosen elsewhere: the caret goes to its end.
-    /// Answers whether the search changed; when it did not, the caret and
+    /// Put `text` in the box from outside it -- a link followed, a filter
+    /// chosen elsewhere, the name a rename starts from: the caret goes to its
+    /// end. Answers whether the text changed; when it did not, the caret and
     /// the selection stay where they were.
     pub fn set_text(&mut self, text: &str) -> bool {
         if self.input.text() == text {
@@ -119,18 +122,18 @@ impl SearchBox {
         true
     }
 
-    /// Empty the box. Answers whether there was a search to empty.
+    /// Empty the box. Answers whether there was text to empty.
     pub fn clear(&mut self) -> bool {
         self.set_text("")
     }
 
-    /// Select the whole search, for the next key to type over -- what
-    /// Ctrl+F does in a program whose box has the keyboard already.
+    /// Select the whole text, for the next key to type over -- what Ctrl+F
+    /// does in a program whose search box has the keyboard already.
     pub fn select_all(&mut self) {
         self.input.select_all();
     }
 
-    /// The caret after the search, nothing selected: where a box that takes
+    /// The caret after the text, nothing selected: where a box that takes
     /// the keyboard by a key or a tab, rather than by a press, puts it.
     pub fn caret_to_end(&mut self) {
         self.input.set_selection_anchor(None);
@@ -140,11 +143,11 @@ impl SearchBox {
 
     /// Apply `key` to the box -- on the program's clipboard, as its menu is
     /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
-    /// and whether the search changed.
-    pub fn key(&mut self, key: &KeyEvent) -> SearchKey {
+    /// and whether the text changed.
+    pub fn key(&mut self, key: &KeyEvent) -> LineKey {
         let before = self.input.text().to_owned();
         let edit = crate::apply_key_on_clipboard(&mut self.input, key, self.font_size);
-        SearchKey {
+        LineKey {
             handled: edit.handled,
             changed: self.input.text() != before,
             copied: edit.copied.is_some(),
@@ -181,7 +184,7 @@ impl SearchBox {
     }
 
     /// The menu's row `id`, chosen: done to the box as its key would be.
-    /// Answers whether the search changed.
+    /// Answers whether the text changed.
     pub fn menu_row(&mut self, id: MenuItemId) -> bool {
         self.input.edit_command(id) == KeyEdit::Changed
     }
@@ -189,11 +192,11 @@ impl SearchBox {
     /// Draw the box's text into `tree` as `look` says: an empty box says
     /// what it is for -- with its caret before that while it has the
     /// keyboard -- and draws no text of its own; a box with the keyboard
-    /// draws its search with its caret and selection, and one without it the
-    /// search cut to the width with `…`. The text sits on the same line
+    /// draws its text with its caret and selection, and one without it the
+    /// text cut to the width with `…`. The text sits on the same line
     /// either way, so it does not move when the box takes the keyboard. The
     /// frame round it is the caller's (`guitk::field::draw`).
-    pub fn draw(&self, tree: &mut RenderTree, look: &SearchLook<'_>) {
+    pub fn draw(&self, tree: &mut RenderTree, look: &LineLook<'_>) {
         if self.is_empty() {
             // The placeholder under the caret too: a box that has just taken
             // the keyboard still says what to type into it. A box with none
@@ -247,13 +250,7 @@ impl SearchBox {
 
 /// One line of `text` in `color` where `look` puts the box's text, cut to
 /// its width with `…`.
-fn push_line(
-    tree: &mut RenderTree,
-    look: &SearchLook<'_>,
-    text: &str,
-    color: Color,
-    font_size: f32,
-) {
+fn push_line(tree: &mut RenderTree, look: &LineLook<'_>, text: &str, color: Color, font_size: f32) {
     tree.push(RenderCommand::Text {
         x: look.x,
         y: look.y,
@@ -291,14 +288,14 @@ mod tests {
         }
     }
 
-    fn typed(search: &mut SearchBox, text: &str) {
+    fn typed(line: &mut LineBox, text: &str) {
         for ch in text.chars() {
-            let key = search.key(&press(Key::Unknown(0), &ch.to_string()));
+            let key = line.key(&press(Key::Unknown(0), &ch.to_string()));
             assert!(key.handled && key.changed, "{ch:?} was not typed");
         }
     }
 
-    const LOOK: SearchLook<'static> = SearchLook {
+    const LOOK: LineLook<'static> = LineLook {
         x: 10.0,
         y: 8.0,
         width: 200.0,
@@ -313,29 +310,29 @@ mod tests {
     };
 
     #[test]
-    fn typing_edits_at_the_caret_and_says_the_search_changed() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "libre");
+    fn typing_edits_at_the_caret_and_says_the_text_changed() {
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "libre");
         assert_eq!(
-            search.key(&press(Key::Home, "")),
-            SearchKey {
+            line.key(&press(Key::Home, "")),
+            LineKey {
                 handled: true,
                 changed: false,
                 copied: false,
             }
         );
         assert_eq!(
-            search.key(&press(Key::Delete, "")),
-            SearchKey {
+            line.key(&press(Key::Delete, "")),
+            LineKey {
                 handled: true,
                 changed: true,
                 copied: false,
             }
         );
-        assert_eq!(search.text(), "ibre");
-        typed(&mut search, "x");
+        assert_eq!(line.text(), "ibre");
+        typed(&mut line, "x");
         assert_eq!(
-            search.text(),
+            line.text(),
             "xibre",
             "typing went to the end, not the caret"
         );
@@ -343,24 +340,24 @@ mod tests {
 
     #[test]
     fn a_copy_or_a_cut_says_it_took_the_selection() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "tax");
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "tax");
         assert!(
-            !search.key(&ctrl(Key::C, "c")).copied,
+            !line.key(&ctrl(Key::C, "c")).copied,
             "a copy with nothing selected took something"
         );
-        search.select_all();
+        line.select_all();
         assert_eq!(
-            search.key(&ctrl(Key::C, "c")),
-            SearchKey {
+            line.key(&ctrl(Key::C, "c")),
+            LineKey {
                 handled: true,
                 changed: false,
                 copied: true,
             }
         );
         assert_eq!(
-            search.key(&ctrl(Key::X, "x")),
-            SearchKey {
+            line.key(&ctrl(Key::X, "x")),
+            LineKey {
                 handled: true,
                 changed: true,
                 copied: true,
@@ -371,8 +368,8 @@ mod tests {
 
     #[test]
     fn a_key_the_box_does_not_answer_is_the_windows() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "tax");
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "tax");
         for key in [
             press(Key::F1, ""),
             press(Key::Up, ""),
@@ -384,14 +381,14 @@ mod tests {
             ctrl(Key::S, "s"),
         ] {
             assert_eq!(
-                search.key(&key),
-                SearchKey::default(),
+                line.key(&key),
+                LineKey::default(),
                 "{:?} was taken by the box",
                 key.key
             );
         }
         assert_eq!(
-            search.text(),
+            line.text(),
             "tax",
             "a key the box does not answer changed it"
         );
@@ -399,117 +396,109 @@ mod tests {
 
     #[test]
     fn a_release_does_nothing() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "ab");
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "ab");
         let release = KeyEvent {
             pressed: false,
             ..press(Key::Backspace, "")
         };
-        assert_eq!(search.key(&release), SearchKey::default());
-        assert_eq!(search.text(), "ab");
+        assert_eq!(line.key(&release), LineKey::default());
+        assert_eq!(line.text(), "ab");
     }
 
     #[test]
     fn typing_stops_at_the_capacity() {
-        let mut search = SearchBox::new(3, 13.0);
-        typed(&mut search, "abc");
+        let mut line = LineBox::new(3, 13.0);
+        typed(&mut line, "abc");
         assert_eq!(
-            search.key(&press(Key::Unknown(0), "d")),
-            SearchKey {
+            line.key(&press(Key::Unknown(0), "d")),
+            LineKey {
                 handled: true,
                 changed: false,
                 copied: false,
             }
         );
-        assert_eq!(search.text(), "abc");
+        assert_eq!(line.text(), "abc");
     }
 
     #[test]
-    fn a_search_set_from_outside_puts_the_caret_at_its_end() {
-        let mut search = SearchBox::new(64, 13.0);
-        assert!(search.set_text("ubuntu"));
-        typed(&mut search, "x");
-        assert_eq!(search.text(), "ubuntux");
+    fn a_text_set_from_outside_puts_the_caret_at_its_end() {
+        let mut line = LineBox::new(64, 13.0);
+        assert!(line.set_text("ubuntu"));
+        typed(&mut line, "x");
+        assert_eq!(line.text(), "ubuntux");
     }
 
     #[test]
-    fn setting_the_same_search_keeps_the_caret() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "abc");
-        search.key(&press(Key::Home, ""));
-        assert!(
-            !search.set_text("abc"),
-            "the same search counted as a change"
-        );
-        typed(&mut search, "x");
-        assert_eq!(
-            search.text(),
-            "xabc",
-            "setting the same search moved the caret"
-        );
+    fn setting_the_same_text_keeps_the_caret() {
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "abc");
+        line.key(&press(Key::Home, ""));
+        assert!(!line.set_text("abc"), "the same text counted as a change");
+        typed(&mut line, "x");
+        assert_eq!(line.text(), "xabc", "setting the same text moved the caret");
     }
 
     #[test]
-    fn clear_says_whether_there_was_a_search() {
-        let mut search = SearchBox::new(64, 13.0);
-        assert!(!search.clear());
-        typed(&mut search, "a");
-        assert!(search.clear());
-        assert!(search.is_empty());
+    fn clear_says_whether_there_was_text() {
+        let mut line = LineBox::new(64, 13.0);
+        assert!(!line.clear());
+        typed(&mut line, "a");
+        assert!(line.clear());
+        assert!(line.is_empty());
     }
 
     #[test]
     fn a_press_puts_the_caret_where_it_landed() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "ab");
-        search.key(&ctrl(Key::A, "a"));
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "ab");
+        line.key(&ctrl(Key::A, "a"));
         // Left of the first letter: the caret before it, the selection gone.
-        search.press(-5.0, 200.0, true);
+        line.press(-5.0, 200.0, true);
         assert!(
-            search.input().selection_anchor().is_none(),
+            line.input().selection_anchor().is_none(),
             "the selection stayed"
         );
-        typed(&mut search, "x");
-        assert_eq!(search.text(), "xab");
+        typed(&mut line, "x");
+        assert_eq!(line.text(), "xab");
         // Past the end, in a box without the keyboard: the caret at the end.
-        search.press(500.0, 200.0, false);
-        typed(&mut search, "y");
-        assert_eq!(search.text(), "xaby");
+        line.press(500.0, 200.0, false);
+        typed(&mut line, "y");
+        assert_eq!(line.text(), "xaby");
     }
 
-    /// A search too long for its box: with the keyboard it is drawn scrolled
+    /// Text too long for its box: with the keyboard it is drawn scrolled
     /// under the caret at its end, without it from its start, and a press is
     /// measured against what was drawn.
     #[test]
     fn a_press_is_measured_against_the_text_as_it_was_drawn() {
         let long = "a".repeat(60);
         let width = 60.0;
-        let mut search = SearchBox::new(64, 13.0);
-        assert!(search.set_text(&long));
+        let mut line = LineBox::new(64, 13.0);
+        assert!(line.set_text(&long));
         // Without the keyboard: the start is on screen, so a press at the
         // left edge is before the first letter.
-        search.press(0.0, width, false);
+        line.press(0.0, width, false);
         assert_eq!(
-            search.input().cursor().byte(),
+            line.input().cursor().byte(),
             0,
             "measured as though scrolled"
         );
         // With it, the caret at the end: the end is on screen, so a press at
         // the right edge is near the end, not a box's width from the start.
-        search.set_text("");
-        search.set_text(&long);
-        search.press(width - 1.0, width, true);
+        line.set_text("");
+        line.set_text(&long);
+        line.press(width - 1.0, width, true);
         assert!(
-            search.input().cursor().byte() > 50,
+            line.input().cursor().byte() > 50,
             "measured from the start: caret at {}",
-            search.input().cursor().byte()
+            line.input().cursor().byte()
         );
     }
 
     /// The menu's rows that would do something, by label.
-    fn lit(search: &SearchBox) -> Vec<String> {
-        search
-            .edit_menu()
+    fn lit(line: &LineBox) -> Vec<String> {
+        line.edit_menu()
             .items()
             .iter()
             .filter_map(|row| match row {
@@ -524,30 +513,30 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_edits_the_search() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "abc");
-        assert!(lit(&search).contains(&String::from("Select all")));
+    fn the_menu_edits_the_text() {
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "abc");
+        assert!(lit(&line).contains(&String::from("Select all")));
         assert!(
-            !search.menu_row(EditCommand::SelectAll.id()),
-            "selecting changed the search"
+            !line.menu_row(EditCommand::SelectAll.id()),
+            "selecting changed the text"
         );
-        assert!(lit(&search).contains(&String::from("Delete")));
+        assert!(lit(&line).contains(&String::from("Delete")));
         assert!(
-            search.menu_row(EditCommand::Delete.id()),
-            "Delete did not say it changed the search"
+            line.menu_row(EditCommand::Delete.id()),
+            "Delete did not say it changed the text"
         );
-        assert!(search.is_empty());
+        assert!(line.is_empty());
     }
 
     #[test]
     fn a_box_with_the_keyboard_draws_its_caret_on_the_line() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "tax");
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "tax");
         let mut tree = RenderTree::new();
-        search.draw(
+        line.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 focused: true,
                 ..LOOK
             },
@@ -565,11 +554,11 @@ mod tests {
 
     #[test]
     fn an_empty_box_with_the_keyboard_says_what_it_is_for_under_its_caret() {
-        let search = SearchBox::new(64, 13.0);
+        let line = LineBox::new(64, 13.0);
         let mut tree = RenderTree::new();
-        search.draw(
+        line.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 focused: true,
                 ..LOOK
             },
@@ -597,9 +586,9 @@ mod tests {
         );
         // With nothing to say, it draws no text at all.
         let mut tree = RenderTree::new();
-        search.draw(
+        line.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 placeholder: "",
                 focused: true,
                 ..LOOK
@@ -615,38 +604,38 @@ mod tests {
     }
 
     #[test]
-    fn caret_to_end_types_after_the_search_and_over_no_selection() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "dog");
-        search.key(&press(Key::Home, ""));
-        search.caret_to_end();
-        typed(&mut search, "s");
-        assert_eq!(search.text(), "dogs", "the caret stayed at the start");
-        search.select_all();
-        search.caret_to_end();
+    fn caret_to_end_types_after_the_text_and_over_no_selection() {
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "dog");
+        line.key(&press(Key::Home, ""));
+        line.caret_to_end();
+        typed(&mut line, "s");
+        assert_eq!(line.text(), "dogs", "the caret stayed at the start");
+        line.select_all();
+        line.caret_to_end();
         assert!(
-            search.input().selection_anchor().is_none(),
+            line.input().selection_anchor().is_none(),
             "the selection stayed"
         );
-        typed(&mut search, "!");
-        assert_eq!(search.text(), "dogs!");
+        typed(&mut line, "!");
+        assert_eq!(line.text(), "dogs!");
     }
 
     #[test]
-    fn select_all_types_over_the_search() {
-        let mut search = SearchBox::new(64, 13.0);
-        typed(&mut search, "DOLLAR");
-        search.select_all();
-        typed(&mut search, "E");
-        assert_eq!(search.text(), "E");
+    fn select_all_types_over_the_text() {
+        let mut line = LineBox::new(64, 13.0);
+        typed(&mut line, "DOLLAR");
+        line.select_all();
+        typed(&mut line, "E");
+        assert_eq!(line.text(), "E");
     }
 
     #[test]
-    fn a_box_without_the_keyboard_draws_the_search_or_its_placeholder() {
-        let mut search = SearchBox::new(64, 13.0);
-        let drawn = |search: &SearchBox| {
+    fn a_box_without_the_keyboard_draws_its_text_or_its_placeholder() {
+        let mut line = LineBox::new(64, 13.0);
+        let drawn = |line: &LineBox| {
             let mut tree = RenderTree::new();
-            search.draw(&mut tree, &LOOK);
+            line.draw(&mut tree, &LOOK);
             assert!(
                 !tree
                     .commands
@@ -668,7 +657,7 @@ mod tests {
                         assert_eq!(max_width, Some(LOOK.width), "not held to the box");
                         assert!(
                             matches!(overflow, TextOverflow::Ellipsis),
-                            "a long search is not cut with an ellipsis"
+                            "long text is not cut with an ellipsis"
                         );
                         Some((text, color, y))
                     }
@@ -677,10 +666,10 @@ mod tests {
                 .expect("no text drawn")
         };
         assert_eq!(
-            drawn(&search),
+            drawn(&line),
             (LOOK.placeholder.to_string(), LOOK.placeholder_color, LOOK.y)
         );
-        typed(&mut search, "tax");
-        assert_eq!(drawn(&search), (String::from("tax"), LOOK.color, LOOK.y));
+        typed(&mut line, "tax");
+        assert_eq!(drawn(&line), (String::from("tax"), LOOK.color, LOOK.y));
     }
 }

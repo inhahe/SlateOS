@@ -56,7 +56,7 @@ use pathtext::ShowPath;
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 
@@ -1184,7 +1184,7 @@ struct FlashcardsApp {
     /// Active study session.
     study_session: Option<StudySession>,
     /// The search box, which is the search the deck's cards are filtered by.
-    search: SearchBox,
+    search: LineBox,
     /// Whether the keyboard is in the search box.
     ///
     /// Needed because every letter in the deck view is a command -- `s`
@@ -1346,7 +1346,7 @@ impl FlashcardsApp {
             selected_deck: 0,
             current_day: today(),
             study_session: None,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_active: false,
             tag_filter: None,
             selected_card: 0,
@@ -3506,7 +3506,7 @@ impl FlashcardsApp {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: search.x + 8.0,
                 y: search_y + 6.0,
                 width: search.w - 16.0,

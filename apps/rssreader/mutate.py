@@ -422,7 +422,7 @@ MUTATIONS += [
 
 # The search box and the prompt's box are the toolkit's field (2026-10-04;
 # lane C, c-e-a-theme-can-shape-the-controls): the search box textline's
-# `SearchBox`, the prompt's box edited by textline's editor through
+# `LineBox`, the prompt's box edited by textline's editor through
 # `edit_box`.
 BOXES = "the_search_and_the_prompt_are_the_toolkits_field"
 CHORDS = "a_chord_is_neither_a_reader_key_nor_typing"

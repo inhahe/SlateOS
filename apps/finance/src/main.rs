@@ -34,7 +34,7 @@ use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use textfmt::tsv;
-use textline::{SearchBox, SearchLook};
+use textline::{LineBox, LineLook};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 
@@ -592,7 +592,7 @@ struct FinanceApp {
     /// which is the honest state for an empty or fully-filtered-out list.
     selected_id: Option<u64>,
     /// The search box, which is the search the list is filtered by.
-    search: SearchBox,
+    search: LineBox,
     search_active: bool,
     category_filter: Option<Category>,
     status_msg: String,
@@ -717,7 +717,7 @@ impl FinanceApp {
             current_date: today,
             view_month: SimpleDate::new(today.year, today.month, 1),
             selected_id: None,
-            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_active: false,
             category_filter: None,
             status_msg: String::from("Personal Finance"),
@@ -3303,7 +3303,7 @@ impl FinanceApp {
         let mut tree = RenderTree::new();
         self.search.draw(
             &mut tree,
-            &SearchLook {
+            &LineLook {
                 x: rect.x + 12.0,
                 y: rect.y + 7.0,
                 width: rect.w - 110.0,

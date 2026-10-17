@@ -37,7 +37,7 @@ use guitk::text::TextCursor;
 use guitk::textedit;
 use guitk::textinput::{KeyEdit, TextInput};
 use oswindow::app::{self, App, Response};
-use textline::SearchBox;
+use textline::LineBox;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -2005,7 +2005,7 @@ pub struct SystemRestoreUI {
     pub compare_id: Option<u64>,
     /// The search box, which is the search the restore points are
     /// filtered by.
-    pub search: SearchBox,
+    pub search: LineBox,
     /// Type filter (None = show all).
     pub type_filter: Option<SnapshotType>,
     /// Current dialog.
@@ -2123,7 +2123,7 @@ impl SystemRestoreUI {
             view_mode: ViewMode::Tree,
             selected_id,
             compare_id: None,
-            search: SearchBox::new(SEARCH_CAPACITY, FONT_SIZE),
+            search: LineBox::new(SEARCH_CAPACITY, FONT_SIZE),
             type_filter: None,
             dialog: DialogKind::None,
             progress: None,
@@ -3132,7 +3132,7 @@ impl SystemRestoreUI {
     /// A key for the search box -- which has the keyboard whenever the list
     /// is on screen, so not in the Schedule view, which lists no restore
     /// point and takes Space, Left and Right for its own controls -- at its
-    /// caret, on the program's clipboard (`SearchBox::key`): the list, and
+    /// caret, on the program's clipboard (`LineBox::key`): the list, and
     /// the selection with it, follows a change to the search. Answers
     /// whether the box did anything with the key.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {

@@ -120,6 +120,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 use textarea::TextArea;
 use textfmt::tsv;
+use textline::{SearchBox, SearchLook};
 use unsaved::{Choice, Question};
 
 // ============================================================================
@@ -1988,18 +1989,14 @@ pub struct App {
     // View state
     sidebar_view: SidebarView,
     sort_order: SortOrder,
-    search_query: String,
+    /// The search box, which is the query the list is filtered by.
+    search: SearchBox,
     search_scope: SearchScope,
     /// Whether what is typed goes into the search box. A letter means "find
     /// this" while it is set and "do this" while it is not, which is the only
     /// thing that lets one keyboard serve both a text field and a set of
     /// shortcuts.
     search_focus: bool,
-    /// The search box's caret and selection, laid over `search_query`,
-    /// which stays the truth: reloaded whenever the query changes under it.
-    search_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
-    search_clipboard: String,
     /// How wide the mark is round the box that has the keyboard: the user's
     /// focus width (`App::appearance_changed`), the toolkit's until it is
     /// known.
@@ -2216,11 +2213,9 @@ impl App {
             selected_language: None,
             sidebar_view: SidebarView::Folders,
             sort_order: SortOrder::DateDesc,
-            search_query: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             search_scope: SearchScope::All,
             search_focus: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             code_scroll: 0,
             list_scroll: 0,
@@ -2920,7 +2915,7 @@ impl App {
     }
 
     fn filtered_snippets(&self) -> Vec<&Snippet> {
-        let mut results = search_snippets(&self.snippets, &self.search_query, self.search_scope);
+        let mut results = search_snippets(&self.snippets, self.search.text(), self.search_scope);
 
         // Apply sidebar filter. Every view narrows the list — the Tags and
         // Languages arms used to fall into a `_ => {}` that did nothing, so
@@ -3248,7 +3243,7 @@ impl App {
             Target::CloseStats => self.show_stats = false,
             Target::Search => self.focus_search(),
             Target::ClearSearch => {
-                self.search_query.clear();
+                self.search.clear();
                 self.list_scroll = 0;
             }
             Target::Scope => {
@@ -3331,7 +3326,7 @@ impl App {
     /// same place. The language follows from the name, which is what
     /// [`Language::from_extension`] was written for and never called for.
     fn new_snippet(&mut self) -> EventResult {
-        let title = self.search_query.trim();
+        let title = self.search.text().trim();
         let title = if title.is_empty() { "Untitled" } else { title }.to_string();
         let language = guess_language(&title, "");
         let Some(id) = self.create_snippet(&title, "", language) else {
@@ -3349,7 +3344,7 @@ impl App {
     /// [`App::create_folder`] and [`MAX_FOLDERS`] had been written and left
     /// with nothing that could call them.
     fn new_folder(&mut self) -> EventResult {
-        let name = self.search_query.trim();
+        let name = self.search.text().trim();
         let name = if name.is_empty() { "Folder" } else { name }.to_string();
         if self.create_folder(&name).is_none() {
             return EventResult::Ignored;
@@ -3468,7 +3463,7 @@ impl App {
             Key::E => self.press(Target::Export),
             Key::O => self.press(Target::Sort),
             Key::Escape => {
-                if self.search_query.is_empty() {
+                if self.search.is_empty() {
                     return EventResult::Ignored;
                 }
                 self.press(Target::ClearSearch)
@@ -3502,26 +3497,12 @@ impl App {
             // delete at it, Ctrl+A, C, X and V, and typing. It typed onto the
             // end, and Backspace from the end was its only edit.
             _ => {
-                if self.search_editor.text() != self.search_query {
-                    self.search_editor.set_text(&self.search_query);
-                }
                 let before = (
-                    self.search_editor.cursor(),
-                    self.search_editor.selection_anchor(),
+                    self.search.input().cursor(),
+                    self.search.input().selection_anchor(),
                 );
-                let edit = textline::apply_key(
-                    &mut self.search_editor,
-                    ev,
-                    &self.search_clipboard,
-                    SEARCH_TEXT_SIZE,
-                );
-                let copied = edit.copied.is_some();
-                if let Some(text) = edit.copied {
-                    self.search_clipboard = text;
-                }
-                let typed = self.search_editor.text() != self.search_query;
-                if typed {
-                    self.search_query = self.search_editor.text().to_owned();
+                let edit = self.search.key(ev);
+                if edit.changed {
                     self.list_scroll = 0;
                 }
                 // Something done, or nothing to show for it: a Backspace on
@@ -3529,10 +3510,10 @@ impl App {
                 // a frame that would be the same.
                 let moved = before
                     != (
-                        self.search_editor.cursor(),
-                        self.search_editor.selection_anchor(),
+                        self.search.input().cursor(),
+                        self.search.input().selection_anchor(),
                     );
-                if typed || moved || copied {
+                if edit.changed || moved || edit.copied {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -3544,20 +3525,7 @@ impl App {
     /// Give the search box the keyboard, its caret after the query.
     fn focus_search(&mut self) {
         self.search_focus = true;
-        self.search_editor.set_text(&self.search_query);
-    }
-
-    /// Where the search's caret is drawn: the editor's while the box has the
-    /// keyboard (the end, if the query changed under the editor), the start
-    /// otherwise. One answer for the drawing and for a press.
-    fn search_cursor(&self) -> text::TextCursor {
-        if !self.search_focus {
-            text::TextCursor::default()
-        } else if self.search_editor.text() == self.search_query {
-            self.search_editor.cursor()
-        } else {
-            text::TextCursor::from(self.search_query.len())
-        }
+        self.search.caret_to_end();
     }
 
     /// The search box's parts, inside the box `outer`: where the query is
@@ -3565,7 +3533,7 @@ impl App {
     /// the scope's label is. One answer for the drawing and for a press.
     fn search_parts(&self, outer: Rect, l: &Layout) -> (Rect, Rect, Rect) {
         let mut inner = inset_x(outer, outer.h / 2.0);
-        let cross = if self.search_query.is_empty() {
+        let cross = if self.search.is_empty() {
             Rect::EMPTY
         } else {
             take_right(
@@ -3588,21 +3556,9 @@ impl App {
     fn press_search(&mut self, outer: Rect, x: f32) {
         let l = self.layout();
         let (inner, _, _) = self.search_parts(outer, &l);
-        let drawn = self.search_cursor();
+        let had_the_keyboard = self.search_focus;
         self.search_focus = true;
-        if self.search_editor.text() != self.search_query {
-            self.search_editor.set_text(&self.search_query);
-        }
-        let cursor = textedit::cursor_at_click(
-            &self.search_query,
-            drawn,
-            inner.w,
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
-            x - inner.x,
-        );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
+        self.search.press(x - inner.x, inner.w, had_the_keyboard);
     }
 
     /// How many rows a page key moves: one panel's worth, less a row so the
@@ -3768,7 +3724,7 @@ impl App {
                 hovered: false,
                 focused: self.search_focus,
                 disabled: false,
-                invalid: !self.search_query.is_empty() && self.filtered_snippets().is_empty(),
+                invalid: !self.search.is_empty() && self.filtered_snippets().is_empty(),
             },
             self.focus_ring_width,
         );
@@ -3777,7 +3733,7 @@ impl App {
         f.hit(Target::Search, outer);
 
         let (inner, cross, scope_rect) = self.search_parts(outer, l);
-        if !self.search_query.is_empty() {
+        if !self.search.is_empty() {
             label_centred(
                 f,
                 &Label {
@@ -3810,53 +3766,22 @@ impl App {
         let line = text::line_height(SEARCH_TEXT_SIZE, FontWeightHint::Regular);
         let y = inner.y + (inner.h - line) / 2.0;
         let mut tree = RenderTree::new();
-        if self.search_query.is_empty() {
-            label_left(
-                f,
-                &Label {
-                    text: SEARCH_PLACEHOLDER,
-                    size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.subtext0,
-                },
-                inner,
-            );
-            if focused {
-                textedit::push_caret(
-                    &mut tree,
-                    inner.x,
-                    y,
-                    line,
-                    self.palette.text,
-                    textedit::CARET_WIDTH,
-                );
-            }
-        } else {
-            let editing = self.search_editor.text() == self.search_query;
-            textedit::draw(
-                &mut tree,
-                &textedit::SingleLine {
-                    text: &self.search_query,
-                    cursor: self.search_cursor(),
-                    selection_anchor: if focused && editing {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused,
-                    x: inner.x,
-                    y,
-                    width: inner.w,
-                    line_height: line,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+        self.search.draw(
+            &mut tree,
+            &SearchLook {
+                x: inner.x,
+                y,
+                width: inner.w,
+                line_height: line,
+                focused,
+                placeholder: SEARCH_PLACEHOLDER,
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
         f.extend(tree.commands);
     }
 
@@ -5891,7 +5816,7 @@ mod tests {
                 selected_title(a),
                 a.snippets.iter().map(|s| s.favorite).collect::<Vec<_>>(),
                 (a.pending_delete, a.editing.is_some()),
-                (a.search_focus, a.show_stats, a.search_query.clone()),
+                (a.search_focus, a.show_stats, a.search.text().to_owned()),
                 (a.sort_order, a.sidebar_view),
             )
         };
@@ -5943,12 +5868,13 @@ mod tests {
         key(&mut a, &chord(Key::Enter, "", Modifiers::alt()));
         key(&mut a, &chord(Key::Escape, "", Modifiers::super_key()));
         assert_eq!(
-            a.search_query, "ę",
+            a.search.text(),
+            "ę",
             "the search typed a command's letter, or lost AltGr's"
         );
         assert!(a.search_focus, "a chorded Enter or Escape left the search");
         key(&mut a, &press(Key::Escape));
-        a.search_query.clear();
+        a.search.clear();
 
         // The editor: its own keys plain, AltGr typing.
         key(&mut a, &press(Key::N));
@@ -6655,7 +6581,7 @@ mod tests {
     #[test]
     fn a_new_snippet_takes_its_name_from_the_search_box() {
         let mut a = app_with(&["one"]);
-        a.search_query = "helper.py".into();
+        a.search.set_text("helper.py");
         click(&mut a, Target::New);
         assert_eq!(selected_title(&a).as_deref(), Some("helper.py"));
     }
@@ -6663,7 +6589,7 @@ mod tests {
     #[test]
     fn a_new_snippet_takes_its_language_from_its_name() {
         let mut a = app_with(&["one"]);
-        a.search_query = "helper.py".into();
+        a.search.set_text("helper.py");
         click(&mut a, Target::New);
         assert_eq!(a.selected_snippet().unwrap().language, Language::Python);
     }
@@ -7106,7 +7032,7 @@ mod tests {
         let parent = a.folders[0].id;
         a.selected_folder_id = Some(parent);
         let before = a.folders.len();
-        a.search_query = "Scratch".into();
+        a.search.set_text("Scratch");
         assert_eq!(click(&mut a, Target::NewFolder), EventResult::Consumed);
         assert_eq!(a.folders.len(), before + 1);
         let made = a.folders.last().unwrap();
@@ -7117,7 +7043,7 @@ mod tests {
     #[test]
     fn a_new_folder_with_nothing_typed_still_gets_a_name() {
         let mut a = app();
-        a.search_query.clear();
+        a.search.clear();
         click(&mut a, Target::NewFolder);
         assert_eq!(a.folders.last().unwrap().name, "Folder");
     }
@@ -7189,16 +7115,16 @@ mod tests {
     #[test]
     fn clicking_the_cross_empties_the_search_box() {
         let mut a = app();
-        a.search_query = "abc".into();
+        a.search.set_text("abc");
         assert!(rect_of(&a, Target::ClearSearch).is_some());
         click(&mut a, Target::ClearSearch);
-        assert!(a.search_query.is_empty());
+        assert!(a.search.is_empty());
     }
 
     #[test]
     fn there_is_no_cross_when_there_is_nothing_to_clear() {
         let mut a = app();
-        a.search_query.clear();
+        a.search.clear();
         assert!(rect_of(&a, Target::ClearSearch).is_none());
     }
 
@@ -7208,9 +7134,9 @@ mod tests {
     #[test]
     fn with_nothing_to_clear_no_room_is_kept_for_the_cross() {
         let mut a = app();
-        a.search_query.clear();
+        a.search.clear();
         let empty = rect_of(&a, Target::Scope).expect("the scope button is drawn");
-        a.search_query = "abc".into();
+        a.search.set_text("abc");
         let typed = rect_of(&a, Target::Scope).expect("the scope button is drawn");
         let cross = rect_of(&a, Target::ClearSearch).expect("the cross is drawn");
         assert!(
@@ -7567,7 +7493,7 @@ mod tests {
     fn the_key_that_opens_the_search_box_is_not_also_typed_into_it() {
         let mut a = app();
         key(&mut a, &press(Key::Slash));
-        assert!(a.search_query.is_empty(), "got {:?}", a.search_query);
+        assert!(a.search.is_empty(), "got {:?}", a.search.text());
     }
 
     #[test]
@@ -7589,7 +7515,7 @@ mod tests {
             EventResult::Ignored,
             "a keystroke that types nothing was claimed anyway"
         );
-        assert_eq!(a.search_query, "al", "a control character reached the box");
+        assert_eq!(a.search.text(), "al", "a control character reached the box");
         assert_eq!(a.list_scroll, 3, "the list was scrolled back for nothing");
 
         // The same key with a real character on it does reach the box.
@@ -7597,7 +7523,8 @@ mod tests {
         letter.text = "p\u{7}".into();
         assert_eq!(key(&mut a, &letter), EventResult::Consumed);
         assert_eq!(
-            a.search_query, "alp",
+            a.search.text(),
+            "alp",
             "the bell character was taken along with the letter"
         );
     }
@@ -7607,7 +7534,7 @@ mod tests {
         let mut a = app_with(&["alpha", "beta"]);
         click(&mut a, Target::Search);
         type_str(&mut a, "alp");
-        assert_eq!(a.search_query, "alp");
+        assert_eq!(a.search.text(), "alp");
         assert_eq!(titles(&a), vec!["alpha".to_string()]);
     }
 
@@ -7622,7 +7549,7 @@ mod tests {
         ev.text = "n".to_string();
         key(&mut a, &ev);
         assert_eq!(a.snippets.len(), 2, "N should have made a snippet");
-        assert!(a.search_query.is_empty());
+        assert!(a.search.is_empty());
     }
 
     #[test]
@@ -7631,7 +7558,7 @@ mod tests {
         a.search_focus = true;
         type_str(&mut a, "abc");
         key(&mut a, &press(Key::Backspace));
-        assert_eq!(a.search_query, "ab");
+        assert_eq!(a.search.text(), "ab");
     }
 
     /// Make the theme's keyboard mark a ring and the user's focus width
@@ -7733,16 +7660,18 @@ mod tests {
         key(&mut a, &press(Key::Home));
         key(&mut a, &press(Key::Delete));
         assert_eq!(
-            a.search_query, "rem",
+            a.search.text(),
+            "rem",
             "Home and Delete did not edit the start"
         );
         key(&mut a, &ctrl(Key::A));
         key(&mut a, &ctrl(Key::X));
-        assert_eq!(a.search_query, "", "Ctrl+A and Ctrl+X did not cut");
+        assert_eq!(a.search.text(), "", "Ctrl+A and Ctrl+X did not cut");
         key(&mut a, &ctrl(Key::V));
         key(&mut a, &ctrl(Key::V));
         assert_eq!(
-            a.search_query, "remrem",
+            a.search.text(),
+            "remrem",
             "Ctrl+V did not paste what was cut"
         );
 
@@ -7772,7 +7701,8 @@ mod tests {
         a.click_at(inner.x + 1.0, inner.y + inner.h / 2.0, MouseButton::Left, W);
         type_str(&mut a, "L");
         assert_eq!(
-            a.search_query, "Lremrem",
+            a.search.text(),
+            "Lremrem",
             "the caret did not go where the press was"
         );
 
@@ -7791,7 +7721,7 @@ mod tests {
         );
 
         // The arrows up and down still walk the results while typing.
-        a.search_query.clear();
+        a.search.clear();
         let before = a.selected_snippet_id;
         key(&mut a, &press(Key::Down));
         assert_ne!(
@@ -7814,7 +7744,7 @@ mod tests {
         key(&mut a, &press(Key::Escape));
         key(&mut a, &ctrl(Key::F));
         type_str(&mut a, "x");
-        assert_eq!(a.search_query, "abx", "Ctrl+F left the caret where it was");
+        assert_eq!(a.search.text(), "abx", "Ctrl+F left the caret where it was");
     }
 
     /// **The editor's line boxes are the toolkit's field**: the one the keys
@@ -7868,7 +7798,7 @@ mod tests {
     fn backspace_on_an_empty_query_is_ignored_rather_than_pretending() {
         let mut a = app();
         a.search_focus = true;
-        a.search_query.clear();
+        a.search.clear();
         assert_eq!(key(&mut a, &press(Key::Backspace)), EventResult::Ignored);
     }
 
@@ -7880,7 +7810,7 @@ mod tests {
         a.search_focus = true;
         type_str(&mut a, "aé");
         key(&mut a, &press(Key::Backspace));
-        assert_eq!(a.search_query, "a");
+        assert_eq!(a.search.text(), "a");
     }
 
     #[test]
@@ -7908,16 +7838,16 @@ mod tests {
     fn escape_outside_the_search_box_clears_a_query() {
         let mut a = app();
         a.search_focus = false;
-        a.search_query = "abc".into();
+        a.search.set_text("abc");
         key(&mut a, &press(Key::Escape));
-        assert!(a.search_query.is_empty());
+        assert!(a.search.is_empty());
     }
 
     #[test]
     fn escape_with_nothing_to_clear_is_ignored() {
         let mut a = app();
         a.search_focus = false;
-        a.search_query.clear();
+        a.search.clear();
         assert_eq!(key(&mut a, &press(Key::Escape)), EventResult::Ignored);
     }
 
@@ -8876,7 +8806,7 @@ mod tests {
                 !library_path().unwrap().exists(),
                 "a first run wrote a library nobody had touched"
             );
-            a.search_query = String::from("hello.py");
+            a.search.set_text("hello.py");
             key(&mut a, &press(Key::N));
             assert!(
                 a.editing.is_some(),

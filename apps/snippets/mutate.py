@@ -451,13 +451,13 @@ MUTATIONS = [
     # own: room kept for a cross that is not there.
     (
         "room is kept for the cross when the search box is empty",
-        "        let cross = if self.search_query.is_empty() {",
+        "        let cross = if self.search.is_empty() {",
         "        let cross = if false {",
         ["with_nothing_to_clear_no_room_is_kept_for_the_cross"],
     ),
     (
         "the cross does not clear the box",
-        "            Target::ClearSearch => {\n                self.search_query.clear();",
+        "            Target::ClearSearch => {\n                self.search.clear();",
         "            Target::ClearSearch => {\n                self.list_scroll = 0;",
         ["clicking_the_cross_empties_the_search_box"],
     ),
@@ -654,18 +654,13 @@ MUTATIONS = [
     # get wrong is going round the editor, which is what these two do.
     (
         "the box takes whatever text arrives, control characters and all",
-        "                if self.search_editor.text() != self.search_query {\n"
-        "                    self.search_editor.set_text(&self.search_query);\n"
-        "                }\n"
-        "                let before = (\n",
+        "                let before = (\n                    self.search.input().cursor(),\n",
         "                if !ev.text.is_empty() {\n"
-        "                    self.search_query.push_str(&ev.text);\n"
+        "                    let typed = format!(\"{}{}\", self.search.text(), ev.text);\n"
+        "                    self.search.set_text(&typed);\n"
         "                    return EventResult::Consumed;\n"
         "                }\n"
-        "                if self.search_editor.text() != self.search_query {\n"
-        "                    self.search_editor.set_text(&self.search_query);\n"
-        "                }\n"
-        "                let before = (\n",
+        "                let before = (\n                    self.search.input().cursor(),\n",
         # Not `the_key_that_opens_the_search_box_is_not_also_typed_into_it`:
         # that one presses `/` with the box shut, so nothing is appended by
         # either spelling.  The two differ only on a keystroke whose text is
@@ -674,7 +669,7 @@ MUTATIONS = [
     ),
     (
         "a key that does nothing to the box says it did",
-        "                if typed || moved || copied {\n",
+        "                if edit.changed || moved || edit.copied {\n",
         "                if true {\n",
         ["backspace_on_an_empty_query_is_ignored_rather_than_pretending"],
     ),
@@ -694,15 +689,14 @@ MUTATIONS = [
     ),
     (
         "escape with an empty query is consumed anyway",
-        "                if self.search_query.is_empty() {\n                    return EventResult::Ignored;\n                }\n                self.press(Target::ClearSearch)",
+        "                if self.search.is_empty() {\n                    return EventResult::Ignored;\n                }\n                self.press(Target::ClearSearch)",
         "                self.press(Target::ClearSearch)",
         ["escape_with_nothing_to_clear_is_ignored"],
     ),
     (
         "typing leaves the list where the old query had scrolled it",
-        "                    self.search_query = self.search_editor.text().to_owned();\n"
-        "                    self.list_scroll = 0;\n",
-        "                    self.search_query = self.search_editor.text().to_owned();\n",
+        "                if edit.changed {\n                    self.list_scroll = 0;\n                }\n",
+        "",
         ["a_narrowed_query_puts_the_list_back_at_the_top"],
     ),
     # -- The wheel -----------------------------------------------------
@@ -1179,12 +1173,11 @@ MUTATIONS = [
     # editor the key as it came -- chord and all.
     (
         "the search's editor is given the key without its chord",
-        '                    &mut self.search_editor,\n                    ev,\n',
-        '                    &mut self.search_editor,\n'
-        '                    &KeyEvent {\n'
-        '                        modifiers: guitk::event::Modifiers::NONE,\n'
-        '                        ..ev.clone()\n'
-        '                    },\n',
+        '                let edit = self.search.key(ev);\n',
+        '                let edit = self.search.key(&KeyEvent {\n'
+        '                    modifiers: guitk::event::Modifiers::NONE,\n'
+        '                    ..ev.clone()\n'
+        '                });\n',
         ['a_chord_is_neither_a_library_key_nor_typing'],
     ),
 ]
@@ -1204,14 +1197,14 @@ MUTATIONS += [
     ),
     (
         "a query that finds nothing is not red",
-        "                invalid: !self.search_query.is_empty() && self.filtered_snippets().is_empty(),\n",
+        "                invalid: !self.search.is_empty() && self.filtered_snippets().is_empty(),\n",
         "                invalid: false,\n",
         [SEARCH_FIELD],
     ),
     (
         "a press on the search box leaves the caret where it was",
-        "        self.search_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "        self.search.press(x - inner.x, inner.w, had_the_keyboard);\n",
+        "        let _ = (x, had_the_keyboard);\n",
         [SEARCH_FIELD],
     ),
     (
@@ -1221,14 +1214,14 @@ MUTATIONS += [
         [SEARCH_FIELD],
     ),
     (
-        "the search's caret is drawn at its start",
-        "                    cursor: self.search_cursor(),\n",
-        "                    cursor: text::TextCursor::default(),\n",
+        "the box with the keyboard is drawn without it",
+        "                focused,\n                placeholder: SEARCH_PLACEHOLDER,\n",
+        "                focused: false,\n                placeholder: SEARCH_PLACEHOLDER,\n",
         [SEARCH_FIELD],
     ),
     (
-        "Ctrl+F leaves the editor with the last query",
-        "        self.search_focus = true;\n        self.search_editor.set_text(&self.search_query);\n",
+        "Ctrl+F leaves the caret where it was",
+        "        self.search_focus = true;\n        self.search.caret_to_end();\n",
         "        self.search_focus = true;\n",
         [SEARCH_FIELD],
     ),

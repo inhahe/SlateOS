@@ -2348,7 +2348,6 @@ dependencies = [
  "loginusers",
  "scratchdir",
  "userdb",
- "utmpfile",
 ]
 
 [[package]]

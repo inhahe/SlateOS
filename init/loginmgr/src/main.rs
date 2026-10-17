@@ -26,36 +26,33 @@ type Shared = Arc<Mutex<Manager<authlib::Authenticator, Database, Logind, Kernel
 /// for repair.
 const KERNEL_COMMAND_LINE: &str = "/proc/cmdline";
 
-/// Holds this start of the machine's stamp ([`this_start`]) once someone has
+/// Holds this start of the machine's identifier ([`this_start`]) once someone has
 /// signed in since it started: a `loginmgr` started again then (it failed,
 /// and init restarted it) signs no one in by itself. A mark holding another
-/// start's stamp is a previous start's: nothing empties `/var/run` when the
+/// start's identifier is a previous start's: nothing empties `/var/run` when the
 /// machine starts (lane D's init empties only utmp), so the mark cannot rely
 /// on vanishing.
 const SIGNED_IN_MARK: &str = "/var/run/loginmgr/signed-in";
 
-/// The login records, whose boot record names this start of the machine.
-const UTMP: &str = "/var/run/utmp";
+/// The kernel's identifier for this start of the machine: random, made once
+/// per boot, as Linux's is -- and so, unlike a boot's time, the same on no
+/// two boots even where the clock is not set.
+const BOOT_ID: &str = "/proc/sys/kernel/random/boot_id";
 
-/// This start of the machine: the time of the last boot record init wrote
-/// to utmp when it started (`seconds.microseconds`), or nothing when there
-/// is none to read -- and then a mark holding nothing counts, as it did
-/// before marks held anything.
-fn this_start() -> Vec<u8> {
-    let Ok(records) = std::fs::read(UTMP) else {
-        return Vec::new();
-    };
-    utmpfile::parse(&records)
-        .iter()
-        .rev()
-        .find(|r| r.record_type == utmpfile::BOOT_TIME)
-        .map(|r| format!("{}.{:06}", r.tv_sec, r.login_usec).into_bytes())
-        .unwrap_or_default()
+/// This start of the machine ([`BOOT_ID`]), or `None` when it cannot be
+/// read.
+fn this_start() -> Option<Vec<u8>> {
+    let id = std::fs::read(BOOT_ID).ok()?;
+    let id = id.trim_ascii().to_vec();
+    (!id.is_empty()).then_some(id)
 }
 
-/// Whether someone has signed in since this start of the machine.
+/// Whether someone has signed in since this start of the machine: the mark
+/// names this start. When the start cannot be named, no mark can say so --
+/// a second sign-in by itself after `loginmgr` restarts is the lesser harm
+/// than none ever again.
 fn signed_in_this_start() -> bool {
-    std::fs::read(SIGNED_IN_MARK).is_ok_and(|mark| mark == this_start())
+    this_start().is_some_and(|id| std::fs::read(SIGNED_IN_MARK).is_ok_and(|mark| mark == id))
 }
 
 /// A login screen that exits sooner than this after it started is started
@@ -120,16 +117,26 @@ static MARKED: AtomicBool = AtomicBool::new(false);
 /// Mark that someone has signed in since the machine started
 /// ([`SIGNED_IN_MARK`]), the first time this process sees a session.
 fn mark_signed_in() {
-    if MARKED.swap(true, Ordering::SeqCst) {
+    if MARKED.load(Ordering::SeqCst) {
         return;
     }
+    let Some(id) = this_start() else {
+        // Nothing to name this start by: no mark can say anything, so none
+        // is written (see `signed_in_this_start`).
+        MARKED.store(true, Ordering::SeqCst);
+        return;
+    };
     let path = Path::new(SIGNED_IN_MARK);
     let made = path
         .parent()
         .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, this_start()));
-    if let Err(e) = made {
-        say(&format!("cannot mark {SIGNED_IN_MARK}: {e}"));
+        .and_then(|()| std::fs::write(path, &id));
+    match made {
+        // Done only once it is written: a failure is tried again at the next
+        // call, so a full /var/run does not leave the automatic account
+        // free to sign in again after a restart.
+        Ok(()) => MARKED.store(true, Ordering::SeqCst),
+        Err(e) => say(&format!("cannot mark {SIGNED_IN_MARK}: {e}")),
     }
 }
 

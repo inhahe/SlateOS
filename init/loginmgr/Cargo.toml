@@ -10,15 +10,14 @@ description = "SlateOS login manager: signs people in and starts their desktop a
 authlib = { path = "../../userspace/authlib" }
 # The account database: whom a session runs as, and its sign-ins counted.
 userdb = { path = "../../userspace/userdb" }
-# Which accounts a login screen offers, and which one signs in by itself --
-# lane C's policy over the database, the same one the screen used to apply.
+# Which accounts a login screen offers, as the screen lists them (Account,
+# offered). Which one signs in by itself is the database's rule
+# (userdb::UserDb::automatic_account).
 loginusers = { path = "../../gui/loginusers" }
 # The service the login screen calls, and logind's.
 libservicebus = { path = "../../userspace/libservicebus" }
 # Waiting for the programs it starts.
 libcall = { path = "../../libcall" }
-# The login records' boot record, which names this start of the machine.
-utmpfile = { path = "../../utmpfile" }
 
 [dev-dependencies]
 # A database of the tests' own.

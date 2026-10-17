@@ -347,8 +347,15 @@ impl<V: Verifier, A: Accounts, S: Sessions, L: Launcher> Manager<V, A, S, L> {
             }
             protocol::AUTHENTICATE => self.authenticate(caller.pid, payload),
             protocol::START_SESSION => self.start_session(caller.pid, payload),
+            // Asked of the database again: an account locked, or no longer
+            // marked, since `loginmgr` started does not sign in by itself.
             protocol::START_AUTOMATIC if no_arguments(payload) => match self.automatic.clone() {
-                Some(user) if self.session.is_none() => self.start(&user),
+                Some(user)
+                    if self.session.is_none()
+                        && self.accounts.automatic().as_deref() == Some(user.as_str()) =>
+                {
+                    self.start(&user)
+                }
                 _ => Reply::Error(protocol::ERR_NO_AUTOMATIC_ACCOUNT, None),
             },
             protocol::LIST_ACCOUNTS | protocol::START_AUTOMATIC => {
@@ -527,8 +534,14 @@ mod tests {
         }
         fn signed_in(&self, _: &str, _: u64) {}
         fn automatic(&self) -> Option<String> {
-            Some("ada".to_owned())
+            MARKED.with(|m| m.borrow().clone())
         }
+    }
+
+    thread_local! {
+        /// The account the test database marks: ada, unless a test locks
+        /// or unmarks her.
+        static MARKED: RefCell<Option<String>> = RefCell::new(Some("ada".to_owned()));
     }
 
     struct Logind(Log, bool);
@@ -843,6 +856,19 @@ mod tests {
             "screen None -> 103",
             "the screen after a log-out is a chooser"
         );
+    }
+
+    #[test]
+    fn an_account_locked_since_the_start_does_not_sign_in_by_itself() {
+        let (mut m, log) = manager(Some("ada"));
+        let screen = m.show_login_screen().unwrap();
+        // `usermod -L ada`, while the screen is up.
+        MARKED.with(|marked| *marked.borrow_mut() = None);
+        assert_eq!(
+            m.call(the(screen), protocol::START_AUTOMATIC, &args(&[])),
+            Reply::Error(protocol::ERR_NO_AUTOMATIC_ACCOUNT, None)
+        );
+        assert_eq!(log.borrow().len(), 1, "no session asked for");
     }
 
     #[test]

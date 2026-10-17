@@ -218,14 +218,14 @@ MUTATIONS += [
     ),
     (
         "a search that finds nothing is not red",
-        "            invalid: !self.search_text.is_empty() && self.search_all(&self.search_text).is_empty(),\n",
+        "            invalid: !self.search.is_empty() && self.search_all(self.search.text()).is_empty(),\n",
         "            invalid: false,\n",
         [FIELD],
     ),
     (
-        "a press leaves the caret where it was",
-        "        self.search_editor.set_cursor(cursor);\n",
-        "        let _ = cursor;\n",
+        "a press puts the caret at the start",
+        "            x - rect.x - SEARCH_TEXT_INSET,\n",
+        "            0.0,\n",
         [FIELD],
     ),
     (

@@ -43,14 +43,13 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree, TextOverflow};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 use guitk::text;
-use guitk::text::TextCursor;
 use guitk::textedit;
-use guitk::textinput::TextInput;
 use guitk::{scroll_window, wheel};
 use oswindow::app::{self, App, Response};
 use pathtext::ShowPath;
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use textline::{SearchBox, SearchLook};
 
 // ============================================================================
 // Constants — layout dimensions
@@ -466,17 +465,12 @@ pub struct SysInfoState {
     /// Hovered tree row index (visible index).
     pub hovered_tree_row: Option<usize>,
     /// Search query text.
-    pub search_text: String,
+    /// The search box, which is the search.
+    pub search: SearchBox,
     /// Whether the shortcut card is up.
     pub show_help: bool,
     /// Whether search box is focused.
     pub search_focused: bool,
-    /// The search box's caret and selection, laid over `search_text`, which
-    /// stays the truth: reloaded whenever the text has changed under it
-    /// (Escape clears it).
-    search_editor: TextInput,
-    /// What Ctrl+C or Ctrl+X last took from the search box, for Ctrl+V.
-    search_clipboard: String,
     /// Whether the pointer is over the search box: its edge is warmed.
     search_hovered: bool,
     /// How wide the mark is round the search box while it has the keyboard:
@@ -591,11 +585,9 @@ impl SysInfoState {
             window_width: DEFAULT_WIDTH,
             window_height: DEFAULT_HEIGHT,
             hovered_tree_row: None,
-            search_text: String::new(),
+            search: SearchBox::new(SEARCH_CAPACITY, SEARCH_TEXT_SIZE),
             show_help: false,
             search_focused: false,
-            search_editor: textline::field_holding("", SEARCH_CAPACITY),
-            search_clipboard: String::new(),
             search_hovered: false,
             focus_ring_width: guitk::style::FOCUS_RING_WIDTH,
             status_message: String::from("Ready"),
@@ -1859,8 +1851,8 @@ impl SysInfoState {
             }
             // Escape = close search
             Key::Escape => {
-                if !self.search_text.is_empty() {
-                    self.search_text.clear();
+                if !self.search.is_empty() {
+                    self.search.clear();
                 }
                 self.search_focused = false;
                 EventResult::Consumed
@@ -1885,7 +1877,7 @@ impl SysInfoState {
             }
             Key::Enter if plain => {
                 // Navigate to first search result.
-                let results = self.search_all(&self.search_text);
+                let results = self.search_all(self.search.text());
                 if let Some((cat, _)) = results.first() {
                     self.selected_category = *cat;
                     // Expand parent if needed.
@@ -1906,33 +1898,18 @@ impl SysInfoState {
                 EventResult::Consumed
             }
             _ => {
-                if self.search_editor.text() != self.search_text {
-                    self.search_editor.set_text(&self.search_text);
-                }
                 let before = (
-                    self.search_editor.cursor(),
-                    self.search_editor.selection_anchor(),
+                    self.search.input().cursor(),
+                    self.search.input().selection_anchor(),
                 );
-                let edit = textline::apply_key(
-                    &mut self.search_editor,
-                    key,
-                    &self.search_clipboard,
-                    SEARCH_TEXT_SIZE,
-                );
-                if let Some(copied) = edit.copied {
-                    self.search_clipboard = copied;
-                }
+                let edit = self.search.key(key);
                 if !edit.handled {
                     return EventResult::Ignored;
                 }
-                let changed = self.search_editor.text() != self.search_text;
-                if changed {
-                    self.search_text = self.search_editor.text().to_owned();
-                }
-                if changed
+                if edit.changed
                     || (
-                        self.search_editor.cursor(),
-                        self.search_editor.selection_anchor(),
+                        self.search.input().cursor(),
+                        self.search.input().selection_anchor(),
                     ) != before
                 {
                     EventResult::Consumed
@@ -1946,43 +1923,21 @@ impl SysInfoState {
     /// Give the search box the keyboard, its caret at the end of the text.
     fn focus_search(&mut self) {
         self.search_focused = true;
-        self.search_editor.set_text(&self.search_text);
-    }
-
-    /// Where the search's caret is drawn: the editor's while the box has the
-    /// keyboard (the end, if the text changed under the editor), the start
-    /// otherwise. One answer for the drawing and for a press.
-    fn search_cursor(&self) -> TextCursor {
-        if !self.search_focused {
-            TextCursor::default()
-        } else if self.search_editor.text() == self.search_text {
-            self.search_editor.cursor()
-        } else {
-            TextCursor::from(self.search_text.len())
-        }
+        self.search.caret_to_end();
     }
 
     /// A press in the search box at `x`: it takes the keyboard, with the
     /// caret under the pointer.
     fn press_search(&mut self, rect: Rect, x: f32) {
-        let drawn = self.search_cursor();
-        if self.search_focused {
-            if self.search_editor.text() != self.search_text {
-                self.search_editor.set_text(&self.search_text);
-            }
-        } else {
+        let had_the_keyboard = self.search_focused;
+        if !had_the_keyboard {
             self.focus_search();
         }
-        let cursor = textedit::cursor_at_click(
-            &self.search_text,
-            drawn,
-            (rect.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
-            SEARCH_TEXT_SIZE,
-            FontWeightHint::Regular,
+        self.search.press(
             x - rect.x - SEARCH_TEXT_INSET,
+            rect.w - 2.0 * SEARCH_TEXT_INSET,
+            had_the_keyboard,
         );
-        self.search_editor.set_selection_anchor(None);
-        self.search_editor.set_cursor(cursor);
     }
 
     /// How the search box is drawn: lit under the pointer, with the
@@ -1995,7 +1950,7 @@ impl SysInfoState {
             hovered: self.search_hovered && !covered,
             focused: self.search_focused && !covered,
             disabled: false,
-            invalid: !self.search_text.is_empty() && self.search_all(&self.search_text).is_empty(),
+            invalid: !self.search.is_empty() && self.search_all(self.search.text()).is_empty(),
         }
     }
 
@@ -2240,43 +2195,22 @@ impl SysInfoState {
             search.y + (search.h - line) / 2.0,
             (search.w - 2.0 * SEARCH_TEXT_INSET).max(0.0),
         );
-        if self.search_text.is_empty() && !state.focused {
-            tree.push(RenderCommand::Text {
+        self.search.draw(
+            tree,
+            &SearchLook {
                 x: tx,
                 y: ty,
-                text: String::from("Search (Ctrl+F)..."),
-                color: self.palette.subtext0,
-                font_size: SEARCH_TEXT_SIZE,
-                font_weight: FontWeightHint::Regular,
-                max_width: Some(tw),
-                overflow: TextOverflow::Ellipsis,
-            });
-        } else {
-            let editing = self.search_focused && self.search_editor.text() == self.search_text;
-            textedit::draw(
-                tree,
-                &textedit::SingleLine {
-                    text: &self.search_text,
-                    cursor: self.search_cursor(),
-                    selection_anchor: if editing {
-                        self.search_editor.selection_anchor()
-                    } else {
-                        None
-                    },
-                    focused: state.focused,
-                    x: tx,
-                    y: ty,
-                    width: tw,
-                    line_height: line,
-                    font_size: SEARCH_TEXT_SIZE,
-                    weight: FontWeightHint::Regular,
-                    color: self.palette.text,
-                    selection_bg: self.palette.accent,
-                    selection_fg: self.palette.crust,
-                    caret_width: textedit::CARET_WIDTH,
-                },
-            );
-        }
+                width: tw,
+                line_height: line,
+                focused: state.focused,
+                placeholder: "Search (Ctrl+F)...",
+                color: self.palette.text,
+                placeholder_color: self.palette.subtext0,
+                selection_bg: self.palette.accent,
+                selection_fg: self.palette.crust,
+                caret_width: textedit::CARET_WIDTH,
+            },
+        );
 
         // Export button.
         let export_x = layout.export.x;
@@ -4053,7 +3987,7 @@ mod tests {
                         // has no /proc, so every category the provider fills
                         // is empty whatever the query is.
                         app.env_vars = Ok(vec![(String::from("CARDKEY"), String::from("present"))]);
-                        app.search_text = String::from("cardkey");
+                        app.search.set_text("cardkey");
                         app.search_focused = true;
                     }
                     app.handle_event(&Event::Key(stroke.clone())) == EventResult::Consumed
@@ -4380,9 +4314,9 @@ mod tests {
         assert!(app.search_focused, "control: Ctrl+F");
         app.handle_event(&chord(Key::S, "s", Modifiers::ctrl()));
         app.handle_event(&chord(Key::X, "x", Modifiers::alt()));
-        assert_eq!(app.search_text, "", "a command typed its letter");
+        assert_eq!(app.search.text(), "", "a command typed its letter");
         app.handle_event(&chord(Key::S, "\u{15b}", ALTGR));
-        assert_eq!(app.search_text, "\u{15b}", "AltGr did not type");
+        assert_eq!(app.search.text(), "\u{15b}", "AltGr did not type");
         app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
         assert!(app.search_focused, "Alt+Escape left the search");
 
@@ -4391,11 +4325,12 @@ mod tests {
         assert!(!app.search_focused, "control: Escape stays in the search");
         app.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
         assert_eq!(
-            app.search_text, "\u{15b}",
+            app.search.text(),
+            "\u{15b}",
             "Alt+Escape cleared the search from outside it"
         );
         app.handle_event(&press(Key::Escape));
-        assert_eq!(app.search_text, "", "control: Escape clears nothing");
+        assert_eq!(app.search.text(), "", "control: Escape clears nothing");
     }
 
     /// **The search box is the toolkit's field, and edits like one**: lit
@@ -4487,7 +4422,8 @@ mod tests {
         app.handle_event(&press(Key::Home));
         app.handle_event(&press(Key::Delete));
         assert_eq!(
-            app.search_text, "pu",
+            app.search.text(),
+            "pu",
             "Home and Delete did not edit the start"
         );
         app.handle_event(&Event::Mouse(guitk::event::MouseEvent {
@@ -4499,7 +4435,8 @@ mod tests {
             app.handle_event(&chord(Key::Unknown(0), &c.to_string(), Modifiers::NONE));
         }
         assert_eq!(
-            app.search_text, "puzzqx",
+            app.search.text(),
+            "puzzqx",
             "a press past the end did not reach it"
         );
         let red = field::State {

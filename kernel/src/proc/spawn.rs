@@ -24642,7 +24642,9 @@ pub fn self_test_linux_shared_file_maps() -> KernelResult<()> {
 ///
 /// It also maps `/tmp/shmapw-sealed`, made here and sealed against writes
 /// (`fs::sealing`): a writable shared mapping of it is `EPERM`, and a
-/// read-only one cannot be made writable.
+/// read-only one cannot be made writable. And a memfd (design-decisions
+/// §1573): mapped shared and writable across a `fork`, refused
+/// `F_SEAL_WRITE` while so mapped, sealed once unmapped.
 pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 60_000_000_000;
@@ -24746,6 +24748,15 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
                     "mprotect(PROT_WRITE) of a write-sealed file's shared mapping was not EACCES"
                 }
                 Some(0x4A) => "munmap of the write-sealed file's mapping failed",
+                Some(0x50 | 0x51) => "memfd_create, or the memfd's ftruncate, failed",
+                Some(0x52) => "a memfd could not be mapped shared and writable",
+                Some(0x53) => "a store through a memfd's mapping was not what pread read",
+                Some(0x54 | 0x55) => "a forked child's store to a memfd was not seen by the parent",
+                Some(0x56) => "F_SEAL_WRITE on a memfd mapped shared and writable was not EBUSY",
+                Some(0x57) => "munmap of the memfd's mapping failed",
+                Some(0x58 | 0x59) => "F_SEAL_WRITE on an unmapped memfd failed, or F_GET_SEALS",
+                Some(0x5A) => "a writable shared mapping of a write-sealed memfd was not EPERM",
+                Some(0x5B) => "a memfd lost a store at its unmapping",
                 Some(0x5F) => "a pread failed",
                 None => "no exit code: the program died",
                 _ => "unexpected exit code",
@@ -24808,7 +24819,7 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
     serial_println!(
         "[spawn]   Linux writable shared file mappings (ring 3: stores read at once, fork, \
          msync, a second view, EACCES on a read-only descriptor, saved by the last unmap, \
-         a write seal refused): OK"
+         a write seal refused, a memfd mapped and sealed): OK"
     );
     Ok(())
 }

@@ -1747,6 +1747,7 @@ fn release_mount_hold(mnt_id: u64) {
             .root
             .iter_mut()
             .chain(inner.others.values_mut().flatten())
+            .chain(inner.internal.iter_mut())
             .find(|m| m.mnt_id == mnt_id)
         {
             mp.objects = mp.objects.saturating_sub(1);
@@ -2177,6 +2178,7 @@ static VFS: Mutex<VfsInner> = Mutex::new(VfsInner {
     root: Vec::new(),
     others: alloc::collections::BTreeMap::new(),
     detached: Vec::new(),
+    internal: Vec::new(),
 });
 
 struct VfsInner {
@@ -2193,6 +2195,10 @@ struct VfsInner {
     /// is finished ([`finish_unmount`]) when its last hold goes
     /// ([`release_mount_hold`]).
     detached: Vec<MountPoint>,
+    /// The kernel's own mounts ([`Vfs::mount_internal`]), in no namespace's
+    /// table: no path reaches them and nothing lists or unmounts them, but
+    /// the files on them are held through them as through any mount.
+    internal: Vec<MountPoint>,
 }
 
 impl VfsInner {
@@ -2218,12 +2224,14 @@ impl VfsInner {
         }
     }
 
-    /// Every entry of every table, and the detached ones still held.
+    /// Every entry of every table, the detached ones still held, and the
+    /// kernel's own.
     fn every(&self) -> impl Iterator<Item = &MountPoint> {
         self.root
             .iter()
             .chain(self.others.values().flatten())
             .chain(self.detached.iter())
+            .chain(self.internal.iter())
     }
 }
 
@@ -5597,6 +5605,95 @@ impl Vfs {
             dir.join(alloc::format!("#{ino}")),
             linkable,
         );
+        Ok(FileHold(FileObject {
+            fs,
+            fs_id,
+            mnt_id,
+            ino,
+        }))
+    }
+
+    /// Mount `fs` for the kernel's own use, outside every mount namespace
+    /// (Linux's `kern_mount`): no path reaches it, `/proc/mounts` does not
+    /// list it, and nothing unmounts it. Its files have identities -- the
+    /// mount has a filesystem id of its own -- and are held through it as
+    /// through any mount. What `ipc::memfd` keeps memfds on (design-decisions
+    /// §1573). Answers the mount's id, for
+    /// [`create_unnamed_internal`](Self::create_unnamed_internal).
+    pub fn mount_internal(fs: Box<dyn FileSystem>) -> u64 {
+        let fs_type = String::from(fs.fs_type());
+        let fs_id = NEXT_FS_ID.fetch_add(1, Ordering::Relaxed);
+        assign_dev(fs_id);
+        let mnt_id = NEXT_MNT_ID.fetch_add(1, Ordering::Relaxed);
+        VFS.lock().internal.push(MountPoint {
+            path: PathBuf::from("/"),
+            root: PathBuf::from("/"),
+            fs_read_only: Arc::new(AtomicBool::new(false)),
+            unbindable: true,
+            parent: 0,
+            hidden: true,
+            fs: Arc::new(Mutex::new(fs)),
+            fs_type,
+            options: MountOptions::defaults(),
+            fs_id,
+            mnt_id,
+            objects: 0,
+            expire_mark: false,
+        });
+        mnt_id
+    }
+
+    /// A file with no name and no directory, on the kernel's mount `mnt_id`
+    /// ([`mount_internal`](Self::mount_internal)): mode `mode` as given (no
+    /// umask, as Linux makes a memfd), owned by the caller, never linkable.
+    /// `shown_as` is the name its per-file state goes by (`perfile`). The
+    /// hold answered is the file's only reference: the file goes with the
+    /// last hold, as an `O_TMPFILE` file does.
+    ///
+    /// # Errors
+    ///
+    /// `NotFound` for a mount that is not the kernel's; the filesystem's own.
+    pub fn create_unnamed_internal(
+        mnt_id: u64,
+        mode: u16,
+        shown_as: PathBuf,
+    ) -> KernelResult<FileHold> {
+        let (fs, fs_id) = {
+            let mut vfs = VFS.lock();
+            let mp = vfs
+                .internal
+                .iter_mut()
+                .find(|m| m.mnt_id == mnt_id)
+                .ok_or(KernelError::NotFound)?;
+            mp.objects = mp.objects.saturating_add(1);
+            (Arc::clone(&mp.fs), mp.fs_id)
+        };
+        let (uid, gid) = creator_ids();
+        let made = {
+            let mut guard = fs.lock();
+            guard
+                .create_unnamed(Path::new("/"), mode & 0o7777)
+                .and_then(|ino| {
+                    if (uid, gid) != (0, 0) {
+                        match guard.chown_ino(ino, uid, gid) {
+                            Ok(()) | Err(KernelError::NotSupported) => {}
+                            Err(e) => {
+                                guard.unpin_ino(ino);
+                                return Err(e);
+                            }
+                        }
+                    }
+                    Ok(ino)
+                })
+        };
+        let ino = match made {
+            Ok(ino) => ino,
+            Err(e) => {
+                release_mount_hold(mnt_id);
+                return Err(e);
+            }
+        };
+        note_unnamed(FileId { fs_id, ino }, shown_as, false);
         Ok(FileHold(FileObject {
             fs,
             fs_id,

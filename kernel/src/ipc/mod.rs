@@ -110,9 +110,6 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
                     crate::net::native_socket::Ending::Close,
                 );
             }
-            ResourceType::MemFd => {
-                memfd::close(memfd::MemFdHandle::from_raw(handle_raw));
-            }
             ResourceType::Epoll => {
                 epoll::close(epoll::EpollHandle::from_raw(handle_raw));
             }

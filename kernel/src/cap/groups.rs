@@ -220,7 +220,6 @@ pub fn init() {
         ResourceType::Service,
         ResourceType::Namespace,
         ResourceType::StreamSocket,
-        ResourceType::MemFd,
         ResourceType::Epoll,
         ResourceType::SignalFd,
         ResourceType::Timerfd,
@@ -766,7 +765,7 @@ fn test_admin_grants_every_resource_type() -> KernelResult<()> {
         granted |= bit;
     }
 
-    for d in 1..=ResourceType::LAST {
+    for d in ResourceType::all().map(ResourceType::discriminant) {
         // Cannot overflow: the guard above bounded LAST below u64::BITS.
         if granted & 1u64.checked_shl(u32::from(d)).unwrap_or(0) == 0 {
             serial_println!(
@@ -781,18 +780,19 @@ fn test_admin_grants_every_resource_type() -> KernelResult<()> {
 
     // Every type present *and* the count matching means no duplicates either,
     // which is what would happen if an append reused an existing entry.
-    if admin.cap_count != usize::from(ResourceType::LAST) {
+    let types = ResourceType::all().count();
+    if admin.cap_count != types {
         serial_println!(
             "[cap/groups]   FAIL: admin has {} grants for {} resource types — a duplicate",
             admin.cap_count,
-            ResourceType::LAST
+            types
         );
         return Err(KernelError::InternalError);
     }
 
     serial_println!(
         "[cap/groups]   admin grants all {} resource types: OK",
-        ResourceType::LAST
+        types
     );
     Ok(())
 }
@@ -813,6 +813,17 @@ fn test_admin_grants_every_resource_type() -> KernelResult<()> {
 /// `from_raw` learns the new value.
 fn test_resource_type_from_raw() -> KernelResult<()> {
     for d in 1..=ResourceType::LAST {
+        if ResourceType::RETIRED.contains(&d) {
+            // A retired number names nothing, and no type took it over.
+            if ResourceType::from_raw(d).is_some() {
+                serial_println!(
+                    "[cap/groups]   FAIL: retired type number {} names a type",
+                    d
+                );
+                return Err(KernelError::InternalError);
+            }
+            continue;
+        }
         let Some(ty) = ResourceType::from_raw(d) else {
             serial_println!(
                 "[cap/groups]   FAIL: ResourceType::from_raw({}) is None, but LAST is {} — \

@@ -47,8 +47,8 @@
 //! ## Which file: [`LockKey`]
 //!
 //! A key names the file a lock is on without resolving anything again: a VFS
-//! file by its resolved host path and its identity, or a memfd by its object
-//! id. Built from a handle ([`LockKey::for_handle`]), the path is the one
+//! file by its resolved host path and its identity (a memfd is one too, since
+//! 2026-10-17: design-decisions §1573). Built from a handle ([`LockKey::for_handle`]), the path is the one
 //! captured at open, which has already been through the caller's namespace.
 //! Until 2026-10-01 the table took a path and passed it to
 //! `Vfs::file_identity`, which applies the caller's namespace. For a jailed
@@ -96,7 +96,7 @@ pub enum RecordLockType {
 #[derive(Debug, Clone)]
 pub struct RecordLock {
     /// Who holds it: a process ([`posix_owner`]) or an open file description
-    /// ([`ofd_owner`], [`memfd_ofd_owner`]).
+    /// ([`ofd_owner`]).
     pub owner: u64,
     /// First byte covered.
     pub start: u64,
@@ -170,10 +170,6 @@ pub enum LockKey {
         path: PathBuf,
         id: Option<crate::fs::vfs::FileId>,
     },
-    /// An anonymous memory file (`memfd_create`), by its object id. It has no
-    /// path, and the id names the object rather than one handle to it:
-    /// `memfd::dup` returns the same value.
-    MemFd(u64),
 }
 
 impl LockKey {
@@ -215,24 +211,14 @@ impl LockKey {
         }
     }
 
-    /// A memfd, by the id its handles carry.
-    #[must_use]
-    pub const fn for_memfd(id: u64) -> Self {
-        Self::MemFd(id)
-    }
-
     /// Do two keys name the same file?
     ///
-    /// For VFS files, identity decides when both sides have one, and the
-    /// path otherwise. A memfd is never a VFS file.
+    /// Identity decides when both sides have one, and the path otherwise.
     fn same_file(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::File { path: a, id: ia }, Self::File { path: b, id: ib }) => match (ia, ib) {
-                (Some(x), Some(y)) => x == y,
-                _ => a == b,
-            },
-            (Self::MemFd(a), Self::MemFd(b)) => a == b,
-            _ => false,
+        let (Self::File { path: a, id: ia }, Self::File { path: b, id: ib }) = (self, other);
+        match (ia, ib) {
+            (Some(x), Some(y)) => x == y,
+            _ => a == b,
         }
     }
 }
@@ -723,25 +709,11 @@ pub fn query_own(key: &LockKey, owner: u64, start: u64, len: u64) -> Option<Reco
 /// for equality, so a mismatched tag makes a lock invisible to its own holder.
 const OFD_OWNER_TAG: u64 = 1 << 63;
 
-/// With [`OFD_OWNER_TAG`]: the open file description is a memfd.
-///
-/// Memfd ids and file handles are two counters that both start at 1. Without
-/// this bit, memfd 5's OFD locks and file handle 5's were one owner, and the
-/// final close of either released the other's.
-const MEMFD_OWNER_TAG: u64 = 1 << 62;
-
 /// The owner value for a lock held by a file's **open file description**
 /// (`F_OFD_*`), by its handle.
 #[must_use]
 pub fn ofd_owner(handle: u64) -> u64 {
-    (handle & !MEMFD_OWNER_TAG) | OFD_OWNER_TAG
-}
-
-/// The owner value for a lock held by a memfd's open file description. A
-/// memfd is one description: `dup` and `fork` share it, offset included.
-#[must_use]
-pub fn memfd_ofd_owner(id: u64) -> u64 {
-    id | OFD_OWNER_TAG | MEMFD_OWNER_TAG
+    handle | OFD_OWNER_TAG
 }
 
 /// The owner value for a lock held by a **process** (plain `F_SETLK`).
@@ -772,12 +744,6 @@ pub fn owner_is_ofd(owner: u64) -> bool {
 /// on rather than merely present.
 pub fn release_ofd(handle: u64) {
     release_all(ofd_owner(handle));
-}
-
-/// [`release_ofd`] for a memfd: called by `memfd::close` when the last
-/// reference to the memfd goes.
-pub fn release_memfd_ofd(id: u64) {
-    release_all(memfd_ofd_owner(id));
 }
 
 /// Drop every lock held by one owner, on every file, waking whoever waited
@@ -1227,36 +1193,47 @@ pub fn self_test() -> KernelResult<()> {
     }
     crate::serial_println!("  [8/12] touching locks of one type merge: OK");
 
-    // 9. A memfd is its own key: a lock on a memfd neither sees a lock on a
-    //    file nor is seen as one, and two owners on the memfd do conflict.
-    //    An id far above any the memfd counter has reached, so no real
-    //    memfd's locks can be in the way.
-    let m = LockKey::for_memfd(u64::MAX >> 2);
-    set(p, A, 0, 0, RecordLockType::Write)?;
-    let beside_file = set(&m, B, 0, 0, RecordLockType::Write);
-    let second_owner = set(&m, A, 0, 1, RecordLockType::Write);
-    let on_memfd = list(&m).len();
-    release_all(A);
-    release_all(B);
-    if beside_file.is_err() || second_owner != Err(KernelError::WouldBlock) || on_memfd != 1 {
+    // 9. Two memfds are two files, each its own key: one owner's lock on one
+    //    does not stand in another's way on the other, and two owners on one
+    //    do conflict. A memfd is a file on the kernel's own memfs, keyed by
+    //    its identity like any (design-decisions §1573).
+    let flags = crate::ipc::memfd::CreateFlags::default();
+    let one = crate::ipc::memfd::create(b"reclock-1", flags).map_err(|_| KernelError::IoError)?;
+    let two = match crate::ipc::memfd::create(b"reclock-2", flags) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = crate::fs::handle::close(one);
+            return Err(KernelError::IoError);
+        }
+    };
+    let keys = (LockKey::for_handle(one), LockKey::for_handle(two));
+    let verdict = match &keys {
+        (Ok(m1), Ok(m2)) => {
+            let own = set(m1, A, 0, 0, RecordLockType::Write);
+            let beside = set(m2, B, 0, 0, RecordLockType::Write);
+            let second_owner = set(m1, B, 0, 1, RecordLockType::Write);
+            release_all(A);
+            release_all(B);
+            own.is_ok() && beside.is_ok() && second_owner == Err(KernelError::WouldBlock)
+        }
+        _ => false,
+    };
+    let _ = crate::fs::handle::close(one);
+    let _ = crate::fs::handle::close(two);
+    if !verdict {
         crate::serial_println!(
-            "reclock:   FAIL: memfd key: beside a file {:?}, a second owner {:?}, {} lock(s)",
-            beside_file,
-            second_owner,
-            on_memfd
+            "reclock:   FAIL: two memfds are not two keys, or one is not one key ({:?})",
+            keys
         );
         return Err(KernelError::IoError);
     }
-    crate::serial_println!("  [9/12] a memfd is a key of its own: OK");
+    crate::serial_println!("  [9/12] two memfds are two files to lock: OK");
 
     test_waiting(A, B)?;
 
     release_all(A);
     release_all(B);
-    if !list(p).is_empty()
-        || !list(&m).is_empty()
-        || !list(&LockKey::for_path(WAIT_TEST_PATH)).is_empty()
-    {
+    if !list(p).is_empty() || !list(&LockKey::for_path(WAIT_TEST_PATH)).is_empty() {
         crate::serial_println!("reclock:   FAIL: the test left locks behind");
         return Err(KernelError::IoError);
     }

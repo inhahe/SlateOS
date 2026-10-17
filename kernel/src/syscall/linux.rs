@@ -3547,21 +3547,21 @@ fn linux_execveat(frame: &mut crate::syscall::entry::SyscallFrame) -> i64 {
             Ok(e) => e,
             Err(sr) => return sr.value,
         };
-        if entry.kind == HandleKind::MemFd {
+        if memfd_of(&entry).is_some() {
             // A memfd: its bytes are the program, and it has no name to load
-            // by. `/proc/<pid>/exe` names it as Linux's does. It was
+            // by, so they are read through the descriptor. `/proc/<pid>/exe`
+            // names it as Linux's does, `/memfd:<name> (deleted)`. It was
             // `EACCES` until 2026-10-08, which no Linux program expects of
             // a memfd created executable (runc and systemd exec from one).
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            let data = match crate::ipc::memfd::contents(h) {
+            let data = match whole_file_of(entry.raw_handle) {
                 Ok(d) => d,
-                Err(e) => return -i64::from(linux_errno_for(e)),
+                Err(e) => return i64::from(linux_errno_for(e)).wrapping_neg(),
             };
-            let mut exe = b"/memfd:".to_vec();
-            // The name is only the link's text: a memfd closed by another
-            // thread since its bytes were read leaves `/memfd: (deleted)`.
-            exe.extend_from_slice(&crate::ipc::memfd::name(h).unwrap_or_default());
-            exe.extend_from_slice(b" (deleted)");
+            // Its shown name: `handle_path` would refuse one that names no file.
+            let exe = match crate::fs::handle::handle_name(entry.raw_handle) {
+                Ok(p) => p.as_bytes().to_vec(),
+                Err(e) => return i64::from(linux_errno_for(e)).wrapping_neg(),
+            };
             return linux_exec_image(frame, data, exe, argv_user, envp_user);
         }
         if entry.kind != HandleKind::File {
@@ -4266,19 +4266,9 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
             // ipc_handles registration, so there is nothing to release.
             SyscallResult::ok(0)
         }
-        HandleKind::MemFd => {
-            // Deregister from the per-process ipc_handles list — same
-            // rationale as the EventFd arm above.
-            if let Some(pid) = caller_pid() {
-                pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::MemFd, entry.raw_handle);
-            }
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            crate::ipc::memfd::close(h);
-            SyscallResult::ok(0)
-        }
         HandleKind::Epoll => {
             // Deregister from the per-process ipc_handles list — same
-            // rationale as the EventFd/MemFd arms above — then drop one
+            // rationale as the EventFd arms above — then drop one
             // refcount on the in-kernel epoll instance.
             if let Some(pid) = caller_pid() {
                 pcb::deregister_ipc_handle(pid, crate::cap::ResourceType::Epoll, entry.raw_handle);
@@ -4289,7 +4279,7 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
         }
         HandleKind::SignalFd => {
             // Deregister from the per-process ipc_handles list — same
-            // rationale as the EventFd/MemFd/Epoll arms above — then drop
+            // rationale as the EventFd/Epoll arms above — then drop
             // one refcount on the in-kernel signalfd instance.
             if let Some(pid) = caller_pid() {
                 pcb::deregister_ipc_handle(
@@ -4304,7 +4294,7 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
         }
         HandleKind::Timerfd => {
             // Deregister from the per-process ipc_handles list — same
-            // rationale as the EventFd/MemFd/Epoll/SignalFd arms above —
+            // rationale as the EventFd/Epoll/SignalFd arms above —
             // then drop one refcount on the in-kernel timerfd instance.
             if let Some(pid) = caller_pid() {
                 pcb::deregister_ipc_handle(
@@ -4319,7 +4309,7 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
         }
         HandleKind::Inotify => {
             // Deregister from the per-process ipc_handles list — same
-            // rationale as the EventFd/MemFd/Epoll/SignalFd/Timerfd arms
+            // rationale as the EventFd/Epoll/SignalFd/Timerfd arms
             // above — then drop one refcount on the in-kernel inotify
             // instance (final close releases every native watch it owns).
             if let Some(pid) = caller_pid() {
@@ -4335,7 +4325,7 @@ pub fn close_handle(entry: FdEntry) -> SyscallResult {
         }
         HandleKind::AlsaPcm => {
             // Deregister from the per-process ipc_handles list — same
-            // rationale as the EventFd/MemFd/.../Inotify arms above — then
+            // rationale as the EventFd/.../Inotify arms above — then
             // drop one refcount on the in-kernel PCM substream (final close
             // releases the mixer slot it holds).
             if let Some(pid) = caller_pid() {
@@ -4549,7 +4539,6 @@ fn dispatch_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
         // ALSA PCM playback substream — `write(2)` pushes interleaved frames
         // to the mixer (the byte-stream equivalent of `WRITEI_FRAMES`).
         HandleKind::AlsaPcm => dispatch_alsa_pcm_write(entry, buf, len),
-        HandleKind::MemFd => dispatch_memfd_write(entry, buf, len),
         // AF_INET stream socket — `write(2)` is `send(2)` with no flags.
         HandleKind::Socket => dispatch_socket_write(entry, buf, len, false, false),
         // A channel end: one write, one message.
@@ -4865,70 +4854,6 @@ fn socket_recv_waitall(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
     SyscallResult::ok(done as i64)
 }
 
-/// Memfd write — copy `len` bytes from user buffer into the memfd at
-/// the memfd's current shared offset.  Validates the user buffer is
-/// readable; honours `F_SEAL_WRITE` and `F_SEAL_GROW` via the underlying
-/// `memfd::write`.
-fn dispatch_memfd_write(entry: FdEntry, buf: u64, len: u64) -> SyscallResult {
-    if len == 0 {
-        return SyscallResult::ok(0);
-    }
-    let len_usize = match usize::try_from(len) {
-        Ok(v) => v,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
-    // Streamed a bounded chunk at a time (`handlers::stream_user_write`): the
-    // kernel holds at most `FILE_CALL_CHUNK` of the request, not all of it. A
-    // seal that stops a later chunk (`F_SEAL_GROW`) leaves the earlier ones
-    // written and returns their count, as Linux's shmem does page by page.
-    let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-    match handlers::stream_user_write(buf, len_usize, |chunk| crate::ipc::memfd::write(h, chunk)) {
-        Ok(n) =>
-        {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(n as i64)
-        }
-        Err(crate::error::KernelError::PermissionDenied) => linux_err(errno::EPERM),
-        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-        Err(e) => linux_err(linux_errno_for(e)),
-    }
-}
-
-/// Memfd read — copy bytes from the memfd at its current shared offset
-/// into the user buffer.  Returns the number of bytes copied (0 at EOF).
-fn dispatch_memfd_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
-    if cap == 0 {
-        return SyscallResult::ok(0);
-    }
-    let cap_usize = match usize::try_from(cap) {
-        Ok(v) => v,
-        Err(_) => return linux_err(errno::EINVAL),
-    };
-    let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-    // A buffer that cannot take the bytes: 0 at or past the end, else EFAULT,
-    // the offset unmoved -- Linux's shmem read faults only at its copy
-    // (requests/d-a-a-null-buffer-is-refused-before-the-read-is-looked-at.md).
-    if crate::mm::user::check_user_span(buf, cap_usize).is_ok()
-        && crate::mm::user::validate_user_write(buf, cap_usize.min(handlers::FILE_CALL_CHUNK))
-            .is_err()
-    {
-        return match (crate::ipc::memfd::offset(h), crate::ipc::memfd::size(h)) {
-            (Ok(at), Ok(size)) if at >= size => SyscallResult::ok(0),
-            (Ok(_), Ok(_)) => linux_err(errno::EFAULT),
-            _ => linux_err(errno::EBADF),
-        };
-    }
-    // Streamed a bounded chunk at a time (`handlers::stream_user_read`), each
-    // chunk's destination checked before it is read, so the shared offset
-    // advances only by what reached the caller.
-    match handlers::stream_user_read(buf, cap_usize, |chunk| crate::ipc::memfd::read(h, chunk)) {
-        #[allow(clippy::cast_possible_wrap)]
-        Ok(n) => SyscallResult::ok(n as i64),
-        Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-        Err(e) => linux_err(linux_errno_for(e)),
-    }
-}
-
 /// Eventfd write: exactly 8 bytes interpreted as a little-endian u64
 /// added to the counter.  Linux semantics:
 ///   * count < 8                 → EINVAL.
@@ -5086,7 +5011,6 @@ fn dispatch_read(entry: FdEntry, buf: u64, cap: u64) -> SyscallResult {
         // A DRM card fd delivers queued KMS events (flip-complete) via read(2).
         HandleKind::DrmCard => dispatch_drm_card_read(&entry, buf, cap),
         HandleKind::Evdev => dispatch_evdev_read(&entry, buf, cap),
-        HandleKind::MemFd => dispatch_memfd_read(entry, buf, cap),
         HandleKind::SignalFd => dispatch_signalfd_read(entry, buf, cap),
         HandleKind::Timerfd => dispatch_timerfd_read(entry, buf, cap),
         HandleKind::Inotify => dispatch_inotify_read(entry, buf, cap),
@@ -6061,31 +5985,29 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
             SyscallResult::ok(if same { 1 } else { 0 })
         }
         fcntl_cmd::F_ADD_SEALS => {
-            // Memfd sealing: only memfd fds accept seals.  Linux
-            // returns EINVAL for non-memfd fds (the seal API is bound
-            // to the memfd file_operations).
+            // Only a memfd takes seals this way: Linux answers EINVAL for
+            // any other file (the seal API is shmem's). Its seals keep
+            // Linux's rules (`fs::sealing::memfd_add_seals`, §1573).
             let entry = match pcb::linux_fd_lookup(pid, fd) {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
             };
-            if entry.kind != HandleKind::MemFd {
+            let Some(memfd) = memfd_of(&entry) else {
                 return linux_err(errno::EINVAL);
+            };
+            // arg is unsigned int: truncated to u32, as Linux reads it.
+            let Some(add) = crate::fs::sealing::SealFlags::from_linux(u64::from(arg as u32)) else {
+                return linux_err(errno::EINVAL);
+            };
+            // Open for writing, or EPERM, as Linux's `memfd_add_seals`.
+            if !crate::fs::handle::open_flags(entry.raw_handle).is_ok_and(|f| f.is_writable()) {
+                return linux_err(errno::EPERM);
             }
-            // arg is unsigned int — truncate to u32 like Linux does
-            // when reading from the syscall register.
-            let add = arg as u32;
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            match crate::ipc::memfd::add_seals(h, add) {
-                Ok(()) => SyscallResult::ok(0),
-                Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-                // memfd add_seals signals "not allowed" (either
-                // allow_sealing=false at create time or F_SEAL_SEAL
-                // already set) as PermissionDenied → EPERM, which
-                // matches Linux's mm/shmem.c::shmem_add_seals.
-                Err(crate::error::KernelError::PermissionDenied) => linux_err(errno::EPERM),
-                // Unknown seal bit set in `add`.
-                Err(crate::error::KernelError::InvalidArgument) => linux_err(errno::EINVAL),
-                Err(_) => linux_err(errno::EIO),
+            let executable = crate::fs::handle::fstat(entry.raw_handle)
+                .is_ok_and(|m| m.permissions & 0o111 != 0);
+            match crate::fs::sealing::memfd_add_seals(memfd, add, executable) {
+                Ok(_) => SyscallResult::ok(0),
+                Err(e) => linux_err(linux_errno_for(e)),
             }
         }
         fcntl_cmd::F_GET_SEALS => {
@@ -6093,14 +6015,10 @@ fn sys_fcntl(args: &SyscallArgs) -> SyscallResult {
                 Some(e) => e,
                 None => return linux_err(errno::EBADF),
             };
-            if entry.kind != HandleKind::MemFd {
-                return linux_err(errno::EINVAL);
-            }
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            match crate::ipc::memfd::get_seals(h) {
-                Ok(seals) => SyscallResult::ok(i64::from(seals)),
-                Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-                Err(_) => linux_err(errno::EIO),
+            match memfd_of(&entry).and_then(crate::fs::sealing::memfd_seals) {
+                #[allow(clippy::cast_possible_wrap)]
+                Some(seals) => SyscallResult::ok(seals.to_linux() as i64),
+                None => linux_err(errno::EINVAL),
             }
         }
         fcntl_cmd::F_GETLK
@@ -6157,7 +6075,6 @@ fn fcntl_flock_apply(
 
     let target = match entry.kind {
         HandleKind::File => Target::File(entry.raw_handle),
-        HandleKind::MemFd => Target::MemFd(entry.raw_handle),
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -6225,10 +6142,8 @@ fn fcntl_flock_apply(
 /// (`proc::spawn`).
 pub(crate) fn release_record_locks_on_close(pid: u64, entry: &FdEntry) {
     use super::record_lock::{Target, release_on_close};
-    match entry.kind {
-        HandleKind::File => release_on_close(pid, Target::File(entry.raw_handle)),
-        HandleKind::MemFd => release_on_close(pid, Target::MemFd(entry.raw_handle)),
-        _ => {}
+    if entry.kind == HandleKind::File {
+        release_on_close(pid, Target::File(entry.raw_handle));
     }
 }
 
@@ -6253,9 +6168,7 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
     // where Linux truncates to int=0 → SEEK_SET → success.  Same
     // shape as the seven prior int-truncation batches
     // (308 mlockall, 309 msync, 310 mlock2, 311 fchmodat, 312
-    // fchownat, 313 unlinkat, 314 renameat2).  MemFd arm already
-    // did `args.arg2 as u32` so it was correct; File arm was the
-    // outlier.
+    // fchownat, 313 unlinkat, 314 renameat2).
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let whence_i32 = args.arg2 as i32;
     #[allow(clippy::cast_sign_loss)]
@@ -6271,25 +6184,6 @@ fn sys_lseek(args: &SyscallArgs) -> SyscallResult {
                 arg5: 0,
             };
             linux_from_native(handlers::sys_fs_seek(&a))
-        }
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let pos = args.arg1 as i64;
-            let whence = whence_u32;
-            match crate::ipc::memfd::seek(h, pos, whence) {
-                Ok(off) => {
-                    #[allow(clippy::cast_possible_wrap)]
-                    let off_i = off as i64;
-                    if off_i < 0 {
-                        return linux_err(errno::EINVAL);
-                    }
-                    SyscallResult::ok(off_i)
-                }
-                Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-                Err(crate::error::KernelError::InvalidArgument) => linux_err(errno::EINVAL),
-                Err(e) => linux_err(linux_errno_for(e)),
-            }
         }
         HandleKind::Console
         | HandleKind::Pipe
@@ -11176,13 +11070,6 @@ fn fionread_count(pid: pcb::ProcessId, fd: i32) -> Result<i64, i32> {
                 crate::fs::handle::current_offset(entry.raw_handle).map_err(linux_errno_for)?;
             Ok(wide(meta.size).saturating_sub(wide(offset)))
         }
-        HandleKind::MemFd => {
-            use crate::ipc::memfd::{self, MemFdHandle};
-            let h = MemFdHandle::from_raw(entry.raw_handle);
-            let size = memfd::size(h).map_err(linux_errno_for)?;
-            let offset = memfd::offset(h).map_err(linux_errno_for)?;
-            Ok(wide(size).saturating_sub(wide(offset)))
-        }
         HandleKind::Pipe => Ok(wide(crate::ipc::pipe::queued_bytes(
             crate::ipc::pipe::PipeHandle::from_raw(entry.raw_handle),
         ))),
@@ -14248,13 +14135,52 @@ pub(crate) fn native_file_mmap(handle: u64, args: &SyscallArgs) -> SyscallResult
 /// one: the mapping is not made (`EPERM`).
 fn count_shared_map(file: crate::fs::vfs::FileId, may_write: bool, handle: u64) -> bool {
     crate::mm::page_cache::shared_map_added(file, may_write.then_some(handle));
-    if may_write
-        && crate::fs::sealing::seals_of_file(file).contains(crate::fs::sealing::SealFlags::WRITE)
-    {
+    if may_write && seals_forbid_writable_maps(file) {
         crate::mm::page_cache::shared_map_removed(file, true);
         return false;
     }
     true
+}
+
+/// The file `entry` is a descriptor of, when it is a memfd (`ipc::memfd`,
+/// design-decisions §1573): the one kind of file `fcntl(F_ADD_SEALS)` and
+/// `F_GET_SEALS` take.
+fn memfd_of(entry: &crate::proc::linux_fd::FdEntry) -> Option<crate::fs::vfs::FileId> {
+    if entry.kind != crate::proc::linux_fd::HandleKind::File {
+        return None;
+    }
+    // A handle the table no longer has holds no memfd: the caller answers
+    // as for any file that is not one.
+    crate::fs::handle::held_identity(entry.raw_handle)
+        .ok()
+        .flatten()
+        .filter(|id| crate::fs::sealing::memfd_seals(*id).is_some())
+}
+
+/// All the bytes of the file `handle` holds, whatever its offset: the image
+/// an `exec` of a memfd loads.
+///
+/// # Errors
+///
+/// The handle's; `OutOfMemory` when the copy cannot be had.
+fn whole_file_of(handle: u64) -> crate::error::KernelResult<alloc::vec::Vec<u8>> {
+    let size = usize::try_from(crate::fs::handle::fstat(handle)?.size)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    let mut data = alloc::vec::Vec::new();
+    data.try_reserve_exact(size)
+        .map_err(|_| KernelError::OutOfMemory)?;
+    data.resize(size, 0);
+    let n = crate::fs::handle::read_at(handle, 0, &mut data)?;
+    data.truncate(n);
+    Ok(data)
+}
+
+/// Whether `file`'s seals forbid a new shared mapping that may write it:
+/// `WRITE`, or `FUTURE_WRITE` (which lets one made before it go on).
+fn seals_forbid_writable_maps(file: crate::fs::vfs::FileId) -> bool {
+    use crate::fs::sealing::SealFlags;
+    crate::fs::sealing::seals_of_file(file)
+        .intersects(SealFlags::WRITE.union(SealFlags::FUTURE_WRITE))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14312,7 +14238,7 @@ fn linux_file_mmap(
     // Only regular files and memfds are mappable here.  Pipes, sockets,
     // eventfds, etc. are not (Linux: ENODEV).
     match entry.kind {
-        HandleKind::File | HandleKind::MemFd => {}
+        HandleKind::File => {}
         _ => return linux_err(errno::ENODEV),
     }
     // A shared map of a file the handle holds maps the page cache, so it
@@ -14330,21 +14256,15 @@ fn linux_file_mmap(
         None
     };
     if shared && (prot & PROT_WRITE) != 0 && shared_file.is_none() {
-        // Written through, a private copy would lose every store. A file
-        // without a stable identity cannot be mapped so (Linux's ENODEV); a
-        // memfd's writable shared mapping is not built.
-        return linux_err(if matches!(entry.kind, HandleKind::MemFd) {
-            errno::ENOSYS
-        } else {
-            errno::ENODEV
-        });
+        // Written through, a private copy would lose every store: a file
+        // without a stable identity cannot be mapped so (Linux's ENODEV).
+        return linux_err(errno::ENODEV);
     }
-    // A WRITE-sealed file (`fs::sealing`) is not mapped shared and writable
-    // (`EPERM`, as Linux's sealed memfd), and a read-only shared mapping of
-    // it may never be made writable.
-    let sealed = shared_file.is_some_and(|f| {
-        crate::fs::sealing::seals_of_file(f).contains(crate::fs::sealing::SealFlags::WRITE)
-    });
+    // A file sealed against writes (`fs::sealing`: `WRITE`, or a memfd's
+    // `FUTURE_WRITE`) is not mapped shared and writable (`EPERM`, as Linux's
+    // sealed memfd), and a read-only shared mapping of it may never be made
+    // writable.
+    let sealed = shared_file.is_some_and(seals_forbid_writable_maps);
     if sealed && (prot & PROT_WRITE) != 0 {
         return linux_err(errno::EPERM);
     }
@@ -14715,10 +14635,6 @@ fn linux_file_mmap_fill(
         let buf = unsafe { core::slice::from_raw_parts_mut(frame_virt as *mut u8, FRAME_SIZE) };
         let read_res = match entry.kind {
             HandleKind::File => crate::fs::handle::read_at(entry.raw_handle, file_off, buf),
-            HandleKind::MemFd => {
-                let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-                crate::ipc::memfd::read_at(h, file_off, buf)
-            }
             // Unreachable: kind validated by the caller.
             _ => Err(crate::error::KernelError::InvalidArgument),
         };
@@ -18736,7 +18652,6 @@ fn sys_fsync(args: &SyscallArgs) -> SyscallResult {
             Ok(()) => SyscallResult::ok(0),
             Err(_) => linux_err(errno::EIO),
         },
-        HandleKind::MemFd => SyscallResult::ok(0),
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -19536,7 +19451,7 @@ fn sys_fadvise64(args: &SyscallArgs) -> SyscallResult {
 
     // Gate 2: S_ISFIFO(inode->i_mode) -> ESPIPE.  Only the Pipe
     // HandleKind models a FIFO inode in our table; everything else
-    // (File, MemFd, Console char-dev, EventFd/PidFd anon_inode) has
+    // (File, Console char-dev, EventFd/PidFd anon_inode) has
     // a non-FIFO inode mode in Linux's equivalent.
     use crate::proc::linux_fd::HandleKind;
     if matches!(entry.kind, HandleKind::Pipe) {
@@ -19609,11 +19524,8 @@ fn fd_access_is_writable(status_flags: u32) -> bool {
 /// believe the hint took effect when it never could.
 ///
 /// In our HandleKind model:
-///   * `File`    — VFS-backed regular file → accept (gate 2 pass).
-///   * `MemFd`   — anonymous file in the memfd table; Linux memfd is
-///     backed by tmpfs / a regular-file-like inode and
-///     readahead is technically valid (no-op on a fully-
-///     in-memory file but not an error) → accept.
+///   * `File`    — VFS-backed regular file, a memfd among them → accept
+///     (gate 2 pass).
 ///   * `Console` — char device equivalent → -EINVAL (gate 2 fail).
 ///   * `Pipe`    — pipe endpoint → -EINVAL.
 ///   * `EventFd` — pseudo-file with no a_ops → -EINVAL.
@@ -19646,7 +19558,7 @@ fn sys_readahead(args: &SyscallArgs) -> SyscallResult {
     // eventfd, pidfd, console — with EINVAL.
     use crate::proc::linux_fd::HandleKind;
     match entry.kind {
-        HandleKind::File | HandleKind::MemFd => {}
+        HandleKind::File => {}
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -21866,7 +21778,6 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
         // memfd: Linux creates the in-memory inode with `S_IFREG | 0o777`;
         // glibc / mesa probe `st_mode & S_IFMT == S_IFREG` to confirm the
         // mmap target is a regular file.
-        HandleKind::MemFd => (S_IFREG | 0o777, 4096),
         // epoll is an anon_inode like eventfd/pidfd — regular file,
         // 0600, blocksize 4096.
         HandleKind::Epoll => (S_IFREG | 0o600, 4096),
@@ -21903,16 +21814,9 @@ fn fill_stat_for_fd(buf: &mut [u8; STAT_SIZE], entry: &crate::proc::linux_fd::Fd
     let (st_dev, st_ino) = nsfs_identity(entry).map_or((0, entry.raw_handle), |(dev, ino)| {
         (crate::fs::vfs::linux_dev_t(dev), ino)
     });
-    // For memfd, surface the live data length as st_size so callers
-    // (notably libraries that ftruncate+stat-loop to size a mapping)
-    // observe the resize they just performed.  Other kinds report 0.
-    let st_size: u64 = match entry.kind {
-        HandleKind::MemFd => {
-            crate::ipc::memfd::size(crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle))
-                .unwrap_or(0)
-        }
-        _ => 0,
-    };
+    // None of these kinds has a size (a memfd, which has, is a File since
+    // design-decisions §1573, and stat'ed as one).
+    let st_size: u64 = 0;
     // Use the current monotonic clock for atime/mtime/ctime so callers
     // see plausible recent timestamps.
     let now_ns = crate::timekeeping::clock_realtime();
@@ -22320,7 +22224,6 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
         // /proc/self/fdinfo/<N> exposes on Linux.
         HandleKind::PidFd => ((S_IFREG | 0o600) as u16, 4096),
         // memfd: regular file on the anon "memfd:" inode, 0777, like Linux.
-        HandleKind::MemFd => ((S_IFREG | 0o777) as u16, 4096),
         // epoll anon_inode — S_IFREG | 0600, like eventfd/pidfd.
         HandleKind::Epoll => ((S_IFREG | 0o600) as u16, 4096),
         // signalfd anon_inode — S_IFREG | 0600, like epoll/eventfd.
@@ -22348,15 +22251,8 @@ fn fill_statx_for_fd(buf: &mut [u8; STATX_SIZE], entry: &crate::proc::linux_fd::
     // A namespace's inode and device are nsfs's (`nsfs_identity`).
     let identity = nsfs_identity(entry);
     let st_ino: u64 = identity.map_or(entry.raw_handle, |(_, ino)| ino);
-    // Surface the live memfd data length so stx_size reflects what callers
-    // (notably libraries that ftruncate+stat-loop) just wrote.
-    let st_size: u64 = match entry.kind {
-        HandleKind::MemFd => {
-            crate::ipc::memfd::size(crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle))
-                .unwrap_or(0)
-        }
-        _ => 0,
-    };
+    // None of these kinds has a size (a memfd is a File: §1573).
+    let st_size: u64 = 0;
     let now_ns = crate::timekeeping::clock_realtime();
     #[allow(clippy::cast_possible_wrap)]
     let now_sec = (now_ns / 1_000_000_000) as i64;
@@ -23947,7 +23843,7 @@ fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
 ///   2. caller_pid == None (kernel context)              -> EROFS short-circuit
 ///   3. fd not in PCB table                              -> EBADF
 ///   4. (non-File HandleKind: Pipe/Console/EventFd/PidFd)-> EINVAL
-///   5. File/MemFd fd not opened for write (FMODE_WRITE) -> EINVAL
+///   5. File fd not opened for write (FMODE_WRITE) -> EINVAL
 ///   6. File handle: enforce RLIMIT_FSIZE (EFBIG on grow past the soft
 ///      limit), resolve the fd's backing path, require a File-WRITE
 ///      capability, then `Vfs::truncate(path, length)`.
@@ -23970,7 +23866,7 @@ fn sys_truncate(args: &SyscallArgs) -> SyscallResult {
 ///
 /// The EFBIG check (Linux's `inode_newsize_ok`, reached only after
 /// `mnt_want_write` succeeds) now fires at its proper position for both
-/// the File and MemFd arms, since a writable mount makes that path
+/// the File arm, since a writable mount makes that path
 /// live.
 ///
 /// ## Why it matters
@@ -24020,13 +23916,10 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
     // i.e. EINVAL unless the inode is a regular file AND the fd is open
     // for writing.  The non-regular kinds are EINVAL'd in the match below
     // (their inode mode is not S_ISREG); here we add the FMODE_WRITE half,
-    // which is what distinguishes a read-only regular-file/memfd fd.  This
-    // gate precedes do_truncate's mnt_want_write (the EROFS source) and
-    // the memfd grow, so a read-only File fd is EINVAL — not EROFS — and a
-    // read-only MemFd fd is EINVAL rather than a silent successful resize.
-    if matches!(entry.kind, HandleKind::File | HandleKind::MemFd)
-        && !fd_access_is_writable(entry.status_flags)
-    {
+    // which is what distinguishes a read-only regular-file fd.  This gate
+    // precedes do_truncate's mnt_want_write (the EROFS source), so a
+    // read-only File fd is EINVAL — not EROFS.
+    if entry.kind == HandleKind::File && !fd_access_is_writable(entry.status_flags) {
         return linux_err(errno::EINVAL);
     }
     match entry.kind {
@@ -24057,25 +23950,6 @@ fn sys_ftruncate(args: &SyscallArgs) -> SyscallResult {
                 // answers for a directory.
                 Err(KernelError::IsADirectory) => linux_err(errno::EINVAL),
                 Err(e) => linux_err(linux_errno_for(e)),
-            }
-        }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let new_size = length as u64;
-            // RLIMIT_FSIZE applies to memfd too — Linux enforces it on
-            // any backing-store grow.
-            if let Err(e) = rlimit_fsize_check_size_for_caller(new_size) {
-                return linux_err(e);
-            }
-            match crate::ipc::memfd::truncate(
-                crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle),
-                new_size,
-            ) {
-                Ok(()) => SyscallResult::ok(0),
-                Err(crate::error::KernelError::PermissionDenied) => linux_err(errno::EPERM),
-                Err(crate::error::KernelError::InvalidArgument) => linux_err(errno::EINVAL),
-                Err(crate::error::KernelError::InvalidHandle) => linux_err(errno::EBADF),
-                Err(_) => linux_err(errno::EIO),
             }
         }
         // Pipes, consoles, eventfds, pidfds, epoll, signalfds, timerfds cannot
@@ -26091,15 +25965,11 @@ fn sendfile_src_read_at(
     use crate::proc::linux_fd::HandleKind;
     match kind {
         HandleKind::File => crate::fs::handle::read_at(handle, pos, buf),
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
-            crate::ipc::memfd::read_at(h, pos, buf)
-        }
         _ => Err(crate::error::KernelError::InvalidArgument),
     }
 }
 
-/// Current open-file cursor of a sendfile source (File / MemFd).
+/// Current open-file cursor of a sendfile source (a File; a memfd is one).
 fn sendfile_src_pos(
     kind: crate::proc::linux_fd::HandleKind,
     handle: u64,
@@ -26107,9 +25977,6 @@ fn sendfile_src_pos(
     use crate::proc::linux_fd::HandleKind;
     match kind {
         HandleKind::File => crate::fs::handle::current_offset(handle),
-        HandleKind::MemFd => {
-            crate::ipc::memfd::offset(crate::ipc::memfd::MemFdHandle::from_raw(handle))
-        }
         _ => Err(crate::error::KernelError::InvalidArgument),
     }
 }
@@ -26128,16 +25995,6 @@ fn sendfile_src_set_pos(
             crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Start(pos))?;
             Ok(())
         }
-        HandleKind::MemFd => {
-            // whence = SEEK_SET (0).
-            #[allow(clippy::cast_possible_wrap)]
-            crate::ipc::memfd::seek(
-                crate::ipc::memfd::MemFdHandle::from_raw(handle),
-                pos as i64,
-                0,
-            )?;
-            Ok(())
-        }
         _ => Err(crate::error::KernelError::InvalidArgument),
     }
 }
@@ -26154,10 +26011,6 @@ fn sendfile_dst_write(
     use crate::proc::linux_fd::HandleKind;
     match kind {
         HandleKind::File => crate::fs::handle::write(handle, data),
-        HandleKind::MemFd => {
-            let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
-            crate::ipc::memfd::write(h, data)
-        }
         HandleKind::Pipe => {
             let h = crate::ipc::pipe::PipeHandle::from_raw(handle);
             if nonblock {
@@ -26183,7 +26036,7 @@ fn sendfile_dst_write(
 }
 
 /// Core sendfile transfer: move up to `count` bytes from a source fd
-/// (File / MemFd) starting at absolute byte `start_pos` into a destination
+/// (a File; a memfd is one) starting at absolute byte `start_pos` into a destination
 /// fd, via a kernel bounce buffer.  Stops at source EOF or a short
 /// destination write.  Returns `(bytes_moved, new_pos)` where `new_pos =
 /// start_pos + bytes_moved`.
@@ -26324,7 +26177,7 @@ fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
     // Gate 4: with an explicit offset, a non-seekable source lacks FMODE_PREAD
     // -> ESPIPE.  FMODE_PREAD is set for seekable regular files; pipes/streams
     // lack it.
-    let in_seekable = matches!(in_entry.kind, HandleKind::File | HandleKind::MemFd);
+    let in_seekable = matches!(in_entry.kind, HandleKind::File);
     if offset_ptr != 0 && !in_seekable {
         return linux_err(errno::ESPIPE);
     }
@@ -26348,7 +26201,7 @@ fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
     // The destination must be a byte sink we can push a kernel buffer into.
     if !matches!(
         out_entry.kind,
-        HandleKind::File | HandleKind::MemFd | HandleKind::Pipe | HandleKind::Console
+        HandleKind::File | HandleKind::Pipe | HandleKind::Console
     ) {
         return linux_err(errno::EINVAL);
     }
@@ -26423,7 +26276,7 @@ fn sys_sendfile(args: &SyscallArgs) -> SyscallResult {
 /// `SPLICE_F_NONBLOCK` (fs/splice.h) — do not block on the pipe end(s).
 const SPLICE_F_NONBLOCK: u32 = 0x02;
 
-/// Read up to `buf.len()` bytes from a splice source.  File/MemFd sources are
+/// Read up to `buf.len()` bytes from a splice source.  File sources are
 /// read positionally at `pos` (cursor untouched — the caller advances it);
 /// pipe sources are read sequentially from the pipe's own cursor.  `allow_block`
 /// is honoured only for a *blocking* pipe source and only on the very first
@@ -26439,7 +26292,7 @@ fn splice_read(
 ) -> crate::error::KernelResult<usize> {
     use crate::proc::linux_fd::HandleKind;
     match kind {
-        HandleKind::File | HandleKind::MemFd => sendfile_src_read_at(kind, handle, pos, buf),
+        HandleKind::File => sendfile_src_read_at(kind, handle, pos, buf),
         HandleKind::Pipe => {
             let h = crate::ipc::pipe::PipeHandle::from_raw(handle);
             if !nonblock && allow_block {
@@ -26452,7 +26305,7 @@ fn splice_read(
     }
 }
 
-/// Write `data` to a splice destination.  File/MemFd destinations are written
+/// Write `data` to a splice destination.  File destinations are written
 /// positionally at `pos` (file-extending); pipe destinations are written
 /// sequentially.  `nonblock` selects the non-blocking pipe path.
 fn splice_write(
@@ -26464,7 +26317,7 @@ fn splice_write(
 ) -> crate::error::KernelResult<usize> {
     use crate::proc::linux_fd::HandleKind;
     match kind {
-        HandleKind::File | HandleKind::MemFd => cfr_dst_write_at(kind, handle, pos, data),
+        HandleKind::File => cfr_dst_write_at(kind, handle, pos, data),
         HandleKind::Pipe => {
             let h = crate::ipc::pipe::PipeHandle::from_raw(handle);
             if nonblock {
@@ -26496,10 +26349,10 @@ fn splice_dst_pipe_space(kind: crate::proc::linux_fd::HandleKind, handle: u64) -
 
 /// Core splice transfer: move up to `len` bytes between a source and a
 /// destination where at least one end is a pipe, via a kernel bounce buffer.
-/// File/MemFd ends are read/written positionally at `in_start` / `out_start`;
+/// File ends are read/written positionally at `in_start` / `out_start`;
 /// pipe ends use their own cursors.  Returns `(bytes_moved, in_end, out_end)`
 /// where `in_end`/`out_end` are the post-transfer file positions (meaningful
-/// only for the File/MemFd side; the pipe side ignores them).
+/// only for the File side; the pipe side ignores them).
 ///
 /// Blocking discipline (`nonblock` = `SPLICE_F_NONBLOCK`):
 ///  * Non-blocking: a pipe with no data / no space yields `WouldBlock` when
@@ -26751,9 +26604,9 @@ fn sys_splice(args: &SyscallArgs) -> SyscallResult {
     if !in_is_pipe && !out_is_pipe {
         return linux_err(errno::EINVAL);
     }
-    // A non-pipe end must be a splice-capable regular file (File/MemFd); pipes,
+    // A non-pipe end must be a splice-capable regular file (a File); pipes,
     // consoles, sockets, etc. on the non-pipe side are rejected EINVAL.
-    let regular = |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+    let regular = |k: HandleKind| matches!(k, HandleKind::File);
     if (!in_is_pipe && !regular(in_entry.kind)) || (!out_is_pipe && !regular(out_entry.kind)) {
         return linux_err(errno::EINVAL);
     }
@@ -26763,7 +26616,7 @@ fn sys_splice(args: &SyscallArgs) -> SyscallResult {
         return linux_err(errno::EINVAL);
     }
 
-    // Resolve the File/MemFd-side start positions.  A pipe end has no offset
+    // Resolve the File-side start positions.  A pipe end has no offset
     // (off_* was forced NULL by the ESPIPE gate above), so its start is unused.
     let in_start = if in_is_pipe {
         0
@@ -26801,7 +26654,7 @@ fn sys_splice(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(linux_errno_for(e)),
     };
 
-    // Position bookkeeping for the File/MemFd side(s): a NULL offset advances
+    // Position bookkeeping for the File side(s): a NULL offset advances
     // the file cursor; a non-NULL offset leaves the cursor and writes the new
     // position back (which can surface EFAULT after a successful transfer).
     if !in_is_pipe {
@@ -27318,7 +27171,7 @@ fn vmsplice_core(
     Ok(total)
 }
 
-/// Positional write of `data` to a copy_file_range destination (File / MemFd)
+/// Positional write of `data` to a copy_file_range destination (a File; a memfd is one)
 /// at absolute byte `pos`, WITHOUT advancing the open-file cursor.  Returns
 /// bytes accepted (`data.len()` for these kinds barring an error or memfd
 /// seal).
@@ -27331,15 +27184,12 @@ fn cfr_dst_write_at(
     use crate::proc::linux_fd::HandleKind;
     match kind {
         HandleKind::File => crate::fs::handle::write_at(handle, pos, data),
-        HandleKind::MemFd => {
-            crate::ipc::memfd::write_at(crate::ipc::memfd::MemFdHandle::from_raw(handle), pos, data)
-        }
         _ => Err(crate::error::KernelError::InvalidArgument),
     }
 }
 
 /// Core copy_file_range transfer: move up to `len` bytes from a source fd
-/// (File / MemFd) at absolute byte `in_start` to a destination fd at absolute
+/// (a File; a memfd is one) at absolute byte `in_start` to a destination fd at absolute
 /// byte `out_start`, via a kernel bounce buffer using positional reads and
 /// writes (neither cursor is touched here — the caller handles that).  Stops
 /// at source EOF or a short destination write.  Returns
@@ -27416,8 +27266,7 @@ fn copy_file_range_core(
 /// source and destination with overlapping `[pos, pos+len)` ranges — Linux
 /// rejects that case with EINVAL (`generic_copy_file_checks`).
 ///
-/// "Same object" is detected by open-path equality for File handles and by
-/// handle identity for MemFd (all handles to one memfd share the same raw id).
+/// "Same object" is detected by open-path equality for File handles.
 /// LIMITATION: two *hardlinks* to the same inode have distinct paths and are
 /// not detected as the same object — Linux compares inodes, which our fd layer
 /// does not expose here.  This is the same approximation the rest of the path
@@ -27448,7 +27297,6 @@ fn copy_file_range_overlaps(
                 (Ok(a), Ok(b)) if a == b
             ),
         },
-        (HandleKind::MemFd, HandleKind::MemFd) => in_handle == out_handle,
         _ => false,
     };
     if !same {
@@ -27599,11 +27447,11 @@ fn sys_copy_file_range(args: &SyscallArgs) -> SyscallResult {
         Some(e) => e,
         None => return linux_err(errno::EBADF),
     };
-    // 4a: !S_ISREG(in) || !S_ISREG(out) -> -EINVAL.  Only File/MemFd back a
+    // 4a: !S_ISREG(in) || !S_ISREG(out) -> -EINVAL.  Only File backs a
     // regular-file inode; pipes, consoles, eventfd, etc. are non-regular.
     // (Linux's preceding S_ISDIR -> -EISDIR arm is not modelled: our fd layer
     // does not distinguish a directory fd from a regular File.)
-    let is_regular = |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+    let is_regular = |k: HandleKind| matches!(k, HandleKind::File);
     if !is_regular(in_entry.kind) || !is_regular(out_entry.kind) {
         return linux_err(errno::EINVAL);
     }
@@ -28920,21 +28768,20 @@ fn sys_userfaultfd(args: &SyscallArgs) -> SyscallResult {
 
 /// `memfd_create(name, flags)`.
 ///
-/// Allocates a fresh `HandleKind::MemFd` slot in the caller's Linux fd
-/// table backed by an in-kernel anonymous in-memory file managed by
-/// [`crate::ipc::memfd`].  Linux gives the inode the conventional
-/// "`memfd:<name>`" path label and `S_IFREG | 0o777` mode bits; we follow
-/// suit (see `fill_stat_for_fd`).
+/// Makes a memfd ([`crate::ipc::memfd`], design-decisions §1573): an unnamed
+/// file on the kernel's own memfs, installed as a file descriptor open
+/// read-write. Linux shows it as `/memfd:<name> (deleted)` with mode
+/// `S_IFREG | 0o777`; so does this.
 ///
 /// Flags:
 ///   * `MFD_CLOEXEC=1` — set `FD_CLOEXEC` on the new fd.
-///   * `MFD_ALLOW_SEALING=2` — permit subsequent `F_ADD_SEALS` (sealing
-///     API is stored but `fcntl(F_ADD_SEALS / F_GET_SEALS)` plumbing is
-///     deferred).
-///   * `MFD_HUGETLB=4`, `MFD_NOEXEC_SEAL=8`, `MFD_EXEC=16`, and the
-///     huge-page-size bits 26..31 are accepted (validated) but
-///     otherwise ignored — we have one page size and no separate
-///     execute permission model.
+///   * `MFD_ALLOW_SEALING=2` — seals may be added (`fcntl(F_ADD_SEALS)`);
+///     without it the file is born sealed with `F_SEAL_SEAL`.
+///   * `MFD_NOEXEC_SEAL=8` — mode `0666`, sealed with `F_SEAL_EXEC`, sealing
+///     allowed, as Linux 6.3 and later.
+///   * `MFD_HUGETLB=4`, `MFD_EXEC=16`, and the huge-page-size bits 26..31
+///     are accepted (validated) and otherwise ignored: there is one page
+///     size, and `MFD_EXEC` is what happens anyway.
 ///
 /// Errors:
 ///   * `EFAULT` — `name` is NULL or unreadable.
@@ -29031,22 +28878,18 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return linux_err(e),
     };
 
-    let allow_sealing = (flags & MFD_ALLOW_SEALING) != 0;
-    let handle = crate::ipc::memfd::create_with_flags(name, allow_sealing);
+    let memfd_flags = crate::ipc::memfd::CreateFlags {
+        allow_sealing: (flags & MFD_ALLOW_SEALING) != 0,
+        noexec_seal: (flags & MFD_NOEXEC_SEAL) != 0,
+    };
+    let raw_handle = match crate::ipc::memfd::create(&name, memfd_flags) {
+        Ok(h) => h,
+        Err(e) => return linux_err(linux_errno_for(e)),
+    };
 
-    // Register the memfd in the caller's per-process IPC handle list so
-    // (a) process-exit cleanup releases it via `ipc::cleanup_handles`
-    //     even if the linux_fd_table layer somehow loses the entry, and
-    // (b) `fork::build_fork_child` sees it in the snapshot and runs
-    //     `dup_one` (which routes through `ipc::memfd::dup`) to bump the
-    //     memfd refcount in the child.  Without this the child's
-    //     inherited fd is a dangling reference once the parent closes.
-    //     This mirrors what `handlers::sys_pipe_create` /
-    //     `handlers::sys_eventfd_create` already do for the native ABI.
-    pcb::register_ipc_handle(caller, crate::cap::ResourceType::MemFd, handle.raw());
-
-    // O_RDWR by convention — memfds are always both readable and writable.
-    let mut entry = crate::proc::linux_fd::FdEntry::memfd(handle.raw(), oflags::O_RDWR);
+    // A memfd is a file (design-decisions §1573), open read-write: the fd
+    // table keeps, forks and closes it as any file's.
+    let mut entry = crate::proc::linux_fd::FdEntry::file(raw_handle, oflags::O_RDWR);
     if (flags & MFD_CLOEXEC) != 0 {
         entry.fd_flags = crate::proc::linux_fd::FD_CLOEXEC;
     }
@@ -29054,11 +28897,9 @@ fn sys_memfd_create(args: &SyscallArgs) -> SyscallResult {
     match pcb::linux_fd_install(caller, entry, 0) {
         Ok(fd) => SyscallResult::ok(i64::from(fd)),
         Err(e) => {
-            // Install failed (e.g. table full).  Release the memfd we
-            // just allocated and drop the just-registered ipc_handles
-            // entry so the next fork doesn't see a phantom handle.
-            pcb::deregister_ipc_handle(caller, crate::cap::ResourceType::MemFd, handle.raw());
-            crate::ipc::memfd::close(handle);
+            // Install failed (e.g. table full): the handle is the file's only
+            // reference, and its close ends the file.
+            let _ = crate::fs::handle::close(raw_handle);
             linux_err(linux_errno_for(e))
         }
     }
@@ -30029,7 +29870,7 @@ enum XattrFd {
     File(crate::fs::handle::HandleFile),
     /// Anything else -- a pipe, a socket, an event descriptor, a device -- of
     /// this kind: an object on no filesystem that keeps attributes.
-    Other(HandleKind),
+    Other,
 }
 
 /// The object behind a descriptor call's descriptor; `EBADF` for one that is
@@ -30039,7 +29880,7 @@ fn xattr_fd(arg: u64) -> Result<XattrFd, SyscallResult> {
     let fd = arg as i32;
     let entry = lookup_caller_fd(fd)?;
     if entry.kind != HandleKind::File {
-        return Ok(XattrFd::Other(entry.kind));
+        return Ok(XattrFd::Other);
     }
     crate::fs::handle::HandleFile::of(entry.raw_handle)
         .map(XattrFd::File)
@@ -30048,24 +29889,15 @@ fn xattr_fd(arg: u64) -> Result<XattrFd, SyscallResult> {
 
 /// The answer for an attribute of an object on no filesystem: the rules'
 /// refusal, then `NotSupported`, as Linux answers for an inode without
-/// `IOP_XATTR` (`xattr_policy::unkept`). A memfd is a regular file; the rest
-/// are neither files nor directories, which is all the rules ask.
+/// `IOP_XATTR` (`xattr_policy::unkept`). None is a file or a directory,
+/// which is all the rules ask.
 ///
-/// Linux keeps attributes on two of these that this kernel does not: a
-/// memfd's (it is a tmpfs file there), and a socket's
-/// `system.sockprotoname`. Recorded in known-issues
-/// `A-XATTR-ON-SOCKETS-AND-MEMFDS`.
-fn xattr_unkept(
-    kind: HandleKind,
-    name: &[u8],
-    access: crate::fs::xattr_policy::Access,
-) -> KernelError {
-    let entry_type = if kind == HandleKind::MemFd {
-        crate::fs::EntryType::File
-    } else {
-        crate::fs::EntryType::CharDevice
-    };
-    let meta = crate::fs::FileMeta::minimal(entry_type, 0);
+/// Linux keeps attributes on one of these that this kernel does not: a
+/// socket's `system.sockprotoname`. Recorded in known-issues
+/// `A-XATTR-ON-SOCKETS-AND-MEMFDS`. (A memfd's are kept: it is a file, since
+/// 2026-10-17, design-decisions §1573.)
+fn xattr_unkept(name: &[u8], access: crate::fs::xattr_policy::Access) -> KernelError {
+    let meta = crate::fs::FileMeta::minimal(crate::fs::EntryType::CharDevice, 0);
     let caller = crate::fs::xattr_policy::Caller::current();
     crate::fs::xattr_policy::unkept(name, access, &meta, caller)
 }
@@ -30173,8 +30005,7 @@ fn sys_fsetxattr(args: &SyscallArgs) -> SyscallResult {
     }
     let res = match &file {
         XattrFd::File(f) => f.set_xattr(&set.name, &set.value, set.mode),
-        XattrFd::Other(kind) => Err(xattr_unkept(
-            *kind,
+        XattrFd::Other => Err(xattr_unkept(
             &set.name,
             crate::fs::xattr_policy::Access::Write,
         )),
@@ -30229,11 +30060,7 @@ fn sys_fgetxattr(args: &SyscallArgs) -> SyscallResult {
     }
     let value = match &file {
         XattrFd::File(f) => f.get_xattr(&name),
-        XattrFd::Other(kind) => Err(xattr_unkept(
-            *kind,
-            &name,
-            crate::fs::xattr_policy::Access::Read,
-        )),
+        XattrFd::Other => Err(xattr_unkept(&name, crate::fs::xattr_policy::Access::Read)),
     };
     match value {
         Ok(value) => xattr_copy_out(&value, args.arg2, args.arg3, XATTR_SIZE_MAX),
@@ -30273,7 +30100,7 @@ fn sys_flistxattr(args: &SyscallArgs) -> SyscallResult {
     }
     let names = match &file {
         XattrFd::File(f) => f.list_xattrs(),
-        XattrFd::Other(_) => Ok(alloc::vec::Vec::new()),
+        XattrFd::Other => Ok(alloc::vec::Vec::new()),
     };
     xattr_list_out(names, args.arg1, args.arg2)
 }
@@ -30329,11 +30156,7 @@ fn sys_fremovexattr(args: &SyscallArgs) -> SyscallResult {
     }
     let res = match &file {
         XattrFd::File(f) => f.remove_xattr(&name),
-        XattrFd::Other(kind) => Err(xattr_unkept(
-            *kind,
-            &name,
-            crate::fs::xattr_policy::Access::Write,
-        )),
+        XattrFd::Other => Err(xattr_unkept(&name, crate::fs::xattr_policy::Access::Write)),
     };
     match res {
         Ok(()) => SyscallResult::ok(0),
@@ -32836,23 +32659,6 @@ pub(crate) fn revents_for_handle(
                 Some(_) => 0,
             }
         }
-        HandleKind::MemFd => {
-            // memfd is a regular file — always readable, always writable.
-            // poll_status returns POLLIN|POLLOUT for live memfds, 0 if the
-            // handle has already been closed (the caller will see EBADF on
-            // a subsequent op).
-            let status = crate::ipc::memfd::poll_status(crate::ipc::memfd::MemFdHandle::from_raw(
-                raw_handle,
-            ));
-            let mut r = status;
-            if status & poll_bits::POLLIN != 0 {
-                r |= poll_bits::POLLRDNORM;
-            }
-            if status & poll_bits::POLLOUT != 0 {
-                r |= poll_bits::POLLWRNORM;
-            }
-            r
-        }
         HandleKind::Epoll => {
             // Polling an epoll fd *itself* (nesting it inside poll/select
             // or another epoll) reports POLLIN once any registered fd in
@@ -33086,7 +32892,7 @@ pub(crate) fn revents_for_handle(
 /// a userspace daemon or a device that has no way to push readiness into the
 /// kernel; `Epoll`, `SignalFd`, `Inotify` and `PidFd` are kernel-side but derive
 /// their readiness from state (a member fd, a signal set, a queue, a process
-/// lifetime) that no single waiter set covers; `File`, `MemFd` and `Console` are
+/// lifetime) that no single waiter set covers; `File` and `Console` are
 /// either always ready or have no readiness notion at all.
 ///
 /// Being poll-only is not a defect to be worked around at the call site — it is
@@ -34111,7 +33917,7 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
     //   1. op != DEL  ->  read event (EFAULT on NULL/unreadable).
     //   2. fdget(epfd) -> EBADF on a missing epfd.
     //   3. fdget(fd)   -> EBADF on a missing target fd.
-    //   4. file_can_poll(tf) -> EPERM for regular files (File / MemFd).
+    //   4. file_can_poll(tf) -> EPERM for regular files (a File; a memfd is one).
     //   5. f.file == tf.file || !is_file_epoll(f.file) -> EINVAL
     //      (self-loop, or epfd is not actually an epoll instance).
     //   6. op switch: ADD/MOD/DEL mutate the interest set; unknown op
@@ -34167,11 +33973,11 @@ fn sys_epoll_ctl(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::linux_fd::HandleKind;
 
     // Gate 4: file_can_poll(tf) -> EPERM if the target does not support
-    // poll.  Regular files (File, MemFd) have no .poll in Linux, so
+    // poll.  Regular files (File) have no .poll in Linux, so
     // epoll rejects them with EPERM — userspace relies on this to fall
     // back to thread-pool I/O for regular files.  Nor has a namespace's.
     match target_entry.kind {
-        HandleKind::File | HandleKind::MemFd | HandleKind::Namespace => {
+        HandleKind::File | HandleKind::Namespace => {
             return linux_err(errno::EPERM);
         }
         HandleKind::Console
@@ -37046,7 +36852,6 @@ fn handle_kind_ord(k: crate::proc::linux_fd::HandleKind) -> u64 {
         HandleKind::Pipe => 2,
         HandleKind::EventFd => 3,
         HandleKind::PidFd => 4,
-        HandleKind::MemFd => 5,
         HandleKind::Epoll => 6,
         HandleKind::SignalFd => 7,
         HandleKind::Timerfd => 8,
@@ -37619,7 +37424,7 @@ fn sys_cachestat(args: &SyscallArgs) -> SyscallResult {
             match entry.kind {
                 // memfd is page-cache-backed on Linux, so cachestat is
                 // valid against it (always zero in our world).
-                HandleKind::File | HandleKind::MemFd => {}
+                HandleKind::File => {}
                 HandleKind::Console
                 | HandleKind::Pipe
                 | HandleKind::EventFd
@@ -46037,38 +45842,6 @@ fn fallocate_zero_file(
     Ok(())
 }
 
-/// `MemFd` counterpart of [`fallocate_zero_file`]: zero `[offset, end)` of
-/// an in-memory file. Same `keep_size` semantics. The in-memory backing
-/// never reclaims space, so `PUNCH_HOLE`/`ZERO_RANGE` are likewise just
-/// "reads return zero" on a memfd.
-#[allow(clippy::cast_possible_truncation)]
-fn fallocate_zero_memfd(
-    h: crate::ipc::memfd::MemFdHandle,
-    offset: u64,
-    end: u64,
-    keep_size: bool,
-) -> crate::error::KernelResult<()> {
-    let size = crate::ipc::memfd::size(h)?;
-    let zero_end = if keep_size { end.min(size) } else { end };
-    if offset >= zero_end {
-        return Ok(());
-    }
-    const CHUNK: usize = 16 * 1024;
-    let zeros = alloc::vec![0u8; CHUNK];
-    let mut pos = offset;
-    while pos < zero_end {
-        let remaining = zero_end.saturating_sub(pos);
-        let this = if remaining > CHUNK as u64 {
-            CHUNK
-        } else {
-            remaining as usize
-        };
-        crate::ipc::memfd::write_at(h, pos, zeros.get(..this).unwrap_or(&[]))?;
-        pos = pos.saturating_add(this as u64);
-    }
-    Ok(())
-}
-
 /// `FALLOC_FL_COLLAPSE_RANGE`: remove the byte range `[offset, offset+len)`
 /// from a file and shift every byte after it down by `len`, so the file
 /// shrinks by exactly `len`.  The caller (`sys_fallocate`) has already
@@ -46334,7 +46107,7 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
         // ENODEV — both ahead of the `f_op->fallocate` (EOPNOTSUPP) check.
         match entry.kind {
             HandleKind::Pipe => return linux_err(errno::ESPIPE),
-            HandleKind::File | HandleKind::MemFd => {}
+            HandleKind::File => {}
             _ => return linux_err(errno::ENODEV),
         }
         // end = offset + len; offset >= 0 and len > 0 by gate (2).  A sum
@@ -46454,37 +46227,8 @@ fn sys_fallocate(args: &SyscallArgs) -> SyscallResult {
                 // concept our backends don't implement).
                 return linux_err(errno::EOPNOTSUPP);
             }
-            HandleKind::MemFd => {
-                let h = crate::ipc::memfd::MemFdHandle::from_raw(entry.raw_handle);
-                if mode == 0 {
-                    let cur = match crate::ipc::memfd::size(h) {
-                        Ok(s) => s,
-                        Err(e) => return linux_err(linux_errno_for(e)),
-                    };
-                    if cur < end_u64 {
-                        return match crate::ipc::memfd::truncate(h, end_u64) {
-                            Ok(()) => SyscallResult::ok(0),
-                            Err(e) => linux_err(linux_errno_for(e)),
-                        };
-                    }
-                    return SyscallResult::ok(0);
-                }
-                if mode == KEEP_SIZE {
-                    // The in-memory backing has no separate block
-                    // reservation; KEEP_SIZE is a successful no-op (the
-                    // logical size is unchanged either way).
-                    return SyscallResult::ok(0);
-                }
-                if mode & PUNCH_HOLE != 0 || mode & ZERO_RANGE != 0 {
-                    return match fallocate_zero_memfd(h, offset_u64, end_u64, zero_keep_size) {
-                        Ok(()) => SyscallResult::ok(0),
-                        Err(e) => linux_err(linux_errno_for(e)),
-                    };
-                }
-                return linux_err(errno::EOPNOTSUPP);
-            }
             // Unreachable: the kind match above already narrowed to
-            // File/MemFd, but keep an explicit ENODEV terminal rather than
+            // File, but keep an explicit ENODEV terminal rather than
             // an unreachable!() so a future kind addition can't panic.
             _ => return linux_err(errno::ENODEV),
         }
@@ -46664,78 +46408,6 @@ fn pwrite_file_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Resu
     Ok(n as i64)
 }
 
-/// Backend for `pread64`/`preadv*` against a MemFd handle.
-///
-/// Same shape as [`pread_file_to_user`] but routes through the memfd
-/// subsystem.  Errors are mapped to Linux errno values: `InvalidHandle`
-/// → `EBADF`, `InvalidArgument` → `EINVAL`, everything else → `EIO`.
-fn pread_memfd_to_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<i64, i32> {
-    if len == 0 {
-        return Ok(0);
-    }
-    // Streamed through a bounded bounce buffer (`handlers::stream_user_read`).
-    // The copy's own faults and allocation failures keep their errnos; the
-    // memfd's are mapped as before.
-    let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
-    let mut at = offset;
-    let n = handlers::stream_user_read(buf, len, |chunk| {
-        let n = crate::ipc::memfd::read_at(h, at, chunk)?;
-        at = at.saturating_add(n as u64);
-        Ok(n)
-    })
-    .map_err(|e| match e {
-        crate::error::KernelError::InvalidHandle => errno::EBADF,
-        crate::error::KernelError::InvalidArgument => errno::EINVAL,
-        crate::error::KernelError::InvalidAddress | crate::error::KernelError::OutOfMemory => {
-            linux_errno_for(e)
-        }
-        _ => errno::EIO,
-    })?;
-    #[allow(clippy::cast_possible_wrap)]
-    Ok(n as i64)
-}
-
-/// Backend for `pwrite64`/`pwritev*` against a MemFd handle.
-///
-/// Same RLIMIT_FSIZE clipping policy as [`pwrite_file_from_user`].
-/// Memfd write returns `PermissionDenied` when an active seal blocks
-/// the write (`F_SEAL_WRITE` / `F_SEAL_FUTURE_WRITE`), surfaced as
-/// `EPERM` to match Linux.
-fn pwrite_memfd_from_user(handle: u64, offset: u64, buf: u64, len: usize) -> Result<i64, i32> {
-    if len == 0 {
-        return Ok(0);
-    }
-    let clipped = rlimit_fsize_clip_for_caller(offset, len as u64)?;
-    let len = match usize::try_from(clipped) {
-        Ok(v) => v,
-        Err(_) => return Err(errno::EINVAL),
-    };
-    if len == 0 {
-        return Ok(0);
-    }
-    // Streamed through a bounded bounce buffer (`handlers::stream_user_write`).
-    // A seal that stops a later chunk leaves the earlier ones written and
-    // returns their count, as Linux's shmem does page by page.
-    let h = crate::ipc::memfd::MemFdHandle::from_raw(handle);
-    let mut at = offset;
-    let n = handlers::stream_user_write(buf, len, |chunk| {
-        let n = crate::ipc::memfd::write_at(h, at, chunk)?;
-        at = at.saturating_add(n as u64);
-        Ok(n)
-    })
-    .map_err(|e| match e {
-        crate::error::KernelError::InvalidHandle => errno::EBADF,
-        crate::error::KernelError::PermissionDenied => errno::EPERM,
-        crate::error::KernelError::InvalidArgument => errno::EINVAL,
-        crate::error::KernelError::InvalidAddress | crate::error::KernelError::OutOfMemory => {
-            linux_errno_for(e)
-        }
-        _ => errno::EIO,
-    })?;
-    #[allow(clippy::cast_possible_wrap)]
-    Ok(n as i64)
-}
-
 /// Enforce `RLIMIT_FSIZE` against a positional write that would write
 /// `len` bytes starting at `offset`.
 ///
@@ -46864,14 +46536,6 @@ fn sys_pread64(args: &SyscallArgs) -> SyscallResult {
                 Err(e) => linux_err(e),
             }
         }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let off = offset as u64;
-            match pread_memfd_to_user(entry.raw_handle, off, buf, len) {
-                Ok(n) => SyscallResult::ok(n),
-                Err(e) => linux_err(e),
-            }
-        }
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -46933,14 +46597,6 @@ fn sys_pwrite64(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_sign_loss)]
             let off = offset as u64;
             match pwrite_file_from_user(entry.raw_handle, off, buf, len) {
-                Ok(n) => SyscallResult::ok(n),
-                Err(e) => linux_err(e),
-            }
-        }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let off = offset as u64;
-            match pwrite_memfd_from_user(entry.raw_handle, off, buf, len) {
                 Ok(n) => SyscallResult::ok(n),
                 Err(e) => linux_err(e),
             }
@@ -48683,112 +48339,6 @@ fn pwritev_file_walk(handle: u64, base_offset: u64, iov_ptr: u64, iovcnt: i32) -
     SyscallResult::ok(total)
 }
 
-/// Walk an iovec array, calling `pread_memfd_to_user` for each entry
-/// at successive offsets.  Same partial-result semantics as
-/// [`preadv_file_walk`] — memfd reads short-return at EOF mid-iov.
-fn preadv_memfd_walk(handle: u64, base_offset: u64, iov_ptr: u64, iovcnt: i32) -> SyscallResult {
-    let mut total: i64 = 0;
-    let mut cur_offset: u64 = base_offset;
-    for i in 0..iovcnt {
-        let entry_ptr = iov_ptr.wrapping_add((i as u64) * 16);
-        #[repr(C)]
-        struct Iovec {
-            base: u64,
-            len: u64,
-        }
-        let mut iov = Iovec { base: 0, len: 0 };
-        // SAFETY: validate_iov has already verified the iov array.
-        let r = unsafe {
-            crate::mm::user::copy_from_user(
-                entry_ptr,
-                (&raw mut iov).cast::<u8>(),
-                core::mem::size_of::<Iovec>(),
-            )
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
-        if iov.len == 0 {
-            continue;
-        }
-        let len = match usize::try_from(iov.len) {
-            Ok(v) => v,
-            Err(_) => return linux_err(errno::EINVAL),
-        };
-        match pread_memfd_to_user(handle, cur_offset, iov.base, len) {
-            Ok(n) => {
-                total = total.saturating_add(n);
-                #[allow(clippy::cast_sign_loss)]
-                let advance = n as u64;
-                cur_offset = cur_offset.saturating_add(advance);
-                if (n as u64) < iov.len {
-                    return SyscallResult::ok(total);
-                }
-            }
-            Err(e) => {
-                if total > 0 {
-                    return SyscallResult::ok(total);
-                }
-                return linux_err(e);
-            }
-        }
-    }
-    SyscallResult::ok(total)
-}
-
-/// Walk an iovec array, calling `pwrite_memfd_from_user` for each entry
-/// at successive offsets.  Same partial-result semantics as
-/// [`pwritev_file_walk`].
-fn pwritev_memfd_walk(handle: u64, base_offset: u64, iov_ptr: u64, iovcnt: i32) -> SyscallResult {
-    let mut total: i64 = 0;
-    let mut cur_offset: u64 = base_offset;
-    for i in 0..iovcnt {
-        let entry_ptr = iov_ptr.wrapping_add((i as u64) * 16);
-        #[repr(C)]
-        struct Iovec {
-            base: u64,
-            len: u64,
-        }
-        let mut iov = Iovec { base: 0, len: 0 };
-        // SAFETY: validate_iov has already verified the iov array.
-        let r = unsafe {
-            crate::mm::user::copy_from_user(
-                entry_ptr,
-                (&raw mut iov).cast::<u8>(),
-                core::mem::size_of::<Iovec>(),
-            )
-        };
-        if let Err(e) = r {
-            return linux_err(linux_errno_for(e));
-        }
-        if iov.len == 0 {
-            continue;
-        }
-        let len = match usize::try_from(iov.len) {
-            Ok(v) => v,
-            Err(_) => return linux_err(errno::EINVAL),
-        };
-        match pwrite_memfd_from_user(handle, cur_offset, iov.base, len) {
-            Ok(n) => {
-                total = total.saturating_add(n);
-                #[allow(clippy::cast_sign_loss)]
-                let advance = n as u64;
-                cur_offset = cur_offset.saturating_add(advance);
-                if (n as u64) < iov.len {
-                    return SyscallResult::ok(total);
-                }
-            }
-            Err(e) => {
-                if total > 0 {
-                    return SyscallResult::ok(total);
-                }
-                return linux_err(e);
-            }
-        }
-    }
-    SyscallResult::ok(total)
-}
-
 /// `preadv(fd, iov, iovcnt, offset)` — positional vectored read.
 ///
 /// Implemented via [`fs::handle::read_at`](crate::fs::handle::read_at):
@@ -48814,11 +48364,6 @@ fn sys_preadv(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_sign_loss)]
             let off = offset as u64;
             preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
-        }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let off = offset as u64;
-            preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
         HandleKind::Console
         | HandleKind::Pipe
@@ -48861,11 +48406,6 @@ fn sys_pwritev(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_sign_loss)]
             let off = offset as u64;
             pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
-        }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let off = offset as u64;
-            pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
         HandleKind::Console
         | HandleKind::Pipe
@@ -48940,11 +48480,6 @@ fn sys_preadv2(args: &SyscallArgs) -> SyscallResult {
             let off = offset as u64;
             preadv_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let off = offset as u64;
-            preadv_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
-        }
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::EventFd
@@ -48999,11 +48534,6 @@ fn sys_pwritev2(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_sign_loss)]
             let off = offset as u64;
             pwritev_file_walk(entry.raw_handle, off, iov_ptr, iovcnt)
-        }
-        HandleKind::MemFd => {
-            #[allow(clippy::cast_sign_loss)]
-            let off = offset as u64;
-            pwritev_memfd_walk(entry.raw_handle, off, iov_ptr, iovcnt)
         }
         HandleKind::Console
         | HandleKind::Pipe
@@ -53138,30 +52668,11 @@ pub fn self_test_xattr_calls() -> crate::error::KernelResult<()> {
         // Objects on no filesystem: the rules, then EOPNOTSUPP.
         let (r, w) = (Access::Read, Access::Write);
         let unkept = [
-            (
-                xattr_unkept(HandleKind::Pipe, b"user.x", r),
-                KernelError::NoAttribute,
-            ),
-            (
-                xattr_unkept(HandleKind::Pipe, b"user.x", w),
-                KernelError::NotPermitted,
-            ),
-            (
-                xattr_unkept(HandleKind::Pipe, b"trusted.x", r),
-                KernelError::NotSupported,
-            ),
-            (
-                xattr_unkept(HandleKind::Pipe, b"trusted.", r),
-                KernelError::NotSupported,
-            ),
-            (
-                xattr_unkept(HandleKind::Socket, b"foo", w),
-                KernelError::NotSupported,
-            ),
-            (
-                xattr_unkept(HandleKind::MemFd, b"user.x", r),
-                KernelError::NotSupported,
-            ),
+            (xattr_unkept(b"user.x", r), KernelError::NoAttribute),
+            (xattr_unkept(b"user.x", w), KernelError::NotPermitted),
+            (xattr_unkept(b"trusted.x", r), KernelError::NotSupported),
+            (xattr_unkept(b"trusted.", r), KernelError::NotSupported),
+            (xattr_unkept(b"foo", w), KernelError::NotSupported),
         ];
         if unkept.iter().any(|(got, want)| got != want) {
             serial_println!("[syscall/linux]   {:?}", unkept);
@@ -53554,7 +53065,7 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
 // ---------------------------------------------------------------------------
 
 /// End-to-end test of the `sendfile(2)` copy path — [`sendfile_core`] and the
-/// File/MemFd source helpers it drives.
+/// File source helpers it drives (a memfd's among them).
 ///
 /// Runs after the `/tmp` memfs mount so it can stage real files.  Exercises
 /// the `fallocate` PUNCH_HOLE / ZERO_RANGE zeroing path ([`fallocate_zero_file`]
@@ -53566,7 +53077,7 @@ pub fn self_test_rename_noreplace() -> crate::error::KernelResult<()> {
 ///  2. PUNCH_HOLE (always KEEP_SIZE): zero a second range, size unchanged.
 ///  3. KEEP_SIZE range entirely past EOF → no-op, size unchanged.
 ///  4. ZERO_RANGE without KEEP_SIZE crossing EOF → file grows, gap zeroed.
-///  5. MemFd ZERO_RANGE + KEEP_SIZE: zero a range, size unchanged.
+///  5. A memfd's ZERO_RANGE + KEEP_SIZE: zero a range, size unchanged.
 pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
     use crate::serial_println;
@@ -53689,22 +53200,22 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
     }
     let _ = crate::fs::Vfs::remove(path);
 
-    // (5) MemFd ZERO_RANGE + KEEP_SIZE.
+    // (5) ZERO_RANGE + KEEP_SIZE on a memfd: a file like any (design-decisions
+    //     §1573), on the kernel's own memfs.
     {
-        let h = crate::ipc::memfd::create_with_flags(b"falloc-test".to_vec(), false);
-        if crate::ipc::memfd::write_at(h, 0, &[0xAAu8; N]).is_err() {
-            crate::ipc::memfd::close(h);
-            serial_println!("[syscall/linux]   FAIL: fallocate memfd stage write");
-            return Err(KernelError::InternalError);
-        }
-        if fallocate_zero_memfd(h, 30, 50, true).is_err() {
-            crate::ipc::memfd::close(h);
-            serial_println!("[syscall/linux]   FAIL: fallocate memfd zero");
+        let h =
+            crate::ipc::memfd::create(b"falloc-test", crate::ipc::memfd::CreateFlags::default())?;
+        let zeroed = crate::fs::handle::write_at(h, 0, &[0xAAu8; N])
+            .and_then(|_| crate::fs::handle::HandleFile::writable(h))
+            .and_then(|f| fallocate_zero_file(&f, 30, 50, true));
+        if zeroed.is_err() {
+            let _ = crate::fs::handle::close(h);
+            serial_println!("[syscall/linux]   FAIL: fallocate memfd zero: {:?}", zeroed);
             return Err(KernelError::InternalError);
         }
         let mut buf = [0u8; N];
-        let read_ok = matches!(crate::ipc::memfd::read_at(h, 0, &mut buf), Ok(n) if n == N);
-        crate::ipc::memfd::close(h);
+        let read_ok = matches!(crate::fs::handle::read_at(h, 0, &mut buf), Ok(n) if n == N);
+        let _ = crate::fs::handle::close(h);
         let ok = read_ok
             && buf.get(..30).is_some_and(|s| s.iter().all(|&b| b == 0xAA))
             && buf.get(30..50).is_some_and(|s| s.iter().all(|&b| b == 0))
@@ -53804,8 +53315,8 @@ pub fn self_test_fallocate_range() -> crate::error::KernelResult<()> {
 ///  2. Offset + count: copy a 5-byte slice from the middle of the source.
 ///  3. `count` larger than the bytes remaining → clamps to what is left.
 ///  4. `start_pos` at EOF → 0 bytes moved, destination stays empty.
-///  5. File → MemFd (cross-kind destination).
-///  6. MemFd → File (cross-kind source).
+///  5. File → memfd (cross-kind destination).
+///  6. memfd → File (cross-kind source).
 pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
     use crate::error::KernelError;
     use crate::fs::handle::{self, OpenFlags};
@@ -53985,15 +53496,15 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
         }
     }
 
-    // (5) File -> MemFd (cross-kind destination).
+    // (5) File -> memfd (cross-kind destination).
     {
-        let mf = crate::ipc::memfd::create_with_flags(b"sf-dst".to_vec(), false);
+        let mf = crate::ipc::memfd::create(b"sf-dst", crate::ipc::memfd::CreateFlags::default())?;
         let in_h = handle::open(SRC, OpenFlags::READ)?;
         let r = sendfile_core(
             HandleKind::File,
             in_h,
-            HandleKind::MemFd,
-            mf.raw(),
+            HandleKind::File,
+            mf,
             0,
             1u64 << 20,
             false,
@@ -54002,18 +53513,18 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
         let (moved, _) = match r {
             Ok(v) => v,
             Err(e) => {
-                crate::ipc::memfd::close(mf);
+                let _ = crate::fs::handle::close(mf);
                 let _ = crate::fs::Vfs::remove(SRC);
                 let _ = crate::fs::Vfs::remove(DST);
                 return Err(e);
             }
         };
         let mut rb = alloc::vec![0u8; PAYLOAD.len()];
-        let n = crate::ipc::memfd::read_at(mf, 0, &mut rb).unwrap_or(0);
-        crate::ipc::memfd::close(mf);
+        let n = crate::fs::handle::read_at(mf, 0, &mut rb).unwrap_or(0);
+        let _ = crate::fs::handle::close(mf);
         if moved != len || n != PAYLOAD.len() || rb.as_slice() != PAYLOAD {
             serial_println!(
-                "[syscall/linux]   FAIL: sendfile File->MemFd mismatch (moved {} n {})",
+                "[syscall/linux]   FAIL: sendfile File->memfd mismatch (moved {} n {})",
                 moved,
                 n
             );
@@ -54023,20 +53534,20 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
         }
     }
 
-    // (6) MemFd -> File (cross-kind source).
+    // (6) memfd -> File (cross-kind source).
     {
-        let mf = crate::ipc::memfd::create_with_flags(b"sf-src".to_vec(), false);
-        if crate::ipc::memfd::write_at(mf, 0, PAYLOAD).is_err() {
-            crate::ipc::memfd::close(mf);
-            serial_println!("[syscall/linux]   FAIL: sendfile MemFd->File staging write failed");
+        let mf = crate::ipc::memfd::create(b"sf-src", crate::ipc::memfd::CreateFlags::default())?;
+        if crate::fs::handle::write_at(mf, 0, PAYLOAD).is_err() {
+            let _ = crate::fs::handle::close(mf);
+            serial_println!("[syscall/linux]   FAIL: sendfile memfd->File staging write failed");
             let _ = crate::fs::Vfs::remove(SRC);
             let _ = crate::fs::Vfs::remove(DST);
             return Err(KernelError::InternalError);
         }
         let out_h = handle::open(DST, out_flags)?;
         let r = sendfile_core(
-            HandleKind::MemFd,
-            mf.raw(),
+            HandleKind::File,
+            mf,
             HandleKind::File,
             out_h,
             0,
@@ -54044,13 +53555,13 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
             false,
         );
         let _ = handle::close(out_h);
-        crate::ipc::memfd::close(mf);
+        let _ = crate::fs::handle::close(mf);
         let (moved, _) = r?;
         if moved != len
             || !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD)
         {
             serial_println!(
-                "[syscall/linux]   FAIL: sendfile MemFd->File mismatch (moved {})",
+                "[syscall/linux]   FAIL: sendfile memfd->File mismatch (moved {})",
                 moved
             );
             let _ = crate::fs::Vfs::remove(SRC);
@@ -54062,7 +53573,7 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
     let _ = crate::fs::Vfs::remove(SRC);
     let _ = crate::fs::Vfs::remove(DST);
     serial_println!(
-        "[syscall/linux]   sendfile (File<->File/MemFd copy, offset+count slice, count-clamp, EOF, cross-kind): OK"
+        "[syscall/linux]   sendfile (File<->File/memfd copy, offset+count slice, count-clamp, EOF, cross-kind): OK"
     );
     Ok(())
 }
@@ -54080,7 +53591,7 @@ pub fn self_test_sendfile() -> crate::error::KernelResult<()> {
 ///  3. **Positional WRITE offset** — `write_at` past byte 0: copy the 3-byte
 ///     tail to `out_start` = 5 of a fresh dest, proving the positional write
 ///     lands at the requested offset and extends the file.
-///  4. **File -> MemFd** and **MemFd -> File** cross-kind transfers.
+///  4. **File -> memfd** and **memfd -> File** cross-kind transfers.
 ///  5. **Overlap detection** — `copy_file_range_overlaps` returns `true` for
 ///     the same backing object with overlapping ranges and `false` for
 ///     disjoint ranges or distinct objects.
@@ -54246,15 +53757,15 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
         }
     }
 
-    // (4) File -> MemFd (cross-kind destination, positional).
+    // (4) File -> memfd (cross-kind destination, positional).
     {
-        let mf = crate::ipc::memfd::create_with_flags(b"cfr-dst".to_vec(), false);
+        let mf = crate::ipc::memfd::create(b"cfr-dst", crate::ipc::memfd::CreateFlags::default())?;
         let in_h = handle::open(SRC, OpenFlags::READ)?;
         let r = copy_file_range_core(
             HandleKind::File,
             in_h,
-            HandleKind::MemFd,
-            mf.raw(),
+            HandleKind::File,
+            mf,
             0,
             0,
             1u64 << 20,
@@ -54263,17 +53774,17 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
         let (moved, _, out_end) = match r {
             Ok(v) => v,
             Err(e) => {
-                crate::ipc::memfd::close(mf);
+                let _ = crate::fs::handle::close(mf);
                 cleanup();
                 return Err(e);
             }
         };
         let mut rb = alloc::vec![0u8; PAYLOAD.len()];
-        let n = crate::ipc::memfd::read_at(mf, 0, &mut rb).unwrap_or(0);
-        crate::ipc::memfd::close(mf);
+        let n = crate::fs::handle::read_at(mf, 0, &mut rb).unwrap_or(0);
+        let _ = crate::fs::handle::close(mf);
         if moved != len || out_end != len || n != PAYLOAD.len() || rb.as_slice() != PAYLOAD {
             serial_println!(
-                "[syscall/linux]   FAIL: cfr File->MemFd mismatch (moved {} n {})",
+                "[syscall/linux]   FAIL: cfr File->memfd mismatch (moved {} n {})",
                 moved,
                 n
             );
@@ -54282,19 +53793,19 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
         }
     }
 
-    // (5) MemFd -> File (cross-kind source, positional).
+    // (5) memfd -> File (cross-kind source, positional).
     {
-        let mf = crate::ipc::memfd::create_with_flags(b"cfr-src".to_vec(), false);
-        if crate::ipc::memfd::write_at(mf, 0, PAYLOAD).is_err() {
-            crate::ipc::memfd::close(mf);
-            serial_println!("[syscall/linux]   FAIL: cfr MemFd->File staging write failed");
+        let mf = crate::ipc::memfd::create(b"cfr-src", crate::ipc::memfd::CreateFlags::default())?;
+        if crate::fs::handle::write_at(mf, 0, PAYLOAD).is_err() {
+            let _ = crate::fs::handle::close(mf);
+            serial_println!("[syscall/linux]   FAIL: cfr memfd->File staging write failed");
             cleanup();
             return Err(KernelError::InternalError);
         }
         let out_h = handle::open(DST, out_flags)?;
         let r = copy_file_range_core(
-            HandleKind::MemFd,
-            mf.raw(),
+            HandleKind::File,
+            mf,
             HandleKind::File,
             out_h,
             0,
@@ -54302,7 +53813,7 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
             1u64 << 20,
         );
         let _ = handle::close(out_h);
-        crate::ipc::memfd::close(mf);
+        let _ = crate::fs::handle::close(mf);
         let (moved, _, _) = match r {
             Ok(v) => v,
             Err(e) => {
@@ -54314,7 +53825,7 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
             || !matches!(crate::fs::Vfs::read_file(DST), Ok(ref c) if c.as_slice() == PAYLOAD)
         {
             serial_println!(
-                "[syscall/linux]   FAIL: cfr MemFd->File mismatch (moved {})",
+                "[syscall/linux]   FAIL: cfr memfd->File mismatch (moved {})",
                 moved
             );
             cleanup();
@@ -54350,13 +53861,13 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
             cleanup();
             return Err(KernelError::InternalError);
         }
-        // Distinct objects (File vs MemFd) never overlap.
-        let mf = crate::ipc::memfd::create_with_flags(b"cfr-distinct".to_vec(), false);
+        // Distinct objects (a File and a memfd) never overlap.
+        let mf =
+            crate::ipc::memfd::create(b"cfr-distinct", crate::ipc::memfd::CreateFlags::default())?;
         let h3 = handle::open(SRC, OpenFlags::READ)?;
-        let cross =
-            copy_file_range_overlaps(HandleKind::File, h3, HandleKind::MemFd, mf.raw(), 0, 0, 10);
+        let cross = copy_file_range_overlaps(HandleKind::File, h3, HandleKind::File, mf, 0, 0, 10);
         let _ = handle::close(h3);
-        crate::ipc::memfd::close(mf);
+        let _ = crate::fs::handle::close(mf);
         if cross {
             serial_println!(
                 "[syscall/linux]   FAIL: cfr overlap false-positive across distinct kinds"
@@ -54368,7 +53879,7 @@ pub fn self_test_copy_file_range() -> crate::error::KernelResult<()> {
 
     cleanup();
     serial_println!(
-        "[syscall/linux]   copy_file_range (File<->File/MemFd positional copy, read+write offsets, cross-kind, overlap-reject): OK"
+        "[syscall/linux]   copy_file_range (File<->File/memfd positional copy, read+write offsets, cross-kind, overlap-reject): OK"
     );
     Ok(())
 }
@@ -70013,14 +69524,14 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         use crate::serial_println;
         // Batch 128: fcntl(F_ADD_SEALS / F_GET_SEALS) — memfd sealing API.
         //
-        // The dispatch arms gate on caller_pid() + linux_fd_lookup +
-        // kind == MemFd, then route to ipc::memfd::add_seals /
-        // ipc::memfd::get_seals which already have full subsystem-level
-        // coverage in ipc::memfd::self_test.  We exercise here the dispatch
-        // gate boundaries that have no direct subsystem coverage:
+        // The dispatch arms gate on caller_pid() + linux_fd_lookup + the
+        // descriptor being a memfd's (`memfd_of`), then route to
+        // `fs::sealing::memfd_add_seals` / `memfd_seals`, which
+        // `ipc::memfd::self_test` covers. Here, the dispatch gate's
+        // boundaries:
         //   * kernel-context (no caller PCB) → EBADF on both cmds.
         //   * constant numbers match Linux (1033 / 1034).
-        //   * non-memfd entry → EINVAL (replicating the arm policy).
+        //   * a descriptor that is not a memfd's → EINVAL.
         {
             // Constant sanity — Linux <linux/fcntl.h> values.
             assert_eq!(fcntl_cmd::F_ADD_SEALS, 1033);
@@ -70050,62 +69561,70 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 }
             }
 
-            // Non-memfd kind gate: replicate the arm policy locally.  The
-            // arm rejects non-MemFd fds with EINVAL (not EBADF) so a
-            // process that calls F_ADD_SEALS on a regular file sees the
-            // same error Linux's mm/shmem.c returns for the same shape.
-            let kind_gate = |k: HandleKind| -> Result<(), i32> {
-                if k != HandleKind::MemFd {
-                    Err(errno::EINVAL)
-                } else {
-                    Ok(())
-                }
-            };
-            assert_eq!(kind_gate(HandleKind::File), Err(errno::EINVAL));
-            assert_eq!(kind_gate(HandleKind::Pipe), Err(errno::EINVAL));
-            assert_eq!(kind_gate(HandleKind::Console), Err(errno::EINVAL));
-            assert_eq!(kind_gate(HandleKind::EventFd), Err(errno::EINVAL));
-            assert_eq!(kind_gate(HandleKind::PidFd), Err(errno::EINVAL));
-            assert_eq!(kind_gate(HandleKind::MemFd), Ok(()));
-
-            // Direct subsystem round-trip — install seals via the memfd
-            // module (which is what the F_ADD_SEALS arm calls) and verify
-            // F_GET_SEALS would observe them.  This catches a regression
-            // where the arm forgets to call into memfd::add_seals at all.
-            let h = crate::ipc::memfd::create_with_flags(b"fcntl-seal-test".to_vec(), true);
-            crate::ipc::memfd::add_seals(h, crate::ipc::memfd::F_SEAL_WRITE)?;
-            let got = crate::ipc::memfd::get_seals(h)?;
-            if got != crate::ipc::memfd::F_SEAL_WRITE {
+            // The arms take a memfd's descriptor alone (`memfd_of`): a
+            // regular file, and any other kind, is EINVAL (not EBADF), as
+            // Linux's mm/memfd.c answers a file that is not shmem's.
+            let h = crate::ipc::memfd::create(
+                b"fcntl-seal-test",
+                crate::ipc::memfd::CreateFlags {
+                    allow_sealing: true,
+                    noexec_seal: false,
+                },
+            )?;
+            // Run before `/tmp` is mounted: a file that is not a memfd is
+            // stood in for by a handle the table does not have.
+            let gate = (
+                memfd_of(&FdEntry::file(h, oflags::O_RDWR)),
+                memfd_of(&FdEntry::file(u64::MAX, oflags::O_RDONLY)),
+                memfd_of(&FdEntry {
+                    kind: HandleKind::Pipe,
+                    ..FdEntry::file(h, oflags::O_RDWR)
+                }),
+            );
+            // The round trip the arms make: a seal added is the seal read.
+            let id = crate::fs::handle::held_identity(h)?.ok_or(KernelError::InternalError)?;
+            let added = crate::fs::sealing::memfd_add_seals(
+                id,
+                crate::fs::sealing::SealFlags::WRITE,
+                false,
+            );
+            let read = crate::fs::sealing::memfd_seals(id).map(|s| s.to_linux());
+            let _ = crate::fs::handle::close(h);
+            if gate.0 != Some(id) || gate.1.is_some() || gate.2.is_some() {
                 serial_println!(
-                    "[syscall/linux]   FAIL: memfd seals round-trip {} != {}",
-                    got,
-                    crate::ipc::memfd::F_SEAL_WRITE,
+                    "[syscall/linux]   FAIL: F_ADD_SEALS's memfd gate {:?} (want the memfd's \
+                     identity, then none, none)",
+                    gate
                 );
-                crate::ipc::memfd::close(h);
                 return Err(KernelError::InternalError);
             }
-            crate::ipc::memfd::close(h);
+            if added.is_err() || read != Some(0x08) {
+                serial_println!(
+                    "[syscall/linux]   FAIL: memfd seals round-trip {:?}, read {:?} (want F_SEAL_WRITE)",
+                    added,
+                    read
+                );
+                return Err(KernelError::InternalError);
+            }
             serial_println!("[syscall/linux]   fcntl F_ADD_SEALS/F_GET_SEALS gate: OK");
         }
         Ok(())
     }
 
-    crate::selftest::step(self_test_register_ipc_eventfd_memfd())?;
+    crate::selftest::step(self_test_register_ipc_eventfd())?;
 
     #[inline(never)]
-    fn self_test_register_ipc_eventfd_memfd() -> crate::error::KernelResult<()> {
+    fn self_test_register_ipc_eventfd() -> crate::error::KernelResult<()> {
         use crate::serial_println;
-        // Batch 129: register_ipc_handle wiring for EventFd / MemFd
-        // (class-bug fix).
+        // Batch 129: register_ipc_handle wiring for EventFd (class-bug fix).
         //
-        // Until this batch, `eventfd_create_with_flags` and
-        // `sys_memfd_create` in this file installed handles into the
-        // caller's linux_fd_table but did NOT call `register_ipc_handle`.
-        // Two consequences:
+        // Until this batch, `eventfd_create_with_flags` installed handles
+        // into the caller's linux_fd_table but did NOT call
+        // `register_ipc_handle`. Two consequences:
         //   * process exit's `cleanup_handles(ipc_handles)` would walk a
-        //     list that never contained the eventfd / memfd handle, so the
-        //     handle leaked indefinitely if userspace exited without
-        //     calling close(2);
+        //     list that never contained the eventfd handle, so the handle
+        //     leaked indefinitely if userspace exited without calling
+        //     close(2);
         //   * fork's `build_fork_child` snapshots the parent's ipc_handles
         //     list and calls `dup_one` per entry to refcount-bump the
         //     resource into the child.  Without an entry, the parent's
@@ -70113,43 +69632,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         //     after which child operations would see InvalidHandle / EBADF
         //     — a silent fd-table corruption.
         //
-        // The fix:
-        //   * Added `ResourceType::MemFd = 17` so memfd handles have a
-        //     well-known type tag.
-        //   * `eventfd_create_with_flags` now calls
-        //     `register_ipc_handle(pid, EventFd, raw)`; install-failure
-        //     rolls back via `deregister_ipc_handle` before closing.
-        //   * `sys_memfd_create` does the same with the MemFd type.
-        //   * `close_handle` deregisters before dropping the native
-        //     reference for both kinds.
-        //   * `ipc::cleanup_handles` got a MemFd arm routing to
-        //     `memfd::close`.
-        //   * `proc::fork::dup_one` / `close_one` got MemFd arms calling
-        //     `memfd::dup` / `memfd::close`.
-        //
-        // What's tested here:
+        // (The memfd had the same wiring until 2026-10-17, when it became a
+        // file, kept by the fd table as any file is: design-decisions
+        // §1573.)
         {
-            // (a) The new discriminant value is what cleanup_handles /
-            //     fork dispatch tables key on.  Anyone renumbering this
-            //     without also reviewing those tables breaks the world.
-            assert_eq!(crate::cap::ResourceType::MemFd as u16, 17);
-
-            // (b) cleanup_handles dispatches MemFd correctly.  Create a
-            //     real memfd, run cleanup_handles with a synthetic
-            //     ipc_handles entry pointing at it, then prove the
-            //     subsystem dropped the last refcount.  `poll_status`
-            //     returns 0 when the handle is gone.
-            let mh = crate::ipc::memfd::create_with_flags(b"batch129-cleanup".to_vec(), false);
-            crate::ipc::cleanup_handles(&[(crate::cap::ResourceType::MemFd, mh.raw())]);
-            if crate::ipc::memfd::poll_status(mh) != 0 {
-                serial_println!("[syscall/linux]   FAIL: memfd survived cleanup_handles dispatch",);
-                return Err(KernelError::InternalError);
-            }
-
-            // (c) cleanup_handles dispatches EventFd correctly (regression
-            //     guard — the arm was already present but the new test
-            //     locks it in alongside MemFd).  `poll_status` returns
-            //     0x0008 (POLLERR) when the eventfd is gone.
+            // (a) cleanup_handles dispatches EventFd correctly.
+            //     `poll_status` returns 0x0008 (POLLERR) when the eventfd is
+            //     gone.
             let eh = crate::ipc::eventfd::create_with_flags(0, false);
             crate::ipc::cleanup_handles(&[(crate::cap::ResourceType::EventFd, eh.raw())]);
             if crate::ipc::eventfd::poll_status(eh) != 0x0008 {
@@ -70159,60 +69648,36 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
 
-            // (d) Fork's dup_one / close_one rely on `memfd::dup` returning
-            //     the same handle and bumping refcount, and on `close`
-            //     symmetrically dropping one.  Verify the contract: dup
-            //     then close once → still alive; close again → gone.  This
-            //     is the invariant that lets fork share a memfd between
-            //     parent and child without copying.
-            let mh2 = crate::ipc::memfd::create_with_flags(b"batch129-fork".to_vec(), false);
-            let mh2_dup = crate::ipc::memfd::dup(mh2)?;
-            assert_eq!(mh2.raw(), mh2_dup.raw());
-            crate::ipc::memfd::close(mh2_dup);
-            if crate::ipc::memfd::poll_status(mh2) == 0 {
-                serial_println!(
-                    "[syscall/linux]   FAIL: memfd refcount dropped too early after dup+close",
-                );
-                return Err(KernelError::InternalError);
-            }
-            crate::ipc::memfd::close(mh2);
-            if crate::ipc::memfd::poll_status(mh2) != 0 {
-                serial_println!("[syscall/linux]   FAIL: memfd survived final close after dup",);
-                return Err(KernelError::InternalError);
-            }
-
-            // (e) register/deregister round-trip on a real PCB.  Spawn a
-            //     fake process, register a fabricated MemFd entry, verify
-            //     it appears in `ipc_handles_snapshot`, deregister, verify
-            //     it's gone.  Catches a regression where the deregister
-            //     keyed on the wrong tuple or the snapshot accessor was
-            //     edited to drop MemFd.
+            // (b) register/deregister round-trip on a real PCB: a fabricated
+            //     entry appears in `ipc_handles_snapshot`, and is gone after
+            //     the deregister. Catches a deregister keyed on the wrong
+            //     tuple.
             let test_pid = pcb::create("batch129-regdereg", 0);
-            pcb::register_ipc_handle(test_pid, crate::cap::ResourceType::MemFd, 0xDEAD_BEEF);
+            pcb::register_ipc_handle(test_pid, crate::cap::ResourceType::EventFd, 0xDEAD_BEEF);
             let snap = pcb::ipc_handles_snapshot(test_pid).unwrap_or_default();
             if !snap
                 .iter()
-                .any(|&(rt, h)| rt == crate::cap::ResourceType::MemFd && h == 0xDEAD_BEEF)
+                .any(|&(rt, h)| rt == crate::cap::ResourceType::EventFd && h == 0xDEAD_BEEF)
             {
                 serial_println!(
-                    "[syscall/linux]   FAIL: MemFd register didn't land in ipc_handles",
+                    "[syscall/linux]   FAIL: EventFd register didn't land in ipc_handles",
                 );
                 pcb::destroy(test_pid);
                 return Err(KernelError::InternalError);
             }
-            pcb::deregister_ipc_handle(test_pid, crate::cap::ResourceType::MemFd, 0xDEAD_BEEF);
+            pcb::deregister_ipc_handle(test_pid, crate::cap::ResourceType::EventFd, 0xDEAD_BEEF);
             let snap2 = pcb::ipc_handles_snapshot(test_pid).unwrap_or_default();
             if snap2
                 .iter()
-                .any(|&(rt, h)| rt == crate::cap::ResourceType::MemFd && h == 0xDEAD_BEEF)
+                .any(|&(rt, h)| rt == crate::cap::ResourceType::EventFd && h == 0xDEAD_BEEF)
             {
-                serial_println!("[syscall/linux]   FAIL: MemFd deregister left a phantom entry",);
+                serial_println!("[syscall/linux]   FAIL: EventFd deregister left a phantom entry",);
                 pcb::destroy(test_pid);
                 return Err(KernelError::InternalError);
             }
             pcb::destroy(test_pid);
 
-            serial_println!("[syscall/linux]   register_ipc_handle EventFd/MemFd wiring: OK",);
+            serial_println!("[syscall/linux]   register_ipc_handle EventFd wiring: OK",);
         }
         Ok(())
     }
@@ -70242,7 +69707,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // The fix mirrors batch 129: between the per-kind dup and the
         // linux_fd_install, register the handle in the caller's
         // ipc_handles under the matching ResourceType (File / Pipe /
-        // EventFd / MemFd).  Console and PidFd map to no kernel resource
+        // EventFd; MemFd too, until it became a file in 2026-10-17's
+        // design-decisions §1573).  Console and PidFd map to no kernel resource
         // and are skipped. (Since 2026-10-02 the map is
         // `HandleKind::resource_type`, the reference an `ipc::passed::Passed`,
         // and the install `pcb::linux_fd_install_passed`, which registers only
@@ -70275,10 +69741,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 kind_to_rt(HandleKind::EventFd),
                 Some(crate::cap::ResourceType::EventFd)
             );
-            assert_eq!(
-                kind_to_rt(HandleKind::MemFd),
-                Some(crate::cap::ResourceType::MemFd)
-            );
             assert_eq!(kind_to_rt(HandleKind::Console), None);
             assert_eq!(kind_to_rt(HandleKind::PidFd), None);
             assert_eq!(kind_to_rt(HandleKind::AlsaControl), None);
@@ -70296,7 +69758,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 (crate::cap::ResourceType::File, 0x1111_2222u64),
                 (crate::cap::ResourceType::Pipe, 0x3333_4444u64),
                 (crate::cap::ResourceType::EventFd, 0x5555_6666u64),
-                (crate::cap::ResourceType::MemFd, 0x7777_8888u64),
+                (crate::cap::ResourceType::Epoll, 0x7777_8888u64),
             ] {
                 pcb::register_ipc_handle(test_pid, rt, h);
                 let snap = pcb::ipc_handles_snapshot(test_pid).unwrap_or_default();
@@ -77044,8 +76506,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // is the opposite: mnt_want_write surfaces EROFS *before*
         // inode_newsize_ok would surface EFBIG, so EROFS always wins on a
         // RO mount.  The rlim check in the File arm was therefore dead
-        // code in our universal-RO universe — we removed it.  MemFd is
-        // unchanged: memfd has no mount, EFBIG is its terminal answer.
+        // code in our universal-RO universe — we removed it. (A memfd is a
+        // File too since 2026-10-17, on the kernel's own writable memfs.)
         //
         // Probes (caller_pid==None kernel context, so the lookup short-
         // circuit fires at gate 2 and the File arm's terminal is reached
@@ -78430,8 +77892,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         // sys_fs_seek's whence comparison, so a caller passing
         // whence=0x1_0000_0000 (high-half garbage + SEEK_SET) saw
         // EINVAL where Linux truncates to int=0 -> SEEK_SET -> success.
-        // The MemFd arm was already correct (`args.arg2 as u32`);
-        // the File arm was the outlier in this seven-syscall family.
+        // The File arm was the outlier in this seven-syscall family.
         //
         // Direct dispatch from boot self-test (kernel context) cannot
         // probe the truncation because lookup_caller_fd returns EBADF
@@ -81349,14 +80810,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     );
                     return Err(KernelError::InternalError);
                 }
-                // FMODE_PREAD (offset given) -> ESPIPE for streams: File/MemFd are
-                // pread-capable; Pipe/Console/EventFd are not.
-                let pread_capable =
-                    |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
-                if !pread_capable(HandleKind::File) || !pread_capable(HandleKind::MemFd) {
-                    serial_println!(
-                        "[syscall/linux]   FAIL: sendfile File/MemFd not pread-capable"
-                    );
+                // FMODE_PREAD (offset given) -> ESPIPE for streams: File (a
+                // memfd among them) is pread-capable; Pipe/Console/EventFd
+                // are not.
+                let pread_capable = |k: HandleKind| matches!(k, HandleKind::File);
+                if !pread_capable(HandleKind::File) {
+                    serial_println!("[syscall/linux]   FAIL: sendfile File not pread-capable");
                     return Err(KernelError::InternalError);
                 }
                 if pread_capable(HandleKind::Pipe)
@@ -81411,10 +80870,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     serial_println!("[syscall/linux]   FAIL: splice Pipe not pipe-classified");
                     return Err(KernelError::InternalError);
                 }
-                if is_pipe(HandleKind::File)
-                    || is_pipe(HandleKind::MemFd)
-                    || is_pipe(HandleKind::Console)
-                {
+                if is_pipe(HandleKind::File) || is_pipe(HandleKind::Console) {
                     serial_println!("[syscall/linux]   FAIL: splice non-pipe mis-classified");
                     return Err(KernelError::InternalError);
                 }
@@ -81648,8 +81104,9 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                 let in_bad = |sf: u32| !fd_access_is_readable(sf);
                 // 4b output gate: output fd must be writable and not O_APPEND.
                 let out_bad = |sf: u32| !fd_access_is_writable(sf) || (sf & O_APPEND) != 0;
-                // 4a regular-file gate: only File/MemFd are S_ISREG-equivalent.
-                let is_regular = |k: HandleKind| matches!(k, HandleKind::File | HandleKind::MemFd);
+                // 4a regular-file gate: only File (a memfd among them) is
+                // S_ISREG-equivalent.
+                let is_regular = |k: HandleKind| matches!(k, HandleKind::File);
 
                 let in_ok = !in_bad(O_RDONLY) && !in_bad(O_RDWR) && in_bad(O_WRONLY);
                 let out_ok = !out_bad(O_WRONLY)
@@ -81658,7 +81115,6 @@ pub fn self_test() -> crate::error::KernelResult<()> {
                     && out_bad(O_WRONLY | O_APPEND)
                     && out_bad(O_RDWR | O_APPEND);
                 let reg_ok = is_regular(HandleKind::File)
-                    && is_regular(HandleKind::MemFd)
                     && !is_regular(HandleKind::Pipe)
                     && !is_regular(HandleKind::Console)
                     && !is_regular(HandleKind::EventFd);

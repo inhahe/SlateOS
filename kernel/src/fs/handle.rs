@@ -513,6 +513,25 @@ fn open_tmpfile_impl(
     allocate_handle_holding(shown_as, 0, 0, file_flags, Some(Arc::new(hold)))
 }
 
+/// A handle open with `flags` on the file `hold` holds, at offset 0, shown as
+/// `shown_as` (`/proc/self/fd`, `/proc/self/maps`): for a file made without
+/// a path to open it by -- a memfd (`ipc::memfd`, design-decisions §1573).
+/// Every operation through the handle goes to the held file, never to the
+/// name.
+///
+/// # Errors
+///
+/// The handle table's (`TooManyOpenFiles`).
+pub fn open_held(
+    shown_as: PathBuf,
+    flags: OpenFlags,
+    hold: crate::fs::vfs::FileHold,
+) -> KernelResult<u64> {
+    // No binding: the name names nothing, so nothing about it may decide
+    // whether the handle still reaches its file.
+    insert_handle(shown_as, 0, 0, flags, Some(Arc::new(hold)), None)
+}
+
 /// Give the file `handle` holds the name `new_path`: `linkat` of a
 /// descriptor (`AT_EMPTY_PATH`, or `/proc/self/fd/N` followed), the native
 /// `SYS_FS_LINK_HANDLE`. See [`crate::fs::Vfs::link_object`] for which files
@@ -2419,6 +2438,19 @@ fn allocate_handle_holding(
     // Asked before the table lock: it takes the mount table and the
     // filesystem's.
     let binding = crate::fs::Vfs::open_binding(&path);
+    insert_handle(path, offset, size, flags, object, binding)
+}
+
+/// [`allocate_handle_holding`] with the open-time binding given: `None` for
+/// a handle whose name is only shown ([`open_held`]).
+fn insert_handle(
+    path: PathBuf,
+    offset: u64,
+    size: u64,
+    flags: OpenFlags,
+    object: Option<Arc<crate::fs::vfs::FileHold>>,
+    binding: Option<u64>,
+) -> KernelResult<u64> {
     let mut table = OPEN_FILES.lock();
 
     if table.len() >= MAX_OPEN_FILES {

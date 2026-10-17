@@ -1046,14 +1046,6 @@ extern "C" fn kernel_main() -> ! {
                 ipc::inotify::self_test()
             });
 
-            // Step 15b: Memfd subsystem.
-            // Anonymous in-memory regular file backing memfd_create(2).  Exercises
-            // create/close/dup refcounting, read/write/seek, pread/pwrite,
-            // truncate grow/shrink, F_SEAL_* enforcement, and poll readiness.
-            selftest::dispatch("Memfd", selftest::Severity::Integrity, || {
-                ipc::memfd::self_test()
-            });
-
             // Step 16: Initialize completion port subsystem.
             // Completion ports provide unified wait on heterogeneous kernel
             // objects (channels, pipes, eventfds, future timers/process exit).
@@ -2117,8 +2109,8 @@ extern "C" fn kernel_main() -> ! {
     });
 
     // fallocate(2) PUNCH_HOLE / ZERO_RANGE zeroing test — drives the
-    // fallocate_zero_vfs / fallocate_zero_memfd path against /tmp files and a
-    // kernel-created memfd (the syscall entry needs a per-process fd table).
+    // fallocate_zero_file path against /tmp files and a kernel-created memfd
+    // (the syscall entry needs a per-process fd table).
     // BLKDISCARD byte-range arithmetic — the only part of a data-destroying
     // ioctl testable without a process and an fd, and the part where an error
     // discards the wrong sectors rather than just failing. The layer below is
@@ -3721,6 +3713,12 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         mm::page_cache::writeback_self_test,
     );
+    // memfds: unnamed files on the kernel's own memfs, with Linux's memfd
+    // seals (design-decisions §1573). With the VFS up: it writes through the
+    // file paths.
+    selftest::dispatch("Memfd", selftest::Severity::Integrity, || {
+        ipc::memfd::self_test()
+    });
     // Writable shared file mappings: stores saved to the file (mm::page_cache
     // writeback, design-decisions §1572 step 2).
     selftest::dispatch_debug(

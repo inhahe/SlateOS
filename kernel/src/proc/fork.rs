@@ -303,13 +303,6 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
             )?;
             Ok(Some((rtype, id)))
         }
-        ResourceType::MemFd => {
-            // Bump the memfd refcount so the child gets its own
-            // independent reference.  Same id — memfd has no per-process
-            // identity, just a shared in-memory file.
-            crate::ipc::memfd::dup(crate::ipc::memfd::MemFdHandle::from_raw(id))?;
-            Ok(Some((rtype, id)))
-        }
         ResourceType::Epoll => {
             // Bump the epoll instance refcount so parent and child each
             // own one reference to the shared interest set — same id.  An
@@ -499,9 +492,6 @@ fn close_one(rtype: ResourceType, id: u64) {
             crate::ipc::stream_socket::close(
                 crate::ipc::stream_socket::StreamSocketHandle::from_raw(id),
             );
-        }
-        ResourceType::MemFd => {
-            crate::ipc::memfd::close(crate::ipc::memfd::MemFdHandle::from_raw(id));
         }
         ResourceType::Epoll => {
             crate::ipc::epoll::close(crate::ipc::epoll::EpollHandle::from_raw(id));

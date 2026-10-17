@@ -126,11 +126,6 @@ pub enum HandleKind {
     /// so `needs_kernel_close()` returns `false`.  Read/write return
     /// `EINVAL`; poll returns POLLIN once the target process is gone.
     PidFd,
-    /// memfd — anonymous in-memory file (Linux `memfd_create`).
-    /// `raw_handle` holds the `ipc::memfd::MemFdHandle` raw u64.
-    /// Read/write are byte-stream operations against the in-kernel
-    /// `MEMFD_TABLE` data buffer; close releases one refcount.
-    MemFd,
     /// epoll instance — Linux `epoll_create`/`epoll_create1`.
     /// `raw_handle` holds the `ipc::epoll::EpollHandle` raw u64.
     /// Read/write return `EINVAL`; the interest set is mutated via
@@ -262,7 +257,6 @@ impl HandleKind {
             Self::File
             | Self::Pipe
             | Self::EventFd
-            | Self::MemFd
             | Self::Epoll
             | Self::SignalFd
             | Self::Timerfd
@@ -289,7 +283,6 @@ impl HandleKind {
             Self::File => Some(ResourceType::File),
             Self::Pipe => Some(ResourceType::Pipe),
             Self::EventFd => Some(ResourceType::EventFd),
-            Self::MemFd => Some(ResourceType::MemFd),
             Self::Epoll => Some(ResourceType::Epoll),
             Self::SignalFd => Some(ResourceType::SignalFd),
             Self::Timerfd => Some(ResourceType::Timerfd),
@@ -454,20 +447,6 @@ impl FdEntry {
         Self {
             kind: HandleKind::PidFd,
             raw_handle: target_pid,
-            fd_flags: 0,
-            status_flags,
-            f_owner: 0,
-            f_owner_sig: 0,
-        }
-    }
-
-    /// Construct an entry for a memfd.  `raw_handle` is the
-    /// `ipc::memfd::MemFdHandle` raw u64.
-    #[must_use]
-    pub const fn memfd(handle: u64, status_flags: u32) -> Self {
-        Self {
-            kind: HandleKind::MemFd,
-            raw_handle: handle,
             fd_flags: 0,
             status_flags,
             f_owner: 0,

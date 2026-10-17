@@ -191,15 +191,8 @@ pub enum ResourceType {
     /// authority.  Tracked per-process so the endpoint is closed when an
     /// owning process dies.
     StreamSocket = 16,
-    /// An anonymous in-memory file (memfd).
-    ///
-    /// Created via `memfd_create(2)` on the Linux ABI.  The handle is a
-    /// refcounted reference into [`crate::ipc::memfd`]; no capability is
-    /// required to create one — the handle itself is the authority.
-    /// Tracked per-process so the memfd is released when an owning
-    /// process dies, and so `fork()` knows to bump the refcount in the
-    /// child.
-    MemFd = 17,
+    // 17 is retired ([`Self::RETIRED`]): it was the memfd, an object of its
+    // own until 2026-10-17, and is a file now (design-decisions §1573).
     /// An epoll instance (Linux `epoll_create`/`epoll_create1`).
     ///
     /// A refcounted reference into [`crate::ipc::epoll`] holding an
@@ -438,11 +431,23 @@ pub enum ResourceType {
 impl ResourceType {
     /// The highest discriminant in use.
     ///
-    /// Discriminants are contiguous from `Channel = 1`, so this doubles as the
-    /// variant count. Consumers that need "every type" iterate `1..=LAST`
-    /// rather than keeping their own list — see
+    /// Discriminants run from `Channel = 1` to this, but for the
+    /// [`RETIRED`](Self::RETIRED) ones, which name no type and are never
+    /// given to another, so that a number a program once knew means nothing
+    /// rather than something else. Consumers that need "every type" iterate
+    /// `1..=LAST` skipping them ([`Self::all`]) rather than keeping their own
+    /// list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
     pub const LAST: u16 = Self::CapBroker as u16;
+
+    /// Discriminants that named a type no longer here: 17, the memfd, a file
+    /// since 2026-10-17 (design-decisions §1573).
+    pub const RETIRED: [u16; 1] = [17];
+
+    /// Every type, in discriminant order.
+    pub fn all() -> impl Iterator<Item = Self> {
+        (1..=Self::LAST).filter_map(Self::from_raw)
+    }
 
     /// This type's wire discriminant, as sent to userspace.
     ///
@@ -510,7 +515,6 @@ impl ResourceType {
             | Self::Service
             | Self::Namespace
             | Self::StreamSocket
-            | Self::MemFd
             | Self::Epoll
             | Self::SignalFd
             | Self::Timerfd
@@ -581,7 +585,6 @@ impl ResourceType {
             14 => Self::Service,
             15 => Self::Namespace,
             16 => Self::StreamSocket,
-            17 => Self::MemFd,
             18 => Self::Epoll,
             19 => Self::SignalFd,
             20 => Self::Timerfd,

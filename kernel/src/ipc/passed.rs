@@ -97,9 +97,6 @@ impl Passed {
             HandleKind::EventFd => {
                 super::eventfd::dup(super::eventfd::EventFdHandle::from_raw(raw)).map(|_| ())
             }
-            HandleKind::MemFd => {
-                super::memfd::dup(super::memfd::MemFdHandle::from_raw(raw)).map(|_| ())
-            }
             HandleKind::Epoll => {
                 super::epoll::dup(super::epoll::EpollHandle::from_raw(raw)).map(|_| ())
             }

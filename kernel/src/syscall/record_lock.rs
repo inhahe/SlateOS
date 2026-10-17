@@ -197,61 +197,41 @@ pub enum Owner {
     Description,
 }
 
-/// The open file a request is about.
+/// The open file a request is about: a VFS file, by its `fs::handle`
+/// handle. (A memfd is one too, since 2026-10-17: design-decisions §1573.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
     /// A VFS file, by its `fs::handle` handle.
     File(u64),
-    /// A memfd, by its id.
-    MemFd(u64),
 }
 
 impl Target {
-    fn memfd(id: u64) -> crate::ipc::memfd::MemFdHandle {
-        crate::ipc::memfd::MemFdHandle::from_raw(id)
+    /// The handle.
+    const fn handle(self) -> u64 {
+        let Self::File(handle) = self;
+        handle
     }
 
     /// Which file the table keys it by.
     fn key(self) -> KernelResult<LockKey> {
-        match self {
-            Self::File(handle) => LockKey::for_handle(handle),
-            Self::MemFd(id) => {
-                // Asked so that a memfd closed meanwhile is `InvalidHandle`
-                // here, as a closed file handle is.
-                crate::ipc::memfd::size(Self::memfd(id))?;
-                Ok(LockKey::for_memfd(id))
-            }
-        }
+        LockKey::for_handle(self.handle())
     }
 
     /// The description's offset: `SEEK_CUR`'s base. Read, not moved: asking
     /// about a lock must not seek the caller's descriptor.
     fn offset(self) -> KernelResult<u64> {
-        match self {
-            Self::File(handle) => {
-                crate::fs::handle::seek(handle, crate::fs::handle::SeekFrom::Current(0))
-            }
-            Self::MemFd(id) => crate::ipc::memfd::offset(Self::memfd(id)),
-        }
+        crate::fs::handle::seek(self.handle(), crate::fs::handle::SeekFrom::Current(0))
     }
 
     /// The file's size: `SEEK_END`'s base.
     fn size(self) -> KernelResult<u64> {
-        match self {
-            Self::File(handle) => crate::fs::handle::fstat(handle).map(|meta| meta.size),
-            Self::MemFd(id) => crate::ipc::memfd::size(Self::memfd(id)),
-        }
+        crate::fs::handle::fstat(self.handle()).map(|meta| meta.size)
     }
 
     /// Whether the description was opened for reading, and for writing.
     fn access(self) -> KernelResult<(bool, bool)> {
-        match self {
-            Self::File(handle) => crate::fs::handle::open_flags(handle)
-                .map(|flags| (flags.is_readable(), flags.is_writable())),
-            // `memfd_create` opens read-write, and nothing reopens one with
-            // less.
-            Self::MemFd(id) => crate::ipc::memfd::size(Self::memfd(id)).map(|_| (true, true)),
-        }
+        crate::fs::handle::open_flags(self.handle())
+            .map(|flags| (flags.is_readable(), flags.is_writable()))
     }
 
     /// Whether the open file description still exists.
@@ -261,10 +241,7 @@ impl Target {
 
     /// The owner value of the description itself (`F_OFD_*`).
     fn description_owner(self) -> u64 {
-        match self {
-            Self::File(handle) => reclock::ofd_owner(handle),
-            Self::MemFd(id) => reclock::memfd_ofd_owner(id),
-        }
+        reclock::ofd_owner(self.handle())
     }
 }
 
@@ -798,22 +775,23 @@ fn core_cases(rw: u64, ro: u64, wo: u64) -> KernelResult<()> {
         "[record-lock]   [7/8] OFD locks report pid -1 and can ask about their own: OK"
     );
 
-    // 8. A memfd is locked by its id and sizes SEEK_END by its own data.
-    let m = crate::ipc::memfd::create_with_flags(alloc::vec::Vec::from(&b"reclock"[..]), false);
-    let r = crate::ipc::memfd::write(m, &[0u8; 8]).and_then(|_| {
+    // 8. A memfd is a file to lock (design-decisions §1573), SEEK_END by its
+    //    own size.
+    let m = crate::ipc::memfd::create(b"reclock", crate::ipc::memfd::CreateFlags::default())?;
+    let r = crate::fs::handle::write_at(m, 0, &[0u8; 8]).and_then(|_| {
         apply(
-            Target::MemFd(m.raw()),
+            Target::File(m),
             a,
             Op::Set,
             &mut Flock::new(F_WRLCK, SEEK_END, -2, 2),
             open,
         )?;
         let mut probe = Flock::new(F_WRLCK, 0, 0, 0);
-        apply(Target::MemFd(m.raw()), b, Op::Get, &mut probe, open)?;
+        apply(Target::File(m), b, Op::Get, &mut probe, open)?;
         Ok(probe)
     });
     reclock::release_all(reclock::posix_owner(TEST_A));
-    crate::ipc::memfd::close(m);
+    let _ = crate::fs::handle::close(m);
     match r {
         Ok(p) if p.l_start == 6 && p.l_len == 2 && p.l_pid == 9101 => {}
         other => return fail("a memfd's SEEK_END lock", &other),

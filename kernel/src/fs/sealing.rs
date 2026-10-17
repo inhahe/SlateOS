@@ -17,8 +17,9 @@
 //! for `F_ADD_SEALS` (`memfd_add_seals` refuses a descriptor without
 //! `FMODE_WRITE`). The native door is `SYS_FS_ADD_SEALS` /
 //! `SYS_FS_GET_SEALS` (1124, 1125), on a handle, in Linux's `F_SEAL_*` bits.
-//! The Linux `fcntl(F_ADD_SEALS)` stays a memfd's alone (`ipc::memfd`), as on
-//! Linux, where a regular file answers `EINVAL`.
+//! The Linux `fcntl(F_ADD_SEALS)` stays a memfd's alone, as on Linux, where a
+//! regular file answers `EINVAL`. A memfd's seals are kept here too, apart,
+//! by Linux's rules ([`memfd_add_seals`], design-decisions §1573).
 //!
 //! **Shared mappings** (design-decisions §1572), as Linux's memfd has them:
 //! a `WRITE`-sealed file cannot be mapped shared and writable (`EPERM`), and
@@ -49,6 +50,7 @@
 //! | SealWrite     | Prevents all writes (content is immutable)  |
 //! | SealSeal      | Prevents adding more seals                  |
 //! | SealExec      | Prevents execute permission changes         |
+//! | FutureWrite   | Prevents new writes and new writable maps   |
 //!
 //! ## Design Notes
 //!
@@ -100,10 +102,68 @@ impl SealFlags {
     pub const SEAL: Self = Self(1 << 3);
     /// Cannot change execute permissions.
     pub const EXEC: Self = Self(1 << 4);
+    /// No new writes and no new writable shared mapping, while one made
+    /// before goes on writing: Linux's `F_SEAL_FUTURE_WRITE`.
+    pub const FUTURE_WRITE: Self = Self(1 << 5);
+    /// Not a seal: marks a memfd's seals (design-decisions §1573), which keep
+    /// Linux's rules where this module's differ -- `WRITE` leaves the size
+    /// to `SHRINK` and `GROW` ([`may_resize`]). Set by [`seals_of`] on what it
+    /// answers for a memfd; never stored, shown or given to a program.
+    pub const MEMFD: Self = Self(1 << 31);
 
     /// All seals combined.
     pub const ALL: Self = Self(0x1F);
 
+    /// These seals, the [`MEMFD`](Self::MEMFD) mark taken off.
+    #[must_use]
+    pub const fn seals_only(self) -> Self {
+        Self(self.0 & !Self::MEMFD.0)
+    }
+
+    /// Whether any of `other`'s seals is set.
+    #[must_use]
+    pub const fn intersects(self, other: Self) -> bool {
+        self.0 & other.0 != 0
+    }
+
+    /// The seals Linux's `F_SEAL_*` bits name -- `SEAL` 0x01, `SHRINK` 0x02,
+    /// `GROW` 0x04, `WRITE` 0x08, `FUTURE_WRITE` 0x10, `EXEC` 0x20 -- the one
+    /// encoding both ABIs use (`fcntl(F_ADD_SEALS)`, `SYS_FS_ADD_SEALS`).
+    /// `None` for a bit Linux does not define.
+    #[must_use]
+    pub fn from_linux(bits: u64) -> Option<Self> {
+        let mut flags = Self::NONE;
+        let mut rest = bits;
+        for (bit, seal) in LINUX_BITS {
+            if bits & bit != 0 {
+                flags = flags.union(seal);
+                rest &= !bit;
+            }
+        }
+        (rest == 0).then_some(flags)
+    }
+
+    /// These seals as Linux's `F_SEAL_*` bits ([`from_linux`](Self::from_linux)).
+    #[must_use]
+    pub fn to_linux(self) -> u64 {
+        LINUX_BITS
+            .iter()
+            .filter(|&&(_, seal)| self.contains(seal))
+            .fold(0, |bits, &(bit, _)| bits | bit)
+    }
+}
+
+/// Linux's `F_SEAL_*` bit for each seal.
+const LINUX_BITS: [(u64, SealFlags); 6] = [
+    (0x01, SealFlags::SEAL),
+    (0x02, SealFlags::SHRINK),
+    (0x04, SealFlags::GROW),
+    (0x08, SealFlags::WRITE),
+    (0x10, SealFlags::FUTURE_WRITE),
+    (0x20, SealFlags::EXEC),
+];
+
+impl SealFlags {
     /// Check if a specific seal is set.
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0
@@ -139,6 +199,13 @@ impl SealFlags {
         }
         if self.contains(Self::EXEC) {
             parts.push("exec");
+        }
+        if self.contains(Self::FUTURE_WRITE) {
+            parts.push("future-write");
+        }
+        if parts.is_empty() {
+            // Only the memfd mark: no seal.
+            return String::from("none");
         }
         let joined = parts.join("+");
         String::from(joined.as_str())
@@ -232,14 +299,18 @@ fn recount(table: &[SealEntry]) {
 
 /// Whether any file is sealed: the write paths' fast path.
 pub fn any_sealed() -> bool {
-    SEALED_FILES.load(Ordering::Relaxed) != 0
+    SEALED_FILES.load(Ordering::Relaxed) != 0 || SEALED_MEMFDS.load(Ordering::Relaxed) != 0
 }
 
 /// The seals on the file with identity `id` -- or named `path`, where its
 /// filesystem gives no identity -- as [`get_seals`] finds them, for a caller
 /// that has the identity already: the VFS, under the filesystem's lock,
-/// which must not call back into the VFS as `get_seals` does.
+/// which must not call back into the VFS as `get_seals` does. A memfd's
+/// carry the [`SealFlags::MEMFD`] mark.
 pub fn seals_of(id: Option<crate::fs::vfs::FileId>, path: &Path) -> SealFlags {
+    if let Some(seals) = id.and_then(memfd_seals) {
+        return seals.union(SealFlags::MEMFD);
+    }
     SEAL_TABLE
         .lock()
         .iter()
@@ -251,11 +322,98 @@ pub fn seals_of(id: Option<crate::fs::vfs::FileId>, path: &Path) -> SealFlags {
 /// has no name for it -- a shared mapping of the file (`mmap`), which asks
 /// whether it may be writable.
 pub fn seals_of_file(id: crate::fs::vfs::FileId) -> SealFlags {
+    if let Some(seals) = memfd_seals(id) {
+        return seals.union(SealFlags::MEMFD);
+    }
     SEAL_TABLE
         .lock()
         .iter()
         .find(|e| e.id == Some(id))
         .map_or(SealFlags::NONE, |e| e.flags)
+}
+
+// ---------------------------------------------------------------------------
+// memfds (design-decisions §1573)
+// ---------------------------------------------------------------------------
+
+/// Each memfd's seals (`ipc::memfd`), by the file's identity, from its
+/// creation to its last hold, sealed or not: what tells `fcntl(F_ADD_SEALS)`
+/// a memfd from another file, which answers `EINVAL`, as on Linux. Apart
+/// from [`SEAL_TABLE`] because their rules are Linux's ([`SealFlags::MEMFD`]),
+/// and because a program may have hundreds: a map, not that table's scan,
+/// and none of its [`MAX_SEALED_FILES`].
+static MEMFD_SEALS: PreemptSpinMutex<
+    alloc::collections::BTreeMap<crate::fs::vfs::FileId, SealFlags>,
+> = PreemptSpinMutex::named(alloc::collections::BTreeMap::new(), b"MEMFD_SEALS");
+
+/// How many memfds carry a seal: [`any_sealed`]'s other half. Kept under
+/// [`MEMFD_SEALS`]'s lock.
+static SEALED_MEMFDS: AtomicUsize = AtomicUsize::new(0);
+
+/// Recount [`SEALED_MEMFDS`]; called with [`MEMFD_SEALS`] locked.
+fn recount_memfds(map: &alloc::collections::BTreeMap<crate::fs::vfs::FileId, SealFlags>) {
+    let sealed = map.values().filter(|s| !s.is_empty()).count();
+    SEALED_MEMFDS.store(sealed, Ordering::Relaxed);
+}
+
+/// File `id` is a new memfd, its seals `initial`: `SEAL` when it was made
+/// without `MFD_ALLOW_SEALING`, `EXEC` with `MFD_NOEXEC_SEAL`.
+pub fn memfd_created(id: crate::fs::vfs::FileId, initial: SealFlags) {
+    let mut map = MEMFD_SEALS.lock();
+    map.insert(id, initial.seals_only());
+    recount_memfds(&map);
+}
+
+/// The seals of memfd `id`; `None` for a file that is not a memfd.
+#[must_use]
+pub fn memfd_seals(id: crate::fs::vfs::FileId) -> Option<SealFlags> {
+    MEMFD_SEALS.lock().get(&id).copied()
+}
+
+/// Add `add` to memfd `id`'s seals, in Linux's `memfd_add_seals`'s order:
+/// answers them all. `executable`: the file's mode has an execute bit, so
+/// that `EXEC` brings the write seals with it, as Linux's does ("W^X from
+/// the start").
+///
+/// # Errors
+///
+/// `InvalidArgument` for a file that is not a memfd; `NotPermitted` once
+/// `SEAL` is set, even adding nothing; `DeviceBusy` for `WRITE` while a
+/// shared mapping may write the file. Asked under the map's lock, which a
+/// mapping counts itself before reading (`linux::count_shared_map`), as for
+/// [`add_seals_to`].
+pub fn memfd_add_seals(
+    id: crate::fs::vfs::FileId,
+    add: SealFlags,
+    executable: bool,
+) -> KernelResult<SealFlags> {
+    let mut add = add.seals_only();
+    let mut map = MEMFD_SEALS.lock();
+    let seals = map.get_mut(&id).ok_or(KernelError::InvalidArgument)?;
+    if seals.contains(SealFlags::SEAL) {
+        DENIED_OPS.fetch_add(1, Ordering::Relaxed);
+        return Err(KernelError::NotPermitted);
+    }
+    if add.contains(SealFlags::WRITE)
+        && !seals.contains(SealFlags::WRITE)
+        && crate::mm::page_cache::has_writable_maps(id)
+    {
+        DENIED_OPS.fetch_add(1, Ordering::Relaxed);
+        return Err(KernelError::DeviceBusy);
+    }
+    // After the mapping check, where Linux puts it too.
+    if add.contains(SealFlags::EXEC) && executable {
+        add = add
+            .union(SealFlags::SHRINK)
+            .union(SealFlags::GROW)
+            .union(SealFlags::WRITE)
+            .union(SealFlags::FUTURE_WRITE);
+    }
+    *seals = seals.union(add);
+    let all = *seals;
+    SEAL_OPS.fetch_add(1, Ordering::Relaxed);
+    recount_memfds(&map);
+    Ok(all)
 }
 
 /// A rule's verdict, counted: `NotPermitted` (`EPERM`) when `refused`.
@@ -270,18 +428,22 @@ fn verdict(refused: bool) -> KernelResult<()> {
 }
 
 /// May `len` bytes be written at `offset` into a file of `size` bytes under
-/// `seals`? Not under `WRITE`; not past the end under `GROW` -- Linux's
-/// `shmem_write_begin`.
+/// `seals`? Not under `WRITE` or `FUTURE_WRITE`; not past the end under
+/// `GROW` -- Linux's `shmem_write_begin`.
 ///
 /// # Errors
 ///
 /// `NotPermitted`.
 pub fn may_write(seals: SealFlags, offset: u64, len: u64, size: u64) -> KernelResult<()> {
+    let seals = seals.seals_only();
     if seals.is_empty() {
         return Ok(());
     }
     let end = offset.saturating_add(len);
-    verdict(seals.contains(SealFlags::WRITE) || (seals.contains(SealFlags::GROW) && end > size))
+    verdict(
+        seals.intersects(SealFlags::WRITE.union(SealFlags::FUTURE_WRITE))
+            || (seals.contains(SealFlags::GROW) && end > size),
+    )
 }
 
 /// May a file of `old` bytes become `new` bytes -- a truncate, a whole-file
@@ -289,13 +451,14 @@ pub fn may_write(seals: SealFlags, offset: u64, len: u64, size: u64) -> KernelRe
 /// under `GROW` (Linux's `shmem_setattr` and `shmem_fallocate`), and neither
 /// under `WRITE`, which here freezes the contents outright, as this module
 /// has always meant it: Linux lets a write-sealed memfd be truncated, and
-/// these seals are not memfd's.
+/// these seals are not memfd's. A memfd's ([`SealFlags::MEMFD`]) are, and
+/// keep Linux's rule: the size is `SHRINK`'s and `GROW`'s alone.
 ///
 /// # Errors
 ///
 /// `NotPermitted`.
 pub fn may_resize(seals: SealFlags, old: u64, new: u64) -> KernelResult<()> {
-    if seals.is_empty() || new == old {
+    if seals.seals_only().is_empty() || new == old {
         return Ok(());
     }
     let freezes = if new < old {
@@ -303,7 +466,8 @@ pub fn may_resize(seals: SealFlags, old: u64, new: u64) -> KernelResult<()> {
     } else {
         SealFlags::GROW
     };
-    verdict(seals.contains(freezes) || seals.contains(SealFlags::WRITE))
+    let frozen = !seals.contains(SealFlags::MEMFD) && seals.contains(SealFlags::WRITE);
+    verdict(seals.contains(freezes) || frozen)
 }
 
 /// May the mode `old` become `new`? Not with an execute bit changed under
@@ -313,7 +477,7 @@ pub fn may_resize(seals: SealFlags, old: u64, new: u64) -> KernelResult<()> {
 ///
 /// `NotPermitted`.
 pub fn may_change_mode(seals: SealFlags, old: u16, new: u16) -> KernelResult<()> {
-    if seals.is_empty() {
+    if seals.seals_only().is_empty() {
         return Ok(());
     }
     verdict(seals.contains(SealFlags::EXEC) && (old ^ new) & 0o111 != 0)
@@ -494,9 +658,18 @@ pub(crate) const PER_FILE_STATE: super::perfile::Table = super::perfile::Table {
 /// what is dropped is exactly what a lookup of this file would have found --
 /// including a path-keyed seal placed on the name before the file existed.
 fn forget_file(id: Option<crate::fs::vfs::FileId>, path: &Path) {
-    let mut table = SEAL_TABLE.lock();
-    table.retain(|e| !seal_entry_matches(e, path, id));
-    recount(&table);
+    {
+        let mut table = SEAL_TABLE.lock();
+        table.retain(|e| !seal_entry_matches(e, path, id));
+        recount(&table);
+    }
+    // A memfd goes with its last hold, which sends this.
+    if let Some(id) = id {
+        let mut map = MEMFD_SEALS.lock();
+        if map.remove(&id).is_some() {
+            recount_memfds(&map);
+        }
+    }
 }
 
 /// Names moved: rewrite every stored name `rename` maps to a new one. For an

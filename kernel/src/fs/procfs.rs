@@ -1390,10 +1390,8 @@ fn gen_locks() -> Vec<u8> {
         } else {
             i64::try_from(lock.owner).unwrap_or(-1)
         };
-        let (fs, ino): (u32, u64) = match key {
-            LockKey::File { id, .. } => file(id),
-            LockKey::MemFd(id) => (0, id),
-        };
+        let LockKey::File { id, .. } = key;
+        let (fs, ino): (u32, u64) = file(id);
         let last = if lock.len == 0 {
             String::from("EOF")
         } else {
@@ -3890,7 +3888,6 @@ pub(crate) fn fd_link_target(entry: &crate::proc::linux_fd::FdEntry) -> PathBuf 
         }
         HandleKind::EventFd => PathBuf::from("anon_inode:[eventfd]"),
         HandleKind::PidFd => PathBuf::from("anon_inode:[pidfd]"),
-        HandleKind::MemFd => PathBuf::from("anon_inode:[memfd]"),
         HandleKind::Epoll => PathBuf::from("anon_inode:[eventpoll]"),
         HandleKind::SignalFd => PathBuf::from("anon_inode:[signalfd]"),
         HandleKind::Timerfd => PathBuf::from("anon_inode:[timerfd]"),
@@ -16563,7 +16560,6 @@ pub fn self_test() -> KernelResult<()> {
             (FdEntry::pipe(43, 0), "pipe:[21]"),
             (FdEntry::eventfd(0, 0), "anon_inode:[eventfd]"),
             (FdEntry::pidfd(7, 0), "anon_inode:[pidfd]"),
-            (FdEntry::memfd(0, 0), "anon_inode:[memfd]"),
         ];
         for (entry, want) in renders {
             let got = fd_link_target(entry);
@@ -16575,6 +16571,19 @@ pub fn self_test() -> KernelResult<()> {
                 );
                 return Err(KernelError::InternalError);
             }
+        }
+        // A memfd is a file, and its link reads as Linux's does
+        // (design-decisions §1573).
+        let memfd =
+            crate::ipc::memfd::create(b"procfs", crate::ipc::memfd::CreateFlags::default())?;
+        let memfd_target = fd_link_target(&FdEntry::file(memfd, 0));
+        let _ = crate::fs::handle::close(memfd);
+        if memfd_target.as_path() != Path::new("/memfd:procfs (deleted)") {
+            serial_println!(
+                "[procfs]   FAIL: a memfd's fd_link_target = {:?}, want /memfd:procfs (deleted)",
+                memfd_target
+            );
+            return Err(KernelError::InternalError);
         }
         // A File entry whose handle cannot be resolved must fall back to the
         // anon label, never an invented path and never empty/panic.

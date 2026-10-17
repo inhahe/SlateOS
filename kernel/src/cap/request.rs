@@ -325,7 +325,6 @@ pub fn requestable(resource_type: ResourceType, resource_id: u64) -> KernelResul
         | T::EventFd
         | T::CompletionPort
         | T::StreamSocket
-        | T::MemFd
         | T::Epoll
         | T::SignalFd
         | T::Timerfd

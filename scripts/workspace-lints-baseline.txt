@@ -99,7 +99,6 @@ userspace/nano
 userspace/netstat  # bare deny(clippy::all)
 userspace/newgrp  # bare deny(clippy::all)
 userspace/nftables  # bare deny(clippy::all)
-userspace/nologin  # bare deny(clippy::all)
 userspace/notimpl  # bare deny(clippy::all)
 userspace/nsenter  # bare deny(clippy::all)
 userspace/nslookup

@@ -2875,6 +2875,12 @@ dependencies = [
 [[package]]
 name = "nologin"
 version = "0.1.0"
+dependencies = [
+ "libcall",
+ "libcsyslog",
+ "quoting",
+ "stdfdguard",
+]
 
 [[package]]
 name = "nonogram"

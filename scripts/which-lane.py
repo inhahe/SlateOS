@@ -730,6 +730,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "nice-diff.sh",
         "nl-diff.sh",
         "nohup-diff.sh",
+        "nologin-diff.sh",
         "nproc-diff.sh",
         "numfmt-diff.sh",
         "od-diff.sh",

@@ -1598,6 +1598,15 @@ list moved to lane D on 2026-09-22):
   diagnostic. On SlateOS it says `cannot open /dev/rfkill` until there is a
   driver to answer it. 2026-10-17.
 
+- `[x]` `[B]` **shadow 4.13's `nologin`, ported** -- Ubuntu's comes from the
+  `login` package, not util-linux -- replacing `userspace/nologin`, written
+  here, which printed to standard error, read `/etc/nologin.txt`, answered
+  `--help` and `--version`, and logged nothing. It logs the attempt (who,
+  the uid, the terminal, `SSH_ORIGINAL_COMMAND`) through the C library's
+  syslog, prints its one line and exits 1, whatever its arguments. Held to
+  Ubuntu's by `scripts/nologin-diff.sh`, the logged line included, through a
+  `/dev/log` of the harness's own: 20 cases agree. 2026-10-17.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

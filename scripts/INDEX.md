@@ -323,6 +323,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nice-diff.sh` | Differential test: our `nice` against GNU coreutils'. |
 | `scripts/nl-diff.sh` | Differential test: our nl against GNU nl. |
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
+| `scripts/nologin-diff.sh` | Differential test: our `nologin` against Ubuntu's, shadow 4.13's. |
 | `scripts/nproc-diff.sh` | nproc-diff.sh — compare our `nproc` against GNU's, inside WSL. |
 | `scripts/numfmt-diff.sh` | numfmt-diff.sh — compare our `numfmt` against GNU's, inside WSL. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
@@ -596,4 +597,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_586 scripts._
+_587 scripts._

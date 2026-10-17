@@ -193,7 +193,7 @@ two disagree.
 | `nl` | Number the lines of files, honouring logical page sections. | yes | `coreutils` |  |
 | `nmap` | Network Port Scanner (nmap) | yes |  |  |
 | `nohup` | Run a command immune to hangups. | yes | `coreutils` |  |
-| `nologin` | Nologin shell. | yes |  |  |
+| `nologin` | Politely refuse a login. | yes |  |  |
 | `nproc` | Print the number of processing units available. | yes | `coreutils` |  |
 | `nsenter` | Namespace manipulation utilities. | yes |  |  |
 | `nslookup` | DNS Lookup Utility | yes |  |  |

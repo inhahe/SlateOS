@@ -79,10 +79,38 @@ compare() {
   SETUP=''
 }
 
+# Both programs run in one working directory, ours first: for what differs
+# between any two directories made alike, as a file's generation does.
+compare_same_files() {
+  local o_out=$DIFF_TMP/o.out g_out=$DIFF_TMP/g.out o_err=$DIFF_TMP/o.err g_err=$DIFF_TMP/g.err
+  [ -d "$work" ] && chmod -R u+rwX "$work" 2>/dev/null
+  rm -rf "$work"
+  mkdir -p "$work"
+  (
+    cd "$work" || exit 99
+    fixture
+    env -i PATH="$bindir/ours:/usr/bin:/bin" HOME="$work" /usr/bin/timeout -k 2 10 "$@" </dev/null >"$o_out" 2>"$o_err"
+    echo $? > "$DIFF_TMP/o.rc"
+    env -i PATH="$bindir/gnu:/usr/bin:/bin" HOME="$work" /usr/bin/timeout -k 2 10 "$@" </dev/null >"$g_out" 2>"$g_err"
+    echo $? > "$DIFF_TMP/g.rc"
+  )
+  local o_rc g_rc
+  o_rc=$(cat "$DIFF_TMP/o.rc"); g_rc=$(cat "$DIFF_TMP/g.rc")
+  if cmp -s "$o_out" "$g_out" && cmp -s "$o_err" "$g_err" && [ "$o_rc" = "$g_rc" ]; then
+    AGREED=yes
+  else
+    AGREED=no
+  fi
+  REPORT=$(
+    printf '  ours rc=%s out={%s} err={%s}\n' "$o_rc" "$(head -c 400 "$o_out" | tr '\n' '|')" "$(head -c 300 "$o_err" | tr '\n' '|')"
+    printf '  gnu  rc=%s out={%s} err={%s}\n' "$g_rc" "$(head -c 400 "$g_out" | tr '\n' '|')" "$(head -c 300 "$g_err" | tr '\n' '|')"
+  )
+}
+
 run_case() {
   local label
   label="$(printf '%q ' "$@")${SETUP:+ [setup: $SETUP]}"
-  compare "$@"
+  ${COMPARE:-compare} "$@"
   if [ "$AGREED" = yes ]; then
     pass=$((pass+1))
     [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$label"
@@ -104,11 +132,11 @@ for args in '' '.' 'f' 'f g' 'd' '-d d' '-a d' '-R d' '-aR d' '-Ra .' '-l f' '-l
   # shellcheck disable=SC2086
   run_case lsattr $args
 done
-# A file's generation is random, so the -v cases set it first, alike on both
-# sides.
-for args in '-v f' '-vp f' '-lv f' '-v d'; do
+# A file's generation is random, and ext4 refuses to set one where metadata
+# checksums are on (ENOTTY), so the -v cases read the same files.
+for args in '-v f' '-vp f' '-lv f' '-v d' '-dv d' '-v f g'; do
   # shellcheck disable=SC2086
-  SETUP='chattr -v 12345 f && chattr -v 4294967295 d'; run_case lsattr $args
+  COMPARE=compare_same_files run_case lsattr $args
 done
 SETUP='chmod 000 d'; run_case lsattr d
 SETUP='chmod 000 d'; run_case lsattr -R .

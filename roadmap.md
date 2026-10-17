@@ -1577,6 +1577,15 @@ list moved to lane D on 2026-09-22):
   differences, a file name escaped in a diagnostic and no line editing.
   2026-10-16.
 
+- `[x]` `[B]` **e2fsprogs 1.47.0's `chattr` and `lsattr`, ported** --
+  replacing `userspace/chattr`, written from scratch with its own option
+  parser. `misc/chattr.c` and `misc/lsattr.c` with the parts of `lib/e2p`
+  (the flag table, `fgetflags`/`fsetflags`, the version and project calls,
+  `iterate_on_dir`) and `lib/et` (`com_err`) they use; one binary, `lsattr`
+  by the name it is called. The ioctls are lane A's (§1524), through
+  `libcall::inode`. Held to Ubuntu's by `scripts/chattr-diff.sh`: 139 cases
+  agree, no deliberate difference. 2026-10-17.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
     `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the

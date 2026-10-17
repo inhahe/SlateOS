@@ -13,3 +13,8 @@ description = "First userspace process — boots the system to a shell prompt"
 name = "init"
 path = "src/main.rs"
 test = false
+
+# The bus's own library, which needs std and so cannot be init's: the tests
+# hold init's no_std copy of its encodings (src/bus.rs) to it.
+[dev-dependencies]
+libservicebus = { path = "../../userspace/libservicebus" }

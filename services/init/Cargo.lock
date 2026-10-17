@@ -5,3 +5,17 @@ version = 4
 [[package]]
 name = "init"
 version = "0.1.0"
+dependencies = [
+ "libservicebus",
+]
+
+[[package]]
+name = "kerror"
+version = "0.1.0"
+
+[[package]]
+name = "libservicebus"
+version = "0.1.0"
+dependencies = [
+ "kerror",
+]

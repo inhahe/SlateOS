@@ -1,5 +1,9 @@
 ## B: `org.slateos.ServiceManager` has two clients and no provider
 
+**Status:** OPEN -- fixed on lane-d (2026-10-17, lane D): init registers the
+name and answers every method above, root only (`services/init/src/bus.rs`,
+`main.rs`'s `Bus`); awaiting a boot on main.
+
 **2026-10-01: the clients now really ask; there is still nobody to answer.**
 Both used to "open" the name with syscall 200, which is `SYS_CHANNEL_CREATE`:
 it took the name's address as its flags and returned a fresh channel

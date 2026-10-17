@@ -10,6 +10,8 @@
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod bus;
+
 /// Linux's `HOST_NAME_MAX`, and the most `SYS_HOSTNAME_SET` takes.
 pub const HOST_NAME_MAX: usize = 64;
 
@@ -570,6 +572,70 @@ pub fn child_caps(
         n = n.saturating_add(1);
     }
     Some(n)
+}
+
+/// Where init keeps the names of the services in `/etc/startup.conf` it
+/// does not start at boot -- `EnableService` and `DisableService` change it
+/// (design-decisions 1196). One name a line; blank lines, `#` comments and
+/// the white space around a name are ignored. A service named here is still
+/// registered, so it can be started when asked.
+pub const STARTUP_DISABLED: &[u8] = b"/etc/startup.disabled";
+
+/// The longest `/etc/startup.disabled` init reads or writes. It holds one
+/// line per disabled service of at most [`MAX_SERVICES`]; a longer one is
+/// not init's, and is left alone.
+pub const MAX_DISABLED_LIST: usize = 4096;
+
+/// What a line of `/etc/startup.disabled` names: the line without the
+/// white space around it, or nothing for a blank line or a comment.
+fn disabled_entry(line: &[u8]) -> Option<&[u8]> {
+    let line = line.trim_ascii();
+    (!line.is_empty() && line.first() != Some(&b'#')).then_some(line)
+}
+
+/// Whether `list` -- `/etc/startup.disabled`'s bytes -- names `name`.
+#[must_use]
+pub fn names_disabled(list: &[u8], name: &[u8]) -> bool {
+    list.split(|&b| b == b'\n')
+        .filter_map(disabled_entry)
+        .any(|n| n == name)
+}
+
+/// `list` with `name` disabled or not, written into `out`: its length, or
+/// `None` when it would not fit. Every other line is kept as it is. To
+/// disable a name not listed, a line with it is added at the end; to enable
+/// one, every line naming it goes.
+pub fn set_disabled(list: &[u8], name: &[u8], disabled: bool, out: &mut [u8]) -> Option<usize> {
+    let mut len = 0usize;
+    let mut put = |bytes: &[u8]| -> Option<()> {
+        let end = len.checked_add(bytes.len())?;
+        out.get_mut(len..end)?.copy_from_slice(bytes);
+        len = end;
+        Some(())
+    };
+    if disabled {
+        put(list)?;
+        if !names_disabled(list, name) {
+            if !list.is_empty() && list.last() != Some(&b'\n') {
+                put(b"\n")?;
+            }
+            put(name)?;
+            put(b"\n")?;
+        }
+    } else {
+        let mut lines = list.split(|&b| b == b'\n').peekable();
+        while let Some(line) = lines.next() {
+            let last = lines.peek().is_none();
+            if disabled_entry(line) == Some(name) {
+                continue;
+            }
+            put(line)?;
+            if !last {
+                put(b"\n")?;
+            }
+        }
+    }
+    Some(len)
 }
 
 /// The kernel's "operation not supported": a process that does not answer
@@ -1357,5 +1423,47 @@ Service/6/r,Service/7/r,Service/8/r,Service/9/r",
             fake.log,
             ["SIGTERM 30".to_string(), std::format!("kill 30 at {start}")]
         );
+    }
+
+    /// `/etc/startup.disabled` names a service on a line of its own, white
+    /// space around it and comments ignored.
+    #[test]
+    fn the_disabled_list_names_whole_lines() {
+        let list = b"# not at boot\n  sshd \r\ncron\n\n#logger\n";
+        assert!(names_disabled(list, b"sshd"));
+        assert!(names_disabled(list, b"cron"));
+        assert!(!names_disabled(list, b"logger"));
+        assert!(!names_disabled(list, b"ssh"));
+        assert!(!names_disabled(b"", b"sshd"));
+    }
+
+    /// Disabling adds the name once, at the end; enabling takes out every
+    /// line naming it; every other line is kept as it was.
+    #[test]
+    fn a_service_is_disabled_and_enabled_by_its_line_alone() {
+        let set = |list: &[u8], name: &[u8], disabled: bool| {
+            let mut out = [0u8; 128];
+            set_disabled(list, name, disabled, &mut out).map(|n| out[..n].to_vec())
+        };
+        assert_eq!(set(b"", b"sshd", true).as_deref(), Some(&b"sshd\n"[..]));
+        assert_eq!(
+            set(b"# keep\ncron", b"sshd", true).as_deref(),
+            Some(&b"# keep\ncron\nsshd\n"[..])
+        );
+        assert_eq!(
+            set(b"cron\nsshd\n", b"sshd", true).as_deref(),
+            Some(&b"cron\nsshd\n"[..])
+        );
+        assert_eq!(
+            set(b"# keep\n sshd \ncron\nsshd\n", b"sshd", false).as_deref(),
+            Some(&b"# keep\ncron\n"[..])
+        );
+        assert_eq!(
+            set(b"cron\n", b"sshd", false).as_deref(),
+            Some(&b"cron\n"[..])
+        );
+        // What does not fit is not written at all.
+        let mut small = [0u8; 4];
+        assert_eq!(set_disabled(b"cron\n", b"sshd", true, &mut small), None);
     }
 }

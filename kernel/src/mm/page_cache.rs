@@ -1086,6 +1086,18 @@ pub fn dirty_pages() -> usize {
     DIRTY_COUNT.load(Ordering::Relaxed)
 }
 
+/// Whether `file` has a shared mapping that may write it: one whose handle
+/// may write, writable now or not (Linux's `VM_SHARED | VM_MAYWRITE`), which
+/// a `WRITE` seal must wait for (`fs::sealing::add_seals_to`).
+#[must_use]
+pub fn has_writable_maps(file: FileId) -> bool {
+    PAGE_CACHE
+        .lock()
+        .files
+        .get(&file)
+        .is_some_and(|st| st.writable_maps > 0)
+}
+
 /// Whether `file` has a shared mapping ([`shared_map_added`]).
 #[must_use]
 pub fn has_shared_maps(file: FileId) -> bool {
@@ -2105,6 +2117,19 @@ fn writeback_checks(path: &str, size: usize) -> KernelResult<()> {
         let [Some(f0), Some(_), Some(f2)] = held else {
             return test_fail("a read through the cache did not leave the file's pages in it");
         };
+
+        // A mapping may write the file: a WRITE seal must wait for it
+        // (`fs::sealing::add_seals_to`), and is not recorded.
+        let sealed = crate::fs::sealing::add_seals_to(
+            Some(file),
+            crate::fs::path::Path::new(path),
+            crate::fs::sealing::SealFlags::WRITE,
+        );
+        if sealed != Err(KernelError::DeviceBusy)
+            || !crate::fs::sealing::seals_of_file(file).is_empty()
+        {
+            return test_fail("a WRITE seal was not refused while a mapping may write the file");
+        }
 
         if mark_dirty(file, page, f0) {
             return test_fail("a page was marked dirty through a frame that is not its own");

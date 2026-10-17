@@ -14239,6 +14239,24 @@ pub(crate) fn native_file_mmap(handle: u64, args: &SyscallArgs) -> SyscallResult
 /// identity is served read-only as a private copy, and refused writable
 /// (`ENODEV`); a writable one of a memfd is not built (`ENOSYS`). Kinds other
 /// than files and memfds → `ENODEV`.
+/// Count a shared mapping of `file` in the page cache
+/// (`page_cache::shared_map_added`, the mapping's `handle` its writer when it
+/// `may_write`), then look at the file's seals again: a `WRITE` seal added
+/// after [`linux_file_mmap`] first looked, and before this count, did not
+/// see the mapping (`fs::sealing::add_seals_to` refuses only one it can
+/// count). False, the count given back, when a mapping that may write found
+/// one: the mapping is not made (`EPERM`).
+fn count_shared_map(file: crate::fs::vfs::FileId, may_write: bool, handle: u64) -> bool {
+    crate::mm::page_cache::shared_map_added(file, may_write.then_some(handle));
+    if may_write
+        && crate::fs::sealing::seals_of_file(file).contains(crate::fs::sealing::SealFlags::WRITE)
+    {
+        crate::mm::page_cache::shared_map_removed(file, true);
+        return false;
+    }
+    true
+}
+
 #[allow(clippy::too_many_arguments)]
 fn linux_file_mmap(
     entry: &FdEntry,
@@ -14321,9 +14339,18 @@ fn linux_file_mmap(
             errno::ENODEV
         });
     }
+    // A WRITE-sealed file (`fs::sealing`) is not mapped shared and writable
+    // (`EPERM`, as Linux's sealed memfd), and a read-only shared mapping of
+    // it may never be made writable.
+    let sealed = shared_file.is_some_and(|f| {
+        crate::fs::sealing::seals_of_file(f).contains(crate::fs::sealing::SealFlags::WRITE)
+    });
+    if sealed && (prot & PROT_WRITE) != 0 {
+        return linux_err(errno::EPERM);
+    }
     // A shared map whose handle may write: it is, or may be made, writable,
     // and the page cache keeps a writer for the file's dirty pages.
-    let may_write = shared_file.is_some() && writable;
+    let may_write = shared_file.is_some() && writable && !sealed;
 
     let frame_size = FRAME_SIZE as u64;
     let hw_page = crate::mm::page_table::HW_PAGE_SIZE as u64;
@@ -14436,11 +14463,15 @@ fn linux_file_mmap(
                 shared: shared_file.is_some(),
                 may_write,
             };
-            if let Some(file) = shared_file {
-                // The VMA's count of the file's shared mappings, which its
-                // release gives back (`pcb::Backing`). Counted before the VMA
-                // is there for another thread's `munmap` to release.
-                crate::mm::page_cache::shared_map_added(file, may_write.then_some(mapped_handle));
+            // The VMA's count of the file's shared mappings, which its
+            // release gives back (`pcb::Backing`). Counted before the VMA is
+            // there for another thread's `munmap` to release.
+            if let Some(file) = shared_file
+                && !count_shared_map(file, may_write, mapped_handle)
+            {
+                let _ = crate::fs::handle::close(mapped_handle);
+                pcb::linux_as_release(pid, length_aligned);
+                return linux_err(errno::EPERM);
             }
             if pcb::add_vma(
                 pid,
@@ -14552,10 +14583,14 @@ fn linux_file_mmap(
         // A shared mapping starts in phase with its file offset, so that each
         // virtual frame maps one page-cache frame (§1572).
         let phase = shared_file.map(|_| offset);
-        if let Some(file) = shared_file {
-            // The VMA's count of the file's shared mappings (`pcb::Backing`),
-            // counted before the VMA is there for another thread to unmap.
-            crate::mm::page_cache::shared_map_added(file, may_write.then_some(mapped_handle));
+        // The VMA's count of the file's shared mappings (`pcb::Backing`),
+        // counted before the VMA is there for another thread to unmap.
+        if let Some(file) = shared_file
+            && !count_shared_map(file, may_write, mapped_handle)
+        {
+            let _ = crate::fs::handle::close(mapped_handle);
+            pcb::linux_as_release(pid, length_aligned);
+            return linux_err(errno::EPERM);
         }
         let base = match pcb::reserve_unmapped_area_phased(
             pid,

@@ -24639,10 +24639,15 @@ pub fn self_test_linux_shared_file_maps() -> KernelResult<()> {
 /// must be there, saved by the last unmap. Afterwards the cache keeps no
 /// state about any more files than before -- every mapping gave back its
 /// count, and the cache its writer -- and holds no more dirty pages.
+///
+/// It also maps `/tmp/shmapw-sealed`, made here and sealed against writes
+/// (`fs::sealing`): a writable shared mapping of it is `EPERM`, and a
+/// read-only one cannot be made writable.
 pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
     const PASS: i32 = 0x2A;
     const DEADLINE_NS: u64 = 60_000_000_000;
     const PATH: &str = "/tmp/shmapw";
+    const SEALED: &str = "/tmp/shmapw-sealed";
     const PG: usize = 4096;
     // Each store the program made, as (offset, byte); every other byte of
     // the file's five pages is zero.
@@ -24677,6 +24682,13 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
         cwd: None,
         uid_gid: None,
     };
+    crate::fs::Vfs::write_file(SEALED, &[0u8; PG])?;
+    if let Err(e) = crate::fs::sealing::add_seals(SEALED, crate::fs::sealing::SealFlags::WRITE) {
+        // The test's file is its own to remove; the seal's error is the one
+        // to report.
+        let _ = crate::fs::Vfs::remove(SEALED);
+        return Err(e);
+    }
     let tracked_before = crate::mm::page_cache::tracked_files();
     let dirty_before = crate::mm::page_cache::dirty_pages();
     let result = match spawn_process(&exe_elf, &options) {
@@ -24686,6 +24698,7 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
                 "[spawn]   FAIL: writable shared file mappings spawn returned {:?}",
                 e
             );
+            let _ = crate::fs::Vfs::remove(SEALED);
             return Err(e);
         }
     };
@@ -24726,6 +24739,13 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
                 Some(0x40 | 0x44) => "munmap failed",
                 Some(0x41..=0x43) => "made read-only and read-write again, the mapping broke",
                 Some(0x45) => "unmapped, the file did not read back every store",
+                Some(0x46) => "the write-sealed file could not be opened",
+                Some(0x47) => "a writable shared mapping of a write-sealed file was not EPERM",
+                Some(0x48) => "a read-only shared mapping of a write-sealed file failed",
+                Some(0x49) => {
+                    "mprotect(PROT_WRITE) of a write-sealed file's shared mapping was not EACCES"
+                }
+                Some(0x4A) => "munmap of the write-sealed file's mapping failed",
                 Some(0x5F) => "a pread failed",
                 None => "no exit code: the program died",
                 _ => "unexpected exit code",
@@ -24771,22 +24791,24 @@ pub fn self_test_linux_writable_shared_file_maps() -> KernelResult<()> {
         }
         Ok(())
     })();
-    // The file is the test's to remove whatever happened; a failure to is
+    // The files are the test's to remove whatever happened; a failure to is
     // reported only when nothing else failed.
-    let removed = crate::fs::Vfs::remove(PATH);
+    let removed = crate::fs::Vfs::remove(PATH).and(crate::fs::Vfs::remove(SEALED));
     outcome?;
     if let Err(e) = removed {
         serial_println!(
-            "[spawn]   FAIL: writable shared file mappings (ring 3) — {} could not be removed: \
-             {:?}",
+            "[spawn]   FAIL: writable shared file mappings (ring 3) — {} or {} could not be \
+             removed: {:?}",
             PATH,
+            SEALED,
             e
         );
         return Err(e);
     }
     serial_println!(
         "[spawn]   Linux writable shared file mappings (ring 3: stores read at once, fork, \
-         msync, a second view, EACCES on a read-only descriptor, saved by the last unmap): OK"
+         msync, a second view, EACCES on a read-only descriptor, saved by the last unmap, \
+         a write seal refused): OK"
     );
     Ok(())
 }

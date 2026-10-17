@@ -46,3 +46,7 @@ memfd's alone (`ipc::memfd`), as on Linux, where a regular file answers
 **Not covered:** a writable shared mapping, which this kernel does not make
 (`mmap` answers `ENOSYS`); when it does, `WRITE` must refuse one, as Linux's
 `F_SEAL_WRITE` does, and adding `WRITE` to a file so mapped must be `EBUSY`.
+*Done 2026-10-16 with the writable shared mappings of §1572:* `WRITE` refuses
+a writable shared mapping (`EPERM`) and makes a read-only one unable to
+become writable, and adding `WRITE` while a shared mapping may write the file
+is `EBUSY` (`fs::sealing::add_seals_to`, `linux::count_shared_map`).

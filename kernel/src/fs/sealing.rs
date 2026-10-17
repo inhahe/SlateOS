@@ -20,9 +20,13 @@
 //! The Linux `fcntl(F_ADD_SEALS)` stays a memfd's alone (`ipc::memfd`), as on
 //! Linux, where a regular file answers `EINVAL`.
 //!
-//! **Not covered:** a writable shared mapping, which this kernel does not
-//! make yet (`mmap` answers `ENOSYS`); when it does, a `WRITE` seal must
-//! refuse one, as Linux's does.
+//! **Shared mappings** (design-decisions §1572), as Linux's memfd has them:
+//! a `WRITE`-sealed file cannot be mapped shared and writable (`EPERM`), and
+//! a read-only shared mapping of it cannot be made writable (`mprotect`:
+//! `EACCES`); a `WRITE` seal is refused while a shared mapping may write the
+//! file (`EBUSY`, [`add_seals_to`]). Stores through a mapping are saved past
+//! these rules -- they were allowed when the mapping was made, and the seal
+//! that would forbid them cannot be added while it lives.
 //!
 //! The design, which is what the rest of this module implements:
 //! file sealing (inspired by Linux's `memfd_seal`) is a mechanism to
@@ -243,6 +247,17 @@ pub fn seals_of(id: Option<crate::fs::vfs::FileId>, path: &Path) -> SealFlags {
         .map_or(SealFlags::NONE, |e| e.flags)
 }
 
+/// The seals on the file with identity `id`: [`seals_of`] for a caller that
+/// has no name for it -- a shared mapping of the file (`mmap`), which asks
+/// whether it may be writable.
+pub fn seals_of_file(id: crate::fs::vfs::FileId) -> SealFlags {
+    SEAL_TABLE
+        .lock()
+        .iter()
+        .find(|e| e.id == Some(id))
+        .map_or(SealFlags::NONE, |e| e.flags)
+}
+
 /// A rule's verdict, counted: `NotPermitted` (`EPERM`) when `refused`.
 fn verdict(refused: bool) -> KernelResult<()> {
     CHECK_OPS.fetch_add(1, Ordering::Relaxed);
@@ -337,7 +352,8 @@ pub fn add_seals(path: impl AsRef<Path>, new_seals: SealFlags) -> KernelResult<S
 ///
 /// # Errors
 ///
-/// As [`add_seals`].
+/// As [`add_seals`]; `DeviceBusy` (`EBUSY`) for `WRITE` on a file a shared
+/// mapping may write, as Linux's `memfd_add_seals` answers.
 pub fn add_seals_to(
     id: Option<crate::fs::vfs::FileId>,
     path: &Path,
@@ -350,6 +366,17 @@ pub fn add_seals_to(
     SEAL_OPS.fetch_add(1, Ordering::Relaxed);
     let now = crate::timekeeping::clock_monotonic();
     let mut table = SEAL_TABLE.lock();
+
+    // A mapping that may write would go on writing a WRITE-sealed file
+    // (design-decisions §1572). Asked under the table's lock: a mapping
+    // counts itself before it reads the seals (`linux_file_mmap`), so one
+    // made meanwhile is either counted here or sees the seal there.
+    if new_seals.contains(SealFlags::WRITE)
+        && id.is_some_and(crate::mm::page_cache::has_writable_maps)
+    {
+        DENIED_OPS.fetch_add(1, Ordering::Relaxed);
+        return Err(KernelError::DeviceBusy);
+    }
 
     // Check existing entry.
     if let Some(entry) = table.iter_mut().find(|e| seal_entry_matches(e, path, id)) {

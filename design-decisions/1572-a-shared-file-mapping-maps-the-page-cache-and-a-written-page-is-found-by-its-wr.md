@@ -116,6 +116,26 @@ and in the background. The other choices, and why not, are below.
   `msync(MS_SYNC)` saves the range's dirty pages; `MS_ASYNC` does nothing
   more, as on Linux since 2.6.19 (the pages are dirty in the cache, and the
   last unmapping, `fsync` and step 3's background pass save them).
+- **Seals** (`fs::sealing`, the VFS's per-file seals), as Linux's memfd
+  has them:
+  - A `WRITE`-sealed file cannot be mapped shared and writable (`EPERM`).
+  - A read-only shared mapping of it is made with `may_write` false, so
+    `mprotect` cannot make it writable (`EACCES`). This follows Linux 6.7
+    and later. Linux 6.6 refuses the read-only mapping too, if the
+    descriptor is `O_RDWR` (checked in WSL).
+  - A `WRITE` seal is refused while any shared mapping may write the file
+    (`EBUSY`), even one that is read-only now. That is Linux 6.6's answer,
+    checked.
+
+  The race is closed on both sides:
+  - The mapping counts itself (`writable_maps`) before it reads the seals
+    a second time (`linux::count_shared_map`).
+  - `add_seals_to` reads the count while it holds the seal table.
+
+  Either the seal sees the mapping or the mapping sees the seal. A
+  mapping's stores are saved past the seal rules: they were allowed when
+  it was made, and the seal that would forbid them cannot be added while
+  it lives.
 - **`Dirty:`** is in `/proc/meminfo` (`page_cache::dirty_pages`, a counter,
   so that `top` reading it once a second does not walk the cache). A save
   is synchronous, its page dirty until the call that saves it returns, so

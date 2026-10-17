@@ -3497,10 +3497,6 @@ impl App {
             // delete at it, Ctrl+A, C, X and V, and typing. It typed onto the
             // end, and Backspace from the end was its only edit.
             _ => {
-                let before = (
-                    self.search.input().cursor(),
-                    self.search.input().selection_anchor(),
-                );
                 let edit = self.search.key(ev);
                 if edit.changed {
                     self.list_scroll = 0;
@@ -3508,12 +3504,7 @@ impl App {
                 // Something done, or nothing to show for it: a Backspace on
                 // an empty query is not a change, and saying it was asks for
                 // a frame that would be the same.
-                let moved = before
-                    != (
-                        self.search.input().cursor(),
-                        self.search.input().selection_anchor(),
-                    );
-                if edit.changed || moved || edit.copied {
+                if edit.changed || edit.moved || edit.copied {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored

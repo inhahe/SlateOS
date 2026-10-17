@@ -1248,8 +1248,6 @@ impl CharMapApp {
     /// else whether it changed the query, its caret or its selection. A
     /// query changed is searched for again.
     fn search_key(&mut self, event: &KeyEvent) -> Option<bool> {
-        let caret = |search: &LineBox| (search.input().cursor(), search.input().selection_anchor());
-        let before = caret(&self.search);
         let edit = self.search.key(event);
         if !edit.handled {
             return None;
@@ -1257,7 +1255,7 @@ impl CharMapApp {
         if edit.changed {
             self.perform_search();
         }
-        Some(edit.changed || caret(&self.search) != before)
+        Some(edit.changed || edit.moved)
     }
 
     /// Where the query is drawn in the search box at `search`: inside it,

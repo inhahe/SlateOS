@@ -2552,13 +2552,6 @@ impl UndeleteApp {
     /// changed the search, its caret or its selection; a search changed
     /// filters the files again. On the program's clipboard.
     fn search_key(&mut self, key: &KeyEvent) -> EventResult {
-        let caret = |filter: &ScanFilter| {
-            (
-                filter.filename_search.input().cursor(),
-                filter.filename_search.input().selection_anchor(),
-            )
-        };
-        let before = caret(&self.filter);
         let edit = self.filter.filename_search.key(key);
         if !edit.handled {
             return EventResult::Ignored;
@@ -2566,7 +2559,7 @@ impl UndeleteApp {
         if edit.changed {
             self.reanchor_selection();
         }
-        if edit.changed || caret(&self.filter) != before {
+        if edit.changed || edit.moved {
             EventResult::Consumed
         } else {
             EventResult::Ignored

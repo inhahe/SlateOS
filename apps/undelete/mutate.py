@@ -250,7 +250,7 @@ MUTATIONS += [
     ),
     (
         "every key the search answers is a redraw",
-        "        if edit.changed || caret(&self.filter) != before {\n",
+        "        if edit.changed || edit.moved {\n",
         "        if true {\n",
         [ENDS],
     ),

@@ -1898,20 +1898,11 @@ impl SysInfoState {
                 EventResult::Consumed
             }
             _ => {
-                let before = (
-                    self.search.input().cursor(),
-                    self.search.input().selection_anchor(),
-                );
                 let edit = self.search.key(key);
                 if !edit.handled {
                     return EventResult::Ignored;
                 }
-                if edit.changed
-                    || (
-                        self.search.input().cursor(),
-                        self.search.input().selection_anchor(),
-                    ) != before
-                {
+                if edit.changed || edit.moved {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored

@@ -4486,13 +4486,6 @@ impl PdfViewerApp {
             self.follow_current_match();
             return true;
         }
-        let caret = |search: &SearchState| {
-            (
-                search.query.input().cursor(),
-                search.query.input().selection_anchor(),
-            )
-        };
-        let before = caret(&self.search);
         let edit = self.search.query.key(event);
         if !edit.handled {
             return false;
@@ -4500,7 +4493,7 @@ impl PdfViewerApp {
         if edit.changed {
             self.refresh_search();
         }
-        edit.changed || caret(&self.search) != before
+        edit.changed || edit.moved
     }
 
     /// Route one window event.

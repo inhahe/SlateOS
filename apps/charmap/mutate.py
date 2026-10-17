@@ -173,7 +173,7 @@ MUTATIONS += [
     ),
     (
         "every key the search answers is a redraw",
-        "        Some(edit.changed || caret(&self.search) != before)\n",
+        "        Some(edit.changed || edit.moved)\n",
         "        Some(true)\n",
         [GRID],
     ),

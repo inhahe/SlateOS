@@ -654,13 +654,13 @@ MUTATIONS = [
     # get wrong is going round the editor, which is what these two do.
     (
         "the box takes whatever text arrives, control characters and all",
-        "                let before = (\n                    self.search.input().cursor(),\n",
+        "                let edit = self.search.key(ev);\n",
         "                if !ev.text.is_empty() {\n"
         "                    let typed = format!(\"{}{}\", self.search.text(), ev.text);\n"
         "                    self.search.set_text(&typed);\n"
         "                    return EventResult::Consumed;\n"
         "                }\n"
-        "                let before = (\n                    self.search.input().cursor(),\n",
+        "                let edit = self.search.key(ev);\n",
         # Not `the_key_that_opens_the_search_box_is_not_also_typed_into_it`:
         # that one presses `/` with the box shut, so nothing is appended by
         # either spelling.  The two differ only on a keystroke whose text is
@@ -669,7 +669,7 @@ MUTATIONS = [
     ),
     (
         "a key that does nothing to the box says it did",
-        "                if edit.changed || moved || edit.copied {\n",
+        "                if edit.changed || edit.moved || edit.copied {\n",
         "                if true {\n",
         ["backspace_on_an_empty_query_is_ignored_rather_than_pretending"],
     ),

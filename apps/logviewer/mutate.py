@@ -554,13 +554,13 @@ MUTATIONS += [
     ),
     (
         "a key that changes nothing in the box is a redraw",
-        "            return Some(if moved {\n                EventResult::Consumed\n            } else {\n                EventResult::Ignored\n            });\n",
+        "            return Some(if edit.moved {\n                EventResult::Consumed\n            } else {\n                EventResult::Ignored\n            });\n",
         "            return Some(EventResult::Consumed);\n",
         [KEEPS, "a_search_finds_lines_and_backspace_gives_them_back"],
     ),
     (
         "a caret moved is not drawn",
-        "            return Some(if moved {\n                EventResult::Consumed\n            } else {\n                EventResult::Ignored\n            });\n",
+        "            return Some(if edit.moved {\n                EventResult::Consumed\n            } else {\n                EventResult::Ignored\n            });\n",
         "            return Some(EventResult::Ignored);\n",
         [EDITS],
     ),

@@ -373,22 +373,22 @@ MUTATIONS = [
     ),
     (
         "a field refuses what AltGr types",
-        "                let before = (\n                    self.search.input().cursor(),\n",
+        "                let edit = self.search.key(key);\n",
         "                if key.modifiers.ctrl {\n"
         "                    return EventResult::Ignored;\n"
         "                }\n"
-        "                let before = (\n                    self.search.input().cursor(),\n",
+        "                let edit = self.search.key(key);\n",
         ["altgr_types_into_a_field_and_runs_no_shortcut"],
     ),
     (
         "a field types a command's letter",
-        "                let before = (\n                    self.search.input().cursor(),\n",
+        "                let edit = self.search.key(key);\n",
         "                if !key.text.is_empty() && !textline::types_into_field(key) {\n"
         "                    let typed = format!(\"{}{}\", self.search.text(), key.text);\n"
         "                    self.search.set_text(&typed);\n"
         "                    return EventResult::Consumed;\n"
         "                }\n"
-        "                let before = (\n                    self.search.input().cursor(),\n",
+        "                let edit = self.search.key(key);\n",
         ["a_command_types_nothing_and_alt_or_windows_is_no_shortcut", "the_search_box_edits_like_a_field"],
     ),
     # -- the shortcut card's hold on the pointer

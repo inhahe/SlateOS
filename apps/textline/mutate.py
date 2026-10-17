@@ -289,6 +289,18 @@ LINE_MUTATIONS = [
         [S_TYPING, S_WINDOWS, S_RELEASE, S_CAPACITY],
     ),
     (
+        "a key never says the caret moved",
+        "            moved: caret(&self.input) != caret_before,\n",
+        "            moved: false,\n",
+        [S_TYPING, "a_copy_or_a_cut_says_it_took_the_selection"],
+    ),
+    (
+        "a key that leaves the caret says it moved",
+        "            moved: caret(&self.input) != caret_before,\n",
+        "            moved: true,\n",
+        [S_TYPING, "a_copy_or_a_cut_says_it_took_the_selection", S_WINDOWS, S_RELEASE, S_CAPACITY],
+    ),
+    (
         "the box keeps a clipboard of its own",
         "        let edit = crate::apply_key_on_clipboard(&mut self.input, key, self.font_size);\n",
         '        let edit = crate::apply_key(&mut self.input, key, "", self.font_size);\n',

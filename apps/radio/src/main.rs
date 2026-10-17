@@ -1957,10 +1957,6 @@ impl RadioApp {
     /// On the program's clipboard. Whether the key changed what is drawn:
     /// the search, its caret or its selection.
     fn edit_search(&mut self, event: &KeyEvent) -> bool {
-        let before = (
-            self.search.input().cursor(),
-            self.search.input().selection_anchor(),
-        );
         let edit = self.search.key(event);
         if !edit.handled {
             return false;
@@ -1969,10 +1965,7 @@ impl RadioApp {
             self.perform_search();
             return true;
         }
-        (
-            self.search.input().cursor(),
-            self.search.input().selection_anchor(),
-        ) != before
+        edit.moved
     }
 
     /// The search box, in the search card at `(sx, sy)`, `sw` wide.

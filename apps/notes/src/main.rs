@@ -3640,10 +3640,6 @@ impl NotesApp {
                 EventResult::Consumed
             }
             _ => {
-                let before = (
-                    self.search.input().cursor(),
-                    self.search.input().selection_anchor(),
-                );
                 let edit = self.search.key(key);
                 if !edit.handled {
                     return EventResult::Ignored;
@@ -3652,14 +3648,10 @@ impl NotesApp {
                     self.reanchor_selection();
                     return EventResult::Consumed;
                 }
-                if (
-                    self.search.input().cursor(),
-                    self.search.input().selection_anchor(),
-                ) == before
-                {
-                    EventResult::Ignored
-                } else {
+                if edit.moved {
                     EventResult::Consumed
+                } else {
+                    EventResult::Ignored
                 }
             }
         }

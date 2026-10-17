@@ -1534,22 +1534,14 @@ impl App {
             self.search_focused = false;
             return Some(EventResult::Consumed);
         }
-        let caret = |filter: &FilterState| {
-            (
-                filter.search.input().cursor(),
-                filter.search.input().selection_anchor(),
-            )
-        };
-        let before = caret(&self.filter);
         let edit = self.filter.search.key(key);
-        let moved = before != caret(&self.filter);
         if edit.changed {
             self.update_search();
             self.reanchor_selection();
             return Some(EventResult::Consumed);
         }
         if edit.handled {
-            return Some(if moved {
+            return Some(if edit.moved {
                 EventResult::Consumed
             } else {
                 EventResult::Ignored

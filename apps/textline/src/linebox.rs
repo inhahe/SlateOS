@@ -41,6 +41,10 @@ pub struct LineKey {
     pub handled: bool,
     /// Whether the text changed.
     pub changed: bool,
+    /// Whether the caret or the selection is not where it was -- an arrow,
+    /// Home, Ctrl+A, and any key that changed the text: what a box redraws
+    /// for though its text is the same.
+    pub moved: bool,
     /// Whether the key put the selection on the clipboard (Ctrl+C, Ctrl+X):
     /// something done that neither the text nor its caret shows.
     pub copied: bool,
@@ -143,13 +147,16 @@ impl LineBox {
 
     /// Apply `key` to the box -- on the program's clipboard, as its menu is
     /// (`apply_key_on_clipboard`) -- and say whether the key was the box's
-    /// and whether the text changed.
+    /// and what it did.
     pub fn key(&mut self, key: &KeyEvent) -> LineKey {
         let before = self.input.text().to_owned();
+        let caret = |input: &TextInput| (input.cursor(), input.selection_anchor());
+        let caret_before = caret(&self.input);
         let edit = crate::apply_key_on_clipboard(&mut self.input, key, self.font_size);
         LineKey {
             handled: edit.handled,
             changed: self.input.text() != before,
+            moved: caret(&self.input) != caret_before,
             copied: edit.copied.is_some(),
         }
     }
@@ -318,14 +325,26 @@ mod tests {
             LineKey {
                 handled: true,
                 changed: false,
+                moved: true,
                 copied: false,
             }
+        );
+        assert_eq!(
+            line.key(&press(Key::Home, "")),
+            LineKey {
+                handled: true,
+                changed: false,
+                moved: false,
+                copied: false,
+            },
+            "Home at the start moved the caret"
         );
         assert_eq!(
             line.key(&press(Key::Delete, "")),
             LineKey {
                 handled: true,
                 changed: true,
+                moved: false,
                 copied: false,
             }
         );
@@ -352,6 +371,7 @@ mod tests {
             LineKey {
                 handled: true,
                 changed: false,
+                moved: false,
                 copied: true,
             }
         );
@@ -360,6 +380,7 @@ mod tests {
             LineKey {
                 handled: true,
                 changed: true,
+                moved: true,
                 copied: true,
             }
         );
@@ -415,6 +436,7 @@ mod tests {
             LineKey {
                 handled: true,
                 changed: false,
+                moved: false,
                 copied: false,
             }
         );

@@ -178,12 +178,14 @@ BAD=0
 while IFS= read -r line; do
     name="$(echo "$line" | grep -oE ' -o src/[A-Za-z0-9_-]+' | head -1 | sed 's|.* -o src/||')"
     [ -n "$name" ] || continue
-    # The build's own link line, with two changes: the output goes to $OUT,
-    # and the compiler that begins it -- zig's cc, which configure was given
-    # -- becomes scripts/lib/worktree.sh's link wrapper: zig's ld.lld itself,
-    # given the line's own inputs and then our libc.a, with zig's C++ runtime
-    # ahead of it and zig's compiler runtime behind it, which is zig's own
-    # order (the wrapper's comment says why the order matters). Not zig's cc
+    # The build's own link line, with three changes: the output goes to $OUT;
+    # ld.lld is told not to stop at its default 20 errors, which would cap the
+    # two counts below and could leave missing symbols uncounted behind
+    # duplicates; and the compiler that begins it -- zig's cc, which configure
+    # was given -- becomes scripts/lib/worktree.sh's link wrapper: zig's ld.lld
+    # itself, given the line's own inputs and then our libc.a, with zig's C++
+    # runtime ahead of it and zig's compiler runtime behind it, which is zig's
+    # own order (the wrapper's comment says why the order matters). Not zig's cc
     # driver with -nostdlib, as until 2026-10-01: that puts zig's own musl
     # libc.a behind every link, where it supplies whatever ours lacks instead
     # of a missing symbol being reported (known-issues
@@ -200,7 +202,7 @@ while IFS= read -r line; do
     # __progname, __progname_full), each musl's member extracted for an
     # `X_unlocked` name our libc then lacked, dragging its `X` in behind it.
     cmd="${line/ -o src\/$name/ -o $OUT/$name}"
-    cmd="$(printf '%q' "$SLATE_LINK_CC") ${cmd#* }"
+    cmd="$(printf '%q' "$SLATE_LINK_CC") -Wl,--error-limit=0 ${cmd#* }"
     eval "$cmd" >"$WORK/link-$name.log" 2>&1
     if [ $? -eq 0 ] && [ -x "$OUT/$name" ]; then
         OK=$((OK + 1))
@@ -225,10 +227,13 @@ echo "BINARIES_FAILED=$BAD"
 # names it only when musl's member collides with ours, so a missing function
 # musl filled in silently was never counted; and the wrapper above links no
 # musl at all, while its C++ and compiler runtimes live in zig's cache too.
+#
+# `grep >/dev/null`, not `grep -q`: under pipefail, -q exits at the first
+# match, readelf dies of SIGPIPE, and the pipeline reads as a missing note.
 NO_NOTE=0
 for b in "$OUT"/*; do
     [ -x "$b" ] || continue
-    if ! readelf -n "$b" 2>/dev/null | grep -q SlateOS; then
+    if ! readelf -n "$b" 2>/dev/null | grep SlateOS >/dev/null; then
         NO_NOTE=$((NO_NOTE + 1))
         echo "NO_SLATEOS_NOTE: ${b##*/}"
     fi

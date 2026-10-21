@@ -435,7 +435,7 @@ fn decode_common_vui(gb: &mut Bits<'_>, vui: &mut Vui) {
 /// -- its fields' lengths. The count of buffers is checked; it, the bit
 /// rates and buffer sizes, and the buffering period's delay length FFmpeg
 /// keeps beside them only its parser and hardware decoders read.
-#[allow(clippy::cast_possible_wrap, reason = "fields of 4 and 5 bits")]
+#[allow(clippy::cast_possible_wrap, reason = "fields of 5 bits")]
 fn decode_hrd_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError> {
     let cpb_count = gb.ue_31() + 1;
     if cpb_count > 32 {
@@ -569,10 +569,6 @@ fn decode_scaling_list(
 /// SPS's were read, `Ok(0)` when none were or a PPS's were, an error when a
 /// delta is out of range -- reading on through every list either way, as
 /// FFmpeg's `ret |=` does.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "FFmpeg's signature, to keep the translation plain"
-)]
 fn decode_scaling_matrices(
     gb: &mut Bits<'_>,
     sps: &Sps,

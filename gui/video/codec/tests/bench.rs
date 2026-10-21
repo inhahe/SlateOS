@@ -66,9 +66,10 @@ fn fps(path: &PathBuf, convert: bool) -> (f64, usize) {
 /// FATE's `h264refframeregression.mp4` (High 10, progressive) and
 /// `twofields_packet.mp4` (Main, interlaced), from the directory `H264_FATE`
 /// names (its `h264` subdirectory), and two 8-bit encodes of the first,
-/// which the motion compensation's 8-bit paths take. All three of those
-/// are CABAC; the second encode is CAVLC (`cabac=0`), whose syntax is read
-/// through `ffbits` rather than the arithmetic decoder --
+/// which the motion compensation's 8-bit paths take. The FATE streams and
+/// the first encode are CABAC; the second encode is CAVLC (`cabac=0`),
+/// whose syntax is read through `ffbits` rather than the arithmetic
+/// decoder --
 ///
 /// ```text
 /// ffmpeg -i <fate>/h264/h264refframeregression.mp4 -an -c:v libx264 -preset medium \

@@ -452,11 +452,8 @@ net80211/src/supplicant.rs:mic_algo
 # for a key with no effect is a false claim on screen. All three do what
 # their rows say now, so all three lines are removed rather than annotated.
 
-# Lane F, 2026-10-21: the AAC translation (FFmpeg 8.1.3), kept for the code
-# that will read them. Each line goes when that code is in. Of the fields the
-# gate found in lane F's FFmpeg translations, the rest were removed: FFmpeg's
-# software decoder never reads them either, only its parser or its hardware
-# decoders do. Their bits are still read past, by name, where they stand.
+# Lane F, 2026-10-21: fields of the AAC translation (FFmpeg 8.1.3), kept for
+# the code that will read them. Each line goes when that code is in.
 #
 # AAC, translated a module at a time (gui/video/aac/src/lib.rs). Whether the
 # frame has buffers is read where a frame is decoded (aacdec.c's "no frame

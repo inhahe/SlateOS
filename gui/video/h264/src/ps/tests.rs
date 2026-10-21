@@ -36,6 +36,15 @@ impl<'t> Trace<'t> {
             .map(|&(_, v)| v)
     }
 
+    /// The last element of this name.
+    fn last(&self, name: &str) -> Option<i64> {
+        self.fields
+            .iter()
+            .rev()
+            .find(|(n, _)| *n == name)
+            .map(|&(_, v)| v)
+    }
+
     /// The first element of this name, as an `i32`; 0 when absent.
     fn int(&self, name: &str) -> i32 {
         self.get(name).unwrap_or(0) as i32
@@ -90,6 +99,7 @@ fn all_sets() -> Vec<Sets> {
         })
         .collect();
     v.push(written_fallbacks());
+    v.push(written_timing(32));
     v
 }
 
@@ -109,10 +119,13 @@ fn ramp(n: usize, start: u8) -> Vec<u8> {
     (0..n).map(|k| start.wrapping_add(k as u8 % 64)).collect()
 }
 
-/// What no conformance stream does: an SPS whose first lists are its own
-/// and whose others fall back to them, and a PPS that sends some lists and
-/// leaves others to fall back to the SPS's (rule B of Table 7-2).
-fn written_fallbacks() -> Sets {
+/// A High profile SPS of 176 by 144 frames and its trace: `lists` writes
+/// its scaling lists and `vui` its video usability information, each
+/// `None` for a set without them.
+fn written_sps(
+    lists: Option<&dyn Fn(&mut Syntax)>,
+    vui: Option<&dyn Fn(&mut Syntax)>,
+) -> (Vec<u8>, Vec<(String, i64)>) {
     let mut s = Syntax::default();
     s.u("profile_idc", 8, 100)
         .u("constraint_set0_flag", 1, 0)
@@ -128,16 +141,15 @@ fn written_fallbacks() -> Sets {
         .ue("bit_depth_luma_minus8", 0)
         .ue("bit_depth_chroma_minus8", 0)
         .u("qpprime_y_zero_transform_bypass_flag", 1, 0)
-        .u("seq_scaling_matrix_present_flag", 1, 1)
-        .list("seq_scaling_list_present_flag[0]", Some(&ramp(16, 20)))
-        .list("seq_scaling_list_present_flag[1]", None)
-        .list("seq_scaling_list_present_flag[2]", Some(&[]))
-        .list("seq_scaling_list_present_flag[3]", None)
-        .list("seq_scaling_list_present_flag[4]", Some(&ramp(16, 40)))
-        .list("seq_scaling_list_present_flag[5]", None)
-        .list("seq_scaling_list_present_flag[6]", Some(&ramp(64, 11)))
-        .list("seq_scaling_list_present_flag[7]", None)
-        .ue("log2_max_frame_num_minus4", 0)
+        .u(
+            "seq_scaling_matrix_present_flag",
+            1,
+            i64::from(lists.is_some()),
+        );
+    if let Some(lists) = lists {
+        lists(&mut s);
+    }
+    s.ue("log2_max_frame_num_minus4", 0)
         .ue("pic_order_cnt_type", 2)
         .ue("max_num_ref_frames", 1)
         .u("gaps_in_frame_num_allowed_flag", 1, 0)
@@ -146,9 +158,30 @@ fn written_fallbacks() -> Sets {
         .u("frame_mbs_only_flag", 1, 1)
         .u("direct_8x8_inference_flag", 1, 1)
         .u("frame_cropping_flag", 1, 0)
-        .u("vui_parameters_present_flag", 1, 0);
-    let sps = s.finish(0x67);
-    let sps_trace = std::mem::take(&mut s.trace);
+        .u("vui_parameters_present_flag", 1, i64::from(vui.is_some()));
+    if let Some(vui) = vui {
+        vui(&mut s);
+    }
+    (s.finish(0x67), s.trace)
+}
+
+/// What no conformance stream does: an SPS whose first lists are its own
+/// and whose others fall back to them, and a PPS that sends some lists and
+/// leaves others to fall back to the SPS's (rule B of Table 7-2).
+fn written_fallbacks() -> Sets {
+    let (sps, sps_trace) = written_sps(
+        Some(&|s: &mut Syntax| {
+            s.list("seq_scaling_list_present_flag[0]", Some(&ramp(16, 20)))
+                .list("seq_scaling_list_present_flag[1]", None)
+                .list("seq_scaling_list_present_flag[2]", Some(&[]))
+                .list("seq_scaling_list_present_flag[3]", None)
+                .list("seq_scaling_list_present_flag[4]", Some(&ramp(16, 40)))
+                .list("seq_scaling_list_present_flag[5]", None)
+                .list("seq_scaling_list_present_flag[6]", Some(&ramp(64, 11)))
+                .list("seq_scaling_list_present_flag[7]", None);
+        }),
+        None,
+    );
 
     let mut p = Syntax::default();
     p.ue("pic_parameter_set_id", 0)
@@ -180,6 +213,83 @@ fn written_fallbacks() -> Sets {
     let pps = p.finish(0x68);
     Sets {
         name: "written: lists falling back".to_owned(),
+        sps,
+        pps,
+        sps_trace,
+        pps_trace: p.trace,
+    }
+}
+
+/// `hrd_parameters()` for `cpbs` buffers, whose four lengths are
+/// `lengths` (each less one but the last, as the syntax has them). The
+/// first buffer's bit rate needs all 32 bits of its code.
+fn write_hrd(s: &mut Syntax, cpbs: i64, lengths: [i64; 4]) {
+    s.ue("cpb_cnt_minus1", cpbs - 1)
+        .u("bit_rate_scale", 4, 3)
+        .u("cpb_size_scale", 4, 5);
+    for i in 0..cpbs {
+        let rate = if i == 0 { 4_000_000_000 } else { 1000 + i * 77 };
+        s.ue(&format!("bit_rate_value_minus1[{i}]"), rate)
+            .ue(&format!("cpb_size_value_minus1[{i}]"), 3000 - i * 5)
+            .u(&format!("cbr_flag[{i}]"), 1, i % 2);
+    }
+    s.u("initial_cpb_removal_delay_length_minus1", 5, lengths[0])
+        .u("cpb_removal_delay_length_minus1", 5, lengths[1])
+        .u("dpb_output_delay_length_minus1", 5, lengths[2])
+        .u("time_offset_length", 5, lengths[3]);
+}
+
+/// What no conformance stream here does: an SPS with timing, both
+/// hypothetical reference decoders -- the second, whose lengths are the
+/// ones kept, with `vcl_cpbs` buffers -- and the bitstream's restrictions
+/// after them; and a plain PPS.
+fn written_timing(vcl_cpbs: i64) -> Sets {
+    let (sps, sps_trace) = written_sps(
+        None,
+        Some(&|s: &mut Syntax| {
+            s.u("aspect_ratio_info_present_flag", 1, 0)
+                .u("overscan_info_present_flag", 1, 0)
+                .u("video_signal_type_present_flag", 1, 0)
+                .u("chroma_loc_info_present_flag", 1, 0)
+                .u("timing_info_present_flag", 1, 1)
+                .u("num_units_in_tick", 32, 1001)
+                .u("time_scale", 32, 60000)
+                .u("fixed_frame_rate_flag", 1, 1)
+                .u("nal_hrd_parameters_present_flag", 1, 1);
+            write_hrd(s, 2, [23, 15, 9, 24]);
+            s.u("vcl_hrd_parameters_present_flag", 1, 1);
+            write_hrd(s, vcl_cpbs, [17, 21, 30, 7]);
+            s.u("low_delay_hrd_flag", 1, 0)
+                .u("pic_struct_present_flag", 1, 1)
+                .u("bitstream_restriction_flag", 1, 1)
+                .u("motion_vectors_over_pic_boundaries_flag", 1, 1)
+                .ue("max_bytes_per_pic_denom", 2)
+                .ue("max_bits_per_mb_denom", 1)
+                .ue("log2_max_mv_length_horizontal", 15)
+                .ue("log2_max_mv_length_vertical", 15)
+                .ue("max_num_reorder_frames", 2)
+                .ue("max_dec_frame_buffering", 4);
+        }),
+    );
+    let mut p = Syntax::default();
+    p.ue("pic_parameter_set_id", 0)
+        .ue("seq_parameter_set_id", 0)
+        .u("entropy_coding_mode_flag", 1, 1)
+        .u("bottom_field_pic_order_in_frame_present_flag", 1, 0)
+        .ue("num_slice_groups_minus1", 0)
+        .ue("num_ref_idx_l0_default_active_minus1", 0)
+        .ue("num_ref_idx_l1_default_active_minus1", 0)
+        .u("weighted_pred_flag", 1, 0)
+        .u("weighted_bipred_idc", 2, 0)
+        .se("pic_init_qp_minus26", 0)
+        .se("pic_init_qs_minus26", 0)
+        .se("chroma_qp_index_offset", 0)
+        .u("deblocking_filter_control_present_flag", 1, 1)
+        .u("constrained_intra_pred_flag", 1, 0)
+        .u("redundant_pic_cnt_present_flag", 1, 0);
+    let pps = p.finish(0x68);
+    Sets {
+        name: format!("written: timing, {vcl_cpbs} buffers"),
         sps,
         pps,
         sps_trace,
@@ -409,6 +519,37 @@ fn each_sequence_parameter_set_reads_as_ffmpeg_traces_it() {
         );
         assert_eq!(sps.num_units_in_tick as i32, t.int("num_units_in_tick"));
         assert_eq!(sps.time_scale as i32, t.int("time_scale"));
+        for (got, field) in [
+            (
+                sps.nal_hrd_parameters_present_flag,
+                "nal_hrd_parameters_present_flag",
+            ),
+            (
+                sps.vcl_hrd_parameters_present_flag,
+                "vcl_hrd_parameters_present_flag",
+            ),
+        ] {
+            assert_eq!(got, t.int(field), "{name}: {field}");
+        }
+        // What the picture timing SEI reads by: the last decoder's lengths,
+        // each set over the first's as FFmpeg sets them.
+        for (got, field, plus) in [
+            (
+                sps.cpb_removal_delay_length,
+                "cpb_removal_delay_length_minus1",
+                1,
+            ),
+            (
+                sps.dpb_output_delay_length,
+                "dpb_output_delay_length_minus1",
+                1,
+            ),
+            (sps.time_offset_length, "time_offset_length", 0),
+        ] {
+            if let Some(v) = t.last(field) {
+                assert_eq!(got, v as i32 + plus, "{name}: {field}");
+            }
+        }
         assert_eq!(
             sps.pic_struct_present_flag,
             t.int("pic_struct_present_flag")
@@ -695,4 +836,35 @@ fn a_set_ffmpeg_refuses_is_refused() {
         );
         decode_sps(gb, &mut ps, true).unwrap();
     });
+
+    // A decoder of more buffers than the 32 there may be. The count is read
+    // as FFmpeg's `get_ue_golomb_31` reads it, which takes every code from
+    // 31 to 62 for 31: 64 buffers is the fewest it sees as too many.
+    let refused = |sps: &[u8], what: &str| {
+        let mut ps = ParamSets::default();
+        read_unit(sps, |gb, _| {
+            let err = decode_sps(gb, &mut ps, false).unwrap_err();
+            assert_eq!(err, PsError::Invalid, "{what}");
+        });
+        assert!(ps.sps_list[0].is_none(), "{what}: not kept");
+    };
+    refused(&written_timing(64).sps, "64 buffers");
+
+    // A scaling list's delta out of range: refused, though the list reads
+    // as one asking for the default would, the delta taking the first
+    // factor to 0 (mod 256), so nothing after it is misread.
+    for bad in [0, 6] {
+        let write = move |s: &mut Syntax| {
+            for i in 0..8 {
+                let flag = format!("seq_scaling_list_present_flag[{i}]");
+                if i == bad {
+                    s.u(&flag, 1, 1).se("delta_scale[0]", -264);
+                } else {
+                    s.list(&flag, None);
+                }
+            }
+        };
+        let (sps, _) = written_sps(Some(&write), None);
+        refused(&sps, &format!("list {bad}'s delta of -264"));
+    }
 }

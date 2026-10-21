@@ -807,6 +807,15 @@ codegen-units = 1
 opt-level = 3
 codegen-units = 1
 
+# ffbits (`gui/video/ffbits`) is the bit reader h264 and aac read every
+# syntax element through, so it runs as often as their loops. Measured with
+# videocodec's bench_h264, eight runs on 1080p alternating with `-Os`: 2.2%
+# more frames a second on a CAVLC stream, 1.6 to 1.8% on CABAC ones. Lane
+# F, 2026-10-21.
+[profile.release.package.ffbits]
+opt-level = 3
+codegen-units = 1
+
 # vp9 (the VP9 decoder, `gui/video/vp9`) is written for the compiler to
 # vectorise -- its filters' widths are constants so that loops unroll into
 # SSE2 -- which `-Os` undoes. Counted with callgrind (exact instruction

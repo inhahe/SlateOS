@@ -321,46 +321,86 @@ fn hw_rng_kind() -> u32 {
     HW_NONE
 }
 
-/// One 64-bit draw from `RDSEED` (true entropy) or `RDRAND` (a
-/// hardware-seeded DRBG), retrying the documented number of times.
+/// One 64-bit draw from the processor: `RDSEED` (true entropy), or, when
+/// `RDSEED` stays exhausted, `RDRAND` (a DRBG the same entropy source keeps
+/// reseeding); `RDRAND` alone on a processor without `RDSEED`.
 ///
-/// Intel specifies that `RDSEED` may legitimately fail under load while the
-/// entropy pool refills, and recommends bounded retries; 32 is more than the
-/// 10 Intel suggests for `RDRAND` and cheap next to failing outright.
+/// `RDSEED` fails by design while its entropy source refills, and under
+/// contention it stays failed: on an AMD Ryzen 9 9950X under WSL, 79% of
+/// single-threaded draws failed but never more than 7 in a row, while with
+/// four threads drawing at once runs of thousands of failures were common
+/// (2026-10-21). A bound on retries alone therefore fails whenever threads
+/// seed together, so the word comes from `RDRAND` instead -- the source this
+/// takes anyway where `RDSEED` is absent, and one `hw_rng_kind` only pairs
+/// with `RDSEED` when the processor has both.
 #[cfg(target_arch = "x86_64")]
 fn hw_word() -> Option<u64> {
-    let kind = hw_rng_kind();
-    if kind == HW_NONE {
-        return None;
+    match hw_rng_kind() {
+        // SAFETY: `hw_rng_kind` answers `HW_RDSEED` only for a processor with
+        // both `RDSEED` (CPUID leaf 7 EBX bit 18) and `RDRAND` (leaf 1 ECX
+        // bit 30).
+        HW_RDSEED => unsafe { rdseed_word().or_else(|| rdrand_word()) },
+        // SAFETY: `HW_RDRAND` means CPUID leaf 1 ECX bit 30 is set.
+        HW_RDRAND => unsafe { rdrand_word() },
+        _ => None,
     }
+}
+
+/// `RDSEED`, up to 32 tries, with a `pause` before each retry as Intel's
+/// guide to the instruction advises; `None` if every try failed.
+///
+/// # Safety
+///
+/// The processor must have `RDSEED` (CPUID leaf 7 EBX bit 18): without it the
+/// instruction raises `#UD`.
+#[cfg(target_arch = "x86_64")]
+unsafe fn rdseed_word() -> Option<u64> {
+    for attempt in 0..32 {
+        if attempt > 0 {
+            core::hint::spin_loop();
+        }
+        let val: u64;
+        let ok: u8;
+        // SAFETY: the caller guarantees `RDSEED` is present. It touches no
+        // memory and writes only `val` and the carry flag.
+        unsafe {
+            core::arch::asm!(
+                "rdseed {val}",
+                "setc {ok}",
+                val = out(reg) val,
+                ok = out(reg_byte) ok,
+                options(nostack, nomem),
+            );
+        }
+        if ok != 0 {
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// `RDRAND`, up to 32 tries -- more than the 10 Intel documents as enough
+/// barring a hardware fault; `None` if every try failed.
+///
+/// # Safety
+///
+/// The processor must have `RDRAND` (CPUID leaf 1 ECX bit 30): without it the
+/// instruction raises `#UD`.
+#[cfg(target_arch = "x86_64")]
+unsafe fn rdrand_word() -> Option<u64> {
     for _ in 0..32 {
         let val: u64;
         let ok: u8;
-        if kind == HW_RDSEED {
-            // SAFETY: `RDSEED` is present — `hw_rng_kind` checked CPUID leaf
-            // 7 EBX bit 18.  It touches no memory and only writes `val` and
-            // the carry flag.
-            unsafe {
-                core::arch::asm!(
-                    "rdseed {val}",
-                    "setc {ok}",
-                    val = out(reg) val,
-                    ok = out(reg_byte) ok,
-                    options(nostack, nomem),
-                );
-            }
-        } else {
-            // SAFETY: `RDRAND` is present — `hw_rng_kind` checked CPUID leaf
-            // 1 ECX bit 30.  Same no-memory contract as above.
-            unsafe {
-                core::arch::asm!(
-                    "rdrand {val}",
-                    "setc {ok}",
-                    val = out(reg) val,
-                    ok = out(reg_byte) ok,
-                    options(nostack, nomem),
-                );
-            }
+        // SAFETY: the caller guarantees `RDRAND` is present. It touches no
+        // memory and writes only `val` and the carry flag.
+        unsafe {
+            core::arch::asm!(
+                "rdrand {val}",
+                "setc {ok}",
+                val = out(reg) val,
+                ok = out(reg_byte) ok,
+                options(nostack, nomem),
+            );
         }
         if ok != 0 {
             return Some(val);
@@ -938,6 +978,26 @@ mod tests {
         let b = hw_rng_kind();
         assert_eq!(a, b);
         assert!(a == HW_NONE || a == HW_RDRAND || a == HW_RDSEED);
+    }
+
+    /// The processor's word arrives while many threads draw at once: `RDSEED`
+    /// alone stays exhausted under contention -- runs of thousands of
+    /// failures with four threads on an AMD Ryzen 9 9950X -- so `hw_word`
+    /// must not fail with it.
+    #[test]
+    fn test_hw_word_answers_while_threads_contend() {
+        if hw_rng_kind() == HW_NONE {
+            return;
+        }
+        let threads: Vec<_> = (0..16)
+            .map(|_| std::thread::spawn(|| (0..2000).all(|_| hw_word().is_some())))
+            .collect();
+        for t in threads {
+            assert!(
+                t.join().expect("a drawing thread panicked"),
+                "a draw failed while threads contended"
+            );
+        }
     }
 
     #[test]

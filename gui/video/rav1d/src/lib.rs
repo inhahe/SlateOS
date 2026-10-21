@@ -721,6 +721,10 @@ pub(crate) fn rav1d_flush(c: &Rav1dContext) {
         for fc in wrapping_iter(c.fc.iter(), state.frame_thread.next as usize) {
             let _ = rav1d_decode_frame_exit(c, fc, Err(EGeneric));
             *fc.task_thread.retval.try_lock().unwrap() = None;
+            // SlateOS (VENDORED.md, change 8): an error the flush itself set
+            // would put the next frame submitted out of order, and the
+            // decoder would wait on it forever.
+            fc.task_thread.error.store(0, Ordering::SeqCst);
             let out_delayed = &mut state.frame_thread.out_delayed[fc.index];
             if out_delayed.p.frame_hdr.is_some() {
                 let _ = mem::take(out_delayed);

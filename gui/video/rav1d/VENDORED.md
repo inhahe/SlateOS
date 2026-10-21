@@ -88,6 +88,17 @@ paths are held to the same results by its test suite.
    test that plays byte-damaged copies of its AV1 fixtures on several
    threads (`a_damaged_file_plays_what_it_can_and_never_panics`), in a debug
    build; worth reporting to rav1d.
+8. **A flush clears each frame's error**, as dav1d has since 1.5.1 (its
+   commit 575af2585915, "flush: Reset f->task_thread.error", which rav1d
+   1.1.0 predates). A frame that fails while `rav1d_flush` (`src/lib.rs`)
+   stops the workers keeps its error set; the next frame submitted after
+   the flush then moves `task_thread.first` on as if it had failed, is put
+   out of order, and its tasks wait on a frame that comes after it -- with
+   two worker threads or more, every thread and the caller then wait for
+   ever. Found by `gui/video/fuzz`'s `video` target, on a damaged AV1 MP4
+   sought after a few frames (`gui/video/codec`'s
+   `a_seek_while_an_av1_frame_fails_does_not_hang`); rav1d's issue #1372
+   tracks bringing dav1d 1.5.1's changes across.
 
 Every change is marked in the source with `SlateOS (VENDORED.md, change N)`,
 except the formatting and the lifetimes.
@@ -95,7 +106,7 @@ except the formatting and the lifetimes.
 ## Updating
 
 `vendor.py` does step 1 and the copying: `python vendor.py <new .crate>
-<empty directory>`, after updating the checksum it holds. Carry changes 2 to 7
+<empty directory>`, after updating the checksum it holds. Carry changes 2 to 8
 across from this copy (`git diff` of this directory against a fresh run shows
 exactly them), drop any the new release makes unnecessary, and update this
 file's table.

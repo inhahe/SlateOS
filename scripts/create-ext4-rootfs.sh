@@ -1145,16 +1145,11 @@ else
     # only the last link against the new libc.a is redone.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/espeak-ng-slateos.elf" \
         scripts/espeak-spike/slatelink.sh
-    # CMake is deliberately NOT in this list, and the reason is its cost rather
-    # than any difference in principle. The other four relink objects that are
-    # already built; cmake's spike re-runs a full cross configure and build of
-    # a C++ tree, which is minutes rather than the 83 s all four of those take
-    # together. A pass that quietly turns every image build into a CMake build
-    # is a pass people learn to skip with NO_SPIKE_REBUILD=1, and then it
-    # protects none of the five.
-    #
-    # The staleness gate below still refuses a stale binary, so this costs
-    # visibility, not safety: the failure names the one command to run.
+    # CMake's relink, like the others: slatelink.sh links the objects run.sh
+    # compiled against the new libc.a and stages the binary again. Its module
+    # tree comes from the build, not the link, so it stays as it is.
+    spike_rebuild_if_behind "$ROOT_DIR/build/spike/cmake-slateos.elf" \
+        scripts/cmake-spike/slatelink.sh
     # CPython's interpreter and its stdlib zip are separate artifacts with
     # separate staleness rules (the zip's are content-based: an `encodings`
     # package must be present and no member may be deflated).  Only the
@@ -1390,8 +1385,8 @@ if [ -e "$CMAKE_SLATE" ] && [ -d "$CMAKE_DATA/share" ]; then
     if [ -e "$ROOT_DIR/toolchain/sysroot/lib/libc.a" ] \
        && [ "$ROOT_DIR/toolchain/sysroot/lib/libc.a" -nt "$CMAKE_SLATE" ]; then
         echo "[rootfs] WARNING: cmake-slateos.elf is OLDER than the sysroot libc.a — it links a"
-        echo "[rootfs]          stale libc and proves nothing about the current one. Rebuild it:"
-        echo "[rootfs]            wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh"
+        echo "[rootfs]          stale libc and proves nothing about the current one. Relink it:"
+        echo "[rootfs]            wsl -d Ubuntu --exec bash scripts/cmake-spike/slatelink.sh"
         CMAKE_STALE=1
     fi
 elif [ -e "$CMAKE_SLATE" ]; then
@@ -2642,10 +2637,10 @@ if [ "$CMAKE_STALE" -gt 0 ]; then
         echo "[rootfs] ERROR: build/spike/cmake-slateos.elf is STALE."
         echo "[rootfs]        It links an older libc.a than the one in the sysroot, so"
         echo "[rootfs]        /bin/cmake on the image would be built against a libc that is"
-        echo "[rootfs]        no longer in the build. Rebuild it:"
-        echo "[rootfs]          wsl -d Ubuntu -- bash scripts/cmake-spike/run.sh"
-        echo "[rootfs]        That rebuilds the module tree beside it, which must match:"
-        echo "[rootfs]        a cmake without /share/cmake-4.4 fails at --version."
+        echo "[rootfs]        no longer in the build. Relink it:"
+        echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/cmake-spike/slatelink.sh"
+        echo "[rootfs]        (normally run for you -- this means that relink failed;"
+        echo "[rootfs]        with no objects to link, scripts/cmake-spike/run.sh builds them.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

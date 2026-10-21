@@ -21,6 +21,14 @@ applied to the `cmake` quarter of the roadmap's
 nobody had measured. It is deliberately shaped like `scripts/make-spike/run.sh`;
 the two answer the same question.
 
+`run.sh` builds from a fresh tree every time, about four minutes, and ends by
+running `./slatelink.sh`: the link against the current `libc.a`, its checks and
+the stripped copy in `build/spike/`. The objects depend only on the libc's
+headers, so after a `libc.a` rebuild the link alone is enough, and
+`scripts/create-ext4-rootfs.sh` runs `slatelink.sh` by itself whenever the
+staged binary is older than `libc.a`. A change to `posix/include` needs
+`run.sh`.
+
 ## What was measured
 
 CMake **4.4.3**, unmodified, cross-configured with the host's cmake 3.28.3 and
@@ -78,12 +86,13 @@ roadmap item.
 
 Unstripped the binary is **274,724,488 bytes** — mostly `debug_info`, against a
 384 MB image. `--strip-debug` brings it to **22,519,240** and `--strip-all` to
-15,337,672. `run.sh` stages the `--strip-debug` form, matching how CPython is
+15,337,672. `slatelink.sh` stages the `--strip-debug` form, matching how CPython is
 staged (design-decisions.md §344): the 7 MB difference is the symbol table, and
 that is what turns a fault address on the serial console into a function name.
 
 An artifact that cannot be staged is not a port, so this number is reported by
-`run.sh` on every run rather than being discovered once.
+`slatelink.sh` on every link rather than being discovered once, and a strip that
+fails fails the link rather than staging the unstripped binary.
 
 ## Two findings from getting configure to run at all
 

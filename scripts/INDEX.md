@@ -151,6 +151,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/clippy-diff.py` | Compare two clippy logs by diagnostic *kind*, so a refactor can be cleared. |
 | `scripts/clippy-sites.py` | Count and list distinct clippy warning sites. |
 | `scripts/cmake-spike/run.sh` | Cross-compile upstream CMake and link it against SlateOS's own libc.a. |
+| `scripts/cmake-spike/slatelink.sh` | Link genuine CMake's built objects against the CURRENT libc.a, and stage it. |
 | `scripts/cmp-diff.sh` | Differential test: our cmp against GNU diffutils' cmp. |
 | `scripts/column-diff.sh` | Differential test: our `column` against util-linux 2.39.3's. |
 | `scripts/comm-diff.sh` | Differential test: our comm against GNU comm. |
@@ -594,4 +595,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_584 scripts._
+_585 scripts._

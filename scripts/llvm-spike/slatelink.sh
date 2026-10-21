@@ -56,7 +56,7 @@ echo "LINK_EXIT=$?"
 grep -iE "error|warning: " link.log | head -20
 # Counted apart, as the CMake port's are: something our libc lacks and
 # something present twice are opposite failures, and either alone stops a
-# link (scripts/cmake-spike/run.sh says how one hid behind the other).
+# link (scripts/cmake-spike/slatelink.sh says how one hid behind the other).
 echo "MISSING_COUNT=$(grep -oP "undefined symbol: \K.*" link.log | sort -u | wc -l)"
 grep -oP "undefined symbol: \K.*" link.log | sort -u | head -40
 echo "DUPLICATE_COUNT=$(grep -oP "duplicate symbol: \K.*" link.log | sort -u | wc -l)"

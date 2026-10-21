@@ -167,136 +167,55 @@ tail -25 conf.log
 echo "BUILD_EXIT=$?"
 grep -iE "^.*error" build.log | head -20
 
-# The decisive step: a link against SlateOS's libc and nothing else, through
-# scripts/lib/worktree.sh's link wrapper -- zig's ld.lld itself, given this
-# build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
-# and zig's compiler runtime behind it, which is zig's own order (the
-# wrapper's comment says why the order matters). Not zig's c++ driver with
-# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
-# every link, where it would supply whatever ours lacks instead of a missing
-# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
-# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
-# handler and collide on __rustc::rust_begin_unwind. (The build above linked
-# through the same wrapper; this link is the one measured, symbol by symbol.)
-echo "LINK_WRAPPER=$SLATE_LINK_CXX:"
-grep '^libs=' "$SLATE_LINK_CXX"
+# The link against SlateOS's libc, its checks and the stripped binary in
+# build/spike/: slatelink.sh's, which the rootfs recipe also runs alone
+# whenever libc.a moves. (The build above linked ctest and the rest through a
+# wrapper of the same kind; that link is the one measured, symbol by symbol.
+# Why it prints the missing and the duplicate symbols as two counts, which
+# other ports cite as told here, is said there now.)
+bash "$SLATE_ROOT/scripts/cmake-spike/slatelink.sh" || exit 1
 
-# Take the object list from cmake's own build rather than globbing: the tree
-# ships Tests/ and Utilities/ subtrees whose objects the real link does not use.
-# The `cmake` executable's objects are the ones CMakeFiles/cmake.dir holds, plus
-# the static libraries the build produced for it.
-CMAKE_OBJDIR="$(find bld -type d -name 'cmake.dir' -print -quit 2>/dev/null)"
-OBJS=""
-if [ -n "$CMAKE_OBJDIR" ]; then
-    OBJS="$(find "$CMAKE_OBJDIR" -name '*.o' | sort | tr '\n' ' ')"
-fi
-echo "OBJ_COUNT=$(echo "$OBJS" | wc -w)"
-if [ -z "$OBJS" ]; then
-    echo "NO_OBJECTS — the build above failed; see $WORK/build.log"
-    exit 1
-fi
-
-# Every static archive the build produced, which is where CMakeLib and the
-# bundled third-party libraries live, in no particular order: ld.lld takes a
-# symbol from any archive on the line, wherever the reference is, so the
-# order the linker needs is not something this has to know. (They were
-# passed twice until 2026-10-01, for GNU ld's sake; the binary is
-# byte-identical either way.)
-LIBS="$(find bld -name '*.a' | sort | tr '\n' ' ')"
-echo "ARCHIVE_COUNT=$(echo "$LIBS" | wc -w)"
-
-# Removed first: ld.lld leaves an existing output alone when a link fails,
-# and the check below would then stage the last run's binary as this one's.
-rm -f cmake-slateos
-# shellcheck disable=SC2086  # word splitting is what builds the object list
-"$SLATE_LINK_CXX" -o cmake-slateos $OBJS $LIBS 2>slate-link.log
-echo "SLATE_LINK_EXIT=$?"
-
-MISSING="/tmp/cmake_missing-$SLATE_LANE.txt"
-grep -oP "undefined symbol: \K.*" slate-link.log | sort -u >"$MISSING"
-echo "MISSING_COUNT=$(wc -l <"$MISSING")"
-head -40 "$MISSING"
-
-# Counted SEPARATELY, and MISSING_COUNT is never allowed to stand in for "the
-# link succeeded". The make spike's first run printed SLATE_LINK_EXIT=1 beside
-# MISSING_COUNT=0 and was briefly read as a fluke, because the only number on
-# screen was the one saying everything was fine: all eleven errors were
-# *duplicate* definitions, which the grep above does not match. The two counts
-# measure opposite failures — nothing is absent vs. something is present twice
-# — and a libc can fail either way, so both print unconditionally.
-DUPES="/tmp/cmake_dupes-$SLATE_LANE.txt"
-grep -oP "duplicate symbol: \K.*" slate-link.log | sort -u >"$DUPES"
-echo "DUPLICATE_COUNT=$(wc -l <"$DUPES")"
-head -40 "$DUPES"
-
-grep -v "undefined symbol\|duplicate symbol\|^>>>" slate-link.log | head -20
-
-if [ -x cmake-slateos ]; then
-    file cmake-slateos
-    readelf -h cmake-slateos | grep -E "Type|Entry"
-    echo "UNSTRIPPED_BYTES=$(stat -c %s cmake-slateos)"
-
-    # Stage the STRIPPED binary. Unstripped this is 274 MB of mostly
-    # `debug_info`, against a 384 MB image — it would not fit beside the rest
-    # of the rootfs, and an artifact that cannot be staged is not a port.
-    # `--strip-debug` and not `--strip-all`, matching how CPython is staged
-    # (design-decisions.md §344): the symbol table costs 7 MB and is what makes
-    # a fault address on the serial console into a function name.
-    cp cmake-slateos "$SLATE_SPIKE/cmake-slateos.elf"
-    # binutils `strip` first, because it edits in place. `zig objcopy` needs an
-    # explicit output path and fails with "expected output parameter" if given
-    # one argument — which it did, harmlessly, while the fallback did the work
-    # and left a confusing error above a correct result.
-    strip --strip-debug "$SLATE_SPIKE/cmake-slateos.elf" 2>/dev/null \
-        || "$SLATE_ZIG" objcopy --strip-debug cmake-slateos \
-            "$SLATE_SPIKE/cmake-slateos.elf" \
-        || echo "STRIP_FAILED — the staged binary is the unstripped one"
-    echo "STAGED_BYTES=$(stat -c %s "$SLATE_SPIKE/cmake-slateos.elf")"
-    ls -l "$SLATE_SPIKE/cmake-slateos.elf"
-
-    # THE BINARY ALONE IS INERT, and not in a subtle way: `cmake --version`
-    # itself fails without the module tree.
-    #
-    #     CMake Error: Could not find CMAKE_ROOT !!!
-    #     CMake has most likely not been installed correctly.
-    #     Modules directory not found in <prefix>/share/cmake-4.4
-    #
-    # Measured, not assumed — a host cmake copied into an empty directory
-    # prints exactly that for `--version`. So the data tree is staged here
-    # beside the binary and the rootfs build stages the two TOGETHER or
-    # neither, which is the rule design-decisions.md §344 arrived at for
-    # CPython: an interpreter without its stdlib dies inside
-    # `init_fs_encoding` before `main()`, and this is the same shape.
-    #
-    # `cmake --install` rather than copying `Modules/` out of the source
-    # tree: some modules are configured at build time, so the source copy is
-    # not what a working cmake reads.
-    #
-    # `Help/` is excluded and is 12 MB of the 24 — it is documentation for
-    # `--help-module`, and nothing needs it to configure a build. `Modules`
-    # and `Templates` are 12 MB together.
-    DATA_VER="$(echo "$VER" | cut -d. -f1,2)"
-    "$HOST_CMAKE" --install bld --prefix "$WORK/inst" >install.log 2>&1
-    echo "INSTALL_EXIT=$?"
-    SRC_DATA="$WORK/inst/share/cmake-$DATA_VER"
-    DEST_DATA="$SLATE_SPIKE/cmake-data/share/cmake-$DATA_VER"
-    if [ -d "$SRC_DATA/Modules" ]; then
-        rm -rf "$SLATE_SPIKE/cmake-data"
-        mkdir -p "$DEST_DATA"
-        cp -r "$SRC_DATA/Modules" "$DEST_DATA/"
-        [ -d "$SRC_DATA/Templates" ] && cp -r "$SRC_DATA/Templates" "$DEST_DATA/"
-        echo "DATA_FILES=$(find "$SLATE_SPIKE/cmake-data" -type f | wc -l)"
-        echo "DATA_BYTES=$(du -sb "$SLATE_SPIKE/cmake-data" | cut -f1)"
-        echo "SLATE_CMAKE_DATA_STAGED=$DEST_DATA"
-    else
-        # Loud: a staged binary with no module tree is a cmake that cannot
-        # even print its version, and the rootfs gate must not be the first
-        # thing to notice.
-        echo "NO_CMAKE_DATA — $SRC_DATA/Modules is absent, so the binary above"
-        echo "                would be staged inert. See install.log."
-    fi
-    echo "SLATE_CMAKE_BUILT"
+# THE BINARY ALONE IS INERT, and not in a subtle way: `cmake --version`
+# itself fails without the module tree.
+#
+#     CMake Error: Could not find CMAKE_ROOT !!!
+#     CMake has most likely not been installed correctly.
+#     Modules directory not found in <prefix>/share/cmake-4.4
+#
+# Measured, not assumed -- a host cmake copied into an empty directory
+# prints exactly that for `--version`. So the data tree is staged here
+# beside the binary and the rootfs build stages the two TOGETHER or
+# neither, which is the rule design-decisions.md §344 arrived at for
+# CPython: an interpreter without its stdlib dies inside
+# `init_fs_encoding` before `main()`, and this is the same shape. It comes
+# from the build, not the link, so slatelink.sh leaves it alone.
+#
+# `cmake --install` rather than copying `Modules/` out of the source
+# tree: some modules are configured at build time, so the source copy is
+# not what a working cmake reads.
+#
+# `Help/` is excluded and is 12 MB of the 24 -- it is documentation for
+# `--help-module`, and nothing needs it to configure a build. `Modules`
+# and `Templates` are 12 MB together.
+DATA_VER="$(echo "$VER" | cut -d. -f1,2)"
+"$HOST_CMAKE" --install bld --prefix "$WORK/inst" >install.log 2>&1
+echo "INSTALL_EXIT=$?"
+SRC_DATA="$WORK/inst/share/cmake-$DATA_VER"
+DEST_DATA="$SLATE_SPIKE/cmake-data/share/cmake-$DATA_VER"
+if [ -d "$SRC_DATA/Modules" ]; then
+    rm -rf "$SLATE_SPIKE/cmake-data"
+    mkdir -p "$DEST_DATA"
+    cp -r "$SRC_DATA/Modules" "$DEST_DATA/"
+    [ -d "$SRC_DATA/Templates" ] && cp -r "$SRC_DATA/Templates" "$DEST_DATA/"
+    echo "DATA_FILES=$(find "$SLATE_SPIKE/cmake-data" -type f | wc -l)"
+    echo "DATA_BYTES=$(du -sb "$SLATE_SPIKE/cmake-data" | cut -f1)"
+    echo "SLATE_CMAKE_DATA_STAGED=$DEST_DATA"
 else
-    echo "NO_SLATE_BINARY"
+    # Loud: a staged binary with no module tree is a cmake that cannot
+    # even print its version, and the rootfs gate must not be the first
+    # thing to notice.
+    echo "NO_CMAKE_DATA -- $SRC_DATA/Modules is absent, so the binary above"
+    echo "                would be staged inert. See install.log."
     exit 1
 fi
+echo "SLATE_CMAKE_BUILT"

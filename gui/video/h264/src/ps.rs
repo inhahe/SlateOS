@@ -134,9 +134,6 @@ pub(crate) struct Sps {
     pub(crate) vcl_hrd_parameters_present_flag: i32,
     pub(crate) pic_struct_present_flag: i32,
     pub(crate) time_offset_length: i32,
-    /// `cpb_cnt_minus1 + 1`.
-    pub(crate) cpb_cnt: i32,
-    pub(crate) initial_cpb_removal_delay_length: i32,
     pub(crate) cpb_removal_delay_length: i32,
     pub(crate) dpb_output_delay_length: i32,
     pub(crate) bit_depth_luma: i32,
@@ -194,8 +191,6 @@ impl Sps {
             vcl_hrd_parameters_present_flag: 0,
             pic_struct_present_flag: 0,
             time_offset_length: 0,
-            cpb_cnt: 0,
-            initial_cpb_removal_delay_length: 0,
             cpb_removal_delay_length: 0,
             dpb_output_delay_length: 0,
             bit_depth_luma: 0,
@@ -213,14 +208,18 @@ const QPS: usize = QP_MAX_NUM + 1;
 
 /// A picture parameter set (`PPS`).
 ///
-/// FFmpeg's whole: some fields only FFmpeg's other users read -- its
-/// hardware decoders, its refusal of slice groups -- and the decoder reads
-/// the scaling lists through the dequantization tables made from them; the
-/// tests read them all, holding the parse to FFmpeg's `trace_headers`.
+/// FFmpeg's, but for what only its hardware decoders read: the set's own
+/// bytes and the slice group map type. The decoder reads the scaling lists
+/// through the dequantization tables made from them. Six fields only the
+/// tests read, holding the parse to FFmpeg's `trace_headers`: the id, the
+/// slice group count (always 1, slice groups being refused), `init_qs`,
+/// the two scaling lists, and `chroma_qp_diff`, which FFmpeg reads only to
+/// pick its assembly's loop filter.
 #[derive(Clone, Debug)]
 #[allow(
     dead_code,
-    reason = "FFmpeg's PPS whole; the fields the decoder does not read are read by the tests"
+    reason = "the six fields named above, read only by the tests that hold the parse to \
+              FFmpeg's trace_headers"
 )]
 pub(crate) struct Pps {
     pub(crate) pps_id: u32,
@@ -231,7 +230,6 @@ pub(crate) struct Pps {
     pub(crate) pic_order_present: u32,
     /// `num_slice_groups_minus1 + 1`, as FFmpeg's int adds it.
     pub(crate) slice_group_count: i32,
-    pub(crate) mb_slice_group_map_type: i32,
     /// `num_ref_idx_l0/l1_default_active_minus1 + 1`.
     pub(crate) ref_count: [u32; 2],
     pub(crate) weighted_pred: u32,
@@ -250,7 +248,6 @@ pub(crate) struct Pps {
     pub(crate) chroma_qp_table: [[u8; QP_MAX_NUM + 1]; 2],
     /// Whether Cb's and Cr's offsets differ.
     pub(crate) chroma_qp_diff: i32,
-    pub(crate) data: Vec<u8>,
     /// The dequantization factors, laid out as the inverse transform reads
     /// them and as FFmpeg's `PPS` holds them, end to end: six 4x4 buffers
     /// of a row per QP (`dequant4_buffer`), then six 8x8 ones
@@ -434,9 +431,10 @@ fn decode_common_vui(gb: &mut Bits<'_>, vui: &mut Vui) {
 }
 
 /// `decode_hrd_parameters`: the hypothetical reference decoder's
-/// parameters, of which what reading the timing SEIs needs is kept -- their
-/// fields' lengths and how many buffers there are. The bit rates and buffer
-/// sizes FFmpeg keeps beside them only its hardware decoders read.
+/// parameters, of which what reading the picture timing SEI needs is kept
+/// -- its fields' lengths. The count of buffers is checked; it, the bit
+/// rates and buffer sizes, and the buffering period's delay length FFmpeg
+/// keeps beside them only its parser and hardware decoders read.
 #[allow(clippy::cast_possible_wrap, reason = "fields of 4 and 5 bits")]
 fn decode_hrd_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError> {
     let cpb_count = gb.ue_31() + 1;
@@ -450,11 +448,10 @@ fn decode_hrd_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError
         gb.ue_long(); // cpb_size_value_minus1
         gb.bit(); // cbr_flag
     }
-    sps.initial_cpb_removal_delay_length = gb.bits(5) as i32 + 1;
+    gb.skip(5); // initial_cpb_removal_delay_length_minus1
     sps.cpb_removal_delay_length = gb.bits(5) as i32 + 1;
     sps.dpb_output_delay_length = gb.bits(5) as i32 + 1;
     sps.time_offset_length = gb.bits(5) as i32;
-    sps.cpb_cnt = cpb_count as i32;
     Ok(())
 }
 
@@ -983,7 +980,6 @@ pub(crate) fn decode_pps(
     if pps_id as usize >= MAX_PPS_COUNT {
         return Err(PsError::Invalid);
     }
-    let data = keep_data_bits(gb, bit_length);
 
     let sps_id = gb.ue_31();
     let Some(sps) = ps.sps_list.get(sps_id as usize).and_then(Clone::clone) else {
@@ -999,11 +995,8 @@ pub(crate) fn decode_pps(
     let cabac = gb.bit();
     let pic_order_present = gb.bit();
     let slice_group_count = gb.ue().wrapping_add(1);
-    let mut mb_slice_group_map_type = 0;
     if slice_group_count > 1 {
-        mb_slice_group_map_type = gb.ue();
         // Slice groups (FMO), which FFmpeg does not decode.
-        let _ = mb_slice_group_map_type;
         ps.unsupported_pps[pps_id as usize] = true;
         return Err(PsError::Unsupported);
     }
@@ -1073,7 +1066,6 @@ pub(crate) fn decode_pps(
         cabac,
         pic_order_present,
         slice_group_count,
-        mb_slice_group_map_type,
         ref_count,
         weighted_pred,
         weighted_bipred_idc,
@@ -1088,7 +1080,6 @@ pub(crate) fn decode_pps(
         scaling_matrix8: Box::new(m8),
         chroma_qp_table,
         chroma_qp_diff: i32::from(chroma_qp_index_offset[0] != chroma_qp_index_offset[1]),
-        data,
         dequant,
         dequant4_list,
         dequant8_list,
@@ -1097,20 +1088,6 @@ pub(crate) fn decode_pps(
     ps.pps_list[pps_id as usize] = Some(Arc::new(pps));
     ps.unsupported_pps[pps_id as usize] = false;
     Ok(())
-}
-
-/// A PPS's bytes as it keeps them: as [`keep_data`], with the stop bit put
-/// back when the unit's syntax (`bit_length`, not the reader's size) ended
-/// on a byte boundary.
-fn keep_data_bits(gb: &Bits<'_>, bit_length: usize) -> Vec<u8> {
-    let size = (gb.byte_size(true) as usize).min(DATA_MAX);
-    let mut data: Vec<u8> = (0..size)
-        .map(|k| gb.buffer().get(k).copied().unwrap_or(0))
-        .collect();
-    if bit_length & 7 == 0 && data.len() < DATA_MAX {
-        data.push(0x80);
-    }
-    data
 }
 
 #[cfg(test)]

@@ -123,7 +123,6 @@ pub(crate) struct FilmGrain {
     pub(crate) color_primaries: u32,
     pub(crate) transfer_characteristics: u32,
     pub(crate) matrix_coeffs: u32,
-    pub(crate) blending_mode_id: u32,
     pub(crate) log2_scale_factor: u32,
     pub(crate) comp_model_present_flag: [u32; 3],
     /// The rest in FFmpeg's types (`uint16_t`, `uint8_t`, `int16_t`): a
@@ -150,7 +149,6 @@ impl Default for FilmGrain {
             color_primaries: 0,
             transfer_characteristics: 0,
             matrix_coeffs: 0,
-            blending_mode_id: 0,
             log2_scale_factor: 0,
             comp_model_present_flag: [0; 3],
             num_intensity_intervals: [0; 3],
@@ -460,30 +458,21 @@ impl Sei {
     }
 
     /// `decode_buffering_period`: read for the errors FFmpeg's gives -- a
-    /// sequence parameter set out of range, or not yet seen -- and passed
-    /// over, its delays being what only FFmpeg's parser reads.
+    /// sequence parameter set out of range, or not yet seen. Its initial
+    /// delays, which FFmpeg reads next into fields only its parser reads,
+    /// are the message's last syntax, so they are not read here.
     fn decode_buffering_period(gb: &mut Bits<'_>, ps: &ParamSets) -> Result<(), SeiError> {
         let sps_id = gb.ue_31();
         if sps_id > 31 {
             return Err(SeiError::Invalid);
         }
-        let Some(sps) = ps.sps_list.get(sps_id as usize).and_then(Option::as_deref) else {
+        if ps
+            .sps_list
+            .get(sps_id as usize)
+            .and_then(Option::as_deref)
+            .is_none()
+        {
             return Err(SeiError::PsNotFound);
-        };
-        #[allow(clippy::cast_sign_loss, reason = "a length of 1 to 32 bits")]
-        let len = sps.initial_cpb_removal_delay_length as u32;
-        #[allow(clippy::cast_sign_loss, reason = "a count of 1 to 32")]
-        let cnt = sps.cpb_cnt.max(0) as usize;
-        for present in [
-            sps.nal_hrd_parameters_present_flag,
-            sps.vcl_hrd_parameters_present_flag,
-        ] {
-            if present != 0 {
-                for _ in 0..cnt.min(32) {
-                    gb.skip(len); // initial_cpb_removal_delay
-                    gb.skip(len); // initial_cpb_removal_delay_offset
-                }
-            }
         }
         Ok(())
     }
@@ -620,15 +609,10 @@ impl Sei {
             // spatial_flipping_flag, frame0_flipped_flag, field_views_flag
             gb.skip(3);
             f.current_frame_is_frame0_flag = gb.bit();
-            // frame0_self_contained_flag, frame1_self_contained_flag
-            gb.skip(2);
-            if f.quincunx_sampling_flag == 0 && f.arrangement_type != 5 {
-                gb.skip(16); // frame0/1_grid_position_x/y
-            }
-            gb.skip(8); // frame_packing_arrangement_reserved_byte
-            gb.ue_long(); // frame_packing_arrangement_repetition_period
+            // What follows -- the self-contained flags, the grid positions,
+            // the repetition period -- FFmpeg reads into nothing it keeps
+            // or into fields nothing reads, so it is not read here.
         }
-        gb.skip(1); // frame_packing_arrangement_extension_flag
     }
 
     /// `decode_ambient_viewing_environment`.
@@ -701,7 +685,9 @@ fn decode_film_grain(h: &mut FilmGrain, gb: &mut Bits<'_>) -> Result<(), SeiErro
         h.transfer_characteristics = gb.bits(8);
         h.matrix_coeffs = gb.bits(8);
     }
-    h.blending_mode_id = gb.bits(2);
+    // blending_mode_id: FFmpeg passes it on only to a caller that asks for
+    // the grain's parameters rather than the grain.
+    gb.skip(2);
     h.log2_scale_factor = gb.bits(4);
     for c in 0..3 {
         h.comp_model_present_flag[c] = gb.bit();

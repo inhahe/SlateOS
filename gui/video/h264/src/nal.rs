@@ -12,7 +12,7 @@
 //! # Why one buffer, laid out as FFmpeg's
 //!
 //! What a read finds past the end of a unit is part of what FFmpeg decodes
-//! from a damaged one (`bits` says how far reads go). FFmpeg writes each
+//! from a damaged one (`ffbits` says how far reads go). FFmpeg writes each
 //! unit at the running sum of the bytes the units before it took from the
 //! packet, and pads each with 64 zeros -- which the next unit, written
 //! straight after, mostly overwrites. So past the end of a unit FFmpeg reads

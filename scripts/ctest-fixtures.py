@@ -159,11 +159,11 @@ things happen here that a direct run skips:
   `fastpy`), and a missing one is reported with the fix, not as a bare
   `ModuleNotFoundError`;
 * the `fastpy-*` recipes are handed this worktree's sysroot
-  (`FASTPY_SLATEOS_SYSROOT`). Run directly, fastpy finds a sysroot by itself,
-  and its fallback is the `libc.a` of a sibling checkout named `os` -- the
-  integration tree, not this worktree. (Fixing that lookup in fastpy itself is
-  design-decisions §915, not yet done. The `ctest-*` recipes link their own
-  worktree's sysroot either way.)
+  (`FASTPY_SLATEOS_SYSROOT`). Run directly, fastpy finds a sysroot by itself:
+  from fastpy 0.3.6 the checkout the build runs in (design-decisions 915), so
+  from inside this worktree it is this worktree's; an older fastpy takes the
+  `libc.a` of a sibling checkout named `os` -- the integration tree. (The
+  `ctest-*` recipes link their own worktree's sysroot either way.)
 * the sysroot is rebuilt first when `libc.a` is behind `posix/src`.
 """
 

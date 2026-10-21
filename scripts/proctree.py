@@ -70,13 +70,17 @@ stranger would kill it with the tree. The proof is a handle to each parent,
 taken when the job's completion port says the parent joined and kept until a
 sweep after it exits: while the handle is open the parent's process id cannot be
 reused, so a process that names that id as its parent and started after the
-parent did is its child.
+parent did is its child. (Creation times are the system clock's, so a clock set
+back between a parent's start and its child's would hide that child: the error
+leaves a process alone, never takes a stranger.)
 
 Still not contained: an escape for the moments before the sweep that adopts it,
 so this process's own death in that window would leave it running; an escape
 whose parent left the tree before the port's message about it was heard; a
 process Windows refuses a job (named through `warn`, and killed with the tree
 by handle); and anything across the WSL boundary (see `run-timeout.py`).
+`known-issues/E-a-process-tree-cannot-contain-everything-started-outside-its-job.md`
+keeps the list.
 """
 
 from __future__ import annotations
@@ -265,11 +269,11 @@ if IS_WINDOWS:
     PROCESS_TERMINATE = 0x0001
     PROCESS_SET_QUOTA = 0x0100
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    SYNCHRONIZE = 0x0010_0000
+    WAIT_OBJECT_0 = 0
     ERROR_INVALID_PARAMETER = 87  # what `OpenProcess` says of a process that is gone
     JobObjectAssociateCompletionPortInformation = 7
     JOB_OBJECT_MSG_NEW_PROCESS = 6
-    JOB_OBJECT_MSG_EXIT_PROCESS = 7
-    JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS = 8
     SystemProcessInformation = 5
     _STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
     _INVALID_HANDLE_VALUE = wintypes.HANDLE(-1)
@@ -297,6 +301,7 @@ if IS_WINDOWS:
                                                wintypes.DWORD, ctypes.POINTER(wintypes.DWORD))
     _k32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
     _k32.TerminateProcess.argtypes = (wintypes.HANDLE, wintypes.UINT)
+    _k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
     _k32.CloseHandle.argtypes = (wintypes.HANDLE,)
     _ntdll.NtQuerySystemInformation.restype = ctypes.c_long
     _ntdll.NtQuerySystemInformation.argtypes = (ctypes.c_int, ctypes.c_void_p, wintypes.ULONG,
@@ -387,12 +392,14 @@ if IS_WINDOWS:
         module docstring says why there are any, and what proves one is the
         tree's.
 
-        `start` it once the root is in the job; `stop` it before the tree's
-        own job is closed, which ends the periodic sweeps and hears what the
-        port still holds; and `reap` after that, which adopts and kills what
-        is left and lets go of every handle. Until `stop` only the watch's own
-        thread touches its state, except that others read `jobs` and
-        `adopted`, which it only ever appends to."""
+        `start` it before the root is let run; `stop` it once the tree is
+        being torn down, which ends the periodic sweeps and hears what the
+        port still holds; `reap`, which kills the tree's job and adopts and
+        kills what is left outside it; and `close`, which lets go of every
+        handle. The tree's own job stays open, and the tree's, until after
+        `reap`: it is what tells a dying member from an escape. Until `stop`
+        only the watch's own thread touches its state, except that others read
+        `jobs` and `adopted`, which it only ever appends to."""
 
         def __init__(self, tree_job, warn):
             self._tree_job = tree_job
@@ -402,7 +409,8 @@ if IS_WINDOWS:
             # Every process a proof can name as parent: pid -> (handle, creation time).
             self._held: dict[int, tuple[int, int]] = {}
             self._unadoptable: list[int] = []   # held escapes Windows refused a job
-            # Held pid -> how many sweeps had begun when its exit was heard.
+            # Held pid -> how many sweeps had listed processes when it was seen
+            # to have exited.
             self._exited: dict[int, int] = {}
             # (pid, creation time) of processes looked at and left alone.
             self._passed: set[tuple[int, int]] = set()
@@ -419,16 +427,16 @@ if IS_WINDOWS:
 
         def _listen(self, job, key) -> bool:
             """Have `job` tell the port, under `key`, of each process that
-            joins or leaves it."""
+            joins it."""
             info = _JOBOBJECT_ASSOCIATE_COMPLETION_PORT(key, self._port)
             return bool(_k32.SetInformationJobObject(
                 job, JobObjectAssociateCompletionPortInformation,
                 ctypes.byref(info), ctypes.sizeof(info)))
 
         def start(self, root_pid) -> None:
-            """Hold the root, while it is still suspended and so still surely
-            the tree's, and begin the periodic sweeps."""
-            h = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, root_pid)
+            """Hold the root, while it is still suspended and so surely the
+            tree's, and begin the periodic sweeps."""
+            h = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, root_pid)
             created = _creation_time(h) if h else None
             if created is not None:
                 self._held[root_pid] = (h, created)
@@ -450,8 +458,8 @@ if IS_WINDOWS:
                                 return
                             self._hear(*got)
                         continue
-                    self._sweep()
-                    self._release()
+                    if self._sweep() is not None:
+                        self._release()
                     due = time.monotonic() + ESCAPE_POLL
             except Exception as e:  # noqa: BLE001 -- said, since a silent end leaves escapes unwatched
                 self._warn(f"the watch for processes started outside the job stopped: {e!r}")
@@ -479,29 +487,28 @@ if IS_WINDOWS:
             return ([self._tree_job] if self._tree_job else []) + self.jobs
 
         def _hear(self, key, msg, pid) -> None:
-            """Hold a process the port says joined one of the jobs, and note
-            when a held one leaves."""
-            if msg == JOB_OBJECT_MSG_NEW_PROCESS:
-                job = self._job_for(key)
-                if job is None or pid in self._held:
-                    return
-                h = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-                if not h:
-                    return  # gone already: the gap the module docstring names
-                created = _creation_time(h)
-                # The id can have passed to another process since the message.
-                if created is None or not _in_job(h, job):
-                    _k32.CloseHandle(h)
-                    return
-                self._held[pid] = (h, created)
-            elif msg in (JOB_OBJECT_MSG_EXIT_PROCESS, JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS):
-                if pid in self._held:
-                    self._exited.setdefault(pid, self._sweeps)
+            """Hold a process the port says joined one of the jobs. (Exits
+            are not taken from the port, whose messages Windows does not
+            promise to deliver: `_release` asks each held process instead.)"""
+            if msg != JOB_OBJECT_MSG_NEW_PROCESS:
+                return
+            job = self._job_for(key)
+            if job is None or pid in self._held:
+                return
+            h = _k32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid)
+            if not h:
+                return  # gone already: the gap the module docstring names
+            created = _creation_time(h)
+            # The id can have passed to another process since the message.
+            if created is None or not _in_job(h, job):
+                _k32.CloseHandle(h)
+                return
+            self._held[pid] = (h, created)
 
-        def _sweep(self) -> int:
+        def _sweep(self) -> int | None:
             """Hold or adopt every process the listing shows a held process
-            started; how many of them were escapes."""
-            self._sweeps += 1
+            started; how many of them were escapes, or None when there was no
+            listing -- which `_release` must not count as a sweep."""
             try:
                 listing = process_snapshot()
             except OSError as e:
@@ -509,7 +516,8 @@ if IS_WINDOWS:
                     self._said_no_listing = True
                     self._warn(f"cannot list processes, so cannot find those started "
                                f"outside the job: {e}")
-                return 0
+                return None
+            self._sweeps += 1
             found, grew = 0, True
             # Round again after any change: one just held can be the parent of
             # another in the same listing.
@@ -531,7 +539,7 @@ if IS_WINDOWS:
             `created`, and adopt it if it is in none of the tree's jobs. 1 if
             it was such an escape, else 0. Either holds it or passes it, so a
             sweep never looks at it twice."""
-            h = _k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE
+            h = _k32.OpenProcess(PROCESS_SET_QUOTA | PROCESS_TERMINATE | SYNCHRONIZE
                                  | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
             if not h:
                 err = ctypes.get_last_error()
@@ -556,6 +564,10 @@ if IS_WINDOWS:
                 return 1
             err = ctypes.get_last_error()
             close_job(job)
+            # Windows refuses a job to a process on its way out (error 5):
+            # that one needs none.
+            if _k32.WaitForSingleObject(h, 100) == WAIT_OBJECT_0:
+                return 0
             self._unadoptable.append(pid)
             self._warn(f"process {pid} was started by the tree outside its job, and Windows "
                        f"refuses it a job of its own (error {err}): it is killed with the "
@@ -563,37 +575,51 @@ if IS_WINDOWS:
             return 1
 
         def _release(self) -> None:
-            """Let go of the held processes that exited before the sweep just
-            made began: it saw every child they left."""
+            """Note which held processes have exited, and let go of those that
+            had exited before the last listing was taken: it showed every child
+            they left."""
+            for pid, (h, _) in self._held.items():
+                if pid not in self._exited and _k32.WaitForSingleObject(h, 0) == WAIT_OBJECT_0:
+                    # It may have exited after the listing: kept for one more.
+                    self._exited[pid] = self._sweeps
             for pid in [p for p, seen in self._exited.items() if seen < self._sweeps]:
                 del self._exited[pid]
+                if pid in self._unadoptable:
+                    self._unadoptable.remove(pid)
                 h, _ = self._held.pop(pid)
                 _k32.CloseHandle(h)
 
         def stop(self) -> None:
-            """End the periodic sweeps and hear what the port still holds. Call
-            while the tree's own job is still open: its messages are checked
-            against it."""
+            """End the periodic sweeps, and hold what the port says joined the
+            jobs meanwhile. Call while the tree's own job is open: what joined
+            it is checked against it."""
             if self._thread is not None:
                 _k32.PostQueuedCompletionStatus(self._port, 0, _STOP_KEY, None)
                 self._thread.join()
                 self._thread = None
             self._drain()
-            self._tree_job = None
 
         def reap(self) -> None:
-            """Adopt what the tree's last moments started outside its job, kill
-            everything in the jobs and handles held here, and let go of them.
-            Call after `stop`, once the tree's own job is closed."""
+            """Kill everything in the tree's job and in the jobs and handles
+            held here, then adopt and kill what the dead started outside them,
+            until a sweep finds no more. Call after `stop`, while the tree's
+            job is still open: a member being killed must still show as one,
+            not as an escape."""
             for _ in range(REAP_ROUNDS):
-                found = self._sweep()
-                for job in self.jobs:
+                for job in self._jobs_now():
                     _k32.TerminateJobObject(job, 1)
                 for pid in self._unadoptable:
                     _k32.TerminateProcess(self._held[pid][0], 1)
-                if not found:
+                self._drain()  # those just killed may have started members
+                if not self._sweep():
                     break
-                self._drain()  # those just killed may have started members of their jobs
+
+        def close(self) -> None:
+            """Let go of everything: close the adopted jobs, which kills what
+            is left in them, and every handle. Safe after a `stop` or `reap`
+            that was cut short, and to call twice."""
+            if self._thread is not None:
+                self.stop()
             for job in self.jobs:
                 close_job(job)
             self.jobs = []
@@ -602,8 +628,10 @@ if IS_WINDOWS:
             self._held.clear()
             self._exited.clear()
             self._unadoptable.clear()
-            _k32.CloseHandle(self._port)
-            self._port = None
+            self._tree_job = None
+            if self._port:
+                _k32.CloseHandle(self._port)
+                self._port = None
 
     def terminate_tree(job, proc) -> None:
         # `taskkill /T` first, *then* the job: order matters. `/T` walks the
@@ -612,7 +640,8 @@ if IS_WINDOWS:
         # job could be made -- and it needs the parents alive to do it. Closing
         # the job first kills them and leaves `/T` nothing to enumerate.
         # Closing the job afterwards costs nothing when the tree is already
-        # dead.
+        # dead. (`Tree` passes no job, and kills and closes its own after this,
+        # with the processes adopted outside it: see `Tree._teardown`.)
         #
         # The call is bounded, and its own tree is torn down on expiry — see
         # `TASKKILL_GRACE`. A hang here used to take the caller with it, and the
@@ -850,20 +879,25 @@ class Tree:
         # Held until it is in the job, so nothing it starts is born outside it.
         if self.job is not None:
             kwargs["creationflags"] = kwargs.get("creationflags", 0) | CREATE_SUSPENDED
+        self.proc = None
         try:
             self.proc = subprocess.Popen(command, **popen_kwargs(), **kwargs)
+            if self.job is not None:
+                if not assign_to_job(self.job, self.proc) and warn:
+                    warn("AssignProcessToJobObject failed; relying on taskkill fallback")
+                if self._escapes:
+                    self._escapes.start(self.proc.pid)
+                if not resume_process(self.proc):
+                    raise OSError(f"could not start {command!r}: NtResumeProcess failed")
         except BaseException:
-            self._close()
+            # Nothing may be left running for a Tree its caller never got.
+            if self.proc is not None:
+                try:
+                    self.proc.kill()
+                except OSError:
+                    pass  # gone already, which is what this wants
+            self._teardown(kill=False)
             raise
-        if self.job is not None:
-            if not assign_to_job(self.job, self.proc) and warn:
-                warn("AssignProcessToJobObject failed; relying on taskkill fallback")
-            if not resume_process(self.proc):
-                self.proc.kill()
-                self._close()
-                raise OSError(f"could not start {command!r}: NtResumeProcess failed")
-            if self._escapes:
-                self._escapes.start(self.proc.pid)
 
     @property
     def adopted(self) -> list[int]:
@@ -875,13 +909,7 @@ class Tree:
     def kill(self) -> None:
         """Terminate the whole tree, adopted processes included. Safe to call
         more than once."""
-        escapes, self._escapes = self._escapes, None
-        if escapes:
-            escapes.stop()
-        terminate_tree(self.job, self.proc)
-        self.job = None
-        if escapes:
-            escapes.reap()
+        self._teardown(kill=True)
 
     def accounting(self) -> Accounting | None:
         """What the tree has cost so far (see `job_accounting`), adopted
@@ -896,22 +924,31 @@ class Tree:
                     acct = acct + more
         return acct
 
-    def _close(self) -> None:
-        """Close the job, which kills what is left in it, and then what is left
-        of the adopted processes."""
-        escapes, self._escapes = self._escapes, None
-        if escapes:
-            escapes.stop()
-        close_job(self.job)
-        self.job = None
-        if escapes:
-            escapes.reap()
+    def _teardown(self, kill: bool) -> None:
+        """Kill what is left of the tree, adopted processes included, and let
+        go of it. `kill` puts `terminate_tree`'s `taskkill /T` and the root's
+        own kill first, while the watch still runs. The job is closed last, in
+        a `finally`, so an interrupt part way through still leaves nothing
+        running once the handles are gone."""
+        escapes = self._escapes
+        try:
+            if kill:
+                terminate_tree(None, self.proc)  # the job is closed below
+            if escapes is not None:
+                escapes.stop()
+                escapes.reap()
+        finally:
+            self._escapes = None
+            if escapes is not None:
+                escapes.close()
+            close_job(self.job)
+            self.job = None
 
     def __enter__(self) -> "Tree":
         return self
 
     def __exit__(self, *_exc) -> None:
-        self._close()
+        self._teardown(kill=False)
 
 
 @dataclass

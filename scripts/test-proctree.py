@@ -21,6 +21,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -167,13 +168,28 @@ def _wait_for(cond, seconds: float) -> bool:
     return True
 
 
-def _start_escape(tree) -> int:
+def _line(stream, seconds: float = 30) -> bytes:
+    """The next line from `stream`, or b"" if none comes within `seconds`: a
+    test whose child never speaks fails rather than hanging the suite."""
+    got: list[bytes] = []
+    reader = threading.Thread(target=lambda: got.append(stream.readline()), daemon=True)
+    reader.start()
+    reader.join(seconds)
+    return got[0] if got else b""
+
+
+def _pid(line: bytes) -> int | None:
+    word = line.strip()
+    return int(word) if word.isdigit() else None
+
+
+def _start_escape(tree) -> int | None:
     """Make `tree`'s root (running `_ROOT`) start its sleeper outside the job;
-    the sleeper's pid."""
+    the sleeper's pid, or None if the root never said it."""
     _let_children_leave(tree.job)
     tree.proc.stdin.write(b"go\n")
     tree.proc.stdin.flush()
-    return int(tree.proc.stdout.readline())
+    return _pid(_line(tree.proc.stdout))
 
 
 def test_an_escape_is_adopted_and_dies_with_the_tree() -> None:
@@ -188,6 +204,9 @@ def test_an_escape_is_adopted_and_dies_with_the_tree() -> None:
             with proctree.Tree([sys.executable, "-c", _ROOT], stdin=subprocess.PIPE,
                                stdout=subprocess.PIPE) as tree:
                 pid = _start_escape(tree)
+                check(f"{how}: the root started its sleeper", pid is not None)
+                if pid is None:
+                    continue
                 h = _hold(pid)
                 check(f"{how}: the sleeper really started outside the job",
                       h is not None and not proctree._in_job(h, tree.job))
@@ -215,9 +234,13 @@ def test_an_escape_dies_with_the_runner() -> None:
                               stdout=subprocess.PIPE)
     h = None
     try:
-        line = runner.stdout.readline().decode().split()
-        check("runner: its tree's escape was adopted", line[1:] == ["adopted"], f"{line}")
-        h = _hold(int(line[0]))
+        line = _line(runner.stdout).split()
+        pid = _pid(line[0]) if line else None
+        check("runner: its tree's escape was adopted",
+              pid is not None and line[1:] == [b"adopted"], f"{line}")
+        if pid is None:
+            return
+        h = _hold(pid)
         check("runner: the escape is running", h is not None and not _exits(h, 0))
         runner.kill()
         check("runner: the escape dies with the runner", h is not None and _exits(h, 10))
@@ -233,7 +256,7 @@ def _escape_runner() -> int:
     with proctree.Tree([sys.executable, "-c", _ROOT], stdin=subprocess.PIPE,
                        stdout=subprocess.PIPE) as tree:
         pid = _start_escape(tree)
-        adopted = _wait_for(lambda: pid in tree.adopted, 10)
+        adopted = pid is not None and _wait_for(lambda: pid in tree.adopted, 10)
         print(pid, "adopted" if adopted else "not-adopted", flush=True)
         time.sleep(120)
     return 0
@@ -254,7 +277,8 @@ def test_a_process_outside_the_tree_is_left_alone() -> None:
                            stdout=subprocess.PIPE) as tree:
             during = subprocess.Popen(sleeper)
             escape = _start_escape(tree)
-            h = _hold(escape)
+            check("strangers: the root started its sleeper", escape is not None)
+            h = _hold(escape) if escape is not None else None
             _wait_for(lambda: escape in tree.adopted, 10)
             time.sleep(3 * proctree.ESCAPE_POLL)
             check("strangers: not adopted",
@@ -268,6 +292,75 @@ def test_a_process_outside_the_tree_is_left_alone() -> None:
             if p is not None:
                 p.kill()
                 p.wait()
+
+
+def test_the_parentage_proof() -> None:
+    """A process is taken only if the listing shows a held process started
+    it, after that process itself started, and it is still the process the
+    listing saw. The watch is driven by hand here, with listings that name
+    real strangers as a held process's children, the way a reused id would;
+    and a held process is let go only once a whole listing has been taken
+    after it exited."""
+    if not proctree.IS_WINDOWS:
+        print("  skip (POSIX)")
+        return
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+    older = subprocess.Popen(sleeper)
+    time.sleep(0.05)  # creation times have the system clock's grain
+    parent = subprocess.Popen(sleeper)
+    time.sleep(0.05)
+    newer = subprocess.Popen(sleeper)
+    procs = (older, parent, newer)
+    handles = [_hold(p.pid) for p in procs]
+    born = {p.pid: proctree._creation_time(h) for p, h in zip(procs, handles)}
+    job = proctree.create_kill_on_close_job()
+    watch = proctree._Escapes(job, None)
+    listing: list = []
+    real_snapshot = proctree.process_snapshot
+    proctree.process_snapshot = lambda: listing
+    try:
+        watch._held[parent.pid] = (_hold(parent.pid), born[parent.pid])
+        listing[:] = [(older.pid, parent.pid, born[older.pid])]
+        watch._sweep()
+        check("proof: a process older than its named parent is left alone",
+              older.pid not in watch._held and not watch.adopted)
+        listing[:] = [(newer.pid, parent.pid, born[newer.pid] + 1)]
+        watch._sweep()
+        check("proof: one that is not the process the listing saw is left alone",
+              newer.pid not in watch._held and not watch.adopted)
+        listing[:] = [(newer.pid, parent.pid, born[newer.pid])]
+        watch._sweep()
+        check("proof: one that passes is adopted", watch.adopted == [newer.pid],
+              f"adopted={watch.adopted}")
+
+        sweeps = watch._sweeps
+
+        def no_listing():
+            raise OSError("no listing")
+
+        proctree.process_snapshot = no_listing
+        check("proof: a sweep without a listing is not counted",
+              watch._sweep() is None and watch._sweeps == sweeps)
+        proctree.process_snapshot = lambda: listing
+        listing[:] = []
+        parent.kill()
+        parent.wait()
+        watch._sweep()
+        watch._release()
+        check("proof: an exited parent is kept until a listing taken after its exit",
+              parent.pid in watch._held)
+        watch._sweep()
+        watch._release()
+        check("proof: and then let go", parent.pid not in watch._held)
+    finally:
+        proctree.process_snapshot = real_snapshot
+        watch.close()
+        proctree.close_job(job)
+        for h in handles:
+            _let_go(h)
+        for p in procs:
+            p.kill()
+            p.wait()
 
 
 def test_the_root_joins_its_job_before_it_runs() -> None:
@@ -291,8 +384,9 @@ def test_the_root_joins_its_job_before_it_runs() -> None:
     try:
         with proctree.Tree([sys.executable, "-c", starts_at_once],
                            stdout=subprocess.PIPE) as tree:
-            pid = int(tree.proc.stdout.readline())
-            h = _hold(pid)
+            pid = _pid(_line(tree.proc.stdout))
+            check("root: it started its child", pid is not None)
+            h = _hold(pid) if pid is not None else None
             check("root: its first child was born in the job",
                   h is not None and proctree._in_job(h, tree.job))
             check("root: so it was never an escape", pid not in tree.adopted,
@@ -469,6 +563,7 @@ def main() -> int:
         test_tree_runs_a_script_end_to_end,
         test_tree_accounting_counts_short_lived_processes,
         test_the_root_joins_its_job_before_it_runs,
+        test_the_parentage_proof,
         test_an_escape_is_adopted_and_dies_with_the_tree,
         test_an_escape_dies_with_the_runner,
         test_a_process_outside_the_tree_is_left_alone,

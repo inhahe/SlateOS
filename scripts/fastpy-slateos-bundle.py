@@ -34,8 +34,9 @@ emulation, so the script says which it did.
 The runtime archive comes from fastpy itself (`toolchain.
 build_slateos_runtime_archive`), which cross-compiles the C runtime with
 `zig cc` and packs it with `zig ar`. So this needs what a fastpy fixture build
-needs -- a fastpy checkout and zig -- and the llvmlite installed for the
-Python that runs it, whose `ir` package is copied rather than imported.
+needs -- fastpy, which is this repository's submodule `toolchain/fastpy`, and
+zig -- and the llvmlite installed for the Python that runs it, whose `ir`
+package is copied rather than imported.
 
 usage:
     python scripts/fastpy-slateos-bundle.py [--fastpy DIR] [--out DIR]
@@ -67,13 +68,11 @@ DEFAULT_OUT = REPO / "build" / "fastpy-slateos"
 #: and the rootfs recipe stages its standard library as `python312.zip`.
 DEFAULT_PYTHON_VERSION = "3.12"
 
-#: Where fastpy is kept, tried last -- `ctest-fixtures.py::_fastpy_dir` explains
-#: why; this repeats its search so the fixtures and the image's compiler come
-#: from one checkout.
-PREMIGRATION_FASTPY = Path("D:/visual studio projects/fastpy")
-
-#: The same place as WSL names it, where the rootfs recipe runs.
-PREMIGRATION_FASTPY_WSL = Path("/mnt/d/visual studio projects/fastpy")
+#: fastpy, a submodule pinned to the commit the OS is tested with: what the
+#: tree is built from unless `--fastpy` or `$FASTPY_DIR` names another
+#: checkout. `ctest-fixtures.py::_fastpy_dir` searches the same way, so the
+#: fixtures and the image's compiler come from one checkout.
+SUBMODULE = REPO / "toolchain" / "fastpy"
 
 #: The image paths, relative to the tree's root.
 LIB_DIR = Path("usr/lib/x86_64-slateos")
@@ -111,9 +110,10 @@ class BundleError(Exception):
 
 
 def find_fastpy(explicit: str | None) -> Path:
-    """The fastpy checkout to bundle: `--fastpy`, then as ctest-fixtures
-    searches -- `$FASTPY_DIR`, `$PYTHONPATH`, a sibling named `fastpy`, and the
-    place fastpy is actually kept."""
+    """The fastpy checkout to bundle: the one `explicit` (`--fastpy`) or
+    `$FASTPY_DIR` names, else the submodule. Nothing else is searched: a
+    fastpy found beside the repository or on `$PYTHONPATH` is not the commit
+    this tree pins, and would be bundled without anyone being told."""
 
     def usable(p: Path) -> bool:
         return (p / "compiler" / "__init__.py").is_file()
@@ -125,17 +125,13 @@ def find_fastpy(explicit: str | None) -> Path:
         if usable(Path(named)):
             return Path(named)
         raise BundleError(f"{named} has no compiler/__init__.py")
-    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
-        if entry and usable(Path(entry)):
-            return Path(entry)
-    sibling = REPO.parent / "fastpy"
-    if usable(sibling):
-        return sibling
-    for candidate in (PREMIGRATION_FASTPY, PREMIGRATION_FASTPY_WSL):
-        if usable(candidate):
-            print(f"fastpy-bundle: using {candidate} (no sibling at {sibling})")
-            return candidate
-    raise BundleError("no fastpy checkout found; pass --fastpy or set FASTPY_DIR")
+    if usable(SUBMODULE):
+        return SUBMODULE
+    raise BundleError(
+        f"{SUBMODULE} is not checked out: run `git submodule update --init "
+        "toolchain/fastpy` (scripts/bootstrap-worktree.sh does), or name "
+        "another checkout with --fastpy or FASTPY_DIR"
+    )
 
 
 def find_llvmlite(explicit: str | None) -> Path:
@@ -334,7 +330,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="fastpy-slateos-bundle",
         description="Build the tree that puts the fastpy compiler on a SlateOS image.",
     )
-    parser.add_argument("--fastpy", help="the fastpy checkout (default: as ctest-fixtures finds it)")
+    parser.add_argument("--fastpy", help="the fastpy checkout (default: $FASTPY_DIR, else toolchain/fastpy)")
     parser.add_argument("--llvmlite", help="llvmlite's package directory (default: this Python's)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT,
                         help="where to assemble the tree (default: build/fastpy-slateos)")

@@ -162,6 +162,40 @@ def test_fastpy_dir_is_honoured_like_the_fixture_builder():
                 os.environ["FASTPY_DIR"] = saved
 
 
+def test_unnamed_the_submodule_is_the_checkout_and_nothing_else_is_searched():
+    """With neither --fastpy nor $FASTPY_DIR, the tree comes from the
+    submodule, `toolchain/fastpy`; one not checked out is an error naming the
+    command that checks it out -- not a fastpy found on $PYTHONPATH, which is
+    not the commit the tree pins."""
+    saved = {name: os.environ.get(name) for name in ("FASTPY_DIR", "PYTHONPATH")}
+    saved_submodule = bundle.SUBMODULE
+    with tempfile.TemporaryDirectory() as tmp:
+        submodule = fake_fastpy(Path(tmp) / "repo" / "toolchain")
+        elsewhere = fake_fastpy(Path(tmp) / "elsewhere")
+        os.environ.pop("FASTPY_DIR", None)
+        os.environ["PYTHONPATH"] = str(elsewhere)
+        try:
+            bundle.SUBMODULE = submodule
+            check("the submodule is the checkout", bundle.find_fastpy(None), submodule)
+            os.environ["FASTPY_DIR"] = str(elsewhere)
+            check("$FASTPY_DIR names another checkout over it",
+                  bundle.find_fastpy(None), elsewhere)
+            os.environ.pop("FASTPY_DIR")
+            bundle.SUBMODULE = Path(tmp) / "unchecked-out"
+            err = raises(bundle.find_fastpy, None)
+            check("a submodule not checked out is an error naming the command, "
+                  "and $PYTHONPATH's fastpy is not used",
+                  err is not None and "git submodule update --init toolchain/fastpy" in err,
+                  True)
+        finally:
+            bundle.SUBMODULE = saved_submodule
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+
 def test_llvmlite_must_be_the_package_directory():
     with tempfile.TemporaryDirectory() as tmp:
         pkg = fake_llvmlite(Path(tmp))
@@ -347,8 +381,8 @@ def main() -> int:
     no tests prints nothing and exits 0, which reads as a pass."""
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 12:
-        print(f"FATAL: found only {len(tests)} tests; the suite has 12. "
+    if len(tests) < 13:
+        print(f"FATAL: found only {len(tests)} tests; the suite has 13. "
               "Discovery is broken, not the code.")
         return 1
     for _, fn in sorted(tests):

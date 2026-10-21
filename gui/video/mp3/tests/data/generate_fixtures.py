@@ -32,7 +32,8 @@ decoder reads is reached:
 
 Layer III's intensity stereo and mixed blocks are written by no encoder
 here; minimp3's own vectors (the ISO conformance streams among them) reach
-them, read by the ignored test `tests/vectors.rs`.
+them, read by the ignored test `tests/vectors.rs` -- and so do the streams a
+fuzzer found (`FOUND`), kept as found.
 
 Run from this directory, with these in WSL:
 
@@ -385,6 +386,15 @@ SHAPED = {
     "one_frame": ("mp2_192_stereo_48000.mp2", "mp2", "one_frame"),
 }
 
+# Streams a fuzzer found, kept as they were found and only answered here:
+# name: what they hold.
+FOUND = {
+    # (2026-10-21) MPEG-2.5 at 8 kHz, mono, its granules' short blocks mixed:
+    # the reorder of their short bands runs 24 lines past the channel's 576,
+    # into the second channel's lines (l3.rs's `reorder`).
+    "found_mixed_8000": "mp3",
+}
+
 
 def shape(name, source, ext, how):
     with open(source, "rb") as fh:
@@ -430,6 +440,8 @@ def extension(name):
         return "mp1"
     if name in SHAPED:
         return SHAPED[name][1]
+    if name in FOUND:
+        return FOUND[name]
     return DAMAGED[name][1]
 
 
@@ -439,6 +451,54 @@ def answer(name):
     with open(f"{name}.txt", "wb") as fh:
         fh.write(out)
     packets(name, path)
+    if name in FOUND:
+        decoded(name)
+
+
+def fnv(data):
+    """FNV-1a, 64-bit: `reference.c`'s hash of samples."""
+    h = 0xCBF29CE484222325
+    for b in data:
+        h = ((h ^ b) * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
+    return h
+
+
+def decoded(name):
+    """A found stream decoded as videocodec's `Sound` decodes it, as
+    NAME.decoded: each of ffprobe's packets (NAME.packets, which the reader
+    is held to) given to the reference alone, in its `--packets` mode -- a
+    line a packet:
+
+        packet <samples a channel> <channels> <hash of its samples>
+
+    It is the decoding minimp3 does with the bit reservoir a packet at a
+    time, which a file's frames given one after another need not reach."""
+    with open(f"{name}.{extension(name)}", "rb") as fh:
+        data = fh.read()
+    bit = bytearray()
+    with open(f"{name}.packets", encoding="utf-8") as fh:
+        for line in fh:
+            w = line.split()
+            if w[0] == "packet":
+                size, pos = int(w[3]), int(w[4])
+                bit += struct.pack(">II", size, 0) + data[pos:pos + size]
+    with tempfile.TemporaryDirectory(dir=".") as tmp:
+        src, pcm_path = os.path.join(tmp, "in.bit"), os.path.join(tmp, "out.pcm")
+        with open(src, "wb") as fh:
+            fh.write(bit)
+        out = wsl(f"{REFERENCE} --packets {shlex.quote(wsl_path(src))} {shlex.quote(wsl_path(pcm_path))}")
+        with open(pcm_path, "rb") as fh:
+            pcm = fh.read()
+    lines, at = [], 0
+    for line in out.decode().splitlines():
+        _, samples, channels = line.split()
+        n = int(samples) * int(channels) * 2
+        lines.append(f"packet {samples} {channels} {fnv(pcm[at:at + n]):016x}")
+        at += n
+    if at != len(pcm):
+        sys.exit(f"{name}: {len(pcm) - at} bytes of samples no packet accounts for")
+    with open(f"{name}.decoded", "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("\n".join(lines) + "\n")
 
 
 def packets(name, path):
@@ -477,7 +537,7 @@ def main():
     ap.add_argument("names", nargs="*")
     args = ap.parse_args()
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    names = args.names or list(FIXTURES) + list(LAYER1) + list(DAMAGED) + list(SHAPED)
+    names = args.names or list(FIXTURES) + list(LAYER1) + list(DAMAGED) + list(SHAPED) + list(FOUND)
     for name in names:
         if not args.answers_only:
             if name in FIXTURES:
@@ -489,6 +549,8 @@ def main():
                 layer1(name, *LAYER1[name])
             elif name in SHAPED:
                 shape(name, *SHAPED[name])
+            elif name in FOUND:
+                pass
             else:
                 source, ext, how, seed = DAMAGED[name]
                 damage(name, source, ext, how, seed)

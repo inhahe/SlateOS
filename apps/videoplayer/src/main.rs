@@ -6950,24 +6950,41 @@ test to be about anything -- it drew {} text command(s)",
             app.playlist.entries()[0].duration,
             Some(Duration::from_secs(90))
         );
-        assert_eq!(app.state, PlaybackState::Stopped);
         assert_eq!(
             app.selected_audio_track,
             Some(audio.index),
             "its own sound is chosen"
         );
-        // Where the picture would be: that there is none, why, and what it
-        // is -- an H.264 picture, which nothing here decodes yet.
+        let shown = texts(&app);
+        assert!(!shown.iter().any(|t| NO_FILE_LINES.contains(&t.as_str())));
+    }
+
+    /// A film whose pictures are in a codec nothing here decodes stays
+    /// stopped, and says where the picture would be that there is none, why,
+    /// and what the picture is.
+    #[test]
+    fn a_film_that_does_not_decode_says_why_where_its_picture_would_be() {
+        let dir = Scratch::new("nodecode");
+        let path = dir.file(
+            "film.mkv",
+            &mediaprobe::testing::mkv_hevc(1920, 1080, 90, 25),
+        );
+        let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+        let said = app.open_path(&path);
+        assert!(app.current_file.is_some(), "not opened: {said}");
+        assert_eq!(app.state, PlaybackState::Stopped);
         let shown = texts(&app);
         for line in [
-            "No picture: the video is H.264, which is not decoded here yet.",
+            "No picture: the video is HEVC, which is not decoded here yet.",
             NO_PICTURE_HINT,
+            "1920x1080 H.265",
         ] {
-            assert!(shown.iter().any(|t| t == line), "never said {line:?}");
+            assert!(
+                shown.iter().any(|t| t == line),
+                "never said {line:?}: {shown:?}"
+            );
         }
-        assert!(shown.iter().any(|t| t == "1920x1080 H.264"), "{shown:?}");
-        assert!(!shown.iter().any(|t| NO_FILE_LINES.contains(&t.as_str())));
-        assert!(!app.decodes, "an H.264 file plays");
+        assert!(!app.decodes, "an HEVC file plays");
     }
 
     /// Play says why a film will not play, rather than running a clock over a
@@ -6975,14 +6992,14 @@ test to be about anything -- it drew {} text command(s)",
     #[test]
     fn play_says_why_a_film_does_not_play_rather_than_pretending() {
         let dir = Scratch::new("play");
-        let path = dir.file("film.mkv", &mediaprobe::testing::mkv(640, 360, 30, 24));
+        let path = dir.file("film.mkv", &mediaprobe::testing::mkv_hevc(640, 360, 30, 24));
         let mut app = VideoPlayerApp::new(WINDOW_WIDTH, WINDOW_HEIGHT);
         app.open_path(&path);
         app.handle_event(&press(Key::Space));
         assert_eq!(app.state, PlaybackState::Stopped);
         assert_eq!(
             app.osd_message.as_deref(),
-            Some("Cannot play: the video is H.264, which is not decoded here yet")
+            Some("Cannot play: the video is HEVC, which is not decoded here yet")
         );
         app.tick(5000);
         assert_eq!(
@@ -10659,8 +10676,8 @@ as many times as before",
         let dir = Scratch::new("away");
         let mut app = film_open(&dir);
         drop(app.take_images());
-        let h264 = dir.file("film.mkv", &mediaprobe::testing::mkv(640, 360, 30, 24));
-        app.open_path(&h264);
+        let hevc = dir.file("film.mkv", &mediaprobe::testing::mkv_hevc(640, 360, 30, 24));
+        app.open_path(&hevc);
         let changes = app.take_images();
         assert!(
             changes.contains(&ImageChange::Drop(PICTURE_IMAGE)),
@@ -10670,7 +10687,7 @@ as many times as before",
         assert!(
             drawn_texts(&app)
                 .iter()
-                .any(|t| t == "No picture: the video is H.264, which is not decoded here yet."),
+                .any(|t| t == "No picture: the video is HEVC, which is not decoded here yet."),
             "{:?}",
             drawn_texts(&app)
         );

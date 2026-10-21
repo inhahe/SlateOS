@@ -37,6 +37,11 @@ under <out>:
                         slice dropped, cut short, or with bytes changed
                         (see `damages`). How the decoder finds the damage,
                         stops, and conceals what it lost.
+  grain/...             each raw stream above with film grain
+                        characteristics put in, before every picture or
+                        every fifth (see `grains`): the grain each picture
+                        is shown with, and the pictures FFmpeg cannot give
+                        any (not 8-bit 4:2:0) shown without.
 
 Generated streams are written under <out> by their names. For each stream:
 
@@ -92,10 +97,12 @@ Generated streams are written under <out> by their names. For each stream:
 """
 import base64
 import json
+import random
 import re
 import shlex
 import subprocess
 import sys
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -658,6 +665,133 @@ def damages(name: str, data: bytes, sizes: list[int], slices: list[str],
     return made
 
 
+# --- Streams with film grain --------------------------------------------------
+
+# Packets each grain stream keeps from the stream's start: enough for field
+# pairs, B pictures and an IDR or two, each picture's grain seeded afresh.
+GRAIN_LENGTH = 40
+
+
+class BitWriter:
+    """Bits written most significant first, as H.264 syntax is."""
+
+    def __init__(self):
+        self.bits: list[int] = []
+
+    def u(self, n: int, v: int) -> "BitWriter":
+        self.bits += [(v >> (n - 1 - i)) & 1 for i in range(n)]
+        return self
+
+    def ue(self, v: int) -> "BitWriter":
+        n = (v + 1).bit_length()
+        return self.u(n - 1, 0).u(n, v + 1)
+
+    def se(self, v: int) -> "BitWriter":
+        return self.ue(2 * v - 1 if v > 0 else -2 * v)
+
+    def bytes(self) -> bytes:
+        """The bits so far, ended as an SEI payload is: a 1, then zeros to
+        the byte (`payload_bit_equal_to_one`, read by nobody here)."""
+        bits = self.bits + [1] + [0] * (-(len(self.bits) + 1) % 8)
+        return bytes(int("".join(map(str, bits[i:i + 8])), 2) for i in range(0, len(bits), 8))
+
+
+def escape(rbsp: bytes) -> bytes:
+    """`rbsp` with emulation prevention bytes put in: a 3 after any two
+    zeros that a byte of 0 to 3 follows."""
+    out, zeros = bytearray(), 0
+    for x in rbsp:
+        if zeros >= 2 and x <= 3:
+            out.append(3)
+            zeros = 0
+        out.append(x)
+        zeros = zeros + 1 if x == 0 else 0
+    return bytes(out)
+
+
+def film_grain_sei(model: dict, repetition_period: int) -> bytes:
+    """A NAL unit, header first, of one film grain characteristics message
+    (payload type 19): frequency filtering, no colour description, additive
+    blending, `model`'s scale and bands for each component it has, and
+    `repetition_period` (0: this picture only; 1: until the next IDR or
+    message -- though FFmpeg forgets any message as a packet begins a new
+    picture)."""
+    w = BitWriter()
+    w.u(1, 0).u(2, 0).u(1, 0)  # cancel flag, model 0, no colour description
+    w.u(2, 0).u(4, model["log2_scale_factor"])  # blending mode, scale
+    for c in range(3):
+        w.u(1, int(c in model["bands"]))
+    for c in range(3):
+        bands = model["bands"].get(c)
+        if bands is None:
+            continue
+        w.u(8, len(bands) - 1).u(3, 2)  # intervals, 3 model values
+        for lo, hi, strength, cut_h, cut_v in bands:
+            w.u(8, lo).u(8, hi).se(strength).se(cut_h).se(cut_v)
+    w.ue(repetition_period)
+    payload = w.bytes()
+    size = bytes([255] * (len(payload) // 255) + [len(payload) % 255])
+    return b"\x06" + escape(bytes([19]) + size + payload + b"\x80")
+
+
+def grain_model(seed: int) -> dict:
+    """A model for a stream, varied by `seed`: a scale of 2 to 5, luma
+    always and each chroma component two times in three, one to three bands
+    of brightness -- some with gaps between them, which leave blocks
+    ungrained -- each with a strength of 10 to 120 and cut-offs of 2 to 14,
+    all as the standard allows (a negative strength, which FFmpeg takes
+    too, is left to the unit tests)."""
+    rng = random.Random(seed)
+    bands = {}
+    for c in range(3):
+        if c > 0 and rng.random() < 1 / 3:
+            continue
+        edges = sorted(rng.sample(range(1, 255), 2 * rng.randint(1, 3) - 1))
+        lows = [0] + edges[1::2]
+        highs = edges[0::2] + [255]
+        # A band's top pulled down by up to 20 leaves a gap above it.
+        bands[c] = [(lo, max(lo, hi - rng.randint(0, 20) * (hi < 255)),
+                     rng.randint(10, 120),
+                     rng.randint(2, 14), rng.randint(2, 14))
+                    for lo, hi in zip(lows, highs)]
+    return {"log2_scale_factor": rng.randint(2, 5), "bands": bands}
+
+
+def grains(name: str, data: bytes, sizes: list[int], slices: list[str],
+           out: Path) -> list[tuple[str, Path]]:
+    """Write a raw stream's first `GRAIN_LENGTH` packets with film grain
+    characteristics put in before a packet's first slice; give back their
+    names and paths. `a`: the stream's model before every packet, to repeat
+    -- which carries it to a second field in a packet of its own, FFmpeg
+    forgetting a message only as a packet begins a picture. `e`: a model of
+    its own before every fifth packet, for that picture alone. FATE has no
+    H.264 stream with film grain, and x264 writes none."""
+    pk = classify(data, sizes, slices)
+    if pk is None:
+        print(f"{name}: slices do not map onto packets; no grain", flush=True)
+        return []
+    seed = zlib.crc32(name.encode("utf-8"))
+    made = []
+
+    def write(kind: str, sei_at) -> None:
+        body = bytearray()
+        for k, p in enumerate(pk[:GRAIN_LENGTH]):
+            sei = sei_at(k)
+            for n in p.nals:
+                if sei is not None and n.type in (1, 5):
+                    body += START_CODE + sei
+                    sei = None
+                body += START_CODE + n.raw
+        grained = f"grain/{name}~{kind}.h264"
+        (out / grained).parent.mkdir(parents=True, exist_ok=True)
+        (out / grained).write_bytes(bytes(body))
+        made.append((grained, out / grained))
+
+    write("a", lambda k: film_grain_sei(grain_model(seed), 1))
+    write("e", lambda k: film_grain_sei(grain_model(seed + k), 0) if k % 5 == 0 else None)
+    return made
+
+
 # --- Streams made with libx264 ----------------------------------------------
 
 # x264's picture timing SEI with no HRD, after its start code: one byte,
@@ -924,7 +1058,7 @@ def main() -> None:
         return
     streams = sources(fate) + [(n, p, False) for n, p in make_x264(out)]
     slices = describe_all(streams, out, jobs)
-    cut_streams, damaged_streams = [], []
+    cut_streams, damaged_streams, grain_streams = [], [], []
     for name, path, container in streams:
         if container or name in FAILED:
             continue
@@ -933,7 +1067,9 @@ def main() -> None:
         data = path.read_bytes()
         cut_streams += cuts(name, data, sizes, slices[name], out)
         damaged_streams += damages(name, data, sizes, slices[name], out)
-    describe_all([(c, p, False) for c, p in cut_streams + damaged_streams], out, jobs)
+        grain_streams += grains(name, data, sizes, slices[name], out)
+    made = cut_streams + damaged_streams + grain_streams
+    describe_all([(c, p, False) for c, p in made], out, jobs)
     # A damaged stream FFmpeg makes nothing of is one the damage went too
     # far in: it goes, stream and all. Any other is an error.
     for name in [n for n in FAILED if n.startswith("damaged/")]:
@@ -941,7 +1077,7 @@ def main() -> None:
         FAILED.remove(name)
         print(f"{name}: dropped, FFmpeg makes nothing of it", flush=True)
     print(f"{len(streams)} streams, {len(cut_streams)} cut from them, "
-          f"{len(damaged_streams)} damaged")
+          f"{len(damaged_streams)} damaged, {len(grain_streams)} with film grain")
     if FAILED:
         raise SystemExit(f"{len(FAILED)} streams FFmpeg made nothing of: {', '.join(FAILED)}")
     add_crc(fate, out, jobs)

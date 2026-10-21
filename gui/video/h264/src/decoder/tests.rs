@@ -10,7 +10,9 @@
 //! The streams are FFmpeg's FATE samples -- every conformance stream and
 //! the other H.264 samples -- streams made with libx264, and those cut
 //! short at the front or with fields taken out (how a decoder joins a
-//! stream late, recovers, and keeps fields of different frames apart).
+//! stream late, recovers, and keeps fields of different frames apart),
+//! damaged (how it finds the damage and conceals it), or given film grain
+//! characteristics (the grain each picture is shown with).
 //! The samples are too large to commit; `tools/pict_expect.py` makes the
 //! rest and writes FFmpeg's lines for all of them. With both on disk:
 //!

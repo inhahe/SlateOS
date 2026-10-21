@@ -123,28 +123,9 @@ mod imp {
         tv_nsec: i64,
     }
 
-    /// `struct stat`, Linux x86-64's layout, as `posix/src/stat.rs` declares it.
-    #[repr(C)]
-    #[derive(Default)]
-    struct CStat {
-        st_dev: u64,
-        st_ino: u64,
-        st_nlink: u64,
-        st_mode: u32,
-        st_uid: u32,
-        st_gid: u32,
-        _pad0: i32,
-        st_rdev: u64,
-        st_size: i64,
-        st_blksize: i64,
-        st_blocks: i64,
-        st_atim: CTimespec,
-        st_mtim: CTimespec,
-        st_ctim: CTimespec,
-        _reserved: [i64; 3],
-    }
-
-    const _: () = assert!(core::mem::size_of::<CStat>() == 144);
+    // `struct stat`, as libcall declares it once for every program (its
+    // size checked there).
+    use libcall::file::Stat as CStat;
 
     unsafe extern "C" {
         fn openat(dirfd: i32, path: *const u8, flags: i32, mode: u32) -> i32;
@@ -176,12 +157,12 @@ mod imp {
             gid: c.st_gid,
             size: c.st_size,
             atime: Timespec {
-                sec: c.st_atim.tv_sec,
-                nsec: c.st_atim.tv_nsec,
+                sec: c.st_atime,
+                nsec: c.st_atime_nsec,
             },
             mtime: Timespec {
-                sec: c.st_mtim.tv_sec,
-                nsec: c.st_mtim.tv_nsec,
+                sec: c.st_mtime,
+                nsec: c.st_mtime_nsec,
             },
         }
     }

@@ -2279,7 +2279,7 @@ prerequisite that is no longer in `roadmap.md` is done: look for it here, or
 ### 4.2 Package manager — Python/fastpy candidate
 
 - [x] Content-addressed immutable store (Nix model) — SHA-256 CAS with Git-style prefix dirs
-- [x] Atomic updates and rollback (generation pointer swap) — append-only generation history
+- [x] Atomic updates and rollback (generation pointer swap) — append-only generation history. Correction, 2026-10-17: until then `pkg rollback` moved the pointer and changed no file (files are deployed in place, so a pointer swap alone changes nothing); it now puts the target generation's files back from the store, refuses when the store no longer holds them, and reports as data (`--json`, exit 0/1/2/3) -- `requests/e-b-programs-can-ask-the-package-manager-to-roll-back.md`
 - [x] Show requested capabilities before install (Android-style) — manifest capabilities field
 - [x] Dependency resolution with version constraints (>=, <=, ^, ==, *)
 - [x] CLI: install, remove, upgrade, update, list, search, info, rollback, generations, gc, verify, files, which

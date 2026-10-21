@@ -524,6 +524,17 @@ pub fn ul_strtou64(s: &[u8], base: u32) -> Result<u64, NumErr> {
     u64::try_from(sc.magnitude).map_err(|_| NumErr::Range)
 }
 
+/// What `strtou32_or_err (str, errmesg)` accepts: [`ul_strtou64`]'s number,
+/// refused as out of range past `UINT32_MAX` (`str2unum_or_err`'s `up`).
+/// Its refusal is reported with [`num_error_message`].
+///
+/// # Errors
+///
+/// As [`ul_strtou64`], and [`NumErr::Range`] past `u32::MAX`.
+pub fn ul_strtou32(s: &[u8], base: u32) -> Result<u32, NumErr> {
+    u32::try_from(ul_strtou64(s, base)?).map_err(|_| NumErr::Range)
+}
+
 /// `do_scale_by_power`: multiply by `base` `power` times, refusing to wrap.
 #[allow(
     clippy::arithmetic_side_effects,
@@ -563,12 +574,24 @@ pub fn parse_size(s: &[u8]) -> Result<u64, NumErr> {
 /// far as it was scaled -- upstream falls through to `*res = x` with the
 /// error still to return -- so `lscpu`, which ignores the status, shows a
 /// cache of `16E` as 16 PiB.
+pub fn parse_size_res(s: &[u8]) -> (Result<u64, NumErr>, u64) {
+    let (r, x, _) = parse_size_power(s);
+    (r, x)
+}
+
+/// `parse_size(str, &res, &power)`: as [`parse_size_res`], and the power of
+/// the suffix as upstream reports it -- 1 for `K`, 2 for `M`, ...; 0 for a
+/// plain number or a size refused before its suffix was read.
+pub fn parse_size_power(s: &[u8]) -> (Result<u64, NumErr>, u64, i32) {
+    parse_size_inner(s)
+}
+
 #[allow(
     clippy::arithmetic_side_effects,
     reason = "indices step through `s` and are read with `get`; the fraction arithmetic is upstream's, each multiply guarded by a `<= u64::MAX / 10` test and each divisor proved non-zero first"
 )]
-pub fn parse_size_res(s: &[u8]) -> (Result<u64, NumErr>, u64) {
-    let fail = |e: NumErr| (Err(e), 0u64);
+fn parse_size_inner(s: &[u8]) -> (Result<u64, NumErr>, u64, i32) {
+    let fail = |e: NumErr| (Err(e), 0u64, 0i32);
     if s.is_empty() {
         return fail(NumErr::Invalid);
     }
@@ -594,7 +617,7 @@ pub fn parse_size_res(s: &[u8]) -> (Result<u64, NumErr>, u64) {
     };
     let mut p = sc.end;
     if p >= s.len() {
-        return (Ok(x), x); // without suffix
+        return (Ok(x), x, 0); // without suffix
     }
 
     let mut base: u64 = 1024;
@@ -697,7 +720,7 @@ pub fn parse_size_res(s: &[u8]) -> (Result<u64, NumErr>, u64) {
     // `parse_size` writes the (possibly overflowed) result out and *then*
     // returns the error, so a caller that ignored the status would still see a
     // number. `strtosize_or_err` does not ignore it.
-    (scaled.map(|()| x), x)
+    (scaled.map(|()| x), x, pwr)
 }
 
 /// The argument is inside util-linux's own `'%s'`, escaped where it is not

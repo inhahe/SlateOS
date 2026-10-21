@@ -2,5 +2,17 @@
 name = "nologin"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS nologin utility"
+description = "nologin, shadow 4.13's, ported: refuse a login, logging the attempt"
+
+[lints]
+workspace = true
+
 [dependencies]
+# A standard descriptor nologin was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }
+# getlogin_r, ttyname_r and getuid, through the C library.
+libcall = { path = "../../libcall" }
+# The attempt logged through the C library's syslog.
+libcsyslog = { path = "../libcsyslog" }
+# SSH_ORIGINAL_COMMAND's bytes, as the environment holds them.
+quoting = { path = "../quoting" }

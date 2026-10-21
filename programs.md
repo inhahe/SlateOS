@@ -13,14 +13,15 @@ A new program is recorded here in the commit that creates it (§1053): run
 the script, commit `programs.md` with the program. `--check` fails when the
 two disagree.
 
-**501 programs; 342 on the image, 6 carried inside the kernel.**
+**504 programs; 344 on the image, 6 carried inside the kernel.**
 
-## Userland utilities and services (`userspace/`, lane B) -- 316
+## Userland utilities and services (`userspace/`, lane B) -- 319
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
 | `acl` | POSIX access control list utility. | yes |  |  |
 | `acpi` | Power management info (acpi/acpid) | yes |  |  |
+| `agetty` | Open a terminal line, ask for a login name, and run `login`. |  |  |  |
 | `ar` | Archive and Object File Tools | yes |  | `ranlib`, `strip` |
 | `arch` | Print machine architecture. | yes | `coreutils` |  |
 | `arp` | ARP Table Management Utility | yes |  |  |
@@ -32,15 +33,16 @@ two disagree.
 | `base64` | Encode or decode FILE, or standard input, to standard output. | yes | `coreutils` |  |
 | `basename` | Strip the directory and an optional suffix from a name. | yes | `coreutils` |  |
 | `basenc` | Encode or decode FILE, or standard input, to standard output. | yes | `coreutils` |  |
-| `bc` | Arbitrary-precision calculator | yes | `coreutils` |  |
+| `bc` | An arbitrary-precision calculator language: GNU bc 1.07.1, ported. | yes | `coreutils` |  |
 | `blkdiscard` | Discard the content of sectors on a device. | yes |  |  |
 | `blkid` | Locate and print block device attributes. | yes |  |  |
 | `blockdev` | Call block device ioctls from the command line. | yes |  |  |
 | `bootctl` | EFI boot manager control. | yes |  |  |
 | `cal` | `cal`, transcribed from util-linux 2.39.3 rather than remembered. | yes | `coreutils` |  |
 | `cat` | Concatenate files and print them on the standard output. | yes | `coreutils` |  |
+| `cfdisk` | Display or manipulate a disk partition table, full screen. | yes |  |  |
 | `chage` | Password-aging utility. | yes |  |  |
-| `chattr` | Ext2/ext4 file attribute utilities. | yes |  | `lsattr` |
+| `chattr` | `chattr` and `lsattr`: change and list a file's attributes. | yes |  | `lsattr` |
 | `chgrp` | Change group ownership. | yes | `coreutils` |  |
 | `chmod` | Change file mode bits. | yes | `coreutils` |  |
 | `chown` | Change file owner and group. | yes | `coreutils` |  |
@@ -61,7 +63,7 @@ two disagree.
 | `curl` | HTTP/HTTPS Client Utility | yes |  |  |
 | `cut` | Print selected parts of lines. | yes | `coreutils` |  |
 | `date` | Print or set the system date and time. | yes | `coreutils` |  |
-| `dc` | Desk calculator (reverse Polish notation) | yes |  |  |
+| `dc` | An arbitrary-precision reverse-Polish calculator: GNU dc 1.4.1 (bc 1.07.1), ported. | yes |  |  |
 | `dd` | Convert and copy a file, with the operand syntax POSIX gave it in 1970 and the conversions GNU has accumulated since. | yes | `coreutils` |  |
 | `df` | Report file system disk space usage. | yes | `coreutils` |  |
 | `dhcpcd` | DHCP Client Daemon (`dhcpcd`) | yes |  |  |
@@ -85,7 +87,7 @@ two disagree.
 | `expr` | Evaluate an expression given as command-line arguments. | yes | `coreutils` |  |
 | `factor` | Print the prime factors of each NUMBER. | yes | `coreutils` |  |
 | `false` | Do nothing, unsuccessfully. | yes | `coreutils` |  |
-| `fdisk` | Partition table manipulator (GPT/MBR) | yes |  |  |
+| `fdisk` | Display or manipulate a disk partition table. | yes |  |  |
 | `fetch` | HTTP fetch utility (wget/curl-like). | yes | `coreutils` |  |
 | `file` | Determine the type of a file. | yes |  |  |
 | `find` | Search for files in a directory hierarchy. | yes | `coreutils` |  |
@@ -109,8 +111,8 @@ two disagree.
 | `getty` | Virtual terminal login manager (agetty/mingetty) | yes |  | `mingetty` |
 | `grep` | Select the lines of its input that match a pattern. | yes | `coreutils` |  |
 | `groups` | Print the groups a user is in. | yes | `coreutils` |  |
-| `gzip` | Gzip/gunzip/zcat compression utility. | yes |  | `gunzip`, `zcat`, `gzcat` |
-| `hardlink` | File deduplication utility. | yes |  |  |
+| `gzip` | Compress or expand files. | yes |  | `gunzip`, `zcat`, `gzcat` |
+| `hardlink` | Consolidate duplicate files using hard links. | yes |  |  |
 | `head` | Output the first part of files. | yes | `coreutils` |  |
 | `hexdump` | Display file contents in hexadecimal, decimal, octal, or ascii: util-linux 2.39.3's, ported. | yes | `coreutils` | `xxd` |
 | `hostid` | Print the numeric identifier for the current host. | yes | `coreutils` |  |
@@ -155,7 +157,7 @@ two disagree.
 | `logname` | Print the user's login name. | yes | `coreutils` |  |
 | `logrotate` | Rotate, retain and compress log files. | yes |  |  |
 | `look` | Display lines beginning with a given string: util-linux 2.39.3's, ported. | yes | `coreutils` |  |
-| `losetup` | Loop device management utility: `losetup`, to set up and control loop devices. | yes |  |  |
+| `losetup` | Set up and control loop devices. | yes |  |  |
 | `lp` | Printing utilities (lp/lpstat/lprm/cancel) | yes |  | `cancel`, `lpq`, `lpr`, `lprm`, `lpstat` |
 | `ls` | List directory contents. | yes | `coreutils` |  |
 | `lsblk` | List block devices. | yes |  |  |
@@ -192,7 +194,7 @@ two disagree.
 | `nl` | Number the lines of files, honouring logical page sections. | yes | `coreutils` |  |
 | `nmap` | Network Port Scanner (nmap) | yes |  |  |
 | `nohup` | Run a command immune to hangups. | yes | `coreutils` |  |
-| `nologin` | Nologin shell. | yes |  |  |
+| `nologin` | Politely refuse a login. | yes |  |  |
 | `nproc` | Print the number of processing units available. | yes | `coreutils` |  |
 | `nsenter` | Namespace manipulation utilities. | yes |  |  |
 | `nslookup` | DNS Lookup Utility | yes |  |  |
@@ -228,7 +230,7 @@ two disagree.
 | `readlink` | Print a symbolic link's target, or a file name's canonical form. | yes | `coreutils` |  |
 | `realpath` | Print the resolved absolute file name. | yes | `coreutils` |  |
 | `renice` | Alter the priority of running processes. | yes | `coreutils` |  |
-| `rfkill` | Slate OS wireless device control | yes |  |  |
+| `rfkill` | List, block and unblock wireless devices. | yes |  |  |
 | `rm` | Remove files or directories. | yes | `coreutils` |  |
 | `rmdir` | Remove empty directories. | yes | `coreutils` |  |
 | `route` | Routing Table Management | yes |  |  |
@@ -241,6 +243,7 @@ two disagree.
 | `sed` | The stream editor. | yes | `coreutils` |  |
 | `seq` | Print numbers from FIRST to LAST, in steps of INCREMENT. | yes | `coreutils` |  |
 | `service` | Service Management CLI | yes |  |  |
+| `sfdisk` | Display or manipulate a disk partition table from a script. | yes |  |  |
 | `sftp` | `Slate OS` SFTP Client | yes |  |  |
 | `sh` | A small POSIX shell. |  | `coreutils` |  |
 | `sha1sum` | Print or check SHA-1 (160-bit) checksums. | yes | `coreutils` |  |
@@ -340,7 +343,7 @@ two disagree.
 
 | Program | What it does | On image | Crate | Other names |
 |---|---|---|---|---|
-| `loginmgr` | Login Manager — Display Manager and Session Launcher |  |  |  |
+| `loginmgr` | Signs people in at the login screen and starts their desktop as them. |  |  |  |
 | `servicebus` | Service Bus Daemon |  |  |  |
 
 ## Applications (`apps/`, lane E) -- 139

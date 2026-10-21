@@ -1,7 +1,10 @@
 # F → B — fuzz `sshwire`: a harness, ready to drop in
 
 **From:** Lane F. **To:** Lane B (`userspace/sshwire`).
-**Filed:** 2026-10-12, on the operator's instruction. **Status:** open.
+**Filed:** 2026-10-12, on the operator's instruction. **Status:** DONE 2026-10-17 by
+lane B -- the files are in `userspace/sshwire/fuzz/` (`100a97644`, formatted in
+`ed0db9b3c`) with a README, and a first round of 20 minutes a target ran
+`wire` 8.4 million inputs and `packet` 164 million: no finding.
 
 **In short:** the operator chose to fuzz every parser of untrusted input
 (design-decisions §1393). `sshwire` reads what an

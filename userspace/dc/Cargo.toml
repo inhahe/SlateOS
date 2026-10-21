@@ -2,10 +2,24 @@
 name = "dc"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS dc - desk calculator (reverse polish), computing on bignum::Decimal"
+description = "GNU dc 1.4.1 (bc 1.07.1), ported: an arbitrary-precision reverse-Polish calculator"
 
 [dependencies]
-bignum = { path = "../bignum" }
+# The C library's FILE buffering, which dc's output shows.
+cstdio = { path = "../cstdio" }
+# bc's number.c: every digit dc prints comes from its algorithms.
+bcnumber = { path = "../bcnumber" }
+# getopt_long's options and its diagnostics, as glibc words them.
+getoptlong = { path = "../getoptlong" }
+# Descriptors, system(3), signals and the password database, through the
+# C library.
+libcall = { path = "../../libcall" }
+# File names in diagnostics, their unprintable bytes escaped.
+quoting = { path = "../quoting" }
+# strtol, for DC_LINE_LENGTH.
+cstrtol = { path = "../cstrtol" }
+# SIGPIPE and the standard descriptors as dc was started with them.
+stdfdguard = { path = "../stdfdguard" }
 
 [lints]
 workspace = true

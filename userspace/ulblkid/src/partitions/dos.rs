@@ -49,14 +49,21 @@ fn is_extended(p: &DosPartition) -> bool {
 
 /// `parse_dos_extended(pr, tab, ex_start, ex_size, ssf)`: follow the chain
 /// of extended boot records from the extended partition at `ex_start`,
-/// adding each record's data partition. All arithmetic is upstream's
-/// 32-bit sector arithmetic, wrapping as it wraps. A chain that loops, or
-/// runs past 100 records without a data partition, ends quietly.
+/// adding each record's data partition. Sizes and offsets within a record
+/// are upstream's 32-bit sector arithmetic, wrapping as it wraps.
+///
+/// As Ubuntu's 2.39.3 builds it, with CVE-2026-53615's fix (upstream
+/// e9d544d0): a data partition must lie within the extended partition
+/// `[ex_start, ex_start + ex_size)`, reckoned in 64 bits so that no start
+/// wraps into it, and a link must stay within it and lead forward. A chain
+/// that breaks either rule, loops, or runs past 100 records without a data
+/// partition, ends quietly.
 fn parse_dos_extended(pr: &mut Probe, tab: TabId, ex_start: u32, ex_size: u32, ssf: u32) -> i32 {
     if ex_start == 0 {
         // A bad offset in the primary extended partition.
         return 0;
     }
+    let ex_end = u64::from(ex_start).saturating_add(u64::from(ex_size));
     let mut cur_start = ex_start;
     let mut cur_size = ex_size;
     let mut ct_nodata = 0u32;
@@ -83,18 +90,21 @@ fn parse_dos_extended(pr: &mut Probe, tab: TabId, ex_start: u32, ex_size: u32, s
             // The start is relative to the record's own extended partition.
             let start = p.start.wrapping_mul(ssf);
             let size = p.size.wrapping_mul(ssf);
-            let abs_start = cur_start.wrapping_add(start);
             if size == 0 || is_extended(p) {
                 continue;
             }
-            if i >= 2 {
-                // The third and fourth entries hold data only if it fits.
-                if start.wrapping_add(size) > cur_size
-                    || abs_start < ex_start
-                    || abs_start.wrapping_add(size) > ex_start.wrapping_add(ex_size)
-                {
-                    continue;
-                }
+            let abs = u64::from(cur_start).saturating_add(u64::from(start));
+            if abs < u64::from(ex_start) || abs.saturating_add(u64::from(size)) > ex_end {
+                // Outside the extended partition.
+                continue;
+            }
+            // `(uint32_t) abs`: below `ex_end`, which a 32-bit start and
+            // size can put past 2^32.
+            let abs_start = low_u32(abs);
+            // The third and fourth entries hold data only if it fits in
+            // this record's own extended partition.
+            if i >= 2 && start.wrapping_add(size) > cur_size {
+                continue;
             }
             let Some(ls) = pr.partlist_mut() else {
                 return PROBE_OK;
@@ -121,9 +131,21 @@ fn parse_dos_extended(pr: &mut Probe, tab: TabId, ex_start: u32, ex_size: u32, s
         }) else {
             return PROBE_OK;
         };
-        cur_start = ex_start.wrapping_add(start);
+        let next = u64::from(ex_start).saturating_add(u64::from(start));
+        // A link past the extended partition, or one that does not lead
+        // forward, ends the chain.
+        if next.saturating_add(u64::from(size)) > ex_end || next <= u64::from(cur_start) {
+            return PROBE_OK;
+        }
+        cur_start = low_u32(next);
         cur_size = size;
     }
+}
+
+/// `(uint32_t) v`: the low 32 bits.
+fn low_u32(v: u64) -> u32 {
+    let [a, b, c, d, ..] = v.to_le_bytes();
+    u32::from_le_bytes([a, b, c, d])
 }
 
 /// `is_lvm(pr)`: an LVM physical volume was found on the device.

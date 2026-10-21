@@ -24,7 +24,7 @@
 //! * **A name in a diagnostic** has its unprintable bytes escaped
 //!   (design-decisions §370).
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes, os_from_bytes};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
@@ -62,6 +62,9 @@ const LONG_VALS: [i32; 6] = [
     b'h' as i32,
     b'V' as i32,
 ];
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
 
 /// What `stat` or `lstat` said about the path.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -212,18 +215,6 @@ fn print_devno(ctl: &Control, short: &[u8], out: &mut Stdout) -> Result<(), ()> 
     Ok(())
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<i32> {
-    match opt {
-        Opt::Short(c, _) => Some(i32::from(*c)),
-        Opt::Long(name, _) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            LONG_VALS.get(i).copied()
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
 stdfdguard::guard_std_fds!();
 
 fn main() -> ExitCode {
@@ -256,7 +247,7 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
                 return errtryhelp(short);
             }
         };
-        let Some(c) = option_code(&opt) else {
+        let Some(c) = OPTIONS.code::<i32>(&opt).map(|(c, _)| c) else {
             if let Opt::Operand(o) = &opt {
                 operands.push(os_bytes(o).into_owned());
             }
@@ -346,15 +337,21 @@ mod tests {
     #[test]
     fn long_options_map_to_upstreams_values() {
         assert_eq!(
-            option_code(&Opt::Long("nofollow", None)),
+            OPTIONS
+                .code::<i32>(&Opt::Long("nofollow", None))
+                .map(|(c, _)| c),
             Some(OPT_NOFOLLOW)
         );
         assert_eq!(
-            option_code(&Opt::Long("fs-devno", None)),
+            OPTIONS
+                .code::<i32>(&Opt::Long("fs-devno", None))
+                .map(|(c, _)| c),
             Some(i32::from(b'd'))
         );
         assert_eq!(
-            option_code(&Opt::Long("devno", None)),
+            OPTIONS
+                .code::<i32>(&Opt::Long("devno", None))
+                .map(|(c, _)| c),
             Some(i32::from(b'x'))
         );
     }

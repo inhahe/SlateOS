@@ -65,7 +65,7 @@ use std::ffi::OsString;
 use std::io::SeekFrom;
 use std::process::ExitCode;
 
-use coreutils::getopt::{Opt, Program, Takes};
+use coreutils::getopt::{LongVals, Opt, Program, Takes};
 use coreutils::quote::{escape_unprintable, os_bytes, os_from_bytes};
 use coreutils::stdfd;
 use coreutils::stdio::StdioReader;
@@ -117,6 +117,9 @@ const LONG_VALS: [i32; 15] = [
     b'w' as i32,
     OPT_TIME_FORMAT,
 ];
+
+/// [`LONG_OPTIONS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONG_OPTIONS, &LONG_VALS);
 
 /// `OPT_TIME_FORMAT`, `CHAR_MAX + 1`.
 const OPT_TIME_FORMAT: i32 = 128;
@@ -1227,28 +1230,6 @@ fn run_main() -> ExitCode {
     ExitCode::from(out.close(status, &short))
 }
 
-/// The long option whose `val` is `c` -- `option_to_longopt`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONG_OPTIONS.get(i))
-        .map(|&(name, _)| name)
-}
-
-/// The `val` upstream's `getopt_long` returns for `opt`.
-fn option_value(opt: &Opt<'_>) -> Option<i32> {
-    match opt {
-        Opt::Short(c, _) => Some(i32::from(*c)),
-        Opt::Long(name, _) => LONG_OPTIONS
-            .iter()
-            .position(|&(n, _)| n == *name)
-            .and_then(|i| LONG_VALS.get(i))
-            .copied(),
-        Opt::Operand(_) => None,
-    }
-}
-
 /// `parse_timestamp (arg, &p)`, as `(time_t) (p / 1000000)`, or `invalid
 /// time value`.
 fn timestamp(diag: &Diag, zone: &localtime::Zone, arg: &[u8]) -> Result<i64, Die> {
@@ -1310,9 +1291,14 @@ fn run(
                 return Err(Die(1));
             }
         };
-        if let Some(c) = option_value(&opt)
-            && let Some(msg) =
-                ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short)
+        if let Some(c) = OPTIONS.code::<i32>(&opt).map(|(c, _)| c)
+            && let Some(msg) = ulstrutils::err_exclusive_options(
+                c,
+                &EXCL,
+                &mut excl_st,
+                |c| OPTIONS.name_of(c),
+                short,
+            )
         {
             ulclosestream::stderr_write(msg.as_bytes());
             return Err(Die(1));
@@ -1536,16 +1522,16 @@ mod tests {
 
     #[test]
     fn options_have_upstreams_values() {
-        let long = |name| option_value(&Opt::Long(name, None));
+        let long = |name| OPTIONS.code::<i32>(&Opt::Long(name, None)).map(|(c, _)| c);
         assert_eq!(long("fulltimes"), Some(i32::from(b'F')));
         assert_eq!(long("time-format"), Some(OPT_TIME_FORMAT));
         assert_eq!(long("limit"), Some(i32::from(b'n')));
-        assert_eq!(option_to_longopt(OPT_TIME_FORMAT), Some("time-format"));
-        assert_eq!(option_to_longopt(i32::from(b'F')), Some("fulltimes"));
+        assert_eq!(OPTIONS.name_of(OPT_TIME_FORMAT), Some("time-format"));
+        assert_eq!(OPTIONS.name_of(i32::from(b'F')), Some("fulltimes"));
         let mut st = [0; 1];
         let f = i32::from(b'F');
         assert!(
-            ulstrutils::err_exclusive_options(f, &EXCL, &mut st, option_to_longopt, b"last")
+            ulstrutils::err_exclusive_options(f, &EXCL, &mut st, |c| OPTIONS.name_of(c), b"last")
                 .is_none()
         );
         assert_eq!(
@@ -1553,7 +1539,7 @@ mod tests {
                 OPT_TIME_FORMAT,
                 &EXCL,
                 &mut st,
-                option_to_longopt,
+                |c| OPTIONS.name_of(c),
                 b"last"
             )
             .as_deref(),

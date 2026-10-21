@@ -429,7 +429,7 @@ impl Term {
     /// Whether a delay that is not mandatory is padded: `normal_delay` --
     /// no `xon`, a `pb` that is not 0 (an absent one is -1, which C counts as
     /// true), no `NCURSES_NO_PADDING`, and a speed at least `pb`.
-    fn normal_delay(&self) -> bool {
+    pub(crate) fn normal_delay(&self) -> bool {
         let pb = self.num(number::PADDING_BAUD_RATE);
         !self.flag(boolean::XON_XOFF) && pb != 0 && !self.no_padding && self.padding.baud >= pb
     }
@@ -505,20 +505,13 @@ impl Term {
     /// `TIPARM_n (cap, …)` of the string capability at `index`, copied:
     /// `None` when the terminal does not have it or it cannot be expanded.
     /// For setting up a screen, where a copy is kept; the writing paths use
-    /// [`Term::put_tiparm`] and [`Term::expand`], which copy nothing.
+    /// [`Term::put_tiparm`], or `tparm`'s buffer directly, which copy
+    /// nothing.
     pub fn tiparm(&mut self, index: usize, params: &[i64]) -> Option<Vec<u8>> {
         let s = self.entry.string(index)?;
         self.tparm
             .expand(&self.entry, s, params)
             .map(<[u8]>::to_vec)
-    }
-
-    /// `TIPARM_n (cap, …)` of the string capability at `index`, in the
-    /// buffer `tparm` keeps until the next expansion: `None` when the
-    /// terminal does not have it or it cannot be expanded.
-    pub fn expand(&mut self, index: usize, params: &[i64]) -> Option<&[u8]> {
-        let s = self.entry.string(index)?;
-        self.tparm.expand(&self.entry, s, params)
     }
 
     /// `_nc_baudrate (ospeed)` of the screen's terminal.
@@ -635,14 +628,15 @@ impl Term {
         self.putp_cap(string::ORIG_PAIR)
     }
 
-    /// `_nc_reset_colors ()`.
-    pub fn reset_colors(&mut self) -> bool {
+    /// `_nc_reset_colors ()`: `op` and `oc` sent, and the colours given
+    /// marked to be given again. Upstream also answers whether either was
+    /// sent, which neither of its callers reads, nor do these.
+    pub fn reset_colors(&mut self) {
         if self.color_defs > 0 {
             self.color_defs = self.color_defs.wrapping_neg();
         }
-        let pair = self.reset_color_pair();
-        let colors = self.putp_cap(string::ORIG_COLORS);
-        pair || colors
+        self.reset_color_pair();
+        self.putp_cap(string::ORIG_COLORS);
     }
 
     /// `toggled_colors (c)`: SVr4's order of `setf`'s colours.
@@ -1307,6 +1301,11 @@ mod tests {
         assert_eq!(rgb2hls(1000, 1000, 1000), (0, 100, 0));
         assert_eq!(rgb2hls(1000, 0, 0), (120, 50, 100));
         assert_eq!(rgb2hls(0, 1000, 0), (240, 50, 100));
+        // A light below 50, whose saturation divides by max + min.
+        assert_eq!(rgb2hls(500, 0, 0), (120, 25, 100));
+        // Green below red and blue the largest: the minimum is green, and
+        // the hue comes from the third arm.
+        assert_eq!(rgb2hls(600, 200, 1000), (30, 60, 100));
     }
 
     #[test]

@@ -80,8 +80,7 @@ use crate::EINVAL;
 /// Argument list too long: more arguments or environment entries than
 /// [`MAX_ARGS`] or [`MAX_ENV`].
 pub const E2BIG: i32 = 7;
-/// Bad file descriptor.
-pub const EBADF: i32 = 9;
+pub use crate::EBADF;
 /// An interrupted system call. Retried here, never reported.
 pub const EINTR: i32 = 4;
 /// Input/output error. What a master reports once every slave is closed.

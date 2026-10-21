@@ -48,7 +48,7 @@ fn columns_match_whole_names() {
     );
     assert_eq!(column_name_to_id(b"LEN", b"LEN", b"wipefs"), None);
     assert_eq!(LONGS.len(), LONG_VALS.len());
-    assert_eq!(option_to_longopt(i32::from(b'O')), Some("output"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'O')), Some("output"));
 }
 
 /// A 64 KiB swap area, with the DOS table of a disk in front of it.

@@ -13,9 +13,10 @@
 //!   pkg log [N|--all]           Show transaction history
 //!   pkg list [--installed]       List packages
 //!   pkg search <QUERY>           Search available packages
+//!   pkg search --font <FAMILY>   The packages that carry a font family
 //!   pkg info <PACKAGE>           Show package details
-//!   pkg rollback [GENERATION]    Rollback to a previous generation
-//!   pkg generations              List system generations
+//!   pkg rollback [GENERATION]    Put the system back as it was in a generation
+//!   pkg generations [--json]     List system generations
 //!   pkg gc [--keep N]            Garbage-collect old generations
 //!   pkg verify [PACKAGE...]      Verify installed package integrity
 //!   pkg files <PACKAGE>          List files owned by a package
@@ -28,6 +29,7 @@
 use quoting::{quoteaf_os, quotef_os};
 use std::collections::{BTreeMap, HashSet};
 use std::env;
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs;
 use std::io;
@@ -36,6 +38,7 @@ use std::process;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use httpclient::Client as HttpClient;
+use jsonvalue::JsonValue;
 
 // ============================================================================
 // Configuration
@@ -58,6 +61,117 @@ const DEFAULT_REPO: &str = "https://repo.slateos.org/stable";
 
 /// Config file location.
 const CONFIG_PATH: &str = "/etc/pkg.conf";
+
+/// The root of the system pkg manages: `/`, or the directory `--root` names
+/// -- a system that is not the running one, as an installer fills, or a
+/// test's scratch directory. Its state, its configuration and every file it
+/// installs are found under it. Set once, by
+/// `main`, before anything is read.
+static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// `path`, absolute on the system pkg manages, where it is found: under
+/// `--root`'s directory, or as it is.
+///
+/// Under `--root` it is resolved as a process chrooted there would see it
+/// ([`resolve_in_root`]), so that nothing pkg writes or removes lands outside
+/// the directory.
+///
+/// # Errors
+///
+/// The path cannot be resolved inside the root ([`resolve_in_root`]).
+fn under_root(path: &str) -> io::Result<PathBuf> {
+    match ROOT.get() {
+        Some(root) => resolve_in_root(root, path, false),
+        None => Ok(PathBuf::from(path)),
+    }
+}
+
+/// One of pkg's own directories or files, where it is found: as
+/// [`under_root`], its last component followed inside the root too -- pkg
+/// writes into it and below it, and a link there must not lead out.
+///
+/// # Errors
+///
+/// As [`under_root`].
+fn state_under_root(path: &str) -> io::Result<PathBuf> {
+    match ROOT.get() {
+        Some(root) => resolve_in_root(root, path, true),
+        None => Ok(PathBuf::from(path)),
+    }
+}
+
+/// The most symbolic links one path is followed through: Linux's
+/// `MAXSYMLINKS`. Past it the rest of the path is taken as it stands.
+const MAX_LINKS: usize = 40;
+
+/// `path` resolved inside `root` as a process chrooted at `root` would
+/// resolve it: `..` stops at the root, and a symbolic link met on the way is
+/// followed inside it -- an absolute one from the root, not from `/`. The
+/// last component is followed too when `follow_last` -- for pkg's own
+/// directories, which it writes below -- and otherwise taken as a name,
+/// since an install replaces a package's file and a removal unlinks it.
+///
+/// The path is checked, then used: a tree that changes in between (a link
+/// put in place meanwhile) is not caught. pkg works on a tree it was given
+/// to manage, not one another user is writing.
+///
+/// # Errors
+///
+/// A link on the way that cannot be read, or more links than
+/// [`MAX_LINKS`] -- each would otherwise be followed later by the kernel,
+/// from the host's root.
+fn resolve_in_root(root: &Path, path: &str, follow_last: bool) -> io::Result<PathBuf> {
+    use std::collections::VecDeque;
+    use std::ffi::OsString;
+    use std::path::Component;
+
+    fn parts(path: &Path) -> impl Iterator<Item = OsString> + '_ {
+        path.components().filter_map(|c| match c {
+            Component::Normal(s) => Some(s.to_owned()),
+            Component::ParentDir => Some(OsString::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        })
+    }
+
+    let mut done: Vec<OsString> = Vec::new();
+    let mut todo: VecDeque<OsString> = parts(Path::new(path)).collect();
+    let mut links = 0usize;
+    while let Some(part) = todo.pop_front() {
+        if part == ".." {
+            done.pop();
+            continue;
+        }
+        if !todo.is_empty() || follow_last {
+            let mut here = root.to_path_buf();
+            here.extend(&done);
+            here.push(&part);
+            let is_link = fs::symlink_metadata(&here).is_ok_and(|m| m.file_type().is_symlink());
+            if is_link {
+                // A link left unfollowed here would be followed by the
+                // kernel later -- from the host's root: the path is refused
+                // instead.
+                let target = fs::read_link(&here)?;
+                if links >= MAX_LINKS {
+                    return Err(io::Error::other(format!(
+                        "{path}: too many levels of symbolic links under the root"
+                    )));
+                }
+                links += 1;
+                if target.has_root() {
+                    done.clear();
+                }
+                let rest: Vec<OsString> = todo.drain(..).collect();
+                todo.extend(parts(&target));
+                todo.extend(rest);
+                continue;
+            }
+        }
+        done.push(part);
+    }
+    let mut resolved = root.to_path_buf();
+    resolved.extend(done);
+    Ok(resolved)
+}
 
 // ============================================================================
 // SHA-256
@@ -261,7 +375,13 @@ struct PackageManifest {
     authors: Vec<String>,
     homepage: String,
     depends: Vec<Dependency>,
-    provides: Vec<String>,         // paths this package provides
+    provides: Vec<String>, // paths this package provides
+    /// The font families its font files hold, as the files spell them --
+    /// what Settings asks for when a theme recommends a font it does not
+    /// have (`pkg search --font`). Written by `pkg pack` from the files
+    /// themselves, never trusted from the source manifest; see
+    /// [`pack_fonts`].
+    fonts: Vec<String>,
     capabilities: Vec<Capability>, // capabilities this package needs
     files: Vec<PackageFile>,
     /// SHA-256 of the entire package archive.
@@ -287,6 +407,7 @@ impl PackageManifest {
     /// license: MIT
     /// depends: libc >= 0.1.0, libcrypto >= 1.0.0
     /// provides: /usr/bin/mycommand, /usr/lib/libmything.so
+    /// fonts: Inter, Inter Display
     /// capabilities: net.connect, fs.home
     /// file: bin/cmd -> /usr/bin/cmd 0755 <sha256> <size>
     /// archive_hash: <sha256>
@@ -301,6 +422,7 @@ impl PackageManifest {
         let mut homepage = String::new();
         let mut depends = Vec::new();
         let mut provides = Vec::new();
+        let mut fonts = Vec::new();
         let mut capabilities = Vec::new();
         let mut files = Vec::new();
         let mut archive_hash = String::new();
@@ -357,6 +479,14 @@ impl PackageManifest {
                 "provides" => {
                     provides = value.split(',').map(|s| s.trim().to_string()).collect();
                 }
+                "fonts" => {
+                    fonts = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .collect();
+                }
                 "capabilities" => {
                     capabilities = value
                         .split(',')
@@ -370,10 +500,11 @@ impl PackageManifest {
                     conffiles = value.split(',').map(|s| s.trim().to_string()).collect();
                 }
                 "file" => {
-                    // file: src -> dst mode hash size
-                    if let Some(pf) = parse_file_entry(value) {
-                        files.push(pf);
-                    }
+                    // file: src -> dst mode hash size. One that cannot be
+                    // read -- or names a destination outside where files go
+                    // -- makes the manifest unreadable: installed without
+                    // it, the package would be reported installed in part.
+                    files.push(parse_file_entry(value)?);
                 }
                 "archive_hash" => archive_hash = value.to_string(),
                 "archive_size" => archive_size = value.parse().unwrap_or(0),
@@ -398,6 +529,7 @@ impl PackageManifest {
             homepage,
             depends,
             provides,
+            fonts,
             capabilities,
             files,
             archive_hash,
@@ -433,6 +565,9 @@ impl PackageManifest {
         }
         if !self.provides.is_empty() {
             out.push_str(&format!("provides: {}\n", self.provides.join(", ")));
+        }
+        if !self.fonts.is_empty() {
+            out.push_str(&format!("fonts: {}\n", self.fonts.join(", ")));
         }
         if !self.capabilities.is_empty() {
             let caps: Vec<&str> = self.capabilities.iter().map(|c| c.name.as_str()).collect();
@@ -478,6 +613,11 @@ fn parse_file_entry(value: &str) -> Option<PackageFile> {
         return None;
     }
     let dst = parts[0].to_string();
+    // An absolute path that climbs nowhere: `..` in a package's destination
+    // is a package trying to write outside where files go.
+    if !dst.starts_with('/') || dst.split('/').any(|c| c == "..") {
+        return None;
+    }
     let mode = u32::from_str_radix(parts[1], 8).unwrap_or(0o644);
     let hash = parts.get(2).unwrap_or(&"").to_string();
     let size = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
@@ -517,11 +657,18 @@ impl PkgConfig {
     /// Load configuration from the config file, falling back to the default
     /// single repository if the file doesn't exist or can't be parsed.
     fn load() -> Self {
-        if let Ok(text) = fs::read_to_string(CONFIG_PATH) {
+        // A configuration that cannot be found under --root is one that
+        // cannot be read: the default, as for a missing file.
+        if let Ok(path) = state_under_root(CONFIG_PATH)
+            && let Ok(text) = fs::read_to_string(&path)
+        {
             if let Some(config) = Self::parse(&text) {
                 return config;
             }
-            eprintln!("pkg: warning: failed to parse {CONFIG_PATH}, using defaults");
+            eprintln!(
+                "pkg: warning: failed to parse {}, using defaults",
+                path.display()
+            );
         }
         Self::default()
     }
@@ -635,10 +782,11 @@ impl PkgConfig {
 
     /// Save configuration to the config file.
     fn save(&self) -> io::Result<()> {
-        if let Some(parent) = Path::new(CONFIG_PATH).parent() {
+        let path = state_under_root(CONFIG_PATH)?;
+        if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(CONFIG_PATH, self.serialize())
+        fs::write(path, self.serialize())
     }
 
     /// Get all enabled repositories sorted by priority (lower first).
@@ -711,7 +859,7 @@ impl ContentStore {
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&path, data)?;
+            write_atomically(&path, data)?;
         }
         Ok(hash)
     }
@@ -801,8 +949,11 @@ impl ContentStore {
             fs::create_dir_all(parent)?;
         }
 
-        // Remove existing file at destination if any
-        if dst.exists() {
+        // Remove what is at the destination -- a symbolic link itself, not
+        // what it names, or the copy below would write through it.
+        if fs::symlink_metadata(dst).is_ok() {
+            // A failure shows below, where the link or the copy cannot
+            // replace it.
             let _ = fs::remove_file(dst);
         }
 
@@ -829,7 +980,16 @@ impl ContentStore {
                 continue;
             }
 
-            let dst = Path::new(&file.dst);
+            let dst = match under_root(&file.dst) {
+                Ok(dst) => dst,
+                Err(e) => {
+                    eprintln!("  warning: failed to deploy {}: {e}", file.dst);
+                    stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
+                    continue;
+                }
+            };
+            let dst = &dst;
             match self.deploy_hardlink(&file.hash, dst) {
                 Ok(()) => {
                     stats.deployed += 1;
@@ -861,6 +1021,7 @@ impl ContentStore {
                 Err(e) => {
                     eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
                 }
             }
         }
@@ -877,7 +1038,7 @@ impl ContentStore {
         &self,
         manifest: &PackageManifest,
         old_file_hashes: &[(String, String)],
-    ) -> io::Result<DeployStats> {
+    ) -> DeployStats {
         let mut stats = DeployStats::default();
 
         // Build lookup of old hashes by path
@@ -893,7 +1054,16 @@ impl ContentStore {
                 continue;
             }
 
-            let dst = Path::new(&file.dst);
+            let dst = match under_root(&file.dst) {
+                Ok(dst) => dst,
+                Err(e) => {
+                    eprintln!("  warning: failed to deploy {}: {e}", file.dst);
+                    stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
+                    continue;
+                }
+            };
+            let dst = &dst;
 
             // Check if this is a config file that might be user-modified
             if conffile_set.contains(file.dst.as_str())
@@ -910,6 +1080,7 @@ impl ContentStore {
                     Err(e) => {
                         eprintln!("  warning: failed to deploy config {}: {e}", file.dst);
                         stats.failed += 1;
+                        stats.failed_paths.push(file.dst.clone());
                     }
                 }
                 continue;
@@ -943,29 +1114,12 @@ impl ContentStore {
                 Err(e) => {
                     eprintln!("  warning: failed to deploy {}: {e}", file.dst);
                     stats.failed += 1;
+                    stats.failed_paths.push(file.dst.clone());
                 }
             }
         }
 
-        Ok(stats)
-    }
-
-    /// Remove deployed files for a package (cleanup on remove/rollback).
-    fn undeploy_package_files(&self, file_hashes: &[(String, String)]) -> u64 {
-        let mut removed = 0u64;
-        for (dst_path, _hash) in file_hashes {
-            let dst = Path::new(dst_path);
-            if dst.exists() {
-                if fs::remove_file(dst).is_ok() {
-                    removed += 1;
-                }
-                // Clean up empty parent directories
-                if let Some(parent) = dst.parent() {
-                    let _ = fs::remove_dir(parent); // Only succeeds if empty
-                }
-            }
-        }
-        removed
+        stats
     }
 }
 
@@ -976,6 +1130,8 @@ struct DeployStats {
     deployed: u64,
     /// Number of files that failed to deploy.
     failed: u64,
+    /// The destinations of those that failed.
+    failed_paths: Vec<String>,
     /// Total bytes of all deployed files.
     total_bytes: u64,
     /// Bytes saved through hardlink deduplication.
@@ -1090,9 +1246,9 @@ impl Generation {
                 if let Some((key, val)) = line_trimmed.split_once(':') {
                     let val = val.trim();
                     match key.trim() {
-                        "generation" => id = val.parse().unwrap_or(0),
-                        "timestamp" => timestamp = val.parse().unwrap_or(0),
-                        "parent" => parent = val.parse().unwrap_or(0),
+                        "generation" => id = val.parse().ok()?,
+                        "timestamp" => timestamp = val.parse().ok()?,
+                        "parent" => parent = val.parse().ok()?,
                         "description" => description = val.to_string(),
                         _ => {}
                     }
@@ -1126,18 +1282,18 @@ impl Generation {
             } else if let Some((key, val)) = line_trimmed.split_once(':') {
                 let val = val.trim();
                 match key.trim() {
+                    // Written by `Version`'s `Display`: what does not read
+                    // back as it was written is a corrupt record, which
+                    // `Version::parse` alone would read as 0.0.0.
                     "version" => {
-                        if let Some(v) = Version::parse(val) {
-                            current_version = v;
-                        }
+                        current_version = Version::parse(val).filter(|v| v.to_string() == val)?;
                     }
                     "manifest" => current_manifest = val.to_string(),
-                    "installed_at" => current_installed_at = val.parse().unwrap_or(0),
+                    "installed_at" => current_installed_at = val.parse().ok()?,
                     "explicit" => current_explicit = val == "yes",
                     "file" => {
-                        if let Some((path, hash)) = val.split_once(' ') {
-                            current_files.push((path.trim().to_string(), hash.trim().to_string()));
-                        }
+                        let (path, hash) = val.split_once(' ')?;
+                        current_files.push((path.trim().to_string(), hash.trim().to_string()));
                     }
                     _ => {}
                 }
@@ -1172,6 +1328,36 @@ impl Generation {
 // Package database — manages generations and the CAS
 // ============================================================================
 
+/// Why a generation could not be made the current one.
+#[derive(Debug)]
+enum CommitError {
+    /// Its record could not be written; the pointer was not touched.
+    NotSaved(io::Error),
+    /// Its record was written, the pointer could not be moved to it.
+    NotCurrent(io::Error),
+}
+
+/// `data` written to `path` whole or not at all: to a temporary name beside
+/// it, flushed to the disk, then renamed over it -- so a crash leaves the old
+/// contents or the new, never a record cut short.
+fn write_atomically(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp{}", process::id()));
+    let tmp = PathBuf::from(tmp);
+    let written = (|| {
+        let mut f = fs::File::create(&tmp)?;
+        io::Write::write_all(&mut f, data)?;
+        f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        // What was half-written goes; the error that matters is the one
+        // returned.
+        let _ = fs::remove_file(&tmp);
+    }
+    written
+}
+
 struct PackageDb {
     cas: ContentStore,
     gen_dir: PathBuf,
@@ -1179,35 +1365,66 @@ struct PackageDb {
 }
 
 impl PackageDb {
-    fn new() -> Self {
-        let cas = ContentStore::new(Path::new(CAS_DIR));
-        Self {
+    /// # Errors
+    ///
+    /// One of pkg's own directories cannot be resolved under `--root`
+    /// ([`resolve_in_root`]).
+    fn new() -> io::Result<Self> {
+        let cas = ContentStore::new(&state_under_root(CAS_DIR)?);
+        Ok(Self {
             cas,
-            gen_dir: PathBuf::from(GEN_DIR),
-            repo_dir: PathBuf::from(REPO_DIR),
-        }
+            gen_dir: state_under_root(GEN_DIR)?,
+            repo_dir: state_under_root(REPO_DIR)?,
+        })
     }
 
     fn ensure_dirs(&self) {
-        let _ = fs::create_dir_all(PKG_ROOT);
+        // Failures show at the first file written beneath it.
+        let _ = state_under_root(PKG_ROOT).and_then(fs::create_dir_all);
         self.cas.ensure_dirs();
         let _ = fs::create_dir_all(&self.gen_dir);
         let _ = fs::create_dir_all(&self.repo_dir);
     }
 
-    /// Get the current (latest) generation ID.
-    fn current_generation_id(&self) -> u64 {
-        let current_path = self.gen_dir.join("current");
-        if let Ok(content) = fs::read_to_string(&current_path) {
-            content.trim().parse().unwrap_or(0)
-        } else {
-            0
+    /// The current generation's number: 0 on a system nothing was ever
+    /// installed on, which has no pointer yet.
+    ///
+    /// # Errors
+    ///
+    /// The pointer cannot be read, or holds no number. The installed state
+    /// is then unknown, which no command may take for "nothing installed":
+    /// one that did would record a system with nothing on it.
+    fn current_generation_id(&self) -> io::Result<u64> {
+        match fs::read_to_string(self.gen_dir.join("current")) {
+            Ok(content) => content.trim().parse().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "the current-generation pointer holds no generation number",
+                )
+            }),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e),
         }
     }
 
-    /// Set the current generation pointer.
+    /// Set the current generation pointer, whole or not at all.
     fn set_current_generation(&self, id: u64) -> io::Result<()> {
-        fs::write(self.gen_dir.join("current"), id.to_string())
+        write_atomically(&self.gen_dir.join("current"), id.to_string().as_bytes())
+    }
+
+    /// Record `generation` and make it the current one: its record first,
+    /// then the pointer.
+    ///
+    /// # Errors
+    ///
+    /// [`CommitError::NotSaved`] when the record could not be written, and
+    /// [`CommitError::NotCurrent`] when it was but the pointer could not be
+    /// moved to it.
+    fn commit_generation(&self, generation: &Generation) -> Result<(), CommitError> {
+        self.save_generation(generation)
+            .map_err(CommitError::NotSaved)?;
+        self.set_current_generation(generation.id)
+            .map_err(CommitError::NotCurrent)
     }
 
     /// Load a generation by ID.
@@ -1218,36 +1435,62 @@ impl PackageDb {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid generation file"))
     }
 
-    /// Save a generation.
+    /// Save a generation, whole or not at all.
     fn save_generation(&self, generation: &Generation) -> io::Result<()> {
         let path = self.gen_dir.join(format!("{}.gen", generation.id));
-        fs::write(&path, generation.serialize())
+        write_atomically(&path, generation.serialize().as_bytes())
     }
 
-    /// Get the current generation (or create generation 0 if none exists).
-    fn current_generation(&self) -> Generation {
-        let id = self.current_generation_id();
+    /// The current generation -- an empty generation 0 on a system nothing
+    /// was ever installed on.
+    ///
+    /// # Errors
+    ///
+    /// As [`PackageDb::current_generation_id`], and the generation it names
+    /// cannot be read or parsed.
+    fn current_generation(&self) -> io::Result<Generation> {
+        let id = self.current_generation_id()?;
         if id == 0 {
-            Generation::new(0, "initial empty state", 0)
+            Ok(Generation::new(0, "initial empty state", 0))
         } else {
             self.load_generation(id)
-                .unwrap_or_else(|_| Generation::new(0, "initial empty state", 0))
         }
     }
 
-    /// Create a new generation based on the current one.
-    fn next_generation(&self, description: &str) -> Generation {
-        let current = self.current_generation();
-        let next_id = current.id + 1;
+    /// A new generation holding what the current one holds, numbered past
+    /// every generation there is -- not only past the current one, which a
+    /// rollback may have made an older one, whose successor's record must
+    /// not be written over.
+    ///
+    /// # Errors
+    ///
+    /// As [`PackageDb::current_generation`], and the generations cannot be
+    /// listed.
+    fn next_generation(&self, description: &str) -> io::Result<Generation> {
+        let current = self.current_generation()?;
+        let last = self.list_generations()?.last().copied().unwrap_or(0);
+        let next_id = last.max(current.id).checked_add(1).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "no generation number is left")
+        })?;
         let mut next = Generation::new(next_id, description, current.id);
         next.packages = current.packages.clone();
-        next
+        Ok(next)
     }
 
-    /// List all generation IDs.
+    /// Every generation's number, in order: none on a system with no
+    /// generation directory yet.
+    ///
+    /// # Errors
+    ///
+    /// The directory is there and cannot be read.
     fn list_generations(&self) -> io::Result<Vec<u64>> {
         let mut ids = Vec::new();
-        if let Ok(entries) = fs::read_dir(&self.gen_dir) {
+        let entries = match fs::read_dir(&self.gen_dir) {
+            Ok(entries) => Some(entries),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
+        };
+        if let Some(entries) = entries {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if let Some(id_str) = name.strip_suffix(".gen")
@@ -1317,6 +1560,17 @@ impl PackageDb {
         }
 
         Ok(all_packages)
+    }
+
+    /// Whether any index [`load_repo_index`](Self::load_repo_index) reads is
+    /// there -- an enabled repository's, or the legacy one -- so that an
+    /// empty answer can be told from no index at all.
+    fn has_repo_index(&self) -> bool {
+        PkgConfig::load()
+            .enabled_repos()
+            .iter()
+            .any(|r| self.repo_index_path(&r.name).exists())
+            || self.repo_dir.join("index").exists()
     }
 
     /// Path to a repo-specific cached index file.
@@ -1446,7 +1700,8 @@ impl TransactionLog {
         );
 
         // Ensure parent directory exists
-        if let Some(parent) = Path::new(TX_LOG_PATH).parent() {
+        let log = state_under_root(TX_LOG_PATH)?;
+        if let Some(parent) = log.parent() {
             let _ = fs::create_dir_all(parent);
         }
 
@@ -1454,14 +1709,14 @@ impl TransactionLog {
         let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(TX_LOG_PATH)?;
+            .open(&log)?;
         io::Write::write_all(&mut file, line.as_bytes())?;
         Ok(())
     }
 
     /// Read the transaction log.
     fn read_all() -> io::Result<Vec<Transaction>> {
-        let text = match fs::read_to_string(TX_LOG_PATH) {
+        let text = match state_under_root(TX_LOG_PATH).and_then(fs::read_to_string) {
             Ok(t) => t,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e),
@@ -1703,24 +1958,52 @@ impl ConfigFileTracker {
 /// A non-zero exit code from a pre-hook aborts the operation.
 struct PackageHooks;
 
-#[allow(dead_code)] // Infrastructure for package lifecycle hooks — wired in next
 impl PackageHooks {
-    /// Run a hook command if it exists.
+    /// Run a hook command if it exists; with `stdout_to_stderr`, what it
+    /// writes to its standard output goes to pkg's standard error, where it
+    /// cannot break up output a program reads (`--json`'s).
     ///
     /// Returns Ok(true) if the hook ran and succeeded,
     /// Ok(false) if no hook was defined, or Err if it failed.
-    fn run(command: &str, pkg_name: &str, pkg_version: &str) -> Result<bool, String> {
+    fn run(
+        command: &str,
+        pkg_name: &str,
+        pkg_version: &str,
+        stdout_to_stderr: bool,
+    ) -> Result<bool, String> {
         if command.is_empty() {
             return Ok(false);
         }
 
         use std::process::Command;
 
-        match Command::new(command)
-            .arg(pkg_name)
-            .arg(pkg_version)
-            .status()
-        {
+        let mut cmd = Command::new(command);
+        cmd.arg(pkg_name).arg(pkg_version);
+        if stdout_to_stderr {
+            cmd.stdout(std::process::Stdio::from(io::stderr()));
+        }
+        // Under `--root`, the hook is the other system's and runs inside it,
+        // as `rpm --root`'s scriptlets do: changed into it, at its `/`.
+        #[cfg(unix)]
+        if let Some(root) = ROOT.get() {
+            use std::os::unix::process::CommandExt;
+            let Ok(root) = std::ffi::CString::new(quoting::os_bytes(root.as_os_str()).into_owned())
+            else {
+                return Err(format!("{}: the root cannot be named", quoteaf_os(command)));
+            };
+            // SAFETY: the closure runs in the child between `fork` and
+            // `exec`. pkg is single-threaded, so no lock another thread held
+            // at the fork can be met there; it makes two calls and builds
+            // nothing that outlives it.
+            unsafe {
+                cmd.pre_exec(move || {
+                    libcall::process::change_root(&root).map_err(io::Error::from_raw_os_error)?;
+                    std::env::set_current_dir("/")
+                });
+            }
+        }
+
+        match cmd.status() {
             Ok(status) => {
                 if status.success() {
                     Ok(true)
@@ -1838,6 +2121,52 @@ impl<'a> Resolver<'a> {
 // CLI commands
 // ============================================================================
 
+/// The current generation, or the end of the command: an installed state
+/// that cannot be read is not an empty one.
+fn current_or_exit(db: &PackageDb) -> Generation {
+    db.current_generation().unwrap_or_else(|e| {
+        eprintln!("pkg: cannot read the installed state: {e}");
+        process::exit(1);
+    })
+}
+
+/// The current generation's number, or the end of the command.
+fn current_id_or_exit(db: &PackageDb) -> u64 {
+    db.current_generation_id().unwrap_or_else(|e| {
+        eprintln!("pkg: cannot read the installed state: {e}");
+        process::exit(1);
+    })
+}
+
+/// The generation a change will be recorded as, or the end of the command.
+fn next_or_exit(db: &PackageDb, description: &str) -> Generation {
+    db.next_generation(description).unwrap_or_else(|e| {
+        eprintln!("pkg: cannot read the installed state: {e}");
+        process::exit(1);
+    })
+}
+
+/// `generation`, whose files are already on disk, recorded as the current
+/// one -- or what was left undone said, and the end of the command.
+fn commit_or_exit(db: &PackageDb, generation: &Generation) {
+    match db.commit_generation(generation) {
+        Ok(()) => {}
+        Err(CommitError::NotSaved(e)) => {
+            eprintln!("pkg: failed to save generation: {e}");
+            process::exit(1);
+        }
+        Err(CommitError::NotCurrent(e)) => {
+            eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
+            eprintln!(
+                "pkg: manually run: echo {} > {}/current",
+                generation.id,
+                db.gen_dir.display()
+            );
+            process::exit(1);
+        }
+    }
+}
+
 fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
     if packages.is_empty() {
         eprintln!("pkg: no packages specified");
@@ -1846,7 +2175,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
 
     db.ensure_dirs();
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check for already-installed packages
     let mut to_install = Vec::new();
@@ -1930,7 +2259,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1941,7 +2270,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run pre-install hook if defined
         if !manifest.hook_pre_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  pre-install hook OK for {}", manifest.name),
                 Ok(false) => {} // no hook
                 Err(e) => {
@@ -2040,7 +2369,7 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run post-install hook if defined
         if !manifest.hook_post_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  post-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
@@ -2054,31 +2383,15 @@ fn cmd_install(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    // Commit generation atomically
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            if let Err(e) = db.set_current_generation(new_gen.id) {
-                eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
-                eprintln!(
-                    "pkg: manually run: echo {} > {}/current",
-                    new_gen.id, GEN_DIR
-                );
-                process::exit(1);
-            }
-            log_transaction(
-                TxOperation::Install,
-                new_gen.id,
-                current.id,
-                &to_install,
-                &desc,
-            );
-            println!("\nDone. Generation {} created.", new_gen.id);
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    log_transaction(
+        TxOperation::Install,
+        new_gen.id,
+        current.id,
+        &to_install,
+        &desc,
+    );
+    println!("\nDone. Generation {} created.", new_gen.id);
 }
 
 fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
@@ -2087,7 +2400,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         process::exit(1);
     }
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check all packages exist
     for name in packages {
@@ -2097,21 +2410,32 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    // Check for reverse dependencies
-    let repo_index = db.load_repo_index().unwrap_or_default();
+    // Check for reverse dependencies: each installed package's needs, by the
+    // manifest it was installed with -- kept in the store -- or, for one
+    // installed without (a snapshot's), by the repository's. One whose needs
+    // neither can tell stops the removal: "not known" is not "none".
+    let repo_index = db.load_repo_index().ok();
     let removing: HashSet<&str> = packages.iter().map(|s| s.as_str()).collect();
 
-    for name in current.packages.keys() {
+    for (name, pkg) in &current.packages {
         if removing.contains(name.as_str()) {
             continue;
         }
-        // Find this package's manifest to check its deps
-        if let Some(manifest) = repo_index.iter().find(|m| m.name == *name) {
-            for dep in &manifest.depends {
-                if removing.contains(dep.name.as_str()) {
-                    eprintln!("pkg: cannot remove {}: required by {name}", dep.name);
-                    process::exit(1);
-                }
+        let manifest = stored_manifest(db, &pkg.manifest_hash).or_else(|| {
+            repo_index
+                .as_ref()
+                .and_then(|index| index.iter().find(|m| m.name == *name).cloned())
+        });
+        let Some(manifest) = manifest else {
+            eprintln!(
+                "pkg: cannot tell what {name} depends on: its manifest is neither in the store nor in the repository index"
+            );
+            process::exit(1);
+        };
+        for dep in &manifest.depends {
+            if removing.contains(dep.name.as_str()) {
+                eprintln!("pkg: cannot remove {}: required by {name}", dep.name);
+                process::exit(1);
             }
         }
     }
@@ -2136,7 +2460,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             .collect::<Vec<_>>()
             .join(", ")
     );
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     for name in packages {
         // Run pre-remove hook if we can find the manifest in CAS
@@ -2147,7 +2471,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             && !manifest.hook_pre_remove.is_empty()
         {
             let ver_str = pkg.version.to_string();
-            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_pre_remove, name, &ver_str, false) {
                 Ok(true) => println!("  pre-remove hook OK for {name}"),
                 Ok(false) => {}
                 Err(e) => {
@@ -2158,7 +2482,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
 
         // Undeploy files from the filesystem before removing from generation
         if let Some(pkg) = current.packages.get(name) {
-            let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
+            let removed = remove_deployed(pkg.file_hashes.iter().map(|(p, _)| p.as_str())).removed;
             if removed > 0 {
                 println!("  Removing {name}... ({removed} files removed)");
             } else {
@@ -2175,7 +2499,7 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
             && !manifest.hook_post_remove.is_empty()
         {
             let ver_str = pkg.version.to_string();
-            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_post_remove, name, &ver_str, false) {
                 Ok(true) => println!("  post-remove hook OK for {name}"),
                 Ok(false) => {}
                 Err(e) => {
@@ -2185,21 +2509,13 @@ fn cmd_remove(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(new_gen.id);
-            log_transaction(TxOperation::Remove, new_gen.id, current.id, packages, &desc);
-            println!("\nDone. Generation {} created.", new_gen.id);
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    log_transaction(TxOperation::Remove, new_gen.id, current.id, packages, &desc);
+    println!("\nDone. Generation {} created.", new_gen.id);
 }
 
 fn cmd_list(db: &PackageDb, installed_only: bool) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     if installed_only || current.packages.is_empty() {
         if current.packages.is_empty() {
@@ -2252,17 +2568,14 @@ fn cmd_search(db: &PackageDb, query: &str) {
                 println!("No packages found matching {}.", quoteaf_os(query));
                 return;
             }
-            let current = db.current_generation();
+            let current = current_or_exit(db);
             for pkg in &results {
                 let status = if current.packages.contains_key(&pkg.name) {
                     "[installed]"
                 } else {
                     ""
                 };
-                println!("{} {} {status}", pkg.name, pkg.version);
-                if !pkg.description.is_empty() {
-                    println!("  {}", pkg.description);
-                }
+                print_search_result(pkg, status);
             }
         }
         Err(e) => {
@@ -2273,7 +2586,7 @@ fn cmd_search(db: &PackageDb, query: &str) {
 }
 
 fn cmd_info(db: &PackageDb, name: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check installed first
     if let Some(pkg) = current.packages.get(name) {
@@ -2314,6 +2627,9 @@ fn cmd_info(db: &PackageDb, name: &str) {
                     println!("  {}", cap.name);
                 }
             }
+            if let Some(line) = fonts_line(&manifest) {
+                println!("{line}");
+            }
         }
         return;
     }
@@ -2348,6 +2664,9 @@ fn cmd_info(db: &PackageDb, name: &str) {
                     println!("  {}", cap.name);
                 }
             }
+            if let Some(line) = fonts_line(&manifest) {
+                println!("{line}");
+            }
             if manifest.archive_size > 0 {
                 println!("Size:      {}", format_size(manifest.archive_size));
             }
@@ -2363,112 +2682,679 @@ fn cmd_info(db: &PackageDb, name: &str) {
     }
 }
 
-fn cmd_generations(db: &PackageDb) {
-    let current_id = db.current_generation_id();
-    match db.list_generations() {
-        Ok(ids) => {
-            if ids.is_empty() {
-                println!("No generations recorded.");
-                return;
-            }
-            println!("{:<6} {:<20} {:<8} DESCRIPTION", "GEN", "DATE", "PKGS");
-            for id in &ids {
-                if let Ok(g) = db.load_generation(*id) {
-                    let marker = if *id == current_id { " *" } else { "" };
-                    let date = format_timestamp(g.timestamp);
-                    println!(
-                        "{:<6} {:<20} {:<8} {}{}",
-                        g.id,
-                        date,
-                        g.packages.len(),
-                        g.description,
-                        marker
-                    );
-                }
-            }
+/// A number for a JSON document: an `f64`, exact to 2^53, which no
+/// generation, timestamp or count here comes near.
+#[allow(clippy::cast_precision_loss)]
+fn json_num(n: u64) -> JsonValue {
+    JsonValue::Number(n as f64)
+}
+
+/// Strings as a JSON array.
+fn json_strs<'a>(items: impl IntoIterator<Item = &'a String>) -> JsonValue {
+    JsonValue::Array(
+        items
+            .into_iter()
+            .map(|s| JsonValue::Str(s.clone()))
+            .collect(),
+    )
+}
+
+/// The transaction that made each generation, from the log: what made it,
+/// and which packages. A generation the log does not have -- one made before
+/// it was kept, or a log that cannot be read -- has none; `gc`, which makes
+/// no generation, is not one.
+fn transactions_by_generation() -> BTreeMap<u64, Transaction> {
+    // The log is an audit trail: without it, what made each generation is
+    // unknown, which `--json` says as null; the generations are still there.
+    let all = TransactionLog::read_all().unwrap_or_else(|_| Vec::new());
+    let mut by_gen = BTreeMap::new();
+    for tx in all {
+        if !matches!(tx.operation, TxOperation::GarbageCollect) {
+            by_gen.entry(tx.generation_id).or_insert(tx);
         }
-        Err(e) => {
-            eprintln!("pkg: failed to list generations: {e}");
-            process::exit(1);
+    }
+    by_gen
+}
+
+/// `pkg generations [--json]`: every generation, the current one marked --
+/// with `--json`, one array of objects on one line, for a program to read:
+/// `generation`, `parent`, `timestamp` (seconds since 1970), `description`,
+/// `packages` (how many), `current`, and from the transaction log
+/// `operation` (`install`, `install-local`, `remove`, `upgrade`,
+/// `rollback`) and `changed` (the packages it named), null where the log
+/// has no record. A generation whose record cannot be read is
+/// `{"generation": N, "error": "..."}`.
+fn cmd_generations(db: &PackageDb, json: bool) {
+    let current_id = current_id_or_exit(db);
+    let ids = db.list_generations().unwrap_or_else(|e| {
+        eprintln!("pkg: failed to list generations: {e}");
+        process::exit(1);
+    });
+    if json {
+        let made_by = transactions_by_generation();
+        let all: Vec<JsonValue> = ids
+            .iter()
+            .map(|&id| match db.load_generation(id) {
+                Ok(g) => {
+                    let tx = made_by.get(&id);
+                    JsonValue::Object(vec![
+                        ("generation".into(), json_num(g.id)),
+                        ("parent".into(), json_num(g.parent)),
+                        ("timestamp".into(), json_num(g.timestamp)),
+                        ("description".into(), JsonValue::Str(g.description.clone())),
+                        ("packages".into(), json_num(g.packages.len() as u64)),
+                        ("current".into(), JsonValue::Bool(id == current_id)),
+                        (
+                            "operation".into(),
+                            tx.map_or(JsonValue::Null, |t| {
+                                JsonValue::Str(t.operation.as_str().into())
+                            }),
+                        ),
+                        (
+                            "changed".into(),
+                            tx.map_or(JsonValue::Null, |t| json_strs(&t.packages)),
+                        ),
+                    ])
+                }
+                Err(e) => JsonValue::Object(vec![
+                    ("generation".into(), json_num(id)),
+                    ("error".into(), JsonValue::Str(e.to_string())),
+                ]),
+            })
+            .collect();
+        println!("{}", JsonValue::Array(all));
+        return;
+    }
+    if ids.is_empty() {
+        println!("No generations recorded.");
+        return;
+    }
+    println!("{:<6} {:<20} {:<8} DESCRIPTION", "GEN", "DATE", "PKGS");
+    for id in &ids {
+        match db.load_generation(*id) {
+            Ok(g) => {
+                let marker = if *id == current_id { " *" } else { "" };
+                let date = format_timestamp(g.timestamp);
+                println!(
+                    "{:<6} {:<20} {:<8} {}{}",
+                    g.id,
+                    date,
+                    g.packages.len(),
+                    g.description,
+                    marker
+                );
+            }
+            Err(e) => println!("{id:<6} (its record cannot be read: {e})"),
         }
     }
 }
 
-fn cmd_rollback(db: &PackageDb, target_gen: Option<u64>) {
-    let current_id = db.current_generation_id();
+/// What going back from one generation to another changes, package by
+/// package, in name order.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RollbackPlan {
+    /// Installed now, not then: their files go -- but for those the target
+    /// installs too.
+    remove: Vec<String>,
+    /// Not installed now, installed then: their files come back from the
+    /// store.
+    restore: Vec<String>,
+    /// Installed both now and then, but not the same copy (another version,
+    /// or other contents): the target's is deployed over the current one,
+    /// and what only the current one had goes.
+    change: Vec<String>,
+}
 
-    let target = match target_gen {
-        Some(id) => id,
-        None => {
-            // Rollback to parent
-            let current = db.current_generation();
-            if current.parent == 0 && current.id == 0 {
-                eprintln!("pkg: no previous generation to rollback to");
-                process::exit(1);
-            }
-            current.parent
+impl RollbackPlan {
+    /// The packages whose files come from the store: restored and changed.
+    fn deployed(&self) -> impl Iterator<Item = &String> {
+        self.restore.iter().chain(&self.change)
+    }
+}
+
+/// `plan_rollback (from, to)`: what going from generation `from` back to
+/// `to` changes.
+fn plan_rollback(from: &Generation, to: &Generation) -> RollbackPlan {
+    let mut plan = RollbackPlan::default();
+    for name in from.packages.keys() {
+        if !to.packages.contains_key(name) {
+            plan.remove.push(name.clone());
         }
+    }
+    for (name, then) in &to.packages {
+        match from.packages.get(name) {
+            None => plan.restore.push(name.clone()),
+            Some(now)
+                if now.manifest_hash != then.manifest_hash
+                    || now.file_hashes != then.file_hashes =>
+            {
+                plan.change.push(name.clone());
+            }
+            Some(_) => {}
+        }
+    }
+    plan
+}
+
+/// The files going from `from` back to `to` takes away: those the removed
+/// and changed packages have now that no package in `to` installs, and that
+/// no package `held` back -- one its pre-install hook refused -- has now, in
+/// path order.
+fn paths_to_remove<'a>(
+    from: &'a Generation,
+    to: &Generation,
+    plan: &RollbackPlan,
+    held: &HashSet<&str>,
+) -> Vec<&'a str> {
+    let kept: HashSet<&str> = to
+        .packages
+        .values()
+        .chain(held.iter().filter_map(|name| from.packages.get(*name)))
+        .flat_map(|p| p.file_hashes.iter().map(|(dst, _)| dst.as_str()))
+        .collect();
+    let mut gone: Vec<&str> = plan
+        .remove
+        .iter()
+        .chain(&plan.change)
+        .filter_map(|name| from.packages.get(name))
+        .flat_map(|p| p.file_hashes.iter().map(|(dst, _)| dst.as_str()))
+        .filter(|dst| !kept.contains(dst))
+        .collect();
+    gone.sort_unstable();
+    gone.dedup();
+    gone
+}
+
+/// The manifest kept in the store under `hash`, as the install put it there.
+fn stored_manifest(db: &PackageDb, hash: &str) -> Option<PackageManifest> {
+    let data = db.cas.get(hash).ok()?;
+    PackageManifest::parse(&String::from_utf8(data).ok()?)
+}
+
+/// What going back to `to` needs from the store that is no longer there
+/// (`pkg gc` took it): each package's manifest and files, named.
+fn missing_from_store(db: &PackageDb, to: &Generation, plan: &RollbackPlan) -> Vec<String> {
+    let mut missing = Vec::new();
+    for name in plan.deployed() {
+        let Some(then) = to.packages.get(name) else {
+            continue;
+        };
+        if stored_manifest(db, &then.manifest_hash).is_none() {
+            missing.push(format!("{name}'s manifest"));
+        }
+        for (dst, hash) in &then.file_hashes {
+            if !hash.is_empty() && !db.cas.has(hash) {
+                missing.push(format!("{name}'s {dst}"));
+            }
+        }
+    }
+    missing
+}
+
+/// What [`remove_deployed`] did.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Removal {
+    /// How many files it removed.
+    removed: u64,
+    /// The paths it could not remove, or could not tell were gone.
+    failed: Vec<String>,
+}
+
+/// Deployed files taken off the disk -- each of `paths` (as a package
+/// names them, under `--root`'s directory) that is there -- an emptied
+/// directory going with its last file: what remove, upgrade and rollback
+/// take away. A file already gone is no failure; any other error, from
+/// looking for the file or from removing it, is said on stderr and its
+/// path listed.
+fn remove_deployed<'a>(paths: impl IntoIterator<Item = &'a str>) -> Removal {
+    let mut done = Removal::default();
+    for dst_path in paths {
+        let gone = under_root(dst_path).and_then(|dst| {
+            match fs::symlink_metadata(&dst) {
+                // A path through something that is no directory cannot
+                // exist either.
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    return Ok(false);
+                }
+                Err(e) => return Err(e),
+                Ok(_) => {}
+            }
+            fs::remove_file(&dst)?;
+            if let Some(parent) = dst.parent() {
+                // Succeeds only for a directory the file was the last one in.
+                let _ = fs::remove_dir(parent);
+            }
+            Ok(true)
+        });
+        match gone {
+            Ok(true) => done.removed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                eprintln!("  warning: failed to remove {dst_path}: {e}");
+                done.failed.push(dst_path.to_string());
+            }
+        }
+    }
+    done
+}
+
+/// Whether the package database may be written -- what a rollback changes
+/// first and last: a file made and removed in it. `Err` with the error when
+/// it may not.
+fn probe_writable(dir: &Path) -> io::Result<()> {
+    let probe = dir.join(format!(".pkg-write-probe{}", process::id()));
+    fs::File::create(&probe)?;
+    fs::remove_file(&probe)
+}
+
+/// How `pkg rollback` ended -- its exit status, for a program that runs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RollbackOutcome {
+    /// 0: the system is the target generation's again, recorded as a new
+    /// generation -- or nothing needed doing, or it was a `--dry-run`.
+    Done,
+    /// 1: refused before anything changed: no such generation, none before
+    /// the current one, what the target needs no longer in the store, or an
+    /// argument that is no generation.
+    Refused,
+    /// 2: stopped partway. Either files could not be changed -- the record
+    /// still names the generation it started from, and running the same
+    /// rollback again finishes it -- or every file was changed and the new
+    /// generation could not be recorded.
+    Partial,
+    /// 3: not permitted: the package database cannot be written.
+    NotPermitted,
+}
+
+impl RollbackOutcome {
+    fn code(self) -> i32 {
+        match self {
+            Self::Done => 0,
+            Self::Refused => 1,
+            Self::Partial => 2,
+            Self::NotPermitted => 3,
+        }
+    }
+
+    fn word(self) -> &'static str {
+        match self {
+            Self::Done => "done",
+            Self::Refused => "refused",
+            Self::Partial => "partial",
+            Self::NotPermitted => "not-permitted",
+        }
+    }
+}
+
+/// What a rollback has to say: to a person as it goes, and with `--json` as
+/// one object at the end.
+#[derive(Default)]
+struct RollbackReport {
+    json: bool,
+    dry_run: bool,
+    from: Option<u64>,
+    to: Option<u64>,
+    generation: Option<u64>,
+    removed: Vec<String>,
+    restored: Vec<String>,
+    /// `(name, version now, version then)`.
+    changed: Vec<(String, String, String)>,
+    failed: Vec<String>,
+}
+
+impl RollbackReport {
+    /// The end of `pkg rollback`: with `--json`, one object on stdout --
+    /// `outcome` (`done`, `refused`, `partial`, `not-permitted`), `from`,
+    /// `to`, `generation` (the one recorded), `dry_run`, `removed`,
+    /// `restored`, `changed` (`name`, `from`, `to`), `failed` (the files
+    /// that could not be changed, and `NAME (pre-install hook)` for a
+    /// package its hook refused) and `error` -- else `error` on stderr; and
+    /// the outcome's exit status.
+    fn finish(&self, outcome: RollbackOutcome, error: Option<&str>) -> ! {
+        if self.json {
+            let num = |n: Option<u64>| n.map_or(JsonValue::Null, json_num);
+            let changed = self
+                .changed
+                .iter()
+                .map(|(name, now, then)| {
+                    JsonValue::Object(vec![
+                        ("name".into(), JsonValue::Str(name.clone())),
+                        ("from".into(), JsonValue::Str(now.clone())),
+                        ("to".into(), JsonValue::Str(then.clone())),
+                    ])
+                })
+                .collect();
+            let doc = JsonValue::Object(vec![
+                ("outcome".into(), JsonValue::Str(outcome.word().into())),
+                ("from".into(), num(self.from)),
+                ("to".into(), num(self.to)),
+                ("generation".into(), num(self.generation)),
+                ("dry_run".into(), JsonValue::Bool(self.dry_run)),
+                ("removed".into(), json_strs(&self.removed)),
+                ("restored".into(), json_strs(&self.restored)),
+                ("changed".into(), JsonValue::Array(changed)),
+                ("failed".into(), json_strs(&self.failed)),
+                (
+                    "error".into(),
+                    error.map_or(JsonValue::Null, |e| JsonValue::Str(e.into())),
+                ),
+            ]);
+            println!("{doc}");
+        } else if let Some(e) = error {
+            eprintln!("pkg: {e}");
+        }
+        process::exit(outcome.code());
+    }
+}
+
+/// A package's hook, run as `pkg` runs the others, its outcome said unless
+/// the output is `--json`'s; `false` when it ran and failed.
+fn run_hook(hook: &str, which: &str, name: &str, version: &str, json: bool) -> bool {
+    if hook.is_empty() {
+        return true;
+    }
+    match PackageHooks::run(hook, name, version, json) {
+        Ok(true) if !json => {
+            println!("  {which} hook OK for {name}");
+            true
+        }
+        Ok(_) => true,
+        Err(e) => {
+            eprintln!("  warning: {name}: {which} hook failed: {e}");
+            false
+        }
+    }
+}
+
+/// `pkg rollback [GENERATION] [--dry-run] [--json]`: the system put back as
+/// it was in `GENERATION` -- the current one's parent by default -- and
+/// recorded as a new generation, so the history only grows. Packages
+/// installed since are taken away (their hooks run as `pkg remove` runs
+/// them), and those of the target generation are put back from the store,
+/// in the target's versions (their post-install hooks run as `pkg upgrade`
+/// runs them); a configuration file the user changed is kept, the target's
+/// saved beside it as `.pkg-new`. Nothing is changed unless everything the
+/// target needs is still in the store. Ends with [`RollbackOutcome`]'s
+/// status.
+fn cmd_rollback(db: &PackageDb, arg: Option<&str>, dry_run: bool, json: bool) -> ! {
+    let mut report = RollbackReport {
+        json,
+        dry_run,
+        ..RollbackReport::default()
+    };
+    let current = match db.current_generation() {
+        Ok(current) => current,
+        Err(e) => report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!("cannot read the installed state: {e}")),
+        ),
+    };
+    report.from = Some(current.id);
+
+    let target_id = match arg {
+        Some(a) => match a.parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => report.finish(
+                RollbackOutcome::Refused,
+                Some(&format!(
+                    "rollback: {}: not a generation number",
+                    quotef_os(a)
+                )),
+            ),
+        },
+        None if current.parent == 0 => report.finish(
+            RollbackOutcome::Refused,
+            Some("no previous generation to rollback to"),
+        ),
+        None => current.parent,
+    };
+    report.to = Some(target_id);
+    if target_id == current.id {
+        if !json {
+            println!("Already at generation {target_id}: nothing to do.");
+        }
+        report.finish(RollbackOutcome::Done, None);
+    }
+    let target = match db.load_generation(target_id) {
+        Ok(target) => target,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!("generation {target_id} not found")),
+        ),
+        Err(e) => report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!("generation {target_id}: {e}")),
+        ),
     };
 
-    // Verify target generation exists
-    if db.load_generation(target).is_err() {
-        eprintln!("pkg: generation {target} not found");
-        process::exit(1);
+    let plan = plan_rollback(&current, &target);
+    report.removed.clone_from(&plan.remove);
+    report.restored.clone_from(&plan.restore);
+    for name in &plan.change {
+        if let (Some(now), Some(then)) = (current.packages.get(name), target.packages.get(name)) {
+            report.changed.push((
+                name.clone(),
+                now.version.to_string(),
+                then.version.to_string(),
+            ));
+        }
     }
-
-    let target_gen = db.load_generation(target).expect("just checked");
-    let current_gen = db.current_generation();
-
-    // Show diff
-    println!("Rolling back from generation {current_id} to {target}:");
-
-    let current_pkgs: HashSet<&str> = current_gen.packages.keys().map(|s| s.as_str()).collect();
-    let target_pkgs: HashSet<&str> = target_gen.packages.keys().map(|s| s.as_str()).collect();
-
-    for name in current_pkgs.difference(&target_pkgs) {
-        println!("  - {name} (will be removed)");
-    }
-    for name in target_pkgs.difference(&current_pkgs) {
-        println!("  + {name} (will be restored)");
-    }
-    for name in current_pkgs.intersection(&target_pkgs) {
-        let cv = &current_gen.packages[*name].version;
-        let tv = &target_gen.packages[*name].version;
-        if cv != tv {
-            println!("  ~ {name} ({cv} → {tv})");
+    if !json {
+        println!(
+            "Rolling back from generation {} to {target_id}:",
+            current.id
+        );
+        for name in &plan.remove {
+            println!("  - {name} (will be removed)");
+        }
+        for name in &plan.restore {
+            println!("  + {name} (will be restored)");
+        }
+        for (name, now, then) in &report.changed {
+            println!("  ~ {name} ({now} → {then})");
         }
     }
 
-    // Create a new generation that represents the rollback
-    // (we don't delete generations — the history is append-only)
-    let desc = format!("rollback to generation {target}");
-    let mut rollback_gen = db.next_generation(&desc);
-    rollback_gen.packages = target_gen.packages.clone();
+    let missing = missing_from_store(db, &target, &plan);
+    if !missing.is_empty() {
+        report.finish(
+            RollbackOutcome::Refused,
+            Some(&format!(
+                "generation {target_id} cannot be put back: no longer in the store (pkg gc removed it): {}",
+                missing.join(", ")
+            )),
+        );
+    }
+    if dry_run {
+        if !json {
+            println!("\n(dry run — no changes made)");
+        }
+        report.finish(RollbackOutcome::Done, None);
+    }
+    if let Err(e) = probe_writable(&db.gen_dir) {
+        let outcome = if matches!(
+            e.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+        ) {
+            RollbackOutcome::NotPermitted
+        } else {
+            RollbackOutcome::Refused
+        };
+        report.finish(
+            outcome,
+            Some(&format!("cannot change the installed system: {e}")),
+        );
+    }
 
-    match db.save_generation(&rollback_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(rollback_gen.id);
-            log_transaction(
-                TxOperation::Rollback,
-                rollback_gen.id,
-                current_id,
-                &[],
-                &desc,
+    // As upgrade does, every pre-install hook runs before any file is
+    // touched: a package its hook refuses keeps the files it has now, none
+    // of the target's are put in their place, and the rollback stops partway
+    // with the package named among what could not be changed.
+    let mut held: HashSet<&str> = HashSet::new();
+    for name in plan.deployed() {
+        let (Some(then), Some(manifest)) = (
+            target.packages.get(name),
+            target
+                .packages
+                .get(name)
+                .and_then(|then| stored_manifest(db, &then.manifest_hash)),
+        ) else {
+            // Checked above: both are there.
+            continue;
+        };
+        let version = then.version.to_string();
+        if !run_hook(
+            &manifest.hook_pre_install,
+            "pre-install",
+            name,
+            &version,
+            json,
+        ) {
+            report.failed.push(format!("{name} (pre-install hook)"));
+            held.insert(name.as_str());
+        }
+    }
+
+    // The packages taken away: their hooks around their files' removal.
+    for name in &plan.remove {
+        if let Some(now) = current.packages.get(name)
+            && let Some(manifest) = stored_manifest(db, &now.manifest_hash)
+        {
+            let version = now.version.to_string();
+            run_hook(
+                &manifest.hook_pre_remove,
+                "pre-remove",
+                name,
+                &version,
+                json,
             );
+        }
+    }
+    let gone = paths_to_remove(&current, &target, &plan, &held);
+    report
+        .failed
+        .extend(remove_deployed(gone.iter().copied()).failed);
+    for name in &plan.remove {
+        if let Some(now) = current.packages.get(name)
+            && let Some(manifest) = stored_manifest(db, &now.manifest_hash)
+        {
+            let version = now.version.to_string();
+            run_hook(
+                &manifest.hook_post_remove,
+                "post-remove",
+                name,
+                &version,
+                json,
+            );
+        }
+    }
+    // The packages put back: the target's copies, from the store.
+    for name in plan.deployed() {
+        if held.contains(name.as_str()) {
+            continue;
+        }
+        let (Some(then), Some(manifest)) = (
+            target.packages.get(name),
+            target
+                .packages
+                .get(name)
+                .and_then(|then| stored_manifest(db, &then.manifest_hash)),
+        ) else {
+            // Checked above: both are there.
+            continue;
+        };
+        let old = current
+            .packages
+            .get(name)
+            .map(|now| now.file_hashes.clone())
+            .unwrap_or_default();
+        let stats = db.cas.deploy_package_files_upgrade(&manifest, &old);
+        if !json {
             println!(
-                "\nRolled back. Generation {} created (based on {target}).",
-                rollback_gen.id
+                "  Put back {name} {}: {} files, {}",
+                then.version,
+                stats.deployed,
+                format_size(stats.total_bytes)
             );
         }
-        Err(e) => {
-            eprintln!("pkg: failed to save rollback generation: {e}");
-            process::exit(1);
-        }
+        report.failed.extend(stats.failed_paths);
+        run_hook(
+            &manifest.hook_post_install,
+            "post-install",
+            name,
+            &then.version.to_string(),
+            json,
+        );
     }
+    if !report.failed.is_empty() {
+        let hooks = held.len();
+        let files = report.failed.len().saturating_sub(hooks);
+        let what = match (files, hooks) {
+            (_, 0) => format!("{files} file(s) could not be changed"),
+            (0, _) => format!("{hooks} package(s) refused by their pre-install hook"),
+            _ => format!(
+                "{files} file(s) could not be changed and {hooks} package(s) were refused by \
+                 their pre-install hook"
+            ),
+        };
+        let message = format!(
+            "{what}; the record still names generation {} -- run 'pkg rollback {target_id}' \
+             again once that is put right",
+            current.id
+        );
+        report.finish(RollbackOutcome::Partial, Some(&message));
+    }
+
+    // The history only grows: the target's packages, as a new generation.
+    let desc = format!("rollback to generation {target_id}");
+    let mut new_gen = match db.next_generation(&desc) {
+        Ok(new_gen) => new_gen,
+        Err(e) => report.finish(
+            RollbackOutcome::Partial,
+            Some(&format!(
+                "the files are generation {target_id}'s, but it cannot be recorded: {e}"
+            )),
+        ),
+    };
+    new_gen.packages = target.packages.clone();
+    match db.commit_generation(&new_gen) {
+        Ok(()) => {}
+        Err(CommitError::NotSaved(e)) => report.finish(
+            RollbackOutcome::Partial,
+            Some(&format!(
+                "the files are generation {target_id}'s, but it cannot be recorded: {e}; \
+                 the record still names generation {}",
+                current.id
+            )),
+        ),
+        Err(CommitError::NotCurrent(e)) => report.finish(
+            RollbackOutcome::Partial,
+            Some(&format!(
+                "CRITICAL — saved generation but failed to update pointer: {e}; \
+                 manually run: echo {} > {}/current",
+                new_gen.id,
+                db.gen_dir.display()
+            )),
+        ),
+    }
+    log_transaction(TxOperation::Rollback, new_gen.id, current.id, &[], &desc);
+    report.generation = Some(new_gen.id);
+    if !json {
+        println!(
+            "\nRolled back. Generation {} created (based on {target_id}).",
+            new_gen.id
+        );
+    }
+    report.finish(RollbackOutcome::Done, None);
 }
 
 fn cmd_gc(db: &PackageDb, keep: usize) {
-    let current_id = db.current_generation_id();
+    let current_id = current_id_or_exit(db);
     let all_ids = match db.list_generations() {
         Ok(ids) => ids,
         Err(e) => {
@@ -2558,7 +3444,7 @@ fn cmd_gc(db: &PackageDb, keep: usize) {
 }
 
 fn cmd_verify(db: &PackageDb, packages: &[String]) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     let to_verify: Vec<(&String, &InstalledPackage)> = if packages.is_empty() {
         current.packages.iter().collect()
@@ -2620,7 +3506,7 @@ fn cmd_verify(db: &PackageDb, packages: &[String]) {
 }
 
 fn cmd_files(db: &PackageDb, name: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     match current.packages.get(name) {
         Some(pkg) => {
             for (path, _hash) in &pkg.file_hashes {
@@ -2635,7 +3521,7 @@ fn cmd_files(db: &PackageDb, name: &str) {
 }
 
 fn cmd_which(db: &PackageDb, path: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     for (name, pkg) in &current.packages {
         for (file_path, _) in &pkg.file_hashes {
             if file_path == path {
@@ -2654,7 +3540,7 @@ fn cmd_which(db: &PackageDb, path: &str) {
 
 /// Find all packages that depend on a given package (reverse dependencies).
 fn cmd_rdeps(db: &PackageDb, target: &str) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Check the target exists
     if !current.packages.contains_key(target) {
@@ -2707,7 +3593,7 @@ fn cmd_rdeps(db: &PackageDb, target: &str) {
 
 /// List all shared libraries (.dso files) installed in the current generation.
 fn cmd_libs(db: &PackageDb) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     let mut libs: Vec<(String, String, String)> = Vec::new(); // (lib_path, pkg_name, version)
 
@@ -2752,7 +3638,7 @@ fn is_shared_lib_path(path: &str) -> bool {
 /// 2. Reports all reverse dependencies that will now use the new version
 /// 3. Creates a new generation (existing dynamically-linked binaries auto-use the new lib)
 fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     if !current.packages.contains_key(lib_name) {
         eprintln!("pkg: {}: not installed", quotef_os(lib_name));
@@ -2845,7 +3731,7 @@ fn cmd_upgrade_lib(db: &PackageDb, lib_name: &str, dry_run: bool) {
 }
 
 fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
     let available = match db.load_repo_index() {
         Ok(a) => a,
         Err(e) => {
@@ -2900,7 +3786,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
     // Install the newer versions
     let names: Vec<String> = upgrades.iter().map(|(n, _, _)| n.to_string()).collect();
     let desc = format!("upgrade {}", names.join(", "));
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2921,7 +3807,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run pre-install hook (used for upgrades too)
         if !manifest.hook_pre_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_pre_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  pre-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
@@ -2981,65 +3867,48 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Build a set of new destination paths for quick lookup.
         let new_dsts: HashSet<&str> = manifest.files.iter().map(|f| f.dst.as_str()).collect();
 
-        let mut removed_stale = 0u64;
-        for (old_dst, _) in &old_file_hashes {
-            if !new_dsts.contains(old_dst.as_str()) {
-                let dst = Path::new(old_dst);
-                if dst.exists() {
-                    if fs::remove_file(dst).is_ok() {
-                        removed_stale += 1;
-                    }
-                    if let Some(parent) = dst.parent() {
-                        let _ = fs::remove_dir(parent);
-                    }
-                }
-            }
-        }
+        let removed_stale = remove_deployed(
+            old_file_hashes
+                .iter()
+                .map(|(dst, _)| dst.as_str())
+                .filter(|dst| !new_dsts.contains(dst)),
+        )
+        .removed;
 
         // Deploy new files with config-aware upgrade logic
         if !manifest.files.is_empty() && !manifest.archive_hash.is_empty() {
-            match db
+            let stats = db
                 .cas
-                .deploy_package_files_upgrade(manifest, &old_file_hashes)
-            {
-                Ok(stats) => {
-                    let mut extras = Vec::new();
-                    if stats.dedup_bytes > 0 {
-                        extras.push(format!(
-                            "{} saved via dedup",
-                            format_size(stats.dedup_bytes)
-                        ));
-                    }
-                    if stats.config_preserved > 0 {
-                        extras.push(format!("{} config(s) preserved", stats.config_preserved));
-                        total_config_preserved += stats.config_preserved;
-                    }
-                    if removed_stale > 0 {
-                        extras.push(format!("{removed_stale} stale file(s) removed"));
-                    }
-                    let extra_str = if extras.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" ({})", extras.join(", "))
-                    };
-                    println!(
-                        "  Upgraded {} to {}: {} files, {}{}",
-                        manifest.name,
-                        manifest.version,
-                        stats.deployed,
-                        format_size(stats.total_bytes),
-                        extra_str
-                    );
-                    if stats.failed > 0 {
-                        eprintln!("    {} file(s) failed to deploy", stats.failed);
-                    }
-                }
-                Err(e) => {
-                    eprintln!(
-                        "  warning: file deployment error for {}: {e}",
-                        manifest.name
-                    );
-                }
+                .deploy_package_files_upgrade(manifest, &old_file_hashes);
+            let mut extras = Vec::new();
+            if stats.dedup_bytes > 0 {
+                extras.push(format!(
+                    "{} saved via dedup",
+                    format_size(stats.dedup_bytes)
+                ));
+            }
+            if stats.config_preserved > 0 {
+                extras.push(format!("{} config(s) preserved", stats.config_preserved));
+                total_config_preserved += stats.config_preserved;
+            }
+            if removed_stale > 0 {
+                extras.push(format!("{removed_stale} stale file(s) removed"));
+            }
+            let extra_str = if extras.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", extras.join(", "))
+            };
+            println!(
+                "  Upgraded {} to {}: {} files, {}{}",
+                manifest.name,
+                manifest.version,
+                stats.deployed,
+                format_size(stats.total_bytes),
+                extra_str
+            );
+            if stats.failed > 0 {
+                eprintln!("    {} file(s) failed to deploy", stats.failed);
             }
         } else {
             if removed_stale > 0 {
@@ -3069,7 +3938,7 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         // Run post-install hook (used for upgrades too)
         if !manifest.hook_post_install.is_empty() {
             let ver_str = manifest.version.to_string();
-            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str) {
+            match PackageHooks::run(&manifest.hook_post_install, &manifest.name, &ver_str, false) {
                 Ok(true) => println!("  post-install hook OK for {}", manifest.name),
                 Ok(false) => {}
                 Err(e) => {
@@ -3082,22 +3951,14 @@ fn cmd_upgrade(db: &PackageDb, packages: &[String], dry_run: bool) {
         }
     }
 
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(new_gen.id);
-            log_transaction(TxOperation::Upgrade, new_gen.id, current.id, &names, &desc);
-            println!("\nDone. Generation {} created.", new_gen.id);
-            if total_config_preserved > 0 {
-                println!(
-                    "  {total_config_preserved} config file(s) preserved — \
-                     new versions saved as .pkg-new"
-                );
-            }
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
+    commit_or_exit(db, &new_gen);
+    log_transaction(TxOperation::Upgrade, new_gen.id, current.id, &names, &desc);
+    println!("\nDone. Generation {} created.", new_gen.id);
+    if total_config_preserved > 0 {
+        println!(
+            "  {total_config_preserved} config file(s) preserved — \
+             new versions saved as .pkg-new"
+        );
     }
 }
 
@@ -3269,15 +4130,21 @@ fn cmd_repo(args: &[String]) {
                     // still be listed. So the failure is reported rather than
                     // discarded, but it does not change the exit status,
                     // because the thing the caller asked for DID happen.
-                    let db = PackageDb::new();
-                    let index_path = db.repo_index_path(name);
-                    if let Err(e) = fs::remove_file(&index_path)
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        eprintln!(
-                            "pkg: warning: the repository is removed but its                              cached index {} could not be deleted: {e}",
-                            quoteaf_os(&index_path)
-                        );
+                    match PackageDb::new() {
+                        Ok(db) => {
+                            let index_path = db.repo_index_path(name);
+                            if let Err(e) = fs::remove_file(&index_path)
+                                && e.kind() != std::io::ErrorKind::NotFound
+                            {
+                                eprintln!(
+                                    "pkg: warning: the repository is removed but its cached index {} could not be deleted: {e}",
+                                    quoteaf_os(&index_path)
+                                );
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "pkg: warning: the repository is removed but its cached index could not be found: {e}"
+                        ),
                     }
                 }
                 Err(e) => {
@@ -3844,7 +4711,7 @@ fn create_pkg_archive(manifest: &PackageManifest, base_dir: &Path) -> io::Result
 fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
     db.ensure_dirs();
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Parse all .pkg files first to validate them before making changes
     let mut parsed: Vec<(PathBuf, PackageManifest, PkgFileBlobs)> = Vec::new();
@@ -3916,7 +4783,7 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
     // Create new generation
     let names: Vec<&str> = parsed.iter().map(|(_, m, _)| m.name.as_str()).collect();
     let desc = format!("install (local) {}", names.join(", "));
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4013,32 +4880,289 @@ fn cmd_install_local(db: &PackageDb, paths: &[PathBuf]) {
         }
     }
 
-    // Commit generation atomically
-    let current_id = db.current_generation_id();
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            if let Err(e) = db.set_current_generation(new_gen.id) {
-                eprintln!("pkg: CRITICAL — saved generation but failed to update pointer: {e}");
-                eprintln!(
-                    "pkg: manually run: echo {} > {}/current",
-                    new_gen.id, GEN_DIR
-                );
-                process::exit(1);
+    commit_or_exit(db, &new_gen);
+    let pkg_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+    log_transaction(
+        TxOperation::InstallLocal,
+        new_gen.id,
+        new_gen.parent,
+        &pkg_names,
+        &desc,
+    );
+    println!("\nDone. Generation {} created.", new_gen.id);
+}
+
+// ============================================================================
+// Font families
+// ============================================================================
+//
+// A theme can recommend the fonts it was designed with, and Settings offers to
+// install a recommended family that is missing (requests/e-b-a-package-could-
+// say-which-font-families-it-carries.md). Settings knows a family by name and
+// the package manager knows packages, so a package says which families it
+// carries: `fonts:` in its manifest. `pkg pack` writes that line from the
+// files the package installs where the system's font index looks, read the
+// way the index reads them (`gui/toolkit/src/fontdb.rs`); a `fonts:` an
+// author wrote is only checked against it. The index's rules are restated
+// here, not shared: requests/b-cf-the-font-index-s-rules-in-one-place.md.
+
+/// The extensions of the files the font index opens, compared without case.
+const FONT_EXTENSIONS: [&str; 4] = ["ttf", "ttc", "otf", "otc"];
+
+/// Where the font index finds the system's fonts (`fontdb::system_font_dirs`
+/// -- the per-user directories are no package's to install into).
+const SYSTEM_FONT_DIR: &str = "/usr/share/fonts/";
+
+/// How many directories below [`SYSTEM_FONT_DIR`] the index descends
+/// (`fontdb`'s `MAX_DEPTH`).
+const FONT_DIR_DEPTH: usize = 6;
+
+/// Whether `path` names a font file, by its extension.
+fn is_font_file(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| FONT_EXTENSIONS.iter().any(|f| e.eq_ignore_ascii_case(f)))
+}
+
+/// Whether a file installed at `dst` is one the font index opens: a font
+/// file under the system font directory, no deeper than the index looks.
+/// A path that is not plain -- an empty, `.` or `..` part -- is not trusted
+/// to land there.
+fn indexed_font(dst: &str) -> bool {
+    let Some(rest) = dst.strip_prefix(SYSTEM_FONT_DIR) else {
+        return false;
+    };
+    let parts: Vec<&str> = rest.split('/').collect();
+    if parts
+        .iter()
+        .any(|p| p.is_empty() || *p == "." || *p == "..")
+    {
+        return false;
+    }
+    parts.len().saturating_sub(1) <= FONT_DIR_DEPTH && is_font_file(rest)
+}
+
+/// Whether family name `name` can go on the `fonts:` line: one with a
+/// comma would be split in two by the line's reader, and one with a control
+/// character -- a new line above all -- would write manifest lines of its
+/// own.
+fn listable_family(name: &str) -> bool {
+    !name.contains(',') && !name.chars().any(char::is_control)
+}
+
+/// What a family is matched by: the font index's key, its name trimmed and
+/// lower-cased, so "inter" finds "Inter".
+fn family_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// The families font file `data` holds -- its typographic family (name ID
+/// 16) and its legacy one (ID 1), the two the font index answers to -- as
+/// the file spells them. A collection is read by its first face, as the
+/// index reads it.
+///
+/// # Errors
+///
+/// What the font parser could not read.
+fn families_in(data: Vec<u8>) -> Result<Vec<String>, String> {
+    let face = osfont::sfnt::Face::parse(data).map_err(|e| e.to_string())?;
+    Ok([
+        osfont::sfnt::name_id::TYPOGRAPHIC_FAMILY,
+        osfont::sfnt::name_id::FAMILY,
+    ]
+    .into_iter()
+    .filter_map(|id| face.name(id))
+    .map(|n| n.trim().to_string())
+    .filter(|n| !n.is_empty())
+    .collect())
+}
+
+/// The families a package's font files hold, each once whatever its case
+/// (the first spelling met), in the order of their keys.
+#[derive(Default)]
+struct FontFamilies(BTreeMap<String, String>);
+
+impl FontFamilies {
+    fn add(&mut self, name: String) {
+        self.0.entry(family_key(&name)).or_insert(name);
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.0.contains_key(&family_key(name))
+    }
+
+    fn into_names(self) -> Vec<String> {
+        self.0.into_values().collect()
+    }
+}
+
+/// Write `manifest.fonts` from the package's indexed font files -- `(source
+/// path, what [`families_in`] read from it)` -- and say what does not agree:
+/// a font file nothing could be read from, a family that cannot be listed,
+/// and a family the source manifest named that no file holds. Answers those
+/// warnings, one line each.
+fn pack_fonts(
+    manifest: &mut PackageManifest,
+    files: impl IntoIterator<Item = (String, Result<Vec<String>, String>)>,
+) -> Vec<String> {
+    let mut found = FontFamilies::default();
+    let mut warnings = Vec::new();
+    for (src, families) in files {
+        match families {
+            Ok(names) if names.is_empty() => {
+                warnings.push(format!("{}: names no font family", quoteaf_os(&src)));
             }
-            let pkg_names: Vec<String> = names.iter().map(|s| s.to_string()).collect();
-            log_transaction(
-                TxOperation::InstallLocal,
-                new_gen.id,
-                current_id,
-                &pkg_names,
-                &desc,
-            );
-            println!("\nDone. Generation {} created.", new_gen.id);
+            Ok(names) => {
+                for name in names {
+                    if listable_family(&name) {
+                        found.add(name);
+                    } else {
+                        warnings.push(format!(
+                            "{}: font family {} has a comma or a control character in it -- left out",
+                            quoteaf_os(&src),
+                            quoteaf_os(&name)
+                        ));
+                    }
+                }
+            }
+            Err(e) => warnings.push(format!("{}: no font family read ({e})", quoteaf_os(&src))),
         }
+    }
+    for named in &manifest.fonts {
+        if !found.contains(named) {
+            warnings.push(format!(
+                "fonts: {} is in none of the package's font files -- left out",
+                quoteaf_os(named)
+            ));
+        }
+    }
+    manifest.fonts = found.into_names();
+    warnings
+}
+
+/// Whether `manifest`'s package carries font family `family`, matched as
+/// the font index matches a name.
+fn carries_font(manifest: &PackageManifest, family: &str) -> bool {
+    let wanted = family_key(family);
+    manifest.fonts.iter().any(|f| family_key(f) == wanted)
+}
+
+/// The packages that carry `family`, judged by the version of each that
+/// `pkg install` would take -- the newest available -- in name order.
+fn font_carriers<'a>(available: &'a [PackageManifest], family: &str) -> Vec<&'a PackageManifest> {
+    let mut newest: BTreeMap<&str, &PackageManifest> = BTreeMap::new();
+    for p in available {
+        let slot = newest.entry(p.name.as_str()).or_insert(p);
+        if p.version > slot.version {
+            *slot = p;
+        }
+    }
+    newest
+        .into_values()
+        .filter(|p| carries_font(p, family))
+        .collect()
+}
+
+/// What `pkg search --font` says of a carrier's installed copy: nothing when
+/// it is not installed, `[installed]` when the installed version holds the
+/// family, and `[upgradable]` when it does not -- `pkg install` leaves an
+/// installed package be, and `pkg upgrade` brings the version that has it.
+/// `installed` is the installed version and, when it could be read, its
+/// manifest; `carrier` is the version listed.
+fn font_status(
+    installed: Option<(&Version, Option<&PackageManifest>)>,
+    carrier: &PackageManifest,
+    family: &str,
+) -> &'static str {
+    match installed {
+        None => "",
+        Some((_, Some(manifest))) if carries_font(manifest, family) => "[installed]",
+        // Without its manifest, the version says: the one listed carries it.
+        Some((version, None)) if *version >= carrier.version => "[installed]",
+        Some(_) => "[upgradable]",
+    }
+}
+
+/// The family `pkg search` is asked for, when its words hold `--font` or
+/// `--font=NAME` wherever they stand: the other words in their order,
+/// `--font=`'s value among them, joined by a space -- a family's name may
+/// hold spaces ("Fira Code"), and need not be quoted. `None` for an
+/// ordinary search.
+fn font_query(words: &[String]) -> Option<String> {
+    let mut font = false;
+    let mut name = Vec::new();
+    for w in words {
+        if w == "--font" {
+            font = true;
+        } else if let Some(v) = w.strip_prefix("--font=") {
+            font = true;
+            name.push(v);
+        } else {
+            name.push(w.as_str());
+        }
+    }
+    font.then(|| name.join(" "))
+}
+
+/// One `pkg search` answer: `NAME VERSION STATUS`, and the description
+/// indented under it. Settings reads the first word of each unindented line.
+fn print_search_result(pkg: &PackageManifest, status: &str) {
+    print!("{}", search_result(pkg, status));
+}
+
+/// [`print_search_result`]'s lines.
+fn search_result(pkg: &PackageManifest, status: &str) -> String {
+    let mut text = format!("{} {} {status}\n", pkg.name, pkg.version);
+    if !pkg.description.is_empty() {
+        text.push_str(&format!("  {}\n", pkg.description));
+    }
+    text
+}
+
+/// `pkg info`'s `Fonts:` line, for a package that carries any.
+fn fonts_line(manifest: &PackageManifest) -> Option<String> {
+    (!manifest.fonts.is_empty()).then(|| format!("Fonts:     {}", manifest.fonts.join(", ")))
+}
+
+/// `pkg search --font <FAMILY>`: the packages that carry the family, as
+/// `pkg search` lists them, with [`font_status`] for the installed ones.
+/// None is a sentence on standard error and status 1; no index to look in,
+/// or one that could not be read, is status 2 -- so a caller can tell "no
+/// package has it" from "could not ask".
+fn cmd_search_font(db: &PackageDb, family: &str) {
+    if !db.has_repo_index() {
+        eprintln!("pkg: no package index to search -- run 'pkg update'");
+        process::exit(2);
+    }
+    let packages = match db.load_repo_index() {
+        Ok(packages) => packages,
         Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
+            eprintln!("pkg: search failed: {e}");
+            process::exit(2);
         }
+    };
+    let carriers = font_carriers(&packages, family);
+    if carriers.is_empty() {
+        eprintln!(
+            "pkg: no package carries the font family {}",
+            quoteaf_os(family)
+        );
+        process::exit(1);
+    }
+    let current = current_or_exit(db);
+    for pkg in carriers {
+        let installed = current.packages.get(&pkg.name).map(|held| {
+            let manifest = db
+                .cas
+                .get(&held.manifest_hash)
+                .ok()
+                .and_then(|data| String::from_utf8(data).ok())
+                .and_then(|text| PackageManifest::parse(&text));
+            (held.version.clone(), manifest)
+        });
+        let installed = installed.as_ref().map(|(v, m)| (v, m.as_ref()));
+        print_search_result(pkg, font_status(installed, pkg, family));
     }
 }
 
@@ -4072,6 +5196,9 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
 
     // Compute hashes for all files and update the manifest entries
     let mut updated_files = Vec::new();
+    // The families each font file the index will open holds, read as each
+    // is met so that no file's bytes outlive their turn.
+    let mut fonts: Vec<(String, Result<Vec<String>, String>)> = Vec::new();
     for file in &manifest.files {
         let src_path = base_dir.join(&file.src);
         let data = match fs::read(&src_path) {
@@ -4093,8 +5220,14 @@ fn cmd_pack(manifest_path: &Path, output_path: Option<&Path>) {
             hash,
             size,
         });
+        if indexed_font(&file.dst) {
+            fonts.push((file.src.clone(), families_in(data)));
+        }
     }
     manifest.files = updated_files;
+    for warning in pack_fonts(&mut manifest, fonts) {
+        eprintln!("pkg: warning: {warning}");
+    }
 
     // Build the archive
     let archive = match create_pkg_archive(&manifest, base_dir) {
@@ -4319,7 +5452,7 @@ fn parse_snapshot(text: &str) -> Result<Vec<SnapshotEntry>, String> {
 
 /// Export current generation as a portable snapshot file.
 fn cmd_snapshot_export(db: &PackageDb, output_path: Option<&Path>) {
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     if current.packages.is_empty() {
         println!("No packages installed — nothing to export.");
@@ -4382,7 +5515,7 @@ fn cmd_snapshot_diff(db: &PackageDb, snapshot_path: &Path) {
         }
     };
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Build lookup for snapshot and current
     let snap_map: BTreeMap<&str, &SnapshotEntry> =
@@ -4472,7 +5605,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
         }
     };
 
-    let current = db.current_generation();
+    let current = current_or_exit(db);
 
     // Determine what needs to change
     let snap_map: BTreeMap<&str, &SnapshotEntry> =
@@ -4542,7 +5675,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
     all_changed.extend(remove_names.iter().cloned());
 
     let desc = format!("snapshot apply ({})", snapshot_path.display());
-    let mut new_gen = db.next_generation(&desc);
+    let mut new_gen = next_or_exit(db, &desc);
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -4552,7 +5685,7 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
     // Remove packages not in snapshot
     for name in &to_remove {
         if let Some(pkg) = current.packages.get(*name) {
-            let removed = db.cas.undeploy_package_files(&pkg.file_hashes);
+            let removed = remove_deployed(pkg.file_hashes.iter().map(|(p, _)| p.as_str())).removed;
             println!("  Removing {name}... ({removed} files removed)");
         }
         new_gen.packages.remove(*name);
@@ -4653,31 +5786,23 @@ fn cmd_snapshot_apply(db: &PackageDb, snapshot_path: &Path, dry_run: bool) {
         }
     }
 
-    match db.save_generation(&new_gen) {
-        Ok(()) => {
-            let _ = db.set_current_generation(new_gen.id);
-            log_transaction(
-                TxOperation::Install, // Closest operation type
-                new_gen.id,
-                current.id,
-                &all_changed,
-                &desc,
-            );
-            println!(
-                "\nDone. Generation {} created ({} packages).",
-                new_gen.id,
-                new_gen.packages.len()
-            );
-        }
-        Err(e) => {
-            eprintln!("pkg: failed to save generation: {e}");
-            process::exit(1);
-        }
-    }
+    commit_or_exit(db, &new_gen);
+    log_transaction(
+        TxOperation::Install, // Closest operation type
+        new_gen.id,
+        current.id,
+        &all_changed,
+        &desc,
+    );
+    println!(
+        "\nDone. Generation {} created ({} packages).",
+        new_gen.id,
+        new_gen.packages.len()
+    );
 }
 
 /// Top-level snapshot command dispatcher.
-fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
+fn cmd_snapshot(db: &PackageDb, args: &[OsString], dry_run: bool) {
     if args.is_empty() {
         println!("Usage: pkg snapshot <subcommand> [options]");
         println!();
@@ -4692,9 +5817,9 @@ fn cmd_snapshot(db: &PackageDb, args: &[String], dry_run: bool) {
         return;
     }
 
-    match args[0].as_str() {
+    match text_arg(&args[0]).as_str() {
         "export" => {
-            let path = args.get(1).map(|s| Path::new(s.as_str()));
+            let path = args.get(1).map(Path::new);
             cmd_snapshot_export(db, path);
         }
         "diff" | "compare" => {
@@ -4727,7 +5852,10 @@ fn print_usage() {
     println!(
         "pkg — Slate OS package manager
 
-Usage: pkg <command> [options] [arguments]
+Usage: pkg [--root <dir>] <command> [options] [arguments]
+
+  --root <dir>           Manage the system under <dir> -- its packages, its
+                         configuration and its files -- not the running one.
 
 Commands:
   install <pkg>...       Install packages (names from repo, or local .pkg files)
@@ -4741,9 +5869,15 @@ Commands:
   log [N|--all]          Show transaction history (default: last 20)
   list [--installed]     List packages
   search <query>         Search available packages
+  search --font <family> The packages that carry a font family
   info <pkg>             Show package details
-  rollback [gen]         Rollback to a previous generation
-  generations            List system generations
+  rollback [gen]         Put the system back as it was in a generation (by
+                         default the one before the current one), recorded as
+                         a new generation. --dry-run shows what it would do;
+                         --json reports it as one object. Exits 0 when done,
+                         1 refused (nothing changed), 2 stopped partway,
+                         3 not permitted
+  generations [--json]   List system generations
   gc [--keep N]          Garbage-collect old generations (default: keep 5)
   verify [pkg...]        Verify installed package integrity
   files <pkg>            List files owned by a package
@@ -4782,7 +5916,9 @@ Creating Packages:
 
   Reads a manifest file, locates all referenced source files relative to
   the manifest's directory, computes SHA-256 hashes, and produces a .pkg
-  archive that can be installed with 'pkg install'.
+  archive that can be installed with 'pkg install'. The 'fonts:' line is
+  written from the package's font files (.ttf .otf .ttc .otc): the
+  families they hold, which 'pkg search --font' finds.
 
 Package Snapshots:
   pkg snapshot export [file]   Export installed packages as portable manifest
@@ -4820,6 +5956,7 @@ Package Manifest Format:
   license: MIT
   depends: libc >= 0.1.0, libcrypto >= 1.0.0
   provides: /usr/bin/mycommand
+  fonts: Inter, Inter Display
   capabilities: net.connect, fs.home
   file: bin/cmd -> /usr/bin/cmd 755 <sha256> <size>
   archive_hash: <sha256>
@@ -4831,34 +5968,98 @@ Package Manifest Format:
 // Main
 // ============================================================================
 
+/// `--root DIR` or `--root=DIR` at the front of `args`: the directory, and
+/// the arguments after it. `Err` names what is wrong with it.
+fn take_root(args: &[OsString]) -> Result<(Option<PathBuf>, &[OsString]), &'static str> {
+    match args.split_first() {
+        Some((first, rest)) if first == "--root" => match rest.split_first() {
+            Some((dir, rest)) if !dir.is_empty() => Ok((Some(PathBuf::from(dir)), rest)),
+            _ => Err("--root requires a directory"),
+        },
+        Some((first, rest)) => match quoting::os_bytes(first).strip_prefix(b"--root=") {
+            Some([]) => Err("--root requires a directory"),
+            Some(dir) => Ok((Some(PathBuf::from(quoting::os_from_bytes(dir))), rest)),
+            None => Ok((None, args)),
+        },
+        None => Ok((None, args)),
+    }
+}
+
+/// `arg` as text -- a package's name, a query, a subcommand or an option,
+/// which pkg's manifests and its index hold only as text -- or the run ends
+/// saying so. (A path is taken as bytes where one is expected, and never
+/// comes here.)
+fn text_arg(arg: &OsStr) -> String {
+    arg.to_str().map_or_else(
+        || {
+            eprintln!(
+                "pkg: {}: not a package name, query or option (it is not UTF-8 text)",
+                quoteaf_os(arg)
+            );
+            process::exit(1)
+        },
+        str::to_string,
+    )
+}
+
+/// Each of `args` as text, as [`text_arg`] takes one.
+fn text_args(args: &[OsString]) -> Vec<String> {
+    args.iter().map(|a| text_arg(a)).collect()
+}
+
 fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let all: Vec<OsString> = env::args_os().skip(1).collect();
+    let args: Vec<OsString> = match take_root(&all) {
+        Ok((root, rest)) => {
+            if let Some(root) = root {
+                // `main` sets it once, here, before anything reads it: the
+                // set cannot find it set already.
+                let _ = ROOT.set(root);
+            }
+            rest.to_vec()
+        }
+        Err(why) => {
+            eprintln!("pkg: {why}");
+            process::exit(1);
+        }
+    };
 
     if args.is_empty() {
         print_usage();
         process::exit(0);
     }
 
-    let db = PackageDb::new();
-    let command = args[0].as_str();
-    let rest: Vec<String> = args[1..].to_vec();
+    let db = match PackageDb::new() {
+        Ok(db) => db,
+        // `rollback --json` promises one object on stdout, whatever stops it.
+        Err(e) if args[0] == "rollback" && args.iter().any(|a| a == "--json") => RollbackReport {
+            json: true,
+            dry_run: args.iter().any(|a| a == "--dry-run"),
+            ..RollbackReport::default()
+        }
+        .finish(RollbackOutcome::Refused, Some(&e.to_string())),
+        Err(e) => {
+            eprintln!("pkg: {e}");
+            process::exit(1);
+        }
+    };
+    let command = text_arg(&args[0]);
+    let rest: &[OsString] = &args[1..];
 
     // Check for --dry-run flag
     let dry_run = rest.iter().any(|a| a == "--dry-run");
-    let rest_filtered: Vec<String> = rest
-        .iter()
-        .filter(|a| a.as_str() != "--dry-run")
-        .cloned()
-        .collect();
+    let rest_os: Vec<OsString> = rest.iter().filter(|a| *a != "--dry-run").cloned().collect();
+    // The words of a command that takes no path: every one must be text.
+    let words = || text_args(&rest_os);
 
-    match command {
+    match command.as_str() {
         "install" => {
             // Detect if any argument is a local .pkg file path.
             // A local path is identified by: ending in ".pkg", starting with "/" or "./",
             // or containing a path separator and pointing to an existing file.
-            let (local_paths, repo_names): (Vec<String>, Vec<String>) = rest_filtered
-                .into_iter()
-                .partition(|arg| is_local_pkg_path(arg));
+            let (local_paths, repo_names): (Vec<OsString>, Vec<OsString>) =
+                rest_os.into_iter().partition(|arg| is_local_pkg_path(arg));
+            let repo_names = text_args(&repo_names);
 
             if !local_paths.is_empty() {
                 let paths: Vec<PathBuf> = local_paths.iter().map(PathBuf::from).collect();
@@ -4872,33 +6073,67 @@ fn main() {
                 process::exit(1);
             }
         }
-        "remove" | "uninstall" => cmd_remove(&db, &rest_filtered, dry_run),
+        "remove" | "uninstall" => cmd_remove(&db, &words(), dry_run),
         "update" => cmd_update(&db),
-        "upgrade" => cmd_upgrade(&db, &rest_filtered, dry_run),
+        "upgrade" => cmd_upgrade(&db, &words(), dry_run),
         "list" | "ls" => {
             let installed_only = rest.iter().any(|a| a == "--installed" || a == "-i");
             cmd_list(&db, installed_only);
         }
         "search" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: search requires a query");
                 process::exit(1);
             }
-            cmd_search(&db, &rest_filtered.join(" "));
+            match font_query(&rest_filtered) {
+                Some(family) if family.trim().is_empty() => {
+                    eprintln!("pkg: search --font requires a font family");
+                    process::exit(1);
+                }
+                Some(family) => cmd_search_font(&db, &family),
+                None => cmd_search(&db, &rest_filtered.join(" ")),
+            }
         }
         "info" | "show" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: info requires a package name");
                 process::exit(1);
             }
             cmd_info(&db, &rest_filtered[0]);
         }
-        "generations" | "gen" => cmd_generations(&db),
+        "generations" | "gen" => {
+            let json = rest.iter().any(|a| a == "--json");
+            cmd_generations(&db, json);
+        }
         "rollback" => {
-            let target = rest_filtered.first().and_then(|s| s.parse().ok());
-            cmd_rollback(&db, target);
+            let json = rest.iter().any(|a| a == "--json");
+            let refuse = |why: &str| {
+                RollbackReport {
+                    json,
+                    dry_run,
+                    ..RollbackReport::default()
+                }
+                .finish(RollbackOutcome::Refused, Some(why))
+            };
+            let mut targets = Vec::new();
+            for word in rest_os.iter().filter(|w| *w != "--json") {
+                match word.to_str() {
+                    Some(w) => targets.push(w.to_string()),
+                    None => refuse(&format!(
+                        "rollback: {}: not a generation number",
+                        quotef_os(word)
+                    )),
+                }
+            }
+            if targets.len() > 1 {
+                refuse("rollback takes one generation at most");
+            }
+            cmd_rollback(&db, targets.first().map(String::as_str), dry_run, json);
         }
         "gc" => {
+            let rest_filtered = words();
             let mut keep = 5usize;
             let mut i = 0;
             while i < rest_filtered.len() {
@@ -4913,8 +6148,9 @@ fn main() {
             }
             cmd_gc(&db, keep);
         }
-        "verify" => cmd_verify(&db, &rest_filtered),
+        "verify" => cmd_verify(&db, &words()),
         "files" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: files requires a package name");
                 process::exit(1);
@@ -4922,13 +6158,22 @@ fn main() {
             cmd_files(&db, &rest_filtered[0]);
         }
         "which" | "owns" => {
-            if rest_filtered.is_empty() {
+            let Some(path) = rest_os.first() else {
                 eprintln!("pkg: which requires a file path");
                 process::exit(1);
+            };
+            // Every installed path is text, as the manifests that name
+            // them are: one that is not owns nothing.
+            match path.to_str() {
+                Some(path) => cmd_which(&db, path),
+                None => {
+                    eprintln!("pkg: {}: not owned by any package", quotef_os(path));
+                    process::exit(1);
+                }
             }
-            cmd_which(&db, &rest_filtered[0]);
         }
         "fetch" | "download" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: fetch requires one or more package names");
                 process::exit(1);
@@ -4936,23 +6181,24 @@ fn main() {
             cmd_fetch(&db, &rest_filtered);
         }
         "pack" => {
-            if rest_filtered.is_empty() {
+            let Some(manifest) = rest_os.first() else {
                 eprintln!("pkg: pack requires a manifest path");
                 eprintln!("Usage: pkg pack <manifest-file> [--output <file.pkg>]");
                 process::exit(1);
-            }
-            let manifest_path = Path::new(&rest_filtered[0]);
-            let output = rest_filtered
+            };
+            let manifest_path = Path::new(manifest);
+            let output = rest_os
                 .iter()
                 .position(|a| a == "--output" || a == "-o")
-                .and_then(|i| rest_filtered.get(i + 1))
-                .map(|s| Path::new(s.as_str()));
+                .and_then(|i| rest_os.get(i + 1))
+                .map(Path::new);
             cmd_pack(manifest_path, output);
         }
-        "repo" | "repository" => cmd_repo(&rest_filtered),
-        "log" | "history" => cmd_log(&rest_filtered),
-        "snapshot" | "snap" => cmd_snapshot(&db, &rest_filtered, dry_run),
+        "repo" | "repository" => cmd_repo(&words()),
+        "log" | "history" => cmd_log(&words()),
+        "snapshot" | "snap" => cmd_snapshot(&db, &rest_os, dry_run),
         "rdeps" | "reverse-deps" | "dependents" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: rdeps requires a package name");
                 process::exit(1);
@@ -4961,6 +6207,7 @@ fn main() {
         }
         "libs" | "libraries" => cmd_libs(&db),
         "upgrade-lib" => {
+            let rest_filtered = words();
             if rest_filtered.is_empty() {
                 eprintln!("pkg: upgrade-lib requires a library package name");
                 process::exit(1);
@@ -4981,14 +6228,12 @@ fn main() {
 ///
 /// Heuristic: it's a local path if it ends in `.pkg`, starts with `/` or `./`
 /// or `../`, or contains a path separator and the file exists.
-fn is_local_pkg_path(arg: &str) -> bool {
-    if arg.ends_with(".pkg") {
+fn is_local_pkg_path(arg: &OsStr) -> bool {
+    let bytes = quoting::os_bytes(arg);
+    if bytes.ends_with(b".pkg") {
         return true;
     }
-    if arg.starts_with('/') || arg.starts_with("./") || arg.starts_with("../") {
-        return Path::new(arg).exists();
-    }
-    if arg.contains('/') {
+    if bytes.contains(&b'/') {
         return Path::new(arg).exists();
     }
     false
@@ -5009,6 +6254,96 @@ mod tests {
 
     use scratchdir::ScratchDir;
     use std::path::Path;
+
+    // ---- --root confines every path ----
+
+    #[test]
+    fn a_path_under_root_cannot_climb_out_of_it() {
+        let root = Path::new("/mnt/target");
+        assert_eq!(
+            super::resolve_in_root(root, "/../../etc/profile", false).unwrap(),
+            root.join("etc").join("profile")
+        );
+        assert_eq!(
+            super::resolve_in_root(root, "/usr/./bin/../lib/x", false).unwrap(),
+            root.join("usr/lib/x")
+        );
+        assert_eq!(super::resolve_in_root(root, "/", false).unwrap(), root);
+    }
+
+    #[test]
+    fn a_destination_that_climbs_or_is_relative_is_not_an_entry() {
+        assert!(super::parse_file_entry("a -> /usr/bin/a 0755 abc 3").is_some());
+        assert!(super::parse_file_entry("a -> /../../etc/x 0644 abc 3").is_none());
+        assert!(super::parse_file_entry("a -> /usr/../../x 0644 abc 3").is_none());
+        assert!(super::parse_file_entry("a -> usr/bin/a 0755 abc 3").is_none());
+        let manifest = |file: &str| {
+            super::PackageManifest::parse(&format!("name: p\nversion: 1.0.0\nfile: {file}\n"))
+        };
+        assert!(manifest("a -> /usr/bin/a 0755 abc 3").is_some());
+        assert!(
+            manifest("a -> /../../etc/x 0644 abc 3").is_none(),
+            "the whole manifest is refused, not the entry skipped"
+        );
+    }
+
+    /// A link inside the root -- absolute or relative -- is followed inside
+    /// it; the last component is a name, never followed.
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_under_root_is_followed_inside_it() {
+        let scratch = ScratchDir::new("pkg-resolve-in-root");
+        let root = scratch.path("root");
+        std::fs::create_dir_all(root.join("var")).unwrap();
+        std::fs::create_dir_all(root.join("usr/lib")).unwrap();
+        std::os::unix::fs::symlink("/run", root.join("var/run")).unwrap();
+        std::os::unix::fs::symlink("usr/lib", root.join("lib")).unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", root.join("usr/lib/last")).unwrap();
+        std::os::unix::fs::symlink("loop", root.join("loop")).unwrap();
+        assert_eq!(
+            super::resolve_in_root(&root, "/var/run/foo", false).unwrap(),
+            root.join("run/foo")
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/lib/libc.so", false).unwrap(),
+            root.join("usr/lib/libc.so")
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/lib/last", false).unwrap(),
+            root.join("usr/lib/last")
+        );
+        assert!(
+            super::resolve_in_root(&root, "/loop/x", false).is_err(),
+            "a link that never ends is refused, not taken as a name"
+        );
+        // Forty links spent, then one more on the way: refused, not left for
+        // the kernel to follow from the host's root.
+        std::fs::create_dir_all(root.join("u40")).unwrap();
+        std::os::unix::fs::symlink("/lib", root.join("u40/lib")).unwrap();
+        std::os::unix::fs::symlink("u1", root.join("usr2")).unwrap();
+        for k in 1..40 {
+            std::os::unix::fs::symlink(format!("u{}", k + 1), root.join(format!("u{k}"))).unwrap();
+        }
+        assert!(super::resolve_in_root(&root, "/usr2/lib/libx.so", false).is_err());
+        // pkg's own directory, a link planted to the host's `/`: followed
+        // inside the root, so the store's files land there.
+        std::fs::create_dir_all(root.join("var/pkg")).unwrap();
+        std::os::unix::fs::symlink("/", root.join("var/pkg/cas")).unwrap();
+        assert_eq!(
+            super::resolve_in_root(&root, "/var/pkg/cas", true).unwrap(),
+            root
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/var/pkg/cas", false).unwrap(),
+            root.join("var/pkg/cas"),
+            "as a package's file: the last component a name"
+        );
+        assert_eq!(
+            super::resolve_in_root(&root, "/u40/lib/libx.so", false).unwrap(),
+            root.join("usr/lib/libx.so"),
+            "u40/lib -> /lib, from the root, and the root's lib -> usr/lib"
+        );
+    }
 
     fn write(scratch: &ScratchDir, name: &str, body: &[u8]) -> std::path::PathBuf {
         let path = scratch.path(name);
@@ -5176,5 +6511,467 @@ mod tests {
         assert_eq!(store.list_blobs().expect("list"), vec![first]);
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- font families ----
+
+    /// A font with only what the parser needs and the names given: one
+    /// empty glyph, and a `name` table of `(name ID, text)` records for
+    /// Windows, Unicode BMP, US English.
+    fn named_font(names: &[(u16, &str)]) -> Vec<u8> {
+        let mut head = vec![0u8; 54];
+        head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes());
+        head[18..20].copy_from_slice(&1000u16.to_be_bytes());
+        // Long `loca` offsets.
+        head[50..52].copy_from_slice(&1i16.to_be_bytes());
+        let mut hhea = vec![0u8; 36];
+        hhea[34..36].copy_from_slice(&1u16.to_be_bytes());
+        let mut maxp = vec![0u8; 6];
+        maxp[4..6].copy_from_slice(&1u16.to_be_bytes());
+        let hmtx = vec![0u8; 4];
+        let loca = vec![0u8; 8];
+        let glyf = vec![0u8; 4];
+
+        let mut strings = Vec::new();
+        let mut records = Vec::new();
+        for &(id, text) in names {
+            let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
+            for v in [
+                3u16,
+                1,
+                0x0409,
+                id,
+                utf16.len() as u16,
+                strings.len() as u16,
+            ] {
+                records.extend_from_slice(&v.to_be_bytes());
+            }
+            strings.extend_from_slice(&utf16);
+        }
+        let mut name = Vec::new();
+        let count = names.len() as u16;
+        for v in [0u16, count, 6 + 12 * count] {
+            name.extend_from_slice(&v.to_be_bytes());
+        }
+        name.extend_from_slice(&records);
+        name.extend_from_slice(&strings);
+
+        let tables: [(&[u8; 4], Vec<u8>); 7] = [
+            (b"glyf", glyf),
+            (b"head", head),
+            (b"hhea", hhea),
+            (b"hmtx", hmtx),
+            (b"loca", loca),
+            (b"maxp", maxp),
+            (b"name", name),
+        ];
+        let mut font = Vec::new();
+        font.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+        for v in [tables.len() as u16, 64, 2, 48] {
+            font.extend_from_slice(&v.to_be_bytes());
+        }
+        let mut offset = 12 + 16 * tables.len();
+        let mut body = Vec::new();
+        for (tag, data) in &tables {
+            font.extend_from_slice(*tag);
+            font.extend_from_slice(&0u32.to_be_bytes());
+            font.extend_from_slice(&(offset as u32).to_be_bytes());
+            font.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            let mut padded = data.clone();
+            padded.resize(data.len().div_ceil(4) * 4, 0);
+            offset += padded.len();
+            body.extend_from_slice(&padded);
+        }
+        font.extend_from_slice(&body);
+        font
+    }
+
+    fn manifest(text: &str) -> PackageManifest {
+        PackageManifest::parse(text).expect("a manifest")
+    }
+
+    #[test]
+    fn a_font_file_s_families_are_its_typographic_and_legacy_ones() {
+        let font = named_font(&[(1, "Inter Display"), (2, "Regular"), (16, " Inter ")]);
+        assert_eq!(
+            families_in(font),
+            Ok(vec!["Inter".to_string(), "Inter Display".to_string()])
+        );
+        assert_eq!(families_in(named_font(&[(2, "Bold")])), Ok(vec![]));
+        assert!(families_in(b"not a font".to_vec()).is_err());
+    }
+
+    #[test]
+    fn font_files_are_known_by_the_index_s_extensions() {
+        for path in ["fonts/Inter.ttf", "a/B.OTF", "c.ttc", "d.Otc"] {
+            assert!(is_font_file(path), "{path}");
+        }
+        for path in ["inter.woff2", "ttf", "README", "x.ttf.txt"] {
+            assert!(!is_font_file(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_font_counts_where_the_index_will_find_it_installed() {
+        for dst in [
+            "/usr/share/fonts/Inter.ttf",
+            "/usr/share/fonts/truetype/inter/Inter.OTF",
+            "/usr/share/fonts/a/b/c/d/e/f/six-deep.ttc",
+        ] {
+            assert!(indexed_font(dst), "{dst}");
+        }
+        for dst in [
+            // Where the index does not look.
+            "/usr/lib/game/Inter.ttf",
+            "/usr/share/fontsx/Inter.ttf",
+            "/usr/share/fonts/a/b/c/d/e/f/g/seven-deep.ttf",
+            // Not a font, by the index's extensions.
+            "/usr/share/fonts/Inter.woff2",
+            "/usr/share/fonts/README",
+            "/usr/share/fonts/",
+            // Not a plain path.
+            "/usr/share/fonts/../Inter.ttf",
+            "/usr/share/fonts//Inter.ttf",
+            "/usr/share/fonts/./Inter.ttf",
+        ] {
+            assert!(!indexed_font(dst), "{dst}");
+        }
+    }
+
+    /// `(source, what it holds)`, as `cmd_pack` hands a file to `pack_fonts`.
+    fn read_font(src: &str, data: Vec<u8>) -> (String, Result<Vec<String>, String>) {
+        (src.to_string(), families_in(data))
+    }
+
+    #[test]
+    fn pack_writes_the_families_the_files_hold_and_says_what_disagrees() {
+        let inter = named_font(&[(1, "Inter"), (16, "Inter")]);
+        let display = named_font(&[(1, "inter display"), (16, "INTER")]);
+        let mut m = manifest("name: fonts-inter\nfonts: Inter, Comic Sans\n");
+        let warnings = pack_fonts(
+            &mut m,
+            [
+                read_font("Inter-Regular.ttf", inter),
+                read_font("InterDisplay.otf", display),
+                read_font("broken.ttf", b"\0\x01\0\0".to_vec()),
+            ],
+        );
+        // Each family once whatever its case, in the order of its key; the
+        // first spelling met is kept.
+        assert_eq!(m.fonts, vec!["Inter", "inter display"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings[0].contains("broken.ttf"), "{warnings:?}");
+        assert!(warnings[1].contains("Comic Sans"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_family_that_would_break_the_line_is_left_out() {
+        let forged = named_font(&[(1, "Inter\nhook-post-install: /tmp/x"), (16, "Foo, Inc")]);
+        let fine = named_font(&[(1, "Inter")]);
+        let mut m = manifest("name: fonts-inter\n");
+        let warnings = pack_fonts(
+            &mut m,
+            [read_font("forged.ttf", forged), read_font("fine.ttf", fine)],
+        );
+        assert_eq!(m.fonts, vec!["Inter"]);
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(
+            warnings.iter().all(|w| w.contains("forged.ttf")),
+            "{warnings:?}"
+        );
+        let text = m.serialize();
+        assert!(!text.contains("hook-post-install"), "{text}");
+        assert!(listable_family("Fira Code"));
+        for name in ["a,b", "a\nb", "a\rb", "a\u{1b}[31m", "a\u{7f}", "a\u{85}b"] {
+            assert!(!listable_family(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn a_font_file_that_names_no_family_is_warned_of() {
+        let mut m = manifest("name: fonts-x\n");
+        let warnings = pack_fonts(&mut m, [read_font("bold.ttf", named_font(&[(2, "Bold")]))]);
+        assert!(m.fonts.is_empty());
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("names no font family"), "{warnings:?}");
+    }
+
+    #[test]
+    fn a_search_answer_is_a_line_and_its_description_indented() {
+        let described = manifest("name: fonts-x\nversion: 1.0.0\ndescription: Fira fonts\n");
+        assert_eq!(
+            search_result(&described, "[installed]"),
+            "fonts-x 1.0.0 [installed]\n  Fira fonts\n"
+        );
+        let bare = manifest("name: tools\nversion: 2.0.0\n");
+        assert_eq!(search_result(&bare, ""), "tools 2.0.0 \n");
+    }
+
+    #[test]
+    fn info_names_the_fonts_only_of_a_package_that_has_some() {
+        let m = manifest("name: fonts-fira\nfonts: Fira Code, Fira Mono\n");
+        assert_eq!(
+            fonts_line(&m).as_deref(),
+            Some("Fonts:     Fira Code, Fira Mono")
+        );
+        assert_eq!(fonts_line(&manifest("name: tools\n")), None);
+    }
+
+    #[test]
+    fn a_package_without_font_files_carries_no_fonts_whatever_it_said() {
+        let mut m = manifest("name: tools\nfonts: Inter\n");
+        let warnings = pack_fonts(&mut m, Vec::new());
+        assert!(m.fonts.is_empty());
+        assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn a_family_is_looked_for_in_the_version_install_would_take() {
+        let index = [
+            manifest("name: fonts-x\nversion: 1.0.0\nfonts: Fira Code\n"),
+            manifest("name: fonts-x\nversion: 2.0.0\n"),
+            manifest("name: fonts-y\nversion: 1.0.0\nfonts: Fira Code\n"),
+            manifest("name: fonts-y\nversion: 1.1.0\nfonts: Fira Code\n"),
+            manifest("name: fonts-a\nversion: 3.0.0\nfonts: fira code\n"),
+        ];
+        let found: Vec<(&str, String)> = font_carriers(&index, "Fira Code")
+            .into_iter()
+            .map(|p| (p.name.as_str(), p.version.to_string()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("fonts-a", "3.0.0".to_string()),
+                ("fonts-y", "1.1.0".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn an_installed_copy_without_the_family_is_upgradable() {
+        let listed = manifest("name: fonts-x\nversion: 2.0.0\nfonts: Fira Code\n");
+        let old = manifest("name: fonts-x\nversion: 1.0.0\n");
+        let old_too = manifest("name: fonts-x\nversion: 1.0.0\nfonts: Fira Code\n");
+        let family = "Fira Code";
+        assert_eq!(font_status(None, &listed, family), "");
+        assert_eq!(
+            font_status(Some((&old.version, Some(&old))), &listed, family),
+            "[upgradable]"
+        );
+        assert_eq!(
+            font_status(Some((&old_too.version, Some(&old_too))), &listed, family),
+            "[installed]"
+        );
+        // No manifest to read: the version decides.
+        assert_eq!(
+            font_status(Some((&old.version, None)), &listed, family),
+            "[upgradable]"
+        );
+        assert_eq!(
+            font_status(Some((&listed.version, None)), &listed, family),
+            "[installed]"
+        );
+    }
+
+    #[test]
+    fn the_root_comes_first_in_either_spelling() {
+        let words = |w: &[&str]| w.iter().map(OsString::from).collect::<Vec<_>>();
+        let args = words(&["--root", "/mnt/t", "list"]);
+        let (root, rest) = take_root(&args).unwrap();
+        assert_eq!(
+            (root.as_deref(), rest),
+            (Some(Path::new("/mnt/t")), &args[2..])
+        );
+        let args = words(&["--root=/mnt/t", "list", "--root"]);
+        let (root, rest) = take_root(&args).unwrap();
+        assert_eq!(
+            (root.as_deref(), rest),
+            (Some(Path::new("/mnt/t")), &args[1..])
+        );
+        let args = words(&["list", "--root", "x"]);
+        assert_eq!(take_root(&args).unwrap(), (None, &args[..]));
+        assert!(take_root(&words(&["--root"])).is_err());
+        assert!(take_root(&words(&["--root", ""])).is_err());
+        assert!(take_root(&words(&["--root="])).is_err());
+        assert_eq!(take_root(&[]).unwrap(), (None, &[][..]));
+    }
+
+    #[test]
+    fn font_is_asked_for_wherever_it_stands() {
+        let words = |w: &[&str]| w.iter().map(|s| (*s).to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            font_query(&words(&["--font", "Fira", "Code"])).as_deref(),
+            Some("Fira Code")
+        );
+        assert_eq!(
+            font_query(&words(&["Fira", "Code", "--font"])).as_deref(),
+            Some("Fira Code")
+        );
+        assert_eq!(
+            font_query(&words(&["--font=Fira", "Code"])).as_deref(),
+            Some("Fira Code")
+        );
+        assert_eq!(font_query(&words(&["--font="])).as_deref(), Some(""));
+        assert_eq!(font_query(&words(&["fira"])), None);
+        assert_eq!(font_query(&words(&["--fonts", "x"])), None);
+    }
+
+    #[test]
+    fn the_fonts_line_survives_a_round_trip() {
+        let m = manifest("name: fonts-fira\nversion: 6.2.0\nfonts: Fira Code , Fira Mono,\n");
+        assert_eq!(m.fonts, vec!["Fira Code", "Fira Mono"]);
+        let again = manifest(&m.serialize());
+        assert_eq!(again.fonts, m.fonts);
+        assert!(m.serialize().contains("\nfonts: Fira Code, Fira Mono\n"));
+        assert!(!manifest("name: tools\n").serialize().contains("fonts:"));
+    }
+
+    #[test]
+    fn a_family_is_found_whatever_its_case_or_spaces() {
+        let m = manifest("name: fonts-fira\nfonts: Fira Code, Fira Mono\n");
+        assert!(carries_font(&m, "Fira Code"));
+        assert!(carries_font(&m, "  fira code "));
+        assert!(carries_font(&m, "FIRA MONO"));
+        assert!(!carries_font(&m, "Fira"));
+        assert!(!carries_font(&m, "Fira Sans"));
+        assert!(!carries_font(&manifest("name: tools\n"), "Fira Code"));
+    }
+
+    // ---- rollback: what going back changes ----
+
+    fn installed(version: &str, manifest: &str, files: &[(&str, &str)]) -> InstalledPackage {
+        InstalledPackage {
+            version: Version::parse(version).unwrap(),
+            manifest_hash: manifest.to_string(),
+            file_hashes: files
+                .iter()
+                .map(|(p, h)| (p.to_string(), h.to_string()))
+                .collect(),
+            installed_at: 0,
+            explicit: true,
+        }
+    }
+
+    fn generation(id: u64, packages: &[(&str, InstalledPackage)]) -> Generation {
+        let mut g = Generation::new(id, "test", 0);
+        for (name, pkg) in packages {
+            g.packages.insert(name.to_string(), pkg.clone());
+        }
+        g
+    }
+
+    #[test]
+    fn a_rollback_removes_restores_and_changes_by_name() {
+        let shared = installed("1.0.0", "m-shared", &[("/usr/lib/libx.so", "h1")]);
+        let now = generation(
+            3,
+            &[
+                (
+                    "a",
+                    installed(
+                        "2.0.0",
+                        "m-a2",
+                        &[("/usr/bin/a", "a2"), ("/usr/share/a/new", "n")],
+                    ),
+                ),
+                (
+                    "only-now",
+                    installed(
+                        "1.0.0",
+                        "m-n",
+                        &[("/usr/bin/n", "n1"), ("/usr/lib/libx.so", "h1")],
+                    ),
+                ),
+                ("same", shared.clone()),
+            ],
+        );
+        let then = generation(
+            1,
+            &[
+                (
+                    "a",
+                    installed(
+                        "1.0.0",
+                        "m-a1",
+                        &[("/usr/bin/a", "a1"), ("/usr/share/a/old", "o")],
+                    ),
+                ),
+                (
+                    "only-then",
+                    installed("3.0.0", "m-t", &[("/usr/bin/t", "t1")]),
+                ),
+                ("same", shared),
+            ],
+        );
+        let plan = plan_rollback(&now, &then);
+        assert_eq!(
+            plan,
+            RollbackPlan {
+                remove: vec!["only-now".into()],
+                restore: vec!["only-then".into()],
+                change: vec!["a".into()],
+            }
+        );
+        // What only the current copies have goes; a path the target
+        // installs too stays, whoever installs it now.
+        assert_eq!(
+            paths_to_remove(&now, &then, &plan, &HashSet::new()),
+            ["/usr/bin/n", "/usr/share/a/new"]
+        );
+        // A package its pre-install hook held back keeps what it has.
+        assert_eq!(
+            paths_to_remove(&now, &then, &plan, &HashSet::from(["a"])),
+            ["/usr/bin/n"]
+        );
+        // The same version with other contents is a change too.
+        let rebuilt = generation(
+            1,
+            &[(
+                "same",
+                installed("1.0.0", "m-shared", &[("/usr/lib/libx.so", "h2")]),
+            )],
+        );
+        let back = generation(
+            2,
+            &[(
+                "same",
+                installed("1.0.0", "m-shared", &[("/usr/lib/libx.so", "h1")]),
+            )],
+        );
+        assert_eq!(plan_rollback(&back, &rebuilt).change, ["same"]);
+        assert_eq!(plan_rollback(&back, &back), RollbackPlan::default());
+    }
+
+    #[test]
+    fn a_generation_record_that_does_not_read_is_refused_not_zeroed() {
+        let good =
+            generation(7, &[("a", installed("1.0.0", "m", &[("/usr/bin/a", "h")]))]).serialize();
+        assert_eq!(Generation::parse(&good).map(|g| g.id), Some(7));
+        for (from, to) in [
+            ("generation: 7", "generation: seven"),
+            ("parent: 0", "parent: -1"),
+            ("  version: 1.0.0", "  version: one"),
+            ("  file: /usr/bin/a h", "  file: /usr/bin/a"),
+        ] {
+            assert!(good.contains(from), "{from}");
+            let bad = good.replace(from, to);
+            assert!(Generation::parse(&bad).is_none(), "{to:?} was read");
+        }
+    }
+
+    #[test]
+    fn a_file_written_atomically_is_whole_and_leaves_no_temporary() {
+        let scratch = ScratchDir::new("pkg-atomic");
+        let path = scratch.path("current");
+        write_atomically(&path, b"1").unwrap();
+        write_atomically(&path, b"22").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"22");
+        let left: Vec<_> = fs::read_dir(scratch.path(""))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(write_atomically(&scratch.path("no/such/dir/file"), b"x").is_err());
     }
 }

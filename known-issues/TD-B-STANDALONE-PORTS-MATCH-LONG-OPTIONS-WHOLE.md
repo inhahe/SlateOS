@@ -10,7 +10,7 @@ by hand and match long options by their whole name, so `flock --verb` or
 loop has its own edge cases around values, `=`, and operands.
 
 **Where:** the standalone ports that already share `usageerror` (the
-diagnostic wording) but not a parser -- `blockdev`, `capsh`, `chattr`,
+diagnostic wording) but not a parser -- `blockdev`, `capsh`,
 `hostnamectl`, `objdump`, `resolvectl`,
 `route`, `sanitize`, `systemctl` -- plus hand-parsed programs that do
 not use it yet. (`tput` was one; it is now ncurses 6.4's, with `clear` and
@@ -23,7 +23,10 @@ old hand parser took an unknown option for the file to lock. And `lsmem`,
 now a port of util-linux's printing through the `smartcols` crate, whose old
 parser refused `--summ`, and whose old program invented a block size when it
 could not read one -- design-decisions §1036. And `prlimit`, `column`,
-`lsirq` and `lscpu`, likewise ported onto `getoptlong` and `smartcols`.)
+`lsirq` and `lscpu`, likewise ported onto `getoptlong` and `smartcols`.
+And `chattr` and `lsattr`, now e2fsprogs 1.47.0's: `lsattr` parses with
+plain `getopt` (`getoptlong`'s `short_only`), and `chattr` walks argv itself,
+as upstream's does -- 2026-10-17.)
 
 **The proper fix,** now possible: `getoptlong` (extracted from
 `coreutils/src/getopt.rs` on 2026-09-26) is the shared parser. Converting a

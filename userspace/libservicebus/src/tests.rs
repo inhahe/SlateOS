@@ -917,3 +917,11 @@ fn try_recv_is_none_when_nothing_waits_and_the_channel_s_error_otherwise() {
     let mut l = lifecycle_over(vec![Incoming::Fails(BusError::Disconnected)]);
     assert_eq!(l.try_recv(), Err(BusError::Disconnected));
 }
+
+#[test]
+fn wiping_a_payload_leaves_no_password_behind() {
+    let mut payload = fields::encode(&[b"1".as_slice(), b"correct horse".as_slice()]);
+    assert!(payload.windows(7).any(|w| w == b"correct"));
+    wipe(&mut payload);
+    assert!(payload.iter().all(|&b| b == 0));
+}

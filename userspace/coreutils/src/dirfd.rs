@@ -474,33 +474,10 @@ struct CDirent {
     d_name: [u8; 256],
 }
 
-/// `struct stat`, in the layout `posix/src/stat.rs` declares — which is itself
-/// documented as matching Linux x86-64's, so the one declaration serves both
-/// the host build and the SlateOS one.
-///
-/// Only `st_dev`, `st_ino`, `st_mode`, `st_size` and `st_mtim` are read. The rest is
-/// present so the struct is the right *size*: `fstat` writes all of it, and a
-/// short buffer would be a stack overwrite rather than a wrong answer.
+// `struct stat`, as libcall declares it once for every program (its size
+// checked there): `fstat` writes all 144 bytes of it.
 #[cfg(unix)]
-#[repr(C)]
-#[derive(Default)]
-struct CStat {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    _pad0: i32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atim: CTimespec,
-    st_mtim: CTimespec,
-    st_ctim: CTimespec,
-    _reserved: [i64; 3],
-}
+use libcall::file::Stat as CStat;
 
 /// `struct timespec`, in the layout `posix/src/stat.rs` declares.
 #[cfg(unix)]
@@ -510,12 +487,6 @@ struct CTimespec {
     tv_sec: i64,
     tv_nsec: i64,
 }
-
-/// The size [`CStat`] must have, checked here rather than discovered as a
-/// corrupted stack: `fstat` writes 144 bytes on x86-64 whatever this file
-/// thinks, so a declaration that drifted from the C one has to fail the build.
-#[cfg(unix)]
-const _: () = assert!(core::mem::size_of::<CStat>() == 144);
 
 /// The `open` flags used here, as Linux numbers them and as
 /// `posix/src/fcntl.rs` declares them.
@@ -595,7 +566,7 @@ impl Stat {
             ino: st.st_ino,
             #[allow(clippy::cast_sign_loss)]
             size: st.st_size.max(0) as u64,
-            mtime: st.st_mtim.tv_sec,
+            mtime: st.st_mtime,
         }
     }
 }

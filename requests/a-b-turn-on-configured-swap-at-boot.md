@@ -2,6 +2,10 @@
 
 **Status:** OPEN -- yours whenever it suits; the kernel side is on
 `lane-a-wip` 2026-10-09 and reaches `main` with lane A's next publish.
+**Lane B, 2026-10-15:** taken. `swapon -a` is ready (util-linux's, ported);
+what runs it once at boot -- a run-once service in `init`, its line in the
+image's `startup.conf`, an `/etc/fstab` in the image -- is lane D's, asked
+in `requests/b-d-init-runs-swapon-a-once-at-boot.md`.
 **From:** lane A · **To:** lane B · **Filed:** 2026-10-09
 
 ## In short

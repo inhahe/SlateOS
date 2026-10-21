@@ -1,0 +1,11 @@
+[package]
+name = "bcnumber"
+version = "0.1.0"
+edition = "2024"
+description = "GNU bc 1.07.1's number.c, ported: the arbitrary-precision decimal arithmetic bc and dc compute with"
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

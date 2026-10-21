@@ -8,6 +8,11 @@
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
+use quoting::escape_unprintable;
+use ulclosestream::warnx;
+#[cfg(unix)]
+use ulclosestream::{stderr_write, warn};
+
 /// `ENOTTY`: what a host without the calls answers.
 #[cfg(not(unix))]
 pub const ENOTTY: i32 = 25;
@@ -301,5 +306,100 @@ pub fn mode(meta: &std::fs::Metadata) -> u32 {
         } else {
             crate::S_IFREG
         }
+    }
+}
+
+/// `flock(fd, operation)`.
+#[cfg(unix)]
+fn flock(file: &File, op: i32) -> Result<(), i32> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn flock(fd: i32, operation: i32) -> i32;
+    }
+    // SAFETY: flock only takes the descriptor, which is open.
+    let rc = unsafe { flock(file.as_raw_fd(), op) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(crate::errno_of(&std::io::Error::last_os_error()))
+    }
+}
+
+/// `blkdev_lock(fd, devname, lockmode)` from `lib/blkdev.c`: an exclusive
+/// `flock` on the device, as `--lock` (or `$LOCK_BLOCK_DEVICE`) asks --
+/// waiting, with a message, when another holds it. 0, or not 0 when the
+/// device must be left alone; what went wrong said on stderr, the
+/// program named `short`.
+pub fn lock(file: &File, devname: &[u8], lockmode: Option<&[u8]>, short: &[u8]) -> i32 {
+    let env = std::env::var_os("LOCK_BLOCK_DEVICE").map(|v| quoting::os_bytes(&v).into_owned());
+    let Some(mode) = lockmode.map(<[u8]>::to_vec).or(env) else {
+        return 0;
+    };
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let oper = if mode.eq_ignore_ascii_case(b"yes") || mode == b"1" {
+        LOCK_EX
+    } else if mode.eq_ignore_ascii_case(b"nonblock") {
+        LOCK_EX | LOCK_NB
+    } else if mode.eq_ignore_ascii_case(b"no") || mode == b"0" {
+        return 0;
+    } else {
+        warnx(
+            short,
+            &format!("unsupported lock mode: {}", escape_unprintable(&mode)),
+        );
+        return -22;
+    };
+    #[cfg(unix)]
+    {
+        /// `EWOULDBLOCK`.
+        const EWOULDBLOCK: i32 = 11;
+        let mut msg = false;
+        if oper & LOCK_NB == 0 {
+            // Without blocking first, to have a message to print.
+            match flock(file, oper | LOCK_NB) {
+                Ok(()) => return 0,
+                Err(EWOULDBLOCK) => {
+                    stderr_write(
+                        format!(
+                            "{}: {}: device already locked, waiting to get lock ... ",
+                            escape_unprintable(short),
+                            escape_unprintable(devname)
+                        )
+                        .as_bytes(),
+                    );
+                    msg = true;
+                }
+                Err(_) => {}
+            }
+        }
+        match flock(file, oper) {
+            Ok(()) => {
+                if msg {
+                    stderr_write(b"OK\n");
+                }
+                0
+            }
+            Err(EWOULDBLOCK) => {
+                warnx(
+                    short,
+                    &format!("{}: device already locked", escape_unprintable(devname)),
+                );
+                -1
+            }
+            Err(e) => {
+                warn(
+                    short,
+                    &format!("{}: failed to get lock", escape_unprintable(devname)),
+                    &std::io::Error::from_raw_os_error(e),
+                );
+                -1
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, devname, oper);
+        0
     }
 }

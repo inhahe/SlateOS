@@ -66,9 +66,9 @@ fn hint_errnos_are_what_upstream_leaves() {
 
 #[test]
 fn options_map_to_their_long_names() {
-    assert_eq!(option_to_longopt(i32::from(b'n')), Some("match-types"));
-    assert_eq!(option_to_longopt(i32::from(b'u')), Some("usages"));
-    assert_eq!(option_to_longopt(i32::from(b'w')), None);
+    assert_eq!(OPTIONS.name_of(i32::from(b'n')), Some("match-types"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'u')), Some("usages"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'w')), None);
     assert_eq!(LONGS.len(), LONG_VALS.len());
 }
 

@@ -73,7 +73,6 @@ unit of review is a file; a crate-level count would hide a new violation in
 from __future__ import annotations
 
 import os
-import posixpath
 import re
 import subprocess
 import sys
@@ -90,7 +89,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # one matters because this script's own self-test builds one.
 import gitenv  # noqa: E402
 import gittree  # noqa: E402
-from rustlex import live_code  # noqa: E402
+from rustlex import live_code, test_module_files  # noqa: E402
 from safewrite import write_text  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -130,46 +129,21 @@ TEST_DIRS = ("tests", "benches")
 #
 # Found from the declarations, resolved as cargo resolves them, not by name: a
 # `test.rs` is not always test code (`coreutils/src/bin/test.rs` is the `test`
-# utility), and test code is not always called `tests`. A declaration this
-# misreads -- a crate root it does not know is one -- leaves its module read as
-# production, which is where the gate stood before.
-_TEST_MOD_DECL = re.compile(
-    r"^[ \t]*#\[cfg\(test\)\]\s*"
-    r"(?:(?:#\[[^\n]*\]|//[^\n]*)\s*)*"
-    r"(?:pub(?:\([^)\n]*\))?\s+)?mod\s+(?:r#)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*;",
-    re.MULTILINE,
-)
-_PATH_ATTR = re.compile(r'#\[path\s*=\s*"(?P<path>[^"\n]+)"\s*\]')
+# utility), and test code is not always called `tests`. The resolution is
+# `rustlex.test_module_files`, the one answer every gate shares
+# (requests/e-abc-one-answer-to-which-files-are-test-modules.md).
 
 
-def _module_dir(rel: str) -> str:
-    """Where `mod x;` in the file `rel` looks for `x`: beside a crate root or a
-    `mod.rs`, and in the directory named for the file otherwise."""
-    parent, _, base = rel.rpartition("/")
-    if base in ("lib.rs", "main.rs", "mod.rs", "build.rs") or parent.endswith("/src/bin"):
-        return parent
-    return f"{parent}/{base[: -len('.rs')]}"
-
-
-def test_modules(sources: list[tuple[str, str | None]]) -> tuple[set[str], tuple[str, ...]]:
-    """The files of the modules `sources` declare under `#[cfg(test)]`, and
-    the directories holding those modules' own submodules, which are test code
-    too."""
-    files: set[str] = set()
-    dirs: list[str] = []
-    for rel, text in sources:
-        if text is None or "#[cfg(test)]" not in text:
-            continue
-        for decl in _TEST_MOD_DECL.finditer(text):
-            path = _PATH_ATTR.search(decl.group(0))
-            if path:
-                # Relative to the declaring file's own directory.
-                files.add(posixpath.normpath(f"{rel.rpartition('/')[0]}/{path['path']}"))
-                continue
-            base = f"{_module_dir(rel)}/{decl['name']}"
-            files.update((f"{base}.rs", f"{base}/mod.rs"))
-            dirs.append(f"{base}/")
-    return files, tuple(dirs)
+def test_modules(sources: list[tuple[str, bytes | None]]) -> set[str]:
+    """The files among `sources` -- `(path, contents)` -- that a build
+    compiles only for its tests: those a `#[cfg(test)]` declaration loads,
+    and every module below them. A file that is not UTF-8 is still a module
+    and may still declare others, so it is read with its bad bytes replaced:
+    a declaration is ASCII."""
+    texts = {
+        Path(rel): (raw or b"").decode("utf-8", errors="replace") for rel, raw in sources
+    }
+    return {path.as_posix() for path in test_module_files(texts)}
 
 # Files whose hits are not defects, with the reason. This table records *why*
 # a file is exempt; the baseline records only *that* a site exists, which is
@@ -356,7 +330,12 @@ def positional_name_arg(line: str) -> str | None:
 
 
 def quotes_around_placeholder(fmt: str) -> bool:
-    """Do hand-written single quotes wrap an actual format *placeholder*?
+    """Do hand-written single quotes wrap an actual format *placeholder*?"""
+    return quoted_placeholders(fmt) > 0
+
+
+def quoted_placeholders(fmt: str) -> int:
+    """How many format *placeholders* hand-written single quotes wrap.
 
     Scanned the way Rust scans a format string, because the naive test --
     "contains `'{` and contains `}'`" -- cannot tell a placeholder from a
@@ -371,8 +350,10 @@ def quotes_around_placeholder(fmt: str) -> bool:
     "declined" by hand on every pass. eventbridge-cli's help text has two.
 
     The scan skips a doubled brace and, at a real placeholder, asks only
-    whether the characters immediately around it are quotes.
+    whether the characters immediately around it are quotes. It stops at an
+    unterminated `{`, past which nothing is a placeholder it can read.
     """
+    count = 0
     i, n = 0, len(fmt)
     while i < n:
         c = fmt[i]
@@ -382,16 +363,16 @@ def quotes_around_placeholder(fmt: str) -> bool:
                 continue
             j = fmt.find("}", i)
             if j == -1:
-                return False
+                break
             if i and fmt[i - 1] == "'" and j + 1 < n and fmt[j + 1] == "'":
-                return True
+                count += 1
             i = j + 1
             continue
         if c == "}" and i + 1 < n and fmt[i + 1] == "}":
             i += 2
             continue
         i += 1
-    return False
+    return count
 
 
 def hand_written_quotes(line: str) -> bool:
@@ -408,7 +389,42 @@ def hand_written_quotes(line: str) -> bool:
     m = _MESSAGE_OPEN.search(line)
     if m is None:
         return False
-    return quotes_around_placeholder(line[m.end() :])
+    return quotes_around_placeholder(line[m.end() :]) and not _quotes_wrap_only_escaped(line)
+
+
+# An argument `escape_unprintable` has rendered: one line of printable bytes,
+# every control byte -- the newline among them -- spelt `\ooo`. Nothing in it
+# can end the line, so it cannot forge one, quotes or no quotes; and the
+# quotes around it are then a port's upstream text (util-linux's `'%s'`),
+# which `quoteaf_os` would change for every value rather than only for the
+# hostile ones. Only that function, by name: a wrapper around it is not
+# known to escape anything.
+_ESCAPED_ARG = re.compile(r"^&?escape_unprintable\([^()]*\)$")
+
+
+def _quotes_wrap_only_escaped(line: str) -> bool:
+    """Whether every hand-quoted placeholder on `line` is a positional slot
+    filled by `escape_unprintable(..)`.
+
+    False whenever the call cannot be read with certainty -- a quoted named
+    capture (`'{name}'`, which no argument fills), an argument list holding
+    a literal, a slot count that does not match the arguments -- so that an
+    uncertain site stays reported.
+    """
+    call = _macro_call(line)
+    if call is None:
+        return False
+    _start, _mac, fmt, args_text, _close = call
+    slots = _positional_slots(fmt)
+    args = _split_args(args_text)
+    if slots is None or args is None or len(slots) != len(args):
+        return False
+    quoted = [arg for is_quoted, arg in zip(slots, args) if is_quoted]
+    return (
+        len(quoted) == quoted_placeholders(fmt)
+        and bool(quoted)
+        and all(_ESCAPED_ARG.match(arg) for arg in quoted)
+    )
 
 
 def is_prose(line: str) -> bool:
@@ -1034,19 +1050,20 @@ def survey_tree(tree: gittree.Tree) -> Survey:
     scanned = 0
     # Read first, judged second: whether a file is a test module is said by
     # its parent, which the walk may reach after it (`test_modules`).
-    sources: list[tuple[str, str | None]] = []
+    sources: list[tuple[str, bytes | None]] = []
     for top in ROOTS:
         for rel in tree.files_under(top):
             if not rel.endswith(".rs") or rel in IGNORE:
                 continue
             if any(part in TEST_DIRS for part in rel.split("/")):
                 continue
-            sources.append((rel, _decode(tree.read_bytes(rel))))
-    test_files, test_dirs = test_modules(sources)
-    for rel, text in sources:
-        if rel in test_files or rel.startswith(test_dirs):
+            sources.append((rel, tree.read_bytes(rel)))
+    test_files = test_modules(sources)
+    for rel, raw in sources:
+        if rel in test_files:
             continue
         scanned += 1
+        text = _decode(raw)
         if text is None:
             continue
         # Test code is not a diagnostic. This gate was the only one of the
@@ -1322,6 +1339,21 @@ def selftest() -> int:
     # Already routed through the helpers: the whole point, not a violation.
     expect("positional-quoted", 'eprintln!("cut: {}: {e}", quotef_os(path));', 0)
     expect("positional-quoted-a", 'eprintln!("cut: {}: {e}", quoteaf_os(path));', 0)
+    # Hand-written quotes around a value `escape_unprintable` has rendered: no
+    # byte of it can end the line, and the quotes are the port's upstream
+    # text (losetup's `parse_switch`, util-linux's `"%s: '%s'"`).
+    expect("quoted-escaped",
+           "_ => Err(format!(\"{errmesg}: '{}'\", escape_unprintable(arg))),", 0)
+    # ...but only that function by name, only when every quoted placeholder
+    # is such a slot, and only a slot: a named capture has no argument.
+    expect("quoted-wrapper-of-escape",
+           "_ => Err(format!(\"{errmesg}: '{}'\", shown(arg))),", 1)
+    expect("quoted-escaped-beside-raw",
+           "eprintln!(\"x: '{}' '{}'\", escape_unprintable(a), b);", 1)
+    expect("quoted-escaped-beside-named",
+           "eprintln!(\"x: '{}' '{name}'\", escape_unprintable(a));", 1)
+    expect("quoted-escaped-unquoted-raw",
+           "eprintln!(\"x: '{}' {}\", escape_unprintable(a), b);", 0)
     # `.display()` is what identifies a file name. Without that qualifier this
     # would flag every integer and enum in a `{}`, and a gate that cries wolf
     # gets switched off.
@@ -2064,10 +2096,14 @@ def selftest() -> int:
     #     refused for `format!("'{}'", c)` by the gate as it stood. Driven
     #     through `survey`, the walk the push runs, on a tree of each kind.
     hit = 'fn f() {\n    eprintln!("cut: \'{p}\': no such file");\n}\n'
-    tree = {
+    tree: dict[str, str | bytes] = {
         # A crate root's test module, one under `#[path]`, and an ordinary one.
         "src/lib.rs": "#[cfg(test)]\nmod tests;\n#[cfg(test)]\n#[path = \"oracle_cases.rs\"]\n"
-                      "mod cases;\nmod real;\nmod other;\n",
+                      "mod cases;\nmod real;\nmod other;\n#[cfg(test)]\nmod latin1;\n",
+        # A test module that is not UTF-8 is test code all the same, and so
+        # is what it declares.
+        "src/latin1.rs": b"// caf\xe9\nmod inner;\n",
+        "src/latin1/inner.rs": hit,
         "src/tests.rs": hit + "mod helper;\n",
         "src/tests/helper.rs": hit,
         "src/oracle_cases.rs": hit,
@@ -2084,7 +2120,10 @@ def selftest() -> int:
         for rel, text in tree.items():
             path = Path(td) / "userspace" / "probe" / rel
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8", newline="")
+            if isinstance(text, bytes):
+                path.write_bytes(text)
+            else:
+                path.write_text(text, encoding="utf-8", newline="")
         seen = survey(Path(td))
     want = {"userspace/probe/src/real.rs", "userspace/probe/src/bin/test.rs",
             "userspace/probe/src/other/tests.rs"}

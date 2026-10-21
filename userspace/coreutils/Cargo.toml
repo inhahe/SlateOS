@@ -95,6 +95,10 @@ ultimeutils = { path = "../ultimeutils" }
 # strerror(3)'s wording for an io::Error, which lived here as src/errmsg.rs
 # until 2026-09-26; `coreutils::errmsg` re-exports it.
 errmsg = { path = "../errmsg" }
+# GNU bc 1.07.1's interpreter, ported -- `bc` is its command line. A library
+# apart because it is most of a program's worth of modules (scanner, parser,
+# code generator, machine), as `bcnumber`, its arithmetic, is apart.
+gnubc = { path = "../gnubc" }
 # gnulib's base64.c, which `basenc`, `base64` and `cksum --base64` build on --
 # its own crate since 2026-09-27, shared with sharutils' uuencode and uudecode,
 # which bundle an older copy of the same decoder.
@@ -192,6 +196,8 @@ optionalfile = { path = "../../optionalfile" }
 scratchdir = { path = "../scratchdir" }
 # Its system that signals nothing, for the requests' tests.
 procstop = { path = "../procstop", features = ["fake"] }
+# A standard output kept in memory, for what `bc`'s usage writes.
+cstdio = { path = "../cstdio" }
 
 [lints]
 workspace = true

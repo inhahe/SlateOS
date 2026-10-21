@@ -182,7 +182,6 @@ BIN_REL = SRC_REL + "/bin"
 # Comparing these against whatever the host happens to have under that name
 # would measure the host, not us.
 NOT_GNU = {
-    "bc",  # GNU bc exists but is not coreutils and has a different option set
     "fetch",
     "logger",
     "minishell",

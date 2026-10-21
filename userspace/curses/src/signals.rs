@@ -153,6 +153,21 @@ pub fn with_slot<R>(f: impl FnOnce(&mut Option<Screen>) -> R) -> Option<R> {
     Some(r)
 }
 
+/// [`with_slot`], waiting out another thread that holds the screen rather
+/// than being refused. For a call already under way, which let the screen go
+/// to wait and must take it back to finish: refused now, it would lose what
+/// the wait read. Nothing on this thread can be holding it then -- a handler
+/// that interrupted would have let go before returning -- so the holder is
+/// another thread, which lets go when its own call ends.
+pub fn with_slot_when_free<R>(mut f: impl FnMut(&mut Option<Screen>) -> R) -> R {
+    loop {
+        if let Some(r) = with_slot(&mut f) {
+            return r;
+        }
+        std::thread::yield_now();
+    }
+}
+
 /// `f` with the screen; `None` before `initscr`, or while it is held (see
 /// [`with_slot`]).
 pub fn with<R>(f: impl FnOnce(&mut Screen) -> R) -> Option<R> {
@@ -407,6 +422,24 @@ mod tests {
         });
         assert!(caught.is_err());
         assert_eq!(with_slot(|_| 2), Some(2));
+        // Held by another thread, it is refused to a call starting, and
+        // waited for by one under way.
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            with_slot(|_| {
+                held_tx.send(()).unwrap();
+                go_rx.recv().unwrap();
+            })
+        });
+        held_rx.recv().unwrap();
+        assert_eq!(with_slot(|_| 3), None);
+        let waiter = std::thread::spawn(|| with_slot_when_free(|_| 4));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(!waiter.is_finished(), "it waits while the other holds it");
+        go_tx.send(()).unwrap();
+        assert_eq!(waiter.join().unwrap(), 4);
+        assert_eq!(holder.join().unwrap(), Some(()));
     }
 
     #[test]

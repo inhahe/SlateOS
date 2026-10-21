@@ -15,7 +15,7 @@
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use swapon::{
     Common, Stdout, errtryhelp, get_swap_prober, match_swap, probe_value, short_name, shown,
     stderr_write, warn_errno, warnx,
@@ -36,6 +36,9 @@ const LONGS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 const LONG_VALS: [u8; 4] = *b"ahvV";
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, u8> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `SWAPOFF_EX_*`: the exit status bits.
 const EX_OK: i32 = 0;
@@ -243,18 +246,6 @@ fn swapoff_all(ctl: &Ctl, common: &mut Common, out: &mut Stdout) -> Result<i32, 
     })
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(u8, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((*c, value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
 /// `main`'s `int` status as the process's exit code: C's `& 0xff`.
 fn exit_byte(status: i32) -> u8 {
     status.to_le_bytes().first().copied().unwrap_or(0)
@@ -299,7 +290,7 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> Result<u8, Fatal> {
                 return Err(Fatal(errtryhelp(short, EX_USAGE)));
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<u8>(&opt) else {
             if let Opt::Operand(o) = &opt {
                 operands.push(quoting::os_bytes(o).into_owned());
             }

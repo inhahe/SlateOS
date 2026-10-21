@@ -24,6 +24,7 @@ import io
 import os
 import re
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rustlex  # noqa: E402  (needs the path line above)
@@ -55,35 +56,28 @@ HELPISH = re.compile(r"^\s*(-|Usage:|usage:|Options:|Commands:)")
 # and cannot know it: the attribute is in the PARENT. `lsblk/src/tests.rs`,
 # which checks the program's usage text against upstream's, was this gate's
 # first false positive of the kind -- a fixture's copy of the help, read as
-# a help the file itself failed to parse.
-CFG_TEST_MOD = re.compile(
-    r"#\[cfg\(test\)\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?"
-    r"mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*;"
-)
+# a help the file itself failed to parse. Which files those are is
+# `rustlex.test_module_files`, the one answer every gate shares
+# (requests/e-abc-one-answer-to-which-files-are-test-modules.md).
 
 
-def test_module_files(files):
-    """The files among `files` that are out-of-line `#[cfg(test)]` modules.
-
-    A module's children live beside `main.rs`, `lib.rs` and `mod.rs`, and in a
-    directory named after any other file (`src/bin/foo.rs` -> `src/bin/foo/`).
-    """
-    out = set()
+def read_sources(files):
+    """Each of `files` that opens, its contents by its path, in order -- read
+    once, for both which files are tests and what the rest say."""
+    contents = {}
     for f in files:
         try:
-            raw = io.open(f, encoding="utf-8", errors="replace").read()
+            contents[f] = io.open(f, encoding="utf-8", errors="replace").read()
         except OSError:
             continue
-        # Comments out, so a doc comment showing the declaration is not one.
-        text = rustlex.strip_noise(raw)
-        base = os.path.dirname(f)
-        stem = os.path.splitext(os.path.basename(f))[0]
-        moddir = base if stem in ("main", "lib", "mod") else os.path.join(base, stem)
-        for m in CFG_TEST_MOD.finditer(text):
-            name = m.group(1)
-            out.add(os.path.normpath(os.path.join(moddir, name + ".rs")))
-            out.add(os.path.normpath(os.path.join(moddir, name, "mod.rs")))
-    return out
+    return contents
+
+
+def test_module_files(contents):
+    """The files among `contents` -- each file's text by its path -- that a
+    build compiles only for its tests, each as `os.path.normpath` gives it."""
+    texts = {Path(os.path.normpath(f)): text for f, text in contents.items()}
+    return {os.path.normpath(str(p)) for p in rustlex.test_module_files(texts)}
 
 
 def advertised(text):
@@ -261,17 +255,28 @@ def selftest():
 
     with tempfile.TemporaryDirectory() as d:
         src = os.path.join(d, "src")
-        os.makedirs(os.path.join(src, "bin"))
+        os.makedirs(os.path.join(src, "bin", "tool"))
         parts = {
             "main.rs": "mod util;\n#[cfg(test)]\nmod tests;\n// #[cfg(test)] mod doc;\n",
+            # A `src/bin/*.rs` is a crate root, so its modules sit beside it,
+            # not in a directory named for it.
             "bin/tool.rs": "#[cfg(test)]\n#[allow(clippy::all)]\nmod checks;\n",
+            "tests.rs": "",
+            "bin/checks.rs": "",
+            "bin/tool/checks.rs": "",
+            "util.rs": "",
+            "doc.rs": "",
         }
         for rel, body in parts.items():
             with io.open(os.path.join(src, rel), "w", encoding="utf-8", newline="\n") as fh:
                 fh.write(body)
-        got = test_module_files([os.path.join(src, "main.rs"), os.path.join(src, "bin", "tool.rs")])
-        want_in = [os.path.join(src, "tests.rs"), os.path.join(src, "bin", "tool", "checks.rs")]
-        want_out = [os.path.join(src, "util.rs"), os.path.join(src, "doc.rs")]
+        got = test_module_files(read_sources([os.path.join(src, r) for r in parts]))
+        want_in = [os.path.join(src, "tests.rs"), os.path.join(src, "bin", "checks.rs")]
+        want_out = [
+            os.path.join(src, "util.rs"),
+            os.path.join(src, "doc.rs"),
+            os.path.join(src, "bin", "tool", "checks.rs"),
+        ]
         if all(os.path.normpath(p) in got for p in want_in) and not any(
             os.path.normpath(p) in got for p in want_out
         ):
@@ -334,14 +339,11 @@ def sweep(files):
     """(how many of `files` hold help text, [(file, [(option, help line,
     where)])] for the options a file's help names that nothing in its
     program parses)."""
-    test_files = test_module_files(files)
+    contents = read_sources(files)
+    test_files = test_module_files(contents)
     texts, raws, order = {}, {}, []
-    for f in files:
+    for f, raw in contents.items():
         if os.path.normpath(f) in test_files:
-            continue
-        try:
-            raw = io.open(f, encoding="utf-8", errors="replace").read()
-        except OSError:
             continue
         # Comments out, string literals kept: a doc comment showing an example
         # command line (`b"--verbose,-d,--port=8080"` in services/init) is not

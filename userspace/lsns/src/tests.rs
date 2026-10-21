@@ -185,9 +185,9 @@ fn help_is_upstreams() {
 #[test]
 fn long_options_map_to_upstreams_values() {
     assert_eq!(LONGS.len(), LONG_VALS.len());
-    assert_eq!(option_to_longopt(i32::from(b'T')), Some("tree"));
-    assert_eq!(option_to_longopt(OPT_OUTPUT_ALL), Some("output-all"));
-    assert_eq!(option_to_longopt(i32::from(b'Z')), None);
+    assert_eq!(OPTIONS.name_of(i32::from(b'T')), Some("tree"));
+    assert_eq!(OPTIONS.name_of(OPT_OUTPUT_ALL), Some("output-all"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'Z')), None);
 }
 
 #[test]
@@ -397,7 +397,7 @@ fn list_and_tree_are_never_refused_together() {
                 i32::from(c),
                 &EXCL,
                 &mut st,
-                option_to_longopt,
+                |c| OPTIONS.name_of(c),
                 b"lsns",
             )
             .is_some()

@@ -137,7 +137,8 @@ def on_image(progs: list[dict]) -> set[str]:
     and the promoted fastpy commands."""
     off = kept_off()
     names: set[str] = {p["name"] for p in progs
-                       if p["dir"].startswith("userspace/") and p["name"] not in off}
+                       if p["dir"].startswith("userspace/") and p.get("built", True)
+                       and p["name"] not in off}
     try:
         for line in open(MANIFEST, encoding="utf-8"):
             line = line.split("#", 1)[0].strip()
@@ -290,6 +291,7 @@ def targets() -> list[dict]:
     for p in meta["packages"]:
         manifest = p["manifest_path"].replace("\\", "/")
         crate_dir = os.path.dirname(manifest)
+        default = set(p.get("features", {}).get("default", []))
         for t in p["targets"]:
             if "bin" not in t["kind"]:
                 continue
@@ -302,6 +304,9 @@ def targets() -> list[dict]:
                 # The crate's own program, whatever it is built as: the row
                 # that carries the crate's other names.
                 "main": src.endswith("/src/main.rs"),
+                # A build without features builds it: one that needs a
+                # feature off by default (a port in progress) is not staged.
+                "built": set(t.get("required-features", [])) <= default,
             })
     progs += standalone_services({p["name"] for p in meta["packages"]})
     progs.sort(key=lambda x: (x["name"], x["dir"]))
@@ -438,6 +443,13 @@ def selftest() -> int:
            [("fastpy", "scripts/fastpy-slateos-bundle.py")])
     expect("a script not ending .py or .sh is no port's line",
            parse_ports("# PROGRAM: /bin/x -- X. (scripts/x.txt)\n"), [])
+    image = on_image([
+        {"name": "selftest-built-by-default", "dir": "userspace/a", "built": True},
+        {"name": "selftest-needs-a-feature", "dir": "userspace/b", "built": False},
+    ])
+    expect("a program built only with a feature is not on the image",
+           ("selftest-built-by-default" in image, "selftest-needs-a-feature" in image),
+           (True, False))
     print(f"selftest: {bad} failure(s)")
     return 1 if bad else 0
 

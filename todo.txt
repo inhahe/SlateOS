@@ -59325,3 +59325,26 @@ is still run by hand, not by `boot-test.sh`.
   guess; tests for a video giving only its primaries, only its matrix, and
   only HDR; the player's fixtures unchanged for fully described and
   untagged video.
+
+## Lane B — batch 8's mutant replay, paused (2026-10-21)
+
+- **The 693 mutants batch 8's review left alive, replayed through the WSL
+  harnesses** (the follow-up `66edc8394`'s message promises it). Paused at the
+  operator's request after 11 of the 521 in cfdisk: 9 caught by
+  `scripts/cfdisk-diff.sh`, 2 missed --
+  `main.rs:2210:39 replace || with && in Cfdisk::main_menu_action` and
+  `main.rs:1671:42 replace > with == in Cfdisk::draw_table`. The 172 in
+  curses have not started. The record is
+  `.git/reviews/20261021T093537-759e931a6234-mutants/{cfdisk,curses}/replay.txt`
+  in the git common directory, and a run resumes from it. **Cost:** about
+  2.4 minutes a mutant for cfdisk, so roughly 21 hours for the rest of it,
+  and longer per mutant for curses (curses-diff is 3109 cases) -- ask the
+  operator before starting it again, since it loads the machine beside the
+  other lanes for a day or two. **To resume:** `git worktree add --detach
+  "C:/visual studio projects/os-lane-b-mut" <a lane-b commit>`, then from
+  `os-lane-b`, `python scripts/mutants-replay.py --tree <that worktree>
+  <record dir>/cfdisk scripts/cfdisk-diff.sh`, and the same for `curses` with
+  `scripts/curses-diff.sh` (a mutant whose lines changed since is reported
+  `stale`). **Then:** for each `missed`, a harness case that catches it, or
+  the reason the change cannot matter, in a commit; delete the worktree and
+  its WSL build cache (`~/.cache/slateos-diff-target/os-lane-b-mut-*`).

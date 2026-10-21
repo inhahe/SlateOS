@@ -10,6 +10,7 @@ promises about its own output, which a one-line summary cannot carry.
 | script | what it does |
 |---|---|
 | `scripts/abi-reach.py` | Which kernel capabilities can the Linux-ABI table reach that no native number can? |
+| `scripts/agetty-diff.sh` | Differential test: our `agetty` against util-linux 2.39.3's. |
 | `scripts/all-diff.sh` | Run every `*-diff.sh` harness and print one summary line each. |
 | `scripts/arch-diff.sh` | arch-diff.sh — compare our `arch` against GNU's, inside WSL. |
 | `scripts/argv-utf8.py` | Find utilities that read argv or the environment as `String`, and so panic. |
@@ -25,7 +26,8 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/bash-spike/slatelink.sh` | The decisive step: relink bash's already-compiled objects against SlateOS's |
 | `scripts/bash-spike/syms.sh` | Spike helper: what does SlateOS's libc.a define, and what does bash need? |
 | `scripts/bashprobe.py` | Faithful transport to real bash, plus an arity-exact word probe. |
-| `scripts/bc-diff.sh` | Differential test: our bc against GNU bc. |
+| `scripts/bc-diff.sh` | Differential test: our bc against Ubuntu 24.04's, side by side in WSL. |
+| `scripts/bc-tables.py` | Write `userspace/gnubc/src/tables.rs`: the parse tables of GNU bc 1.07.1's |
 | `scripts/bench-history.py` | Record and diff the kernel micro-benchmark scorecard across boots. |
 | `scripts/binutils-spike/run.sh` | Cross-compile GNU binutils (as, ld, ar, nm, objdump ...) and link them against SlateOS's libc.a. |
 | `scripts/binutils-spike/slatelink.sh` | Link binutils' built objects against the CURRENT libc.a, and stage its programs. |
@@ -46,7 +48,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/canary-load.py` | Hold the host CPU busy across a *named window* of a `--bench` run. |
 | `scripts/canary-spread-survey.py` | Survey the canary's observed spread across every recorded run. |
 | `scripts/cat-diff.sh` | Differential test: our cat against GNU coreutils' cat. |
+| `scripts/cfdisk-diff.sh` | Differential test: our `cfdisk` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/charwidth-gen.py` | Generate the terminal-column width tables of `userspace/charwidth`. |
+| `scripts/chattr-diff.sh` | Differential test: our chattr and lsattr against Ubuntu 24.04's, in WSL. |
 | `scripts/check-absent-operand-default.py` | Refuse a missing shell operand that silently becomes a number. |
 | `scripts/check-accidental-headings.py` | Refuse to build when a `---` separator has silently become an `<h2>`. |
 | `scripts/check-ansic-quoting-vs-bash.py` | Pin bash's `$'...'` (ANSI-C quoting) rules, for TD-SHELLQUOTE-NO-ANSI-C-QUOTING. |
@@ -174,6 +178,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/curses-ptyrun.py` | Run a program on a pseudo-terminal of its own, for curses-diff.sh. |
 | `scripts/cut-diff.sh` | Differential test: our cut against GNU cut. |
 | `scripts/date-diff.sh` | Differential test: our `date` against GNU date. |
+| `scripts/dc-diff.sh` | Differential test: our dc against Ubuntu 24.04's, side by side in WSL. |
 | `scripts/dd-diff.sh` | Differential test: our dd against GNU dd. |
 | `scripts/df-diff.sh` | Differential test: our df against GNU df. |
 | `scripts/diff-diff.sh` | Differential test: our `diff` against GNU diffutils. |
@@ -201,6 +206,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/extract-tcc-strace.sh` | Extract tcc + crt + libtcc1.a from rootfs.ext4 and strace a hosted compile. |
 | `scripts/factor-diff.sh` | factor-diff.sh — compare our `factor` against GNU's, inside WSL. |
 | `scripts/fastpy-slateos-bundle.py` | Build the tree that puts the fastpy compiler on a SlateOS image. |
+| `scripts/fdisk-diff.sh` | Differential test: our `fdisk` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/file-diff.sh` | Differential test: our `file` against file 5.45, built from the release. |
 | `scripts/file-gen-cdf.py` | Generate Composite Document Files (OLE2) for testing libmagic's readcdf.c. |
 | `scripts/file-gen-elf.py` | Generate ELF files exercising every path of libmagic's readelf.c. |
@@ -252,7 +258,9 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/grade-positional.py` | Grade the positional drift model against a *known* disturbance window. |
 | `scripts/grep-diff.sh` | Differential test: our grep against the host's GNU grep. |
 | `scripts/guest.py` | A SlateOS guest that stays up, and a way into it from the host. |
+| `scripts/gzip-diff.sh` | Differential test: our `gzip` (and `gunzip`, `zcat`, `uncompress`) against |
 | `scripts/hang-repro-loop.sh` | hang-repro-loop.sh — Repeatedly boot the (already-built) kernel to try to |
+| `scripts/hardlink-diff.sh` | Differential test: our `hardlink` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/head-diff.sh` | Differential test: our head against GNU head. |
 | `scripts/hexdump-diff.sh` | Differential test: our `hexdump` against util-linux 2.39.3's. |
 | `scripts/host-errmsg.py` | Find utilities that print the *host's* error text instead of POSIX's. |
@@ -287,6 +295,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/logger-diff.sh` | Differential test: our `logger` against util-linux 2.39.3's. |
 | `scripts/logname-diff.sh` | logname-diff.sh — compare our `logname` against the real GNU one, inside WSL. |
 | `scripts/look-diff.sh` | Differential test: our `look` against util-linux 2.39.3's. |
+| `scripts/losetup-diff.sh` | Differential test: our `losetup` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/lossy-decode.py` | Find lossy byte->text conversions that reach a VALUE, not a message. |
 | `scripts/ls-diff.sh` | Compare our `ls` -- and `dir` and `vdir`, its other two builds -- against GNU's, inside WSL. |
 | `scripts/ls-quote-probe.py` | Measure all ten of GNU's quoting styles at once, byte for byte. |
@@ -318,6 +327,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/nice-diff.sh` | Differential test: our `nice` against GNU coreutils'. |
 | `scripts/nl-diff.sh` | Differential test: our nl against GNU nl. |
 | `scripts/nohup-diff.sh` | Differential test: our `nohup` against GNU coreutils'. |
+| `scripts/nologin-diff.sh` | Differential test: our `nologin` against Ubuntu's, shadow 4.13's. |
 | `scripts/nproc-diff.sh` | nproc-diff.sh — compare our `nproc` against GNU's, inside WSL. |
 | `scripts/numfmt-diff.sh` | numfmt-diff.sh — compare our `numfmt` against GNU's, inside WSL. |
 | `scripts/od-diff.sh` | Differential test: our od against GNU od. |
@@ -421,6 +431,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/renice-diff.sh` | Differential test: our `renice` against util-linux 2.39.3's. |
 | `scripts/resolve-rip.sh` | resolve-rip.sh — map a kernel RIP (or any code address) to the containing |
 | `scripts/review-batch.py` | Review a batch of commits at the level its contents call for; gate `main` on it. |
+| `scripts/rfkill-diff.sh` | Differential test: our `rfkill` against util-linux 2.39.3's. |
 | `scripts/rm-diff.sh` | Differential test: our `rm` against GNU coreutils'. |
 | `scripts/rmdir-diff.sh` | Differential test: our `rmdir` against GNU coreutils 9.4's. |
 | `scripts/run-checker.sh` | `run_checker` — the one implementation of "did that checker reach a verdict?" |
@@ -443,6 +454,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/seq-diff.sh` | Differential test: our `seq` against GNU's. |
 | `scripts/seq-probe.sh` | One side of the `seq` differential test. |
 | `scripts/setup-toolchain.sh` | Install the Rust toolchain and other dependencies needed to build the kernel. |
+| `scripts/sfdisk-diff.sh` | Differential test: our `sfdisk` against Ubuntu's, util-linux 2.39.3's. |
 | `scripts/sh-diff.sh` | Differential test: our sh against dash. |
 | `scripts/sharutils-ref.sh` | Unpacks Ubuntu's sharutils package, without root, as the uuencode/uudecode harness reference. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
@@ -501,6 +513,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-check-self-tests-wired.py` | Regression tests for the self-test wiring gate's `RAN-IF` markers. |
 | `scripts/test-checkers-honour-head.py` | Do the push gates' checkers judge the commit, or whatever is on the disk? |
 | `scripts/test-ctest-fixtures.py` | Regression tests for the sysroot staleness gate in `scripts/ctest-fixtures.py`. |
+| `scripts/test-curses-ptyrun.py` | Regression tests for `scripts/curses-ptyrun.py`'s `keys:` escapes. |
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
@@ -592,4 +605,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_582 scripts._
+_595 scripts._

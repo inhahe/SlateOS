@@ -226,6 +226,15 @@ def tracked_entries_from_worktree(root: str):
         if is_excluded(path):
             head.pop(path, None)
             continue
+        if os.path.isdir(os.path.join(root, path)):
+            # A submodule (`toolchain/fastpy`), the one kind of tracked path
+            # that is a directory: what it holds is the commit checked out in
+            # it, which `hash-object` cannot read. The diff names it when that
+            # commit is not the one HEAD pins -- or when it has uncommitted
+            # edits, which its commit does not show.
+            head[path] = _git(os.path.join(root, path), "rev-parse",
+                              "HEAD").decode("ascii").strip()
+            continue
         rehash.append(path)
 
     if rehash:

@@ -328,6 +328,43 @@ def test_clean_worktree_matches_its_own_commit_on_the_tracked_half():
         repo.close()
 
 
+def test_a_submodule_is_the_commit_checked_out_in_it():
+    """`toolchain/fastpy` is a submodule. A merge that moves its pin leaves its
+    checkout where it was, and the diff then names a directory, which
+    `hash-object` cannot read -- the worktree digest raised. What a submodule
+    holds is the commit checked out in it: at the pin, the worktree agrees
+    with its commit; off it, the digest is that other commit's."""
+    repo = base_repo()
+    sub = Repo()
+    try:
+        sub.write("compiler/__init__.py", "first\n")
+        sub.commit("first")
+        first = sub.git("rev-parse", "HEAD").strip()
+        sub.write("compiler/__init__.py", "second\n")
+        sub.commit("second")
+        second = sub.git("rev-parse", "HEAD").strip()
+        checkout = os.path.join(repo.root, "toolchain", "fastpy")
+        subprocess.run(["git", "clone", "-q", sub.root, checkout],
+                       capture_output=True, check=True)
+        subprocess.run(["git", "-C", checkout, "checkout", "-q", first],
+                       capture_output=True, check=True)
+        repo.commit("pin the submodule at its first commit")
+        check("the commit records the submodule as its pinned commit",
+              dict(sd.tracked_entries_from_commit(repo.root, "HEAD")).get(
+                  "toolchain/fastpy"), first)
+        check("at the pin, the worktree's tracked half is its commit's",
+              sd._digest(sd.tracked_entries_from_worktree(repo.root), []),
+              sd._digest(sd.tracked_entries_from_commit(repo.root, "HEAD"), []))
+        subprocess.run(["git", "-C", checkout, "checkout", "-q", second],
+                       capture_output=True, check=True)
+        check("off the pin, the submodule is the commit checked out in it",
+              dict(sd.tracked_entries_from_worktree(repo.root)).get(
+                  "toolchain/fastpy"), second)
+    finally:
+        sub.close()
+        repo.close()
+
+
 def test_the_two_flavours_never_compare_equal():
     """A `tracked:` digest asserts strictly less than a `full:` one.
 

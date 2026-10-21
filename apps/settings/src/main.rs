@@ -10,7 +10,9 @@ mod dyndns;
 mod lockscreen;
 mod recyclebins;
 mod remote;
+mod rules;
 mod snapshots;
+mod thumbs;
 
 use appearance::Palette;
 use appearance::{
@@ -21,6 +23,7 @@ use appearance::{
 use guitk::color::Color;
 use guitk::colorpicker::{ColorPickerDialog, ColorPickerEvent};
 use guitk::dialog::{DialogAction, FileDialog};
+use guitk::disabled::{Disabled, WhyDisabled};
 #[allow(unused_imports)]
 use guitk::event::{
     Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -69,6 +72,14 @@ const SEARCH_BAR_HEIGHT: f32 = 40.0;
 const CATEGORY_ITEM_HEIGHT: f32 = 44.0;
 const CONTENT_PADDING: f32 = 32.0;
 const SECTION_SPACING: f32 = 24.0;
+
+/// The side of a category's icon in the sidebar, in pixels.
+const CATEGORY_ICON_SIDE: u16 = 16;
+/// How far below its row's top a category's icon is drawn: centred on the
+/// label beside it.
+const CATEGORY_ICON_DY: f32 = 14.0;
+/// The side of the search field's magnifier, in pixels.
+const SEARCH_ICON_SIDE: u16 = 14;
 
 /// Width of the page tab drawn for `label`, including the 8 px padding each side.
 ///
@@ -135,16 +146,28 @@ impl SettingsCategory {
         }
     }
 
-    fn icon_char(self) -> &'static str {
+    /// The category's icon in the user's icon theme, by its freedesktop name,
+    /// and the built-in icon drawn where the theme has none of that name.
+    /// No name may shorten to a *different* built-in icon -- a missing name
+    /// falls back by dropping its last `-part` before the stand-in is tried,
+    /// so `preferences-system-network` would draw System's gear for Network.
+    ///
+    /// Until 2026-10-10 these were emoji, which no font SlateOS has draws: the
+    /// sidebar showed eight boxes
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    fn icon(self) -> (&'static str, &'static str) {
         match self {
-            Self::System => "\u{2699}",           // gear
-            Self::Network => "\u{1F310}",         // globe
-            Self::Personalization => "\u{1F3A8}", // palette
-            Self::Apps => "\u{1F4E6}",            // package
-            Self::Accounts => "\u{1F464}",        // person
-            Self::Privacy => "\u{1F512}",         // lock
-            Self::Accessibility => "\u{267F}",    // accessibility
-            Self::Update => "\u{1F504}",          // refresh
+            Self::System => ("preferences-system", "preferences-system"),
+            Self::Network => ("network-workgroup", "network-idle"),
+            Self::Personalization => ("preferences-desktop-theme", "image-x-generic"),
+            Self::Apps => ("applications-other", "application-x-executable"),
+            Self::Accounts => ("system-users", "avatar-default"),
+            Self::Privacy => ("security-high", "system-lock-screen"),
+            Self::Accessibility => (
+                "preferences-desktop-accessibility",
+                "preferences-desktop-accessibility",
+            ),
+            Self::Update => ("system-software-update", "system-reboot"),
         }
     }
 
@@ -194,6 +217,8 @@ impl SettingsCategory {
             ],
             Self::Apps => &[
                 SettingsPage::DefaultApps,
+                SettingsPage::WindowRules,
+                SettingsPage::ContextMenus,
                 SettingsPage::StartupApps,
                 SettingsPage::InstalledApps,
             ],
@@ -243,6 +268,12 @@ pub enum SettingsPage {
     LockScreen,
     // Apps
     DefaultApps,
+    /// What happens to a program's windows as they open: lane C's window
+    /// rules (`gui/windowrules`), kept in `window-rules.yaml`.
+    WindowRules,
+    /// What programs add to a file's right-click menu, each switched on or
+    /// off: lane C's service menus (`gui/servicemenus`, §1448).
+    ContextMenus,
     StartupApps,
     InstalledApps,
     // Accounts
@@ -297,6 +328,8 @@ impl SettingsPage {
             Self::Fonts => "fonts",
             Self::LockScreen => "lock-screen",
             Self::DefaultApps => "default-apps",
+            Self::WindowRules => "window-rules",
+            Self::ContextMenus => "context-menus",
             Self::StartupApps => "startup-apps",
             Self::InstalledApps => "installed-apps",
             Self::UserAccounts => "user-accounts",
@@ -348,6 +381,8 @@ impl SettingsPage {
             Self::Fonts => "Fonts",
             Self::LockScreen => "Lock Screen",
             Self::DefaultApps => "Default Apps",
+            Self::WindowRules => "Window Rules",
+            Self::ContextMenus => "Context Menus",
             Self::StartupApps => "Startup Apps",
             Self::InstalledApps => "Installed Apps",
             Self::UserAccounts => "User Accounts",
@@ -564,6 +599,25 @@ pub struct SettingsState {
     /// The page control under the pointer, which is drawn lit -- a text
     /// field's edge, as the toolkit's fields are.
     page_hovered: Option<RowHit>,
+    /// Where the pointer is over the window; `None` once it has left. Kept
+    /// for the reason a disabled control gives, which is asked again after
+    /// every event: a page can change under a pointer that has not moved.
+    pointer: Option<(f32, f32)>,
+    /// Says why the disabled control under the pointer is disabled, after
+    /// the toolkit's tooltip delay (`requests/c-e-say-why-a-control-is-
+    /// disabled.md`).
+    why_disabled: WhyDisabled,
+    /// The window's clock, in milliseconds: the sum of every tick's
+    /// `elapsed_ms`. Settings asks for ticks only while a reason is waiting
+    /// to appear -- the one thing it times -- so this measures those waits
+    /// and stands still between them.
+    ///
+    /// Read when the pointer comes to rest on a disabled control, it has not
+    /// yet counted the time since the last tick. Only one wait is ever
+    /// running, so that matters in one case: moved from one disabled control
+    /// to another before the first's reason appeared, the pointer sees the
+    /// second's as soon as the first's was due -- early, never late.
+    clock_ms: u64,
 
     // Window dimensions
     pub window_width: f32,
@@ -596,10 +650,10 @@ pub struct SettingsState {
     /// that does all of that, and does it correctly for right-to-left text,
     /// which a hand-rolled one was never going to.
     pub exclusion_draft: TextInput,
-    /// What the last copy or cut in either field took: one for the window,
-    /// so a pattern copied from the search pastes into the exclusions. Each
-    /// field kept its own (`TextInput`'s), and a copy reached only itself.
-    clipboard: String,
+    /// A text field's right-click menu while it is up -- Cut, Copy, Paste,
+    /// Delete, Select all -- and the field it is for
+    /// (`requests/c-e-text-fields-have-a-right-click-menu.md`).
+    field_menu: fieldmenu::FieldMenu<MenuField>,
     /// Which place on the page typing goes to, if any.
     focused_field: Option<FieldId>,
     /// What the open picker is being used for.
@@ -724,6 +778,22 @@ pub struct SettingsState {
     /// from the page on every move, so the value follows the same track the
     /// user can see.
     dragging: Option<SliderId>,
+    /// How far the page is scrolled down, in pixels: nought at its top.
+    ///
+    /// Every walk of the page starts at [`SettingsState::page_top`] -- the
+    /// drawing, the hit test, the anchors a list opens under and the boxes a
+    /// disabled control's reason is said for -- so a scrolled row is pressed
+    /// where it is drawn. Pages did not scroll at all until 2026-10-10, and
+    /// what ran past the bottom of the window could not be reached: the
+    /// Sound page's last events, among others. Kept within the page after
+    /// every event ([`SettingsState::clamp_page_scroll`]), and nought on
+    /// entering a page.
+    page_scroll: f32,
+    /// Where the page's scrollbar thumb was taken hold of, measured from the
+    /// thumb's top, while the button is down on it.
+    page_bar_grab: Option<f32>,
+    /// Whether the pointer is over the page's scrollbar, which lights it.
+    page_bar_hovered: bool,
     /// The file associations the Default Apps page reports.
     ///
     /// Held rather than read while drawing because `build_page` runs on every
@@ -739,9 +809,19 @@ pub struct SettingsState {
     /// Why the calendar's events could not be read, or what came of the
     /// last press that started the calendar.
     calendar_note: Option<String>,
-    /// Starts another program -- the calendar, at an event's colour. The
-    /// tests stand in for it, so none of them starts a program.
+    /// Starts another program -- the calendar, at an event's colour; the
+    /// Network Manager. The tests stand in for it, so none of them starts a
+    /// program.
     starter: fn(&str, &[&str]) -> std::io::Result<()>,
+    /// The machine's network interfaces as the Network page shows them, or
+    /// why they could not be read; `None` until the page is first entered.
+    network: Option<Result<Vec<hwquery::NetworkAdapterInfo>, String>>,
+    /// What came of the last press on "Network Connections".
+    network_note: Option<String>,
+    /// Under test, the root the interfaces are read under: a fixture tree,
+    /// or (by default) a directory that does not exist.
+    #[cfg(test)]
+    machine_root: String,
     /// What each offered category resolves to, alongside the raw list.
     ///
     /// Computed when the associations are, from the same document, so the two
@@ -790,11 +870,83 @@ pub struct SettingsState {
     /// environment names them -- or none in a test, which must not read the
     /// machine's.
     cursor_icon_dirs: Vec<PathBuf>,
+    /// The Background page's source just chosen and not set up yet -- a
+    /// folder not yet picked: shown in its place until it is set up or
+    /// another is chosen (design-decisions §1243). `None` shows the source
+    /// the desktop shows.
+    wallpaper_source_pending: Option<WallpaperSource>,
+    /// The themes the Background page offers by their pictures, read on
+    /// entering the page: each recommended picture for the mode the desktop
+    /// is in.
+    wallpaper_theme_cards: Vec<PictureCard>,
+    /// The pictures installed themes bundle, offered as pictures to choose.
+    bundled_picture_cards: Vec<PictureCard>,
+    /// Those pictures drawn small, decoded on a thread of their own.
+    thumbs: thumbs::Thumbs,
+    /// The pictures the window draws from the user's icon theme -- the
+    /// sidebar's, the dropdowns' checks -- and which of them it holds, handed
+    /// to the loop with the thumbnails (`App::take_images`).
+    icons: themeicons::Icons,
+    /// The palette the icons the window holds were drawn in: another one
+    /// draws them all again ([`themeicons::Icons::forget`]), since an icon's
+    /// colour is part of the picture.
+    icons_palette: Option<Palette>,
+    /// The sound themes installed, read on entering the Sound page.
+    sound_themes: Vec<appearance::sounds::SoundThemeInfo>,
+    /// Where sound themes are looked for: `None` is the standard places
+    /// (`appearance::sounds::available`); a test points it at scratch ones,
+    /// so the page lists no theme of the machine running it.
+    sound_roots: Option<Vec<PathBuf>>,
+    /// The sound a change asked to be heard, and at what volume, not yet
+    /// played: [`Self::preview`] puts it here and the window's event seam
+    /// (`App::on_event`) plays it once the event is handled -- the handler
+    /// decides, the seam does the device's I/O. A test reads it here.
+    pending_preview: Option<(sound::Sound, f32)>,
+    /// Whether a preview is played at all. `main` sets it, so a test run
+    /// plays nothing on the machine running it, even through the event
+    /// seam -- the desktop's rule too (`event_sounds::allow_playback`).
+    play_previews: bool,
+    /// The window rules, highest priority first, as the Window Rules page
+    /// shows them: the user's own, or the built-in ones while their file says
+    /// nothing about rules (`windowrules::file::load`). Read on entering the
+    /// page.
+    rules: Vec<windowrules::WindowRule>,
+    /// Whether [`Self::rules`] are the built-in ones -- the file says nothing
+    /// about rules -- rather than the user's own.
+    rules_built_in: bool,
+    /// The rules the file holds that could not be read, each with why.
+    rule_problems: Vec<windowrules::file::Problem>,
+    /// Why the last change to the rules could not be kept, if it could not.
+    rules_error: Option<String>,
+    /// The rule last deleted and where it stood, until the next change: what
+    /// "Put it back" restores.
+    rule_deleted: Option<(usize, windowrules::WindowRule)>,
+    /// The rule being written, while the editor is open: the page is the
+    /// editor then.
+    rule_draft: Option<rules::RuleDraft>,
+    /// What programs add to a file's right-click menu, as the Context Menus
+    /// page lists them: every service menu found, and every file that looked
+    /// like one and is not offered (`servicemenus::scan`). Read on entering
+    /// the page.
+    service_menus: servicemenus::Scan,
+    /// Which of them are on: `context-menus.yaml`, kept with its comments.
+    service_choices: servicemenus::ChoicesFile,
+    /// Where service menus are looked for: `None` is the environment's
+    /// (`servicemenus::Dirs::standard`); a test points it at scratch ones, so
+    /// the page lists no menu of the machine running it.
+    service_dirs: Option<servicemenus::Dirs>,
+    /// Why the last switch could not be kept, if it could not.
+    service_error: Option<String>,
     /// The fixed-pitch families, for the terminal font picker. A subset of
     /// `font_families`, kept separately because the filter is the whole point:
     /// offering the unfiltered list under "Terminal Font" is what breaks a
     /// terminal's grid.
     mono_families: Vec<String>,
+    /// Whether a family is installed here: `guitk::text::family_installed`,
+    /// the one question the desktop asks when it chooses among a theme's
+    /// fonts. A test's state answers from a fixture instead, so what it sees
+    /// does not hang on the fonts of the machine running it.
+    family_check: fn(&str) -> bool,
     /// Minutes before the session locks itself; nought is never.
     ///
     /// Held rather than re-read while drawing, like the two lists above:
@@ -910,6 +1062,11 @@ impl DropdownLayout {
 pub enum DropdownId {
     /// How far the `n`-th program's notifications get while focusing.
     NotifImportance(usize),
+    /// Which sound theme the desktop's sounds come from: `theme.sounds`.
+    SoundTheme,
+    /// What the `n`-th of `appearance::sounds::SHELL_EVENTS` plays: the
+    /// theme's sound, none, or a file of the user's.
+    EventSound(usize),
     /// How long notifications are kept, also across restarts
     /// (`notifsettings::HistoryRetention`, design-decisions §1468).
     NotifHistory,
@@ -935,6 +1092,9 @@ pub enum DropdownId {
     /// installed XCursor theme -- a GNOME or KDE one included -- or the
     /// built-in pointer (`cursor_theme`, design-decisions §1459).
     CursorTheme,
+    /// Where the desktop's background comes from: a picture, a theme's, by
+    /// time of day, a folder, or none (design-decisions §1243).
+    WallpaperSource,
     /// The shapes of the controls -- a theme's `widget-style`, chosen apart
     /// from its colours (`widget_theme`, design-decisions §1435).
     WidgetTheme,
@@ -977,6 +1137,9 @@ pub enum DropdownId {
     /// `available_families`, which is how it declines to make that decision on
     /// the user's behalf.
     MonoFont,
+    /// Where the desktop's fonts come from: the user's own, or a theme's
+    /// recommendations (`font_theme`, design-decisions §1472).
+    FontTheme,
     /// When the morning picture goes up.
     DayWallpaperFrom,
     /// When the evening picture goes up.
@@ -987,6 +1150,23 @@ pub enum DropdownId {
     /// One of the `n`-th drive's own limits, as the Recycle Bin page lists
     /// the drives.
     BinDrive(usize, recyclebins::LimitKind),
+    /// How the rule being written picks its windows.
+    RuleMatch,
+    /// Where its windows open.
+    RulePlace,
+    /// How big they open.
+    RuleSize,
+    /// The snap zone a rule written by hand puts them in, which the editor
+    /// keeps or takes off (`rules` module's "What the editor keeps").
+    RuleSnap,
+    /// Which virtual desktop they open on.
+    RuleDesktop,
+    /// Whether they open minimised, maximised or full screen.
+    RuleState,
+    /// How opaque they are drawn.
+    RuleOpacity,
+    /// One of the rule's yes-or-no things.
+    RuleFlag(rules::Flag),
 }
 
 impl DropdownId {
@@ -1018,7 +1198,26 @@ impl DropdownId {
     /// a list that names itself exhaustive and is not will be read as
     /// exhaustive by the next person, reason or no reason. The gate's own
     /// wording: "A subset named ALL is the same defect wearing the other hat."
-    pub const FIXED: [Self; 31] = [
+    pub const FIXED: [Self; 50] = [
+        Self::SoundTheme,
+        Self::FontTheme,
+        Self::EventSound(0),
+        Self::RuleMatch,
+        Self::RulePlace,
+        Self::RuleSize,
+        Self::RuleSnap,
+        Self::RuleDesktop,
+        Self::RuleState,
+        Self::RuleOpacity,
+        Self::RuleFlag(rules::Flag::OnTop),
+        Self::RuleFlag(rules::Flag::Below),
+        Self::RuleFlag(rules::Flag::Taskbar),
+        Self::RuleFlag(rules::Flag::AltTab),
+        Self::RuleFlag(rules::Flag::Tray),
+        Self::RuleFlag(rules::Flag::CanClose),
+        Self::RuleFlag(rules::Flag::CanMove),
+        Self::RuleFlag(rules::Flag::CanResize),
+        Self::WallpaperSource,
         Self::QuietStart,
         Self::QuietEnd,
         Self::NotifHistory,
@@ -1186,7 +1385,7 @@ impl SettingsState {
                 "",
                 "Remove",
                 pal.accent,
-                Some(RowHit::Press(ButtonId::RemoveClock(index))),
+                Press::Does(RowHit::Press(ButtonId::RemoveClock(index))),
             );
         }
         if settings.additional_clocks.len() < datetimesettings::MAX_CLOCKS {
@@ -1219,6 +1418,80 @@ impl SettingsState {
             .chain(self.cursor_icon_dirs.iter().cloned())
             .collect();
         self.cursor_themes = appearance::cursors::available_in(&roots);
+    }
+
+    /// The Background page's offers, read on entering it: each theme that
+    /// recommends a picture, by its picture for the mode the desktop is in
+    /// now, and every picture installed themes bundle -- each asked for small
+    /// at once, so it is decoding while the page is read.
+    fn refresh_picture_cards(&mut self) {
+        let light = self.appearance.settings.is_light();
+        let mut themes = Vec::new();
+        let mut bundled = Vec::new();
+        for info in &self.themes {
+            if info.provides_wallpapers() {
+                let picture =
+                    appearance::themes::WallpaperTheme::load_from(&self.theme_dirs, &info.id)
+                        .picture(light)
+                        .map(std::path::Path::to_path_buf);
+                themes.push(PictureCard {
+                    theme: Some(info.id.clone()),
+                    name: info.name.clone(),
+                    picture,
+                });
+            }
+            for picture in &info.wallpapers {
+                let file = picture.file_name().map_or_else(
+                    || picture.shown().to_string(),
+                    |name| std::path::Path::new(name).shown().to_string(),
+                );
+                bundled.push(PictureCard {
+                    theme: None,
+                    name: format!("{file} ({})", info.name),
+                    picture: Some(picture.clone()),
+                });
+            }
+        }
+        for card in themes.iter().chain(&bundled) {
+            if let Some(picture) = &card.picture {
+                self.thumbs.ask(picture);
+            }
+        }
+        self.wallpaper_theme_cards = themes;
+        self.bundled_picture_cards = bundled;
+    }
+
+    /// The source the Background page shows: the one just chosen, while it
+    /// is not set up and nothing above it has been set since; else the one
+    /// the desktop shows.
+    fn wallpaper_source(&self) -> WallpaperSource {
+        let shown = WallpaperSource::shown(&self.appearance.settings);
+        match self.wallpaper_source_pending {
+            Some(pending) if pending.rank() > shown.rank() => pending,
+            _ => shown,
+        }
+    }
+
+    /// Choose where the background comes from (design-decisions §1243): the
+    /// sources the desktop would show over it are cleared, so that it is the
+    /// one shown; those below it are kept, unseen, as what shows if it is
+    /// cleared. Chosen and not set up yet -- no folder picked -- it is
+    /// remembered as chosen until it is.
+    fn choose_wallpaper_source(&mut self, source: WallpaperSource) {
+        let s = &mut self.appearance.settings;
+        if source.rank() < WallpaperSource::TimeOfDay.rank() {
+            s.wallpaper_schedule.clear();
+        }
+        if source.rank() < WallpaperSource::Folder.rank() {
+            s.wallpaper_folder = None;
+        }
+        if source.rank() < WallpaperSource::Theme.rank() {
+            s.wallpaper_theme = appearance::themes::WallpaperTheme::built_in();
+        }
+        if source.rank() < WallpaperSource::Picture.rank() {
+            s.wallpaper = None;
+        }
+        self.wallpaper_source_pending = Some(source);
     }
 
     /// The chosen cursor theme's name as shown: its listed name, or its
@@ -1333,6 +1606,37 @@ impl SettingsState {
         } else {
             format!("{} -- no window frames", info.name)
         }
+    }
+
+    /// A theme's row in the fonts list: "My own fonts" for the built-in
+    /// theme, which recommends none; a theme's name; or why it cannot be
+    /// chosen -- unreadable, or recommending no font.
+    fn font_theme_item(info: &appearance::themes::ThemeInfo) -> String {
+        if info.origin == appearance::themes::Origin::BuiltIn {
+            MY_OWN_FONTS.to_owned()
+        } else if info.provides_fonts() {
+            info.name.clone()
+        } else if let Some(problem) = &info.problem {
+            format!("{} -- cannot be used: it {problem}", info.name)
+        } else {
+            format!("{} -- recommends no fonts", info.name)
+        }
+    }
+
+    /// Where the fonts come from, as the row shows it: "My own fonts", the
+    /// theme's name, or -- for a theme no longer installed -- its folder's.
+    fn font_theme_shown(&self) -> String {
+        let theme = &self.appearance.settings.font_theme;
+        if theme.is_built_in() {
+            return MY_OWN_FONTS.to_owned();
+        }
+        self.themes
+            .iter()
+            .find(|t| t.id.as_os_str() == theme.id())
+            .map_or_else(
+                || std::path::Path::new(theme.id()).shown().to_string(),
+                |t| t.name.clone(),
+            )
     }
 
     /// A theme's row in the Taskbar panel list: its name, or why it cannot
@@ -1463,6 +1767,16 @@ impl SettingsState {
     /// assigning the field themselves would be four chances to forget.
     fn go_to_page(&mut self, page: SettingsPage) {
         self.current_page = page;
+        // Another page opens at its top: a scroll is where this page was
+        // read to, and means nothing on the next.
+        self.page_scroll = 0.0;
+        self.page_bar_grab = None;
+        // And no field of the last page keeps the keyboard. Left focused, the
+        // Background page's exclusion box took what was typed on whatever
+        // page the sidebar went to -- a box no longer on screen, filling
+        // with keystrokes meant for another page, which on this window are
+        // settings.
+        self.focused_field = None;
         if page == SettingsPage::DefaultApps {
             self.refresh_default_apps();
         }
@@ -1473,6 +1787,42 @@ impl SettingsState {
         }
         if page == SettingsPage::Themes {
             self.refresh_themes();
+        }
+        // The sound themes, read on entry as the themes are.
+        if page == SettingsPage::Sound {
+            self.refresh_sound_themes();
+        }
+        // The window rules, read on entry: the desktop and a hand edit both
+        // change the file while the window is open, and an announcement of
+        // it can be lost. Read as an announcement is, so an editor left open
+        // follows its rule by name.
+        if page == SettingsPage::WindowRules {
+            self.reread_rules();
+        }
+        // The context menus and the choices about them, read on entry: a
+        // program installed since may have added one.
+        if page == SettingsPage::ContextMenus {
+            self.refresh_service_menus();
+        }
+        // The interfaces, read on entry: one may have come up, or been
+        // changed in the Network Manager, since the page was last shown.
+        if page == SettingsPage::NetworkStatus {
+            self.network_note = None;
+            self.refresh_network();
+        }
+        // The themes that recommend fonts, read on entry as the Themes page
+        // reads them.
+        if page == SettingsPage::Fonts {
+            self.refresh_themes();
+        }
+        // The themes with pictures, and theirs, read on entry as the themes
+        // page reads them.
+        if page == SettingsPage::Wallpaper {
+            self.refresh_themes();
+            self.refresh_picture_cards();
+            // A source chosen on an earlier visit and never set up is not what
+            // the desktop shows; the page opens on what it does.
+            self.wallpaper_source_pending = None;
         }
         // The notices, read on entry: a list is cheap, and the page shows
         // what is installed now.
@@ -1545,6 +1895,138 @@ impl SettingsState {
             _ => self.appearance.settings.wallpaper.clone(),
         };
         self.open_picture_dialog(PickerPurpose::LoginImage, start.as_deref());
+    }
+
+    /// Read the sound themes installed, where the page looks for them.
+    fn refresh_sound_themes(&mut self) {
+        self.sound_themes = match &self.sound_roots {
+            Some(roots) => appearance::sounds::available_in(roots),
+            None => appearance::sounds::available(),
+        };
+    }
+
+    /// The sound theme `id`, from where the page looks for themes.
+    fn sound_theme_named(&self, id: &std::ffi::OsStr) -> appearance::sounds::SoundTheme {
+        match &self.sound_roots {
+            Some(roots) => {
+                appearance::sounds::SoundTheme::named(id, self.theme_dirs.clone(), roots.clone())
+            }
+            None => appearance::sounds::SoundTheme::load(id),
+        }
+    }
+
+    /// Which of [`EVENT_SOUND_CHOICES`] the `n`-th event has now.
+    fn event_sound_choice(&self, index: usize) -> usize {
+        let name = appearance::sounds::SHELL_EVENTS.get(index).map(|e| e.name);
+        match name.and_then(|name| self.appearance.settings.sounds.events.get(name)) {
+            None => 0,
+            Some(appearance::EventSound::Off) => 1,
+            Some(appearance::EventSound::File(_)) => 2,
+        }
+    }
+
+    /// What the `n`-th event's row shows it plays: the theme's sound, none,
+    /// or the user's own file by its name.
+    fn event_sound_shown(&self, index: usize) -> String {
+        let name = appearance::sounds::SHELL_EVENTS.get(index).map(|e| e.name);
+        match name.and_then(|name| self.appearance.settings.sounds.events.get(name)) {
+            None => EVENT_SOUND_CHOICES[0].to_owned(),
+            Some(appearance::EventSound::Off) => EVENT_SOUND_CHOICES[1].to_owned(),
+            Some(appearance::EventSound::File(path)) => {
+                let file = path.file_name().map_or_else(
+                    || path.shown().to_string(),
+                    |name| std::path::Path::new(name).shown().to_string(),
+                );
+                format!("Your own: {file}")
+            }
+        }
+    }
+
+    /// Choice `choice` of [`EVENT_SOUND_CHOICES`] for the `n`-th event: the
+    /// theme's (the user's own forgotten), none, or a file -- chosen in the
+    /// picker, so a cancelled picker leaves the event as it was.
+    fn choose_event_sound(&mut self, index: usize, choice: usize) {
+        let Some(event) = appearance::sounds::SHELL_EVENTS.get(index) else {
+            return;
+        };
+        let events = &mut self.appearance.settings.sounds.events;
+        match choice {
+            0 => {
+                events.remove(event.name);
+                self.preview_event(event.name);
+            }
+            1 => {
+                events.insert(event.name.to_owned(), appearance::EventSound::Off);
+            }
+            2 => self.open_sound_dialog(index),
+            _ => {}
+        }
+    }
+
+    /// Play the sound the event `name` makes now -- the user's own, or the
+    /// theme's -- as [`Self::preview`] does.
+    fn preview_event(&mut self, name: &str) {
+        let choice = self.appearance.settings.sound_for(name);
+        self.preview(&choice);
+    }
+
+    /// Play `choice` once, at the volume the desktop plays at: a sound is
+    /// heard as it is chosen, which is design.txt's "previewable". Silence
+    /// plays nothing. Turned into a sound as the desktop turns it
+    /// (`gui/desktop/src/event_sounds.rs`, `EventSounds::sound`), so what is
+    /// heard here is what will be heard there.
+    fn preview(&mut self, choice: &appearance::sounds::SoundChoice) {
+        let sound = match choice {
+            appearance::sounds::SoundChoice::File(path) => sound::Sound::File(path.clone()),
+            appearance::sounds::SoundChoice::BuiltIn(event) => {
+                match sound::BuiltIn::for_event(event) {
+                    Some(builtin) => sound::Sound::BuiltIn(builtin),
+                    None => return,
+                }
+            }
+            appearance::sounds::SoundChoice::Silent => return,
+        };
+        let volume = self.appearance.settings.sounds.volume;
+        self.pending_preview = Some((sound, volume));
+    }
+
+    /// Play the preview a change asked for, if any, and forget it: called
+    /// by the event seam once an event is handled. Nothing is played unless
+    /// [`Self::play_previews`].
+    fn play_pending_preview(&mut self) {
+        let Some((sound, volume)) = self.pending_preview.take() else {
+            return;
+        };
+        if self.play_previews {
+            // Busy, no sound device, no thread: each means the preview is
+            // not heard, which the page cannot mend and the choice does not
+            // hang on -- the setting is saved either way.
+            let _unheard = sound::play(sound, volume);
+        }
+    }
+
+    /// The picker, for a sound of the user's own for the `n`-th event: the
+    /// kinds the desktop's player reads, opened where the event's own file
+    /// is if it has one.
+    fn open_sound_dialog(&mut self, index: usize) {
+        let near = appearance::sounds::SHELL_EVENTS
+            .get(index)
+            .and_then(|e| self.appearance.settings.sounds.events.get(e.name))
+            .and_then(|choice| match choice {
+                appearance::EventSound::File(path) => {
+                    path.parent().map(std::path::Path::to_path_buf)
+                }
+                appearance::EventSound::Off => None,
+            });
+        let start = near
+            .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+            .unwrap_or_else(std::env::temp_dir);
+        let mut dialog = FileDialog::open()
+            .with_initial_path(start)
+            .with_filter("Sounds", &["*.oga", "*.ogg", "*.wav"]);
+        dialog.set_entries(guitk::dialog::list_directory(dialog.current_path()));
+        self.picker_is_for = PickerPurpose::EventSound(index);
+        self.dialog = Some(dialog);
     }
 
     /// The picture picker, wherever its answer is going to land.
@@ -1685,6 +2167,16 @@ impl SettingsState {
                     }
                     PickerPurpose::DayWallpaper => self.set_scheduled_picture(true, path),
                     PickerPurpose::NightWallpaper => self.set_scheduled_picture(false, path),
+                    PickerPurpose::EventSound(index) => {
+                        if let Some(event) = appearance::sounds::SHELL_EVENTS.get(index) {
+                            self.appearance
+                                .settings
+                                .sounds
+                                .events
+                                .insert(event.name.to_owned(), appearance::EventSound::File(path));
+                            self.preview_event(event.name);
+                        }
+                    }
                 }
             }
             DialogAction::Cancelled => self.dialog = None,
@@ -1788,6 +2280,12 @@ impl SettingsState {
             let before = (self.lock_clock_seconds, self.lock_clock_date);
             (self.lock_clock_seconds, self.lock_clock_date) = lockscreen::stored_clock();
             before != (self.lock_clock_seconds, self.lock_clock_date)
+        } else if name == windowrules::file::CONFIG_NAME {
+            self.reread_rules()
+        } else if name == servicemenus::CONFIG_NAME {
+            let before = self.service_choices.choices.clone();
+            self.service_choices = servicemenus::ChoicesFile::load();
+            before != self.service_choices.choices
         } else if name == associations::CONFIG_NAME {
             let before = (
                 std::mem::take(&mut self.default_apps),
@@ -1955,20 +2453,23 @@ impl SettingsState {
         Self {
             current_category: SettingsCategory::System,
             current_page: SettingsPage::Display,
-            search_query: TextInput::new(),
+            search_query: textline::field_holding("", SEARCH_CAPACITY),
             search_focused: false,
             show_help: false,
             sidebar_hovered: None,
             search_hovered: false,
             page_hovered: None,
+            pointer: None,
+            why_disabled: WhyDisabled::new(),
+            clock_ms: 0,
 
             window_width: 1200.0,
             window_height: 800.0,
             dialog: None,
             color_dialog: None,
             color_is_for: ColorPurpose::Accent,
-            exclusion_draft: TextInput::new(),
-            clipboard: String::new(),
+            exclusion_draft: textline::field_holding("", EXCLUSION_CAPACITY),
+            field_menu: fieldmenu::FieldMenu::new(),
             focused_field: None,
             picker_is_for: PickerPurpose::Wallpaper,
 
@@ -2022,6 +2523,9 @@ impl SettingsState {
             dropdown_scroll: 0,
             dropdown_wheel: wheel::Accumulator::default(),
             dragging: None,
+            page_scroll: 0.0,
+            page_bar_grab: None,
+            page_bar_hovered: false,
             // Empty, not loaded: this constructor is deliberately free of
             // I/O, as the note on `load_appearance` explains. The list is
             // filled by `refresh_default_apps`, from `main` and on entry to
@@ -2030,6 +2534,10 @@ impl SettingsState {
             calendar_events: Vec::new(),
             calendar_note: None,
             starter: start_program,
+            network: None,
+            network_note: None,
+            #[cfg(test)]
+            machine_root: String::from("no-machine-under-test"),
             default_app_categories: Vec::new(),
             default_roles: Vec::new(),
             app_dirs: desktopentry::scan::DataDirs::new(Vec::new()),
@@ -2046,7 +2554,29 @@ impl SettingsState {
             // The environment's names, not a read of the folders: that is
             // `refresh_themes`'s, on entering the page.
             cursor_icon_dirs: appearance::cursors::icon_dirs(),
+            wallpaper_source_pending: None,
+            wallpaper_theme_cards: Vec::new(),
+            bundled_picture_cards: Vec::new(),
+            // No thread yet: one starts when the first picture is asked for.
+            thumbs: thumbs::Thumbs::new(),
+            icons: themeicons::Icons::new(appearance::icons::IconTheme::default()),
+            icons_palette: None,
+            sound_themes: Vec::new(),
+            sound_roots: None,
+            pending_preview: None,
+            play_previews: false,
+            rules: Vec::new(),
+            rules_built_in: false,
+            rule_problems: Vec::new(),
+            rules_error: None,
+            rule_deleted: None,
+            rule_draft: None,
+            service_menus: servicemenus::Scan::default(),
+            service_choices: servicemenus::ChoicesFile::new(),
+            service_dirs: None,
+            service_error: None,
             mono_families: Vec::new(),
+            family_check: guitk::text::family_installed,
             lock_after_minutes: 0,
             lock_clock_seconds: false,
             lock_clock_date: true,
@@ -2110,8 +2640,18 @@ fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color,
     });
 }
 
-/// Push a text command with regular weight and optional max_width.
-fn text_clipped(
+/// `rules` as the file would hold them: what two lists of rules are
+/// compared by, a rule having no `==` of its own.
+fn rules_text(rules: &[windowrules::WindowRule]) -> String {
+    let rules: Vec<&windowrules::WindowRule> = rules.iter().collect();
+    let mut doc = yamldoc::Document::new();
+    windowrules::file::write(&rules, &mut doc);
+    doc.to_text()
+}
+
+/// `content` at (`x`, `y`), no wider than `max_width`: cut with an ellipsis
+/// where it is wider, so the reader can see that there is more.
+fn text_elided(
     tree: &mut RenderTree,
     x: f32,
     y: f32,
@@ -2130,6 +2670,62 @@ fn text_clipped(
         max_width: Some(max_width),
         overflow: TextOverflow::Ellipsis,
     });
+}
+
+/// How wide a label a user wrote may be drawn: the label column, less a
+/// gap before the control.
+const NAME_WIDTH: f32 = CONTROL_COLUMN_DX - 16.0;
+
+/// The gap between two buttons of a strip.
+const BUTTON_GAP: f32 = 8.0;
+
+/// The fonts list's words for the user's own fonts: the built-in theme's row,
+/// which recommends none.
+const MY_OWN_FONTS: &str = "My own fonts";
+
+/// The field of the rule editor's `draft` that `field` names, or `None` for
+/// a field that is not the editor's.
+fn rule_input(draft: &mut rules::RuleDraft, field: FieldId) -> Option<&mut TextInput> {
+    Some(match field {
+        FieldId::RuleName => &mut draft.name,
+        FieldId::RuleMatch => &mut draft.match_text,
+        FieldId::RulePlace => &mut draft.place_text,
+        FieldId::RuleSize => &mut draft.size_text,
+        FieldId::RuleMinSize => &mut draft.min_size,
+        FieldId::RuleMaxSize => &mut draft.max_size,
+        FieldId::ExclusionDraft => return None,
+    })
+}
+
+/// `items` by their labels, and the place of the one `chosen` picks -- the
+/// first, if it picks none: a list's items and its chosen one.
+fn listed<T>(
+    items: &[T],
+    label: impl Fn(&T) -> String,
+    chosen: impl Fn(&T) -> bool,
+) -> (Vec<String>, usize) {
+    (
+        items.iter().map(&label).collect(),
+        items.iter().position(chosen).unwrap_or(0),
+    )
+}
+
+/// A context menu in a sentence: what it adds, the kinds of file it is for,
+/// and whose it is -- which is why it is on or off before anyone chose.
+fn service_menu_said(menu: &servicemenus::ServiceMenu) -> String {
+    // Never none: `servicemenus::scan` lists a menu with no usable item
+    // among the skipped files, with why.
+    let items: Vec<String> = menu
+        .actions
+        .iter()
+        .map(|action| format!("\u{201c}{}\u{201d}", action.name))
+        .collect();
+    let adds = format!("Adds {}", items.join(", "));
+    let whose = match menu.origin {
+        servicemenus::Origin::System => "Installed with the system: on until you turn it off.",
+        servicemenus::Origin::User => "Yours: off until you turn it on.",
+    };
+    format!("{adds}, for {}. {whose}", menu.mime_types.join(", "))
 }
 
 /// Render a toggle switch (on/off).
@@ -2171,7 +2767,7 @@ fn render_toggle(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, enabled: 
 /// band the pointer grabs, and the origin a drag measures from all come from
 /// here — a slider whose visible track and draggable range differ is the same
 /// class of defect the page-sink split exists to prevent, and this is the same
-/// remedy [`pill_rect`] applies to pills.
+/// remedy [`pill_layout`] applies to pills.
 fn slider_track(x: f32, y: f32) -> (f32, f32) {
     (x, y + (ITEM_HEIGHT - SLIDER_HEIGHT) / 2.0)
 }
@@ -2272,7 +2868,7 @@ fn render_dropdown_button(
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
-    text_clipped(
+    text_elided(
         tree,
         x + 10.0,
         y + 16.0,
@@ -2308,38 +2904,81 @@ fn render_section_header(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, t
 // the numbers: a second copy is how a button ends up drawn in one place and
 // clicked in another, and the drift is invisible until someone tries it.
 
-/// Width of one pill.
-const PILL_WIDTH: f32 = 72.0;
-/// Distance from one pill's left edge to the next.
-const PILL_PITCH: f32 = 80.0;
+/// The narrowest a pill is drawn, so a row of short labels ("Mon", "Off") is
+/// still a row of targets worth aiming at.
+const PILL_MIN_WIDTH: f32 = 44.0;
+// `pill_layout` clamps a pill's width between the two: `clamp` panics on
+// bounds the wrong way round.
+const _: () = assert!(PILL_MIN_WIDTH < VALUE_WIDTH);
+/// The room either side of a pill's label.
+const PILL_PAD_X: f32 = 10.0;
+/// The gap between two pills, beside each other and from one line of them to
+/// the next.
+const PILL_GAP: f32 = 8.0;
 const PILL_HEIGHT: f32 = 28.0;
 /// How far below the row's top edge the pills sit.
 const PILL_INSET_Y: f32 = 8.0;
+/// The size a pill's label is drawn at.
+const PILL_TEXT_SIZE: f32 = 12.0;
 /// Distance from the content's left edge to the first pill — the same right
 /// column the toggles and dropdowns on other rows use, which is why it is that
 /// column's constant rather than a second copy of the number.
 const PILL_ROW_X: f32 = CONTROL_COLUMN_DX;
 
-/// The rectangle of pill `index` in a row drawn at (`x`, `y`), as
-/// `(x, y, width, height)`. The only place a pill's position is computed —
-/// both the drawing and the click band come from here.
-fn pill_rect(index: usize, x: f32, y: f32) -> (f32, f32, f32, f32) {
-    #[allow(clippy::cast_precision_loss)]
-    let px = x + (index as f32) * PILL_PITCH;
-    (px, y + PILL_INSET_Y, PILL_WIDTH, PILL_HEIGHT)
+/// Where each pill of a row goes, as `(x, y, width, height)` from the control
+/// column's left edge and the row's top, and how tall the row is. The only
+/// place a pill's position is computed — both the drawing and the click band
+/// come from here.
+///
+/// Each pill is as wide as its label needs, never narrower than
+/// [`PILL_MIN_WIDTH`], and they run along the control column ([`VALUE_WIDTH`]
+/// wide), a pill that would pass its edge beginning the next line: the row
+/// grows a line for it. Until 2026-10-10 every pill was 72 pixels at an
+/// 80-pixel pitch, so the column held three: the quiet-hours days ran 250
+/// pixels past the page, off a window of the width it is laid out for, and a
+/// longer label ran out of its pill.
+fn pill_layout(labels: &[&str]) -> (Vec<(f32, f32, f32, f32)>, f32) {
+    let mut rects = Vec::with_capacity(labels.len());
+    let (mut x, mut y) = (0.0, PILL_INSET_Y);
+    for label in labels {
+        let width = (text::measure(label, PILL_TEXT_SIZE, FontWeightHint::Regular)
+            + 2.0 * PILL_PAD_X)
+            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH);
+        if x > 0.0 && x + width > VALUE_WIDTH {
+            x = 0.0;
+            y += PILL_HEIGHT + PILL_GAP;
+        }
+        rects.push((x, y, width, PILL_HEIGHT));
+        x += width + PILL_GAP;
+    }
+    (rects, ITEM_HEIGHT + (y - PILL_INSET_Y))
 }
 
-/// Draw a row of pills, the selected one filled with the accent color.
-fn render_pill_row(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, items: &[(&str, bool)]) {
-    for (idx, (label, active)) in items.iter().enumerate() {
-        let (px, py, pw, ph) = pill_rect(idx, x, y);
+/// Draw a row of pills at `rects` (from [`pill_layout`], placed), the
+/// selected one filled with the accent color. A label too wide for the
+/// column is cut with an ellipsis rather than run out of its pill.
+fn render_pill_row(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    rects: &[(f32, f32, f32, f32)],
+    items: &[(&str, bool)],
+) {
+    for (&(px, py, pw, ph), (label, active)) in rects.iter().zip(items) {
         let (bg, fg) = if *active {
             (pal.accent, pal.crust)
         } else {
             (pal.surface1, pal.subtext0)
         };
         fill_rounded(tree, px, py, pw, ph, bg, 6.0);
-        tree.text(px + 10.0, py + 7.0, label, fg, 12.0);
+        text_elided(
+            tree,
+            px + PILL_PAD_X,
+            py + 7.0,
+            label,
+            fg,
+            PILL_TEXT_SIZE,
+            pw - 2.0 * PILL_PAD_X,
+        );
     }
 }
 
@@ -2378,9 +3017,31 @@ fn render_button(tree: &mut RenderTree, pal: &Palette, x: f32, y: f32, label: &s
     tree.text(x + 12.0, y + 8.0, label, pal.crust, 13.0);
 }
 
+/// What an event's sound can be, in the order its list offers them: the
+/// sound theme's, none, or a file of the user's own (chosen in the picker).
+const EVENT_SOUND_CHOICES: [&str; 3] = ["The theme's", "Off", "A file of my own..."];
+
 /// Where the calendar is: the desktop starts programs by their path under
 /// `/usr/bin` (`gui/desktop/src/launcher.rs`).
 const CALENDAR: &str = "/usr/bin/calendar";
+
+/// Where the Network Manager is, for the Network page's "Network
+/// Connections" button.
+const NETWORK_MANAGER: &str = "/usr/bin/netmanager";
+
+/// What the Network page says of a value nothing publishes.
+const NOT_REPORTED: &str = "Not reported";
+
+/// An address as the Network page shows it, and its ink: the address; "None
+/// assigned" where the kernel says there is none; [`NOT_REPORTED`] where
+/// nothing says -- the last two dimmed, being no address.
+fn address_shown<'a>(address: &'a hwquery::Address, pal: &Palette) -> (&'a str, Color) {
+    match address {
+        hwquery::Address::Is(text) => (text.as_str(), pal.text),
+        hwquery::Address::Unassigned => ("None assigned", pal.subtext0),
+        hwquery::Address::NotReported => (NOT_REPORTED, pal.subtext0),
+    }
+}
 
 /// How many of the events an accent hides are named, each with its button;
 /// past that, one button opens the calendar.
@@ -2722,7 +3383,7 @@ fn render_swatch(
 // each row as the cursor passes it; `HitSink` paints nothing and remembers
 // which row's band contained the pointer. The row drawn at a given y *is* the
 // row clicked there, because a single function put both of them there — the
-// same collapse `pill_rect` above already applies within one row, and
+// same collapse `pill_layout` above already applies within one row, and
 // `dropdown_layout` applies to the popup.
 
 /// Distance from the content column's left edge to the column the row controls
@@ -2753,6 +3414,34 @@ const ROW_HIT_INSET: f32 = 8.0;
 /// needle to thread with a mouse, and the label is what the user is aiming at
 /// anyway.
 const ROW_HIT_WIDTH: f32 = 620.0;
+
+/// How wide a note may run before it wraps: the width a row's label and its
+/// control take together (a row's band less its inset each side), so a note
+/// never runs past the controls it explains, at any window size the page is
+/// laid out for.
+const NOTE_WIDTH: f32 = ROW_HIT_WIDTH - 2.0 * ROW_HIT_INSET;
+
+/// How wide a value beside a row's label may be drawn: from the control
+/// column to where a note ends, so a value and the notes about it share one
+/// right edge.
+const VALUE_WIDTH: f32 = NOTE_WIDTH - CONTROL_COLUMN_DX;
+
+/// The size an opened licence's text is drawn at, smaller than a note's: it
+/// is read through, not glanced at, and is long.
+const LICENCE_SIZE: f32 = 11.0;
+
+/// How far apart an opened licence's lines are.
+const LICENCE_LINE_HEIGHT: f32 = 15.0;
+
+/// The size a note is drawn at.
+const NOTE_SIZE: f32 = 13.0;
+
+/// How far apart a wrapped note's lines are: the page's own convention, a
+/// note of two lines having always been given 44 against one line's 28.
+const NOTE_LINE_HEIGHT: f32 = 16.0;
+
+/// The room under a note's last line before whatever follows it.
+const NOTE_GAP: f32 = 12.0;
 
 /// Vertical space a section header occupies: the title, its divider, and the
 /// gap beneath. The same total [`render_section_header`] returns.
@@ -2791,6 +3480,8 @@ const BUTTON_ROW_INSET_Y: f32 = 6.0;
 enum ToggleId {
     NightLight,
     AutoLogin,
+    /// Whether the desktop makes sounds at all: `sounds.enabled`.
+    SystemSounds,
     /// Whether the `n`-th program in the notification list makes a sound.
     NotifSound(usize),
     /// Whether it shows a banner rather than only appearing in the list.
@@ -2837,6 +3528,15 @@ enum ToggleId {
     /// bin holds a `limits.yaml`, so flipping it writes or removes that file
     /// ([`SettingsState::set_bin_own_limits`]) rather than a `bool`.
     BinOwnLimits(usize),
+    /// Whether the `n`-th window rule is applied: written by
+    /// [`SettingsState::set_rule_enabled`], not through the snapshot.
+    RuleEnabled(usize),
+    /// Whether the rule being written is for the first window it matches
+    /// only.
+    RuleOnce,
+    /// Whether the `n`-th service menu is offered: written by
+    /// [`SettingsState::set_service_menu`], not through the snapshot.
+    ServiceMenu(usize),
 }
 
 /// A row of small selectable buttons — see [`render_pill_row`].
@@ -3010,6 +3710,11 @@ enum SelectId {
     AccountPicture,
     /// One saved exclusion pattern, by position. Selecting it removes it.
     ExclusionPattern,
+    /// A theme offered by its picture on the Background page, by its place
+    /// in `wallpaper_theme_cards`.
+    WallpaperTheme,
+    /// A picture a theme bundles, by its place in `bundled_picture_cards`.
+    BundledPicture,
 }
 
 /// A place on a page where typing goes.
@@ -3022,6 +3727,52 @@ enum SelectId {
 enum FieldId {
     /// The glob being typed, before it is added to the exclusion list.
     ExclusionDraft,
+    /// A window rule's name, in the rule editor.
+    RuleName,
+    /// The program, title or words a rule matches by.
+    RuleMatch,
+    /// The two numbers of where a rule's windows open.
+    RulePlace,
+    /// The two numbers of how big they open.
+    RuleSize,
+    /// The smallest they may be made.
+    RuleMinSize,
+    /// The largest they may be made.
+    RuleMaxSize,
+}
+
+impl FieldId {
+    /// The rule editor's fields, in the order Tab visits them -- those the
+    /// editor shows: [`SettingsState::rule_fields`].
+    const RULE_FIELDS: [Self; 6] = [
+        Self::RuleName,
+        Self::RuleMatch,
+        Self::RulePlace,
+        Self::RuleSize,
+        Self::RuleMinSize,
+        Self::RuleMaxSize,
+    ];
+
+    /// How many characters the field holds.
+    fn capacity(self) -> usize {
+        match self {
+            Self::ExclusionDraft => EXCLUSION_CAPACITY,
+            Self::RuleName => rules::NAME_CAPACITY,
+            Self::RuleMatch => rules::MATCH_CAPACITY,
+            Self::RulePlace | Self::RuleSize | Self::RuleMinSize | Self::RuleMaxSize => {
+                rules::NUMBERS_CAPACITY
+            }
+        }
+    }
+}
+
+/// The text field a right-click menu is up for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MenuField {
+    /// The sidebar's search.
+    Search,
+    /// A field on the page.
+    Page(FieldId),
 }
 
 /// A continuously-valued setting the pointer can drag along a track.
@@ -3039,6 +3790,8 @@ enum SliderId {
     /// How long the pointer has between two clicks for them to be one
     /// double click, in milliseconds.
     DoubleClickMs,
+    /// How loud the desktop's sounds are, 0 to 1: `sounds.volume`.
+    SoundVolume,
 }
 
 impl SliderId {
@@ -3050,11 +3803,12 @@ impl SliderId {
     /// a test walks it to check each one is draggable, the way
     /// [`DropdownId::FIXED`] does for dropdowns.
     #[cfg(test)]
-    const FIXED: [Self; 4] = [
+    const FIXED: [Self; 5] = [
         Self::NightLightTemperature,
         Self::NarratorRate,
         Self::TextSize,
         Self::DoubleClickMs,
+        Self::SoundVolume,
     ];
 
     /// The lowest and highest value this slider can hold, in the units the
@@ -3072,7 +3826,7 @@ impl SliderId {
     /// hide settings the file can hold.
     fn range(self) -> (f32, f32) {
         match self {
-            Self::NightLightTemperature | Self::NarratorRate => (0.0, 1.0),
+            Self::NightLightTemperature | Self::NarratorRate | Self::SoundVolume => (0.0, 1.0),
             Self::TextSize => (50.0, 250.0),
             #[allow(clippy::cast_precision_loss)]
             Self::DoubleClickMs => (MIN_DOUBLE_CLICK_MS as f32, MAX_DOUBLE_CLICK_MS as f32),
@@ -3090,6 +3844,9 @@ impl SliderId {
         match self {
             Self::NightLightTemperature | Self::NarratorRate => None,
             Self::TextSize => Some(format!("{whole}%")),
+            // Stored as a fraction, shown as the percentage people read
+            // volumes in.
+            Self::SoundVolume => Some(format!("{}%", round_u16(value * 100.0))),
             // In milliseconds, the unit the setting is actually stored and
             // applied in, rather than as a "speed" the user would have to guess
             // the direction of. The ends are labelled Fast and Slow by the page.
@@ -3111,6 +3868,8 @@ enum AnchorId {
     Dropdown(DropdownId),
     /// The left end of a slider's track.
     Slider(SliderId),
+    /// The top-left of a text field's row: what Tab scrolls into view.
+    Field(FieldId),
 }
 
 /// A push button that does something when pressed.
@@ -3140,6 +3899,10 @@ enum ButtonId {
     OpenCalendar,
     /// Read the calendar's events again.
     LookAgain,
+    /// Read the machine's network interfaces again, on the Network page.
+    RefreshNetwork,
+    /// Open the Network Manager, where an interface is changed.
+    OpenNetworkManager,
     /// Open or close the `n`-th third-party notice on the About page.
     Notice(usize),
     /// Choose the picture up from the morning.
@@ -3148,6 +3911,24 @@ enum ButtonId {
     ChooseNightWallpaper,
     /// Stop changing the picture by the time of day.
     ClearSchedule,
+    /// Open the `n`-th window rule in the editor.
+    EditRule(usize),
+    /// Move the `n`-th window rule above the one before it.
+    RuleUp(usize),
+    /// Move it below the one after it.
+    RuleDown(usize),
+    /// Delete the `n`-th window rule.
+    DeleteRule(usize),
+    /// Put the rule just deleted back where it was.
+    PutRuleBack,
+    /// Open the editor on a new window rule.
+    AddRule,
+    /// Save the rule being written.
+    SaveRule,
+    /// Close the editor and keep nothing of it.
+    CancelRule,
+    /// Remove from the file the rules it cannot read.
+    RemoveUnreadableRules,
 }
 
 /// How long a rotation leaves each picture up, in seconds.
@@ -3275,6 +4056,9 @@ enum PickerPurpose {
     DayWallpaper,
     /// The picture up from the evening, by time of day.
     NightWallpaper,
+    /// A sound of the user's own for the `n`-th of
+    /// `appearance::sounds::SHELL_EVENTS`.
+    EventSound(usize),
 }
 
 /// What a click on a page landed on.
@@ -3292,6 +4076,22 @@ enum RowHit {
     /// track's origin is asked of the page via [`AnchorId::Slider`] rather
     /// than carried alongside the name.
     Slider(SliderId),
+}
+
+/// What pressing a button does: something, or nothing and why.
+///
+/// The one value [`PageSink::button_at`] decides a button by -- its click
+/// band, its paint, and what it says when the pointer rests on it -- so a
+/// button cannot be drawn dimmed and say nothing about it, any more than it
+/// can be drawn live with nothing behind it.
+#[derive(Debug, Clone, Copy)]
+enum Press<'a> {
+    /// Pressing it does this.
+    Does(RowHit),
+    /// It cannot be pressed, for this reason: a sentence for the user,
+    /// shown while the pointer rests on the dimmed button (`design.txt`: "a
+    /// hover tooltip ... explaining why it's disabled/how to enable it").
+    Cannot(&'a str),
 }
 
 /// The one description of a settings page, interpreted either as drawing or as
@@ -3333,6 +4133,11 @@ trait PageSink {
     /// window coordinates. [`DrawSink`] discards it.
     fn hit_rect(&mut self, x: f32, y: f32, w: f32, h: f32, what: RowHit);
 
+    /// Note that the control drawn over the given rectangle, in absolute
+    /// window coordinates, is disabled, and `why`. Only [`WhySink`] keeps
+    /// it; the others draw or click, and a disabled control does neither.
+    fn disabled_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _why: &str) {}
+
     // ---- provided: the vocabulary a page is written in ----
 
     /// The column every row's control sits in.
@@ -3354,11 +4159,44 @@ trait PageSink {
         self.advance(SECTION_SPACING);
     }
 
-    /// A line of explanatory prose beneath a section header.
+    /// Explanatory prose beneath a section header, wrapped to [`NOTE_WIDTH`].
+    ///
+    /// `height` is the room the caller wants for the note: most ask 28, a
+    /// line and the gap after it. A note the column cannot hold on one line
+    /// takes the lines it needs, each [`NOTE_LINE_HEIGHT`] apart, and the room
+    /// grows with them -- never shrinks below what was asked. Until
+    /// 2026-10-10 every note was drawn on one line however long, past the
+    /// column and cut off by the window's edge (a text command does not wrap),
+    /// while the room below it was whatever its caller had guessed the line
+    /// count would be.
     fn note(&mut self, text: &str, height: f32) {
-        let pal = &self.palette();
-        self.draw(|tree, x, y| tree.text(x, y + 4.0, text, pal.subtext0, 13.0));
-        self.advance(height);
+        let ink = self.palette().subtext0;
+        self.note_in(text, height, ink);
+    }
+
+    /// A note in `ink`, wrapped and spaced as [`Self::note`].
+    fn note_in(&mut self, text: &str, height: f32, ink: Color) {
+        let lines = text::wrap(text, NOTE_WIDTH, NOTE_SIZE, FontWeightHint::Regular);
+        let mut needed = NOTE_GAP;
+        for _ in &lines {
+            needed += NOTE_LINE_HEIGHT;
+        }
+        self.draw(move |tree, x, y| {
+            let mut line_y = y + 4.0;
+            for line in &lines {
+                tree.text(x, line_y, line, ink, NOTE_SIZE);
+                line_y += NOTE_LINE_HEIGHT;
+            }
+        });
+        self.advance(height.max(needed));
+    }
+
+    /// Why something failed -- a change that could not be kept, a file that
+    /// could not be read -- in red, wrapped as a note is: the whole reason,
+    /// however long, where a value row would cut it at the column's edge.
+    fn problem(&mut self, text: &str) {
+        let pal = self.palette();
+        self.note_in(text, 28.0, pal.ink(pal.red));
     }
 
     /// A labelled row: text on the left, `control` drawn at the control
@@ -3400,9 +4238,14 @@ trait PageSink {
     /// role and is documented as not carrying text, excluded by name from the
     /// palette's own WCAG floor (`every_role_a_user_reads_is_legible_on_the_
     /// base_of_its_own_palette`). A greyed row is still a row somebody reads.
-    fn unavailable_row(&mut self, label: &str, value: &str) {
+    ///
+    /// `why` is said while the pointer rests on the row: what it would take
+    /// for the row to be usable, in a sentence.
+    fn unavailable_row(&mut self, label: &str, value: &str, why: &str) {
         let pal = &self.palette();
         let text = value.to_string();
+        let (x, y) = (self.x(), self.y());
+        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);
         self.row(label, None, ITEM_HEIGHT, move |tree, cx, y| {
             tree.text(cx, y + 8.0, &text, pal.subtext0, 13.0);
         });
@@ -3463,24 +4306,38 @@ trait PageSink {
         });
     }
 
-    /// A row that only reports a value; nothing to click.
+    /// A row that only reports a value; nothing to click. A value wider than
+    /// the room beside its label ([`VALUE_WIDTH`]) is cut with an ellipsis:
+    /// a text command does not wrap, so until 2026-10-10 a long one -- a
+    /// program's name, a font family's -- ran on past the row and, in a
+    /// window as narrow as the page is laid out for, off the window. Say why
+    /// something failed with [`Self::problem`], which wraps, not here.
     fn value_row(&mut self, label: &str, value: &str, color: Color) {
         self.row(label, None, ITEM_HEIGHT, |tree, cx, y| {
-            tree.text(cx, y + 14.0, value, color, 13.0);
+            text_elided(tree, cx, y + 14.0, value, color, 13.0, VALUE_WIDTH);
         });
     }
 
-    /// A row whose control is a strip of pills, one of them selected.
+    /// A row whose control is a strip of pills, one of them selected: as
+    /// many lines of them as the control column needs ([`pill_layout`]).
     fn pill_row(&mut self, label: &str, id: PillId, items: &[(&str, bool)]) {
         let pal = &self.palette();
-        let pill_x = self.x() + PILL_ROW_X;
-        let y = self.y();
-        for idx in 0..items.len() {
-            let (px, py, pw, ph) = pill_rect(idx, pill_x, y);
+        let labels: Vec<&str> = items.iter().map(|(label, _)| *label).collect();
+        let (offsets, height) = pill_layout(&labels);
+        let placed = |x: f32, y: f32| -> Vec<(f32, f32, f32, f32)> {
+            offsets
+                .iter()
+                .map(|&(dx, dy, w, h)| (x + dx, y + dy, w, h))
+                .collect()
+        };
+        for (idx, (px, py, pw, ph)) in placed(self.x() + PILL_ROW_X, self.y())
+            .into_iter()
+            .enumerate()
+        {
             self.hit_rect(px, py, pw, ph, RowHit::Pill(id, idx));
         }
-        self.row(label, None, ITEM_HEIGHT, |tree, _cx, y| {
-            render_pill_row(tree, pal, pill_x, y, items);
+        self.row(label, None, height, |tree, cx, y| {
+            render_pill_row(tree, pal, &placed(cx, y), items);
         });
     }
 
@@ -3488,26 +4345,29 @@ trait PageSink {
     /// blocks of bespoke content, so this does not move the cursor — the
     /// caller advances past the whole block.
     ///
-    /// **A button looks live exactly when it is live.** `what` is the one
-    /// value that decides both: it registers the click band, and its
-    /// `Some`-ness picks which of [`render_button`] / [`render_disabled_button`]
-    /// paints it. There is deliberately no way to ask for the live colour
-    /// while passing `None`, because that combination is the bug this is
-    /// fixing — seven buttons that promised an action the app cannot perform.
+    /// **A button looks live exactly when it is live.** `press` is the one
+    /// value that decides both: it registers the click band, and whether it
+    /// is [`Press::Does`] picks which of [`render_button`] /
+    /// [`render_disabled_button`] paints it. There is deliberately no way to
+    /// ask for the live colour with nothing behind the button, because that
+    /// combination is the bug this is fixing — seven buttons that promised an
+    /// action the app cannot perform.
     ///
-    /// A `None` button still registers no band, which stays correct: a band
-    /// that swallowed the click would take the "nothing happened here"
-    /// feedback away and block anything drawn beneath it. Dimming is what
-    /// tells the user *why* nothing happened.
-    fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, what: Option<RowHit>) {
+    /// A button that [`Press::Cannot`] still registers no band, which stays
+    /// correct: a band that swallowed the click would take the "nothing
+    /// happened here" feedback away and block anything drawn beneath it.
+    /// Dimming says that nothing will happen; the reason it carries, said
+    /// while the pointer rests on the button, says why.
+    fn button_at(&mut self, dx: f32, dy: f32, label: &str, color: Color, press: Press<'_>) {
         let pal = &self.palette();
-        match what {
-            Some(what) => {
-                let (x, y) = (self.x(), self.y());
+        let (x, y) = (self.x(), self.y());
+        match press {
+            Press::Does(what) => {
                 self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);
                 self.draw(|tree, x, y| render_button(tree, pal, x + dx, y + dy, label, color));
             }
-            None => {
+            Press::Cannot(why) => {
+                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, why);
                 self.draw(|tree, x, y| render_disabled_button(tree, pal, x + dx, y + dy, label));
             }
         }
@@ -3520,12 +4380,60 @@ trait PageSink {
     /// one-value rule as a free-standing one. The row itself takes no click
     /// band — the button is the target, not the whole row, because the rest of
     /// the row is a label and pressing a label should do nothing.
-    fn button_row(&mut self, label: &str, button: &str, color: Color, what: Option<RowHit>) {
+    fn button_row(&mut self, label: &str, button: &str, color: Color, press: Press<'_>) {
         let pal = &self.palette();
         self.draw(|tree, x, y| {
             render_setting_row(tree, pal, x, y, label, 0.0);
         });
-        self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, what);
+        self.button_at(CONTROL_COLUMN_DX, BUTTON_ROW_INSET_Y, button, color, press);
+        self.advance(ITEM_HEIGHT);
+    }
+
+    /// Buttons side by side from the row's left, each live or dimmed by its
+    /// own [`Press`], as [`Self::button_at`] draws one.
+    fn button_strip(&mut self, buttons: &[(&str, Color, Press<'_>)]) {
+        let mut dx = 0.0;
+        for (label, color, press) in buttons {
+            self.button_at(dx, BUTTON_ROW_INSET_Y, label, *color, *press);
+            dx += button_width(label) + BUTTON_GAP;
+        }
+        self.advance(ITEM_HEIGHT);
+    }
+
+    /// [`Self::toggle_row`] labelled with a name the user wrote -- a window
+    /// rule's -- cut with an ellipsis at the control column rather than drawn
+    /// on under the switch.
+    fn named_toggle_row(&mut self, name: &str, id: ToggleId, on: bool) {
+        let pal = self.palette();
+        let (x, y) = (self.x(), self.y());
+        self.hit_rect(
+            x - ROW_HIT_INSET,
+            y,
+            ROW_HIT_WIDTH,
+            ITEM_HEIGHT,
+            RowHit::Toggle(id),
+        );
+        let control_x = self.control_x();
+        let name = name.to_owned();
+        self.draw(move |tree, x, y| {
+            text_elided(tree, x, y + 14.0, &name, pal.text, 14.0, NAME_WIDTH);
+            render_toggle(tree, &pal, control_x, y + 12.0, on);
+        });
+        self.advance(ITEM_HEIGHT);
+    }
+
+    /// [`Self::unavailable_row`] labelled with a name the user wrote, as
+    /// [`Self::named_toggle_row`] is.
+    fn named_unavailable_row(&mut self, name: &str, value: &str, why: &str) {
+        let pal = self.palette();
+        let (x, y) = (self.x(), self.y());
+        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);
+        let control_x = self.control_x();
+        let (name, value) = (name.to_owned(), value.to_owned());
+        self.draw(move |tree, x, y| {
+            text_elided(tree, x, y + 14.0, &name, pal.text, 14.0, NAME_WIDTH);
+            tree.text(control_x, y + 8.0, &value, pal.subtext0, 13.0);
+        });
         self.advance(ITEM_HEIGHT);
     }
 
@@ -3551,6 +4459,7 @@ trait PageSink {
             render_setting_row(tree, pal, x, y, label, 0.0);
         });
         let (x, y) = (self.x(), self.y());
+        self.anchor(AnchorId::Field(id), x, y);
         self.hit_rect(
             x + CONTROL_COLUMN_DX,
             y + BUTTON_ROW_INSET_Y,
@@ -3584,7 +4493,7 @@ trait PageSink {
                 focus_width,
             );
             if text.is_empty() && !focused {
-                text_clipped(
+                text_elided(
                     tree,
                     fx + 8.0,
                     fy + 7.0,
@@ -3740,6 +4649,58 @@ impl PageSink for AnchorSink {
     }
 }
 
+/// The sink that answers "which controls are disabled, and why?" -- what
+/// [`WhyDisabled`] is handed with each pointer move. Walking the page for
+/// it, as [`HitSink`] does for a click, means the box a reason is given for
+/// is the box the dimmed control was drawn in.
+struct WhySink {
+    x: f32,
+    y: f32,
+    disabled: Vec<((f32, f32, f32, f32), String)>,
+}
+
+impl PageSink for WhySink {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+    fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
+    fn disabled_rect(&mut self, x: f32, y: f32, w: f32, h: f32, why: &str) {
+        self.disabled.push(((x, y, w, h), why.to_owned()));
+    }
+}
+
+/// The sink that answers "how tall is the page?": it walks the page and
+/// keeps only where the cursor ends.
+struct MeasureSink {
+    x: f32,
+    y: f32,
+}
+
+impl PageSink for MeasureSink {
+    fn x(&self) -> f32 {
+        self.x
+    }
+    fn y(&self) -> f32 {
+        self.y
+    }
+    fn advance(&mut self, dy: f32) {
+        self.y += dy;
+    }
+    fn draw(&mut self, _f: impl FnOnce(&mut RenderTree, f32, f32)) {}
+    fn hit_rect(&mut self, _x: f32, _y: f32, _w: f32, _h: f32, _what: RowHit) {}
+}
+
+/// Room left below a page's last row when it is scrolled to its end, so the
+/// end reads as an end rather than as a row cut by the window's edge.
+const PAGE_FOOT: f32 = 24.0;
+
 // ============================================================================
 // Page renderers
 // ============================================================================
@@ -3778,8 +4739,13 @@ impl SettingsState {
         // Page content
         let page_y = HEADER_HEIGHT + 8.0;
         tree.clip(content_x, page_y, content_w, self.window_height - page_y);
-        self.render_current_page(&mut tree, content_x + CONTENT_PADDING, page_y);
+        self.render_current_page(
+            &mut tree,
+            content_x + CONTENT_PADDING,
+            page_y - self.page_scroll,
+        );
         tree.unclip();
+        self.render_page_bar(&mut tree);
 
         tree.unclip();
 
@@ -3787,6 +4753,9 @@ impl SettingsState {
         if self.open_dropdown.is_some() {
             self.render_open_dropdown(&mut tree);
         }
+
+        // A text field's right-click menu, over the page it was opened on.
+        tree.commands.extend(self.field_menu.render(pal));
 
         // And a modal over even that: a dropdown drawn over one would be a
         // list the user could not dismiss. Two of them now, the file picker
@@ -3811,6 +4780,11 @@ impl SettingsState {
                 "F1 closes this",
             );
         }
+
+        // Why the disabled control under the pointer is disabled, over
+        // everything. Nothing above is ever drawn with it: a list, a picker or
+        // the card coming up takes the reason away (`explain_disabled`).
+        tree.commands.extend(self.why_disabled.render(pal));
 
         tree
     }
@@ -3927,10 +4901,21 @@ impl SettingsState {
             self.appearance.settings.focus_ring_width(),
         );
         if self.search_query.text().is_empty() && !self.search_focused {
+            tree.push(RenderCommand::Image {
+                x: 24.0,
+                y: search_y + 12.5,
+                width: f32::from(SEARCH_ICON_SIDE),
+                height: f32::from(SEARCH_ICON_SIDE),
+                image_id: self.icons.icon(
+                    "system-search",
+                    u32::from(SEARCH_ICON_SIDE),
+                    pal.subtext0,
+                ),
+            });
             tree.text(
-                24.0,
+                24.0 + f32::from(SEARCH_ICON_SIDE) + 6.0,
                 search_y + 12.0,
-                "\u{1F50D} Search settings...",
+                "Search settings...",
                 pal.subtext0,
                 13.0,
             );
@@ -3998,14 +4983,21 @@ impl SettingsState {
                 );
             }
 
-            // Icon
-            tree.text(
-                24.0,
-                item_y + 12.0,
-                category.icon_char(),
-                pal.subtext0,
-                16.0,
-            );
+            // Icon, from the user's icon theme in the colour the label beside
+            // it is drawn in.
+            let (name, stand_in) = category.icon();
+            tree.push(RenderCommand::Image {
+                x: 24.0,
+                y: item_y + CATEGORY_ICON_DY,
+                width: f32::from(CATEGORY_ICON_SIDE),
+                height: f32::from(CATEGORY_ICON_SIDE),
+                image_id: self.icons.icon_or(
+                    name,
+                    stand_in,
+                    u32::from(CATEGORY_ICON_SIDE),
+                    pal.subtext0,
+                ),
+            });
 
             // Label
             let label_color = if is_selected { pal.text } else { pal.subtext1 };
@@ -4087,6 +5079,8 @@ impl SettingsState {
             SettingsPage::Proxy => self.build_proxy_page(sink),
             SettingsPage::DynamicDns => Self::build_dyndns_page(sink, &self.palette()),
             SettingsPage::DefaultApps => self.build_default_apps_page(sink),
+            SettingsPage::WindowRules => self.build_window_rules_page(sink),
+            SettingsPage::ContextMenus => self.build_context_menus_page(sink),
             SettingsPage::About => self.build_about_page(sink),
             SettingsPage::RecycleBin => self.build_recycle_bin_page(sink),
             SettingsPage::Fonts => self.build_fonts_page(sink),
@@ -4197,6 +5191,109 @@ impl SettingsState {
         HEADER_HEIGHT + 8.0
     }
 
+    /// Where the page's first row is drawn: the content's top, less how far
+    /// the page is scrolled. Every walk of the page starts here.
+    fn page_top(&self) -> f32 {
+        Self::content_top() - self.page_scroll
+    }
+
+    /// How tall the window's view of the page is.
+    fn page_view_height(&self) -> f32 {
+        (self.window_height - Self::content_top()).max(0.0)
+    }
+
+    /// How tall the page is, from its first row to below its last.
+    fn page_height(&self) -> f32 {
+        let mut sink = MeasureSink { x: 0.0, y: 0.0 };
+        self.build_page(&mut sink);
+        sink.y + PAGE_FOOT
+    }
+
+    /// The farthest the page scrolls: until its last row is on screen, with
+    /// [`PAGE_FOOT`] below it. Nought for a page that fits.
+    fn max_page_scroll(&self) -> f32 {
+        (self.page_height() - self.page_view_height()).max(0.0)
+    }
+
+    /// Keep the scroll within the page, which may have grown shorter -- a
+    /// section switched off, a window made taller. Whether it moved.
+    fn clamp_page_scroll(&mut self) -> bool {
+        self.scroll_page_to(self.page_scroll)
+    }
+
+    /// Scroll the page by `dy` pixels, down for positive. Whether it moved:
+    /// at an end it does not.
+    fn scroll_page_by(&mut self, dy: f32) -> bool {
+        self.scroll_page_to(self.page_scroll + dy)
+    }
+
+    /// Scroll the page to `to`, kept within it. Whether it moved.
+    fn scroll_page_to(&mut self, to: f32) -> bool {
+        let before = self.page_scroll;
+        let to = if to.is_finite() { to } else { before };
+        self.page_scroll = to.clamp(0.0, self.max_page_scroll());
+        (self.page_scroll - before).abs() > f32::EPSILON
+    }
+
+    /// How far Page Up and Page Down move: the view, less a row, so the row
+    /// at the edge is still on screen after the move to read on from.
+    fn page_step(&self) -> f32 {
+        (self.page_view_height() - ITEM_HEIGHT).max(ITEM_HEIGHT)
+    }
+
+    /// The page's scrollbar -- its column and its thumb -- or `None` for a
+    /// page that fits the window, which has nothing to scroll.
+    fn page_bar(&self) -> Option<(guitk::frame::Rect, guitk::frame::Rect)> {
+        let max = self.max_page_scroll();
+        if max <= 0.0 {
+            return None;
+        }
+        let view = self.page_view_height();
+        let track = guitk::frame::Rect::new(
+            self.window_width - guitk::scrollbar::WIDTH,
+            Self::content_top(),
+            guitk::scrollbar::WIDTH,
+            view,
+        );
+        let thumb = guitk::scrollbar::thumb_of(
+            track,
+            view / (view + max),
+            self.page_scroll / max,
+            guitk::scrollbar::MIN_THUMB,
+        );
+        Some((track, thumb))
+    }
+
+    /// Scroll the page to where the thumb, held `grab` below its top, is
+    /// dragged to the pointer's height `my`.
+    fn drag_page_bar_to(&mut self, my: f32, grab: f32) {
+        let Some((track, thumb)) = self.page_bar() else {
+            return;
+        };
+        let span = track.h - thumb.h;
+        if span <= 0.0 {
+            return;
+        }
+        let fraction = ((my - grab - track.y) / span).clamp(0.0, 1.0);
+        self.scroll_page_to(fraction * self.max_page_scroll());
+    }
+
+    /// Draw the page's scrollbar, if the page does not fit.
+    fn render_page_bar(&self, tree: &mut RenderTree) {
+        if let Some((track, thumb)) = self.page_bar() {
+            guitk::scrollbar::draw(
+                tree,
+                &self.palette(),
+                track,
+                thumb,
+                guitk::scrollbar::BarState {
+                    hovered: self.page_bar_hovered,
+                    dragging: self.page_bar_grab.is_some(),
+                },
+            );
+        }
+    }
+
     /// Paint the current page.
     fn render_current_page(&self, tree: &mut RenderTree, x: f32, start_y: f32) {
         let mut sink = DrawSink {
@@ -4249,15 +5346,66 @@ impl SettingsState {
 
     /// What the page control at (`mx`, `my`) is, if the point is on one.
     fn row_at(&self, mx: f32, my: f32) -> Option<RowHit> {
+        // Above the content's top is the header, over whatever row has
+        // scrolled under it: a press there is the header's, never the row's.
+        if my < Self::content_top() {
+            return None;
+        }
         let mut sink = HitSink {
             mx,
             my,
             x: Self::content_x(),
-            y: Self::content_top(),
+            y: self.page_top(),
             hit: None,
         };
         self.build_page(&mut sink);
         sink.hit
+    }
+
+    /// The page's disabled controls, each as drawn -- its box in window
+    /// coordinates -- with why it is disabled.
+    fn disabled_controls(&self) -> Vec<((f32, f32, f32, f32), String)> {
+        let mut sink = WhySink {
+            x: Self::content_x(),
+            y: self.page_top(),
+            disabled: Vec::new(),
+        };
+        self.build_page(&mut sink);
+        sink.disabled
+    }
+
+    /// Say why the disabled control under the pointer is disabled, or stop
+    /// saying it: the pointer is on none, has left the window, or something
+    /// is drawn over the page -- a list, a picker, the shortcut card, a
+    /// field's menu -- or a slider or the scrollbar is being dragged. Returns
+    /// whether what is drawn changed.
+    ///
+    /// Asked after every event rather than on pointer moves alone, because a
+    /// page can change under a pointer that stays put: a key that goes to
+    /// another page must not leave the last page's reason on the new one.
+    fn explain_disabled(&mut self) -> bool {
+        let covered = self.dialog.is_some()
+            || self.color_dialog.is_some()
+            || self.show_help
+            || self.open_dropdown.is_some()
+            || self.field_menu.is_up()
+            || self.dragging.is_some()
+            || self.page_bar_grab.is_some();
+        match self.pointer {
+            // Not over the header, where a disabled row may have scrolled
+            // under it: the row is not what the pointer is on.
+            Some(at) if !covered && at.1 >= Self::content_top() => {
+                let disabled = self.disabled_controls();
+                let boxes: Vec<Disabled<'_>> = disabled
+                    .iter()
+                    .map(|(bounds, why)| (*bounds, why.as_str()))
+                    .collect();
+                let screen = (self.window_width, self.window_height);
+                self.why_disabled
+                    .pointer_at(at, self.clock_ms, screen, &boxes)
+            }
+            _ => self.why_disabled.pointer_left(),
+        }
     }
 
     // --- Display page ---
@@ -4364,9 +5512,827 @@ impl SettingsState {
         }
     }
 
+    // --- Context Menus page ---
+
+    /// The Context Menus page
+    /// (`requests/c-e-programs-add-to-a-files-right-click-menu.md`, section 2):
+    /// what programs add to the menu a right-click on a file opens. Every
+    /// service menu found -- by its name, with a switch, what it adds, the
+    /// kinds of file it is for and whose it is -- and every file that looked
+    /// like one and is not offered, and every item of a menu that is not,
+    /// each with why: the one place a user can learn why an item they
+    /// installed never appears.
+    ///
+    /// A switch is written to `context-menus.yaml` as it is flipped
+    /// ([`Self::set_service_menu`]); the desktop and the file manager read it
+    /// again when the change is announced, so it holds from the next
+    /// right-click.
+    fn build_context_menus_page<S: PageSink>(&self, s: &mut S) {
+        s.section("Context Menus");
+        s.note(
+            "What programs add to the menu a right-click on a file opens. A menu installed with the system is on until you turn it off; one put in your own folder is off until you turn it on.",
+            44.0,
+        );
+        if let Some(error) = &self.service_error {
+            s.problem(error);
+        }
+        if self.service_menus.menus.is_empty() {
+            s.note(
+                "No program has added anything to the right-click menu.",
+                28.0,
+            );
+        }
+        for (index, menu) in self.service_menus.menus.iter().enumerate() {
+            s.gap();
+            let name = menu
+                .name
+                .clone()
+                .unwrap_or_else(|| std::path::Path::new(&menu.id).shown().to_string());
+            s.named_toggle_row(
+                &name,
+                ToggleId::ServiceMenu(index),
+                self.service_choices.choices.is_on(menu),
+            );
+            s.note(&service_menu_said(menu), 28.0);
+            for why in &menu.unusable {
+                s.note(&format!("Not offered: {why}."), 28.0);
+            }
+        }
+        if !self.service_menus.skipped.is_empty() {
+            s.gap();
+            s.section("Not Offered");
+            s.note(
+                "These files look like context menus and are not offered, each for the reason beside it.",
+                28.0,
+            );
+            for skipped in &self.service_menus.skipped {
+                let file = skipped.path.file_name().map_or_else(
+                    || skipped.path.shown().to_string(),
+                    |name| std::path::Path::new(name).shown().to_string(),
+                );
+                s.note(&format!("{file}: {}.", skipped.why), 28.0);
+            }
+        }
+    }
+
+    /// Read the context menus and the choices about them, from where they
+    /// are looked for.
+    fn refresh_service_menus(&mut self) {
+        let dirs = self
+            .service_dirs
+            .clone()
+            .unwrap_or_else(servicemenus::Dirs::standard);
+        let locale = desktopentry::Locale::from_env(|name| std::env::var(name).ok());
+        self.service_menus = servicemenus::scan(&dirs, locale.as_ref());
+        self.service_choices = servicemenus::ChoicesFile::load();
+    }
+
+    /// Turn the `index`-th context menu on or off, and keep it -- or say why
+    /// it could not be kept, and show the choices as the file holds them:
+    /// what the desktop and the file manager go by, not the switch as it was
+    /// flipped.
+    fn set_service_menu(&mut self, index: usize) {
+        let Some(menu) = self.service_menus.menus.get(index) else {
+            return;
+        };
+        let on = self.service_choices.choices.is_on(menu);
+        self.service_choices.choices.set(menu, !on);
+        match self.service_choices.save() {
+            Ok(()) => self.service_error = None,
+            Err(e) => {
+                self.service_error = Some(format!("The choice could not be kept: {e}"));
+                self.service_choices = servicemenus::ChoicesFile::load();
+            }
+        }
+    }
+
+    // --- Window Rules page ---
+
+    /// The Window Rules page (`requests/c-e-a-window-rules-page-in-settings.md`):
+    /// what happens to a program's windows as they open. The rules in their
+    /// order, each said in a line, with a switch and buttons to change it,
+    /// move it and delete it; a new one added; and the rules the file holds
+    /// that could not be read, each with why.
+    ///
+    /// The rules are lane C's `windowrules`: read with `file::load`, written
+    /// with `file::store` as each change is made, and taken by the desktop
+    /// from the file for the next window a rule matches. While a rule is
+    /// being written the page is its editor ([`Self::build_rule_editor`]).
+    ///
+    /// A file holding a rule that cannot be read refuses every change, and
+    /// says why: `file::store` writes only the rules it is given, so the first
+    /// change would delete the very rule its author is meant to mend
+    /// (`requests/e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`).
+    /// "Remove them" is the way past, taken on purpose.
+    fn build_window_rules_page<S: PageSink>(&self, s: &mut S) {
+        if let Some(draft) = &self.rule_draft {
+            self.build_rule_editor(s, draft);
+            return;
+        }
+        let pal = self.palette();
+        s.section("Window Rules");
+        s.note(
+            "What happens to a program's windows as they open: where they go, how big they are, whether they have a taskbar button. Where two rules disagree, the one nearer the top wins, and a change applies to the next window a rule matches.",
+            44.0,
+        );
+        if self.rules_built_in {
+            s.note(
+                "These are the rules every account starts with. Change any of them and they are yours.",
+                28.0,
+            );
+        }
+        if let Some(error) = &self.rules_error {
+            s.problem(error);
+        }
+        let blocked = self.rules_blocked();
+        if !self.rule_problems.is_empty() {
+            s.gap();
+            s.section("Not Applied");
+            s.note(
+                "Your window-rules file has rules that cannot be read, so they are not applied. Mend them in the file, or remove them here; until then nothing on this page can be changed, since saving would lose them.",
+                44.0,
+            );
+            for problem in &self.rule_problems {
+                let line = if problem.rule.is_empty() {
+                    format!("The rules as a whole: {}", problem.what)
+                } else {
+                    format!("\u{201c}{}\u{201d}: {}", problem.rule, problem.what)
+                };
+                s.note(&line, 28.0);
+            }
+            s.button_row(
+                "The rules that cannot be read",
+                "Remove them",
+                pal.surface1,
+                Press::Does(RowHit::Press(ButtonId::RemoveUnreadableRules)),
+            );
+        }
+        if let Some((_, rule)) = &self.rule_deleted {
+            s.gap();
+            s.note(&format!("\u{201c}{}\u{201d} is deleted.", rule.name), 28.0);
+            s.button_row(
+                "Deleted by mistake?",
+                "Put it back",
+                pal.accent,
+                blocked.map_or(
+                    Press::Does(RowHit::Press(ButtonId::PutRuleBack)),
+                    Press::Cannot,
+                ),
+            );
+        }
+        let last = self.rules.len().saturating_sub(1);
+        let or_blocked = |press: Press<'static>| blocked.map_or(press, Press::Cannot);
+        for (index, rule) in self.rules.iter().enumerate() {
+            s.gap();
+            match blocked {
+                None => s.named_toggle_row(&rule.name, ToggleId::RuleEnabled(index), rule.enabled),
+                Some(why) => s.named_unavailable_row(
+                    &rule.name,
+                    if rule.enabled { "On" } else { "Off" },
+                    why,
+                ),
+            }
+            s.note(
+                &format!(
+                    "{}. {}",
+                    rules::describe_criteria(&rule.criteria),
+                    rules::describe_actions(&rule.actions, rule.one_shot)
+                ),
+                28.0,
+            );
+            let up = if index == 0 {
+                Press::Cannot("It is the first rule already.")
+            } else {
+                or_blocked(Press::Does(RowHit::Press(ButtonId::RuleUp(index))))
+            };
+            let down = if index == last {
+                Press::Cannot("It is the last rule already.")
+            } else {
+                or_blocked(Press::Does(RowHit::Press(ButtonId::RuleDown(index))))
+            };
+            s.button_strip(&[
+                (
+                    "Change",
+                    pal.accent,
+                    or_blocked(Press::Does(RowHit::Press(ButtonId::EditRule(index)))),
+                ),
+                ("Move up", pal.surface1, up),
+                ("Move down", pal.surface1, down),
+                (
+                    "Delete",
+                    pal.surface1,
+                    or_blocked(Press::Does(RowHit::Press(ButtonId::DeleteRule(index)))),
+                ),
+            ]);
+        }
+        if self.rules.is_empty() {
+            s.gap();
+            s.note(
+                "There are no rules: every window opens as its program asks.",
+                28.0,
+            );
+        }
+        s.gap();
+        let full = format!(
+            "A file keeps {} rules at most: delete one first.",
+            windowrules::MAX_RULES
+        );
+        let add = match blocked {
+            Some(why) => Press::Cannot(why),
+            None if self.rules.len() >= windowrules::MAX_RULES => Press::Cannot(&full),
+            None => Press::Does(RowHit::Press(ButtonId::AddRule)),
+        };
+        s.button_row("A rule of your own", "Add a rule", pal.accent, add);
+    }
+
+    /// The window-rule editor: the rule's name and which windows it is for,
+    /// where and how big they open, how they open and behave, and Save --
+    /// dimmed, with the reason under it, until the draft is a rule
+    /// ([`rules::RuleDraft::rule`]).
+    fn build_rule_editor<S: PageSink>(&self, s: &mut S, draft: &rules::RuleDraft) {
+        let pal = self.palette();
+        s.section(if draft.editing.is_some() {
+            "Change a Rule"
+        } else {
+            "A New Rule"
+        });
+        self.rule_field(
+            s,
+            "Name",
+            FieldId::RuleName,
+            &draft.name,
+            "What the rule is for",
+        );
+        s.dropdown_row(
+            "Which windows",
+            DropdownId::RuleMatch,
+            draft.matching.label(),
+        );
+        if let Some(label) = draft.matching.field_label() {
+            self.rule_field(
+                s,
+                label,
+                FieldId::RuleMatch,
+                &draft.match_text,
+                draft.matching.placeholder(),
+            );
+        }
+        s.gap();
+        s.section("Where and How Big");
+        s.dropdown_row("Where it opens", DropdownId::RulePlace, draft.place.label());
+        if let Some(label) = draft.place.field_label() {
+            self.rule_field(
+                s,
+                label,
+                FieldId::RulePlace,
+                &draft.place_text,
+                draft.place.placeholder(),
+            );
+        }
+        s.dropdown_row("How big", DropdownId::RuleSize, draft.size.label());
+        if let Some(label) = draft.size.field_label() {
+            self.rule_field(
+                s,
+                label,
+                FieldId::RuleSize,
+                &draft.size_text,
+                draft.size.placeholder(),
+            );
+        }
+        self.rule_field(
+            s,
+            "Smallest size",
+            FieldId::RuleMinSize,
+            &draft.min_size,
+            "Width and height: 400 300",
+        );
+        self.rule_field(
+            s,
+            "Largest size",
+            FieldId::RuleMaxSize,
+            &draft.max_size,
+            "Width and height: 1600 1200",
+        );
+        if let Some(zone) = draft.actions.snap_zone {
+            s.dropdown_row("Snaps into", DropdownId::RuleSnap, &format!("Zone {zone}"));
+        }
+        s.gap();
+        s.section("How It Opens");
+        s.dropdown_row(
+            "Desktop",
+            DropdownId::RuleDesktop,
+            &rules::desktop_label(draft.actions.desktop),
+        );
+        s.dropdown_row(
+            "Opens",
+            DropdownId::RuleState,
+            rules::state_label(draft.actions.initial_state),
+        );
+        s.dropdown_row(
+            "Opacity",
+            DropdownId::RuleOpacity,
+            &rules::opacity_label(draft.actions.opacity),
+        );
+        for flag in rules::Flag::ALL {
+            s.dropdown_row(
+                flag.label(),
+                DropdownId::RuleFlag(flag),
+                rules::Tri::of(flag.get(&draft.actions)).label(),
+            );
+        }
+        if let Some(monitor) = draft.actions.target_monitor {
+            s.unavailable_row(
+                "Monitor",
+                &format!("Monitor {}", monitor.saturating_add(1)),
+                "Kept as your file has it, and not carried out yet: windows open on the one display this system drives.",
+            );
+        }
+        if let Some(none) = draft.actions.no_decorations {
+            s.unavailable_row(
+                "Title bar",
+                if none { "None" } else { "Its own" },
+                "Kept as your file has it, and not carried out yet: a window's title bar is its own program's to draw.",
+            );
+        }
+        s.toggle_row("For the first window only", ToggleId::RuleOnce, draft.once);
+        s.gap();
+        // Refused while the file holds a rule that cannot be read, as every
+        // change to the rules is, and while the draft is not a rule.
+        let why = self
+            .rules_blocked()
+            .map(str::to_owned)
+            .or_else(|| draft.rule(&self.rules).err());
+        let save = match &why {
+            None => Press::Does(RowHit::Press(ButtonId::SaveRule)),
+            Some(why) => Press::Cannot(why),
+        };
+        s.button_strip(&[
+            ("Save", pal.accent, save),
+            (
+                "Cancel",
+                pal.surface1,
+                Press::Does(RowHit::Press(ButtonId::CancelRule)),
+            ),
+        ]);
+        if let Some(why) = &why {
+            s.note(why, 28.0);
+        }
+    }
+
+    /// One of the rule editor's fields.
+    fn rule_field<S: PageSink>(
+        &self,
+        s: &mut S,
+        label: &str,
+        id: FieldId,
+        input: &TextInput,
+        placeholder: &str,
+    ) {
+        s.text_field_row(
+            label,
+            id,
+            input,
+            placeholder,
+            self.focused_field == Some(id),
+            self.page_hovered == Some(RowHit::Focus(id)),
+            self.appearance.settings.focus_ring_width(),
+        );
+    }
+
+    /// The rule editor's fields it shows now, in the order Tab visits them.
+    fn rule_fields(&self) -> Vec<FieldId> {
+        let Some(draft) = &self.rule_draft else {
+            return Vec::new();
+        };
+        FieldId::RULE_FIELDS
+            .into_iter()
+            .filter(|field| match field {
+                FieldId::RuleMatch => draft.matching.field_label().is_some(),
+                FieldId::RulePlace => draft.place.field_label().is_some(),
+                FieldId::RuleSize => draft.size.field_label().is_some(),
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// A key for the rule editor's field `field`, if the field takes it: Tab
+    /// and Enter go on to the next field (Shift+Tab back to the one before),
+    /// Escape lets the keyboard go, and the rest are `textline`'s, as in
+    /// every field. `None` for a key the field has no use for, which goes on
+    /// to the page -- Ctrl+F to the search, say.
+    fn rule_field_key(
+        &mut self,
+        field: FieldId,
+        evt: &KeyEvent,
+        plain: bool,
+    ) -> Option<EventResult> {
+        match evt.key {
+            Key::Escape if plain => {
+                self.focused_field = None;
+                Some(EventResult::Consumed)
+            }
+            Key::Tab | Key::Enter if plain => {
+                let back = evt.key == Key::Tab && evt.modifiers.shift;
+                self.focus_next_rule_field(field, back);
+                Some(EventResult::Consumed)
+            }
+            // A field has no lines to move through: Up and Down go to the
+            // field above or below, staying put at the ends. Passed on, they
+            // changed the page's category in the middle of an edit.
+            Key::Up | Key::Down if plain => {
+                self.step_rule_field(field, evt.key == Key::Up);
+                Some(EventResult::Consumed)
+            }
+            _ => {
+                let input = self
+                    .rule_draft
+                    .as_mut()
+                    .and_then(|draft| rule_input(draft, field))?;
+                Self::edit_line(input, evt, field.capacity()).then_some(EventResult::Consumed)
+            }
+        }
+    }
+
+    /// Give the keyboard to the editor's field after `from` -- before it, if
+    /// `back` -- and scroll it into view. Past either end, to no field.
+    fn focus_next_rule_field(&mut self, from: FieldId, back: bool) {
+        let fields = self.rule_fields();
+        let next = match fields.iter().position(|f| *f == from) {
+            Some(at) if back => at.checked_sub(1).and_then(|at| fields.get(at)),
+            Some(at) => fields.get(at.saturating_add(1)),
+            None => fields.first(),
+        }
+        .copied();
+        self.focused_field = next;
+        if let Some(field) = next {
+            self.scroll_into_view(AnchorId::Field(field));
+        }
+    }
+
+    /// Give the keyboard to the editor's field above `from` (`up`) or below
+    /// it, and scroll it into view; at the first or the last, `from` keeps it.
+    fn step_rule_field(&mut self, from: FieldId, up: bool) {
+        let fields = self.rule_fields();
+        let Some(at) = fields.iter().position(|f| *f == from) else {
+            return;
+        };
+        let next = if up {
+            at.checked_sub(1)
+        } else {
+            at.checked_add(1)
+        };
+        if let Some(field) = next.and_then(|at| fields.get(at)).copied() {
+            self.focused_field = Some(field);
+            self.scroll_into_view(AnchorId::Field(field));
+        }
+    }
+
+    /// Scroll the page so the row `anchor` names is on screen.
+    fn scroll_into_view(&mut self, anchor: AnchorId) {
+        let Some((_, y)) = self.anchor_at(anchor) else {
+            return;
+        };
+        let top = Self::content_top();
+        if y < top {
+            self.scroll_page_by(y - top);
+        } else if y + ITEM_HEIGHT > self.window_height {
+            self.scroll_page_by(y + ITEM_HEIGHT - self.window_height);
+        }
+    }
+
+    /// Read the rules as the page shows them: the user's, or the built-in
+    /// ones while the file says nothing about rules -- and why any it holds
+    /// cannot be read.
+    fn refresh_rules(&mut self) {
+        match windowrules::file::load() {
+            Some(loaded) => {
+                self.rules = loaded.rules;
+                self.rule_problems = loaded.problems;
+                self.rules_built_in = false;
+            }
+            None => {
+                self.rules = windowrules::default_rules();
+                self.rule_problems = Vec::new();
+                self.rules_built_in = true;
+            }
+        }
+    }
+
+    /// The rules again, their file having changed under the page: a hand
+    /// edit, another Settings window. A rule open in the editor is followed
+    /// by its name to wherever it stands now, or becomes a new one if the
+    /// file no longer has it; "Put it back" is forgotten, its place being
+    /// the old list's. Whether they changed: a file that holds the rules as
+    /// they were -- this window's own write, announced back to it -- changes
+    /// nothing, the offer to put a rule back included.
+    fn reread_rules(&mut self) -> bool {
+        let before = (
+            rules_text(&self.rules),
+            self.rule_problems.clone(),
+            self.rules_built_in,
+        );
+        let editing = self
+            .rule_draft
+            .as_ref()
+            .and_then(|draft| draft.editing)
+            .and_then(|at| self.rules.get(at))
+            .map(|rule| rule.name.clone());
+        self.refresh_rules();
+        let after = (
+            rules_text(&self.rules),
+            self.rule_problems.clone(),
+            self.rules_built_in,
+        );
+        if after == before {
+            return false;
+        }
+        self.rule_deleted = None;
+        if let Some(draft) = self.rule_draft.as_mut() {
+            draft.editing = editing.and_then(|name| self.rules.iter().position(|r| r.name == name));
+        }
+        true
+    }
+
+    /// Why no change to the rules can be kept now, if none can: the file
+    /// holds a rule that cannot be read, which a save would delete.
+    fn rules_blocked(&self) -> Option<&'static str> {
+        (!self.rule_problems.is_empty()).then_some(
+            "Your window-rules file has a rule that cannot be read, and saving a change would delete it: mend it in the file, or remove it above.",
+        )
+    }
+
+    /// Write the rules as the page holds them, then show what the file says:
+    /// the rules as written, or as they were with why they could not be.
+    /// Whether they were written.
+    ///
+    /// Refused while [`Self::rules_blocked`]: every control that changes the
+    /// rules is dimmed then, and this is the line they all pass.
+    fn store_rules(&mut self) -> bool {
+        if self.rules_blocked().is_some() {
+            return false;
+        }
+        let rules: Vec<&windowrules::WindowRule> = self.rules.iter().collect();
+        let stored = windowrules::file::store(&rules);
+        self.rules_error = stored
+            .as_ref()
+            .err()
+            .map(|e| format!("The rules could not be kept: {e}"));
+        self.refresh_rules();
+        stored.is_ok()
+    }
+
+    /// Turn the `index`-th rule on or off, and keep it.
+    fn set_rule_enabled(&mut self, index: usize) {
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let Some(rule) = self.rules.get_mut(index) else {
+            return;
+        };
+        rule.enabled = !rule.enabled;
+        self.rule_deleted = None;
+        self.store_rules();
+    }
+
+    /// Move the `index`-th rule above the one before it, or below the one
+    /// after it, and keep the order.
+    fn move_rule(&mut self, index: usize, up: bool) {
+        let other = if up {
+            index.checked_sub(1)
+        } else {
+            index.checked_add(1)
+        };
+        let Some(other) = other.filter(|other| *other < self.rules.len()) else {
+            return;
+        };
+        if index >= self.rules.len() || self.rules_blocked().is_some() {
+            return;
+        }
+        self.rules.swap(index, other);
+        self.rule_deleted = None;
+        self.store_rules();
+    }
+
+    /// Delete the `index`-th rule, and offer it back until the next change.
+    fn delete_rule(&mut self, index: usize) {
+        if index >= self.rules.len() || self.rules_blocked().is_some() {
+            return;
+        }
+        let rule = self.rules.remove(index);
+        self.rule_deleted = None;
+        // Offered back only once it is gone: a delete the file refused leaves
+        // the rule where it was, read back by `store_rules`.
+        if self.store_rules() {
+            self.rule_deleted = Some((index, rule));
+        }
+    }
+
+    /// Put the rule just deleted back where it stood.
+    fn put_rule_back(&mut self) {
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let Some((index, rule)) = self.rule_deleted.take() else {
+            return;
+        };
+        let at = index.min(self.rules.len());
+        self.rules.insert(at, rule);
+        self.store_rules();
+    }
+
+    /// Take the rules the file cannot read out of it: the rules it can read
+    /// written back alone. The one change the page makes while the file holds
+    /// such a rule, and only when asked.
+    fn remove_unreadable_rules(&mut self) {
+        self.rule_problems.clear();
+        self.rule_deleted = None;
+        self.store_rules();
+    }
+
+    /// Open the editor on the `index`-th rule, or on a new one; the keyboard
+    /// goes to its name.
+    fn open_rule_editor(&mut self, index: Option<usize>) {
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let draft = match index.and_then(|at| self.rules.get(at).map(|rule| (at, rule))) {
+            Some((at, rule)) => rules::RuleDraft::of(rule, at),
+            None => rules::RuleDraft::new(),
+        };
+        self.rule_draft = Some(draft);
+        self.rule_deleted = None;
+        self.page_scroll = 0.0;
+        self.focused_field = Some(FieldId::RuleName);
+    }
+
+    /// Save the rule being written: in its own place if it is one already,
+    /// at the top -- where it wins -- if it is new. The editor closes once
+    /// the rule is kept; a write the file refused leaves it open on the
+    /// draft, the list as the file has it, and why above.
+    fn save_rule(&mut self) {
+        // Save is dimmed, with the reason, while the rules cannot be kept or
+        // the draft is not a rule.
+        if self.rules_blocked().is_some() {
+            return;
+        }
+        let Some(draft) = &self.rule_draft else {
+            return;
+        };
+        let Ok(rule) = draft.rule(&self.rules) else {
+            return;
+        };
+        match draft.editing.and_then(|at| self.rules.get_mut(at)) {
+            Some(slot) => *slot = rule,
+            None => self.rules.insert(0, rule),
+        }
+        if self.store_rules() {
+            self.close_rule_editor();
+        }
+    }
+
+    /// Close the editor, keeping nothing of what it held.
+    fn close_rule_editor(&mut self) {
+        self.rule_draft = None;
+        if self
+            .focused_field
+            .is_some_and(|field| FieldId::RULE_FIELDS.contains(&field))
+        {
+            self.focused_field = None;
+        }
+        self.page_scroll = 0.0;
+    }
+
+    /// A rule-editor list's items, and which is chosen.
+    fn rule_dropdown(&self, id: DropdownId) -> (Vec<String>, usize) {
+        let Some(draft) = &self.rule_draft else {
+            return (Vec::new(), 0);
+        };
+        let a = &draft.actions;
+        match id {
+            DropdownId::RuleMatch => listed(
+                &rules::MatchKind::ALL,
+                |kind| kind.label().to_owned(),
+                |kind| *kind == draft.matching,
+            ),
+            DropdownId::RulePlace => listed(
+                &rules::Place::ALL,
+                |place| place.label().to_owned(),
+                |place| *place == draft.place,
+            ),
+            DropdownId::RuleSize => listed(
+                &rules::Size::ALL,
+                |size| size.label().to_owned(),
+                |size| *size == draft.size,
+            ),
+            DropdownId::RuleSnap => (
+                vec![
+                    rules::AS_USUAL.to_owned(),
+                    a.snap_zone
+                        .map_or_else(String::new, |zone| format!("Zone {zone}")),
+                ],
+                usize::from(a.snap_zone.is_some()),
+            ),
+            DropdownId::RuleDesktop => listed(
+                &rules::desktop_choices(a.desktop),
+                |desktop| rules::desktop_label(*desktop),
+                |desktop| *desktop == a.desktop,
+            ),
+            DropdownId::RuleState => listed(
+                &rules::STATES,
+                |state| rules::state_label(*state).to_owned(),
+                |state| *state == a.initial_state,
+            ),
+            DropdownId::RuleOpacity => listed(
+                &rules::opacity_choices(a.opacity),
+                |opacity| rules::opacity_label(*opacity),
+                |opacity| match (opacity, a.opacity) {
+                    (Some(listed), Some(now)) => rules::same_opacity(*listed, now),
+                    (None, None) => true,
+                    _ => false,
+                },
+            ),
+            DropdownId::RuleFlag(flag) => {
+                let now = rules::Tri::of(flag.get(a));
+                listed(
+                    &rules::Tri::ALL,
+                    |tri| tri.label().to_owned(),
+                    |tri| *tri == now,
+                )
+            }
+            _ => (Vec::new(), 0),
+        }
+    }
+
+    /// Choose the `index`-th item of the rule editor's list `id`.
+    fn choose_in_rule(&mut self, id: DropdownId, index: usize) {
+        let Some(draft) = self.rule_draft.as_mut() else {
+            return;
+        };
+        match id {
+            DropdownId::RuleMatch => {
+                if let Some(kind) = rules::MatchKind::ALL.get(index) {
+                    draft.matching = *kind;
+                }
+            }
+            DropdownId::RulePlace => {
+                if let Some(place) = rules::Place::ALL.get(index) {
+                    draft.place = *place;
+                }
+            }
+            DropdownId::RuleSize => {
+                if let Some(size) = rules::Size::ALL.get(index) {
+                    draft.size = *size;
+                }
+            }
+            // Its zone or none: the editor cannot name the others
+            // (`rules` module's "What the editor keeps").
+            DropdownId::RuleSnap => {
+                if index == 0 {
+                    draft.actions.snap_zone = None;
+                }
+            }
+            DropdownId::RuleDesktop => {
+                if let Some(desktop) = rules::desktop_choices(draft.actions.desktop).get(index) {
+                    draft.actions.desktop = *desktop;
+                }
+            }
+            DropdownId::RuleState => {
+                if let Some(state) = rules::STATES.get(index) {
+                    draft.actions.initial_state = *state;
+                }
+            }
+            DropdownId::RuleOpacity => {
+                if let Some(opacity) = rules::opacity_choices(draft.actions.opacity).get(index) {
+                    draft.actions.opacity = *opacity;
+                }
+            }
+            DropdownId::RuleFlag(flag) => {
+                if let Some(tri) = rules::Tri::ALL.get(index) {
+                    flag.set(&mut draft.actions, tri.value());
+                }
+            }
+            _ => {}
+        }
+        // A field the choice took away does not keep the keyboard: "Every
+        // window" has no text, "As usual" no numbers.
+        if let Some(field) = self.focused_field
+            && FieldId::RULE_FIELDS.contains(&field)
+            && !self.rule_fields().contains(&field)
+        {
+            self.focused_field = None;
+        }
+    }
+
     // --- Sound page ---
 
-    /// The Sound page: the shape of the settings, and none of them usable.
+    /// The Sound page: the desktop's own sounds, which are real, and the shape
+    /// of the device settings, which are not yet.
+    ///
+    /// **The System Sounds section is real** (2026-10-10,
+    /// `requests/c-e-a-sounds-page-for-the-sounds-axis.md`): the desktop
+    /// chooses its sounds by what it sets, so its controls are live
+    /// ([`Self::build_system_sounds`]). The rest of this comment is about the
+    /// device sections, which still have nothing behind them.
     ///
     /// Until 2026-09-14 this page offered an output device chooser, a volume
     /// slider, a mute switch, an input device chooser, an input volume slider,
@@ -4398,109 +6364,234 @@ impl SettingsState {
     ///
     /// Each row gets its real control when audio gets a consumer, and not
     /// before -- the same rule the Mouse page states, applied to a page that
-    /// had not been following it.
+    /// had not been following it. The System Sounds section is the first that
+    /// got one.
     fn build_sound_page<S: PageSink>(&self, s: &mut S) {
         s.section("Output");
         s.note(
             "Audio is not wired up yet: this system has no sound service and no way to enumerate devices, so these settings would not reach anything.",
             44.0,
         );
-        s.unavailable_row("Output Device", "No devices detected");
-        s.unavailable_row("Volume", "Unavailable");
-        s.unavailable_row("Mute", "Unavailable");
+        s.unavailable_row(
+            "Output Device",
+            "No devices detected",
+            "This system cannot play sound yet, so there is no device to choose.",
+        );
+        s.unavailable_row(
+            "Volume",
+            "Unavailable",
+            "This system cannot play sound yet, so there is no volume to set.",
+        );
+        s.unavailable_row(
+            "Mute",
+            "Unavailable",
+            "This system cannot play sound yet, so there is nothing to mute.",
+        );
         s.gap();
 
         s.section("Input");
-        s.unavailable_row("Input Device", "No devices detected");
-        s.unavailable_row("Input Volume", "Unavailable");
+        s.unavailable_row(
+            "Input Device",
+            "No devices detected",
+            "This system cannot record sound yet, so there is no microphone to choose.",
+        );
+        s.unavailable_row(
+            "Input Volume",
+            "Unavailable",
+            "This system cannot record sound yet, so there is no input level to set.",
+        );
         s.gap();
 
-        s.section("System Sounds");
-        s.unavailable_row("Enable System Sounds", "Unavailable");
-        s.gap();
+        self.build_system_sounds(s);
 
         s.section("Per-Application Volume");
         s.note("Nothing is playing audio, and nothing here can ask.", 28.0);
     }
 
-    /// The Wallpaper page: which picture the desktop shows.
+    /// The System Sounds section: whether the desktop makes sounds, how
+    /// loud, from which sound theme, and each event's own sound -- the
+    /// `sounds` settings in `appearance.yaml`, which the desktop chooses by
+    /// (design-decisions §1477). Saved and obeyed now, heard the day a
+    /// program can reach the sound device; the note says so.
     ///
-    /// The shell could already crop, letterbox, tile, centre and span a
-    /// wallpaper across monitors, tint it by time of day and rotate a
-    /// slideshow. `set_image` was called four times in the whole tree and all
-    /// four were in the shell's own tests: the feature was complete except
-    /// that no user could reach it.
+    /// A sound is heard as it is chosen -- design.txt's sound dropdown is
+    /// "previewable" ([`Self::preview`]): an event's sound when it is set, a
+    /// theme's notification when the theme is, and the volume's own sound
+    /// when the volume's handle is let go, at the volume it was let go at.
     ///
-    /// Only the picture is offered, not the fit mode, the slideshow or the
-    /// dynamic tint. Those are settings `appearance.yaml` does not carry yet,
-    /// and a control that writes a value nothing reads is the defect the Mouse
-    /// page below refuses in its own words.
-    fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
-        s.section("Desktop Picture");
-        // Pictures by time of day are the wallpaper while they are set (lane
-        // C's `wallpaper_schedule`): the picture and the rotation each say
-        // so, rather than read as what the desktop shows.
-        let scheduled = !self.appearance.settings.wallpaper_schedule.is_empty();
-
-        match self.appearance.settings.wallpaper.as_deref() {
-            Some(path) => {
-                // `display()` because this is the line of text under the
-                // heading, and a label is text by definition. The path itself
-                // is held exactly; nothing is rebuilt from this string.
-                s.note(&path.shown().to_string(), 28.0);
-                if scheduled {
-                    s.note(
-                        "Not shown while there are pictures by time of day, below.",
-                        28.0,
-                    );
-                }
-            }
-            None if scheduled => s.note("No picture.", 28.0),
-            None => {
-                s.note(
-                    "No picture. The desktop is the plain background, which follows your theme.",
-                    28.0,
-                );
-            }
+    /// With sounds off, the rest is not offered: a volume or a theme for
+    /// sounds that do not play is a control whose every setting does the
+    /// same nothing, as the Night Light's warmth is with the light off.
+    fn build_system_sounds<S: PageSink>(&self, s: &mut S) {
+        s.section("System Sounds");
+        s.note(
+            "The desktop's sounds -- a notification, a screenshot, a device -- are saved here and followed, and are heard the day a program can reach the sound device.",
+            28.0,
+        );
+        let sounds = &self.appearance.settings.sounds;
+        s.toggle_row("System sounds", ToggleId::SystemSounds, sounds.enabled);
+        if !sounds.enabled {
+            s.gap();
+            return;
         }
+        self.slider(s, "Volume", SliderId::SoundVolume);
+        let theme = self
+            .sound_themes
+            .iter()
+            .find(|t| t.id.as_os_str() == self.appearance.settings.sound_theme.id())
+            .map_or_else(
+                || {
+                    std::path::Path::new(self.appearance.settings.sound_theme.id())
+                        .shown()
+                        .to_string()
+                },
+                |t| t.name.clone(),
+            );
+        s.dropdown_row("Sound theme", DropdownId::SoundTheme, &theme);
+        s.gap();
 
+        s.section("Sounds For");
+        for (index, event) in appearance::sounds::SHELL_EVENTS.iter().enumerate() {
+            s.dropdown_row(
+                event.label,
+                DropdownId::EventSound(index),
+                &self.event_sound_shown(index),
+            );
+        }
+        s.gap();
+    }
+
+    /// The Background page: where the desktop's background comes from
+    /// (design-decisions §1243).
+    ///
+    /// One question first -- Show: a picture, a theme's pictures, pictures by
+    /// time of day, a folder of pictures in turn, or none -- and then only the
+    /// controls of the answer. The desktop shows the highest of those that is
+    /// set, so a page with a section for each let a user set one and never
+    /// see it, outranked by another set long before. Choosing a source clears
+    /// those above it ([`SettingsState::choose_wallpaper_source`]), and each
+    /// source's Clear empties it and stays on it, to choose again.
+    fn build_wallpaper_page<S: PageSink>(&self, s: &mut S) {
+        let source = self.wallpaper_source();
+        s.section("Desktop Background");
+        s.dropdown_row("Show", DropdownId::WallpaperSource, source.label());
+        match source {
+            WallpaperSource::Picture => self.build_wallpaper_picture(s),
+            WallpaperSource::Theme => self.build_wallpaper_themes(s),
+            WallpaperSource::TimeOfDay => self.build_wallpaper_schedule(s),
+            WallpaperSource::Folder => self.build_wallpaper_rotation(s),
+            WallpaperSource::Plain => self.build_wallpaper_plain(s),
+        }
+        // How a picture is placed is the same for every source of one, and
+        // is offered once there is a picture to place: a control whose every
+        // option does the same nothing is one a user reads as broken rather
+        // than as inapplicable.
+        if source != WallpaperSource::Plain
+            && WallpaperSource::shown(&self.appearance.settings) == source
+        {
+            s.dropdown_row(
+                "How it is placed",
+                DropdownId::WallpaperFit,
+                self.appearance.settings.wallpaper_fit.label(),
+            );
+        }
+        s.gap();
+        self.build_login_background(s);
+    }
+
+    /// "A picture": the user's own, from a file or from the pictures the
+    /// installed themes bring.
+    fn build_wallpaper_picture<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
+        match self.appearance.settings.wallpaper.as_deref() {
+            // `shown()` because this is a line of text under the heading; the
+            // path itself is held exactly, and nothing is rebuilt from this.
+            Some(path) => s.note(&path.shown().to_string(), 28.0),
+            None => s.note("No picture chosen yet.", 28.0),
+        }
         s.button_row(
             "Desktop picture",
             "Choose...",
             pal.accent,
-            Some(RowHit::Press(ButtonId::ChooseWallpaper)),
+            Press::Does(RowHit::Press(ButtonId::ChooseWallpaper)),
         );
+        // Offered only when there is one to remove. A "Remove" that is always
+        // there is a button whose press does nothing most of the time, and a
+        // user cannot tell that from one that failed.
+        if self.appearance.settings.wallpaper.is_some() {
+            s.button_row(
+                "Remove the picture",
+                "Remove",
+                pal.surface1,
+                Press::Does(RowHit::Press(ButtonId::ClearWallpaper)),
+            );
+        }
+        // A theme's pictures, offered as pictures like any other (lane C,
+        // c-e-a-themes-wallpapers-on-the-background-page): choosing one sets
+        // the picture, not the theme.
+        if !self.bundled_picture_cards.is_empty() {
+            s.note("Or one of the pictures your themes bring:", 28.0);
+            let chosen = self.appearance.settings.wallpaper.as_deref();
+            self.picture_grid(
+                s,
+                &self.bundled_picture_cards,
+                SelectId::BundledPicture,
+                |card| chosen.is_some() && card.picture.as_deref() == chosen,
+            );
+        }
+    }
 
-        self.build_wallpaper_schedule(s);
-
-        s.section("Rotation");
-        match self.appearance.settings.wallpaper_folder.as_deref() {
-            Some(folder) => {
-                s.note(&folder.shown().to_string(), 28.0);
-                if scheduled {
-                    s.note(
-                        "Not shown while there are pictures by time of day, above.",
-                        28.0,
-                    );
-                }
-            }
-            None if scheduled => s.note("No folder.", 28.0),
-            None => s.note(
-                "No folder. The desktop shows the single picture above.",
+    /// "A theme's pictures": each installed theme that recommends a picture,
+    /// shown by its picture for the mode the desktop is drawn in now.
+    fn build_wallpaper_themes<S: PageSink>(&self, s: &mut S) {
+        let settings = &self.appearance.settings;
+        if self.wallpaper_theme_cards.is_empty() {
+            s.note(
+                "No installed theme brings pictures. A theme brings them in a wallpapers folder beside its theme.yaml.",
                 28.0,
-            ),
+            );
+        } else {
+            s.note(
+                if settings.is_light() {
+                    "Each theme by its picture for light mode, the mode now. A theme with one for each mode changes it with the mode."
+                } else {
+                    "Each theme by its picture for dark mode, the mode now. A theme with one for each mode changes it with the mode."
+                },
+                28.0,
+            );
+            let chosen = settings.wallpaper_theme.id();
+            self.picture_grid(
+                s,
+                &self.wallpaper_theme_cards,
+                SelectId::WallpaperTheme,
+                |card| card.theme.as_deref() == Some(chosen),
+            );
+        }
+        // Why a chosen theme's pictures are not in use: the desktop shows the
+        // user's own picture meanwhile and says nothing on screen.
+        if let Some(problem) = settings.wallpaper_theme.problem() {
+            s.note(problem, 28.0);
+        }
+    }
+
+    /// "A folder of pictures, in turn": the folder, how often, in what order,
+    /// and which pictures in it to skip.
+    fn build_wallpaper_rotation<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        match self.appearance.settings.wallpaper_folder.as_deref() {
+            Some(folder) => s.note(&folder.shown().to_string(), 28.0),
+            None => s.note("No folder chosen yet.", 28.0),
         }
         s.button_row(
             "Rotate through a folder",
             "Choose...",
             pal.accent,
-            Some(RowHit::Press(ButtonId::ChooseRotationFolder)),
+            Press::Does(RowHit::Press(ButtonId::ChooseRotationFolder)),
         );
         // The interval and the order are about a folder, so they appear with
         // one and not before: three controls of which two govern nothing read
         // as broken rather than as inapplicable, which is the judgement the
-        // fit dropdown below already makes.
+        // fit dropdown makes too.
         if self.appearance.settings.wallpaper_folder.is_some() {
             s.dropdown_row(
                 "Change picture",
@@ -4527,7 +6618,7 @@ impl SettingsState {
                     pattern,
                     "Remove",
                     pal.surface1,
-                    Some(RowHit::Select(SelectId::ExclusionPattern, idx)),
+                    Press::Does(RowHit::Select(SelectId::ExclusionPattern, idx)),
                 );
             }
             s.text_field_row(
@@ -4546,42 +6637,88 @@ impl SettingsState {
                     "",
                     "Add",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::AddExclusion)),
+                    Press::Does(RowHit::Press(ButtonId::AddExclusion)),
                 );
             }
             s.button_row(
                 "Stop rotating",
                 "Clear",
                 pal.subtext0,
-                Some(RowHit::Press(ButtonId::ClearRotation)),
+                Press::Does(RowHit::Press(ButtonId::ClearRotation)),
             );
         }
-        // Offered only with a picture to place, for the reason Remove is:
-        // a control whose every option does the same nothing is one a user
-        // reads as broken rather than as inapplicable.
-        if self.appearance.settings.wallpaper.is_some() {
-            s.dropdown_row(
-                "How it is placed",
-                DropdownId::WallpaperFit,
-                self.appearance.settings.wallpaper_fit.label(),
-            );
-        }
-        // Offered only when there is one to remove. A "Remove" that is always
-        // there is a button whose press does nothing most of the time, and a
-        // user cannot tell that from one that failed.
-        if self.appearance.settings.wallpaper.is_some() {
-            s.button_row(
-                "Remove the picture",
-                "Remove",
-                pal.surface1,
-                Some(RowHit::Press(ButtonId::ClearWallpaper)),
-            );
-        }
+    }
 
-        // On this page rather than a page of its own, because the setting most
-        // people want is "the same as that one" and a choice is easiest to make
-        // next to the thing it is being compared with. `design.txt` line 1247
-        // asks for exactly that: an easy way to make the two the same.
+    /// "No picture": the plain background -- and the quickest way to a
+    /// picture from here, as there was before there was a choice to make.
+    fn build_wallpaper_plain<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        s.note(
+            "No picture. The desktop is the plain background, which follows your theme.",
+            28.0,
+        );
+        s.button_row(
+            "Desktop picture",
+            "Choose...",
+            pal.accent,
+            Press::Does(RowHit::Press(ButtonId::ChooseWallpaper)),
+        );
+    }
+
+    /// A grid of picture cards: each a click target as `select` by its place
+    /// in `cards`, drawn with its picture small once that is ready, and ringed
+    /// when `chosen` says it is the one in use.
+    fn picture_grid<S: PageSink>(
+        &self,
+        s: &mut S,
+        cards: &[PictureCard],
+        select: SelectId,
+        chosen: impl Fn(&PictureCard) -> bool,
+    ) {
+        let pal = self.palette();
+        let (x, y) = (s.x(), s.y());
+        for idx in 0..cards.len() {
+            let (cx, cy) = picture_card_origin(idx, x, y);
+            s.hit_rect(
+                cx,
+                cy,
+                PICTURE_CARD_WIDTH,
+                PICTURE_CARD_HEIGHT,
+                RowHit::Select(select, idx),
+            );
+        }
+        let drawn: Vec<(String, Option<thumbs::Thumb>, bool)> = cards
+            .iter()
+            .map(|card| {
+                (
+                    card.name.clone(),
+                    card.picture.as_deref().and_then(|p| self.thumbs.get(p)),
+                    chosen(card),
+                )
+            })
+            .collect();
+        s.draw(move |tree, x, y| {
+            for (idx, (name, thumb, chosen)) in drawn.iter().enumerate() {
+                render_picture_card(
+                    tree,
+                    &pal,
+                    picture_card_origin(idx, x, y),
+                    name,
+                    *thumb,
+                    *chosen,
+                );
+            }
+        });
+        s.advance(picture_grid_height(cards.len()));
+    }
+
+    /// The login screen's background, on this page rather than one of its
+    /// own, because the setting most people want is "the same as that one"
+    /// and a choice is easiest to make next to the thing it is being compared
+    /// with. `design.txt` line 1247 asks for exactly that: an easy way to make
+    /// the two the same.
+    fn build_login_background<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
         s.section("Login screen");
         s.dropdown_row(
             "Background",
@@ -4600,7 +6737,7 @@ impl SettingsState {
                     "Login picture",
                     "Choose...",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::ChooseLoginImage)),
+                    Press::Does(RowHit::Press(ButtonId::ChooseLoginImage)),
                 );
             }
             // The theme needs no explaining, and the two hand-written styles
@@ -4946,7 +7083,7 @@ impl SettingsState {
                     &name,
                     "Change colour",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::EventColour(event.id))),
+                    Press::Does(RowHit::Press(ButtonId::EventColour(event.id))),
                 );
             }
             if hidden.len() > CLASHES_LISTED {
@@ -4955,14 +7092,14 @@ impl SettingsState {
                     &more,
                     "Open calendar",
                     pal.accent,
-                    Some(RowHit::Press(ButtonId::OpenCalendar)),
+                    Press::Does(RowHit::Press(ButtonId::OpenCalendar)),
                 );
             }
             s.button_row(
                 "Changed any?",
                 "Look again",
                 pal.accent,
-                Some(RowHit::Press(ButtonId::LookAgain)),
+                Press::Does(RowHit::Press(ButtonId::LookAgain)),
             );
         }
         if let Some(note) = &self.calendar_note {
@@ -4986,51 +7123,102 @@ impl SettingsState {
 
     // --- Network status page ---
 
-    /// The Network Status page.
+    /// The Network page: the machine's interfaces as the kernel publishes
+    /// them (`/proc/net`, read through `hwquery` as the Network Manager reads
+    /// it) -- each one's link, hardware address, IPv4 address, netmask,
+    /// gateway and DNS server -- read on entering the page and on Refresh.
     ///
-    /// It used to list three network adapters -- `eth0`, Ethernet, connected,
-    /// 192.168.1.100; `wlan0`, Wi-Fi, disconnected; `lo`, loopback,
-    /// 127.0.0.1 -- each with a green or grey dot for its link state. All
-    /// three were written into the source as constants. **This system cannot
-    /// enumerate its network interfaces**: there is no such call in `net/`,
-    /// which carries a DNS resolver and an HTTP client and nothing that asks
-    /// the kernel what hardware is present, and no service between a GUI
-    /// application and the kernel's own interfaces.
-    ///
-    /// A green dot beside a name and an address is the strongest claim a
-    /// status page can make -- it says "I looked, and this is what is there".
-    ///
-    /// The address fields went for a second reason, which outlasts the first.
-    /// Nothing reads them. `net/dns` does define a `ResolverConfig` and parse
-    /// `resolv.conf`, so the *format* exists, but no program in this tree
-    /// loads one -- so a nameserver typed here would be stored in this
-    /// window's memory until it closed. Same for the proxy, whose page below
-    /// says so in its own words.
+    /// Read-only, and on purpose: the Network Manager (`apps/netmanager`) is
+    /// where an interface is changed, through the kernel's
+    /// `SYS_NET_IF_CONFIG`, administrator only; a second place to change one
+    /// address would be two configurators each unaware of the other's edits.
+    /// The page opens it.
     fn build_network_page<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
         s.section("Network Adapters");
+        match &self.network {
+            None => {}
+            Some(Err(why)) => {
+                s.problem(&format!("The network interfaces could not be read: {why}"));
+            }
+            Some(Ok(adapters)) if adapters.is_empty() => {
+                s.note("This machine has no network card the system found.", 28.0);
+            }
+            Some(Ok(adapters)) => {
+                for adapter in adapters {
+                    let (link, ink) = match adapter.up {
+                        Some(true) => ("Connected", pal.ink(pal.green)),
+                        Some(false) => ("Disconnected", pal.subtext0),
+                        None => (NOT_REPORTED, pal.subtext0),
+                    };
+                    s.value_row(&adapter.name, link, ink);
+                    let mac = if adapter.mac_address.is_empty() {
+                        NOT_REPORTED
+                    } else {
+                        adapter.mac_address.as_str()
+                    };
+                    s.value_row("Hardware address", mac, pal.text);
+                    for (label, address) in [
+                        ("IPv4 address", &adapter.ipv4),
+                        ("Subnet mask", &adapter.subnet),
+                        ("Gateway", &adapter.gateway),
+                        ("DNS server", &adapter.dns),
+                    ] {
+                        let (text, ink) = address_shown(address, &pal);
+                        s.value_row(label, text, ink);
+                    }
+                    s.gap();
+                }
+            }
+        }
+        s.button_row(
+            "Read the adapters again",
+            "Refresh",
+            pal.text,
+            Press::Does(RowHit::Press(ButtonId::RefreshNetwork)),
+        );
+        s.gap();
+        s.section("Change Settings");
         s.note(
-            "This system cannot list its network interfaces yet. Nothing here              can ask which are present, whether any is connected, or what              address it holds.",
+            "An adapter's address, netmask, gateway and DNS server are changed in Network Connections, and an administrator's rights are needed to apply them.",
             44.0,
         );
-        s.unavailable_row("Interfaces", "Cannot be listed");
-        s.gap();
-
-        s.section("IP Configuration");
-        s.note(
-            "There is no interface to configure, and nothing on this system              reads an address typed here.",
-            28.0,
+        s.button_row(
+            "Network Connections",
+            "Open",
+            pal.text,
+            Press::Does(RowHit::Press(ButtonId::OpenNetworkManager)),
         );
-        s.unavailable_row("IPv4 address", "Unknown");
-        s.unavailable_row("Gateway", "Unknown");
-        s.gap();
+        if let Some(note) = &self.network_note {
+            s.note(note, 28.0);
+        }
+    }
 
-        s.section("DNS");
-        s.note(
-            "No program on this system loads a resolver configuration, so a              nameserver set here would reach nothing. The format is defined --              `net/dns` parses `resolv.conf` -- but nothing reads the file.",
-            44.0,
-        );
-        s.unavailable_row("Preferred DNS", "Not configured");
-        s.unavailable_row("Alternate DNS", "Not configured");
+    /// Read the machine's interfaces, replacing what the page showed.
+    fn refresh_network(&mut self) {
+        use hwquery::HardwareProvider as _;
+        self.network = Some(self.machine().query_network().map_err(|e| e.to_string()));
+    }
+
+    /// Where the interfaces are read: the machine.
+    #[cfg(not(test))]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::new()
+    }
+
+    /// Under test, a fixture tree ([`Self::machine_root`]), so no test's
+    /// outcome depends on the computer it runs on.
+    #[cfg(test)]
+    fn machine(&self) -> hwquery::SyscallProvider {
+        hwquery::SyscallProvider::at(&self.machine_root)
+    }
+
+    /// Start the Network Manager, saying under its button what came of it.
+    fn open_network_manager(&mut self) {
+        self.network_note = Some(match (self.starter)(NETWORK_MANAGER, &[]) {
+            Ok(()) => String::from("Opening Network Connections."),
+            Err(e) => format!("Could not start Network Connections ({NETWORK_MANAGER}): {e}"),
+        });
     }
 
     /// The Proxy page.
@@ -5041,10 +7229,14 @@ impl SettingsState {
     fn build_proxy_page<S: PageSink>(&self, s: &mut S) {
         s.section("Proxy");
         s.note(
-            "Nothing on this system routes through a proxy. `net/httpclient`              connects directly and takes no proxy setting, so an address              entered here would be read by nothing.",
+            "Nothing on this system routes through a proxy. `net/httpclient` connects directly and takes no proxy setting, so an address entered here would be read by nothing.",
             44.0,
         );
-        s.unavailable_row("HTTP proxy", "Not supported");
+        s.unavailable_row(
+            "HTTP proxy",
+            "Not supported",
+            "Nothing on this system can connect through a proxy yet.",
+        );
     }
 
     // --- Accounts page ---
@@ -5066,7 +7258,7 @@ impl SettingsState {
         // never touches the machine's real accounts.
         if self.user_accounts.is_empty() {
             s.note(
-                "No accounts to show. Either the system account database could                  not be read, or it holds no ordinary user account.",
+                "No accounts to show. Either the system account database could not be read, or it holds no ordinary user account.",
                 28.0,
             );
         }
@@ -5115,8 +7307,24 @@ impl SettingsState {
         }
         s.gap();
 
-        s.button_at(0.0, 0.0, "+ Add Account", pal.accent, None);
-        s.button_at(140.0, 0.0, "- Remove Account", pal.red, None);
+        s.button_at(
+            0.0,
+            0.0,
+            "+ Add Account",
+            pal.accent,
+            Press::Cannot(
+                "Settings cannot add accounts yet: there is no account service for it to ask.",
+            ),
+        );
+        s.button_at(
+            140.0,
+            0.0,
+            "- Remove Account",
+            pal.red,
+            Press::Cannot(
+                "Settings cannot remove accounts yet: there is no account service for it to ask.",
+            ),
+        );
         s.advance(44.0);
         s.gap();
 
@@ -5142,7 +7350,14 @@ impl SettingsState {
             self.auto_login_enabled,
         );
 
-        s.button_row("Password", "Change Password", pal.accent, None);
+        s.button_row(
+            "Password",
+            "Change Password",
+            pal.accent,
+            Press::Cannot(
+                "Settings cannot change passwords yet: there is no account service for it to ask.",
+            ),
+        );
         s.gap();
 
         s.section("Account Picture");
@@ -5206,21 +7421,21 @@ impl SettingsState {
     fn build_privacy_page<S: PageSink>(&self, s: &mut S) {
         s.section("App Permissions");
         s.note(
-            "This system does not keep a list of which applications may use              the camera, the microphone or your location, and nothing here              could grant or withdraw such a permission.",
+            "This system does not keep a list of which applications may use the camera, the microphone or your location, and nothing here could grant or withdraw such a permission.",
             44.0,
         );
         s.note(
-            "That is by design rather than unfinished. A program here reaches              a device by holding a handle to it, which it can only have been              given -- there is no central table of names to tick, and nothing              has authority simply because of what it is called.",
+            "That is by design rather than unfinished. A program here reaches a device by holding a handle to it, which it can only have been given -- there is no central table of names to tick, and nothing has authority simply because of what it is called.",
             44.0,
         );
-        s.unavailable_row("Location", "Not recorded per application");
-        s.unavailable_row("Camera", "Not recorded per application");
-        s.unavailable_row("Microphone", "Not recorded per application");
+        s.unavailable_row("Location", "Not recorded per application", "A program reaches your location only through a handle it was given, so there is no list of programs to change here.");
+        s.unavailable_row("Camera", "Not recorded per application", "A program reaches the camera only through a handle it was given, so there is no list of programs to change here.");
+        s.unavailable_row("Microphone", "Not recorded per application", "A program reaches the microphone only through a handle it was given, so there is no list of programs to change here.");
         s.gap();
 
         s.section("Diagnostics & Data");
         s.note(
-            "Nothing on this system collects diagnostic data, so there is no              collection level to choose.",
+            "Nothing on this system collects diagnostic data, so there is no collection level to choose.",
             28.0,
         );
         s.gap();
@@ -5479,8 +7694,16 @@ impl SettingsState {
             "This system cannot update itself yet. There is no update service to ask, so nothing here could check, download or install anything, and this page will not say that it has.",
             44.0,
         );
-        s.unavailable_row("Last checked", "Never");
-        s.unavailable_row("Available updates", "Unknown");
+        s.unavailable_row(
+            "Last checked",
+            "Never",
+            "This system cannot update itself yet, so it has never checked for updates.",
+        );
+        s.unavailable_row(
+            "Available updates",
+            "Unknown",
+            "This system cannot update itself yet, so it cannot look for updates.",
+        );
         s.gap();
 
         s.section("System Information");
@@ -5530,7 +7753,15 @@ impl SettingsState {
             );
             tree.text(x + 16.0, y + 50.0, "after an update.", pal.subtext0, 12.0);
         });
-        s.button_at(440.0, 28.0, "Go Back", pal.peach, None);
+        s.button_at(
+            440.0,
+            28.0,
+            "Go Back",
+            pal.peach,
+            Press::Cannot(
+                "There is no earlier version to go back to: this system cannot update itself yet.",
+            ),
+        );
         s.advance(96.0);
 
         s.draw(|tree, x, y| {
@@ -5551,7 +7782,7 @@ impl SettingsState {
                 12.0,
             );
         });
-        s.button_at(440.0, 28.0, "Reset", pal.red, None);
+        s.button_at(440.0, 28.0, "Reset", pal.red, Press::Cannot("This system cannot reinstall itself yet, so there is nothing to start afresh from."));
         s.advance(96.0);
     }
 
@@ -5704,7 +7935,7 @@ impl SettingsState {
             );
         }
         if let Some(error) = &self.bin_error {
-            s.value_row("Not kept", error, pal.ink(pal.red));
+            s.problem(error);
         }
 
         for (index, row) in self.bin_rows.iter().enumerate() {
@@ -5789,6 +8020,88 @@ impl SettingsState {
         self.refresh_bins();
     }
 
+    /// The Fonts page: where the fonts come from first -- the user's own, or
+    /// a theme's recommendations (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`,
+    /// design-decisions §1472) -- then that source's rows.
+    ///
+    /// Asked first, as the Background page asks where its picture comes from
+    /// (§1243): a theme's family is drawn in place of the user's own, so a
+    /// page offering both side by side would let a user pick a family and
+    /// see another drawn. A theme that cannot be used leaves the user's own
+    /// fonts in use, and so offers them, under the reason.
+    fn build_fonts_page<S: PageSink>(&self, s: &mut S) {
+        let theme = &self.appearance.settings.font_theme;
+        s.section("Where Fonts Come From");
+        s.dropdown_row("Fonts", DropdownId::FontTheme, &self.font_theme_shown());
+        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {
+            s.note(
+                "No theme installed here recommends fonts, so they are your own, chosen below.",
+                28.0,
+            );
+        }
+        if let Some(problem) = theme.problem() {
+            s.note(problem, 40.0);
+        }
+        s.gap();
+        if theme.is_built_in() || theme.problem().is_some() {
+            self.build_own_fonts(s);
+        } else {
+            self.build_theme_fonts(s);
+        }
+    }
+
+    /// A theme's fonts: for each role, the families it recommends in the
+    /// order they are tried, which of them this machine has, the user's own
+    /// for when it has none, and the one that will be drawn -- what
+    /// `AppearanceSettings::fonts_with_theme` answers.
+    fn build_theme_fonts<S: PageSink>(&self, s: &mut S) {
+        let pal = self.palette();
+        let settings = &self.appearance.settings;
+        let theme = &settings.font_theme;
+        let installed = self.family_check;
+        let drawn = settings.fonts_with_theme(installed);
+        let roles = [
+            (
+                "Interface Text",
+                theme.ui(),
+                &settings.fonts.ui_font,
+                &drawn.ui_font,
+                guitk::text::font_family(),
+            ),
+            (
+                "Fixed-Pitch Text",
+                theme.mono(),
+                &settings.fonts.mono_font,
+                &drawn.mono_font,
+                guitk::text::mono_family(),
+            ),
+        ];
+        for (title, families, own, chosen, in_use) in roles {
+            s.section(title);
+            if families.is_empty() {
+                s.note("The theme recommends none, so your own is used.", 28.0);
+            }
+            for family in families {
+                if installed(family) {
+                    s.value_row(family, "Installed", pal.text);
+                } else {
+                    s.value_row(family, "Not installed", pal.peach);
+                }
+            }
+            s.value_row("If none is installed", own, pal.subtext0);
+            s.value_row("Will be drawn in", chosen, pal.text);
+            match in_use {
+                Some(family) => s.value_row("In use now", &family, pal.subtext0),
+                None => s.value_row("In use now", "Built-in face", pal.subtext0),
+            }
+            s.gap();
+        }
+        s.note(
+            "Programs still draw your own fonts for now: drawing a theme's is to come, and this choice is kept for it. A family that is not installed is installed from its font file; Settings cannot yet install a theme's fonts for you, since no package here says which fonts it carries.",
+            60.0,
+        );
+    }
+
     /// The font the interface is drawn in.
     ///
     /// Two rows that look redundant and are not: what the user has *chosen*
@@ -5799,7 +8112,7 @@ impl SettingsState {
     /// That disagreement is the one thing a user needs to see to understand
     /// why picking a font changed nothing, and it is invisible from the
     /// setting alone.
-    fn build_fonts_page<S: PageSink>(&self, s: &mut S) {
+    fn build_own_fonts<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
         let chosen = self.appearance.settings.fonts.ui_font.clone();
         let installed = self.font_families.contains(&chosen);
@@ -5956,15 +8269,14 @@ impl SettingsState {
     /// `c-e-day-and-night-wallpapers-need-a-place-in-settings`).
     ///
     /// Choosing either picture sets it at its time, 06:00 or 18:00, which a
-    /// dropdown then moves; Clear stops it. A schedule is the wallpaper --
-    /// it wins over the picture and the rotation -- so the section says so
-    /// while one is set, and which picture is up now. A schedule written by
-    /// hand with more than two pictures is listed as it is, with Clear: this
-    /// page sets two.
+    /// dropdown then moves; Clear empties both, to choose again. The page
+    /// says which picture is up now. A schedule written by hand with more
+    /// than two pictures is listed as it is, with Clear: this page sets two.
+    /// Shown as the Background page's "Pictures by time of day"
+    /// (design-decisions §1243), under the Show line that names it.
     fn build_wallpaper_schedule<S: PageSink>(&self, s: &mut S) {
         let pal = self.palette();
         let schedule = &self.appearance.settings.wallpaper_schedule;
-        s.section("By time of day");
         let Some((day, night)) = day_and_night(schedule) else {
             for entry in schedule {
                 s.value_row(
@@ -5981,7 +8293,7 @@ impl SettingsState {
                 "",
                 "Clear",
                 pal.subtext0,
-                Some(RowHit::Press(ButtonId::ClearSchedule)),
+                Press::Does(RowHit::Press(ButtonId::ClearSchedule)),
             );
             return;
         };
@@ -6003,7 +8315,12 @@ impl SettingsState {
                 Some(entry) => format!("{name}: {}", entry.image.shown()),
                 None => name.to_string(),
             };
-            s.button_row(&label, "Choose...", pal.accent, Some(RowHit::Press(choose)));
+            s.button_row(
+                &label,
+                "Choose...",
+                pal.accent,
+                Press::Does(RowHit::Press(choose)),
+            );
             if let Some(entry) = entry {
                 s.dropdown_row("Up from", from, &notifsettings::format_hm(entry.from));
             }
@@ -6015,19 +8332,14 @@ impl SettingsState {
             );
             return;
         }
-        let now = self.scheduled_up_at(datetimesettings::clock::now_utc_secs());
-        s.note(
-            &format!(
-                "While these are set they are the wallpaper, in place of the picture above and the rotation below.{}",
-                now.map_or_else(String::new, |up| format!(" Up now: {up}."))
-            ),
-            28.0,
-        );
+        if let Some(up) = self.scheduled_up_at(datetimesettings::clock::now_utc_secs()) {
+            s.note(&format!("Up now: {up}."), 28.0);
+        }
         s.button_row(
-            "Stop changing by time of day",
+            "Clear both pictures",
             "Clear",
             pal.subtext0,
-            Some(RowHit::Press(ButtonId::ClearSchedule)),
+            Press::Does(RowHit::Press(ButtonId::ClearSchedule)),
         );
     }
 
@@ -6126,7 +8438,7 @@ impl SettingsState {
                 20.0,
             ),
             Some(NoticesShown::Failed(why)) => {
-                s.value_row("Could not be read", why, pal.peach);
+                s.problem(&format!("The licence notices could not be read: {why}"));
             }
             Some(NoticesShown::Loaded(list)) => {
                 for (index, notice) in list.iter().enumerate() {
@@ -6135,7 +8447,7 @@ impl SettingsState {
                         &notice.title(),
                         if open { "Hide licence" } else { "Show licence" },
                         pal.text,
-                        Some(RowHit::Press(ButtonId::Notice(index))),
+                        Press::Does(RowHit::Press(ButtonId::Notice(index))),
                     );
                     s.value_row("Licence", &notice.licence, pal.subtext0);
                     if let Some(attribution) = &notice.attribution {
@@ -6145,17 +8457,19 @@ impl SettingsState {
                         for text in texts {
                             s.section(&text.name);
                             match &text.shown {
-                                Ok(body) => {
-                                    for line in body.lines() {
-                                        let line = line.to_string();
-                                        let colour = pal.subtext0;
+                                Ok(_) => {
+                                    let colour = pal.subtext0;
+                                    for line in text.lines().iter() {
+                                        let line = line.clone();
                                         s.draw(move |tree, x, y| {
-                                            tree.text(x, y, &line, colour, 11.0);
+                                            tree.text(x, y, &line, colour, LICENCE_SIZE);
                                         });
-                                        s.advance(15.0);
+                                        s.advance(LICENCE_LINE_HEIGHT);
                                     }
                                 }
-                                Err(why) => s.value_row("Could not be read", why, pal.peach),
+                                Err(why) => {
+                                    s.problem(&format!("This licence could not be read: {why}"));
+                                }
                             }
                         }
                     }
@@ -6196,6 +8510,7 @@ impl SettingsState {
                     .read()
                     .map(|bytes| shown_as_text(&bytes))
                     .map_err(|e| e.to_string()),
+                wrapped: std::cell::RefCell::new(None),
             })
             .collect();
         self.open_notice = Some((index, texts));
@@ -6365,6 +8680,7 @@ impl SettingsState {
     fn build_placeholder_page<S: PageSink>(&self, s: &mut S) {
         let pal = &self.palette();
         let page_name = self.current_page.label();
+        let sign = self.icons.icon("dialog-information", 36, pal.peach);
         s.draw(move |tree, x, y| {
             text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);
             tree.text(
@@ -6378,7 +8694,13 @@ impl SettingsState {
             // Visual placeholder: a card with icon
             let card_y = y + 100.0;
             fill_rounded(tree, x, card_y, 400.0, 150.0, pal.surface0, 12.0);
-            tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", pal.peach, 36.0);
+            tree.push(RenderCommand::Image {
+                x: x + 182.0,
+                y: card_y + 40.0,
+                width: 36.0,
+                height: 36.0,
+                image_id: sign,
+            });
             tree.text(
                 x + 120.0,
                 card_y + 110.0,
@@ -6398,7 +8720,7 @@ impl SettingsState {
         let mut sink = AnchorSink {
             want: id,
             x: Self::content_x(),
-            y: Self::content_top(),
+            y: self.page_top(),
             found: None,
         };
         self.build_page(&mut sink);
@@ -6460,6 +8782,31 @@ impl SettingsState {
                     .unwrap_or(self.bin_default);
                 let (values, at) = kind.options(&limits);
                 (values.into_iter().map(|v| kind.label(v)).collect(), at)
+            }
+            DropdownId::SoundTheme => {
+                let current = self.appearance.settings.sound_theme.id();
+                let items = self.sound_themes.iter().map(|t| t.name.clone()).collect();
+                let at = self
+                    .sound_themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == current)
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::RuleMatch
+            | DropdownId::RulePlace
+            | DropdownId::RuleSize
+            | DropdownId::RuleSnap
+            | DropdownId::RuleDesktop
+            | DropdownId::RuleState
+            | DropdownId::RuleOpacity
+            | DropdownId::RuleFlag(_) => self.rule_dropdown(dropdown_id),
+            DropdownId::EventSound(index) => {
+                let items = EVENT_SOUND_CHOICES
+                    .iter()
+                    .map(|c| (*c).to_owned())
+                    .collect();
+                (items, self.event_sound_choice(index))
             }
             DropdownId::NotifImportance(index) => {
                 let items: Vec<String> = notifsettings::Importance::ALL
@@ -6543,6 +8890,18 @@ impl SettingsState {
                     .themes
                     .iter()
                     .position(|t| t.id.as_os_str() == self.appearance.settings.icon_theme.id())
+                    .unwrap_or(0);
+                (items, at)
+            }
+            DropdownId::WallpaperSource => {
+                let items = WallpaperSource::ALL
+                    .iter()
+                    .map(|source| source.label().to_string())
+                    .collect();
+                let shown = self.wallpaper_source();
+                let at = WallpaperSource::ALL
+                    .iter()
+                    .position(|source| *source == shown)
                     .unwrap_or(0);
                 (items, at)
             }
@@ -6678,6 +9037,15 @@ impl SettingsState {
                     .position(|m| *m == self.lock_after_minutes)
                     .unwrap_or(0);
                 (items, current)
+            }
+            DropdownId::FontTheme => {
+                let items = self.themes.iter().map(Self::font_theme_item).collect();
+                let at = self
+                    .themes
+                    .iter()
+                    .position(|t| t.id.as_os_str() == self.appearance.settings.font_theme.id())
+                    .unwrap_or(0);
+                (items, at)
             }
             DropdownId::UiFont => {
                 // A configured family that is not installed has no row to
@@ -6872,7 +9240,7 @@ impl SettingsState {
             }
 
             let item_color = if is_selected { pal.accent } else { pal.text };
-            text_clipped(
+            text_elided(
                 tree,
                 dropdown_x + 12.0,
                 iy + 10.0,
@@ -6882,15 +9250,18 @@ impl SettingsState {
                 popup_w - 24.0,
             );
 
-            // Checkmark for selected
+            // A check for the one chosen, from the icon theme: no face here
+            // draws U+2713.
             if is_selected {
-                tree.text(
-                    dropdown_x + popup_w - 24.0,
-                    iy + 10.0,
-                    "\u{2713}",
-                    pal.accent,
-                    14.0,
-                );
+                tree.push(RenderCommand::Image {
+                    x: dropdown_x + popup_w - 26.0,
+                    y: iy + 10.0,
+                    width: 14.0,
+                    height: 14.0,
+                    image_id: self
+                        .icons
+                        .icon_or("object-select", "emblem-ok", 14, pal.accent),
+                });
             }
         }
 
@@ -6934,7 +9305,13 @@ impl SettingsState {
         // change and written straight back over whoever wrote it -- and ahead
         // of the dialogs, which would otherwise be handed it while they are up.
         if let Event::SettingsChanged { group } = event {
-            return if self.reread(group.file_name()) {
+            let mut changed = self.reread(group.file_name());
+            // What `dispatch_event` does after every other event: a page the
+            // file made shorter is not left scrolled past its end, and a
+            // reason is not left up for a control the file took away.
+            changed |= self.clamp_page_scroll();
+            changed |= self.explain_disabled();
+            return if changed {
                 EventResult::Consumed
             } else {
                 EventResult::Ignored
@@ -6997,7 +9374,41 @@ impl SettingsState {
     /// Route an event to its handler. Split from [`handle_event`](Self::handle_event)
     /// so the routing can be exercised without writing to the user's home
     /// directory.
+    ///
+    /// Whoever the event goes to, a tick also moves the window's clock, and
+    /// every event is followed by asking again what the pointer rests on
+    /// ([`explain_disabled`](Self::explain_disabled)) -- both outside the
+    /// routing, so that none of its early answers can skip them.
     fn dispatch_event(&mut self, event: &Event) -> EventResult {
+        if let Event::Mouse(mouse) = event {
+            self.pointer = match mouse.kind {
+                MouseEventKind::Leave => None,
+                _ => Some((mouse.x, mouse.y)),
+            };
+        }
+        let mut result = self.route_event(event);
+        // A page that grew shorter -- a section switched off, the window made
+        // taller -- is not left scrolled past its end.
+        if self.clamp_page_scroll() {
+            result = EventResult::Consumed;
+        }
+        if let Event::Tick { elapsed_ms } = event {
+            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);
+            if self.why_disabled.tick(self.clock_ms) {
+                result = EventResult::Consumed;
+            }
+            if self.field_menu.tick(*elapsed_ms) {
+                result = EventResult::Consumed;
+            }
+        }
+        if self.explain_disabled() {
+            result = EventResult::Consumed;
+        }
+        result
+    }
+
+    /// Hand an event to whichever part of the window answers it.
+    fn route_event(&mut self, event: &Event) -> EventResult {
         // The picker answers first, and everything but a resize. It is modal,
         // and a keystroke meant for a filename would otherwise reach the page
         // behind it -- where, on this window, every key is a setting.
@@ -7018,6 +9429,23 @@ impl SettingsState {
         if !matches!(event, Event::Resize { .. }) && self.color_dialog.is_some() {
             self.color_dialog_event(event);
             return EventResult::Consumed;
+        }
+        // A text field's menu takes the presses, the keys, the pointer and
+        // the wheel while it is up, as any menu does -- a row chosen, a press
+        // outside putting it away and reaching nothing under it, a right
+        // press there opening that field's own -- and the arrows move through
+        // its rows, Enter does the lit one, Escape puts it away.
+        match self.field_menu.event(event) {
+            fieldmenu::Outcome::Window => {}
+            fieldmenu::Outcome::Taken => return EventResult::Consumed,
+            fieldmenu::Outcome::Chosen(field, id) => {
+                self.do_field_menu_row(id, field);
+                return EventResult::Consumed;
+            }
+            fieldmenu::Outcome::RightPressElsewhere(x, y) => {
+                let _another = self.open_field_menu(x, y);
+                return EventResult::Consumed;
+            }
         }
         match event {
             Event::Key(key_evt) => self.handle_key(key_evt),
@@ -7067,6 +9495,12 @@ impl SettingsState {
         // pattern and AltGr+X, a Polish `ź`, cut it -- and typed the letter
         // every other chord carries: Ctrl+F put an `f` in the pattern and
         // never reached the search.
+        if let Some(field) = self.focused_field
+            && FieldId::RULE_FIELDS.contains(&field)
+            && let Some(result) = self.rule_field_key(field, evt, plain)
+        {
+            return result;
+        }
         if self.focused_field == Some(FieldId::ExclusionDraft) {
             match evt.key {
                 // Escape abandons the draft rather than merely unfocusing:
@@ -7081,13 +9515,16 @@ impl SettingsState {
                     self.add_exclusion();
                     return EventResult::Consumed;
                 }
+                // The field's, not the page's, which would change the category
+                // or the page under a half-typed pattern: Up and Down have no
+                // line to move to, and Tab moves on, letting the keyboard go.
+                Key::Up | Key::Down if plain => return EventResult::Consumed,
+                Key::Tab if plain => {
+                    self.focused_field = None;
+                    return EventResult::Consumed;
+                }
                 _ => {
-                    if Self::edit_line(
-                        &mut self.exclusion_draft,
-                        &mut self.clipboard,
-                        evt,
-                        EXCLUSION_CAPACITY,
-                    ) {
+                    if Self::edit_line(&mut self.exclusion_draft, evt, EXCLUSION_CAPACITY) {
                         return EventResult::Consumed;
                     }
                 }
@@ -7119,18 +9556,23 @@ impl SettingsState {
                 self.search_query.clear();
                 return EventResult::Consumed;
             }
-            if Self::edit_line(
-                &mut self.search_query,
-                &mut self.clipboard,
-                evt,
-                SEARCH_CAPACITY,
-            ) {
+            if Self::edit_line(&mut self.search_query, evt, SEARCH_CAPACITY) {
                 return EventResult::Consumed;
             }
         }
 
         if !plain {
             return EventResult::Ignored;
+        }
+        // An open list stays by its row: the keys that would scroll the page
+        // or go to another page under it wait until it is put away.
+        if self.open_dropdown.is_some()
+            && matches!(
+                evt.key,
+                Key::Up | Key::Down | Key::PageUp | Key::PageDown | Key::Home | Key::End | Key::Tab
+            )
+        {
+            return EventResult::Consumed;
         }
         // Category navigation with Up/Down when sidebar focused
         match evt.key {
@@ -7140,6 +9582,25 @@ impl SettingsState {
             }
             Key::Down => {
                 self.step_category(1);
+                EventResult::Consumed
+            }
+            // The page, a view at a time, and to its ends. Reached only with
+            // no field or search box holding the keyboard: each takes its
+            // keys above, Home and End among them.
+            Key::PageDown => {
+                self.scroll_page_by(self.page_step());
+                EventResult::Consumed
+            }
+            Key::PageUp => {
+                self.scroll_page_by(-self.page_step());
+                EventResult::Consumed
+            }
+            Key::Home => {
+                self.scroll_page_to(0.0);
+                EventResult::Consumed
+            }
+            Key::End => {
+                self.scroll_page_to(f32::MAX);
                 EventResult::Consumed
             }
             Key::Tab => {
@@ -7163,20 +9624,69 @@ impl SettingsState {
     }
 
     /// Apply `evt` to a one-line field with `textline`'s keys, keeping what a
-    /// copy or a cut took on the window's clipboard. Whether the field
-    /// answered the key: one it does not -- Tab, an arrow it has no use for,
-    /// a Ctrl chord other than A, C, X and V -- is the page's.
-    fn edit_line(
-        field: &mut TextInput,
-        clipboard: &mut String,
-        evt: &KeyEvent,
-        capacity: usize,
-    ) -> bool {
-        let edit = textline::apply_key(field, evt, capacity, clipboard, FIELD_FONT_SIZE);
-        if let Some(copied) = edit.copied {
-            *clipboard = copied;
+    /// copy or a cut took on the program's clipboard -- the one the fields'
+    /// right-click menu copies to and pastes from, so a pattern copied from
+    /// the search with Ctrl+C pastes into the exclusions from the menu.
+    /// Whether the field answered the key: one it does not -- Tab, an arrow
+    /// it has no use for, a Ctrl chord other than A, C, X and V -- is the
+    /// page's.
+    fn edit_line(field: &mut TextInput, evt: &KeyEvent, capacity: usize) -> bool {
+        textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled
+    }
+
+    /// The text field `field` names, as the window holds it now: `None` for a
+    /// rule field while no rule is being written.
+    fn menu_field_input(&mut self, field: MenuField) -> Option<&mut TextInput> {
+        match field {
+            MenuField::Search => Some(&mut self.search_query),
+            MenuField::Page(FieldId::ExclusionDraft) => Some(&mut self.exclusion_draft),
+            MenuField::Page(id) => self
+                .rule_draft
+                .as_mut()
+                .and_then(|draft| rule_input(draft, id)),
         }
-        edit.handled
+    }
+
+    /// A right press: over a text field, its menu where the press landed,
+    /// the field given the keyboard and its caret and selection left as they
+    /// are, so Cut and Copy act on what the user selected (§1454). Anywhere
+    /// else, nothing.
+    fn open_field_menu(&mut self, x: f32, y: f32) -> EventResult {
+        let field = if Self::search_rect().contains(x, y) {
+            MenuField::Search
+        } else if let Some(RowHit::Focus(id)) = self.row_at(x, y) {
+            MenuField::Page(id)
+        } else {
+            return EventResult::Ignored;
+        };
+        let viewport = (self.window_width, self.window_height);
+        let Some(input) = self.menu_field_input(field) else {
+            return EventResult::Ignored;
+        };
+        let menu = input.edit_menu();
+        self.field_menu.open(field, menu, x, y, viewport);
+        match field {
+            MenuField::Search => {
+                self.search_focused = true;
+                self.focused_field = None;
+            }
+            MenuField::Page(id) => {
+                self.search_focused = false;
+                self.focused_field = Some(id);
+            }
+        }
+        self.open_dropdown = None;
+        EventResult::Consumed
+    }
+
+    /// Do the menu row `id` to `field`, as its key would.
+    fn do_field_menu_row(&mut self, id: guitk::menu::MenuItemId, field: MenuField) {
+        if let Some(input) = self.menu_field_input(field) {
+            // What changed needs nothing more: the search's filter and the
+            // rule editor's checks are read from the fields as the page is
+            // drawn.
+            let _edit = input.edit_command(id);
+        }
     }
 
     /// Move the sidebar selection by `delta` categories, stopping at the ends.
@@ -7224,13 +9734,29 @@ impl SettingsState {
         }
         match &evt.kind {
             MouseEventKind::Press(MouseButton::Left) => self.handle_click(evt.x, evt.y),
+            // An open list is put away by a press of any button, as by a left
+            // one off it, and the press reaches nothing under it.
+            MouseEventKind::Press(MouseButton::Right) if self.open_dropdown.is_some() => {
+                self.open_dropdown = None;
+                EventResult::Consumed
+            }
+            // During a drag -- a slider's, the scrollbar's -- nobody's: the
+            // drag holds the pointer until it is let go, and a menu opened in
+            // the middle of it would take the moves the drag follows.
+            MouseEventKind::Press(MouseButton::Right)
+                if self.dragging.is_some() || self.page_bar_grab.is_some() =>
+            {
+                EventResult::Consumed
+            }
+            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(evt.x, evt.y),
             MouseEventKind::Move => self.handle_hover(evt.x, evt.y),
             // Nothing is under a pointer that has left.
             MouseEventKind::Leave => {
                 let category = self.sidebar_hovered.take().is_some();
                 let search = std::mem::take(&mut self.search_hovered);
                 let page = self.page_hovered.take().is_some();
-                if category || search || page {
+                let bar = std::mem::take(&mut self.page_bar_hovered);
+                if category || search || page || bar {
                     EventResult::Consumed
                 } else {
                     EventResult::Ignored
@@ -7240,13 +9766,24 @@ impl SettingsState {
             // Releasing outside is the ordinary way to finish a slider gesture,
             // so this must not be conditional on the pointer still being over
             // the track.
-            MouseEventKind::Release(MouseButton::Left) => {
-                if self.dragging.take().is_some() {
-                    EventResult::Consumed
-                } else {
-                    EventResult::Ignored
-                }
+            // The page's scrollbar, let go of.
+            MouseEventKind::Release(MouseButton::Left) if self.page_bar_grab.is_some() => {
+                self.page_bar_grab = None;
+                EventResult::Consumed
             }
+            MouseEventKind::Release(MouseButton::Left) => match self.dragging.take() {
+                Some(slider) => {
+                    // How loud the desktop's sounds now are, heard when the
+                    // handle is let go: the sound a volume change makes, as
+                    // the desktop makes it. Not on every step of the drag,
+                    // which would be a stutter of overlapping sounds.
+                    if slider == SliderId::SoundVolume {
+                        self.preview_event("audio-volume-change");
+                    }
+                    EventResult::Consumed
+                }
+                None => EventResult::Ignored,
+            },
             // Only the sign of `dy` is used, not its magnitude:
             // `dy` is in notches; `wheel::rows` turns it into whole items and
             // banks the fraction. What was here read only the *sign* of `dy`,
@@ -7256,6 +9793,15 @@ impl SettingsState {
                 let rows = self.dropdown_wheel.rows(*dy);
                 self.scroll_dropdown_by(rows);
                 EventResult::Consumed
+            }
+            // Over the page, the wheel scrolls it: by pixels, a long page
+            // being read rather than stepped through a row at a time.
+            MouseEventKind::Scroll { dy, .. } if evt.x >= SIDEBAR_WIDTH => {
+                if self.scroll_page_by(wheel::pixels(*dy, ITEM_HEIGHT)) {
+                    EventResult::Consumed
+                } else {
+                    EventResult::Ignored
+                }
             }
             _ => EventResult::Ignored,
         }
@@ -7269,6 +9815,21 @@ impl SettingsState {
             match layout.item_at(mx, my) {
                 Some(index) => self.apply_dropdown_selection(index),
                 None => self.open_dropdown = None,
+            }
+            return EventResult::Consumed;
+        }
+
+        // The page's scrollbar: its thumb is taken hold of, and a press on
+        // the column above or below it moves the page a view that way.
+        if let Some((track, thumb)) = self.page_bar()
+            && track.contains(mx, my)
+        {
+            if thumb.contains(mx, my) {
+                self.page_bar_grab = Some(my - thumb.y);
+            } else if my < thumb.y {
+                self.scroll_page_by(-self.page_step());
+            } else {
+                self.scroll_page_by(self.page_step());
             }
             return EventResult::Consumed;
         }
@@ -7287,6 +9848,9 @@ impl SettingsState {
             let search_y = Self::search_top();
             if my >= search_y && my < search_y + SEARCH_BAR_HEIGHT {
                 self.search_focused = true;
+                // The keyboard is the search's alone: a page field left
+                // holding it is served first, and took what was typed.
+                self.focused_field = None;
                 return EventResult::Consumed;
             }
         }
@@ -7343,6 +9907,8 @@ impl SettingsState {
                 self.drag_slider_to(id, mx);
             }
             RowHit::Toggle(ToggleId::BinOwnLimits(index)) => self.set_bin_own_limits(index),
+            RowHit::Toggle(ToggleId::RuleEnabled(index)) => self.set_rule_enabled(index),
+            RowHit::Toggle(ToggleId::ServiceMenu(index)) => self.set_service_menu(index),
             RowHit::Toggle(id) => {
                 // Saved, where it is one of the lock screen's two, by the
                 // whole-snapshot comparison in `handle_event`, as every other
@@ -7418,8 +9984,30 @@ impl SettingsState {
             RowHit::Press(ButtonId::RemoveClock(index)) => {
                 self.datetime.settings.remove_clock(index);
             }
+            // Each Clear empties the source shown and stays on it, to choose
+            // again; the page's Show list is what changes the source.
             RowHit::Press(ButtonId::ClearWallpaper) => {
                 self.appearance.settings.wallpaper = None;
+                self.wallpaper_source_pending = Some(WallpaperSource::Picture);
+            }
+            RowHit::Select(SelectId::WallpaperTheme, idx) => {
+                if let Some(id) = self
+                    .wallpaper_theme_cards
+                    .get(idx)
+                    .and_then(|card| card.theme.clone())
+                {
+                    self.appearance.settings.wallpaper_theme =
+                        appearance::themes::WallpaperTheme::load_from(&self.theme_dirs, &id);
+                }
+            }
+            RowHit::Select(SelectId::BundledPicture, idx) => {
+                if let Some(picture) = self
+                    .bundled_picture_cards
+                    .get(idx)
+                    .and_then(|card| card.picture.clone())
+                {
+                    self.appearance.settings.wallpaper = Some(picture);
+                }
             }
             RowHit::Press(ButtonId::ChooseRotationFolder) => self.open_rotation_folder_dialog(),
             RowHit::Press(ButtonId::ChooseLoginImage) => self.open_login_image_dialog(),
@@ -7431,6 +10019,7 @@ impl SettingsState {
             }
             RowHit::Press(ButtonId::ClearRotation) => {
                 self.appearance.settings.wallpaper_folder = None;
+                self.wallpaper_source_pending = Some(WallpaperSource::Folder);
             }
             RowHit::Press(ButtonId::EventColour(id)) => {
                 let what = self
@@ -7445,13 +10034,25 @@ impl SettingsState {
                 self.start_calendar(&["--event-colour", &id], &what);
             }
             RowHit::Press(ButtonId::OpenCalendar) => self.start_calendar(&[], "your events"),
+            RowHit::Press(ButtonId::RefreshNetwork) => self.refresh_network(),
+            RowHit::Press(ButtonId::OpenNetworkManager) => self.open_network_manager(),
             RowHit::Press(ButtonId::LookAgain) => self.refresh_calendar_events(),
             RowHit::Press(ButtonId::Notice(index)) => self.toggle_notice(index),
             RowHit::Press(ButtonId::ChooseDayWallpaper) => self.open_schedule_dialog(true),
             RowHit::Press(ButtonId::ChooseNightWallpaper) => self.open_schedule_dialog(false),
             RowHit::Press(ButtonId::ClearSchedule) => {
                 self.appearance.settings.wallpaper_schedule.clear();
+                self.wallpaper_source_pending = Some(WallpaperSource::TimeOfDay);
             }
+            RowHit::Press(ButtonId::EditRule(index)) => self.open_rule_editor(Some(index)),
+            RowHit::Press(ButtonId::RuleUp(index)) => self.move_rule(index, true),
+            RowHit::Press(ButtonId::RuleDown(index)) => self.move_rule(index, false),
+            RowHit::Press(ButtonId::DeleteRule(index)) => self.delete_rule(index),
+            RowHit::Press(ButtonId::PutRuleBack) => self.put_rule_back(),
+            RowHit::Press(ButtonId::AddRule) => self.open_rule_editor(None),
+            RowHit::Press(ButtonId::SaveRule) => self.save_rule(),
+            RowHit::Press(ButtonId::CancelRule) => self.close_rule_editor(),
+            RowHit::Press(ButtonId::RemoveUnreadableRules) => self.remove_unreadable_rules(),
         }
     }
 
@@ -7520,6 +10121,7 @@ impl SettingsState {
             // integers an `f32` represents without rounding.
             #[allow(clippy::cast_precision_loss)]
             SliderId::DoubleClickMs => self.input.settings.mouse.double_click_ms as f32,
+            SliderId::SoundVolume => self.appearance.settings.sounds.volume,
         }
     }
 
@@ -7561,6 +10163,7 @@ impl SettingsState {
                 self.appearance.settings.night_light_strength = value;
             }
             SliderId::NarratorRate => self.narrator_rate = value,
+            SliderId::SoundVolume => self.appearance.settings.sounds.volume = value,
             SliderId::TextSize => self.text_size_percent = round_u16(value),
             // Through the model's setter, not by assignment: the clamp belongs
             // to whoever owns the file, and this way a track that ever grew
@@ -7585,6 +10188,7 @@ impl SettingsState {
             ToggleId::RotationShuffle => &mut self.appearance.settings.wallpaper_shuffle,
             ToggleId::NightLight => &mut self.appearance.settings.night_light,
             ToggleId::AutoLogin => &mut self.auto_login_enabled,
+            ToggleId::SystemSounds => &mut self.appearance.settings.sounds.enabled,
             ToggleId::NotifSound(index) => &mut self.notif.settings.apps.get_mut(index)?.sound,
             ToggleId::NotifBanner(index) => &mut self.notif.settings.apps.get_mut(index)?.banner,
             ToggleId::ClockSeconds => &mut self.datetime.settings.show_seconds,
@@ -7616,6 +10220,13 @@ impl SettingsState {
             // Not a `bool` of this state's: whether the drive's bin holds a
             // `limits.yaml`, flipped by `set_bin_own_limits`.
             ToggleId::BinOwnLimits(_) => return None,
+            // The rules' file is written as each change is made, not by the
+            // snapshot: see `set_rule_enabled`.
+            ToggleId::RuleEnabled(_) => return None,
+            ToggleId::RuleOnce => &mut self.rule_draft.as_mut()?.once,
+            // `context-menus.yaml` is written as each switch is flipped: see
+            // `set_service_menu`.
+            ToggleId::ServiceMenu(_) => return None,
         })
     }
 
@@ -7668,6 +10279,12 @@ impl SettingsState {
     }
 
     fn handle_hover(&mut self, mx: f32, my: f32) -> EventResult {
+        // A held scrollbar thumb follows the pointer anywhere, as a held
+        // slider does below.
+        if let Some(grab) = self.page_bar_grab {
+            self.drag_page_bar_to(my, grab);
+            return EventResult::Consumed;
+        }
         // A held slider follows the pointer anywhere, including off the track
         // and out over the sidebar. Dropping the value the moment the pointer
         // strays above or below a six-pixel bar would make the control
@@ -7694,12 +10311,17 @@ impl SettingsState {
         } else {
             self.row_at(mx, my)
         };
+        let bar = self
+            .page_bar()
+            .is_some_and(|(track, _)| track.contains(mx, my));
         let changed = category != self.sidebar_hovered
             || search != self.search_hovered
-            || page != self.page_hovered;
+            || page != self.page_hovered
+            || bar != self.page_bar_hovered;
         self.sidebar_hovered = category;
         self.search_hovered = search;
         self.page_hovered = page;
+        self.page_bar_hovered = bar;
         if changed {
             EventResult::Consumed
         } else {
@@ -7793,6 +10415,11 @@ impl SettingsState {
                         } else {
                             appearance::icons::IconTheme::load(&info.id)
                         };
+                }
+            }
+            DropdownId::WallpaperSource => {
+                if let Some(source) = WallpaperSource::ALL.get(index) {
+                    self.choose_wallpaper_source(*source);
                 }
             }
             DropdownId::CursorTheme => {
@@ -7889,6 +10516,27 @@ impl SettingsState {
                 }
             }
             DropdownId::BinDrive(drive, kind) => self.set_bin_drive_limit(drive, kind, index),
+            DropdownId::SoundTheme => {
+                if let Some(id) = self.sound_themes.get(index).map(|t| t.id.clone()) {
+                    self.appearance.settings.sound_theme = self.sound_theme_named(&id);
+                    // How the theme sounds: its own notification -- the
+                    // event heard most -- whatever the user has set in its
+                    // place, since it is the theme being chosen.
+                    if let Some(first) = appearance::sounds::SHELL_EVENTS.first() {
+                        let choice = self.appearance.settings.sound_theme.sound(first.name);
+                        self.preview(&choice);
+                    }
+                }
+            }
+            DropdownId::EventSound(event) => self.choose_event_sound(event, index),
+            DropdownId::RuleMatch
+            | DropdownId::RulePlace
+            | DropdownId::RuleSize
+            | DropdownId::RuleSnap
+            | DropdownId::RuleDesktop
+            | DropdownId::RuleState
+            | DropdownId::RuleOpacity
+            | DropdownId::RuleFlag(_) => self.choose_in_rule(dropdown_id, index),
             DropdownId::NotifImportance(app) => {
                 if let Some(chosen) = notifsettings::Importance::ALL.get(index)
                     && let Some(rule) = self.notif.settings.apps.get_mut(app)
@@ -7947,14 +10595,29 @@ impl SettingsState {
                     self.session_dirty = true;
                 }
             }
+            // A family of one's own is one's own fonts: a theme left chosen
+            // would draw its family in place of the one just picked.
             DropdownId::UiFont => {
                 if let Some(family) = self.font_families.get(index) {
                     self.appearance.settings.fonts.ui_font = family.clone();
+                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();
                 }
             }
             DropdownId::MonoFont => {
                 if let Some(family) = self.mono_families.get(index) {
                     self.appearance.settings.fonts.mono_font = family.clone();
+                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();
+                }
+            }
+            DropdownId::FontTheme => {
+                if let Some(info) = self.themes.get(index) {
+                    if info.origin == appearance::themes::Origin::BuiltIn {
+                        self.appearance.settings.font_theme =
+                            appearance::themes::FontTheme::built_in();
+                    } else if info.provides_fonts() {
+                        self.appearance.settings.font_theme =
+                            appearance::themes::FontTheme::load_from(&self.theme_dirs, &info.id);
+                    }
                 }
             }
             DropdownId::ColorFilter => {
@@ -8079,12 +10742,28 @@ impl oswindow::app::App for SettingsState {
         (self.window_width as u32, self.window_height as u32)
     }
 
-    // `tick_interval` is deliberately left at its `None` default, and the
-    // absence is the assertion: Settings ages nothing. Every visible change it
-    // makes is downstream of an event — there is no animation, no toast that
-    // expires, no periodic re-read of the files it owns. The day one of those is
-    // added, this is the method that has to come with it, or the feature ships
-    // frozen with passing tests over it (`known-issues.md` lesson 47).
+    /// Settings times one thing: the wait before a disabled control's reason
+    /// appears, while the pointer rests on it. A tick is asked for when that
+    /// wait ends and not otherwise -- every other visible change is downstream
+    /// of an event, with no animation and no toast that expires -- so a
+    /// window nobody is pointing at sleeps. Without this the reason would
+    /// wait for some unrelated event to draw it (`known-issues.md` lesson 47).
+    ///
+    /// Never a tick of nought: a wait starts at the clock's present reading,
+    /// and the clock moves only with a tick, which shows the reason the
+    /// moment it is due.
+    fn tick_interval(&self) -> Option<std::time::Duration> {
+        // And a text field's menu, whose dimmed rows say why while the
+        // pointer rests on one -- on its own clock, which the ticks move.
+        let menu = self.field_menu.due_in();
+        let why = self.why_disabled.due_in(self.clock_ms);
+        match (why, menu) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+        .map(std::time::Duration::from_millis)
+    }
+
     fn on_event(&mut self, event: &Event) -> Response {
         // The one translation this seam performs, and the one place in Settings
         // where the two enums meet. `EventResult` answers a different question —
@@ -8102,7 +10781,9 @@ impl oswindow::app::App for SettingsState {
         // `CloseRequested` is not answered with `Exit` because it does not need
         // to be: `EventLoop::run_batched` closes on it whatever the application
         // says, so that a title-bar X cannot be a button that does nothing.
-        match self.handle_event(event) {
+        let result = self.handle_event(event);
+        self.play_pending_preview();
+        match result {
             EventResult::Consumed => Response::Redraw,
             EventResult::Ignored => Response::Idle,
         }
@@ -8136,7 +10817,50 @@ impl oswindow::app::App for SettingsState {
         // out for a window that is not the one on screen is the visible cost.
         self.window_width = width.max(0.0);
         self.window_height = height.max(0.0);
-        self.render_tree()
+        // Pictures finished since the last wake -- or with no waker at all,
+        // as on a link that cannot be woken -- are drawn in this frame, and
+        // uploaded before it by `take_images`.
+        self.thumbs.collect();
+        // The icon theme and the colours the icons are drawn in, as they are
+        // now: another of either draws every icon again.
+        self.icons
+            .set_theme(self.appearance.settings.icon_theme.clone());
+        let palette = self.palette();
+        if self.icons_palette.replace(palette) != Some(palette) {
+            self.icons.forget();
+        }
+        let tree = self.render_tree();
+        self.icons.frame_drawn(&tree.commands);
+        tree
+    }
+
+    /// The Background page decodes pictures on a thread of its own
+    /// (design-decisions §1243), which wakes the loop when one is ready.
+    fn wants_waker(&self) -> bool {
+        true
+    }
+
+    fn attach_waker(&mut self, waker: std::task::Waker) {
+        self.thumbs.attach_waker(waker);
+    }
+
+    /// A picture is decoded: draw it.
+    fn on_wake(&mut self) -> Response {
+        if self.thumbs.collect() {
+            Response::Redraw
+        } else {
+            Response::Idle
+        }
+    }
+
+    /// The pictures decoded and not yet uploaded, and the icons the frame
+    /// names that the window does not hold (or holds in colours no longer
+    /// drawn, dropped), asked for after each render and before its frame goes
+    /// out, so a frame never names a picture the compositor does not have.
+    fn take_images(&mut self) -> Vec<oswindow::app::ImageChange> {
+        let mut changes = self.thumbs.take_uploads();
+        changes.extend(self.icons.take_images());
+        changes
     }
 }
 
@@ -8155,6 +10879,213 @@ fn known_programs(dirs: &desktopentry::scan::DataDirs) -> Vec<desktopentry::App>
             .filter(|own| !installed.contains(&own.id)),
     );
     list
+}
+
+/// Where the desktop's background comes from: the Background page's first
+/// question (design-decisions §1243), in the order the page lists them.
+///
+/// The desktop shows the highest of them that is set, in its own order --
+/// pictures by time of day, a rotating folder, a theme's picture, a picture
+/// (`gui/desktop/src/session.rs`, `sync_wallpaper`) -- so choosing one clears
+/// those above it, and those below are kept as what shows if it is cleared.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WallpaperSource {
+    /// One picture of the user's own.
+    Picture,
+    /// A theme's recommended picture, for the mode the desktop is drawn in.
+    Theme,
+    /// A picture up from the morning and one from the evening.
+    TimeOfDay,
+    /// The pictures in a folder, in turn.
+    Folder,
+    /// No picture: the plain background, in the theme's colours.
+    Plain,
+}
+
+impl WallpaperSource {
+    /// Every source, in the page's order.
+    const ALL: [Self; 5] = [
+        Self::Picture,
+        Self::Theme,
+        Self::TimeOfDay,
+        Self::Folder,
+        Self::Plain,
+    ];
+
+    /// What the page calls it.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Picture => "A picture",
+            Self::Theme => "A theme's pictures",
+            Self::TimeOfDay => "Pictures by time of day",
+            Self::Folder => "A folder of pictures, in turn",
+            Self::Plain => "No picture",
+        }
+    }
+
+    /// Its place in the desktop's order: a source shows over every source
+    /// with a lower rank.
+    fn rank(self) -> u8 {
+        match self {
+            Self::TimeOfDay => 4,
+            Self::Folder => 3,
+            Self::Theme => 2,
+            Self::Picture => 1,
+            Self::Plain => 0,
+        }
+    }
+
+    /// The source the desktop shows with `settings`: the highest that is set.
+    fn shown(settings: &appearance::AppearanceSettings) -> Self {
+        if !settings.wallpaper_schedule.is_empty() {
+            Self::TimeOfDay
+        } else if settings.wallpaper_folder.is_some() {
+            Self::Folder
+        } else if !settings.wallpaper_theme.is_built_in() {
+            Self::Theme
+        } else if settings.wallpaper.is_some() {
+            Self::Picture
+        } else {
+            Self::Plain
+        }
+    }
+}
+
+/// A picture offered on the Background page: a theme by its recommended
+/// picture, or a picture a theme bundles.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PictureCard {
+    /// The theme it chooses, for a theme's card; `None` for a bundled
+    /// picture's, which chooses the picture itself.
+    theme: Option<std::ffi::OsString>,
+    /// What the card says under its picture.
+    name: String,
+    /// The picture drawn on it; `None` for a theme that recommends none for
+    /// the mode the desktop is in, which has nothing to show.
+    picture: Option<PathBuf>,
+}
+
+/// The width of a picture card, and of the picture drawn on it.
+const PICTURE_CARD_WIDTH: f32 = 176.0;
+/// The height of the picture on a card: sixteen by nine.
+const PICTURE_CARD_PICTURE_HEIGHT: f32 = 99.0;
+/// The height of a card: its picture and the line naming it.
+const PICTURE_CARD_HEIGHT: f32 = PICTURE_CARD_PICTURE_HEIGHT + 24.0;
+/// The gap between one card and the next, across and down.
+const PICTURE_CARD_GAP: f32 = 12.0;
+/// How many cards to a row: as many as the page's column holds -- the
+/// width its notes keep to, [`NOTE_WIDTH`] -- so none runs past the rows
+/// beside it, or under the scrollbar, where a press is the scrollbar's.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a few whole cards, from two positive widths in pixels"
+)]
+const PICTURE_CARD_COLUMNS: usize =
+    ((NOTE_WIDTH + PICTURE_CARD_GAP) / (PICTURE_CARD_WIDTH + PICTURE_CARD_GAP)) as usize;
+const _: () = assert!(
+    PICTURE_CARD_COLUMNS >= 1,
+    "the page's column is narrower than one picture card"
+);
+
+/// Where the `index`-th picture card goes, with the grid's top left corner
+/// at (`x`, `y`).
+fn picture_card_origin(index: usize, x: f32, y: f32) -> (f32, f32) {
+    let col = index % PICTURE_CARD_COLUMNS;
+    let row = index / PICTURE_CARD_COLUMNS;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a page's cards number in the dozens"
+    )]
+    let (col, row) = (col as f32, row as f32);
+    (
+        x + col * (PICTURE_CARD_WIDTH + PICTURE_CARD_GAP),
+        y + row * (PICTURE_CARD_HEIGHT + PICTURE_CARD_GAP),
+    )
+}
+
+/// The height of a grid of `count` picture cards.
+fn picture_grid_height(count: usize) -> f32 {
+    let rows = count.div_ceil(PICTURE_CARD_COLUMNS);
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a page's cards number in the dozens"
+    )]
+    let rows = rows as f32;
+    rows * (PICTURE_CARD_HEIGHT + PICTURE_CARD_GAP)
+}
+
+/// Draw one picture card with its top left corner at (`x`, `y`): its picture
+/// fitted inside the card's picture box with its shape kept -- or, while it
+/// decodes or when it cannot be, a plain box saying so -- its name under it,
+/// and a ring round the picture when it is the one chosen.
+fn render_picture_card(
+    tree: &mut RenderTree,
+    pal: &Palette,
+    (x, y): (f32, f32),
+    name: &str,
+    thumb: Option<thumbs::Thumb>,
+    chosen: bool,
+) {
+    fill_rounded(
+        tree,
+        x,
+        y,
+        PICTURE_CARD_WIDTH,
+        PICTURE_CARD_PICTURE_HEIGHT,
+        pal.surface0,
+        6.0,
+    );
+    let words = match thumb {
+        Some(thumbs::Thumb::Ready { id, width, height }) if width > 0 && height > 0 => {
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "a thumbnail is a few hundred pixels across"
+            )]
+            let (w, h) = (width as f32, height as f32);
+            let scale = (PICTURE_CARD_WIDTH / w).min(PICTURE_CARD_PICTURE_HEIGHT / h);
+            let (dw, dh) = (w * scale, h * scale);
+            tree.push(RenderCommand::Image {
+                x: x + (PICTURE_CARD_WIDTH - dw) / 2.0,
+                y: y + (PICTURE_CARD_PICTURE_HEIGHT - dh) / 2.0,
+                width: dw,
+                height: dh,
+                image_id: id,
+            });
+            None
+        }
+        Some(thumbs::Thumb::Loading) => Some("Loading..."),
+        _ => Some("No preview"),
+    };
+    if let Some(words) = words {
+        tree.text_in(
+            x + 10.0,
+            y + PICTURE_CARD_PICTURE_HEIGHT / 2.0 - 8.0,
+            PICTURE_CARD_WIDTH - 20.0,
+            words,
+            pal.subtext0,
+            12.0,
+        );
+    }
+    if chosen {
+        tree.push(RenderCommand::StrokeRect {
+            x,
+            y,
+            width: PICTURE_CARD_WIDTH,
+            height: PICTURE_CARD_PICTURE_HEIGHT,
+            color: pal.accent,
+            line_width: 3.0,
+            corner_radii: CornerRadii::all(6.0),
+        });
+    }
+    tree.text_in(
+        x,
+        y + PICTURE_CARD_PICTURE_HEIGHT + 6.0,
+        PICTURE_CARD_WIDTH,
+        name,
+        if chosen { pal.accent } else { pal.text },
+        12.0,
+    );
 }
 
 /// When a new morning picture goes up: 06:00, as lane C's schedule has it.
@@ -8209,6 +11140,59 @@ struct OpenText {
     name: String,
     /// The text as shown ([`shown_as_text`]), or why it could not be read.
     shown: Result<String, String>,
+    /// Its lines as drawn ([`licence_lines`]), and the font they were
+    /// wrapped in -- the UI family and how it is rendered: wrapped again only
+    /// when that changes. Wrapping a long licence is most of what a walk of
+    /// the page costs, and the page is walked several times an event: its
+    /// height, what the pointer is on, what is drawn.
+    wrapped: std::cell::RefCell<Option<(WrapFont, Vec<String>)>>,
+}
+
+/// The font a text is wrapped in: the UI family, and how it is rendered.
+type WrapFont = (Option<String>, text::Rendering);
+
+impl OpenText {
+    /// The text's lines as the page draws them, wrapped in the font in use
+    /// now; none for a text that could not be read.
+    fn lines(&self) -> std::cell::Ref<'_, [String]> {
+        let font = (text::font_family(), text::rendering());
+        let stale = self
+            .wrapped
+            .borrow()
+            .as_ref()
+            .is_none_or(|(wrapped_in, _)| *wrapped_in != font);
+        if stale {
+            let lines = self
+                .shown
+                .as_deref()
+                .map_or_else(|_| Vec::new(), licence_lines);
+            *self.wrapped.borrow_mut() = Some((font, lines));
+        }
+        std::cell::Ref::map(self.wrapped.borrow(), |wrapped| {
+            wrapped
+                .as_ref()
+                .map_or(&[][..], |(_, lines)| lines.as_slice())
+        })
+    }
+}
+
+/// A licence's `body` as the About page draws it: wrapped to the column with
+/// every byte kept -- indentation, blank lines: a licence's paragraphs are as
+/// its authors broke them, often one to a line, and a text command does not
+/// wrap -- each line without the carriage return a file written on Windows
+/// ends it with. The last line ending ends a line rather than beginning an
+/// empty one, as `str::lines` reads it.
+fn licence_lines(body: &str) -> Vec<String> {
+    let body = body
+        .strip_suffix('\n')
+        .map_or(body, |b| b.strip_suffix('\r').unwrap_or(b));
+    text::wrap_ranges(body, NOTE_WIDTH, LICENCE_SIZE, FontWeightHint::Regular)
+        .into_iter()
+        .map(|range| {
+            let line = body.get(range).unwrap_or_default();
+            line.strip_suffix('\r').unwrap_or(line).to_owned()
+        })
+        .collect()
 }
 
 /// A licence text as the page shows it: its words as they are, and a byte
@@ -8296,6 +11280,9 @@ fn main() -> ExitCode {
         }
     };
     let mut state = SettingsState::new();
+    // A sound chosen on the Sound page is heard from the real program; a
+    // test's state records it and plays nothing.
+    state.play_previews = true;
     // The Personalization pages open on what the user actually has, which is
     // the same file the desktop shell paints from.
     state.load_appearance();
@@ -8704,13 +11691,15 @@ mod tests {
 
     /// **A morning and an evening picture are chosen on the Wallpaper page**
     /// (lane C's `c-e-day-and-night-wallpapers-need-a-place-in-settings`):
-    /// each with its own Choose, up from 06:00 and 18:00, each moved by its
-    /// dropdown on its own side of the other, and Clear stops them. It could
-    /// be set only by editing `appearance.yaml`.
+    /// under Show's "Pictures by time of day", each with its own Choose, up
+    /// from 06:00 and 18:00, each moved by its dropdown on its own side of the
+    /// other, and Clear empties them and stays, to choose again. It could be
+    /// set only by editing `appearance.yaml`.
     #[test]
     fn a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
+        show_source(&mut state, WallpaperSource::TimeOfDay);
         let schedule = |state: &SettingsState| -> Vec<(String, PathBuf)> {
             state
                 .appearance
@@ -8794,6 +11783,12 @@ mod tests {
 
         press_row(&mut state, RowHit::Press(ButtonId::ClearSchedule));
         assert!(schedule(&state).is_empty(), "Clear left the schedule");
+        assert_eq!(
+            state.wallpaper_source(),
+            WallpaperSource::TimeOfDay,
+            "Clear left the source it cleared"
+        );
+        assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_some());
     }
 
     /// **A schedule written by hand is shown as it is**, with Clear; the page
@@ -8855,52 +11850,523 @@ mod tests {
         );
     }
 
-    /// **The picture and the rotation say so while a schedule hides them**:
-    /// pictures by time of day are the wallpaper while they are set, and
-    /// "No folder. The desktop shows the single picture above." was then
-    /// untrue. Without a schedule each reads as it did.
+    /// Press the control `what` names on the page through the event path a
+    /// click takes, which also saves what it changed.
+    fn press_on(state: &mut SettingsState, what: RowHit) {
+        let (x, y) = center_of(state, what).unwrap_or_else(|| panic!("{what:?} is not drawn"));
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// Choose `source` in the Background page's Show list as a user does: a
+    /// press on the row, then on the entry.
+    fn show_source(state: &mut SettingsState, source: WallpaperSource) {
+        press_on(state, RowHit::Dropdown(DropdownId::WallpaperSource));
+        assert_eq!(state.open_dropdown, Some(DropdownId::WallpaperSource));
+        let at = WallpaperSource::ALL
+            .iter()
+            .position(|s| *s == source)
+            .expect("every source is listed");
+        press_dropdown_item(state, at);
+        assert!(state.open_dropdown.is_none(), "choosing left the list open");
+    }
+
+    /// A scratch theme folder with one theme that brings pictures -- Aurora,
+    /// a day picture and a night one, recommended for light and dark -- and
+    /// one that does not.
+    fn scratch_wallpaper_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-wallpaper-themes");
+        let aurora = dir.dir().join("aurora");
+        let pictures = aurora.join("wallpapers");
+        std::fs::create_dir_all(&pictures).expect("pictures folder");
+        thumbs::tests::png(&pictures, "day.png", 64, 36);
+        thumbs::tests::png(&pictures, "night.png", 32, 18);
+        std::fs::write(
+            aurora.join("theme.yaml"),
+            "meta:\n  name: Aurora\nwallpapers:\n  dark: wallpapers/night.png\n  light: wallpapers/day.png\n",
+        )
+        .expect("theme file");
+        let plain = dir.dir().join("plain");
+        std::fs::create_dir_all(&plain).expect("theme folder");
+        std::fs::write(
+            plain.join("theme.yaml"),
+            "meta:\n  name: Plain\ncolors:\n  base: \"#101018\"\n",
+        )
+        .expect("theme file");
+        dir
+    }
+
+    /// The Background page over `dir`'s themes, and no other desktop's.
+    fn wallpaper_state(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: Some(dir.dir().to_path_buf()),
+            system: dir.dir().join("no-system-themes"),
+        };
+        state.cursor_icon_dirs = Vec::new();
+        state.go_to_page(SettingsPage::Wallpaper);
+        state
+    }
+
+    /// **Only the source the desktop shows has its controls on the page**
+    /// (design-decisions §1243). Pictures by time of day outrank a folder,
+    /// which outranks a picture; the page used to show a section for each, so
+    /// a picture set under a schedule was written and never seen.
     #[test]
-    fn the_picture_and_the_rotation_say_when_a_schedule_hides_them() {
-        let hidden_above = "Not shown while there are pictures by time of day, above.";
-        let hidden_below = "Not shown while there are pictures by time of day, below.";
-        let single = "No folder. The desktop shows the single picture above.";
+    fn only_the_source_the_desktop_shows_has_its_controls_on_the_page() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
-        state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
-        let text = format!("{:?}", state.render_tree());
-        assert!(text.contains(single), "{text}");
-        assert!(!text.contains(hidden_below) && !text.contains(hidden_above));
-
-        state
-            .appearance
-            .settings
+        let settings = &mut state.appearance.settings;
+        settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+        settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+        settings
             .wallpaper_schedule
             .push(appearance::ScheduledWallpaper {
                 from: DAY_FROM,
                 image: PathBuf::from("/pics/day.jpg"),
             });
-        let text = format!("{:?}", state.render_tree());
+        let drawn = |state: &SettingsState, what: RowHit| center_of(state, what).is_some();
+
+        assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+        assert!(drawn(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)));
+        assert!(!drawn(
+            &state,
+            RowHit::Press(ButtonId::ChooseRotationFolder)
+        ));
+        assert!(!drawn(&state, RowHit::Press(ButtonId::ChooseWallpaper)));
+        let texts = drawn_texts(&state);
         assert!(
-            text.contains(hidden_below),
-            "the picture does not say it is hidden"
-        );
-        assert!(
-            !text.contains(single),
-            "the rotation still says the picture is shown"
+            texts.iter().any(|t| t == "Pictures by time of day"),
+            "{texts:?}"
         );
 
-        state.appearance.settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
-        let text = format!("{:?}", state.render_tree());
-        assert!(
-            text.contains(hidden_above),
-            "the rotation does not say it is hidden"
-        );
+        state.appearance.settings.wallpaper_schedule.clear();
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+        assert!(drawn(&state, RowHit::Press(ButtonId::ChooseRotationFolder)));
+        assert!(!drawn(&state, RowHit::Press(ButtonId::ChooseWallpaper)));
+        assert!(!drawn(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)));
+
+        state.appearance.settings.wallpaper_folder = None;
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+        assert!(drawn(&state, RowHit::Press(ButtonId::ChooseWallpaper)));
+        assert!(!drawn(
+            &state,
+            RowHit::Press(ButtonId::ChooseRotationFolder)
+        ));
 
         state.appearance.settings.wallpaper = None;
-        let text = format!("{:?}", state.render_tree());
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Plain);
+        let texts = drawn_texts(&state);
         assert!(
-            !text.contains("the plain background"),
-            "no picture reads as the plain background under a schedule"
+            texts
+                .iter()
+                .any(|t| t.starts_with("No picture. The desktop is the plain background")),
+            "{texts:?}"
+        );
+    }
+
+    /// **Choosing a source clears those above it and keeps those below**
+    /// (design-decisions §1243): what is chosen is what the desktop shows,
+    /// and each source below it keeps its settings as what shows if it is
+    /// cleared.
+    #[test]
+    fn choosing_a_source_clears_those_above_it_and_keeps_those_below() {
+        settingsfile::testing::with_scratch_config("settings-sources-clear", |_| {
+            use std::ffi::OsStr;
+            let everything = || {
+                let mut state = SettingsState::new();
+                state.current_page = SettingsPage::Wallpaper;
+                let s = &mut state.appearance.settings;
+                s.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+                s.wallpaper_theme = appearance::themes::WallpaperTheme::from_pictures(
+                    "aurora",
+                    None,
+                    Some(PathBuf::from("/themes/aurora/day.png")),
+                );
+                s.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+                s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
+                    from: DAY_FROM,
+                    image: PathBuf::from("/pics/day.jpg"),
+                });
+                state
+            };
+            // Kept: the schedule, the folder, the theme, the picture.
+            for (source, kept) in [
+                (WallpaperSource::TimeOfDay, [true, true, true, true]),
+                (WallpaperSource::Folder, [false, true, true, true]),
+                (WallpaperSource::Theme, [false, false, true, true]),
+                (WallpaperSource::Picture, [false, false, false, true]),
+                (WallpaperSource::Plain, [false, false, false, false]),
+            ] {
+                let mut state = everything();
+                show_source(&mut state, source);
+                let s = &state.appearance.settings;
+                let got = [
+                    !s.wallpaper_schedule.is_empty(),
+                    s.wallpaper_folder.is_some(),
+                    s.wallpaper_theme.id() == OsStr::new("aurora"),
+                    s.wallpaper.is_some(),
+                ];
+                assert_eq!(got, kept, "{source:?}");
+                assert_eq!(
+                    WallpaperSource::shown(s),
+                    source,
+                    "{source:?} is not what the desktop shows"
+                );
+                assert_eq!(state.wallpaper_source(), source);
+            }
+        });
+    }
+
+    /// **A source chosen and not set up yet is shown until it is**: the page
+    /// offers the folder's Choose while the desktop goes on showing the
+    /// picture below it, and once a folder is chosen the folder is shown.
+    /// Leaving the page forgets a choice never set up.
+    #[test]
+    fn a_source_chosen_and_not_set_up_is_shown_until_it_is() {
+        settingsfile::testing::with_scratch_config("settings-source-pending", |_| {
+            let dir = scratchdir::ScratchDir::new("settings-wallpaper-pending");
+            let mut state = wallpaper_state(&dir);
+            state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+            show_source(&mut state, WallpaperSource::Folder);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+            assert_eq!(
+                WallpaperSource::shown(&state.appearance.settings),
+                WallpaperSource::Picture,
+                "the picture below the folder was not kept"
+            );
+            let texts = drawn_texts(&state);
+            assert!(
+                texts.iter().any(|t| t == "No folder chosen yet."),
+                "{texts:?}"
+            );
+            // Nothing of the folder's to place yet.
+            assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_none());
+            press_on(&mut state, RowHit::Press(ButtonId::ChooseRotationFolder));
+            assert!(
+                state.apply_dialog_answer(DialogAction::Selected(PathBuf::from("/pics/rotation")))
+            );
+            assert_eq!(
+                WallpaperSource::shown(&state.appearance.settings),
+                WallpaperSource::Folder
+            );
+            assert!(center_of(&state, RowHit::Dropdown(DropdownId::WallpaperFit)).is_some());
+
+            // Chosen and never set up, and the page left: it opens again on what
+            // the desktop shows.
+            show_source(&mut state, WallpaperSource::TimeOfDay);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+            state.go_to_page(SettingsPage::Themes);
+            state.go_to_page(SettingsPage::Wallpaper);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+
+            // A source chosen and not set up gives way to one set above it since
+            // -- by another program, say: the page shows what the desktop does.
+            show_source(&mut state, WallpaperSource::Picture);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+            state
+                .appearance
+                .settings
+                .wallpaper_schedule
+                .push(appearance::ScheduledWallpaper {
+                    from: DAY_FROM,
+                    image: PathBuf::from("/pics/day.jpg"),
+                });
+            assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+        });
+    }
+
+    /// **Each source's Clear empties it and stays on it**, to choose again:
+    /// the Show list is what changes the source. Each from a page opened on a
+    /// source already set, as a user finds it -- not one just chosen, which
+    /// the page would stay on anyway.
+    #[test]
+    fn each_clear_empties_its_source_and_stays_on_it() {
+        settingsfile::testing::with_scratch_config("settings-each-clear", |_| {
+            let fresh = |set: fn(&mut appearance::AppearanceSettings)| {
+                let mut state = SettingsState::new();
+                state.current_page = SettingsPage::Wallpaper;
+                // Below every source here, so a Clear that let go of its source
+                // would show this instead.
+                state.appearance.settings.wallpaper = Some(PathBuf::from("/pics/one.jpg"));
+                set(&mut state.appearance.settings);
+                state
+            };
+
+            let mut state = fresh(|s| {
+                s.wallpaper_schedule.push(appearance::ScheduledWallpaper {
+                    from: DAY_FROM,
+                    image: PathBuf::from("/pics/day.jpg"),
+                });
+            });
+            press_on(&mut state, RowHit::Press(ButtonId::ClearSchedule));
+            assert!(state.appearance.settings.wallpaper_schedule.is_empty());
+            assert_eq!(state.wallpaper_source(), WallpaperSource::TimeOfDay);
+            assert!(center_of(&state, RowHit::Press(ButtonId::ChooseDayWallpaper)).is_some());
+
+            let mut state = fresh(|s| s.wallpaper_folder = Some(PathBuf::from("/pics/rotation")));
+            press_on(&mut state, RowHit::Press(ButtonId::ClearRotation));
+            assert_eq!(state.appearance.settings.wallpaper_folder, None);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Folder);
+            assert!(center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some());
+
+            let mut state = fresh(|_| {});
+            press_on(&mut state, RowHit::Press(ButtonId::ClearWallpaper));
+            assert_eq!(state.appearance.settings.wallpaper, None);
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+            assert!(center_of(&state, RowHit::Press(ButtonId::ChooseWallpaper)).is_some());
+        });
+    }
+
+    /// **A picture decoded is drawn in the next frame, and a wake says so**:
+    /// the decoding thread's result is collected both when it wakes the
+    /// window and before any frame, and the frame names the picture only
+    /// after its upload is queued.
+    #[test]
+    fn a_picture_decoded_is_drawn_and_a_wake_asks_for_a_frame() {
+        use oswindow::app::App as _;
+        let dir = scratch_wallpaper_themes();
+        let deadline = || {
+            std::time::Instant::now()
+                .checked_add(std::time::Duration::from_secs(10))
+                .expect("a deadline")
+        };
+        // The wake path.
+        let mut state = wallpaper_state(&dir);
+        assert!(state.wants_waker());
+        let until = deadline();
+        while !matches!(state.on_wake(), Response::Redraw) {
+            assert!(std::time::Instant::now() < until, "no wake found a picture");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!state.take_images().is_empty(), "a wake queued no upload");
+
+        // The frame path, with nothing but frames. The picture is told from
+        // the icons every frame draws by asking the icons which they drew.
+        let mut state = wallpaper_state(&dir);
+        show_source(&mut state, WallpaperSource::Theme);
+        let until = deadline();
+        let picture = loop {
+            let tree = state.render(1200.0, 800.0);
+            if let Some(id) = tree.commands.iter().find_map(|c| match c {
+                RenderCommand::Image { image_id, .. } if !state.icons.drew(*image_id) => {
+                    Some(*image_id)
+                }
+                _ => None,
+            }) {
+                break id;
+            }
+            assert!(
+                std::time::Instant::now() < until,
+                "no frame drew the picture"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert!(
+            state.take_images().iter().any(|change| matches!(
+                change,
+                oswindow::app::ImageChange::Upload { id, .. } if *id == picture
+            )),
+            "a frame named a picture with no upload queued"
+        );
+
+        // Other colours draw the icons again; the picture stays where it is.
+        let settings = &mut state.appearance.settings;
+        settings.theme_mode = if settings.theme_mode == ThemeMode::Dark {
+            ThemeMode::Light
+        } else {
+            ThemeMode::Dark
+        };
+        let _frame = state.render(1200.0, 800.0);
+        assert!(
+            !state.take_images().iter().any(|change| matches!(
+                change,
+                oswindow::app::ImageChange::Drop(id) if *id == picture
+            )),
+            "other colours dropped the picture with the icons"
+        );
+    }
+
+    /// The Show list names every source, in the page's order, and opens on
+    /// the one shown.
+    #[test]
+    fn the_show_list_names_every_source_and_opens_on_the_one_shown() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        state.appearance.settings.wallpaper_folder = Some(PathBuf::from("/pics/rotation"));
+        state.show_dropdown(DropdownId::WallpaperSource);
+        let layout = state.dropdown_layout().expect("a layout");
+        assert_eq!(
+            layout.items,
+            WallpaperSource::ALL
+                .iter()
+                .map(|s| s.label().to_string())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            layout.items[layout.selected],
+            "A folder of pictures, in turn"
+        );
+    }
+
+    /// **A theme is chosen by its picture** (lane C,
+    /// `c-e-a-themes-wallpapers-on-the-background-page`): the themes that
+    /// bring pictures, each by its picture for the mode the desktop is in,
+    /// drawn small once decoded -- uploaded before the frame that names it --
+    /// and a press on one writes `theme.wallpaper` to `appearance.yaml`.
+    #[test]
+    fn a_theme_is_chosen_by_its_picture() {
+        with_scratch_config("settings-wallpaper-theme", |_root| {
+            let dir = scratch_wallpaper_themes();
+            let mut state = wallpaper_state(&dir);
+            assert_eq!(
+                state.wallpaper_theme_cards.len(),
+                1,
+                "only Aurora brings pictures: {:?}",
+                state.wallpaper_theme_cards
+            );
+            let card = state.wallpaper_theme_cards[0].clone();
+            assert_eq!(card.name, "Aurora");
+            let for_now = if state.appearance.settings.is_light() {
+                "day.png"
+            } else {
+                "night.png"
+            };
+            let picture = card.picture.expect("Aurora has a picture for the mode now");
+            assert!(
+                picture.ends_with(for_now),
+                "{picture:?} is not for the mode now"
+            );
+
+            show_source(&mut state, WallpaperSource::Theme);
+            let thumbs::Thumb::Ready { id, .. } =
+                thumbs::tests::settle(&mut state.thumbs, &picture)
+            else {
+                panic!(
+                    "the picture was not decoded: {:?}",
+                    state.thumbs.get(&picture)
+                );
+            };
+            let uploads = oswindow::app::App::take_images(&mut state);
+            assert!(
+                uploads.iter().any(|u| matches!(
+                    u,
+                    oswindow::app::ImageChange::Upload { id: up, .. } if *up == id
+                )),
+                "the picture was not uploaded"
+            );
+            let tree = state.render_tree();
+            assert!(
+                tree.commands.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Image { image_id, .. } if *image_id == id
+                )),
+                "the picture is not drawn"
+            );
+
+            press_on(&mut state, RowHit::Select(SelectId::WallpaperTheme, 0));
+            assert_eq!(
+                state.appearance.settings.wallpaper_theme.id(),
+                std::ffi::OsStr::new("aurora")
+            );
+            // The theme chosen is the one marked: its name in the accent.
+            let accent = state.palette().accent;
+            let tree = state.render_tree();
+            assert!(
+                tree.commands.iter().any(|c| matches!(
+                    c,
+                    RenderCommand::Text { text, color, .. } if text == "Aurora" && *color == accent
+                )),
+                "the chosen theme is not marked"
+            );
+            let saved =
+                AppearanceSettings::read_from(&appearance::config::load(appearance::CONFIG_NAME));
+            assert_eq!(saved.wallpaper_theme.id(), std::ffi::OsStr::new("aurora"));
+        });
+    }
+
+    /// **The pictures themes bring are offered as pictures**: under "A
+    /// picture", each by its file's name and its theme's, and a press sets it
+    /// as the picture -- not the theme.
+    #[test]
+    fn the_pictures_themes_bring_are_offered_as_pictures() {
+        settingsfile::testing::with_scratch_config("settings-bundled-pictures", |_| {
+            let dir = scratch_wallpaper_themes();
+            let mut state = wallpaper_state(&dir);
+            show_source(&mut state, WallpaperSource::Picture);
+            let names: Vec<String> = state
+                .bundled_picture_cards
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            assert!(
+                names.contains(&String::from("day.png (Aurora)"))
+                    && names.contains(&String::from("night.png (Aurora)")),
+                "{names:?}"
+            );
+            // Each card chooses its own picture.
+            for name in ["night.png (Aurora)", "day.png (Aurora)"] {
+                let at = names.iter().position(|n| n == name).expect("listed");
+                let picture = state.bundled_picture_cards[at]
+                    .picture
+                    .clone()
+                    .expect("a bundled card has its picture");
+                press_on(&mut state, RowHit::Select(SelectId::BundledPicture, at));
+                assert_eq!(
+                    state.appearance.settings.wallpaper.as_deref(),
+                    Some(picture.as_path()),
+                    "{name}"
+                );
+            }
+            assert!(
+                state.appearance.settings.wallpaper_theme.is_built_in(),
+                "a picture chose a theme"
+            );
+            assert_eq!(state.wallpaper_source(), WallpaperSource::Picture);
+        });
+    }
+
+    /// **A chosen theme whose pictures cannot be used says why** under its
+    /// pictures; the desktop shows the user's own picture meanwhile.
+    #[test]
+    fn a_theme_whose_pictures_cannot_be_used_says_why() {
+        let dir = scratch_wallpaper_themes();
+        let mut state = wallpaper_state(&dir);
+        state.appearance.settings.wallpaper_theme = appearance::themes::WallpaperTheme::load_from(
+            &state.theme_dirs,
+            std::ffi::OsStr::new("gone"),
+        );
+        let problem = state
+            .appearance
+            .settings
+            .wallpaper_theme
+            .problem()
+            .expect("control: a theme not installed has a problem")
+            .to_string();
+        assert_eq!(state.wallpaper_source(), WallpaperSource::Theme);
+        let texts = drawn_texts(&state);
+        assert!(
+            texts.contains(&problem),
+            "{problem:?} is not said: {texts:?}"
+        );
+    }
+
+    /// With no theme that brings pictures, "A theme's pictures" says where
+    /// they come from rather than showing nothing.
+    #[test]
+    fn with_no_theme_that_brings_pictures_the_page_says_where_they_come_from() {
+        let dir = scratchdir::ScratchDir::new("settings-no-wallpaper-themes");
+        let mut state = wallpaper_state(&dir);
+        show_source(&mut state, WallpaperSource::Theme);
+        let texts = drawn_texts(&state);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.starts_with("No installed theme brings pictures")),
+            "{texts:?}"
         );
     }
 
@@ -11592,7 +15058,7 @@ mod tests {
             );
 
             // One clipboard: copied from the search, pasted into the pattern.
-            state.handle_event(&chord(Key::A, "a", Modifiers::ctrl()));
+            state.handle_event(&ctrl_chord(Key::A, "a"));
             state.handle_event(&chord(Key::C, "c", Modifiers::ctrl()));
             state.handle_event(&chord(Key::Escape, "", Modifiers::alt()));
             assert!(state.search_focused, "Alt+Escape left the search");
@@ -11606,7 +15072,7 @@ mod tests {
                 kind: MouseEventKind::Press(MouseButton::Left),
             }));
             state.handle_event(&key_press(Key::End));
-            state.handle_event(&chord(Key::V, "v", Modifiers::ctrl()));
+            state.handle_event(&ctrl_chord(Key::V, "v"));
             assert_eq!(
                 state.exclusion_draft.text(),
                 "ab\u{105}\u{17a}wall",
@@ -11869,15 +15335,17 @@ mod tests {
     fn rotation_detail_rows_wait_for_a_folder() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Wallpaper;
-
         state.appearance.settings.wallpaper_folder = None;
+        // The way to start rotating is one choice away, in the Show list.
+        show_source(&mut state, WallpaperSource::Folder);
+
         assert!(
             center_of(&state, RowHit::Toggle(ToggleId::RotationShuffle)).is_none(),
             "a shuffle switch was drawn with no folder to shuffle"
         );
         assert!(
             center_of(&state, RowHit::Press(ButtonId::ChooseRotationFolder)).is_some(),
-            "the page must always offer a way to START rotating"
+            "the folder source offers no way to START rotating"
         );
 
         state.appearance.settings.wallpaper_folder = Some(std::path::PathBuf::from("/pics"));
@@ -12130,7 +15598,7 @@ mod tests {
     pub(super) fn hit_bands(state: &SettingsState) -> Vec<(RowHit, (f32, f32, f32, f32))> {
         let mut sink = RectSink {
             x: SettingsState::content_x(),
-            y: SettingsState::content_top(),
+            y: state.page_top(),
             rects: Vec::new(),
         };
         state.build_page(&mut sink);
@@ -12252,6 +15720,21 @@ mod tests {
         // machine running it.
         state.font_families = vec!["Example Sans".to_owned(), "Example Serif".to_owned()];
         state.mono_families = vec!["Example Mono".to_owned()];
+        // And the window-rule editor, which is the page while a rule is
+        // written: a rule complete enough to save, so Save is live, with
+        // numbers where it opens and how big, so their fields are drawn, and
+        // a snap zone, the one list a rule must already have to be drawn.
+        if page == SettingsPage::WindowRules {
+            let mut draft = rules::RuleDraft::new();
+            draft.name.set_text("Example");
+            draft.match_text.set_text("terminal");
+            draft.place = rules::Place::At;
+            draft.place_text.set_text("100 80");
+            draft.size = rules::Size::Exactly;
+            draft.size_text.set_text("800 600");
+            draft.actions.snap_zone = Some(1);
+            state.rule_draft = Some(draft);
+        }
         // Turning one switch on can reveal another, so repeat until the set
         // stops growing. Bounded because nothing here turns a switch back off.
         for _ in 0..8 {
@@ -12489,6 +15972,3429 @@ mod tests {
             }
         }
         assert!(checked >= 7, "only {checked} dimmed buttons were pressed");
+    }
+
+    // --- Saying why a control is disabled --------------------------------
+    //
+    // `design.txt` asks every program for "a hover tooltip for any menu
+    // option or button that's currently disabled, explaining why it's
+    // disabled/how to enable it" (requests/c-e-say-why-a-control-is-
+    // disabled.md). The tests rest the pointer where the window drew each
+    // dimmed control -- found in the render tree, as the census above finds
+    // them -- and let time pass with ticks, as the window's loop does.
+
+    /// The reason the window draws over its page, if it draws one -- and an
+    /// assertion that it is drawn last, over everything else.
+    fn reason_on_screen(state: &SettingsState) -> Option<String> {
+        let drawn = state.why_disabled.render(&state.palette());
+        if drawn.is_empty() {
+            return None;
+        }
+        let tree = state.render_tree();
+        assert!(
+            tree.commands.ends_with(&drawn),
+            "the reason is drawn under something rather than over the page"
+        );
+        state.why_disabled.showing().map(str::to_owned)
+    }
+
+    /// Move the pointer to (`x`, `y`), as the window's loop reports it.
+    fn rest_at(state: &mut SettingsState, x: f32, y: f32) -> EventResult {
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Move,
+        }))
+    }
+
+    /// Let `ms` milliseconds pass, as one tick of the window's loop.
+    fn wait(state: &mut SettingsState, ms: u64) -> EventResult {
+        state.dispatch_event(&Event::Tick { elapsed_ms: ms })
+    }
+
+    /// How long the window asks to sleep before its next tick, in ms.
+    fn asks_to_wake_in(state: &SettingsState) -> Option<u128> {
+        oswindow::app::App::tick_interval(state).map(|d| d.as_millis())
+    }
+
+    /// **Every dimmed button says why, when the pointer rests on it** -- after
+    /// the toolkit's tooltip delay and not before, drawn over the page, in a
+    /// sentence; and the window asks for the tick that shows it, so the reason
+    /// is not left waiting for some other event to draw.
+    #[test]
+    fn every_dimmed_button_says_why_when_the_pointer_rests_on_it() {
+        let mut explained = 0_usize;
+        for (page, swept) in states_to_sweep() {
+            let pal = swept.palette();
+            for (label, bx, by, fill, _) in painted_buttons(&swept) {
+                if fill != pal.surface0 {
+                    continue;
+                }
+                let mut state = fully_expanded(page);
+                state.selected_account = swept.selected_account;
+                let (cx, cy) = (bx + button_width(&label) / 2.0, by + BUTTON_HEIGHT / 2.0);
+                rest_at(&mut state, cx, cy);
+                assert_eq!(
+                    reason_on_screen(&state),
+                    None,
+                    "on {}, \"{label}\" explained itself before the delay",
+                    page.label()
+                );
+                assert_eq!(
+                    asks_to_wake_in(&state),
+                    Some(500),
+                    "on {}, \"{label}\": the window does not ask to be woken for its reason",
+                    page.label()
+                );
+                assert_eq!(wait(&mut state, 499), EventResult::Ignored);
+                assert_eq!(reason_on_screen(&state), None, "the reason came early");
+                assert_eq!(
+                    wait(&mut state, 1),
+                    EventResult::Consumed,
+                    "on {}, the tick that shows \"{label}\"'s reason does not ask for a frame",
+                    page.label()
+                );
+                let why = reason_on_screen(&state)
+                    .unwrap_or_else(|| panic!("on {}, \"{label}\" says nothing", page.label()));
+                assert!(
+                    why.len() > 20 && why.ends_with('.'),
+                    "on {}, \"{label}\" says only \"{why}\"",
+                    page.label()
+                );
+                assert_eq!(
+                    asks_to_wake_in(&state),
+                    None,
+                    "the window ticks on for nothing"
+                );
+                explained += 1;
+            }
+        }
+        assert!(explained >= 5, "only {explained} dimmed buttons explained");
+    }
+
+    /// **A row that cannot be used yet says why**: each of the Sound page's,
+    /// rested on where its value is drawn.
+    #[test]
+    fn a_row_that_cannot_be_used_says_why() {
+        let mut state = fully_expanded(SettingsPage::Sound);
+        let tree = state.render_tree();
+        let values: Vec<(f32, f32)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { x, y, text, .. }
+                    if text == "Unavailable" || text == "No devices detected" =>
+                {
+                    Some((*x + 4.0, *y + 6.0))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(values.len(), 5, "the Sound page's five rows are not drawn");
+        let mut reasons = Vec::new();
+        for (x, y) in values {
+            rest_at(&mut state, x, y);
+            wait(&mut state, 500);
+            let why = reason_on_screen(&state).expect("a row that cannot be used says nothing");
+            assert!(
+                why.contains("sound"),
+                "\"{why}\" does not say what is missing"
+            );
+            reasons.push(why);
+        }
+        reasons.sort();
+        reasons.dedup();
+        assert_eq!(reasons.len(), 5, "two rows give one reason: {reasons:?}");
+    }
+
+    /// **The reason goes with the pointer**: moved onto a control that can
+    /// be used, or out of the window, it is gone at once -- and moving within
+    /// the dimmed button neither restarts the wait nor hides it.
+    #[test]
+    fn the_reason_goes_when_the_pointer_leaves_the_control() {
+        let mut state = fully_expanded(SettingsPage::Recovery);
+        let (_, bx, by, _, _) = painted_buttons(&state)
+            .into_iter()
+            .find(|(label, ..)| label == "Reset")
+            .expect("the Recovery page draws Reset");
+        let (cx, cy) = (bx + 10.0, by + BUTTON_HEIGHT / 2.0);
+        rest_at(&mut state, cx, cy);
+        wait(&mut state, 300);
+        rest_at(&mut state, cx + 4.0, cy);
+        wait(&mut state, 200);
+        assert!(
+            reason_on_screen(&state).is_some(),
+            "moving within the button started the wait again"
+        );
+        assert_eq!(rest_at(&mut state, cx + 8.0, cy), EventResult::Ignored);
+        assert!(
+            reason_on_screen(&state).is_some(),
+            "moving within the button hid it"
+        );
+
+        assert_eq!(
+            rest_at(&mut state, 10.0, 10.0),
+            EventResult::Consumed,
+            "the reason went without a frame to show it gone"
+        );
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "the reason stayed with the pointer gone"
+        );
+        assert_eq!(asks_to_wake_in(&state), None);
+
+        rest_at(&mut state, cx, cy);
+        wait(&mut state, 500);
+        assert!(reason_on_screen(&state).is_some());
+        assert_eq!(
+            state.dispatch_event(&Event::Mouse(MouseEvent {
+                x: -1.0,
+                y: -1.0,
+                kind: MouseEventKind::Leave,
+            })),
+            EventResult::Consumed
+        );
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "the reason outlived the pointer leaving"
+        );
+    }
+
+    /// **A control that can be used explains nothing**, and the window sleeps
+    /// while the pointer rests on it.
+    #[test]
+    fn a_control_that_can_be_used_explains_nothing() {
+        let mut state = fully_expanded(SettingsPage::Wallpaper);
+        let (what, (x, y, w, h)) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| matches!(what, RowHit::Press(_)))
+            .expect("the Background page has a button to press");
+        rest_at(&mut state, x + w / 2.0, y + h / 2.0);
+        assert_eq!(state.row_at(x + w / 2.0, y + h / 2.0), Some(what));
+        assert_eq!(
+            asks_to_wake_in(&state),
+            None,
+            "a live button waits to explain itself"
+        );
+        wait(&mut state, 5_000);
+        assert_eq!(reason_on_screen(&state), None);
+    }
+
+    /// **Nothing is explained under something drawn over the page**: the
+    /// shortcut card put up over a reason takes it away, and a reason is not
+    /// started under the card.
+    #[test]
+    fn nothing_is_explained_under_the_shortcut_card() {
+        let mut state = fully_expanded(SettingsPage::Recovery);
+        let (_, bx, by, _, _) = painted_buttons(&state)
+            .into_iter()
+            .find(|(label, ..)| label == "Go Back")
+            .expect("the Recovery page draws Go Back");
+        let (cx, cy) = (bx + 10.0, by + BUTTON_HEIGHT / 2.0);
+        rest_at(&mut state, cx, cy);
+        wait(&mut state, 500);
+        assert!(reason_on_screen(&state).is_some());
+
+        state.dispatch_event(&Event::Key(KeyEvent {
+            key: Key::F1,
+            pressed: true,
+            modifiers: Modifiers::NONE,
+            text: String::new(),
+        }));
+        assert!(state.show_help, "F1 did not raise the card");
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "the reason is drawn over the card"
+        );
+
+        rest_at(&mut state, cx + 2.0, cy);
+        assert_eq!(
+            asks_to_wake_in(&state),
+            None,
+            "a reason waits under the card"
+        );
+        wait(&mut state, 5_000);
+        assert_eq!(reason_on_screen(&state), None);
+    }
+
+    /// **Nor under a list, a picker or a drag**: each of the other things
+    /// that can be over the page, or holding the pointer, takes a reason away
+    /// when it comes, and starts none while it is there.
+    #[test]
+    fn nothing_is_explained_under_a_list_a_picker_or_a_drag() {
+        /// Put something over the page, or hold the pointer.
+        type Cover = fn(&mut SettingsState);
+        let covers: [(&str, Cover); 4] = [
+            ("an open list", |s| {
+                s.open_dropdown = Some(DropdownId::Resolution);
+            }),
+            ("the file picker", |s| {
+                s.dialog = Some(FileDialog::open());
+            }),
+            ("the colour picker", |s| {
+                s.color_dialog = Some(ColorPickerDialog::new(s.palette().accent));
+            }),
+            ("a slider held", |s| {
+                s.dragging = Some(SliderId::NightLightTemperature);
+            }),
+        ];
+        for (what, cover) in covers {
+            let mut state = fully_expanded(SettingsPage::Recovery);
+            let (_, bx, by, _, _) = painted_buttons(&state)
+                .into_iter()
+                .find(|(label, ..)| label == "Go Back")
+                .expect("the Recovery page draws Go Back");
+            let (cx, cy) = (bx + 10.0, by + BUTTON_HEIGHT / 2.0);
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert!(reason_on_screen(&state).is_some());
+
+            cover(&mut state);
+            assert_eq!(
+                wait(&mut state, 0),
+                EventResult::Consumed,
+                "the reason went under {what} without a frame to show it gone"
+            );
+            assert_eq!(
+                state.why_disabled.showing(),
+                None,
+                "the reason stayed over {what}"
+            );
+            rest_at(&mut state, cx + 2.0, cy);
+            assert_eq!(asks_to_wake_in(&state), None, "a reason waits under {what}");
+        }
+    }
+
+    // --- The System Sounds section ----------------------------------------------
+
+    /// A scratch folder of sound themes: Chimes, with sounds of its own.
+    fn scratch_sound_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-sound-themes");
+        let chimes = dir.dir().join("chimes");
+        std::fs::create_dir_all(chimes.join("stereo")).expect("theme folder");
+        std::fs::write(
+            chimes.join("index.theme"),
+            "[Sound Theme]\nName=Chimes\nDirectories=stereo\n\n[stereo]\nOutputProfile=stereo\n",
+        )
+        .expect("index.theme");
+        dir
+    }
+
+    /// The Sound page over `dir`'s sound themes, and no other.
+    fn sound_page(dir: &scratchdir::ScratchDir) -> SettingsState {
+        // The settings as they start, not as a file has them: most of these
+        // tests run outside a scratch configuration, where reading one would
+        // read the developer's own -- sounds switched off there, and the rows
+        // a test looks for are never drawn.
+        let mut state = SettingsState::new();
+        state.sound_roots = Some(vec![dir.dir().to_path_buf()]);
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: None,
+            system: dir.dir().join("no-themes"),
+        };
+        state.current_category = SettingsCategory::System;
+        state.go_to_page(SettingsPage::Sound);
+        state
+    }
+
+    /// **The desktop's sounds are chosen on the Sound page and reach the
+    /// file** the desktop reads them from: on or off, how loud, the sound
+    /// theme, and each event's own -- the theme's, none, or a file of the
+    /// user's, chosen in the picker. The section was "Enable System Sounds --
+    /// Unavailable" while nothing read it; the desktop does now.
+    #[test]
+    fn the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file() {
+        settingsfile::testing::with_scratch_config("settings-system-sounds", |_| {
+            let dir = scratch_sound_themes();
+            let mut state = sound_page(&dir);
+            let saved = || appearance::AppearanceFile::load().settings;
+
+            press_on(&mut state, RowHit::Toggle(ToggleId::SystemSounds));
+            assert!(
+                !saved().sounds.enabled,
+                "turning the sounds off was not written"
+            );
+            press_on(&mut state, RowHit::Toggle(ToggleId::SystemSounds));
+            assert!(
+                saved().sounds.enabled,
+                "turning them on again was not written"
+            );
+
+            // The volume, at the far end of its track.
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(SliderId::SoundVolume))
+                .expect("the page draws the volume");
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: track_x + SLIDER_WIDTH,
+                y: track_y + 2.0,
+                kind: MouseEventKind::Press(MouseButton::Left),
+            }));
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: track_x + SLIDER_WIDTH,
+                y: track_y + 2.0,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            }));
+            assert!(
+                (saved().sounds.volume - 1.0).abs() < 0.01,
+                "the volume was not written: {}",
+                saved().sounds.volume
+            );
+            assert!(
+                drawn_texts(&state).iter().any(|t| t == "100%"),
+                "the volume's readout does not say how loud"
+            );
+
+            // The theme, from the list of those installed: the list opens on
+            // the one in use, and the row names the one chosen.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::SoundTheme));
+            let layout = state.dropdown_layout().expect("the list opened");
+            assert_eq!(
+                layout.selected, 0,
+                "the list does not open on the theme in use"
+            );
+            let at = state
+                .sound_themes
+                .iter()
+                .position(|t| t.name == "Chimes")
+                .expect("the scratch theme is offered");
+            assert_ne!(at, 0, "the built-in theme is not first");
+            press_dropdown_item(&mut state, at);
+            assert_eq!(saved().sound_theme.id(), std::ffi::OsStr::new("chimes"));
+            assert!(
+                drawn_texts(&state).iter().any(|t| t == "Chimes"),
+                "the row does not name the theme chosen"
+            );
+            press_on(&mut state, RowHit::Dropdown(DropdownId::SoundTheme));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                at,
+                "the list does not open on the theme chosen"
+            );
+            state.open_dropdown = None;
+
+            // An event: none, then the theme's again -- each kept, shown on
+            // the event's row, and the one its list opens on.
+            let notification = appearance::sounds::SHELL_EVENTS[0].name;
+            assert_eq!(state.event_sound_shown(0), "The theme's");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 1);
+            assert_eq!(
+                saved().sounds.events.get(notification),
+                Some(&appearance::EventSound::Off)
+            );
+            assert_eq!(state.event_sound_shown(0), "Off");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                1,
+                "the list does not open on Off"
+            );
+            press_dropdown_item(&mut state, 0);
+            assert_eq!(saved().sounds.events.get(notification), None);
+            assert_eq!(state.event_sound_shown(0), "The theme's");
+
+            // Another event, a file of my own: chosen in the picker, for that
+            // event and no other.
+            let shot = appearance::sounds::SHELL_EVENTS
+                .iter()
+                .position(|e| e.name == "screen-capture")
+                .expect("a screenshot has a sound");
+            let screenshot = appearance::sounds::SHELL_EVENTS[shot].name;
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(shot)));
+            press_dropdown_item(&mut state, 2);
+            assert!(state.dialog.is_some(), "a file of my own put no picker up");
+            assert_eq!(state.picker_is_for, PickerPurpose::EventSound(shot));
+            let ding = dir.dir().join("ding.oga");
+            state.apply_dialog_answer(DialogAction::Selected(ding.clone()));
+            state.save_appearance();
+            assert_eq!(
+                saved().sounds.events.get(screenshot),
+                Some(&appearance::EventSound::File(ding))
+            );
+            assert_eq!(
+                saved().sounds.events.get(notification),
+                None,
+                "the file went to another event as well"
+            );
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t == "Your own: ding.oga"),
+                "the row does not say which file plays"
+            );
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(shot)));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                2,
+                "the list does not open on the user's own"
+            );
+        });
+    }
+
+    /// **With the sounds off, the rest of the section is not offered**: a
+    /// volume, a theme or an event's sound for sounds that do not play would
+    /// be controls whose every setting does the same nothing.
+    #[test]
+    fn with_system_sounds_off_the_rest_of_the_section_is_not_offered() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        state.appearance.settings.sounds.enabled = false;
+        let offered: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .collect();
+        assert_eq!(offered, vec![RowHit::Toggle(ToggleId::SystemSounds)]);
+
+        state.appearance.settings.sounds.enabled = true;
+        let offered: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .collect();
+        assert!(offered.contains(&RowHit::Slider(SliderId::SoundVolume)));
+        assert!(offered.contains(&RowHit::Dropdown(DropdownId::SoundTheme)));
+        for index in 0..appearance::sounds::SHELL_EVENTS.len() {
+            assert!(
+                offered.contains(&RowHit::Dropdown(DropdownId::EventSound(index))),
+                "{} has no row",
+                appearance::sounds::SHELL_EVENTS[index].label
+            );
+        }
+    }
+
+    /// **A sound is heard as it is chosen** -- design.txt's sound dropdown is
+    /// "previewable": a theme's notification when the theme is chosen, an
+    /// event's sound when it is set, the user's file when the picker answers,
+    /// and the volume's own sound when its handle is let go, at the volume it
+    /// was let go at. "Off" plays nothing; and a test's state records what it
+    /// would play without playing it aloud.
+    #[test]
+    fn a_sound_is_heard_as_it_is_chosen() {
+        settingsfile::testing::with_scratch_config("settings-sound-previews", |_| {
+            let dir = scratch_sound_themes();
+            let chime = dir
+                .dir()
+                .join("chimes")
+                .join("stereo")
+                .join("message-new-instant.oga");
+            std::fs::write(&chime, b"OggS").expect("the theme's notification");
+            let mut state = sound_page(&dir);
+            assert!(!state.play_previews, "a test's state would play aloud");
+            state.appearance.settings.sounds.volume = 0.25;
+            state.appearance.settings.sounds.events.insert(
+                appearance::sounds::SHELL_EVENTS[0].name.to_owned(),
+                appearance::EventSound::File(dir.dir().join("mine.oga")),
+            );
+
+            // A theme: how its own notification sounds, whatever the user
+            // has set in its place.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::SoundTheme));
+            let at = state
+                .sound_themes
+                .iter()
+                .position(|t| t.name == "Chimes")
+                .expect("the scratch theme is offered");
+            press_dropdown_item(&mut state, at);
+            assert_eq!(
+                state.pending_preview,
+                Some((sound::Sound::File(chime.clone()), 0.25)),
+                "choosing a theme did not play its notification"
+            );
+
+            // Off plays nothing; the theme's again plays the theme's.
+            state.pending_preview = None;
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 1);
+            assert_eq!(state.pending_preview, None, "silence was played");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 0);
+            assert_eq!(
+                state.pending_preview,
+                Some((sound::Sound::File(chime), 0.25)),
+                "the theme's sound, chosen again, was not played"
+            );
+
+            // A file of the user's own, when the picker answers.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::EventSound(0)));
+            press_dropdown_item(&mut state, 2);
+            let ding = dir.dir().join("ding.oga");
+            state.apply_dialog_answer(DialogAction::Selected(ding.clone()));
+            assert_eq!(
+                state.pending_preview,
+                Some((sound::Sound::File(ding), 0.25)),
+                "the file chosen was not played"
+            );
+
+            // The volume, when its handle is let go -- not while it moves.
+            state.pending_preview = None;
+            let (track_x, track_y) = state
+                .anchor_at(AnchorId::Slider(SliderId::SoundVolume))
+                .expect("the page draws the volume");
+            for kind in [
+                MouseEventKind::Press(MouseButton::Left),
+                MouseEventKind::Move,
+            ] {
+                state.handle_event(&Event::Mouse(MouseEvent {
+                    x: track_x + SLIDER_WIDTH / 2.0,
+                    y: track_y + 2.0,
+                    kind,
+                }));
+                assert_eq!(
+                    state.pending_preview, None,
+                    "the volume sounded before it was let go"
+                );
+            }
+            state.handle_event(&Event::Mouse(MouseEvent {
+                x: track_x + SLIDER_WIDTH / 2.0,
+                y: track_y + 2.0,
+                kind: MouseEventKind::Release(MouseButton::Left),
+            }));
+            let volume = state.appearance.settings.sounds.volume;
+            assert!((volume - 0.5).abs() < 0.01, "the volume is {volume}");
+            // The scratch theme has no volume sound and no freedesktop theme
+            // to fall back on, so the built-in one plays.
+            let tick = sound::BuiltIn::for_event("audio-volume-change")
+                .expect("a built-in sound for a volume change");
+            assert_eq!(
+                state.pending_preview,
+                Some((sound::Sound::BuiltIn(tick), volume)),
+                "letting the volume go did not play the volume's sound at it"
+            );
+
+            // The program is handed its events through the window's seam,
+            // which plays what the handler asked for -- aloud only in the real
+            // program -- and leaves nothing waiting for the next event.
+            state.pending_preview = None;
+            for kind in [
+                MouseEventKind::Press(MouseButton::Left),
+                MouseEventKind::Release(MouseButton::Left),
+            ] {
+                oswindow::app::App::on_event(
+                    &mut state,
+                    &Event::Mouse(MouseEvent {
+                        x: track_x + SLIDER_WIDTH / 4.0,
+                        y: track_y + 2.0,
+                        kind,
+                    }),
+                );
+            }
+            let moved = state.appearance.settings.sounds.volume;
+            assert!(moved < 0.4, "the seam did not handle the events: {moved}");
+            assert_eq!(
+                state.pending_preview, None,
+                "the seam left the preview waiting"
+            );
+        });
+    }
+
+    // --- A page longer than the window scrolls ------------------------------------
+
+    /// The wheel turned one notch at (`x`, `y`): towards the page's end for a
+    /// negative `dy`, as a wheel turned towards the user sends.
+    fn turn_wheel(state: &mut SettingsState, x: f32, y: f32, dy: f32) -> EventResult {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Scroll { dx: 0.0, dy },
+        }))
+    }
+
+    /// The last of the Sound page's event rows -- the bottom of a page longer
+    /// than the window.
+    fn last_event() -> DropdownId {
+        DropdownId::EventSound(appearance::sounds::SHELL_EVENTS.len() - 1)
+    }
+
+    /// A point over the page, clear of every control's band and of the
+    /// scrollbar, for the wheel.
+    fn over_the_page(state: &SettingsState) -> (f32, f32) {
+        (state.window_width - 60.0, state.window_height / 2.0)
+    }
+
+    /// Where the window drew the text `text`, if it drew it.
+    fn drawn_at(state: &SettingsState, text: &str) -> Option<(f32, f32)> {
+        state.render_tree().commands.iter().find_map(|c| match c {
+            RenderCommand::Text { text: t, x, y, .. } if t == text => Some((*x, *y)),
+            _ => None,
+        })
+    }
+
+    /// **A page longer than the window scrolls, and a row that was below the
+    /// window is drawn on screen and pressed where it is drawn.** Settings'
+    /// pages did not scroll at all, and what ran past the window's bottom
+    /// could not be reached: the Sound page's last events, among others.
+    #[test]
+    fn a_page_longer_than_the_window_scrolls_to_its_last_row() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        let last = last_event();
+        let label = appearance::sounds::SHELL_EVENTS
+            .last()
+            .expect("an event")
+            .label;
+        let (_, below) = center_of(&state, RowHit::Dropdown(last)).expect("the last event's row");
+        assert!(
+            below > state.window_height,
+            "the page fits the window, so this proves nothing: {below}"
+        );
+
+        // The wheel over the sidebar is the sidebar's.
+        assert_eq!(
+            turn_wheel(&mut state, 10.0, 400.0, -1.0),
+            EventResult::Ignored
+        );
+        assert!(
+            state.page_scroll.abs() < f32::EPSILON,
+            "the wheel over the sidebar scrolled the page"
+        );
+
+        let (wx, wy) = over_the_page(&state);
+        let mut notches = 0;
+        while turn_wheel(&mut state, wx, wy, -1.0) == EventResult::Consumed {
+            notches += 1;
+            assert!(notches < 100, "the wheel never reached the page's end");
+        }
+        assert!(notches > 0, "the wheel did not scroll the page");
+
+        // Drawn on screen, and pressed there.
+        let (x, y) = center_of(&state, RowHit::Dropdown(last)).expect("the last event's row");
+        assert!(
+            y > SettingsState::content_top() && y + ITEM_HEIGHT / 2.0 <= state.window_height,
+            "at the page's end its last row is not on screen: {y}"
+        );
+        let (_, label_y) = drawn_at(&state, label).expect("the last event's label is drawn");
+        assert!(
+            (label_y - (y - ITEM_HEIGHT / 2.0 + 14.0)).abs() < 1.0,
+            "the label is drawn at {label_y}, its row pressed at {y}"
+        );
+        let (_, anchored) = state
+            .anchor_at(AnchorId::Dropdown(last))
+            .expect("the list's button is drawn");
+        assert!(
+            (anchored - (y - ITEM_HEIGHT / 2.0)).abs() < 1.0,
+            "the list would open under {anchored}, its row is pressed at {y}"
+        );
+        state.handle_click(x, y);
+        assert_eq!(state.open_dropdown, Some(last));
+
+        // And the wheel over an open list scrolls the list, not the page.
+        let layout = state.dropdown_layout().expect("the list is open");
+        let scrolled = state.page_scroll;
+        turn_wheel(&mut state, layout.x + 10.0, layout.y + 10.0, 1.0);
+        assert!((state.page_scroll - scrolled).abs() < f32::EPSILON);
+    }
+
+    /// **The page scrolls no further than its ends**, and a page that grows
+    /// shorter is not left scrolled past its new end.
+    #[test]
+    fn a_page_scrolls_no_further_than_its_ends() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        let (wx, wy) = over_the_page(&state);
+        assert_eq!(
+            turn_wheel(&mut state, wx, wy, 1.0),
+            EventResult::Ignored,
+            "the page scrolled up past its top"
+        );
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+        for _ in 0..100 {
+            turn_wheel(&mut state, wx, wy, -1.0);
+        }
+        assert!(state.page_scroll > 0.0);
+        assert!((state.page_scroll - state.max_page_scroll()).abs() < 0.01);
+        assert_eq!(turn_wheel(&mut state, wx, wy, -1.0), EventResult::Ignored);
+
+        // The sounds switched off take the section's rows away: the page is
+        // shorter, and what it was scrolled to is past its end.
+        let long = state.max_page_scroll();
+        state.appearance.settings.sounds.enabled = false;
+        assert!(
+            state.max_page_scroll() < long,
+            "the page did not get shorter"
+        );
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: wx,
+            y: wy,
+            kind: MouseEventKind::Move,
+        }));
+        assert!(
+            state.page_scroll <= state.max_page_scroll() + 0.01,
+            "left scrolled past the end: {} of {}",
+            state.page_scroll,
+            state.max_page_scroll()
+        );
+    }
+
+    /// **Another page opens at its top.**
+    #[test]
+    fn another_page_opens_at_its_top() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        state.handle_event(&key_press(Key::End));
+        assert!(state.page_scroll > 0.0, "End did not scroll the page");
+        state.go_to_page(SettingsPage::Display);
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+    }
+
+    /// **Page Down and Page Up move a view less a row; Home and End go to the
+    /// ends** -- with nothing typed into: a box that has the keyboard keeps
+    /// its Home and End.
+    #[test]
+    fn the_keys_scroll_the_page() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        // A window short enough for the page to run more than a view past it.
+        state.window_height = 500.0;
+        let step = state.window_height - SettingsState::content_top() - ITEM_HEIGHT;
+        assert!(
+            state.max_page_scroll() > step,
+            "the page is too short to show a step"
+        );
+        state.handle_event(&key_press(Key::PageDown));
+        assert!(
+            (state.page_scroll - step).abs() < 0.01,
+            "Page Down moved {}, not {step}",
+            state.page_scroll
+        );
+        state.handle_event(&key_press(Key::PageUp));
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+        state.handle_event(&key_press(Key::End));
+        assert!((state.page_scroll - state.max_page_scroll()).abs() < 0.01);
+        state.handle_event(&key_press(Key::Home));
+        assert!(state.page_scroll.abs() < f32::EPSILON);
+
+        state.search_focused = true;
+        state.handle_event(&key_press(Key::End));
+        assert!(
+            state.page_scroll.abs() < f32::EPSILON,
+            "the search box's End scrolled the page"
+        );
+    }
+
+    /// **The scrollbar is there only for a page that does not fit; its thumb,
+    /// taken hold of, scrolls the page, and a press beside it moves a view.**
+    #[test]
+    fn the_scrollbar_scrolls_a_page_that_does_not_fit() {
+        let fits = fully_expanded(SettingsPage::Proxy);
+        assert!(
+            fits.max_page_scroll().abs() < f32::EPSILON,
+            "the Proxy page does not fit"
+        );
+        assert!(
+            fits.page_bar().is_none(),
+            "a page that fits has a scrollbar"
+        );
+
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        // A window short enough for the page to run more than a view past it.
+        state.window_height = 500.0;
+        let (track, thumb) = state.page_bar().expect("the long page has a scrollbar");
+        assert!(
+            (thumb.y - track.y).abs() < 0.01,
+            "at the top, the thumb is not at the top"
+        );
+        let painted = state.render_tree().commands.iter().any(|c| {
+            matches!(
+                c,
+                RenderCommand::FillRect { y, height, .. }
+                    if (*y - thumb.y).abs() < 0.5 && (*height - thumb.h).abs() < 0.5
+            )
+        });
+        assert!(painted, "the scrollbar's thumb is not drawn");
+
+        // A press on the column below the thumb: a view down.
+        state.handle_click(track.x + track.w / 2.0, track.bottom() - 1.0);
+        let step = state.window_height - SettingsState::content_top() - ITEM_HEIGHT;
+        assert!(
+            (state.page_scroll - step).abs() < 0.01,
+            "{}",
+            state.page_scroll
+        );
+        state.handle_event(&key_press(Key::Home));
+
+        // The thumb, held and dragged past the bottom: the end.
+        let (track, thumb) = state.page_bar().expect("still a scrollbar");
+        let held = (thumb.x + thumb.w / 2.0, thumb.y + thumb.h / 2.0);
+        for (x, y, kind) in [
+            (held.0, held.1, MouseEventKind::Press(MouseButton::Left)),
+            (held.0, track.bottom() + 200.0, MouseEventKind::Move),
+            (
+                held.0,
+                track.bottom() + 200.0,
+                MouseEventKind::Release(MouseButton::Left),
+            ),
+        ] {
+            state.handle_event(&Event::Mouse(MouseEvent { x, y, kind }));
+        }
+        assert!(
+            (state.page_scroll - state.max_page_scroll()).abs() < 0.01,
+            "the thumb dragged past the bottom left the page at {}",
+            state.page_scroll
+        );
+        assert!(state.page_bar_grab.is_none(), "the thumb is still held");
+
+        // A press on the column above the thumb: a view up.
+        let (track, _) = state.page_bar().expect("still a scrollbar");
+        let before = state.page_scroll;
+        state.handle_click(track.x + track.w / 2.0, track.y + 1.0);
+        assert!(
+            (before - state.page_scroll - step).abs() < 0.01,
+            "a press above the thumb moved {before} -> {}",
+            state.page_scroll
+        );
+    }
+
+    /// **A row scrolled under the header is not pressed through it, nor said
+    /// why it is disabled through it** -- and the reasons' boxes move with
+    /// the page.
+    #[test]
+    fn a_row_under_the_header_is_not_pressed_through_it() {
+        let dir = scratch_sound_themes();
+        let mut state = sound_page(&dir);
+        let top = SettingsState::content_top();
+        let switch = RowHit::Toggle(ToggleId::SystemSounds);
+
+        // The switch scrolled half under the header: its lower half, on the
+        // page, is pressed; its upper half, under the header, is not.
+        let (_, (x, y, w, h)) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| *what == switch)
+            .expect("the sounds' switch");
+        state.scroll_page_to(y - top + h / 2.0);
+        let (_, (_, y, _, h)) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| *what == switch)
+            .expect("the sounds' switch");
+        assert!(
+            y < top && y + h > top,
+            "the switch is not half under the header"
+        );
+        assert_eq!(state.row_at(x + w / 2.0, top + h / 4.0), Some(switch));
+        assert_eq!(
+            state.row_at(x + w / 2.0, top - h / 4.0),
+            None,
+            "the switch was pressed through the header"
+        );
+
+        // A disabled row the same: its box moved with the page, and a pointer
+        // resting on the header over its upper half is not on it.
+        state.scroll_page_to(0.0);
+        let ((bx, by, bw, bh), _) = state
+            .disabled_controls()
+            .into_iter()
+            .next_back()
+            .expect("the Sound page's device rows are disabled");
+        state.scroll_page_to(by - top + bh / 2.0);
+        let ((_, moved, _, _), _) = state
+            .disabled_controls()
+            .into_iter()
+            .next_back()
+            .expect("the same row");
+        assert!(
+            (moved - (top - bh / 2.0)).abs() < 0.01,
+            "the disabled row's box did not move with the page: {moved}"
+        );
+        rest_at(&mut state, bx + bw / 2.0, top - bh / 4.0);
+        wait(&mut state, 600);
+        assert_eq!(
+            reason_on_screen(&state),
+            None,
+            "a disabled row under the header said why through it"
+        );
+        rest_at(&mut state, bx + bw / 2.0, top + bh / 4.0);
+        wait(&mut state, 600);
+        assert!(
+            reason_on_screen(&state).is_some(),
+            "the disabled row's half on the page does not say why"
+        );
+    }
+
+    /// **A field lets the keyboard go when the page changes.** The
+    /// Background page's exclusion box kept it, so what was typed on the page
+    /// the sidebar went to filled a box no longer on screen.
+    #[test]
+    fn a_field_lets_the_keyboard_go_when_the_page_changes() {
+        let mut state = fully_expanded(SettingsPage::Wallpaper);
+        state.focused_field = Some(FieldId::ExclusionDraft);
+        type_text(&mut state, "*.gif");
+        assert_eq!(
+            state.exclusion_draft.text(),
+            "*.gif",
+            "the box did not take what was typed"
+        );
+        state.go_to_page(SettingsPage::Display);
+        assert_eq!(state.focused_field, None, "the box kept the keyboard");
+        type_text(&mut state, "abc");
+        assert_eq!(
+            state.exclusion_draft.text(),
+            "*.gif",
+            "what was typed on another page went into the hidden box"
+        );
+    }
+
+    // --- The Window Rules page ------------------------------------------------------
+
+    /// Three rules, as a user might write them.
+    const THREE_RULES: &str = "rules:\n  First:\n    app: one\n    desktop: 2\n  Second:\n    title-contains: chat\n    taskbar: false\n  Third:\n    any: true\n    on-top: true\n";
+
+    /// Two rules that can be read, and one with a typo that cannot.
+    const WITH_A_TYPO: &str = "rules:\n  Terminal:\n    app: terminal\n  Notes:\n    app: notes\n  Chat:\n    app: chat\n    taskbar: flase\n";
+
+    /// `yaml` as the run's `window-rules.yaml`, under the scratch
+    /// configuration `root` -- none, for `None` -- and the Window Rules page
+    /// opened on it.
+    fn rules_page(root: &std::path::Path, yaml: Option<&str>) -> SettingsState {
+        if let Some(yaml) = yaml {
+            write_rules_file(root, yaml);
+        }
+        let mut state = SettingsState::new();
+        state.current_category = SettingsCategory::Apps;
+        state.go_to_page(SettingsPage::WindowRules);
+        state
+    }
+
+    /// `yaml` as the run's `window-rules.yaml`.
+    fn write_rules_file(root: &std::path::Path, yaml: &str) {
+        let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+        std::fs::create_dir_all(path.parent().expect("a folder")).expect("the settings folder");
+        std::fs::write(&path, yaml).expect("the rules file");
+    }
+
+    /// The rules the file holds now, by name and in order; `None` while it
+    /// says nothing about rules.
+    fn rules_on_file() -> Option<Vec<String>> {
+        windowrules::file::load()
+            .map(|loaded| loaded.rules.into_iter().map(|rule| rule.name).collect())
+    }
+
+    /// The rule named `name` in the file.
+    fn rule_on_file(name: &str) -> windowrules::WindowRule {
+        windowrules::file::load()
+            .expect("the file has rules")
+            .rules
+            .into_iter()
+            .find(|rule| rule.name == name)
+            .unwrap_or_else(|| panic!("the file has no rule {name:?}"))
+    }
+
+    /// The page's rules, by name.
+    fn rule_names(state: &SettingsState) -> Vec<String> {
+        state.rules.iter().map(|rule| rule.name.clone()).collect()
+    }
+
+    /// Choose the `index`-th item of the list `id` as a user does.
+    fn choose(state: &mut SettingsState, id: DropdownId, index: usize) {
+        press_on(state, RowHit::Dropdown(id));
+        assert_eq!(state.open_dropdown, Some(id), "{id:?} did not open");
+        press_dropdown_item(state, index);
+    }
+
+    /// Type `text` into the rule editor's field `field`, pressed first.
+    fn type_into(state: &mut SettingsState, field: FieldId, text: &str) {
+        press_on(state, RowHit::Focus(field));
+        assert_eq!(state.focused_field, Some(field));
+        type_text(state, text);
+    }
+
+    /// Shift+Tab, as a key press.
+    fn shift_tab() -> Event {
+        Event::Key(KeyEvent {
+            key: Key::Tab,
+            pressed: true,
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::NONE
+            },
+            text: String::new(),
+        })
+    }
+
+    /// **With no rules written, the page shows the ones every account starts
+    /// with, and says so** -- and the first change makes them the user's own,
+    /// written to the file whole.
+    #[test]
+    fn with_no_rules_written_the_built_in_ones_are_shown_and_a_change_makes_them_yours() {
+        settingsfile::testing::with_scratch_config("settings-rules-built-in", |root| {
+            let mut state = rules_page(root, None);
+            let built_in: Vec<String> = windowrules::default_rules()
+                .into_iter()
+                .map(|rule| rule.name)
+                .collect();
+            assert_eq!(rule_names(&state), built_in);
+            let says_built_in = |state: &SettingsState| {
+                drawn_texts(state)
+                    .iter()
+                    .any(|t| t.starts_with("These are the rules every account starts with"))
+            };
+            assert!(
+                says_built_in(&state),
+                "the page does not say whose rules they are"
+            );
+            assert_eq!(rules_on_file(), None, "opening the page wrote the file");
+
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(1)));
+            assert_eq!(
+                rules_on_file(),
+                Some(built_in.clone()),
+                "the built-in rules were not written whole"
+            );
+            assert!(
+                !rule_on_file(&built_in[1]).enabled,
+                "the switch was not written"
+            );
+            assert!(rule_on_file(&built_in[0]).enabled);
+            assert!(
+                !says_built_in(&state),
+                "the user's own rules are called the built-in ones"
+            );
+        });
+    }
+
+    /// **Each rule is listed by its name, with what it matches and does in a
+    /// line, in the file's order.**
+    #[test]
+    fn each_rule_is_listed_with_what_it_matches_and_does() {
+        settingsfile::testing::with_scratch_config("settings-rules-listed", |root| {
+            let state = rules_page(root, Some(THREE_RULES));
+            assert_eq!(rule_names(&state), ["First", "Second", "Third"]);
+            let texts = drawn_texts(&state);
+            for name in ["First", "Second", "Third"] {
+                assert!(texts.iter().any(|t| t == name), "{name} is not drawn");
+            }
+            let said = "Windows whose title has \u{201c}chat\u{201d}. No taskbar button.";
+            assert!(
+                texts.iter().any(|t| t == said),
+                "the second rule is not said: {texts:?}"
+            );
+            assert!(state.rule_problems.is_empty() && state.rules_error.is_none());
+        });
+    }
+
+    /// **A rule switched off is written off, and stays where it was.**
+    #[test]
+    fn a_rule_switched_off_is_written_off_and_stays_in_its_place() {
+        settingsfile::testing::with_scratch_config("settings-rules-switch", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(1)));
+            assert!(!rule_on_file("Second").enabled);
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["First", "Second", "Third"]
+            );
+            assert!(rule_on_file("First").enabled && rule_on_file("Third").enabled);
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(1)));
+            assert!(
+                rule_on_file("Second").enabled,
+                "switching it on again was not written"
+            );
+        });
+    }
+
+    /// **Rules move up and down, and the order is written; the first cannot
+    /// go up nor the last down, and each says why.**
+    #[test]
+    fn rules_move_up_and_down_and_the_ends_say_why_they_cannot() {
+        settingsfile::testing::with_scratch_config("settings-rules-move", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::RuleDown(0)));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Second", "First", "Third"]
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::RuleUp(2)));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Second", "Third", "First"]
+            );
+            assert_eq!(rule_names(&state), ["Second", "Third", "First"]);
+
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleUp(0))).is_none());
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleDown(2))).is_none());
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleUp(1))).is_some());
+            assert!(center_of(&state, RowHit::Press(ButtonId::RuleDown(1))).is_some());
+            let reasons: Vec<String> = state
+                .disabled_controls()
+                .into_iter()
+                .map(|(_, why)| why)
+                .collect();
+            assert!(reasons.iter().any(|r| r == "It is the first rule already."));
+            assert!(reasons.iter().any(|r| r == "It is the last rule already."));
+        });
+    }
+
+    /// **A rule deleted is gone from the file, and can be put back where it
+    /// was until the next change; deleting every rule leaves none, not the
+    /// built-in ones.**
+    #[test]
+    fn a_rule_deleted_can_be_put_back_where_it_was() {
+        settingsfile::testing::with_scratch_config("settings-rules-delete", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(1)));
+            assert_eq!(rules_on_file().expect("rules"), ["First", "Third"]);
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t == "\u{201c}Second\u{201d} is deleted."),
+                "the page does not say what was deleted"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::PutRuleBack));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["First", "Second", "Third"]
+            );
+            assert_eq!(
+                rule_on_file("Second").criteria,
+                windowrules::MatchCriteria::TitleContains("chat".to_owned())
+            );
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_none(),
+                "a rule put back is offered back again"
+            );
+
+            // The next change forgets it.
+            press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(0)));
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(0)));
+            assert!(center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_none());
+
+            for _ in 0..2 {
+                press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(0)));
+            }
+            assert_eq!(
+                rules_on_file(),
+                Some(Vec::new()),
+                "the built-in rules came back"
+            );
+            assert!(!state.rules_built_in);
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t.starts_with("There are no rules"))
+            );
+        });
+    }
+
+    /// **"Put it back" outlasts the announcement of the window's own write**:
+    /// the desktop tells every window the rules file changed, this one
+    /// included, and a file holding what this window wrote changes nothing
+    /// for it. A change it did not make does forget the rule deleted.
+    #[test]
+    fn put_it_back_outlasts_the_announcement_of_its_own_write() {
+        settingsfile::testing::with_scratch_config("settings-rules-own-write", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::DeleteRule(1)));
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_some(),
+                "the window's own write, announced back to it, forgot the rule deleted"
+            );
+            write_rules_file(root, THREE_RULES);
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(center_of(&state, RowHit::Press(ButtonId::PutRuleBack)).is_none());
+        });
+    }
+
+    /// **An editor left open follows its rule by name when the page is
+    /// entered again**: the file may have changed with no announcement
+    /// reaching the window, and Save writes over the rule the editor was
+    /// opened on, not whichever now stands in its place.
+    #[test]
+    fn an_editor_left_open_follows_its_rule_back_onto_the_page() {
+        settingsfile::testing::with_scratch_config("settings-rules-reenter", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(Some(1));
+            state.go_to_page(SettingsPage::Display);
+            write_rules_file(
+                root,
+                "rules:\n  Zero:\n    any: true\n  First:\n    app: one\n  Second:\n    title-contains: chat\n",
+            );
+            state.go_to_page(SettingsPage::WindowRules);
+            assert_eq!(
+                state.rule_draft.as_ref().and_then(|draft| draft.editing),
+                Some(2),
+                "the editor lost the rule it was opened on"
+            );
+        });
+    }
+
+    /// **A rule the file will not take stays in the editor**: a Save whose
+    /// write fails leaves the editor open on the draft, and says why.
+    #[test]
+    fn a_rule_the_file_will_not_take_stays_in_the_editor() {
+        settingsfile::testing::with_scratch_config("settings-rules-save-fails", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(None);
+            if let Some(draft) = state.rule_draft.as_mut() {
+                draft.name.set_text("Mine");
+                draft.match_text.set_text("terminal");
+            }
+            // A folder where the file goes: no file can be written there.
+            let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+            std::fs::remove_file(&path).expect("the rules file");
+            std::fs::create_dir_all(&path).expect("a folder in its place");
+            state.save_rule();
+            assert!(state.rules_error.is_some(), "the failed write was not said");
+            assert_eq!(
+                state
+                    .rule_draft
+                    .as_ref()
+                    .map(|draft| draft.name.text().to_owned())
+                    .as_deref(),
+                Some("Mine"),
+                "the draft was lost with the write"
+            );
+        });
+    }
+
+    /// **Save is refused while the file holds a rule that cannot be read**,
+    /// as every change to the rules is -- dimmed, with why -- though the
+    /// typo reached the file while the editor was open: nothing is written,
+    /// and the list does not show as saved a rule the file does not hold.
+    #[test]
+    fn save_is_refused_while_the_rules_cannot_be_kept() {
+        settingsfile::testing::with_scratch_config("settings-rules-save-blocked", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(Some(0));
+            write_rules_file(root, WITH_A_TYPO);
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(state.rules_blocked().is_some());
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::SaveRule)).is_none(),
+                "Save is offered while no change can be kept"
+            );
+            let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+            let before = std::fs::read_to_string(&path).expect("the file");
+            let listed = rule_names(&state);
+            state.save_rule();
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file"),
+                before,
+                "Save wrote over a rule the file cannot read"
+            );
+            assert_eq!(
+                rule_names(&state),
+                listed,
+                "the list shows as saved a rule the file does not hold"
+            );
+            assert!(
+                state.rule_draft.is_some(),
+                "the editor closed on nothing kept"
+            );
+        });
+    }
+
+    /// **Up and Down move between the editor's fields**, staying put at the
+    /// ends -- never on to the page, where they changed its category in the
+    /// middle of an edit.
+    #[test]
+    fn up_and_down_move_between_the_editors_fields() {
+        settingsfile::testing::with_scratch_config("settings-rules-arrows", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            state.open_rule_editor(Some(0));
+            let fields = state.rule_fields();
+            assert_eq!(state.focused_field, fields.first().copied());
+            state.handle_event(&key_press(Key::Up));
+            assert_eq!(
+                state.focused_field,
+                fields.first().copied(),
+                "Up at the first field moved"
+            );
+            state.handle_event(&key_press(Key::Down));
+            assert_eq!(state.focused_field, fields.get(1).copied());
+            assert_eq!(
+                (state.current_category, state.current_page),
+                (SettingsCategory::Apps, SettingsPage::WindowRules),
+                "an arrow in a field left the page"
+            );
+        });
+    }
+
+    /// **The exclusion box keeps the arrows and Tab**: Up and Down have no
+    /// line to move to in it, Tab lets the keyboard go -- and none of them
+    /// changes the category or the page under a half-typed pattern.
+    #[test]
+    fn the_exclusion_box_keeps_the_arrows_and_tab() {
+        let mut state = rotation_page();
+        state.focused_field = Some(FieldId::ExclusionDraft);
+        let at = (state.current_category, state.current_page);
+        state.dispatch_event(&key_press(Key::Down));
+        state.dispatch_event(&key_press(Key::Up));
+        assert_eq!((state.current_category, state.current_page), at);
+        assert_eq!(state.focused_field, Some(FieldId::ExclusionDraft));
+        state.dispatch_event(&key_press(Key::Tab));
+        assert_eq!(
+            (state.current_category, state.current_page),
+            at,
+            "Tab in the box went to another page"
+        );
+        assert_eq!(
+            state.focused_field, None,
+            "Tab kept the keyboard in the box"
+        );
+    }
+
+    /// **A press on the search box takes the keyboard from a page's field**:
+    /// what is typed next is the search's, not the field's.
+    #[test]
+    fn a_press_on_the_search_takes_the_keyboard_from_a_field() {
+        let mut state = rotation_page();
+        state.focused_field = Some(FieldId::ExclusionDraft);
+        let search = SettingsState::search_rect();
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x: search.x + search.w / 2.0,
+            y: search.y + search.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+        type_text(&mut state, "mouse");
+        assert_eq!(state.search_query.text(), "mouse");
+        assert_eq!(
+            state.exclusion_draft.text(),
+            "",
+            "what was typed for the search went into the field"
+        );
+    }
+
+    /// **No reason is drawn over a field's menu, or while the scrollbar is
+    /// held**: the menu is over the page, and a reason would be drawn over
+    /// the menu.
+    #[test]
+    fn no_reason_is_drawn_over_a_fields_menu_or_a_held_scrollbar() {
+        settingsfile::testing::with_scratch_config("settings-reason-covered", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            let ((x, y, w, h), _) = state
+                .disabled_controls()
+                .into_iter()
+                .find(|(_, why)| why == "It is the first rule already.")
+                .expect("the first rule's dimmed Up");
+            let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert!(
+                reason_on_screen(&state).is_some(),
+                "the dimmed Up says nothing"
+            );
+
+            let search = SettingsState::search_rect();
+            state.open_field_menu(search.x + 10.0, search.y + search.h / 2.0);
+            assert!(state.field_menu.is_up());
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert_eq!(
+                reason_on_screen(&state),
+                None,
+                "a reason was drawn over the field's menu"
+            );
+
+            state.field_menu = fieldmenu::FieldMenu::default();
+            state.page_bar_grab = Some(0.0);
+            rest_at(&mut state, cx, cy);
+            wait(&mut state, 500);
+            assert_eq!(
+                reason_on_screen(&state),
+                None,
+                "a reason was drawn while the scrollbar was held"
+            );
+        });
+    }
+
+    /// **A file that makes the page shorter leaves it within its rows**: the
+    /// page scrolled to its end, the rules cut to three by hand, and the
+    /// announcement keeps the scroll inside the new page.
+    #[test]
+    fn a_file_that_shortens_the_page_leaves_it_within_its_rows() {
+        settingsfile::testing::with_scratch_config("settings-rules-shorter", |root| {
+            let mut many = String::from("rules:\n");
+            for n in 0..30 {
+                many.push_str(&format!("  Rule {n:02}:\n    app: app{n}\n"));
+            }
+            let mut state = rules_page(root, Some(&many));
+            state.scroll_page_to(f32::MAX);
+            assert!(state.page_scroll > 0.0, "thirty rules fit the window");
+            write_rules_file(root, THREE_RULES);
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert!(
+                state.page_scroll <= state.max_page_scroll(),
+                "the page is scrolled past its end"
+            );
+        });
+    }
+
+    /// **A right press is no field's while a list is open or a drag is
+    /// held**: it puts the list away, as a left one off it does, and opens
+    /// no menu under it; and during a drag it opens none, which would take
+    /// the release that ends the drag.
+    #[test]
+    fn a_right_press_is_no_fields_while_a_list_is_open_or_a_drag_held() {
+        let mut state = rotation_page();
+        let (fx, fy) =
+            center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("the exclusion box");
+        let right = Event::Mouse(MouseEvent {
+            x: fx,
+            y: fy,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        });
+        state.open_dropdown = Some(DropdownId::RotationInterval);
+        state.dispatch_event(&right);
+        assert!(
+            !state.field_menu.is_up(),
+            "a menu opened under the open list"
+        );
+        assert!(state.open_dropdown.is_none(), "the list stayed open");
+
+        state.dragging = Some(SliderId::TextSize);
+        state.dispatch_event(&right);
+        assert!(
+            !state.field_menu.is_up(),
+            "a menu opened in the middle of a drag"
+        );
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x: fx,
+            y: fy,
+            kind: MouseEventKind::Release(MouseButton::Left),
+        }));
+        assert!(state.dragging.is_none(), "the release did not end the drag");
+    }
+
+    /// **An open list holds the keys that would move the page under it**:
+    /// End scrolls nothing and Down changes no category while it is up.
+    #[test]
+    fn an_open_list_holds_the_keys_that_would_move_the_page() {
+        let mut state = rotation_page();
+        state.window_height = 320.0;
+        assert!(state.max_page_scroll() > 0.0, "the page fits the window");
+        let at = (state.current_category, state.current_page);
+        state.open_dropdown = Some(DropdownId::RotationInterval);
+        state.dispatch_event(&key_press(Key::End));
+        assert_eq!(
+            state.page_scroll, 0.0,
+            "End scrolled the page under the list"
+        );
+        state.dispatch_event(&key_press(Key::Down));
+        assert_eq!(
+            (state.current_category, state.current_page),
+            at,
+            "Down went to another category under the list"
+        );
+    }
+
+    /// **The scrollbar is not left lit by a pointer that has left the
+    /// window over it.**
+    #[test]
+    fn the_scrollbar_goes_out_when_the_pointer_leaves() {
+        let mut state = rotation_page();
+        state.window_height = 320.0;
+        let (track, _) = state.page_bar().expect("a page longer than the window");
+        rest_at(&mut state, track.x + track.w / 2.0, track.y + track.h - 4.0);
+        assert!(
+            state.page_bar_hovered,
+            "the scrollbar is not lit under the pointer"
+        );
+        state.dispatch_event(&Event::Mouse(MouseEvent {
+            x: -1.0,
+            y: -1.0,
+            kind: MouseEventKind::Leave,
+        }));
+        assert!(!state.page_bar_hovered, "the scrollbar stayed lit");
+    }
+
+    /// **The picture cards keep to the page's column**: a row of them ends
+    /// within the width the notes keep to, so none lies under the scrollbar,
+    /// where a press is the scrollbar's.
+    #[test]
+    fn the_picture_cards_keep_to_the_pages_column() {
+        let (x, _) = picture_card_origin(PICTURE_CARD_COLUMNS.saturating_sub(1), 0.0, 0.0);
+        assert!(
+            x + PICTURE_CARD_WIDTH <= NOTE_WIDTH,
+            "a row of cards is {} wide, and the column {NOTE_WIDTH}",
+            x + PICTURE_CARD_WIDTH
+        );
+    }
+
+    /// **A new rule is written above the rest, saying what was chosen and
+    /// nothing more.**
+    #[test]
+    fn a_new_rule_is_written_above_the_rest() {
+        settingsfile::testing::with_scratch_config("settings-rules-add", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::AddRule));
+            assert!(state.rule_draft.is_some(), "Add a rule opened no editor");
+            assert_eq!(
+                state.focused_field,
+                Some(FieldId::RuleName),
+                "the keyboard is not at the name"
+            );
+            type_text(&mut state, "Editor big");
+            state.handle_event(&key_press(Key::Tab));
+            assert_eq!(state.focused_field, Some(FieldId::RuleMatch));
+            type_text(&mut state, "editor");
+            let maximised = rules::STATES
+                .iter()
+                .position(|s| *s == Some(windowrules::InitialState::Maximized))
+                .expect("maximised is offered");
+            choose(&mut state, DropdownId::RuleState, maximised);
+            choose(&mut state, DropdownId::RuleFlag(rules::Flag::Taskbar), 2);
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert!(state.rule_draft.is_none(), "Save left the editor open");
+            assert_eq!(
+                state.focused_field, None,
+                "a closed editor's field kept the keyboard"
+            );
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Editor big", "First", "Second", "Third"]
+            );
+            let rule = rule_on_file("Editor big");
+            assert_eq!(
+                rule.criteria,
+                windowrules::MatchCriteria::AppId("editor".to_owned())
+            );
+            assert_eq!(
+                rule.actions.initial_state,
+                Some(windowrules::InitialState::Maximized)
+            );
+            assert_eq!(rule.actions.skip_taskbar, Some(true));
+            assert_eq!(
+                rule.actions.active_count(),
+                2,
+                "it says more than was chosen"
+            );
+        });
+    }
+
+    /// **A rule changed keeps its place and what it said, and its name must
+    /// be its own -- Save says why not, under the button as well as on it.**
+    #[test]
+    fn a_rule_changed_keeps_its_place_and_its_name_must_be_its_own() {
+        settingsfile::testing::with_scratch_config("settings-rules-edit", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(1)));
+            let draft = state.rule_draft.as_ref().expect("the editor");
+            assert_eq!(draft.name.text(), "Second");
+            assert_eq!(draft.matching, rules::MatchKind::TitleContains);
+            assert_eq!(draft.match_text.text(), "chat");
+
+            // Each list opens on what the rule says.
+            press_on(&mut state, RowHit::Dropdown(DropdownId::RuleMatch));
+            let words = rules::MatchKind::ALL
+                .iter()
+                .position(|k| *k == rules::MatchKind::TitleContains)
+                .expect("offered");
+            assert_eq!(state.dropdown_layout().expect("open").selected, words);
+            state.open_dropdown = None;
+            press_on(
+                &mut state,
+                RowHit::Dropdown(DropdownId::RuleFlag(rules::Flag::Taskbar)),
+            );
+            assert_eq!(
+                state.dropdown_layout().expect("open").selected,
+                2,
+                "the taskbar's list does not open on No"
+            );
+            state.open_dropdown = None;
+
+            state
+                .rule_draft
+                .as_mut()
+                .expect("the editor")
+                .name
+                .set_text("Third");
+            let taken = "Another rule is called \u{201c}Third\u{201d} already.";
+            assert!(
+                center_of(&state, RowHit::Press(ButtonId::SaveRule)).is_none(),
+                "Save is offered for a name another rule has"
+            );
+            assert!(
+                state
+                    .disabled_controls()
+                    .iter()
+                    .any(|(_, why)| why == taken)
+            );
+            assert!(
+                drawn_texts(&state).iter().any(|t| t == taken),
+                "the reason is not under Save"
+            );
+
+            state
+                .rule_draft
+                .as_mut()
+                .expect("the editor")
+                .name
+                .set_text("Chat");
+            let remember = rules::Place::ALL
+                .iter()
+                .position(|p| *p == rules::Place::Remember)
+                .expect("offered");
+            choose(&mut state, DropdownId::RulePlace, remember);
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert_eq!(rules_on_file().expect("rules"), ["First", "Chat", "Third"]);
+            let rule = rule_on_file("Chat");
+            assert_eq!(
+                rule.actions.position,
+                Some(windowrules::PositionSpec::RememberLast)
+            );
+            assert_eq!(
+                rule.actions.skip_taskbar,
+                Some(true),
+                "what the rule said before was lost"
+            );
+        });
+    }
+
+    /// **Cancel keeps nothing of the editor**, and leaves the file as it was.
+    #[test]
+    fn cancel_keeps_nothing_of_the_editor() {
+        settingsfile::testing::with_scratch_config("settings-rules-cancel", |root| {
+            let mut state = rules_page(root, None);
+            press_on(&mut state, RowHit::Press(ButtonId::AddRule));
+            type_text(&mut state, "Mine");
+            press_on(&mut state, RowHit::Press(ButtonId::CancelRule));
+            assert!(state.rule_draft.is_none());
+            assert_eq!(
+                state.focused_field, None,
+                "the hidden field kept the keyboard"
+            );
+            assert_eq!(rules_on_file(), None, "Cancel wrote the file");
+        });
+    }
+
+    /// **A rule the file cannot read is shown with why, and nothing on the
+    /// page saves over it** -- not even by a way round the controls -- until
+    /// the user removes it on purpose. `windowrules::file::store` keeps only
+    /// the rules it is given, so any save would have deleted it.
+    #[test]
+    fn a_rule_the_file_cannot_read_is_shown_and_nothing_saves_over_it() {
+        settingsfile::testing::with_scratch_config("settings-rules-unreadable", |root| {
+            let mut state = rules_page(root, Some(WITH_A_TYPO));
+            let path = settingsfile::testing::scratch_path(root, windowrules::file::CONFIG_NAME);
+            assert_eq!(rule_names(&state), ["Terminal", "Notes"]);
+            let texts = drawn_texts(&state);
+            assert!(
+                texts
+                    .iter()
+                    .any(|t| t.starts_with("\u{201c}Chat\u{201d}: `taskbar` is `true` or `false`")),
+                "the problem is not said: {texts:?}"
+            );
+            for what in [
+                RowHit::Toggle(ToggleId::RuleEnabled(0)),
+                RowHit::Press(ButtonId::EditRule(0)),
+                RowHit::Press(ButtonId::DeleteRule(0)),
+                RowHit::Press(ButtonId::AddRule),
+            ] {
+                assert!(center_of(&state, what).is_none(), "{what:?} is offered");
+            }
+            let blocked = state.rules_blocked().expect("changes are refused");
+            assert!(
+                state
+                    .disabled_controls()
+                    .iter()
+                    .any(|(_, why)| why == blocked)
+            );
+
+            // Nor by a way round the controls: each refuses for itself, and
+            // leaves the page's rules as they were -- or the next save, once
+            // allowed, would write what was refused.
+            state.set_rule_enabled(0);
+            state.move_rule(0, false);
+            state.delete_rule(0);
+            state.open_rule_editor(None);
+            assert!(state.rule_draft.is_none(), "the editor opened");
+            assert!(!state.store_rules());
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("the file"),
+                WITH_A_TYPO,
+                "the file was written over"
+            );
+
+            press_on(&mut state, RowHit::Press(ButtonId::RemoveUnreadableRules));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Terminal", "Notes"],
+                "a move or a delete refused before was written now"
+            );
+            assert!(
+                rule_on_file("Terminal").enabled,
+                "a switch refused before was written now"
+            );
+            assert!(
+                windowrules::file::load()
+                    .expect("rules")
+                    .problems
+                    .is_empty()
+            );
+            assert!(state.rule_problems.is_empty());
+            assert!(
+                center_of(&state, RowHit::Toggle(ToggleId::RuleEnabled(0))).is_some(),
+                "changes are still refused once the rule is gone"
+            );
+        });
+    }
+
+    /// **Every choice the editor offers reaches the file as itself.**
+    #[test]
+    fn every_choice_the_editor_offers_reaches_the_file() {
+        settingsfile::testing::with_scratch_config("settings-rules-every-choice", |root| {
+            let mut state = rules_page(root, Some("rules: {}\n"));
+            assert!(state.rules.is_empty() && !state.rules_built_in);
+            press_on(&mut state, RowHit::Press(ButtonId::AddRule));
+            type_text(&mut state, "All of it");
+            let at = |items: &[rules::Place], item: rules::Place| {
+                items.iter().position(|i| *i == item).expect("offered")
+            };
+            let words = rules::MatchKind::ALL
+                .iter()
+                .position(|k| *k == rules::MatchKind::TitleContains)
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleMatch, words);
+            type_into(&mut state, FieldId::RuleMatch, "notes");
+            choose(
+                &mut state,
+                DropdownId::RulePlace,
+                at(&rules::Place::ALL, rules::Place::At),
+            );
+            type_into(&mut state, FieldId::RulePlace, "-20 80");
+            let part = rules::Size::ALL
+                .iter()
+                .position(|s| *s == rules::Size::Part)
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleSize, part);
+            type_into(&mut state, FieldId::RuleSize, "50% 75%");
+            type_into(&mut state, FieldId::RuleMinSize, "400 300");
+            type_into(&mut state, FieldId::RuleMaxSize, "1600x1200");
+            let third = rules::desktop_choices(None)
+                .iter()
+                .position(|d| *d == Some(2))
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleDesktop, third);
+            let full = rules::STATES
+                .iter()
+                .position(|s| *s == Some(windowrules::InitialState::Fullscreen))
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleState, full);
+            let eighty = rules::opacity_choices(None)
+                .iter()
+                .position(|o| *o == Some(0.8))
+                .expect("offered");
+            choose(&mut state, DropdownId::RuleOpacity, eighty);
+            let mut expected = windowrules::RuleActions::new();
+            for (n, flag) in rules::Flag::ALL.into_iter().enumerate() {
+                let yes = n % 2 == 0;
+                choose(
+                    &mut state,
+                    DropdownId::RuleFlag(flag),
+                    if yes { 1 } else { 2 },
+                );
+                flag.set(&mut expected, Some(yes));
+            }
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleOnce));
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+
+            let rule = rule_on_file("All of it");
+            assert_eq!(
+                rule.criteria,
+                windowrules::MatchCriteria::TitleContains("notes".to_owned())
+            );
+            expected.position = Some(windowrules::PositionSpec::Absolute { x: -20, y: 80 });
+            expected.size = Some(windowrules::SizeSpec::Percentage {
+                w_pct: 0.5,
+                h_pct: 0.75,
+            });
+            expected.min_size = Some((400, 300));
+            expected.max_size = Some((1600, 1200));
+            expected.desktop = Some(2);
+            expected.initial_state = Some(windowrules::InitialState::Fullscreen);
+            expected.opacity = Some(0.8);
+            assert_eq!(rule.actions, expected);
+            assert!(rule.one_shot, "for the first window only was not written");
+            assert!(rule.enabled);
+        });
+    }
+
+    /// **What the editor does not offer is kept as the file has it** -- the
+    /// monitor and the title bar, which the desktop does not carry out yet,
+    /// and the snap zone, which the editor cannot name -- **and a snap zone
+    /// can be taken off.**
+    #[test]
+    fn what_the_editor_does_not_offer_is_kept_and_a_snap_can_be_taken_off() {
+        settingsfile::testing::with_scratch_config("settings-rules-kept", |root| {
+            let mut state = rules_page(
+                root,
+                Some(
+                    "rules:\n  Kept:\n    app: chat\n    monitor: 2\n    decorations: false\n    snap: 3\n",
+                ),
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(0)));
+            let texts = drawn_texts(&state);
+            for shown in ["Monitor 2", "Zone 3"] {
+                assert!(texts.iter().any(|t| t == shown), "{shown} is not shown");
+            }
+            let reasons: Vec<String> = state
+                .disabled_controls()
+                .into_iter()
+                .map(|(_, why)| why)
+                .collect();
+            assert!(
+                reasons.iter().any(|r| r.contains("not carried out yet")),
+                "the monitor and the title bar do not say why they cannot be chosen"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            let rule = rule_on_file("Kept");
+            assert_eq!(rule.actions.target_monitor, Some(1));
+            assert_eq!(rule.actions.no_decorations, Some(true));
+            assert_eq!(rule.actions.snap_zone, Some(3));
+
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(0)));
+            choose(&mut state, DropdownId::RuleSnap, 0);
+            assert!(
+                center_of(&state, RowHit::Dropdown(DropdownId::RuleSnap)).is_none(),
+                "the snap row stays with no zone to show"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert_eq!(rule_on_file("Kept").actions.snap_zone, None);
+            assert_eq!(
+                rule_on_file("Kept").actions.target_monitor,
+                Some(1),
+                "taking the snap off took the monitor too"
+            );
+        });
+    }
+
+    /// **The editor's fields take the keyboard in turn**: Tab and Enter go on
+    /// to the next field the editor shows -- past ones its choices hide --
+    /// Shift+Tab back, Escape lets go, and a field a choice hides lets go.
+    #[test]
+    fn the_editors_fields_take_the_keyboard_in_turn() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::WindowRules;
+        state.open_rule_editor(None);
+        assert_eq!(state.focused_field, Some(FieldId::RuleName));
+        type_text(&mut state, "R");
+        assert_eq!(state.rule_draft.as_ref().expect("editor").name.text(), "R");
+
+        state.handle_event(&key_press(Key::Tab));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMatch));
+        // "As usual" for where and how big: no fields, so on to the sizes.
+        state.handle_event(&key_press(Key::Tab));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMinSize));
+        state.handle_event(&shift_tab());
+        assert_eq!(state.focused_field, Some(FieldId::RuleMatch));
+        state.handle_event(&key_press(Key::Enter));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMinSize));
+        state.handle_event(&key_press(Key::Enter));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMaxSize));
+        state.handle_event(&key_press(Key::Enter));
+        assert_eq!(
+            state.focused_field, None,
+            "past the last field the keyboard is let go"
+        );
+
+        state.focused_field = Some(FieldId::RuleMinSize);
+        state.handle_event(&key_press(Key::Escape));
+        assert_eq!(state.focused_field, None);
+
+        // Every window has no text to match: its field goes, and lets go.
+        state.focused_field = Some(FieldId::RuleMatch);
+        state.choose_in_rule(DropdownId::RuleMatch, 3);
+        assert_eq!(
+            state.rule_draft.as_ref().expect("editor").matching,
+            rules::MatchKind::Any
+        );
+        assert_eq!(
+            state.focused_field, None,
+            "a field no longer shown kept the keyboard"
+        );
+        assert!(!state.rule_fields().contains(&FieldId::RuleMatch));
+    }
+
+    /// **Tab scrolls the field it goes to into view.**
+    #[test]
+    fn tab_scrolls_the_field_it_goes_to_into_view() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::WindowRules;
+        state.open_rule_editor(None);
+        state.scroll_page_to(f32::MAX);
+        assert!(
+            state.page_scroll > 0.0,
+            "the editor fits the window: this proves nothing"
+        );
+        state.focused_field = Some(FieldId::RuleMinSize);
+        state.handle_event(&key_press(Key::Tab));
+        assert_eq!(state.focused_field, Some(FieldId::RuleMaxSize));
+        let (_, y) = state
+            .anchor_at(AnchorId::Field(FieldId::RuleMaxSize))
+            .expect("the field is drawn");
+        assert!(
+            y >= SettingsState::content_top() && y + ITEM_HEIGHT <= state.window_height,
+            "the field the keyboard went to is off screen: {y}"
+        );
+    }
+
+    /// **Rules changed under the page are read again**, and a rule open in
+    /// the editor is followed to its new place by its name.
+    #[test]
+    fn rules_changed_under_the_page_are_read_again() {
+        settingsfile::testing::with_scratch_config("settings-rules-reread", |root| {
+            let mut state = rules_page(root, Some(THREE_RULES));
+            press_on(&mut state, RowHit::Press(ButtonId::EditRule(2)));
+            write_rules_file(
+                root,
+                &THREE_RULES.replacen("rules:\n", "rules:\n  Zeroth:\n    app: zero\n", 1),
+            );
+            state.handle_event(&announce(windowrules::file::CONFIG_NAME));
+            assert_eq!(rule_names(&state), ["Zeroth", "First", "Second", "Third"]);
+            assert_eq!(
+                state.rule_draft.as_ref().expect("the editor").editing,
+                Some(3),
+                "the rule being changed was not followed to its new place"
+            );
+            press_on(&mut state, RowHit::Press(ButtonId::SaveRule));
+            assert_eq!(
+                rules_on_file().expect("rules"),
+                ["Zeroth", "First", "Second", "Third"],
+                "saving wrote over the change, or put the rule elsewhere"
+            );
+        });
+    }
+
+    // --- Fonts from a theme ------------------------------------------------------------
+
+    /// Themes in a scratch folder: one recommending fonts, one recommending
+    /// none.
+    fn scratch_font_themes() -> scratchdir::ScratchDir {
+        let dir = scratchdir::ScratchDir::new("settings-font-themes");
+        let theme = |id: &str, yaml: &str| {
+            let folder = dir.dir().join(id);
+            std::fs::create_dir_all(&folder).expect("theme folder");
+            std::fs::write(folder.join("theme.yaml"), yaml).expect("theme file");
+        };
+        theme(
+            "typeset",
+            "meta:\n  name: Typeset\nfonts:\n  ui: [Inter, Example Sans]\n  mono: Fira Code\n",
+        );
+        theme(
+            "bare",
+            "meta:\n  name: Bare\ncolors:\n  base: \"#101018\"\n",
+        );
+        dir
+    }
+
+    /// The Fonts page over `dir`'s themes, on a machine that has Example
+    /// Sans and Example Mono and no other family.
+    fn fonts_page(dir: &scratchdir::ScratchDir) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.theme_dirs = appearance::themes::ThemeDirs {
+            user: None,
+            system: dir.dir().to_path_buf(),
+        };
+        state.font_families = vec!["Example Sans".to_owned(), "Example Mono".to_owned()];
+        state.mono_families = vec!["Example Mono".to_owned()];
+        state.family_check = |family| matches!(family, "Example Sans" | "Example Mono");
+        state.current_category = SettingsCategory::Personalization;
+        state.go_to_page(SettingsPage::Fonts);
+        state
+    }
+
+    /// The values the page draws beside `label`, in order: what each row
+    /// labelled so says.
+    fn values_beside(texts: &[String], label: &str) -> Vec<String> {
+        texts
+            .windows(2)
+            .filter(|pair| pair[0] == label)
+            .map(|pair| pair[1].clone())
+            .collect()
+    }
+
+    /// **The fonts come from the user's own choice or a theme's, chosen
+    /// first, and reach the file** (`requests/c-e-fonts-from-a-theme-on-the-fonts-page.md`):
+    /// "My own fonts" and every installed theme, one that recommends none
+    /// saying so and not chosen.
+    #[test]
+    fn the_fonts_come_from_your_own_choice_or_a_theme_and_reach_the_file() {
+        settingsfile::testing::with_scratch_config("settings-font-source", |_| {
+            let dir = scratch_font_themes();
+            let mut state = fonts_page(&dir);
+            let saved = || appearance::AppearanceFile::load().settings;
+
+            press_on(&mut state, RowHit::Dropdown(DropdownId::FontTheme));
+            let layout = state.dropdown_layout().expect("the list opened");
+            let items = layout.items.clone();
+            assert_eq!(items.first().map(String::as_str), Some("My own fonts"));
+            assert_eq!(
+                layout.selected, 0,
+                "the list does not open on the fonts in use"
+            );
+            assert!(
+                items.iter().any(|i| i == "Bare -- recommends no fonts"),
+                "{items:?}"
+            );
+            let typeset = items
+                .iter()
+                .position(|i| i == "Typeset")
+                .expect("the theme with fonts is offered");
+            press_dropdown_item(&mut state, typeset);
+            assert_eq!(saved().font_theme.id(), std::ffi::OsStr::new("typeset"));
+            assert_eq!(state.font_theme_shown(), "Typeset");
+
+            let bare = items
+                .iter()
+                .position(|i| i.starts_with("Bare"))
+                .expect("listed");
+            press_on(&mut state, RowHit::Dropdown(DropdownId::FontTheme));
+            press_dropdown_item(&mut state, bare);
+            assert_eq!(
+                saved().font_theme.id(),
+                std::ffi::OsStr::new("typeset"),
+                "a theme that recommends no fonts was chosen for them"
+            );
+
+            press_on(&mut state, RowHit::Dropdown(DropdownId::FontTheme));
+            assert_eq!(
+                state.dropdown_layout().expect("the list opened").selected,
+                typeset,
+                "the list does not open on the theme chosen"
+            );
+            press_dropdown_item(&mut state, 0);
+            assert!(
+                saved().font_theme.is_built_in(),
+                "my own fonts were not written"
+            );
+        });
+    }
+
+    /// **A theme's fonts say which are installed, and which will be drawn**:
+    /// the first installed of each role's, or the user's own where none is.
+    /// The user's own pickers are not offered beside them, since a family
+    /// picked there would not be the one drawn.
+    #[test]
+    fn a_themes_fonts_say_which_are_installed_and_which_will_be_drawn() {
+        let dir = scratch_font_themes();
+        let mut state = fonts_page(&dir);
+        state.appearance.settings.fonts.mono_font = "Example Mono".to_owned();
+        state.appearance.settings.font_theme = appearance::themes::FontTheme::load_from(
+            &state.theme_dirs,
+            std::ffi::OsStr::new("typeset"),
+        );
+        let texts = drawn_texts(&state);
+        // The first of each: a recommended family's own row. A family can
+        // be drawn again further down, as what "Will be drawn in" says.
+        let first = |label: &str| values_beside(&texts, label).into_iter().next();
+        assert_eq!(first("Inter").as_deref(), Some("Not installed"));
+        assert_eq!(first("Example Sans").as_deref(), Some("Installed"));
+        assert_eq!(first("Fira Code").as_deref(), Some("Not installed"));
+        assert_eq!(
+            values_beside(&texts, "Will be drawn in"),
+            ["Example Sans", "Example Mono"],
+            "the drawn families are not the first installed, or the user's own"
+        );
+        assert_eq!(
+            values_beside(&texts, "If none is installed")
+                .last()
+                .map(String::as_str),
+            Some("Example Mono")
+        );
+        for own in [DropdownId::UiFont, DropdownId::MonoFont] {
+            assert!(
+                center_of(&state, RowHit::Dropdown(own)).is_none(),
+                "{own:?} is offered beside the theme's fonts"
+            );
+        }
+    }
+
+    /// **A font theme that cannot be used says why, and the user's own fonts
+    /// -- the ones in use -- are offered under it.**
+    #[test]
+    fn a_font_theme_that_cannot_be_used_says_why_and_your_own_fonts_are_offered() {
+        let dir = scratch_font_themes();
+        let mut state = fonts_page(&dir);
+        state.appearance.settings.font_theme = appearance::themes::FontTheme::load_from(
+            &state.theme_dirs,
+            std::ffi::OsStr::new("gone"),
+        );
+        let problem = state
+            .appearance
+            .settings
+            .font_theme
+            .problem()
+            .expect("a theme not installed cannot be used")
+            .to_owned();
+        let texts = drawn_texts(&state);
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.len() > 10 && problem.starts_with(t.as_str())),
+            "the reason is not said: {problem:?}"
+        );
+        assert_eq!(state.font_theme_shown(), "gone");
+        assert!(
+            center_of(&state, RowHit::Dropdown(DropdownId::UiFont)).is_some(),
+            "the user's own fonts are not offered"
+        );
+    }
+
+    /// **A family of one's own is one's own fonts**: picking one sets the
+    /// theme's fonts aside, or the family picked would not be drawn.
+    #[test]
+    fn a_family_of_your_own_is_your_own_fonts() {
+        settingsfile::testing::with_scratch_config("settings-own-family", |_| {
+            let dir = scratch_font_themes();
+            let mut state = fonts_page(&dir);
+            for (row, family) in [
+                (DropdownId::UiFont, "Example Sans"),
+                (DropdownId::MonoFont, "Example Mono"),
+            ] {
+                state.appearance.settings.font_theme = appearance::themes::FontTheme::load_from(
+                    &state.theme_dirs,
+                    std::ffi::OsStr::new("gone"),
+                );
+                press_on(&mut state, RowHit::Dropdown(row));
+                press_dropdown_item(&mut state, 0);
+                let saved = appearance::AppearanceFile::load().settings;
+                assert_eq!(
+                    if row == DropdownId::UiFont {
+                        saved.fonts.ui_font
+                    } else {
+                        saved.fonts.mono_font
+                    },
+                    family
+                );
+                assert!(
+                    saved.font_theme.is_built_in(),
+                    "{row:?}: a theme was left chosen over the family picked"
+                );
+            }
+        });
+    }
+
+    /// **With no theme recommending fonts, the page says so** rather than
+    /// leave a list of one choice unexplained.
+    #[test]
+    fn with_no_theme_recommending_fonts_the_page_says_so() {
+        let dir = scratchdir::ScratchDir::new("settings-no-font-themes");
+        let state = fonts_page(&dir);
+        assert!(
+            drawn_texts(&state)
+                .iter()
+                .any(|t| t.starts_with("No theme installed here recommends fonts")),
+            "the page does not say why the list has only your own fonts"
+        );
+        let mut typeset = fonts_page(&scratch_font_themes());
+        typeset.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();
+        assert!(
+            !drawn_texts(&typeset)
+                .iter()
+                .any(|t| t.starts_with("No theme installed here recommends fonts")),
+            "the page says no theme recommends fonts when one does"
+        );
+    }
+
+    // --- The Context Menus page ---------------------------------------------------
+
+    /// A system data folder and a user's, in a scratch folder: the system's
+    /// holding a menu for text, one item of it with no command, a menu with
+    /// no name of its own, and a file that names no kind of file; the user's
+    /// holding a menu of their own.
+    fn scratch_service_menus() -> (scratchdir::ScratchDir, servicemenus::Dirs) {
+        let dir = scratchdir::ScratchDir::new("settings-context-menus");
+        let system = dir.dir().join("system");
+        let user = dir.dir().join("user");
+        for (base, name, text) in [
+            (
+                &system,
+                "shout.desktop",
+                "[Desktop Entry]\nType=Service\nName=Shouting\nMimeType=text/plain;\nActions=shout;mute;\n\n[Desktop Action shout]\nName=Shout it\nExec=shout %f\n\n[Desktop Action mute]\nName=Mute it\n",
+            ),
+            (
+                &system,
+                "nowhere.desktop",
+                "[Desktop Entry]\nType=Service\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go %f\n",
+            ),
+            (
+                &system,
+                "plain.desktop",
+                "[Desktop Entry]\nType=Service\nMimeType=text/plain;\nActions=go;\n\n[Desktop Action go]\nName=Go\nExec=go %f\n",
+            ),
+            (
+                &user,
+                "mine.desktop",
+                "[Desktop Entry]\nType=Service\nName=Mine\nMimeType=image/png;\nActions=look;\n\n[Desktop Action look]\nName=Look at it\nExec=look %f\n",
+            ),
+        ] {
+            let folder = base.join("kio").join("servicemenus");
+            std::fs::create_dir_all(&folder).expect("the menus folder");
+            std::fs::write(folder.join(name), text).expect("the menu");
+        }
+        let dirs = servicemenus::Dirs {
+            user: Some(user),
+            system: vec![system],
+        };
+        (dir, dirs)
+    }
+
+    /// The Context Menus page over `dirs`' menus.
+    fn context_menus_page(dirs: &servicemenus::Dirs) -> SettingsState {
+        let mut state = SettingsState::new();
+        state.service_dirs = Some(dirs.clone());
+        state.current_category = SettingsCategory::Apps;
+        state.go_to_page(SettingsPage::ContextMenus);
+        state
+    }
+
+    /// The `n`-th menu the page lists, by its name.
+    fn service_menu_named(state: &SettingsState, name: &str) -> usize {
+        state
+            .service_menus
+            .menus
+            .iter()
+            .position(|menu| menu.name.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("the page lists no menu {name:?}"))
+    }
+
+    /// Whether the switch `id` is drawn on -- its track filled green -- read
+    /// from the paint inside the switch's click band; `None` if no switch is
+    /// drawn there.
+    fn switch_drawn_on(state: &SettingsState, id: ToggleId) -> Option<bool> {
+        let (bx, by, bw, bh) = hit_bands(state)
+            .into_iter()
+            .find(|(what, _)| *what == RowHit::Toggle(id))?
+            .1;
+        let pal = state.palette();
+        state.render_tree().commands.iter().find_map(|c| match c {
+            RenderCommand::FillRect {
+                x,
+                y,
+                width,
+                height,
+                color,
+                ..
+            } if (*width - TOGGLE_WIDTH).abs() < 0.01
+                && (*height - TOGGLE_HEIGHT).abs() < 0.01
+                && *x >= bx
+                && x + width <= bx + bw
+                && *y >= by
+                && y + height <= by + bh =>
+            {
+                Some(*color == pal.green)
+            }
+            _ => None,
+        })
+    }
+
+    /// **Every context menu is listed with what it adds, for which files and
+    /// whose it is, and what is not offered says why**
+    /// (`requests/c-e-programs-add-to-a-files-right-click-menu.md`): a system
+    /// menu on, the user's own off, an item with no command and a file that
+    /// names no kind of file each with its reason.
+    #[test]
+    fn every_context_menu_is_listed_and_what_is_not_offered_says_why() {
+        settingsfile::testing::with_scratch_config("settings-context-menus-listed", |_| {
+            let (_dir, dirs) = scratch_service_menus();
+            let state = context_menus_page(&dirs);
+            let texts = drawn_texts(&state);
+            // A menu with no name of its own is listed by its file's.
+            for name in ["Shouting", "Mine", "plain.desktop"] {
+                assert!(
+                    texts.iter().any(|t| t == name),
+                    "{name} is not listed: {texts:?}"
+                );
+            }
+            let shouting = service_menu_named(&state, "Shouting");
+            let mine = service_menu_named(&state, "Mine");
+            let on = |at: usize| {
+                state
+                    .service_choices
+                    .choices
+                    .is_on(&state.service_menus.menus[at])
+            };
+            assert!(on(shouting), "a system menu is not on");
+            assert!(
+                !on(mine),
+                "the user's own menu is on before they turned it on"
+            );
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(shouting)),
+                Some(true),
+                "a system menu's switch is not drawn on"
+            );
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(mine)),
+                Some(false),
+                "the user's own menu's switch is not drawn off"
+            );
+            let said = texts.join(" ");
+            for words in [
+                "\u{201c}Shout it\u{201d}, for text/plain. Installed with the system",
+                "Yours: off until you turn it on.",
+                "Not offered: mute: it has no Exec.",
+                "nowhere.desktop: names no kind of file it is for (MimeType).",
+            ] {
+                assert!(said.contains(words), "{words:?} is not said: {said}");
+            }
+        });
+    }
+
+    /// **A switch turns a menu on or off, and is written to the file the
+    /// desktop and the file manager read** -- a system menu off, the user's
+    /// own on.
+    #[test]
+    fn a_context_menus_switch_reaches_the_file() {
+        settingsfile::testing::with_scratch_config("settings-context-menus-switch", |_| {
+            let (_dir, dirs) = scratch_service_menus();
+            let mut state = context_menus_page(&dirs);
+            let shouting = service_menu_named(&state, "Shouting");
+            let mine = service_menu_named(&state, "Mine");
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(mine)));
+            assert_eq!(state.service_error, None);
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(shouting)),
+                Some(false),
+                "the switch turned off is drawn on"
+            );
+            assert_eq!(
+                switch_drawn_on(&state, ToggleId::ServiceMenu(mine)),
+                Some(true),
+                "the switch turned on is drawn off"
+            );
+            let saved = servicemenus::ChoicesFile::load().choices;
+            assert!(
+                !saved.is_on(&state.service_menus.menus[shouting]),
+                "turning a system menu off was not written"
+            );
+            assert!(
+                saved.is_on(&state.service_menus.menus[mine]),
+                "turning the user's own menu on was not written"
+            );
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            assert!(
+                servicemenus::ChoicesFile::load()
+                    .choices
+                    .is_on(&state.service_menus.menus[shouting]),
+                "turning it on again was not written"
+            );
+        });
+    }
+
+    /// **The choices changed elsewhere are read again** -- the file manager
+    /// or a hand edit -- and with no menus at all the page says so.
+    #[test]
+    fn context_menu_choices_changed_elsewhere_are_read_again() {
+        settingsfile::testing::with_scratch_config("settings-context-menus-reread", |_| {
+            let (_dir, dirs) = scratch_service_menus();
+            let mut state = context_menus_page(&dirs);
+            let shouting = service_menu_named(&state, "Shouting");
+            let mut elsewhere = servicemenus::ChoicesFile::load();
+            elsewhere
+                .choices
+                .set(&state.service_menus.menus[shouting], false);
+            elsewhere.save().expect("written elsewhere");
+            state.handle_event(&announce(servicemenus::CONFIG_NAME));
+            assert!(
+                !state
+                    .service_choices
+                    .choices
+                    .is_on(&state.service_menus.menus[shouting]),
+                "a choice made elsewhere is not shown"
+            );
+
+            let empty = servicemenus::Dirs {
+                user: None,
+                system: Vec::new(),
+            };
+            let state = context_menus_page(&empty);
+            assert!(
+                drawn_texts(&state)
+                    .iter()
+                    .any(|t| t.starts_with("No program has added anything")),
+                "with no menus the page does not say so"
+            );
+        });
+    }
+
+    /// **A change whose file cannot be written says why, in full, and the
+    /// page shows what the file holds** -- a window rule's switch and a
+    /// context menu's, each file blocked by a folder of its name -- **and
+    /// once it can be written, the next change is kept and the complaint
+    /// goes.**
+    #[test]
+    fn a_change_that_cannot_be_kept_says_why_and_shows_what_the_file_holds() {
+        settingsfile::testing::with_scratch_config("settings-not-kept", |root| {
+            let block = |name: &str| {
+                let path = settingsfile::testing::scratch_path(root, name);
+                std::fs::create_dir_all(&path).expect("a folder where the file goes");
+                path
+            };
+            let said =
+                |state: &SettingsState, words: &str| drawn_texts(state).join(" ").contains(words);
+
+            let rules_file = block(windowrules::file::CONFIG_NAME);
+            let mut state = rules_page(root, None);
+            let was = state.rules[0].enabled;
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(0)));
+            assert!(
+                said(&state, "The rules could not be kept:"),
+                "{:?}",
+                drawn_texts(&state)
+            );
+            assert_eq!(
+                state.rules[0].enabled, was,
+                "the page shows a change the file does not hold"
+            );
+            std::fs::remove_dir(&rules_file).expect("the folder taken away");
+            press_on(&mut state, RowHit::Toggle(ToggleId::RuleEnabled(0)));
+            assert_eq!(
+                state.rules_error, None,
+                "the complaint outlived a change that was kept"
+            );
+            assert_ne!(state.rules[0].enabled, was);
+
+            let menus_file = block(servicemenus::CONFIG_NAME);
+            let (_dir, dirs) = scratch_service_menus();
+            let mut state = context_menus_page(&dirs);
+            let shouting = service_menu_named(&state, "Shouting");
+            let is_on = |state: &SettingsState| {
+                state
+                    .service_choices
+                    .choices
+                    .is_on(&state.service_menus.menus[shouting])
+            };
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            assert!(
+                said(&state, "The choice could not be kept:"),
+                "{:?}",
+                drawn_texts(&state)
+            );
+            assert!(
+                is_on(&state),
+                "the switch shows a change the file does not hold"
+            );
+            std::fs::remove_dir(&menus_file).expect("the folder taken away");
+            press_on(&mut state, RowHit::Toggle(ToggleId::ServiceMenu(shouting)));
+            assert_eq!(
+                state.service_error, None,
+                "the complaint outlived a change that was kept"
+            );
+            assert!(!is_on(&state));
+        });
+    }
+
+    // --- The Network page -------------------------------------------------------
+
+    /// The Network page over a machine whose `/proc/net` says `text` -- or,
+    /// with `None`, one that publishes nothing at all.
+    fn network_page(text: Option<&str>) -> (scratchdir::ScratchDir, SettingsState) {
+        let dir = scratchdir::ScratchDir::new("settings-network");
+        if let Some(text) = text {
+            std::fs::create_dir_all(dir.dir().join("proc")).expect("the fixture");
+            std::fs::write(dir.dir().join("proc").join("net"), text).expect("the fixture");
+        }
+        let mut state = SettingsState::new();
+        state.machine_root = dir
+            .dir()
+            .to_str()
+            .expect("a scratch path in text")
+            .to_owned();
+        state.starter = record_start;
+        state.current_category = SettingsCategory::Network;
+        state.go_to_page(SettingsPage::NetworkStatus);
+        (dir, state)
+    }
+
+    /// **The Network page lists the machine's interface as the kernel
+    /// publishes it** -- its link, hardware address and every address --
+    /// where it said nothing on the system could list one, two weeks after
+    /// the Network Manager had begun to.
+    #[test]
+    fn the_network_page_lists_the_machines_interface() {
+        let (_dir, state) = network_page(Some(
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.2.2\n  DNS:     10.0.2.3\n",
+        ));
+        let said = drawn_texts(&state);
+        for words in [
+            "eth0",
+            "Connected",
+            "52:54:00:12:34:56",
+            "10.0.2.15",
+            "255.255.255.0",
+            "10.0.2.2",
+            "10.0.2.3",
+        ] {
+            assert!(
+                said.iter().any(|t| t == words),
+                "{words:?} is not shown: {said:?}"
+            );
+        }
+        assert!(
+            !said.iter().any(|t| t.contains("cannot list")),
+            "the page still says nothing can list the interfaces"
+        );
+    }
+
+    /// **An interface down and unconfigured says so** -- disconnected, its
+    /// addresses none assigned rather than zeros -- and a machine with no
+    /// card says that.
+    #[test]
+    fn an_unconfigured_interface_and_no_interface_say_so() {
+        let (_dir, state) = network_page(Some(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        ));
+        let said = drawn_texts(&state);
+        assert!(said.iter().any(|t| t == "Disconnected"), "{said:?}");
+        assert!(
+            said.iter().filter(|t| *t == "None assigned").count() >= 4,
+            "an unassigned address is not said to be none: {said:?}"
+        );
+        assert!(!said.iter().any(|t| t == "0.0.0.0"), "{said:?}");
+
+        let (_dir, state) = network_page(Some(
+            "Interface: eth0  (DOWN)\n  MAC:     00:00:00:00:00:00\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        ));
+        assert!(
+            drawn_texts(&state)
+                .iter()
+                .any(|t| t.starts_with("This machine has no network card")),
+            "a machine with no card does not say so"
+        );
+    }
+
+    /// **Refresh reads the interfaces again**, and entering the page does:
+    /// an interface brought up in the Network Manager is shown up.
+    #[test]
+    fn the_network_page_reads_the_interfaces_again() {
+        let (dir, mut state) = network_page(Some(
+            "Interface: eth0  (DOWN)\n  MAC:     52:54:00:12:34:56\n  IPv4:    0.0.0.0\n  Netmask: 0.0.0.0\n  Gateway: 0.0.0.0\n  DNS:     0.0.0.0\n",
+        ));
+        std::fs::write(
+            dir.dir().join("proc").join("net"),
+            "Interface: eth0  (UP)\n  MAC:     52:54:00:12:34:56\n  IPv4:    10.0.2.15\n  Netmask: 255.255.255.0\n  Gateway: 10.0.2.2\n  DNS:     10.0.2.3\n",
+        )
+        .expect("the fixture");
+        assert!(drawn_texts(&state).iter().any(|t| t == "Disconnected"));
+        press_on(&mut state, RowHit::Press(ButtonId::RefreshNetwork));
+        assert!(
+            drawn_texts(&state).iter().any(|t| t == "Connected"),
+            "Refresh did not read the interface again"
+        );
+
+        std::fs::write(dir.dir().join("proc").join("net"), "").expect("the fixture");
+        state.go_to_page(SettingsPage::NetworkStatus);
+        assert!(
+            !drawn_texts(&state).iter().any(|t| t == "Connected"),
+            "entering the page did not read the interfaces again"
+        );
+    }
+
+    /// **"Network Connections" opens the Network Manager**, where an
+    /// interface is changed, and says so -- or why it could not.
+    #[test]
+    fn network_connections_opens_the_network_manager() {
+        let (_dir, mut state) = network_page(None);
+        // A machine that publishes no interfaces at all says why.
+        assert!(
+            drawn_texts(&state)
+                .join(" ")
+                .contains("The network interfaces could not be read:"),
+            "a read that failed says nothing"
+        );
+        let _earlier = STARTED.with(|s| std::mem::take(&mut *s.borrow_mut()));
+        press_on(&mut state, RowHit::Press(ButtonId::OpenNetworkManager));
+        STARTED.with(|s| {
+            assert_eq!(*s.borrow(), vec![(NETWORK_MANAGER.to_owned(), vec![])]);
+        });
+        assert!(
+            drawn_texts(&state)
+                .iter()
+                .any(|t| t == "Opening Network Connections."),
+            "the press says nothing"
+        );
+
+        state.starter = refuse_start;
+        press_on(&mut state, RowHit::Press(ButtonId::OpenNetworkManager));
+        assert!(
+            drawn_texts(&state)
+                .join(" ")
+                .contains("Could not start Network Connections (/usr/bin/netmanager)"),
+            "a start that failed is not said"
+        );
+    }
+
+    // --- A text field's right-click menu ------------------------------------------
+
+    /// `key` pressed with Ctrl, carrying `text` as the compositor sends a
+    /// command's letter.
+    fn ctrl_chord(key: Key, text: &str) -> Event {
+        Event::Key(KeyEvent {
+            key,
+            pressed: true,
+            modifiers: Modifiers::ctrl(),
+            text: text.to_owned(),
+        })
+    }
+
+    /// A right press at `(x, y)`.
+    fn right_press(state: &mut SettingsState, x: f32, y: f32) -> EventResult {
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x,
+            y,
+            kind: MouseEventKind::Press(MouseButton::Right),
+        }))
+    }
+
+    /// The middle of the search box.
+    fn search_middle() -> (f32, f32) {
+        let r = SettingsState::search_rect();
+        (r.x + r.w / 2.0, r.y + r.h / 2.0)
+    }
+
+    /// The row of the open field menu that does `command`, and whether it is
+    /// lit.
+    fn field_menu_row(
+        state: &SettingsState,
+        command: guitk::editmenu::EditCommand,
+    ) -> (usize, bool) {
+        let menu = state.field_menu.menu().expect("a field menu is up");
+        menu.items()
+            .iter()
+            .enumerate()
+            .find_map(|(at, item)| match item {
+                guitk::menu::MenuItem::Action { id, enabled, .. } if *id == command.id() => {
+                    Some((at, *enabled))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the menu has no {command:?} row"))
+    }
+
+    /// Choose `command` in the open field menu with a click on its row.
+    fn choose_in_field_menu(state: &mut SettingsState, command: guitk::editmenu::EditCommand) {
+        let (at, enabled) = field_menu_row(state, command);
+        assert!(enabled, "{command:?} is dimmed");
+        let rect = state
+            .field_menu
+            .menu()
+            .and_then(|menu| menu.item_rect(at))
+            .expect("the row is drawn");
+        state.handle_event(&Event::Mouse(MouseEvent {
+            x: rect.x + rect.w / 2.0,
+            y: rect.y + rect.h / 2.0,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        }));
+    }
+
+    /// **A right-click in a text field offers Cut, Copy, Paste, Delete and
+    /// Select all, each lit only when it would do something, and a row chosen
+    /// does it** (`requests/c-e-text-fields-have-a-right-click-menu.md`):
+    /// the search's selection copied from the menu, pasted from the menu into
+    /// the Background page's pattern -- and pasted by Ctrl+V too, the keys
+    /// and the menu sharing the program's clipboard.
+    #[test]
+    fn a_text_fields_right_click_menu_cuts_copies_and_pastes() {
+        let mut state = rotation_page();
+        let (sx, sy) = search_middle();
+        state.handle_click(sx, sy);
+        type_text(&mut state, "wall");
+        assert_eq!(state.search_query.text(), "wall");
+
+        // Nothing selected: Cut, Copy and Delete are dimmed.
+        assert_eq!(right_press(&mut state, sx, sy), EventResult::Consumed);
+        assert_eq!(state.field_menu.field(), Some(MenuField::Search));
+        assert!(!field_menu_row(&state, guitk::editmenu::EditCommand::Copy).1);
+        assert!(field_menu_row(&state, guitk::editmenu::EditCommand::SelectAll).1);
+        assert!(
+            drawn_texts(&state).iter().any(|t| t.starts_with("Select")),
+            "the menu is not drawn"
+        );
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::SelectAll);
+        assert!(!state.field_menu.is_up(), "the menu stayed up");
+        right_press(&mut state, sx, sy);
+        assert!(
+            field_menu_row(&state, guitk::editmenu::EditCommand::Copy).1,
+            "a selection does not light Copy"
+        );
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Copy);
+        assert_eq!(guitk::clipboard::text(), "wall");
+
+        // Into the pattern, from its own menu.
+        let (px, py) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        right_press(&mut state, px, py);
+        assert_eq!(
+            state.focused_field,
+            Some(FieldId::ExclusionDraft),
+            "the right-click did not give the field the keyboard"
+        );
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Paste);
+        assert_eq!(state.exclusion_draft.text(), "wall");
+        // And by key, from the same clipboard.
+        state.handle_event(&ctrl_chord(Key::V, "v"));
+        assert_eq!(state.exclusion_draft.text(), "wallwall");
+
+        // Cut takes the selection out and keeps it.
+        state.handle_event(&ctrl_chord(Key::A, "a"));
+        right_press(&mut state, px, py);
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Cut);
+        assert_eq!(state.exclusion_draft.text(), "");
+        assert_eq!(guitk::clipboard::text(), "wallwall");
+    }
+
+    /// **The menu is modal while it is up**: Escape puts it away and reaches
+    /// no field, a press elsewhere puts it away and works nothing under it,
+    /// the arrows and Enter choose a row -- and a right-click on no field
+    /// offers nothing.
+    #[test]
+    fn a_field_menu_takes_the_keys_and_presses_while_it_is_up() {
+        let mut state = SettingsState::new();
+        state.current_page = SettingsPage::Wallpaper;
+        let (sx, sy) = search_middle();
+        state.handle_click(sx, sy);
+        type_text(&mut state, "glob");
+
+        right_press(&mut state, sx, sy);
+        state.handle_event(&key_press(Key::Escape));
+        assert!(!state.field_menu.is_up(), "Escape left the menu up");
+        assert_eq!(
+            state.search_query.text(),
+            "glob",
+            "Escape reached the search"
+        );
+
+        // A press elsewhere: the menu goes, and the category under it is not
+        // chosen. On a page's field, with the search empty -- a search lists
+        // its results where the categories were, and a press there would
+        // choose nothing whether or not it went through.
+        let mut paged = rotation_page();
+        let (px, py) = center_of(&paged, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        right_press(&mut paged, px, py);
+        assert!(paged.field_menu.is_up());
+        let category = paged.current_category;
+        let (cx, cy) = (40.0, SettingsState::category_row_top(3) + 10.0);
+        let press = Event::Mouse(MouseEvent {
+            x: cx,
+            y: cy,
+            kind: MouseEventKind::Press(MouseButton::Left),
+        });
+        paged.handle_event(&press);
+        assert!(!paged.field_menu.is_up());
+        assert_eq!(
+            paged.current_category, category,
+            "the press went through the menu"
+        );
+        // And the same press with no menu up does choose that category, so the
+        // check above looked at a press that would have done something.
+        paged.handle_event(&press);
+        assert_ne!(
+            paged.current_category, category,
+            "the press hit no category"
+        );
+
+        // The keys: down to Select all and Enter.
+        right_press(&mut state, sx, sy);
+        let (select_all, _) = field_menu_row(&state, guitk::editmenu::EditCommand::SelectAll);
+        // Down from the top until Select all is lit, then Enter.
+        for _ in 0..12 {
+            if state
+                .field_menu
+                .menu()
+                .and_then(guitk::menu::ContextMenu::highlighted)
+                == Some(select_all)
+            {
+                break;
+            }
+            state.handle_event(&key_press(Key::Down));
+        }
+        state.handle_event(&key_press(Key::Enter));
+        assert!(!state.field_menu.is_up());
+        assert!(
+            state.search_query.has_selection(),
+            "Enter did not choose the row"
+        );
+
+        // A right-click on no field.
+        let (bx, by) = (SIDEBAR_WIDTH + 400.0, 10.0);
+        assert_eq!(right_press(&mut state, bx, by), EventResult::Ignored);
+        assert!(!state.field_menu.is_up());
+    }
+
+    /// **A paste from the menu stops at the field's capacity**, as one by
+    /// key does -- the fields carry their own capacities now, which the
+    /// menu's paste honours -- and a rule's long name, read from the file,
+    /// is not cut by the field holding it.
+    #[test]
+    fn a_paste_from_the_menu_stops_at_the_fields_capacity() {
+        let mut state = rotation_page();
+        guitk::clipboard::set_text(&"x".repeat(EXCLUSION_CAPACITY + 50));
+        let (px, py) = center_of(&state, RowHit::Focus(FieldId::ExclusionDraft)).expect("field");
+        right_press(&mut state, px, py);
+        choose_in_field_menu(&mut state, guitk::editmenu::EditCommand::Paste);
+        assert_eq!(
+            state.exclusion_draft.text().chars().count(),
+            EXCLUSION_CAPACITY
+        );
+
+        let long = "n".repeat(rules::NAME_CAPACITY + 20);
+        let rule = windowrules::WindowRule {
+            name: long.clone(),
+            ..windowrules::default_rules().remove(0)
+        };
+        let draft = rules::RuleDraft::of(&rule, 0);
+        assert_eq!(draft.name.text(), long, "a name from the file was cut");
+        assert_eq!(draft.name.capacity(), Some(rules::NAME_CAPACITY));
+    }
+
+    // --- Notes wrap to their column --------------------------------------------
+
+    /// What a note draws, through the sink that paints a page: each line's
+    /// text and height, and where the cursor stands after it.
+    fn drawn_note(text: &str, height: f32) -> (Vec<(String, f32)>, f32) {
+        let mut tree = RenderTree::new();
+        let mut sink = DrawSink {
+            tree: &mut tree,
+            pal: Palette::for_mode(false),
+            x: 0.0,
+            y: 0.0,
+        };
+        sink.note(text, height);
+        let after = sink.y;
+        let lines = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, y, .. } => Some((text.clone(), *y)),
+                _ => None,
+            })
+            .collect();
+        (lines, after)
+    }
+
+    /// **A note too long for its column wraps**, each line within
+    /// [`NOTE_WIDTH`] and [`NOTE_LINE_HEIGHT`] below the last, and takes the
+    /// room its lines need -- never less than its caller asked. Until
+    /// 2026-10-10 every note was one line however long, drawn past the
+    /// column and cut off by the window's edge, with whatever room its
+    /// caller had guessed below it.
+    #[test]
+    fn a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need() {
+        let long = "Nothing on this system routes through a proxy, so an address \
+                    entered here would be read by nothing at all, and saying so in \
+                    one long line would run past the controls it explains.";
+        let (lines, after) = drawn_note(long, 28.0);
+        assert!(lines.len() > 1, "a long note was drawn on one line");
+        for (text, _) in &lines {
+            assert!(
+                text::width(text, NOTE_SIZE) <= NOTE_WIDTH + 0.5,
+                "\"{text}\" runs past the column"
+            );
+        }
+        for pair in lines.windows(2) {
+            let ((_, upper), (_, lower)) = (&pair[0], &pair[1]);
+            assert!(
+                (lower - upper - NOTE_LINE_HEIGHT).abs() < 0.01,
+                "lines {upper} and {lower} are not a line apart"
+            );
+        }
+        #[allow(clippy::cast_precision_loss, reason = "a note has a handful of lines")]
+        let needed = NOTE_GAP + NOTE_LINE_HEIGHT * lines.len() as f32;
+        assert!(
+            (after - needed).abs() < 0.01,
+            "a note of {} lines took {after}, not {needed}",
+            lines.len()
+        );
+        let joined: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            joined.join(" "),
+            long.split_whitespace().collect::<Vec<_>>().join(" ")
+        );
+
+        // A short note keeps the room its caller asked for, however much.
+        assert_eq!(drawn_note("Short.", 28.0).1, 28.0);
+        assert_eq!(
+            drawn_note("Short.", 44.0).1,
+            44.0,
+            "a short note shrank its room"
+        );
+        assert_eq!(drawn_note("Short.", 28.0).0.len(), 1);
+    }
+
+    /// **No text on any page runs past the rows it belongs to**: on every
+    /// page, with every switch on, every text in the page's column ends where
+    /// its notes do -- drawn short, cut with an ellipsis, or wrapped. A text
+    /// command does not wrap, so until 2026-10-10 a long value or a long
+    /// reason ran on past its row and, in a window as narrow as the page is
+    /// laid out for, off the window.
+    #[test]
+    fn no_text_on_any_page_runs_past_its_rows() {
+        let left = SettingsState::content_x();
+        let right = left + NOTE_WIDTH;
+        let mut past = Vec::new();
+        for page in all_pages() {
+            let state = fully_expanded(page);
+            for command in &state.render_tree().commands {
+                let RenderCommand::Text {
+                    x,
+                    text: drawn,
+                    font_size,
+                    font_weight,
+                    max_width,
+                    ..
+                } = command
+                else {
+                    continue;
+                };
+                // The sidebar's, left of the page.
+                if *x < left - 0.5 {
+                    continue;
+                }
+                let wide = text::measure(drawn, *font_size, *font_weight);
+                let ends = x + max_width.map_or(wide, |most| wide.min(most));
+                if ends > right + 0.5 {
+                    past.push(format!(
+                        "{}: {drawn:?} ends at {ends}, past {right}",
+                        page.label()
+                    ));
+                }
+            }
+        }
+        assert!(past.is_empty(), "{}", past.join("\n"));
+    }
+
+    /// **A value too wide for the room beside its label is cut with an
+    /// ellipsis at the notes' edge**, and a short one is drawn whole.
+    #[test]
+    fn a_value_too_wide_for_its_row_is_cut_at_the_notes_edge() {
+        let drawn = |value: &str| {
+            let mut tree = RenderTree::new();
+            let mut sink = DrawSink {
+                tree: &mut tree,
+                pal: Palette::for_mode(false),
+                x: 0.0,
+                y: 0.0,
+            };
+            sink.value_row("Program", value, Color::BLACK);
+            tree.commands
+                .into_iter()
+                .find_map(|c| match c {
+                    RenderCommand::Text {
+                        x,
+                        text,
+                        max_width,
+                        overflow,
+                        ..
+                    } if text == value => Some((x, max_width, overflow)),
+                    _ => None,
+                })
+                .expect("the value is drawn")
+        };
+        let long = "An Exceedingly Long Program Name That No Row Beside A Label Could Hold Whole";
+        let (x, most, overflow) = drawn(long);
+        assert!(
+            text::measure(long, 13.0, FontWeightHint::Regular) > VALUE_WIDTH,
+            "the fixture is not too wide"
+        );
+        assert_eq!(most, Some(VALUE_WIDTH));
+        assert_eq!(overflow, TextOverflow::Ellipsis);
+        assert!(
+            (x + VALUE_WIDTH - NOTE_WIDTH).abs() < 0.01,
+            "the value's room ends at {}, not at the notes' edge {NOTE_WIDTH}",
+            x + VALUE_WIDTH
+        );
+        let (_, most, _) = drawn("Notes");
+        assert!(
+            most.is_some_and(|m| text::measure("Notes", 13.0, FontWeightHint::Regular) < m),
+            "a short value would be cut"
+        );
+    }
+
+    /// **An opened licence is wrapped once, not on every walk of the page**:
+    /// the same lines come back while the font is the same. Wrapping a long
+    /// licence is most of what a walk of the page costs, and the page is
+    /// walked several times an event.
+    #[test]
+    fn an_opened_licence_is_wrapped_once() {
+        let text = OpenText {
+            name: "LICENSE".to_owned(),
+            shown: Ok("Some words\r\n\r\n    Indented.\r\n".to_owned()),
+            wrapped: std::cell::RefCell::new(None),
+        };
+        let first = text.lines().as_ptr();
+        assert_eq!(&*text.lines(), ["Some words", "", "    Indented."]);
+        assert_eq!(
+            text.lines().as_ptr(),
+            first,
+            "the text was wrapped again in the same font"
+        );
+    }
+
+    /// **An opened licence is wrapped to the column with every byte kept**: a
+    /// paragraph on one line -- the common way a licence is written -- is
+    /// drawn as lines that end inside the column, its indentation and blank
+    /// lines as written and a line's carriage return not drawn.
+    #[test]
+    fn an_opened_licence_wraps_to_the_column_and_keeps_every_byte() {
+        settingsfile::testing::with_scratch_config("settings-about-wrap", |root| {
+            let bundle = root.join("licenses");
+            std::fs::create_dir_all(bundle.join("long-1.0")).expect("the bundle");
+            std::fs::write(
+                bundle.join("index.yaml"),
+                "notices:\n  long-1.0:\n    component: 'long'\n    version: '1.0'\n    licence: 'MIT'\n    from: 'crates.io'\n    texts:\n      - 'long-1.0/LICENSE'\n",
+            )
+            .expect("the index");
+            let paragraph = "Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the \"Software\"), to deal in the Software without restriction.";
+            std::fs::write(
+                bundle.join("long-1.0").join("LICENSE"),
+                format!("Copyright (c) Somebody\r\n\r\n{paragraph}\r\n    Indented line.\r\n"),
+            )
+            .expect("the licence");
+            let mut app = SettingsState::new();
+            app.notices_dir = bundle;
+            app.go_to_page(SettingsPage::About);
+            press_row(&mut app, RowHit::Press(ButtonId::Notice(0)));
+            let lines: Vec<(String, f32)> = app
+                .render_tree()
+                .commands
+                .iter()
+                .filter_map(|c| match c {
+                    RenderCommand::Text {
+                        text, font_size, x, ..
+                    } if (*font_size - LICENCE_SIZE).abs() < 0.01 => Some((text.clone(), *x)),
+                    _ => None,
+                })
+                .collect();
+            let texts: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+            assert!(texts.len() >= 4, "{texts:?}");
+            let paragraph_lines = texts.get(2..texts.len() - 1).unwrap_or_default();
+            assert!(
+                paragraph_lines.len() > 1,
+                "the paragraph was not wrapped: {texts:?}"
+            );
+            for (line, x) in &lines {
+                assert!(!line.contains('\r'), "{line:?} draws a carriage return");
+                let ends =
+                    x + text::measure(line.trim_end(), LICENCE_SIZE, FontWeightHint::Regular);
+                assert!(
+                    ends <= SettingsState::content_x() + NOTE_WIDTH + 0.5,
+                    "{line:?} runs past the column"
+                );
+            }
+            assert_eq!(texts.first(), Some(&"Copyright (c) Somebody"));
+            assert_eq!(texts.get(1), Some(&""), "the blank line is not kept");
+            assert_eq!(
+                texts.last(),
+                Some(&"    Indented line."),
+                "the indentation is lost"
+            );
+            assert_eq!(
+                paragraph_lines.concat(),
+                paragraph,
+                "a byte of the paragraph was lost"
+            );
+        });
+    }
+
+    /// **Why something failed is said in full, in red, wrapped to the
+    /// column** -- not cut at the column's edge as a value is.
+    #[test]
+    fn a_problem_is_said_in_full_in_red() {
+        let mut tree = RenderTree::new();
+        let pal = Palette::for_mode(false);
+        let mut sink = DrawSink {
+            tree: &mut tree,
+            pal,
+            x: 0.0,
+            y: 0.0,
+        };
+        let why = "The rules could not be kept: the folder they are written to is a file \
+                   another program put there, and nothing can be written beneath a file.";
+        sink.problem(why);
+        let lines: Vec<(String, Color)> = tree
+            .commands
+            .iter()
+            .filter_map(|c| match c {
+                RenderCommand::Text { text, color, .. } => Some((text.clone(), *color)),
+                _ => None,
+            })
+            .collect();
+        assert!(lines.len() > 1, "a long reason was not wrapped: {lines:?}");
+        for (line, color) in &lines {
+            assert_eq!(*color, pal.ink(pal.red), "{line:?} is not in red");
+            assert!(
+                text::width(line, NOTE_SIZE) <= NOTE_WIDTH + 0.5,
+                "{line:?} runs past the column"
+            );
+        }
+        let said: Vec<&str> = lines.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(
+            said.join(" "),
+            why.split_whitespace().collect::<Vec<_>>().join(" "),
+            "a word of the reason was lost"
+        );
+    }
+
+    /// **A row of pills wraps within the control column and grows a line for
+    /// each line of pills**, every pill as wide as its label needs and none
+    /// overlapping another; a label too wide for the whole column gets a pill
+    /// as wide as the column and is cut with an ellipsis.
+    #[test]
+    fn a_pill_row_wraps_in_its_column_and_grows() {
+        let days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+        let (rects, height) = pill_layout(&days);
+        assert_eq!(rects.len(), days.len());
+        let mut lines: Vec<f32> = Vec::new();
+        for (&(x, y, w, h), label) in rects.iter().zip(days) {
+            assert!(
+                x >= 0.0 && x + w <= VALUE_WIDTH + 0.01,
+                "{label} runs out of the column"
+            );
+            assert!(
+                w >= text::measure(label, PILL_TEXT_SIZE, FontWeightHint::Regular)
+                    + 2.0 * PILL_PAD_X
+                    - 0.01,
+                "{label}'s pill is too narrow for it"
+            );
+            assert!((h - PILL_HEIGHT).abs() < 0.01);
+            if !lines.iter().any(|l| (l - y).abs() < 0.01) {
+                lines.push(y);
+            }
+        }
+        for (i, a) in rects.iter().enumerate() {
+            for b in rects.iter().skip(i + 1) {
+                let apart =
+                    a.0 + a.2 <= b.0 || b.0 + b.2 <= a.0 || a.1 + a.3 <= b.1 || b.1 + b.3 <= a.1;
+                assert!(apart, "{a:?} and {b:?} overlap");
+            }
+        }
+        assert!(lines.len() > 1, "seven days fit one line of {VALUE_WIDTH}");
+        #[allow(clippy::cast_precision_loss, reason = "a handful of lines")]
+        let grown = ITEM_HEIGHT + (lines.len() - 1) as f32 * (PILL_HEIGHT + PILL_GAP);
+        assert!(
+            (height - grown).abs() < 0.01,
+            "{} lines of pills in a row {height} tall, not {grown}",
+            lines.len()
+        );
+
+        // Drawn, the row takes that height, and an overlong label is cut.
+        let long = "A label far too long for any column that a row of pills could offer it";
+        let mut tree = RenderTree::new();
+        let mut sink = DrawSink {
+            tree: &mut tree,
+            pal: Palette::for_mode(false),
+            x: 0.0,
+            y: 0.0,
+        };
+        sink.pill_row(
+            "Days",
+            PillId::QuietDays,
+            &[("Mon", true), (long, false), ("Tue", false)],
+        );
+        let after = sink.y;
+        let (_, three_tall) = pill_layout(&["Mon", long, "Tue"]);
+        assert!(
+            (after - three_tall).abs() < 0.01,
+            "the row took {after}, its pills {three_tall}"
+        );
+        let cut = tree
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                RenderCommand::Text {
+                    text,
+                    max_width,
+                    overflow,
+                    ..
+                } if text == long => Some((*max_width, *overflow)),
+                _ => None,
+            })
+            .expect("the long label is drawn");
+        assert_eq!(
+            cut,
+            (Some(VALUE_WIDTH - 2.0 * PILL_PAD_X), TextOverflow::Ellipsis)
+        );
+    }
+
+    /// **A licence that cannot be read says why, in full** -- one text of a
+    /// notice missing, and a bundle whose index cannot be read at all.
+    #[test]
+    fn a_licence_that_cannot_be_read_says_why() {
+        settingsfile::testing::with_scratch_config("settings-about-unreadable", |root| {
+            let bundle = root.join("licenses");
+            std::fs::create_dir_all(&bundle).expect("the bundle");
+            std::fs::write(
+                bundle.join("index.yaml"),
+                "notices:\n  gone-1.0:\n    component: 'gone'\n    licence: 'MIT'\n    from: 'crates.io'\n    texts:\n      - 'gone-1.0/LICENSE'\n",
+            )
+            .expect("the index");
+            let mut app = SettingsState::new();
+            app.notices_dir = bundle.clone();
+            app.go_to_page(SettingsPage::About);
+            press_row(&mut app, RowHit::Press(ButtonId::Notice(0)));
+            let said = drawn_texts(&app).join(" ");
+            assert!(
+                said.contains("This licence could not be read:"),
+                "a missing licence text does not say so: {said}"
+            );
+
+            std::fs::write(bundle.join("index.yaml"), "licences: none\n")
+                .expect("an index with no notices list");
+            app.go_to_page(SettingsPage::About);
+            let said = drawn_texts(&app).join(" ");
+            assert!(
+                said.contains("The licence notices could not be read:"),
+                "an unreadable index does not say so: {said}"
+            );
+        });
+    }
+
+    // --- Pictures from the icon theme ------------------------------------------
+
+    /// The ids `changes` uploads, and those it drops.
+    fn icon_changes(changes: &[oswindow::app::ImageChange]) -> (Vec<u64>, Vec<u64>) {
+        let mut uploads = Vec::new();
+        let mut drops = Vec::new();
+        for change in changes {
+            match change {
+                oswindow::app::ImageChange::Upload { id, .. } => uploads.push(*id),
+                oswindow::app::ImageChange::Drop(id) => drops.push(*id),
+                oswindow::app::ImageChange::Patch { .. } => {}
+            }
+        }
+        (uploads, drops)
+    }
+
+    /// The icon drawn at the left of the sidebar's row `idx`.
+    fn category_icon_drawn(tree: &RenderTree, idx: usize) -> Option<u64> {
+        let top = SettingsState::category_row_top(idx);
+        tree.commands.iter().find_map(|c| match c {
+            RenderCommand::Image { x, y, image_id, .. }
+                if (*x - 24.0).abs() < 0.01 && *y >= top && *y < top + CATEGORY_ITEM_HEIGHT =>
+            {
+                Some(*image_id)
+            }
+            _ => None,
+        })
+    }
+
+    /// **The sidebar draws each category's picture as an icon from the icon
+    /// theme, uploaded before the frame that names it, and once** -- they
+    /// were emoji, which no font here draws: eight boxes
+    /// (`requests/c-e-draw-pictures-from-the-icon-theme.md`).
+    #[test]
+    fn the_sidebar_draws_each_category_icon_from_the_theme() {
+        settingsfile::testing::with_scratch_config("settings-icons-sidebar", |_| {
+            let mut state = SettingsState::new();
+            let tree = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            let (uploads, drops) = icon_changes(&oswindow::app::App::take_images(&mut state));
+            assert!(drops.is_empty(), "{drops:?}");
+            for (idx, category) in SettingsCategory::ALL.iter().enumerate() {
+                let id = category_icon_drawn(&tree, idx)
+                    .unwrap_or_else(|| panic!("{} has no icon", category.label()));
+                assert!(
+                    uploads.contains(&id),
+                    "{}'s icon is drawn and never sent",
+                    category.label()
+                );
+            }
+            let _again = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            assert_eq!(
+                icon_changes(&oswindow::app::App::take_images(&mut state)),
+                (vec![], vec![]),
+                "the icons were sent again"
+            );
+        });
+    }
+
+    /// **No category's icon name shortens to another built-in icon**: a name
+    /// the theme lacks falls back by dropping its last `-part` before the
+    /// stand-in is tried, and `preferences-system-network` would have drawn
+    /// System's gear for Network. Each stand-in is one the built-in set draws.
+    #[test]
+    fn no_category_icon_shortens_to_another_built_in_icon() {
+        let built_in = appearance::icons::built_in_names();
+        for category in SettingsCategory::ALL {
+            let (name, stand_in) = category.icon();
+            assert!(
+                built_in.contains(&stand_in),
+                "{}'s stand-in {stand_in} is not built in",
+                category.label()
+            );
+            let mut shorter = name;
+            loop {
+                assert!(
+                    !built_in.contains(&shorter) || shorter == stand_in,
+                    "{}'s {name} would draw the built-in {shorter}, not {stand_in}",
+                    category.label()
+                );
+                match shorter.rfind('-') {
+                    Some(at) => shorter = &shorter[..at],
+                    None => break,
+                }
+            }
+        }
+    }
+
+    /// **Other colours draw every icon again**: the old ones are dropped from
+    /// the window and the new ones sent, since an icon's colour is part of
+    /// the picture.
+    #[test]
+    fn other_colours_draw_the_icons_again() {
+        settingsfile::testing::with_scratch_config("settings-icons-colours", |_| {
+            let mut state = SettingsState::new();
+            state.appearance.settings.theme_mode = ThemeMode::Light;
+            let _light = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            let (light, _) = icon_changes(&oswindow::app::App::take_images(&mut state));
+            assert!(!light.is_empty());
+
+            state.appearance.settings.theme_mode = ThemeMode::Dark;
+            let _dark = oswindow::app::App::render(&mut state, 1200.0, 800.0);
+            let (dark, mut dropped) = icon_changes(&oswindow::app::App::take_images(&mut state));
+            dropped.sort_unstable();
+            let mut held = light.clone();
+            held.sort_unstable();
+            assert_eq!(dropped, held, "the light icons stay in the window");
+            assert_eq!(dark.len(), light.len(), "{dark:?}");
+            assert!(
+                dark.iter().all(|id| !light.contains(id)),
+                "an icon was not drawn again in the dark colours"
+            );
+        });
+    }
+
+    /// Whether `c` is an emoji or a pictographic symbol: no font SlateOS has
+    /// draws one, so it is a box on screen.
+    fn is_pictograph(c: char) -> bool {
+        matches!(
+            u32::from(c),
+            0x2600..=0x27BF | 0x2B00..=0x2BFF | 0x1F000..=0x1FAFF
+        )
+    }
+
+    /// **No page draws an emoji** -- every page with every switch on, the
+    /// sidebar and the open dropdowns' checks -- but the account pictures,
+    /// which wait on the account picture being kept at all
+    /// (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
+    #[test]
+    fn no_page_draws_an_emoji() {
+        let mut drawn = Vec::new();
+        for page in all_pages() {
+            let mut state = fully_expanded(page);
+            for text in drawn_texts(&state) {
+                drawn.push((page.label(), text));
+            }
+            if let Some(id) = DropdownId::FIXED
+                .iter()
+                .copied()
+                .find(|id| center_of(&state, RowHit::Dropdown(*id)).is_some())
+            {
+                state.show_dropdown(id);
+                for text in drawn_texts(&state) {
+                    drawn.push((page.label(), text));
+                }
+            }
+        }
+        let boxes: Vec<String> = drawn
+            .iter()
+            .filter(|(_, text)| !ACCOUNT_PICTURES.contains(&text.as_str()))
+            .filter(|(_, text)| text.chars().any(is_pictograph))
+            .map(|(page, text)| format!("{page}: {text:?}"))
+            .collect();
+        assert!(boxes.is_empty(), "drawn as boxes:\n{}", boxes.join("\n"));
     }
 
     // --- The account picture grid ------------------------------------------
@@ -12887,26 +19793,42 @@ mod tests {
         }
     }
 
-    /// **Every row on the Sound page is inert, and nothing has to refuse it.**
+    /// **The Sound page's device rows are inert, and nothing has to refuse
+    /// them.**
     ///
     /// `unavailable_row` registers no hit band at all, so there is no handler
-    /// that could forget. This asserts the page offers *no* click target
-    /// whatsoever, which is the strongest form of that claim and the one that
-    /// cannot rot when a handler is edited: a test that clicked each row and
-    /// checked nothing changed would still pass if a band reappeared and its
-    /// handler happened to be a no-op today.
+    /// that could forget. This asserts the page offers no click target beyond
+    /// the System Sounds section's, which is the strongest form of that claim
+    /// and the one that cannot rot when a handler is edited: a test that
+    /// clicked each row and checked nothing changed would still pass if a band
+    /// reappeared and its handler happened to be a no-op today.
     ///
-    /// It also fails the day somebody adds a working control here, which is
-    /// correct -- that is the day the page stops being unavailable, and the
-    /// doc comment on `build_sound_page` stops being true.
+    /// It also fails the day somebody adds a working control to the devices,
+    /// the input or the per-program volumes, which is correct -- that is the
+    /// day they stop being unavailable, and the doc comment on
+    /// `build_sound_page` stops being true.
+    ///
+    /// Until 2026-10-10 the claim was the whole page's. The System Sounds
+    /// section has controls since -- the desktop reads them
+    /// (`the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file`).
     #[test]
-    fn the_sound_page_offers_nothing_to_click() {
+    fn the_sound_devices_offer_nothing_to_click() {
         let state = fully_expanded(SettingsPage::Sound);
-        let bands = hit_bands(&state);
-        let named: Vec<RowHit> = bands.iter().map(|(what, _)| *what).collect();
+        let stray: Vec<RowHit> = hit_bands(&state)
+            .into_iter()
+            .map(|(what, _)| what)
+            .filter(|what| {
+                !matches!(
+                    what,
+                    RowHit::Toggle(ToggleId::SystemSounds)
+                        | RowHit::Slider(SliderId::SoundVolume)
+                        | RowHit::Dropdown(DropdownId::SoundTheme | DropdownId::EventSound(_))
+                )
+            })
+            .collect();
         assert!(
-            bands.is_empty(),
-            "audio reaches nothing, so the page must offer nothing: {named:?}"
+            stray.is_empty(),
+            "the devices reach nothing, so they must offer nothing: {stray:?}"
         );
     }
 
@@ -13042,6 +19964,10 @@ mod tests {
             y: cy,
             kind: MouseEventKind::Release(MouseButton::Left),
         }));
+        assert_eq!(
+            state.pending_preview, None,
+            "letting go of a slider that is not the sounds' volume played a sound"
+        );
         state.handle_event(&Event::Mouse(MouseEvent {
             x: track_x,
             y: cy,
@@ -13362,11 +20288,14 @@ mod tests {
     fn test_a_click_in_the_gap_between_pills_changes_nothing() {
         let mut state = SettingsState::new();
         state.current_page = SettingsPage::Themes;
-        let (px, py) = center_of(&state, RowHit::Pill(PillId::Transparency, 0))
+        let (px, py, pw, ph) = hit_bands(&state)
+            .into_iter()
+            .find(|(what, _)| *what == RowHit::Pill(PillId::Transparency, 0))
+            .map(|(_, band)| band)
             .expect("the transparency row has pills");
         // Between the first and second pill: past the first pill's right edge,
         // short of where the second begins.
-        state.handle_click(px + PILL_WIDTH / 2.0 + 2.0, py);
+        state.handle_click(px + pw + PILL_GAP / 2.0, py + ph / 2.0);
         assert_eq!(
             state.appearance.settings.transparency,
             AppearanceSettings::default().transparency
@@ -15110,6 +22039,29 @@ mod tests {
         });
     }
 
+    /// **A default limit that cannot be kept says why, in full** -- the
+    /// settings file blocked by a folder of its name.
+    #[test]
+    fn a_default_limit_that_cannot_be_kept_says_why() {
+        with_scratch_config("settings-bins-default-blocked", |root| {
+            let mut state = bins_page(root);
+            let file = settingsfile::testing::scratch_path(root, recyclebin::USER_SETTINGS);
+            std::fs::create_dir_all(&file).expect("a folder where the file goes");
+            state.show_dropdown(DropdownId::BinDefault(recyclebins::LimitKind::Age));
+            let items = state.dropdown_layout().expect("a layout").items;
+            let at = items
+                .iter()
+                .position(|t| t == "1 week")
+                .expect("a week is offered");
+            state.apply_dropdown_selection(at);
+            let said = drawn_texts(&state).join(" ");
+            assert!(
+                said.contains("The default could not be kept:"),
+                "a default that could not be kept does not say so: {said}"
+            );
+        });
+    }
+
     /// **A drive given limits of its own keeps them in its bin**, starting
     /// from the default's; taken away, it keeps to the default again.
     #[test]
@@ -15316,6 +22268,24 @@ mod loop_tests {
             .collect()
     }
 
+    /// Room in the script for the first frame of a state like `twin`: one
+    /// empty batch for each picture it uploads.
+    ///
+    /// The test desktop hands over one scripted batch at each turn, and a
+    /// turn is anything the loop waits through -- an upload's answer as much
+    /// as an event, an upload being a round trip. Settings' first frame
+    /// uploads its icons (the sidebar's, from the icon theme), so without
+    /// this room every batch would arrive during those uploads, all at once,
+    /// and no frame would answer them one by one. Counted from `twin`'s own
+    /// first frame rather than written down, so a picture added to the page
+    /// cannot shift the script unseen.
+    fn room_for_first_frame(desk: &mut testing::TestDesktop, twin: &mut SettingsState) {
+        let _frame = twin.render(1200.0, 800.0);
+        for _upload in twin.take_images() {
+            desk.script.push_back(Vec::new());
+        }
+    }
+
     fn control_on(page: SettingsPage, what: RowHit) -> (SettingsState, (f32, f32)) {
         let mut state = SettingsState::new();
         state.current_page = page;
@@ -15343,6 +22313,14 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(
+                &mut desk,
+                &mut control_on(
+                    SettingsPage::UserAccounts,
+                    RowHit::Select(SelectId::Account, 1),
+                )
+                .0,
+            );
             // Each batch is one turn of the loop, so these arrive in order with
             // Settings processing each before the next appears.
             desk.script
@@ -15388,6 +22366,14 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(
+                &mut desk,
+                &mut control_on(
+                    SettingsPage::UserAccounts,
+                    RowHit::Select(SelectId::Account, 1),
+                )
+                .0,
+            );
             desk.script
                 .push_back(vec![InputEvent::new(theirs, click_at(at.0, at.1))]);
             desk.script
@@ -15419,6 +22405,14 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(
+                &mut desk,
+                &mut control_on(
+                    SettingsPage::UserAccounts,
+                    RowHit::Select(SelectId::Account, 1),
+                )
+                .0,
+            );
             desk.script
                 .push_back(vec![InputEvent::new(window, Event::CloseRequested)]);
             // Delivered on a later turn, so it can only arrive if the loop is
@@ -15452,6 +22446,7 @@ mod loop_tests {
 
         {
             let mut desk = desktop.borrow_mut();
+            room_for_first_frame(&mut desk, &mut SettingsState::new());
             desk.script.push_back(vec![InputEvent::new(
                 window,
                 Event::Resize {
@@ -15489,6 +22484,10 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1)).0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script
@@ -15534,6 +22533,14 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(
+                        SettingsPage::UserAccounts,
+                        RowHit::Select(SelectId::Account, 1),
+                    )
+                    .0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script
@@ -15565,6 +22572,10 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1)).0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 // Four more events, none of which touches the appearance file.
@@ -15659,6 +22670,7 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(&mut desk, &mut double_click_control().0);
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script
@@ -15701,6 +22713,10 @@ mod loop_tests {
 
             {
                 let mut desk = desktop.borrow_mut();
+                room_for_first_frame(
+                    &mut desk,
+                    &mut control_on(SettingsPage::Themes, RowHit::Select(SelectId::ThemeMode, 1)).0,
+                );
                 desk.script
                     .push_back(vec![InputEvent::new(window, click_at(at.0, at.1))]);
                 desk.script

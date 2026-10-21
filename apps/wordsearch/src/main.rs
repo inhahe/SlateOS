@@ -540,6 +540,8 @@ pub struct WordSearchApp {
     palette: Palette,
     /// `palette`'s colours as this window draws them: rebuilt with it.
     colours: Colours,
+    /// Why a greyed chip is greyed, said while the pointer rests on it.
+    reasons: gamechrome::why::Reasons,
 }
 
 impl WordSearchApp {
@@ -571,9 +573,26 @@ impl WordSearchApp {
             size: (WINDOW_WIDTH, WINDOW_HEIGHT),
             palette: Palette::for_mode(false),
             colours: Colours::of(&Palette::for_mode(false)),
+            reasons: gamechrome::why::Reasons::new(),
         };
         app.generate_puzzle();
         app
+    }
+
+    /// Why the chip `target` is greyed now, in a sentence for the player;
+    /// `None` when it is not. The hint needs one left and a word left to
+    /// find, as the program refuses it otherwise.
+    #[must_use]
+    pub fn why_greyed(&self, target: Target) -> Option<&'static str> {
+        match target {
+            Target::HintButton if self.status == GameStatus::Won => {
+                Some("Every word is found: start a new game to play again.")
+            }
+            Target::HintButton if self.hints_remaining == 0 => {
+                Some("Every hint for this puzzle has been used.")
+            }
+            _ => None,
+        }
     }
 
     // ── What the outside can ask ───────────────────────────────────────────
@@ -1683,14 +1702,15 @@ impl WordSearchApp {
             true,
         );
         // A hint needs one left and a word left to light: switched off
-        // otherwise, as the program refuses it.
+        // otherwise, as the program refuses it -- greyed exactly when there
+        // is a reason to give for it, so the paint and the words agree.
         self.chip(
             f,
             l.chip(2),
             Target::HintButton,
             &format!("Hint {}", self.hints_remaining),
             l.font,
-            self.hints_remaining > 0 && self.status == GameStatus::Playing,
+            self.why_greyed(Target::HintButton).is_none(),
         );
         self.chip(f, l.chip(3), Target::NewGame, "New", l.font, true);
     }
@@ -1869,7 +1889,10 @@ impl WordSearchApp {
 /// a pointer `Move`, a `Release`, a `Tick` — through exactly the path the
 /// window uses.
 pub fn handle_event(app: &mut WordSearchApp, event: &Event) -> EventResult {
-    match event {
+    // Where the pointer is and what time it is, for the reason a greyed chip
+    // gives, before the event does anything else.
+    let why = app.reasons.event(event);
+    let result = match event {
         Event::Key(key) => app.handle_key(key),
         Event::Mouse(mouse) => app.handle_mouse(mouse),
         Event::Tick { elapsed_ms } => app.tick(*elapsed_ms),
@@ -1882,7 +1905,8 @@ pub fn handle_event(app: &mut WordSearchApp, event: &Event) -> EventResult {
             EventResult::Consumed
         }
         _ => EventResult::Ignored,
-    }
+    };
+    if why { EventResult::Consumed } else { result }
 }
 
 impl App for WordSearchApp {
@@ -1912,14 +1936,17 @@ impl App for WordSearchApp {
     /// there is something for it to move. Leaving this at the default gets no
     /// ticks at all — which is what this program did, with a timer field on the
     /// model and a `MM:SS` in the header and nothing on earth to advance it.
+    ///
+    /// And sooner, when a greyed chip's reason is due first.
     fn tick_interval(&self) -> Option<Duration> {
-        if self.hint.is_some() {
+        let own = if self.hint.is_some() {
             Some(Duration::from_millis(HINT_STEP_MS))
         } else if self.status == GameStatus::Playing {
             Some(Duration::from_millis(CLOCK_MS))
         } else {
             None
-        }
+        };
+        self.reasons.sooner(own)
     }
 
     fn on_event(&mut self, event: &Event) -> Response {
@@ -1936,7 +1963,14 @@ impl App for WordSearchApp {
         // The size the frame is drawn at is the size the next click is read
         // against -- that is the whole point of storing it.
         self.resize(width, height);
-        self.frame(width, height).into_tree()
+        let frame = self.frame(width, height);
+        // The greyed chips this frame drew, for the reason the one under the
+        // pointer gives.
+        let greyed = gamechrome::why::greyed(frame.hits(), |target| self.why_greyed(*target));
+        self.reasons.drawn(greyed, (width, height));
+        let mut tree = frame.into_tree();
+        tree.commands.extend(self.reasons.render(&self.palette));
+        tree
     }
 }
 
@@ -1988,6 +2022,71 @@ fn main() -> ExitCode {
 )]
 mod tests {
     use super::*;
+
+    // --- Why a greyed chip is greyed ------------------------------------------
+
+    /// The window's frame, drawn as the window draws it: the reason a greyed
+    /// chip gives, if one shows, over everything.
+    fn on_screen(a: &mut WordSearchApp) -> RenderTree {
+        App::render(a, WINDOW_WIDTH, WINDOW_HEIGHT)
+    }
+
+    /// Rest the pointer on the Hint chip, where the last frame drew it, and
+    /// let the toolkit's delay pass; what the window then says.
+    fn rest_on_hint(a: &mut WordSearchApp) -> Option<String> {
+        let (x, y) = a
+            .frame(WINDOW_WIDTH, WINDOW_HEIGHT)
+            .rect_of(|t| *t == Target::HintButton)
+            .expect("the header draws the Hint chip")
+            .centre();
+        handle_event(
+            a,
+            &Event::Mouse(MouseEvent {
+                x,
+                y,
+                kind: MouseEventKind::Move,
+            }),
+        );
+        handle_event(a, &Event::Tick { elapsed_ms: 500 });
+        a.reasons.showing().map(str::to_owned)
+    }
+
+    /// **A spent Hint says why**, while the pointer rests on it, after the
+    /// delay and drawn over everything -- and one with hints left says
+    /// nothing.
+    #[test]
+    fn a_greyed_hint_says_why_while_the_pointer_rests_on_it() {
+        let mut a = WordSearchApp::with_seed(1234);
+        on_screen(&mut a);
+        assert_eq!(rest_on_hint(&mut a), None, "a live Hint explains itself");
+
+        a.hints_remaining = 0;
+        on_screen(&mut a);
+        assert_eq!(
+            rest_on_hint(&mut a).as_deref(),
+            Some("Every hint for this puzzle has been used.")
+        );
+        let tree = on_screen(&mut a);
+        let reason = a.reasons.render(&a.palette);
+        assert!(
+            !reason.is_empty() && tree.commands.ends_with(&reason),
+            "not drawn last"
+        );
+
+        a.status = GameStatus::Won;
+        on_screen(&mut a);
+        // A finished game keeps no clock of its own, so the tick asked for
+        // now is the reason's, freshly waiting for the pointer at rest.
+        assert_eq!(
+            App::tick_interval(&a),
+            Some(Duration::from_millis(500)),
+            "the window does not ask for the tick that shows the reason"
+        );
+        assert_eq!(
+            rest_on_hint(&mut a).as_deref(),
+            Some("Every word is found: start a new game to play again.")
+        );
+    }
 
     /// The colours a game draws in until the theme says otherwise.
     fn colours() -> Colours {

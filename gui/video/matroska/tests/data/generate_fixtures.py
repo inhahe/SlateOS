@@ -57,7 +57,10 @@ import sys
 import zlib
 from decimal import Decimal
 
-FFDIR = sys.argv[1] if len(sys.argv) > 1 else "D:/utils"
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
+import fixture_tools  # noqa: E402  (gui/video: where the generators find ffmpeg)
+
+FFDIR = sys.argv[1] if len(sys.argv) > 1 else fixture_tools.tool_dir("ffmpeg")
 FFMPEG = os.path.join(FFDIR, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
 FFPROBE = os.path.join(FFDIR, "ffprobe.exe" if os.name == "nt" else "ffprobe")
 

@@ -84,12 +84,31 @@ run_side() {
   diff_run timeout -k 2 15 env LC_ALL=C.UTF-8 PATH="$bindir/$side" "$prog" "$@"
 }
 
+# Where the next case's standard output and error go: '' for the files the
+# comparison reads, or one of '>/dev/full', '>&-', '2>/dev/full' and '2>&-'.
+# Whatever is redirected away is compared as empty on both sides. Reset after
+# every case.
+REDIR=''
+
+# `side_redir SIDE OUT ERR ARGS...`: one side, connected as `REDIR` says.
+side_redir() {
+  local side=$1 out=$2 err=$3; shift 3
+  case $REDIR in
+    '>/dev/full')  run_side "$side" "$@" </dev/null >/dev/full 2>"$err" ;;
+    '>&-')         run_side "$side" "$@" </dev/null >&- 2>"$err" ;;
+    '2>/dev/full') run_side "$side" "$@" </dev/null >"$out" 2>/dev/full ;;
+    '2>&-')        run_side "$side" "$@" </dev/null >"$out" 2>&- ;;
+    *)             run_side "$side" "$@" </dev/null >"$out" 2>"$err" ;;
+  esac
+}
+
 compare() {
   local o_out g_out o_err g_err o_rc g_rc
   o_err=$(mktemp); g_err=$(mktemp)
   local o_bin g_bin; o_bin=$(mktemp); g_bin=$(mktemp)
-  run_side ours "$@" </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-  run_side gnu  "$@" </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
+  side_redir ours "$o_bin" "$o_err" "$@"; o_rc=$?
+  side_redir gnu  "$g_bin" "$g_err" "$@"; g_rc=$?
+  REDIR=''
   o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
   local o_msg g_msg
   o_msg=$(cat "$o_err"); g_msg=$(cat "$g_err")
@@ -116,17 +135,17 @@ report() {
   return 0
 }
 
-run_case() { compare "$@"; report "$prog $*"; }
+run_case() { local redir=$REDIR; compare "$@"; report "$prog $* $redir"; }
 
 xfail_case() {
-  local why=$1; shift
+  local why=$1 redir=$REDIR; shift
   compare "$@"
   if [ "$AGREED" = yes ]; then
     xpass=$((xpass+1))
-    printf 'XPASS %s %s -- expected to differ (%s) and did not\n' "$prog" "$*" "$why"
+    printf 'XPASS %s %s %s -- expected to differ (%s) and did not\n' "$prog" "$*" "$redir" "$why"
   else
     xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'xfail %s %s (%s)\n' "$prog" "$*" "$why"
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s %s %s (%s)\n%s\n' "$prog" "$*" "$redir" "$why" "$REPORT"
   fi
   return 0
 }
@@ -228,6 +247,32 @@ run_case -b -F empty.txt
 run_case -F name.txt -s
 run_case -F name.txt other
 run_case one two
+
+# --- output that cannot be written ------------------------------------------------------
+# Upstream's printfs are unchecked and it has no close_stdout, so with its output
+# on a full disk or closed it exits 0 having printed nowhere. Ours reports the
+# write, as a coreutils program does: design-decisions 1071, the operator's
+# answer to B-Q25. A run that writes nothing to standard output has nothing to
+# report, and a failing standard error is upstream's silence on both sides.
+why_write='a failed write is reported (design-decisions 1071)'
+REDIR='>/dev/full'; xfail_case "$why_write"
+REDIR='>&-';        xfail_case "$why_write"
+REDIR='>/dev/full'; xfail_case "$why_write" -s
+REDIR='>/dev/full'; xfail_case "$why_write" --help
+REDIR='>/dev/full'; xfail_case "$why_write" -V
+REDIR='>&-';        xfail_case "$why_write" -V
+REDIR='>/dev/full'; run_case -F /nosuch/file
+REDIR='>&-';        run_case -F /nosuch/file
+REDIR='>/dev/full'; run_case newname
+# getopt's complaint, then the usage on standard output, which fails: upstream
+# exits 255 having said only the complaint; ours reports the write too, and its
+# status is close_stdout's 1.
+REDIR='>/dev/full'; xfail_case "$why_write" -sQ
+REDIR='2>/dev/full'; run_case -F /nosuch/file
+REDIR='2>&-';        run_case -F /nosuch/file
+REDIR='2>/dev/full'; run_case newname
+REDIR='2>/dev/full'; run_case -Q
+REDIR='2>/dev/full'; run_case
 
 # --- the names the program answers to --------------------------------------------------
 # Debian installs dnsdomainname, domainname, nisdomainname and ypdomainname as

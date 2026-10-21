@@ -1,6 +1,11 @@
-## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — **open: one program left, `kill`, frozen by B-Q22**
+## TD-COREUTILS-LONG-OPTIONS-DO-NOT-ABBREVIATE (lane B, 2026-08-16) — FIXED on lane-b, pending a boot test on main
 
-**Status:** OPEN -- re-measured 2026-10-03, and down to one program. Every
+**Status:** FIXED on `lane-b` 2026-10-09, pending a boot test on `main`;
+then it moves to `known-issues-resolved/`. The last program, `kill`, is
+procps-ng 4.0.4's now (B-Q22's answer, design-decisions §1072), read with
+`getopt_long` through the shared parser, so `--sig=USR2` and `--tab` work as
+they do upstream; `scripts/kill-diff.sh` holds them. Before that, re-measured
+2026-10-03, it was down to one program. Every
 other program in `userspace/coreutils/src/bin/` parses through the shared
 `getopt` (directly, or through its library module: the digests, `basenc`,
 `ls`, `pgrep`), and the sixteen whose GNU originals use gnulib's

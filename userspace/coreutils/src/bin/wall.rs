@@ -215,12 +215,10 @@ impl GroupWorkspace {
     }
 }
 
-/// `xgethostname`: `gethostname` into `sysconf (_SC_HOST_NAME_MAX) + 1`
-/// bytes, or `None`.
+/// `xgethostname`: [`libcall::xgethostname`]'s name, or `None`.
 fn xgethostname() -> Option<Vec<u8>> {
-    let mut buf = [0u8; 65];
-    let n = libcall::hostname_into(&mut buf).ok()?;
-    Some(buf.get(..n.min(64)).unwrap_or_default().to_vec())
+    let mut buf = [0u8; libcall::XGETHOSTNAME_BUF];
+    libcall::xgethostname(&mut buf).map(<[u8]>::to_vec)
 }
 
 /// util-linux's `xgetlogin`: the real uid's name, or `None`.

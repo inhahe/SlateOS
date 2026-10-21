@@ -59315,6 +59315,17 @@ BOOT_OK both times. **Left:** lane C's request answered and lane B told
 that `powerctl reload` can call 1139, once this is on main; the kexec boot
 is still run by hand, not by `boot-test.sh`.
 
+- **videocodec: F-Q11's answer, C, in `colour.rs`** (design-decisions §1389,
+  lane F, 2026-10-12). `resolve` in `gui/video/codec/src/colour.rs` ignores a
+  colour part a video gives alone, where Chrome does; the operator chose to
+  use every part given and guess only the rest (BT.709 for HD, BT.601 for
+  smaller), then convert primaries and curve to the screen as for a fully
+  described video. **Do it**: take each of matrix, range, primaries and
+  transfer from the container if it says it, else the stream, else the
+  guess; tests for a video giving only its primaries, only its matrix, and
+  only HDR; the player's fixtures unchanged for fully described and
+  untagged video.
+
 ## Lane F — the H.264 decoder, translated a module at a time (2026-10-10)
 
 - **h264: read through `gui/video/ffbits`** (`gui/video/h264/src/bits.rs`,

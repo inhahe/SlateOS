@@ -294,6 +294,94 @@ HELP_MUTATIONS = [
     ),
 ]
 
+
+WHY = Path(__file__).parent / "src" / "why.rs"
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; requests/c-e-say-why-a-control-is-disabled.md): the
+# greyed boxes picked from a frame's, the pointer and the clock followed,
+# the sooner tick asked for, the reason drawn, and a copy whole.
+WHY_MUTATIONS = [
+    (
+        'the greyed boxes are every box the frame recorded',
+        '        .filter_map(|(target, r)| why(target).map(|why| ((r.x, r.y, r.w, r.h), why.to_owned())))',
+        '        .map(|(target, r)| ((r.x, r.y, r.w, r.h), why(target).unwrap_or("").to_owned()))',
+        ['the_greyed_boxes_are_those_the_game_gives_a_reason_for'],
+    ),
+    (
+        "a frame's greyed buttons are not kept",
+        '        self.drawn = greyed;',
+        '        let _ = greyed;',
+        ['a_button_greyed_under_a_resting_pointer_explains_itself', 'a_greyed_button_says_why_after_the_delay_and_asks_for_the_tick', 'the_reason_goes_with_the_pointer_and_with_the_button'],
+    ),
+    (
+        'a frame drawn does not ask about the pointer again',
+        '        self.screen = screen;\n        self.settle();',
+        '        self.screen = screen;',
+        ['a_button_greyed_under_a_resting_pointer_explains_itself', 'the_reason_goes_with_the_pointer_and_with_the_button'],
+    ),
+    (
+        'leaving is not the pointer gone',
+        '                MouseEventKind::Leave => self.pointer_left(),',
+        '                MouseEventKind::Leave => false,',
+        ['the_window_s_events_move_the_pointer_and_the_clock'],
+    ),
+    (
+        'a pointer event does not move the pointer',
+        '                _ => self.pointer_at(mouse.x, mouse.y),',
+        '                _ => false,',
+        ['the_window_s_events_move_the_pointer_and_the_clock'],
+    ),
+    (
+        'a tick event is not time',
+        '            Event::Tick { elapsed_ms } => self.tick(*elapsed_ms),',
+        '            Event::Tick { .. } => false,',
+        ['the_window_s_events_move_the_pointer_and_the_clock'],
+    ),
+    (
+        'a pointer that left is still followed',
+        '        self.pointer = None;\n        self.why.pointer_left()',
+        '        self.why.pointer_left()',
+        ['a_pointer_that_has_left_starts_no_reason_when_a_frame_is_drawn'],
+    ),
+    (
+        'the clock does not move',
+        '        self.clock_ms = self.clock_ms.saturating_add(elapsed_ms);',
+        '        let _ = elapsed_ms;',
+        ['a_button_greyed_under_a_resting_pointer_explains_itself', 'a_copy_keeps_the_buttons_and_the_pointer_and_waits_again', 'a_greyed_button_says_why_after_the_delay_and_asks_for_the_tick', 'the_reason_goes_with_the_pointer_and_with_the_button', 'the_window_s_events_move_the_pointer_and_the_clock'],
+    ),
+    (
+        'the later tick is asked for',
+        '            (Some(own), Some(reason)) => Some(own.min(reason)),',
+        '            (Some(own), Some(reason)) => Some(own.max(reason)),',
+        ['the_window_ticks_for_the_sooner_of_its_own_and_a_reason'],
+    ),
+    (
+        "a reason's tick is dropped for no tick of the game's",
+        '            (own, reason) => own.or(reason),',
+        '            (own, _) => own,',
+        ['the_window_ticks_for_the_sooner_of_its_own_and_a_reason'],
+    ),
+    (
+        'nothing is drawn',
+        '        self.why.render(palette)',
+        '        let _ = palette;\n        Vec::new()',
+        ['a_greyed_button_says_why_after_the_delay_and_asks_for_the_tick'],
+    ),
+    (
+        'a copy forgets the pointer',
+        '            pointer: self.pointer,',
+        '            pointer: None,',
+        ['a_copy_keeps_the_buttons_and_the_pointer_and_waits_again'],
+    ),
+    (
+        'a copy does not ask about the pointer',
+        '        copy.settle();\n        copy',
+        '        copy',
+        ['a_copy_keeps_the_buttons_and_the_pointer_and_waits_again'],
+    ),
+]
+
 if __name__ == "__main__":
     # A filter goes to the tables it names a row of, and only those: the
     # harness refuses a filter that selects nothing.
@@ -303,6 +391,7 @@ if __name__ == "__main__":
         (LEGIBILITY, LEGIBILITY_MUTATIONS),
         (HISTORY, HISTORY_MUTATIONS),
         (HELP, HELP_MUTATIONS),
+        (WHY, WHY_MUTATIONS),
     ]
     names = [name for _, rows in tables for name, *_ in rows]
     unmatched = [o for o in only if not any(o in n for n in names)]

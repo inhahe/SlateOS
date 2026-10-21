@@ -4,17 +4,19 @@ Breaks one piece of production code at a time and checks that the test which
 claims to cover it is the one that fails.  A test that passes against a broken
 program is not testing the program.
 
-Covers what lane C asked this app for on 2026-09-27 and 2026-09-28: the
-taskbar's window-titles switch, the automatic mode's hours, the pointer's size
-and colours, the colour and icon themes, and the Date & Time page -- each a
-setting the desktop obeyed that nothing here could change.  The rest of the
-suite predates this table.  The last rows, added 2026-10-04, cover the list of
-keys' hold on the pointer: a press with it up puts it away and flips nothing
-under it, and the wheel scrolls no dropdown it covers.
-
-And, from 2026-10-09, the Recycle Bin page (design-decisions §1238, §1240):
-every drive's bin, the default limits, and each drive's own, in `main.rs`;
-what each limit offers and how it reads, in `recyclebins.rs`.
+The rows cover:
+- what lane C asked this app for: the taskbar's window-titles switch, the
+  automatic mode's hours, the pointer's size and colours, the colour and icon
+  themes, and the Date & Time page -- each a setting the desktop obeys;
+- the list of keys' hold on the pointer: a press with it up puts it away and
+  flips nothing under it, and the wheel scrolls no dropdown it covers;
+- why a disabled control is disabled, said while the pointer rests on it
+  (requests/c-e-say-why-a-control-is-disabled.md);
+- the Recycle Bin page (design-decisions §1238, §1240): every drive's bin,
+  the default limits and each drive's own, in `main.rs`; what each limit
+  offers and how it reads, in `recyclebins.rs`;
+- the window rules, their editor and their file, in `main.rs` and `rules.rs`.
+Tests older than the table have no rows.
 
 Run it with no arguments to sweep everything, or with substrings of the
 mutation names to run only those.
@@ -203,8 +205,8 @@ MUTATIONS = [
     ),
     (
         "a hidden event has no button",
-        "                    Some(RowHit::Press(ButtonId::EventColour(event.id))),",
-        "                    None,",
+        "                    Press::Does(RowHit::Press(ButtonId::EventColour(event.id))),",
+        '                    Press::Cannot("Hidden."),',
         ["an_accent_that_hides_an_event_names_it_with_a_way_to_its_colour"],
     ),
     (
@@ -251,8 +253,8 @@ MUTATIONS = [
     ),
     (
         'an announced settings file is not read again',
-        '            return if self.reread(group.file_name()) {',
-        '            return if false && self.reread(group.file_name()) {',
+        '            let mut changed = self.reread(group.file_name());',
+        '            let mut changed = false;',
         ['a_file_changed_elsewhere_is_read_again_and_not_written_back', 'every_file_settings_shows_is_read_again_when_it_changes'],
     ),
     (
@@ -407,8 +409,8 @@ MUTATIONS = [
     ),
     (
         'an opened notice shows none of its text',
-        '                                    for line in body.lines() {',
-        '                                    for line in body.lines().take(0) {',
+        '            let line = body.get(range).unwrap_or_default();',
+        '            let line = body.get(range.start..range.start).unwrap_or_default();',
         ['the_about_page_lists_the_notices_and_opens_one'],
     ),
     (
@@ -431,8 +433,8 @@ MUTATIONS = [
     ),
     (
         'the pictures by time of day are not on the page',
-        '        self.build_wallpaper_schedule(s);\n',
-        '',
+        '            WallpaperSource::TimeOfDay => self.build_wallpaper_schedule(s),',
+        '            WallpaperSource::TimeOfDay => self.build_wallpaper_plain(s),',
         ['a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page', 'a_schedule_of_more_than_two_pictures_is_listed_as_it_is'],
     ),
     (
@@ -515,8 +517,8 @@ MUTATIONS = [
     ),
     (
         'the picture up now is not said',
-        'now.map_or_else(String::new, |up| format!(" Up now: {up}."))',
-        'now.map_or_else(String::new, |_| String::new())',
+        '            s.note(&format!("Up now: {up}."), 28.0);',
+        '            let _ = up;',
         ['a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page'],
     ),
     (
@@ -525,30 +527,10 @@ MUTATIONS = [
         '.scheduled_wallpaper_at(utc_secs, datetimesettings::Tz::utc())',
         ['the_picture_up_now_is_the_one_for_this_machines_time_of_day'],
     ),
-    (
-        'the picture does not say a schedule hides it',
-        '                if scheduled {\n                    s.note(\n                        "Not shown while there are pictures by time of day, below.",',
-        '                if false {\n                    s.note(\n                        "Not shown while there are pictures by time of day, below.",',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
-    (
-        'the rotation does not say a schedule hides it',
-        '                if scheduled {\n                    s.note(\n                        "Not shown while there are pictures by time of day, above.",',
-        '                if false {\n                    s.note(\n                        "Not shown while there are pictures by time of day, above.",',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
-    (
-        'the rotation says the single picture is shown under a schedule',
-        '            None if scheduled => s.note("No folder.", 28.0),\n',
-        '',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
-    (
-        'no picture reads as the plain background under a schedule',
-        '            None if scheduled => s.note("No picture.", 28.0),\n',
-        '',
-        ['the_picture_and_the_rotation_say_when_a_schedule_hides_them'],
-    ),
+    # No rows for the notes saying a source is hidden under a schedule: since
+    # design-decisions §1243 a source the desktop does not show is not on the
+    # page at all, which only_the_source_the_desktop_shows_has_its_controls_on_
+    # the_page holds and the WallpaperSource rows below sweep.
     (
         'a chord raises the list of keys',
         '        if evt.key == Key::F1 && plain {',
@@ -587,16 +569,12 @@ MUTATIONS = [
     ),
     (
         "a chord works the page's keys",
-        '        if !plain {\n            return EventResult::Ignored;\n        }\n        // Category navigation',
-        '        // Category navigation',
+        '        if !plain {\n            return EventResult::Ignored;\n        }\n        // An open list stays by its row',
+        '        // An open list stays by its row',
         ['a_chord_is_neither_a_settings_key_nor_typing'],
     ),
-    (
-        'a copy reaches only its own field',
-        '            *clipboard = copied;\n',
-        '            let _ = copied;\n',
-        ['a_chord_is_neither_a_settings_key_nor_typing'],
-    ),
+    # 'a copy reaches only its own field' moved to the field menu's rows
+    # (2026-10-10), the keys now copying to the program's clipboard.
     # -- the search box and the text field, the toolkit's (c-e-a-theme-can-shape-the-controls)
     (
         'the search box is drawn the same wherever the pointer is',
@@ -797,6 +775,16 @@ AXIS_ROWS = "each_theme_axis_row_opens_its_own_list"
 UNREADABLE = "a_theme_that_cannot_be_read_says_why_in_every_list"
 CANNOT_SERVE = "a_theme_chosen_for_an_axis_it_cannot_serve_says_why"
 FRAMES_WRITTEN = "window_frames_and_a_taskbar_panel_chosen_are_written"
+SOURCES_SHOWN = "only_the_source_the_desktop_shows_has_its_controls_on_the_page"
+SOURCES_CLEARED = "choosing_a_source_clears_those_above_it_and_keeps_those_below"
+SOURCE_PENDING = "a_source_chosen_and_not_set_up_is_shown_until_it_is"
+EACH_CLEAR = "each_clear_empties_its_source_and_stays_on_it"
+SHOW_LIST = "the_show_list_names_every_source_and_opens_on_the_one_shown"
+THEME_CHOSEN = "a_theme_is_chosen_by_its_picture"
+BUNDLED = "the_pictures_themes_bring_are_offered_as_pictures"
+THEME_PROBLEM = "a_theme_whose_pictures_cannot_be_used_says_why"
+NO_THEMES = "with_no_theme_that_brings_pictures_the_page_says_where_they_come_from"
+FRAMES_AND_WAKES = "a_picture_decoded_is_drawn_and_a_wake_asks_for_a_frame"
 
 
 def axis_rows(what, label, variant, field, provides, without, apart, extra=()):
@@ -1021,6 +1009,210 @@ MUTATIONS += [
         "        (!self.cursor_themes.iter().skip(1).any(|t| t.id.as_os_str() == id))",
         ["a_cursor_theme_not_installed_says_so"],
     ),
+    # The Background page's one choice of source, and themes by their
+    # pictures (2026-10-10; design-decisions §1243, lane C's
+    # c-e-a-themes-wallpapers-on-the-background-page).
+    (
+        "a schedule is never what the desktop shows",
+        "        if !settings.wallpaper_schedule.is_empty() {\n            Self::TimeOfDay",
+        "        if false {\n            Self::TimeOfDay",
+        [SOURCES_SHOWN, SOURCES_CLEARED],
+    ),
+    (
+        "a folder is never what the desktop shows",
+        "        } else if settings.wallpaper_folder.is_some() {\n            Self::Folder",
+        "        } else if false {\n            Self::Folder",
+        [SOURCES_SHOWN, SOURCES_CLEARED],
+    ),
+    (
+        "a theme is never what the desktop shows",
+        "        } else if !settings.wallpaper_theme.is_built_in() {\n            Self::Theme",
+        "        } else if false {\n            Self::Theme",
+        [SOURCES_CLEARED, THEME_PROBLEM],
+    ),
+    (
+        "a picture is never what the desktop shows",
+        "        } else if settings.wallpaper.is_some() {\n            Self::Picture",
+        "        } else if false {\n            Self::Picture",
+        [SOURCES_SHOWN, SOURCES_CLEARED],
+    ),
+    (
+        "choosing a source leaves the schedule above it",
+        "        if source.rank() < WallpaperSource::TimeOfDay.rank() {\n"
+        "            s.wallpaper_schedule.clear();\n"
+        "        }\n",
+        "",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "choosing the folder clears the folder",
+        "        if source.rank() < WallpaperSource::Folder.rank() {",
+        "        if source.rank() <= WallpaperSource::Folder.rank() {",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "choosing a theme clears the theme",
+        "        if source.rank() < WallpaperSource::Theme.rank() {",
+        "        if source.rank() <= WallpaperSource::Theme.rank() {",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "choosing a picture clears the picture",
+        "        if source.rank() < WallpaperSource::Picture.rank() {",
+        "        if source.rank() <= WallpaperSource::Picture.rank() {",
+        [SOURCES_CLEARED],
+    ),
+    (
+        "a source chosen and not set up is not shown",
+        "            Some(pending) if pending.rank() > shown.rank() => pending,",
+        "            Some(pending) if false => pending,",
+        [SOURCE_PENDING, "a_morning_and_an_evening_picture_are_chosen_on_the_wallpaper_page"],
+    ),
+    (
+        "a source chosen is shown over one set above it since",
+        "            Some(pending) if pending.rank() > shown.rank() => pending,",
+        "            Some(pending) if pending.rank() > 0 => pending,",
+        [SOURCE_PENDING],
+    ),
+    (
+        "a source chosen and never set up outlives the page",
+        "            // the desktop shows; the page opens on what it does.\n"
+        "            self.wallpaper_source_pending = None;",
+        "            // the desktop shows; the page opens on what it does.",
+        [SOURCE_PENDING],
+    ),
+    (
+        "the schedule's Clear leaves its source",
+        "                self.wallpaper_source_pending = Some(WallpaperSource::TimeOfDay);",
+        "",
+        [EACH_CLEAR],
+    ),
+    (
+        "the folder's Clear leaves its source",
+        "                self.wallpaper_source_pending = Some(WallpaperSource::Folder);",
+        "",
+        [EACH_CLEAR],
+    ),
+    (
+        "the picture's Remove leaves its source",
+        "                self.wallpaper_source_pending = Some(WallpaperSource::Picture);",
+        "",
+        [EACH_CLEAR],
+    ),
+    (
+        "the Show list opens on the first source",
+        "                    .position(|source| *source == shown)",
+        "                    .position(|source| *source == WallpaperSource::Picture)",
+        [SHOW_LIST],
+    ),
+    (
+        "choosing in the Show list does nothing",
+        "                    self.choose_wallpaper_source(*source);",
+        "                    let _ = source;",
+        [SOURCES_CLEARED, SOURCE_PENDING],
+    ),
+    (
+        "the fit is offered with nothing to place",
+        "            && WallpaperSource::shown(&self.appearance.settings) == source\n",
+        "",
+        [SOURCE_PENDING],
+    ),
+    (
+        "the theme source draws no themes",
+        "            WallpaperSource::Theme => self.build_wallpaper_themes(s),",
+        "            WallpaperSource::Theme => self.build_wallpaper_plain(s),",
+        [THEME_CHOSEN, THEME_PROBLEM, NO_THEMES],
+    ),
+    (
+        "a theme with pictures is not offered",
+        "            if info.provides_wallpapers() {",
+        "            if false {",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a theme is shown by its other mode's picture",
+        "                        .picture(light)",
+        "                        .picture(!light)",
+        [THEME_CHOSEN],
+    ),
+    (
+        "the pictures themes bring are not offered",
+        "            for picture in &info.wallpapers {",
+        "            for picture in info.wallpapers.iter().take(0) {",
+        [BUNDLED],
+    ),
+    (
+        "the pictures are not asked for",
+        "                self.thumbs.ask(picture);",
+        "                let _ = picture;",
+        [THEME_CHOSEN, FRAMES_AND_WAKES],
+    ),
+    (
+        "a theme's card chooses nothing",
+        "                        appearance::themes::WallpaperTheme::load_from(&self.theme_dirs, &id);",
+        "                        appearance::themes::WallpaperTheme::built_in();\n                    let _ = &id;",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a bundled picture's card chooses nothing",
+        "                    self.appearance.settings.wallpaper = Some(picture);",
+        "                    let _ = picture;",
+        [BUNDLED],
+    ),
+    (
+        "the picture source offers no bundled pictures",
+        "        if !self.bundled_picture_cards.is_empty() {",
+        "        if false {",
+        [BUNDLED],
+    ),
+    (
+        "every card is the first card",
+        "                RowHit::Select(select, idx),",
+        "                RowHit::Select(select, 0),",
+        [BUNDLED],
+    ),
+    (
+        "the theme chosen is not marked",
+        "card.theme.as_deref() == Some(chosen)",
+        "card.theme.as_deref() == Some(chosen) && false",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a card draws another picture",
+        "                image_id: id,",
+        "                image_id: id ^ 1,",
+        [THEME_CHOSEN],
+    ),
+    (
+        "a theme that cannot be used says nothing",
+        "        if let Some(problem) = settings.wallpaper_theme.problem() {\n            s.note(problem, 28.0);",
+        "        if let Some(problem) = settings.wallpaper_theme.problem() {\n            let _ = problem;",
+        [THEME_PROBLEM],
+    ),
+    (
+        "no uploads reach the window",
+        "        let mut changes = self.thumbs.take_uploads();\n",
+        "        let mut changes = Vec::new();\n",
+        [THEME_CHOSEN, FRAMES_AND_WAKES],
+    ),
+    (
+        "a frame does not collect decoded pictures",
+        "        self.thumbs.collect();\n        // The icon theme",
+        "        // The icon theme",
+        [FRAMES_AND_WAKES],
+    ),
+    (
+        "a wake does not collect decoded pictures",
+        "        if self.thumbs.collect() {",
+        "        if false {",
+        [FRAMES_AND_WAKES],
+    ),
+    (
+        "the window asks for no waker",
+        "    fn wants_waker(&self) -> bool {\n        true",
+        "    fn wants_waker(&self) -> bool {\n        false",
+        [FRAMES_AND_WAKES],
+    ),
     # The colour list's own unreadable theme.
     (
         "an unreadable theme is listed as an icon pack",
@@ -1032,6 +1224,1629 @@ MUTATIONS += [
         [UNREADABLE],
     ),
 ]
+
+
+# -- why a disabled control is disabled, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md): every
+# dimmed button and every row that cannot be used yet gives a reason, which
+# appears after the toolkit's delay, goes with the pointer, and is drawn over
+# everything -- and is never started under a list, a picker, the card or a
+# drag.
+WHY_BUTTONS = "every_dimmed_button_says_why_when_the_pointer_rests_on_it"
+WHY_ROWS = "a_row_that_cannot_be_used_says_why"
+WHY_GOES = "the_reason_goes_when_the_pointer_leaves_the_control"
+WHY_LIVE = "a_control_that_can_be_used_explains_nothing"
+WHY_CARD = "nothing_is_explained_under_the_shortcut_card"
+WHY_COVERS = "nothing_is_explained_under_a_list_a_picker_or_a_drag"
+
+MUTATIONS += [
+    (
+        "a dimmed button gives no reason",
+        "                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, why);",
+        "                let _ = why;",
+        [WHY_BUTTONS, WHY_GOES, WHY_CARD, WHY_COVERS],
+    ),
+    (
+        "a dimmed button's reason is kept for another place",
+        "                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, why);",
+        "                self.disabled_rect(x, y, button_width(label), BUTTON_HEIGHT, why);",
+        [WHY_BUTTONS],
+    ),
+    (
+        "a button that can be pressed gives a reason",
+        "                self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);",
+        "                self.hit_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, what);\n"
+        '                self.disabled_rect(x + dx, y + dy, button_width(label), BUTTON_HEIGHT, "Live.");',
+        [WHY_LIVE],
+    ),
+    (
+        "a row that cannot be used gives no reason",
+        "        let text = value.to_string();\n        let (x, y) = (self.x(), self.y());\n        self.disabled_rect(x - ROW_HIT_INSET, y, ROW_HIT_WIDTH, ITEM_HEIGHT, why);",
+        "        let text = value.to_string();\n        let (x, y) = (self.x(), self.y());\n        let _ = (x, y, why);",
+        [WHY_ROWS],
+    ),
+    (
+        "the page's reasons are not kept",
+        "        self.disabled.push(((x, y, w, h), why.to_owned()));",
+        "        let _ = (x, y, w, h, why);",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "the reasons are asked of the page from another place",
+        "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: self.page_top(),",
+        "        let mut sink = WhySink {\n            x: Self::content_x(),\n            y: 0.0,",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "the pointer is not followed",
+        "            self.pointer = match mouse.kind {\n                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),\n            };",
+        "            let _ = mouse;",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "a pointer that left is still followed",
+        "                MouseEventKind::Leave => None,\n                _ => Some((mouse.x, mouse.y)),",
+        "                MouseEventKind::Leave => self.pointer,\n                _ => Some((mouse.x, mouse.y)),",
+        [WHY_GOES],
+    ),
+    (
+        "a tick does not move the clock",
+        "            self.clock_ms = self.clock_ms.saturating_add(*elapsed_ms);",
+        "            let _ = elapsed_ms;",
+        [WHY_BUTTONS, WHY_ROWS],
+    ),
+    (
+        "the tick that shows a reason asks for no frame",
+        "            if self.why_disabled.tick(self.clock_ms) {\n                result = EventResult::Consumed;\n            }",
+        "            self.why_disabled.tick(self.clock_ms);",
+        [WHY_BUTTONS],
+    ),
+    (
+        "a reason that goes asks for no frame",
+        "        if self.explain_disabled() {\n            result = EventResult::Consumed;\n        }",
+        "        self.explain_disabled();",
+        [WHY_GOES],
+    ),
+    (
+        "the window asks for no tick",
+        "        let why = self.why_disabled.due_in(self.clock_ms);\n",
+        "        let why = self.why_disabled.due_in(self.clock_ms).filter(|_| false);\n",
+        [WHY_BUTTONS],
+    ),
+    (
+        "the reason is not drawn",
+        "        tree.commands.extend(self.why_disabled.render(pal));",
+        "        let _ = self.why_disabled.render(pal);",
+        [WHY_BUTTONS],
+    ),
+    (
+        "a reason is given under the file picker",
+        "        let covered = self.dialog.is_some()\n            || self.color_dialog.is_some()",
+        "        let covered = self.color_dialog.is_some()",
+        [WHY_COVERS],
+    ),
+    (
+        "a reason is given under the colour picker",
+        "            || self.color_dialog.is_some()\n            || self.show_help",
+        "            || self.show_help",
+        [WHY_COVERS],
+    ),
+    (
+        "a reason is given under the shortcut card",
+        "            || self.show_help\n            || self.open_dropdown.is_some()",
+        "            || self.open_dropdown.is_some()",
+        [WHY_CARD],
+    ),
+    (
+        "a reason is given under a list",
+        "            || self.open_dropdown.is_some()\n            || self.field_menu.is_up()\n",
+        "            || self.field_menu.is_up()\n",
+        [WHY_COVERS],
+    ),
+    (
+        "a reason is given during a drag",
+        "            || self.field_menu.is_up()\n            || self.dragging.is_some()\n",
+        "            || self.field_menu.is_up()\n",
+        [WHY_COVERS],
+    ),
+]
+
+
+# Notes wrap to their column and take the room their lines need
+# (2026-10-10): a note was one line however long, cut off by the window.
+MUTATIONS += [
+    (
+        'a note is not wrapped',
+        '        let lines = text::wrap(text, NOTE_WIDTH, NOTE_SIZE, FontWeightHint::Regular);',
+        '        let lines = vec![text.to_owned()];',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+    (
+        'a wrapped note takes only the room asked',
+        '        self.advance(height.max(needed));',
+        '        self.advance(height);',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+    (
+        'a note shrinks below the room asked',
+        '        self.advance(height.max(needed));',
+        '        self.advance(needed);',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+    (
+        "a note's lines are drawn on one another",
+        '                line_y += NOTE_LINE_HEIGHT;',
+        '                line_y += 0.0;',
+        ['a_note_too_long_for_its_column_wraps_and_takes_the_room_its_lines_need'],
+    ),
+]
+
+
+# The System Sounds section (2026-10-10, requests/c-e-a-sounds-page-for-the-
+# sounds-axis.md): on or off, a volume, a sound theme and each event's sound,
+# written to appearance.yaml, and each heard as it is chosen.
+#
+# Not rows: whether a preview is *played* (`play_previews`, set by `main`) is
+# unobservable here -- on this host `sound::play` answers "no device" at once,
+# and a test plays nothing aloud by design -- so the gate and `main`'s line
+# setting it have no test that could fail. That the event seam takes the
+# preview it was asked for is observable, and has rows.
+SOUNDS_CHOSEN = "the_system_sounds_are_chosen_on_the_sound_page_and_reach_the_file"
+SOUNDS_OFF = "with_system_sounds_off_the_rest_of_the_section_is_not_offered"
+SOUNDS_HEARD = "a_sound_is_heard_as_it_is_chosen"
+SLIDER_DRAG = "test_a_slider_drag_follows_the_pointer_past_the_track"
+
+MUTATIONS += [
+    (
+        "the sound themes are not read on entering the Sound page",
+        "            self.refresh_sound_themes();\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the page lists the machine's sound themes, not where it looks",
+        "            Some(roots) => appearance::sounds::available_in(roots),",
+        "            Some(_roots) => appearance::sounds::available(),",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "a theme chosen is looked for in the standard places, not where it was listed",
+        "            Some(roots) => {\n                appearance::sounds::SoundTheme::named(id, self.theme_dirs.clone(), roots.clone())\n            }",
+        "            Some(_roots) => appearance::sounds::SoundTheme::load(id),",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "an event's list opens on the theme's when it is Off",
+        "            Some(appearance::EventSound::Off) => 1,",
+        "            Some(appearance::EventSound::Off) => 0,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's list opens on the theme's when it is the user's own",
+        "            Some(appearance::EventSound::File(_)) => 2,",
+        "            Some(appearance::EventSound::File(_)) => 0,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event that is Off is shown as the theme's",
+        "            Some(appearance::EventSound::Off) => EVENT_SOUND_CHOICES[1].to_owned(),",
+        "            Some(appearance::EventSound::Off) => EVENT_SOUND_CHOICES[0].to_owned(),",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's row does not say the file is the user's own",
+        '                format!("Your own: {file}")',
+        '                format!("{file}")',
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the theme's, chosen again, keeps the user's choice",
+        "                events.remove(event.name);\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "Off is not kept",
+        "                events.insert(event.name.to_owned(), appearance::EventSound::Off);\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "a file of my own puts no picker up",
+        "            2 => self.open_sound_dialog(index),",
+        "            2 => {}",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the sound picker's answer goes to another errand",
+        "        self.picker_is_for = PickerPurpose::EventSound(index);",
+        "        self.picker_is_for = PickerPurpose::LoginImage;",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the picker's file goes to the first event",
+        "                        if let Some(event) = appearance::sounds::SHELL_EVENTS.get(index) {\n                            self.appearance",
+        "                        if let Some(event) = appearance::sounds::SHELL_EVENTS.get(index.min(0)) {\n                            self.appearance",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the picker's file is not kept",
+        ".insert(event.name.to_owned(), appearance::EventSound::File(path));",
+        ".insert(event.name.to_owned(), appearance::EventSound::Off);",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the volume is drawn at nought",
+        "            SliderId::SoundVolume => self.appearance.settings.sounds.volume,",
+        "            SliderId::SoundVolume => 0.0,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the volume is not kept",
+        "            SliderId::SoundVolume => self.appearance.settings.sounds.volume = value,",
+        "            SliderId::SoundVolume => {}",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the volume has no readout",
+        '            Self::SoundVolume => Some(format!("{}%", round_u16(value * 100.0))),',
+        "            Self::SoundVolume => None,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the sounds' switch flips nothing",
+        "            ToggleId::SystemSounds => &mut self.appearance.settings.sounds.enabled,",
+        "            ToggleId::SystemSounds => return None,",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "the rest of the section is offered with the sounds off",
+        "        if !sounds.enabled {\n            s.gap();\n            return;\n        }\n",
+        "",
+        [SOUNDS_OFF],
+    ),
+    (
+        "the section has no volume",
+        '        self.slider(s, "Volume", SliderId::SoundVolume);\n',
+        "",
+        [SOUNDS_OFF, SOUNDS_CHOSEN],
+    ),
+    (
+        "the theme's row does not name it",
+        '                |t| t.name.clone(),\n            );\n        s.dropdown_row("Sound theme"',
+        '                |_t| String::new(),\n            );\n        s.dropdown_row("Sound theme"',
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "every event's row is the first event's",
+        "                DropdownId::EventSound(index),\n                &self.event_sound_shown(index),",
+        "                DropdownId::EventSound(0),\n                &self.event_sound_shown(index),",
+        [SOUNDS_OFF],
+    ),
+    (
+        "the theme list opens on the first theme",
+        "                    .position(|t| t.id.as_os_str() == current)\n                    .unwrap_or(0);",
+        "                    .position(|_t| current.is_empty())\n                    .unwrap_or(0);",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's list opens on the first choice",
+        "                (items, self.event_sound_choice(index))",
+        "                (items, index.min(0))",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "a theme chosen is not kept",
+        "                    self.appearance.settings.sound_theme = self.sound_theme_named(&id);\n",
+        "",
+        [SOUNDS_CHOSEN],
+    ),
+    (
+        "an event's choice does nothing",
+        "            DropdownId::EventSound(event) => self.choose_event_sound(event, index),",
+        "            DropdownId::EventSound(_event) => {}",
+        [SOUNDS_CHOSEN],
+    ),
+    # The previews.
+    (
+        "the theme's sound, chosen again, is not heard",
+        "                events.remove(event.name);\n                self.preview_event(event.name);\n",
+        "                events.remove(event.name);\n",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "the user's file is not heard when the picker answers",
+        "                            self.preview_event(event.name);\n",
+        "",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a theme chosen is not heard",
+        "                        self.preview(&choice);\n",
+        "",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a theme chosen plays the user's sound in its place",
+        "                        let choice = self.appearance.settings.sound_theme.sound(first.name);",
+        "                        let choice = self.appearance.settings.sound_for(first.name);",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "every slider let go plays the volume's sound",
+        "                    if slider == SliderId::SoundVolume {",
+        "                    if slider == slider {",
+        [SLIDER_DRAG],
+    ),
+    (
+        "the volume let go is not heard",
+        "                    if slider == SliderId::SoundVolume {",
+        "                    if slider != SliderId::SoundVolume {",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "the volume let go plays the notification",
+        '                        self.preview_event("audio-volume-change");',
+        '                        self.preview_event("message-new-instant");',
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a preview is not recorded",
+        "        self.pending_preview = Some((sound, volume));\n",
+        "",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a preview plays at full volume",
+        "        let volume = self.appearance.settings.sounds.volume;\n        self.pending_preview",
+        "        let volume = 1.0;\n        self.pending_preview",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "the event seam does not play the preview it was asked for",
+        "        let result = self.handle_event(event);\n        self.play_pending_preview();\n",
+        "        let result = self.handle_event(event);\n",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a preview played is left waiting, to play again",
+        "        let Some((sound, volume)) = self.pending_preview.take() else {",
+        "        let Some((sound, volume)) = self.pending_preview.clone() else {",
+        [SOUNDS_HEARD],
+    ),
+    (
+        "a built-in sound is not previewed",
+        "                    Some(builtin) => sound::Sound::BuiltIn(builtin),",
+        "                    Some(_builtin) => return,",
+        [SOUNDS_HEARD],
+    ),
+]
+
+
+# Pages scroll (2026-10-10): a page longer than the window ran past its
+# bottom, where nothing could be reached. One offset where every walk of the
+# page starts; the wheel, the page keys and a scrollbar move it.
+#
+# Not a row: whether the scrollbar is lit under the pointer
+# (`page_bar_hovered`), which only changes its colour.
+SCROLL_LAST = "a_page_longer_than_the_window_scrolls_to_its_last_row"
+SCROLL_ENDS = "a_page_scrolls_no_further_than_its_ends"
+SCROLL_NEW_PAGE = "another_page_opens_at_its_top"
+SCROLL_KEYS = "the_keys_scroll_the_page"
+SCROLL_BAR = "the_scrollbar_scrolls_a_page_that_does_not_fit"
+SCROLL_HEADER = "a_row_under_the_header_is_not_pressed_through_it"
+
+MUTATIONS += [
+    (
+        "the page's walks ignore the scroll",
+        "        Self::content_top() - self.page_scroll\n",
+        "        Self::content_top()\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "the page is drawn where it was before it scrolled",
+        "            page_y - self.page_scroll,\n",
+        "            page_y,\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "the scrollbar is not drawn",
+        "        self.render_page_bar(&mut tree);\n",
+        "",
+        [SCROLL_BAR],
+    ),
+    (
+        "a page's rows are not measured",
+        "        sink.y + PAGE_FOOT\n",
+        "        PAGE_FOOT\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "a page scrolls until its last row has gone",
+        "        (self.page_height() - self.page_view_height()).max(0.0)\n",
+        "        self.page_height().max(0.0)\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "a page scrolls past its end",
+        "        self.page_scroll = to.clamp(0.0, self.max_page_scroll());\n",
+        "        self.page_scroll = to.max(0.0);\n",
+        [SCROLL_ENDS],
+    ),
+    (
+        "a page grown shorter is left scrolled past its end",
+        "        if self.clamp_page_scroll() {\n            result = EventResult::Consumed;\n        }\n",
+        "",
+        [SCROLL_ENDS],
+    ),
+    (
+        "another page opens where the last was scrolled to",
+        "        self.page_scroll = 0.0;\n        self.page_bar_grab = None;\n",
+        "        self.page_bar_grab = None;\n",
+        [SCROLL_NEW_PAGE],
+    ),
+    (
+        "the wheel over the sidebar scrolls the page",
+        "            MouseEventKind::Scroll { dy, .. } if evt.x >= SIDEBAR_WIDTH => {\n",
+        "            MouseEventKind::Scroll { dy, .. } => {\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "the wheel scrolls the page the wrong way",
+        "                if self.scroll_page_by(wheel::pixels(*dy, ITEM_HEIGHT)) {\n",
+        "                if self.scroll_page_by(-wheel::pixels(*dy, ITEM_HEIGHT)) {\n",
+        [SCROLL_LAST],
+    ),
+    (
+        "Page Down moves a whole view, the row at the edge with it",
+        "        (self.page_view_height() - ITEM_HEIGHT).max(ITEM_HEIGHT)\n",
+        "        self.page_view_height().max(ITEM_HEIGHT)\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "Page Down goes up",
+        "            Key::PageDown => {\n                self.scroll_page_by(self.page_step());\n",
+        "            Key::PageDown => {\n                self.scroll_page_by(-self.page_step());\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "Page Up goes down",
+        "            Key::PageUp => {\n                self.scroll_page_by(-self.page_step());\n",
+        "            Key::PageUp => {\n                self.scroll_page_by(self.page_step());\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "End does not go to the end",
+        "                self.scroll_page_to(f32::MAX);\n",
+        "                self.scroll_page_to(0.0);\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "Home does not go to the top",
+        "            Key::Home => {\n                self.scroll_page_to(0.0);\n",
+        "            Key::Home => {\n                self.scroll_page_to(f32::MAX);\n",
+        [SCROLL_KEYS],
+    ),
+    (
+        "a page that fits has a scrollbar",
+        "        if max <= 0.0 {\n            return None;\n        }\n        let view = self.page_view_height();\n",
+        "        let view = self.page_view_height();\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "the thumb is not taken hold of",
+        "                self.page_bar_grab = Some(my - thumb.y);\n",
+        "",
+        [SCROLL_BAR],
+    ),
+    (
+        "a press below the thumb moves the page up",
+        "            } else {\n                self.scroll_page_by(self.page_step());\n            }\n            return EventResult::Consumed;\n",
+        "            } else {\n                self.scroll_page_by(-self.page_step());\n            }\n            return EventResult::Consumed;\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a press above the thumb moves the page down",
+        "            } else if my < thumb.y {\n                self.scroll_page_by(-self.page_step());\n",
+        "            } else if my < thumb.y {\n                self.scroll_page_by(self.page_step());\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a held thumb does not follow the pointer",
+        "        if let Some(grab) = self.page_bar_grab {\n            self.drag_page_bar_to(my, grab);\n            return EventResult::Consumed;\n        }\n",
+        "",
+        [SCROLL_BAR],
+    ),
+    (
+        "the thumb is never let go",
+        "                self.page_bar_grab = None;\n                EventResult::Consumed\n",
+        "                EventResult::Consumed\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a drag of the thumb moves the page a pixel's worth",
+        "        self.scroll_page_to(fraction * self.max_page_scroll());\n",
+        "        self.scroll_page_to(fraction);\n",
+        [SCROLL_BAR],
+    ),
+    (
+        "a press on the header reaches the row under it",
+        "        if my < Self::content_top() {\n            return None;\n        }\n",
+        "",
+        [SCROLL_HEADER],
+    ),
+    (
+        "the reasons' boxes stay where the page was",
+        "            y: self.page_top(),\n            disabled: Vec::new(),\n",
+        "            y: Self::content_top(),\n            disabled: Vec::new(),\n",
+        [SCROLL_HEADER],
+    ),
+    (
+        "a reason is said through the header",
+        "            Some(at) if !covered && at.1 >= Self::content_top() => {\n",
+        "            Some(at) if !covered => {\n",
+        [SCROLL_HEADER],
+    ),
+    (
+        "a list opens where its button was before the page scrolled",
+        "            y: self.page_top(),\n            found: None,\n",
+        "            y: Self::content_top(),\n            found: None,\n",
+        [SCROLL_LAST],
+    ),
+]
+
+# A field lets the keyboard go when the page changes (2026-10-10): the
+# Background page's exclusion box kept it, and took what was typed on the
+# next page.
+MUTATIONS += [
+    (
+        "a field keeps the keyboard on another page",
+        "        // settings.\n        self.focused_field = None;\n",
+        "        // settings.\n",
+        ["a_field_lets_the_keyboard_go_when_the_page_changes"],
+    ),
+]
+
+
+# The Window Rules page (2026-10-10, requests/c-e-a-window-rules-page-in-
+# settings.md): lane C's rules in order, each switched, changed, moved and
+# deleted, a new one added, the file's unreadable rules said and never saved
+# over; the editor's fields and lists.
+#
+# Not rows: scrolling the editor to its top on opening and closing, which
+# only moves the view; and the 256-rule limit on Add, which would need a test
+# writing 256 rules for one sentence.
+R_BUILT_IN = "with_no_rules_written_the_built_in_ones_are_shown_and_a_change_makes_them_yours"
+R_LISTED = "each_rule_is_listed_with_what_it_matches_and_does"
+R_SWITCH = "a_rule_switched_off_is_written_off_and_stays_in_its_place"
+R_MOVE = "rules_move_up_and_down_and_the_ends_say_why_they_cannot"
+R_DELETE = "a_rule_deleted_can_be_put_back_where_it_was"
+R_ADD = "a_new_rule_is_written_above_the_rest"
+R_EDIT = "a_rule_changed_keeps_its_place_and_its_name_must_be_its_own"
+R_CANCEL = "cancel_keeps_nothing_of_the_editor"
+R_UNREADABLE = "a_rule_the_file_cannot_read_is_shown_and_nothing_saves_over_it"
+R_EVERY = "every_choice_the_editor_offers_reaches_the_file"
+R_KEPT = "what_the_editor_does_not_offer_is_kept_and_a_snap_can_be_taken_off"
+R_KEYS = "the_editors_fields_take_the_keyboard_in_turn"
+R_TAB_SCROLL = "tab_scrolls_the_field_it_goes_to_into_view"
+R_REREAD = "rules_changed_under_the_page_are_read_again"
+
+MUTATIONS += [
+    (
+        "the rules are not read on entering the page",
+        "        if page == SettingsPage::WindowRules {\n            self.reread_rules();\n        }\n",
+        "",
+        [R_LISTED],
+    ),
+    (
+        "with no file there are no rules, not the built-in ones",
+        "                self.rules = windowrules::default_rules();\n",
+        "                self.rules = Vec::new();\n",
+        [R_BUILT_IN],
+    ),
+    (
+        "the built-in rules are not said to be",
+        "        if self.rules_built_in {\n",
+        "        if !self.rules_built_in {\n",
+        [R_BUILT_IN],
+    ),
+    (
+        "a rule's name is not drawn",
+        "            text_elided(tree, x, y + 14.0, &name, pal.text, 14.0, NAME_WIDTH);\n            render_toggle(",
+        "            render_toggle(",
+        [R_LISTED],
+    ),
+    (
+        "a rule's actions are not said",
+        "                    \"{}. {}\",\n",
+        "                    \"{}.{}\",\n",
+        [R_LISTED],
+    ),
+    (
+        "the switch flips nothing",
+        "        rule.enabled = !rule.enabled;\n",
+        "",
+        [R_SWITCH],
+    ),
+    (
+        "a change is not written",
+        "        let stored = windowrules::file::store(&rules);\n",
+        "        let stored: std::io::Result<()> = Ok(());\n        let _ = &rules;\n",
+        [R_SWITCH],
+    ),
+    (
+        "the page shows what it holds, not what the file says",
+        "        self.refresh_rules();\n        stored.is_ok()\n",
+        "        stored.is_ok()\n",
+        [R_BUILT_IN],
+    ),
+    (
+        "a move moves nothing",
+        "        self.rules.swap(index, other);\n",
+        "",
+        [R_MOVE],
+    ),
+    (
+        "up moves down",
+        "        let other = if up {\n            index.checked_sub(1)\n        } else {\n            index.checked_add(1)\n        };\n",
+        "        let other = if up {\n            index.checked_add(1)\n        } else {\n            index.checked_sub(1)\n        };\n",
+        [R_MOVE],
+    ),
+    (
+        "the first rule is offered a move up",
+        "            let up = if index == 0 {\n",
+        "            let up = if index == usize::MAX {\n",
+        [R_MOVE],
+    ),
+    (
+        "the last rule is offered a move down",
+        "            let down = if index == last {\n",
+        "            let down = if index == usize::MAX {\n",
+        [R_MOVE],
+    ),
+    (
+        "a deleted rule is not offered back",
+        "            self.rule_deleted = Some((index, rule));\n",
+        "",
+        [R_DELETE],
+    ),
+    (
+        "a rule put back goes to the end",
+        "        let at = index.min(self.rules.len());\n",
+        "        let at = self.rules.len().min(index.max(self.rules.len()));\n",
+        [R_DELETE],
+    ),
+    (
+        "a rule put back is offered back again",
+        "        let Some((index, rule)) = self.rule_deleted.take() else {\n",
+        "        let Some((index, rule)) = self.rule_deleted.clone() else {\n",
+        [R_DELETE],
+    ),
+    (
+        "a change keeps the deleted rule on offer",
+        "        rule.enabled = !rule.enabled;\n        self.rule_deleted = None;\n",
+        "        rule.enabled = !rule.enabled;\n",
+        [R_DELETE],
+    ),
+    (
+        "a new rule goes to the bottom",
+        "            None => self.rules.insert(0, rule),\n",
+        "            None => self.rules.push(rule),\n",
+        [R_ADD],
+    ),
+    (
+        "a changed rule is added as a new one",
+        "        match draft.editing.and_then(|at| self.rules.get_mut(at)) {\n",
+        "        match draft.editing.and_then(|at| self.rules.get_mut(at)).filter(|_| false) {\n",
+        [R_EDIT],
+    ),
+    (
+        "Save leaves the editor open",
+        "        if self.store_rules() {\n            self.close_rule_editor();\n        }\n",
+        "        self.store_rules();\n",
+        [R_ADD],
+    ),
+    (
+        "Cancel keeps the editor",
+        "            RowHit::Press(ButtonId::CancelRule) => self.close_rule_editor(),\n",
+        "            RowHit::Press(ButtonId::CancelRule) => {}\n",
+        [R_CANCEL],
+    ),
+    (
+        "a closed editor's field keeps the keyboard",
+        "            .is_some_and(|field| FieldId::RULE_FIELDS.contains(&field))\n        {\n            self.focused_field = None;\n        }\n",
+        "            .is_some_and(|field| FieldId::RULE_FIELDS.contains(&field))\n        {\n        }\n",
+        [R_CANCEL],
+    ),
+    (
+        "the editor opens with the keyboard elsewhere",
+        "        self.focused_field = Some(FieldId::RuleName);\n",
+        "",
+        [R_ADD],
+    ),
+    (
+        "the editor opens on a blank rule to change one",
+        "            Some((at, rule)) => rules::RuleDraft::of(rule, at),\n",
+        "            Some(_) => rules::RuleDraft::new(),\n",
+        [R_EDIT],
+    ),
+    (
+        "Save is offered for a draft that is not a rule",
+        "        let save = match &why {\n            None => Press::Does(RowHit::Press(ButtonId::SaveRule)),\n            Some(why) => Press::Cannot(why),\n        };\n",
+        "        let save = Press::Does(RowHit::Press(ButtonId::SaveRule));\n",
+        [R_EDIT],
+    ),
+    (
+        "the reason is not said under Save",
+        "        if let Some(why) = &why {\n            s.note(why, 28.0);\n        }\n",
+        "",
+        [R_EDIT],
+    ),
+    (
+        "an unreadable rule's problem is not said",
+        "                s.note(&line, 28.0);\n",
+        "",
+        [R_UNREADABLE],
+    ),
+    (
+        "changes are not refused while a rule cannot be read",
+        "        (!self.rule_problems.is_empty()).then_some(\n",
+        "        (self.rule_problems.len() > usize::MAX - 1).then_some(\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "a save writes over a rule that cannot be read",
+        "        if self.rules_blocked().is_some() {\n            return false;\n        }\n",
+        "",
+        [R_UNREADABLE],
+    ),
+    (
+        "a switch refused is kept to be written later",
+        "    fn set_rule_enabled(&mut self, index: usize) {\n        if self.rules_blocked().is_some() {\n            return;\n        }\n",
+        "    fn set_rule_enabled(&mut self, index: usize) {\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "a move refused is kept to be written later",
+        "        if index >= self.rules.len() || self.rules_blocked().is_some() {\n            return;\n        }\n        self.rules.swap(index, other);\n",
+        "        if index >= self.rules.len() {\n            return;\n        }\n        self.rules.swap(index, other);\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "a delete refused is kept to be written later",
+        "        if index >= self.rules.len() || self.rules_blocked().is_some() {\n            return;\n        }\n        let rule = self.rules.remove(index);\n",
+        "        if index >= self.rules.len() {\n            return;\n        }\n        let rule = self.rules.remove(index);\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "the editor opens while a rule cannot be read",
+        "    fn open_rule_editor(&mut self, index: Option<usize>) {\n        if self.rules_blocked().is_some() {\n            return;\n        }\n",
+        "    fn open_rule_editor(&mut self, index: Option<usize>) {\n",
+        [R_UNREADABLE],
+    ),
+    (
+        "Remove them removes nothing",
+        "        self.rule_problems.clear();\n",
+        "",
+        [R_UNREADABLE],
+    ),
+    (
+        "the rules are not read again when their file changes",
+        "            self.reread_rules()\n",
+        "            false\n",
+        [R_REREAD],
+    ),
+    (
+        "the rule being changed is not followed to its new place",
+        "            draft.editing = editing.and_then(|name| self.rules.iter().position(|r| r.name == name));\n",
+        "            let _ = (draft, editing);\n",
+        [R_REREAD],
+    ),
+    (
+        "Tab does not go on to the next field",
+        "            Key::Tab | Key::Enter if plain => {\n",
+        "            Key::Enter if plain => {\n",
+        [R_KEYS],
+    ),
+    (
+        "Shift+Tab goes on, not back",
+        "                let back = evt.key == Key::Tab && evt.modifiers.shift;\n",
+        "                let back = evt.key == Key::Tab && evt.modifiers.shift && evt.modifiers.ctrl;\n",
+        [R_KEYS],
+    ),
+    (
+        "Escape keeps the keyboard in the field",
+        "            Key::Escape if plain => {\n                self.focused_field = None;\n                Some(EventResult::Consumed)\n            }\n            Key::Tab | Key::Enter",
+        "            Key::Escape if plain => Some(EventResult::Consumed),\n            Key::Tab | Key::Enter",
+        [R_KEYS],
+    ),
+    (
+        "what is typed does not reach the field",
+        "                    .and_then(|draft| rule_input(draft, field))?;\n",
+        "                    .and_then(|draft| rule_input(draft, FieldId::ExclusionDraft))?;\n",
+        [R_KEYS],
+    ),
+    (
+        "a field a choice hides keeps the keyboard",
+        "            && !self.rule_fields().contains(&field)\n        {\n            self.focused_field = None;\n        }\n",
+        "            && !self.rule_fields().contains(&field)\n        {\n        }\n",
+        [R_KEYS],
+    ),
+    (
+        "Tab goes to a field the editor does not show",
+        "                FieldId::RulePlace => draft.place.field_label().is_some(),\n",
+        "                FieldId::RulePlace => true,\n",
+        [R_KEYS],
+    ),
+    (
+        "Tab leaves the field it goes to off screen",
+        "        if let Some(field) = next {\n            self.scroll_into_view(AnchorId::Field(field));\n",
+        "        if let Some(field) = next {\n",
+        [R_TAB_SCROLL],
+    ),
+    (
+        "a field above the view is scrolled further away",
+        "            self.scroll_page_by(y - top);\n",
+        "            self.scroll_page_by(top - y);\n",
+        [R_TAB_SCROLL],
+    ),
+    (
+        "a field does not say where it is",
+        "        self.anchor(AnchorId::Field(id), x, y);\n",
+        "",
+        [R_TAB_SCROLL],
+    ),
+    (
+        "the list of ways to match opens on the first",
+        "                |kind| *kind == draft.matching,\n",
+        "                |kind| *kind != *kind,\n",
+        [R_EDIT],
+    ),
+    (
+        "a yes-or-no list opens on the first",
+        "                    |tri| *tri == now,\n",
+        "                    |tri| *tri != *tri && now == now,\n",
+        [R_EDIT],
+    ),
+    (
+        "the way to match is not chosen",
+        "                    draft.matching = *kind;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "where it opens is not chosen",
+        "                    draft.place = *place;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "how big it opens is not chosen",
+        "                    draft.size = *size;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "the desktop is not chosen",
+        "                    draft.actions.desktop = *desktop;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "how it opens is not chosen",
+        "                    draft.actions.initial_state = *state;\n",
+        "",
+        [R_ADD],
+    ),
+    (
+        "the opacity is not chosen",
+        "                    draft.actions.opacity = *opacity;\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "a yes or no is not chosen",
+        "                    flag.set(&mut draft.actions, tri.value());\n",
+        "",
+        [R_EVERY],
+    ),
+    (
+        "a snap zone cannot be taken off",
+        "                    draft.actions.snap_zone = None;\n",
+        "",
+        [R_KEPT],
+    ),
+    (
+        "for the first window only is not kept",
+        "            ToggleId::RuleOnce => &mut self.rule_draft.as_mut()?.once,\n",
+        "            ToggleId::RuleOnce => return None,\n",
+        [R_EVERY],
+    ),
+]
+
+
+# Fonts from a theme (2026-10-10, requests/c-e-fonts-from-a-theme-on-the-
+# fonts-page.md): where the fonts come from, chosen first; a theme's
+# recommendations, which are installed and which will be drawn.
+F_SOURCE = "the_fonts_come_from_your_own_choice_or_a_theme_and_reach_the_file"
+F_THEME = "a_themes_fonts_say_which_are_installed_and_which_will_be_drawn"
+F_PROBLEM = "a_font_theme_that_cannot_be_used_says_why_and_your_own_fonts_are_offered"
+F_OWN = "a_family_of_your_own_is_your_own_fonts"
+F_NONE = "with_no_theme_recommending_fonts_the_page_says_so"
+
+MUTATIONS += [
+    (
+        "the themes are not read on entering the Fonts page",
+        "        if page == SettingsPage::Fonts {\n            self.refresh_themes();\n        }\n",
+        "",
+        [F_SOURCE],
+    ),
+    (
+        "the built-in theme is not called my own fonts",
+        "        if info.origin == appearance::themes::Origin::BuiltIn {\n            MY_OWN_FONTS.to_owned()\n",
+        "        if info.origin == appearance::themes::Origin::BuiltIn {\n            info.name.clone()\n",
+        [F_SOURCE],
+    ),
+    (
+        "a theme recommending no fonts does not say so",
+        "            format!(\"{} -- recommends no fonts\", info.name)\n",
+        "            info.name.clone()\n",
+        [F_SOURCE],
+    ),
+    (
+        "a theme recommending no fonts is chosen for them",
+        "                    } else if info.provides_fonts() {\n                        self.appearance.settings.font_theme =\n",
+        "                    } else if info.provides_fonts() || info.problem.is_none() {\n                        self.appearance.settings.font_theme =\n",
+        [F_SOURCE],
+    ),
+    (
+        "my own fonts cannot be chosen again",
+        "                        self.appearance.settings.font_theme =\n                            appearance::themes::FontTheme::built_in();\n",
+        "",
+        [F_SOURCE],
+    ),
+    (
+        "the fonts list opens on my own fonts whatever is chosen",
+        ".position(|t| t.id.as_os_str() == self.appearance.settings.font_theme.id())",
+        ".position(|t| t.id.as_os_str() == self.appearance.settings.font_theme.id() && t.dir.is_none())",
+        [F_SOURCE],
+    ),
+    (
+        "the fonts row does not name the theme chosen",
+        "                |t| t.name.clone(),\n            )\n    }\n\n    /// A theme's row in the Taskbar panel list",
+        "                |_t| MY_OWN_FONTS.to_owned(),\n            )\n    }\n\n    /// A theme's row in the Taskbar panel list",
+        [F_SOURCE],
+    ),
+    (
+        "a font theme no longer installed is shown as my own fonts",
+        "                || std::path::Path::new(theme.id()).shown().to_string(),\n                |t| t.name.clone(),\n            )\n    }\n\n    /// A theme's row in the Taskbar",
+        "                || MY_OWN_FONTS.to_owned(),\n                |t| t.name.clone(),\n            )\n    }\n\n    /// A theme's row in the Taskbar",
+        [F_PROBLEM],
+    ),
+    (
+        "a theme's fonts are not shown",
+        "            self.build_theme_fonts(s);\n",
+        "            self.build_own_fonts(s);\n",
+        [F_THEME],
+    ),
+    (
+        "a font theme that cannot be used offers no fonts",
+        "        if theme.is_built_in() || theme.problem().is_some() {\n",
+        "        if theme.is_built_in() {\n",
+        [F_PROBLEM],
+    ),
+    (
+        "why a font theme cannot be used is not said",
+        "        if let Some(problem) = theme.problem() {\n            s.note(problem, 40.0);\n        }\n",
+        "",
+        [F_PROBLEM],
+    ),
+    (
+        "every recommended family is said to be installed",
+        "                if installed(family) {\n",
+        "                if installed(family) || !family.is_empty() {\n",
+        [F_THEME],
+    ),
+    (
+        "the family drawn is the user's own",
+        "        let drawn = settings.fonts_with_theme(installed);\n",
+        "        let drawn = settings.fonts.clone();\n",
+        [F_THEME],
+    ),
+    (
+        "a family of one's own leaves the theme chosen",
+        "                    self.appearance.settings.fonts.ui_font = family.clone();\n                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();\n",
+        "                    self.appearance.settings.fonts.ui_font = family.clone();\n",
+        [F_OWN],
+    ),
+    (
+        "a fixed-pitch family of one's own leaves the theme chosen",
+        "                    self.appearance.settings.fonts.mono_font = family.clone();\n                    self.appearance.settings.font_theme = appearance::themes::FontTheme::built_in();\n",
+        "                    self.appearance.settings.fonts.mono_font = family.clone();\n",
+        [F_OWN],
+    ),
+    (
+        "the page says no theme recommends fonts when one does",
+        "        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {\n",
+        "        if theme.is_built_in() {\n",
+        [F_NONE],
+    ),
+    (
+        "the page never says no theme recommends fonts",
+        "        if theme.is_built_in() && !self.themes.iter().any(|t| t.provides_fonts()) {\n",
+        "        if theme.is_built_in() && self.themes.is_empty() {\n",
+        [F_NONE],
+    ),
+]
+
+
+# Text fits its row (2026-10-10): a value beside a label is cut with an
+# ellipsis at the notes' edge, why something failed is said in full in red,
+# an opened licence is wrapped with every byte kept, and a row of pills is
+# laid out from its labels and wraps within the control column.
+FIT_ALL = "no_text_on_any_page_runs_past_its_rows"
+FIT_VALUE = "a_value_too_wide_for_its_row_is_cut_at_the_notes_edge"
+FIT_LICENCE = "an_opened_licence_wraps_to_the_column_and_keeps_every_byte"
+FIT_PROBLEM = "a_problem_is_said_in_full_in_red"
+FIT_PILLS = "a_pill_row_wraps_in_its_column_and_grows"
+FIT_UNREAD = "a_licence_that_cannot_be_read_says_why"
+FIT_BIN = "a_default_limit_that_cannot_be_kept_says_why"
+FIT_GAP = "test_a_click_in_the_gap_between_pills_changes_nothing"
+
+MUTATIONS += [
+    (
+        "a value runs on past its row",
+        "            text_elided(tree, cx, y + 14.0, value, color, 13.0, VALUE_WIDTH);\n",
+        "            tree.text(cx, y + 14.0, value, color, 13.0);\n",
+        [FIT_VALUE],
+    ),
+    (
+        "a value's room ends past the notes' edge",
+        "const VALUE_WIDTH: f32 = NOTE_WIDTH - CONTROL_COLUMN_DX;\n",
+        "const VALUE_WIDTH: f32 = NOTE_WIDTH - CONTROL_COLUMN_DX + 40.0;\n",
+        [FIT_VALUE],
+    ),
+    (
+        "a row of pills never wraps",
+        "        if x > 0.0 && x + width > VALUE_WIDTH {\n",
+        "        if x > 0.0 && x + width > VALUE_WIDTH * 4.0 {\n",
+        [FIT_ALL, FIT_PILLS],
+    ),
+    (
+        "a row of pills that wraps does not grow",
+        "    (rects, ITEM_HEIGHT + (y - PILL_INSET_Y))\n",
+        "    (rects, ITEM_HEIGHT)\n",
+        [FIT_PILLS],
+    ),
+    (
+        "a pill is never wider than the narrowest",
+        "            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH);\n",
+        "            .clamp(PILL_MIN_WIDTH, PILL_MIN_WIDTH);\n",
+        [FIT_PILLS],
+    ),
+    (
+        "a pill may be wider than the column",
+        "            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH);\n",
+        "            .clamp(PILL_MIN_WIDTH, VALUE_WIDTH * 2.0);\n",
+        [FIT_PILLS],
+    ),
+    (
+        "pills touch",
+        "        x += width + PILL_GAP;\n",
+        "        x += width;\n",
+        [FIT_GAP],
+    ),
+    (
+        "a pill's label runs out of its pill",
+        "        text_elided(\n            tree,\n            px + PILL_PAD_X,\n            py + 7.0,\n            label,\n            fg,\n            PILL_TEXT_SIZE,\n            pw - 2.0 * PILL_PAD_X,\n        );\n",
+        "        tree.text(px + PILL_PAD_X, py + 7.0, label, fg, PILL_TEXT_SIZE);\n",
+        [FIT_PILLS],
+    ),
+    (
+        "why something failed is not said in red",
+        "        self.note_in(text, 28.0, pal.ink(pal.red));\n",
+        "        self.note_in(text, 28.0, pal.subtext0);\n",
+        [FIT_PROBLEM],
+    ),
+    (
+        "a note is drawn in black whatever its ink",
+        "                tree.text(x, line_y, line, ink, NOTE_SIZE);\n",
+        "                tree.text(x, line_y, line, Color::BLACK, NOTE_SIZE);\n",
+        [FIT_PROBLEM],
+    ),
+    (
+        "an opened licence is not wrapped",
+        "    text::wrap_ranges(body, NOTE_WIDTH, LICENCE_SIZE, FontWeightHint::Regular)\n",
+        "    text::wrap_ranges(body, NOTE_WIDTH * 10.0, LICENCE_SIZE, FontWeightHint::Regular)\n",
+        [FIT_LICENCE],
+    ),
+    (
+        "a licence line draws its carriage return",
+        "            line.strip_suffix('\\r').unwrap_or(line).to_owned()\n",
+        "            line.to_owned()\n",
+        [FIT_LICENCE],
+    ),
+    (
+        "a licence's last line ending begins an empty line",
+        "        .strip_suffix('\\n')\n        .map_or(body, |b| b.strip_suffix('\\r').unwrap_or(b));\n",
+        "        .strip_suffix('\\u{0}')\n        .map_or(body, |b| b.strip_suffix('\\r').unwrap_or(b));\n",
+        [FIT_LICENCE],
+    ),
+    (
+        "a licence that cannot be read says nothing",
+        "                                    s.problem(&format!(\"This licence could not be read: {why}\"));\n",
+        "                                    let _ = why;\n",
+        [FIT_UNREAD],
+    ),
+    (
+        "notices that cannot be read say nothing",
+        "                s.problem(&format!(\"The licence notices could not be read: {why}\"));\n",
+        "                let _ = why;\n",
+        [FIT_UNREAD],
+    ),
+    (
+        "a default limit that could not be kept says nothing",
+        "        if let Some(error) = &self.bin_error {\n            s.problem(error);\n        }\n",
+        "        if let Some(_error) = &self.bin_error {}\n",
+        [FIT_BIN],
+    ),
+]
+
+
+# The Context Menus page (2026-10-10, requests/c-e-programs-add-to-a-files-
+# right-click-menu.md, section 2): every service menu with a switch, what it
+# adds, for which files and whose; what is not offered with why; a switch
+# written as it is flipped, or why it could not be.
+CM_LISTED = "every_context_menu_is_listed_and_what_is_not_offered_says_why"
+CM_SWITCH = "a_context_menus_switch_reaches_the_file"
+CM_REREAD = "context_menu_choices_changed_elsewhere_are_read_again"
+CM_NOT_KEPT = "a_change_that_cannot_be_kept_says_why_and_shows_what_the_file_holds"
+
+MUTATIONS += [
+    (
+        "the context menus are not read on entering the page",
+        "        if page == SettingsPage::ContextMenus {\n            self.refresh_service_menus();\n        }\n",
+        "",
+        [CM_LISTED],
+    ),
+    (
+        "a context menu's switch does nothing",
+        "            RowHit::Toggle(ToggleId::ServiceMenu(index)) => self.set_service_menu(index),\n",
+        "            RowHit::Toggle(ToggleId::ServiceMenu(_index)) => {}\n",
+        [CM_SWITCH],
+    ),
+    (
+        "a context menu's switch flips nothing",
+        "        self.service_choices.choices.set(menu, !on);\n",
+        "        self.service_choices.choices.set(menu, on);\n",
+        [CM_SWITCH],
+    ),
+    (
+        "a context menu's switch is not written",
+        "        match self.service_choices.save() {\n",
+        "        match Ok::<(), std::io::Error>(()) {\n",
+        [CM_SWITCH],
+    ),
+    (
+        "a context menu's switch is drawn the other way",
+        "                self.service_choices.choices.is_on(menu),\n",
+        "                !self.service_choices.choices.is_on(menu),\n",
+        [CM_LISTED, CM_SWITCH],
+    ),
+    (
+        "a context menu with no name of its own is listed by none",
+        "                .unwrap_or_else(|| std::path::Path::new(&menu.id).shown().to_string());\n",
+        "                .unwrap_or_default();\n",
+        [CM_LISTED],
+    ),
+    (
+        "what a context menu adds is not said",
+        "            s.note(&service_menu_said(menu), 28.0);\n",
+        "",
+        [CM_LISTED],
+    ),
+    (
+        "an item not offered does not say why",
+        "                s.note(&format!(\"Not offered: {why}.\"), 28.0);\n",
+        "                let _ = why;\n",
+        [CM_LISTED],
+    ),
+    (
+        "a file not offered does not say why",
+        "                s.note(&format!(\"{file}: {}.\", skipped.why), 28.0);\n",
+        "                let _ = (file, &skipped.why);\n",
+        [CM_LISTED],
+    ),
+    (
+        "the user's own menu is said to be the system's",
+        "        servicemenus::Origin::User => \"Yours: off until you turn it on.\",\n",
+        "        servicemenus::Origin::User => \"Installed with the system: on until you turn it off.\",\n",
+        [CM_LISTED],
+    ),
+    (
+        "the kinds of file a menu is for are not said",
+        "    format!(\"{adds}, for {}. {whose}\", menu.mime_types.join(\", \"))\n",
+        "    format!(\"{adds}. {whose}\")\n",
+        [CM_LISTED],
+    ),
+    (
+        "with no context menus the page says nothing",
+        "        if self.service_menus.menus.is_empty() {\n",
+        "        if self.service_menus.menus.len() > 99 {\n",
+        [CM_REREAD],
+    ),
+    (
+        "context menu choices made elsewhere are not read",
+        "            let before = self.service_choices.choices.clone();\n            self.service_choices = servicemenus::ChoicesFile::load();\n",
+        "            let before = self.service_choices.choices.clone();\n",
+        [CM_REREAD],
+    ),
+    (
+        "a switch that could not be kept shows the change anyway",
+        "                self.service_error = Some(format!(\"The choice could not be kept: {e}\"));\n                self.service_choices = servicemenus::ChoicesFile::load();\n",
+        "                self.service_error = Some(format!(\"The choice could not be kept: {e}\"));\n",
+        [CM_NOT_KEPT],
+    ),
+    (
+        "a context menu's complaint outlives a change kept",
+        "            Ok(()) => self.service_error = None,\n",
+        "            Ok(()) => {}\n",
+        [CM_NOT_KEPT],
+    ),
+    (
+        "why a context menu's switch could not be kept is not said",
+        "        if let Some(error) = &self.service_error {\n            s.problem(error);\n        }\n",
+        "        if let Some(_error) = &self.service_error {}\n",
+        [CM_NOT_KEPT],
+    ),
+    (
+        "why the rules could not be kept is not said",
+        "        if let Some(error) = &self.rules_error {\n            s.problem(error);\n        }\n",
+        "        if let Some(_error) = &self.rules_error {}\n",
+        [CM_NOT_KEPT],
+    ),
+]
+
+
+# Pictures from the icon theme (2026-10-10, requests/c-e-draw-pictures-from-
+# the-icon-theme.md): the sidebar's categories, the search field's magnifier,
+# a dropdown's check and the placeholder card, drawn as theme icons through
+# `themeicons` and handed to the loop with the thumbnails.
+ICON_SIDEBAR = "the_sidebar_draws_each_category_icon_from_the_theme"
+ICON_NAMES = "no_category_icon_shortens_to_another_built_in_icon"
+ICON_COLOURS = "other_colours_draw_the_icons_again"
+NO_EMOJI = "no_page_draws_an_emoji"
+
+MUTATIONS += [
+    (
+        "the frame's icons are never sent",
+        "        self.icons.frame_drawn(&tree.commands);\n",
+        "",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "the icons are not handed to the loop",
+        "        changes.extend(self.icons.take_images());\n",
+        "",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "other colours keep the old icons",
+        "        if self.icons_palette.replace(palette) != Some(palette) {\n            self.icons.forget();\n        }\n",
+        "        self.icons_palette = Some(palette);\n",
+        [ICON_COLOURS],
+    ),
+    (
+        "the icons are drawn again every frame",
+        "        if self.icons_palette.replace(palette) != Some(palette) {\n",
+        "        if self.icons_palette.replace(palette).is_some() {\n",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "Network draws System's gear",
+        '            Self::Network => ("network-workgroup", "network-idle"),',
+        '            Self::Network => ("preferences-system-network", "network-idle"),',
+        [ICON_NAMES],
+    ),
+    (
+        "a stand-in nothing draws",
+        '            Self::Update => ("system-software-update", "system-reboot"),',
+        '            Self::Update => ("system-software-update", "system-update"),',
+        [ICON_NAMES, ICON_SIDEBAR],
+    ),
+    (
+        "a category's icon sits below its row",
+        "                y: item_y + CATEGORY_ICON_DY,\n",
+        "                y: item_y + CATEGORY_ITEM_HEIGHT,\n",
+        [ICON_SIDEBAR],
+    ),
+    (
+        "a category's picture is an emoji again",
+        "            let (name, stand_in) = category.icon();\n            tree.push(RenderCommand::Image {\n                x: 24.0,\n",
+        "            let (name, stand_in) = category.icon();\n            tree.text(24.0, item_y, \"\\u{2699}\", pal.subtext0, 16.0);\n            tree.push(RenderCommand::Image {\n                x: 24.0,\n",
+        [NO_EMOJI],
+    ),
+    (
+        "the search field's magnifier is an emoji again",
+        "            tree.push(RenderCommand::Image {\n                x: 24.0,\n                y: search_y + 12.5,\n",
+        "            tree.text(24.0, search_y, \"\\u{1F50D}\", pal.subtext0, 13.0);\n            tree.push(RenderCommand::Image {\n                x: 24.0,\n                y: search_y + 12.5,\n",
+        [NO_EMOJI],
+    ),
+    (
+        "a dropdown's check is a character again",
+        "            if is_selected {\n                tree.push(RenderCommand::Image {\n                    x: dropdown_x + popup_w - 26.0,\n",
+        "            if is_selected {\n                tree.text(dropdown_x, iy, \"\\u{2713}\", pal.accent, 14.0);\n                tree.push(RenderCommand::Image {\n                    x: dropdown_x + popup_w - 26.0,\n",
+        [NO_EMOJI],
+    ),
+    (
+        "the placeholder's sign is an emoji again",
+        "        s.draw(move |tree, x, y| {\n            text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);\n",
+        "        s.draw(move |tree, x, y| {\n            tree.text(x, y, \"\\u{1F6A7}\", pal.peach, 36.0);\n            text_bold(tree, x, y + 20.0, page_name, pal.text, 22.0);\n",
+        [NO_EMOJI],
+    ),
+]
+
+
+# The Network page reads the machine (2026-10-10): its interfaces as the
+# kernel publishes them, through hwquery as the Network Manager reads them,
+# read on entry and on Refresh; Network Connections opens the Network
+# Manager, which is where an interface is changed.
+NET_LIST = "the_network_page_lists_the_machines_interface"
+NET_NONE = "an_unconfigured_interface_and_no_interface_say_so"
+NET_AGAIN = "the_network_page_reads_the_interfaces_again"
+NET_OPEN = "network_connections_opens_the_network_manager"
+
+MUTATIONS += [
+    (
+        "the interfaces are not read on entering the Network page",
+        "        if page == SettingsPage::NetworkStatus {\n            self.network_note = None;\n            self.refresh_network();\n        }\n",
+        "",
+        [NET_LIST, NET_AGAIN],
+    ),
+    (
+        "Refresh reads nothing",
+        "            RowHit::Press(ButtonId::RefreshNetwork) => self.refresh_network(),\n",
+        "            RowHit::Press(ButtonId::RefreshNetwork) => {}\n",
+        [NET_AGAIN],
+    ),
+    (
+        "a link that is up reads disconnected",
+        '                        Some(true) => ("Connected", pal.ink(pal.green)),',
+        '                        Some(true) => ("Disconnected", pal.ink(pal.green)),',
+        [NET_LIST],
+    ),
+    (
+        "a link that is down reads connected",
+        '                        Some(false) => ("Disconnected", pal.subtext0),',
+        '                        Some(false) => ("Connected", pal.subtext0),',
+        [NET_NONE],
+    ),
+    (
+        "an address the kernel says is none reads not reported",
+        '        hwquery::Address::Unassigned => ("None assigned", pal.subtext0),',
+        '        hwquery::Address::Unassigned => (NOT_REPORTED, pal.subtext0),',
+        [NET_NONE],
+    ),
+    (
+        "the hardware address is not shown",
+        '                    s.value_row("Hardware address", mac, pal.text);\n',
+        "                    let _ = mac;\n",
+        [NET_LIST],
+    ),
+    (
+        "the gateway is not shown",
+        '                        ("Gateway", &adapter.gateway),\n',
+        "",
+        [NET_LIST],
+    ),
+    (
+        "a machine with no card says nothing",
+        '                s.note("This machine has no network card the system found.", 28.0);\n',
+        "",
+        [NET_NONE],
+    ),
+    (
+        "a read that failed says nothing",
+        '                s.problem(&format!("The network interfaces could not be read: {why}"));\n',
+        "                let _ = why;\n",
+        [NET_OPEN],
+    ),
+    (
+        "Network Connections starts nothing",
+        "            RowHit::Press(ButtonId::OpenNetworkManager) => self.open_network_manager(),\n",
+        "            RowHit::Press(ButtonId::OpenNetworkManager) => {}\n",
+        [NET_OPEN],
+    ),
+    (
+        "a start that failed is said to be opening",
+        '            Err(e) => format!("Could not start Network Connections ({NETWORK_MANAGER}): {e}"),',
+        '            Err(_e) => String::from("Opening Network Connections."),',
+        [NET_OPEN],
+    ),
+]
+
+
+# A text field's right-click menu (2026-10-10, requests/c-e-text-fields-have-
+# a-right-click-menu.md): Cut, Copy, Paste, Delete and Select all over the
+# search and the page's fields, through apps/fieldmenu; the keys and the menu
+# share the program's clipboard; each field holds its capacity.
+FM_CUT = "a_text_fields_right_click_menu_cuts_copies_and_pastes"
+FM_MODAL = "a_field_menu_takes_the_keys_and_presses_while_it_is_up"
+FM_CAP = "a_paste_from_the_menu_stops_at_the_fields_capacity"
+FM_CHORD = "a_chord_is_neither_a_settings_key_nor_typing"
+
+MUTATIONS += [
+    (
+        "a right press opens no menu",
+        "            MouseEventKind::Press(MouseButton::Right) => self.open_field_menu(evt.x, evt.y),\n",
+        "",
+        [FM_CUT],
+    ),
+    (
+        "a chosen row does nothing",
+        "            let _edit = input.edit_command(id);\n",
+        "",
+        [FM_CUT],
+    ),
+    (
+        "the right-click leaves the keyboard where it was",
+        "            MenuField::Page(id) => {\n                self.search_focused = false;\n                self.focused_field = Some(id);\n            }\n",
+        "            MenuField::Page(_id) => {}\n",
+        [FM_CUT],
+    ),
+    (
+        "the menu is never drawn",
+        "        tree.commands.extend(self.field_menu.render(pal));\n",
+        "",
+        [FM_CUT],
+    ),
+    (
+        "the keys keep no clipboard the menu shares",
+        "        textline::apply_key_on_clipboard(field, evt, capacity, FIELD_FONT_SIZE).handled\n",
+        "        textline::apply_key(field, evt, capacity, \"\", FIELD_FONT_SIZE).handled\n",
+        [FM_CUT, FM_CHORD],
+    ),
+    (
+        'a field holds no capacity',
+        '            exclusion_draft: textline::field_holding("", EXCLUSION_CAPACITY),\n',
+        '            exclusion_draft: textline::field_holding("", usize::MAX),\n',
+        [FM_CAP],
+    ),
+    (
+        'a press or a key the menu took reaches the page too',
+        '            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n',
+        '            fieldmenu::Outcome::Taken => {}\n',
+        [FM_MODAL],
+    ),
+    (
+        "a press the menu took reaches the page too",
+        "            fieldmenu::Outcome::Taken => return EventResult::Consumed,\n",
+        "            fieldmenu::Outcome::Taken => {}\n",
+        [FM_MODAL],
+    ),
+    (
+        "a right press on no field is taken",
+        "            return EventResult::Ignored;\n        };\n        let viewport = (self.window_width, self.window_height);\n",
+        "            return EventResult::Consumed;\n        };\n        let viewport = (self.window_width, self.window_height);\n",
+        [FM_MODAL],
+    ),
+]
+
+
+# The reviews of the publish range: what the window does with its own write
+# announced back, a save the file refused, the keys a field or an open list
+# holds, a right press during a drag, and the page's walk.
+MUTATIONS += [
+    (
+        "the window's own write announced back forgets the rule deleted",
+        "        if after == before {\n            return false;\n        }\n",
+        "",
+        ["put_it_back_outlasts_the_announcement_of_its_own_write"],
+    ),
+    (
+        "the page is entered by a reading that loses an open editor's rule",
+        "        if page == SettingsPage::WindowRules {\n            self.reread_rules();\n",
+        "        if page == SettingsPage::WindowRules {\n            self.refresh_rules();\n",
+        ["an_editor_left_open_follows_its_rule_back_onto_the_page"],
+    ),
+    (
+        "Save closes the editor whether or not the rule was kept",
+        "        if self.store_rules() {\n            self.close_rule_editor();\n        }\n",
+        "        self.close_rule_editor();\n        self.store_rules();\n",
+        ["a_rule_the_file_will_not_take_stays_in_the_editor"],
+    ),
+    (
+        "Save is taken while the rules cannot be kept",
+        "        // the draft is not a rule.\n        if self.rules_blocked().is_some() {\n            return;\n        }\n",
+        "        // the draft is not a rule.\n",
+        ["save_is_refused_while_the_rules_cannot_be_kept"],
+    ),
+    (
+        "Save is offered while the rules cannot be kept",
+        "        let why = self\n            .rules_blocked()\n            .map(str::to_owned)\n            .or_else(|| draft.rule(&self.rules).err());\n",
+        "        let why = draft.rule(&self.rules).err();\n",
+        ["save_is_refused_while_the_rules_cannot_be_kept"],
+    ),
+    (
+        "Up and Down in a rule's field go to the page",
+        "            Key::Up | Key::Down if plain => {\n                self.step_rule_field(field, evt.key == Key::Up);\n                Some(EventResult::Consumed)\n            }\n",
+        "",
+        ["up_and_down_move_between_the_editors_fields"],
+    ),
+    (
+        "the exclusion box gives the arrows to the page",
+        "                Key::Up | Key::Down if plain => return EventResult::Consumed,\n",
+        "",
+        ["the_exclusion_box_keeps_the_arrows_and_tab"],
+    ),
+    (
+        "Tab in the exclusion box goes to another page",
+        "                Key::Tab if plain => {\n                    self.focused_field = None;\n                    return EventResult::Consumed;\n                }\n",
+        "",
+        ["the_exclusion_box_keeps_the_arrows_and_tab"],
+    ),
+    (
+        "a press on the search leaves a field the keyboard",
+        "                // holding it is served first, and took what was typed.\n                self.focused_field = None;\n",
+        "                // holding it is served first, and took what was typed.\n",
+        ["a_press_on_the_search_takes_the_keyboard_from_a_field"],
+    ),
+    (
+        "a reason is drawn over a field's menu",
+        "            || self.field_menu.is_up()\n",
+        "",
+        ["no_reason_is_drawn_over_a_fields_menu_or_a_held_scrollbar"],
+    ),
+    (
+        "a reason is drawn while the scrollbar is held",
+        "            || self.dragging.is_some()\n            || self.page_bar_grab.is_some();\n",
+        "            || self.dragging.is_some();\n",
+        ["no_reason_is_drawn_over_a_fields_menu_or_a_held_scrollbar"],
+    ),
+    (
+        "a file that shortens the page leaves it past its end",
+        "            changed |= self.clamp_page_scroll();\n",
+        "",
+        ["a_file_that_shortens_the_page_leaves_it_within_its_rows"],
+    ),
+    (
+        "a right press opens a menu under an open list",
+        "            MouseEventKind::Press(MouseButton::Right) if self.open_dropdown.is_some() => {\n                self.open_dropdown = None;\n                EventResult::Consumed\n            }\n",
+        "",
+        ["a_right_press_is_no_fields_while_a_list_is_open_or_a_drag_held"],
+    ),
+    (
+        "a right press opens a menu in the middle of a drag",
+        "            MouseEventKind::Press(MouseButton::Right)\n                if self.dragging.is_some() || self.page_bar_grab.is_some() =>\n            {\n                EventResult::Consumed\n            }\n",
+        "",
+        ["a_right_press_is_no_fields_while_a_list_is_open_or_a_drag_held"],
+    ),
+    (
+        "an open list lets the page move under it",
+        "        if self.open_dropdown.is_some()\n            && matches!(\n",
+        "        if false\n            && matches!(\n",
+        ["an_open_list_holds_the_keys_that_would_move_the_page"],
+    ),
+    (
+        "the scrollbar stays lit when the pointer leaves",
+        "                let bar = std::mem::take(&mut self.page_bar_hovered);\n",
+        "                let bar = false;\n",
+        ["the_scrollbar_goes_out_when_the_pointer_leaves"],
+    ),
+    (
+        "the picture cards run past the page's column",
+        "    ((NOTE_WIDTH + PICTURE_CARD_GAP) / (PICTURE_CARD_WIDTH + PICTURE_CARD_GAP)) as usize;\n",
+        "    4;\n",
+        ["the_picture_cards_keep_to_the_pages_column"],
+    ),
+    (
+        "an opened licence is wrapped on every walk of the page",
+        "            .is_none_or(|(wrapped_in, _)| *wrapped_in != font);\n",
+        "            .is_none_or(|_| true);\n",
+        ["an_opened_licence_is_wrapped_once"],
+    ),
+]
+
 
 RECYCLEBINS = [
     (
@@ -1066,9 +2881,221 @@ RECYCLEBINS = [
     ),
 ]
 
+# The Background page's pictures, made small off the window's thread
+# (2026-10-10, design-decisions §1243).
+THUMB_SMALL = "a_picture_is_made_small_and_uploaded_once"
+THUMB_FAILS = "a_picture_that_cannot_be_read_fails"
+THUMB_IDS = "each_picture_has_an_id_of_its_own"
+THUMB_WAKE = "a_picture_decoded_wakes_the_window"
+
+THUMBS = [
+    (
+        "a picture is not made small",
+        "MAX_WIDTH, MAX_HEIGHT)",
+        "4096, 4096)",
+        [THUMB_SMALL],
+    ),
+    (
+        "a decoded picture is not uploaded",
+        "                    self.uploads.push(ImageChange::Upload {",
+        "                    let _ = (ImageChange::Upload {",
+        [THUMB_SMALL, THUMB_IDS],
+    ),
+    (
+        "a picture asked for twice is decoded twice",
+        "        if let Some((_, thumb)) = self.by_path.get(path) {\n            return *thumb;\n        }\n",
+        "",
+        [THUMB_SMALL],
+    ),
+    (
+        "two pictures share an id",
+        "        self.next_id = self.next_id.wrapping_add(1);\n",
+        "",
+        [THUMB_IDS],
+    ),
+    (
+        "a picture that cannot be read waits for ever",
+        "                Err(_why) => Thumb::Failed,",
+        "                Err(_why) => Thumb::Loading,",
+        [THUMB_FAILS],
+    ),
+    (
+        "the worker wakes nobody",
+        "                            waker.wake_by_ref();",
+        "                            let _ = waker;",
+        [THUMB_WAKE],
+    ),
+    (
+        "a ready picture's size is not its own",
+        "                    Thumb::Ready { id, width, height }",
+        "                    Thumb::Ready { id, width: height, height: width }",
+        [THUMB_SMALL],
+    ),
+]
+
+# The Window Rules editor's model (`src/rules.rs`): a draft read into a rule,
+# and a rule said in words.
+RULE_UNTOUCHED = "a_rule_saved_untouched_is_the_rule_it_was"
+RULE_NEW = "a_new_rule_does_nothing_until_it_is_told"
+RULE_REFUSED = "a_draft_that_cannot_be_a_rule_says_why"
+RULE_NUMBERS = "numbers_are_read_as_people_type_them"
+RULE_FLAGS = "each_flag_reads_and_writes_its_own_action_in_its_rows_sense"
+RULE_SAID = "a_rule_is_said_in_a_sentence"
+RULE_LISTS = "a_list_shows_what_a_rule_says_even_off_the_list"
+
+RULES = [
+    (
+        "a rule's field holds no capacity",
+        '            name: textline::field_holding(&rule.name, NAME_CAPACITY),\n',
+        '            name: textline::field_holding(&rule.name, usize::MAX),\n',
+        ["a_paste_from_the_menu_stops_at_the_fields_capacity"],
+    ),
+    (
+        "only spaces part a pair of numbers",
+        "matches!(c, ',' | 'x' | 'X' | '\\u{d7}')",
+        "matches!(c, ' ')",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a third number is not refused",
+        "    if words.next().is_some() {\n        return None;\n    }\n",
+        "",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a percentage past a hundred is read",
+        "    (0.0..=100.0).contains(&number).then_some(number / 100.0)\n",
+        "    (0.0..=1000.0).contains(&number).then_some(number / 100.0)\n",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a window may be no part of the screen",
+        "    percent(word).filter(|fraction| *fraction > 0.0)\n",
+        "    percent(word)\n",
+        [RULE_NUMBERS],
+    ),
+    (
+        "a window may be no pixels wide",
+        "    word.parse().ok().filter(|n| *n > 0)\n",
+        "    word.parse().ok()\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "a name is not trimmed",
+        "        let name = self.name.text().trim();\n",
+        "        let name = self.name.text();\n",
+        [RULE_NEW],
+    ),
+    (
+        "a rule needs no name",
+        "        if name.is_empty() {\n",
+        "        if name.is_empty() && name.len() > 1 {\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "a rule's own name is taken from it",
+        "            .any(|(at, other)| Some(at) != self.editing && other.name == name)\n",
+        "            .any(|(_, other)| other.name == name)\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "a rule needs nothing to match",
+        "            kind if text.is_empty() => return Err(kind.missing().to_owned()),\n",
+        "",
+        [RULE_REFUSED],
+    ),
+    (
+        "the smallest size may be larger than the largest",
+        "            && (min_w > max_w || min_h > max_h)\n",
+        "            && (min_w > max_w && min_h > max_h && min_w == 0)\n",
+        [RULE_REFUSED],
+    ),
+    (
+        "for the first window only is lost",
+        "        rule.one_shot = self.once;\n",
+        "",
+        [RULE_UNTOUCHED],
+    ),
+    (
+        "a point's numbers are shown the wrong way round",
+        "(Place::At, 0, format!(\"{x} {y}\"))",
+        "(Place::At, 0, format!(\"{y} {x}\"))",
+        [RULE_UNTOUCHED],
+    ),
+    (
+        "the middle of a monitor becomes the first monitor's",
+        "(Place::Centre, monitor, String::new())",
+        "(Place::Centre, monitor.min(0), String::new())",
+        [RULE_UNTOUCHED],
+    ),
+    (
+        "no taskbar button is said as one",
+        "            (Self::Taskbar, false) => \"no taskbar button\",\n",
+        "            (Self::Taskbar, false) => \"a taskbar button\",\n",
+        [RULE_SAID],
+    ),
+    (
+        "a rule that does nothing says nothing",
+        "        return \"Does nothing yet.\".to_owned();\n",
+        "        return String::new();\n",
+        [RULE_SAID],
+    ),
+    (
+        "the sentence starts small",
+        ".map(|first| first.to_uppercase().chain(chars).collect())",
+        ".map(|first| first.to_lowercase().chain(chars).collect())",
+        [RULE_SAID],
+    ),
+    (
+        "the taskbar row reads the model's sense",
+        "            Self::Taskbar => actions.skip_taskbar.map(|skip| !skip),\n",
+        "            Self::Taskbar => actions.skip_taskbar,\n",
+        [RULE_FLAGS],
+    ),
+    (
+        "the taskbar row writes the model's sense",
+        "            Self::Taskbar => actions.skip_taskbar = inverted,\n",
+        "            Self::Taskbar => actions.skip_taskbar = value,\n",
+        [RULE_FLAGS],
+    ),
+    (
+        "a desktop past the desktops is not listed",
+        "        choices.push(Some(desktop));\n",
+        "",
+        [RULE_LISTS],
+    ),
+    (
+        "an opacity between the steps goes in the wrong place",
+        ".position(|choice| choice.is_some_and(|step| step < opacity))",
+        ".position(|choice| choice.is_some_and(|step| step > opacity))",
+        [RULE_LISTS],
+    ),
+    (
+        "a whole percentage keeps its .0",
+        "    match shown.strip_suffix(\".0\") {\n",
+        "    match shown.strip_suffix(\".x\") {\n",
+        [RULE_LISTS],
+    ),
+    (
+        "a rule's own place is rounded to what the editor shows",
+        "            Place::Part\n                if matches!(",
+        "            Place::Part\n                if false && matches!(",
+        ["a_rule_saved_untouched_is_the_rule_it_was"],
+    ),
+    (
+        "a rule's own size is rounded to what the editor shows",
+        "            Size::Part\n                if matches!(",
+        "            Size::Part\n                if false && matches!(",
+        ["a_rule_saved_untouched_is_the_rule_it_was"],
+    ),
+]
+
+
 TABLES = {
     "main.rs": MUTATIONS,
     "recyclebins.rs": RECYCLEBINS,
+    "rules.rs": RULES,
+    "thumbs.rs": THUMBS,
 }
 
 if __name__ == "__main__":

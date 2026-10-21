@@ -216,7 +216,13 @@ wherever upstream has a rule, and is absent where upstream has none:
 The other half of this is the closed-*descriptor* guard (`guard_std_fds!` and
 `stdfd::restore`), without which Rust's runtime quietly replaces a closed
 descriptor with `/dev/null` before `main` and a program cannot see `>&-` at
-all. Five programs still lack it: `ed hostname kill more patch`.
+all. One program still lacks it: `more`. `ed`, `hostname` and `patch`
+gained it on 2026-10-09 with B-Q25's lost-output reporting, and procps'
+`kill` when it was ported the same day, and `top` was ported with it on
+2026-10-15 -- but `NOT_YET_GUARDED` in `tests/std_fds_guarded.rs` kept
+listing the first four until then, so that test failed from 2026-10-09:
+nothing runs the whole coreutils suite before a push (the mutation round's
+unmutated baseline was what said so).
 `find` was converted on 2026-10-08, with its output rebuilt on stdio's
 terms: each sink a buffered `Stream` as upstream's `FILE *` is, `-print`
 unchecked, `-printf` checked call by call (`find: 'standard output':

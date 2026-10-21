@@ -1032,12 +1032,18 @@ What lane A actually has left:
 | a parent's `SIGCHLD` when its child stops or continues (known-issues `A-SIGCHLD-IS-NOT-POSTED-WHEN-A-CHILD-STOPS-OR-CONTINUES`) | **Linux half done 2026-10-08, on main.** A Linux-ABI parent gets `CLD_STOPPED`/`CLD_CONTINUED` from the child, as Linux's `do_notify_parent_cldstop` sends it, unless its `SIGCHLD` is ignored or has `SA_NOCLDSTOP` (`handlers::notify_parent_of_job_control`). Only a change is recorded now: a `SIGCONT` to a running process left a continue for `waitpid(WCONTINUED)`, and a `SIGSTOP` to a stopped one a second stop; and one lock orders a stop against a continue (`handlers::JOB_CONTROL`), so two senders' `SIGSTOP` and `SIGCONT` can no longer leave a running process marked stopped. Ring-3 test `self_test_linux_sigchld_stop`, checked against Linux 6.6.87. Also 2026-10-08: a signal whose action ignores it is dropped as it is sent unless blocked, as Linux's `sig_ignored` does -- for a Linux program with handlers installed it was queued and woke its sleeps for nothing, and so was every `SIGCHLD` to a Linux parent (`syscall::linux::post_linux_sigchld`; ring-3 test `self_test_linux_ignored_at_send`). **Left:** native parents, which wait on lane D's answer to item 3 of `requests/d-a-put-each-signal-s-siginfo-in-the-native-frame.md` |
 | a program asks the user for a capability and the desktop answers (lane C's `requests/c-abf-a-program-asking-for-a-capability-reaches-no-one.md`, §1548) | **lane A's half done 2026-10-08, on main.** A request names its object as a capability does -- type, `resource_id` (a pid, port, interrupt line; 0 the class), rights -- and a reason (`SYS_CAP_REQUEST_FOR` 1154); handles and the broker's own right cannot be asked for. The handler holds the new type `CapBroker` (35), registers (1150), is told of each request on a channel it can wait on (`NEW`/`ENDED`/`LOST` events with the request's record), lists what waits (1153), and decides with one call that grants on approval (1152); the asker waits (1155). Exits and execs cancel requests and unregister a handler; requests time out after 30 s; the kernel shell's `capreq approve` now grants. Ring-3 test `self_test_native_cap_broker`. **Left:** "Always allow" (`open-questions/A-Q26.md`); granting `CapBroker` to init once lane D withholds it there (`requests/a-bd-resource-type-35-is-capbroker.md`) |
 | CPU-time clocks and timers (`known-issues/A-CPU-TIME-CLOCKS-READ-WALL-TIME-AND-CANNOT-BE-TIMED.md`, §1549, §1550) | **done 2026-10-08, on main.** Clocks: `clock_gettime`/`clock_getres`/`clock_settime` on `CLOCK_PROCESS_CPUTIME_ID`, `CLOCK_THREAD_CPUTIME_ID` and the per-process and per-thread ids read each thread's run time, measured at every context switch, to the nanosecond (`CPUCLOCK_SCHED`), or the sampled ticks (PROF, VIRT); a process's counts its exited threads, read as one snapshot with them (`pcb::process_counters`, which `getrusage` and `/proc` now read too, so a thread exiting mid-read is no longer missed). Timers: `timer_create` on every CPU clock, `clock_nanosleep` on CPU clocks, `ITIMER_VIRTUAL`/`ITIMER_PROF`, `RLIMIT_CPU` and `RLIMIT_RTTIME` (`SIGXCPU`, then `SIGKILL`), all checked at the tick against the thread's sample and its process's running totals, which a timer's arming turns on (`sched::ProcCpuAccount`, `proc::cputimer`). Native: `SYS_CPU_CLOCK` (1156: get, resolution, sleep), `SYS_ITIMER_SET`/`GET` take 1 and 2, `SYS_POSIX_TIMER` takes CPU clocks; lane D told (`requests/a-d-cpu-time-clocks-have-a-native-call-now.md`). Ring-3 tests `self_test_linux_cpu_clocks`, `self_test_native_cpu_clock`, `self_test_linux_cpu_timers` (Linux ones 12/12 on Linux 6.6.87). `RLIMIT_RTTIME` too: a real-time thread's run without blocking, counted at the tick (`known-issues/A-RLIMIT-RTTIME-IS-NOT-ENFORCED.md`) |
-| swap where the design puts it: a swap file by default, a swap partition, `swapon`/`swapoff`, and never a disk that does not say it is swap (the operator's D-Q8 question; `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`) | **open, taken 2026-10-09.** Today: compressed RAM, plus 16 MiB of the first virtio disk without an ext4 superblock, claimed at boot; `swapon` answers `EPERM`. |
+| swap where the design puts it: a swap file by default, a swap partition, `swapon`/`swapoff`, and never a disk that does not say it is swap (the operator's D-Q8 question; `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`) | **built on lane-a-wip 2026-10-09**, on main with the next publish: an area only where a swap header says so (the boot takes a whole disk that carries one, and nothing else); areas through extents; `swapon`/`swapoff` on both ABIs (`SYS_SWAP_ON`/`OFF`, 1175/1176) for block devices and swap files on ext4, held against writes while on; `/proc/swaps` as Linux's. Left: zram sized from RAM; lane B turning configured swap on at boot; lane D's C library. |
+| a program asked to close or to stop by message (B-Q22's kernel half, §1072; lane B's request of 2026-10-09) | **built on lane-a-wip 2026-10-09** (§1569): `SYS_LIFECYCLE_REGISTER`/`REQUEST`/`QUERY` (1172-1174), `proc::lifecycle`; `requests/a-b-the-lifecycle-endpoint.md` for lanes B, C and E. |
+| `todo.txt` as the rest of §1530: one entry per file, finished ones out (the operator asked 2026-10-09 whether the reform was done; for `todo.txt` it was not -- 59,315 lines) | **open, taken 2026-10-09.** A cutover like 2026-10-02's: `docs-migrate.py` and `check-docs.py` extended to `todo/`, with every lane's in-flight notes carried across and a halt while it runs. |
+| networking out of the kernel, the last step: delete the in-kernel stack (A-Q9's option D, §934; the default has been the daemon since 2026-09-12) | **open.** ~40 files of `kernel/src/net/`, keeping the NIC shim; the `net.userspace=0` escape hatch goes with them. |
 | a file's version history follows the file through a rename (A-Q22, operator, §1564) | **open, decided 2026-10-09.** `fs::history` keyed by the file's identity (its inode), not its path. |
 | capsettings shows the groups and tags the kernel enforces; secpolicy parked (A-Q23, operator, §1565) | **open, decided 2026-10-09.** |
 | writable shared file mappings (A-Q24, operator, §1566 -- reverses §22/§23) | **open, decided 2026-10-09.** Every option of lane D's D-Q3 needs it. |
 | a debugger takes over a running program when the user says yes or the program agreed in advance (A-Q25, operator, §1567) | **open, decided 2026-10-09.** |
 | a permission prompt offers "Allow" for this run and "Always allow" by fingerprint (A-Q26, operator, §1568) | **open, decided 2026-10-09.** Kernel store of always-allowed grants; lane C's prompt gains the second button. Lane F's F-Q3 (screen capture) wants the same three choices. |
+| restore the operator's MIT `LICENSE` (13032901f) and its `OPERATOR_OWNS` entry in `scripts/which-lane.py` (the operator's word, 2026-10-09) | **waiting on lane C**: held off `main` 2026-10-15, since at the root it makes `gather-notices.py` fail every boot test (`requests/a-c-gather-notices-reads-the-repository-root-as-a-crate.md`). Both come back together once lane C's fix is on `main`. |
+| a boot test that boots to the desktop and checks it, with QEMU's screen capture and simulated input (F-Q15, operator, §1392 -- every lane's next goal) | **in progress.** Built on lane-a-wip 2026-10-14: the guest's screen, keyboard and mouse and a display server's grants (lane F's `requests/f-a-the-guest-cannot-run-a-graphical-program-or-show-its-screen.md`), and the screen probe (§1570): at the marker the boot test types `echo <word>` at the guest and reads the word back off its screen -- today the console with init's shell on it. The desktop it is to check waits on lanes D, B, F and C; when it starts, the probe's expectation changes. |
+| the console's boot checklist dropped a nested step and showed the step around it twice ("Preemptive scheduling" ran inside "Storage & filesystems"; the screen probe's first capture showed it) | **done on lane-a-wip 2026-10-14.** `console::boot_step_update` redraws its own step's line, carried along as the screen scrolls, instead of the line above the cursor; step lines reach the screen's text buffer too. |
 | the `fs/` wiring backlog: 340 of 430 modules have no consumer but `/proc` | **not operator-gated, but not a bug either.** dd-950: the unread fields are the shape of a missing userspace consumer. One worked example exists (`gui/desktop/src/power_settings.rs` reads `/proc/brightness`); the other ~339 are a documentation pattern (`provides` where `records` is true) plus real wiring. Sweeping 337 docs on one lane's reading of the architecture is what dd-951 warns against |
 | ~100 remaining unread kernel fields | triage framework recorded (dd-950); the two big clusters are done (power family 12, DRM plane 6). Remaining value is low per-field and the rule matters more than the count |
 
@@ -1425,14 +1431,95 @@ list moved to lane D on 2026-09-22):
       and the login shell); readline.
   - **Ports the operator asked to have recorded** (§1050), with the lane each
     most likely belongs to -- a suggestion for the owning lane to adopt or
-    reassign, not an assignment: Mono, .NET on Linux (D, as a language
-    runtime, like CPython); Xonsh (B, a shell -- needs CPython); Nushell *on
-    SlateOS* (B -- the `[x]` below it measured a Windows build); the
-    operator's WinDirStat fork, `D:/visual studio projects/dirsize/windirstat`,
-    or QDirStat (E); a real debugger, GDB and/or LLDB (D, with the toolchain --
-    the `gdb` crate here is hand-written); and a reimplementation of
-    `D:/visual studio projects/backup` in a supported language, or that
-    program run on Mono once Mono runs (E).
+    reassign, not an assignment: .NET as `dotnet/runtime`, not Mono (D, as a
+    language runtime, like CPython -- the operator's change of 2026-10-10,
+    §1246); Xonsh (B, a shell -- needs CPython); Nushell *on SlateOS* (B --
+    the `[x]` below it measured a Windows build); and a real debugger, GDB
+    and/or LLDB (D, with the toolchain -- the `gdb` crate here is
+    hand-written). The operator's WinDirStat fork and the operator's backup
+    program are lane E's own items now. The whole list, YSH included, is
+    `roadmap-detailed.md` §6.13.
+
+- **The operator's answers of 2026-10-09 (B-Q22, B-Q24, B-Q25), as work.**
+  B-Q23 was answered on 2026-10-10 and B-Q26 on 2026-10-11 (below).
+  - `[x]` `[B]` **New passwords are yescrypt** (§1070, B-Q24). Done 2026-10-09:
+    `userdb::PASSWORD_METHOD`, a setting from `crypt_gensalt` through
+    `libcall::crypt`, `authlib`'s burn to match.
+  - `[x]` `[B]` **Lost output is reported** (§1071, B-Q25) in `which` (already),
+    `ed`, `hostname` and `patch`, each with full-disk and closed-output cases
+    in its harness as differences on purpose. Done 2026-10-09.
+  - **One `kill`, three requests** (§1072, B-Q22: close, terminate, force,
+    sent as SlateOS's message to a program that answers it and as a Linux
+    signal to one that does not):
+    - `[x]` `[B]` procps-ng 4.0.4's `kill`, ported, replacing coreutils'
+      `kill.rs` and deleting `userspace/kill` -- `kill PID` is `SIGTERM`
+      everywhere from then on, never the forced end it was whenever the build
+      linked `userspace/kill` last. Done 2026-10-09: `scripts/kill-diff.sh`
+      runs every case in a PID namespace of its own, which is what let it
+      measure upstream's `kill -9 -12` signalling -1 (a deliberate difference
+      here: a negative PID is its group). `killall` leaves the image with
+      `userspace/kill` (`requests/b-d-killall-is-not-kill-under-another-name-any-more.md`)
+      until the next item.
+    - `[x]` `[B]` psmisc's `killall`, ported (`pstree` is already psmisc's).
+      Done 2026-10-09: `userspace/coreutils/src/bin/killall.rs`, held to
+      Ubuntu's by `scripts/killall-diff.sh`, each case in a PID namespace of
+      its own with four named victims. On SlateOS it signals with `kill(2)`:
+      no pidfds there, the case upstream falls back for.
+    - `[-]` `[A]` The kernel half: a lifecycle endpoint each process registers
+      at start, found by PID under a signal's permission rule -- offered by
+      lane A 2026-10-09 and accepted. Built 2026-10-11 on lane-a-wip
+      (`SYS_LIFECYCLE_REGISTER` 1172, `SYS_LIFECYCLE_REQUEST` 1173 answering
+      `NotSupported` for a program with no endpoint, `SYS_LIFECYCLE_QUERY`
+      1174; §1569, `requests/a-b-the-lifecycle-endpoint.md`), reaching main
+      with lane A's next publish.
+    - `[x]` `[B]` The userspace half: a library a program answers *close* (may
+      decline) and *terminate* (may not) with; `kill`, `pkill` and `killall`
+      sending them -- `--close`, `--via=message|signal`, `--force`,
+      `--timeout MS REQUEST` -- and falling back to the signal for a program
+      that does not answer. Done 2026-10-15: `libservicebus::lifecycle`
+      (register, receive, ask, query); `coreutils::procps::requests`, the
+      three programs' one implementation of the options and the routes. The
+      options are matched only when spelled in full (`getoptlong`'s
+      `whole_only`), so every upstream abbreviation keeps its meaning -- `pkill
+      --term` is still `--terminal` -- and the harnesses take the usage
+      paragraph out before comparing.
+    - `[ ]` `[B]` Services stopped with *terminate*, then *force* after their
+      stop timeout (`init`, the service manager). The stop is
+      `services/init`'s, which is lane D's tree: requested 2026-10-15
+      (`requests/b-d-init-stops-a-service-with-terminate-then-force.md`);
+      the `service` command only asks `init`.
+    - `[ ]` `[C]` The GUI toolkit answers *close* as a window's close button
+      does and *terminate* as session end does, for every program built on it
+      (requested).
+    - `[ ]` `[E]` The task manager (`apps/sysmonitor`) offers close, "end
+      without asking" and force, where it sends `SIGKILL` today (requested).
+    - `[ ]` `[F]` *close* for a Linux program's windows, as the compositor's
+      close request -- asked when the toolkit half exists.
+  - **What is installed is the installer's question** (§1073, B-Q23: E, with
+    "desktop" meaning everything but the six network servers):
+    - `[ ]` `[B]` Package groups in `pkg/`, one per answer -- desktop,
+      development and gaming the same set (everything but `sshd`, `ftpd`,
+      `telnet`, `inetd`, `ntpd`, `finger`), server without the desktop
+      applications and games -- each installable later from the others.
+    - `[ ]` The installer's "what is this machine for" answer selects a group
+      (no owner yet; the image keeps everything until then, §1053).
+  - **A program's remembered settings grow by three** (§1074, B-Q26: A) --
+    the processors it may use, a cap on its processor use, a profile while it
+    runs -- with the remembered priority they join (`roadmap-detailed.md`
+    §1.3, no lane yet: the kernel applies them at process creation, Settings
+    and the task manager set them).
+
+- **Requests to lane B, taken 2026-10-11:**
+  - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
+    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`, on
+    lane-a-wip until lane A's next publish: the kernel turns on only a whole
+    disk with a swap header by itself).
+  - `[ ]` `[B]` `pkg` packages say which font families they carry, so
+    Settings can offer a theme's recommended fonts
+    (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
+  - `[ ]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
+    test-module finder from `rustlex` once lane A puts one there
+    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`).
 
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**
@@ -2227,7 +2314,11 @@ live.
   turned on (`context-menus.yaml`); a menu that cannot be used is reported
   with why. **Lane E:** the file manager's menus and the Settings page that
   lists and switches them
-  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`). Menu rows
+  (`requests/c-e-programs-add-to-a-files-right-click-menu.md`) -- the file
+  manager's done 2026-10-10 (60fc1cd4a), but for the items' pictures, which
+  wait on it drawing from the icon theme at all; the Settings page done the
+  same day (Apps -> Context Menus: every menu with its switch, whose it is
+  and what it adds, and what is not offered with why). Menu rows
   draw their pictures since the same day -- an item's, a submenu's, a jump
   list action's (`ContextMenu::render_with_icons`).
 
@@ -3258,6 +3349,53 @@ word; text inside them that says "lane C" is history.
   prerequisite of the two items that open this list. Do not start until the
   large-initiative ordering reaches it.
 
+- `[E]` **The operator's backup program, LithicBackup, on SlateOS**
+  (design-decisions §1050, the operator's answer to B-Q18: "a
+  reimplementation of `d:\visual studio projects\backup` in a language we
+  support, or if we get Mono ported, we can just run it on that"). Adopted
+  2026-10-10 from the list in lane B's backlog. The program is C# for .NET 8
+  (`net8.0-windows`): about 50,000 lines in 168 files, a WPF window, and
+  Windows underneath it -- the NTFS change journal says what changed, IMAPI2
+  burns the discs, Win32 names the volumes. Mono 6.14 cannot load a .NET 8
+  program, so the operator changed the .NET port to `dotnet/runtime` (§1246).
+  Even then, running it needs more than the runtime: WPF exists only on
+  Windows, and the journal and the burner are Windows calls. The operator's
+  two routes:
+  - **Run it on .NET:** its window rewritten (in Avalonia, itself a port, or
+    against our toolkit), and its Windows services swapped for SlateOS's own.
+  - **Reimplement it:**
+    - the engine on `apps/snapstore`, the store `apps/backup` and System
+      Restore share;
+    - its schedules as `apps/backup` already keeps them (C-Q21, §1426);
+    - the window in our toolkit;
+    - the feature list from the program's own `design.md`, `roadmap.md` and
+      `known-issues.md`.
+
+  Which route is chosen when the work starts, depending on how far
+  `dotnet/runtime` has got by then. Either way, copying a file that is open
+  and changing waits on the VSS equivalent in `roadmap-detailed.md` (the
+  operator's request of 2026-08-21). The operator's whole list of ports is
+  `roadmap-detailed.md` §6.13.
+
+- `[E]` **The operator's WinDirStat fork on SlateOS** (design-decisions
+  §1050, B-Q18: "QDirStat, or better, port my own fork of WinDirStat that can
+  be found at d:\visual studio projects\dirsize\windirstat"). Adopted
+  2026-10-10 from the same list.
+  - **The fork:** C++ on MFC and Win32, about 39,000 lines. It has All
+    Files, Largest Files, Duplicate Files, Search Results, File Watcher,
+    Extension and Treemap views; logical against physical size; scans saved
+    and reloaded; and cleanup from the window. MFC is Windows-only, so a port
+    means a new window layer under the fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported: a treemap, a sortable file list and an
+    extension breakdown.
+  - **First step:** compare the fork's features with diskanalyzer's. Then
+    either port the fork's logic or bring its features to diskanalyzer; if
+    neither is clearly better, it is a question for the operator.
+
+  QDirStat, the other route the operator named, is built on Qt, which
+  nothing here has ported.
+
 - `[-]` `[E]` **Games and the theme** — **C-Q16**, answered by the operator
   (`design-decisions.md` §1422): every game's chrome follows the palette, and
   on the board a colour keeps its own value only where a player reads it --
@@ -3431,7 +3569,53 @@ word; text inside them that says "lane C" is history.
     (`c-e-day-and-night-wallpapers-need-a-place-in-settings.md`)~~ **done
     2026-09-29** (3a7073848): a morning and an evening picture, each with
     its time, and the picture and the rotation saying when a schedule hides
-    them;
+    them (since 2026-10-10 the page shows one source at a time, below);
+  - ~~a theme's wallpapers on the Background page
+    (`c-e-a-themes-wallpapers-on-the-background-page.md`)~~ **done
+    2026-10-10**: the page asks one question first -- Show: a picture, a
+    theme's pictures, pictures by time of day, a folder in turn, or none --
+    and choosing a source clears those the desktop would show over it
+    (design-decisions §1243); themes chosen by their pictures, decoded off
+    the window's thread; the pictures themes bring offered as pictures;
+  - ~~window frames, the taskbar panel and the cursor theme chosen in
+    Settings (`c-e-choose-the-window-frames-in-settings.md`,
+    `c-e-choose-the-taskbar-panel-in-settings.md`,
+    `c-e-choose-the-cursor-theme-in-settings.md`)~~ **done 2026-10-10**:
+    three rows on the Themes page, each list holding every installed theme
+    and choosing that axis alone;
+  - ~~how long notifications are kept
+    (`c-e-a-setting-for-how-long-notifications-are-kept.md`)~~ **done
+    2026-10-10**: Keep for, on the Notifications page;
+  - ~~the password vault shared with the credential service
+    (`c-e-share-the-password-vault-with-the-credential-service.md`)~~
+    **done 2026-10-10**: `apps/credvault`, the vault's model and its file
+    format moved out of the password manager into a library both build on,
+    so the service reads the vault with the very code that writes it;
+  - ~~the System Sounds section on Settings' Sound page
+    (`c-e-a-sounds-page-for-the-sounds-axis.md`)~~ **done 2026-10-10**: on
+    or off, a volume, the sound theme -- every one installed, other
+    desktops' too -- and each event's sound (the theme's, none, or a file of
+    the user's), each heard as it is chosen; heard on SlateOS once the C
+    library reaches the sound device (lane D's half of
+    `e-ad-no-application-can-reach-the-sound-device.md`);
+  - ~~a Window Rules page in Settings
+    (`c-e-a-window-rules-page-in-settings.md`)~~ **done 2026-10-10**: the
+    rules in order, each switched, changed, moved and deleted, a new one
+    added, and the file's unreadable ones said and never saved over
+    (`e-c-a-window-rule-the-file-cannot-read-is-deleted-by-the-next-save.md`
+    asks lane C to keep them); the snap zones wait on lane F to be named
+    (`e-f-settings-could-name-the-snap-zones.md`). Settings' pages scroll
+    since the same day -- they did not, and what ran past the window's bottom
+    could not be reached;
+  - `[-]` a disabled control says why while the pointer rests on it
+    (`c-e-say-why-a-control-is-disabled.md`) -- **in progress**: Settings
+    (every dimmed button and unusable row), thirteen games through
+    `gamechrome::why`, the lock screen and System Restore's forms, and the
+    explorer's, notes' and the photo manager's context menus -- which never
+    saw the pointer, so their submenus could not be reached with it -- done
+    2026-10-10; hangman, gomoku, pinball and the network manager wait on
+    lane C's `Frame::greyed`, the editor's menu rows on the menu bar's
+    `explain`;
   - the editor and the markdown editor onto the toolkit's code editor
     (`c-e-the-toolkit-has-a-code-editor.md`);
   - adoption, program by program: the slider, the switch, checkbox, radio
@@ -3758,6 +3942,37 @@ word; text inside them that says "lane C" is history.
   (`requests/e-a-the-sevenz-crate-is-ready-for-the-kernel-shim.md`: the
   kernel's copy checks no CRC). **Remaining, lane A's:** the three kernel
   shims.
+
+- `[-]` `[E]` **Programs draw their pictures from the icon theme, not as
+  emoji** -- 2026-10-10, lane C's
+  `requests/c-e-draw-pictures-from-the-icon-theme.md`. No font here draws
+  emoji, so each was a box. `apps/themeicons` is the piece every program
+  under `oswindow::app` uses: icons named while drawing, uploaded through
+  `App::take_images`, dropped and drawn again when the colours or the icon
+  theme change. **Done:** Settings (its sidebar, search field, open lists'
+  checks and placeholder card), the file manager's detail view (each file
+  by its type's own icon name, its kind's built-in icon where the theme has
+  none) and the archive manager's file list. **Remaining:** the file
+  manager's toolbar and transfer buttons and the world clock, which need
+  icons the built-in set does not draw
+  (`requests/e-c-icon-names-lane-e-s-programs-need.md`); the finance
+  categories, which no icon name describes; Settings' account pictures,
+  which wait on the picture being kept at all
+  (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`).
+
+- `[-]` `[E]` **A text field's right-click menu in every program** --
+  2026-10-10, lane C's `requests/c-e-text-fields-have-a-right-click-menu.md`:
+  Cut, Copy, Paste, Delete and Select all (Undo and Redo in a box with a
+  history), each dimmed when it would do nothing. `apps/fieldmenu` holds the
+  menu, routes the presses, keys, pointer and clock to it and draws it, for
+  every program; `textline::apply_key_on_clipboard` puts the keys on the
+  program's clipboard, which the menu copies to and pastes from -- programs
+  kept clipboards of their own for the keys. **Done:** Settings, the QR code
+  maker, the torrent client's magnet box, the renamer's boxes, the sound
+  recorder's marker names, the process explorer's filter and New Task
+  boxes, the mail client's compose form. **Remaining:** calendar, finance,
+  flashcards, jsonviewer, notes, paint, regextester, reminders, snippets,
+  stickynotes.
 
 Known-issues: `apps/**` — 141 crates — has never had a systematic audit;
 bug-hunt sweeps over it are standing work between features (this was lane
@@ -5957,6 +6172,60 @@ _Port ext4 first. Don't write a custom filesystem._
   over `/dev/log` -- and with a terminal, every run in a PID namespace of its
   own whose init starts the same fixtures in the same order on both sides,
   so that killall5 can reach nothing else);
+  `slabtop` (2026-10-09, procps-ng 4.0.4's -- new, nothing here had it: the
+  first full-screen procps program, drawn through `userspace/curses`; the
+  library's `slabinfo.c` arithmetic in its own types -- `float` use, wrapping
+  `unsigned int` totals, the smallest object starting at `INT_MAX` -- the
+  totals from a second read of the file, the caches in `qsort_r`'s stable
+  order with names by `strcoll`, keys read one at a time between frames,
+  `SIGINT` and `SIGWINCH` as upstream handles them and `SIGTERM` left to
+  curses; an empty `/proc/slabinfo` is the library's null info, refused by
+  every read after with `EINVAL`, which vmstat's `-m` now also says; the new
+  `libcall::fd::read` and `wait_readable` and `libcall::locale`'s `strcoll`,
+  `tolower` and `radix`; `scripts/slabtop-diff.sh`: 218 cases agree and 3
+  differ on purpose, `-o` reports over pinned fixtures and the screen on
+  pseudo-terminals -- keys, resizes, `SIGINT`, `SIGTERM`, `SIGHUP`, `^Z`, a
+  file changing between frames);
+  `watch` (2026-10-09, procps-ng 4.0.4's as Debian builds it, with
+  `--enable-watch8bit` and `--enable-colorwatch`, drawn through
+  `userspace/curses`; `userspace/watch`, written from the manual, is retired:
+  the command run by the C library's `system` -- or with `-x` by `execvp` --
+  in a child whose output and errors are one pipe, read a character at a time
+  as `my_getwc` reads it: 0xFF taken for the end, sixteen bytes that make no
+  character given back but the first, a NUL taking what follows it into the
+  character looked for; tabs, bells, wide characters at the edge and
+  characters of no width placed as upstream places them; SGR colour drawn
+  unless `-C`; the title's `%.1f` in the locale's decimal point, `ctime`'s
+  date in the zone and the host's name in `sysconf`'s length, cut to fit as
+  upstream cuts it; `COLUMNS` and `LINES` read once by `strtol` into an
+  `int`, else the terminal on standard error measured; `-d` and
+  `=permanent`, `-g`, `-q`, `-e`, `-b`, `-x`, `-p`, `-r`, `-w`; `SIGINT`,
+  `SIGTERM` and `SIGHUP` end it through curses and `SIGWINCH` resizes; the new
+  `libcall::process::system`, `libcall::clock::nanosleep`,
+  `libcall::fd::pipe` and `libcall::conf::SC_HOST_NAME_MAX`, and curses'
+  `attr_set`; `scripts/watch-diff.sh`: 148 cases agree and 2 differ on
+  purpose, on pseudo-terminals with standard error on the terminal and off
+  it, the clock pinned by a preloaded shim);
+  `top` (2026-10-15, procps-ng 4.0.4's as Ubuntu builds it,
+  `--disable-modern-top`; `userspace/top`, written from the manual, is
+  retired: the summary and the task table from the library's `pids`, `stat`
+  and `meminfo` layers that `ps`, `free` and `vmstat` already read through;
+  the four windows and their field groups, sorting, the forest view, the
+  user and other filters, the inspect screens, the bottom windows, the
+  colour mapping, scrolling, the Fields screen, every prompt, and the
+  rcfile read in all its old forms and written back; the terminal through
+  `userspace/terminfo` with upstream's own `Pseudo_screen` row sparing;
+  `float` arithmetic, `snprintf` truncation and the locale's radix as C has
+  them; standard error reopened on `/dev/null` and so buffered, which is
+  why getopt's complaint still reaches the terminal and a fatal signal's
+  note never does; signals acted on where the program waits rather than in
+  their handlers (deliberate difference 1), and no NUMA (4);
+  `scripts/top-diff.sh`: 344 cases agree and 1 differs on purpose, `-b`
+  over a fixture `/proc` and the screen on pseudo-terminals -- keys,
+  prompts, rcfiles, resizes, signals, `^Z`, `/proc` changing between
+  frames -- each run in a PID namespace with the clock frozen;
+  `requests/b-ad-proc-counts-pages-of-4-kib-while-libc-says-a-page-is-16-kib.md`
+  for what only SlateOS can show: its memory columns four times too large);
   and `nproc`,
   re-ported because the standalone crate that had it was not GNU's and is retired. The multi-personality crates that answered some of these
   names in part lost those branches (§1005: `getopt` printenv/sync/cksum, `pv` truncate and shred, `nproc` arch/pathchk/users, `shuf` numfmt and factor, `base64` base32, `finger` pinky).
@@ -5966,7 +6235,7 @@ _Port ext4 first. Don't write a custom filesystem._
 - [-] `[B]` System administration utilities — Rust userspace binaries: -- 150 of its utilities were deleted under design-decisions §1006 (a command that does not work is deleted): `locale`, `mesg`, `dbus`, `perf`, `capsh`, `resolvectl`, `socat`, `parted`, `getfattr`, `auditctl`, `grub-install`, `upower`, `mkinitramfs`, `plymouth`, `udisksctl`, `numactl`, `btrfs`, `flatpak`, `firejail`, `apparmor`, `selinux`, `snapper`, `tuned`, `cpupower`, `thermald`, `fwupdmgr`, `podman`, `resolvectl`, `mcelog`, `rasdaemon`, `kexec`, `nvme`, `tpm2`, `avahi-daemon`, `cups`, `powertop`, `tlp`, `fscrypt`, `pipewire`, `xz`, `zstd`, `bzip2`, `lz4`, `age`, `openssl`, `certbot`, `gpg`, `borg`, `restic`, `rclone`, `git`, `sqlite3`, `cmake`, `meson`, `ninja`, `python3`, `node`, `docker`, `ffmpeg`, `valgrind`, `pkgconf`, `sensors`, `tmux`, `ruby`, `java`, `go`, `rustup`, `terraform`, `ansible`, `kubectl`, `gradle`, `maven`, `helm`, `prometheus`, `memcached`, `elasticsearch`, `consul`, `vault`, `etcd`, `minio`, `nginx`, `haproxy`, `traefik`, `caddy`, `envoy`, `openvpn`, `pgbouncer`, `neo4j`, `cassandra`, `iperf3`, `squid`, `postfix`, `dovecot`, `unbound`, `gitea`, `keycloak`, `mattermost`, `nextcloud`, `jellyfin`, `syncthing`, `borgmatic`, `pandoc`, `tesseract`, `exiftool`, `doxygen`, `ccache`, `distcc`, `sccache`, `mold`, `loki`, `tempo`, `jaeger`, `vegeta`, `k6`, `wrk`, `ab`, `cfssl`, `hashcat`, `john`, `lynis`, `trivy`, `cosign`, `buildah`, `cni-plugins`, `flux`, `argocd`, `pulumi`, `packer`, `mpv`, `sox`, `cmus`, `ncmpcpp`, `remmina`, `xrdp`, `borg`, `duplicity`, `timeshift`, `snapper2`, `lua`, `perl`, `php`, `julia`, `deno`, `bun`, `zig`, `micro`, `lazygit`, `lazydocker`, `bat`, `eza`.
   - [x] sysinfo: system information reader (/proc, /sys), CPU/mem/disk/net/OS summary, JSON output
   - [x] sanitize: filename sanitizer (4 modes: conservative/strict/windows/minimal, dry-run, recursive)
-  - [x] top: interactive process monitor (CPU/mem per-process, sort fields, batch mode, PID filter)
+  - [x] top: procps-ng 4.0.4's, a coreutils program since 2026-10-15 (see the coreutils item; `scripts/top-diff.sh`, 345 cases)
   - [x] mount/umount: filesystem mounting with fstab support, bind mounts, option parsing
   - [x] dmesg: kernel message buffer viewer (level filter, follow, JSON output, colored severity)
   - [x] lspci: PCI device lister (vendor/device database, tree view, BAR info, verbosity levels)
@@ -6099,6 +6368,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] shuf/factor/numfmt: randomization and number tools (Fisher-Yates shuffle, prime factorization, SI/IEC unit conversion)
   - [x] tput/clear/tset/reset/tabs: ncurses 6.4's, coreutils programs since 2026-10-08 (see the coreutils item) -- capabilities, `-S`, `init`/`reset`, the init and reset strings, margins, tab stops, `tset`'s mappings and questions, the line put right, `tabs`' lists, through `userspace/terminfo` (`scripts/tput-diff.sh`)
   - [x] tic/captoinfo/infotocap/infocmp/toe: ncurses 6.4's terminfo compiler and its tools, coreutils programs since 2026-10-09 (see the coreutils item) -- compiling terminfo and termcap sources, translating between them, `tic -v`'s checks, `infocmp`'s dumps and comparisons, `toe`'s tables, through `userspace/terminfo`'s `compile` (`scripts/tic-diff.sh`). The image has no terminfo database to use them on yet: `requests/b-d-the-image-has-no-terminfo-database-and-tic-can-now-build-one.md`
+  - [x] curses: ncursesw 6.4's screen library, ported as Ubuntu builds it, for procps' `slabtop` and `watch` (2026-10-09, `userspace/curses`) -- the screen and `stdscr`, adding bytes and wide characters, attributes and colours, the cursor-movement optimiser and the hash-map scroll optimiser, `doupdate`, `endwin` and coming back, resizing, line drawing, and the `SIGTSTP`/`SIGINT`/`SIGTERM`/`SIGWINCH` handlers -- which here wait for a curses call in progress rather than running inside it (§1069); `scripts/curses-diff.sh`: 990 cases agree with Ubuntu's libncursesw, scripts of curses calls run under 17 terminal types, to a file and to a pseudo-terminal, suspended, interrupted and resized. No input (`getch`): nothing here reads keys through curses. `slabtop` and `watch` draw through it (2026-10-09). The work its signal handlers do -- `endwin`, and the repaint after `SIGTSTP` -- allocates nothing once a screen is drawn (2026-10-09, `TD-B-CURSES-SIGNAL-WORK-ALLOCATES-IN-A-HANDLER`): `tparm` expands into a buffer it keeps, capabilities are written straight from the entry, and a counting allocator in the tests measures it
   - [x] m4: macro processor (define/undefine, ifdef/ifelse, translit, eval with full precedence, divert/undivert, changequote, include)
   - [x] pv/truncate/shred/fuser: pipe/file management (progress bar, rate limit, secure overwrite, process finder via /proc)
   - [x] xdg-open/xdg-mime/mimeopen: file association (200+ MIME types, 25+ magic signatures, mimeapps.list, .desktop files)

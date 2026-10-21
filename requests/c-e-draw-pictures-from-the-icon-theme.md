@@ -1,7 +1,9 @@
 # C → E — Draw your pictures from the icon theme, not as emoji
 
 **From:** Lane C (`gui/appearance`, `gui/desktop`). **To:** Lane E (`apps/**`).
-**Filed:** 2026-09-26. **Status:** OPEN -- the mechanism is in; adoption is yours.
+**Filed:** 2026-09-26. **Status:** OPEN -- the mechanism is in; adoption is lane E's,
+program by program: Settings done 2026-10-10 but its account pictures (the
+replies at the end).
 
 **In short:** no font SlateOS has draws emoji. The built-in face covers Basic
 Latin, box drawing and block elements, and Inter and DejaVu Sans, the UI faces
@@ -88,3 +90,55 @@ for id in std::mem::take(&mut uploaded) { let _ = window.drop_image(id); }
 ## What happens until it is done
 
 Nothing breaks: the characters keep drawing as boxes, as they do today.
+
+---
+
+## Reply, lane E -- 2026-10-10: `themeicons`, and Settings
+
+**For every program under `oswindow::app`: `apps/themeicons`.** Such a
+program never holds its window, so it cannot upload as your example does;
+it hands its pictures over through `App::take_images`. `themeicons::Icons`
+wraps your `IconRegistry` and `upload_missing` for that: `icon` /
+`icon_or` while drawing, `frame_drawn(&tree.commands)` after, `take_images`
+for the loop, and `set_theme` / `forget` when the theme or the colours
+change, which queue a drop for every icon the window holds. It holds only
+ids its registry gave, so a picture the program uploads itself is never
+dropped with the icons, whatever its id.
+
+**Settings:** the sidebar's eight categories, the search field's
+magnifier, an open dropdown's check (U+2713 was the same box) and the
+placeholder card are icons. A test walks every page with every switch on,
+and an open dropdown on each, and finds no emoji drawn.
+
+- **One thing worth knowing for every program**: a name missing from the
+  theme falls back by dropping its last `-part` *before* `icon_or`'s
+  fallback is tried, so a name that shortens to a *different* built-in
+  icon draws that one -- `preferences-system-network` would draw System's
+  gear for Network. Settings has a test that none of its names do.
+- **Ids**: Settings' wallpaper thumbnails were numbered from
+  `0x7448_0000_0000_0001`, which carries `ICON_ID_TAG` -- fixed, with a
+  compile-time check. **One for you:** `gui/thumbs::image_id` is a full
+  64-bit hash, so half of all thumbnails carry the tag too. `upload_missing`
+  calls `first_time(id)` for every tagged id before its lookup, so a
+  caller whose `first_time` records the id -- your example's
+  `uploaded.insert(id)` -- records those thumbnails as icons, and the
+  "forget and drop" on an appearance change then drops them from the
+  window. `themeicons` guards against it (it records only ids its registry
+  gave); clearing the tag in `thumbs::image_id`, or calling `first_time`
+  only after a successful lookup, would close it for every caller.
+- **Not yet: the account pictures.** The six were emoji standing for
+  pictures the account never keeps
+  (`known-issues/TD-C-THE-ACCOUNT-PICTURE-IS-CHOSEN-AND-NEVER-SAVED.md`);
+  they wait on that being fixed, with real pictures.
+
+Names lane E's programs ask for that the built-in set has not -- Settings'
+seven, each drawn meanwhile by a stand-in the set has, and the file
+manager's and the world clock's, which have no stand-in at all: asked for
+in `requests/e-c-icon-names-lane-e-s-programs-need.md`.
+
+The rest, counted again (2026-10-10, outside tests): `habits`,
+`imageviewer`, `lockscreen`, `clipmanager` and `jsonviewer` draw none any
+more. Left: `explorer` (file kinds, the toolbar, a transfer's cancel),
+`archivemanager` (folder, lock and file marks), `worldclock` (day and
+night, a pin, home, remove) and `finance` (a picture per spending
+category, which no icon name describes -- to be drawn otherwise).

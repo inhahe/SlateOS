@@ -4,9 +4,14 @@ version = "0.1.0"
 edition = "2024"
 description = "SlateOS terminal multiplexer"
 [dependencies]
-userdb = { path = "../userdb" }
+# Who the caller is, by name: `getpwuid` over `/etc/passwd`, which every user
+# may read (userdb's own database is root's alone).
+pwdb = { path = "../pwdb" }
 authlib = { path = "../authlib" }
 # It interpolates `session_name` into "[reattaching to session {}]". That
 # value is a path from the command line, and a path may hold any byte but
 # `/` and NUL -- a newline included.
 quoting = { path = "../quoting" }
+# The terminal through the C library: keys read raw on standard input
+# (tcgetattr, tcsetattr, read), what it draws written to standard output.
+libcall = { path = "../../libcall" }

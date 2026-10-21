@@ -597,14 +597,14 @@ MUTATIONS = [
     ),
     (
         "the frame does not remember the size it was drawn at",
-        "        self.resize(width, height);\n        self.frame(width, height).into_tree()",
-        "        self.frame(width, height).into_tree()",
+        '        self.resize(width, height);\n        let frame = self.frame(width, height);',
+        '        let frame = self.frame(width, height);',
         ["a_click_is_read_against_the_size_the_frame_was_drawn_at"],
     ),
     (
         "the window draws something other than the frame",
-        "        self.frame(width, height).into_tree()",
-        "        Frame::new(width, height).into_tree()",
+        '        let mut tree = frame.into_tree();',
+        '        let mut tree = Frame::new(width, height).into_tree();',
         ["what_the_window_draws_is_what_the_frame_drew"],
     ),
     # ── Layout: the bands ─────────────────────────────────────────────────
@@ -905,14 +905,14 @@ MUTATIONS = [
     ),
     (
         "the direction pad is never greyed",
-        "                dir.glyph(),\n                (r.h * 0.55).min(l.font * 1.6),\n                playable,",
-        "                dir.glyph(),\n                (r.h * 0.55).min(l.font * 1.6),\n                true,",
+        '                self.why_greyed(Target::Move(dir)).is_none(),',
+        '                true,',
         ["the_direction_buttons_are_greyed_while_the_board_is_frozen"],
     ),
     (
         "the undo button is never greyed",
-        '            (Target::Undo, "Undo", self.history.can_undo()),',
-        '            (Target::Undo, "Undo", true),',
+        '                self.why_greyed(Target::Undo).is_none(),',
+        '                true,',
         ["the_undo_button_is_greyed_while_there_is_nothing_to_undo"],
     ),
     (
@@ -1118,6 +1118,63 @@ MUTATIONS = [
         '        Key::Escape => Some(Intent::CloseHelp),\n',
         '',
         ['every_advertised_key_does_something'],
+    ),
+]
+
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md):
+# the frame's greyed buttons handed to gamechrome::why::Reasons, the
+# pointer and the clock followed, the tick asked for, the reason drawn
+# last -- and each reason the game gives.
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['a_greyed_button_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['a_greyed_button_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['a_greyed_button_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons.due_in()',
+        '        None',
+        ['the_window_ticks_only_while_a_reason_waits'],
+    ),
+    (
+        "a greyed button's reason is given under the list of keys",
+        '        let greyed = if self.show_help {',
+        '        let greyed = if false {',
+        ['the_list_of_keys_takes_a_reason_away'],
+    ),
+    (
+        'a greyed button says nothing: There is no move to take back yet."',
+        '                "There is no move to take back yet."',
+        '                ""',
+        ['a_greyed_button_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: You have reached 2048: press Keep going',
+        '                GameStatus::Won => Some("You have reached 2048: press Keep going to play on."),',
+        '                GameStatus::Won => Some(""),',
+        ['a_greyed_button_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: No move is left on the board: start a n',
+        '                    Some("No move is left on the board: start a new game, or undo.")',
+        '                    Some("")',
+        ['a_greyed_button_says_why_while_the_pointer_rests_on_it'],
     ),
 ]
 

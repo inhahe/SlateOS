@@ -48,7 +48,7 @@ MUTATIONS = [
     ),
     (
         "Take is live when a take would be refused",
-        "            self.button(f, btn, \"Take\", l.small, false, self.enabled(Action::Take));",
+        "            self.button(f, btn, \"Take\", l.small, false, live);",
         "            self.button(f, btn, \"Take\", l.small, false, true);",
         ["take_is_switched_off_when_a_take_would_be_refused"],
     ),
@@ -78,5 +78,41 @@ MUTATIONS = [
     ),
 ]
 
+
+# Why a greyed button is greyed, said while the pointer rests on it
+# (2026-10-10; lane C, requests/c-e-say-why-a-control-is-disabled.md).
+MUTATIONS += [
+    (
+        "the pointer is not followed for a greyed button's reason",
+        '    let why = app.reasons.event(event);',
+        '    let why = false;',
+        ['a_greyed_take_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the frame's greyed buttons are not handed over",
+        '        self.reasons.drawn(greyed, (width, height));',
+        '        let _ = greyed;',
+        ['a_greyed_take_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "a greyed button's reason is not drawn",
+        '        tree.commands.extend(self.reasons.render(&self.palette));',
+        '        let _ = self.reasons.render(&self.palette);',
+        ['a_greyed_take_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        "the window asks for no tick for a greyed button's reason",
+        '        self.reasons\n            .sooner(self.thinking().then_some(Duration::from_millis(TICK_MS)))',
+        '        self.thinking().then_some(Duration::from_millis(TICK_MS))',
+        ['a_greyed_take_says_why_while_the_pointer_rests_on_it'],
+    ),
+    (
+        'a greyed button says nothing: The game is over: start a new game to p',
+        '            GameState::Won(_) => "The game is over: start a new game to play again.",',
+        '            GameState::Won(_) => "",',
+        ['a_greyed_take_says_why_while_the_pointer_rests_on_it'],
+    ),
+]
+
 if __name__ == "__main__":
-    sys.exit(sweep(SRC, MUTATIONS, "nim", timeout=240))
+    sys.exit(sweep(SRC, MUTATIONS, "nim", timeout=240, only=sys.argv[1:] or None))

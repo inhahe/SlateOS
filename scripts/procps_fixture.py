@@ -81,6 +81,9 @@ class P:
                  autogroup=b"/autogroup-12 nice 0\n", attr=None, exe=None,
                  fd2=None, tasks=None, status_extra=b"", raw_stat=None,
                  raw_status=None, files=None, name=None,
+                 # `statm`'s bytes; None for ones made from the sizes above
+                 # (in 4 KiB pages), False for no file at all.
+                 statm=None,
                  # Which `ns/` files exist, and which to share: a PID whose
                  # files to hard-link (so `stat` gives both one inode), or a
                  # dict of namespace name to PID for some of them.
@@ -142,6 +145,14 @@ class P:
             b(self.sigcgt))
         return s + self.status_extra
 
+    def statm_bytes(self):
+        """`statm`: size, resident, shared, text, lib, data and dt, in pages."""
+        if self.statm is not None:
+            return self.statm
+        text = (self.code[1] - self.code[0]) // 4096
+        return b"%d %d %d %d 0 %d 0\n" % (self.vsize // 4096, self.rss, self.rss // 4,
+                                         text, self.vmdata // 4)
+
     def ns_source(self, ns):
         """The PID whose `ns/NS` this process shares, or None."""
         if isinstance(self.ns_from, dict):
@@ -153,6 +164,8 @@ class P:
         if self.raw_status is not False:
             write(f"{d}/status", self.status(tid))
         write(f"{d}/cmdline", self.cmdline)
+        if self.statm is not False:
+            write(f"{d}/statm", self.statm_bytes())
         if self.environ is not None:
             write(f"{d}/environ", self.environ)
         if self.wchan is not None:

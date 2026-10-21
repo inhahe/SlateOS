@@ -11,6 +11,9 @@ guitk = { path = "../../gui/toolkit" }
 
 # The keys a one-line field answers, shared rather than copied.
 textline = { path = "../textline" }
+# The magnet box's right-click menu -- Cut, Copy, Paste, Delete, Select all
+# -- held, routed and drawn as every program's is.
+fieldmenu = { path = "../fieldmenu" }
 oswindow = { path = "../../gui/window" }
 
 # Ctrl+O reads through `safeio::read_capped`, the byte-oriented one: a

@@ -54,7 +54,10 @@ import sys
 ARGS = sys.argv[1:]
 ONLY = set(ARGS[ARGS.index("--only") + 1:]) if "--only" in ARGS else set()
 ARGS = ARGS[:ARGS.index("--only")] if "--only" in ARGS else ARGS
-FFDIR = ARGS[0] if ARGS else "D:/utils"
+sys.path.insert(0, os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")))
+import fixture_tools  # noqa: E402  (gui/video: where the generators find ffmpeg)
+
+FFDIR = ARGS[0] if ARGS else fixture_tools.tool_dir("ffmpeg")
 FFMPEG = os.path.join(FFDIR, "ffmpeg.exe" if os.name == "nt" else "ffmpeg")
 FFPROBE = os.path.join(FFDIR, "ffprobe.exe" if os.name == "nt" else "ffprobe")
 

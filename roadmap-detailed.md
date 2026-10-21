@@ -552,7 +552,7 @@ _Bootloader: Limine for development (Phases 0-5). For release: GRUB for dual-boo
 - [x] Audit: no kernel mappings with both write and execute permissions
 
 #### Swap
-- [ ] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD) — *2026-10-09 (lane A): was marked done, is not built. The kernel swaps to compressed RAM and to 16 MiB of a spare virtio disk it claims at boot; `swapon` refuses. Taken by lane A: `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`.*
+- [-] Swap file support (not partition — swap files are more convenient, negligible perf diff on SSD) — *2026-10-09 (lane A): was marked done, was not built (the kernel swapped to compressed RAM and to 16 MiB of a spare virtio disk it claimed at boot; `swapon` refused). Built on lane-a-wip the same day: `swapon`/`swapoff` for swap files on ext4 and for block devices, both ABIs; turning the configured file on at boot is lane B's (`requests/a-b-turn-on-configured-swap-at-boot.md`). `known-issues/A-SWAP-HAS-NO-SWAP-FILE-AND-CLAIMS-ANY-DISK-WITHOUT-AN-EXT4-SUPERBLOCK.md`.*
 - [x] zswap/zram compressed swap (recommended for desktop)
 - [x] Swappiness tunable (default 10-20 for desktop, not 60 like Linux)
 - [x] Swap priority (multiple swap devices) — tiered: zram (priority 100) + disk (priority 0), highest-priority device fills first
@@ -614,6 +614,10 @@ _Four workload profiles: Desktop (default, interactive/responsive), Database (hi
   - [ ] **Applied where every launch passes**, at process creation, so it holds however the program is started — shell, desktop, or another program — and not only from the launchers that know about it.
   - [ ] **Lowering is always allowed; raising is not free.** A rule that sets a priority above normal, or into the realtime band, is accepted only if the user setting it holds the grant that level needs (`proc.priority_other`, and the elevated grant for realtime) — a rule file must not become a way to launder priority.
   - [ ] **Set it where the priority is seen:** Settings → per-app priority, and in the task manager next to the running process ("Always use this priority for this program"). Precedents: Windows' per-executable `PerfOptions` (`CpuPriorityClass`, `IoPriority`) and Process Lasso's remembered priorities; on Linux, `ananicy`, and systemd units' `Nice=`/`CPUWeight=`.
+  - [ ] **Three more remembered settings, beside the priority** _(the operator's answer to B-Q26, 2026-10-11: design-decisions §1074)_ -- kept, shown, ordered by the same precedence and set in the same two places:
+    - [ ] **The processors a program may use** (CPU affinity), including "the fast cores" / "the power-saving cores" on a chip with both kinds; applied at process creation through the per-process processor mask (`SYS_SCHED_SET_AFFINITY`).
+    - [ ] **A cap on a program's processor use** -- a percentage, or a number of cores -- applied as a launch-time limit the kernel enforces.
+    - [ ] **A workload profile while the program runs** -- switched to when it starts, back when the last such program ends; raising priority for everything else needs the grant a priority raise needs.
 - [x] Workload profile presets for scheduler parameters
 - [x] Benchmark: pick_next_task must be O(1) or O(log n), never O(n)
 - [x] Benchmark: context switch target < 5us (Linux: 1-3us) — measured 67ns WHPX, 398ns TCG
@@ -1135,7 +1139,7 @@ _Note the boundary: this covers programs that **crash**. A program that **hangs*
 - [x] Hardware exceptions → language-level exceptions (SEH-style) _(exception.rs: ExceptionCode enum, ExceptionContext struct, per-process handler registry; idt.rs: dispatch to userspace handler via modified IRETQ frame, context pushed on user stack, SysV ABI, SYS_EXCEPTION_RETURN to resume)_
   - [x] Divide by zero, illegal instruction, genuine segfault → catchable exceptions
   - [x] Normal page faults handled by kernel, NOT exposed to application
-- [ ] Structured shutdown via IPC message (not Unix signals)
+- [-] Structured shutdown via IPC message (not Unix signals) — *2026-10-09: the kernel half is built (lane A, §1569): a program registers for close and terminate requests (`SYS_LIFECYCLE_REGISTER`/`REQUEST`/`QUERY`, 1172-1174) and each arrives as one message. The rest is the operator's §1072 design, built by lanes B (`kill`, services), C (the toolkit answering for every GUI program) and E (the task manager).*
 - [ ] Process credential / capability management
 - [ ] Unwind info in release builds for backtraces (< 2% perf impact)
 - [ ] Separate debug symbol files loaded on demand for symbolization
@@ -1850,7 +1854,7 @@ _2026-09-28 (`design-decisions.md` §1435): the axis exists -- a theme's `widget
   window-title overflow so tabs and titles behave identically.
 
 ##### Tier 3 — Sound Scheme (nice-to-have, add later)
-- [-] System sounds: notification, error, login, logout, empty recycle bin, etc. -- *2026-10-05 (`design-decisions.md` §1476): `gui/sound` plays a sound file (WAV, Ogg Vorbis, Ogg Opus) through the kernel's ALSA device, converting to the mixer's 48 kHz stereo, and synthesizes a sound for each common event (message, information, warning, error, bell, complete, trash emptied, screen capture, device added and removed, login, logout, power, battery low, volume) for a theme with none. Not yet heard on SlateOS: native programs have no way to the device and the mixer is not emptied into a card (`requests/e-ad-no-application-can-reach-the-sound-device.md`, the kernel's). Choosing the sound -- the `sounds` theme axis, on/off, volume -- and playing it at the shell's events follow.* *2026-10-05 (§1477): chosen and played -- `theme.sounds` (a sound theme in the freedesktop layout, other desktops' included), `sounds.enabled`, `sounds.volume` and the user's own file or silence per event (`sounds.events`), in `appearance.yaml`; the desktop sounds a notification (by priority, as its program's rule allows), the volume, a device, a screenshot, a low battery, the network, and signing in and out. Still `[-]` until it is heard on SlateOS (the kernel's half, above); the Settings section is lane E's (`requests/c-e-a-sounds-page-for-the-sounds-axis.md`).*
+- [-] System sounds: notification, error, login, logout, empty recycle bin, etc. -- *2026-10-05 (`design-decisions.md` §1476): `gui/sound` plays a sound file (WAV, Ogg Vorbis, Ogg Opus) through the kernel's ALSA device, converting to the mixer's 48 kHz stereo, and synthesizes a sound for each common event (message, information, warning, error, bell, complete, trash emptied, screen capture, device added and removed, login, logout, power, battery low, volume) for a theme with none. Not yet heard on SlateOS: native programs have no way to the device and the mixer is not emptied into a card (`requests/e-ad-no-application-can-reach-the-sound-device.md`, the kernel's). Choosing the sound -- the `sounds` theme axis, on/off, volume -- and playing it at the shell's events follow.* *2026-10-05 (§1477): chosen and played -- `theme.sounds` (a sound theme in the freedesktop layout, other desktops' included), `sounds.enabled`, `sounds.volume` and the user's own file or silence per event (`sounds.events`), in `appearance.yaml`; the desktop sounds a notification (by priority, as its program's rule allows), the volume, a device, a screenshot, a low battery, the network, and signing in and out. Still `[-]` until it is heard on SlateOS (the kernel's half, above); the Settings section is lane E's (`requests/c-e-a-sounds-page-for-the-sounds-axis.md`).* *2026-10-10: the Settings section is done -- the switch, the volume, the sound theme and each event's sound (the theme's, none, or the user's own file), each heard as it is chosen. The kernel's half is on `main` (§1520); what stands between these sounds and a speaker now is the C library reaching the sound device (lane D's half of `requests/e-ad-no-application-can-reach-the-sound-device.md`).*
 - [x] Small OGG files bundled in theme directory, or reference a separate sound scheme package -- *2026-10-05 (§1477): both. A theme folder's `stereo/<event>.oga` (or `.ogg`, `.wav`) is its sounds, and a sound theme installed for another desktop under `$XDG_DATA_DIRS/sounds` is one of the themes `theme.sounds` can name.*
 - [x] Optional — many users run silent, but themes that pair colors with sounds are more cohesive -- *2026-10-05 (§1477): `sounds.enabled: false` silences every event; `sounds.events.<name>: off` one; a theme with colours and sounds gives both, chosen axis by axis.*
 
@@ -2291,6 +2295,10 @@ _Custom Python (fastpy) text editor. Editing engine is a toolkit widget (Phase 3
         WinForms/WPF do not exist here, so a C#-native notepad would need
         Avalonia or a binding to our own toolkit regardless. **Porting Mono does
         not by itself get this app running.**
+        *2026-10-10: the runtime to port is now `dotnet/runtime`, not Mono
+        (design-decisions §1246). This notepad targets .NET 8
+        (`net8.0-windows`, WPF), which Mono 6.14 cannot load. Under any
+        runtime, its window still has to be rewritten.*
   - [ ] *Lane A's read, non-binding:* these are answers to different questions.
         Route 1 delivers the editor; route 2 delivers a language runtime and
         should be prioritised as such — against CPython-style ambitions, not
@@ -2537,7 +2545,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] fastpy compiler **hosted on SlateOS** (AOT Python compiler — first-class language for OS userspace). Note the distinction: *cross*-compiling Python to SlateOS binaries from the dev machine already works and is in use (60+ `services/fastpy-*` binaries — see Phase 0 → "Integrate fastpy compiler into build system"). This item is the compiler **running on the OS itself**, which needs CPython ported first (fastpy is written in Python and bridges to the CPython runtime for binary-extension imports — `design-decisions.md` §9).
 - [ ] Custom Rust target for the OS
 - [ ] Port Rust std library to native syscalls
-- [ ] Port a debugger (gdb/lldb) — both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
+- [-] Port a debugger (gdb/lldb) — *2026-10-10: GDB 18.1 links and is on the image; running a program under it waits on the kernel's `ptrace` (`roadmap.md`, lane D).* Both live attach (`debug.*` capabilities) and **postmortem dump-file loading** (opens the crash dumps from §1.5 → Crash Dumps & Postmortem Debugging, re-symbolicates against recorded store paths). Dump format chosen to match what the ported debugger understands (minidump/ELF-core-compatible) so minimal porting is needed.
 
 #### Programming Language Support
 - [ ] Rust (native, first-class — kernel language)
@@ -2550,6 +2558,7 @@ _Chromium first (required for web app framework + VS Code). Firefox later via Li
 - [ ] Ruby (via CRuby/MRI port)
 - [ ] Nim (native compiler, needs C backend which uses gcc)
 - [ ] Zig (self-hosted compiler, minimal runtime)
+- [ ] C#, F# and Visual Basic (via `dotnet/runtime` — requires `mem.jit` capability). This is the operator's choice over Mono, made 2026-10-10 (design-decisions §1246), because their own C# programs target .NET 8. The list of ports they asked for is §6.13.
 
 _Goal: a developer should be able to use any mainstream language on this OS. Languages with JIT compilers require the `mem.jit` capability for full performance; they can fall back to interpreter mode without it._
 
@@ -3789,6 +3798,93 @@ _Several independent watchdogs, each with its own deadline, each able to trip al
 - [ ] Per-incident history with retention/size caps, in the same shape as the crash-dump lifecycle in Phase 1.5
 - [ ] Process Explorer (§4.3) shows live watch state — which processes are not responding, and what each is blocked on
 - [ ] **Reports stay on the machine.** They contain window titles, file paths and process names. Capability-gated to read another user's incidents; never uploaded anywhere, consistent with the project's no-telemetry rule. Explicit, reviewable export for a user who chooses to send one to a developer.
+
+### 6.13 Ports the operator asked for by name
+
+_The operator's own list of things to port or bring over, kept here in one
+place, each item with where its work is described and tracked. Added
+2026-10-10 at the operator's request. The list comes from their answer to
+B-Q18 on 2026-09-27 (design-decisions §1050, quoted there word for word) and
+from two requests of 2026-08-21. `roadmap.md` is the authority on progress;
+the flags here say only where each item stood on 2026-10-10._
+
+**Asked for on 2026-09-27 (B-Q18, §1050):**
+
+- [ ] **Chromium** — §4.7. A joint task led by lane E, waiting on the POSIX
+      layer, the GPU stack and networking.
+- [ ] **.NET, so C# programs run directly: `dotnet/runtime`** — §4.8 →
+      Programming Language Support. The operator first asked for Mono, "dotnet
+      support for Linux". On 2026-10-10 they changed it to `dotnet/runtime`
+      (design-decisions §1246): Mono 6.14 implements .NET Framework 4 and
+      cannot load the .NET 8 programs they want to run. Lane D's Mono 6.14
+      work is where the port starts. That work links against `libc.a` and is
+      on the image, but has not yet been seen running.
+- [ ] **Xonsh** — §2.7, "xonsh as an optional shell". It needs CPython's
+      interactive mode, or fastpy's planned JIT REPL.
+- [-] **YSH** — §2.7. It comes with genuine Oils (`oils-for-unix`), which
+      builds and links against `libc.a` and is not yet on the image (lane B,
+      design-decisions §1043).
+- [ ] **Nushell, on SlateOS** — §2.7. The `[x]` it was once given measured a
+      Windows build (`nu.exe`), not SlateOS.
+- [ ] **The operator's WinDirStat fork, or QDirStat.**
+  - **The fork:** `D:/visual studio projects/dirsize/windirstat`, C++ on MFC
+    and Win32, about 39,000 lines. It has All Files, Largest Files, Duplicate
+    Files, Search Results, File Watcher, Extension and Treemap views; logical
+    against physical size; saved and reloaded scans; and cleanup from the
+    window. MFC is Windows-only, so a port means a new window layer under the
+    fork's own logic.
+  - **What exists here:** `apps/diskanalyzer`, a WinDirStat-style analyzer
+    written here rather than ported.
+  - **The plan:** compare the two, then either port the fork's logic or bring
+    its features to diskanalyzer (lane E, `roadmap.md`).
+  - **QDirStat** is built on Qt, which nothing here has ported.
+- [-] **A capable debugger, like cdb** — §4.8, "Port a debugger (gdb/lldb)".
+      GDB 18.1 and gdbserver link against `libc.a` and are on the image as
+      `/bin/gnu-gdb` and `/bin/gdbserver`. Running a program under them waits
+      on the kernel's `ptrace` (lane D, `roadmap.md`). LLDB needs LLVM and
+      Clang ported first.
+- [ ] **The operator's backup program, LithicBackup.**
+  - **The program:** `D:/visual studio projects/backup`, C# for .NET 8
+    (`net8.0-windows`), about 50,000 lines in 168 files. It has a WPF window,
+    and Windows services under it: the NTFS change journal, IMAPI2 for
+    burning discs, and Win32 volume names.
+  - **The operator's two routes:** reimplement it in a language SlateOS
+    supports, or run it once .NET runs here.
+  - **Running it needs more than the runtime.** WPF exists only on Windows,
+    so its window is rewritten either way. Its Windows services are replaced
+    by SlateOS's own: §2.3's change journal, and §4.10's VSS equivalent.
+  - **The choice** waits on `dotnet/runtime` running here (lane E,
+    `roadmap.md`). `apps/backup` (§4.4) is SlateOS's own backup program,
+    which a reimplementation would build on.
+  - [ ] **Back up a file as soon as its writer says it is done** (the
+    operator, 2026-10-16). SlateOS lets a program mark a file as being written
+    and then finalize it (§ filesystem, the "file is complete" finalizer /
+    write-in-progress signal). The port's continuous backup copies a file, or
+    makes its new version, on that finalize, rather than guessing from
+    whether the file has gone quiet. Until a finalize, it leaves alone a file
+    marked as being written. A finalize the kernel fires because the writer
+    died is backed up but kept apart, as possibly half-written.
+    - **The guessing stays, for every writer that never uses the signal:**
+      Linux programs, Windows programs under Wine, and any other program that
+      does not call the new functions. On Windows, LithicBackup copies a
+      file once it has stayed unchanged for a time that grows with its size,
+      and, for files matching chosen name patterns such as append-only logs,
+      after a longest wait even if it never settles
+      (`src/LithicBackup.Core/Models/ContinuousRules.cs`: debounce size tiers
+      and max-wait mask tiers). Those rules apply to files without the mark.
+    - **Open:** a file kept marked for hours, such as a database that stays
+      open all day, never finalizes, so it is never copied. A longest wait
+      would copy it torn. The way to a good copy is the VSS equivalent
+      (§4.10, writer coordination), which asks its writer to reach a
+      consistent state first.
+
+**Asked for on 2026-08-21:**
+
+- [ ] **A VSS equivalent** — §4.10: a frozen, readable view of a live
+      volume, so a backup copies files that are open and changing.
+- [ ] **The operator's notepad** — §4.2, "Bring over the operator's existing
+      notepad". `D:/visual studio projects/notepad` (NotepadRedo) is also
+      .NET 8 with a WPF window, so the same two routes apply.
 
 ---
 

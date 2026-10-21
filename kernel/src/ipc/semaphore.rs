@@ -821,26 +821,40 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[sem]   Grants in batches, none counted while a task waits: OK");
     }
 
-    // Test 8: a timed wait that times out leaves no entry behind, which a
-    // later signal would spend its unit on.
-    {
-        let h = create(0, 10);
-        let timed_out = matches!(wait_timeout(h, 1_000_000), Err(KernelError::TimedOut));
-        signal(h, 1)?;
-        let left = count(h)?;
-        close(h);
-        if !timed_out || left != 1 {
-            serial_println!(
-                "[sem]   FAIL: a timed-out wait (timed out {}) left the next unit uncounted ({})",
-                timed_out,
-                left
-            );
-            return Err(KernelError::InternalError);
-        }
-        serial_println!("[sem]   Timed-out wait leaves the queue: OK");
-    }
-
     serial_println!("[sem] IPC semaphore self-test PASSED");
+    Ok(())
+}
+
+/// Boot self-test of a timed wait that expires.
+///
+/// # Why this is not part of [`self_test`]
+///
+/// [`self_test`] runs in the early deterministic-init phase, before
+/// `hrtimer::init()` and `sti()`. A timed wait parks until its hrtimer fires,
+/// and hrtimer callbacks are dispatched from the APIC timer ISR, which does not
+/// run until then: there, this wait would park the boot for good. It is called
+/// from the boot path once interrupts are live, beside the other waits bounded
+/// by a timer (`unix_socket::self_test_timeouts`).
+///
+/// # Errors
+///
+/// [`KernelError::InternalError`] if the wait does not time out, or leaves an
+/// entry behind that a later signal spends its unit on.
+pub fn self_test_timed_wait() -> KernelResult<()> {
+    let h = create(0, 10);
+    let timed_out = matches!(wait_timeout(h, 1_000_000), Err(KernelError::TimedOut));
+    signal(h, 1)?;
+    let left = count(h)?;
+    close(h);
+    if !timed_out || left != 1 {
+        serial_println!(
+            "[sem]   FAIL: a timed-out wait (timed out {}) left the next unit uncounted ({})",
+            timed_out,
+            left
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[sem]   Timed-out wait leaves the queue: OK");
     Ok(())
 }
 

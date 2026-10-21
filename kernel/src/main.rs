@@ -2033,6 +2033,13 @@ extern "C" fn kernel_main() -> ! {
                 selftest::Severity::Integrity,
                 || ipc::unix_socket::self_test_timeouts(),
             );
+            // A semaphore's timed wait, likewise: it parks until its hrtimer
+            // fires, so it cannot be part of `ipc::semaphore::self_test()`.
+            selftest::dispatch(
+                "IPC semaphore timed wait",
+                selftest::Severity::Integrity,
+                || ipc::semaphore::self_test_timed_wait(),
+            );
         }
         case();
     }

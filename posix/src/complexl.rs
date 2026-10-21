@@ -1506,7 +1506,9 @@ mod tests {
     /// bound to nearest and one ulp more, its infinities, NaNs and zeros
     /// exactly; elsewhere glibc's answer to nearest, within the bound and
     /// [`DIRECTED_DRIFT`] more. `errno` is the one to nearest where that is
-    /// set, as `math.rs`'s replay has it (design-decisions section 1139).
+    /// set, as `math.rs`'s replay has it (design-decisions section 1139). A
+    /// call that fails may instead answer as another vendor's x87 does
+    /// ([`crate::mathl::x87_vendor_alternative`]).
     ///
     /// Before 2026-09-28 the double and float functions took their sines and
     /// cosines from the crate, whose argument reduction assumes rounding to
@@ -1558,7 +1560,12 @@ mod tests {
                 DIRECTED_SLACK.with(|s| s.set(slack));
                 let result = {
                     let _r = Rounding::set(mode);
-                    check_line(&want)
+                    check_line(&want).or_else(|e| {
+                        match crate::mathl::x87_vendor_alternative(mode_name, &want) {
+                            Some(other) if check_line(&other).is_ok() => Ok(()),
+                            _ => Err(e),
+                        }
+                    })
                 };
                 DIRECTED_SLACK.with(|s| s.set(0));
                 if let Err(e) = result {

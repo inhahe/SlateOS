@@ -814,7 +814,14 @@ mod tests {
             0xffbf,
             "every x86-64 processor has these"
         );
-        assert_eq!(writable >> 16, 0, "and none above the sixteenth");
+        // Above them Intel's have none. AMD's that have misaligned SSE mode
+        // (CPUID 8000_0001h ECX bit 7, `misalignsse`) have one, bit 17: MM,
+        // the misaligned-exception mask -- 0x2ffff on a Ryzen 9 9950X.
+        assert_eq!(
+            writable >> 16 & !0b10,
+            0,
+            "and above the sixteenth at most AMD's MM"
+        );
         feclearexcept(FE_ALL_EXCEPT);
         let bogus = FemodeT {
             control_word: FPU_DEFAULT,
@@ -822,13 +829,17 @@ mod tests {
             mxcsr: 0xffff_0000 | 0x1f80 | 0x3f,
         };
         assert_eq!(fesetmode(&raw const bogus), 0);
-        assert_eq!(stmxcsr() >> 16, 0);
+        assert_eq!(
+            stmxcsr() >> 16,
+            writable >> 16,
+            "of the high bits, those the processor has"
+        );
         assert_eq!(fetestexcept(FE_ALL_EXCEPT), 0, "a mode's flags are not set");
         let mut env = FenvT::default();
         fegetenv(&raw mut env);
         env.mxcsr |= 0xffff_0000;
         assert_eq!(fesetenv(&raw const env), 0);
-        assert_eq!(stmxcsr() >> 16, 0);
+        assert_eq!(stmxcsr() >> 16, writable >> 16);
     }
 
     /// NULL is written to by neither, and changes nothing.

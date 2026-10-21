@@ -5321,6 +5321,32 @@ pub unsafe fn nanl(tag: *const u8) -> L {
 // Tests
 // ===========================================================================
 
+/// The other answer an x87 may give for an oracle line replayed in a
+/// directed rounding `mode` (`"down"`, `"up"` or `"zero"`): where `want`,
+/// `<name> <in...> = <out> <errno>`, has one result, the least subnormal of
+/// a sign that `mode` rounds toward zero, with no `errno`, that zero with
+/// `ERANGE`. `None` for every other line.
+///
+/// The x87's transcendental instructions differ by vendor in the last place,
+/// and a result just under the least subnormal is where that shows in the
+/// answer: rounding downward, `fpatan` gives `atan2l(LDBL_TRUE_MIN, 1)` as
+/// the least subnormal on the Intel processor the directed oracles were
+/// recorded on, and as +0 -- the correctly rounded answer -- on an AMD Ryzen
+/// 9 9950X, where glibc 2.39's own `atan2l` and `cargl` then answer +0 and
+/// `ERANGE` (2026-10-21). The two results are one ulp apart, inside the
+/// replay's bound; the zero brings its range error with it.
+#[cfg(test)]
+pub(crate) fn x87_vendor_alternative(mode: &str, want: &str) -> Option<String> {
+    let (lhs, rhs) = want.split_once(" = ")?;
+    let (value, errno) = rhs.split_once(' ')?;
+    let zero = match (mode, value) {
+        ("down" | "zero", "0000:0000000000000001") => "0000:0000000000000000",
+        ("up" | "zero", "8000:0000000000000001") => "8000:0000000000000000",
+        _ => return None,
+    };
+    (errno == "0").then(|| format!("{lhs} = {zero} {}", errno::ERANGE))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5860,7 +5886,8 @@ mod tests {
 
     /// Every call of [`ORACLE`] again in each directed rounding mode, against
     /// [`directed_answer`]: bit for bit where IEEE fixes the answer, within
-    /// the bound to nearest and one ulp more otherwise.
+    /// the bound to nearest and one ulp more otherwise -- or against the
+    /// other answer another vendor's x87 gives ([`x87_vendor_alternative`]).
     #[test]
     fn every_call_answers_in_every_rounding_direction() {
         // lgammal writes signgam, which math.rs's tests read.
@@ -5896,7 +5923,11 @@ mod tests {
                 DIRECTED_SLACK.with(|s| s.set(1));
                 let result = {
                     let _r = Rounding::set(mode);
-                    check(&format!("{lhs} = {want}"))
+                    let line = format!("{lhs} = {want}");
+                    check(&line).or_else(|e| match x87_vendor_alternative(mode_name, &line) {
+                        Some(other) if check(&other).is_ok() => Ok(()),
+                        _ => Err(e),
+                    })
                 };
                 DIRECTED_SLACK.with(|s| s.set(0));
                 if let Err(e) = result {

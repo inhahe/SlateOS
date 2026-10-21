@@ -348,7 +348,9 @@ impl<R: Read + Seek> Demuxer<R> {
     /// does not read, or has no Segment; when it holds no Cluster -- a
     /// complete file of an Info and Tracks alone too, as FFmpeg refuses one
     /// -- or its description is damaged as FFmpeg refuses it for: cut short
-    /// ([`Error::Truncated`]), or a Tracks damaged after its first entry.
+    /// ([`Error::Truncated`]), or a Tracks damaged after its first entry;
+    /// and when damage before the first Cluster is built to cost too much to
+    /// look past ([`Error::Unsupported`]).
     pub fn open(source: R) -> Result<Self, Error> {
         let mut r = Reader::new(source)?;
         let doc_type = read_ebml_header(&mut r)?;
@@ -595,7 +597,8 @@ impl<R: Read + Seek> Demuxer<R> {
     ///
     /// When the source fails, a Tracks refuses the file, or the file holds
     /// no Cluster (a complete Segment of an Info and Tracks alone too) or
-    /// ends inside an element the second pass reads ([`Error::Truncated`]).
+    /// ends inside an element the second pass reads ([`Error::Truncated`]);
+    /// and as [`Self::second_pass`].
     fn read_description(&mut self, segment: &Header) -> Result<u64, Error> {
         let mut g = Gathered::default();
         let first_cluster = match self.first_pass(segment, &mut g)? {
@@ -728,8 +731,9 @@ impl<R: Read + Seek> Demuxer<R> {
     ///
     /// [`Error::Truncated`] when the file ends inside an element read --
     /// FFmpeg's `AVERROR(EIO)`, which ends its search, where other damage
-    /// does not -- or holds no Cluster after the last; and as
-    /// [`Self::first_pass`].
+    /// does not -- or holds no Cluster after the last;
+    /// [`Error::Unsupported`] when the search costs more than a damaged file
+    /// can need; and as [`Self::first_pass`].
     fn second_pass(
         &mut self,
         segment_start: u64,
@@ -737,11 +741,28 @@ impl<R: Read + Seek> Demuxer<R> {
         g: &mut Gathered,
     ) -> Result<u64, Error> {
         self.segment_end = self.r.len();
+        // A file can be built so that each element found holds the headers
+        // of those after it, which are found and read in turn, each through
+        // all the rest: work that grows as the square of the file's length.
+        // FFmpeg's pass does the same, and runs for hours on such a file of
+        // a few megabytes. Looking past real damage reads each element about
+        // once; past eight units of `Reader::work` per byte of the file, and
+        // 2^20 more, the file is refused.
+        let budget = self
+            .r
+            .work()
+            .saturating_add(self.r.len().saturating_mul(8))
+            .saturating_add(1 << 20);
         // The first pass's elements, walked again as the search passes their
         // starts: where the next one begins.
         let mut first = self.segment_data;
         let mut from = segment_start.saturating_add(1);
         loop {
+            if self.r.work() > budget {
+                return Err(Error::Unsupported(
+                    "damage before the first Cluster too costly to look past",
+                ));
+            }
             let (at, id) = self.find_top_level(from)?.ok_or(Error::Truncated)?;
             if id == ids::CLUSTER {
                 return Ok(at);

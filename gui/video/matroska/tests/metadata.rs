@@ -21,7 +21,7 @@
 
 use std::io::Cursor;
 
-use matroska::{AttachmentKind, Demuxer, Metadata};
+use matroska::{AttachmentKind, Demuxer, Error, Metadata};
 
 fn data(name: &str) -> String {
     format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -425,6 +425,41 @@ fn after_damage_the_segment_runs_to_the_end_of_the_file() {
         Some(&b"Past the end"[..])
     );
     assert_eq!(d.next_packet().unwrap().unwrap().data, b"k");
+}
+
+/// A file built to make looking past damage cost the square of its length
+/// is refused, as too costly to look past. After a stray byte, Infos follow,
+/// each header (its ID, and a size running to the end of the many Voids
+/// after them) inside an unknown child of the Info before. The second pass,
+/// which finds each element by its ID and reads it, reads every Info through
+/// all the Infos and Voids after it -- as FFmpeg's does, which on such a file
+/// of a few megabytes runs for hours. Without the bound this file opens, after
+/// some 10^7 elements read.
+#[test]
+fn damage_too_costly_to_look_past_refuses_the_file() {
+    const INFOS: usize = 1000;
+    const VOIDS: usize = 10_000;
+    let voids = [0xEC, 0x80].repeat(VOIDS);
+    // Built from the last Info back: each holds the 14-byte children that
+    // hide the headers of the ones after it, then the Voids.
+    let mut chain: Vec<u8> = Vec::new();
+    for _ in 0..INFOS {
+        let data = if chain.is_empty() {
+            chain
+        } else {
+            [vec![0x80, 0x8C], chain].concat()
+        };
+        let size = (data.len() + voids.len()) as u64;
+        let mut header = vec![0x15, 0x49, 0xA9, 0x66];
+        header.extend_from_slice(&size.to_be_bytes());
+        header[4] = 0x01;
+        chain = [header, data].concat();
+    }
+    let bytes = file_with(&[vec![0x00], chain, voids].concat());
+    assert!(matches!(
+        Demuxer::open(Cursor::new(bytes)).err(),
+        Some(Error::Unsupported(_))
+    ));
 }
 
 /// A tag nested deeper than FFmpeg reads -- 13 SimpleTags deep is the most

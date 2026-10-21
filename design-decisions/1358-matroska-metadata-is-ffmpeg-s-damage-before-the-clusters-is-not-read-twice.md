@@ -66,7 +66,14 @@ listed once.
   change; a file built to hold hundreds of thousands of tags for one
   dictionary would take FFmpeg, and an exact copy, hours. Past 2^28 units of
   work (some 20,000 tags in one dictionary; real files hold tens) the rest
-  of a file's tags are left out.
+  of a file's tags are left out. The second pass is bounded too: a file
+  can be built so that each element it finds holds the headers of those
+  after it, each then found and read through all the rest -- work as the
+  square of the file's length, which in FFmpeg runs for hours on a file of
+  a few megabytes. Looking past real damage reads each element about once.
+  Counting a unit of work per seek, per read and per 16 bytes read, past
+  eight units per byte of the file and 2^20 more the file is refused
+  (`Error::Unsupported`).
 - *Attachments' bytes are read when asked for* (`Demuxer::attachment_data`),
   not when the file is opened as FFmpeg reads them: a film with 40 MB of
   subtitle fonts opens without reading them, and they are read only if the

@@ -68,10 +68,10 @@ EMBED_INPUT_CHARS = 2000
 QUERY_INSTRUCTION = ("Given a question about a software project's issues, design decisions, roadmap, notes and "
                      "requests, retrieve the entries that answer it")
 SERVER_PORT = int(os.environ.get("DOCSEARCH_EMBED_PORT", "8093"))
-LLAMA_DIR = Path(os.environ.get("DOCSEARCH_LLAMA_DIR", "D:/ai/llama.cpp/b11344"))
+LLAMA_DIR = Path(os.environ.get("DOCSEARCH_LLAMA_DIR", "C:/ai/llama.cpp/b11344"))
 SERVER_EXE = LLAMA_DIR / "llama-server.exe"
 EMBED_MODEL = Path(os.environ.get("DOCSEARCH_EMBED_MODEL",
-                                  "D:/ai/Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"))
+                                  "C:/ai/Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf"))
 ID_QUERY = re.compile(r"^(?:\u00a7\s*\d+|\d{1,4}|(?:[A-F]-)?Q\d+|DQ\d+|[A-Za-z0-9]+(?:-[A-Za-z0-9.]+){1,})$")
 
 INDEX_SCHEMA = """

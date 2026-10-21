@@ -26,7 +26,6 @@ real one, aliases only, a real `python3` with only an aliased `python`.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -35,6 +34,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import msysbash  # noqa: E402
+import shellfunc  # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -48,13 +48,6 @@ def check(label, got, want):
     print(f"        want: {want!r}")
     _FAILURES.append(label)
     return False
-
-
-def lifted_find_py(text):
-    match = re.search(r"^find_py\(\)\s*\{.*?^\}\n", text, re.MULTILINE | re.DOTALL)
-    if match is None:
-        raise RuntimeError("the hook has no `find_py() { ... }`; this suite tests nothing")
-    return match.group(0)
 
 
 def fake(directory, name):
@@ -81,8 +74,7 @@ def choose(fn, path_dirs):
 
 
 def main() -> int:
-    with open(HOOK, encoding="utf-8", newline="") as fh:
-        fn = lifted_find_py(fh.read())
+    fn = shellfunc.shell_function_in(HOOK, "find_py")
 
     with tempfile.TemporaryDirectory(prefix="pychoice-", ignore_cleanup_errors=True) as tmp:
         alias = os.path.join(tmp, "Local", "Microsoft", "WindowsApps")

@@ -45,6 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
+import shellfunc  # noqa: E402
 import msysbash  # noqa: E402  (the bash boot-test.sh runs under; see run_fn)
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -106,26 +107,6 @@ def check(label: str, got: object, want: object) -> None:
     else:
         print(f"  FAIL {label} -- got {got!r}, want {want!r}")
         failures.append(label)
-
-
-def extract(name: str, text: str) -> str:
-    """The `name() { ... }` block, by a closing brace at column 0."""
-    lines = text.splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith(f"{name}() {{"):
-            start = i
-            break
-    if start is None:
-        raise SystemExit(
-            f"cannot find `{name}() {{` in scripts/boot-test.sh -- it was renamed "
-            "or restructured, and this suite is testing nothing. Update the "
-            "extraction, do not delete the test."
-        )
-    for j in range(start + 1, len(lines)):
-        if lines[j] == "}":
-            return "\n".join(lines[start : j + 1])
-    raise SystemExit(f"`{name}` has no closing brace at column 0")
 
 
 def git(repo: Path, *args: str) -> str:
@@ -206,7 +187,7 @@ def append(repo: Path, row: str) -> None:
 
 
 def main() -> int:
-    body = extract("commit_boot_history", BOOT.read_text(encoding="utf-8", errors="replace"))
+    body = shellfunc.shell_function_in(BOOT, "commit_boot_history")
 
     with scratch_dir() as tmp:
         print("group 1: the ordinary case")

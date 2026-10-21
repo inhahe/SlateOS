@@ -870,6 +870,23 @@ def not_about_the_tree(qemu_stderr: str, exit_code: int) -> str | None:
     return host_failure(qemu_stderr) or harness_abort(exit_code)
 
 
+def parse_gate_skips(text: str) -> dict[str, str]:
+    """run_checker's RUN_CHECKER_SKIPS as {gate label: the reason it gave}.
+
+    `text` is one `<label><TAB><reason>` line per gate that could not run
+    (scripts/run-checker.sh, run_checker_note_skip); empty means none did. A
+    line with no tab is all label, since a label is never empty and a reason
+    may be. A label seen twice keeps its first reason.
+    """
+    skips: dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        label, _tab, reason = line.partition("\t")
+        skips.setdefault(label, reason)
+    return skips
+
+
 VERDICT_HELP = {
     "PASS": "marker reached, every gate green",
     "PASS_TOOLING": "kernel booted; the harness failed to produce an artefact",
@@ -1437,11 +1454,10 @@ def build_record(serial: Serial | None, verdict: str, args,
     # is a different fact from a run whose gates were free.
     if args.gates_seconds is not None:
         rec["gates_seconds"] = args.gates_seconds
-    # The gates that checked nothing. Empty list when none, absent when the
-    # caller did not say -- the same three-state rule as `skips` below.
-    if getattr(args, "gates_skipped", None) is not None:
-        rec["gates_skipped"] = [ln for ln in args.gates_skipped.splitlines()
-                                if ln.strip()]
+    # The gates that checked nothing, {label: reason}. Empty when none, absent
+    # when the caller did not say -- the same three-state rule as `skips` below.
+    if args.gates_skipped is not None:
+        rec["gates_skipped"] = parse_gate_skips(args.gates_skipped)
     if args.script_seconds is not None:
         rec["script_seconds"] = args.script_seconds
     # Disk pressure, which is a cause of boot-test failures this file could not
@@ -2022,14 +2038,14 @@ def report(records: list[dict], current: dict | None) -> None:
         verdict = current["verdict"]
         hits = current.get("fingerprints") or []
         why = VERDICT_HELP.get(verdict, "")
-        gate_skips = current.get("gates_skipped") or []
+        gate_skips = current.get("gates_skipped") or {}
         if verdict == "PASS" and gate_skips:
             why = (f"marker reached, every gate that ran passed; "
                    f"{len(gate_skips)} could not run")
         print(f"[boot-history] {verdict}"
               + (f" -- {why}" if why else ""))
-        for line in gate_skips:
-            print(f"[boot-history]   not run: {line}")
+        for label, reason in gate_skips.items():
+            print(f"[boot-history]   not run: {label} -- {reason}")
         # Named as the pair, matching `wall_populations`' key exactly, so the
         # line that says which population this boot is in and the block that
         # prints that population's median cannot disagree about the partition.
@@ -2243,12 +2259,11 @@ def main(argv=None) -> int:
                              "carry it will say.")
     parser.add_argument("--gates-skipped", default=None, metavar="LINES",
                         help="the pre-build gates that could not run, one "
-                             "`<label> -- <reason>` per line (run_checker's "
-                             "RUN_CHECKER_SKIPS); empty for none. Passed "
-                             "exactly when --gates-seconds is, and omitted "
-                             "with it, so an absent field keeps meaning 'the "
-                             "gate phase did not finish, or the row predates "
-                             "the field'.")
+                             "`<label><TAB><reason>` per line (run_checker's "
+                             "RUN_CHECKER_SKIPS); empty for none. Required "
+                             "with --gates-seconds and refused without it, so "
+                             "an absent field keeps meaning 'the gate phase "
+                             "did not finish, or the row predates the field'.")
     parser.add_argument("--script-seconds", type=float, default=None,
                         help="seconds the whole boot-test.sh run took, start "
                              "to finish. `wall_seconds` is QEMU alone, so "
@@ -2331,6 +2346,16 @@ def main(argv=None) -> int:
     parser.add_argument("--limit", type=int, default=25,
                         help="records shown by --list (default: %(default)s)")
     args = parser.parse_args(argv)
+    # The pairing --gates-skipped's help promises: a list without a finished
+    # gate phase, or a finished phase without its list, is a row that says two
+    # things at once.
+    if (args.gates_skipped is None) != (args.gates_seconds is None):
+        parser.error("--gates-skipped and --gates-seconds go together: both "
+                     "when the gate phase finished, neither when it did not")
+    # The report quotes checkers' own words, and a console whose code page
+    # cannot encode one must not end the report with a traceback.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
 
     if args.streaks:
         return cmd_streaks(args.history)

@@ -71,28 +71,29 @@ def check(label: str, ok: bool, detail: str = "") -> None:
         failures.append(label)
 
 
-def extract_run_checker(text: str) -> str:
-    """The `run_checker() { ... }` block, cut out by brace matching.
+def extract_function(path: Path, name: str) -> str:
+    """The `<name>() { ... }` block of the shell file `path`, cut out by brace
+    matching.
 
-    Matches the closing brace at column 0, which is the file's style for a
-    function body and is unambiguous: every inner `}` in the body is indented.
+    Matches the closing brace at column 0, which is the style of both files for
+    a function body and is unambiguous: every inner `}` in the body is indented.
     """
-    lines = text.splitlines()
+    lines = path.read_text(encoding="utf-8").splitlines()
     start = None
     for i, line in enumerate(lines):
-        if line.startswith("run_checker() {"):
+        if line.startswith(f"{name}() {{"):
             start = i
             break
     if start is None:
         raise SystemExit(
-            "cannot find `run_checker() {` in scripts/run-checker.sh -- the "
-            "helper was renamed or restructured, and this suite is testing "
-            "nothing. Update the extraction, do not delete the test."
+            f"cannot find `{name}() {{` in {path.name} -- the function was "
+            "renamed or restructured, and this suite is testing nothing. "
+            "Update the extraction, do not delete the test."
         )
     for j in range(start + 1, len(lines)):
         if lines[j] == "}":
             return "\n".join(lines[start : j + 1])
-    raise SystemExit("run_checker's body has no closing brace at column 0")
+    raise SystemExit(f"{name}'s body in {path.name} has no closing brace at column 0")
 
 
 def child_env() -> dict[str, str]:
@@ -131,11 +132,15 @@ def child_env() -> dict[str, str]:
     the first thing a silent checker "said" -- and groups 9 and 10 read it as
     the decline reason a silent checker must not have. Run by hand, the suite
     passed.
+
+    `RUN_CHECKER_*` goes too: the library appends to RUN_CHECKER_SKIPS, so a
+    value inherited from a caller would be counted as this driver's skips.
     """
     return {
         k: v
         for k, v in os.environ.items()
-        if not (k.startswith("CHECKER_") or k.startswith("GATE_CACHE"))
+        if not (k.startswith("CHECKER_") or k.startswith("GATE_CACHE")
+                or k.startswith("RUN_CHECKER_"))
     }
 
 
@@ -506,7 +511,9 @@ def main() -> int:
         print("skip: no `sh` on PATH")
         return 0
 
-    func = extract_run_checker(LIB.read_text(encoding="utf-8"))
+    # run_checker and the function its skip arms record through.
+    func = (extract_function(LIB, "run_checker_note_skip") + "\n"
+            + extract_function(LIB, "run_checker"))
 
     tmp_root = Path(tempfile.mkdtemp(prefix="runchecker-"))
     try:
@@ -1232,8 +1239,7 @@ def main() -> int:
         # The per-call flag is cleared by the next gate (group 9 pins that), so a
         # run's verdict cannot be built from it. RUN_CHECKER_SKIPS is: both kinds
         # of skip append to it, a gate that ran does not, and nothing clears it
-        # between calls. Without it a boot test on a host missing zig skipped
-        # three libc gates and still ended "every gate green".
+        # between calls.
         acc_driver = tmp_root / "driver-accumulate.sh"
         acc_driver.write_text(
             "set -u\n"
@@ -1252,15 +1258,59 @@ def main() -> int:
         out = r.stdout + r.stderr
         block = out.split("SKIPS-BEGIN\n", 1)[-1].split("SKIPS-END", 1)[0]
         lines = [ln for ln in block.splitlines() if ln]
-        check("both kinds of skip are kept, in order, one line each",
+        check("both kinds of skip are kept, in order, one `label<TAB>reason` each",
               len(lines) == 2
-              and lines[0].startswith("gate_declined -- wsl is not installed")
-              and lines[1].startswith("gate_selfskip -- zig cc not found"),
+              and lines[0].startswith("gate_declined\twsl is not installed")
+              and lines[1].startswith("gate_selfskip\tzig cc not found"),
               out.strip()[-400:])
         check("a gate that ran is not among them", "gate_ran" not in block,
               out.strip()[-400:])
         for name in ("gate_declined", "gate_ran", "gate_selfskip"):
             KeptLog(tmp_root, "pre-push", name).unlink(missing_ok=True)
+
+        # --- the push's tally reads them ----------------------------------
+        # A call site tallies its gate before the checker runs, so a gate whose
+        # checker then could not run was listed under "ran". The tally moves a
+        # gate whose name is among the skips, and lists every skip by reason.
+        tally_driver = tmp_root / "driver-tally.sh"
+        tally_driver.write_text(
+            "set -u\n"
+            + extract_function(HOOK, "print_gate_tally") + "\n"
+            + 'gates_ran=" rustfmt libc-abi eol"\n'
+            + 'gates_skipped=" docs"\n'
+            + "TAB=$(printf '\\t')\n"
+            + 'RUN_CHECKER_SKIPS="libc-abi${TAB}no zig -- cannot compare\n'
+            + 'libc-abi-selftest${TAB}no zig\n"\n'
+            + "print_gate_tally\n",
+            encoding="utf-8",
+            newline="")
+        r = subprocess.run(["sh", str(tally_driver)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=child_env())
+        out = r.stdout + r.stderr
+        check("a gate whose checker could not run is not counted as ran",
+              "2 gate(s) ran, 2 skipped." in out
+              and "ran:    rustfmt eol" in out
+              and "skipped: docs libc-abi" in out, out.strip()[-400:])
+        check("every skip is listed with its reason, the separator a reason "
+              "contains included",
+              "    libc-abi -- no zig -- cannot compare" in out
+              and "    libc-abi-selftest -- no zig" in out, out.strip()[-400:])
+        empty_driver = tmp_root / "driver-tally-none.sh"
+        empty_driver.write_text(
+            "set -u\n"
+            + extract_function(HOOK, "print_gate_tally") + "\n"
+            + 'gates_ran=" rustfmt"\ngates_skipped=""\nRUN_CHECKER_SKIPS=\n'
+            + "print_gate_tally\n",
+            encoding="utf-8",
+            newline="")
+        r = subprocess.run(["sh", str(empty_driver)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=child_env())
+        out = r.stdout + r.stderr
+        check("with no skips the tally is as before",
+              "1 gate(s) ran, 0 skipped." in out and "could not run" not in out,
+              out.strip()[-400:])
 
         # ------------------------------------------------------------------
         # The distinct-label rule group 7 checks is about one invocation

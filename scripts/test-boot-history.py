@@ -1273,30 +1273,56 @@ def test_gates_skipped_keeps_its_three_states(bh):
     as a run on which no gate was skipped."""
     args = _Args()
     args.gates_seconds = 100.0
-    args.gates_skipped = ("check-libc-declared -- SKIPPED: no zig\n"
-                          "check-libc-overlay -- SKIPPED: no zig\n")
+    # The reason carries ` -- ` itself, which is why the separator is a tab.
+    args.gates_skipped = ("check-libc-declared\tSKIPPED: no zig -- cannot read\n"
+                          "check-libc-overlay\tSKIPPED: no zig\n")
     rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
-    check("each skipped gate is one entry", rec.get("gates_skipped"),
-          ["check-libc-declared -- SKIPPED: no zig",
-           "check-libc-overlay -- SKIPPED: no zig"])
+    check("each skipped gate is one entry, keyed by its label",
+          rec.get("gates_skipped"),
+          {"check-libc-declared": "SKIPPED: no zig -- cannot read",
+           "check-libc-overlay": "SKIPPED: no zig"})
     args.gates_skipped = ""
     rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
-    check("none skipped is an empty list, not an absent key",
-          rec.get("gates_skipped"), [])
+    check("none skipped is an empty mapping, not an absent key",
+          rec.get("gates_skipped"), {})
     rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
     check("not passed leaves the key out", "gates_skipped" in rec, False)
 
 
+def test_gate_skip_lines_parse_by_their_first_tab(bh):
+    check("a line with no tab is all label",
+          bh.parse_gate_skips("cfg-unix\n"), {"cfg-unix": ""})
+    check("a repeated label keeps its first reason",
+          bh.parse_gate_skips("a\tfirst\na\tsecond\n"), {"a": "first"})
+    check("blank lines are not gates", bh.parse_gate_skips("\n \n"), {})
+
+
+def test_gates_skipped_is_refused_without_gates_seconds(bh, tmpdir):
+    """Each without the other would write a row claiming both that the gate
+    phase finished and that it did not."""
+    import contextlib
+    import io
+    hist = os.path.join(tmpdir, "pairing.jsonl")
+    for argv, what in ((["--gates-skipped="], "a list without a gate phase"),
+                       (["--gates-seconds", "5"], "a gate phase without its list")):
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                bh.main(["--history", hist, "--no-record"] + argv)
+            refused = False
+        except SystemExit as exc:
+            refused = exc.code == 2
+        check(f"{what} is refused", refused, True)
+
+
 def test_a_pass_with_skipped_gates_does_not_say_every_gate_green(bh):
-    """The verdict line is what gets read, so it is where a gate that checked
-    nothing has to show: a host missing zig skipped three libc gates under
-    "every gate green"."""
+    """The verdict line is what gets read, so a gate that checked nothing has
+    to show there, by name and with its reason."""
     import contextlib
     import io
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         bh.report([], {"verdict": "PASS", "profile": "debug",
-                       "gates_skipped": ["check-libc-declared -- SKIPPED: no zig"]})
+                       "gates_skipped": {"check-libc-declared": "SKIPPED: no zig"}})
     out = buf.getvalue()
     check("the pass does not claim every gate", "every gate green" in out, False)
     check_true("it counts the gates that could not run", "1 could not run" in out)
@@ -1304,7 +1330,7 @@ def test_a_pass_with_skipped_gates_does_not_say_every_gate_green(bh):
                "not run: check-libc-declared -- SKIPPED: no zig" in out)
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
-        bh.report([], {"verdict": "PASS", "profile": "debug", "gates_skipped": []})
+        bh.report([], {"verdict": "PASS", "profile": "debug", "gates_skipped": {}})
     check_true("a pass with none skipped still says every gate green",
                "every gate green" in buf.getvalue())
 

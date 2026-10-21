@@ -1013,7 +1013,6 @@ OPERATOR_OWNS: tuple[str, ...] = (
     "aero-window-frame.png",
     "file explorer.png",
     "slate os.png",
-    "push.bat",
 )
 
 #: Files every lane writes, each under a named per-lane rule. A rule that says

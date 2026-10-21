@@ -500,15 +500,15 @@ impl Context {
     }
 
     /// The frame and its properties as handed out (`output_frame`): the
-    /// frame with its film grain where it has some, with the decoded
-    /// frame's properties.
+    /// frame with its film grain where that was made, with the decoded
+    /// frame's properties. A picture whose grain was to be made but never
+    /// was -- finished only to begin the next in its packet, a first field
+    /// shown alone, a packet that failed before the picture was finished --
+    /// is shown as decoded, where FFmpeg shows its `f_grain` as allocated,
+    /// whatever its buffer pool left there.
     fn output_frame(&self, out: usize) -> Option<Output> {
         let pic = &self.pics[out];
-        let frame = if pic.needs_fg {
-            pic.f_grain.clone()?
-        } else {
-            pic.f.clone()?
-        };
+        let frame = pic.f_grain.as_ref().or(pic.f.as_ref())?.clone();
         let mut props = pic.props.clone();
         if pic.sei_recovery_frame_cnt == 0 {
             props.key = true;

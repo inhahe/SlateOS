@@ -451,10 +451,11 @@ fn pictures_are_set_up_and_shown_as_ffmpeg_does() {
     );
 }
 
-/// Adler-32 as FFmpeg's `framecrc` muxer takes it: `av_adler32_update`
-/// started from 0, not the standard 1.
-fn adler32(data: &[u8]) -> u32 {
-    let (mut a, mut b) = (0u32, 0u32);
+/// `data` added to the Adler-32 `sum` (`av_adler32_update`): FFmpeg's
+/// `framecrc` muxer starts from 0, `av_adler32_update`'s own callers mostly
+/// from the standard 1.
+pub(crate) fn adler32(sum: u32, data: &[u8]) -> u32 {
+    let (mut a, mut b) = (sum & 0xFFFF, sum >> 16);
     for &x in data {
         a = (a + u32::from(x)) % 65521;
         b = (b + a) % 65521;
@@ -467,11 +468,11 @@ fn adler32(data: &[u8]) -> u32 {
 /// Adler-32.
 fn picture_sum(p: &crate::Picture) -> String {
     let bytes = picture_bytes(p);
-    format!("{}, 0x{:08x}", bytes.len(), adler32(&bytes))
+    format!("{}, 0x{:08x}", bytes.len(), adler32(0, &bytes))
 }
 
 /// A picture's planes end to end, as FFmpeg's raw video holds them.
-fn picture_bytes(p: &crate::Picture) -> Vec<u8> {
+pub(crate) fn picture_bytes(p: &crate::Picture) -> Vec<u8> {
     let mut bytes = Vec::new();
     for i in 0..3 {
         if let Some(v) = p.plane8(i) {

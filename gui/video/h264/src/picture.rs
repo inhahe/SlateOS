@@ -296,8 +296,9 @@ pub(crate) struct Picture {
     /// a film grain message was in force, and not refused when the grain
     /// was to be made.
     pub(crate) needs_fg: bool,
-    /// The frame shown in its place when it is (`f_grain`): allocated with
-    /// `f`, the grain made into it when the picture is finished.
+    /// The frame shown in its place when it is (`f_grain`): made, grain and
+    /// all, when the picture is finished; `None` until then, or if the
+    /// grain is not made.
     pub(crate) f_grain: Option<Arc<AnyFrame>>,
     /// The grain it is to be shown with: the film grain side data FFmpeg
     /// attaches to `f`, the first one attached when both fields bring one.

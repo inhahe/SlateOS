@@ -203,14 +203,14 @@ fn an_i_pcm_picture_is_its_samples() {
     assert_eq!(luma_plane(&got[0]), written_luma());
 }
 
-/// A film grain characteristics SEI with no model in it (cancel flag 0,
-/// model 0, no colour description, blending 0, scale 0, no component's
-/// model, repetition period 0): FFmpeg's decoder marks the picture for
-/// grain, then shows it ungrained when it cannot add any.
+/// A film grain characteristics SEI with no component's model (cancel flag
+/// 0, model 0, no colour description, blending 0, scale 0, repetition
+/// period 0): FFmpeg's decoder marks the picture for grain, then makes the
+/// grain with nothing to add, each plane a copy.
 const FILM_GRAIN_SEI: [u8; 6] = [0x06, 19, 2, 0x00, 0x04, 0x80];
 
 #[test]
-fn a_picture_with_film_grain_is_shown_without_grain() {
+fn a_picture_with_film_grain_but_no_model_is_shown_as_decoded() {
     let mut d = Decoder::new();
     let got = pictures(&mut d, &stream(PLAIN, &[&FILM_GRAIN_SEI])).unwrap();
     assert_eq!(got.len(), 1);
@@ -222,25 +222,29 @@ fn a_picture_with_film_grain_is_shown_without_grain() {
 /// then the strength and the two cut-off frequencies it is given.
 type Band = (i64, i64, i64, i64, i64);
 
-/// A film grain characteristics SEI, header first: frequency filtering,
-/// no colour description, additive blending, `log2_scale_factor`, each
-/// component's `bands` (`None`: no grain), and `repetition_period` (1:
-/// until the next IDR or message).
-fn film_grain_sei(
-    log2_scale_factor: i64,
-    bands: [Option<&[Band]>; 3],
-    repetition_period: i64,
-) -> Vec<u8> {
+/// The grain the film grain tests give: luma in two bands, Cb in one, Cr
+/// none.
+const GRAIN_BANDS: [Option<&[Band]>; 3] = [
+    Some(&[(0, 100, 60, 6, 9), (101, 255, -45, 10, 4)]),
+    Some(&[(0, 255, 40, 3, 3)]),
+    None,
+];
+
+/// A film grain characteristics SEI, header first: model `model_id` (0
+/// frequency filtering, 1 auto-regression), no colour description,
+/// additive blending, a scale of 3, [`GRAIN_BANDS`], and a repetition
+/// period of 1: until the next IDR or message.
+fn film_grain_sei(model_id: i64) -> Vec<u8> {
     let payload = |s: &mut Syntax| {
         s.u("film_grain_characteristics_cancel_flag", 1, 0)
-            .u("film_grain_model_id", 2, 0)
+            .u("film_grain_model_id", 2, model_id)
             .u("separate_colour_description_present_flag", 1, 0)
             .u("blending_mode_id", 2, 0)
-            .u("log2_scale_factor", 4, log2_scale_factor);
-        for b in &bands {
+            .u("log2_scale_factor", 4, 3);
+        for b in &GRAIN_BANDS {
             s.u("comp_model_present_flag", 1, i64::from(b.is_some()));
         }
-        for b in bands.iter().flatten() {
+        for b in GRAIN_BANDS.iter().flatten() {
             s.u("num_intensity_intervals_minus1", 8, b.len() as i64 - 1)
                 .u("num_model_values_minus1", 3, 2);
             for &(lo, hi, strength, cut_h, cut_v) in *b {
@@ -251,10 +255,7 @@ fn film_grain_sei(
                     .se("comp_model_value", cut_v);
             }
         }
-        s.ue(
-            "film_grain_characteristics_repetition_period",
-            repetition_period,
-        );
+        s.ue("film_grain_characteristics_repetition_period", 1);
     };
     // The payload's size in bytes: its bits, then a 1 and zeros to the byte.
     let mut measure = Syntax::default();
@@ -272,52 +273,35 @@ fn film_grain_sei(
     sei.finish(0x06)
 }
 
-/// A picture's planes, cropped, summed as FFmpeg's `framecrc` muxer sums a
-/// raw frame: one Adler-32 over the luma, then each chroma plane, started
-/// from 0 rather than Adler-32's 1.
-fn framecrc(p: &Picture) -> u32 {
-    let (mut a, mut b) = (0u32, 0u32);
-    for c in 0..3 {
-        let plane = p.plane8(c).unwrap();
-        for y in 0..plane.height {
-            for &s in &plane.data[y * plane.stride..y * plane.stride + plane.width] {
-                a = (a + u32::from(s)) % 65521;
-                b = (b + a) % 65521;
-            }
-        }
-    }
-    (b << 16) | a
-}
-
-/// Three I_PCM pictures, each a packet with a film grain message: each
-/// shown with grain seeded by its own order count -- and the IDR's by its
-/// id too -- as FFmpeg shows it. (A message does not outlast its packet:
-/// FFmpeg forgets it as the next begins, whatever its repetition period.)
-/// The sums are FFmpeg 8.1.3's (`tools/ffdbg`'s build): with
-/// `H264_WRITE_GRAIN=<file>` this test writes the stream there, and
-/// `ffmpeg -threads 1 -i <file> -f framecrc -` sums it.
-#[test]
-fn pictures_with_film_grain_are_shown_with_ffmpegs_grain() {
+/// Three I_PCM pictures of 2x2 macroblocks, the first an IDR of id 3, each
+/// a packet of its own, `sei` before the slice of each picture `with_sei`
+/// says; each shown picture summed as FFmpeg's `framecrc` muxer sums it.
+/// The sums the tests hold them to are FFmpeg 8.1.3's (`tools/ffdbg`'s
+/// build): with `H264_WRITE_GRAIN=<directory>` each test writes its stream
+/// there as `<name>.h264`, and `ffmpeg -threads 1 -i <file> -f framecrc -`
+/// sums it.
+fn grain_sums(name: &str, sei: &[u8], with_sei: [bool; 3]) -> Vec<u32> {
     let shape = Shape {
         mbs: (2, 2),
         ..PLAIN
     };
     let (sps, pps) = parameter_sets(shape);
-    let sei = film_grain_sei(
-        3,
-        [
-            Some(&[(0, 100, 60, 6, 9), (101, 255, -45, 10, 4)]),
-            Some(&[(0, 255, 40, 3, 3)]),
-            None,
-        ],
-        1,
-    );
-    let packets = [
-        annex_b(&[&sps, &pps, &sei, &i_pcm_slice(shape, 0, Some(3))]),
-        annex_b(&[&sei, &i_pcm_slice(shape, 1, None)]),
-        annex_b(&[&sei, &i_pcm_slice(shape, 2, None)]),
-    ];
-    if let Some(path) = std::env::var_os("H264_WRITE_GRAIN") {
+    let packets: Vec<Vec<u8>> = (0..3u32)
+        .map(|k| {
+            let slice = i_pcm_slice(shape, k, (k == 0).then_some(3));
+            let mut units: Vec<&[u8]> = Vec::new();
+            if k == 0 {
+                units.extend([sps.as_slice(), pps.as_slice()]);
+            }
+            if with_sei[k as usize] {
+                units.push(sei);
+            }
+            units.push(&slice);
+            annex_b(&units)
+        })
+        .collect();
+    if let Some(dir) = std::env::var_os("H264_WRITE_GRAIN") {
+        let path = std::path::Path::new(&dir).join(format!("{name}.h264"));
         std::fs::write(path, packets.concat()).unwrap();
     }
     let mut d = Decoder::new();
@@ -328,10 +312,36 @@ fn pictures_with_film_grain_are_shown_with_ffmpegs_grain() {
     while let Some(p) = d.drain() {
         got.push(p);
     }
-    let sums: Vec<u32> = got.iter().map(framecrc).collect();
+    got.iter()
+        .map(|p| crate::decoder::tests::adler32(0, &crate::decoder::tests::picture_bytes(p)))
+        .collect()
+}
+
+/// [`grain_sums`]' pictures without grain, as FFmpeg shows them.
+const UNGRAINED: [u32; 3] = [0x68d2_cd96, 0x1866_ce66, 0x409e_ce6e];
+
+#[test]
+fn pictures_with_film_grain_are_shown_with_ffmpegs_grain() {
+    // Each shown with grain seeded by its own order count, and the IDR's
+    // by its id too.
+    let sums = grain_sums("each", &film_grain_sei(0), [true; 3]);
     assert_eq!(sums, [0x544b_cb2d, 0xb6cb_cc00, 0x0104_ccb0]);
-    // Without grain FFmpeg shows them as 0x68d2cd96, 0x1866ce66 and
-    // 0x409ece6e (`-export_side_data film_grain`).
+}
+
+#[test]
+fn a_film_grain_message_does_not_outlast_its_packet() {
+    // FFmpeg forgets the message as the next packet begins, whatever its
+    // repetition period says: only the first picture has grain.
+    let sums = grain_sums("first", &film_grain_sei(0), [true, false, false]);
+    assert_eq!(sums, [0x544b_cb2d, UNGRAINED[1], UNGRAINED[2]]);
+}
+
+#[test]
+fn pictures_whose_grain_cannot_be_made_are_shown_as_decoded() {
+    // Auto-regression, which FFmpeg does not synthesize: each picture is
+    // marked for grain, refused it, and shown without.
+    let sums = grain_sums("refused", &film_grain_sei(1), [true; 3]);
+    assert_eq!(sums, UNGRAINED);
 }
 
 #[test]

@@ -319,19 +319,22 @@ fn captions_are_three_bytes_each_and_a_short_message_is_refused() {
 
 #[test]
 fn film_grain_parameters_are_read() {
-    // Written bit by bit: cancel 0, model 1, no colour description,
-    // blending 0, scale 6, components 1 0 1; component 0 two intervals of
-    // two values, component 2 one interval of one value; repetition 0.
-    let mut bits: Vec<(u32, u32)> = vec![
-        (0, 1),
-        (1, 2),
-        (0, 1),
-        (0, 2),
-        (6, 4),
-        (1, 1),
-        (0, 1),
-        (1, 1),
-    ];
+    // Written bit by bit: cancel 0, model 1, a colour description or none
+    // (read past either way), blending 0, scale 6, components 1 0 1;
+    // component 0 two intervals of two values, component 2 one interval of
+    // one value; repetition 0.
+    for colour in [false, true] {
+        film_grain_parameters_are_read_with(colour);
+    }
+}
+
+fn film_grain_parameters_are_read_with(colour: bool) {
+    let mut bits: Vec<(u32, u32)> = vec![(0, 1), (1, 2), (u32::from(colour), 1)];
+    if colour {
+        // Bit depths 10 and 9, full range, primaries 9, transfer 16, matrix 9.
+        bits.extend([(2, 3), (1, 3), (1, 1), (9, 8), (16, 8), (9, 8)]);
+    }
+    bits.extend([(0, 2), (6, 4), (1, 1), (0, 1), (1, 1)]);
     let se = |v: i32| -> (u32, u32) {
         // A signed Exp-Golomb code as (bits, length).
         let code = (if v > 0 { 2 * v - 1 } else { -2 * v }) as u32 + 1;
@@ -361,15 +364,16 @@ fn film_grain_parameters_are_read() {
     decode(&sei_unit(&[(19, &out)]), &mut sei).unwrap();
     let fg = sei.film_grain.as_ref().unwrap();
     assert!(fg.present);
-    assert_eq!((fg.model_id, fg.log2_scale_factor), (1, 6));
-    assert_eq!(fg.comp_model_present_flag, [1, 0, 1]);
-    assert_eq!(fg.num_intensity_intervals, [2, 0, 1]);
-    assert_eq!(fg.num_model_values, [2, 0, 1]);
+    let with = format!("colour description: {colour}");
+    assert_eq!((fg.model_id, fg.log2_scale_factor), (1, 6), "{with}");
+    assert_eq!(fg.comp_model_present_flag, [1, 0, 1], "{with}");
+    assert_eq!(fg.num_intensity_intervals, [2, 0, 1], "{with}");
+    assert_eq!(fg.num_model_values, [2, 0, 1], "{with}");
     assert_eq!(fg.intensity_interval_lower_bound[0][1], 60);
     assert_eq!(fg.intensity_interval_upper_bound[0][1], 200);
     assert_eq!(fg.comp_model_value[0][0][..2], [3, -2]);
     assert_eq!(fg.comp_model_value[0][1][..2], [-7, 0]);
-    assert_eq!(fg.comp_model_value[2][0][0], 5);
+    assert_eq!(fg.comp_model_value[2][0][0], 5, "{with}");
 
     // A cancel flag: the message is kept, saying nothing.
     let mut sei = Sei::default();

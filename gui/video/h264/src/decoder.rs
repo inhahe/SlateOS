@@ -335,7 +335,6 @@ pub(crate) struct Context {
     pub(crate) x264_build: i32,
     pub(crate) postpone_filter: bool,
     pub(crate) picture_idr: bool,
-    pub(crate) picture_intra_only: bool,
     pub(crate) crop_left: i32,
     pub(crate) crop_right: i32,
     pub(crate) crop_top: i32,
@@ -502,7 +501,6 @@ impl Default for Context {
             x264_build: -1,
             postpone_filter: false,
             picture_idr: false,
-            picture_intra_only: false,
             crop_left: 0,
             crop_right: 0,
             crop_top: 0,
@@ -1109,23 +1107,14 @@ impl Context {
     /// (`alloc_picture`).
     fn alloc_picture(&mut self, slot: usize, sps: &Sps) -> Result<(), DecodeError> {
         #[allow(clippy::cast_sign_loss, reason = "coded sizes are positive")]
-        let new_frame = || {
-            AnyFrame::new(
-                self.width as usize,
-                self.height as usize,
-                self.chroma_x_shift,
-                self.chroma_y_shift,
-                sps.bit_depth_luma,
-            )
-            .ok_or(DecodeError)
-        };
-        let frame = new_frame()?;
-        // The frame it is shown as with grain, of the same size and layout.
-        let f_grain = if self.pics[slot].needs_fg {
-            Some(new_frame()?)
-        } else {
-            None
-        };
+        let frame = AnyFrame::new(
+            self.width as usize,
+            self.height as usize,
+            self.chroma_x_shift,
+            self.chroma_y_shift,
+            sps.bit_depth_luma,
+        )
+        .ok_or(DecodeError)?;
 
         #[allow(clippy::cast_sign_loss, reason = "a macroblock count from the SPS")]
         let (big_mb_num, mb_array_size, b4_array_size) = {
@@ -1166,7 +1155,6 @@ impl Context {
         };
         let pic = &mut self.pics[slot];
         pic.f = Some(Arc::new(frame));
-        pic.f_grain = f_grain.map(Arc::new);
         pic.props.format = a.pix_fmt;
         pic.props.sample_aspect_ratio = sar;
         pic.props.color_range = a.color_range;
@@ -1263,4 +1251,4 @@ impl Context {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

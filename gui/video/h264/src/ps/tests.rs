@@ -838,8 +838,17 @@ fn a_set_ffmpeg_refuses_is_refused() {
     });
 
     // A decoder of more buffers than the 32 there may be. The count is read
-    // as FFmpeg's `get_ue_golomb_31` reads it, which takes every code from
-    // 31 to 62 for 31: 64 buffers is the fewest it sees as too many.
+    // as FFmpeg's `get_ue_golomb_31` reads it, whose table gives 31 for
+    // every cpb_cnt_minus1 from 31 to 34 and 32 for any above: 35 buffers
+    // pass as 32, and 36 is the fewest refused.
+    for (cpbs, taken) in [(35, true), (36, false)] {
+        let mut s = Syntax::default();
+        write_hrd(&mut s, cpbs, [23, 15, 9, 24]);
+        read_unit(&s.finish(0x67), |gb, _| {
+            let r = decode_hrd_parameters(gb, &mut Sps::zeroed());
+            assert_eq!(r.is_ok(), taken, "{cpbs} buffers");
+        });
+    }
     let refused = |sps: &[u8], what: &str| {
         let mut ps = ParamSets::default();
         read_unit(sps, |gb, _| {
@@ -848,7 +857,7 @@ fn a_set_ffmpeg_refuses_is_refused() {
         });
         assert!(ps.sps_list[0].is_none(), "{what}: not kept");
     };
-    refused(&written_timing(64).sps, "64 buffers");
+    refused(&written_timing(36).sps, "36 buffers");
 
     // A scaling list's delta out of range: refused, though the list reads
     // as one asking for the default would, the delta taking the first

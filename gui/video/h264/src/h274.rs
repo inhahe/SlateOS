@@ -19,7 +19,7 @@
 #![allow(
     clippy::indexing_slicing,
     reason = "pattern indices are under 64 by construction (offsets under 56 plus 8); \
-              plane indices are inside planes whose sizes are whole 8x8 blocks"
+              plane indices are inside planes `whole_blocks` has found whole 8x8 blocks"
 )]
 #![allow(
     clippy::arithmetic_side_effects,
@@ -28,6 +28,11 @@
 #![allow(
     clippy::cast_possible_truncation,
     reason = "FFmpeg's stores into int8_t and int16_t, which keep the low bits as here"
+)]
+#![allow(
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap,
+    reason = "the grain is int8_t kept in the output plane's bytes, as FFmpeg keeps it"
 )]
 
 use std::sync::OnceLock;
@@ -41,19 +46,26 @@ use crate::sei::FilmGrain;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GrainParams {
     /// The picture's order count plus `poc_offset` -- the last IDR's
-    /// `idr_pic_id`, 0 after an intra-only picture -- shifted five up:
-    /// FFmpeg's `int` sum, widened into the `uint64_t` it keeps it in.
+    /// `idr_pic_id` -- shifted five up: FFmpeg's `int` sum, widened into
+    /// the `uint64_t` it keeps it in.
     pub(crate) seed: u64,
     /// The model: which components have grain, and how strong and how
     /// coarse it is for each band of brightness.
     pub(crate) model: FilmGrain,
 }
 
-/// Why a picture cannot be given its grain (`AVERROR_PATCHWELCOME`): a
-/// model other than frequency filtering, or a picture other than 8-bit
-/// 4:2:0. FFmpeg then shows the picture without grain.
+/// Why a picture is not given its grain. FFmpeg then shows it without.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Unsupported;
+pub(crate) enum NoGrain {
+    /// A model other than frequency filtering, or a picture other than
+    /// 8-bit 4:2:0 (`AVERROR_PATCHWELCOME`).
+    Unsupported,
+    /// A plane that is not whole 8x8 blocks, which grain is made in. A
+    /// decoded picture's planes are whole macroblocks, so never.
+    NotWholeBlocks,
+    /// The frame it would be made in cannot be allocated.
+    NoMemory,
+}
 
 /// One 64x64 pattern of grain.
 type Pattern = [[i8; 64]; 64];
@@ -127,6 +139,17 @@ fn make_pattern(h: usize, v: usize) -> Pattern {
     out
 }
 
+/// Whether `p` is whole 8x8 blocks, every row of them inside its samples:
+/// what the indexing in [`avg_8x8`], [`generate`] and the final add relies on.
+fn whole_blocks(p: &Plane<u8>) -> bool {
+    p.width.is_multiple_of(8)
+        && p.height.is_multiple_of(8)
+        && p.width <= p.stride
+        && p.stride
+            .checked_mul(p.height)
+            .is_some_and(|n| n <= p.data.len())
+}
+
 /// The mean of the 8x8 block of `plane` at `x`, `y` (`avg_8x8_c`).
 fn avg_8x8(plane: &Plane<u8>, x: usize, y: usize) -> u16 {
     let mut sum = 0u16;
@@ -151,13 +174,15 @@ struct Component<'a> {
 /// block of `input` there (`generate`): blank when the block's brightness
 /// falls in no band; otherwise a piece of its band's pattern, from
 /// `y_offset`, `x_offset`, its sign flipped when `invert`, and its left edge
-/// smoothed with the block before's when `deblock`.
+/// smoothed with the block before's when `deblock`. `grain` is the output
+/// plane, its bytes holding the grain as `int8_t` until the picture is
+/// added to it, as FFmpeg lays it there.
 #[allow(
     clippy::too_many_arguments,
     reason = "FFmpeg's generate(), argument for argument"
 )]
 fn generate(
-    grain: &mut [i8],
+    grain: &mut [u8],
     stride: usize,
     input: &Plane<u8>,
     comp: &Component<'_>,
@@ -191,51 +216,68 @@ fn generate(
     for (r, row) in grain[y * stride..].chunks_mut(stride).take(8).enumerate() {
         let src = &db[y_offset + r][x_offset..x_offset + 8];
         for (g, &d) in row[x..x + 8].iter_mut().zip(src) {
-            *g = ((i32::from(scale) * i32::from(d)) >> comp.shift) as i8;
+            *g = ((i32::from(scale) * i32::from(d)) >> comp.shift) as i8 as u8;
         }
         if deblock {
             // `deblock_8x8_c`: the edge between this block and the one
             // before, each side mixed with its neighbours.
-            let (l1, l0) = (i32::from(row[x - 2]), i32::from(row[x - 1]));
-            let (r0, r1) = (i32::from(row[x]), i32::from(row[x + 1]));
-            row[x] = ((l0 + r0 * 2 + r1) >> 2) as i8;
-            row[x - 1] = ((r0 + l0 * 2 + l1) >> 2) as i8;
+            let at = |k: usize| i32::from(row[k] as i8);
+            let (l1, l0, r0, r1) = (at(x - 2), at(x - 1), at(x), at(x + 1));
+            row[x] = ((l0 + r0 * 2 + r1) >> 2) as i8 as u8;
+            row[x - 1] = ((r0 + l0 * 2 + l1) >> 2) as i8 as u8;
         }
     }
 }
 
-/// `out` made `input` with the grain `params` describe
-/// (`ff_h274_apply_film_grain`); `format` is the frames' layout, and `out`
-/// a frame of `input`'s size and format, as FFmpeg requires. Each plane
-/// whose component has no grain is copied.
+/// `input` with the grain `params` describe, as a frame of its own
+/// (`ff_h274_apply_film_grain` into the `f_grain` FFmpeg allocates beside
+/// the picture); `format` is `input`'s layout. A plane whose component has
+/// no grain is a copy.
 ///
 /// # Errors
 ///
-/// [`Unsupported`] for a model other than frequency filtering or a picture
-/// other than 8-bit 4:2:0, leaving `out` as it was.
+/// [`NoGrain::Unsupported`] for a model other than frequency filtering or
+/// a picture other than 8-bit 4:2:0; [`NoGrain::NotWholeBlocks`] for a
+/// plane whose blocks the grain would be read and written past;
+/// [`NoGrain::NoMemory`] when the frame cannot be allocated.
 pub(crate) fn apply_film_grain(
-    out: &mut FrameBuf<u8>,
     input: &FrameBuf<u8>,
     format: PixelFormat,
     params: &GrainParams,
-) -> Result<(), Unsupported> {
+) -> Result<FrameBuf<u8>, NoGrain> {
     const COLOR_OFFSET: [u64; 3] = [0, 85, 170];
     let model = &params.model;
     if model.model_id != 0 || format != PixelFormat::Yuv420(8) {
-        return Err(Unsupported);
+        return Err(NoGrain::Unsupported);
     }
+    if !input.planes.iter().all(whole_blocks) {
+        return Err(NoGrain::NotWholeBlocks);
+    }
+    // Each plane, as `input`'s: a copy, or blank for the grain to be laid
+    // in, its rows packed as `input`'s are.
+    let plane = |c: usize| -> Option<Plane<u8>> {
+        let input = &input.planes[c];
+        let mut data = Vec::new();
+        data.try_reserve_exact(input.data.len()).ok()?;
+        if model.comp_model_present_flag[c] == 0 {
+            data.extend_from_slice(&input.data);
+        } else {
+            data.resize(input.data.len(), 0);
+        }
+        Some(Plane { data, ..*input })
+    };
+    let (Some(y), Some(cb), Some(cr)) = (plane(0), plane(1), plane(2)) else {
+        return Err(NoGrain::NoMemory);
+    };
+    let mut out = FrameBuf {
+        planes: [y, cb, cr],
+    };
 
     for (c, (out, input)) in out.planes.iter_mut().zip(&input.planes).enumerate() {
-        let (width, height) = (input.width, input.height);
-        debug_assert_eq!((out.width, out.height), (width, height));
-        // Each row's samples, by a plane's stride.
-        let rows = |stride: usize| (0..height).map(move |y| y * stride..y * stride + width);
         if model.comp_model_present_flag[c] == 0 {
-            for (o, i) in rows(out.stride).zip(rows(input.stride)) {
-                out.data[o].copy_from_slice(&input.data[i]);
-            }
             continue;
         }
+        let (width, height, stride) = (input.width, input.height, input.stride);
 
         let mut comp = Component {
             lower: &model.intensity_interval_lower_bound[c],
@@ -254,10 +296,8 @@ pub(crate) fn apply_film_grain(
             }
         }
 
-        // The grain itself, before it is added: FFmpeg lays it in the
-        // output plane's bytes, which hold nothing else until then.
-        let stride = width;
-        let mut grain = vec![0i8; width * height];
+        // The grain itself, before it is added: laid in the output plane's
+        // bytes, which hold nothing else until then.
         let mut seed = SEED_LUT[(params.seed.wrapping_add(COLOR_OFFSET[c]) % 256) as usize];
         // Grain is made in 8x8 blocks; the generator moves on every 16x16.
         for y in (0..height).step_by(16) {
@@ -269,7 +309,7 @@ pub(crate) fn apply_film_grain(
                 for yy in (0..16).step_by(8).take_while(|yy| y + yy < height) {
                     for xx in (0..16).step_by(8).take_while(|xx| x + xx < width) {
                         generate(
-                            &mut grain,
+                            &mut out.data,
                             stride,
                             input,
                             &comp,
@@ -285,17 +325,15 @@ pub(crate) fn apply_film_grain(
             }
         }
 
-        // `add_8x8_clip_c` over each row.
-        for ((o, i), g) in rows(out.stride)
-            .zip(rows(input.stride))
-            .zip(grain.chunks(stride))
-        {
-            for ((o, &s), &g) in out.data[o].iter_mut().zip(&input.data[i]).zip(g) {
-                *o = (i32::from(s) + i32::from(g)).clamp(0, 255) as u8;
+        // `add_8x8_clip_c` over each row: the picture added to its grain.
+        for y in 0..height {
+            let row = y * stride..y * stride + width;
+            for (o, &s) in out.data[row.clone()].iter_mut().zip(&input.data[row]) {
+                *o = (i32::from(s) + i32::from(*o as i8)).clamp(0, 255) as u8;
             }
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 #[cfg(test)]

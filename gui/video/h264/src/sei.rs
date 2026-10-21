@@ -116,13 +116,6 @@ pub(crate) struct PictureTiming {
 pub(crate) struct FilmGrain {
     pub(crate) present: bool,
     pub(crate) model_id: u32,
-    pub(crate) separate_colour_description_present_flag: u32,
-    pub(crate) bit_depth_luma: u32,
-    pub(crate) bit_depth_chroma: u32,
-    pub(crate) full_range: u32,
-    pub(crate) color_primaries: u32,
-    pub(crate) transfer_characteristics: u32,
-    pub(crate) matrix_coeffs: u32,
     pub(crate) log2_scale_factor: u32,
     pub(crate) comp_model_present_flag: [u32; 3],
     /// The rest in FFmpeg's types (`uint16_t`, `uint8_t`, `int16_t`): a
@@ -142,13 +135,6 @@ impl Default for FilmGrain {
         Self {
             present: false,
             model_id: 0,
-            separate_colour_description_present_flag: 0,
-            bit_depth_luma: 0,
-            bit_depth_chroma: 0,
-            full_range: 0,
-            color_primaries: 0,
-            transfer_characteristics: 0,
-            matrix_coeffs: 0,
             log2_scale_factor: 0,
             comp_model_present_flag: [0; 3],
             num_intensity_intervals: [0; 3],
@@ -676,18 +662,18 @@ fn decode_film_grain(h: &mut FilmGrain, gb: &mut Bits<'_>) -> Result<(), SeiErro
     }
     *h = FilmGrain::default();
     h.model_id = gb.bits(2);
-    h.separate_colour_description_present_flag = gb.bit();
-    if h.separate_colour_description_present_flag != 0 {
-        h.bit_depth_luma = gb.bits(3) + 8;
-        h.bit_depth_chroma = gb.bits(3) + 8;
-        h.full_range = gb.bit();
-        h.color_primaries = gb.bits(8);
-        h.transfer_characteristics = gb.bits(8);
-        h.matrix_coeffs = gb.bits(8);
+    // The colour description and blending_mode_id FFmpeg passes on only to
+    // a caller that asks for the grain's parameters rather than the grain.
+    if gb.bit() != 0 {
+        // separate_colour_description_present_flag
+        gb.skip(3); // film_grain_bit_depth_luma_minus8
+        gb.skip(3); // film_grain_bit_depth_chroma_minus8
+        gb.skip(1); // film_grain_full_range_flag
+        gb.skip(8); // film_grain_colour_primaries
+        gb.skip(8); // film_grain_transfer_characteristics
+        gb.skip(8); // film_grain_matrix_coefficients
     }
-    // blending_mode_id: FFmpeg passes it on only to a caller that asks for
-    // the grain's parameters rather than the grain.
-    gb.skip(2);
+    gb.skip(2); // blending_mode_id
     h.log2_scale_factor = gb.bits(4);
     for c in 0..3 {
         h.comp_model_present_flag[c] = gb.bit();

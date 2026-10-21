@@ -474,10 +474,12 @@ impl Context {
         self.poc.delta_poc_bottom = sl.hdr.delta_poc_bottom;
         self.poc.delta_poc = sl.hdr.delta_poc;
 
+        // FFmpeg also sets it to 0 at a picture whose slices are all intra
+        // (`picture_intra_only`), but works that out only when it decodes
+        // with frame threads (`get_last_needed_nal`). Single-threaded, as
+        // this decoder is held to it, the offset stays the last IDR's.
         if nal.kind == NAL_IDR_SLICE {
             self.poc_offset = sl.hdr.idr_pic_id;
-        } else if self.picture_intra_only {
-            self.poc_offset = 0;
         }
 
         let max_frame_num = 1 << sps.log2_max_frame_num;
@@ -717,26 +719,25 @@ impl Context {
         err
     }
 
-    /// Picture `cur`'s grain made into the frame it is shown as
-    /// (`ff_h274_apply_film_grain` on `f_grain`): whether it was -- not
-    /// where the picture has no grain parameters (FFmpeg's side data was
-    /// never attached, decoding having failed first) or they cannot be
-    /// applied to it.
+    /// Picture `cur`'s grain made, as the frame it is shown as (`f_grain`,
+    /// `ff_h274_apply_film_grain`): whether it was -- not where the picture
+    /// has no grain parameters (FFmpeg's side data was never attached,
+    /// decoding having failed first), or they cannot be applied to it.
     fn make_film_grain(&mut self, cur: usize) -> bool {
         let pic = &mut self.pics[cur];
-        let (Some(params), Some(input), Some(out)) = (
-            pic.film_grain.as_deref(),
-            pic.f.as_deref(),
-            pic.f_grain.as_mut(),
-        ) else {
+        // Beyond 8 bits the picture is refused, as FFmpeg refuses all but
+        // yuv420p.
+        let (Some(params), Some(AnyFrame::Eight(input))) =
+            (pic.film_grain.as_deref(), pic.f.as_deref())
+        else {
             return false;
         };
-        match (Arc::make_mut(out), input) {
-            (AnyFrame::Eight(out), AnyFrame::Eight(input)) => {
-                apply_film_grain(out, input, pic.props.format, params).is_ok()
+        match apply_film_grain(input, pic.props.format, params) {
+            Ok(grained) => {
+                pic.f_grain = Some(Arc::new(AnyFrame::Eight(grained)));
+                true
             }
-            // Beyond 8 bits: refused as FFmpeg refuses all but yuv420p.
-            _ => false,
+            Err(_) => false,
         }
     }
 }

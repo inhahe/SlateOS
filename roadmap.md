@@ -4823,8 +4823,9 @@ lane C's `guitk`.
         4:2:0) shown without. Held to FFmpeg's own synthesis on synthetic
         pictures (`tools/h274_expect.c`), and to FFmpeg's decoder on 458
         streams `tools/pict_expect.py` gives film grain characteristics --
-        every raw stream with a model before every picture, and before
-        every fifth -- 6810 of whose pictures have grain; with them 1768
+        every raw stream with a model before two packets in three (the
+        third, without, shown without grain), and with a new one before
+        every fifth -- 5097 of whose pictures have grain; with them 1768
         streams, all matching in every picture.
       - `[ ]` Speed: about half FFmpeg's C (without assembly) on a
         720x480 conformance stream; no work on it yet.

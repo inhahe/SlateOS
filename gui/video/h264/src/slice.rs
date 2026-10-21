@@ -22,9 +22,9 @@
               written wrapping"
 )]
 
-use crate::bits::Bits;
 use crate::nal::{NAL_IDR_SLICE, Nal};
 use crate::ps::{ParamSets, Pps, Sps};
+use ffbits::Bits;
 
 /// A picture's top field alone (`PICT_TOP_FIELD`).
 pub(crate) const PICT_TOP_FIELD: i32 = 1;

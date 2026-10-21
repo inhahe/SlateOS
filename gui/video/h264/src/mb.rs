@@ -30,7 +30,6 @@
     reason = "FFmpeg's int conversions, made where it makes them"
 )]
 
-use crate::bits::Bits;
 use crate::decoder::{Context, DecodeError, SliceContext};
 use crate::idct::{
     Depth, chroma_dc_dequant_idct, chroma422_dc_dequant_idct, idct_add, idct_add8, idct_add8_422,
@@ -47,6 +46,7 @@ use crate::pred::{
     DIAG_DOWN_LEFT_PRED, HOR_PRED8X8, VERT_LEFT_PRED, VERT_PRED8X8, pred_blocks_add, pred_chroma,
     pred4x4, pred4x4_add, pred8x8l, pred8x8l_add, pred8x8l_filter_add, pred16x16,
 };
+use ffbits::Bits;
 
 /// `ff_h264_mb_sizes`: a macroblock's samples by chroma format.
 const MB_SIZES: [usize; 4] = [256, 384, 512, 768];

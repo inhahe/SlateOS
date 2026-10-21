@@ -35,7 +35,6 @@
 
 use std::sync::Arc;
 
-use crate::bits::Bits;
 use crate::cabacmb::Data;
 use crate::decoder::{Context, DecodeError, SliceContext};
 use crate::er::{ER_MB_END, ER_MB_ERROR};
@@ -44,6 +43,7 @@ use crate::mbtype::is_interlaced;
 use crate::mvpred::tab;
 use crate::picture::{AnyFrame, FrameBuf, Pixel, table_offset};
 use crate::slice::PICT_FRAME;
+use ffbits::Bits;
 
 impl Context {
     /// A slice's macroblocks (`decode_slice`), from where its header left

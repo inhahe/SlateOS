@@ -15,7 +15,6 @@
 
 use std::sync::Arc;
 
-use crate::bits::Bits;
 use crate::decoder::{Context, DecodeError, SliceContext};
 use crate::nal::{
     Flags, NAL_AUD, NAL_AUXILIARY_SLICE, NAL_DPA, NAL_DPB, NAL_DPC, NAL_END_SEQUENCE,
@@ -24,6 +23,7 @@ use crate::nal::{
 };
 use crate::picture::{AnyFrame, DELAYED_PIC_REF, FRAME_RECOVERED_SEI, FrameProps, Pixel};
 use crate::ps::{decode_pps, decode_sps};
+use ffbits::Bits;
 
 /// `FF_DECODE_ERROR_DECODE_SLICES`: a slice could not be decoded.
 const DECODE_ERROR_DECODE_SLICES: i32 = 8;

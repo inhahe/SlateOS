@@ -14,11 +14,11 @@
 
 use std::sync::Arc;
 
-use crate::bits::Bits;
 use crate::decoder::{Context, DecodeError, MAX_SLICES, SliceContext};
 use crate::direct::{clip_int8, low_int};
 use crate::nal::{NAL_IDR_SLICE, Nal};
 use crate::slice::{PICT_BOTTOM_FIELD, PICT_FRAME, PictureState, TYPE_B, TYPE_I};
+use ffbits::Bits;
 
 impl Context {
     /// The implicit weights of each pair of references, by how far each is

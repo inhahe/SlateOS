@@ -12,12 +12,12 @@
 )]
 
 use super::TABLES;
-use crate::bits::Bits;
 use crate::decoder::{Context, SliceContext};
 use crate::mbtype::{MB_TYPE_16X16, MB_TYPE_L0};
 use crate::ps::{ParamSets, decode_pps, decode_sps};
 use crate::scan::{FIELD, FIELD8X8_CAVLC};
 use crate::writer::{Syntax, read_unit};
+use ffbits::Bits;
 
 /// A Main profile SPS and a CAVLC PPS: 4:2:0 at 8 bits, flat scaling.
 fn sets() -> ParamSets {

@@ -33,7 +33,7 @@
 )]
 
 use crate::Error;
-use crate::bits::Bits;
+use ffbits::Bits;
 
 /// `H264_NAL_SLICE`: a coded slice of a picture that is not an IDR.
 pub(crate) const NAL_SLICE: u32 = 1;

@@ -8,8 +8,9 @@
 //!
 //! # Where each part of FFmpeg lives
 //!
-//! - `bits`: `get_bits.h` and `golomb.h` -- a NAL unit's bits and the
-//!   Exp-Golomb codes most syntax is written in.
+//! - `get_bits.h`, `golomb.h` and `vlc.c` -- a NAL unit's bits, the
+//!   Exp-Golomb codes most syntax is written in, and the variable-length
+//!   codes of CAVLC -- are the `ffbits` crate, shared with the AAC decoder.
 //! - `nal`: `h2645_parse.c` -- a packet split into NAL units, after start
 //!   codes or after lengths, and unescaped.
 //! - `ps`: `h264_ps.c` and `h2645_vui.c` -- sequence and picture parameter
@@ -75,12 +76,9 @@
 //!   their parts, pictures finished and handed out, the last ones drained.
 //! - `side_data`: what FFmpeg attaches to a frame from SEI -- stereo
 //!   packing, rotation, captions, HDR metadata and the rest.
-//! - `vlc`: `vlc.c`'s table building and `get_vlc2` -- variable-length
-//!   codes read as FFmpeg reads them, the invalid ones included.
 
 #![forbid(unsafe_code)]
 
-mod bits;
 mod cabac;
 mod cabacmb;
 mod cavlc;
@@ -111,7 +109,6 @@ mod side_data;
 mod slice;
 mod slicedata;
 mod tables;
-mod vlc;
 #[cfg(test)]
 mod writer;
 

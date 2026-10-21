@@ -59328,14 +59328,6 @@ is still run by hand, not by `boot-test.sh`.
 
 ## Lane F — the H.264 decoder, translated a module at a time (2026-10-10)
 
-- **h264: read through `gui/video/ffbits`** (`gui/video/h264/src/bits.rs`,
-  `vlc.rs`). `ffbits` is the H.264 decoder's bit reader and VLC tables made
-  a crate of their own (f8c2a6607) for the AAC decoder; h264 still has its
-  own copies, two of everything to keep in step. **Do it** once the H.264
-  batch's review is in: depend on `ffbits`, keep `level_prefix` there (it
-  reads the cache as `h264_cavlc.c` does), delete both copies and their
-  tests.
-
 - **h264: film grain synthesis** (`gui/video/h264/src/field.rs`,
   `sei_to_frame`; `decoder.rs`, `frame_start`). FFmpeg adds H.274 film
   grain to a finished picture that carries a film grain characteristics

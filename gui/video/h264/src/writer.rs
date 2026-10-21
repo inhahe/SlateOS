@@ -9,8 +9,8 @@
     reason = "test code, on values the tests choose"
 )]
 
-use crate::bits::Bits;
 use crate::nal::{Flags, Nal, Splitter};
+use ffbits::Bits;
 
 /// A unit written syntax element by syntax element, each recorded as
 /// `trace_headers` would print it.

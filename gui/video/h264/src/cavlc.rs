@@ -32,7 +32,6 @@
 
 use std::sync::LazyLock;
 
-use crate::bits::{Bits, av_log2};
 use crate::decoder::{Context, DecodeError, SliceContext};
 use crate::mbtype::{
     B_MB_TYPE_INFO, B_SUB_MB_TYPE_INFO, CHROMA_DC_BLOCK_INDEX, CHROMA_DC_SCAN, CHROMA422_DC_SCAN,
@@ -47,7 +46,7 @@ use crate::picture::table_offset;
 use crate::pred::{DC_128_PRED8X8, check_intra_pred_mode, check_intra4x4_pred_mode};
 use crate::scan::{Scan, ScanTables};
 use crate::slice::{TYPE_B, TYPE_I, TYPE_P, TYPE_SI};
-use crate::vlc::{Vlc, VlcError};
+use ffbits::{Bits, Vlc, VlcError, bits::av_log2};
 
 /// How many bits each table is looked up by (`*_VLC_BITS`).
 const LEVEL_TAB_BITS: u32 = 8;

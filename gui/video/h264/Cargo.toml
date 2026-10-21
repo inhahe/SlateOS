@@ -11,5 +11,8 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[dependencies]
+ffbits = { path = "../ffbits" }
+
 [lints]
 workspace = true

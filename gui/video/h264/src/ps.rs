@@ -28,12 +28,12 @@
 use std::sync::Arc;
 
 use crate::Error;
-use crate::bits::Bits;
 use crate::tables::{
     CHROMA_QP, DEFAULT_SCALING4, DEFAULT_SCALING8, DEQUANT4_COEFF_INIT, DEQUANT8_COEFF_INIT,
     DEQUANT8_COEFF_INIT_SCAN, LEVEL_MAX_DPB_MBS, PIXEL_ASPECT, QP_MAX_NUM, QUANT_DIV6, QUANT_REM6,
     ZIGZAG_DIRECT, ZIGZAG_SCAN,
 };
+use ffbits::Bits;
 
 /// How many sequence parameter sets a stream may have (`MAX_SPS_COUNT`).
 pub(crate) const MAX_SPS_COUNT: usize = 32;

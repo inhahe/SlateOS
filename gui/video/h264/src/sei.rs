@@ -26,8 +26,8 @@
               from bytes, a byte at a time, within the unit"
 )]
 
-use crate::bits::Bits;
 use crate::ps::{ParamSets, Sps};
+use ffbits::Bits;
 
 /// `SEI_TYPE_BUFFERING_PERIOD`.
 const BUFFERING_PERIOD: u32 = 0;

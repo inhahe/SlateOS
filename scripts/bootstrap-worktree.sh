@@ -9,6 +9,10 @@
 #   2. the `limine/` bootloader binaries the boot test stages into the ESP;
 #   3. `rootfs.ext4`, the Path-Z glibc rootfs the boot test attaches as vdb.
 #
+# It also checks out `toolchain/fastpy`, the git submodule holding the fastpy
+# compiler the rootfs's fastpy-* programs and /bin/fastpy are built with
+# (see provision_fastpy).
+#
 # Item 3 does not break the build — it silently *shrinks the test suite*.
 # Without it the boot test still reports PASSED while skipping ~58 rungs,
 # including every REAL-glibc Path-Z test (dynamic execution, stdio, pthread,
@@ -320,6 +324,25 @@ provision_sysroot() {
     return 1
 }
 
+# Check out `toolchain/fastpy`: fastpy, a submodule pinned to the commit this
+# tree was tested with, which `ctest-fixtures.py build` compiles the fastpy-*
+# programs with and the rootfs recipe bundles as /bin/fastpy. A clone or a new
+# worktree holds only an empty directory there until this runs. `submodule
+# update` clones it the first time and afterwards moves it to the pinned
+# commit, so it is a no-op on a current checkout; it refuses rather than
+# overwrite uncommitted edits in it.
+provision_fastpy() {
+    echo "==> checking out fastpy (toolchain/fastpy)"
+    if git -C "$ROOT" submodule update --init -- toolchain/fastpy; then
+        return 0
+    fi
+    echo "    error: could not check out toolchain/fastpy." >&2
+    echo "    Without it the fastpy-* programs cannot be built, and the rootfs" >&2
+    echo "    leaves out /bin/fastpy. Set FASTPY_DIR to another fastpy checkout" >&2
+    echo "    to build with that one instead." >&2
+    return 1
+}
+
 check_only=0
 
 # `--services`: rebuild every service the kernel embeds, and nothing else --
@@ -505,6 +528,7 @@ failed=()
 # not reach for the network.
 if [ $# -eq 0 ] && [ "$services_only" -eq 0 ]; then
     provision_limine || failed+=("limine")
+    provision_fastpy || failed+=("fastpy")
     provision_rootfs || failed+=("rootfs.ext4")
     provision_sysroot || failed+=("sysroot")
 fi

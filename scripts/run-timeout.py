@@ -29,18 +29,18 @@ family) invoke WSL. **`boot-test.sh` does not** -- every `wsl` string in it is a
 echoed instruction telling the operator to rebuild the rootfs by hand, so the boot
 test this runner is most often pointed at is not affected.
 
-A SECOND EXCEPTION, ALSO MEASURED: a Windows App Execution Alias. On this host
-`python3` resolves first to `%LOCALAPPDATA%\\Microsoft\\WindowsApps\\python3.exe`,
-which is not an interpreter but a request to activate a Store-packaged app, and
-packaged apps start outside the caller's Job Object. Under this runner (a 15 s
-timeout on a 90 s sleeper, 2026-09-26) the job counted 1 process of 3. The
-timeout still killed the sleeper, because `taskkill /T` walks the tree by
-parentage rather than by job, but the job's other two guarantees are gone: if
-this runner dies, kill-on-close cannot reach the escaped processes, and the cost
-line does not count them (a 26-minute push through the alias reported 28 s of
-CPU). `proctree.Tree` detects an alias by its reparse tag and this runner prints
-a warning when handed one; the cure is to pass a real interpreter -- `python`,
-not `python3`, on this host -- as `boot-test.sh` and the push hook do.
+A SECOND GAP, NOW CLOSED: a Windows App Execution Alias. The `python.exe` and
+`python3.exe` in `%LOCALAPPDATA%\\Microsoft\\WindowsApps` are not interpreters
+but requests to activate a Store-packaged app, and Windows starts that app
+outside the caller's Job Object. So when anything in the tree ran one -- a
+script calling a bare `python3`, say -- the app's launcher, its runtime and all
+the runtime started were outside the job, and on 2026-10-21 all of them outlived
+the job being closed. `proctree.Tree` now finds such processes by parentage
+within half a second and adopts each into a kill-on-close job of its own, so they
+die on a timeout, at the end and with this runner, and their cost is counted.
+The final status line says how many there were. What stays outside the job for
+those moments, and the little else that cannot be contained, is listed in
+`proctree.py`'s module docstring.
 
 This module is the *streaming* front end to that: the child keeps this
 process's stdout and stderr, so its output appears live. For the batch case —
@@ -102,11 +102,16 @@ def _log(msg: str) -> None:
 
 
 def _cost(tree: "proctree.Tree") -> str:
-    """`; <what the tree cost>` for the final status line, or nothing where
-    there is no job to ask. Read before the job closes -- the totals go with
-    the handle, and closing it is also the kill."""
+    """`; <what the tree cost>` for the final status line, and how many of its
+    processes started outside the job and were adopted; nothing where there is
+    no job to ask. Read before the job closes -- the totals go with the handle,
+    and closing it is also the kill."""
     acct = tree.accounting()
-    return f"; {acct.summary()}" if acct is not None else ""
+    if acct is None:
+        return ""
+    adopted = len(tree.adopted)
+    escapes = f", {adopted} of them adopted after starting outside the job" if adopted else ""
+    return f"; {acct.summary()}{escapes}"
 
 
 def main(argv: list[str]) -> int:

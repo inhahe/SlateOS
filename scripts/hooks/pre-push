@@ -588,11 +588,10 @@ skip=0
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || skip=1
 # The same interpreter boot-test.sh uses: `python` before `python3`, and never
 # a Windows App Execution Alias (...\Microsoft\WindowsApps\python*.exe) while a
-# real one exists. The alias starts a Store-packaged launcher, which runs --
-# with the interpreter it starts -- outside the caller's Job Object: a gate
-# run through it is invisible to run-timeout's accounting and beyond its
-# kill-on-close (measured 2026-09-26: the job counted 1 process of 3). It
-# also meant pushes and boots were graded by two different Python installs.
+# real one exists. The alias starts whichever Python a Store-packaged launcher
+# picks, so pushes and boots would be graded by two different Python installs.
+# (Windows also starts that launcher outside the caller's Job Object; proctree
+# now finds and adopts such processes, so run-timeout still contains them.)
 # An alias is still used if it is all there is: a skipped gate is worse.
 #
 # PATH is walked by hand because `command -v` answers only the FIRST match:

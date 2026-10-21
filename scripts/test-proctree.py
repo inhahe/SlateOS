@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""test-proctree.py — tests for `proctree.resolve_command` and friends.
+"""test-proctree.py — tests for `proctree`: the launch path, the cost, and the
+containment of what a tree starts outside its Job Object.
 
 Run directly (no pytest dependency, so it works on a bare Python):
 
@@ -19,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -97,49 +99,259 @@ def test_wsl_launcher_detection() -> None:
     check("missing path is not the shim", not proctree._is_wsl_launcher(r"Z:\nope\bash.exe"))
 
 
-def test_app_execution_alias_detection() -> None:
-    """A WindowsApps alias is recognised by its reparse tag, and a Tree says so.
+# --- What a tree starts outside its job (proctree's module docstring) ------
+#
+# The deterministic stand-in for an App Execution Alias is a tree job that
+# lets its members' children leave it (`_let_children_leave`): such a child
+# starts outside the job with a member as its parent, which is the shape an
+# alias produces. The alias itself is tested too, where the host has one.
 
-    The negatives run everywhere; the positives need an alias to point at,
-    which this project's host has (`python3` resolves to one first) and a
-    stock POSIX host does not -- a named skip there, not a quiet pass.
-    """
-    check("the running interpreter is not an alias",
-          not proctree.is_app_execution_alias(sys.executable))
-    check("a missing path is not an alias",
-          not proctree.is_app_execution_alias(
-              os.path.join(tempfile.gettempdir(), "no-such-alias-probe.exe")))
-    check("nor is something that is not a path at all",
-          not proctree.is_app_execution_alias(None))
-    check("a real interpreter draws no warning",
-          proctree.alias_warning([sys.executable, "-c", "pass"]) is None)
-    check("a shell string names no program, so draws none",
-          proctree.alias_warning("python3 -c pass") is None)
-    alias = os.path.expandvars(
-        r"%LOCALAPPDATA%\Microsoft\WindowsApps\python3.exe")
-    if not proctree.IS_WINDOWS or not os.path.lexists(alias):
-        print(f"  SKIP no App Execution Alias on this host to test against "
-              f"({alias})")
+# The tree's root: waits for a line on stdin, so the test can change the job
+# before anything is started, then starts a sleeper and prints its pid.
+_ROOT = ("import subprocess, sys, time\n"
+         "sys.stdin.readline()\n"
+         "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+         "print(c.pid, flush=True)\n"
+         "time.sleep(120)\n")
+
+_SYNCHRONIZE = 0x0010_0000
+_WAIT_OBJECT_0 = 0
+
+
+def _let_children_leave(job) -> None:
+    """Set `JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK` on `job`, so what its members
+    start is in no job at all."""
+    from ctypes import byref, sizeof
+    info = proctree._JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
+    k32 = proctree._k32
+    if not k32.QueryInformationJobObject(job, proctree.JobObjectExtendedLimitInformation,
+                                         byref(info), sizeof(info), None):
+        raise OSError("QueryInformationJobObject failed")
+    info.BasicLimitInformation.LimitFlags |= 0x1000
+    if not k32.SetInformationJobObject(job, proctree.JobObjectExtendedLimitInformation,
+                                       byref(info), sizeof(info)):
+        raise OSError("SetInformationJobObject failed")
+
+
+def _hold(pid: int):
+    """A handle to `pid` for watching it exit (and, if a test fails, for
+    killing what it left): held from the moment its pid is known, so that pid
+    cannot pass to another process while the test watches it."""
+    return proctree._k32.OpenProcess(
+        _SYNCHRONIZE | proctree.PROCESS_TERMINATE | proctree.PROCESS_QUERY_LIMITED_INFORMATION,
+        False, pid)
+
+
+def _exits(handle, seconds: float) -> bool:
+    k32 = proctree._k32
+    from ctypes import wintypes
+    k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    return k32.WaitForSingleObject(handle, int(seconds * 1000)) == _WAIT_OBJECT_0
+
+
+def _let_go(handle) -> None:
+    """Kill what a failed test left running, and close the handle."""
+    if handle:
+        if not _exits(handle, 0):
+            proctree._k32.TerminateProcess(handle, 1)
+        proctree._k32.CloseHandle(handle)
+
+
+def _wait_for(cond, seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while not cond():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _start_escape(tree) -> int:
+    """Make `tree`'s root (running `_ROOT`) start its sleeper outside the job;
+    the sleeper's pid."""
+    _let_children_leave(tree.job)
+    tree.proc.stdin.write(b"go\n")
+    tree.proc.stdin.flush()
+    return int(tree.proc.stdout.readline())
+
+
+def test_an_escape_is_adopted_and_dies_with_the_tree() -> None:
+    """A process the tree starts outside its job is adopted into one of its own,
+    counted, and killed both when the `with` block ends and by `kill`."""
+    if not proctree.IS_WINDOWS:
+        print("  skip (POSIX: a process group, not a job)")
         return
-    check("the WindowsApps python3 is recognised as an alias",
-          proctree.is_app_execution_alias(alias))
-    warning = proctree.alias_warning([alias, "--version"]) or ""
-    check("its warning names the alias and what it costs",
-          "App Execution Alias" in warning and "outside the Job Object" in warning,
-          warning)
-    # The Tree itself, end to end: the warning reaches the caller's `warn`.
-    # `--version` so the launch is brief; bounded all the same, since what an
-    # alias starts is up to whatever package owns it.
-    heard: list[str] = []
-    with proctree.Tree([alias, "--version"], warn=heard.append,
-                       stdout=subprocess.DEVNULL,
-                       stderr=subprocess.DEVNULL) as tree:
+    for how in ("the block's end", "kill"):
+        h = None
         try:
-            tree.proc.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            tree.kill()
-    check("a Tree started through it warns its caller",
-          any("App Execution Alias" in line for line in heard), f"{heard}")
+            with proctree.Tree([sys.executable, "-c", _ROOT], stdin=subprocess.PIPE,
+                               stdout=subprocess.PIPE) as tree:
+                pid = _start_escape(tree)
+                h = _hold(pid)
+                check(f"{how}: the sleeper really started outside the job",
+                      h is not None and not proctree._in_job(h, tree.job))
+                check(f"{how}: it is adopted",
+                      _wait_for(lambda: pid in tree.adopted, 10), f"adopted={tree.adopted}")
+                check(f"{how}: into a job of its own", proctree._in_job(h, None)
+                      and not proctree._in_job(h, tree.job))
+                acct = tree.accounting()
+                check(f"{how}: and its cost is counted with the tree's",
+                      acct is not None and acct.processes >= 2, f"{acct!r}")
+                if how == "kill":
+                    tree.kill()
+            check(f"{how}: it dies with the tree", h is not None and _exits(h, 10))
+        finally:
+            _let_go(h)
+
+
+def test_an_escape_dies_with_the_runner() -> None:
+    """The guarantee that matters most: when the process holding the tree dies,
+    an adopted escape dies too, as the rest of the tree does."""
+    if not proctree.IS_WINDOWS:
+        print("  skip (POSIX)")
+        return
+    runner = subprocess.Popen([sys.executable, __file__, "--escape-runner"],
+                              stdout=subprocess.PIPE)
+    h = None
+    try:
+        line = runner.stdout.readline().decode().split()
+        check("runner: its tree's escape was adopted", line[1:] == ["adopted"], f"{line}")
+        h = _hold(int(line[0]))
+        check("runner: the escape is running", h is not None and not _exits(h, 0))
+        runner.kill()
+        check("runner: the escape dies with the runner", h is not None and _exits(h, 10))
+    finally:
+        _let_go(h)
+        runner.kill()
+        runner.wait()
+
+
+def _escape_runner() -> int:
+    """`--escape-runner`: hold a tree whose sleeper escaped, say its pid once
+    it is adopted, and wait to be killed."""
+    with proctree.Tree([sys.executable, "-c", _ROOT], stdin=subprocess.PIPE,
+                       stdout=subprocess.PIPE) as tree:
+        pid = _start_escape(tree)
+        adopted = _wait_for(lambda: pid in tree.adopted, 10)
+        print(pid, "adopted" if adopted else "not-adopted", flush=True)
+        time.sleep(120)
+    return 0
+
+
+def test_a_process_outside_the_tree_is_left_alone() -> None:
+    """Adopting a stranger would kill it with the tree. Processes this test
+    starts beside the tree, before it and while it runs, must be neither
+    adopted nor killed, however many sweeps pass."""
+    if not proctree.IS_WINDOWS:
+        print("  skip (POSIX)")
+        return
+    sleeper = [sys.executable, "-c", "import time; time.sleep(60)"]
+    before = subprocess.Popen(sleeper)
+    during = h = None
+    try:
+        with proctree.Tree([sys.executable, "-c", _ROOT], stdin=subprocess.PIPE,
+                           stdout=subprocess.PIPE) as tree:
+            during = subprocess.Popen(sleeper)
+            escape = _start_escape(tree)
+            h = _hold(escape)
+            _wait_for(lambda: escape in tree.adopted, 10)
+            time.sleep(3 * proctree.ESCAPE_POLL)
+            check("strangers: not adopted",
+                  before.pid not in tree.adopted and during.pid not in tree.adopted,
+                  f"adopted={tree.adopted}")
+        check("strangers: still running after the tree is gone",
+              before.poll() is None and during.poll() is None)
+    finally:
+        _let_go(h)
+        for p in (before, during):
+            if p is not None:
+                p.kill()
+                p.wait()
+
+
+def test_the_root_joins_its_job_before_it_runs() -> None:
+    """The root is held suspended until it is in the job. Assignment is made
+    slow here, so a root that ran meanwhile would start its child outside."""
+    if not proctree.IS_WINDOWS:
+        print("  skip (POSIX)")
+        return
+    assign = proctree.assign_to_job
+
+    def slow_assign(job, proc):
+        time.sleep(1.5)
+        return assign(job, proc)
+
+    starts_at_once = ("import subprocess, sys, time\n"
+                      "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                      "print(c.pid, flush=True)\n"
+                      "time.sleep(60)\n")
+    proctree.assign_to_job = slow_assign
+    h = None
+    try:
+        with proctree.Tree([sys.executable, "-c", starts_at_once],
+                           stdout=subprocess.PIPE) as tree:
+            pid = int(tree.proc.stdout.readline())
+            h = _hold(pid)
+            check("root: its first child was born in the job",
+                  h is not None and proctree._in_job(h, tree.job))
+            check("root: so it was never an escape", pid not in tree.adopted,
+                  f"adopted={tree.adopted}")
+    finally:
+        proctree.assign_to_job = assign
+        _let_go(h)
+
+
+def _windows_apps_alias() -> str | None:
+    """A Python App Execution Alias, where the host has one."""
+    for name in ("python.exe", "python3.exe"):
+        path = os.path.expandvars(rf"%LOCALAPPDATA%\Microsoft\WindowsApps\{name}")
+        if os.path.lexists(path):
+            return path
+    return None
+
+
+def test_an_alias_launch_is_contained() -> None:
+    """The case this exists for, end to end: run through an App Execution
+    Alias by a member of the tree, the app's runtime and what it starts die
+    with the tree. Needs an alias to run, which a stock host may not have -- a
+    named skip there, not a quiet pass."""
+    alias = _windows_apps_alias() if proctree.IS_WINDOWS else None
+    if alias is None:
+        print("  SKIP no Python App Execution Alias on this host")
+        return
+    # As the root, the alias joins the job like any child, and its status
+    # comes back -- which also shows a suspended start does not upset it.
+    res = proctree.run_captured([alias, "-c", "import sys; sys.exit(3)"], timeout=60)
+    check("alias as the root: runs, and its status is passed through",
+          res.returncode == 3, f"rc={res.returncode} stderr={res.stderr[-300:]!r}")
+    handles = []
+    with tempfile.TemporaryDirectory() as td:
+        # A file, not the tree's stdout: whether a brokered process's output
+        # reaches a pipe is up to the package's launcher.
+        pidfile = Path(td) / "pids"
+        runtime = ("import os, pathlib, subprocess, sys, time\n"
+                   "c = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'])\n"
+                   f"pathlib.Path({str(pidfile)!r}).write_text(f'{{os.getpid()}} {{c.pid}}')\n"
+                   "time.sleep(120)\n")
+        member = (f"import subprocess, time\n"
+                  f"subprocess.Popen([{alias!r}, '-c', {runtime!r}])\n"
+                  f"time.sleep(120)\n")
+        try:
+            with proctree.Tree([sys.executable, "-c", member]) as tree:
+                started = _wait_for(lambda: len(pidfile.read_text().split()) == 2
+                                    if pidfile.exists() else False, 30)
+                check("alias by a member: its runtime ran", started)
+                if not started:
+                    return
+                pids = [int(p) for p in pidfile.read_text().split()]
+                handles = [_hold(p) for p in pids]
+                check("alias by a member: its runtime is adopted",
+                      _wait_for(lambda: pids[0] in tree.adopted, 10), f"adopted={tree.adopted}")
+            check("alias by a member: the runtime and its child die with the tree",
+                  all(h is not None and _exits(h, 10) for h in handles))
+        finally:
+            for h in handles:
+                _let_go(h)
 
 
 def test_shebang_detection() -> None:
@@ -251,11 +463,15 @@ def main() -> int:
         test_bare_shell_name_is_made_absolute,
         test_explicit_interpreter_path_is_respected,
         test_wsl_launcher_detection,
-        test_app_execution_alias_detection,
         test_shebang_detection,
         test_shell_is_usable,
         test_tree_runs_a_script_end_to_end,
         test_tree_accounting_counts_short_lived_processes,
+        test_the_root_joins_its_job_before_it_runs,
+        test_an_escape_is_adopted_and_dies_with_the_tree,
+        test_an_escape_dies_with_the_runner,
+        test_a_process_outside_the_tree_is_left_alone,
+        test_an_alias_launch_is_contained,
     ]
     for t in tests:
         print(f"{t.__name__}:")
@@ -269,4 +485,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--escape-runner"]:
+        sys.exit(_escape_runner())
     sys.exit(main())

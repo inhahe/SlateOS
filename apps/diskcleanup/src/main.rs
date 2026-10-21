@@ -85,14 +85,15 @@ const CORNER_RADIUS: f32 = 6.0;
 const CHECKBOX_SIZE: f32 = guitk::checkbox::SIZE;
 const PROGRESS_HEIGHT: f32 = 8.0;
 
-/// Where a scan starts when the user presses "Scan" rather than a test.
+/// Where the "Scan" button starts in the program the user runs:
+/// [`CleanupUI::for_this_machine`].
 ///
 /// One entry, and it is the filesystem root, because [`CleanupScanner::scan`]
 /// treats each base as a *prefix* rather than a directory to walk: it joins
 /// `"tmp"`, `"var/log"` and the rest onto every base, so a base of `"/"`
-/// produces exactly `/tmp` and `/var/log`. The list is a slice rather than a
-/// constant path so that a test — or, later, a per-user scan — can pass its own
-/// roots to the same function the button calls, instead of a parallel one.
+/// produces exactly `/tmp` and `/var/log`. A slice rather than a constant path
+/// so that a test — or, later, a per-user scan — can give the button its own
+/// roots ([`CleanupUI::with_scan_roots`]) instead of a parallel code path.
 const DEFAULT_SCAN_ROOTS: [&str; 1] = ["/"];
 
 // ============================================================================
@@ -1345,6 +1346,12 @@ pub struct CleanupUI {
     pub scan_complete: bool,
     /// Scanner instance holding discovered items.
     pub scanner: CleanupScanner,
+    /// The bases the "Scan" button hands [`Self::run_scan`].
+    ///
+    /// Empty unless the UI was built to scan something, so that a test which
+    /// clicks the button scans nothing rather than the computer running it.
+    /// Every scanned folder is one the cleanup may then delete from.
+    scan_roots: Vec<String>,
     /// Most recent cleanup result (if any).
     pub last_result: Option<CleanupResult>,
     /// Progress of a running cleanup (0.0 .. 1.0).
@@ -1389,6 +1396,24 @@ pub struct CleanupUI {
 }
 
 impl CleanupUI {
+    /// The window the user runs: its "Scan" button looks in the filesystem
+    /// root and in every other drive's recycle bin.
+    #[must_use]
+    pub fn for_this_machine() -> Self {
+        Self {
+            scanner: CleanupScanner::new(),
+            scan_roots: DEFAULT_SCAN_ROOTS
+                .iter()
+                .map(|root| (*root).to_owned())
+                .collect(),
+            ..Self::new()
+        }
+    }
+
+    /// A window that scans nothing until told where: its "Scan" button has no
+    /// roots and no drives' bins. What [`Self::run_scan`] or
+    /// [`Self::with_scan_roots`] names is all it ever looks at, which is what
+    /// a test needs -- the window deletes from the folders it scanned.
     pub fn new() -> Self {
         let mut selected = BTreeMap::new();
         for cat in CleanupCategory::ALL {
@@ -1404,7 +1429,8 @@ impl CleanupUI {
             selected,
             category_sizes: BTreeMap::new(),
             scan_complete: false,
-            scanner: CleanupScanner::new(),
+            scanner: CleanupScanner::new().with_drive_bins(Vec::new()),
+            scan_roots: Vec::new(),
             last_result: None,
             progress: 0.0,
             preview_category: None,
@@ -1414,6 +1440,13 @@ impl CleanupUI {
             width: WINDOW_WIDTH,
             height: WINDOW_HEIGHT,
         }
+    }
+
+    /// The same window with its "Scan" button looking in `roots` instead.
+    #[must_use]
+    pub fn with_scan_roots(mut self, roots: &[&str]) -> Self {
+        self.scan_roots = roots.iter().map(|root| (*root).to_owned()).collect();
+        self
     }
 
     /// The clickable geometry for the size the compositor last reported.
@@ -1763,7 +1796,9 @@ impl CleanupUI {
     /// The category list's own hit-test: checkboxes, "View" links, footer.
     fn click_category_list(&mut self, lay: &Layout, x: f32, y: f32) -> EventResult {
         if hits(lay.scan_button(), x, y) {
-            self.run_scan(&DEFAULT_SCAN_ROOTS);
+            let roots = self.scan_roots.clone();
+            let roots: Vec<&str> = roots.iter().map(String::as_str).collect();
+            self.run_scan(&roots);
             return EventResult::Consumed;
         }
         if hits(lay.clean_button(), x, y) {
@@ -2570,7 +2605,7 @@ impl oswindow::app::App for CleanupUI {
 }
 
 fn main() -> ExitCode {
-    oswindow::app::launch("diskcleanup", &mut CleanupUI::new())
+    oswindow::app::launch("diskcleanup", &mut CleanupUI::for_this_machine())
 }
 
 // ============================================================================
@@ -3766,12 +3801,31 @@ mod tests {
 
     #[test]
     fn test_click_on_scan_button_scans() {
-        let mut ui = CleanupUI::new();
+        let scratch = ScratchDir::new("scan-button");
+        scratch.file("tmp/a", 4096);
+        let mut ui = CleanupUI::new().with_scan_roots(&[scratch.as_str()]);
         assert!(!ui.scan_complete);
         let (x, y) = centre(ui.layout().scan_button());
         assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
         assert!(ui.scan_complete);
-        assert!(!ui.category_sizes.is_empty());
+        assert_eq!(
+            ui.category_sizes.get(&CleanupCategory::TempFiles),
+            Some(&4096)
+        );
+    }
+
+    /// A window nobody gave roots to scans nothing when "Scan" is clicked:
+    /// not the root of the computer the tests run on, and no drive's bin.
+    /// Whatever a scan reads becomes deletable, so this is what keeps a
+    /// click in a test from reaching the operator's files.
+    #[test]
+    fn a_window_given_no_roots_scans_nothing() {
+        let mut ui = CleanupUI::new();
+        let (x, y) = centre(ui.layout().scan_button());
+        assert_eq!(ui.handle_event(&click(x, y)), EventResult::Consumed);
+        assert!(ui.scan_complete);
+        assert!(ui.scanner.roots().is_empty(), "{:?}", ui.scanner.roots());
+        assert!(ui.category_sizes.is_empty());
     }
 
     #[test]
@@ -3924,12 +3978,13 @@ mod tests {
     /// A UI that has *really* scanned a scratch tree holding one 4 KiB temp file.
     ///
     /// Every event-wiring test that needs the "scan found something" state goes
-    /// through here rather than through `DEFAULT_SCAN_ROOTS`. That constant is
-    /// `["/"]`, which is correct for SlateOS and catastrophic here: on the
-    /// machine these tests run on it resolves to `C:\`, so the scan would
-    /// enumerate and measure the developer's `C:\tmp` -- and, worse, add it to
-    /// the confinement list, at which point one `Enter` in a dialog test would
-    /// erase it. `scripts/check-diskcleanup-test-roots.py` enforces the rule
+    /// through here rather than through [`CleanupUI::for_this_machine`], whose
+    /// "Scan" button looks in `DEFAULT_SCAN_ROOTS` and every drive's recycle
+    /// bin. That constant is `["/"]`, which is correct for SlateOS and
+    /// catastrophic here: on the machine these tests run on it resolves to the
+    /// current drive's root, so the scan would enumerate and measure the
+    /// developer's `C:\tmp` -- and, worse, add it to the confinement list, at
+    /// which point one `Enter` in a dialog test would erase it. `scripts/check-diskcleanup-test-roots.py` enforces the rule
     /// this comment states, because a comment cannot stop the next test.
     fn scanned_over(scratch: &ScratchDir) -> CleanupUI {
         scratch.file("tmp/a", 4096);

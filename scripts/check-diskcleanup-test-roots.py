@@ -31,13 +31,17 @@ back. `cargo test` on a green tree that has just erased `C:\\tmp` exits 0.
 
 Inside `#[cfg(test)]` code under `apps/diskcleanup` only:
 
-1.  Any mention of `DEFAULT_SCAN_ROOTS`. It *is* `["/"]`; there is no safe way
-    for a test to use it, and no reason to -- the constant's own value is what
-    production is for.
+1.  Any mention of `DEFAULT_SCAN_ROOTS`, or of `for_this_machine`, the window
+    whose "Scan" button uses it. It *is* `["/"]`; there is no safe way for a
+    test to use it, and no reason to -- the constant's own value is what
+    production is for. A test that clicks "Scan" builds its window with
+    `CleanupUI::new()`, which scans nothing, and gives it a `ScratchDir` with
+    `with_scan_roots`.
 2.  A **root-anchored path literal** -- `"/"`, `"/tmp/..."`, `"C:\\..."`,
     `"\\\\server\\..."` -- appearing in the argument list of a call that walks
-    or deletes: `run_scan`, `scan`, `allow_root`, `execute`, `dry_run`,
-    `measure_recursive`, `enumerate_entries`, `remove`, `set_scan_roots`.
+    or deletes, or that tells the "Scan" button where to: `run_scan`, `scan`,
+    `allow_root`, `execute`, `dry_run`, `measure_recursive`,
+    `enumerate_entries`, `remove`, `with_scan_roots`.
 
 Note what is deliberately *not* flagged: a root-anchored literal on its own.
 `CleanupItem::new("/tmp/foo", Temp)` is inert -- it builds a struct, and the
@@ -92,13 +96,15 @@ from rustscan import CFG_TEST_RE, blank_ranges, item_end, signature_of, strip_co
 # scanned.
 CRATE = "apps/diskcleanup"
 
-# The constant that makes a scan start at the filesystem root.
-DEFAULT_ROOTS_RE = re.compile(r"\bDEFAULT_SCAN_ROOTS\b")
+# The constant that makes a scan start at the filesystem root, and the window
+# whose "Scan" button scans it.
+DEFAULT_ROOTS_RE = re.compile(r"\b(?P<name>DEFAULT_SCAN_ROOTS|for_this_machine)\b")
 
-# Calls that walk a directory or unlink something. A root-anchored literal in
-# any of their argument lists is the bug this gate exists for.
+# Calls that walk a directory or unlink something, or aim the "Scan" button. A
+# root-anchored literal in any of their argument lists is the bug this gate
+# exists for.
 DANGEROUS_RE = re.compile(
-    r"\b(?P<name>run_scan|scan|allow_root|set_scan_roots|execute|dry_run"
+    r"\b(?P<name>run_scan|scan|allow_root|with_scan_roots|execute|dry_run"
     r"|measure_recursive|enumerate_entries|remove)\s*(?=\()"
 )
 
@@ -177,7 +183,7 @@ def findings(text: str) -> list[tuple[int, str]]:
         out.append(
             (
                 line_of(safe, m.start()),
-                "test code names DEFAULT_SCAN_ROOTS, which is [\"/\"] -- "
+                f"test code names {m.group('name')}, which scans [\"/\"] -- "
                 "scan a ScratchDir instead",
             )
         )
@@ -297,6 +303,43 @@ mod tests {
 }
 """
 
+# The machine's window: its "Scan" button scans DEFAULT_SCAN_ROOTS without
+# the test ever naming them, which is how `test_click_on_scan_button_scans`
+# scanned the drive the tests ran on until 2026-10-20.
+CLICKS_THE_MACHINES_SCAN = """
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_scans() {
+        let mut ui = CleanupUI::for_this_machine();
+        ui.handle_event(&click(x, y));
+    }
+}
+"""
+
+# The button aimed at the host by hand.
+AIMS_THE_BUTTON_AT_THE_HOST = """
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_scans() {
+        let mut ui = CleanupUI::new().with_scan_roots(&["/"]);
+    }
+}
+"""
+
+# The button aimed at a scratch tree, as the real test does.
+AIMS_THE_BUTTON_AT_SCRATCH = """
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn it_scans() {
+        let scratch = ScratchDir::new("a");
+        let mut ui = CleanupUI::new().with_scan_roots(&[scratch.as_str()]);
+    }
+}
+"""
+
 # A nested paren in the argument list must not end the scan early.
 NESTED_PARENS = """
 #[cfg(test)]
@@ -323,6 +366,9 @@ SELF_TESTS = [
     ("an inert path literal is not reported", INERT_LITERAL, 0),
     ("a Windows drive root is reported", WINDOWS_ROOT, 1),
     ("a nested paren does not end the argument list", NESTED_PARENS, 1),
+    ("the machine's window in a test is reported", CLICKS_THE_MACHINES_SCAN, 1),
+    ("the Scan button aimed at \"/\" is reported", AIMS_THE_BUTTON_AT_THE_HOST, 1),
+    ("the Scan button aimed at a scratch dir is not", AIMS_THE_BUTTON_AT_SCRATCH, 0),
 ]
 
 

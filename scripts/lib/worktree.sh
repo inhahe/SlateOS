@@ -415,9 +415,10 @@ slate_adopt_legacy_work() {
 }
 
 # `$CC` must not contain spaces: autotools word-splits it, and this repo lives
-# under "D:\visual studio projects\", so pointing CC straight at a path under
-# /mnt/d produces a thoroughly misleading "C compiler cannot create
-# executables". These wrappers keep the space out of $CC. They are keyed by
+# under a path with a space in it ("visual studio projects"), so pointing CC
+# straight at a path under the Windows drive's mount produces a thoroughly
+# misleading "C compiler cannot create executables". These wrappers keep the
+# space out of $CC. They are keyed by
 # lane so two lanes configuring at once cannot hand each other's zig to
 # autotools.
 # Resolve $SLATE_ZIG, downloading the pinned toolchain if this machine has not

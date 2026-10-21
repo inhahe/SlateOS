@@ -266,6 +266,23 @@
 # fixture creating a stray branch or tag elsewhere in the namespace is not
 # caught -- junk refs, where the damage this exists for is a rewritten branch.
 
+# run_checker_note_skip <label> <reason>
+#
+# Records a gate that checked nothing: appends one `<label><TAB><reason>` line
+# to RUN_CHECKER_SKIPS. Unlike RUN_CHECKER_SKIPPED and RUN_CHECKER_SKIP_REASON,
+# which describe the last call only, nothing clears it between gates; a caller
+# empties it when it starts counting and reads it at the end, so a skip its
+# call site did not look at is still counted. run_checker's two skip arms call
+# this, and so does a gate that decides in shell that it cannot run.
+#
+# <label> names the gate (run_checker's label, or the gate's own name); <reason>
+# is one line, in the words of whatever could not run. A tab rather than prose
+# separates them because reasons contain ` -- ` and the label must come back out.
+run_checker_note_skip() {
+    RUN_CHECKER_SKIPS="${RUN_CHECKER_SKIPS-}$1$(printf '\t')$2
+"
+}
+
 # run_checker [--may-skip] <label> <command> [args...]
 run_checker() {
     # Defined in here so that anything cutting run_checker out of this file
@@ -291,6 +308,9 @@ run_checker() {
     RUN_CHECKER_SKIPPED=
     # shellcheck disable=SC2034
     RUN_CHECKER_SKIP_REASON=
+    # The pair above answers for this call only; the run's whole list of skips
+    # is RUN_CHECKER_SKIPS, which the two skip arms below append to through
+    # run_checker_note_skip and nothing here clears.
     _rc_may_skip=
     if [ "$1" = "--may-skip" ]; then
         _rc_may_skip=1
@@ -473,6 +493,7 @@ run_checker() {
         RUN_CHECKER_SKIPPED=1
         # shellcheck disable=SC2034
         RUN_CHECKER_SKIP_REASON=$_rc_first
+        run_checker_note_skip "$_rc_label" "$_rc_first"
         rm -f "$_rc_log"
         # Loud, and on its own line, because the one thing a skip must never do
         # is read like a pass in a scrollback of twenty-eight gates. The reason
@@ -502,6 +523,7 @@ run_checker() {
         RUN_CHECKER_SKIPPED=1
         # shellcheck disable=SC2034
         RUN_CHECKER_SKIP_REASON=$_rc_first
+        run_checker_note_skip "$_rc_label" "$_rc_first"
         rm -f "$_rc_log"
         echo "$_rc_prog: SKIPPED $_rc_label -- the checker reported that it could not run." >&2
         echo "$_rc_prog:   reason: $_rc_first" >&2

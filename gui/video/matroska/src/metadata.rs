@@ -330,8 +330,9 @@ pub struct Attachment {
 }
 
 /// FFmpeg's limit on a file's streams (`max_streams`): tracks and
-/// attachments together.
-const MAX_STREAMS: usize = 1000;
+/// attachments together. Its tracks are its first streams, and a track past
+/// the limit refuses the file; an attachment past it is left out.
+pub(crate) const MAX_STREAMS: usize = 1000;
 
 /// The lists FFmpeg reads from the Segment's top-level elements, before it
 /// makes anything of them.

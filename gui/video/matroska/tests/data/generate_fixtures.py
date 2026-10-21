@@ -42,6 +42,15 @@ MaxFALL both or neither, the first `Colour` of two, and a second
 `MasteringMetadata` read over the first set back to 0. Each answered with
 what ffprobe says of the stream. `tests/colour.rs` holds the crate to them.
 
+And the **truncation sweeps** (`meta_trailing.cut.txt`, `uncued.cut.txt`):
+each file cut short at every length, from inside its EBML header to its last
+Cluster, answered with what ffprobe shows of it or `refused`; and the
+**openings** (`open_*.mkv`, answered together in `openings.txt`): files
+FFmpeg opens or refuses by how its header reads before the first Cluster,
+and what it reads of those it opens -- the tracks listed once where FFmpeg
+lists them twice (design-decisions §1358). `tests/metadata.rs` holds the
+crate to both.
+
 The answers were made with the ffmpeg and ffprobe of gyan.dev's full build
 of 2026-03-09 (git 9b7439c31b). Run from this directory:
 
@@ -71,7 +80,11 @@ def run(*args):
 
 def ffmpeg(name, *args):
     # bitexact: no random UIDs or version strings, so a run makes the same
-    # bytes as the last.
+    # bytes as the last -- on the same CPU. libopus encodes in floating
+    # point down paths chosen by the CPU's instruction sets, so on another
+    # machine the Opus packets of vp9_opus.webm and meta_ffmpeg.mkv come out
+    # different, though as long; restore those two (and vp9_opus.txt) from
+    # git rather than commit them, unless they are meant to change.
     run(FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *args,
         "-fflags", "+bitexact", "-threads", "1", name)
 
@@ -412,6 +425,33 @@ def synthetic():
         cluster(0, simple(1, 0, 0x80, frame(1, 4)), bad_group, simple(1, 20, 0x80, frame(3, 4))),
         cluster(1000, simple(1, 0, 0x80, frame(4, 4))),
     )
+    # Where the first resync after the header starts, the first Cluster's
+    # size being no number: past the element FFmpeg last knew good. Where it
+    # followed a SeekHead entry -- here to Tags after the Clusters -- that is
+    # the first Cluster, which following one goes back to; else it is the
+    # last element read in the header, here the track's CodecPrivate, whose
+    # bytes hold a whole Cluster for the resync to find.
+    hiding = el("1654AE6B", el(
+        "AE",
+        uint("D7", 1) + uint("73C5", 1) + uint("83", 1) + string("86", "V_SNOW")
+        + el("E0", uint("B0", 16) + uint("BA", 16)) + uint("23E383", 10_000_000)
+        + el("63A2", cluster(500, simple(1, 0, 0x80, frame(2, 4)))),
+    ))
+    bad_first = bytes.fromhex("1F43B675") + b"\x00" + frame(9, 6)
+    after = cluster(1000, simple(1, 0, 0x80, frame(4, 4)))
+    out["resync_first_cluster.mkv"] = segment(INFO, hiding, bad_first, after)
+    late_tags = el("1254C367", el("7373", el("67C8", string("45A3", "A") + string("4487", "b"))))
+    at_tags = len(el("114D9B74", seek_to("1254C367", 0))) + len(INFO + hiding + bad_first + after)
+    out["resync_first_cluster_after_seek_head.mkv"] = segment(
+        el("114D9B74", seek_to("1254C367", at_tags)), INFO, hiding, bad_first, after, late_tags)
+    # A Segment whose stated end comes before its Clusters: FFmpeg's first
+    # pass ends there, and its second, which reads the Segment to the end of
+    # the file, finds the Clusters after it and plays them.
+    out["segment_ends_before_clusters.mkv"] = segment(
+        INFO, one,
+        cluster(0, simple(1, 0, 0x80, frame(1, 4))),
+        cluster(100, simple(1, 0, 0x80, frame(2, 4))),
+        size=vint(len(INFO + one)))
     out.update(lane_e_layouts())
     return out
 
@@ -1047,6 +1087,23 @@ def metadata_fixtures():
     out["meta_seek_mismatch.mkv"] = m_file(m_laid_out(
         [("1941A469", "t4"), ("1941A469", "att")], parts))
 
+    # A Tracks after the Clusters, found through the SeekHead, whose one
+    # entry FFmpeg refuses the file for wherever it reads it: a crop leaving
+    # nothing of the picture's 16 columns.
+    cropped = el("1654AE6B", el(
+        "AE",
+        uint("D7", 1) + uint("73C5", 1) + uint("83", 1) + string("86", "V_SNOW")
+        + el("E0", uint("B0", 16) + uint("BA", 16) + uint("54CC", 8) + uint("54DD", 8)),
+    ))
+    parts = [("info", m_info()), ("c", m_clusters()), ("tracks", cropped)]
+    out["meta_refused_track_after_the_clusters.mkv"] = m_file(m_laid_out([("1654AE6B", "tracks")], parts))
+
+    # As many tracks as FFmpeg makes streams of, and one more, which refuses
+    # the file (its max_streams).
+    for n in (1000, 1001):
+        many = el("1654AE6B", b"".join(snow_track(k) for k in range(1, n + 1)))
+        out[f"meta_{n}_tracks.mkv"] = m_file(m_info(), many, m_clusters())
+
     return out
 
 
@@ -1160,9 +1217,183 @@ def m_trailing():
              ("ch", chapters), ("att", files), ("tags", tags)]
     entries = [("1549A966", "info"), ("1654AE6B", "tracks"), ("1043A770", "ch"), ("1941A469", "att"),
                ("1254C367", "tags")]
-    data = m_file(m_laid_out(entries, parts))
-    # Where the metadata begins: the sweep cuts from there to the end.
-    return data, data.index(chapters)
+    return m_file(m_laid_out(entries, parts))
+
+
+# How long the openings' Info says they are: the duration ffprobe shows of
+# one whose Info it read, and not of one whose it did not.
+OPENING_SECONDS = 3.5
+
+
+def openings():
+    """Files FFmpeg opens or refuses by how its header reads before the first
+    Cluster -- most of them by its second pass, which looks for the Segment's
+    top-level elements by their IDs after anything but a Cluster ends the
+    first. Lane E's layout (Info, two Tracks entries, Clusters), but for an
+    Info of a 100 microsecond tick and 3.5 s, which the time bases and the
+    duration show to have been read or not: with no Cluster at all; with
+    damage and nothing after it; with a Segment whose stated end comes before
+    its Clusters; with stray bytes before the first Cluster; with top-level
+    elements of unknown size, one before an Info hidden in a Void that only a
+    second pass would find; with damaged Cues before the Clusters, one with
+    such an Info in its bytes after the damage; with a
+    second Segment after one of unknown size, which FFmpeg passes over as an
+    element it does not know; and with a SeekHead whose
+    SeekIDs the second pass takes for elements -- a Cluster's among them,
+    which ends the pass there, the file cut short at three places in it.
+    Answered in `openings.txt`."""
+    tracks = e_two_tracks()
+    info = e_el("1549A966", e_uint("2AD7B1", 100_000)
+                + e_el("4489", struct.pack(">d", OPENING_SECONDS * 10_000)))
+    head = info + tracks
+    clusters = e_three_seconds()[len(E_HEADER) + 12 + len(E_INFO) + len(tracks):]
+    assert clusters.startswith(bytes.fromhex("1F43B675"))
+    # A SimpleTag whose string runs past it.
+    bad_tags = e_el("1254C367", e_el("7373", e_el(
+        "67C8", e_el("45A3", b"AFTER") + bytes.fromhex("4487") + e_size(200) + b"lost")))
+    # A CuePoint whose CueTrackPositions runs past it.
+    bad_cues = e_el("1C53BB6B", e_el("BB", e_uint("B3", 0) + bytes.fromhex("B7") + e_size(200)))
+    tags = e_el("1254C367", e_el("7373", e_el("67C8", e_el("45A3", b"A") + e_el("4487", b"b"))))
+    unknown = bytes.fromhex("01FFFFFFFFFFFFFF")
+    # An Info of a 1 ns tick, hidden in a Void: read only by a second pass,
+    # which finds elements by their IDs, and seen in the time bases.
+    hidden_info = e_el("EC", e_el("1549A966", e_uint("2AD7B1", 1)))
+    # The damaged Cues, the hidden Info in their bytes after the damage.
+    bad_cues_hiding = e_el("1C53BB6B", e_el("BB", e_uint("B3", 0) + bytes.fromhex("B7") + e_size(200))
+                           + hidden_info)
+
+    def seg(body, size=None):
+        return E_HEADER + e_el("18538067", body, size)
+
+    def unsized(element):
+        """`element`, written by `e_el`, its size made unknown."""
+        return element[:4] + unknown + element[12:]
+
+    def seek_head(*ids):
+        """A SeekHead naming each of `ids` where it stands in `head` and the
+        Clusters after it, the SeekHead first."""
+        size = 12 + len(ids) * 42
+        places = {"1549A966": size, "1654AE6B": size + len(info), "1F43B675": size + len(head)}
+        return e_el("114D9B74", b"".join(
+            e_el("4DBB", e_el("53AB", bytes.fromhex(i)) + e_uint("53AC", places[i])) for i in ids))
+
+    # The video track's CodecPrivate holding a Cluster's ID: the file cut
+    # short after it, inside the Tracks, the second pass looks no further.
+    private = e_el("1654AE6B", e_track(E_VIDEO, 1, "V_VP9", e_uint("23E383", 40_000_000),
+                                       e_el("63A2", bytes.fromhex("1F43B675") + bytes(8)))
+                   + e_track(E_AUDIO, 2, "A_OPUS", e_el("63A2", OPUS_HEAD)))
+    with_private = seg(info + private + clusters)
+    in_private = with_private.index(bytes.fromhex("1F43B675")) + 6
+    assert in_private < len(seg(info + private))
+    named = seek_head("1F43B675", "1549A966")
+    assert len(named) == 12 + 2 * 42
+    with_cluster = seg(named + head + clusters)
+    seek_at = len(E_HEADER) + 12
+    first_seek = seek_at + 12 + 42
+    out = {
+        "open_no_cluster.mkv": seg(head),
+        "open_no_cluster_unknown_segment.mkv": seg(head, unknown),
+        "open_no_cluster_void_after.mkv": seg(head + e_el("EC", bytes(4))),
+        "open_damaged_and_no_cluster.mkv": seg(head + bad_tags),
+        "open_damaged_then_clusters.mkv": seg(head + bad_tags + clusters),
+        "open_segment_ends_before_clusters.mkv": seg(head + clusters, e_size(len(head))),
+        "open_segment_ends_in_tracks.mkv": seg(head + clusters, e_size(len(head) - 3)),
+        "open_segment_ends_in_info.mkv": seg(head + clusters, e_size(len(info) - 3)),
+        "open_info_of_unknown_size.mkv": seg(unsized(info) + tracks + clusters),
+        "open_info_of_unknown_size_unknown_segment.mkv": seg(unsized(info) + tracks + clusters, unknown),
+        "open_tracks_of_unknown_size.mkv": seg(info + unsized(tracks) + clusters),
+        "open_tracks_of_unknown_size_unknown_segment.mkv": seg(info + unsized(tracks) + clusters, unknown),
+        "open_tags_of_unknown_size.mkv": seg(head + unsized(tags) + clusters),
+        "open_info_of_unknown_size_then_stray_00_unknown_segment.mkv": seg(
+            unsized(info) + tracks + bytes(1) + clusters, unknown),
+        "open_info_of_unknown_size_then_an_info_in_a_void_unknown_segment.mkv": seg(
+            unsized(info) + tracks + hidden_info + clusters, unknown),
+        "open_tracks_cut_after_a_cluster_id_in_them.mkv": with_private[:in_private],
+        "open_element_80_of_unknown_size_unknown_segment.mkv": seg(head + bytes.fromhex("80") + unknown + clusters,
+                                                                   unknown),
+        "open_cues_damaged_then_clusters.mkv": seg(head + bad_cues + clusters),
+        "open_cues_damaged_and_no_cluster.mkv": seg(head + bad_cues),
+        "open_cues_damaged_before_an_info_in_them.mkv": seg(head + bad_cues_hiding + clusters),
+        "open_second_segment_inside_one_of_unknown_size.mkv": seg(head, unknown) + e_el("18538067", clusters),
+        "open_segment_ends_in_seek_head.mkv": seg(seek_head("1549A966", "1654AE6B") + head + clusters,
+                                                  e_size(12 + 2 * 42 - 3)),
+        "open_seek_head_then_stray_00.mkv": seg(seek_head("1549A966", "1654AE6B") + head + b"\x00" + clusters),
+        "open_seek_head_names_a_cluster_then_damage.mkv": seg(named + head + bad_tags + clusters),
+        "open_seek_head_names_a_cluster_and_no_cluster.mkv": seg(named + head),
+        "open_seek_head_names_a_cluster_cut_after_it.mkv": with_cluster[:first_seek],
+        "open_seek_head_names_a_cluster_cut_in_the_next_id.mkv": with_cluster[:first_seek + 1],
+        "open_seek_head_names_a_cluster_cut_in_a_position.mkv": with_cluster[:seek_at + len(named) - 1],
+    }
+    for stray in ["00", "80", "FF", "4286", "FFFF"]:
+        out[f"open_stray_{stray.lower()}.mkv"] = seg(head + bytes.fromhex(stray) + clusters)
+        if stray != "00":
+            out[f"open_stray_{stray.lower()}_unknown_segment.mkv"] = seg(
+                head + bytes.fromhex(stray) + clusters, unknown)
+    return out
+
+
+def stream_blocks(lines):
+    """`meta_lines` after `start`, split: the lines before the first stream,
+    each stream's (its line and its tags), and the chapters' after."""
+    before, blocks, after = [], [], []
+    for line in lines:
+        if line.startswith("chapter ") or after:
+            after.append(line)
+        elif line.startswith("stream "):
+            blocks.append([line])
+        elif blocks:
+            blocks[-1].append(line)
+        else:
+            before.append(line)
+    return before, blocks, after
+
+
+def opening_lines(name):
+    """What `openings.txt` holds a file to: `None` if ffprobe refuses it; else
+    `meta_lines` after `start`, each stream's time base, and the duration
+    ffprobe takes from the Info -- `none` where it gives another, which it
+    worked out from the packets. And whether FFmpeg listed the tracks twice,
+    its second pass having read the Tracks again: the lines then list them
+    once, as this crate does (design-decisions §1358)."""
+    got = meta_lines(name)
+    if got == ["refused"]:
+        return None, False
+    before, blocks, after = stream_blocks(got[1:])
+    r = subprocess.run(
+        [FFPROBE, "-v", "error", "-show_entries", "stream=codec_name,time_base:format=duration", "-of", "json",
+         name],
+        check=True, capture_output=True, text=True, encoding="utf-8",
+    )
+    j = json.loads(r.stdout)
+    # Each stream's codec, which tells the tracks apart, and time base.
+    bases = [(s.get("codec_name"), s["time_base"]) for s in j.get("streams", [])]
+    assert len(bases) == len(blocks), name
+    half = len(blocks) // 2
+    twice = len(blocks) % 2 == 0 and half > 0 and all(
+        blocks[k][1:] == blocks[k + half][1:] and bases[k] == bases[k + half] for k in range(half))
+    if twice:
+        blocks, bases = blocks[:half], bases[:half]
+    lines = before + [line for b in blocks for line in b] + after
+    lines += [f"time base {i} {tb}" for i, (_, tb) in enumerate(bases)]
+    duration = j.get("format", {}).get("duration")
+    lines.append(f"duration {duration if duration == f'{OPENING_SECONDS:.6f}' else 'none'}")
+    return lines, twice
+
+
+def openings_answer(files):
+    lines = ["# Each open_*.mkv: `refused` if ffprobe will not open it; else what it shows,",
+             "# `twice` where FFmpeg lists the tracks a second time, given once as this crate",
+             "# gives them -- see opening_lines (generate_fixtures.py)."]
+    for name, data in sorted(files.items()):
+        with open(name, "wb") as f:
+            f.write(data)
+        got, twice = opening_lines(name)
+        if got is None:
+            lines.append(f"file {name} refused")
+            continue
+        lines.append(f"file {name} opens{' twice' if twice else ''}")
+        lines += got
+    return "\n".join(lines) + "\n"
 
 
 def esc(b):
@@ -1229,13 +1460,14 @@ def meta_answer(name):
     return "\n".join(lines) + "\n"
 
 
-def sweep_answer(name, data, first):
-    """Each cut of `data` from `first` to its end: the MD5 of `meta_lines`,
-    without its `start` line -- given apart, as the test needs it."""
-    lines = [f"# {name} cut short at each length from {first}: `start`, and the MD5 of the rest "
+def sweep_answer(name, data):
+    """Each cut of `data`, at every length short of the whole: the MD5 of
+    `meta_lines`, without its `start` line -- given apart, as the test needs
+    it."""
+    lines = [f"# {name} cut short at each length: `start`, and the MD5 of the rest "
              "of what ffprobe shows (generate_fixtures.py)."]
     cut = "m_cut.mkv"
-    for n in range(first, len(data)):
+    for n in range(len(data)):
         with open(cut, "wb") as f:
             f.write(data[:n])
         got = meta_lines(cut)
@@ -1251,6 +1483,13 @@ def sweep_answer(name, data, first):
 # --- the answers ---------------------------------------------------------------
 
 
+# Fixtures FFmpeg reads with its second pass, which reads again the Tracks
+# its first pass read and so lists every track twice: their answers list
+# them once, as this crate does (design-decisions §1358) -- the second
+# listing checked to repeat the first, with no packet of its own.
+READ_TWICE = {"segment_ends_before_clusters.mkv"}
+
+
 def answer(name):
     streams = subprocess.run(
         [FFPROBE, "-v", "error", "-show_entries", "stream=index,codec_name,time_base", "-of", "compact=p=0", name],
@@ -1262,12 +1501,21 @@ def answer(name):
          "-show_data_hash", "MD5", "-of", "compact=p=0", name],
         check=True, capture_output=True, text=True, encoding="utf-8",
     ).stdout.splitlines()
+    fields = lambda line: dict(kv.split("=", 1) for kv in line.split("|") if "=" in kv)  # noqa: E731
     lines = [f"# {name}: what ffprobe makes of it (generate_fixtures.py)."]
+    if name in READ_TWICE:
+        half = len(streams) // 2
+        kind = lambda s: (fields(s).get("codec_name"), fields(s)["time_base"])  # noqa: E731
+        assert half > 0 and len(streams) == 2 * half, name
+        assert all(kind(streams[k]) == kind(streams[k + half]) for k in range(half)), name
+        assert all(int(fields(p)["stream_index"]) < half for p in packets), name
+        streams = streams[:half]
+        lines.append("# FFmpeg lists its tracks twice; given once (design-decisions §1358).")
     for s in streams:
-        f = dict(kv.split("=", 1) for kv in s.split("|") if "=" in kv)
+        f = fields(s)
         lines.append(f"stream {f['index']} {f.get('codec_name', 'none')} {f['time_base']}")
     for p in packets:
-        f = dict(kv.split("=", 1) for kv in p.split("|") if "=" in kv)
+        f = fields(p)
         adds = [v for k, v in f.items() if k.endswith("block_additional_id")]
         lines.append(
             "packet {} {} {} {} {} {} {} {}".format(
@@ -1599,14 +1847,19 @@ def main():
             with open(f"{base}.txt", "w", encoding="utf-8", newline="\n") as f:
                 f.write(answer(name))
         print(f"{name}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()[:16]}")
-    trailing, first = m_trailing()
+    trailing = m_trailing()
     with open("meta_trailing.mkv", "wb") as f:
         f.write(trailing)
     with open("meta_trailing.meta.txt", "w", encoding="utf-8", newline="\n") as f:
         f.write(meta_answer("meta_trailing.mkv"))
-    with open("meta_trailing.cut.txt", "w", encoding="utf-8", newline="\n") as f:
-        f.write(sweep_answer("meta_trailing.mkv", trailing, first))
-    print(f"meta_trailing.mkv: {len(trailing)} bytes, cut from {first}")
+    # The truncation sweeps: metadata after the Clusters, found through the
+    # SeekHead; and lane E's layout, two tracks and no SeekHead.
+    for name, data in [("meta_trailing.mkv", trailing), ("uncued.mkv", e_three_seconds())]:
+        with open(name.rsplit(".", 1)[0] + ".cut.txt", "w", encoding="utf-8", newline="\n") as f:
+            f.write(sweep_answer(name, data))
+        print(f"{name}: cut at each of its {len(data)} lengths")
+    with open("openings.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write(openings_answer(openings()))
 
 
 if __name__ == "__main__":

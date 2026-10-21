@@ -481,7 +481,7 @@ def test_provisioning_leaves_a_checked_out_fastpy_alone(tmp):
     fastpy = os.path.join(tmp, "elsewhere-fastpy")
     os.makedirs(os.path.join(fastpy, "compiler"))
     with open(os.path.join(fastpy, "compiler", "__init__.py"), "w",
-              encoding="utf-8") as fh:
+              encoding="utf-8", newline="\n") as fh:
         fh.write("")
     status, out, calls = _provision(tmp, "fastpy-dir", 1, fastpy_dir=fastpy)
     check("with FASTPY_DIR naming a checkout, no git runs", calls == [],

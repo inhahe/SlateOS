@@ -87,3 +87,25 @@ cargo bench -p <crate-name>
 This project is written and maintained by an AI agent working autonomously against the roadmap. The conventions, coding standards, self-review checklist, performance targets, and testing requirements that govern that work are documented in **[`CLAUDE.md`](CLAUDE.md)**. The design rationale lives in `design.txt` and the accompanying design notes (`scheduler.txt`, `ipc.txt`, `memory management.txt`, `design-decisions.md`, `open-questions.md`, `known-issues.md`).
 
 Because the AI is the developer, reviewer, and tester, correctness and testing are held to a high bar: every subsystem ships with unit, integration, and (where relevant) stress and boot tests, and performance-critical code is benchmarked against concrete baselines.
+
+
+## License
+
+SlateOS's own code is MIT - see [LICENSE](LICENSE). Free to use, modify and
+redistribute; provided as-is, with no warranty.
+
+Components ported from or built on other projects keep those projects'
+licences, and the MIT licence does not cover them. The copyleft ones are:
+
+| Component | Licence |
+|---|---|
+| `userspace/coreutils` (ported from GNU coreutils) | GPL-3.0-or-later, with GPL-2.0 and LGPL parts |
+| `userspace/oils`, `userspace/autoopts` | GPL-3.0-or-later |
+| `userspace/localtime`, `userspace/ulclosestream` | GPL-2.0-or-later, with LGPL parts |
+| `userspace/lockfile` | GPL-2.0-or-later or Artistic-1.0 |
+| `gui/video/mp4` | LGPL-2.1-or-later |
+
+Permissively licensed parts (the font and image-codec libraries, bzip2 and
+others) keep their own notices too. Each such component's licence texts are in
+its own `licenses/` directory, with a `notices.yaml` saying which apply to
+what, and the OS image carries them all under `/usr/share/licenses`.

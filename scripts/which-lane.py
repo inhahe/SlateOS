@@ -1006,6 +1006,7 @@ OPERATOR_OWNS: tuple[str, ...] = (
     ".claude/",
     "backups/",
     "CLAUDE.md",
+    "LICENSE",
     "claude.md.bak",
     "design.txt",
     "design desicions.txt",

@@ -1119,7 +1119,7 @@ def test_a_suite_that_exits_nonzero_to_report_a_skip_is_a_failure():
     _dump_on_failure(ok, out)
 
 
-def extract_commit_wait_budget(source=None):
+def extract_commit_wait_budget():
     """`commit_wait_budget` and its floor, lifted verbatim out of `boot-test.sh`.
 
     Extracted rather than restated, for the reason `extract_dirty_check` gives:
@@ -1129,18 +1129,13 @@ def extract_commit_wait_budget(source=None):
     a caller can source it, set `BOOT_TEST_START_EPOCH` to whatever elapsed
     time it wants to simulate, and ask what the budget would be.
     """
-    if source is None:
-        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
-            source = handle.read()
-    lines = source.splitlines()
+    with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+        source = handle.read()
     try:
-        floor = next(i for i, line in enumerate(lines)
+        floor = next(line for line in source.splitlines()
                      if line.startswith("COMMIT_WAIT_FLOOR="))
-        start = next(i for i, line in enumerate(lines)
-                     if line.strip() == "commit_wait_budget() {")
-        end = next(i for i, line in enumerate(lines[start:], start)
-                   if line == "}")
-    except StopIteration:
+        budget = shellfunc.shell_function(source, "commit_wait_budget", "boot-test.sh")
+    except (StopIteration, shellfunc.ShellFunctionError):
         raise RuntimeError(
             "boot-test.sh no longer defines COMMIT_WAIT_FLOOR and "
             "commit_wait_budget(). The pre-build commit-headroom gate still "
@@ -1149,7 +1144,7 @@ def extract_commit_wait_budget(source=None):
             "rather than deleting this test. Without it, nothing stops the "
             "budget reverting to a constant, which on 2026-09-06 threw away a "
             "7402-second gate phase to avoid a 900-second wait.")
-    return "\n".join([lines[floor]] + lines[start:end + 1])
+    return floor + "\n" + budget
 
 
 def _budget(fragment, elapsed, bash="bash", env_override=None):

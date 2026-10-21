@@ -7,7 +7,9 @@ Run: `python scripts/test-shellfunc.py` (0 = pass, 1 = fail).
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import shellfunc  # noqa: E402
@@ -61,6 +63,46 @@ def main() -> int:
           "no closing" in error_of("target() {\n    echo\n  }\n", "target"), True)
     check("a name with regex metacharacters is matched literally",
           error_of("aXb() {\n}\n", "a.b") != "", True)
+
+    # The overrun: a closing line that is not a bare `}` must not carry the
+    # lift on through the code and the function after it.
+    for closer in ("  }", "} >&2", "}  # end"):
+        check(f"a function closed by {closer!r} is an error, not a lift into the next one",
+              "runs into another function" in error_of(
+                  f"target() {{\n    echo\n{closer}\necho top-level\nafter() {{\n    echo\n}}\n",
+                  "target"), True)
+    check("...and so is one followed by a brace group rather than a function",
+          "runs into" in error_of("target() {\n    echo\n  }\n{\n    echo\n}\n", "target"), True)
+    nested = ("target() {\n    helper() {\n        echo\n    }\n"
+              "    { echo a; echo b\n    }\n}\nafter() {\n}\n")
+    check("an indented closing brace -- a nested function, a brace group -- does not end it",
+          shellfunc.shell_function(nested, "target"),
+          "target() {\n    helper() {\n        echo\n    }\n    { echo a; echo b\n    }\n}\n")
+    check("a one-line definition is an error, not a lift to a later brace",
+          "on one line" in error_of("target() { echo; }\nafter() {\n}\n", "target"), True)
+    check("a comment after the opening brace is allowed",
+          shellfunc.shell_function("target() {  # why\n    echo\n}\n", "target"),
+          "target() {  # why\n    echo\n}\n")
+    check("CRLF text is lifted as LF",
+          shellfunc.shell_function("x=1\r\ntarget() {\r\n    echo\r\n}\r\n", "target"),
+          "target() {\n    echo\n}\n")
+
+    # shell_function_in: reads the file (CRLF too) and names it in an error.
+    d = tempfile.mkdtemp(prefix="shellfunc-")
+    try:
+        p = os.path.join(d, "some-script.sh")
+        with open(p, "wb") as fh:
+            fh.write(b"target() {\r\n    echo\r\n}\r\n")
+        check("shell_function_in lifts from a file, CRLF read as LF",
+              shellfunc.shell_function_in(p, "target"), "target() {\n    echo\n}\n")
+        try:
+            shellfunc.shell_function_in(p, "missing")
+            named = False
+        except shellfunc.ShellFunctionError as exc:
+            named = "some-script.sh" in str(exc)
+        check("...and its error names the file", named, True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}")

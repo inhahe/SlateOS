@@ -102,6 +102,8 @@ META_MISMATCH = "metadata_where_the_seek_head_names_the_wrong_element"
 META_TRAILING = "metadata_after_the_clusters"
 META_CUT = "metadata_cut_short_anywhere_is_ffmpeg_s"
 META_DAMAGE = "damage_before_the_first_cluster_keeps_what_was_read"
+CUT_TWO_TRACKS = "two_tracks_cut_short_anywhere_are_ffmpeg_s"
+OPENINGS = "a_file_opens_or_is_refused_as_ffmpeg_decides"
 META_DEEP = "tags_nest_no_deeper_than_ffmpeg_reads"
 META_INFO_PACKETS = "packets_of_meta_info"
 META_DAMAGED_INFO = "metadata_of_a_damaged_info"
@@ -534,7 +536,7 @@ DEMUX = [
     ),
     (
         "after damage before the first Cluster, the Segment's stated end still bounds it",
-        "                                segment_ends = None;\n",
+        "        *segment_ends = None;\n",
         "",
         ["after_damage_the_segment_runs_to_the_end_of_the_file"],
     ),
@@ -546,6 +548,42 @@ DEMUX = [
         "                        return Err(e);\n"
         "                        // Past its four-byte ID, and one more.",
         [META_DAMAGE],
+    ),
+    (
+        "a file with no Cluster opens",
+        "                if self.segment_end >= self.r.len() {\n"
+        "                    return Err(Error::Truncated);",
+        "                if self.segment_end >= self.r.len() {\n"
+        "                    break;",
+        [OPENINGS, CUT_TWO_TRACKS, META_CUT],
+    ),
+    (
+        "a Segment's stated end before its first Cluster ends the reading",
+        "                if self.segment_end >= self.r.len() {\n",
+        "                if true {\n",
+        [OPENINGS],
+    ),
+    (
+        "a file cut short in its first Cluster's size is refused",
+        "            if nest::read_id(&mut self.r).is_ok_and(|id| id == ids::CLUSTER) {\n",
+        "            if nest::read_id(&mut self.r).is_ok_and(|id| id == ids::CLUSTER)\n"
+        "                && nest::read_size(&mut self.r).is_ok()\n"
+        "            {\n",
+        [CUT_TWO_TRACKS, META_CUT],
+    ),
+    (
+        "bytes that are no element before the first Cluster refuse the file",
+        "                Err(Error::Invalid(_)) => {\n"
+        "                    let from = start.saturating_add(1);",
+        "                Err(Error::Invalid(_)) if false => {\n"
+        "                    let from = start.saturating_add(1);",
+        [OPENINGS],
+    ),
+    (
+        "an element FFmpeg does not know, running past the Segment, is passed over whole",
+        "            if !ids::is_top_level(h.id) && segment_ends.is_some_and(|e| end > e) {\n",
+        "            if false {\n",
+        [OPENINGS],
     ),
     # Reading the Clusters.
     (

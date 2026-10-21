@@ -177,15 +177,13 @@ fn metadata_after_the_clusters() {
     holds_to_ffprobe("meta_trailing.mkv");
 }
 
-/// A file whose metadata comes after its Clusters, cut short at every
-/// length through it: what was read before each cut is kept as FFmpeg keeps
-/// it -- a number cut short as far as it was read, a string cut short not
-/// at all, an attachment whose data is cut short left out -- and the
-/// SeekHead followed no further.
-#[test]
-fn metadata_cut_short_anywhere_is_ffmpeg_s() {
-    let bytes = std::fs::read(data("meta_trailing.mkv")).unwrap();
-    let text = std::fs::read_to_string(data("meta_trailing.cut.txt")).unwrap();
+/// `name` cut short at every length short of the whole, each held to what
+/// ffprobe shows of it (`NAME.cut.txt`): refused, or opened with the same
+/// metadata, streams and chapters.
+fn cut_short_anywhere_as_ffmpeg(name: &str) {
+    let bytes = std::fs::read(data(name)).unwrap();
+    let base = name.rsplit_once('.').unwrap().0;
+    let text = std::fs::read_to_string(data(&format!("{base}.cut.txt"))).unwrap();
     let mut cuts = 0;
     for line in text.lines().filter(|l| !l.starts_with('#')) {
         let w: Vec<&str> = line.split(' ').collect();
@@ -197,18 +195,57 @@ fn metadata_cut_short_anywhere_is_ffmpeg_s() {
         };
         let got = dump(&bytes[..n], start);
         if w[2] == "refused" {
-            assert_eq!(got, ["refused"], "cut at {n}");
+            assert_eq!(got, ["refused"], "{name} cut at {n}");
         } else {
             let text = got.join("\n") + "\n";
             assert_eq!(
                 md5::md5_hex(text.as_bytes()).to_string(),
                 w[3],
-                "cut at {n}: {got:#?}"
+                "{name} cut at {n}: {got:#?}"
             );
         }
+        assert_eq!(n, cuts, "{name}: a length missing from the answers");
         cuts += 1;
     }
-    assert!(cuts > 600, "{cuts} cuts");
+    assert_eq!(cuts, bytes.len(), "{name}: every length short of the whole");
+}
+
+/// A file whose metadata comes after its Clusters, cut short at every
+/// length through it. Before the first Cluster's ID is whole, the file is
+/// refused, as FFmpeg refuses it. After it, what was read before each cut
+/// is kept as FFmpeg keeps it -- a number cut short as far as it was read, a
+/// string cut short not at all, an attachment whose data is cut short left
+/// out -- and the SeekHead followed no further.
+#[test]
+fn metadata_cut_short_anywhere_is_ffmpeg_s() {
+    cut_short_anywhere_as_ffmpeg("meta_trailing.mkv");
+}
+
+/// Lane E's layout -- Info, a Tracks of two entries, Clusters, no SeekHead
+/// -- cut short at every length: inside either entry or between them, the
+/// file is refused, as FFmpeg refuses it, rather than opened with no tracks
+/// (`requests/e-f-matroska-opens-a-file-cut-short-inside-its-tracks.md`).
+#[test]
+fn two_tracks_cut_short_anywhere_are_ffmpeg_s() {
+    cut_short_anywhere_as_ffmpeg("uncued.mkv");
+}
+
+/// Files FFmpeg opens or refuses by how its header reads before the first
+/// Cluster (`openings.txt`): one with no Cluster is refused, whether it is
+/// whole or damaged; one whose Segment ends before its Clusters, or with
+/// stray bytes before them, opens.
+#[test]
+fn a_file_opens_or_is_refused_as_ffmpeg_decides() {
+    let text = std::fs::read_to_string(data("openings.txt")).unwrap();
+    let mut files = 0;
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        let (name, answer) = line.split_once(' ').unwrap();
+        let bytes = std::fs::read(data(name)).unwrap();
+        let opened = Demuxer::open(Cursor::new(bytes)).map(|_| "opens");
+        assert_eq!(opened.unwrap_or("refused"), answer, "{name}");
+        files += 1;
+    }
+    assert!(files >= 11, "{files} files");
 }
 
 // --- Beyond ffprobe -----------------------------------------------------------

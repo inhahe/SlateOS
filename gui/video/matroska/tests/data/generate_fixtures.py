@@ -42,6 +42,13 @@ MaxFALL both or neither, the first `Colour` of two, and a second
 `MasteringMetadata` read over the first set back to 0. Each answered with
 what ffprobe says of the stream. `tests/colour.rs` holds the crate to them.
 
+And the **truncation sweeps** (`meta_trailing.cut.txt`, `uncued.cut.txt`):
+each file cut short at every length, from inside its EBML header to its last
+Cluster, answered with what ffprobe shows of it or `refused`; and the
+**openings** (`open_*.mkv`, answered together in `openings.txt`): files
+FFmpeg opens or refuses by how its header reads before the first Cluster.
+`tests/metadata.rs` holds the crate to both.
+
 The answers were made with the ffmpeg and ffprobe of gyan.dev's full build
 of 2026-03-09 (git 9b7439c31b). Run from this directory:
 
@@ -71,7 +78,11 @@ def run(*args):
 
 def ffmpeg(name, *args):
     # bitexact: no random UIDs or version strings, so a run makes the same
-    # bytes as the last.
+    # bytes as the last -- on the same CPU. libopus encodes in floating
+    # point down paths chosen by the CPU's instruction sets, so on another
+    # machine the Opus packets of vp9_opus.webm and meta_ffmpeg.mkv come out
+    # different, though as long; restore those two (and vp9_opus.txt) from
+    # git rather than commit them, unless they are meant to change.
     run(FFMPEG, "-hide_banner", "-loglevel", "error", "-y", *args,
         "-fflags", "+bitexact", "-threads", "1", name)
 
@@ -1160,9 +1171,48 @@ def m_trailing():
              ("ch", chapters), ("att", files), ("tags", tags)]
     entries = [("1549A966", "info"), ("1654AE6B", "tracks"), ("1043A770", "ch"), ("1941A469", "att"),
                ("1254C367", "tags")]
-    data = m_file(m_laid_out(entries, parts))
-    # Where the metadata begins: the sweep cuts from there to the end.
-    return data, data.index(chapters)
+    return m_file(m_laid_out(entries, parts))
+
+
+def openings():
+    """Files FFmpeg opens or refuses by how its header reads before the first
+    Cluster, lane E's layout (Info, two Tracks entries, Clusters; no
+    SeekHead): with no Cluster at all, with damage and nothing after it,
+    with a Segment whose stated end comes before its Clusters, and with
+    stray bytes before the first Cluster. Answered in `openings.txt`."""
+    tracks = e_two_tracks()
+    head = E_INFO + tracks
+    clusters = e_three_seconds()[len(E_HEADER) + 12 + len(head):]
+    assert clusters.startswith(bytes.fromhex("1F43B675"))
+    # A SimpleTag whose string runs past it.
+    bad_tags = e_el("1254C367", e_el("7373", e_el(
+        "67C8", e_el("45A3", b"AFTER") + bytes.fromhex("4487") + e_size(200) + b"lost")))
+    unknown = bytes.fromhex("01FFFFFFFFFFFFFF")
+
+    def seg(body, size=None):
+        return E_HEADER + e_el("18538067", body, size)
+
+    out = {
+        "open_no_cluster.mkv": seg(head),
+        "open_no_cluster_unknown_segment.mkv": seg(head, unknown),
+        "open_no_cluster_void_after.mkv": seg(head + e_el("EC", bytes(4))),
+        "open_damaged_and_no_cluster.mkv": seg(head + bad_tags),
+        "open_damaged_then_clusters.mkv": seg(head + bad_tags + clusters),
+        "open_segment_ends_before_clusters.mkv": seg(head + clusters, e_size(len(head))),
+        "open_segment_ends_in_tracks.mkv": seg(head + clusters, e_size(len(head) - 3)),
+    }
+    for stray in ["00", "80", "FF", "4286"]:
+        out[f"open_stray_{stray.lower()}.mkv"] = seg(head + bytes.fromhex(stray) + clusters)
+    return out
+
+
+def openings_answer(files):
+    lines = ["# Each open_*.mkv: whether ffprobe opens it or refuses it (generate_fixtures.py)."]
+    for name, data in sorted(files.items()):
+        with open(name, "wb") as f:
+            f.write(data)
+        lines.append(f"{name} {'refused' if meta_lines(name) == ['refused'] else 'opens'}")
+    return "\n".join(lines) + "\n"
 
 
 def esc(b):
@@ -1229,13 +1279,14 @@ def meta_answer(name):
     return "\n".join(lines) + "\n"
 
 
-def sweep_answer(name, data, first):
-    """Each cut of `data` from `first` to its end: the MD5 of `meta_lines`,
-    without its `start` line -- given apart, as the test needs it."""
-    lines = [f"# {name} cut short at each length from {first}: `start`, and the MD5 of the rest "
+def sweep_answer(name, data):
+    """Each cut of `data`, at every length short of the whole: the MD5 of
+    `meta_lines`, without its `start` line -- given apart, as the test needs
+    it."""
+    lines = [f"# {name} cut short at each length: `start`, and the MD5 of the rest "
              "of what ffprobe shows (generate_fixtures.py)."]
     cut = "m_cut.mkv"
-    for n in range(first, len(data)):
+    for n in range(len(data)):
         with open(cut, "wb") as f:
             f.write(data[:n])
         got = meta_lines(cut)
@@ -1599,14 +1650,19 @@ def main():
             with open(f"{base}.txt", "w", encoding="utf-8", newline="\n") as f:
                 f.write(answer(name))
         print(f"{name}: {len(data)} bytes, sha256 {hashlib.sha256(data).hexdigest()[:16]}")
-    trailing, first = m_trailing()
+    trailing = m_trailing()
     with open("meta_trailing.mkv", "wb") as f:
         f.write(trailing)
     with open("meta_trailing.meta.txt", "w", encoding="utf-8", newline="\n") as f:
         f.write(meta_answer("meta_trailing.mkv"))
-    with open("meta_trailing.cut.txt", "w", encoding="utf-8", newline="\n") as f:
-        f.write(sweep_answer("meta_trailing.mkv", trailing, first))
-    print(f"meta_trailing.mkv: {len(trailing)} bytes, cut from {first}")
+    # The truncation sweeps: metadata after the Clusters, found through the
+    # SeekHead; and lane E's layout, two tracks and no SeekHead.
+    for name, data in [("meta_trailing.mkv", trailing), ("uncued.mkv", e_three_seconds())]:
+        with open(name.rsplit(".", 1)[0] + ".cut.txt", "w", encoding="utf-8", newline="\n") as f:
+            f.write(sweep_answer(name, data))
+        print(f"{name}: cut at each of its {len(data)} lengths")
+    with open("openings.txt", "w", encoding="utf-8", newline="\n") as f:
+        f.write(openings_answer(openings()))
 
 
 if __name__ == "__main__":

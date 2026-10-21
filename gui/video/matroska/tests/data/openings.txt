@@ -1,0 +1,12 @@
+# Each open_*.mkv: whether ffprobe opens it or refuses it (generate_fixtures.py).
+open_damaged_and_no_cluster.mkv refused
+open_damaged_then_clusters.mkv opens
+open_no_cluster.mkv refused
+open_no_cluster_unknown_segment.mkv refused
+open_no_cluster_void_after.mkv refused
+open_segment_ends_before_clusters.mkv opens
+open_segment_ends_in_tracks.mkv opens
+open_stray_00.mkv opens
+open_stray_4286.mkv opens
+open_stray_80.mkv opens
+open_stray_ff.mkv opens

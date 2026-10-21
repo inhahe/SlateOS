@@ -548,6 +548,16 @@ impl<R: Read + Seek> Demuxer<R> {
     ///   met inside a damaged element by the search for the next one, as in
     ///   a SeekHead whose nine-byte `SeekID` holds Tracks's own ID -- is
     ///   passed over as the others are, as FFmpeg passes over it.
+    /// - Bytes that are no element, and an element FFmpeg does not know that
+    ///   runs past the Segment, are damage too, looked past from the byte
+    ///   after their start.
+    /// - A file with no Cluster is refused ([`Error::Truncated`]), as FFmpeg
+    ///   refuses it: one cut short before its first Cluster, inside the
+    ///   Tracks or anywhere else, and one whose resynchronisation finds no
+    ///   element after the damage. A Segment whose stated end comes before
+    ///   its first Cluster is read on past that end, as after damage. A file
+    ///   cut short just past the first Cluster's ID still opens: FFmpeg stops
+    ///   at the ID, its size unread.
     fn read_description(&mut self, segment_ends: Option<u64>) -> Result<(), Error> {
         // Where the Segment says it ends, which bounds its top-level elements
         // until a resynchronisation: after one, FFmpeg takes the Segment for
@@ -558,17 +568,54 @@ impl<R: Read + Seek> Demuxer<R> {
         // Cues read where they stand, which FFmpeg reads at once.
         let mut cues_read: Vec<u64> = Vec::new();
         self.r.seek_to(self.segment_data)?;
-        while self.r.pos() < self.segment_end {
-            let Some(h) = self.r.header()? else { break };
-            if h.id == ids::CLUSTER {
-                self.first_cluster = Some(h.start);
+        loop {
+            let start = self.r.pos();
+            if start >= self.segment_end {
+                // No Cluster before the Segment's end. At the end of the
+                // file FFmpeg refuses the file, however whole what came
+                // before; at a stated end the file runs on past, it reads on
+                // beyond it, as after damage.
+                if self.segment_end >= self.r.len() {
+                    return Err(Error::Truncated);
+                }
+                let at = self.resync_description(start, &mut segment_ends)?;
+                self.r.seek_to(at)?;
+                continue;
+            }
+            // FFmpeg stops at a Cluster's ID, its size unread: a file cut
+            // short in that size still opens.
+            if nest::read_id(&mut self.r).is_ok_and(|id| id == ids::CLUSTER) {
+                self.first_cluster = Some(start);
                 break;
             }
+            self.r.seek_to(start)?;
+            let h = match self.r.header() {
+                Ok(Some(h)) => h,
+                // No element here: FFmpeg looks for the next one from the
+                // byte after.
+                Err(Error::Invalid(_)) => {
+                    let from = start.saturating_add(1);
+                    let at = self.resync_description(from, &mut segment_ends)?;
+                    self.r.seek_to(at)?;
+                    continue;
+                }
+                // The file ends inside the header. (`None` is the end of the
+                // file, which `start` is short of.)
+                Ok(None) => return Err(Error::Truncated),
+                Err(e) => return Err(e),
+            };
             let end = h
                 .end()
                 .ok_or(Error::Invalid("a top-level element of unknown size"))?;
             let mut next = end.min(self.segment_end);
-            if ids::is_top_level(h.id) {
+            if !ids::is_top_level(h.id) && segment_ends.is_some_and(|e| end > e) {
+                // An element FFmpeg does not know, running past the
+                // Segment: damage, which it looks past from the byte after
+                // its start -- its ID may be a single byte, the next
+                // element's ID right behind it.
+                let from = start.saturating_add(1);
+                next = self.resync_description(from, &mut segment_ends)?;
+            } else if ids::is_top_level(h.id) {
                 level1.met(h.id, h.start);
                 let read = match h.id {
                     ids::CUES => {
@@ -603,17 +650,8 @@ impl<R: Read + Seek> Demuxer<R> {
                     Err(Error::Io(kind)) => return Err(Error::Io(kind)),
                     Err(_) => {
                         // Past its four-byte ID, and one more.
-                        match self.find_top_level(h.start.saturating_add(5))? {
-                            Some(at) => {
-                                next = at;
-                                // As FFmpeg, a Segment resynchronised in is
-                                // read to the end of the file, its stated
-                                // end no longer a bound.
-                                self.segment_end = self.r.len();
-                                segment_ends = None;
-                            }
-                            None => break,
-                        }
+                        let from = h.start.saturating_add(5);
+                        next = self.resync_description(from, &mut segment_ends)?;
                     }
                 }
             }
@@ -777,6 +815,27 @@ impl<R: Read + Seek> Demuxer<R> {
                 .map(|(n, read)| (n, read.then_some(placeholder_timing()))),
         );
         Ok(())
+    }
+
+    /// After damage before the first Cluster: where the next top-level
+    /// element begins, looked for from `from`. As FFmpeg, a Segment
+    /// resynchronised in is read to the end of the file from then on, its
+    /// stated end (`segment_ends`, and the bound reading stops at) no longer
+    /// a bound.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Truncated`] when the file holds none after `from`: FFmpeg's
+    /// `matroska_resync` meets the end of the file, and it refuses the file.
+    fn resync_description(
+        &mut self,
+        from: u64,
+        segment_ends: &mut Option<u64>,
+    ) -> Result<u64, Error> {
+        let at = self.find_top_level(from)?.ok_or(Error::Truncated)?;
+        self.segment_end = self.r.len();
+        *segment_ends = None;
+        Ok(at)
     }
 
     /// Where the next of the Segment's top-level elements begins, at or

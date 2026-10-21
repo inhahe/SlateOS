@@ -205,3 +205,10 @@ scratch_*.py
 # been rewritten by 15 commits and swept into others by `git add -A` without
 # anyone meaning to. Untracked here; the file itself stays where it is.
 .claude/scheduled_tasks.lock
+
+# The operator's own scripts, which are not part of the project and must not
+# be swept in by a `git add -A`: go.bat, the operator's launcher for the
+# lanes' sessions, and push.bat, should the operator's commit-everything
+# script be re-created (it runs `git add -A` itself).
+/go.bat
+/push.bat

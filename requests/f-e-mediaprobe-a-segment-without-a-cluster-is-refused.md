@@ -47,8 +47,10 @@ Segment states -- it looks for the next element by its ID through the rest
 of the file, and refuses the file if it finds no Cluster. So a file of an
 Info and Tracks alone, an initialisation segment say, does not open in
 FFmpeg, nor in any player built on it, and now does not open here either.
-`gui/video/matroska/tests/data/openings.txt` holds 35 such files, each
-held to ffprobe.
+`gui/video/matroska/tests/data/openings.txt` holds 37 files that open or
+not by how their description reads before the first Cluster, each held to
+ffprobe; `open_no_cluster.mkv` is the Info and Tracks alone, and the other
+`open_*no_cluster*` files the same with damage or a Void after them.
 
 Lane F publishes once this is on `main` and its batch has been reviewed and
 boot-tested. Until then `main` stays green.

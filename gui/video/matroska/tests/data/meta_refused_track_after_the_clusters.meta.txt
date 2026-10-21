@@ -1,0 +1,2 @@
+# meta_refused_track_after_the_clusters.mkv: the metadata ffprobe shows (generate_fixtures.py).
+refused

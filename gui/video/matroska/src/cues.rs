@@ -116,8 +116,9 @@ fn read_point<R: Read + Seek>(
 
 /// FFmpeg's index of the file's cue points (`matroska_add_index_entries`),
 /// ordered by time: none for fewer than two points, or a second point's
-/// time past 10^14 nanoseconds ("apparently broken"); else every position
-/// of every point.
+/// time past 10^14 nanoseconds ("apparently broken"); else a position for
+/// each track at each time a point gives -- of several points at one time,
+/// the last's.
 pub(crate) fn index(points: Vec<Point>, segment_data: u64, timestamp_scale: u64) -> Vec<Cue> {
     if points.len() < 2 {
         return Vec::new();
@@ -144,8 +145,52 @@ pub(crate) fn index(points: Vec<Point>, segment_data: u64, timestamp_scale: u64)
             })
         })
         .collect();
-    // FFmpeg's index is sorted by time; a stable sort keeps the file's order
-    // among equal times.
-    out.sort_by_key(|c| c.time);
+    // FFmpeg's index is a stream's, sorted by time, with one entry a time:
+    // an entry added at a time it holds takes that entry's place
+    // (`ff_add_index_entry`). A stable sort keeps the file's order among a
+    // track's points at one time, and the last of them is kept -- which also
+    // holds each point once where both of FFmpeg's passes over a damaged
+    // Segment read the Cues.
+    out.sort_by_key(|c| (c.time, c.track));
+    out.dedup_by(|later, kept| {
+        let same = later.time == kept.time && later.track == kept.track;
+        if same {
+            kept.cluster = later.cluster;
+        }
+        same
+    });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cue, Point, index};
+
+    fn point(time: u64, positions: &[(u64, u64)]) -> Point {
+        Point {
+            time,
+            positions: positions.to_vec(),
+        }
+    }
+
+    /// Of a track's points at one time the last is kept, each time once,
+    /// and each track's apart: the index FFmpeg's `ff_add_index_entry` makes.
+    #[test]
+    fn a_track_has_one_entry_a_time_the_last_point_s() {
+        let points = vec![
+            point(0, &[(1, 10), (2, 11)]),
+            point(5, &[(1, 30)]),
+            point(0, &[(1, 20)]),
+            point(5, &[(1, 30)]),
+        ];
+        let cue = |time: i64, track: u64, cluster: u64| Cue {
+            time,
+            track,
+            cluster: cluster + 100,
+        };
+        assert_eq!(
+            index(points, 100, 1_000_000),
+            [cue(0, 1, 20), cue(0, 2, 11), cue(5, 1, 30)]
+        );
+    }
 }

@@ -71,6 +71,10 @@ SEEKS_WALK_DAMAGE = "seeks_in_walk_damage"
 SEEKS_ZLIB_LACES = "seeks_in_zlib_laces"
 RESYNC_POINT = "packets_of_resync_point"
 RESYNC_IN_GROUP = "packets_of_resync_in_group"
+RESYNC_FIRST_CLUSTER = "packets_of_resync_first_cluster"
+RESYNC_AFTER_SEEK_HEAD = "packets_of_resync_first_cluster_after_seek_head"
+COSTLY = "damage_too_costly_to_look_past_refuses_the_file"
+KEPT_MANY_TIMES = "damage_that_would_keep_the_file_many_times_over_refuses_it"
 # What ffprobe cannot show.
 WALK = "a_walk_reads_only_as_far_as_the_seek_needs"
 SPARSE = "a_seek_goes_to_a_cue_not_past_it"
@@ -237,6 +241,12 @@ EBML = [
         "            self.inner = Some(old);\n            return Err(e.into());",
         "            return Err(e.into());",
         ["a_read_ahead_that_cannot_be_changed_leaves_reading_as_it_was"],
+    ),
+    (
+        "the bytes read are not counted",
+        "        self.bytes_read = self.bytes_read.saturating_add(n);\n",
+        "",
+        [COSTLY, KEPT_MANY_TIMES],
     ),
 ]
 
@@ -439,6 +449,18 @@ CUES = [
         "if points.is_empty() {",
         [SEEKS_ONE_CUE],
     ),
+    (
+        "a track's points at one time are all kept",
+        "        let same = later.time == kept.time && later.track == kept.track;\n",
+        "        let same = false;\n",
+        ["a_track_has_one_entry_a_time_the_last_point_s"],
+    ),
+    (
+        "of a track's points at one time the first is kept",
+        "            kept.cluster = later.cluster;\n",
+        "",
+        ["a_track_has_one_entry_a_time_the_last_point_s"],
+    ),
 ]
 
 DEMUX = [
@@ -473,7 +495,13 @@ DEMUX = [
     ),
     (
         "Tracks after the Clusters are not looked for",
-        "            ids::TRACKS => self.read_tracks(&h).map_err(|d| d.error),\n",
+        "            ids::TRACKS => self.read_tracks(&h).map_err(|d| {\n"
+        "                if d.refused {\n"
+        "                    Fault::Refuse(d.error)\n"
+        "                } else {\n"
+        "                    Fault::from(d.error)\n"
+        "                }\n"
+        "            }),\n",
         "            ids::TRACKS => Ok(()),\n",
         [TRACKS_AT_THE_END],
     ),
@@ -514,8 +542,8 @@ DEMUX = [
     ),
     (
         "Cues are used after following the SeekHead has failed",
-        "                Err(_) => return Ok(true),\n",
-        "                Err(_) => return Ok(false),\n",
+        "                Err(Fault::Damage(_)) => return Ok(Followed::Broken),\n",
+        "                Err(Fault::Damage(_)) => return Ok(Followed::Read),\n",
         [SEEKS_CUES_BROKEN],
     ),
     (
@@ -539,9 +567,27 @@ DEMUX = [
     ),
     (
         "after damage before the first Cluster, the Segment's stated end still bounds it",
-        "        self.segment_end = self.r.len();\n        // The first pass's elements,",
-        "        // The first pass's elements,",
+        "        self.segment_end = self.r.len();\n        // A file can be built",
+        "        // A file can be built",
         ["after_damage_the_segment_runs_to_the_end_of_the_file"],
+    ),
+    (
+        "the second pass reads no more than the file's length",
+        "            .saturating_add(self.r.len().saturating_mul(4))\n",
+        "            .saturating_add(self.r.len().saturating_mul(1))\n",
+        ["damage_before_a_large_element_is_looked_past"],
+    ),
+    (
+        "the Segment's stated end does not end the first pass before the end of the file",
+        "            if stated_end.is_some_and(|e| at >= e) || at >= self.r.len() {\n",
+        "            if stated_end.is_some_and(|e| at >= e) && at >= self.r.len() {\n",
+        ["packets_of_segment_ends_before_clusters"],
+    ),
+    (
+        "damage built to be read over and over is looked past",
+        "            .saturating_add(self.r.len().saturating_mul(4))\n",
+        "            .saturating_add(u64::MAX)\n",
+        [COSTLY, KEPT_MANY_TIMES],
     ),
     (
         "damage before the first Cluster refuses the file",
@@ -554,7 +600,7 @@ DEMUX = [
     ),
     (
         "bytes that are no element before the first Cluster refuse the file",
-        "                Err(_) => return Ok(Err(Stop::Before(at))),\n"
+        "                Err(_) => return Ok(Err(Stop::Before)),\n"
         "            };\n"
         "            if id == ids::CLUSTER {\n",
         "                Err(e) => return Err(e),\n"
@@ -565,7 +611,7 @@ DEMUX = [
     (
         "the Segment's end before its first Cluster refuses the file",
         "            if stated_end.is_some_and(|e| at >= e) || at >= self.r.len() {\n"
-        "                return Ok(Err(Stop::Before(at)));\n",
+        "                return Ok(Err(Stop::Before));\n",
         "            if stated_end.is_some_and(|e| at >= e) || at >= self.r.len() {\n"
         "                return Err(Error::Truncated);\n",
         [OPENINGS],
@@ -604,9 +650,29 @@ DEMUX = [
     ),
     (
         "the second pass knows only the first element the first pass read",
-        "            while first < at && first < stop.at() {\n",
-        "            while first < at && first < stop.at() && false {\n",
+        "            g.first_pass.push(at);\n",
+        "            if g.first_pass.is_empty() {\n"
+        "                g.first_pass.push(at);\n"
+        "            }\n",
         [OPENINGS, META_DAMAGE],
+    ),
+    (
+        "after a SeekHead entry was followed, the first resync starts from the Segment's start",
+        "        if second_pass || followed != Followed::Nothing {\n",
+        "        if second_pass {\n",
+        [RESYNC_AFTER_SEEK_HEAD],
+    ),
+    (
+        "the first resync starts from the first Cluster whatever came before it",
+        "        if second_pass || followed != Followed::Nothing {\n",
+        "        if second_pass || followed != Followed::Nothing || true {\n",
+        [RESYNC_FIRST_CLUSTER],
+    ),
+    (
+        "an entry FFmpeg refuses the file for, in a Tracks the SeekHead names, is passed over",
+        "                if d.refused {\n",
+        "                if false {\n",
+        ["metadata_where_a_track_after_the_clusters_is_refused"],
     ),
     (
         "an element the first pass was cut short in is looked past by the second",

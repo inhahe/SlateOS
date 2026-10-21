@@ -80,8 +80,8 @@ pub struct Reader<R> {
     inner: Option<BufReader<R>>,
     pos: u64,
     len: u64,
-    /// See [`Reader::work`].
-    work: u64,
+    /// See [`Reader::bytes_read`].
+    bytes_read: u64,
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -97,7 +97,7 @@ impl<R: Read + Seek> Reader<R> {
             inner: Some(BufReader::with_capacity(READ_AHEAD, source)),
             pos: 0,
             len,
-            work: 0,
+            bytes_read: 0,
         })
     }
 
@@ -146,11 +146,11 @@ impl<R: Read + Seek> Reader<R> {
         self.len.saturating_sub(self.pos)
     }
 
-    /// The reading done so far, in units of one per seek and per read, and
-    /// one more per 16 bytes read: a measure of what reading has cost, for
-    /// bounding what a damaged file can make it cost.
-    pub fn work(&self) -> u64 {
-        self.work
+    /// How many bytes have been read so far, those passed over by a seek
+    /// not counted: what reading has cost, and the most it can have kept,
+    /// for bounding what a damaged file can make it cost.
+    pub fn bytes_read(&self) -> u64 {
+        self.bytes_read
     }
 
     /// Move to `pos`, which must lie within the source.
@@ -159,7 +159,6 @@ impl<R: Read + Seek> Reader<R> {
     ///
     /// When `pos` is past the end, or the source cannot seek.
     pub fn seek_to(&mut self, pos: u64) -> Result<(), Error> {
-        self.work = self.work.saturating_add(1);
         if pos > self.len {
             return Err(Error::Truncated);
         }
@@ -188,7 +187,6 @@ impl<R: Read + Seek> Reader<R> {
     /// Fill `buf`, or fail with [`Error::Truncated`].
     fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
         let n = u64::try_from(buf.len()).map_err(|_| Error::Truncated)?;
-        self.work = self.work.saturating_add(n / 16).saturating_add(1);
         if n > self.remaining() {
             return Err(Error::Truncated);
         }
@@ -197,6 +195,7 @@ impl<R: Read + Seek> Reader<R> {
             kind => Error::Io(kind),
         })?;
         self.pos = self.pos.saturating_add(n);
+        self.bytes_read = self.bytes_read.saturating_add(n);
         Ok(())
     }
 

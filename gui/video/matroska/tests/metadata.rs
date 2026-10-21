@@ -106,15 +106,25 @@ fn start_of(word: &str) -> Option<i64> {
     (word != "none").then(|| word.parse().unwrap())
 }
 
-/// The file's metadata, streams and chapters, as ffprobe shows them.
+/// The file's metadata, streams and chapters, as ffprobe shows them -- or
+/// its refusal.
 fn holds_to_ffprobe(name: &str) {
     let base = name.rsplit_once('.').unwrap().0;
     let path = data(&format!("{base}.meta.txt"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
-    let start = lines.next().unwrap().strip_prefix("start ").unwrap();
-    let expected: Vec<&str> = lines.collect();
+    let first = lines.next().unwrap();
     let bytes = std::fs::read(data(name)).unwrap();
+    if first == "refused" {
+        assert_eq!(
+            dump(&bytes, None),
+            ["refused"],
+            "{name}: ffprobe refuses it"
+        );
+        return;
+    }
+    let start = first.strip_prefix("start ").unwrap();
+    let expected: Vec<&str> = lines.collect();
     let got = dump(&bytes, start_of(start));
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
         assert_eq!(g, e, "{name}: line {i} of what ffprobe shows");
@@ -170,6 +180,11 @@ fn metadata_through_the_seek_head() {
 #[test]
 fn metadata_where_the_seek_head_names_the_wrong_element() {
     holds_to_ffprobe("meta_seek_mismatch.mkv");
+}
+
+#[test]
+fn metadata_where_a_track_after_the_clusters_is_refused() {
+    holds_to_ffprobe("meta_refused_track_after_the_clusters.mkv");
 }
 
 #[test]
@@ -456,6 +471,61 @@ fn damage_too_costly_to_look_past_refuses_the_file() {
         chain = [header, data].concat();
     }
     let bytes = file_with(&[vec![0x00], chain, voids].concat());
+    assert!(matches!(
+        Demuxer::open(Cursor::new(bytes)).err(),
+        Some(Error::Unsupported(_))
+    ));
+}
+
+/// Real damage is looked past however large what follows it: a stray byte,
+/// then a Tracks whose entry's CodecPrivate is 4 MiB, which the second pass
+/// reads about twice -- in its search for IDs, and reading the Tracks found
+/// -- well inside its bound, and far past the mebibyte of slack in it.
+#[test]
+fn damage_before_a_large_element_is_looked_past() {
+    let entry = [
+        el(&[0xD7], &[2]),
+        el(&[0x83], &[1]),
+        el(&[0x86], b"V_SNOW"),
+        big(&[0x63, 0xA2], &vec![0; 4 << 20]),
+    ]
+    .concat();
+    let tracks = big(&[0x16, 0x54, 0xAE, 0x6B], &big(&[0xAE], &entry));
+    let bytes = file_with(&[vec![0x00], tracks].concat());
+    let d = Demuxer::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(d.tracks().len(), 2);
+}
+
+/// Damage built so that looking past it would keep the file in memory many
+/// times over is refused too. As above, but Tracks, each header inside an
+/// unknown child of the Tracks before, all of them ending in one entry whose
+/// CodecPrivate is 4 MiB: every Tracks the second pass reads keeps a copy of
+/// it. Without the bound this file opens with the 16 copies.
+#[test]
+fn damage_that_would_keep_the_file_many_times_over_refuses_it() {
+    const TRACKS: usize = 16;
+    let entry = [
+        el(&[0xD7], &[2]),
+        el(&[0x83], &[1]),
+        el(&[0x86], b"V_SNOW"),
+        big(&[0x63, 0xA2], &vec![0; 4 << 20]),
+    ]
+    .concat();
+    let entry = big(&[0xAE], &entry);
+    let mut chain: Vec<u8> = Vec::new();
+    for _ in 0..TRACKS {
+        let data = if chain.is_empty() {
+            chain
+        } else {
+            [vec![0x80, 0x8C], chain].concat()
+        };
+        let size = (data.len() + entry.len()) as u64;
+        let mut header = vec![0x16, 0x54, 0xAE, 0x6B];
+        header.extend_from_slice(&size.to_be_bytes());
+        header[4] = 0x01;
+        chain = [header, data].concat();
+    }
+    let bytes = file_with(&[vec![0x00], chain, entry].concat());
     assert!(matches!(
         Demuxer::open(Cursor::new(bytes)).err(),
         Some(Error::Unsupported(_))

@@ -425,6 +425,33 @@ def synthetic():
         cluster(0, simple(1, 0, 0x80, frame(1, 4)), bad_group, simple(1, 20, 0x80, frame(3, 4))),
         cluster(1000, simple(1, 0, 0x80, frame(4, 4))),
     )
+    # Where the first resync after the header starts, the first Cluster's
+    # size being no number: past the element FFmpeg last knew good. Where it
+    # followed a SeekHead entry -- here to Tags after the Clusters -- that is
+    # the first Cluster, which following one goes back to; else it is the
+    # last element read in the header, here the track's CodecPrivate, whose
+    # bytes hold a whole Cluster for the resync to find.
+    hiding = el("1654AE6B", el(
+        "AE",
+        uint("D7", 1) + uint("73C5", 1) + uint("83", 1) + string("86", "V_SNOW")
+        + el("E0", uint("B0", 16) + uint("BA", 16)) + uint("23E383", 10_000_000)
+        + el("63A2", cluster(500, simple(1, 0, 0x80, frame(2, 4)))),
+    ))
+    bad_first = bytes.fromhex("1F43B675") + b"\x00" + frame(9, 6)
+    after = cluster(1000, simple(1, 0, 0x80, frame(4, 4)))
+    out["resync_first_cluster.mkv"] = segment(INFO, hiding, bad_first, after)
+    late_tags = el("1254C367", el("7373", el("67C8", string("45A3", "A") + string("4487", "b"))))
+    at_tags = len(el("114D9B74", seek_to("1254C367", 0))) + len(INFO + hiding + bad_first + after)
+    out["resync_first_cluster_after_seek_head.mkv"] = segment(
+        el("114D9B74", seek_to("1254C367", at_tags)), INFO, hiding, bad_first, after, late_tags)
+    # A Segment whose stated end comes before its Clusters: FFmpeg's first
+    # pass ends there, and its second, which reads the Segment to the end of
+    # the file, finds the Clusters after it and plays them.
+    out["segment_ends_before_clusters.mkv"] = segment(
+        INFO, one,
+        cluster(0, simple(1, 0, 0x80, frame(1, 4))),
+        cluster(100, simple(1, 0, 0x80, frame(2, 4))),
+        size=vint(len(INFO + one)))
     out.update(lane_e_layouts())
     return out
 
@@ -1060,6 +1087,17 @@ def metadata_fixtures():
     out["meta_seek_mismatch.mkv"] = m_file(m_laid_out(
         [("1941A469", "t4"), ("1941A469", "att")], parts))
 
+    # A Tracks after the Clusters, found through the SeekHead, whose one
+    # entry FFmpeg refuses the file for wherever it reads it: a crop leaving
+    # nothing of the picture's 16 columns.
+    cropped = el("1654AE6B", el(
+        "AE",
+        uint("D7", 1) + uint("73C5", 1) + uint("83", 1) + string("86", "V_SNOW")
+        + el("E0", uint("B0", 16) + uint("BA", 16) + uint("54CC", 8) + uint("54DD", 8)),
+    ))
+    parts = [("info", m_info()), ("c", m_clusters()), ("tracks", cropped)]
+    out["meta_refused_track_after_the_clusters.mkv"] = m_file(m_laid_out([("1654AE6B", "tracks")], parts))
+
     return out
 
 
@@ -1176,6 +1214,11 @@ def m_trailing():
     return m_file(m_laid_out(entries, parts))
 
 
+# How long the openings' Info says they are: the duration ffprobe shows of
+# one whose Info it read, and not of one whose it did not.
+OPENING_SECONDS = 3.5
+
+
 def openings():
     """Files FFmpeg opens or refuses by how its header reads before the first
     Cluster -- most of them by its second pass, which looks for the Segment's
@@ -1194,7 +1237,8 @@ def openings():
     which ends the pass there, the file cut short at three places in it.
     Answered in `openings.txt`."""
     tracks = e_two_tracks()
-    info = e_el("1549A966", e_uint("2AD7B1", 100_000) + e_el("4489", struct.pack(">d", 35_000.0)))
+    info = e_el("1549A966", e_uint("2AD7B1", 100_000)
+                + e_el("4489", struct.pack(">d", OPENING_SECONDS * 10_000)))
     head = info + tracks
     clusters = e_three_seconds()[len(E_HEADER) + 12 + len(E_INFO) + len(tracks):]
     assert clusters.startswith(bytes.fromhex("1F43B675"))
@@ -1326,7 +1370,7 @@ def opening_lines(name):
     lines = before + [line for b in blocks for line in b] + after
     lines += [f"time base {i} {tb}" for i, (_, tb) in enumerate(bases)]
     duration = j.get("format", {}).get("duration")
-    lines.append(f"duration {duration if duration == '3.500000' else 'none'}")
+    lines.append(f"duration {duration if duration == f'{OPENING_SECONDS:.6f}' else 'none'}")
     return lines, twice
 
 
@@ -1433,6 +1477,13 @@ def sweep_answer(name, data):
 # --- the answers ---------------------------------------------------------------
 
 
+# Fixtures FFmpeg reads with its second pass, which reads again the Tracks
+# its first pass read and so lists every track twice: their answers list
+# them once, as this crate does (design-decisions §1358) -- the second
+# listing checked to repeat the first, with no packet of its own.
+READ_TWICE = {"segment_ends_before_clusters.mkv"}
+
+
 def answer(name):
     streams = subprocess.run(
         [FFPROBE, "-v", "error", "-show_entries", "stream=index,codec_name,time_base", "-of", "compact=p=0", name],
@@ -1444,12 +1495,21 @@ def answer(name):
          "-show_data_hash", "MD5", "-of", "compact=p=0", name],
         check=True, capture_output=True, text=True, encoding="utf-8",
     ).stdout.splitlines()
+    fields = lambda line: dict(kv.split("=", 1) for kv in line.split("|") if "=" in kv)  # noqa: E731
     lines = [f"# {name}: what ffprobe makes of it (generate_fixtures.py)."]
+    if name in READ_TWICE:
+        half = len(streams) // 2
+        kind = lambda s: (fields(s).get("codec_name"), fields(s)["time_base"])  # noqa: E731
+        assert half > 0 and len(streams) == 2 * half, name
+        assert all(kind(streams[k]) == kind(streams[k + half]) for k in range(half)), name
+        assert all(int(fields(p)["stream_index"]) < half for p in packets), name
+        streams = streams[:half]
+        lines.append("# FFmpeg lists its tracks twice; given once (design-decisions §1358).")
     for s in streams:
-        f = dict(kv.split("=", 1) for kv in s.split("|") if "=" in kv)
+        f = fields(s)
         lines.append(f"stream {f['index']} {f.get('codec_name', 'none')} {f['time_base']}")
     for p in packets:
-        f = dict(kv.split("=", 1) for kv in p.split("|") if "=" in kv)
+        f = fields(p)
         adds = [v for k, v in f.items() if k.endswith("block_additional_id")]
         lines.append(
             "packet {} {} {} {} {} {} {} {}".format(

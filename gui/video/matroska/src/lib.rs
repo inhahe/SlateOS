@@ -44,8 +44,9 @@
 //! at most 256 laces and a binary element at most 256 MiB (FFmpeg's limit).
 //! Damage before the first Cluster is looked past as FFmpeg's second pass
 //! over the Segment looks past it, by the IDs of the elements after it --
-//! but for damage built to make that cost the square of the file's length
-//! (FFmpeg's pass runs for hours on such a file), which refuses the file.
+//! but for damage built to make that read the file over and over (FFmpeg's
+//! pass runs for hours on such a file, or keeps many copies of it), which
+//! refuses the file.
 //! A damaged Cluster ends reading at that point, and the next packet comes
 //! from the next top-level element the file still holds, found by its ID as
 //! FFmpeg resynchronises -- the search starting one byte past the last

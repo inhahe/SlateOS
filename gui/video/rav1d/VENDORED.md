@@ -26,10 +26,11 @@ paths are held to the same results by its test suite.
 
 ## What was changed
 
-1. **Formatting.** Every `.rs` file was run through `rustfmt --edition 2024`,
-   which this repository's pre-push gate requires of every Rust file it
-   publishes. Upstream formats with the 2021 style; the difference is layout
-   only (import order, line breaks).
+1. **Formatting.** Every `.rs` file is formatted by `rustfmt --edition 2021`
+   with rustfmt's defaults: the crate's own edition, by which this
+   repository's pre-push gate checks each crate's files. Upstream's layout
+   may differ in places where its own rustfmt settings do (layout only:
+   import order, line breaks).
 2. **The manifest** (`Cargo.toml`) is this project's: the dependencies and
    features are upstream's, the assembly build-dependencies and the
    `[profile]` and `[workspace]` sections are gone (a workspace member's

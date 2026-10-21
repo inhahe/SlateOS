@@ -1,11 +1,11 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::include::common::bitdepth::AsPrimitive;
-use crate::include::common::bitdepth::BPC;
 use crate::include::common::bitdepth::BitDepth;
 use crate::include::common::bitdepth::DynPixel;
 use crate::include::common::bitdepth::LeftPixelRow;
 use crate::include::common::bitdepth::ToPrimitive;
+use crate::include::common::bitdepth::BPC;
 use crate::include::common::intops::iclip;
 use crate::include::dav1d::picture::Rav1dPictureDataComponentOffset;
 use crate::src::align::AlignedVec64;
@@ -52,7 +52,11 @@ bitflags! {
 
 impl LrEdgeFlags {
     pub const fn select(&self, select: bool) -> Self {
-        if select { *self } else { Self::empty() }
+        if select {
+            *self
+        } else {
+            Self::empty()
+        }
     }
 }
 

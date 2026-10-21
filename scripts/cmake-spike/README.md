@@ -21,6 +21,20 @@ applied to the `cmake` quarter of the roadmap's
 nobody had measured. It is deliberately shaped like `scripts/make-spike/run.sh`;
 the two answer the same question.
 
+`run.sh` configures and builds from a fresh tree every time, about four
+minutes; runs `./slatelink.sh` for the link against the current `libc.a`, its
+checks and the stripped binary in `build/spike/cmake-slateos.elf`; and then
+stages the module tree, `build/spike/cmake-data`, from the build.
+
+CMake's configure answers its probes from our `libc.a` and `posix/include`, so
+a build is only as current as what it was configured against. `run.sh`
+records that (`configured.sh`: the libc's C-visible names, the headers, the
+recipe, the compiler), and `scripts/create-ext4-rootfs.sh` runs `slatelink.sh`
+before every image build, which does the least that brings the binary up to
+date: nothing when nothing moved, the link alone when only `libc.a`'s code
+did (most libc changes), and `run.sh` when the configuration did. The module
+tree comes from the build, so only `run.sh` remakes it.
+
 ## What was measured
 
 CMake **4.4.3**, unmodified, cross-configured with the host's cmake 3.28.3 and
@@ -78,12 +92,13 @@ roadmap item.
 
 Unstripped the binary is **274,724,488 bytes** — mostly `debug_info`, against a
 384 MB image. `--strip-debug` brings it to **22,519,240** and `--strip-all` to
-15,337,672. `run.sh` stages the `--strip-debug` form, matching how CPython is
+15,337,672. `slatelink.sh` stages the `--strip-debug` form, matching how CPython is
 staged (design-decisions.md §344): the 7 MB difference is the symbol table, and
 that is what turns a fault address on the serial console into a function name.
 
 An artifact that cannot be staged is not a port, so this number is reported by
-`run.sh` on every run rather than being discovered once.
+`slatelink.sh` on every link rather than being discovered once, and a strip that
+fails fails the link rather than staging the unstripped binary.
 
 ## Two findings from getting configure to run at all
 

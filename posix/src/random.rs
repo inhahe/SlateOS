@@ -30,10 +30,12 @@
 //!    ChaCha20 CSPRNG seeded from RDRAND/RDSEED, TSC jitter, the HPET
 //!    counter and interrupt-arrival timing.  Userspace cannot see any of
 //!    those sources itself, so this is the only complete answer.
-//! 2. **RDSEED/RDRAND**, guarded by a `CPUID` feature check, used only to
-//!    seed the local pool when the kernel is unreachable — which on this
-//!    codebase means the host build, where `cargo test` runs against the
-//!    Windows triple and the raw `SYSCALL` instruction is gated off.
+//! 2. **RDSEED, else RDRAND**, guarded by a `CPUID` feature check, used only
+//!    to seed the local pool when there is no kernel to ask: the host build,
+//!    where `cargo test` runs and the raw `SYSCALL` instruction is gated off,
+//!    and programs' rlib copy of this library (`TD-B-THE-POSIX-RLIB-IS-A-
+//!    SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`). `RDRAND` stands in while
+//!    `RDSEED` stays exhausted, which contention makes common (`hw_word_of`).
 //! 3. **Nothing else.**  If neither source is available we **fail**:
 //!    `getrandom`/`getentropy` return `-1`/`EIO` and `arc4random` aborts.
 //!    Fabricating plausible-looking bytes from a clock is what caused the
@@ -285,7 +287,7 @@ const HW_NONE: u32 = 1;
 const HW_RDRAND: u32 = 2;
 const HW_RDSEED: u32 = 3;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(miri)))]
 fn hw_rng_kind() -> u32 {
     let cached = HW_RNG.load(Ordering::Relaxed);
     if cached != 0 {
@@ -316,62 +318,138 @@ fn hw_rng_kind() -> u32 {
     kind
 }
 
-#[cfg(not(target_arch = "x86_64"))]
+/// Under Miri, which runs neither `CPUID` nor the two instructions: a
+/// processor with both, so that the code around them is checked.
+#[cfg(miri)]
+fn hw_rng_kind() -> u32 {
+    HW_RDSEED
+}
+
+#[cfg(all(not(target_arch = "x86_64"), not(miri)))]
 fn hw_rng_kind() -> u32 {
     HW_NONE
 }
 
-/// One 64-bit draw from `RDSEED` (true entropy) or `RDRAND` (a
-/// hardware-seeded DRBG), retrying the documented number of times.
-///
-/// Intel specifies that `RDSEED` may legitimately fail under load while the
-/// entropy pool refills, and recommends bounded retries; 32 is more than the
-/// 10 Intel suggests for `RDRAND` and cheap next to failing outright.
-#[cfg(target_arch = "x86_64")]
+/// One 64-bit draw from the processor, from the sources [`hw_rng_kind`]
+/// found it to have.
 fn hw_word() -> Option<u64> {
     let kind = hw_rng_kind();
-    if kind == HW_NONE {
-        return None;
+    // SAFETY: `kind` is `hw_rng_kind`'s answer for this processor.
+    unsafe { hw_word_of(kind) }
+}
+
+/// One 64-bit draw from the sources `kind` names: for `HW_RDSEED`, `RDSEED`
+/// (entropy straight from the processor's source), or `RDRAND` when `RDSEED`
+/// stays exhausted; for `HW_RDRAND`, `RDRAND`; nothing for `HW_NONE`.
+///
+/// `RDSEED` fails by design while its entropy source refills, and while
+/// several threads draw at once it can stay failed for thousands of tries, so
+/// a bound on its retries alone fails whenever threads seed together.
+/// `RDRAND` is a DRBG that source keeps reseeding: a key taken from it has
+/// the DRBG's security strength, not fresh entropy in every bit. That is
+/// accepted here, because this path serves only builds with no kernel to ask
+/// -- the host, and programs' rlib copy of this library
+/// (`TD-B-THE-POSIX-RLIB-IS-A-SECOND-LIBC-WITH-EVERY-SYSCALL-STUBBED-OUT`) --
+/// and on a processor without `RDSEED` it is the only source there is.
+///
+/// # Safety
+///
+/// The processor must have every instruction `kind` names: `HW_RDSEED` needs
+/// `RDSEED` and `RDRAND`, `HW_RDRAND` needs `RDRAND`. An instruction the
+/// processor lacks raises `#UD`.
+unsafe fn hw_word_of(kind: u32) -> Option<u64> {
+    match kind {
+        // SAFETY (both closures): the caller guarantees `RDSEED` and `RDRAND`.
+        HW_RDSEED => {
+            draw(|v| unsafe { rdseed_step(v) }).or_else(|| draw(|v| unsafe { rdrand_step(v) }))
+        }
+        // SAFETY: the caller guarantees `RDRAND`.
+        HW_RDRAND => draw(|v| unsafe { rdrand_step(v) }),
+        _ => None,
     }
+}
+
+/// Up to 32 tries of `step` -- which writes a word to its argument and
+/// answers whether the processor vouched for it -- with a `pause` after each
+/// failure, as Intel's guide to the two instructions advises. `None` if all
+/// 32 failed.
+///
+/// A word of all zeros or all ones counts as a failure even when vouched
+/// for: those are what defective generators return while claiming success
+/// (AMD's `RDRAND` after a resume on families 15h and 16h, and on early Zen 2
+/// firmware), and a working one gives either once in 2^63 draws.
+fn draw(step: impl Fn(&mut u64) -> bool) -> Option<u64> {
     for _ in 0..32 {
-        let val: u64;
-        let ok: u8;
-        if kind == HW_RDSEED {
-            // SAFETY: `RDSEED` is present — `hw_rng_kind` checked CPUID leaf
-            // 7 EBX bit 18.  It touches no memory and only writes `val` and
-            // the carry flag.
-            unsafe {
-                core::arch::asm!(
-                    "rdseed {val}",
-                    "setc {ok}",
-                    val = out(reg) val,
-                    ok = out(reg_byte) ok,
-                    options(nostack, nomem),
-                );
-            }
-        } else {
-            // SAFETY: `RDRAND` is present — `hw_rng_kind` checked CPUID leaf
-            // 1 ECX bit 30.  Same no-memory contract as above.
-            unsafe {
-                core::arch::asm!(
-                    "rdrand {val}",
-                    "setc {ok}",
-                    val = out(reg) val,
-                    ok = out(reg_byte) ok,
-                    options(nostack, nomem),
-                );
-            }
+        let mut word = 0;
+        if step(&mut word) && word != 0 && word != u64::MAX {
+            return Some(word);
         }
-        if ok != 0 {
-            return Some(val);
-        }
+        core::hint::spin_loop();
     }
     None
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn hw_word() -> Option<u64> {
-    None
+/// `RDSEED` once: the word it wrote, and whether it vouched for it.
+///
+/// # Safety
+///
+/// The processor must have `RDSEED` (CPUID leaf 7 EBX bit 18).
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "rdseed")]
+unsafe fn rdseed_step(word: &mut u64) -> bool {
+    core::arch::x86_64::_rdseed64_step(word) == 1
+}
+
+/// `RDRAND` once: the word it wrote, and whether it vouched for it.
+///
+/// # Safety
+///
+/// The processor must have `RDRAND` (CPUID leaf 1 ECX bit 30).
+#[cfg(all(target_arch = "x86_64", not(miri)))]
+#[target_feature(enable = "rdrand")]
+unsafe fn rdrand_step(word: &mut u64) -> bool {
+    core::arch::x86_64::_rdrand64_step(word) == 1
+}
+
+/// Under Miri, which runs neither instruction: a SplitMix64 sequence that
+/// always vouches, so the code around the draws is checked. Not random.
+#[cfg(miri)]
+unsafe fn rdseed_step(word: &mut u64) -> bool {
+    *word = miri_word();
+    true
+}
+
+/// As [`rdseed_step`]'s Miri stand-in.
+#[cfg(miri)]
+unsafe fn rdrand_step(word: &mut u64) -> bool {
+    *word = miri_word();
+    true
+}
+
+/// SplitMix64 over a shared counter, for the Miri stand-ins.
+#[cfg(miri)]
+fn miri_word() -> u64 {
+    static STATE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let gamma = 0x9E37_79B9_7F4A_7C15_u64;
+    let mut z = STATE
+        .fetch_add(gamma, Ordering::Relaxed)
+        .wrapping_add(gamma);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// Where neither exists, nothing is ever drawn: `hw_rng_kind` answers
+/// `HW_NONE`, which names no instruction.
+#[cfg(all(not(target_arch = "x86_64"), not(miri)))]
+unsafe fn rdseed_step(_word: &mut u64) -> bool {
+    false
+}
+
+/// As [`rdseed_step`] where neither instruction exists.
+#[cfg(all(not(target_arch = "x86_64"), not(miri)))]
+unsafe fn rdrand_step(_word: &mut u64) -> bool {
+    false
 }
 
 /// Draw 32 bytes of seed material for the local pool.
@@ -706,10 +784,10 @@ mod tests {
     use super::*;
 
     // Note: the failure paths (`must_fill` aborting, `secure_bytes` returning
-    // false) cannot be exercised here — they call `_exit`, and there is no way
-    // to make CPUID stop reporting RDRAND on the test host.  The host build
-    // reaches them only on a CPU with neither RDSEED nor RDRAND, which no
-    // x86_64 part sold since 2012 is.
+    // an error) are not exercised here: the abort ends the test process. The
+    // host reaches them when the processor's generator fails `draw`'s 32 tries
+    // of both instructions, or has neither; `draw`'s own test covers its
+    // giving up.
 
     // -- ChaCha20 core --
 
@@ -940,6 +1018,69 @@ mod tests {
         assert!(a == HW_NONE || a == HW_RDRAND || a == HW_RDSEED);
     }
 
+    /// The processor's word arrives while many threads draw at once, though
+    /// `RDSEED` alone stays exhausted under such contention.
+    #[test]
+    // Under Miri the draws are a stand-in, which cannot contend, and 32,000
+    // of them are slow there.
+    #[cfg_attr(miri, ignore)]
+    fn test_hw_word_answers_while_threads_contend() {
+        if hw_rng_kind() == HW_NONE {
+            return;
+        }
+        let threads: Vec<_> = (0..16)
+            .map(|_| std::thread::spawn(|| (0..2000).all(|_| hw_word().is_some())))
+            .collect();
+        for t in threads {
+            assert!(
+                t.join().expect("a drawing thread panicked"),
+                "a draw failed while threads contended"
+            );
+        }
+    }
+
+    /// Each kind draws from its own sources: `RDRAND` alone, as on a processor
+    /// without `RDSEED`, and nothing for `HW_NONE`.
+    #[test]
+    fn test_hw_word_of_each_kind() {
+        // SAFETY: `HW_NONE` names no instruction.
+        assert_eq!(unsafe { hw_word_of(HW_NONE) }, None);
+        if hw_rng_kind() >= HW_RDRAND {
+            // SAFETY: `HW_RDRAND` and `HW_RDSEED` both mean the processor has
+            // `RDRAND`.
+            assert!(unsafe { hw_word_of(HW_RDRAND) }.is_some());
+        }
+    }
+
+    /// `draw` takes the first word vouched for, refuses all zeros and all
+    /// ones even when vouched for, and gives up after 32 tries.
+    #[test]
+    fn test_draw_refuses_stuck_words_and_gives_up() {
+        let tries = core::cell::Cell::new(0_u32);
+        let stuck = |w: &mut u64| {
+            tries.set(tries.get() + 1);
+            *w = u64::MAX;
+            true
+        };
+        assert_eq!(draw(stuck), None);
+        assert_eq!(tries.get(), 32);
+        assert_eq!(
+            draw(|w| {
+                *w = 0;
+                true
+            }),
+            None
+        );
+        assert_eq!(draw(|_| false), None);
+        let n = core::cell::Cell::new(0_u64);
+        let third = |w: &mut u64| {
+            n.set(n.get() + 1);
+            *w = n.get();
+            n.get() == 3
+        };
+        assert_eq!(draw(third), Some(3));
+    }
+
     #[test]
     fn test_kernel_fill_reports_absent_on_host() {
         // The raw SYSCALL instruction is gated off on host builds, so this
@@ -986,17 +1127,17 @@ mod tests {
     #[test]
     fn test_random_state_zero_is_all_zero_bytes() {
         // Pins the `perthread` all-zero invariant: a fresh thread's block is
-        // carved out of untouched anonymous memory and never initialised.
+        // carved out of untouched anonymous memory and never initialised, so
+        // all-zero bytes must be the state `ZERO` names. Compared field by
+        // field: the struct has tail padding, which is never initialised, so
+        // reading `ZERO` itself as bytes would read uninitialised memory.
+        // SAFETY: every field is an integer or an array of integers, for
+        // which all-zero bytes are a valid value.
+        let zeroed: RandomState = unsafe { core::mem::MaybeUninit::zeroed().assume_init() };
         let zero = RandomState::ZERO;
-        // SAFETY: `RandomState` is `repr(C)` and holds only integers and
-        // arrays of integers, so every byte of it is initialised and reading
-        // it as bytes is well-defined.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                core::ptr::from_ref(&zero).cast::<u8>(),
-                core::mem::size_of::<RandomState>(),
-            )
-        };
-        assert!(bytes.iter().all(|&b| b == 0));
+        assert_eq!(zeroed.key, zero.key);
+        assert_eq!(zeroed.buf, zero.buf);
+        assert_eq!(zeroed.avail, zero.avail);
+        assert_eq!(zeroed.generation, zero.generation);
     }
 }

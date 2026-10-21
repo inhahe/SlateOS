@@ -10,17 +10,18 @@ the thing it describes -- which announces itself, so a pointer suffices.
 
 ### C/C++ Compilers (for crates with C dependencies like libz-sys, ring, libgit2-sys)
 
-The machine has Visual Studio and Build Tools installed but they are **not on PATH by default**. You must either run vcvarsall.bat first or set `CC`/`CC_x86_64_slateos` to the full path.
+The PC the project moved to on 2026-10-20 has one Visual Studio: **VS 2026 Build Tools**, MSVC 14.51.36231, Windows SDK 10.0.26100.0. It is **not on PATH by default**. You must either run vcvarsall.bat first or set `CC`/`CC_x86_64_slateos` to the full path.
 
-**vcvarsall.bat locations:**
-- VS 2022 Community: `"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat"`
-- VS 2022 Enterprise: `"C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat"`
-- VS 2026 Build Tools: `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"`
-- VS 2022 Build Tools: `"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"`
+- vcvarsall.bat: `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"`
+- cl.exe (x64 host, x64 target): `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"`
 
-**cl.exe locations (x64 host → x64 target):**
-- VS 2022: `"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64\cl.exe"`
-- VS 2026 BT: `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.50.35717\bin\Hostx64\x64\cl.exe"`
+The MSVC version in that path changes with every Build Tools update, so read
+it rather than trusting the number written here: `vswhere -latest -products *
+-property installationPath` gives the install's folder (vswhere is
+`C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`;
+without `-products *` it looks only for full Visual Studio editions and prints
+nothing here), and `VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt`
+under that folder holds the MSVC version.
 
 For cross-compiling Rust crates with C dependencies to our custom target (x86_64-slateos), set:
 ```
@@ -34,24 +35,43 @@ Or from bash without vcvarsall, pass the full cl.exe path and ensure the Windows
 ring 3, and the `fastpy-*` ones need the fastpy checkout importable. It looks
 for fastpy **beside the repo root** and honours `$FASTPY_DIR`.
 
-Since the 2026-09-06 migration the sibling search no longer finds it: the OS
-moved to `E:` and fastpy did not, so `<repo>/../fastpy` resolves to
-`E:/visual studio projects/fastpy`, which does not exist. fastpy is still at
-`D:/visual studio projects/fastpy` — see the "Still on `D:`" note at the bottom
-of `E:/visual studio projects/CLAUDE.md`.
-
-So prefix fixture builds:
+Since the move to the new PC (2026-10-20) fastpy sits beside the OS repo, at
+`C:/visual studio projects/fastpy` (its GitHub checkout, where fastpy itself
+is developed), so the sibling search finds it with nothing set. To build
+against another checkout, name it:
 
 ```
-FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
+FASTPY_DIR="<path-to-fastpy>" python scripts/ctest-fixtures.py build
 ```
 
-The symptom without it is an import traceback that does not mention fastpy at
-all, which is why this is written down rather than left to be rediscovered.
+fastpy is developed in that checkout while the lanes build against it, so a
+fastpy commit makes the `fastpy-*` fixtures stale: the rootfs build then
+refuses until `ctest-fixtures.py build` has rebuilt them.
+
+fastpy needs `llvmlite`, so it must run under a Python that has it: a bare
+`python` here is Python 3.14 with the project's packages. A Python without
+them -- a newly installed version made the default, as 3.15 briefly was on
+2026-10-21 -- makes `ctest-fixtures.py build` refuse before building
+anything, naming the missing module.
+
 Note that rebuilding fixtures can rebuild `libc.a` first, and a new `libc.a`
 makes *every* fixture stale — so a one-fixture build can turn into a 70-fixture
 one, and the rootfs image then needs repacking too
 (`wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh`).
+
+### zig (the libc gates and the C fixtures)
+
+`check-libc-abi.py`, `check-libc-declared.py`, `check-libc-prototypes.py` and
+`check-libc-overlay.py` read musl's headers with zig 0.16.0, found through
+`$FASTPY_ZIG` and then `PATH` only. Without it each prints `SKIPPED` and exits
+3: `build-sysroot.ps1` goes on with a yellow warning, and the pre-push hook
+lists the libc-ABI gate among the skipped ones and lets the push through. So a
+missing zig is easy to miss: a `SKIPPED` from any of the four means set
+`FASTPY_ZIG`. fastpy's own lookup, which the fixture builds use, also tries
+`D:\utils\zig-*` and `C:\utils\zig-*`.
+
+On this PC the user-scope `FASTPY_ZIG` names
+`C:/utils/zig-x86_64-windows-0.16.0/zig.exe`, which exists.
 
 ### Rust toolchains
 

@@ -21,13 +21,19 @@ applied to the `cmake` quarter of the roadmap's
 nobody had measured. It is deliberately shaped like `scripts/make-spike/run.sh`;
 the two answer the same question.
 
-`run.sh` builds from a fresh tree every time, about four minutes, and ends by
-running `./slatelink.sh`: the link against the current `libc.a`, its checks and
-the stripped copy in `build/spike/`. The objects depend only on the libc's
-headers, so after a `libc.a` rebuild the link alone is enough, and
-`scripts/create-ext4-rootfs.sh` runs `slatelink.sh` by itself whenever the
-staged binary is older than `libc.a`. A change to `posix/include` needs
-`run.sh`.
+`run.sh` configures and builds from a fresh tree every time, about four
+minutes; runs `./slatelink.sh` for the link against the current `libc.a`, its
+checks and the stripped binary in `build/spike/cmake-slateos.elf`; and then
+stages the module tree, `build/spike/cmake-data`, from the build.
+
+CMake's configure answers its probes from our `libc.a` and `posix/include`, so
+a build is only as current as what it was configured against. `run.sh`
+records that (`configured.sh`: the libc's C-visible names, the headers, the
+recipe, the compiler), and `scripts/create-ext4-rootfs.sh` runs `slatelink.sh`
+before every image build, which does the least that brings the binary up to
+date: nothing when nothing moved, the link alone when only `libc.a`'s code
+did (most libc changes), and `run.sh` when the configuration did. The module
+tree comes from the build, so only `run.sh` remakes it.
 
 ## What was measured
 

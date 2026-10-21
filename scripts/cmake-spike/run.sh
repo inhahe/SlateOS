@@ -43,12 +43,18 @@ set -uo pipefail
 set -x
 
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+. "$(dirname "${BASH_SOURCE[0]}")/configured.sh" || exit 1
 
 VER="$SLATE_CMAKE_VERSION"
 SYSROOT="$SLATE_SYSROOT"
 # Durable, not /tmp — see worktree.sh ($SLATE_WORK).
 WORK="$SLATE_WORK/cmake-spike"
-SPIKE_LIBS="/tmp/slate-sysroot2-$SLATE_LANE"
+# The archives the link wrapper names, off the /mnt mount (9p is slow, and a
+# linker reads an archive many times); slatelink.sh links with the same ones.
+SPIKE_LIBS="$WORK/libs"
+# What this build was configured against (configured.sh), written only once
+# the build has succeeded: slatelink.sh relinks only a build it describes.
+RECORD="$WORK/configured.txt"
 JOBS="$(nproc 2>/dev/null || echo 4)"
 
 slate_make_zig_wrappers || exit 1
@@ -66,6 +72,7 @@ fi
 "$HOST_CMAKE" --version | head -1
 
 mkdir -p "$WORK" && cd "$WORK" || exit 1
+rm -f "$RECORD"
 rm -rf "cmake-$VER" bld
 tar xf "$SLATE_CMAKE_TARBALL" || exit 1
 
@@ -143,6 +150,8 @@ echo "SYSROOT_HEADERS=$(find "$FINDROOT/include" -name '*.h' | wc -l)"
 mkdir -p "$SPIKE_LIBS"
 cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
 slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
+CONFIGURED="$(cmake_configure_fingerprint "$SPIKE_LIBS/libc.a" "$SLATE_ROOT/posix/include")" \
+    || { echo "NO_FINGERPRINT -- configured.sh could not read libc.a or posix/include"; exit 1; }
 
 "$HOST_CMAKE" -S "cmake-$VER" -B bld \
     -DCMAKE_SYSTEM_NAME=Linux \
@@ -160,20 +169,26 @@ slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
     -DBUILD_CursesDialog=OFF \
     -DBUILD_QtDialog=OFF \
     >conf.log 2>&1
-echo "CONFIGURE_EXIT=$?"
+CONFIGURE_EXIT=$?
+echo "CONFIGURE_EXIT=$CONFIGURE_EXIT"
 tail -25 conf.log
+[ "$CONFIGURE_EXIT" -eq 0 ] || { echo "NO_CONFIGURE -- see $WORK/conf.log"; exit 1; }
 
+# A build that fails, or is killed (known-issues
+# D-SOMETHING-KILLS-WSL-PROCESSES-BY-PATTERN), stops here: linking a partial
+# tree would print CMake's own missing symbols as if our libc lacked them.
 "$HOST_CMAKE" --build bld -j "$JOBS" >build.log 2>&1
-echo "BUILD_EXIT=$?"
+BUILD_EXIT=$?
+echo "BUILD_EXIT=$BUILD_EXIT"
 grep -iE "^.*error" build.log | head -20
+[ "$BUILD_EXIT" -eq 0 ] || { echo "NO_BUILD -- see $WORK/build.log"; exit 1; }
+echo "$CONFIGURED" >"$RECORD" || exit 1
 
 # The link against SlateOS's libc, its checks and the stripped binary in
-# build/spike/: slatelink.sh's, which the rootfs recipe also runs alone
-# whenever libc.a moves. (The build above linked ctest and the rest through a
-# wrapper of the same kind; that link is the one measured, symbol by symbol.
-# Why it prints the missing and the duplicate symbols as two counts, which
-# other ports cite as told here, is said there now.)
-bash "$SLATE_ROOT/scripts/cmake-spike/slatelink.sh" || exit 1
+# build/spike/: slatelink.sh's, which the rootfs recipe also runs by itself.
+# The build above linked ctest and the rest through the same wrapper; that
+# link is the one measured, symbol by symbol.
+SLATE_CMAKE_FROM_RUN=1 bash "$SLATE_ROOT/scripts/cmake-spike/slatelink.sh" || exit 1
 
 # THE BINARY ALONE IS INERT, and not in a subtle way: `cmake --version`
 # itself fails without the module tree.

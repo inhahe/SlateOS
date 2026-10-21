@@ -1088,12 +1088,19 @@ SYSROOT_LIBC="$ROOT_DIR/toolchain/sysroot/lib/libc.a"
 # build.  Stale is the case that lies, and stale is the case this fixes.
 spike_rebuild_if_behind() {
     local artifact="$1"; shift
-    local name script log
-    name="$(basename "$artifact")"
     [ -e "$artifact" ] || return 0
     [ -e "$SYSROOT_LIBC" ] || return 0
     [ "$SYSROOT_LIBC" -nt "$artifact" ] || return 0
-    echo "[rootfs] $name is behind libc.a — rebuilding it ($*)"
+    echo "[rootfs] $(basename "$artifact") is behind libc.a — rebuilding it ($*)"
+    spike_run_rebuild "$artifact" "$@"
+}
+
+# Run the remaining arguments as scripts that rebuild $1 (an artifact path),
+# logging each, and stop the image build if one fails.
+spike_run_rebuild() {
+    local artifact="$1"; shift
+    local name script log
+    name="$(basename "$artifact")"
     for script in "$@"; do
         # One log per *script*, not per artifact: an artifact rebuilt by two
         # scripts would otherwise have the first one's output truncated away by
@@ -1108,7 +1115,7 @@ spike_rebuild_if_behind() {
             exit 1
         fi
     done
-    echo "[rootfs] $name rebuilt."
+    echo "[rootfs] $name is up to date: $(tail -1 "$log")"
 }
 
 # Is the Oils spec bundle's harness the tree's? Byte for byte, file by file:
@@ -1145,11 +1152,18 @@ else
     # only the last link against the new libc.a is redone.
     spike_rebuild_if_behind "$ROOT_DIR/build/spike/espeak-ng-slateos.elf" \
         scripts/espeak-spike/slatelink.sh
-    # CMake's relink, like the others: slatelink.sh links the objects run.sh
-    # compiled against the new libc.a and stages the binary again. Its module
-    # tree comes from the build, not the link, so it stays as it is.
-    spike_rebuild_if_behind "$ROOT_DIR/build/spike/cmake-slateos.elf" \
-        scripts/cmake-spike/slatelink.sh
+    # CMake decides for itself how much it needs, so it is asked every time
+    # rather than only when its binary is behind libc.a: its configure probed
+    # our libc.a and posix/include, and a header change can stale it without
+    # moving libc.a. slatelink.sh answers in about a second when nothing
+    # moved, relinks when only libc.a's code did, and hands over to run.sh's
+    # four-minute configure and build when its configuration did
+    # (scripts/cmake-spike/configured.sh). Absent stays absent, as above.
+    if [ -e "$ROOT_DIR/build/spike/cmake-slateos.elf" ]; then
+        echo "[rootfs] bringing cmake-slateos.elf up to date (scripts/cmake-spike/slatelink.sh)"
+        spike_run_rebuild "$ROOT_DIR/build/spike/cmake-slateos.elf" \
+            scripts/cmake-spike/slatelink.sh
+    fi
     # CPython's interpreter and its stdlib zip are separate artifacts with
     # separate staleness rules (the zip's are content-based: an `encodings`
     # package must be present and no member may be deflated).  Only the
@@ -2639,8 +2653,9 @@ if [ "$CMAKE_STALE" -gt 0 ]; then
         echo "[rootfs]        /bin/cmake on the image would be built against a libc that is"
         echo "[rootfs]        no longer in the build. Relink it:"
         echo "[rootfs]          wsl -d Ubuntu --exec bash scripts/cmake-spike/slatelink.sh"
-        echo "[rootfs]        (normally run for you -- this means that relink failed;"
-        echo "[rootfs]        with no objects to link, scripts/cmake-spike/run.sh builds them.)"
+        echo "[rootfs]        (this script normally runs that for you — reaching this"
+        echo "[rootfs]        message means NO_SPIKE_REBUILD=1 was set, or it ran and"
+        echo "[rootfs]        did not clear the staleness.)"
         echo "[rootfs]        Or set ALLOW_STALE_FIXTURES=1 to build the image anyway."
         exit 1
     fi

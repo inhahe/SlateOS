@@ -5,7 +5,7 @@ Produces `ctest-cxx-throw.elf`, a native SlateOS (`x86_64-slateos`) binary:
 `main.cpp` compiled by `zig c++` (clang, with libc++'s and musl's headers and
 `posix/include` in front of them), linked with rust-lld against zig's C++
 runtime -- libc++, libc++abi, libunwind, compiler_rt -- and the posix `libc.a`
-sysroot, the way every C++ port here is linked (`scripts/cmake-spike/run.sh`).
+sysroot, the way every C++ port here is linked (`scripts/cmake-spike/slatelink.sh`).
 `scripts/create-ext4-rootfs.sh` stages it at `/tests/ctest-cxx-throw.elf`;
 the kernel rung that runs it and asserts the exit code (42 == all checks
 passed) is lane A's, requested in `requests/d-a-run-ctest-cxx-throw.md`.

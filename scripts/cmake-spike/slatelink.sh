@@ -1,59 +1,83 @@
 #!/bin/bash
-# Link genuine CMake's built objects against the CURRENT libc.a, and stage it.
+# Bring the staged CMake up to date with the CURRENT libc.a, doing the least that does it.
 #
 # scripts/cmake-spike/run.sh unpacks CMake, configures it and compiles it --
-# every time from a fresh tree, the four minutes -- and then runs this, the
-# link against toolchain/sysroot/lib/libc.a, its checks, and the stripped copy
-# in build/spike/. Every libc.a rebuild leaves that link behind, and
-# scripts/create-ext4-rootfs.sh refuses to stage a binary older than the
-# library it links, so the recipe runs this alone when the artifact is behind
-# libc.a (`spike_rebuild_if_behind`), as it runs the other ports' relinks. The
-# objects do not depend on the C library -- only on its headers, which are
-# musl's plus posix/include, and run.sh is what a header change needs. The
-# module tree run.sh stages beside the binary (build/spike/cmake-data) does not
-# depend on it at all.
+# from a fresh tree every time, about four minutes -- and then runs this for
+# the link against toolchain/sysroot/lib/libc.a, its checks, and the stripped
+# copy in build/spike/. scripts/create-ext4-rootfs.sh runs this by itself
+# before every image build, and this decides how much is needed:
 #
-# If run.sh has never run here the objects are missing; this says so and
-# fails, and the recipe then reports the artifact stale.
+#   * nothing, when what run.sh configured against is unchanged (configured.sh)
+#     and the staged binary is newer than libc.a: about a second;
+#   * the link alone, when libc.a has moved but its C-visible names and
+#     posix/include have not -- most libc changes: seconds;
+#   * run.sh, when they have, or when no build here records what it was
+#     configured against: CMake's configure probes our libc.a and our headers,
+#     so its objects are only as current as that configuration.
 #
 # Run it from WSL: wsl -d Ubuntu --exec bash scripts/cmake-spike/slatelink.sh
 set -uo pipefail
 
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
+. "$(dirname "${BASH_SOURCE[0]}")/configured.sh" || exit 1
 
 SYSROOT="$SLATE_SYSROOT"
 WORK="$SLATE_WORK/cmake-spike"
-BLD="$WORK/bld"
-# libc.a off the /mnt mount: 9p is slow, and a linker reads an archive many
-# times.
+# run.sh's: the archives off the /mnt mount and the wrapper bld/CMakeCache.txt
+# records as its compiler, both rewritten from the current sysroot below.
 SPIKE_LIBS="$WORK/libs"
+RECORD="$WORK/configured.txt"
+STAGED="$SLATE_SPIKE/cmake-slateos.elf"
+RUN_SH="$SLATE_ROOT/scripts/cmake-spike/run.sh"
+
+# The pinned zig, as run.sh's setup settles it: the fingerprint names it, and
+# the strip below falls back to it.
+slate_ensure_zig || exit 1
+CURRENT="$(cmake_configure_fingerprint "$SYSROOT/libc.a" "$SLATE_ROOT/posix/include")" \
+    || { echo "NO_FINGERPRINT -- configured.sh could not read libc.a or posix/include"; exit 1; }
+if [ "$(cat "$RECORD" 2>/dev/null)" != "$CURRENT" ]; then
+    if [ "${SLATE_CMAKE_FROM_RUN:-0}" = "1" ]; then
+        # run.sh recorded what it configured against moments ago; a difference
+        # now means libc.a or posix/include changed during its build.
+        echo "CONFIGURATION_MOVED -- libc.a or posix/include changed while run.sh was"
+        echo "  building; run it again: wsl -d Ubuntu --exec bash scripts/cmake-spike/run.sh"
+        exit 1
+    fi
+    echo "RECONFIGURE -- the build here was configured against something else, or"
+    echo "  records nothing (run.sh never finished here). Configured: $(cat "$RECORD" 2>/dev/null || echo none)"
+    echo "  Now:        $CURRENT"
+    echo "  Handing over to run.sh, the full configure and build."
+    exec bash "$RUN_SH"
+fi
+if [ "${SLATE_CMAKE_FROM_RUN:-0}" != "1" ] && [ "$STAGED" -nt "$SYSROOT/libc.a" ]; then
+    echo "SLATE_CMAKE_CURRENT=$STAGED"
+    exit 0
+fi
+
+# Relative paths from here on: the object and archive lists are word-split on
+# the link line, which no path under $WORK may break.
+cd "$WORK" || exit 1
 
 # Take the object list from cmake's own build rather than globbing: the tree
 # ships Tests/ and Utilities/ subtrees whose objects the real link does not use.
 # The `cmake` executable's objects are the ones CMakeFiles/cmake.dir holds, plus
 # the static libraries the build produced for it.
-CMAKE_OBJDIR="$(find "$BLD" -type d -name 'cmake.dir' -print -quit 2>/dev/null)"
-if [ -z "$CMAKE_OBJDIR" ]; then
-    echo "NO_OBJECTS -- $BLD has no cmake.dir: CMake has not been built here."
-    echo "  Build it first: wsl -d Ubuntu --exec bash scripts/cmake-spike/run.sh"
-    exit 1
+CMAKE_OBJDIR="$(find bld -type d -name 'cmake.dir' -print -quit 2>/dev/null)"
+OBJS=""
+if [ -n "$CMAKE_OBJDIR" ]; then
+    OBJS="$(find "$CMAKE_OBJDIR" -name '*.o' | sort | tr '\n' ' ')"
 fi
-cd "$WORK" || exit 1
-
-OBJS="$(find "$CMAKE_OBJDIR" -name '*.o' | sort | tr '\n' ' ')"
 echo "OBJ_COUNT=$(echo "$OBJS" | wc -w)"
 if [ -z "${OBJS// /}" ]; then
-    echo "NO_OBJECTS -- $CMAKE_OBJDIR holds none; rebuild with run.sh"
+    echo "NO_OBJECTS -- $WORK/bld holds no cmake.dir objects; rebuild with run.sh"
     exit 1
 fi
 
 # Every static archive the build produced, which is where CMakeLib and the
 # bundled third-party libraries live, in no particular order: ld.lld takes a
 # symbol from any archive on the line, wherever the reference is, so the
-# order the linker needs is not something this has to know. (They were
-# passed twice until 2026-10-01, for GNU ld's sake; the binary is
-# byte-identical either way.)
-LIBS="$(find "$BLD" -name '*.a' | sort | tr '\n' ' ')"
+# order the linker needs is not something this has to know.
+LIBS="$(find bld -name '*.a' | sort | tr '\n' ' ')"
 echo "ARCHIVE_COUNT=$(echo "$LIBS" | wc -w)"
 
 # The decisive step: a link against SlateOS's libc and nothing else, through
@@ -61,24 +85,24 @@ echo "ARCHIVE_COUNT=$(echo "$LIBS" | wc -w)"
 # build's own inputs and then our libc.a, with zig's C++ runtime ahead of it
 # and zig's compiler runtime behind it, which is zig's own order (the
 # wrapper's comment says why the order matters). Not zig's c++ driver with
-# -nostdlib, as until 2026-10-01: that puts zig's own musl libc.a behind
-# every link, where it would supply whatever ours lacks instead of a missing
-# symbol being reported (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC).
-# libstubs.a is deliberately not linked -- it and libc.a each carry a panic
-# handler and collide on __rustc::rust_begin_unwind. Its own directory, not
-# run.sh's bin/: that is on PATH during the build, and a cc and c++ there
-# would be found by anything that asks for them by name.
+# -nostdlib: that puts zig's own musl libc.a behind every link, where it would
+# supply whatever ours lacks instead of a missing symbol being reported
+# (known-issues D-SPIKES-LINK-ZIGS-MUSL-BEHIND-OUR-LIBC). libstubs.a is
+# deliberately not linked -- it and libc.a each carry a panic handler and
+# collide on __rustc::rust_begin_unwind.
 mkdir -p "$SPIKE_LIBS" || exit 1
 cp "$SYSROOT/libc.a" "$SYSROOT/libunwind.a" "$SPIKE_LIBS/" || exit 1
-slate_make_link_wrappers "$WORK/link" "$SPIKE_LIBS" || exit 1
+slate_make_link_wrappers "$WORK/bin" "$SPIKE_LIBS" || exit 1
 echo "LINK_WRAPPER=$SLATE_LINK_CXX:"
 grep '^libs=' "$SLATE_LINK_CXX"
 
 # Removed first: ld.lld leaves an existing output alone when a link fails,
 # and the checks below would then stage the last run's binary as this one's.
+# --error-limit=0: ld.lld stops at 20 errors by default, which would cap both
+# counts below and could leave the missing symbols uncounted behind duplicates.
 rm -f cmake-slateos
 # shellcheck disable=SC2086  # word splitting is what builds the object list
-"$SLATE_LINK_CXX" -o cmake-slateos $OBJS $LIBS 2>slate-link.log
+"$SLATE_LINK_CXX" -Wl,--error-limit=0 -o cmake-slateos $OBJS $LIBS 2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
 # Counted SEPARATELY, and MISSING_COUNT is never allowed to stand in for "the
@@ -130,7 +154,6 @@ echo "UNSTRIPPED_BYTES=$(stat -c %s cmake-slateos)"
 # Written beside the artifact and moved over it, so the recipe never stages
 # half a file.
 mkdir -p "$SLATE_SPIKE" || exit 1
-STAGED="$SLATE_SPIKE/cmake-slateos.elf"
 strip --strip-debug -o "$STAGED.new" cmake-slateos 2>/dev/null \
     || "$SLATE_ZIG" objcopy --strip-debug cmake-slateos "$STAGED.new" \
     || { rm -f "$STAGED.new"; echo "STRIP_FAILED"; exit 1; }

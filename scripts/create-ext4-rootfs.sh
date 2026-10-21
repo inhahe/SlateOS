@@ -1041,7 +1041,7 @@ if [ -n "$SYSROOT_STALE" ] && [ -z "$SYSROOT_PY" ]; then
     echo "[rootfs]          rebuilt ones, whose own staleness checks stay quiet precisely"
     echo "[rootfs]          because they are fresh. Rebuild in this order:"
     echo "[rootfs]            powershell -File toolchain/build-sysroot.ps1"
-    echo "[rootfs]            PYTHONPATH=<fastpy> python services/<name>/build.py   # each fixture"
+    echo "[rootfs]            python scripts/ctest-fixtures.py build                # every fixture behind it"
     echo "[rootfs]            wsl -d Ubuntu -- bash scripts/bash-spike/slatelink.sh # if present"
 fi
 
@@ -3711,9 +3711,9 @@ done
 # hypothetical: `fastpy-minishell.elf` was built 2026-08-21 16:05, fastpy fixed
 # the list-element-kind defect that broke it at 18:03, and both this gate and
 # `ctest-fixtures.py` went on calling the fixture current
-# (BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING). The compiler is found the same
-# way `ctest-fixtures.py::_fastpy_dir` finds it — $FASTPY_DIR, then a sibling of
-# the repo root named exactly `fastpy` — and stood in for by the newest `.py`
+# (BUG-FASTPY-MINISHELL-EXITS-0-WITHOUT-FORKING). The compiler is the checkout
+# `ctest-fixtures.py fastpy-dir` names -- the one its `build` uses, asked rather
+# than searched for again, so the two cannot drift -- and stood in for by the newest `.py`
 # under its `compiler/` package, which is the same mtime instrument the rest of
 # this loop uses. Not found means the input is skipped: this script runs under
 # WSL, cannot rebuild a fastpy fixture anyway, and a gate that fails closed on a
@@ -3741,10 +3741,8 @@ STALE_REPORT=""
 # guard the sysroot check above uses for the same reason.
 FASTPY_NEWEST=""
 _fastpy_root=""
-if [ -n "${FASTPY_DIR:-}" ] && [ -f "$FASTPY_DIR/compiler/__init__.py" ]; then
-    _fastpy_root="$FASTPY_DIR"
-elif [ -f "$(dirname "$ROOT_DIR")/fastpy/compiler/__init__.py" ]; then
-    _fastpy_root="$(dirname "$ROOT_DIR")/fastpy"
+if [ -n "$SYSROOT_PY" ]; then
+    _fastpy_root="$("$SYSROOT_PY" "$ROOT_DIR/scripts/ctest-fixtures.py" fastpy-dir)" || _fastpy_root=""
 fi
 if [ -n "$_fastpy_root" ]; then
     FASTPY_NEWEST="$(find "$_fastpy_root/compiler" -name '*.py' -type f -printf '%T@ %p\n' 2>/dev/null \

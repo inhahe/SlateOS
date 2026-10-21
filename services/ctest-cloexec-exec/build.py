@@ -26,15 +26,9 @@ descriptor shares staying open. The legend of exit codes is at the top of
 The same source compiles and passes on Linux (gcc main.c && ./a.out), which
 is how its expectations were checked to be Linux's.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only ctest-cloexec-exec
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only ctest-cloexec-exec`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built and current.
 """

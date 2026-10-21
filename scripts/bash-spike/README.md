@@ -98,11 +98,11 @@ Artifacts land in `build/spike/` (gitignored): `bash-musl.elf`,
 ## Three traps worth remembering
 
 **1. `$CC` cannot contain spaces.** autotools word-splits it, and this repo
-lives under `C:\visual studio projects\`. The first attempt died with
+lives under `...\visual studio projects\`. The first attempt died with
 `CROSS_CONFIGURE_EXIT=77` ("C compiler cannot create executables") for that
 reason alone — nothing to do with the toolchain. `cross2.sh` writes wrapper
 scripts to `/tmp/zigcc`, `/tmp/zigar`, `/tmp/zigranlib` to dodge it. The build
-also happens under `/tmp`, since `/mnt/c` is slow over 9p.
+also happens under `/tmp`, since the Windows drive's mount is slow over 9p.
 
 **2. bash 5.2 has an inverted `strtoimax` test.** `configure:20446` adds
 `lib/sh/strtoimax.c` to `LIBOBJS` when the system **has** a usable

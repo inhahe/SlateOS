@@ -30,15 +30,9 @@ exits with code 3 — the entry count returned by `os.listdir` — so an empty
 listing (the original opendir arg3/buf_cap ABI bug) can no longer false-pass;
 the serial log additionally shows each of the three printed names.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only fastpy-ls
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only fastpy-ls`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

@@ -20,15 +20,9 @@ codes is at the top of `main.c`; 42 is every check.
 The same source runs on Linux against the host's binutils, to check the
 fixture's own expectations (main.c's macros say how).
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only ctest-binutils-runs
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only ctest-binutils-runs`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built and current. The rootfs
 must carry binutils, which scripts/binutils-spike/run.sh builds.

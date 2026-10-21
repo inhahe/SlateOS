@@ -45,8 +45,9 @@ VER="${CPYTHON_VER:-3.12.3}"
 WORK="$SLATE_WORK/cpython-spike"
 slate_adopt_legacy_work "/tmp/cpython-spike-$SLATE_LANE" "$WORK"
 
-# Everything except the sysroot lives off /mnt/d: the 9p mount is slow, and a
-# CPython build is thousands of compiler invocations rather than pkgconf's tens.
+# Everything except the sysroot lives off the Windows drive's 9p mount, which
+# is slow, and a CPython build is thousands of compiler invocations rather than
+# pkgconf's tens.
 mkdir -p "$WORK"
 cd "$WORK"
 

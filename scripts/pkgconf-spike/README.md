@@ -92,7 +92,7 @@ a fixture `.pc` file and assert the output, false-pass-proof.
   SlateOS's `libc.a` is built to the musl ABI, so compiling against zig's musl
   headers and linking against our archive is legitimate rather than a fudge.
 - **`$CC` must not contain spaces.** autotools word-splits it, and this repo
-  lives under `C:\visual studio projects\`. The bash spike lost a run to this,
+  lives under `...\visual studio projects\`. The bash spike lost a run to this,
   dying with a misleading "C compiler cannot create executables"
   (`CROSS_CONFIGURE_EXIT=77`). The `/tmp/zigcc` wrapper exists to keep the
   space out of `$CC`.

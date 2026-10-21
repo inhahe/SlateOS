@@ -38,15 +38,9 @@ temporary directory rather than beside the fixture, because
 `create-ext4-rootfs.sh` stages every `services/ctest-*/*.elf` it can find and a
 fixture nothing runs is worse than no fixture.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only ctest-initfini
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only ctest-initfini`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built and must be *current* with
 `posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS.

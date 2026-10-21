@@ -3,8 +3,8 @@
 #
 # Fixes over cross.sh: the compiler is reached through a wrapper on a path with
 # no spaces (configure word-splits $CC, and the repo lives under "visual studio
-# projects"), and the whole build happens on the Linux filesystem — /mnt/d is
-# both space-laden and slow.
+# projects"), and the whole build happens on the Linux filesystem — the Windows
+# drive's 9p mount is both space-laden and slow.
 . "$(dirname "${BASH_SOURCE[0]}")/../lib/worktree.sh" || exit 1
 
 set -x

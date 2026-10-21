@@ -37,7 +37,9 @@ be mistaken for the stronger one.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
+import io
 import os
 import sys
 import tempfile
@@ -428,6 +430,117 @@ def test_a_c_fixtures_overlay_headers_are_an_input(cf, tmpdir):
     finally:
         cf._NEWEST_COMPILER_SOURCE = saved
         cf._NEWEST_OVERLAY_HEADER.clear()
+
+
+# --------------------------------------------------------------------------
+# Which fastpy, and which fixtures
+# --------------------------------------------------------------------------
+
+def _usable_fastpy(path: Path) -> Path:
+    """A directory `_fastpy_dir` accepts: one with `compiler/__init__.py`."""
+    (path / "compiler").mkdir(parents=True)
+    (path / "compiler" / "__init__.py").write_bytes(b"")
+    return path
+
+
+@contextlib.contextmanager
+def _fastpy_search(cf, tmpdir: str, **env):
+    """A repo at `<tmpdir>/os-lane-x` with the environment variables `env`
+    set (None: unset), both put back afterwards. Yields the repo's parent."""
+    saved_repo, saved_env = cf.REPO, {k: os.environ.get(k) for k in env}
+    cf.REPO = Path(tmpdir) / "os-lane-x"
+    cf.REPO.mkdir(exist_ok=True)
+    for k, v in env.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            yield Path(tmpdir)
+    finally:
+        cf.REPO = saved_repo
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_fastpy_dir_takes_the_sibling_named_fastpy(cf, tmpdir):
+    """With neither variable set, the checkout beside the repo named exactly
+    `fastpy` -- and nothing when there is none."""
+    with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None) as parent:
+        _usable_fastpy(parent / "fastpy_copy")
+        none = cf._fastpy_dir()
+        sibling = _usable_fastpy(parent / "fastpy")
+        found = cf._fastpy_dir()
+    check("no sibling named fastpy, nothing", none, None)
+    check("the sibling named fastpy", found, sibling)
+
+
+def test_fastpy_dir_takes_pythonpath_before_the_sibling(cf, tmpdir):
+    """A usable `$PYTHONPATH` entry outranks the sibling."""
+    other = _usable_fastpy(Path(tmpdir) / "elsewhere" / "fastpy")
+    with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=str(other)) as parent:
+        _usable_fastpy(parent / "fastpy")
+        found = cf._fastpy_dir()
+    check("the PYTHONPATH entry", found, other)
+
+
+def test_a_wrong_fastpy_dir_is_refused_not_fallen_through(cf, tmpdir):
+    """A `$FASTPY_DIR` without `compiler/` is an error, even with a usable
+    sibling beside the repo: building from a checkout the caller did not name
+    is the failure this search must never have."""
+    with _fastpy_search(cf, tmpdir, FASTPY_DIR=str(Path(tmpdir) / "missing"),
+                        PYTHONPATH=None) as parent:
+        _usable_fastpy(parent / "fastpy")
+        found = cf._fastpy_dir()
+    check("a wrong FASTPY_DIR finds nothing", found, None)
+
+
+def test_fastpy_dir_command_prints_only_the_path(cf, tmpdir):
+    """`fastpy-dir`, which create-ext4-rootfs.sh reads, prints the checkout and
+    nothing else on stdout, and exits 1 with nothing on it when there is none
+    -- the search's own complaint about a wrong FASTPY_DIR included."""
+    with _fastpy_search(cf, tmpdir, FASTPY_DIR=str(Path(tmpdir) / "missing"),
+                        PYTHONPATH=None):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            missing_rc = cf.cmd_fastpy_dir()
+        missing_out = out.getvalue()
+    with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None) as parent:
+        sibling = _usable_fastpy(parent / "fastpy")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            found_rc = cf.cmd_fastpy_dir()
+        found_out = out.getvalue()
+    check("none: exit 1", missing_rc, 1)
+    check("none: nothing on stdout", missing_out, "")
+    check("found: exit 0", found_rc, 0)
+    check("found: the path alone", found_out, f"{sibling}\n")
+
+
+def test_only_prefers_the_fixture_named_exactly(cf, tmpdir):
+    """`--only` takes the fixture called exactly that where there is one --
+    some names are prefixes of others -- and otherwise every name containing it."""
+    services = Path(tmpdir) / "services"
+    for name in ("fastpy-ls", "fastpy-lseek", "ctest-fortify", "ctest-fortify-abort"):
+        (services / name).mkdir(parents=True)
+        (services / name / "build.py").write_bytes(b"# recipe\n")
+    saved = cf.SERVICES
+    cf.SERVICES = services
+    try:
+        names = {o: [f.name for f in cf.select_fixtures(o)]
+                 for o in ("fastpy-ls", "ctest-fortify", "fortify", "lseek", None)}
+    finally:
+        cf.SERVICES = saved
+    check("exact: fastpy-ls alone", names["fastpy-ls"], ["fastpy-ls"])
+    check("exact: ctest-fortify alone", names["ctest-fortify"], ["ctest-fortify"])
+    check("part: both fortify fixtures", names["fortify"],
+          ["ctest-fortify", "ctest-fortify-abort"])
+    check("part: lseek", names["lseek"], ["fastpy-lseek"])
+    check("none: all four", len(names[None]), 4)
 
 
 def main() -> int:

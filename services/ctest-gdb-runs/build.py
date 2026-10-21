@@ -18,15 +18,9 @@ command interpreter, reading another program's symbol table, and gdbserver --
 so the boundary between the last pass and the first failure is the finding.
 The legend of exit codes is at the top of `main.c`; 42 is all four.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only ctest-gdb-runs
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only ctest-gdb-runs`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built and current. The rootfs
 must carry /bin/gnu-gdb and /bin/gdbserver, which scripts/gdb-spike/run.sh

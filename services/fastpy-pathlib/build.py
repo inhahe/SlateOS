@@ -62,15 +62,9 @@ exception", so an exception raised in a `with` body silently vanished whenever
 `__exit__` did enough work to dirty that register (touching `self` sufficed).
 The dispatchers now honour `FpyMethodDef.returns_value`.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only fastpy-pathlib
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only fastpy-pathlib`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) and the pure-mode SlateOS runtime objects are
 built on demand by the fastpy toolchain.

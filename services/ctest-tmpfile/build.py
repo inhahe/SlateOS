@@ -28,15 +28,9 @@ is how its expectations were checked to be Linux's -- on Linux before 6.10 an
 ordinary user's `AT_EMPTY_PATH` link is `ENOENT`, which the fixture accepts
 there and names the file through `/proc/self/fd` instead.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only ctest-tmpfile
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only ctest-tmpfile`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built and current.
 """

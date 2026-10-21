@@ -47,15 +47,9 @@ Bounds are structural (a non-blocking read gated on `poll`, a counted spin with
 not depend on a subsystem other than the one under test, or a timer regression
 surfaces here as a userland failure and points at the wrong place.
 
-Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
-you are working in:
-
-    python scripts/ctest-fixtures.py build --only ctest-coreutils-runs
-
-That finds the fastpy checkout and hands fastpy this worktree's sysroot.
-Running this file directly works if `compiler` is importable, but fastpy
-then finds the sysroot by itself, and its fallback is the `libc.a` of a
-sibling checkout named `os` -- the integration tree, not this one.
+Build it with `python scripts/ctest-fixtures.py build --only ctest-coreutils-runs`, from
+the root of the worktree you are working in; that script's docstring says
+why it, not a direct run of this file, is the entry point.
 
 The posix sysroot (`libc.a`) must already be built and must be *current* with
 `posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS. The rootfs

@@ -56,8 +56,8 @@ fi
 cd "$BUILD" || exit 1
 mkdir -p "$SPIKE" || exit 1
 
-# Copy the sysroot off /mnt/d — the linker reads these archives heavily and
-# the 9p mount is slow.
+# Copy the sysroot off the Windows drive's mount — the linker reads these
+# archives heavily and the 9p mount is slow.
 mkdir -p "$SLATE_SYSROOT_COPY"
 cp "$SYSROOT"/libc.a "$SYSROOT"/libstubs.a "$SYSROOT"/libunwind.a "$SLATE_SYSROOT_COPY"/ || exit 1
 ls -l "$SLATE_SYSROOT_COPY"

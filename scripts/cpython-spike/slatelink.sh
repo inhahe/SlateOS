@@ -28,7 +28,8 @@ cd "$BUILD" || exit 1
 
 slate_make_zig_wrappers || exit 1
 
-# Copy the archives off /mnt/d: the linker reads them heavily and 9p is slow.
+# Copy the archives off the Windows drive's mount: the linker reads them
+# heavily and 9p is slow.
 mkdir -p "$SYSCOPY"
 cp "$SLATE_SYSROOT/libc.a" "$SLATE_SYSROOT/libunwind.a" "$SYSCOPY/" || exit 1
 

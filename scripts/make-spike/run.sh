@@ -25,7 +25,7 @@
 # rootfs rung, not as a port.
 #
 # Run it from WSL. Everything except the sysroot lives in /tmp, because the
-# linker reads the archives heavily and the 9p mount to /mnt/d is slow.
+# linker reads the archives heavily and the Windows drive's 9p mount is slow.
 set -uo pipefail
 set -x
 

@@ -59,14 +59,6 @@ fix it. And it rebuilds the sysroot first when `libc.a` is behind its inputs,
 which matters here more than for most fixtures: this one tests code that
 changes in the same commits as the fixture.
 
-**This paragraph used to say to run this file directly**, with a
-`PYTHONPATH=D:/visual studio projects/fastpy` prefix. Lane A followed it on
-2026-09-10 and got `ModuleNotFoundError: No module named compiler`, because
-they did not have that path to hand -- and a bare import error names nothing
-you can act on, where `ctest-fixtures.py` prints the variable to set and the
-sibling directory it looked for. The instruction was the defect, not the
-reader.
-
 Running this file directly still works if `compiler` is importable, and is
 what `ctest-fixtures.py` ultimately does; it is just not the thing to tell
 somebody to do.

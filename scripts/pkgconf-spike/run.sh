@@ -8,8 +8,7 @@
 # resume from.
 #
 # Run it from WSL. Everything except the sysroot lives in /tmp, because the
-# linker reads the archives heavily and the 9p mount of the Windows drive
-# (/mnt/c) is slow.
+# linker reads the archives heavily and the Windows drive's 9p mount is slow.
 set -euo pipefail
 set -x
 

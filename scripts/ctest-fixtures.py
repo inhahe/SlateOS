@@ -151,24 +151,26 @@ seen three times, not three broken fixtures, and it says so and stops instead of
 printing the same traceback 70 times. Distinct failures are unaffected: they never
 match, so every fixture is still attempted and each is reported in full.
 
-**Rebuild through this script, not by running `services/<name>/build.py`
-directly.** `build.py` produces a correct ELF and does not touch the `.stamp`,
-which still describes the *previous* one — so `check` then reports STALE for a
-fixture you just rebuilt, which reads like a failed build rather than an
-unwritten stamp. Lane A lost a cycle to exactly this and asked for the line
-(`requests/a-b-ctest-fixture-elfs-and-stamps-are-stale-against-the-current-libc.md`).
-`build` runs each `build.py` and then stamps, which is the only ordering that
-leaves the pair consistent.
+**Build fixtures through this script, not by running
+`services/<name>/build.py` directly** -- `build --only <name>` for one. Three
+things happen here that a direct run skips:
 
-`stamp` exists for one narrow case: adopting fixtures that are already known
-good (as when this script was introduced, the nine ELFs having just been
-rebuilt and boot-verified). It records whatever is on disk, so running it to
-silence a `check` failure would defeat the entire point — rebuild instead.
+* fastpy is found (`$FASTPY_DIR`, then `$PYTHONPATH`, then the sibling
+  `fastpy`), and a missing one is reported with the fix, not as a bare
+  `ModuleNotFoundError`;
+* the `fastpy-*` recipes are handed this worktree's sysroot
+  (`FASTPY_SLATEOS_SYSROOT`). Run directly, fastpy finds a sysroot by itself,
+  and its fallback is the `libc.a` of a sibling checkout named `os` -- the
+  integration tree, not this worktree. (Fixing that lookup in fastpy itself is
+  design-decisions §915, not yet done. The `ctest-*` recipes link their own
+  worktree's sysroot either way.)
+* the sysroot is rebuilt first when `libc.a` is behind `posix/src`.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import os
 import re
@@ -418,6 +420,18 @@ def fixtures() -> list[Path]:
     found = [d for d in SERVICES.glob("ctest-*") if (d / "build.py").is_file()]
     found += [d for d in SERVICES.glob("fastpy-*") if (d / "build.py").is_file()]
     return sorted(found)
+
+
+def select_fixtures(only: str | None) -> list[Path]:
+    """The fixtures `--only` names: every one without it; the one whose
+    directory is called exactly `only`, where one is; otherwise each whose
+    name contains it. Exact first, because some names are prefixes of others
+    (`fastpy-ls` of `fastpy-lseek`), and each recipe names itself."""
+    every = fixtures()
+    if not only:
+        return every
+    exact = [f for f in every if f.name == only]
+    return exact or [f for f in every if only in f.name]
 
 
 def elf_of(fixture: Path) -> Path:
@@ -911,6 +925,19 @@ def _fastpy_dir() -> Path | None:
     return None
 
 
+def cmd_fastpy_dir() -> int:
+    """Print the fastpy checkout `build` would use, and nothing else on
+    stdout; exit 1 if there is none. For `create-ext4-rootfs.sh`, whose
+    compiler-staleness gate must judge the checkout the fixtures were built
+    with, so it asks rather than repeating the search."""
+    with contextlib.redirect_stdout(sys.stderr):
+        found = _fastpy_dir()
+    if found is None:
+        return 1
+    print(found)
+    return 0
+
+
 def _build_sysroot() -> bool:
     """Rebuild `libc.a` from `posix/src`. True if it now exists and is current.
 
@@ -1060,7 +1087,7 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         print("[ctest]        than one does.")
         return 1
 
-    selected = [f for f in fixtures() if not only or only in f.name]
+    selected = select_fixtures(only)
     if not selected:
         print(f"[ctest] ERROR: no fixture matches --only {only!r}" if only
               else f"[ctest] ERROR: no fixtures found under {SERVICES}")
@@ -1096,9 +1123,20 @@ def cmd_build(only: str | None, force: bool = False) -> int:
         # said nothing" printed the same thing before -- which is the shape
         # that cost lane A a build-plus-failed-repack cycle. The announcement
         # is the fix; the cascade above is only the part that saves the second
-        # command.
-        print(f"[ctest] --only {only!r}: sysroot already current, so the other "
-              f"{len(fixtures()) - len(selected)} fixture(s) are unaffected.")
+        # command. "Unaffected" is checked, not assumed: a sysroot rebuilt by
+        # hand (build-sysroot.ps1) leaves the others stale without this run
+        # having rebuilt anything.
+        others = [f for f in fixtures() if f not in selected]
+        stale_others = [f for f in others if is_stale(f)]
+        if stale_others:
+            print(f"[ctest] --only {only!r}: {len(stale_others)} of the other "
+                  f"{len(others)} fixture(s) are stale as well "
+                  f"({', '.join(f.name for f in stale_others[:5])}"
+                  f"{', ...' if len(stale_others) > 5 else ''}); "
+                  f"`build` without --only rebuilds them.")
+        else:
+            print(f"[ctest] --only {only!r}: the other {len(others)} fixture(s) "
+                  f"are current.")
     rc, built, skipped = 0, 0, 0
     started = time.monotonic()
     # The preflight above proves fastpy *imports*; it cannot prove fastpy still
@@ -1278,7 +1316,7 @@ def cmd_image_check() -> int:
         print("[ctest]        The image was packed before these existed, so their")
         print("[ctest]        kernel rungs will report SKIP and the run will pass")
         print("[ctest]        without having tested them. Build them and repack:")
-        print("[ctest]          PYTHONPATH=<fastpy> python <dir>/build.py")
+        print(f"[ctest]          {_self_cmd()} build")
         print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
         return 1
 
@@ -1339,9 +1377,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "command",
-        choices=("build", "image-stamp", "image-check", "sysroot-stamp", "sysroot-check"),
+        choices=("build", "image-stamp", "image-check", "sysroot-stamp", "sysroot-check",
+                 "fastpy-dir"),
     )
-    parser.add_argument("--only", help="substring of a fixture directory name, e.g. jobctl")
+    parser.add_argument(
+        "--only",
+        help="a fixture directory's name, or part of several (jobctl, fastpy-)",
+    )
     parser.add_argument(
         "--force",
         action="store_true",
@@ -1356,6 +1398,8 @@ def main() -> int:
         return cmd_image_check()
     if args.command == "sysroot-stamp":
         return cmd_sysroot_stamp()
+    if args.command == "fastpy-dir":
+        return cmd_fastpy_dir()
     return cmd_sysroot_check()
 
 

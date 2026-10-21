@@ -41,6 +41,30 @@ fn luma(mb: u32, i: u32) -> u8 {
 /// I_PCM -- an SPS, a PPS, `extra` units (each whole, header first), then
 /// the slice.
 fn stream(shape: Shape, extra: &[&[u8]]) -> Vec<u8> {
+    let (sps, pps) = parameter_sets(shape);
+    let slice = i_pcm_slice(shape, 0, Some(0));
+    let units: Vec<&[u8]> = [sps.as_slice(), pps.as_slice()]
+        .into_iter()
+        .chain(extra.iter().copied())
+        .chain([slice.as_slice()])
+        .collect();
+    annex_b(&units)
+}
+
+/// `units` (each whole, header first) after start codes.
+fn annex_b(units: &[&[u8]]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for unit in units {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(unit);
+    }
+    out
+}
+
+/// The SPS and PPS of a Baseline stream of `shape`'s pictures, each
+/// header first: frame numbers of 4 bits, order counts that follow them
+/// (type 2), one reference frame.
+fn parameter_sets(shape: Shape) -> (Vec<u8>, Vec<u8>) {
     let (w, h) = shape.mbs;
     let mut sps = Syntax::default();
     sps.u("profile_idc", 8, 66)
@@ -99,15 +123,33 @@ fn stream(shape: Shape, extra: &[&[u8]]) -> Vec<u8> {
         .u("deblocking_filter_control_present_flag", 1, 1)
         .u("constrained_intra_pred_flag", 1, 0)
         .u("redundant_pic_cnt_present_flag", 1, 0);
+    (sps.finish(0x67), pps.finish(0x68))
+}
+
+/// The one slice, header first, of picture `frame_num` of `shape`: an IDR
+/// picture of `idr_pic_id`, or for `None` a reference I picture after
+/// one. Its macroblocks are all I_PCM: luma sample `i` of macroblock `mb`
+/// is `luma(mb + 16 * frame_num, i)`, every chroma sample 128.
+fn i_pcm_slice(shape: Shape, frame_num: u32, idr_pic_id: Option<u32>) -> Vec<u8> {
+    let (w, h) = shape.mbs;
     let mut slice = Syntax::default();
     slice
         .ue("first_mb_in_slice", 0)
         .ue("slice_type", 7)
         .ue("pic_parameter_set_id", 0)
-        .u("frame_num", 4, 0)
-        .ue("idr_pic_id", 0)
-        .u("no_output_of_prior_pics_flag", 1, 0)
-        .u("long_term_reference_flag", 1, 0)
+        .u("frame_num", 4, i64::from(frame_num));
+    match idr_pic_id {
+        Some(id) => {
+            slice
+                .ue("idr_pic_id", i64::from(id))
+                .u("no_output_of_prior_pics_flag", 1, 0)
+                .u("long_term_reference_flag", 1, 0);
+        }
+        None => {
+            slice.u("adaptive_ref_pic_marking_mode_flag", 1, 0);
+        }
+    }
+    slice
         .se("slice_qp_delta", 0)
         .ue("disable_deblocking_filter_idc", 1);
     for mb in 0..w * h {
@@ -116,23 +158,17 @@ fn stream(shape: Shape, extra: &[&[u8]]) -> Vec<u8> {
             slice.u("pcm_alignment_zero_bit", 1, 0);
         }
         for i in 0..256 {
-            slice.u("pcm_sample_luma", 8, i64::from(luma(mb, i)));
+            slice.u(
+                "pcm_sample_luma",
+                8,
+                i64::from(luma(mb + 16 * frame_num, i)),
+            );
         }
         for _ in 0..128 {
             slice.u("pcm_sample_chroma", 8, 128);
         }
     }
-    let (sps, pps, slice) = (sps.finish(0x67), pps.finish(0x68), slice.finish(0x65));
-    let units = [sps.as_slice(), pps.as_slice()]
-        .into_iter()
-        .chain(extra.iter().copied())
-        .chain([slice.as_slice()]);
-    let mut out = Vec::new();
-    for unit in units {
-        out.extend_from_slice(&[0, 0, 0, 1]);
-        out.extend_from_slice(unit);
-    }
-    out
+    slice.finish(if idr_pic_id.is_some() { 0x65 } else { 0x61 })
 }
 
 /// Every picture `data` decodes to, as one packet, then drained.
@@ -180,6 +216,122 @@ fn a_picture_with_film_grain_is_shown_without_grain() {
     assert_eq!(got.len(), 1);
     // The decoded samples, not a blank frame standing in for grain.
     assert_eq!(luma_plane(&got[0]), written_luma());
+}
+
+/// A band of brightness in a film grain model: its lower and upper bound,
+/// then the strength and the two cut-off frequencies it is given.
+type Band = (i64, i64, i64, i64, i64);
+
+/// A film grain characteristics SEI, header first: frequency filtering,
+/// no colour description, additive blending, `log2_scale_factor`, each
+/// component's `bands` (`None`: no grain), and `repetition_period` (1:
+/// until the next IDR or message).
+fn film_grain_sei(
+    log2_scale_factor: i64,
+    bands: [Option<&[Band]>; 3],
+    repetition_period: i64,
+) -> Vec<u8> {
+    let payload = |s: &mut Syntax| {
+        s.u("film_grain_characteristics_cancel_flag", 1, 0)
+            .u("film_grain_model_id", 2, 0)
+            .u("separate_colour_description_present_flag", 1, 0)
+            .u("blending_mode_id", 2, 0)
+            .u("log2_scale_factor", 4, log2_scale_factor);
+        for b in &bands {
+            s.u("comp_model_present_flag", 1, i64::from(b.is_some()));
+        }
+        for b in bands.iter().flatten() {
+            s.u("num_intensity_intervals_minus1", 8, b.len() as i64 - 1)
+                .u("num_model_values_minus1", 3, 2);
+            for &(lo, hi, strength, cut_h, cut_v) in *b {
+                s.u("intensity_interval_lower_bound", 8, lo)
+                    .u("intensity_interval_upper_bound", 8, hi)
+                    .se("comp_model_value", strength)
+                    .se("comp_model_value", cut_h)
+                    .se("comp_model_value", cut_v);
+            }
+        }
+        s.ue(
+            "film_grain_characteristics_repetition_period",
+            repetition_period,
+        );
+    };
+    // The payload's size in bytes: its bits, then a 1 and zeros to the byte.
+    let mut measure = Syntax::default();
+    payload(&mut measure);
+    let size = (measure.position() - 8) / 8 + 1;
+    assert!(size < 255, "one byte of payload size");
+    let mut sei = Syntax::default();
+    sei.u("payload_type", 8, 19)
+        .u("payload_size", 8, size as i64);
+    payload(&mut sei);
+    sei.u("payload_bit_equal_to_one", 1, 1);
+    while sei.position() % 8 != 0 {
+        sei.u("payload_bit_equal_to_zero", 1, 0);
+    }
+    sei.finish(0x06)
+}
+
+/// A picture's planes, cropped, summed as FFmpeg's `framecrc` muxer sums a
+/// raw frame: one Adler-32 over the luma, then each chroma plane, started
+/// from 0 rather than Adler-32's 1.
+fn framecrc(p: &Picture) -> u32 {
+    let (mut a, mut b) = (0u32, 0u32);
+    for c in 0..3 {
+        let plane = p.plane8(c).unwrap();
+        for y in 0..plane.height {
+            for &s in &plane.data[y * plane.stride..y * plane.stride + plane.width] {
+                a = (a + u32::from(s)) % 65521;
+                b = (b + a) % 65521;
+            }
+        }
+    }
+    (b << 16) | a
+}
+
+/// Three I_PCM pictures, each a packet with a film grain message: each
+/// shown with grain seeded by its own order count -- and the IDR's by its
+/// id too -- as FFmpeg shows it. (A message does not outlast its packet:
+/// FFmpeg forgets it as the next begins, whatever its repetition period.)
+/// The sums are FFmpeg 8.1.3's (`tools/ffdbg`'s build): with
+/// `H264_WRITE_GRAIN=<file>` this test writes the stream there, and
+/// `ffmpeg -threads 1 -i <file> -f framecrc -` sums it.
+#[test]
+fn pictures_with_film_grain_are_shown_with_ffmpegs_grain() {
+    let shape = Shape {
+        mbs: (2, 2),
+        ..PLAIN
+    };
+    let (sps, pps) = parameter_sets(shape);
+    let sei = film_grain_sei(
+        3,
+        [
+            Some(&[(0, 100, 60, 6, 9), (101, 255, -45, 10, 4)]),
+            Some(&[(0, 255, 40, 3, 3)]),
+            None,
+        ],
+        1,
+    );
+    let packets = [
+        annex_b(&[&sps, &pps, &sei, &i_pcm_slice(shape, 0, Some(3))]),
+        annex_b(&[&sei, &i_pcm_slice(shape, 1, None)]),
+        annex_b(&[&sei, &i_pcm_slice(shape, 2, None)]),
+    ];
+    if let Some(path) = std::env::var_os("H264_WRITE_GRAIN") {
+        std::fs::write(path, packets.concat()).unwrap();
+    }
+    let mut d = Decoder::new();
+    let mut got = Vec::new();
+    for (k, packet) in packets.iter().enumerate() {
+        got.extend(d.decode(packet, k as i64, 1).unwrap());
+    }
+    while let Some(p) = d.drain() {
+        got.push(p);
+    }
+    let sums: Vec<u32> = got.iter().map(framecrc).collect();
+    assert_eq!(sums, [0x544b_cb2d, 0xb6cb_cc00, 0x0104_ccb0]);
+    // Without grain FFmpeg shows them as 0x68d2cd96, 0x1866ce66 and
+    // 0x409ece6e (`-export_side_data film_grain`).
 }
 
 #[test]

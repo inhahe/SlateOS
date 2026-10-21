@@ -1109,14 +1109,23 @@ impl Context {
     /// (`alloc_picture`).
     fn alloc_picture(&mut self, slot: usize, sps: &Sps) -> Result<(), DecodeError> {
         #[allow(clippy::cast_sign_loss, reason = "coded sizes are positive")]
-        let frame = AnyFrame::new(
-            self.width as usize,
-            self.height as usize,
-            self.chroma_x_shift,
-            self.chroma_y_shift,
-            sps.bit_depth_luma,
-        )
-        .ok_or(DecodeError)?;
+        let new_frame = || {
+            AnyFrame::new(
+                self.width as usize,
+                self.height as usize,
+                self.chroma_x_shift,
+                self.chroma_y_shift,
+                sps.bit_depth_luma,
+            )
+            .ok_or(DecodeError)
+        };
+        let frame = new_frame()?;
+        // The frame it is shown as with grain, of the same size and layout.
+        let f_grain = if self.pics[slot].needs_fg {
+            Some(new_frame()?)
+        } else {
+            None
+        };
 
         #[allow(clippy::cast_sign_loss, reason = "a macroblock count from the SPS")]
         let (big_mb_num, mb_array_size, b4_array_size) = {
@@ -1157,6 +1166,7 @@ impl Context {
         };
         let pic = &mut self.pics[slot];
         pic.f = Some(Arc::new(frame));
+        pic.f_grain = f_grain.map(Arc::new);
         pic.props.format = a.pix_fmt;
         pic.props.sample_aspect_ratio = sar;
         pic.props.color_range = a.color_range;
@@ -1205,10 +1215,10 @@ impl Context {
             ]
             .map(|c| c as u32);
             pic.props.crop = crop;
-            // A picture with film grain characteristics is shown without
-            // grain, as FFmpeg shows it when it cannot synthesize the grain
-            // or is asked for the parameters instead: no synthesis here yet
-            // (todo.txt, "h264: film grain synthesis"), so no `needs_fg`.
+            // Under a film grain message the picture is shown with grain:
+            // FFmpeg leaves it to the caller only when asked to export the
+            // parameters instead, which this decoder never is.
+            pic.needs_fg = self.sei.film_grain.as_ref().is_some_and(|f| f.present);
         }
         if self.alloc_picture(slot, &sps).is_err() {
             self.unref_pic(slot);

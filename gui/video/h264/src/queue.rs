@@ -251,14 +251,14 @@ impl Context {
             // was decoded as it was queued.
             if self.current_slice != 0 {
                 if self.cur_pic_ptr.is_some() && self.field_picture() && self.first_field != 0 {
-                    self.field_end()?;
+                    self.field_end(true)?;
                 } else if self.cur_pic_ptr.is_some()
                     && !self.field_picture()
                     && self.first_field == 0
                     && self.nal_unit_type == NAL_IDR_SLICE
                 {
                     // Broken frame packetizing.
-                    let r = self.field_end();
+                    let r = self.field_end(true);
                     self.cur_pic_ptr = None;
                     r?;
                 } else {

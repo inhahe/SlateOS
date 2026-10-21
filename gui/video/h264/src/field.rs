@@ -21,8 +21,9 @@
 use std::sync::Arc;
 
 use crate::decoder::{Context, DecodeError, MAX_DPB_FRAMES, SliceContext, cmp_q};
+use crate::h274::{GrainParams, apply_film_grain};
 use crate::nal::{NAL_IDR_SLICE, Nal};
-use crate::picture::{DELAYED_PIC_REF, FRAME_RECOVERED_IDR, FRAME_RECOVERED_SEI};
+use crate::picture::{AnyFrame, DELAYED_PIC_REF, FRAME_RECOVERED_IDR, FRAME_RECOVERED_SEI};
 use crate::poc::init_poc;
 use crate::ps::Sps;
 use crate::sei::{
@@ -118,9 +119,22 @@ impl Context {
     /// The SEI's side data onto picture `cur` (`ff_h2645_sei_to_frame`,
     /// with `h2645_sei_to_side_data`): what is about the picture -- its
     /// stereo packing, its orientation, captions, the display it was
-    /// mastered on -- each message taken as FFmpeg takes it, the captions,
-    /// unregistered data and AFD used up as they are attached.
+    /// mastered on, the film grain to show it with -- each message taken as
+    /// FFmpeg takes it, the captions, unregistered data and AFD used up as
+    /// they are attached.
     fn sei_to_frame(&mut self, cur: usize) {
+        // The grain's seed (FFmpeg's `seed` argument): the order count plus
+        // the last IDR's id five bits up, an int FFmpeg widens into the
+        // uint64_t it keeps it in.
+        #[allow(
+            clippy::cast_sign_loss,
+            reason = "FFmpeg's int widened into a uint64_t"
+        )]
+        let grain_seed = i64::from(
+            self.pics[cur]
+                .poc
+                .wrapping_add(self.poc_offset.wrapping_shl(5)),
+        ) as u64;
         let sei = &mut self.sei;
         let props = &mut self.pics[cur].props;
 
@@ -224,10 +238,17 @@ impl Context {
             props.side_data.push(SideData::Lcevc(lcevc));
         }
         if let Some(fg) = sei.film_grain.as_mut().filter(|f| f.present) {
-            // Applied when the picture is done, not yet translated
-            // (todo.txt: "h264: film grain synthesis"); what the message
-            // leaves for the pictures after this one is kept as FFmpeg
-            // keeps it.
+            // Made into the picture when it is finished (`field_end`). FFmpeg
+            // reads the first of a frame's film grain side data, so a second
+            // field's message changes nothing.
+            let params = &mut self.pics[cur].film_grain;
+            if params.is_none() {
+                *params = Some(Box::new(GrainParams {
+                    seed: grain_seed,
+                    model: (**fg).clone(),
+                }));
+            }
+            // What the message leaves for the pictures after this one.
             fg.present = fg.repetition_period != 0;
         }
     }
@@ -529,6 +550,7 @@ impl Context {
                     Some(p) if self.pics[first].same_shape(&self.pics[p]) => {
                         self.pics[first].f = self.pics[p].f.clone();
                         self.pics[first].props = self.pics[p].props.clone();
+                        self.pics[first].film_grain = self.pics[p].film_grain.clone();
                         self.pics[first].poc = self.pics[p].poc.wrapping_add(2);
                         self.pics[first].gray = self.pics[p].gray;
                     }
@@ -663,8 +685,11 @@ impl Context {
     }
 
     /// A frame or field finished (`ff_h264_field_end`): a reference marked,
-    /// and the order count and frame number kept for the next picture's.
-    pub(crate) fn field_end(&mut self) -> Result<(), DecodeError> {
+    /// the order count and frame number kept for the next picture's, and
+    /// the picture's film grain made -- once both its fields are decoded,
+    /// and unless it is finished only to begin the next picture of the same
+    /// packet (`in_setup`), where FFmpeg makes none.
+    pub(crate) fn field_end(&mut self, in_setup: bool) -> Result<(), DecodeError> {
         let mut err = Ok(());
         self.mb_y = 0;
         if !self.droppable {
@@ -674,7 +699,44 @@ impl Context {
         }
         self.poc.prev_frame_num_offset = self.poc.frame_num_offset;
         self.poc.prev_frame_num = self.poc.frame_num;
+
+        let whole = !self.field_picture() || self.first_field == 0;
+        if let Some(cur) = self
+            .cur_pic_ptr
+            .filter(|&c| !in_setup && whole && self.pics[c].needs_fg)
+        {
+            // A picture whose grain cannot be made is shown without it. In
+            // FFmpeg this branch sets the error it returns either way, so a
+            // marking error goes unreported here.
+            if !self.make_film_grain(cur) {
+                self.pics[cur].needs_fg = false;
+            }
+            err = Ok(());
+        }
         self.current_slice = 0;
         err
+    }
+
+    /// Picture `cur`'s grain made into the frame it is shown as
+    /// (`ff_h274_apply_film_grain` on `f_grain`): whether it was -- not
+    /// where the picture has no grain parameters (FFmpeg's side data was
+    /// never attached, decoding having failed first) or they cannot be
+    /// applied to it.
+    fn make_film_grain(&mut self, cur: usize) -> bool {
+        let pic = &mut self.pics[cur];
+        let (Some(params), Some(input), Some(out)) = (
+            pic.film_grain.as_deref(),
+            pic.f.as_deref(),
+            pic.f_grain.as_mut(),
+        ) else {
+            return false;
+        };
+        match (Arc::make_mut(out), input) {
+            (AnyFrame::Eight(out), AnyFrame::Eight(input)) => {
+                apply_film_grain(out, input, pic.props.format, params).is_ok()
+            }
+            // Beyond 8 bits: refused as FFmpeg refuses all but yuv420p.
+            _ => false,
+        }
     }
 }

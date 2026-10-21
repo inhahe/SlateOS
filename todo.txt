@@ -59325,22 +59325,3 @@ is still run by hand, not by `boot-test.sh`.
   guess; tests for a video giving only its primaries, only its matrix, and
   only HDR; the player's fixtures unchanged for fully described and
   untagged video.
-
-## Lane F — the H.264 decoder, translated a module at a time (2026-10-10)
-
-- **h264: film grain synthesis** (`gui/video/h264/src/field.rs`,
-  `sei_to_frame`; `decoder.rs`, `frame_start`). FFmpeg adds H.274 film
-  grain to a finished picture that carries a film grain characteristics
-  SEI: `h264_field_start` sets `needs_fg` and gets a second frame,
-  `f_grain`; `ff_h264_field_end` synthesizes the grain into it
-  (`ff_h274_apply_film_grain`, `h274.c`) and `output_frame` hands it out
-  -- or, where synthesis fails, clears `needs_fg` and hands out the
-  picture as decoded. Here the SEI is read and its persistence kept as
-  FFmpeg keeps it, and every picture is handed out as decoded: what FFmpeg
-  shows when synthesis fails, or when the caller asks for the parameters
-  instead (`AV_CODEC_EXPORT_DATA_FILM_GRAIN`). FATE has no H.264 film
-  grain sample and x264 writes none. **Do it**: translate `h274.c`'s
-  synthesis and its tables, and `ff_h2645_sei_to_frame`'s film grain
-  parameters; put `needs_fg` and `f_grain` back as FFmpeg has them; write
-  film grain SEIs into conformance streams with the tests' `Syntax` writer
-  (`src/tests.rs` writes one) and compare each picture with FFmpeg's.

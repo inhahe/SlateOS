@@ -23,6 +23,7 @@
 
 use std::sync::Arc;
 
+use crate::h274::GrainParams;
 use crate::ps::Pps;
 use crate::side_data::SideData;
 
@@ -291,6 +292,16 @@ pub(crate) struct FrameProps {
 pub(crate) struct Picture {
     /// The samples (`f`); `None` when the slot is free (`!f->buf[0]`).
     pub(crate) f: Option<Arc<AnyFrame>>,
+    /// Whether it is to be shown with film grain (`needs_fg`): begun while
+    /// a film grain message was in force, and not refused when the grain
+    /// was to be made.
+    pub(crate) needs_fg: bool,
+    /// The frame shown in its place when it is (`f_grain`): allocated with
+    /// `f`, the grain made into it when the picture is finished.
+    pub(crate) f_grain: Option<Arc<AnyFrame>>,
+    /// The grain it is to be shown with: the film grain side data FFmpeg
+    /// attaches to `f`, the first one attached when both fields bring one.
+    pub(crate) film_grain: Option<Box<GrainParams>>,
     /// The frame's other properties.
     pub(crate) props: FrameProps,
     /// The quantizer of each macroblock (`qscale_table`), and the

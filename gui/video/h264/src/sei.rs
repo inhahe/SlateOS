@@ -126,12 +126,15 @@ pub(crate) struct FilmGrain {
     pub(crate) blending_mode_id: u32,
     pub(crate) log2_scale_factor: u32,
     pub(crate) comp_model_present_flag: [u32; 3],
-    pub(crate) num_intensity_intervals: [u32; 3],
-    pub(crate) num_model_values: [u32; 3],
+    /// The rest in FFmpeg's types (`uint16_t`, `uint8_t`, `int16_t`): a
+    /// model value past 16 bits is cut to them where it is stored, as
+    /// FFmpeg's is, and film grain synthesis reads it so.
+    pub(crate) num_intensity_intervals: [u16; 3],
+    pub(crate) num_model_values: [u8; 3],
     /// A row for each of the three components.
-    pub(crate) intensity_interval_lower_bound: Box<[[u32; 256]]>,
-    pub(crate) intensity_interval_upper_bound: Box<[[u32; 256]]>,
-    pub(crate) comp_model_value: Box<[[[i32; 6]; 256]]>,
+    pub(crate) intensity_interval_lower_bound: Box<[[u8; 256]]>,
+    pub(crate) intensity_interval_upper_bound: Box<[[u8; 256]]>,
+    pub(crate) comp_model_value: Box<[[[i16; 6]; 256]]>,
     pub(crate) repetition_period: u32,
 }
 
@@ -707,16 +710,25 @@ fn decode_film_grain(h: &mut FilmGrain, gb: &mut Bits<'_>) -> Result<(), SeiErro
         if h.comp_model_present_flag[c] == 0 {
             continue;
         }
-        h.num_intensity_intervals[c] = gb.bits(8) + 1;
-        h.num_model_values[c] = gb.bits(3) + 1;
+        #[allow(clippy::cast_possible_truncation, reason = "8 and 3 bits, plus 1")]
+        {
+            h.num_intensity_intervals[c] = (gb.bits(8) + 1) as u16;
+            h.num_model_values[c] = (gb.bits(3) + 1) as u8;
+        }
         if h.num_model_values[c] > 6 {
             return Err(SeiError::Invalid);
         }
-        for i in 0..h.num_intensity_intervals[c] as usize {
-            h.intensity_interval_lower_bound[c][i] = gb.bits(8);
-            h.intensity_interval_upper_bound[c][i] = gb.bits(8);
-            for j in 0..h.num_model_values[c] as usize {
-                h.comp_model_value[c][i][j] = gb.se_long();
+        for i in 0..usize::from(h.num_intensity_intervals[c]) {
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "8-bit bounds; the values cut to FFmpeg's int16_t"
+            )]
+            {
+                h.intensity_interval_lower_bound[c][i] = gb.bits(8) as u8;
+                h.intensity_interval_upper_bound[c][i] = gb.bits(8) as u8;
+                for j in 0..usize::from(h.num_model_values[c]) {
+                    h.comp_model_value[c][i][j] = gb.se_long() as i16;
+                }
             }
         }
     }

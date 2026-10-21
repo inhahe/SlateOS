@@ -4816,8 +4816,16 @@ lane C's `guitk`.
         A key frame seek in an MP4 lands on the key frame the time falls
         under, where FFmpeg's seek, by the decoding timeline, can land one
         early when pictures are shown out of order.
-      - `[ ]` Film grain: the SEI is read; FFmpeg applies it
-        (`h274.c`), and that is not translated yet.
+      - `[x]` Film grain (2026-10-21): `h274.c` translated -- the grain a
+        film grain characteristics SEI describes, made into a second frame
+        as each picture is finished and shown in its place, the decoded
+        frame kept for prediction; a picture FFmpeg gives none (not 8-bit
+        4:2:0) shown without. Held to FFmpeg's own synthesis on synthetic
+        pictures (`tools/h274_expect.c`), and to FFmpeg's decoder on 458
+        streams `tools/pict_expect.py` gives film grain characteristics --
+        every raw stream with a model before every picture, and before
+        every fifth -- 6810 of whose pictures have grain; with them 1768
+        streams, all matching in every picture.
       - `[ ]` Speed: about half FFmpeg's C (without assembly) on a
         720x480 conformance stream; no work on it yet.
     - `[ ]` HEVC: an optional install, the decoder HEIC's (§1370).

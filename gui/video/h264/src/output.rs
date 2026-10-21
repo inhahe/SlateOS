@@ -499,10 +499,16 @@ impl Context {
         );
     }
 
-    /// The frame and its properties as handed out (`output_frame`).
+    /// The frame and its properties as handed out (`output_frame`): the
+    /// frame with its film grain where it has some, with the decoded
+    /// frame's properties.
     fn output_frame(&self, out: usize) -> Option<Output> {
         let pic = &self.pics[out];
-        let frame = pic.f.clone()?;
+        let frame = if pic.needs_fg {
+            pic.f_grain.clone()?
+        } else {
+            pic.f.clone()?
+        };
         let mut props = pic.props.clone();
         if pic.sei_recovery_frame_cnt == 0 {
             props.key = true;
@@ -594,7 +600,7 @@ impl Context {
             return Err(DecodeError);
         }
 
-        self.field_end()?;
+        self.field_end(false)?;
         let out = match self.next_output_pic {
             Some(out) => self.finalize_frame(out),
             None => None,

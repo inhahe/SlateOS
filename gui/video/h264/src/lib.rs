@@ -72,6 +72,8 @@
 //! - `er`: `error_resilience.c` and `h264_er_decode_mb` -- the macroblocks
 //!   of a frame that no slice decoded, or that a slice failed in, guessed
 //!   from around them.
+//! - `h274`: `h274.c` -- the film grain a film grain characteristics SEI
+//!   describes, synthesized onto a finished picture as it is shown.
 //! - `output`: `h264dec.c`'s packet loop -- extradata, NAL units handed to
 //!   their parts, pictures finished and handed out, the last ones drained.
 //! - `side_data`: what FFmpeg attaches to a frame from SEI -- stereo
@@ -86,6 +88,7 @@ mod decoder;
 mod direct;
 mod er;
 mod field;
+mod h274;
 mod idct;
 mod loopfilter;
 mod mb;

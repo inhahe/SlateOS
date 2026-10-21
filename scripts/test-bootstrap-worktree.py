@@ -422,16 +422,28 @@ def _git_calls(log: str) -> list[str]:
         return [line.strip() for line in fh if line.strip()]
 
 
-def _provision(tmp, name, git_exit, *, checked_out=False, fastpy_dir=None):
-    """Fully provision a fake tree named `name` with a stubbed git exiting
-    `git_exit`. Returns (exit status, output, git calls)."""
-    root = make_tree(tmp, name, ["init"])
-    if checked_out:
-        # A submodule's checkout has a `.git` file naming its git directory.
-        os.makedirs(os.path.join(root, "toolchain", "fastpy"))
-        with open(os.path.join(root, "toolchain", "fastpy", ".git"), "w",
+def _fake_fastpy(directory, *, files=True):
+    """A fastpy checkout in `directory` as far as anything here looks at one:
+    the `.git` file a submodule's checkout has, and `compiler/__init__.py`
+    unless `files` is False -- a checkout cut short after its clone."""
+    os.makedirs(os.path.join(directory, "compiler"), exist_ok=True)
+    with open(os.path.join(directory, ".git"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write("gitdir: ../../.git/modules/toolchain/fastpy\n")
+    if files:
+        with open(os.path.join(directory, "compiler", "__init__.py"), "w",
                   encoding="utf-8", newline="\n") as fh:
-            fh.write("gitdir: ../../.git/modules/toolchain/fastpy\n")
+            fh.write("")
+
+
+def _provision(tmp, name, git_exit, *, checked_out=None, fastpy_dir=None):
+    """Fully provision a fake tree named `name` with a stubbed git exiting
+    `git_exit`; `checked_out` is "whole" or "cut short" for a toolchain/fastpy
+    already there. Returns (exit status, output, git calls)."""
+    root = make_tree(tmp, name, ["init"])
+    if checked_out is not None:
+        _fake_fastpy(os.path.join(root, "toolchain", "fastpy"),
+                     files=checked_out == "whole")
     bindir, cargo_log = _stub_cargo(os.path.join(tmp, "stubs-" + name))
     git_log = _stub_git_and_powershell(bindir, git_exit)
     env = dict(os.environ)
@@ -442,7 +454,8 @@ def _provision(tmp, name, git_exit, *, checked_out=False, fastpy_dir=None):
     env["STUB_CARGO_LOG"] = cargo_log
     proc = subprocess.run(
         [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh")],
-        cwd=root, capture_output=True, text=True, env=env,
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=env,
     )
     return proc.returncode, proc.stdout + proc.stderr, _git_calls(git_log)
 
@@ -472,26 +485,30 @@ def test_provisioning_checks_out_the_fastpy_submodule(tmp):
 def test_provisioning_leaves_a_checked_out_fastpy_alone(tmp):
     """`submodule update` moves a checkout to the pin with its output
     silenced, leaving behind commits made in it, so a checkout already there
-    is not touched; and FASTPY_DIR naming a checkout makes the submodule
-    unneeded -- the advice the failure above gives must be one that works."""
-    status, out, calls = _provision(tmp, "fastpy-present", 1, checked_out=True)
+    is not touched -- but one cut short after its clone is retried. And a
+    failed checkout is no failure when FASTPY_DIR names a checkout: the
+    advice the failure gives must be one that works."""
+    status, out, calls = _provision(tmp, "fastpy-present", 1, checked_out="whole")
     check("a checked-out toolchain/fastpy runs no git", calls == [],
           "calls: %r\n%s" % (calls, out))
     check("...and provisions the tree", status == OK, "got %d\n%s" % (status, out))
-    fastpy = os.path.join(tmp, "elsewhere-fastpy")
-    os.makedirs(os.path.join(fastpy, "compiler"))
-    with open(os.path.join(fastpy, "compiler", "__init__.py"), "w",
-              encoding="utf-8", newline="\n") as fh:
-        fh.write("")
-    status, out, calls = _provision(tmp, "fastpy-dir", 1, fastpy_dir=fastpy)
-    check("with FASTPY_DIR naming a checkout, no git runs", calls == [],
+    status, out, calls = _provision(tmp, "fastpy-cut-short", 0,
+                                    checked_out="cut short")
+    check("one with a .git and no compiler/ is checked out again",
+          len(calls) == 1 and "submodule update --init" in calls[0],
           "calls: %r\n%s" % (calls, out))
-    check("...the tree is provisioned, though git would have failed",
-          status == OK, "got %d\n%s" % (status, out))
-    status, out, calls = _provision(tmp, "fastpy-dir-wrong", 0,
+    fastpy = os.path.join(tmp, "elsewhere-fastpy")
+    _fake_fastpy(fastpy)
+    status, out, calls = _provision(tmp, "fastpy-dir", 1, fastpy_dir=fastpy)
+    check("with FASTPY_DIR naming a checkout, the submodule is still tried",
+          len(calls) == 1, "calls: %r\n%s" % (calls, out))
+    check("...and its failing provisions the tree, saying how WSL sees FASTPY_DIR",
+          status == OK and "WSLENV=FASTPY_DIR/p" in out,
+          "got %d\n%s" % (status, out))
+    status, out, calls = _provision(tmp, "fastpy-dir-wrong", 1,
                                     fastpy_dir=os.path.join(tmp, "nowhere"))
-    check("a FASTPY_DIR naming no checkout fails, and says so",
-          status != OK and "FAILED: fastpy" in out
+    check("a FASTPY_DIR naming no checkout does not save a failed checkout, "
+          "and is named", status != OK and "FAILED: fastpy" in out
           and "no compiler/__init__.py" in out, "got %d\n%s" % (status, out))
 
 

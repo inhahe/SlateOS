@@ -320,6 +320,13 @@ pub fn webm(width: u16, height: u16, secs: u32, fps: u32) -> Vec<u8> {
     matroska("webm", "V_VP9", width, height, secs, fps)
 }
 
+/// [`mkv`]'s file with an HEVC (H.265) picture: for a player's tests of a
+/// film whose pictures it cannot decode.
+#[must_use]
+pub fn mkv_hevc(width: u16, height: u16, secs: u32, fps: u32) -> Vec<u8> {
+    matroska("matroska", "V_MPEGH/ISO/HEVC", width, height, secs, fps)
+}
+
 // ============================================================================
 // AVI
 // ============================================================================

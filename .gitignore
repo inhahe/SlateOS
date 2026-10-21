@@ -206,10 +206,9 @@ scratch_*.py
 # anyone meaning to. Untracked here; the file itself stays where it is.
 .claude/scheduled_tasks.lock
 
-# The operator's own scripts: go.bat launches the lanes' sessions (which
-# account, which session, which prompt this week), and push.bat was a
-# commit-everything-and-push shortcut. Neither is part of the project.
-# Untracked in the operator's tree, where the file stays; a lane worktree's
-# copy, which nobody edits, goes when it merges the commit that untracked it.
+# The operator's own scripts, which are not part of the project and must not
+# be swept in by a `git add -A`: go.bat, the operator's launcher for the
+# lanes' sessions, and push.bat, should the operator's commit-everything
+# script be re-created (it runs `git add -A` itself).
 /go.bat
 /push.bat

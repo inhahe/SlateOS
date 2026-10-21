@@ -111,6 +111,57 @@ def vanished_trace() -> None:
           (inputs, any("vanished" in w for w in why)), (None, True))
 
 
+def unreadable_trace() -> None:
+    """A trace file that does not parse -- two writers' output in one file,
+    say -- leaves the run untraced, as a vanished directory does, rather than
+    raising and turning the gate's verdict into a refused boot."""
+    import srcload
+    gc = srcload.load(DRIVER, "gate_cache")
+    d = tempfile.mkdtemp(prefix="gate-trace-unreadable-")
+    try:
+        with open(os.path.join(d, "git-root.1.json"), "w", encoding="utf-8",
+                  newline="\n") as fh:
+            fh.write('{"rc": 0}{"rc": 0}')
+        inputs, why = gc.merge(d)
+        check("an unreadable trace file is an untraced run, not an error",
+              (inputs, any("could not be read: git-root.1.json" in w for w in why)),
+              (None, True))
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def ids_are_unique_across_processes() -> None:
+    """Two traced processes that share one inherited spawn id -- each reached
+    through an untraced intermediary -- must still name their children and
+    their git records apart. Alike, two records shared one file: one's answer
+    replaced the other's, or both landed in it and the trace would not parse."""
+    import srcload
+    gt = srcload.load(os.path.join(HERE, "gatecache_trace.py"), "gatecache_trace")
+    d = tempfile.mkdtemp(prefix="gate-trace-ids-")
+    try:
+        repo = os.path.join(d, "some-repo")
+        a, b = gt._Tracer(d, "root.7"), gt._Tracer(d, "root.7")
+
+        def git_record(t) -> str:
+            args, _ = gt._classify(t, ["git", "-C", repo, "rev-parse", "HEAD"], (), {},
+                                   "site", "tee.py")
+            return args[2]
+
+        def python_child(t) -> str:
+            _, k = gt._classify(t, [sys.executable, "-c", "pass"], (), {}, "site", "tee.py")
+            return k["env"]["GATE_CACHE_SPAWN"]
+
+        ra, rb = git_record(a), git_record(b)
+        check("two processes with one inherited spawn id name their git records apart",
+              (os.path.basename(ra).startswith("git-root.7."), ra != rb), (True, True))
+        check("...and their Python children apart",
+              python_child(a) != python_child(b), True)
+        check("one process still numbers its own children apart",
+              python_child(a) != python_child(a), True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def main() -> int:
     # The checkers these cases trace run `git -C <scratch repo>` with the
     # environment they inherit, and under a git hook that environment binds a
@@ -137,6 +188,8 @@ def main() -> int:
     finally:
         fx.cleanup()
     vanished_trace()
+    unreadable_trace()
+    ids_are_unique_across_processes()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}")

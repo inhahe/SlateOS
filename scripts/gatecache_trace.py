@@ -211,6 +211,13 @@ class _Tracer:
         self.lock = threading.RLock()
         self.local = threading.local()
         self.counter = 0
+        # Part of every id this process mints. An inherited spawn id is not
+        # unique: a Python process reached through an untraced intermediary (a
+        # shell, any other program) inherits its parent's GATE_CACHE_SPAWN
+        # rather than being given one, so several such processes would count
+        # `<id>.1`, `<id>.2`... alike, and name their git records alike. Random
+        # rather than the pid, which Windows hands out again within one run.
+        self.nonce = os.urandom(4).hex()
         self.ended = False
 
     def busy(self) -> bool:
@@ -675,7 +682,7 @@ def _classify(t: _Tracer, args, a, k, site_dir: str, tee: str):
     exe = os.fsdecode(k["executable"]) if k.get("executable") else (argv[0] if argv else "")
     with t.lock:
         t.counter += 1
-        sid = f"{t.spawn_id or 'root'}.{t.counter}"
+        sid = f"{t.spawn_id or 'root'}.{t.nonce}.{t.counter}"
     base_env = dict(os.environ) if env is None else {
         os.fsdecode(n): os.fsdecode(v) for n, v in env.items()}
     overlay = sorted(n for n in set(base_env) | set(os.environ)

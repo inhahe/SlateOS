@@ -101,7 +101,9 @@ def main() -> int:
         "stderr_sha": hashes["stderr"].hexdigest(),
         "rc": rc,
     }
-    tmp = record + ".tmp"
+    # Its own temporary, so that two writers of one record can at worst replace
+    # each other whole, never interleave in one file.
+    tmp = record + f".{os.getpid()}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
             json.dump(out, fh)

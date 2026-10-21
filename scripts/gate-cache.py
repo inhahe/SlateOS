@@ -222,12 +222,21 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
         path = os.path.join(trace_dir, name)
         if name.endswith(".tmp"):
             why.append(f"a trace file was never finished: {name}")
-        elif name.startswith("proc-"):
+            continue
+        if not name.startswith(("proc-", "git-")):
+            continue
+        # A record that cannot be read leaves the run untraced, as a vanished
+        # directory does above: not stored, the checker's verdict standing.
+        try:
             with open(path, encoding="utf-8") as fh:
-                procs.append(json.load(fh))
-        elif name.startswith("git-"):
-            with open(path, encoding="utf-8") as fh:
-                records[gt.norm(path)] = json.load(fh)
+                rec = json.load(fh)
+        except (OSError, ValueError) as exc:
+            why.append(f"a trace file could not be read: {name} ({exc})")
+            continue
+        if name.startswith("proc-"):
+            procs.append(rec)
+        else:
+            records[gt.norm(path)] = rec
     spawned = {p["spawn"] for p in procs}
     if "root" not in spawned:
         why.append("the checker's own trace is missing (it exited before its exit handlers)")

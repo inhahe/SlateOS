@@ -196,6 +196,51 @@ def test_unnamed_the_submodule_is_the_checkout_and_nothing_else_is_searched():
                     os.environ[name] = value
 
 
+def test_the_submodule_must_be_the_commit_the_tree_pins():
+    """A merge that moves the pin leaves the submodule where it was; bundling
+    it then puts an older compiler on the image than the fixtures are built
+    with. So it is refused unless it is the pinned commit, unedited."""
+    pin = "5b11d8825e868140cf9c6350f92192c82fb0f3d7"
+    check("the pinned commit is bundled without a word",
+          bundle.check_pin(pin, pin), None)
+    err = raises(bundle.check_pin, "6ec4a2e95b73e2dcbfd0adf4574a89c76d63c866", pin)
+    check("another commit is refused, naming the command that moves it",
+          err is not None and "git submodule update toolchain/fastpy" in err
+          and pin in err, True)
+    err = raises(bundle.check_pin, f"{pin}-dirty", pin)
+    check("the pinned commit with edits in it is refused too",
+          err is not None and "uncommitted edits" in err, True)
+    note = bundle.check_pin(pin, None)
+    check("a pin git cannot read is said, not refused",
+          note is not None and "cannot read the commit" in note and pin in note, True)
+
+
+def test_a_worktrees_windows_git_dir_is_translated_only_where_it_can_be():
+    """`pinned_commit` retries under WSL with the worktree's git directory as
+    WSL names it. Only a `.git` file naming a Windows path is a candidate, and
+    only where `wslpath` exists -- not a main checkout's `.git` directory, nor
+    a relative `gitdir:` that git already follows."""
+    saved_repo = bundle.REPO
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            directory = Path(tmp) / "main"
+            (directory / ".git").mkdir(parents=True)
+            bundle.REPO = directory
+            check("a .git directory is not translated", bundle._wsl_git_dir(), None)
+            relative = Path(tmp) / "relative"
+            write(relative / ".git", "gitdir: ../main/.git/worktrees/x\n")
+            bundle.REPO = relative
+            check("a relative gitdir is not translated", bundle._wsl_git_dir(), None)
+            windows = Path(tmp) / "windows"
+            write(windows / ".git", "gitdir: C:/x/.git/worktrees/y\n")
+            bundle.REPO = windows
+            if bundle.shutil.which("wslpath") is None:
+                check("with no wslpath, a Windows gitdir is left alone",
+                      bundle._wsl_git_dir(), None)
+        finally:
+            bundle.REPO = saved_repo
+
+
 def test_llvmlite_must_be_the_package_directory():
     with tempfile.TemporaryDirectory() as tmp:
         pkg = fake_llvmlite(Path(tmp))
@@ -381,8 +426,8 @@ def main() -> int:
     no tests prints nothing and exits 0, which reads as a pass."""
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 13:
-        print(f"FATAL: found only {len(tests)} tests; the suite has 13. "
+    if len(tests) < 15:
+        print(f"FATAL: found only {len(tests)} tests; the suite has 15. "
               "Discovery is broken, not the code.")
         return 1
     for _, fn in sorted(tests):

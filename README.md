@@ -55,7 +55,7 @@ Development is organized into phases (Phase 0 foundation → Phase 5 advanced fe
 
 SlateOS is developed on Windows (edit + cross-compile) and booted in **QEMU**. The kernel builds against a custom target (`toolchain/x86_64-slateos.json`) on a Rust **nightly** toolchain; some host-side crates with C dependencies require the Visual Studio Build Tools. See [`CLAUDE.md`](CLAUDE.md) for the exact toolchain, compiler paths, and environment setup.
 
-Clone with `git clone --recursive`, or run `git submodule update --init` in an existing clone: the programs written in Python are compiled by the fastpy in `toolchain/fastpy`, the commit this tree pins. `./scripts/bootstrap-worktree.sh` checks it out along with everything else a fresh checkout lacks. To build with another fastpy checkout — one you are changing — set `FASTPY_DIR` to it.
+Clone with `git clone --recursive`, or run `git submodule update --init` in an existing clone: the programs written in Python are compiled by the fastpy in `toolchain/fastpy`, the commit this tree pins. `./scripts/bootstrap-worktree.sh` checks it out along with everything else a fresh checkout lacks. To build with another fastpy checkout — one you are changing — set `FASTPY_DIR` to it. The rootfs is built under WSL, which sees a Windows variable only when told to: `WSLENV=FASTPY_DIR/p` passes it, path translated, so `/bin/fastpy` comes from the same checkout as the programs.
 
 Typical loops:
 

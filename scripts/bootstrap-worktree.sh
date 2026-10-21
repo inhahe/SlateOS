@@ -327,11 +327,27 @@ provision_sysroot() {
 # Check out `toolchain/fastpy`: fastpy, a submodule pinned to the commit this
 # tree was tested with, which `ctest-fixtures.py build` compiles the fastpy-*
 # programs with and the rootfs recipe bundles as /bin/fastpy. A clone or a new
-# worktree holds only an empty directory there until this runs. `submodule
-# update` clones it the first time and afterwards moves it to the pinned
-# commit, so it is a no-op on a current checkout; it refuses rather than
-# overwrite uncommitted edits in it.
+# worktree holds only an empty directory there until this runs.
+#
+# Only an empty one is checked out. One already there is left at whatever
+# commit it is on: `submodule update` would move it to the pin with its
+# output silenced, leaving behind any commit made in it -- a pin about to be
+# moved, say. Moving it to the pin is the fixture build's, which refuses over
+# uncommitted edits. And with FASTPY_DIR naming a checkout, builds use that
+# one, so the submodule is not needed.
 provision_fastpy() {
+    if [ -n "${FASTPY_DIR:-}" ]; then
+        if [ -f "$FASTPY_DIR/compiler/__init__.py" ]; then
+            echo "==> fastpy: builds use FASTPY_DIR ($FASTPY_DIR); toolchain/fastpy left as it is"
+            return 0
+        fi
+        echo "    error: FASTPY_DIR is $FASTPY_DIR, which holds no compiler/__init__.py" >&2
+        return 1
+    fi
+    if [ -e "$ROOT/toolchain/fastpy/.git" ]; then
+        echo "==> fastpy already checked out (toolchain/fastpy)"
+        return 0
+    fi
     echo "==> checking out fastpy (toolchain/fastpy)"
     if git -C "$ROOT" submodule update --init -- toolchain/fastpy; then
         return 0

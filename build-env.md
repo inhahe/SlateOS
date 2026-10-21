@@ -48,13 +48,11 @@ fastpy is developed in that checkout while the lanes build against it, so a
 fastpy commit makes the `fastpy-*` fixtures stale: the rootfs build then
 refuses until `ctest-fixtures.py build` has rebuilt them.
 
-fastpy needs `llvmlite`, so it must run under a Python that has it. On this PC
-a bare `python` starts Python 3.15, which has no packages, while the
-packages, `llvmlite` among them, are installed in Python 3.14
-(`py -3.14`, or `C:/Users/Computer/AppData/Local/Python/pythoncore-3.14-64/python.exe`).
-Under 3.15, `ctest-fixtures.py build` refuses before building anything and
-names the missing module. Until the default is 3.14 again, run the fixture
-build with `py -3.14`, and put that folder first on `PATH` for a boot test.
+fastpy needs `llvmlite`, so it must run under a Python that has it: a bare
+`python` here is Python 3.14 with the project's packages. A Python without
+them -- a newly installed version made the default, as 3.15 briefly was on
+2026-10-21 -- makes `ctest-fixtures.py build` refuse before building
+anything, naming the missing module.
 
 Note that rebuilding fixtures can rebuild `libc.a` first, and a new `libc.a`
 makes *every* fixture stale — so a one-fixture build can turn into a 70-fixture
@@ -68,18 +66,12 @@ one, and the rootfs image then needs repacking too
 `$FASTPY_ZIG` and then `PATH` only. Without it each prints `SKIPPED` and exits
 3: `build-sysroot.ps1` goes on with a yellow warning, and the pre-push hook
 lists the libc-ABI gate among the skipped ones and lets the push through. So a
-missing zig is easy to miss. fastpy's own
-lookup, which the fixture builds use, also tries `D:\utils\zig-*` and
-`C:\utils\zig-*`.
+missing zig is easy to miss: a `SKIPPED` from any of the four means set
+`FASTPY_ZIG`. fastpy's own lookup, which the fixture builds use, also tries
+`D:\utils\zig-*` and `C:\utils\zig-*`.
 
-On this PC zig is at `D:/utils/zig-x86_64-windows-0.16.0/zig.exe`, which
-neither lookup finds by itself: the user-scope `FASTPY_ZIG` carried over from
-the old PC names `C:/utils/...`, which this PC lacks. Until that is corrected,
-set it in your shell before a sysroot build or a push:
-
-```
-export FASTPY_ZIG="D:/utils/zig-x86_64-windows-0.16.0/zig.exe"
-```
+On this PC the user-scope `FASTPY_ZIG` names
+`C:/utils/zig-x86_64-windows-0.16.0/zig.exe`, which exists.
 
 ### Rust toolchains
 

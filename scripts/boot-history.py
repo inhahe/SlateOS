@@ -1437,6 +1437,11 @@ def build_record(serial: Serial | None, verdict: str, args,
     # is a different fact from a run whose gates were free.
     if args.gates_seconds is not None:
         rec["gates_seconds"] = args.gates_seconds
+    # The gates that checked nothing. Empty list when none, absent when the
+    # caller did not say -- the same three-state rule as `skips` below.
+    if getattr(args, "gates_skipped", None) is not None:
+        rec["gates_skipped"] = [ln for ln in args.gates_skipped.splitlines()
+                                if ln.strip()]
     if args.script_seconds is not None:
         rec["script_seconds"] = args.script_seconds
     # Disk pressure, which is a cause of boot-test failures this file could not
@@ -2017,8 +2022,14 @@ def report(records: list[dict], current: dict | None) -> None:
         verdict = current["verdict"]
         hits = current.get("fingerprints") or []
         why = VERDICT_HELP.get(verdict, "")
+        gate_skips = current.get("gates_skipped") or []
+        if verdict == "PASS" and gate_skips:
+            why = (f"marker reached, every gate that ran passed; "
+                   f"{len(gate_skips)} could not run")
         print(f"[boot-history] {verdict}"
               + (f" -- {why}" if why else ""))
+        for line in gate_skips:
+            print(f"[boot-history]   not run: {line}")
         # Named as the pair, matching `wall_populations`' key exactly, so the
         # line that says which population this boot is in and the block that
         # prints that population's median cannot disagree about the partition.
@@ -2230,6 +2241,14 @@ def main(argv=None) -> int:
                              "build together, which is exactly the conflation "
                              "this field exists to end. The first rows to "
                              "carry it will say.")
+    parser.add_argument("--gates-skipped", default=None, metavar="LINES",
+                        help="the pre-build gates that could not run, one "
+                             "`<label> -- <reason>` per line (run_checker's "
+                             "RUN_CHECKER_SKIPS); empty for none. Passed "
+                             "exactly when --gates-seconds is, and omitted "
+                             "with it, so an absent field keeps meaning 'the "
+                             "gate phase did not finish, or the row predates "
+                             "the field'.")
     parser.add_argument("--script-seconds", type=float, default=None,
                         help="seconds the whole boot-test.sh run took, start "
                              "to finish. `wall_seconds` is QEMU alone, so "

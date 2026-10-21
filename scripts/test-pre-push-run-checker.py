@@ -1228,6 +1228,40 @@ def main() -> int:
         # is the suite catching cross-group state, not a flake.
         log.unlink(missing_ok=True)
 
+        # --- the run's skips accumulate --------------------------------------
+        # The per-call flag is cleared by the next gate (group 9 pins that), so a
+        # run's verdict cannot be built from it. RUN_CHECKER_SKIPS is: both kinds
+        # of skip append to it, a gate that ran does not, and nothing clears it
+        # between calls. Without it a boot test on a host missing zig skipped
+        # three libc gates and still ended "every gate green".
+        acc_driver = tmp_root / "driver-accumulate.sh"
+        acc_driver.write_text(
+            "set -u\n"
+            + preamble(tmp_root, True)
+            + f"{func}\n"
+            + f'run_checker --may-skip gate_declined "{sys.executable}" '
+            + f'"{skipper.as_posix()}"\n'
+            + f'run_checker gate_ran "{sys.executable}" "{clean.as_posix()}"\n'
+            + f'run_checker gate_selfskip "{sys.executable}" "{selfskip.as_posix()}"\n'
+            + 'printf "SKIPS-BEGIN\\n%sSKIPS-END\\n" "${RUN_CHECKER_SKIPS-}"\n',
+            encoding="utf-8",
+            newline="")
+        r = subprocess.run(["sh", str(acc_driver)], capture_output=True,
+                           text=True, encoding="utf-8", errors="replace",
+                           env=child_env())
+        out = r.stdout + r.stderr
+        block = out.split("SKIPS-BEGIN\n", 1)[-1].split("SKIPS-END", 1)[0]
+        lines = [ln for ln in block.splitlines() if ln]
+        check("both kinds of skip are kept, in order, one line each",
+              len(lines) == 2
+              and lines[0].startswith("gate_declined -- wsl is not installed")
+              and lines[1].startswith("gate_selfskip -- zig cc not found"),
+              out.strip()[-400:])
+        check("a gate that ran is not among them", "gate_ran" not in block,
+              out.strip()[-400:])
+        for name in ("gate_declined", "gate_ran", "gate_selfskip"):
+            KeptLog(tmp_root, "pre-push", name).unlink(missing_ok=True)
+
         # ------------------------------------------------------------------
         # The distinct-label rule group 7 checks is about one invocation
         # overwriting itself. This is the other axis, which no assertion

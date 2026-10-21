@@ -719,6 +719,23 @@ report_pathz_skips() {
     return 0
 }
 
+# Surface the pre-build gates that checked nothing: run_checker's skips, each
+# with the reason its checker gave.
+#
+# Not a failure, for the reason a Path-Z skip is not one: a gate whose tool
+# this host lacks says so with exit 3, and that is a fact about the host.  But
+# each skip is announced once, thousands of lines above the verdict, and the
+# verdict is what gets read -- without this, a host that has lost a gate's tool
+# passes under a banner saying every gate is green.
+report_gate_skips() {
+    [ -n "${RUN_CHECKER_SKIPS:-}" ] || return 0
+    local n
+    n="$(printf '%s' "$RUN_CHECKER_SKIPS" | grep -c .)" || n=0
+    echo "=== $n GATE(S) COULD NOT RUN -- they checked nothing ==="
+    printf '%s' "$RUN_CHECKER_SKIPS" | sed 's/^/  /'
+    return 0
+}
+
 # Refuse to boot a rootfs.ext4 whose staged binaries no longer match the tree.
 #
 # WHY A NEW GUARD, when this script already has three staleness checks: every
@@ -1510,6 +1527,9 @@ export CHECKER_PROG CHECKER_REFUSING CHECKER_LOGDIR
 # nothing (SC1090).
 # shellcheck source=run-checker.sh
 . "$BOOT_CHECKER_LIB"
+# Every gate that could not run is appended here by run_checker; the verdict
+# prints them (report_gate_skips) and the boot-history row records them.
+RUN_CHECKER_SKIPS=
 
 # Announce the tree under test, first line of the log, before anything else.
 #
@@ -3476,6 +3496,9 @@ record_boot_outcome() {
     # looking like a measurement.
     if [ -n "${GATES_SECONDS:-}" ]; then
         args+=(--gates-seconds "$GATES_SECONDS")
+        # Beside gates_seconds, so the row has the list exactly when the gate
+        # phase completed: empty then means none skipped.
+        args+=("--gates-skipped=${RUN_CHECKER_SKIPS:-}")
     fi
     if [ -n "${BOOT_TEST_START_EPOCH:-}" ]; then
         local script_secs=$(( $(date +%s) - BOOT_TEST_START_EPOCH ))
@@ -3640,6 +3663,7 @@ finish_pass() {
     # only on the ones that skip the suite.
     report_bench_coverage_rot
     report_pathz_skips "$file"
+    report_gate_skips
 
     # A green run whose rootfs could not be verified is still green -- the
     # kernel booted -- but its Path-Z coverage claim is unbacked.  Re-print the

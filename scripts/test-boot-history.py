@@ -799,6 +799,9 @@ class _Args:
     # about 034dffe2c.
     src_changed_during_run = False
     gates_seconds = None
+    # argparse's default: boot-test.sh passes the list only beside
+    # --gates-seconds, so the ordinary stub has neither.
+    gates_skipped = None
     script_seconds = None
     # Same shape, and the same reason: a run whose floor check was disabled with
     # --min-free-gb=0, or whose `df` was unreadable, did not observe zero GiB
@@ -1262,6 +1265,48 @@ def test_report_names_the_build_of_the_run_it_just_recorded(bh):
     # the profile axis was missing from it.
     check_true("current run's build is printed",
                "build: debug/kasan-instrumented" in buf.getvalue())
+
+
+def test_gates_skipped_keeps_its_three_states(bh):
+    """A list when the gate phase finished (empty for none), absent otherwise:
+    an absent field must keep meaning "not said", or every older row would read
+    as a run on which no gate was skipped."""
+    args = _Args()
+    args.gates_seconds = 100.0
+    args.gates_skipped = ("check-libc-declared -- SKIPPED: no zig\n"
+                          "check-libc-overlay -- SKIPPED: no zig\n")
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("each skipped gate is one entry", rec.get("gates_skipped"),
+          ["check-libc-declared -- SKIPPED: no zig",
+           "check-libc-overlay -- SKIPPED: no zig"])
+    args.gates_skipped = ""
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", args)
+    check("none skipped is an empty list, not an absent key",
+          rec.get("gates_skipped"), [])
+    rec = bh.build_record(_serial(bh, S_PASS), "PASS", _Args())
+    check("not passed leaves the key out", "gates_skipped" in rec, False)
+
+
+def test_a_pass_with_skipped_gates_does_not_say_every_gate_green(bh):
+    """The verdict line is what gets read, so it is where a gate that checked
+    nothing has to show: a host missing zig skipped three libc gates under
+    "every gate green"."""
+    import contextlib
+    import io
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report([], {"verdict": "PASS", "profile": "debug",
+                       "gates_skipped": ["check-libc-declared -- SKIPPED: no zig"]})
+    out = buf.getvalue()
+    check("the pass does not claim every gate", "every gate green" in out, False)
+    check_true("it counts the gates that could not run", "1 could not run" in out)
+    check_true("and names each with its reason",
+               "not run: check-libc-declared -- SKIPPED: no zig" in out)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        bh.report([], {"verdict": "PASS", "profile": "debug", "gates_skipped": []})
+    check_true("a pass with none skipped still says every gate green",
+               "every gate green" in buf.getvalue())
 
 
 # --------------------------------------------------------------------------

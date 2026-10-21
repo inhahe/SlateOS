@@ -291,6 +291,12 @@ run_checker() {
     RUN_CHECKER_SKIPPED=
     # shellcheck disable=SC2034
     RUN_CHECKER_SKIP_REASON=
+    # RUN_CHECKER_SKIPS is the one outward channel NOT cleared here: every skip
+    # since the caller last emptied it, one `<label> -- <reason>` line each,
+    # appended by the two skip arms below. The pair above answers for this call
+    # only, so a skip the caller does not count on the spot is gone by the next
+    # gate; this is what lets the end of a run say which gates checked nothing
+    # (boot-test.sh prints it beside its verdict and records it in the row).
     _rc_may_skip=
     if [ "$1" = "--may-skip" ]; then
         _rc_may_skip=1
@@ -473,6 +479,8 @@ run_checker() {
         RUN_CHECKER_SKIPPED=1
         # shellcheck disable=SC2034
         RUN_CHECKER_SKIP_REASON=$_rc_first
+        RUN_CHECKER_SKIPS="${RUN_CHECKER_SKIPS-}$_rc_label -- $_rc_first
+"
         rm -f "$_rc_log"
         # Loud, and on its own line, because the one thing a skip must never do
         # is read like a pass in a scrollback of twenty-eight gates. The reason
@@ -502,6 +510,8 @@ run_checker() {
         RUN_CHECKER_SKIPPED=1
         # shellcheck disable=SC2034
         RUN_CHECKER_SKIP_REASON=$_rc_first
+        RUN_CHECKER_SKIPS="${RUN_CHECKER_SKIPS-}$_rc_label -- $_rc_first
+"
         rm -f "$_rc_log"
         echo "$_rc_prog: SKIPPED $_rc_label -- the checker reported that it could not run." >&2
         echo "$_rc_prog:   reason: $_rc_first" >&2

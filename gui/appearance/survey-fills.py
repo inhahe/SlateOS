@@ -14,7 +14,7 @@ from rustslice import production_end  # noqa: E402
 import collections
 import sys
 
-ROOT = pathlib.Path(r"E:\visual studio projects\os-lane-c")
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 ROLES = ("surface0", "surface1", "surface2", "mantle", "crust")
 
 # Words near a site that say it is a control's groove rather than a container.

@@ -48,6 +48,20 @@ listed once.
   the Tracks after it once (`meta_damaged_info.mkv`). A damaged Tracks
   still refuses the file, as before: FFmpeg's second pass would list
   each of its tracks before the damage twice.
+
+  *Revised 2026-10-21* (the review of `cb1228fcd`): the second pass is now
+  FFmpeg's own, element for element (`Demuxer::second_pass`) -- it starts
+  wherever FFmpeg's does (damage, the end of the file, the Segment's stated
+  end, stray bytes), finds each element by its ID from the fifth byte of
+  the last, IDs inside other elements' data included, and refuses the file
+  where FFmpeg does (the end of the file inside an element it reads, or no
+  Cluster). Of the elements the first pass read, it reads the Info, the
+  SeekHeads and the Cues again, as FFmpeg does -- what they give is the
+  same, and reading them in FFmpeg's order keeps an ID met inside a
+  SeekHead from having the last word -- and skips the Tracks, Chapters,
+  Tags and Attachments, which is the departure above and nothing more. It
+  replaced three rules of the crate's own, each right on its own fixture
+  and wrong on the cases around it.
 - *Bounded.* FFmpeg's dictionary costs a search of the whole list per
   change; a file built to hold hundreds of thousands of tags for one
   dictionary would take FFmpeg, and an exact copy, hours. Past 2^28 units of
@@ -95,10 +109,12 @@ FFmpeg does not know, where this used to take it for damage and lose the
 frames after it up to the next Cluster -- or the whole file, before the
 first (`reserved_ids.mkv`).
 
-**Held to.** `gui/video/matroska/tests/metadata.rs` (eleven files' metadata
-and the 660 cuts against ffprobe, and what ffprobe cannot show, the
-departure above among it), `tests/fixtures.rs` (the packets and seeks of
-the new files), and `mutate.py`'s rows for each rule.
+**Held to.** `gui/video/matroska/tests/metadata.rs` (eleven files' metadata,
+the 923 cuts of one and the 500 of another, and 37 files damaged before
+their first Cluster, against ffprobe -- the last with the tracks FFmpeg
+lists twice taken once, which is how the departure is held to; and what
+ffprobe cannot show), `tests/fixtures.rs` (the packets and seeks of the
+new files), and `mutate.py`'s rows for each rule.
 
 **Revisit if** FFmpeg changes its resynchronisation after header damage --
 then follow it -- or if a file with more than some 20,000 tags for one

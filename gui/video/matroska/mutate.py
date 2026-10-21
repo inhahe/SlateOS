@@ -445,26 +445,24 @@ DEMUX = [
     # Reading the description.
     (
         "a Tracks damaged before its first entry refuses the file",
-        "                        }) if refused || read > 0 => return Err(error),",
-        "                        }) if refused || read >= 0 => return Err(error),",
-        [SEEKHEAD_DAMAGE],
+        "                if d.refused || d.read > 0 {",
+        "                if d.refused || d.read >= 0 {",
+        [SEEKHEAD_DAMAGE, OPENINGS],
     ),
     (
         "an entry FFmpeg refuses the file for is passed over",
-        "                        }) if refused || read > 0 => return Err(error),",
-        "                        }) if read > 0 => return Err(error),",
+        "                if d.refused || d.read > 0 {",
+        "                if d.read > 0 {",
         [PROJECTIONS],
     ),
     (
         "a damaged Info before the Clusters refuses the file",
-        "                    ids::CUES => {\n"
-        "                        cues_read.push(h.start);",
-        "                    ids::INFO => {\n"
-        "                        nest::read_info(&mut self.r, &h, IN_SEGMENT, &mut self.info)?;\n"
-        "                        Ok(())\n"
-        "                    }\n"
-        "                    ids::CUES => {\n"
-        "                        cues_read.push(h.start);",
+        "            ids::CUES => {\n"
+        "                // FFmpeg reads Cues met before the first Cluster at once,",
+        "            ids::INFO => nest::read_info(&mut self.r, h, levels, &mut self.info)\n"
+        "                .map_err(Fault::Refuse),\n"
+        "            ids::CUES => {\n"
+        "                // FFmpeg reads Cues met before the first Cluster at once,",
         [META_DAMAGED_INFO, META_DAMAGED_INFO_PACKETS],
     ),
     (
@@ -481,19 +479,24 @@ DEMUX = [
     ),
     (
         "Cues the SeekHead points to are not noted",
-        "            level1.cues_unread().into_iter().collect()\n",
-        "            Vec::new()\n",
+        "            g.level1.cues_unread()\n",
+        "            None\n",
         [SPARSE],
     ),
     (
         "only the first Cues element before the Clusters is the index",
-        "                        cues_read.push(h.start);\n"
-        "                        Ok(())",
-        "                        if cues_read.is_empty() {\n"
-        "                            cues_read.push(h.start);\n"
-        "                        }\n"
-        "                        Ok(())",
+        "                g.cues_read = true;\n",
+        "                if g.cues_read {\n"
+        "                    return Ok(());\n"
+        "                }\n"
+        "                g.cues_read = true;\n",
         [SEEKS_TWO_CUES],
+    ),
+    (
+        "Cues before the Clusters are not read as the file is opened",
+        "                cues::read_points(&mut self.r, h, levels, &mut g.cue_points).map_err(Fault::from)\n",
+        "                Ok(())\n",
+        [OPENINGS],
     ),
     (
         "damaged Cues are no index",
@@ -511,15 +514,15 @@ DEMUX = [
     ),
     (
         "Cues are used after following the SeekHead has failed",
-        "                    cues_broken = true;\n",
-        "",
+        "                Err(_) => return Ok(true),\n",
+        "                Err(_) => return Ok(false),\n",
         [SEEKS_CUES_BROKEN],
     ),
     (
         "a second Tracks before the Clusters is not read",
-        "                    ids::TRACKS => match self.read_tracks(&h) {",
-        "                    ids::TRACKS if !self.tracks.is_empty() => Ok(()),\n"
-        "                    ids::TRACKS => match self.read_tracks(&h) {",
+        "            ids::TRACKS => self.read_tracks(h).map_err(|d| {\n",
+        "            ids::TRACKS if !self.tracks.is_empty() => Ok(()),\n"
+        "            ids::TRACKS => self.read_tracks(h).map_err(|d| {\n",
         [META_TWO_TRACKS_PACKETS, META_TWO_TRACKS],
     ),
     (
@@ -536,53 +539,79 @@ DEMUX = [
     ),
     (
         "after damage before the first Cluster, the Segment's stated end still bounds it",
-        "        *segment_ends = None;\n",
-        "",
+        "        self.segment_end = self.r.len();\n        // The first pass's elements,",
+        "        // The first pass's elements,",
         ["after_damage_the_segment_runs_to_the_end_of_the_file"],
     ),
     (
         "damage before the first Cluster refuses the file",
-        "                    Err(_) => {\n"
-        "                        // Past its four-byte ID, and one more.",
-        "                    Err(e) => {\n"
-        "                        return Err(e);\n"
-        "                        // Past its four-byte ID, and one more.",
-        [META_DAMAGE],
-    ),
-    (
-        "a file with no Cluster opens",
-        "                if self.segment_end >= self.r.len() {\n"
-        "                    return Err(Error::Truncated);",
-        "                if self.segment_end >= self.r.len() {\n"
-        "                    break;",
-        [OPENINGS, CUT_TWO_TRACKS, META_CUT],
-    ),
-    (
-        "a Segment's stated end before its first Cluster ends the reading",
-        "                if self.segment_end >= self.r.len() {\n",
-        "                if true {\n",
-        [OPENINGS],
-    ),
-    (
-        "a file cut short in its first Cluster's size is refused",
-        "            if nest::read_id(&mut self.r).is_ok_and(|id| id == ids::CLUSTER) {\n",
-        "            if nest::read_id(&mut self.r).is_ok_and(|id| id == ids::CLUSTER)\n"
-        "                && nest::read_size(&mut self.r).is_ok()\n"
-        "            {\n",
-        [CUT_TWO_TRACKS, META_CUT],
+        "                Err(Fault::Damage(error)) => {\n"
+        "                    let cut = matches!(error, Error::Truncated);\n",
+        "                Err(Fault::Damage(error)) => {\n"
+        "                    return Err(error);\n"
+        "                    let cut = matches!(error, Error::Truncated);\n",
+        [META_DAMAGE, OPENINGS],
     ),
     (
         "bytes that are no element before the first Cluster refuse the file",
-        "                Err(Error::Invalid(_)) => {\n"
-        "                    let from = start.saturating_add(1);",
-        "                Err(Error::Invalid(_)) if false => {\n"
-        "                    let from = start.saturating_add(1);",
+        "                Err(_) => return Ok(Err(Stop::Before(at))),\n"
+        "            };\n"
+        "            if id == ids::CLUSTER {\n",
+        "                Err(e) => return Err(e),\n"
+        "            };\n"
+        "            if id == ids::CLUSTER {\n",
         [OPENINGS],
     ),
     (
-        "an element FFmpeg does not know, running past the Segment, is passed over whole",
-        "            if !ids::is_top_level(h.id) && segment_ends.is_some_and(|e| end > e) {\n",
-        "            if false {\n",
+        "the Segment's end before its first Cluster refuses the file",
+        "            if stated_end.is_some_and(|e| at >= e) || at >= self.r.len() {\n"
+        "                return Ok(Err(Stop::Before(at)));\n",
+        "            if stated_end.is_some_and(|e| at >= e) || at >= self.r.len() {\n"
+        "                return Err(Error::Truncated);\n",
+        [OPENINGS],
+    ),
+    (
+        "a file with no Cluster opens",
+        "            let (at, id) = self.find_top_level(from)?.ok_or(Error::Truncated)?;\n",
+        "            let Some((at, id)) = self.find_top_level(from)? else {\n"
+        "                return Ok(self.r.len());\n"
+        "            };\n",
+        [OPENINGS, CUT_TWO_TRACKS, META_CUT],
+    ),
+    (
+        "damage the second pass meets refuses the file",
+        "                Err(Fault::Damage(_)) => {}\n",
+        "                Err(Fault::Damage(e)) => return Err(e),\n",
+        [OPENINGS],
+    ),
+    (
+        "the end of the file inside an element the second pass reads is looked past",
+        "                Err(Fault::Damage(Error::Truncated)) => return Err(Error::Truncated),\n",
+        "",
+        [OPENINGS],
+    ),
+    (
+        "the second pass reads again the Tracks the first read",
+        "                    ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        "                    ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        [OPENINGS, META_DAMAGE],
+    ),
+    (
+        "the second pass does not read again the Info the first read",
+        "                    ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        "                    ids::INFO | ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        [OPENINGS],
+    ),
+    (
+        "the second pass knows only the first element the first pass read",
+        "            while first < at && first < stop.at() {\n",
+        "            while first < at && first < stop.at() && false {\n",
+        [OPENINGS, META_DAMAGE],
+    ),
+    (
+        "an element the first pass was cut short in is looked past by the second",
+        "                if matches!(stop, Stop::Inside { at: end, cut: true } if end == at) {\n",
+        "                if false {\n",
         [OPENINGS],
     ),
     # Reading the Clusters.
@@ -707,9 +736,9 @@ DEMUX = [
     # Damage.
     (
         "damage ends the file",
-        "if filled >= 4 && ids::is_top_level(window) {",
+        "if filled == 4 && ids::is_top_level(window) {",
         "if false {",
-        [RESYNC, DAMAGED, BAD_LACES, OVERRUN],
+        [RESYNC, DAMAGED, BAD_LACES, OVERRUN, OPENINGS],
     ),
     (
         "the frames a damaged block gave before its damage are dropped",
@@ -734,7 +763,7 @@ DEMUX = [
         "                // Anything else is passed over -- Cues too: FFmpeg reads Cues\n"
         "                // only before the first Cluster or where the SeekHead points.\n",
         "                if h.id == ids::CUES {\n"
-        "                    self.cues_at.push(h.start);\n"
+        "                    self.cues_at = Some(h.start);\n"
         "                }\n",
         [CUES_MET],
     ),
@@ -1050,6 +1079,13 @@ METADATA = [
 ]
 
 NEST = [
+    # A top-level element of unknown size, which FFmpeg reads.
+    (
+        "an element of unknown size runs on past the next top-level element",
+        "    if end.is_none() && ids::is_top_level(id) {\n",
+        "    if false {\n",
+        [OPENINGS],
+    ),
     # The Info.
     (
         "the timestamp scale is a millisecond whatever the file says",

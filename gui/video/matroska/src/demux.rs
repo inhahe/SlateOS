@@ -3,10 +3,12 @@
 //!
 //! The order of work follows FFmpeg's (`matroska_read_header`,
 //! `matroska_read_packet`): the Segment's top-level elements are read up to
-//! the first Cluster; anything the SeekHead points to that was not met on
+//! the first Cluster, read again by FFmpeg's second pass if anything but a
+//! Cluster ends them; anything the SeekHead points to that was not met on
 //! the way (an Info or Tracks written after the Clusters) is read from where
-//! it says; the Cues are read only when a seek needs them. Then Clusters are
-//! read one element at a time, and a block's frames become packets.
+//! it says; Cues met on the way are read then, and those only the SeekHead
+//! names when a seek needs them. Then Clusters are read one element at a
+//! time, and a block's frames become packets.
 
 use std::collections::VecDeque;
 use std::io::{Read, Seek};
@@ -178,15 +180,16 @@ pub struct Demuxer<R> {
     /// Where the Segment's data begins: SeekHead and Cues positions count
     /// from here.
     segment_data: u64,
-    /// Where the Segment ends: the file's end for one of unknown size.
+    /// Where the Segment ends: the file's end for one of unknown size, and
+    /// after FFmpeg's second pass over its description.
     segment_end: u64,
-    /// Where the first Cluster begins, if there is one.
-    first_cluster: Option<u64>,
-    /// Where the Cues are, as FFmpeg finds them: every Cues element read
-    /// before the first Cluster (or where a SeekHead entry naming something
-    /// else points), all of them one index; else the one the SeekHead names,
-    /// unless following it failed. And the index once read.
-    cues_at: Vec<u64>,
+    /// The Cues, as FFmpeg finds them: the points of every Cues element read
+    /// with the description (before the first Cluster, or where a SeekHead
+    /// entry naming something else points), all of them one index; else
+    /// where the one the SeekHead names is, read at the first seek -- none
+    /// if following the SeekHead failed. And the index once made.
+    cue_points: Vec<cues::Point>,
+    cues_at: Option<u64>,
     cues: Option<Vec<Cue>>,
     state: State,
     /// The frames of the last block not yet given out.
@@ -290,13 +293,62 @@ struct Damage {
     refused: bool,
 }
 
+/// How reading a top-level element failed: damage, which FFmpeg reads on
+/// past; or what refuses the file -- the source failing, or a Tracks.
+enum Fault {
+    Damage(Error),
+    Refuse(Error),
+}
+
+impl From<Error> for Fault {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Io(_) => Self::Refuse(error),
+            _ => Self::Damage(error),
+        }
+    }
+}
+
+/// Where FFmpeg's first pass over the Segment stopped, short of a Cluster.
+#[derive(Clone, Copy)]
+enum Stop {
+    /// Before the element at this position, unread: the Segment ends there,
+    /// or the pass refused the element's header.
+    Before(u64),
+    /// Inside the top-level element at `at`, read in part; `cut` when the
+    /// file ends inside it.
+    Inside { at: u64, cut: bool },
+}
+
+impl Stop {
+    const fn at(self) -> u64 {
+        match self {
+            Self::Before(at) | Self::Inside { at, .. } => at,
+        }
+    }
+}
+
+/// What reading the Segment's description gathers: the lists FFmpeg reads
+/// into, its record of the top-level elements, and the Cues read on the
+/// way -- whether any was, and their points.
+#[derive(Default)]
+struct Gathered {
+    lists: Lists,
+    level1: Level1,
+    cues_read: bool,
+    cue_points: Vec<cues::Point>,
+}
+
 impl<R: Read + Seek> Demuxer<R> {
     /// Read `source`'s header, its segment's description and its tracks.
     ///
     /// # Errors
     ///
     /// When the source is not an EBML file, asks for a version of EBML this
-    /// does not read, has no Segment, or its description is damaged.
+    /// does not read, or has no Segment; when it holds no Cluster -- a
+    /// complete file of an Info and Tracks alone too, as FFmpeg refuses one
+    /// -- or its description is damaged as FFmpeg refuses it for: cut short
+    /// ([`Error::Truncated`]), or a Tracks damaged after its first entry.
     pub fn open(source: R) -> Result<Self, Error> {
         let mut r = Reader::new(source)?;
         let doc_type = read_ebml_header(&mut r)?;
@@ -331,8 +383,8 @@ impl<R: Read + Seek> Demuxer<R> {
             declared: Vec::new(),
             segment_data: segment.data,
             segment_end,
-            first_cluster: None,
-            cues_at: Vec::new(),
+            cue_points: Vec::new(),
+            cues_at: None,
             cues: None,
             state: State::Done,
             queue: VecDeque::new(),
@@ -348,19 +400,17 @@ impl<R: Read + Seek> Demuxer<R> {
             },
             selected: None,
         };
-        d.read_description(segment.end())?;
-        if let Some(at) = d.first_cluster {
-            d.r.seek_to(at)?;
-            d.state = State::Segment;
-            let start = Place {
-                state: State::Segment,
-                pos: at,
-                last_good: at,
-                segment_end: d.segment_end,
-            };
-            d.walk.start = Some(start);
-            d.walk.next = Some(start);
-        }
+        let at = d.read_description(&segment)?;
+        d.r.seek_to(at)?;
+        d.state = State::Segment;
+        let start = Place {
+            state: State::Segment,
+            pos: at,
+            last_good: at,
+            segment_end: d.segment_end,
+        };
+        d.walk.start = Some(start);
+        d.walk.next = Some(start);
         Ok(d)
     }
 
@@ -516,151 +566,292 @@ impl<R: Read + Seek> Demuxer<R> {
             .and_then(|(_, t)| *t)
     }
 
-    /// The Segment's top-level elements up to the first Cluster, then what
-    /// the SeekHead points to that was not met -- by FFmpeg's rules
-    /// (`matroska_read_header`, `matroska_execute_seekhead`):
+    /// The Segment's description, as FFmpeg's `matroska_read_header` reads
+    /// it: its top-level elements before the first Cluster, then what the
+    /// SeekHead points to that was not met. Where the first Cluster begins.
     ///
-    /// - Before the first Cluster, every top-level element met is read, a
-    ///   second Info or Tracks too (FFmpeg's "Duplicate element" is a
-    ///   warning, not a refusal): a second Info starts its numbers afresh, a
-    ///   second Tracks adds its tracks, and so do further Chapters, Tags and
-    ///   Attachments.
-    /// - Then each SeekHead entry in turn, chained SeekHeads' too: one is
-    ///   followed if FFmpeg's record of that element ([`Level1`]) is not
-    ///   yet read -- an Info, Tracks, Chapters or Attachments read anywhere
-    ///   already is not read again, a SeekHead or Tags at a new position is
-    ///   -- and whatever top-level element stands where it points is read,
-    ///   be it the one named or not. The Cues are left for the first seek,
-    ///   from where the last entry naming them points.
-    /// - A damaged Info, SeekHead, Chapters, Tags or Attachments keeps what
-    ///   was read of it. Met before the first Cluster, reading goes on from the
-    ///   next top-level element found after its ID (where FFmpeg comes to on
-    ///   its second pass; FFmpeg first goes back to the start of the
-    ///   Segment and reads it all again, which repeats every track before
-    ///   the damage, and that is not followed here). Met through a SeekHead,
-    ///   the SeekHead is followed no further, and its Cues are not used --
-    ///   FFmpeg marks its index broken.
-    /// - A Tracks damaged after one of its entries refuses the file, as it
-    ///   always has here: FFmpeg's second pass would list each track before
-    ///   the damage twice. So does one with an entry FFmpeg refuses the file
-    ///   for (a projection's private data, a crop leaving nothing). One
-    ///   damaged before its first entry -- often no Tracks at all, but its ID
-    ///   met inside a damaged element by the search for the next one, as in
-    ///   a SeekHead whose nine-byte `SeekID` holds Tracks's own ID -- is
-    ///   passed over as the others are, as FFmpeg passes over it.
-    /// - Bytes that are no element, and an element FFmpeg does not know that
-    ///   runs past the Segment, are damage too, looked past from the byte
-    ///   after their start.
-    /// - A file with no Cluster is refused ([`Error::Truncated`]), as FFmpeg
-    ///   refuses it: one cut short before its first Cluster, inside the
-    ///   Tracks or anywhere else, and one whose resynchronisation finds no
-    ///   element after the damage. A Segment whose stated end comes before
-    ///   its first Cluster is read on past that end, as after damage. A file
-    ///   cut short just past the first Cluster's ID still opens: FFmpeg stops
-    ///   at the ID, its size unread.
-    fn read_description(&mut self, segment_ends: Option<u64>) -> Result<(), Error> {
-        // Where the Segment says it ends, which bounds its top-level elements
-        // until a resynchronisation: after one, FFmpeg takes the Segment for
-        // one of unknown size, read to the end of the file.
-        let mut segment_ends = segment_ends;
-        let mut lists = Lists::default();
-        let mut level1 = Level1::default();
-        // Cues read where they stand, which FFmpeg reads at once.
-        let mut cues_read: Vec<u64> = Vec::new();
-        self.r.seek_to(self.segment_data)?;
+    /// FFmpeg reads the Segment in up to two passes. The first reads its
+    /// elements one after the other from its start ([`Self::first_pass`]);
+    /// the first Cluster's ID ends the reading. Anything else that ends the
+    /// first pass -- damage, the end of the file, the end the Segment states
+    /// -- starts the second, which looks for the top-level elements again
+    /// from the Segment's start, each by its ID, reading the Segment as if it
+    /// ran to the end of the file ([`Self::second_pass`]).
+    ///
+    /// Every top-level element met is read, a second Info or Tracks too
+    /// (FFmpeg's "Duplicate element" is a warning, not a refusal): a second
+    /// Info starts its numbers afresh, a second Tracks adds its tracks, and
+    /// so do further Chapters, Tags and Attachments. A damaged element keeps
+    /// what was read of it. A Tracks damaged after one of its entries refuses
+    /// the file, as it always has here, and so does one with an entry FFmpeg
+    /// refuses the file for (a projection's private data, a crop leaving
+    /// nothing).
+    ///
+    /// Then the SeekHead is followed ([`Self::follow_seek_head`]), and the
+    /// Cues are settled: those read on the way are the index; else those the
+    /// SeekHead names, read at the first seek, unless following it failed.
+    ///
+    /// # Errors
+    ///
+    /// When the source fails, a Tracks refuses the file, or the file holds
+    /// no Cluster (a complete Segment of an Info and Tracks alone too) or
+    /// ends inside an element the second pass reads ([`Error::Truncated`]).
+    fn read_description(&mut self, segment: &Header) -> Result<u64, Error> {
+        let mut g = Gathered::default();
+        let first_cluster = match self.first_pass(segment, &mut g)? {
+            Ok(at) => at,
+            Err(stop) => self.second_pass(segment.start, stop, &mut g)?,
+        };
+        let cues_broken = self.follow_seek_head(&mut g)?;
+        self.cues_at = if g.cues_read || cues_broken {
+            None
+        } else {
+            g.level1.cues_unread()
+        };
+        self.cue_points = g.cue_points;
+        // FFmpeg reads a duration that is not a number as none.
+        if self.info.duration.is_some_and(f64::is_nan) {
+            self.info.duration = None;
+        }
+        if self.info.timestamp_scale == 0 {
+            self.info.timestamp_scale = 1_000_000;
+        }
+        self.time_tracks();
+        let described = describe(&self.info, &mut self.tracks, &g.lists);
+        self.metadata = described.metadata;
+        self.chapters = described.chapters;
+        self.attachments = described.attachments;
+        Ok(first_cluster)
+    }
+
+    /// FFmpeg's first pass over the Segment (`ebml_parse` of the Segment):
+    /// its elements one after the other from its start. Where the first
+    /// Cluster begins; or, when anything else ends the pass, where and how
+    /// it stopped.
+    ///
+    /// Each element must fit in the Segment: inside its stated end, and of
+    /// known size -- but for a top-level element in a Segment of unknown
+    /// size, which FFmpeg reads though the specification forbids it, and
+    /// which ends where an element that cannot be inside it begins. A
+    /// top-level element is read, any other passed over, a Void among them
+    /// -- and a Segment, which FFmpeg does not know inside a Segment. The
+    /// pass ends at the Segment's stated end; at the end of the file; at
+    /// bytes that are no element's header, or an element that does not fit;
+    /// at an element passed over that runs past the end of the file; and at
+    /// damage in a top-level element.
+    ///
+    /// # Errors
+    ///
+    /// When the source fails, or a Tracks refuses the file.
+    fn first_pass(
+        &mut self,
+        segment: &Header,
+        g: &mut Gathered,
+    ) -> Result<Result<u64, Stop>, Error> {
+        let stated_end = segment.end();
+        let mut at = segment.data;
         loop {
-            let start = self.r.pos();
-            if start >= self.segment_end {
-                // No Cluster before the Segment's end. At the end of the
-                // file FFmpeg refuses the file, however whole what came
-                // before; at a stated end the file runs on past, it reads on
-                // beyond it, as after damage.
-                if self.segment_end >= self.r.len() {
-                    return Err(Error::Truncated);
-                }
-                let at = self.resync_description(start, &mut segment_ends)?;
-                self.r.seek_to(at)?;
-                continue;
+            if stated_end.is_some_and(|e| at >= e) || at >= self.r.len() {
+                return Ok(Err(Stop::Before(at)));
             }
-            // FFmpeg stops at a Cluster's ID, its size unread: a file cut
-            // short in that size still opens.
-            if nest::read_id(&mut self.r).is_ok_and(|id| id == ids::CLUSTER) {
-                self.first_cluster = Some(start);
-                break;
-            }
-            self.r.seek_to(start)?;
-            let h = match self.r.header() {
-                Ok(Some(h)) => h,
-                // No element here: FFmpeg looks for the next one from the
-                // byte after.
-                Err(Error::Invalid(_)) => {
-                    let from = start.saturating_add(1);
-                    let at = self.resync_description(from, &mut segment_ends)?;
-                    self.r.seek_to(at)?;
-                    continue;
-                }
-                // The file ends inside the header. (`None` is the end of the
-                // file, which `start` is short of.)
-                Ok(None) => return Err(Error::Truncated),
-                Err(e) => return Err(e),
+            self.r.seek_to(at)?;
+            let id = match nest::read_id(&mut self.r) {
+                Ok(id) => id,
+                Err(Error::Io(kind)) => return Err(Error::Io(kind)),
+                Err(_) => return Ok(Err(Stop::Before(at))),
             };
-            let end = h
-                .end()
-                .ok_or(Error::Invalid("a top-level element of unknown size"))?;
-            let mut next = end.min(self.segment_end);
-            if !ids::is_top_level(h.id) && segment_ends.is_some_and(|e| end > e) {
-                // An element FFmpeg does not know, running past the
-                // Segment: damage, which it looks past from the byte after
-                // its start -- its ID may be a single byte, the next
-                // element's ID right behind it.
-                let from = start.saturating_add(1);
-                next = self.resync_description(from, &mut segment_ends)?;
-            } else if ids::is_top_level(h.id) {
-                level1.met(h.id, h.start);
-                let read = match h.id {
-                    ids::CUES => {
-                        cues_read.push(h.start);
-                        Ok(())
-                    }
-                    ids::TRACKS => match self.read_tracks(&h) {
-                        Ok(()) => Ok(()),
-                        // An entry FFmpeg refuses the file for, refused
-                        // here too; or damaged after some of its tracks:
-                        // FFmpeg's second pass would list those twice, which
-                        // is not followed -- the file is refused, as it
-                        // always has been here.
-                        Err(Damage {
-                            error,
-                            read,
-                            refused,
-                        }) if refused || read > 0 => return Err(error),
-                        // Damaged before its first: passed over as any other
-                        // element is, as FFmpeg passes over it -- often no
-                        // Tracks at all, but its ID met inside a damaged
-                        // element by a resynchronisation.
-                        Err(Damage { error, .. }) => Err(error),
-                    },
-                    _ if segment_ends.is_some_and(|e| end > e) => {
-                        Err(Error::Invalid("an element running past its Segment"))
-                    }
-                    _ => self.read_listed(&h, IN_SEGMENT, &mut lists),
-                };
-                match read {
+            if id == ids::CLUSTER {
+                // FFmpeg stops at a Cluster's ID, its size unread: a file cut
+                // short in that size still opens.
+                return Ok(Ok(at));
+            }
+            let size = match nest::read_size(&mut self.r) {
+                Ok(size) => size,
+                Err(Error::Io(kind)) => return Err(Error::Io(kind)),
+                Err(_) => return Ok(Err(Stop::Before(at))),
+            };
+            let h = Header {
+                id,
+                size,
+                start: at,
+                data: self.r.pos(),
+            };
+            let fits = match (h.end(), stated_end) {
+                (Some(end), Some(stated)) => end <= stated,
+                (Some(_), None) => true,
+                (None, None) => ids::is_top_level(id),
+                (None, Some(_)) => false,
+            };
+            if !fits {
+                return Ok(Err(Stop::Before(at)));
+            }
+            if !ids::is_top_level(id) {
+                match nest::skip(&mut self.r, &h) {
                     Ok(()) => {}
                     Err(Error::Io(kind)) => return Err(Error::Io(kind)),
-                    Err(_) => {
-                        // Past its four-byte ID, and one more.
-                        let from = h.start.saturating_add(5);
-                        next = self.resync_description(from, &mut segment_ends)?;
-                    }
+                    Err(_) => return Ok(Err(Stop::Before(at))),
+                }
+                at = self.r.pos();
+                continue;
+            }
+            g.level1.met(id, at);
+            match self.read_level1(&h, IN_SEGMENT, g) {
+                Ok(()) => {}
+                Err(Fault::Refuse(error)) => return Err(error),
+                Err(Fault::Damage(error)) => {
+                    let cut = matches!(error, Error::Truncated);
+                    return Ok(Err(Stop::Inside { at, cut }));
                 }
             }
-            self.r.seek_to(next)?;
+            // Past it: for one of unknown size, where its children ended.
+            at = h.end().unwrap_or(self.r.pos());
         }
+    }
 
-        let mut cues_broken = false;
+    /// FFmpeg's second pass over the Segment (`matroska_resync`, then
+    /// `ebml_parse` of one element, in turn): each top-level element found
+    /// by its ID, from the byte after the Segment's own ID, and the next
+    /// looked for from the fifth byte of the last -- so an ID inside an
+    /// element's data, a SeekHead's `SeekID` say, is taken for an element,
+    /// as FFmpeg takes it. The Segment runs to the end of the file from then
+    /// on, for the elements and for the Clusters after them. Where the first
+    /// Cluster's ID is found.
+    ///
+    /// Of the elements the first pass read, the Info, the SeekHeads and the
+    /// Cues are read again, as FFmpeg reads them -- which gives what they
+    /// gave, in the order FFmpeg reads it -- and the Tracks, Chapters, Tags
+    /// and Attachments are not: FFmpeg's second reading of those repeats
+    /// every track, chapter, tag and attachment in them (design-decisions
+    /// §1358).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Truncated`] when the file ends inside an element read --
+    /// FFmpeg's `AVERROR(EIO)`, which ends its search, where other damage
+    /// does not -- or holds no Cluster after the last; and as
+    /// [`Self::first_pass`].
+    fn second_pass(
+        &mut self,
+        segment_start: u64,
+        stop: Stop,
+        g: &mut Gathered,
+    ) -> Result<u64, Error> {
+        self.segment_end = self.r.len();
+        // The first pass's elements, walked again as the search passes their
+        // starts: where the next one begins.
+        let mut first = self.segment_data;
+        let mut from = segment_start.saturating_add(1);
+        loop {
+            let (at, id) = self.find_top_level(from)?.ok_or(Error::Truncated)?;
+            if id == ids::CLUSTER {
+                return Ok(at);
+            }
+            // Past its four-byte ID, and one more.
+            from = at.saturating_add(5);
+            while first < at && first < stop.at() {
+                first = self.end_of_read(first)?;
+            }
+            let read_before = first == at
+                && match stop {
+                    Stop::Before(end) => at < end,
+                    Stop::Inside { at: end, .. } => at <= end,
+                };
+            self.r.seek_to(at.saturating_add(4))?;
+            let size = match nest::read_size(&mut self.r) {
+                Ok(size) => size,
+                Err(e @ (Error::Truncated | Error::Io(_))) => return Err(e),
+                Err(_) => continue,
+            };
+            let h = Header {
+                id,
+                size,
+                start: at,
+                data: self.r.pos(),
+            };
+            g.level1.met(id, at);
+            if read_before
+                && matches!(
+                    id,
+                    ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS
+                )
+            {
+                // FFmpeg reads it again as far as the first pass did; past
+                // the end of the file, which refuses it.
+                if matches!(stop, Stop::Inside { at: end, cut: true } if end == at) {
+                    return Err(Error::Truncated);
+                }
+                continue;
+            }
+            match self.read_level1(&h, IN_SEGMENT, g) {
+                Ok(()) => {}
+                Err(Fault::Damage(Error::Truncated)) => return Err(Error::Truncated),
+                Err(Fault::Damage(_)) => {}
+                Err(Fault::Refuse(error)) => return Err(error),
+            }
+        }
+    }
+
+    /// Where the element at `at`, which the first pass read whole, ends:
+    /// where that pass went on from.
+    fn end_of_read(&mut self, at: u64) -> Result<u64, Error> {
+        self.r.seek_to(at)?;
+        let h = self.r.header()?.ok_or(Error::Truncated)?;
+        if let Some(end) = h.end() {
+            return Ok(end);
+        }
+        // A top-level element of unknown size: its children, each of known
+        // size, up to the element that ended it.
+        self.r.seek_to(h.data)?;
+        while let Some(c) = nest::child(&mut self.r, None).map_err(|b| b.error)? {
+            self.r.seek_to(c.end().ok_or(Error::Truncated)?)?;
+        }
+        Ok(self.r.pos())
+    }
+
+    /// A top-level element where reading stands, `h`, with `levels` of
+    /// FFmpeg's nesting around it: an Info into the segment's description, a
+    /// Tracks's tracks into the demuxer's, a Cues's points and the rest's
+    /// lists into `g`.
+    fn read_level1(&mut self, h: &Header, levels: u32, g: &mut Gathered) -> Result<(), Fault> {
+        match h.id {
+            ids::TRACKS => self.read_tracks(h).map_err(|d| {
+                if d.refused || d.read > 0 {
+                    Fault::Refuse(d.error)
+                } else {
+                    // Damaged before its first entry: passed over as any
+                    // other element is -- often no Tracks at all, but its
+                    // ID met inside another element by the second pass.
+                    Fault::from(d.error)
+                }
+            }),
+            ids::CUES => {
+                // FFmpeg reads Cues met before the first Cluster at once,
+                // and then reads no others.
+                g.cues_read = true;
+                cues::read_points(&mut self.r, h, levels, &mut g.cue_points).map_err(Fault::from)
+            }
+            _ => self
+                .read_listed(h, levels, &mut g.lists)
+                .map_err(Fault::from),
+        }
+    }
+
+    /// FFmpeg's `matroska_execute_seekhead`: each SeekHead entry in turn,
+    /// chained SeekHeads' too. One is followed if FFmpeg's record of that
+    /// element ([`Level1`]) is not yet read -- an Info, Tracks, Chapters or
+    /// Attachments read anywhere already is not read again, a SeekHead or
+    /// Tags at a new position is -- and whatever top-level element stands
+    /// where it points is read, be it the one named or not. The Cues are
+    /// left for the first seek, from where the last entry naming them
+    /// points. Whether following failed: the entries after are not
+    /// followed, and FFmpeg marks its index broken.
+    ///
+    /// # Errors
+    ///
+    /// When the source fails.
+    fn follow_seek_head(&mut self, g: &mut Gathered) -> Result<bool, Error> {
         let mut i = 0;
-        while let Some(SeekEntry { id, pos }) = lists.seek.get(i).copied() {
+        while let Some(SeekEntry { id, pos }) = g.lists.seek.get(i).copied() {
             i = i.saturating_add(1);
             // FFmpeg's checks: an ID of up to four bytes, and a position that
             // stays within int64_t when the Segment's start is added.
@@ -671,10 +862,10 @@ impl<R: Read + Seek> Demuxer<R> {
             else {
                 continue;
             };
-            let Some(k) = level1.find(id, pos) else {
+            let Some(k) = g.level1.find(id, pos) else {
                 continue;
             };
-            let Some(entry) = level1.entries.get_mut(k) else {
+            let Some(entry) = g.level1.entries.get_mut(k) else {
                 continue;
             };
             if entry.parsed {
@@ -684,50 +875,23 @@ impl<R: Read + Seek> Demuxer<R> {
             if id == ids::CUES {
                 continue;
             }
-            match self.read_at(pos, &mut level1, &mut lists, &mut cues_read) {
+            match self.read_at(pos, g) {
                 Ok(()) => {}
                 Err(Error::Io(kind)) => return Err(Error::Io(kind)),
-                Err(_) => {
-                    cues_broken = true;
-                    break;
-                }
+                Err(_) => return Ok(true),
             }
-            if let Some(entry) = level1.entries.get_mut(k) {
+            if let Some(entry) = g.level1.entries.get_mut(k) {
                 entry.parsed = true;
             }
         }
-        self.cues_at = if !cues_read.is_empty() {
-            cues_read
-        } else if cues_broken {
-            Vec::new()
-        } else {
-            level1.cues_unread().into_iter().collect()
-        };
-        // FFmpeg reads a duration that is not a number as none.
-        if self.info.duration.is_some_and(f64::is_nan) {
-            self.info.duration = None;
-        }
-        if self.info.timestamp_scale == 0 {
-            self.info.timestamp_scale = 1_000_000;
-        }
-        self.time_tracks();
-        let described = describe(&self.info, &mut self.tracks, &lists);
-        self.metadata = described.metadata;
-        self.chapters = described.chapters;
-        self.attachments = described.attachments;
-        Ok(())
+        Ok(false)
     }
 
     /// What FFmpeg reads where a SeekHead entry points: the top-level
     /// element there, whichever it is -- a Cluster, or an element it does
-    /// not know, read as nothing.
-    fn read_at(
-        &mut self,
-        pos: u64,
-        level1: &mut Level1,
-        lists: &mut Lists,
-        cues_read: &mut Vec<u64>,
-    ) -> Result<(), Error> {
+    /// not know, read as nothing; one of unknown size too, as FFmpeg reads
+    /// it.
+    fn read_at(&mut self, pos: u64, g: &mut Gathered) -> Result<(), Error> {
         self.r.seek_to(pos)?;
         let id = nest::read_id(&mut self.r)?;
         if id == ids::CLUSTER {
@@ -744,20 +908,15 @@ impl<R: Read + Seek> Demuxer<R> {
         if !ids::is_top_level(id) {
             return nest::skip_any(&mut self.r, &h);
         }
-        level1.met(id, pos);
-        if h.end().is_none() {
-            // FFmpeg tries to read one of unknown size, which the
-            // specification forbids; this refuses it.
-            return Err(Error::Invalid("a top-level element of unknown size"));
-        }
+        g.level1.met(id, pos);
         match id {
+            // A damaged one is not refused here, as it is before the first
+            // Cluster: its tracks are left out, and following stops.
             ids::TRACKS => self.read_tracks(&h).map_err(|d| d.error),
-            ids::CUES => {
-                // Read at once by FFmpeg: these are its index then.
-                cues_read.push(pos);
-                Ok(())
-            }
-            _ => self.read_listed(&h, FROM_SEEK_HEAD, lists),
+            _ => match self.read_level1(&h, FROM_SEEK_HEAD, g) {
+                Ok(()) => Ok(()),
+                Err(Fault::Damage(e) | Fault::Refuse(e)) => Err(e),
+            },
         }
     }
 
@@ -778,34 +937,38 @@ impl<R: Read + Seek> Demuxer<R> {
 
     /// A Tracks element: its tracks added to those of any before it, as
     /// FFmpeg adds them -- or, damaged, none of them, and how many of its
-    /// entries were read before the damage.
+    /// entries were read before the damage. One of unknown size ends as
+    /// [`nest::child`] ends it.
     fn read_tracks(&mut self, h: &Header) -> Result<(), Damage> {
         let (mut tracks, mut declared) = (Vec::new(), Vec::new());
-        let mut refused = None;
-        let walked = self.r.children(h, |r, entry| {
+        let damage = |error, read: &Vec<(u64, bool)>, refused| Damage {
+            error,
+            read: read.len(),
+            refused,
+        };
+        let end = h.end();
+        self.r
+            .seek_to(h.data)
+            .map_err(|e| damage(e, &declared, false))?;
+        loop {
+            let entry = match nest::child(&mut self.r, end) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(b) => return Err(damage(b.error, &declared, false)),
+            };
             if entry.id != ids::TRACK_ENTRY {
-                return Ok(());
+                nest::skip(&mut self.r, &entry).map_err(|e| damage(e, &declared, false))?;
+                continue;
             }
-            let (number, track) = match read_track(r, entry) {
+            let (number, track) = match read_track(&mut self.r, &entry) {
                 Ok(read) => read,
-                Err(EntryError::Damaged(e)) => return Err(e),
-                Err(EntryError::Refused(e)) => {
-                    refused = Some(e);
-                    return Err(e);
-                }
+                Err(EntryError::Damaged(e)) => return Err(damage(e, &declared, false)),
+                Err(EntryError::Refused(e)) => return Err(damage(e, &declared, true)),
             };
             declared.push((number, track.is_some()));
             if let Some(t) = track {
                 tracks.push(t);
             }
-            Ok(())
-        });
-        if let Err(error) = walked {
-            return Err(Damage {
-                error,
-                read: declared.len(),
-                refused: refused.is_some(),
-            });
         }
         self.tracks.extend(tracks);
         // Timing comes once the TimestampScale is certain.
@@ -817,52 +980,39 @@ impl<R: Read + Seek> Demuxer<R> {
         Ok(())
     }
 
-    /// After damage before the first Cluster: where the next top-level
-    /// element begins, looked for from `from`. As FFmpeg, a Segment
-    /// resynchronised in is read to the end of the file from then on, its
-    /// stated end (`segment_ends`, and the bound reading stops at) no longer
-    /// a bound.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Truncated`] when the file holds none after `from`: FFmpeg's
-    /// `matroska_resync` meets the end of the file, and it refuses the file.
-    fn resync_description(
-        &mut self,
-        from: u64,
-        segment_ends: &mut Option<u64>,
-    ) -> Result<u64, Error> {
-        let at = self.find_top_level(from)?.ok_or(Error::Truncated)?;
-        self.segment_end = self.r.len();
-        *segment_ends = None;
-        Ok(at)
-    }
-
     /// Where the next of the Segment's top-level elements begins, at or
-    /// after `from`, found by its ID as FFmpeg's `matroska_resync` finds one.
+    /// after `from`, and its ID: found as FFmpeg's `matroska_resync` finds
+    /// one, by the four bytes of its ID. Read a little at a time, so that
+    /// the search costs what it passes over.
     #[allow(
         clippy::arithmetic_side_effects,
-        reason = "positions are within the file (`at` stays under its length, and an ID is found only after four bytes of the scan, so its start is at or past where the scan began)"
+        reason = "positions are within the file (`at` stays under its length, and an ID is found only after four bytes of the search, so its start is at or past where the search began); `chunk` is at most the buffer's length"
     )]
-    fn find_top_level(&mut self, from: u64) -> Result<Option<u64>, Error> {
-        let mut at = from;
+    fn find_top_level(&mut self, from: u64) -> Result<Option<(u64, Id)>, Error> {
         let len = self.r.len();
+        if from >= len {
+            return Ok(None);
+        }
+        self.r.seek_to(from)?;
+        let mut buf = [0u8; 4096];
+        let mut chunk = 16;
+        let mut at = from;
         let mut window = 0u32;
-        let mut filled = 0;
-        let mut buf = vec![0u8; 64 * 1024];
+        let mut filled = 0u32;
         while at < len {
-            self.r.seek_to(at)?;
-            let n = usize::try_from((len - at).min(64 * 1024)).unwrap_or(64 * 1024);
-            let chunk = buf.get_mut(..n).unwrap_or_default();
-            self.r.read_into(chunk)?;
-            for (i, &b) in chunk.iter().enumerate() {
+            let n = usize::try_from(len - at).map_or(chunk, |left| left.min(chunk));
+            let part = buf.get_mut(..n).unwrap_or_default();
+            self.r.read_into(part)?;
+            for (i, &b) in part.iter().enumerate() {
                 window = (window << 8) | u32::from(b);
-                filled += 1;
-                if filled >= 4 && ids::is_top_level(window) {
-                    return Ok(Some(at + u64::try_from(i).unwrap_or(0) - 3));
+                filled = (filled + 1).min(4);
+                if filled == 4 && ids::is_top_level(window) {
+                    let end = at + u64::try_from(i).unwrap_or(0) + 1;
+                    return Ok(Some((end - 4, window)));
                 }
             }
             at += u64::try_from(n).unwrap_or(1);
+            chunk = (chunk * 2).min(buf.len());
         }
         Ok(None)
     }
@@ -1273,7 +1423,7 @@ impl<R: Read + Seek> Demuxer<R> {
     /// FFmpeg delivers the laces it queued before one failed.
     fn resync(&mut self) -> Result<bool, Error> {
         match self.find_top_level(self.last_good.saturating_add(1))? {
-            Some(start) => {
+            Some((start, _)) => {
                 self.r.seek_to(start)?;
                 self.last_good = start;
                 // As FFmpeg, a segment resynchronised into is read to the
@@ -1349,11 +1499,6 @@ impl<R: Read + Seek> Demuxer<R> {
             .or(entries.first())
             .copied()
         else {
-            if self.first_cluster.is_none() {
-                // Nothing to play, so nothing to go to.
-                self.state = State::Done;
-                return Ok(());
-            }
             return Err(Error::Invalid("a seek in a track with no key frame"));
         };
         self.queue.clear();
@@ -1373,8 +1518,8 @@ impl<R: Read + Seek> Demuxer<R> {
     fn cues(&mut self) -> Result<&[Cue], Error> {
         if self.cues.is_none() {
             let reading = self.r.pos();
-            let mut points = Vec::new();
-            for at in self.cues_at.clone() {
+            let mut points = std::mem::take(&mut self.cue_points);
+            if let Some(at) = self.cues_at {
                 // Damage keeps the points read before it, as FFmpeg keeps
                 // them: what the error leaves in `points` is the index, so
                 // the error itself is passed over.

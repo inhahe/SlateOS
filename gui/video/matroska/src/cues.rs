@@ -4,8 +4,9 @@
 //! (`matroska_index`, then `matroska_add_index_entries`).
 //!
 //! FFmpeg keeps one list of cue points for the file, and every Cues element
-//! it reads adds to it: all those before the first Cluster, or else the one
-//! the SeekHead names, read at the first seek. A damaged Cues element adds
+//! it reads adds to it: all those before the first Cluster, read as the file
+//! is opened, or else the one the SeekHead names, read at the first seek. A
+//! damaged Cues element adds
 //! the points before its damage, and the one damaged as far as it got
 //! (`nest.rs`'s rules). The index is made of the whole list.
 
@@ -47,7 +48,7 @@ pub(crate) fn read_points<R: Read + Seek>(
     out: &mut Vec<Point>,
 ) -> Result<(), Error> {
     let levels = nest::enter(levels)?;
-    let end = nest::end_of(cues)?;
+    let end = cues.end();
     r.seek_to(cues.data)?;
     loop {
         let c = match nest::child(r, end) {
@@ -79,7 +80,7 @@ fn read_point<R: Read + Seek>(
     point: &mut Point,
 ) -> Result<(), Error> {
     let levels = nest::enter(levels)?;
-    let end = nest::end_of(h)?;
+    let end = Some(nest::end_of(h)?);
     loop {
         let c = match nest::child(r, end) {
             Ok(Some(c)) => c,
@@ -99,7 +100,7 @@ fn read_point<R: Read + Seek>(
                     return Ok(());
                 };
                 nest::enter(levels)?;
-                let positions_end = nest::end_of(&c)?;
+                let positions_end = Some(nest::end_of(&c)?);
                 while let Some(f) = nest::child(r, positions_end).map_err(|b| b.error)? {
                     match f.id {
                         ids::CUE_TRACK => nest::uint(r, &f, 0, track)?,

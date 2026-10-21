@@ -230,22 +230,67 @@ fn two_tracks_cut_short_anywhere_are_ffmpeg_s() {
     cut_short_anywhere_as_ffmpeg("uncued.mkv");
 }
 
+/// What `openings.txt` gives of a file that opens: [`dump`]'s lines, each
+/// track's time base, and the duration in seconds, as ffprobe writes it.
+fn opening(bytes: &[u8]) -> Vec<String> {
+    let mut lines = dump(bytes, None);
+    let Ok(d) = Demuxer::open(Cursor::new(bytes.to_vec())) else {
+        return lines;
+    };
+    for (i, t) in d.tracks().iter().enumerate() {
+        let (num, den) = d.time_base(t.number).unwrap();
+        lines.push(format!("time base {i} {num}/{den}"));
+    }
+    // FFmpeg's: the ticks times the nanoseconds of a tick, in microseconds,
+    // truncated.
+    let info = d.info();
+    lines.push(match info.duration {
+        Some(ticks) => {
+            #[allow(clippy::cast_precision_loss, reason = "FFmpeg's own sum, in double")]
+            let micros = (ticks * info.timestamp_scale as f64 / 1000.0) as i64;
+            #[allow(clippy::cast_precision_loss, reason = "as ffprobe prints it")]
+            let seconds = micros as f64 / 1e6;
+            format!("duration {seconds:.6}")
+        }
+        None => "duration none".to_owned(),
+    });
+    lines
+}
+
 /// Files FFmpeg opens or refuses by how its header reads before the first
-/// Cluster (`openings.txt`): one with no Cluster is refused, whether it is
-/// whole or damaged; one whose Segment ends before its Clusters, or with
-/// stray bytes before them, opens.
+/// Cluster (`openings.txt`), and what it reads of those it opens -- most of
+/// them by its second pass, which looks for the Segment's top-level
+/// elements by their IDs: one with no Cluster is refused, whether it is
+/// whole or damaged, unless a SeekHead's `SeekID` holds a Cluster's ID; one
+/// whose Segment ends before its Clusters, with stray bytes before them,
+/// with top-level elements of unknown size, or damaged Cues, opens. Where
+/// FFmpeg lists the tracks twice, its second pass having read the Tracks
+/// again, they are listed once (design-decisions §1358).
 #[test]
 fn a_file_opens_or_is_refused_as_ffmpeg_decides() {
     let text = std::fs::read_to_string(data("openings.txt")).unwrap();
-    let mut files = 0;
+    let mut answers: Vec<(&str, Vec<&str>)> = Vec::new();
     for line in text.lines().filter(|l| !l.starts_with('#')) {
-        let (name, answer) = line.split_once(' ').unwrap();
-        let bytes = std::fs::read(data(name)).unwrap();
-        let opened = Demuxer::open(Cursor::new(bytes)).map(|_| "opens");
-        assert_eq!(opened.unwrap_or("refused"), answer, "{name}");
-        files += 1;
+        match line.strip_prefix("file ") {
+            Some(file) => answers.push((file, Vec::new())),
+            None => answers.last_mut().unwrap().1.push(line),
+        }
     }
-    assert!(files >= 11, "{files} files");
+    // Every file's failure, not the first's.
+    let mut wrong = Vec::new();
+    for (file, lines) in &answers {
+        let (name, answer) = file.split_once(' ').unwrap();
+        let bytes = std::fs::read(data(name)).unwrap();
+        if answer == "refused" {
+            if Demuxer::open(Cursor::new(bytes)).is_ok() {
+                wrong.push(format!("{name}: opens"));
+            }
+        } else if opening(&bytes) != *lines {
+            wrong.push(format!("{name}: {:?}", opening(&bytes)));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of the files: {wrong:#?}", wrong.len());
+    assert!(answers.len() >= 37, "{} files", answers.len());
 }
 
 // --- Beyond ffprobe -----------------------------------------------------------

@@ -1,12 +1,267 @@
-# Each open_*.mkv: whether ffprobe opens it or refuses it (generate_fixtures.py).
-open_damaged_and_no_cluster.mkv refused
-open_damaged_then_clusters.mkv opens
-open_no_cluster.mkv refused
-open_no_cluster_unknown_segment.mkv refused
-open_no_cluster_void_after.mkv refused
-open_segment_ends_before_clusters.mkv opens
-open_segment_ends_in_tracks.mkv opens
-open_stray_00.mkv opens
-open_stray_4286.mkv opens
-open_stray_80.mkv opens
-open_stray_ff.mkv opens
+# Each open_*.mkv: `refused` if ffprobe will not open it; else what it shows,
+# `twice` where FFmpeg lists the tracks a second time, given once as this crate
+# gives them -- see opening_lines (generate_fixtures.py).
+file open_cues_damaged_and_no_cluster.mkv refused
+file open_cues_damaged_before_an_info_in_them.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/1000000000
+time base 1 1/1000000000
+duration none
+file open_cues_damaged_then_clusters.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_damaged_and_no_cluster.mkv refused
+file open_damaged_then_clusters.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_element_80_of_unknown_size_unknown_segment.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_info_of_unknown_size.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_info_of_unknown_size_then_an_info_in_a_void_unknown_segment.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_info_of_unknown_size_then_stray_00_unknown_segment.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_info_of_unknown_size_unknown_segment.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_no_cluster.mkv refused
+file open_no_cluster_unknown_segment.mkv refused
+file open_no_cluster_void_after.mkv refused
+file open_second_segment_inside_one_of_unknown_size.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_seek_head_names_a_cluster_and_no_cluster.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_seek_head_names_a_cluster_cut_after_it.mkv opens
+format
+duration none
+file open_seek_head_names_a_cluster_cut_in_a_position.mkv refused
+file open_seek_head_names_a_cluster_cut_in_the_next_id.mkv refused
+file open_seek_head_names_a_cluster_then_damage.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_seek_head_then_stray_00.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_segment_ends_before_clusters.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_segment_ends_in_info.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_segment_ends_in_seek_head.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_segment_ends_in_tracks.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_00.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_4286.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_4286_unknown_segment.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_80.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_80_unknown_segment.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_ff.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_ff_unknown_segment.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_ffff.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_stray_ffff_unknown_segment.mkv opens twice
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_tags_of_unknown_size.mkv opens twice
+format
+tag A=b
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_tracks_cut_after_a_cluster_id_in_them.mkv refused
+file open_tracks_of_unknown_size.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000
+file open_tracks_of_unknown_size_unknown_segment.mkv opens
+format
+stream 0 track
+tag language=eng
+stream 1 track
+tag language=eng
+time base 0 1/10000
+time base 1 1/10000
+duration 3.500000

@@ -19,12 +19,27 @@ of them.
 | WavPack, ProRes and RealMedia audio packets, which FFmpeg rebuilds from Matroska's form | given as stored | FFmpeg's `matroska_parse_wavpack`, `_prores` and `_rm_audio`, if those codecs are ever decoded here. (WebVTT's, which FFmpeg's `matroska_parse_webvtt` takes apart, are given as stored too, and `videocodec::Subtitles` takes WebM's apart as it does.) |
 | Several `ContentEncoding`s on one track | passed through as stored, as FFmpeg does | nothing: FFmpeg's own behaviour |
 | A source that cannot seek (a pipe, a live stream) | `Demuxer::open` measures the source, so it needs `Seek` | a streaming mode: the reader already knows where every element ends, but `open`'s SeekHead and the seek's index read ahead |
-| A top-level element of unknown size other than a Cluster (the specification allows it of none) | refused before the first Cluster; ends following the SeekHead there | FFmpeg reads one until an element that cannot be inside it begins, or the file ends, as it reads a Cluster of unknown size -- but only inside a Segment of unknown size. In a Segment of known size the element is damage, and FFmpeg's second pass, which takes the Segment for one of unknown size, reads it then (`ebml_parse` in `matroskadec.c`). ffprobe 9b7439c31b opens a file with a Tags of unknown size before its first Cluster, and lists its tags (probed 2026-10-21). An unknown-size element nested in one is accepted too, which needs FFmpeg's table of what may be inside what |
+| A master element of unknown size inside another of unknown size -- a `Tag` in a `Tags`, a `TrackEntry` in a `Tracks` (the specification allows it of none; a top-level element of unknown size is read, as FFmpeg reads one) | damage: the element holding it keeps what was read before it | FFmpeg reads one until an element its parent or any level above knows begins, handing that element up (`ebml_parse`'s walk up its syntax tables). It needs each reader in `nest.rs` and `track.rs` to know the IDs of the levels above it. ffprobe 9b7439c31b lists the tag of a `Tag` of unknown size in a `Tags` of unknown size (probed 2026-10-21) |
 | A chapter without an end, in a file whose Info gives no duration | the last such chapter ends where it starts (`Demuxer::chapter_ends`) | FFmpeg estimates a duration from the streams' bit rates when probing; that needs the bit rates, which the demuxer does not know |
-| Damage in a Tracks after its first track, before the first Cluster (damage before its first is passed over, as FFmpeg passes over it) | the file is refused | FFmpeg reads the Segment again from its start, which lists every track before the damage twice (design-decisions §1358 for why that is not copied); keeping the tracks read before the damage, once, and reading on after the element -- as for a damaged Info -- would serve, with each track's fields read as FFmpeg's partial `TrackEntry` holds them |
+| Damage in a Tracks after its first track, before the first Cluster (damage before its first is passed over, as FFmpeg passes over it) | the file is refused | FFmpeg's second pass reads the Tracks again, which lists every track before the damage twice (design-decisions §1358 for why that is not copied) -- or, where it meets a Cluster's ID first (a SeekHead naming a Cluster, before the Tracks), lists them once and opens the file. Keeping the tracks read before the damage, once, and reading on -- as for damaged Tags -- would serve both, with each track's fields read as FFmpeg's partial `TrackEntry` holds them |
+| Elements between the EBML header and the Segment (a Void, say) | passed over, and the Segment read from its start | FFmpeg reads one of them where it expects the Segment, which sends it straight to its second pass: the Segment's elements are found by their IDs, and its `segment_start` never set, so it counts the SeekHead's and the Cues' positions from the file's start and misses what they point to. Copying it would copy a fault |
+| The end of the file in a `TrackEntry`, between two of its elements | the file is refused, as the end of the file inside an element is | FFmpeg reads that as damage its second pass looks past, not as the file cut short: the two differ only where an element's ID lies in the entry's bytes after the damage. Reading entries with `nest::child`, as the other readers are, would do it |
 
 **Where.** `gui/video/matroska/src/` (`demux.rs`, `track.rs`, `nest.rs`,
 `metadata.rs`); the crate's module documentation says what it reads.
+
+**Was here, fixed 2026-10-21:** damage before the first Cluster was looked
+past by rules of this crate's own -- one for stray bytes, one for an
+element running past the Segment's stated end, one for the end of the file
+-- each matching FFmpeg on its own fixture and not on the cases around it: a
+stray byte in a Segment of unknown size, or two bytes of `FF` fill, refused
+a file FFmpeg opens; an Info running past the Segment's stated end was
+passed over unread where FFmpeg reads it; a file cut short inside a
+SeekHead opened where FFmpeg refuses it; and a top-level element of unknown
+size refused the file. It is now FFmpeg's second pass itself
+(`Demuxer::second_pass`), and Cues met before the first Cluster are read as
+the file is opened, so that damage in them starts that pass as it does in
+FFmpeg. Held to ffprobe by 37 files (`openings.txt`).
 
 **Was here, fixed 2026-10-05:** a damaged Info before the first Cluster
 refused the file. It keeps the fields read before the damage and reading

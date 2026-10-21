@@ -530,7 +530,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-pre-push-touches.py` | Tests for the pre-push hook's `touches` helper (scripts/hooks/pre-push). |
 | `scripts/test-pre-push-tree-is-push.py` | Tests for `tree_is_push`, the precondition of pre-push gates 53-74. |
 | `scripts/test-pre-push-unixhalf-gate.py` | Behavioural tests for pre-push gate 12 (coreutils' unix half). |
-| `scripts/test-proctree.py` | test-proctree.py — tests for `proctree.resolve_command` and friends. |
+| `scripts/test-proctree.py` | test-proctree.py — tests for `proctree`: launch, cost, and containment. |
 | `scripts/test-program-catalogue.py` | The rule that every program is recorded: `programs.md` lists every binary. |
 | `scripts/test-prune-build-cache.py` | Run `prune-build-cache.py`'s self-test under the boot test's tooling gate. |
 | `scripts/test-prune-build-trees.py` | Tests for `scripts/prune-build-trees.py`. |

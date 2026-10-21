@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""test-proctree.py — tests for `proctree`: the launch path, the cost, and the
-containment of what a tree starts outside its Job Object.
+"""test-proctree.py — tests for `proctree`: launch, cost, and containment.
+
+Containment includes what a tree starts outside its Job Object.
 
 Run directly (no pytest dependency, so it works on a bare Python):
 

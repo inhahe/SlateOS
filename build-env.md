@@ -36,15 +36,17 @@ ring 3, and the `fastpy-*` ones need the fastpy checkout importable. It looks
 for fastpy **beside the repo root** and honours `$FASTPY_DIR`.
 
 Since the move to the new PC (2026-10-20) fastpy sits beside the OS repo, at
-`C:/visual studio projects/fastpy`, so the sibling search finds it with
-nothing set. A second checkout remains at `D:/visual studio projects/fastpy`:
-its git history is newer (the history rewrite for publishing, 2026-10-18), but
-on 2026-10-21 its `compiler/` and `runtime/` sources were identical to the
-sibling's. If the two ever diverge, name the one you mean:
+`C:/visual studio projects/fastpy` (its GitHub checkout, where fastpy itself
+is developed), so the sibling search finds it with nothing set. To build
+against another checkout, name it:
 
 ```
-FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
+FASTPY_DIR="<path-to-fastpy>" python scripts/ctest-fixtures.py build
 ```
+
+fastpy is developed in that checkout while the lanes build against it, so a
+fastpy commit makes the `fastpy-*` fixtures stale: the rootfs build then
+refuses until `ctest-fixtures.py build` has rebuilt them.
 
 fastpy needs `llvmlite`, so it must run under a Python that has it. On this PC
 a bare `python` starts Python 3.15, which has no packages, while the

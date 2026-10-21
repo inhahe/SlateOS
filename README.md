@@ -95,17 +95,31 @@ SlateOS's own code is MIT - see [LICENSE](LICENSE). Free to use, modify and
 redistribute; provided as-is, with no warranty.
 
 Components ported from or built on other projects keep those projects'
-licences, and the MIT licence does not cover them. The copyleft ones are:
+licences, and the MIT licence does not cover them. These are the upstreams
+whose licence is, or offers, a copyleft one:
 
-| Component | Licence |
-|---|---|
-| `userspace/coreutils` (ported from GNU coreutils) | GPL-3.0-or-later, with GPL-2.0 and LGPL parts |
-| `userspace/oils`, `userspace/autoopts` | GPL-3.0-or-later |
-| `userspace/localtime`, `userspace/ulclosestream` | GPL-2.0-or-later, with LGPL parts |
-| `userspace/lockfile` | GPL-2.0-or-later or Artistic-1.0 |
-| `gui/video/mp4` | LGPL-2.1-or-later |
+| Upstream | Licence | Notice kept in |
+|---|---|---|
+| GNU coreutils 9.4, diffutils 3.10, findutils 4.9.0, patch 2.7.6, time 1.9, binutils 2.42; gawk 5.2.1 | GPL-3.0-or-later | `userspace/coreutils` |
+| gnulib | GPL-3.0-or-later AND LGPL-3.0-or-later AND LGPL-2.1-or-later | `userspace/coreutils` |
+| GNU bash 5.2.37 | GPL-3.0-or-later | `userspace/oils` |
+| GNU sharutils 4.15.2 | GPL-3.0-or-later | `userspace/autoopts` |
+| AutoOpts 41.1 | LGPL-3.0-or-later OR BSD-3-Clause | `userspace/autoopts` |
+| glibc 2.39 | LGPL-2.1-or-later AND GPL-2.0-or-later | `userspace/localtime` |
+| util-linux 2.39.3 | GPL-2.0-or-later AND LGPL-2.1-or-later, with BSD and MIT parts | `userspace/ulclosestream` |
+| procps-ng 4.0.4 | GPL-2.0-or-later AND LGPL-2.1-or-later | `userspace/coreutils` |
+| psmisc 23.7, sysvinit 3.08, Debian hostname 3.23 | GPL-2.0-or-later | `userspace/coreutils` |
+| systemd 255 | LGPL-2.1-or-later | `userspace/coreutils` |
+| procmail 3.24 | GPL-2.0-or-later OR Artistic-1.0 | `userspace/lockfile` |
+| vim 9.1.0016 (`xxd`) | MIT OR GPL-2.0-only | `userspace/coreutils` |
+| FFmpeg n8.1.3, and FFmpeg 9b7439c31b (2026-03) | LGPL-2.1-or-later | `gui/video/ffbits`, `gui/video/mp4` |
 
-Permissively licensed parts (the font and image-codec libraries, bzip2 and
-others) keep their own notices too. Each such component's licence texts are in
-its own `licenses/` directory, with a `notices.yaml` saying which apply to
-what, and the OS image carries them all under `/usr/share/licenses`.
+An upstream's code is often in more crates than the one keeping its notice:
+that crate's `licenses/notices.yaml` names them (sharutils, for one, is
+`userspace/uuencode` and `userspace/uudecode`; util-linux is `lsblk`, `blkid`,
+`login` and the rest of its ports). Everything else is under permissive
+licences, each keeping its own notice. `python scripts/gather-notices.py
+--list` prints every third-party component with its licence and the crate
+whose notice covers it, and the OS image carries those notices under
+`/usr/share/licenses`; the fonts keep their licences beside them under
+`/usr/share/fonts`, and Oils' spec tests in `/usr/share/oils-spec`.

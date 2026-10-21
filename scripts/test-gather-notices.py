@@ -100,18 +100,24 @@ def main(argv: list[str]) -> int:
                "the walk or the lock file reading is broken, not the tree")
 
     # 3. The golden bundle.
+    written = golden = None
     with tempfile.TemporaryDirectory(prefix="gather_notices_golden_") as tmp:
         root, home = gn.build_fixture(Path(tmp))
         fresh = Path(tmp) / "bundle"
-        gn.write_bundle(gn.gather(root, home), fresh)
-        written, golden = files_under(fresh), files_under(GOLDEN)
-    expect(written.keys() == golden.keys(),
-           "the golden bundle's files are not the ones the gatherer writes",
-           f"    written: {sorted(written)}\n    golden:  {sorted(golden)}")
-    for rel in sorted(written.keys() & golden.keys()):
-        expect(written[rel] == golden[rel],
-               f"the gatherer no longer writes {rel} as gui/notices reads it "
-               "(see this file's docstring before regenerating)")
+        try:
+            gn.write_bundle(gn.gather(root, home), fresh)
+        except gn.NoticeError as exc:
+            expect(False, f"the fixture's notices do not gather: {exc}")
+        else:
+            written, golden = files_under(fresh), files_under(GOLDEN)
+    if written is not None and golden is not None:
+        expect(written.keys() == golden.keys(),
+               "the golden bundle's files are not the ones the gatherer writes",
+               f"    written: {sorted(written)}\n    golden:  {sorted(golden)}")
+        for rel in sorted(written.keys() & golden.keys()):
+            expect(written[rel] == golden[rel],
+                   f"the gatherer no longer writes {rel} as gui/notices reads it "
+                   "(see this file's docstring before regenerating)")
 
     if failures:
         print("test-gather-notices: FAILED")

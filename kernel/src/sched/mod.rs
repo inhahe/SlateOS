@@ -8613,6 +8613,15 @@ const IDLE_FALLBACK_WEDGE_TICKS: u64 = 500;
 /// once per idle stretch, a second in.
 const IDLE_ORPHAN_CHECK_TICKS: u64 = 100;
 
+/// Idle-fallback passes with interrupts off and nothing runnable before the
+/// boot is stopped as wedged. With IF=0 the loop polls instead of halting
+/// (HLT would end only on an NMI), so a pass takes microseconds rather than a
+/// tick: about a second native, a few tens under TCG. Before that, a task
+/// another CPU wakes is still found; after it, nothing that can still happen
+/// will make one runnable -- no tick, no device -- and the stop names why
+/// rather than leaving the boot test to time out at a bare HLT.
+const IDLE_IF_OFF_PASSES: u64 = 1 << 20;
+
 /// One-shot guard so the idle-fallback wedge dump fires at most once per boot.
 static IDLE_FALLBACK_WEDGE_DUMPED: AtomicBool = AtomicBool::new(false);
 
@@ -9910,7 +9919,11 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     current_id
                 };
                 loop {
-                    if handoff.is_none() {
+                    // With interrupts off, HLT would end only on an NMI, so it
+                    // is never what ends this wait: poll instead, which still
+                    // drains deferred wakes and sees another CPU's
+                    // (`IDLE_IF_OFF_PASSES`).
+                    if handoff.is_none() && cpu::interrupts_enabled() {
                         cpu::hlt();
                     }
 
@@ -9953,6 +9966,33 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     });
                     let Some(ready_id) = picked else {
                         idle_spins = idle_spins.saturating_add(1);
+                        if !cpu::interrupts_enabled() {
+                            // Passes, not ticks: the tick-sized checks below
+                            // would fire within microseconds here.
+                            if idle_spins >= IDLE_IF_OFF_PASSES {
+                                if !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed) {
+                                    dump_idle_fallback_wedge(&s, cpu, wedge_subject);
+                                }
+                                drop(s);
+                                // The alternative is not recovery but halting
+                                // silently for ever: the panic path is what
+                                // reports why, and stops the boot test at once.
+                                #[allow(clippy::panic)]
+                                {
+                                    panic!(
+                                        "idle with interrupts off and nothing runnable on CPU {cpu}: \
+                                         no tick or device interrupt can make a task runnable, so \
+                                         the boot would halt for ever. Typically a wait bounded by \
+                                         an hrtimer before hrtimer::init() and sti() -- its timer \
+                                         can never fire (task {wedge_subject} is waiting)"
+                                    );
+                                }
+                            }
+                            drop(s);
+                            wake_signals.flush();
+                            core::hint::spin_loop();
+                            continue;
+                        }
                         // A second with nothing to run: if a task sits
                         // `Running` on no CPU, this is where it shows.
                         if idle_spins == IDLE_ORPHAN_CHECK_TICKS {

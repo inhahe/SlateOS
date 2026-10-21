@@ -22,10 +22,12 @@
 # its path, so the caller must have run slate_ensure_zig, which settles
 # which zig $SLATE_ZIG is. Fails if any of them cannot be read.
 cmake_configure_fingerprint() {
-    local libc="$1" include="$2" symbols headers recipe zig
+    local libc="$1" include="$2" symbols headers recipe zig nm
     [ -f "$libc" ] && [ -d "$include" ] || return 1
     zig="$("$SLATE_ZIG" version 2>/dev/null)" && [ -n "$zig" ] || return 1
-    symbols="$(nm -g --defined-only --format=just-symbols "$libc" 2>/dev/null \
+    # binutils' nm, which WSL's Ubuntu has and the Windows side does not.
+    nm="$(command -v nm)" || { echo "configured.sh: no nm to list libc.a's names" >&2; return 1; }
+    symbols="$("$nm" -g --defined-only --format=just-symbols "$libc" 2>/dev/null \
         | grep -E '^[A-Za-z_][A-Za-z0-9_]*$' | grep -vE '^(_R|_ZN)' \
         | sort -u | sha256sum | cut -c1-64)" || return 1
     headers="$(cd "$include" && find . -type f -print0 | sort -z \

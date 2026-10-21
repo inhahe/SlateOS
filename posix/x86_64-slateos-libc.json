@@ -24,6 +24,8 @@
         "kind": "inline"
     },
 
+    "llvm-args": ["-disable-machine-licm"],
+
     "metadata": {
         "description": "x86_64 bare-metal, hard-float: the ABI libc.a is built for",
         "host_tools": false,

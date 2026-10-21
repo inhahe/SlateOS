@@ -38,6 +38,17 @@ $sysroot = Join-Path $PSScriptRoot "sysroot\lib"
 #                           it, so the code sees the same bare-metal target.
 #   red zone off            as unknown-none. The move changes the float ABI
 #                           and nothing else about the code generated.
+#   -disable-machine-licm   LLVM's pre-register-allocation MachineLICM can
+#                           hoist a load out of an outer loop past the test
+#                           that guards it, and the load then faults: it
+#                           caches "this block always runs" per block, not
+#                           per loop, and asks both the outer loop and the
+#                           inner one (LLVM issue 233340, fixed by PR 234138,
+#                           in every LLVM from 18 on). `msgrcv` read a jump
+#                           table 32 GiB out of bounds whenever `msgtyp` was
+#                           0. Remove this once the nightly's LLVM has the
+#                           fix (known-issues.md
+#                           D-LLVM-MACHINELICM-SPECULATES-A-GUARDED-LOAD).
 #
 # `-Zbuild-std=core,compiler_builtins` compiles those two for the spec as well,
 # so the whole archive has one ABI. Until 2026-09-25 this built for

@@ -1098,6 +1098,12 @@ def metadata_fixtures():
     parts = [("info", m_info()), ("c", m_clusters()), ("tracks", cropped)]
     out["meta_refused_track_after_the_clusters.mkv"] = m_file(m_laid_out([("1654AE6B", "tracks")], parts))
 
+    # As many tracks as FFmpeg makes streams of, and one more, which refuses
+    # the file (its max_streams).
+    for n in (1000, 1001):
+        many = el("1654AE6B", b"".join(snow_track(k) for k in range(1, n + 1)))
+        out[f"meta_{n}_tracks.mkv"] = m_file(m_info(), many, m_clusters())
+
     return out
 
 

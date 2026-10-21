@@ -72,9 +72,13 @@ listed once.
   square of the file's length, which in FFmpeg runs for hours on a file of
   a few megabytes, and keeps a large element they all end in once for each
   of them. The search for IDs only moves forward, so looking past real
-  damage reads the bytes before the first Cluster about twice; past
-  reading four times the file's length, and a mebibyte more, the file is
-  refused (`Error::Unsupported`). What the pass reads bounds what it keeps.
+  damage reads the bytes before the first Cluster about twice; once the
+  pass has read four times the file's length -- or had
+  the source hand that much over, which passing over elements larger than
+  the read-ahead, each throwing it away, can make far more than it reads --
+  the file is refused (`Error::Unsupported`). What the pass reads bounds
+  what it keeps, with the 1000 tracks FFmpeg makes streams of, past which
+  it refuses the file too.
 - *Attachments' bytes are read when asked for* (`Demuxer::attachment_data`),
   not when the file is opened as FFmpeg reads them: a film with 40 MB of
   subtitle fonts opens without reading them, and they are read only if the

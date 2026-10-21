@@ -75,6 +75,7 @@ RESYNC_FIRST_CLUSTER = "packets_of_resync_first_cluster"
 RESYNC_AFTER_SEEK_HEAD = "packets_of_resync_first_cluster_after_seek_head"
 COSTLY = "damage_too_costly_to_look_past_refuses_the_file"
 KEPT_MANY_TIMES = "damage_that_would_keep_the_file_many_times_over_refuses_it"
+REFILLED = "damage_that_would_refill_the_read_ahead_over_and_over_refuses_it"
 # What ffprobe cannot show.
 WALK = "a_walk_reads_only_as_far_as_the_seek_needs"
 SPARSE = "a_seek_goes_to_a_cue_not_past_it"
@@ -244,9 +245,17 @@ EBML = [
     ),
     (
         "the bytes read are not counted",
-        "        self.bytes_read = self.bytes_read.saturating_add(n);\n",
+        "        self.read = self.read.saturating_add(n);\n",
         "",
-        [COSTLY, KEPT_MANY_TIMES],
+        [COSTLY],
+    ),
+    (
+        "the bytes the source hands over are not counted",
+        "        self.read = self\n"
+        "            .read\n"
+        "            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));\n",
+        "",
+        [REFILLED],
     ),
 ]
 
@@ -467,15 +476,27 @@ DEMUX = [
     # Reading the description.
     (
         "a Tracks damaged before its first entry refuses the file",
-        "                if d.refused || d.read > 0 {",
-        "                if d.refused || d.read >= 0 {",
+        "        if self.refused || (entries_refuse && self.read > 0) {",
+        "        if self.refused || (entries_refuse && self.read >= 0) {",
         [SEEKHEAD_DAMAGE, OPENINGS],
     ),
     (
         "an entry FFmpeg refuses the file for is passed over",
-        "                if d.refused || d.read > 0 {",
-        "                if d.read > 0 {",
-        [PROJECTIONS],
+        "        if self.refused || (entries_refuse && self.read > 0) {",
+        "        if entries_refuse && self.read > 0 {",
+        [PROJECTIONS, "metadata_where_a_track_after_the_clusters_is_refused"],
+    ),
+    (
+        "a file may hold more tracks than FFmpeg makes streams",
+        "                if self.tracks.len().saturating_add(tracks.len()) > MAX_STREAMS {\n",
+        "                if false {\n",
+        ["metadata_of_one_track_too_many"],
+    ),
+    (
+        "FFmpeg's thousandth stream refuses the file",
+        "                if self.tracks.len().saturating_add(tracks.len()) > MAX_STREAMS {\n",
+        "                if self.tracks.len().saturating_add(tracks.len()) >= MAX_STREAMS {\n",
+        ["metadata_of_as_many_tracks_as_ffmpeg_reads"],
     ),
     (
         "a damaged Info before the Clusters refuses the file",
@@ -495,15 +516,18 @@ DEMUX = [
     ),
     (
         "Tracks after the Clusters are not looked for",
-        "            ids::TRACKS => self.read_tracks(&h).map_err(|d| {\n"
-        "                if d.refused {\n"
-        "                    Fault::Refuse(d.error)\n"
-        "                } else {\n"
-        "                    Fault::from(d.error)\n"
-        "                }\n"
-        "            }),\n",
-        "            ids::TRACKS => Ok(()),\n",
+        "        self.read_level1(&h, FROM_SEEK_HEAD, g)\n",
+        "        if id == ids::TRACKS {\n"
+        "            return Ok(());\n"
+        "        }\n"
+        "        self.read_level1(&h, FROM_SEEK_HEAD, g)\n",
         [TRACKS_AT_THE_END],
+    ),
+    (
+        "damage after an entry of a Tracks the SeekHead names refuses the file",
+        "                .map_err(|d| d.fault(levels == IN_SEGMENT)),\n",
+        "                .map_err(|d| d.fault(true)),\n",
+        ["damage_in_a_tracks_the_seek_head_names_does_not_refuse_the_file"],
     ),
     (
         "Cues the SeekHead points to are not noted",
@@ -573,8 +597,8 @@ DEMUX = [
     ),
     (
         "the second pass reads no more than the file's length",
-        "            .saturating_add(self.r.len().saturating_mul(4))\n",
-        "            .saturating_add(self.r.len().saturating_mul(1))\n",
+        "        let allowance = self.r.len().saturating_mul(4);\n",
+        "        let allowance = self.r.len().saturating_mul(1);\n",
         ["damage_before_a_large_element_is_looked_past"],
     ),
     (
@@ -585,9 +609,21 @@ DEMUX = [
     ),
     (
         "damage built to be read over and over is looked past",
-        "            .saturating_add(self.r.len().saturating_mul(4))\n",
-        "            .saturating_add(u64::MAX)\n",
-        [COSTLY, KEPT_MANY_TIMES],
+        "            if self.r.bytes_read() > read_budget || self.r.bytes_fetched() > fetch_budget {\n",
+        "            if self.r.bytes_fetched() > fetch_budget {\n",
+        [COSTLY],
+    ),
+    (
+        "damage built to have the source hand the file over again and again is looked past",
+        "            if self.r.bytes_read() > read_budget || self.r.bytes_fetched() > fetch_budget {\n",
+        "            if self.r.bytes_read() > read_budget {\n",
+        [REFILLED],
+    ),
+    (
+        "damage built to be kept many times over is looked past",
+        "        let allowance = self.r.len().saturating_mul(4);\n",
+        "        let allowance = u64::MAX;\n",
+        [COSTLY, KEPT_MANY_TIMES, REFILLED],
     ),
     (
         "damage before the first Cluster refuses the file",
@@ -638,23 +674,23 @@ DEMUX = [
     ),
     (
         "the second pass reads again the Tracks the first read",
-        "                    ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
-        "                    ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        "                ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        "                ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
         [OPENINGS, META_DAMAGE],
     ),
     (
         "the second pass does not read again the Info the first read",
-        "                    ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
-        "                    ids::INFO | ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        "                ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
+        "                ids::INFO | ids::TRACKS | ids::CHAPTERS | ids::TAGS | ids::ATTACHMENTS\n",
         [OPENINGS],
     ),
     (
         "the second pass knows only the first element the first pass read",
-        "            g.first_pass.push(at);\n",
-        "            if g.first_pass.is_empty() {\n"
-        "                g.first_pass.push(at);\n"
-        "            }\n",
-        [OPENINGS, META_DAMAGE],
+        "                g.first_pass.push(at);\n",
+        "                if g.first_pass.is_empty() {\n"
+        "                    g.first_pass.push(at);\n"
+        "                }\n",
+        ["damage_after_attachments_lists_them_once"],
     ),
     (
         "after a SeekHead entry was followed, the first resync starts from the Segment's start",
@@ -670,8 +706,14 @@ DEMUX = [
     ),
     (
         "an entry FFmpeg refuses the file for, in a Tracks the SeekHead names, is passed over",
-        "                if d.refused {\n",
-        "                if false {\n",
+        "                .map_err(|d| d.fault(levels == IN_SEGMENT)),\n",
+        "                .map_err(|d| {\n"
+        "                    if levels == IN_SEGMENT {\n"
+        "                        d.fault(true)\n"
+        "                    } else {\n"
+        "                        Fault::from(d.error)\n"
+        "                    }\n"
+        "                }),\n",
         ["metadata_where_a_track_after_the_clusters_is_refused"],
     ),
     (

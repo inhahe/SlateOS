@@ -41,7 +41,8 @@
 //!
 //! Errors, never a panic. Every element is bounded by its parent and by the
 //! file's length before anything is read or allocated for it; a block holds
-//! at most 256 laces and a binary element at most 256 MiB (FFmpeg's limit).
+//! at most 256 laces, a binary element at most 256 MiB, and a file at most
+//! 1000 tracks (FFmpeg's limits).
 //! Damage before the first Cluster is looked past as FFmpeg's second pass
 //! over the Segment looks past it, by the IDs of the elements after it --
 //! but for damage built to make that read the file over and over (FFmpeg's

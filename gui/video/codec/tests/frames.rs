@@ -398,7 +398,8 @@ fn a_seek_while_an_av1_frame_fails_does_not_hang() {
             let _ = video.seek(i64::MAX / 4, SeekMode::KeyFrame);
             let _ = video.next_picture();
         }
-        done.send(()).unwrap();
+        // After a hang the test has given up waiting, and nothing receives.
+        let _ = done.send(());
     });
     assert!(
         finished

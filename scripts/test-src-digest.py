@@ -360,8 +360,51 @@ def test_a_submodule_is_the_commit_checked_out_in_it():
         check("off the pin, the submodule is the commit checked out in it",
               dict(sd.tracked_entries_from_worktree(repo.root)).get(
                   "toolchain/fastpy"), second)
+
+        # An inherited GIT_DIR (a hook, `git bisect run`) outranks `-C`: asked
+        # inside the submodule, git would answer for the superproject.
+        os.environ["GIT_DIR"] = os.path.join(repo.root, ".git")
+        try:
+            under_a_hook = dict(sd.tracked_entries_from_worktree(repo.root)).get(
+                "toolchain/fastpy")
+        finally:
+            del os.environ["GIT_DIR"]
+        check("an inherited GIT_DIR does not make it the superproject's commit",
+              under_a_hook, second)
+
+        # Two different edits are two different compilers.
+        with open(os.path.join(checkout, "compiler", "__init__.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write("edited once\n")
+        once = dict(sd.tracked_entries_from_worktree(repo.root))["toolchain/fastpy"]
+        with open(os.path.join(checkout, "compiler", "__init__.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write("edited twice\n")
+        twice = dict(sd.tracked_entries_from_worktree(repo.root))["toolchain/fastpy"]
+        check("an edited submodule is its commit, marked with its changes",
+              once.startswith(second + "-dirty-"), True)
+        check("...and a different edit is a different digest", once != twice, True)
     finally:
         sub.close()
+        repo.close()
+
+
+def test_a_submodule_not_checked_out_is_the_commit_the_index_pins():
+    """A merge moving the pin into a tree whose submodule was never checked
+    out leaves an empty directory, which `git -C` would walk up from into the
+    superproject. Its entry is the commit the index pins."""
+    repo = base_repo()
+    try:
+        old, new = "1" * 40, "2" * 40
+        repo.git("update-index", "--add", "--cacheinfo",
+                 f"160000,{old},toolchain/fastpy")
+        repo.git("commit", "-q", "-m", "pin", "--no-gpg-sign")
+        os.makedirs(os.path.join(repo.root, "toolchain", "fastpy"), exist_ok=True)
+        repo.git("update-index", "--cacheinfo", f"160000,{new},toolchain/fastpy")
+        check("not checked out, the submodule is the commit the index pins",
+              dict(sd.tracked_entries_from_worktree(repo.root)).get(
+                  "toolchain/fastpy"), new)
+    finally:
         repo.close()
 
 

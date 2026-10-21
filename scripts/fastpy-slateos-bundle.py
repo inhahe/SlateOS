@@ -187,26 +187,32 @@ def check_pin(checked_out: str, pinned: str | None) -> str | None:
     """Refuse a submodule that is not the compiler this tree pins.
 
     `checked_out` is `git_identity` of the submodule (`<commit>`, with
-    `-dirty` for edits in `compiler/` or `runtime/`); `pinned` is
-    `pinned_commit()`. A merge that moves the pin leaves the submodule where
-    it was, and bundling it then would put an older compiler on the image
-    than the one the fixtures are built with. Returns a line to print when
-    the pin cannot be read, else None; raises BundleError when they differ.
+    `-dirty` for edits or new files in `compiler/` or `runtime/`, or
+    `unknown`); `pinned` is `pinned_commit()`. A merge that moves the pin
+    leaves the submodule where it was, and bundling it then would put an
+    older compiler on the image than the one the fixtures are built with.
+    Returns a line to print when either commit cannot be read, else None;
+    raises BundleError when they differ.
     """
     if pinned is None:
         return (f"cannot read the commit this tree pins toolchain/fastpy at; "
                 f"bundling it as checked out, at {checked_out}")
+    if checked_out == "unknown":
+        return (f"cannot read the commit toolchain/fastpy is at; bundling it "
+                f"unchecked against {pinned}, the commit this tree pins")
     if checked_out == pinned:
         return None
     if checked_out == f"{pinned}-dirty":
         raise BundleError(
-            f"toolchain/fastpy has uncommitted edits in compiler/ or runtime/, "
-            f"so it is not {pinned}, the commit this tree pins: undo them, or "
-            "bundle the checkout they belong in with --fastpy or FASTPY_DIR"
+            f"toolchain/fastpy has uncommitted edits or new files in compiler/ "
+            f"or runtime/, so it is not {pinned}, the commit this tree pins: "
+            "undo them, or bundle the checkout they belong in with --fastpy "
+            "or FASTPY_DIR"
         )
     raise BundleError(
         f"toolchain/fastpy is at {checked_out}, not {pinned}, the commit this "
-        "tree pins: run `git submodule update toolchain/fastpy`"
+        "tree pins: `git submodule update toolchain/fastpy` moves it to the "
+        "pin, or `git add toolchain/fastpy` pins the commit it is at"
     )
 
 
@@ -279,8 +285,9 @@ def fastpy_version(fastpy: Path) -> str:
 
 def git_identity(path: Path) -> str:
     """`<commit>`, `<commit>-dirty` when `compiler/` or `runtime/` has edits
-    the commit lacks, or `unknown` outside a checkout. Recorded in `BUNDLE`,
-    and held to the pin by `check_pin` when the checkout is the submodule."""
+    the commit lacks or files it does not track (a new module would be
+    copied), or `unknown` outside a checkout. Recorded in `BUNDLE`, and held
+    to the pin by `check_pin` when the checkout is the submodule."""
     # A checkout has `.git` -- a directory, or a file in a worktree. Without
     # one there is nothing to ask, and no reason to start git to be told so.
     if not (path / ".git").exists():
@@ -293,7 +300,7 @@ def git_identity(path: Path) -> str:
         ).stdout.strip()
         dirty = subprocess.run(
             ["git", "-C", str(path), "status", "--porcelain",
-             "--untracked-files=no", "--", "compiler", "runtime"],
+             "--untracked-files=normal", "--", "compiler", "runtime"],
             capture_output=True, text=True, encoding="utf-8", check=True,
             env=gitenv.clean_env(),
         ).stdout.strip()
@@ -363,8 +370,10 @@ def byte_compile(home: Path, version: str) -> str:
 
 
 def build(fastpy: Path, llvmlite: Path, out: Path, version: str,
-          toolchain: ModuleType) -> str:
-    """Assemble the tree in `out`; return the byte-compile line."""
+          toolchain: ModuleType, identity: str | None = None) -> str:
+    """Assemble the tree in `out`; return the byte-compile line. `identity`
+    is `git_identity(fastpy)` when the caller has already asked it -- the
+    one `check_pin` approved -- and is asked here when not."""
     clear_output(out)
 
     archive = Path(toolchain.build_slateos_runtime_archive(
@@ -390,7 +399,7 @@ def build(fastpy: Path, llvmlite: Path, out: Path, version: str,
     # Written last: its presence is what marks the tree complete, and what
     # lets the next run clear it.
     fields = (
-        ("fastpy", git_identity(fastpy)),
+        ("fastpy", git_identity(fastpy) if identity is None else identity),
         ("fastpy-version", fastpy_version(fastpy)),
         ("llvmlite", llvmlite_version(llvmlite)),
         ("python", version),
@@ -417,15 +426,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         fastpy = find_fastpy(args.fastpy)
-        if fastpy == SUBMODULE:
-            note = check_pin(git_identity(fastpy), pinned_commit())
+        identity = git_identity(fastpy)
+        # Resolved, so that naming the submodule by another spelling of its
+        # path is still the submodule, held to the pin.
+        if fastpy.resolve() == SUBMODULE.resolve():
+            note = check_pin(identity, pinned_commit())
             if note is not None:
                 print(f"fastpy-bundle: {note}")
         else:
             print(f"fastpy-bundle: using {fastpy}, not the pinned toolchain/fastpy")
         llvmlite = find_llvmlite(args.llvmlite)
         compiled = build(fastpy, llvmlite, args.out, args.python_version,
-                         load_toolchain(fastpy))
+                         load_toolchain(fastpy), identity)
     except (BundleError, RuntimeError, OSError) as err:
         # RuntimeError is fastpy's own report of a failed runtime build (no
         # zig, a compile error); OSError a copy that could not be made.

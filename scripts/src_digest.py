@@ -72,6 +72,8 @@ import os
 import re
 import subprocess
 
+import gitenv
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 #: How many hex characters of the SHA-256 to keep. Sixteen is 64 bits; these
@@ -152,8 +154,40 @@ def check_exclusions_are_shallow(paths):
 
 
 def _git(root: str, *args: str) -> bytes:
-    return subprocess.run(["git", "-C", root, *args],
-                          capture_output=True, check=True).stdout
+    # A clean environment: an inherited GIT_DIR (a hook, `git bisect run`)
+    # outranks `-C`, and would answer for another repository -- the
+    # superproject, asked about a submodule.
+    return subprocess.run(["git", "-C", root, *args], capture_output=True,
+                          check=True, env=gitenv.clean_env()).stdout
+
+
+def _gitlinks(root: str) -> dict[str, str]:
+    """`{path: commit}` for each submodule the index pins (mode 160000)."""
+    links = {}
+    for entry in _git(root, "ls-files", "--stage", "-z").split(b"\0"):
+        meta, tab, raw_path = entry.partition(b"\t")
+        if tab and meta.startswith(b"160000 "):
+            links[raw_path.decode("utf-8", "surrogateescape")] = \
+                meta.split()[1].decode("ascii")
+    return links
+
+
+def _submodule_identity(root: str, path: str, pinned: str) -> str:
+    """What the submodule at `path` holds, as a digest entry: the commit
+    checked out in it, and a hash of its uncommitted changes when it has any
+    -- two different compilers must not share a digest. Not checked out, it
+    holds nothing on disk, and the commit the index pins (`pinned`) is what
+    this tree says it is."""
+    checkout = os.path.join(root, path)
+    if not os.path.exists(os.path.join(checkout, ".git")):
+        return pinned
+    commit = _git(checkout, "rev-parse", "HEAD").decode("ascii").strip()
+    status = _git(checkout, "status", "--porcelain", "-z",
+                  "--untracked-files=normal")
+    if not status:
+        return commit
+    changes = hashlib.sha256(status + b"\0" + _git(checkout, "diff", "--binary", "HEAD"))
+    return f"{commit}-dirty-{changes.hexdigest()[:DIGEST_CHARS]}"
 
 
 def tracked_entries_from_commit(root: str, treeish: str):
@@ -215,6 +249,11 @@ def tracked_entries_from_worktree(root: str):
             changed.append((status[:1], None, fields[i + 1]))
             i += 2
 
+    # Submodules (`toolchain/fastpy`), known by their mode: what one holds is
+    # a commit, which `hash-object` cannot read. The diff names one when the
+    # commit checked out in it is not the one HEAD pins, when it has
+    # uncommitted changes, or when the index pins another commit.
+    links = _gitlinks(root) if changed else {}
     rehash = []
     for status, old_raw, raw in changed:
         path = raw.decode("utf-8", "surrogateescape")
@@ -226,14 +265,8 @@ def tracked_entries_from_worktree(root: str):
         if is_excluded(path):
             head.pop(path, None)
             continue
-        if os.path.isdir(os.path.join(root, path)):
-            # A submodule (`toolchain/fastpy`), the one kind of tracked path
-            # that is a directory: what it holds is the commit checked out in
-            # it, which `hash-object` cannot read. The diff names it when that
-            # commit is not the one HEAD pins -- or when it has uncommitted
-            # edits, which its commit does not show.
-            head[path] = _git(os.path.join(root, path), "rev-parse",
-                              "HEAD").decode("ascii").strip()
+        if path in links:
+            head[path] = _submodule_identity(root, path, links[path])
             continue
         rehash.append(path)
 
@@ -249,7 +282,8 @@ def tracked_entries_from_worktree(root: str):
                                                         "surrogateescape")
             proc = subprocess.run(
                 ["git", "-C", root, "hash-object", "--stdin-paths"],
-                input=payload, capture_output=True, check=True)
+                input=payload, capture_output=True, check=True,
+                env=gitenv.clean_env())
             shas = proc.stdout.decode("ascii").split()
             if len(shas) != len(rehash):
                 raise RuntimeError(

@@ -329,22 +329,19 @@ provision_sysroot() {
 # programs with and the rootfs recipe bundles as /bin/fastpy. A clone or a new
 # worktree holds only an empty directory there until this runs.
 #
-# Only an empty one is checked out. One already there is left at whatever
-# commit it is on: `submodule update` would move it to the pin with its
-# output silenced, leaving behind any commit made in it -- a pin about to be
-# moved, say. Moving it to the pin is the fixture build's, which refuses over
-# uncommitted edits. And with FASTPY_DIR naming a checkout, builds use that
-# one, so the submodule is not needed.
+# Only one not yet checked out is: one holding `compiler/__init__.py`, as
+# every consumer tests for, is left at whatever commit it is on.
+# `submodule update` would move it to the pin with its output silenced,
+# leaving behind any commit made in it -- a pin about to be moved, say.
+# Moving one to the pin is `git submodule update toolchain/fastpy`, which the
+# fastpy bundle names when it refuses a checkout off the pin. A checkout cut
+# short (its `.git` written, its files not) is not one, so it is retried.
+#
+# A failed checkout is not fatal when FASTPY_DIR names a fastpy checkout:
+# the fixture builds use that one. The rootfs is built under WSL, which sees
+# the variable only when passed through, and that is said.
 provision_fastpy() {
-    if [ -n "${FASTPY_DIR:-}" ]; then
-        if [ -f "$FASTPY_DIR/compiler/__init__.py" ]; then
-            echo "==> fastpy: builds use FASTPY_DIR ($FASTPY_DIR); toolchain/fastpy left as it is"
-            return 0
-        fi
-        echo "    error: FASTPY_DIR is $FASTPY_DIR, which holds no compiler/__init__.py" >&2
-        return 1
-    fi
-    if [ -e "$ROOT/toolchain/fastpy/.git" ]; then
+    if [ -f "$ROOT/toolchain/fastpy/compiler/__init__.py" ]; then
         echo "==> fastpy already checked out (toolchain/fastpy)"
         return 0
     fi
@@ -352,10 +349,20 @@ provision_fastpy() {
     if git -C "$ROOT" submodule update --init -- toolchain/fastpy; then
         return 0
     fi
+    if [ -n "${FASTPY_DIR:-}" ] && [ -f "$FASTPY_DIR/compiler/__init__.py" ]; then
+        echo "    could not check out toolchain/fastpy; builds use FASTPY_DIR" >&2
+        echo "    ($FASTPY_DIR). The rootfs is built under WSL, which sees it" >&2
+        echo "    only when passed through:" >&2
+        echo "        WSLENV=FASTPY_DIR/p wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
+        return 0
+    fi
     echo "    error: could not check out toolchain/fastpy." >&2
     echo "    Without it the fastpy-* programs cannot be built, and the rootfs" >&2
     echo "    leaves out /bin/fastpy. Set FASTPY_DIR to another fastpy checkout" >&2
     echo "    to build with that one instead." >&2
+    if [ -n "${FASTPY_DIR:-}" ]; then
+        echo "    (FASTPY_DIR is $FASTPY_DIR, which holds no compiler/__init__.py.)" >&2
+    fi
     return 1
 }
 

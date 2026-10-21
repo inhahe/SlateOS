@@ -775,6 +775,8 @@ def self_test() -> int:
         _git(["update-index", "--add", "--cacheinfo",
               "160000,5b11d8825e868140cf9c6350f92192c82fb0f3d7,sub"],
              cwd=str(scratch))
+        # Without the gitlink in the index, the case below passes for nothing.
+        staged = _git(["ls-files", "--stage"], cwd=str(scratch)).stdout
         listed = tracked_files(cwd=str(scratch))
 
     cases: list[tuple[str, object, object]] = [
@@ -908,6 +910,7 @@ def self_test() -> int:
          align_undeclared_first, [s_sh]),
 
         # -- the scope leaves out a submodule, and nothing else
+        ("the scratch index holds a submodule", b"160000 " in staged, True),
         ("a submodule is not a tracked file to read; the file beside it is",
          listed, [b"a.sh"]),
 

@@ -109,25 +109,38 @@ def vanished_trace() -> None:
     inputs, why = gc.merge(gone)
     check("a vanished trace directory is an untraced run, not an error",
           (inputs, any("vanished" in w for w in why)), (None, True))
+    check("...and a lost trace, not the checker's doing",
+          all(w.startswith(gc.TRANSIENT) for w in why), True)
 
 
 def unreadable_trace() -> None:
     """A trace file that does not parse -- two writers' output in one file,
     say -- leaves the run untraced, as a vanished directory does, rather than
-    raising and turning the gate's verdict into a refused boot."""
+    raising and turning the gate's verdict into a refused boot. Even when it
+    is the checker's own record, the only reason given is the lost trace."""
     import srcload
     gc = srcload.load(DRIVER, "gate_cache")
     d = tempfile.mkdtemp(prefix="gate-trace-unreadable-")
     try:
-        with open(os.path.join(d, "git-root.1.json"), "w", encoding="utf-8",
-                  newline="\n") as fh:
-            fh.write('{"rc": 0}{"rc": 0}')
+        for name in ("git-root.1.json", "proc-1-ab.json"):
+            with open(os.path.join(d, name), "w", encoding="utf-8", newline="\n") as fh:
+                fh.write('{"rc": 0}{"rc": 0}')
         inputs, why = gc.merge(d)
         check("an unreadable trace file is an untraced run, not an error",
               (inputs, any("could not be read: git-root.1.json" in w for w in why)),
               (None, True))
+        check("...a lost trace, and nothing else: not 'its own trace is missing'",
+              (len(why), all(w.startswith(gc.TRANSIENT) for w in why)), (2, True))
     finally:
         shutil.rmtree(d, ignore_errors=True)
+
+
+def _tracer_module():
+    """gatecache_trace, loaded under a name of its own. Under the boot test
+    this suite is itself traced, and `sys.modules["gatecache_trace"]` is the
+    live tracer that gitenv consults; loading over it would unhook it."""
+    import srcload
+    return srcload.load(os.path.join(HERE, "gatecache_trace.py"), "gatecache_trace_under_test")
 
 
 def ids_are_unique_across_processes() -> None:
@@ -135,11 +148,13 @@ def ids_are_unique_across_processes() -> None:
     through an untraced intermediary -- must still name their children and
     their git records apart. Alike, two records shared one file: one's answer
     replaced the other's, or both landed in it and the trace would not parse."""
-    import srcload
-    gt = srcload.load(os.path.join(HERE, "gatecache_trace.py"), "gatecache_trace")
+    gt = _tracer_module()
     d = tempfile.mkdtemp(prefix="gate-trace-ids-")
+    # Outside the trace directory, which `_classify` treats as the run's own:
+    # a git command there is internal and gets no record at all.
+    elsewhere = tempfile.mkdtemp(prefix="gate-trace-ids-repo-")
     try:
-        repo = os.path.join(d, "some-repo")
+        repo = os.path.join(elsewhere, "some-repo")
         a, b = gt._Tracer(d, "root.7"), gt._Tracer(d, "root.7")
 
         def git_record(t) -> str:
@@ -158,6 +173,36 @@ def ids_are_unique_across_processes() -> None:
               python_child(a) != python_child(b), True)
         check("one process still numbers its own children apart",
               python_child(a) != python_child(a), True)
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+        shutil.rmtree(elsewhere, ignore_errors=True)
+
+
+def descendants_cannot_claim_a_listed_id() -> None:
+    """A Python process reached through something untraced inherits whatever
+    GATE_CACHE_SPAWN its traced ancestor's environment holds. That must not be
+    an id the ancestor's parent listed -- the root's, above all -- or the
+    descendant's record would stand in for a listed process whose own record
+    is missing, and the run be stored without that process's inputs."""
+    d = tempfile.mkdtemp(prefix="gate-trace-spawn-")
+    try:
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GATE_CACHE_")}
+        env.update(GATE_CACHE_TRACE_DIR=d, GATE_CACHE_SPAWN="root",
+                   GATE_CACHE_INTERNAL_ENV='["PYTHONPATH"]', GATE_CACHE_INTERNAL_ROOTS="[]")
+        site = os.path.join(HERE, "gatecache_site")
+        env["PYTHONPATH"] = site + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+        p = subprocess.run([sys.executable, "-c",
+                            "import os; print(os.environ['GATE_CACHE_SPAWN'])"],
+                           capture_output=True, text=True, encoding="utf-8", env=env)
+        handed_down = p.stdout.strip()
+        claimed = []
+        for name in os.listdir(d):
+            if name.startswith("proc-") and name.endswith(".json"):
+                with open(os.path.join(d, name), encoding="utf-8") as fh:
+                    claimed.append(json.load(fh)["spawn"])
+        check("the traced process still claims the id it was given", claimed, ["root"])
+        check("...and hands its untraced descendants one nobody listed",
+              (handed_down.startswith("root~"), handed_down != "root"), (True, True))
     finally:
         shutil.rmtree(d, ignore_errors=True)
 
@@ -190,6 +235,7 @@ def main() -> int:
     vanished_trace()
     unreadable_trace()
     ids_are_unique_across_processes()
+    descendants_cannot_claim_a_listed_id()
     print()
     if failures:
         print(f"{len(failures)} FAILED: {', '.join(failures)}")
@@ -544,6 +590,24 @@ def cases(fx: Fixture) -> None:
         json.dump(e, fh)
     check("an entry from another UTC day is not trusted",
           "entries last one UTC day" in _lookup_reason(fx, e), True)
+
+    # A trace lost on its way to merge says nothing about the checker, so it is
+    # not stored and not remembered: the next run is an ordinary miss, stored,
+    # not "found uncacheable earlier today".
+    damager = fx.checker("""
+        import os
+        if os.environ.get("GATE_TEST_DAMAGE") == "1":
+            with open(os.path.join(os.environ["GATE_CACHE_TRACE_DIR"], "git-junk.json"),
+                      "w", encoding="utf-8") as fh:
+                fh.write("{}{}")
+        print("ran")
+    """)
+    rc, _, note = fx.run(damager, env=dict(os.environ, GATE_TEST_DAMAGE="1"))
+    check("a damaged trace: the pass stands, not stored",
+          (rc, "not stored" in note, "could not be read" in note), (0, True, True))
+    rc, _, note = fx.run(damager, env=dict(os.environ, GATE_TEST_DAMAGE="0"))
+    check("...and not remembered: the next run is traced and stored",
+          (rc, kind(note), "stored" in note and "not stored" not in note), (0, "MISS", True))
 
 
 def _lookup_reason(fx: Fixture, entry: dict) -> str:

@@ -6,9 +6,10 @@
 now tries `FASTPY_SLATEOS_SYSROOT` (an error unless it holds `libc.a`); on
 SlateOS, the system's; the nearest directory at or above the working directory
 that has `toolchain/build-sysroot.ps1` (an error unless its sysroot is built);
-the same walk from fastpy's own directory; and last the sibling `os`. The boot
-test's identity check no longer copies that search (lane A, `81cb9543a`): it
-asks whether the fixture builder names the sysroot.
+the same walk from fastpy's own directory; and last the sibling `os`. With that
+and `scripts/ctest-fixtures.py` naming the worktree's sysroot for every build,
+the boot test's sysroot identity check, which copied fastpy's old search and
+could never see what a build linked, is gone (lane A, 2026-10-21).
 
 **In short:** the C-test fixtures are compiled by fastpy (a separate project).
 Fastpy hard-codes a sibling folder named `os` to find the C library, but the

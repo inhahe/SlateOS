@@ -47,13 +47,15 @@ Development is organized into phases (Phase 0 foundation → Phase 5 advanced fe
 | `apps/` | Desktop applications (file explorer, settings, text editor, …) |
 | `userspace/` | Shell, coreutils, terminal, and CLI tools |
 | `bench/` | Benchmarks and performance baselines (`bench/baselines.toml`) |
-| `toolchain/` | Custom `x86_64-slateos` target spec and sysroot stubs |
+| `toolchain/` | Custom `x86_64-slateos` target spec, sysroot stubs, and `fastpy/` — the fastpy compiler as a git submodule, pinned to the commit the OS is tested with |
 | `scripts/` | Build, disk-image, and QEMU boot-test scripts |
 | `esp/` | EFI System Partition staging (Limine bootloader + config) |
 
 ## Building & running
 
 SlateOS is developed on Windows (edit + cross-compile) and booted in **QEMU**. The kernel builds against a custom target (`toolchain/x86_64-slateos.json`) on a Rust **nightly** toolchain; some host-side crates with C dependencies require the Visual Studio Build Tools. See [`CLAUDE.md`](CLAUDE.md) for the exact toolchain, compiler paths, and environment setup.
+
+Clone with `git clone --recursive`, or run `git submodule update --init` in an existing clone: the programs written in Python are compiled by the fastpy in `toolchain/fastpy`, the commit this tree pins. `./scripts/bootstrap-worktree.sh` checks it out along with everything else a fresh checkout lacks. To build with another fastpy checkout — one you are changing — set `FASTPY_DIR` to it.
 
 Typical loops:
 

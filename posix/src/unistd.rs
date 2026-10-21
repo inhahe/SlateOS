@@ -3078,10 +3078,9 @@ pub const GRND_INSECURE: u32 = 0x0004;
 /// matching Linux's kernel-side validation.
 pub const GRND_VALID_FLAGS: u32 = GRND_NONBLOCK | GRND_RANDOM | GRND_INSECURE;
 
-/// Fill a buffer with random bytes.
-///
-/// Uses `rdrand` x86_64 instruction where available.  Falls back to
-/// a simple LCG seeded from the monotonic clock if RDRAND fails.
+/// Fill a buffer with random bytes: `crate::random::secure_bytes`, which
+/// asks the kernel's CSPRNG and, where there is no kernel to ask, the
+/// processor's generator -- and fails rather than return guessable bytes.
 ///
 /// # Flag validation
 ///

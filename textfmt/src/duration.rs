@@ -359,7 +359,7 @@ pub fn relative(elapsed_secs: u64) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic, reason = "test code")]
 mod tests {
-    use super::{clock, clock_ms, coarse, coarse_minutes, relative, units, units_ms, Parts};
+    use super::{Parts, clock, clock_ms, coarse, coarse_minutes, relative, units, units_ms};
     use alloc::format;
 
     // --- the regression this module was written for ---
@@ -384,7 +384,10 @@ mod tests {
         for secs in [3_600_u64, 3_661, 7_322, 86_399, 86_400, 359_999] {
             let s = clock(secs);
             let colons = s.matches(':').count();
-            assert_eq!(colons, 2, "{secs}s rendered as {s}, which has no hours field");
+            assert_eq!(
+                colons, 2,
+                "{secs}s rendered as {s}, which has no hours field"
+            );
         }
         assert_eq!(clock(3_661), "01:01:01");
         assert_ne!(clock(3_661), "61:01");
@@ -434,8 +437,12 @@ mod tests {
     fn clock_ms_agrees_with_clock_on_the_seconds_part() {
         for ms in [0_u64, 999, 1_000, 65_250, 3_599_999, 3_600_000, 3_661_007] {
             let expected = format!("{}.", clock(ms / 1000));
-            assert!(clock_ms(ms).starts_with(&expected),
-                    "clock_ms({ms}) = {} disagrees with clock({})", clock_ms(ms), ms / 1000);
+            assert!(
+                clock_ms(ms).starts_with(&expected),
+                "clock_ms({ms}) = {} disagrees with clock({})",
+                clock_ms(ms),
+                ms / 1000
+            );
         }
     }
 
@@ -488,8 +495,10 @@ mod tests {
         for secs in [0_u64, 1, 59, 60, 3_599, 3_600, 86_399, 86_400, 1_000_000] {
             let c = coarse(secs);
             let u = units(secs);
-            assert!(c.split_whitespace().count() <= u.split_whitespace().count(),
-                    "coarse({secs}) = {c} is longer than units({secs}) = {u}");
+            assert!(
+                c.split_whitespace().count() <= u.split_whitespace().count(),
+                "coarse({secs}) = {c} is longer than units({secs}) = {u}"
+            );
         }
     }
 
@@ -593,16 +602,28 @@ mod tests {
     #[test]
     fn relative_never_reports_a_longer_span_as_a_shorter_rank() {
         const RANK: [(&str, u8); 8] = [
-            ("just now", 0), ("m ago", 1), ("h ago", 2), ("yesterday", 3),
-            ("d ago", 4), ("w ago", 5), ("mo ago", 6), ("y ago", 7),
+            ("just now", 0),
+            ("m ago", 1),
+            ("h ago", 2),
+            ("yesterday", 3),
+            ("d ago", 4),
+            ("w ago", 5),
+            ("mo ago", 6),
+            ("y ago", 7),
         ];
         fn rank(s: &str) -> u8 {
             // `mo ago` must be tested before `m ago`, and `yesterday` is its
             // own rank rather than a suffix.
-            if s == "just now" { return 0; }
-            if s == "yesterday" { return 3; }
+            if s == "just now" {
+                return 0;
+            }
+            if s == "yesterday" {
+                return 3;
+            }
             for (suffix, r) in RANK.iter().rev() {
-                if s.ends_with(suffix) { return *r; }
+                if s.ends_with(suffix) {
+                    return *r;
+                }
             }
             u8::MAX
         }
@@ -610,8 +631,17 @@ mod tests {
         let mut secs = 0_u64;
         while secs < 40_000_000 {
             let r = rank(&relative(secs));
-            assert_ne!(r, u8::MAX, "relative({secs}) = {} is unranked", relative(secs));
-            assert!(r >= last, "relative({secs}) = {} ranks below the previous span", relative(secs));
+            assert_ne!(
+                r,
+                u8::MAX,
+                "relative({secs}) = {} is unranked",
+                relative(secs)
+            );
+            assert!(
+                r >= last,
+                "relative({secs}) = {} ranks below the previous span",
+                relative(secs)
+            );
             last = r;
             secs = secs.saturating_add(997);
         }
@@ -626,7 +656,18 @@ mod tests {
 
     #[test]
     fn parts_reduce_each_component_into_its_own_range() {
-        for secs in [0_u64, 1, 59, 60, 3_599, 3_600, 86_399, 86_400, 1_000_000, u64::MAX] {
+        for secs in [
+            0_u64,
+            1,
+            59,
+            60,
+            3_599,
+            3_600,
+            86_399,
+            86_400,
+            1_000_000,
+            u64::MAX,
+        ] {
             let p = Parts::split(secs);
             assert!(p.hours < 24, "{secs}: hours {} out of range", p.hours);
             assert!(p.minutes < 60, "{secs}: minutes {} out of range", p.minutes);
@@ -640,7 +681,9 @@ mod tests {
     fn parts_round_trip() {
         for secs in [0_u64, 1, 59, 61, 3_601, 86_401, 90_061, 1_000_000] {
             let p = Parts::split(secs);
-            let back = p.days.saturating_mul(86_400)
+            let back = p
+                .days
+                .saturating_mul(86_400)
                 .saturating_add(p.hours.saturating_mul(3_600))
                 .saturating_add(p.minutes.saturating_mul(60))
                 .saturating_add(p.seconds);

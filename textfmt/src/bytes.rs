@@ -181,7 +181,10 @@ pub fn scale(bytes: u64, unit: Unit) -> String {
 
     let whole = tenths / 10;
     let frac = tenths % 10;
-    format!("{whole}.{frac} {}", names.get(index).copied().unwrap_or("B"))
+    format!(
+        "{whole}.{frac} {}",
+        names.get(index).copied().unwrap_or("B")
+    )
 }
 
 /// `bytes_per_sec` in binary units, suffixed `/s` — `1.0 KiB/s` is 1024 B/s.
@@ -366,10 +369,7 @@ mod tests {
                 let s = scale(n, unit);
                 let (num, name) = s.split_once(' ').expect("one space, always");
                 assert!(names.contains(&name), "{s}: unknown unit");
-                assert!(
-                    num.parse::<f64>().is_ok(),
-                    "{s}: mantissa is not a number"
-                );
+                assert!(num.parse::<f64>().is_ok(), "{s}: mantissa is not a number");
                 // Exactly one decimal place above the first prefix, none below.
                 let expected_dot = usize::from(name != "B");
                 assert_eq!(

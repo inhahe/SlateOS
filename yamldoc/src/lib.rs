@@ -238,7 +238,11 @@ impl Document {
             if Some(row.indent) != indent {
                 continue;
             }
-            if let Some(raw) = self.lines.get(i).and_then(|l| l.get(value.start..value.end)) {
+            if let Some(raw) = self
+                .lines
+                .get(i)
+                .and_then(|l| l.get(value.start..value.end))
+            {
                 out.push(unquote(raw));
             }
         }
@@ -681,7 +685,8 @@ fn sequence_item(body: &str) -> Option<&str> {
 
 /// Number of leading space characters.
 fn leading_spaces(line: &str) -> usize {
-    line.len().saturating_sub(line.trim_start_matches(' ').len())
+    line.len()
+        .saturating_sub(line.trim_start_matches(' ').len())
 }
 
 /// Split `body` — a line with its indentation stripped — into its key and the
@@ -1001,10 +1006,16 @@ fn looks_numeric(value: &str) -> bool {
         .strip_prefix(['+', '-'])
         .unwrap_or(value)
         .replace('_', "");
-    if let Some(hex) = unsigned.strip_prefix("0x").or_else(|| unsigned.strip_prefix("0X")) {
+    if let Some(hex) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
         return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
     }
-    if let Some(oct) = unsigned.strip_prefix("0o").or_else(|| unsigned.strip_prefix("0O")) {
+    if let Some(oct) = unsigned
+        .strip_prefix("0o")
+        .or_else(|| unsigned.strip_prefix("0O"))
+    {
         return !oct.is_empty() && oct.chars().all(|c| ('0'..='7').contains(&c));
     }
     if matches!(
@@ -1046,11 +1057,7 @@ fn quote_key(key: &str) -> String {
         && key
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.');
-    if plain {
-        key.to_owned()
-    } else {
-        escape(key)
-    }
+    if plain { key.to_owned() } else { escape(key) }
 }
 
 impl core::fmt::Display for Document {
@@ -1123,7 +1130,11 @@ transparency: 0.85
             "\n\n\n",
             "   \n\ta: not-a-key\n",
         ] {
-            assert_eq!(Document::parse(text).to_text(), text, "round trip of {text:?}");
+            assert_eq!(
+                Document::parse(text).to_text(),
+                text,
+                "round trip of {text:?}"
+            );
         }
     }
 
@@ -1262,7 +1273,11 @@ transparency: 0.85
         );
         assert_eq!(
             doc.keys(&[]),
-            vec!["theme".to_owned(), "fonts".to_owned(), "transparency".to_owned()]
+            vec![
+                "theme".to_owned(),
+                "fonts".to_owned(),
+                "transparency".to_owned()
+            ]
         );
         assert_eq!(
             doc.keys(&["fonts"]),
@@ -1350,7 +1365,10 @@ transparency: 0.85
         doc.set_str(&["fonts", "mono", "family"], "JetBrains Mono");
         // Plain, not quoted: an interior space is legal in a plain scalar, and
         // quoting what does not need it is its own kind of churn in the file.
-        assert_eq!(doc.to_text(), "fonts:\n  mono:\n    family: JetBrains Mono\n");
+        assert_eq!(
+            doc.to_text(),
+            "fonts:\n  mono:\n    family: JetBrains Mono\n"
+        );
         assert_eq!(
             doc.get_str(&["fonts", "mono", "family"]).as_deref(),
             Some("JetBrains Mono")
@@ -1444,7 +1462,9 @@ transparency: 0.85
         doc.set_str(&["a b: c"], "x");
         assert_eq!(doc.to_text(), "\"a b: c\": x\n");
         assert_eq!(
-            Document::parse(&doc.to_text()).get_str(&["a b: c"]).as_deref(),
+            Document::parse(&doc.to_text())
+                .get_str(&["a b: c"])
+                .as_deref(),
             Some("x")
         );
     }
@@ -1557,7 +1577,11 @@ transparency: 0.85
         write(&mut doc);
         let once = doc.to_text();
         write(&mut doc);
-        assert_eq!(doc.to_text(), once, "a second identical save changed the file");
+        assert_eq!(
+            doc.to_text(),
+            once,
+            "a second identical save changed the file"
+        );
         // And the comments are all still there.
         assert!(once.contains("# SlateOS appearance settings."));
         assert!(once.contains("# points, not pixels"));

@@ -15,9 +15,12 @@ members = [
     # drawn with; codec (videocodec), the one a program calls for a file's
     # frames; and opus, libopus's decoder for their sound, ported as vp9 was
     # (§1350), and vorbis, Tremor's, ported the same way (§1352), and flac,
-    # libFLAC's.
+    # libFLAC's; and h264, FFmpeg's H.264 decoder translated (§1376).
+    "gui/video/aac",
     "gui/video/codec",
+    "gui/video/ffbits",
     "gui/video/flac",
+    "gui/video/h264",
     "gui/video/matroska",
     "gui/video/mp3",
     "gui/video/mp4",
@@ -794,6 +797,22 @@ codegen-units = 1
 # a loop over every pixel of every frame, which `-Os` would not unroll or
 # vectorise. It keeps the optimisation it had inside imagecodec.
 [profile.release.package.yuv]
+opt-level = 3
+codegen-units = 1
+
+# h264 (`gui/video/h264`) is FFmpeg's H.264 decoder translated, without its
+# assembly: prediction, transforms, motion compensation and the loop filter
+# are loops over every sample, as in rav1d above.
+[profile.release.package.h264]
+opt-level = 3
+codegen-units = 1
+
+# ffbits (`gui/video/ffbits`) is the bit reader h264 and aac read every
+# syntax element through, so it runs as often as their loops. Measured with
+# videocodec's bench_h264, eight runs on 1080p alternating with `-Os`: 2.2%
+# more frames a second on a CAVLC stream, 1.6 to 1.8% on CABAC ones. Lane
+# F, 2026-10-21.
+[profile.release.package.ffbits]
 opt-level = 3
 codegen-units = 1
 

@@ -51,6 +51,38 @@ pub struct Demuxer<R> {
     /// The tracks whose packets are given out ([`Demuxer::select_tracks`]);
     /// `None` for every track.
     selected: Option<Vec<usize>>,
+    /// Each track's key frames ([`Demuxer::seek_key`]): the time each is
+    /// shown at and its sample, sorted by time; worked out once, as the file
+    /// opens.
+    key_times: Vec<Vec<(i64, usize)>>,
+}
+
+/// The key frames of `sc`: key samples not marked to be dropped, each with
+/// the time it is shown at -- its decoding time moved by its composition
+/// offset, as [`Packet::pts`] gives it, in the track's timescale -- sorted
+/// by that time.
+fn key_times(sc: &Stream) -> Vec<(i64, usize)> {
+    // Each sample's composition offset, run by run as `finalize` reads it.
+    let mut offsets = sc
+        .tts
+        .iter()
+        .flat_map(|t| std::iter::repeat_n(t.offset, usize::try_from(t.count).unwrap_or(0)));
+    let mut keys = Vec::new();
+    for (sample, e) in sc.index.iter().enumerate() {
+        let offset = offsets.next();
+        if e.flags & KEYFRAME == 0 || e.flags & DISCARD != 0 {
+            continue;
+        }
+        let time = match offset {
+            Some(o) if sc.has_ctts => e
+                .timestamp
+                .saturating_add(i64::from(sc.dts_shift).saturating_add(i64::from(o))),
+            _ => e.timestamp,
+        };
+        keys.push((time, sample));
+    }
+    keys.sort_unstable();
+    keys
 }
 
 /// FFmpeg's `AV_TIME_BASE`: the microseconds tracks are compared in.
@@ -86,12 +118,14 @@ impl<R: Read + Seek> Demuxer<R> {
                     && s.stts.iter().all(|&(count, d)| count == 0 || d == 0)
             })
             .collect();
+        let key_times = streams.iter().map(key_times).collect();
         let mut d = Self {
             r,
             tracks,
             streams,
             discarded,
             selected: None,
+            key_times,
         };
         for s in &mut d.streams {
             s.current_sample = 0;
@@ -315,8 +349,44 @@ impl<R: Read + Seek> Demuxer<R> {
         self.seek_toward(track, timestamp, false)
     }
 
+    /// Go to the key frame of track `track` shown at or before `timestamp`
+    /// -- the latest, a key sample not marked to be dropped -- by its own
+    /// sample, and every other track as [`Self::seek`] moves them; answers
+    /// the key frame's time (in the track's timescale, as [`Packet::pts`]
+    /// gives it), or None, nothing moved, when no key frame shows that
+    /// early or the file has no track `track`.
+    ///
+    /// [`Self::seek`] finds its key frame as FFmpeg does, on the decoding
+    /// timeline moved back by one constant. Where pictures are reordered
+    /// that can land on a key frame before this one, or -- where the times
+    /// they are shown at are not moved back to meet the decoding times, as
+    /// in a fragmented file with no edit list -- past it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::seek`], for a track whose samples cannot be gone to; a
+    /// track with a key frame to go to always can be.
+    pub fn seek_key(&mut self, track: usize, timestamp: i64) -> Result<Option<i64>, Error> {
+        let Some(&(time, sample)) = self.key_times.get(track).and_then(|keys| {
+            let shown = keys.partition_point(|&(t, _)| t <= timestamp);
+            keys.get(shown.checked_sub(1)?)
+        }) else {
+            return Ok(None);
+        };
+        self.place(track, sample)?;
+        self.follow(track, sample, true)?;
+        Ok(Some(time))
+    }
+
     fn seek_toward(&mut self, track: usize, timestamp: i64, backward: bool) -> Result<(), Error> {
         let sample = self.seek_stream(track, timestamp, backward)?;
+        self.follow(track, sample, backward)
+    }
+
+    /// The rest of a seek once track `track` is at `sample`: its priming to
+    /// drop, and every other track to its sample at the same decoding time,
+    /// at or before it (`backward`) or at or after.
+    fn follow(&mut self, track: usize, sample: usize, backward: bool) -> Result<(), Error> {
         let (seek_ts, scale) = {
             let sc = self
                 .streams
@@ -345,7 +415,7 @@ impl<R: Read + Seek> Demuxer<R> {
     fn seek_stream(&mut self, i: usize, timestamp: i64, backward: bool) -> Result<usize, Error> {
         let sc = self
             .streams
-            .get_mut(i)
+            .get(i)
             .ok_or(Error::Invalid("a seek in no track"))?;
         // The time is a presentation's: moved onto the decoding timeline.
         let wanted =
@@ -359,6 +429,18 @@ impl<R: Read + Seek> Demuxer<R> {
             }
             None => return Err(Error::Invalid("no sample to seek to")),
         };
+        self.place(i, sample)?;
+        Ok(sample)
+    }
+
+    /// Track `i` to sample `sample`, the next it gives: where it is among
+    /// the durations and offsets, and among the sample-to-chunk runs
+    /// (`mov_current_sample_set`, and the rest of `mov_seek_stream`).
+    fn place(&mut self, i: usize, sample: usize) -> Result<(), Error> {
+        let sc = self
+            .streams
+            .get_mut(i)
+            .ok_or(Error::Invalid("a seek in no track"))?;
         sc.current_sample = sample;
         // Where the sample is among the durations and offsets.
         let mut first = 0usize;
@@ -386,7 +468,7 @@ impl<R: Read + Seek> Demuxer<R> {
                 first = next;
             }
         }
-        Ok(sample)
+        Ok(())
     }
 }
 

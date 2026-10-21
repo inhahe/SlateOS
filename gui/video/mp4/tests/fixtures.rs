@@ -308,6 +308,42 @@ fn demuxes_as_ffmpeg_does(name: &str) {
             "{name}: what the tracks say of their pictures"
         );
     }
+    // A key frame seek, on a demuxer of its own: of each picture track's
+    // key packets that are not discarded, as ffprobe gives them, the latest
+    // shown at or before the time -- asked about each packet's time and the
+    // ticks either side -- and that packet the next the track gives.
+    let mut k = Demuxer::open(File::open(data(name)).unwrap()).unwrap();
+    let videos: Vec<usize> = (0..k.tracks().len())
+        .filter(|&i| k.tracks()[i].video.is_some())
+        .collect();
+    for i in videos {
+        k.select_tracks(Some(&[i]));
+        let mine: Vec<&Line> = expected.iter().filter(|p| p.stream == i).collect();
+        let keys: Vec<i64> = mine
+            .iter()
+            .filter(|p| p.flags.starts_with("K_"))
+            .map(|p| p.pts)
+            .collect();
+        for p in &mine {
+            for at in [p.pts - 1, p.pts, p.pts + 1] {
+                let want = keys.iter().copied().filter(|&k| k <= at).max();
+                let got = k.seek_key(i, at).unwrap();
+                assert_eq!(got, want, "{name}: track {i}'s key frame at or before {at}");
+                if let Some(time) = got {
+                    let next = k.next_packet().unwrap().expect("the key frame");
+                    assert_eq!(
+                        (next.track, next.pts, next.keyframe),
+                        (i, time, true),
+                        "{name}: the packet after a key frame seek to {at}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        k.seek_key(k.tracks().len(), 0).unwrap().is_none(),
+        "{name}: no such track"
+    );
     let mut got = Vec::new();
     while let Some(p) = d.next_packet().unwrap_or_else(|e| panic!("{name}: {e}")) {
         got.push(Line {

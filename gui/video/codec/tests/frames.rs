@@ -26,7 +26,7 @@ use std::io::Cursor;
 use videocodec::{Frame, SeekMode, Video};
 
 /// Every fixture, each a path the conversion or the file can take.
-const FIXTURES: [&str; 35] = [
+const FIXTURES: [&str; 43] = [
     "vp8_sd.webm",
     "vp8_hd.webm",
     "vp8_odd.webm",
@@ -62,6 +62,14 @@ const FIXTURES: [&str; 35] = [
     "vp9_rotate_270.mkv",
     "vp9_mirror.mkv",
     "vp9_mirror_turn.mkv",
+    "h264.mp4",
+    "h264_cut.mp4",
+    "h264_422_10bit.mp4",
+    "h264_interlaced.mp4",
+    "h264_gbr.mp4",
+    "h264_matroska.mkv",
+    "h264_fragmented.mp4",
+    "h264_container_crop.mp4",
 ];
 
 /// The fixtures whose colour Chrome converts to sRGB's, as it reads them:
@@ -468,21 +476,45 @@ fn each_turned_file_says_its_turn() {
     }
 }
 
-/// MP4 holds H.264 more often than anything else, which is not decoded here
-/// yet: such a file is refused by its codec's name, not taken for damage.
+/// The MP4 reader's H.264 samples -- B pictures, and composition offsets
+/// that start below zero -- show every picture its packets hold (each
+/// packet one, none discarded: the answers `gui/video/mp4` holds its packets
+/// to), once each, in the order they are shown.
+#[test]
+fn mp4_h264_samples_show_each_picture_once_in_order() {
+    for name in ["h264_bframes", "h264_negative_cts"] {
+        let data = format!("{}/../mp4/tests/data/{name}", env!("CARGO_MANIFEST_DIR"));
+        let answers = std::fs::read_to_string(format!("{data}.txt")).unwrap();
+        let shown = answers
+            .lines()
+            .filter(|l| l.starts_with("packet 0 "))
+            .filter(|l| !l.split(' ').nth(7).unwrap().contains('D'))
+            .count();
+        let mut video = Video::open(File::open(format!("{data}.mp4")).unwrap()).unwrap();
+        let mut times = Vec::new();
+        while let Some(frame) = video.next_frame().unwrap() {
+            times.push(frame.time);
+        }
+        assert_eq!(times.len(), shown, "{name}");
+        assert!(times.windows(2).all(|w| w[0] < w[1]), "{name}: {times:?}");
+    }
+}
+
+/// An MP4 in a codec not decoded here -- MPEG-4 Part 2, DivX's -- is
+/// refused by its codec's name, not taken for damage.
 #[test]
 fn an_mp4_in_a_codec_not_decoded_here_is_refused_by_name() {
-    let h264 = format!(
-        "{}/../mp4/tests/data/h264_bframes.mp4",
+    let mpeg4 = format!(
+        "{}/../mp4/tests/data/mpeg4_bframes.mp4",
         env!("CARGO_MANIFEST_DIR")
     );
-    let refused = Video::open(File::open(h264).unwrap());
+    let refused = Video::open(File::open(mpeg4).unwrap());
     assert!(matches!(
         refused,
-        Err(videocodec::Error::Codec(videocodec::Codec::H264))
+        Err(videocodec::Error::Codec(videocodec::Codec::Mpeg4))
     ));
     assert_eq!(
         refused.err().unwrap().to_string(),
-        "the video is H.264, which is not decoded here yet"
+        "the video is MPEG-4 Part 2, which is not decoded here yet"
     );
 }

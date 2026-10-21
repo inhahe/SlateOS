@@ -56,6 +56,7 @@ pub(crate) enum Planes {
         alpha: Option<vp9::Picture>,
     },
     Av1(av1::Picture),
+    H264(h264::Picture),
 }
 
 impl Picture {
@@ -83,12 +84,25 @@ impl Picture {
         }
     }
 
+    /// An H.264 picture, timed by the packet that began it.
+    pub(crate) fn h264(picture: h264::Picture, hint: ColourHint) -> Self {
+        let (time, duration) = picture.time();
+        Self {
+            time,
+            duration,
+            keyframe: picture.is_key_frame(),
+            planes: Planes::H264(picture),
+            hint,
+        }
+    }
+
     /// Its width and height in pixels.
     pub fn size(&self) -> (u32, u32) {
         match &self.planes {
             Planes::Vp8 { picture, .. } => (picture.width(), picture.height()),
             Planes::Vp9 { picture, .. } => (picture.width(), picture.height()),
             Planes::Av1(p) => p.size(),
+            Planes::H264(p) => p.size(),
         }
     }
 
@@ -111,6 +125,9 @@ impl Picture {
                 )
             }
             Planes::Av1(p) => (Prefer::Bitstream, ColourHint::av1(p)),
+            // As AV1: what the stream says, as FFmpeg's decoder gives it with
+            // each frame, before the file.
+            Planes::H264(p) => (Prefer::Bitstream, ColourHint::h264(p)),
         };
         colour::resolve(prefer, said, self.hint, width, height)
     }
@@ -122,6 +139,7 @@ impl Picture {
     pub fn light(&self) -> Light {
         let said = match &self.planes {
             Planes::Av1(p) => ColourHint::av1(p).light,
+            Planes::H264(p) => ColourHint::h264(p).light,
             Planes::Vp8 { .. } | Planes::Vp9 { .. } => Light::default(),
         };
         colour::light(said, self.hint.light)
@@ -166,6 +184,7 @@ impl Picture {
             Planes::Vp8 { picture, alpha } => vp8_pixels(picture, alpha.as_ref(), look, out),
             Planes::Vp9 { picture, alpha } => vp9_pixels(picture, alpha.as_ref(), look, out),
             Planes::Av1(p) => av1_pixels(p, look, out),
+            Planes::H264(p) => h264_pixels(p, look, out),
         };
         if result.is_err() {
             out.clear();
@@ -619,6 +638,68 @@ fn av1_pixels(picture: &av1::Picture, look: Look, out: &mut Vec<u32>) -> Result<
                 .as_ref()
                 .zip(v.as_ref())
                 .map(|(u, v)| (packed(u), packed(v))),
+            alpha: None,
+        }
+        .convert(look, out)
+    }
+}
+
+/// An H.264 plane as `yuv` reads it, in place.
+fn h264_view<P>(p: h264::PlaneView<'_, P>) -> Plane<'_, P> {
+    Plane {
+        samples: p.data,
+        stride: p.stride,
+        width: p.width,
+        height: p.height,
+    }
+}
+
+/// An H.264 picture's pixels: 8 to 14 bits; 4:2:0 (monochrome too, its
+/// chroma the middle value, as FFmpeg decodes it), 4:2:2 or 4:4:4; or GBR,
+/// its planes G, B and R, converted by the identity matrix as libavif
+/// converts it.
+fn h264_pixels(picture: &h264::Picture, look: Look, out: &mut Vec<u32>) -> Result<(), Error> {
+    use h264::PixelFormat as F;
+    let size = |n: u32| usize::try_from(n).map_err(|_| Error::Colour(reformat::Error::Size));
+    let (w, h) = picture.size();
+    let (width, height) = (size(w)?, size(h)?);
+    let (subsampling, depth) = match picture.format() {
+        F::Yuv420(d) => ((1, 1), d),
+        F::Yuvj420 => ((1, 1), 8),
+        F::Yuv422(d) => ((1, 0), d),
+        F::Yuvj422 => ((1, 0), 8),
+        F::Yuv444(d) | F::Gbr(d) => ((0, 0), d),
+        F::Yuvj444 => ((0, 0), 8),
+        F::None => return Err(Error::Colour(reformat::Error::Unsupported)),
+    };
+    let missing = Error::Colour(reformat::Error::Size);
+    if depth == 8 {
+        let [Some(y), Some(u), Some(v)] = [0, 1, 2].map(|i| picture.plane8(i).map(h264_view))
+        else {
+            return Err(missing);
+        };
+        Planar {
+            width,
+            height,
+            depth,
+            subsampling,
+            y,
+            chroma: Some((u, v)),
+            alpha: None,
+        }
+        .convert(look, out)
+    } else {
+        let [Some(y), Some(u), Some(v)] = [0, 1, 2].map(|i| picture.plane16(i).map(h264_view))
+        else {
+            return Err(missing);
+        };
+        Planar {
+            width,
+            height,
+            depth,
+            subsampling,
+            y,
+            chroma: Some((u, v)),
             alpha: None,
         }
         .convert(look, out)

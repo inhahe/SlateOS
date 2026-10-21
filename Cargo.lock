@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "aac"
+version = "0.1.0"
+dependencies = [
+ "ffbits",
+]
+
+[[package]]
 name = "acl"
 version = "0.1.0"
 dependencies = [
@@ -1400,6 +1407,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "ffbits"
+version = "0.1.0"
+
+[[package]]
 name = "fieldmenu"
 version = "0.1.0"
 dependencies = [
@@ -1780,6 +1791,13 @@ dependencies = [
  "libcall",
  "quoting",
  "stdfdguard",
+]
+
+[[package]]
+name = "h264"
+version = "0.1.0"
+dependencies = [
+ "ffbits",
 ]
 
 [[package]]
@@ -4988,6 +5006,7 @@ name = "videocodec"
 version = "0.1.0"
 dependencies = [
  "flac",
+ "h264",
  "imagecodec",
  "libc",
  "matroska",

@@ -1,0 +1,410 @@
+diff --git a/libavcodec/decode.c b/libavcodec/decode.c
+index ba896b3..afbeb9e 100644
+--- a/libavcodec/decode.c
++++ b/libavcodec/decode.c
+@@ -1,3 +1,6 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include "libavutil/adler32.h"
+ /*
+  * generic decoding-related code
+  *
+@@ -61,6 +64,8 @@
+ typedef struct DecodeContext {
+     AVCodecInternal avci;
+ 
++    int ffdbg_id;
++
+     /**
+      * This is set to AV_FRAME_FLAG_KEY for decoders of intra-only formats
+      * (those whose codec descriptor has AV_CODEC_PROP_INTRA_ONLY set)
+@@ -822,6 +827,27 @@ int ff_decode_receive_frame(AVCodecContext *avctx, AVFrame *frame, unsigned flag
+         ret = apply_cropping(avctx, frame);
+         if (ret < 0)
+             goto fail;
++        {
++            static int dbg = -1;
++            if (dbg < 0)
++                dbg = getenv("FFDBG_FRAMECRC") != NULL;
++            if (dbg) {
++                AVFrame *c = av_frame_clone(frame);
++                int decoders = decode_ctx(avctx->internal)->ffdbg_id;
++                if (c && av_frame_apply_cropping(c, AV_FRAME_CROP_UNALIGNED) >= 0) {
++                    int size = av_image_get_buffer_size(c->format, c->width, c->height, 1);
++                    uint8_t *buf = size > 0 ? av_malloc(size) : NULL;
++                    if (buf) {
++                        av_image_copy_to_buffer(buf, size, (const uint8_t * const *)c->data,
++                                                c->linesize, c->format, c->width, c->height, 1);
++                        fprintf(stderr, "FRAMECRC d=%d %d, 0x%08x\n", decoders, size,
++                                (unsigned)av_adler32_update(0, buf, size));
++                        av_free(buf);
++                    }
++                }
++                av_frame_free(&c);
++            }
++        }
+     }
+ 
+     avctx->frame_num++;
+@@ -2001,6 +2027,13 @@ av_cold int ff_decode_preinit(AVCodecContext *avctx)
+     DecodeContext     *dc = decode_ctx(avci);
+     int ret = 0;
+ 
++    {
++        static int ffdbg_next;
++        dc->ffdbg_id = ++ffdbg_next;
++        if (getenv("FFDBG_FRAMECRC"))
++            fprintf(stderr, "DECODER d=%d\n", dc->ffdbg_id);
++    }
++
+     dc->initial_pict_type = AV_PICTURE_TYPE_NONE;
+     if (avctx->codec_descriptor->props & AV_CODEC_PROP_INTRA_ONLY) {
+         dc->intra_only_flag = AV_FRAME_FLAG_KEY;
+diff --git a/libavcodec/error_resilience.c b/libavcodec/error_resilience.c
+index 8cf5bc6..c403cce 100644
+--- a/libavcodec/error_resilience.c
++++ b/libavcodec/error_resilience.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <stdlib.h>
+ /*
+  * Error resilience / concealment
+  *
+@@ -927,6 +929,9 @@ void ff_er_frame_end(ERContext *s, int *decode_error_flags)
+                           (s->avctx->skip_top + s->avctx->skip_bottom)) {
+         return;
+     }
++    if (getenv("FFDBG_ER"))
++        fprintf(stderr, "ER concealing: error_count=%d mb_num=%d\n",
++                (int)atomic_load(&s->error_count), s->mb_num);
+     linesize = s->cur_pic.f->linesize;
+ 
+     if (   s->avctx->codec_id == AV_CODEC_ID_MPEG2VIDEO
+diff --git a/libavcodec/h264_mb.c b/libavcodec/h264_mb.c
+index 67fa980..86409c4 100644
+--- a/libavcodec/h264_mb.c
++++ b/libavcodec/h264_mb.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <stdlib.h>
+ /*
+  * H.26L/H.264/AVC/JVT/14496-10/... decoder
+  * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
+@@ -815,4 +817,60 @@ void ff_h264_hl_decode_mb(const H264Context *h, H264SliceContext *sl)
+         hl_decode_mb_simple_16(h, sl);
+     } else
+         hl_decode_mb_simple_8(h, sl);
++    {
++        static int dbg = -1;
++        if (dbg < 0)
++            dbg = getenv("FFDBG_MB") != NULL;
++        if (dbg) {
++            const int mb_x = sl->mb_x, mb_y = sl->mb_y;
++            const int ps = h->pixel_shift;
++            const int c444 = CHROMA444(h);
++            const int block_h = 16 >> h->chroma_y_shift;
++            ptrdiff_t ls = sl->linesize, uvls = sl->uvlinesize;
++            uint8_t *d[3];
++            int rows[3], cols[3], pl, y, x;
++            uint32_t sum[3];
++            if (c444) {
++                for (pl = 0; pl < 3; pl++) {
++                    d[pl] = h->cur_pic.f->data[pl] + ((mb_x << ps) + mb_y * ls) * 16;
++                    rows[pl] = 16;
++                    cols[pl] = 16;
++                }
++            } else {
++                d[0] = h->cur_pic.f->data[0] + ((mb_x << ps) + mb_y * ls) * 16;
++                d[1] = h->cur_pic.f->data[1] + (mb_x << ps) * 8 + mb_y * uvls * block_h;
++                d[2] = h->cur_pic.f->data[2] + (mb_x << ps) * 8 + mb_y * uvls * block_h;
++                rows[0] = 16; cols[0] = 16;
++                rows[1] = rows[2] = block_h;
++                cols[1] = cols[2] = 8;
++            }
++            if (MB_FIELD(sl)) {
++                if (mb_y & 1) {
++                    d[0] -= ls * 15;
++                    if (c444) {
++                        d[1] -= ls * 15;
++                        d[2] -= ls * 15;
++                    } else {
++                        d[1] -= uvls * (block_h - 1);
++                        d[2] -= uvls * (block_h - 1);
++                    }
++                }
++                ls *= 2;
++                uvls *= 2;
++            }
++            for (pl = 0; pl < 3; pl++) {
++                uint32_t a = 1, b = 0;
++                ptrdiff_t stride = (pl && !c444) ? uvls : ls;
++                for (y = 0; y < rows[pl]; y++)
++                    for (x = 0; x < (cols[pl] << ps); x++) {
++                        a = (a + d[pl][y * stride + x]) % 65521;
++                        b = (b + a) % 65521;
++                    }
++                sum[pl] = (b << 16) | a;
++            }
++            fprintf(stderr, "MB poc=%d mb=%d,%d type=%x cbp=%x qp=%d sum=%08x,%08x,%08x h=%d\n",
++                    h->cur_pic_ptr->poc, mb_x, mb_y, mb_type, sl->cbp, sl->qscale,
++                    sum[0], sum[1], sum[2], h->ffdbg_id);
++        }
++    }
+ }
+diff --git a/libavcodec/h264_mc_template.c b/libavcodec/h264_mc_template.c
+index d24b0a0..b36f97a 100644
+--- a/libavcodec/h264_mc_template.c
++++ b/libavcodec/h264_mc_template.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <stdlib.h>
+ /*
+  * H.26L/H.264/AVC/JVT/14496-10/... decoder
+  * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
+@@ -75,6 +77,26 @@ static void MCFUNC(hl_motion)(const H264Context *h, H264SliceContext *sl,
+     const int mb_type = h->cur_pic.mb_type[mb_xy];
+ 
+     av_assert2(IS_INTER(mb_type));
++    {
++        static int dbg = -1;
++        if (dbg < 0)
++            dbg = getenv("FFDBG_MV") != NULL;
++        if (dbg) {
++            int list, i;
++            fprintf(stderr, "MV poc=%d mb=%d,%d type=%x sub=%x,%x,%x,%x",
++                    h->cur_pic_ptr->poc, sl->mb_x, sl->mb_y, mb_type,
++                    sl->sub_mb_type[0], sl->sub_mb_type[1],
++                    sl->sub_mb_type[2], sl->sub_mb_type[3]);
++            for (list = 0; list < sl->list_count; list++) {
++                fprintf(stderr, " L%d", list);
++                for (i = 0; i < 16; i++)
++                    fprintf(stderr, " %d:%d,%d", sl->ref_cache[list][scan8[i]],
++                            sl->mv_cache[list][scan8[i]][0],
++                            sl->mv_cache[list][scan8[i]][1]);
++            }
++            fprintf(stderr, " h=%d\n", h->ffdbg_id);
++        }
++    }
+ 
+     if (HAVE_THREADS && (h->avctx->active_thread_type & FF_THREAD_FRAME))
+         await_references(h, sl);
+diff --git a/libavcodec/h264_slice.c b/libavcodec/h264_slice.c
+index 4bf61dd..578a395 100644
+--- a/libavcodec/h264_slice.c
++++ b/libavcodec/h264_slice.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <stdlib.h>
+ /*
+  * H.26L/H.264/AVC/JVT/14496-10/... decoder
+  * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
+@@ -166,12 +168,13 @@ static int init_table_pools(H264Context *h)
+     const int b4_stride     = h->mb_width * 4 + 1;
+     const int b4_array_size = b4_stride * h->mb_height * 4;
+ 
+-    h->qscale_table_pool = av_refstruct_pool_alloc(big_mb_num + h->mb_stride, 0);
++    unsigned zero = getenv("FFDBG_ZERO_TABLES") ? AV_REFSTRUCT_POOL_FLAG_ZERO_EVERY_TIME : 0;
++    h->qscale_table_pool = av_refstruct_pool_alloc(big_mb_num + h->mb_stride, zero);
+     h->mb_type_pool      = av_refstruct_pool_alloc((big_mb_num + h->mb_stride) *
+-                                                   sizeof(uint32_t), 0);
++                                                   sizeof(uint32_t), zero);
+     h->motion_val_pool   = av_refstruct_pool_alloc(2 * (b4_array_size + 4) *
+-                                                   sizeof(int16_t), 0);
+-    h->ref_index_pool    = av_refstruct_pool_alloc(4 * mb_array_size, 0);
++                                                   sizeof(int16_t), zero);
++    h->ref_index_pool    = av_refstruct_pool_alloc(4 * mb_array_size, zero);
+ 
+     if (!h->qscale_table_pool || !h->mb_type_pool || !h->motion_val_pool ||
+         !h->ref_index_pool) {
+@@ -185,6 +188,24 @@ static int init_table_pools(H264Context *h)
+     return 0;
+ }
+ 
++/* FFDBG_FILL: a new frame's every byte set to the variable's value, so
++ * that samples FFmpeg never writes show as it rather than as whatever
++ * memory the buffer pool hands back. */
++static void ffdbg_fill(AVFrame *f)
++{
++    const char *fill = getenv("FFDBG_FILL");
++    if (fill) {
++        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
++        int byte = atoi(fill), plane;
++        for (plane = 0; plane < 4 && f->data[plane]; plane++) {
++            int rows = f->height;
++            if ((plane == 1 || plane == 2) && desc)
++                rows = AV_CEIL_RSHIFT(rows, desc->log2_chroma_h);
++            memset(f->data[plane], byte, (size_t)f->linesize[plane] * rows);
++        }
++    }
++}
++
+ static int alloc_picture(H264Context *h, H264Picture *pic)
+ {
+     int i, ret = 0;
+@@ -203,6 +224,7 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
+                                    pic->reference ? AV_GET_BUFFER_FLAG_REF : 0);
+     if (ret < 0)
+         goto fail;
++    ffdbg_fill(pic->f);
+ 
+     if (pic->needs_fg) {
+         pic->f_grain->format = pic->f->format;
+@@ -211,6 +233,7 @@ static int alloc_picture(H264Context *h, H264Picture *pic)
+         ret = ff_thread_get_buffer(h->avctx, pic->f_grain, 0);
+         if (ret < 0)
+             goto fail;
++        ffdbg_fill(pic->f_grain);
+     }
+ 
+     ret = ff_hwaccel_frame_priv_alloc(h->avctx, &pic->hwaccel_picture_private);
+@@ -2501,6 +2524,31 @@ static void loop_filter(const H264Context *h, H264SliceContext *sl, int start_x,
+                     ff_h264_filter_mb_fast(h, sl, mb_x, mb_y, dest_y, dest_cb,
+                                            dest_cr, linesize, uvlinesize);
+                 }
++                {
++                    static int dbg = -1;
++                    if (dbg < 0)
++                        dbg = getenv("FFDBG_LF") != NULL;
++                    if (dbg) {
++                        uint8_t *d[3] = { dest_y, dest_cb, dest_cr };
++                        const int rows[3] = { 16, block_h, block_h };
++                        const int cols[3] = { 16, 8 << CHROMA444(h), 8 << CHROMA444(h) };
++                        const ptrdiff_t stride[3] = { linesize, uvlinesize, uvlinesize };
++                        uint32_t sum[3];
++                        int pl, y, x;
++                        for (pl = 0; pl < 3; pl++) {
++                            uint32_t a = 1, b = 0;
++                            for (y = 0; y < rows[pl]; y++)
++                                for (x = 0; x < (cols[pl] << pixel_shift); x++) {
++                                    a = (a + d[pl][y * stride[pl] + x]) % 65521;
++                                    b = (b + a) % 65521;
++                                }
++                            sum[pl] = (b << 16) | a;
++                        }
++                        fprintf(stderr, "LF poc=%d mb=%d,%d sum=%08x,%08x,%08x h=%d\n",
++                                h->cur_pic_ptr->poc, mb_x, mb_y, sum[0], sum[1], sum[2],
++                                h->ffdbg_id);
++                    }
++                }
+             }
+     }
+     sl->slice_type  = old_slice_type;
+@@ -2590,6 +2638,24 @@ static int decode_slice(struct AVCodecContext *avctx, void *arg)
+ 
+     sl->is_complex = FRAME_MBAFF(h) || h->picture_structure != PICT_FRAME ||
+                      (CONFIG_GRAY && (h->flags & AV_CODEC_FLAG_GRAY));
++    if (getenv("FFDBG_REF")) {
++        for (int list = 0; list < sl->list_count; list++)
++            for (int i = 0; i < sl->ref_count[list]; i++) {
++                const H264Ref *r = &sl->ref_list[list][i];
++                uint32_t a = 1, b = 0;
++                if (r->parent && r->parent->f->buf[0]) {
++                    const AVFrame *f = r->parent->f;
++                    for (int y = 0; y < f->height; y++)
++                        for (int x = 0; x < f->width << h->pixel_shift; x++) {
++                            a = (a + f->data[0][y * f->linesize[0] + x]) % 65521;
++                            b = (b + a) % 65521;
++                        }
++                }
++                fprintf(stderr, "REF poc=%d slice=%d list=%d i=%d refpoc=%d ref=%d sum=%08x h=%d\n",
++                        h->cur_pic_ptr->poc, sl->slice_num, list, i, r->poc, r->reference,
++                        (b << 16) | a, h->ffdbg_id);
++            }
++    }
+ 
+     if (!(h->avctx->active_thread_type & FF_THREAD_SLICE) && h->picture_structure == PICT_FRAME && sl->er->error_status_table) {
+         const int start_i  = av_clip(sl->resync_mb_x + sl->resync_mb_y * h->mb_width, 0, h->mb_num - 1);
+diff --git a/libavcodec/h264dec.c b/libavcodec/h264dec.c
+index 809a938..9de1169 100644
+--- a/libavcodec/h264dec.c
++++ b/libavcodec/h264dec.c
+@@ -1,3 +1,5 @@
++#include <stdio.h>
++#include <stdlib.h>
+ /*
+  * H.26L/H.264/AVC/JVT/14496-10/... decoder
+  * Copyright (c) 2003 Michael Niedermayer <michaelni@gmx.at>
+@@ -292,6 +294,10 @@ static int h264_init_context(AVCodecContext *avctx, H264Context *h)
+ 
+     h->avctx                 = avctx;
+     h->cur_chroma_format_idc = -1;
++    {
++        static int ffdbg_next;
++        h->ffdbg_id = ++ffdbg_next;
++    }
+ 
+     h->width_from_caller     = avctx->width;
+     h->height_from_caller    = avctx->height;
+@@ -813,6 +819,24 @@ end:
+             memset(&sl->ref_list[0][0], 0, sizeof(sl->ref_list[0][0]));
+     }
+ #endif /* CONFIG_ERROR_RESILIENCE */
++    if (getenv("FFDBG_PIC") && h->cur_pic_ptr && h->cur_pic_ptr->f->buf[0]) {
++        const AVFrame *f = h->cur_pic_ptr->f;
++        uint32_t sum[3];
++        for (int p = 0; p < 3; p++) {
++            uint32_t a = 1, b = 0;
++            int w = p ? AV_CEIL_RSHIFT(f->width, h->chroma_x_shift) : f->width;
++            int hh = p ? AV_CEIL_RSHIFT(f->height, h->chroma_y_shift) : f->height;
++            for (int y = 0; y < hh; y++)
++                for (int x = 0; x < w << h->pixel_shift; x++) {
++                    a = (a + f->data[p][y * f->linesize[p] + x]) % 65521;
++                    b = (b + a) % 65521;
++                }
++            sum[p] = (b << 16) | a;
++        }
++        fprintf(stderr, "PIC poc=%d fpoc=%d,%d struct=%d sum=%08x,%08x,%08x h=%d\n",
++                h->cur_pic_ptr->poc, h->cur_pic_ptr->field_poc[0], h->cur_pic_ptr->field_poc[1],
++                h->picture_structure, sum[0], sum[1], sum[2], h->ffdbg_id);
++    }
+     /* clean up */
+     if (h->cur_pic_ptr && !h->droppable && h->has_slice) {
+         ff_thread_report_progress(&h->cur_pic_ptr->tf, INT_MAX,
+@@ -956,6 +980,22 @@ static int finalize_frame(H264Context *h, AVFrame *dst, H264Picture *out, int *g
+                           f->format, f->width, f->height>>1);
+         }
+ 
++        if (getenv("FFDBG_OUT")) {
++            AVFrame *f = out->f;
++            int ps = h->pixel_shift, y, x, par;
++            uint32_t s[2];
++            for (par = 0; par < 2; par++) {
++                uint32_t a = 1, b = 0;
++                for (y = par; y < 16 * h->mb_height; y += 2)
++                    for (x = 0; x < (16 * h->mb_width) << ps; x++) {
++                        a = (a + f->data[0][y * f->linesize[0] + x]) % 65521;
++                        b = (b + a) % 65521;
++                    }
++                s[par] = (b << 16) | a;
++            }
++            fprintf(stderr, "OUT poc=%d fpoc=%d,%d top=%08x bot=%08x h=%d\n", out->poc,
++                    out->field_poc[0], out->field_poc[1], s[0], s[1], h->ffdbg_id);
++        }
+         ret = output_frame(h, dst, out);
+         if (ret < 0)
+             return ret;
+@@ -1037,6 +1077,12 @@ static int h264_decode_frame(AVCodecContext *avctx, AVFrame *pict,
+     if (av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, NULL)) {
+         size_t side_size;
+         uint8_t *side = av_packet_get_side_data(avpkt, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
++        if (getenv("FFDBG_NEWEXTRA")) {
++            fprintf(stderr, "NEWEXTRA pos=%" PRId64 " ", avpkt->pos);
++            for (size_t i = 0; i < side_size; i++)
++                fprintf(stderr, "%02x", side[i]);
++            fprintf(stderr, " h=%d\n", h->ffdbg_id);
++        }
+         ff_h264_decode_extradata(side, side_size,
+                                  &h->ps, &h->is_avc, &h->nal_length_size,
+                                  avctx->err_recognition, avctx);
+diff --git a/libavcodec/h264dec.h b/libavcodec/h264dec.h
+index 74fd09d..6643f35 100644
+--- a/libavcodec/h264dec.h
++++ b/libavcodec/h264dec.h
+@@ -577,6 +577,7 @@ typedef struct H264Context {
+     int non_gray;                       ///< Did we encounter a intra frame after a gray gap frame
+     int noref_gray;
+     int skip_gray;
++    int ffdbg_id;
+ } H264Context;
+ 
+ extern const uint16_t ff_h264_mb_sizes[4];

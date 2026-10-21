@@ -10,10 +10,13 @@ publish = false
 matroska = { path = "../matroska" }
 mp4 = { path = "../mp4" }
 ogg = { path = "../ogg" }
-# The codecs: VP8 and VP9, libvpx's decoders ported; AV1, rav1d vendored.
+# The codecs: VP8 and VP9, libvpx's decoders ported; AV1, rav1d vendored;
+# H.264, FFmpeg's decoder translated (LGPL, as the MP4 reader is;
+# design-decisions §1376).
 vp8 = { path = "../vp8" }
 vp9 = { path = "../vp9" }
 rav1d = { path = "../rav1d" }
+h264 = { path = "../h264" }
 # YUV to pixels, exactly as an AVIF still of the same picture is converted.
 yuv = { path = "../yuv" }
 # The sound: Opus, libopus's decoder ported; Vorbis, Tremor ported; FLAC,

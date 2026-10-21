@@ -142,6 +142,12 @@ pub struct Video {
     /// in `stts` but the last lasts as long as the first. `None` where the
     /// `moov` lists no samples (a fragmented file).
     pub frame_duration: Option<u32>,
+    /// How many pictures an H.264 decoder holds back to show them in
+    /// order, as FFmpeg estimates it from the composition offsets
+    /// (`codecpar->video_delay`) for its decoder to start from: 0 for
+    /// another codec, or where the track has no offsets or lists no
+    /// samples.
+    pub reorder_delay: u32,
 }
 
 /// A picture's colour, numbered as ITU-T H.273 numbers it, as `colr` and

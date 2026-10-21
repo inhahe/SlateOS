@@ -1,0 +1,15 @@
+[package]
+name = "ffbits"
+version = "0.1.0"
+edition = "2024"
+description = "Bits and variable-length codes read as FFmpeg's libavcodec reads them, for the decoders translated from it."
+# Translated from FFmpeg's libavcodec get_bits.h, golomb.h and vlc.c (see
+# licenses/notices.yaml).
+license = "LGPL-2.1-or-later"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[lints]
+workspace = true

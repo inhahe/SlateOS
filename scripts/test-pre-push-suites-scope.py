@@ -39,6 +39,7 @@ HOOK = os.path.join(REPO_ROOT, "scripts", "hooks", "pre-push")
 sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import gitenv  # noqa: E402
 import msysbash  # noqa: E402
+import shellfunc  # noqa: E402
 
 _FAILURES: list[str] = []
 
@@ -73,9 +74,7 @@ def lifted(text):
     """`pushed_paths()` and the two pipelines that read it, exactly as the hook
     has them. Lifting rather than restating is the point: a copy here would go
     on passing after the hook changed."""
-    fn = re.search(r"^pushed_paths\(\)\s*\{.*?^\}\n", text, re.MULTILINE | re.DOTALL)
-    if fn is None:
-        raise RuntimeError("the hook has no `pushed_paths() { ... }` any more")
+    fn = shellfunc.shell_function(text, "pushed_paths", "pre-push")
     scripts = re.search(r"^\s*changed_scripts=\$\((.*)\)\s*$", text, re.MULTILINE)
     if scripts is None:
         raise RuntimeError("the hook no longer computes `changed_scripts=$(...)`")
@@ -83,7 +82,7 @@ def lifted(text):
                             text, re.MULTILINE)
     if hook_suites is None:
         raise RuntimeError("the hook no longer asks `pushed_paths` whether it changed itself")
-    return fn.group(0), scripts.group(1), hook_suites.group(1)
+    return fn, scripts.group(1), hook_suites.group(1)
 
 
 def run_hook_side(repo, pushed, remote, fn, scripts_cmd, hook_cmd):

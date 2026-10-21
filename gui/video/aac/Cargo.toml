@@ -1,0 +1,18 @@
+[package]
+name = "aac"
+version = "0.1.0"
+edition = "2024"
+description = "AAC sound decoded as FFmpeg's fixed-point decoder decodes it."
+# Translated from FFmpeg's libavcodec fixed-point AAC decoder (see
+# licenses/notices.yaml and design-decisions/1377).
+license = "LGPL-2.1-or-later"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ffbits = { path = "../ffbits" }
+
+[lints]
+workspace = true

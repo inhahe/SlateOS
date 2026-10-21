@@ -26,14 +26,17 @@
 //!
 //! Matroska, WebM and MP4 files, told apart by their first bytes as FFmpeg
 //! tells them; VP8, and VP9 in every profile (8-, 10- and 12-bit; 4:2:0,
-//! 4:2:2, 4:4:0, 4:4:4; RGB), each with WebM's alpha channel; and AV1. An
-//! MP4 file's edit list is obeyed as FFmpeg obeys it: the frames it leaves
-//! out are decoded, for those after them, and not shown. A picture the file
-//! asks to be turned or mirrored -- MP4's display matrix, Matroska's
-//! projection -- comes out turned, as ffmpeg's autorotate turns it
-//! ([`Orientation`]). Not yet: H.264 and
-//! HEVC, which most MP4 files hold (`roadmap.md`, "Video files"). An Ogg
-//! film's pictures are Theora, refused by name; its sound plays ([`Sound`]).
+//! 4:2:2, 4:4:0, 4:4:4; RGB), each with WebM's alpha channel; AV1; and
+//! H.264 in every profile (FFmpeg's decoder translated, `gui/video/h264`:
+//! interlaced, 8- to 14-bit, 4:2:0 to 4:4:4, damaged streams concealed as
+//! FFmpeg conceals them). An MP4 file's edit list is obeyed as FFmpeg obeys
+//! it: the frames it leaves out are decoded, for those after them, and not
+//! shown. A picture the file asks to be turned or mirrored -- MP4's display
+//! matrix, Matroska's projection -- comes out turned, as ffmpeg's autorotate
+//! turns it ([`Orientation`]). Not yet: HEVC (`roadmap.md`, "Video files").
+//! An interlaced H.264 picture comes out as its two fields woven, as FFmpeg
+//! gives it; nothing deinterlaces it yet. An Ogg film's pictures are
+//! Theora, refused by name; its sound plays ([`Sound`]).
 //!
 //! # Sound
 //!
@@ -149,7 +152,6 @@ pub enum Codec {
     Vp8,
     Vp9,
     Av1,
-    /// Not decoded here yet.
     H264,
     /// Not decoded here yet.
     Hevc,
@@ -456,6 +458,8 @@ pub enum Error {
     Vp9(vp9::Error),
     /// An AV1 packet did not decode.
     Av1(rav1d::safe::Error),
+    /// An H.264 packet did not decode, or held no picture.
+    H264(h264::Error),
     /// A picture whose colour cannot be converted: a matrix libavif refuses
     /// (BT.2020 constant luminance, ICtCp, ...), or the identity matrix with
     /// subsampled chroma.
@@ -495,6 +499,7 @@ impl fmt::Display for Error {
             Self::Vp8(e) => write!(f, "{e}"),
             Self::Vp9(e) => write!(f, "{e}"),
             Self::Av1(e) => write!(f, "{e}"),
+            Self::H264(e) => write!(f, "{e}"),
             Self::Colour(yuv::reformat::Error::Unsupported) => {
                 f.write_str("the video's colour description cannot be converted to pixels")
             }

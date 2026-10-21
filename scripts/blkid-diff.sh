@@ -113,6 +113,9 @@ PY
 mk ebr-bounds 4 mbr 0:0:5:4096:1000 4096:0:131:4294963300:10 4096:1:5:200:60 \
   4296:0:131:2000:50 4296:1:5:100:60 4196:0:130:1:20
 mk ebr-link-out 4 mbr 0:0:5:4096:1000 4096:0:131:1:50 4096:1:5:2000:60 6096:0:131:1:20
+# A link that starts inside the extended partition and runs past its end, to
+# a record whose own logical lies inside it.
+mk ebr-link-long 4 mbr 0:0:5:4096:1000 4096:0:131:1:50 4096:1:5:500:600 4596:0:131:1:20
 if command -v sfdisk > /dev/null; then
   mk dos-logicals 64 sh -c 'printf "label: dos\nlabel-id: 0x1234abcd\n,8M,L,*\n,8M,S\n,,E\n,4M,L\n,4M,83\n,,b\n" | sfdisk -q "$0"'
   mk gpt-many 64 sh -c 'printf "label: gpt\nlabel-id: 01234567-89ab-cdef-0123-456789abcdef\n,4M,L,name=root\n,4M,S,name=swap\n,4M,U\n,4M,L,attrs=RequiredPartition\n,,L,name=\"with space\"\n" | sfdisk -q "$0"'

@@ -220,6 +220,9 @@ c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\r|$ENTER|$QUIT"
 c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f999G\r|keys:\e|$QUIT"
 c gaps.img "$DOWN|$DOWN|keys:n|keys:\eOD\x7f9\r|keys:\e|$QUIT"
 c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f2048S\r|$ENTER|keys:W|keys:yes\r|$QUIT"
+# A size in sectors past the free space: refused, the prompt comes back
+# without its S, and Enter there means bytes.
+c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f999999999S\r|$ENTER|keys:\e|$QUIT"
 
 # --- writing, or not -------------------------------------------------------------
 c dos.img "keys:d|keys:W|keys:no\r|$QUIT"

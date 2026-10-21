@@ -1413,6 +1413,9 @@ impl Cfdisk {
     /// The text of field `id` of the current partition, if it has any.
     fn current_field(&mut self, id: i32) -> Option<Vec<u8>> {
         let mut pa = self.get_current_partition()?.clone();
+        // A field that cannot be read is one without text: the extra window
+        // leaves it out, as upstream's `if (!fdisk_partition_to_string (...)
+        // && data)` does.
         self.cxt.partition_to_string(&mut pa, id).ok().flatten()
     }
 
@@ -1560,6 +1563,8 @@ impl Cfdisk {
             1,
         );
         extra.reduce_termwidth(4);
+        // Upstream ignores this call's result too; a table that cannot be
+        // printed draws an empty window rather than ending the program.
         let tbstr = extra.print_to_string().unwrap_or_default();
         if let Some(w) = win_ex {
             curses::box_(w, 0, 0);
@@ -1754,6 +1759,8 @@ impl Cfdisk {
         let label_name = self.cxt.label_ref().map_or("", libfdisk::Label::get_name);
         curses::clear();
         let devname = self.cxt.get_devname().unwrap_or_default().to_vec();
+        // An identifier that cannot be read is shown as none: "Label: X"
+        // alone, upstream's branch for a nonzero return or a NULL id.
         let id = self.cxt.get_disklabel_id().ok().flatten();
         let nsectors = self.cxt.get_nsectors();
         {
@@ -1826,12 +1833,13 @@ impl Cfdisk {
                 user = *res;
                 rc = 0;
             } else {
-                let mut text = buf.clone();
-                if matches!(text.last(), Some(b'S' | b's')) {
+                // Off `buf` itself, as upstream's `buf[len - 1] = '\0'` takes
+                // it: a size refused below is offered again without its `S`.
+                if matches!(buf.last(), Some(b'S' | b's')) {
                     insec = true;
-                    text.pop();
+                    buf.pop();
                 }
-                let (r, x, p) = ulstrutils::parse_size_power(&text);
+                let (r, x, p) = ulstrutils::parse_size_power(&buf);
                 user = x;
                 pwr = p;
                 rc = match r {
@@ -1895,6 +1903,9 @@ impl Cfdisk {
         }
         let codetypes = lb.has_code_parttypes();
         let mut cm = Vec::with_capacity(nitems);
+        // Beside the menu, in its order: an item's userdata is its type's
+        // index here.
+        let mut types: Vec<PartType> = Vec::with_capacity(nitems);
         let mut idx = 0usize;
         for i in 0..nitems {
             let Some(x) = lb.get_parttype(i) else {
@@ -1908,19 +1919,17 @@ impl Cfdisk {
             } else {
                 (name.to_vec(), x.get_string().map(<[u8]>::to_vec))
             };
+            if cur.is_some_and(|c| same_type(x, c)) {
+                idx = types.len();
+            }
             cm.push(MenuItem {
                 key: 0,
                 name,
                 desc,
-                userdata: Some(i),
+                userdata: Some(types.len()),
             });
-            if cur.is_some_and(|c| same_type(x, c)) {
-                idx = i;
-            }
+            types.push(x.clone());
         }
-        let types: Vec<PartType> = (0..nitems)
-            .filter_map(|i| lb.get_parttype(i).cloned())
-            .collect();
         {
             let mut u = self.ui.borrow_mut();
             // "make the new menu active"
@@ -2587,9 +2596,9 @@ fn ui_get_string(
     buf: &mut Vec<u8>,
     len: usize,
 ) -> isize {
-    let (ln, cols, utf8) = {
+    let (ln, utf8) = {
         let u = ui.borrow();
-        (c_int(u.menu_start_line()), u.cols, u.utf8)
+        (c_int(u.menu_start_line()), u.utf8)
     };
     let mut cl = 1i32;
     let mut rc: isize = -1;
@@ -2601,9 +2610,8 @@ fn ui_get_string(
         curses::mvaddstr(ln, cl, p);
         cl = cl.wrapping_add(c_int(mbs_safe_width(p, utf8)));
     }
-    // The cells `mbs_new_edit` is given (`ui_cols - cl`) it keeps and never
-    // reads.
-    let _ = cols;
+    // Upstream also gives `mbs_new_edit` the cells left (`ui_cols - cl`),
+    // which it keeps and never reads.
     let mut edit = Editor::new(buf, len, utf8);
     edit.goto(MBS_EDIT_END);
     match hint {

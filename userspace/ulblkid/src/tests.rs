@@ -250,6 +250,20 @@ fn dos_ebr_entries_and_links_stay_inside_the_extended_partition() {
     let mut pr = probe_of(&dir, "img2", &img);
     let ls = pr.partitions().unwrap();
     assert_eq!(parts(ls), vec![(1, 4096, 1000, 0x05), (5, 4097, 50, 0x83)]);
+    // So does a link that starts inside it and runs past its end, though the
+    // record it leads to holds a logical inside it (blkid-diff's
+    // ebr-link-long, where Ubuntu's libblkid lists no partition 6).
+    let mut img = Image::new(4 << 20);
+    img.mbr_entry(0, 0, 0, 0x05, 4096, 1000)
+        .mbr_magic(0)
+        .mbr_entry(4096, 0, 0, 0x83, 1, 50)
+        .mbr_entry(4096, 1, 0, 0x05, 500, 600)
+        .mbr_magic(4096)
+        .mbr_entry(4596, 0, 0, 0x83, 1, 20)
+        .mbr_magic(4596);
+    let mut pr = probe_of(&dir, "img3", &img);
+    let ls = pr.partitions().unwrap();
+    assert_eq!(parts(ls), vec![(1, 4096, 1000, 0x05), (5, 4097, 50, 0x83)]);
 }
 
 #[test]

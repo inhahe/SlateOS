@@ -1000,11 +1000,13 @@ impl Screen {
             }
         };
         let rc = self.cooked_line_end(w, &line, ch);
-        // "ungetch in reverse order"
+        // "ungetch in reverse order" -- the line as `strlen (buf)` reads it:
+        // a NUL typed into it ends it there, and what followed is dropped.
         if rc != ERR {
             self.fifo.unget(i32::from(b'\n'));
         }
-        for &b in line.s.iter().rev() {
+        let line_bytes = line.s.split(|&b| b == 0).next().unwrap_or_default();
+        for &b in line_bytes.iter().rev() {
             self.fifo.unget(signed_char(b));
         }
         let r = self.fifo.pull();
@@ -1278,6 +1280,35 @@ mod tests {
         sp.stdscr.delay = -1;
         sp.cbreak = 3;
         assert_eq!(sp.wgetch_step(Win::Stdscr), Err(Need::Ready(200)));
+    }
+
+    #[test]
+    fn a_cooked_line_is_returned_up_to_a_nul_typed_into_it() {
+        // Neither cbreak nor raw, and nothing queued: wgetch reads a whole
+        // line first, a byte at a time, and returns it one byte per call.
+        let mut sp = xterm(Box::new(CLocale));
+        sp.echo = false;
+        assert_eq!(sp.wgetch_step(Win::Stdscr), Err(Need::Byte));
+        let mut got = Vec::new();
+        for &b in b"ab\0cd\n" {
+            sp.fed = Fed::Byte(i32::from(b));
+            match sp.wgetch_step(Win::Stdscr) {
+                Ok(c) => got.push(c),
+                other => assert_eq!(other, Err(Need::Byte), "after {b:#x}"),
+            }
+        }
+        while let Ok(c) = sp.wgetch_step(Win::Stdscr) {
+            if c == ERR {
+                break;
+            }
+            got.push(c);
+            if c == i32::from(b'\n') {
+                break;
+            }
+        }
+        // As upstream's `strlen (buf)` reads the line: up to the NUL, then
+        // the newline its end adds.
+        assert_eq!(got, [b'a', b'b', b'\n'].map(i32::from));
     }
 
     #[test]

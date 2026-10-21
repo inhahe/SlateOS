@@ -820,20 +820,31 @@ pub fn box_(w: Win, verch: Attr, horch: Attr) -> bool {
 /// `read` or `poll`, as upstream's, during which curses' own signal
 /// handlers find the screen free and suspend or end the program at once,
 /// and after which a signal's `SA_RESTART` has decided, as for upstream,
-/// whether the wait ended. `None` without a screen.
+/// whether the wait ended. `None` without a screen, or when another call
+/// holds it as this one starts.
 fn reading<R>(mut step: impl FnMut(&mut Screen) -> Result<R, input::Need>) -> Option<R> {
     let mut fed = input::Fed::Nothing;
     let mut first = true;
     loop {
-        let r = signals::with(|sp| {
-            if first {
-                sp.begin_read();
-            }
-            if fed != input::Fed::Nothing {
-                sp.fed = fed;
-            }
-            step(sp).map_err(|need| (need, sp.ifd))
-        })?;
+        let mut attempt = |slot: &mut Option<Screen>| {
+            slot.as_mut().map(|sp| {
+                if first {
+                    sp.begin_read();
+                }
+                if fed != input::Fed::Nothing {
+                    sp.fed = fed;
+                }
+                step(sp).map_err(|need| (need, sp.ifd))
+            })
+        };
+        // Starting, the call is refused a screen another holds, as every
+        // call is. Under way, it let the screen go to wait, and refused now
+        // it would lose what the wait read: so it waits its turn.
+        let r = if first {
+            signals::with_slot(&mut attempt).flatten()
+        } else {
+            signals::with_slot_when_free(&mut attempt)
+        }?;
         first = false;
         match r {
             Ok(v) => return Some(v),

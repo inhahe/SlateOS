@@ -67,11 +67,11 @@ def unescape(text):
     i = 0
     while i < len(raw):
         c = raw[i]
-        if c != 0x5C or i + 1 >= len(raw):
+        if c != 0x5C:
             out.append(c)
             i += 1
             continue
-        nxt = raw[i + 1]
+        nxt = raw[i + 1] if i + 1 < len(raw) else None
         simple = {0x72: 0x0D, 0x6E: 0x0A, 0x74: 0x09, 0x65: 0x1B, 0x5C: 0x5C}
         if nxt in simple:
             out.append(simple[nxt])
@@ -81,9 +81,10 @@ def unescape(text):
             out.append(int(raw[i + 2 : i + 4].decode("ascii"), 16))
             i += 4
         else:
-            # Typed as it stands, an escape this does not know would make a
-            # case press other keys than it says -- and both sides of a
-            # comparison would agree on them.
+            # Typed as it stands, an escape this does not know -- or a
+            # backslash with nothing after it -- would make a case press
+            # other keys than it says, and both sides of a comparison would
+            # agree on them.
             raise ValueError("unknown escape in keys: " + text)
     return bytes(out)
 

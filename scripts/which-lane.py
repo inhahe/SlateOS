@@ -835,6 +835,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "tee-diff.sh",
         "test-check-cp-diff-sees-nul.py",
         "test-checkers-honour-head.py",
+        "test-curses-ptyrun.py",
         "test-diff-bound.sh",
         "test-diff-forward.sh",
         "test-diff.sh",

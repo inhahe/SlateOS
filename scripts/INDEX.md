@@ -512,6 +512,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-check-self-tests-wired.py` | Regression tests for the self-test wiring gate's `RAN-IF` markers. |
 | `scripts/test-checkers-honour-head.py` | Do the push gates' checkers judge the commit, or whatever is on the disk? |
 | `scripts/test-ctest-fixtures.py` | Regression tests for the sysroot staleness gate in `scripts/ctest-fixtures.py`. |
+| `scripts/test-curses-ptyrun.py` | Regression tests for `scripts/curses-ptyrun.py`'s `keys:` escapes. |
 | `scripts/test-diff-bound.sh` | Two-probe test for the bound that `diff-wsl.sh` puts around every harness. |
 | `scripts/test-diff-forward.sh` | Does a `DIFF_*` knob set on the command line reach the far side of the WSL |
 | `scripts/test-diff.sh` | Differential test: our `test` against GNU `test`. |
@@ -602,4 +603,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_592 scripts._
+_593 scripts._

@@ -479,8 +479,9 @@ fn damage_too_costly_to_look_past_refuses_the_file() {
 
 /// Real damage is looked past however large what follows it: a stray byte,
 /// then a Tracks whose entry's CodecPrivate is 4 MiB, which the second pass
-/// reads about twice -- in its search for IDs, and reading the Tracks found
-/// -- well inside its bound, and far past the mebibyte of slack in it.
+/// reads about twice -- reading the Tracks found, and in its search for the
+/// Chapters after it -- well inside its bound, and far past the mebibyte of
+/// slack in it.
 #[test]
 fn damage_before_a_large_element_is_looked_past() {
     let entry = [
@@ -491,9 +492,10 @@ fn damage_before_a_large_element_is_looked_past() {
     ]
     .concat();
     let tracks = big(&[0x16, 0x54, 0xAE, 0x6B], &big(&[0xAE], &entry));
-    let bytes = file_with(&[vec![0x00], tracks].concat());
+    let bytes = file_with(&[vec![0x00], tracks, one_chapter(b"After")].concat());
     let d = Demuxer::open(Cursor::new(bytes)).unwrap();
     assert_eq!(d.tracks().len(), 2);
+    assert_eq!(d.chapters().len(), 1);
 }
 
 /// Damage built so that looking past it would keep the file in memory many

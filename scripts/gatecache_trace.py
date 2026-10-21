@@ -100,6 +100,17 @@ _REAL_ISLINK = os.path.islink
 _REAL_ACCESS = os.access
 
 
+def write_json(path: str, obj) -> None:
+    """Write `obj` as JSON to `path` whole or not at all: into a temporary of
+    this process's own, then renamed over `path`. Two writers of one path can
+    at worst replace each other whole; neither can land inside the other's
+    file. Raises OSError as `open` and `os.replace` do."""
+    tmp = f"{path}.{os.getpid()}.tmp"
+    with _REAL_OPEN(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        json.dump(obj, fh)
+    os.replace(tmp, path)
+
+
 def norm(p) -> str | None:
     """The comparable form of a path: absolute, case-folded where the OS is."""
     if p is None or isinstance(p, int):
@@ -211,6 +222,13 @@ class _Tracer:
         self.lock = threading.RLock()
         self.local = threading.local()
         self.counter = 0
+        # Part of every id this process mints. An inherited spawn id is not
+        # unique: Python processes reached through one untraced intermediary (a
+        # shell, any other program) all inherit the id `install` leaves in the
+        # environment, so they would count `<id>.1`, `<id>.2`... alike and name
+        # their git records alike. Random rather than the pid, which Windows
+        # hands out again within one run.
+        self.nonce = os.urandom(4).hex()
         self.ended = False
 
     def busy(self) -> bool:
@@ -302,11 +320,8 @@ class _Tracer:
         }
         self.enter()
         try:
-            path = os.path.join(self.trace_dir, f"proc-{os.getpid()}-{id(self):x}.json")
-            tmp = path + ".tmp"
-            with _REAL_OPEN(tmp, "w", encoding="utf-8", newline="\n") as fh:
-                json.dump(record, fh)
-            os.replace(tmp, path)
+            write_json(os.path.join(self.trace_dir, f"proc-{os.getpid()}-{id(self):x}.json"),
+                       record)
         except OSError:
             pass  # no end record: the driver refuses to store the run
         finally:
@@ -675,7 +690,7 @@ def _classify(t: _Tracer, args, a, k, site_dir: str, tee: str):
     exe = os.fsdecode(k["executable"]) if k.get("executable") else (argv[0] if argv else "")
     with t.lock:
         t.counter += 1
-        sid = f"{t.spawn_id or 'root'}.{t.counter}"
+        sid = f"{t.spawn_id or 'root'}.{t.nonce}.{t.counter}"
     base_env = dict(os.environ) if env is None else {
         os.fsdecode(n): os.fsdecode(v) for n, v in env.items()}
     overlay = sorted(n for n in set(base_env) | set(os.environ)
@@ -745,6 +760,13 @@ def install() -> None:
     if T is not None or not _TRACE_DIR:
         return
     T = _Tracer(_TRACE_DIR, _SPAWN_ID)
+    # What a Python process inherits when it is reached through something that
+    # is not traced (a shell, any other program), rather than started by
+    # `_classify`, which names each child itself. No parent ever lists this id,
+    # so such a process can never pass for a child that was listed -- the root
+    # least of all -- and hide that child's missing record. Set before environ
+    # is patched: it is this process's doing, not something the checker read.
+    os.environ["GATE_CACHE_SPAWN"] = f"{_SPAWN_ID or 'root'}~{T.nonce}"
     os.stat = _traced_stat
     os.lstat = _traced_lstat
     os.access = _traced_access

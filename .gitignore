@@ -208,6 +208,7 @@ scratch_*.py
 
 # The operator's own launcher for the lanes' sessions: which account, which
 # session, which prompt this week. It is not part of the project, and the
-# operator edits it constantly. Untracked here; the file itself stays where it
-# is.
+# operator edits it constantly. Untracked in the operator's tree, where the
+# file stays; a lane worktree's copy, which nobody edits, goes when it merges
+# the commit that untracked it.
 /go.bat

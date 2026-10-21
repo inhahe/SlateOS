@@ -43,8 +43,9 @@ $sysroot = Join-Path $PSScriptRoot "sysroot\lib"
 #                           that guards it, and the load then faults: it
 #                           caches "this block always runs" per block, not
 #                           per loop, and asks both the outer loop and the
-#                           inner one (LLVM issue 233340, fixed by PR 234138,
-#                           in every LLVM from 18 on). `msgrcv` read a jump
+#                           inner one (LLVM issue 233340: present in every
+#                           LLVM from 18.1 on; the fix, PR 234138, was
+#                           unmerged on 2026-10-21). `msgrcv` read a jump
 #                           table 32 GiB out of bounds whenever `msgtyp` was
 #                           0. Remove this once the nightly's LLVM has the
 #                           fix (known-issues.md

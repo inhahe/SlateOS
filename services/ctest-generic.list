@@ -24,23 +24,27 @@
 # A fixture goes on only after it has passed in a lane D boot: none of
 # another lane's boots should meet one of these failing for the first time.
 #
+# Lines commented out with "failed its first run" failed the 2026-10-21 boot,
+# the first that ran this list; each comes back once it passes in a lane D
+# boot (known-issues/D-SIXTEEN-C-FIXTURES-FAIL-THEIR-FIRST-RUN-ON-THE-GENERIC-RUNG.md).
+#
 # name           grants   seconds
 ctest-obstack    -        30
 ctest-argp       file     120
 ctest-aio        file     30
 ctest-cxx-throw  -        30
-ctest-eintr      -        120
+# ctest-eintr      -        120  (failed its first run -- timed out in a futex wait)
 ctest-fortify-abort -        60
 ctest-printf-streams -        30
 ctest-pthread    -        120
 ctest-stdio      file     60
 ctest-sysvipc    -        30
 ctest-ucontext   -        30
-ctest-llvm-tools file     600  needs=bin/llc
+# ctest-llvm-tools file     600  needs=bin/llc  (failed its first run -- 51: ld.lld -static ... -lc returned 262)
 ctest-sigpipe    -        30
 ctest-rusage     -        60
-ctest-pi-mutex   -        60
-ctest-system     file     60
+# ctest-pi-mutex   -        60  (failed its first run -- 52: the low thread ran on ahead)
+# ctest-system     file     60  (failed its first run -- 9: no /bin/sh while the battery sees the image at /mnt)
 ctest-mmap-file  file     30
 # Waiting on lane A's `creds` grant word -- (Process, SET_CREDENTIALS), to
 # set their own ids -- which the rung does not know yet, and a word it does
@@ -51,8 +55,8 @@ ctest-mmap-file  file     30
 ctest-fallocate  file     30
 ctest-string     -        60
 ctest-gdb-runs   file     300  needs=bin/gnu-gdb
-ctest-mono-runs  file     300  needs=lib/mono/checks/checks.exe
-ctest-binutils-runs file     300  needs=bin/as
+# ctest-mono-runs  file     300  needs=lib/mono/checks/checks.exe  (failed its first run -- 12: a probe died on a signal)
+# ctest-binutils-runs file     300  needs=bin/as  (failed its first run -- 73: size counts the .note.gnu.property as writes)
 ctest-gcc-runs   file     600  needs=usr/bin/gcc
 ctest-unix-socket file     60
 ctest-shared-anon -        30
@@ -62,18 +66,18 @@ ctest-fsetfl-append file     60
 ctest-positional-io file     60
 ctest-timed-join -        30
 ctest-sigign-exec file     30
-ctest-renice     -        30
+# ctest-renice     -        30  (failed its first run -- 23: reading pid 1's nice, ESRCH)
 ctest-affinity   -        30
-ctest-siginfo    -        30
-ctest-tmpfile    file     30
-ctest-seals      file     30
+# ctest-siginfo    -        30  (failed its first run -- 61: one record of the child's three, then EINTR)
+# ctest-tmpfile    file     30  (failed its first run -- 2: mkdir /tmp/ctest-tmpfile, EACCES)
+# ctest-seals      file     30  (failed its first run -- 2: memfd_create(MFD_ALLOW_SEALING), ENOENT)
 ctest-cpu-clocks -        60
-ctest-itimers    -        60
+# ctest-itimers    -        60  (failed its first run -- 11)
 ctest-posix-timers -      60
-ctest-dumpable   file     30
-ctest-thread-masks -        30
+# ctest-dumpable   file     30  (failed its first run -- 39)
+# ctest-thread-masks -        30  (failed its first run -- 30)
 ctest-sigev-thread -        30
-ctest-fifo       file     30
+# ctest-fifo       file     30  (failed its first run -- 9)
 # ctest-setids     creds    30  (waiting on `creds`, as ctest-resuid above)
 ctest-spawn-attrs file     30
 # ctest-swap       file,creds 30  (waiting on `creds`, as ctest-resuid above)
@@ -81,4 +85,4 @@ ctest-scm-rights file     30
 ctest-uts-namespace file     30
 ctest-secureboot file,secureboot 30
 ctest-signal-deaths -        30
-ctest-terminfo   file     60
+# ctest-terminfo   file     60  (failed its first run -- 10)

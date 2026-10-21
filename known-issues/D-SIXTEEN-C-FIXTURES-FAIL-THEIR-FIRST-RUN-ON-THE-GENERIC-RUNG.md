@@ -51,11 +51,18 @@ minute instead of a boot. Its root is the image, not `/mnt`, so a program
 that depends on where the image is mounted behaves differently there.
 `target/lane-d-logs/guest-run.sh <name>...` (lane D's worktree) rebuilds the
 image, runs the named programs that way and keeps each one's output in
-`target/lane-d-logs/guest/`. Since `01c70b786` changed `libc.a`, the image
-recipe refuses the userland until `python scripts/build-userland.py` has
-relinked it; run that first.
+`target/lane-d-logs/guest/`. Since `01c70b786` changed `libc.a`, everything
+linked against it must be relinked before an image means anything: the C
+fixtures by `python scripts/ctest-fixtures.py build` (the image recipe only
+warns about a stale fixture), and the userland by
+`python scripts/build-userland.py` (the recipe refuses a stale one).
+
+**Off the list meanwhile:** the fifteen besides `ctest-sysvipc` are commented
+out of `services/ctest-generic.list`, each with its first failure, as the
+list's rule says (a program goes on only after it has passed in a lane D
+boot). `ctest-sysvipc` stays on, so the next boot shows whether
+`01c70b786` fixed it.
 
 **Next:** one cause per row: the libc, the program, the image recipe, or the
-kernel (a request to lane A). Any that cannot be fixed in lane D comes off
-the list with a comment saying what it waits on, so that the list holds only
-programs that pass, and lane D can publish.
+kernel (a request to lane A). Each program goes back on the list once it
+passes in a lane D boot.

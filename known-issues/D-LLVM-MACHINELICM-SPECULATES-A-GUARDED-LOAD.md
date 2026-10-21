@@ -41,7 +41,12 @@ asks about one loop per run and stays on. Checked in the rebuilt
 `ctest-sysvipc.elf`: the dispatch is `jmpq *(%r11,%r10,8)` again, after the
 `mode == 0` test. The cost is invariant instructions LLVM's IR-level LICM
 cannot see (with the large code model, every `movabs` of an address) staying
-inside loops: a few cheap instructions per iteration.
+inside loops: a few cheap instructions per iteration, by reading the code;
+**not measured**. The libc rows of `performance-targets.md` (the memory and
+string functions; `crypt`) are what it could move, and the posix benches
+(`--bench mem`, `--bench crypt`) build for the host, which does not use this
+spec, so they cannot see it. Measuring it needs those benchmarks run on
+SlateOS, with and without the flag.
 
 **Still exposed** (none of it lane D's to change):
 

@@ -1,9 +1,9 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::include::common::bitdepth::AsPrimitive;
-use crate::include::common::bitdepth::BPC;
 use crate::include::common::bitdepth::BitDepth;
 use crate::include::common::bitdepth::ToPrimitive;
+use crate::include::common::bitdepth::BPC;
 use crate::include::common::dump::ac_dump;
 use crate::include::common::dump::coef_dump;
 use crate::include::common::dump::hex_dump;
@@ -42,42 +42,41 @@ use crate::src::levels::Av1BlockInter;
 use crate::src::levels::Av1BlockIntra;
 use crate::src::levels::Av1BlockIntraInter;
 use crate::src::levels::BlockSize;
-use crate::src::levels::CFL_PRED;
 use crate::src::levels::CompInterType;
-use crate::src::levels::DC_PRED;
-use crate::src::levels::DCT_DCT;
-use crate::src::levels::FILTER_PRED;
 use crate::src::levels::Filter2d;
-use crate::src::levels::GLOBALMV;
-use crate::src::levels::GLOBALMV_GLOBALMV;
-use crate::src::levels::IDTX;
 use crate::src::levels::InterIntraPredMode;
 use crate::src::levels::InterIntraType;
 use crate::src::levels::IntraPredMode;
 use crate::src::levels::MotionMode;
 use crate::src::levels::Mv;
-use crate::src::levels::SMOOTH_PRED;
 use crate::src::levels::TxClass;
 use crate::src::levels::TxfmSize;
 use crate::src::levels::TxfmType;
+use crate::src::levels::CFL_PRED;
+use crate::src::levels::DCT_DCT;
+use crate::src::levels::DC_PRED;
+use crate::src::levels::FILTER_PRED;
+use crate::src::levels::GLOBALMV;
+use crate::src::levels::GLOBALMV_GLOBALMV;
+use crate::src::levels::IDTX;
+use crate::src::levels::SMOOTH_PRED;
 use crate::src::levels::WHT_WHT;
 use crate::src::lf_apply::rav1d_copy_lpf;
 use crate::src::lf_apply::rav1d_loopfilter_sbrow_cols;
 use crate::src::lf_apply::rav1d_loopfilter_sbrow_rows;
 use crate::src::lr_apply::rav1d_lr_sbrow;
-use crate::src::msac::MsacContext;
 use crate::src::msac::rav1d_msac_decode_bool_adapt;
 use crate::src::msac::rav1d_msac_decode_bool_equi;
 use crate::src::msac::rav1d_msac_decode_bools;
 use crate::src::msac::rav1d_msac_decode_hi_tok;
+use crate::src::msac::rav1d_msac_decode_symbol_adapt16;
 use crate::src::msac::rav1d_msac_decode_symbol_adapt4;
 use crate::src::msac::rav1d_msac_decode_symbol_adapt8;
-use crate::src::msac::rav1d_msac_decode_symbol_adapt16;
+use crate::src::msac::MsacContext;
 use crate::src::picture::Rav1dThreadPicture;
 use crate::src::pixels::Pixels as _;
 use crate::src::scan::dav1d_scans;
 use crate::src::strided::Strided as _;
-use crate::src::tables::TxfmInfo;
 use crate::src::tables::dav1d_filter_2d;
 use crate::src::tables::dav1d_filter_mode_to_y_mode;
 use crate::src::tables::dav1d_lo_ctx_offsets;
@@ -86,6 +85,7 @@ use crate::src::tables::dav1d_tx_type_class;
 use crate::src::tables::dav1d_tx_types_per_set;
 use crate::src::tables::dav1d_txfm_dimensions;
 use crate::src::tables::dav1d_txtp_from_uvmode;
+use crate::src::tables::TxfmInfo;
 use crate::src::wedge::dav1d_ii_masks;
 use crate::src::wedge::dav1d_wedge_masks;
 use crate::src::with_offset::WithOffset;
@@ -621,7 +621,11 @@ fn decode_coefs<BD: BitDepth>(
                     &mut ts_c.cdf.m.txtp_inter3[t_dim.min as usize],
                 );
                 idx = bool_idx as u8;
-                if bool_idx { DCT_DCT } else { IDTX }
+                if bool_idx {
+                    DCT_DCT
+                } else {
+                    IDTX
+                }
             } else if t_dim.min == TxfmSize::S16x16 as _ {
                 idx = rav1d_msac_decode_symbol_adapt16(
                     &mut ts_c.msac,

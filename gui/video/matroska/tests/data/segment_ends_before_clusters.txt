@@ -1,0 +1,5 @@
+# segment_ends_before_clusters.mkv: what ffprobe makes of it (generate_fixtures.py).
+# FFmpeg lists its tracks twice; given once (design-decisions §1358).
+stream 0 snow 1/1000
+packet 0 0 10 4 127 K__ da6c56969ff19daf215df520e6739e19 -
+packet 0 100 10 4 145 K__ 9aad8723b78a15d039d8c5b9bac6b34e -

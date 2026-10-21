@@ -397,6 +397,121 @@ def _stub_cargo(tmp: str) -> tuple[str, str]:
     return bindir, log
 
 
+def _stub_git_and_powershell(bindir: str, git_exit: int) -> str:
+    """Into `bindir`: a `git` that records its arguments and exits `git_exit`,
+    so that no test clones anything or reaches a real repository; and
+    PowerShells that succeed, standing in for the sysroot build. Returns the
+    git log's path."""
+    log = os.path.join(bindir, "git.log")
+    with open(os.path.join(bindir, "git"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write('#!/usr/bin/env bash\n'
+                 'printf "%%s\\n" "$*" >> "%s"\nexit %d\n'
+                 % (log.replace("\\", "/"), git_exit))
+    os.chmod(os.path.join(bindir, "git"), 0o755)
+    for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh"):
+        with open(os.path.join(bindir, name), "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("#!/usr/bin/env bash\nexit 0\n")
+        os.chmod(os.path.join(bindir, name), 0o755)
+    return log
+
+
+def _git_calls(log: str) -> list[str]:
+    if not os.path.exists(log):
+        return []
+    with open(log, encoding="utf-8") as fh:
+        return [line.strip() for line in fh if line.strip()]
+
+
+def _fake_fastpy(directory, *, files=True):
+    """A fastpy checkout in `directory` as far as anything here looks at one:
+    the `.git` file a submodule's checkout has, and `compiler/__init__.py`
+    unless `files` is False -- a checkout cut short after its clone."""
+    os.makedirs(os.path.join(directory, "compiler"), exist_ok=True)
+    with open(os.path.join(directory, ".git"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write("gitdir: ../../.git/modules/toolchain/fastpy\n")
+    if files:
+        with open(os.path.join(directory, "compiler", "__init__.py"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write("")
+
+
+def _provision(tmp, name, git_exit, *, checked_out=None, fastpy_dir=None):
+    """Fully provision a fake tree named `name` with a stubbed git exiting
+    `git_exit`; `checked_out` is "whole" or "cut short" for a toolchain/fastpy
+    already there. Returns (exit status, output, git calls)."""
+    root = make_tree(tmp, name, ["init"])
+    if checked_out is not None:
+        _fake_fastpy(os.path.join(root, "toolchain", "fastpy"),
+                     files=checked_out == "whole")
+    bindir, cargo_log = _stub_cargo(os.path.join(tmp, "stubs-" + name))
+    git_log = _stub_git_and_powershell(bindir, git_exit)
+    env = dict(os.environ)
+    env.pop("FASTPY_DIR", None)
+    if fastpy_dir is not None:
+        env["FASTPY_DIR"] = fastpy_dir
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    env["STUB_CARGO_LOG"] = cargo_log
+    proc = subprocess.run(
+        [BASH, os.path.join(root, "scripts", "bootstrap-worktree.sh")],
+        cwd=root, capture_output=True, text=True, encoding="utf-8",
+        errors="replace", env=env,
+    )
+    return proc.returncode, proc.stdout + proc.stderr, _git_calls(git_log)
+
+
+def test_provisioning_checks_out_the_fastpy_submodule(tmp):
+    """Full provisioning runs `git submodule update --init` on an empty
+    toolchain/fastpy -- the compiler the fastpy fixtures and /bin/fastpy are
+    built with -- and a failed checkout fails the provisioning, naming
+    FASTPY_DIR."""
+    for git_exit in (0, 1):
+        status, out, calls = _provision(tmp, "fastpy-%d" % git_exit, git_exit)
+        check("provisioning runs `git -C <tree> submodule update --init -- "
+              "toolchain/fastpy` once (git exits %d)" % git_exit,
+              len(calls) == 1 and calls[0].startswith("-C ")
+              and calls[0].endswith("/fastpy-%d submodule update --init -- "
+                                    "toolchain/fastpy" % git_exit),
+              "calls: %r\n%s" % (calls, out))
+        if git_exit == 0:
+            check("...and a checkout that succeeds provisions the tree",
+                  status == OK, "got %d\n%s" % (status, out))
+        else:
+            check("...and one that fails fails it, naming fastpy and FASTPY_DIR",
+                  status != OK and "FAILED: fastpy" in out
+                  and "FASTPY_DIR" in out, "got %d\n%s" % (status, out))
+
+
+def test_provisioning_leaves_a_checked_out_fastpy_alone(tmp):
+    """`submodule update` moves a checkout to the pin with its output
+    silenced, leaving behind commits made in it, so a checkout already there
+    is not touched -- but one cut short after its clone is retried. And a
+    failed checkout is no failure when FASTPY_DIR names a checkout: the
+    advice the failure gives must be one that works."""
+    status, out, calls = _provision(tmp, "fastpy-present", 1, checked_out="whole")
+    check("a checked-out toolchain/fastpy runs no git", calls == [],
+          "calls: %r\n%s" % (calls, out))
+    check("...and provisions the tree", status == OK, "got %d\n%s" % (status, out))
+    status, out, calls = _provision(tmp, "fastpy-cut-short", 0,
+                                    checked_out="cut short")
+    check("one with a .git and no compiler/ is checked out again",
+          len(calls) == 1 and "submodule update --init" in calls[0],
+          "calls: %r\n%s" % (calls, out))
+    fastpy = os.path.join(tmp, "elsewhere-fastpy")
+    _fake_fastpy(fastpy)
+    status, out, calls = _provision(tmp, "fastpy-dir", 1, fastpy_dir=fastpy)
+    check("with FASTPY_DIR naming a checkout, the submodule is still tried",
+          len(calls) == 1, "calls: %r\n%s" % (calls, out))
+    check("...and its failing provisions the tree, saying how WSL sees FASTPY_DIR",
+          status == OK and "WSLENV=FASTPY_DIR/p" in out,
+          "got %d\n%s" % (status, out))
+    status, out, calls = _provision(tmp, "fastpy-dir-wrong", 1,
+                                    fastpy_dir=os.path.join(tmp, "nowhere"))
+    check("a FASTPY_DIR naming no checkout does not save a failed checkout, "
+          "and is named", status != OK and "FAILED: fastpy" in out
+          and "no compiler/__init__.py" in out, "got %d\n%s" % (status, out))
+
+
 def test_services_builds_every_embedded_service_and_nothing_else(tmp):
     """`--services` is what boot-test.sh runs before every kernel build: each
     embedded service, and no limine, rootfs or sysroot -- which here are all
@@ -405,6 +520,7 @@ def test_services_builds_every_embedded_service_and_nothing_else(tmp):
     root = make_tree(tmp, "services-only", ["init", "netstack"], limine=False,
                      rootfs=None)
     bindir, log = _stub_cargo(tmp)
+    git_log = _stub_git_and_powershell(bindir, 0)
     env = dict(os.environ)
     env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
     env["STUB_CARGO_LOG"] = log
@@ -429,6 +545,8 @@ def test_services_builds_every_embedded_service_and_nothing_else(tmp):
     check("--services provisions no rootfs",
           not os.path.exists(os.path.join(root, "rootfs.ext4")), out)
     check("--services does not build the sysroot", "sysroot" not in out, out)
+    check("--services does not check out fastpy", _git_calls(git_log) == [],
+          "git calls: %r\n%s" % (_git_calls(git_log), out))
 
 
 def test_services_takes_neither_names_nor_check(tmp):
@@ -453,8 +571,12 @@ def test_provisioning_never_copies_a_siblings_rootfs(tmp):
     os.makedirs(parent)
     target = make_tree(parent, "target", ["init"], rootfs=None)
     sibling = make_tree(parent, "sibling", ["init"], rootfs="good")
-    bindir, log = _stub_cargo(tmp)
-    # The sysroot step would run PowerShell on a script this fake tree lacks.
+    bindir, log = _stub_cargo(os.path.join(tmp, "stubs-siblings"))
+    # Its own stubs, so that what runs does not hang on the tests before it:
+    # a git that clones nothing for the fastpy step, and PowerShells that
+    # fail, since the sysroot step would run one on a script this fake tree
+    # lacks.
+    _stub_git_and_powershell(bindir, 0)
     for name in ("powershell.exe", "pwsh.exe", "powershell", "pwsh"):
         with open(os.path.join(bindir, name), "w", encoding="utf-8", newline="\n") as fh:
             fh.write("#!/usr/bin/env bash\nexit 1\n")
@@ -499,6 +621,8 @@ def main() -> int:
         test_services_builds_every_embedded_service_and_nothing_else,
         test_services_takes_neither_names_nor_check,
         test_provisioning_never_copies_a_siblings_rootfs,
+        test_provisioning_checks_out_the_fastpy_submodule,
+        test_provisioning_leaves_a_checked_out_fastpy_alone,
     )
     try:
         for test in tests:

@@ -16,11 +16,13 @@ toolchain whose archive builder writes a fixed file takes its place.
 
 In-process throughout, and starting no other process: the fakes are not git
 checkouts, so `git_identity` answers without running git, and the
-byte-compile is done by this interpreter.
+byte-compile is done by this interpreter. Where a test is about what the
+script asks git or `wslpath`, a stand-in `subprocess` answers it.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.util
 import inspect
@@ -160,6 +162,219 @@ def test_fastpy_dir_is_honoured_like_the_fixture_builder():
                 os.environ.pop("FASTPY_DIR", None)
             else:
                 os.environ["FASTPY_DIR"] = saved
+
+
+def test_unnamed_the_submodule_is_the_checkout_and_nothing_else_is_searched():
+    """With neither --fastpy nor $FASTPY_DIR, the tree comes from the
+    submodule, `toolchain/fastpy`; one not checked out is an error naming the
+    command that checks it out -- not a fastpy found on $PYTHONPATH, which is
+    not the commit the tree pins."""
+    saved = {name: os.environ.get(name) for name in ("FASTPY_DIR", "PYTHONPATH")}
+    saved_submodule = bundle.SUBMODULE
+    with tempfile.TemporaryDirectory() as tmp:
+        submodule = fake_fastpy(Path(tmp) / "repo" / "toolchain")
+        elsewhere = fake_fastpy(Path(tmp) / "elsewhere")
+        os.environ.pop("FASTPY_DIR", None)
+        os.environ["PYTHONPATH"] = str(elsewhere)
+        try:
+            bundle.SUBMODULE = submodule
+            check("the submodule is the checkout", bundle.find_fastpy(None), submodule)
+            os.environ["FASTPY_DIR"] = str(elsewhere)
+            check("$FASTPY_DIR names another checkout over it",
+                  bundle.find_fastpy(None), elsewhere)
+            os.environ.pop("FASTPY_DIR")
+            bundle.SUBMODULE = Path(tmp) / "unchecked-out"
+            err = raises(bundle.find_fastpy, None)
+            check("a submodule not checked out is an error naming the command, "
+                  "and $PYTHONPATH's fastpy is not used",
+                  err is not None and "git submodule update --init toolchain/fastpy" in err,
+                  True)
+        finally:
+            bundle.SUBMODULE = saved_submodule
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+
+
+def test_the_submodule_must_be_the_commit_the_tree_pins():
+    """A merge that moves the pin leaves the submodule where it was; bundling
+    it then puts an older compiler on the image than the fixtures are built
+    with. So it is refused unless it is the pinned commit, unedited."""
+    pin = "5b11d8825e868140cf9c6350f92192c82fb0f3d7"
+    check("the pinned commit is bundled without a word",
+          bundle.check_pin(pin, pin), None)
+    err = raises(bundle.check_pin, "6ec4a2e95b73e2dcbfd0adf4574a89c76d63c866", pin)
+    check("another commit is refused, naming the command that moves it to the "
+          "pin and the one that pins it instead",
+          err is not None and "git submodule update toolchain/fastpy" in err
+          and "git add toolchain/fastpy" in err and pin in err, True)
+    err = raises(bundle.check_pin, f"{pin}-dirty", pin)
+    check("the pinned commit with edits in it is refused too",
+          err is not None and "uncommitted edits" in err, True)
+    note = bundle.check_pin(pin, None)
+    check("a pin git cannot read is said, not refused",
+          note is not None and "cannot read the commit" in note and pin in note, True)
+    note = bundle.check_pin("unknown", pin)
+    check("so is a submodule whose own commit git cannot read",
+          note is not None and "cannot read the commit toolchain/fastpy is at" in note,
+          True)
+
+
+class _Ran:
+    """What a stand-in `subprocess.run` hands back."""
+
+    def __init__(self, returncode: int, stdout: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+def _with_stand_ins(fn, **names):
+    """Call `fn()` with the bundle module's `names` replaced, then put them back."""
+    saved = {name: getattr(bundle, name) for name in names}
+    try:
+        for name, value in names.items():
+            setattr(bundle, name, value)
+        return fn()
+    finally:
+        for name, value in saved.items():
+            setattr(bundle, name, value)
+
+
+def test_the_pin_is_read_again_through_wslpath_when_git_cannot_open_the_tree():
+    """Under WSL git cannot open a lane worktree by itself; the pin is then
+    asked again with the git directory as WSL names it. No process is
+    started: `subprocess` and `shutil` are stand-ins."""
+    calls: list[list[str]] = []
+
+    def run_failing_then_answering(args, **_kwargs):
+        calls.append(list(args))
+        return _Ran(0, "abc123\n") if "--git-dir" in args else _Ran(128)
+
+    fake_subprocess = types.SimpleNamespace(run=run_failing_then_answering)
+    got = _with_stand_ins(bundle.pinned_commit, subprocess=fake_subprocess,
+                          _wsl_git_dir=lambda: "/mnt/c/os/.git/worktrees/os-lane-f")
+    check("the second asking answers", got, "abc123")
+    check("...with the translated git directory and this tree as its work tree",
+          calls[-1][3:7] if len(calls) == 2 else calls,
+          ["--git-dir", "/mnt/c/os/.git/worktrees/os-lane-f",
+           "--work-tree", str(bundle.REPO)])
+    calls.clear()
+    got = _with_stand_ins(bundle.pinned_commit, subprocess=fake_subprocess,
+                          _wsl_git_dir=lambda: None)
+    check("with nothing to translate, one asking, and no answer",
+          (got, len(calls)), (None, 1))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        windows = Path(tmp) / "windows"
+        write(windows / ".git", "gitdir: C:/x/.git/worktrees/y\n")
+        translated: list[list[str]] = []
+
+        def wslpath(args, **_kwargs):
+            translated.append(list(args))
+            return _Ran(0, "/mnt/c/x/.git/worktrees/y\n")
+
+        got = _with_stand_ins(
+            bundle._wsl_git_dir, REPO=windows,
+            shutil=types.SimpleNamespace(which=lambda name: "/usr/bin/" + name),
+            subprocess=types.SimpleNamespace(run=wslpath))
+        check("a Windows gitdir is translated by wslpath -u",
+              (got, translated),
+              ("/mnt/c/x/.git/worktrees/y", [["wslpath", "-u", "C:/x/.git/worktrees/y"]]))
+
+
+def test_a_new_file_in_the_compiler_makes_the_checkout_dirty():
+    """`build` copies every `compiler/*.py` on disk, so a file the commit does
+    not track is as much a departure from it as an edit: git is asked to list
+    untracked files, and a listing marks the checkout dirty."""
+    asked: list[list[str]] = []
+
+    def git(args, **_kwargs):
+        asked.append(list(args))
+        if "rev-parse" in args:
+            return _Ran(0, "abc123\n")
+        return _Ran(0, "?? compiler/experimental.py\n")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        checkout = Path(tmp) / "fastpy"
+        write(checkout / ".git", "gitdir: ../somewhere\n")
+        got = _with_stand_ins(lambda: bundle.git_identity(checkout),
+                              subprocess=types.SimpleNamespace(
+                                  run=git, CalledProcessError=OSError))
+    status = next((a for a in asked if "status" in a), [])
+    check("untracked files are listed, not left out",
+          ("--untracked-files=no" in status, "--untracked-files=normal" in status),
+          (False, True))
+    check("...and one listed marks the checkout dirty", got, "abc123-dirty")
+
+
+def test_main_holds_the_submodule_to_the_pin_however_it_is_named():
+    """`main` refuses a submodule off the pin, also when it reaches it by
+    another spelling of its path; a checkout named elsewhere is said."""
+    pin, other = "b" * 40, "a" * 40
+
+    def stop(_explicit):
+        # Past the check, nothing is built: a check that let the submodule
+        # through fails this test rather than assembling a tree.
+        raise bundle.BundleError("stop here")
+
+    for named, label in ((bundle.SUBMODULE, "the submodule"),
+                         (bundle.SUBMODULE / "compiler" / "..",
+                          "the submodule by another spelling")):
+        err = io.StringIO()
+        with tempfile.TemporaryDirectory() as tmp:
+
+            def run_main():
+                with contextlib.redirect_stderr(err), \
+                        contextlib.redirect_stdout(io.StringIO()):
+                    return bundle.main(["--out", str(Path(tmp) / "tree")])
+
+            status = _with_stand_ins(run_main, find_fastpy=lambda _explicit: named,
+                                     git_identity=lambda _path: other,
+                                     pinned_commit=lambda: pin, find_llvmlite=stop)
+        check(f"{label} off the pin is refused", (status, pin in err.getvalue()),
+              (1, True))
+    with tempfile.TemporaryDirectory() as tmp:
+        elsewhere = fake_fastpy(Path(tmp))
+        out = io.StringIO()
+
+        def run_named():
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+                return bundle.main(["--out", str(Path(tmp) / "tree")])
+
+        _with_stand_ins(run_named, find_fastpy=lambda _explicit: elsewhere,
+                        find_llvmlite=stop)
+        check("a checkout named elsewhere is said to be used instead of the pin",
+              f"using {elsewhere}, not the pinned toolchain/fastpy" in out.getvalue(),
+              True)
+
+
+def test_a_worktrees_windows_git_dir_is_translated_only_where_it_can_be():
+    """`pinned_commit` retries under WSL with the worktree's git directory as
+    WSL names it. Only a `.git` file naming a Windows path is a candidate, and
+    only where `wslpath` exists -- not a main checkout's `.git` directory, nor
+    a relative `gitdir:` that git already follows."""
+    saved_repo = bundle.REPO
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            directory = Path(tmp) / "main"
+            (directory / ".git").mkdir(parents=True)
+            bundle.REPO = directory
+            check("a .git directory is not translated", bundle._wsl_git_dir(), None)
+            relative = Path(tmp) / "relative"
+            write(relative / ".git", "gitdir: ../main/.git/worktrees/x\n")
+            bundle.REPO = relative
+            check("a relative gitdir is not translated", bundle._wsl_git_dir(), None)
+            windows = Path(tmp) / "windows"
+            write(windows / ".git", "gitdir: C:/x/.git/worktrees/y\n")
+            bundle.REPO = windows
+            check("with no wslpath, a Windows gitdir is left alone",
+                  _with_stand_ins(bundle._wsl_git_dir,
+                                  shutil=types.SimpleNamespace(which=lambda _name: None)),
+                  None)
+        finally:
+            bundle.REPO = saved_repo
 
 
 def test_llvmlite_must_be_the_package_directory():
@@ -347,8 +562,8 @@ def main() -> int:
     no tests prints nothing and exits 0, which reads as a pass."""
     tests = [(name, fn) for name, fn in list(globals().items())
              if name.startswith("test_") and callable(fn)]
-    if len(tests) < 12:
-        print(f"FATAL: found only {len(tests)} tests; the suite has 12. "
+    if len(tests) < 18:
+        print(f"FATAL: found only {len(tests)} tests; the suite has 18. "
               "Discovery is broken, not the code.")
         return 1
     for _, fn in sorted(tests):

@@ -1005,14 +1005,21 @@ def _run_python_suites(suites):
             with open(pad, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(_QUIET_SUITE)
 
+        with open(os.path.join(os.path.dirname(BOOT_TEST), "run-checker.sh"),
+                  "r", encoding="utf-8") as handle:
+            note_skip = extract_shell_function("run_checker_note_skip",
+                                               handle.read())
         with open(os.path.join(tmp, "harness.sh"), "w",
                   encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "set -u\n"
                 "PROJECT_ROOT=.\n"
+                "RUN_CHECKER_SKIPS=\n"
+                + note_skip + "\n\n"
                 + extract_shell_function("check_python_suites") + "\n\n"
                 "check_python_suites\n"
                 f"echo \"GATE_RETURNED rc=$?\"\n"
+                "printf 'SKIPS=[%s]\\n' \"$RUN_CHECKER_SKIPS\"\n"
             )
 
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the suite loop")
@@ -1048,6 +1055,10 @@ def test_a_suite_that_skips_a_group_cannot_report_only_that_it_passed():
                 "capstone is not installed" in out, True)
     ok &= check("the section's closing line carries the count",
                 "1 group(s) SKIPPED in 1: test-fake-skipper.py" in out, True)
+    ok &= check("and the suite joins the run's list of gates that could not run",
+                "SKIPS=[test-fake-skipper.py\t1 group(s) SKIPPED, the first: "
+                "SKIP  the end-to-end group: capstone is not installed\n]" in out,
+                True)
     ok &= check("the harness is green", rc, 0)
     _dump_on_failure(ok, out)
 

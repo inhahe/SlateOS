@@ -8,7 +8,8 @@ Checks the package against the SHA-256 recorded below (update it, and
 VENDORED.md, when moving to a new release), unpacks it, copies `lib.rs`,
 `include/**/*.rs` and `src/*.rs` -- all of the Rust, none of the assembly --
 with the licence and readme files, and formats every `.rs` file with
-`rustfmt --edition 2024`, as this repository's pre-push gate requires. The
+`rustfmt --edition 2021`, the crate's own edition, by which this repository's
+pre-push gate checks it. The
 manifest, `VENDORED.md`, `safe.rs` and the other local changes are then carried
 across by hand from the previous vendored copy, and the result diffed.
 """
@@ -22,6 +23,8 @@ import tarfile
 
 PACKAGE_SHA256 = "1932f060d5e7bd49dc9f8b272c1dc5e9ce0ffe141c28be900265d3989b36c9ed"
 KEEP_FILES = ["lib.rs", "COPYING", "README.md", "THANKS.md", "NEWS.dav1d"]
+# The crate's edition (Cargo.toml), which the pre-push gate formats its files by.
+EDITION = "2021"
 
 
 def main() -> None:
@@ -53,7 +56,7 @@ def main() -> None:
     # Formatting lib.rs formats the module tree it declares; the rest are then
     # formatted one by one, as the gate checks them.
     for path in [dest / "lib.rs", *sorted(dest.rglob("*.rs"))]:
-        subprocess.run(["rustfmt", "--edition", "2024", str(path)], check=True)
+        subprocess.run(["rustfmt", "--edition", EDITION, str(path)], check=True)
     print(f"vendored {len(wanted)} files into {dest}")
 
 

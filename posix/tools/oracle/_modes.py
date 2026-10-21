@@ -128,9 +128,13 @@ def write_modes_oracle(c, nearest, out, what, keep=differs):
     else:
         rule = (f"# differs in kind -- an infinity, a NaN or a zero where {nm} has none, or\n"
                 f"# of the other sign -- or in errno from the one {nm} gives to nearest.\n")
+    # The x87's last place differs by vendor in a directed mode -- see
+    # mathl.rs's x87_vendor_alternative, which assumes an Intel-recorded table.
+    cpu = run("grep -m1 '^model name' /proc/cpuinfo").stdout.partition(":")[2].strip()
     header = (f"# glibc 2.39 under WSL in the directed rounding modes: {what}\n"
               f"# (posix/tools/oracle/_modes.py). <mode> <call>, for each call whose answer\n"
-              + rule)
+              + rule
+              + f"# Recorded on: {cpu or 'an unknown processor'}\n")
     Path(out).write_text(header + "\n".join(rows) + "\n", encoding="utf-8", newline="\n")
     print(f"{len(rows)} of {3 * len(near)} directed calls kept ({differing} differ from "
           f"nearest) -> {out}")

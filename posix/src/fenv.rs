@@ -814,14 +814,10 @@ mod tests {
             0xffbf,
             "every x86-64 processor has these"
         );
-        // Above them Intel's have none. AMD's that have misaligned SSE mode
-        // (CPUID 8000_0001h ECX bit 7, `misalignsse`) have one, bit 17: MM,
-        // the misaligned-exception mask -- 0x2ffff on a Ryzen 9 9950X.
-        assert_eq!(
-            writable >> 16 & !0b10,
-            0,
-            "and above the sixteenth at most AMD's MM"
-        );
+        // Which bits above them a processor has is its own: Intel's have
+        // none, AMD's with misaligned SSE mode (CPUID 8000_0001h ECX bit 7)
+        // have bit 17, MM, the misaligned-exception mask -- 0x2ffff on a
+        // Ryzen 9 9950X. So what follows is said against `writable`.
         feclearexcept(FE_ALL_EXCEPT);
         let bogus = FemodeT {
             control_word: FPU_DEFAULT,
@@ -835,6 +831,10 @@ mod tests {
             "of the high bits, those the processor has"
         );
         assert_eq!(fetestexcept(FE_ALL_EXCEPT), 0, "a mode's flags are not set");
+        // The default mode clears them, so that the environment's come from
+        // the environment.
+        assert_eq!(fesetmode(FE_DFL_MODE), 0);
+        assert_eq!(stmxcsr() >> 16, 0, "the default mode has none");
         let mut env = FenvT::default();
         fegetenv(&raw mut env);
         env.mxcsr |= 0xffff_0000;

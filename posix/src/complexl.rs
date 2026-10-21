@@ -1508,7 +1508,7 @@ mod tests {
     /// [`DIRECTED_DRIFT`] more. `errno` is the one to nearest where that is
     /// set, as `math.rs`'s replay has it (design-decisions section 1139). A
     /// call that fails may instead answer as another vendor's x87 does
-    /// ([`crate::mathl::x87_vendor_alternative`]).
+    /// ([`crate::mathl::check_or_x87_alternative`]).
     ///
     /// Before 2026-09-28 the double and float functions took their sines and
     /// cosines from the crate, whose argument reduction assumes rounding to
@@ -1560,12 +1560,12 @@ mod tests {
                 DIRECTED_SLACK.with(|s| s.set(slack));
                 let result = {
                     let _r = Rounding::set(mode);
-                    check_line(&want).or_else(|e| {
-                        match crate::mathl::x87_vendor_alternative(mode_name, &want) {
-                            Some(other) if check_line(&other).is_ok() => Ok(()),
-                            _ => Err(e),
-                        }
-                    })
+                    crate::mathl::check_or_x87_alternative(
+                        mode_name,
+                        &want,
+                        || ulps_allowed(lhs.split(' ').next().unwrap_or_default()) > 0,
+                        check_line,
+                    )
                 };
                 DIRECTED_SLACK.with(|s| s.set(0));
                 if let Err(e) = result {
@@ -1604,6 +1604,21 @@ mod tests {
         fn drop(&mut self) {
             crate::fenv::fesetround(crate::fenv::FE_TONEAREST);
         }
+    }
+
+    /// While `mathl`'s `X87_ALTERNATIVE` is set, [`ulps_allowed`] is 0: an
+    /// answer one ulp from the line's, which passes otherwise, fails.
+    #[test]
+    fn the_other_x87s_answer_is_compared_bit_for_bit() {
+        extended();
+        // To nearest, cargl(1 + LDBL_TRUE_MIN i) is the least subnormal: one
+        // ulp from this line's +0.
+        let line = "cargl 3fff:8000000000000000 0000:0000000000000001 = 0000:0000000000000000 0";
+        assert_eq!(check_line(line), Ok(()), "within the bound");
+        crate::mathl::X87_ALTERNATIVE.with(|x| x.set(true));
+        let exact = check_line(line);
+        crate::mathl::X87_ALTERNATIVE.with(|x| x.set(false));
+        assert!(exact.is_err(), "bit for bit");
     }
 
     /// The fixes by name, in every directed mode: an overflow multiplied by
@@ -1665,6 +1680,9 @@ mod tests {
     /// case for the `long double` function (`libm-test-ulps`, x86_64),
     /// FreeBSD's, and one for the real functions' own difference.
     fn ulps_allowed(name: &str) -> u64 {
+        if crate::mathl::X87_ALTERNATIVE.with(core::cell::Cell::get) {
+            return 0;
+        }
         let base = match name.strip_suffix('l').unwrap_or(name) {
             "creal" | "cimag" | "conj" | "cproj" => 0,
             "cabs" | "carg" => 2,

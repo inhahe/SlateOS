@@ -5333,10 +5333,16 @@ pub unsafe fn nanl(tag: *const u8) -> L {
 /// the least subnormal on the Intel processor the directed oracles were
 /// recorded on, and as +0 -- the correctly rounded answer -- on an AMD Ryzen
 /// 9 9950X, where glibc 2.39's own `atan2l` and `cargl` then answer +0 and
-/// `ERANGE` (2026-10-21). The two results are one ulp apart, inside the
-/// replay's bound; the zero brings its range error with it.
+/// `ERANGE` (2026-10-21). The two results are one ulp apart; the zero
+/// brings its range error with it.
+///
+/// One way only: the other way, every zero with `ERANGE` in an oracle would
+/// also pass as the least subnormal without one -- an `expl` that stopped
+/// underflowing, say. Were the directed oracles recorded again on an AMD
+/// processor (each header names the processor, from 2026-10-21), this would
+/// have to map the other way.
 #[cfg(test)]
-pub(crate) fn x87_vendor_alternative(mode: &str, want: &str) -> Option<String> {
+fn x87_vendor_alternative(mode: &str, want: &str) -> Option<String> {
     let (lhs, rhs) = want.split_once(" = ")?;
     let (value, errno) = rhs.split_once(' ')?;
     let zero = match (mode, value) {
@@ -5345,6 +5351,44 @@ pub(crate) fn x87_vendor_alternative(mode: &str, want: &str) -> Option<String> {
         _ => return None,
     };
     (errno == "0").then(|| format!("{lhs} = {zero} {}", errno::ERANGE))
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// True while [`check_or_x87_alternative`] replays the other vendor's
+    /// answer, which is a zero to be compared bit for bit: the replays'
+    /// tolerances -- this module's and `complexl`'s -- are 0 while it is.
+    pub(crate) static X87_ALTERNATIVE: core::cell::Cell<bool> =
+        const { core::cell::Cell::new(false) };
+}
+
+/// Replays an oracle `line` with `check` in the directed rounding `mode` the
+/// caller has set; where that fails and [`x87_vendor_alternative`] has
+/// another answer for the line, of a function that is `inexact` -- computed,
+/// where IEEE does not fix the answer -- replays that one, bit for bit.
+///
+/// `check` answers whether the library gives the line's answer, `<name>
+/// <in...> = <out...> <errno>`, within the replay's tolerance. `inexact` is
+/// asked only when there is another answer. The error names both answers'
+/// failures where both fail.
+#[cfg(test)]
+pub(crate) fn check_or_x87_alternative(
+    mode: &str,
+    line: &str,
+    inexact: impl FnOnce() -> bool,
+    check: impl Fn(&str) -> Result<(), String>,
+) -> Result<(), String> {
+    let e = match check(line) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+    let Some(other) = x87_vendor_alternative(mode, line).filter(|_| inexact()) else {
+        return Err(e);
+    };
+    X87_ALTERNATIVE.with(|x| x.set(true));
+    let r = check(&other);
+    X87_ALTERNATIVE.with(|x| x.set(false));
+    r.map_err(|e2| format!("{e}; nor as another vendor's x87 would, `{other}`: {e2}"))
 }
 
 #[cfg(test)]
@@ -5381,6 +5425,9 @@ mod tests {
     /// (`libm-test-ulps`, x86_64, `ldouble`) plus one for the difference in
     /// algorithms -- and one more in a directed mode ([`DIRECTED_SLACK`]).
     fn ulps(name: &str) -> u64 {
+        if X87_ALTERNATIVE.with(core::cell::Cell::get) {
+            return 0;
+        }
         match ulps_to_nearest(name) {
             0 => 0,
             n => n + DIRECTED_SLACK.with(core::cell::Cell::get),
@@ -5887,7 +5934,7 @@ mod tests {
     /// Every call of [`ORACLE`] again in each directed rounding mode, against
     /// [`directed_answer`]: bit for bit where IEEE fixes the answer, within
     /// the bound to nearest and one ulp more otherwise -- or against the
-    /// other answer another vendor's x87 gives ([`x87_vendor_alternative`]).
+    /// other answer another vendor's x87 gives ([`check_or_x87_alternative`]).
     #[test]
     fn every_call_answers_in_every_rounding_direction() {
         // lgammal writes signgam, which math.rs's tests read.
@@ -5923,11 +5970,12 @@ mod tests {
                 DIRECTED_SLACK.with(|s| s.set(1));
                 let result = {
                     let _r = Rounding::set(mode);
-                    let line = format!("{lhs} = {want}");
-                    check(&line).or_else(|e| match x87_vendor_alternative(mode_name, &line) {
-                        Some(other) if check(&other).is_ok() => Ok(()),
-                        _ => Err(e),
-                    })
+                    check_or_x87_alternative(
+                        mode_name,
+                        &format!("{lhs} = {want}"),
+                        || ulps_to_nearest(name) > 0,
+                        check,
+                    )
                 };
                 DIRECTED_SLACK.with(|s| s.set(0));
                 if let Err(e) = result {
@@ -5954,6 +6002,98 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         );
+    }
+
+    /// [`x87_vendor_alternative`]: the least subnormal of the sign a
+    /// direction rounds toward zero, with no `errno`, is that zero with
+    /// `ERANGE`; any other line has no alternative.
+    #[test]
+    fn the_other_x87s_answer_is_the_zero_under_the_least_subnormal() {
+        let (pos, neg) = ("0000:0000000000000001", "8000:0000000000000001");
+        let line =
+            |out: &str| format!("atan2l 0000:0000000000000001 3fff:8000000000000000 = {out}");
+        let alt = |mode, out: &str| x87_vendor_alternative(mode, &line(out));
+        let zero = |sign: &str| Some(line(&format!("{sign}:0000000000000000 34")));
+        assert_eq!(alt("down", &format!("{pos} 0")), zero("0000"));
+        assert_eq!(alt("zero", &format!("{pos} 0")), zero("0000"));
+        assert_eq!(alt("up", &format!("{neg} 0")), zero("8000"));
+        assert_eq!(alt("zero", &format!("{neg} 0")), zero("8000"));
+        // The direction rounds it away from zero.
+        assert_eq!(alt("up", &format!("{pos} 0")), None);
+        assert_eq!(alt("down", &format!("{neg} 0")), None);
+        // Already a range error; another value; two results.
+        assert_eq!(alt("down", &format!("{pos} 34")), None);
+        assert_eq!(alt("down", "0000:0000000000000002 0"), None);
+        assert_eq!(alt("down", &format!("{pos} {pos} 0")), None);
+    }
+
+    /// [`check_or_x87_alternative`] replays the other answer only after the
+    /// line's own fails, only for an inexact function, and with every
+    /// tolerance 0 while it does.
+    #[test]
+    fn a_replay_takes_the_other_x87s_answer_only_where_it_may() {
+        let line = "atan2l 0000:0000000000000001 3fff:8000000000000000 = 0000:0000000000000001 0";
+        let other = "atan2l 0000:0000000000000001 3fff:8000000000000000 = 0000:0000000000000000 34";
+        let seen = core::cell::RefCell::new(Vec::new());
+        let check = |l: &str| {
+            seen.borrow_mut()
+                .push((l.to_owned(), X87_ALTERNATIVE.with(core::cell::Cell::get)));
+            if l == other {
+                Ok(())
+            } else {
+                Err("first".to_owned())
+            }
+        };
+        assert_eq!(
+            check_or_x87_alternative("down", line, || true, check),
+            Ok(())
+        );
+        assert_eq!(
+            *seen.borrow(),
+            [(line.to_owned(), false), (other.to_owned(), true)]
+        );
+        assert!(
+            !X87_ALTERNATIVE.with(core::cell::Cell::get),
+            "the tolerances are back"
+        );
+        assert_eq!(
+            check_or_x87_alternative("down", other, || true, |_| Ok(())),
+            Ok(()),
+            "a line that passes is the answer"
+        );
+        let first = Err("first".to_owned());
+        assert_eq!(
+            check_or_x87_alternative("down", line, || false, check),
+            first,
+            "not for a function IEEE fixes"
+        );
+        assert_eq!(
+            check_or_x87_alternative("up", line, || true, check),
+            first,
+            "nor where the direction rounds away from zero"
+        );
+        let both = check_or_x87_alternative("down", line, || true, |_| Err("no".to_owned()));
+        assert_eq!(
+            both,
+            Err(format!(
+                "no; nor as another vendor's x87 would, `{other}`: no"
+            ))
+        );
+    }
+
+    /// While [`X87_ALTERNATIVE`] is set, [`ulps`] is 0: an answer one ulp
+    /// from the line's, which passes otherwise, fails.
+    #[test]
+    fn the_other_x87s_answer_is_compared_bit_for_bit() {
+        extended();
+        // To nearest, atan2l(LDBL_TRUE_MIN, 1) is the least subnormal: one
+        // ulp from this line's +0.
+        let line = "atan2l 0000:0000000000000001 3fff:8000000000000000 = 0000:0000000000000000 0";
+        assert_eq!(check(line), Ok(()), "within the bound");
+        X87_ALTERNATIVE.with(|x| x.set(true));
+        let exact = check(line);
+        X87_ALTERNATIVE.with(|x| x.set(false));
+        assert!(exact.is_err(), "bit for bit");
     }
 
     /// glibc 2.39's answers over every class of 80-bit encoding -- zeros,

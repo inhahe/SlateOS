@@ -15,9 +15,13 @@ The PC the project moved to on 2026-10-20 has one Visual Studio: **VS 2026 Build
 - vcvarsall.bat: `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"`
 - cl.exe (x64 host, x64 target): `"C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools\VC\Tools\MSVC\14.51.36231\bin\Hostx64\x64\cl.exe"`
 
-The MSVC version in that path changes with every Build Tools update. Ask
-`"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath`
-rather than trusting the number written here.
+The MSVC version in that path changes with every Build Tools update, so read
+it rather than trusting the number written here: `vswhere -latest -products *
+-property installationPath` gives the install's folder (vswhere is
+`C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`;
+without `-products *` it looks only for full Visual Studio editions and prints
+nothing here), and `VC\Auxiliary\Build\Microsoft.VCToolsVersion.default.txt`
+under that folder holds the MSVC version.
 
 For cross-compiling Rust crates with C dependencies to our custom target (x86_64-slateos), set:
 ```
@@ -42,9 +46,14 @@ sibling's. If the two ever diverge, name the one you mean:
 FASTPY_DIR="D:/visual studio projects/fastpy" python scripts/ctest-fixtures.py build
 ```
 
-A fastpy that cannot be found shows up as an import traceback that does not
-mention fastpy at all, which is why this is written down rather than left to
-be rediscovered.
+fastpy needs `llvmlite`, so it must run under a Python that has it. On this PC
+a bare `python` starts Python 3.15, which has no packages, while the
+packages, `llvmlite` among them, are installed in Python 3.14
+(`py -3.14`, or `C:/Users/Computer/AppData/Local/Python/pythoncore-3.14-64/python.exe`).
+Under 3.15, `ctest-fixtures.py build` refuses before building anything and
+names the missing module. Until the default is 3.14 again, run the fixture
+build with `py -3.14`, and put that folder first on `PATH` for a boot test.
+
 Note that rebuilding fixtures can rebuild `libc.a` first, and a new `libc.a`
 makes *every* fixture stale — so a one-fixture build can turn into a 70-fixture
 one, and the rootfs image then needs repacking too
@@ -61,7 +70,14 @@ missing zig is easy to miss. fastpy's own
 lookup, which the fixture builds use, also tries `D:\utils\zig-*` and
 `C:\utils\zig-*`.
 
-On this PC zig is at `D:/utils/zig-x86_64-windows-0.16.0/zig.exe`.
+On this PC zig is at `D:/utils/zig-x86_64-windows-0.16.0/zig.exe`, which
+neither lookup finds by itself: the user-scope `FASTPY_ZIG` carried over from
+the old PC names `C:/utils/...`, which this PC lacks. Until that is corrected,
+set it in your shell before a sysroot build or a push:
+
+```
+export FASTPY_ZIG="D:/utils/zig-x86_64-windows-0.16.0/zig.exe"
+```
 
 ### Rust toolchains
 

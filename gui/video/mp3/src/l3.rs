@@ -670,11 +670,12 @@ fn intensity_stereo(grbuf: &mut [f32], ist_pos: &mut [u8; 39], gr: &[GrInfo], hd
 ///
 /// The bands can lay out more lines than `grbuf` holds. In MPEG-2.5's mixed
 /// blocks at 8 kHz, minimp3 starts the short bands 72 lines in, as FFmpeg
-/// does, but takes them from a table whose long part is 36 lines, as
-/// libmad's is: they run 24 lines past the channel's 576. minimp3 then
-/// reads and writes what its scratch memory holds next -- the second
-/// channel's lines, or after them the scale factors -- and this reads and
-/// writes `after`, which the caller makes that same memory.
+/// does, but lays them out by libmad's table, of whose bands it takes the
+/// first six -- 48 lines -- to be the long ones: the 528 lines of short
+/// bands after them run from line 72 to 600, 24 past the channel's 576.
+/// minimp3 then reads and writes what its scratch memory holds next -- the
+/// second channel's lines, or after them the scale factors -- and this reads
+/// and writes `after`, which the caller makes that same memory.
 fn reorder(grbuf: &mut [f32], after: &mut [f32], scratch: &mut [f32], sfb: &[u8]) {
     let n = grbuf.len();
     let mut dst = 0usize;

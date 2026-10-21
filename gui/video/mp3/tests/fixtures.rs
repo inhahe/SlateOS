@@ -97,9 +97,11 @@ fixtures!(
     vbri_in_front,
     joined_after_tagged,
     one_frame,
-    // Found by the fuzzer: MPEG-2.5 at 8 kHz with mixed blocks, whose short
-    // bands run past the channel's lines.
+    // MPEG-2.5 at 8 kHz with mixed blocks, whose short bands run past the
+    // channel's lines: found by the fuzzer, in mono; and made, in stereo,
+    // where the second channel's run into the scale factors is its sound.
     found_mixed_8000,
+    mixed_8000_stereo,
 );
 
 /// Every answer in `tests/data` has its test above, so that a fixture added
@@ -137,7 +139,12 @@ fn found_streams_decode_packet_by_packet_as_minimp3_does() {
             continue;
         }
         let name = answer.file_stem().and_then(|s| s.to_str()).expect("a name");
-        let stream = std::fs::File::open(dir.join(format!("{name}.mp3"))).expect("the stream");
+        let path = ["mp3", "mp2", "mp1"]
+            .iter()
+            .map(|ext| dir.join(format!("{name}.{ext}")))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| panic!("no stream for {name}"));
+        let stream = std::fs::File::open(path).expect("the stream");
         let mut reader = mp3::Reader::open(stream).expect("opened");
         let mut decoder = mp3::Decoder::new();
         let mut pcm = [0i16; mp3::MAX_SAMPLES_PER_FRAME];

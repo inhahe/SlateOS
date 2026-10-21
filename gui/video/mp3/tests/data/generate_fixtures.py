@@ -33,7 +33,8 @@ decoder reads is reached:
 Layer III's intensity stereo and mixed blocks are written by no encoder
 here; minimp3's own vectors (the ISO conformance streams among them) reach
 them, read by the ignored test `tests/vectors.rs` -- and so do the streams a
-fuzzer found (`FOUND`), kept as found.
+fuzzer found (`FOUND`), kept as found, and the Layer III frames made here for
+what no encoder writes (`LAYER3`).
 
 Run from this directory, with these in WSL:
 
@@ -386,6 +387,64 @@ SHAPED = {
     "one_frame": ("mp2_192_stereo_48000.mp2", "mp2", "one_frame"),
 }
 
+# Layer III frames made here, for what no encoder writes: name: frames.
+LAYER3 = {
+    # MPEG-2.5 at 8 kHz, stereo, every granule's short blocks mixed: the
+    # reorder of each channel's short bands runs 24 lines past its own
+    # (l3.rs's `reorder`) -- the first channel's into the second's first
+    # lines, moving some of them and clearing the rest; the second's into
+    # the scale factors after it in minimp3's memory, which its windows'
+    # gains make differ, reading them as its last lines.
+    "mixed_8000_stereo": 12,
+}
+
+
+def mixed_8000_stereo(name, frames):
+    """`frames` frames of MPEG-2.5 Layer III at 8 kHz and 160 kbps (1440
+    bytes), stereo, no CRC, each channel's granule a short block mixed with
+    long ones, of a gain of 240 and its windows' subblock gains 0, 1 and 2,
+    and its 576 lines in Huffman table B's count1 quadruples: every line 1
+    in size, their signs alternating."""
+    lines_bits = 576 // 4 * 8
+    out = bytearray()
+    for _ in range(frames):
+        b = Bits()
+        b.put(0x7FF, 11)  # sync
+        b.put(0, 2)  # MPEG-2.5
+        b.put(1, 2)  # Layer III
+        b.put(1, 1)  # no CRC
+        b.put(14, 4)  # 160 kbps
+        b.put(2, 2)  # 8 kHz
+        b.put(0, 1)  # no padding
+        b.put(0, 1)  # private
+        b.put(0, 2)  # stereo
+        b.put(0, 2)  # mode extension
+        b.put(0, 4)  # copyright, original, emphasis
+        b.put(0, 8)  # main_data_begin
+        b.put(0, 2)  # private bits
+        for _channel in range(2):
+            b.put(lines_bits, 12)  # part2_3_length
+            b.put(0, 9)  # big_values
+            b.put(240, 8)  # global_gain
+            b.put(0, 9)  # scalefac_compress
+            b.put(1, 1)  # window switching
+            b.put(2, 2)  # block_type: short
+            b.put(1, 1)  # mixed
+            b.put(0, 10)  # table_select, twice
+            for gain in (0, 1, 2):
+                b.put(gain, 3)  # subblock_gain
+            b.put(0, 1)  # scalefac_scale
+            b.put(1, 1)  # count1table_select: table B
+        # Each channel's main data: each quadruple's code 0000 (four lines
+        # of 1), then its four signs.
+        for _quadruple in range(2 * 576 // 4):
+            b.put(0, 4)
+            b.put(0b0101, 4)
+        out += b.pad_to(1440 * 8)
+    with open(f"{name}.mp3", "wb") as f:
+        f.write(out)
+
+
 # Streams a fuzzer found, kept as they were found and only answered here:
 # name: what they hold.
 FOUND = {
@@ -438,6 +497,8 @@ def extension(name):
         return FIXTURES[name][0]
     if name in LAYER1:
         return "mp1"
+    if name in LAYER3:
+        return "mp3"
     if name in SHAPED:
         return SHAPED[name][1]
     if name in FOUND:
@@ -537,7 +598,7 @@ def main():
     ap.add_argument("names", nargs="*")
     args = ap.parse_args()
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
-    names = args.names or list(FIXTURES) + list(LAYER1) + list(DAMAGED) + list(SHAPED) + list(FOUND)
+    names = args.names or list(FIXTURES) + list(LAYER1) + list(LAYER3) + list(DAMAGED) + list(SHAPED) + list(FOUND)
     for name in names:
         if not args.answers_only:
             if name in FIXTURES:
@@ -547,6 +608,8 @@ def main():
                 encode(name, ext, rate, channels, seconds, style, how, extra)
             elif name in LAYER1:
                 layer1(name, *LAYER1[name])
+            elif name in LAYER3:
+                globals()[name](name, LAYER3[name])
             elif name in SHAPED:
                 shape(name, *SHAPED[name])
             elif name in FOUND:

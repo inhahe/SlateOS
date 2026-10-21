@@ -53,9 +53,9 @@ that never enters the sysroot.  Otherwise the compile flags mirror
     python scripts/ctest-fixtures.py build --only hostname
 
 That is the supported entry point and it does two things this file cannot. It
-finds the fastpy checkout itself -- `$FASTPY_DIR`, then `$PYTHONPATH`, then a
-sibling named `fastpy` -- and if it finds none it says so with the command to
-fix it. And it rebuilds the sysroot first when `libc.a` is behind its inputs,
+checks out the fastpy this tree pins (the submodule `toolchain/fastpy`, or
+`$FASTPY_DIR`'s) and says so with the command to fix it when it cannot. And it
+rebuilds the sysroot first when `libc.a` is behind its inputs,
 which matters here more than for most fixtures: this one tests code that
 changes in the same commits as the fixture.
 

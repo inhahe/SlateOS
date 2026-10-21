@@ -36,8 +36,12 @@ ring 3, and the `fastpy-*` ones need fastpy importable. This tree pins fastpy
 as the git submodule `toolchain/fastpy` (2026-10-21, operator's decision), so a
 checkout says which compiler built its binaries. `ctest-fixtures.py build`
 checks the submodule out at the pinned commit when it is not -- a fresh
-worktree, or a merge that moved the pin -- and refuses if it has changes of its
-own. By hand:
+worktree, or a merge that moved the pin -- and refuses rather than discard work
+in it: changes to its files, or a commit made in it that is on none of fastpy's
+branches. It records which fastpy commit built each `fastpy-*` fixture
+(`toolchain/sysroot/fastpy-pins`), so a fixture built with any other is stale,
+and `ctest-fixtures.py image-check` -- which the boot test runs -- refuses an
+image holding one. By hand:
 
 ```
 git submodule update --init -- toolchain/fastpy
@@ -50,10 +54,19 @@ To build with another fastpy -- working on fastpy itself, whose own checkout is
 FASTPY_DIR="<path-to-fastpy>" python scripts/ctest-fixtures.py build
 ```
 
-Moving the pin to a new fastpy is a commit of the gitlink
-(`git -C toolchain/fastpy checkout <sha>`, then `git add toolchain/fastpy`);
-it makes the `fastpy-*` fixtures stale, and the rootfs build refuses until
-`ctest-fixtures.py build` has rebuilt them.
+Moving the pin to a new fastpy: push the fastpy commit to
+github.com/inhahe/fastpy first -- the URL `.gitmodules` names, and so the place
+every other worktree's `build` fetches it from -- then
+`git -C toolchain/fastpy fetch` and `git -C toolchain/fastpy checkout <sha>`,
+and commit `toolchain/fastpy`. The `fastpy-*` fixtures are then stale, and
+`image-check` refuses until `ctest-fixtures.py build` has rebuilt them.
+
+Git will not remove a worktree whose submodule has been checked out ("working
+trees containing submodules cannot be moved or removed"), even after
+`git submodule deinit`; one that never checked it out is removed as usual.
+Check that `git -C <worktree> status` shows nothing of value, then
+`git worktree remove --force <worktree>`. (Each worktree keeps its own clone
+of fastpy, about 5 MB.)
 
 fastpy needs `llvmlite`, so it must run under a Python that has it: a bare
 `python` here is Python 3.14 with the project's packages. A Python without

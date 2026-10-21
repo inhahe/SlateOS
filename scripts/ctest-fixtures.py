@@ -155,9 +155,10 @@ match, so every fixture is still attempted and each is reported in full.
 `services/<name>/build.py` directly** -- `build --only <name>` for one. Three
 things happen here that a direct run skips:
 
-* the pinned fastpy (`toolchain/fastpy`, or `$FASTPY_DIR`) is checked out at
-  its pin and put on the import path, and a missing one is reported with the
-  fix, not as a bare `ModuleNotFoundError`;
+* the submodule `toolchain/fastpy` is checked out at its pin (or
+  `$FASTPY_DIR`'s fastpy is used instead), put on the import path, and
+  recorded as the fastpy each `fastpy-*` ELF was built with; a missing one is
+  reported with the fix, not as a bare `ModuleNotFoundError`;
 * the `fastpy-*` recipes are handed this worktree's sysroot
   (`FASTPY_SLATEOS_SYSROOT`). Run directly, fastpy finds a sysroot by itself:
   from fastpy 0.3.6 the checkout the build runs in (design-decisions 915), so
@@ -172,6 +173,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import hashlib
+import io
 import os
 import re
 import shutil
@@ -546,12 +548,16 @@ _NEWEST_OVERLAY_HEADER: dict[Path, Path | None] = {}
 
 
 def _newest_compiler_source() -> Path | None:
-    """The most recently modified `.py` in fastpy's `compiler` package.
+    """The most recently modified source of fastpy's that a `fastpy-*` ELF is
+    made from: a `.py` of its `compiler` package, or a `.c`/`.h` of the
+    `runtime` every one of them links.
 
     The stand-in for "the version of the compiler that built this ELF" — see
-    `_inputs`. `None` when no fastpy checkout can be found, or when it somehow
-    contains no Python at all; both are the build's problem to report, not this
-    gate's to guess about.
+    `_inputs` -- for a fastpy being edited in place (`$FASTPY_DIR`); the
+    pinned one is judged by its commit (`_pin_staleness`). `None` when no
+    fastpy checkout can be found, or when it somehow contains no sources at
+    all; both are the build's problem to report, not this gate's to guess
+    about.
 
     Cached, because `is_stale` runs once per fixture and there are 61 of them
     against a package of a few hundred files. The cache is per-process and the
@@ -566,6 +572,8 @@ def _newest_compiler_source() -> Path | None:
     fastpy = _fastpy_dir()
     if fastpy is not None:
         sources = list((fastpy / "compiler").rglob("*.py"))
+        sources += [p for p in (fastpy / "runtime").rglob("*")
+                    if p.suffix in (".c", ".h")]
         if sources:
             try:
                 _NEWEST_COMPILER_SOURCE = max(sources, key=lambda p: p.stat().st_mtime)
@@ -612,7 +620,9 @@ def is_stale(fixture: Path) -> str | None:
             # A missing input is the build's problem to report, not ours; it
             # is not evidence about the ELF's freshness either way.
             continue
-    return f"older than {', '.join(behind)}" if behind else None
+    if behind:
+        return f"older than {', '.join(behind)}"
+    return _pin_staleness(fixture)
 
 
 def _body(text: str) -> list[str]:
@@ -913,6 +923,95 @@ def _fastpy_dir() -> Path | None:
     return pinned if usable(pinned) else None
 
 
+def _git(*args: str, cwd: Path | None = None,
+         timeout: int = 60) -> subprocess.CompletedProcess[str] | None:
+    """`git <args>` in `cwd` (default the repo), or None -- having said why --
+    when git is not there or does not answer within `timeout` seconds.
+
+    `gitenv.clean_env()`, because `build` can run under a hook, where an
+    inherited `GIT_DIR` would point this at another repository; and no
+    terminal prompt, because a credential prompt nobody can see is a hang."""
+    import gitenv
+    env = gitenv.clean_env()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    try:
+        return subprocess.run(["git", *args], cwd=cwd or REPO, env=env,
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=timeout, check=False)
+    except FileNotFoundError:
+        print("[ctest] ERROR: git is not on PATH.")
+    except subprocess.TimeoutExpired:
+        print(f"[ctest] ERROR: `git {' '.join(args)}` gave no answer in {timeout}s.")
+    return None
+
+
+def _fastpy_pin() -> str | None:
+    """The fastpy commit this tree pins -- the gitlink in the index -- or None
+    where git cannot say (under WSL, where git cannot open a Windows worktree;
+    or no submodule). Asked once per process."""
+    global _FASTPY_PIN
+    if _FASTPY_PIN is _UNCACHED:
+        _FASTPY_PIN = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            listed = _git("ls-files", "-s", "--", FASTPY_SUBMODULE)
+        fields = listed.stdout.split() if listed is not None and listed.returncode == 0 else []
+        if len(fields) >= 2 and fields[0] == "160000":
+            _FASTPY_PIN = fields[1]
+    return _FASTPY_PIN
+
+
+_FASTPY_PIN: object = _UNCACHED
+
+
+def _pin_record() -> Path:
+    """The record of which fastpy each `fastpy-*` fixture was built with:
+    `<fixture> <commit>` lines, `<commit>` being `dev` for a `$FASTPY_DIR`
+    build. In the gitignored sysroot directory, beside the other build
+    outputs this script keeps state about."""
+    return REPO / "toolchain" / "sysroot" / "fastpy-pins"
+
+
+def _recorded_pins() -> dict[str, str]:
+    try:
+        text = _pin_record().read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    pins: dict[str, str] = {}
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2:
+            pins[parts[0]] = parts[1]
+    return pins
+
+
+def _record_pin(fixture: str, commit: str) -> None:
+    """Note that `fixture` was just built with fastpy `commit`."""
+    pins = _recorded_pins()
+    pins[fixture] = commit
+    path = _pin_record()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes("".join(f"{k} {v}\n" for k, v in sorted(pins.items())).encode())
+
+
+def _pin_staleness(fixture: Path) -> str | None:
+    """Why `fixture` was built with a fastpy other than the one this tree
+    pins, or None. Only a `fastpy-*` fixture, only where the pin can be read,
+    and not for a `$FASTPY_DIR` build, which is building with another fastpy
+    on purpose. A pin move changes no file the mtime test watches until the
+    submodule is checked out again -- and then possibly only the runtime --
+    so this is the test that sees it."""
+    if not fixture.name.startswith("fastpy-") or os.environ.get("FASTPY_DIR"):
+        return None
+    pin = _fastpy_pin()
+    if pin is None:
+        return None
+    built = _recorded_pins().get(fixture.name)
+    if built == pin:
+        return None
+    return (f"built with fastpy {built[:12] if built else 'of no record'}, "
+            f"not the pinned {pin[:12]}")
+
+
 def _submodule_state(status_line: str) -> str:
     """What one line of `git submodule status` says: `current` (checked out at
     the commit the tree pins), `absent` (never checked out), `moved` (checked
@@ -927,53 +1026,84 @@ def _sync_fastpy_submodule() -> bool:
     already: never checked out (a fresh clone or worktree), or left at another
     commit by a merge or checkout that moved the pin -- git moves the pin and
     leaves the submodule's files where they were, so a build would quietly use
-    the old compiler. True when it is (now) at the pin.
+    the old compiler. True when it is (now) at the pin, which is checked
+    after the checkout rather than assumed from git's exit status.
 
-    Refuses -- False, having said why -- when the submodule has changes to its
-    tracked files: checking out the pin would discard them, and building with
-    them is not building with the pinned compiler. Work on fastpy goes through
-    `$FASTPY_DIR` instead. Every git call gets `gitenv.clean_env()`, since
-    `build` can run under a hook, where an inherited `GIT_DIR` would point
-    these at another repository."""
-    import gitenv
+    Refuses -- False, having said why -- rather than discard work: when the
+    submodule has changes to its tracked files, or is at a commit that is
+    neither behind the pin nor on any of its remote's branches (a commit made
+    in it, which checking out the pin would leave reachable only from the
+    reflog). Working on fastpy happens in a fastpy checkout, built with
+    through `$FASTPY_DIR`; a new pin is that work pushed and then committed
+    here as the gitlink.
+    """
+    def status_line() -> str | None:
+        status = _git("submodule", "status", "--", FASTPY_SUBMODULE)
+        if status is None:
+            return None
+        line = status.stdout.strip("\n")
+        if status.returncode != 0 or not line:
+            print(f"[ctest] ERROR: `git submodule status -- {FASTPY_SUBMODULE}` "
+                  f"said nothing usable: {status.stderr.strip() or 'no such submodule'}")
+            return None
+        return line
 
-    def git(*args: str, cwd: Path = REPO) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(["git", *args], cwd=cwd, env=gitenv.clean_env(),
-                              capture_output=True, text=True, encoding="utf-8",
-                              errors="replace", check=False)
-
-    status = git("submodule", "status", "--", FASTPY_SUBMODULE)
-    line = status.stdout.strip("\n")
-    if status.returncode != 0 or not line:
-        print(f"[ctest] ERROR: `git submodule status -- {FASTPY_SUBMODULE}` "
-              f"said nothing usable: {status.stderr.strip() or 'no such submodule'}")
+    line = status_line()
+    if line is None:
         return False
     state = _submodule_state(line)
     if state == "conflict":
         print(f"[ctest] ERROR: {FASTPY_SUBMODULE}'s pinned commit is in a merge "
               f"conflict; resolve it in the superproject first.")
         return False
+    sub = REPO / FASTPY_SUBMODULE
     if state != "absent":
-        dirty = git("status", "--porcelain", "--untracked-files=no",
-                    cwd=REPO / FASTPY_SUBMODULE)
+        dirty = _git("status", "--porcelain", "--untracked-files=no", cwd=sub)
+        if dirty is None:
+            return False
         if dirty.returncode != 0 or dirty.stdout.strip():
             print(f"[ctest] ERROR: {FASTPY_SUBMODULE} has changes of its own, so it "
                   f"is not the pinned compiler:")
             for row in (dirty.stdout or dirty.stderr).splitlines()[:10]:
                 print(f"[ctest]          {row}")
-            print("[ctest]        Commit them in fastpy, or set FASTPY_DIR to build with")
-            print("[ctest]        a fastpy of your choosing.")
+            print("[ctest]        Work on fastpy in a fastpy checkout and build with it")
+            print("[ctest]        through FASTPY_DIR; to drop the changes:")
+            print(f"[ctest]          git -C {FASTPY_SUBMODULE} checkout -- .")
             return False
     if state == "current":
         return True
-    update = git("submodule", "update", "--init", "--", FASTPY_SUBMODULE)
+    pin = _fastpy_pin()
+    if state == "moved" and pin is not None:
+        behind = _git("merge-base", "--is-ancestor", "HEAD", pin, cwd=sub)
+        published = _git("branch", "-r", "--contains", "HEAD", cwd=sub)
+        if behind is None or published is None:
+            return False
+        if behind.returncode != 0 and not published.stdout.strip():
+            print(f"[ctest] ERROR: {FASTPY_SUBMODULE} is at a commit that is neither")
+            print("[ctest]        behind the pin nor on any of its remote's branches --")
+            print("[ctest]        work done in it, which checking out the pin would leave")
+            print("[ctest]        reachable only from the reflog. Push it to fastpy, or")
+            print("[ctest]        move it to a fastpy checkout and build through FASTPY_DIR.")
+            return False
+    update = _git("submodule", "update", "--init", "--checkout", "--",
+                  FASTPY_SUBMODULE, timeout=900)
+    if update is None:
+        return False
     if update.returncode != 0:
         print(f"[ctest] ERROR: checking out {FASTPY_SUBMODULE} at its pin failed:")
         for row in (update.stderr or update.stdout).strip().splitlines()[-10:]:
             print(f"[ctest]          {row}")
         return False
+    after = status_line()
+    if after is None:
+        return False
+    if _submodule_state(after) != "current":
+        print(f"[ctest] ERROR: after checking it out, {FASTPY_SUBMODULE} is still not at")
+        print(f"[ctest]        its pin: {after.strip()}")
+        print(f"[ctest]        (a submodule.{FASTPY_SUBMODULE}.update setting can do this.)")
+        return False
     print(f"[ctest] fastpy: {FASTPY_SUBMODULE} was {state}; checked out the pinned "
-          f"commit {line[1:].split()[0][:12]}.")
+          f"commit {after[1:].split()[0][:12]}.")
     return True
 
 
@@ -1048,6 +1178,11 @@ def _fail_signature(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def cmd_build(only: str | None, force: bool = False) -> int:
+    # The pinned fastpy first: a check of milliseconds that can refuse, before
+    # a sysroot rebuild that can take minutes.
+    dev_fastpy = bool(os.environ.get("FASTPY_DIR"))
+    if not dev_fastpy and not _sync_fastpy_submodule():
+        return 1
     # A stale libc.a is not a warning any more. Every fixture links it, so
     # building against one that is behind produces 70 binaries that test a
     # system this tree cannot build -- which is the whole of B-Q5. Fix it
@@ -1067,19 +1202,16 @@ def cmd_build(only: str | None, force: bool = False) -> int:
             return 1
     # Resolve fastpy before building anything. Without it every fixture dies
     # with `ModuleNotFoundError: No module named 'compiler'`, which names
-    # neither fastpy nor PYTHONPATH -- nine identical tracebacks that read like
-    # a broken toolchain rather than an unset variable.
-    if not os.environ.get("FASTPY_DIR") and not _sync_fastpy_submodule():
-        return 1
+    # nothing to act on -- one identical traceback per fixture.
     fastpy = _fastpy_dir()
     if fastpy is None:
-        print("[ctest] ERROR: no fastpy to build with (needs compiler/__init__.py).")
-        print("[ctest]        Each recipe imports fastpy's `compiler` package. The one")
-        print(f"[ctest]        this tree pins is the submodule {FASTPY_SUBMODULE}:")
-        print(f"[ctest]          git submodule update --init -- {FASTPY_SUBMODULE}")
-        print("[ctest]        or, to build with another fastpy:")
-        print("[ctest]          FASTPY_DIR=<path-to-fastpy> " f"{_self_cmd()} build")
+        if not dev_fastpy:
+            # The sync above has just checked the submodule out at its pin, so
+            # the pinned commit itself lacks the package.
+            print(f"[ctest] ERROR: the fastpy {FASTPY_SUBMODULE} pins has no "
+                  f"compiler/__init__.py; the pin is wrong.")
         return 1
+    built_with = "dev" if dev_fastpy else (_fastpy_pin() or "unknown")
     # Resolving fastpy says which compiler runs; this says which libc it links.
     # The staleness gate above answered a question about a file that was not the
     # file that mattered until this line existed -- see `_slateos_sysroot_env`.
@@ -1243,6 +1375,8 @@ def cmd_build(only: str | None, force: bool = False) -> int:
             continue
         streak_sig, streak_n = None, 0
         built += 1
+        if fixture.name.startswith("fastpy-"):
+            _record_pin(fixture.name, built_with)
         print(f"[ctest]   {result.stdout.strip().splitlines()[-1] if result.stdout.strip() else 'built'}")
     print(
         f"[ctest] {built} built, {skipped} already current, "
@@ -1370,6 +1504,23 @@ def cmd_image_check() -> int:
         print("[ctest]        The image was packed before these existed, so their")
         print("[ctest]        kernel rungs will report SKIP and the run will pass")
         print("[ctest]        without having tested them. Build them and repack:")
+        print(f"[ctest]          {_self_cmd()} build")
+        print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
+        return 1
+
+    # A merge that moves the fastpy pin changes no file either comparison
+    # above can see -- git leaves the submodule's files where they were -- so
+    # ask the record which fastpy built each fixture. (Under WSL git cannot
+    # read the pin and this passes; the boot test runs it from Windows.)
+    off_pin = [(f.name, why) for f in fixtures() if (why := _pin_staleness(f))]
+    if off_pin:
+        print(f"[ctest] ERROR: {len(off_pin)} fastpy fixture(s) were built with a fastpy "
+              f"this tree does not pin:")
+        for name, why in off_pin[:10]:
+            print(f"[ctest]          {name}: {why}")
+        if len(off_pin) > 10:
+            print(f"[ctest]          ... and {len(off_pin) - 10} more")
+        print("[ctest]        Rebuild them (build checks the pinned fastpy out) and repack:")
         print(f"[ctest]          {_self_cmd()} build")
         print("[ctest]          wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh")
         return 1

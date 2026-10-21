@@ -537,10 +537,12 @@ def _git(*args, cwd):
 
 
 def test_build_checks_the_pinned_fastpy_out_and_keeps_local_work(cf, tmpdir):
-    """`_sync_fastpy_submodule` against real git: a submodule never checked
-    out, and one left at another commit (as a merge that moves the pin leaves
-    it), are both checked out at the pin; one with changes to its files is
-    refused and left as it is."""
+    """`_sync_fastpy_submodule` and `_fastpy_pin` against real git: a
+    submodule left at another commit (as a merge that moves the pin leaves
+    it) and one never checked out are both checked out at the pin; one at a
+    commit made in it, and one with changes to its files, are refused and
+    left as they are."""
+    import gitenv
     root = Path(tmpdir)
     home = root / "home"
     home.mkdir()
@@ -555,8 +557,10 @@ def test_build_checks_the_pinned_fastpy_out_and_keeps_local_work(cf, tmpdir):
     os.environ["HOME"] = str(home)
     os.environ["USERPROFILE"] = str(home)
     saved_repo = cf.REPO
+    fp, os_repo = root / "fastpy-origin", root / "os"
+    seen: dict[str, object] = {}
+    out = io.StringIO()
     try:
-        fp = root / "fastpy-origin"
         (fp / "compiler").mkdir(parents=True)
         _git("init", "-q", cwd=fp)
         (fp / "compiler" / "__init__.py").write_bytes(b"VERSION = 1\n")
@@ -566,7 +570,6 @@ def test_build_checks_the_pinned_fastpy_out_and_keeps_local_work(cf, tmpdir):
         (fp / "compiler" / "__init__.py").write_bytes(b"VERSION = 2\n")
         _git("commit", "-q", "-am", "two", cwd=fp)
 
-        os_repo = root / "os"
         os_repo.mkdir()
         _git("init", "-q", cwd=os_repo)
         _git("submodule", "add", "-q", fp.as_posix(), "toolchain/fastpy", cwd=os_repo)
@@ -575,41 +578,221 @@ def test_build_checks_the_pinned_fastpy_out_and_keeps_local_work(cf, tmpdir):
         _git("add", "toolchain/fastpy", cwd=os_repo)
         _git("commit", "-q", "-m", "pin fastpy at one", cwd=os_repo)
         cf.REPO = os_repo
+        cf._FASTPY_PIN = cf._UNCACHED
 
-        out = io.StringIO()
+        def status():
+            return _git("submodule", "status", "--", "toolchain/fastpy", cwd=os_repo)
+
         with contextlib.redirect_stdout(out):
-            # Left at another commit, as a merge that moved the pin leaves it.
+            seen["pin"] = cf._fastpy_pin() == first
+            # Left at another commit, as a merge that moved the pin leaves it:
+            # one on fastpy's own branches, so nothing is lost by moving off it.
             _git("checkout", "-q", "main", cwd=sub)
-            moved = _git("submodule", "status", "--", "toolchain/fastpy", cwd=os_repo)
-            synced_moved = cf._sync_fastpy_submodule()
-            after_moved = _git("rev-parse", "HEAD", cwd=sub)
+            seen["moved state"] = cf._submodule_state(status())
+            seen["moved synced"] = cf._sync_fastpy_submodule()
+            seen["moved at pin"] = _git("rev-parse", "HEAD", cwd=sub) == first
             # Never checked out, as in a fresh worktree.
             _git("submodule", "deinit", "-q", "--", "toolchain/fastpy", cwd=os_repo)
-            absent = _git("submodule", "status", "--", "toolchain/fastpy", cwd=os_repo)
-            synced_absent = cf._sync_fastpy_submodule()
-            after_absent = _git("rev-parse", "HEAD", cwd=sub)
-            current_again = cf._sync_fastpy_submodule()
-            # Changes of its own: refused, and kept.
+            seen["absent state"] = cf._submodule_state(status())
+            seen["absent synced"] = cf._sync_fastpy_submodule()
+            seen["absent at pin"] = _git("rev-parse", "HEAD", cwd=sub) == first
+            seen["current"] = cf._sync_fastpy_submodule()
+            # A commit made in the submodule: on none of its remote's branches.
+            (sub / "compiler" / "__init__.py").write_bytes(b"VERSION = 'local'\n")
+            _git("commit", "-q", "-am", "local work", cwd=sub)
+            local = _git("rev-parse", "HEAD", cwd=sub)
+            seen["local refused"] = cf._sync_fastpy_submodule()
+            seen["local kept"] = _git("rev-parse", "HEAD", cwd=sub) == local
+            # An update setting that would leave the submodule where it is: the
+            # checkout is asked for explicitly, so the pin still wins.
+            _git("checkout", "-q", "main", cwd=sub)
+            _git("config", "submodule.toolchain/fastpy.update", "none", cwd=os_repo)
+            seen["update=none synced"] = cf._sync_fastpy_submodule()
+            seen["update=none at pin"] = _git("rev-parse", "HEAD", cwd=sub) == first
+            _git("config", "--unset", "submodule.toolchain/fastpy.update", cwd=os_repo)
+            # Changes to its files: refused, and kept.
+            _git("checkout", "-q", first, cwd=sub)
             (sub / "compiler" / "__init__.py").write_bytes(b"VERSION = 'mine'\n")
-            refused = cf._sync_fastpy_submodule()
-            kept = (sub / "compiler" / "__init__.py").read_bytes()
+            seen["dirty refused"] = cf._sync_fastpy_submodule()
+            seen["dirty kept"] = (sub / "compiler" / "__init__.py").read_bytes()
+    except Exception as exc:  # noqa: BLE001 -- a git failure is this test's failure, not the run's
+        seen["error"] = f"{type(exc).__name__}: {exc}"
     finally:
         cf.REPO = saved_repo
+        cf._FASTPY_PIN = cf._UNCACHED
         for k, v in saved_home.items():
             if v is None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
-    check("left at another commit reads as moved", cf._submodule_state(moved), "moved")
-    check("moved: synced", synced_moved, True)
-    check("moved: now at the pin", after_moved, first)
-    check("deinit reads as absent", cf._submodule_state(absent), "absent")
-    check("absent: synced", synced_absent, True)
-    check("absent: now at the pin", after_absent, first)
-    check("at the pin: nothing to do", current_again, True)
-    check("changes of its own: refused", refused, False)
-    check("and left as they were", kept, b"VERSION = 'mine'\n")
-    check("the refusal says why", "changes of its own" in out.getvalue(), True)
+        for tree in (fp, os_repo):
+            if tree.exists():
+                gitenv.remove_tree(tree)
+    check("the scenario ran without a git failure", seen.get("error"), None)
+    check("the pin is the gitlink", seen.get("pin"), True)
+    check("left at another commit reads as moved", seen.get("moved state"), "moved")
+    check("moved: synced", seen.get("moved synced"), True)
+    check("moved: now at the pin", seen.get("moved at pin"), True)
+    check("deinit reads as absent", seen.get("absent state"), "absent")
+    check("absent: synced", seen.get("absent synced"), True)
+    check("absent: now at the pin", seen.get("absent at pin"), True)
+    check("at the pin: nothing to do", seen.get("current"), True)
+    check("a commit made in it: refused", seen.get("local refused"), False)
+    check("and still checked out", seen.get("local kept"), True)
+    check("update = none: synced all the same", seen.get("update=none synced"), True)
+    check("update = none: at the pin", seen.get("update=none at pin"), True)
+    check("changes of its own: refused", seen.get("dirty refused"), False)
+    check("and left as they were", seen.get("dirty kept"), b"VERSION = 'mine'\n")
+    check("the refusals say why",
+          ("reflog" in out.getvalue(), "changes of its own" in out.getvalue()),
+          (True, True))
+
+
+def test_a_fastpy_fixture_built_off_the_pin_is_stale(cf, tmpdir):
+    """The pin record: a `fastpy-*` fixture with no record, or one built with
+    another fastpy, is stale; built with the pin, it is not. `ctest-*`
+    fixtures and `$FASTPY_DIR` builds are not judged by the pin."""
+    pin, other = "a" * 40, "b" * 40
+    saved = cf._fastpy_pin
+    cf._fastpy_pin = lambda: pin
+    try:
+        with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None):
+            fx = Path(tmpdir) / "services" / "fastpy-x"
+            c = Path(tmpdir) / "services" / "ctest-x"
+            no_record = cf._pin_staleness(fx)
+            cf._record_pin("fastpy-x", other)
+            off_pin = cf._pin_staleness(fx)
+            cf._record_pin("fastpy-x", pin)
+            on_pin = cf._pin_staleness(fx)
+            c_fixture = cf._pin_staleness(c)
+            cf._record_pin("fastpy-x", other)
+        with _fastpy_search(cf, tmpdir, FASTPY_DIR=str(tmpdir), PYTHONPATH=None):
+            dev = cf._pin_staleness(fx)
+    finally:
+        cf._fastpy_pin = saved
+    check("no record: stale", (no_record or "").startswith("built with fastpy of no record"), True)
+    check("another fastpy: stale", (off_pin or "").startswith(f"built with fastpy {other[:12]}"), True)
+    check("the pin: current", on_pin, None)
+    check("a ctest fixture: not judged by the pin", c_fixture, None)
+    check("a FASTPY_DIR build: not judged by the pin", dev, None)
+
+
+def test_a_checkout_that_leaves_the_submodule_off_its_pin_is_refused(cf, tmpdir):
+    """The state after `git submodule update` is checked, not taken from its
+    exit status: a git that answers 0 and leaves the submodule moved is a
+    refusal."""
+    sha = "c" * 40
+    answers = {
+        ("submodule", "status"): f"+{sha} toolchain/fastpy (v0)\n",
+        ("status", "--porcelain"): "",
+        ("merge-base", "--is-ancestor"): "",
+        ("branch", "-r"): "  origin/main\n",
+        ("submodule", "update"): "",
+    }
+
+    def fake_git(*args, cwd=None, timeout=60):
+        out = answers[(args[0], args[1])]
+        return subprocess.CompletedProcess(["git", *args], 0, out, "")
+
+    saved = (cf._git, cf._fastpy_pin)
+    cf._git, cf._fastpy_pin = fake_git, (lambda: "d" * 40)
+    try:
+        with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                synced = cf._sync_fastpy_submodule()
+    finally:
+        cf._git, cf._fastpy_pin = saved
+    check("still moved after the update: refused", synced, False)
+    check("and says so", "still not at" in out.getvalue(), True)
+
+
+def test_is_stale_asks_the_pin_record(cf, tmpdir):
+    """A `fastpy-*` ELF newer than all its files is still stale when the pin
+    record says another fastpy built it."""
+    _fake_tree(cf, tmpdir)
+    fx = Path(tmpdir) / "services" / "fastpy-x"
+    fx.mkdir(parents=True)
+    (fx / "build.py").write_bytes(b"# recipe\n")
+    elf = cf.elf_of(fx)
+    elf.write_bytes(b"ELF")
+    for p in (fx / "build.py", cf.LIBC):
+        _age(p, 100)
+    _age(elf, 50)
+    saved = (cf._fastpy_pin, cf._NEWEST_COMPILER_SOURCE, os.environ.get("FASTPY_DIR"))
+    cf._fastpy_pin = lambda: "a" * 40
+    cf._NEWEST_COMPILER_SOURCE = None
+    os.environ.pop("FASTPY_DIR", None)
+    try:
+        cf._record_pin("fastpy-x", "a" * 40)
+        on_pin = cf.is_stale(fx)
+        cf._record_pin("fastpy-x", "b" * 40)
+        off_pin = cf.is_stale(fx)
+    finally:
+        cf._fastpy_pin = saved[0]
+        cf._NEWEST_COMPILER_SOURCE = cf._UNCACHED
+        if saved[2] is not None:
+            os.environ["FASTPY_DIR"] = saved[2]
+    check("built with the pin: current", on_pin, None)
+    check("built with another: stale", (off_pin or "").startswith("built with fastpy bbbb"), True)
+
+
+def test_build_syncs_the_pin_first_and_not_for_a_fastpy_dir(cf, tmpdir):
+    """`build` asks for the pinned fastpy before anything else -- a failure
+    stops it there -- and does not when `$FASTPY_DIR` names another."""
+    class Reached(Exception):
+        pass
+
+    def reached(*_args, **_kwargs):
+        raise Reached
+
+    calls: list[str] = []
+    saved = (cf._sync_fastpy_submodule, cf.sysroot_staleness, cf._build_sysroot)
+    cf._sync_fastpy_submodule = lambda: calls.append("sync") or False
+    cf.sysroot_staleness = reached
+    cf._build_sysroot = reached
+    try:
+        with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None):
+            rc = cf.cmd_build(None)
+        with _fastpy_search(cf, tmpdir, FASTPY_DIR=str(tmpdir), PYTHONPATH=None):
+            try:
+                cf.cmd_build(None)
+                went_on = False
+            except Reached:
+                went_on = True
+    finally:
+        cf._sync_fastpy_submodule, cf.sysroot_staleness, cf._build_sysroot = saved
+    check("a refused sync stops build before the sysroot", (rc, calls), (1, ["sync"]))
+    check("with FASTPY_DIR: no sync, on to the sysroot", (went_on, calls), (True, ["sync"]))
+
+
+def test_image_check_refuses_a_fixture_built_off_the_pin(cf, tmpdir):
+    """An image whose files all match the tree still fails when a `fastpy-*`
+    fixture in it was built with a fastpy the tree does not pin."""
+    image, manifest = Path(tmpdir) / "rootfs.ext4", Path(tmpdir) / "rootfs.ext4.manifest"
+    image.write_bytes(b"")
+    manifest.write_bytes(b"")
+    fx = Path(tmpdir) / "services" / "fastpy-x"
+    names = ("ROOTFS", "ROOTFS_MANIFEST", "_staged_artifacts", "_unbuilt_recipes",
+             "fixtures", "_pin_staleness")
+    saved = {n: getattr(cf, n) for n in names}
+    cf.ROOTFS, cf.ROOTFS_MANIFEST = image, manifest
+    cf._staged_artifacts = lambda: []
+    cf._unbuilt_recipes = lambda: []
+    cf.fixtures = lambda: [fx]
+    try:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cf._pin_staleness = lambda f: "built with fastpy b, not the pinned a"
+            off = cf.cmd_image_check()
+            cf._pin_staleness = lambda f: None
+            on = cf.cmd_image_check()
+    finally:
+        for n, v in saved.items():
+            setattr(cf, n, v)
+    check("built off the pin: refused", off, 1)
+    check("and says which", "fastpy-x: built with fastpy b" in out.getvalue(), True)
+    check("built on the pin: ok", on, 0)
 
 
 def test_only_prefers_the_fixture_named_exactly(cf, tmpdir):

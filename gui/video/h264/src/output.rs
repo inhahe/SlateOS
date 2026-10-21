@@ -309,7 +309,6 @@ impl Context {
 
         let mut ret = Ok(());
         for nal in pkt.nals().to_vec() {
-            self.nal_ref_idc = nal.ref_idc;
             self.nal_unit_type = nal.kind;
             match nal.kind {
                 NAL_IDR_SLICE | NAL_SLICE => {

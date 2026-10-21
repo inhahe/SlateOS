@@ -107,8 +107,6 @@ pub(crate) struct PictureTiming {
     pub(crate) pic_struct: u32,
     /// The clock types the timestamps name, a bit each.
     pub(crate) ct_type: u32,
-    pub(crate) dpb_output_delay: u32,
-    pub(crate) cpb_removal_delay: i64,
     pub(crate) timecode: [TimeCode; 3],
     pub(crate) timecode_cnt: usize,
 }
@@ -167,12 +165,10 @@ impl Default for FilmGrain {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FramePacking {
     pub(crate) present: bool,
-    pub(crate) arrangement_id: u32,
     /// -1 until a message says, as the decoder starts it
     /// (`h264_init_context`).
     pub(crate) arrangement_cancel_flag: i32,
     pub(crate) arrangement_type: u32,
-    pub(crate) arrangement_repetition_period: u32,
     pub(crate) content_interpretation_type: u32,
     pub(crate) quincunx_sampling_flag: u32,
     pub(crate) current_frame_is_frame0_flag: u32,
@@ -182,10 +178,8 @@ impl Default for FramePacking {
     fn default() -> Self {
         Self {
             present: false,
-            arrangement_id: 0,
             arrangement_cancel_flag: -1,
             arrangement_type: 0,
-            arrangement_repetition_period: 0,
             content_interpretation_type: 0,
             quincunx_sampling_flag: 0,
             current_frame_is_frame0_flag: 0,
@@ -239,8 +233,6 @@ pub(crate) struct Sei {
     /// Frames until the picture is right, from a recovery point; -1 for
     /// none.
     pub(crate) recovery_frame_cnt: i32,
-    pub(crate) buffering_period_present: bool,
-    pub(crate) initial_cpb_removal_delay: [u32; 32],
     /// The x264 build that wrote the stream, from its user data; -1 for
     /// none. Kept from one access unit to the next.
     pub(crate) x264_build: i32,
@@ -266,13 +258,8 @@ pub(crate) struct Sei {
 impl Default for Sei {
     fn default() -> Self {
         Self {
-            picture_timing: PictureTiming {
-                cpb_removal_delay: -1,
-                ..PictureTiming::default()
-            },
+            picture_timing: PictureTiming::default(),
             recovery_frame_cnt: -1,
-            buffering_period_present: false,
-            initial_cpb_removal_delay: [0; 32],
             x264_build: -1,
             unregistered: Vec::new(),
             a53_caption: Vec::new(),
@@ -333,16 +320,13 @@ impl<'a> Bytes<'a> {
 impl Sei {
     /// Forget what the last access unit said (`ff_h264_sei_uninit`, with
     /// `ff_h2645_sei_reset`): exactly the fields those clear. The rest --
-    /// a picture timing message's structure and time codes, the buffering
-    /// delays, the frame packing and orientation values, the mastering
+    /// a picture timing message's structure and time codes, the frame
+    /// packing and orientation values, the mastering
     /// display's, the x264 version, the alternative transfer -- stay until
     /// a message overwrites them, as FFmpeg's do.
     pub(crate) fn uninit(&mut self) {
         self.recovery_frame_cnt = -1;
-        self.picture_timing.dpb_output_delay = 0;
-        self.picture_timing.cpb_removal_delay = -1;
         self.picture_timing.present = false;
-        self.buffering_period_present = false;
         self.frame_packing.present = false;
         self.display_orientation.present = false;
         self.afd = None;
@@ -406,7 +390,7 @@ impl Sei {
             let r = match kind {
                 PIC_TIMING => self.decode_picture_timing(payload),
                 RECOVERY_POINT => self.decode_recovery_point(&mut pb),
-                BUFFERING_PERIOD => self.decode_buffering_period(&mut pb, ps),
+                BUFFERING_PERIOD => Self::decode_buffering_period(&mut pb, ps),
                 GREEN_METADATA => Ok(()), // read by FFmpeg for its log alone
                 USER_DATA_REGISTERED => self.decode_registered(&mut bytes),
                 USER_DATA_UNREGISTERED => self.decode_unregistered(payload),
@@ -472,12 +456,10 @@ impl Sei {
         Ok(())
     }
 
-    /// `decode_buffering_period`.
-    fn decode_buffering_period(
-        &mut self,
-        gb: &mut Bits<'_>,
-        ps: &ParamSets,
-    ) -> Result<(), SeiError> {
+    /// `decode_buffering_period`: read for the errors FFmpeg's gives -- a
+    /// sequence parameter set out of range, or not yet seen -- and passed
+    /// over, its delays being what only FFmpeg's parser reads.
+    fn decode_buffering_period(gb: &mut Bits<'_>, ps: &ParamSets) -> Result<(), SeiError> {
         let sps_id = gb.ue_31();
         if sps_id > 31 {
             return Err(SeiError::Invalid);
@@ -494,13 +476,12 @@ impl Sei {
             sps.vcl_hrd_parameters_present_flag,
         ] {
             if present != 0 {
-                for i in 0..cnt.min(32) {
-                    self.initial_cpb_removal_delay[i] = gb.bits_long(len);
+                for _ in 0..cnt.min(32) {
+                    gb.skip(len); // initial_cpb_removal_delay
                     gb.skip(len); // initial_cpb_removal_delay_offset
                 }
             }
         }
-        self.buffering_period_present = true;
         Ok(())
     }
 
@@ -626,7 +607,7 @@ impl Sei {
     /// `decode_frame_packing_arrangement`.
     fn decode_frame_packing(&mut self, gb: &mut Bits<'_>) {
         let f = &mut self.frame_packing;
-        f.arrangement_id = gb.ue_long();
+        gb.ue_long(); // frame_packing_arrangement_id
         f.arrangement_cancel_flag = i32::from(gb.flag());
         f.present = f.arrangement_cancel_flag == 0;
         if f.present {
@@ -642,7 +623,7 @@ impl Sei {
                 gb.skip(16); // frame0/1_grid_position_x/y
             }
             gb.skip(8); // frame_packing_arrangement_reserved_byte
-            f.arrangement_repetition_period = gb.ue_long();
+            gb.ue_long(); // frame_packing_arrangement_repetition_period
         }
         gb.skip(1); // frame_packing_arrangement_extension_flag
     }
@@ -757,8 +738,8 @@ pub(crate) fn process_picture_timing(pt: &mut PictureTiming, sps: &Sps) -> Resul
             sps.cpb_removal_delay_length as u32,
             sps.dpb_output_delay_length as u32,
         );
-        pt.cpb_removal_delay = i64::from(gb.bits_long(cpb_len));
-        pt.dpb_output_delay = gb.bits_long(dpb_len);
+        gb.skip(cpb_len); // cpb_removal_delay
+        gb.skip(dpb_len); // dpb_output_delay
     }
     if sps.pic_struct_present_flag != 0 {
         pt.pic_struct = gb.bits(4);

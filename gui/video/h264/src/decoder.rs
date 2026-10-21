@@ -358,7 +358,6 @@ pub(crate) struct Context {
     pub(crate) mb_stride: i32,
     pub(crate) mb_num: i32,
 
-    pub(crate) nal_ref_idc: u32,
     pub(crate) nal_unit_type: u32,
     pub(crate) has_slice: bool,
     /// Units come after their lengths (`is_avc`), each length this many
@@ -459,8 +458,6 @@ pub(crate) struct Context {
     pub(crate) chroma_pred_mode_table: Vec<u8>,
     pub(crate) mvd_table: [Vec<[u8; 2]>; 2],
     pub(crate) direct_table: Vec<u8>,
-    /// How many lists each macroblock's slice had.
-    pub(crate) list_counts: Vec<u8>,
     /// The coefficient scans for the stream (`init_scan_tables`).
     pub(crate) scans: crate::scan::ScanTables,
     /// Whether samples are 16 bits (`pixel_shift`).
@@ -519,7 +516,6 @@ impl Default for Context {
             mb_width: 0,
             mb_stride: 0,
             mb_num: 0,
-            nal_ref_idc: 0,
             nal_unit_type: 0,
             has_slice: false,
             is_avc: false,
@@ -575,7 +571,6 @@ impl Default for Context {
             chroma_pred_mode_table: Vec::new(),
             mvd_table: [Vec::new(), Vec::new()],
             direct_table: Vec::new(),
-            list_counts: Vec::new(),
             scans: crate::scan::ScanTables::default(),
             pixel_shift: 0,
             block_offset: [0; 2 * 48],
@@ -935,7 +930,6 @@ impl Context {
             zeroed(row_mb_num * 8, [0; 2])?,
         ];
         self.direct_table = zeroed(big_mb_num * 4, 0)?;
-        self.list_counts = zeroed(big_mb_num, 0)?;
         self.mb2b_xy = zeroed(big_mb_num, 0)?;
         self.mb2br_xy = zeroed(big_mb_num, 0)?;
         self.b_stride = self.mb_width * 4;

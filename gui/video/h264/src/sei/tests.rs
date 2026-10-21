@@ -62,20 +62,12 @@ fn each_sei_unit_reads_as_ffmpeg_traces_it() {
             assert!(p.present, "{name}");
             assert_eq!(i64::from(p.arrangement_type), kind, "{name}");
             assert_eq!(
-                i64::from(p.arrangement_id),
-                get(t, "frame_packing_arrangement_id").unwrap()
-            );
-            assert_eq!(
                 i64::from(p.content_interpretation_type),
                 get(t, "content_interpretation_type").unwrap()
             );
             assert_eq!(
                 i64::from(p.current_frame_is_frame0_flag),
                 get(t, "current_frame_is_frame0_flag").unwrap()
-            );
-            assert_eq!(
-                i64::from(p.arrangement_repetition_period),
-                get(t, "frame_packing_arrangement_repetition_period").unwrap()
             );
         } else {
             assert!(!sei.frame_packing.present, "{name}");
@@ -116,11 +108,6 @@ fn each_sei_unit_reads_as_ffmpeg_traces_it() {
             );
         }
 
-        if let Some(delay) = get(t, "initial_cpb_removal_delay") {
-            assert!(sei.buffering_period_present, "{name}");
-            assert_eq!(i64::from(sei.initial_cpb_removal_delay[0]), delay, "{name}");
-        }
-
         // The x264 version: the text after the UUID, read here by hand.
         let text: Vec<u8> = all(t, "user_data_payload_byte")
             .into_iter()
@@ -158,13 +145,6 @@ fn each_sei_unit_reads_as_ffmpeg_traces_it() {
             process_picture_timing(&mut sei.picture_timing, sps).unwrap();
             if let Some(s) = get(t, "pic_struct") {
                 assert_eq!(i64::from(sei.picture_timing.pic_struct), s, "{name}");
-            }
-            if let Some(d) = get(t, "cpb_removal_delay") {
-                assert_eq!(sei.picture_timing.cpb_removal_delay, d, "{name}");
-                assert_eq!(
-                    i64::from(sei.picture_timing.dpb_output_delay),
-                    get(t, "dpb_output_delay").unwrap()
-                );
             }
         }
     }
@@ -246,7 +226,6 @@ fn a_buffering_period_naming_a_missing_sps_is_passed_over() {
     let unit = sei_unit(&[(0, &[0b0010_0000]), (6, &recovery(0))]);
     assert_eq!(decode(&unit, &mut sei), Err(SeiError::PsNotFound));
     assert_eq!(sei.recovery_frame_cnt, 0, "read on past it");
-    assert!(!sei.buffering_period_present);
 }
 
 #[test]
@@ -412,22 +391,15 @@ fn clearing_for_the_next_access_unit_clears_what_ffmpeg_clears() {
     sei.uninit();
     assert_eq!(sei.recovery_frame_cnt, -1);
     assert!(!sei.picture_timing.present);
-    assert_eq!(sei.picture_timing.cpb_removal_delay, -1);
-    assert_eq!(sei.picture_timing.dpb_output_delay, 0);
     assert!(!sei.display_orientation.present);
-    assert!(!sei.buffering_period_present);
     assert_eq!(sei.mastering_display.present, 0);
-    // What FFmpeg leaves: the structure and time codes, the delays read,
-    // the orientation's and the display's values.
+    // What FFmpeg leaves: the structure and time codes, the orientation's
+    // and the display's values.
     assert_eq!(
         sei.picture_timing.pic_struct,
         before.picture_timing.pic_struct
     );
     assert_eq!(sei.picture_timing.payload, before.picture_timing.payload);
-    assert_eq!(
-        sei.initial_cpb_removal_delay,
-        before.initial_cpb_removal_delay
-    );
     assert_eq!(
         sei.display_orientation.anticlockwise_rotation,
         before.display_orientation.anticlockwise_rotation

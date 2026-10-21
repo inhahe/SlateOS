@@ -451,3 +451,30 @@ net80211/src/supplicant.rs:mic_algo
 # urgent: an unnamed working key is a discoverability defect, and a card row
 # for a key with no effect is a false claim on screen. All three do what
 # their rows say now, so all three lines are removed rather than annotated.
+
+# Lane F, 2026-10-21: the H.264 and AAC translations (FFmpeg 8.1.3), kept for
+# the code that will read them. Each line goes when that code is in. Of the
+# 22 fields the gate found on lane-f-hdr, the other 15 -- and 6 more of the
+# same kind it could not see -- were removed: FFmpeg's software decoder never
+# reads them either, only its parser or its hardware decoders do. Their bits
+# are still read past, by name, where they stand.
+#
+# H.264 film grain (todo.txt, "h264: film grain synthesis"). FFmpeg lays
+# H.274 grain over a picture from these: `ff_h274_apply_film_grain` reads
+# model_id and log2_scale_factor, `ff_h2645_sei_to_frame` passes
+# blending_mode_id on with them, and the grain's seed is the picture's POC
+# plus poc_offset << 5. That synthesis is not translated yet; the message is
+# read and kept as FFmpeg keeps it.
+gui/video/h264/src/sei.rs:model_id
+gui/video/h264/src/sei.rs:blending_mode_id
+gui/video/h264/src/sei.rs:log2_scale_factor
+gui/video/h264/src/decoder.rs:poc_offset
+#
+# AAC, translated a module at a time (gui/video/aac/src/lib.rs). Whether the
+# frame has buffers is read where a frame is decoded (aacdec.c's "no frame
+# data found"), its length as the frame leaves the decoder, and the noise
+# generator's state by the spectral decoding's noise bands
+# (`decode_spectrum_and_dequant`). None of those is translated yet.
+gui/video/aac/src/context.rs:allocated
+gui/video/aac/src/context.rs:nb_samples
+gui/video/aac/src/context.rs:random_state

@@ -64,9 +64,7 @@ pub(crate) struct Vui {
     pub(crate) aspect_ratio_idc: u32,
     pub(crate) aspect_ratio_info_present_flag: u32,
     pub(crate) overscan_info_present_flag: u32,
-    pub(crate) overscan_appropriate_flag: u32,
     pub(crate) video_signal_type_present_flag: u32,
-    pub(crate) video_format: u32,
     /// 1 for full range, 0 for limited, -1 for unsaid.
     pub(crate) video_full_range_flag: i32,
     pub(crate) colour_description_present_flag: u32,
@@ -78,12 +76,13 @@ pub(crate) struct Vui {
     pub(crate) matrix_coeffs: u32,
     pub(crate) chroma_loc_info_present_flag: u32,
     pub(crate) chroma_sample_loc_type_top_field: u32,
-    pub(crate) chroma_sample_loc_type_bottom_field: u32,
     /// `AVChromaLocation`.
     pub(crate) chroma_location: u32,
 }
 
-/// A sequence parameter set (`SPS`), field for field as FFmpeg keeps it.
+/// A sequence parameter set (`SPS`), field for field as FFmpeg keeps it,
+/// less what nothing in its software decoder reads: those syntax elements
+/// are read past, by name, where they stand.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Sps {
     pub(crate) sps_id: u32,
@@ -125,13 +124,10 @@ pub(crate) struct Sps {
     pub(crate) timing_info_present_flag: i32,
     pub(crate) num_units_in_tick: u32,
     pub(crate) time_scale: u32,
-    pub(crate) fixed_frame_rate_flag: i32,
     pub(crate) offset_for_ref_frame: Box<[i32; 256]>,
     pub(crate) bitstream_restriction_flag: i32,
     pub(crate) num_reorder_frames: i32,
-    pub(crate) max_dec_frame_buffering: i32,
     pub(crate) scaling_matrix_present: i32,
-    pub(crate) scaling_matrix_present_mask: u16,
     pub(crate) scaling_matrix4: [[u8; 16]; 6],
     pub(crate) scaling_matrix8: Box<[[u8; 64]; 6]>,
     pub(crate) nal_hrd_parameters_present_flag: i32,
@@ -140,10 +136,6 @@ pub(crate) struct Sps {
     pub(crate) time_offset_length: i32,
     /// `cpb_cnt_minus1 + 1`.
     pub(crate) cpb_cnt: i32,
-    pub(crate) bit_rate_scale: i32,
-    pub(crate) bit_rate_value: [u32; 32],
-    pub(crate) cpb_size_value: [u32; 32],
-    pub(crate) cpr_flag: u32,
     pub(crate) initial_cpb_removal_delay_length: i32,
     pub(crate) cpb_removal_delay_length: i32,
     pub(crate) dpb_output_delay_length: i32,
@@ -192,13 +184,10 @@ impl Sps {
             timing_info_present_flag: 0,
             num_units_in_tick: 0,
             time_scale: 0,
-            fixed_frame_rate_flag: 0,
             offset_for_ref_frame: Box::new([0; 256]),
             bitstream_restriction_flag: 0,
             num_reorder_frames: 0,
-            max_dec_frame_buffering: 0,
             scaling_matrix_present: 0,
-            scaling_matrix_present_mask: 0,
             scaling_matrix4: [[0; 16]; 6],
             scaling_matrix8: Box::new([[0; 64]; 6]),
             nal_hrd_parameters_present_flag: 0,
@@ -206,10 +195,6 @@ impl Sps {
             pic_struct_present_flag: 0,
             time_offset_length: 0,
             cpb_cnt: 0,
-            bit_rate_scale: 0,
-            bit_rate_value: [0; 32],
-            cpb_size_value: [0; 32],
-            cpr_flag: 0,
             initial_cpb_removal_delay_length: 0,
             cpb_removal_delay_length: 0,
             dpb_output_delay_length: 0,
@@ -259,8 +244,6 @@ pub(crate) struct Pps {
     pub(crate) constrained_intra_pred: u32,
     pub(crate) redundant_pic_cnt_present: u32,
     pub(crate) transform_8x8_mode: u32,
-    pub(crate) pic_scaling_matrix_present_flag: u32,
-    pub(crate) pic_scaling_matrix_present_mask: u16,
     pub(crate) scaling_matrix4: [[u8; 16]; 6],
     pub(crate) scaling_matrix8: Box<[[u8; 64]; 6]>,
     /// The chroma QP for each luma QP, for Cb and Cr, the offsets applied.
@@ -410,12 +393,12 @@ fn decode_common_vui(gb: &mut Bits<'_>, vui: &mut Vui) {
 
     vui.overscan_info_present_flag = gb.bit();
     if vui.overscan_info_present_flag != 0 {
-        vui.overscan_appropriate_flag = gb.bit();
+        gb.bit(); // overscan_appropriate_flag
     }
 
     vui.video_signal_type_present_flag = gb.bit();
     if vui.video_signal_type_present_flag != 0 {
-        vui.video_format = gb.bits(3);
+        gb.bits(3); // video_format
         #[allow(clippy::cast_possible_wrap, reason = "one bit")]
         let full = gb.bit() as i32;
         vui.video_full_range_flag = full;
@@ -439,7 +422,7 @@ fn decode_common_vui(gb: &mut Bits<'_>, vui: &mut Vui) {
     vui.chroma_loc_info_present_flag = gb.bit();
     if vui.chroma_loc_info_present_flag != 0 {
         vui.chroma_sample_loc_type_top_field = gb.ue_31();
-        vui.chroma_sample_loc_type_bottom_field = gb.ue_31();
+        gb.ue_31(); // chroma_sample_loc_type_bottom_field
         vui.chroma_location = if vui.chroma_sample_loc_type_top_field <= 5 {
             vui.chroma_sample_loc_type_top_field + 1
         } else {
@@ -450,21 +433,22 @@ fn decode_common_vui(gb: &mut Bits<'_>, vui: &mut Vui) {
     }
 }
 
-/// `decode_hrd_parameters`: the hypothetical reference decoder's buffer
-/// sizes, kept for what they say of timing.
+/// `decode_hrd_parameters`: the hypothetical reference decoder's
+/// parameters, of which what reading the timing SEIs needs is kept -- their
+/// fields' lengths and how many buffers there are. The bit rates and buffer
+/// sizes FFmpeg keeps beside them only its hardware decoders read.
 #[allow(clippy::cast_possible_wrap, reason = "fields of 4 and 5 bits")]
 fn decode_hrd_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError> {
     let cpb_count = gb.ue_31() + 1;
     if cpb_count > 32 {
         return Err(PsError::Invalid);
     }
-    sps.cpr_flag = 0;
-    sps.bit_rate_scale = gb.bits(4) as i32;
+    gb.bits(4); // bit_rate_scale
     gb.bits(4); // cpb_size_scale
-    for i in 0..cpb_count as usize {
-        sps.bit_rate_value[i] = gb.ue_long().wrapping_add(1);
-        sps.cpb_size_value[i] = gb.ue_long().wrapping_add(1);
-        sps.cpr_flag |= gb.bit() << i;
+    for _ in 0..cpb_count {
+        gb.ue_long(); // bit_rate_value_minus1
+        gb.ue_long(); // cpb_size_value_minus1
+        gb.bit(); // cbr_flag
     }
     sps.initial_cpb_removal_delay_length = gb.bits(5) as i32 + 1;
     sps.cpb_removal_delay_length = gb.bits(5) as i32 + 1;
@@ -495,7 +479,7 @@ fn decode_vui_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError
             sps.num_units_in_tick = num_units_in_tick;
             sps.time_scale = time_scale;
         }
-        sps.fixed_frame_rate_flag = gb.bit() as i32;
+        gb.bit(); // fixed_frame_rate_flag
     }
 
     sps.nal_hrd_parameters_present_flag = gb.bit() as i32;
@@ -521,7 +505,7 @@ fn decode_vui_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError
         gb.ue_31(); // log2_max_mv_length_horizontal
         gb.ue_31(); // log2_max_mv_length_vertical
         sps.num_reorder_frames = gb.ue_31() as i32;
-        sps.max_dec_frame_buffering = gb.ue_31() as i32;
+        gb.ue_31(); // max_dec_frame_buffering
 
         if gb.left() < 0 {
             sps.num_reorder_frames = 0;
@@ -537,16 +521,15 @@ fn decode_vui_parameters(gb: &mut Bits<'_>, sps: &mut Sps) -> Result<(), PsError
     Ok(())
 }
 
-/// One scaling list (`decode_scaling_list`): its present flag into `mask`
-/// at `pos`; absent, a copy of `fallback`; present but starting with a
-/// zero delta, a copy of `jvt`; otherwise its deltas, in zigzag order.
+/// One scaling list (`decode_scaling_list`): absent, a copy of `fallback`;
+/// present but starting with a zero delta, a copy of `jvt`; otherwise its
+/// deltas, in zigzag order. FFmpeg also notes which lists were present, a
+/// mask only its hardware decoders read; it is not kept here.
 fn decode_scaling_list(
     gb: &mut Bits<'_>,
     factors: &mut [u8],
     jvt: &[u8],
     fallback: &[u8],
-    mask: &mut u16,
-    pos: u32,
 ) -> Result<(), PsError> {
     let size = factors.len();
     let scan: &[u8] = if size == 16 {
@@ -554,10 +537,7 @@ fn decode_scaling_list(
     } else {
         &ZIGZAG_DIRECT
     };
-    #[allow(clippy::cast_possible_truncation, reason = "one bit")]
-    let present = gb.bit() as u16;
-    *mask |= present << pos;
-    if present == 0 {
+    if gb.bit() == 0 {
         factors.copy_from_slice(&fallback[..size]);
         return Ok(());
     }
@@ -602,7 +582,6 @@ fn decode_scaling_matrices(
     transform_8x8_mode: bool,
     is_sps: bool,
     present: bool,
-    mask: &mut u16,
     m4: &mut [[u8; 16]; 6],
     m8: &mut [[u8; 64]; 6],
 ) -> Result<i32, PsError> {
@@ -617,40 +596,37 @@ fn decode_scaling_matrices(
     } else {
         DEFAULT_SCALING8
     };
-    *mask = 0;
     if !present {
         return Ok(0);
     }
-    // (list, default list, list it falls back to when absent, mask bit),
-    // in FFmpeg's order. A later list's fallback is an earlier list as just
-    // read, so each is copied out when its turn comes.
+    // (list, default list, list it falls back to when absent), in FFmpeg's
+    // order. A later list's fallback is an earlier list as just read, so
+    // each is copied out when its turn comes.
     let mut failed = false;
-    for (i, jvt, fallback, pos) in [
-        (0, 0, None, 0),    // intra Y
-        (1, 0, Some(0), 1), // intra Cr
-        (2, 0, Some(1), 2), // intra Cb
-        (3, 1, None, 3),    // inter Y
-        (4, 1, Some(3), 4), // inter Cr
-        (5, 1, Some(4), 5), // inter Cb
+    for (i, jvt, fallback) in [
+        (0, 0, None),    // intra Y
+        (1, 0, Some(0)), // intra Cr
+        (2, 0, Some(1)), // intra Cb
+        (3, 1, None),    // inter Y
+        (4, 1, Some(3)), // inter Cr
+        (5, 1, Some(4)), // inter Cb
     ] {
         let fb = fallback.map_or(fb4[jvt], |k: usize| m4[k]);
-        failed |=
-            decode_scaling_list(gb, &mut m4[i], &DEFAULT_SCALING4[jvt], &fb, mask, pos).is_err();
+        failed |= decode_scaling_list(gb, &mut m4[i], &DEFAULT_SCALING4[jvt], &fb).is_err();
     }
     if is_sps || transform_8x8_mode {
-        let mut lists = vec![(0, 0, None, 6), (3, 1, None, 7)]; // intra Y, inter Y
+        let mut lists = vec![(0, 0, None), (3, 1, None)]; // intra Y, inter Y
         if sps.chroma_format_idc == 3 {
             lists.extend([
-                (1, 0, Some(0), 8),  // intra Cr
-                (4, 1, Some(3), 9),  // inter Cr
-                (2, 0, Some(1), 10), // intra Cb
-                (5, 1, Some(4), 11), // inter Cb
+                (1, 0, Some(0)), // intra Cr
+                (4, 1, Some(3)), // inter Cr
+                (2, 0, Some(1)), // intra Cb
+                (5, 1, Some(4)), // inter Cb
             ]);
         }
-        for (i, jvt, fallback, pos) in lists {
+        for (i, jvt, fallback) in lists {
             let fb = fallback.map_or(fb8[jvt], |k: usize| m8[k]);
-            failed |= decode_scaling_list(gb, &mut m8[i], &DEFAULT_SCALING8[jvt], &fb, mask, pos)
-                .is_err();
+            failed |= decode_scaling_list(gb, &mut m8[i], &DEFAULT_SCALING8[jvt], &fb).is_err();
         }
     }
     if failed {
@@ -751,12 +727,9 @@ pub(crate) fn decode_sps(
         }
         sps.transform_bypass = gb.bit() as i32;
         let present = gb.flag();
-        let mut mask = 0;
         let mut m4 = sps.scaling_matrix4;
         let mut m8 = *sps.scaling_matrix8;
-        let ret =
-            decode_scaling_matrices(gb, &sps, false, true, present, &mut mask, &mut m4, &mut m8)?;
-        sps.scaling_matrix_present_mask = mask;
+        let ret = decode_scaling_matrices(gb, &sps, false, true, present, &mut m4, &mut m8)?;
         sps.scaling_matrix4 = m4;
         sps.scaling_matrix8 = Box::new(m8);
         sps.scaling_matrix_present |= ret;
@@ -1057,22 +1030,19 @@ pub(crate) fn decode_pps(
     let redundant_pic_cnt_present = gb.bit();
 
     let mut transform_8x8_mode = 0;
-    let mut pic_scaling_matrix_present_flag = 0;
-    let mut pic_scaling_matrix_present_mask = 0;
     let mut m4 = sps.scaling_matrix4;
     let mut m8 = *sps.scaling_matrix8;
 
     let bits_left = bit_length as i64 - i64::from(gb.count());
     if bits_left > 0 && more_rbsp_data_in_pps(&sps) {
         transform_8x8_mode = gb.bit();
-        pic_scaling_matrix_present_flag = gb.bit();
+        let pic_scaling_matrix_present_flag = gb.bit();
         decode_scaling_matrices(
             gb,
             &sps,
             transform_8x8_mode != 0,
             false,
             pic_scaling_matrix_present_flag != 0,
-            &mut pic_scaling_matrix_present_mask,
             &mut m4,
             &mut m8,
         )?;
@@ -1114,8 +1084,6 @@ pub(crate) fn decode_pps(
         constrained_intra_pred,
         redundant_pic_cnt_present,
         transform_8x8_mode,
-        pic_scaling_matrix_present_flag,
-        pic_scaling_matrix_present_mask,
         scaling_matrix4: m4,
         scaling_matrix8: Box::new(m8),
         chroma_qp_table,

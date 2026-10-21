@@ -409,7 +409,6 @@ fn each_sequence_parameter_set_reads_as_ffmpeg_traces_it() {
         );
         assert_eq!(sps.num_units_in_tick as i32, t.int("num_units_in_tick"));
         assert_eq!(sps.time_scale as i32, t.int("time_scale"));
-        assert_eq!(sps.fixed_frame_rate_flag, t.int("fixed_frame_rate_flag"));
         assert_eq!(
             sps.pic_struct_present_flag,
             t.int("pic_struct_present_flag")
@@ -423,10 +422,6 @@ fn each_sequence_parameter_set_reads_as_ffmpeg_traces_it() {
                 sps.num_reorder_frames,
                 t.int("max_num_reorder_frames"),
                 "{name}"
-            );
-            assert_eq!(
-                sps.max_dec_frame_buffering,
-                t.int("max_dec_frame_buffering")
             );
         } else if sps.ref_frame_count != 0 {
             // Bounded by the level's buffer, as FFmpeg derives it.

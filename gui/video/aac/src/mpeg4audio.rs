@@ -56,7 +56,6 @@ pub(crate) struct Config {
     pub(crate) ext_object_type: i32,
     pub(crate) ext_sampling_index: i32,
     pub(crate) ext_sample_rate: i32,
-    pub(crate) ext_chan_config: i32,
     pub(crate) channels: i32,
     pub(crate) ps: i32,
     pub(crate) frame_length_short: i32,
@@ -166,7 +165,7 @@ pub(crate) fn read_config(
         c.ext_sample_rate = sample_rate(gb, &mut c.ext_sampling_index);
         c.object_type = object_type(gb);
         if c.object_type == aot::ER_BSAC {
-            c.ext_chan_config = gb.bits(4) as i32;
+            gb.bits(4); // extensionChannelConfiguration, which nothing reads
         }
     } else {
         c.ext_object_type = aot::NULL;

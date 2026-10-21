@@ -190,7 +190,7 @@ done
 case_ "$S_MIX" plain -vv b a
 case_ "$S_MIX" plain -vv .
 
-CASE_NAME=times
+CASE_NAME='times'
 for args in '-v' '-vv' '-t -v' '-t -O -v' '-O -v' '-t -m -v' '-t -M -v' '-t -vvv'; do
   # shellcheck disable=SC2086
   case_ "$S_TIMES" plain $args a

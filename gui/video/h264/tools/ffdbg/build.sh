@@ -59,8 +59,12 @@ if [ ! -d "$dir" ]; then
     git clone --depth 1 --branch n8.1.3 https://git.ffmpeg.org/ffmpeg.git "$dir"
 fi
 cd "$dir"
-if ! grep -q FFDBG_MB libavcodec/h264_mb.c; then
-    patch -p1 < "$here/ffdbg.patch"
+# The patch, unless the checkout holds it as it stands now. A checkout
+# patched by an older ffdbg.patch is put back to n8.1.3 first, which drops
+# its old probes: the checkout is this script's own and holds nothing else.
+if ! git apply -R --check "$here/ffdbg.patch" 2>/dev/null; then
+    git checkout -- .
+    git apply "$here/ffdbg.patch"
 fi
 ./configure --disable-everything --disable-asm --disable-doc --disable-autodetect \
     --enable-debug=3 --optflags=-O1 \

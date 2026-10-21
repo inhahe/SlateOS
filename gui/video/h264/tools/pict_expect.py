@@ -38,10 +38,11 @@ under <out>:
                         (see `damages`). How the decoder finds the damage,
                         stops, and conceals what it lost.
   grain/...             each raw stream above with film grain
-                        characteristics put in, before every picture or
-                        every fifth (see `grains`): the grain each picture
-                        is shown with, and the pictures FFmpeg cannot give
-                        any (not 8-bit 4:2:0) shown without.
+                        characteristics put in, before two pictures in three
+                        or every fifth (see `grains`): the grain each picture
+                        is shown with, the pictures a message no longer
+                        reaches, and the pictures FFmpeg cannot give any
+                        (not 8-bit 4:2:0) shown without.
 
 Generated streams are written under <out> by their names. For each stream:
 
@@ -746,7 +747,9 @@ def grain_model(seed: int) -> dict:
     for c in range(3):
         if c > 0 and rng.random() < 1 / 3:
             continue
-        edges = sorted(rng.sample(range(1, 255), 2 * rng.randint(1, 3) - 1))
+        # k bands take 2k - 2 edges between them: each band's top, then the
+        # next one's bottom.
+        edges = sorted(rng.sample(range(1, 255), 2 * rng.randint(1, 3) - 2))
         lows = [0] + edges[1::2]
         highs = edges[0::2] + [255]
         # A band's top pulled down by up to 20 leaves a gap above it.
@@ -761,11 +764,13 @@ def grains(name: str, data: bytes, sizes: list[int], slices: list[str],
            out: Path) -> list[tuple[str, Path]]:
     """Write a raw stream's first `GRAIN_LENGTH` packets with film grain
     characteristics put in before a packet's first slice; give back their
-    names and paths. `a`: the stream's model before every packet, to repeat
-    -- which carries it to a second field in a packet of its own, FFmpeg
-    forgetting a message only as a packet begins a picture. `e`: a model of
-    its own before every fifth packet, for that picture alone. FATE has no
-    H.264 stream with film grain, and x264 writes none."""
+    names and paths. `a`: the stream's model, to repeat, before two packets
+    in three -- which carries it to a second field in a packet of its own,
+    FFmpeg forgetting a message only as a packet begins a picture, and
+    leaves every third picture without grain, whatever the repetition
+    period said. `e`: a model of its own before every fifth packet, for that
+    picture alone. FATE has no H.264 stream with film grain, and x264 writes
+    none."""
     pk = classify(data, sizes, slices)
     if pk is None:
         print(f"{name}: slices do not map onto packets; no grain", flush=True)
@@ -787,7 +792,7 @@ def grains(name: str, data: bytes, sizes: list[int], slices: list[str],
         (out / grained).write_bytes(bytes(body))
         made.append((grained, out / grained))
 
-    write("a", lambda k: film_grain_sei(grain_model(seed), 1))
+    write("a", lambda k: film_grain_sei(grain_model(seed), 1) if k % 3 != 2 else None)
     write("e", lambda k: film_grain_sei(grain_model(seed + k), 0) if k % 5 == 0 else None)
     return made
 

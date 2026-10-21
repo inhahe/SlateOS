@@ -1,6 +1,14 @@
 ## §915 — Fix fastpy's sysroot lookup directly rather than working around it per-lane
 
 **Date:** 2026-09-07. **Decided by:** Operator. **Lane:** A.
+**Status:** done 2026-10-21, in fastpy 0.3.6 (github.com/inhahe/fastpy
+`5b11d88`), by lane D at the operator's request. `_find_slateos_sysroot_lib`
+now tries `FASTPY_SLATEOS_SYSROOT` (an error unless it holds `libc.a`); on
+SlateOS, the system's; the nearest directory at or above the working directory
+that has `toolchain/build-sysroot.ps1` (an error unless its sysroot is built);
+the same walk from fastpy's own directory; and last the sibling `os`. The boot
+test's identity check no longer copies that search (lane A, `81cb9543a`): it
+asks whether the fixture builder names the sysroot.
 
 **In short:** the C-test fixtures are compiled by fastpy (a separate project).
 Fastpy hard-codes a sibling folder named `os` to find the C library, but the

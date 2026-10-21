@@ -23,13 +23,15 @@ exit codes is at the top of `main.c`; 42 is every check.
 The same source compiles and passes on Linux (gcc main.c && ./a.out), which
 is how its expectations were checked to be Linux's.
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in (`scripts/lib/worktree.sh` says why
-naming another checkout in a command is how a lane builds another lane's
-artifact):
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \\
-        python services/ctest-unix-socket/build.py
+    python scripts/ctest-fixtures.py build --only ctest-unix-socket
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built and current.
 """

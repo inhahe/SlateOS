@@ -71,10 +71,6 @@ Running this file directly still works if `compiler` is importable, and is
 what `ctest-fixtures.py` ultimately does; it is just not the thing to tell
 somebody to do.
 
-(fastpy is on `D:` and this repo is on `E:`, so the sibling search fails and
-some configuration is not optional -- `known-issues.md` ->
-`B-CTEST-FIXTURES-CANNOT-FIND-THE-FASTPY-CHECKOUT-AFTER-THE-E-DRIVE-MIGRATION`.)
-
 The posix sysroot (`libc.a`) must already be built and must be *current* with
 `posix/src/` -- this fixture in particular tests code being changed the same
 day, so a stale sysroot will fail it for the wrong reason.

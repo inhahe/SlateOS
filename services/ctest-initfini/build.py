@@ -38,13 +38,15 @@ temporary directory rather than beside the fixture, because
 `create-ext4-rootfs.sh` stages every `services/ctest-*/*.elf` it can find and a
 fixture nothing runs is worse than no fixture.
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in.  There are four checkouts of this
-repo, and naming one of them in a command is how a lane ends up building
-another lane's artifact -- see `scripts/lib/worktree.sh`:
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \
-        python services/ctest-initfini/build.py
+    python scripts/ctest-fixtures.py build --only ctest-initfini
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built and must be *current* with
 `posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS.

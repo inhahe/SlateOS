@@ -39,11 +39,15 @@ the point (`scripts/lib/worktree.sh`, `slate_zig_cxx_runtime`, does the same).
 `-fno-builtin` and the codegen flags mirror `toolchain/x86_64-slateos.json`
 (static relocation, large code model), as in the C fixtures.
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in -- see `scripts/lib/worktree.sh`:
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \\
-        python services/ctest-cxx-throw/build.py
+    python scripts/ctest-fixtures.py build --only ctest-cxx-throw
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built and current with
 `posix/src/`: this fixture tests code added the same day, so a stale

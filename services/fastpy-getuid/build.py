@@ -40,13 +40,15 @@ and runs it as a ring-3 self-test (`self_test_fastpy_slateos_getuid`).  No
 filesystem capabilities beyond writing the output file are needed
 (`Rights::WRITE` for `/tmp`); the credential syscall needs no capability.
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in. There are four checkouts of this
-repo, and naming one of them in a command is how a lane ends up building
-another lane's artifact -- see `scripts/lib/worktree.sh`:
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \
-        python services/fastpy-getuid/build.py
+    python scripts/ctest-fixtures.py build --only fastpy-getuid
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

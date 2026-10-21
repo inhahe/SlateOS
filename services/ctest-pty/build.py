@@ -40,13 +40,15 @@ its own invention.
 Otherwise the compile flags mirror `toolchain/x86_64-slateos.json` (static
 relocation, large code model).
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in.  There are four checkouts of this
-repo, and naming one of them in a command is how a lane ends up building
-another lane's artifact -- see `scripts/lib/worktree.sh`:
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \
-        python services/ctest-pty/build.py
+    python scripts/ctest-fixtures.py build --only ctest-pty
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built and must be *current* with
 `posix/src/` and with `toolchain/build-sysroot.ps1`'s RUSTFLAGS.

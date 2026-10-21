@@ -57,13 +57,15 @@ File capability, spawns the process with argv `[fastpy-store, <input path>]`,
 and asserts it exits 0 (i.e. the store round-tripped and verified). The boot
 harness also confirms the digest `e5221fb8459a80d2` appears on serial.
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in. There are four checkouts of this
-repo, and naming one of them in a command is how a lane ends up building
-another lane's artifact -- see `scripts/lib/worktree.sh`:
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \
-        python services/fastpy-store/build.py
+    python scripts/ctest-fixtures.py build --only fastpy-store
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

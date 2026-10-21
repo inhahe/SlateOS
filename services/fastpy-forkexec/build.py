@@ -33,13 +33,15 @@ output appears on serial (proving the forked child really became `cat`) and
 reaped the child and read the correct exit status) — the fork/exec/wait
 handoff proven end to end from ring 3 through fastpy's own bindings.
 
-Run with fastpy on PYTHONPATH so `compiler` is importable, from the root of
-the worktree you are actually working in. There are four checkouts of this
-repo, and naming one of them in a command is how a lane ends up building
-another lane's artifact -- see `scripts/lib/worktree.sh`:
+Build it through `scripts/ctest-fixtures.py`, from the root of the worktree
+you are working in:
 
-    PYTHONPATH="D:/visual studio projects/fastpy" \
-        python services/fastpy-forkexec/build.py
+    python scripts/ctest-fixtures.py build --only fastpy-forkexec
+
+That finds the fastpy checkout and hands fastpy this worktree's sysroot.
+Running this file directly works if `compiler` is importable, but fastpy
+then finds the sysroot by itself, and its fallback is the `libc.a` of a
+sibling checkout named `os` -- the integration tree, not this one.
 
 The posix sysroot (`libc.a`) must already be built; see
 `toolchain/build-sysroot.ps1`.

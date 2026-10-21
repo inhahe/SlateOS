@@ -21,7 +21,7 @@
 
 use std::io::Cursor;
 
-use matroska::{AttachmentKind, Demuxer, Metadata};
+use matroska::{AttachmentKind, Demuxer, Error, Metadata};
 
 fn data(name: &str) -> String {
     format!("{}/tests/data/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -106,15 +106,25 @@ fn start_of(word: &str) -> Option<i64> {
     (word != "none").then(|| word.parse().unwrap())
 }
 
-/// The file's metadata, streams and chapters, as ffprobe shows them.
+/// The file's metadata, streams and chapters, as ffprobe shows them -- or
+/// its refusal.
 fn holds_to_ffprobe(name: &str) {
     let base = name.rsplit_once('.').unwrap().0;
     let path = data(&format!("{base}.meta.txt"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
     let mut lines = text.lines().filter(|l| !l.starts_with('#'));
-    let start = lines.next().unwrap().strip_prefix("start ").unwrap();
-    let expected: Vec<&str> = lines.collect();
+    let first = lines.next().unwrap();
     let bytes = std::fs::read(data(name)).unwrap();
+    if first == "refused" {
+        assert_eq!(
+            dump(&bytes, None),
+            ["refused"],
+            "{name}: ffprobe refuses it"
+        );
+        return;
+    }
+    let start = first.strip_prefix("start ").unwrap();
+    let expected: Vec<&str> = lines.collect();
     let got = dump(&bytes, start_of(start));
     for (i, (g, e)) in got.iter().zip(&expected).enumerate() {
         assert_eq!(g, e, "{name}: line {i} of what ffprobe shows");
@@ -173,19 +183,32 @@ fn metadata_where_the_seek_head_names_the_wrong_element() {
 }
 
 #[test]
+fn metadata_where_a_track_after_the_clusters_is_refused() {
+    holds_to_ffprobe("meta_refused_track_after_the_clusters.mkv");
+}
+
+#[test]
+fn metadata_of_as_many_tracks_as_ffmpeg_reads() {
+    holds_to_ffprobe("meta_1000_tracks.mkv");
+}
+
+#[test]
+fn metadata_of_one_track_too_many() {
+    holds_to_ffprobe("meta_1001_tracks.mkv");
+}
+
+#[test]
 fn metadata_after_the_clusters() {
     holds_to_ffprobe("meta_trailing.mkv");
 }
 
-/// A file whose metadata comes after its Clusters, cut short at every
-/// length through it: what was read before each cut is kept as FFmpeg keeps
-/// it -- a number cut short as far as it was read, a string cut short not
-/// at all, an attachment whose data is cut short left out -- and the
-/// SeekHead followed no further.
-#[test]
-fn metadata_cut_short_anywhere_is_ffmpeg_s() {
-    let bytes = std::fs::read(data("meta_trailing.mkv")).unwrap();
-    let text = std::fs::read_to_string(data("meta_trailing.cut.txt")).unwrap();
+/// `name` cut short at every length short of the whole, each held to what
+/// ffprobe shows of it (`NAME.cut.txt`): refused, or opened with the same
+/// metadata, streams and chapters.
+fn cut_short_anywhere_as_ffmpeg(name: &str) {
+    let bytes = std::fs::read(data(name)).unwrap();
+    let base = name.rsplit_once('.').unwrap().0;
+    let text = std::fs::read_to_string(data(&format!("{base}.cut.txt"))).unwrap();
     let mut cuts = 0;
     for line in text.lines().filter(|l| !l.starts_with('#')) {
         let w: Vec<&str> = line.split(' ').collect();
@@ -197,18 +220,102 @@ fn metadata_cut_short_anywhere_is_ffmpeg_s() {
         };
         let got = dump(&bytes[..n], start);
         if w[2] == "refused" {
-            assert_eq!(got, ["refused"], "cut at {n}");
+            assert_eq!(got, ["refused"], "{name} cut at {n}");
         } else {
             let text = got.join("\n") + "\n";
             assert_eq!(
                 md5::md5_hex(text.as_bytes()).to_string(),
                 w[3],
-                "cut at {n}: {got:#?}"
+                "{name} cut at {n}: {got:#?}"
             );
         }
+        assert_eq!(n, cuts, "{name}: a length missing from the answers");
         cuts += 1;
     }
-    assert!(cuts > 600, "{cuts} cuts");
+    assert_eq!(cuts, bytes.len(), "{name}: every length short of the whole");
+}
+
+/// A file whose metadata comes after its Clusters, cut short at every
+/// length through it. Before the first Cluster's ID is whole, the file is
+/// refused, as FFmpeg refuses it. After it, what was read before each cut
+/// is kept as FFmpeg keeps it -- a number cut short as far as it was read, a
+/// string cut short not at all, an attachment whose data is cut short left
+/// out -- and the SeekHead followed no further.
+#[test]
+fn metadata_cut_short_anywhere_is_ffmpeg_s() {
+    cut_short_anywhere_as_ffmpeg("meta_trailing.mkv");
+}
+
+/// Lane E's layout -- Info, a Tracks of two entries, Clusters, no SeekHead
+/// -- cut short at every length: inside either entry or between them, the
+/// file is refused, as FFmpeg refuses it, rather than opened with no tracks
+/// (`requests/e-f-matroska-opens-a-file-cut-short-inside-its-tracks.md`).
+#[test]
+fn two_tracks_cut_short_anywhere_are_ffmpeg_s() {
+    cut_short_anywhere_as_ffmpeg("uncued.mkv");
+}
+
+/// What `openings.txt` gives of a file that opens: [`dump`]'s lines, each
+/// track's time base, and the duration in seconds, as ffprobe writes it.
+fn opening(bytes: &[u8]) -> Vec<String> {
+    let mut lines = dump(bytes, None);
+    let Ok(d) = Demuxer::open(Cursor::new(bytes.to_vec())) else {
+        return lines;
+    };
+    for (i, t) in d.tracks().iter().enumerate() {
+        let (num, den) = d.time_base(t.number).unwrap();
+        lines.push(format!("time base {i} {num}/{den}"));
+    }
+    // FFmpeg's: the ticks times the nanoseconds of a tick, in microseconds,
+    // truncated.
+    let info = d.info();
+    lines.push(match info.duration {
+        Some(ticks) => {
+            #[allow(clippy::cast_precision_loss, reason = "FFmpeg's own sum, in double")]
+            let micros = (ticks * info.timestamp_scale as f64 / 1000.0) as i64;
+            #[allow(clippy::cast_precision_loss, reason = "as ffprobe prints it")]
+            let seconds = micros as f64 / 1e6;
+            format!("duration {seconds:.6}")
+        }
+        None => "duration none".to_owned(),
+    });
+    lines
+}
+
+/// Files FFmpeg opens or refuses by how its header reads before the first
+/// Cluster (`openings.txt`), and what it reads of those it opens -- most of
+/// them by its second pass, which looks for the Segment's top-level
+/// elements by their IDs: one with no Cluster is refused, whether it is
+/// whole or damaged, unless a SeekHead's `SeekID` holds a Cluster's ID; one
+/// whose Segment ends before its Clusters, with stray bytes before them,
+/// with top-level elements of unknown size, or damaged Cues, opens. Where
+/// FFmpeg lists the tracks twice, its second pass having read the Tracks
+/// again, they are listed once (design-decisions §1358).
+#[test]
+fn a_file_opens_or_is_refused_as_ffmpeg_decides() {
+    let text = std::fs::read_to_string(data("openings.txt")).unwrap();
+    let mut answers: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in text.lines().filter(|l| !l.starts_with('#')) {
+        match line.strip_prefix("file ") {
+            Some(file) => answers.push((file, Vec::new())),
+            None => answers.last_mut().unwrap().1.push(line),
+        }
+    }
+    // Every file's failure, not the first's.
+    let mut wrong = Vec::new();
+    for (file, lines) in &answers {
+        let (name, answer) = file.split_once(' ').unwrap();
+        let bytes = std::fs::read(data(name)).unwrap();
+        if answer == "refused" {
+            if Demuxer::open(Cursor::new(bytes)).is_ok() {
+                wrong.push(format!("{name}: opens"));
+            }
+        } else if opening(&bytes) != *lines {
+            wrong.push(format!("{name}: {:?}", opening(&bytes)));
+        }
+    }
+    assert!(wrong.is_empty(), "{} of the files: {wrong:#?}", wrong.len());
+    assert!(answers.len() >= 37, "{} files", answers.len());
 }
 
 // --- Beyond ffprobe -----------------------------------------------------------
@@ -327,6 +434,69 @@ fn damage_before_the_first_cluster_keeps_what_was_read() {
     assert_eq!(d.next_packet().unwrap().unwrap().data, b"k");
 }
 
+/// A Tracks the SeekHead names, after the Clusters, damaged after its first
+/// entry, does not refuse the file as it would before the first Cluster:
+/// following the SeekHead stops, and the file opens -- without that Tracks'
+/// tracks, where FFmpeg keeps the entry before the damage (known-issues).
+#[test]
+fn damage_in_a_tracks_the_seek_head_names_does_not_refuse_the_file() {
+    let header = el(&[0x1A, 0x45, 0xDF, 0xA3], &el(&[0x42, 0x82], b"matroska"));
+    let info = el(
+        &[0x15, 0x49, 0xA9, 0x66],
+        &el(&[0x2A, 0xD7, 0xB1], &[0x0F, 0x42, 0x40]),
+    );
+    let entry = [
+        el(&[0xD7], &[1]),
+        el(&[0x73, 0xC5], &[1]),
+        el(&[0x83], &[1]),
+        el(&[0x86], b"V_SNOW"),
+    ]
+    .concat();
+    // The second entry's TrackNumber runs past the entry.
+    let tracks = el(
+        &[0x16, 0x54, 0xAE, 0x6B],
+        &[el(&[0xAE], &entry), vec![0xAE, 0x83, 0xD7, 0x88, 1]].concat(),
+    );
+    let seek_head = |pos: u64| {
+        let entry = [
+            el(&[0x53, 0xAB], &[0x16, 0x54, 0xAE, 0x6B]),
+            el(&[0x53, 0xAC], &pos.to_be_bytes()),
+        ]
+        .concat();
+        el(&[0x11, 0x4D, 0x9B, 0x74], &el(&[0x4D, 0xBB], &entry))
+    };
+    let at = (seek_head(0).len() + info.len() + key_cluster().len()) as u64;
+    let segment = [seek_head(at), info, key_cluster(), tracks].concat();
+    let bytes = [header, big(SEGMENT, &segment)].concat();
+    let d = Demuxer::open(Cursor::new(bytes)).unwrap();
+    assert!(d.tracks().is_empty());
+}
+
+/// Attachments of one file, named `name`.
+fn one_attachment(name: &[u8]) -> Vec<u8> {
+    let file = [
+        el(&[0x46, 0x6E], name),
+        el(&[0x46, 0x60], b"application/x-test"),
+        el(&[0x46, 0x5C], b"data"),
+        el(&[0x46, 0xAE], &[7]),
+    ]
+    .concat();
+    el(&[0x19, 0x41, 0xA4, 0x69], &el(&[0x61, 0xA7], &file))
+}
+
+/// What the first pass read before damage the second does not read again:
+/// an attachment before a stray byte is listed once, where FFmpeg's second
+/// reading of the Attachments lists it twice (design-decisions §1358).
+/// (Chapters and tags would not show it: a chapter read again takes its own
+/// place, by its UID, and a tag sets its value again.)
+#[test]
+fn damage_after_attachments_lists_them_once() {
+    let bytes = file_with(&[one_attachment(b"a.bin"), vec![0x00]].concat());
+    let d = Demuxer::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(d.tracks().len(), 1);
+    assert_eq!(d.attachments().len(), 1);
+}
+
 /// After damage before the first Cluster, the Segment's stated end bounds
 /// nothing more: as FFmpeg, reading goes on to the end of the file. Here a
 /// Segment says it ends with its damaged Tags, and Chapters and a Cluster
@@ -343,6 +513,109 @@ fn after_damage_the_segment_runs_to_the_end_of_the_file() {
         Some(&b"Past the end"[..])
     );
     assert_eq!(d.next_packet().unwrap().unwrap().data, b"k");
+}
+
+/// A file built to make looking past damage cost the square of its length
+/// is refused, as too costly to look past. After a stray byte, Infos follow,
+/// each header (its ID, and a size running to the end of the many Voids
+/// after them) inside an unknown child of the Info before. The second pass,
+/// which finds each element by its ID and reads it, reads every Info through
+/// all the Infos and Voids after it -- as FFmpeg's does, which on such a file
+/// of a few megabytes runs for hours. Without the bound this file opens, after
+/// some 10^7 elements read.
+#[test]
+fn damage_too_costly_to_look_past_refuses_the_file() {
+    let voids = [0xEC, 0x80].repeat(10_000);
+    let chain = nested(&[0x15, 0x49, 0xA9, 0x66], 1000, voids.len());
+    let bytes = file_with(&[vec![0x00], chain, voids].concat());
+    assert!(matches!(
+        Demuxer::open(Cursor::new(bytes)).err(),
+        Some(Error::Unsupported(_))
+    ));
+}
+
+/// `count` elements of the four-byte ID `id`, built from the last back: each
+/// header (the ID, and an eight-byte size running to the end of the
+/// `tail_len` bytes after them all) inside an unknown 14-byte child of the
+/// one before -- so that the second pass, finding each by its ID, reads each
+/// through all the rest.
+fn nested(id: &[u8], count: usize, tail_len: usize) -> Vec<u8> {
+    let mut chain: Vec<u8> = Vec::new();
+    for _ in 0..count {
+        let data = if chain.is_empty() {
+            chain
+        } else {
+            [vec![0x80, 0x8C], chain].concat()
+        };
+        let size = (data.len() + tail_len) as u64;
+        let mut header = id.to_vec();
+        header.extend_from_slice(&size.to_be_bytes());
+        header[4] = 0x01;
+        chain = [header, data].concat();
+    }
+    chain
+}
+
+/// Real damage is looked past however large what follows it: a stray byte,
+/// then a Tracks whose entry's CodecPrivate is 4 MiB, which the second pass
+/// reads about twice -- reading the Tracks found, and in its search for the
+/// Chapters after it -- inside its bound of four times the file.
+#[test]
+fn damage_before_a_large_element_is_looked_past() {
+    let entry = [
+        el(&[0xD7], &[2]),
+        el(&[0x83], &[1]),
+        el(&[0x86], b"V_SNOW"),
+        big(&[0x63, 0xA2], &vec![0; 4 << 20]),
+    ]
+    .concat();
+    let tracks = big(&[0x16, 0x54, 0xAE, 0x6B], &big(&[0xAE], &entry));
+    let bytes = file_with(&[vec![0x00], tracks, one_chapter(b"After")].concat());
+    let d = Demuxer::open(Cursor::new(bytes)).unwrap();
+    assert_eq!(d.tracks().len(), 2);
+    assert_eq!(d.chapters().len(), 1);
+}
+
+/// Damage built so that looking past it would keep the file in memory many
+/// times over is refused too. As above, but Tracks, each header inside an
+/// unknown child of the Tracks before, all of them ending in one entry whose
+/// CodecPrivate is 4 MiB: every Tracks the second pass reads keeps a copy of
+/// it. Without the bound this file opens with the 16 copies.
+#[test]
+fn damage_that_would_keep_the_file_many_times_over_refuses_it() {
+    const TRACKS: usize = 16;
+    let entry = [
+        el(&[0xD7], &[2]),
+        el(&[0x83], &[1]),
+        el(&[0x86], b"V_SNOW"),
+        big(&[0x63, 0xA2], &vec![0; 4 << 20]),
+    ]
+    .concat();
+    let entry = big(&[0xAE], &entry);
+    let chain = nested(&[0x16, 0x54, 0xAE, 0x6B], TRACKS, entry.len());
+    let bytes = file_with(&[vec![0x00], chain, entry].concat());
+    assert!(matches!(
+        Demuxer::open(Cursor::new(bytes)).err(),
+        Some(Error::Unsupported(_))
+    ));
+}
+
+/// Damage built so that looking past it would have the source hand over
+/// the file many times, for little read, is refused too. As above, but each
+/// Tracks ends in 64 Voids a byte longer than the read-ahead: passing over
+/// one leaves the read-ahead behind, and the next element's header -- nine
+/// bytes read -- has the source hand over 64 KiB again. The bound counts what
+/// the source hands over. Counting what was read, this file opened, after
+/// the source had handed over 256 MiB for some 45 KB read.
+#[test]
+fn damage_that_would_refill_the_read_ahead_over_and_over_refuses_it() {
+    let voids = big(&[0xEC], &vec![0; 64 * 1024 + 1]).repeat(64);
+    let chain = nested(&[0x16, 0x54, 0xAE, 0x6B], 64, voids.len());
+    let bytes = file_with(&[vec![0x00], chain, voids].concat());
+    assert!(matches!(
+        Demuxer::open(Cursor::new(bytes)).err(),
+        Some(Error::Unsupported(_))
+    ));
 }
 
 /// A tag nested deeper than FFmpeg reads -- 13 SimpleTags deep is the most

@@ -77,9 +77,33 @@ pub const READ_AHEAD: usize = 64 * 1024;
 pub struct Reader<R> {
     /// The source, read ahead into a buffer. `None` only inside
     /// [`Reader::set_read_ahead`], while the buffer is changed.
-    inner: Option<BufReader<R>>,
+    inner: Option<BufReader<Counted<R>>>,
     pos: u64,
     len: u64,
+    /// See [`Reader::bytes_read`].
+    read: u64,
+}
+
+/// A source that counts the bytes it hands over ([`Reader::bytes_fetched`]).
+struct Counted<R> {
+    source: R,
+    read: u64,
+}
+
+impl<R: Read> Read for Counted<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.source.read(buf)?;
+        self.read = self
+            .read
+            .saturating_add(u64::try_from(n).unwrap_or(u64::MAX));
+        Ok(n)
+    }
+}
+
+impl<R: Seek> Seek for Counted<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.source.seek(pos)
+    }
 }
 
 impl<R: Read + Seek> Reader<R> {
@@ -92,13 +116,17 @@ impl<R: Read + Seek> Reader<R> {
         let len = source.seek(SeekFrom::End(0))?;
         source.seek(SeekFrom::Start(0))?;
         Ok(Self {
-            inner: Some(BufReader::with_capacity(READ_AHEAD, source)),
+            inner: Some(BufReader::with_capacity(
+                READ_AHEAD,
+                Counted { source, read: 0 },
+            )),
             pos: 0,
             len,
+            read: 0,
         })
     }
 
-    fn source(&mut self) -> Result<&mut BufReader<R>, Error> {
+    fn source(&mut self) -> Result<&mut BufReader<Counted<R>>, Error> {
         self.inner.as_mut().ok_or(Error::Io(io::ErrorKind::Other))
     }
 
@@ -143,6 +171,21 @@ impl<R: Read + Seek> Reader<R> {
         self.len.saturating_sub(self.pos)
     }
 
+    /// How many bytes have been read so far, those passed over by a seek
+    /// not counted: what parsing has cost, and the most it can have kept --
+    /// with [`Self::bytes_fetched`], for bounding what a damaged file can
+    /// make reading cost.
+    pub fn bytes_read(&self) -> u64 {
+        self.read
+    }
+
+    /// How many bytes the source has handed over so far: those read ahead,
+    /// and again after every seek that leaves the read-ahead behind -- so
+    /// that passing over an element costs the read-ahead it throws away.
+    pub fn bytes_fetched(&self) -> u64 {
+        self.inner.as_ref().map_or(0, |r| r.get_ref().read)
+    }
+
     /// Move to `pos`, which must lie within the source.
     ///
     /// # Errors
@@ -185,6 +228,7 @@ impl<R: Read + Seek> Reader<R> {
             kind => Error::Io(kind),
         })?;
         self.pos = self.pos.saturating_add(n);
+        self.read = self.read.saturating_add(n);
         Ok(())
     }
 

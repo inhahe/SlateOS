@@ -22,11 +22,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import json
 import os
 import subprocess
 import sys
 import threading
+
+# Only for its writer: the tee runs untraced, and importing does not install.
+from gatecache_trace import write_json
 
 #: Past this much stdin the record would be unwieldy; the run is not stored.
 MAX_STDIN = 16 << 20
@@ -101,11 +103,8 @@ def main() -> int:
         "stderr_sha": hashes["stderr"].hexdigest(),
         "rc": rc,
     }
-    tmp = record + ".tmp"
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-            json.dump(out, fh)
-        os.replace(tmp, record)
+        write_json(record, out)
     except OSError:
         pass  # no record: the driver refuses to store the run
     return rc

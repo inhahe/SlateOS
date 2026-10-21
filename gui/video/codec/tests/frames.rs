@@ -370,6 +370,45 @@ fn a_damaged_file_plays_what_it_can_and_never_panics() {
     }
 }
 
+/// A damaged AV1 file the fuzzer found, played and sought as its target
+/// plays it, ends: a seek flushes the decoder while a frame of it fails, and
+/// the decoding after the seek goes on (rav1d's `VENDORED.md`, change 8 --
+/// it hung, every thread waiting). It runs on a thread of its own, so
+/// that a hang fails the test rather than holding it. (Only with two or more
+/// of the decoder's threads, which it starts one a core.)
+#[test]
+fn a_seek_while_an_av1_frame_fails_does_not_hang() {
+    let bytes = std::fs::read(path("found_av1_flush_hang.mp4")).unwrap();
+    let (done, finished) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let limits = videocodec::Limits {
+            max_pixels: 1 << 20,
+        };
+        if let Ok(mut video) = Video::open_with(Cursor::new(bytes), None, limits) {
+            for _ in 0..6 {
+                if !matches!(video.next_frame(), Ok(Some(_))) {
+                    break;
+                }
+            }
+            // Whether each works is not the question; that each returns is.
+            let _ = video.seek(0, SeekMode::KeyFrame);
+            let _ = video.next_frame();
+            let _ = video.seek(1_000_000, SeekMode::Exact);
+            let _ = video.next_frame();
+            let _ = video.seek(i64::MAX / 4, SeekMode::KeyFrame);
+            let _ = video.next_picture();
+        }
+        // After a hang the test has given up waiting, and nothing receives.
+        let _ = done.send(());
+    });
+    assert!(
+        finished
+            .recv_timeout(std::time::Duration::from_mins(1))
+            .is_ok(),
+        "the decoder hung"
+    );
+}
+
 /// A player decodes on a thread of its own: everything it holds moves to one.
 #[test]
 fn a_video_moves_to_another_thread() {

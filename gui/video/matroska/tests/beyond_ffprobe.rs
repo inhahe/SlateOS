@@ -441,7 +441,9 @@ fn a_track_selected_alone_gives_the_packets_it_gives_among_the_others() {
         if every_packet(&mut ahead) != all {
             differ.push(format!("{name}: read 7 bytes ahead at a time"));
         }
-        for n in d.tracks().iter().map(|t| t.number) {
+        // Every track of every file, but for the 1000 of the file of as many
+        // tracks as FFmpeg reads, which are one another's copies.
+        for n in d.tracks().iter().map(|t| t.number).take(8) {
             let mut alone = open(&name);
             alone.select_tracks(Some(&[n]));
             alone.set_read_ahead(1024).unwrap();

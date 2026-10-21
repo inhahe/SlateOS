@@ -1,17 +1,17 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 
 use crate::include::common::bitdepth::AsPrimitive;
-use crate::include::common::bitdepth::BPC;
 use crate::include::common::bitdepth::BitDepth;
 use crate::include::common::bitdepth::DynPixel;
+use crate::include::common::bitdepth::BPC;
 use crate::include::common::intops::apply_sign;
 use crate::include::common::intops::iclip;
 use crate::include::dav1d::headers::Rav1dPixelLayoutSubSampled;
 use crate::include::dav1d::picture::Rav1dPictureDataComponentOffset;
 use crate::src::cpu::CpuFlags;
-use crate::src::enum_map::DefaultValue;
 use crate::src::enum_map::enum_map;
 use crate::src::enum_map::enum_map_ty;
+use crate::src::enum_map::DefaultValue;
 use crate::src::ffi_safe::FFISafe;
 use crate::src::internal::SCRATCH_AC_TXTP_LEN;
 use crate::src::internal::SCRATCH_EDGE_LEN;
@@ -31,11 +31,11 @@ use crate::src::levels::Z1_PRED;
 use crate::src::levels::Z2_PRED;
 use crate::src::levels::Z3_PRED;
 use crate::src::strided::Strided as _;
-use crate::src::tables::FLT_INCR;
 use crate::src::tables::dav1d_dr_intra_derivative;
 use crate::src::tables::dav1d_filter_intra_taps;
 use crate::src::tables::dav1d_sm_weights;
 use crate::src::tables::filter_fn;
+use crate::src::tables::FLT_INCR;
 use crate::src::wrap_fn_ptr::wrap_fn_ptr;
 use libc::ptrdiff_t;
 use std::cmp;

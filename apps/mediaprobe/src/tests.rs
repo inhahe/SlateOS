@@ -396,22 +396,34 @@ fn a_track_says_its_name_language_and_flags() {
 
 #[test]
 fn the_duration_is_in_ticks_of_the_timestamp_scale() {
+    // A Segment of the Info alone would be refused, as FFmpeg refuses a
+    // header that no Cluster follows; this one Cluster makes it a file.
+    let segment = |info: &[u8]| {
+        let body = [
+            element(0x1549_A966, info),
+            element(0x1F43_B675, &uint_element(0xE7, 0)),
+        ];
+        element(0x1853_8067, &body.concat())
+    };
     // A tick of a whole second, and the duration as a four-byte float.
     let info = [
         uint_element(0x2A_D7B1, 1_000_000_000),
         element(0x4489, &90.0_f32.to_be_bytes()),
     ]
     .concat();
-    let segment = element(0x1853_8067, &element(0x1549_A966, &info));
     let mut file = ebml_header("matroska");
-    file.extend(segment);
+    file.extend(segment(&info));
     assert_eq!(read(&file).duration_secs, Some(90.0));
     // A NaN duration is no duration, and nor is one of nothing.
     for nothing in [f64::NAN, 0.0] {
-        let info = float_element(0x4489, nothing);
+        // The title shows the file was read, not refused, so that the None
+        // below is the duration's own.
+        let info = [float_element(0x4489, nothing), element(0x7BA9, b"Film")].concat();
         let mut file = ebml_header("matroska");
-        file.extend(element(0x1853_8067, &element(0x1549_A966, &info)));
-        assert_eq!(read(&file).duration_secs, None, "{nothing}");
+        file.extend(segment(&info));
+        let probe = read(&file);
+        assert_eq!(probe.title.as_deref(), Some("Film"), "{nothing}");
+        assert_eq!(probe.duration_secs, None, "{nothing}");
     }
 }
 

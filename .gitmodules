@@ -1,0 +1,3 @@
+[submodule "toolchain/fastpy"]
+	path = toolchain/fastpy
+	url = https://github.com/inhahe/fastpy.git

@@ -6,6 +6,7 @@
 #![allow(
     clippy::panic,
     clippy::expect_used,
+    clippy::indexing_slicing,
     reason = "a test: a panic is a failed test"
 )]
 
@@ -96,6 +97,11 @@ fixtures!(
     vbri_in_front,
     joined_after_tagged,
     one_frame,
+    // MPEG-2.5 at 8 kHz with mixed blocks, whose short bands run past the
+    // channel's lines: found by the fuzzer, in mono; and made, in stereo,
+    // where the second channel's run into the scale factors is its sound.
+    found_mixed_8000,
+    mixed_8000_stereo,
 );
 
 /// Every answer in `tests/data` has its test above, so that a fixture added
@@ -116,4 +122,44 @@ fn every_fixture_is_tested() {
             );
         }
     }
+}
+
+/// The streams the fuzzer found, decoded as videocodec's `Sound` decodes
+/// them -- each packet the reader gives handed to the decoder alone -- as
+/// minimp3 decodes the same packets (`NAME.decoded`, from
+/// `generate_fixtures.py`): the decoding a packet at a time reaches frames
+/// the file's frames given one after another can pass over.
+#[test]
+fn found_streams_decode_packet_by_packet_as_minimp3_does() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).expect("tests/data") {
+        let answer = entry.expect("an entry").path();
+        if answer.extension().is_none_or(|e| e != "decoded") {
+            continue;
+        }
+        let name = answer.file_stem().and_then(|s| s.to_str()).expect("a name");
+        let path = ["mp3", "mp2", "mp1"]
+            .iter()
+            .map(|ext| dir.join(format!("{name}.{ext}")))
+            .find(|p| p.exists())
+            .unwrap_or_else(|| panic!("no stream for {name}"));
+        let stream = std::fs::File::open(path).expect("the stream");
+        let mut reader = mp3::Reader::open(stream).expect("opened");
+        let mut decoder = mp3::Decoder::new();
+        let mut pcm = [0i16; mp3::MAX_SAMPLES_PER_FRAME];
+        let mut got = Vec::new();
+        while let Some(packet) = reader.next_packet().expect("a packet") {
+            let (samples, info) = decoder.decode_frame(&packet.data, Some(&mut pcm));
+            let channels = if samples == 0 { 0 } else { info.channels };
+            got.push(format!(
+                "packet {samples} {channels} {:016x}",
+                common::fnv(&pcm[..samples * channels])
+            ));
+        }
+        let expected = std::fs::read_to_string(&answer).expect("the answer");
+        assert_eq!(got, expected.lines().collect::<Vec<_>>(), "{name}");
+        checked += 1;
+    }
+    assert!(checked >= 1, "no found stream to decode");
 }

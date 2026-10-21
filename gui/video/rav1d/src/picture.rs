@@ -13,10 +13,10 @@ use crate::include::dav1d::headers::Rav1dMasteringDisplay;
 use crate::include::dav1d::headers::Rav1dPixelLayout;
 use crate::include::dav1d::headers::Rav1dSequenceHeader;
 use crate::include::dav1d::picture::Dav1dPicture;
-use crate::include::dav1d::picture::RAV1D_PICTURE_ALIGNMENT;
 use crate::include::dav1d::picture::Rav1dPicAllocator;
 use crate::include::dav1d::picture::Rav1dPicture;
 use crate::include::dav1d::picture::Rav1dPictureParameters;
+use crate::include::dav1d::picture::RAV1D_PICTURE_ALIGNMENT;
 use crate::src::error::Dav1dResult;
 use crate::src::error::Rav1dError::EGeneric;
 use crate::src::error::Rav1dResult;
@@ -33,10 +33,10 @@ use std::ffi::c_int;
 use std::ffi::c_void;
 use std::mem;
 use std::ptr;
-use std::ptr::NonNull;
 use std::ptr::fn_addr_eq;
-use std::sync::Arc;
+use std::ptr::NonNull;
 use std::sync::atomic::AtomicU32;
+use std::sync::Arc;
 use to_method::To as _;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]

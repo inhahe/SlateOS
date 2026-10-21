@@ -9,6 +9,10 @@
 #   2. the `limine/` bootloader binaries the boot test stages into the ESP;
 #   3. `rootfs.ext4`, the Path-Z glibc rootfs the boot test attaches as vdb.
 #
+# It also checks out `toolchain/fastpy`, the git submodule holding the fastpy
+# compiler the rootfs's fastpy-* programs and /bin/fastpy are built with
+# (see provision_fastpy).
+#
 # Item 3 does not break the build — it silently *shrinks the test suite*.
 # Without it the boot test still reports PASSED while skipping ~58 rungs,
 # including every REAL-glibc Path-Z test (dynamic execution, stdio, pthread,
@@ -320,6 +324,48 @@ provision_sysroot() {
     return 1
 }
 
+# Check out `toolchain/fastpy`: fastpy, a submodule pinned to the commit this
+# tree was tested with, which `ctest-fixtures.py build` compiles the fastpy-*
+# programs with and the rootfs recipe bundles as /bin/fastpy. A clone or a new
+# worktree holds only an empty directory there until this runs.
+#
+# Only one not yet checked out is: one holding `compiler/__init__.py`, as
+# every consumer tests for, is left at whatever commit it is on.
+# `submodule update` would move it to the pin with its output silenced,
+# leaving behind any commit made in it -- a pin about to be moved, say.
+# Moving one to the pin is `git submodule update toolchain/fastpy`, which the
+# fastpy bundle names when it refuses a checkout off the pin. A checkout cut
+# short (its `.git` written, its files not) is not one, so it is retried.
+#
+# A failed checkout is not fatal when FASTPY_DIR names a fastpy checkout:
+# the fixture builds use that one. The rootfs is built under WSL, which sees
+# the variable only when passed through, and that is said.
+provision_fastpy() {
+    if [ -f "$ROOT/toolchain/fastpy/compiler/__init__.py" ]; then
+        echo "==> fastpy already checked out (toolchain/fastpy)"
+        return 0
+    fi
+    echo "==> checking out fastpy (toolchain/fastpy)"
+    if git -C "$ROOT" submodule update --init -- toolchain/fastpy; then
+        return 0
+    fi
+    if [ -n "${FASTPY_DIR:-}" ] && [ -f "$FASTPY_DIR/compiler/__init__.py" ]; then
+        echo "    could not check out toolchain/fastpy; builds use FASTPY_DIR" >&2
+        echo "    ($FASTPY_DIR). The rootfs is built under WSL, which sees it" >&2
+        echo "    only when passed through:" >&2
+        echo "        WSLENV=FASTPY_DIR/p wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh" >&2
+        return 0
+    fi
+    echo "    error: could not check out toolchain/fastpy." >&2
+    echo "    Without it the fastpy-* programs cannot be built, and the rootfs" >&2
+    echo "    leaves out /bin/fastpy. Set FASTPY_DIR to another fastpy checkout" >&2
+    echo "    to build with that one instead." >&2
+    if [ -n "${FASTPY_DIR:-}" ]; then
+        echo "    (FASTPY_DIR is $FASTPY_DIR, which holds no compiler/__init__.py.)" >&2
+    fi
+    return 1
+}
+
 check_only=0
 
 # `--services`: rebuild every service the kernel embeds, and nothing else --
@@ -505,6 +551,7 @@ failed=()
 # not reach for the network.
 if [ $# -eq 0 ] && [ "$services_only" -eq 0 ]; then
     provision_limine || failed+=("limine")
+    provision_fastpy || failed+=("fastpy")
     provision_rootfs || failed+=("rootfs.ext4")
     provision_sysroot || failed+=("sysroot")
 fi

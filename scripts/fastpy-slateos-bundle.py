@@ -34,8 +34,9 @@ emulation, so the script says which it did.
 The runtime archive comes from fastpy itself (`toolchain.
 build_slateos_runtime_archive`), which cross-compiles the C runtime with
 `zig cc` and packs it with `zig ar`. So this needs what a fastpy fixture build
-needs -- a fastpy checkout and zig -- and the llvmlite installed for the
-Python that runs it, whose `ir` package is copied rather than imported.
+needs -- fastpy, which is this repository's submodule `toolchain/fastpy`, and
+zig -- and the llvmlite installed for the Python that runs it, whose `ir`
+package is copied rather than imported.
 
 usage:
     python scripts/fastpy-slateos-bundle.py [--fastpy DIR] [--out DIR]
@@ -49,12 +50,15 @@ import hashlib
 import importlib.util
 import os
 import py_compile
+import re
 import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 from types import ModuleType
+
+import gitenv
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -67,13 +71,11 @@ DEFAULT_OUT = REPO / "build" / "fastpy-slateos"
 #: and the rootfs recipe stages its standard library as `python312.zip`.
 DEFAULT_PYTHON_VERSION = "3.12"
 
-#: Where fastpy is kept, tried last -- `ctest-fixtures.py::_fastpy_dir` explains
-#: why; this repeats its search so the fixtures and the image's compiler come
-#: from one checkout.
-PREMIGRATION_FASTPY = Path("D:/visual studio projects/fastpy")
-
-#: The same place as WSL names it, where the rootfs recipe runs.
-PREMIGRATION_FASTPY_WSL = Path("/mnt/d/visual studio projects/fastpy")
+#: fastpy, a submodule pinned to the commit the OS is tested with: what the
+#: tree is built from unless `--fastpy` or `$FASTPY_DIR` names another
+#: checkout. `ctest-fixtures.py::_fastpy_dir` searches the same way, so the
+#: fixtures and the image's compiler come from one checkout.
+SUBMODULE = REPO / "toolchain" / "fastpy"
 
 #: The image paths, relative to the tree's root.
 LIB_DIR = Path("usr/lib/x86_64-slateos")
@@ -111,9 +113,10 @@ class BundleError(Exception):
 
 
 def find_fastpy(explicit: str | None) -> Path:
-    """The fastpy checkout to bundle: `--fastpy`, then as ctest-fixtures
-    searches -- `$FASTPY_DIR`, `$PYTHONPATH`, a sibling named `fastpy`, and the
-    place fastpy is actually kept."""
+    """The fastpy checkout to bundle: the one `explicit` (`--fastpy`) or
+    `$FASTPY_DIR` names, else the submodule. Nothing else is searched: a
+    fastpy found beside the repository or on `$PYTHONPATH` is not the commit
+    this tree pins, and would be bundled without anyone being told."""
 
     def usable(p: Path) -> bool:
         return (p / "compiler" / "__init__.py").is_file()
@@ -125,17 +128,92 @@ def find_fastpy(explicit: str | None) -> Path:
         if usable(Path(named)):
             return Path(named)
         raise BundleError(f"{named} has no compiler/__init__.py")
-    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
-        if entry and usable(Path(entry)):
-            return Path(entry)
-    sibling = REPO.parent / "fastpy"
-    if usable(sibling):
-        return sibling
-    for candidate in (PREMIGRATION_FASTPY, PREMIGRATION_FASTPY_WSL):
-        if usable(candidate):
-            print(f"fastpy-bundle: using {candidate} (no sibling at {sibling})")
-            return candidate
-    raise BundleError("no fastpy checkout found; pass --fastpy or set FASTPY_DIR")
+    if usable(SUBMODULE):
+        return SUBMODULE
+    raise BundleError(
+        f"{SUBMODULE} is not checked out: run `git submodule update --init "
+        "toolchain/fastpy` (scripts/bootstrap-worktree.sh does), or name "
+        "another checkout with --fastpy or FASTPY_DIR"
+    )
+
+
+def pinned_commit() -> str | None:
+    """The commit this tree pins `toolchain/fastpy` at (the index's, so a
+    staged move of the pin counts), or None if git cannot say.
+
+    Under WSL, where the rootfs recipe runs this, git cannot open a lane
+    worktree by itself: its `.git` file names the git directory by a Windows
+    path (`gitdir: C:/...`). That path is then tried again as WSL names it."""
+    attempts: list[list[str]] = [[]]
+    wsl_git_dir = _wsl_git_dir()
+    if wsl_git_dir is not None:
+        attempts.append(["--git-dir", wsl_git_dir, "--work-tree", str(REPO)])
+    for extra in attempts:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(REPO), *extra, "rev-parse", ":toolchain/fastpy"],
+                capture_output=True, text=True, encoding="utf-8",
+                env=gitenv.clean_env(),
+            )
+        except OSError:
+            return None
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return None
+
+
+def _wsl_git_dir() -> str | None:
+    """REPO's git directory as WSL names it, when REPO's `.git` is a file
+    naming it by a Windows path and `wslpath` is here to translate it; else
+    None."""
+    try:
+        text = (REPO / ".git").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # A directory (a main checkout), or no `.git` at all.
+        return None
+    named = re.fullmatch(r"gitdir: ([A-Za-z]:[/\\].*)", text.strip())
+    if named is None or shutil.which("wslpath") is None:
+        return None
+    try:
+        result = subprocess.run(["wslpath", "-u", named.group(1)],
+                                capture_output=True, text=True, encoding="utf-8")
+    except OSError:
+        return None
+    path = result.stdout.strip()
+    return path if result.returncode == 0 and path else None
+
+
+def check_pin(checked_out: str, pinned: str | None) -> str | None:
+    """Refuse a submodule that is not the compiler this tree pins.
+
+    `checked_out` is `git_identity` of the submodule (`<commit>`, with
+    `-dirty` for edits or new files in `compiler/` or `runtime/`, or
+    `unknown`); `pinned` is `pinned_commit()`. A merge that moves the pin
+    leaves the submodule where it was, and bundling it then would put an
+    older compiler on the image than the one the fixtures are built with.
+    Returns a line to print when either commit cannot be read, else None;
+    raises BundleError when they differ.
+    """
+    if pinned is None:
+        return (f"cannot read the commit this tree pins toolchain/fastpy at; "
+                f"bundling it as checked out, at {checked_out}")
+    if checked_out == "unknown":
+        return (f"cannot read the commit toolchain/fastpy is at; bundling it "
+                f"unchecked against {pinned}, the commit this tree pins")
+    if checked_out == pinned:
+        return None
+    if checked_out == f"{pinned}-dirty":
+        raise BundleError(
+            f"toolchain/fastpy has uncommitted edits or new files in compiler/ "
+            f"or runtime/, so it is not {pinned}, the commit this tree pins: "
+            "undo them, or bundle the checkout they belong in with --fastpy "
+            "or FASTPY_DIR"
+        )
+    raise BundleError(
+        f"toolchain/fastpy is at {checked_out}, not {pinned}, the commit this "
+        "tree pins: `git submodule update toolchain/fastpy` moves it to the "
+        "pin, or `git add toolchain/fastpy` pins the commit it is at"
+    )
 
 
 def find_llvmlite(explicit: str | None) -> Path:
@@ -207,8 +285,9 @@ def fastpy_version(fastpy: Path) -> str:
 
 def git_identity(path: Path) -> str:
     """`<commit>`, `<commit>-dirty` when `compiler/` or `runtime/` has edits
-    the commit lacks, or `unknown` outside a checkout. Recorded for whoever
-    reads `BUNDLE`; nothing decides anything by it."""
+    the commit lacks or files it does not track (a new module would be
+    copied), or `unknown` outside a checkout. Recorded in `BUNDLE`, and held
+    to the pin by `check_pin` when the checkout is the submodule."""
     # A checkout has `.git` -- a directory, or a file in a worktree. Without
     # one there is nothing to ask, and no reason to start git to be told so.
     if not (path / ".git").exists():
@@ -217,11 +296,13 @@ def git_identity(path: Path) -> str:
         head = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "HEAD"],
             capture_output=True, text=True, encoding="utf-8", check=True,
+            env=gitenv.clean_env(),
         ).stdout.strip()
         dirty = subprocess.run(
             ["git", "-C", str(path), "status", "--porcelain",
-             "--untracked-files=no", "--", "compiler", "runtime"],
+             "--untracked-files=normal", "--", "compiler", "runtime"],
             capture_output=True, text=True, encoding="utf-8", check=True,
+            env=gitenv.clean_env(),
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
@@ -289,8 +370,10 @@ def byte_compile(home: Path, version: str) -> str:
 
 
 def build(fastpy: Path, llvmlite: Path, out: Path, version: str,
-          toolchain: ModuleType) -> str:
-    """Assemble the tree in `out`; return the byte-compile line."""
+          toolchain: ModuleType, identity: str | None = None) -> str:
+    """Assemble the tree in `out`; return the byte-compile line. `identity`
+    is `git_identity(fastpy)` when the caller has already asked it -- the
+    one `check_pin` approved -- and is asked here when not."""
     clear_output(out)
 
     archive = Path(toolchain.build_slateos_runtime_archive(
@@ -316,7 +399,7 @@ def build(fastpy: Path, llvmlite: Path, out: Path, version: str,
     # Written last: its presence is what marks the tree complete, and what
     # lets the next run clear it.
     fields = (
-        ("fastpy", git_identity(fastpy)),
+        ("fastpy", git_identity(fastpy) if identity is None else identity),
         ("fastpy-version", fastpy_version(fastpy)),
         ("llvmlite", llvmlite_version(llvmlite)),
         ("python", version),
@@ -334,7 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         prog="fastpy-slateos-bundle",
         description="Build the tree that puts the fastpy compiler on a SlateOS image.",
     )
-    parser.add_argument("--fastpy", help="the fastpy checkout (default: as ctest-fixtures finds it)")
+    parser.add_argument("--fastpy", help="the fastpy checkout (default: $FASTPY_DIR, else toolchain/fastpy)")
     parser.add_argument("--llvmlite", help="llvmlite's package directory (default: this Python's)")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT,
                         help="where to assemble the tree (default: build/fastpy-slateos)")
@@ -343,9 +426,18 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         fastpy = find_fastpy(args.fastpy)
+        identity = git_identity(fastpy)
+        # Resolved, so that naming the submodule by another spelling of its
+        # path is still the submodule, held to the pin.
+        if fastpy.resolve() == SUBMODULE.resolve():
+            note = check_pin(identity, pinned_commit())
+            if note is not None:
+                print(f"fastpy-bundle: {note}")
+        else:
+            print(f"fastpy-bundle: using {fastpy}, not the pinned toolchain/fastpy")
         llvmlite = find_llvmlite(args.llvmlite)
         compiled = build(fastpy, llvmlite, args.out, args.python_version,
-                         load_toolchain(fastpy))
+                         load_toolchain(fastpy), identity)
     except (BundleError, RuntimeError, OSError) as err:
         # RuntimeError is fastpy's own report of a failed runtime build (no
         # zig, a compile error); OSError a copy that could not be made.

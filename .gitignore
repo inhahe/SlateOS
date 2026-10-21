@@ -205,3 +205,9 @@ scratch_*.py
 # been rewritten by 15 commits and swept into others by `git add -A` without
 # anyone meaning to. Untracked here; the file itself stays where it is.
 .claude/scheduled_tasks.lock
+
+# The operator's own launcher for the lanes' sessions: which account, which
+# session, which prompt this week. It is not part of the project, and the
+# operator edits it constantly. Untracked here; the file itself stays where it
+# is.
+/go.bat

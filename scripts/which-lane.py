@@ -1013,7 +1013,6 @@ OPERATOR_OWNS: tuple[str, ...] = (
     "aero-window-frame.png",
     "file explorer.png",
     "slate os.png",
-    "go.bat",
     "push.bat",
 )
 

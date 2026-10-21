@@ -130,15 +130,15 @@ own `build.py` documents this), so it must run from Windows rather than from
 inside WSL. The `image-*` and `sysroot-*` commands need neither and run anywhere
 the image is built.
 
-You do not normally have to arrange the import yourself: `build` looks for a
-fastpy checkout beside the repo root (and honours `$FASTPY_DIR`) and puts it on
-the child's `PYTHONPATH`. If it cannot find one it says so and names the two
-ways to fix it, rather than letting each fixture die with a bare
-`ModuleNotFoundError: No module named 'compiler'` -- which is nine identical
-tracebacks that do not mention fastpy at all. To override the search:
+You do not have to arrange the import yourself. fastpy is pinned as the
+submodule `toolchain/fastpy`, and `build` checks it out at the pinned commit
+when it is not -- a fresh worktree, or a merge that moved the pin -- refusing
+if it has changes of its own, then puts it on the child's `PYTHONPATH`. If
+there is still no fastpy it says so and names the fix, rather than letting each
+fixture die with a bare `ModuleNotFoundError: No module named 'compiler'`. To
+build with another fastpy -- working on fastpy itself -- name it:
 
     FASTPY_DIR="<path-to-fastpy>" python scripts/ctest-fixtures.py build
-    PYTHONPATH="<path-to-fastpy>" python scripts/ctest-fixtures.py build
 
 That preflight proves fastpy *imports*. It cannot prove fastpy still *compiles*,
 and the difference bit on 2026-08-29: a Python upgrade moved `site-packages`, so
@@ -155,9 +155,9 @@ match, so every fixture is still attempted and each is reported in full.
 `services/<name>/build.py` directly** -- `build --only <name>` for one. Three
 things happen here that a direct run skips:
 
-* fastpy is found (`$FASTPY_DIR`, then `$PYTHONPATH`, then the sibling
-  `fastpy`), and a missing one is reported with the fix, not as a bare
-  `ModuleNotFoundError`;
+* the pinned fastpy (`toolchain/fastpy`, or `$FASTPY_DIR`) is checked out at
+  its pin and put on the import path, and a missing one is reported with the
+  fix, not as a bare `ModuleNotFoundError`;
 * the `fastpy-*` recipes are handed this worktree's sysroot
   (`FASTPY_SLATEOS_SYSROOT`). Run directly, fastpy finds a sysroot by itself:
   from fastpy 0.3.6 the checkout the build runs in (design-decisions 915), so
@@ -876,26 +876,26 @@ def _slateos_sysroot_env() -> str | None:
     return None
 
 
+#: Where this tree pins fastpy (`.gitmodules`): the compiler it was tested
+#: with, at the commit the tree records.
+FASTPY_SUBMODULE = "toolchain/fastpy"
+
+
 def _fastpy_dir() -> Path | None:
-    """The fastpy checkout whose `compiler` package each build.py imports.
+    """The fastpy checkout whose `compiler` package each build.py imports:
+    `$FASTPY_DIR`, which is for working on fastpy itself, and otherwise the
+    submodule at `toolchain/fastpy`. None if neither is there.
 
-    Searched, in order: $FASTPY_DIR, anything already on $PYTHONPATH, and a
-    sibling of the repo root named exactly `fastpy`, which is where fastpy is
-    kept -- so the common case needs no configuration at all. A build step
-    that works only when somebody remembers a path fails the first time
-    somebody else runs it.
-
-    The sibling must be named `fastpy`, not merely *contain* a `compiler`
-    package. An earlier draft accepted the first sibling that looked importable
-    and so selected `_fastpy_before` -- an old snapshot that sorts ahead of
-    `fastpy` -- silently cross-compiling nine fixtures against a stale
-    compiler. Picking a build input by "first directory that seems plausible"
-    is not a search, it is a guess; when the guess is wrong it produces working
-    binaries built from the wrong source, which no later check catches. Anyone
-    whose checkout lives elsewhere sets FASTPY_DIR.
+    Nothing else is looked at -- not `$PYTHONPATH`, not a fastpy beside the
+    repo. Any other fastpy is one this tree does not name, so binaries built
+    with it are not the ones the tree's commit determines; and on a machine
+    that keeps a fastpy beside its checkouts, a fallback to it would let a
+    worktree whose submodule was never checked out build with that one, and
+    nothing would say so. A wrong `$FASTPY_DIR` is reported, not passed over
+    for the submodule, for the same reason.
 
     A candidate only counts if it actually contains `compiler/__init__.py`, so
-    that a wrong path is reported here rather than nine times over as a bare
+    that a wrong path is reported here rather than once per fixture as a bare
     import error in the children.
     """
 
@@ -904,25 +904,77 @@ def _fastpy_dir() -> Path | None:
 
     env_dir = os.environ.get("FASTPY_DIR")
     if env_dir:
-        cand = Path(env_dir)
-        # An explicit FASTPY_DIR that is wrong is a mistake worth reporting,
-        # not something to silently fall through from into a sibling that
-        # happens to work -- that would build against a checkout the caller
-        # did not name.
-        if usable(cand):
-            return cand
+        if usable(Path(env_dir)):
+            return Path(env_dir)
         print(f"[ctest] ERROR: FASTPY_DIR={env_dir} has no compiler/__init__.py")
         return None
 
-    for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep):
-        if entry and usable(Path(entry)):
-            return Path(entry)
+    pinned = REPO / FASTPY_SUBMODULE
+    return pinned if usable(pinned) else None
 
-    sibling = REPO.parent / "fastpy"
-    if usable(sibling):
-        return sibling
 
-    return None
+def _submodule_state(status_line: str) -> str:
+    """What one line of `git submodule status` says: `current` (checked out at
+    the commit the tree pins), `absent` (never checked out), `moved` (checked
+    out at another commit) or `conflict` (the pin itself is in a merge
+    conflict) -- its first character, as git documents it."""
+    return {" ": "current", "-": "absent", "+": "moved", "U": "conflict"}.get(
+        status_line[:1], "conflict")
+
+
+def _sync_fastpy_submodule() -> bool:
+    """Check `toolchain/fastpy` out at the commit this tree pins, if it is not
+    already: never checked out (a fresh clone or worktree), or left at another
+    commit by a merge or checkout that moved the pin -- git moves the pin and
+    leaves the submodule's files where they were, so a build would quietly use
+    the old compiler. True when it is (now) at the pin.
+
+    Refuses -- False, having said why -- when the submodule has changes to its
+    tracked files: checking out the pin would discard them, and building with
+    them is not building with the pinned compiler. Work on fastpy goes through
+    `$FASTPY_DIR` instead. Every git call gets `gitenv.clean_env()`, since
+    `build` can run under a hook, where an inherited `GIT_DIR` would point
+    these at another repository."""
+    import gitenv
+
+    def git(*args: str, cwd: Path = REPO) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", *args], cwd=cwd, env=gitenv.clean_env(),
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", check=False)
+
+    status = git("submodule", "status", "--", FASTPY_SUBMODULE)
+    line = status.stdout.strip("\n")
+    if status.returncode != 0 or not line:
+        print(f"[ctest] ERROR: `git submodule status -- {FASTPY_SUBMODULE}` "
+              f"said nothing usable: {status.stderr.strip() or 'no such submodule'}")
+        return False
+    state = _submodule_state(line)
+    if state == "conflict":
+        print(f"[ctest] ERROR: {FASTPY_SUBMODULE}'s pinned commit is in a merge "
+              f"conflict; resolve it in the superproject first.")
+        return False
+    if state != "absent":
+        dirty = git("status", "--porcelain", "--untracked-files=no",
+                    cwd=REPO / FASTPY_SUBMODULE)
+        if dirty.returncode != 0 or dirty.stdout.strip():
+            print(f"[ctest] ERROR: {FASTPY_SUBMODULE} has changes of its own, so it "
+                  f"is not the pinned compiler:")
+            for row in (dirty.stdout or dirty.stderr).splitlines()[:10]:
+                print(f"[ctest]          {row}")
+            print("[ctest]        Commit them in fastpy, or set FASTPY_DIR to build with")
+            print("[ctest]        a fastpy of your choosing.")
+            return False
+    if state == "current":
+        return True
+    update = git("submodule", "update", "--init", "--", FASTPY_SUBMODULE)
+    if update.returncode != 0:
+        print(f"[ctest] ERROR: checking out {FASTPY_SUBMODULE} at its pin failed:")
+        for row in (update.stderr or update.stdout).strip().splitlines()[-10:]:
+            print(f"[ctest]          {row}")
+        return False
+    print(f"[ctest] fastpy: {FASTPY_SUBMODULE} was {state}; checked out the pinned "
+          f"commit {line[1:].split()[0][:12]}.")
+    return True
 
 
 def cmd_fastpy_dir() -> int:
@@ -1017,14 +1069,16 @@ def cmd_build(only: str | None, force: bool = False) -> int:
     # with `ModuleNotFoundError: No module named 'compiler'`, which names
     # neither fastpy nor PYTHONPATH -- nine identical tracebacks that read like
     # a broken toolchain rather than an unset variable.
+    if not os.environ.get("FASTPY_DIR") and not _sync_fastpy_submodule():
+        return 1
     fastpy = _fastpy_dir()
     if fastpy is None:
-        print("[ctest] ERROR: cannot find a fastpy checkout (needs compiler/__init__.py).")
-        print("[ctest]        Each services/ctest-*/build.py imports fastpy's `compiler`")
-        print("[ctest]        package to drive the zig cross-compile. Point at it with:")
+        print("[ctest] ERROR: no fastpy to build with (needs compiler/__init__.py).")
+        print("[ctest]        Each recipe imports fastpy's `compiler` package. The one")
+        print(f"[ctest]        this tree pins is the submodule {FASTPY_SUBMODULE}:")
+        print(f"[ctest]          git submodule update --init -- {FASTPY_SUBMODULE}")
+        print("[ctest]        or, to build with another fastpy:")
         print("[ctest]          FASTPY_DIR=<path-to-fastpy> " f"{_self_cmd()} build")
-        print("[ctest]        or place the fastpy checkout beside this repo:")
-        print(f"[ctest]          {REPO.parent / 'fastpy'}")
         return 1
     # Resolving fastpy says which compiler runs; this says which libc it links.
     # The staleness gate above answered a question about a file that was not the

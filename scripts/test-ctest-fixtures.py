@@ -41,6 +41,7 @@ import contextlib
 import inspect
 import io
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -467,34 +468,29 @@ def _fastpy_search(cf, tmpdir: str, **env):
                 os.environ[k] = v
 
 
-def test_fastpy_dir_takes_the_sibling_named_fastpy(cf, tmpdir):
-    """With neither variable set, the checkout beside the repo named exactly
-    `fastpy` -- and nothing when there is none."""
-    with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None) as parent:
-        _usable_fastpy(parent / "fastpy_copy")
-        none = cf._fastpy_dir()
-        sibling = _usable_fastpy(parent / "fastpy")
-        found = cf._fastpy_dir()
-    check("no sibling named fastpy, nothing", none, None)
-    check("the sibling named fastpy", found, sibling)
-
-
-def test_fastpy_dir_takes_pythonpath_before_the_sibling(cf, tmpdir):
-    """A usable `$PYTHONPATH` entry outranks the sibling."""
+def test_fastpy_dir_takes_the_submodule_and_nothing_else(cf, tmpdir):
+    """With no `$FASTPY_DIR`, the submodule `toolchain/fastpy` -- and nothing
+    when it is not checked out, though a usable fastpy sits beside the repo
+    and on `$PYTHONPATH`: building with a fastpy the tree does not pin is
+    what the submodule exists to rule out."""
     other = _usable_fastpy(Path(tmpdir) / "elsewhere" / "fastpy")
     with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=str(other)) as parent:
         _usable_fastpy(parent / "fastpy")
+        none = cf._fastpy_dir()
+        pinned = _usable_fastpy(cf.REPO / "toolchain" / "fastpy")
         found = cf._fastpy_dir()
-    check("the PYTHONPATH entry", found, other)
+    check("no submodule checked out: nothing, sibling and PYTHONPATH ignored",
+          none, None)
+    check("the submodule", found, pinned)
 
 
 def test_a_wrong_fastpy_dir_is_refused_not_fallen_through(cf, tmpdir):
-    """A `$FASTPY_DIR` without `compiler/` is an error, even with a usable
-    sibling beside the repo: building from a checkout the caller did not name
+    """A `$FASTPY_DIR` without `compiler/` is an error, even with the
+    submodule checked out: building from a checkout the caller did not name
     is the failure this search must never have."""
     with _fastpy_search(cf, tmpdir, FASTPY_DIR=str(Path(tmpdir) / "missing"),
-                        PYTHONPATH=None) as parent:
-        _usable_fastpy(parent / "fastpy")
+                        PYTHONPATH=None):
+        _usable_fastpy(cf.REPO / "toolchain" / "fastpy")
         found = cf._fastpy_dir()
     check("a wrong FASTPY_DIR finds nothing", found, None)
 
@@ -509,8 +505,8 @@ def test_fastpy_dir_command_prints_only_the_path(cf, tmpdir):
         with contextlib.redirect_stdout(out):
             missing_rc = cf.cmd_fastpy_dir()
         missing_out = out.getvalue()
-    with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None) as parent:
-        sibling = _usable_fastpy(parent / "fastpy")
+    with _fastpy_search(cf, tmpdir, FASTPY_DIR=None, PYTHONPATH=None):
+        pinned = _usable_fastpy(cf.REPO / "toolchain" / "fastpy")
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             found_rc = cf.cmd_fastpy_dir()
@@ -518,7 +514,102 @@ def test_fastpy_dir_command_prints_only_the_path(cf, tmpdir):
     check("none: exit 1", missing_rc, 1)
     check("none: nothing on stdout", missing_out, "")
     check("found: exit 0", found_rc, 0)
-    check("found: the path alone", found_out, f"{sibling}\n")
+    check("found: the path alone", found_out, f"{pinned}\n")
+
+
+def test_submodule_status_lines_are_read_as_git_documents_them(cf):
+    """The first character of a `git submodule status` line."""
+    sha = "5b11d8825e868140cf9c6350f92192c82fb0f3d7 toolchain/fastpy"
+    check("space: current", cf._submodule_state(" " + sha + " (v0.3.6)"), "current")
+    check("minus: absent", cf._submodule_state("-" + sha), "absent")
+    check("plus: moved", cf._submodule_state("+" + sha + " (v0.3.5)"), "moved")
+    check("U: conflict", cf._submodule_state("U" + sha), "conflict")
+
+
+def _git(*args, cwd):
+    import gitenv
+    r = subprocess.run(["git", *args], cwd=cwd, env=gitenv.clean_env(),
+                       capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", check=False)
+    if r.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
+
+def test_build_checks_the_pinned_fastpy_out_and_keeps_local_work(cf, tmpdir):
+    """`_sync_fastpy_submodule` against real git: a submodule never checked
+    out, and one left at another commit (as a merge that moves the pin leaves
+    it), are both checked out at the pin; one with changes to its files is
+    refused and left as it is."""
+    root = Path(tmpdir)
+    home = root / "home"
+    home.mkdir()
+    # A local-path submodule needs protocol.file.allow, and commits need a
+    # name. gitenv.clean_env() drops GIT_CONFIG_*, so the config goes where
+    # git reads it regardless: a HOME of the test's own.
+    (home / ".gitconfig").write_bytes(
+        b"[user]\n\tname = t\n\temail = t@t\n"
+        b"[protocol \"file\"]\n\tallow = always\n"
+        b"[init]\n\tdefaultBranch = main\n")
+    saved_home = {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
+    os.environ["HOME"] = str(home)
+    os.environ["USERPROFILE"] = str(home)
+    saved_repo = cf.REPO
+    try:
+        fp = root / "fastpy-origin"
+        (fp / "compiler").mkdir(parents=True)
+        _git("init", "-q", cwd=fp)
+        (fp / "compiler" / "__init__.py").write_bytes(b"VERSION = 1\n")
+        _git("add", ".", cwd=fp)
+        _git("commit", "-q", "-m", "one", cwd=fp)
+        first = _git("rev-parse", "HEAD", cwd=fp)
+        (fp / "compiler" / "__init__.py").write_bytes(b"VERSION = 2\n")
+        _git("commit", "-q", "-am", "two", cwd=fp)
+
+        os_repo = root / "os"
+        os_repo.mkdir()
+        _git("init", "-q", cwd=os_repo)
+        _git("submodule", "add", "-q", fp.as_posix(), "toolchain/fastpy", cwd=os_repo)
+        sub = os_repo / "toolchain" / "fastpy"
+        _git("checkout", "-q", first, cwd=sub)
+        _git("add", "toolchain/fastpy", cwd=os_repo)
+        _git("commit", "-q", "-m", "pin fastpy at one", cwd=os_repo)
+        cf.REPO = os_repo
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            # Left at another commit, as a merge that moved the pin leaves it.
+            _git("checkout", "-q", "main", cwd=sub)
+            moved = _git("submodule", "status", "--", "toolchain/fastpy", cwd=os_repo)
+            synced_moved = cf._sync_fastpy_submodule()
+            after_moved = _git("rev-parse", "HEAD", cwd=sub)
+            # Never checked out, as in a fresh worktree.
+            _git("submodule", "deinit", "-q", "--", "toolchain/fastpy", cwd=os_repo)
+            absent = _git("submodule", "status", "--", "toolchain/fastpy", cwd=os_repo)
+            synced_absent = cf._sync_fastpy_submodule()
+            after_absent = _git("rev-parse", "HEAD", cwd=sub)
+            current_again = cf._sync_fastpy_submodule()
+            # Changes of its own: refused, and kept.
+            (sub / "compiler" / "__init__.py").write_bytes(b"VERSION = 'mine'\n")
+            refused = cf._sync_fastpy_submodule()
+            kept = (sub / "compiler" / "__init__.py").read_bytes()
+    finally:
+        cf.REPO = saved_repo
+        for k, v in saved_home.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    check("left at another commit reads as moved", cf._submodule_state(moved), "moved")
+    check("moved: synced", synced_moved, True)
+    check("moved: now at the pin", after_moved, first)
+    check("deinit reads as absent", cf._submodule_state(absent), "absent")
+    check("absent: synced", synced_absent, True)
+    check("absent: now at the pin", after_absent, first)
+    check("at the pin: nothing to do", current_again, True)
+    check("changes of its own: refused", refused, False)
+    check("and left as they were", kept, b"VERSION = 'mine'\n")
+    check("the refusal says why", "changes of its own" in out.getvalue(), True)
 
 
 def test_only_prefers_the_fixture_named_exactly(cf, tmpdir):

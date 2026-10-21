@@ -31,22 +31,29 @@ Or from bash without vcvarsall, pass the full cl.exe path and ensure the Windows
 
 ### fastpy (for the ring-3 fixtures)
 
-`scripts/ctest-fixtures.py` compiles the ~70 fixture ELFs the boot test runs in
-ring 3, and the `fastpy-*` ones need the fastpy checkout importable. It looks
-for fastpy **beside the repo root** and honours `$FASTPY_DIR`.
+`scripts/ctest-fixtures.py` compiles the fixture ELFs the boot test runs in
+ring 3, and the `fastpy-*` ones need fastpy importable. This tree pins fastpy
+as the git submodule `toolchain/fastpy` (2026-10-21, operator's decision), so a
+checkout says which compiler built its binaries. `ctest-fixtures.py build`
+checks the submodule out at the pinned commit when it is not -- a fresh
+worktree, or a merge that moved the pin -- and refuses if it has changes of its
+own. By hand:
 
-Since the move to the new PC (2026-10-20) fastpy sits beside the OS repo, at
-`C:/visual studio projects/fastpy` (its GitHub checkout, where fastpy itself
-is developed), so the sibling search finds it with nothing set. To build
-against another checkout, name it:
+```
+git submodule update --init -- toolchain/fastpy
+```
+
+To build with another fastpy -- working on fastpy itself, whose own checkout is
+`C:/visual studio projects/fastpy` -- name it; nothing else is looked at:
 
 ```
 FASTPY_DIR="<path-to-fastpy>" python scripts/ctest-fixtures.py build
 ```
 
-fastpy is developed in that checkout while the lanes build against it, so a
-fastpy commit makes the `fastpy-*` fixtures stale: the rootfs build then
-refuses until `ctest-fixtures.py build` has rebuilt them.
+Moving the pin to a new fastpy is a commit of the gitlink
+(`git -C toolchain/fastpy checkout <sha>`, then `git add toolchain/fastpy`);
+it makes the `fastpy-*` fixtures stale, and the rootfs build refuses until
+`ctest-fixtures.py build` has rebuilt them.
 
 fastpy needs `llvmlite`, so it must run under a Python that has it: a bare
 `python` here is Python 3.14 with the project's packages. A Python without

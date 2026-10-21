@@ -1,5 +1,21 @@
 ## A-LANE-A-WIP-HANGS-IN-THE-SEMAPHORE-TIMED-WAIT-SELF-TEST (lane A, 2026-10-21) — OPEN
-**Status:** OPEN -- on lane-a-wip only (a94974945); `main` (c85e42859) does not have it
+**Status:** OPEN -- fixed on lane-a-wip (`655557547`, `acaa81be8`), which then booted
+green on 2026-10-21; closes when the batch reaches `main`. `main` never had it.
+
+**Cause, as found.** Two faults met. (1) Test 8's timed wait runs in the early
+deterministic-init phase, before `hrtimer::init()` and `sti()`, where its timer
+can never fire. (2) The scheduler's idle fallback halted (HLT) *before* its
+first pass, and that pass is what drains deferred wakes; with interrupts off
+HLT ends only on an NMI, so a wake already deferred for the boot task was
+never delivered, and the boot halted for good. Evidence: with (2) fixed and
+test 8 put back in the early phase on purpose, the boot passed -- the drained
+wake resumed the task, and its 1 ms deadline had passed by the clock.
+
+**Fix.** `655557547` moves test 8 to `ipc::semaphore::self_test_timed_wait`,
+run once interrupts are live (as rq39 did for unix sockets). `acaa81be8` makes
+the idle fallback poll instead of halting while interrupts are off -- so
+deferred wakes are drained -- and, after `IDLE_IF_OFF_PASSES` empty passes,
+dump the wedge report and panic, naming the cause.
 
 **In short:** the 80-commit lane A batch on `lane-a-wip` (memory, page cache, memfd,
 msync and scheduler work from 2026-10-16/17) had never been booted when lane A was

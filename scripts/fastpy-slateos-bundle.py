@@ -50,12 +50,15 @@ import hashlib
 import importlib.util
 import os
 import py_compile
+import re
 import shutil
 import subprocess
 import sys
 import tomllib
 from pathlib import Path
 from types import ModuleType
+
+import gitenv
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -134,6 +137,79 @@ def find_fastpy(explicit: str | None) -> Path:
     )
 
 
+def pinned_commit() -> str | None:
+    """The commit this tree pins `toolchain/fastpy` at (the index's, so a
+    staged move of the pin counts), or None if git cannot say.
+
+    Under WSL, where the rootfs recipe runs this, git cannot open a lane
+    worktree by itself: its `.git` file names the git directory by a Windows
+    path (`gitdir: C:/...`). That path is then tried again as WSL names it."""
+    attempts: list[list[str]] = [[]]
+    wsl_git_dir = _wsl_git_dir()
+    if wsl_git_dir is not None:
+        attempts.append(["--git-dir", wsl_git_dir, "--work-tree", str(REPO)])
+    for extra in attempts:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(REPO), *extra, "rev-parse", ":toolchain/fastpy"],
+                capture_output=True, text=True, encoding="utf-8",
+                env=gitenv.clean_env(),
+            )
+        except OSError:
+            return None
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    return None
+
+
+def _wsl_git_dir() -> str | None:
+    """REPO's git directory as WSL names it, when REPO's `.git` is a file
+    naming it by a Windows path and `wslpath` is here to translate it; else
+    None."""
+    try:
+        text = (REPO / ".git").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # A directory (a main checkout), or no `.git` at all.
+        return None
+    named = re.fullmatch(r"gitdir: ([A-Za-z]:[/\\].*)", text.strip())
+    if named is None or shutil.which("wslpath") is None:
+        return None
+    try:
+        result = subprocess.run(["wslpath", "-u", named.group(1)],
+                                capture_output=True, text=True, encoding="utf-8")
+    except OSError:
+        return None
+    path = result.stdout.strip()
+    return path if result.returncode == 0 and path else None
+
+
+def check_pin(checked_out: str, pinned: str | None) -> str | None:
+    """Refuse a submodule that is not the compiler this tree pins.
+
+    `checked_out` is `git_identity` of the submodule (`<commit>`, with
+    `-dirty` for edits in `compiler/` or `runtime/`); `pinned` is
+    `pinned_commit()`. A merge that moves the pin leaves the submodule where
+    it was, and bundling it then would put an older compiler on the image
+    than the one the fixtures are built with. Returns a line to print when
+    the pin cannot be read, else None; raises BundleError when they differ.
+    """
+    if pinned is None:
+        return (f"cannot read the commit this tree pins toolchain/fastpy at; "
+                f"bundling it as checked out, at {checked_out}")
+    if checked_out == pinned:
+        return None
+    if checked_out == f"{pinned}-dirty":
+        raise BundleError(
+            f"toolchain/fastpy has uncommitted edits in compiler/ or runtime/, "
+            f"so it is not {pinned}, the commit this tree pins: undo them, or "
+            "bundle the checkout they belong in with --fastpy or FASTPY_DIR"
+        )
+    raise BundleError(
+        f"toolchain/fastpy is at {checked_out}, not {pinned}, the commit this "
+        "tree pins: run `git submodule update toolchain/fastpy`"
+    )
+
+
 def find_llvmlite(explicit: str | None) -> Path:
     """llvmlite's package directory: `--llvmlite`, else the running Python's.
     Only its files are read; nothing of it is imported."""
@@ -203,8 +279,8 @@ def fastpy_version(fastpy: Path) -> str:
 
 def git_identity(path: Path) -> str:
     """`<commit>`, `<commit>-dirty` when `compiler/` or `runtime/` has edits
-    the commit lacks, or `unknown` outside a checkout. Recorded for whoever
-    reads `BUNDLE`; nothing decides anything by it."""
+    the commit lacks, or `unknown` outside a checkout. Recorded in `BUNDLE`,
+    and held to the pin by `check_pin` when the checkout is the submodule."""
     # A checkout has `.git` -- a directory, or a file in a worktree. Without
     # one there is nothing to ask, and no reason to start git to be told so.
     if not (path / ".git").exists():
@@ -213,11 +289,13 @@ def git_identity(path: Path) -> str:
         head = subprocess.run(
             ["git", "-C", str(path), "rev-parse", "HEAD"],
             capture_output=True, text=True, encoding="utf-8", check=True,
+            env=gitenv.clean_env(),
         ).stdout.strip()
         dirty = subprocess.run(
             ["git", "-C", str(path), "status", "--porcelain",
              "--untracked-files=no", "--", "compiler", "runtime"],
             capture_output=True, text=True, encoding="utf-8", check=True,
+            env=gitenv.clean_env(),
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         return "unknown"
@@ -339,6 +417,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         fastpy = find_fastpy(args.fastpy)
+        if fastpy == SUBMODULE:
+            note = check_pin(git_identity(fastpy), pinned_commit())
+            if note is not None:
+                print(f"fastpy-bundle: {note}")
+        else:
+            print(f"fastpy-bundle: using {fastpy}, not the pinned toolchain/fastpy")
         llvmlite = find_llvmlite(args.llvmlite)
         compiled = build(fastpy, llvmlite, args.out, args.python_version,
                          load_toolchain(fastpy))

@@ -446,6 +446,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/sh-diff.sh` | Differential test: our sh against dash. |
 | `scripts/sharutils-ref.sh` | Unpacks Ubuntu's sharutils package, without root, as the uuencode/uudecode harness reference. |
 | `scripts/shellcheck-all.sh` | Run shellcheck over every script in this directory and below it. |
+| `scripts/shellfunc.py` | Cut one shell function out of a script, by name, so a test runs the real one. |
 | `scripts/shred-diff.sh` | shred-diff.sh — compare our `shred` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/shuf-diff.sh` | shuf-diff.sh — compare our `shuf` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/skill-diff.sh` | skill-diff.sh -- run our `skill` and `snice` and procps-ng's side by side and |
@@ -538,6 +539,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-rootfs-staging.sh` | Exercise create-ext4-rootfs.sh's staging blocks against fake artifacts, |
 | `scripts/test-rustemit.py` | Tests for `rustemit.py` and the checker built on it. |
 | `scripts/test-selftests-are-repo-safe.py` | Every self-test the push hook runs must leave the real repository alone. |
+| `scripts/test-shellfunc.py` | Regression tests for `scripts/shellfunc.py`. |
 | `scripts/test-src-digest.py` | Regression tests for `scripts/src_digest.py`. |
 | `scripts/test-srcload.py` | Regression tests for `scripts/srcload.py`. |
 | `scripts/test-straddle-check.py` | Regression tests for `scripts/straddle-check.py`. |
@@ -590,4 +592,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_580 scripts._
+_582 scripts._

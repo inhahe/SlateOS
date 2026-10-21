@@ -29,7 +29,6 @@ repository bindings removed (`gitenv.clean_env`), never in this one.
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -38,6 +37,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
 import msysbash  # noqa: E402
+import shellfunc  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HOOK = os.path.join(HERE, "hooks", "pre-push")
@@ -52,15 +52,6 @@ def check(label: str, got: object, want: object) -> None:
         print(f"FAIL  {label}\n        got : {got!r}\n        want: {want!r}",
               file=sys.stderr)
         failures.append(label)
-
-
-def extract_function() -> str:
-    with open(HOOK, encoding="utf-8") as fh:
-        text = fh.read()
-    m = re.search(r"^tree_is_push\(\) \{\n.*?^\}\n", text, re.MULTILINE | re.DOTALL)
-    if not m:
-        raise SystemExit("tree_is_push() not found in scripts/hooks/pre-push")
-    return m.group(0)
 
 
 def git(repo: str, *args: str) -> str:
@@ -86,7 +77,7 @@ def run(repo: str, fn: str, pushed: str, *paths: str) -> tuple[int, str]:
 
 
 def main() -> int:
-    fn = extract_function()
+    fn = shellfunc.shell_function_in(HOOK, "tree_is_push")
     repo = tempfile.mkdtemp(prefix="tree-is-push-")
     try:
         git(repo, "init", "-q")

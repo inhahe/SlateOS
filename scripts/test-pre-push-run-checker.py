@@ -54,6 +54,7 @@ from pathlib import Path
 # objects too), in `finally` blocks that may run before that group does.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import gitenv  # noqa: E402
+import shellfunc  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 LIB = ROOT / "scripts" / "run-checker.sh"
@@ -69,31 +70,6 @@ def check(label: str, ok: bool, detail: str = "") -> None:
     else:
         print(f"  FAIL {label}" + (f" -- {detail}" if detail else ""))
         failures.append(label)
-
-
-def extract_function(path: Path, name: str) -> str:
-    """The `<name>() { ... }` block of the shell file `path`, cut out by brace
-    matching.
-
-    Matches the closing brace at column 0, which is the style of both files for
-    a function body and is unambiguous: every inner `}` in the body is indented.
-    """
-    lines = path.read_text(encoding="utf-8").splitlines()
-    start = None
-    for i, line in enumerate(lines):
-        if line.startswith(f"{name}() {{"):
-            start = i
-            break
-    if start is None:
-        raise SystemExit(
-            f"cannot find `{name}() {{` in {path.name} -- the function was "
-            "renamed or restructured, and this suite is testing nothing. "
-            "Update the extraction, do not delete the test."
-        )
-    for j in range(start + 1, len(lines)):
-        if lines[j] == "}":
-            return "\n".join(lines[start : j + 1])
-    raise SystemExit(f"{name}'s body in {path.name} has no closing brace at column 0")
 
 
 def child_env() -> dict[str, str]:
@@ -512,8 +488,8 @@ def main() -> int:
         return 0
 
     # run_checker and the function its skip arms record through.
-    func = (extract_function(LIB, "run_checker_note_skip") + "\n"
-            + extract_function(LIB, "run_checker"))
+    func = (shellfunc.shell_function_in(LIB, "run_checker_note_skip") + "\n"
+            + shellfunc.shell_function_in(LIB, "run_checker"))
 
     tmp_root = Path(tempfile.mkdtemp(prefix="runchecker-"))
     try:
@@ -1275,7 +1251,7 @@ def main() -> int:
         tally_driver = tmp_root / "driver-tally.sh"
         tally_driver.write_text(
             "set -u\n"
-            + extract_function(HOOK, "print_gate_tally") + "\n"
+            + shellfunc.shell_function_in(HOOK, "print_gate_tally") + "\n"
             + 'gates_ran=" rustfmt libc-abi eol"\n'
             + 'gates_skipped=" docs"\n'
             + "TAB=$(printf '\\t')\n"
@@ -1299,7 +1275,7 @@ def main() -> int:
         empty_driver = tmp_root / "driver-tally-none.sh"
         empty_driver.write_text(
             "set -u\n"
-            + extract_function(HOOK, "print_gate_tally") + "\n"
+            + shellfunc.shell_function_in(HOOK, "print_gate_tally") + "\n"
             + 'gates_ran=" rustfmt"\ngates_skipped=""\nRUN_CHECKER_SKIPS=\n'
             + "print_gate_tally\n",
             encoding="utf-8",

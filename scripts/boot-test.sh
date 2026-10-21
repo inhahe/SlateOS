@@ -1510,6 +1510,14 @@ export CHECKER_PROG CHECKER_REFUSING CHECKER_LOGDIR
 # nothing (SC1090).
 # shellcheck source=run-checker.sh
 . "$BOOT_CHECKER_LIB"
+# Every gate that could not run, appended by run_checker_note_skip; the gate
+# banner counts them and the boot-history row records them with their reasons.
+RUN_CHECKER_SKIPS=
+# Each Python gate below skips on its own when there is no python, in its own
+# words; this one entry is what puts them in the list.
+if ! command -v python &>/dev/null && ! command -v python3 &>/dev/null; then
+    run_checker_note_skip "every python gate" "no python or python3 on PATH"
+fi
 
 # Announce the tree under test, first line of the log, before anything else.
 #
@@ -1597,14 +1605,19 @@ unset _bt_dirty
 # as "unknown" and therefore refuses to group -- the safe direction.  A boot
 # test that failed because a digest could not be computed would be strictly
 # worse than one that simply did not record it.
-BT_SRC_DIGEST=""
-if command -v python &>/dev/null; then
-    BT_SRC_DIGEST="$(python "$PROJECT_ROOT/scripts/src_digest.py" \
-                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
-elif command -v python3 &>/dev/null; then
-    BT_SRC_DIGEST="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" \
-                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
-fi
+#
+# Taken again after --bootstrap provisions the tree (check_prerequisites): the
+# service binaries it builds go into the kernel, so they are part of what the
+# digest describes, and a digest taken before they existed would make the
+# comparison at build time report a change the run made itself.
+take_src_digest() {
+    if command -v python &>/dev/null; then
+        python "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true
+    elif command -v python3 &>/dev/null; then
+        python3 "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true
+    fi
+}
+BT_SRC_DIGEST="$(take_src_digest)"
 if [ -n "$BT_SRC_DIGEST" ]; then
     echo "=== Source digest: $BT_SRC_DIGEST ==="
 else
@@ -3476,6 +3489,9 @@ record_boot_outcome() {
     # looking like a measurement.
     if [ -n "${GATES_SECONDS:-}" ]; then
         args+=(--gates-seconds "$GATES_SECONDS")
+        # Beside gates_seconds, so the row has the list exactly when the gate
+        # phase completed: empty then means none skipped.
+        args+=("--gates-skipped=${RUN_CHECKER_SKIPS:-}")
     fi
     if [ -n "${BOOT_TEST_START_EPOCH:-}" ]; then
         local script_secs=$(( $(date +%s) - BOOT_TEST_START_EPOCH ))
@@ -3812,6 +3828,8 @@ check_prerequisites() {
                 # must not turn a now-buildable tree back into a refusal.  The
                 # re-check below is the authority.
                 bash "$boot" || true
+                BT_SRC_DIGEST="$(take_src_digest)"
+                echo "=== Source digest after provisioning: ${BT_SRC_DIGEST:-unavailable} ==="
                 report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
                 case "$status" in
                     0)
@@ -7978,6 +7996,8 @@ check_python_suites() {
                 nskips=$(printf '%s\n' "$skips" | wc -l)
                 skipped_groups=$((skipped_groups + nskips))
                 skipping+=("$(basename "$f")")
+                run_checker_note_skip "$(basename "$f")" \
+                    "$((nskips)) group(s) SKIPPED, the first: $(printf '%s\n' "$skips" | head -n 1 | sed 's/^[[:space:]]*//')"
                 # Indented under the suite's own line, so it reads as part of
                 # that suite's report rather than as a separate finding.  Line
                 # by line rather than one `printf '  ^ %s\n' "$skips"`: that
@@ -8639,6 +8659,7 @@ check_cfg_unix() {
         | grep -qx "x86_64-unknown-linux-gnu"; then
         echo "=== cfg(unix) check: skipped (x86_64-unknown-linux-gnu not installed) ===" >&2
         echo "    rustup target add x86_64-unknown-linux-gnu" >&2
+        run_checker_note_skip cfg-unix "the x86_64-unknown-linux-gnu target is not installed"
         return 0
     fi
 
@@ -8809,7 +8830,15 @@ check_kernel_docs
 # not at bench/boot-history.jsonl, and the header's budgeting advice is exactly
 # what this number is evidence for.
 GATES_SECONDS=$(( $(date +%s) - GATES_START_EPOCH ))
-echo "=== Gates OK (${GATES_SECONDS}s) ==="
+# "OK" covers only the gates that ran, so the ones that could not are named
+# here; their reasons are in the boot-history verdict at the end of the run.
+if [ -n "$RUN_CHECKER_SKIPS" ]; then
+    _gate_skip_labels="$(printf '%s' "$RUN_CHECKER_SKIPS" | cut -f1 | tr '\n' ' ')"
+    _gate_skip_count="$(printf '%s' "$RUN_CHECKER_SKIPS" | grep -c .)" || true
+    echo "=== Gates OK (${GATES_SECONDS}s), but ${_gate_skip_count} could not run: ${_gate_skip_labels% } ==="
+else
+    echo "=== Gates OK (${GATES_SECONDS}s) ==="
+fi
 
 # Where those seconds went, per gate.
 #
@@ -8903,12 +8932,7 @@ if [ "$NO_BUILD" -eq 0 ]; then
     # allowed.  Recording it as though it had not happened is not.
     BT_SRC_CHANGED=0
     if [ -n "$BT_SRC_DIGEST" ]; then
-        _bt_digest_now=""
-        if command -v python &>/dev/null; then
-            _bt_digest_now="$(python "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
-        elif command -v python3 &>/dev/null; then
-            _bt_digest_now="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
-        fi
+        _bt_digest_now="$(take_src_digest)"
         # An unavailable second digest proves nothing and must not accuse.
         if [ -n "$_bt_digest_now" ] && [ "$_bt_digest_now" != "$BT_SRC_DIGEST" ]; then
             BT_SRC_CHANGED=1

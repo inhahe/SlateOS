@@ -850,6 +850,8 @@ if [ ! -f "$hook_lib" ]; then
 fi
 # shellcheck source=../run-checker.sh
 . "$hook_lib"
+# This push's gates that could not run; print_gate_tally reads it at the end.
+RUN_CHECKER_SKIPS=
 
 # ---------------------------------------------------------------------------
 # Gate 77: what reaches main lies in a recorded review at its tier.
@@ -7256,12 +7258,42 @@ EOF
     exit 1
 fi
 
-n_ran=0
-n_skipped=0
-for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
-for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
-echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
-[ "$n_ran" -gt 0 ] && echo "  ran:    ${gates_ran# }" >&2
-[ "$n_skipped" -gt 0 ] && echo "  skipped: ${gates_skipped# }" >&2
+# print_gate_tally -- the closing count of the gates that ran and those that
+# did not.
+#
+# A call site tallies its gate (note_gate) by what it decided before running
+# it, but a checker can find only at run time that it cannot run -- exit 3, or
+# a decline its call site allows -- and most call sites do not look.
+# RUN_CHECKER_SKIPS holds every such skip, so a gate whose own name is among
+# them moves from ran to skipped here, and every skip is listed with the reason
+# its checker gave, including those whose label is not a gate's name (a
+# self-test, a per-ref run).
+print_gate_tally() {
+    _tab=$(printf '\t')
+    if [ -n "${RUN_CHECKER_SKIPS:-}" ]; then
+        _skip_labels=" $(printf '%s' "$RUN_CHECKER_SKIPS" | cut -f1 | tr '\n' ' ')"
+        _still_ran=""
+        for _g in $gates_ran; do
+            case "$_skip_labels" in
+            *" $_g "*) gates_skipped="$gates_skipped $_g" ;;
+            *) _still_ran="$_still_ran $_g" ;;
+            esac
+        done
+        gates_ran=$_still_ran
+    fi
+    n_ran=0
+    n_skipped=0
+    for _g in $gates_ran; do n_ran=$((n_ran + 1)); done
+    for _g in $gates_skipped; do n_skipped=$((n_skipped + 1)); done
+    echo "pre-push: $n_ran gate(s) ran, $n_skipped skipped." >&2
+    if [ "$n_ran" -gt 0 ]; then echo "  ran:    ${gates_ran# }" >&2; fi
+    if [ "$n_skipped" -gt 0 ]; then echo "  skipped: ${gates_skipped# }" >&2; fi
+    if [ -n "${RUN_CHECKER_SKIPS:-}" ]; then
+        echo "  could not run, so checked nothing:" >&2
+        printf '%s' "$RUN_CHECKER_SKIPS" | sed "s/$_tab/ -- /; s/^/    /" >&2
+    fi
+    return 0
+}
+print_gate_tally
 
 exit 0

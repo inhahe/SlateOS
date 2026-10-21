@@ -44,7 +44,7 @@
 
 stdfdguard::guard_std_fds!();
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use smartcols::{FL_RIGHT, FL_TRUNC, JsonType, Table};
 use std::ffi::{OsStr, OsString};
@@ -76,6 +76,9 @@ const LONGS: &[(&str, Takes)] = &[
     ("version", Takes::Nothing),
 ];
 const LONG_VALS: [u8; 8] = *b"snoSJPhV";
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, u8> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`.
 const EXCL: [&[i32]; 1] = [&[b'J' as i32, b'P' as i32]];
@@ -476,27 +479,6 @@ fn get_scols_table(out: &IrqOutput, irqs: &[IrqInfo]) -> Table {
     table
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(u8, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((*c, value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
-/// `option_to_longopt(c, longopts)`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| i32::from(v) == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 /// `main()`.
 fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
     let arg0 = argv
@@ -526,12 +508,16 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
             }
         };
         // Operands are allowed, and ignored.
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<u8>(&opt) else {
             continue;
         };
-        if let Some(msg) =
-            err_exclusive_options(i32::from(c), &EXCL, &mut excl_st, option_to_longopt, short)
-        {
+        if let Some(msg) = err_exclusive_options(
+            i32::from(c),
+            &EXCL,
+            &mut excl_st,
+            |c| OPTIONS.name_of(c),
+            short,
+        ) {
             stderr_write(msg.as_bytes());
             return 1;
         }

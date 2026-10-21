@@ -152,20 +152,35 @@ pub fn foreground_group(fd: i32) -> Result<i32, i32> {
 }
 
 /// `tcflush`'s selector for "the input received and not yet read".
-const TCIFLUSH: i32 = 0;
+pub const TCIFLUSH: i32 = 0;
+/// `tcflush`'s selector for "the output written and not yet sent".
+pub const TCOFLUSH: i32 = 1;
+/// `tcflush`'s selector for both.
+pub const TCIOFLUSH: i32 = 2;
 
 /// `tcflush(fd, TCIFLUSH)`: throw away what has been typed at the terminal on
 /// `fd` and not yet read.
 ///
 /// # Errors
 ///
-/// `EBADF`, `ENOTTY`; [`ENOSYS`](crate::ENOSYS) on a host with no C library
-/// of ours.
+/// As [`flush`].
 pub fn flush_input(fd: i32) -> Result<(), i32> {
+    flush(fd, TCIFLUSH)
+}
+
+/// `tcflush(fd, queue)`: throw away what is waiting in the terminal on
+/// `fd`'s input ([`TCIFLUSH`]), its output ([`TCOFLUSH`]), or both
+/// ([`TCIOFLUSH`]).
+///
+/// # Errors
+///
+/// `EBADF`, `ENOTTY`, `EINVAL` for another `queue`; [`ENOSYS`](crate::ENOSYS)
+/// on a host with no C library of ours.
+pub fn flush(fd: i32, queue: i32) -> Result<(), i32> {
     #[cfg(unix)]
     {
         // SAFETY: `tcflush` takes two numbers and touches no memory of ours.
-        if unsafe { sys::tcflush(fd, TCIFLUSH) } == 0 {
+        if unsafe { sys::tcflush(fd, queue) } == 0 {
             Ok(())
         } else {
             Err(crate::last_errno())
@@ -173,7 +188,7 @@ pub fn flush_input(fd: i32) -> Result<(), i32> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (fd, TCIFLUSH);
+        let _ = (fd, queue);
         Err(crate::ENOSYS)
     }
 }
@@ -189,10 +204,21 @@ pub fn input_speed(t: &Termios) -> u32 {
     #[cfg(not(unix))]
     {
         // glibc 2.39's Linux arithmetic, for a host with no library to ask:
-        // the speed bits of `c_cflag`, which the input speed shares.
-        t.c_cflag & CBAUD
+        // 0 when `cfsetispeed` was given 0, else the speed bits of
+        // `c_cflag`, which the input speed shares.
+        if t.c_iflag & IBAUD0 != 0 {
+            0
+        } else {
+            t.c_cflag & CBAUD
+        }
     }
 }
+
+/// glibc's `IBAUD0`: a bit of `c_iflag` no terminal flag uses, set by
+/// `cfsetispeed (t, 0)` -- "the input speed is the output speed" -- which a
+/// record with one speed field cannot otherwise hold.
+#[cfg(any(not(unix), test))]
+const IBAUD0: u32 = 0o20_000_000_000;
 
 /// `cfgetospeed(t)`: the output speed, as a `B*` constant.
 #[must_use]
@@ -209,12 +235,15 @@ pub fn output_speed(t: &Termios) -> u32 {
     }
 }
 
-/// `cfsetispeed(t, speed)`: set the input speed to the `B*` constant `speed`.
+/// `cfsetispeed(t, speed)`: set the input speed to the `B*` constant `speed`
+/// -- 0 meaning "as the output speed".
+///
+/// On a host with no C library of ours, glibc 2.39's arithmetic is done
+/// here, so that the record is the same.
 ///
 /// # Errors
 ///
-/// `EINVAL` for a value that is not a speed; [`ENOSYS`](crate::ENOSYS) on a
-/// host with no C library of ours.
+/// `EINVAL` for a value that is not a speed.
 pub fn set_input_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     #[cfg(unix)]
     {
@@ -227,9 +256,28 @@ pub fn set_input_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (t, speed);
-        Err(crate::ENOSYS)
+        // glibc 2.39's Linux `cfsetispeed`, for a host with no library to
+        // ask.
+        if !is_speed(speed) {
+            return Err(crate::EINVAL);
+        }
+        t.c_ispeed = speed;
+        if speed == 0 {
+            t.c_iflag |= IBAUD0;
+        } else {
+            t.c_iflag &= !IBAUD0;
+            t.c_cflag = (t.c_cflag & !CBAUD) | speed;
+        }
+        Ok(())
     }
+}
+
+/// Whether `speed` is a `B*` constant, as glibc's speed calls judge one:
+/// nothing outside `CBAUD`. (Their second test, `B57600` to `B4000000`,
+/// admits only values within it.)
+#[cfg(not(unix))]
+fn is_speed(speed: u32) -> bool {
+    speed & !CBAUD == 0
 }
 
 /// `cfsetospeed(t, speed)`: set the output speed to the `B*` constant `speed`.
@@ -249,8 +297,13 @@ pub fn set_output_speed(t: &mut Termios, speed: u32) -> Result<(), i32> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (t, speed);
-        Err(crate::ENOSYS)
+        // glibc 2.39's Linux `cfsetospeed`.
+        if !is_speed(speed) {
+            return Err(crate::EINVAL);
+        }
+        t.c_ospeed = speed;
+        t.c_cflag = (t.c_cflag & !CBAUD) | speed;
+        Ok(())
     }
 }
 
@@ -367,6 +420,8 @@ pub const FFDLY: u32 = 0o100_000;
 pub const CSIZE: u32 = 0o60;
 /// `CS8`.
 pub const CS8: u32 = 0o60;
+/// `CS7`: seven-bit characters.
+pub const CS7: u32 = 0o40;
 /// `CSTOPB`.
 pub const CSTOPB: u32 = 0o100;
 /// `CREAD`.
@@ -379,6 +434,12 @@ pub const PARODD: u32 = 0o1000;
 pub const HUPCL: u32 = 0o2000;
 /// `CLOCAL`.
 pub const CLOCAL: u32 = 0o4000;
+/// `CRTSCTS`: hardware (RTS/CTS) flow control.
+pub const CRTSCTS: u32 = 0o20_000_000_000;
+/// `B38400`: the speed a console reports, and a getty's default.
+pub const B38400: u32 = 0o17;
+/// `B9600`: a serial line's speed when none was given, and `TTYDEF_SPEED`.
+pub const B9600: u32 = 0o15;
 
 // `c_lflag`.
 
@@ -611,6 +672,24 @@ mod tests {
         );
     }
 
+    /// Input speed 0 is "as the output", marked in `c_iflag` and the speed
+    /// bits left alone; a real speed clears the mark -- glibc 2.39's
+    /// record, from its library or from the arithmetic here.
+    #[test]
+    fn input_speed_zero_is_marked_and_a_speed_unmarks_it() {
+        let mut t = Termios {
+            c_cflag: 0o15,
+            ..Termios::default()
+        };
+        set_input_speed(&mut t, 0).expect("0 is a speed");
+        assert_eq!((t.c_iflag, t.c_cflag, input_speed(&t)), (IBAUD0, 0o15, 0));
+        set_input_speed(&mut t, 0o16).expect("B19200 is a speed");
+        assert_eq!((t.c_iflag, t.c_cflag, input_speed(&t)), (0, 0o16, 0o16));
+        set_output_speed(&mut t, 0o17).expect("B38400 is a speed");
+        assert_eq!((output_speed(&t), t.c_cflag), (0o17, 0o17));
+        assert_eq!(set_input_speed(&mut t, 0o20), Err(crate::EINVAL));
+    }
+
     #[test]
     fn the_constants_are_the_c_librarys() {
         use posix::ioctl as p;
@@ -618,6 +697,8 @@ mod tests {
         assert_eq!(TCSANOW, p::TCSANOW);
         assert_eq!(TCSADRAIN, p::TCSADRAIN);
         assert_eq!(TCSAFLUSH, p::TCSAFLUSH);
+        assert_eq!(TCIFLUSH, p::TCIFLUSH);
+        assert_eq!(TCIOFLUSH, p::TCIOFLUSH);
         // Every flag and slot the C library defines too.
         for (ours, theirs) in [
             (BRKINT, p::BRKINT),
@@ -631,6 +712,8 @@ mod tests {
             (ONLCR, p::ONLCR),
             (CSIZE, p::CSIZE),
             (CS8, p::CS8),
+            (B38400, p::B38400),
+            (B9600, p::B9600),
             (CREAD, p::CREAD),
             (PARENB, p::PARENB),
             (HUPCL, p::HUPCL),

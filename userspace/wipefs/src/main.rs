@@ -23,7 +23,7 @@
 //! * **A name in a diagnostic** has its unprintable bytes escaped
 //!   (design-decisions §370).
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use smartcols::{ColumnId, JsonType, Table};
 use std::ffi::{OsStr, OsString};
@@ -77,6 +77,9 @@ const LONG_VALS: [i32; 14] = [
     b'i' as i32,
     b'O' as i32,
 ];
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`: `-O`, `-a` and `-o` exclude each other.
 const EXCL: [&[i32]; 1] = [&[b'O' as i32, b'a' as i32, b'o' as i32]];
@@ -672,95 +675,6 @@ fn rereadpt(file: &File, devname: &[u8], out: &mut Stdout) {
     }
 }
 
-/// `flock(fd, operation)`.
-#[cfg(unix)]
-fn flock(file: &File, op: i32) -> Result<(), i32> {
-    use std::os::fd::AsRawFd;
-    unsafe extern "C" {
-        fn flock(fd: i32, operation: i32) -> i32;
-    }
-    // SAFETY: flock only takes the descriptor, which is open.
-    let rc = unsafe { flock(file.as_raw_fd(), op) };
-    if rc == 0 {
-        Ok(())
-    } else {
-        Err(ulblkid::errno_of(&std::io::Error::last_os_error()))
-    }
-}
-
-/// `blkdev_lock(fd, devname, lockmode)` from `lib/blkdev.c`: an exclusive
-/// `flock` on the device, as `--lock` (or `$LOCK_BLOCK_DEVICE`) asks --
-/// waiting, with a message, when another holds it. 0, or not 0 when the
-/// device must be left alone. (The only one of util-linux's ports to need
-/// it so far; it moves to a shared crate with the second.)
-fn blkdev_lock(file: &File, devname: &[u8], lockmode: Option<&[u8]>, short: &[u8]) -> i32 {
-    let env = std::env::var_os("LOCK_BLOCK_DEVICE").map(|v| os_bytes(&v).into_owned());
-    let Some(mode) = lockmode.map(<[u8]>::to_vec).or(env) else {
-        return 0;
-    };
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
-    let oper = if mode.eq_ignore_ascii_case(b"yes") || mode == b"1" {
-        LOCK_EX
-    } else if mode.eq_ignore_ascii_case(b"nonblock") {
-        LOCK_EX | LOCK_NB
-    } else if mode.eq_ignore_ascii_case(b"no") || mode == b"0" {
-        return 0;
-    } else {
-        warnx(short, &format!("unsupported lock mode: {}", shown(&mode)));
-        return -22;
-    };
-    #[cfg(unix)]
-    {
-        /// `EWOULDBLOCK`.
-        const EWOULDBLOCK: i32 = 11;
-        let mut msg = false;
-        if oper & LOCK_NB == 0 {
-            // Without blocking first, to have a message to print.
-            match flock(file, oper | LOCK_NB) {
-                Ok(()) => return 0,
-                Err(EWOULDBLOCK) => {
-                    stderr_write(
-                        format!(
-                            "{}: {}: device already locked, waiting to get lock ... ",
-                            shown(short),
-                            shown(devname)
-                        )
-                        .as_bytes(),
-                    );
-                    msg = true;
-                }
-                Err(_) => {}
-            }
-        }
-        match flock(file, oper) {
-            Ok(()) => {
-                if msg {
-                    stderr_write(b"OK\n");
-                }
-                0
-            }
-            Err(EWOULDBLOCK) => {
-                warnx(short, &format!("{}: device already locked", shown(devname)));
-                -1
-            }
-            Err(e) => {
-                warn(
-                    short,
-                    &format!("{}: failed to get lock", shown(devname)),
-                    &std::io::Error::from_raw_os_error(e),
-                );
-                -1
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (file, devname, oper);
-        0
-    }
-}
-
 /// `close(fd)`, its failure reported as upstream reports it.
 #[cfg_attr(
     not(unix),
@@ -800,7 +714,7 @@ fn do_wipe(ctl: &mut Ctl, out: &mut Stdout, short: &[u8]) -> Result<(), Fatal> {
     let Some(file) = pr.file().cloned() else {
         return Ok(());
     };
-    if blkdev_lock(&file, &devname, ctl.lockmode.as_deref(), short) != 0 {
+    if ulblkid::blkdev::lock(&file, &devname, ctl.lockmode.as_deref(), short) != 0 {
         return Ok(());
     }
     let mut backup: Option<Vec<u8>> = None;
@@ -899,27 +813,6 @@ fn do_wipe(ctl: &mut Ctl, out: &mut Stdout, short: &[u8]) -> Result<(), Fatal> {
     Ok(())
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
-/// `option_to_longopt(c, opts)`: the first long option with this `val`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 stdfdguard::guard_std_fds!();
 
 fn main() -> ExitCode {
@@ -958,14 +851,14 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
                 return errtryhelp(short);
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
             if let Opt::Operand(o) = &opt {
                 operands.push(os_bytes(o).into_owned());
             }
             continue;
         };
         if let Some(msg) =
-            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short)
+            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, |c| OPTIONS.name_of(c), short)
         {
             stderr_write(msg.as_bytes());
             return 1;

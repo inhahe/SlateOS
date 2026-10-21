@@ -4,7 +4,7 @@
 `check-config-turn-guards.py`), lane B (`quote-names.py`,
 `check-help-vs-parser.py`), lane C (`lanec_scan.py`,
 `check-tested-but-uncalled.py`) · **Filed:** 2026-10-10
-**Status:** lane A's half DONE on `lane-a-wip` 2026-10-12 -- `rustlex.test_module_files`, and `check-config-turn-guards.py` uses it; lanes B, C and E replace their copies. When filed: Nothing is blocked; each copy works for the tree as it is
+**Status:** lane A's half DONE on `lane-a-wip` 2026-10-12 -- `rustlex.test_module_files`, and `check-config-turn-guards.py` uses it; lane B's half DONE 2026-10-15 -- `quote-names.py` and `check-help-vs-parser.py` call it, their copies gone (the second's had resolved a `src/bin/x.rs` binary's modules under `src/bin/x/`, where cargo looks beside it); lanes C and E replace theirs. When filed: Nothing is blocked; each copy works for the tree as it is
 today.
 
 ## In short

@@ -285,6 +285,29 @@ mod tests {
     }
 
     #[test]
+    fn the_masks_are_curses_priv_h_s() {
+        // curses.priv.h's compositions, over the bits Ubuntu's curses.h gives
+        // (A_STANDOUT 0x10000 ... A_PROTECT 0x1000000, A_ITALIC 0x80000000).
+        assert_eq!(NONBLANK_ATTR, 0x8038_0000, "bold, dim, blink, italic");
+        assert_eq!(TPARM_ATTR, 0x01ff_0000, "standout to protect, all nine");
+        assert_eq!(
+            XMC_CONFLICT, 0x81bf_0000,
+            "TPARM_ATTR without altcharset, with italic"
+        );
+        assert_eq!(ALL_BUT_COLOR, 0xffff_00ff);
+    }
+
+    #[test]
+    fn uncolored_drops_the_pair_and_keeps_the_rest() {
+        let c = Cell::with_char(0x41, A_BOLD | A_UNDERLINE | color_pair(9));
+        assert_eq!(c.uncolored(), A_BOLD | A_UNDERLINE);
+        // Two cells apart only in their pair are the same uncoloured.
+        let d = Cell::with_char(0x41, A_BOLD | A_UNDERLINE | color_pair(2));
+        assert_eq!(c.uncolored(), d.uncolored());
+        assert_eq!(Cell::blank().uncolored(), A_NORMAL);
+    }
+
+    #[test]
     fn a_pair_lives_whole_in_ext_color_and_cut_in_the_attributes() {
         let mut c = Cell::blank();
         c.set_pair(300);

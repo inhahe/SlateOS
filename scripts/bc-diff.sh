@@ -1,562 +1,466 @@
 #!/usr/bin/env bash
-# Differential test: our bc against GNU bc.
+# Differential test: our bc against Ubuntu 24.04's, side by side in WSL.
 #
-# ## Why this one was written
+# Ours is coreutils' `bc`: GNU bc 1.07.1 ported, its `main.c` in
+# `userspace/coreutils/src/bin/bc.rs` and the rest in `userspace/gnubc`. It
+# replaced a bc written from scratch, whose harness this file was.
 #
-# Because there was none, and `quit` had been wrong the whole time.
-# `known-issues.md` -> TD-B-BC-QUIT-FIRES-AT-THE-WRONG-TIME-AND-HALT-DOES-NOT-EXIST
-# records what was found once someone finally ran the two side by side: `quit`
-# fired when it was *reached* rather than when it was *read*, and `halt` — the
-# one that really does fire when reached — did not exist at all. Both are stated
-# outright in the GNU manual. Neither was caught, for the single reason that
-# nothing compared the two programs.
+# ## What is compared
 #
-# ## GNU `bc` has no `-e`, so no case here uses one
+# For each case: standard output byte for byte, standard error, the exit
+# status. Each side runs with an empty environment but `PATH` (its own bc
+# first, so `argv[0]` is the bare `bc` on both), `HOME`, and what the case
+# sets. Standard input is not a terminal, so neither side is interactive
+# unless `-i` makes it so.
 #
-# Our `bc` accepts `-e EXPR`; GNU bc 1.07.1 does not, and answers
-# `invalid option -- 'e'` followed by its usage. That is not a difference in
-# behaviour to be adjudicated, it is a different command line, so `-e` is
-# exercised by the unit tests in `bc.rs` and never here. Every case below feeds
-# its program through a **file operand** or through **standard input**, which
-# are the two routes both programs have.
+# Most programs are run two ways, because bc reads each its own way: as a
+# file operand (then standard input, empty), and on standard input -- where
+# `read()` reads from the same descriptor through a buffer of its own.
 #
-# The distinction is not academic: the two routes chunk their input the same way
-# but arrive at it differently, and `quit` — whose whole definition is about
-# *when the text is read* — is the one construct that can tell them apart. So
-# most cases below are run twice, once each way.
+# ## Deliberate differences
 #
-# ## `-q` on every case, and why the banner is not tested here
+# `userspace/gnubc/src/lib.rs` lists them. The two this harness meets: a
+# file name with an unprintable byte is escaped in a diagnostic, and there is
+# no line editing, so `-i` on a pipe does not echo what it reads (xfail).
 #
-# Without it GNU prints a version banner, ours prints a different one; the
-# comparison would then be of two version strings on every single case rather
-# than of the programs. The banner is checked once, as an xfail, and everything
-# else runs `-q`.
-#
-# ## Three kinds of difference, and why they are not one kind
-#
-# * **xfail** — a difference this project has *decided* to have and expects to
-#   still have next year: `--version` names SlateOS. Silent unless it stops
-#   reproducing.
-# * **KBUG** — a difference nobody wants, which has been found, written up in
-#   `known-issues.md`, and not yet fixed. Printed on every run with its tracker
-#   key, and does *not* fail the run.
-# * **DIFF** — anything else. Fails the run.
-#
-# The middle category exists because the two obvious alternatives are both
-# worse. Leaving a known bug as a plain DIFF makes the harness red on every
-# single run, and a harness that is always red is a harness nobody reads —
-# which is how `quit` stayed broken. Filing it as an xfail is a lie: it records
-# a difference as *intended* when it is in fact debt, and the next reader has no
-# way to tell the two apart. So a KBUG is loud, is attributable to a tracker
-# entry that describes the fix, and fails the run the moment it starts *passing*
-# — because a marker that outlives its bug is a false statement about the tree.
-#
-# Three of the xfails are about identity rather than behaviour — `--help` omits
-# the GNU project's `Report bugs to:` block, `--version` names SlateOS, and the
-# banner does too. Three are behavioural, all added 2026-09-16. In two of them
-# GNU is the one with the bug; the third is a field we cannot honestly produce:
-#
-#   * `adr=` in a runtime error. GNU prints
-#     `Runtime error (func=(main), adr=3): Divide by zero`, where `adr` is the
-#     byte offset into the dc program it compiled the statement to. We walk a
-#     tree and compile nothing, so there is no honest value for it — and it is
-#     not a line number wearing a disguise: measured, `1/0` is `adr=3` whether
-#     it is the first line of the file or the fourth. We emit `func=`, which we
-#     can produce truthfully, and omit `adr=` rather than invent one. An absent
-#     field is visible; a fabricated number is not.
-#
-#   * a missing final newline. GNU calls `print "A"` with no trailing newline a
-#     syntax error and runs nothing. We run the line, because a file is far more
-#     often missing its last newline than genuinely half-written, and refusing
-#     would answer `printf '2+2' | bc` with silence.
-#   * the source and line named for an error detected at end of input. GNU says
-#     `(standard_in) 1:` even when the input is a file and the construct opens
-#     on line 4, because at EOF its reporter reads a file handle and a line
-#     counter it has already torn down. Ours names the real file and the real
-#     line.
-#
-# Neither is a number: `bc` computes the same answers either way. They are
-# claimed as intentional because they are, and because the alternative — filing
-# them as KBUGs — would put two entries in `known-issues.md` describing work
-# nobody intends to do, which is how a tracker stops being read.
-#
-# Run `OURS=/usr/bin/bc ./scripts/bc-diff.sh` to confirm the harness still
-# discriminates: it should report every xfail as XPASS, every KBUG as KFIXED,
-# and nothing else.
+# `DIFF_FAIL_FAST=1` stops at the first difference; `VERBOSE=1` shows the
+# agreements too.
 set -u
 
 DIFF_PROG='bc'
+DIFF_NEED='python3 timeout'
+DIFF_TIMEOUT=${DIFF_TIMEOUT:-3600}
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
-# Variables the program under test runs with, on both sides, and nothing else
-# does: only `prog_trailing` applies it. Empty unless a case block sets it.
-ENVV=()
+cur=$DIFF_TMP/cur
+work=$DIFF_TMP/work
+pass=0; fail=0; xfail=0; xpass=0
 
-pass=0; fail=0; xfail=0; xpass=0; kbug=0; kfixed=0
+# One side: a fresh working directory (which is also HOME), the case's
+# setup, the command. ENVS is a list of assignments without spaces; ENVA is
+# one assignment that may hold them.
+run_side() {
+  local side=$1 out=$2 err=$3; shift 3
+  rm -rf "$work"
+  mkdir -p "$work"
+  ln -sfn "$bindir/$side" "$cur"
+  (
+    cd "$work" || exit 99
+    if [ -n "${SETUP:-}" ]; then eval "$SETUP"; fi
+    local input=/dev/null
+    if [ -n "${INFILE:-}" ]; then input=$INFILE; fi
+    if [ -n "${INPUT_SET:-}" ]; then
+      printf '%s' "$INPUT" > "$DIFF_TMP/input"
+      input=$DIFF_TMP/input
+    fi
+    # shellcheck disable=SC2086
+    set -- env -i PATH="$cur:/usr/bin:/bin" HOME="$work" ${ENVS:-} ${ENVA:+"$ENVA"} \
+      /usr/bin/timeout -k 2 "${LIMIT:-10}" "$@"
+    case ${REDIR:-} in
+      '>/dev/full')  diff_run "$@" <"$input" >/dev/full 2>"$err" ;;
+      '>&-')         diff_run "$@" <"$input" >&- 2>"$err" ;;
+      '2>/dev/full') diff_run "$@" <"$input" >"$out" 2>/dev/full ;;
+      '<&-')         diff_run "$@" <&- >"$out" 2>"$err" ;;
+      '<dir')        diff_run "$@" <"$work" >"$out" 2>"$err" ;;
+      '|head')       { diff_run "$@" <"$input" 2>"$err"; echo $? > "$DIFF_TMP/pipe-rc"; } | head -c 20 >"$out"
+                     exit "$(cat "$DIFF_TMP/pipe-rc")" ;;
+      *)             diff_run "$@" <"$input" >"$out" 2>"$err" ;;
+    esac
+  )
+}
 
-# The tracker key attached to the next comparison, if any. Set by `known_bug`
-# and consumed by `report`, so a marker can never be left dangling over the
-# case after the one it was written for.
-KBUG=
-
-# The reason the next comparison is *meant* to differ, if it is. Set by
-# `differs_by_design` and consumed by `report`, exactly as `KBUG` is.
-#
-# Separate from `KBUG` because the two make opposite claims, and when either
-# stops reproducing the harness must say a different thing: a bug that starts
-# passing has been fixed and its marker is now a false statement, while a
-# deliberate difference that starts passing means we have quietly adopted GNU's
-# behaviour and the *decision* wants rechecking. Both fail the run. They are
-# not the same finding and must not print the same word.
-XFAIL=
-
-fixtures=$DIFF_TMP/fixtures
-mkdir -p "$fixtures"
-cd "$fixtures" >/dev/null || exit 1
-
-# --- one comparison -----------------------------------------------------------
-# `AGREED` and `REPORT` are set; the caller reports them.
-#
-# stdout goes through a file rather than a pipe: in `x=$(bc … | od)` the status
-# `$?` records is od's, not bc's, and the status is half of what is being
-# compared.
 compare() {
-  local mode="$1" text="$2"; shift 2
-  local o_out g_out o_err g_err o_rc g_rc o_bin g_bin
-  o_err=$DIFF_TMP/o.err; g_err=$DIFF_TMP/g.err
-  o_bin=$DIFF_TMP/o.out; g_bin=$DIFF_TMP/g.out
-
-  if [ "$mode" = file ]; then
-    printf '%b' "$text" > prog.bc
-    timeout -k 2 30 env PATH="$bindir/ours" bc -q "$@" prog.bc </dev/null \
-      >"$o_bin" 2>"$o_err"; o_rc=$?
-    timeout -k 2 30 env PATH="$bindir/gnu"  bc -q "$@" prog.bc </dev/null \
-      >"$g_bin" 2>"$g_err"; g_rc=$?
-  elif [ "$mode" = trailing ]; then
-    # The file first and the arguments after it, with no `-q` of our own: the
-    # arguments are the question, and where option parsing stops decides it.
-    # With standard input not a terminal neither side prints its banner.
-    printf '%b' "$text" > prog.bc
-    timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/ours" bc prog.bc "$@" \
-      </dev/null >"$o_bin" 2>"$o_err"; o_rc=$?
-    timeout -k 2 30 env ${ENVV[@]+"${ENVV[@]}"} PATH="$bindir/gnu"  bc prog.bc "$@" \
-      </dev/null >"$g_bin" 2>"$g_err"; g_rc=$?
-  else
-    printf '%b' "$text" | timeout -k 2 30 env PATH="$bindir/ours" bc -q "$@" \
-      >"$o_bin" 2>"$o_err"; o_rc=$?
-    printf '%b' "$text" | timeout -k 2 30 env PATH="$bindir/gnu"  bc -q "$@" \
-      >"$g_bin" 2>"$g_err"; g_rc=$?
-  fi
-
-  # `od -An -c`, not the text. `bc`'s `print` writes exactly what it is told and
-  # nothing more, so trailing newlines -- present or absent -- are part of the
-  # answer, and `$(…)` strips them. Comparing the octal dump keeps them.
-  o_out=$(od -An -c <"$o_bin"); g_out=$(od -An -c <"$g_bin")
-  o_err=$(od -An -c <"$o_err"); g_err=$(od -An -c <"$g_err")
-
-  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_err" = "$g_err" ]; then
+  local o_out g_out o_err g_err o_rc g_rc
+  o_out=$DIFF_TMP/o.out; g_out=$DIFF_TMP/g.out; o_err=$DIFF_TMP/o.err; g_err=$DIFF_TMP/g.err
+  : > "$o_out"; : > "$g_out"; : > "$o_err"; : > "$g_err"
+  run_side ours "$o_out" "$o_err" "$@"; o_rc=$?
+  run_side gnu "$g_out" "$g_err" "$@"; g_rc=$?
+  if cmp -s "$o_out" "$g_out" && [ "$o_rc" = "$g_rc" ] && cmp -s "$o_err" "$g_err"; then
     AGREED=yes
   else
     AGREED=no
   fi
-  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
-    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" \
-            "$(printf '%s' "$o_err" | tr -s ' \n' ' ')" \
-    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')" \
-            "$(printf '%s' "$g_err" | tr -s ' \n' ' ')")
+  REPORT=$(
+    printf '  ours rc=%s out={%s} err={%s}\n' "$o_rc" "$(head -c 300 "$o_out" | od -An -c | tr -s ' \n' ' ' | head -c 400)" "$(head -c 300 "$o_err" | tr '\n' '|')"
+    printf '  gnu  rc=%s out={%s} err={%s}\n' "$g_rc" "$(head -c 300 "$g_out" | od -An -c | tr -s ' \n' ' ' | head -c 400)" "$(head -c 300 "$g_err" | tr '\n' '|')"
+    if ! cmp -s "$o_out" "$g_out"; then cmp "$o_out" "$g_out" 2>&1 | head -1 | sed 's/^/  /'; fi
+    if ! cmp -s "$o_err" "$g_err"; then printf '  stderr differs\n'; fi
+  )
+  SETUP=''; INPUT=''; INPUT_SET=''; INFILE=''; ENVS=''; ENVA=''; REDIR=''; LIMIT=''
 }
 
-# `known_bug KEY` — the next `prog`/`prog_file`/`prog_stdin` is expected to
-# differ because of the `known-issues.md` entry named by KEY. The key is
-# printed with the row, so the report can be read straight through to the
-# write-up without anyone having to remember which bug this was.
-known_bug() { KBUG="$1"; }
-
 report() {
-  local key=$KBUG; KBUG=
-  local why=$XFAIL; XFAIL=
   if [ "$AGREED" = yes ]; then
-    if [ -n "$key" ]; then
-      # Fails the run on purpose: someone fixed the bug and the marker is now
-      # a false claim. Removing it is part of the fix.
-      kfixed=$((kfixed+1))
-      printf 'KFIXED %s  (%s no longer reproduces -- close it and drop the marker)\n' \
-        "$1" "$key"
-    elif [ -n "$why" ]; then
-      # Also fails, but it is not the same event and does not get the same
-      # word. We claimed this difference was wanted and it has gone away, so
-      # either someone changed our behaviour without revisiting the decision or
-      # the decision was never true. Either way a human has to look.
-      xpass=$((xpass+1))
-      printf 'XPASS %s  (claimed to differ on purpose: %s -- it no longer does)\n' \
-        "$1" "$why"
-    else
-      pass=$((pass+1))
-      [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$1"
-    fi
-  elif [ -n "$key" ]; then
-    kbug=$((kbug+1))
-    printf 'KBUG %s  (%s)\n%s\n' "$1" "$key" "$REPORT"
-  elif [ -n "$why" ]; then
-    # Quiet unless asked. A difference we have decided to have is not news on
-    # every run, and printing it would train the reader to skim past the KBUGs
-    # sitting next to it.
-    xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'xfail %s  (%s)\n' "$1" "$why"
+    pass=$((pass+1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$1"
   else
     fail=$((fail+1))
     printf 'DIFF %s\n%s\n' "$1" "$REPORT"
+    if [ -n "${DIFF_FAIL_FAST:-}" ]; then
+      echo "bc-diff: stopped at the first difference"
+      exit 1
+    fi
   fi
   return 0
 }
 
-# `differs_by_design WHY` — the next comparison is expected to differ because
-# this project chose to differ, not because it is broken. See the three-kinds
-# note at the top for why this is not the same as `known_bug`.
-differs_by_design() { XFAIL="$1"; }
-
-# `prog LABEL TEXT [ARGS…]` — the same program both ways round, which is the
-# only way to see a construct whose meaning depends on how the text arrives.
-#
-# `KBUG` is re-armed before the second `report`, because `report` consumes it
-# and both routes are the same bug.
-prog() {
-  local label="$1" text="$2"; shift 2
-  local key=$KBUG why=$XFAIL
-  compare file  "$text" "$@"; KBUG=$key; XFAIL=$why; report "[file]  $label"
-  compare stdin "$text" "$@"; KBUG=$key; XFAIL=$why; report "[stdin] $label"
-  KBUG=; XFAIL=
-}
-
-# One route only, for a case whose other route is not the same question.
-prog_file()  { local l="$1" t="$2"; shift 2; compare file  "$t" "$@"; report "[file]  $l"; }
-prog_stdin() { local l="$1" t="$2"; shift 2; compare stdin "$t" "$@"; report "[stdin] $l"; }
-# `prog_trailing LABEL TEXT ARGS…` — `bc prog.bc ARGS…`, under `$ENVV`.
-prog_trailing() {
-  local l="$1" t="$2"; shift 2
-  compare trailing "$t" "$@"; report "[trailing] ${ENVV[*]:+${ENVV[*]} }$l"
-}
-
-# A case expected to differ, with the reason. Counted apart so that one which
-# starts agreeing is reported too: a stale xfail is a claim nobody rechecked.
-xfail_argv() {
-  local why="$1"; shift
-  local o_all g_all o_rc g_rc o_txt g_txt
-  o_all=$DIFF_TMP/xo; g_all=$DIFF_TMP/xg
-  timeout -k 2 30 env PATH="$bindir/ours" bc "$@" </dev/null >"$o_all" 2>&1; o_rc=$?
-  timeout -k 2 30 env PATH="$bindir/gnu"  bc "$@" </dev/null >"$g_all" 2>&1; g_rc=$?
-  o_txt=$(cat "$o_all"); g_txt=$(cat "$g_all")
-  if [ "$o_txt" = "$g_txt" ] && [ "$o_rc" = "$g_rc" ]; then
-    xpass=$((xpass+1))
-    printf 'XPASS bc %s  (expected to differ: %s)\n' "$*" "$why"
-  else
-    xfail=$((xfail+1))
-    [ -n "${VERBOSE:-}" ] && printf 'xfail bc %s  (%s)\n' "$*" "$why"
-  fi
-  return 0
-}
-
-# ==============================================================================
-# `quit` is a read-time event
-# ==============================================================================
-# The manual: "quit: when this statement is read, the bc processor is
-# terminated, regardless of where the quit statement is found". The granularity
-# of "read" is one chunk of input -- one line, or, when a line leaves a brace
-# open, every line through the one that closes it. So a `quit` anywhere in a
-# chunk cancels the *whole* chunk, including statements written before it, and
-# including ones that would never have executed.
-#
-# Each of these was measured against GNU bc 1.07.1 before being written down.
-
-# The one that already agreed, and the reason the bug survived: with `quit` on
-# a line of its own, "read" and "reached" are the same moment.
-prog 'quit on its own line'          'print "A"\nquit\nprint "B"\n'
-
-# The one that did not. Everything on the line goes, `print "A"` included.
-prog 'quit later on the same line'   'print "A"; quit; print "B"\n'
-
-# `regardless of where the quit statement is found` -- a branch never taken is
-# still text that was read.
-prog 'quit inside if (0)'            'print "A"\nif (0) { quit }\nprint "B"\n'
-prog 'quit inside while (0)'         'print "A"\nwhile (0) { quit }\nprint "B"\n'
-
-# A function body is read as a unit and never executed. GNU stops anyway.
-prog 'quit inside a definition'      'define f() { quit }\nprint "before"\n'
-prog 'quit in a definition, called'  'define f() { quit }\nprint f()\n'
-
-# A brace-continued construct is one chunk, so the lines above the `quit`
-# inside it go with it -- but lines *before* the construct have already run.
-prog 'quit inside a multi-line if'   'print "A"\nif (0) {\n quit\n}\nprint "B"\n'
-prog 'quit under a loop that ran'    'print "A"\nwhile (0) {\n print "C"\n}\nquit\nprint "B"\n'
-
-# The word only counts as the keyword when it is one.
-prog 'the string "quit" is not quit' 'print "quit"\nprint "B"\n'
-prog 'an identifier starting quit'   'quitx = 3\nprint quitx\n'
-
-# ==============================================================================
-# `halt` is an execution-time event
-# ==============================================================================
-# The manual again: "halt: … an executed statement". Which is the whole of the
-# difference: `halt` in a branch not taken does nothing at all.
-prog 'halt on its own line'          'print "A"\nhalt\nprint "B"\n'
-prog 'halt later on the same line'   'print "A"; halt; print "B"\n'
-prog 'halt inside if (0)'            'print "A"\nif (0) { halt }\nprint "B"\n'
-prog 'halt inside if (1)'            'print "A"\nif (1) { halt }\nprint "B"\n'
-prog 'halt inside a definition'      'define f() { halt }\nprint "before"\n'
-prog 'halt in a definition, called'  'define f() { halt }\nprint "before"\nprint f()\n'
-prog 'halt breaking out of a loop'   'i = 0\nwhile (i < 5) { print i; if (i == 2) halt; i += 1 }\n'
-prog 'the string "halt" is not halt' 'print "halt"\nprint "B"\n'
-
-# The two together: whichever is *read* first ends it, since `quit` cancels its
-# chunk before anything in it executes.
-prog 'quit above halt'               'print "A"\nquit\nhalt\nprint "B"\n'
-prog 'halt above quit'               'print "A"\nhalt\nquit\nprint "B"\n'
-prog 'halt then quit, one line'      'print "A"; halt; quit\n'
-
-# ==============================================================================
-# More than one file operand
-# ==============================================================================
-# `quit` ends the run, not the file: a later operand is not read either.
-printf 'print "A"\nquit\n' > q1.bc
-printf 'print "A"\nhalt\n' > h1.bc
-printf 'print "B"\n'       > two.bc
-run_two() {
-  local label="$1"; shift
-  local o_out g_out o_rc g_rc
-  timeout -k 2 30 env PATH="$bindir/ours" bc -q "$@" </dev/null >"$DIFF_TMP/o" 2>&1; o_rc=$?
-  timeout -k 2 30 env PATH="$bindir/gnu"  bc -q "$@" </dev/null >"$DIFF_TMP/g" 2>&1; g_rc=$?
-  o_out=$(od -An -c <"$DIFF_TMP/o"); g_out=$(od -An -c <"$DIFF_TMP/g")
-  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ]; then AGREED=yes; else AGREED=no; fi
-  REPORT=$(printf '  ours (rc=%s): %s\n  gnu  (rc=%s): %s' \
-    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" \
-    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')")
+run_case() {
+  local label
+  label="$(printf '%q ' "$@")${REDIR:-} ${ENVS:-}${ENVA:+ $(printf '%q' "$ENVA")}${SETUP:+ [setup: $SETUP]}${INPUT_SET:+ [stdin: $(printf '%q' "$INPUT")]}"
+  compare "$@"
   report "$label"
 }
-run_two 'quit in the first of two files' q1.bc two.bc
-run_two 'halt in the first of two files' h1.bc two.bc
-run_two 'quit in the second of two'      two.bc q1.bc
 
-# ==============================================================================
-# Everything else, so this is a harness and not one bug's regression test
-# ==============================================================================
-
-# --- arithmetic and scale -----------------------------------------------------
-prog 'integer arithmetic'      '1+2\n7-9\n6*7\n\n'
-prog 'division truncates'      '7/2\n-7/2\n1/3\n'
-prog 'scale changes division'  'scale=10\n1/3\n2/7\n'
-prog 'modulo follows scale'    'scale=0\n7%3\n-7%3\nscale=2\n7%3\n'
-prog 'exponent'                '2^10\n2^0\n(-2)^3\n'
-prog 'scale of a power'        'scale=5\n2^-3\n'
-prog 'sqrt'                    'scale=10\nsqrt(2)\nsqrt(0)\n'
-prog 'length and scale'        'length(123.456)\nscale(123.456)\nlength(0)\n'
-prog 'parentheses and unary'   '-(3+4)\n- -5\n2*-3\n'
-prog 'big numbers'             '2^100\n(2^64)-1\n'
-differs_by_design 'GNU adds adr=, a byte offset into the dc program it compiles to; we walk a tree'
-prog 'division by zero'        '1/0\nprint "after"\n'
-differs_by_design 'GNU adds adr=, a byte offset into the dc program it compiles to; we walk a tree'
-prog 'sqrt of a negative'      'sqrt(-1)\nprint "after"\n'
-
-# --- ibase / obase ------------------------------------------------------------
-prog 'obase hex'               'obase=16\n255\n4096\n'
-prog 'obase binary'            'obase=2\n5\n255\n'
-prog 'ibase hex'               'ibase=16\nFF\nA0\n'
-prog 'ibase then obase'        'ibase=16\nobase=A\nFF\n'
-
-# --- variables, arrays, last --------------------------------------------------
-prog 'variables'               'x = 5\ny = x * 2\nprint y, "\\n"\n'
-prog 'compound assignment'     'x = 1\nx += 4\nx *= 3\nprint x, "\\n"\n'
-prog 'increment operators'     'x = 1\nprint x++, " ", x, "\\n"\nprint ++x, " ", x, "\\n"\n'
-prog 'arrays'                  'a[0] = 1\na[1] = 2\nprint a[0] + a[1], "\\n"\n'
-prog 'last'                    '2+3\nprint last, "\\n"\n'
-
-# --- control flow -------------------------------------------------------------
-prog 'if else'                 'if (1) print "yes\\n" else print "no\\n"\nif (0) print "yes\\n" else print "no\\n"\n'
-prog 'while'                   'i=0\nwhile (i<3) { print i; i+=1 }\nprint "\\n"\n'
-prog 'for'                     'for (i=0; i<3; i++) print i\nprint "\\n"\n'
-prog 'break'                   'for (i=0; i<9; i++) { if (i==3) break; print i }\nprint "\\n"\n'
-prog 'continue'                'for (i=0; i<5; i++) { if (i==2) continue; print i }\nprint "\\n"\n'
-prog 'nested loops'            'for (i=0;i<3;i++) { for (j=0;j<2;j++) print i,j } \nprint "\\n"\n'
-
-# --- functions ----------------------------------------------------------------
-prog 'define and call'         'define f(x) { return (x*2) }\nprint f(21), "\\n"\n'
-prog 'recursion'               'define f(n) { if (n<=1) return (1); return (n*f(n-1)) }\nprint f(10), "\\n"\n'
-prog 'auto locals'             'define f(x) { auto t; t = x+1; return (t) }\nt = 99\nprint f(1), " ", t, "\\n"\n'
-prog 'no explicit return'      'define f() { 1 }\nprint f(), "\\n"\n'
-differs_by_design 'GNU adds adr=, a byte offset into the dc program it compiles to; we walk a tree'
-prog 'undefined function'      'print f(1)\nprint "after"\n'
-
-# --- print --------------------------------------------------------------------
-prog 'print with no newline'   'print "A"\n'
-prog 'print several items'     'print "x=", 5, "\\n"\n'
-prog 'print escapes'           'print "a\\tb\\nc\\n"\n'
-prog 'bare expression prints'  '1+1\n"literal"\n'
-
-# --- -l, the math library -----------------------------------------------------
-prog 'mathlib scale default'   'scale\n' -l
-prog 'mathlib s and c'         'scale=10\nprint s(0), "\\n", c(0), "\\n"\n' -l
-prog 'mathlib e and l'         'scale=10\nprint e(1), "\\n", l(1), "\\n"\n' -l
-prog 'mathlib a and j'         'scale=10\nprint a(1), "\\n", j(0,1), "\\n"\n' -l
-# Arctangent across its range, not just at 1.
-#
-# `TD-B-BC-MATHLIB-ARCTANGENT-IS-INACCURATE` asked for these when it was closed,
-# and gave the reason: a series with a term cap "can be right at one argument
-# and wrong at the next". The `a(1)` row above is what FOUND that bug, so one
-# sample was enough to find it -- but one sample is not enough to confirm a
-# FIX, and those are different jobs. The new implementation reduces by halving
-# the argument, which gives it a threshold (1/16) and an inversion branch
-# (|x| > 1) that the single row samples neither of.
-#
-# `a(1.0001)` is the interesting one: the |x|>1 inversion maps it to `a(.9999)`,
-# which is just as slow to sum as the argument it came from, so an
-# implementation that inverts but does not reduce passes `a(2)` and fails here.
-prog 'mathlib a across its range' 'scale=10\nprint a(0), "\\n", a(0.5), "\\n", a(2), "\\n", a(-1), "\\n"\n' -l
-prog 'mathlib a near the reduction boundary' 'scale=10\nprint a(0.06), "\\n", a(0.07), "\\n", a(1.0001), "\\n", a(100), "\\n"\n' -l
-prog 'log of zero'             'scale=10\nprint l(0), "\\n"\n' -l
-# The saturation value is `-(10^scale - 1)`, so a row at ONE scale cannot tell
-# a correct implementation from a hard-coded constant -- which is precisely the
-# trap the tracker entry warned about. Two more scales, either side, and a
-# negative argument, since GNU saturates for every non-positive input and not
-# only for zero.
-prog 'log of zero at other scales' 'scale=1\nprint l(0), "\\n"\nscale=20\nprint l(0), "\\n"\n' -l
-prog 'log of a negative'       'scale=10\nprint l(-1), "\\n", l(-0.5), "\\n"\n' -l
-
-# --- comments and whitespace --------------------------------------------------
-prog 'block comment'           '/* a comment */ 1+1\n'
-prog 'comment spanning lines'  '/* one\ntwo */ 2+2\n'
-prog 'hash comment'            '1+1 # trailing\n2+2\n'
-prog 'line continuation'       '1 + \\\n2\n'
-prog 'empty input'             ''
-prog 'only newlines'           '\n\n\n'
-differs_by_design 'GNU calls a missing final newline a syntax error; we run the line'
-prog 'no trailing newline'     'print "A"'
-
-# --- errors -------------------------------------------------------------------
-# Wording is compared in full. A harness that only asked "did it complain?"
-# would pass on every wrong message.
-prog 'syntax error'            'print )\n'
-prog 'unterminated string'     'print "abc\n'
-# GNU reports this one as `(standard_in) 1:` even when the input IS a file and
-# the construct opens on line 4 -- at end of input its error reporter reads a
-# file handle and a line counter that have both already been torn down, so it
-# names neither the right file nor the right line. Ours says `prog.bc 3:`.
-# Measured both ways round before claiming it; see the entry.
-differs_by_design 'GNU misnames the source and line for an at-EOF error; ours are right'
-prog 'unbalanced brace'        'if (1) {\nprint "A"\n'
-prog 'bad character'           '1 $ 2\n'
-prog 'error then more input'   'print )\nprint "after\\n"\n'
-
-# Statements need a separator, and the interesting part is which tokens count
-# as one. Both halves are here on purpose: the refusals are the bug that was
-# fixed, and the acceptances are the control, because the failure mode of an
-# over-strict rule is REFUSING VALID PROGRAMS -- worse than the over-acceptance
-# it replaces, and invisible to a suite that only tests malformed input.
-#
-# `{ 1 } 2` being refused is the row that is not obvious: a closing brace ends
-# a statement but does not license the next one. `define f() { … } f()` being
-# accepted is the other: a definition is its own input item in GNU's grammar,
-# which is why the separator rule is not applied after one.
-prog 'two statements, no separator'  '1 2\n'
-prog 'block then statement'          '{ 1 } 2\n'
-prog 'if-block then statement'       'if (1) { print "a" } 2\n'
-prog 'separators that are accepted'  '1; 2\n{ print "a" }\nif (1) print "b" else print "c"\n'
-prog 'define then call, no separator' 'define f() { return (1) } f()\n'
-
-prog_file 'a file that is not there' '' nosuch.bc
-# A name that needs quoting still gets them, and there we differ from GNU on
-# purpose: GNU prints it bare, so a file called
-# `x<newline>bc: /etc/shadow: Permission denied` forges a diagnostic bc never
-# wrote. The row is here rather than merely asserted in the entry, because a
-# deviation nothing exercises is a deviation nobody will notice losing.
-differs_by_design 'a name needing quotes is quoted, so it cannot forge a diagnostic line'
-prog_file 'an unavailable name with a space' '' 'no such.bc'
-
-# --- POSIXLY_CORRECT -----------------------------------------------------------
-# glibc's getopt ends option parsing at the first operand while it is set, so a
-# `-q` after the file is a second file -- `File -q is unavailable.` -- where
-# without it the `-q` is an option. Measured against GNU bc 1.07.1 on
-# 2026-09-25; `coreutils::getopt`'s module docs, "Where option parsing stops".
-ENVV=(POSIXLY_CORRECT=1)
-prog_trailing 'a -q after the file is a second file' '1+1\n' -q
-prog_trailing 'a -- after the file is a file too'    '1+1\n' -- -q
-ENVV=()
-prog_trailing 'a -q after the file is an option'     '1+1\n' -q
-prog_trailing 'a -- after the file ends the options' '1+1\n' -- -q
-
-# --- the descriptors, as the program was given them ---------------------------
-# Ubuntu's bc carries Debian's 05_notice_read_write_errors.diff: each value and
-# string printed is flushed and checked, each diagnostic checked, each
-# character `read()` takes checked, and the first failure ends the run --
-# `dc: could not write output file: REASON` (sic), status 1. `--help`,
-# `--version` and the usage are not checked. A closed standard input is the
-# scanner's `(standard_in) 1: read() in flex scanner failed`, status 1. Until
-# 2026-10-08 ours printed with `println!` (a panic on a full disk), saw
-# neither a closed output nor a closed input (Rust's runtime puts /dev/null
-# on each), and went on past a diagnostic that could not be written.
-#
-# `desc LABEL TEXT REDIRECTIONS` -- TEXT on standard input and bc run under
-# REDIRECTIONS, which are applied after the harness's own, so they win.
-desc() {
-  local label="$1" text="$2" redir="$3"
-  local o_out g_out o_err g_err o_rc g_rc
-  printf '%b' "$text" > desc.in
-  printf '1+1\n' > prog.bc
-  ( eval "timeout -k 2 30 env PATH=\"\$bindir/ours\" bc -q $redir" ) \
-    <desc.in >"$DIFF_TMP/o.out" 2>"$DIFF_TMP/o.err"; o_rc=$?
-  ( eval "timeout -k 2 30 env PATH=\"\$bindir/gnu\" bc -q $redir" ) \
-    <desc.in >"$DIFF_TMP/g.out" 2>"$DIFF_TMP/g.err"; g_rc=$?
-  o_out=$(od -An -c <"$DIFF_TMP/o.out"); g_out=$(od -An -c <"$DIFF_TMP/g.out")
-  o_err=$(od -An -c <"$DIFF_TMP/o.err"); g_err=$(od -An -c <"$DIFF_TMP/g.err")
-  if [ "$o_out" = "$g_out" ] && [ "$o_rc" = "$g_rc" ] && [ "$o_err" = "$g_err" ]; then
-    AGREED=yes
+xfail_case() {
+  local why=$1; shift
+  local label
+  label="$(printf '%q ' "$@")"
+  compare "$@"
+  if [ "$AGREED" = yes ]; then
+    xpass=$((xpass+1))
+    printf 'XPASS %s -- expected to differ (%s) and did not\n' "$label" "$why"
   else
-    AGREED=no
+    xfail=$((xfail+1))
+    [ -n "${VERBOSE:-}" ] && printf 'xfail %s (%s)\n%s\n' "$label" "$why" "$REPORT"
   fi
-  REPORT=$(printf '  ours (rc=%s): %s  {%s}\n  gnu  (rc=%s): %s  {%s}' \
-    "$o_rc" "$(printf '%s' "$o_out" | tr -s ' \n' ' ')" \
-            "$(printf '%s' "$o_err" | tr -s ' \n' ' ')" \
-    "$g_rc" "$(printf '%s' "$g_out" | tr -s ' \n' ' ')" \
-            "$(printf '%s' "$g_err" | tr -s ' \n' ' ')")
-  report "[desc]  $label ($redir)"
+  return 0
 }
-desc 'a result to a full disk'           '1+1\n'          '>/dev/full'
-desc 'a result to a closed output'       '1+1\n'          '>&-'
-desc 'a string to a full disk'           'print "a"\n'    '>/dev/full'
-desc 'a string to a closed output'       'print "a"\n'    '>&-'
-desc 'two results, the first lost'       '1+1\n2+2\n'     '>/dev/full'
-desc 'nothing printed, output closed'    'quit\n'         '>&-'
-desc 'nothing printed, output full'      'x=1\n'          '>/dev/full'
-desc 'the version, to a full disk'       ''               '--version >/dev/full'
-desc 'the version, to a closed output'   ''               '--version >&-'
-desc 'the help, to a full disk'          ''               '--help >/dev/full'
-desc 'the usage, to a closed output'     ''               '--bogus >&-'
-desc 'a runtime error, stderr full'      '1/0\n'          '2>/dev/full'
-desc 'a lost error ends the run'         '1/0\n2+2\n'     '2>/dev/full'
-desc 'a lost syntax error ends the run'  '1+\n2+2\n'      '2>/dev/full'
-desc 'a runtime error, stderr closed'    '1/0\n2+2\n'     '2>&-'
-desc 'a result, stderr full'             '2+2\n'          '2>/dev/full'
-desc 'input closed'                      ''               '<&-'
-desc 'a file, then input closed'         ''               'prog.bc <&-'
-desc 'a missing file, output closed'     ''               'nosuch >&-'
-desc 'output and stderr both full'       '1/0\n3\n'       '>/dev/full 2>/dev/full'
 
-# ==============================================================================
-# Differences on purpose
-# ==============================================================================
-xfail_argv 'our --help omits the GNU project ancillary block' --help
-xfail_argv 'our --version names SlateOS'                      --version
-xfail_argv 'our --version names SlateOS'                      -v
-# Without `-q` the banner is printed, and the two banners name different
-# programs. Every other case above passes `-q` for exactly this reason.
-xfail_argv 'our banner names SlateOS'                         -i
+# stdin PROGRAM ARGS...: bc ARGS with PROGRAM on standard input.
+stdin() { local p=$1; shift; INPUT=$p; INPUT_SET=1; run_case bc "$@"; }
+# file PROGRAM ARGS...: PROGRAM in a file, named as the last operand.
+file() { local p=$1; shift; SETUP="printf '%s' $(printf '%q' "$p") > prog"; run_case bc "$@" prog; }
+# two PROGRAM ARGS...: the program both ways, with each of the case's
+# settings (they are cleared after each run).
+two() {
+  local e=${ENVS:-} a=${ENVA:-} l=${LIMIT:-}
+  file "$@"
+  ENVS=$e; ENVA=$a; LIMIT=$l; stdin "$@"
+}
+# lib PROGRAM: the program both ways under -l.
+lib() { two "$1" -l; }
+# raw FORMAT ARGS...: a program printf makes from FORMAT -- for bytes a shell
+# string cannot hold, NUL among them -- as a file operand and on stdin.
+raw() {
+  local f=$1; shift
+  SETUP="printf $(printf '%q' "$f") > prog"; run_case bc "$@" prog
+  SETUP="printf $(printf '%q' "$f") > prog"; INFILE=prog; run_case bc "$@"
+}
 
-printf '\n%d passed, %d differed, %d known bugs, %d differ on purpose' \
-  "$pass" "$fail" "$kbug" "$xfail"
-[ "$xpass" -gt 0 ] && printf ', %d NO LONGER differ (update the harness)' "$xpass"
-[ "$kfixed" -gt 0 ] && printf ', %d known bugs are FIXED (close them)' "$kfixed"
-printf '\n'
-# A KBUG does not fail the run; a KFIXED does. See the three-kinds note at the
-# top: the whole point of the category is that it lets the harness stay green
-# while the debt is still visible, and the one thing that must not stay quiet is
-# a marker describing a bug that no longer exists.
-[ "$fail" -eq 0 ] && [ "$kfixed" -eq 0 ] || exit 1
+# --- the command line ------------------------------------------------------------
+for args in '-h' '--help' '-v' '--version' '--he' '--ver' '-x' '--bogus' '--' '-hv' '-vh' '-q -v' \
+            '-xq' '--warn=1' '--standard --version' '-c' '--compile' '-s' '-w' '-l' '--mathlib' '-ql'; do
+  # shellcheck disable=SC2086
+  run_case bc $args
+done
+run_case bc nonexistent
+SETUP="printf '1\n'> a"; run_case bc a nonexistent
+SETUP="printf '1\n'> a"; run_case bc nonexistent a
+SETUP="printf '1\n' > a; printf '2\n' > b"; run_case bc a b
+SETUP="printf '1\n' > a; printf '2\n' > b"; INPUT=$'3\n'; INPUT_SET=1; run_case bc a b
+SETUP="printf '1\n' > a"; run_case bc a -q a
+SETUP="printf 'quit\n' > a; printf '2\n' > b"; run_case bc a b
+SETUP="printf 'halt\n' > a; printf '2\n' > b"; run_case bc a b
+SETUP="printf '1+\n' > a; printf '2\n' > b"; run_case bc a b
+SETUP="printf '1+' > a; printf '2\n' > b"; run_case bc a b
+SETUP="printf 'define f() {\n' > a; printf '2\n}\nf()\n' > b"; run_case bc a b
+SETUP="printf '/* open\n' > a; printf '*/ 5\n' > b"; run_case bc a b
+SETUP="printf '\"open\n' > a; printf 'str\"\n7\n' > b"; run_case bc a b
+SETUP="printf '1\\\\\n' > a; printf '2\n' > b"; run_case bc a b
+SETUP="mkdir d"; run_case bc d
+run_case bc /dev/null
+INPUT=$'5\n'; INPUT_SET=1; run_case bc -
+INPUT=$'5\n'; INPUT_SET=1; run_case bc /dev/stdin
+REDIR='<dir'; run_case bc
+REDIR='<&-'; run_case bc
+SETUP="printf '6\n' > a"; REDIR='<&-'; run_case bc a
+REDIR='>/dev/full'; INPUT=$'1\n'; INPUT_SET=1; run_case bc
+REDIR='>/dev/full'; INPUT=$'print "x"\n'; INPUT_SET=1; run_case bc
+REDIR='>/dev/full'; INPUT=$'warranty\n'; INPUT_SET=1; run_case bc
+REDIR='>/dev/full'; INPUT=$'limits\n'; INPUT_SET=1; run_case bc
+REDIR='>/dev/full'; run_case bc --version
+REDIR='>/dev/full'; run_case bc --help
+REDIR='>/dev/full'; INPUT=$'1\n'; INPUT_SET=1; run_case bc -c
+REDIR='>&-'; INPUT=$'1\n'; INPUT_SET=1; run_case bc
+REDIR='2>/dev/full'; INPUT=$'1/0\n'; INPUT_SET=1; run_case bc
+REDIR='2>/dev/full'; INPUT=$'1+\n'; INPUT_SET=1; run_case bc
+REDIR='2>/dev/full'; run_case bc -x
+REDIR='|head'; INPUT=$'for(i=0;i<100;i++) i\n'; INPUT_SET=1; run_case bc
+xfail_case 'a file name is escaped in a diagnostic' bc "$(printf 'no\nsuch')"
+
+# -i: interactive whatever standard input is -- the banner, unless -q.
+# Ubuntu's bc then reads standard input through readline, which echoes each
+# line it reads when its input is not a terminal; ours has no line editing
+# (lib.rs), and echoes nothing.
+why_rl='readline echoes the lines it reads (no line editing here)'
+INPUT=$'1\n'; INPUT_SET=1; xfail_case "$why_rl" bc -i
+INPUT=$'1\n'; INPUT_SET=1; xfail_case "$why_rl" bc -iq
+INPUT=$'1\nwarranty\n'; INPUT_SET=1; xfail_case "$why_rl" bc -i
+SETUP="printf '2\n' > a"; INPUT=$'1\n'; INPUT_SET=1; xfail_case "$why_rl" bc -i a
+# The banner and the rest, which readline leaves alone: from a file.
+SETUP="printf '1\nwarranty\n' > a"; run_case bc -i a
+
+# --- the environment -------------------------------------------------------------------
+for e in 'BC_ENV_ARGS=-q' 'BC_ENV_ARGS=-l' 'BC_ENV_ARGS=-x' 'BC_ENV_ARGS=-v' 'BC_ENV_ARGS=-h' \
+         'BC_ENV_ARGS=nonexistent' 'BC_ENV_ARGS=' 'BC_ENV_ARGS=--warn' 'BC_ENV_ARGS=--standard' \
+         'POSIXLY_CORRECT=1' 'POSIXLY_CORRECT=' 'BC_LINE_LENGTH=0' 'BC_LINE_LENGTH=1' 'BC_LINE_LENGTH=2' \
+         'BC_LINE_LENGTH=3' 'BC_LINE_LENGTH=4' 'BC_LINE_LENGTH=10' 'BC_LINE_LENGTH=-5' 'BC_LINE_LENGTH=abc' \
+         'BC_LINE_LENGTH=12abc' 'BC_LINE_LENGTH=+20' 'BC_LINE_LENGTH=99999999999' 'BC_LINE_LENGTH=4294967306'; do
+  ENVS=$e; two $'2^300\nprint "a long string a long string a long string a long string a long string a long string"\n1.5\n'
+done
+ENVA='BC_ENV_ARGS= -q  -l '; two $'s(1)\n'
+ENVA='BC_ENV_ARGS=-w -s'; two $'a[1]=1\n'
+SETUP="printf '5\n' > envf"; ENVA='BC_ENV_ARGS=envf'; two $'6\n'
+SETUP="printf '5\n' > envf"; ENVA='BC_ENV_ARGS=envf'; INPUT=$'7\n'; INPUT_SET=1; run_case bc
+ENVS='POSIXLY_CORRECT=1'; two $'a[1]=1\nx = 2 # c\nprint "s"\n'
+ENVS='POSIXLY_CORRECT=1'; run_case bc -x a
+
+# --- numbers ------------------------------------------------------------------------------
+for p in '0' '00' '000.000' '1' '-1' '.5' '-.5' '5.' '1.50' '0.000' '12345678901234567890123456789012345678901234567890' \
+         'A' 'F' 'G' 'Z' 'AB' 'A.B' '1A' 'ZZ.Z' '.A' '1.2.3' '1..2' '..' '.' '1,000' '1e5' \
+         '123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890' \
+         '-123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890' \
+         '.000000000000000000000000000000000000000000000000000000000000000000000000000000001'; do
+  two "$p"$'\n'
+done
+two $'1\\\n2\n'
+two $'1\\\n\\\n2\n'
+two $'1.\\\n5\n'
+two $'1\\\n'
+raw '1\\'
+two $'1\\\r\n2\n'
+
+# --- bases ----------------------------------------------------------------------------------
+for p in 'ibase=16; FF' 'ibase=16; ff' 'ibase=2; 1010' 'ibase=2; 1012' 'ibase=2; 2' 'ibase=2; 1.1' \
+         'ibase=16; 1.8' 'ibase=16; A.' 'ibase=16; .F' 'ibase=36; ZZ' 'ibase=37' 'ibase=1' 'ibase=0' 'ibase=-5' \
+         'ibase=17' 'ibase=100' 'ibase=99999999999' 'ibase=16; ibase=A; ibase' 'ibase=8; 9' 'ibase=8; 19' \
+         'obase=16; 255' 'obase=2; 10' 'obase=2; -10' 'obase=8; 0.5' 'obase=16; 1/3' 'obase=17; 1000' \
+         'obase=100; 123456789' 'obase=1000; 2^100' 'obase=65536; 2^100' 'obase=1' 'obase=0' 'obase=-3' \
+         'obase=99999999999' 'obase=2147483647; 5' 'obase=2147483648' 'obase=16; scale=10; 1/3' \
+         'obase=3; scale=5; 1/7' 'obase=10; ibase=16; obase' 'scale=-1' 'scale=99999999999' \
+         'scale=2147483647; scale' 'scale=5; 1/3; scale=0; 1/3' 'x=ibase; x' 'ibase=16; x=A; x' \
+         'ibase++; ibase' 'ibase--; ibase' 'ibase=16; ibase++; ibase' 'ibase=2; ibase--' 'obase=2; obase--' \
+         'scale--' 'scale=3; scale--; scale' 'obase=2147483647; obase++' 'history' 'history=5; history' \
+         'history=-3; history' 'history=99999999999; history' 'history--; history' 'history=0; history--; history' \
+         'history++; history' 'history=2147483648; history' 'last' '5; last' '5; .' '5; . + 1' '. = 3; .'; do
+  two "$p"$'\n'
+done
+
+# --- arithmetic --------------------------------------------------------------------------------
+for p in '1+2' '1-2' '2*3' '7/2' '7%2' '2^10' '2^-1' '2^-1; scale=5; 2^-1' '0^-1' '0^0' '(-2)^3' '-2^2' \
+         '2^0.5' '2^99999999999' '10^100' '2^1000' '1/0' '1%0' '0/5' '-7/2' '-7%2' '7%-2' 'scale=3; 7%2' \
+         'scale=3; 10%3' 'sqrt(2)' 'sqrt(-1)' 'sqrt(0)' 'sqrt(1)' 'scale=20; sqrt(2)' 'sqrt(1000000)' \
+         'scale=5; sqrt(0.0001)' 'length(123)' 'length(0.001)' 'length(0)' 'length(-12.34)' 'length(.5)' \
+         'scale(1.234)' 'scale(1)' 'scale(1.0)' 'x=5; ++x; x' 'x=5; x++; x' 'x=5; --x' 'x=5; x--; x' \
+         'x+=3; x' 'x=2; x*=5; x' 'x=10; x/=4; x' 'x=10; x%=4; x' 'x=2; x^=10; x' 'x=5; x-=7; x' \
+         'x =- 3' 'x=+3' 'x=-3; x' 'a=b=c=4; a; b; c' '1==1' '1!=1' '1<2' '1<=1' '1>2' '1>=2' \
+         '2>1>0' '!0' '!5' '!!3' '1&&0' '1&&2' '0||0' '0||3' '1&&1||0' '!1||1' '(1+2)*3' '1+2*3' \
+         '-(-3)' '- -3' '2^3^2' '2*-3' '1/3*3' 'scale=10; 1/3*3' 'scale=1; 0.05+0.05' \
+         'x=3; x == 3' 'x = 3 == 3; x' '(x=3)' 'random()' 'random(); random(); random()' 'x=random(); x>0' \
+         'read' 'length' 'sqrt' 'scale(1' '1 +' '(1' '1)' '*1' 'x++++' '++x++' '++5' '5++' '--' \
+         '1;2;3' '1;;2' ';' ';;;' '{1;2}' '{}' '{ }' '{1}{2}' 'x=1;{x=2;x}' '{1' '}' '1}'; do
+  two "$p"$'\n'
+done
+
+# --- strings and print -----------------------------------------------------------------------
+for p in '"hello"' '"a\nb"' '"tab\there"' '"q\q"' '"bs\\"' '"x\"' '"\a\b\f\r\e\z"' '""' \
+         '"multi
+line"' 'print "a", 1, "b\n"' 'print 1' 'print 1, 2' 'print "x\n", 3+4, "\n"' 'print "\q\n"' \
+         'print "unterminated' '"unterminated' 'print' 'print ,' 'print 1,' 'print a[1], "\n"' \
+         'print "\' 'print "\\"' 'print "\t\n"' 'print "1234567890123456789012345678901234567890123456789012345678901234567890123456789\n"' \
+         '"1234567890123456789012345678901234567890123456789012345678901234567890123456789"' \
+         'print 2^300, "\n"'; do
+  two "$p"$'\n'
+done
+raw '"a\000b"\n5\n'
+raw 'print "a\000b"\n5\n'
+raw '"\000"\n'
+
+# --- names, variables, arrays ----------------------------------------------------------------
+for p in 'x' 'x=5; x' 'abc=5; abc' 'a_1=2; a_1' 'a1b2=3; a1b2' '_a=1' 'A=1' 'x[0]' 'x[0]=5; x[0]' \
+         'x[1]=2; x[0]=1; x[0]+x[1]' 'x[-1]' 'x[-1]=3' 'x[0.5]' 'x[1.5]=4; x[1]' 'x[16777215]=1; x[16777215]' \
+         'x[16777216]' 'x[99999999999]' 'x[2^31]' 'x=1; x[0]=2; x; x[0]' 'x[0]=1; x[0]++; x[0]' \
+         'x[0]=1; ++x[0]; x[0]' 'x[0]=5; x[0]--; --x[0]; x[0]' 'x[0]+=5; x[0]' 'x[1000]=7; x[1000]; x[999]' \
+         'x[x[0]=3]=4; x[3]' 'x[]' 'x[' 'x[1' 'x[]=1' 'x[1]=x[2]=x[3]=9; x[1]+x[2]+x[3]' \
+         'for(i=0;i<300;i++) a[i]=i; a[255]; a[256]; a[299]' 'a[x++]=x; a[0]; x' 'last=5; last' \
+         'ibase=16; x[A]=1; x[10]' 'quit=1' 'define=1' 'if=2' 'Print=1'; do
+  two "$p"$'\n'
+done
+
+# --- control flow --------------------------------------------------------------------------------
+for p in 'if (1) 5' 'if (0) 5' 'if (0) 5 else 6' 'if (1) 5 else 6' $'if (1)\n5' $'if (0) 5\nelse 6' \
+         'if (1) if (0) 1 else 2' 'if (x=3) x' 'if 1 5' 'if (1)' 'if () 5' 'else 5' \
+         'i=0; while (i<3) i++' 'i=0; while (i<3) { i; i+=1 }' 'while (0) 5' 'while (1) break' \
+         'i=0; while (1) { if (i++>3) break; i }' 'for (i=0; i<3; i++) i' 'for (i=0; i<3; i++) { i; continue; 9 }' \
+         'for (;;) break' 'for (i=0;;i++) if (i>2) break' 'for (i=5; i; ) i--' 'for (; i<3; i++) i' \
+         'for (i=0; i<2; ) { i; i++ }' 'for (i=0; i<3; i++) for (j=0; j<2; j++) i*10+j' 'break' 'continue' \
+         'while (1) continue' 'for (i=0;i<3;i++) { while (1) break; i }' 'for (i=0; i<3; i++) ; i' \
+         'while (i<3) i++; i' 'for (i=0; i<10; i++) if (i%2) continue else i' 'for (a[0]=0; a[0]<2; a[0]++) a[0]' \
+         'for (i=0; i<2; i++) halt' 'if (0) halt; 5' 'if (0) quit; 5' 'quit; 5' '5; quit' 'halt; 5' '5; halt' \
+         'for (i=0; i<2; i++) quit' 'while (i<3) { i++; if (i==2) halt }' 'for (i=0, i<3, i++) i' \
+         'for i=0; i<3; i++ i' 'for (x(); i<3; i++) i' 'for ((i=0); (i<3); (i++)) i' 'while (1) { }' 'for (;;) { }'; do
+  LIMIT=3 two "$p"$'\n'
+done
+
+# --- functions --------------------------------------------------------------------------------------
+for p in $'define f(x) { return x*2 }\nf(3)' $'define f(x) { return (x*2) }\nf(3)' \
+         $'define f() { return }\nf()' $'define f() { return () }\nf()' $'define f() { 5 }\nf()' \
+         $'define f() { }\nf()' $'define f(x,y) { return x-y }\nf(5,2)' $'define f(x,y,z) { return x*100+y*10+z }\nf(1,2,3)' \
+         $'define f(x) { auto y; y=x+1; return y }\nf(1); y' $'define f(x) { auto y,z; y=2; z=3; return x+y+z }\nf(1)' \
+         $'define f(x) {\nauto y\ny = x\nreturn y\n}\nf(4)' $'define f(n) { if (n<2) return 1; return n*f(n-1) }\nf(20)' \
+         $'define fib(n) { if (n<2) return n; return fib(n-1)+fib(n-2) }\nfib(15)' \
+         $'define f(a[]) { return a[0]+a[1] }\nb[0]=1; b[1]=2; f(b[])' \
+         $'define f(a[]) { a[0]=9; return 0 }\nb[0]=1; z=f(b[]); b[0]' \
+         $'define f(*a[]) { a[0]=9; return 0 }\nb[0]=1; z=f(b[]); b[0]' \
+         $'define f(a[]) { return a[5] }\nf(b[])' \
+         $'define f(x) { return x }\nf(a[])' $'define f(x,y) { return x }\nf(a[],1)' \
+         $'define f(x[]) { return 1 }\nf(1)' $'define f(x[]) { return 1 }\nq=1\nf(1)' $'define f(x) { return x }\nf(1,2)' \
+         $'define f(x,y) { return x }\nf(1)' $'define f(x) { return x }\ny=2;z=3\nf(a[])' $'define f() { return 1 }\nf(1)' \
+         $'g()' $'define f() { return g() }\nf()' $'define f(x) { x = 5 }\nx=1; f(2); x' $'define f(x) { auto x; return 1 }' \
+         $'define f(x,x) { return 1 }' $'define f() { auto a,a; return 1 }' $'define f() { auto *a[]; return 1 }' \
+         $'define f() { auto a[]; a[0]=1; return a[0] }\nf(); a[0]' $'define f(x) { return x }\ndefine f(x) { return x+1 }\nf(1)' \
+         $'define void f() { print "v\\n" }\nf()' $'define void f() { return 5 }' $'define void f() { return }\nf()' \
+         $'define void f() { }\nx=f()' $'define void f() { }\nf()+1' $'define void f() { }\n(f())' \
+         $'define void f() { }\nprint f()' $'define f() { return 1 }\ndefine void f() { }\nf()' \
+         $'define f()\n{ return 3 }\nf()' $'define f() {\n}\nf()' $'define f() { return 1 }' \
+         $'define f() { return 1 } 5' $'define f() {\nreturn 1 }; 5' $'define f(x) { return x }\nf(1)+f(2)*f(3)' \
+         $'define f(x) { ibase=16; return 10 }\nf(1); ibase; 10' $'define f(x) { return A }\nibase=16; f(0)' \
+         $'define f(x) { return 10 }\nibase=16; f(0)' $'define f() { scale=5; return 1/3 }\nf(); scale' \
+         $'define f() { return 1/0 }\nf(); 5' $'define f(x) { auto y; y=1/0 }\ny=7; f(1); y' \
+         $'define f(x) { x; return x+1 }\nf(f(f(1)))' $'define f() { halt }\n1; f(); 2' $'define f() { quit }\n1; f(); 2' \
+         $'define f(x) { return f(x) }' $'return 5' $'return' $'define f() { break }' \
+         $'define f() { continue }' $'define f() { for(;;) return 3 }\nf()' $'define f() { while (1) { return 7 } }\nf()' \
+         $'define a(x) { return 1 }\na(2)' $'define e(x) { return 1 }\ne(2)' $'define f(a[], b[]) { return a[0]*b[0] }\nx[0]=3; y[0]=4; f(x[], y[])' \
+         $'define f(a[]) { return a[0] }\nf(a[])' $'define f(*a[]) { a[1]=5 }\nz=f(a[]); a[1]' $'define f(x[]) { return f2(x[]) }\ndefine f2(y[]) { return y[0] }\nz[0]=4; f(z[])'; do
+  LIMIT=5 two "$p"$'\n'
+done
+
+# --- the math library -------------------------------------------------------------------------------
+for p in 's(1)' 'c(1)' 'a(1)' 'l(2)' 'e(1)' 'j(0,1)' 'j(1,2.5)' 'scale' 's(0)' 'c(0)' 'a(0)' 'l(1)' 'e(0)' \
+         'l(0)' 'l(-1)' 'e(-1)' 'e(100)' 's(-1)' 'a(-1)' 'a(.2)' 'a(5)' 'scale=50; 4*a(1)' 'scale=5; e(1)' \
+         'scale=0; e(1)' 'scale=0; s(1)' 'scale=100; l(10)' 'j(-1,1)' 'j(1.5,1)' 'ibase=16; e(1)' 'obase=16; e(1)' \
+         'e(1); scale' 'define e(x) { return 42 }; e(1)' 'define s(x) { return 7 }; c(1)' 'x=e(1); x'; do
+  lib "$p"$'\n'
+done
+two $'s(1)\n'
+INPUT=$'s(1)\n'; INPUT_SET=1; run_case bc -c -l
+
+# --- read() -----------------------------------------------------------------------------------------
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'42\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'1.\n2\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'ibase=16\nx=read()\nx\n' > r"; INPUT=$'1.\n2\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'-12.5\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'   +7\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'1\\\n2\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'abc\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'ZZ\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'1+2\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\ny=read()\nx;y\n' > r"; INPUT=$'1 2\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'~5\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'.\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'ibase=2\nx=read()\nx\n' > r"; INPUT=$'19\n'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'5'; INPUT_SET=1; run_case bc r
+SETUP="printf 'x=read()\nx\n' > r"; INPUT=$'-\n5\n'; INPUT_SET=1; run_case bc r
+LIMIT=2 stdin $'x=read()\nx\n'
+INPUT=$'x=read()\nx\n'; INPUT_SET=1; LIMIT=2 run_case bc -s
+
+# --- comments and blanks -------------------------------------------------------------------------------
+for p in '/* c */ 5' $'/* multi\nline */ 5' '/* unterminated' $'/* a */ /* b */ 6' '/*/ 7 */ 8' '/** 9 **/' \
+         '# hash' '5 # hash' $'5 #\n6' '#' $'\t5' $'5\t+\t1' '  5  ' $'\f5' $'\v5' $'5\r' $'\r5'; do
+  two "$p"$'\n'
+done
+
+# --- illegal characters and syntax errors ------------------------------------------------------------------
+for p in '@' '$' '`' '~' '?' ':' "'" '\' '1 @ 2' '&' '|' '&&' '||' '1 & 2' '1 | 2' '= 1' '==' '<' '1 <' \
+         '1 =< 2' '1 => 2' '1 <> 2' 'x =+ 1' 'x =* 2' 'x =/ 2' '{' '(' ')' '[' ']' ',' '1,2' \
+         'define' 'define f' 'define f(' 'define f()' 'define f() {' 'define f() }' 'auto x' 'if' 'while' 'for' \
+         'f(' 'f(1' 'f(,)' 'f(1,)' 'f(a[1])' 'x[1][2]' 'sqrt()' 'length()' 'scale()' 'read(1)' 'random(1)' \
+         'limits' 'warranty' 'limits; 5' 'print limits' '1 2' '1 x' 'x y' '++' '-' '!' '1 !' 'ibase[1]' 'last[1]' \
+         'scale(x[])' 'x[]+1' 'void' 'define void' 'Void=1'; do
+  two "$p"$'\n'
+done
+raw '\001\n5\n'
+raw '\177\n5\n'
+raw '\200\n5\n'
+raw '\377\n5\n'
+raw '\000\n5\n'
+raw '5\000\n6\n'
+raw 'x\033y\n5\n'
+raw '1+\n2\n'
+raw '(\n5\n'
+raw '1+\n\n\n2\n'
+raw 'define f() {\n1+\n}\nf()\n5\n'
+raw 'if (1) {\n1+\n5\n}\n6\n'
+raw '1\n2'
+raw '2+2'
+raw 'print "A"'
+raw 'define f() { return 1 }'
+raw '5;'
+raw '{ 5'
+raw '/* c */'
+
+# --- -s and -w: what is not POSIX bc -------------------------------------------------------------------------
+for p in 'a[1]=1' 'abc=1' 'x=2; x+=1' 'print "a"' 'if (1) 1 else 2' 'for (;;) break' 'for (i=0; i<2; i++) continue' \
+         '!0' '1&&1' '1||0' 'x=1 == 1' 'last' '.' 'history' 'read()' 'random()' 'halt' 'ibase=17' 'ibase=16; G' \
+         'ibase=16; 1G' '"str"' '# c' $'define f(x) { return x }\nf(1)' $'define f(x) { return (x) }' \
+         $'define f(*a[]) { return 1 }' $'define void f() { }' $'define f() {\nreturn 1 }' $'define f() { auto a[]; return 1 }' \
+         'x=1, 2' '1 == 1' '(1 == 1)' 'if (1 == 1) 1' 'x = (1 < 2)' 'length(1 == 1)' 'sqrt(1 > 0)' 'a[1 < 2]=3' \
+         'scale(1); length(2)' 'x=1;;' 'limits' 'warranty' 'quit'; do
+  two "$p"$'\n' -s
+  two "$p"$'\n' -w
+done
+
+# --- -c: the compiled code ------------------------------------------------------------------------------------
+for p in '1+2' 'x=5' 'a[1]=2' 'print "a"' 'if (1) 2 else 3' 'while (0) 1' 'for (i=0;i<2;i++) i' \
+         $'define f(x,*y[]) { auto z,w[]; return x }\nf(1,y[])' '"str"' 'ibase=16; FF' '1.5' 'halt' 'quit' '1+' \
+         'for (i=0;i<100;i++) { x = x + i * 2 - 3 / 4 % 5 ^ 6 }' 'x++; ++x; x--; --x; a[1]++; ++a[1]' \
+         'x+=1; a[2]*=3' '!x && y || z' 'x < y; x <= y; x > y; x >= y; x == y; x != y' 'read(); random()' \
+         'sqrt(2); length(3); scale(4)' 'last; history; ibase; obase; scale'; do
+  two "$p"$'\n' -c
+done
+
+# --- line breaking ---------------------------------------------------------------------------------------------------
+for p in '2^500' '-2^500' '10^69' '10^68' '10^70' 'obase=16; 2^500' 'obase=1000; 2^500' 'scale=200; 1/7' \
+         'print 2^300, 2^300, "\n"' 'print "x"; 2^300' '1; 2^200; print "abc"; 2^200'; do
+  two "$p"$'\n'
+  ENVS='BC_LINE_LENGTH=20'; two "$p"$'\n'
+  ENVS='BC_LINE_LENGTH=0'; two "$p"$'\n'
+done
+
+# --- runtime errors and where they stop ---------------------------------------------------------------------------
+for p in '1/0; 5' $'1/0\n5' '1%0' 'x=1/0; x' 'sqrt(-4); 5' 'a[-1]=1; 5' 'x=a[-1]' 'a[-1]++' '++a[-1]' \
+         'a[16777216]--' $'define f(x) { return 1/0 }\nf(1); f(2)' 'for (i=0;i<3;i++) { i; 1/0 }' \
+         $'1/0; print "after"\nprint "next\\n"' '2^(2^40)' '0^-1' '(1/0)+(2/0)' 'x[1/0]=1' 'sqrt(1/0)'; do
+  two "$p"$'\n'
+done
+
+# --- seeded random programs ------------------------------------------------------------------------------------------
+gen=$DIFF_TMP/gen.py
+cat > "$gen" <<'PY'
+import random, sys
+r = random.Random(20261016)
+atoms = ['+', '-', '*', '/', '%', '^', '=', '+=', '-=', '*=', '==', '!=', '<', '<=', '>', '>=', '!', '&&', '||',
+         '++', '--', '(', ')', '(', ')', '[', ']', '{', '}', ';', ',', '\n', '\n', ' ', ' ', 'x', 'y', 'a[0]', 'a[',
+         'f(', 'f(1)', 'g(x)', 'b[]', 'scale', 'ibase', 'obase', 'last', '.', 'length(', 'sqrt(', 'scale(',
+         'if (', 'else', 'while (', 'for (', 'break', 'continue', 'return', 'auto', 'define', 'print', '"s"',
+         '"', '/*', '*/', '#', '\\\n', '@', '\x01', '\xff', 'A', 'F', 'Z', 'void', 'read', 'limits']
+for i in range(int(sys.argv[1])):
+    parts = []
+    for _ in range(r.randint(1, 30)):
+        if r.random() < 0.35:
+            parts.append(r.choice(['0', '1', '2', '3', '7', '10', '16', '99', '0.5', '1.25', '.5',
+                                   str(r.randint(0, 10**r.randint(1, 30))), '-3']))
+        else:
+            parts.append(r.choice(atoms))
+    text = ''.join(parts)
+    if r.random() < 0.85:
+        text += '\n'
+    sys.stdout.buffer.write(text.encode('latin-1') + b'\0')
+PY
+while IFS= read -r -d '' prog; do
+  LIMIT=3 two "$prog"
+done < <(python3 "$gen" 400)
+
+echo "bc-diff: $pass passed, $fail differed, $xfail xfail, $xpass xpass"
+[ "$fail" = 0 ] && [ "$xpass" = 0 ]

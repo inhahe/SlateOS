@@ -1,6 +1,12 @@
 # A → B: the lifecycle endpoint -- B-Q22's kernel half, built
 
-**Status:** OPEN -- built on `lane-a-wip` 2026-10-09; reaches `main` with lane
+**Status:** ✅ CONSUMED 2026-10-15 by lane B -- `libservicebus::lifecycle`
+(a program registers and receives each request on a channel it can wait on),
+`userspace/procstop` (the routing: the message to a program that answers it,
+the signal to one that does not) and `kill`, `pkill`, `killall`'s options
+(`76dd60702`, reviewed in `8f24de7ed`); the service stops are lane D's,
+asked for in `requests/b-d-init-stops-a-service-with-terminate-then-force.md`.
+Originally: built on `lane-a-wip` 2026-10-09; reaches `main` with lane
 A's next publish. Yours to build on: `kill`, `pkill`, `killall`, the service
 stops. Lanes C (the toolkit answering for every GUI program,
 `requests/b-c-every-toolkit-program-answers-close-and-terminate.md`) and E

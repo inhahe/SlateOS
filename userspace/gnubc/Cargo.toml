@@ -1,0 +1,21 @@
+[package]
+name = "gnubc"
+version = "0.1.0"
+edition = "2024"
+description = "GNU bc 1.07.1's interpreter, ported: the bc language, for coreutils' bc"
+
+[dependencies]
+# bc's number.c: every digit bc prints comes from its algorithms.
+bcnumber = { path = "../bcnumber" }
+# The C library's FILE buffering, which bc's output shows.
+cstdio = { path = "../cstdio" }
+# Descriptors, signals and the file reads the scanner makes, through the C
+# library.
+libcall = { path = "../../libcall" }
+# File names in diagnostics, their unprintable bytes escaped.
+quoting = { path = "../quoting" }
+# C's cast of a long to an int (`low_i32`), for storing into ibase and the rest.
+cstrtol = { path = "../cstrtol" }
+
+[lints]
+workspace = true

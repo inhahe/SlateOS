@@ -98,6 +98,25 @@ pub const PASSWD_NAME: &str = "passwd";
 /// directory. See [`UserDb::to_shadow_text`].
 pub const SHADOW_NAME: &str = "shadow";
 
+/// The automatic sign-in hint, named relative to the database's own
+/// directory: present exactly when an account will sign in by itself
+/// ([`UserDb::automatic_account`]), so that the screens before the desktop
+/// -- the kernel's, which cannot read this database -- can say that holding
+/// Shift offers the account chooser instead (design-decisions §1427). See
+/// [`UserDb::save`].
+pub const AUTOLOGIN_HINT_NAME: &str = "autologin-hint";
+
+/// The hint's one line: what it says to a person who finds it.
+const AUTOLOGIN_HINT_TEXT: &str = "auto_login: true\n";
+
+/// The uid range that describes a person rather than a service.
+///
+/// The *upper* bound is the half that is easy to leave out and wrong to.
+/// `nobody` is conventionally uid 65534 -- above the range, not below it -- so a
+/// bare `uid >= 1000` filter drops `daemon` and keeps `nobody`, which is the
+/// account the filter most obviously exists to hide.
+pub const HUMAN_UIDS: core::ops::RangeInclusive<u32> = 1000..=60_000;
+
 /// The method new passwords are hashed with: yescrypt, at the cost
 /// `crypt_gensalt` gives it by default -- `$y$j9T$`, 16 MiB of memory and
 /// about 16 ms for each check -- which is what a new password gets on Ubuntu
@@ -748,7 +767,17 @@ impl Record {
         self.set_bare(field::GROUPS, &buf);
     }
 
-    /// Whether this account logs in without being asked.
+    /// Whether a lock or login screen offers this account: it has a username
+    /// to ask about, and its uid is a person's ([`HUMAN_UIDS`]) -- or it has
+    /// none, since a hand-edited record that omits the field describes a
+    /// person far more often than a daemon.
+    #[must_use]
+    pub fn is_offered(&self) -> bool {
+        self.username().is_some() && self.uid().is_none_or(|uid| HUMAN_UIDS.contains(&uid))
+    }
+
+    /// Whether this account is marked to log in without being asked. Whether
+    /// it then does is [`UserDb::automatic_account`]'s to say.
     #[must_use]
     pub fn auto_login(&self) -> bool {
         self.get(field::AUTO_LOGIN)
@@ -1177,18 +1206,41 @@ impl UserDb {
     /// real `/etc/passwd`. See [`UserDb::to_passwd_text`] for what §353 asks
     /// of them.
     ///
+    /// # The automatic sign-in hint
+    ///
+    /// [`AUTOLOGIN_HINT_NAME`] beside the database is made to follow it here:
+    /// written when an account will sign in by itself
+    /// ([`UserDb::automatic_account`]), removed when none will. No one rename
+    /// covers two files, so the order is chosen for what a power cut between
+    /// them leaves: turning the hint off removes it *before* anything else is
+    /// written, and turning it on writes it *after* the database. Either way
+    /// the cut leaves no hint, at worst -- never one promising a sign-in that
+    /// will not happen.
+    ///
     /// # Errors
     ///
     /// [`std::io::ErrorKind::InvalidData`] wrapping a [`GenerateError`] if a
     /// record cannot be written to `/etc/passwd` — checked *before* anything
     /// is written, so such a database fails the save with all three files
-    /// untouched rather than after the YAML has already moved. Otherwise any
-    /// I/O error from creating, writing or renaming a temporary file.
+    /// untouched rather than after the YAML has already moved. An error
+    /// removing a hint that is to go, before anything is written. Otherwise
+    /// any I/O error from creating, writing or renaming a temporary file --
+    /// the hint's rename last, after the database is saved, its error saying
+    /// that the accounts were saved.
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         let passwd = self.to_passwd_text(path).map_err(unrepresentable)?;
         let shadow = self.to_shadow_text(path).map_err(unrepresentable)?;
         let dir = path.parent().unwrap_or_else(|| std::path::Path::new(""));
+        let hint = dir.join(AUTOLOGIN_HINT_NAME);
+        let automatic = self.automatic_account().is_some();
+        if !automatic {
+            match std::fs::remove_file(&hint) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+        }
 
         let plan = [
             // Owner-only. The database holds every account's password hash,
@@ -1216,6 +1268,23 @@ impl UserDb {
                 }
             }
         }
+        // The hint is staged with them, so that a disk too full to hold it
+        // fails the save before anything has changed; only its rename is
+        // left for after the database's. Readable by all: it says only that
+        // someone signs in by itself, which the screen shows anyway.
+        let hint_staged = if automatic {
+            match Staged::write(&hint, AUTOLOGIN_HINT_TEXT, Access::Shared) {
+                Ok(one) => Some(one),
+                Err(e) => {
+                    for done in staged {
+                        done.abandon();
+                    }
+                    return Err(e);
+                }
+            }
+        } else {
+            None
+        };
 
         // The database is renamed first, so that a rename that fails partway
         // leaves the truth behind its derived files rather than ahead of them:
@@ -1235,10 +1304,23 @@ impl UserDb {
                 first_error = Some(e);
             }
         }
-        match first_error {
-            Some(e) => Err(e),
-            None => Ok(()),
+        if let Some(e) = first_error {
+            if let Some(one) = hint_staged {
+                one.abandon();
+            }
+            return Err(e);
         }
+        if let Some(one) = hint_staged {
+            // The database is saved by now; an error from here says so, so
+            // that no caller reports the change as not made.
+            one.commit().map_err(|e| {
+                std::io::Error::new(
+                    e.kind(),
+                    format!("the accounts were saved, but {AUTOLOGIN_HINT_NAME} was not: {e}"),
+                )
+            })?;
+        }
+        Ok(())
     }
 
     /// Render `/etc/passwd` from the database, naming `source` in its header.
@@ -1323,6 +1405,42 @@ impl UserDb {
             );
         }
         Ok(out)
+    }
+
+    /// The account that signs in by itself, if one does: of the accounts a
+    /// screen offers ([`Record::is_offered`]), the one marked
+    /// [`Record::auto_login`] -- `None` when none is, when two or more are,
+    /// and when the one marked is locked. The login screen, `loginmgr` and
+    /// the hint [`UserDb::save`] writes all ask this, so that none of them
+    /// can disagree with the others.
+    ///
+    /// # Why a locked account does not sign in
+    ///
+    /// Signing in by itself checks no password, so the lock is the only
+    /// thing between a locked account and its desktop. An administrator's
+    /// lock has to mean the account does not open whichever way it is asked;
+    /// one that signed itself in while `usermod -L` said it could not would
+    /// make the lock a suggestion.
+    ///
+    /// # Why two marked accounts are none
+    ///
+    /// The flag is kept per account, so a database can mark two -- a hand
+    /// edit, or two programs that each set one. Which was meant is written
+    /// nowhere, and choosing by the order of the file would be a guess that
+    /// could open one person's desktop for another. So neither signs in, and
+    /// the login screen offers both, which is the screen the chooser key
+    /// would have shown.
+    #[must_use]
+    pub fn automatic_account(&self) -> Option<&Record> {
+        let mut marked = self
+            .records()
+            .iter()
+            .filter(|r| r.is_offered() && r.auto_login());
+        let one = marked.next()?;
+        if one.is_locked() || marked.next().is_some() {
+            return None;
+        }
+        Some(one)
     }
 
     /// The records, in file order.
@@ -2261,6 +2379,154 @@ users:
         let mut temp = path.as_os_str().to_os_string();
         temp.push(".tmp");
         assert!(!std::path::Path::new(&temp).exists());
+    }
+
+    // ---- Signing in by itself, and the hint (§1427) ----
+
+    /// A database of `(username, uid, marked, locked)`.
+    fn accounts(rows: &[(&str, Option<u32>, bool, bool)]) -> UserDb {
+        let mut db = UserDb::new();
+        for &(name, uid, marked, locked) in rows {
+            let mut record = Record::new();
+            record.set(field::USERNAME, name);
+            if let Some(uid) = uid {
+                record.set_uid(uid);
+            }
+            record.set_auto_login(marked);
+            record.set_locked(locked);
+            db.push(record);
+        }
+        db
+    }
+
+    fn automatic(db: &UserDb) -> Option<String> {
+        db.automatic_account().and_then(Record::username)
+    }
+
+    #[test]
+    fn one_offered_unlocked_marked_account_signs_in_by_itself() {
+        let none = accounts(&[
+            ("ada", Some(1000), false, false),
+            ("bob", Some(1001), false, false),
+        ]);
+        assert_eq!(automatic(&none), None);
+        let one = accounts(&[
+            ("ada", Some(1000), false, false),
+            ("bob", Some(1001), true, false),
+        ]);
+        assert_eq!(automatic(&one), Some("bob".to_owned()));
+        let locked = accounts(&[("bob", Some(1001), true, true)]);
+        assert_eq!(automatic(&locked), None, "a lock is not a suggestion");
+        let two = accounts(&[
+            ("ada", Some(1000), true, false),
+            ("bob", Some(1001), true, false),
+        ]);
+        assert_eq!(automatic(&two), None, "which was meant is written nowhere");
+        let service = accounts(&[
+            ("daemon", Some(2), true, false),
+            ("bob", Some(1001), true, false),
+        ]);
+        assert_eq!(
+            automatic(&service),
+            Some("bob".to_owned()),
+            "a service is not offered"
+        );
+        let nobody = accounts(&[("nobody", Some(65_534), true, false)]);
+        assert_eq!(automatic(&nobody), None);
+        let no_uid = accounts(&[("eve", None, true, false)]);
+        assert_eq!(
+            automatic(&no_uid),
+            Some("eve".to_owned()),
+            "no uid is a person"
+        );
+    }
+
+    #[test]
+    fn a_save_writes_the_hint_exactly_while_someone_signs_in_by_itself() {
+        let scratch = ScratchDir::new("userdb-autologin-hint");
+        let path = scratch.path("users.yaml");
+        let hint = scratch.path(AUTOLOGIN_HINT_NAME);
+        let mut db = accounts(&[("ada", Some(1000), false, false)]);
+        db.save(&path).expect("save");
+        assert!(!hint.exists(), "no one signs in by itself");
+        db.find_mut("ada").expect("ada").set_auto_login(true);
+        db.save(&path).expect("save");
+        assert_eq!(
+            std::fs::read_to_string(&hint).expect("hint"),
+            AUTOLOGIN_HINT_TEXT
+        );
+        let mut temp = hint.as_os_str().to_os_string();
+        temp.push(".tmp");
+        assert!(!std::path::Path::new(&temp).exists());
+        db.find_mut("ada").expect("ada").set_locked(true);
+        db.save(&path).expect("save");
+        assert!(!hint.exists(), "locked, she does not sign in by herself");
+        db.save(&path).expect("save");
+        assert!(
+            !hint.exists(),
+            "and a hint that is not there is not an error"
+        );
+    }
+
+    /// Turning the hint off removes it before the database is written, so a
+    /// save that then fails leaves no hint rather than a stale one.
+    #[test]
+    fn turning_the_hint_off_removes_it_before_the_database_is_written() {
+        let scratch = ScratchDir::new("userdb-autologin-hint-order");
+        let path = scratch.path("users.yaml");
+        let hint = scratch.path(AUTOLOGIN_HINT_NAME);
+        let mut db = accounts(&[("ada", Some(1000), true, false)]);
+        db.save(&path).expect("save");
+        assert!(hint.exists());
+        // A directory where the database's temporary goes: its write fails.
+        let mut temp = path.as_os_str().to_os_string();
+        temp.push(".tmp");
+        std::fs::create_dir(&temp).expect("block the temporary");
+        db.find_mut("ada").expect("ada").set_auto_login(false);
+        assert!(db.save(&path).is_err());
+        assert!(!hint.exists(), "gone before the write that failed");
+        let before = UserDb::load(&path).expect("load");
+        assert_eq!(
+            automatic(&before),
+            Some("ada".to_owned()),
+            "the database unchanged"
+        );
+    }
+
+    /// A hint that cannot be written fails the save before anything is
+    /// changed; one that cannot be put in place after the database was
+    /// says the accounts were saved.
+    #[test]
+    fn a_hint_that_cannot_be_written_is_said_for_what_it_is() {
+        let scratch = ScratchDir::new("userdb-autologin-hint-fail");
+        let path = scratch.path("users.yaml");
+        let hint = scratch.path(AUTOLOGIN_HINT_NAME);
+        let mut db = accounts(&[("ada", Some(1000), false, false)]);
+        db.save(&path).expect("save");
+        let before = std::fs::read_to_string(&path).expect("read");
+        // Its temporary cannot be written: nothing changes.
+        let mut temp = hint.as_os_str().to_os_string();
+        temp.push(".tmp");
+        std::fs::create_dir(&temp).expect("block the hint's temporary");
+        db.find_mut("ada").expect("ada").set_auto_login(true);
+        assert!(db.save(&path).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read"),
+            before,
+            "the database unchanged"
+        );
+        std::fs::remove_dir(&temp).expect("unblock");
+        // The hint's own name is a directory: the rename fails after the
+        // database is saved, and the error says so.
+        std::fs::create_dir(&hint).expect("block the hint");
+        let err = db.save(&path).expect_err("the hint cannot be put in place");
+        assert!(err.to_string().contains("the accounts were saved"), "{err}");
+        let after = UserDb::load(&path).expect("load");
+        assert_eq!(
+            automatic(&after),
+            Some("ada".to_owned()),
+            "the database saved"
+        );
     }
 
     // ---- The generated flat files (§353) ----

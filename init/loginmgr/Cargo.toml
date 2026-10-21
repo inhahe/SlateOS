@@ -2,30 +2,25 @@
 name = "loginmgr"
 version = "0.1.0"
 edition = "2024"
-description = "SlateOS Login Manager — display manager and session launcher"
+description = "SlateOS login manager: signs people in and starts their desktop as them"
 
-# `userdb` for `/etc/users.yaml`: the format, the parser and the password hash.
-# This crate carried its own of each, and so did `userspace/useradm`, in
-# versions that disagreed about the name of the salt field and about what was
-# hashed — so an account created with `useradm` could not log in here. See
-# `design-decisions.md` §330.
-#
-# `authlib` for the shared failed-attempt tally. This crate had its own
-# in-memory lockout, keyed by uid and lost on restart, which shared nothing
-# with the console `login` prompt or with `su` — so an attacker slowed to one
-# guess every five minutes at this screen could switch to a text console and
-# resume at full speed, and vice versa. See `design-decisions.md` §354.
 [dependencies]
-# An argument may hold any byte but `/` and NUL, so a diagnostic that names
-# one has to escape what does not decode rather than assume UTF-8.
-quoting = { path = "../../userspace/quoting" }
+# Checking a password: the verdict and the shared tally of wrong guesses that
+# `login` and `su` count against too (design-decisions §341, §354).
 authlib = { path = "../../userspace/authlib" }
-guitk = { path = "../../gui/toolkit" }
+# The account database: whom a session runs as, and its sign-ins counted.
 userdb = { path = "../../userspace/userdb" }
+# Which accounts a login screen offers, as the screen lists them (Account,
+# offered). Which one signs in by itself is the database's rule
+# (userdb::UserDb::automatic_account).
+loginusers = { path = "../../gui/loginusers" }
+# The service the login screen calls, and logind's.
+libservicebus = { path = "../../userspace/libservicebus" }
+# Waiting for the programs it starts.
+libcall = { path = "../../libcall" }
 
 [dev-dependencies]
-# A database of the tests' own, for the ones that check this program against
-# the file rather than against the list it loaded.
+# A database of the tests' own.
 scratchdir = { path = "../../userspace/scratchdir" }
 
 [lints]

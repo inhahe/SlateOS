@@ -4,7 +4,8 @@
 //! the linked C library. And two questions asked of a descriptor: whether it
 //! is a terminal (`isatty`), and whether it will take a write within a time
 //! (`poll` for `POLLOUT`), which a program writing to other people's
-//! terminals -- journald's broadcast -- asks of each.
+//! terminals -- journald's broadcast -- asks of each. And `poll` itself, for
+//! a program that waits on several descriptors, each for events of its own.
 //!
 //! What a program needs when it arranges another program's standard
 //! descriptors and then becomes that program, as `systemd-cat` does: std
@@ -31,27 +32,71 @@ const F_SETFD: i32 = 2;
 #[cfg(any(unix, test))]
 const FD_CLOEXEC: i32 = 1;
 
-/// `poll`'s events: something to read, room to write, and a descriptor that
-/// is not open.
-#[cfg(any(unix, test))]
-const POLLIN: i16 = 0x0001;
-#[cfg(any(unix, test))]
-const POLLOUT: i16 = 0x0004;
-#[cfg(any(unix, test))]
-const POLLNVAL: i16 = 0x0020;
+/// `poll`'s events: something to read, room to write, an error, a hang-up,
+/// and a descriptor that is not open. The last three are reported whether
+/// asked for or not.
+pub const POLLIN: i16 = 0x0001;
+/// Room to write.
+pub const POLLOUT: i16 = 0x0004;
+/// An error on the descriptor -- for a pipe's write end, no reader left.
+pub const POLLERR: i16 = 0x0008;
+/// The other end has gone: a pipe with no writer, a terminal hung up.
+pub const POLLHUP: i16 = 0x0010;
+/// The descriptor is not open.
+pub const POLLNVAL: i16 = 0x0020;
+
+/// One descriptor for [`poll`] to watch: C's `struct pollfd`. `events` is
+/// what to wait for -- 0 for only what `poll` always reports, an error or a
+/// hang-up -- and `revents` what came.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PollFd {
+    /// The descriptor; a negative one is not watched.
+    pub fd: i32,
+    /// The events asked for.
+    pub events: i16,
+    /// The events that came, written by [`poll`].
+    pub revents: i16,
+}
+
+/// Wait at most `timeout_ms` milliseconds (`-1` for ever) for any of `fds`
+/// to have an event it asked for, or one `poll` always reports: `poll`. How
+/// many have one -- each one's `revents` says which -- and 0 when the time
+/// ran out.
+///
+/// For a program that waits on several descriptors, each for its own events
+/// -- `rfkill event`'s device for `POLLIN | POLLHUP` and its standard output
+/// for nothing, so that only a reader going away ends the wait.
+///
+/// # Errors
+///
+/// What `poll` reports: `EINTR` when a signal came first, `EINVAL`, `ENOMEM`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> Result<usize, i32> {
+    poll_impl(fds, timeout_ms)
+}
+
+#[cfg(unix)]
+fn poll_impl(fds: &mut [PollFd], timeout_ms: i32) -> Result<usize, i32> {
+    let nfds = u64::try_from(fds.len()).map_err(|_| crate::EINVAL)?;
+    // SAFETY: `fds` is `nfds` live `struct pollfd`s in a row -- `PollFd` is
+    // `repr(C)` with C's fields -- which the call reads and writes `revents`
+    // into, and keeps no pointer to.
+    let rc = unsafe { sys::poll(fds.as_mut_ptr(), nfds, timeout_ms) };
+    usize::try_from(rc).map_err(|_| last_errno())
+}
+
+#[cfg(not(unix))]
+fn poll_impl(_fds: &mut [PollFd], _timeout_ms: i32) -> Result<usize, i32> {
+    Err(ENOSYS)
+}
 /// `EBADF`.
 #[cfg(unix)]
 const EBADF: i32 = 9;
 
 #[cfg(unix)]
 mod sys {
-    /// C's `struct pollfd`.
-    #[repr(C)]
-    pub struct PollFd {
-        pub fd: i32,
-        pub events: i16,
-        pub revents: i16,
-    }
+    pub use super::PollFd;
 
     unsafe extern "C" {
         pub fn dup2(old: i32, new: i32) -> i32;
@@ -64,6 +109,9 @@ mod sys {
         pub fn read(fd: i32, buf: *mut core::ffi::c_void, count: usize) -> isize;
         pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
         pub fn open(path: *const core::ffi::c_char, flags: i32, ...) -> i32;
+        // Two `struct timespec`s, as four 64-bit words; only ever passed
+        // null here.
+        pub fn futimens(fd: i32, times: *const [i64; 4]) -> i32;
     }
 
     /// `O_RDONLY`.
@@ -99,6 +147,117 @@ fn open_read_one(path: &core::ffi::CStr) -> Result<i32, i32> {
 #[cfg(not(unix))]
 fn open_read_one(_path: &core::ffi::CStr) -> Result<i32, i32> {
     Err(ENOSYS)
+}
+
+/// `O_CREAT`.
+pub const O_CREAT: i32 = 0o100;
+
+/// Open `path` for reading, creating it -- empty, with permissions `mode`
+/// -- if it is not there: `open (path, O_CREAT | O_CLOEXEC | O_RDONLY,
+/// mode)`, which the standard library will not do (it creates only for
+/// writing). The descriptor, the caller's to [`close`].
+///
+/// # Errors
+///
+/// What `open` reports: `EACCES`, `ENOENT` for a missing directory, `EROFS`
+/// and the rest; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_create_read(path: &core::ffi::CStr, mode: u32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        let flags = O_CREAT | sys::O_CLOEXEC | sys::O_RDONLY;
+        // SAFETY: a NUL-terminated path the call only reads, the flags, and
+        // the mode `O_CREAT` reads as the third argument, an `unsigned int`.
+        let fd = unsafe { sys::open(path.as_ptr(), flags, mode) };
+        if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(ENOSYS)
+    }
+}
+
+/// Set the file on `fd`'s access and change times to now: `futimens (fd,
+/// NULL)` -- which, unlike setting given times (all the standard library
+/// offers), anyone who may write the file may do, its owner or not.
+///
+/// # Errors
+///
+/// `EACCES` or `EPERM` without write permission, `EBADF`, `EROFS`;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn touch_now(fd: i32) -> Result<(), i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: a null `times` asks for "now" for both times; nothing of
+        // ours is read or written.
+        if unsafe { sys::futimens(fd, core::ptr::null()) } == 0 {
+            Ok(())
+        } else {
+            Err(last_errno())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(ENOSYS)
+    }
+}
+
+/// `O_WRONLY`.
+pub const O_WRONLY: i32 = 0o1;
+
+/// Open `path` for writing, creating it -- empty, with permissions `mode`
+/// -- if it is not there, close-on-exec: `open (path, O_CREAT | O_CLOEXEC |
+/// O_WRONLY, mode)`. Unlike the standard library's, this does not ask for
+/// `O_TRUNC` or anything else. The descriptor, the caller's to [`close`].
+///
+/// # Errors
+///
+/// What `open` reports; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_create_write(path: &core::ffi::CStr, mode: u32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        let flags = O_CREAT | sys::O_CLOEXEC | O_WRONLY;
+        // SAFETY: as in `open_create_read`.
+        let fd = unsafe { sys::open(path.as_ptr(), flags, mode) };
+        if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        Err(ENOSYS)
+    }
+}
+
+/// `O_RDWR`.
+pub const O_RDWR: i32 = 0o2;
+/// `O_NOCTTY`: opening a terminal does not make it the controlling one.
+pub const O_NOCTTY: i32 = 0o400;
+
+/// Open a terminal line for reading and writing as a getty opens it --
+/// `open (path, O_RDWR | O_NOCTTY | O_NONBLOCK)`: not as the controlling
+/// terminal, without waiting for carrier, and *not* closed on `exec`, since
+/// it is to be the login's standard input. The lowest free descriptor, the
+/// caller's to [`close`].
+///
+/// # Errors
+///
+/// What `open` reports: `ENOENT`, `EACCES`, `EBUSY` and the rest;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn open_line(path: &core::ffi::CStr) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        let flags = O_RDWR | O_NOCTTY | crate::termios::O_NONBLOCK;
+        // SAFETY: a NUL-terminated path the call only reads, and flags; no
+        // third argument, which only `O_CREAT` and `O_TMPFILE` read.
+        let fd = unsafe { sys::open(path.as_ptr(), flags) };
+        if fd >= 0 { Ok(fd) } else { Err(last_errno()) }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Err(ENOSYS)
+    }
 }
 
 /// Write `buf` to `fd` once: `write`. How many bytes went, which may be
@@ -259,6 +418,39 @@ fn dup_above_one(fd: i32, min: i32) -> Result<i32, i32> {
 #[cfg(not(unix))]
 fn dup_above_one(_fd: i32, _min: i32) -> Result<i32, i32> {
     Err(ENOSYS)
+}
+
+/// `fcntl`'s command for a copy at the lowest free number at or above the
+/// argument, kept across `exec`.
+#[cfg(any(unix, test))]
+const F_DUPFD: i32 = 0;
+
+/// `dup (fd)`: a copy of `fd` at the lowest free number, *kept* across
+/// `exec` -- what a program arranging another's standard descriptors needs,
+/// where [`dup_above`]'s copy would be gone in the program it runs. The
+/// copy is the caller's to close.
+///
+/// # Errors
+///
+/// `EBADF` when `fd` is not open, `EMFILE`; [`ENOSYS`](crate::ENOSYS) off
+/// Unix.
+pub fn dup(fd: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: numbers only; `F_DUPFD` reads its third argument as an
+        // `int` and touches no memory.
+        let copy = unsafe { sys::fcntl(fd, F_DUPFD, 0) };
+        if copy < 0 {
+            Err(last_errno())
+        } else {
+            Ok(copy)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = fd;
+        Err(ENOSYS)
+    }
 }
 
 /// Whether `fd` is closed by an `exec`: `FD_CLOEXEC` set or cleared with
@@ -496,12 +688,147 @@ mod tests {
     #[test]
     fn the_numbers_are_the_librarys() {
         assert_eq!(F_DUPFD_CLOEXEC, posix::fcntl_ops::F_DUPFD_CLOEXEC);
+        assert_eq!(F_DUPFD, posix::fcntl_ops::F_DUPFD);
         assert_eq!(F_GETFD, posix::fcntl_ops::F_GETFD);
         assert_eq!(F_SETFD, posix::fcntl_ops::F_SETFD);
         assert_eq!(FD_CLOEXEC, 1);
         assert_eq!(POLLIN, posix::poll::POLLIN);
         assert_eq!(POLLOUT, posix::poll::POLLOUT);
         assert_eq!(POLLNVAL, posix::poll::POLLNVAL);
+        assert_eq!(POLLERR, posix::poll::POLLERR);
+        assert_eq!(POLLHUP, posix::poll::POLLHUP);
+        assert_eq!(core::mem::size_of::<PollFd>(), 8, "C's struct pollfd");
+        assert_eq!(O_RDWR, posix::fcntl::O_RDWR);
+        assert_eq!(O_NOCTTY, posix::fcntl::O_NOCTTY);
+        assert_eq!(O_CREAT, posix::fcntl::O_CREAT);
+        assert_eq!(O_WRONLY, posix::fcntl::O_WRONLY);
+    }
+
+    /// Each descriptor is woken by what it asked for, and by an error or a
+    /// hang-up whether it asked or not.
+    #[cfg(unix)]
+    #[test]
+    fn poll_reports_each_descriptor_s_own_events() {
+        let (r, w) = pipe().unwrap();
+        let mut fds = [
+            PollFd {
+                fd: r,
+                events: POLLIN | POLLHUP,
+                revents: 0,
+            },
+            PollFd {
+                fd: w,
+                events: 0,
+                revents: 0,
+            },
+        ];
+        assert_eq!(poll(&mut fds, 0), Ok(0), "nothing to read, nothing wrong");
+        write(w, b"x").unwrap();
+        assert_eq!(poll(&mut fds, 0), Ok(1));
+        assert_eq!(fds[0].revents, POLLIN);
+        assert_eq!(fds[1].revents, 0, "room to write was not asked about");
+        close(r).unwrap();
+        fds[0].fd = -1;
+        assert_eq!(poll(&mut fds, 0), Ok(1));
+        assert_eq!(fds[1].revents, POLLERR, "no reader left");
+        close(w).unwrap();
+    }
+
+    /// A file opened for writing is created as asked, not emptied when it
+    /// is there, and its times set to now.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_touched_to_now() {
+        extern crate std;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(std::format!("libcall-touch-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("trigger");
+        std::fs::write(&path, b"kept").unwrap();
+        let old = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let fd = open_create_write(&c, 0o600).unwrap();
+        touch_now(fd).unwrap();
+        let _ = close(fd);
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(meta.len(), 4);
+        assert!(meta.modified().unwrap() > old);
+        std::fs::remove_file(&path).unwrap();
+        let fd = open_create_write(&c, 0o640).unwrap();
+        let _ = close(fd);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640 & !umask()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The process's umask, which a created file's mode passes through:
+    /// read, not set, since setting it would race the other tests' threads.
+    #[cfg(unix)]
+    fn umask() -> u32 {
+        extern crate std;
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|s| {
+                s.lines()
+                    .find_map(|l| l.strip_prefix("Umask:"))
+                    .and_then(|v| u32::from_str_radix(v.trim(), 8).ok())
+            })
+            .unwrap_or(0o022)
+    }
+
+    /// A file opened for reading is created if need be, with the mode
+    /// asked for, and opened again as it is.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_is_created_to_be_read() {
+        extern crate std;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(std::format!("libcall-create-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("trigger");
+        let c = std::ffi::CString::new(path.to_str().unwrap()).unwrap();
+        let fd = open_create_read(&c, 0o600).unwrap();
+        let _ = close(fd);
+        let meta = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (meta.len(), meta.permissions().mode() & 0o777),
+            (0, 0o600 & !umask())
+        );
+        let fd = open_create_read(&c, 0o644).unwrap();
+        let _ = close(fd);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600 & !umask()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            open_create_read(c"/nonexistent/dir/trigger", 0o600),
+            Err(crate::ENOENT)
+        );
+    }
+
+    /// A line opened as a getty opens it is read-write and survives `exec`;
+    /// a path that is not there is refused.
+    #[cfg(unix)]
+    #[test]
+    fn a_line_is_opened_read_write_and_kept_across_exec() {
+        let fd = open_line(c"/dev/null").unwrap();
+        let fl = crate::termios::status_flags(fd).unwrap();
+        assert_eq!(fl & 0o3, O_RDWR);
+        assert_ne!(fl & crate::termios::O_NONBLOCK, 0);
+        // SAFETY: `F_GETFD` takes no third argument.
+        let fdflags = unsafe { sys::fcntl(fd, F_GETFD) };
+        assert_eq!(fdflags & FD_CLOEXEC, 0);
+        let _ = close(fd);
+        assert_eq!(open_line(c"/nonexistent/line"), Err(crate::ENOENT));
     }
 
     #[cfg(unix)]
@@ -563,6 +890,27 @@ mod tests {
         close(target).unwrap();
         close(copy).unwrap();
         assert!(close(copy).is_err(), "closed twice");
+    }
+
+    /// A plain copy is kept across `exec`, where `dup_above`'s is not.
+    #[cfg(unix)]
+    #[test]
+    fn a_plain_copy_is_kept_across_exec() {
+        extern crate std;
+        use std::os::fd::AsRawFd;
+
+        let file = std::fs::File::open("/dev/null").unwrap();
+        let copy = dup(file.as_raw_fd()).unwrap();
+        // SAFETY: `F_GETFD` takes no third argument.
+        let flags = unsafe { sys::fcntl(copy, F_GETFD) };
+        assert_eq!(flags & FD_CLOEXEC, 0);
+        let above = dup_above(file.as_raw_fd(), 0).unwrap();
+        // SAFETY: as above.
+        let flags = unsafe { sys::fcntl(above, F_GETFD) };
+        assert_eq!(flags & FD_CLOEXEC, FD_CLOEXEC);
+        close(copy).unwrap();
+        close(above).unwrap();
+        assert_eq!(dup(-1), Err(EBADF));
     }
 
     #[cfg(unix)]

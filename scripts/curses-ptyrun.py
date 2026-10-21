@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Run a program on a pseudo-terminal of its own, for curses-diff.sh.
 
-Usage: curses-ptyrun.py [--then ACTION]... [--tty-stderr] ROWS COLS OUT ERR
-                        PROG [ARG...]
+Usage: curses-ptyrun.py [--then ACTION]... [--tty-stderr] [--stdout FILE]
+                        ROWS COLS OUT ERR PROG [ARG...]
 
 The terminal is ROWS by COLS and is PROG's controlling terminal: PROG leads a
 new session (`pty.fork`). Its standard input and output are the terminal; its
 standard error goes to the file ERR -- or with --tty-stderr stays on the
 terminal, as it is for a program run from one, which matters to a program
-that measures the terminal on its standard error (procps's `watch`). Everything
+that measures the terminal on its standard error (procps's `watch`). With
+--stdout its standard output goes to FILE instead, as for a program whose
+output is redirected while it still runs on a terminal. Everything
 the terminal is sent is written to the file OUT as it arrives, and once PROG
 has exited its exit status is appended to ERR as "exit N" (N negative for a
 signal).
@@ -23,8 +25,8 @@ what it draws; the first waits for PROG to have written something at all.
 (A step that makes PROG draw nothing new is then followed by the next all
 the same.) A step is one or more actions, separated by `;`, done together:
 
-  keys:TEXT     TEXT typed at the terminal, with \\n, \\t, \\e, \\\\ and \\xHH
-                (\\x3b for a `;`)
+  keys:TEXT     TEXT typed at the terminal, with \\r, \\n, \\t, \\e, \\\\ and
+                \\xHH (\\x3b for a `;`); any other backslash is an error
   resize:RxC    the terminal made R rows by C columns (the kernel then
                 sends the foreground group SIGWINCH)
   signal:NAME   the signal sent to PROG (INT, TERM, HUP, WINCH, ...)
@@ -65,12 +67,12 @@ def unescape(text):
     i = 0
     while i < len(raw):
         c = raw[i]
-        if c != 0x5C or i + 1 >= len(raw):
+        if c != 0x5C:
             out.append(c)
             i += 1
             continue
-        nxt = raw[i + 1]
-        simple = {0x6E: 0x0A, 0x74: 0x09, 0x65: 0x1B, 0x5C: 0x5C}
+        nxt = raw[i + 1] if i + 1 < len(raw) else None
+        simple = {0x72: 0x0D, 0x6E: 0x0A, 0x74: 0x09, 0x65: 0x1B, 0x5C: 0x5C}
         if nxt in simple:
             out.append(simple[nxt])
             i += 2
@@ -79,9 +81,22 @@ def unescape(text):
             out.append(int(raw[i + 2 : i + 4].decode("ascii"), 16))
             i += 4
         else:
-            out.append(c)
-            i += 1
+            # Typed as it stands, an escape this does not know -- or a
+            # backslash with nothing after it -- would make a case press
+            # other keys than it says, and both sides of a comparison would
+            # agree on them.
+            raise ValueError("unknown escape in keys: " + text)
     return bytes(out)
+
+
+def check(step):
+    """Raise ValueError for a --then STEP `act` could not do."""
+    for action in step.split(";"):
+        kind, _, arg = action.partition(":")
+        if kind == "keys":
+            unescape(arg)
+        elif kind not in ("resize", "signal", "sleep", "copy"):
+            raise ValueError("unknown action: " + action)
 
 
 def act(step, pid, master):
@@ -112,6 +127,7 @@ def act(step, pid, master):
 def main(argv):
     actions = []
     tty_stderr = False
+    stdout_path = None
     args = argv[1:]
     while args:
         if len(args) >= 2 and args[0] == "--then":
@@ -120,10 +136,19 @@ def main(argv):
         elif args[0] == "--tty-stderr":
             tty_stderr = True
             args = args[1:]
+        elif len(args) >= 2 and args[0] == "--stdout":
+            stdout_path = args[1]
+            args = args[2:]
         else:
             break
     if len(args) < 5:
         sys.stderr.write(__doc__.split("\n\n")[1] + "\n")
+        return 1
+    try:
+        for step in actions:
+            check(step)
+    except ValueError as e:
+        sys.stderr.write("curses-ptyrun: %s\n" % e)
         return 1
     rows, cols = int(args[0]), int(args[1])
     out_path, err_path, prog = args[2], args[3], args[4:]
@@ -134,6 +159,9 @@ def main(argv):
                 fcntl.ioctl(1, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
                 if not tty_stderr:
                     os.dup2(err.fileno(), 2)
+                if stdout_path is not None:
+                    with open(stdout_path, "wb") as out:
+                        os.dup2(out.fileno(), 1)
                 os.execvp(prog[0], prog)
             finally:
                 os._exit(127)

@@ -226,14 +226,14 @@ fn xstrncpy(src: &[u8], n: usize) -> Vec<u8> {
 /// by the file -- by device and inode when the kernel says them, else by
 /// name.
 fn loopdev_is_used(device: &[u8], filename: &[u8]) -> bool {
-    let st = stat(filename).ok();
-    if let Some(st) = st
-        && let Some((dev, ino, _)) = crate::loopdev::loop_info(device)
-    {
-        // Device and inode known: the name is not looked at.
-        return ino == st.ino && dev == st.dev;
+    let mut lc = crate::loopdev::LoopCxt::new(0);
+    if lc.set_device(Some(device)).is_err() {
+        // Upstream returns the failure itself, which its callers read as
+        // true.
+        return true;
     }
-    crate::loopdev::backing_file(device).is_some_and(|name| name == filename)
+    let st = stat(filename).ok().map(|st| (st.dev, st.ino));
+    lc.is_used(st, Some(filename), 0, 0, 0)
 }
 
 /// What a mount-table check found.

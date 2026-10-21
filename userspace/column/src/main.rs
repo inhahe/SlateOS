@@ -50,7 +50,7 @@
 
 stdfdguard::guard_std_fds!();
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use smartcols::{
     ColumnId, FL_HIDDEN, FL_NOEXTREMES, FL_RIGHT, FL_TREE, FL_TRUNC, FL_WRAP, LineId, Table,
@@ -113,6 +113,9 @@ const LONGS: &[(&str, Takes)] = &[
 ];
 /// Each long option's `val`, in [`LONGS`]' order.
 const LONG_VALS: [u8; 27] = *b"cxhJLocstNClHnmEdORTWLeripV";
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, u8> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`: rows and members in ASCII order, as `err_exclusive_options`
 /// requires.
@@ -896,27 +899,6 @@ fn tab_to(out: &mut Vec<u8>, chcnt: &mut usize, endcol: usize) {
     }
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(u8, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((*c, value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
-/// `option_to_longopt(c, longopts)`: the first long option for `c`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| i32::from(v) == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 /// `main()`.
 #[allow(
     clippy::too_many_lines,
@@ -946,12 +928,16 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
             files.push(file);
             continue;
         }
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<u8>(&opt) else {
             continue;
         };
-        if let Some(msg) =
-            err_exclusive_options(i32::from(c), &EXCL, &mut excl_st, option_to_longopt, short)
-        {
+        if let Some(msg) = err_exclusive_options(
+            i32::from(c),
+            &EXCL,
+            &mut excl_st,
+            |c| OPTIONS.name_of(c),
+            short,
+        ) {
             stderr_write(msg.as_bytes());
             return 1;
         }

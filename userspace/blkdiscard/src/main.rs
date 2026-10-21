@@ -20,7 +20,7 @@
 //! * **A sector size of 0**, which upstream divides by, fails the alignment
 //!   checks instead.
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, os_bytes};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
@@ -45,6 +45,9 @@ const LONGS: &[(&str, Takes)] = &[
     ("zeroout", Takes::Nothing),
 ];
 const LONG_VALS: [u8; 10] = *b"fhloqspvVz";
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, u8> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `EXIT_NOTSUPP` (`include/exitcodes.h`).
 #[cfg(unix)]
@@ -255,18 +258,6 @@ fn is_block(file: &File) -> Result<bool, i32> {
     }
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(u8, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((*c, value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
 /// A size option: `strtosize_or_err(arg, msg)`.
 fn size_arg(value: Option<&OsString>, msg: &str, short: &[u8]) -> Result<u64, Fatal> {
     let arg = value.cloned().unwrap_or_default();
@@ -317,7 +308,7 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> Result<u8, Fatal> {
                 return Ok(errtryhelp(short));
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<u8>(&opt) else {
             if let Opt::Operand(o) = &opt {
                 operands.push(os_bytes(o).into_owned());
             }
@@ -570,6 +561,6 @@ mod tests {
     fn options_map_to_their_letters() {
         assert_eq!(LONGS.len(), LONG_VALS.len());
         let opt = Opt::Long("zeroout", None);
-        assert_eq!(option_code(&opt).map(|(c, _)| c), Some(b'z'));
+        assert_eq!(OPTIONS.code::<u8>(&opt).map(|(c, _)| c), Some(b'z'));
     }
 }

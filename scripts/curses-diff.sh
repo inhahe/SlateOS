@@ -18,9 +18,13 @@
 # database has and in each locale the case names: everything written to
 # standard output -- the bytes a terminal would be sent -- byte for byte;
 # what every call returned, as each probe prints it on standard error; and
-# the exit status. Standard output is a file, not a terminal, so neither side
-# has terminal modes to set (they fail alike, which the return values
-# show), and the speed is 0, so nothing is padded with time.
+# the exit status. Most cases run twice. Once with standard output a file,
+# not a terminal: neither side has terminal modes to set (they fail alike,
+# which the return values show), and the speed is 0, so nothing is padded
+# with time. And once on a pseudo-terminal (`scripts/curses-ptyrun.py`),
+# whose modes the library sets and whose speed pads. A few run a third time
+# with standard output a file and standard error the terminal, where curses
+# looks for the terminal's modes.
 #
 # The environment is emptied for each run (`env -i`) and only what a case
 # names is set, so that neither side sees `LINES`, `COLUMNS`,
@@ -40,6 +44,9 @@ DIFF_EXAMPLES=curses-probe
 DIFF_NO_REF=1
 DIFF_NO_BINDIR=1
 DIFF_NEED='cc cmp od infocmp tic'
+# Over half an hour: every scenario runs under some thirty terminal types,
+# and the keyboard's wait on each run for the probe to go quiet.
+DIFF_TIMEOUT=${DIFF_TIMEOUT:-5400}
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -79,9 +86,13 @@ done
 # And terminal types no database here holds, made for the capabilities they
 # have and the ones above do not: a magic-cookie glitch (`xmc`), colours that
 # will not combine with some attributes (`ncv`, reverse among them), colours
-# defined by hue, lightness and saturation (`hls`), and direct colour (`RGB`,
-# 2^24 colours). `tic` compiles them into a directory of the harness's own,
-# which both sides are pointed at with `TERMINFO`.
+# defined by hue, lightness and saturation (`hls`), direct colour (`RGB`,
+# 2^24 colours), no cursor addressing but a home-down (`cup` gone, `ll`), no
+# way to end every attribute at once (`sgr0` and `sgr` gone), an `RGB`
+# string that names no bits, insertion by an `ich1` cheap enough to win, with
+# insert mode half there (`smir` without `rmir`), and lines that can be
+# inserted but not deleted, with no scrolling region for part of the screen. `tic` compiles them into a directory of the
+# harness's own, which both sides are pointed at with `TERMINFO`.
 synth=$DIFF_TMP/terminfo
 mkdir -p "$synth"
 cat > "$DIFF_TMP/synth.ti" <<'EOF'
@@ -101,8 +112,18 @@ slate-direct|direct colour,
 	setab=\E[48;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
 	setaf=\E[38;2;%p1%{65536}%/%d;%p1%{256}%/%{255}%&%d;%p1%{255}%&%dm,
 	use=xterm,
+slate-nocup|cursor movement by steps only and a home-down,
+	cup@, ll=\E[24H, use=vt100,
+slate-nosgr0|attributes ended one at a time,
+	sgr0@, sgr@, use=vt100,
+slate-rgb0|an RGB string that gives each colour no bits,
+	RGB=0/0/0, use=xterm-256color,
+slate-ich1|characters inserted one at a time by one byte, insert mode entered but never left,
+	ich@, rmir@, ich1=^E, use=xterm-color,
+slate-ilonly|lines inserted but not deleted and no scrolling region,
+	dl@, dl1@, csr@, use=xterm-color,
 EOF
-SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct'
+SYNTH='slate-xmc slate-ncv slate-ncvbold slate-hls slate-direct slate-nocup slate-nosgr0 slate-rgb0 slate-ich1 slate-ilonly'
 if ! tic -x -o "$synth" "$DIFF_TMP/synth.ti" 2> "$DIFF_TMP/synth.err"; then
   echo "curses-diff: tic could not compile the made-up terminal types:" >&2
   cat "$DIFF_TMP/synth.err" >&2
@@ -119,14 +140,21 @@ mkdir -p "$work"
 # run SIDE PROG TERM LOCALE MODE ENV... -- SCRIPT: one probe run, its output
 # in $work/SIDE.{out,err}. MODE `file` writes to a file; `pty` to a
 # pseudo-terminal of the size an environment entry `PTY=ROWSxCOLS` gives
-# (24x80 without one), which is not passed on to the probe.
+# (24x80 without one), which is not passed on to the probe, and on which
+# each entry `THEN=STEP` is done in turn, as `curses-ptyrun.py --then STEP`
+# does it -- keys typed once the probe has drawn and gone quiet; `ttyerr` to a
+# file from a program whose standard input and error are that terminal --
+# output redirected from a program run on one, where curses finds the
+# terminal's modes on standard error -- and what reached the terminal is
+# compared with what the probe printed.
 run() {
   local side=$1 prog=$2 term=$3 loc=$4 mode=$5
   shift 5
-  local envs=() size=24x80
+  local envs=() size=24x80 then=()
   while [ "$1" != -- ]; do
     case "$1" in
       PTY=*) size=${1#PTY=} ;;
+      THEN=*) then+=(--then "${1#THEN=}") ;;
       *) envs+=("$1") ;;
     esac
     shift
@@ -135,9 +163,18 @@ run() {
   case $term in slate-*) envs+=("TERMINFO=$synth") ;; esac
   if [ "$mode" = pty ]; then
     env -i PATH=/usr/bin:/bin TERM="$term" LC_ALL="$loc" "${envs[@]}" \
-      timeout 30 python3 "$root/scripts/curses-ptyrun.py" "${size%x*}" "${size#*x}" \
+      timeout 30 python3 "$root/scripts/curses-ptyrun.py" "${then[@]}" "${size%x*}" "${size#*x}" \
       "$work/$side.out" "$work/$side.err" "$prog" "$1" < /dev/null
     local rc=$?
+    [ "$rc" = 0 ] || echo "runner $rc" >> "$work/$side.err"
+  elif [ "$mode" = ttyerr ]; then
+    rm -f "$work/$side.out" "$work/$side.exit"
+    env -i PATH=/usr/bin:/bin TERM="$term" LC_ALL="$loc" "${envs[@]}" \
+      timeout 30 python3 "$root/scripts/curses-ptyrun.py" --tty-stderr \
+      --stdout "$work/$side.out" "${size%x*}" "${size#*x}" \
+      "$work/$side.err" "$work/$side.exit" "$prog" "$1" < /dev/null
+    local rc=$?
+    cat "$work/$side.exit" >> "$work/$side.err"
     [ "$rc" = 0 ] || echo "runner $rc" >> "$work/$side.err"
   else
     env -i PATH=/usr/bin:/bin TERM="$term" LC_ALL="$loc" "${envs[@]}" \
@@ -151,6 +188,13 @@ check() {
   local name=$1 term=$2 loc=$3 mode=$4
   shift 4
   run ref "$ref" "$term" "$loc" "$mode" "$@"
+  # The reference still running at the time limit, or a step the runner
+  # refused, is a scenario that tests nothing past the point it stuck --
+  # and ours, stuck at the same point, would agree.
+  if grep -q '^runner ' "$work/ref.err"; then
+    echo "curses-diff: the reference did not finish ($(grep '^runner ' "$work/ref.err")): $name/$term/$loc/$mode" >&2
+    exit 2
+  fi
   run ours "$OURS" "$term" "$loc" "$mode" "$@"
   if cmp -s "$work/ref.out" "$work/ours.out" && cmp -s "$work/ref.err" "$work/ours.err"; then
     pass=$((pass + 1))
@@ -180,12 +224,15 @@ check() {
 # scenario NAME LOCALES [ENV...]: the script on standard input, run under
 # every terminal type in each of LOCALES (space-separated), writing both to
 # a file and to a terminal -- or only to a terminal when the first ENV is
-# `pty-only`.
+# `pty-only`, and in all three modes of `run` when it is `all-modes`.
 scenario() {
   local name=$1 locales=$2 modes='file pty'
   shift 2
   if [ "${1:-}" = pty-only ]; then
     modes=pty
+    shift
+  elif [ "${1:-}" = all-modes ]; then
+    modes='file pty ttyerr'
     shift
   fi
   if [ -n "$ONLY" ] && [ "$ONLY" != "$name" ]; then
@@ -438,6 +485,21 @@ scenario scrolling-more 'C' < <(
   shifted 3 20 -5;  echo refresh
   echo 'mvaddstr 12 0 a line of its own'
   shifted 13 23 1;  echo refresh
+  echo 'endwin'
+)
+
+# The same with idlok on, so that an update may scroll by deleting and
+# inserting lines where a scrolling region will not do -- and on
+# slate-ilonly, which can insert lines but not delete them, must not.
+scenario scrolling-idl 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  echo 'idlok 1'
+  shifted 0 23 0;   echo refresh
+  shifted 5 15 3;   echo refresh
+  shifted 10 22 -2; echo refresh
+  shifted 0 23 1;   echo refresh
+  shifted 3 20 -5;  echo refresh
   echo 'endwin'
 )
 
@@ -895,6 +957,485 @@ scenario terminate-before-refresh 'C' pty-only <<'EOF'
 initscr
 mvaddstr 1 1 never shown
 terminate
+EOF
+
+# Calls made before there is a screen.
+scenario before-initscr 'C' <<'EOF'
+doupdate
+refresh
+endwin
+initscr
+doupdate
+endwin
+EOF
+
+# The terminal's modes as each call leaves them, kept and restored -- on a
+# terminal, with output redirected from one, and with none.
+scenario terminal-modes 'C' all-modes <<'EOF'
+use_env 0
+tty
+initscr
+tty
+def_shell_mode
+def_prog_mode
+cbreak
+tty
+nocbreak
+tty
+noecho
+nonl
+tty
+echo
+nl
+reset_shell_mode
+tty
+reset_prog_mode
+tty
+mvaddstr 0 0 modes
+refresh
+endwin
+tty
+EOF
+
+# Moves a tab is the cheapest way to make, on a terminal that keeps tabs as
+# they are and on one that expands them itself, where curses must not use
+# them -- and takes `ht` and `cbt` away, which `tigetstr` shows.
+tab_script='use_env 0
+initscr
+tigetstr ht
+tigetstr cbt
+tigetstr cols
+tigetstr nosuch
+mvaddstr 0 0 a
+mvaddstr 0 8 b
+mvaddstr 0 16 c
+mvaddstr 1 1 d
+mvaddstr 1 24 e
+mvaddstr 2 7 f
+mvaddstr 2 40 g
+refresh
+mvaddstr 3 2 h
+move 3 16
+refresh
+endwin'
+scenario tab-stops 'C' <<< "$tab_script"
+scenario tab-stops-expanded 'C' pty-only <<< "tab3
+$tab_script"
+
+# Characters inserted into a line. curses inserts only where the line's end
+# changed too -- text added to a line that was not blank -- and only where
+# that costs no more than writing the characters: by `ich`, by insert mode,
+# by `ich1` (slate-ich1), and not at all where the terminal has no way to
+# insert (vt100). The first lines change in the middle, which is written.
+scenario insertion 'C' <<'EOF'
+use_env 0
+initscr
+mvaddstr 0 0 abcdefghijklmnopqrstuvwxyz the quick brown fox jumps over the lazy dog
+mvaddstr 1 0 0123456789 the quick brown fox jumps over the lazy dog
+mvaddstr 2 0 a short line
+mvaddstr 3 0 short
+mvaddstr 4 0 abc
+mvaddstr 5 0 the end of a line
+refresh
+mvaddstr 0 0 abcXdefghijklmnopqrstuvwxyz the quick brown fox jumps over the lazy dog
+mvaddstr 1 0 01234XYZ56789 the quick brown fox jumps over the lazy dog
+mvaddstr 2 0 a shorter line
+mvaddstr 3 0 shortX
+mvaddstr 4 0 abcdefghijklmnopqrstuvwxyz
+mvaddstr 5 0 the end of a lineXY
+refresh
+endwin
+EOF
+
+# The same next to a wide character, where the insertion must not split one:
+# after the start of a line, and at its first column.
+scenario insertion-wide 'C.UTF-8' <<'EOF'
+use_env 0
+initscr
+mvaddnwstr 0 0 -1 abcdQxyz the quick brown fox jumps over the lazy dog
+mvaddnwstr 1 0 -1 Qxyz the quick brown fox jumps over the lazy dog
+refresh
+mvaddnwstr 0 0 -1 abcd中Rxyz the quick brown fox jumps over the lazy dog
+mvaddnwstr 1 0 -1 中Rxyz the quick brown fox jumps over the lazy dog
+refresh
+endwin
+EOF
+
+# A character written in the last column of a terminal with the newline
+# glitch (vt100's xenl) leaves the cursor nowhere known; on a terminal with
+# no cursor addressing (slate-nocup) the next move must then start from home
+# or the margin.
+scenario unknown-column 'C' <<'EOF'
+use_env 0
+initscr
+mvaddstr 2 79 Z
+mvaddstr 3 5 q
+mvaddstr 6 79 Y
+mvaddstr 7 12 r
+refresh
+endwin
+EOF
+
+# use_legacy_coding: the level before, which in the C locale is 1 from the
+# start; a level past 2 refused; and bytes from 128 through the byte calls
+# at each level. (What a level does to a wide character from 160 up, the
+# byte calls never make, is wide-calls-one-byte-locale's.)
+scenario legacy-coding 'C' <<'EOF'
+use_env 0
+initscr
+use_legacy_coding 1
+mvaddstr 0 0 \xa0\xa1\xff\x9f\x80
+refresh
+use_legacy_coding 2
+mvaddstr 1 0 \xa0\xa1\xff\x9f\x80
+refresh
+use_legacy_coding 3
+use_legacy_coding 0
+mvaddstr 2 0 \xa0\xa1\xff\x9f\x80
+refresh
+endwin
+EOF
+
+# Characters a one-byte locale has no width for, put on the screen through
+# the wide calls: those at 160 and above are written as they are there, the
+# rest made blanks.
+scenario wide-calls-one-byte-locale 'C' <<'EOF'
+use_env 0
+initscr
+mvaddnwstr 0 0 -1 \xc2\xa0\xc2\xa1\xc2\x9f\xc3\xbf
+refresh
+endwin
+EOF
+
+# Runs of one character, which a terminal with `rep` may send as one --
+# but not a line-drawing character past the table's end, nor a character
+# past a byte.
+scenario repeats 'C' <<'EOF'
+use_env 0
+initscr
+attrset 400000
+mvaddnwstr 0 0 -1 \xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80\xc2\x80
+attrset 0
+mvaddnwstr 1 0 -1 \xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80\xc4\x80
+mvaddstr 2 0 xxxxxxxxxxxxxxxxxxxx
+refresh
+endwin
+EOF
+
+# Two pairs that show the same colours: changing one for the other changes
+# nothing on the screen.
+scenario same-colours 'C' <<'EOF'
+use_env 0
+initscr
+start_color
+init_pair 1 1 2
+init_pair 2 1 2
+init_pair 3 1 3
+attrset 100
+mvaddstr 0 0 same colours
+mvaddstr 1 0 other colours
+refresh
+attrset 200
+mvaddstr 0 0 same colours
+attrset 300
+mvaddstr 1 0 other colours
+refresh
+endwin
+EOF
+
+# Lines changed in their middle or cut short, which a terminal may redo by
+# inserting and deleting characters (`ich`, `dch`, `smir`), by clearing the
+# start or the end of the line (`el1`, `el`), or by writing them again --
+# by amounts on either side of what each costs, and around wide characters.
+scenario line-edits 'C C.UTF-8' <<'EOF'
+use_env 0
+initscr
+mvaddstr 0 0 the quick brown fox jumps over the lazy dog
+mvaddstr 1 0 the quick brown fox jumps over the lazy dog
+mvaddstr 2 0 the quick brown fox jumps over the lazy dog
+mvaddstr 3 0 the quick brown fox jumps over the lazy dog
+mvaddstr 4 0 abcdefghij
+mvaddstr 5 0 abcdefghij
+mvaddstr 6 0 abcdefghij
+mvaddstr 7 0 abcdefghij
+mvaddstr 8 0 abcdefghij
+mvaddstr 9 0 abcdefghij
+mvaddstr 10 0 abcdefghij
+mvaddstr 11 0 abcdefghij
+mvaddstr 12 0 abcdefghij
+mvaddstr 13 0 abcdefghij
+mvaddstr 14 0 abcdefghij
+mvaddstr 15 0 abcdefghij
+mvaddnwstr 16 0 -1 日本語のテキスト
+mvaddnwstr 17 0 -1 ab日本語cd
+mvaddnwstr 18 0 -1 日本語
+mvaddnwstr 19 4 -1 x日本
+refresh
+mvaddstr 0 0 the quick brown fox XYZ jumps over the lazy dog
+mvaddstr 1 0 the quick fox jumps over the lazy dog
+clrtoeol
+mvaddstr 2 0 he quick brown fox jumps over the lazy dog
+clrtoeol
+mvaddstr 3 0 Xthe quick brown fox jumps over the lazy dog
+mvaddstr 4 0 abcdeX
+clrtoeol
+mvaddstr 5 0 abcdeXg
+clrtoeol
+mvaddstr 6 0 abcdeXgh
+clrtoeol
+mvaddstr 7 0 abcdeXghi
+mvaddstr 8 0  abcdefghij
+mvaddstr 9 0   abcdefghij
+mvaddstr 10 0    abcdefghij
+mvaddstr 11 0     abcdefghij
+mvaddstr 12 0      abcdefghij
+mvaddstr 13 0       abcdefghij
+mvaddstr 14 0        abcdefghij
+mvaddstr 15 0 abXcdefghij
+mvaddnwstr 16 0 -1 X日本語のテキスト
+mvaddnwstr 17 0 -1 ab中日本語cd
+mvaddnwstr 18 0 -1 X日本語
+mvaddnwstr 19 0 -1 日本x日本
+refresh
+endwin
+EOF
+
+# Lines moved down within a region that starts at the top of the screen and
+# ends above its bottom.
+scenario scrolling-down-from-the-top 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  shifted 0 23 0;   echo refresh
+  shifted 0 10 -1;  echo refresh
+  shifted 0 12 -2;  echo refresh
+  echo 'endwin'
+)
+
+# Scrolling by deleting and inserting lines, which an update may do only
+# after `idlok` -- on a terminal without a scrolling region, and one by one
+# or several at a time.
+scenario scrolling-by-lines 'C' < <(
+  echo 'use_env 0'
+  echo 'initscr'
+  echo 'idlok 1'
+  echo 'idcok 0'
+  shifted 0 23 0;   echo refresh
+  shifted 5 15 1;   echo refresh
+  shifted 5 15 -1;  echo refresh
+  shifted 3 20 3;   echo refresh
+  shifted 3 20 -4;  echo refresh
+  shifted 0 23 1;   echo refresh
+  echo 'idlok 0'
+  shifted 5 15 1;   echo refresh
+  echo 'endwin'
+)
+
+# Sub-windows: drawn in, boxed, refreshed on their own, nested, deleted --
+# the parent's cells are theirs, so what they drew stays in stdscr -- and
+# refused where they would not fit. And what acs_map holds.
+scenario windows 'C C.UTF-8' <<'EOF'
+use_env 0
+initscr
+acs q
+acs l
+acs .
+acs
+mvaddstr 0 0 background text across the top line of the screen
+mvaddstr 10 0 more background text on line ten, which the box covers
+refresh
+subwin 0 6 30 8 4
+wgetmaxyx 1
+box 1 0 0
+mvwaddstr 1 1 1 inside the box
+mvwaddstr 1 2 1 second line
+wrefresh 1
+wgetyx 1
+derwin 1 2 10 2 2
+wgetmaxyx 2
+waddstr 2 nested sub-window text
+wrefresh 2
+delwin 1
+delwin 2
+delwin 1
+wrefresh 1
+touchwin 0
+refresh
+subwin 0 3 20 20 50
+wborder 3 7c 7c 2d 2d 2b 2b 2b 2b
+wrefresh 3
+wclear 3
+wrefresh 3
+wnoutrefresh 3
+doupdate
+werase 0
+refresh
+subwin 0 30 10 0 0
+derwin 0 5 5 22 78
+derwin 0 0 0 20 70
+wgetmaxyx 4
+endwin
+EOF
+
+# The screen resized with sub-windows in it: shrunk, they are cut back to
+# fit; grown, they keep their size.
+scenario resize-subwindows 'C' <<'EOF'
+use_env 0
+initscr
+subwin 0 5 70 10 5
+derwin 1 3 60 1 5
+box 1 0 0
+wrefresh 1
+resizeterm 20 60
+wgetmaxyx 1
+wgetmaxyx 2
+wgetmaxyx 0
+refresh
+resizeterm 30 100
+wgetmaxyx 1
+wgetmaxyx 2
+box 1 0 0
+wrefresh 1
+resizeterm 12 40
+wgetmaxyx 1
+wgetmaxyx 2
+endwin
+EOF
+
+# The input queue without typing: nothing to read, keys pushed back, the
+# queue flushed, and the delay modes.
+scenario keys-queue 'C' <<'EOF'
+use_env 0
+initscr
+cbreak
+noecho
+nodelay 0 1
+getch
+ungetch 65
+ungetch 410
+getch
+getch
+getch
+keypad 0 1
+ungetch 259
+getch
+ungetch 66
+flushinp
+getch
+nodelay 0 0
+halfdelay 1
+getch
+halfdelay 0
+meta 0
+meta 1
+notimeout 0 1
+endwin
+EOF
+
+# A SIGWINCH, and resizeterm, each queue KEY_RESIZE for getch.
+scenario resize-key 'C' <<'EOF'
+use_env 0
+initscr
+cbreak
+nodelay 0 1
+mvaddstr 0 0 before
+refresh
+winch 20 60
+getch
+getch
+lines
+resizeterm 24 80
+getch
+lines
+endwin
+EOF
+
+# Keys typed: a byte, an arrow and a function key as the keypad sends them,
+# an arrow as the cursor keys send it outside keypad mode, backspace, and an
+# escape with nothing after it. Each terminal type knows its own sequences,
+# so on some the bytes come back one at a time.
+scenario keys 'C' pty-only 'THEN=keys:a\eOA\e[Bx\eOP\x7f\e' <<'EOF'
+use_env 0
+initscr
+cbreak
+noecho
+keypad 0 1
+set_escdelay 100
+mvaddstr 0 0 type
+refresh
+getch
+wtimeout 0 300
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+getch
+endwin
+EOF
+
+# Keys echoed by curses itself: a tab and a return among them.
+scenario keys-echo 'C C.UTF-8' pty-only 'THEN=keys:ab\tc\rd' <<'EOF'
+use_env 0
+initscr
+cbreak
+echo
+mvaddstr 2 0 echo:
+refresh
+getch
+wtimeout 0 300
+getch
+getch
+getch
+getch
+getch
+getch
+endwin
+EOF
+
+# Cooked mode: getch reads a whole line first, with curses' own echo, erase
+# and line-kill, then returns it a byte at a time.
+scenario keys-cooked 'C' pty-only 'THEN=keys:hel\x7flo\x15world\r' <<'EOF'
+use_env 0
+initscr
+nocbreak
+echo
+mvaddstr 1 0 line:
+refresh
+getch
+getch
+getch
+getch
+getch
+getch
+tty
+endwin
+EOF
+
+# Wide characters from their bytes: two whole, a key between, and one left
+# unfinished.
+scenario get-wch 'C.UTF-8' pty-only 'THEN=keys:\xc3\xa9z\eOA\xe2\x82' <<'EOF'
+use_env 0
+initscr
+cbreak
+noecho
+keypad 0 1
+set_escdelay 100
+refresh
+get_wch
+wtimeout 0 300
+get_wch
+get_wch
+get_wch
+get_wch
+get_wch
+endwin
 EOF
 
 # Terminal types the database has no entry for, and none at all.

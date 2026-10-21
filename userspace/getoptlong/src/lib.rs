@@ -162,6 +162,62 @@ pub enum Takes {
     Optional,
 }
 
+/// Upstream's `struct option[]` with each entry's `val`, the code its
+/// `getopt_long` returns: the long names and what each takes, as a
+/// [`Program`] is given them, and beside them the `val`s, index for index.
+/// With it a port's option switch sees what upstream's does, whether the
+/// option was typed short or long.
+#[derive(Clone, Copy, Debug)]
+pub struct LongVals<'t, V: 'static> {
+    names: &'t [(&'static str, Takes)],
+    vals: &'t [V],
+}
+
+impl<'t, V: Copy + 'static> LongVals<'t, V> {
+    /// The table: `names`, and the `val` of each. A long option without its
+    /// `val` could not be decoded, so there must be as many of one as of the
+    /// other, which a table built in a `const` checks as it compiles.
+    ///
+    /// # Panics
+    ///
+    /// When `names` and `vals` differ in length.
+    #[must_use]
+    pub const fn new(names: &'t [(&'static str, Takes)], vals: &'t [V]) -> Self {
+        assert!(names.len() == vals.len(), "each long option needs its val");
+        Self { names, vals }
+    }
+
+    /// `option_to_longopt (c, longopts)`: the long name whose `val` is `c`
+    /// -- the first, when several share it -- for a diagnostic to name.
+    #[must_use]
+    pub fn name_of(&self, c: i32) -> Option<&'static str>
+    where
+        V: Into<i32>,
+    {
+        self.vals
+            .iter()
+            .position(|&v| v.into() == c)
+            .and_then(|i| self.names.get(i))
+            .map(|&(name, _)| name)
+    }
+
+    /// The code upstream's switch sees for a parsed item -- a short
+    /// option's own character, a long option's `val` -- and the item's
+    /// value; `None` for an operand, or for a long name not in the table.
+    /// `R` is the type the port's switch matches on.
+    #[must_use]
+    pub fn code<R: From<u8> + From<V>>(&self, opt: &Opt<'_>) -> Option<(R, Option<OsString>)> {
+        match opt {
+            Opt::Short(c, value) => Some((R::from(*c), value.clone())),
+            Opt::Long(name, value) => {
+                let i = self.names.iter().position(|&(n, _)| n == *name)?;
+                Some((R::from(*self.vals.get(i)?), value.clone()))
+            }
+            Opt::Operand(_) => None,
+        }
+    }
+}
+
 /// A command line that cannot be run, and the status to exit with.
 ///
 /// The status is part of the return value rather than a note in a doc comment
@@ -1466,6 +1522,50 @@ mod tests {
         ("stable", Takes::Nothing),
         ("key", Takes::Required),
     ];
+
+    /// A long option decodes to its `val`, a short one to its character,
+    /// and a `val` back to the first long name that has it.
+    #[test]
+    fn a_long_option_decodes_to_its_val_and_back() {
+        const OPT_RS: i32 = 0x100;
+        const VALS: [i32; 8] = [
+            b'b' as i32,
+            b'c' as i32,
+            b'R' as i32,
+            OPT_RS,
+            OPT_RS,
+            b'r' as i32,
+            b's' as i32,
+            b'k' as i32,
+        ];
+        const T: LongVals<'static, i32> = LongVals::new(SORT_LONGS, &VALS);
+        let value = Some(OsString::from("1,2"));
+        assert_eq!(
+            T.code::<i32>(&Opt::Long("key", value.clone())),
+            Some((i32::from(b'k'), value.clone()))
+        );
+        assert_eq!(
+            T.code::<i32>(&Opt::Short(b'k', value.clone())),
+            Some((i32::from(b'k'), value))
+        );
+        assert_eq!(
+            T.code::<i32>(&Opt::Long("sort", None)),
+            Some((OPT_RS, None))
+        );
+        assert_eq!(T.code::<i32>(&Opt::Long("nosuch", None)), None);
+        let operand = OsString::from("f");
+        assert_eq!(T.code::<i32>(&Opt::Operand(&operand)), None);
+        assert_eq!(T.name_of(i32::from(b'R')), Some("random-sort"));
+        assert_eq!(T.name_of(OPT_RS), Some("random-source"), "the first of two");
+        assert_eq!(T.name_of(i32::from(b'z')), None);
+        // A port whose switch matches bytes keeps them as bytes.
+        const BYTES: LongVals<'static, u8> = LongVals::new(SORT_LONGS, b"bcRxyrsk");
+        assert_eq!(
+            BYTES.code::<u8>(&Opt::Long("check", None)),
+            Some((b'c', None))
+        );
+        assert_eq!(BYTES.name_of(i32::from(b'y')), Some("sort"));
+    }
 
     /// The sentence alone, having first checked that the referral is there.
     ///

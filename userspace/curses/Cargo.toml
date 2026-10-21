@@ -2,7 +2,7 @@
 name = "curses"
 version = "0.1.0"
 edition = "2024"
-description = "ncursesw 6.4's screen library, as procps' watch and slabtop drive it: the screen and its windows, adding characters, attributes and colours, refresh and endwin"
+description = "ncursesw 6.4's screen library, as procps' watch and slabtop and util-linux's cfdisk drive it: the screen and its sub-windows, adding characters, attributes, colours and line drawing, refresh, endwin, and the keyboard"
 
 [lints]
 workspace = true

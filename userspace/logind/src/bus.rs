@@ -255,6 +255,7 @@ pub fn dispatch(
 ) -> Reply {
     match member {
         "CreateSession" => create_session(daemon, payload, caller),
+        "SetSessionLeader" => set_session_leader(daemon, payload, caller),
         "ListSessions" => list_sessions(daemon, caller),
         "ListUsers" => list_users(daemon, caller),
         "ListSeats" => list_seats(daemon, caller),
@@ -793,6 +794,32 @@ fn create_session(daemon: &mut Daemon, payload: &[u8], caller: Option<Credential
     }
 }
 
+/// `SetSessionLeader(id, pid)`: name the session's leader, the process
+/// `KillSession` signals.
+///
+/// **Administrator only**, as `CreateSession` is, and for the same reason:
+/// naming a leader is the display manager finishing a registration it began
+/// (it registers the session first, so the desktop it starts can be told the
+/// id, then names the desktop's pid). Anyone else could point another user's
+/// `KillSession` at a process of their choosing. Checked before anything is
+/// decoded.
+fn set_session_leader(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
+    if let Err(e) = authorize(daemon, "", caller, Required::Administrator) {
+        return Reply::Error(e);
+    }
+    let Some(args) = fields::decode_exact(payload, 2) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    let text = |i: usize| args.get(i).and_then(|b| core::str::from_utf8(b).ok());
+    let (Some(id), Some(pid)) = (text(0), text(1).and_then(|s| s.parse::<u32>().ok())) else {
+        return Reply::Error(ERR_INVALID_ARGUMENTS);
+    };
+    match daemon.set_session_leader(id, pid) {
+        Ok(()) => Reply::empty(),
+        Err(_) => Reply::Error(ERR_NO_SUCH_SESSION),
+    }
+}
+
 fn set_idle_hint(daemon: &mut Daemon, payload: &[u8], caller: Option<Credentials>) -> Reply {
     let Some(args) = fields::decode_exact(payload, 3) else {
         return Reply::Error(ERR_INVALID_ARGUMENTS);
@@ -835,28 +862,6 @@ pub fn handle_message(daemon: &mut Daemon, call: &Message, caller: Option<Creden
         Reply::Return(payload) => Message::reply(call).with_payload(&payload),
         Reply::Error(name) => Message::error(call, name),
     }
-}
-
-/// Overwrite a call's payload once it has been handled.
-///
-/// `AuthenticateSession` carries a plaintext password, and the buffer it
-/// arrived in is a `Vec` that will be reused or freed without being cleared.
-/// Wiping it does not make the password safe — it was in a channel buffer and
-/// a receive buffer before it got here — but it shortens the window in which a
-/// later heap dump of this process contains someone's password, and it costs a
-/// memset.
-///
-/// `write_volatile` in a loop rather than `fill`, because the optimiser is
-/// entitled to delete a store to memory that is never read again, and that is
-/// exactly what this is.
-pub fn wipe(payload: &mut [u8]) {
-    for byte in payload.iter_mut() {
-        // SAFETY: `byte` is a valid, aligned, exclusively-borrowed `u8` for
-        // the duration of the loop iteration; a volatile write of a `u8` to it
-        // is in-bounds and initialises it.
-        unsafe { core::ptr::write_volatile(byte, 0) };
-    }
-    core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
 }
 
 // Panicking on bad data is what a test is *for*: an `unwrap` that fires is a
@@ -1588,6 +1593,55 @@ mod tests {
         assert!(!call(&mut d, "GetSession", &[id.as_bytes()], Some(creds(1000))).is_error());
     }
 
+    /// A display manager registers a session with no leader, then names the
+    /// desktop it started; only root may, and only for a session that exists.
+    #[test]
+    fn root_names_a_session_s_leader_after_creating_it() {
+        let mut d = Daemon::new(DaemonConfig::default(), crate::test_verifier());
+        let mut args = create_args();
+        args[11] = b"0";
+        let Reply::Return(body) = call(&mut d, "CreateSession", &args, Some(creds(0))) else {
+            panic!("root was refused");
+        };
+        let id = String::from_utf8(fields::decode_exact(&body, 1).expect("one field")[0].to_vec())
+            .expect("logind mints decimal ids");
+        assert_eq!(d.sessions[&id].leader_pid, 0);
+
+        let mine = call(
+            &mut d,
+            "SetSessionLeader",
+            &[id.as_bytes(), b"77"],
+            Some(creds(1000)),
+        );
+        assert!(mine.is_error(), "the session's own user named its leader");
+        assert_eq!(d.sessions[&id].leader_pid, 0);
+
+        let set = call(
+            &mut d,
+            "SetSessionLeader",
+            &[id.as_bytes(), b"77"],
+            Some(creds(0)),
+        );
+        assert!(!set.is_error(), "root was refused: {set:?}");
+        assert_eq!(d.sessions[&id].leader_pid, 77);
+
+        let none = call(&mut d, "SetSessionLeader", &[b"999", b"77"], Some(creds(0)));
+        assert!(
+            matches!(none, Reply::Error(ERR_NO_SUCH_SESSION)),
+            "{none:?}"
+        );
+        let bad = call(
+            &mut d,
+            "SetSessionLeader",
+            &[id.as_bytes(), b"x"],
+            Some(creds(0)),
+        );
+        assert!(
+            matches!(bad, Reply::Error(ERR_INVALID_ARGUMENTS)),
+            "{bad:?}"
+        );
+    }
+
     /// Creating a session is an administrator action. A caller who could mint
     /// one for any uid could impersonate that user to every other method
     /// here, so this is the security property of the method and not a
@@ -1938,13 +1992,5 @@ mod tests {
         assert!(denied.is_error());
         assert_eq!(denied.reply_serial, 77);
         assert_eq!(denied.member, ERR_UNKNOWN_CALLER);
-    }
-
-    #[test]
-    fn wiping_a_payload_leaves_no_password_behind() {
-        let mut payload = fields::encode(&[b"1".as_slice(), b"correct horse".as_slice()]);
-        assert!(payload.windows(7).any(|w| w == b"correct"));
-        wipe(&mut payload);
-        assert!(payload.iter().all(|&b| b == 0));
     }
 }

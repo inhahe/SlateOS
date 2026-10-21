@@ -1,0 +1,41 @@
+# The cargo-fuzz harness's manifest. `scripts/fuzz.py` installs it as
+# ~/fuzz/gzip-fuzz/tree/fuzz/Cargo.toml, and the `path`s below are relative
+# to that place, not to this file: kept under another name here so that
+# nothing in the real workspace mistakes this directory for a package. See
+# README.md.
+[package]
+name = "gzip-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Seeds are made by `seeds.py`. Nothing here reaches `unsafe` code: the
+# decoders are safe Rust, so no target needs the address sanitizer.
+[package.metadata.slateos-fuzz]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+gzip = { path = "../userspace/gzip" }
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "roundtrip"
+path = "fuzz_targets/roundtrip.rs"
+test = false
+doc = false
+bench = false

@@ -61,13 +61,16 @@ slate_make_link_wrappers "$WORK/link" "$SPIKE_LIBS" || exit 1
 
 # Removed first: ld.lld leaves an existing output alone when a link fails, and
 # the checks below would then stage the last run's binary as this one's.
+# --error-limit=0: ld.lld stops at 20 errors by default, which would cap both
+# counts below and could leave the missing symbols uncounted behind duplicates.
 rm -f oils-for-unix-slateos
 # shellcheck disable=SC2086  # word splitting is what builds the object list
-"$SLATE_LINK_CXX" -Wl,--gc-sections -o oils-for-unix-slateos $OBJS 2>slate-link.log
+"$SLATE_LINK_CXX" -Wl,--gc-sections -Wl,--error-limit=0 -o oils-for-unix-slateos $OBJS 2>slate-link.log
 echo "SLATE_LINK_EXIT=$?"
 
-# Both counts, always, and neither inferred from the other: they measure
-# opposite failures (scripts/cmake-spike/run.sh tells the run that taught it).
+# Both counts, always, and neither inferred from the other: a link fails when a
+# symbol is defined nowhere and when one is defined twice, and a zero for the
+# first says nothing about the second.
 MISSING="$WORK/missing.txt"
 grep -oP "undefined symbol: \K.*" slate-link.log | sort -u >"$MISSING"
 echo "MISSING_COUNT=$(wc -l <"$MISSING")"

@@ -26,3 +26,7 @@ there to lift.
 
 The Font Manager's tests build their faces with it (`osfont` with the
 `testing` feature in `[dev-dependencies]`), and their copy goes.
+
+**Also lane B (2026-10-15):** `pkg`'s tests carry a third copy
+(`userspace/pkg/src/main.rs`, `named_font`: a face with given name
+records), which goes the same way when this lands.

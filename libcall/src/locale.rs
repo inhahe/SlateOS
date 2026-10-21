@@ -73,6 +73,7 @@ mod sys {
         pub fn mbrtowc(pwc: *mut i32, s: *const u8, n: usize, ps: *mut MbState) -> usize;
         pub fn wcrtomb(s: *mut u8, wc: i32, ps: *mut MbState) -> usize;
         pub fn wcwidth(wc: i32) -> i32;
+        pub fn __ctype_get_mb_cur_max() -> usize;
         pub fn iswprint(wc: u32) -> i32;
         pub fn isprint(c: i32) -> i32;
         pub fn iscntrl(c: i32) -> i32;
@@ -131,6 +132,25 @@ pub fn select_from_env(category: i32, buf: &mut [u8]) -> Option<usize> {
     }
 }
 
+/// `setlocale (category, name)`: select the locale `name` -- `"POSIX"`,
+/// `"C.UTF-8"` -- for `category`. Whether it exists: one that does not
+/// leaves the selection as it was.
+#[must_use]
+pub fn select(category: i32, name: &core::ffi::CStr) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: `name` is a NUL-terminated string the call only reads; the
+        // result is only tested for null.
+        !unsafe { sys::setlocale(category, name.as_ptr().cast()) }.is_null()
+    }
+    #[cfg(not(unix))]
+    {
+        // The host has only "C", which "POSIX" also names.
+        let _ = category;
+        matches!(name.to_bytes(), b"C" | b"POSIX")
+    }
+}
+
 /// `setlocale (category, NULL)`: the name of the locale selected for
 /// `category`, copied into `buf` as far as it fits; its length.
 pub fn current(category: i32, buf: &mut [u8]) -> Option<usize> {
@@ -169,6 +189,31 @@ pub fn codeset(buf: &mut [u8]) -> Option<usize> {
         const ASCII: &[u8] = b"ANSI_X3.4-1968";
         copy_cut(ASCII, buf);
         Some(ASCII.len())
+    }
+}
+
+/// `ABDAY_1`, `nl_langinfo`'s item for Sunday's abbreviation; the week's
+/// other days follow it.
+pub const ABDAY_1: i32 = 0x2_0000;
+/// `ABMON_1`, `nl_langinfo`'s item for January's abbreviation; the year's
+/// other months follow it.
+pub const ABMON_1: i32 = 0x2_000e;
+
+/// `nl_langinfo (item)`, copied into `buf` without its NUL: its length,
+/// which is more than `buf` holds when it did not fit. `None` off Unix,
+/// where there is no C library of ours to ask.
+pub fn langinfo(item: i32, buf: &mut [u8]) -> Option<usize> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `nl_langinfo` takes any item, answering "" for one it does
+        // not know; the result is copied out before anything else is called.
+        let p = unsafe { sys::nl_langinfo(item) };
+        copy_c_string(p, buf)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (item, buf);
+        None
     }
 }
 
@@ -268,6 +313,21 @@ pub fn wcrtomb(wc: i32, state: &mut MbState, buf: &mut [u8; MB_LEN_MAX]) -> Opti
         let b = u8::try_from(wc).ok().filter(|b| *b < 0x80)?;
         buf[0] = b;
         Some(1)
+    }
+}
+
+/// `MB_CUR_MAX`: the most bytes a character of the selected locale takes --
+/// 1 in the C locale, 6 in glibc's UTF-8 ones.
+#[must_use]
+pub fn mb_cur_max() -> usize {
+    #[cfg(unix)]
+    {
+        // SAFETY: no arguments; it reads the selected locale.
+        unsafe { sys::__ctype_get_mb_cur_max() }
+    }
+    #[cfg(not(unix))]
+    {
+        1
     }
 }
 
@@ -385,6 +445,35 @@ mod tests {
 
     use super::*;
 
+    /// "C" is always there, and its names are English; a locale that is not
+    /// there is refused, and leaves the selection as it was. (The tests
+    /// never select anything but "C", the process's own from the start.)
+    #[cfg(unix)]
+    #[test]
+    fn the_c_locale_is_selected_and_named_in_english() {
+        assert!(select(LC_CTYPE, c"C"));
+        assert!(!select(LC_CTYPE, c"no-such-locale.UTF-8"));
+        let mut day = [0u8; 16];
+        let n = langinfo(ABDAY_1, &mut day).expect("a Sunday");
+        assert_eq!(&day[..n], b"Sun");
+        let mut month = [0u8; 16];
+        let n = langinfo(ABMON_1 + 11, &mut month).expect("a December");
+        assert_eq!(&month[..n], b"Dec");
+        // A buffer too short is answered with the whole length.
+        let mut short = [0u8; 2];
+        assert_eq!(langinfo(ABDAY_1, &mut short), Some(3));
+        assert_eq!(&short, b"Su");
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn off_unix_only_c_is_selected_and_nothing_named() {
+        assert!(select(LC_CTYPE, c"C"));
+        assert!(select(LC_CTYPE, c"POSIX"));
+        assert!(!select(LC_CTYPE, c"C.UTF-8"));
+        assert_eq!(langinfo(ABDAY_1, &mut [0u8; 8]), None);
+    }
+
     #[test]
     fn the_numbers_are_the_librarys() {
         assert_eq!(LC_CTYPE, posix::locale::LC_CTYPE);
@@ -392,6 +481,8 @@ mod tests {
         assert_eq!(LC_COLLATE, posix::locale::LC_COLLATE);
         assert_eq!(LC_ALL, posix::locale::LC_ALL);
         assert_eq!(CODESET, posix::langinfo::CODESET);
+        assert_eq!(ABDAY_1, posix::langinfo::ABDAY_1);
+        assert_eq!(ABMON_1, posix::langinfo::ABMON_1);
         assert_eq!(RADIXCHAR, posix::langinfo::RADIXCHAR);
         assert_eq!(
             core::mem::size_of::<MbState>(),

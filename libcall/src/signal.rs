@@ -35,6 +35,8 @@ pub use crate::{SIGCONT, SIGKILL, SIGPIPE, SIGSTOP, SIGTERM};
 
 /// Interrupt from the keyboard: Ctrl-C.
 pub const SIGINT: i32 = 2;
+/// `SIGUSR1`: the first signal left to programs' own use.
+pub const SIGUSR1: i32 = 10;
 /// Quit from the keyboard: Ctrl-\.
 pub const SIGQUIT: i32 = 3;
 /// A timer set by [`set_alarm_timer`] or [`alarm`] has run out.
@@ -49,6 +51,10 @@ pub const SIGTTIN: i32 = 21;
 pub const SIGTTOU: i32 = 22;
 /// The window of the terminal the process is on changed size.
 pub const SIGWINCH: i32 = 28;
+/// The process used more CPU time than its limit allows.
+pub const SIGXCPU: i32 = 24;
+/// The process wrote a file past its size limit.
+pub const SIGXFSZ: i32 = 25;
 
 /// `sigaction`'s flag for "resume a call this signal interrupted, rather than
 /// failing it with `EINTR`".
@@ -749,6 +755,8 @@ mod tests {
         assert_eq!(SIGQUIT, posix::signal::SIGQUIT);
         assert_eq!(SIGALRM, posix::signal::SIGALRM);
         assert_eq!(SIGCHLD, posix::signal::SIGCHLD);
+        assert_eq!(SIGXCPU, posix::signal::SIGXCPU);
+        assert_eq!(SIGXFSZ, posix::signal::SIGXFSZ);
         assert_eq!(SIGTSTP, posix::signal::SIGTSTP);
         assert_eq!(SIGTTIN, posix::signal::SIGTTIN);
         assert_eq!(SIGTTOU, posix::signal::SIGTTOU);
@@ -792,7 +800,6 @@ mod tests {
     #[test]
     fn a_blocked_signal_waits_and_suspend_delivers_it() {
         use core::sync::atomic::{AtomicUsize, Ordering};
-        const SIGUSR1: i32 = 10;
         static RAN: AtomicUsize = AtomicUsize::new(0);
         extern "C" fn count(_sig: i32) {
             RAN.fetch_add(1, Ordering::SeqCst);

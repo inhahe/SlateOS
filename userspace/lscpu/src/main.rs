@@ -90,7 +90,7 @@ mod topology;
 mod types;
 mod virt;
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Program, Takes};
 use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use smartcols::{ColumnId, FL_NOEXTREMES, FL_RIGHT, FL_TREE, FL_WRAP, JsonType, LineId, Table};
 use std::ffi::{OsStr, OsString};
@@ -150,6 +150,9 @@ const LONG_VALS: [i32; 15] = [
     OPT_OUTPUT_ALL,
     OPT_HIERARCHIC,
 ];
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`.
 const EXCL: [&[i32]; 2] = [
@@ -629,27 +632,6 @@ fn cache_desc(col: CacheCol) -> &'static ColDesc<CacheCol> {
         .unwrap_or(&COLDESCS_CACHE[0])
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
-/// `option_to_longopt(c, longopts)`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 /// The settings `main`'s option loop leaves.
 struct Options {
     columns: Vec<Column>,
@@ -690,11 +672,13 @@ fn parse_options(
                 return Err(errtryhelp(short));
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
             opts.operands = opts.operands.saturating_add(1);
             continue;
         };
-        if let Some(msg) = err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short) {
+        if let Some(msg) =
+            err_exclusive_options(c, &EXCL, &mut excl_st, |c| OPTIONS.name_of(c), short)
+        {
             stderr_write(msg.as_bytes());
             return Err(Fatal::Status(1));
         }

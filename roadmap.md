@@ -1351,6 +1351,26 @@ networking, which the kernel side of every one of these already needed:
 Roadmap (the POSIX/libc, fixture and toolchain items that used to open this
 list moved to lane D on 2026-09-22):
 
+- `[-]` `[B]` **The login screen, then the desktop, start** -- lane B's step
+  on §1392's path, ahead of the rest of this list. The shape is agreed with
+  lane C (`requests/b-c-one-process-signs-people-in-and-it-is-not-the-desktop.md`)
+  and recorded in §1076.
+  - `[x]` `init/loginmgr` the daemon: `org.slateos.LoginManager`, its rules
+    tested, logind's `SetSessionLeader`. 2026-10-16. Lane C told
+    (`requests/b-c-loginmgr-is-built-its-calls-and-how-it-starts-the-screen.md`).
+  - `[ ]` Its launcher: start the screen and the desktop as their users,
+    holding only what each is given. Waits on lane A
+    (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
+  - `[ ]` logind's power calls (`PowerOff`, `Reboot`, `Suspend`) over the bus,
+    allowed to the active seat's session -- the login screen's among them --
+    and carried out through the service manager, as `powerctl` does
+    (todo.txt, "loginctl can inspect sessions and cannot change them").
+    Waits on something answering `org.slateos.ServiceManager`: proposed
+    to lane D's init 2026-10-16
+    (`requests/b-d-init-could-answer-org-slateos-servicemanager.md`).
+  - `[ ]` `loginmgr`'s line in `/etc/startup.conf` and a `greeter` account
+    on the image: lane D's, to ask once the launcher works.
+
 - `[B]` Port **Oils (OSH)** — initiative A, in progress (line ~1799).
   ⛔ **Scope frozen 2026-08-14 — see design-decisions.md §305 before touching it.**
   bash itself runs on SlateOS; osh parity work is now gated by §305's stopping
@@ -1501,6 +1521,12 @@ list moved to lane D on 2026-09-22):
       development and gaming the same set (everything but `sshd`, `ftpd`,
       `telnet`, `inetd`, `ntpd`, `finger`), server without the desktop
       applications and games -- each installable later from the others.
+      *Blocked, 2026-10-15:* there is nothing to group yet. No program of
+      the system is a package -- the image is staged from lane D's
+      `scripts/rootfs-bin-manifest.txt` (§1053), and `pkg` has no package
+      definitions for the system at all -- and the one consumer, the
+      installer, has no owner. Start when either exists: the groups are
+      then a list of package names per answer, and `pkg install @<group>`.
     - `[ ]` The installer's "what is this machine for" answer selects a group
       (no owner yet; the image keeps everything until then, §1053).
   - **A program's remembered settings grow by three** (§1074, B-Q26: A) --
@@ -1509,17 +1535,95 @@ list moved to lane D on 2026-09-22):
     §1.3, no lane yet: the kernel applies them at process creation, Settings
     and the task manager set them).
 
+- `[-]` `[B]` **util-linux 2.39.3's `agetty`, ported** -- replacing
+  `userspace/getty`, written from the manual (its `mingetty` personality,
+  which Ubuntu does not ship, goes with it), and writing the `LOGIN_PROCESS`
+  record it never wrote (`known-issues/B-GETTY-WRITES-NO-LOGIN-PROCESS-RECORD.md`).
+  The console and serial logins of a server installation (§1073) run
+  through it. In stages, each held to Ubuntu's `/usr/sbin/agetty` by
+  `scripts/agetty-diff.sh` before the next: (1) the command line,
+  `--show-issue` and the issue file's escapes; (2) the line opened and set
+  up, the name read, `login` run; (3) `utmp`/`wtmp`; (4) the issue shown
+  again on `--reload` or an address change -- all four done 2026-10-16, 189
+  cases agree. Then shipped in `getty`'s place, once the console answers
+  `KDGKBMODE` (`requests/b-d-the-console-could-answer-as-a-virtual-console.md`).
+
+- `[-]` `[B]` **GNU gzip 1.12, ported** (Ubuntu's `1.12-1ubuntu3.2`, its two
+  CVE fixes included) -- replacing `userspace/gzip`, written from scratch,
+  whose fixed-Huffman-only deflate made files nobody else's gzip makes. Held
+  to Ubuntu's `/usr/bin/gzip` by `scripts/gzip-diff.sh`, compressed bytes
+  included; `gunzip`, `zcat` and `uncompress` are the port under Ubuntu's
+  script names; `userspace/gzip/fuzz/` fuzzes every decoder. The image's
+  names wait on lane D
+  (`requests/b-d-gzip-is-gnu-gzip-now-uncompress-in-gzcat-out.md`).
+
+- `[x]` `[B]` **GNU dc 1.4.1 (bc 1.07.1), ported** -- replacing
+  `userspace/dc`, written from scratch over `bignum`. Its arithmetic is bc's
+  own `number.c` (`userspace/bcnumber`), so the digits past a result's exact
+  value are upstream's; stdio's buffering is modelled, which `!` and the
+  "unimplemented" notes show. Held to Ubuntu's `/usr/bin/dc` by
+  `scripts/dc-diff.sh`: 1691 cases agree, one deliberate difference (file
+  names escaped in diagnostics). 2026-10-16. GNU `bc` itself, whose
+  `number.c` this already is, is the next of the pair.
+
+- `[x]` `[B]` **GNU bc 1.07.1, ported** -- replacing coreutils' `bc`, written
+  from scratch over `bignum`. Still coreutils' program (§1005): its `main.c`
+  is `userspace/coreutils/src/bin/bc.rs`, the rest the library
+  `userspace/gnubc` -- `scan.l` matched as flex matches it, the parse driven
+  by Bison's own tables from upstream's `bc.c`, the code generator and
+  loader, the machine, `-l`'s library as upstream compiles it, glibc's
+  `random()`. Held to Ubuntu's `/usr/bin/bc` by `scripts/bc-diff.sh`: 2312
+  cases agree, 400 seeded random programs among them; deliberate
+  differences, a file name escaped in a diagnostic and no line editing.
+  2026-10-16.
+
+- `[x]` `[B]` **e2fsprogs 1.47.0's `chattr` and `lsattr`, ported** --
+  replacing `userspace/chattr`, written from scratch with its own option
+  parser. `misc/chattr.c` and `misc/lsattr.c` with the parts of `lib/e2p`
+  (the flag table, `fgetflags`/`fsetflags`, the version and project calls,
+  `iterate_on_dir`) and `lib/et` (`com_err`) they use; one binary, `lsattr`
+  by the name it is called. The ioctls are lane A's (§1524), through
+  `libcall::inode`. Held to Ubuntu's by `scripts/chattr-diff.sh`: 139 cases
+  agree, no deliberate difference. 2026-10-17. On SlateOS itself every file
+  is refused until the C library forwards the ioctls and the kernel answers
+  them natively (`requests/b-ad-chattr-s-ioctls-do-not-reach-the-kernel.md`).
+
+- `[x]` `[B]` **util-linux 2.39.3's `rfkill`, ported** -- replacing
+  `userspace/rfkill`, written from scratch, which read `/sys/class/rfkill`
+  alone and never opened `/dev/rfkill`, where the kernel lists the devices
+  and takes the requests to block them. Its table prints through
+  `smartcols`. Held to Ubuntu's by `scripts/rfkill-diff.sh`, each case in a
+  namespace with a `/dev/rfkill` and a `/sys/class/rfkill` of its own:
+  341 cases agree; deliberate difference, an identifier escaped in a
+  diagnostic. On SlateOS it says `cannot open /dev/rfkill` until there is a
+  driver to answer it. 2026-10-17.
+
+- `[x]` `[B]` **shadow 4.13's `nologin`, ported** -- Ubuntu's comes from the
+  `login` package, not util-linux -- replacing `userspace/nologin`, written
+  here, which printed to standard error, read `/etc/nologin.txt`, answered
+  `--help` and `--version`, and logged nothing. It logs the attempt (who,
+  the uid, the terminal, `SSH_ORIGINAL_COMMAND`) through the C library's
+  syslog, prints its one line and exits 1, whatever its arguments. Held to
+  Ubuntu's by `scripts/nologin-diff.sh`, the logged line included, through a
+  `/dev/log` of the harness's own: 20 cases agree. 2026-10-17.
+
 - **Requests to lane B, taken 2026-10-11:**
   - `[ ]` `[B]` Swap turned on at boot from configuration -- `swapon -a` over
-    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`, on
-    lane-a-wip until lane A's next publish: the kernel turns on only a whole
-    disk with a swap header by itself).
-  - `[ ]` `[B]` `pkg` packages say which font families they carry, so
+    `fstab` (lane A's `requests/a-b-turn-on-configured-swap-at-boot.md`; the
+    kernel half is on main: it turns on only a whole disk with a swap header
+    by itself). `swapon -a` itself is done (util-linux's, ported); running it
+    once at boot needs a run-once kind of service in `init` and a line in the
+    image's `startup.conf`, both lane D's: requested 2026-10-15
+    (`requests/b-d-init-runs-swapon-a-once-at-boot.md`).
+  - `[x]` `[B]` `pkg` packages say which font families they carry, so
     Settings can offer a theme's recommended fonts
     (`requests/e-b-a-package-could-say-which-font-families-it-carries.md`).
-  - `[ ]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
+    Done 2026-10-15: `fonts:` in the manifest, written by `pkg pack` from the
+    font files as the font index reads them; `pkg search --font <FAMILY>`.
+  - `[x]` `[B]` `quote-names.py` and `check-help-vs-parser.py` take their
     test-module finder from `rustlex` once lane A puts one there
-    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`).
+    (`requests/e-abc-one-answer-to-which-files-are-test-modules.md`). Done
+    2026-10-15: both call `rustlex.test_module_files`.
 
 - `[x]` `[B]` **`/etc/users.yaml` is the truth; `/etc/passwd` and `/etc/shadow`
   are generated from it — design-decisions.md §353. Complete 2026-09-06.**
@@ -6424,7 +6528,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] fdisk/gdisk/sfdisk/cfdisk/partprobe: disk partitioning (MBR/GPT, CRC32, GUID, 60+ GPT types, JSON, 137 tests)
   - [x] gdb/gdbserver: debugger (ELF64, breakpoints, watchpoints, x86_64 disassembler, expr eval, GDB remote protocol, 122 tests)
   - [x] swapon/swapoff/free: swap and memory management (/proc/meminfo, /proc/swaps, human/unit output). **2026-09-27: `swapon` and `swapoff` are now ports of util-linux 2.39.3's** (`userspace/swapon`, `src/bin/swapoff.rs`) on the libmount, libblkid and libsmartcols ports -- `--show`'s table, `-s`, the checks before swapon(2) (permissions, holes, the page size a header was made for, `--fixpgsz` re-making it with mkswap, old software-suspend data), `-a` over fstab with noauto/nofail/pri=/discard=, and swapoff by path, label, UUID and `-a`; `scripts/swapon-diff.sh`, 166 cases, all agreeing.
-  - [x] losetup/lodetach: loop device management (sysfs enumeration, setup/detach, JSON output, size parsing)
+  - [x] losetup/lodetach: loop device management (sysfs enumeration, setup/detach, JSON output, size parsing) -- since 2026-10-17 a port of util-linux 2.39.3's `losetup.c` on `smartcols`, with `lib/loopdev.c` as `ulsysfs::loopdev` (`LoopCxt`: the sysfs and `LOOP_*` ioctl paths, the used/free iteration, setup by `LOOP_CONFIGURE` or `LOOP_SET_FD`); `scripts/losetup-diff.sh` (WSL's own loop devices, and fake sysfs trees beside the real `/dev/loopN` nodes in a user namespace): 620 cases agree. Setting up and detaching need root, which no harness has: those paths are compared as an ordinary user meets them, refused
   - [x] hostnamectl/hostname/domainname/dnsdomainname: hostname management (machine-info, os-release, virtualization detection)
   - [x] useradd/userdel/usermod/groupadd/groupdel/groupmod/newgrp: user management (atomic file I/O, UID/GID auto-assign, skel copy, 106 tests)
   - [x] cron/crontab/anacron/at/atd/batch/atq/atrm: job scheduling (cron expressions, time parsing, 8 special strings, 103 tests)
@@ -6448,7 +6552,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] dmsetup/dmstats/kpartx: device mapper control (19 commands, 12 target types, MBR/GPT partition parsing, 190 tests)
   - [x] lsirq: IRQ information display (/proc/interrupts + softirqs, JSON/pairs output) -- since 2026-09-26 a port of util-linux 2.39.3's `lsirq.c` and `irq-common.c` on `smartcols`; `scripts/lsirq-diff.sh` (fake `/proc` files bound in a user namespace): 212 cases agree, 1 more where only upstream never finishes
   - [x] irqbalance: IRQ balancing daemon (load imbalance detection, CPU affinity migration)
-  - [x] hardlink: duplicate file deduplication (FNV-1a hashing, byte-verify, dry-run mode)
+  - [x] hardlink: duplicate file deduplication -- since 2026-10-17 a port of util-linux 2.39.3's `hardlink.c` with `lib/fileeq.c` (contents compared block by block, digests made by the kernel's `AF_ALG` where it has one, else `memcmp`) and glibc's `tsearch`/`twalk` and `nftw`, whose orders decide which file is kept and in what order they are linked; `scripts/hardlink-diff.sh` (each tree built afresh in a tmpfs of its own, the trees left behind compared too): 158 cases agree
   - [x] dmidecode/biosdecode: SMBIOS/DMI table decoder (type filtering, string keyword lookup, JSON output, hex dump)
   - [x] efibootmgr/efivar: EFI boot variable manager (boot entry CRUD, boot order, UCS-2 label parsing)
   - [x] inotifywait/inotifywatch: filesystem event monitoring (14 event types, glob filtering, CSV/custom output, statistics)

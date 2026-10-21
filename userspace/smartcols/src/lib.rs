@@ -934,6 +934,21 @@ impl Table {
         self.order.clone().into_iter()
     }
 
+    /// `scols_line_get_parent(ln)`: the line `ln` is a child of, if any.
+    #[must_use]
+    pub fn line_parent(&self, ln: LineId) -> Option<LineId> {
+        self.line(ln)?.parent
+    }
+
+    /// `scols_line_next_child(ln, itr, &child)` from the start: `ln`'s
+    /// children, in their order -- none for a line not this table's.
+    #[must_use]
+    pub fn line_children(&self, ln: LineId) -> Vec<LineId> {
+        self.line(ln)
+            .map(|l| l.children.clone())
+            .unwrap_or_default()
+    }
+
     /// `scols_line_get_cell(ln, n)` and `scols_cell_set_userdata`: a number
     /// kept with the line's `n`th cell for a comparison function to read
     /// ([`CellView::userdata`]); never printed.

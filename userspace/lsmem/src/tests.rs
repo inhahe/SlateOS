@@ -49,12 +49,12 @@ fn exclusive_options_are_refused_on_the_second_of_a_group() {
 
 #[test]
 fn each_option_value_names_its_long_option() {
-    assert_eq!(option_to_longopt(i32::from(b'J')), Some("json"));
-    assert_eq!(option_to_longopt(i32::from(b'P')), Some("pairs"));
-    assert_eq!(option_to_longopt(i32::from(b'S')), Some("split"));
-    assert_eq!(option_to_longopt(OPT_SUMMARY), Some("summary"));
-    assert_eq!(option_to_longopt(OPT_OUTPUT_ALL), Some("output-all"));
-    assert_eq!(option_to_longopt(i32::from(b'x')), None);
+    assert_eq!(OPTIONS.name_of(i32::from(b'J')), Some("json"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'P')), Some("pairs"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'S')), Some("split"));
+    assert_eq!(OPTIONS.name_of(OPT_SUMMARY), Some("summary"));
+    assert_eq!(OPTIONS.name_of(OPT_OUTPUT_ALL), Some("output-all"));
+    assert_eq!(OPTIONS.name_of(i32::from(b'x')), None);
 }
 
 #[test]

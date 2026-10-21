@@ -239,6 +239,10 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("services/", "D"),
     ("toolchain/stubs/", "D"),
     ("toolchain/build-sysroot.ps1", "D"),
+    # fastpy, the compiler the fastpy-* programs and /bin/fastpy are built
+    # with: a submodule, pinned to the commit the OS was tested with. Moving
+    # the pin is a change to this path.
+    ("toolchain/fastpy/", "D"),
     ("scripts/create-ext4-rootfs.sh", "D"),
     # The TLS client for userspace programs (rustls over vendored crypto), a
     # carve-out of lane A's net/: lane D offered to build it and lane A handed
@@ -327,6 +331,7 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("clippy.toml", "A"),
     (".gitattributes", "A"),
     (".gitignore", "A"),
+    (".gitmodules", "A"),
     (".git-blame-ignore-revs", "A"),
     ("bare-metal-boot.md", "A"),
     ("net-userspace-migration.md", "A"),
@@ -1612,6 +1617,8 @@ def _self_test() -> int:
         ("services/ctest-pty/main.c", "D"),
         ("toolchain/stubs/src/lib.rs", "D"),
         ("toolchain/build-sysroot.ps1", "D"),
+        ("toolchain/fastpy", "D"),
+        ("toolchain/fastpy/compiler/toolchain.py", "D"),
         ("toolchain/x86_64-slateos.json", "A"),
         ("apps/chess/src/main.rs", "E"),
         ("randrange/src/lib.rs", "E"),

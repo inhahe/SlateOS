@@ -2592,6 +2592,18 @@ costs neither the CPython memory footprint nor interpreter-speed execution._
   - [ ] **Where it plays, chosen per connection:** on the viewer (the default), on the host, on both, or nowhere -- RDP's "remote audio playback" choice.
   - [ ] **The microphone the other way:** the viewer's microphone offered to the host as an input device, for calls made from the remote desktop -- RDP's audio input redirection. Off until the viewer allows it, as a browser asks before a page may use the microphone.
   - [ ] The FreeRDP port (above) brings RDP's own audio channels with it (`rdpsnd` out, `audin` in); the native streaming paths need the items above.
+- [ ] **Shared clipboard, as an option.** (Operator request, 2026-10-22.) Copy on one side, paste on the other.
+  - [ ] **Chosen per connection and per direction,** viewer to host and host to viewer separately, and remembered per host. Off until turned on, as for the phone (§6.11.3): a clipboard that follows you silently will one day carry a password to a machine that should not have it.
+  - [ ] **Text first; images and files behind their own switch.** Rich text crosses as the clipboard's sanitized format (§3.5's multi-format clipboard: no hidden text, backgrounds or embedded objects), with plain text beside it.
+  - [ ] **Sent only when pasted:** a copy announces which formats it has, and the data crosses only when the other side pastes -- RDP's delayed rendering -- so copying a large image costs nothing until it is used, and a copy never pasted never leaves the machine.
+  - [ ] **In a browser viewer** (F-Q6), the page reads the viewer's clipboard only as the browser allows: at a paste, or once the user has granted it the clipboard permission.
+  - [ ] The FreeRDP port brings RDP's clipboard channel (`cliprdr`); the native streaming paths need the items above.
+- [ ] **Uploading and downloading files, as an option.** (Operator request, 2026-10-22.) Files to the host from the viewer's machine, and back.
+  - [ ] **Upload:** files dragged into the remote window land where they are dropped -- into the folder or program under the pointer, as a local drag would -- or are picked with the viewer's file dialog and go to a folder chosen on the host (Downloads by default).
+  - [ ] **Download:** files chosen on the host, through a file dialog drawn in the session, and saved the viewer's way -- the browser's own download, or a save dialog in a native viewer, where they can also be dragged out of the window.
+  - [ ] **Files through the clipboard too,** copied on one side and pasted on the other, when the shared clipboard's file switch is on.
+  - [ ] **Large files without trouble:** a progress bar and a cancel button; transfers that resume where they stopped after a dropped connection; a checksum to confirm each file arrived whole; and a share of the bandwidth that leaves the picture and sound smooth.
+  - [ ] **The host is told:** files arriving and leaving are shown on the host's own screen and logged, so the person at the machine sees what was taken from it or put on it. Each direction can be switched off per host, and the host's owner can forbid either for every connection.
 - [ ] DynDNS setup helper in settings (prefer free services, especially dynu.net)
 
 ### 4.10 System Snapshots

@@ -13,7 +13,8 @@ session, and each pass:
   2. fast-forwards the tree with `check-lane-signals.py`'s
      `sync_integration_tree` -- `merge --ff-only` and nothing else, so the
      operator's own edits there are never touched;
-  3. tells the operator, with a Windows notification, when the tree cannot
+  3. tells the operator -- with a Windows notification, or a message box
+     where the account has notifications switched off -- when the tree cannot
      follow `main`: at once when git refuses the fast-forward (a commit of the
      tree's own, a local edit in the way, another branch), and after an hour
      when anything else keeps a pass from finishing -- GitHub unreachable, a
@@ -240,29 +241,63 @@ def one_pass(tree: Path, cls, notify, now: _dt.datetime | None = None,
     return outcome
 
 
-def toast(title: str, body: str) -> bool:
+def notify(title: str, body: str, toast=None, popup=None) -> bool:
+    """Show the operator `title` and `body`: as a Windows notification where
+    Windows lets one through, else as a message box, which it always shows --
+    notifications can be switched off for the whole account, and were on the
+    PC this was written for. True if either was shown. `toast` and `popup`
+    are the two ways, given only by the self-test."""
+    toast = toast or show_toast
+    popup = popup or show_popup
+    if toast(title, body) == "shown":
+        return True
+    return popup(title, body)
+
+
+def show_toast(title: str, body: str) -> str:
     """A Windows notification, through Windows PowerShell's WinRT types (no
     module to install). The texts travel in the environment, so nothing in
-    them is parsed as PowerShell. True if PowerShell reported no error."""
+    them is parsed as PowerShell. Returns "shown", "disabled" (Windows will
+    not show this sender's notifications), or "failed"."""
     script = (
         "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
         "ContentType = WindowsRuntime] > $null\n"
+        "$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+        "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe')\n"
+        "if ($notifier.Setting -ne [Windows.UI.Notifications.NotificationSetting]::Enabled) "
+        "{ exit 3 }\n"
         "$t = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
         "[Windows.UI.Notifications.ToastTemplateType]::ToastText02)\n"
         "$n = $t.GetElementsByTagName('text')\n"
         "$n.Item(0).AppendChild($t.CreateTextNode($env:SLATEOS_TOAST_TITLE)) > $null\n"
         "$n.Item(1).AppendChild($t.CreateTextNode($env:SLATEOS_TOAST_BODY)) > $null\n"
-        "$x = [Windows.UI.Notifications.ToastNotification]::new($t)\n"
-        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
-        "'{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe'"
-        ").Show($x)\n"
+        "$notifier.Show([Windows.UI.Notifications.ToastNotification]::new($t))\n"
     )
-    return run_powershell(script, {"SLATEOS_TOAST_TITLE": title, "SLATEOS_TOAST_BODY": body})
+    rc = run_powershell(script, {"SLATEOS_TOAST_TITLE": title, "SLATEOS_TOAST_BODY": body})
+    return {0: "shown", 3: "disabled"}.get(rc, "failed")
 
 
-def run_powershell(script: str, extra_env: dict[str, str] | None = None) -> bool:
+def show_popup(title: str, body: str) -> bool:
+    """A message box in this process's own session (`msg.exe`), which stays
+    until the operator clicks OK. `msg` hands it to the session and returns at
+    once, so the pass does not wait on the operator. True if it was sent."""
+    import ctypes
+
+    session = ctypes.c_ulong()
+    if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
+        return False
+    text = f"{title}\n\n{body}"[:240]
+    try:
+        r = subprocess.run(["msg.exe", str(session.value), text],
+                           capture_output=True, check=False, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return r.returncode == 0
+
+
+def run_powershell(script: str, extra_env: dict[str, str] | None = None) -> int:
     """`script` in Windows PowerShell, passed encoded so that no quoting can
-    change it. True if it exited 0."""
+    change it. Its exit code; -1 if it could not run or ran out of time."""
     encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
     env = dict(os.environ)
     env.update(extra_env or {})
@@ -271,8 +306,8 @@ def run_powershell(script: str, extra_env: dict[str, str] | None = None) -> bool
             ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
             env=env, capture_output=True, check=False, timeout=120)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return r.returncode == 0
+        return -1
+    return r.returncode
 
 
 def install(tree: Path) -> int:
@@ -306,7 +341,7 @@ def install(tree: Path) -> int:
         f"{ps('Fast-forwards the SlateOS integration tree to main every minute, and notifies when it cannot. ' + str(script))}"
         " > $null\n"
     )
-    if not run_powershell(body):
+    if run_powershell(body) != 0:
         print("integration-tree-sync: registering the task failed", file=sys.stderr)
         return 1
     print(f"integration-tree-sync: '{TASK_NAME}' runs {script} every minute with {py}")
@@ -315,7 +350,7 @@ def install(tree: Path) -> int:
 
 def uninstall() -> int:
     ok = run_powershell(
-        f"Unregister-ScheduledTask -TaskName '{TASK_NAME}' -Confirm:$false -ErrorAction Stop")
+        f"Unregister-ScheduledTask -TaskName '{TASK_NAME}' -Confirm:$false -ErrorAction Stop") == 0
     print(f"integration-tree-sync: '{TASK_NAME}' " + ("removed" if ok else "was not removed"))
     return 0 if ok else 1
 
@@ -347,6 +382,21 @@ def self_test() -> int:
     check("a stored time that is not one is no time",
           should_notify({"key": "k", "notified_at": None}, "k", now), True)
 
+    popups: list[str] = []
+
+    def popup(title: str, body: str) -> bool:
+        popups.append(body)
+        return True
+
+    check("a notification Windows shows needs no message box",
+          notify("t", "a", lambda t, b: "shown", popup) and popups == [], True)
+    check("notifications switched off: a message box instead",
+          notify("t", "b", lambda t, b: "disabled", popup) and popups == ["b"], True)
+    check("a notification that failed: a message box too",
+          notify("t", "c", lambda t, b: "failed", popup) and popups == ["b", "c"], True)
+    check("and neither shown is not shown",
+          notify("t", "d", lambda t, b: "failed", lambda t, b: False), False)
+
     cls = signals()
     env = cls._clean_git_env()
 
@@ -375,7 +425,7 @@ def self_test() -> int:
         shown_now: list[tuple[str, str]] = []
         works = [True]
 
-        def notify(title: str, body: str) -> bool:
+        def fake_notify(title: str, body: str) -> bool:
             if works[0]:
                 shown_now.append((title, body))
             return works[0]
@@ -383,7 +433,7 @@ def self_test() -> int:
         def run(at: _dt.datetime) -> str:
             # environ={}: as the task runs it, whoever runs this self-test --
             # a git hook's GIT_DIR would make the fast-forward stand aside.
-            return one_pass(tree, cls, notify, at, environ={})
+            return one_pass(tree, cls, fake_notify, at, environ={})
 
         check("a tree already on main is current", run(now), "current")
         (origin / "f.txt").write_bytes(b"two\n")
@@ -442,8 +492,8 @@ def self_test() -> int:
         git(origin, "commit", "-q", "-am", "four")
         before = len(shown_now)
         check("a crashing pass is an outcome, not a crash",
-              one_pass(tree, Broken(), notify, t1, environ={}), "error")
-        one_pass(tree, Broken(), notify, t1 + TROUBLE_AFTER, environ={})
+              one_pass(tree, Broken(), fake_notify, t1, environ={}), "error")
+        one_pass(tree, Broken(), fake_notify, t1 + TROUBLE_AFTER, environ={})
         check("and is told after an hour", len(shown_now), before + 1)
         check("with what crashed", "sync_integration_tree is gone" in shown_now[-1][1], True)
     finally:
@@ -470,7 +520,7 @@ def main(argv: list[str]) -> int:
         return 1
     if "--install" in argv:
         return install(tree)
-    one_pass(tree, cls, toast)
+    one_pass(tree, cls, notify)
     return 0
 
 

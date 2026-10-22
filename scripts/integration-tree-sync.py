@@ -90,9 +90,12 @@ def in_progress(git_dir: Path) -> str | None:
 
 
 def reason_key(line: str) -> str:
-    """A block's reason without the count of commits behind, which changes
-    each time `main` moves while the reason itself does not."""
-    return re.sub(r"\b\d+ commit\(s\) behind\b", "behind", line)
+    """A block's reason without what changes while the reason does not: the
+    count of commits behind, which grows each time `main` moves, and git's own
+    words on why it would not fast-forward, which list the files in the way --
+    so that one more file in the way is not a new reason to show."""
+    key = re.sub(r"\b\d+ commit\(s\) behind\b", "behind", line)
+    return re.sub(r"would not fast-forward it \(.*?\)\.", "would not fast-forward it.", key)
 
 
 def parse_time(value) -> _dt.datetime | None:
@@ -212,6 +215,10 @@ def one_pass(tree: Path, cls, notify, now: _dt.datetime | None = None,
         if state:
             write_state(state_path, {})
             log(log_path, now, "following main again")
+            if state.get("notified_at"):
+                # A message box stays on screen after its trouble has passed.
+                tell(notify, log_path, now, "SlateOS: the integration tree follows main again",
+                     "What you were told about has passed: the tree is on main again.")
         if outcome == "done":
             log(log_path, now, detail)
         return outcome
@@ -231,27 +238,39 @@ def one_pass(tree: Path, cls, notify, now: _dt.datetime | None = None,
         title = "SlateOS: the integration tree has not followed main for an hour"
         body = f"For {minutes} minutes: {detail}"
         kept = {k: state.get(k) for k in ("key", "notified_at", "trouble", "trouble_since")}
-    if should_notify(state, key, now):
-        if notify(title, body[:400]):
-            kept.update(key=key, notified_at=now.isoformat())
-            log(log_path, now, "operator notified: " + body)
-        else:
-            log(log_path, now, "the notification could not be shown: " + body)
+    if should_notify(state, key, now) and tell(notify, log_path, now, title, body):
+        kept.update(key=key, notified_at=now.isoformat())
     write_state(state_path, {k: v for k, v in kept.items() if v is not None})
     return outcome
 
 
-def notify(title: str, body: str, toast=None, popup=None) -> bool:
+def tell(notify, log_path: Path, now: _dt.datetime, title: str, body: str) -> str:
+    """`notify(title, body)`, the log named at the end of the body (a message
+    box holds 255 characters, the log all of it), guarded: a notice that
+    raises is one not shown, and the pass goes on. Logs how the operator was
+    told, and returns it, or "" when they were not."""
+    try:
+        how = notify(title, f"{body}\n\nAll of it: {log_path}")
+    except Exception as e:  # noqa: BLE001 -- an unshown notice is logged, not fatal
+        how = ""
+        log(log_path, now, f"showing the notice raised {type(e).__name__}: {one_line(str(e))}")
+    log(log_path, now, (f"operator told by {how}: " if how else
+                        "the notice could not be shown: ") + body)
+    return how
+
+
+def notify(title: str, body: str, toast=None, popup=None) -> str:
     """Show the operator `title` and `body`: as a Windows notification where
-    Windows lets one through, else as a message box, which it always shows --
-    notifications can be switched off for the whole account, and were on the
-    PC this was written for. True if either was shown. `toast` and `popup`
-    are the two ways, given only by the self-test."""
+    Windows lets one through, else as a message box -- notifications can be
+    switched off for the whole account, and were on the PC this was written
+    for. Returns how ("a notification", "a message box"), or "" if neither
+    could be shown. `toast` and `popup` are the two ways, given only by the
+    self-test."""
     toast = toast or show_toast
     popup = popup or show_popup
     if toast(title, body) == "shown":
-        return True
-    return popup(title, body)
+        return "a notification"
+    return "a message box" if popup(title, body) else ""
 
 
 def show_toast(title: str, body: str) -> str:
@@ -274,23 +293,63 @@ def show_toast(title: str, body: str) -> str:
         "$notifier.Show([Windows.UI.Notifications.ToastNotification]::new($t))\n"
     )
     rc = run_powershell(script, {"SLATEOS_TOAST_TITLE": title, "SLATEOS_TOAST_BODY": body})
+    return toast_outcome(rc)
+
+
+def toast_outcome(rc: int) -> str:
+    """What `show_toast`'s PowerShell exit code `rc` means: 0 shown, 3 the
+    sender's notifications switched off, anything else failed."""
     return {0: "shown", 3: "disabled"}.get(rc, "failed")
 
 
+#: The longest message `msg.exe` sends (measured: 255 characters go, 256 do not).
+MSG_LIMIT = 255
+
+
+def popup_text(title: str, body: str, limit: int = MSG_LIMIT) -> str:
+    """`title` and `body` in at most `limit` characters, for `msg.exe`: the
+    body's last paragraph -- the line naming the log -- kept whole, and what
+    is cut from the rest marked with "..."."""
+    text = f"{title}\n\n{body}"
+    if len(text) <= limit:
+        return text
+    head, sep, tail = text.rpartition("\n\n")
+    if not sep or len(tail) + 5 >= limit:
+        return text[: limit - 3] + "..."
+    return head[: limit - len(tail) - 5] + "...\n\n" + tail
+
+
+def msg_exe() -> str:
+    """Windows' own `msg.exe` by its full path, never one the search order
+    finds first, as in the task's working directory. A 32-bit Python has
+    System32 redirected, and reaches the real one through Sysnative."""
+    root = os.environ.get("SystemRoot") or "C:/Windows"
+    native = os.path.join(root, "Sysnative")
+    folder = native if os.path.isdir(native) else os.path.join(root, "System32")
+    return os.path.join(folder, "msg.exe")
+
+
+def popup_command(session: int, title: str, body: str) -> list[str]:
+    """The `msg.exe` command that shows `title` and `body` in session
+    `session`, until OK or the reminder that would replace it is due: `msg`'s
+    own default is a minute, gone before anyone looks."""
+    return [msg_exe(), f"/TIME:{int(REMIND.total_seconds())}", str(session),
+            popup_text(title, body)]
+
+
 def show_popup(title: str, body: str) -> bool:
-    """A message box in this process's own session (`msg.exe`), which stays
-    until the operator clicks OK. `msg` hands it to the session and returns at
-    once, so the pass does not wait on the operator. True if it was sent."""
+    """A message box in this process's own session. `msg` hands it to the
+    session and returns at once, so the pass does not wait on the operator.
+    True if it was sent; `msg.exe` is not on every edition of Windows."""
     import ctypes
 
     session = ctypes.c_ulong()
     if not ctypes.windll.kernel32.ProcessIdToSessionId(os.getpid(), ctypes.byref(session)):
         return False
-    text = f"{title}\n\n{body}"[:240]
     try:
-        r = subprocess.run(["msg.exe", str(session.value), text],
+        r = subprocess.run(popup_command(session.value, title, body),
                            capture_output=True, check=False, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ValueError, subprocess.TimeoutExpired):
         return False
     return r.returncode == 0
 
@@ -395,7 +454,28 @@ def self_test() -> int:
     check("a notification that failed: a message box too",
           notify("t", "c", lambda t, b: "failed", popup) and popups == ["b", "c"], True)
     check("and neither shown is not shown",
-          notify("t", "d", lambda t, b: "failed", lambda t, b: False), False)
+          notify("t", "d", lambda t, b: "failed", lambda t, b: False), "")
+    check("PowerShell's exit codes", [toast_outcome(rc) for rc in (0, 3, 1, -1)],
+          ["shown", "disabled", "failed", "failed"])
+    log_line = "All of it: C:/visual studio projects/os/.git/slateos-integration-sync.log"
+    long_box = popup_text("SlateOS: the integration tree is not following main",
+                          "x" * 400 + "\n\n" + log_line)
+    check("a long message fits msg.exe", len(long_box) <= MSG_LIMIT, True)
+    check("and keeps the line naming the log whole", long_box.endswith(log_line), True)
+    check("and says it was cut", "...\n\n" + log_line in long_box, True)
+    check("a short message is left alone", popup_text("t", "b"), "t\n\nb")
+    cmd = popup_command(1, "t", "b")
+    check("msg.exe by its full path", Path(cmd[0]).is_absolute() and cmd[0].endswith("msg.exe"),
+          True)
+    check("shown until OK or the next reminder", cmd[1:3], [f"/TIME:{int(REMIND.total_seconds())}", "1"])
+    ff = ("the integration tree X is 3 commit(s) behind main, and git would not fast-forward "
+          "it (error: Your local changes to the following files would be overwritten by "
+          "merge: {}). The operator's own uncommitted changes there are in the way")
+    check("one more file in the way is not a new reason",
+          reason_key(ff.format("a.txt")), reason_key(ff.format("a.txt b.txt")))
+    check("but another kind of refusal is",
+          reason_key(ff.format("a.txt")) != reason_key("the integration tree X is on lane-b, not main"),
+          True)
 
     cls = signals()
     env = cls._clean_git_env()
@@ -425,10 +505,10 @@ def self_test() -> int:
         shown_now: list[tuple[str, str]] = []
         works = [True]
 
-        def fake_notify(title: str, body: str) -> bool:
+        def fake_notify(title: str, body: str) -> str:
             if works[0]:
                 shown_now.append((title, body))
-            return works[0]
+            return "a test notice" if works[0] else ""
 
         def run(at: _dt.datetime) -> str:
             # environ={}: as the task runs it, whoever runs this self-test --
@@ -464,6 +544,11 @@ def self_test() -> int:
         git(tree, "reset", "-q", "--hard", "origin/main")
         check("back on main, it follows main again", run(now + REMIND), "current")
         check("and the reason is forgotten", read_state(state_path), {})
+        check("and the operator, who was told, is told it has passed",
+              "follows main again" in shown_now[-1][0], True)
+        check("the log says how they were told",
+              "operator told by a test notice" in (tree / ".git" / LOG_NAME).read_text(
+                  encoding="utf-8"), True)
 
         # Anything that keeps a pass from finishing is told after an hour.
         t0 = now + 2 * REMIND
@@ -496,6 +581,20 @@ def self_test() -> int:
         one_pass(tree, Broken(), fake_notify, t1 + TROUBLE_AFTER, environ={})
         check("and is told after an hour", len(shown_now), before + 1)
         check("with what crashed", "sync_integration_tree is gone" in shown_now[-1][1], True)
+
+        # A notice that raises is a notice not shown; the pass goes on.
+        def raising_notify(title: str, body: str) -> str:
+            raise ValueError("embedded null character")
+
+        write_state(state_path, {})
+        (tree / "h.txt").write_bytes(b"mine too\n")
+        git(tree, "add", "h.txt")
+        git(tree, "commit", "-q", "-m", "another of the tree's own")
+        check("a notice that raises does not end the pass",
+              one_pass(tree, cls, raising_notify, t1, environ={}), "blocked")
+        check("and is not counted as shown", read_state(state_path).get("notified_at"), None)
+        check("and the log says so",
+              "raised ValueError" in (tree / ".git" / LOG_NAME).read_text(encoding="utf-8"), True)
     finally:
         cls._gitenv().remove_tree(tmp)
     print("integration-tree-sync self-test: " + ("ok" if not bad else f"{len(bad)} failed"))

@@ -527,6 +527,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/test-grade-positional.py` | Regression tests for `scripts/grade-positional.py`. |
 | `scripts/test-guest.py` | Tests for `guest.py`, the host's end of the guest agent's protocol. |
 | `scripts/test-hostload.py` | Tests for `hostload.py`, the harness's measurement of how much CPU a process gets. |
+| `scripts/test-integration-tree-sync.py` | Regression tests for `scripts/integration-tree-sync.py`: its self-test. |
 | `scripts/test-lane-claims.py` | Tests for `scripts/lane-claims.py` through its command line. |
 | `scripts/test-layout-sweep.py` | Regression tests for `scripts/layout-sweep.py`. |
 | `scripts/test-link-wrappers.sh` | Self-test for slate_make_link_wrappers in scripts/lib/worktree.sh: the |
@@ -606,4 +607,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_596 scripts._
+_597 scripts._

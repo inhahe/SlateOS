@@ -1288,6 +1288,46 @@ def main() -> int:
               "1 gate(s) ran, 0 skipped." in out and "could not run" not in out,
               out.strip()[-400:])
 
+        # --- the push's time ----------------------------------------------
+        # The hook ends -- refused or not, from its EXIT trap -- with its total
+        # and its slowest timed gates, and keeps the rows for
+        # gate-cost-report.py --push.
+        timing_log = tmp_root / "pre-push-gate-timing.1.tsv"
+        timing_log.write_bytes(b"fast\t1\t0\nslow\t30\t1\nmid\t5\t0\n")
+        timing_driver = tmp_root / "driver-timing.sh"
+        timing_driver.write_text(
+            "set -u\n"
+            + shellfunc.shell_function_in(HOOK, "print_gate_timing") + "\n"
+            + "hook_started=$(( ${EPOCHSECONDS:-$(date +%s)} - 42 ))\n"
+            + f"CHECKER_TIMING_LOG='{timing_log.as_posix()}'\n"
+            + "trap print_gate_timing EXIT\n"
+            + "exit 3\n",
+            encoding="utf-8",
+            newline="")
+
+        def run_timing() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["sh", str(timing_driver)], capture_output=True,
+                                  text=True, encoding="utf-8", errors="replace",
+                                  env=child_env())
+
+        r = run_timing()
+        out = r.stdout + r.stderr
+        check("a refused push keeps its exit status through the summary",
+              r.returncode == 3, out.strip()[-400:])
+        check("the summary gives the whole time and the timed gates' total",
+              re.search(r"pre-push: 4[2-4]s in all, 36s of it in 3 timed gate\(s\)", out)
+              is not None, out.strip()[-400:])
+        rows = [ln.split() for ln in out.splitlines() if ln.startswith("  ")]
+        check("the slowest come first, a refusal's exit beside it",
+              [row[1] for row in rows] == ["slow", "mid", "fast"] and "(exit 1)" in out,
+              out.strip()[-400:])
+        check("the rows are kept for gate-cost-report.py --push", timing_log.is_file())
+        timing_log.write_bytes(b"")
+        out = run_timing().stderr
+        check("with no gate timed it says so, and prints no table",
+              "no gate ran through run_checker" in out and "the slowest" not in out,
+              out.strip()[-400:])
+
         # ------------------------------------------------------------------
         # The distinct-label rule group 7 checks is about one invocation
         # overwriting itself. This is the other axis, which no assertion

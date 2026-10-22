@@ -809,19 +809,53 @@ export CHECKER_LOGDIR CHECKER_PROG CHECKER_REFUSING CHECKER_NOTE
 # runs must not inherit it.
 # shellcheck disable=SC2034  # read by run_checker, from scripts/run-checker.sh
 CHECKER_REPO_GUARD=1
-# Each run_checker gate's wall-clock, one row per call, for the summary this
-# hook ends with: where a push's minutes went. One file per run, removed once
-# summarised; one left by a refused push is swept a day later. Unset first,
-# then set without exporting, like the guard above: a boot test running this
-# hook exports its own, and the suites run here must not add their gates' rows
-# to this one.
-hook_started=$(date +%s 2>/dev/null)
-find "$CHECKER_LOGDIR" -maxdepth 1 -name 'pre-push-gate-timing.*.tsv' -mmin +1440 \
+# Each run_checker gate's wall-clock, one row per call: where a push's minutes
+# went. Summarised as the hook exits, refused or not, and kept a month so that
+# `scripts/gate-cost-report.py --push` can total pushes across lanes. Unset
+# first, then set without exporting, like the guard above: a boot test running
+# this hook exports its own, and the suites run here must not add their gates'
+# rows to this one.
+# shellcheck disable=SC3028  # bash's clock where there is one; `date` where not
+hook_started=${EPOCHSECONDS:-$(date +%s 2>/dev/null)}
+find "$CHECKER_LOGDIR" -maxdepth 1 -name 'pre-push-gate-timing.*.tsv' -mtime +30 \
     -exec rm -f {} + 2>/dev/null
 unset CHECKER_TIMING_LOG
-# shellcheck disable=SC2034  # read by run_checker, from scripts/run-checker.sh
 CHECKER_TIMING_LOG="$CHECKER_LOGDIR/pre-push-gate-timing.$$.tsv"
 : >"$CHECKER_TIMING_LOG" 2>/dev/null || CHECKER_TIMING_LOG=""
+
+# The push's time, and its slowest timed gates. Only gates run through
+# run_checker are timed -- the tooling suites among them -- so the difference
+# between the two totals is the work done in shell here: rustfmt, the git calls
+# that scope each gate, and the rest.
+print_gate_timing() {
+    [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -f "$CHECKER_TIMING_LOG" ] || return 0
+    _gt_tab=$(printf '\t')
+    # shellcheck disable=SC3028  # bash's clock where there is one; `date` where not
+    _gt_now=${EPOCHSECONDS:-$(date +%s 2>/dev/null)}
+    _gt_total="?"
+    if [ -n "$hook_started" ] && [ -n "$_gt_now" ]; then
+        _gt_total=$((_gt_now - hook_started))
+    fi
+    if [ ! -s "$CHECKER_TIMING_LOG" ]; then
+        echo "pre-push: ${_gt_total}s in all; no gate ran through run_checker." >&2
+        return 0
+    fi
+    _gt_n=$(wc -l <"$CHECKER_TIMING_LOG" | tr -d ' ')
+    _gt_sum=$(awk -F'\t' '{s += $2} END {print s + 0}' "$CHECKER_TIMING_LOG")
+    echo "pre-push: ${_gt_total}s in all, ${_gt_sum}s of it in $_gt_n timed gate(s); the slowest:" >&2
+    sort -t"$_gt_tab" -k2,2nr "$CHECKER_TIMING_LOG" | head -8 |
+        while IFS="$_gt_tab" read -r _gt_label _gt_secs _gt_rc; do
+            case "$_gt_rc" in
+            0) _gt_note="" ;;
+            *) _gt_note="  (exit $_gt_rc)" ;;
+            esac
+            printf '  %6ss  %s%s\n' "$_gt_secs" "$_gt_label" "$_gt_note" >&2
+        done
+    return 0
+}
+# On every exit, so that a refused push -- often the costliest -- says where its
+# time went too. A trap does not change the status the hook exits with.
+trap print_gate_timing EXIT
 
 # The one implementation of "did that checker reach a verdict?", shared with
 # scripts/boot-test.sh. It lived here first, and was moved out the day the same
@@ -7308,32 +7342,5 @@ print_gate_tally() {
     return 0
 }
 print_gate_tally
-
-# The push's time, and the slowest gates in it. Only gates run through
-# run_checker are timed; those run in shell here (rustfmt, shellcheck, the
-# tooling-suite loop) are in the difference between the two totals.
-print_gate_timing() {
-    [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -f "$CHECKER_TIMING_LOG" ] || return 0
-    _gt_tab=$(printf '\t')
-    _gt_now=$(date +%s 2>/dev/null)
-    _gt_total="?"
-    if [ -n "$hook_started" ] && [ -n "$_gt_now" ]; then
-        _gt_total=$((_gt_now - hook_started))
-    fi
-    _gt_n=$(wc -l <"$CHECKER_TIMING_LOG" | tr -d ' ')
-    _gt_sum=$(awk -F'\t' '{s += $2} END {print s + 0}' "$CHECKER_TIMING_LOG")
-    echo "pre-push: ${_gt_total}s in all, ${_gt_sum}s of it in $_gt_n timed gate(s); the slowest:" >&2
-    sort -t"$_gt_tab" -k2,2nr "$CHECKER_TIMING_LOG" | head -8 |
-        while IFS="$_gt_tab" read -r _gt_label _gt_secs _gt_rc; do
-            case "$_gt_rc" in
-            0) _gt_note="" ;;
-            *) _gt_note="  (exit $_gt_rc)" ;;
-            esac
-            printf '  %6ss  %s%s\n' "$_gt_secs" "$_gt_label" "$_gt_note" >&2
-        done
-    rm -f "$CHECKER_TIMING_LOG"
-    return 0
-}
-print_gate_timing
 
 exit 0

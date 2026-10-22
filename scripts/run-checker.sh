@@ -212,9 +212,10 @@
 #                     The hook uses it to say why the gate's bypass is the wrong
 #                     reaction; boot-test has no bypass and leaves it unset.
 #   CHECKER_TIMING_LOG  a file to append one `<label>\t<seconds>\t<exit>` row to
-#                     per gate, or empty to record nothing. Unset by default, so
-#                     a caller that has not asked for it -- the pre-push hook --
-#                     is byte-for-byte unaffected, not even paying two `date`s.
+#                     per gate, or empty to record nothing. The boot test and
+#                     the pre-push hook both set it; a caller that does not
+#                     records nothing. The clock is bash's $EPOCHSECONDS, so a
+#                     timed gate costs no fork, with `date` where a shell lacks it.
 #
 # ## Why the gates are worth timing at all
 #
@@ -374,7 +375,8 @@ run_checker() {
     # Wall-clock is sampled around the child and recorded before anything is
     # decided about it -- see the block below on why the write cannot wait.
     _rc_t0=
-    [ -n "${CHECKER_TIMING_LOG:-}" ] && _rc_t0=$(date +%s 2>/dev/null)
+    # shellcheck disable=SC3028  # bash's clock where there is one; `date` where not
+    [ -n "${CHECKER_TIMING_LOG:-}" ] && _rc_t0=${EPOCHSECONDS:-$(date +%s 2>/dev/null)}
 
     _rc_before=
     if [ -n "${CHECKER_REPO_GUARD:-}" ]; then _rc_before=$(_rc_repo_state); fi
@@ -440,7 +442,8 @@ run_checker() {
     # `>>` on a line under PIPE_BUF is atomic on every platform this runs on, so
     # concurrent lanes appending to one file interleave rows but never bytes.
     if [ -n "${CHECKER_TIMING_LOG:-}" ] && [ -n "$_rc_t0" ]; then
-        _rc_t1=$(date +%s 2>/dev/null)
+        # shellcheck disable=SC3028  # bash's clock where there is one; `date` where not
+        _rc_t1=${EPOCHSECONDS:-$(date +%s 2>/dev/null)}
         # A clock that failed to read leaves the field empty rather than
         # inventing a 0 -- a gate that appears to have taken no time is a claim,
         # and this is not in a position to make it.

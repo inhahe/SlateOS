@@ -271,6 +271,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/id-diff.sh` | id-diff.sh — compare our `id` and `groups` against GNU's, inside WSL. |
 | `scripts/install-diff.sh` | Differential test: our `install` against GNU coreutils 9.4's. |
 | `scripts/install-hooks.sh` | Install this repo's git hooks into the shared .git dir, as trampolines. |
+| `scripts/integration-tree-sync.py` | Keep the integration tree on `main` from a scheduled task, with no lane running. |
 | `scripts/interleave-diff.sh` | interleave-diff.sh — one question, asked of every utility that answers it: |
 | `scripts/join-diff.sh` | Differential test: our join against GNU join. |
 | `scripts/join-probe.py` | Ad-hoc measurement of GNU `join`. Not part of the build; kept only so the |
@@ -605,4 +606,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_595 scripts._
+_596 scripts._

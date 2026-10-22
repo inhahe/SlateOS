@@ -491,6 +491,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "hang-repro-loop.sh",
         "hostload.py",
         "install-hooks.sh",
+        "integration-tree-sync.py",
         "kasan-build.sh",
         "kasan-check-preshadow.py",
         "ki_split.py",

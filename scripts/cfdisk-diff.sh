@@ -24,7 +24,7 @@ set -u
 
 DIFF_PROG='cfdisk'
 DIFF_PKG='cfdisk'
-DIFF_NEED='timeout sfdisk python3'
+DIFF_NEED='timeout sfdisk python3 mkfs.ext4 unshare'
 # Every case types its keys a step at a time, each after a pause for the
 # program to go quiet, on both sides.
 DIFF_TIMEOUT=${DIFF_TIMEOUT:-3600}
@@ -57,6 +57,18 @@ table gaps.img 64 'label: dos\nlabel-id: 0x0a0b0c0d\n10240,4096,83\n2048,4096,83
 table odd.img 64 'label: dos\nlabel-id: 0x0d0d0d0d\n2048,4096,83\n10000,4096,83\n'
 # A device its user may read and not write: each side's copy keeps the mode.
 cp "$fx/dos.img" "$fx/ro.img" && chmod 444 "$fx/ro.img"
+# gpt.img with an ext4 filesystem in its second partition (9 MiB in), and
+# fstabs naming that partition: by the filesystem's UUID and by the
+# partition's, and by the partition's alone -- for the details box's mount
+# point.
+cp "$fx/gpt.img" "$fx/gptfs.img"
+truncate -s 16M "$fx/p2.fs"
+mkfs.ext4 -q -F -U 77777777-6666-4555-8444-333333333333 -L fslabel "$fx/p2.fs" >/dev/null 2>&1 \
+  && dd if="$fx/p2.fs" of="$fx/gptfs.img" bs=1M seek=9 conv=notrunc status=none \
+  || { echo "cfdisk-diff: fixture gptfs.img could not be made" >&2; exit 2; }
+printf 'UUID=77777777-6666-4555-8444-333333333333 /fs ext4 defaults 0 2\nPARTUUID=11234567-89AB-4CDE-8F01-23456789ABCD /part ext4 defaults 0 2\n' \
+  > "$fx/fstab"
+printf 'PARTUUID=11234567-89AB-4CDE-8F01-23456789ABCD /part ext4 defaults 0 2\n' > "$fx/fstab-part"
 table full.img 16 'label: dos\nlabel-id: 0x01020304\n,4M\n,4M\n,4M\n,,\n'
 # More partitions than the screen has lines for the table: it pages.
 many='label: gpt\nlabel-id: 5A6F7B1C-1111-4222-8333-944455566677\n'
@@ -98,7 +110,7 @@ PY
 run_side() {
   local side=$1 src=$2 steps=$3; shift 3
   local d=$DIFF_TMP/run-$side size=${CF_SIZE:-24x80}
-  local thens=() step
+  local thens=() step pre=()
   rm -rf "$d"; mkdir -p "$d"
   [ -n "$src" ] && cp "$fx/$src" "$d/img"
   if [ -n "$steps" ]; then
@@ -107,7 +119,13 @@ run_side() {
       thens+=(--then "$step")
     done
   fi
-  (cd "$d" && env -i PATH="$bindir/$side" TERM="${CF_TERM:-xterm-256color}" \
+  # CF_FSTAB=FILE: the run sees FILE as /etc/fstab, in a private user and
+  # mount namespace -- no root needed, and the host's fstab untouched.
+  if [ -n "${CF_FSTAB:-}" ]; then
+    pre=(/usr/bin/unshare -mUr /bin/sh -c \
+      'mount --bind "$1" /etc/fstab || exit 125; shift; exec "$@"' _ "$CF_FSTAB")
+  fi
+  (cd "$d" && "${pre[@]}" env -i PATH="$bindir/$side" TERM="${CF_TERM:-xterm-256color}" \
     LC_ALL="${CF_LOC:-C.UTF-8}" HOME="$d" \
     /usr/bin/timeout -k 2 60 /usr/bin/python3 "$root/scripts/curses-ptyrun.py" "${thens[@]}" \
     "${size%x*}" "${size#*x}" "$d/out" "$d/err" cfdisk "$@" < /dev/null)
@@ -270,6 +288,17 @@ c dos.img "keys:t|keys:\eOF|keys:\e|$QUIT"
 # a partition's line, to its first -- not wrapped round to the last.
 c dos.img "$RIGHT|$LEFT|$QUIT"
 c dos.img "keys:\eOD\eOD\eOD|$QUIT"
+# The details box's mount point: by the filesystem's UUID first, and by the
+# partition's only when that finds none.
+CF_FSTAB=$fx/fstab c gptfs.img "$DOWN|$QUIT"
+CF_FSTAB=$fx/fstab-part c gptfs.img "$DOWN|$QUIT"
+# A terminal too narrow for the table: the Type column is the one cut.
+CF_SIZE=24x50 c gpt.img "$QUIT"
+CF_SIZE=24x50 c dos.img "$QUIT"
+# The first page's last row, then the whole screen redrawn (Ctrl-L): the
+# table's own arrows to the next page are drawn last, without the
+# cursor's reverse video.
+c many.img "keys:\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB|keys:\x0c|$QUIT"
 # Home after paging down the table: its first line, not a page up.
 c many.img "keys:\e[6~|keys:\e[6~|keys:\eOH|$QUIT"
 # SIGTERM and SIGINT end it, as its handlers for them do.

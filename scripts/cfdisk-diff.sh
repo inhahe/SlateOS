@@ -266,6 +266,11 @@ c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f512\r|$ENTER|$QUIT"
 c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f100\r|keys:\e|$QUIT"
 # The type menu's last page, reached with End: no arrow for a page after it.
 c dos.img "keys:t|keys:\eOF|keys:\e|$QUIT"
+# Home in the paged type menu goes to the first item, not a page up.
+c dos.img "keys:t|keys:\eOF|keys:\eOH|$ENTER|$QUIT"
+# A size over the free space by exactly its suffix's unit is refused, not
+# taken for all of it: 3M in gaps.img's gap of exactly 2 MiB.
+c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f3M\r|keys:\e|$QUIT"
 # The box of the current partition's details needs three free lines under
 # the table: dos.img's leaves two, three and four on these screens.
 for s in 17x80 18x80 19x80; do

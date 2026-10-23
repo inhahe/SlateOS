@@ -248,8 +248,9 @@ c ro.img "keys:W|$QUIT"
 # A dialog's text ended by Ctrl-J or the keypad's Enter, as by Return.
 c gpt.img "keys:u|keys:abc\n|$QUIT"
 c gpt.img "keys:u|keys:abd\eOM|$QUIT"
-# A size in sectors is kept exactly, not aligned: 3000 sectors, more than
-# the 1 MiB grain below which nothing is aligned anyway, written.
+# A size in sectors above the 1 MiB grain, written: aligned like any other,
+# since upstream marks the free space, not the new partition, as sized
+# explicitly.
 c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f3000S\r|$ENTER|keys:W|keys:yes\r|$QUIT"
 # The primary-or-extended menu takes only Enter: x there is nothing, so
 # Down then picks extended.

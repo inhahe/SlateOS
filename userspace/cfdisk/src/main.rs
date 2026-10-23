@@ -1793,19 +1793,16 @@ impl Cfdisk {
     /// `ui_get_size (cf, prompt, &res, low, up, &expsize)`: a size asked
     /// for, in bytes, between `low` and `up`; `ERR_ESC` when the
     /// dialog was left.
-    fn get_size(
-        &mut self,
-        prompt: &[u8],
-        res: &mut u64,
-        low: u64,
-        up: u64,
-        expsize: Option<&mut bool>,
-    ) -> isize {
+    ///
+    /// Upstream also reports whether the size was given in sectors
+    /// (`expsize`), and its one caller then marks the free space -- not the
+    /// new partition -- as sized explicitly, which nothing reads; so the
+    /// report changes nothing, and is not kept.
+    fn get_size(&mut self, prompt: &[u8], res: &mut u64, low: u64, up: u64) -> isize {
         let mut user = 0u64;
         let dflt = ulstrutils::size_to_human_string(0, *res).into_bytes();
         self.ui.borrow().clean_info();
         let mut buf = dflt.clone();
-        let mut expsize = expsize;
         let mut rc: isize;
         loop {
             let mut pwr = 0i32;
@@ -1871,12 +1868,6 @@ impl Cfdisk {
                         .borrow()
                         .warnx(format!("Maximum size is {up} bytes.").as_bytes());
                     rc = neg(libcall::ERANGE);
-                }
-                if rc == 0
-                    && insec
-                    && let Some(e) = expsize.as_deref_mut()
-                {
-                    *e = true;
                 }
             } else {
                 self.ui.borrow().warnx(b"Failed to parse size.");
@@ -2224,15 +2215,7 @@ impl Cfdisk {
                 let ss = self.cxt.get_sector_size();
                 let mut size = pa.get_size().wrapping_mul(ss);
                 let (max_size, dflt_size) = (size, size);
-                let mut expsize = false;
-                if self.get_size(
-                    b"Partition size: ",
-                    &mut size,
-                    ss,
-                    max_size,
-                    Some(&mut expsize),
-                ) != ERR_ESC
-                {
+                if self.get_size(b"Partition size: ", &mut size, ss, max_size) != ERR_ESC {
                     let secs = size.checked_div(ss).unwrap_or(0);
                     let mut npa = Partition::new();
                     if dflt_size == size {
@@ -2241,9 +2224,6 @@ impl Cfdisk {
                     } else {
                         npa.set_size(secs);
                     }
-                    // Upstream marks the free space, not the new partition,
-                    // as sized explicitly: `fdisk_partition_size_explicit
-                    // (pa, 1)` -- which nothing reads afterwards.
                     npa.set_start(start);
                     npa.set_partno_follow_default(true);
                     // "add to disk label -- libfdisk will ask for missing
@@ -2287,7 +2267,7 @@ impl Cfdisk {
                 let ss = self.cxt.get_sector_size();
                 size = size.wrapping_mul(ss);
                 let max_size = size;
-                if self.get_size(b"New size: ", &mut size, ss, max_size, None) != ERR_ESC {
+                if self.get_size(b"New size: ", &mut size, ss, max_size) != ERR_ESC {
                     let secs = size.checked_div(ss).unwrap_or(0);
                     let mut npa = Partition::new();
                     npa.set_size(secs);

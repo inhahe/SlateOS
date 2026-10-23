@@ -52,6 +52,9 @@ blank empty.img 64
 table dos.img 64 'label: dos\nlabel-id: 0x12345678\n,8M,83\n,8M,82,*\n,16M,5\n,4M,83\n,,8e\n'
 table gpt.img 64 'label: gpt\nlabel-id: 4A6F7B1C-1111-4222-8333-944455566677\nsize=8M, type=L, uuid=01234567-89AB-4CDE-8F01-23456789ABCD, name="first"\nsize=16M, type=S, uuid=11234567-89AB-4CDE-8F01-23456789ABCD\n'
 table gaps.img 64 'label: dos\nlabel-id: 0x0a0b0c0d\n10240,4096,83\n2048,4096,83\n'
+# In disk order, a partition between two free spaces, and a gap that is no
+# whole number of MiB (6144 to 9999).
+table odd.img 64 'label: dos\nlabel-id: 0x0d0d0d0d\n2048,4096,83\n10000,4096,83\n'
 table full.img 16 'label: dos\nlabel-id: 0x01020304\n,4M\n,4M\n,4M\n,,\n'
 # More partitions than the screen has lines for the table: it pages.
 many='label: gpt\nlabel-id: 5A6F7B1C-1111-4222-8333-944455566677\n'
@@ -223,6 +226,14 @@ c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f2048S\r|$ENTER|keys:
 # A size in sectors past the free space: refused, the prompt comes back
 # without its S, and Enter there means bytes.
 c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f999999999S\r|$ENTER|keys:\e|$QUIT"
+# A size with a suffix that rounds past the free space, by less than the
+# suffix's unit, is all of it (2M in 1.88 MiB).
+c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f2M\r|$ENTER|$QUIT"
+# Deleting the partition between two free spaces leaves two lines fewer,
+# and the cursor past the last: it moves to the last.
+c odd.img "$DOWN|$DOWN|keys:d|$QUIT"
+# A dialog's text edited: Left over several characters, Home, End.
+c gpt.img "keys:u|keys:abcd\eOD\eODX\eOHY\eOFZ\r|$QUIT"
 
 # --- writing, or not -------------------------------------------------------------
 c dos.img "keys:d|keys:W|keys:no\r|$QUIT"

@@ -59326,7 +59326,7 @@ is still run by hand, not by `boot-test.sh`.
   only HDR; the player's fixtures unchanged for fully described and
   untagged video.
 
-## Lane B — batch 8's mutant replay, paused (2026-10-21)
+## Lane B — batch 8's mutant replay, paused (2026-10-21), resumed with batch 7's (2026-10-22)
 
 - **The 693 mutants batch 8's review left alive, replayed through the WSL
   harnesses** (the follow-up `66edc8394`'s message promises it). Paused at the
@@ -59348,3 +59348,11 @@ is still run by hand, not by `boot-test.sh`.
   `stale`). **Then:** for each `missed`, a harness case that catches it, or
   the reason the change cannot matter, in a commit; delete the worktree and
   its WSL build cache (`~/.cache/slateos-diff-target/os-lane-b-mut-*`).
+- **Resumed 2026-10-22, the operator having said a day or more of machine load
+  is fine** ("16 cores ... time doesn't matter"). One job, one package after
+  another, in `os-lane-b-mut` at `cfe4b3d16`: first batch 7's never-replayed
+  survivors (`.git/reviews/20261017T082013-b8042d2bea05-mutants/`: 70 in
+  fdisk through `fdisk-diff.sh` and `sfdisk-diff.sh`, 2 in coreutils through
+  `patch-diff.sh`, `rm-diff.sh` and `mv-diff.sh`), then batch 8's cfdisk and
+  curses as above. The job script is `target/drafts/replay-all.sh` in
+  `os-lane-b`; rerunning it carries on from each `replay.txt`.

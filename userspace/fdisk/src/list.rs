@@ -115,13 +115,22 @@ fn list_units(cxt: &mut Context) {
 }
 
 /// A table of `columns` -- name, width hint and flags each -- made for
-/// printing: its header coloured as upstream colours it (not yet: the
-/// `smartcols` port draws no colour, see known-issues
-/// `TD-B-SMARTCOLS-DRAWS-NO-COLOUR`).
-fn new_table(columns: &[(&[u8], f64, u32)]) -> smartcols::Table {
+/// printing: when colours are wanted, coloured, each column's header in
+/// the scheme's `header` colour (bold unless the scheme says otherwise).
+fn new_table(term: &Term, columns: &[(&[u8], f64, u32)]) -> smartcols::Table {
     let mut out = smartcols::Table::new();
+    let header = if term.colors_wanted() {
+        out.enable_colors(true);
+        term.color_scheme_get_sequence(b"header", ulcolors::BOLD)
+    } else {
+        None
+    };
     for &(name, whint, flags) in columns {
-        out.new_column(name, whint, flags);
+        let co = out.new_column(name, whint, flags);
+        if let Some(seq) = &header {
+            // A column this table just made: nothing to refuse.
+            let _ = out.column_header_set_color(co, Some(seq));
+        }
     }
     out
 }
@@ -168,7 +177,7 @@ pub fn list_disklabel(cxt: &mut Context, term: &Term, fields: &Fields) {
         }
         cols.push((field.get_name().as_bytes(), field.get_width(), fl));
     }
-    let mut out = new_table(&cols);
+    let mut out = new_table(term, &cols);
 
     for pa in tb.iter_mut() {
         let Ok(ln) = out.new_line(None) else {
@@ -250,7 +259,7 @@ pub fn list_freespace(cxt: &mut Context, term: &Term) {
         .iter()
         .map(|&(name, _)| (name, 5.0, FL_RIGHT))
         .collect();
-    let mut out = new_table(&cols);
+    let mut out = new_table(term, &cols);
 
     let mut sumsize: u64 = 0;
     for pa in tb.iter_mut() {
@@ -311,15 +320,9 @@ pub fn proc_partitions(short: &[u8]) -> Vec<Vec<u8>> {
     let mut devs = Vec::new();
     for line in std::io::BufReader::new(f).split(b'\n') {
         let Ok(line) = line else { break };
-        // " %*d %*d %*d %128[^\n ]"
-        let mut words = line
-            .split(|&c| c == b' ' || c == b'\t')
-            .filter(|w| !w.is_empty());
-        let numbers = words.by_ref().take(3).filter(|w| is_int(w)).count();
-        let Some(name) = words.next().filter(|_| numbers == 3) else {
+        let Some(name) = proc_partition_name(&line) else {
             continue;
         };
-        let name = name.get(..name.len().min(128)).unwrap_or(name);
         let devno = ulsysfs::devname_to_devno(name);
         if devno == 0 {
             continue;
@@ -339,6 +342,19 @@ pub fn proc_partitions(short: &[u8]) -> Vec<Vec<u8>> {
         }
     }
     devs
+}
+
+/// `sscanf (line, " %*d %*d %*d %128[^\n ]", buf) == 1`: the name a
+/// `/proc/partitions` line gives after its three numbers -- none for the
+/// file's header, a blank line, or a line without the three -- cut to 128
+/// bytes, as upstream reads it.
+fn proc_partition_name(line: &[u8]) -> Option<&[u8]> {
+    let mut words = line
+        .split(|&c| c == b' ' || c == b'\t')
+        .filter(|w| !w.is_empty());
+    let numbers = words.by_ref().take(3).filter(|w| is_int(w)).count();
+    let name = words.next().filter(|_| numbers == 3)?;
+    Some(name.get(..name.len().min(128)).unwrap_or(name))
 }
 
 /// Whether `w` is what `%d` reads whole: an optional sign and digits.
@@ -541,4 +557,29 @@ pub fn init_fields(cxt: &Context, term: &Term, fields: &Fields) -> Option<Vec<i3
         }
     }
     Some(ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::proc_partition_name;
+
+    #[test]
+    fn a_proc_partitions_line_names_its_device_after_three_numbers() {
+        assert_eq!(proc_partition_name(b"major minor  #blocks  name"), None);
+        assert_eq!(proc_partition_name(b""), None);
+        assert_eq!(
+            proc_partition_name(b"   8        0  104857600 sda"),
+            Some(&b"sda"[..])
+        );
+        assert_eq!(
+            proc_partition_name(b"\t259\t1\t1024\tnvme0n1p1"),
+            Some(&b"nvme0n1p1"[..])
+        );
+        assert_eq!(proc_partition_name(b" 8 0 x sda"), None);
+        assert_eq!(proc_partition_name(b" 8 0 1"), None);
+        let long = [b'a'; 200];
+        let mut line = b" 1 2 3 ".to_vec();
+        line.extend_from_slice(&long);
+        assert_eq!(proc_partition_name(&line).map(<[u8]>::len), Some(128));
+    }
 }

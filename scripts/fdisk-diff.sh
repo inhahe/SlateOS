@@ -20,7 +20,7 @@ set -u
 
 DIFF_PROG='fdisk'
 DIFF_PKG='fdisk'
-DIFF_NEED='timeout sfdisk python3'
+DIFF_NEED='timeout sfdisk python3 mkfs.ext4'
 # shellcheck source=diff-wsl.sh
 . "$(dirname "$0")/diff-wsl.sh"
 
@@ -48,6 +48,26 @@ table full.img 16 'label: dos\nlabel-id: 0x01020304\n,4M\n,4M\n,4M\n,,\n'
 table hybrid.img 64 'label: gpt\n,8M,L\n'
 printf 'label: dos\nunit: sectors\n,10M,83\n,,82,*\n' > "$fx/load.sfdisk"
 printf 'label: dos\n,10M,nosuchtype\n,,83,x\n' > "$fx/bad.sfdisk"
+# A script that reads, and cannot be applied: its partition is larger than
+# any of the images.
+printf 'label: dos\n,100G,83\n' > "$fx/big.sfdisk"
+table sun.img 64 'label: sun\n,8M\n,8M\n'
+table sgi.img 64 'label: sgi\n,8M\n,8M\n'
+# dos.img with boot code in front of its table, for -B.
+cp "$fx/dos.img" "$fx/boot.img"
+python3 - "$fx/boot.img" <<'PY'
+import sys
+with open(sys.argv[1], "r+b") as f:
+    f.write(bytes((i * 7 + 1) & 0xFF for i in range(440)))
+PY
+# An empty DOS table, and an ext4 filesystem 1 MiB in, where a new first
+# partition starts: fdisk finds its signature and asks, or does not, before
+# removing it.
+table sig.img 64 'label: dos\nlabel-id: 0x5a5a5a5a\n'
+truncate -s 8M "$fx/sig.fs"
+mkfs.ext4 -q -F -U 99999999-8888-4777-8666-555555555555 "$fx/sig.fs" >/dev/null 2>&1 \
+  && dd if="$fx/sig.fs" of="$fx/sig.img" bs=1M seek=1 conv=notrunc status=none \
+  || { echo "fdisk-diff: fixture sig.img could not be made" >&2; exit 2; }
 
 # mask FILE...: a new table's random identifiers.
 mask() {
@@ -66,8 +86,13 @@ state() {
   echo '-- first sector'
   python3 - "$img" <<'PY'
 import sys
-b = open(sys.argv[1], "rb").read(512)
-print((b[:440] + b"\0\0\0\0" + b[444:]).hex())
+with open(sys.argv[1], "rb") as f:
+    b = f.read(512)
+    print((b[:440] + b"\0\0\0\0" + b[444:]).hex())
+    # An ext4 superblock's magic, 1 MiB in: whether a signature fdisk was
+    # told to remove is gone.
+    f.seek(1048576 + 1024 + 56)
+    print("-- ext4 magic 1 MiB in:", f.read(2).hex())
 PY
   # What `O` wrote.
   if [ -f "$DIFF_TMP/run-$1/script" ]; then
@@ -118,6 +143,55 @@ d() { local src=$1 input=$2; shift 2; compare "$src" "$input" "$@" img; }
 # l FIXTURE ARGS...: a listing of `img`, no dialog.
 l() { local src=$1; shift; compare "$src" "" "$@" img; }
 
+# outcome LABEL: the two sides' transcripts, $DIFF_TMP/{o,g}.all, compared.
+outcome() {
+  mask "$DIFF_TMP/o.all" "$DIFF_TMP/g.all"
+  if cmp -s "$DIFF_TMP/o.all" "$DIFF_TMP/g.all"; then
+    pass=$((pass + 1))
+    [ -n "${VERBOSE:-}" ] && printf 'OK   %s\n' "$1"
+  else
+    fail=$((fail + 1))
+    printf 'DIFF %s\n' "$1"
+    diff -u --label gnu --label ours "$DIFF_TMP/g.all" "$DIFF_TMP/o.all" | sed -n '3,30p' | sed 's/^/  /'
+    if [ -n "${DIFF_FAIL_FAST:-}" ]; then exit 1; fi
+  fi
+}
+
+# t FIXTURE STEPS [ARGS...]: the dialog on `img` on a terminal of its own
+# (scripts/curses-ptyrun.py, STEPS its `|`-separated actions), for what
+# fdisk does only there: the question before quitting with changes not
+# written, and the one before removing a signature. Upstream reads a
+# terminal through GNU readline and the port does not (known-issues
+# TD-B-FDISK-HAS-NO-READLINE), so what the terminal was sent is not
+# compared -- standard error, the exit status and the image left are.
+tty_side() {
+  local side=$1 src=$2 steps=$3; shift 3
+  local d=$DIFF_TMP/run-$side thens=() step parts
+  rm -rf "$d"; mkdir -p "$d"
+  [ -n "$src" ] && cp "$fx/$src" "$d/img"
+  IFS='|' read -r -a parts <<< "$steps"
+  for step in "${parts[@]}"; do thens+=(--then "$step"); done
+  (cd "$d" && env LC_ALL=C.UTF-8 TERM=dumb PATH="$bindir/$side" \
+    /usr/bin/timeout -k 2 60 /usr/bin/python3 "$root/scripts/curses-ptyrun.py" \
+    "${thens[@]}" 24 80 "$d/tty" "$d/err" fdisk "$@" img < /dev/null)
+  local rc=$?
+  [ "$rc" = 0 ] || echo "runner $rc" >> "$d/err"
+}
+t() {
+  local src=$1 steps=$2; shift 2
+  tty_side ours "$src" "$steps" "$@"
+  { cat "$DIFF_TMP/run-ours/err"; state ours; } > "$DIFF_TMP/o.all"
+  tty_side gnu "$src" "$steps" "$@"
+  { cat "$DIFF_TMP/run-gnu/err"; state gnu; } > "$DIFF_TMP/g.all"
+  # Every case ends by leaving: Ubuntu's fdisk still running at the time
+  # limit is a case that tests nothing past where it stuck.
+  if ! [ -s "$DIFF_TMP/run-gnu/err" ] || grep -q '^runner ' "$DIFF_TMP/run-gnu/err"; then
+    echo "fdisk-diff: Ubuntu's fdisk did not finish on a terminal: $src $steps $*" >&2
+    exit 2
+  fi
+  outcome "$(printf '[%s] fdisk %s img, on a terminal <<< %q' "$src" "$*" "$steps")"
+}
+
 # --- options, usage and refusals -----------------------------------------------
 compare "" "" -h
 compare "" "" --help
@@ -154,6 +228,13 @@ l dos.img -l -t gpt
 l dos.img -l -C 100 -H 16 -S 63
 l dos.img -s
 compare "" "" -l img img2
+l dos.img -l --color=always
+l gpt.img -x --color=always
+l dos.img -l --lock
+l dos.img -l --lock=no
+l sun.img -l
+l sgi.img -l
+
 
 # --- the dialog: help, printing, units, leaving ------------------------------------
 d dos.img 'm\nq\n'
@@ -174,6 +255,12 @@ d dos.img 'l\nq\n'
 d gpt.img 'l\nq\n'
 d dos.img 'x\nd\nD\nq\n'
 d gpt.img 'x\nD\nq\n'
+d dos.img 'm\np\nq\n' --color=always
+d dos.img 'p\nq\n' --lock=nonblock
+d dos.img 'p\nq\n' --lock=bogus
+# On a terminal: quitting with a change not written asks first.
+t dos.img 'keys:d\r|keys:1\r|keys:q\r|keys:y\r'
+t dos.img 'keys:d\r|keys:1\r|keys:q\r|keys:n\r|keys:q\r|keys:y\r'
 
 # --- new tables -----------------------------------------------------------------
 d empty.img 'p\nw\n'
@@ -185,6 +272,10 @@ d empty.img 's\n\n\n\np\nw\n'
 d empty.img 's\n16\n63\n\np\nw\n'
 d empty.img 'G\np\nw\n'
 d empty.img 'n\np\nq\n' -n
+# -B keeps the boot code in front of the table a new label replaces.
+d boot.img 'o\nw\n' -B
+d boot.img 'o\nw\n'
+d boot.img 'g\nw\n' -B
 
 # --- MBR partitions -------------------------------------------------------------
 d empty.img 'o\nn\np\n1\n\n+10M\nn\np\n2\n\n+5M\nn\ne\n3\n\n\nn\n\n+2M\nn\n\n\np\nw\n'
@@ -206,6 +297,27 @@ d dos.img 'x\ni\n0xdeadbeef\nr\np\nw\n'
 d dos.img 'x\nb\n1\n4096\nr\nw\n'
 d dos.img 'x\nF\nr\nq\n'
 d dos.img 'x\nf\nr\nw\n'
+d dos.img 'x\nc\n100\nh\n16\ns\n32\np\nr\np\nq\n'
+# An absolute last sector, not a +size.
+d empty.img 'o\nn\np\n1\n\n8191\nw\n'
+d empty.img 'g\nn\n1\n\n10239\nw\n'
+# A letter where a partition number is asked: a number only where the
+# partitions are letters (BSD).
+d dos.img 'd\nb\n1\np\nq\n'
+# A new partition over a filesystem: without a terminal fdisk only says so,
+# unless told to remove it (-W always); on one it asks.
+d sig.img 'n\np\n1\n\n+8M\np\nw\n'
+d sig.img 'n\np\n1\n\n+8M\np\nw\n' -W always
+d sig.img 'n\np\n1\n\n+8M\np\nw\n' -W never
+t sig.img 'keys:n\r|keys:p\r|keys:1\r|keys:\r|keys:+8M\r|keys:y\r|keys:w\r'
+t sig.img 'keys:n\r|keys:p\r|keys:1\r|keys:\r|keys:+8M\r|keys:n\r|keys:w\r'
+
+# --- Sun and SGI ----------------------------------------------------------------
+d sun.img 'm\nq\n'
+d sun.img 'a\n1\nc\n2\np\nw\n'
+d sun.img 'x\na\n2\ne\n3\ni\n2\no\n7200\ny\n1000\nh\n32\nr\np\nw\n'
+d sgi.img 'm\nq\n'
+d sgi.img 'a\n1\nc\n2\nb\n/boot/unix\ni\np\nw\n'
 
 # --- GPT partitions -------------------------------------------------------------
 d empty.img 'g\nn\n1\n\n+5M\nn\n\n\n+10M\nn\n\n\n\nt\n2\n19\np\nw\n'
@@ -234,6 +346,7 @@ d dos.img 'O\nscript\nq\n'
 d empty.img 'I\nnosuchfile\nq\n'
 d empty.img 'I\n../fx/load.sfdisk\np\nw\n'
 d empty.img 'I\n../fx/bad.sfdisk\np\nq\n'
+d dos.img 'I\n../fx/big.sfdisk\np\nq\n'
 
 printf '\nfdisk-diff: %d passed, %d differed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

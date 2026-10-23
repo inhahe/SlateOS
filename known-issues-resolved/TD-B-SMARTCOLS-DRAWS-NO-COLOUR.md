@@ -1,6 +1,14 @@
 ## TD-B-SMARTCOLS-DRAWS-NO-COLOUR (lane B, 2026-10-17)
 
-**Status:** OPEN
+**Status:** FIXED 2026-10-22 (lane B). `smartcols` writes cells' colours as
+libsmartcols 2.39.3 does: `Table::enable_colors`, a header cell's colour
+(`column_header_set_color`, a sequence or a colour's name), and the printer's
+`fputs_color_cell_open`/`_close` and line open/close around each cell --
+after the width calculation, which they do not touch. fdisk-list's two
+tables set their headers in the scheme's `header` colour when colours are
+wanted, so `fdisk` and `sfdisk` print them bold as Ubuntu's do
+(`fdisk-diff.sh`'s `--color=always` cases). Lines' and columns' own colours
+are not kept: nothing here sets one.
 
 **In short:** util-linux's table library colours what a program asks it to
 -- a column's header in bold, a cell in a colour of its own -- when the

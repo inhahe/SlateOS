@@ -59356,3 +59356,21 @@ is still run by hand, not by `boot-test.sh`.
   `patch-diff.sh`, `rm-diff.sh` and `mv-diff.sh`), then batch 8's cfdisk and
   curses as above. The job script is `target/drafts/replay-all.sh` in
   `os-lane-b`; rerunning it carries on from each `replay.txt`.
+- **Paused 2026-10-23 at the operator's word** (OS work paused until there
+  are three accounts again). Batch 7 is done: every survivor caught or
+  answered (`d95a06409`, `f04580d7d`). Batch 8's cfdisk: 337 of its 521
+  replayed (258 caught, 60 missed, 19 stale), and every miss through the
+  310th answered in the cfdisk-diff commits up to `75e6530cb` -- a case
+  that catches it (confirmed by `--again` replays, records `replay-2.txt`
+  and `replay-3.txt` beside `replay.txt`) or the reason it cannot matter,
+  in each commit's message. Not started: cfdisk's last 184, curses's 172.
+  **To resume:** both scratch worktrees are clean and kept --
+  `os-lane-b-mut` (at `cfe4b3d16`, the main replay's) and `os-lane-b-mut2`
+  (the `--again` replays', at the latest harness). Better to first move
+  `os-lane-b-mut` to the lane-b tip (`git -C ... checkout --detach <tip>`),
+  so the rest meet the current cfdisk-diff (99 cases) directly; then
+  `python scripts/mutants-replay.py --tree "C:/visual studio
+  projects/os-lane-b-mut" <record dir>/cfdisk scripts/cfdisk-diff.sh`,
+  then the same for `curses` with `scripts/curses-diff.sh`. When done,
+  delete both worktrees and their WSL caches
+  (`~/.cache/slateos-diff-target/os-lane-b-mut*`).

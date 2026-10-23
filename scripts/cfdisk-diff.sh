@@ -248,6 +248,10 @@ c ro.img "keys:W|$QUIT"
 # A dialog's text ended by Ctrl-J or the keypad's Enter, as by Return.
 c gpt.img "keys:u|keys:abc\n|$QUIT"
 c gpt.img "keys:u|keys:abd\eOM|$QUIT"
+# A size in sectors is kept exactly, not aligned: 1000 sectors, written.
+c gaps.img "$DOWN|$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f1000S\r|$ENTER|keys:W|keys:yes\r|$QUIT"
+# The primary-or-extended menu takes only Enter: q there is nothing.
+c odd.img "$DOWN|keys:n|keys:\r|keys:q|$ENTER|$QUIT"
 # The smallest size is one sector: 512 bytes is taken, 100 refused.
 c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f512\r|$ENTER|$QUIT"
 c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f100\r|keys:\e|$QUIT"

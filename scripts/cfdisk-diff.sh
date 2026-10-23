@@ -236,6 +236,19 @@ c odd.img "$DOWN|$DOWN|keys:d|$QUIT"
 # Left and Backspace over characters of more than one byte (é, €).
 c gpt.img "keys:u|keys:abcd\eOD\eODX\eOHY\eOFZ\r|$QUIT"
 c gpt.img "keys:u|keys:a\xc3\xa9\xe2\x82\xac\eODX\eOD\eOD\x7fY\r|$QUIT"
+# A dialog's text ended by Ctrl-J or the keypad's Enter, as by Return.
+c gpt.img "keys:u|keys:abc\n|$QUIT"
+c gpt.img "keys:u|keys:abd\eOM|$QUIT"
+# The smallest size is one sector: 512 bytes is taken, 100 refused.
+c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f512\r|$ENTER|$QUIT"
+c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f100\r|keys:\e|$QUIT"
+# The type menu's last page, reached with End: no arrow for a page after it.
+c dos.img "keys:t|keys:\eOF|keys:\e|$QUIT"
+# The box of the current partition's details needs three free lines under
+# the table: dos.img's leaves two, three and four on these screens.
+for s in 17x80 18x80 19x80; do
+  CF_SIZE=$s c dos.img "$QUIT"
+done
 
 # --- writing, or not -------------------------------------------------------------
 c dos.img "keys:d|keys:W|keys:no\r|$QUIT"

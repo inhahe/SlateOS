@@ -4097,6 +4097,7 @@ version = "0.1.0"
 dependencies = [
  "charwidth",
  "quoting",
+ "ulcolors",
  "ulstrutils",
 ]
 

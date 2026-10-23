@@ -5,6 +5,18 @@
 use crate::json::Kind;
 use crate::{Cell, Format, JsonType, LineId, Symbols, Table, careful, mbs};
 
+/// `struct libscols_cell *ce` as the printing functions pass it: the cell
+/// whose colour a printed cell is written in, by the column's place.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Ce {
+    /// None: an empty cell of a wrapped line's extra lines.
+    None,
+    /// The column's header.
+    Header(usize),
+    /// A line's cell.
+    Data(LineId, usize),
+}
+
 /// `struct ul_buffer`: one cell's text as it is built, and where the tree's
 /// drawing in it ends (`SCOLS_BUFPTR_TREEEND`).
 #[derive(Debug, Default)]
@@ -206,6 +218,63 @@ impl Table {
         true
     }
 
+    /// `fputs_color_reset`.
+    fn color_reset(&self, out: &mut Vec<u8>) {
+        if self.cur_color.borrow_mut().take().is_some() {
+            out.extend_from_slice(ulcolors::RESET);
+        }
+    }
+
+    /// `fputs_color`: the output switched to `color`, or to none.
+    fn put_color(&self, out: &mut Vec<u8>, color: Option<Vec<u8>>) {
+        self.color_reset(out);
+        if let Some(c) = color {
+            out.extend_from_slice(&c);
+            *self.cur_color.borrow_mut() = Some(c);
+        }
+    }
+
+    /// `get_cell_color`: `ce`'s colour, when colours are written.
+    fn cell_color(&self, ce: Ce) -> Option<Vec<u8>> {
+        if !self.colors_wanted || self.format != Format::Human {
+            return None;
+        }
+        match ce {
+            Ce::None => None,
+            Ce::Header(cl) => self.columns.get(cl).and_then(|c| c.header.color.clone()),
+            Ce::Data(ln, cl) => self.cell(ln, cl).and_then(|c| c.color.clone()),
+        }
+    }
+
+    /// `fputs_color_cell_open`.
+    fn color_cell_open(&self, out: &mut Vec<u8>, ce: Ce) {
+        if let Some(c) = self.cell_color(ce) {
+            self.put_color(out, Some(c));
+        }
+    }
+
+    /// `fputs_color_cell_close`: back to the line's colour, which is none.
+    fn color_cell_close(&self, out: &mut Vec<u8>, ce: Ce) {
+        if self.cell_color(ce).is_some() {
+            self.put_color(out, None);
+        }
+    }
+
+    /// `fputs_color_line_open`: the line's colour, which is none -- so a
+    /// colour still on is reset.
+    fn color_line_open(&self, out: &mut Vec<u8>) {
+        if self.colors_wanted && self.format == Format::Human {
+            self.put_color(out, None);
+        }
+    }
+
+    /// `fputs_color_line_close`.
+    fn color_line_close(&self, out: &mut Vec<u8>) {
+        if self.colors_wanted && self.format == Format::Human {
+            self.color_reset(out);
+        }
+    }
+
     /// `has_pending_data`.
     fn has_pending_data(&self) -> bool {
         self.columns
@@ -239,8 +308,9 @@ impl Table {
 
     /// `print_empty_cell`: padding, or in the tree column the groups' and
     /// the tree's continuing lines.
-    fn print_empty_cell(&self, out: &mut Vec<u8>, cl: usize, ln: Option<LineId>) {
+    fn print_empty_cell(&self, out: &mut Vec<u8>, cl: usize, ln: Option<LineId>, ce: Ce) {
         let mut len_pad = 0usize;
+        self.color_cell_open(out, ce);
         if let Some(ln) = ln
             && let Some(col) = self.columns.get(cl)
             && col.is_tree()
@@ -270,19 +340,24 @@ impl Table {
         }
         let width = self.columns.get(cl).map_or(0, |c| c.width);
         let is_last = self.is_last_column(cl);
-        if self.finish_cell(out, cl, ln, len_pad, width, is_last) && !is_last {
+        let filled = self.finish_cell(out, cl, ln, len_pad, width, is_last);
+        self.color_cell_close(out, ce);
+        if filled && !is_last {
             out.extend_from_slice(&self.colsep());
         }
     }
 
     /// `print_newline_padding`: a line break, then every column up to and
-    /// including `cl` as empty cells -- hidden ones too, as upstream does.
-    fn print_newline_padding(&mut self, out: &mut Vec<u8>, cl: usize, ln: Option<LineId>) {
+    /// including `cl` as empty cells -- hidden ones too, as upstream does,
+    /// and each in the colour of `ce`, the cell that ran over.
+    fn print_newline_padding(&mut self, out: &mut Vec<u8>, cl: usize, ln: Option<LineId>, ce: Ce) {
         out.extend_from_slice(&self.linesep());
         self.termlines_used = self.termlines_used.saturating_add(1);
+        self.color_line_open(out);
         for i in 0..=cl {
-            self.print_empty_cell(out, i, ln);
+            self.print_empty_cell(out, i, ln, ce);
         }
+        self.color_line_close(out);
     }
 
     /// `step_pending_data`.
@@ -345,9 +420,13 @@ impl Table {
             // of the cell is dropped instead.
             col.pending = None;
         }
+        let ce = ln.map_or(Ce::None, |l| Ce::Data(l, cl));
+        self.color_cell_open(out, ce);
         out.extend_from_slice(&data);
         let is_last = self.is_last_column(cl);
-        if self.finish_cell(out, cl, ln, len, width, is_last) && !is_last {
+        let filled = self.finish_cell(out, cl, ln, len, width, is_last);
+        self.color_cell_close(out, ce);
+        if filled && !is_last {
             out.extend_from_slice(&self.colsep());
         }
         Ok(())
@@ -515,6 +594,9 @@ impl Table {
             }
         }
 
+        // A line's cell, or with no line the column's header.
+        let ce = ln.map_or(Ce::Header(cl), |l| Ce::Data(l, cl));
+        self.color_cell_open(out, ce);
         if !data.is_empty() {
             if is_right {
                 let pad = self.cell_padding();
@@ -525,12 +607,14 @@ impl Table {
             }
             out.extend_from_slice(&data);
         }
-        if !self.finish_cell(out, cl, ln, len, width, is_last) {
+        let filled = self.finish_cell(out, cl, ln, len, width, is_last);
+        self.color_cell_close(out, ce);
+        if !filled {
             return;
         }
         if len > width && !is_trunc {
             // The next column starts on the next line.
-            self.print_newline_padding(out, cl, ln);
+            self.print_newline_padding(out, cl, ln, ce);
         } else if !is_last {
             out.extend_from_slice(&self.colsep());
         }
@@ -548,6 +632,7 @@ impl Table {
         buf: &mut Buf,
     ) -> Result<(), crate::Error> {
         let mut pending = false;
+        self.color_line_open(out);
         for cl in 0..self.columns.len() {
             if self.columns.get(cl).is_some_and(crate::Column::is_hidden) {
                 continue;
@@ -558,9 +643,11 @@ impl Table {
                 pending = true;
             }
         }
+        self.color_line_close(out);
         while pending {
             pending = false;
             out.extend_from_slice(&self.linesep());
+            self.color_line_open(out);
             self.termlines_used = self.termlines_used.saturating_add(1);
             for cl in 0..self.columns.len() {
                 let Some(col) = self.columns.get(cl) else {
@@ -570,14 +657,18 @@ impl Table {
                     continue;
                 }
                 if col.pending.is_some() {
-                    self.print_pending_data(out, cl, Some(ln))?;
+                    if let Err(e) = self.print_pending_data(out, cl, Some(ln)) {
+                        self.color_line_close(out);
+                        return Err(e);
+                    }
                     if self.columns.get(cl).is_some_and(|c| c.pending.is_some()) {
                         pending = true;
                     }
                 } else {
-                    self.print_empty_cell(out, cl, Some(ln));
+                    self.print_empty_cell(out, cl, Some(ln), Ce::None);
                 }
             }
+            self.color_line_close(out);
         }
         Ok(())
     }

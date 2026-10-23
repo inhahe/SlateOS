@@ -15,3 +15,6 @@ quoting = { path = "../quoting" }
 charwidth = { path = "../charwidth" }
 # `get_env_int`'s strtol, for COLUMNS and LINES.
 ulstrutils = { path = "../ulstrutils" }
+# lib/color-names.c's color_get_sequence, for a cell's colour given by name,
+# and UL_COLOR_RESET.
+ulcolors = { path = "../ulcolors" }

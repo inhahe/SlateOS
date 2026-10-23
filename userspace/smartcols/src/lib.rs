@@ -185,6 +185,11 @@ pub(crate) struct Cell {
     /// `lsblk` keeps a number to sort by. Upstream's is a `void *`; the one
     /// program that sets it points it at a `uint64_t`.
     pub(crate) userdata: Option<u64>,
+    /// `color`: the escape sequence the cell is written in when the table's
+    /// colours are on. (Upstream's lines and columns have a colour of their
+    /// own too, which a cell without one takes; nothing here sets either,
+    /// so neither is kept.)
+    pub(crate) color: Option<Vec<u8>>,
 }
 
 impl Cell {
@@ -404,6 +409,12 @@ pub struct Table {
     pub(crate) no_encode: bool,
     pub(crate) no_linesep: bool,
     pub(crate) no_wrap: bool,
+    /// `colors_wanted`: cells written in their colours
+    /// ([`Table::enable_colors`]).
+    pub(crate) colors_wanted: bool,
+    /// `cur_color`: the colour the output is in, so that switching to
+    /// another, or to none, resets it first.
+    pub(crate) cur_color: std::cell::RefCell<Option<Vec<u8>>>,
 }
 
 impl Default for Table {
@@ -458,6 +469,8 @@ impl Table {
             no_encode: false,
             no_linesep: false,
             no_wrap: false,
+            colors_wanted: false,
+            cur_color: std::cell::RefCell::new(None),
         }
     }
 
@@ -527,6 +540,36 @@ impl Table {
     /// `scols_table_enable_header_repeat`.
     pub fn enable_header_repeat(&mut self, enable: bool) {
         self.header_repeat = enable;
+    }
+
+    /// `scols_table_enable_colors`: write cells in the colours they were
+    /// given -- in the human-readable format only.
+    pub fn enable_colors(&mut self, enable: bool) {
+        self.colors_wanted = enable;
+    }
+
+    /// `scols_cell_set_color (scols_column_get_header (cl), color)`: the
+    /// colour `cl`'s header is written in -- an escape sequence, or a
+    /// colour's name or `xx;yy` code, made one as upstream's
+    /// `color_get_sequence` makes it.
+    ///
+    /// # Errors
+    ///
+    /// The column is not this table's.
+    pub fn column_header_set_color(
+        &mut self,
+        cl: ColumnId,
+        color: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        let seq = color.map(|c| {
+            if ulcolors::is_sequence(c) {
+                c.to_vec()
+            } else {
+                ulcolors::get_sequence(c)
+            }
+        });
+        self.column_mut(cl).ok_or(Error::Invalid)?.header.color = seq;
+        Ok(())
     }
 
     /// `scols_table_enable_maxout`: fill the terminal's width.

@@ -48,9 +48,12 @@ table full.img 16 'label: dos\nlabel-id: 0x01020304\n,4M\n,4M\n,4M\n,,\n'
 table hybrid.img 64 'label: gpt\n,8M,L\n'
 printf 'label: dos\nunit: sectors\n,10M,83\n,,82,*\n' > "$fx/load.sfdisk"
 printf 'label: dos\n,10M,nosuchtype\n,,83,x\n' > "$fx/bad.sfdisk"
-# A script that reads, and cannot be applied: its partition is larger than
-# any of the images.
+# A partition larger than any of the images: libfdisk makes it 0 B at the
+# disk's end, and the script applies.
 printf 'label: dos\n,100G,83\n' > "$fx/big.sfdisk"
+# A script that reads, and cannot be applied: its partition starts past the
+# end of every image.
+printf 'label: dos\nstart=200000,size=10\n' > "$fx/far.sfdisk"
 table sun.img 64 'label: sun\n,8M\n,8M\n'
 table sgi.img 64 'label: sgi\n,8M\n,8M\n'
 # dos.img with boot code in front of its table, for -B.
@@ -258,9 +261,12 @@ d gpt.img 'x\nD\nq\n'
 d dos.img 'm\np\nq\n' --color=always
 d dos.img 'p\nq\n' --lock=nonblock
 d dos.img 'p\nq\n' --lock=bogus
-# On a terminal: quitting with a change not written asks first.
-t dos.img 'keys:d\r|keys:1\r|keys:q\r|keys:y\r'
-t dos.img 'keys:d\r|keys:1\r|keys:q\r|keys:n\r|keys:q\r|keys:y\r'
+# On a terminal, with a change not written: q leaves at once, but ^D or
+# ^C at the prompt asks first -- y leaves, n stays (and w then writes).
+t dos.img 'keys:d\r|keys:1\r|keys:q\r'
+t dos.img 'keys:d\r|keys:1\r|keys:\x04|keys:y\r'
+t dos.img 'keys:d\r|keys:1\r|keys:\x04|keys:n\r|keys:w\r'
+t dos.img 'keys:d\r|keys:1\r|keys:\x03|keys:y\r'
 
 # --- new tables -----------------------------------------------------------------
 d empty.img 'p\nw\n'
@@ -347,6 +353,7 @@ d empty.img 'I\nnosuchfile\nq\n'
 d empty.img 'I\n../fx/load.sfdisk\np\nw\n'
 d empty.img 'I\n../fx/bad.sfdisk\np\nq\n'
 d dos.img 'I\n../fx/big.sfdisk\np\nq\n'
+d dos.img 'I\n../fx/far.sfdisk\np\nq\n'
 
 printf '\nfdisk-diff: %d passed, %d differed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

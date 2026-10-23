@@ -200,6 +200,9 @@ c dos.img "$ENTER|$ENTER" -r
 c gpt.img "$DOWN|$DOWN|$QUIT"
 c gpt.img "keys:x|$QUIT"
 c many.img "keys:\e[6~|keys:\e[6~|keys:\e[5~|$DOWN|keys:\eOF|$QUIT"
+# Down a line at a time to the first page's last row: its arrows to the
+# next page are drawn with the cursor's reverse video.
+c many.img "keys:\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB\eOB|$QUIT"
 c gaps.img "$DOWN|$DOWN|$QUIT"
 c full.img "$DOWN|$DOWN|$DOWN|$QUIT"
 
@@ -209,6 +212,9 @@ c dos.img "keys:b|$DOWN|keys:b|keys:W|keys:yes\r|$QUIT"
 c dos.img "keys:\e[3~|$QUIT"
 c dos.img "keys:t|$DOWN|$DOWN|$ENTER|keys:W|keys:yes\r|$QUIT"
 c dos.img "keys:t|keys:\e[6~|keys:\e[5~|keys:q|$QUIT"
+# A type chosen with Ctrl-J and with the keypad's Enter, as with Return.
+c dos.img "keys:t|$DOWN|keys:\n|$QUIT"
+c dos.img "keys:t|$DOWN|keys:\eOM|$QUIT"
 c gpt.img "keys:t|keys:\e[6~|keys:\e[6~|$DOWN|$ENTER|keys:W|keys:yes\r|$QUIT"
 c gpt.img "keys:r|keys:\x7f\x7f\x7f\x7f\x7f\x7f4M\r|keys:W|keys:yes\r|$QUIT"
 c gpt.img "keys:r|keys:\e|$QUIT"

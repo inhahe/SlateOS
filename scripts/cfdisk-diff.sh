@@ -232,8 +232,10 @@ c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f2M\r|$ENTER|$QUIT"
 # Deleting the partition between two free spaces leaves two lines fewer,
 # and the cursor past the last: it moves to the last.
 c odd.img "$DOWN|$DOWN|keys:d|$QUIT"
-# A dialog's text edited: Left over several characters, Home, End.
+# A dialog's text edited: Left over several characters, Home, End; and
+# Left and Backspace over characters of more than one byte (é, €).
 c gpt.img "keys:u|keys:abcd\eOD\eODX\eOHY\eOFZ\r|$QUIT"
+c gpt.img "keys:u|keys:a\xc3\xa9\xe2\x82\xac\eODX\eOD\eOD\x7fY\r|$QUIT"
 
 # --- writing, or not -------------------------------------------------------------
 c dos.img "keys:d|keys:W|keys:no\r|$QUIT"

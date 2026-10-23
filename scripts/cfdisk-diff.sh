@@ -266,6 +266,11 @@ c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f512\r|$ENTER|$QUIT"
 c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f100\r|keys:\e|$QUIT"
 # The type menu's last page, reached with End: no arrow for a page after it.
 c dos.img "keys:t|keys:\eOF|keys:\e|$QUIT"
+# Home after paging down the table: its first line, not a page up.
+c many.img "keys:\e[6~|keys:\e[6~|keys:\eOH|$QUIT"
+# SIGTERM and SIGINT end it, as its handlers for them do.
+c dos.img "signal:TERM"
+c dos.img "signal:INT"
 # Up at the table's first line, and Page Up on the first page: the cursor
 # stays where it is.
 c dos.img "$UP|$QUIT"

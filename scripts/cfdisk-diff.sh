@@ -266,6 +266,24 @@ c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f512\r|$ENTER|$QUIT"
 c odd.img "$DOWN|keys:n|keys:\x7f\x7f\x7f\x7f\x7f\x7f\x7f100\r|keys:\e|$QUIT"
 # The type menu's last page, reached with End: no arrow for a page after it.
 c dos.img "keys:t|keys:\eOF|keys:\e|$QUIT"
+# Up at the table's first line, and Page Up on the first page: the cursor
+# stays where it is.
+c dos.img "$UP|$QUIT"
+c many.img "keys:\e[5~|$QUIT"
+# --lock: a mode it does not know refuses the device; the default locks it.
+c dos.img "$QUIT" --lock=bogus
+c dos.img "$QUIT" --lock
+c ro.img "$QUIT" --lock=bogus
+# The label menu of an empty disk: a label chosen with Ctrl-J and with the
+# keypad's Enter; x does nothing there, and L opens the script dialog as l
+# does.
+c empty.img "$DOWN|keys:\n|$QUIT"
+c empty.img "$DOWN|keys:\eOM|$QUIT"
+c empty.img "keys:x|$QUIT"
+c empty.img "keys:L|keys:\e|$QUIT"
+# Characters two cells wide in a dialog's text: Left over them, and X
+# between.
+c gpt.img "keys:u|keys:\xe4\xb8\xad\xe6\x96\x87\eODX\r|$QUIT"
 # Home in the paged type menu goes to the first item, not a page up.
 c dos.img "keys:t|keys:\eOF|keys:\eOH|$ENTER|$QUIT"
 # A size over the free space by exactly its suffix's unit is refused, not

@@ -55,6 +55,8 @@ table gaps.img 64 'label: dos\nlabel-id: 0x0a0b0c0d\n10240,4096,83\n2048,4096,83
 # In disk order, a partition between two free spaces, and a gap that is no
 # whole number of MiB (6144 to 9999).
 table odd.img 64 'label: dos\nlabel-id: 0x0d0d0d0d\n2048,4096,83\n10000,4096,83\n'
+# A device its user may read and not write: each side's copy keeps the mode.
+cp "$fx/dos.img" "$fx/ro.img" && chmod 444 "$fx/ro.img"
 table full.img 16 'label: dos\nlabel-id: 0x01020304\n,4M\n,4M\n,4M\n,,\n'
 # More partitions than the screen has lines for the table: it pages.
 many='label: gpt\nlabel-id: 5A6F7B1C-1111-4222-8333-944455566677\n'
@@ -236,6 +238,13 @@ c odd.img "$DOWN|$DOWN|keys:d|$QUIT"
 # Left and Backspace over characters of more than one byte (é, €).
 c gpt.img "keys:u|keys:abcd\eOD\eODX\eOHY\eOFZ\r|$QUIT"
 c gpt.img "keys:u|keys:a\xc3\xa9\xe2\x82\xac\eODX\eOD\eOD\x7fY\r|$QUIT"
+# Right and Delete in a dialog's text, over characters of one byte and of
+# more.
+c gpt.img "keys:u|keys:abcd\eOH\eOC\e[3~X\r|$QUIT"
+c gpt.img "keys:u|keys:a\xc3\xa9\xe2\x82\xacb\eOH\eOC\e[3~X\r|$QUIT"
+# A device that cannot be written is opened read-only, and says so; W then
+# does nothing.
+c ro.img "keys:W|$QUIT"
 # A dialog's text ended by Ctrl-J or the keypad's Enter, as by Return.
 c gpt.img "keys:u|keys:abc\n|$QUIT"
 c gpt.img "keys:u|keys:abd\eOM|$QUIT"

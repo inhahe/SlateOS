@@ -146,6 +146,32 @@ pub fn set_waiter(vector: u8, task: u64) {
     }
 }
 
+/// Let go of `vector`'s delivery before the vector is freed: its waiter is
+/// woken (to find its device gone) and forgotten, and its count dropped, so
+/// the next owner of the vector starts from nothing.
+pub fn release_delivery(vector: u8) {
+    let Some(index) = pool_index(vector) else {
+        return;
+    };
+    if let Some(waiter) = WAITER.get(index) {
+        let task = waiter.swap(u64::MAX, Ordering::AcqRel);
+        if task != u64::MAX {
+            let _woken = crate::sched::try_wake(task);
+        }
+    }
+    if let Some(pending) = PENDING.get(index) {
+        pending.store(0, Ordering::Release);
+    }
+}
+
+/// Whether `vector` is allocated from the pool.
+#[must_use]
+pub fn is_allocated(vector: u8) -> bool {
+    pool_index(vector)
+        .and_then(|index| VECTOR_ALLOCATED.get(index))
+        .is_some_and(|allocated| allocated.load(Ordering::Acquire))
+}
+
 /// Retry the wakes [`dispatch`] could not make: each vector with interrupts
 /// counted wakes its waiter. Called with the I/O APIC lines' deferred wakes.
 pub fn process_deferred_wakes() {
@@ -393,16 +419,16 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
         // 64-bit: upper address at +8, data at +12.
         pci::config_write32(bus, dev, func, cap.wrapping_add(8), 0);
         #[allow(clippy::cast_possible_truncation)]
-        pci::config_write16(bus, dev, func, cap.wrapping_add(12), data as u16);
+        pci::config_write16_native(bus, dev, func, cap.wrapping_add(12), data as u16);
     } else {
         // 32-bit: data at +8.
         #[allow(clippy::cast_possible_truncation)]
-        pci::config_write16(bus, dev, func, cap.wrapping_add(8), data as u16);
+        pci::config_write16_native(bus, dev, func, cap.wrapping_add(8), data as u16);
     }
 
     // Enable MSI (set bit 0 of Message Control).
     let msg_control = pci::config_read16(bus, dev, func, cap.wrapping_add(2));
-    pci::config_write16(
+    pci::config_write16_native(
         bus,
         dev,
         func,
@@ -412,7 +438,7 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
 
     // Disable legacy INTx (set bit 10 of PCI Command register).
     let cmd = pci::config_read16(bus, dev, func, 4);
-    pci::config_write16(bus, dev, func, 4, cmd | (1 << 10));
+    pci::config_write16_native(bus, dev, func, 4, cmd | (1 << 10));
 
     serial_println!(
         "[msi] Enabled MSI for {:02x}:{:02x}.{}: vector={}, cpu={}",
@@ -437,7 +463,7 @@ pub fn disable_msi(config: &mut MsiConfig) {
 
     // Clear MSI enable bit.
     let msg_control = pci::config_read16(bus, dev, func, cap.wrapping_add(2));
-    pci::config_write16(
+    pci::config_write16_native(
         bus,
         dev,
         func,

@@ -858,6 +858,23 @@ pub fn sys_pci_device_dma_alloc(args: &SyscallArgs) -> SyscallResult {
     device_result(r)
 }
 
+/// `SYS_PCI_DEVICE_IRQ_SETUP` — set up an open device's MSI. See
+/// [`SYS_PCI_DEVICE_IRQ_SETUP`](super::number::SYS_PCI_DEVICE_IRQ_SETUP).
+pub fn sys_pci_device_irq_setup(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0)
+        .and_then(|pid| crate::devhandle::irq_setup(args.arg0, pid))
+        .map(|()| 0);
+    device_result(r)
+}
+
+/// `SYS_PCI_DEVICE_IRQ_WAIT` — take, or wait for, an open device's
+/// interrupts. See [`SYS_PCI_DEVICE_IRQ_WAIT`](super::number::SYS_PCI_DEVICE_IRQ_WAIT).
+pub fn sys_pci_device_irq_wait(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0)
+        .and_then(|pid| crate::devhandle::irq_wait(args.arg0, pid, args.arg1 != 0));
+    device_result(r)
+}
+
 /// `SYS_PCI_DEVICE_MAP_BAR` — map a memory BAR into the caller, uncached.
 pub fn sys_pci_device_map_bar(args: &SyscallArgs) -> SyscallResult {
     let r = held_device(args.arg0).and_then(|pid| {

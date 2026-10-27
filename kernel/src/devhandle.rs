@@ -80,6 +80,8 @@ struct Device {
     guards: Guards,
     /// DMA arenas mapped in the domain.
     arenas: Vec<Arena>,
+    /// Its MSI, once set up: the vector its messages arrive on.
+    msi: Option<crate::msi::MsiConfig>,
 }
 
 /// A DMA arena: memory the device may read and write, mapped in its owner
@@ -148,6 +150,7 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
             domain,
             guards,
             arenas: Vec::new(),
+            msi: None,
         })
     })();
     let mut devices = DEVICES.lock();
@@ -176,6 +179,13 @@ pub fn close(raw: u64) {
 /// reading and writing memory, then its mappings.
 fn release(device: Device) {
     pci::disable_bus_master(device.addr);
+    // Bus mastering is off, so the device sends no more messages. Its
+    // vector's waiter is woken and its count dropped while the vector is
+    // still this device's, then MSI is turned off and the vector freed.
+    if let Some(mut config) = device.msi {
+        crate::msi::release_delivery(config.allocated_vector);
+        crate::msi::disable_msi(&mut config);
+    }
     let pml4 = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0);
     // Detached and destroyed before any arena is freed: the device can reach
     // none of them from here on, whatever it was doing.
@@ -343,6 +353,74 @@ pub fn revoke_arena(raw: u64, phys: u64, size: usize) {
             e
         );
     }
+}
+
+/// Set up the device's MSI, owned by `pid`: one vector, its messages sent to
+/// the CPU this runs on (online by definition, read from its own local APIC;
+/// a waiter on another CPU is woken from there). `NotSupported` for a device without an MSI capability,
+/// `AlreadyExists` once it is set up, `ResourceExhausted` with no vector free.
+pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
+    // No local APIC yet (early boot): no message could be delivered.
+    if !crate::apic::is_ready() {
+        return Err(KernelError::NotSupported);
+    }
+    let target = crate::apic::read_id();
+    let mut devices = DEVICES.lock();
+    let device = devices
+        .iter_mut()
+        .find(|d| d.raw == raw)
+        .ok_or(KernelError::InvalidHandle)?;
+    if device.owner != pid {
+        return Err(KernelError::PermissionDenied);
+    }
+    if device.msi.is_some() {
+        return Err(KernelError::AlreadyExists);
+    }
+    let (b, d, f) = (device.addr.bus, device.addr.device, device.addr.function);
+    let mut config = crate::msi::find_msi_capability(b, d, f).ok_or(KernelError::NotSupported)?;
+    crate::msi::enable_msi(&mut config, target).ok_or(KernelError::ResourceExhausted)?;
+    device.msi = Some(config);
+    Ok(())
+}
+
+/// The device's interrupts since the last take, owned by `pid`: taken at
+/// once when `block` is false (0 when none came), else waited for until at
+/// least one has. `InvalidArgument` before [`irq_setup`]; `InvalidHandle`
+/// when the device is closed while waiting.
+pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
+    let vector_of = || {
+        with_owned(raw, pid, |d| {
+            d.msi
+                .as_ref()
+                .map(|c| c.allocated_vector)
+                .ok_or(KernelError::InvalidArgument)
+        })
+    };
+    let vector = vector_of()?;
+    if !block {
+        return Ok(crate::msi::take(vector));
+    }
+    crate::msi::set_waiter(vector, crate::sched::current_task_id());
+    let taken = loop {
+        let count = crate::msi::take(vector);
+        if count > 0 {
+            break Ok(count);
+        }
+        // Closed (and the vector freed) while waiting: nothing will come.
+        if vector_of().ok() != Some(vector) {
+            break Err(KernelError::InvalidHandle);
+        }
+        // A wake landing before the park leaves a token the park consumes,
+        // so an interrupt between the take above and here is not lost.
+        crate::sched::block_current_on(crate::wchan::Wait::new(
+            crate::wchan::WaitChannel::Io,
+            u64::from(vector),
+        ));
+    };
+    if vector_of().ok() == Some(vector) {
+        crate::msi::set_waiter(vector, u64::MAX);
+    }
+    taken
 }
 
 /// The IOMMU domain of the device `raw` names, if `pid` owns it.
@@ -649,6 +727,10 @@ fn unmap_bar(pml4: u64, owner: ProcessId, bar: &MappedBar) {
 /// memory BAR and an MSI capability, and no kernel driver.
 const EDU_VENDOR: u16 = 0x1234;
 const EDU_DEVICE: u16 = 0x11E8;
+/// edu's interrupt registers: writing a bit raises it (an MSI when MSI is
+/// on), writing it to the other acknowledges it.
+const EDU_IRQ_RAISE: u64 = 0x60;
+const EDU_IRQ_ACK: u64 = 0x64;
 
 /// Open, configure, map and close QEMU's `edu` device as a scratch process,
 /// and check every refusal on the way: a second open, another process's
@@ -717,7 +799,7 @@ pub fn self_test() -> KernelResult<()> {
     if !confined {
         skips.record("IOMMU confinement", "no active IOMMU");
     }
-    serial_println!("[devhandle]   open, configure, map, DMA arenas and close edu: OK");
+    serial_println!("[devhandle]   open, configure, map, MSI, DMA arenas and close edu: OK");
     skips.report("[devhandle]");
 
     fn self_test_on(
@@ -773,6 +855,44 @@ pub fn self_test() -> KernelResult<()> {
             if at(size).is_some() {
                 return Err("the mapping runs past BAR0");
             }
+            // An MSI: edu sends one when its interrupt-raise register is
+            // written, and it is taken once on the vector set up for it.
+            irq_setup(raw, owner).map_err(|_| "MSI could not be set up")?;
+            if irq_setup(raw, owner) != Err(KernelError::AlreadyExists) {
+                return Err("a second MSI set-up was not refused");
+            }
+            let vector = with_owned(raw, owner, |d| {
+                d.msi
+                    .as_ref()
+                    .map(|c| c.allocated_vector)
+                    .ok_or(KernelError::InvalidArgument)
+            })
+            .map_err(|_| "no vector recorded")?;
+            // SAFETY: BAR0 is edu's register window, which nothing else in
+            // the kernel maps or drives.
+            let regs = unsafe { page_table::map_mmio(bar0.base, HW_PAGE) }
+                .map_err(|_| "BAR0 could not be mapped for the kernel")?;
+            let reg = |offset: u64| regs.saturating_add(offset) as *mut u32;
+            // SAFETY: two of edu's 32-bit registers, inside the page just
+            // mapped: acknowledge everything, then raise interrupt bit 0.
+            unsafe {
+                reg(EDU_IRQ_ACK).write_volatile(u32::MAX);
+                reg(EDU_IRQ_RAISE).write_volatile(1);
+            }
+            let deadline = crate::hpet::elapsed_ns().saturating_add(100_000_000);
+            let mut taken = 0;
+            while taken == 0 && crate::hpet::elapsed_ns() < deadline {
+                taken = irq_wait(raw, owner, false).unwrap_or(0);
+                core::hint::spin_loop();
+            }
+            // SAFETY: as above; the raised bit is acknowledged.
+            unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
+            if taken != 1 {
+                return Err("edu's MSI was not taken exactly once");
+            }
+            if irq_wait(raw, owner, false) != Ok(0) {
+                return Err("one MSI was taken twice");
+            }
             // A DMA arena: where the owner sees it is its device address,
             // and the device's domain reaches it until it is freed.
             let (arena, device_addr) =
@@ -782,7 +902,7 @@ pub fn self_test() -> KernelResult<()> {
                 return Err("the arena is not at its device address");
             }
             let Some(domain) = domain_of(raw, owner).map_err(|_| "no domain answer")? else {
-                return Ok((va, None));
+                return Ok((va, None, vector));
             };
             if iommu_remap::translate_bus(domain, device_addr) != Some(device_addr) {
                 return Err("the device's domain does not reach its arena");
@@ -811,9 +931,9 @@ pub fn self_test() -> KernelResult<()> {
             if given {
                 return Err("a forked child got the device's registers or its arena");
             }
-            Ok((va, Some((domain, kept_addr))))
+            Ok((va, Some((domain, kept_addr)), vector))
         })();
-        let (va, kept) = match checks {
+        let (va, kept, vector) = match checks {
             Ok(found) => found,
             Err(msg) => {
                 close(raw);
@@ -835,6 +955,9 @@ pub fn self_test() -> KernelResult<()> {
         let command = pci::config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
         if command & (1 << 2) != 0 {
             return Err("bus mastering is still on after the last close");
+        }
+        if crate::msi::is_allocated(vector) {
+            return Err("the device's MSI vector is still allocated after the last close");
         }
         Ok(kept.is_some())
     }

@@ -811,6 +811,10 @@ const fn build_v1_table() -> SyscallTable {
         Some(handlers::sys_pci_device_map_bar);
     handlers[super::number::SYS_PCI_DEVICE_DMA_ALLOC as usize] =
         Some(handlers::sys_pci_device_dma_alloc);
+    handlers[super::number::SYS_PCI_DEVICE_IRQ_SETUP as usize] =
+        Some(handlers::sys_pci_device_irq_setup);
+    handlers[super::number::SYS_PCI_DEVICE_IRQ_WAIT as usize] =
+        Some(handlers::sys_pci_device_irq_wait);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
@@ -5990,7 +5994,7 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
 fn test_dispatch_device_calls() -> KernelResult<()> {
     use super::number::{
         SYS_PCI_DEVICE_BAR, SYS_PCI_DEVICE_CLOSE, SYS_PCI_DEVICE_CONFIG_READ,
-        SYS_PCI_DEVICE_MAP_BAR, SYS_PCI_DEVICE_OPEN,
+        SYS_PCI_DEVICE_IRQ_WAIT, SYS_PCI_DEVICE_MAP_BAR, SYS_PCI_DEVICE_OPEN,
     };
     use crate::cap::{ResourceType, Rights};
     use crate::mm::page_table::{self, VirtAddr};
@@ -6045,6 +6049,18 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
             .map_err(|_| "BAR0 could not be mapped")?;
         if page_table::translate(pml4, VirtAddr::new(va)).is_none() {
             return Err("the BAR mapping is not there");
+        }
+        // Its interrupts, through the handle: a take before any set-up is
+        // refused, and another process's take too. (Set-up and delivery need
+        // the local APIC, which this boot step precedes: the device
+        // self-test checks them later.)
+        if call(driver, SYS_PCI_DEVICE_IRQ_WAIT, handle, 0, 0)
+            != i64::from(KernelError::InvalidArgument.code())
+        {
+            return Err("a take before the MSI was set up was not refused");
+        }
+        if call(stranger, SYS_PCI_DEVICE_IRQ_WAIT, handle, 0, 0) != invalid {
+            return Err("another process took the owner's interrupts");
         }
         // The owner's exit, as a dying thread runs it: held handles closed,
         // its address space still there.

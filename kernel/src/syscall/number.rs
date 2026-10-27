@@ -7375,6 +7375,19 @@ pub const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 /// handle's release) takes it from the device first.
 pub const SYS_PCI_DEVICE_DMA_ALLOC: u64 = 1185;
 
+/// Set up an open device's MSI: `arg0` the handle. One vector, its messages
+/// sent to the CPU the call ran on; the kernel programs the device's MSI capability
+/// (which the caller may not write). `NotSupported` for a device without
+/// one, `AlreadyExists` once it is set up.
+pub const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
+
+/// Take an open device's interrupts: `arg0` the handle, `arg1` 0 to take what
+/// has come and return at once (0 when nothing has), anything else to wait
+/// until at least one has. Returns how many. `InvalidArgument` before
+/// `SYS_PCI_DEVICE_IRQ_SETUP`; `InvalidHandle` if the handle is closed while
+/// waiting.
+pub const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

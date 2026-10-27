@@ -1,0 +1,9 @@
+# The Linux release the driver layer compiles against (design-decisions 1578).
+#
+# `scripts/linux-tree.sh` fetches exactly this tarball and refuses any other
+# content. Moving the pin is one commit: the version, the hash, and whatever
+# the boot test then says about every driver. The hash is the one kernel.org
+# publishes in https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
+# (a PGP-signed file); once committed, this line is the trust anchor.
+version 6.18.59
+sha256 53a55ac9863a5547e292b8e381d4e4c2240dd1127d5428a7c44dbc550be23963

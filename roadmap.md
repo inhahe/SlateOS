@@ -194,7 +194,7 @@ day. Prune on the schedule above from the start, not once the volume is tight.
 
 | Lane | Agent name | Name | Owns (writes freely) |
 |------|------|------|----------------------|
-| **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `elfparse/**`, `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`; since §973 also the gate machinery (`scripts/hooks/**`, `scripts/run-checker.sh`, `scripts/which-lane.py`, the gates that judge every lane) and the kernel's scripts, the hash and crypto crates (`sha1`, `sha2`, `md5`, `pwkdf`, `blockbuf`, `crc32`), and the boot and repository configuration (`esp/**`, `limine.conf`, `.gitignore`, `.gitattributes`, `clippy.toml`, `.cargo/**`) |
+| **A** | `Lane A` | **Kernel, Core & Networking** | `kernel/**`, `bench/**`, `net/**`, `netipc/**`, `netproto/**`, `netring/**`, `net80211/**`, `aes/**`, `hmac/**`, `elfparse/**`, `linuxdrv/**` (the Linux driver layer, §1578), `services/netstack/**`, `toolchain/x86_64-slateos.json`, `scripts/boot-test.sh`, `scripts/run-timeout.py`, `scripts/wedge-soak.sh`; since §973 also the gate machinery (`scripts/hooks/**`, `scripts/run-checker.sh`, `scripts/which-lane.py`, the gates that judge every lane) and the kernel's scripts, the hash and crypto crates (`sha1`, `sha2`, `md5`, `pwkdf`, `blockbuf`, `crc32`), and the boot and repository configuration (`esp/**`, `limine.conf`, `.gitignore`, `.gitattributes`, `clippy.toml`, `.cargo/**`) |
 | **B** | `Lane B` | **Userland** | `userspace/**`, `init/**`; since §973 also the differential harnesses and userland checkers in `scripts/`, and ten root crates (`procinfo`, `libcall`, `optionalfile`, …) |
 | **C** | `Lane C` | **Desktop & Toolkit** | `gui/**` except lane F's crates (`gui/compositor`, `window`, `remote`, `font`, `imagecodec`, `vulkan`, `video`); since §973 also the GUI gates and gui/ reintroduction harnesses in `scripts/` |
 | **D** | `Lane D` | **POSIX, libc & Toolchain** | `posix/**`, `services/**` except `services/netstack/**`, `net/tls/**` (the userspace TLS client, handed over by lane A 2026-10-07), `toolchain/stubs/**`, `toolchain/build-sysroot.ps1`, `scripts/create-ext4-rootfs.sh`; since §973 also the libc checkers, fixtures, rootfs manifest, toolchain setup and port spikes in `scripts/`, `build-env.md`, `posix-blockers.md` |
@@ -5423,12 +5423,15 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   Bluetooth, laptop audio DSPs); handwritten native drivers stay for the
   standard core. Operator's decision, 2026-10-27: design-decisions §1577; the
   split, the rule of thumb and the inventory are `roadmap-detailed.md` §2.1a.
-  - [-] Shape first: each Linux driver in its own `udriver` process,
+  - [x] Shape first: each Linux driver in its own `udriver` process,
         IOMMU-sandboxed (§1576); the GPL boundary (driver processes GPL, kernel
         MIT); the pinned Linux release and the import script -- the shape is
         decided (§1578: Linux's own headers and core code, only the bottom
-        emulated, one cooperative thread per driver, `linux-6.18.y` fetched
-        by hash); the fetch-and-prepare script is next
+        emulated, one cooperative thread per driver); `linuxdrv/linux.pin`
+        pins 6.18.59 and `scripts/linux-tree.sh` fetches, verifies and
+        prepares it (2026-10-27). `linux-tree.sh needs <dir>` measured
+        `e1000e`: 148 symbols, about 100 of them the bottom layer
+        (`linuxdrv/README.md`)
   - [ ] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
         timers, PCI and MSI, IRQs, the minimal device model, `request_firmware`
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),

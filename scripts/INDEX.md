@@ -290,6 +290,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/lastlog-diff.sh` | Differential test: our `lastlog` against shadow-utils 4.13's. |
 | `scripts/layout-sweep.py` | Measure how much of a benchmark's movement is caused by code *placement*. |
 | `scripts/lib/worktree.sh` | The directive above is load-bearing rather than decorative. This file has no |
+| `scripts/linux-tree.sh` | Fetch, verify and prepare the Linux tree the driver layer compiles against. |
 | `scripts/llvm-spike/run.sh` | Cross-compile LLVM 20's `opt`, `llc` and `ld.lld` for SlateOS, linked against |
 | `scripts/llvm-spike/slatelink.sh` | Link LLVM's opt, llc and ld.lld for SlateOS from the objects |
 | `scripts/ln-diff.sh` | ln-diff.sh -- compare our `ln` against GNU coreutils 9.4's, inside WSL. |
@@ -609,4 +610,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_599 scripts._
+_600 scripts._

@@ -226,6 +226,8 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     ("aes/", "A"),
     ("hmac/", "A"),
     ("elfparse/", "A"),
+    # The Linux driver layer (design-decisions 1577, 1578).
+    ("linuxdrv/", "A"),
     ("services/netstack/", "A"),
     ("toolchain/x86_64-slateos.json", "A"),
     ("scripts/boot-test.sh", "A"),
@@ -500,6 +502,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "kasan-check-preshadow.py",
         "ki_split.py",
         "layout-sweep.py",
+        "linux-tree.sh",
         "live-counter-ledger.txt",
         "merge-readiness.py",
         "migrate-worktrees-to-drive.ps1",

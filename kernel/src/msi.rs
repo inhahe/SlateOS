@@ -56,10 +56,13 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 /// Bits 31:20 = 0xFEE (fixed), bits 19:12 = destination LAPIC ID.
 const MSI_ADDRESS_BASE: u32 = 0xFEE0_0000;
 
-/// First IDT vector available for MSI allocation.
-const MSI_VECTOR_BASE: u8 = 48;
+/// First IDT vector available for MSI allocation: above the I/O APIC's
+/// lines (`ioapic::IRQ_VECTOR_BASE` 33 up to 56), which an MSI vector must
+/// never share -- a device's message would run another line's handler.
+const MSI_VECTOR_BASE: u8 = 64;
 
-/// Last IDT vector available for MSI allocation.
+/// Last IDT vector available for MSI allocation: below the IPIs (250-252)
+/// and the spurious vector (255).
 const MSI_VECTOR_MAX: u8 = 223;
 
 /// Total MSI vectors available.
@@ -392,6 +395,30 @@ pub fn stats() -> MsiStats {
 /// Self-test for the MSI subsystem.
 pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[msi] Running self-test...");
+
+    // Test 0: the pool shares no vector with the I/O APIC's lines or the
+    // kernel's own vectors.
+    let ioapic_end = crate::ioapic::IRQ_VECTOR_BASE.saturating_add(crate::ioapic::MAX_IRQ as u8);
+    let kernel_vectors = [
+        crate::apic::TIMER_VECTOR,
+        crate::apic::SPURIOUS_VECTOR,
+        crate::apic::RESCHEDULE_VECTOR,
+        crate::cpusync::CPU_SYNC_VECTOR,
+        crate::tlb::TLB_SHOOTDOWN_VECTOR,
+    ];
+    if MSI_VECTOR_BASE < ioapic_end
+        || kernel_vectors
+            .iter()
+            .any(|&v| (MSI_VECTOR_BASE..=MSI_VECTOR_MAX).contains(&v))
+    {
+        serial_println!(
+            "[msi]   FAIL: the MSI pool {}..={} overlaps the I/O APIC (..{}) or a kernel vector",
+            MSI_VECTOR_BASE,
+            MSI_VECTOR_MAX,
+            ioapic_end
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
 
     // Test 1: Vector allocation.
     let v1 = alloc_vector();

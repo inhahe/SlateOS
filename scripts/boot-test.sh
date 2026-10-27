@@ -8890,6 +8890,23 @@ if [ "$NO_STAGE" -eq 0 ] && [ ! -f "$KERNEL_BIN" ]; then
     exit 1
 fi
 
+# No function of the debug kernel may claim more than half a 64 KiB task stack.
+# An unoptimised build copies a `const` array wherever it is used and moves large
+# values by copy, so a frame that is small in release can be the whole stack in
+# debug -- and a path the boot never runs (a benchmark, a rare error branch)
+# overflows it only on whatever machine first runs it. Measured statically
+# (`scripts/stack-frames.py`, ~25 s), so it fails here whatever the boot runs,
+# and before QEMU starts.
+if [ "$BENCH_PROFILE" = "debug" ] && [ -f "$KERNEL_BIN" ]; then
+    echo "=== Checking the debug kernel's largest stack frames ==="
+    frames_py=python
+    command -v python &>/dev/null || frames_py=python3
+    if ! "$frames_py" "$PROJECT_ROOT/scripts/stack-frames.py" --elf "$KERNEL_BIN" --fail-above 32768; then
+        echo "ERROR: a stack frame of more than half a task stack (above)." >&2
+        exit 1
+    fi
+fi
+
 # Step 2: Stage boot files
 #
 # Checked a second time, and not redundantly: staging copies a ~200 MiB kernel

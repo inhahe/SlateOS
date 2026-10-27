@@ -67,8 +67,7 @@ const CRC32_TABLE: [u32; 256] = {
 ///
 /// A `static`, read where it lies: a `const` array is copied wherever it is
 /// used in an unoptimised build, 8 KiB a use, and `crc32_raw`'s eight uses
-/// came to a 64 KiB stack frame -- a kernel task's whole stack (the test
-/// PC's benchmark task overflowed it, 2026-10-27).
+/// would make a 64 KiB stack frame -- a kernel task's whole stack.
 static TABLES: [[u32; 256]; 8] = {
     let mut t = [[0u32; 256]; 8];
     t[0] = CRC32_TABLE;

@@ -242,6 +242,14 @@ def main() -> None:
         "-- what is really on the stack, which the per-symbol ranking hides",
     )
     ap.add_argument(
+        "--fail-above",
+        type=int,
+        metavar="N",
+        help="exit 1, naming them, if any function's frame claims more than N "
+        "bytes: boot-test.sh's gate on the debug kernel, which a frame of half a "
+        "task stack fails long before a real machine overflows it",
+    )
+    ap.add_argument(
         "--diff",
         nargs=2,
         metavar=("BEFORE_ELF", "AFTER_ELF"),
@@ -269,6 +277,20 @@ def main() -> None:
 
     elf = args.elf or elf_for(args.profile)
     table = frames(disassemble(elf))
+
+    if args.fail_above is not None:
+        over = sorted(((n, s) for s, n in table.items() if n > args.fail_above), reverse=True)
+        if over:
+            print(f"stack-frames: {len(over)} function(s) in {elf} claim more than "
+                  f"{args.fail_above} bytes of stack, of a 64 KiB task stack:")
+            for n, sym in over:
+                print(f"{n:8d}  {sym}")
+            print("A large local, a large value moved by value, or a large `const` array "
+                  "(copied wherever it is used, in an unoptimised build) is the usual cause; "
+                  "a `static`, a Box, or a by-reference parameter is the usual fix.")
+            sys.exit(1)
+        print(f"stack-frames: no frame in {len(table)} claims more than {args.fail_above} bytes")
+        return
 
     if args.peak:
         rows = peaks(table)

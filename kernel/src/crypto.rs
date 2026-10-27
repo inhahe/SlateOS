@@ -158,9 +158,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 ///
 /// Generated at compile time.  Each entry is the CRC of the byte index
 /// value processed through 8 rounds of the bit-at-a-time algorithm. A
-/// `static`, read where it lies, where a `const` would be copied onto the
-/// stack at each use in an unoptimised build (as crc32's 8 KiB tables were,
-/// until they overflowed a task's stack).
+/// `static`, read where it lies: a `const` array is copied onto the stack at
+/// each use in an unoptimised build.
 static CRC32C_TABLE: [u32; 256] = {
     // Castagnoli polynomial (bit-reversed).
     const POLY: u32 = 0x82F6_3B78;

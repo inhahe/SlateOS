@@ -20,7 +20,8 @@
 //!
 //! A per-frame metadata array (1 byte per frame) tracks whether each frame
 //! is allocated or free (and at what order).  This metadata is carved from
-//! the first usable memory region during initialization.
+//! the first usable memory region with room for it above the ISA DMA zone
+//! (`metadata_base`), and never from below 1 MiB.
 //!
 //! ## Initialization
 //!
@@ -1886,8 +1887,9 @@ pub fn pcpu_cache_stats() -> PerCpuCacheStats {
 
 /// [`metadata_base`] on made-up memory maps: a large machine's metadata goes
 /// above the ISA DMA zone, though its first region starts at 1 MiB; one
-/// whose only room is below the zone still gets a place; one with no room
-/// gets none; a region that is not usable is passed over.
+/// whose only room is below the zone still gets a place, but none below
+/// 1 MiB; one with no room gets none; a region that is not usable is passed
+/// over; a region the metadata fills exactly is taken.
 fn self_test_metadata_base() -> KernelResult<()> {
     let entry = |base: u64, length: u64, type_: u64| MemmapEntry {
         base,
@@ -1898,24 +1900,37 @@ fn self_test_metadata_base() -> KernelResult<()> {
     let usable = memmap_type::USABLE;
     // 64 GiB from 1 MiB, as the test PC has it: 33 MiB of metadata.
     let big = [entry(mib, 64 << 30, usable)];
-    // 12 MiB, all below the zone's end, after a reserved region above it.
+    // Conventional memory, then 12 MiB from 1 MiB, then a reserved region
+    // above the zone.
     let small = [
+        entry(0x1000, 0x9_E000, usable),
         entry(16 * mib, 64 * mib, memmap_type::RESERVED),
         entry(mib, 12 * mib, usable),
     ];
+    // Exactly 33 MiB above the zone.
+    let exact = [entry(DMA_ZONE_END, 33 * mib, usable)];
     // Fixed arrays, not vectors: this runs before the heap exists.
-    let (big, small) = ([&big[0]], [&small[0], &small[1]]);
+    let (big, small, exact) = ([&big[0]], [&small[0], &small[1], &small[2]], [&exact[0]]);
     let got = [
         metadata_base(&big, 33 * mib),
         metadata_base(&small, 2 * mib),
+        // Fits below 1 MiB, in conventional memory, and nowhere else.
+        metadata_base(&small[..1], 64 * 1024),
         metadata_base(&small, 13 * mib),
+        metadata_base(&exact, 33 * mib),
     ];
-    if got != [Some(DMA_ZONE_END), Some(mib), None] {
+    let want = [
+        Some(DMA_ZONE_END),
+        Some(mib),
+        None,
+        None,
+        Some(DMA_ZONE_END),
+    ];
+    if got != want {
         serial_println!(
-            "[mm]   FAIL: metadata placed at {:x?} (want [{:#x}, {:#x}, none])",
+            "[mm]   FAIL: metadata placed at {:#x?}, want {:#x?}",
             got,
-            DMA_ZONE_END,
-            mib
+            want
         );
         return Err(KernelError::InternalError);
     }
@@ -2001,25 +2016,28 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
 /// Where the allocator's `metadata_size` bytes of metadata go: the start of
 /// the first USABLE region with room for them above the ISA DMA zone
 /// ([`DMA_ZONE_END`]), what of a region lies below the zone's end left out;
-/// below it only when nothing above has room (a machine of little memory).
-/// A PC's first usable region starts at 1 MiB, and a large machine's
-/// metadata -- 33 MiB for 64 GiB -- put there would fill the whole zone,
-/// leaving nothing for the devices that can reach only it (the test PC's
-/// first boot of 2026-10-27 stopped on exactly that). Linux allocates such
-/// early tables from the top of memory for the same reason.
+/// inside the zone only when nothing above has room (a machine of little
+/// memory); and never below [`LOW_MEMORY_RESERVE`], where the SMP
+/// trampoline is copied. A PC's first usable region starts at 1 MiB, and a
+/// large machine's metadata -- 33 MiB for 64 GiB -- put there would fill
+/// the whole zone, leaving nothing for the devices that can reach only it.
+/// Linux allocates such early tables from the top of memory for the same
+/// reason.
 #[allow(clippy::arithmetic_side_effects)]
 fn metadata_base(memory_map: &[&MemmapEntry], metadata_size: u64) -> Option<u64> {
     let frame_size = FRAME_SIZE as u64;
-    [DMA_ZONE_END, 0].into_iter().find_map(|floor| {
-        memory_map
-            .iter()
-            .filter(|entry| entry.type_ == memmap_type::USABLE)
-            .find_map(|entry| {
-                let base = align_up(entry.base.max(floor), frame_size);
-                let end = align_down(entry.base.saturating_add(entry.length), frame_size);
-                (end > base && end - base >= metadata_size).then_some(base)
-            })
-    })
+    [DMA_ZONE_END, LOW_MEMORY_RESERVE]
+        .into_iter()
+        .find_map(|floor| {
+            memory_map
+                .iter()
+                .filter(|entry| entry.type_ == memmap_type::USABLE)
+                .find_map(|entry| {
+                    let base = align_up(entry.base.max(floor), frame_size);
+                    let end = align_down(entry.base.saturating_add(entry.length), frame_size);
+                    (end > base && end - base >= metadata_size).then_some(base)
+                })
+        })
 }
 
 /// Populate the allocator's free lists from USABLE memory map regions,
@@ -2047,11 +2065,10 @@ fn populate_free_lists(
         }
 
         // Skip low memory — reserved for BIOS, IVT, and SMP trampoline.
-        // The frame allocator metadata may live in this range (it's carved
-        // separately), but the frames themselves are never added to the
-        // free list.  This avoids corruption when the SMP trampoline
-        // writes to physical 0x8000 (which would otherwise be a free-list
-        // node in the buddy allocator).
+        // Its frames are never added to the free list, and the metadata is
+        // never placed there either (`metadata_base`): the SMP trampoline
+        // is written to physical 0x8000, which would otherwise be a
+        // free-list node in the buddy allocator, or the metadata itself.
         let start = start.max(LOW_MEMORY_RESERVE);
         if end <= start {
             continue;
@@ -2083,8 +2100,8 @@ fn populate_free_lists(
 
 /// Initialize the physical frame allocator from the bootloader memory map.
 ///
-/// Scans the Limine memory map for `USABLE` regions, carves off a small
-/// metadata area from the first suitable region, and populates the buddy
+/// Scans the Limine memory map for `USABLE` regions, carves off the
+/// metadata area where `metadata_base` puts it, and populates the buddy
 /// free lists with all remaining usable frames.
 ///
 /// # Safety

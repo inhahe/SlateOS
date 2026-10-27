@@ -1542,8 +1542,7 @@ fn self_test_inner() {
 
     // Test 15: Tick processing (run a few ticks): each counted where guest
     // integration was set up, none on bare metal, where there is nothing to
-    // tick (the test PC's boot of 2026-10-27 stopped on a test that expected
-    // a hypervisor, as QEMU always is).
+    // tick -- QEMU is always a hypervisor, a real PC need not be.
     let before = TICK_COUNTER.load(Ordering::Relaxed);
     tick();
     tick();

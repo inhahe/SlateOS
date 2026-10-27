@@ -603,7 +603,95 @@ use spin::Mutex;
 static XHCI: Mutex<Option<Box<XhciController>>> = Mutex::new(None);
 
 // ---------------------------------------------------------------------------
-// MMIO register access helpers
+// Taking the controller from the firmware
+// ---------------------------------------------------------------------------
+
+/// How long after the controller starts its ports are given to show their
+/// devices (see `XhciController::init`).
+const PORT_SETTLE_NS: u64 = 500_000_000;
+
+/// Extended capability ID of USB Legacy Support (xHCI §7.1).
+const XECP_LEGACY: u32 = 1;
+/// USBLEGSUP: the firmware's and the OS's ownership semaphores.
+const LEGSUP_BIOS_OWNED: u32 = 1 << 16;
+const LEGSUP_OS_OWNED: u32 = 1 << 24;
+/// USBLEGCTLSTS: what is kept when the firmware's SMI enables are cleared
+/// (reserved and read-only bits, as Linux keeps them), and the SMI event
+/// bits, write-1-to-clear.
+const LEGCTL_KEEP: u32 = (0x7 << 1) | (0xFF << 5) | (0x7 << 17);
+const LEGCTL_EVENTS: u32 = 0x7 << 29;
+/// How long the firmware is given to let go of the controller: a second, as
+/// Linux gives it.
+const HANDOFF_NS: u64 = 1_000_000_000;
+
+/// Take the controller from the firmware (xHCI §4.22.1).
+///
+/// With USB legacy support on, the firmware drives the controller from
+/// System Management Mode so that a USB keyboard works before an OS loads.
+/// An OS that resets the controller without asking leaves that code driving
+/// a controller it no longer understands -- on the test PC, a machine that
+/// froze soon after the controller ran, its devices unseen. So the OS asks
+/// (OS Owned) and the firmware lets go (BIOS Owned clears); a firmware that
+/// has not let go within a second is overruled. Then the firmware's SMIs are
+/// turned off and any pending cleared. A controller without the capability
+/// was never the firmware's.
+///
+/// # Safety
+///
+/// `base` is the controller's mapped register block, and `hccparams1` its
+/// HCCPARAMS1.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn take_from_firmware(base: *mut u8, hccparams1: u32) {
+    // The extended capabilities: a list, offsets in 32-bit words, the first
+    // from the base, each next from the one before.
+    let mut at = ((hccparams1 >> 16) & 0xFFFF) as usize * 4;
+    let mut hops = 0u32;
+    while at != 0 && hops < 64 {
+        hops += 1;
+        // SAFETY: an extended capability inside the mapped register block.
+        let cap = unsafe { mmio_read32(base, at) };
+        if cap & 0xFF == XECP_LEGACY {
+            if cap & LEGSUP_BIOS_OWNED != 0 {
+                // SAFETY: as above.
+                unsafe { mmio_write32(base, at, cap | LEGSUP_OS_OWNED) };
+                let asked = crate::hrtimer::now_ns();
+                // SAFETY: as above.
+                while unsafe { mmio_read32(base, at) } & LEGSUP_BIOS_OWNED != 0 {
+                    if crate::hrtimer::now_ns().saturating_sub(asked) > HANDOFF_NS {
+                        // SAFETY: as above.
+                        let now = unsafe { mmio_read32(base, at) };
+                        // SAFETY: as above.
+                        unsafe {
+                            mmio_write32(base, at, (now & !LEGSUP_BIOS_OWNED) | LEGSUP_OS_OWNED);
+                        }
+                        crate::serial_println!(
+                            "[xhci] The firmware kept the controller past a second: taken from it"
+                        );
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+                crate::serial_println!("[xhci] Taken over from the firmware's USB legacy support");
+            } else {
+                // SAFETY: as above.
+                unsafe { mmio_write32(base, at, cap | LEGSUP_OS_OWNED) };
+            }
+            // SAFETY: USBLEGCTLSTS follows USBLEGSUP.
+            let control = unsafe { mmio_read32(base, at + 4) };
+            // SAFETY: as above.
+            unsafe { mmio_write32(base, at + 4, (control & LEGCTL_KEEP) | LEGCTL_EVENTS) };
+            return;
+        }
+        let next = ((cap >> 8) & 0xFF) as usize * 4;
+        if next == 0 {
+            break;
+        }
+        at += next;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Register access
 // ---------------------------------------------------------------------------
 
 /// Read a 32-bit MMIO register.
@@ -752,6 +840,9 @@ impl XhciController {
         let op_base = unsafe { mmio_base.add(cap_length as usize) };
         let rt_base = unsafe { mmio_base.add(rts_off as usize) };
         let db_base = unsafe { mmio_base.add(db_off as usize) };
+
+        // SAFETY: mmio_base is the mapped register block; hccparams1 its own.
+        unsafe { take_from_firmware(mmio_base, hccparams1) };
 
         // ---- Controller Reset ----
 
@@ -961,6 +1052,16 @@ impl XhciController {
             slot_int: [IntIn::default(); MAX_SLOTS],
             stray_transfer_events: 0,
         });
+
+        // A port shows its device only once it has powered up and the
+        // connection has debounced -- USB 2 gives a device 100 ms to connect
+        // after power is good, then 100 ms of debounce -- and a reset just
+        // took every port down. QEMU's ports are connected at once; a real
+        // controller's are not, and a scan straight after the start saw none.
+        let settle_from = crate::hrtimer::now_ns();
+        while crate::hrtimer::now_ns().saturating_sub(settle_from) < PORT_SETTLE_NS {
+            core::hint::spin_loop();
+        }
 
         // Scan ports for connected devices.
         ctrl.scan_ports();

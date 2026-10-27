@@ -207,8 +207,23 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
     // If the write fails, silently drop the output rather than panicking
     // inside a print path.
     with_serial(|port| {
-        let _ = port.write_fmt(args);
+        if crate::screenlog::active() {
+            let _ = ScreenTee(port).write_fmt(args);
+        } else {
+            let _ = port.write_fmt(args);
+        }
     });
+}
+
+/// The serial port, with each piece written also fed to the kernel's log
+/// pane on the screen (`screenlog`, `log.screen=1`).
+struct ScreenTee<'a>(&'a mut SerialPort);
+
+impl fmt::Write for ScreenTee<'_> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        crate::screenlog::feed(s.as_bytes());
+        self.0.write_str(s)
+    }
 }
 
 /// Write raw bytes to the serial port, with no UTF-8 interpretation.
@@ -225,6 +240,7 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
 /// the *only* transformation applied — every other byte goes out verbatim.
 pub fn _print_bytes(bytes: &[u8]) {
     with_serial(|port| {
+        crate::screenlog::feed(bytes);
         for &byte in bytes {
             if byte == b'\n' {
                 port.write_byte(b'\r');

@@ -974,7 +974,14 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
     }
 
     let cols = width / GLYPH_WIDTH;
-    let rows = height / GLYPH_HEIGHT;
+    let mut rows = height / GLYPH_HEIGHT;
+    // With the kernel's log on the screen (`log.screen=1`), the console
+    // keeps the top quarter and the log pane the rest: the console scrolls
+    // and erases its own rows only, so the two never draw on each other.
+    let log_pane = crate::screenlog::requested() && rows >= 16;
+    if log_pane {
+        rows /= 4;
+    }
 
     let mut con = CONSOLE.lock_irqsave();
     con.fb_addr = addr;
@@ -994,6 +1001,19 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
     // Clear the screen to the background color so we start fresh.
     drop(con);
     clear();
+    if log_pane {
+        // SAFETY: the framebuffer the caller vouched for; the console draws
+        // only in its first `rows` glyph rows, above the pane.
+        unsafe {
+            crate::screenlog::start(
+                addr,
+                pitch,
+                width,
+                rows.saturating_mul(GLYPH_HEIGHT),
+                height,
+            );
+        }
+    }
 
     crate::serial_println!(
         "[console] Framebuffer console: {}x{} chars ({}x{} px)",
@@ -1130,8 +1150,11 @@ pub fn show_hint(text: &'static str) {
 
 /// Give the bottom row back to the console, blank ([`show_hint`]). Nothing,
 /// when there is no hint -- without taking the console's lock, since every
-/// page flip and commit a program makes asks.
+/// page flip and commit a program makes asks. A program that flips or sets
+/// a mode has taken the display, so the kernel's log pane stops too
+/// (`screenlog`).
 pub fn hide_hint() {
+    crate::screenlog::stop();
     if !HINT_SHOWN.load(core::sync::atomic::Ordering::Acquire) {
         return;
     }

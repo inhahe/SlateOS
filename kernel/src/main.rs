@@ -175,6 +175,7 @@ mod sched;
 mod sched_fairness;
 mod sched_migrate;
 mod sclatency;
+mod screenlog;
 mod security;
 mod selftest;
 mod serial;
@@ -8559,6 +8560,13 @@ extern "C" fn kernel_main() -> ! {
     // §914: Diagnostic — cosmetic rendering, not structural integrity.
     selftest::dispatch_debug("Console", selftest::Severity::Diagnostic, || {
         console::self_test()
+    });
+
+    // The log pane's line assembly and drawing (`log.screen=1`), on a
+    // framebuffer in memory.
+    // §914: Diagnostic — a debugging aid's rendering.
+    selftest::dispatch_debug("Screen log", selftest::Severity::Diagnostic, || {
+        screenlog::self_test()
     });
 
     // TTY/termios layer self-test (depends on the console being up so that

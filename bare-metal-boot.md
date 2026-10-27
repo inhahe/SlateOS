@@ -194,13 +194,17 @@ a board with no COM header, a PCIe serial card does it: add
 port on the PCI bus as well as to COM1, at 115200 8N1 (`=2` names the second,
 and so on, in the order the PCI scan meets them). The kernel finds the card
 before it prints its first line, switches on its I/O decoding and that of the
-bridges leading to it, and checks it in loopback before using it: the line
-after `=== Kernel booting ===` says which port it took, or why it took none. A
-port that stops taking bytes mid-boot is dropped, with a line saying so, rather
-than hanging the kernel. It is not done unasked, since whatever is plugged into
-a serial port would be sent the log. A card qualifies when its class says
-"16550-compatible serial port", or it is an ASIX AX99100 serial function; its
-registers must be I/O ports, not memory.
+bridges leading to it -- once each bridge's I/O window is seen to hold the
+card's port -- and checks it in loopback before using it, switching off again
+what it switched on if it does not answer. The log's first line, before
+`=== Kernel booting ===`, says which port it took, or why it took none. A port
+that stops taking bytes mid-boot is dropped, with a line saying so, rather than
+hanging the kernel. It is not done unasked, since whatever is plugged into a
+serial port would be sent the log. A card qualifies when its class says
+"serial port, 16550 to 16950", or it is an ASIX AX99100 serial function; its
+registers must be I/O ports, not memory. The divisor is set for the usual
+1.8432 MHz UART clock: a card whose UART runs from another (some Oxford
+16950 parts) comes up at another rate.
 
 ### Keep the machine's own disks safe: `blk.writable=`
 

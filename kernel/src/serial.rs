@@ -105,8 +105,8 @@ impl SerialPort {
             // Enable FIFO, clear TX/RX queues, 14-byte threshold.
             port::outb(self.base + regs::FCR, 0xC7);
 
-            // IRQs enabled, RTS/DSR set.
-            port::outb(self.base + regs::MCR, 0x0B);
+            // DTR, RTS, OUT2.
+            port::outb(self.base.wrapping_add(regs::MCR), MCR_NORMAL);
         }
     }
 
@@ -114,7 +114,25 @@ impl SerialPort {
     fn is_transmit_empty(&self) -> bool {
         // SAFETY: Reading the LSR of a valid COM port is safe.
         let lsr = unsafe { port::inb(self.base + regs::LSR) };
-        lsr & 0x20 != 0
+        lsr & LSR_THR_EMPTY != 0
+    }
+
+    /// Write a single byte once the transmitter has room, waiting at most
+    /// `polls` line-status reads for it: whether it was written.
+    fn try_write_byte(&self, byte: u8, polls: u32) -> bool {
+        if !(0..polls).any(|_| {
+            let room = self.is_transmit_empty();
+            if !room {
+                core::hint::spin_loop();
+            }
+            room
+        }) {
+            return false;
+        }
+        // SAFETY: the THR of the port `self` was made for, its transmitter
+        // with room.
+        unsafe { port::outb(self.base.wrapping_add(regs::THR), byte) };
+        true
     }
 
     /// Write a single byte, blocking until the UART is ready. A byte for
@@ -173,24 +191,10 @@ fn mirror_byte(byte: u8) {
     use core::sync::atomic::Ordering;
 
     let base = MIRROR.load(Ordering::Relaxed);
-    if base == 0 {
-        return;
+    if base != 0 && !SerialPort::new(base).try_write_byte(byte, PORT_POLLS_MAX) {
+        MIRROR.store(0, Ordering::Relaxed);
+        MIRROR_LOST.store(true, Ordering::Relaxed);
     }
-    let mut polls = 0u32;
-    // SAFETY: `base` is the first register of a 16550 that answered the
-    // loopback test with its decoding on; reading its line status has no
-    // side effect.
-    while unsafe { port::inb(base.wrapping_add(regs::LSR)) } & LSR_THR_EMPTY == 0 {
-        polls = polls.saturating_add(1);
-        if polls >= PORT_POLLS_MAX {
-            MIRROR.store(0, Ordering::Relaxed);
-            MIRROR_LOST.store(true, Ordering::Relaxed);
-            return;
-        }
-        core::hint::spin_loop();
-    }
-    // SAFETY: as above; its transmitter has room.
-    unsafe { port::outb(base.wrapping_add(regs::THR), byte) };
 }
 
 /// Whether a 16550 answers at `base`, which [`SerialPort::init`] has set up:
@@ -312,6 +316,27 @@ fn attach_pci_port() {
             );
             return;
         }
+        UartSearch::BridgeClosed(bridge, port) => {
+            crate::serial_println!(
+                "[serial] log.pci_serial={}: the bridge at {:02x}:{:02x}.{} does not pass the port's I/O {:#x} through (outside its I/O window); nothing switched on",
+                nth,
+                bridge.bus,
+                bridge.device,
+                bridge.function,
+                port
+            );
+            return;
+        }
+        UartSearch::TooDeep(at) => {
+            crate::serial_println!(
+                "[serial] log.pci_serial={}: the serial port at {:02x}:{:02x}.{} is behind more bridges than are looked through; nothing switched on",
+                nth,
+                at.bus,
+                at.device,
+                at.function
+            );
+            return;
+        }
     };
     let port = SerialPort::new(uart.port);
     // SAFETY: `early_uart` found a 16550-compatible function whose BAR0 is
@@ -335,16 +360,21 @@ fn attach_pci_port() {
                 uart.opened
             );
         }
-        Err((lsr, got)) => crate::serial_println!(
-            "[serial] log.pci_serial={}: the serial port at {:02x}:{:02x}.{} (I/O {:#x}) does not answer: in loopback, line status {:#04x}, byte {:#04x}",
-            nth,
-            at.bus,
-            at.device,
-            at.function,
-            uart.port,
-            lsr,
-            got
-        ),
+        Err((lsr, got)) => {
+            // Not the port it looked like: what was switched on to reach it
+            // is switched off again.
+            crate::pci::close_io_decode(&uart);
+            crate::serial_println!(
+                "[serial] log.pci_serial={}: the serial port at {:02x}:{:02x}.{} (I/O {:#x}) does not answer: in loopback, line status {:#04x}, byte {:#04x}; I/O decoding switched back off",
+                nth,
+                at.bus,
+                at.device,
+                at.function,
+                uart.port,
+                lsr,
+                got
+            );
+        }
     }
 }
 
@@ -394,6 +424,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         }
     }
     crate::serial_println!("[serial]   log.pci_serial= parsing: OK");
+    self_test_pci_port()
+}
+
+/// The first PCI serial port, found as `log.pci_serial=1` finds one --
+/// through the bridges, their windows checked -- and answering in loopback.
+/// The boot test's QEMU has one behind a root port; a machine with none says
+/// so. A port the log already goes to is left as it is.
+fn self_test_pci_port() -> crate::error::KernelResult<()> {
+    use crate::pci::UartSearch;
+
+    let uart = match crate::pci::early_uart(1) {
+        UartSearch::Found(uart) => uart,
+        UartSearch::TooFew(0) => {
+            crate::serial_println!(
+                "[serial]   no PCI serial port here: the search is not exercised"
+            );
+            return Ok(());
+        }
+        other => {
+            crate::serial_println!("[serial]   FAIL: the first PCI serial port: {:?}", other);
+            return Err(crate::error::KernelError::InternalError);
+        }
+    };
+    if uart.port != MIRROR.load(core::sync::atomic::Ordering::Relaxed) {
+        let port = SerialPort::new(uart.port);
+        // SAFETY: `early_uart` found a 16550-compatible function whose BAR0
+        // is these I/O ports, its decoding on; nothing else drives it (the log
+        // goes to another port, or none), and loopback sends nothing out.
+        if let Err((lsr, got)) = unsafe {
+            port.init();
+            loopback_answers(uart.port)
+        } {
+            crate::serial_println!(
+                "[serial]   FAIL: the PCI serial port at I/O {:#x} does not answer: line status {:#04x}, byte {:#04x}",
+                uart.port,
+                lsr,
+                got
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    let at = uart.address;
+    crate::serial_println!(
+        "[serial]   the PCI serial port at {:02x}:{:02x}.{} (I/O {:#x}) found and answering: OK",
+        at.bus,
+        at.device,
+        at.function,
+        uart.port
+    );
     Ok(())
 }
 

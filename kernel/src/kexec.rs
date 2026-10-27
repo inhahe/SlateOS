@@ -2168,7 +2168,9 @@ pub unsafe fn quiesce() {
 
     // 2. Mask every IOAPIC line, so no device interrupt is delivered to the new
     //    kernel before it has installed its own IDT and re-programmed the IOAPIC.
-    // SAFETY: step 1b stopped every other CPU for good.
+    // SAFETY: step 1b stopped the other CPUs where they stood, or reported
+    // the one that did not stop; a running CPU lets the lock go within the
+    // seize's wait, and only a stopped one holds it through it.
     unsafe { crate::ioapic::mask_all() };
 
     // 3. Stop the LAPIC timer (the one interrupt source the kernel itself arms).
@@ -2182,7 +2184,9 @@ pub unsafe fn quiesce() {
     //    function. A device left mastering could DMA through the old kernel's
     //    mappings into memory the new kernel is using. Every bus behind every
     //    bridge.
-    // SAFETY: step 1b stopped every other CPU for good.
+    // SAFETY: step 1b stopped the other CPUs where they stood, or reported
+    // the one that did not stop; a running CPU lets the lock go within the
+    // seize's wait, and only a stopped one holds it through it.
     unsafe { crate::pci::disable_bus_master_everywhere() };
 
     // 5. The IOMMU: translation off on every unit, so that the new kernel's

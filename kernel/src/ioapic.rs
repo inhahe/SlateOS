@@ -524,8 +524,9 @@ pub fn mask_irq(irq: u8) {
 ///
 /// # Safety
 ///
-/// No other CPU may run kernel code again (`kexec`'s stopped CPUs): one
-/// that did might be in the middle of an access, and would be cut off.
+/// For a restart, with the other CPUs stopped (`kexec`): a CPU still
+/// holding the window after `WindowLock::seize`'s wait must be one that
+/// will never run again.
 pub unsafe fn mask_all() {
     // SAFETY: the caller's.
     unsafe { WINDOW.seize() };

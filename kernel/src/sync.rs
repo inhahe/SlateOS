@@ -1870,14 +1870,24 @@ impl WindowLock {
         })
     }
 
-    /// Take the lock from whichever CPU holds it, which then never gives it
-    /// back: for a restart.
+    /// For a restart, whose other CPUs are stopped wherever they stood: wait
+    /// a little for the lock to be let go -- a CPU still running holds it a
+    /// few microseconds -- and if it is not, take it from its holder, which
+    /// stopped holding it and never will let it go. The lock is free after.
     ///
     /// # Safety
     ///
-    /// No other CPU may run kernel code again; one that did might be in the
-    /// middle of an access, and would be cut off.
+    /// A CPU holding the lock through the wait (some milliseconds) must be one
+    /// that will never run again: one that was merely slow would have its
+    /// access cut off.
     pub unsafe fn seize(&self) {
+        const POLLS: u32 = 1_000_000;
+        for _ in 0..POLLS {
+            if self.holder.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            core::hint::spin_loop();
+        }
         self.holder.store(0, Ordering::Release);
     }
 }
@@ -1966,7 +1976,39 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Test 7: the spin-stall detector actually fires.
     self_test_stall();
 
+    // Test 8: a register-window lock.
+    self_test_window_lock()?;
+
     serial_println!("[sync] Self-test PASSED");
+    Ok(())
+}
+
+/// [`WindowLock`]: an access from inside a held one is told it is nested,
+/// an outer one is not, and the lock is free after; a restart's seize takes
+/// it from a holder that never lets go, and leaves a free one free.
+fn self_test_window_lock() -> crate::error::KernelResult<()> {
+    let lock = WindowLock::new();
+    let seen = lock.with(|outer| (outer, lock.with(|inner| inner)));
+    let free_after = lock.holder.load(Ordering::Acquire) == 0;
+    // A holder that is no CPU at all, as a stopped one never lets go.
+    lock.holder.store(usize::MAX, Ordering::Release);
+    // SAFETY: a lock of this test's own, which no access uses.
+    unsafe { lock.seize() };
+    let seized = lock.holder.load(Ordering::Acquire) == 0;
+    // SAFETY: as above.
+    unsafe { lock.seize() };
+    let usable = !lock.with(|nested| nested);
+    if seen != (false, true) || !free_after || !seized || !usable {
+        crate::serial_println!(
+            "[sync]   FAIL: window lock: nested {:?} (want (false, true)), free after {}, seized {}, usable {}",
+            seen,
+            free_after,
+            seized,
+            usable
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!("[sync]   WindowLock: nesting told, a stopped holder's lock seized: OK");
     Ok(())
 }
 

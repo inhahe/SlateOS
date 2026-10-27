@@ -149,21 +149,19 @@ impl Pane {
     /// reaches, so whatever the screen held before -- a loader's image, the
     /// previous kernel's desktop after a kexec -- would show beside it.
     fn blank(&self, width: u32, height: u32) {
+        // The background is black, all zero bytes: a row is one fill, as wide
+        // as the CPU stores, rather than a store a pixel -- a 4K screen's pane
+        // is millions of pixels.
+        const _: () = assert!(BG == 0);
+        let row_bytes = usize::try_from(width).unwrap_or(0).saturating_mul(4);
         for y in self.top..height {
             let row = self
                 .fb
                 .wrapping_add(u64::from(y).wrapping_mul(u64::from(self.pitch)));
-            for x in 0..width {
-                // SAFETY: inside the pane's rows of the framebuffer, which
-                // `start`'s caller vouched for (`width` pixels a row, rows
-                // `top..height`); a framebuffer's pixels are 4-byte aligned.
-                unsafe {
-                    core::ptr::write_volatile(
-                        row.wrapping_add(u64::from(x).wrapping_mul(4)) as *mut u32,
-                        BG,
-                    );
-                }
-            }
+            // SAFETY: inside the pane's rows of the framebuffer, which
+            // `start`'s caller vouched for (`width` pixels a row, rows
+            // `top..height`).
+            unsafe { core::ptr::write_bytes(row as *mut u8, 0, row_bytes) };
         }
     }
 

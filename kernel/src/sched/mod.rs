@@ -8624,12 +8624,13 @@ const IDLE_ORPHAN_CHECK_TICKS: u64 = 100;
 /// leaving the boot test to time out at a bare HLT.
 const IDLE_IF_OFF_SECS: u64 = 30;
 
-/// [`IDLE_IF_OFF_SECS`] in TSC cycles, at the calibrated rate; at 4 GHz
-/// before the TSC is calibrated (`bench::calibrate_tsc`), the fastest rate
-/// one runs at, so that the wait is never shorter than meant.
+/// [`IDLE_IF_OFF_SECS`] in TSC cycles, at the calibrated rate; at 8 GHz
+/// before the TSC is calibrated (`bench::calibrate_tsc`), above any TSC's
+/// rate (desktop parts run theirs near 4.5 GHz), so that the wait is never
+/// shorter than meant.
 fn idle_if_off_cycles() -> u64 {
     let hz = match crate::bench::tsc_freq() {
-        0 => 4_000_000_000,
+        0 => 8_000_000_000,
         hz => hz,
     };
     hz.saturating_mul(IDLE_IF_OFF_SECS)

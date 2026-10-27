@@ -371,9 +371,11 @@ fn for_each_function(mut f: impl FnMut(PciAddress)) {
 // Serial ports, before the heap
 // ---------------------------------------------------------------------------
 
-/// Class, subclass and programming interface of a 16550-compatible serial
-/// port: class 07h (communication), subclass 00h (serial), interface 02h.
-const CLASS_SERIAL_16550: u32 = 0x07_00_02;
+/// Class, subclass and programming interface of the serial ports driven as
+/// a 16550: class 07h (communication), subclass 00h (serial), interface 02h
+/// (16550) to 06h (16650, 16750, 16850, 16950) -- the 16550's registers,
+/// with more beside them. Linux's `serial_pci_guess_board` takes the same.
+const CLASS_SERIAL_16550: core::ops::RangeInclusive<u32> = 0x07_00_02..=0x07_00_06;
 /// Class code, subclass, interface and revision (32-bit, offset 0x08).
 const CFG_CLASS_REVISION: u8 = 0x08;
 /// Subsystem vendor id (low half) and subsystem id (high half), offset 0x2C
@@ -381,6 +383,16 @@ const CFG_CLASS_REVISION: u8 = 0x08;
 const CFG_SUBSYSTEM: u8 = 0x2C;
 /// A bridge's subordinate bus number: the highest bus behind it.
 const CFG_SUBORDINATE_BUS: u8 = 0x1A;
+/// A bridge's I/O window: base (bits 7:4 are address bits 15:12; bits 3:0
+/// are 1 for 32-bit I/O addressing) and limit, 8-bit each.
+const CFG_IO_BASE: u8 = 0x1C;
+const CFG_IO_LIMIT: u8 = 0x1D;
+/// The upper 16 bits of the window's base and limit, for 32-bit I/O.
+const CFG_IO_BASE_UPPER: u8 = 0x30;
+const CFG_IO_LIMIT_UPPER: u8 = 0x32;
+/// The most bridges [`early_uart`] looks through to reach a port: a PC's
+/// slots sit one or two deep.
+const UART_PATH_MAX: usize = 8;
 /// Vendor id (low half) and device id (high half) of the ASIX AX99100, a
 /// PCIe chip whose functions are serial, parallel, SPI or I2C ports.
 const ASIX_AX99100_ID: u32 = 0x9100_125B;
@@ -396,9 +408,11 @@ pub struct PciUart {
     /// The I/O port of its first register (its BAR0).
     pub port: u16,
     /// How many command registers had I/O decoding switched on to reach it:
-    /// its own and those of the bridges leading to it. Firmware leaves it
-    /// off where no firmware driver used the device.
-    pub opened: u32,
+    /// its own and those of the bridges leading to it, firmware leaving it
+    /// off where no firmware driver used the device. They are the first
+    /// `opened` of `switched`, which [`close_io_decode`] switches off again.
+    pub opened: usize,
+    switched: [PciAddress; UART_PATH_MAX + 1],
 }
 
 /// What [`early_uart`] found.
@@ -411,6 +425,13 @@ pub enum UartSearch {
     /// The port asked for has no I/O-port registers to drive: its BAR0
     /// (shown raw) is memory, unassigned, or above the 64 KiB I/O space.
     NoIoPorts(PciAddress, u32),
+    /// A bridge leading to the port does not pass its I/O port through: the
+    /// port is outside the bridge's I/O window, which firmware never set for
+    /// it. Nothing was switched on.
+    BridgeClosed(PciAddress, u16),
+    /// More bridges lead to the port than [`UART_PATH_MAX`]: not looked
+    /// through. Nothing was switched on.
+    TooDeep(PciAddress),
 }
 
 /// Whether a function is a serial port the kernel can drive as a 16550:
@@ -419,18 +440,19 @@ pub enum UartSearch {
 /// reads the dword at 0x2C (only asked for of an AX99100, since in a bridge
 /// that offset is something else).
 fn is_serial_16550(id: u32, class_revision: u32, subsystem: impl FnOnce() -> u32) -> bool {
-    class_revision >> 8 == CLASS_SERIAL_16550
+    CLASS_SERIAL_16550.contains(&(class_revision >> 8))
         || (id == ASIX_AX99100_ID && subsystem() == ASIX_AX99100_SERIAL)
 }
 
 /// The `nth` (from 1) 16550-compatible serial port on the PCI bus, in
 /// [`for_each_function`]'s order, with I/O decoding switched on in it and in
-/// every bridge leading to it.
+/// every bridge leading to it -- once each of those bridges is seen to pass
+/// the port through (its I/O window holds it), and not otherwise: a bridge
+/// switched on with a window firmware never set would claim I/O ports the
+/// machine's own devices answer.
 ///
 /// Allocates nothing and needs nothing set up but the config ports, so the
-/// serial console can call it before anything else runs; and it must run on
-/// one CPU with no other config access going on, since the 0xCF8/0xCFC pair
-/// is not taken under a lock.
+/// serial console can call it before anything else runs.
 pub fn early_uart(nth: usize) -> UartSearch {
     let mut seen = 0usize;
     let mut hit = None;
@@ -458,28 +480,102 @@ pub fn early_uart(nth: usize) -> UartSearch {
         Ok(port) if bar & 1 != 0 && port != 0 => port,
         _ => return UartSearch::NoIoPorts(addr, bar),
     };
-    let mut opened = u32::from(open_io_decode(addr));
+    // The bridges leading to it, each checked to pass the port through.
+    let mut path = [addr; UART_PATH_MAX];
+    let mut depth = 0usize;
+    let mut refused = None;
     for_each_function(|bridge| {
         let (bus, dev, func) = (bridge.bus, bridge.device, bridge.function);
-        if config_read8(bus, dev, func, CFG_HEADER_TYPE) & !HEADER_TYPE_MULTIFUNCTION
-            != HEADER_TYPE_BRIDGE
+        if refused.is_some()
+            || config_read8(bus, dev, func, CFG_HEADER_TYPE) & !HEADER_TYPE_MULTIFUNCTION
+                != HEADER_TYPE_BRIDGE
         {
             return;
         }
         // A bridge leads to the buses from its secondary to its subordinate;
         // one firmware never numbered (secondary 0) leads nowhere.
         let behind = config_read8(bus, dev, func, CFG_SECONDARY_BUS);
-        if behind != 0
-            && (behind..=config_read8(bus, dev, func, CFG_SUBORDINATE_BUS)).contains(&addr.bus)
+        if behind == 0
+            || !(behind..=config_read8(bus, dev, func, CFG_SUBORDINATE_BUS)).contains(&addr.bus)
         {
-            opened = opened.saturating_add(u32::from(open_io_decode(bridge)));
+            return;
+        }
+        if !io_window(bridge).contains(&u32::from(port)) {
+            refused = Some(UartSearch::BridgeClosed(bridge, port));
+        } else if let Some(slot) = path.get_mut(depth) {
+            *slot = bridge;
+            depth = depth.saturating_add(1);
+        } else {
+            refused = Some(UartSearch::TooDeep(addr));
         }
     });
-    UartSearch::Found(PciUart {
+    if let Some(refusal) = refused {
+        return refusal;
+    }
+    let mut uart = PciUart {
         address: addr,
         port,
-        opened,
-    })
+        opened: 0,
+        switched: [addr; UART_PATH_MAX + 1],
+    };
+    for &function in core::iter::once(&addr).chain(path.get(..depth).unwrap_or(&[])) {
+        if open_io_decode(function)
+            && let Some(slot) = uart.switched.get_mut(uart.opened)
+        {
+            *slot = function;
+            uart.opened = uart.opened.saturating_add(1);
+        }
+    }
+    UartSearch::Found(uart)
+}
+
+/// The I/O ports a bridge passes through to the buses behind it: its I/O
+/// window ([`io_window_of`]).
+fn io_window(bridge: PciAddress) -> core::ops::RangeInclusive<u32> {
+    let (bus, dev, func) = (bridge.bus, bridge.device, bridge.function);
+    let base = config_read8(bus, dev, func, CFG_IO_BASE);
+    io_window_of(
+        base,
+        config_read8(bus, dev, func, CFG_IO_LIMIT),
+        // Read only for 32-bit addressing: a 16-bit window's are not there.
+        (base & 0x0F == 0x01).then(|| {
+            (
+                config_read16(bus, dev, func, CFG_IO_BASE_UPPER),
+                config_read16(bus, dev, func, CFG_IO_LIMIT_UPPER),
+            )
+        }),
+    )
+}
+
+/// A bridge's I/O window from its registers: base and limit (address bits
+/// 15:12 in bits 7:4; the limit's low 12 bits all ones), and for 32-bit
+/// addressing the upper 16 bits of each (PCI-to-PCI Bridge Architecture
+/// Specification 1.2, 3.2.5.6). Empty when the base is above the limit.
+fn io_window_of(base: u8, limit: u8, upper: Option<(u16, u16)>) -> core::ops::RangeInclusive<u32> {
+    let (base_upper, limit_upper) = upper.unwrap_or((0, 0));
+    let low = (u32::from(base & 0xF0) << 8) | (u32::from(base_upper) << 16);
+    let high = (u32::from(limit & 0xF0) << 8) | 0xFFF | (u32::from(limit_upper) << 16);
+    low..=high
+}
+
+/// Switch off again the I/O decoding [`early_uart`] switched on for `uart`:
+/// for a port that then did not answer.
+pub fn close_io_decode(uart: &PciUart) {
+    for &function in uart.switched.get(..uart.opened).unwrap_or(&[]) {
+        let command = config_read16(
+            function.bus,
+            function.device,
+            function.function,
+            CFG_COMMAND,
+        );
+        config_write16_native(
+            function.bus,
+            function.device,
+            function.function,
+            CFG_COMMAND,
+            command & !CMD_IO_SPACE,
+        );
+    }
 }
 
 /// Switch on I/O decoding in a function's command register; whether it was
@@ -626,8 +722,9 @@ pub fn disable_bus_master(addr: PciAddress) {
 ///
 /// # Safety
 ///
-/// No other CPU may run kernel code again: one that did could be in the
-/// middle of a config access, and would be cut off.
+/// For a restart, with the other CPUs stopped: a CPU still holding the
+/// config ports after `WindowLock::seize`'s wait must be one that will
+/// never run again.
 pub unsafe fn disable_bus_master_everywhere() {
     // SAFETY: the caller's.
     unsafe { CONFIG_PORTS.seize() };
@@ -1246,13 +1343,17 @@ fn self_test_nested_access() -> Result<(), &'static str> {
 /// controller, an AX99100 parallel port, another vendor's chip carrying the
 /// AX99100's subsystem ids.
 fn self_test_serial_match() -> Result<(), &'static str> {
-    let cases: [(u32, u32, u32, bool); 6] = [
+    let cases: [(u32, u32, u32, bool); 9] = [
         // QEMU's pci-serial: class 07/00/02, revision 1.
         (0x0002_1B36, 0x0700_0201, 0, true),
         (ASIX_AX99100_ID, 0x0700_0000, ASIX_AX99100_SERIAL, true),
-        // A 16450 (interface 00) and a 16650 (interface 03): not 16550s.
+        // An 8250 (interface 00) and a 16450 (01): not 16550s. A 16650 (03)
+        // and a 16950 (06) are: the 16550's registers, and more.
         (0x0002_1B36, 0x0700_0001, 0, false),
-        (0x0002_1B36, 0x0700_0301, 0, false),
+        (0x0002_1B36, 0x0700_0101, 0, false),
+        (0x0002_1B36, 0x0700_0301, 0, true),
+        (0x0002_1B36, 0x0700_0601, 0, true),
+        (0x0002_1B36, 0x0700_0701, 0, false),
         // The AX99100's parallel port (subsystem 2000h).
         (ASIX_AX99100_ID, 0x0701_0300, 0x2000_A000, false),
         (0x9100_1234, 0x0780_0000, ASIX_AX99100_SERIAL, false),
@@ -1269,7 +1370,27 @@ fn self_test_serial_match() -> Result<(), &'static str> {
             return Err("serial port matching");
         }
     }
-    crate::serial_println!("[pci]   serial port matching: OK");
+    // A bridge's I/O window: as reset (0, 0: the first 4 KiB, which a port
+    // firmware placed higher is not in), one at 0x6000, a 32-bit one, and one
+    // turned off (base above limit).
+    let windows = [
+        io_window_of(0, 0, None),
+        io_window_of(0x60, 0x70, None),
+        io_window_of(0x61, 0x61, Some((1, 1))),
+    ];
+    let off = io_window_of(0xF0, 0x00, None);
+    if windows != [0..=0xFFF, 0x6000..=0x7FFF, 0x1_6000..=0x1_6FFF]
+        || windows
+            .iter()
+            .map(|w| w.contains(&0x6000))
+            .collect::<Vec<_>>()
+            != [false, true, false]
+        || !off.is_empty()
+    {
+        crate::serial_println!("[pci]   FAIL: bridge I/O windows read as {:x?}", windows);
+        return Err("bridge I/O window");
+    }
+    crate::serial_println!("[pci]   serial port matching, bridge I/O windows: OK");
     Ok(())
 }
 

@@ -10012,6 +10012,12 @@ QEMU_START_EPOCH=$(date +%s)
 # before it turns one on; QEMU's default was 39 bits, 3-level, before 9.2, and
 # `check_iommu_active` fails a boot whose unit stayed off.
 # virtio devices bypass it (they would need `iommu_platform=on`).
+#
+# `pci-serial` behind its own root port: a 16550 on the PCI bus, as the PCIe
+# serial card a desktop with no COM1 logs through (`log.pci_serial=`), so
+# that `serial::self_test` finds it the way the kernel does at boot --
+# through the bridge -- and checks it answers. Its output goes nowhere: the
+# boot's log is not copied to it unless asked.
 "$QEMU" \
     -device intel-iommu,caching-mode=on,aw-bits=48 \
     -netdev user,id=net0 \
@@ -10041,6 +10047,9 @@ QEMU_START_EPOCH=$(date +%s)
     -device qemu-xhci,id=xhci0 \
     -device usb-kbd,bus=xhci0.0 \
     "${USB_STICK_ARGS[@]}" \
+    -device pcie-root-port,id=rpser,bus=pcie.0,chassis=40,slot=40 \
+    -chardev null,id=pciser0 \
+    -device pci-serial,bus=rpser,chardev=pciser0 \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     "${GPU_DISPLAY_ARGS[@]}" \

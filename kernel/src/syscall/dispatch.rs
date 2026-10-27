@@ -809,6 +809,8 @@ const fn build_v1_table() -> SyscallTable {
         Some(handlers::sys_pci_device_config_write);
     handlers[super::number::SYS_PCI_DEVICE_MAP_BAR as usize] =
         Some(handlers::sys_pci_device_map_bar);
+    handlers[super::number::SYS_PCI_DEVICE_DMA_ALLOC as usize] =
+        Some(handlers::sys_pci_device_dma_alloc);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
@@ -1178,7 +1180,6 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_mmap_hint_stays_in_the_user_half()?;
     test_dispatch_irq_holder()?;
     test_dispatch_dma_exit_unmaps()?;
-    crate::devhandle::self_test()?;
     test_dispatch_device_calls()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;

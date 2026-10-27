@@ -7365,6 +7365,14 @@ pub const SYS_PCI_DEVICE_CONFIG_WRITE: u64 = 1183;
 /// `NotSupported` for a BAR under 4 KiB or not page-aligned.
 pub const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 
+/// Allocate a DMA arena for an open device: `arg0` the handle, `arg1` the
+/// size in bytes, `arg2` where to write (a `u64`) the address the device must
+/// be given. Returns the address the caller sees. The arena is mapped in the
+/// caller and in the device's own IOMMU domain, so the device reaches it and
+/// nothing else the caller has; freeing it (`SYS_DMA_FREE`, `munmap`, or the
+/// handle's release) takes it from the device first.
+pub const SYS_PCI_DEVICE_DMA_ALLOC: u64 = 1185;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

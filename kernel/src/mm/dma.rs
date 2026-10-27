@@ -277,6 +277,7 @@ pub fn alloc_for_user(
                 phys,
                 order: buf.order,
                 size: i.saturating_mul(4096),
+                device: None,
             };
             unmap_user_buffer(&placed);
             crate::tlb::flush_range(user_virt, i as u32);
@@ -314,6 +315,7 @@ pub fn alloc_for_user(
 pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
     // Look up the DMA mapping.
     let mapping = untrack_dma_mapping(pml4_phys, user_virt).ok_or(KernelError::InvalidArgument)?;
+    revoke_device(&mapping);
 
     let hw_pages = unmap_user_buffer(&mapping);
     // Flush TLB for the unmapped range.
@@ -338,6 +340,10 @@ struct DmaMappingInfo {
     order: usize,
     /// Mapped size in bytes.
     size: usize,
+    /// The device handle whose device may reach the buffer through its IOMMU
+    /// domain (`devhandle`), told before the buffer is freed so that it
+    /// stops reaching it first.
+    device: Option<u64>,
 }
 
 /// Global table of active DMA mappings.
@@ -356,7 +362,28 @@ fn track_dma_mapping(pml4_phys: u64, user_virt: u64, phys: u64, order: usize, si
         phys,
         order,
         size,
+        device: None,
     });
+}
+
+/// Record that the device behind device handle `device` may reach the user
+/// DMA buffer at `user_virt` (design-decisions 1579), so that whatever frees
+/// the buffer revokes the device's access first.
+pub fn mark_device(pml4_phys: u64, user_virt: u64, device: u64) {
+    if let Some(m) = DMA_MAPPINGS
+        .lock()
+        .iter_mut()
+        .find(|m| m.pml4_phys == pml4_phys && m.user_virt == user_virt)
+    {
+        m.device = Some(device);
+    }
+}
+
+/// Before a user DMA buffer is freed: a device that may reach it stops.
+fn revoke_device(mapping: &DmaMappingInfo) {
+    if let Some(device) = mapping.device {
+        crate::devhandle::revoke_arena(device, mapping.phys, mapping.size);
+    }
 }
 
 fn untrack_dma_mapping(pml4_phys: u64, user_virt: u64) -> Option<DmaMappingInfo> {
@@ -402,6 +429,7 @@ pub fn release_overlapping(pml4_phys: u64, start: u64, end: u64) {
         doomed
     };
     for mapping in doomed {
+        revoke_device(&mapping);
         let hw_pages = unmap_user_buffer(&mapping);
         crate::tlb::flush_range(mapping.user_virt, hw_pages as u32);
         // Nothing can be done about a block the allocator refuses -- it

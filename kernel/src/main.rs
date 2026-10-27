@@ -8391,6 +8391,14 @@ extern "C" fn kernel_main() -> ! {
         iommu_remap::self_test()
     });
 
+    // A userspace driver's device handle (design-decisions 1579): after the
+    // IOMMU's translation is on (step 19c), so that a device is confined to
+    // its own domain and the test can check what the domain lets it reach.
+    // §914: Integrity -- the handle is a security boundary.
+    selftest::dispatch_debug("Devhandle", selftest::Severity::Integrity, || {
+        devhandle::self_test()
+    });
+
     // AHCI/SATA driver self-test.
     selftest::dispatch_debug("Ahci", selftest::Severity::Diagnostic, || ahci::self_test());
 

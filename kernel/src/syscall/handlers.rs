@@ -829,6 +829,26 @@ pub fn sys_pci_device_config_write(args: &SyscallArgs) -> SyscallResult {
     device_result(r)
 }
 
+/// `SYS_PCI_DEVICE_DMA_ALLOC` — a DMA arena for an open device. See
+/// [`SYS_PCI_DEVICE_DMA_ALLOC`](super::number::SYS_PCI_DEVICE_DMA_ALLOC).
+pub fn sys_pci_device_dma_alloc(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0).and_then(|pid| {
+        let pml4 = caller_pml4().ok_or(KernelError::NoSuchProcess)?;
+        let (user_virt, device_addr) = crate::devhandle::dma_alloc(args.arg0, pid, args.arg1)?;
+        if let Err(e) =
+            crate::mm::user::copy_to_user_as(pml4, args.arg2, &device_addr.to_le_bytes())
+        {
+            // The caller cannot learn the device address, so the arena is of
+            // no use to it: freed (and taken from the device) rather than
+            // left for it to find.
+            let _ = crate::mm::dma::free_for_user(pml4, user_virt);
+            return Err(e);
+        }
+        Ok(user_virt)
+    });
+    device_result(r)
+}
+
 /// `SYS_PCI_DEVICE_MAP_BAR` — map a memory BAR into the caller, uncached.
 pub fn sys_pci_device_map_bar(args: &SyscallArgs) -> SyscallResult {
     let r = held_device(args.arg0).and_then(|pid| {

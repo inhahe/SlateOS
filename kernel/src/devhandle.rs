@@ -16,6 +16,7 @@
 //! IOMMU domain, and interrupts.
 
 use crate::error::{KernelError, KernelResult};
+use crate::iommu_remap::{self, Caller, DmaPerms};
 use crate::pci::{self, PciAddress};
 use crate::proc::pcb::ProcessId;
 use crate::sync::Mutex;
@@ -66,6 +67,20 @@ struct Device {
     /// upper-half-of-64-bit register.
     bars: [Option<MemoryBar>; 6],
     mapped: Vec<MappedBar>,
+    /// The IOMMU domain the device's DMA is confined to, made at open; `None`
+    /// without an active IOMMU, when nothing confines it.
+    domain: Option<iommu_remap::DomainId>,
+    /// DMA arenas mapped in the domain.
+    arenas: Vec<Arena>,
+}
+
+/// A DMA arena: memory the device may read and write, mapped in its owner
+/// and in the device's domain. The device's address for it is its physical
+/// address (the domain maps each arena at its own address).
+#[derive(Debug, Clone, Copy)]
+struct Arena {
+    user_virt: u64,
+    phys: u64,
 }
 
 static DEVICES: Mutex<Vec<Device>> = Mutex::new(Vec::new());
@@ -93,6 +108,7 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
     // Sized now, before its driver starts: sizing writes all-ones to each
     // BAR, which a running driver would see.
     let bars = size_memory_bars(addr);
+    let domain = confine(addr)?;
     let raw = NEXT_RAW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     pci::bind_driver(addr, USERSPACE_DRIVER);
     devices.push(Device {
@@ -101,6 +117,8 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
         owner,
         bars,
         mapped: Vec::new(),
+        domain,
+        arenas: Vec::new(),
     });
     Ok(raw)
 }
@@ -142,12 +160,135 @@ pub fn release_owned_by(owner: ProcessId) {
 /// reading and writing memory, then its mappings.
 fn release(device: Device) {
     pci::disable_bus_master(device.addr);
-    if let Some(pml4) = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0) {
+    let pml4 = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0);
+    if let Some(domain) = device.domain {
+        // Detached and destroyed before any arena is freed: the device can
+        // reach none of them from here on, whatever it was doing.
+        let (b, d, f) = (device.addr.bus, device.addr.device, device.addr.function);
+        if let Err(e) = iommu_remap::detach_device_as(Caller::Kernel, domain, b, d, f)
+            .and_then(|()| iommu_remap::destroy_domain_as(Caller::Kernel, domain))
+        {
+            crate::serial_println!(
+                "[devhandle] {:?}: its IOMMU domain could not be released: {:?}",
+                device.addr,
+                e
+            );
+        }
+    }
+    if let Some(pml4) = pml4 {
+        // The arenas' tracking entries are the DMA module's: freed through it,
+        // they leave its table too. Without the owner's page table (a process
+        // destroyed outright) its address space's teardown frees them.
+        for arena in &device.arenas {
+            if let Err(e) = crate::mm::dma::free_for_user(pml4, arena.user_virt) {
+                crate::serial_println!(
+                    "[devhandle] {:?}: an arena could not be freed: {:?}",
+                    device.addr,
+                    e
+                );
+            }
+        }
         for bar in &device.mapped {
             unmap_pages(pml4, bar.user_virt, bar.pages);
         }
     }
     pci::unbind_driver(device.addr, USERSPACE_DRIVER);
+}
+
+/// The IOMMU domain a newly opened device's DMA is confined to: made, and
+/// the device attached, when an IOMMU is active; `None` when none is, and the
+/// log says the device is not confined. A device the IOMMU cannot be given
+/// alone is refused rather than opened unconfined.
+fn confine(addr: PciAddress) -> KernelResult<Option<iommu_remap::DomainId>> {
+    if !iommu_remap::is_active() {
+        crate::serial_println!(
+            "[devhandle] {:02x}:{:02x}.{}: no active IOMMU, so its DMA is not confined",
+            addr.bus,
+            addr.device,
+            addr.function
+        );
+        return Ok(None);
+    }
+    let domain = iommu_remap::create_domain_as(Caller::Kernel)?;
+    if let Err(e) =
+        iommu_remap::attach_device_as(Caller::Kernel, domain, addr.bus, addr.device, addr.function)
+    {
+        // Nothing is mapped in it yet; its own failure to go leaves nothing
+        // reachable, and the refusal is what the caller needs to see.
+        let _ = iommu_remap::destroy_domain_as(Caller::Kernel, domain);
+        return Err(e);
+    }
+    Ok(Some(domain))
+}
+
+/// Allocate a DMA arena of at least `size` bytes for the device `raw` names,
+/// owned by `pid`: mapped in `pid` and in the device's domain. Returns (the
+/// address `pid` sees, the address the device must be given).
+pub fn dma_alloc(raw: u64, pid: ProcessId, size: u64) -> KernelResult<(u64, u64)> {
+    use crate::mm::dma::{self, DmaConstraint};
+
+    let pml4 = crate::proc::pcb::get_pml4(pid)
+        .filter(|&p| p != 0)
+        .ok_or(KernelError::NoSuchProcess)?;
+    let domain = with_owned(raw, pid, |d| Ok(d.domain))?;
+    let size = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
+    let (user_virt, phys, size) = dma::alloc_for_user(pml4, size, DmaConstraint::None)?;
+    if let Some(domain) = domain
+        && let Err(e) = iommu_remap::map_dma_as(
+            Caller::Kernel,
+            domain,
+            phys,
+            phys,
+            size,
+            DmaPerms::READ_WRITE,
+        )
+    {
+        // Never given to the device: freeing it needs nothing revoked.
+        let _ = dma::free_for_user(pml4, user_virt);
+        return Err(e);
+    }
+    dma::mark_device(pml4, user_virt, raw);
+    let recorded = with_owned(raw, pid, |d| {
+        d.arenas.push(Arena { user_virt, phys });
+        Ok(())
+    });
+    if let Err(e) = recorded {
+        // Closed while it was being made: free it through the tracker, which
+        // revokes the (now gone) device first.
+        let _ = dma::free_for_user(pml4, user_virt);
+        return Err(e);
+    }
+    Ok((user_virt, phys))
+}
+
+/// The device `raw` names stops reaching the arena at `phys` (`size` bytes),
+/// which is about to be freed: it is unmapped from the device's domain, so a
+/// late access faults in the IOMMU rather than landing in freed memory.
+/// Called by the DMA module before it frees any buffer marked for a device; a
+/// device already released, or an arena already revoked, has nothing to do.
+pub fn revoke_arena(raw: u64, phys: u64, size: usize) {
+    let mut devices = DEVICES.lock();
+    let Some(device) = devices.iter_mut().find(|d| d.raw == raw) else {
+        return;
+    };
+    let Some(index) = device.arenas.iter().position(|a| a.phys == phys) else {
+        return;
+    };
+    device.arenas.swap_remove(index);
+    if let Some(domain) = device.domain
+        && let Err(e) = iommu_remap::unmap_dma_as(Caller::Kernel, domain, phys, size)
+    {
+        crate::serial_println!(
+            "[devhandle] {:?}: an arena could not be revoked from its domain: {:?}",
+            device.addr,
+            e
+        );
+    }
+}
+
+/// The IOMMU domain of the device `raw` names, if `pid` owns it.
+pub fn domain_of(raw: u64, pid: ProcessId) -> KernelResult<Option<iommu_remap::DomainId>> {
+    with_owned(raw, pid, |d| Ok(d.domain))
 }
 
 /// The memory BARs of the device `raw` names, if `pid` owns it.
@@ -394,18 +535,24 @@ pub fn self_test() -> KernelResult<()> {
     let result = self_test_on(addr, owner, stranger);
     pcb::destroy(owner);
     pcb::destroy(stranger);
-    if let Err(msg) = result {
-        serial_println!("[devhandle]   FAIL: {}", msg);
-        return Err(KernelError::InternalError);
+    let confined = match result {
+        Ok(confined) => confined,
+        Err(msg) => {
+            serial_println!("[devhandle]   FAIL: {}", msg);
+            return Err(KernelError::InternalError);
+        }
+    };
+    if !confined {
+        skips.record("IOMMU confinement", "no active IOMMU");
     }
-    serial_println!("[devhandle]   open, configure, map and close edu: OK");
+    serial_println!("[devhandle]   open, configure, map, DMA arenas and close edu: OK");
     skips.report("[devhandle]");
 
     fn self_test_on(
         addr: PciAddress,
         owner: ProcessId,
         stranger: ProcessId,
-    ) -> Result<(), &'static str> {
+    ) -> Result<bool, &'static str> {
         let pml4 = pcb::get_pml4(owner)
             .filter(|&p| p != 0)
             .ok_or("the scratch process has no address space")?;
@@ -454,10 +601,31 @@ pub fn self_test() -> KernelResult<()> {
             if at(size).is_some() {
                 return Err("the mapping runs past BAR0");
             }
-            Ok(va)
+            // A DMA arena: where the owner sees it is its device address,
+            // and the device's domain reaches it until it is freed.
+            let (arena, device_addr) =
+                dma_alloc(raw, owner, 0x4000).map_err(|_| "a DMA arena could not be made")?;
+            if page_table::translate(pml4, VirtAddr::new(arena)) != Some(device_addr) {
+                return Err("the arena is not at its device address");
+            }
+            let Some(domain) = domain_of(raw, owner).map_err(|_| "no domain answer")? else {
+                return Ok((va, None));
+            };
+            if iommu_remap::translate_bus(domain, device_addr) != Some(device_addr) {
+                return Err("the device's domain does not reach its arena");
+            }
+            crate::mm::dma::free_for_user(pml4, arena)
+                .map_err(|_| "the arena could not be freed")?;
+            if iommu_remap::translate_bus(domain, device_addr).is_some() {
+                return Err("a freed arena is still reachable by the device");
+            }
+            // A second, left for the close to take back.
+            let (_kept, kept_addr) =
+                dma_alloc(raw, owner, 0x4000).map_err(|_| "a second arena could not be made")?;
+            Ok((va, Some((domain, kept_addr))))
         })();
-        let va = match checks {
-            Ok(va) => va,
+        let (va, kept) = match checks {
+            Ok(found) => found,
             Err(msg) => {
                 close(raw);
                 return Err(msg);
@@ -470,11 +638,16 @@ pub fn self_test() -> KernelResult<()> {
         if page_table::translate(pml4, VirtAddr::new(va)).is_some() {
             return Err("BAR0 is still mapped after the last close");
         }
+        if let Some((domain, kept_addr)) = kept
+            && iommu_remap::translate_bus(domain, kept_addr).is_some()
+        {
+            return Err("an arena is still reachable by the device after the last close");
+        }
         let command = pci::config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
         if command & (1 << 2) != 0 {
             return Err("bus mastering is still on after the last close");
         }
-        Ok(())
+        Ok(kept.is_some())
     }
     Ok(())
 }

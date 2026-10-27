@@ -1376,6 +1376,27 @@ fn walk_or_create(table_phys: u64, index: usize, hhdm: u64) -> KernelResult<u64>
 
 /// Walk one level of the SLPT without allocating.
 /// Returns `None` if the entry is not present.
+/// The host physical address a device in `domain_id` reaches at `bus_addr`,
+/// or `None` where the domain maps nothing (or there is no such domain): the
+/// domain's own tables read back, as the IOMMU walks them.
+#[must_use]
+pub fn translate_bus(domain_id: DomainId, bus_addr: u64) -> Option<u64> {
+    let hhdm = page_table::hhdm()?;
+    // Held through the walk: a domain's tables are freed under it, when the
+    // domain is destroyed.
+    let domains = DOMAINS.lock();
+    let root = domains
+        .iter()
+        .find(|d| d.active && d.id == domain_id)
+        .map(|d| d.pml4_phys)?;
+    let index = |shift: u32| ((bus_addr >> shift) & 0x1FF) as usize;
+    let pdpt = walk_existing(root, index(39), hhdm)?;
+    let pd = walk_existing(pdpt, index(30), hhdm)?;
+    let pt = walk_existing(pd, index(21), hhdm)?;
+    let page = walk_existing(pt, index(12), hhdm)?;
+    Some(page | (bus_addr & 0xFFF))
+}
+
 fn walk_existing(table_phys: u64, index: usize, hhdm: u64) -> Option<u64> {
     // SAFETY: table_phys is valid, index < 512.
     let entry = unsafe {

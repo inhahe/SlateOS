@@ -5424,7 +5424,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   call reaches, and what a process can call today is pieces. Three holes found
   then are closed (`MAP_MMIO` refused; an interrupt line its holder's alone; a
   process's DMA buffers unmapped before its exit frees them). Still to build,
-  as one design (a device handle, capability-checked, released on exit):
+  as one design (a device handle, capability-checked, released on exit --
+  design-decisions §1579):
   - [ ] Owning a PCI function: a handle naming bus:device.function, refused
         when a kernel driver or another process has it
   - [ ] Its BARs mapped uncached through the handle -- the kernel finds the

@@ -172,6 +172,12 @@ struct FileState {
     /// the background pass's write of a page has landed. Linux's
     /// `PG_writeback`, for the file rather than the page.
     saving: bool,
+    /// A writable shared mapping let a store into a page that is the file's
+    /// own frame ([`MarkDirty::Adopted`]) since the last save took this:
+    /// nothing to copy, but the next save ([`writeback`]) sets the file's
+    /// times and announces the change, once, as its write of copied pages
+    /// would. Counted as dirty for the background pass and the writer.
+    mapped_written: bool,
 }
 
 impl FileState {
@@ -856,9 +862,9 @@ pub enum MarkDirty {
     /// The page is dirty now: the write may be let through.
     Marked,
     /// The page is the file's own frame (adopted): the write may be let
-    /// through, and lands in the file, with nothing to save. What a write
-    /// does besides -- the file's times, the change announced -- is the
-    /// caller's to do (`fs::handle::note_mapped_write`), since no save will.
+    /// through, and lands in the file, with nothing to copy. The file is
+    /// marked written ([`FileState::mapped_written`]): the next save sets
+    /// its times and announces the change.
     Adopted,
     /// The cache no longer holds that frame for that page: the mapping maps
     /// a page the file has dropped (a cut racing the write). The access is
@@ -887,6 +893,10 @@ pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty
     match cache.pages.get_mut(&key) {
         Some(entry) if entry.frame == frame => {
             if entry.adopted {
+                if let Some(state) = cache.files.get_mut(&file) {
+                    state.mapped_written = true;
+                }
+                cache.note_dirtied(file);
                 return MarkDirty::Adopted;
             }
             entry.set_dirty(true);
@@ -935,9 +945,20 @@ pub fn writeback(file: FileId, from: u64, to: u64) -> KernelResult<()> {
     let Some(writer) = begin_save(file)? else {
         return Ok(());
     };
+    // Taken now: a store into the file's own frame after this marks it again,
+    // for the next save.
+    let mapped_written = PAGE_CACHE
+        .lock()
+        .files
+        .get_mut(&file)
+        .is_some_and(|st| core::mem::take(&mut st.mapped_written));
     let (result, wrote) = save_pages(file, first, last, hhdm, writer);
     let let_go = end_save(file, from == 0 && to == u64::MAX, result.is_ok());
-    if wrote {
+    if mapped_written {
+        // Its times set as well, which a save of copied pages does by
+        // writing them.
+        crate::fs::handle::note_mapped_write(writer);
+    } else if wrote {
         crate::fs::handle::announce_written_back(writer);
     }
     // This call's own reference, and the cache's when it let the writer go.
@@ -1101,8 +1122,9 @@ fn end_save(file: FileId, whole: bool, ok: bool) -> Option<u64> {
     // must never sleep on a save that has ended.
     let let_go = (|| {
         let mut cache = PAGE_CACHE.lock();
-        let still_dirty = file_has_dirty(&cache, file);
+        let has_dirty = file_has_dirty(&cache, file);
         let state = cache.files.get_mut(&file)?;
+        let still_dirty = has_dirty || state.mapped_written;
         state.saving = false;
         if !still_dirty {
             state.dirtied_at = None;

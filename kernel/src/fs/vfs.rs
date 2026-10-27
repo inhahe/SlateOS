@@ -5989,13 +5989,13 @@ impl Vfs {
         Self::object_announce(obj, path, false);
     }
 
-    /// A shared mapping's store is about to reach the held file `obj`,
-    /// named `path`, with no save to follow: the mapping maps the file's own
-    /// frame (`FileSystem::page_frame`, memfs). What a write would do is done
-    /// here, as Linux's write fault does it (`file_update_time`): the file's
-    /// modification and change times become now, and the change is announced
-    /// (`IN_MODIFY`, the change journal). On the first store to each page of
-    /// a mapping, as that is the store that faults.
+    /// The held file `obj`, named `path`, was written through a shared
+    /// mapping of its own frames (`FileSystem::page_frame`, memfs), which a
+    /// save has nothing to copy from: what the save's write would do is done
+    /// here, once a save -- `msync`, `fsync`, the last writable unmapping,
+    /// the background pass -- finds it so. The file's modification and change
+    /// times become now, and the change is announced (`IN_MODIFY`, the
+    /// change journal), as for a file whose mapped pages are saved.
     pub fn object_mapped_write(obj: &FileObject, path: &Path) {
         {
             let mut guard = obj.fs.lock();

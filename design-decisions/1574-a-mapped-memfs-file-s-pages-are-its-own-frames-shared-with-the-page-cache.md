@@ -38,18 +38,32 @@ one copy, which a write, a read and every mapping all see.
    is marked adopted. A writable shared mapping's first store to it is let
    through without marking it dirty -- the store is in the file, and there
    is nothing to save -- and a change to the file is not copied into it, as
-   it is in it already. What a save would have done besides is done at that
-   first store's fault instead (`MarkDirty::Adopted`,
-   `Vfs::object_mapped_write`): the file's modification and change times
-   are set, and the change announced, as Linux's write fault does.
-5. **The size limit counts holes, not conversions.** A mapping's fault that
-   needs a frame for a hole counts against a size-limited memfs, and is
-   refused past the limit with `SIGBUS`, as tmpfs answers it; turning bytes
-   the file holds into frames is never refused, though it rounds them up to
-   whole pages. (Saving it would copy the frame out and back under
+   it is in it already. (Saving it would copy the frame out and back under
    the filesystem's lock, putting older bytes back over a store a mapping
    made between the two.) A cut drops the pages as for any file; memfs
    frees its frames past the end, the cache its references.
+
+   What a save does besides copying is still done, at the next save: the
+   store marks the file written through a mapping
+   (`MarkDirty::Adopted`, `FileState::mapped_written`), and the next
+   `writeback` -- `msync`, `fsync`, the last writable unmapping, the
+   background pass -- sets the file's modification and change times and
+   announces the change once (`Vfs::object_mapped_write`), as a save of
+   copied pages does. Not at the fault: that would be once per 4 KiB part,
+   thousands of announcements for one mapping's writes. (POSIX lets the
+   times be marked at any point up to the next `msync`.)
+5. **A file's bytes are charged as whole pages.** The size limit counts a
+   file kept as bytes by the pages they reach, not by the byte -- the frames
+   turning them into frames will take -- as Linux's tmpfs charges whole
+   pages (16 KiB ones here, as on a 16 KiB-page Linux). So a mapping's first
+   fault never needs room the file was not charged already: mapping a file
+   in a full filesystem cannot fail, and mapping many small files cannot
+   take one past its limit. Only a hole a fault fills counts as new, and is
+   refused past the limit with `SIGBUS`, as tmpfs answers it. The cost: a
+   size-limited memfs holds a quarter as many files of 4 KiB or less as a
+   4 KiB-block count would let it. *Decided by:* Claude (autonomous), on a
+   review's finding that charging bytes let mapped files reach about four
+   times the limit.
 
 ### The alternatives not taken
 

@@ -252,12 +252,21 @@ impl FileFrames {
     }
 
     /// Write `data` at `offset`, into the pages' own frames, growing the file.
-    /// All of it or none: the frames of the holes it covers are made first, so
-    /// that a frame not to be had fails the write before any byte of it lands.
+    /// All of it or none: every way it can fail is met before a byte of it
+    /// lands -- the frames of the holes it covers are made first, and the
+    /// frames' alias (the direct map, all a copy into them needs) is checked
+    /// -- and the frames it made are freed if it fails all the same.
     fn write(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
         let end = offset
             .checked_add(u64::try_from(data.len()).map_err(|_| KernelError::FileTooLarge)?)
             .ok_or(KernelError::FileTooLarge)?;
+        page_table::hhdm().ok_or(KernelError::InternalError)?;
+        // The bytes of the last page past the old end are not the file's (a
+        // mapping's store past it); what the file grows into reads zeros.
+        // Done first, so that its failure leaves nothing to undo.
+        if offset > self.len {
+            self.zero_tail()?;
+        }
         let pages = if data.is_empty() {
             0..0
         } else {
@@ -281,13 +290,16 @@ impl FileFrames {
                 }
             }
         }
-        // The bytes of the last page past the old end are not the file's (a
-        // mapping's store past it); what the file grows into reads zeros.
-        if offset > self.len {
-            self.zero_tail()?;
+        for &(index, held) in &made {
+            self.pages.insert(index, held);
         }
-        self.pages.extend(made);
-        self.write_pages(offset, data)?;
+        if let Err(e) = self.write_pages(offset, data) {
+            for (index, held) in made {
+                self.pages.remove(&index);
+                release_frame(held);
+            }
+            return Err(e);
+        }
         self.len = self.len.max(end);
         Ok(())
     }
@@ -336,11 +348,17 @@ impl FileFrames {
 }
 
 impl MemData {
-    /// The memory the contents hold, what the size limit counts: the bytes,
-    /// or a whole frame for each page held -- holes hold none.
+    /// The memory the contents hold, what the size limit counts: a whole
+    /// frame for each page held -- holes hold none -- and for each page the
+    /// bytes reach, as a file kept as bytes holds once it is turned into
+    /// frames. Charged so from the first byte, as tmpfs charges whole pages,
+    /// so that turning bytes into frames (a mapping's first fault) never
+    /// needs room the file was not already charged: a mapping of a file in a
+    /// full filesystem cannot fail, and mapping files cannot take one past
+    /// its limit.
     fn held(&self) -> u64 {
         match self {
-            Self::Bytes(bytes) => bytes.len() as u64,
+            Self::Bytes(bytes) => whole_pages(bytes.len() as u64),
             Self::Frames(frames) => (frames.pages.len() as u64).saturating_mul(PAGE),
         }
     }
@@ -354,28 +372,18 @@ impl MemData {
         }
     }
 
-    /// [`held`](Self::held) once in frames: as it is, or as turning the
-    /// bytes into frames leaves it.
-    fn held_as_frames(&self) -> u64 {
-        match self {
-            Self::Bytes(bytes) => (bytes.len() as u64).div_ceil(PAGE).saturating_mul(PAGE),
-            Self::Frames(_) => self.held(),
-        }
-    }
-
     /// What [`held`](Self::held) would be after `len` bytes are written at
     /// `offset`.
     fn held_after_write(&self, offset: u64, len: u64) -> u64 {
         let end = offset.saturating_add(len);
         match self {
-            Self::Bytes(bytes) if end <= BYTES_MAX => (bytes.len() as u64).max(end),
-            _ if len == 0 => self.held_as_frames(),
+            Self::Bytes(bytes) if end <= BYTES_MAX => whole_pages((bytes.len() as u64).max(end)),
+            _ if len == 0 => self.held(),
             _ => {
                 let new = (offset / PAGE..=end.saturating_sub(1) / PAGE)
                     .filter(|&index| !self.has_page(index))
                     .count() as u64;
-                self.held_as_frames()
-                    .saturating_add(new.saturating_mul(PAGE))
+                self.held().saturating_add(new.saturating_mul(PAGE))
             }
         }
     }
@@ -384,23 +392,11 @@ impl MemData {
     /// `size`: a growth in frames is a hole.
     fn held_after_set_len(&self, size: u64) -> u64 {
         match self {
-            Self::Bytes(_) if size <= BYTES_MAX => size,
-            Self::Bytes(bytes) => (bytes.len() as u64)
-                .min(size)
-                .div_ceil(PAGE)
-                .saturating_mul(PAGE),
+            Self::Bytes(_) if size <= BYTES_MAX => whole_pages(size),
+            Self::Bytes(bytes) => whole_pages((bytes.len() as u64).min(size)),
             Self::Frames(frames) => {
                 (frames.pages.range(..size.div_ceil(PAGE)).count() as u64).saturating_mul(PAGE)
             }
-        }
-    }
-
-    /// What [`held`](Self::held) would be after the contents become `len`
-    /// bytes, whole ([`replace`](Self::replace)).
-    fn held_after_replace(&self, len: u64) -> u64 {
-        match self {
-            Self::Bytes(_) if len <= BYTES_MAX => len,
-            _ => len.div_ceil(PAGE).saturating_mul(PAGE),
         }
     }
 
@@ -408,7 +404,7 @@ impl MemData {
     /// `index`'s frame ([`frames`](Self::frames), [`FileFrames::frame`]).
     fn held_after_fault(&self, index: u64) -> u64 {
         let new = if self.has_page(index) { 0 } else { PAGE };
-        self.held_as_frames().saturating_add(new)
+        self.held().saturating_add(new)
     }
 
     /// The file's length in bytes.
@@ -1667,9 +1663,9 @@ impl FileSystem for MemFs {
                 // Within the size limit, checked before anything changes.
                 let old = existing.held_bytes();
                 let len = u64::try_from(data.len()).unwrap_or(u64::MAX);
-                let new = existing
-                    .file_data()
-                    .map_or(old, |content| content.held_after_replace(len));
+                // Contents of `len` bytes hold its pages, bytes or frames
+                // (`MemData::held`).
+                let new = existing.file_data().map_or(old, |_| whole_pages(len));
                 self.room_for(old, new)?;
                 let existing = self.node_mut(existing_ino)?;
                 let not_a_file = existing.not_a_file();
@@ -1796,14 +1792,10 @@ impl FileSystem for MemFs {
             }
             // A hole made for a mapping counts against the size limit as a
             // write does: past it, the fault is refused (`SIGBUS`, as Linux's
-            // tmpfs answers it). Bytes the file holds already do not, though
-            // turning them into frames rounds them up to whole pages: they are
-            // the file's, and refusing them would fail a read of data that is
-            // there.
+            // tmpfs answers it). Bytes turned into frames need no room: they
+            // were charged as whole pages already (`MemData::held`).
             let old = node.held_bytes();
-            if !content.has_page(offset / PAGE) {
-                self.room_for(old, content.held_after_fault(offset / PAGE))?;
-            }
+            self.room_for(old, content.held_after_fault(offset / PAGE))?;
             let node = self.node_mut(ino)?;
             let data = node.file_data_mut().ok_or(not_a_file)?;
             let made = data.frames().and_then(|frames| frames.frame(offset / PAGE));
@@ -2399,6 +2391,12 @@ fn blocks_of(len: u64) -> u64 {
     len.div_ceil(MEMFS_BLOCK_SIZE)
 }
 
+/// `len` bytes rounded up to whole pages: what contents of that length hold
+/// (`MemData::held`).
+fn whole_pages(len: u64) -> u64 {
+    len.div_ceil(PAGE).saturating_mul(PAGE)
+}
+
 /// The machine's memory, in bytes: its usable frames. `None` before it is
 /// counted.
 fn ram_bytes() -> Option<u64> {
@@ -2895,16 +2893,16 @@ fn test_bytes_max() -> KernelResult<()> {
 /// The size limit counts what a file holds: a mapped file a whole frame for
 /// each page it has, a hole nothing. A mapping's fault that would make a
 /// page past the limit is refused, `DiskFull`, and the running count stays
-/// the sum of what every file holds. A full filesystem still maps the bytes
-/// a file holds: they are the file's already.
+/// the sum of what every file holds. A file's bytes are charged as whole
+/// pages, so a full filesystem still maps them, with nothing more counted.
 fn test_frames_counted() -> KernelResult<()> {
     fn fail(what: &str) -> KernelResult<()> {
         crate::serial_println!("[memfs]   FAILED: frames counted: {}", what);
         Err(KernelError::IoError)
     }
-    // Two frames' worth of blocks, and what a second, one-byte file holds;
-    // objects enough.
-    let small_blocks = blocks_of(1);
+    // Two frames' worth of blocks, and what a second, one-byte file holds --
+    // a page, as any file's bytes are charged; objects enough.
+    let small_blocks = blocks_of(PAGE);
     let blocks = (PAGE.saturating_mul(2) / MEMFS_BLOCK_SIZE).saturating_add(small_blocks);
     let mut fs = MemFs::with_limits(MemFsLimit::Exactly(blocks), MemFsLimit::Exactly(16));
     let path = Path::new("/m");
@@ -2943,14 +2941,15 @@ fn test_frames_counted() -> KernelResult<()> {
         if fs.held_blocks != walked_blocks(&fs) || fs.held_blocks != blocks {
             return fail("the count is not what the files hold");
         }
-        // Full: the one-byte file is mapped all the same, and counted a frame.
+        // Full: the one-byte file is mapped all the same, its frame charged
+        // already.
         if let Some(Ok(f)) = fs.page_frame(small_ino, 0) {
             held.push(f);
         } else {
             return fail("a full filesystem refused to map bytes a file holds");
         }
-        if fs.held_blocks != walked_blocks(&fs) {
-            return fail("the count is not what the files hold, once bytes are a frame");
+        if fs.held_blocks != walked_blocks(&fs) || fs.held_blocks != blocks {
+            return fail("turning bytes into a frame changed what is counted");
         }
         Ok(())
     })();
@@ -2971,56 +2970,55 @@ fn test_limits() -> KernelResult<()> {
         crate::serial_println!("[memfs]   FAILED: limits: {}", what);
         Err(KernelError::IoError)
     }
-    let block = usize::try_from(MEMFS_BLOCK_SIZE).unwrap_or(4096);
-    // Four blocks, five objects (the root is one).
-    let mut fs = MemFs::with_limits(MemFsLimit::Exactly(4), MemFsLimit::Exactly(5));
-    fs.write_file(Path::new("/a"), &alloc::vec![1u8; block.saturating_mul(3)])?;
-    fs.write_at(Path::new("/b"), 0, &alloc::vec![2u8; block])?;
+    // Contents are charged in whole pages (`MemData::held`): the test counts
+    // in pages, each `pages(1)` blocks.
+    let page = usize::try_from(PAGE).unwrap_or(16384);
+    let pages = |n: u64| blocks_of(PAGE.saturating_mul(n));
+    // Four pages, five objects (the root is one).
+    let mut fs = MemFs::with_limits(MemFsLimit::Exactly(pages(4)), MemFsLimit::Exactly(5));
+    fs.write_file(Path::new("/a"), &alloc::vec![1u8; page.saturating_mul(3)])?;
+    fs.write_at(Path::new("/b"), 0, &alloc::vec![2u8; page])?;
     if fs.write_at(Path::new("/b"), 1, b"x") != Ok(()) {
-        return fail("a write inside a block already held was refused");
+        return fail("a write inside a page already held was refused");
     }
-    if fs.write_at(Path::new("/b"), u64::try_from(block).unwrap_or(4096), b"y")
-        != Err(KernelError::DiskFull)
-    {
+    if fs.write_at(Path::new("/b"), PAGE, b"y") != Err(KernelError::DiskFull) {
         return fail("a write past the size limit was not DiskFull");
     }
-    if fs.write_file(Path::new("/a"), &alloc::vec![1u8; block.saturating_mul(4)])
+    if fs.write_file(Path::new("/a"), &alloc::vec![1u8; page.saturating_mul(4)])
         != Err(KernelError::DiskFull)
     {
         return fail("an overwrite past the size limit was not DiskFull");
     }
-    if fs.truncate(Path::new("/b"), MEMFS_BLOCK_SIZE.saturating_mul(2))
-        != Err(KernelError::DiskFull)
-    {
+    if fs.truncate(Path::new("/b"), PAGE.saturating_mul(2)) != Err(KernelError::DiskFull) {
         return fail("a truncate past the size limit was not DiskFull");
     }
-    if fs.read_file(Path::new("/a"))?.len() != block.saturating_mul(3)
+    if fs.read_file(Path::new("/a"))?.len() != page.saturating_mul(3)
         || fs.held_blocks != walked_blocks(&fs)
     {
         return fail("a refused change changed something");
     }
     // Room comes back as contents shrink or go.
     fs.truncate(Path::new("/a"), 0)?;
-    fs.write_file(Path::new("/c"), &alloc::vec![3u8; block.saturating_mul(2)])?;
+    fs.write_file(Path::new("/c"), &alloc::vec![3u8; page.saturating_mul(2)])?;
     fs.remove(Path::new("/c"))?;
     let ino = fs.resolve_ino(Path::new("/b"))?;
     fs.pin_ino(ino)?;
     fs.remove(Path::new("/b"))?;
-    // Unlinked but held open: its block stays held until the last handle.
-    if fs.held_blocks != 1 || fs.held_blocks != walked_blocks(&fs) {
+    // Unlinked but held open: its page stays held until the last handle.
+    if fs.held_blocks != pages(1) || fs.held_blocks != walked_blocks(&fs) {
         crate::serial_println!(
-            "[memfs]   FAILED: limits: {} blocks held, {} walked (want 1)",
+            "[memfs]   FAILED: limits: {} blocks held, {} walked (want {})",
             fs.held_blocks,
-            walked_blocks(&fs)
+            walked_blocks(&fs),
+            pages(1)
         );
         return Err(KernelError::IoError);
     }
-    // Through its handle it grows to the whole limit -- its own block is
-    // part of it -- and not a block past.
-    fs.write_ino(ino, 0, &alloc::vec![9u8; block.saturating_mul(4)])?;
-    if fs.write_ino(ino, 0, &alloc::vec![9u8; block.saturating_mul(5)])
-        != Err(KernelError::DiskFull)
-        || fs.held_blocks != 4
+    // Through its handle it grows to the whole limit -- its own page is
+    // part of it -- and not a page past.
+    fs.write_ino(ino, 0, &alloc::vec![9u8; page.saturating_mul(4)])?;
+    if fs.write_ino(ino, 0, &alloc::vec![9u8; page.saturating_mul(5)]) != Err(KernelError::DiskFull)
+        || fs.held_blocks != pages(4)
     {
         return fail("an open, unlinked file's handle grew it past the limit");
     }
@@ -3028,14 +3026,15 @@ fn test_limits() -> KernelResult<()> {
     if fs.held_blocks != 0 || fs.held_blocks != walked_blocks(&fs) {
         return fail("blocks were not given back when contents went");
     }
-    fs.write_file(Path::new("/d"), &alloc::vec![4u8; block.saturating_mul(4)])?;
+    fs.write_file(Path::new("/d"), &alloc::vec![4u8; page.saturating_mul(4)])?;
     // statvfs: the limit is the total; what is held is taken from it.
     let info = fs.statvfs()?;
-    if info.total_blocks != 4 || info.free_blocks != 0 {
+    if info.total_blocks != pages(4) || info.free_blocks != 0 {
         crate::serial_println!(
-            "[memfs]   FAILED: limits: statvfs {} total, {} free (want 4, 0)",
+            "[memfs]   FAILED: limits: statvfs {} total, {} free (want {}, 0)",
             info.total_blocks,
-            info.free_blocks
+            info.free_blocks,
+            pages(4)
         );
         return Err(KernelError::IoError);
     }
@@ -3070,10 +3069,7 @@ fn test_limits() -> KernelResult<()> {
     }
     // No limit at all: nothing refused for size.
     let mut open = MemFs::with_limits(MemFsLimit::Unlimited, MemFsLimit::Unlimited);
-    open.write_file(
-        Path::new("/big"),
-        &alloc::vec![0u8; block.saturating_mul(8)],
-    )?;
+    open.write_file(Path::new("/big"), &alloc::vec![0u8; page.saturating_mul(8)])?;
     crate::serial_println!(
         "[memfs]   size and object limits: DiskFull past each, room given back, counted as held: OK"
     );
@@ -3606,7 +3602,8 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     crate::serial_println!("[memfs]   last unlink frees the inode: OK");
 
     // statvfs reports room: 4096-byte blocks, some free when memory is, and
-    // what is held -- total less free -- grows by a file's whole blocks. The
+    // what is held -- total less free -- grows by a file's whole pages, as
+    // its bytes are charged (`MemData::held`): 10,000 bytes, one page. The
     // objects used -- total less free -- are the inode table (the object
     // limit, tmpfs's `nr_inodes`, is no longer one per block of room).
     let held = |info: &FsInfo| info.total_blocks.saturating_sub(info.free_blocks);
@@ -3618,7 +3615,7 @@ fn test_symlinks(fs: &mut MemFs) -> KernelResult<()> {
     let frames_known = crate::mm::frame::stats().is_some();
     if after.block_size != 4096
         || (frames_known && after.free_blocks == 0)
-        || held(&after) != held(&before).saturating_add(3)
+        || held(&after) != held(&before).saturating_add(blocks_of(whole_pages(10_000)))
         || held(&gone) != held(&before)
         // `after` was read with /room.bin still there: one object more
         // than the table holds now.

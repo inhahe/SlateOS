@@ -8778,6 +8778,12 @@ fn try_begin_exec_teardown(pml4: u64) -> Option<ExecTeardown> {
 /// does it while they exist. Every thread of the process is off them by
 /// then, or recorded in [`Process::killed_on_cpu`].
 pub fn release_address_space(pid: ProcessId) {
+    // A driver's devices first, while its page table is still its own: their
+    // BARs are mapped in it, and the teardown below is no place to find
+    // device memory (design-decisions 1579).
+    if state(pid) == Some(ProcessState::Zombie) {
+        crate::devhandle::release_owned_by(pid);
+    }
     let (pml4, vmas, killed_on_cpu) = {
         let mut table = PROCESS_TABLE.lock();
         let Some(p) = table.get_mut(&pid) else {

@@ -301,6 +301,7 @@ pub fn requestable(resource_type: ResourceType, resource_id: u64) -> KernelResul
         | T::Thread
         | T::PortIo
         | T::DeviceIrq
+        | T::PciDevice
         | T::PrivilegedPort
         | T::ResourceLimit => Ok(()),
         T::File

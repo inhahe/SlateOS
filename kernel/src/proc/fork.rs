@@ -471,7 +471,10 @@ fn dup_one(rtype: ResourceType, id: u64) -> KernelResult<Option<(ResourceType, u
         | ResourceType::PrivilegedPort
         | ResourceType::ResourceLimit
         | ResourceType::BlockDevice
-        | ResourceType::CapBroker => Ok(None),
+        | ResourceType::CapBroker
+        // A device handle is one driver's at a time, as NetRaw's NIC is: a
+        // forked child does not co-own it (design-decisions 1579).
+        | ResourceType::PciDevice => Ok(None),
     }
 }
 

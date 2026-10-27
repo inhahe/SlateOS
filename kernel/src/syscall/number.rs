@@ -7324,6 +7324,45 @@ pub const SYS_MSYNC: u64 = 1177;
 pub const SYS_FS_INODE_FLAGS: u64 = 1178;
 
 // ---------------------------------------------------------------------------
+// Device handles: a userspace driver's PCI function (design-decisions 1579)
+// ---------------------------------------------------------------------------
+
+/// Open a PCI function for the calling process to drive.
+///
+/// `arg0`: the function, `bus << 8 | device << 3 | function`.
+///
+/// Needs a `PciDevice` capability with `WRITE` for that function
+/// (`cap::pci_device_id`) or for every function (id 0). Returns a device
+/// handle, which only the caller holds, which a fork does not pass on, and
+/// whose close or the caller's exit releases the device. `NotFound` when no
+/// function answers there; `DeviceBusy` when a kernel driver or another
+/// process has it.
+pub const SYS_PCI_DEVICE_OPEN: u64 = 1179;
+
+/// Close a device handle: the device stops DMA (bus mastering off), and its
+/// mappings are removed. `arg0`: the handle.
+pub const SYS_PCI_DEVICE_CLOSE: u64 = 1180;
+
+/// One memory BAR of an open device: `arg0` the handle, `arg1` the BAR index
+/// (0-5). Returns its size in bytes, with bit 0 set when it is prefetchable;
+/// `InvalidArgument` for a BAR that is not memory. Never its address.
+pub const SYS_PCI_DEVICE_BAR: u64 = 1181;
+
+/// Read configuration space: `arg0` the handle, `arg1` the offset (0-255),
+/// `arg2` the width (1, 2 or 4, naturally aligned). Returns the value.
+pub const SYS_PCI_DEVICE_CONFIG_READ: u64 = 1182;
+
+/// Write configuration space: `arg0` the handle, `arg1` the offset, `arg2`
+/// the width, `arg3` the value. The BARs, the expansion ROM and the MSI and
+/// MSI-X capabilities are refused with `PermissionDenied`.
+pub const SYS_PCI_DEVICE_CONFIG_WRITE: u64 = 1183;
+
+/// Map a memory BAR into the caller, uncached: `arg0` the handle, `arg1` the
+/// BAR index. Returns the address; the size is `SYS_PCI_DEVICE_BAR`'s.
+/// `NotSupported` for a BAR under 4 KiB or not page-aligned.
+pub const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
+
+// ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------
 

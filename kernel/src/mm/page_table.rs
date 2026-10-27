@@ -2858,7 +2858,13 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                     super::swap::unregister_reclaimable(pml4_phys, virt_frame_base);
 
                     for &frame_base in seen.iter().take(seen_count) {
-                        if let Some(frame) = PhysFrame::from_addr(frame_base) {
+                        // Device memory -- a driver's BAR still mapped -- is
+                        // not the allocator's to take back, as `munmap` also
+                        // leaves it: freeing it would hand registers out as
+                        // RAM. Only the mapping goes, with this table.
+                        if let Some(frame) = PhysFrame::from_addr(frame_base)
+                            && frame::is_allocator_owned(frame)
+                        {
                             // Drop this frame's reverse-mapping (if any) before
                             // freeing it.  Without removing it the entry would
                             // dangle, pointing into a physical frame about to be

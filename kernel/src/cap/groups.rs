@@ -255,6 +255,9 @@ pub fn init() {
         // them: every authority a request can name, which admin holds above
         // already, reached through the broker.
         ResourceType::CapBroker,
+        // Every PCI function a userspace driver may open (design-decisions
+        // 1579): the class, id 0.
+        ResourceType::PciDevice,
     ]
     .map(|resource_type| CapGrant {
         resource_type,

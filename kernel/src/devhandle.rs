@@ -8,9 +8,12 @@
 //! made in its owner -- and what happens on the last close: the device stops
 //! doing DMA first, then everything mapped for it is taken back.
 //!
-//! Not here yet (roadmap.md 2.1): the system calls and the handle kind that
-//! put a handle in a process's table, DMA arenas in the device's IOMMU
-//! domain, and interrupts.
+//! The system calls are `SYS_PCI_DEVICE_*` (`syscall::handlers`); a handle is a
+//! held handle of `ResourceType::PciDevice`, never inherited, so it has one
+//! holder. Its holder's exit releases it at the zombie transition
+//! ([`release_owned_by`]), before the address space its BARs are mapped in
+//! is torn down. Not here yet (roadmap.md 2.1): DMA arenas in the device's
+//! IOMMU domain, and interrupts.
 
 use crate::error::{KernelError, KernelResult};
 use crate::pci::{self, PciAddress};
@@ -59,9 +62,6 @@ struct Device {
     raw: u64,
     addr: PciAddress,
     owner: ProcessId,
-    /// References from handle tables (the open is one; a dup or a fork that
-    /// passes the handle on adds one). The device is released at zero.
-    refs: u32,
     /// Its memory BARs by index; `None` for an unimplemented, I/O-port or
     /// upper-half-of-64-bit register.
     bars: [Option<MemoryBar>; 6],
@@ -99,30 +99,42 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
         raw,
         addr,
         owner,
-        refs: 1,
         bars,
         mapped: Vec::new(),
     });
     Ok(raw)
 }
 
-/// Drop one reference to `raw`; the last releases the device.
+/// Release the device `raw` names. A handle already released -- by its
+/// holder's exit, before the reap that closes its handles -- names nothing,
+/// and closing it does nothing.
 pub fn close(raw: u64) {
     let released = {
         let mut devices = DEVICES.lock();
         let Some(index) = devices.iter().position(|d| d.raw == raw) else {
             return;
         };
-        let Some(device) = devices.get_mut(index) else {
-            return;
-        };
-        device.refs = device.refs.saturating_sub(1);
-        if device.refs > 0 {
-            return;
-        }
         devices.swap_remove(index)
     };
     release(released);
+}
+
+/// Release every device `owner` holds. Called as it becomes a zombie, while
+/// its page table still exists: the BARs mapped in it must be unmapped
+/// before the address space is torn down, which would otherwise free them as
+/// RAM.
+pub fn release_owned_by(owner: ProcessId) {
+    let released: Vec<Device> = {
+        let mut devices = DEVICES.lock();
+        let (mine, others) = core::mem::take(&mut *devices)
+            .into_iter()
+            .partition(|d| d.owner == owner);
+        *devices = others;
+        mine
+    };
+    for device in released {
+        release(device);
+    }
 }
 
 /// Take back everything an open device was given, in the order that is safe

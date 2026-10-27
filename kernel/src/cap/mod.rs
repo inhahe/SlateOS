@@ -426,6 +426,23 @@ pub enum ResourceType {
     /// asked for (`request::requestable`). Pure authority: no per-open object
     /// behind it, and it implies no Linux capability.
     CapBroker = 35,
+
+    /// A PCI function a userspace driver may open (design-decisions 1579),
+    /// and the device handles opened on one.
+    ///
+    /// As a capability, `resource_id` is [`pci_device_id`] of the function
+    /// (`Rights::WRITE` to open it), or 0 for every function -- the ids of
+    /// functions start at `0x1_0000`, so the two cannot collide. As a held
+    /// handle in `ipc_handles`, the id is the raw device handle, released
+    /// when its holder closes it or exits. Not inherited: a device is one
+    /// driver's at a time, as `NetRaw`'s NIC is.
+    PciDevice = 36,
+}
+
+/// The capability `resource_id` naming the PCI function at bus:device.function.
+#[must_use]
+pub const fn pci_device_id(bus: u8, device: u8, function: u8) -> u64 {
+    0x1_0000 | (bus as u64) << 8 | ((device & 0x1F) as u64) << 3 | (function & 0x7) as u64
 }
 
 impl ResourceType {
@@ -438,7 +455,7 @@ impl ResourceType {
     /// `1..=LAST` skipping them ([`Self::all`]) rather than keeping their own
     /// list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::CapBroker as u16;
+    pub const LAST: u16 = Self::PciDevice as u16;
 
     /// Discriminants that named a type no longer here: 17, the memfd, a file
     /// since 2026-10-17 (design-decisions §1573).
@@ -532,7 +549,8 @@ impl ResourceType {
             | Self::Semaphore
             | Self::UnixSocket
             | Self::NativeSocket
-            | Self::CapBroker => self as u16,
+            | Self::CapBroker
+            | Self::PciDevice => self as u16,
         }
     }
 
@@ -603,6 +621,7 @@ impl ResourceType {
             33 => Self::UnixSocket,
             34 => Self::NativeSocket,
             35 => Self::CapBroker,
+            36 => Self::PciDevice,
             _ => return None,
         };
         Some(ty)
@@ -901,13 +920,18 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    capability requests (design-decisions 1548) -- pure authority that
     //    no Linux capability follows from; told to lane D in
     //    requests/a-bd-resource-type-35-is-capbroker.md.
-    if ResourceType::LAST != 35 {
+    //    36 since 2026-10-27: `PciDevice`, a PCI function a userspace driver
+    //    may open, and the device handles opened on one (design-decisions
+    //    1579) -- narrower than any Linux capability (`CAP_SYS_RAWIO` is all
+    //    of port I/O and /dev/mem); told to lane D in
+    //    requests/a-d-resource-type-36-is-pcidevice.md.
+    if ResourceType::LAST != 36 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 35 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 36 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-five types — it needs nothing, and \
+             answer, that file names seven of our thirty-six types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

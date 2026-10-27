@@ -729,6 +729,116 @@ pub fn sys_irq_release(args: &SyscallArgs) -> SyscallResult {
 }
 
 // ---------------------------------------------------------------------------
+// Device handles (design-decisions 1579)
+// ---------------------------------------------------------------------------
+
+/// A device handle `arg` the calling process holds, and that process: the
+/// handle is checked against its held handles, so another process's is
+/// `InvalidHandle` as one that names nothing is.
+fn held_device(handle: u64) -> Result<pcb::ProcessId, KernelError> {
+    require_ipc_handle(ResourceType::PciDevice, handle)?;
+    caller_pid().ok_or(KernelError::NoSuchProcess)
+}
+
+/// A result carrying a non-negative value as the call's result.
+fn device_result(r: KernelResult<u64>) -> SyscallResult {
+    match r.and_then(|v| i64::try_from(v).map_err(|_| KernelError::InternalError)) {
+        Ok(v) => SyscallResult::ok(v),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PCI_DEVICE_OPEN` — open a PCI function to drive. See
+/// [`SYS_PCI_DEVICE_OPEN`](super::number::SYS_PCI_DEVICE_OPEN).
+pub fn sys_pci_device_open(args: &SyscallArgs) -> SyscallResult {
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NoSuchProcess);
+    };
+    let Ok(packed) = u16::try_from(args.arg0) else {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    };
+    #[allow(clippy::cast_possible_truncation)]
+    let addr = crate::pci::PciAddress {
+        bus: (packed >> 8) as u8,
+        device: ((packed >> 3) & 0x1F) as u8,
+        function: (packed & 0x7) as u8,
+    };
+    let id = crate::cap::pci_device_id(addr.bus, addr.device, addr.function);
+    // This function, or every function (id 0): a capability for the class
+    // is a different entry from one for an instance, and either authorises.
+    if require_cap(ResourceType::PciDevice, id, crate::cap::Rights::WRITE).is_err()
+        && require_cap(ResourceType::PciDevice, 0, crate::cap::Rights::WRITE).is_err()
+    {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    match crate::devhandle::open(pid, addr) {
+        Ok(handle) => {
+            register_for_caller(ResourceType::PciDevice, handle);
+            device_result(Ok(handle))
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_PCI_DEVICE_CLOSE` — release a device handle.
+pub fn sys_pci_device_close(args: &SyscallArgs) -> SyscallResult {
+    let handle = args.arg0;
+    let pid = match held_device(handle) {
+        Ok(pid) => pid,
+        Err(e) => return SyscallResult::err(e),
+    };
+    pcb::deregister_ipc_handle(pid, ResourceType::PciDevice, handle);
+    crate::devhandle::close(handle);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_PCI_DEVICE_BAR` — a memory BAR's size, bit 0 set when prefetchable.
+pub fn sys_pci_device_bar(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0).and_then(|pid| {
+        let index = usize::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
+        let bars = crate::devhandle::bars(args.arg0, pid)?;
+        let bar = bars
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or(KernelError::InvalidArgument)?;
+        // The size is a power of two of at least 16 bytes, so bit 0 is free.
+        Ok(bar.size | u64::from(bar.prefetch))
+    });
+    device_result(r)
+}
+
+/// `SYS_PCI_DEVICE_CONFIG_READ` — read the device's configuration space.
+pub fn sys_pci_device_config_read(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0).and_then(|pid| {
+        let offset = u16::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
+        let width = u8::try_from(args.arg2).map_err(|_| KernelError::InvalidArgument)?;
+        crate::devhandle::config_read(args.arg0, pid, offset, width).map(u64::from)
+    });
+    device_result(r)
+}
+
+/// `SYS_PCI_DEVICE_CONFIG_WRITE` — write the device's configuration space.
+pub fn sys_pci_device_config_write(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0).and_then(|pid| {
+        let offset = u16::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
+        let width = u8::try_from(args.arg2).map_err(|_| KernelError::InvalidArgument)?;
+        let value = u32::try_from(args.arg3).map_err(|_| KernelError::InvalidArgument)?;
+        crate::devhandle::config_write(args.arg0, pid, offset, width, value).map(|()| 0)
+    });
+    device_result(r)
+}
+
+/// `SYS_PCI_DEVICE_MAP_BAR` — map a memory BAR into the caller, uncached.
+pub fn sys_pci_device_map_bar(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0).and_then(|pid| {
+        let index = usize::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
+        crate::devhandle::map_bar(args.arg0, pid, index).map(|(va, _size)| va)
+    });
+    device_result(r)
+}
+
+// ---------------------------------------------------------------------------
 // Port I/O (40–49)
 // ---------------------------------------------------------------------------
 

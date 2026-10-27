@@ -629,11 +629,11 @@ const fn build_v1_table() -> SyscallTable {
 
     // The device door (1119-1123): the Linux device ABI -- today the sound
     // card's -- reached natively, answering in Linux errnos.
-    handlers[SYS_DEVICE_OPEN as usize] = Some(handlers::sys_device_open);
+    handlers[SYS_DEVICE_OPEN as usize] = Some(handlers::sys_pci_device_open);
     handlers[SYS_DEVICE_IOCTL as usize] = Some(handlers::sys_device_ioctl);
     handlers[SYS_DEVICE_READ as usize] = Some(handlers::sys_device_read);
     handlers[SYS_DEVICE_WRITE as usize] = Some(handlers::sys_device_write);
-    handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_device_close);
+    handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_pci_device_close);
     // Seals on a file (1124-1125): `fs::sealing`, by handle.
     handlers[SYS_FS_ADD_SEALS as usize] = Some(handlers::sys_fs_add_seals);
     handlers[SYS_FS_GET_SEALS as usize] = Some(handlers::sys_fs_get_seals);
@@ -799,6 +799,16 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_MMAP_FILE as usize] = Some(handlers::sys_mmap_file);
     handlers[SYS_MSYNC as usize] = Some(handlers::sys_msync);
     handlers[SYS_FS_INODE_FLAGS as usize] = Some(handlers::sys_fs_inode_flags);
+    // Device handles: a userspace driver's PCI function (design-decisions 1579).
+    handlers[super::number::SYS_PCI_DEVICE_OPEN as usize] = Some(handlers::sys_pci_device_open);
+    handlers[super::number::SYS_PCI_DEVICE_CLOSE as usize] = Some(handlers::sys_pci_device_close);
+    handlers[super::number::SYS_PCI_DEVICE_BAR as usize] = Some(handlers::sys_pci_device_bar);
+    handlers[super::number::SYS_PCI_DEVICE_CONFIG_READ as usize] =
+        Some(handlers::sys_pci_device_config_read);
+    handlers[super::number::SYS_PCI_DEVICE_CONFIG_WRITE as usize] =
+        Some(handlers::sys_pci_device_config_write);
+    handlers[super::number::SYS_PCI_DEVICE_MAP_BAR as usize] =
+        Some(handlers::sys_pci_device_map_bar);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);
@@ -1168,6 +1178,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_irq_holder()?;
     test_dispatch_dma_exit_unmaps()?;
     crate::devhandle::self_test()?;
+    test_dispatch_device_calls()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;
     test_dispatch_power_off_and_reboot()?;
@@ -5918,6 +5929,96 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
         "[syscall]   DMA buffers at exit: OK ({} page(s) unmapped before freeing)",
         pages
     );
+    Ok(())
+}
+
+/// The `SYS_PCI_DEVICE_*` calls as scratch processes drive QEMU's `edu` device:
+/// open refused without a `PciDevice` capability and granted with one; the
+/// owner's configuration read and BAR size through the handle; another
+/// process's use of the handle `InvalidHandle`; and the owner's exit --
+/// `devhandle::release_owned_by`, as at its zombie transition -- unbinds the
+/// device and unmaps its BAR, after which the reap's close is a no-op.
+/// Skipped, and recorded so, where there is no `edu`.
+fn test_dispatch_device_calls() -> KernelResult<()> {
+    use super::number::{
+        SYS_PCI_DEVICE_BAR, SYS_PCI_DEVICE_CLOSE, SYS_PCI_DEVICE_CONFIG_READ,
+        SYS_PCI_DEVICE_MAP_BAR, SYS_PCI_DEVICE_OPEN,
+    };
+    use crate::cap::{ResourceType, Rights};
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    let mut skips = crate::fs::selftest::Skips::new();
+    let Some(edu) = crate::pci::find_device(0x1234, 0x11E8) else {
+        skips.record("device calls", "no QEMU edu device attached");
+        skips.report("[syscall]");
+        return Ok(());
+    };
+    let a = edu.address;
+    let packed = u64::from(a.bus) << 8 | u64::from(a.device) << 3 | u64::from(a.function);
+    let denied = i64::from(KernelError::PermissionDenied.code());
+    let invalid = i64::from(KernelError::InvalidHandle.code());
+    let call = |pid: pcb::ProcessId, nr: u64, arg0: u64, arg1: u64, arg2: u64| {
+        let args = SyscallArgs {
+            arg0,
+            arg1,
+            arg2,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        self_test_as_process(pid, || dispatch(nr, &args).value)
+    };
+    let driver = pcb::create("device-calls", 0);
+    let stranger = pcb::create("device-stranger", 0);
+    let result = (|| -> Result<(), &'static str> {
+        let pml4 = pcb::get_pml4(driver)
+            .filter(|&p| p != 0)
+            .ok_or("no address space")?;
+        if call(driver, SYS_PCI_DEVICE_OPEN, packed, 0, 0) != denied {
+            return Err("a device was opened without a capability");
+        }
+        let id = crate::cap::pci_device_id(a.bus, a.device, a.function);
+        pcb::grant_capability(driver, ResourceType::PciDevice, id, Rights::WRITE)
+            .map_err(|_| "the capability could not be granted")?;
+        let handle = u64::try_from(call(driver, SYS_PCI_DEVICE_OPEN, packed, 0, 0))
+            .map_err(|_| "open with the capability failed")?;
+        if call(driver, SYS_PCI_DEVICE_CONFIG_READ, handle, 0, 2) != 0x1234 {
+            return Err("configuration space did not read edu's vendor id");
+        }
+        if call(driver, SYS_PCI_DEVICE_BAR, handle, 0, 0) & !1 != 1 << 20 {
+            return Err("BAR0's size was not 1 MiB");
+        }
+        if call(stranger, SYS_PCI_DEVICE_CONFIG_READ, handle, 0, 2) != invalid {
+            return Err("another process used the owner's handle");
+        }
+        let va = u64::try_from(call(driver, SYS_PCI_DEVICE_MAP_BAR, handle, 0, 0))
+            .map_err(|_| "BAR0 could not be mapped")?;
+        if page_table::translate(pml4, VirtAddr::new(va)).is_none() {
+            return Err("the BAR mapping is not there");
+        }
+        crate::devhandle::release_owned_by(driver);
+        if crate::pci::bound_driver(a).is_some() {
+            return Err("the device is still bound after its owner's exit");
+        }
+        if page_table::translate(pml4, VirtAddr::new(va)).is_some() {
+            return Err("BAR0 is still mapped after its owner's exit");
+        }
+        if call(driver, SYS_PCI_DEVICE_CLOSE, handle, 0, 0) != 0 {
+            return Err("the reap's close of a released handle failed");
+        }
+        Ok(())
+    })();
+    crate::devhandle::release_owned_by(driver);
+    pcb::destroy(driver);
+    pcb::destroy(stranger);
+    if let Err(msg) = result {
+        serial_println!("[syscall]   FAIL: device calls: {}", msg);
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   device calls: OK (capability, ownership, exit release)");
+    skips.report("[syscall]");
     Ok(())
 }
 

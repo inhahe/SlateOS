@@ -629,11 +629,11 @@ const fn build_v1_table() -> SyscallTable {
 
     // The device door (1119-1123): the Linux device ABI -- today the sound
     // card's -- reached natively, answering in Linux errnos.
-    handlers[SYS_DEVICE_OPEN as usize] = Some(handlers::sys_pci_device_open);
+    handlers[SYS_DEVICE_OPEN as usize] = Some(handlers::sys_device_open);
     handlers[SYS_DEVICE_IOCTL as usize] = Some(handlers::sys_device_ioctl);
     handlers[SYS_DEVICE_READ as usize] = Some(handlers::sys_device_read);
     handlers[SYS_DEVICE_WRITE as usize] = Some(handlers::sys_device_write);
-    handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_pci_device_close);
+    handlers[SYS_DEVICE_CLOSE as usize] = Some(handlers::sys_device_close);
     // Seals on a file (1124-1125): `fs::sealing`, by handle.
     handlers[SYS_FS_ADD_SEALS as usize] = Some(handlers::sys_fs_add_seals);
     handlers[SYS_FS_GET_SEALS as usize] = Some(handlers::sys_fs_get_seals);

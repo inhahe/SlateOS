@@ -169,12 +169,40 @@ static IRQ_WAIT_TASK: [AtomicU64; MAX_IRQ] = {
 // IOAPIC register access
 // ---------------------------------------------------------------------------
 
+/// IOREGSEL and IOWIN, an index register and a data register: one access,
+/// or one read-modify-write of a redirection entry, at a time
+/// (`sync::WindowLock`). Mask and unmask come from interrupt handlers (the
+/// IRQ-storm detector), from system calls (a driver acknowledging its IRQ)
+/// and from IRQ balancing, on any CPU.
+static WINDOW: crate::sync::WindowLock = crate::sync::WindowLock::new();
+
+/// Run `access` -- register accesses through the window, a redirection
+/// entry's read-modify-write among them -- as one step, holding [`WINDOW`].
+/// On a CPU that holds it already (an NMI or exception that interrupted its
+/// own access: none touches the I/O APIC today), IOREGSEL is put back as the
+/// interrupted access left it.
+fn with_window<R>(access: impl FnOnce() -> R) -> R {
+    WINDOW.with(|nested| {
+        let base = IOAPIC_BASE_VIRT.load(Ordering::Relaxed);
+        let sel = base.wrapping_add(u64::from(IOREGSEL)) as *mut u32;
+        // SAFETY: IOREGSEL of the mapped I/O APIC (`base` is not 0); it reads
+        // back the index last written, and is written back below.
+        let selected = (nested && base != 0).then(|| unsafe { core::ptr::read_volatile(sel) });
+        let result = access();
+        if let Some(index) = selected {
+            // SAFETY: as above.
+            unsafe { core::ptr::write_volatile(sel, index) };
+        }
+        result
+    })
+}
+
 /// Read a 32-bit IOAPIC register via the indirect register window.
 ///
 /// # Safety
 ///
 /// `IOAPIC_BASE_VIRT` must be initialized.  `reg` must be a valid
-/// IOAPIC register index.
+/// IOAPIC register index.  The window must be held ([`with_window`]).
 unsafe fn ioapic_read(reg: u8) -> u32 {
     let base = IOAPIC_BASE_VIRT.load(Ordering::Relaxed);
     debug_assert!(base != 0, "IOAPIC not initialized");
@@ -194,7 +222,7 @@ unsafe fn ioapic_read(reg: u8) -> u32 {
 /// # Safety
 ///
 /// `IOAPIC_BASE_VIRT` must be initialized.  `reg` must be a valid
-/// IOAPIC register index.
+/// IOAPIC register index.  The window must be held ([`with_window`]).
 unsafe fn ioapic_write(reg: u8, value: u32) {
     let base = IOAPIC_BASE_VIRT.load(Ordering::Relaxed);
     debug_assert!(base != 0, "IOAPIC not initialized");
@@ -211,7 +239,8 @@ unsafe fn ioapic_write(reg: u8, value: u32) {
 ///
 /// # Safety
 ///
-/// IOAPIC must be initialized.  `irq` must be < `NUM_REDIR_ENTRIES`.
+/// IOAPIC must be initialized.  `irq` must be < `NUM_REDIR_ENTRIES`.  The
+/// window must be held ([`with_window`]).
 unsafe fn read_redir_entry(irq: u8) -> u64 {
     // Each entry occupies two consecutive 32-bit indirect registers.
     // SAFETY: Caller guarantees irq is valid.
@@ -228,7 +257,8 @@ unsafe fn read_redir_entry(irq: u8) -> u64 {
 ///
 /// # Safety
 ///
-/// IOAPIC must be initialized.  `irq` must be < `NUM_REDIR_ENTRIES`.
+/// IOAPIC must be initialized.  `irq` must be < `NUM_REDIR_ENTRIES`.  The
+/// window must be held ([`with_window`]).
 #[allow(clippy::cast_possible_truncation)]
 unsafe fn write_redir_entry(irq: u8, entry: u64) {
     // Write high DWORD first (destination), then low DWORD (vector +
@@ -357,10 +387,9 @@ pub unsafe fn init() -> KernelResult<()> {
     IOAPIC_BASE_VIRT.store(ioapic_virt, Ordering::Release);
 
     // Step 3: Read IOAPIC identification and version.
-    // SAFETY: IOAPIC MMIO is mapped and accessible.
-    let raw_id = unsafe { ioapic_read(REG_ID) };
+    // SAFETY: IOAPIC MMIO is mapped and accessible; the window is held.
+    let (raw_id, ver_reg) = with_window(|| unsafe { (ioapic_read(REG_ID), ioapic_read(REG_VER)) });
     let id = raw_id >> 24;
-    let ver_reg = unsafe { ioapic_read(REG_VER) };
     let version = ver_reg & 0xFF;
     let max_entry = (ver_reg >> 16) & 0xFF;
     // Count of entries = max index + 1.
@@ -416,10 +445,8 @@ pub unsafe fn init() -> KernelResult<()> {
             }
         }
 
-        // SAFETY: IOAPIC is initialized, irq < num_entries.
-        unsafe {
-            write_redir_entry(irq_u8, entry);
-        }
+        // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+        with_window(|| unsafe { write_redir_entry(irq_u8, entry) });
     }
 
     serial_println!(
@@ -462,11 +489,11 @@ pub unsafe fn unmask_irq(irq: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries.
-    unsafe {
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+    with_window(|| unsafe {
         let entry = read_redir_entry(irq);
         write_redir_entry(irq, entry & !REDIR_MASKED);
-    }
+    });
 
     serial_println!(
         "[ioapic] IRQ {} unmasked → vector {}",
@@ -482,27 +509,36 @@ pub fn mask_irq(irq: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries.
-    unsafe {
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+    with_window(|| unsafe {
         let entry = read_redir_entry(irq);
         write_redir_entry(irq, entry | REDIR_MASKED);
-    }
+    });
 }
 
 /// Mask every IOAPIC redirection entry, so no external interrupt can be
 /// delivered. Used when quiescing the machine for a kexec handoff: the new
 /// kernel re-programs the IOAPIC from scratch, so it must start with every line
 /// silent. A no-op before the IOAPIC is initialized (`NUM_REDIR_ENTRIES` is 0).
-pub fn mask_all() {
+/// The window is seized first, from whichever stopped CPU held it.
+///
+/// # Safety
+///
+/// No other CPU may run kernel code again (`kexec`'s stopped CPUs): one
+/// that did might be in the middle of an access, and would be cut off.
+pub unsafe fn mask_all() {
+    // SAFETY: the caller's.
+    unsafe { WINDOW.seize() };
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     // `num` is the redirection-entry count (<= 240); each is masked in turn.
     for irq in 0..num {
-        // SAFETY: `irq < num`, and the IOAPIC is initialized when `num > 0`.
+        // SAFETY: `irq < num`, and the IOAPIC is initialized when `num > 0`;
+        // the window is held.
         #[allow(clippy::cast_possible_truncation)]
-        unsafe {
+        with_window(|| unsafe {
             let entry = read_redir_entry(irq as u8);
             write_redir_entry(irq as u8, entry | REDIR_MASKED);
-        }
+        });
     }
 }
 
@@ -520,11 +556,11 @@ pub unsafe fn set_level_triggered(irq: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries.
-    unsafe {
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+    with_window(|| unsafe {
         let entry = read_redir_entry(irq);
         write_redir_entry(irq, entry | REDIR_LEVEL_TRIGGER | REDIR_ACTIVE_LOW);
-    }
+    });
 }
 
 /// Set the CPU affinity for an IRQ — route it to a specific LAPIC.
@@ -556,14 +592,14 @@ pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries.
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
     // Destination LAPIC ID occupies bits 63:56 of the 64-bit entry.
-    unsafe {
+    with_window(|| unsafe {
         let entry = read_redir_entry(irq);
         // Clear old destination (bits 63:56), set new one.
         let entry = (entry & 0x00FF_FFFF_FFFF_FFFF) | (u64::from(lapic_id) << 56);
         write_redir_entry(irq, entry);
-    }
+    });
 
     serial_println!("[ioapic] IRQ {} affinity → LAPIC ID {}", irq, lapic_id,);
 }
@@ -580,8 +616,8 @@ pub fn get_irq_affinity(irq: u8) -> Option<u8> {
         return None;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries.
-    let entry = unsafe { read_redir_entry(irq) };
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+    let entry = with_window(|| unsafe { read_redir_entry(irq) });
     // Destination LAPIC ID is in bits 63:56.
     #[allow(clippy::cast_possible_truncation)]
     Some((entry >> 56) as u8)
@@ -831,8 +867,8 @@ pub fn self_test() -> KernelResult<()> {
     for i in 0..num {
         #[allow(clippy::cast_possible_truncation)]
         let irq = i as u8;
-        // SAFETY: IOAPIC is initialized, irq < num_entries.
-        let entry = unsafe { read_redir_entry(irq) };
+        // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+        let entry = with_window(|| unsafe { read_redir_entry(irq) });
 
         // Check masked.
         if entry & REDIR_MASKED == 0 {
@@ -865,6 +901,30 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!("[ioapic]   IRQ notification counters: all zero");
+
+    // Test 4: an access from inside one -- as an NMI interrupting this CPU's
+    // own would be -- reads right, and leaves the index the outer access
+    // selected in IOREGSEL.
+    let normal = get_irq_affinity(0);
+    let (nested, left) = with_window(|| {
+        let sel = base.wrapping_add(u64::from(IOREGSEL)) as *mut u32;
+        // SAFETY: IOREGSEL of the mapped I/O APIC (Test 1); the window is held.
+        unsafe { core::ptr::write_volatile(sel, u32::from(REG_VER)) };
+        let nested = get_irq_affinity(0);
+        // SAFETY: as above.
+        (nested, unsafe { core::ptr::read_volatile(sel) })
+    });
+    if nested != normal || left & 0xFF != u32::from(REG_VER) {
+        serial_println!(
+            "[ioapic]   FAIL: a nested read gave {:?} (want {:?}) and left index {:#x} selected (want {:#x})",
+            nested,
+            normal,
+            left,
+            REG_VER
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[ioapic]   nested register access: OK");
 
     serial_println!("[ioapic] Self-test PASSED");
     Ok(())

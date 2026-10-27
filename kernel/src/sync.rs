@@ -1813,6 +1813,82 @@ impl<T> Drop for PreemptSpinIrqGuard<'_, T> {
 }
 
 // ---------------------------------------------------------------------------
+// WindowLock — a hardware register window
+// ---------------------------------------------------------------------------
+
+/// The lock for a device reached through a register window: an index
+/// written to one register, then data moved through another -- the PCI
+/// config ports (0xCF8, 0xCFC), the I/O APIC's IOREGSEL and IOWIN. Another
+/// CPU's access, or an interrupt handler's on the same CPU, landing between
+/// the two moves the wrong register's data, and one landing inside a
+/// read-modify-write of a register undoes the change it made.
+///
+/// Taken with interrupts off, and it records the CPU holding it. An NMI
+/// cannot be held off: [`with`](Self::with) tells a CPU that comes back in
+/// while it holds the lock -- an NMI or exception that interrupted its own
+/// access -- that it is nested, instead of waiting for itself for ever; the
+/// nested access must then leave the window as it found it (put back the
+/// index, which both windows read back). A restart, whose other CPUs are
+/// stopped wherever they stood, takes it from whichever held it
+/// ([`seize`](Self::seize)).
+///
+/// A raw spin, outside lockdep: it is taken from NMI context, and nothing is
+/// ever locked inside it.
+pub struct WindowLock {
+    /// 0 for nobody, else the holding CPU's index plus one.
+    holder: AtomicUsize,
+}
+
+impl WindowLock {
+    /// An unheld lock.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            holder: AtomicUsize::new(0),
+        }
+    }
+
+    /// Run `access` holding the window, with interrupts off: `access(false)`,
+    /// or `access(true)` on a CPU that holds it already (nested), which must
+    /// put the window back as it found it.
+    pub fn with<R>(&self, access: impl FnOnce(bool) -> R) -> R {
+        crate::cpu::without_interrupts(|| {
+            let me = crate::smp::current_cpu_index().saturating_add(1);
+            if self.holder.load(Ordering::Relaxed) == me {
+                return access(true);
+            }
+            while self
+                .holder
+                .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+                .is_err()
+            {
+                core::hint::spin_loop();
+            }
+            let result = access(false);
+            self.holder.store(0, Ordering::Release);
+            result
+        })
+    }
+
+    /// Take the lock from whichever CPU holds it, which then never gives it
+    /// back: for a restart.
+    ///
+    /// # Safety
+    ///
+    /// No other CPU may run kernel code again; one that did might be in the
+    /// middle of an access, and would be cut off.
+    pub unsafe fn seize(&self) {
+        self.holder.store(0, Ordering::Release);
+    }
+}
+
+impl Default for WindowLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 

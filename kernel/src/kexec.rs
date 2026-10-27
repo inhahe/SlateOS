@@ -2168,7 +2168,8 @@ pub unsafe fn quiesce() {
 
     // 2. Mask every IOAPIC line, so no device interrupt is delivered to the new
     //    kernel before it has installed its own IDT and re-programmed the IOAPIC.
-    crate::ioapic::mask_all();
+    // SAFETY: step 1b stopped every other CPU for good.
+    unsafe { crate::ioapic::mask_all() };
 
     // 3. Stop the LAPIC timer (the one interrupt source the kernel itself arms).
     // SAFETY: as above; the new kernel re-arms its own timer.

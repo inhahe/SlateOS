@@ -157,47 +157,31 @@ fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     | u32::from(offset & 0xFC) // Dword-aligned
 }
 
-/// Which CPU is inside a config access ([`config_access`]): 0 for none, else
-/// its index plus one. The lock that makes an access -- an address written to
-/// 0xCF8, then data moved through 0xCFC -- one step: another CPU's access, or
-/// an interrupt handler's on this one, landing between the two would move
-/// the wrong register's data.
-static CONFIG_HOLDER: AtomicUsize = AtomicUsize::new(0);
+/// The config ports, an address port and a data port: one access at a time
+/// (`sync::WindowLock`).
+static CONFIG_PORTS: crate::sync::WindowLock = crate::sync::WindowLock::new();
 
 /// Select `addr` in the config address port and run `data` against the data
-/// port, as one access: interrupts off, and [`CONFIG_HOLDER`] held.
+/// port, as one access, holding [`CONFIG_PORTS`].
 ///
 /// An NMI cannot be held off, and the watchdog's re-arm (`hardlockup`) does
-/// config access from one. If it interrupted this CPU's own access, waiting
-/// for the holder would wait forever; so a CPU that finds itself the holder
-/// does its access without waiting and puts back the address the interrupted
-/// access selected (the address port reads back), as firmware's SMM handlers
-/// do around the same pair of ports.
+/// config access from one. One that interrupted this CPU's own access does
+/// its own at once, and puts back the address the interrupted access
+/// selected (the address port reads back), as firmware's SMM handlers do
+/// around the same pair of ports.
 fn config_access<R>(addr: u32, data: impl FnOnce() -> R) -> R {
-    crate::cpu::without_interrupts(|| {
-        let me = crate::smp::current_cpu_index().saturating_add(1);
-        if CONFIG_HOLDER.load(Ordering::Relaxed) == me {
-            // SAFETY: 0xCF8 is the config mechanism #1 address port, always
-            // present on PC-compatible hardware; reading it gives the address
-            // the interrupted access selected, written back before returning.
-            let interrupted = unsafe { port::inl(PCI_CONFIG_ADDR) };
-            // SAFETY: as above.
-            unsafe { port::outl(PCI_CONFIG_ADDR, addr) };
-            let result = data();
-            // SAFETY: as above.
-            unsafe { port::outl(PCI_CONFIG_ADDR, interrupted) };
-            return result;
-        }
-        while CONFIG_HOLDER
-            .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
-        // SAFETY: as above; this CPU holds the ports.
+    CONFIG_PORTS.with(|nested| {
+        // SAFETY: 0xCF8 is the config mechanism #1 address port, always
+        // present on PC-compatible hardware; reading it gives the address the
+        // interrupted access selected, written back before returning.
+        let interrupted = nested.then(|| unsafe { port::inl(PCI_CONFIG_ADDR) });
+        // SAFETY: as above.
         unsafe { port::outl(PCI_CONFIG_ADDR, addr) };
         let result = data();
-        CONFIG_HOLDER.store(0, Ordering::Release);
+        if let Some(address) = interrupted {
+            // SAFETY: as above.
+            unsafe { port::outl(PCI_CONFIG_ADDR, address) };
+        }
         result
     })
 }
@@ -617,7 +601,7 @@ pub fn disable_bus_master(addr: PciAddress) {
 /// Stop every function on every bus mastering, for a kexec: DMA stops at
 /// its source. Called with every other CPU stopped where it stood, so it
 /// takes no lock and allocates nothing: the config ports are seized from
-/// whichever stopped CPU held them ([`CONFIG_HOLDER`]), and the bus is
+/// whichever stopped CPU held them ([`CONFIG_PORTS`]), and the bus is
 /// walked afresh rather than read from the kept scan, whose lock a stopped
 /// CPU may hold for good.
 ///
@@ -626,7 +610,8 @@ pub fn disable_bus_master(addr: PciAddress) {
 /// No other CPU may run kernel code again: one that did could be in the
 /// middle of a config access, and would be cut off.
 pub unsafe fn disable_bus_master_everywhere() {
-    CONFIG_HOLDER.store(0, Ordering::Release);
+    // SAFETY: the caller's.
+    unsafe { CONFIG_PORTS.seize() };
     for_each_function(disable_bus_master);
 }
 
@@ -662,7 +647,7 @@ pub unsafe fn disable_bus_master_everywhere() {
 // silences everything else.  Order does not matter — a claim that arrives
 // after the sweep re-enables the function it names.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// Sentinel for an unused slot in [`INTX_CLAIMS`].
 ///
@@ -1213,21 +1198,14 @@ pub fn self_test() -> Result<(), &'static str> {
 fn self_test_nested_access() -> Result<(), &'static str> {
     let normal = config_read32(0, 0, 0, CFG_VENDOR_ID);
     let selected = config_address(0, 0, 0, CFG_CLASS_REVISION);
-    let (nested, after) = crate::cpu::without_interrupts(|| {
-        let me = crate::smp::current_cpu_index().saturating_add(1);
-        // Take the ports as an access does, and select a register.
-        while CONFIG_HOLDER
-            .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
-            .is_err()
-        {
-            core::hint::spin_loop();
-        }
+    // Hold the ports as an access does, and select a register; then a read
+    // from inside, as an NMI's would be.
+    let (nested, after) = CONFIG_PORTS.with(|_| {
         // SAFETY: 0xCF8 is the config address port; this CPU holds it.
         unsafe { port::outl(PCI_CONFIG_ADDR, selected) };
         let nested = config_read32(0, 0, 0, CFG_VENDOR_ID);
         // SAFETY: as above.
         let after = unsafe { port::inl(PCI_CONFIG_ADDR) };
-        CONFIG_HOLDER.store(0, Ordering::Release);
         (nested, after)
     });
     if nested != normal || after != selected {

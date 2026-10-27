@@ -56,18 +56,21 @@ DEFAULT_CMDLINE = "blk.writable=eui64:0025385181b1cd22 selftest.keep_going=1 log
 IMAGE_NAME = "slateos-pikvm.img"
 
 # The PiKVM reaches the network by WiFi, which drops now and then: a request
-# the network loses is made again, RETRIES times in all, RETRY_WAIT seconds
-# apart; an upload cut off is started again from its beginning (the PiKVM
-# keeps no half-written image to resume).
+# that is safe to repeat, and that the network loses, is made again -- RETRIES
+# times in all, RETRY_WAIT seconds apart; an upload cut off is started again
+# from its beginning (the PiKVM keeps no half-written image to resume).
 RETRIES = 4
 RETRY_WAIT = 5
-# The image goes up in pieces of this size, streamed from the file: sent as
-# one write of half a gigabyte it was cut off every time.
+# The image is streamed from its file in pieces of this size, not read whole.
 UPLOAD_CHUNK = 4 << 20
-# How long `boot` presses the boot-menu key after power-on: this board takes
-# 10-25 s from a cold start to its menu, and a key pressed before it is up is
-# lost.
+# How long `boot` presses the boot-menu key after power-on: a key pressed
+# before the firmware listens is lost, and a cold start reaches the menu in
+# 10-25 s.
 MENU_KEY_SECONDS = 30
+# A lost answer, not kvmd's: a connection refused, reset or timed out, or cut
+# off partway through the answer. (urllib's HTTPError, kvmd's own answer, is an
+# OSError too, and is told apart first wherever these are caught.)
+NETWORK_ERRORS = (OSError, http.client.HTTPException)
 
 # US Dvorak, as Windows on the test PC is set: physical key (its US position)
 # -> (character, shifted character).
@@ -177,21 +180,26 @@ class PiKvm:
         self.ctx.check_hostname = False
         self.ctx.verify_mode = ssl.CERT_NONE
 
-    def call(self, method: str, path: str, body: bytes | None = None, timeout: float = 30) -> bytes:
-        """One request to kvmd: its answer's body. One the network loses is
-        made again (RETRIES in all); an answer, an error status included, is
-        final. A dropped request may have been carried out before it was
-        lost: the actions here (a key, a click, a power button) bear one
-        repeat."""
-        for attempt in range(1, RETRIES + 1):
+    def call(self, method: str, path: str, body=None, timeout: float = 30,
+             repeatable: bool = False) -> bytes:
+        """One request to kvmd: its answer's body. An answer kvmd gives, an
+        error status included, is final (HTTPError). A request the network
+        loses is made again (RETRIES in all) only when `repeatable`: when
+        doing it twice does no more than doing it once -- a read, a key or
+        button sent with the state it is to be in, a move to a position, a
+        power action (kvmd presses only what changes the state). Anything else
+        -- a key pressed and released, a drive connected -- may have been
+        carried out before its answer was lost, and is not repeated."""
+        tries = RETRIES if repeatable else 1
+        for attempt in range(1, tries + 1):
             req = urllib.request.Request(self.url + path, data=body, method=method, headers=self.headers)
             try:
                 with urllib.request.urlopen(req, context=self.ctx, timeout=timeout) as r:
                     return r.read()
             except urllib.error.HTTPError:
                 raise
-            except OSError as e:  # URLError, a reset or a timeout: the network
-                if attempt == RETRIES:
+            except NETWORK_ERRORS as e:
+                if attempt == tries:
                     raise
                 print(f"pikvm: {method} {path.split('?')[0]}: {e}; again in {RETRY_WAIT} s",
                       file=sys.stderr)
@@ -199,31 +207,40 @@ class PiKvm:
         raise AssertionError("unreachable")
 
     def json(self, method: str, path: str, **kw) -> dict:
+        kw.setdefault("repeatable", method == "GET")
         return json.loads(self.call(method, path, **kw))["result"]
 
     def key(self, code: str, state: bool | None = None) -> None:
+        """Press and release `code`, or with `state` hold it down (True) or
+        let it go (False) -- which bears repeating, as a press and release
+        does not."""
         q = f"key={code}" + ("" if state is None else f"&state={'true' if state else 'false'}")
-        self.call("POST", f"/api/hid/events/send_key?{q}")
+        self.call("POST", f"/api/hid/events/send_key?{q}", repeatable=state is not None)
 
     def move(self, x: int, y: int) -> None:
         self.call("POST", f"/api/hid/events/send_mouse_move?to_x={to_absolute(x, WIDTH)}"
-                          f"&to_y={to_absolute(y, HEIGHT)}")
+                          f"&to_y={to_absolute(y, HEIGHT)}", repeatable=True)
 
     def click(self, button: str = "left") -> None:
-        self.call("POST", f"/api/hid/events/send_mouse_button?button={button}&state=true")
+        self.call("POST", f"/api/hid/events/send_mouse_button?button={button}&state=true",
+                  repeatable=True)
         time.sleep(0.08)
-        self.call("POST", f"/api/hid/events/send_mouse_button?button={button}&state=false")
+        self.call("POST", f"/api/hid/events/send_mouse_button?button={button}&state=false",
+                  repeatable=True)
 
     def type_text(self, text: str, layout: str) -> None:
+        """Type `text`, each key held down and let go as two events, so that
+        one repeated after a lost answer types nothing twice."""
         for code, shift in key_presses(text, layout):
             if shift:
                 self.key("ShiftLeft", True)
-            self.key(code)
+            self.key(code, True)
+            self.key(code, False)
             if shift:
                 self.key("ShiftLeft", False)
 
     def snapshot(self) -> bytes:
-        return self.call("GET", "/api/streamer/snapshot")
+        return self.call("GET", "/api/streamer/snapshot", repeatable=True)
 
     def leds(self) -> dict:
         return self.json("GET", "/api/atx")["leds"]
@@ -236,70 +253,106 @@ class PiKvm:
         hold ends. A refusal is tried again for a few seconds all the same."""
         for attempt in range(1, 11):
             try:
-                self.call("POST", f"/api/atx/power?action={action}&wait=1", timeout=60)
+                self.call("POST", f"/api/atx/power?action={action}&wait=1", timeout=60,
+                          repeatable=True)
                 return
             except urllib.error.HTTPError as e:
                 if e.code != 409 or attempt == 10:
                     raise
                 time.sleep(1)
 
+    def set_connected(self, connected: bool) -> None:
+        """Connect the virtual drive to the PC, or disconnect it, unless it is
+        so already -- kvmd refuses either then (400). Not repeated on a lost
+        answer, which may have been carried out: the drive's state is read
+        again instead, and the request made again only if it did not take."""
+        for attempt in range(1, RETRIES + 1):
+            if self.json("GET", "/api/msd")["drive"]["connected"] == connected:
+                return
+            try:
+                self.call("POST", f"/api/msd/set_connected?connected={int(connected)}")
+                return
+            except urllib.error.HTTPError:
+                raise
+            except NETWORK_ERRORS as e:
+                if attempt == RETRIES:
+                    raise
+                print(f"pikvm: set_connected: {e}; looking again in {RETRY_WAIT} s", file=sys.stderr)
+                time.sleep(RETRY_WAIT)
+
+    def wait_idle(self, seconds: float = 120) -> None:
+        """Wait while the virtual drive's storage is busy -- as it stays for a
+        while after an upload cut off, until kvmd sees the connection gone."""
+        end = time.monotonic() + seconds
+        while self.json("GET", "/api/msd").get("busy") and time.monotonic() < end:
+            time.sleep(2)
+
     def upload(self, image: Path) -> None:
         """Put `image` on the virtual drive as a read-only flash drive, connected."""
-        # Disconnecting a drive that is not connected is refused (HTTP 400).
-        if self.json("GET", "/api/msd")["drive"]["connected"]:
-            self.call("POST", "/api/msd/set_connected?connected=0")
+        # Read first: a missing or unreadable image fails here, before the
+        # PiKVM's drive is touched, not as a "cut off" upload.
+        size = image.stat().st_size
+        with image.open("rb"):
+            pass
+        self.set_connected(False)
         for attempt in range(1, RETRIES + 1):
+            self.wait_idle()
             try:
-                self.call("POST", f"/api/msd/remove?image={IMAGE_NAME}")
+                self.call("POST", f"/api/msd/remove?image={IMAGE_NAME}", repeatable=True)
             except urllib.error.HTTPError:
-                pass  # No earlier image of that name, or none left: nothing to remove.
+                pass  # No earlier image of that name: nothing to remove.
             try:
-                self.write_image(image)
+                self.write_image(image, size)
                 break
-            except (OSError, http.client.HTTPException) as e:
+            except urllib.error.HTTPError as e:
+                if e.code == 409 and attempt < RETRIES:
+                    print(f"pikvm: the drive is busy; trying again in {RETRY_WAIT} s", file=sys.stderr)
+                    time.sleep(RETRY_WAIT)
+                    continue
+                sys.exit(f"pikvm: the PiKVM refused the image: {e.code} {e.read()[:300]!r}")
+            except NETWORK_ERRORS as e:
                 if attempt == RETRIES:
                     raise
                 print(f"pikvm: the upload was cut off ({e}); starting it again", file=sys.stderr)
                 time.sleep(RETRY_WAIT)
-        self.call("POST", f"/api/msd/set_params?image={IMAGE_NAME}&cdrom=0&rw=0")
-        self.call("POST", "/api/msd/set_connected?connected=1")
+        self.call("POST", f"/api/msd/set_params?image={IMAGE_NAME}&cdrom=0&rw=0", repeatable=True)
+        self.set_connected(True)
         for _ in range(60):
             if self.json("GET", "/api/msd")["drive"]["image"]["complete"]:
                 return
             time.sleep(1)
         sys.exit("pikvm: the image never showed as complete")
 
-    def write_image(self, image: Path) -> None:
-        """Send `image` to the virtual drive's storage as IMAGE_NAME, streamed
-        from the file in UPLOAD_CHUNK pieces, saying how far it has got. A
-        refusal from kvmd ends the script; a connection lost raises."""
-        parts = urllib.parse.urlsplit(self.url)
-        conn = (http.client.HTTPSConnection(parts.netloc, context=self.ctx, timeout=120)
-                if parts.scheme == "https" else http.client.HTTPConnection(parts.netloc, timeout=120))
-        size = image.stat().st_size
-        try:
-            conn.putrequest("POST", f"/api/msd/write?image={IMAGE_NAME}")
-            for key, value in self.headers.items():
-                conn.putheader(key, value)
-            conn.putheader("Content-Length", str(size))
-            conn.putheader("Content-Type", "application/octet-stream")
-            conn.endheaders()
-            sent, start = 0, time.monotonic()
-            said = start
-            with image.open("rb") as fh:
-                while block := fh.read(UPLOAD_CHUNK):
-                    conn.send(block)
-                    sent += len(block)
-                    if time.monotonic() - said >= 10:
-                        print(f"pikvm: {sent >> 20} of {size >> 20} MiB sent", flush=True)
-                        said = time.monotonic()
-            answer = conn.getresponse()
-            body = answer.read()
-            if answer.status != 200:
-                sys.exit(f"pikvm: the PiKVM refused the image: {answer.status} {body[:300]!r}")
-            print(f"pikvm: {size >> 20} MiB sent in {time.monotonic() - start:.0f} s", flush=True)
-        finally:
-            conn.close()
+    def write_image(self, image: Path, size: int) -> None:
+        """Send `image`, `size` bytes, to the virtual drive's storage as
+        IMAGE_NAME, streamed from the file, saying how far it has got. kvmd's
+        refusal raises HTTPError; a connection lost, one of NETWORK_ERRORS."""
+        start = time.monotonic()
+        headers = {**self.headers, "Content-Length": str(size),
+                   "Content-Type": "application/octet-stream"}
+        with image.open("rb") as fh:
+            req = urllib.request.Request(self.url + f"/api/msd/write?image={IMAGE_NAME}",
+                                         data=Progress(fh, size), method="POST", headers=headers)
+            with urllib.request.urlopen(req, context=self.ctx, timeout=120) as r:
+                r.read()
+        print(f"pikvm: {size >> 20} MiB sent in {time.monotonic() - start:.0f} s", flush=True)
+
+
+class Progress:
+    """A file being sent, read in UPLOAD_CHUNK pieces whatever the reader
+    asks for, saying every 10 s how far it has got."""
+
+    def __init__(self, fh, size: int) -> None:
+        self.fh, self.size, self.sent = fh, size, 0
+        self.said = time.monotonic()
+
+    def read(self, _n: int = -1) -> bytes:
+        block = self.fh.read(UPLOAD_CHUNK)
+        self.sent += len(block)
+        if time.monotonic() - self.said >= 10:
+            print(f"pikvm: {self.sent >> 20} of {self.size >> 20} MiB sent", flush=True)
+            self.said = time.monotonic()
+        return block
 
 
 def stage(worktree: Path, out: Path, cmdline: str) -> None:
@@ -334,7 +387,11 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str) -> None:
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
-    """Upload `image`, restart the PC, and pick the PiKVM drive in its boot menu."""
+    """Upload `image`, restart the PC, and pick the PiKVM drive in its boot
+    menu. The click is checked as far as pictures allow: one the menu does
+    not take (the screen unchanged) is made again. A screen that changes is
+    taken for the boot starting -- which it may not be, if what settled was a
+    logo before the menu; `watch` or `snap` shows which."""
     if not kvm.boot_entry_xy:
         sys.exit("pikvm: boot needs boot_entry_xy in ~/.pikvm: where the boot menu shows the PiKVM drive")
     kvm.upload(image)
@@ -349,26 +406,56 @@ def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
     for _ in range(MENU_KEY_SECONDS * 4):
         kvm.key(menu_key)
         time.sleep(0.25)
-    # The menu waits for a choice: once the screen is still, it is up.
-    menu = wait_still(kvm, 30)
-    x, y = kvm.boot_entry_xy
-    for _ in range(3):
-        kvm.move(x, y)
+    click_entry(kvm, tuple(kvm.boot_entry_xy))
+
+
+def click_entry(kvm: PiKvm, xy: tuple) -> None:
+    """Click the boot menu's entry at `xy` once the screen has settled -- the
+    menu waits for a choice -- and again if the screen does not change."""
+    if wait_still(kvm, 30) is None:
+        print("pikvm: no settled screen to check the click against (it kept "
+              "changing, or no picture can be had): clicking once, unchecked", flush=True)
+        kvm.move(*xy)
         time.sleep(0.3)
         kvm.click()
-        if menu is None or changed_from(kvm, menu, 10):
+        return
+    for _ in range(3):
+        kvm.move(*xy)
+        time.sleep(0.5)
+        # Taken after the move: a pointer drawn on the entry, or the entry
+        # lit up under it, is part of the picture, not a sign the click took.
+        before = snapshot_image(kvm)
+        kvm.click()
+        if before is None or changed_from(kvm, before, 10):
             return
         print("pikvm: the boot menu is still up; clicking the entry again", flush=True)
     sys.exit("pikvm: the boot menu did not take the click")
 
 
-def snapshot_image(kvm: PiKvm):
-    """The screen, greyscale; None when no picture can be had."""
-    from PIL import Image
+def picture(kvm: PiKvm):
+    """The screen: (the JPEG kvmd sent, the picture in greyscale), or a
+    string saying why there is none -- no Pillow, the PC off or between
+    modes, the network, a picture cut short."""
     try:
-        return Image.open(io.BytesIO(kvm.snapshot())).convert("L")
-    except (urllib.error.URLError, OSError):
-        return None
+        from PIL import Image
+    except ImportError:
+        return "Pillow is not installed"
+    try:
+        data = kvm.snapshot()
+    except urllib.error.HTTPError:
+        return "the PC is off or between modes"
+    except NETWORK_ERRORS as e:
+        return str(e)
+    try:
+        return data, Image.open(io.BytesIO(data)).convert("L")
+    except OSError as e:  # PIL's UnidentifiedImageError: a picture cut short
+        return f"a picture that does not decode ({e})"
+
+
+def snapshot_image(kvm: PiKvm):
+    """The screen in greyscale; None when no picture can be had."""
+    got = picture(kvm)
+    return None if isinstance(got, str) else got[1]
 
 
 def wait_still(kvm: PiKvm, seconds: float):
@@ -400,24 +487,19 @@ def changed_from(kvm: PiKvm, before, seconds: float) -> bool:
 def watch(kvm: PiKvm, seconds: float, every: float, out_dir: Path) -> None:
     """Screenshot every `every` seconds for up to `seconds`; say when the
     screen stops changing (a hang, or the end of a boot)."""
-    from PIL import Image
     out_dir.mkdir(parents=True, exist_ok=True)
     last, still, n = None, 0.0, 0
     end = time.monotonic() + seconds
     while time.monotonic() < end:
         time.sleep(every)
-        try:
-            data = kvm.snapshot()
-        except urllib.error.HTTPError:
-            print("pikvm: no picture (the PC is off or between modes)")
+        got = picture(kvm)
+        if isinstance(got, str):
+            print(f"pikvm: no picture ({got})")
             continue
-        except OSError as e:  # the network, past call's retries
-            print(f"pikvm: no picture ({e})")
-            continue
+        data, img = got
         n += 1
         shot = out_dir / f"watch-{n:03}.jpg"
         shot.write_bytes(data)
-        img = Image.open(io.BytesIO(data)).convert("L")
         if last is not None and screens_alike(last, img):
             still += every
         else:
@@ -475,10 +557,172 @@ def self_test() -> int:
         check("limine.conf without an entry is refused", "taken", "refused")
     except ValueError:
         pass
+    self_test_requests(check)
+    self_test_screens(check)
     for f in failures:
         print("FAIL", f)
     print("pikvm self-test:", "FAILED" if failures else "passed")
     return 1 if failures else 0
+
+
+def self_test_requests(check) -> None:
+    """call()'s retries, set_connected(), type_text() and upload()'s first
+    step, against a stubbed urlopen and a stubbed PiKVM: no network."""
+    from unittest import mock
+    global RETRY_WAIT
+    saved_wait, RETRY_WAIT = RETRY_WAIT, 0
+    try:
+        kvm = PiKvm.__new__(PiKvm)
+        kvm.url, kvm.headers, kvm.ctx = "https://pikvm.test", {}, None
+
+        class Answer:
+            def __init__(self, body):
+                self.body = body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return self.body
+
+        def lost_then(n, body=b"ok", error=None):
+            """An urlopen whose first `n` calls lose the network."""
+            calls = []
+
+            def urlopen(req, **_kw):
+                calls.append(req.full_url)
+                if len(calls) <= n:
+                    raise error or urllib.error.URLError("network down")
+                return Answer(body)
+            return urlopen, calls
+
+        urlopen, calls = lost_then(2)
+        with mock.patch.object(urllib.request, "urlopen", urlopen):
+            got = kvm.call("GET", "/api/x", repeatable=True)
+        check("call: a repeatable request lost twice is made a third time", (got, len(calls)), (b"ok", 3))
+        urlopen, calls = lost_then(1)
+        with mock.patch.object(urllib.request, "urlopen", urlopen):
+            try:
+                kvm.call("POST", "/api/hid/events/send_key?key=KeyA")
+                check("call: a lost press-and-release is not made again", "made again", "raised")
+            except urllib.error.URLError:
+                check("call: a lost press-and-release is not made again", len(calls), 1)
+        urlopen, calls = lost_then(1, error=http.client.IncompleteRead(b"half"))
+        with mock.patch.object(urllib.request, "urlopen", urlopen):
+            got = kvm.call("GET", "/api/streamer/snapshot", repeatable=True)
+        check("call: an answer cut off partway is a lost answer", (got, len(calls)), (b"ok", 2))
+        urlopen, calls = lost_then(9)
+        with mock.patch.object(urllib.request, "urlopen", urlopen):
+            try:
+                kvm.call("GET", "/api/x", repeatable=True)
+                check("call: gives up after RETRIES", "answered", "raised")
+            except urllib.error.URLError:
+                check("call: gives up after RETRIES", len(calls), RETRIES)
+
+        class Stub:
+            """A PiKVM that records what it is asked."""
+
+            def __init__(self, states, lose_post=False):
+                self.states, self.lose_post, self.log = list(states), lose_post, []
+
+            def json(self, method, path, **_kw):
+                connected = self.states.pop(0) if len(self.states) > 1 else self.states[0]
+                return {"drive": {"connected": connected}, "busy": False}
+
+            def call(self, method, path, **_kw):
+                self.log.append(path)
+                if self.lose_post:
+                    self.lose_post = False
+                    raise urllib.error.URLError("answer lost")
+                return b""
+
+            def key(self, code, state=None):
+                self.log.append((code, state))
+
+        stub = Stub([True])
+        PiKvm.set_connected(stub, True)
+        check("set_connected: a drive connected already is left alone", stub.log, [])
+        stub = Stub([False, True], lose_post=True)
+        PiKvm.set_connected(stub, True)
+        check("set_connected: a lost answer that took is not made again",
+              stub.log, ["/api/msd/set_connected?connected=1"])
+        stub = Stub([True])
+        PiKvm.type_text(stub, "Ab", "us")
+        check("type: each key held and let go as two events",
+              stub.log, [("ShiftLeft", True), ("KeyA", True), ("KeyA", False),
+                         ("ShiftLeft", False), ("KeyB", True), ("KeyB", False)])
+        stub = Stub([True])
+        try:
+            PiKvm.upload(stub, Path("no-such-image.img"))
+            check("upload: a missing image fails", "uploaded", "raised")
+        except FileNotFoundError:
+            check("upload: a missing image fails before the drive is touched", stub.log, [])
+    finally:
+        RETRY_WAIT = saved_wait
+
+
+def self_test_screens(check) -> None:
+    """wait_still(), changed_from() and click_entry() against a stubbed
+    screen, with time passing only as they sleep."""
+    try:
+        from PIL import Image
+    except ImportError:
+        print("pikvm self-test: no PIL, so the click checks are not exercised")
+        return
+    from unittest import mock
+
+    def jpeg(level):
+        out = io.BytesIO()
+        Image.new("L", (8, 8), level).save(out, format="JPEG")
+        return out.getvalue()
+
+    class Screen:
+        """A PiKVM whose screen shows `frames` in turn, then the last for
+        good; a click advances it by `on_click` frames."""
+
+        def __init__(self, frames, on_click=0):
+            self.frames, self.on_click, self.clicks, self.moves = list(frames), on_click, 0, 0
+
+        def snapshot(self):
+            return jpeg(self.frames.pop(0) if len(self.frames) > 1 else self.frames[0])
+
+        def move(self, x, y):
+            self.moves += 1
+
+        def click(self):
+            self.clicks += 1
+            del self.frames[:min(self.on_click, len(self.frames) - 1)]
+
+    clock = [0.0]
+    with mock.patch.object(time, "monotonic", lambda: clock[0]), \
+            mock.patch.object(time, "sleep", lambda t: clock.__setitem__(0, clock[0] + t)):
+        check("wait_still: settles on the first picture seen twice",
+              wait_still(Screen([0, 200, 200]), 30) is not None, True)
+        check("wait_still: a screen that never settles is None",
+              wait_still(Screen([0, 200, 0, 200, 0, 200] * 20), 10), None)
+        black = Image.new("L", (8, 8), 0)
+        check("changed_from: a screen that changes", changed_from(Screen([0, 0, 200]), black, 10), True)
+        check("changed_from: one that does not", changed_from(Screen([0]), black, 10), False)
+        def clicks(screen):
+            """How many clicks click_entry made; -1 if it gave up."""
+            try:
+                click_entry(screen, (5, 5))
+            except SystemExit:
+                return -1
+            return screen.clicks
+
+        # The menu (0) settles; the first click is lost, the second takes (200).
+        check("click_entry: a click the menu did not take is made again",
+              clicks(Screen([0] * 14 + [200])), 2)
+        # The menu settles, then the click takes it away at once.
+        check("click_entry: a click that takes is made once",
+              clicks(Screen([0, 0, 0, 0, 200], on_click=1)), 1)
+        check("click_entry: a menu that never takes a click is given up on",
+              clicks(Screen([0])), -1)
+
 
 
 def main(argv: list[str]) -> int:

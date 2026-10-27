@@ -47,10 +47,11 @@
 //! hops to prevent loops).
 //!
 //! **A file is kept once, mapped or not** (design-decisions §1574). Its
-//! contents are bytes, exactly as long as the file, until it is mapped; a
-//! mapping's first fault turns them into frames of the file's own
-//! ([`FileFrames`]), and the page cache takes a reference on a frame instead
-//! of copying it ([`FileSystem::page_frame`]). The VFS reads and writes a
+//! contents are bytes, exactly as long as the file, while it is unmapped and
+//! no longer than `BYTES_MAX` (64 KiB); a write past that, or a mapping's
+//! first fault, turns them into frames of the file's own ([`FileFrames`]),
+//! and the page cache takes a reference on a frame instead of copying it
+//! ([`FileSystem::page_frame`]). The VFS reads and writes a
 //! memfs file directly, past the page cache ([`FileSystem::caches_contents`]),
 //! so a write and every mapping reach the same memory.
 
@@ -140,7 +141,8 @@ enum MemData {
 /// large file's memory for the length of the copy.
 const BYTES_MAX: u64 = 4 * PAGE;
 
-/// A mapped memfs file's contents: its length, and the frame holding each
+/// The contents of a memfs file that was mapped or grew past [`BYTES_MAX`]:
+/// its length, and the frame holding each
 /// page it has, by page index (`offset / FRAME_SIZE`); a page with none is a
 /// hole, zeros. Each frame carries one reference, the file's; the page cache
 /// and the mappings take their own.
@@ -250,23 +252,39 @@ impl FileFrames {
     }
 
     /// Write `data` at `offset`, into the pages' own frames, growing the file.
-    /// A write that fails part-way (a frame not to be had) leaves nothing
-    /// past the file's old end: the pages it made there are freed and the
-    /// last page's tail zeroed, so that growing the file still reads zeros.
+    /// All of it or none: the frames of the holes it covers are made first, so
+    /// that a frame not to be had fails the write before any byte of it lands.
     fn write(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
         let end = offset
             .checked_add(u64::try_from(data.len()).map_err(|_| KernelError::FileTooLarge)?)
             .ok_or(KernelError::FileTooLarge)?;
+        let pages = if data.is_empty() {
+            0..0
+        } else {
+            offset / PAGE..(end.saturating_sub(1) / PAGE).saturating_add(1)
+        };
+        let holes = pages.clone().filter(|index| !self.pages.contains_key(index)).count();
+        let mut made = Vec::new();
+        made.try_reserve_exact(holes)
+            .map_err(|_| KernelError::OutOfMemory)?;
+        for index in pages.filter(|index| !self.pages.contains_key(index)) {
+            match frame::alloc_frame_zeroed() {
+                Ok(held) => made.push((index, held)),
+                Err(e) => {
+                    for (_, held) in made {
+                        release_frame(held);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        // The bytes of the last page past the old end are not the file's (a
+        // mapping's store past it); what the file grows into reads zeros.
         if offset > self.len {
             self.zero_tail()?;
         }
-        if let Err(e) = self.write_pages(offset, data) {
-            for (_, held) in self.pages.split_off(&self.len.div_ceil(PAGE)) {
-                release_frame(held);
-            }
-            self.zero_tail()?;
-            return Err(e);
-        }
+        self.pages.extend(made);
+        self.write_pages(offset, data)?;
         self.len = self.len.max(end);
         Ok(())
     }
@@ -417,6 +435,17 @@ impl MemData {
     fn write(&mut self, offset: u64, data: &[u8]) -> KernelResult<()> {
         let end = offset.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
         if end > BYTES_MAX {
+            if let Self::Bytes(bytes) = self {
+                // Into frames. The write ends past every byte the file holds
+                // (at most BYTES_MAX), so only those before it are kept, and
+                // only those are copied -- none, for a file written over from
+                // its start. On failure the file is as it was.
+                let kept = usize::try_from(offset).map_or(bytes.len(), |o| o.min(bytes.len()));
+                let mut frames = FileFrames::from_bytes(bytes.get(..kept).unwrap_or(&[]))?;
+                frames.write(offset, data)?;
+                *self = Self::Frames(frames);
+                return Ok(());
+            }
             return self.frames()?.write(offset, data);
         }
         match self {
@@ -1764,9 +1793,14 @@ impl FileSystem for MemFs {
             }
             // A hole made for a mapping counts against the size limit as a
             // write does: past it, the fault is refused (`SIGBUS`, as Linux's
-            // tmpfs answers it).
+            // tmpfs answers it). Bytes the file holds already do not, though
+            // turning them into frames rounds them up to whole pages: they are
+            // the file's, and refusing them would fail a read of data that is
+            // there.
             let old = node.held_bytes();
-            self.room_for(old, content.held_after_fault(offset / PAGE))?;
+            if !content.has_page(offset / PAGE) {
+                self.room_for(old, content.held_after_fault(offset / PAGE))?;
+            }
             let node = self.node_mut(ino)?;
             let data = node.file_data_mut().ok_or(not_a_file)?;
             let made = data.frames().and_then(|frames| frames.frame(offset / PAGE));
@@ -2836,6 +2870,18 @@ fn test_bytes_max() -> KernelResult<()> {
     if grown != (true, true, b"x".to_vec()) {
         return fail("a file turned into frames lost its bytes, or reads other than zeros between");
     }
+    // Written past BYTES_MAX from inside its bytes: those before the write
+    // stay, the rest is the write's.
+    fs.write_file(Path::new("/over"), &alloc::vec![1u8; 1000])?;
+    fs.write_at(Path::new("/over"), 500, &alloc::vec![2u8; max])?;
+    let over = (
+        fs.read_at(Path::new("/over"), 0, 500)?.iter().all(|&b| b == 1),
+        fs.read_at(Path::new("/over"), 500, max)?,
+        fs.read_at(Path::new("/over"), 500u64.saturating_add(BYTES_MAX), 8)?.len(),
+    );
+    if over != (true, alloc::vec![2u8; max], 0) {
+        return fail("a write taking a file past 64 KiB from inside it lost the bytes before it");
+    }
     crate::serial_println!("[memfs]   bytes up to 64 KiB, frames past, a cut's growth a hole: OK");
     Ok(())
 }
@@ -2843,18 +2889,24 @@ fn test_bytes_max() -> KernelResult<()> {
 /// The size limit counts what a file holds: a mapped file a whole frame for
 /// each page it has, a hole nothing. A mapping's fault that would make a
 /// page past the limit is refused, `DiskFull`, and the running count stays
-/// the sum of what every file holds.
+/// the sum of what every file holds. A full filesystem still maps the bytes
+/// a file holds: they are the file's already.
 fn test_frames_counted() -> KernelResult<()> {
     fn fail(what: &str) -> KernelResult<()> {
         crate::serial_println!("[memfs]   FAILED: frames counted: {}", what);
         Err(KernelError::IoError)
     }
-    // Two frames' worth of blocks; objects enough.
-    let blocks = PAGE.saturating_mul(2) / MEMFS_BLOCK_SIZE;
+    // Two frames' worth of blocks, and what a second, one-byte file holds;
+    // objects enough.
+    let small_blocks = blocks_of(1);
+    let blocks = (PAGE.saturating_mul(2) / MEMFS_BLOCK_SIZE).saturating_add(small_blocks);
     let mut fs = MemFs::with_limits(MemFsLimit::Exactly(blocks), MemFsLimit::Exactly(16));
     let path = Path::new("/m");
     fs.write_file(path, b"1")?;
     let ino = fs.resolve_ino(path)?;
+    let small = Path::new("/n");
+    fs.write_file(small, b"2")?;
+    let small_ino = fs.resolve_ino(small)?;
     let mut held = alloc::vec::Vec::new();
     let result = (|| {
         // Mapped: one byte is a whole frame now.
@@ -2862,12 +2914,12 @@ fn test_frames_counted() -> KernelResult<()> {
         if let Some(Ok(f)) = first {
             held.push(f);
         }
-        if fs.held_blocks != blocks_of(PAGE) {
+        if fs.held_blocks != blocks_of(PAGE).saturating_add(small_blocks) {
             return fail("a mapped file is not counted a frame a page");
         }
         // Grown by a cut: a hole, nothing more held.
         fs.truncate(path, PAGE.saturating_mul(3))?;
-        if fs.held_blocks != blocks_of(PAGE) {
+        if fs.held_blocks != blocks_of(PAGE).saturating_add(small_blocks) {
             return fail("a hole was counted as held");
         }
         // A second page fills the limit; a third is past it.
@@ -2884,6 +2936,15 @@ fn test_frames_counted() -> KernelResult<()> {
         }
         if fs.held_blocks != walked_blocks(&fs) || fs.held_blocks != blocks {
             return fail("the count is not what the files hold");
+        }
+        // Full: the one-byte file is mapped all the same, and counted a frame.
+        if let Some(Ok(f)) = fs.page_frame(small_ino, 0) {
+            held.push(f);
+        } else {
+            return fail("a full filesystem refused to map bytes a file holds");
+        }
+        if fs.held_blocks != walked_blocks(&fs) {
+            return fail("the count is not what the files hold, once bytes are a frame");
         }
         Ok(())
     })();

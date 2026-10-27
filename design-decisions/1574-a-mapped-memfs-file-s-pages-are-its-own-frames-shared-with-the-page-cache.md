@@ -38,7 +38,15 @@ one copy, which a write, a read and every mapping all see.
    is marked adopted. A writable shared mapping's first store to it is let
    through without marking it dirty -- the store is in the file, and there
    is nothing to save -- and a change to the file is not copied into it, as
-   it is in it already. (Saving it would copy the frame out and back under
+   it is in it already. What a save would have done besides is done at that
+   first store's fault instead (`MarkDirty::Adopted`,
+   `Vfs::object_mapped_write`): the file's modification and change times
+   are set, and the change announced, as Linux's write fault does.
+5. **The size limit counts holes, not conversions.** A mapping's fault that
+   needs a frame for a hole counts against a size-limited memfs, and is
+   refused past the limit with `SIGBUS`, as tmpfs answers it; turning bytes
+   the file holds into frames is never refused, though it rounds them up to
+   whole pages. (Saving it would copy the frame out and back under
    the filesystem's lock, putting older bytes back over a store a mapping
    made between the two.) A cut drops the pages as for any file; memfs
    frees its frames past the end, the cache its references.

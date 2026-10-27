@@ -2369,6 +2369,23 @@ pub fn announce_written_back(handle: u64) {
     }
 }
 
+/// A shared mapping of the file `handle` holds is letting a store reach the
+/// file's own frame, with no save to follow: the file's times are set and
+/// the change announced, as a write would (`Vfs::object_mapped_write`).
+/// Nothing, for a handle that holds no file.
+pub fn note_mapped_write(handle: u64) {
+    let (object, path) = {
+        let table = OPEN_FILES.lock();
+        let Some(file) = table.get(&handle) else {
+            return;
+        };
+        (file.object.clone(), file.path.clone())
+    };
+    if let Some(obj) = object {
+        crate::fs::Vfs::object_mapped_write(&obj, &path);
+    }
+}
+
 /// Make what has been written to the file `handle` names stable: its dirty
 /// pages, written through shared mappings, saved to it
 /// (`mm::page_cache::writeback`), then its filesystem flushed -- `fsync`.

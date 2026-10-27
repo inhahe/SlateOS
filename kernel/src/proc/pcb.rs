@@ -5971,11 +5971,19 @@ pub fn write_protect_file_pages(
         return;
     }
     // Each mapping finds its pages by search, which needs them in offset
-    // order: the only caller, a save, takes them from an ordered index.
-    debug_assert!(
-        pages.is_sorted_by_key(|&(offset, _)| offset),
-        "write_protect_file_pages wants its pages in offset order"
-    );
+    // order. The only caller, a save, takes them from an ordered index; but
+    // a page out of order would be skipped, left writable with its dirty
+    // mark cleared, and its next store lost -- so the order is checked in
+    // every build (one pass), and a list out of order is sorted.
+    let sorted;
+    let pages = if pages.is_sorted_by_key(|&(offset, _)| offset) {
+        pages
+    } else {
+        let mut copy = pages.to_vec();
+        copy.sort_unstable_by_key(|&(offset, _)| offset);
+        sorted = copy;
+        sorted.as_slice()
+    };
     let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
     let hw = HW_PAGE_SIZE as u64;
     let writes = |v: &Vma| {
@@ -6100,8 +6108,9 @@ fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) ->
     let Some(frame) = PhysFrame::from_addr(pte.phys_addr() & !frame_mask) else {
         return false;
     };
-    match crate::mm::page_cache::mark_dirty(fault.file_id, fo & !frame_mask, frame) {
-        crate::mm::page_cache::MarkDirty::Marked => {}
+    let adopted = match crate::mm::page_cache::mark_dirty(fault.file_id, fo & !frame_mask, frame) {
+        crate::mm::page_cache::MarkDirty::Marked => false,
+        crate::mm::page_cache::MarkDirty::Adopted => true,
         // A cut dropped the page: the part maps a frame that is no longer the
         // file's. Unmapped here, the access runs again and faults afresh --
         // `SIGBUS` past the new end -- rather than `SIGSEGV`, and rather than
@@ -6112,7 +6121,7 @@ fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) ->
             return true;
         }
         crate::mm::page_cache::MarkDirty::NoWriter => return false,
-    }
+    };
     let flags = pte.flags() | PageFlags::WRITABLE;
     // SAFETY: the faulting process's PML4, its page-table lock held; `va` is
     // a 4 KiB-aligned user address in a writable VMA whose PTE is present.
@@ -6123,6 +6132,12 @@ fn resolve_shared_write(pml4_phys: u64, fault_addr: u64, fault: &SharedFault) ->
     // faults, finds the part writable, and runs the access again.
     // SAFETY: invlpg is always safe in ring 0.
     unsafe { page_table::invlpg(va) };
+    drop(held);
+    // The store lands in the file's own frame, with no save to follow: the
+    // file's times and the change announced now, outside the page-table lock.
+    if adopted {
+        crate::fs::handle::note_mapped_write(fault.handle);
+    }
     true
 }
 
@@ -7507,9 +7522,11 @@ pub enum FaultOutcome {
     /// The process table was held elsewhere, and the caller asked not to
     /// wait for it: nothing is known yet, so try again.
     Busy,
-    /// The address is in a shared mapping of a file, at or past the file's
-    /// end: Linux's `SIGBUS` (`BUS_ADRERR`), not a segmentation fault.
-    BeyondEnd,
+    /// The address is in a mapping of a file that cannot give it a page: it
+    /// is at or past the file's end (a shared mapping), or a hole the
+    /// filesystem has no room left to fill. Linux's `SIGBUS` (`BUS_ADRERR`),
+    /// not a segmentation fault.
+    NoFilePage,
 }
 
 /// Why [`resolve_fault_inner`] left a fault unresolved, when that says
@@ -7520,8 +7537,8 @@ enum FaultNote {
     None,
     /// See [`FaultOutcome::Busy`].
     Busy,
-    /// See [`FaultOutcome::BeyondEnd`].
-    BeyondEnd,
+    /// See [`FaultOutcome::NoFilePage`].
+    NoFilePage,
 }
 
 /// Resolve a page fault in `pid`'s address space against its VMA list:
@@ -7558,7 +7575,7 @@ pub fn resolve_fault(pid: ProcessId, fault_addr: u64, error_code: u64, wait: boo
     match note {
         FaultNote::None => FaultOutcome::Unresolvable,
         FaultNote::Busy => FaultOutcome::Busy,
-        FaultNote::BeyondEnd => FaultOutcome::BeyondEnd,
+        FaultNote::NoFilePage => FaultOutcome::NoFilePage,
     }
 }
 
@@ -7908,6 +7925,7 @@ fn resolve_fault_inner(
                 handle,
                 page_file_off,
                 pid,
+                note,
             );
         }
     }
@@ -8069,17 +8087,23 @@ struct SharedFault {
 /// `resolve_shared_write` marks the page dirty before it lets the write in.
 ///
 /// A part at or past the file's end is left unmapped; when it is the faulting
-/// one, `note` becomes [`FaultNote::BeyondEnd`] (`SIGBUS`). True when the
+/// one, `note` becomes [`FaultNote::NoFilePage`] (`SIGBUS`), as it does when
+/// the filesystem has no room for the faulting part's page. True when the
 /// access may run again: the faulting part is mapped now, by this call or
 /// another CPU's, or the file's length was set while this call ran, and the
 /// access's next fault reads it afresh.
-fn resolve_file_shared(
+///
+/// `adopted_write` is set when a store was let into a page that is the file's
+/// own frame (`MarkDirty::Adopted`), which [`resolve_file_shared`] then
+/// reports to the file.
+fn map_file_shared(
     pml4_phys: u64,
     frame_base: u64,
     fault_addr: u64,
     write: bool,
     fault: &SharedFault,
     note: &mut FaultNote,
+    adopted_write: &mut bool,
 ) -> bool {
     use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::{self, HW_PAGE_SIZE, HW_PAGES_PER_FRAME, PageFlags, VirtAddr};
@@ -8122,15 +8146,20 @@ fn resolve_file_shared(
             .saturating_add(va.wrapping_sub(fault.start));
         if fo >= size {
             if va == faulting_part {
-                *note = FaultNote::BeyondEnd;
+                *note = FaultNote::NoFilePage;
             }
             continue;
         }
         let page_off = fo & !frame_mask;
         let in_page = fo & frame_mask;
-        let Ok(frame) = crate::fs::handle::cached_page(fault.handle, fault.file_id, page_off)
-        else {
-            return faulting_mapped;
+        let frame = match crate::fs::handle::cached_page(fault.handle, fault.file_id, page_off) {
+            Ok(frame) => frame,
+            Err(e) => {
+                if e == KernelError::DiskFull && va == faulting_part {
+                    *note = FaultNote::NoFilePage;
+                }
+                return faulting_mapped;
+            }
         };
         // Under the address space's page-table lock: whether this virtual
         // frame maps into `frame` already, and the mapping, must be one step,
@@ -8158,15 +8187,15 @@ fn resolve_file_shared(
             // not fault a second time to be seen (Linux's `do_shared_fault`
             // calling `page_mkwrite`). Under the page-table lock, as the
             // write fault's own marking is (`resolve_shared_write`).
-            let flags = if write
-                && va == faulting_part
-                && fault.flags.contains(PageFlags::WRITABLE)
-                && crate::mm::page_cache::mark_dirty(fault.file_id, page_off, frame)
-                    == crate::mm::page_cache::MarkDirty::Marked
-            {
-                map_flags | PageFlags::WRITABLE
-            } else {
-                map_flags
+            let marked = (write && va == faulting_part && fault.flags.contains(PageFlags::WRITABLE))
+                .then(|| crate::mm::page_cache::mark_dirty(fault.file_id, page_off, frame));
+            let flags = match marked {
+                Some(crate::mm::page_cache::MarkDirty::Marked) => map_flags | PageFlags::WRITABLE,
+                Some(crate::mm::page_cache::MarkDirty::Adopted) => {
+                    *adopted_write = true;
+                    map_flags | PageFlags::WRITABLE
+                }
+                _ => map_flags,
             };
             // SAFETY: `pml4_phys` is the faulting process's PML4, `va` a
             // 4 KiB-aligned user address in a VMA that allows this mapping
@@ -8208,6 +8237,25 @@ fn resolve_file_shared(
     faulting_mapped
 }
 
+/// [`map_file_shared`], and then -- with no page-table lock held -- what a
+/// store let into the file's own frame needs, as no save will follow: the
+/// file's times set and the change announced (`fs::handle::note_mapped_write`).
+fn resolve_file_shared(
+    pml4_phys: u64,
+    frame_base: u64,
+    fault_addr: u64,
+    write: bool,
+    fault: &SharedFault,
+    note: &mut FaultNote,
+) -> bool {
+    let mut adopted_write = false;
+    let resolved = map_file_shared(pml4_phys, frame_base, fault_addr, write, fault, note, &mut adopted_write);
+    if adopted_write {
+        crate::fs::handle::note_mapped_write(fault.handle);
+    }
+    resolved
+}
+
 /// Resolve a whole-frame, frame-aligned `MAP_PRIVATE` file fault from the
 /// shared read-only page cache (design §23/§36/§37).
 ///
@@ -8235,7 +8283,10 @@ fn resolve_file_shared(
 /// on write *do* go through the normal path and are registered there.
 ///
 /// Returns `true` if the page was mapped, `false` (→ access violation) on
-/// any allocation, fill, or mapping failure.
+/// any allocation, fill, or mapping failure -- but for a hole the filesystem
+/// has no room to fill, which sets `note` to [`FaultNote::NoFilePage`]
+/// (`SIGBUS`, as Linux's tmpfs answers it).
+#[allow(clippy::too_many_arguments)] // The fault's whole context, as resolve_file_shared's.
 fn resolve_file_cached(
     pml4_phys: u64,
     frame_base: u64,
@@ -8244,6 +8295,7 @@ fn resolve_file_cached(
     handle: u64,
     page_file_off: u64,
     pid: ProcessId,
+    note: &mut FaultNote,
 ) -> bool {
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
 
@@ -8263,7 +8315,12 @@ fn resolve_file_cached(
     // very page we're filling (read_at now routes through get_or_fill — §38).
     let phys_frame = match crate::fs::handle::cached_page(handle, file_id, page_file_off) {
         Ok(f) => f,
-        Err(_) => return false,
+        Err(e) => {
+            if e == KernelError::DiskFull {
+                *note = FaultNote::NoFilePage;
+            }
+            return false;
+        }
     };
 
     // Map read-only.  A writable VMA becomes RO + COW so the first write
@@ -11122,6 +11179,86 @@ fn test_subpage_fault_spares_a_shared_frame() -> KernelResult<()> {
 
     destroy(pid);
     serial_println!("[proc]   sub-page fault: own frame reused, shared frame left alone: OK");
+    Ok(())
+}
+
+/// Test: a store through a writable shared mapping of a memfs file sets the
+/// file's modification time, as a write does -- though the mapping maps the
+/// file's own frame and no save will follow -- on both write faults: one on
+/// a part not mapped yet (`resolve_file_shared`), and one on a part mapped
+/// read-only beside it (`resolve_shared_write`). Needs `/tmp`, so it is run
+/// with the page cache's tests (`page_cache::writeback_self_test`), after the
+/// filesystems are mounted, rather than with this module's.
+#[allow(clippy::arithmetic_side_effects)]
+pub(crate) fn test_mapped_write_touches_a_memfs_file() -> KernelResult<()> {
+    use crate::fs::handle::{self, OpenFlags};
+    use crate::mm::page_table::{HW_PAGE_SIZE, PageFlags};
+    use crate::mm::vma::ForkPolicy;
+
+    const PATH: &str = "/tmp/mapped-write-times";
+    const USER_WRITE_NOT_PRESENT: u64 = (1 << 1) | (1 << 2);
+    const USER_WRITE_PRESENT: u64 = 1 | (1 << 1) | (1 << 2);
+    const LONG_AGO: u64 = 1_000_000_000;
+    let base = 0x0000_0034_0000_0000_u64;
+    // Best effort: a leftover from an earlier failure.
+    let _ = crate::fs::Vfs::remove(PATH);
+    // Two 4 KiB parts long, so that the second fault's part is inside it.
+    crate::fs::Vfs::write_file(PATH, &[7u8; 8192])?;
+    let file = crate::fs::Vfs::file_identity(PATH)?.ok_or(KernelError::InternalError)?;
+    let writer = handle::open(PATH, OpenFlags::READ.union(OpenFlags::WRITE))?;
+    let pid = create("mapped-write-test", 0);
+    let result = (|| {
+        let fail = |what: &str| {
+            serial_println!("[proc]   FAIL: a mapped write: {}", what);
+            Err(KernelError::InternalError)
+        };
+        set_running(pid)?;
+        let vma = Vma {
+            start: base,
+            end: base + crate::mm::frame::FRAME_SIZE as u64,
+            kind: VmaKind::FileBacked {
+                handle: writer,
+                file_offset: 0,
+                file_id: Some(file),
+                shared: true,
+                may_write: true,
+            },
+            flags: PageFlags::PRESENT
+                | PageFlags::WRITABLE
+                | PageFlags::USER_ACCESSIBLE
+                | PageFlags::NO_EXECUTE,
+            fork: ForkPolicy::COPY,
+        };
+        // What `mmap` takes for the VMA, which the process's end gives back.
+        let backing = Backing::of(&vma).ok_or(KernelError::InternalError)?;
+        backing.retain()?;
+        if let Err(e) = add_vma(pid, vma) {
+            backing.release();
+            return Err(e);
+        }
+        let modified = || handle::fstat(writer).map(|m| m.modified_ns);
+        for (what, at, error) in [
+            ("a part not mapped yet", base, USER_WRITE_NOT_PRESENT),
+            ("a part mapped read-only", base + HW_PAGE_SIZE as u64, USER_WRITE_PRESENT),
+        ] {
+            crate::fs::Vfs::set_times(PATH, 0, LONG_AGO)?;
+            if !try_resolve_fault(pid, at, error) {
+                return fail("the write fault was not resolved");
+            }
+            if modified()? == LONG_AGO {
+                serial_println!("[proc]     on {}", what);
+                return fail("the file's modification time was left as it was");
+            }
+        }
+        Ok(())
+    })();
+    destroy(pid);
+    // The test's own handle and file: a close fails only for a handle
+    // already gone, and the removal only matters to a next run.
+    let _ = handle::close(writer);
+    let _ = crate::fs::Vfs::remove(PATH);
+    result?;
+    serial_println!("[proc]   a store through a shared mapping of a memfs file sets its times: OK");
     Ok(())
 }
 

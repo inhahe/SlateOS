@@ -855,6 +855,11 @@ fn file_has_dirty(cache: &CacheState, file: FileId) -> bool {
 pub enum MarkDirty {
     /// The page is dirty now: the write may be let through.
     Marked,
+    /// The page is the file's own frame (adopted): the write may be let
+    /// through, and lands in the file, with nothing to save. What a write
+    /// does besides -- the file's times, the change announced -- is the
+    /// caller's to do (`fs::handle::note_mapped_write`), since no save will.
+    Adopted,
     /// The cache no longer holds that frame for that page: the mapping maps
     /// a page the file has dropped (a cut racing the write). The access is
     /// to run again once the stale part is unmapped, and find what the file
@@ -868,8 +873,9 @@ pub enum MarkDirty {
 /// A writable shared mapping is about to write the page of `file` at
 /// `page_offset` (16 KiB-aligned), which it maps from `frame`: mark it dirty,
 /// to be saved ([`writeback`]), unless [`MarkDirty`] says otherwise. A page
-/// that is the file's own frame (adopted) is let through unmarked: the store
-/// lands in the file, and there is nothing to save.
+/// that is the file's own frame (adopted) is let through unmarked,
+/// [`MarkDirty::Adopted`]: the store lands in the file, and there is nothing
+/// to save.
 pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty {
     let Ok(key) = key_for(file, page_offset) else {
         return MarkDirty::Gone;
@@ -880,10 +886,11 @@ pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty
     }
     match cache.pages.get_mut(&key) {
         Some(entry) if entry.frame == frame => {
-            if !entry.adopted {
-                entry.set_dirty(true);
-                cache.note_dirtied(file);
+            if entry.adopted {
+                return MarkDirty::Adopted;
             }
+            entry.set_dirty(true);
+            cache.note_dirtied(file);
             MarkDirty::Marked
         }
         _ => MarkDirty::Gone,
@@ -2368,14 +2375,14 @@ fn memfs_mapping_is_the_file() -> KernelResult<()> {
             let after = unsafe { core::ptr::read_volatile(at) };
             shared_map_removed(file, true);
             release(again);
-            if marked != MarkDirty::Marked || dirty {
+            if marked != MarkDirty::Adopted || dirty {
                 crate::serial_println!(
                     "[page_cache]     mark_dirty answered {:?}, dirty: {}",
                     marked,
                     dirty
                 );
                 return test_fail(
-                    "a store to a memfs file's own frame was refused, or marked it dirty",
+                    "a store to a memfs file's own frame was refused, marked it dirty, or was not said to be the file's",
                 );
             }
             if after != b'Q' {
@@ -2415,6 +2422,9 @@ fn memfs_mapping_is_the_file() -> KernelResult<()> {
 /// be made or read.
 pub fn writeback_self_test() -> KernelResult<()> {
     memfs_mapping_is_the_file()?;
+    // The same adopted pages through the fault path, which lives with the
+    // processes; run here, where /tmp is mounted.
+    crate::proc::pcb::test_mapped_write_touches_a_memfs_file()?;
     const PATH: &str = "/tmp/page-cache-writeback";
     let size = FRAME_SIZE.saturating_mul(2).saturating_add(100);
     crate::serial_println!("[page_cache] Running dirty-page writeback self-test...");

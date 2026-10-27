@@ -1796,15 +1796,12 @@ fn kill_userspace_task_with_info(
         let mapped =
             page_table::translate(page_table::active_pml4_phys(), VirtAddr::new(frame.rip))
                 .is_some();
-        if mapped && frame.rip >= page_table::USER_SPACE_END {
-            // A jump into the kernel's half: its pages are not unmapped under
-            // a fault report, so the page just seen present can be read.
-            let avail =
-                usize::try_from(0x1000_u64.saturating_sub(frame.rip & 0xFFF).min(16)).unwrap_or(0);
-            // SAFETY: the page holding `frame.rip` is mapped, a kernel page
-            // that stays so; `avail` stops at its end.
-            let bytes = unsafe { core::slice::from_raw_parts(frame.rip as *const u8, avail) };
-            serial_println!("  bytes @RIP ({avail}): {bytes:02x?}");
+        if frame.rip >= page_table::USER_SPACE_END {
+            // A jump into the kernel's half, to an address the process chose:
+            // not read. It may be a device's registers, where a read has an
+            // effect; another process's memory, which the log would then
+            // show; or a vmalloc page freed under the read.
+            serial_println!("  bytes @RIP: <{:#018x} is the kernel's: not read>", frame.rip);
         } else if mapped {
             let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
             let mut buf = [0u8; 16];
@@ -4186,11 +4183,12 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
             // `Busy` -- the table held by this very task -- cannot happen
             // for a user-mode fault; it would retry the access.
             UserFault::Resolved | UserFault::Busy => return,
-            UserFault::BeyondEnd => {
-                // A shared mapping of a file, past the file's end: Linux's
-                // `SIGBUS` with `BUS_ADRERR` (`filemap_fault`'s
-                // `VM_FAULT_SIGBUS`), and a native program's access
-                // violation, as any unresolvable fault is.
+            UserFault::NoFilePage => {
+                // A mapping of a file that cannot give the page -- past the
+                // file's end, or a hole with no room left to fill it: Linux's
+                // `SIGBUS` with `BUS_ADRERR` (`filemap_fault`'s and
+                // `shmem_fault`'s `VM_FAULT_SIGBUS`), and a native program's
+                // access violation, as any unresolvable fault is.
                 log_exception(14, frame.rip, cr2);
                 const SIGBUS: u32 = 7;
                 let si_code = crate::proc::linux_sigframe::si_fault_code::BUS_ADRERR;
@@ -4200,7 +4198,7 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
                 }
                 use crate::proc::exception::ExceptionCode;
                 dispatch_or_kill_userspace(
-                    "Page Fault (#PF) past the end of a mapped file",
+                    "Page Fault (#PF) in a mapped file with no page to give",
                     frame,
                     ExceptionCode::AccessViolation,
                     cr2,
@@ -4472,8 +4470,8 @@ enum UserFault {
     /// The process table is held by this very task: the access is to run
     /// again later, not wait for itself.
     Busy,
-    /// A shared mapping of a file, past the file's end: `SIGBUS`.
-    BeyondEnd,
+    /// A mapping of a file that cannot give the page: `SIGBUS`.
+    NoFilePage,
     /// Nothing the kernel can do: the access is the program's to answer for.
     Unresolved,
 }
@@ -4519,7 +4517,7 @@ fn resolve_user_fault(pid: u64, task_id: sched::task::TaskId, cr2: u64, error: u
                 return UserFault::Resolved;
             }
             crate::proc::pcb::FaultOutcome::Busy => return UserFault::Busy,
-            crate::proc::pcb::FaultOutcome::BeyondEnd => return UserFault::BeyondEnd,
+            crate::proc::pcb::FaultOutcome::NoFilePage => return UserFault::NoFilePage,
             crate::proc::pcb::FaultOutcome::Unresolvable => {}
         }
     }

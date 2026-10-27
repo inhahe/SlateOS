@@ -146,6 +146,26 @@ mod cap {
     /// Fault Recording offset in 128-bit units (bits 24-33).
     pub const FRO_SHIFT: u32 = 24;
     pub const FRO_MASK: u64 = 0x3FF << 24;
+    /// Number of fault-recording registers, less one (bits 40-47).
+    pub const NFR_SHIFT: u32 = 40;
+    pub const NFR_MASK: u64 = 0xFF << 40;
+    /// An IOTLB invalidation can drain writes (bit 54) and reads (bit 55)
+    /// in flight first.
+    pub const DWD: u64 = 1 << 54;
+    pub const DRD: u64 = 1 << 55;
+}
+
+/// ECAP register bit fields.
+mod ecap {
+    /// Page-walk coherency (bit 0): the unit snoops the CPU caches when it
+    /// reads the tables.
+    pub const C: u64 = 1 << 0;
+    /// Pass-through (bit 6): a context entry may let a device's requests
+    /// through untranslated.
+    pub const PT: u64 = 1 << 6;
+    /// The IOTLB registers' offset in 16-byte units (bits 8-17).
+    pub const IRO_SHIFT: u32 = 8;
+    pub const IRO_MASK: u64 = 0x3FF << 8;
 }
 
 /// Second-level page table entry flags (VT-d).
@@ -174,6 +194,34 @@ const IOMMU_PAGE_SIZE: usize = 4096;
 
 /// Entries per IOMMU page table level.
 const ENTRIES_PER_TABLE: usize = 512;
+
+/// GSTS bits that are states rather than one-shot commands: what a GCMD
+/// write carries over to leave them as they are (VT-d §10.4.4's programming
+/// note). A one-shot bit carried over would repeat its command.
+const GSTS_PERSISTENT: u32 = 0x96FF_FFFF;
+
+/// Context entry, low quadword: present; translation type (bits 3:2).
+const CTX_PRESENT: u64 = 1;
+const CTX_TT_TRANSLATED: u64 = 0b00 << 2;
+const CTX_TT_PASS_THROUGH: u64 = 0b10 << 2;
+const CTX_TT_MASK: u64 = 0b11 << 2;
+/// Context entry, high bits 2:0, the address width: 2 is a 4-level, 48-bit
+/// table -- what a domain's table is, and the deepest any unit this module
+/// turns on supports, which a pass-through entry must name.
+const CTX_AW_4LEVEL: u64 = 0b010;
+
+/// The domain id every device shares until a driver gives it one of its own:
+/// its requests pass through untranslated. Domain 0 is reserved on a unit in
+/// caching mode, so this is 1, and [`create_domain`] starts after it.
+const PASS_THROUGH_DID: DomainId = 1;
+/// The first id [`create_domain`] gives.
+const FIRST_DOMAIN_ID: DomainId = 2;
+
+/// IOMMU units this module tracks: as many as `iommu` records.
+const MAX_UNITS: usize = 8;
+
+/// Polls of an invalidation register before giving up.
+const INVALIDATION_POLLS: u32 = 1_000_000;
 
 // ---------------------------------------------------------------------------
 // DMA permission flags (public API)
@@ -242,7 +290,7 @@ impl Domain {
 static DOMAINS: Mutex<[Domain; MAX_DOMAINS]> = Mutex::new([Domain::EMPTY; MAX_DOMAINS]);
 
 /// Next domain ID to allocate.
-static NEXT_DOMAIN_ID: AtomicU16 = AtomicU16::new(1);
+static NEXT_DOMAIN_ID: AtomicU16 = AtomicU16::new(FIRST_DOMAIN_ID);
 
 // ---------------------------------------------------------------------------
 // Root and Context Tables
@@ -256,6 +304,15 @@ static REMAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Total DMA faults observed.
 static TOTAL_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+/// Which units have translation on, by `iommu` unit index.
+static UNIT_ON: [AtomicBool; MAX_UNITS] = [const { AtomicBool::new(false) }; MAX_UNITS];
+
+/// Every unit with translation on snoops the CPU caches when it walks the
+/// tables (ECAP.C). When one does not -- Intel's graphics unit often does
+/// not -- every table write must be pushed out to memory ([`sync_tables`]),
+/// or the unit reads what memory held before: zeros, or an old table.
+static WALKS_COHERENT: AtomicBool = AtomicBool::new(true);
 
 // ---------------------------------------------------------------------------
 // Root Table Entry (128 bits)
@@ -303,12 +360,13 @@ impl RootEntry {
 /// Context table entry (one per device/function, 128 bits = 16 bytes).
 ///
 /// Intel VT-d spec §9.3:
-/// - Low qword bits 0: Present
-/// - Low qword bits 1: Fault Processing Disable
-/// - Low qword bits 2-3: Translation Type (00 = untranslated→translated)
+/// - Low qword bit 0: Present
+/// - Low qword bit 1: Fault Processing Disable
+/// - Low qword bits 2-3: Translation Type (00 translated by the domain's
+///   table, 10 passed through untranslated)
 /// - Low qword bits 12-63: Second-level page table pointer
-/// - High qword bits 0-15: Domain ID
-/// - High qword bits 16-18: Address Width (010 = 48-bit, 4-level)
+/// - High qword bits 0-2: Address Width (010 = 48-bit, 4-level)
+/// - High qword bits 8-23: Domain ID
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct ContextEntry {
@@ -317,11 +375,14 @@ struct ContextEntry {
 }
 
 impl ContextEntry {
-    const EMPTY: Self = Self { lo: 0, hi: 0 };
-
     /// Whether this entry is present.
     fn is_present(&self) -> bool {
-        self.lo & 1 != 0
+        self.lo & CTX_PRESENT != 0
+    }
+
+    /// Whether the device passes through untranslated: no domain of its own.
+    fn is_pass_through(&self) -> bool {
+        self.is_present() && self.lo & CTX_TT_MASK == CTX_TT_PASS_THROUGH
     }
 
     /// Get the second-level page table physical address.
@@ -330,22 +391,26 @@ impl ContextEntry {
     }
 
     /// Get the domain ID.
-    fn domain_id(&self) -> u16 {
-        (self.hi & 0xFFFF) as u16
+    fn domain_id(&self) -> DomainId {
+        DomainId::try_from((self.hi >> 8) & 0xFFFF).unwrap_or(0)
     }
 
-    /// Create a present context entry.
-    ///
-    /// - `slpt_phys`: physical address of the domain's PML4.
-    /// - `domain_id`: domain ID for this device.
-    /// - Translation type = 0 (untranslated requests → second-level translated).
-    /// - Address width = 2 (48-bit, 4-level page table: AGAW = 48).
-    fn new(slpt_phys: u64, domain_id: u16) -> Self {
-        let lo = (slpt_phys & PHYS_ADDR_MASK) | 1; // Present, TT=00
-        // High qword: domain ID in bits 0-15, AGAW=010 in bits 16-18
-        // AGAW=010 means 4-level (48-bit) page table walk.
-        let hi = (domain_id as u64) | (0b010 << 16);
-        Self { lo, hi }
+    /// A device in domain `domain_id`, its requests translated by the
+    /// 4-level table at `slpt_phys`.
+    fn translated(slpt_phys: u64, domain_id: DomainId) -> Self {
+        Self {
+            lo: (slpt_phys & PHYS_ADDR_MASK) | CTX_TT_TRANSLATED | CTX_PRESENT,
+            hi: CTX_AW_4LEVEL | (u64::from(domain_id) << 8),
+        }
+    }
+
+    /// A device with no domain of its own: its requests pass through
+    /// untranslated.
+    fn pass_through() -> Self {
+        Self {
+            lo: CTX_TT_PASS_THROUGH | CTX_PRESENT,
+            hi: CTX_AW_4LEVEL | (u64::from(PASS_THROUGH_DID) << 8),
+        }
     }
 }
 
@@ -353,14 +418,23 @@ impl ContextEntry {
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Initialize IOMMU DMA remapping.
+/// Turn DMA remapping on where it can leave every device working.
 ///
-/// Allocates the root table, programs each detected IOMMU unit, and
-/// enables translation globally.  After this, all DMA from PCI devices
-/// goes through the IOMMU page tables.
+/// Each Intel VT-d unit that can pass a device through untranslated, and
+/// whose deepest table is the 4-level one a domain uses, is pointed at one
+/// shared root table in which every bus, device and function passes
+/// through, and then translation is turned on: devices DMA as before, and a
+/// driver that wants one sandboxed gives it a domain ([`attach_device`]). A
+/// unit that cannot is left off, its devices unaffected. (Translation over
+/// an empty table would block every device's DMA -- the display's
+/// scan-out, USB, the disks -- the moment it was on.)
 ///
-/// Must be called after `iommu::init()` (detection) and `mm::init()`
-/// (page allocator available).
+/// Must be called after `iommu::init()` (detection) and `mm::init()`.
+///
+/// # Errors
+///
+/// A table allocation's failure. A unit that cannot be turned on is logged
+/// and left off; that is not an error.
 pub fn init() -> KernelResult<()> {
     if !crate::iommu::is_available() {
         serial_println!("[iommu_remap] No IOMMU hardware — skipping DMA remapping init");
@@ -373,100 +447,239 @@ pub fn init() -> KernelResult<()> {
     }
 
     serial_println!("[iommu_remap] Initializing Intel VT-d DMA remapping...");
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
-    // Allocate and zero the root table (4 KiB = 256 × 16-byte entries).
-    let root_table = page_table::alloc_pt_page()?;
-    ROOT_TABLE_PHYS.store(root_table, Ordering::Release);
-
-    serial_println!("[iommu_remap] Root table at phys {:#x}", root_table);
-
-    // Program each IOMMU unit.
-    let unit_count = crate::iommu::unit_count();
-    for i in 0..unit_count {
-        let unit = match crate::iommu::get_unit(i as usize) {
-            Some(u) => u,
-            None => continue,
+    let mut usable = [None; MAX_UNITS];
+    let mut coherent = true;
+    let units = usize::from(crate::iommu::unit_count());
+    for (i, slot) in usable.iter_mut().enumerate().take(units) {
+        let Some(unit) = crate::iommu::get_unit(i) else {
+            continue;
         };
-
-        if let Err(e) = init_unit(unit.register_base) {
-            serial_println!(
-                "[iommu_remap] WARNING: failed to init unit {} at {:#x}: {:?}",
+        match probe_unit(unit.register_base) {
+            Ok((mmio, snoops)) => {
+                *slot = Some(mmio);
+                coherent &= snoops;
+            }
+            Err(e) => serial_println!(
+                "[iommu_remap]   unit {} at {:#x} left off: {:?}",
                 i,
                 unit.register_base,
                 e
-            );
-            // Continue with other units — partial protection is better
-            // than none.
+            ),
         }
     }
+    if usable.iter().all(Option::is_none) {
+        serial_println!("[iommu_remap] No unit can pass devices through: DMA remapping left off");
+        return Ok(());
+    }
 
-    REMAP_ACTIVE.store(true, Ordering::Release);
-    serial_println!("[iommu_remap] DMA remapping active");
+    WALKS_COHERENT.store(coherent, Ordering::Release);
+    let root = build_pass_through_tables(hhdm)?;
+    ROOT_TABLE_PHYS.store(root, Ordering::Release);
+    serial_println!("[iommu_remap] Root table at phys {:#x}", root);
+
+    let mut any = false;
+    for (i, mmio) in usable.iter().enumerate() {
+        let Some(mmio) = *mmio else {
+            continue;
+        };
+        match enable_unit(mmio, root) {
+            Ok(()) => {
+                if let Some(on) = UNIT_ON.get(i) {
+                    on.store(true, Ordering::Release);
+                }
+                any = true;
+            }
+            Err(e) => serial_println!("[iommu_remap]   unit {} not enabled: {:?}", i, e),
+        }
+    }
+    if any {
+        REMAP_ACTIVE.store(true, Ordering::Release);
+        serial_println!(
+            "[iommu_remap] DMA remapping active: every device passes through until a driver gives it a domain"
+        );
+    }
     Ok(())
 }
 
-/// Initialize a single IOMMU hardware unit.
-///
-/// Programs the root table pointer and enables translation.
-fn init_unit(register_base: u64) -> KernelResult<()> {
-    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
-    let mmio = register_base + hhdm;
-
-    // Read version.
+/// Map a unit's registers and decide whether it can be turned on: it must
+/// pass devices through (ECAP.PT), and its deepest table must be 4-level --
+/// the depth a pass-through entry names, and a domain's. Translation the
+/// firmware left on is turned off, so that the root table can be replaced.
+/// Answers the registers' virtual base and whether the unit's table walks
+/// snoop the CPU caches.
+fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
+    // SAFETY: a DRHD's register base is its unit's register block: device
+    // memory.
+    let mmio = unsafe { page_table::map_mmio(register_base, 0x1000)? };
     let version = read_reg32(mmio, reg::VER);
-    let major = (version >> 4) & 0xF;
-    let minor = version & 0xF;
-    serial_println!(
-        "[iommu_remap]   Unit at {:#x}: VT-d version {}.{}",
-        register_base,
-        major,
-        minor
-    );
-
-    // Read capabilities.
     let cap_val = read_reg64(mmio, reg::CAP);
-    let ndoms_raw = cap_val & cap::NDOMS_MASK;
-    let ndoms = 1u32 << (4 + ndoms_raw as u32);
-    let sagaw = (cap_val & cap::SAGAW_MASK) >> cap::SAGAW_SHIFT;
-    let need_wbf = (cap_val & cap::RWBF) != 0;
-
+    let ecap_val = read_reg64(mmio, reg::ECAP);
+    // The block reaches the IOTLB registers and the last fault record.
+    let iro = (ecap_val & ecap::IRO_MASK) >> ecap::IRO_SHIFT;
+    let fro = (cap_val & cap::FRO_MASK) >> cap::FRO_SHIFT;
+    let nfr = (cap_val & cap::NFR_MASK) >> cap::NFR_SHIFT;
+    let extent = iro
+        .saturating_mul(16)
+        .saturating_add(16)
+        .max(fro.saturating_add(nfr).saturating_add(1).saturating_mul(16));
+    if extent > 0x1000 {
+        // SAFETY: as above.
+        unsafe { page_table::map_mmio(register_base, extent)? };
+    }
     serial_println!(
-        "[iommu_remap]   CAP: ndoms={}, sagaw={:#x}, need_wbf={}",
-        ndoms,
-        sagaw,
-        need_wbf
+        "[iommu_remap]   Unit at {:#x}: VT-d {}.{}, CAP {:#x}, ECAP {:#x}",
+        register_base,
+        (version >> 4) & 0xF,
+        version & 0xF,
+        cap_val,
+        ecap_val
     );
-
-    // Verify 4-level (48-bit) page table support (SAGAW bit 2).
-    if sagaw & 0x04 == 0 {
-        serial_println!("[iommu_remap]   ERROR: 48-bit (4-level) AGAW not supported");
+    if ecap_val & ecap::PT == 0 {
+        serial_println!("[iommu_remap]   it cannot pass devices through (ECAP.PT clear)");
         return Err(KernelError::NotSupported);
     }
-
-    // Set root table pointer.
-    let root_table = ROOT_TABLE_PHYS.load(Ordering::Acquire);
-    write_reg64(mmio, reg::RTADDR, root_table);
-
-    // Issue SRTP command and wait for completion.
-    let gsts = read_reg32(mmio, reg::GSTS);
-    write_reg32(mmio, reg::GCMD, gsts | gcmd::SRTP);
-    wait_for_status(mmio, gsts::RTPS, true)?;
-
-    serial_println!("[iommu_remap]   Root table pointer set");
-
-    // Flush write buffer if needed.
-    if need_wbf {
-        write_reg32(mmio, reg::GCMD, gsts | gcmd::WBF);
-        wait_for_status(mmio, gsts::WBFS, false)?; // WBF clears when done
+    // SAGAW bit 2 is a 4-level table; a higher bit, a deeper one, which a
+    // pass-through entry would have to name instead.
+    let sagaw = (cap_val & cap::SAGAW_MASK) >> cap::SAGAW_SHIFT;
+    if sagaw & 0b100 == 0 || sagaw >> 3 != 0 {
+        serial_println!(
+            "[iommu_remap]   its deepest table is not 4-level (SAGAW {:#x})",
+            sagaw
+        );
+        return Err(KernelError::NotSupported);
     }
+    if read_reg32(mmio, reg::GSTS) & gsts::TES != 0 {
+        gcmd(mmio, 0, gcmd::TE);
+        wait_for_status(mmio, gsts::TES, false)?;
+        serial_println!("[iommu_remap]   translation the firmware left on: turned off");
+    }
+    Ok((mmio, ecap_val & ecap::C != 0))
+}
 
-    // Enable translation.
-    let gsts = read_reg32(mmio, reg::GSTS);
-    write_reg32(mmio, reg::GCMD, gsts | gcmd::TE);
+/// The root table every unit shares: all 256 buses present, every device
+/// and function on each passing through.
+fn build_pass_through_tables(hhdm: u64) -> KernelResult<u64> {
+    let root = page_table::alloc_pt_page()?;
+    for bus in 0..256usize {
+        let ctx = page_table::alloc_pt_page()?;
+        // SAFETY: `ctx` and `root` are 4 KiB table pages of our own, 256
+        // 16-byte entries each; nothing reads them until a unit is pointed
+        // at `root`, after the last write is synced.
+        unsafe {
+            let entries = ctx.wrapping_add(hhdm) as *mut ContextEntry;
+            for devfn in 0..256usize {
+                core::ptr::write(entries.add(devfn), ContextEntry::pass_through());
+            }
+            core::ptr::write(
+                (root.wrapping_add(hhdm) as *mut RootEntry).add(bus),
+                RootEntry::new(ctx),
+            );
+        }
+        sync_tables(ctx, IOMMU_PAGE_SIZE, hhdm);
+    }
+    sync_tables(root, IOMMU_PAGE_SIZE, hhdm);
+    Ok(root)
+}
+
+/// Point a unit at the root table, invalidate everything it cached, and
+/// turn translation on.
+fn enable_unit(mmio: u64, root: u64) -> KernelResult<()> {
+    write_reg64(mmio, reg::RTADDR, root);
+    gcmd(mmio, gcmd::SRTP, 0);
+    wait_for_status(mmio, gsts::RTPS, true)?;
+    if read_reg64(mmio, reg::CAP) & cap::RWBF != 0 {
+        gcmd(mmio, gcmd::WBF, 0);
+        wait_for_status(mmio, gsts::WBFS, false)?;
+    }
+    // A new root table: every context and translation it cached is stale.
+    invalidate_context_global(mmio)?;
+    invalidate_iotlb(mmio, None)?;
+    gcmd(mmio, gcmd::TE, 0);
     wait_for_status(mmio, gsts::TES, true)?;
-
     serial_println!("[iommu_remap]   Translation enabled");
     Ok(())
+}
+
+/// Issue global commands: set the state bits `set` and clear `clear`, the
+/// other states carried over and no one-shot command repeated.
+fn gcmd(mmio: u64, set: u32, clear: u32) {
+    let status = read_reg32(mmio, reg::GSTS) & GSTS_PERSISTENT & !clear;
+    write_reg32(mmio, reg::GCMD, status | set);
+}
+
+/// Push `len` bytes of table memory at `phys` out of the CPU caches, when a
+/// unit with translation on does not snoop them ([`WALKS_COHERENT`]).
+fn sync_tables(phys: u64, len: usize, hhdm: u64) {
+    if WALKS_COHERENT.load(Ordering::Acquire) {
+        return;
+    }
+    let line = u64::from(crate::cpu::cache_line_size()).max(16);
+    let virt = phys.wrapping_add(hhdm);
+    let end = virt.saturating_add(len as u64);
+    let mut at = virt & !line.wrapping_sub(1);
+    while at < end {
+        // SAFETY: a line of a table page the direct map maps; clflush writes
+        // it back and evicts it, changing nothing it holds.
+        unsafe {
+            core::arch::asm!("clflush [{}]", in(reg) at, options(nostack, preserves_flags));
+        }
+        at = at.saturating_add(line);
+    }
+    // Every line written back before a unit is told to look.
+    // SAFETY: a fence.
+    unsafe {
+        core::arch::asm!("mfence", options(nostack, preserves_flags));
+    }
+}
+
+/// Invalidate every context a unit cached (CCMD, global granularity).
+fn invalidate_context_global(mmio: u64) -> KernelResult<()> {
+    const ICC: u64 = 1 << 63;
+    const GLOBAL: u64 = 0b01 << 61;
+    write_reg64(mmio, reg::CCMD, ICC | GLOBAL);
+    poll_clear(mmio, reg::CCMD, ICC)
+}
+
+/// Invalidate a unit's IOTLB: domain `did`'s translations, or every one.
+/// In-flight DMA is drained first where the unit can: after an unmap, no
+/// read or write may still use the old translation.
+fn invalidate_iotlb(mmio: u64, did: Option<DomainId>) -> KernelResult<()> {
+    const IVT: u64 = 1 << 63;
+    let cap_val = read_reg64(mmio, reg::CAP);
+    let iro = (read_reg64(mmio, reg::ECAP) & ecap::IRO_MASK) >> ecap::IRO_SHIFT;
+    let iotlb = iro.saturating_mul(16).saturating_add(8);
+    let granularity = match did {
+        Some(d) => (0b10 << 60) | (u64::from(d) << 32),
+        None => 0b01 << 60,
+    };
+    let mut drain = 0;
+    if cap_val & cap::DRD != 0 {
+        drain |= 1 << 49;
+    }
+    if cap_val & cap::DWD != 0 {
+        drain |= 1 << 48;
+    }
+    write_reg64(mmio, iotlb, IVT | granularity | drain);
+    poll_clear(mmio, iotlb, IVT)
+}
+
+/// Wait for a unit to clear `bit` of the 64-bit register at `offset`: an
+/// invalidation's completion.
+fn poll_clear(mmio: u64, offset: u64, bit: u64) -> KernelResult<()> {
+    for _ in 0..INVALIDATION_POLLS {
+        if read_reg64(mmio, offset) & bit == 0 {
+            return Ok(());
+        }
+        core::hint::spin_loop();
+    }
+    serial_println!(
+        "[iommu_remap] Timeout waiting for register {:#x} bit {:#x} to clear",
+        offset,
+        bit
+    );
+    Err(KernelError::TimedOut)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,6 +692,9 @@ fn init_unit(register_base: u64) -> KernelResult<()> {
 /// permitted until pages are explicitly mapped).
 pub fn create_domain() -> KernelResult<DomainId> {
     let pml4 = page_table::alloc_pt_page()?;
+    if let Some(hhdm) = page_table::hhdm() {
+        sync_tables(pml4, IOMMU_PAGE_SIZE, hhdm);
+    }
     let id = NEXT_DOMAIN_ID.fetch_add(1, Ordering::Relaxed);
 
     if id as usize >= MAX_DOMAINS {
@@ -648,7 +864,7 @@ pub fn unmap_dma(domain_id: DomainId, bus_addr: u64, size: usize) -> KernelResul
     }
 
     // Flush IOTLB (invalidate cached translations).
-    flush_iotlb_domain(domain_id);
+    flush_iotlb_domain(domain_id)?;
 
     Ok(())
 }
@@ -683,27 +899,26 @@ pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
         return Err(KernelError::NotSupported);
     }
 
-    // Get or allocate context table for this bus.
-    let context_table = get_or_alloc_context_table(root_table, bus, hhdm)?;
-
-    // Program the context entry for this device/function.
+    let context_table = context_table_of(root_table, bus, hhdm)?;
     let devfn = ((device as usize) << 3) | (function as usize);
-    let entry = ContextEntry::new(pml4_phys, domain_id);
-
-    // SAFETY: context_table is a valid 4 KiB page we own, devfn < 256,
-    // and context entries are 16 bytes (256 entries fit in 4 KiB).
-    unsafe {
-        let ctx_virt = (context_table + hhdm) as *mut ContextEntry;
-        let existing = core::ptr::read(ctx_virt.add(devfn));
-        if existing.is_present() {
-            // Device already attached — check if same domain.
-            if existing.domain_id() == domain_id {
-                return Ok(()); // Idempotent.
-            }
-            return Err(KernelError::AlreadyExists);
+    // SAFETY: one of the context tables init built; devfn < 256.
+    let existing = unsafe {
+        core::ptr::read_volatile(
+            (context_table.wrapping_add(hhdm) as *const ContextEntry).add(devfn),
+        )
+    };
+    if existing.is_present() && !existing.is_pass_through() {
+        if existing.domain_id() == domain_id {
+            return Ok(()); // Idempotent.
         }
-        core::ptr::write(ctx_virt.add(devfn), entry);
+        return Err(KernelError::AlreadyExists);
     }
+    write_context_entry(
+        context_table,
+        devfn,
+        ContextEntry::translated(pml4_phys, domain_id),
+        hhdm,
+    )?;
 
     // Update device count.
     {
@@ -712,8 +927,9 @@ pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
         domains[slot].device_count = domains[slot].device_count.saturating_add(1);
     }
 
-    // Flush context cache.
-    flush_context_cache();
+    // The device's old translations were the pass-through domain's.
+    flush_context_cache()?;
+    flush_iotlb_domain(PASS_THROUGH_DID)?;
 
     serial_println!(
         "[iommu_remap] Attached {:02x}:{:02x}.{} to domain {}",
@@ -727,8 +943,8 @@ pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
 
 /// Detach a PCI device from its domain.
 ///
-/// Clears the context table entry, preventing any further DMA from
-/// this device.
+/// The device passes through untranslated again, as every device the
+/// kernel drives itself does.
 pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> KernelResult<()> {
     if device >= 32 || function >= 8 {
         return Err(KernelError::InvalidArgument);
@@ -741,36 +957,21 @@ pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
         return Err(KernelError::NotSupported);
     }
 
-    // Read root table entry for this bus.
-    // SAFETY: root_table is a valid 4 KiB page, bus < 256.
-    let root_entry = unsafe {
-        let root_virt = (root_table + hhdm) as *const RootEntry;
-        core::ptr::read(root_virt.add(bus as usize))
-    };
-
-    if !root_entry.is_present() {
-        return Err(KernelError::NotFound);
-    }
-
-    let context_table = root_entry.context_table_phys();
+    let context_table = context_table_of(root_table, bus, hhdm)?;
     let devfn = ((device as usize) << 3) | (function as usize);
 
-    // SAFETY: context_table is a valid page, devfn < 256.
+    // SAFETY: one of the context tables init built; devfn < 256.
     let existing = unsafe {
-        let ctx_virt = (context_table + hhdm) as *const ContextEntry;
-        core::ptr::read(ctx_virt.add(devfn))
+        core::ptr::read_volatile(
+            (context_table.wrapping_add(hhdm) as *const ContextEntry).add(devfn),
+        )
     };
 
-    if !existing.is_present() || existing.domain_id() != domain_id {
+    if !existing.is_present() || existing.is_pass_through() || existing.domain_id() != domain_id {
         return Err(KernelError::NotFound);
     }
 
-    // Clear the entry.
-    // SAFETY: Same page, valid index.
-    unsafe {
-        let ctx_virt = (context_table + hhdm) as *mut ContextEntry;
-        core::ptr::write(ctx_virt.add(devfn), ContextEntry::EMPTY);
-    }
+    write_context_entry(context_table, devfn, ContextEntry::pass_through(), hhdm)?;
 
     // Update device count.
     {
@@ -780,8 +981,8 @@ pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
     }
 
     // Flush caches.
-    flush_context_cache();
-    flush_iotlb_domain(domain_id);
+    flush_context_cache()?;
+    flush_iotlb_domain(domain_id)?;
 
     serial_println!(
         "[iommu_remap] Detached {:02x}:{:02x}.{} from domain {}",
@@ -828,6 +1029,7 @@ fn map_4k_slpt(
         let pt_virt = (pt_phys + hhdm) as *mut u64;
         core::ptr::write(pt_virt.add(pt_idx), entry);
     }
+    sync_tables(entry_at(pt_phys, pt_idx, 8), 8, hhdm);
 
     Ok(())
 }
@@ -860,6 +1062,7 @@ fn unmap_4k_slpt(pml4_phys: u64, bus_addr: u64, hhdm: u64) {
         let pt_virt = (pt_phys + hhdm) as *mut u64;
         core::ptr::write(pt_virt.add(pt_idx), 0);
     }
+    sync_tables(entry_at(pt_phys, pt_idx, 8), 8, hhdm);
 }
 
 /// Walk one level of the SLPT, allocating a new table if the entry
@@ -878,8 +1081,9 @@ fn walk_or_create(table_phys: u64, index: usize, hhdm: u64) -> KernelResult<u64>
         return Ok(entry & PHYS_ADDR_MASK);
     }
 
-    // Allocate a new page table level.
+    // Allocate a new page table level, its zeros where a unit reads them.
     let new_table = page_table::alloc_pt_page()?;
+    sync_tables(new_table, IOMMU_PAGE_SIZE, hhdm);
 
     // Write the entry with R+W (intermediate entries need both for
     // the walk to succeed for any access type).
@@ -890,6 +1094,7 @@ fn walk_or_create(table_phys: u64, index: usize, hhdm: u64) -> KernelResult<u64>
         let virt = (table_phys + hhdm) as *mut u64;
         core::ptr::write(virt.add(index), new_entry);
     }
+    sync_tables(entry_at(table_phys, index, 8), 8, hhdm);
 
     Ok(new_table)
 }
@@ -1004,32 +1209,51 @@ unsafe fn free_slpt(pml4_phys: u64, hhdm: u64) {
 // Context table helpers
 // ---------------------------------------------------------------------------
 
-/// Get or allocate a context table for a PCI bus.
-fn get_or_alloc_context_table(root_table: u64, bus: u8, hhdm: u64) -> KernelResult<u64> {
-    // Read existing root entry.
-    // SAFETY: root_table is a valid 4 KiB page, bus < 256.
-    // Root table has 256 entries × 16 bytes = 4096 bytes.
-    let existing = unsafe {
-        let root_virt = (root_table + hhdm) as *const RootEntry;
-        core::ptr::read(root_virt.add(bus as usize))
+/// The physical address of entry `index`, `size` bytes each, of the table at
+/// `table`: an index below the table's entry count, inside its page.
+fn entry_at(table: u64, index: usize, size: u64) -> u64 {
+    table.wrapping_add((index as u64).wrapping_mul(size))
+}
+
+/// The context table of `bus`: init built all 256.
+fn context_table_of(root_table: u64, bus: u8, hhdm: u64) -> KernelResult<u64> {
+    // SAFETY: root_table is the root table init built: 256 16-byte entries.
+    let entry = unsafe {
+        core::ptr::read_volatile(
+            (root_table.wrapping_add(hhdm) as *const RootEntry).add(bus as usize),
+        )
     };
-
-    if existing.is_present() {
-        return Ok(existing.context_table_phys());
+    if entry.is_present() {
+        Ok(entry.context_table_phys())
+    } else {
+        Err(KernelError::NotFound)
     }
+}
 
-    // Allocate a new context table (4 KiB = 256 × 16-byte entries).
-    let ctx_table = page_table::alloc_pt_page()?;
-
-    // Write root entry.
-    let entry = RootEntry::new(ctx_table);
-    // SAFETY: Valid page, valid index.
+/// Replace the context entry of `devfn` in the table at `context_table`:
+/// first made not present, and that invalidated, so that no unit reads half
+/// of the old entry and half of the new; then the high quadword, then the
+/// low one, which makes it present. The caller invalidates after.
+fn write_context_entry(
+    context_table: u64,
+    devfn: usize,
+    entry: ContextEntry,
+    hhdm: u64,
+) -> KernelResult<()> {
+    let at = entry_at(context_table, devfn, 16);
+    let lo = at.wrapping_add(hhdm) as *mut u64;
+    // SAFETY: an entry of a context table init built (devfn < 256). The
+    // units read it, so each store is volatile, and in this order.
+    unsafe { core::ptr::write_volatile(lo, 0) };
+    sync_tables(at, 16, hhdm);
+    flush_context_cache()?;
+    // SAFETY: as above.
     unsafe {
-        let root_virt = (root_table + hhdm) as *mut RootEntry;
-        core::ptr::write(root_virt.add(bus as usize), entry);
+        core::ptr::write_volatile(lo.add(1), entry.hi);
+        core::ptr::write_volatile(lo, entry.lo);
     }
-
-    Ok(ctx_table)
+    sync_tables(at, 16, hhdm);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1103,54 +1327,40 @@ fn wait_for_status(mmio_base: u64, bit: u32, expected_set: bool) -> KernelResult
 // Cache invalidation
 // ---------------------------------------------------------------------------
 
-/// Flush the context cache on all IOMMU units.
-///
-/// Must be called after modifying context table entries.
-fn flush_context_cache() {
-    let unit_count = crate::iommu::unit_count();
-    let hhdm = match page_table::hhdm() {
-        Some(h) => h,
-        None => return,
-    };
-
-    for i in 0..unit_count {
-        let unit = match crate::iommu::get_unit(i as usize) {
-            Some(u) => u,
-            None => continue,
-        };
-        let mmio = unit.register_base + hhdm;
-
-        // Issue a global context invalidation via the CCMD register.
-        // Bits 63: Invalidation Command Completion (ICC) — set to trigger.
-        // Bits 61-62: Invlaidation Request Granularity = 01 (global).
-        let ccmd_val: u64 = (1u64 << 63) | (0b01u64 << 61);
-        write_reg64(mmio, reg::CCMD, ccmd_val);
-
-        // Wait for ICC bit to clear (hardware clears it on completion).
-        for _ in 0..100_000 {
-            let val = read_reg64(mmio, reg::CCMD);
-            if val & (1u64 << 63) == 0 {
-                break;
-            }
-            core::hint::spin_loop();
-        }
-    }
+/// Invalidate every context the units with translation on cached: after a
+/// context entry changed.
+fn flush_context_cache() -> KernelResult<()> {
+    for_each_unit_on(invalidate_context_global)
 }
 
-/// Flush IOTLB for a specific domain on all units.
-///
-/// Must be called after unmapping pages.
-fn flush_iotlb_domain(_domain_id: DomainId) {
-    // The IOTLB invalidation register is at an offset determined by
-    // the ECAP register's IRO field.  For simplicity, we issue a
-    // global IOTLB invalidation via the context cache (which implicitly
-    // invalidates IOTLB entries for the affected contexts).
-    //
-    // A proper implementation would use the IOTLB registers at the
-    // ECAP.IRO offset for domain-selective invalidation.
-    //
-    // For now, context cache flush serves as a conservative invalidation.
-    flush_context_cache();
+/// Invalidate domain `domain_id`'s translations on every unit with
+/// translation on: after its table changed, or a device left it.
+fn flush_iotlb_domain(domain_id: DomainId) -> KernelResult<()> {
+    for_each_unit_on(|mmio| invalidate_iotlb(mmio, Some(domain_id)))
+}
+
+/// Run `f` on each unit with translation on, by its registers' virtual
+/// base: every unit tried, and the first failure answered.
+fn for_each_unit_on(f: impl Fn(u64) -> KernelResult<()>) -> KernelResult<()> {
+    let Some(hhdm) = page_table::hhdm() else {
+        return Ok(());
+    };
+    let mut first = Ok(());
+    for (i, on) in UNIT_ON.iter().enumerate() {
+        if !on.load(Ordering::Acquire) {
+            continue;
+        }
+        let Some(unit) = crate::iommu::get_unit(i) else {
+            continue;
+        };
+        if let Err(e) = f(unit.register_base.wrapping_add(hhdm)) {
+            serial_println!("[iommu_remap] unit {}: invalidation failed: {:?}", i, e);
+            if first.is_ok() {
+                first = Err(e);
+            }
+        }
+    }
+    first
 }
 
 // ---------------------------------------------------------------------------
@@ -1197,7 +1407,9 @@ pub fn stats() -> RemapStats {
 
     RemapStats {
         active: REMAP_ACTIVE.load(Ordering::Relaxed),
-        total_domains: NEXT_DOMAIN_ID.load(Ordering::Relaxed).saturating_sub(1),
+        total_domains: NEXT_DOMAIN_ID
+            .load(Ordering::Relaxed)
+            .saturating_sub(FIRST_DOMAIN_ID),
         active_domains,
         total_mapped_pages: total_mapped,
         total_faults: TOTAL_FAULTS.load(Ordering::Relaxed),
@@ -1425,6 +1637,106 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // Test 10: context entries as VT-d lays them out (§9.3): the address
+    // width in high bits 2:0, the domain in 23:8, the translation type in
+    // low bits 3:2.
+    let t = ContextEntry::translated(0x1234_5000, 7);
+    let p = ContextEntry::pass_through();
+    if t.lo != 0x1234_5001
+        || t.hi != (0b010 | (7 << 8))
+        || t.domain_id() != 7
+        || t.is_pass_through()
+        || p.lo != 0b1001
+        || p.hi != (0b010 | (u64::from(PASS_THROUGH_DID) << 8))
+        || !p.is_pass_through()
+    {
+        serial_println!(
+            "[iommu_remap]   FAIL: context entries are not laid out as VT-d reads them: {:#x?} {:#x?}",
+            (t.lo, t.hi),
+            (p.lo, p.hi)
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[iommu_remap]   Context entry layout: OK");
+
+    // Test 11: with a unit on, every device passes through, and a device
+    // given a domain is translated by it until it is detached.
+    if is_active() {
+        remap_live_test()?;
+    }
+
     serial_println!("[iommu_remap] Self-test PASSED");
+    Ok(())
+}
+
+/// For [`self_test`], with translation on: each unit marked on says so, the
+/// root table passes every device through, and a function that is not there
+/// -- FF:1F.7 -- given a domain is translated by it, is refused to a second
+/// domain, and passes through again once detached.
+fn remap_live_test() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[iommu_remap]   FAIL: {}", what);
+        Err(KernelError::InternalError)
+    }
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    let root = ROOT_TABLE_PHYS.load(Ordering::Acquire);
+    let entry_of = |bus: u8, devfn: usize| -> KernelResult<ContextEntry> {
+        let ctx = context_table_of(root, bus, hhdm)?;
+        // SAFETY: one of init's context tables; devfn < 256.
+        Ok(unsafe {
+            core::ptr::read_volatile((ctx.wrapping_add(hhdm) as *const ContextEntry).add(devfn))
+        })
+    };
+    for (i, on) in UNIT_ON.iter().enumerate() {
+        if on.load(Ordering::Acquire) {
+            let unit = crate::iommu::get_unit(i).ok_or(KernelError::InternalError)?;
+            if read_reg32(unit.register_base.wrapping_add(hhdm), reg::GSTS) & gsts::TES == 0 {
+                return fail("a unit marked on does not have translation on");
+            }
+        }
+    }
+    if !entry_of(0, 0)?.is_pass_through() || !entry_of(255, 255)?.is_pass_through() {
+        return fail("a device does not pass through by default");
+    }
+    let (bus, dev, func) = (0xFF_u8, 0x1F_u8, 7_u8);
+    // A function that is not there answers all ones.
+    if crate::pci::config_read16(bus, dev, func, 0) != 0xFFFF {
+        serial_println!("[iommu_remap]   FF:1F.7 is a real function here: domain test skipped");
+        return Ok(());
+    }
+    let devfn = (usize::from(dev) << 3) | usize::from(func);
+    let d = create_domain()?;
+    let result = (|| -> KernelResult<()> {
+        attach_device(d, bus, dev, func)?;
+        let attached = entry_of(bus, devfn)?;
+        let pml4 = DOMAINS
+            .lock()
+            .get(usize::from(d))
+            .map_or(0, |x| x.pml4_phys);
+        let again = attach_device(d, bus, dev, func);
+        let other = create_domain()?;
+        let taken = attach_device(other, bus, dev, func);
+        // The second domain never held the device; destroying it cannot fail
+        // on its account, and a leak here would only cost a table page.
+        let _ = destroy_domain(other);
+        detach_device(d, bus, dev, func)?;
+        let detached = entry_of(bus, devfn)?;
+        if attached.is_pass_through() || attached.domain_id() != d || attached.slpt_phys() != pml4 {
+            return fail("an attached function is not translated by its domain");
+        }
+        if again != Ok(()) || taken != Err(KernelError::AlreadyExists) {
+            return fail("attaching twice, or to a second domain, answered wrongly");
+        }
+        if !detached.is_pass_through() {
+            return fail("a detached function does not pass through again");
+        }
+        Ok(())
+    })();
+    // The test's own domain: after a failure it may still hold the function.
+    let _ = destroy_domain(d);
+    result?;
+    serial_println!(
+        "[iommu_remap]   Live: every device passes through, a domain translates its function, detach restores: OK"
+    );
     Ok(())
 }

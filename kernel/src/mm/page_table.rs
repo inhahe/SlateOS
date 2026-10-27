@@ -200,6 +200,51 @@ pub fn kernel_pml4_phys() -> KernelResult<u64> {
     }
 }
 
+/// Map device registers at `phys..phys + len` into the kernel's direct map,
+/// uncached and writable, at the address the direct map gives them
+/// (`phys + hhdm()`), and answer that address. The bootloader's direct map
+/// covers RAM, not device memory, so a driver must do this before its first
+/// register access: an unmapped one is a kernel page fault. A frame another
+/// mapping already covers (a second unit's registers in the same 16 KiB) is
+/// left as it is.
+///
+/// # Errors
+///
+/// `NotSupported` before [`init`]; `InvalidAddress` for an empty or
+/// wrapping range; a page-table allocation's failure.
+///
+/// # Safety
+///
+/// The range must be device memory: RAM mapped uncached beside its cached
+/// direct-map alias would have the two disagree.
+pub unsafe fn map_mmio(phys: u64, len: u64) -> KernelResult<u64> {
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+    let pml4 = kernel_pml4_phys()?;
+    let end = phys
+        .checked_add(len)
+        .filter(|_| len > 0)
+        .ok_or(KernelError::InvalidAddress)?;
+    let frame_bytes = FRAME_SIZE as u64;
+    let mut at = phys & !(frame_bytes.wrapping_sub(1));
+    let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
+    while at < end {
+        let frame = PhysFrame::from_addr(at).ok_or(KernelError::InvalidAddress)?;
+        let virt = VirtAddr::new(at.checked_add(hhdm).ok_or(KernelError::InvalidAddress)?);
+        // SAFETY: device memory, by the caller's word, mapped in the kernel's
+        // own direct-map range, where no RAM mapping covers it. A
+        // not-present entry made present needs no TLB invalidation: no CPU
+        // caches a translation for a page that was not present.
+        match unsafe { map_frame(pml4, virt, frame, flags) } {
+            Ok(()) | Err(KernelError::AlreadyExists) => {}
+            Err(e) => return Err(e),
+        }
+        at = at
+            .checked_add(frame_bytes)
+            .ok_or(KernelError::InvalidAddress)?;
+    }
+    phys.checked_add(hhdm).ok_or(KernelError::InvalidAddress)
+}
+
 // ---------------------------------------------------------------------------
 // Page table entry flags
 // ---------------------------------------------------------------------------

@@ -28,3 +28,13 @@ on it is refused.
   closes its handles (a hook in process teardown beside the handle table's).
 - Then the `PortIo` capability check can become one for the device itself:
   attach only a function the process holds a capability for.
+
+**Found with it, 2026-10-27:** `SYS_DMA_ALLOC`'s buffers are placed in no
+IOMMU domain at all, so a device sandboxed by a domain cannot reach them; and
+`SYS_DMA_ATTACH` attaches any bus:device.function not already in another
+domain, owned by the caller or not. A third gap, the exit path freeing a
+process's DMA buffers twice, is fixed (`mm::dma::free_all_for_process` now
+unmaps before it frees). All of what remains is the device interface's scope
+(roadmap.md 2.1, "The device interface for userspace drivers"): a domain made
+for a device handle, buffers placed in it, and the domain destroyed with the
+handle.

@@ -5418,6 +5418,30 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 
 ### 2.1 Driver framework
+- [ ] `[A]` **The device interface for userspace drivers** -- what any driver
+  process, native or Linux, needs from the kernel; the Linux layer below
+  stands on it. Surveyed 2026-10-27: `udriver.rs` is bookkeeping no system
+  call reaches, and what a process can call today is pieces. Three holes found
+  then are closed (`MAP_MMIO` refused; an interrupt line its holder's alone; a
+  process's DMA buffers unmapped before its exit frees them). Still to build,
+  as one design (a device handle, capability-checked, released on exit):
+  - [ ] Owning a PCI function: a handle naming bus:device.function, refused
+        when a kernel driver or another process has it
+  - [ ] Its BARs mapped uncached through the handle -- the kernel finds the
+        address, the process never names one -- including BARs smaller than
+        a 16 KiB frame
+  - [ ] Its configuration space read and written through the handle, with the
+        registers the kernel manages (BARs, MSI) refused
+  - [ ] Its interrupts: MSI and MSI-X vectors, and INTx for what has nothing
+        else; waitable together with channels and timers (`SYS_WAIT_MULTIPLE`
+        or completion ports take no interrupt source today); masked when its
+        process exits, so a level-triggered line cannot storm
+  - [ ] DMA through the device's own IOMMU domain: coherent buffers placed in
+        it (`SYS_DMA_ALLOC`'s are in none), and pinned ranges of the process's
+        own memory for streaming DMA (no call does this today); the domain
+        and its mappings destroyed when the process exits
+        (`known-issues/TD-A-DMA-SYSCALLS-MAP-ANY-MEMORY-AND-OUTLIVE-THEIR-PROCESS.md`)
+  - [ ] Its first user: Linux's `e1000e` through the layer below
 - [ ] `[A]` **Linux driver compatibility layer** -- Linux's own drivers, built
   from unmodified source, for hardware with no standard interface (GPUs, WiFi,
   Bluetooth, laptop audio DSPs); handwritten native drivers stay for the

@@ -29,6 +29,7 @@ PC, US Dvorak (`--layout us` for QWERTY): the PiKVM sends physical keys.
 from __future__ import annotations
 
 import argparse
+import http.client
 import io
 import json
 import os
@@ -39,6 +40,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -52,6 +54,20 @@ WIDTH, HEIGHT = 1920, 1080
 DEFAULT_CMDLINE = "blk.writable=eui64:0025385181b1cd22 selftest.keep_going=1 log.screen=1"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
+
+# The PiKVM reaches the network by WiFi, which drops now and then: a request
+# the network loses is made again, RETRIES times in all, RETRY_WAIT seconds
+# apart; an upload cut off is started again from its beginning (the PiKVM
+# keeps no half-written image to resume).
+RETRIES = 4
+RETRY_WAIT = 5
+# The image goes up in pieces of this size, streamed from the file: sent as
+# one write of half a gigabyte it was cut off every time.
+UPLOAD_CHUNK = 4 << 20
+# How long `boot` presses the boot-menu key after power-on: this board takes
+# 10-25 s from a cold start to its menu, and a key pressed before it is up is
+# lost.
+MENU_KEY_SECONDS = 30
 
 # US Dvorak, as Windows on the test PC is set: physical key (its US position)
 # -> (character, shifted character).
@@ -162,9 +178,25 @@ class PiKvm:
         self.ctx.verify_mode = ssl.CERT_NONE
 
     def call(self, method: str, path: str, body: bytes | None = None, timeout: float = 30) -> bytes:
-        req = urllib.request.Request(self.url + path, data=body, method=method, headers=self.headers)
-        with urllib.request.urlopen(req, context=self.ctx, timeout=timeout) as r:
-            return r.read()
+        """One request to kvmd: its answer's body. One the network loses is
+        made again (RETRIES in all); an answer, an error status included, is
+        final. A dropped request may have been carried out before it was
+        lost: the actions here (a key, a click, a power button) bear one
+        repeat."""
+        for attempt in range(1, RETRIES + 1):
+            req = urllib.request.Request(self.url + path, data=body, method=method, headers=self.headers)
+            try:
+                with urllib.request.urlopen(req, context=self.ctx, timeout=timeout) as r:
+                    return r.read()
+            except urllib.error.HTTPError:
+                raise
+            except OSError as e:  # URLError, a reset or a timeout: the network
+                if attempt == RETRIES:
+                    raise
+                print(f"pikvm: {method} {path.split('?')[0]}: {e}; again in {RETRY_WAIT} s",
+                      file=sys.stderr)
+                time.sleep(RETRY_WAIT)
+        raise AssertionError("unreachable")
 
     def json(self, method: str, path: str, **kw) -> dict:
         return json.loads(self.call(method, path, **kw))["result"]
@@ -204,11 +236,19 @@ class PiKvm:
         # Disconnecting a drive that is not connected is refused (HTTP 400).
         if self.json("GET", "/api/msd")["drive"]["connected"]:
             self.call("POST", "/api/msd/set_connected?connected=0")
-        try:
-            self.call("POST", f"/api/msd/remove?image={IMAGE_NAME}")
-        except urllib.error.HTTPError:
-            pass  # No earlier image of that name: nothing to remove.
-        self.call("POST", f"/api/msd/write?image={IMAGE_NAME}", body=image.read_bytes(), timeout=900)
+        for attempt in range(1, RETRIES + 1):
+            try:
+                self.call("POST", f"/api/msd/remove?image={IMAGE_NAME}")
+            except urllib.error.HTTPError:
+                pass  # No earlier image of that name, or none left: nothing to remove.
+            try:
+                self.write_image(image)
+                break
+            except (OSError, http.client.HTTPException) as e:
+                if attempt == RETRIES:
+                    raise
+                print(f"pikvm: the upload was cut off ({e}); starting it again", file=sys.stderr)
+                time.sleep(RETRY_WAIT)
         self.call("POST", f"/api/msd/set_params?image={IMAGE_NAME}&cdrom=0&rw=0")
         self.call("POST", "/api/msd/set_connected?connected=1")
         for _ in range(60):
@@ -216,6 +256,38 @@ class PiKvm:
                 return
             time.sleep(1)
         sys.exit("pikvm: the image never showed as complete")
+
+    def write_image(self, image: Path) -> None:
+        """Send `image` to the virtual drive's storage as IMAGE_NAME, streamed
+        from the file in UPLOAD_CHUNK pieces, saying how far it has got. A
+        refusal from kvmd ends the script; a connection lost raises."""
+        parts = urllib.parse.urlsplit(self.url)
+        conn = (http.client.HTTPSConnection(parts.netloc, context=self.ctx, timeout=120)
+                if parts.scheme == "https" else http.client.HTTPConnection(parts.netloc, timeout=120))
+        size = image.stat().st_size
+        try:
+            conn.putrequest("POST", f"/api/msd/write?image={IMAGE_NAME}")
+            for key, value in self.headers.items():
+                conn.putheader(key, value)
+            conn.putheader("Content-Length", str(size))
+            conn.putheader("Content-Type", "application/octet-stream")
+            conn.endheaders()
+            sent, start = 0, time.monotonic()
+            said = start
+            with image.open("rb") as fh:
+                while block := fh.read(UPLOAD_CHUNK):
+                    conn.send(block)
+                    sent += len(block)
+                    if time.monotonic() - said >= 10:
+                        print(f"pikvm: {sent >> 20} of {size >> 20} MiB sent", flush=True)
+                        said = time.monotonic()
+            answer = conn.getresponse()
+            body = answer.read()
+            if answer.status != 200:
+                sys.exit(f"pikvm: the PiKVM refused the image: {answer.status} {body[:300]!r}")
+            print(f"pikvm: {size >> 20} MiB sent in {time.monotonic() - start:.0f} s", flush=True)
+        finally:
+            conn.close()
 
 
 def stage(worktree: Path, out: Path, cmdline: str) -> None:
@@ -262,14 +334,55 @@ def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
                 break
     time.sleep(2)
     kvm.power("on")
-    for _ in range(45):
+    for _ in range(MENU_KEY_SECONDS * 4):
         kvm.key(menu_key)
         time.sleep(0.25)
-    time.sleep(1)
+    # The menu waits for a choice: once the screen is still, it is up.
+    menu = wait_still(kvm, 30)
     x, y = kvm.boot_entry_xy
-    kvm.move(x, y)
-    time.sleep(0.3)
-    kvm.click()
+    for _ in range(3):
+        kvm.move(x, y)
+        time.sleep(0.3)
+        kvm.click()
+        if menu is None or changed_from(kvm, menu, 10):
+            return
+        print("pikvm: the boot menu is still up; clicking the entry again", flush=True)
+    sys.exit("pikvm: the boot menu did not take the click")
+
+
+def snapshot_image(kvm: PiKvm):
+    """The screen, greyscale; None when no picture can be had."""
+    from PIL import Image
+    try:
+        return Image.open(io.BytesIO(kvm.snapshot())).convert("L")
+    except (urllib.error.URLError, OSError):
+        return None
+
+
+def wait_still(kvm: PiKvm, seconds: float):
+    """The screen once two pictures a second apart show it the same, within
+    `seconds`; None if it never settles, or no picture can be had."""
+    last = None
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        img = snapshot_image(kvm)
+        if img is not None and last is not None and screens_alike(last, img):
+            return img
+        last = img
+        time.sleep(1)
+    return None
+
+
+def changed_from(kvm: PiKvm, before, seconds: float) -> bool:
+    """Whether the screen comes to show something other than `before`
+    within `seconds`."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        img = snapshot_image(kvm)
+        if img is not None and not screens_alike(before, img):
+            return True
+        time.sleep(1)
+    return False
 
 
 def watch(kvm: PiKvm, seconds: float, every: float, out_dir: Path) -> None:
@@ -285,6 +398,9 @@ def watch(kvm: PiKvm, seconds: float, every: float, out_dir: Path) -> None:
             data = kvm.snapshot()
         except urllib.error.HTTPError:
             print("pikvm: no picture (the PC is off or between modes)")
+            continue
+        except OSError as e:  # the network, past call's retries
+            print(f"pikvm: no picture ({e})")
             continue
         n += 1
         shot = out_dir / f"watch-{n:03}.jpg"

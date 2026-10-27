@@ -90,7 +90,7 @@ const STATUS_INTERRUPT: u16 = 1 << 3;
 // ---------------------------------------------------------------------------
 
 /// PCI bus/device/function address.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PciAddress {
     pub bus: u8,
     pub device: u8,
@@ -1185,6 +1185,15 @@ pub fn bind_driver(addr: PciAddress, name: &'static str) {
 
 /// [`bind_driver`]'s record alone, without its log line and hot-plug event:
 /// what the self-test can make and unmake without leaving an event behind.
+/// Forget that `name` drives `addr`, if it is the one recorded: a binding
+/// another driver holds is left alone, so a release cannot unbind it.
+pub fn unbind_driver(addr: PciAddress, name: &'static str) {
+    let key = pack_addr(addr);
+    DRIVER_BINDINGS
+        .lock()
+        .retain(|&(k, n)| k != key || n != name);
+}
+
 fn record_binding(addr: PciAddress, name: &'static str) {
     let key = pack_addr(addr);
     let mut bindings = DRIVER_BINDINGS.lock();

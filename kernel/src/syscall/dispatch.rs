@@ -1167,6 +1167,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_mmio_refused()?;
     test_dispatch_irq_holder()?;
     test_dispatch_dma_exit_unmaps()?;
+    crate::devhandle::self_test()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;
     test_dispatch_power_off_and_reboot()?;

@@ -10039,6 +10039,10 @@ QEMU_START_EPOCH=$(date +%s)
 # that `serial::self_test` finds it the way the kernel does at boot --
 # through the bridge -- and checks it answers. Its output goes nowhere: the
 # boot's log is not copied to it unless asked.
+#
+# `edu`, QEMU's teaching device (1234:11e8: a 1 MiB register BAR, MSI, a DMA
+# engine) with no kernel driver: what `devhandle::self_test` opens, maps and
+# releases as a userspace driver would (design-decisions 1579).
 "$QEMU" \
     -device intel-iommu,caching-mode=on,aw-bits=48 \
     -netdev user,id=net0 \
@@ -10071,6 +10075,7 @@ QEMU_START_EPOCH=$(date +%s)
     -device pcie-root-port,id=rpser,bus=pcie.0,chassis=40,slot=40 \
     -chardev null,id=pciser0 \
     -device pci-serial,bus=rpser,chardev=pciser0 \
+    -device edu \
     -serial "file:$SERIAL_FILE_WIN" \
     -pidfile "$PIDFILE_WIN" \
     "${GPU_DISPLAY_ARGS[@]}" \

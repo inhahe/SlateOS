@@ -94,6 +94,7 @@ mod cpufreq;
 mod cpusync;
 mod cputime;
 mod crypto;
+mod devhandle;
 mod devhotplug;
 mod devpower;
 mod drm;

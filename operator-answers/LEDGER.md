@@ -10,6 +10,23 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-22: remote desktop's video prefers AV1, with VP9 as the fallback
+
+- **Given:** 2026-10-22, in chat to lane B's session, answering lane B's
+  recommendation after the operator asked whether AV1, which Chrome Remote
+  Desktop uses, is better than the VP9 that §1332 chose. F-Q2, which §1332
+  answered, offered VP9, VP8 and H.264, not AV1.
+- **Processed:** 2026-10-22 by lane B: copied; written into
+  `roadmap-detailed.md` (§4.9, Remote Desktop, and the compositor's
+  video-capture line); lane F told by notice, to record it as a decision
+  superseding §1332's VP9 alone and to build the AV1 encoder.
+- **Copy:** `operator-answers/2026-10-22-chat-to-lane-b.txt`
+- **Content:** sha256 `27524379e28a05a78ab87f3245ae1d6dc009ba2ef313f499ebf3fa551d8a2aed`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| Remote desktop's video fallback prefers AV1 -- libaom's real-time encoder, tuned for screen content -- and keeps VP9 as the fallback, chosen per connection by what the viewer can decode; supersedes §1332's VP9 alone | F | `roadmap-detailed.md` §4.9 | relayed 2026-10-22 |
+
 ## chat, 2026-10-16: the logo is `xor2.png`; LithicBackup backs up on the writer's "done"
 
 - **Given:** 2026-10-16, in chat to lane F's session. Neither part answers a

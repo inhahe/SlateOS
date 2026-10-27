@@ -1,0 +1,31 @@
+[package]
+name = "libfdisk"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux 2.39.3's libfdisk, ported: in-memory editing of DOS, GPT, Sun, SGI and BSD partition tables, the dialogs that drive it, and sfdisk scripts"
+
+[lints]
+workspace = true
+
+[dependencies]
+# libblkid: the device's topology, the signatures a new table would hide
+# (fdisk_check_collisions) or erase (fdisk_do_wipe), and a partition's
+# filesystem (FSTYPE, FSUUID, FSLABEL).
+ulblkid = { path = "../ulblkid" }
+# size_to_human_string, parse_size, the number parsers.
+ulstrutils = { path = "../ulstrutils" }
+# lib/sysfs.c: a block device's model.
+ulsysfs = { path = "../ulsysfs" }
+# GPT's header and entry-array checksums.
+crc32 = { path = "../../crc32" }
+# lib/jsonwrt.c and carefulputc.h's fputs_quoted, for dumping scripts.
+smartcols = { path = "../smartcols" }
+# A partition's letter in a message, escaped like any value shown.
+quoting = { path = "../quoting" }
+# The kernel's random bytes, for new disk and partition identifiers.
+randrange = { path = "../../randrange" }
+# C's strtol and strtoul, as the label drivers and scripts read numbers.
+cstrtol = { path = "../cstrtol" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }

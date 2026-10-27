@@ -26,7 +26,11 @@ macro_rules! const_min {
     ($a:expr, $b:expr) => {{
         let a = $a;
         let b = $b;
-        if a < b { a } else { b }
+        if a < b {
+            a
+        } else {
+            b
+        }
     }};
 }
 

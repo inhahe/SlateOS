@@ -100,17 +100,42 @@ pub(crate) fn read_size<R: Read + Seek>(r: &mut Reader<R>) -> Result<Size, Error
     })
 }
 
-/// The next child of a master element ending at `end`: `None` at its end.
+/// A file that ends where an element's next child would begin: damage, which
+/// FFmpeg's second pass looks past (`ebml_parse`'s `AVERROR_EOF`). A file
+/// that ends inside a child's ID, size or value is [`Error::Truncated`]
+/// instead, which that pass refuses the file for (its `AVERROR(EIO)`).
+pub(crate) const ENDS_BETWEEN_CHILDREN: Error =
+    Error::Invalid("the file ends where an element's next child would begin");
+
+/// The next child of a master element ending at `end` -- `None` for one of
+/// unknown size -- or `None` at its end.
 ///
 /// As FFmpeg's `ebml_parse` reads one: an ID, then a size, then the checks
 /// against the parent -- a child of unknown size, or one running past its
-/// parent, is refused. A failure after the ID carries the ID.
-pub(crate) fn child<R: Read + Seek>(r: &mut Reader<R>, end: u64) -> Result<Option<Header>, Broken> {
+/// parent, is refused. A failure after the ID carries the ID. A parent of
+/// unknown size -- only a top-level element is read as one -- ends at the end
+/// of the file, or where another top-level element begins (FFmpeg's rule,
+/// for the elements it knows at the Segment's level, a Segment not among
+/// them); reading is left at that element.
+pub(crate) fn child<R: Read + Seek>(
+    r: &mut Reader<R>,
+    end: Option<u64>,
+) -> Result<Option<Header>, Broken> {
     let start = r.pos();
-    if start >= end {
+    if end.is_some_and(|e| start >= e) {
         return Ok(None);
     }
+    if r.remaining() == 0 {
+        return match end {
+            None => Ok(None),
+            Some(_) => Err(ENDS_BETWEEN_CHILDREN.into()),
+        };
+    }
     let id = read_id(r)?;
+    if end.is_none() && ids::is_top_level(id) {
+        r.seek_to(start)?;
+        return Ok(None);
+    }
     let with_id = |error| Broken {
         id: Some(id),
         error,
@@ -118,21 +143,29 @@ pub(crate) fn child<R: Read + Seek>(r: &mut Reader<R>, end: u64) -> Result<Optio
     let size = read_size(r).map_err(with_id)?;
     let data = r.pos();
     let Size::Known(n) = size else {
-        return Err(with_id(Error::Invalid(
-            "an element of unknown size inside a sized one",
-        )));
+        // FFmpeg takes one in a parent of unknown size too, ending it by
+        // its own table of what may be inside what; that is not followed.
+        return Err(with_id(Error::Invalid(if end.is_some() {
+            "an element of unknown size inside a sized one"
+        } else {
+            "an element of unknown size inside one of unknown size"
+        })));
     };
-    match data.checked_add(n) {
-        Some(child_end) if child_end <= end => Ok(Some(Header {
-            id,
-            size,
-            start,
-            data,
-        })),
-        _ => Err(with_id(Error::Invalid(
-            "an element running past its parent",
-        ))),
+    match (data.checked_add(n), end) {
+        (Some(child_end), Some(end)) if child_end <= end => {}
+        (Some(_), None) => {}
+        _ => {
+            return Err(with_id(Error::Invalid(
+                "an element running past its parent",
+            )));
+        }
     }
+    Ok(Some(Header {
+        id,
+        size,
+        start,
+        data,
+    }))
 }
 
 /// Into a master element one level below `levels`: the level count inside
@@ -307,7 +340,7 @@ pub(crate) fn read_info<R: Read + Seek>(
     enter(levels)?;
     info.timestamp_scale = 1_000_000;
     info.duration = None;
-    let end = end_of(h)?;
+    let end = h.end();
     r.seek_to(h.data)?;
     while let Some(c) = child(r, end).map_err(|b| b.error)? {
         match c.id {
@@ -396,7 +429,7 @@ pub(crate) fn read_seek_head<R: Read + Seek>(
     out: &mut Vec<SeekEntry>,
 ) -> Result<(), Error> {
     let levels = enter(levels)?;
-    let end = end_of(h)?;
+    let end = h.end();
     r.seek_to(h.data)?;
     while let Some(c) = child(r, end).map_err(|b| b.error)? {
         if c.id != ids::SEEK {
@@ -422,7 +455,7 @@ fn read_seek<R: Read + Seek>(
     c: &Header,
     e: &mut SeekEntry,
 ) -> Result<(), Error> {
-    let end = end_of(c)?;
+    let end = Some(end_of(c)?);
     while let Some(f) = child(r, end).map_err(|b| b.error)? {
         match f.id {
             ids::SEEK_ID => uint(r, &f, 0, &mut e.id)?,
@@ -458,7 +491,7 @@ pub(crate) fn read_chapters<R: Read + Seek>(
     out: &mut Vec<RawChapter>,
 ) -> Result<(), Error> {
     let levels = enter(levels)?;
-    let end = end_of(h)?;
+    let end = h.end();
     r.seek_to(h.data)?;
     while let Some(edition) = child(r, end).map_err(|b| b.error)? {
         if edition.id != ids::EDITION_ENTRY {
@@ -466,7 +499,7 @@ pub(crate) fn read_chapters<R: Read + Seek>(
             continue;
         }
         let in_edition = enter(levels)?;
-        let edition_end = end_of(&edition)?;
+        let edition_end = Some(end_of(&edition)?);
         loop {
             let atom = match child(r, edition_end) {
                 Ok(Some(c)) => c,
@@ -502,7 +535,7 @@ fn read_atom<R: Read + Seek>(
     c.start = NOPTS;
     c.end = NOPTS;
     c.uid = 0;
-    let end = end_of(atom)?;
+    let end = Some(end_of(atom)?);
     while let Some(f) = child(r, end).map_err(|b| b.error)? {
         match f.id {
             ids::CHAPTER_TIME_START => uint(r, &f, NOPTS, &mut c.start)?,
@@ -510,7 +543,7 @@ fn read_atom<R: Read + Seek>(
             ids::CHAPTER_UID => uint(r, &f, 0, &mut c.uid)?,
             ids::CHAPTER_DISPLAY => {
                 enter(levels)?;
-                let display_end = end_of(&f)?;
+                let display_end = Some(end_of(&f)?);
                 while let Some(d) = child(r, display_end).map_err(|b| b.error)? {
                     if d.id == ids::CHAP_STRING {
                         string(r, &d, None, &mut c.title)?;
@@ -568,7 +601,7 @@ pub(crate) fn read_tags<R: Read + Seek>(
     out: &mut Vec<RawTags>,
 ) -> Result<(), Error> {
     let levels = enter(levels)?;
-    let end = end_of(h)?;
+    let end = h.end();
     r.seek_to(h.data)?;
     loop {
         let t = match child(r, end) {
@@ -590,7 +623,7 @@ pub(crate) fn read_tags<R: Read + Seek>(
             return Ok(());
         };
         let in_tag = enter(levels)?;
-        let tag_end = end_of(&t)?;
+        let tag_end = Some(end_of(&t)?);
         loop {
             let c = match child(r, tag_end) {
                 Ok(Some(c)) => c,
@@ -630,7 +663,7 @@ fn read_targets<R: Read + Seek>(
     target.track = 0;
     target.chapter = 0;
     target.attachment = 0;
-    let end = end_of(h)?;
+    let end = Some(end_of(h)?);
     while let Some(f) = child(r, end).map_err(|b| b.error)? {
         match f.id {
             ids::TARGET_TYPE => string(r, &f, None, &mut target.kind)?,
@@ -654,7 +687,7 @@ fn read_simple_tag<R: Read + Seek>(
     let levels = enter(levels)?;
     tag.lang = Some(b"und".to_vec());
     tag.default = 0;
-    let end = end_of(h)?;
+    let end = Some(end_of(h)?);
     loop {
         let f = match child(r, end) {
             Ok(Some(c)) => c,
@@ -707,7 +740,7 @@ pub(crate) fn read_attachments<R: Read + Seek>(
     out: &mut Vec<RawAttachment>,
 ) -> Result<(), Error> {
     let levels = enter(levels)?;
-    let end = end_of(h)?;
+    let end = h.end();
     r.seek_to(h.data)?;
     loop {
         let f = match child(r, end) {
@@ -730,7 +763,7 @@ pub(crate) fn read_attachments<R: Read + Seek>(
         };
         enter(levels)?;
         a.uid = 0;
-        let file_end = end_of(&f)?;
+        let file_end = Some(end_of(&f)?);
         while let Some(c) = child(r, file_end).map_err(|b| b.error)? {
             match c.id {
                 ids::FILE_UID => uint(r, &c, 0, &mut a.uid)?,
@@ -769,7 +802,7 @@ mod tests {
 
     fn top(bytes: &[u8]) -> (Reader<Cursor<Vec<u8>>>, Header) {
         let mut r = reader(bytes);
-        let h = child(&mut r, u64::MAX)
+        let h = child(&mut r, Some(u64::MAX))
             .map_err(|b| b.error)
             .unwrap()
             .unwrap();
@@ -781,23 +814,26 @@ mod tests {
         // 0xFF: a one-byte ID whose value bits are all ones, which FFmpeg
         // reads as an element it does not know.
         let mut r = reader(&[0xff, 0x81, 0]);
-        let h = child(&mut r, 3).map_err(|b| b.error).unwrap().unwrap();
+        let h = child(&mut r, Some(3))
+            .map_err(|b| b.error)
+            .unwrap()
+            .unwrap();
         assert_eq!((h.id, h.size, h.data), (0xff, Size::Known(1), 2));
     }
 
     #[test]
     fn a_child_past_its_parent_is_refused_with_its_id() {
         let mut r = reader(&[0xb6, 0x85, 0, 0]);
-        let b = child(&mut r, 4).err().unwrap();
+        let b = child(&mut r, Some(4)).err().unwrap();
         assert_eq!(b.id, Some(0xb6));
         let mut r = reader(&[0xb6, 0xff]);
         assert_eq!(
-            child(&mut r, 2).err().unwrap().id,
+            child(&mut r, Some(2)).err().unwrap().id,
             Some(0xb6),
             "unknown size"
         );
         let mut r = reader(&[0x00]);
-        assert_eq!(child(&mut r, 1).err().unwrap().id, None, "no ID");
+        assert_eq!(child(&mut r, Some(1)).err().unwrap().id, None, "no ID");
     }
 
     #[test]

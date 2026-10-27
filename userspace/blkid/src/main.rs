@@ -31,7 +31,7 @@
 //!   part that was encoded; upstream's buffer is then unterminated, and its
 //!   output runs on into whatever follows it in memory.
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Opt, Program, Takes};
 use quoting::{escape_unprintable, escaped_in_quotes, os_bytes};
 use std::ffi::{OsStr, OsString};
 use std::process::ExitCode;
@@ -99,6 +99,9 @@ const LONGS: &[(&str, Takes)] = &[
     ("help", Takes::Nothing),
 ];
 const LONG_VALS: [u8; 20] = *b"cdDgokstlLUpHiSOunVh";
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, u8> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`: `-n` and `-u` exclude each other.
 const EXCL: [&[i32]; 1] = [&[b'n' as i32, b'u' as i32]];
@@ -769,27 +772,6 @@ fn list_to_types(list: &[u8], flag: &mut u32, short: &[u8]) -> Result<Vec<Vec<u8
     Ok(p.split(|&b| b == b',').map(<[u8]>::to_vec).collect())
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((i32::from(*LONG_VALS.get(i)?), value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
-/// `option_to_longopt(c, opts)`: the first long option with this `val`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| i32::from(v) == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 /// The `errno` a failed `blkid_probe_set_hint(pr, hint, 0)` leaves for
 /// `warn` to print: what was there before (`errno_left`) when the hint does
 /// not parse as `NAME=value`, else `strtoumax`'s -- `ERANGE`, or the 0 it
@@ -911,14 +893,14 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Stdout) -> u8 {
                 return errtryhelp(short, 1);
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
             if let Opt::Operand(o) = &opt {
                 operands.push(os_bytes(o).into_owned());
             }
             continue;
         };
         if let Some(msg) =
-            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, option_to_longopt, short)
+            ulstrutils::err_exclusive_options(c, &EXCL, &mut excl_st, |c| OPTIONS.name_of(c), short)
         {
             stderr_write(msg.as_bytes());
             return BLKID_EXIT_OTHER;

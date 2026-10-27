@@ -124,6 +124,7 @@
 # | `DIFF_PKG`       | `coreutils` | the cargo package(s) to build from; more than one for a harness whose subjects do not share a crate |
 # | `DIFF_BINS`      | `$DIFF_PROG`, or empty if `DIFF_EXAMPLES` is set | the `--bin` names to build; more than one for a harness that compares a family |
 # | `DIFF_EXAMPLES`  | (none) | `--example` names to build, for a harness whose subject is a test instrument rather than a shipped utility. `extfloat-probe` is one: it exposes a *library* to a C reference, and a `src/bin/*.rs` would be installed into the image |
+# | `DIFF_FEATURES`  | (none) | cargo features to build with, comma-separated: for a binary built only on request, as `agetty` is while its port is in progress (`required-features`) |
 # | `DIFF_FORWARD`   | (none) | extra environment variable names to carry across the re-exec. Every `DIFF_*` knob above already crosses on its own, as do `OURS` and `VERBOSE`; this is for a name that matches neither pattern |
 # | `DIFF_REF`       | (none) | candidate paths for the reference, tried in order, instead of looking on `PATH`. `echo` needs this: `command -v echo` finds the shell builtin, which is not what is being compared. Single-binary harnesses only |
 # | `DIFF_GNU_SOURCE`| (none) | a coreutils version (`9.4`) to fetch, build and compare against, *instead of* the installed binary. See "Why a built reference" below |
@@ -1314,6 +1315,7 @@ if [ -z "$OURS" ]; then
   for diff_p in $DIFF_PKG; do diff_args="$diff_args -p $diff_p"; done
   for diff_b in $DIFF_BINS; do diff_args="$diff_args --bin $diff_b"; done
   for diff_b in $DIFF_EXAMPLES; do diff_args="$diff_args --example $diff_b"; done
+  if [ -n "${DIFF_FEATURES:-}" ]; then diff_args="$diff_args --features $DIFF_FEATURES"; fi
   # shellcheck disable=SC2086
   ( cd "$root" && cargo build $diff_args \
       --target x86_64-unknown-linux-gnu --target-dir "$target_dir" ) >&2 || exit 1
@@ -1733,3 +1735,48 @@ then
 else
   DIFF_FOREIGN_LINK=
 fi
+
+# --- 9. a system log of the harness's own -------------------------------------
+# For a program that writes to the system log: each side runs in a mount
+# namespace whose /dev is a tmpfs, and logs to a socket bound there.
+#
+# `diff_devlog` writes `$DIFF_TMP/devlog.sh`, for a case script run inside
+# the namespace to source. Its `devlog_start LOG` listens on /dev/log and
+# appends each datagram to LOG, a line each; it exits the case with 93 when
+# the socket never appears, so a side that logged nowhere is not compared as
+# one that logged nothing. `devlog_stop` sends the listener a datagram that
+# stops it: the socket keeps datagrams in order, so every one the program
+# sent is written first, however long the listener takes to be scheduled.
+diff_devlog() {
+  cat > "$DIFF_TMP/devlog.py" <<'PY'
+import socket, sys
+s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+s.bind(sys.argv[1])
+with open(sys.argv[2], "ab", buffering=0) as out:
+    while True:
+        d = s.recv(65536)
+        if d == b"\0devlog-stop":
+            break
+        out.write(d + b"\n")
+PY
+  cat > "$DIFF_TMP/devlog.sh" <<'SH'
+devlog_start() {
+  python3 "$(dirname "$0")/devlog.py" /dev/log "$1" < /dev/null > /dev/null 2>&1 &
+  devlog_pid=$!
+  for _ in $(seq 1 100); do [ -S /dev/log ] && return 0; sleep 0.02; done
+  kill "$devlog_pid" 2>/dev/null
+  exit 93
+}
+devlog_stop() {
+  python3 -c 'import socket; socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).sendto(b"\0devlog-stop", "/dev/log")' 2>/dev/null \
+    || kill "$devlog_pid" 2>/dev/null
+  wait "$devlog_pid" 2>/dev/null
+}
+SH
+}
+
+# diff_mask_logged_time FILE...: a logged line's timestamp, `Mmm dd
+# hh:mm:ss` after the priority, differs between the sides.
+diff_mask_logged_time() {
+  sed -E -i 's/^(<[0-9]+>)[A-Z][a-z]{2} [ 0-9][0-9] [0-9]{2}:[0-9]{2}:[0-9]{2} /\1TS /' "$@"
+}

@@ -879,166 +879,6 @@ check_rootfs_freshness() {
         echo "                python scripts/ctest-fixtures.py build"
         echo "                wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
     fi
-
-    check_sysroot_identity
-}
-
-# Is the `libc.a` these fixtures were LINKED against the same file as the one
-# the checks above VERIFIED?
-#
-# The gate above answers "is our sysroot behind our posix/ sources?".  That is
-# a question about `$PROJECT_ROOT/toolchain/sysroot/lib/libc.a`, because
-# ctest-fixtures.py derives LIBC from its own `REPO` (ctest-fixtures.py:196-198,
-# `Path(__file__).resolve().parent.parent` -- this worktree).  Correct, and not
-# the whole question.
-#
-# fastpy resolves the sysroot independently, and differently.
-# `_find_slateos_sysroot_lib` (fastpy/compiler/toolchain.py:160-186) tries
-# $FASTPY_SLATEOS_SYSROOT first and otherwise falls back to a *sibling* `os`
-# checkout -- `<fastpy>/../os/toolchain/sysroot/lib`, which is the integration
-# worktree, never the lane worktree the build ran from.  Nothing in
-# ctest-fixtures.py sets that variable, so from any os-lane-* the fallback is
-# what fires and the fixtures link a libc.a from a different checkout than the
-# one every check in this script reasons about.  Observed 2026-08-31: all three
-# lanes sharing one 11-day-old copy.
-#
-# Note where this is invisible: built from `D:\visual studio projects\os`, the
-# two paths ARE the same directory, so the mismatch cannot occur in the tree we
-# integrate in and occurs in all three we work in.  That is why no existing gate
-# caught it -- each one is individually right about the file it looks at.
-#
-# WHY CONTENT AND NOT PATH.  Two different paths holding identical bytes is not
-# a problem; it is the ordinary case right after everyone rebuilds.  Comparing
-# realpaths would fire on every lane run and be tuned out within a day, which is
-# the failure mode a gate cannot recover from.  Compare the bytes.
-#
-# WHY A WARNING AND NOT A FAILURE.  Same reasoning as the gate above, and it is
-# the reasoning rather than the conclusion that is being reused: the repair is
-# to set FASTPY_SLATEOS_SYSROOT in scripts/ctest-fixtures.py and relink under
-# services/**, both lane B's tree (request filed:
-# requests/a-b-ctest-fixtures-verify-one-libc-and-link-a-different-one.md).
-# Failing here would block every lane-A boot test on a repair lane A must not
-# make.  And the kernel result is unaffected either way -- it is only what the
-# Path-Z rungs prove about *this* posix that is in question, not the kernel
-# under test.  This gate's job is to stop the reader believing something the
-# run did not establish.
-check_sysroot_identity() {
-    local ours="$PROJECT_ROOT/toolchain/sysroot/lib/libc.a"
-    if [ ! -f "$ours" ]; then
-        # Nothing to compare against.  The gate above already covers a missing
-        # sysroot; staying quiet here avoids two warnings for one cause.
-        return 0
-    fi
-
-    # Mirror _find_slateos_sysroot_lib's candidate order exactly.  If this ever
-    # disagrees with fastpy the gate becomes worse than nothing -- it would
-    # report on a file fastpy does not use -- so it is written to be read
-    # side-by-side with that function.
-    local resolved=""
-    local c
-    if [ -n "${FASTPY_SLATEOS_SYSROOT:-}" ]; then
-        for c in "$FASTPY_SLATEOS_SYSROOT/lib" "$FASTPY_SLATEOS_SYSROOT"; do
-            if [ -f "$c/libc.a" ]; then resolved="$c"; break; fi
-        done
-    fi
-    if [ -z "$resolved" ]; then
-        # ctest-fixtures.py locates fastpy as $FASTPY_DIR or a sibling checkout
-        # (ctest-fixtures.py:868-873); fastpy then walks up from there.
-        c="${FASTPY_DIR:-$PROJECT_ROOT/../fastpy}/../os/toolchain/sysroot/lib"
-        if [ -f "$c/libc.a" ]; then resolved="$c"; fi
-    fi
-
-    if [ -z "$resolved" ]; then
-        # ASK WHETHER THE REPAIR IS IN FORCE BEFORE WARNING THAT IT IS NOT.
-        #
-        # `scripts/ctest-fixtures.py` computes this worktree's sysroot in
-        # `_slateos_sysroot_env` and assigns it into the child environment beside
-        # that call, so every fixture build gets FASTPY_SLATEOS_SYSROOT and
-        # fastpy's sibling fallback never runs. The fixtures in the image ARE
-        # linked against a named libc.a -- this process simply cannot see which,
-        # because the variable is exported to the child and not to us.
-        #
-        # Until 2026-09-10 this branch warned unconditionally that "the fixtures
-        # in the image were linked without one -- their Path-Z rungs cannot be
-        # attributed to any posix/ revision". That was TRUE when written and FALSE
-        # once lane B landed the repair this very message recommends, and it fired
-        # on every lane-A boot test in between. A warning that is always printed
-        # and no longer true is the failure this function's own header names:
-        # "tuned out within a day, which is the failure mode a gate cannot
-        # recover from."
-        #
-        # Matched on the ASSIGNMENT rather than a line number, and on the builder
-        # rather than on fastpy, because the mirror of fastpy's path search is
-        # what drifted in the first place -- this file computed
-        # `<worktree>/../fastpy/../os/...` on E: while fastpy computed
-        # `D:/.../os/...`, so the two disagreed about the very thing the header
-        # says they must not. If lane B renames `child_env`, this check FAILS
-        # CLOSED: the warning returns, which is noisy but safe. The opposite
-        # polarity would be a gate that went quiet when its subject moved.
-        local builder="$PROJECT_ROOT/scripts/ctest-fixtures.py"
-        if [ -f "$builder" ] && grep -qE 'child_env\[.FASTPY_SLATEOS_SYSROOT.\]' "$builder"; then
-            echo "    fixture libc: supplied by scripts/ctest-fixtures.py"
-            echo "                  (_slateos_sysroot_env exports"
-            echo "                  FASTPY_SLATEOS_SYSROOT per build, so fastpy's"
-            echo "                  sibling-checkout fallback is not reached). Not"
-            echo "                  byte-compared here: the value is exported to the"
-            echo "                  child, so this process cannot read it back."
-            return 0
-        fi
-
-        # Say which of the two possible causes this is.  The message used to
-        # read "something this host can no longer name", which describes a
-        # missing or unidentifiable libc -- and that is not what happened.  Ours
-        # is present and named on the next line (the early return above proves
-        # it exists).  What failed is fastpy's *search*: its last candidate is a
-        # sibling checkout literally named `os`, so from any `os-lane-*` it
-        # looks only at the integration worktree and never at the tree being
-        # tested.  Misnaming a search defect as a missing file sends the reader
-        # to rebuild a sysroot that is already there.
-        echo "=== WARNING: fastpy cannot see this worktree's sysroot ==="
-        echo "    ours (present, never searched): $ours"
-        echo "    fastpy's last candidate is a *sibling checkout named 'os'*,"
-        echo "    which in the three-worktree layout is the integration tree and"
-        echo "    holds no sysroot.  \$FASTPY_SLATEOS_SYSROOT is unset, so no"
-        echo "    candidate resolves and the fixtures in the image were linked"
-        echo "    without one -- their Path-Z rungs cannot be attributed to any"
-        echo "    posix/ revision.  The kernel result below is unaffected."
-        echo "    To repair, set the variable when the fixtures are BUILT:"
-        # Quoted: every checkout of this project lives under a path with a
-        # space in it ("visual studio projects"), so an unquoted assignment
-        # here is a repair line that fails when pasted.
-        echo "        FASTPY_SLATEOS_SYSROOT=\"$PROJECT_ROOT/toolchain/sysroot\" \\"
-        echo "            python scripts/ctest-fixtures.py build"
-        echo "        wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
-        echo "    Setting it only for this check would make the comparison below"
-        echo "    read our own libc.a against itself and pass in silence, which"
-        echo "    is why this script does not do that (known-issues.md"
-        echo "    A-FASTPY-SYSROOT-SEARCH-CANNOT-SEE-A-LANE-WORKTREE)."
-        return 0
-    fi
-
-    if cmp -s "$resolved/libc.a" "$ours"; then
-        return 0
-    fi
-
-    # Normalise for the message only.  The candidate walk above deliberately
-    # does NOT resolve as it goes -- it mirrors fastpy, which does not either --
-    # but the raw fallback reads as `<worktree>/../fastpy/../os/...`, and a
-    # reader who has to unpick that is a reader who skips the warning.
-    local shown
-    shown="$(realpath -m "$resolved/libc.a" 2>/dev/null || echo "$resolved/libc.a")"
-
-    echo "=== WARNING: fixtures link a libc.a from a different checkout ==="
-    echo "    verified: $ours"
-    echo "    linked:   $shown"
-    echo "    These differ in content.  Every check above reasoned about the"
-    echo "    first path; fastpy links the second (see"
-    echo "    fastpy/compiler/toolchain.py _find_slateos_sysroot_lib).  The"
-    echo "    kernel result below is unaffected -- but the Path-Z rungs exercise"
-    echo "    the posix/ that built the *linked* libc, which is not this tree's."
-    echo "    To repair:  set FASTPY_SLATEOS_SYSROOT=$PROJECT_ROOT/toolchain/sysroot"
-    echo "                python scripts/ctest-fixtures.py build"
-    echo "                wsl -d Ubuntu -- bash scripts/create-ext4-rootfs.sh"
 }
 
 # Directories whose contents are performance-critical per CLAUDE.md's
@@ -1529,6 +1369,14 @@ export CHECKER_PROG CHECKER_REFUSING CHECKER_LOGDIR
 # nothing (SC1090).
 # shellcheck source=run-checker.sh
 . "$BOOT_CHECKER_LIB"
+# Every gate that could not run, appended by run_checker_note_skip; the gate
+# banner counts them and the boot-history row records them with their reasons.
+RUN_CHECKER_SKIPS=
+# Each Python gate below skips on its own when there is no python, in its own
+# words; this one entry is what puts them in the list.
+if ! command -v python &>/dev/null && ! command -v python3 &>/dev/null; then
+    run_checker_note_skip "every python gate" "no python or python3 on PATH"
+fi
 
 # Announce the tree under test, first line of the log, before anything else.
 #
@@ -1616,14 +1464,19 @@ unset _bt_dirty
 # as "unknown" and therefore refuses to group -- the safe direction.  A boot
 # test that failed because a digest could not be computed would be strictly
 # worse than one that simply did not record it.
-BT_SRC_DIGEST=""
-if command -v python &>/dev/null; then
-    BT_SRC_DIGEST="$(python "$PROJECT_ROOT/scripts/src_digest.py" \
-                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
-elif command -v python3 &>/dev/null; then
-    BT_SRC_DIGEST="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" \
-                     --root "$PROJECT_ROOT" 2>/dev/null || true)"
-fi
+#
+# Taken again after --bootstrap provisions the tree (check_prerequisites): the
+# service binaries it builds go into the kernel, so they are part of what the
+# digest describes, and a digest taken before they existed would make the
+# comparison at build time report a change the run made itself.
+take_src_digest() {
+    if command -v python &>/dev/null; then
+        python "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true
+    elif command -v python3 &>/dev/null; then
+        python3 "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true
+    fi
+}
+BT_SRC_DIGEST="$(take_src_digest)"
 if [ -n "$BT_SRC_DIGEST" ]; then
     echo "=== Source digest: $BT_SRC_DIGEST ==="
 else
@@ -3496,6 +3349,9 @@ record_boot_outcome() {
     # looking like a measurement.
     if [ -n "${GATES_SECONDS:-}" ]; then
         args+=(--gates-seconds "$GATES_SECONDS")
+        # Beside gates_seconds, so the row has the list exactly when the gate
+        # phase completed: empty then means none skipped.
+        args+=("--gates-skipped=${RUN_CHECKER_SKIPS:-}")
     fi
     # What the gate cache did, and why the gates it did not serve ran: counted
     # on the row so that a cause which keeps coming back can be added up
@@ -3839,6 +3695,8 @@ check_prerequisites() {
                 # must not turn a now-buildable tree back into a refusal.  The
                 # re-check below is the authority.
                 bash "$boot" || true
+                BT_SRC_DIGEST="$(take_src_digest)"
+                echo "=== Source digest after provisioning: ${BT_SRC_DIGEST:-unavailable} ==="
                 report="$(bash "$boot" --check --need="$need" 2>&1)" && status=0 || status=$?
                 case "$status" in
                     0)
@@ -8005,6 +7863,8 @@ check_python_suites() {
                 nskips=$(printf '%s\n' "$skips" | wc -l)
                 skipped_groups=$((skipped_groups + nskips))
                 skipping+=("$(basename "$f")")
+                run_checker_note_skip "$(basename "$f")" \
+                    "$((nskips)) group(s) SKIPPED, the first: $(printf '%s\n' "$skips" | head -n 1 | sed 's/^[[:space:]]*//')"
                 # Indented under the suite's own line, so it reads as part of
                 # that suite's report rather than as a separate finding.  Line
                 # by line rather than one `printf '  ^ %s\n' "$skips"`: that
@@ -8666,6 +8526,7 @@ check_cfg_unix() {
         | grep -qx "x86_64-unknown-linux-gnu"; then
         echo "=== cfg(unix) check: skipped (x86_64-unknown-linux-gnu not installed) ===" >&2
         echo "    rustup target add x86_64-unknown-linux-gnu" >&2
+        run_checker_note_skip cfg-unix "the x86_64-unknown-linux-gnu target is not installed"
         return 0
     fi
 
@@ -8836,7 +8697,15 @@ check_kernel_docs
 # not at bench/boot-history.jsonl, and the header's budgeting advice is exactly
 # what this number is evidence for.
 GATES_SECONDS=$(( $(date +%s) - GATES_START_EPOCH ))
-echo "=== Gates OK (${GATES_SECONDS}s) ==="
+# "OK" covers only the gates that ran, so the ones that could not are named
+# here; their reasons are in the boot-history verdict at the end of the run.
+if [ -n "$RUN_CHECKER_SKIPS" ]; then
+    _gate_skip_labels="$(printf '%s' "$RUN_CHECKER_SKIPS" | cut -f1 | tr '\n' ' ')"
+    _gate_skip_count="$(printf '%s' "$RUN_CHECKER_SKIPS" | grep -c .)" || true
+    echo "=== Gates OK (${GATES_SECONDS}s), but ${_gate_skip_count} could not run: ${_gate_skip_labels% } ==="
+else
+    echo "=== Gates OK (${GATES_SECONDS}s) ==="
+fi
 
 # Where those seconds went, per gate.
 #
@@ -8942,12 +8811,7 @@ if [ "$NO_BUILD" -eq 0 ]; then
     # allowed.  Recording it as though it had not happened is not.
     BT_SRC_CHANGED=0
     if [ -n "$BT_SRC_DIGEST" ]; then
-        _bt_digest_now=""
-        if command -v python &>/dev/null; then
-            _bt_digest_now="$(python "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
-        elif command -v python3 &>/dev/null; then
-            _bt_digest_now="$(python3 "$PROJECT_ROOT/scripts/src_digest.py" --root "$PROJECT_ROOT" 2>/dev/null || true)"
-        fi
+        _bt_digest_now="$(take_src_digest)"
         # An unavailable second digest proves nothing and must not accuse.
         if [ -n "$_bt_digest_now" ] && [ "$_bt_digest_now" != "$BT_SRC_DIGEST" ]; then
             BT_SRC_CHANGED=1

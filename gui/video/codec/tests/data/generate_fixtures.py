@@ -53,6 +53,9 @@ Where the answers come from -- none of it from the crate itself:
   the luma it gives unturned, turned the table's way here. The display size
   is the turned frame's, its pixel's shape turned with it (as ffmpeg's
   `transpose` turns the sample aspect ratio).
+- **H.264**, encoded by libx264 (and libx264rgb) and decoded by FFmpeg's
+  own H.264 decoder: B pictures, shown in another order than decoded; a
+  file cut between key frames; 10-bit 4:2:2; interlaced; RGB; and Matroska.
 
 Every fixture is 8 frames at 25 a second, a key frame every 3, encoded with
 one thread and `-fflags +bitexact`, so a run makes the same bytes as the last.
@@ -83,6 +86,10 @@ VP8 = ["-c:v", "libvpx", "-deadline", "good", "-cpu-used", "4", "-crf", "40",
        "-b:v", "1M", "-g", "3", "-keyint_min", "3", "-threads", "1", "-auto-alt-ref", "0"]
 AV1 = ["-c:v", "libaom-av1", "-cpu-used", "8", "-crf", "50", "-b:v", "0", "-g", "3",
        "-keyint_min", "3", "-threads", "1", "-row-mt", "0", "-tiles", "1x1"]
+# x264 with B pictures, so that pictures are shown in another order than
+# they are decoded in: a key frame every 3, as the rest.
+X264 = ["-c:v", "libx264", "-preset", "medium", "-crf", "30", "-g", "3", "-keyint_min", "3",
+        "-sc_threshold", "0", "-bf", "2", "-threads", "1"]
 
 # A varying alpha for VP9's transparency: a ramp across, down and in time.
 ALPHA = (",format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)'"
@@ -204,7 +211,9 @@ class Tools:
         self.harness = harness
 
     def encode(self, name, source, args, fmt=None):
-        fmt = fmt or ("mp4" if name.endswith(".mp4") else "webm")
+        # WebM holds VP8, VP9 and AV1 only; an H.264 .mkv is Matroska.
+        fmt = fmt or ("mp4" if name.endswith(".mp4")
+                      else "matroska" if name.startswith("h264") else "webm")
         run([self.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
              "-f", "lavfi", "-i", source, *args, "-fflags", "+bitexact",
              "-f", fmt, name])
@@ -219,11 +228,12 @@ class Tools:
         return json.loads(out.decode("utf-8"))
 
     def raw(self, name, decoder, pix_fmt):
-        """Every frame's planes, whole and unturned: a crop or a turn the
-        file asks for is the answer's to apply, after the conversion, not
-        ffmpeg's before it."""
+        """Every frame's planes, unturned and cropped only as the bitstream
+        says (H.264's frame cropping, as the decoder applies it): a crop or a
+        turn the file asks for is the answer's to apply, after the
+        conversion, not ffmpeg's before it."""
         dec = ["-c:v", decoder] if decoder else []
-        return run([self.ffmpeg, "-hide_banner", "-loglevel", "error", *dec, "-apply_cropping", "none",
+        return run([self.ffmpeg, "-hide_banner", "-loglevel", "error", *dec, "-apply_cropping", "codec",
                     "-noautorotate", "-i", name,
                     "-map", "0:v:0", "-fps_mode", "passthrough", "-f", "rawvideo",
                     "-pix_fmt", pix_fmt, "-"])
@@ -560,6 +570,20 @@ def patch_colr(data, primaries, transfer, matrix, full_range):
                                    0x80 if full_range else 0) + data[at + 7:]
 
 
+def patch_height(data, height):
+    """The picture's height as the file states it -- in the first video
+    sample entry, and in the track header, so that the two still agree and
+    FFmpeg makes no pixel shape of a difference -- rewritten in place."""
+    stsd = data.index(b"stsd") - 4
+    entry = stsd + 16
+    data = data[:entry + 34] + struct.pack(">H", height) + data[entry + 36:]
+    tkhd = data.index(b"tkhd") - 4
+    # The height, 16.16, last in the header; version 1 widens three of the
+    # fields before it.
+    at = tkhd + (100 if data[tkhd + 8] == 1 else 88)
+    return data[:at] + struct.pack(">I", height << 16) + data[at + 4:]
+
+
 def clap_box(width, height, offset_x, offset_y):
     """A clean aperture: four fractions, each (numerator, denominator)."""
     body = b"".join(struct.pack(">i", v) for q in (width, height, offset_x, offset_y) for v in q)
@@ -639,6 +663,8 @@ def mp4_fixture(tools, name, source, args, pix_fmt, planes, colour, decoder, *,
     pixels = pixels_md5(tools, raw, len(probe["frames"]), width, height, fmt, depth, alpha, colour,
                         crop=crop if crop != (0, 0, 0, 0) else None, turn=turn)
     codec = name.split("_", 1)[0].split(".", 1)[0]
+    # `Codec`'s own name, as `VideoInfo` prints it.
+    codec = {"h264": "h.264"}.get(codec, codec)
     if name.endswith(".mp4"):
         info = mp4_info(tools, name, decoder, codec, width, height, crop, fragmented, turn)
     else:
@@ -701,6 +727,36 @@ def write_mp4s(tools):
     # A 4:3 pixel turned a quarter: 144 wide, its pixel 3:4, shown 108 wide.
     mp4_fixture(tools, "vp9_pasp_rotate.mp4", small + ",setsar=4/3", *vp9,
                 display=["-display_rotation", "-90"], turn="clockwise")
+    # H.264, FFmpeg's own decoder giving the planes: B pictures, so shown in
+    # another order than decoded, from the reorder delay MP4's composition
+    # offsets give; cut between key frames, the frames before the edit
+    # list's start decoded and not shown whatever order they come out in;
+    # 10-bit 4:2:2, said BT.709; coded interlaced, its fields woven, as
+    # FFmpeg gives them; RGB, as libx264rgb stores it (G, B, R, the identity
+    # matrix); and in Matroska, which estimates no delay.
+    mp4_fixture(tools, "h264.mp4", small, X264 + yuv420, *plain, (6, 1, "limited"), None)
+    mp4_fixture(tools, "h264_cut.mp4", longer, X264 + yuv420, *plain, (6, 1, "limited"), None,
+                cut=0.05)
+    mp4_fixture(tools, "h264_422_10bit.mp4", small, X264 + ["-pix_fmt", "yuv422p10le"] + bt709,
+                "yuv422p10le", ("422", 10, 0), (1, 1, "limited"), None)
+    mp4_fixture(tools, "h264_interlaced.mp4", small,
+                X264 + yuv420 + ["-flags", "+ildct+ilme", "-x264-params", "tff=1"], *plain,
+                (6, 1, "limited"), None)
+    mp4_fixture(tools, "h264_gbr.mp4", small,
+                ["-c:v", "libx264rgb"] + X264[2:] + ["-pix_fmt", "gbrp"], "gbrp", ("444", 8, 0),
+                (0, 1, "full"), None)
+    mp4_fixture(tools, "h264_matroska.mkv", small, X264 + yuv420, *plain, (6, 1, "limited"),
+                None)
+    # Coded 144 rows, the file saying 140: the encoder's padding, as a
+    # broken muxer leaves it uncropped. FFmpeg's decoder, opened with the
+    # file's size, crops the last four rows off.
+    mp4_fixture(tools, "h264_container_crop.mp4", small, X264 + yuv420, *plain,
+                (6, 1, "limited"), None, change=lambda d: patch_height(d, 140))
+    # Fragmented, its moov listing no samples: the reorder delay from the
+    # fragments' composition offsets, where FFmpeg's player probes for it.
+    mp4_fixture(tools, "h264_fragmented.mp4", small,
+                X264 + yuv420 + ["-movflags", "frag_keyframe+empty_moov"], *plain,
+                (6, 1, "limited"), None, fragmented=True)
 
 
 def main():

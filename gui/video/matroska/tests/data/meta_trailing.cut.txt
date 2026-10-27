@@ -1,4 +1,267 @@
-# meta_trailing.mkv cut short at each length from 263: `start`, and the MD5 of the rest of what ffprobe shows (generate_fixtures.py).
+# meta_trailing.mkv cut short at each length: `start`, and the MD5 of the rest of what ffprobe shows (generate_fixtures.py).
+cut 0 refused
+cut 1 refused
+cut 2 refused
+cut 3 refused
+cut 4 refused
+cut 5 refused
+cut 6 refused
+cut 7 refused
+cut 8 refused
+cut 9 refused
+cut 10 refused
+cut 11 refused
+cut 12 refused
+cut 13 refused
+cut 14 refused
+cut 15 refused
+cut 16 refused
+cut 17 refused
+cut 18 refused
+cut 19 refused
+cut 20 refused
+cut 21 refused
+cut 22 refused
+cut 23 refused
+cut 24 refused
+cut 25 refused
+cut 26 refused
+cut 27 refused
+cut 28 refused
+cut 29 refused
+cut 30 refused
+cut 31 refused
+cut 32 refused
+cut 33 refused
+cut 34 refused
+cut 35 refused
+cut 36 refused
+cut 37 refused
+cut 38 refused
+cut 39 refused
+cut 40 refused
+cut 41 refused
+cut 42 refused
+cut 43 refused
+cut 44 refused
+cut 45 refused
+cut 46 refused
+cut 47 refused
+cut 48 refused
+cut 49 refused
+cut 50 refused
+cut 51 refused
+cut 52 refused
+cut 53 refused
+cut 54 refused
+cut 55 refused
+cut 56 refused
+cut 57 refused
+cut 58 refused
+cut 59 refused
+cut 60 refused
+cut 61 refused
+cut 62 refused
+cut 63 refused
+cut 64 refused
+cut 65 refused
+cut 66 refused
+cut 67 refused
+cut 68 refused
+cut 69 refused
+cut 70 refused
+cut 71 refused
+cut 72 refused
+cut 73 refused
+cut 74 refused
+cut 75 refused
+cut 76 refused
+cut 77 refused
+cut 78 refused
+cut 79 refused
+cut 80 refused
+cut 81 refused
+cut 82 refused
+cut 83 refused
+cut 84 refused
+cut 85 refused
+cut 86 refused
+cut 87 refused
+cut 88 refused
+cut 89 refused
+cut 90 refused
+cut 91 refused
+cut 92 refused
+cut 93 refused
+cut 94 refused
+cut 95 refused
+cut 96 refused
+cut 97 refused
+cut 98 refused
+cut 99 refused
+cut 100 refused
+cut 101 refused
+cut 102 refused
+cut 103 refused
+cut 104 refused
+cut 105 refused
+cut 106 refused
+cut 107 refused
+cut 108 refused
+cut 109 refused
+cut 110 refused
+cut 111 refused
+cut 112 refused
+cut 113 refused
+cut 114 refused
+cut 115 refused
+cut 116 refused
+cut 117 refused
+cut 118 refused
+cut 119 refused
+cut 120 refused
+cut 121 refused
+cut 122 refused
+cut 123 refused
+cut 124 refused
+cut 125 refused
+cut 126 refused
+cut 127 refused
+cut 128 refused
+cut 129 refused
+cut 130 refused
+cut 131 refused
+cut 132 refused
+cut 133 refused
+cut 134 refused
+cut 135 refused
+cut 136 refused
+cut 137 refused
+cut 138 refused
+cut 139 refused
+cut 140 refused
+cut 141 refused
+cut 142 refused
+cut 143 refused
+cut 144 refused
+cut 145 refused
+cut 146 refused
+cut 147 refused
+cut 148 refused
+cut 149 refused
+cut 150 refused
+cut 151 refused
+cut 152 refused
+cut 153 refused
+cut 154 refused
+cut 155 refused
+cut 156 refused
+cut 157 refused
+cut 158 refused
+cut 159 refused
+cut 160 refused
+cut 161 refused
+cut 162 refused
+cut 163 refused
+cut 164 refused
+cut 165 refused
+cut 166 refused
+cut 167 refused
+cut 168 refused
+cut 169 refused
+cut 170 refused
+cut 171 refused
+cut 172 refused
+cut 173 refused
+cut 174 refused
+cut 175 refused
+cut 176 refused
+cut 177 refused
+cut 178 refused
+cut 179 refused
+cut 180 refused
+cut 181 refused
+cut 182 refused
+cut 183 refused
+cut 184 refused
+cut 185 refused
+cut 186 refused
+cut 187 refused
+cut 188 refused
+cut 189 refused
+cut 190 refused
+cut 191 refused
+cut 192 refused
+cut 193 refused
+cut 194 refused
+cut 195 refused
+cut 196 refused
+cut 197 refused
+cut 198 refused
+cut 199 refused
+cut 200 refused
+cut 201 refused
+cut 202 refused
+cut 203 refused
+cut 204 refused
+cut 205 refused
+cut 206 refused
+cut 207 refused
+cut 208 refused
+cut 209 refused
+cut 210 refused
+cut 211 refused
+cut 212 refused
+cut 213 refused
+cut 214 refused
+cut 215 refused
+cut 216 refused
+cut 217 refused
+cut 218 refused
+cut 219 refused
+cut 220 refused
+cut 221 refused
+cut 222 refused
+cut 223 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 224 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 225 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 226 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 227 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 228 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 229 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 230 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 231 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 232 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 233 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 234 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 235 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 236 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 237 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 238 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 239 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 240 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 241 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 242 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 243 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 244 none 4a05e4cd9673d1882644d21cdeb1d76a
+cut 245 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 246 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 247 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 248 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 249 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 250 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 251 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 252 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 253 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 254 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 255 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 256 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 257 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 258 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 259 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 260 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 261 0 4a05e4cd9673d1882644d21cdeb1d76a
+cut 262 0 4a05e4cd9673d1882644d21cdeb1d76a
 cut 263 0 4a05e4cd9673d1882644d21cdeb1d76a
 cut 264 0 4a05e4cd9673d1882644d21cdeb1d76a
 cut 265 0 4a05e4cd9673d1882644d21cdeb1d76a

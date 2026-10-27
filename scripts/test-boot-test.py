@@ -45,6 +45,7 @@ sys.path.insert(0, os.path.join(REPO_ROOT, "scripts"))
 import gitenv  # noqa: E402
 import hostload  # noqa: E402
 import msysbash  # noqa: E402
+import shellfunc  # noqa: E402
 import srcload  # noqa: E402
 
 # The fixtures below are throwaway repositories picked with `-C` and `cwd=`.
@@ -586,30 +587,10 @@ def test_a_crashed_linter_is_not_a_tree_full_of_lint_findings():
           bool(pattern.search(backlog)), False)
 
 
-def extract_shell_function(name, source=None):
-    """Lift one top-level function out of `boot-test.sh`, by name.
-
-    Relies on the file's one formatting invariant: a top-level function opens
-    with `name() {` in column 0 and closes with `}` in column 0. That is checked
-    rather than assumed -- a silently-truncated extraction would produce a stub
-    that passes every assertion made about it.
-    """
-    if source is None:
-        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
-            source = handle.read()
-    lines = source.splitlines()
-    opener = f"{name}() {{"
-    try:
-        start = lines.index(opener)
-    except ValueError:
-        raise RuntimeError(
-            f"boot-test.sh no longer defines `{name}` as a top-level function "
-            f"opening with `{opener}` in column 0. If it was renamed or nested, "
-            f"update this extractor; do not delete the test that uses it.")
-    for end in range(start + 1, len(lines)):
-        if lines[end] == "}":
-            return "\n".join(lines[start:end + 1])
-    raise RuntimeError(f"`{name}` in boot-test.sh has no closing `}}` in column 0")
+def extract_shell_function(name):
+    """Lift function `name` out of `boot-test.sh` (scripts/shellfunc.py says how,
+    and what it refuses)."""
+    return shellfunc.shell_function_in(BOOT_TEST, name)
 
 
 #: How long a harness run may take before it is called a hang. These are hang
@@ -1005,14 +986,19 @@ def _run_python_suites(suites):
             with open(pad, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(_QUIET_SUITE)
 
+        note_skip = shellfunc.shell_function_in(
+            os.path.join(os.path.dirname(BOOT_TEST), "run-checker.sh"), "run_checker_note_skip")
         with open(os.path.join(tmp, "harness.sh"), "w",
                   encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "set -u\n"
                 "PROJECT_ROOT=.\n"
+                "RUN_CHECKER_SKIPS=\n"
+                + note_skip + "\n\n"
                 + extract_shell_function("check_python_suites") + "\n\n"
                 "check_python_suites\n"
                 f"echo \"GATE_RETURNED rc=$?\"\n"
+                "printf 'SKIPS=[%s]\\n' \"$RUN_CHECKER_SKIPS\"\n"
             )
 
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the suite loop")
@@ -1048,6 +1034,10 @@ def test_a_suite_that_skips_a_group_cannot_report_only_that_it_passed():
                 "capstone is not installed" in out, True)
     ok &= check("the section's closing line carries the count",
                 "1 group(s) SKIPPED in 1: test-fake-skipper.py" in out, True)
+    ok &= check("and the suite joins the run's list of gates that could not run",
+                "SKIPS=[test-fake-skipper.py\t1 group(s) SKIPPED, the first: "
+                "SKIP  the end-to-end group: capstone is not installed\n]" in out,
+                True)
     ok &= check("the harness is green", rc, 0)
     _dump_on_failure(ok, out)
 
@@ -1129,7 +1119,7 @@ def test_a_suite_that_exits_nonzero_to_report_a_skip_is_a_failure():
     _dump_on_failure(ok, out)
 
 
-def extract_commit_wait_budget(source=None):
+def extract_commit_wait_budget():
     """`commit_wait_budget` and its floor, lifted verbatim out of `boot-test.sh`.
 
     Extracted rather than restated, for the reason `extract_dirty_check` gives:
@@ -1139,18 +1129,13 @@ def extract_commit_wait_budget(source=None):
     a caller can source it, set `BOOT_TEST_START_EPOCH` to whatever elapsed
     time it wants to simulate, and ask what the budget would be.
     """
-    if source is None:
-        with open(BOOT_TEST, "r", encoding="utf-8") as handle:
-            source = handle.read()
-    lines = source.splitlines()
+    with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+        source = handle.read()
     try:
-        floor = next(i for i, line in enumerate(lines)
+        floor = next(line for line in source.splitlines()
                      if line.startswith("COMMIT_WAIT_FLOOR="))
-        start = next(i for i, line in enumerate(lines)
-                     if line.strip() == "commit_wait_budget() {")
-        end = next(i for i, line in enumerate(lines[start:], start)
-                   if line == "}")
-    except StopIteration:
+        budget = shellfunc.shell_function(source, "commit_wait_budget", "boot-test.sh")
+    except (StopIteration, shellfunc.ShellFunctionError):
         raise RuntimeError(
             "boot-test.sh no longer defines COMMIT_WAIT_FLOOR and "
             "commit_wait_budget(). The pre-build commit-headroom gate still "
@@ -1159,7 +1144,7 @@ def extract_commit_wait_budget(source=None):
             "rather than deleting this test. Without it, nothing stops the "
             "budget reverting to a constant, which on 2026-09-06 threw away a "
             "7402-second gate phase to avoid a 900-second wait.")
-    return "\n".join([lines[floor]] + lines[start:end + 1])
+    return floor + "\n" + budget
 
 
 def _budget(fragment, elapsed, bash="bash", env_override=None):

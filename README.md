@@ -47,13 +47,15 @@ Development is organized into phases (Phase 0 foundation → Phase 5 advanced fe
 | `apps/` | Desktop applications (file explorer, settings, text editor, …) |
 | `userspace/` | Shell, coreutils, terminal, and CLI tools |
 | `bench/` | Benchmarks and performance baselines (`bench/baselines.toml`) |
-| `toolchain/` | Custom `x86_64-slateos` target spec and sysroot stubs |
+| `toolchain/` | Custom `x86_64-slateos` target spec, sysroot stubs, and `fastpy/` — the fastpy compiler as a git submodule, pinned to the commit the OS is tested with |
 | `scripts/` | Build, disk-image, and QEMU boot-test scripts |
 | `esp/` | EFI System Partition staging (Limine bootloader + config) |
 
 ## Building & running
 
 SlateOS is developed on Windows (edit + cross-compile) and booted in **QEMU**. The kernel builds against a custom target (`toolchain/x86_64-slateos.json`) on a Rust **nightly** toolchain; some host-side crates with C dependencies require the Visual Studio Build Tools. See [`CLAUDE.md`](CLAUDE.md) for the exact toolchain, compiler paths, and environment setup.
+
+Clone with `git clone --recursive`, or run `git submodule update --init` in an existing clone: the programs written in Python are compiled by the fastpy in `toolchain/fastpy`, the commit this tree pins. `./scripts/bootstrap-worktree.sh` checks it out along with everything else a fresh checkout lacks. To build with another fastpy checkout — one you are changing — set `FASTPY_DIR` to it. The rootfs is built under WSL, which sees a Windows variable only when told to: `WSLENV=FASTPY_DIR/p` passes it, path translated, so `/bin/fastpy` comes from the same checkout as the programs.
 
 Typical loops:
 
@@ -85,3 +87,39 @@ cargo bench -p <crate-name>
 This project is written and maintained by an AI agent working autonomously against the roadmap. The conventions, coding standards, self-review checklist, performance targets, and testing requirements that govern that work are documented in **[`CLAUDE.md`](CLAUDE.md)**. The design rationale lives in `design.txt` and the accompanying design notes (`scheduler.txt`, `ipc.txt`, `memory management.txt`, `design-decisions.md`, `open-questions.md`, `known-issues.md`).
 
 Because the AI is the developer, reviewer, and tester, correctness and testing are held to a high bar: every subsystem ships with unit, integration, and (where relevant) stress and boot tests, and performance-critical code is benchmarked against concrete baselines.
+
+
+## License
+
+SlateOS's own code is MIT - see [LICENSE](LICENSE). Free to use, modify and
+redistribute; provided as-is, with no warranty.
+
+Components ported from or built on other projects keep those projects'
+licences, and the MIT licence does not cover them. These are the upstreams
+whose licence is, or offers, a copyleft one:
+
+| Upstream | Licence | Notice kept in |
+|---|---|---|
+| GNU coreutils 9.4, diffutils 3.10, findutils 4.9.0, patch 2.7.6, time 1.9, binutils 2.42; gawk 5.2.1 | GPL-3.0-or-later | `userspace/coreutils` |
+| gnulib | GPL-3.0-or-later AND LGPL-3.0-or-later AND LGPL-2.1-or-later | `userspace/coreutils` |
+| GNU bash 5.2.37 | GPL-3.0-or-later | `userspace/oils` |
+| GNU sharutils 4.15.2 | GPL-3.0-or-later | `userspace/autoopts` |
+| AutoOpts 41.1 | LGPL-3.0-or-later OR BSD-3-Clause | `userspace/autoopts` |
+| glibc 2.39 | LGPL-2.1-or-later AND GPL-2.0-or-later | `userspace/localtime` |
+| util-linux 2.39.3 | GPL-2.0-or-later AND LGPL-2.1-or-later, with BSD and MIT parts | `userspace/ulclosestream` |
+| procps-ng 4.0.4 | GPL-2.0-or-later AND LGPL-2.1-or-later | `userspace/coreutils` |
+| psmisc 23.7, sysvinit 3.08, Debian hostname 3.23 | GPL-2.0-or-later | `userspace/coreutils` |
+| systemd 255 | LGPL-2.1-or-later | `userspace/coreutils` |
+| procmail 3.24 | GPL-2.0-or-later OR Artistic-1.0 | `userspace/lockfile` |
+| vim 9.1.0016 (`xxd`) | MIT OR GPL-2.0-only | `userspace/coreutils` |
+| FFmpeg n8.1.3, and FFmpeg 9b7439c31b (2026-03) | LGPL-2.1-or-later | `gui/video/ffbits`, `gui/video/mp4` |
+
+An upstream's code is often in more crates than the one keeping its notice:
+that crate's `licenses/notices.yaml` names them (sharutils, for one, is
+`userspace/uuencode` and `userspace/uudecode`; util-linux is `lsblk`, `blkid`,
+`login` and the rest of its ports). Everything else is under permissive
+licences, each keeping its own notice. `python scripts/gather-notices.py
+--list` prints every third-party component with its licence and the crate
+whose notice covers it, and the OS image carries those notices under
+`/usr/share/licenses`; the fonts keep their licences beside them under
+`/usr/share/fonts`, and Oils' spec tests in `/usr/share/oils-spec`.

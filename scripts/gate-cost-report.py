@@ -22,12 +22,14 @@ file in every worktree and totals them per gate.
 What it counts, and what it refuses to count
 --------------------------------------------
 
-* **Only the boot test's own gates.** Test suites that run a fixture copy of
-  the push hook inherit the boot's `CHECKER_TIMING_LOG`, so the files also hold
-  the fixtures' rows (`doc-links-<sha>`, `raced-global-<sha>`, ...), whose
-  refusals are the fixtures doing their job. A row counts only when its label
-  is one `scripts/boot-test.sh` itself passes to `run_checker`; the others are
-  tallied separately so the exclusion is visible, not silent.
+* **Only the boot test's own gates.** A row counts only when its label is one
+  `scripts/boot-test.sh` itself passes to `run_checker`. Others -- the per-sha
+  rows (`doc-links-<sha>`, `raced-global-<sha>`, ...) of fixture copies of the
+  push hook, which wrote into the boot's file until the hook kept a log of its
+  own -- are tallied separately, so the exclusion is visible, not silent.
+* **`--push` totals the push hook instead,** from `pre-push-gate-timing.<pid>.tsv`
+  beside the boot files: every row of the hook's own log counts, and a per-sha
+  label is counted under its gate's name (`doc-links-<sha>` as `doc-links`).
 * **A refusal is exit 1**, run_checker's "finding". It is a catch, or a false
   alarm; the report cannot tell which, and lists the dates so a person can.
   Exit 2 and 3 are declines (no verdict); anything else is a crash.
@@ -68,10 +70,12 @@ def boot_labels(boot_test_text: str) -> set[str]:
     return out
 
 
-def timing_files(common_dir: str) -> list[str]:
-    """Every gate-timing file in the repository's git dir and its worktrees'."""
-    pats = [os.path.join(common_dir, "boot-test-gate-timing.*.tsv"),
-            os.path.join(common_dir, "worktrees", "*", "boot-test-gate-timing.*.tsv")]
+def timing_files(common_dir: str, prefix: str = "boot-test-gate-timing") -> list[str]:
+    """Every `<prefix>.<pid>.tsv` timing file in the repository's git dir and
+    its worktrees': the boot test's, or with `pre-push-gate-timing` the push
+    hook's."""
+    pats = [os.path.join(common_dir, f"{prefix}.*.tsv"),
+            os.path.join(common_dir, "worktrees", "*", f"{prefix}.*.tsv")]
     out: list[str] = []
     for p in pats:
         out.extend(glob.glob(p))
@@ -90,9 +94,11 @@ class Gate:
         self.lanes: set[str] = set()
 
 
-def tally(files: list[str], labels: set[str], since: dt.date | None
+def tally(files: list[str], labels: set[str] | None, since: dt.date | None
           ) -> tuple[dict[str, Gate], int, int, int]:
-    """Per-gate totals over `files`. Returns (gates, runs, fixture_rows,
+    """Per-gate totals over `files`: the rows whose label is in `labels`, or
+    with `labels` None (the push hook's own logs) every row, a per-sha label
+    counted under its gate's name. Returns (gates, runs, fixture_rows,
     unparsed_rows)."""
     gates: dict[str, Gate] = {}
     runs = fixture = bad = 0
@@ -112,7 +118,9 @@ def tally(files: list[str], labels: set[str], since: dt.date | None
                 bad += 1
                 continue
             label, secs, rc = r[0], int(r[1]), int(r[2])
-            if label not in labels or SHA_LABEL.search(label):
+            if labels is None:
+                label = SHA_LABEL.sub("", label)
+            elif label not in labels or SHA_LABEL.search(label):
                 fixture += 1
                 continue
             counted = True
@@ -130,10 +138,10 @@ def tally(files: list[str], labels: set[str], since: dt.date | None
 
 
 def report(gates: dict[str, Gate], runs: int, fixture: int, bad: int,
-           top: int) -> str:
+           top: int, what: str = "boot run") -> str:
     lines = []
     total = sum(sum(g.secs) for g in gates.values())
-    lines.append(f"{runs} boot run(s), {len(gates)} gate label(s), "
+    lines.append(f"{runs} {what}(s), {len(gates)} gate label(s), "
                  f"{total / 3600:.1f} gate-hours in total; {fixture} fixture "
                  f"row(s) excluded, {bad} unparsed.")
     lines.append("")
@@ -195,6 +203,21 @@ def _self_test() -> int:
         out = report(gates, runs, fixture, bad, 0)
         check("the report names the fixture exclusion", "2 fixture row(s) excluded" in out, True)
         check("never-refused gates are summed", "2 of 3 gate(s) never refused" in out, True)
+
+        # The push hook's own logs: every row counts, per-sha labels under
+        # their gate's name, and the boot files are not read for them.
+        with open(os.path.join(wt, "pre-push-gate-timing.3.tsv"), "w",
+                  encoding="utf-8", newline="\n") as fh:
+            fh.write(f"doc-links-{sha}\t3\t0\ndoc-links-{'b' * 40}\t4\t1\n"
+                     "suite-test-x.py\t9\t0\n")
+        pushes = timing_files(tmp, "pre-push-gate-timing")
+        check("--push finds only the hook's files", len(pushes), 1)
+        gates, runs, fixture, bad = tally(pushes, None, None)
+        check("a per-sha label is counted under its gate", sorted(gates["doc-links"].secs), [3, 4])
+        check("and its refusal with it", len(gates["doc-links"].refusals), 1)
+        check("nothing in the hook's log is a fixture row", fixture, 0)
+        check("a push report says pushes",
+              report(gates, runs, fixture, bad, 0, "push").startswith("1 push(s)"), True)
     if fails:
         print(f"gate-cost-report: {len(fails)} FAILURE(S)")
         return 1
@@ -206,6 +229,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--since", metavar="YYYY-MM-DD",
                     help="only runs whose timing file is this recent")
+    ap.add_argument("--push", action="store_true",
+                    help="total the push hook's gates instead of the boot test's")
     ap.add_argument("--top", type=int, default=40,
                     help="rows to print, by total cost (0 = all; default 40)")
     ap.add_argument("--self-test", "--selftest", "--self_test", dest="selftest",
@@ -220,15 +245,18 @@ def main(argv: list[str] | None = None) -> int:
         print("gate-cost-report: not in a git repository -- no answer.", file=sys.stderr)
         return 2
     common = os.path.abspath(os.path.join(ROOT, common))
-    files = timing_files(common)
+    files = timing_files(common, "pre-push-gate-timing" if args.push else
+                         "boot-test-gate-timing")
     if not files:
         print(f"gate-cost-report: no timing files under {common} -- no answer.",
               file=sys.stderr)
         return 2
-    with open(os.path.join(HERE, "boot-test.sh"), encoding="utf-8") as fh:
-        labels = boot_labels(fh.read())
+    labels = None
+    if not args.push:
+        with open(os.path.join(HERE, "boot-test.sh"), encoding="utf-8") as fh:
+            labels = boot_labels(fh.read())
     gates, runs, fixture, bad = tally(files, labels, since)
-    print(report(gates, runs, fixture, bad, args.top))
+    print(report(gates, runs, fixture, bad, args.top, "push" if args.push else "boot run"))
     return 0
 
 

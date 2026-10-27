@@ -33,7 +33,7 @@
 
 mod path;
 
-use getoptlong::{Opt, Program, Takes};
+use getoptlong::{LongVals, Program, Takes};
 use path::SysPath;
 use quoting::{escape_unprintable, os_bytes};
 use smartcols::{ColumnId, FL_RIGHT, JsonType, Table};
@@ -94,6 +94,9 @@ const LONG_VALS: [i32; 13] = [
     b'V' as i32,
     OPT_SUMMARY,
 ];
+
+/// [`LONGS`] and [`LONG_VALS`], upstream's `struct option[]`, as one table.
+const OPTIONS: LongVals<'static, i32> = LongVals::new(LONGS, &LONG_VALS);
 
 /// `excl[]`: the options that exclude each other, rows and columns in ASCII
 /// order as `err_exclusive_options` requires.
@@ -349,21 +352,11 @@ fn usage(short: &[u8]) -> Vec<u8> {
     text
 }
 
-/// `option_to_longopt(c, longopts)`: the first long option whose `val` is
-/// `c`.
-fn option_to_longopt(c: i32) -> Option<&'static str> {
-    LONG_VALS
-        .iter()
-        .position(|&v| v == c)
-        .and_then(|i| LONGS.get(i))
-        .map(|&(name, _)| name)
-}
-
 /// `err_exclusive_options(c, longopts, excl, status)` (`ulstrutils`'s):
 /// refuse `c` when another option of a group it belongs to came first. The
 /// message names the whole group, and no referral follows it.
 fn err_exclusive_options(c: i32, status: &mut [i32; 2], short: &[u8]) -> Result<(), u8> {
-    match ulstrutils::err_exclusive_options(c, &EXCL, status, option_to_longopt, short) {
+    match ulstrutils::err_exclusive_options(c, &EXCL, status, |c| OPTIONS.name_of(c), short) {
         Some(msg) => {
             to_stderr(&msg);
             Err(1)
@@ -766,18 +759,6 @@ fn strtol_overflows(s: &[u8]) -> bool {
     sc.saturated || sc.magnitude > limit || (!sc.negative && sc.magnitude == limit)
 }
 
-/// The option each parsed item stands for, as upstream's switch sees it.
-fn option_code(opt: &Opt<'_>) -> Option<(i32, Option<OsString>)> {
-    match opt {
-        Opt::Short(c, value) => Some((i32::from(*c), value.clone())),
-        Opt::Long(name, value) => {
-            let i = LONGS.iter().position(|&(n, _)| n == *name)?;
-            Some((*LONG_VALS.get(i)?, value.clone()))
-        }
-        Opt::Operand(_) => None,
-    }
-}
-
 /// `main()`.
 #[allow(
     clippy::too_many_lines,
@@ -809,7 +790,7 @@ fn run(argv: &[OsString], short: &[u8], out: &mut Out) -> u8 {
                 return errtryhelp(short);
             }
         };
-        let Some((c, value)) = option_code(&opt) else {
+        let Some((c, value)) = OPTIONS.code::<i32>(&opt) else {
             operands = operands.saturating_add(1);
             continue;
         };

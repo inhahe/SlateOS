@@ -189,7 +189,7 @@ fn the_exclusive_option_rows_keep_upstreams_early_exit() {
                 i32::from(c),
                 &EXCL,
                 &mut st,
-                option_to_longopt,
+                |c| OPTIONS.name_of(c),
                 b"findmnt",
             )
         })

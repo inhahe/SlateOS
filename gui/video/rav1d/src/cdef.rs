@@ -30,7 +30,7 @@ use std::ptr;
 use crate::include::common::bitdepth::bd_fn;
 
 #[cfg(all(feature = "asm", any(target_arch = "x86", target_arch = "x86_64")))]
-use crate::include::common::bitdepth::{BPC, bpc_fn};
+use crate::include::common::bitdepth::{bpc_fn, BPC};
 
 bitflags! {
     #[repr(transparent)]

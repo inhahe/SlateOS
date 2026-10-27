@@ -199,6 +199,21 @@ fn packets_of_resync_in_group() {
 }
 
 #[test]
+fn packets_of_resync_first_cluster() {
+    demuxes_as_ffmpeg_does("resync_first_cluster.mkv");
+}
+
+#[test]
+fn packets_of_resync_first_cluster_after_seek_head() {
+    demuxes_as_ffmpeg_does("resync_first_cluster_after_seek_head.mkv");
+}
+
+#[test]
+fn packets_of_segment_ends_before_clusters() {
+    demuxes_as_ffmpeg_does("segment_ends_before_clusters.mkv");
+}
+
+#[test]
 fn packets_of_walk_damage() {
     demuxes_as_ffmpeg_does("walk_damage.mkv");
 }

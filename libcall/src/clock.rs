@@ -23,9 +23,112 @@ mod sys {
         pub tv_nsec: i64,
     }
 
+    /// C's `struct tm`, as glibc and SlateOS's library lay it out: nine
+    /// `int`s, then `tm_gmtoff` and `tm_zone`.
+    #[repr(C)]
+    pub struct Tm {
+        pub tm_sec: i32,
+        pub tm_min: i32,
+        pub tm_hour: i32,
+        pub tm_mday: i32,
+        pub tm_mon: i32,
+        pub tm_year: i32,
+        pub tm_wday: i32,
+        pub tm_yday: i32,
+        pub tm_isdst: i32,
+        pub tm_gmtoff: i64,
+        pub tm_zone: *const u8,
+    }
+
     unsafe extern "C" {
         pub fn clock_gettime(clock: i32, tp: *mut Timespec) -> i32;
         pub fn nanosleep(req: *const Timespec, rem: *mut Timespec) -> i32;
+        pub fn time(t: *mut i64) -> i64;
+        pub fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    }
+}
+
+/// A time broken down in the local zone: `struct tm`'s fields, as C has
+/// them -- the month from 0, the year since 1900, Sunday day 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Local {
+    /// `tm_sec`.
+    pub sec: i32,
+    /// `tm_min`.
+    pub min: i32,
+    /// `tm_hour`.
+    pub hour: i32,
+    /// `tm_mday`.
+    pub mday: i32,
+    /// `tm_mon`, January 0.
+    pub mon: i32,
+    /// `tm_year`, years since 1900.
+    pub year: i32,
+    /// `tm_wday`, Sunday 0.
+    pub wday: i32,
+}
+
+/// `time (NULL)` and `localtime_r`: now, in the local zone (`TZ`,
+/// `/etc/localtime`) as the C library reads it.
+///
+/// # Errors
+///
+/// `EOVERFLOW` from `localtime_r`; [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn local_now() -> Result<Local, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: a null argument asks `time` only for its result.
+        let now = unsafe { sys::time(core::ptr::null_mut()) };
+        local_at(now)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(ENOSYS)
+    }
+}
+
+/// `localtime_r (&t)`: the time `t` seconds after the epoch, in the local
+/// zone (`TZ`, `/etc/localtime`) as the C library reads it.
+///
+/// # Errors
+///
+/// `EOVERFLOW` from `localtime_r`, for a year past what `int` holds;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn local_at(t: i64) -> Result<Local, i32> {
+    #[cfg(unix)]
+    {
+        let mut tm = sys::Tm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            tm_gmtoff: 0,
+            tm_zone: core::ptr::null(),
+        };
+        // SAFETY: both pointers are to locals of the C library's layout,
+        // alive across the call, which writes `tm` and keeps neither.
+        if unsafe { sys::localtime_r(&raw const t, &raw mut tm) }.is_null() {
+            return Err(last_errno());
+        }
+        Ok(Local {
+            sec: tm.tm_sec,
+            min: tm.tm_min,
+            hour: tm.tm_hour,
+            mday: tm.tm_mday,
+            mon: tm.tm_mon,
+            year: tm.tm_year,
+            wday: tm.tm_wday,
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = t;
+        Err(ENOSYS)
     }
 }
 
@@ -116,5 +219,42 @@ mod tests {
     #[test]
     fn off_unix_it_declines() {
         assert_eq!(since_boot(), Err(ENOSYS));
+        assert_eq!(local_now(), Err(ENOSYS));
+        assert_eq!(local_at(0), Err(ENOSYS));
+    }
+
+    /// The real library: a given time, broken down. The epoch is the last
+    /// day of 1969 or the first of 1970 in every zone there is; a day later
+    /// is the next day of the month either way.
+    #[cfg(unix)]
+    #[test]
+    fn a_given_time_is_broken_down() {
+        let epoch = local_at(0).unwrap();
+        assert!(
+            matches!(
+                (epoch.year, epoch.mon, epoch.mday),
+                (69, 11, 31) | (70, 0, 1)
+            ),
+            "{epoch:?}"
+        );
+        let next = local_at(86_400).unwrap();
+        assert_eq!((next.hour, next.min), (epoch.hour, epoch.min));
+        assert_ne!(next.mday, epoch.mday);
+        assert!(local_at(i64::MAX).is_err());
+    }
+
+    /// The real library: now, broken down, every field in its range.
+    #[cfg(unix)]
+    #[test]
+    fn now_is_a_date_and_a_time() {
+        let t = local_now().unwrap();
+        assert!((0..=60).contains(&t.sec), "{t:?}");
+        assert!((0..60).contains(&t.min), "{t:?}");
+        assert!((0..24).contains(&t.hour), "{t:?}");
+        assert!((1..=31).contains(&t.mday), "{t:?}");
+        assert!((0..12).contains(&t.mon), "{t:?}");
+        assert!((0..7).contains(&t.wday), "{t:?}");
+        // Since 1900: this century or a later one.
+        assert!(t.year >= 100, "{t:?}");
     }
 }

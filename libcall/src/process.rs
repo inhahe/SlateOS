@@ -43,6 +43,8 @@ mod sys {
     unsafe extern "C" {
         pub fn fork() -> i32;
         pub fn execvp(file: *const u8, argv: *const *const u8) -> i32;
+        pub fn execv(path: *const u8, argv: *const *const u8) -> i32;
+        pub fn nice(inc: i32) -> i32;
         pub fn waitpid(pid: i32, status: *mut i32, options: i32) -> i32;
         pub fn setpgid(pid: i32, pgid: i32) -> i32;
         // Variadic, as C declares it: glibc's reads its four further
@@ -155,16 +157,82 @@ pub fn execvp(argv: &[&CStr], slots: &mut [*const u8]) -> i32 {
     let Some(program) = argv.first() else {
         return EINVAL;
     };
-    let Some(vector) = slots.get_mut(..=argv.len()) else {
+    match c_vector(argv, slots) {
+        Some(vector) => execvp_one(program, vector),
+        None => EINVAL,
+    }
+}
+
+/// Become the program at `path` -- taken as it is, a name without a `/`
+/// included, where [`execvp`] would search `PATH` -- with `argv` as its
+/// arguments: `execv`. `argv[0]` is what the program is told its name is.
+///
+/// Returns only if that failed, with the `errno`; `slots` as for
+/// [`execvp`]. `EINVAL` when `argv` is empty or `slots` too short;
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+#[must_use = "it returns only on failure, and the errno is the reason"]
+pub fn execv(path: &CStr, argv: &[&CStr], slots: &mut [*const u8]) -> i32 {
+    if argv.is_empty() {
         return EINVAL;
-    };
+    }
+    match c_vector(argv, slots) {
+        Some(vector) => execv_one(path, vector),
+        None => EINVAL,
+    }
+}
+
+/// `argv` as C's argument vector, put together in `slots`: a pointer per
+/// argument and the null that ends them. `None` when `slots` is too short.
+fn c_vector<'a>(argv: &[&CStr], slots: &'a mut [*const u8]) -> Option<&'a [*const u8]> {
+    let vector = slots.get_mut(..=argv.len())?;
     for (slot, arg) in vector.iter_mut().zip(argv) {
         *slot = arg.as_ptr().cast();
     }
     if let Some(end) = vector.last_mut() {
         *end = core::ptr::null();
     }
-    execvp_one(program, vector)
+    Some(vector)
+}
+
+#[cfg(unix)]
+fn execv_one(path: &CStr, vector: &[*const u8]) -> i32 {
+    // SAFETY: as in `execvp_one`: `path` is NUL-terminated and `vector` a
+    // null-terminated array of pointers to strings that outlive the call.
+    unsafe { sys::execv(path.as_ptr().cast(), vector.as_ptr()) };
+    last_errno()
+}
+
+#[cfg(not(unix))]
+fn execv_one(_path: &CStr, _vector: &[*const u8]) -> i32 {
+    ENOSYS
+}
+
+/// `nice (inc)`: lower this process's priority by `inc` (raise it, for a
+/// negative `inc` and the privilege): the new nice value.
+///
+/// # Errors
+///
+/// The `errno` when the call answered below zero -- `EPERM` for a raise
+/// without the privilege. A nice value that really is negative also
+/// answers so (with whatever `errno` held), which is how a caller testing
+/// `nice (inc) < 0` as C's agetty does reads it.
+/// [`ENOSYS`](crate::ENOSYS) off Unix.
+pub fn nice(inc: i32) -> Result<i32, i32> {
+    #[cfg(unix)]
+    {
+        // SAFETY: one number in, one out; no memory of ours.
+        let value = unsafe { sys::nice(inc) };
+        if value < 0 {
+            Err(last_errno())
+        } else {
+            Ok(value)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = inc;
+        Err(ENOSYS)
+    }
 }
 
 #[cfg(unix)]
@@ -784,6 +852,8 @@ mod tests {
             EINVAL,
             "two words need three slots"
         );
+        assert_eq!(execv(c"/bin/true", &[], &mut slots), EINVAL);
+        assert_eq!(execv(c"/bin/true", &words, &mut slots), EINVAL);
     }
 
     /// Off Unix every call declines.
@@ -797,6 +867,8 @@ mod tests {
         assert_eq!(disable_core_dumps(), Err(ENOSYS));
         let mut slots = [core::ptr::null(); 2];
         assert_eq!(execvp(&[c"true"], &mut slots), ENOSYS);
+        assert_eq!(execv(c"true", &[c"true"], &mut slots), ENOSYS);
+        assert_eq!(nice(0), Err(ENOSYS));
         assert_eq!(change_root(c"/"), Err(ENOSYS));
         assert_eq!(set_groups(&[]), Err(ENOSYS));
         assert_eq!(set_gid(0), Err(ENOSYS));
@@ -861,5 +933,40 @@ mod tests {
         };
         assert_eq!(status.exit_code(), Some(7), "{:#x}", status.raw());
         assert_eq!(wait_nohang(pid), Err(posix::errno::ECHILD), "reaped once");
+    }
+
+    /// `execv` takes its path as it is: `true`, which `execvp` would find on
+    /// `PATH`, is a file in the current directory to it, and there is none.
+    #[cfg(unix)]
+    #[test]
+    fn execv_searches_no_path() {
+        extern crate std;
+        use std::time::{Duration, Instant};
+
+        let mut slots = [core::ptr::null(); 2];
+        // SAFETY: the child calls only `execv` and `exit_immediately`.
+        let pid = match unsafe { fork() }.unwrap() {
+            Forked::Child => {
+                let errno = execv(c"true", &[c"true"], &mut slots);
+                exit_immediately(if errno == crate::ENOENT { 7 } else { 8 });
+            }
+            Forked::Parent(pid) => pid,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = wait_nohang(pid).unwrap() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "the child never finished");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(status.exit_code(), Some(7), "{:#x}", status.raw());
+    }
+
+    /// Lowering one's priority by nothing is always allowed.
+    #[cfg(unix)]
+    #[test]
+    fn nice_by_nothing_answers_the_value() {
+        assert!(nice(0).is_ok());
     }
 }

@@ -1,5 +1,13 @@
 ## B-FDISK-CANNOT-PARTITION (lane B, 2026-09-10) — open, and honest about it
 
+**Status:** OPEN -- fixed on lane-b (2026-10-17), awaiting a boot on main:
+the program below is replaced by util-linux 2.39.3's fdisk, ported on the
+libfdisk port (`userspace/libfdisk`, `userspace/fdisk`), which partitions
+images and devices as Ubuntu's does -- `scripts/fdisk-diff.sh` makes, changes
+and writes MBR, GPT, Sun, SGI and nested BSD tables with both and compares
+the images (104 cases agree). The rest of this entry describes the program
+that was replaced.
+
 **In short:** `userspace/fdisk` reads a disk and describes its partition table
 accurately. It cannot *change* one. There is no `File::create`, no
 `OpenOptions`, and no write to any device anywhere in its 4,789 lines — the

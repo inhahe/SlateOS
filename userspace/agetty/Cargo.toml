@@ -1,0 +1,46 @@
+[package]
+name = "agetty"
+version = "0.1.0"
+edition = "2024"
+description = "util-linux 2.39.3's agetty, ported: open a terminal, set its mode, ask for a name, run login"
+
+[features]
+# The `agetty` binary, built only on request while the port is in progress:
+# until it can open a line and run `login`, it cannot do a getty's job, and a
+# command that cannot is not shipped (design-decisions 1006). The library and
+# its tests are built always. `scripts/agetty-diff.sh` asks for it.
+port = []
+
+[[bin]]
+name = "agetty"
+path = "src/main.rs"
+required-features = ["port"]
+
+[dependencies]
+# getopt_long, as glibc parses.
+getoptlong = { path = "../getoptlong" }
+# util-linux's strutils: strtou32_or_err and strverscmp (the issue.d order).
+ulstrutils = { path = "../ulstrutils" }
+# util-linux's color names, for the issue file's \e{name}.
+ulcolors = { path = "../ulcolors" }
+# The C library: uname, the host and domain names, the clock, termios.
+libcall = { path = "../../libcall" }
+# The C library's syslog(3), where upstream's diagnostics go.
+libcsyslog = { path = "../libcsyslog" }
+# Bytes and OsStrings, and util-linux's quoting of an argument in a message.
+quoting = { path = "../quoting" }
+# Standard output as util-linux's close_stdout keeps it, and stderr writes.
+ulclosestream = { path = "../ulclosestream" }
+# strerror's text for an I/O failure, whatever the host.
+errmsg = { path = "../errmsg" }
+# The standard descriptors and SIGPIPE as the process was started with them,
+# for what it hands on to login.
+stdfdguard = { path = "../stdfdguard" }
+# The utmp records \u and \U count.
+utmpfile = { path = "../../utmpfile" }
+
+[dev-dependencies]
+scratchdir = { path = "../scratchdir" }
+
+[lints]
+workspace = true

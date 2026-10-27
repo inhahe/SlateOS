@@ -1,6 +1,12 @@
 ## §361 — An unimplemented flag is refused when its absence changes the answer, and accepted as a no-op when it only omits an advisory
 
 **Date:** 2026-08-22
+
+> **SUPERSEDED for `bc` (2026-10-16)** by the port of GNU bc 1.07.1
+> (`userspace/gnubc`, its `main.c` in `userspace/coreutils/src/bin/bc.rs`): it
+> implements every option GNU's has -- `-s`, `-w` and `-c` among them -- so
+> nothing below applies to `bc` any longer. The rule still stands for the
+> other utilities it names.
 **Decided by:** Claude (autonomous)
 **Where it bites:** `userspace/coreutils/src/bin/bc.rs` first; the rule is
 meant to apply to every utility in `userspace/coreutils/` that is missing a

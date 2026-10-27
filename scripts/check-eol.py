@@ -371,17 +371,29 @@ def _git(args: list[str], stdin: bytes | None = None,
         cwd=cwd if cwd is not None else str(ROOT), env=env)
 
 
-def tracked_files() -> list[bytes]:
-    """Every tracked path, as raw bytes.
+def tracked_files(cwd: str | None = None) -> list[bytes]:
+    """Every tracked file, as raw bytes: each path in the index except a
+    submodule's (`toolchain/fastpy`), which is another repository's commit and
+    on disk a directory -- its files are that repository's to check.
 
     Bytes rather than `str` because a path is bytes at the OS boundary
     (CLAUDE.md self-review item 7) and `-z` is the only `git ls-files` output
-    that survives a filename containing a newline or a quote.
+    that survives a filename containing a newline or a quote. `--stage`, for
+    the mode that marks a submodule (160000); a path in a merge conflict is
+    listed once per stage, so once is kept.
     """
-    r = _git(["ls-files", "-z"])
+    r = _git(["ls-files", "-z", "--stage"], cwd=cwd)
     if r.returncode != 0:
         return []
-    return [p for p in r.stdout.split(b"\0") if p]
+    out: list[bytes] = []
+    seen: set[bytes] = set()
+    for entry in r.stdout.split(b"\0"):
+        meta, tab, path = entry.partition(b"\t")
+        if not tab or meta.startswith(b"160000 ") or path in seen:
+            continue
+        seen.add(path)
+        out.append(path)
+    return out
 
 
 def declared_text(paths: list[bytes], cwd: str | None = None) -> list[bytes]:
@@ -754,6 +766,19 @@ def self_test() -> int:
         align_declared_first = declared_text([s_sh, s_rs], cwd=str(scratch))
         align_undeclared_first = declared_text([s_rs, s_sh], cwd=str(scratch))
 
+        # A submodule beside a file, as `toolchain/fastpy` is: git lists both,
+        # and on disk the submodule is a directory no read can open -- which
+        # the scan used to report as a file nobody could look at, and refuse.
+        (scratch / "a.sh").write_bytes(b"#!/bin/sh\n")
+        (scratch / "sub").mkdir()
+        _git(["add", "a.sh"], cwd=str(scratch))
+        _git(["update-index", "--add", "--cacheinfo",
+              "160000,5b11d8825e868140cf9c6350f92192c82fb0f3d7,sub"],
+             cwd=str(scratch))
+        # Without the gitlink in the index, the case below passes for nothing.
+        staged = _git(["ls-files", "--stage"], cwd=str(scratch)).stdout
+        listed = tracked_files(cwd=str(scratch))
+
     cases: list[tuple[str, object, object]] = [
         # -- the verdict, end to end
         ("end to end, a clean file returns 0", rc_clean, 0),
@@ -883,6 +908,11 @@ def self_test() -> int:
          align_declared_first, [s_sh]),
         ("a two-file query, unasserted first, returns just the asserted one",
          align_undeclared_first, [s_sh]),
+
+        # -- the scope leaves out a submodule, and nothing else
+        ("the scratch index holds a submodule", b"160000 " in staged, True),
+        ("a submodule is not a tracked file to read; the file beside it is",
+         listed, [b"a.sh"]),
 
         # -- the CR test, against those same real files' real bytes
         ("the real .sh is clean as it stands", scan_bytes(real)[0], 0),

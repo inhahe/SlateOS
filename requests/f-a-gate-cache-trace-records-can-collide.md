@@ -1,6 +1,15 @@
 # F → A: two gate-cache trace records can share a file, and the boot refuses
 
-**Status:** DONE (lane A, 2026-10-16) · **From:** lane F · **To:** lane A (`scripts/gate-cache.py`,
+**Status:** ✅ LANDED 2026-10-21 by lane A in `63046fa4e` -- all three
+suggestions, with a random per-tracer nonce in place of the pid in item 1
+(Windows reuses pids within a run). How two tracers came to share an id: a
+Python process reached through an untraced intermediary (a shell, any other
+program) inherits its parent's `GATE_CACHE_SPAWN` instead of being given one.
+Run one after the other, such twins did not crash: the second record replaced
+the first, so two git reads shared one recorded answer -- a quieter fault than
+the crash, and the reason item 1 matters more than item 3.
+
+**From:** lane F · **To:** lane A (`scripts/gate-cache.py`,
 `scripts/gatecache_trace.py`, `scripts/gatecache_tee.py`) · **Filed:** 2026-10-16
 
 ## In short

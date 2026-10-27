@@ -2,6 +2,29 @@
 name = "rfkill"
 version = "0.1.0"
 edition = "2024"
+description = "rfkill, util-linux 2.39.3's, ported: list, block and unblock wireless devices through /dev/rfkill"
+
+[lints]
+workspace = true
+
 [dependencies]
-# The device type it found nothing of is the argv word the user typed.
+# glibc's getopt_long: GNU order, abbreviations and their ambiguities.
+getoptlong = { path = "../getoptlong" }
+# argv is bytes; an identifier in a diagnostic is escaped.
 quoting = { path = "../quoting" }
+# libsmartcols: the table; and what setlocale leaves in errno.
+smartcols = { path = "../smartcols" }
+# string_add_to_idarray for -o, err_exclusive_options, strtou32_or_err.
+ulstrutils = { path = "../ulstrutils" }
+# stdout buffered as glibc buffers it, and close_stdout at the end.
+ulclosestream = { path = "../ulclosestream" }
+# A standard descriptor rfkill was started without stays closed.
+stdfdguard = { path = "../stdfdguard" }
+# util-linux's write_all, which a request is written with.
+ulallio = { path = "../ulallio" }
+# /dev/rfkill: open, read, write and poll it, through the C library.
+libcall = { path = "../../libcall" }
+# The block and unblock requests logged, through the C library's syslog.
+libcsyslog = { path = "../libcsyslog" }
+# `rfkill event`'s timestamps, in the local zone as the C library reads it.
+localtime = { path = "../localtime" }

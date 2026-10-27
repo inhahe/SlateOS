@@ -667,26 +667,45 @@ fn intensity_stereo(grbuf: &mut [f32], ist_pos: &mut [u8; 39], gr: &[GrInfo], hd
 
 /// `L3_reorder`: a short block's lines from band-major to window-major,
 /// through `scratch`.
-fn reorder(grbuf: &mut [f32], scratch: &mut [f32], sfb: &[u8]) {
-    let mut src = 0usize;
+///
+/// The bands can lay out more lines than `grbuf` holds. In MPEG-2.5's mixed
+/// blocks at 8 kHz, minimp3 starts the short bands 72 lines in, as FFmpeg
+/// does, but lays them out by libmad's table, of whose bands it takes the
+/// first six -- 48 lines -- to be the long ones: the 528 lines of short
+/// bands after them run from line 72 to 600, 24 past the channel's 576.
+/// minimp3 then reads and writes what its scratch memory holds next -- the
+/// second channel's lines, or after them the scale factors -- and this reads
+/// and writes `after`, which the caller makes that same memory.
+fn reorder(grbuf: &mut [f32], after: &mut [f32], scratch: &mut [f32], sfb: &[u8]) {
+    let n = grbuf.len();
     let mut dst = 0usize;
-    let mut s = 0usize;
-    loop {
-        let len = usize::from(sfb[s]);
-        if len == 0 {
-            break;
+    {
+        let line = |i: usize| if i < n { grbuf[i] } else { after[i - n] };
+        let mut src = 0usize;
+        let mut s = 0usize;
+        loop {
+            let len = usize::from(sfb[s]);
+            if len == 0 {
+                break;
+            }
+            for _ in 0..len {
+                scratch[dst] = line(src);
+                scratch[dst + 1] = line(src + len);
+                scratch[dst + 2] = line(src + 2 * len);
+                dst += 3;
+                src += 1;
+            }
+            src += 2 * len;
+            s += 3;
         }
-        for _ in 0..len {
-            scratch[dst] = grbuf[src];
-            scratch[dst + 1] = grbuf[src + len];
-            scratch[dst + 2] = grbuf[src + 2 * len];
-            dst += 3;
-            src += 1;
-        }
-        src += 2 * len;
-        s += 3;
     }
-    grbuf[..dst].copy_from_slice(&scratch[..dst]);
+    for (i, &v) in scratch[..dst].iter().enumerate() {
+        if i < n {
+            grbuf[i] = v;
+        } else {
+            after[i - n] = v;
+        }
+    }
 }
 
 /// `L3_antialias`: the butterflies between `nbands` + 1 subbands.
@@ -897,15 +916,24 @@ pub(crate) fn decode(
         let mut aa_bands = 31i32;
         let n_long_bands = (if gr.mixed_block_flag != 0 { 2usize } else { 0 })
             << u32::from(hdr.my_sample_rate() == 2);
-        let grbuf = &mut s.grbuf[ch * 576..ch * 576 + 576];
         if gr.n_short_sfb != 0 {
             aa_bands = n_long_bands as i32 - 1;
+            // The channel's lines, and what follows them in minimp3's
+            // scratch memory, which its reorder can reach.
+            let (first, second) = s.grbuf.split_at_mut(576);
+            let (lines, after) = if ch == 0 {
+                (first, second)
+            } else {
+                (second, &mut s.scf[..])
+            };
             reorder(
-                &mut grbuf[n_long_bands * 18..],
+                &mut lines[n_long_bands * 18..],
+                after,
                 s.syn,
                 &gr.sfbtab[usize::from(gr.n_long_sfb)..],
             );
         }
+        let grbuf = &mut s.grbuf[ch * 576..ch * 576 + 576];
         antialias(grbuf, aa_bands);
         imdct_gr(grbuf, overlap, gr.block_type, n_long_bands);
         change_sign(grbuf);

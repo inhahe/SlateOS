@@ -1,5 +1,9 @@
 ## B: `org.slateos.ServiceManager` has two clients and no provider
 
+**2026-10-16: proposed to lane D** that `services/init` answer the name
+(`requests/b-d-init-could-answer-org-slateos-servicemanager.md`): it holds
+the service table and the stop sequence a power-off has to run first.
+
 **2026-10-01: the clients now really ask; there is still nobody to answer.**
 Both used to "open" the name with syscall 200, which is `SYS_CHANNEL_CREATE`:
 it took the name's address as its flags and returned a fresh channel

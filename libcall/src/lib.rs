@@ -63,26 +63,34 @@
 
 use core::ffi::CStr;
 
+pub mod alg;
 pub mod clock;
 pub mod conf;
 pub mod crypt;
 pub mod env;
 pub mod epoll;
 pub mod fd;
+pub mod file;
 pub mod glob;
+pub mod inode;
 pub mod inotify;
 pub mod locale;
 pub mod lock;
 pub mod netdb;
+pub mod netlink;
 pub mod power;
 pub mod priority;
 pub mod process;
 pub mod pty;
+pub mod pwd;
 pub mod shm;
 pub mod signal;
 pub mod socket;
 pub mod termios;
+pub mod tty;
 pub mod utmp;
+pub mod uts;
+pub mod xattr;
 
 // ---------------------------------------------------------------------------
 // Values
@@ -120,6 +128,23 @@ pub const EAGAIN: i32 = 11;
 /// Permission denied -- also what a record lock may fail with when another
 /// process holds a conflicting one.
 pub const EACCES: i32 = 13;
+/// Read-only file system.
+pub const EROFS: i32 = 30;
+/// Device or resource busy -- a loop device already bound, say.
+pub const EBUSY: i32 = 16;
+/// File exists -- what an exclusive create answers for a name taken.
+pub const EEXIST: i32 = 17;
+/// Bad file descriptor.
+pub const EBADF: i32 = 9;
+/// No such device or address -- an open of a FIFO or a device with nothing
+/// behind it.
+pub const ENXIO: i32 = 6;
+/// Operation not supported -- what e2fsprogs reports for a file that has no
+/// attributes to show.
+pub const EOPNOTSUPP: i32 = 95;
+/// Not a terminal: a terminal's modes asked of, or set on, a descriptor
+/// that is something else.
+pub const ENOTTY: i32 = 25;
 
 /// No such process.
 ///
@@ -920,6 +945,12 @@ mod tests {
         assert_eq!(EINTR, posix::errno::EINTR);
         assert_eq!(EAGAIN, posix::errno::EAGAIN);
         assert_eq!(EACCES, posix::errno::EACCES);
+        assert_eq!(EROFS, posix::errno::EROFS);
+        assert_eq!(EBUSY, posix::errno::EBUSY);
+        assert_eq!(EEXIST, posix::errno::EEXIST);
+        assert_eq!(EBADF, posix::errno::EBADF);
+        assert_eq!(ENXIO, posix::errno::ENXIO);
+        assert_eq!(EOPNOTSUPP, posix::errno::EOPNOTSUPP);
         assert_eq!(ENAMETOOLONG, posix::errno::ENAMETOOLONG);
         assert_eq!(
             usize::try_from(posix::limits::HOST_NAME_MAX).ok(),

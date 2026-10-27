@@ -41,7 +41,13 @@
 //!
 //! Errors, never a panic. Every element is bounded by its parent and by the
 //! file's length before anything is read or allocated for it; a block holds
-//! at most 256 laces and a binary element at most 256 MiB (FFmpeg's limit).
+//! at most 256 laces, a binary element at most 256 MiB, and a file at most
+//! 1000 tracks (FFmpeg's limits).
+//! Damage before the first Cluster is looked past as FFmpeg's second pass
+//! over the Segment looks past it, by the IDs of the elements after it --
+//! but for damage built to make that read the file over and over (FFmpeg's
+//! pass runs for hours on such a file, or keeps many copies of it), which
+//! refuses the file.
 //! A damaged Cluster ends reading at that point, and the next packet comes
 //! from the next top-level element the file still holds, found by its ID as
 //! FFmpeg resynchronises -- the search starting one byte past the last
@@ -54,10 +60,14 @@
 //! (`tests/fixtures.rs`, `tests/data/generate_fixtures.py`), and so is the
 //! display matrix -- or the refusal -- of 22 files' video projections
 //! ([`Video::display_matrix`], `tests/projection.rs`), and the metadata,
-//! chapters and attachments of eleven files and of one cut short at each of
-//! 660 lengths (`tests/metadata.rs`); what ffprobe cannot show is in
-//! `tests/beyond_ffprobe.rs` and `tests/metadata.rs`; and `mutate.py` breaks
-//! the code one rule at a time and checks the tests notice.
+//! chapters and attachments of eleven files and of two cut short at each of
+//! their 923 and 500 lengths, and whether 37 files damaged before their
+//! first Cluster open and what is read of them (`tests/metadata.rs`) -- but
+//! for one choice: where damage before the first Cluster has FFmpeg read the
+//! Segment twice, each track is listed once (design-decisions §1358). What
+//! ffprobe cannot show is in `tests/beyond_ffprobe.rs` and
+//! `tests/metadata.rs`; and `mutate.py` breaks the code one rule at a time
+//! and checks the tests notice.
 
 mod block;
 mod cues;
@@ -80,7 +90,9 @@ pub use track::{
 pub enum Error {
     /// The source failed.
     Io(std::io::ErrorKind),
-    /// The file ends inside an element.
+    /// The file ends inside an element -- or, opening it, holds no Cluster
+    /// to play, however whole what it holds (FFmpeg's search for one meets
+    /// the end of the file).
     Truncated,
     /// The file breaks the format's rules: the words say which.
     Invalid(&'static str),

@@ -33,6 +33,8 @@ import subprocess
 import sys
 import tempfile
 
+import shellfunc
+
 NL = chr(10)
 HERE = os.path.dirname(os.path.abspath(__file__))
 BOOT = os.path.join(HERE, "boot-test.sh")
@@ -81,13 +83,11 @@ CASES = [
 
 
 def main():
-    src = io.open(BOOT, encoding="utf-8").read()
-    marker = FUNC + "() {"
-    if marker not in src:
-        print("FAIL: %s not found in boot-test.sh -- the gate was removed or renamed" % FUNC)
+    try:
+        func = shellfunc.shell_function_in(BOOT, FUNC)
+    except shellfunc.ShellFunctionError as exc:
+        print("FAIL: %s -- the gate was removed, renamed or restructured" % exc)
         return 1
-    start = src.index(marker)
-    func = src[start:src.index(NL + "}" + NL, start) + 3]
 
     root = tempfile.mkdtemp(prefix="idgate")
     fails = 0

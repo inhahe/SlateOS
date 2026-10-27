@@ -1,6 +1,12 @@
 ## §362 — A `bc` file operand does not end the run: standard input is read afterwards, in the same interpreter
 
 **Date:** 2026-08-22
+
+> **SUPERSEDED (2026-10-16)** by the port of GNU bc 1.07.1 (`userspace/gnubc`,
+> its `main.c` in `userspace/coreutils/src/bin/bc.rs`), which reads standard
+> input after its file operands because upstream's `open_new_file` does. The
+> `-e EXPR` this calls "our one deviation" is gone: the port has GNU's options
+> and no others, and answers `bc -e` with `invalid option -- 'e'`.
 **Decided by:** Claude (autonomous)
 **Where it bites:** `userspace/coreutils/src/bin/bc.rs`, `main`.
 

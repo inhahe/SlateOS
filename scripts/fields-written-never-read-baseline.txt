@@ -451,3 +451,15 @@ net80211/src/supplicant.rs:mic_algo
 # urgent: an unnamed working key is a discoverability defect, and a card row
 # for a key with no effect is a false claim on screen. All three do what
 # their rows say now, so all three lines are removed rather than annotated.
+
+# Lane F, 2026-10-21: fields of the AAC translation (FFmpeg 8.1.3), kept for
+# the code that will read them. Each line goes when that code is in.
+#
+# AAC, translated a module at a time (gui/video/aac/src/lib.rs). Whether the
+# frame has buffers is read where a frame is decoded (aacdec.c's "no frame
+# data found"), its length as the frame leaves the decoder, and the noise
+# generator's state by the spectral decoding's noise bands
+# (`decode_spectrum_and_dequant`). None of those is translated yet.
+gui/video/aac/src/context.rs:allocated
+gui/video/aac/src/context.rs:nb_samples
+gui/video/aac/src/context.rs:random_state

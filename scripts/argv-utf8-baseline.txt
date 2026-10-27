@@ -26,14 +26,12 @@ userspace/at/src/main.rs:argv-as-string
 userspace/backup/src/main.rs:argv-as-string
 userspace/bootctl/src/main.rs:argv-as-string
 userspace/cgroup/src/main.rs:argv-as-string
-userspace/chattr/src/main.rs:argv-as-string
 userspace/coredumpctl/src/main.rs:argv-as-string
 userspace/cpio/src/main.rs:argv-as-string
 userspace/crond/src/main.rs:argv-as-string
 userspace/crontab/src/main.rs:argv-as-string
 userspace/ctags/src/main.rs:argv-as-string
 userspace/curl/src/main.rs:argv-as-string
-userspace/dc/src/main.rs:argv-as-string
 userspace/dhcpcd/src/main.rs:argv-as-string
 userspace/dig/src/main.rs:argv-as-string
 userspace/diskutil/src/main.rs:argv-as-string
@@ -48,8 +46,6 @@ userspace/ftpd/src/main.rs:argv-as-string
 userspace/fuser/src/main.rs:argv-as-string
 userspace/fw/src/main.rs:argv-as-string
 userspace/getent/src/main.rs:argv-as-string
-userspace/gzip/src/main.rs:argv-as-string
-userspace/hardlink/src/main.rs:argv-as-string
 userspace/hostnamectl/src/main.rs:argv-as-string
 userspace/htop/src/main.rs:argv-as-string
 userspace/hwclock/src/main.rs:argv-as-string
@@ -70,7 +66,6 @@ userspace/lex/src/main.rs:argv-as-string
 userspace/localectl/src/main.rs:argv-as-string
 userspace/loginctl/src/main.rs:argv-as-string
 userspace/logind/src/main.rs:argv-as-string
-userspace/losetup/src/main.rs:argv-as-string
 userspace/lp/src/main.rs:argv-as-string
 userspace/lsmod/src/main.rs:argv-as-string
 userspace/lsof/src/main.rs:argv-as-string
@@ -93,11 +88,9 @@ userspace/nslookup/src/main.rs:argv-as-string
 userspace/ntpd/src/main.rs:argv-as-string
 userspace/objdump/src/main.rs:argv-as-string
 userspace/ping/src/main.rs:argv-as-string
-userspace/pkg/src/main.rs:argv-as-string
 userspace/polkit/src/main.rs:argv-as-string
 userspace/pv/src/main.rs:argv-as-string
 userspace/readelf/src/main.rs:argv-as-string
-userspace/rfkill/src/main.rs:argv-as-string
 userspace/route/src/main.rs:argv-as-string
 userspace/rsync/src/main.rs:argv-as-string
 userspace/sanitize/src/main.rs:argv-as-string

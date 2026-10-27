@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "aac"
+version = "0.1.0"
+dependencies = [
+ "ffbits",
+]
+
+[[package]]
 name = "acl"
 version = "0.1.0"
 dependencies = [
@@ -34,6 +41,23 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures 0.3.1",
+]
+
+[[package]]
+name = "agetty"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
+ "libcsyslog",
+ "quoting",
+ "scratchdir",
+ "stdfdguard",
+ "ulclosestream",
+ "ulcolors",
+ "ulstrutils",
+ "utmpfile",
 ]
 
 [[package]]
@@ -257,6 +281,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bcnumber"
+version = "0.1.0"
+
+[[package]]
 name = "benchmark"
 version = "0.1.0"
 dependencies = [
@@ -453,6 +481,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfdisk"
+version = "0.1.0"
+dependencies = [
+ "curses",
+ "errmsg",
+ "fdisk",
+ "getoptlong",
+ "libcall",
+ "libfdisk",
+ "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulcolors",
+ "ulmount",
+ "ulstrutils",
+ "ulsysfs",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 
@@ -516,7 +565,12 @@ version = "0.1.0"
 name = "chattr"
 version = "0.1.0"
 dependencies = [
- "usageerror",
+ "cstdio",
+ "cstrtol",
+ "errmsg",
+ "getoptlong",
+ "libcall",
+ "stdfdguard",
 ]
 
 [[package]]
@@ -677,6 +731,7 @@ dependencies = [
  "blake2 0.1.0",
  "charwidth",
  "cprintf",
+ "cstdio",
  "cstrtol",
  "curses",
  "embed-manifest",
@@ -685,6 +740,7 @@ dependencies = [
  "fnmatch",
  "getoptlong",
  "gnubase64",
+ "gnubc",
  "journalfwd",
  "journalio",
  "journalrec",
@@ -849,6 +905,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cstdio"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "libcall",
+]
+
+[[package]]
 name = "cstrtol"
 version = "0.1.0"
 
@@ -933,7 +997,13 @@ dependencies = [
 name = "dc"
 version = "0.1.0"
 dependencies = [
- "bignum",
+ "bcnumber",
+ "cstdio",
+ "cstrtol",
+ "getoptlong",
+ "libcall",
+ "quoting",
+ "stdfdguard",
 ]
 
 [[package]]
@@ -1325,6 +1395,24 @@ dependencies = [
 [[package]]
 name = "fdisk"
 version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
+ "libfdisk",
+ "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulcolors",
+ "ulstrutils",
+ "ulsysfs",
+]
+
+[[package]]
+name = "ffbits"
+version = "0.1.0"
 
 [[package]]
 name = "fieldmenu"
@@ -1653,6 +1741,17 @@ name = "gnubase64"
 version = "0.1.0"
 
 [[package]]
+name = "gnubc"
+version = "0.1.0"
+dependencies = [
+ "bcnumber",
+ "cstdio",
+ "cstrtol",
+ "libcall",
+ "quoting",
+]
+
+[[package]]
 name = "gomoku"
 version = "0.1.0"
 dependencies = [
@@ -1691,7 +1790,18 @@ dependencies = [
 name = "gzip"
 version = "0.1.0"
 dependencies = [
+ "errmsg",
+ "getoptlong",
+ "libcall",
  "quoting",
+ "stdfdguard",
+]
+
+[[package]]
+name = "h264"
+version = "0.1.0"
+dependencies = [
+ "ffbits",
 ]
 
 [[package]]
@@ -1722,6 +1832,16 @@ dependencies = [
 [[package]]
 name = "hardlink"
 version = "0.1.0"
+dependencies = [
+ "ere",
+ "getoptlong",
+ "libcall",
+ "quoting",
+ "stdfdguard",
+ "ulallio",
+ "ulclosestream",
+ "ulstrutils",
+]
 
 [[package]]
 name = "hearts"
@@ -2133,6 +2253,21 @@ name = "libcsyslog"
 version = "0.1.0"
 
 [[package]]
+name = "libfdisk"
+version = "0.1.0"
+dependencies = [
+ "crc32",
+ "cstrtol",
+ "quoting",
+ "randrange",
+ "scratchdir",
+ "smartcols",
+ "ulblkid",
+ "ulstrutils",
+ "ulsysfs",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 dependencies = [
@@ -2297,8 +2432,9 @@ name = "loginmgr"
 version = "0.1.0"
 dependencies = [
  "authlib",
- "guitk",
- "quoting",
+ "libcall",
+ "libservicebus",
+ "loginusers",
  "scratchdir",
  "userdb",
 ]
@@ -2342,7 +2478,14 @@ name = "losetup"
 version = "0.1.0"
 dependencies = [
  "embed-manifest",
+ "getoptlong",
+ "libcall",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulclosestream",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]
@@ -2822,6 +2965,12 @@ dependencies = [
 [[package]]
 name = "nologin"
 version = "0.1.0"
+dependencies = [
+ "libcall",
+ "libcsyslog",
+ "quoting",
+ "stdfdguard",
+]
 
 [[package]]
 name = "nonogram"
@@ -3162,6 +3311,9 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "httpclient",
+ "jsonvalue",
+ "libcall",
+ "osfont",
  "quoting",
  "scratchdir",
  "sha2",
@@ -3553,7 +3705,16 @@ dependencies = [
 name = "rfkill"
 version = "0.1.0"
 dependencies = [
+ "getoptlong",
+ "libcall",
+ "libcsyslog",
+ "localtime",
  "quoting",
+ "smartcols",
+ "stdfdguard",
+ "ulallio",
+ "ulclosestream",
+ "ulstrutils",
 ]
 
 [[package]]
@@ -3827,6 +3988,25 @@ dependencies = [
  "deflate",
  "sha2",
  "xz",
+]
+
+[[package]]
+name = "sfdisk"
+version = "0.1.0"
+dependencies = [
+ "errmsg",
+ "fdisk",
+ "getoptlong",
+ "libfdisk",
+ "quoting",
+ "scratchdir",
+ "smartcols",
+ "stdfdguard",
+ "ulblkid",
+ "ulclosestream",
+ "ulcolors",
+ "ulstrutils",
+ "ulsysfs",
 ]
 
 [[package]]
@@ -4615,6 +4795,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "ulallio"
+version = "0.1.0"
+dependencies = [
+ "libcall",
+]
+
+[[package]]
 name = "ulblkid"
 version = "0.1.0"
 dependencies = [
@@ -4625,6 +4812,7 @@ dependencies = [
  "quoting",
  "scratchdir",
  "sha2",
+ "ulclosestream",
  "ulstrutils",
  "ulsysfs",
  "xxhash64",
@@ -4823,6 +5011,7 @@ name = "videocodec"
 version = "0.1.0"
 dependencies = [
  "flac",
+ "h264",
  "imagecodec",
  "libc",
  "matroska",

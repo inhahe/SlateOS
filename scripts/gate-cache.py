@@ -225,6 +225,12 @@ def run_traced(argv: list[str], trace_dir: str) -> tuple[int, bytes]:
     return proc.wait(), bytes(kept)
 
 
+#: Begins a reason that is about the trace, not the checker: it was lost or
+#: damaged on its way here. Such a run is not stored, and the checker is not
+#: remembered as uncacheable for the day either -- the next run may trace fine.
+TRANSIENT = "the trace was lost: "
+
+
 def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
     """The union of every traced process's inputs, or None and the reasons."""
     why: list[str] = []
@@ -233,13 +239,12 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
     try:
         names = sorted(os.listdir(trace_dir))
     except FileNotFoundError:
-        # Something removed the temp directory while the checker ran (seen on
-        # 2026-10-02, rq38: another session's sweep, most likely). The run is
-        # simply untraced: not stored, and its verdict -- which the caller
-        # already has -- stands. Raising here turned a passing gate into a
-        # boot refused for "never reached a verdict".
-        return None, ["the trace directory vanished before it was read -- "
+        # Something removed the temp directory while the checker ran (another
+        # session's sweep, most likely). The run is simply untraced: not
+        # stored, and its verdict -- which the caller already has -- stands.
+        return None, [TRANSIENT + "the trace directory vanished before it was read -- "
                       "something else removed it"]
+    unreadable: list[str] = []
     for name in names:
         path = os.path.join(trace_dir, name)
         if name.endswith(".tmp"):
@@ -247,20 +252,21 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
             continue
         if not name.startswith(("proc-", "git-")):
             continue
-        # A trace that cannot be read -- two writers' output in one file, say
-        # -- is a run untraced, as a vanished trace directory is: not stored,
-        # its verdict standing. Raising here refused a boot whose gate had
-        # passed (requests/f-a-gate-cache-trace-records-can-collide.md).
         try:
             with open(path, encoding="utf-8") as fh:
-                data = json.load(fh)
+                rec = json.load(fh)
         except (OSError, ValueError) as exc:
-            why.append(f"a trace file could not be read: {name} ({type(exc).__name__})")
+            unreadable.append(TRANSIENT + f"a trace file could not be read: {name} ({exc})")
             continue
         if name.startswith("proc-"):
-            procs.append(data)
+            procs.append(rec)
         else:
-            records[gt.norm(path)] = data
+            records[gt.norm(path)] = rec
+    if unreadable:
+        # Untraced, like a vanished directory. Returned before the checks
+        # below, which would read the gap as the checker's doing ("its own
+        # trace is missing") and so remember it as uncacheable.
+        return None, unreadable
     spawned = {p["spawn"] for p in procs}
     if "root" not in spawned:
         why.append("the checker's own trace is missing (it exited before its exit handlers)")
@@ -333,11 +339,7 @@ def merge(trace_dir: str) -> tuple[dict | None, list[str]]:
 
 def store(store_dir: str, key: str, entry: dict) -> None:
     os.makedirs(store_dir, exist_ok=True)
-    path = os.path.join(store_dir, key + ".json")
-    tmp = path + f".{os.getpid()}.tmp"
-    with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
-        json.dump(entry, fh)
-    os.replace(tmp, path)
+    gt.write_json(os.path.join(store_dir, key + ".json"), entry)
 
 
 #: What a reason a gate ran is counted as: `(pattern, kind)`, the first whose
@@ -385,6 +387,7 @@ REASON_KINDS: tuple[tuple[str, str], ...] = (
     (r"a trace file could not be read", "a trace file could not be read"),
     (r"the checker's own trace is missing", "the checker's own trace is missing"),
     (r"the trace directory vanished", "the trace directory vanished"),
+    (r"merging the trace failed", "merging the trace failed"),
     (r"traced exit -?\d+, untraced -?\d+$", "traced and untraced runs disagreed"),
     (r"cached exit -?\d+, fresh exit -?\d+$", "a verification disagreed"),
 )
@@ -392,7 +395,9 @@ REASON_KINDS: tuple[tuple[str, str], ...] = (
 
 def reason_kind(reason: str) -> str:
     """The kind `reason` is counted under (`REASON_KINDS`); "other" when no
-    pattern knows it, the reason itself still in the log beside it."""
+    pattern knows it, the reason itself still in the log beside it. A lost
+    trace's reason is counted by what was lost, past its `TRANSIENT` mark."""
+    reason = reason.removeprefix(TRANSIENT)
     for pattern, kind in REASON_KINDS:
         m = re.match(pattern, reason)
         if m:
@@ -511,7 +516,13 @@ def main(argv: list[str] | None = None) -> int:
     # fail the gate on the way out either.
     with tempfile.TemporaryDirectory(prefix="gate-trace-", ignore_cleanup_errors=True) as trace_dir:
         rc, output = run_traced(command, trace_dir)
-        inputs, why = merge(trace_dir)
+        # The checker has its verdict; nothing merge() trips on may change it.
+        # A record of a shape it did not expect, or a git it cannot start, is
+        # the trace's fault, so the run is merely untraced.
+        try:
+            inputs, why = merge(trace_dir)
+        except Exception as exc:  # noqa: BLE001 -- see above
+            inputs, why = None, [TRANSIENT + f"merging the trace failed: {exc!r}"]
 
     if verify and rc != entry["rc"]:
         note(f"VERIFY FAILED for {label}: the cache would have replayed exit "
@@ -582,9 +593,11 @@ def main(argv: list[str] | None = None) -> int:
                 rerun = f"; run again untraced, whose exit {verdict} stands"
             note(f"{head}; not stored: " + "; ".join(why[:3])
                  + (f" (+{len(why) - 3} more)" if len(why) > 3 else "") + rerun)
-            store(store_dir, key, {"format": FORMAT, "label": label, "argv": command,
-                                   "utc_date": today(), "uncacheable": why,
-                                   "scripts": script_digests(command)})
+            # A lost trace says nothing about the gate: the next run tries again.
+            if not all(w.startswith(TRANSIENT) for w in why):
+                store(store_dir, key, {"format": FORMAT, "label": label, "argv": command,
+                                       "utc_date": today(), "uncacheable": why,
+                                       "scripts": script_digests(command)})
             log("UNCACHEABLE", label, started, why[0] if why else "")
             return verdict
         store(store_dir, key, {

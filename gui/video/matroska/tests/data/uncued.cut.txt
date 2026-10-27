@@ -1,0 +1,501 @@
+# uncued.mkv cut short at each length: `start`, and the MD5 of the rest of what ffprobe shows (generate_fixtures.py).
+cut 0 refused
+cut 1 refused
+cut 2 refused
+cut 3 refused
+cut 4 refused
+cut 5 refused
+cut 6 refused
+cut 7 refused
+cut 8 refused
+cut 9 refused
+cut 10 refused
+cut 11 refused
+cut 12 refused
+cut 13 refused
+cut 14 refused
+cut 15 refused
+cut 16 refused
+cut 17 refused
+cut 18 refused
+cut 19 refused
+cut 20 refused
+cut 21 refused
+cut 22 refused
+cut 23 refused
+cut 24 refused
+cut 25 refused
+cut 26 refused
+cut 27 refused
+cut 28 refused
+cut 29 refused
+cut 30 refused
+cut 31 refused
+cut 32 refused
+cut 33 refused
+cut 34 refused
+cut 35 refused
+cut 36 refused
+cut 37 refused
+cut 38 refused
+cut 39 refused
+cut 40 refused
+cut 41 refused
+cut 42 refused
+cut 43 refused
+cut 44 refused
+cut 45 refused
+cut 46 refused
+cut 47 refused
+cut 48 refused
+cut 49 refused
+cut 50 refused
+cut 51 refused
+cut 52 refused
+cut 53 refused
+cut 54 refused
+cut 55 refused
+cut 56 refused
+cut 57 refused
+cut 58 refused
+cut 59 refused
+cut 60 refused
+cut 61 refused
+cut 62 refused
+cut 63 refused
+cut 64 refused
+cut 65 refused
+cut 66 refused
+cut 67 refused
+cut 68 refused
+cut 69 refused
+cut 70 refused
+cut 71 refused
+cut 72 refused
+cut 73 refused
+cut 74 refused
+cut 75 refused
+cut 76 refused
+cut 77 refused
+cut 78 refused
+cut 79 refused
+cut 80 refused
+cut 81 refused
+cut 82 refused
+cut 83 refused
+cut 84 refused
+cut 85 refused
+cut 86 refused
+cut 87 refused
+cut 88 refused
+cut 89 refused
+cut 90 refused
+cut 91 refused
+cut 92 refused
+cut 93 refused
+cut 94 refused
+cut 95 refused
+cut 96 refused
+cut 97 refused
+cut 98 refused
+cut 99 refused
+cut 100 refused
+cut 101 refused
+cut 102 refused
+cut 103 refused
+cut 104 refused
+cut 105 refused
+cut 106 refused
+cut 107 refused
+cut 108 refused
+cut 109 refused
+cut 110 refused
+cut 111 refused
+cut 112 refused
+cut 113 refused
+cut 114 refused
+cut 115 refused
+cut 116 refused
+cut 117 refused
+cut 118 refused
+cut 119 refused
+cut 120 refused
+cut 121 refused
+cut 122 refused
+cut 123 refused
+cut 124 refused
+cut 125 refused
+cut 126 refused
+cut 127 refused
+cut 128 refused
+cut 129 refused
+cut 130 refused
+cut 131 refused
+cut 132 refused
+cut 133 refused
+cut 134 refused
+cut 135 refused
+cut 136 refused
+cut 137 refused
+cut 138 refused
+cut 139 refused
+cut 140 refused
+cut 141 refused
+cut 142 refused
+cut 143 refused
+cut 144 refused
+cut 145 refused
+cut 146 refused
+cut 147 refused
+cut 148 refused
+cut 149 refused
+cut 150 refused
+cut 151 refused
+cut 152 refused
+cut 153 refused
+cut 154 refused
+cut 155 refused
+cut 156 refused
+cut 157 refused
+cut 158 refused
+cut 159 refused
+cut 160 refused
+cut 161 refused
+cut 162 refused
+cut 163 refused
+cut 164 refused
+cut 165 refused
+cut 166 refused
+cut 167 refused
+cut 168 refused
+cut 169 refused
+cut 170 refused
+cut 171 refused
+cut 172 refused
+cut 173 refused
+cut 174 refused
+cut 175 refused
+cut 176 refused
+cut 177 refused
+cut 178 refused
+cut 179 refused
+cut 180 refused
+cut 181 refused
+cut 182 refused
+cut 183 refused
+cut 184 refused
+cut 185 refused
+cut 186 refused
+cut 187 refused
+cut 188 refused
+cut 189 refused
+cut 190 refused
+cut 191 refused
+cut 192 refused
+cut 193 refused
+cut 194 refused
+cut 195 refused
+cut 196 refused
+cut 197 refused
+cut 198 refused
+cut 199 refused
+cut 200 refused
+cut 201 refused
+cut 202 refused
+cut 203 refused
+cut 204 refused
+cut 205 refused
+cut 206 refused
+cut 207 refused
+cut 208 refused
+cut 209 refused
+cut 210 refused
+cut 211 refused
+cut 212 refused
+cut 213 refused
+cut 214 refused
+cut 215 refused
+cut 216 refused
+cut 217 refused
+cut 218 refused
+cut 219 refused
+cut 220 refused
+cut 221 refused
+cut 222 refused
+cut 223 refused
+cut 224 refused
+cut 225 refused
+cut 226 refused
+cut 227 refused
+cut 228 refused
+cut 229 refused
+cut 230 refused
+cut 231 refused
+cut 232 refused
+cut 233 refused
+cut 234 refused
+cut 235 refused
+cut 236 refused
+cut 237 refused
+cut 238 refused
+cut 239 refused
+cut 240 refused
+cut 241 refused
+cut 242 refused
+cut 243 refused
+cut 244 refused
+cut 245 refused
+cut 246 refused
+cut 247 refused
+cut 248 refused
+cut 249 refused
+cut 250 refused
+cut 251 refused
+cut 252 refused
+cut 253 refused
+cut 254 refused
+cut 255 refused
+cut 256 refused
+cut 257 refused
+cut 258 refused
+cut 259 refused
+cut 260 refused
+cut 261 refused
+cut 262 refused
+cut 263 refused
+cut 264 refused
+cut 265 refused
+cut 266 refused
+cut 267 refused
+cut 268 refused
+cut 269 refused
+cut 270 refused
+cut 271 refused
+cut 272 refused
+cut 273 refused
+cut 274 refused
+cut 275 refused
+cut 276 refused
+cut 277 refused
+cut 278 refused
+cut 279 refused
+cut 280 refused
+cut 281 refused
+cut 282 refused
+cut 283 refused
+cut 284 refused
+cut 285 refused
+cut 286 refused
+cut 287 refused
+cut 288 refused
+cut 289 refused
+cut 290 refused
+cut 291 refused
+cut 292 refused
+cut 293 refused
+cut 294 refused
+cut 295 refused
+cut 296 refused
+cut 297 refused
+cut 298 refused
+cut 299 refused
+cut 300 refused
+cut 301 refused
+cut 302 refused
+cut 303 refused
+cut 304 refused
+cut 305 refused
+cut 306 refused
+cut 307 refused
+cut 308 refused
+cut 309 none 8b91ab6053b27f3109b35c30988730c2
+cut 310 none 8b91ab6053b27f3109b35c30988730c2
+cut 311 none 8b91ab6053b27f3109b35c30988730c2
+cut 312 none 8b91ab6053b27f3109b35c30988730c2
+cut 313 none 8b91ab6053b27f3109b35c30988730c2
+cut 314 none 8b91ab6053b27f3109b35c30988730c2
+cut 315 none 8b91ab6053b27f3109b35c30988730c2
+cut 316 none 8b91ab6053b27f3109b35c30988730c2
+cut 317 none 8b91ab6053b27f3109b35c30988730c2
+cut 318 none 8b91ab6053b27f3109b35c30988730c2
+cut 319 none 8b91ab6053b27f3109b35c30988730c2
+cut 320 none 8b91ab6053b27f3109b35c30988730c2
+cut 321 none 8b91ab6053b27f3109b35c30988730c2
+cut 322 none 8b91ab6053b27f3109b35c30988730c2
+cut 323 none 8b91ab6053b27f3109b35c30988730c2
+cut 324 none 8b91ab6053b27f3109b35c30988730c2
+cut 325 none 8b91ab6053b27f3109b35c30988730c2
+cut 326 none 8b91ab6053b27f3109b35c30988730c2
+cut 327 none 8b91ab6053b27f3109b35c30988730c2
+cut 328 none 8b91ab6053b27f3109b35c30988730c2
+cut 329 none 8b91ab6053b27f3109b35c30988730c2
+cut 330 none 8b91ab6053b27f3109b35c30988730c2
+cut 331 none 8b91ab6053b27f3109b35c30988730c2
+cut 332 none 8b91ab6053b27f3109b35c30988730c2
+cut 333 none 8b91ab6053b27f3109b35c30988730c2
+cut 334 none 8b91ab6053b27f3109b35c30988730c2
+cut 335 none 8b91ab6053b27f3109b35c30988730c2
+cut 336 none 8b91ab6053b27f3109b35c30988730c2
+cut 337 none 8b91ab6053b27f3109b35c30988730c2
+cut 338 none 8b91ab6053b27f3109b35c30988730c2
+cut 339 none 8b91ab6053b27f3109b35c30988730c2
+cut 340 none 8b91ab6053b27f3109b35c30988730c2
+cut 341 none 8b91ab6053b27f3109b35c30988730c2
+cut 342 none 8b91ab6053b27f3109b35c30988730c2
+cut 343 none 8b91ab6053b27f3109b35c30988730c2
+cut 344 none 8b91ab6053b27f3109b35c30988730c2
+cut 345 none 8b91ab6053b27f3109b35c30988730c2
+cut 346 none 8b91ab6053b27f3109b35c30988730c2
+cut 347 none 8b91ab6053b27f3109b35c30988730c2
+cut 348 none 8b91ab6053b27f3109b35c30988730c2
+cut 349 none 8b91ab6053b27f3109b35c30988730c2
+cut 350 none 8b91ab6053b27f3109b35c30988730c2
+cut 351 0 8b91ab6053b27f3109b35c30988730c2
+cut 352 0 8b91ab6053b27f3109b35c30988730c2
+cut 353 0 8b91ab6053b27f3109b35c30988730c2
+cut 354 0 8b91ab6053b27f3109b35c30988730c2
+cut 355 0 8b91ab6053b27f3109b35c30988730c2
+cut 356 0 8b91ab6053b27f3109b35c30988730c2
+cut 357 0 8b91ab6053b27f3109b35c30988730c2
+cut 358 0 8b91ab6053b27f3109b35c30988730c2
+cut 359 0 8b91ab6053b27f3109b35c30988730c2
+cut 360 0 8b91ab6053b27f3109b35c30988730c2
+cut 361 0 8b91ab6053b27f3109b35c30988730c2
+cut 362 0 8b91ab6053b27f3109b35c30988730c2
+cut 363 0 8b91ab6053b27f3109b35c30988730c2
+cut 364 0 8b91ab6053b27f3109b35c30988730c2
+cut 365 0 8b91ab6053b27f3109b35c30988730c2
+cut 366 0 8b91ab6053b27f3109b35c30988730c2
+cut 367 0 8b91ab6053b27f3109b35c30988730c2
+cut 368 0 8b91ab6053b27f3109b35c30988730c2
+cut 369 0 8b91ab6053b27f3109b35c30988730c2
+cut 370 0 8b91ab6053b27f3109b35c30988730c2
+cut 371 0 8b91ab6053b27f3109b35c30988730c2
+cut 372 0 8b91ab6053b27f3109b35c30988730c2
+cut 373 0 8b91ab6053b27f3109b35c30988730c2
+cut 374 0 8b91ab6053b27f3109b35c30988730c2
+cut 375 0 8b91ab6053b27f3109b35c30988730c2
+cut 376 0 8b91ab6053b27f3109b35c30988730c2
+cut 377 0 8b91ab6053b27f3109b35c30988730c2
+cut 378 0 8b91ab6053b27f3109b35c30988730c2
+cut 379 0 8b91ab6053b27f3109b35c30988730c2
+cut 380 0 8b91ab6053b27f3109b35c30988730c2
+cut 381 0 8b91ab6053b27f3109b35c30988730c2
+cut 382 0 8b91ab6053b27f3109b35c30988730c2
+cut 383 0 8b91ab6053b27f3109b35c30988730c2
+cut 384 0 8b91ab6053b27f3109b35c30988730c2
+cut 385 0 8b91ab6053b27f3109b35c30988730c2
+cut 386 0 8b91ab6053b27f3109b35c30988730c2
+cut 387 0 8b91ab6053b27f3109b35c30988730c2
+cut 388 0 8b91ab6053b27f3109b35c30988730c2
+cut 389 0 8b91ab6053b27f3109b35c30988730c2
+cut 390 0 8b91ab6053b27f3109b35c30988730c2
+cut 391 0 8b91ab6053b27f3109b35c30988730c2
+cut 392 0 8b91ab6053b27f3109b35c30988730c2
+cut 393 0 8b91ab6053b27f3109b35c30988730c2
+cut 394 0 8b91ab6053b27f3109b35c30988730c2
+cut 395 0 8b91ab6053b27f3109b35c30988730c2
+cut 396 0 8b91ab6053b27f3109b35c30988730c2
+cut 397 0 8b91ab6053b27f3109b35c30988730c2
+cut 398 0 8b91ab6053b27f3109b35c30988730c2
+cut 399 0 8b91ab6053b27f3109b35c30988730c2
+cut 400 0 8b91ab6053b27f3109b35c30988730c2
+cut 401 0 8b91ab6053b27f3109b35c30988730c2
+cut 402 0 8b91ab6053b27f3109b35c30988730c2
+cut 403 0 8b91ab6053b27f3109b35c30988730c2
+cut 404 0 8b91ab6053b27f3109b35c30988730c2
+cut 405 0 8b91ab6053b27f3109b35c30988730c2
+cut 406 0 8b91ab6053b27f3109b35c30988730c2
+cut 407 0 8b91ab6053b27f3109b35c30988730c2
+cut 408 0 8b91ab6053b27f3109b35c30988730c2
+cut 409 0 8b91ab6053b27f3109b35c30988730c2
+cut 410 0 8b91ab6053b27f3109b35c30988730c2
+cut 411 0 8b91ab6053b27f3109b35c30988730c2
+cut 412 0 8b91ab6053b27f3109b35c30988730c2
+cut 413 0 8b91ab6053b27f3109b35c30988730c2
+cut 414 0 8b91ab6053b27f3109b35c30988730c2
+cut 415 0 8b91ab6053b27f3109b35c30988730c2
+cut 416 0 8b91ab6053b27f3109b35c30988730c2
+cut 417 0 8b91ab6053b27f3109b35c30988730c2
+cut 418 0 8b91ab6053b27f3109b35c30988730c2
+cut 419 0 8b91ab6053b27f3109b35c30988730c2
+cut 420 0 8b91ab6053b27f3109b35c30988730c2
+cut 421 0 8b91ab6053b27f3109b35c30988730c2
+cut 422 0 8b91ab6053b27f3109b35c30988730c2
+cut 423 0 8b91ab6053b27f3109b35c30988730c2
+cut 424 0 8b91ab6053b27f3109b35c30988730c2
+cut 425 0 8b91ab6053b27f3109b35c30988730c2
+cut 426 0 8b91ab6053b27f3109b35c30988730c2
+cut 427 0 8b91ab6053b27f3109b35c30988730c2
+cut 428 0 8b91ab6053b27f3109b35c30988730c2
+cut 429 0 8b91ab6053b27f3109b35c30988730c2
+cut 430 0 8b91ab6053b27f3109b35c30988730c2
+cut 431 0 8b91ab6053b27f3109b35c30988730c2
+cut 432 0 8b91ab6053b27f3109b35c30988730c2
+cut 433 0 8b91ab6053b27f3109b35c30988730c2
+cut 434 0 8b91ab6053b27f3109b35c30988730c2
+cut 435 0 8b91ab6053b27f3109b35c30988730c2
+cut 436 0 8b91ab6053b27f3109b35c30988730c2
+cut 437 0 8b91ab6053b27f3109b35c30988730c2
+cut 438 0 8b91ab6053b27f3109b35c30988730c2
+cut 439 0 8b91ab6053b27f3109b35c30988730c2
+cut 440 0 8b91ab6053b27f3109b35c30988730c2
+cut 441 0 8b91ab6053b27f3109b35c30988730c2
+cut 442 0 8b91ab6053b27f3109b35c30988730c2
+cut 443 0 8b91ab6053b27f3109b35c30988730c2
+cut 444 0 8b91ab6053b27f3109b35c30988730c2
+cut 445 0 8b91ab6053b27f3109b35c30988730c2
+cut 446 0 8b91ab6053b27f3109b35c30988730c2
+cut 447 0 8b91ab6053b27f3109b35c30988730c2
+cut 448 0 8b91ab6053b27f3109b35c30988730c2
+cut 449 0 8b91ab6053b27f3109b35c30988730c2
+cut 450 0 8b91ab6053b27f3109b35c30988730c2
+cut 451 0 8b91ab6053b27f3109b35c30988730c2
+cut 452 0 8b91ab6053b27f3109b35c30988730c2
+cut 453 0 8b91ab6053b27f3109b35c30988730c2
+cut 454 0 8b91ab6053b27f3109b35c30988730c2
+cut 455 0 8b91ab6053b27f3109b35c30988730c2
+cut 456 0 8b91ab6053b27f3109b35c30988730c2
+cut 457 0 8b91ab6053b27f3109b35c30988730c2
+cut 458 0 8b91ab6053b27f3109b35c30988730c2
+cut 459 0 8b91ab6053b27f3109b35c30988730c2
+cut 460 0 8b91ab6053b27f3109b35c30988730c2
+cut 461 0 8b91ab6053b27f3109b35c30988730c2
+cut 462 0 8b91ab6053b27f3109b35c30988730c2
+cut 463 0 8b91ab6053b27f3109b35c30988730c2
+cut 464 0 8b91ab6053b27f3109b35c30988730c2
+cut 465 0 8b91ab6053b27f3109b35c30988730c2
+cut 466 0 8b91ab6053b27f3109b35c30988730c2
+cut 467 0 8b91ab6053b27f3109b35c30988730c2
+cut 468 0 8b91ab6053b27f3109b35c30988730c2
+cut 469 0 8b91ab6053b27f3109b35c30988730c2
+cut 470 0 8b91ab6053b27f3109b35c30988730c2
+cut 471 0 8b91ab6053b27f3109b35c30988730c2
+cut 472 0 8b91ab6053b27f3109b35c30988730c2
+cut 473 0 8b91ab6053b27f3109b35c30988730c2
+cut 474 0 8b91ab6053b27f3109b35c30988730c2
+cut 475 0 8b91ab6053b27f3109b35c30988730c2
+cut 476 0 8b91ab6053b27f3109b35c30988730c2
+cut 477 0 8b91ab6053b27f3109b35c30988730c2
+cut 478 0 8b91ab6053b27f3109b35c30988730c2
+cut 479 0 8b91ab6053b27f3109b35c30988730c2
+cut 480 0 8b91ab6053b27f3109b35c30988730c2
+cut 481 0 8b91ab6053b27f3109b35c30988730c2
+cut 482 0 8b91ab6053b27f3109b35c30988730c2
+cut 483 0 8b91ab6053b27f3109b35c30988730c2
+cut 484 0 8b91ab6053b27f3109b35c30988730c2
+cut 485 0 8b91ab6053b27f3109b35c30988730c2
+cut 486 0 8b91ab6053b27f3109b35c30988730c2
+cut 487 0 8b91ab6053b27f3109b35c30988730c2
+cut 488 0 8b91ab6053b27f3109b35c30988730c2
+cut 489 0 8b91ab6053b27f3109b35c30988730c2
+cut 490 0 8b91ab6053b27f3109b35c30988730c2
+cut 491 0 8b91ab6053b27f3109b35c30988730c2
+cut 492 0 8b91ab6053b27f3109b35c30988730c2
+cut 493 0 8b91ab6053b27f3109b35c30988730c2
+cut 494 0 8b91ab6053b27f3109b35c30988730c2
+cut 495 0 8b91ab6053b27f3109b35c30988730c2
+cut 496 0 8b91ab6053b27f3109b35c30988730c2
+cut 497 0 8b91ab6053b27f3109b35c30988730c2
+cut 498 0 8b91ab6053b27f3109b35c30988730c2
+cut 499 0 8b91ab6053b27f3109b35c30988730c2

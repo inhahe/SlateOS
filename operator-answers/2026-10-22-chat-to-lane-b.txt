@@ -1,0 +1,8 @@
+[The operator asked lane B, in chat:]
+Our project is set to use VP9 for our remote desktop, but Chrome Remote Desktop uses AV1, isn't that better then?
+
+[Lane B's recommendation, ending its answer:]
+My recommendation: AV1 preferred, VP9 kept as the fallback, chosen per connection by what the viewer can decode. Do you want that? If so, I'll record it as your decision, superseding the VP9-only one, and pass it to lane F to build.
+
+[The operator answered:]
+yes, and put it in roadmap-detailed.md

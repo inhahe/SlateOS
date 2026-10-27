@@ -27,8 +27,10 @@ mistaken for a skip.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import inspect
+import io
 import json
 import os
 import sys
@@ -373,90 +375,165 @@ def test_stale_allowlist_entry_fails():
 HOTPLUG = "[hotplug] offline/online cycle"
 
 
-def _cpu_rows(single: int, multi: int, *, fires_on_multi: bool,
-              misses_on_single: int = 0) -> list[dict]:
-    """`single` one-CPU boots then `multi` two-CPU boots, every one skipping
-    every unconditional allowlist entry. The hotplug entry fires on the
-    one-CPU boots except the last `misses_on_single`, and on the two-CPU
-    boots when `fires_on_multi`.
-    """
-    plain = [n for n in gate.ALLOWED if n not in gate.ALLOWED_ON]
-    rows = _rows(single - misses_on_single, plain + [HOTPLUG])
-    rows += _rows(misses_on_single, plain)
-    rows += _rows(multi, plain + ([HOTPLUG] if fires_on_multi else []), cpus=2)
-    return rows
+def _boots(k: int, *, hotplug: bool, **over) -> list[dict]:
+    """`k` boots skipping every unconditional allowlist entry, and the hotplug
+    cycle when `hotplug`. With no `cpus`, a boot is single-CPU by the
+    recorder's rule for a row without the field."""
+    plain = [n for n, a in gate.ALLOWED.items() if a.only_on is None]
+    return _rows(k, plain + ([HOTPLUG] if hotplug else []), **over)
+
+
+def _single(k: int, *, hotplug: bool = True) -> list[dict]:
+    return _boots(k, hotplug=hotplug)
+
+
+def _multi(k: int, *, hotplug: bool, cpus=2) -> list[dict]:
+    return _boots(k, hotplug=hotplug, cpus=cpus)
+
+
+def _history(tmpdir: str, rows: list[dict]) -> str:
+    path = os.path.join(tmpdir, "history.jsonl")
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        for rec in rows:
+            handle.write(json.dumps(rec) + "\n")
+    return path
+
+
+def _main_says(argv: list[str]) -> tuple[int, str]:
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        rc = gate.main(argv)
+    return rc, out.getvalue()
 
 
 def test_conditional_entry_is_judged_on_its_own_boots():
     # On a boot given `--smp=2` the hotplug cycle runs. That is what the entry
     # says will happen, not evidence that it went stale.
-    res = gate.analyse(_cpu_rows(24, 1, fires_on_multi=False), 25, 10)
+    res = gate.analyse(_single(24) + _multi(1, hotplug=False), 25, 10)
     check("a two-CPU boot that ran the section leaves the entry standing",
           (HOTPLUG in res["allowed_firing"], res["stale_allowlist"],
-           res["allowed_outside"], res["split"].get(HOTPLUG)),
+           res["allowed_outside"], tuple(res["split"][HOTPLUG])),
           (True, [], [], (24, 24, 1, 0)))
 
 
 def test_conditional_entry_must_fire_on_every_matching_boot():
-    res = gate.analyse(_cpu_rows(12, 1, fires_on_multi=False,
-                                 misses_on_single=1), 25, 10)
+    rows = _single(11) + _single(1, hotplug=False) + _multi(1, hotplug=False)
+    res = gate.analyse(rows, 25, 10)
     check("one single-CPU boot that ran the section makes the entry false",
           res["stale_allowlist"], [HOTPLUG])
 
 
-def test_conditional_entry_that_never_ran_anywhere_fails():
-    res = gate.analyse(_cpu_rows(10, 10, fires_on_multi=True), 25, 10)
-    check("skipped on ten boots outside its condition too: the condition "
+def test_no_matching_boot_in_the_window_is_stale():
+    # The harness moved to two CPUs: the entry describes no boot being run.
+    for fired in (False, True):
+        res = gate.analyse(_multi(25, hotplug=fired), 25, 10)
+        check(f"no single-CPU boot in the window, skip fired={fired}: stale",
+              (res["stale_allowlist"], HOTPLUG in res["allowed_firing"]),
+              ([HOTPLUG], False))
+
+
+def test_outside_reaches_back_past_the_window():
+    # Two-CPU boots are rare; a window of 25 rarely holds ten. Judged on the
+    # last 25 of them in the whole history, ten that all skipped are found.
+    res = gate.analyse(_multi(10, hotplug=True) + _single(25), 25, 10)
+    check("ten two-CPU boots behind the window, all skipping: the condition "
           "explains nothing",
-          (res["allowed_outside"], res["allowed_firing"].count(HOTPLUG),
-           res["stale_allowlist"]),
-          ([HOTPLUG], 0, []))
+          (res["allowed_outside"], HOTPLUG in res["allowed_firing"],
+           res["stale_allowlist"], tuple(res["split"][HOTPLUG])),
+          ([HOTPLUG], False, [], (25, 25, 10, 10)))
 
 
-def test_conditional_entry_outside_needs_the_floor_too():
-    res = gate.analyse(_cpu_rows(16, 9, fires_on_multi=True), 25, 10)
+def test_outside_is_its_own_window():
+    ran_long_ago = (_multi(1, hotplug=False) + _multi(25, hotplug=True)
+                    + _single(25))
+    check("a run older than the last 25 two-CPU boots clears nothing",
+          gate.analyse(ran_long_ago, 25, 10)["allowed_outside"], [HOTPLUG])
+    ran_lately = (_multi(1, hotplug=False) + _multi(24, hotplug=True)
+                  + _single(25))
+    check("a run among the last 25 two-CPU boots clears the charge",
+          gate.analyse(ran_lately, 25, 10)["allowed_outside"], [])
+
+
+def test_outside_needs_the_floor_too():
+    res = gate.analyse(_multi(9, hotplug=True) + _single(16), 25, 10)
     check("nine two-CPU boots are not enough to accuse the condition",
           (res["allowed_outside"], HOTPLUG in res["allowed_firing"]),
           ([], True))
 
 
-def test_conditional_entries_are_allowlisted():
-    # `ALLOWED_ON` holds the condition, `ALLOWED` the justification; an entry
-    # in the first only would be printed with no reason and fail on lookup.
-    check("every conditional entry has its justification",
-          sorted(set(gate.ALLOWED_ON) - set(gate.ALLOWED)), [])
+def test_rows_that_cannot_say_are_in_neither_population():
+    # A row recorded without its CPU count is no evidence either way.
+    res = gate.analyse(_multi(10, hotplug=True, cpus=None) + _single(15),
+                       25, 10)
+    check("unknown-CPU rows count neither inside nor outside",
+          (tuple(res["split"][HOTPLUG]), res["allowed_outside"],
+           HOTPLUG in res["allowed_firing"]),
+          ((15, 15, 0, 0), [], True))
+
+
+def test_a_boot_outside_the_condition_is_not_refused(tmpdir):
+    # Refusing the one boot that can record the fix would leave no way out.
+    rows = _multi(10, hotplug=True) + _single(25)
+    res = gate.analyse(rows, 25, 10, {"cpus": 2})
+    check("a two-CPU boot about to run turns the failure into a note",
+          (res["outside_pending"], res["allowed_outside"],
+           res["stale_allowlist"]), ([HOTPLUG], [], []))
+    path = _history(tmpdir, rows)
+    check("main: refused before a one-CPU boot, and with no boot named, "
+          "let through before a two-CPU one",
+          [_main_says(["--history", path] + extra)[0]
+           for extra in ([], ["--cpus", "1"], ["--cpus", "2"])],
+          [1, 1, 0])
 
 
 def test_single_cpu_follows_the_recorder():
-    check("which rows count as single-CPU",
-          [gate.single_cpu(rec) for rec in (
+    check("which rows count as single-CPU, and which cannot say",
+          [gate.SINGLE_CPU.matches(rec) for rec in (
               {}, {"cpus": 1}, {"cpus": 2}, {"cpus": None},
               {"experiment": "-smp 4"})],
-          [True, True, False, False, False])
+          [True, True, False, None, None])
 
 
 def test_main_passes_with_a_two_cpu_boot_in_the_window(tmpdir):
-    path = os.path.join(tmpdir, "mixed.jsonl")
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        for rec in _cpu_rows(24, 1, fires_on_multi=False):
-            handle.write(json.dumps(rec) + "\n")
-    check("the window that refused lane A's boot on 2026-10-27 passes",
-          gate.main(["--history", path]), 0)
+    path = _history(tmpdir, _single(24) + _multi(1, hotplug=False))
+    rc, said = _main_says(["--history", path])
+    check("the window that refused lane A's boot on 2026-10-27 passes", rc, 0)
+    check_true("...and the note gives both populations",
+               f"{HOTPLUG} skipped on all 24 single-CPU boot(s) in the window "
+               f"(and on 0 of the last 1 other boot(s))" in said)
+    rc, listed = _main_says(["--history", path, "--list"])
+    check_true("--list gives both populations too",
+               f"{HOTPLUG} ALLOWED (single-CPU: 24/24, others: 0/1)" in listed)
+
+
+def test_main_names_the_population_a_stale_entry_failed_on(tmpdir):
+    rows = _single(11) + _single(1, hotplug=False) + _multi(1, hotplug=False)
+    rc, said = _main_says(["--history", _history(tmpdir, rows)])
+    check("stale is exit 1", rc, 1)
+    check_true("...counted on the single-CPU boots",
+               f"{HOTPLUG} is in ALLOWED but fired on only 11 of the 12 "
+               f"single-CPU boot(s) in the window" in said)
+
+
+def test_main_names_an_entry_whose_condition_describes_nothing(tmpdir):
+    rc, said = _main_says(
+        ["--history", _history(tmpdir, _multi(25, hotplug=False))])
+    check("no single-CPU boot is exit 1", rc, 1)
+    check_true("...and says so", "no boot in the window was one" in said)
 
 
 def test_main_fails_a_condition_that_explains_nothing(tmpdir):
-    path = os.path.join(tmpdir, "never.jsonl")
-    with open(path, "w", encoding="utf-8", newline="") as handle:
-        for rec in _cpu_rows(10, 10, fires_on_multi=True):
-            handle.write(json.dumps(rec) + "\n")
-    check("never ran on either population is exit 1",
-          gate.main(["--history", path]), 1)
+    path = _history(tmpdir, _multi(10, hotplug=True) + _single(10))
+    rc, said = _main_says(["--history", path])
+    check("never ran on either population is exit 1", rc, 1)
+    check_true("...and the message counts the other boots",
+               "skipped on all of the last 10 other boot(s)" in said)
 
 
 def test_allowlist_entries_state_a_condition():
     # The docstring's rule, enforced: an entry that does not say what would
     # make the skip stop firing is the beginning of a dumping ground.
-    bad = [k for k, v in gate.ALLOWED.items() if len(v) < 60]
+    bad = [k for k, v in gate.ALLOWED.items() if len(v.reason) < 60]
     check("every allowlist entry carries a real justification", bad, [])
 
 

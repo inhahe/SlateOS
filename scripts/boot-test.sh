@@ -8097,8 +8097,12 @@ check_boot_skips() {
 
     echo "=== Checking for self-tests that skip on every recorded boot ==="
     local rc
+    # --cpus: an allowlist entry judged on single-CPU boots that has also
+    # never run on a multi-CPU one fails the gate -- except for a multi-CPU
+    # boot, which is the one that can record the fix.
     run_checker check-boot-skips "$py" -u \
-        "$PROJECT_ROOT/scripts/check-boot-skips.py" && rc=0 || rc=$?
+        "$PROJECT_ROOT/scripts/check-boot-skips.py" --cpus "$SMP_CPUS" \
+        && rc=0 || rc=$?
     [ "$rc" -eq 0 ] && return 0
 
     # The `rc -eq 2` arm this used to carry is gone; run_checker makes that

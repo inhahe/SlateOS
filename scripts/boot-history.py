@@ -92,6 +92,7 @@ from typing import Callable
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 import srcload  # noqa: E402
+from bootrows import cpus_of  # noqa: E402
 
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 DEFAULT_SERIAL = os.path.join(REPO_ROOT, "build", "serial-test.txt")
@@ -1871,23 +1872,6 @@ def profile_of(rec: dict) -> str:
         return _PROFILE_UNKNOWN
     val = rec["profile"]
     return _PROFILE_UNKNOWN if val is None else str(val)
-
-
-def cpus_of(rec: dict) -> int | None:
-    """How many CPUs a record's boot ran on, `None` when it cannot say.
-
-    A row without the field predates it, and for an ordinary boot that is
-    not a guess but a fact of the harness: until `--smp` existed
-    (2026-10-09) boot-test.sh started QEMU with no `-smp`, which is one CPU.
-    An *experiment* row is the exception -- its `QEMU_EXTRA` could have
-    named any count -- so one without the field cannot say. A row with the
-    field carries what QEMU was given, or `null` when the recorder was not
-    told.
-    """
-    if "cpus" not in rec:
-        return None if rec.get("experiment") else 1
-    val = rec["cpus"]
-    return val if isinstance(val, int) and not isinstance(val, bool) else None
 
 
 def population_of(rec: dict) -> str:

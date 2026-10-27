@@ -395,6 +395,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "audit-rustfmt-drift.py",
         "bench-history.py",
         "boot-history.py",
+        "bootrows.py",
         "bootstrap-worktree.sh",
         "build-image.ps1",
         "build-iso.sh",

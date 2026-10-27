@@ -194,3 +194,43 @@ across lanes, and the only record that exists of which sections did not run on a
 given boot. Reversing costs the answer to "has this ever run?", which was
 unanswerable before today and is the question §650's six spent their whole lives
 evading.
+
+### Amendment, 2026-10-27 — an entry whose condition the history records is judged on the boots that meet it
+
+**In short:** point 4's second rule treated any boot on which an allowlisted
+skip did *not* fire as proof that the entry had gone stale. That is right for
+a condition the history cannot see, and wrong for one it records. The hotplug
+entry says "stops firing on a boot with two CPUs"; the first two-CPU boot made
+it fire on 24 of 25 boots, and the gate refused the next build -- for the
+thing the entry predicted. So an entry whose condition is a field of the
+history row (`cpus`, through `bootrows.cpus_of`) now names it
+(`Allowance.only_on` in `scripts/check-boot-skips.py`), and is judged on two
+populations:
+
+- **The boots in the window that meet the condition.** The skip must fire on
+  every one, and there must be at least one. A boot there on which it did not
+  fire, or none at all, is a stale entry under the original rule.
+- **The last N boots in the whole history that do not.** Once there are
+  `--min` of them, the section must have run on at least one; if it skipped on
+  all, it has never run anywhere and the condition explains nothing -- a new
+  failure. These are drawn from the whole history, not the window, because
+  such boots are rare (one in a thousand, so far), and a window of 25 would
+  almost never hold ten. A row that cannot say whether it meets the condition
+  (`cpus: null`) is in neither.
+
+The second failure is not raised against a boot that does not meet the
+condition (`--cpus`, which `boot-test.sh` passes): that boot is the only one
+that can record a fix, and refusing it would recreate the deadlock
+`still_emitted` exists to break.
+
+**What it gives up:** detection on the boots outside the condition is weaker
+than on the rest. It needs ten such boots before it can accuse anything, and
+a single old run among the last N keeps it quiet. The note prints that
+population's count on every run, so a skip firing there stays in front of a
+reader before it can fail.
+
+**Decided by:** Claude (autonomous), lane A.
+
+**Alternative rejected:** deleting the hotplug entry. It would pass until the
+two-CPU boot left the window, then fail again in whichever lane ran the 25th
+single-CPU boot after it.

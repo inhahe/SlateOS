@@ -37,6 +37,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/blockdev-diff.sh` | Differential test: our `blockdev` against util-linux 2.39.3's. |
 | `scripts/boot-history.py` | Record the outcome of every boot test, and count the streaks that |
 | `scripts/boot-test.sh` | boot-test.sh — Build the kernel, boot it in QEMU, verify BOOT_OK. |
+| `scripts/bootrows.py` | Facts about one row of `bench/boot-history.jsonl` that more than one script reads. |
 | `scripts/bootstrap-worktree.sh` | bootstrap-worktree.sh — make a fresh worktree or clone able to build and boot. |
 | `scripts/build-iso.sh` | Build the kernel and create a bootable ISO image using Limine. |
 | `scripts/build-usb-image.py` | Build a real, GPT-partitioned, UEFI-bootable raw disk image for SlateOS. |
@@ -608,4 +609,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_598 scripts._
+_599 scripts._

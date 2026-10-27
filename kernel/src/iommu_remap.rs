@@ -1807,26 +1807,32 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 9b: a destroyed domain's id is given out again -- the lowest free
     // one -- so that a driver creating and destroying domains cannot use up
-    // the few ids a unit holds.
+    // the few ids a unit holds. Three made, the outer two destroyed: the next
+    // is the lower of those two.
     {
         let a = create_domain()?;
         let b = create_domain()?;
-        destroy_domain(a)?;
         let c = create_domain()?;
-        let reused = c == a;
-        destroy_domain(b)?;
+        destroy_domain(a)?;
         destroy_domain(c)?;
-        if !reused {
+        let d = create_domain()?;
+        let want = a.min(c);
+        destroy_domain(b)?;
+        destroy_domain(d)?;
+        if d != want {
             serial_println!(
-                "[iommu_remap]   FAIL: domains {} and {}, {} destroyed, then {} given",
+                "[iommu_remap]   FAIL: domains {}, {} and {}, {} and {} destroyed, then {} given (want {})",
                 a,
                 b,
+                c,
                 a,
-                c
+                c,
+                d,
+                want
             );
             return Err(KernelError::InternalError);
         }
-        serial_println!("[iommu_remap]   domain ids given out again: OK");
+        serial_println!("[iommu_remap]   domain ids given out again, the lowest first: OK");
     }
 
     // Test 10: context entries as VT-d lays them out (§9.3): the address

@@ -176,12 +176,35 @@ does not depend on any driver of ours having initialised. If Limine's menu
 appears and then the screen goes black and stays black, the framebuffer handoff
 is where to look first.
 
-### There will probably be no serial log
+### There will probably be no serial log: put the log on the screen
 
 The boot test's entire verification model is serial markers, and a desktop
-motherboard generally exposes no DE-9 port. Expect to read results off the
-screen and photograph anything interesting. If the board has a COM *header*, a
-USB-TTL adapter on it gives the full log and is worth the five minutes.
+motherboard generally exposes no DE-9 port. Add **`log.screen=1`** to the
+kernel command line: every line the kernel writes to its serial log is then
+drawn on the screen as well -- the console keeps the top quarter, the log the
+rest, in a pane that wraps (the newest line is the one above
+`-- newest line above --`) rather than scrolls, because scrolling a real
+framebuffer is slow (`kernel/src/screenlog.rs`). A fault's report and the
+step a hang stopped at are then on the screen. It stops when the desktop
+takes the display.
+
+A real serial port still gives what a screen cannot: the whole log, kept. On
+a board with no COM header, a PCIe serial card does it (see §9).
+
+### Keep the machine's own disks safe: `blk.writable=`
+
+The kernel treats every physical disk (NVMe, SATA) as **read-only** unless
+the command line names it: writes and discards to any other are refused
+before a driver sees them (design-decisions §1575). Name the one disk a test
+may change by its EUI-64 or serial number, as the registration lines of a
+first boot print them:
+
+    blk.writable=eui64:0025385181b1cd22
+
+Windows prints an NVMe disk's EUI-64 as its "serial number"
+(`0025_3851_81B1_CD22.`), and that form can be pasted as it is. With no
+`blk.writable=` no disk is written at all, and a value that does not parse
+names none.
 
 ## 6. Known gaps on the first boot — expect these, they are not new bugs
 
@@ -261,7 +284,45 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 | Independent reader test over the image structures | **done** — `scripts/test-build-usb-image.py`, 6 groups green |
 | Image boots in the **diskless shape a stick actually has** | **done** — verified 2026-08-21: `--usb-image --no-rootfs` → `BOOT_OK` in 75 s, tagged as an experiment (see §6) |
 | Guarded writer for a physical stick | **done** — `scripts/write-usb-stick.ps1` |
-| On-screen progress channel | **exists**, never exercised outside QEMU |
+| On-screen progress channel | **done** -- the boot steps, and the whole log with `log.screen=1`; used on the test PC 2026-10-27 |
 | Recovery procedure | **documented above**, never exercised |
-| Boot on the operator's PC | **waiting on the operator being at the machine** |
+| Boot on the operator's PC | **in progress** on the test PC behind a PiKVM (§9) |
 | Intel iGPU driver written against the real chip | blocked on the row above (§263) |
+
+## 9. The test PC behind a PiKVM
+
+Since 2026-10-27 the operator's old PC is a test machine that SlateOS boots on
+with nobody at it, through a **PiKVM** (V4 Plus, `192.168.1.188`): a network
+device that captures the PC's screen, acts as its keyboard and mouse and as a
+USB drive, and works its power and reset buttons.
+
+| | |
+|---|---|
+| Board | Gigabyte Z370 AORUS Gaming 5-CF, firmware F6; F12 is the boot menu |
+| CPU / graphics | i7-8700K, Intel UHD Graphics 630 (the only GPU) |
+| Disks | `nvme0n1` = Samsung 980 PRO 2 TB, **Windows: never written**; `nvme1n1` = Samsung 960 EVO 1 TB, EUI-64 0025385181b1cd22, **may be wiped** |
+| Firmware | UEFI, Secure Boot off; nothing was changed for SlateOS |
+| Serial | none on the board; a PCIe serial card (AX99100) into a USB adapter on the PiKVM is planned |
+
+**A boot.** The staged ESP (Limine, the kernel, `limine.conf` with
+`blk.writable=eui64:0025385181b1cd22 log.screen=1` on the first entry) is made
+into a disk image (`scripts/build-usb-image.py`) and loaded onto the PiKVM's
+virtual USB drive (`/api/msd/write`, then `set_params cdrom=0`,
+`set_connected`). The PC is forced off and on (`/api/atx/power?action=off_hard`
+then `on`), F12 pressed through the PiKVM's keyboard until the boot menu shows,
+and `UEFI: PiKVM Flash Drive` chosen; screenshots (`/api/streamer/snapshot`)
+are the log. The PC's Windows keyboard layout is US Dvorak, which matters only
+when typing into Windows.
+
+**What the first boots found** (each fixed on `lane-a-wip`, none ever seen in
+QEMU):
+
+| Stop | Cause | Fixed by |
+|---|---|---|
+| Hardware tables | the IOMMU's registers read unmapped; and translation turned on over an empty table, which blocks every device's DMA | design-decisions §1576 |
+| Storage | AHCI's 2 KiB register block, not 16 KiB-aligned, left unmapped; five other drivers mapped the same way | `page_table::map_mmio` in every driver |
+| (no NVMe found) | the PCI scan read bus 0 only; both M.2 drives sit behind root ports | `pci::scan_all` walks every bridge |
+| Storage, after USB starts | the xHCI driver reset the controller without taking it from the firmware's USB legacy support, and scanned its ports before they could show a device | `xhci::take_from_firmware` (to be confirmed on the PC) |
+
+The write fence held throughout: the Windows disk registered read-only, the
+spare writable.

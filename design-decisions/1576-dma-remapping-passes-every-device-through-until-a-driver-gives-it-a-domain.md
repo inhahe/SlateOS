@@ -41,13 +41,22 @@ not flush the IOTLB.
   their failures are returned. A new mapping is flushed only on a unit in
   caching mode (CAP.CM), the one kind that may have cached its absence, and
   without draining: no DMA in flight can be using a translation that did
-  not exist.
+  not exist. A unit not in caching mode that asks for write-buffer flushing
+  (CAP.RWBF) has its write buffer flushed instead. A mapping made over a
+  present one is flushed as an unmapping is, on every unit, drained.
 - What firmware left on is taken back first: translation, interrupt
-  remapping, queued invalidation, and protected memory regions (PMEN, which
-  a TXT launch leaves on and which would block pass-through DMA).
+  remapping and queued invalidation. Protected memory regions (PMEN, which a
+  TXT launch leaves on and which would block pass-through DMA) are turned off
+  once translation is on, as Linux orders it, so that memory is never left
+  open between the two -- and on a unit left off, whose devices could not
+  otherwise reach it.
 - A domain's id is the lowest free one below what every unit holds
   (CAP.ND), and is given out again once the domain is destroyed and the
-  units have flushed it; a refused creation takes none.
+  units have flushed it; a refused creation takes none, and a destroy whose
+  flush fails leaves the domain as it was. A domain belongs to the process
+  that made it through the DMA system calls (`Caller`): another process's
+  call on it is refused as one on no domain, so a stale id, now another
+  driver's domain, reaches nothing.
 - A kexec turns translation off on every unit with no lock taken
   (`shutdown`): the other CPUs are stopped where they stood, and may hold
   any lock for good.

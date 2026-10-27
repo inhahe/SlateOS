@@ -282,6 +282,8 @@ struct Domain {
     device_count: u16,
     /// Total mapped pages (for statistics).
     mapped_pages: u64,
+    /// Who created it, and so who may use it ([`Caller`]).
+    owner: Caller,
 }
 
 impl Domain {
@@ -291,7 +293,24 @@ impl Domain {
         active: false,
         device_count: 0,
         mapped_pages: 0,
+        owner: Caller::Kernel,
     };
+
+    /// Whether `caller` may use this domain: the kernel any, a process the
+    /// ones it created. A process's stale id for a domain destroyed and
+    /// given out again -- ids are reused -- then names nothing it may use,
+    /// as before the reuse it named nothing at all.
+    fn allows(&self, caller: Caller) -> bool {
+        caller == Caller::Kernel || self.owner == caller
+    }
+}
+
+/// Who asks for a domain operation: the kernel's own code, or a process
+/// (by id) through the DMA system calls.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Caller {
+    Kernel,
+    Process(u64),
 }
 
 /// Domain table.
@@ -513,7 +532,12 @@ pub fn init() -> KernelResult<()> {
                 }
                 any = true;
             }
-            Err(e) => serial_println!("[iommu_remap]   unit {} not enabled: {:?}", i, e),
+            Err(e) => {
+                serial_println!("[iommu_remap]   unit {} not enabled: {:?}", i, e);
+                // Left off, as a unit refused at probe is. A failure is said,
+                // and the unit is off either way.
+                let _ = disable_protected_memory(mmio);
+            }
         }
     }
     if any {
@@ -566,6 +590,9 @@ fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
     quiesce_unit(mmio)?;
     if ecap_val & ecap::PT == 0 {
         serial_println!("[iommu_remap]   it cannot pass devices through (ECAP.PT clear)");
+        // Left off: what it would block, nothing else will open. A failure
+        // is said, and changes nothing about leaving the unit off.
+        let _ = disable_protected_memory(mmio);
         return Err(KernelError::NotSupported);
     }
     // SAGAW bit 2 is a 4-level table; a higher bit, a deeper one, which a
@@ -576,6 +603,8 @@ fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
             "[iommu_remap]   its deepest table is not 4-level (SAGAW {:#x})",
             sagaw
         );
+        // As above.
+        let _ = disable_protected_memory(mmio);
         return Err(KernelError::NotSupported);
     }
     // Its domain ids: no domain may have one it cannot hold.
@@ -592,8 +621,9 @@ fn domain_ids_of(cap_val: u64) -> u32 {
 }
 
 /// Turn off what the firmware may have left on in a unit: translation,
-/// interrupt remapping, queued invalidation -- its queue drained first, as
-/// the spec requires before it is turned off -- and protected memory.
+/// interrupt remapping, and queued invalidation -- its queue drained first,
+/// as the spec requires before it is turned off. Protected memory is turned
+/// off later ([`disable_protected_memory`]).
 fn quiesce_unit(mmio: u64) -> KernelResult<()> {
     let status = read_reg32(mmio, reg::GSTS);
     if status & gsts::TES != 0 {
@@ -623,32 +653,35 @@ fn quiesce_unit(mmio: u64) -> KernelResult<()> {
         wait_for_status(mmio, gsts::QIES, false)?;
         serial_println!("[iommu_remap]   queued invalidation the firmware left on: turned off");
     }
-    // Protected memory regions, which a TXT launch (tboot) leaves on: the
-    // unit blocks every DMA into them, pass-through DMA too, and every device
-    // here passes through. Linux turns them off the same way
-    // (`iommu_disable_protect_mem_regions`).
+    Ok(())
+}
+
+/// Turn off the protected memory regions a TXT launch (tboot) leaves on: the
+/// unit blocks every DMA into them, pass-through DMA too, and every device
+/// here passes through. Done once translation is on (`enable_unit`), as
+/// Linux's `init_dmars` orders it, so that memory is never left open between
+/// the two; and for a unit left off, whose devices could otherwise never
+/// reach that memory. Linux's `iommu_disable_protect_mem_regions`.
+fn disable_protected_memory(mmio: u64) -> KernelResult<()> {
     const PMEN_EPM: u32 = 1 << 31;
     const PMEN_PRS: u32 = 1;
-    if read_reg64(mmio, reg::CAP) & (cap::PLMR | cap::PHMR) != 0
-        && read_reg32(mmio, reg::PMEN) & (PMEN_EPM | PMEN_PRS) != 0
+    if read_reg64(mmio, reg::CAP) & (cap::PLMR | cap::PHMR) == 0
+        || read_reg32(mmio, reg::PMEN) & (PMEN_EPM | PMEN_PRS) == 0
     {
-        write_reg32(mmio, reg::PMEN, read_reg32(mmio, reg::PMEN) & !PMEN_EPM);
-        let mut cleared = false;
-        for _ in 0..INVALIDATION_POLLS {
-            if read_reg32(mmio, reg::PMEN) & PMEN_PRS == 0 {
-                cleared = true;
-                break;
-            }
+        return Ok(());
+    }
+    write_reg32(mmio, reg::PMEN, read_reg32(mmio, reg::PMEN) & !PMEN_EPM);
+    if !(0..INVALIDATION_POLLS).any(|_| {
+        let off = read_reg32(mmio, reg::PMEN) & PMEN_PRS == 0;
+        if !off {
             core::hint::spin_loop();
         }
-        if !cleared {
-            serial_println!(
-                "[iommu_remap]   protected memory the firmware left on would not turn off"
-            );
-            return Err(KernelError::TimedOut);
-        }
-        serial_println!("[iommu_remap]   protected memory the firmware left on: turned off");
+        off
+    }) {
+        serial_println!("[iommu_remap]   protected memory the firmware left on would not turn off");
+        return Err(KernelError::TimedOut);
     }
+    serial_println!("[iommu_remap]   protected memory the firmware left on: turned off");
     Ok(())
 }
 
@@ -693,6 +726,9 @@ fn enable_unit(mmio: u64, root: u64) -> KernelResult<()> {
     gcmd(mmio, gcmd::TE, 0);
     wait_for_status(mmio, gsts::TES, true)?;
     serial_println!("[iommu_remap]   Translation enabled");
+    // Translation is on whatever this does, so the unit is on: a failure is
+    // said, and leaves only DMA into the protected regions refused.
+    let _ = disable_protected_memory(mmio);
     Ok(())
 }
 
@@ -787,6 +823,12 @@ fn poll_clear(mmio: u64, offset: u64, bit: u64) -> KernelResult<()> {
 /// one, below what every unit can hold (CAP.ND): a destroyed domain's id is
 /// given out again once [`destroy_domain`] has flushed it.
 pub fn create_domain() -> KernelResult<DomainId> {
+    create_domain_as(Caller::Kernel)
+}
+
+/// [`create_domain`] for `caller`, the only one besides the kernel that may
+/// then use it ([`Caller`]).
+pub fn create_domain_as(caller: Caller) -> KernelResult<DomainId> {
     // The table first, so that a refusal for want of memory takes no id.
     let pml4 = page_table::alloc_pt_page()?;
     if let Some(hhdm) = page_table::hhdm() {
@@ -819,6 +861,7 @@ pub fn create_domain() -> KernelResult<DomainId> {
             active: true,
             device_count: 0,
             mapped_pages: 0,
+            owner: caller,
         };
     }
     drop(domains);
@@ -832,6 +875,12 @@ pub fn create_domain() -> KernelResult<DomainId> {
 ///
 /// Fails if devices are still attached.
 pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
+    destroy_domain_as(Caller::Kernel, domain_id)
+}
+
+/// [`destroy_domain`] for `caller`: `InvalidArgument` for a domain it may
+/// not use ([`Caller`]).
+pub fn destroy_domain_as(caller: Caller, domain_id: DomainId) -> KernelResult<()> {
     // Phase 1: validate and detach the page table from the domain table
     // under the DOMAINS lock.  Marking the domain inactive here makes every
     // subsequent map_dma / attach_device reject it, so no thread can add a
@@ -841,22 +890,22 @@ pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
     // PT_PAGE_POOL lock taken by free_pt_page.
     let pml4_phys = {
         let mut domains = DOMAINS.lock();
-        let slot = domain_id as usize;
-
-        if slot >= MAX_DOMAINS || !domains[slot].active {
+        let Some(domain) = domains
+            .get_mut(usize::from(domain_id))
+            .filter(|d| d.active && d.allows(caller))
+        else {
             return Err(KernelError::InvalidArgument);
-        }
-        if domains[slot].device_count > 0 {
+        };
+        if domain.device_count > 0 {
             return Err(KernelError::DeviceBusy);
         }
 
         // Its table stays named in the slot, which keeps the id from being
         // given out again (`create_domain`) until the units have forgotten it.
-        let pml4 = domains[slot].pml4_phys;
-        domains[slot].active = false;
-        domains[slot].mapped_pages = 0;
-        pml4
+        domain.active = false;
+        (domain.pml4_phys, core::mem::take(&mut domain.mapped_pages))
     };
+    let (pml4_phys, mapped_pages) = pml4_phys;
 
     // Phase 1b: the units forget the id. A device that left the domain was
     // flushed then, but a unit may still cache the domain's page-table
@@ -865,8 +914,14 @@ pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
     {
         let _invalidating = REMAP_LOCK.lock();
         if let Err(e) = flush_iotlb_domain(domain_id) {
+            // Put back as it was, for the caller to try again: inactive, it
+            // could never be reached -- nor its id given out -- again.
+            if let Some(domain) = DOMAINS.lock().get_mut(usize::from(domain_id)) {
+                domain.active = true;
+                domain.mapped_pages = mapped_pages;
+            }
             serial_println!(
-                "[iommu_remap] WARNING: domain {} not flushed ({:?}): its id and table are kept",
+                "[iommu_remap] WARNING: domain {} not flushed ({:?}): not destroyed",
                 domain_id,
                 e
             );
@@ -930,6 +985,19 @@ pub fn map_dma(
     size: usize,
     perms: DmaPerms,
 ) -> KernelResult<()> {
+    map_dma_as(Caller::Kernel, domain_id, bus_addr, phys_addr, size, perms)
+}
+
+/// [`map_dma`] for `caller`: `InvalidArgument` for a domain it may not use
+/// ([`Caller`]).
+pub fn map_dma_as(
+    caller: Caller,
+    domain_id: DomainId,
+    bus_addr: u64,
+    phys_addr: u64,
+    size: usize,
+    perms: DmaPerms,
+) -> KernelResult<()> {
     if size == 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -937,7 +1005,10 @@ pub fn map_dma(
     let pml4_phys = {
         let domains = DOMAINS.lock();
         let slot = domain_id as usize;
-        if slot >= MAX_DOMAINS || !domains[slot].active {
+        if !domains
+            .get(slot)
+            .is_some_and(|d| d.active && d.allows(caller))
+        {
             return Err(KernelError::InvalidArgument);
         }
         domains[slot].pml4_phys
@@ -947,11 +1018,14 @@ pub fn map_dma(
     let flags = perms.to_pte_flags();
     let pages = size.div_ceil(IOMMU_PAGE_SIZE);
 
+    // Whether a page was mapped already, to something else or with other
+    // permissions: a unit may hold its old translation, on any unit.
+    let mut replaced = false;
     for i in 0..pages {
         let offset = (i as u64) * (IOMMU_PAGE_SIZE as u64);
         let ba = bus_addr + offset;
         let pa = phys_addr + offset;
-        map_4k_slpt(pml4_phys, ba, pa, flags, hhdm)?;
+        replaced |= map_4k_slpt(pml4_phys, ba, pa, flags, hhdm)?;
     }
 
     // Update mapped page count.
@@ -962,9 +1036,15 @@ pub fn map_dma(
         }
     }
 
-    // A unit in caching mode may have cached these pages' absence.
+    // A replaced translation is flushed as an unmapped one is, on every unit,
+    // DMA drained first; new ones need telling only where a unit may have
+    // cached their absence, or holds table writes in a buffer.
     let _invalidating = REMAP_LOCK.lock();
-    flush_new_mappings(domain_id)?;
+    if replaced {
+        flush_iotlb_domain(domain_id)?;
+    } else {
+        flush_new_mappings(domain_id)?;
+    }
 
     Ok(())
 }
@@ -974,6 +1054,17 @@ pub fn map_dma(
 /// After this call, devices in this domain can no longer DMA to
 /// `bus_addr..bus_addr+size`.  An IOTLB flush is issued.
 pub fn unmap_dma(domain_id: DomainId, bus_addr: u64, size: usize) -> KernelResult<()> {
+    unmap_dma_as(Caller::Kernel, domain_id, bus_addr, size)
+}
+
+/// [`unmap_dma`] for `caller`: `InvalidArgument` for a domain it may not use
+/// ([`Caller`]).
+pub fn unmap_dma_as(
+    caller: Caller,
+    domain_id: DomainId,
+    bus_addr: u64,
+    size: usize,
+) -> KernelResult<()> {
     if size == 0 {
         return Err(KernelError::InvalidArgument);
     }
@@ -981,7 +1072,10 @@ pub fn unmap_dma(domain_id: DomainId, bus_addr: u64, size: usize) -> KernelResul
     let pml4_phys = {
         let domains = DOMAINS.lock();
         let slot = domain_id as usize;
-        if slot >= MAX_DOMAINS || !domains[slot].active {
+        if !domains
+            .get(slot)
+            .is_some_and(|d| d.active && d.allows(caller))
+        {
             return Err(KernelError::InvalidArgument);
         }
         domains[slot].pml4_phys
@@ -1020,6 +1114,18 @@ pub fn unmap_dma(domain_id: DomainId, bus_addr: u64, size: usize) -> KernelResul
 /// (identified by Bus:Device:Function) goes through the domain's
 /// page table.
 pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> KernelResult<()> {
+    attach_device_as(Caller::Kernel, domain_id, bus, device, function)
+}
+
+/// [`attach_device`] for `caller`: `InvalidArgument` for a domain it may not
+/// use ([`Caller`]).
+pub fn attach_device_as(
+    caller: Caller,
+    domain_id: DomainId,
+    bus: u8,
+    device: u8,
+    function: u8,
+) -> KernelResult<()> {
     if device >= 32 || function >= 8 {
         return Err(KernelError::InvalidArgument);
     }
@@ -1027,7 +1133,10 @@ pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
     let pml4_phys = {
         let domains = DOMAINS.lock();
         let slot = domain_id as usize;
-        if slot >= MAX_DOMAINS || !domains[slot].active {
+        if !domains
+            .get(slot)
+            .is_some_and(|d| d.active && d.allows(caller))
+        {
             return Err(KernelError::InvalidArgument);
         }
         domains[slot].pml4_phys
@@ -1088,6 +1197,18 @@ pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
 /// The device passes through untranslated again, as every device the
 /// kernel drives itself does.
 pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> KernelResult<()> {
+    detach_device_as(Caller::Kernel, domain_id, bus, device, function)
+}
+
+/// [`detach_device`] for `caller`: `InvalidArgument` for a domain it may not
+/// use ([`Caller`]).
+pub fn detach_device_as(
+    caller: Caller,
+    domain_id: DomainId,
+    bus: u8,
+    device: u8,
+    function: u8,
+) -> KernelResult<()> {
     if device >= 32 || function >= 8 {
         return Err(KernelError::InvalidArgument);
     }
@@ -1100,6 +1221,15 @@ pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
     }
 
     let _changing = REMAP_LOCK.lock();
+    // Under the lock a destroy takes too, so the domain cannot change hands
+    // between this and the detach.
+    if !DOMAINS
+        .lock()
+        .get(usize::from(domain_id))
+        .is_some_and(|d| d.active && d.allows(caller))
+    {
+        return Err(KernelError::InvalidArgument);
+    }
     let context_table = context_table_of(root_table, bus, hhdm)?;
     let devfn = ((device as usize) << 3) | (function as usize);
 
@@ -1143,14 +1273,16 @@ pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
 
 /// Map a single 4 KiB page in a domain's second-level page table.
 ///
-/// Creates intermediate levels as needed.
+/// Creates intermediate levels as needed. True when it replaced a leaf that
+/// was present: a unit may still hold that translation, which only a flush
+/// takes away (`map_dma`).
 fn map_4k_slpt(
     pml4_phys: u64,
     bus_addr: u64,
     phys_addr: u64,
     flags: u64,
     hhdm: u64,
-) -> KernelResult<()> {
+) -> KernelResult<bool> {
     // Extract page table indices from bus_addr (same layout as x86_64 VA).
     let pml4_idx = ((bus_addr >> 39) & 0x1FF) as usize;
     let pdpt_idx = ((bus_addr >> 30) & 0x1FF) as usize;
@@ -1168,13 +1300,13 @@ fn map_4k_slpt(
     let entry = (phys_addr & PHYS_ADDR_MASK) | flags;
 
     // SAFETY: pt_phys is a valid 4 KiB page, pt_idx < 512.
-    unsafe {
+    let old = unsafe {
         let pt_virt = (pt_phys + hhdm) as *mut u64;
-        core::ptr::write(pt_virt.add(pt_idx), entry);
-    }
+        core::ptr::replace(pt_virt.add(pt_idx), entry)
+    };
     sync_tables(entry_at(pt_phys, pt_idx, 8), 8, hhdm);
 
-    Ok(())
+    Ok(old & (slpte::READ | slpte::WRITE) != 0)
 }
 
 /// Unmap a single 4 KiB page in a domain's SLPT.
@@ -1449,21 +1581,28 @@ fn write_reg64(mmio_base: u64, offset: u64, value: u64) {
 ///
 /// Spins for up to ~100ms (1M iterations with memory barriers).
 fn wait_for_status(mmio_base: u64, bit: u32, expected_set: bool) -> KernelResult<()> {
-    for _ in 0..1_000_000 {
-        let gsts = read_reg32(mmio_base, reg::GSTS);
-        let is_set = (gsts & bit) != 0;
-        if is_set == expected_set {
-            return Ok(());
-        }
-        core::hint::spin_loop();
+    if status_reached(mmio_base, bit, expected_set) {
+        return Ok(());
     }
-
     serial_println!(
         "[iommu_remap] Timeout waiting for GSTS bit {:#x} = {}",
         bit,
         expected_set
     );
     Err(KernelError::TimedOut)
+}
+
+/// Whether GSTS `bit` comes to read `expected_set` within a million polls.
+/// Prints nothing, so that a caller with the other CPUs stopped -- one of
+/// them may hold the serial log's lock for good -- can use it (`shutdown`).
+fn status_reached(mmio_base: u64, bit: u32, expected_set: bool) -> bool {
+    (0..1_000_000).any(|_| {
+        let reached = (read_reg32(mmio_base, reg::GSTS) & bit != 0) == expected_set;
+        if !reached {
+            core::hint::spin_loop();
+        }
+        reached
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1482,16 +1621,23 @@ fn flush_iotlb_domain(domain_id: DomainId) -> KernelResult<()> {
     for_each_unit_on(|mmio| invalidate_iotlb(mmio, Some(domain_id), true))
 }
 
-/// Tell every unit in caching mode of domain `domain_id`'s new translations:
-/// such a unit may have cached their absence (VT-d §6.1). One not in caching
-/// mode caches no absence, and is left alone; and no DMA in flight can use a
-/// translation that did not exist, so none is drained first.
+/// Tell every unit of domain `domain_id`'s new translations as it needs:
+/// one in caching mode may have cached their absence, and has its IOTLB
+/// invalidated (VT-d §6.1); one that is not, but asks for write-buffer
+/// flushing (CAP.RWBF), has its write buffer flushed, so that its walks see
+/// the new entries (§6.8, Linux's `iommu_flush_write_buffer`). No DMA in
+/// flight can use a translation that did not exist, so none is drained.
 fn flush_new_mappings(domain_id: DomainId) -> KernelResult<()> {
     for_each_unit_on(|mmio| {
-        if read_reg64(mmio, reg::CAP) & cap::CM == 0 {
-            return Ok(());
+        let cap_val = read_reg64(mmio, reg::CAP);
+        if cap_val & cap::CM != 0 {
+            return invalidate_iotlb(mmio, Some(domain_id), false);
         }
-        invalidate_iotlb(mmio, Some(domain_id), false)
+        if cap_val & cap::RWBF != 0 {
+            gcmd(mmio, gcmd::WBF, 0);
+            return wait_for_status(mmio, gsts::WBFS, false);
+        }
+        Ok(())
     })
 }
 
@@ -1524,9 +1670,9 @@ fn for_each_unit_on(f: impl Fn(u64) -> KernelResult<()>) -> KernelResult<()> {
 /// before it replaces the tables (`quiesce_unit`).
 ///
 /// Called with every other CPU stopped where it stood (`kexec::quiesce`),
-/// so it takes no lock: one of them may hold [`REMAP_LOCK`] for good. What
-/// that CPU was doing to a unit's tables no longer matters once translation
-/// is off.
+/// so it takes no lock and prints nothing: one of them may hold
+/// [`REMAP_LOCK`], or the serial log's lock, for good. What that CPU was
+/// doing to a unit's tables no longer matters once translation is off.
 pub fn shutdown() {
     for regs in &UNIT_REGS {
         let mmio = regs.load(Ordering::Acquire);
@@ -1534,7 +1680,7 @@ pub fn shutdown() {
             continue;
         }
         gcmd(mmio, 0, gcmd::TE);
-        if wait_for_status(mmio, gsts::TES, false).is_ok() {
+        if status_reached(mmio, gsts::TES, false) {
             regs.store(0, Ordering::Release);
         }
     }
@@ -1842,6 +1988,64 @@ pub fn self_test() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[iommu_remap]   domain ids given out again, the lowest first: OK");
+    }
+
+    // Test 9c: a mapping made over one that is present says so, which is
+    // what has map_dma flush it on every unit: a unit not in caching mode
+    // would otherwise keep the old translation.
+    {
+        let d = create_domain()?;
+        let pml4 = DOMAINS
+            .lock()
+            .get(usize::from(d))
+            .map_or(0, |dom| dom.pml4_phys);
+        let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        let bus = 0x7000_0000;
+        let rw = slpte::READ | slpte::WRITE;
+        let fresh = map_4k_slpt(pml4, bus, 0x60_0000, rw, hhdm);
+        let over = map_4k_slpt(pml4, bus, 0x61_0000, slpte::READ, hhdm);
+        unmap_4k_slpt(pml4, bus, hhdm);
+        let after_unmap = map_4k_slpt(pml4, bus, 0x62_0000, rw, hhdm);
+        destroy_domain(d)?;
+        if (fresh, over, after_unmap) != (Ok(false), Ok(true), Ok(false)) {
+            serial_println!(
+                "[iommu_remap]   FAIL: replaced leaf reported as {:?}, {:?}, {:?} (want false, true, false)",
+                fresh,
+                over,
+                after_unmap
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[iommu_remap]   a mapping over a present one says so: OK");
+    }
+
+    // Test 9d: a process's domain is its own: another process's map and
+    // destroy of it are refused, as of a domain that is not there; its own
+    // go through.
+    {
+        let (mine, theirs) = (Caller::Process(0x7001), Caller::Process(0x7002));
+        let d = create_domain_as(mine)?;
+        let page = IOMMU_PAGE_SIZE;
+        let foreign_map = map_dma_as(theirs, d, 0x7100_0000, 0x63_0000, page, DmaPerms::READ);
+        let foreign_destroy = destroy_domain_as(theirs, d);
+        let own_map = map_dma_as(mine, d, 0x7100_0000, 0x63_0000, page, DmaPerms::READ);
+        let own_destroy = destroy_domain_as(mine, d);
+        if foreign_map != Err(KernelError::InvalidArgument)
+            || foreign_destroy != Err(KernelError::InvalidArgument)
+            || own_map.is_err()
+            || own_destroy.is_err()
+        {
+            serial_println!(
+                "[iommu_remap]   FAIL: another process's map {:?} and destroy {:?}, the owner's {:?} and {:?}",
+                foreign_map,
+                foreign_destroy,
+                own_map,
+                own_destroy
+            );
+            let _ = destroy_domain(d);
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[iommu_remap]   a process's domain refuses every other process: OK");
     }
 
     // Test 10: context entries as VT-d lays them out (§9.3): the address

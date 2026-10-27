@@ -873,7 +873,11 @@ pub fn sys_dma_domain_create(_args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    match crate::iommu_remap::create_domain() {
+    // The domain is the calling process's: only it may use it (`Caller`).
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NotPermitted);
+    };
+    match crate::iommu_remap::create_domain_as(crate::iommu_remap::Caller::Process(pid)) {
         Ok(id) => SyscallResult::ok(id as i64),
         Err(e) => SyscallResult::err(e),
     }
@@ -887,7 +891,11 @@ pub fn sys_dma_domain_destroy(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    match crate::iommu_remap::destroy_domain(domain_id) {
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NotPermitted);
+    };
+    match crate::iommu_remap::destroy_domain_as(crate::iommu_remap::Caller::Process(pid), domain_id)
+    {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -912,7 +920,17 @@ pub fn sys_dma_map(args: &SyscallArgs) -> SyscallResult {
         _ => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    match crate::iommu_remap::map_dma(domain_id, bus_addr, phys_addr, size, perms) {
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NotPermitted);
+    };
+    match crate::iommu_remap::map_dma_as(
+        crate::iommu_remap::Caller::Process(pid),
+        domain_id,
+        bus_addr,
+        phys_addr,
+        size,
+        perms,
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -928,7 +946,15 @@ pub fn sys_dma_unmap(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    match crate::iommu_remap::unmap_dma(domain_id, bus_addr, size) {
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NotPermitted);
+    };
+    match crate::iommu_remap::unmap_dma_as(
+        crate::iommu_remap::Caller::Process(pid),
+        domain_id,
+        bus_addr,
+        size,
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -945,7 +971,16 @@ pub fn sys_dma_attach(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    match crate::iommu_remap::attach_device(domain_id, bus, device, function) {
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NotPermitted);
+    };
+    match crate::iommu_remap::attach_device_as(
+        crate::iommu_remap::Caller::Process(pid),
+        domain_id,
+        bus,
+        device,
+        function,
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -962,7 +997,16 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
-    match crate::iommu_remap::detach_device(domain_id, bus, device, function) {
+    let Some(pid) = caller_pid() else {
+        return SyscallResult::err(KernelError::NotPermitted);
+    };
+    match crate::iommu_remap::detach_device_as(
+        crate::iommu_remap::Caller::Process(pid),
+        domain_id,
+        bus,
+        device,
+        function,
+    ) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }

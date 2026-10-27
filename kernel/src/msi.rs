@@ -32,8 +32,10 @@
 //! ## Vector Allocation
 //!
 //! This module maintains a pool of IDT vectors available for MSI allocation.
-//! Vectors 48-223 are reserved for device MSI (below 48: exceptions and
-//! legacy IRQs; above 223: system vectors like IPI, TLB shootdown, etc.).
+//! Vectors 64-223 are reserved for device MSI (below: exceptions, the timer
+//! and the I/O APIC's lines; above: the IPIs and the spurious vector). Each
+//! has an IDT stub that calls [`dispatch`], which counts the interrupt for
+//! the device handle owning the vector and wakes its waiter.
 //!
 //! ## References
 //!
@@ -59,14 +61,14 @@ const MSI_ADDRESS_BASE: u32 = 0xFEE0_0000;
 /// First IDT vector available for MSI allocation: above the I/O APIC's
 /// lines (`ioapic::IRQ_VECTOR_BASE` 33 up to 56), which an MSI vector must
 /// never share -- a device's message would run another line's handler.
-const MSI_VECTOR_BASE: u8 = 64;
+pub const MSI_VECTOR_BASE: u8 = 64;
 
 /// Last IDT vector available for MSI allocation: below the IPIs (250-252)
 /// and the spurious vector (255).
-const MSI_VECTOR_MAX: u8 = 223;
+pub const MSI_VECTOR_MAX: u8 = 223;
 
 /// Total MSI vectors available.
-const MSI_VECTOR_COUNT: usize = (MSI_VECTOR_MAX - MSI_VECTOR_BASE + 1) as usize;
+pub const MSI_VECTOR_COUNT: usize = (MSI_VECTOR_MAX - MSI_VECTOR_BASE + 1) as usize;
 
 /// PCI capability IDs.
 const PCI_CAP_ID_MSI: u8 = 0x05;
@@ -85,6 +87,14 @@ const MSIX_CONTROL_FUNCTION_MASK: u16 = 1 << 14;
 // Delivery
 // ---------------------------------------------------------------------------
 
+/// The device handle each vector's interrupts are counted for (its raw
+/// value; 0 for none). Interrupts on a vector no one owns are not counted, so
+/// the next owner never inherits them.
+static OWNER: [AtomicU64; MSI_VECTOR_COUNT] = {
+    const NONE: AtomicU64 = AtomicU64::new(0);
+    [NONE; MSI_VECTOR_COUNT]
+};
+
 /// Interrupts counted per vector since its owner last took them: added to by
 /// the interrupt handler ([`dispatch`]), taken by the owner ([`take`]).
 static PENDING: [AtomicU64; MSI_VECTOR_COUNT] = {
@@ -92,11 +102,23 @@ static PENDING: [AtomicU64; MSI_VECTOR_COUNT] = {
     [ZERO; MSI_VECTOR_COUNT]
 };
 
-/// The task woken when a vector fires, `u64::MAX` for none.
+/// The task waiting for a vector, `u64::MAX` for none: one at a time.
 static WAITER: [AtomicU64; MSI_VECTOR_COUNT] = {
     const NONE: AtomicU64 = AtomicU64::new(u64::MAX);
     [NONE; MSI_VECTOR_COUNT]
 };
+
+/// Set when [`dispatch`]'s wake of a vector's waiter was refused (the
+/// scheduler's lock busy), cleared once [`process_deferred_wakes`] makes it.
+static WAKE_OWED: [AtomicBool; MSI_VECTOR_COUNT] = {
+    const NO: AtomicBool = AtomicBool::new(false);
+    [NO; MSI_VECTOR_COUNT]
+};
+
+/// Serialises the owner's operations on a vector -- claiming, releasing,
+/// taking, registering a waiter -- so none acts on a vector that has
+/// meanwhile changed hands. The interrupt handler never takes it.
+static DELIVERY: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
 /// The index of `vector` in the pool, if it is one.
 fn pool_index(vector: u8) -> Option<usize> {
@@ -106,62 +128,156 @@ fn pool_index(vector: u8) -> Option<usize> {
 }
 
 /// An interrupt arrived on MSI `vector` (the IDT dispatcher's arm for the
-/// pool): counted, its waiter woken, and the local APIC told it is done.
-/// Interrupt context: atomics and a try-lock wake only. A wake the scheduler
-/// lock refused is retried by [`process_deferred_wakes`].
+/// pool): counted for its owner, its waiter woken, the local APIC told it is
+/// done, and the softirqs it may have raised run -- as an I/O APIC line's
+/// handler does. Interrupt context: atomics and a try-lock wake only.
+///
+/// The count and the waiter are read in sequentially consistent order, as
+/// a waiter registers itself and then looks at the count, so one of the two
+/// always sees the other: an interrupt is never counted unseen by a waiter
+/// that missed its wake.
 pub fn dispatch(vector: u8) {
+    crate::cputime::enter_irq();
+    crate::ktrace::record(
+        crate::ktrace::Category::Irq,
+        crate::ktrace::event::IRQ_ENTER,
+        u64::from(vector),
+        crate::sched::current_cpu_id() as u64,
+    );
     if let Some(index) = pool_index(vector)
-        && let (Some(pending), Some(waiter)) = (PENDING.get(index), WAITER.get(index))
+        && OWNER
+            .get(index)
+            .is_some_and(|o| o.load(Ordering::SeqCst) != 0)
+        && let (Some(pending), Some(waiter), Some(owed)) =
+            (PENDING.get(index), WAITER.get(index), WAKE_OWED.get(index))
     {
-        pending.fetch_add(1, Ordering::Release);
-        let task = waiter.load(Ordering::Acquire);
+        pending.fetch_add(1, Ordering::SeqCst);
+        let task = waiter.load(Ordering::SeqCst);
         if task != u64::MAX && !crate::sched::try_wake(task) {
+            owed.store(true, Ordering::Release);
             crate::softirq::raise(crate::softirq::IRQ_POLL_SOFTIRQ);
         }
     }
     // SAFETY: called from the interrupt handler for this vector, which the
     // local APIC delivered and now expects to be told is finished.
     unsafe { crate::apic::eoi() };
+    // SAFETY: after EOI, at the end of an interrupt handler, as
+    // `ioapic::handle_device_irq` runs them.
+    unsafe { crate::softirq::process_pending() };
+    crate::ktrace::record(
+        crate::ktrace::Category::Irq,
+        crate::ktrace::event::IRQ_EXIT,
+        u64::from(vector),
+        crate::sched::current_cpu_id() as u64,
+    );
+    crate::cputime::exit_irq();
 }
 
-/// Take, and clear, the interrupts counted on `vector`.
-pub fn take(vector: u8) -> u64 {
-    pool_index(vector)
-        .and_then(|index| PENDING.get(index))
-        .map_or(0, |pending| pending.swap(0, Ordering::AcqRel))
-}
-
-/// Whether `vector` has interrupts counted, without taking them.
+/// Make `owner` (a device handle's raw value, not 0) the one `vector`'s
+/// interrupts are counted for, starting from nothing. Refused (`false`) for
+/// a vector outside the pool or owned already.
 #[must_use]
-pub fn is_pending(vector: u8) -> bool {
-    pool_index(vector)
-        .and_then(|index| PENDING.get(index))
-        .is_some_and(|pending| pending.load(Ordering::Acquire) > 0)
-}
-
-/// Make `task` the one woken when `vector` fires (`u64::MAX`: no one).
-pub fn set_waiter(vector: u8, task: u64) {
-    if let Some(waiter) = pool_index(vector).and_then(|index| WAITER.get(index)) {
-        waiter.store(task, Ordering::Release);
-    }
-}
-
-/// Let go of `vector`'s delivery before the vector is freed: its waiter is
-/// woken (to find its device gone) and forgotten, and its count dropped, so
-/// the next owner of the vector starts from nothing.
-pub fn release_delivery(vector: u8) {
+pub fn claim_delivery(vector: u8, owner: u64) -> bool {
+    let _serial = DELIVERY.lock();
     let Some(index) = pool_index(vector) else {
-        return;
+        return false;
     };
-    if let Some(waiter) = WAITER.get(index) {
-        let task = waiter.swap(u64::MAX, Ordering::AcqRel);
-        if task != u64::MAX {
-            let _woken = crate::sched::try_wake(task);
+    let (Some(slot), Some(pending), Some(waiter), Some(owed)) = (
+        OWNER.get(index),
+        PENDING.get(index),
+        WAITER.get(index),
+        WAKE_OWED.get(index),
+    ) else {
+        return false;
+    };
+    if owner == 0 || slot.load(Ordering::SeqCst) != 0 {
+        return false;
+    }
+    pending.store(0, Ordering::SeqCst);
+    waiter.store(u64::MAX, Ordering::SeqCst);
+    owed.store(false, Ordering::Release);
+    slot.store(owner, Ordering::SeqCst);
+    true
+}
+
+/// Let go of `vector`'s delivery before the vector is freed, if `owner` has
+/// it: no longer counted, its waiter woken to find it gone -- a full wake,
+/// this being no interrupt -- and its count dropped.
+pub fn release_delivery(vector: u8, owner: u64) {
+    let task = {
+        let _serial = DELIVERY.lock();
+        let Some(index) = pool_index(vector) else {
+            return;
+        };
+        if OWNER
+            .get(index)
+            .is_none_or(|o| o.load(Ordering::SeqCst) != owner)
+        {
+            return;
         }
+        if let Some(slot) = OWNER.get(index) {
+            slot.store(0, Ordering::SeqCst);
+        }
+        if let Some(pending) = PENDING.get(index) {
+            pending.store(0, Ordering::SeqCst);
+        }
+        WAITER
+            .get(index)
+            .map_or(u64::MAX, |w| w.swap(u64::MAX, Ordering::SeqCst))
+    };
+    if task != u64::MAX {
+        crate::sched::wake(task);
     }
-    if let Some(pending) = PENDING.get(index) {
-        pending.store(0, Ordering::Release);
+}
+
+/// Take, and clear, the interrupts counted on `vector` for `owner`: `None`
+/// when `owner` no longer has it.
+#[must_use]
+pub fn take(vector: u8, owner: u64) -> Option<u64> {
+    let _serial = DELIVERY.lock();
+    let index = pool_index(vector)?;
+    if OWNER.get(index)?.load(Ordering::SeqCst) != owner {
+        return None;
     }
+    Some(PENDING.get(index)?.swap(0, Ordering::SeqCst))
+}
+
+/// Register `task` as the one waiting for `vector`, owned by `owner`:
+/// `DeviceBusy` when another task waits already, `InvalidHandle` when
+/// `owner` no longer has the vector.
+pub fn register_waiter(vector: u8, owner: u64, task: u64) -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    let _serial = DELIVERY.lock();
+    let index = pool_index(vector).ok_or(KernelError::InvalidHandle)?;
+    if OWNER
+        .get(index)
+        .is_none_or(|o| o.load(Ordering::SeqCst) != owner)
+    {
+        return Err(KernelError::InvalidHandle);
+    }
+    let waiter = WAITER.get(index).ok_or(KernelError::InvalidHandle)?;
+    match waiter.compare_exchange(u64::MAX, task, Ordering::SeqCst, Ordering::SeqCst) {
+        Ok(_) => Ok(()),
+        Err(current) if current == task => Ok(()),
+        Err(_) => Err(KernelError::DeviceBusy),
+    }
+}
+
+/// `task` stops waiting for `vector`, if it is the one waiting.
+pub fn unregister_waiter(vector: u8, task: u64) {
+    let _serial = DELIVERY.lock();
+    if let Some(waiter) = pool_index(vector).and_then(|index| WAITER.get(index)) {
+        let _was = waiter.compare_exchange(task, u64::MAX, Ordering::SeqCst, Ordering::SeqCst);
+    }
+}
+
+/// The task registered as waiting for `vector`, if one is.
+#[must_use]
+pub fn waiter_of(vector: u8) -> Option<u64> {
+    pool_index(vector)
+        .and_then(|index| WAITER.get(index))
+        .map(|w| w.load(Ordering::SeqCst))
+        .filter(|&task| task != u64::MAX)
 }
 
 /// Whether `vector` is allocated from the pool.
@@ -172,55 +288,98 @@ pub fn is_allocated(vector: u8) -> bool {
         .is_some_and(|allocated| allocated.load(Ordering::Acquire))
 }
 
-/// Retry the wakes [`dispatch`] could not make: each vector with interrupts
-/// counted wakes its waiter. Called with the I/O APIC lines' deferred wakes.
+/// Make the wakes [`dispatch`] owes: only those it could not make, so a
+/// waiter is not woken again for an interrupt it was woken for already.
+/// Called with the I/O APIC lines' deferred wakes, on each timer tick.
 pub fn process_deferred_wakes() {
-    for (pending, waiter) in PENDING.iter().zip(WAITER.iter()) {
-        if pending.load(Ordering::Acquire) == 0 {
+    for (owed, waiter) in WAKE_OWED.iter().zip(WAITER.iter()) {
+        if !owed.load(Ordering::Acquire) {
             continue;
         }
-        let task = waiter.load(Ordering::Acquire);
-        if task != u64::MAX {
-            let _woken = crate::sched::try_wake(task);
+        let task = waiter.load(Ordering::SeqCst);
+        if task == u64::MAX || crate::sched::try_wake(task) {
+            owed.store(false, Ordering::Release);
         }
     }
 }
 
-/// An interrupt sent to this CPU on a pool vector reaches [`dispatch`] and is
-/// counted, and [`take`] hands the count over once. Sent as an IPI to the
-/// local APIC itself, so it needs no device; run once interrupts are on.
-pub fn self_test_delivery() -> crate::error::KernelResult<()> {
-    let Some(vector) = alloc_vector() else {
-        serial_println!("[msi]   FAIL: delivery: no vector free");
-        return Err(crate::error::KernelError::InternalError);
-    };
-    let _stale = take(vector);
-    let Some(apic_id) = crate::smp::cpu_apic_id(crate::smp::fast_cpu_index()) else {
-        free_vector(vector);
-        serial_println!("[msi]   FAIL: delivery: this CPU has no APIC id");
-        return Err(crate::error::KernelError::InternalError);
-    };
-    // SAFETY: a fixed IPI to this CPU's own APIC on a vector the IDT has a
-    // stub for (the pool's), which only counts it.
-    unsafe { crate::apic::send_fixed_ipi(apic_id, vector) };
+/// How long a self-test waits for an interrupt it sent: 100 ms by the HPET,
+/// and at most this many spins, so a machine without an HPET (whose clock
+/// stays 0) fails the test rather than hangs the boot.
+const SELF_TEST_SPINS: u32 = 50_000_000;
+
+/// Spin until `ready` or the self-test's bound runs out.
+fn wait_briefly(mut ready: impl FnMut() -> bool) -> bool {
     let deadline = crate::hpet::elapsed_ns().saturating_add(100_000_000);
-    while !is_pending(vector) && crate::hpet::elapsed_ns() < deadline {
+    for _ in 0..SELF_TEST_SPINS {
+        if ready() {
+            return true;
+        }
+        if crate::hpet::elapsed_ns() > deadline {
+            break;
+        }
         core::hint::spin_loop();
     }
-    let first = take(vector);
-    let second = take(vector);
-    free_vector(vector);
-    if first != 1 || second != 0 {
+    ready()
+}
+
+/// An interrupt sent to this CPU on a pool vector reaches [`dispatch`] and is
+/// counted for its owner, and [`take`] hands the count over once; an
+/// interrupt on a vector no one owns is not counted. Sent as an IPI to the
+/// local APIC itself, so it needs no device; run once interrupts are on.
+pub fn self_test_delivery() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    const OWNER_TAG: u64 = 0xD15_7E57;
+    let Some(vector) = alloc_vector() else {
+        serial_println!("[msi]   FAIL: delivery: no vector free");
+        return Err(KernelError::InternalError);
+    };
+    // Unowned: the interrupt arrives and is not counted.
+    // SAFETY: a self-IPI on a vector the IDT has a stub for (the pool's),
+    // which only counts it; the APIC is up (interrupts are on).
+    unsafe { crate::apic::send_self_ipi(vector) };
+    let _settled = wait_briefly(|| false);
+    if !claim_delivery(vector, OWNER_TAG) {
+        free_vector(vector);
         serial_println!(
-            "[msi]   FAIL: delivery: vector {} counted {} then {} (want 1 then 0)",
-            vector,
-            first,
-            second
+            "[msi]   FAIL: delivery: vector {} could not be claimed",
+            vector
         );
-        return Err(crate::error::KernelError::InternalError);
+        return Err(KernelError::InternalError);
+    }
+    let inherited = take(vector, OWNER_TAG);
+    // Owned: counted once, taken once.
+    // SAFETY: as above.
+    unsafe { crate::apic::send_self_ipi(vector) };
+    let mut first: u64 = 0;
+    let _arrived = wait_briefly(|| {
+        first = first.saturating_add(take(vector, OWNER_TAG).unwrap_or(0));
+        first > 0
+    });
+    let second = take(vector, OWNER_TAG);
+    let stranger = take(vector, OWNER_TAG ^ 1);
+    release_delivery(vector, OWNER_TAG);
+    let after = take(vector, OWNER_TAG);
+    free_vector(vector);
+    if inherited != Some(0)
+        || first != 1
+        || second != Some(0)
+        || stranger.is_some()
+        || after.is_some()
+    {
+        serial_println!(
+            "[msi]   FAIL: delivery: vector {}: inherited {:?}, counted {} then {:?}, a stranger took {:?}, after release {:?}",
+            vector,
+            inherited,
+            first,
+            second,
+            stranger,
+            after
+        );
+        return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[msi]   delivery: OK (vector {} reached dispatch once)",
+        "[msi]   delivery: OK (vector {}: unowned not counted, owned counted once)",
         vector
     );
     Ok(())
@@ -400,6 +559,29 @@ pub fn find_msi_capability(bus: u8, device: u8, function: u8) -> Option<MsiConfi
 /// Allocates a vector, programs the MSI registers, and enables MSI.
 /// Returns the allocated vector number on success.
 pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
+    // MSI-X off first, should firmware have left it on: the specification
+    // forbids both enabled at once, and what a function then does is its own.
+    let msix_at = pci::walk_capabilities(pci::PciAddress {
+        bus: config.bus,
+        device: config.device,
+        function: config.function,
+    })
+    .into_iter()
+    .find(|c| c.id == 0x11)
+    .map(|c| c.offset.wrapping_add(2));
+    if let Some(control) = msix_at {
+        let value = pci::config_read16(config.bus, config.device, config.function, control);
+        if value & (1 << 15) != 0 {
+            pci::config_write16_native(
+                config.bus,
+                config.device,
+                config.function,
+                control,
+                value & !(1 << 15),
+            );
+        }
+    }
+
     // Allocate a vector.
     let vector = alloc_vector()?;
     config.allocated_vector = vector;
@@ -433,7 +615,9 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
         dev,
         func,
         cap.wrapping_add(2),
-        msg_control | MSI_CONTROL_ENABLE,
+        // Multiple Message Enable (bits 6:4) to 0: one vector is allocated,
+        // whatever the function held before.
+        (msg_control & !(0b111 << 4)) | MSI_CONTROL_ENABLE,
     );
 
     // Disable legacy INTx (set bit 10 of PCI Command register).
@@ -470,6 +654,10 @@ pub fn disable_msi(config: &mut MsiConfig) {
         cap.wrapping_add(2),
         msg_control & !MSI_CONTROL_ENABLE,
     );
+    // Legacy INTx back on (Command bit 10), as `enable_msi` found it off:
+    // the function goes back to whoever drives it next able to interrupt.
+    let cmd = pci::config_read16(bus, dev, func, 4);
+    pci::config_write16_native(bus, dev, func, 4, cmd & !(1 << 10));
 
     // Free allocated vectors.
     free_vectors(config.allocated_vector, config.allocated_count as usize);

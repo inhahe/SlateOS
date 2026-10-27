@@ -756,7 +756,11 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
         }
         // `msi`'s pool: a driver's device signalling by message.
         #[allow(clippy::cast_possible_truncation)] // 64..=223 fits a u8.
-        v @ 64..=223 => crate::msi::dispatch(v as u8),
+        v if (u64::from(crate::msi::MSI_VECTOR_BASE)..=u64::from(crate::msi::MSI_VECTOR_MAX))
+            .contains(&v) =>
+        {
+            crate::msi::dispatch(v as u8);
+        }
         _ => {}
     }
 }
@@ -1189,11 +1193,14 @@ irq_stub!(isr_irq23, 56);
 // MSI vectors (`msi`'s pool, 64..=223): one stub each, every one dispatched to
 // `msi::dispatch` by the arm in `dispatch_vector`. A userspace driver's device
 // signals on one of these (design-decisions 1579).
+// The list below is written for these bounds: one changed alone fails here.
+const _: () = assert!(crate::msi::MSI_VECTOR_BASE == 64 && crate::msi::MSI_VECTOR_MAX == 223);
 macro_rules! msi_stubs {
     ($($stub:ident = $vector:literal),* $(,)?) => {
         $( irq_stub!($stub, $vector); )*
-        /// The MSI pool's stubs, in vector order from 64.
-        static MSI_STUBS: &[unsafe extern "C" fn()] = &[$($stub),*];
+        /// The MSI pool's stubs, in vector order from its base: as many as
+        /// the pool has vectors, or this does not compile.
+        static MSI_STUBS: [unsafe extern "C" fn(); crate::msi::MSI_VECTOR_COUNT] = [$($stub),*];
     };
 }
 msi_stubs!(
@@ -5081,7 +5088,8 @@ pub unsafe fn init() {
 
         // MSI vectors 64..=223, the pool `msi` hands out to drivers' devices.
         for (i, &stub) in MSI_STUBS.iter().enumerate() {
-            idt.entries[64 + i] = IdtEntry::new(stub as *const () as u64, cs, 0, 0);
+            idt.entries[usize::from(crate::msi::MSI_VECTOR_BASE) + i] =
+                IdtEntry::new(stub as *const () as u64, cs, 0, 0);
         }
 
         // Fill remaining vectors with the default handler.

@@ -757,6 +757,25 @@ pub unsafe fn send_ipi_all_excluding_self(vector: u8) {
     wait_icr_idle();
 }
 
+/// Send a fixed-mode IPI to this CPU itself, by the ICR's "self" shorthand
+/// (bits 19:18 = 01): the mechanism a self-IPI is meant to use, one
+/// register write, so nothing can slip between two writes as it can for
+/// [`send_fixed_ipi`]. The interrupt is taken once interrupts are on.
+///
+/// # Safety
+///
+/// APIC must be initialized. The vector must have a valid ISR in the IDT.
+pub unsafe fn send_self_ipi(vector: u8) {
+    crate::cpu::without_interrupts(|| {
+        wait_icr_idle();
+        // SAFETY: Valid APIC register write: fixed delivery, edge, self.
+        unsafe {
+            apic_write(APIC_ICR_LOW, 0x0004_0000 | u32::from(vector));
+        }
+        wait_icr_idle();
+    });
+}
+
 /// Send a fixed-mode IPI to a specific CPU (by APIC ID).
 ///
 /// The target CPU's ISR at `vector` will fire.  Used for targeted

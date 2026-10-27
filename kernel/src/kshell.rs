@@ -128106,7 +128106,11 @@ fn cmd_msi() {
         "  Vectors free:      {}",
         st.vectors_total.saturating_sub(st.vectors_used as usize)
     );
-    shell_println!("  Vector range:      48 - 223 (IDT)");
+    shell_println!(
+        "  Vector range:      {} - {} (IDT)",
+        crate::msi::MSI_VECTOR_BASE,
+        crate::msi::MSI_VECTOR_MAX
+    );
 }
 
 /// `kevent` — display kernel event bus statistics.

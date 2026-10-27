@@ -12,7 +12,9 @@
 //! held handle of `ResourceType::PciDevice`, never inherited, so it has one
 //! holder. Its holder's exit closes it with the rest of its held handles
 //! (`pcb::exit_close_fds`), before the address space its BARs and arenas are
-//! mapped in is released. Not here yet (roadmap.md 2.1): interrupts.
+//! mapped in is released. Interrupts are MSI, one vector, taken or waited
+//! for through the handle (`msi` delivers them); MSI-X, INTx and readiness
+//! in `SYS_WAIT_MULTIPLE` are not here yet (roadmap.md 2.1).
 
 use crate::error::{KernelError, KernelResult};
 use crate::iommu_remap::{self, Caller, DmaPerms};
@@ -82,6 +84,8 @@ struct Device {
     arenas: Vec<Arena>,
     /// Its MSI, once set up: the vector its messages arrive on.
     msi: Option<crate::msi::MsiConfig>,
+    /// An MSI set-up in progress (made outside the table's lock).
+    msi_busy: bool,
 }
 
 /// A DMA arena: memory the device may read and write, mapped in its owner
@@ -151,6 +155,7 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
             guards,
             arenas: Vec::new(),
             msi: None,
+            msi_busy: false,
         })
     })();
     let mut devices = DEVICES.lock();
@@ -183,7 +188,7 @@ fn release(device: Device) {
     // vector's waiter is woken and its count dropped while the vector is
     // still this device's, then MSI is turned off and the vector freed.
     if let Some(mut config) = device.msi {
-        crate::msi::release_delivery(config.allocated_vector);
+        crate::msi::release_delivery(config.allocated_vector, device.raw);
         crate::msi::disable_msi(&mut config);
     }
     let pml4 = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0);
@@ -357,58 +362,95 @@ pub fn revoke_arena(raw: u64, phys: u64, size: usize) {
 
 /// Set up the device's MSI, owned by `pid`: one vector, its messages sent to
 /// the CPU this runs on (online by definition, read from its own local APIC;
-/// a waiter on another CPU is woken from there). `NotSupported` for a device without an MSI capability,
-/// `AlreadyExists` once it is set up, `ResourceExhausted` with no vector free.
+/// a waiter on another CPU is woken from there). `NotSupported` before the
+/// local APIC is up and for a device without an MSI capability,
+/// `AlreadyExists` once it is set up (or being set up), `ResourceExhausted`
+/// with no vector free.
 pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
     // No local APIC yet (early boot): no message could be delivered.
     if !crate::apic::is_ready() {
         return Err(KernelError::NotSupported);
     }
-    let target = crate::apic::read_id();
-    let mut devices = DEVICES.lock();
-    let device = devices
-        .iter_mut()
-        .find(|d| d.raw == raw)
-        .ok_or(KernelError::InvalidHandle)?;
-    if device.owner != pid {
-        return Err(KernelError::PermissionDenied);
+    // Reserved under the table's lock, made outside it: the capability walk
+    // and the programming are port accesses and a log line, too long to hold
+    // a spinlock across.
+    let addr = {
+        let mut devices = DEVICES.lock();
+        let device = devices
+            .iter_mut()
+            .find(|d| d.raw == raw)
+            .ok_or(KernelError::InvalidHandle)?;
+        if device.owner != pid {
+            return Err(KernelError::PermissionDenied);
+        }
+        if device.msi.is_some() || device.msi_busy {
+            return Err(KernelError::AlreadyExists);
+        }
+        device.msi_busy = true;
+        device.addr
+    };
+    let made = (|| {
+        let (b, d, f) = (addr.bus, addr.device, addr.function);
+        let mut config =
+            crate::msi::find_msi_capability(b, d, f).ok_or(KernelError::NotSupported)?;
+        crate::msi::enable_msi(&mut config, crate::apic::read_id())
+            .ok_or(KernelError::ResourceExhausted)?;
+        if !crate::msi::claim_delivery(config.allocated_vector, raw) {
+            crate::msi::disable_msi(&mut config);
+            return Err(KernelError::InternalError);
+        }
+        Ok(config)
+    })();
+    let unwanted = {
+        let mut devices = DEVICES.lock();
+        match devices.iter_mut().find(|d| d.raw == raw) {
+            Some(device) => {
+                device.msi_busy = false;
+                device.msi = Some(made?);
+                return Ok(());
+            }
+            // Closed while it was being made: undone below, without the lock.
+            None => made.ok(),
+        }
+    };
+    if let Some(mut config) = unwanted {
+        crate::msi::release_delivery(config.allocated_vector, raw);
+        crate::msi::disable_msi(&mut config);
     }
-    if device.msi.is_some() {
-        return Err(KernelError::AlreadyExists);
-    }
-    let (b, d, f) = (device.addr.bus, device.addr.device, device.addr.function);
-    let mut config = crate::msi::find_msi_capability(b, d, f).ok_or(KernelError::NotSupported)?;
-    crate::msi::enable_msi(&mut config, target).ok_or(KernelError::ResourceExhausted)?;
-    device.msi = Some(config);
-    Ok(())
+    Err(KernelError::InvalidHandle)
 }
 
 /// The device's interrupts since the last take, owned by `pid`: taken at
 /// once when `block` is false (0 when none came), else waited for until at
-/// least one has. `InvalidArgument` before [`irq_setup`]; `InvalidHandle`
-/// when the device is closed while waiting.
+/// least one has. One task waits at a time (`DeviceBusy` for a second).
+/// `InvalidArgument` before [`irq_setup`]; `InvalidHandle` when the device
+/// is closed, waiting or not; `Interrupted` when a signal or a freeze comes
+/// for `pid` while it waits.
 pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
-    let vector_of = || {
-        with_owned(raw, pid, |d| {
-            d.msi
-                .as_ref()
-                .map(|c| c.allocated_vector)
-                .ok_or(KernelError::InvalidArgument)
-        })
-    };
-    let vector = vector_of()?;
+    let vector = with_owned(raw, pid, |d| {
+        d.msi
+            .as_ref()
+            .map(|c| c.allocated_vector)
+            .ok_or(KernelError::InvalidArgument)
+    })?;
     if !block {
-        return Ok(crate::msi::take(vector));
+        return crate::msi::take(vector, raw).ok_or(KernelError::InvalidHandle);
     }
-    crate::msi::set_waiter(vector, crate::sched::current_task_id());
+    let task = crate::sched::current_task_id();
+    crate::msi::register_waiter(vector, raw, task)?;
+    // A signal for the process wakes the tasks registered here, as it does
+    // a sleeping nanosleep.
+    crate::proc::signal::register_signalfd_waiter(pid, task, 0);
     let taken = loop {
-        let count = crate::msi::take(vector);
-        if count > 0 {
-            break Ok(count);
+        match crate::msi::take(vector, raw) {
+            None => break Err(KernelError::InvalidHandle),
+            Some(count) if count > 0 => break Ok(count),
+            Some(_) => {}
         }
-        // Closed (and the vector freed) while waiting: nothing will come.
-        if vector_of().ok() != Some(vector) {
-            break Err(KernelError::InvalidHandle);
+        if crate::ipc::waiters::deliverable_signal_pending(pid)
+            || crate::proc::freezer::interrupt_pending(pid)
+        {
+            break Err(KernelError::Interrupted);
         }
         // A wake landing before the park leaves a token the park consumes,
         // so an interrupt between the take above and here is not lost.
@@ -417,9 +459,8 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
             u64::from(vector),
         ));
     };
-    if vector_of().ok() == Some(vector) {
-        crate::msi::set_waiter(vector, u64::MAX);
-    }
+    crate::proc::signal::deregister_signalfd_waiter(pid, task);
+    crate::msi::unregister_waiter(vector, task);
     taken
 }
 
@@ -723,6 +764,66 @@ fn unmap_bar(pml4: u64, owner: ProcessId, bar: &MappedBar) {
     crate::proc::pcb::remove_foreign_region(owner, bar.user_virt, end);
 }
 
+/// The blocking-wait test's worker: waits on the device its statics name,
+/// as a driver's interrupt thread would, and leaves the outcome behind.
+static WAITER_RAW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WAITER_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static WAITER_RESULT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(WAITING);
+/// [`WAITER_RESULT`] while the worker has not answered.
+const WAITING: i64 = i64::MIN;
+
+extern "C" fn irq_waiter(_arg: u64) {
+    use core::sync::atomic::Ordering;
+    let raw = WAITER_RAW.load(Ordering::SeqCst);
+    let owner = WAITER_OWNER.load(Ordering::SeqCst);
+    let answer = match irq_wait(raw, owner, true) {
+        Ok(count) => i64::try_from(count).unwrap_or(i64::MAX),
+        Err(e) => i64::from(e.code()),
+    };
+    WAITER_RESULT.store(answer, Ordering::SeqCst);
+}
+
+/// Start the worker on `raw`, and return once it is parked waiting for
+/// `vector` (`false` if it never got there).
+fn start_waiter(raw: u64, owner: ProcessId, vector: u8) -> bool {
+    use core::sync::atomic::Ordering;
+    WAITER_RAW.store(raw, Ordering::SeqCst);
+    WAITER_OWNER.store(owner, Ordering::SeqCst);
+    WAITER_RESULT.store(WAITING, Ordering::SeqCst);
+    if crate::sched::spawn(b"devhandle-irq", 16, irq_waiter, 0, 0).is_err() {
+        return false;
+    }
+    yield_until(|| crate::msi::waiter_of(vector).is_some())
+}
+
+/// The worker's answer, once it has one.
+fn waiter_answer() -> Option<i64> {
+    use core::sync::atomic::Ordering;
+    let mut answer = None;
+    let _done = yield_until(|| {
+        let value = WAITER_RESULT.load(Ordering::SeqCst);
+        answer = (value != WAITING).then_some(value);
+        answer.is_some()
+    });
+    answer
+}
+
+/// Yield until `ready`, for at most a second (or a bounded number of
+/// yields, should the clock not run).
+fn yield_until(mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = crate::hpet::elapsed_ns().saturating_add(1_000_000_000);
+    for _ in 0..200_000 {
+        if ready() {
+            return true;
+        }
+        if crate::hpet::elapsed_ns() > deadline {
+            break;
+        }
+        crate::sched::yield_now();
+    }
+    ready()
+}
+
 /// QEMU's `edu` device, which the boot test attaches for this test: a 1 MiB
 /// memory BAR and an MSI capability, and no kernel driver.
 const EDU_VENDOR: u16 = 0x1234;
@@ -893,6 +994,19 @@ pub fn self_test() -> KernelResult<()> {
             if irq_wait(raw, owner, false) != Ok(0) {
                 return Err("one MSI was taken twice");
             }
+            // Parked in a blocking wait, a waiter is woken by the device's
+            // interrupt and takes it.
+            if !start_waiter(raw, owner, vector) {
+                return Err("the blocking waiter never parked");
+            }
+            // SAFETY: as above.
+            unsafe { reg(EDU_IRQ_RAISE).write_volatile(1) };
+            let woken = waiter_answer();
+            // SAFETY: as above.
+            unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
+            if woken != Some(1) {
+                return Err("a parked waiter was not woken by the device's interrupt");
+            }
             // A DMA arena: where the owner sees it is its device address,
             // and the device's domain reaches it until it is freed.
             let (arena, device_addr) =
@@ -940,7 +1054,16 @@ pub fn self_test() -> KernelResult<()> {
                 return Err(msg);
             }
         };
+        // A waiter parked when the device closes is woken, to find it gone.
+        let parked = start_waiter(raw, owner, vector);
         close(raw);
+        let woken = waiter_answer();
+        if !parked {
+            return Err("the second blocking waiter never parked");
+        }
+        if woken != Some(i64::from(KernelError::InvalidHandle.code())) {
+            return Err("a waiter parked at close was not woken with InvalidHandle");
+        }
         if pci::bound_driver(addr).is_some() {
             return Err("the function is still bound after its last close");
         }

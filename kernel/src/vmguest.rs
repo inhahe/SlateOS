@@ -1540,16 +1540,24 @@ fn self_test_inner() {
     }
     crate::serial_println!("[vmguest]   Feature consistency: OK");
 
-    // Test 15: Tick processing (run a few ticks).
+    // Test 15: Tick processing (run a few ticks): each counted where guest
+    // integration was set up, none on bare metal, where there is nothing to
+    // tick (the test PC's boot of 2026-10-27 stopped on a test that expected
+    // a hypervisor, as QEMU always is).
     let before = TICK_COUNTER.load(Ordering::Relaxed);
     tick();
     tick();
     tick();
     let after = TICK_COUNTER.load(Ordering::Relaxed);
+    let ticks = if INITIALIZED.load(Ordering::Acquire) {
+        3
+    } else {
+        0
+    };
     assert_eq!(
         after,
-        before.saturating_add(3),
-        "Tick counter should increment by 3"
+        before.saturating_add(ticks),
+        "Tick counter should increment by one a tick under a hypervisor, and not at all on bare metal"
     );
     crate::serial_println!("[vmguest]   Tick processing: OK");
 

@@ -173,9 +173,11 @@ BUILTIN_SHAPED_RECEIVERS = {"io", "codecs", "os", "gzip", "bz2", "lzma"}
 # mode says `"t"`. `tarfile.open` writes an archive whatever its mode -- `"w"`,
 # `"w:gz"`, `"w|"` -- and has no text mode at all. Grading them as the builtin
 # flagged `tarfile.open(fileobj=buf, mode="w")` as a text write, which it
-# cannot be, and would have done the same to `gzip.open(p, "w")`.
+# cannot be, and would have done the same to `gzip.open(p, "w")`. PIL's
+# `Image.open(fp)` reads an image and nothing else (its only mode is `"r"`), so
+# a buffer passed first is not a computed text mode.
 TEXT_ONLY_WITH_T_RECEIVERS = {"gzip", "bz2", "lzma"}
-NEVER_TEXT_RECEIVERS = {"tarfile"}
+NEVER_TEXT_RECEIVERS = {"tarfile", "Image"}
 
 UNKNOWN_MODE = "<computed>"
 
@@ -633,6 +635,8 @@ def self_test() -> int:
         ("tarfile.open(p,'w:gz') is not", len(one("tarfile.open(p,'w:gz')")), 0),
         ("tarfile.open with a computed mode is not -- still an archive",
          len(one("tarfile.open(p,m)")), 0),
+        ("PIL's Image.open(buf) is not -- it only reads",
+         len(one("Image.open(io.BytesIO(d))")), 0),
         ("gzip.open(p,'w') is not -- 'w' is 'wb' there",
          len(one("gzip.open(p,'w')")), 0),
         ("gzip.open(p,'wt') is a finding -- 't' asks for text",

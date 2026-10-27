@@ -5831,7 +5831,8 @@ impl Vfs {
             if !guard.caches_contents() {
                 let read = guard.read_ino(obj.ino, offset, len);
                 drop(guard);
-                if read.is_ok()
+                // As Linux, only a read that read something is an access.
+                if read.as_ref().is_ok_and(|bytes| !bytes.is_empty())
                     && obj.announced
                     && super::notify::interest_includes(super::notify::FsEventMask::ACCESS)
                 {

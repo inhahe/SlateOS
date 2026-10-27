@@ -107,6 +107,11 @@ struct CacheEntry {
     /// Saved by [`writeback`]; never evicted while set. Changed only through
     /// [`set_dirty`](Self::set_dirty), which keeps [`DIRTY_COUNT`] in step.
     dirty: bool,
+    /// The frame is the filesystem's own -- the file itself (memfs,
+    /// design-decisions §1574) -- not a copy of it. It is never dirty, as a
+    /// store through a mapping is in the file already, and never saved; and
+    /// a change to the file is in it already, so none is copied into it.
+    adopted: bool,
 }
 
 impl CacheEntry {
@@ -450,9 +455,9 @@ where
         STAT_MISSES.fetch_add(1, Ordering::Relaxed);
         // The filesystem's own frame, or one of the cache's, filled. Either
         // carries one reference, the cache's, published or given back below.
-        let filled = match adopt() {
-            Some(adopted) => adopted,
-            None => fill_new_frame(hhdm, &mut fill),
+        let (filled, adopted) = match adopt() {
+            Some(own) => (own, true),
+            None => (fill_new_frame(hhdm, &mut fill), false),
         };
 
         // Re-acquire, end this fill's count, and insert, resolving the races.
@@ -507,6 +512,7 @@ where
             CacheEntry {
                 frame: new_frame,
                 dirty: false,
+                adopted,
             },
         );
         RESIDENT_COUNT.fetch_add(1, Ordering::Relaxed);
@@ -861,7 +867,9 @@ pub enum MarkDirty {
 
 /// A writable shared mapping is about to write the page of `file` at
 /// `page_offset` (16 KiB-aligned), which it maps from `frame`: mark it dirty,
-/// to be saved ([`writeback`]), unless [`MarkDirty`] says otherwise.
+/// to be saved ([`writeback`]), unless [`MarkDirty`] says otherwise. A page
+/// that is the file's own frame (adopted) is let through unmarked: the store
+/// lands in the file, and there is nothing to save.
 pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty {
     let Ok(key) = key_for(file, page_offset) else {
         return MarkDirty::Gone;
@@ -872,8 +880,10 @@ pub fn mark_dirty(file: FileId, page_offset: u64, frame: PhysFrame) -> MarkDirty
     }
     match cache.pages.get_mut(&key) {
         Some(entry) if entry.frame == frame => {
-            entry.set_dirty(true);
-            cache.note_dirtied(file);
+            if !entry.adopted {
+                entry.set_dirty(true);
+                cache.note_dirtied(file);
+            }
             MarkDirty::Marked
         }
         _ => MarkDirty::Gone,
@@ -1520,7 +1530,8 @@ fn collect_writes<'a>(
         let Some(bytes) = data.get(done..done.saturating_add(len)) else {
             return;
         };
-        if let Some(entry) = cache.pages.get(&key)
+        // An adopted page is the file: the write is in it already.
+        if let Some(entry) = cache.pages.get(&key).filter(|e| !e.adopted)
             // SAFETY: resident entry ⇒ allocated frame; cache lock held.
             && unsafe { frame::ref_inc(entry.frame) }.is_ok()
         {
@@ -1551,7 +1562,8 @@ fn zero_past_end(
         file,
         page_index: old.checked_div(page).unwrap_or(0),
     };
-    if let Some(entry) = cache.pages.get(&key)
+    // An adopted page is the file, whose filesystem zeroes its own tail.
+    if let Some(entry) = cache.pages.get(&key).filter(|e| !e.adopted)
         // SAFETY: resident entry ⇒ allocated frame; cache lock held.
         && unsafe { frame::ref_inc(entry.frame) }.is_ok()
     {
@@ -2286,7 +2298,11 @@ fn fill_racing_a_change(file: FileId) -> KernelResult<()> {
 /// got the way a mapping's fault gets it
 /// (`handle::cached_page`), it shows a write to the file at once -- with no
 /// shared mapping counted, which is when the cache would drop a copy of its
-/// own rather than update it, so a copy would show the old byte.
+/// own rather than update it, so a copy would show the old byte. Shared and
+/// writable, a store's first fault on it is let through and marks nothing
+/// dirty -- there is nothing to save -- and a write to the file is not copied
+/// into it a second time: a copy, taken while a mapping stores, would put the
+/// older bytes back.
 fn memfs_mapping_is_the_file() -> KernelResult<()> {
     use crate::fs::handle::{self, OpenFlags};
     const PATH: &str = "/tmp/memfs-one-copy";
@@ -2296,6 +2312,14 @@ fn memfs_mapping_is_the_file() -> KernelResult<()> {
     crate::fs::Vfs::write_file(PATH, b"one copy")?;
     let file = crate::fs::Vfs::file_identity(PATH)?.ok_or(KernelError::InternalError)?;
     let reader = handle::open(PATH, OpenFlags::READ)?;
+    let writer = match handle::open(PATH, OpenFlags::READ.union(OpenFlags::WRITE)) {
+        Ok(h) => h,
+        Err(e) => {
+            // The test's own handle: a close fails only for one already gone.
+            let _ = handle::close(reader);
+            return Err(e);
+        }
+    };
     let result = (|| {
         // A read of it goes past the cache, leaving no copy there.
         let _ = crate::fs::Vfs::read_file(PATH)?;
@@ -2303,26 +2327,74 @@ fn memfs_mapping_is_the_file() -> KernelResult<()> {
             return test_fail("a read of a memfs file left a copy in the page cache");
         }
         let page = handle::cached_page(reader, file, 0)?;
-        let written = crate::fs::Vfs::write_at(PATH, 0, b"O");
-        // SAFETY: a frame we hold a reference on; byte 0 is inside its alias.
-        let seen = unsafe { core::ptr::read_volatile(page.to_virt(hhdm) as *const u8) };
-        release(page);
-        written?;
-        if seen != b'O' {
-            return test_fail(
-                "a mapping's page of a memfs file is a copy, not the file's own frame",
+        let checked = (|| {
+            let written = crate::fs::Vfs::write_at(PATH, 0, b"O");
+            // SAFETY: a frame we hold a reference on; byte 0 is inside its alias.
+            let seen = unsafe { core::ptr::read_volatile(page.to_virt(hhdm) as *const u8) };
+            written?;
+            if seen != b'O' {
+                return test_fail(
+                    "a mapping's page of a memfs file is a copy, not the file's own frame",
+                );
+            }
+            // Mapped shared and writable: the page got again (the write above,
+            // with no shared mapping counted, dropped the cache's entry), a
+            // store's first fault, then a store (byte 1 = 'Q'), then a write
+            // the cache is told of with nothing behind it ('R'), which only a
+            // copy into the page would show.
+            shared_map_added(file, Some(writer));
+            let again = match handle::cached_page(reader, file, 0) {
+                Ok(frame) => frame,
+                Err(e) => {
+                    shared_map_removed(file, true);
+                    return Err(e);
+                }
+            };
+            let marked = mark_dirty(file, 0, again);
+            let dirty = file_has_dirty(&PAGE_CACHE.lock(), file);
+            let at = (again.to_virt(hhdm) as *mut u8).wrapping_add(1);
+            // SAFETY: a frame we hold a reference on; byte 1 is inside its alias.
+            unsafe { core::ptr::write_volatile(at, b'Q') };
+            let _ = file_changed(
+                file.fs_id,
+                file.ino,
+                FileChange::Written {
+                    offset: 1,
+                    data: b"R",
+                    old_size: None,
+                },
             );
-        }
-        Ok(())
+            // SAFETY: as above.
+            let after = unsafe { core::ptr::read_volatile(at) };
+            shared_map_removed(file, true);
+            release(again);
+            if marked != MarkDirty::Marked || dirty {
+                crate::serial_println!(
+                    "[page_cache]     mark_dirty answered {:?}, dirty: {}",
+                    marked,
+                    dirty
+                );
+                return test_fail(
+                    "a store to a memfs file's own frame was refused, or marked it dirty",
+                );
+            }
+            if after != b'Q' {
+                return test_fail("a write was copied into a memfs file's own frame again");
+            }
+            Ok(())
+        })();
+        release(page);
+        checked
     })();
-    // The test's own handle and scratch file: a close fails only for a
+    // The test's own handles and scratch file: a close fails only for a
     // handle already gone, and the removal only matters to a next run.
     let _ = handle::close(reader);
+    let _ = handle::close(writer);
     let _ = crate::fs::Vfs::remove(PATH);
     let _ = invalidate_file(file);
     result?;
     crate::serial_println!(
-        "[page_cache]   a mapping's page of a memfs file is the file's own frame: OK"
+        "[page_cache]   a mapping's page of a memfs file is the file's own frame, never dirty, never copied into: OK"
     );
     Ok(())
 }

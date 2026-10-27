@@ -9975,7 +9975,17 @@ QEMU_START_EPOCH=$(date +%s)
 # e1000, then rtl8139.  That is a deliberate consequence -- it puts the virtio
 # path under the existing DHCP/ARP/ICMP tests, while e1000 and rtl8139 keep
 # their own direct datapath coverage regardless of which one is primary.
+#
+# `intel-iommu`: an Intel VT-d unit, so that the DMA-remapping code runs on
+# every boot, as it does on any real Intel PC with VT-d on (design-decisions
+# §1576) -- without one it ran nowhere until the first real-hardware boot,
+# which it stopped. Every device passes through it untranslated, and
+# `iommu_remap`'s live self-test sandboxes a function that is not there.
+# `caching-mode=on` makes the unit cache a translation's absence, so that a
+# missing invalidation after a mapping shows as a fault rather than passing.
+# virtio devices bypass it (they would need `iommu_platform=on`).
 "$QEMU" \
+    -device intel-iommu,caching-mode=on \
     -netdev user,id=net0 \
     -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
     -netdev user,id=net1 \

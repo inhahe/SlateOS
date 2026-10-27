@@ -5426,21 +5426,24 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   process's DMA buffers unmapped before its exit frees them). Still to build,
   as one design (a device handle, capability-checked, released on exit --
   design-decisions §1579):
-  - [ ] Owning a PCI function: a handle naming bus:device.function, refused
-        when a kernel driver or another process has it
-  - [ ] Its BARs mapped uncached through the handle -- the kernel finds the
-        address, the process never names one -- including BARs smaller than
-        a 16 KiB frame
-  - [ ] Its configuration space read and written through the handle, with the
-        registers the kernel manages (BARs, MSI) refused
+  - [x] Owning a PCI function: a handle naming bus:device.function, refused
+        when a kernel driver or another process has it (`SYS_PCI_DEVICE_OPEN`,
+        `ResourceType::PciDevice`; released at its holder's zombie transition)
+  - [x] Its BARs mapped uncached through the handle -- the kernel finds the
+        address, the process never names one -- in 4 KiB pages, so a BAR
+        smaller than a 16 KiB frame is mapped alone; one under 4 KiB is
+        refused (`SYS_PCI_DEVICE_MAP_BAR`)
+  - [x] Its configuration space read and written through the handle, with the
+        registers the kernel manages (BARs, ROM, MSI, MSI-X) refused
   - [ ] Its interrupts: MSI and MSI-X vectors, and INTx for what has nothing
         else; waitable together with channels and timers (`SYS_WAIT_MULTIPLE`
         or completion ports take no interrupt source today); masked when its
         process exits, so a level-triggered line cannot storm
-  - [ ] DMA through the device's own IOMMU domain: coherent buffers placed in
-        it (`SYS_DMA_ALLOC`'s are in none), and pinned ranges of the process's
-        own memory for streaming DMA (no call does this today); the domain
-        and its mappings destroyed when the process exits
+  - [x] DMA through the device's own IOMMU domain: arenas placed in it
+        (`SYS_PCI_DEVICE_DMA_ALLOC`), revoked from the device before any path
+        frees them, and the domain destroyed with the handle. Streaming maps
+        of arbitrary process memory are not built: §1579 serves the Linux
+        layer from arenas; a native driver that needs them is the trigger
         (`known-issues/TD-A-DMA-SYSCALLS-MAP-ANY-MEMORY-AND-OUTLIVE-THEIR-PROCESS.md`)
   - [ ] Its first user: Linux's `e1000e` through the layer below
 - [ ] `[A]` **Linux driver compatibility layer** -- Linux's own drivers, built

@@ -1166,6 +1166,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_shared_anonymous_memory()?;
     test_dispatch_mmio_refused()?;
     test_dispatch_irq_holder()?;
+    test_dispatch_dma_exit_unmaps()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;
     test_dispatch_power_off_and_reboot()?;
@@ -5863,6 +5864,59 @@ fn test_dispatch_irq_holder() -> KernelResult<()> {
         return fail("the holder could not release it");
     }
     serial_println!("[syscall]   interrupt line holder: OK (wait, release and claim refused)");
+    Ok(())
+}
+
+/// A process's DMA buffers are unmapped before the exit path frees them. The
+/// address space's teardown frees every frame still mapped in it, so a
+/// buffer left mapped would be freed twice and later handed to two owners. A
+/// scratch process gets a buffer, and after `free_all_for_process` no page of
+/// it may still translate.
+fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
+    use crate::mm::dma::{self, DmaConstraint};
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::proc::pcb;
+
+    fn fail(msg: &str, pid: pcb::ProcessId) -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: DMA buffers at exit: {}", msg);
+        pcb::destroy(pid);
+        Err(KernelError::InternalError)
+    }
+    let pid = pcb::create("dma-exit", 0);
+    let Some(pml4) = pcb::get_pml4(pid).filter(|&p| p != 0) else {
+        return fail("the scratch process has no address space", pid);
+    };
+    let Ok((virt, _phys, size)) = dma::alloc_for_user(pml4, 0x4000, DmaConstraint::None) else {
+        return fail("no DMA buffer could be made", pid);
+    };
+    let page = |i: usize| VirtAddr::new(virt.saturating_add((i as u64).saturating_mul(4096)));
+    let pages = size / 4096;
+
+    dma::free_all_for_process(pml4);
+    let still_mapped = (0..pages)
+        .filter(|&i| page_table::translate(pml4, page(i)).is_some())
+        .count();
+    if still_mapped > 0 {
+        // Cleared here, so destroying the scratch process cannot free the
+        // buffer a second time on the way out of a failed test.
+        for i in 0..pages {
+            // SAFETY: `pml4` is the scratch process's own table, which no CPU
+            // runs; the page was mapped by `alloc_for_user` and its frames
+            // are already freed, so only the stale entry is cleared.
+            let _ = unsafe { page_table::unmap_4k(pml4, page(i)) };
+        }
+        serial_println!(
+            "[syscall]     {} of {} page(s) still mapped",
+            still_mapped,
+            pages
+        );
+        return fail("free_all_for_process left the buffer mapped", pid);
+    }
+    pcb::destroy(pid);
+    serial_println!(
+        "[syscall]   DMA buffers at exit: OK ({} page(s) unmapped before freeing)",
+        pages
+    );
     Ok(())
 }
 

@@ -295,19 +295,10 @@ pub fn alloc_for_user(
 /// - `pml4_phys`: the process's PML4 physical address.
 /// - `user_virt`: the virtual address returned by `alloc_for_user`.
 pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
-    use crate::mm::page_table::{self, VirtAddr};
-
     // Look up the DMA mapping.
     let mapping = untrack_dma_mapping(pml4_phys, user_virt).ok_or(KernelError::InvalidArgument)?;
 
-    // Unmap from the process's address space.
-    let hw_pages = mapping.size / 4096;
-    for i in 0..hw_pages {
-        let vaddr = VirtAddr::new(user_virt + (i as u64) * 4096);
-        // SAFETY: We own this mapping.
-        let _ = unsafe { page_table::unmap_4k(pml4_phys, vaddr) };
-    }
-
+    let hw_pages = unmap_user_buffer(&mapping);
     // Flush TLB for the unmapped range.
     crate::tlb::flush_range(user_virt, hw_pages as u32);
 
@@ -381,10 +372,37 @@ pub fn free_all_for_process(pml4_phys: u64) {
             // SAFETY: If from_addr fails, the mapping was corrupt — skip.
             None => continue,
         };
-        // SAFETY: Process is exiting; no device should be using the buffer.
-        // We don't unmap (page tables are being torn down anyway).
+        // Unmapped before it is freed: the address space's teardown frees
+        // every frame still mapped in it, so a buffer left mapped would be
+        // freed twice -- once here as a block, once there page by page -- and
+        // two later allocations could be handed the same memory. No CPU runs
+        // these tables any more, so no TLB flush is needed.
+        unmap_user_buffer(&mapping);
+        // SAFETY: Process is exiting; no device should be using the buffer,
+        // and nothing maps it any more.
         let _ = unsafe { frame::free_order(frame, mapping.order) };
     }
+}
+
+/// Clear the page-table entries of a user DMA buffer, leaving its frames
+/// allocated. Returns how many 4 KiB pages it covered.
+fn unmap_user_buffer(mapping: &DmaMappingInfo) -> usize {
+    use crate::mm::page_table::{self, VirtAddr};
+
+    let hw_pages = mapping.size / 4096;
+    for i in 0..hw_pages {
+        let vaddr = VirtAddr::new(
+            mapping
+                .user_virt
+                .saturating_add((i as u64).saturating_mul(4096)),
+        );
+        // SAFETY: the buffer was mapped by `alloc_for_user` into this page
+        // table, and its tracking entry is gone, so nothing else unmaps it.
+        // A page already absent is not an error worth reporting: the entry
+        // is cleared either way, which is all the caller needs.
+        let _ = unsafe { page_table::unmap_4k(mapping.pml4_phys, vaddr) };
+    }
+    hw_pages
 }
 
 // ---------------------------------------------------------------------------

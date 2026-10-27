@@ -204,9 +204,10 @@ pub fn kernel_pml4_phys() -> KernelResult<u64> {
 /// uncached and writable, at the address the direct map gives them
 /// (`phys + hhdm()`), and answer that address. The bootloader's direct map
 /// covers RAM, not device memory, so a driver must do this before its first
-/// register access: an unmapped one is a kernel page fault. A frame another
-/// mapping already covers (a second unit's registers in the same 16 KiB) is
-/// left as it is.
+/// register access: an unmapped one is a kernel page fault. Of a frame that
+/// is partly mapped already -- a second unit's registers in the same 16 KiB,
+/// or a register page beside RAM the direct map covers -- only the 4 KiB
+/// pages not yet mapped are mapped; the others are left as they are.
 ///
 /// # Errors
 ///
@@ -235,7 +236,25 @@ pub unsafe fn map_mmio(phys: u64, len: u64) -> KernelResult<u64> {
         // not-present entry made present needs no TLB invalidation: no CPU
         // caches a translation for a page that was not present.
         match unsafe { map_frame(pml4, virt, frame, flags) } {
-            Ok(()) | Err(KernelError::AlreadyExists) => {}
+            Ok(()) => {}
+            // Some of the frame's 4 KiB pages are mapped (map_frame rolled
+            // back the rest): map those that are not, one by one.
+            Err(KernelError::AlreadyExists) => {
+                let subpages: [PageFlags; HW_PAGES_PER_FRAME] = core::array::from_fn(|i| {
+                    let page = virt
+                        .as_u64()
+                        .wrapping_add((i as u64).wrapping_mul(HW_PAGE_SIZE as u64));
+                    if translate(pml4, VirtAddr::new(page)).is_some() {
+                        PageFlags::empty()
+                    } else {
+                        flags
+                    }
+                });
+                if subpages.iter().any(|f| f.contains(PageFlags::PRESENT)) {
+                    // SAFETY: as above; only pages no entry maps are written.
+                    unsafe { map_frame_subpages(pml4, virt, frame, subpages)? };
+                }
+            }
             Err(e) => return Err(e),
         }
         at = at
@@ -3125,6 +3144,31 @@ fn test_map_mmio_unaligned() -> KernelResult<()> {
                 return Err(KernelError::InternalError);
             }
         }
+    }
+    // A frame one 4 KiB page of which is mapped already: the page asked for
+    // beside it is mapped too, and the first stays.
+    let hhdm = hhdm().ok_or(KernelError::NotSupported)?;
+    let base = 0xFED0_8000_u64;
+    let frame = PhysFrame::from_addr(base).ok_or(KernelError::InternalError)?;
+    let virt = VirtAddr::new(base.wrapping_add(hhdm));
+    let only_first: [PageFlags; HW_PAGES_PER_FRAME] = core::array::from_fn(|i| {
+        if i == 0 {
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE
+        } else {
+            PageFlags::empty()
+        }
+    });
+    // SAFETY: device memory in the chipset's fixed range; nothing reads it.
+    match unsafe { map_frame_subpages(pml4, virt, frame, only_first) } {
+        Ok(()) | Err(KernelError::AlreadyExists) => {}
+        Err(e) => return Err(e),
+    }
+    let second = base.wrapping_add(HW_PAGE_SIZE as u64).wrapping_add(0x80);
+    // SAFETY: as above.
+    let at = unsafe { map_mmio(second, 0x10)? };
+    if translate(pml4, VirtAddr::new(at)) != Some(second) || translate(pml4, virt) != Some(base) {
+        serial_println!("[pt]   FAIL: a page beside one already mapped was left unmapped");
+        return Err(KernelError::InternalError);
     }
     Ok(())
 }

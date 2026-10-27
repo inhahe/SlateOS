@@ -337,7 +337,7 @@ fn apply_scheme() {
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let width = con.fb_width;
-    let height = con.fb_height;
+    let height = con.own_height;
     let bg = scheme.bg;
     drop(con);
     for y in 0..height {
@@ -548,6 +548,11 @@ struct ConsoleInner {
     fb_width: u32,
     /// Framebuffer height in pixels.
     fb_height: u32,
+    /// The pixel rows the console draws in, from the top: the whole
+    /// framebuffer, or with the kernel's log on the screen (`screenlog`) the
+    /// top quarter, the log pane having the rest. Erasing the screen erases
+    /// these, never the pane's.
+    own_height: u32,
     /// Bytes per row in the framebuffer (may include padding beyond width).
     fb_pitch: u32,
     /// Number of text columns (fb_width / GLYPH_WIDTH).
@@ -798,6 +803,7 @@ impl ConsoleInner {
         c.fb_addr = fb.as_mut_ptr() as u64;
         c.fb_width = width;
         c.fb_height = height;
+        c.own_height = height;
         c.fb_pitch = width.checked_mul(4)?;
         c.cols = cols;
         c.rows = rows;
@@ -838,6 +844,7 @@ impl ConsoleInner {
             fb_addr: 0,
             fb_width: 0,
             fb_height: 0,
+            own_height: 0,
             fb_pitch: 0,
             cols: 0,
             rows: 0,
@@ -987,6 +994,11 @@ pub unsafe fn init(addr: u64, width: u32, height: u32, pitch: u32, bpp: u16) {
     con.fb_addr = addr;
     con.fb_width = width;
     con.fb_height = height;
+    con.own_height = if log_pane {
+        rows.saturating_mul(GLYPH_HEIGHT)
+    } else {
+        height
+    };
     con.fb_pitch = pitch;
     con.cols = cols;
     con.rows = rows;
@@ -1104,7 +1116,7 @@ pub fn clear() {
 
     let fb = con.fb_addr;
     let width = con.fb_width;
-    let height = con.fb_height;
+    let height = con.own_height;
     let pitch = con.fb_pitch;
     let bg = con.default_bg;
     drop(con);
@@ -1245,7 +1257,7 @@ fn draw_hint(con: &ConsoleInner) {
 /// `color`.
 fn fill_row_band(con: &ConsoleInner, row: u32, color: u32) {
     let top = row.saturating_mul(GLYPH_HEIGHT);
-    let bottom = top.saturating_add(GLYPH_HEIGHT).min(con.fb_height);
+    let bottom = top.saturating_add(GLYPH_HEIGHT).min(con.own_height);
     for y in top..bottom {
         for x in 0..con.fb_width {
             put_pixel(con.fb_addr, con.fb_pitch, x, y, color);
@@ -2931,7 +2943,11 @@ pub struct ConsoleSnapshot {
 /// Returns `None` if the console is not initialized or the screen buffer
 /// has not been allocated yet.
 pub fn snapshot_state() -> Option<ConsoleSnapshot> {
-    let con = CONSOLE.lock_irqsave();
+    snapshot_on(&CONSOLE.lock_irqsave())
+}
+
+/// [`snapshot_state`] of `con`.
+fn snapshot_on(con: &ConsoleInner) -> Option<ConsoleSnapshot> {
     if !con.initialized || con.screen_buf.is_empty() {
         return None;
     }
@@ -2967,7 +2983,11 @@ pub fn snapshot_state() -> Option<ConsoleSnapshot> {
 /// ([`show_hint`]) is a row taller or shorter: the rows both have are
 /// restored, the cursor and scroll region kept inside the console's.
 pub fn restore_state(snap: &ConsoleSnapshot) {
-    let mut con = CONSOLE.lock_irqsave();
+    restore_on(&mut CONSOLE.lock_irqsave(), snap);
+}
+
+/// [`restore_state`] onto `con`.
+fn restore_on(con: &mut ConsoleInner, snap: &ConsoleSnapshot) {
     if !con.initialized {
         return;
     }
@@ -2999,7 +3019,15 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
     con.strikethrough = snap.strikethrough;
     let last = con.rows.saturating_sub(1);
     con.cursor_row = con.cursor_row.min(last);
-    con.scroll_bottom = snap.scroll_bottom.min(last);
+    // A region that was the whole screen is the whole screen again, whether
+    // the hint row has come or gone since: the snapshot's last row is not
+    // this console's.
+    con.scroll_bottom = if snap.scroll_top == 0 && snap.scroll_bottom >= snap.rows.saturating_sub(1)
+    {
+        last
+    } else {
+        snap.scroll_bottom.min(last)
+    };
     con.scroll_top = snap.scroll_top.min(con.scroll_bottom);
 
     // The screen buffer: what the snapshot has of the rows both have, the
@@ -3034,7 +3062,7 @@ pub fn restore_state(snap: &ConsoleSnapshot) {
             }
         }
     }
-    draw_hint(&con);
+    draw_hint(con);
 
     // Reset ANSI parser to clean state so the restored session doesn't
     // inherit a partial escape sequence from the previous session.
@@ -3427,12 +3455,22 @@ fn test_hint_row() -> Result<(), &'static str> {
     if c.rows != ROWS - 1 || band(ROWS - 1) != shown || row_text(&c, ROWS - 2) != "h" {
         return Err("text fed past the bottom reached the hint, or a second hint was taken");
     }
+    // A terminal session's snapshot, taken while the hint shows.
+    let snap = snapshot_on(&c).ok_or("no snapshot of a scratch console")?;
     hide_hint_on(&mut c);
     if c.rows != ROWS
         || c.scroll_bottom != ROWS - 1
         || band(ROWS - 1).iter().any(|&p| p != DEFAULT_BG)
     {
         return Err("the bottom row did not come back, blank");
+    }
+    // Restored once the hint is gone, its whole-screen region is the whole
+    // screen again: the bottom row scrolls with the rest.
+    restore_on(&mut c, &snap);
+    if c.rows != ROWS || c.scroll_bottom != ROWS - 1 {
+        return Err(
+            "a snapshot taken with the hint shown left the bottom row out of the scroll region",
+        );
     }
     let mut one = alloc::vec![DEFAULT_BG; WIDTH * GLYPH_HEIGHT as usize];
     let mut tiny = ConsoleInner::scratch(COLS, 1, &mut one).ok_or("no one-row console")?;

@@ -1100,9 +1100,12 @@ pub fn init(hhdm_offset: u64) {
                         read_only: false,
                     };
 
+                    // ATA pads its strings with spaces on either side: the
+                    // identity is trimmed, as a command line can only carry
+                    // the serial without them.
                     let identity = blkdev::DiskIdentity {
-                        model: port.model.clone(),
-                        serial: port.serial.clone(),
+                        model: port.model.trim().into(),
+                        serial: port.serial.trim().into(),
                         eui64: None,
                     };
                     let device = AhciDevice {

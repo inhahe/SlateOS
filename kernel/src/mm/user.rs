@@ -962,6 +962,10 @@ pub fn peek_user(addr: u64, buf: &mut [u8]) -> bool {
     if addr.checked_add(len).is_none_or(|end| end > USER_SPACE_END) {
         return false;
     }
+    let peeking = PEEKING.get(sched::current_cpu_id());
+    if let Some(flag) = peeking {
+        flag.store(true, core::sync::atomic::Ordering::Relaxed);
+    }
     // SAFETY: `buf` is ours, `len` bytes; `addr..addr + len` is user space,
     // so a fault there is a user page's, and resumes at the copy's fixup.
     let left = unsafe {
@@ -970,7 +974,25 @@ pub fn peek_user(addr: u64, buf: &mut [u8]) -> bool {
         crate::smep_smap::clac();
         left
     };
+    if let Some(flag) = peeking {
+        flag.store(false, core::sync::atomic::Ordering::Relaxed);
+    }
     left == 0
+}
+
+/// The CPUs inside a [`peek_user`]: a diagnostic's read, made wherever the
+/// diagnostic runs. A fault in it where it may not wait is no misplaced
+/// copy, and the page-fault handler's warning for one ([`peeking`]) is not
+/// spent on it.
+static PEEKING: [core::sync::atomic::AtomicBool; crate::smp::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; crate::smp::MAX_CPUS];
+
+/// Whether CPU `cpu` is inside a [`peek_user`].
+#[must_use]
+pub fn peeking(cpu: usize) -> bool {
+    PEEKING
+        .get(cpu)
+        .is_some_and(|flag| flag.load(core::sync::atomic::Ordering::Relaxed))
 }
 
 /// The page-fault handler's fixups for `mm::uaccess`'s routines, on a user

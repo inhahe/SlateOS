@@ -5954,10 +5954,10 @@ fn shared_range(vma: &Vma, lo: u64, hi: u64) -> Option<(u64, u64)> {
 /// flush per run of pages. The next store to a page then faults, and marks it
 /// dirty again (`resolve_shared_write`). What `page_cache::writeback` does
 /// before it copies pages out: one walk of the process table for them all.
-/// Each mapping finds its own pages by search -- `pages` in offset order,
-/// as the save picks them, or sorted here first -- so the work under the
-/// process table's lock is the mappings' and the pages they map, not their
-/// product.
+/// Each mapping finds its own pages by search -- `pages` must be in offset
+/// order, as the save picks them from the cache's ordered index -- so the
+/// work under the process table's lock is the mappings' and the pages they
+/// map, not their product.
 ///
 /// Called with no lock held: it takes the process table, then each address
 /// space's page-table lock, never both.
@@ -5971,16 +5971,11 @@ pub fn write_protect_file_pages(
         return;
     }
     // Each mapping finds its pages by search, which needs them in offset
-    // order, as a save picks them; given out of order, they are sorted here.
-    let sorted: Vec<(u64, crate::mm::frame::PhysFrame)>;
-    let pages = if pages.is_sorted_by_key(|&(offset, _)| offset) {
-        pages
-    } else {
-        let mut copy = pages.to_vec();
-        copy.sort_unstable_by_key(|&(offset, _)| offset);
-        sorted = copy;
-        sorted.as_slice()
-    };
+    // order: the only caller, a save, takes them from an ordered index.
+    debug_assert!(
+        pages.is_sorted_by_key(|&(offset, _)| offset),
+        "write_protect_file_pages wants its pages in offset order"
+    );
     let frame_mask = (FRAME_SIZE as u64).wrapping_sub(1);
     let hw = HW_PAGE_SIZE as u64;
     let writes = |v: &Vma| {

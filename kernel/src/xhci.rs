@@ -606,6 +606,9 @@ static XHCI: Mutex<Option<Box<XhciController>>> = Mutex::new(None);
 // Taking the controller from the firmware
 // ---------------------------------------------------------------------------
 
+/// How many bytes of a controller's register block are mapped.
+const REGS_MAPPED: usize = 0x1_0000;
+
 /// How long after the controller starts its ports are given to show their
 /// devices (see `XhciController::init`).
 const PORT_SETTLE_NS: u64 = 500_000_000;
@@ -623,31 +626,42 @@ const LEGCTL_EVENTS: u32 = 0x7 << 29;
 /// How long the firmware is given to let go of the controller: a second, as
 /// Linux gives it.
 const HANDOFF_NS: u64 = 1_000_000_000;
+/// The most polls either wait makes, whatever the clock says: on a machine
+/// whose clock does not run (no HPET, no calibrated TSC: `hrtimer::now_ns`
+/// stays 0) a wait must still end. A settle poll only reads the clock; a
+/// handoff poll reads a register too, a microsecond or so.
+const SETTLE_POLLS_MAX: u32 = 100_000_000;
+const HANDOFF_POLLS_MAX: u32 = 2_000_000;
 
 /// Take the controller from the firmware (xHCI §4.22.1).
 ///
 /// With USB legacy support on, the firmware drives the controller from
 /// System Management Mode so that a USB keyboard works before an OS loads.
 /// An OS that resets the controller without asking leaves that code driving
-/// a controller it no longer understands -- on the test PC, a machine that
-/// froze soon after the controller ran, its devices unseen. So the OS asks
-/// (OS Owned) and the firmware lets go (BIOS Owned clears); a firmware that
-/// has not let go within a second is overruled. Then the firmware's SMIs are
-/// turned off and any pending cleared. A controller without the capability
-/// was never the firmware's.
+/// a controller it no longer understands. So the OS asks (OS Owned) and the
+/// firmware lets go (BIOS Owned clears); a firmware that has not let go
+/// within a second is overruled. Then the firmware's SMIs are turned off and
+/// any pending cleared. A controller without the capability was never the
+/// firmware's.
+///
+/// Only capabilities inside the `mapped` bytes of the register block are
+/// read: a list that leads past them (a malformed or hostile device) ends
+/// the search, rather than reading memory nothing mapped.
 ///
 /// # Safety
 ///
-/// `base` is the controller's mapped register block, and `hccparams1` its
-/// HCCPARAMS1.
-#[allow(clippy::arithmetic_side_effects)]
-unsafe fn take_from_firmware(base: *mut u8, hccparams1: u32) {
+/// `base` is the controller's register block, `mapped` bytes of it mapped,
+/// and `hccparams1` its HCCPARAMS1.
+unsafe fn take_from_firmware(base: *mut u8, mapped: usize, hccparams1: u32) {
     // The extended capabilities: a list, offsets in 32-bit words, the first
     // from the base, each next from the one before.
-    let mut at = ((hccparams1 >> 16) & 0xFFFF) as usize * 4;
+    let mut at = usize::try_from((hccparams1 >> 16) & 0xFFFF)
+        .unwrap_or(0)
+        .saturating_mul(4);
     let mut hops = 0u32;
-    while at != 0 && hops < 64 {
-        hops += 1;
+    // A capability's two registers must both lie inside the mapping.
+    while at != 0 && at.saturating_add(8) <= mapped && hops < 64 {
+        hops = hops.saturating_add(1);
         // SAFETY: an extended capability inside the mapped register block.
         let cap = unsafe { mmio_read32(base, at) };
         if cap & 0xFF == XECP_LEGACY {
@@ -655,9 +669,13 @@ unsafe fn take_from_firmware(base: *mut u8, hccparams1: u32) {
                 // SAFETY: as above.
                 unsafe { mmio_write32(base, at, cap | LEGSUP_OS_OWNED) };
                 let asked = crate::hrtimer::now_ns();
+                let mut polls = 0u32;
                 // SAFETY: as above.
                 while unsafe { mmio_read32(base, at) } & LEGSUP_BIOS_OWNED != 0 {
-                    if crate::hrtimer::now_ns().saturating_sub(asked) > HANDOFF_NS {
+                    polls = polls.saturating_add(1);
+                    if crate::hrtimer::now_ns().saturating_sub(asked) > HANDOFF_NS
+                        || polls >= HANDOFF_POLLS_MAX
+                    {
                         // SAFETY: as above.
                         let now = unsafe { mmio_read32(base, at) };
                         // SAFETY: as above.
@@ -676,17 +694,25 @@ unsafe fn take_from_firmware(base: *mut u8, hccparams1: u32) {
                 // SAFETY: as above.
                 unsafe { mmio_write32(base, at, cap | LEGSUP_OS_OWNED) };
             }
-            // SAFETY: USBLEGCTLSTS follows USBLEGSUP.
-            let control = unsafe { mmio_read32(base, at + 4) };
+            // SAFETY: USBLEGCTLSTS follows USBLEGSUP, inside the mapping.
+            let control = unsafe { mmio_read32(base, at.saturating_add(4)) };
             // SAFETY: as above.
-            unsafe { mmio_write32(base, at + 4, (control & LEGCTL_KEEP) | LEGCTL_EVENTS) };
+            unsafe {
+                mmio_write32(
+                    base,
+                    at.saturating_add(4),
+                    (control & LEGCTL_KEEP) | LEGCTL_EVENTS,
+                );
+            }
             return;
         }
-        let next = ((cap >> 8) & 0xFF) as usize * 4;
+        let next = usize::try_from((cap >> 8) & 0xFF)
+            .unwrap_or(0)
+            .saturating_mul(4);
         if next == 0 {
             break;
         }
-        at += next;
+        at = at.saturating_add(next);
     }
 }
 
@@ -791,7 +817,7 @@ impl XhciController {
 
         // The register space: 64 KiB covers it on the controllers met so far.
         // SAFETY: BAR0 is the controller's register block: device memory.
-        let mmio_virt = unsafe { page_table::map_mmio(mmio_phys, 0x1_0000)? };
+        let mmio_virt = unsafe { page_table::map_mmio(mmio_phys, REGS_MAPPED as u64)? };
         let mmio_base = mmio_virt as *mut u8;
 
         // Enable bus mastering and memory space.
@@ -841,8 +867,9 @@ impl XhciController {
         let rt_base = unsafe { mmio_base.add(rts_off as usize) };
         let db_base = unsafe { mmio_base.add(db_off as usize) };
 
-        // SAFETY: mmio_base is the mapped register block; hccparams1 its own.
-        unsafe { take_from_firmware(mmio_base, hccparams1) };
+        // SAFETY: mmio_base is the register block, REGS_MAPPED bytes of it
+        // mapped; hccparams1 its own.
+        unsafe { take_from_firmware(mmio_base, REGS_MAPPED, hccparams1) };
 
         // ---- Controller Reset ----
 
@@ -1059,7 +1086,11 @@ impl XhciController {
         // took every port down. QEMU's ports are connected at once; a real
         // controller's are not, and a scan straight after the start saw none.
         let settle_from = crate::hrtimer::now_ns();
-        while crate::hrtimer::now_ns().saturating_sub(settle_from) < PORT_SETTLE_NS {
+        let mut polls = 0u32;
+        while crate::hrtimer::now_ns().saturating_sub(settle_from) < PORT_SETTLE_NS
+            && polls < SETTLE_POLLS_MAX
+        {
+            polls = polls.saturating_add(1);
             core::hint::spin_loop();
         }
 

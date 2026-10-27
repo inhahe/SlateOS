@@ -652,6 +652,10 @@ fn free_drm_buffers() {
 /// Tries DRM-backed rendering first; falls back to fb.rs if DRM buffers
 /// cannot be allocated.
 pub fn start() {
+    // The compositor takes the display, whichever way it draws: the kernel's
+    // log pane, which draws on the same framebuffer, stops.
+    crate::screenlog::stop();
+
     // Try DRM path first.
     let drm_ok = if drm::device_count() > 0 {
         init_drm_buffers()

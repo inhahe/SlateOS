@@ -60,6 +60,9 @@ struct Pane {
     len: usize,
     /// Inside an escape sequence (after ESC, until its final letter).
     escape: bool,
+    /// The framebuffer's base and pitch are 8-byte aligned, so two pixels
+    /// go in one store; otherwise one pixel a store.
+    wide: bool,
 }
 
 /// The pane draws: set once it is placed, cleared for good by [`stop`].
@@ -87,18 +90,7 @@ pub unsafe fn start(fb: u64, pitch: u32, width: u32, top: u32, height: u32) {
     if cols == 0 || rows < 2 {
         return;
     }
-    let mut pane = Pane {
-        fb,
-        pitch,
-        top,
-        cols,
-        rows,
-        row: 0,
-        row_len: [0; MAX_ROWS],
-        line: [0; MAX_COLS],
-        len: 0,
-        escape: false,
-    };
+    let mut pane = Pane::new(fb, pitch, top, cols, rows);
     pane.mark(0);
     *PANE.lock() = Some(pane);
     ACTIVE.store(true, Ordering::Release);
@@ -133,6 +125,24 @@ pub fn feed(bytes: &[u8]) {
 }
 
 impl Pane {
+    /// A pane of `cols` by `rows` glyph cells, from pixel row `top` of the
+    /// framebuffer at `fb`, `pitch` bytes a pixel row; nothing drawn yet.
+    fn new(fb: u64, pitch: u32, top: u32, cols: u32, rows: u32) -> Self {
+        Self {
+            fb,
+            pitch,
+            top,
+            cols,
+            rows,
+            row: 0,
+            row_len: [0; MAX_ROWS],
+            line: [0; MAX_COLS],
+            len: 0,
+            escape: false,
+            wide: fb.is_multiple_of(8) && pitch.is_multiple_of(8),
+        }
+    }
+
     /// Assemble `bytes` into lines, drawing each one completed.
     fn feed(&mut self, bytes: &[u8]) {
         for &b in bytes {
@@ -212,7 +222,8 @@ impl Pane {
         }
     }
 
-    /// Draw `ch` at glyph cell (`col`, `row`) of the pane, two pixels a store.
+    /// Draw `ch` at glyph cell (`col`, `row`) of the pane: two pixels a store
+    /// on an 8-byte-aligned framebuffer, one otherwise.
     fn glyph(&self, col: u32, row: u32, ch: u8, fg: u32) {
         let bits = crate::font::glyph(ch);
         let x0 = u64::from(col.saturating_mul(GLYPH_WIDTH)).saturating_mul(4);
@@ -222,22 +233,35 @@ impl Pane {
                 .fb
                 .wrapping_add(u64::from(y0.saturating_add(gy)).wrapping_mul(u64::from(self.pitch)))
                 .wrapping_add(x0);
-            for pair in 0..GLYPH_WIDTH / 2 {
-                // The font's most significant bit is the leftmost pixel, and
-                // the leftmost of a pair is the lower address: the low half.
-                let shift = pair.saturating_mul(2);
-                let left = if line & (0x80 >> shift) != 0 { fg } else { BG };
-                let right = if line & (0x40 >> shift) != 0 { fg } else { BG };
-                // SAFETY: inside the pane's rows of the framebuffer, which
-                // `start`'s caller vouched for: col < cols and row < rows keep
-                // x and y inside it. A cell starts 32 bytes into its row, so
-                // the store is 8-byte aligned on any framebuffer whose base
-                // and pitch are.
-                unsafe {
-                    core::ptr::write_volatile(
-                        at.wrapping_add(u64::from(pair).wrapping_mul(8)) as *mut u64,
-                        u64::from(left) | (u64::from(right) << 32),
-                    );
+            // The font's most significant bit is the leftmost pixel.
+            let pixel = |x: u32| if line & (0x80 >> x) != 0 { fg } else { BG };
+            if self.wide {
+                for pair in 0..GLYPH_WIDTH / 2 {
+                    let left = pair.saturating_mul(2);
+                    // The leftmost of a pair is the lower address: the low half.
+                    let both =
+                        u64::from(pixel(left)) | (u64::from(pixel(left.saturating_add(1))) << 32);
+                    // SAFETY: inside the pane's rows of the framebuffer, which
+                    // `start`'s caller vouched for: col < cols and row < rows
+                    // keep x and y inside it. A cell starts 32 bytes into its
+                    // row, so with base and pitch 8-byte aligned (`wide`), so
+                    // is the store.
+                    unsafe {
+                        core::ptr::write_volatile(
+                            at.wrapping_add(u64::from(pair).wrapping_mul(8)) as *mut u64,
+                            both,
+                        );
+                    }
+                }
+            } else {
+                for x in 0..GLYPH_WIDTH {
+                    // SAFETY: as above; a framebuffer's pixels are 4-byte aligned.
+                    unsafe {
+                        core::ptr::write_volatile(
+                            at.wrapping_add(u64::from(x).wrapping_mul(4)) as *mut u32,
+                            pixel(x),
+                        );
+                    }
                 }
             }
         }
@@ -246,34 +270,48 @@ impl Pane {
 
 /// The pane's line assembly and drawing, on a framebuffer in memory: lines
 /// drawn at their rows, the marker after the newest, escape sequences
-/// dropped, a long line split, and the rows wrapping to the top.
+/// dropped, a long line split, and the rows wrapping to the top -- on an
+/// 8-byte-aligned framebuffer, two pixels a store, and on one that is not,
+/// one a store.
 pub fn self_test() -> crate::error::KernelResult<()> {
-    use crate::error::KernelError;
-    fn fail(what: &str) -> crate::error::KernelResult<()> {
-        crate::serial_println!("[screenlog]   FAIL: {}", what);
-        Err(KernelError::InternalError)
-    }
     crate::serial_println!("[screenlog] Running self-test...");
-    // A framebuffer of 4 columns by 3 rows of glyphs.
+    for wide in [true, false] {
+        if let Err(what) = self_test_pane(wide) {
+            crate::serial_println!(
+                "[screenlog]   FAIL ({} stores): {}",
+                if wide { "wide" } else { "narrow" },
+                what
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    crate::serial_println!(
+        "[screenlog]   lines, the marker, escapes dropped, splitting, wrapping, both store widths: OK"
+    );
+    Ok(())
+}
+
+/// [`self_test`] on a framebuffer whose base is 8-byte aligned (`wide`) or
+/// 4 bytes past that.
+fn self_test_pane(wide: bool) -> Result<(), &'static str> {
+    // A framebuffer of 4 columns by 3 rows of glyphs, black as the console
+    // leaves the screen, placed in a buffer one pixel longer so that it can
+    // start either on an 8-byte boundary or 4 bytes past one.
     const COLS: u32 = 4;
     const ROWS: u32 = 3;
     const WIDTH: u32 = COLS * GLYPH_WIDTH;
     const PIXELS: usize = (WIDTH * ROWS * GLYPH_HEIGHT) as usize;
     let width = WIDTH;
-    // Black, as the console leaves the screen.
-    let mut fb = alloc::vec![BG; PIXELS];
-    let mut pane = Pane {
-        fb: fb.as_mut_ptr() as u64,
-        pitch: WIDTH * 4,
-        top: 0,
-        cols: COLS,
-        rows: ROWS,
-        row: 0,
-        row_len: [0; MAX_ROWS],
-        line: [0; MAX_COLS],
-        len: 0,
-        escape: false,
-    };
+    let mut buf = alloc::vec![BG; PIXELS + 1];
+    let aligned = (buf.as_ptr() as usize).is_multiple_of(8);
+    let skip = usize::from(aligned != wide);
+    let fb = buf
+        .get_mut(skip..skip.saturating_add(PIXELS))
+        .ok_or("no framebuffer")?;
+    let mut pane = Pane::new(fb.as_mut_ptr() as u64, WIDTH * 4, 0, COLS, ROWS);
+    if pane.wide != wide {
+        return Err("the store width does not follow the framebuffer's alignment");
+    }
     // The glyph drawn at a cell: true where a pixel has `fg`, false where it
     // has the background; None if any pixel is neither.
     let cell = |fb: &[u32], col: u32, row: u32, fg: u32| -> Option<[u8; 16]> {
@@ -303,26 +341,23 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     };
 
     pane.feed(b"AB\nx");
-    if !shows(&fb, 0, b"AB  ", FG) || !shows(&fb, 1, b"-- n", MARK) || pane.len != 1 {
-        return fail("a line is not drawn at its row with the marker after it");
+    if !shows(fb, 0, b"AB  ", FG) || !shows(fb, 1, b"-- n", MARK) || pane.len != 1 {
+        return Err("a line is not drawn at its row with the marker after it");
     }
     pane.feed(b"\x1b[1;32mOK\x1b[0m\n");
     // The line covers the marker it replaces, the label's last letter too.
-    if !shows(&fb, 1, b"xOK ", FG) || !shows(&fb, 2, b"-- n", MARK) {
-        return fail("an escape sequence was drawn, a line split, or old text left");
+    if !shows(fb, 1, b"xOK ", FG) || !shows(fb, 2, b"-- n", MARK) {
+        return Err("an escape sequence was drawn, a line split, or old text left");
     }
     // Six bytes into four columns: split, and the rows wrap to the top.
     pane.feed(b"abcdef\n");
-    if !shows(&fb, 2, b"abcd", FG) || !shows(&fb, 0, b"ef  ", FG) || !shows(&fb, 1, b"-- n", MARK) {
-        return fail("a long line is not split, or the rows do not wrap");
+    if !shows(fb, 2, b"abcd", FG) || !shows(fb, 0, b"ef  ", FG) || !shows(fb, 1, b"-- n", MARK) {
+        return Err("a long line is not split, or the rows do not wrap");
     }
     // "é" (two bytes) and a tab.
     pane.feed(b"\xc3\xa9\tz\n");
-    if !shows(&fb, 1, b"~ z ", FG) {
-        return fail("a UTF-8 character or a tab is not drawn as it should be");
+    if !shows(fb, 1, b"~ z ", FG) {
+        return Err("a UTF-8 character or a tab is not drawn as it should be");
     }
-    crate::serial_println!(
-        "[screenlog]   lines, the marker, escapes dropped, splitting, wrapping: OK"
-    );
     Ok(())
 }

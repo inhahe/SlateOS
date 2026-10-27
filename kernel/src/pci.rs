@@ -262,7 +262,33 @@ pub fn config_write16_native(bus: u8, device: u8, function: u8, offset: u8, valu
 
 /// Every PCI function on every bus reachable from bus 0, with what a driver
 /// needs of each ([`for_each_function`]'s order).
+///
+/// Scanned once and kept: a scan is thousands of slow port reads on a PC
+/// with many bridges, and nothing here changes what it finds (no hotplug,
+/// and firmware placed the BARs). [`rescan`] scans again.
 pub fn scan_all() -> Vec<PciDevice> {
+    let mut kept = SCANNED.lock();
+    if let Some(found) = kept.as_ref() {
+        return found.clone();
+    }
+    let found = scan_now();
+    *kept = Some(found.clone());
+    found
+}
+
+/// Scan again, and keep what is found for [`scan_all`]: after a change the
+/// kept scan cannot see.
+pub fn rescan() -> Vec<PciDevice> {
+    let found = scan_now();
+    *SCANNED.lock() = Some(found.clone());
+    found
+}
+
+/// What [`scan_all`] last found; `None` until it first scans.
+static SCANNED: crate::sync::PreemptSpinMutex<Option<Vec<PciDevice>>> =
+    crate::sync::PreemptSpinMutex::new(None);
+
+fn scan_now() -> Vec<PciDevice> {
     let mut devices = Vec::new();
     for_each_function(|addr| scan_function(addr.bus, addr.device, addr.function, &mut devices));
     devices
@@ -983,9 +1009,9 @@ pub fn decode_bars(dev: &PciDevice) -> Vec<BarInfo> {
 // Self-test
 // ---------------------------------------------------------------------------
 
-/// Scan bus 0 and log all discovered PCI devices.
+/// Scan every bus and log all discovered PCI devices.
 pub fn self_test() -> Result<(), &'static str> {
-    crate::serial_println!("[pci] Scanning PCI bus 0...");
+    crate::serial_println!("[pci] Scanning the PCI buses...");
 
     let devices = scan_all();
     if devices.is_empty() {
@@ -1021,15 +1047,17 @@ pub fn self_test() -> Result<(), &'static str> {
 /// 32-bit memory BAR, a 64-bit prefetchable one spanning two registers (and
 /// reported once), and an unassigned register left out.
 fn self_test_bindings_and_bars() -> Result<(), &'static str> {
-    // An address no function answers at, so nothing real is bound there.
-    let nowhere = PciAddress {
-        bus: 0xFE,
-        device: 31,
-        function: 7,
-    };
-    if config_read16(nowhere.bus, nowhere.device, nowhere.function, CFG_VENDOR_ID) != 0xFFFF {
-        return Ok(());
-    }
+    // An address no function answers at, so nothing real is bound there:
+    // function 7 of slot 31, on the highest bus where none does.
+    let nowhere = (0..=0xFFu8)
+        .rev()
+        .map(|bus| PciAddress {
+            bus,
+            device: 31,
+            function: 7,
+        })
+        .find(|a| config_read16(a.bus, a.device, a.function, CFG_VENDOR_ID) == 0xFFFF)
+        .ok_or("every bus has a function at slot 31, function 7")?;
     if bound_driver(nowhere).is_some() {
         return Err("an address no driver took reads as bound");
     }

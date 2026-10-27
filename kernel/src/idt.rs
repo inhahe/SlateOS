@@ -1796,7 +1796,16 @@ fn kill_userspace_task_with_info(
         let mapped =
             page_table::translate(page_table::active_pml4_phys(), VirtAddr::new(frame.rip))
                 .is_some();
-        if mapped {
+        if mapped && frame.rip >= page_table::USER_SPACE_END {
+            // A jump into the kernel's half: its pages are not unmapped under
+            // a fault report, so the page just seen present can be read.
+            let avail =
+                usize::try_from(0x1000_u64.saturating_sub(frame.rip & 0xFFF).min(16)).unwrap_or(0);
+            // SAFETY: the page holding `frame.rip` is mapped, a kernel page
+            // that stays so; `avail` stops at its end.
+            let bytes = unsafe { core::slice::from_raw_parts(frame.rip as *const u8, avail) };
+            serial_println!("  bytes @RIP ({avail}): {bytes:02x?}");
+        } else if mapped {
             let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
             let mut buf = [0u8; 16];
             // The page holding `frame.rip` was just seen present, and `avail`
@@ -4142,6 +4151,7 @@ extern "C" fn handle_page_fault(frame_ptr: *mut InterruptStackFrame, error: u64)
         // whatever it holds.
         if !may_wait
             && pid != 0
+            && !mm::user::peeking(sched::current_cpu_id())
             && !UACCESS_ATOMIC_SAID.swap(true, core::sync::atomic::Ordering::Relaxed)
         {
             serial_println!(

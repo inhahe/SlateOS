@@ -379,7 +379,7 @@ pub fn self_test_delivery() -> crate::error::KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[msi]   delivery: OK (vector {}: unowned not counted, owned counted once)",
+        "[msi]   delivery: OK (vector {}: nothing from before its claim, counted once)",
         vector
     );
     Ok(())

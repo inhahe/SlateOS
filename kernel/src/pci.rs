@@ -1,8 +1,8 @@
 //! Minimal PCI bus enumeration via Configuration Space Mechanism #1.
 //!
-//! Scans PCI bus 0 by probing all 32 device slots (8 functions each)
-//! through ports 0xCF8 (address) and 0xCFC (data).  This is sufficient
-//! for discovering virtio devices in QEMU's q35 machine.
+//! Scans bus 0 and every bus behind a PCI-to-PCI bridge, probing all 32
+//! device slots (8 functions each) through ports 0xCF8 (address) and 0xCFC
+//! (data).  The pair is taken under a lock ([`config_access`]).
 //!
 //! ## PCI Configuration Space
 //!
@@ -157,25 +157,64 @@ fn config_address(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     | u32::from(offset & 0xFC) // Dword-aligned
 }
 
+/// Which CPU is inside a config access ([`config_access`]): 0 for none, else
+/// its index plus one. The lock that makes an access -- an address written to
+/// 0xCF8, then data moved through 0xCFC -- one step: another CPU's access, or
+/// an interrupt handler's on this one, landing between the two would move
+/// the wrong register's data.
+static CONFIG_HOLDER: AtomicUsize = AtomicUsize::new(0);
+
+/// Select `addr` in the config address port and run `data` against the data
+/// port, as one access: interrupts off, and [`CONFIG_HOLDER`] held.
+///
+/// An NMI cannot be held off, and the watchdog's re-arm (`hardlockup`) does
+/// config access from one. If it interrupted this CPU's own access, waiting
+/// for the holder would wait forever; so a CPU that finds itself the holder
+/// does its access without waiting and puts back the address the interrupted
+/// access selected (the address port reads back), as firmware's SMM handlers
+/// do around the same pair of ports.
+fn config_access<R>(addr: u32, data: impl FnOnce() -> R) -> R {
+    crate::cpu::without_interrupts(|| {
+        let me = crate::smp::current_cpu_index().saturating_add(1);
+        if CONFIG_HOLDER.load(Ordering::Relaxed) == me {
+            // SAFETY: 0xCF8 is the config mechanism #1 address port, always
+            // present on PC-compatible hardware; reading it gives the address
+            // the interrupted access selected, written back before returning.
+            let interrupted = unsafe { port::inl(PCI_CONFIG_ADDR) };
+            // SAFETY: as above.
+            unsafe { port::outl(PCI_CONFIG_ADDR, addr) };
+            let result = data();
+            // SAFETY: as above.
+            unsafe { port::outl(PCI_CONFIG_ADDR, interrupted) };
+            return result;
+        }
+        while CONFIG_HOLDER
+            .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: as above; this CPU holds the ports.
+        unsafe { port::outl(PCI_CONFIG_ADDR, addr) };
+        let result = data();
+        CONFIG_HOLDER.store(0, Ordering::Release);
+        result
+    })
+}
+
 /// Read a 32-bit value from PCI configuration space.
 pub fn config_read32(bus: u8, device: u8, function: u8, offset: u8) -> u32 {
     let addr = config_address(bus, device, function, offset);
-    // SAFETY: Ports 0xCF8/0xCFC are the PCI config mechanism #1 ports,
-    // always present on PC-compatible hardware.
-    unsafe {
-        port::outl(PCI_CONFIG_ADDR, addr);
-        port::inl(PCI_CONFIG_DATA)
-    }
+    // SAFETY: 0xCFC is the config mechanism #1 data port, always present on
+    // PC-compatible hardware; `config_access` has selected the register.
+    config_access(addr, || unsafe { port::inl(PCI_CONFIG_DATA) })
 }
 
 /// Write a 32-bit value to PCI configuration space.
 pub fn config_write32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     let addr = config_address(bus, device, function, offset);
     // SAFETY: Same as config_read32.
-    unsafe {
-        port::outl(PCI_CONFIG_ADDR, addr);
-        port::outl(PCI_CONFIG_DATA, value);
-    }
+    config_access(addr, || unsafe { port::outl(PCI_CONFIG_DATA, value) });
 }
 
 /// Read a 16-bit value from PCI configuration space.
@@ -225,13 +264,10 @@ pub fn config_read8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
     let addr = config_address(bus, device, function, offset);
-    // SAFETY: 0xCF8/0xCFC are the PCI config mechanism #1 ports. The
-    // aligned dword address is written first, then a byte access selects
-    // the target lane within the dword via (offset & 3).
-    unsafe {
-        port::outl(PCI_CONFIG_ADDR, addr);
-        port::outb(PCI_CONFIG_DATA + u16::from(offset & 3), value);
-    }
+    // SAFETY: 0xCFC-0xCFF are the PCI config mechanism #1 data port's
+    // lanes; `config_access` has selected the aligned dword, and a byte
+    // access selects the target lane within it via (offset & 3).
+    config_access(addr, || unsafe { port::outb(PCI_CONFIG_DATA + u16::from(offset & 3), value) });
 }
 
 /// Write a 16-bit value to PCI configuration space using a genuine 16-bit
@@ -247,13 +283,9 @@ pub fn config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn config_write16_native(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
     let addr = config_address(bus, device, function, offset);
-    // SAFETY: 0xCF8/0xCFC are the PCI config mechanism #1 ports. Writing
-    // the aligned dword address then a word access selects the target
+    // SAFETY: as config_write8's, with a word access selecting the target
     // 16-bit lane within the dword via (offset & 2).
-    unsafe {
-        port::outl(PCI_CONFIG_ADDR, addr);
-        port::outw(PCI_CONFIG_DATA + u16::from(offset & 2), value);
-    }
+    config_access(addr, || unsafe { port::outw(PCI_CONFIG_DATA + u16::from(offset & 2), value) });
 }
 
 // ---------------------------------------------------------------------------
@@ -622,7 +654,7 @@ pub fn disable_bus_master(addr: PciAddress) {
 // silences everything else.  Order does not matter — a claim that arrives
 // after the sweep re-enables the function it names.
 
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 /// Sentinel for an unused slot in [`INTX_CLAIMS`].
 ///
@@ -1156,8 +1188,46 @@ pub fn self_test() -> Result<(), &'static str> {
     self_test_intx(&devices)?;
     self_test_bindings_and_bars()?;
     self_test_serial_match()?;
+    self_test_nested_access()?;
 
     crate::serial_println!("[pci] Self-test PASSED");
+    Ok(())
+}
+
+/// [`config_access`] entered by the CPU that holds the ports, as an NMI
+/// interrupting its access would: the read must still be right, and the
+/// address the interrupted access selected must be back in place.
+fn self_test_nested_access() -> Result<(), &'static str> {
+    let normal = config_read32(0, 0, 0, CFG_VENDOR_ID);
+    let selected = config_address(0, 0, 0, CFG_CLASS_REVISION);
+    let (nested, after) = crate::cpu::without_interrupts(|| {
+        let me = crate::smp::current_cpu_index().saturating_add(1);
+        // Take the ports as an access does, and select a register.
+        while CONFIG_HOLDER
+            .compare_exchange_weak(0, me, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+        // SAFETY: 0xCF8 is the config address port; this CPU holds it.
+        unsafe { port::outl(PCI_CONFIG_ADDR, selected) };
+        let nested = config_read32(0, 0, 0, CFG_VENDOR_ID);
+        // SAFETY: as above.
+        let after = unsafe { port::inl(PCI_CONFIG_ADDR) };
+        CONFIG_HOLDER.store(0, Ordering::Release);
+        (nested, after)
+    });
+    if nested != normal || after != selected {
+        crate::serial_println!(
+            "[pci]   FAIL: a nested config read gave {:#010x} (want {:#010x}) and left {:#010x} selected (want {:#010x})",
+            nested,
+            normal,
+            after,
+            selected
+        );
+        return Err("nested config access");
+    }
+    crate::serial_println!("[pci]   nested config access: OK");
     Ok(())
 }
 

@@ -1995,9 +1995,12 @@ fn self_test_window_lock() -> crate::error::KernelResult<()> {
     // SAFETY: a lock of this test's own, which no access uses.
     unsafe { lock.seize() };
     let seized = lock.holder.load(Ordering::Acquire) == 0;
-    // SAFETY: as above.
-    unsafe { lock.seize() };
-    let usable = !lock.with(|nested| nested);
+    // Used again only once seized: a lock still held would spin for ever.
+    let usable = seized && {
+        // SAFETY: as above.
+        unsafe { lock.seize() };
+        !lock.with(|nested| nested)
+    };
     if seen != (false, true) || !free_after || !seized || !usable {
         crate::serial_println!(
             "[sync]   FAIL: window lock: nested {:?} (want (false, true)), free after {}, seized {}, usable {}",

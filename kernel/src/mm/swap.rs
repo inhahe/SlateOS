@@ -1914,6 +1914,10 @@ impl crate::blkdev::BlockDevice for MemoryTierDevice {
         }
     }
 
+    fn medium(&self) -> crate::blkdev::Medium {
+        crate::blkdev::Medium::Scratch
+    }
+
     fn read_sector(
         &mut self,
         lba: u64,

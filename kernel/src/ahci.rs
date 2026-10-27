@@ -257,6 +257,8 @@ struct AhciPort {
 pub struct AhciDevice {
     port: spin::Mutex<AhciPort>,
     info: BlockDeviceInfo,
+    /// The disk's names, for the write fence: from IDENTIFY DEVICE, fixed.
+    identity: blkdev::DiskIdentity,
 }
 
 // SAFETY: AhciDevice uses a Mutex for interior mutability; safe to send
@@ -746,6 +748,10 @@ impl BlockDevice for AhciDevice {
         self.info.clone()
     }
 
+    fn medium(&self) -> blkdev::Medium {
+        blkdev::Medium::Disk(self.identity.clone())
+    }
+
     fn flush(&mut self) -> KernelResult<()> {
         self.port.lock().flush_impl()
     }
@@ -1101,9 +1107,15 @@ pub fn init(hhdm_offset: u64) {
                         read_only: false,
                     };
 
+                    let identity = blkdev::DiskIdentity {
+                        model: port.model.clone(),
+                        serial: port.serial.clone(),
+                        eui64: None,
+                    };
                     let device = AhciDevice {
                         port: spin::Mutex::new(port),
                         info: info.clone(),
+                        identity,
                     };
 
                     blkdev::register(&dev_name, Box::new(device));

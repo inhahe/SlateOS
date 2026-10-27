@@ -415,6 +415,9 @@ struct NvmeController {
     /// Model/serial from IDENTIFY.
     model: String,
     serial: String,
+    /// Namespace 1's EUI-64 (Identify Namespace bytes 120-127); `None` when
+    /// the controller leaves it zero, as it may.
+    eui64: Option<[u8; 8]>,
     /// A volatile write cache is present (Identify Controller VWC, byte 525
     /// bit 0): what the controller has completed may be only in its memory
     /// until a Flush.
@@ -534,6 +537,7 @@ impl NvmeController {
             block_size: 512,
             model: String::new(),
             serial: String::new(),
+            eui64: None,
             volatile_cache: false,
         })
     }
@@ -630,6 +634,13 @@ impl NvmeController {
             data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
         self.sector_count = nsze;
+
+        // Bytes 120-127: EUI64, the namespace's IEEE identifier; zero when it
+        // has none. What the write fence can name the disk by.
+        self.eui64 = data
+            .get(120..128)
+            .and_then(|b| <[u8; 8]>::try_from(b).ok())
+            .filter(|eui| *eui != [0u8; 8]);
 
         // Bytes 24-25: FLBAS (Formatted LBA Size).
         // Bits 3:0 = index into LBA Format table.
@@ -851,6 +862,8 @@ impl NvmeController {
 pub struct NvmeDevice {
     ctrl: spin::Mutex<NvmeController>,
     info: BlockDeviceInfo,
+    /// The disk's names, for the write fence: from IDENTIFY, fixed.
+    identity: blkdev::DiskIdentity,
 }
 
 unsafe impl Send for NvmeDevice {}
@@ -859,6 +872,10 @@ unsafe impl Sync for NvmeDevice {}
 impl BlockDevice for NvmeDevice {
     fn info(&self) -> BlockDeviceInfo {
         self.info.clone()
+    }
+
+    fn medium(&self) -> blkdev::Medium {
+        blkdev::Medium::Disk(self.identity.clone())
     }
 
     fn flush(&mut self) -> KernelResult<()> {
@@ -1099,9 +1116,15 @@ pub fn init(hhdm_offset: u64) {
             read_only: false,
         };
 
+        let identity = blkdev::DiskIdentity {
+            model: controller.model.clone(),
+            serial: controller.serial.clone(),
+            eui64: controller.eui64,
+        };
         let device = NvmeDevice {
             ctrl: spin::Mutex::new(controller),
             info: info.clone(),
+            identity,
         };
 
         blkdev::register(&dev_name, Box::new(device));

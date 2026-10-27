@@ -327,7 +327,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     if fixup_for(at(slateos_uaccess_copy_insn)) != Some(at(slateos_uaccess_copy_fixup))
         || fixup_for(at(slateos_uaccess_bits32_cas_insn)) != Some(at(slateos_uaccess_fault_ret))
         || fixup_for(at(slateos_uaccess_copy_fixup)).is_some()
-        || fixup_for(self_test as usize as u64).is_some()
+        || fixup_for(self_test as *const () as usize as u64).is_some()
     {
         return fail("the fixup table is wrong");
     }

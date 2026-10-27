@@ -1870,6 +1870,12 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("blkdev discard", selftest::Severity::Diagnostic, || {
                 blkdev::self_test_discard()
             });
+            // The write fence: no physical disk is changed unless the boot
+            // command line names it. Integrity: on a real machine a broken
+            // fence would put its owner's disks at risk.
+            selftest::dispatch_debug("blkdev write fence", selftest::Severity::Integrity, || {
+                blkdev::self_test_write_fence()
+            });
             // FAT fstrim (free-space discard) self-test on a scratch RAM disk.
             selftest::dispatch_debug("FAT fstrim", selftest::Severity::Diagnostic, || {
                 fs::fat::trim_self_test()

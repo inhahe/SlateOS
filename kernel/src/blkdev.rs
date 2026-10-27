@@ -48,6 +48,52 @@ pub struct BlockDeviceInfo {
     pub read_only: bool,
 }
 
+/// What a block device keeps its sectors on, as the write fence
+/// ([`WriteFence`]) sees it: [`BlockDevice::medium`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Medium {
+    /// Memory, or a disk a hypervisor makes up (virtio-blk): nothing anyone
+    /// keeps outside this system. Always writable.
+    Scratch,
+    /// A disk behind a storage controller -- NVMe, AHCI -- real, or an
+    /// emulation of one: possibly someone's data. Writable only when the
+    /// boot command line names it.
+    Disk(DiskIdentity),
+}
+
+/// How a physical disk names itself: what `blk.writable=` matches, and what
+/// the serial log shows at registration so that a boot entry can be written
+/// from it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiskIdentity {
+    /// The model string, trimmed ("Samsung SSD 960 EVO 1TB"). Shown, never
+    /// matched: two disks of one model share it.
+    pub model: String,
+    /// The serial number, trimmed; empty when the disk gave none that is text.
+    pub serial: String,
+    /// An NVMe namespace's IEEE EUI-64, when it has one -- what Windows shows
+    /// as an NVMe disk's serial number (`0025_3851_81B1_CD22.`).
+    pub eui64: Option<[u8; 8]>,
+}
+
+impl core::fmt::Display for DiskIdentity {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let serial = if self.serial.is_empty() {
+            "(none)"
+        } else {
+            &self.serial
+        };
+        write!(f, "\"{}\", serial {}", self.model, serial)?;
+        if let Some(eui) = self.eui64 {
+            f.write_str(", eui64 ")?;
+            for b in eui {
+                write!(f, "{b:02x}")?;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Trait for block-level storage devices.
 ///
 /// All methods take `&mut self` because device I/O inherently mutates
@@ -60,6 +106,11 @@ pub struct BlockDeviceInfo {
 pub trait BlockDevice: Send {
     /// Return metadata about this device.
     fn info(&self) -> BlockDeviceInfo;
+
+    /// What the device keeps its sectors on, for the write fence
+    /// ([`WriteFence`]). Every driver must say: a new one cannot be left
+    /// unfenced by forgetting to.
+    fn medium(&self) -> Medium;
 
     /// Read a single sector into `buf`.
     ///
@@ -196,6 +247,11 @@ impl BlockDevice for crate::virtio::blk::VirtioBlkDevice {
             sector_size: SECTOR_SIZE as u32,
             read_only: false,
         }
+    }
+
+    fn medium(&self) -> Medium {
+        // A disk the hypervisor makes up: what backs it is the host's to guard.
+        Medium::Scratch
     }
 
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
@@ -357,16 +413,39 @@ enum Direction {
     Flush,
 }
 
-/// A registered device seen through its statistics: each request a caller
-/// of [`with_device`] or [`try_with_device`] makes is passed to the driver
-/// and counted -- one request, its sectors and its time -- whatever it
-/// answers, as Linux counts a completed request whether it failed or not.
+/// A registered device seen through its statistics and the write fence:
+/// each request a caller of [`with_device`] or [`try_with_device`] makes is
+/// passed to the driver and counted -- one request, its sectors and its time
+/// -- whatever it answers, as Linux counts a completed request whether it
+/// failed or not. A write or discard to a device the fence keeps is refused
+/// here, before the driver sees it, and counted only as a refusal.
 struct Accounted<'a> {
     device: &'a mut dyn BlockDevice,
     stats: &'a mut DeviceStats,
+    /// The registry's name for the device, for the refusal's log line.
+    name: &'a str,
+    /// The fence lets this device be changed ([`RegisteredDevice::writable`]).
+    writable: bool,
+    /// Writes and discards refused so far ([`RegisteredDevice::refused`]).
+    refused: &'a mut u64,
 }
 
 impl Accounted<'_> {
+    /// Refuse `what` (a write, a discard) to a fenced device: `NotPermitted`
+    /// (`EPERM`, what Linux answers a write to a read-only block device), the
+    /// first refusal per device said on the serial log, the rest counted.
+    fn refuse(&mut self, what: &str) -> KernelResult<()> {
+        if *self.refused == 0 {
+            crate::serial_println!(
+                "[blkdev] {} to '{}' refused: the write fence keeps it (blk.writable= does not name it)",
+                what,
+                self.name
+            );
+        }
+        *self.refused = self.refused.saturating_add(1);
+        Err(KernelError::NotPermitted)
+    }
+
     /// Count one request of `sectors` that began at `start`
     /// (`crate::hrtimer::now_ns`) and answered `result`.
     fn count(&mut self, way: Direction, sectors: u64, start: u64, result: &KernelResult<()>) {
@@ -407,7 +486,13 @@ impl Accounted<'_> {
 
 impl BlockDevice for Accounted<'_> {
     fn info(&self) -> BlockDeviceInfo {
-        self.device.info()
+        let mut info = self.device.info();
+        info.read_only |= !self.writable;
+        info
+    }
+
+    fn medium(&self) -> Medium {
+        self.device.medium()
     }
 
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
@@ -418,6 +503,9 @@ impl BlockDevice for Accounted<'_> {
     }
 
     fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
+        if !self.writable {
+            return self.refuse("a write");
+        }
         let start = crate::hrtimer::now_ns();
         let r = self.device.write_sector(lba, buf);
         self.count(Direction::Write, 1, start, &r);
@@ -432,6 +520,9 @@ impl BlockDevice for Accounted<'_> {
     }
 
     fn write_sectors(&mut self, start_lba: u64, count: u32, buf: &[u8]) -> KernelResult<()> {
+        if !self.writable {
+            return self.refuse("a write");
+        }
         let start = crate::hrtimer::now_ns();
         let r = self.device.write_sectors(start_lba, count, buf);
         self.count(Direction::Write, u64::from(count), start, &r);
@@ -439,10 +530,13 @@ impl BlockDevice for Accounted<'_> {
     }
 
     fn supports_discard(&self) -> bool {
-        self.device.supports_discard()
+        self.writable && self.device.supports_discard()
     }
 
     fn discard(&mut self, start_lba: u64, count: u64) -> KernelResult<()> {
+        if !self.writable {
+            return self.refuse("a discard");
+        }
         let start = crate::hrtimer::now_ns();
         let r = self.device.discard(start_lba, count);
         // Only a discard the device takes is one; a refusal of the call
@@ -471,6 +565,11 @@ struct RegisteredDevice {
     device: Box<dyn BlockDevice>,
     /// What callers have asked of it since it was registered ([`Accounted`]).
     stats: DeviceStats,
+    /// The write fence lets it be changed: its [`Medium`] is scratch, or the
+    /// boot command line names it. Decided once, at registration.
+    writable: bool,
+    /// Writes and discards the fence has refused it.
+    refused: u64,
     /// Device metadata, snapshotted at registration time.
     ///
     /// Captured once via [`BlockDevice::info`] (which needs `&self`) so
@@ -485,8 +584,137 @@ struct RegisteredDevice {
     info: BlockDeviceInfo,
 }
 
+impl RegisteredDevice {
+    /// The device as callers reach it: counted, and fenced.
+    fn accounted(&mut self) -> Accounted<'_> {
+        Accounted {
+            device: self.device.as_mut(),
+            stats: &mut self.stats,
+            name: &self.name,
+            writable: self.writable,
+            refused: &mut self.refused,
+        }
+    }
+}
+
 /// Global block device registry.
 static REGISTRY: Mutex<Vec<RegisteredDevice>> = Mutex::new(Vec::new());
+
+// ---------------------------------------------------------------------------
+// The write fence
+// ---------------------------------------------------------------------------
+
+/// Which physical disks this kernel may change. Every [`Medium::Disk`] the
+/// boot command line does not name is read-only: listed so, and each write
+/// and discard to it refused in the registry before a driver sees it. So a
+/// machine that boots SlateOS to try it keeps its own disks whole unless its
+/// boot entry names the one it gives up (design-decisions §1575).
+///
+/// The command line's `blk.writable=` (the last, if several) is a
+/// comma-separated list of:
+/// - `eui64:<16 hex digits>` -- an NVMe namespace's EUI-64; `_`, `.`, `-` and
+///   `:` among the digits are ignored, so Windows' form
+///   (`0025_3851_81B1_CD22.`) can be pasted;
+/// - `serial:<text>` -- the disk's serial number, exactly;
+/// - `all` -- every disk, for a machine whose disks are all scratch.
+///
+/// With no `blk.writable=`, no physical disk is writable. A value with an
+/// item that does not parse names none: a typo must never widen the fence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteFence {
+    /// `blk.writable=all`.
+    All,
+    /// The disks named -- none, when the list is empty.
+    Named(Vec<DiskName>),
+}
+
+/// One disk a [`WriteFence`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiskName {
+    /// `eui64:` -- [`DiskIdentity::eui64`].
+    Eui64([u8; 8]),
+    /// `serial:` -- [`DiskIdentity::serial`], exactly.
+    Serial(String),
+}
+
+impl WriteFence {
+    /// The fence `cmdline` sets.
+    ///
+    /// # Errors
+    ///
+    /// The first item of `blk.writable=` that does not parse.
+    pub fn from_cmdline(cmdline: &str) -> Result<Self, String> {
+        let Some(value) = cmdline
+            .split_ascii_whitespace()
+            .filter_map(|word| word.strip_prefix("blk.writable="))
+            .next_back()
+        else {
+            return Ok(Self::Named(Vec::new()));
+        };
+        let mut all = false;
+        let mut names = Vec::new();
+        for item in value.split(',').filter(|item| !item.is_empty()) {
+            if item == "all" {
+                all = true;
+            } else if let Some(hex) = item.strip_prefix("eui64:") {
+                names.push(DiskName::Eui64(
+                    parse_eui64(hex).ok_or_else(|| String::from(item))?,
+                ));
+            } else if let Some(serial) = item.strip_prefix("serial:").filter(|s| !s.is_empty()) {
+                names.push(DiskName::Serial(String::from(serial)));
+            } else {
+                return Err(String::from(item));
+            }
+        }
+        Ok(if all { Self::All } else { Self::Named(names) })
+    }
+
+    /// Whether a device on `medium` may be changed.
+    #[must_use]
+    pub fn permits(&self, medium: &Medium) -> bool {
+        match (self, medium) {
+            (_, Medium::Scratch) | (Self::All, _) => true,
+            (Self::Named(names), Medium::Disk(id)) => names.iter().any(|name| match name {
+                DiskName::Eui64(eui) => id.eui64 == Some(*eui),
+                DiskName::Serial(serial) => !id.serial.is_empty() && id.serial == *serial,
+            }),
+        }
+    }
+}
+
+/// Sixteen hex digits as an EUI-64, the separators Windows and Linux print
+/// between them (`_`, `.`, `-`, `:`) skipped; `None` for anything else.
+fn parse_eui64(text: &str) -> Option<[u8; 8]> {
+    let mut eui = [0u8; 8];
+    let mut digits = 0usize;
+    for c in text.chars().filter(|c| !matches!(c, '_' | '.' | '-' | ':')) {
+        let nibble = u8::try_from(c.to_digit(16)?).ok()?;
+        let byte = eui.get_mut(digits / 2)?;
+        *byte = byte.checked_mul(16)?.checked_add(nibble)?;
+        digits = digits.checked_add(1)?;
+    }
+    (digits == 16).then_some(eui)
+}
+
+static WRITE_FENCE: spin::Once<WriteFence> = spin::Once::new();
+
+/// The fence this boot's command line sets, read at the first registration.
+/// A line that is not text, or a `blk.writable=` that does not parse, names
+/// no disk.
+pub fn write_fence() -> &'static WriteFence {
+    WRITE_FENCE.call_once(|| {
+        match WriteFence::from_cmdline(crate::boot::kernel_cmdline().unwrap_or("")) {
+            Ok(fence) => fence,
+            Err(item) => {
+                crate::serial_println!(
+                    "[blkdev] blk.writable= item {:?} does not parse: no disk is writable",
+                    item
+                );
+                WriteFence::Named(Vec::new())
+            }
+        }
+    })
+}
 
 /// Register a block device with the given name.
 ///
@@ -497,7 +725,19 @@ static REGISTRY: Mutex<Vec<RegisteredDevice>> = Mutex::new(Vec::new());
 /// ([`with_device`]) return the *first* matching entry: leaving a stale
 /// duplicate behind would shadow the new device, so re-registration must
 /// drop the old entry rather than append alongside it.
+///
+/// Whether it may be written is decided here, once: by its [`Medium`] and
+/// this boot's [`write_fence`]. A fenced disk is listed read-only, and every
+/// write and discard to it is refused.
 pub fn register(name: &str, device: Box<dyn BlockDevice>) {
+    register_fenced(name, device, write_fence());
+}
+
+/// [`register`], under `fence` rather than this boot's: the write fence's
+/// self-test registers one disk under fences of its own.
+fn register_fenced(name: &str, device: Box<dyn BlockDevice>, fence: &WriteFence) {
+    let medium = device.medium();
+    let writable = fence.permits(&medium);
     let mut registry = REGISTRY.lock();
 
     // Replace on duplicate name: drop any existing entry so the freshly
@@ -515,12 +755,27 @@ pub fn register(name: &str, device: Box<dyn BlockDevice>) {
     // (authoritative over any name the driver hard-codes in its own info()).
     let mut info = device.info();
     info.name = String::from(name);
+    info.read_only |= !writable;
 
-    crate::serial_println!("[blkdev] Registered device '{}'", name);
+    match &medium {
+        Medium::Scratch => crate::serial_println!("[blkdev] Registered device '{}'", name),
+        Medium::Disk(id) => crate::serial_println!(
+            "[blkdev] Registered device '{}': disk {} -- {}",
+            name,
+            id,
+            if writable {
+                "writable"
+            } else {
+                "read-only: blk.writable= does not name it"
+            }
+        ),
+    }
     registry.push(RegisteredDevice {
         name: String::from(name),
         device,
         stats: DeviceStats::default(),
+        writable,
+        refused: 0,
         info,
     });
 }
@@ -552,10 +807,7 @@ where
     let mut registry = REGISTRY.lock();
     for entry in registry.iter_mut() {
         if entry.name == name {
-            return Some(f(&mut Accounted {
-                device: entry.device.as_mut(),
-                stats: &mut entry.stats,
-            }));
+            return Some(f(&mut entry.accounted()));
         }
     }
     None
@@ -599,10 +851,7 @@ where
     };
     for entry in registry.iter_mut() {
         if entry.name == name {
-            return Ok(Some(f(&mut Accounted {
-                device: entry.device.as_mut(),
-                stats: &mut entry.stats,
-            })));
+            return Ok(Some(f(&mut entry.accounted())));
         }
     }
     Ok(None)
@@ -617,7 +866,7 @@ pub fn supports_discard(name: &str) -> Option<bool> {
     registry
         .iter()
         .find(|entry| entry.name == name)
-        .map(|entry| entry.device.supports_discard())
+        .map(|entry| entry.writable && entry.device.supports_discard())
 }
 
 /// Issue a discard (TRIM/UNMAP) for `count` sectors starting at `start_lba`
@@ -648,11 +897,7 @@ pub fn flush_all() -> KernelResult<()> {
     let mut registry = REGISTRY.lock();
     let mut first_err = None;
     for entry in registry.iter_mut() {
-        let r = Accounted {
-            device: entry.device.as_mut(),
-            stats: &mut entry.stats,
-        }
-        .flush();
+        let r = entry.accounted().flush();
         if let Err(e) = r {
             first_err.get_or_insert(e);
         }
@@ -777,6 +1022,10 @@ impl BlockDevice for RamBlockDevice {
         }
     }
 
+    fn medium(&self) -> Medium {
+        Medium::Scratch
+    }
+
     fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
         let (start, end) = self.sector_range(lba).ok_or(KernelError::InvalidArgument)?;
         let src = self
@@ -847,6 +1096,206 @@ impl BlockDevice for RamBlockDevice {
 
 /// Boot self-test for the block-layer discard primitive.
 ///
+/// A RAM disk that says it is a physical disk, for the write fence's
+/// self-test: [`Medium::Disk`] with the identity it is given.
+struct PretendDisk {
+    inner: RamBlockDevice,
+    identity: DiskIdentity,
+}
+
+impl BlockDevice for PretendDisk {
+    fn info(&self) -> BlockDeviceInfo {
+        self.inner.info()
+    }
+
+    fn medium(&self) -> Medium {
+        Medium::Disk(self.identity.clone())
+    }
+
+    fn read_sector(&mut self, lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> KernelResult<()> {
+        self.inner.read_sector(lba, buf)
+    }
+
+    fn write_sector(&mut self, lba: u64, buf: &[u8; SECTOR_SIZE]) -> KernelResult<()> {
+        self.inner.write_sector(lba, buf)
+    }
+
+    fn supports_discard(&self) -> bool {
+        self.inner.supports_discard()
+    }
+
+    fn discard(&mut self, start_lba: u64, count: u64) -> KernelResult<()> {
+        self.inner.discard(start_lba, count)
+    }
+}
+
+/// The write fence ([`WriteFence`]): the command line's forms, whom a fence
+/// lets write, and a disk in the registry -- under a fence that does not name
+/// it, read as before, its writes and discards refused before the device sees
+/// them and it listed read-only; named, written.
+pub fn self_test_write_fence() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        crate::serial_println!("[blkdev]   FAIL: write fence: {}", what);
+        Err(KernelError::InternalError)
+    }
+    crate::serial_println!("[blkdev] Running write-fence self-test...");
+
+    // The command line's forms. EUI is the test PC's E: drive, as Windows
+    // prints it.
+    const EUI: [u8; 8] = [0x00, 0x25, 0x38, 0x51, 0x81, 0xB1, 0xCD, 0x22];
+    let named = |names: Vec<DiskName>| Ok(WriteFence::Named(names));
+    let serial = |s: &str| DiskName::Serial(String::from(s));
+    let parses: [(&str, Result<WriteFence, ()>); 7] = [
+        ("quiet sched.boot_deadline_ms=9", named(Vec::new())),
+        (
+            "a blk.writable=eui64:0025_3851_81B1_CD22. b",
+            named(alloc::vec![DiskName::Eui64(EUI)]),
+        ),
+        (
+            "blk.writable=serial:S3EV,eui64:0025385181b1cd22",
+            named(alloc::vec![serial("S3EV"), DiskName::Eui64(EUI)]),
+        ),
+        ("blk.writable=all", Ok(WriteFence::All)),
+        (
+            "blk.writable=all blk.writable=serial:X",
+            named(alloc::vec![serial("X")]),
+        ),
+        ("blk.writable=", named(Vec::new())),
+        ("blk.writable=,serial:X,", named(alloc::vec![serial("X")])),
+    ];
+    for (line, want) in parses {
+        if WriteFence::from_cmdline(line).map_err(|_| ()) != want {
+            crate::serial_println!("[blkdev]     cmdline {:?}", line);
+            return fail("a blk.writable= line does not set the fence it should");
+        }
+    }
+    // A typo never widens it: the whole value is refused.
+    for line in [
+        "blk.writable=eui64:0025",
+        "blk.writable=eui64:0025385181b1cd2200",
+        "blk.writable=all,eui64:zz",
+        "blk.writable=serial:",
+        "blk.writable=nvme0n1",
+    ] {
+        if WriteFence::from_cmdline(line).is_ok() {
+            crate::serial_println!("[blkdev]     cmdline {:?}", line);
+            return fail("a malformed blk.writable= was taken");
+        }
+    }
+
+    // Whom each fence lets write.
+    let this = DiskIdentity {
+        model: String::from("Pretend Disk"),
+        serial: String::from("FENCE-TEST-1"),
+        eui64: Some(EUI),
+    };
+    let other = DiskIdentity {
+        model: String::from("Pretend Disk"),
+        serial: String::from("FENCE-TEST-2"),
+        eui64: Some([1; 8]),
+    };
+    let unnamed = DiskIdentity {
+        serial: String::new(),
+        eui64: None,
+        ..this.clone()
+    };
+    let (this_m, other_m) = (Medium::Disk(this.clone()), Medium::Disk(other));
+    let none = WriteFence::Named(Vec::new());
+    let by_eui = WriteFence::Named(alloc::vec![DiskName::Eui64(EUI)]);
+    let by_serial = WriteFence::Named(alloc::vec![serial("FENCE-TEST-1")]);
+    let answers = [
+        none.permits(&Medium::Scratch),
+        !none.permits(&this_m),
+        by_eui.permits(&this_m),
+        !by_eui.permits(&other_m),
+        by_serial.permits(&this_m),
+        !by_serial.permits(&other_m),
+        !by_serial.permits(&Medium::Disk(unnamed)),
+        WriteFence::All.permits(&other_m),
+    ];
+    if let Some(i) = answers.iter().position(|ok| !ok) {
+        crate::serial_println!("[blkdev]     answer {} was wrong", i);
+        return fail("a fence lets the wrong disks write");
+    }
+
+    // A disk in the registry, under a fence that does not name it, then one
+    // that does.
+    let dev = "fencetest0";
+    // A leftover of an earlier failed run, if any.
+    let _ = unregister(dev);
+    let pretend = || {
+        Box::new(PretendDisk {
+            inner: RamBlockDevice::new(16),
+            identity: this.clone(),
+        })
+    };
+    register_fenced(dev, pretend(), &none);
+    let fenced = (|| -> KernelResult<()> {
+        let pattern = [0xA5u8; 2 * SECTOR_SIZE];
+        let refused = [
+            with_device(dev, |d| d.write_sector(0, &[0xA5; SECTOR_SIZE])),
+            with_device(dev, |d| d.write_sectors(1, 2, &pattern)),
+            with_device(dev, |d| d.discard(0, 4)),
+        ];
+        if let Some(i) = refused
+            .iter()
+            .position(|r| *r != Some(Err(KernelError::NotPermitted)))
+        {
+            crate::serial_println!("[blkdev]     request {} answered {:?}", i, refused.get(i));
+            return fail("a fenced disk took a write or a discard");
+        }
+        let mut back = [0xFFu8; 3 * SECTOR_SIZE];
+        if with_device(dev, |d| d.read_sectors(0, 3, &mut back)) != Some(Ok(()))
+            || back.iter().any(|&b| b != 0)
+        {
+            return fail("a fenced disk does not read as before, or a refused write landed");
+        }
+        let listed = (
+            info(dev).map(|i| i.read_only),
+            with_device(dev, |d| d.info().read_only),
+            supports_discard(dev),
+            with_device(dev, |d| d.supports_discard()),
+        );
+        if listed != (Some(true), Some(true), Some(false), Some(false)) {
+            crate::serial_println!("[blkdev]     listed {:?}", listed);
+            return fail("a fenced disk is not listed read-only, or offers discard");
+        }
+        let reached = device_stats()
+            .into_iter()
+            .find(|(i, _)| i.name == dev)
+            .map(|(_, s)| (s.writes, s.discards));
+        if reached != Some((0, 0)) {
+            return fail("a refused request was counted as reaching the disk");
+        }
+        Ok(())
+    })();
+    let _ = unregister(dev);
+    fenced?;
+
+    register_fenced(dev, pretend(), &by_serial);
+    let open = (|| -> KernelResult<()> {
+        let mut back = [0u8; SECTOR_SIZE];
+        let wrote = with_device(dev, |d| {
+            d.write_sector(0, &[0x5A; SECTOR_SIZE])?;
+            d.read_sector(0, &mut back)
+        });
+        if wrote != Some(Ok(()))
+            || back.iter().any(|&b| b != 0x5A)
+            || info(dev).is_none_or(|i| i.read_only)
+        {
+            return fail("a disk the fence names cannot be written");
+        }
+        Ok(())
+    })();
+    let _ = unregister(dev);
+    open?;
+
+    crate::serial_println!(
+        "[blkdev]   write fence: forms, whom it lets write, a fenced disk and a named one: OK"
+    );
+    Ok(())
+}
+
 /// Registers a small scratch [`RamBlockDevice`], fills a few sectors with a
 /// non-zero pattern, discards a sub-range through the registry helper, and
 /// verifies that (a) the discarded sectors read back as zero, (b) the

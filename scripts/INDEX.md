@@ -360,6 +360,7 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/pidof-diff.sh` | pidof-diff.sh -- run our `pidof` and `killall5` and sysvinit's side by side |
 | `scripts/pidof-fixture.sh` | pidof-fixture.sh -- the init of a PID namespace running one pidof-diff case. |
 | `scripts/pidof-ttyrun.py` | Run a program with a pseudo-terminal as its standard input. |
+| `scripts/pikvm.py` | Boot a kernel on the real-hardware test PC through its PiKVM, and watch it. |
 | `scripts/pinky-diff.sh` | pinky-diff.sh — compare our `pinky` against GNU coreutils 9.4's, inside WSL. |
 | `scripts/pkgconf-spike/run.sh` | Cross-compile upstream pkgconf and link it against SlateOS's own libc.a. |
 | `scripts/pmap-diff.sh` | pmap-diff.sh -- run our `pmap` and procps-ng's side by side and report every |
@@ -607,4 +608,4 @@ promises about its own output, which a one-line summary cannot carry.
 | `scripts/xxd-diff.sh` | Differential test: our `xxd` against vim 9.1.0016's. |
 | `scripts/yes-diff.sh` | Differential test: our `yes` against GNU coreutils'. |
 
-_597 scripts._
+_598 scripts._

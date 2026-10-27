@@ -509,6 +509,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "open-requests.py",
         "option-refusal-ledger.txt",
         "orphan-modules-baseline.txt",
+        "pikvm.py",
         "positional-model-limits.py",
         "pre-boot.py",
         "proctree.py",

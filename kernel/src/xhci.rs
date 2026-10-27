@@ -31,7 +31,7 @@ use core::sync::atomic::{Ordering, fence};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::mm::page_table;
 use crate::pci;
 
 // ---------------------------------------------------------------------------
@@ -701,36 +701,10 @@ impl XhciController {
 
         crate::serial_println!("[xhci] BAR0 MMIO at physical {:#X}", mmio_phys);
 
-        // Map MMIO region into kernel virtual address space.
-        // xHCI register space is typically 64 KiB (4 × 16 KiB frames).
-        let mmio_virt = mmio_phys.wrapping_add(hhdm_offset);
+        // The register space: 64 KiB covers it on the controllers met so far.
+        // SAFETY: BAR0 is the controller's register block: device memory.
+        let mmio_virt = unsafe { page_table::map_mmio(mmio_phys, 0x1_0000)? };
         let mmio_base = mmio_virt as *mut u8;
-
-        let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
-        let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
-
-        // Map 4 frames (64 KiB) covering the xHCI register space.
-        for i in 0..4u64 {
-            let frame_phys = mmio_phys.wrapping_add(i.wrapping_mul(16384));
-            if let Some(frame) = PhysFrame::from_addr(frame_phys) {
-                let virt = VirtAddr::new(mmio_virt.wrapping_add(i.wrapping_mul(16384)));
-                // SAFETY: frame_phys is PCI BAR MMIO. Mapping device
-                // registers into kernel VA space with NO_CACHE.
-                if let Err(_e) =
-                    unsafe { page_table::map_frame(pml4_phys, virt, frame, mmio_flags) }
-                {
-                    // May already be mapped if within HHDM on large-RAM systems.
-                }
-            }
-        }
-        // Flush TLB for mapped region.
-        for i in 0..4u64 {
-            let addr = mmio_virt.wrapping_add(i.wrapping_mul(16384));
-            // SAFETY: Standard TLB invalidation.
-            unsafe {
-                core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
-            }
-        }
 
         // Enable bus mastering and memory space.
         pci::enable_bus_master(pci_dev.address);

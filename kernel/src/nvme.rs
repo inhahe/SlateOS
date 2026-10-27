@@ -1022,30 +1022,16 @@ pub fn init(hhdm_offset: u64) {
             regs_virt
         );
 
-        // Map NVMe MMIO region into kernel page tables.
-        // BAR addresses may be above physical RAM (not covered by HHDM).
-        let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
-        let mmio_flags = page_table::PageFlags::PRESENT
-            | page_table::PageFlags::WRITABLE
-            | page_table::PageFlags::NO_CACHE;
-        // NVMe registers + doorbells can span several pages; map 64 KiB (4 frames).
-        for i in 0..4u64 {
-            let frame_phys = base_phys.wrapping_add(i.wrapping_mul(16384));
-            if let Some(f) = frame::PhysFrame::from_addr(frame_phys) {
-                let virt = page_table::VirtAddr::new(frame_phys.wrapping_add(hhdm_offset));
-                // SAFETY: frame_phys is the PCI BAR0 MMIO region for NVMe.
-                let _ = unsafe { page_table::map_frame(pml4_phys, virt, f, mmio_flags) };
-            }
-        }
-        // TLB flush.
-        for i in 0..4u64 {
-            let addr = base_phys
-                .wrapping_add(hhdm_offset)
-                .wrapping_add(i.wrapping_mul(16384));
-            // SAFETY: Standard invlpg.
-            unsafe {
-                core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
-            }
+        // The registers and the doorbells after them: 64 KiB covers them on
+        // every controller this driver has met.
+        // SAFETY: BAR0 is the controller's register block: device memory.
+        if let Err(e) = unsafe { page_table::map_mmio(base_phys, 0x1_0000) } {
+            serial_println!(
+                "[nvme]   could not map BAR0 {:#x} ({:?}) -- skipping",
+                base_phys,
+                e
+            );
+            continue;
         }
 
         // Enable bus mastering.

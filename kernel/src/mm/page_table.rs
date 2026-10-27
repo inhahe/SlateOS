@@ -3088,7 +3088,44 @@ pub fn self_test() -> KernelResult<()> {
     test_install_table_race(hhdm)?;
     serial_println!("[pt]   Table creation that loses a race adopts the winner's table: OK");
 
+    // -- Test 9: device registers mapped where they sit -----------------------
+    test_map_mmio_unaligned()?;
+    serial_println!("[pt]   Device registers off a frame boundary map to themselves, uncached: OK");
+
     serial_println!("[pt] Page table self-test PASSED");
+    Ok(())
+}
+
+/// For [`self_test`]: [`map_mmio`] maps device registers wherever they sit
+/// -- off a 16 KiB frame boundary, or across one -- so that each byte of
+/// the range translates to itself, uncached. Drivers that mapped only a
+/// frame-aligned base left an Intel chipset's 2 KiB SATA register block
+/// unmapped on real hardware, and its first register read faulted.
+fn test_map_mmio_unaligned() -> KernelResult<()> {
+    let pml4 = kernel_pml4_phys()?;
+    // In the chipset's fixed range (0xFED0_0000 is the HPET's): device
+    // memory on every PC. Only mapped here, never read.
+    let cases: [(u64, u64); 2] = [(0xFED0_0400, 0x100), (0xFED0_3F00, 0x200)];
+    for (phys, len) in cases {
+        // SAFETY: device memory, as above; nothing reads it.
+        let virt = unsafe { map_mmio(phys, len)? };
+        for offset in [0, len.saturating_sub(1)] {
+            let at = phys.saturating_add(offset);
+            let va = VirtAddr::new(virt.saturating_add(offset));
+            let mapped = translate(pml4, va);
+            let uncached =
+                translate_flags(pml4, va).is_some_and(|f| f.contains(PageFlags::NO_CACHE));
+            if mapped != Some(at) || !uncached {
+                serial_println!(
+                    "[pt]   FAIL: device byte {:#x} maps to {:?} (uncached: {})",
+                    at,
+                    mapped,
+                    uncached
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
     Ok(())
 }
 

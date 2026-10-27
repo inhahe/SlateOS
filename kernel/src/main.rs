@@ -1299,7 +1299,7 @@ extern "C" fn kernel_main() -> ! {
             // Discovers codecs, sets up CORB/RIRB command buffers, probes audio
             // topology for output path (DAC → Pin).  QEMU: `-device intel-hda
             // -device hda-duplex`.
-            hda::init(boot_info.hhdm_offset);
+            hda::init();
 
             // Virtio-sound driver: modern VM audio via virtio.
             // QEMU: `-device virtio-sound-pci,audiodev=a0 -audiodev sdl,id=a0`

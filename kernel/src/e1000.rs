@@ -42,7 +42,7 @@ use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::frame::{self, PhysFrame};
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::mm::page_table;
 use crate::pci::{self, PciDevice};
 use crate::serial_println;
 use crate::virtio::net::MacAddress;
@@ -481,38 +481,10 @@ impl E1000Device {
         };
 
         // Map MMIO region into kernel virtual address space.
-        // PCI BAR addresses may be above physical RAM, so the HHDM
-        // bootloader mapping doesn't cover them. We must explicitly
-        // map the MMIO pages with NO_CACHE attribute.
-        let mmio_virt = mmio_phys.wrapping_add(hhdm_offset);
+        // The register space, 128 KiB.
+        // SAFETY: BAR0 is the controller's register block: device memory.
+        let mmio_virt = unsafe { page_table::map_mmio(mmio_phys, 0x2_0000)? };
         let mmio_base = mmio_virt as *mut u8;
-
-        // Map 128 KiB of MMIO space (8 × 16 KiB frames).
-        let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
-        let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
-        // Map each 16 KiB frame covering the 128 KiB register space.
-        for i in 0..8u64 {
-            let frame_phys = mmio_phys.wrapping_add(i.wrapping_mul(16384));
-            if let Some(frame) = PhysFrame::from_addr(frame_phys) {
-                let virt = VirtAddr::new(mmio_virt.wrapping_add(i.wrapping_mul(16384)));
-                // SAFETY: frame_phys is the PCI BAR MMIO region.
-                // Mapping device registers into kernel VA space.
-                if let Err(_e) =
-                    unsafe { page_table::map_frame(pml4_phys, virt, frame, mmio_flags) }
-                {
-                    // May already be mapped (e.g., within HHDM range on large-RAM systems).
-                    // Continue — the mapping might work via existing HHDM.
-                }
-            }
-        }
-        // Flush TLB for the mapped region.
-        for i in 0..8u64 {
-            let addr = mmio_virt.wrapping_add(i.wrapping_mul(16384));
-            // SAFETY: Standard invlpg to flush stale TLB entries.
-            unsafe {
-                core::arch::asm!("invlpg [{}]", in(reg) addr, options(nostack, preserves_flags));
-            }
-        }
 
         // Enable bus mastering for DMA.
         pci::enable_bus_master(pci_dev.address);

@@ -45,8 +45,7 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
-use crate::mm::frame::PhysFrame;
-use crate::mm::page_table::{self, PageFlags, VirtAddr};
+use crate::mm::page_table;
 use crate::port;
 use crate::serial_println;
 
@@ -319,8 +318,7 @@ unsafe fn disable_pic() {
 /// # Errors
 ///
 /// Returns [`KernelError::NotSupported`] if the HHDM is not initialized,
-/// or [`KernelError::BadAlignment`] if the IOAPIC base address is not
-/// frame-aligned.
+/// or the error mapping the I/O APIC's registers answered.
 ///
 /// # Safety
 ///
@@ -350,31 +348,11 @@ pub unsafe fn init() -> KernelResult<()> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
     let ioapic_virt = ioapic_base_phys.wrapping_add(hhdm);
 
-    let ioapic_frame = PhysFrame::from_addr(ioapic_base_phys).ok_or(KernelError::BadAlignment)?;
-    let ioapic_va = VirtAddr::new(ioapic_virt);
-    let pml4_phys = page_table::cr3_to_pml4(page_table::read_cr3());
-    let mmio_flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE;
-
-    // SAFETY: IOAPIC physical address is valid device MMIO at the
-    // well-known address 0xFEC0_0000.  Mapping into the HHDM range.
-    if let Err(e) = unsafe { page_table::map_frame(pml4_phys, ioapic_va, ioapic_frame, mmio_flags) }
-    {
-        serial_println!(
-            "[ioapic] WARNING: MMIO map failed ({:?}), trying existing HHDM...",
-            e,
-        );
-    } else {
-        // Flush TLB for the new mapping.
-        // SAFETY: Standard invlpg for the virtual address we just mapped.
-        unsafe {
-            core::arch::asm!(
-                "invlpg [{}]",
-                in(reg) ioapic_virt,
-                options(nostack, preserves_flags),
-            );
-        }
-        serial_println!("[ioapic] MMIO mapped at {:#x}", ioapic_virt);
-    }
+    // SAFETY: the I/O APIC's register window (from the MADT, or the
+    // well-known address): device memory. Mapped wherever it sits: a second
+    // I/O APIC is commonly at 0xFEC0_1000, not on a 16 KiB frame boundary.
+    unsafe { page_table::map_mmio(ioapic_base_phys, 0x20)? };
+    serial_println!("[ioapic] MMIO mapped at {:#x}", ioapic_virt);
 
     IOAPIC_BASE_VIRT.store(ioapic_virt, Ordering::Release);
 

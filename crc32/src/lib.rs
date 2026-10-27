@@ -64,7 +64,12 @@ const CRC32_TABLE: [u32; 256] = {
 /// eight input bytes are folded in by eight independent lookups rather than
 /// eight that each wait for the last ("slicing by 8"). `TABLES[0]` is
 /// [`CRC32_TABLE`]. 8 KiB, built at compile time.
-const TABLES: [[u32; 256]; 8] = {
+///
+/// A `static`, read where it lies: a `const` array is copied wherever it is
+/// used in an unoptimised build, 8 KiB a use, and `crc32_raw`'s eight uses
+/// came to a 64 KiB stack frame -- a kernel task's whole stack (the test
+/// PC's benchmark task overflowed it, 2026-10-27).
+static TABLES: [[u32; 256]; 8] = {
     let mut t = [[0u32; 256]; 8];
     t[0] = CRC32_TABLE;
     let mut k = 1;
@@ -167,7 +172,7 @@ fn bytewise(seed: u32, data: &[u8]) -> u32 {
         // would force a `Result` on a function that cannot fail.
         #[allow(clippy::indexing_slicing)]
         {
-            crc = CRC32_TABLE[idx] ^ (crc >> 8);
+            crc = TABLES[0][idx] ^ (crc >> 8);
         }
     }
     crc

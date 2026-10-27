@@ -1178,6 +1178,63 @@ _Note the boundary: this covers programs that **crash**. A program that **hangs*
 - [-] virtio drivers (disk, network, GPU) for VM development/testing — virtio-blk, virtio-net, virtio-gpu and virtio-sound done (in-kernel; legacy PCI transport except GPU, which is modern); descriptor allocation for all four is routed through the proved Ada component
 - [x] VMware tools equivalent for VM-friendliness _(vmguest.rs: hypervisor-specific feature activation for KVM/Hyper-V/VMware/VBox/Xen/QEMU-TCG, pvclock/refTSC/pseudo-TSC clock sources, balloon memory, display resize, heartbeat, guest info reporting, shutdown signaling, VMware backdoor)_
 
+### 2.1a Linux Driver Compatibility Layer
+
+Operator-directed (2026-10-27): drivers come two ways. **Handwritten native
+drivers** (Rust) for hardware that follows a public standard, or that is small,
+fast or on the boot path; **Linux's own drivers, compiled from unmodified source
+through a compatibility layer**, for hardware with no standard interface, where
+each vendor needs its own large driver -- GPUs, WiFi, Bluetooth, laptop audio.
+This is the split FreeBSD (LinuxKPI, `drm-kmod`) and Genode (DDE Linux) use.
+Hand-porting those drivers instead was rejected: several million lines, and a
+fork of code Linux changes every release (about nine weeks) and extends for each
+year's new hardware -- FreeBSD's hand-port of Linux's graphics drivers fell years
+behind before it moved to a layer.
+
+Which hardware goes which way:
+
+| Handwritten native driver | Linux driver through the layer |
+|---|---|
+| Storage: NVMe, AHCI/SATA | GPUs: Intel `i915`/`xe`, AMD `amdgpu`, NVIDIA `nouveau`/`nova` (with Linux's DRM core, GEM/TTM, dma-buf) |
+| USB: xHCI host controller, and the class drivers (HID, mass storage, hubs, CDC) | WiFi: Intel `iwlwifi`, Realtek `rtw88`/`rtw89`, MediaTek `mt76`, Qualcomm `ath10k`/`ath11k`/`ath12k`, Broadcom `brcmfmac` (with `mac80211`/`cfg80211`) |
+| Display without a GPU driver: UEFI GOP framebuffer (always the fallback) | Bluetooth controllers: `btusb` and the vendor firmware loaders (`btintel`, `btrtl`, `btmtk`) |
+| virtio (disk, network, GPU, sound) | Laptop audio DSPs: Intel SOF/AVS, AMD ACP (with ALSA/ASoC); HDA codecs whose quirks the native driver lacks |
+| Basic audio: HD Audio controller and generic codecs | Thunderbolt/USB4, card readers, laptop platform drivers (`thinkpad_acpi`, `asus-wmi`, ...), sensors |
+| Common wired network: Intel `e1000e`/`igb`/`igc` (the test PC's I219-V), Realtek `r8169` | Any device class later found to need a large vendor-specific driver |
+| Platform: ACPI, IOMMU, APIC/IOAPIC, HPET, PCI, RTC, PS/2, I2C HID touchpads | |
+
+Rule of thumb: native when a public standard defines the device (one driver
+covers every vendor), when the driver is small, when it is on the boot path
+(nothing may depend on the layer to start), or when it moves data fast enough
+that crossing into a driver process per request matters (NVMe, 10GbE); the
+layer when the device is one vendor's design that only its vendor's driver
+knows.
+
+- [ ] Design decision, before any code: the layer's shape and boundaries
+  - [ ] Each Linux driver runs in its own driver process (a `udriver`), never in the kernel, its DMA confined to its own IOMMU domain (`iommu_remap`, design-decisions §1576) -- the C code is Linux's trust model, so the sandbox is the security boundary
+  - [ ] Licence boundary: the drivers are GPLv2, so the driver processes and the layer linked into them are GPL; the kernel and native services stay MIT, talking to them only by IPC. Record it beside the existing GPL userland tools
+  - [ ] Which Linux release the layer targets, recorded in one place, and how the driver sources are imported (a script that fetches and pins a release; a minimal patch queue, kept empty where possible)
+- [ ] The core shim (LinuxKPI-style): the internal kernel API drivers call, mapped onto native primitives
+  - [ ] Memory: `kmalloc`/`kfree`, `vmalloc`, `dma_alloc_coherent`, `dma_map_*`/scatterlists (over `mm::dma` and the IOMMU domain)
+  - [ ] Concurrency: spinlocks, mutexes, completions, atomics, RCU, wait queues -- with Linux's rules of when code may sleep kept exactly, since a mismatch fails only under load
+  - [ ] Deferred work: workqueues, tasklets/softirq-equivalents, timers, hrtimers, kthreads
+  - [ ] PCI core: driver probe/remove, BARs, MSI/MSI-X, power states, config space (over `udriver` and the PCI syscalls)
+  - [ ] Interrupts: `request_irq`/`request_threaded_irq` over the IRQ IPC delivery
+  - [ ] Device model: a minimal `struct device`/`kobject`, devres (managed resources freed on remove), sysfs/debugfs as stubs
+  - [ ] Firmware: `request_firmware` from `/lib/firmware`, and packaging the redistributable `linux-firmware` files the chosen drivers need
+- [ ] Subsystem bridges: what each class of driver plugs into
+  - [ ] Network: `net_device` onto the native network stack (`services/netstack`), frames in and out over shared rings
+  - [ ] WiFi: `mac80211`/`cfg80211` inside the driver process; decide when the layer reaches WiFi whether SlateOS's own `net80211` (supplicant, association, design-decisions §579) drives it through a cfg80211-shaped control interface or gives way to it
+  - [ ] Graphics: DRM/KMS, GEM/TTM and dma-buf onto lane F's graphics stack (compositor, `gui/vulkan`), and the userspace half (Mesa) ported to match -- see 3.1
+  - [ ] Audio: ALSA/ASoC onto the native audio service
+  - [ ] Bluetooth: HCI onto the native Bluetooth stack (2.2)
+- [ ] First driver through the layer: a small wired network driver with a native twin (`e1000e` or `r8169`), so the layer is proved against a known-good driver and its overhead measured, in QEMU and on the test PC
+- [ ] Then WiFi on hardware SlateOS can be tested on (the test PC, if it has a WiFi card; otherwise a USB or PCIe card bought for the purpose)
+- [ ] Then the Intel GPU on the test PC (UHD 630, `i915`) -- this replaces hand-porting it (3.1)
+- [ ] Benchmarks: each class through the layer against Linux on the same machine (packet rate and latency, frame time, audio latency); the layer's own cost should be small next to the cost of crossing into a driver process, which native drivers pay too
+- [ ] Keeping current: a cadence for moving to a newer Linux release (each one changes some internal interfaces the layer emulates), and a record of which drivers lag it
+- [ ] Boot-test coverage: the first network driver through the layer under QEMU (e1000e) beside the native one, so the layer is exercised on every boot; the rest on real hardware
+
 ### 2.2 Essential Drivers
 
 - [-] Keyboard (PS/2 and USB HID) — PS/2 done (IRQ-driven, scan code set 1, ring buffer); USB HID pending
@@ -1420,6 +1477,9 @@ _Traditional suffix extensions (foo.txt). OS-specific: `.nx` (executable), `.dso
   `impl Transceiver` over lane A's `kernel::net::hwsim`, then a real wireless
   driver. Note that a green hwsim run will prove the frame exchange and the key
   schedule, **not** confidentiality — hwsim does not encrypt, deliberately.
+  The real wireless drivers come through the Linux driver compatibility layer
+  (2.1a), with Linux's `mac80211`/`cfg80211`: how `net80211` meets them is
+  decided there.
 
 ### 2.5 POSIX Compatibility Layer
 
@@ -1659,9 +1719,14 @@ on `$PATH`, so a script that says `ps` gets `ps`._
 
 ### 3.1 GPU Drivers
 
-- [ ] Port AMDGPU driver (open source, well-documented — first priority)
-- [ ] Port Intel i915/xe driver (integrated graphics — covers most laptops)
-- [ ] NVIDIA: defer, use Linux compat layer later (FreeBSD approach)
+All three come through the Linux driver compatibility layer (2.1a), not by
+hand-porting (operator, 2026-10-27): Linux's own `amdgpu`, `i915`/`xe` and
+`nouveau`/`nova`, built from unmodified source. Without one, the UEFI GOP
+framebuffer is the display.
+
+- [ ] Port AMDGPU driver (open source, well-documented — first priority) — through the layer (2.1a)
+- [ ] Port Intel i915/xe driver (integrated graphics — covers most laptops) — through the layer (2.1a); the test PC's UHD 630 is the first device to bring it up on
+- [ ] NVIDIA: defer, use Linux compat layer later (FreeBSD approach) — the layer is 2.1a
 
 ### 3.2 Graphics Stack
 

@@ -189,7 +189,18 @@ step a hang stopped at are then on the screen. It stops when the desktop
 takes the display.
 
 A real serial port still gives what a screen cannot: the whole log, kept. On
-a board with no COM header, a PCIe serial card does it (see §9).
+a board with no COM header, a PCIe serial card does it: add
+**`log.pci_serial=1`**, and the log goes to the first 16550-compatible serial
+port on the PCI bus as well as to COM1, at 115200 8N1 (`=2` names the second,
+and so on, in the order the PCI scan meets them). The kernel finds the card
+before it prints its first line, switches on its I/O decoding and that of the
+bridges leading to it, and checks it in loopback before using it: the line
+after `=== Kernel booting ===` says which port it took, or why it took none. A
+port that stops taking bytes mid-boot is dropped, with a line saying so, rather
+than hanging the kernel. It is not done unasked, since whatever is plugged into
+a serial port would be sent the log. A card qualifies when its class says
+"16550-compatible serial port", or it is an ASIX AX99100 serial function; its
+registers must be I/O ports, not memory.
 
 ### Keep the machine's own disks safe: `blk.writable=`
 
@@ -285,6 +296,7 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 | Image boots in the **diskless shape a stick actually has** | **done** — verified 2026-08-21: `--usb-image --no-rootfs` → `BOOT_OK` in 75 s, tagged as an experiment (see §6) |
 | Guarded writer for a physical stick | **done** — `scripts/write-usb-stick.ps1` |
 | On-screen progress channel | **done** -- the boot steps, and the whole log with `log.screen=1`; used on the test PC 2026-10-27 |
+| The log on a PCIe serial card | **written** -- `log.pci_serial=N`; to be checked in QEMU, then on the test PC when the card comes |
 | Recovery procedure | **documented above**, never exercised |
 | Boot on the operator's PC | **in progress** on the test PC behind a PiKVM (§9) |
 | Intel iGPU driver written against the real chip | blocked on the row above (§263) |
@@ -302,7 +314,7 @@ USB drive, and works its power and reset buttons.
 | CPU / graphics | i7-8700K, Intel UHD Graphics 630 (the only GPU) |
 | Disks | `nvme0n1` = Samsung 980 PRO 2 TB, **Windows: never written**; `nvme1n1` = Samsung 960 EVO 1 TB, EUI-64 0025385181b1cd22, **may be wiped** |
 | Firmware | UEFI, Secure Boot off; nothing was changed for SlateOS |
-| Serial | none on the board; a PCIe serial card (AX99100) into a USB adapter on the PiKVM is planned |
+| Serial | none on the board; a PCIe serial card (LinksTek PCIE-SE2, an AX99100) into an RS-232 USB adapter on the PiKVM is on order, for `log.pci_serial=1` |
 
 **A boot.** The staged ESP (Limine, the kernel, `limine.conf` with
 `blk.writable=eui64:0025385181b1cd22 log.screen=1` on the first entry) is made

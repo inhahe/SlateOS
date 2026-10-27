@@ -355,6 +355,124 @@ fn for_each_function(mut f: impl FnMut(PciAddress)) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Serial ports, before the heap
+// ---------------------------------------------------------------------------
+
+/// Class, subclass and programming interface of a 16550-compatible serial
+/// port: class 07h (communication), subclass 00h (serial), interface 02h.
+const CLASS_SERIAL_16550: u32 = 0x07_00_02;
+/// Class code, subclass, interface and revision (32-bit, offset 0x08).
+const CFG_CLASS_REVISION: u8 = 0x08;
+/// Subsystem vendor id (low half) and subsystem id (high half), offset 0x2C
+/// of a type-0 header.
+const CFG_SUBSYSTEM: u8 = 0x2C;
+/// A bridge's subordinate bus number: the highest bus behind it.
+const CFG_SUBORDINATE_BUS: u8 = 0x1A;
+/// Vendor id (low half) and device id (high half) of the ASIX AX99100, a
+/// PCIe chip whose functions are serial, parallel, SPI or I2C ports.
+const ASIX_AX99100_ID: u32 = 0x9100_125B;
+/// The subsystem dword of an AX99100 function set up as a serial port
+/// (subsystem vendor A000h, subsystem 1000h); its other kinds of port carry
+/// other subsystem ids. This is how Linux's `8250_pci` tells them apart.
+const ASIX_AX99100_SERIAL: u32 = 0x1000_A000;
+
+/// A serial port on the PCI bus that is driven as a 16550 through I/O ports.
+#[derive(Debug, Clone, Copy)]
+pub struct PciUart {
+    pub address: PciAddress,
+    /// The I/O port of its first register (its BAR0).
+    pub port: u16,
+    /// How many command registers had I/O decoding switched on to reach it:
+    /// its own and those of the bridges leading to it. Firmware leaves it
+    /// off where no firmware driver used the device.
+    pub opened: u32,
+}
+
+/// What [`early_uart`] found.
+#[derive(Debug, Clone, Copy)]
+pub enum UartSearch {
+    /// The port asked for, its decoding on.
+    Found(PciUart),
+    /// Fewer serial ports than asked for: how many there are.
+    TooFew(usize),
+    /// The port asked for has no I/O-port registers to drive: its BAR0
+    /// (shown raw) is memory, unassigned, or above the 64 KiB I/O space.
+    NoIoPorts(PciAddress, u32),
+}
+
+/// Whether a function is a serial port the kernel can drive as a 16550:
+/// one whose class says so, or an AX99100 serial function. `id` is the
+/// dword at offset 0, `class_revision` the one at 0x08, and `subsystem`
+/// reads the dword at 0x2C (only asked for of an AX99100, since in a bridge
+/// that offset is something else).
+fn is_serial_16550(id: u32, class_revision: u32, subsystem: impl FnOnce() -> u32) -> bool {
+    class_revision >> 8 == CLASS_SERIAL_16550 || (id == ASIX_AX99100_ID && subsystem() == ASIX_AX99100_SERIAL)
+}
+
+/// The `nth` (from 1) 16550-compatible serial port on the PCI bus, in
+/// [`for_each_function`]'s order, with I/O decoding switched on in it and in
+/// every bridge leading to it.
+///
+/// Allocates nothing and needs nothing set up but the config ports, so the
+/// serial console can call it before anything else runs; and it must run on
+/// one CPU with no other config access going on, since the 0xCF8/0xCFC pair
+/// is not taken under a lock.
+pub fn early_uart(nth: usize) -> UartSearch {
+    let mut seen = 0usize;
+    let mut hit = None;
+    for_each_function(|addr| {
+        let (bus, dev, func) = (addr.bus, addr.device, addr.function);
+        if hit.is_some()
+            || !is_serial_16550(
+                config_read32(bus, dev, func, CFG_VENDOR_ID),
+                config_read32(bus, dev, func, CFG_CLASS_REVISION),
+                || config_read32(bus, dev, func, CFG_SUBSYSTEM),
+            )
+        {
+            return;
+        }
+        seen = seen.saturating_add(1);
+        if seen == nth {
+            hit = Some(addr);
+        }
+    });
+    let Some(addr) = hit else {
+        return UartSearch::TooFew(seen);
+    };
+    let bar = config_read32(addr.bus, addr.device, addr.function, CFG_BAR0);
+    let port = match u16::try_from(bar & 0xFFFF_FFFC) {
+        Ok(port) if bar & 1 != 0 && port != 0 => port,
+        _ => return UartSearch::NoIoPorts(addr, bar),
+    };
+    let mut opened = u32::from(open_io_decode(addr));
+    for_each_function(|bridge| {
+        let (bus, dev, func) = (bridge.bus, bridge.device, bridge.function);
+        if config_read8(bus, dev, func, CFG_HEADER_TYPE) & !HEADER_TYPE_MULTIFUNCTION != HEADER_TYPE_BRIDGE {
+            return;
+        }
+        // A bridge leads to the buses from its secondary to its subordinate;
+        // one firmware never numbered (secondary 0) leads nowhere.
+        let behind = config_read8(bus, dev, func, CFG_SECONDARY_BUS);
+        if behind != 0 && (behind..=config_read8(bus, dev, func, CFG_SUBORDINATE_BUS)).contains(&addr.bus) {
+            opened = opened.saturating_add(u32::from(open_io_decode(bridge)));
+        }
+    });
+    UartSearch::Found(PciUart { address: addr, port, opened })
+}
+
+/// Switch on I/O decoding in a function's command register; whether it was
+/// off. A genuine 16-bit write, so the status register beside it -- whose
+/// error bits clear when a 1 is written to them -- is left alone.
+fn open_io_decode(addr: PciAddress) -> bool {
+    let command = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
+    if command & CMD_IO_SPACE != 0 {
+        return false;
+    }
+    config_write16_native(addr.bus, addr.device, addr.function, CFG_COMMAND, command | CMD_IO_SPACE);
+    true
+}
+
 /// Read all fields for one PCI function and add it to the device list.
 #[allow(clippy::cast_possible_truncation)]
 fn scan_function(bus: u8, device: u8, function: u8, devices: &mut Vec<PciDevice>) {
@@ -1037,8 +1155,41 @@ pub fn self_test() -> Result<(), &'static str> {
 
     self_test_intx(&devices)?;
     self_test_bindings_and_bars()?;
+    self_test_serial_match()?;
 
     crate::serial_println!("[pci] Self-test PASSED");
+    Ok(())
+}
+
+/// [`is_serial_16550`] on made-up register values: a 16550 by class, an
+/// AX99100 serial function, and the near misses -- another kind of serial
+/// controller, an AX99100 parallel port, another vendor's chip carrying the
+/// AX99100's subsystem ids.
+fn self_test_serial_match() -> Result<(), &'static str> {
+    let cases: [(u32, u32, u32, bool); 6] = [
+        // QEMU's pci-serial: class 07/00/02, revision 1.
+        (0x0002_1B36, 0x0700_0201, 0, true),
+        (ASIX_AX99100_ID, 0x0700_0000, ASIX_AX99100_SERIAL, true),
+        // A 16450 (interface 00) and a 16650 (interface 03): not 16550s.
+        (0x0002_1B36, 0x0700_0001, 0, false),
+        (0x0002_1B36, 0x0700_0301, 0, false),
+        // The AX99100's parallel port (subsystem 2000h).
+        (ASIX_AX99100_ID, 0x0701_0300, 0x2000_A000, false),
+        (0x9100_1234, 0x0780_0000, ASIX_AX99100_SERIAL, false),
+    ];
+    for (id, class_revision, subsystem, want) in cases {
+        if is_serial_16550(id, class_revision, || subsystem) != want {
+            crate::serial_println!(
+                "[pci]   FAIL: id {:#010x} class {:#010x} subsystem {:#010x} taken for a 16550: {}",
+                id,
+                class_revision,
+                subsystem,
+                !want
+            );
+            return Err("serial port matching");
+        }
+    }
+    crate::serial_println!("[pci]   serial port matching: OK");
     Ok(())
 }
 

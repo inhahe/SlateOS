@@ -8569,6 +8569,12 @@ extern "C" fn kernel_main() -> ! {
         screenlog::self_test()
     });
 
+    // Which PCI serial port `log.pci_serial=` names, on made-up command lines.
+    // §914: Diagnostic — a debugging aid's switch.
+    selftest::dispatch_debug("PCI serial log", selftest::Severity::Diagnostic, || {
+        serial::self_test()
+    });
+
     // TTY/termios layer self-test (depends on the console being up so that
     // TIOCGWINSZ can report live dimensions).
     // §914: Diagnostic — terminal flags and line discipline, not structural integrity.

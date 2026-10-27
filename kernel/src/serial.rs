@@ -3,6 +3,9 @@
 //! The serial console is the primary debug output channel during early
 //! boot and kernel development.  Output goes to COM1 (0x3F8), which
 //! QEMU maps to the host terminal when started with `-serial stdio`.
+//! With `log.pci_serial=N` on the command line it goes to the Nth
+//! 16550-compatible serial port on the PCI bus as well -- a serial card, for
+//! a machine with no COM1 -- found and set up before the first line.
 //!
 //! This module provides:
 //! - A global `SERIAL` writer protected by a spinlock
@@ -80,9 +83,9 @@ impl SerialPort {
     /// Must only be called once per port, and the port address must be
     /// valid hardware.
     pub unsafe fn init(&self) {
-        // SAFETY: All port writes target COM1 registers which are
-        // standard PC hardware.  We write them in the canonical UART
-        // initialization sequence.
+        // SAFETY: All port writes target the registers of the 16550 at
+        // `self.base`, which the caller vouches for.  We write them in the
+        // canonical UART initialization sequence.
         unsafe {
             // Disable all interrupts.
             port::outb(self.base + regs::IER, 0x00);
@@ -114,7 +117,9 @@ impl SerialPort {
         lsr & 0x20 != 0
     }
 
-    /// Write a single byte, blocking until the UART is ready.
+    /// Write a single byte, blocking until the UART is ready. A byte for
+    /// COM1, the log's port, also goes to the PCI serial port the log is
+    /// copied to, if there is one (`log.pci_serial=`).
     pub fn write_byte(&self, byte: u8) {
         // Busy-wait for the transmit buffer to be empty.
         while !self.is_transmit_empty() {
@@ -124,6 +129,105 @@ impl SerialPort {
         // is the standard way to transmit a byte.
         unsafe {
             port::outb(self.base + regs::THR, byte);
+        }
+        if self.base == COM1_BASE {
+            mirror_byte(byte);
+        }
+    }
+}
+
+/// The I/O port of the PCI serial port the log is copied to
+/// (`log.pci_serial=N`), or 0 for none. Set once, by [`init`], after the
+/// port has answered [`loopback_answers`]; cleared for good by
+/// [`mirror_byte`] if the port stops taking bytes.
+static MIRROR: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Set when [`mirror_byte`] gives up on the port, until [`_print`] has said
+/// so on the ports that are left.
+static MIRROR_LOST: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Line status: a received byte is waiting in the receive buffer.
+const LSR_DATA_READY: u8 = 0x01;
+/// Line status: the transmitter has room for a byte.
+const LSR_THR_EMPTY: u8 = 0x20;
+/// Modem control: loopback, in which what is sent is received at once and
+/// the wire is held idle.
+const MCR_LOOPBACK: u8 = 0x10;
+/// Modem control as [`SerialPort::init`] leaves it: DTR, RTS, OUT2.
+const MCR_NORMAL: u8 = 0x0B;
+
+/// How many line-status reads [`mirror_byte`] and [`loopback_answers`] wait
+/// for a byte. One byte takes 87 µs at 115200 baud, and a port read on a
+/// PCIe card takes upward of half a microsecond, so this is a quarter-second
+/// at the least: a port that has not moved in that long is not working.
+const PORT_POLLS_MAX: u32 = 500_000;
+
+/// Write `byte` to the PCI serial port in [`MIRROR`], if there is one.
+///
+/// Its wait is bounded, unlike COM1's: the card is an add-in, and a port
+/// whose transmitter never empties would otherwise hang every print in the
+/// kernel, the panic's among them. (One that has gone from the bus reads as
+/// all ones, which says the transmitter is empty: its bytes are lost, but
+/// nothing waits.) Past the bound the port is dropped and [`MIRROR_LOST`] set.
+fn mirror_byte(byte: u8) {
+    use core::sync::atomic::Ordering;
+
+    let base = MIRROR.load(Ordering::Relaxed);
+    if base == 0 {
+        return;
+    }
+    let mut polls = 0u32;
+    // SAFETY: `base` is the first register of a 16550 that answered the
+    // loopback test with its decoding on; reading its line status has no
+    // side effect.
+    while unsafe { port::inb(base.wrapping_add(regs::LSR)) } & LSR_THR_EMPTY == 0 {
+        polls = polls.saturating_add(1);
+        if polls >= PORT_POLLS_MAX {
+            MIRROR.store(0, Ordering::Relaxed);
+            MIRROR_LOST.store(true, Ordering::Relaxed);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+    // SAFETY: as above; its transmitter has room.
+    unsafe { port::outb(base.wrapping_add(regs::THR), byte) };
+}
+
+/// Whether a 16550 answers at `base`, which [`SerialPort::init`] has set up:
+/// in loopback a byte sent is received at once, so one comes back. Nothing
+/// reaches the wire meanwhile, so whatever the port is plugged into sees
+/// nothing. Leaves the port out of loopback. `Err` holds what the line
+/// status or the receive buffer read instead.
+///
+/// # Safety
+///
+/// `base` must be a 16550's first I/O port, with its decoding on.
+unsafe fn loopback_answers(base: u16) -> Result<(), (u8, u8)> {
+    const PROBE: u8 = 0xA5;
+    let reg = |offset: u16| base.wrapping_add(offset);
+    // SAFETY: the caller's; each access is one of a 16550's registers.
+    unsafe {
+        port::outb(reg(regs::MCR), MCR_NORMAL | MCR_LOOPBACK);
+        // Empty what the receiver holds, so the byte read is the probe.
+        let mut stale = 0u32;
+        while port::inb(reg(regs::LSR)) & LSR_DATA_READY != 0 && stale < 64 {
+            let _ = port::inb(reg(regs::THR));
+            stale = stale.saturating_add(1);
+        }
+        port::outb(reg(regs::THR), PROBE);
+        let mut lsr = port::inb(reg(regs::LSR));
+        let mut polls = 0u32;
+        while lsr & LSR_DATA_READY == 0 && polls < PORT_POLLS_MAX {
+            core::hint::spin_loop();
+            lsr = port::inb(reg(regs::LSR));
+            polls = polls.saturating_add(1);
+        }
+        let got = port::inb(reg(regs::THR));
+        port::outb(reg(regs::MCR), MCR_NORMAL);
+        if lsr & LSR_DATA_READY != 0 && got == PROBE {
+            Ok(())
+        } else {
+            Err((lsr, got))
         }
     }
 }
@@ -161,6 +265,134 @@ pub unsafe fn init() {
     unsafe {
         SERIAL.lock().init();
     }
+    attach_pci_port();
+}
+
+/// Copy the log to a PCI serial port too, if the command line asks for one
+/// (`log.pci_serial=N`, the Nth in the PCI scan's order, from 1), and say
+/// what became of it. A desktop board often has no COM1 at all, and a
+/// serial card is then the one place the log survives a hang or a dead
+/// screen whole. Not done unasked: whatever is plugged into a serial port,
+/// a UPS or a modem, would be sent the log.
+///
+/// Runs inside [`init`], before the kernel prints anything else, so the
+/// port has the log from its first line.
+fn attach_pci_port() {
+    use crate::pci::UartSearch;
+
+    let nth = match crate::boot::kernel_cmdline_bytes().and_then(pci_serial_choice) {
+        None => return,
+        Some(Ok(nth)) => nth,
+        Some(Err(value)) => {
+            crate::serial_println!(
+                "[serial] log.pci_serial={} is not a port number (1 is the first PCI serial port); the log stays on COM1",
+                value.escape_ascii()
+            );
+            return;
+        }
+    };
+    let uart = match crate::pci::early_uart(nth) {
+        UartSearch::Found(uart) => uart,
+        UartSearch::TooFew(found) => {
+            crate::serial_println!(
+                "[serial] log.pci_serial={}: the PCI bus has {} 16550-compatible serial port(s)",
+                nth,
+                found
+            );
+            return;
+        }
+        UartSearch::NoIoPorts(at, bar) => {
+            crate::serial_println!(
+                "[serial] log.pci_serial={}: the serial port at {:02x}:{:02x}.{} has no I/O ports to drive (BAR0 {:#010x})",
+                nth,
+                at.bus,
+                at.device,
+                at.function,
+                bar
+            );
+            return;
+        }
+    };
+    let port = SerialPort::new(uart.port);
+    // SAFETY: `early_uart` found a 16550-compatible function whose BAR0 is
+    // these I/O ports, and switched its decoding on; this is the one place
+    // that sets it up, and only the BSP is running.
+    let answer = unsafe {
+        port.init();
+        loopback_answers(uart.port)
+    };
+    let at = uart.address;
+    match answer {
+        Ok(()) => {
+            MIRROR.store(uart.port, core::sync::atomic::Ordering::Relaxed);
+            crate::serial_println!(
+                "[serial] log.pci_serial={}: the log goes to the serial port at {:02x}:{:02x}.{} (I/O {:#x}) as well, 115200 8N1; I/O decoding switched on in {} command register(s)",
+                nth,
+                at.bus,
+                at.device,
+                at.function,
+                uart.port,
+                uart.opened
+            );
+        }
+        Err((lsr, got)) => crate::serial_println!(
+            "[serial] log.pci_serial={}: the serial port at {:02x}:{:02x}.{} (I/O {:#x}) does not answer: in loopback, line status {:#04x}, byte {:#04x}",
+            nth,
+            at.bus,
+            at.device,
+            at.function,
+            uart.port,
+            lsr,
+            got
+        ),
+    }
+}
+
+/// What a command line says of `log.pci_serial=`: see [`pci_serial_choice`].
+type PciSerialChoice<'a> = Option<Result<usize, &'a [u8]>>;
+
+/// Which PCI serial port a command line asks the log to go to:
+/// `log.pci_serial=N`, the last such word winning. `None` when it asks for
+/// none (no such word, or `=0`); `Err` holds a value that is not a number.
+fn pci_serial_choice(line: &[u8]) -> PciSerialChoice<'_> {
+    let value = line
+        .split(u8::is_ascii_whitespace)
+        .filter_map(|word| word.strip_prefix(b"log.pci_serial="))
+        .next_back()?;
+    let parsed = core::str::from_utf8(value).ok().and_then(|text| text.parse::<usize>().ok());
+    match parsed {
+        Some(0) => None,
+        Some(nth) => Some(Ok(nth)),
+        None => Some(Err(value)),
+    }
+}
+
+/// [`pci_serial_choice`] on made-up command lines.
+pub fn self_test() -> crate::error::KernelResult<()> {
+    let cases: [(&[u8], PciSerialChoice<'_>); 8] = [
+        (b"", None),
+        (b"log.screen=1 blk.writable=all", None),
+        (b"log.pci_serial=1", Some(Ok(1))),
+        (b"quiet log.pci_serial=2 log.screen=1", Some(Ok(2))),
+        (b"log.pci_serial=2 log.pci_serial=1", Some(Ok(1))),
+        (b"log.pci_serial=0", None),
+        (b"log.pci_serial=yes", Some(Err(b"yes"))),
+        (b"xlog.pci_serial=1 log.pci_serial", None),
+    ];
+    for (line, want) in cases {
+        let got = pci_serial_choice(line);
+        if got != want {
+            crate::serial_println!(
+                "[serial]   FAIL: log.pci_serial from \"{}\": {:?}, want {:?}",
+                line.escape_ascii(),
+                got,
+                want
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[serial]   log.pci_serial= parsing: OK");
+    Ok(())
 }
 
 /// Backing function for the serial print macros.
@@ -198,7 +430,7 @@ pub unsafe fn init() {
 /// read, a deadlock cannot.
 ///
 /// This is a function (not inline in the macro) so that `?`/`await`/`return`
-/// used inside a `serial_println!(...)` format argument is evaluated in the
+/// used inside a `crate::serial_println!(...)` format argument is evaluated in the
 /// *caller's* context, exactly as with the standard-library `print!` family.
 #[doc(hidden)]
 pub fn _print(args: core::fmt::Arguments<'_>) {
@@ -213,6 +445,15 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
             let _ = port.write_fmt(args);
         }
     });
+    report_lost_mirror();
+}
+
+/// Say on COM1 and the screen, once, that the PCI serial port was dropped
+/// ([`mirror_byte`]): otherwise its log would just stop, which reads as a hang.
+fn report_lost_mirror() {
+    if MIRROR_LOST.swap(false, core::sync::atomic::Ordering::Relaxed) {
+        crate::serial_println!("[serial] the PCI serial port stopped taking bytes; the log no longer goes to it");
+    }
 }
 
 /// The serial port, with each piece written also fed to the kernel's log
@@ -248,6 +489,7 @@ pub fn _print_bytes(bytes: &[u8]) {
             port.write_byte(byte);
         }
     });
+    report_lost_mirror();
 }
 
 /// Run `emit` against the serial port under the deadlock-escape protocol.

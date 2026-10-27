@@ -661,24 +661,37 @@ pub fn irq_is_pending(irq: u32) -> bool {
         .is_some_and(|slot| slot.load(Ordering::Acquire) > 0)
 }
 
-/// Register a task to be woken when the specified IRQ fires.
+/// Claim `irq` for `task_id`, the task woken when it fires.
 ///
-/// Only one task can wait on each IRQ at a time.  Returns `false`
-/// if the IRQ number is out of range.
-pub fn irq_register_task(irq: u32, task_id: u64) -> bool {
-    if let Some(slot) = IRQ_WAIT_TASK.get(irq as usize) {
-        slot.store(task_id, Ordering::Release);
-        true
-    } else {
-        false
-    }
+/// One task holds a line at a time. Returns `true` when `task_id` now holds
+/// it -- the line was free, or already this task's -- and `false` when
+/// another task holds it or `irq` is out of range: a second claimant would
+/// otherwise take the holder's wakeups.
+#[must_use]
+pub fn irq_claim(irq: u32, task_id: u64) -> bool {
+    IRQ_WAIT_TASK.get(irq as usize).is_some_and(|slot| {
+        match slot.compare_exchange(u64::MAX, task_id, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => true,
+            Err(holder) => holder == task_id,
+        }
+    })
 }
 
-/// Unregister the waiting task for an IRQ.
-pub fn irq_unregister_task(irq: u32) {
-    if let Some(slot) = IRQ_WAIT_TASK.get(irq as usize) {
-        slot.store(u64::MAX, Ordering::Release);
-    }
+/// The task holding `irq`, if any.
+#[must_use]
+pub fn irq_holder(irq: u32) -> Option<u64> {
+    IRQ_WAIT_TASK
+        .get(irq as usize)
+        .map(|slot| slot.load(Ordering::Acquire))
+        .filter(|&task| task != u64::MAX)
+}
+
+/// Give up `irq` if `task_id` holds it. Returns whether it did.
+pub fn irq_release_if_holder(irq: u32, task_id: u64) -> bool {
+    IRQ_WAIT_TASK.get(irq as usize).is_some_and(|slot| {
+        slot.compare_exchange(task_id, u64::MAX, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    })
 }
 
 /// Release all IRQ registrations belonging to a specific task.

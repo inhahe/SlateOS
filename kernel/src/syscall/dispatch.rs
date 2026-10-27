@@ -1164,6 +1164,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_tioc_and_watch_records()?;
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
+    test_dispatch_mmio_refused()?;
+    test_dispatch_irq_holder()?;
     test_dispatch_secureboot_doors()?;
     test_dispatch_power_reload()?;
     test_dispatch_power_off_and_reboot()?;
@@ -5750,6 +5752,120 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
 /// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
 /// 0, and memory-failure injection is `-EPERM`. (Its effects need a process
 /// and are tested in ring 3: `spawn::self_test_linux_madvise_fork`.)
+/// `SYS_MMAP` with `MAP_MMIO` is refused: a process could otherwise map any
+/// physical memory it named -- the kernel image, page 0 -- read and write.
+/// Asked for both as a scratch process, each answer must be
+/// `PermissionDenied` -- not an address, which is what a mapping of any kind
+/// would return.
+fn test_dispatch_mmio_refused() -> KernelResult<()> {
+    use super::number::{MAP_MMIO, MAP_READ, MAP_WRITE};
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    static KERNEL_DATA: u64 = 0x5EC7_E7D0;
+    let Ok(kernel_pml4) = page_table::kernel_pml4_phys() else {
+        serial_println!("[syscall]   FAIL: MAP_MMIO refused: no kernel page table");
+        return Err(KernelError::InternalError);
+    };
+    let kernel_frame = page_table::translate(
+        kernel_pml4,
+        VirtAddr::new(core::ptr::addr_of!(KERNEL_DATA) as u64),
+    )
+    .map(|phys| phys & !((crate::mm::frame::FRAME_SIZE as u64).wrapping_sub(1)));
+    let Some(kernel_frame) = kernel_frame else {
+        serial_println!("[syscall]   FAIL: MAP_MMIO refused: the kernel's own static has no frame");
+        return Err(KernelError::InternalError);
+    };
+
+    let pid = pcb::create("mmio-refused", 0);
+    let mut failed = None;
+    for (what, phys) in [("physical page 0", 0), ("the kernel image", kernel_frame)] {
+        let args = SyscallArgs {
+            arg0: 0,
+            arg1: 0x4000,
+            arg2: MAP_READ | MAP_WRITE | MAP_MMIO,
+            arg3: phys,
+            arg4: 0,
+            arg5: 0,
+        };
+        let got = self_test_as_process(pid, || dispatch(SYS_MMAP, &args).value);
+        if got != i64::from(KernelError::PermissionDenied.code()) {
+            serial_println!(
+                "[syscall]   FAIL: MAP_MMIO of {} ({:#x}) answered {:#x}, not PermissionDenied",
+                what,
+                phys,
+                got
+            );
+            failed = Some(what);
+        }
+    }
+    pcb::destroy(pid);
+    if failed.is_some() {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   MAP_MMIO refused: OK (page 0, the kernel image)");
+    Ok(())
+}
+
+/// An interrupt line is its holder's alone: while another task holds it, the
+/// caller's `SYS_IRQ_WAIT` and `SYS_IRQ_RELEASE` are refused with
+/// `PermissionDenied` -- the wait at once, not after blocking -- the line is
+/// still the holder's afterwards, and a second claim fails.
+///
+/// The holder is a task id no task has, and the line is ISA 5, which nothing
+/// in the boot test drives and which stays masked: claiming does not unmask.
+/// One interrupt is recorded as pending first, so a wait that skipped the
+/// check would return its count rather than block the boot forever.
+fn test_dispatch_irq_holder() -> KernelResult<()> {
+    use super::number::{SYS_IRQ_RELEASE, SYS_IRQ_WAIT};
+    use crate::ioapic;
+
+    const LINE: u32 = 5;
+    const HOLDER: u64 = u64::MAX - 0x1A5;
+    let fail = |msg: &str| -> KernelResult<()> {
+        serial_println!("[syscall]   FAIL: interrupt line holder: {}", msg);
+        // Leave the line as the boot found it, whatever failed. The count is
+        // the one recorded below, so discarding it loses nothing.
+        ioapic::irq_release_if_holder(LINE, HOLDER);
+        let _recorded = ioapic::irq_consume(LINE);
+        Err(KernelError::InternalError)
+    };
+    if !ioapic::irq_claim(LINE, HOLDER) {
+        return fail("line 5 is already held, so it cannot be the test's");
+    }
+    ioapic::irq_notify(LINE);
+    let args = SyscallArgs {
+        arg0: u64::from(LINE),
+        arg1: 0,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let denied = i64::from(KernelError::PermissionDenied.code());
+    if dispatch(SYS_IRQ_WAIT, &args).value != denied {
+        return fail("another task's wait on a held line was not refused");
+    }
+    if dispatch(SYS_IRQ_RELEASE, &args).value != denied {
+        return fail("another task's release of a held line was not refused");
+    }
+    if ioapic::irq_holder(LINE) != Some(HOLDER) {
+        return fail("the line changed hands");
+    }
+    if ioapic::irq_claim(LINE, crate::sched::current_task_id()) {
+        return fail("a second task claimed a held line");
+    }
+    if ioapic::irq_consume(LINE) != 1 {
+        return fail("the recorded interrupt was taken by a refused wait");
+    }
+    if !ioapic::irq_release_if_holder(LINE, HOLDER) || ioapic::irq_holder(LINE).is_some() {
+        return fail("the holder could not release it");
+    }
+    serial_println!("[syscall]   interrupt line holder: OK (wait, release and claim refused)");
+    Ok(())
+}
+
 fn test_dispatch_memory_advise() -> KernelResult<()> {
     use super::linux::errno;
     let call = |addr: u64, len: u64, advice: u64| {

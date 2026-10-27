@@ -94,8 +94,6 @@ pub const SYS_SLEEP: u64 = 11;
 /// `arg0`: virtual address hint (0 = kernel picks).
 /// `arg1`: size in bytes (rounded up to frame boundary).
 /// `arg2`: flags (`MAP_*` bitfield).
-/// `arg3`: physical address (only used with `MAP_MMIO`, must be
-///         frame-aligned).
 ///
 /// ## Flags
 ///
@@ -104,8 +102,8 @@ pub const SYS_SLEEP: u64 = 11;
 /// | `MAP_READ`    | 0   | Pages are readable                       |
 /// | `MAP_WRITE`   | 1   | Pages are writable                       |
 /// | `MAP_EXEC`    | 2   | Pages are executable                     |
-/// | `MAP_NOCACHE` | 3   | Disable CPU caching (for MMIO)           |
-/// | `MAP_MMIO`    | 4   | Map specific phys addr from `arg3`       |
+/// | `MAP_NOCACHE` | 3   | Disable CPU caching                      |
+/// | `MAP_MMIO`    | 4   | Refused (`PermissionDenied`); see below  |
 /// | `MAP_FIXED`   | 5   | Use exact vaddr from `arg0` (must be set)|
 /// | `MAP_LAZY`    | 6   | Demand-paged rather than committed       |
 /// | `MAP_SHARED`  | 7   | Shared with every process forked from it |
@@ -121,7 +119,10 @@ pub const MAP_WRITE: u64 = 1 << 1;
 pub const MAP_EXEC: u64 = 1 << 2;
 /// Mmap flag: disable CPU caching (for device MMIO).
 pub const MAP_NOCACHE: u64 = 1 << 3;
-/// Mmap flag: map specific physical address (from `arg3`).
+/// Mmap flag, refused with `PermissionDenied`: it asked to map a physical
+/// address the caller named, which the kernel cannot tell from RAM. The bit
+/// stays reserved so it never comes to mean anything else; a driver maps its
+/// device's registers through the device interface (roadmap.md 2.1).
 pub const MAP_MMIO: u64 = 1 << 4;
 /// Mmap flag: use exact virtual address from `arg0`.
 pub const MAP_FIXED: u64 = 1 << 5;

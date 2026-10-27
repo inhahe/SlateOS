@@ -581,8 +581,9 @@ pub fn sys_debug_print(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_IRQ_REGISTER` — claim an IRQ line for the calling task.
 ///
-/// Registers the task for wakeup notifications and unmasks the IRQ
-/// on the IOAPIC.  Only one task may be registered per IRQ.
+/// Registers the task for wakeup notifications and unmasks the IRQ on the
+/// IOAPIC. One task holds a line: a line another task holds is refused with
+/// `DeviceBusy`, and only the holder may wait on it or release it.
 pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
     let irq = args.arg0;
 
@@ -617,7 +618,9 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let irq_u8 = irq as u8;
 
-    crate::ioapic::irq_register_task(irq_u32, task_id);
+    if !crate::ioapic::irq_claim(irq_u32, task_id) {
+        return SyscallResult::err(KernelError::DeviceBusy);
+    }
 
     // Registering for a line whose PCI functions have INTx disabled succeeds
     // and then never delivers anything: we unmask at the IOAPIC, but the pin
@@ -658,6 +661,10 @@ pub fn sys_irq_register(args: &SyscallArgs) -> SyscallResult {
 /// known-issues.md `BUG-TRYWAKE-FALSE-CONFLATES-CONTENTION`).  The only
 /// truthful signal is the pending counter itself, so the loop returns
 /// only a count that an ISR actually recorded — never a fabricated one.
+///
+/// Only the task holding the line ([`sys_irq_register`]) may wait on it:
+/// anyone else is refused with `PermissionDenied`, since the holder is the
+/// task the interrupt wakes and a second waiter would only take its counts.
 pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
     let irq = args.arg0;
 
@@ -668,6 +675,9 @@ pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
     #[allow(clippy::cast_possible_truncation)]
     let irq_u32 = irq as u32;
     let task_id = sched::current_task_id();
+    if crate::ioapic::irq_holder(irq_u32) != Some(task_id) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
 
     loop {
         // Fast path (and post-wake re-check): consume whatever fired.
@@ -676,12 +686,6 @@ pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
             #[allow(clippy::cast_possible_wrap)]
             return SyscallResult::ok(count as i64);
         }
-
-        // Ensure the calling task is registered for this IRQ's wakeup.
-        // Re-registering each iteration is an idempotent atomic store and
-        // covers the case where the registration was cleared while we
-        // were running.
-        crate::ioapic::irq_register_task(irq_u32, task_id);
 
         // Slow path: block until the IRQ fires.
         //
@@ -697,7 +701,9 @@ pub fn sys_irq_wait(args: &SyscallArgs) -> SyscallResult {
 
 /// `SYS_IRQ_RELEASE` — release a previously registered IRQ line.
 ///
-/// Masks the IRQ on the IOAPIC and unregisters the task.
+/// Masks the IRQ on the IOAPIC and unregisters the task. Only the task
+/// holding the line may release it; anyone else is refused with
+/// `PermissionDenied` and the line is left as it was.
 pub fn sys_irq_release(args: &SyscallArgs) -> SyscallResult {
     let irq = args.arg0;
 
@@ -709,9 +715,15 @@ pub fn sys_irq_release(args: &SyscallArgs) -> SyscallResult {
     let irq_u32 = irq as u32;
     #[allow(clippy::cast_possible_truncation)]
     let irq_u8 = irq as u8;
+    let task_id = sched::current_task_id();
 
+    // Masked while still held: no other task can claim a held line, so the
+    // mask cannot land on a line someone else has just been given.
+    if crate::ioapic::irq_holder(irq_u32) != Some(task_id) {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
     crate::ioapic::mask_irq(irq_u8);
-    crate::ioapic::irq_unregister_task(irq_u32);
+    crate::ioapic::irq_release_if_holder(irq_u32, task_id);
 
     SyscallResult::ok(0)
 }
@@ -1012,46 +1024,48 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
-/// `SYS_MMAP` — map memory into the calling process's address space.
-///
-/// Supports two modes:
-/// - **Anonymous**: allocates physical frames and maps them (default).
-/// - **MMIO**: maps a specific physical address range (`MAP_MMIO` flag).
+/// `SYS_MMAP` — map anonymous memory into the calling process's address space.
 ///
 /// `arg0`: virtual address hint (0 = kernel picks).
 /// `arg1`: size in bytes (rounded up to frame boundary).
-/// `arg2`: flags (`MAP_READ` | `MAP_WRITE` | `MAP_EXEC` | `MAP_NOCACHE` | `MAP_MMIO`).
-/// `arg3`: physical address (only used with `MAP_MMIO`).
+/// `arg2`: flags (`MAP_READ` | `MAP_WRITE` | `MAP_EXEC` | `MAP_NOCACHE` |
+///         `MAP_LAZY` | `MAP_SHARED`). `MAP_MMIO` is refused (see below).
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     use super::number::{
         MAP_EXEC, MAP_LAZY, MAP_MMIO, MAP_NOCACHE, MAP_READ, MAP_SHARED, MAP_WRITE,
     };
-    use crate::mm::frame::{FRAME_SIZE, PhysFrame};
+    use crate::mm::frame::FRAME_SIZE;
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
     use crate::proc::{pcb, thread};
 
     let vaddr_hint = args.arg0;
     let size = args.arg1;
     let mut flags = args.arg2;
-    let phys_addr = args.arg3;
+    // A process never names a physical address to map. Nothing here can tell
+    // a device's registers from RAM -- the kernel's own, or another
+    // process's -- so the flag is refused rather than checked; a driver
+    // reaches its device's registers through the device interface, which
+    // finds the address itself (roadmap.md 2.1). Refused first, before
+    // anything about the caller is looked up, so no path past here sees it.
+    if flags & MAP_MMIO != 0 {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
     // Shared anonymous memory is always committed: a page faulted in lazily
     // would be faulted separately in each process after a fork and share
     // nothing (see `MAP_SHARED`). An explicit request for both is a contract
-    // nobody can keep; device memory is shared already, so MMIO ignores it.
-    let shared_anon = flags & MAP_SHARED != 0 && flags & MAP_MMIO == 0;
+    // nobody can keep.
+    let shared_anon = flags & MAP_SHARED != 0;
     if shared_anon && flags & MAP_LAZY != 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    // If the caller didn't explicitly specify a commit bit (MAP_LAZY /
-    // MAP_MMIO), pick the default commit mode.  A per-process policy
-    // override (set via Settings; design-decisions.md §11) wins; otherwise
-    // the system-wide default (PARAM_MM_LAZY_DEFAULT) applies.  MMIO
-    // mappings are always committed (they must map specific physical
-    // addresses), so they bypass this entirely.
-    if flags & (MAP_LAZY | MAP_MMIO) == 0 && !shared_anon {
+    // If the caller didn't explicitly ask for MAP_LAZY, pick the default
+    // commit mode.  A per-process policy override (set via Settings;
+    // design-decisions.md §11) wins; otherwise the system-wide default
+    // (PARAM_MM_LAZY_DEFAULT) applies.
+    if flags & MAP_LAZY == 0 && !shared_anon {
         let sysctl_lazy = crate::sysctl::get(crate::sysctl::PARAM_MM_LAZY_DEFAULT) == Some(1);
         let policy = thread::owner_process(sched::current_task_id())
             .and_then(pcb::get_mmap_commit_policy)
@@ -1130,11 +1144,6 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
             return SyscallResult::err(KernelError::BadAlignment);
         }
         vaddr_hint
-    } else if flags & MAP_MMIO != 0 {
-        // MMIO mappings are not VMA-tracked, so they use the device mmap
-        // region's bump allocator, disjoint from the VMA-tracked general
-        // region the gap finder serves (they can never collide).
-        mmap_alloc_vaddr(size_aligned)
     } else {
         // Anonymous mapping in the VMA-tracked general region: atomically
         // reserve a free gap with its Anonymous VMA.  Reusing freed gaps
@@ -1150,69 +1159,7 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::OutOfMemory);
     }
 
-    if flags & MAP_MMIO != 0 {
-        // MMIO mapping: map specific physical address.
-        if !phys_addr.is_multiple_of(frame_size) {
-            return SyscallResult::err(KernelError::BadAlignment);
-        }
-
-        for i in 0..num_frames {
-            #[allow(clippy::arithmetic_side_effects)]
-            let pa = phys_addr + (i as u64) * frame_size;
-            #[allow(clippy::arithmetic_side_effects)]
-            let va = base_vaddr + (i as u64) * frame_size;
-
-            let phys = match PhysFrame::from_addr(pa) {
-                Some(f) => f,
-                None => {
-                    // Rollback: unmap frames 0..i (don't free — device memory).
-                    for j in 0..i {
-                        #[allow(clippy::arithmetic_side_effects)]
-                        let rv = base_vaddr + (j as u64) * frame_size;
-                        // SAFETY: we mapped these frames successfully above.
-                        let _ = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(rv)) };
-                    }
-                    return SyscallResult::err(KernelError::BadAlignment);
-                }
-            };
-
-            // SAFETY: pml4_phys is valid, phys is a device MMIO address
-            // (not managed by our allocator), virt is in user space.
-            // SHARED: device memory is shared with the device by definition;
-            // a fork that made it copy-on-write would copy registers into RAM.
-            if let Err(e) = unsafe {
-                page_table::map_frame(
-                    pml4_phys,
-                    VirtAddr::new(va),
-                    phys,
-                    page_flags | PageFlags::SHARED,
-                )
-            } {
-                serial_println!(
-                    "[mmap] MMIO map failed at va={:#x} pa={:#x}: {:?}",
-                    va,
-                    pa,
-                    e
-                );
-                // Rollback: unmap frames 0..i (don't free — device memory).
-                for j in 0..i {
-                    #[allow(clippy::arithmetic_side_effects)]
-                    let rv = base_vaddr + (j as u64) * frame_size;
-                    // SAFETY: we mapped these frames successfully above.
-                    let _ = unsafe { page_table::unmap_frame(pml4_phys, VirtAddr::new(rv)) };
-                }
-                return SyscallResult::err(e);
-            }
-        }
-
-        serial_println!(
-            "[mmap] MMIO mapped {:#x}..{:#x} → phys {:#x} ({} frames)",
-            base_vaddr,
-            base_vaddr + size_aligned,
-            phys_addr,
-            num_frames
-        );
-    } else if flags & MAP_LAZY != 0 {
+    if flags & MAP_LAZY != 0 {
         // Lazy (demand-paged) anonymous mapping: register a VMA but
         // don't allocate physical frames.  Frames are allocated on
         // first access via the page fault handler.
@@ -1221,10 +1168,6 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
         // is committed allocation per the design spec.
         use crate::mm::vma::{Vma, VmaKind};
 
-        // MAP_LAZY + MAP_MMIO makes no sense — MMIO regions must be
-        // backed by specific physical addresses, not demand-paged.
-        // (MAP_MMIO was already handled above, but defensive check.)
-        //
         // When `reserved`, the gap reservation already inserted this
         // Anonymous VMA atomically; adding it again would overlap.  Only
         // the explicit-hint path (which doesn't reserve) registers it here.

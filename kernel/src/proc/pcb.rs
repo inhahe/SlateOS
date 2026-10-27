@@ -8187,8 +8187,9 @@ fn map_file_shared(
             // not fault a second time to be seen (Linux's `do_shared_fault`
             // calling `page_mkwrite`). Under the page-table lock, as the
             // write fault's own marking is (`resolve_shared_write`).
-            let marked = (write && va == faulting_part && fault.flags.contains(PageFlags::WRITABLE))
-                .then(|| crate::mm::page_cache::mark_dirty(fault.file_id, page_off, frame));
+            let marked =
+                (write && va == faulting_part && fault.flags.contains(PageFlags::WRITABLE))
+                    .then(|| crate::mm::page_cache::mark_dirty(fault.file_id, page_off, frame));
             let flags = match marked {
                 Some(crate::mm::page_cache::MarkDirty::Marked) => map_flags | PageFlags::WRITABLE,
                 Some(crate::mm::page_cache::MarkDirty::Adopted) => {
@@ -8249,7 +8250,15 @@ fn resolve_file_shared(
     note: &mut FaultNote,
 ) -> bool {
     let mut adopted_write = false;
-    let resolved = map_file_shared(pml4_phys, frame_base, fault_addr, write, fault, note, &mut adopted_write);
+    let resolved = map_file_shared(
+        pml4_phys,
+        frame_base,
+        fault_addr,
+        write,
+        fault,
+        note,
+        &mut adopted_write,
+    );
     if adopted_write {
         crate::fs::handle::note_mapped_write(fault.handle);
     }
@@ -11239,7 +11248,11 @@ pub(crate) fn test_mapped_write_touches_a_memfs_file() -> KernelResult<()> {
         let modified = || handle::fstat(writer).map(|m| m.modified_ns);
         for (what, at, error) in [
             ("a part not mapped yet", base, USER_WRITE_NOT_PRESENT),
-            ("a part mapped read-only", base + HW_PAGE_SIZE as u64, USER_WRITE_PRESENT),
+            (
+                "a part mapped read-only",
+                base + HW_PAGE_SIZE as u64,
+                USER_WRITE_PRESENT,
+            ),
         ] {
             crate::fs::Vfs::set_times(PATH, 0, LONG_AGO)?;
             if !try_resolve_fault(pid, at, error) {

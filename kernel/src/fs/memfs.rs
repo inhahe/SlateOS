@@ -263,7 +263,10 @@ impl FileFrames {
         } else {
             offset / PAGE..(end.saturating_sub(1) / PAGE).saturating_add(1)
         };
-        let holes = pages.clone().filter(|index| !self.pages.contains_key(index)).count();
+        let holes = pages
+            .clone()
+            .filter(|index| !self.pages.contains_key(index))
+            .count();
         let mut made = Vec::new();
         made.try_reserve_exact(holes)
             .map_err(|_| KernelError::OutOfMemory)?;
@@ -2875,9 +2878,12 @@ fn test_bytes_max() -> KernelResult<()> {
     fs.write_file(Path::new("/over"), &alloc::vec![1u8; 1000])?;
     fs.write_at(Path::new("/over"), 500, &alloc::vec![2u8; max])?;
     let over = (
-        fs.read_at(Path::new("/over"), 0, 500)?.iter().all(|&b| b == 1),
+        fs.read_at(Path::new("/over"), 0, 500)?
+            .iter()
+            .all(|&b| b == 1),
         fs.read_at(Path::new("/over"), 500, max)?,
-        fs.read_at(Path::new("/over"), 500u64.saturating_add(BYTES_MAX), 8)?.len(),
+        fs.read_at(Path::new("/over"), 500u64.saturating_add(BYTES_MAX), 8)?
+            .len(),
     );
     if over != (true, alloc::vec![2u8; max], 0) {
         return fail("a write taking a file past 64 KiB from inside it lost the bytes before it");

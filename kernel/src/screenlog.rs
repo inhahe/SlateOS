@@ -150,13 +150,18 @@ impl Pane {
     /// previous kernel's desktop after a kexec -- would show beside it.
     fn blank(&self, width: u32, height: u32) {
         for y in self.top..height {
-            let row = self.fb.wrapping_add(u64::from(y).wrapping_mul(u64::from(self.pitch)));
+            let row = self
+                .fb
+                .wrapping_add(u64::from(y).wrapping_mul(u64::from(self.pitch)));
             for x in 0..width {
                 // SAFETY: inside the pane's rows of the framebuffer, which
                 // `start`'s caller vouched for (`width` pixels a row, rows
                 // `top..height`); a framebuffer's pixels are 4-byte aligned.
                 unsafe {
-                    core::ptr::write_volatile(row.wrapping_add(u64::from(x).wrapping_mul(4)) as *mut u32, BG);
+                    core::ptr::write_volatile(
+                        row.wrapping_add(u64::from(x).wrapping_mul(4)) as *mut u32,
+                        BG,
+                    );
                 }
             }
         }

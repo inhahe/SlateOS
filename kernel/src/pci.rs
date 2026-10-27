@@ -251,7 +251,9 @@ pub fn config_write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
     // SAFETY: 0xCFC-0xCFF are the PCI config mechanism #1 data port's
     // lanes; `config_access` has selected the aligned dword, and a byte
     // access selects the target lane within it via (offset & 3).
-    config_access(addr, || unsafe { port::outb(PCI_CONFIG_DATA + u16::from(offset & 3), value) });
+    config_access(addr, || unsafe {
+        port::outb(PCI_CONFIG_DATA + u16::from(offset & 3), value)
+    });
 }
 
 /// Write a 16-bit value to PCI configuration space using a genuine 16-bit
@@ -269,7 +271,9 @@ pub fn config_write16_native(bus: u8, device: u8, function: u8, offset: u8, valu
     let addr = config_address(bus, device, function, offset);
     // SAFETY: as config_write8's, with a word access selecting the target
     // 16-bit lane within the dword via (offset & 2).
-    config_access(addr, || unsafe { port::outw(PCI_CONFIG_DATA + u16::from(offset & 2), value) });
+    config_access(addr, || unsafe {
+        port::outw(PCI_CONFIG_DATA + u16::from(offset & 2), value)
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -415,7 +419,8 @@ pub enum UartSearch {
 /// reads the dword at 0x2C (only asked for of an AX99100, since in a bridge
 /// that offset is something else).
 fn is_serial_16550(id: u32, class_revision: u32, subsystem: impl FnOnce() -> u32) -> bool {
-    class_revision >> 8 == CLASS_SERIAL_16550 || (id == ASIX_AX99100_ID && subsystem() == ASIX_AX99100_SERIAL)
+    class_revision >> 8 == CLASS_SERIAL_16550
+        || (id == ASIX_AX99100_ID && subsystem() == ASIX_AX99100_SERIAL)
 }
 
 /// The `nth` (from 1) 16550-compatible serial port on the PCI bus, in
@@ -456,17 +461,25 @@ pub fn early_uart(nth: usize) -> UartSearch {
     let mut opened = u32::from(open_io_decode(addr));
     for_each_function(|bridge| {
         let (bus, dev, func) = (bridge.bus, bridge.device, bridge.function);
-        if config_read8(bus, dev, func, CFG_HEADER_TYPE) & !HEADER_TYPE_MULTIFUNCTION != HEADER_TYPE_BRIDGE {
+        if config_read8(bus, dev, func, CFG_HEADER_TYPE) & !HEADER_TYPE_MULTIFUNCTION
+            != HEADER_TYPE_BRIDGE
+        {
             return;
         }
         // A bridge leads to the buses from its secondary to its subordinate;
         // one firmware never numbered (secondary 0) leads nowhere.
         let behind = config_read8(bus, dev, func, CFG_SECONDARY_BUS);
-        if behind != 0 && (behind..=config_read8(bus, dev, func, CFG_SUBORDINATE_BUS)).contains(&addr.bus) {
+        if behind != 0
+            && (behind..=config_read8(bus, dev, func, CFG_SUBORDINATE_BUS)).contains(&addr.bus)
+        {
             opened = opened.saturating_add(u32::from(open_io_decode(bridge)));
         }
     });
-    UartSearch::Found(PciUart { address: addr, port, opened })
+    UartSearch::Found(PciUart {
+        address: addr,
+        port,
+        opened,
+    })
 }
 
 /// Switch on I/O decoding in a function's command register; whether it was
@@ -477,7 +490,13 @@ fn open_io_decode(addr: PciAddress) -> bool {
     if command & CMD_IO_SPACE != 0 {
         return false;
     }
-    config_write16_native(addr.bus, addr.device, addr.function, CFG_COMMAND, command | CMD_IO_SPACE);
+    config_write16_native(
+        addr.bus,
+        addr.device,
+        addr.function,
+        CFG_COMMAND,
+        command | CMD_IO_SPACE,
+    );
     true
 }
 

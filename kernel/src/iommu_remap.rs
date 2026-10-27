@@ -642,7 +642,9 @@ fn quiesce_unit(mmio: u64) -> KernelResult<()> {
             core::hint::spin_loop();
         }
         if !cleared {
-            serial_println!("[iommu_remap]   protected memory the firmware left on would not turn off");
+            serial_println!(
+                "[iommu_remap]   protected memory the firmware left on would not turn off"
+            );
             return Err(KernelError::TimedOut);
         }
         serial_println!("[iommu_remap]   protected memory the firmware left on: turned off");
@@ -790,14 +792,19 @@ pub fn create_domain() -> KernelResult<DomainId> {
     if let Some(hhdm) = page_table::hhdm() {
         sync_tables(pml4, IOMMU_PAGE_SIZE, hhdm);
     }
-    let limit = usize::try_from(DOMAIN_IDS.load(Ordering::Acquire)).map_or(MAX_DOMAINS, |ids| ids.min(MAX_DOMAINS));
+    let limit = usize::try_from(DOMAIN_IDS.load(Ordering::Acquire))
+        .map_or(MAX_DOMAINS, |ids| ids.min(MAX_DOMAINS));
 
     let mut domains = DOMAINS.lock();
     // A slot is free when it holds no table: a destroyed domain's keeps its
     // table until the units have forgotten its id.
-    let free = (usize::from(FIRST_DOMAIN_ID)..limit)
-        .find(|&slot| domains.get(slot).is_some_and(|d| !d.active && d.pml4_phys == 0));
-    let Some((slot, id)) = free.and_then(|slot| Some((slot, DomainId::try_from(slot).ok()?))) else {
+    let free = (usize::from(FIRST_DOMAIN_ID)..limit).find(|&slot| {
+        domains
+            .get(slot)
+            .is_some_and(|d| !d.active && d.pml4_phys == 0)
+    });
+    let Some((slot, id)) = free.and_then(|slot| Some((slot, DomainId::try_from(slot).ok()?)))
+    else {
         drop(domains);
         // SAFETY: allocated above and never published: no entry and no walk
         // can reach it.
@@ -1532,7 +1539,9 @@ pub fn shutdown() {
         }
     }
     REMAP_ACTIVE.store(
-        UNIT_REGS.iter().any(|regs| regs.load(Ordering::Acquire) != 0),
+        UNIT_REGS
+            .iter()
+            .any(|regs| regs.load(Ordering::Acquire) != 0),
         Ordering::Release,
     );
 }

@@ -359,7 +359,9 @@ fn pci_serial_choice(line: &[u8]) -> PciSerialChoice<'_> {
         .split(u8::is_ascii_whitespace)
         .filter_map(|word| word.strip_prefix(b"log.pci_serial="))
         .next_back()?;
-    let parsed = core::str::from_utf8(value).ok().and_then(|text| text.parse::<usize>().ok());
+    let parsed = core::str::from_utf8(value)
+        .ok()
+        .and_then(|text| text.parse::<usize>().ok());
     match parsed {
         Some(0) => None,
         Some(nth) => Some(Ok(nth)),
@@ -452,7 +454,9 @@ pub fn _print(args: core::fmt::Arguments<'_>) {
 /// ([`mirror_byte`]): otherwise its log would just stop, which reads as a hang.
 fn report_lost_mirror() {
     if MIRROR_LOST.swap(false, core::sync::atomic::Ordering::Relaxed) {
-        crate::serial_println!("[serial] the PCI serial port stopped taking bytes; the log no longer goes to it");
+        crate::serial_println!(
+            "[serial] the PCI serial port stopped taking bytes; the log no longer goes to it"
+        );
     }
 }
 

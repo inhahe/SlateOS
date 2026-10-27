@@ -1801,7 +1801,10 @@ fn kill_userspace_task_with_info(
             // not read. It may be a device's registers, where a read has an
             // effect; another process's memory, which the log would then
             // show; or a vmalloc page freed under the read.
-            serial_println!("  bytes @RIP: <{:#018x} is the kernel's: not read>", frame.rip);
+            serial_println!(
+                "  bytes @RIP: <{:#018x} is the kernel's: not read>",
+                frame.rip
+            );
         } else if mapped {
             let avail = (0x1000 - (frame.rip & 0xFFF)).min(16) as usize;
             let mut buf = [0u8; 16];

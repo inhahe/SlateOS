@@ -622,7 +622,8 @@ fn registers_reach(cap_length: u8, rts_off: u32, db_off: u32, max_ports: u8, max
     let interrupter_0 = u64::from(rts_off)
         .saturating_add(0x20)
         .saturating_add(INTERRUPTER_SIZE as u64);
-    let doorbells = u64::from(db_off).saturating_add(u64::from(max_slots).saturating_add(1).saturating_mul(4));
+    let doorbells =
+        u64::from(db_off).saturating_add(u64::from(max_slots).saturating_add(1).saturating_mul(4));
     ports.max(interrupter_0).max(doorbells)
 }
 
@@ -3102,7 +3103,10 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // 8 ports, 64 slots) end with its doorbells; a runtime block placed at
     // the mapping's end, or doorbells past it, reach beyond.
     for (args, want) in [
-        ((0x40_u8, 0x1000_u32, 0x2000_u32, 8_u8, 64_u8), 0x2000 + 65 * 4),
+        (
+            (0x40_u8, 0x1000_u32, 0x2000_u32, 8_u8, 64_u8),
+            0x2000 + 65 * 4,
+        ),
         ((0x40, 0xFFE0, 0x2000, 8, 64), 0xFFE0 + 0x40),
         ((0x80, 0x1000, 0x3000, 255, 255), 0x3000 + 256 * 4),
         ((0x20, 0x600, 0x800, 255, 1), 0x20 + 0x400 + 255 * 0x10),
@@ -3110,7 +3114,12 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         let (cap_length, rts_off, db_off, ports, slots) = args;
         let got = registers_reach(cap_length, rts_off, db_off, ports, slots);
         if got != want {
-            crate::serial_println!("[xhci]   FAIL: registers reach {:#x} for {:x?}, want {:#x}", got, args, want);
+            crate::serial_println!(
+                "[xhci]   FAIL: registers reach {:#x} for {:x?}, want {:#x}",
+                got,
+                args,
+                want
+            );
             return Err(crate::error::KernelError::InternalError);
         }
     }

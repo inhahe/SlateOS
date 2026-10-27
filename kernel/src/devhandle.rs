@@ -714,8 +714,23 @@ pub fn self_test() -> KernelResult<()> {
                 return Err("a freed arena is still reachable by the device");
             }
             // A second, left for the close to take back.
-            let (_kept, kept_addr) =
+            let (kept, kept_addr) =
                 dma_alloc(raw, owner, 0x4000).map_err(|_| "a second arena could not be made")?;
+            // A fork's child gets neither the BAR nor the arena
+            // (`PageFlags::FOREIGN`): it holds no handle and no tracker
+            // entry. Cloned with no range excluded, so the flag alone is
+            // what keeps them out.
+            // SAFETY: the owner is a scratch process no thread runs, so its
+            // tables are quiescent for the clone.
+            let child = unsafe { crate::mm::cow::clone_address_space_cow(pml4, &[]) }
+                .map_err(|_| "the owner's address space could not be cloned")?;
+            let given = page_table::translate(child, VirtAddr::new(va)).is_some()
+                || page_table::translate(child, VirtAddr::new(kept)).is_some();
+            // SAFETY: the child table was just made, and no CPU runs on it.
+            unsafe { page_table::destroy_user_address_space(child) };
+            if given {
+                return Err("a forked child got the device's registers or its arena");
+            }
             Ok((va, Some((domain, kept_addr))))
         })();
         let (va, kept) = match checks {

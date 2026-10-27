@@ -5423,9 +5423,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   Bluetooth, laptop audio DSPs); handwritten native drivers stay for the
   standard core. Operator's decision, 2026-10-27: design-decisions §1577; the
   split, the rule of thumb and the inventory are `roadmap-detailed.md` §2.1a.
-  - [ ] Shape first: each Linux driver in its own `udriver` process,
+  - [-] Shape first: each Linux driver in its own `udriver` process,
         IOMMU-sandboxed (§1576); the GPL boundary (driver processes GPL, kernel
-        MIT); the pinned Linux release and the import script
+        MIT); the pinned Linux release and the import script -- the shape is
+        decided (§1578: Linux's own headers and core code, only the bottom
+        emulated, one cooperative thread per driver, `linux-6.18.y` fetched
+        by hash); the fetch-and-prepare script is next
   - [ ] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
         timers, PCI and MSI, IRQs, the minimal device model, `request_firmware`
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),

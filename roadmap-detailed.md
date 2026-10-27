@@ -1210,11 +1210,11 @@ that crossing into a driver process per request matters (NVMe, 10GbE); the
 layer when the device is one vendor's design that only its vendor's driver
 knows.
 
-- [ ] Design decision, before any code: the layer's shape and boundaries
-  - [ ] Each Linux driver runs in its own driver process (a `udriver`), never in the kernel, its DMA confined to its own IOMMU domain (`iommu_remap`, design-decisions §1576) -- the C code is Linux's trust model, so the sandbox is the security boundary
-  - [ ] Licence boundary: the drivers are GPLv2, so the driver processes and the layer linked into them are GPL; the kernel and native services stay MIT, talking to them only by IPC. Record it beside the existing GPL userland tools
-  - [ ] Which Linux release the layer targets, recorded in one place, and how the driver sources are imported (a script that fetches and pins a release; a minimal patch queue, kept empty where possible)
-- [ ] The core shim (LinuxKPI-style): the internal kernel API drivers call, mapped onto native primitives
+- [x] Design decision, before any code: the layer's shape and boundaries -- decided 2026-10-27, design-decisions §1578: Linux's own headers and core code, only the bottom emulated (Genode's method, not LinuxKPI's rewritten headers), one cooperative thread per driver process on a uniprocessor, non-preemptive Linux configuration
+  - [x] Each Linux driver runs in its own driver process (a `udriver`), never in the kernel, its DMA confined to its own IOMMU domain (`iommu_remap`, design-decisions §1576) -- the C code is Linux's trust model, so the sandbox is the security boundary
+  - [-] Licence boundary: the drivers are GPLv2, so the driver processes and the layer linked into them are GPL; the kernel and native services stay MIT, talking to them only by IPC. Record it beside the existing GPL userland tools -- decided in §1578 rule 7 (Linux's files and everything generated from them GPL-2.0 in a directory that says so; the layer's own two halves MIT, compatible with linking into the GPL executables); the licence notice lands with the first driver
+  - [-] Which Linux release the layer targets, recorded in one place, and how the driver sources are imported (a script that fetches and pins a release; a minimal patch queue, kept empty where possible) -- decided in §1578 rule 6 (6.18.y long-term, pinned by version and SHA-256, fetched into `build/`, never vendored or edited); the script is not written yet
+- [ ] The core shim: the internal kernel API drivers call, mapped onto native primitives -- per §1578, Linux's own code wherever it can run as it is, and below it a C half that implements Linux's functions over a small `slx_*` interface and a Rust half that implements `slx_*` on SlateOS
   - [ ] Memory: `kmalloc`/`kfree`, `vmalloc`, `dma_alloc_coherent`, `dma_map_*`/scatterlists (over `mm::dma` and the IOMMU domain)
   - [ ] Concurrency: spinlocks, mutexes, completions, atomics, RCU, wait queues -- with Linux's rules of when code may sleep kept exactly, since a mismatch fails only under load
   - [ ] Deferred work: workqueues, tasklets/softirq-equivalents, timers, hrtimers, kthreads

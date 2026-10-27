@@ -669,20 +669,27 @@ pub fn irq_is_pending(irq: u32) -> bool {
 /// otherwise take the holder's wakeups.
 #[must_use]
 pub fn irq_claim(irq: u32, task_id: u64) -> bool {
-    IRQ_WAIT_TASK.get(irq as usize).is_some_and(|slot| {
-        match slot.compare_exchange(u64::MAX, task_id, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => {
-                // A new holder starts from nothing: interrupts counted while
-                // the line was free, or still held by the last holder, were
-                // not for this one.
-                if let Some(pending) = IRQ_PENDING.get(irq as usize) {
-                    pending.store(0, Ordering::Release);
-                }
-                true
-            }
-            Err(holder) => holder == task_id,
+    let (Some(slot), Some(pending)) = (
+        IRQ_WAIT_TASK.get(irq as usize),
+        IRQ_PENDING.get(irq as usize),
+    ) else {
+        return false;
+    };
+    if slot.load(Ordering::Acquire) == task_id {
+        return true;
+    }
+    // A new holder starts from nothing: what was counted while the line was
+    // free, or still held by the last holder, was not for it. Taken before
+    // the claim is published, so an interrupt counted for the new holder
+    // cannot be the one wiped; put back if the claim is lost.
+    let stale = pending.swap(0, Ordering::AcqRel);
+    match slot.compare_exchange(u64::MAX, task_id, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => true,
+        Err(holder) => {
+            pending.fetch_add(stale, Ordering::AcqRel);
+            holder == task_id
         }
-    })
+    }
 }
 
 /// The task holding `irq`, if any.

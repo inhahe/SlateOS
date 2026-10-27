@@ -681,6 +681,12 @@ unsafe fn clone_frame_group(
         if !pte.is_present() {
             continue;
         }
+        // Not the parent's to give (`PageFlags::FOREIGN`): a device's
+        // registers or a DMA buffer, which belong to a handle or a tracker
+        // entry the child does not hold. The child gets nothing there.
+        if pte.raw() & page_table::PageFlags::FOREIGN.bits() != 0 {
+            continue;
+        }
 
         let phys = pte.phys_addr();
         let frame_base = phys & !(FRAME_SIZE as u64 - 1);

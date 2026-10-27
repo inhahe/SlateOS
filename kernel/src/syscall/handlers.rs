@@ -1566,7 +1566,7 @@ const MMAP_FULL_FLUSH_PAGES: u64 = 64;
 /// to the caller.  Picks a per-page shootdown for small ranges and a full
 /// flush for large ones.
 #[allow(clippy::arithmetic_side_effects)]
-fn mmap_flush_range(start: u64, end: u64) {
+pub(crate) fn mmap_flush_range(start: u64, end: u64) {
     if end <= start {
         return;
     }

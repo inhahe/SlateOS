@@ -1183,17 +1183,34 @@ pub fn bind_driver(addr: PciAddress, name: &'static str) {
     );
 }
 
-/// [`bind_driver`]'s record alone, without its log line and hot-plug event:
-/// what the self-test can make and unmake without leaving an event behind.
-/// Forget that `name` drives `addr`, if it is the one recorded: a binding
-/// another driver holds is left alone, so a release cannot unbind it.
+/// Forget that `name` drives `addr`, if it is the one recorded -- a binding
+/// another driver holds is left alone, so a release cannot unbind it -- and
+/// say so, as [`bind_driver`] does: a log line and a hot-plug event.
 pub fn unbind_driver(addr: PciAddress, name: &'static str) {
     let key = pack_addr(addr);
-    DRIVER_BINDINGS
-        .lock()
-        .retain(|&(k, n)| k != key || n != name);
+    let removed = {
+        let mut bindings = DRIVER_BINDINGS.lock();
+        let before = bindings.len();
+        bindings.retain(|&(k, n)| k != key || n != name);
+        bindings.len() != before
+    };
+    if removed {
+        crate::serial_println!(
+            "[pci] {:02x}:{:02x}.{} is no longer driven by {}",
+            addr.bus,
+            addr.device,
+            addr.function,
+            name
+        );
+        crate::devhotplug::driver_unbound(
+            crate::udriver::DeviceAddr::new(addr.bus, addr.device, addr.function),
+            name,
+        );
+    }
 }
 
+/// [`bind_driver`]'s record alone, without its log line and hot-plug event:
+/// what the self-test can make and unmake without leaving an event behind.
 fn record_binding(addr: PciAddress, name: &'static str) {
     let key = pack_addr(addr);
     let mut bindings = DRIVER_BINDINGS.lock();

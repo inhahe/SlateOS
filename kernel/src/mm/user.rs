@@ -1521,6 +1521,11 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
         // or the frame is mapped with no reference held for it. Per page, so
         // a large unmap does not hold the lock throughout.
         let held = crate::mm::as_lock::lock(pml4);
+        // A frame the space does not own (`PageFlags::FOREIGN`: device
+        // registers, a buffer the DMA tracker frees) loses its mapping here
+        // and nothing else, whatever its address looks like.
+        let foreign = page_table::read_leaf_pte(pml4, VirtAddr::new(va))
+            .is_some_and(|pte| pte.raw() & page_table::PageFlags::FOREIGN.bits() != 0);
         // SAFETY: `pml4` is the caller's live page table and `va` is below
         // USER_SPACE_END (clamped above), so this never touches the shared
         // kernel half.  `unmap_4k` reports an absent page as `Err`.  The TLB
@@ -1542,7 +1547,7 @@ pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
             });
             let frame = PhysFrame::from_addr(phys4k & !frame_mask);
             match frame {
-                Some(pf) if !still_mapped && frame::is_allocator_owned(pf) => {
+                Some(pf) if !foreign && !still_mapped && frame::is_allocator_owned(pf) => {
                     crate::mm::accounting::uncharge(pml4, 1);
                     gather.add(frame_va, pf.addr());
                 }

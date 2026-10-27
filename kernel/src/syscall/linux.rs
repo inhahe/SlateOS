@@ -13967,7 +13967,13 @@ fn drm_mmap_dumb(
     // disjoint from the VMA-tracked general region).
     let fixed = (flags & MAP_FIXED) != 0;
     let base = if fixed {
-        if addr_hint & frame_size.wrapping_sub(1) != 0 {
+        // Aligned, and wholly in the user half: the kernel half is one set
+        // of tables every address space shares.
+        if addr_hint & frame_size.wrapping_sub(1) != 0
+            || addr_hint
+                .checked_add(length_aligned)
+                .is_none_or(|end| end > crate::mm::page_table::USER_SPACE_END)
+        {
             pcb::linux_as_release(pid, length_aligned);
             return linux_err(errno::EINVAL);
         }

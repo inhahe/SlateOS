@@ -5984,7 +5984,7 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
 /// open refused without a `PciDevice` capability and granted with one; the
 /// owner's configuration read and BAR size through the handle; another
 /// process's use of the handle `InvalidHandle`; and the owner's exit --
-/// `devhandle::release_owned_by`, as at its zombie transition -- unbinds the
+/// `pcb::exit_close_fds`, as a dying thread runs it -- unbinds the
 /// device and unmaps its BAR, after which the reap's close is a no-op.
 /// Skipped, and recorded so, where there is no `edu`.
 fn test_dispatch_device_calls() -> KernelResult<()> {
@@ -6046,19 +6046,22 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         if page_table::translate(pml4, VirtAddr::new(va)).is_none() {
             return Err("the BAR mapping is not there");
         }
-        crate::devhandle::release_owned_by(driver);
+        // The owner's exit, as a dying thread runs it: held handles closed,
+        // its address space still there.
+        pcb::exit_close_fds(driver);
         if crate::pci::bound_driver(a).is_some() {
             return Err("the device is still bound after its owner's exit");
         }
         if page_table::translate(pml4, VirtAddr::new(va)).is_some() {
             return Err("BAR0 is still mapped after its owner's exit");
         }
-        if call(driver, SYS_PCI_DEVICE_CLOSE, handle, 0, 0) != 0 {
-            return Err("the reap's close of a released handle failed");
+        if call(driver, SYS_PCI_DEVICE_CLOSE, handle, 0, 0)
+            != i64::from(KernelError::InvalidHandle.code())
+        {
+            return Err("a handle its holder's exit closed is still held");
         }
         Ok(())
     })();
-    crate::devhandle::release_owned_by(driver);
     pcb::destroy(driver);
     pcb::destroy(stranger);
     if let Err(msg) = result {

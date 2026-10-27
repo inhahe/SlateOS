@@ -10,10 +10,9 @@
 //!
 //! The system calls are `SYS_PCI_DEVICE_*` (`syscall::handlers`); a handle is a
 //! held handle of `ResourceType::PciDevice`, never inherited, so it has one
-//! holder. Its holder's exit releases it at the zombie transition
-//! ([`release_owned_by`]), before the address space its BARs are mapped in
-//! is torn down. Not here yet (roadmap.md 2.1): DMA arenas in the device's
-//! IOMMU domain, and interrupts.
+//! holder. Its holder's exit closes it with the rest of its held handles
+//! (`pcb::exit_close_fds`), before the address space its BARs and arenas are
+//! mapped in is released. Not here yet (roadmap.md 2.1): interrupts.
 
 use crate::error::{KernelError, KernelResult};
 use crate::iommu_remap::{self, Caller, DmaPerms};
@@ -26,11 +25,14 @@ use alloc::vec::Vec;
 const CFG_COMMAND: u8 = 0x04;
 const CFG_BAR0: u8 = 0x10;
 const CFG_ROM: u8 = 0x30;
+const CFG_HEADER_TYPE: u8 = 0x0E;
 /// Bits of the command register.
 const CMD_MEMORY_SPACE: u16 = 1 << 1;
 /// Capability ids whose registers the kernel manages.
 const CAP_MSI: u8 = 0x05;
 const CAP_MSIX: u8 = 0x11;
+const CAP_PM: u8 = 0x01;
+const CAP_PCIE: u8 = 0x10;
 /// The span of an MSI capability at its largest (64-bit, per-vector
 /// masking) and of an MSI-X capability: what a write may not touch.
 const CAP_MSI_LEN: u8 = 24;
@@ -55,6 +57,10 @@ pub struct MemoryBar {
 struct MappedBar {
     user_virt: u64,
     pages: u64,
+    /// The BAR's physical base: an entry is cleared only while it maps it.
+    phys: u64,
+    /// The region reserved for it, in whole frames.
+    span: u64,
 }
 
 /// What an open device is.
@@ -70,6 +76,7 @@ struct Device {
     /// The IOMMU domain the device's DMA is confined to, made at open; `None`
     /// without an active IOMMU, when nothing confines it.
     domain: Option<iommu_remap::DomainId>,
+    guards: Guards,
     /// DMA arenas mapped in the domain.
     arenas: Vec<Arena>,
 }
@@ -101,6 +108,11 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
     if pci::config_read16(addr.bus, addr.device, addr.function, 0x00) == 0xFFFF {
         return Err(KernelError::NotFound);
     }
+    // A bridge's header (type 1) has two BARs and its own windows where a
+    // device's has six: what is sized and guarded here is a device's.
+    if pci::config_read8(addr.bus, addr.device, addr.function, CFG_HEADER_TYPE) & 0x7F != 0 {
+        return Err(KernelError::NotSupported);
+    }
     let mut devices = DEVICES.lock();
     if pci::bound_driver(addr).is_some() || devices.iter().any(|d| d.addr == addr) {
         return Err(KernelError::DeviceBusy);
@@ -108,6 +120,7 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
     // Sized now, before its driver starts: sizing writes all-ones to each
     // BAR, which a running driver would see.
     let bars = size_memory_bars(addr);
+    let guards = Guards::of(addr);
     let domain = confine(addr)?;
     let raw = NEXT_RAW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     pci::bind_driver(addr, USERSPACE_DRIVER);
@@ -118,14 +131,14 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
         bars,
         mapped: Vec::new(),
         domain,
+        guards,
         arenas: Vec::new(),
     });
     Ok(raw)
 }
 
-/// Release the device `raw` names. A handle already released -- by its
-/// holder's exit, before the reap that closes its handles -- names nothing,
-/// and closing it does nothing.
+/// Release the device `raw` names. A handle that names nothing (already
+/// released) does nothing.
 pub fn close(raw: u64) {
     let released = {
         let mut devices = DEVICES.lock();
@@ -135,24 +148,6 @@ pub fn close(raw: u64) {
         devices.swap_remove(index)
     };
     release(released);
-}
-
-/// Release every device `owner` holds. Called as it becomes a zombie, while
-/// its page table still exists: the BARs mapped in it must be unmapped
-/// before the address space is torn down, which would otherwise free them as
-/// RAM.
-pub fn release_owned_by(owner: ProcessId) {
-    let released: Vec<Device> = {
-        let mut devices = DEVICES.lock();
-        let (mine, others) = core::mem::take(&mut *devices)
-            .into_iter()
-            .partition(|d| d.owner == owner);
-        *devices = others;
-        mine
-    };
-    for device in released {
-        release(device);
-    }
 }
 
 /// Take back everything an open device was given, in the order that is safe
@@ -189,7 +184,7 @@ fn release(device: Device) {
             }
         }
         for bar in &device.mapped {
-            unmap_pages(pml4, bar.user_virt, bar.pages);
+            unmap_bar(pml4, device.owner, bar);
         }
     }
     pci::unbind_driver(device.addr, USERSPACE_DRIVER);
@@ -319,16 +314,18 @@ pub fn config_write(
     width: u8,
     value: u32,
 ) -> KernelResult<()> {
-    let addr = with_owned(raw, pid, |d| Ok(d.addr))?;
     let offset = config_offset(offset, width)?;
-    if config_write_refused(addr, offset, width) {
+    let (addr, refused) = with_owned(raw, pid, |d| {
+        Ok((d.addr, d.guards.refuse(offset, width, value)))
+    })?;
+    if refused {
         return Err(KernelError::PermissionDenied);
     }
     let (b, d, f) = (addr.bus, addr.device, addr.function);
     #[allow(clippy::cast_possible_truncation)]
     match width {
         1 => pci::config_write8(b, d, f, offset, value as u8),
-        2 => pci::config_write16(b, d, f, offset, value as u16),
+        2 => pci::config_write16_native(b, d, f, offset, value as u16),
         _ => pci::config_write32(b, d, f, offset, value),
     }
     Ok(())
@@ -341,8 +338,10 @@ pub fn config_write(
 /// registers beside it.
 pub fn map_bar(raw: u64, pid: ProcessId, index: usize) -> KernelResult<(u64, u64)> {
     use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::VmaKind;
+    use crate::proc::pcb::{self, ForkAdvice};
 
-    let pml4 = crate::proc::pcb::get_pml4(pid)
+    let pml4 = pcb::get_pml4(pid)
         .filter(|&p| p != 0)
         .ok_or(KernelError::NoSuchProcess)?;
     let bar = with_owned(raw, pid, |d| {
@@ -356,41 +355,62 @@ pub fn map_bar(raw: u64, pid: ProcessId, index: usize) -> KernelResult<(u64, u64
         return Err(KernelError::NotSupported);
     }
     let pages = bar.size / HW_PAGE;
-    let user_virt = crate::syscall::handlers::mmap_alloc_vaddr(bar.size);
-    if user_virt == 0 {
-        return Err(KernelError::OutOfMemory);
-    }
+    // A region of its own in the owner's address space, in whole frames, as
+    // every region is: reused once the device is released, and not given to
+    // a forked child, which holds no handle.
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    let span = bar.size.div_ceil(frame).saturating_mul(frame);
     let flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
         | PageFlags::USER_ACCESSIBLE
         | PageFlags::NO_CACHE
         | PageFlags::NO_EXECUTE
-        | PageFlags::SHARED;
-    for page in 0..pages {
-        let offset = page.saturating_mul(HW_PAGE);
-        // SAFETY: `pml4` is the owner's own table; the address is in the
-        // device mmap region, where nothing else maps; the physical page is
-        // the device's own BAR, which the allocator does not own.
-        let mapped = unsafe {
-            page_table::map_4k_if_absent(
-                pml4,
-                VirtAddr::new(user_virt.saturating_add(offset)),
-                bar.base.saturating_add(offset),
-                flags,
-            )
-        };
-        if let Err(e) = mapped {
-            unmap_pages(pml4, user_virt, page);
-            return Err(e);
-        }
+        | PageFlags::FOREIGN;
+    let user_virt =
+        crate::syscall::handlers::alloc_user_mmap_reserve(pid, span, VmaKind::Fixed, flags);
+    if user_virt == 0 {
+        return Err(KernelError::OutOfMemory);
     }
-    let recorded = with_owned(raw, pid, |d| {
-        d.mapped.push(MappedBar { user_virt, pages });
-        Ok(())
+    let mapped = MappedBar {
+        user_virt,
+        pages,
+        phys: bar.base,
+        span,
+    };
+    let placed = pcb::set_fork_policy(
+        pid,
+        user_virt,
+        user_virt.saturating_add(span),
+        ForkAdvice::DontCopy,
+    )
+    .map(|_| ())
+    .and_then(|()| {
+        for page in 0..pages {
+            let offset = page.saturating_mul(HW_PAGE);
+            // SAFETY: `pml4` is the owner's own table; the region was
+            // just reserved for this mapping; the physical page is the
+            // device's own BAR, which the allocator does not own.
+            let done = unsafe {
+                page_table::map_4k_if_absent(
+                    pml4,
+                    VirtAddr::new(user_virt.saturating_add(offset)),
+                    bar.base.saturating_add(offset),
+                    flags,
+                )
+            };
+            // A page already there is not the BAR: the region is not
+            // what it was reserved as, and nothing is left half-mapped.
+            if !matches!(done, Ok(true)) {
+                return Err(done.err().unwrap_or(KernelError::AlreadyExists));
+            }
+        }
+        with_owned(raw, pid, |d| {
+            d.mapped.push(mapped);
+            Ok(())
+        })
     });
-    if let Err(e) = recorded {
-        // Closed while it was being mapped: nothing would ever unmap it.
-        unmap_pages(pml4, user_virt, pages);
+    if let Err(e) = placed {
+        unmap_bar(pml4, pid, &mapped);
         return Err(e);
     }
     Ok((user_virt, bar.size))
@@ -423,20 +443,54 @@ fn config_offset(offset: u16, width: u8) -> KernelResult<u8> {
     u8::try_from(offset).map_err(|_| KernelError::InvalidArgument)
 }
 
-/// Whether a write of `width` bytes at `offset` touches a register the
-/// kernel manages.
-fn config_write_refused(addr: PciAddress, offset: u8, width: u8) -> bool {
-    let start = u16::from(offset);
-    let end = start.saturating_add(u16::from(width));
-    let overlaps = |from: u16, len: u16| start < from.saturating_add(len) && from < end;
-    if overlaps(u16::from(CFG_BAR0), 24) || overlaps(u16::from(CFG_ROM), 4) {
-        return true;
+/// The configuration registers a driver may not write, read once when its
+/// device is opened (the capability list is the hardware's and does not
+/// change): the BARs and the ROM by position, the MSI and MSI-X
+/// capabilities, the power state, and a Function Level Reset -- the last two
+/// reset the function behind the kernel's back, after which its BARs read 0
+/// while the kernel still has them recorded as sized at open.
+#[derive(Debug, Clone, Default)]
+struct Guards {
+    /// Byte ranges refused outright: (start, length).
+    ranges: Vec<(u16, u16)>,
+    /// The high byte of the PCIe Device Control register, whose bit 7 is
+    /// Initiate Function Level Reset: a write setting it is refused, any
+    /// other write to the register (payload sizes, relaxed ordering, ...)
+    /// is the driver's.
+    flr_byte: Option<u16>,
+}
+
+impl Guards {
+    fn of(addr: PciAddress) -> Self {
+        let mut ranges = alloc::vec![(u16::from(CFG_BAR0), 24), (u16::from(CFG_ROM), 4)];
+        let mut flr_byte = None;
+        for cap in pci::walk_capabilities(addr) {
+            let at = u16::from(cap.offset);
+            match cap.id {
+                CAP_MSI => ranges.push((at, u16::from(CAP_MSI_LEN))),
+                CAP_MSIX => ranges.push((at, u16::from(CAP_MSIX_LEN))),
+                // PMCSR's low byte: the power state.
+                CAP_PM => ranges.push((at.saturating_add(4), 1)),
+                CAP_PCIE => flr_byte = Some(at.saturating_add(9)),
+                _ => {}
+            }
+        }
+        Self { ranges, flr_byte }
     }
-    pci::walk_capabilities(addr).iter().any(|cap| match cap.id {
-        CAP_MSI => overlaps(u16::from(cap.offset), u16::from(CAP_MSI_LEN)),
-        CAP_MSIX => overlaps(u16::from(cap.offset), u16::from(CAP_MSIX_LEN)),
-        _ => false,
-    })
+
+    /// Whether writing `value`, `width` bytes at `offset`, is refused.
+    fn refuse(&self, offset: u8, width: u8, value: u32) -> bool {
+        let start = u16::from(offset);
+        let end = start.saturating_add(u16::from(width));
+        let overlaps = |from: u16, len: u16| start < from.saturating_add(len) && from < end;
+        if self.ranges.iter().any(|&(from, len)| overlaps(from, len)) {
+            return true;
+        }
+        self.flr_byte.is_some_and(|byte| {
+            overlaps(byte, 1)
+                && (value >> (u32::from(byte.saturating_sub(start)).saturating_mul(8))) & 0x80 != 0
+        })
+    }
 }
 
 /// Size each memory BAR of `addr` by the standard probe: memory decoding off,
@@ -446,7 +500,7 @@ fn size_memory_bars(addr: PciAddress) -> [Option<MemoryBar>; 6] {
     let (b, d, f) = (addr.bus, addr.device, addr.function);
     let mut bars = [None; 6];
     let command = pci::config_read16(b, d, f, CFG_COMMAND);
-    pci::config_write16(b, d, f, CFG_COMMAND, command & !CMD_MEMORY_SPACE);
+    pci::config_write16_native(b, d, f, CFG_COMMAND, command & !CMD_MEMORY_SPACE);
     let mut index: usize = 0;
     while index < 6 {
         let offset =
@@ -492,21 +546,32 @@ fn size_memory_bars(addr: PciAddress) -> [Option<MemoryBar>; 6] {
         }
         index = index.saturating_add(if is_64 { 2 } else { 1 });
     }
-    pci::config_write16(b, d, f, CFG_COMMAND, command);
+    pci::config_write16_native(b, d, f, CFG_COMMAND, command);
     bars
 }
 
-/// Clear `pages` 4 KiB entries from `user_virt` in `pml4`, and flush them.
-fn unmap_pages(pml4: u64, user_virt: u64, pages: u64) {
+/// Take a BAR mapping out of its owner: each entry that still maps the
+/// BAR's own page is cleared (one that no longer does is someone else's
+/// now, and is left alone), the range flushed, and the region removed so
+/// the address space can reuse it.
+fn unmap_bar(pml4: u64, owner: ProcessId, bar: &MappedBar) {
     use crate::mm::page_table::{self, VirtAddr};
-    for page in 0..pages {
-        let va = user_virt.saturating_add(page.saturating_mul(HW_PAGE));
-        // SAFETY: the page was mapped by `map_bar` into this table; the frame
-        // behind it is device memory, which clearing the entry does not free.
-        // An entry already absent leaves nothing to clear.
-        let _ = unsafe { page_table::unmap_4k(pml4, VirtAddr::new(va)) };
+    for page in 0..bar.pages {
+        let offset = page.saturating_mul(HW_PAGE);
+        let va = VirtAddr::new(bar.user_virt.saturating_add(offset));
+        if page_table::translate(pml4, va) != Some(bar.phys.saturating_add(offset)) {
+            continue;
+        }
+        // SAFETY: the entry maps the BAR's own page, mapped by `map_bar` into
+        // this table; the frame behind it is device memory, which clearing
+        // the entry does not free. Its result is the address just checked.
+        let _ = unsafe { page_table::unmap_4k(pml4, va) };
     }
-    crate::tlb::flush_range(user_virt, u32::try_from(pages).unwrap_or(u32::MAX));
+    let end = bar.user_virt.saturating_add(bar.span);
+    crate::syscall::handlers::mmap_flush_range(bar.user_virt, end);
+    // A region already gone -- unmapped by the owner itself -- leaves nothing
+    // to remove.
+    let _ = crate::proc::pcb::remove_vma_range(owner, bar.user_virt, end);
 }
 
 /// QEMU's `edu` device, which the boot test attaches for this test: a 1 MiB
@@ -522,6 +587,35 @@ pub fn self_test() -> KernelResult<()> {
     use crate::mm::page_table::{self, VirtAddr};
     use crate::proc::pcb;
     use crate::serial_println;
+
+    // The write guards, on a made-up layout: BARs at 0x10, the PCIe Device
+    // Control register at 0x48 (its high byte, holding FLR, at 0x49).
+    let guards = Guards {
+        ranges: alloc::vec![(0x10, 24)],
+        flr_byte: Some(0x49),
+    };
+    for (offset, width, value, refused) in [
+        (0x48, 2, 0x8000, true),
+        (0x48, 2, 0x0010, false),
+        (0x48, 4, 0x0000_8000, true),
+        (0x49, 1, 0x80, true),
+        (0x49, 1, 0x10, false),
+        (0x10, 4, 0, true),
+        (0x24, 4, 0, true),
+        (0x0C, 4, 0, false),
+        (0x28, 4, 0, false),
+    ] {
+        if guards.refuse(offset, width, value) != refused {
+            serial_println!(
+                "[devhandle]   FAIL: a {}-byte write of {:#x} at {:#x} was {} refused",
+                width,
+                value,
+                offset,
+                if refused { "not" } else { "wrongly" }
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
 
     let mut skips = crate::fs::selftest::Skips::new();
     let Some(edu) = pci::find_device(EDU_VENDOR, EDU_DEVICE) else {

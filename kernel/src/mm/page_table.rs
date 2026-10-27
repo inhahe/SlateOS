@@ -419,6 +419,14 @@ impl PageFlags {
     /// as writable as it was ([`user_protect_flags`]).
     pub const CACHED: Self = Self(1 << 52);
 
+    /// Software bit (53): the frame behind this user entry is not the
+    /// address space's -- a device's registers, or a DMA buffer the DMA
+    /// tracker owns (design-decisions 1579). The generic paths leave it to
+    /// its owner: tearing down the address space or unmapping the range
+    /// clears the entry and frees nothing, and `fork` does not give it to
+    /// the child, which holds neither the device nor the buffer.
+    pub const FOREIGN: Self = Self(1 << 53);
+
     /// No-execute: instruction fetches cause a page fault.  Requires
     /// `IA32_EFER.NXE` to be enabled (Limine does this).
     pub const NO_EXECUTE: Self = Self(1 << 63);
@@ -2827,6 +2835,11 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                             continue;
                         }
                         any_present = true;
+                        // Not this space's frame (`PageFlags::FOREIGN`): its
+                        // owner frees it; the entry goes with the table.
+                        if pte.raw() & PageFlags::FOREIGN.bits() != 0 {
+                            continue;
+                        }
                         let frame_base = pte.phys_addr() & !FRAME_OFFSET_MASK;
                         let mut already = false;
                         for &s in seen.iter().take(seen_count) {

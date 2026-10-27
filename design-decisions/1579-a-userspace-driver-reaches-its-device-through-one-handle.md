@@ -66,7 +66,7 @@ the kernel stops the device and takes everything back.
 
 | Alternative | For | Against |
 |---|---|---|
-| **A device handle (chosen)** | One capability check at open, and every later call can only reach that device; release comes from the held-handle list every exit already empties; waiting joins the existing `SYS_WAIT_MULTIPLE`, which keys on the resource type | The exit order matters: a process's address space is freed when it becomes a zombie and its held handles only when it is reaped, so its devices are released at the zombie transition (`devhandle::release_owned_by`), before the teardown that would free their BARs as RAM |
+| **A device handle (chosen)** | One capability check at open, and every later call can only reach that device; release comes from the held-handle list every exit already empties; waiting joins the existing `SYS_WAIT_MULTIPLE`, which keys on the resource type | The exit order matters: a device must be released while its owner's page table still exists, which `pcb::exit_close_fds` (held handles) running before `release_address_space` gives; and the generic memory paths must not free or copy its pages (`PageFlags::FOREIGN`) |
 | Extend `udriver.rs`'s driver ids | Code exists | Ids are not handles: nothing closes them on exit, nothing can wait on them, and every call would re-check ownership by id |
 | Map any process memory for DMA per transfer | Any buffer can be given to a device | A system call and an IOMMU map and unmap per packet; pinning arbitrary process pages; the Linux layer does not need it |
 | Interrupts as IPC messages on a channel | One wait mechanism | A message allocated per interrupt, a queue that can overflow under an interrupt storm; a pending mask coalesces, never allocates, never overflows |

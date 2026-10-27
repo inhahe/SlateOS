@@ -42,7 +42,7 @@ case "$(uname -s)" in
         esac
         # WSL imports only the variables WSLENV names: the tree's location
         # is a WSL path, passed as it is.
-        exec env MSYS2_ARG_CONV_EXCL='*' WSLENV="SLATEOS_LINUX_ROOT${WSLENV:+:$WSLENV}" \
+        exec env MSYS2_ARG_CONV_EXCL='*' MSYS2_ENV_CONV_EXCL='SLATEOS_LINUX_ROOT' WSLENV="SLATEOS_LINUX_ROOT${WSLENV:+:$WSLENV}" \
             wsl.exe -d "$distro" -e bash "/mnt$self" "$@"
         ;;
 esac

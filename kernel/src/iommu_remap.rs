@@ -1374,8 +1374,6 @@ fn walk_or_create(table_phys: u64, index: usize, hhdm: u64) -> KernelResult<u64>
     Ok(new_table)
 }
 
-/// Walk one level of the SLPT without allocating.
-/// Returns `None` if the entry is not present.
 /// The host physical address a device in `domain_id` reaches at `bus_addr`,
 /// or `None` where the domain maps nothing (or there is no such domain): the
 /// domain's own tables read back, as the IOMMU walks them.
@@ -1397,6 +1395,8 @@ pub fn translate_bus(domain_id: DomainId, bus_addr: u64) -> Option<u64> {
     Some(page | (bus_addr & 0xFFF))
 }
 
+/// Walk one level of the SLPT without allocating.
+/// Returns `None` if the entry is not present.
 fn walk_existing(table_phys: u64, index: usize, hhdm: u64) -> Option<u64> {
     // SAFETY: table_phys is valid, index < 512.
     let entry = unsafe {

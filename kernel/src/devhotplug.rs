@@ -500,40 +500,30 @@ pub fn device_removed_usb(port_path: &str) {
 
 /// Report that a driver has been successfully bound to a device.
 pub fn driver_bound(addr: DeviceAddr, driver_name: &str) {
-    let now = crate::hpet::elapsed_ns();
-
-    let mut state = STATE.lock();
-    let event_id = state.next_event_id;
-    state.next_event_id = state.next_event_id.wrapping_add(1);
-    state.total_bindings = state.total_bindings.saturating_add(1);
-
-    let event = HotplugEvent {
-        id: event_id,
-        kind: EventKind::DriverBound,
-        bus: BusType::Pci,
-        device_addr: Some(addr),
-        device_id: None,
-        usb_info: None,
-        matched_driver: Some(String::from(driver_name)),
-        timestamp_ns: now,
-        consumed: false,
-    };
-
-    push_event(&mut state, event);
+    driver_event(addr, driver_name, EventKind::DriverBound);
 }
 
 /// Report that a driver has let a device go: the counterpart of
 /// [`driver_bound`], so a watcher does not see the device as driven forever.
 pub fn driver_unbound(addr: DeviceAddr, driver_name: &str) {
+    driver_event(addr, driver_name, EventKind::DriverUnbound);
+}
+
+/// Queue a driver's binding or unbinding of `addr`; a binding counts
+/// towards the total.
+fn driver_event(addr: DeviceAddr, driver_name: &str, kind: EventKind) {
     let now = crate::hpet::elapsed_ns();
 
     let mut state = STATE.lock();
     let event_id = state.next_event_id;
     state.next_event_id = state.next_event_id.wrapping_add(1);
+    if kind == EventKind::DriverBound {
+        state.total_bindings = state.total_bindings.saturating_add(1);
+    }
 
     let event = HotplugEvent {
         id: event_id,
-        kind: EventKind::DriverUnbound,
+        kind,
         bus: BusType::Pci,
         device_addr: Some(addr),
         device_id: None,

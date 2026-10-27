@@ -6664,6 +6664,32 @@ pub fn reserve_unmapped_area_phased(
     Some(base)
 }
 
+/// Remove the region `[start, end)` only if it is still exactly the one a
+/// device mapping reserved -- a `Fixed` region carrying
+/// `PageFlags::FOREIGN` -- checked and removed under one lock, so a region
+/// the process has since put there itself (after unmapping the device's, or
+/// after an exec) is left alone. Returns whether it was removed.
+pub fn remove_foreign_region(pid: ProcessId, start: u64, end: u64) -> bool {
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid) else {
+        return false;
+    };
+    let Ok(idx) = proc.vmas.binary_search_by_key(&start, |v| v.start) else {
+        return false;
+    };
+    let ours = proc.vmas.get(idx).is_some_and(|v| {
+        v.end == end
+            && v.kind == crate::mm::vma::VmaKind::Fixed
+            && v.flags.contains(crate::mm::page_table::PageFlags::FOREIGN)
+    });
+    if ours {
+        // A Fixed region has no backing file, so there is no reference to
+        // release outside the lock.
+        proc.vmas.remove(idx);
+    }
+    ours
+}
+
 /// Remove a VMA from a process's VMA list by start address.
 ///
 /// Returns `true` if a VMA was found and removed, `false` otherwise.

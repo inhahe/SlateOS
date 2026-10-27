@@ -618,8 +618,11 @@ unsafe fn map_child_pte(
 /// parent into the child, applying copy-on-write semantics.
 ///
 /// For each present PTE in the group:
+/// - **Not the space's** pages ([`PageFlags::FOREIGN`]: a device's
+///   registers, a DMA buffer the DMA tracker owns) are not given to the
+///   child at all: it holds neither the device nor the tracker entry.
 /// - **Shared-by-design** pages ([`PageFlags::SHARED`]: a shared-memory
-///   region, an io ring, a DMA or scanout buffer, device memory) are mapped
+///   region, an io ring, a scanout buffer) are mapped
 ///   into the child as they are -- same frame, same permissions -- and the
 ///   parent's entry is left alone.  Making them copy-on-write would
 ///   disconnect whichever side wrote first from the region (the region, the

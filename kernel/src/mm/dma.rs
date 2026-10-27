@@ -324,6 +324,25 @@ pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
     free_block(&mapping)
 }
 
+/// Take a user DMA buffer out of its process without freeing it: its entry
+/// is untracked and its pages unmapped, and its frames stay allocated for
+/// good. For a buffer a device may still reach -- its IOMMU domain could not
+/// be taken from it -- where handing the frames back would let the device
+/// write into whatever is given them next. A leak, said in the log, is the
+/// lesser harm.
+pub fn abandon_for_user(pml4_phys: u64, user_virt: u64) {
+    let Some(mapping) = untrack_dma_mapping(pml4_phys, user_virt) else {
+        return;
+    };
+    let hw_pages = unmap_user_buffer(&mapping);
+    crate::tlb::flush_range(user_virt, hw_pages as u32);
+    serial_println!(
+        "[dma] user buffer {:#x} ({} bytes) abandoned, not freed: a device may still reach it",
+        mapping.phys,
+        mapping.size
+    );
+}
+
 // ---------------------------------------------------------------------------
 // DMA mapping tracker
 // ---------------------------------------------------------------------------
@@ -370,14 +389,16 @@ fn track_dma_mapping(pml4_phys: u64, user_virt: u64, phys: u64, order: usize, si
 /// Record that the device behind device handle `device` may reach the user
 /// DMA buffer at `user_virt` (design-decisions 1579), so that whatever frees
 /// the buffer revokes the device's access first.
-pub fn mark_device(pml4_phys: u64, user_virt: u64, device: u64) {
-    if let Some(m) = DMA_MAPPINGS
+/// Returns whether the buffer was still tracked: one freed in the meantime
+/// must not be given to the device.
+#[must_use]
+pub fn mark_device(pml4_phys: u64, user_virt: u64, device: u64) -> bool {
+    DMA_MAPPINGS
         .lock()
         .iter_mut()
         .find(|m| m.pml4_phys == pml4_phys && m.user_virt == user_virt)
-    {
-        m.device = Some(device);
-    }
+        .map(|m| m.device = Some(device))
+        .is_some()
 }
 
 /// Before a user DMA buffer is freed: a device that may reach it stops.

@@ -33,6 +33,7 @@ const CAP_MSI: u8 = 0x05;
 const CAP_MSIX: u8 = 0x11;
 const CAP_PM: u8 = 0x01;
 const CAP_PCIE: u8 = 0x10;
+const CAP_AF: u8 = 0x13;
 /// The span of an MSI capability at its largest (64-bit, per-vector
 /// masking) and of an MSI-X capability: what a write may not touch.
 const CAP_MSI_LEN: u8 = 24;
@@ -91,6 +92,10 @@ struct Arena {
 }
 
 static DEVICES: Mutex<Vec<Device>> = Mutex::new(Vec::new());
+/// Functions being opened: claimed under [`DEVICES`]'s lock (taken first),
+/// made outside it, so a second open of the same function is refused while
+/// the first is still sizing it.
+static OPENING: Mutex<Vec<PciAddress>> = Mutex::new(Vec::new());
 /// The next raw handle value; never reused, so a stale handle names nothing.
 static NEXT_RAW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
@@ -113,27 +118,43 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
     if pci::config_read8(addr.bus, addr.device, addr.function, CFG_HEADER_TYPE) & 0x7F != 0 {
         return Err(KernelError::NotSupported);
     }
-    let mut devices = DEVICES.lock();
-    if pci::bound_driver(addr).is_some() || devices.iter().any(|d| d.addr == addr) {
-        return Err(KernelError::DeviceBusy);
+    // Claimed under the table's lock, then made outside it: sizing the BARs,
+    // reading the capabilities and confining the device are dozens of port
+    // accesses and an IOMMU invalidation, too long to hold a spinlock across.
+    {
+        let devices = DEVICES.lock();
+        let mut opening = OPENING.lock();
+        if pci::bound_driver(addr).is_some()
+            || devices.iter().any(|d| d.addr == addr)
+            || opening.contains(&addr)
+        {
+            return Err(KernelError::DeviceBusy);
+        }
+        opening.push(addr);
     }
-    // Sized now, before its driver starts: sizing writes all-ones to each
-    // BAR, which a running driver would see.
-    let bars = size_memory_bars(addr);
-    let guards = Guards::of(addr);
-    let domain = confine(addr)?;
-    let raw = NEXT_RAW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    pci::bind_driver(addr, USERSPACE_DRIVER);
-    devices.push(Device {
-        raw,
-        addr,
-        owner,
-        bars,
-        mapped: Vec::new(),
-        domain,
-        guards,
-        arenas: Vec::new(),
-    });
+    let made = (|| {
+        // Sized now, before its driver starts: sizing writes all-ones to each
+        // BAR, which a running driver would see.
+        let bars = size_memory_bars(addr);
+        let guards = Guards::of(addr);
+        let domain = confine(addr)?;
+        pci::bind_driver(addr, USERSPACE_DRIVER);
+        Ok(Device {
+            raw: NEXT_RAW.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+            addr,
+            owner,
+            bars,
+            mapped: Vec::new(),
+            domain,
+            guards,
+            arenas: Vec::new(),
+        })
+    })();
+    let mut devices = DEVICES.lock();
+    OPENING.lock().retain(|&a| a != addr);
+    let device = made?;
+    let raw = device.raw;
+    devices.push(device);
     Ok(raw)
 }
 
@@ -156,9 +177,10 @@ pub fn close(raw: u64) {
 fn release(device: Device) {
     pci::disable_bus_master(device.addr);
     let pml4 = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0);
+    // Detached and destroyed before any arena is freed: the device can reach
+    // none of them from here on, whatever it was doing.
+    let mut reachable = false;
     if let Some(domain) = device.domain {
-        // Detached and destroyed before any arena is freed: the device can
-        // reach none of them from here on, whatever it was doing.
         let (b, d, f) = (device.addr.bus, device.addr.device, device.addr.function);
         if let Err(e) = iommu_remap::detach_device_as(Caller::Kernel, domain, b, d, f)
             .and_then(|()| iommu_remap::destroy_domain_as(Caller::Kernel, domain))
@@ -168,13 +190,21 @@ fn release(device: Device) {
                 device.addr,
                 e
             );
+            reachable = true;
         }
     }
     if let Some(pml4) = pml4 {
         // The arenas' tracking entries are the DMA module's: freed through it,
         // they leave its table too. Without the owner's page table (a process
-        // destroyed outright) its address space's teardown frees them.
+        // destroyed outright) its address space's teardown frees them. One
+        // the device may still reach -- its domain would not let go -- is
+        // abandoned, not freed: its frames given out again would be the
+        // device's to write.
         for arena in &device.arenas {
+            if reachable {
+                crate::mm::dma::abandon_for_user(pml4, arena.user_virt);
+                continue;
+            }
             if let Err(e) = crate::mm::dma::free_for_user(pml4, arena.user_virt) {
                 crate::serial_println!(
                     "[devhandle] {:?}: an arena could not be freed: {:?}",
@@ -217,43 +247,77 @@ fn confine(addr: PciAddress) -> KernelResult<Option<iommu_remap::DomainId>> {
 }
 
 /// Allocate a DMA arena of at least `size` bytes for the device `raw` names,
-/// owned by `pid`: mapped in `pid` and in the device's domain. Returns (the
-/// address `pid` sees, the address the device must be given).
-pub fn dma_alloc(raw: u64, pid: ProcessId, size: u64) -> KernelResult<(u64, u64)> {
-    use crate::mm::dma::{self, DmaConstraint};
+/// owned by `pid`, within the addresses the device can reach (`constraint`):
+/// mapped in `pid` and in the device's domain. Returns (the address `pid`
+/// sees, the address the device must be given).
+pub fn dma_alloc(
+    raw: u64,
+    pid: ProcessId,
+    size: u64,
+    constraint: crate::mm::dma::DmaConstraint,
+) -> KernelResult<(u64, u64)> {
+    use crate::mm::dma;
+
+    /// Why the arena did not reach the device.
+    enum NotGiven {
+        /// Freed already, by another thread of the owner: nothing to undo.
+        Freed,
+        /// Anything else: the arena is still tracked, and is freed here.
+        Error(KernelError),
+    }
 
     let pml4 = crate::proc::pcb::get_pml4(pid)
         .filter(|&p| p != 0)
         .ok_or(KernelError::NoSuchProcess)?;
-    let domain = with_owned(raw, pid, |d| Ok(d.domain))?;
+    with_owned(raw, pid, |_| Ok(()))?;
     let size = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
-    let (user_virt, phys, size) = dma::alloc_for_user(pml4, size, DmaConstraint::None)?;
-    if let Some(domain) = domain
-        && let Err(e) = iommu_remap::map_dma_as(
-            Caller::Kernel,
-            domain,
-            phys,
-            phys,
-            size,
-            DmaPerms::READ_WRITE,
-        )
-    {
-        // Never given to the device: freeing it needs nothing revoked.
-        let _ = dma::free_for_user(pml4, user_virt);
-        return Err(e);
+    let (user_virt, phys, size) = dma::alloc_for_user(pml4, size, constraint)?;
+    // Given to the device under the device table's lock: a close cannot
+    // release the device -- and its domain id be reused by another device --
+    // between finding the domain and mapping into it, and a free racing this
+    // call revokes through `revoke_arena`, which waits for the lock and then
+    // finds the arena recorded.
+    let given = {
+        let mut devices = DEVICES.lock();
+        match devices.iter_mut().find(|d| d.raw == raw && d.owner == pid) {
+            None => Err(NotGiven::Error(KernelError::InvalidHandle)),
+            Some(device) => {
+                if !dma::mark_device(pml4, user_virt, raw) {
+                    Err(NotGiven::Freed)
+                } else if let Some(domain) = device.domain
+                    && let Err(e) = iommu_remap::map_dma_as(
+                        Caller::Kernel,
+                        domain,
+                        phys,
+                        phys,
+                        size,
+                        DmaPerms::READ_WRITE,
+                    )
+                {
+                    // A failure part-way leaves the pages before it mapped:
+                    // taken out of the domain before the arena is freed. The
+                    // pages that never were mapped make this report an error,
+                    // which is expected and says nothing more.
+                    let _ = iommu_remap::unmap_dma_as(Caller::Kernel, domain, phys, size);
+                    Err(NotGiven::Error(e))
+                } else {
+                    device.arenas.push(Arena { user_virt, phys });
+                    Ok(())
+                }
+            }
+        }
+    };
+    match given {
+        Ok(()) => Ok((user_virt, phys)),
+        Err(NotGiven::Freed) => Err(KernelError::InvalidArgument),
+        Err(NotGiven::Error(e)) => {
+            // Not given to the device (or taken back out of its domain), so
+            // freeing it needs nothing revoked; the free's own failure would
+            // only mean it was freed meanwhile.
+            let _ = dma::free_for_user(pml4, user_virt);
+            Err(e)
+        }
     }
-    dma::mark_device(pml4, user_virt, raw);
-    let recorded = with_owned(raw, pid, |d| {
-        d.arenas.push(Arena { user_virt, phys });
-        Ok(())
-    });
-    if let Err(e) = recorded {
-        // Closed while it was being made: free it through the tracker, which
-        // revokes the (now gone) device first.
-        let _ = dma::free_for_user(pml4, user_virt);
-        return Err(e);
-    }
-    Ok((user_virt, phys))
 }
 
 /// The device `raw` names stops reaching the arena at `phys` (`size` bytes),
@@ -453,17 +517,18 @@ fn config_offset(offset: u16, width: u8) -> KernelResult<u8> {
 struct Guards {
     /// Byte ranges refused outright: (start, length).
     ranges: Vec<(u16, u16)>,
-    /// The high byte of the PCIe Device Control register, whose bit 7 is
-    /// Initiate Function Level Reset: a write setting it is refused, any
-    /// other write to the register (payload sizes, relaxed ordering, ...)
+    /// Bits that reset the function when written as 1, as (byte, mask): the
+    /// PCIe Device Control register's Initiate Function Level Reset, and the
+    /// Advanced Features capability's. A write setting one is refused; any
+    /// other write to those registers (payload sizes, relaxed ordering, ...)
     /// is the driver's.
-    flr_byte: Option<u16>,
+    resets: Vec<(u16, u8)>,
 }
 
 impl Guards {
     fn of(addr: PciAddress) -> Self {
         let mut ranges = alloc::vec![(u16::from(CFG_BAR0), 24), (u16::from(CFG_ROM), 4)];
-        let mut flr_byte = None;
+        let mut resets = Vec::new();
         for cap in pci::walk_capabilities(addr) {
             let at = u16::from(cap.offset);
             match cap.id {
@@ -471,11 +536,14 @@ impl Guards {
                 CAP_MSIX => ranges.push((at, u16::from(CAP_MSIX_LEN))),
                 // PMCSR's low byte: the power state.
                 CAP_PM => ranges.push((at.saturating_add(4), 1)),
-                CAP_PCIE => flr_byte = Some(at.saturating_add(9)),
+                // Device Control's high byte, bit 7 (bit 15 of the word).
+                CAP_PCIE => resets.push((at.saturating_add(9), 0x80)),
+                // AF Control, bit 0.
+                CAP_AF => resets.push((at.saturating_add(4), 0x01)),
                 _ => {}
             }
         }
-        Self { ranges, flr_byte }
+        Self { ranges, resets }
     }
 
     /// Whether writing `value`, `width` bytes at `offset`, is refused.
@@ -486,9 +554,11 @@ impl Guards {
         if self.ranges.iter().any(|&(from, len)| overlaps(from, len)) {
             return true;
         }
-        self.flr_byte.is_some_and(|byte| {
+        self.resets.iter().any(|&(byte, mask)| {
             overlaps(byte, 1)
-                && (value >> (u32::from(byte.saturating_sub(start)).saturating_mul(8))) & 0x80 != 0
+                && (value >> (u32::from(byte.saturating_sub(start)).saturating_mul(8)))
+                    & u32::from(mask)
+                    != 0
         })
     }
 }
@@ -569,9 +639,10 @@ fn unmap_bar(pml4: u64, owner: ProcessId, bar: &MappedBar) {
     }
     let end = bar.user_virt.saturating_add(bar.span);
     crate::syscall::handlers::mmap_flush_range(bar.user_virt, end);
-    // A region already gone -- unmapped by the owner itself -- leaves nothing
-    // to remove.
-    let _ = crate::proc::pcb::remove_vma_range(owner, bar.user_virt, end);
+    // Only while it is still the region reserved for this BAR: one the owner
+    // has since unmapped, and perhaps filled with something of its own, is
+    // left alone.
+    crate::proc::pcb::remove_foreign_region(owner, bar.user_virt, end);
 }
 
 /// QEMU's `edu` device, which the boot test attaches for this test: a 1 MiB
@@ -589,10 +660,11 @@ pub fn self_test() -> KernelResult<()> {
     use crate::serial_println;
 
     // The write guards, on a made-up layout: BARs at 0x10, the PCIe Device
-    // Control register at 0x48 (its high byte, holding FLR, at 0x49).
+    // Control register at 0x48 (its high byte, holding FLR, at 0x49), and an
+    // Advanced Features control byte at 0x64 (FLR in bit 0).
     let guards = Guards {
         ranges: alloc::vec![(0x10, 24)],
-        flr_byte: Some(0x49),
+        resets: alloc::vec![(0x49, 0x80), (0x64, 0x01)],
     };
     for (offset, width, value, refused) in [
         (0x48, 2, 0x8000, true),
@@ -604,6 +676,9 @@ pub fn self_test() -> KernelResult<()> {
         (0x24, 4, 0, true),
         (0x0C, 4, 0, false),
         (0x28, 4, 0, false),
+        (0x64, 1, 0x01, true),
+        (0x64, 1, 0x02, false),
+        (0x64, 4, 0x0000_0001, true),
     ] {
         if guards.refuse(offset, width, value) != refused {
             serial_println!(
@@ -698,7 +773,8 @@ pub fn self_test() -> KernelResult<()> {
             // A DMA arena: where the owner sees it is its device address,
             // and the device's domain reaches it until it is freed.
             let (arena, device_addr) =
-                dma_alloc(raw, owner, 0x4000).map_err(|_| "a DMA arena could not be made")?;
+                dma_alloc(raw, owner, 0x4000, crate::mm::dma::DmaConstraint::None)
+                    .map_err(|_| "a DMA arena could not be made")?;
             if page_table::translate(pml4, VirtAddr::new(arena)) != Some(device_addr) {
                 return Err("the arena is not at its device address");
             }
@@ -715,7 +791,8 @@ pub fn self_test() -> KernelResult<()> {
             }
             // A second, left for the close to take back.
             let (kept, kept_addr) =
-                dma_alloc(raw, owner, 0x4000).map_err(|_| "a second arena could not be made")?;
+                dma_alloc(raw, owner, 0x4000, crate::mm::dma::DmaConstraint::Below4G)
+                    .map_err(|_| "a second arena could not be made")?;
             // A fork's child gets neither the BAR nor the arena
             // (`PageFlags::FOREIGN`): it holds no handle and no tracker
             // entry. Cloned with no range excluded, so the flag alone is

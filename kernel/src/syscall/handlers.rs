@@ -834,7 +834,16 @@ pub fn sys_pci_device_config_write(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_pci_device_dma_alloc(args: &SyscallArgs) -> SyscallResult {
     let r = held_device(args.arg0).and_then(|pid| {
         let pml4 = caller_pml4().ok_or(KernelError::NoSuchProcess)?;
-        let (user_virt, device_addr) = crate::devhandle::dma_alloc(args.arg0, pid, args.arg1)?;
+        use crate::mm::dma::DmaConstraint;
+        // The device's address width: what it can be given.
+        let constraint = match args.arg3 {
+            0 | 64 => DmaConstraint::None,
+            32 => DmaConstraint::Below4G,
+            24 => DmaConstraint::Below16M,
+            _ => return Err(KernelError::InvalidArgument),
+        };
+        let (user_virt, device_addr) =
+            crate::devhandle::dma_alloc(args.arg0, pid, args.arg1, constraint)?;
         if let Err(e) =
             crate::mm::user::copy_to_user_as(pml4, args.arg2, &device_addr.to_le_bytes())
         {

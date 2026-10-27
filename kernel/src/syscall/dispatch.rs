@@ -5984,9 +5984,9 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
 /// open refused without a `PciDevice` capability and granted with one; the
 /// owner's configuration read and BAR size through the handle; another
 /// process's use of the handle `InvalidHandle`; and the owner's exit --
-/// `pcb::exit_close_fds`, as a dying thread runs it -- unbinds the
-/// device and unmaps its BAR, after which the reap's close is a no-op.
-/// Skipped, and recorded so, where there is no `edu`.
+/// `pcb::exit_close_fds`, as a dying thread runs it -- unbinds the device and
+/// unmaps its BAR, after which the handle is no longer held (a close is
+/// `InvalidHandle`). Skipped, and recorded so, where there is no `edu`.
 fn test_dispatch_device_calls() -> KernelResult<()> {
     use super::number::{
         SYS_PCI_DEVICE_BAR, SYS_PCI_DEVICE_CLOSE, SYS_PCI_DEVICE_CONFIG_READ,

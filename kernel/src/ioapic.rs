@@ -675,20 +675,22 @@ pub fn irq_claim(irq: u32, task_id: u64) -> bool {
     ) else {
         return false;
     };
-    if slot.load(Ordering::Acquire) == task_id {
-        return true;
-    }
     // A new holder starts from nothing: what was counted while the line was
-    // free, or still held by the last holder, was not for it. Taken before
-    // the claim is published, so an interrupt counted for the new holder
-    // cannot be the one wiped; put back if the claim is lost.
-    let stale = pending.swap(0, Ordering::AcqRel);
+    // free, or for the last holder, was not for it. That count is read before
+    // the claim and only it is taken away after the claim succeeds -- an
+    // interrupt counted since is the new holder's and stays, and a claim that
+    // fails touches nothing, so a holder's count is never hidden from it.
+    let stale = pending.load(Ordering::Acquire);
     match slot.compare_exchange(u64::MAX, task_id, Ordering::AcqRel, Ordering::Acquire) {
-        Ok(_) => true,
-        Err(holder) => {
-            pending.fetch_add(stale, Ordering::AcqRel);
-            holder == task_id
+        Ok(_) => {
+            // Saturating: nothing else lowers it while no task holds the line,
+            // but a lost race to zero must not wrap.
+            let _ = pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                Some(count.saturating_sub(stale))
+            });
+            true
         }
+        Err(holder) => holder == task_id,
     }
 }
 

@@ -2939,8 +2939,9 @@ pub unsafe fn swap_out_page(pml4_phys: u64, virt: VirtAddr) -> KernelResult<Swap
         if !part.is_present() {
             continue;
         }
-        // Shared by design: not this path's to swap, ever.
-        if part.flags().contains(PageFlags::SHARED) {
+        // Shared by design, or not the space's at all (`FOREIGN`: a device's
+        // registers, a DMA buffer): not this path's to swap, ever.
+        if part.flags().contains(PageFlags::SHARED) || part.flags().contains(PageFlags::FOREIGN) {
             return Err(KernelError::NotSupported);
         }
         // Locked (`mlock`): not while it is. `WouldBlock`, which leaves the

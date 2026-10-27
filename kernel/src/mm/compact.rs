@@ -317,13 +317,15 @@ unsafe fn migrate_page(old_phys: u64, new_phys: u64) -> bool {
         return false;
     }
 
-    // A shared-by-design page is never migrated: the other parties -- the
-    // shared-memory region, an io ring, a device -- still hold the old frame,
-    // and the rmap cannot see them.  fork gives such pages no rmap entry, so
-    // this is defence in depth, and it is checked before anything is copied.
-    if page_table::translate_flags(pml4_phys, page_table::VirtAddr::new(virt_addr))
-        .is_some_and(|f| f.contains(page_table::PageFlags::SHARED))
-    {
+    // A shared-by-design page, or one the address space does not own (a
+    // device's registers, a DMA buffer: `PageFlags::FOREIGN`), is never
+    // migrated: the other parties -- the shared-memory region, an io ring, a
+    // device -- still hold the old frame, and the rmap cannot see them.  fork
+    // gives such pages no rmap entry, so this is defence in depth, and it is
+    // checked before anything is copied.
+    if page_table::translate_flags(pml4_phys, page_table::VirtAddr::new(virt_addr)).is_some_and(
+        |f| f.contains(page_table::PageFlags::SHARED) || f.contains(page_table::PageFlags::FOREIGN),
+    ) {
         return false;
     }
 

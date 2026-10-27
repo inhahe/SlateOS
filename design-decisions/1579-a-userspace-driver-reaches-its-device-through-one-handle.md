@@ -51,6 +51,16 @@ the kernel stops the device and takes everything back.
    level-triggered: when it fires the kernel quenches it at the device
    (the command register's INTx-disable bit) and `TAKE` re-arms it, so an
    unserviced device cannot storm.
+
+   *As built (2026-10-27): MSI, one vector.* `SYS_PCI_DEVICE_IRQ_SETUP(h)`
+   (1186) programs the device's MSI capability; `SYS_PCI_DEVICE_IRQ_WAIT(h,
+   block)` (1187) takes the count, at once or after blocking until there is
+   one -- woken from the interrupt, and by the handle's close. MSI-X, INTx,
+   several vectors, and readiness in `SYS_WAIT_MULTIPLE` are still to come:
+   a wait there can block only on objects with a waiter set woken from
+   ordinary kernel context, which an interrupt is not, so until a device
+   has one a driver blocks in `IRQ_WAIT` on a thread of its own and tells
+   its main loop through an eventfd.
 5. **Closing releases everything, in the safe order.** On the handle's last
    close -- including when the process exits or crashes -- the kernel turns
    bus mastering off first, so the device stops reading and writing memory;

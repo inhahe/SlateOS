@@ -65,6 +65,11 @@ Two properties keep it from rotting:
     lie about the current tree -- or the section was renamed or deleted and the
     entry names nothing. Both are fixed by deleting a line.
 
+When the condition is something the history row records -- how many CPUs the
+boot had -- the entry also goes in `ALLOWED_ON`, and is then judged on the
+boots that meet it: it must fire on every one of those, and must have run on
+at least one of the others.
+
 Usage
 -----
 
@@ -81,6 +86,7 @@ import argparse
 import json
 import os
 import sys
+from typing import Callable
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(SCRIPT_DIR)
@@ -128,8 +134,10 @@ ALLOWED: dict[str, str] = {
         "sec 652)."
     ),
     "[hotplug] offline/online cycle": (
-        "Needs a second CPU to take offline. The boot test runs single-CPU; "
-        "stops firing the moment the harness boots with `-smp 2` or more."
+        "Needs a second CPU to take offline (`cpu_hotplug.rs` test 7). The "
+        "boot test runs single-CPU unless given `--smp=2` or more, and on "
+        "such a boot the section runs. Judged on single-CPU boots only "
+        "(`ALLOWED_ON`)."
     ),
     "[iso9660] integration test": (
         "Needs an ISO 9660 filesystem mounted. The boot test attaches no "
@@ -140,7 +148,32 @@ ALLOWED: dict[str, str] = {
 
 sys.path.insert(0, SCRIPT_DIR)
 
+import srcload  # noqa: E402
 from rustscan import strip_comments  # noqa: E402
+
+_BOOT_HISTORY = srcload.load(os.path.join(SCRIPT_DIR, "boot-history.py"),
+                             "boot_history")
+
+
+def single_cpu(rec: dict) -> bool:
+    """Whether a history row's boot ran on one CPU, by the recorder's rule."""
+    return _BOOT_HISTORY.cpus_of(rec) == 1
+
+
+#: Allowlist entries whose condition is a property of the boot that the
+#: history row records, so the gate can check it rather than take it on trust:
+#: name -> (the matching boots in words, whether a row is one). Every key is
+#: also in `ALLOWED`, which holds the justification.
+#:
+#: Such an entry is judged on two populations. On the matching boots it must
+#: fire every time, exactly like an unconditional entry. On the others it must
+#: have run at least once, once there are `--min` of them -- otherwise the
+#: section has never run anywhere and the condition explained nothing. A boot
+#: outside the condition, where the section runs, is then what the entry
+#: predicts rather than evidence that the entry has gone stale.
+ALLOWED_ON: dict[str, tuple[str, Callable[[dict], bool]]] = {
+    "[hotplug] offline/online cycle": ("single-CPU", single_cpu),
+}
 
 
 def _collapse(text: str) -> str:
@@ -278,22 +311,53 @@ def analyse(records: list[dict], window_size: int, minimum: int) -> dict:
         "always": [],       # fired on every boot, not allowlisted -> failure
         "allowed_firing": [],   # fired on every boot, allowlisted  -> printed
         "stale_allowlist": [],  # allowlisted but not always firing -> failure
+        # A conditional entry (`ALLOWED_ON`) that also fired on every one of
+        # `--min` or more boots outside its condition -> failure.
+        "allowed_outside": [],
+        # Per conditional entry: (boots matching, fired on; boots outside,
+        # fired on), for the messages.
+        "split": {},
     }
     if n < minimum:
         return result
 
     for name, count in sorted(counts.items()):
-        if count != n:
+        if count != n or name in ALLOWED_ON:
             continue
         if name in ALLOWED:
             result["allowed_firing"].append(name)
         else:
             result["always"].append(name)
 
-    always_all = set(result["always"]) | set(result["allowed_firing"])
+    for name in sorted(ALLOWED_ON):
+        _words, matches = ALLOWED_ON[name]
+        inside = [rec for rec in window if matches(rec)]
+        outside = [rec for rec in window if not matches(rec)]
+        fired_in = tally(inside).get(name, 0)
+        fired_out = tally(outside).get(name, 0)
+        result["split"][name] = (len(inside), fired_in, len(outside), fired_out)
+        if fired_in != len(inside):
+            continue                    # stale, by the rule below
+        if len(outside) >= minimum and fired_out == len(outside):
+            result["allowed_outside"].append(name)
+        else:
+            result["allowed_firing"].append(name)
+
+    always_all = (set(result["always"]) | set(result["allowed_firing"])
+                  | set(result["allowed_outside"]))
     result["stale_allowlist"] = sorted(
         name for name in ALLOWED if name not in always_all)
     return result
+
+
+def population(name: str, res: dict) -> str:
+    """The boots `name` was judged on, in words: `"24 single-CPU boot(s) in
+    the window"` for a conditional entry, `"25 boot(s) in the window"` else.
+    """
+    if name in res["split"]:
+        inside = res["split"][name][0]
+        return f"{inside} {ALLOWED_ON[name][0]} boot(s) in the window"
+    return f"{res['n']} boot(s) in the window"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -322,6 +386,10 @@ def main(argv: list[str] | None = None) -> int:
         for name, count in sorted(res["counts"].items(),
                                   key=lambda kv: (-kv[1], kv[0])):
             mark = " ALLOWED" if name in ALLOWED else ""
+            if name in res["split"]:
+                inside, fired_in, outside, fired_out = res["split"][name]
+                mark += (f" ({ALLOWED_ON[name][0]}: {fired_in}/{inside}, "
+                         f"others: {fired_out}/{outside})")
             print(f"[boot-skips]   {count}/{res['n']}  {name}{mark}")
         return 0
 
@@ -335,10 +403,18 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     for name in res["allowed_firing"]:
-        print(f"check-boot-skips: note: {name} skipped on all {res['n']} "
-              f"boot(s) -- allowlisted: {ALLOWED[name]}")
+        print(f"check-boot-skips: note: {name} skipped on all "
+              f"{population(name, res)} -- allowlisted: {ALLOWED[name]}")
 
     failed = False
+    for name in res["allowed_outside"]:
+        failed = True
+        _inside, _fired_in, outside, _fired_out = res["split"][name]
+        print(f"check-boot-skips: FAIL: {name} is allowlisted for "
+              f"{ALLOWED_ON[name][0]} boots only, but it was also skipped on "
+              f"all {outside} other boot(s) in the window, so the section has "
+              f"not run once and the condition does not explain why. Find out "
+              f"what else stops it, and correct the entry or the test.")
     for name in res["always"]:
         if not still_emitted(name):
             print(
@@ -360,9 +436,12 @@ def main(argv: list[str] | None = None) -> int:
 
     for name in res["stale_allowlist"]:
         failed = True
-        seen = res["counts"].get(name, 0)
+        if name in res["split"]:
+            _inside, seen, _outside, _fired_out = res["split"][name]
+        else:
+            seen = res["counts"].get(name, 0)
         print(f"check-boot-skips: FAIL: {name} is in ALLOWED but fired on "
-              f"only {seen} of the last {res['n']} boot(s). Either its "
+              f"only {seen} of the {population(name, res)}. Either its "
               f"precondition now holds sometimes -- in which case the entry is "
               f"a false statement about the current tree -- or the section was "
               f"renamed or removed and the entry names nothing. Delete the "

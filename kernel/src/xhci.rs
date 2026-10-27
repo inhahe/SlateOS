@@ -609,6 +609,23 @@ static XHCI: Mutex<Option<Box<XhciController>>> = Mutex::new(None);
 /// How many bytes of a controller's register block are mapped.
 const REGS_MAPPED: usize = 0x1_0000;
 
+/// How far into its register block the registers this driver uses reach,
+/// by the controller's own capability registers: the operational registers
+/// (`cap_length` on) with a port register set for each of `max_ports`;
+/// the runtime registers (`rts_off` on) through interrupter 0's; and the
+/// doorbells (`db_off` on), one for the command ring and one for each of
+/// `max_slots`.
+fn registers_reach(cap_length: u8, rts_off: u32, db_off: u32, max_ports: u8, max_slots: u8) -> u64 {
+    let ports = u64::from(cap_length)
+        .saturating_add(OP_PORT_BASE as u64)
+        .saturating_add(u64::from(max_ports).saturating_mul(0x10));
+    let interrupter_0 = u64::from(rts_off)
+        .saturating_add(0x20)
+        .saturating_add(INTERRUPTER_SIZE as u64);
+    let doorbells = u64::from(db_off).saturating_add(u64::from(max_slots).saturating_add(1).saturating_mul(4));
+    ports.max(interrupter_0).max(doorbells)
+}
+
 /// How long after the controller starts its ports are given to show their
 /// devices (see `XhciController::init`).
 const PORT_SETTLE_NS: u64 = 500_000_000;
@@ -859,10 +876,26 @@ impl XhciController {
             crate::serial_println!("[xhci] WARNING: Controller does not support 64-bit addressing");
         }
 
+        // Every register the driver touches must be inside what was mapped:
+        // the offsets are the controller's own word, and one past the mapping
+        // would be a kernel fault at its first access.
+        let reach = registers_reach(cap_length, rts_off, db_off, max_ports, max_slots);
+        if reach > REGS_MAPPED as u64 {
+            crate::serial_println!(
+                "[xhci] the controller's registers reach {:#x} bytes (operational at {:#x}, runtime at {:#x}, doorbells at {:#x}), past the {:#x} mapped: not used",
+                reach,
+                cap_length,
+                rts_off,
+                db_off,
+                REGS_MAPPED
+            );
+            return Err(KernelError::NotSupported);
+        }
+
         // Calculate register base addresses.
         // SAFETY: cap_length, rts_off, db_off come from the controller's own
-        // capability registers.  The resulting pointers stay within the MMIO
-        // region we mapped above (BAR0 always covers the full register space).
+        // capability registers, and the registers they lead to end within the
+        // REGS_MAPPED bytes mapped above (`registers_reach`).
         let op_base = unsafe { mmio_base.add(cap_length as usize) };
         let rt_base = unsafe { mmio_base.add(rts_off as usize) };
         let db_base = unsafe { mmio_base.add(db_off as usize) };
@@ -3063,6 +3096,25 @@ pub fn hid_report_to_scancode(report: &HidKeyboardReport) -> Option<u8> {
 /// (non-fatal).
 pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[xhci] Self-test...");
+
+    // How far a controller's registers reach, from its capability registers:
+    // QEMU's (operational at 0x40, runtime at 0x1000, doorbells at 0x2000,
+    // 8 ports, 64 slots) end with its doorbells; a runtime block placed at
+    // the mapping's end, or doorbells past it, reach beyond.
+    for (args, want) in [
+        ((0x40_u8, 0x1000_u32, 0x2000_u32, 8_u8, 64_u8), 0x2000 + 65 * 4),
+        ((0x40, 0xFFE0, 0x2000, 8, 64), 0xFFE0 + 0x40),
+        ((0x80, 0x1000, 0x3000, 255, 255), 0x3000 + 256 * 4),
+        ((0x20, 0x600, 0x800, 255, 1), 0x20 + 0x400 + 255 * 0x10),
+    ] {
+        let (cap_length, rts_off, db_off, ports, slots) = args;
+        let got = registers_reach(cap_length, rts_off, db_off, ports, slots);
+        if got != want {
+            crate::serial_println!("[xhci]   FAIL: registers reach {:#x} for {:x?}, want {:#x}", got, args, want);
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    crate::serial_println!("[xhci]   How far the registers reach: OK");
 
     // Test 1: PCI detection API.
     let controllers = pci::find_devices_by_class(PCI_CLASS_SERIAL_BUS, PCI_SUBCLASS_USB);

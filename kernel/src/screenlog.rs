@@ -91,6 +91,7 @@ pub unsafe fn start(fb: u64, pitch: u32, width: u32, top: u32, height: u32) {
         return;
     }
     let mut pane = Pane::new(fb, pitch, top, cols, rows);
+    pane.blank(width, height);
     pane.mark(0);
     *PANE.lock() = Some(pane);
     ACTIVE.store(true, Ordering::Release);
@@ -140,6 +141,24 @@ impl Pane {
             len: 0,
             escape: false,
             wide: fb.is_multiple_of(8) && pitch.is_multiple_of(8),
+        }
+    }
+
+    /// Paint the pane's pixel rows, `top` down to `height`, `width` pixels
+    /// across, the background: a line is drawn only as far as its text
+    /// reaches, so whatever the screen held before -- a loader's image, the
+    /// previous kernel's desktop after a kexec -- would show beside it.
+    fn blank(&self, width: u32, height: u32) {
+        for y in self.top..height {
+            let row = self.fb.wrapping_add(u64::from(y).wrapping_mul(u64::from(self.pitch)));
+            for x in 0..width {
+                // SAFETY: inside the pane's rows of the framebuffer, which
+                // `start`'s caller vouched for (`width` pixels a row, rows
+                // `top..height`); a framebuffer's pixels are 4-byte aligned.
+                unsafe {
+                    core::ptr::write_volatile(row.wrapping_add(u64::from(x).wrapping_mul(4)) as *mut u32, BG);
+                }
+            }
         }
     }
 
@@ -294,15 +313,16 @@ pub fn self_test() -> crate::error::KernelResult<()> {
 /// [`self_test`] on a framebuffer whose base is 8-byte aligned (`wide`) or
 /// 4 bytes past that.
 fn self_test_pane(wide: bool) -> Result<(), &'static str> {
-    // A framebuffer of 4 columns by 3 rows of glyphs, black as the console
-    // leaves the screen, placed in a buffer one pixel longer so that it can
-    // start either on an 8-byte boundary or 4 bytes past one.
+    // A framebuffer of 4 columns by 3 rows of glyphs, holding an old image,
+    // placed in a buffer one pixel longer so that it can start either on an
+    // 8-byte boundary or 4 bytes past one.
     const COLS: u32 = 4;
     const ROWS: u32 = 3;
     const WIDTH: u32 = COLS * GLYPH_WIDTH;
     const PIXELS: usize = (WIDTH * ROWS * GLYPH_HEIGHT) as usize;
+    const STALE: u32 = 0x0012_3456;
     let width = WIDTH;
-    let mut buf = alloc::vec![BG; PIXELS + 1];
+    let mut buf = alloc::vec![STALE; PIXELS + 1];
     let aligned = (buf.as_ptr() as usize).is_multiple_of(8);
     let skip = usize::from(aligned != wide);
     let fb = buf
@@ -311,6 +331,10 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
     let mut pane = Pane::new(fb.as_mut_ptr() as u64, WIDTH * 4, 0, COLS, ROWS);
     if pane.wide != wide {
         return Err("the store width does not follow the framebuffer's alignment");
+    }
+    pane.blank(WIDTH, ROWS * GLYPH_HEIGHT);
+    if fb.iter().any(|&p| p != BG) {
+        return Err("the old image is left in the pane");
     }
     // The glyph drawn at a cell: true where a pixel has `fg`, false where it
     // has the background; None if any pixel is neither.

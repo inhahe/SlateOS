@@ -296,7 +296,7 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 | Image boots in the **diskless shape a stick actually has** | **done** — verified 2026-08-21: `--usb-image --no-rootfs` → `BOOT_OK` in 75 s, tagged as an experiment (see §6) |
 | Guarded writer for a physical stick | **done** — `scripts/write-usb-stick.ps1` |
 | On-screen progress channel | **done** -- the boot steps, and the whole log with `log.screen=1`; used on the test PC 2026-10-27 |
-| The log on a PCIe serial card | **written** -- `log.pci_serial=N`; to be checked in QEMU, then on the test PC when the card comes |
+| The log on a PCIe serial card | **done in QEMU** -- `log.pci_serial=N`; a `pci-serial` behind a PCIe root port carried the whole log, byte for byte the same as COM1 (2026-10-27); awaits the card for the test PC |
 | Recovery procedure | **documented above**, never exercised |
 | Boot on the operator's PC | **in progress** on the test PC behind a PiKVM (§9) |
 | Intel iGPU driver written against the real chip | blocked on the row above (§263) |

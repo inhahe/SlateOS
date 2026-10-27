@@ -36,6 +36,7 @@ import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -93,6 +94,28 @@ def layout_map(layout: str) -> dict[str, tuple[str, bool]]:
         out.setdefault(u, (code, False))
         out.setdefault(s, (code, True))
     return out
+
+
+def key_presses(text: str, layout: str) -> list[tuple[str, bool]]:
+    """The key, and whether Shift is held, for each character of `text` on
+    `layout`. ValueError for a character the layout cannot type, before any
+    is typed, so that no half-typed command is left on the PC."""
+    keys = layout_map(layout)
+    keys["\n"] = ("Enter", False)
+    missing = [ch for ch in text if ch not in keys]
+    if missing:
+        raise ValueError(f"cannot type {missing[0]!r} on the {layout} layout")
+    return [keys[ch] for ch in text]
+
+
+def screens_alike(last, img) -> bool:
+    """Whether two greyscale screenshots show the same screen: the same size,
+    and no pixel more than 40 levels apart. A change of size is the PC
+    changing video mode, which is a change."""
+    from PIL import ImageChops
+    if last.size != img.size:
+        return False
+    return ImageChops.difference(last, img).point(lambda v: 255 if v > 40 else 0).getbbox() is None
 
 
 def to_absolute(pixel: int, size: int) -> int:
@@ -160,12 +183,7 @@ class PiKvm:
         self.call("POST", f"/api/hid/events/send_mouse_button?button={button}&state=false")
 
     def type_text(self, text: str, layout: str) -> None:
-        keys = layout_map(layout)
-        for ch in text:
-            if ch == "\n":
-                self.key("Enter")
-                continue
-            code, shift = keys[ch]
+        for code, shift in key_presses(text, layout):
             if shift:
                 self.key("ShiftLeft", True)
             self.key(code)
@@ -183,7 +201,9 @@ class PiKvm:
 
     def upload(self, image: Path) -> None:
         """Put `image` on the virtual drive as a read-only flash drive, connected."""
-        self.call("POST", "/api/msd/set_connected?connected=0")
+        # Disconnecting a drive that is not connected is refused (HTTP 400).
+        if self.json("GET", "/api/msd")["drive"]["connected"]:
+            self.call("POST", "/api/msd/set_connected?connected=0")
         try:
             self.call("POST", f"/api/msd/remove?image={IMAGE_NAME}")
         except urllib.error.HTTPError:
@@ -199,9 +219,18 @@ class PiKvm:
 
 
 def stage(worktree: Path, out: Path, cmdline: str) -> None:
-    """Build the USB image of `worktree`'s built kernel at `out`."""
-    esp = out.parent / (out.stem + "-esp")
-    shutil.rmtree(esp, ignore_errors=True)
+    """Build the USB image of `worktree`'s built kernel at `out`, from an ESP
+    tree laid out in a scratch directory that is gone afterwards."""
+    with tempfile.TemporaryDirectory(prefix="pikvm-esp-") as scratch:
+        stage_esp(worktree, Path(scratch), cmdline)
+        subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", scratch,
+                        "--output", str(out)], check=True)
+
+
+def stage_esp(worktree: Path, esp: Path, cmdline: str) -> None:
+    """Lay out an ESP in `esp`: Limine, `worktree`'s built kernel (stripped of
+    its debug sections when llvm-strip is there), and its limine.conf with
+    `cmdline` on the first entry."""
     (esp / "EFI" / "BOOT").mkdir(parents=True)
     (esp / "boot").mkdir()
     limine = worktree / "limine" / "BOOTX64.EFI"
@@ -218,8 +247,6 @@ def stage(worktree: Path, out: Path, cmdline: str) -> None:
         shutil.copy(kernel, esp / "boot" / "kernel")
     template = (worktree / "limine.conf").read_text(encoding="utf-8")
     (esp / "limine.conf").write_text(limine_conf(template, cmdline), encoding="utf-8", newline="\n")
-    subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", str(esp),
-                    "--output", str(out)], check=True)
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
@@ -248,7 +275,7 @@ def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
 def watch(kvm: PiKvm, seconds: float, every: float, out_dir: Path) -> None:
     """Screenshot every `every` seconds for up to `seconds`; say when the
     screen stops changing (a hang, or the end of a boot)."""
-    from PIL import Image, ImageChops
+    from PIL import Image
     out_dir.mkdir(parents=True, exist_ok=True)
     last, still, n = None, 0.0, 0
     end = time.monotonic() + seconds
@@ -263,7 +290,7 @@ def watch(kvm: PiKvm, seconds: float, every: float, out_dir: Path) -> None:
         shot = out_dir / f"watch-{n:03}.jpg"
         shot.write_bytes(data)
         img = Image.open(io.BytesIO(data)).convert("L")
-        if last is not None and ImageChops.difference(last, img).point(lambda v: 255 if v > 40 else 0).getbbox() is None:
+        if last is not None and screens_alike(last, img):
             still += every
         else:
             still = 0.0
@@ -289,6 +316,24 @@ def self_test() -> int:
     check("every printable character types in both layouts",
           [c for c in map(chr, range(32, 127)) if c not in dv or c not in us], [])
     check("coordinates: the corners", (to_absolute(0, WIDTH), to_absolute(WIDTH, WIDTH)), (-32768, 32767))
+    check("typing: a line, its Enter", key_presses("ls\n", "us"),
+          [("KeyL", False), ("KeyS", False), ("Enter", False)])
+    try:
+        key_presses("ls\tx", "us")
+        check("typing: a tab is refused before anything is typed", "typed", "refused")
+    except ValueError:
+        pass
+    try:
+        from PIL import Image
+    except ImportError:
+        print("pikvm self-test: no PIL, so watch's screen comparison is not checked")
+    else:
+        black = Image.new("L", (4, 4))
+        check("screens: one picture is alike itself", screens_alike(black, black.copy()), True)
+        check("screens: a changed pixel is a change",
+              screens_alike(black, Image.new("L", (4, 4), 200)), False)
+        check("screens: a new video mode is a change, not an error",
+              screens_alike(black, Image.new("L", (8, 4))), False)
     template = "timeout: 3\n\n/OS Kernel\n    protocol: limine\n    kernel_path: boot():/boot/kernel\n\n/OS Kernel (recovery)\n    kernel_path: boot():/boot/kernel\n    cmdline: single recovery\n"
     conf = limine_conf(template, "a=1 b")
     check("limine.conf: the first entry gets the line", conf.count("cmdline: a=1 b"), 1)

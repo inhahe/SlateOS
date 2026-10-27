@@ -962,10 +962,13 @@ pub fn peek_user(addr: u64, buf: &mut [u8]) -> bool {
     if addr.checked_add(len).is_none_or(|end| end > USER_SPACE_END) {
         return false;
     }
+    // Not preempted meanwhile: the flag is this CPU's, and a task moved to
+    // another would leave it raised here and absent where the copy runs.
+    sched::preempt_disable();
     let peeking = PEEKING.get(sched::current_cpu_id());
-    if let Some(flag) = peeking {
-        flag.store(true, core::sync::atomic::Ordering::Relaxed);
-    }
+    // What the flag was: a peek inside another (a fault report made while
+    // one was being made) puts it back raised, not cleared.
+    let was = peeking.is_some_and(|flag| flag.swap(true, core::sync::atomic::Ordering::Relaxed));
     // SAFETY: `buf` is ours, `len` bytes; `addr..addr + len` is user space,
     // so a fault there is a user page's, and resumes at the copy's fixup.
     let left = unsafe {
@@ -975,8 +978,9 @@ pub fn peek_user(addr: u64, buf: &mut [u8]) -> bool {
         left
     };
     if let Some(flag) = peeking {
-        flag.store(false, core::sync::atomic::Ordering::Relaxed);
+        flag.store(was, core::sync::atomic::Ordering::Relaxed);
     }
+    sched::preempt_enable();
     left == 0
 }
 

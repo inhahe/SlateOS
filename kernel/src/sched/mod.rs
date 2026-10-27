@@ -8613,16 +8613,27 @@ const IDLE_FALLBACK_WEDGE_TICKS: u64 = 500;
 /// once per idle stretch, a second in.
 const IDLE_ORPHAN_CHECK_TICKS: u64 = 100;
 
-/// How long, in TSC cycles, the idle fallback polls with interrupts off and
-/// nothing runnable before the boot is stopped as wedged: 2^35, about 8 s at
-/// 4 GHz and 34 s at 1 GHz. With IF=0 the loop polls instead of halting (HLT
-/// would end only on an NMI). Measured in time, not passes -- a pass is
-/// microseconds native and far longer under TCG -- so that a wait on another
-/// CPU's slow work is not taken for a wedge. Before that, a task another CPU
-/// wakes is still found; after it, nothing that can still happen will make
-/// one runnable -- no tick, no device -- and the stop names why rather than
+/// How long the idle fallback polls with interrupts off and nothing runnable
+/// before the boot is stopped as wedged: 30 s. With IF=0 the loop polls
+/// instead of halting (HLT would end only on an NMI). Measured in time, not
+/// passes -- a pass is microseconds native and far longer under TCG -- and
+/// long enough that a wait on another CPU's slow work, emulated on a loaded
+/// host, is not taken for a wedge. Before that, a task another CPU wakes is
+/// still found; after it, nothing that can still happen will make one
+/// runnable -- no tick, no device -- and the stop names why rather than
 /// leaving the boot test to time out at a bare HLT.
-const IDLE_IF_OFF_CYCLES: u64 = 1 << 35;
+const IDLE_IF_OFF_SECS: u64 = 30;
+
+/// [`IDLE_IF_OFF_SECS`] in TSC cycles, at the calibrated rate; at 4 GHz
+/// before the TSC is calibrated (`bench::calibrate_tsc`), the fastest rate
+/// one runs at, so that the wait is never shorter than meant.
+fn idle_if_off_cycles() -> u64 {
+    let hz = match crate::bench::tsc_freq() {
+        0 => 4_000_000_000,
+        hz => hz,
+    };
+    hz.saturating_mul(IDLE_IF_OFF_SECS)
+}
 
 /// One-shot guard so the idle-fallback wedge dump fires at most once per boot.
 static IDLE_FALLBACK_WEDGE_DUMPED: AtomicBool = AtomicBool::new(false);
@@ -9907,7 +9918,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                 // once instead of hanging silently — see dump_idle_fallback_wedge.
                 let mut idle_spins: u64 = 0;
                 // When this stretch of polling with interrupts off began
-                // (`IDLE_IF_OFF_CYCLES`): the TSC, 0 before it began.
+                // (`IDLE_IF_OFF_SECS`): the TSC, 0 before it began.
                 let mut if_off_since: u64 = 0;
                 // Where this stack is not the CPU's own idle context, leave it
                 // for that context, which idles in its place: the current task
@@ -9927,7 +9938,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                     // With interrupts off, HLT would end only on an NMI, so it
                     // is never what ends this wait: poll instead, which still
                     // drains deferred wakes and sees another CPU's
-                    // (`IDLE_IF_OFF_CYCLES`).
+                    // (`IDLE_IF_OFF_SECS`).
                     if handoff.is_none() && cpu::interrupts_enabled() {
                         cpu::hlt();
                     }
@@ -9978,7 +9989,7 @@ fn schedule_inner(requeue: bool, kind: SwitchKind) {
                             if if_off_since == 0 {
                                 if_off_since = now;
                             }
-                            if now.wrapping_sub(if_off_since) >= IDLE_IF_OFF_CYCLES {
+                            if now.wrapping_sub(if_off_since) >= idle_if_off_cycles() {
                                 if !IDLE_FALLBACK_WEDGE_DUMPED.swap(true, Ordering::Relaxed) {
                                     dump_idle_fallback_wedge(&s, cpu, wedge_subject);
                                 }

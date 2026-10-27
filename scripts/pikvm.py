@@ -229,7 +229,19 @@ class PiKvm:
         return self.json("GET", "/api/atx")["leds"]
 
     def power(self, action: str) -> None:
-        self.call("POST", f"/api/atx/power?action={action}")
+        """Press the PC's power button as `action` says (`on`, `off`,
+        `off_hard`, `reset_hard`), returning once the press is over
+        (`wait=1`): `off_hard` holds the button for seconds, and kvmd refuses
+        another press meanwhile (409) -- the power light goes out before the
+        hold ends. A refusal is tried again for a few seconds all the same."""
+        for attempt in range(1, 11):
+            try:
+                self.call("POST", f"/api/atx/power?action={action}&wait=1", timeout=60)
+                return
+            except urllib.error.HTTPError as e:
+                if e.code != 409 or attempt == 10:
+                    raise
+                time.sleep(1)
 
     def upload(self, image: Path) -> None:
         """Put `image` on the virtual drive as a read-only flash drive, connected."""

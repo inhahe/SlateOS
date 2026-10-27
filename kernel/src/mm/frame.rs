@@ -1903,8 +1903,8 @@ fn self_test_metadata_base() -> KernelResult<()> {
         entry(16 * mib, 64 * mib, memmap_type::RESERVED),
         entry(mib, 12 * mib, usable),
     ];
-    let (big, small): (alloc::vec::Vec<_>, alloc::vec::Vec<_>) =
-        (big.iter().collect(), small.iter().collect());
+    // Fixed arrays, not vectors: this runs before the heap exists.
+    let (big, small) = ([&big[0]], [&small[0], &small[1]]);
     let got = [
         metadata_base(&big, 33 * mib),
         metadata_base(&small, 2 * mib),

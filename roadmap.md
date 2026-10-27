@@ -5418,6 +5418,23 @@ _Define scheduler trait interface first, implement one scheduler behind it._
 _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
 
 ### 2.1 Driver framework
+- [ ] `[A]` **Linux driver compatibility layer** -- Linux's own drivers, built
+  from unmodified source, for hardware with no standard interface (GPUs, WiFi,
+  Bluetooth, laptop audio DSPs); handwritten native drivers stay for the
+  standard core. Operator's decision, 2026-10-27: design-decisions §1577; the
+  split, the rule of thumb and the inventory are `roadmap-detailed.md` §2.1a.
+  - [ ] Shape first: each Linux driver in its own `udriver` process,
+        IOMMU-sandboxed (§1576); the GPL boundary (driver processes GPL, kernel
+        MIT); the pinned Linux release and the import script
+  - [ ] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
+        timers, PCI and MSI, IRQs, the minimal device model, `request_firmware`
+  - [ ] First driver: a wired network driver with a native twin (`e1000e`),
+        in QEMU's boot test beside the native one, its overhead measured
+  - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
+        then how lane A's `net80211` meets `mac80211`/`cfg80211`
+  - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
+        from Linux's DRM/KMS onto the graphics stack -- this is how the i915
+        item in 3.1 gets done
 
 ### 2.2 Essential drivers
 
@@ -6727,7 +6744,13 @@ _Depends on: Phase 2 (drivers, filesystem, basic userspace). Goal: boot to a gra
           makes it a compile error to reach the frame list without saying which
           case you handle, `free_backing` now returns `NotSupported` for VRAM,
           and the self-test asserts the refusal rather than trusting it.
-- [~] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
+- [ ] `[A]` Port Intel i915/xe driver (integrated graphics — covers most laptops)
+      — **Unblocked 2026-10-27:** Q50 was answered C (§263, bare metal), and
+      SlateOS now boots to its shell on the test PC behind the PiKVM, whose only
+      GPU is the i7-8700K's UHD 630 (`bare-metal-boot.md` §9). It comes through
+      the Linux driver compatibility layer, Linux's own `i915` built unmodified
+      (operator, §1577; 2.1 above), not hand-ported. What follows is why it was
+      blocked until then.
       — **blocked by `open-questions.md` Q50** (operator decision), not by effort.
       There is no device to write it against: `qemu-system-x86_64 -device help`
       lists sixteen display devices (`ati-vga`, `bochs-display`, `cirrus-vga`,

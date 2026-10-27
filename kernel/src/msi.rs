@@ -46,7 +46,7 @@
 
 use crate::pci;
 use crate::serial_println;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -80,6 +80,125 @@ const MSI_CONTROL_PERVECTOR_MASK: u16 = 1 << 8;
 /// MSI-X message control register bits.
 const MSIX_CONTROL_ENABLE: u16 = 1 << 15;
 const MSIX_CONTROL_FUNCTION_MASK: u16 = 1 << 14;
+
+// ---------------------------------------------------------------------------
+// Delivery
+// ---------------------------------------------------------------------------
+
+/// Interrupts counted per vector since its owner last took them: added to by
+/// the interrupt handler ([`dispatch`]), taken by the owner ([`take`]).
+static PENDING: [AtomicU64; MSI_VECTOR_COUNT] = {
+    const ZERO: AtomicU64 = AtomicU64::new(0);
+    [ZERO; MSI_VECTOR_COUNT]
+};
+
+/// The task woken when a vector fires, `u64::MAX` for none.
+static WAITER: [AtomicU64; MSI_VECTOR_COUNT] = {
+    const NONE: AtomicU64 = AtomicU64::new(u64::MAX);
+    [NONE; MSI_VECTOR_COUNT]
+};
+
+/// The index of `vector` in the pool, if it is one.
+fn pool_index(vector: u8) -> Option<usize> {
+    (MSI_VECTOR_BASE..=MSI_VECTOR_MAX)
+        .contains(&vector)
+        .then(|| usize::from(vector.wrapping_sub(MSI_VECTOR_BASE)))
+}
+
+/// An interrupt arrived on MSI `vector` (the IDT dispatcher's arm for the
+/// pool): counted, its waiter woken, and the local APIC told it is done.
+/// Interrupt context: atomics and a try-lock wake only. A wake the scheduler
+/// lock refused is retried by [`process_deferred_wakes`].
+pub fn dispatch(vector: u8) {
+    if let Some(index) = pool_index(vector)
+        && let (Some(pending), Some(waiter)) = (PENDING.get(index), WAITER.get(index))
+    {
+        pending.fetch_add(1, Ordering::Release);
+        let task = waiter.load(Ordering::Acquire);
+        if task != u64::MAX && !crate::sched::try_wake(task) {
+            crate::softirq::raise(crate::softirq::IRQ_POLL_SOFTIRQ);
+        }
+    }
+    // SAFETY: called from the interrupt handler for this vector, which the
+    // local APIC delivered and now expects to be told is finished.
+    unsafe { crate::apic::eoi() };
+}
+
+/// Take, and clear, the interrupts counted on `vector`.
+pub fn take(vector: u8) -> u64 {
+    pool_index(vector)
+        .and_then(|index| PENDING.get(index))
+        .map_or(0, |pending| pending.swap(0, Ordering::AcqRel))
+}
+
+/// Whether `vector` has interrupts counted, without taking them.
+#[must_use]
+pub fn is_pending(vector: u8) -> bool {
+    pool_index(vector)
+        .and_then(|index| PENDING.get(index))
+        .is_some_and(|pending| pending.load(Ordering::Acquire) > 0)
+}
+
+/// Make `task` the one woken when `vector` fires (`u64::MAX`: no one).
+pub fn set_waiter(vector: u8, task: u64) {
+    if let Some(waiter) = pool_index(vector).and_then(|index| WAITER.get(index)) {
+        waiter.store(task, Ordering::Release);
+    }
+}
+
+/// Retry the wakes [`dispatch`] could not make: each vector with interrupts
+/// counted wakes its waiter. Called with the I/O APIC lines' deferred wakes.
+pub fn process_deferred_wakes() {
+    for (pending, waiter) in PENDING.iter().zip(WAITER.iter()) {
+        if pending.load(Ordering::Acquire) == 0 {
+            continue;
+        }
+        let task = waiter.load(Ordering::Acquire);
+        if task != u64::MAX {
+            let _woken = crate::sched::try_wake(task);
+        }
+    }
+}
+
+/// An interrupt sent to this CPU on a pool vector reaches [`dispatch`] and is
+/// counted, and [`take`] hands the count over once. Sent as an IPI to the
+/// local APIC itself, so it needs no device; run once interrupts are on.
+pub fn self_test_delivery() -> crate::error::KernelResult<()> {
+    let Some(vector) = alloc_vector() else {
+        serial_println!("[msi]   FAIL: delivery: no vector free");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    let _stale = take(vector);
+    let Some(apic_id) = crate::smp::cpu_apic_id(crate::smp::fast_cpu_index()) else {
+        free_vector(vector);
+        serial_println!("[msi]   FAIL: delivery: this CPU has no APIC id");
+        return Err(crate::error::KernelError::InternalError);
+    };
+    // SAFETY: a fixed IPI to this CPU's own APIC on a vector the IDT has a
+    // stub for (the pool's), which only counts it.
+    unsafe { crate::apic::send_fixed_ipi(apic_id, vector) };
+    let deadline = crate::hpet::elapsed_ns().saturating_add(100_000_000);
+    while !is_pending(vector) && crate::hpet::elapsed_ns() < deadline {
+        core::hint::spin_loop();
+    }
+    let first = take(vector);
+    let second = take(vector);
+    free_vector(vector);
+    if first != 1 || second != 0 {
+        serial_println!(
+            "[msi]   FAIL: delivery: vector {} counted {} then {} (want 1 then 0)",
+            vector,
+            first,
+            second
+        );
+        return Err(crate::error::KernelError::InternalError);
+    }
+    serial_println!(
+        "[msi]   delivery: OK (vector {} reached dispatch once)",
+        vector
+    );
+    Ok(())
+}
 
 // ---------------------------------------------------------------------------
 // Vector allocation

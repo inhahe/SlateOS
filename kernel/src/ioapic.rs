@@ -755,6 +755,8 @@ pub fn process_deferred_wakes() {
             }
         }
     }
+    // And the MSI vectors' (a driver's device's), which have no line here.
+    crate::msi::process_deferred_wakes();
 }
 
 // ---------------------------------------------------------------------------

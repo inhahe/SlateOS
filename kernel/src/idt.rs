@@ -754,6 +754,9 @@ extern "C" fn dispatch_vector(frame: *mut InterruptStackFrame, vector: u64) {
             let irq = (v - 33) as u32;
             crate::ioapic::handle_device_irq(irq);
         }
+        // `msi`'s pool: a driver's device signalling by message.
+        #[allow(clippy::cast_possible_truncation)] // 64..=223 fits a u8.
+        v @ 64..=223 => crate::msi::dispatch(v as u8),
         _ => {}
     }
 }
@@ -1182,6 +1185,179 @@ irq_stub!(isr_irq20, 53);
 irq_stub!(isr_irq21, 54);
 irq_stub!(isr_irq22, 55);
 irq_stub!(isr_irq23, 56);
+
+// MSI vectors (`msi`'s pool, 64..=223): one stub each, every one dispatched to
+// `msi::dispatch` by the arm in `dispatch_vector`. A userspace driver's device
+// signals on one of these (design-decisions 1579).
+macro_rules! msi_stubs {
+    ($($stub:ident = $vector:literal),* $(,)?) => {
+        $( irq_stub!($stub, $vector); )*
+        /// The MSI pool's stubs, in vector order from 64.
+        static MSI_STUBS: &[unsafe extern "C" fn()] = &[$($stub),*];
+    };
+}
+msi_stubs!(
+    isr_msi64 = 64,
+    isr_msi65 = 65,
+    isr_msi66 = 66,
+    isr_msi67 = 67,
+    isr_msi68 = 68,
+    isr_msi69 = 69,
+    isr_msi70 = 70,
+    isr_msi71 = 71,
+    isr_msi72 = 72,
+    isr_msi73 = 73,
+    isr_msi74 = 74,
+    isr_msi75 = 75,
+    isr_msi76 = 76,
+    isr_msi77 = 77,
+    isr_msi78 = 78,
+    isr_msi79 = 79,
+    isr_msi80 = 80,
+    isr_msi81 = 81,
+    isr_msi82 = 82,
+    isr_msi83 = 83,
+    isr_msi84 = 84,
+    isr_msi85 = 85,
+    isr_msi86 = 86,
+    isr_msi87 = 87,
+    isr_msi88 = 88,
+    isr_msi89 = 89,
+    isr_msi90 = 90,
+    isr_msi91 = 91,
+    isr_msi92 = 92,
+    isr_msi93 = 93,
+    isr_msi94 = 94,
+    isr_msi95 = 95,
+    isr_msi96 = 96,
+    isr_msi97 = 97,
+    isr_msi98 = 98,
+    isr_msi99 = 99,
+    isr_msi100 = 100,
+    isr_msi101 = 101,
+    isr_msi102 = 102,
+    isr_msi103 = 103,
+    isr_msi104 = 104,
+    isr_msi105 = 105,
+    isr_msi106 = 106,
+    isr_msi107 = 107,
+    isr_msi108 = 108,
+    isr_msi109 = 109,
+    isr_msi110 = 110,
+    isr_msi111 = 111,
+    isr_msi112 = 112,
+    isr_msi113 = 113,
+    isr_msi114 = 114,
+    isr_msi115 = 115,
+    isr_msi116 = 116,
+    isr_msi117 = 117,
+    isr_msi118 = 118,
+    isr_msi119 = 119,
+    isr_msi120 = 120,
+    isr_msi121 = 121,
+    isr_msi122 = 122,
+    isr_msi123 = 123,
+    isr_msi124 = 124,
+    isr_msi125 = 125,
+    isr_msi126 = 126,
+    isr_msi127 = 127,
+    isr_msi128 = 128,
+    isr_msi129 = 129,
+    isr_msi130 = 130,
+    isr_msi131 = 131,
+    isr_msi132 = 132,
+    isr_msi133 = 133,
+    isr_msi134 = 134,
+    isr_msi135 = 135,
+    isr_msi136 = 136,
+    isr_msi137 = 137,
+    isr_msi138 = 138,
+    isr_msi139 = 139,
+    isr_msi140 = 140,
+    isr_msi141 = 141,
+    isr_msi142 = 142,
+    isr_msi143 = 143,
+    isr_msi144 = 144,
+    isr_msi145 = 145,
+    isr_msi146 = 146,
+    isr_msi147 = 147,
+    isr_msi148 = 148,
+    isr_msi149 = 149,
+    isr_msi150 = 150,
+    isr_msi151 = 151,
+    isr_msi152 = 152,
+    isr_msi153 = 153,
+    isr_msi154 = 154,
+    isr_msi155 = 155,
+    isr_msi156 = 156,
+    isr_msi157 = 157,
+    isr_msi158 = 158,
+    isr_msi159 = 159,
+    isr_msi160 = 160,
+    isr_msi161 = 161,
+    isr_msi162 = 162,
+    isr_msi163 = 163,
+    isr_msi164 = 164,
+    isr_msi165 = 165,
+    isr_msi166 = 166,
+    isr_msi167 = 167,
+    isr_msi168 = 168,
+    isr_msi169 = 169,
+    isr_msi170 = 170,
+    isr_msi171 = 171,
+    isr_msi172 = 172,
+    isr_msi173 = 173,
+    isr_msi174 = 174,
+    isr_msi175 = 175,
+    isr_msi176 = 176,
+    isr_msi177 = 177,
+    isr_msi178 = 178,
+    isr_msi179 = 179,
+    isr_msi180 = 180,
+    isr_msi181 = 181,
+    isr_msi182 = 182,
+    isr_msi183 = 183,
+    isr_msi184 = 184,
+    isr_msi185 = 185,
+    isr_msi186 = 186,
+    isr_msi187 = 187,
+    isr_msi188 = 188,
+    isr_msi189 = 189,
+    isr_msi190 = 190,
+    isr_msi191 = 191,
+    isr_msi192 = 192,
+    isr_msi193 = 193,
+    isr_msi194 = 194,
+    isr_msi195 = 195,
+    isr_msi196 = 196,
+    isr_msi197 = 197,
+    isr_msi198 = 198,
+    isr_msi199 = 199,
+    isr_msi200 = 200,
+    isr_msi201 = 201,
+    isr_msi202 = 202,
+    isr_msi203 = 203,
+    isr_msi204 = 204,
+    isr_msi205 = 205,
+    isr_msi206 = 206,
+    isr_msi207 = 207,
+    isr_msi208 = 208,
+    isr_msi209 = 209,
+    isr_msi210 = 210,
+    isr_msi211 = 211,
+    isr_msi212 = 212,
+    isr_msi213 = 213,
+    isr_msi214 = 214,
+    isr_msi215 = 215,
+    isr_msi216 = 216,
+    isr_msi217 = 217,
+    isr_msi218 = 218,
+    isr_msi219 = 219,
+    isr_msi220 = 220,
+    isr_msi221 = 221,
+    isr_msi222 = 222,
+    isr_msi223 = 223,
+);
 
 // ---------------------------------------------------------------------------
 // Ring 3 exception handling
@@ -4901,6 +5077,11 @@ pub unsafe fn init() {
         ];
         for (i, &addr) in irq_stubs.iter().enumerate() {
             idt.entries[33 + i] = IdtEntry::new(addr, cs, 0, 0);
+        }
+
+        // MSI vectors 64..=223, the pool `msi` hands out to drivers' devices.
+        for (i, &stub) in MSI_STUBS.iter().enumerate() {
+            idt.entries[64 + i] = IdtEntry::new(stub as *const () as u64, cs, 0, 0);
         }
 
         // Fill remaining vectors with the default handler.

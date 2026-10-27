@@ -659,6 +659,9 @@ pub fn self_test() -> KernelResult<()> {
     use crate::proc::pcb;
     use crate::serial_println;
 
+    // MSI delivery itself, before anything uses it for a device.
+    crate::msi::self_test_delivery()?;
+
     // The write guards, on a made-up layout: BARs at 0x10, the PCIe Device
     // Control register at 0x48 (its high byte, holding FLR, at 0x49), and an
     // Advanced Features control byte at 0x64 (FLR in bit 0).

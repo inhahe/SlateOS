@@ -297,23 +297,15 @@ pub fn config_write16_native(bus: u8, device: u8, function: u8, offset: u8, valu
 ///
 /// Scanned once and kept: a scan is thousands of slow port reads on a PC
 /// with many bridges, and nothing here changes what it finds (no hotplug,
-/// and firmware placed the BARs). [`rescan`] scans again.
+/// and firmware placed the BARs). The scan itself runs outside the lock,
+/// which disables preemption; two first callers both scan, and the first to
+/// finish is kept.
 pub fn scan_all() -> Vec<PciDevice> {
-    let mut kept = SCANNED.lock();
-    if let Some(found) = kept.as_ref() {
+    if let Some(found) = SCANNED.lock().as_ref() {
         return found.clone();
     }
     let found = scan_now();
-    *kept = Some(found.clone());
-    found
-}
-
-/// Scan again, and keep what is found for [`scan_all`]: after a change the
-/// kept scan cannot see.
-pub fn rescan() -> Vec<PciDevice> {
-    let found = scan_now();
-    *SCANNED.lock() = Some(found.clone());
-    found
+    SCANNED.lock().get_or_insert(found).clone()
 }
 
 /// What [`scan_all`] last found; `None` until it first scans.
@@ -620,6 +612,22 @@ pub fn enable_bus_master(addr: PciAddress) {
 pub fn disable_bus_master(addr: PciAddress) {
     let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
     write_command(addr, cmd & !CMD_BUS_MASTER);
+}
+
+/// Stop every function on every bus mastering, for a kexec: DMA stops at
+/// its source. Called with every other CPU stopped where it stood, so it
+/// takes no lock and allocates nothing: the config ports are seized from
+/// whichever stopped CPU held them ([`CONFIG_HOLDER`]), and the bus is
+/// walked afresh rather than read from the kept scan, whose lock a stopped
+/// CPU may hold for good.
+///
+/// # Safety
+///
+/// No other CPU may run kernel code again: one that did could be in the
+/// middle of a config access, and would be cut off.
+pub unsafe fn disable_bus_master_everywhere() {
+    CONFIG_HOLDER.store(0, Ordering::Release);
+    for_each_function(disable_bus_master);
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +1192,11 @@ pub fn self_test() -> Result<(), &'static str> {
         );
     }
     crate::serial_println!("[pci]   {} device(s) found", devices.len());
+    // Kept: the next caller is given this scan, not a new one.
+    if SCANNED.lock().as_ref().map(Vec::len) != Some(devices.len()) {
+        crate::serial_println!("[pci]   FAIL: the scan was not kept");
+        return Err("scan not kept");
+    }
 
     self_test_intx(&devices)?;
     self_test_bindings_and_bars()?;

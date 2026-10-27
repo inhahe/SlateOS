@@ -2174,13 +2174,15 @@ pub unsafe fn quiesce() {
     // SAFETY: as above; the new kernel re-arms its own timer.
     unsafe { crate::apic::stop_timer() };
 
+    // From here no lock may be taken: a CPU stopped in step 1b holds whatever
+    // it held for good.
+    //
     // 4. Stop all device DMA at the source by clearing bus mastering on every PCI
     //    function. A device left mastering could DMA through the old kernel's
     //    mappings into memory the new kernel is using. Every bus behind every
-    //    bridge (`pci::scan_all`).
-    for dev in crate::pci::scan_all() {
-        crate::pci::disable_bus_master(dev.address);
-    }
+    //    bridge.
+    // SAFETY: step 1b stopped every other CPU for good.
+    unsafe { crate::pci::disable_bus_master_everywhere() };
 
     // 5. The IOMMU: translation off on every unit, so that the new kernel's
     //    first DMA is not translated through tables in memory it reuses.

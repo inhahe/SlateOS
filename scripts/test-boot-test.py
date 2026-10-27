@@ -1327,6 +1327,47 @@ def test_a_kernel_fault_is_a_death_even_when_the_boot_keeps_going():
         check(label, _death_harness(cmdline, text), want)
 
 
+def _iommu_check(serial_text):
+    """Run the real `check_iommu_active` on a serial log holding
+    `serial_text`: "PASS" or "FAIL", `None` on a hang.
+    """
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "serial.txt"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(serial_text)
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -uo pipefail\n"
+                + extract_shell_function("check_iommu_active") + "\n\n"
+                + "if check_iommu_active serial.txt > /dev/null; then echo PASS; "
+                  "else echo FAIL; fi\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the IOMMU check")
+        return None if proc is None else proc.stdout.strip()
+    finally:
+        drop_fixture(tmp)
+
+
+def test_a_boot_whose_iommu_stayed_off_fails():
+    """QEMU's `intel-iommu` is there so that DMA remapping runs on every boot.
+    A unit the kernel left off -- a QEMU whose default address width offers no
+    4-level table -- skips every remapping path, and must fail the boot rather
+    than pass it.
+    """
+    on = ("[iommu_remap] Root table at phys 0x7f000\n"
+          "[iommu_remap] DMA remapping active: every device passes through "
+          "until a driver gives it a domain\n")
+    off = ("[iommu_remap]   unit 0 at 0xfed90000 left off: NotSupported\n"
+           "[iommu_remap] No unit can pass devices through: DMA remapping left off\n")
+    for label, text, want in [
+        ("a unit that came on passes", on, "PASS"),
+        ("a unit left off fails", off, "FAIL"),
+        ("a log with no IOMMU line at all fails", "[boot] up\n", "FAIL"),
+    ]:
+        check(label, _iommu_check(text), want)
+
+
 def _append_steps(steps):
     """Shell that appends each `(elapsed, text)` to serial.txt and scans it.
 

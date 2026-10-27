@@ -38,7 +38,19 @@ not flush the IOTLB.
   (ECAP.C clear, as Intel's graphics unit often is), every table write is
   written back with `clflush` before the unit is told to look.
 - Context and IOTLB invalidation per the spec, drained where the unit can;
-  their failures are returned.
+  their failures are returned. A new mapping is flushed only on a unit in
+  caching mode (CAP.CM), the one kind that may have cached its absence, and
+  without draining: no DMA in flight can be using a translation that did
+  not exist.
+- What firmware left on is taken back first: translation, interrupt
+  remapping, queued invalidation, and protected memory regions (PMEN, which
+  a TXT launch leaves on and which would block pass-through DMA).
+- A domain's id is the lowest free one below what every unit holds
+  (CAP.ND), and is given out again once the domain is destroyed and the
+  units have flushed it; a refused creation takes none.
+- A kexec turns translation off on every unit with no lock taken
+  (`shutdown`): the other CPUs are stopped where they stood, and may hold
+  any lock for good.
 
 ### The alternatives not taken
 
@@ -56,5 +68,6 @@ not flush the IOTLB.
   pass_through}`, `remap_live_test`.
 - `kernel/src/mm/page_table.rs`: `map_mmio`, the helper that maps device
   registers into the direct map.
-- Tested under QEMU's emulated Intel IOMMU (`-device intel-iommu`), which
-  the regular boot test does not attach.
+- Tested on every boot test under QEMU's emulated Intel IOMMU
+  (`-device intel-iommu,caching-mode=on,aw-bits=48`); a boot whose unit
+  stayed off fails (`check_iommu_active`).

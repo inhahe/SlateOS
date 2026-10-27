@@ -97,6 +97,9 @@ mod reg {
     pub const FEDATA: u64 = 0x3C;
     /// Fault event address register (32-bit, RW).
     pub const FEADDR: u64 = 0x40;
+    /// Protected memory enable register (32-bit, RW): bit 31 turns the
+    /// protected low and high memory regions on, bit 0 says they are.
+    pub const PMEN: u64 = 0x64;
     /// Invalidation queue head (64-bit, RO).
     pub const IQH: u64 = 0x80;
     /// Invalidation queue tail (64-bit, RW).
@@ -142,6 +145,12 @@ mod cap {
     pub const SAGAW_MASK: u64 = 0x1F << 8;
     /// Required Write Buffer Flushing (bit 4).
     pub const RWBF: u64 = 1 << 4;
+    /// The unit has protected low (bit 5) and high (bit 6) memory regions.
+    pub const PLMR: u64 = 1 << 5;
+    pub const PHMR: u64 = 1 << 6;
+    /// Caching mode (bit 7): the unit may cache a translation's absence, so
+    /// it must be told of new translations as well as of removed ones.
+    pub const CM: u64 = 1 << 7;
     /// Fault Recording offset in 128-bit units (bits 24-33).
     pub const FRO_SHIFT: u32 = 24;
     pub const FRO_MASK: u64 = 0x3FF << 24;
@@ -288,8 +297,8 @@ impl Domain {
 /// Domain table.
 static DOMAINS: Mutex<[Domain; MAX_DOMAINS]> = Mutex::new([Domain::EMPTY; MAX_DOMAINS]);
 
-/// Next domain ID to allocate.
-static NEXT_DOMAIN_ID: AtomicU16 = AtomicU16::new(FIRST_DOMAIN_ID);
+/// How many domains have been created, for [`stats`].
+static DOMAINS_CREATED: AtomicU16 = AtomicU16::new(0);
 
 // ---------------------------------------------------------------------------
 // Root and Context Tables
@@ -315,8 +324,11 @@ static REMAP_LOCK: Mutex<()> = Mutex::new(());
 /// id is below it. Unlimited until a unit says otherwise.
 static DOMAIN_IDS: AtomicU32 = AtomicU32::new(u32::MAX);
 
-/// Which units have translation on, by `iommu` unit index.
-static UNIT_ON: [AtomicBool; MAX_UNITS] = [const { AtomicBool::new(false) }; MAX_UNITS];
+/// The units with translation on, by `iommu` unit index: the virtual base
+/// of each one's registers, 0 for a unit with it off. Kept here, and not
+/// looked up in `iommu`'s list of units under its lock, so that [`shutdown`]
+/// can reach every unit with no lock to take.
+static UNIT_REGS: [AtomicU64; MAX_UNITS] = [const { AtomicU64::new(0) }; MAX_UNITS];
 
 /// Every unit with translation on snoops the CPU caches when it walks the
 /// tables (ECAP.C). When one does not -- Intel's graphics unit often does
@@ -496,8 +508,8 @@ pub fn init() -> KernelResult<()> {
         };
         match enable_unit(mmio, root) {
             Ok(()) => {
-                if let Some(on) = UNIT_ON.get(i) {
-                    on.store(true, Ordering::Release);
+                if let Some(regs) = UNIT_REGS.get(i) {
+                    regs.store(mmio, Ordering::Release);
                 }
                 any = true;
             }
@@ -580,8 +592,8 @@ fn domain_ids_of(cap_val: u64) -> u32 {
 }
 
 /// Turn off what the firmware may have left on in a unit: translation,
-/// interrupt remapping, and queued invalidation -- its queue drained first,
-/// as the spec requires before it is turned off.
+/// interrupt remapping, queued invalidation -- its queue drained first, as
+/// the spec requires before it is turned off -- and protected memory.
 fn quiesce_unit(mmio: u64) -> KernelResult<()> {
     let status = read_reg32(mmio, reg::GSTS);
     if status & gsts::TES != 0 {
@@ -610,6 +622,30 @@ fn quiesce_unit(mmio: u64) -> KernelResult<()> {
         gcmd(mmio, 0, gcmd::QIE);
         wait_for_status(mmio, gsts::QIES, false)?;
         serial_println!("[iommu_remap]   queued invalidation the firmware left on: turned off");
+    }
+    // Protected memory regions, which a TXT launch (tboot) leaves on: the
+    // unit blocks every DMA into them, pass-through DMA too, and every device
+    // here passes through. Linux turns them off the same way
+    // (`iommu_disable_protect_mem_regions`).
+    const PMEN_EPM: u32 = 1 << 31;
+    const PMEN_PRS: u32 = 1;
+    if read_reg64(mmio, reg::CAP) & (cap::PLMR | cap::PHMR) != 0
+        && read_reg32(mmio, reg::PMEN) & (PMEN_EPM | PMEN_PRS) != 0
+    {
+        write_reg32(mmio, reg::PMEN, read_reg32(mmio, reg::PMEN) & !PMEN_EPM);
+        let mut cleared = false;
+        for _ in 0..INVALIDATION_POLLS {
+            if read_reg32(mmio, reg::PMEN) & PMEN_PRS == 0 {
+                cleared = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !cleared {
+            serial_println!("[iommu_remap]   protected memory the firmware left on would not turn off");
+            return Err(KernelError::TimedOut);
+        }
+        serial_println!("[iommu_remap]   protected memory the firmware left on: turned off");
     }
     Ok(())
 }
@@ -651,7 +687,7 @@ fn enable_unit(mmio: u64, root: u64) -> KernelResult<()> {
     }
     // A new root table: every context and translation it cached is stale.
     invalidate_context_global(mmio)?;
-    invalidate_iotlb(mmio, None)?;
+    invalidate_iotlb(mmio, None, true)?;
     gcmd(mmio, gcmd::TE, 0);
     wait_for_status(mmio, gsts::TES, true)?;
     serial_println!("[iommu_remap]   Translation enabled");
@@ -699,9 +735,9 @@ fn invalidate_context_global(mmio: u64) -> KernelResult<()> {
 }
 
 /// Invalidate a unit's IOTLB: domain `did`'s translations, or every one.
-/// In-flight DMA is drained first where the unit can: after an unmap, no
-/// read or write may still use the old translation.
-fn invalidate_iotlb(mmio: u64, did: Option<DomainId>) -> KernelResult<()> {
+/// With `drain_first`, in-flight DMA is drained first where the unit can:
+/// after an unmap, no read or write may still use the old translation.
+fn invalidate_iotlb(mmio: u64, did: Option<DomainId>, drain_first: bool) -> KernelResult<()> {
     const IVT: u64 = 1 << 63;
     let cap_val = read_reg64(mmio, reg::CAP);
     let iro = (read_reg64(mmio, reg::ECAP) & ecap::IRO_MASK) >> ecap::IRO_SHIFT;
@@ -711,10 +747,10 @@ fn invalidate_iotlb(mmio: u64, did: Option<DomainId>) -> KernelResult<()> {
         None => 0b01 << 60,
     };
     let mut drain = 0;
-    if cap_val & cap::DRD != 0 {
+    if drain_first && cap_val & cap::DRD != 0 {
         drain |= 1 << 49;
     }
-    if cap_val & cap::DWD != 0 {
+    if drain_first && cap_val & cap::DWD != 0 {
         drain |= 1 << 48;
     }
     write_reg64(mmio, iotlb, IVT | granularity | drain);
@@ -745,27 +781,41 @@ fn poll_clear(mmio: u64, offset: u64, bit: u64) -> KernelResult<()> {
 /// Create a new DMA remapping domain.
 ///
 /// Allocates a fresh second-level page table (initially empty — no DMA
-/// permitted until pages are explicitly mapped).
+/// permitted until pages are explicitly mapped). Its id is the lowest free
+/// one, below what every unit can hold (CAP.ND): a destroyed domain's id is
+/// given out again once [`destroy_domain`] has flushed it.
 pub fn create_domain() -> KernelResult<DomainId> {
-    let id = NEXT_DOMAIN_ID.fetch_add(1, Ordering::Relaxed);
-    if id as usize >= MAX_DOMAINS || u32::from(id) >= DOMAIN_IDS.load(Ordering::Acquire) {
-        serial_println!("[iommu_remap] ERROR: domain ID overflow");
-        return Err(KernelError::OutOfMemory);
-    }
+    // The table first, so that a refusal for want of memory takes no id.
     let pml4 = page_table::alloc_pt_page()?;
     if let Some(hhdm) = page_table::hhdm() {
         sync_tables(pml4, IOMMU_PAGE_SIZE, hhdm);
     }
+    let limit = usize::try_from(DOMAIN_IDS.load(Ordering::Acquire)).map_or(MAX_DOMAINS, |ids| ids.min(MAX_DOMAINS));
 
     let mut domains = DOMAINS.lock();
-    let slot = id as usize;
-    domains[slot] = Domain {
-        id,
-        pml4_phys: pml4,
-        active: true,
-        device_count: 0,
-        mapped_pages: 0,
+    // A slot is free when it holds no table: a destroyed domain's keeps its
+    // table until the units have forgotten its id.
+    let free = (usize::from(FIRST_DOMAIN_ID)..limit)
+        .find(|&slot| domains.get(slot).is_some_and(|d| !d.active && d.pml4_phys == 0));
+    let Some((slot, id)) = free.and_then(|slot| Some((slot, DomainId::try_from(slot).ok()?))) else {
+        drop(domains);
+        // SAFETY: allocated above and never published: no entry and no walk
+        // can reach it.
+        unsafe { page_table::free_pt_page(pml4) };
+        serial_println!("[iommu_remap] ERROR: every domain id is in use");
+        return Err(KernelError::OutOfMemory);
     };
+    if let Some(domain) = domains.get_mut(slot) {
+        *domain = Domain {
+            id,
+            pml4_phys: pml4,
+            active: true,
+            device_count: 0,
+            mapped_pages: 0,
+        };
+    }
+    drop(domains);
+    DOMAINS_CREATED.fetch_add(1, Ordering::Relaxed);
 
     serial_println!("[iommu_remap] Created domain {} (PML4={:#x})", id, pml4);
     Ok(id)
@@ -793,12 +843,29 @@ pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
             return Err(KernelError::DeviceBusy);
         }
 
+        // Its table stays named in the slot, which keeps the id from being
+        // given out again (`create_domain`) until the units have forgotten it.
         let pml4 = domains[slot].pml4_phys;
         domains[slot].active = false;
         domains[slot].mapped_pages = 0;
-        domains[slot].pml4_phys = 0;
         pml4
     };
+
+    // Phase 1b: the units forget the id. A device that left the domain was
+    // flushed then, but a unit may still cache the domain's page-table
+    // entries -- pointers into the pages freed below -- and a new domain
+    // given this id would find them.
+    {
+        let _invalidating = REMAP_LOCK.lock();
+        if let Err(e) = flush_iotlb_domain(domain_id) {
+            serial_println!(
+                "[iommu_remap] WARNING: domain {} not flushed ({:?}): its id and table are kept",
+                domain_id,
+                e
+            );
+            return Err(e);
+        }
+    }
 
     // Phase 2: reclaim the domain's entire second-level page-table
     // structure (PML4 through PT).  The caller-owned DMA target frames
@@ -824,6 +891,10 @@ pub fn destroy_domain(domain_id: DomainId) -> KernelResult<()> {
         }
     }
 
+    // The id is free again.
+    if let Some(domain) = DOMAINS.lock().get_mut(usize::from(domain_id)) {
+        domain.pml4_phys = 0;
+    }
     serial_println!("[iommu_remap] Destroyed domain {}", domain_id);
     Ok(())
 }
@@ -884,11 +955,9 @@ pub fn map_dma(
         }
     }
 
-    // A unit in caching mode may have cached these pages' absence: told of
-    // the new translations, as of any change (VT-d §6.1). Harmless on one
-    // that is not.
+    // A unit in caching mode may have cached these pages' absence.
     let _invalidating = REMAP_LOCK.lock();
-    flush_iotlb_domain(domain_id)?;
+    flush_new_mappings(domain_id)?;
 
     Ok(())
 }
@@ -1403,24 +1472,32 @@ fn flush_context_cache() -> KernelResult<()> {
 /// Invalidate domain `domain_id`'s translations on every unit with
 /// translation on: after its table changed, or a device left it.
 fn flush_iotlb_domain(domain_id: DomainId) -> KernelResult<()> {
-    for_each_unit_on(|mmio| invalidate_iotlb(mmio, Some(domain_id)))
+    for_each_unit_on(|mmio| invalidate_iotlb(mmio, Some(domain_id), true))
+}
+
+/// Tell every unit in caching mode of domain `domain_id`'s new translations:
+/// such a unit may have cached their absence (VT-d §6.1). One not in caching
+/// mode caches no absence, and is left alone; and no DMA in flight can use a
+/// translation that did not exist, so none is drained first.
+fn flush_new_mappings(domain_id: DomainId) -> KernelResult<()> {
+    for_each_unit_on(|mmio| {
+        if read_reg64(mmio, reg::CAP) & cap::CM == 0 {
+            return Ok(());
+        }
+        invalidate_iotlb(mmio, Some(domain_id), false)
+    })
 }
 
 /// Run `f` on each unit with translation on, by its registers' virtual
 /// base: every unit tried, and the first failure answered.
 fn for_each_unit_on(f: impl Fn(u64) -> KernelResult<()>) -> KernelResult<()> {
-    let Some(hhdm) = page_table::hhdm() else {
-        return Ok(());
-    };
     let mut first = Ok(());
-    for (i, on) in UNIT_ON.iter().enumerate() {
-        if !on.load(Ordering::Acquire) {
+    for (i, regs) in UNIT_REGS.iter().enumerate() {
+        let mmio = regs.load(Ordering::Acquire);
+        if mmio == 0 {
             continue;
         }
-        let Some(unit) = crate::iommu::get_unit(i) else {
-            continue;
-        };
-        if let Err(e) = f(unit.register_base.wrapping_add(hhdm)) {
+        if let Err(e) = f(mmio) {
             serial_println!("[iommu_remap] unit {}: invalidation failed: {:?}", i, e);
             if first.is_ok() {
                 first = Err(e);
@@ -1438,26 +1515,24 @@ fn for_each_unit_on(f: impl Fn(u64) -> KernelResult<()>) -> KernelResult<()> {
 /// another kernel: its tables lie in memory the next kernel will reuse. A
 /// unit that does not answer is left as it is; the next kernel turns it off
 /// before it replaces the tables (`quiesce_unit`).
+///
+/// Called with every other CPU stopped where it stood (`kexec::quiesce`),
+/// so it takes no lock: one of them may hold [`REMAP_LOCK`] for good. What
+/// that CPU was doing to a unit's tables no longer matters once translation
+/// is off.
 pub fn shutdown() {
-    let Some(hhdm) = page_table::hhdm() else {
-        return;
-    };
-    let _changing = REMAP_LOCK.lock();
-    for (i, on) in UNIT_ON.iter().enumerate() {
-        if !on.load(Ordering::Acquire) {
+    for regs in &UNIT_REGS {
+        let mmio = regs.load(Ordering::Acquire);
+        if mmio == 0 {
             continue;
         }
-        let Some(unit) = crate::iommu::get_unit(i) else {
-            continue;
-        };
-        let mmio = unit.register_base.wrapping_add(hhdm);
         gcmd(mmio, 0, gcmd::TE);
         if wait_for_status(mmio, gsts::TES, false).is_ok() {
-            on.store(false, Ordering::Release);
+            regs.store(0, Ordering::Release);
         }
     }
     REMAP_ACTIVE.store(
-        UNIT_ON.iter().any(|on| on.load(Ordering::Acquire)),
+        UNIT_REGS.iter().any(|regs| regs.load(Ordering::Acquire) != 0),
         Ordering::Release,
     );
 }
@@ -1502,9 +1577,7 @@ pub fn stats() -> RemapStats {
 
     RemapStats {
         active: REMAP_ACTIVE.load(Ordering::Relaxed),
-        total_domains: NEXT_DOMAIN_ID
-            .load(Ordering::Relaxed)
-            .saturating_sub(FIRST_DOMAIN_ID),
+        total_domains: DOMAINS_CREATED.load(Ordering::Relaxed),
         active_domains,
         total_mapped_pages: total_mapped,
         total_faults: TOTAL_FAULTS.load(Ordering::Relaxed),
@@ -1732,6 +1805,30 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
 
+    // Test 9b: a destroyed domain's id is given out again -- the lowest free
+    // one -- so that a driver creating and destroying domains cannot use up
+    // the few ids a unit holds.
+    {
+        let a = create_domain()?;
+        let b = create_domain()?;
+        destroy_domain(a)?;
+        let c = create_domain()?;
+        let reused = c == a;
+        destroy_domain(b)?;
+        destroy_domain(c)?;
+        if !reused {
+            serial_println!(
+                "[iommu_remap]   FAIL: domains {} and {}, {} destroyed, then {} given",
+                a,
+                b,
+                a,
+                c
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[iommu_remap]   domain ids given out again: OK");
+    }
+
     // Test 10: context entries as VT-d lays them out (§9.3): the address
     // width in high bits 2:0, the domain in 23:8, the translation type in
     // low bits 3:2.
@@ -1794,12 +1891,10 @@ fn remap_live_test() -> KernelResult<()> {
             core::ptr::read_volatile((ctx.wrapping_add(hhdm) as *const ContextEntry).add(devfn))
         })
     };
-    for (i, on) in UNIT_ON.iter().enumerate() {
-        if on.load(Ordering::Acquire) {
-            let unit = crate::iommu::get_unit(i).ok_or(KernelError::InternalError)?;
-            if read_reg32(unit.register_base.wrapping_add(hhdm), reg::GSTS) & gsts::TES == 0 {
-                return fail("a unit marked on does not have translation on");
-            }
+    for regs in &UNIT_REGS {
+        let mmio = regs.load(Ordering::Acquire);
+        if mmio != 0 && read_reg32(mmio, reg::GSTS) & gsts::TES == 0 {
+            return fail("a unit marked on does not have translation on");
         }
     }
     if !entry_of(0, 0)?.is_pass_through() || !entry_of(255, 255)?.is_pass_through() {

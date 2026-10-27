@@ -2176,16 +2176,15 @@ pub unsafe fn quiesce() {
 
     // 4. Stop all device DMA at the source by clearing bus mastering on every PCI
     //    function. A device left mastering could DMA through the old kernel's
-    //    mappings into memory the new kernel is using. (Bus 0 only for now: QEMU's
-    //    devices live there; recursing bridges is noted in todo.txt.)
+    //    mappings into memory the new kernel is using. Every bus behind every
+    //    bridge (`pci::scan_all`).
     for dev in crate::pci::scan_all() {
         crate::pci::disable_bus_master(dev.address);
     }
 
-    // 5. The IOMMU: SlateOS never enables DMA-remapping translation (the iommu
-    //    module is informational only), so there is no translation to turn off.
-    //    If that changes, clear the translation-enable bit on every unit here, so
-    //    the new kernel's first DMA is not translated through the old tables.
+    // 5. The IOMMU: translation off on every unit, so that the new kernel's
+    //    first DMA is not translated through tables in memory it reuses.
+    crate::iommu_remap::shutdown();
 
     // 6. Send INIT to every other CPU, leaving each waiting for a SIPI --
     //    exactly the state the firmware leaves them in for the MP request. Each

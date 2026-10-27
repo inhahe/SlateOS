@@ -62,7 +62,7 @@
 
 #![allow(dead_code)] // Public API awaiting driver framework integration.
 
-use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
 use crate::error::{KernelError, KernelResult};
@@ -135,8 +135,7 @@ mod gsts {
 
 /// CAP register bit fields.
 mod cap {
-    /// Number of domain IDs supported (bits 0-2).
-    /// NDOMS = 2^(4+N), where N is the field value.
+    /// Number of domain IDs supported (bits 0-2): 2^(4+2N), N the field.
     pub const NDOMS_MASK: u64 = 0x07;
     /// Supported Adjusted Guest Address Widths (bits 8-12).
     pub const SAGAW_SHIFT: u32 = 8;
@@ -304,6 +303,17 @@ static REMAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Total DMA faults observed.
 static TOTAL_FAULTS: AtomicU64 = AtomicU64::new(0);
+
+/// Held across every change to a context entry and every invalidation once
+/// the units are on: a unit's invalidation registers take one request at a
+/// time, and a context entry is read, checked and rewritten in steps.
+/// Taken by the public entry points ([`attach_device`], [`detach_device`],
+/// [`unmap_dma`]); the helpers they call assume it is held.
+static REMAP_LOCK: Mutex<()> = Mutex::new(());
+
+/// How many domain ids every unit turned on can hold (CAP.ND): a domain's
+/// id is below it. Unlimited until a unit says otherwise.
+static DOMAIN_IDS: AtomicU32 = AtomicU32::new(u32::MAX);
 
 /// Which units have translation on, by `iommu` unit index.
 static UNIT_ON: [AtomicBool; MAX_UNITS] = [const { AtomicBool::new(false) }; MAX_UNITS];
@@ -503,12 +513,17 @@ pub fn init() -> KernelResult<()> {
     Ok(())
 }
 
-/// Map a unit's registers and decide whether it can be turned on: it must
-/// pass devices through (ECAP.PT), and its deepest table must be 4-level --
-/// the depth a pass-through entry names, and a domain's. Translation the
-/// firmware left on is turned off, so that the root table can be replaced.
-/// Answers the registers' virtual base and whether the unit's table walks
-/// snoop the CPU caches.
+/// Map a unit's registers, take back what the firmware left on, and decide
+/// whether the unit can be turned on: it must pass devices through
+/// (ECAP.PT), and its deepest table must be 4-level -- the depth a
+/// pass-through entry names, and a domain's. Answers the registers' virtual
+/// base and whether the unit's table walks snoop the CPU caches.
+///
+/// Every unit is quiesced first, whether or not it can be turned on:
+/// translation, interrupt remapping and queued invalidation the firmware
+/// left on would keep devices using the firmware's tables and queue --
+/// memory the kernel now owns -- and queued invalidation forbids the
+/// register-based invalidations this module uses.
 fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
     // SAFETY: a DRHD's register base is its unit's register block: device
     // memory.
@@ -536,6 +551,7 @@ fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
         cap_val,
         ecap_val
     );
+    quiesce_unit(mmio)?;
     if ecap_val & ecap::PT == 0 {
         serial_println!("[iommu_remap]   it cannot pass devices through (ECAP.PT clear)");
         return Err(KernelError::NotSupported);
@@ -550,12 +566,52 @@ fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
         );
         return Err(KernelError::NotSupported);
     }
-    if read_reg32(mmio, reg::GSTS) & gsts::TES != 0 {
+    // Its domain ids: no domain may have one it cannot hold.
+    DOMAIN_IDS.fetch_min(domain_ids_of(cap_val), Ordering::AcqRel);
+    Ok((mmio, ecap_val & ecap::C != 0))
+}
+
+/// How many domain ids a unit whose CAP register reads `cap_val` holds:
+/// 2^(4+2N), N its ND field (VT-d §10.4.2).
+fn domain_ids_of(cap_val: u64) -> u32 {
+    let nd = u32::try_from(cap_val & cap::NDOMS_MASK).unwrap_or(0);
+    1u32.checked_shl(nd.saturating_mul(2).saturating_add(4))
+        .unwrap_or(u32::MAX)
+}
+
+/// Turn off what the firmware may have left on in a unit: translation,
+/// interrupt remapping, and queued invalidation -- its queue drained first,
+/// as the spec requires before it is turned off.
+fn quiesce_unit(mmio: u64) -> KernelResult<()> {
+    let status = read_reg32(mmio, reg::GSTS);
+    if status & gsts::TES != 0 {
         gcmd(mmio, 0, gcmd::TE);
         wait_for_status(mmio, gsts::TES, false)?;
         serial_println!("[iommu_remap]   translation the firmware left on: turned off");
     }
-    Ok((mmio, ecap_val & ecap::C != 0))
+    if status & gsts::IRES != 0 {
+        gcmd(mmio, 0, gcmd::IRE);
+        wait_for_status(mmio, gsts::IRES, false)?;
+        serial_println!("[iommu_remap]   interrupt remapping the firmware left on: turned off");
+    }
+    if status & gsts::QIES != 0 {
+        let mut drained = false;
+        for _ in 0..INVALIDATION_POLLS {
+            if read_reg64(mmio, reg::IQH) == read_reg64(mmio, reg::IQT) {
+                drained = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        if !drained {
+            serial_println!("[iommu_remap]   the firmware's invalidation queue never drained");
+            return Err(KernelError::TimedOut);
+        }
+        gcmd(mmio, 0, gcmd::QIE);
+        wait_for_status(mmio, gsts::QIES, false)?;
+        serial_println!("[iommu_remap]   queued invalidation the firmware left on: turned off");
+    }
+    Ok(())
 }
 
 /// The root table every unit shares: all 256 buses present, every device
@@ -691,15 +747,14 @@ fn poll_clear(mmio: u64, offset: u64, bit: u64) -> KernelResult<()> {
 /// Allocates a fresh second-level page table (initially empty — no DMA
 /// permitted until pages are explicitly mapped).
 pub fn create_domain() -> KernelResult<DomainId> {
+    let id = NEXT_DOMAIN_ID.fetch_add(1, Ordering::Relaxed);
+    if id as usize >= MAX_DOMAINS || u32::from(id) >= DOMAIN_IDS.load(Ordering::Acquire) {
+        serial_println!("[iommu_remap] ERROR: domain ID overflow");
+        return Err(KernelError::OutOfMemory);
+    }
     let pml4 = page_table::alloc_pt_page()?;
     if let Some(hhdm) = page_table::hhdm() {
         sync_tables(pml4, IOMMU_PAGE_SIZE, hhdm);
-    }
-    let id = NEXT_DOMAIN_ID.fetch_add(1, Ordering::Relaxed);
-
-    if id as usize >= MAX_DOMAINS {
-        serial_println!("[iommu_remap] ERROR: domain ID overflow");
-        return Err(KernelError::OutOfMemory);
     }
 
     let mut domains = DOMAINS.lock();
@@ -822,9 +877,18 @@ pub fn map_dma(
     }
 
     // Update mapped page count.
-    let mut domains = DOMAINS.lock();
-    let slot = domain_id as usize;
-    domains[slot].mapped_pages = domains[slot].mapped_pages.saturating_add(pages as u64);
+    {
+        let mut domains = DOMAINS.lock();
+        if let Some(domain) = domains.get_mut(domain_id as usize) {
+            domain.mapped_pages = domain.mapped_pages.saturating_add(pages as u64);
+        }
+    }
+
+    // A unit in caching mode may have cached these pages' absence: told of
+    // the new translations, as of any change (VT-d §6.1). Harmless on one
+    // that is not.
+    let _invalidating = REMAP_LOCK.lock();
+    flush_iotlb_domain(domain_id)?;
 
     Ok(())
 }
@@ -864,6 +928,7 @@ pub fn unmap_dma(domain_id: DomainId, bus_addr: u64, size: usize) -> KernelResul
     }
 
     // Flush IOTLB (invalidate cached translations).
+    let _invalidating = REMAP_LOCK.lock();
     flush_iotlb_domain(domain_id)?;
 
     Ok(())
@@ -899,6 +964,7 @@ pub fn attach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
         return Err(KernelError::NotSupported);
     }
 
+    let _changing = REMAP_LOCK.lock();
     let context_table = context_table_of(root_table, bus, hhdm)?;
     let devfn = ((device as usize) << 3) | (function as usize);
     // SAFETY: one of the context tables init built; devfn < 256.
@@ -957,6 +1023,7 @@ pub fn detach_device(domain_id: DomainId, bus: u8, device: u8, function: u8) -> 
         return Err(KernelError::NotSupported);
     }
 
+    let _changing = REMAP_LOCK.lock();
     let context_table = context_table_of(root_table, bus, hhdm)?;
     let devfn = ((device as usize) << 3) | (function as usize);
 
@@ -1367,6 +1434,34 @@ fn for_each_unit_on(f: impl Fn(u64) -> KernelResult<()>) -> KernelResult<()> {
 // Query API
 // ---------------------------------------------------------------------------
 
+/// Turn translation off on every unit that has it on, for a kexec into
+/// another kernel: its tables lie in memory the next kernel will reuse. A
+/// unit that does not answer is left as it is; the next kernel turns it off
+/// before it replaces the tables (`quiesce_unit`).
+pub fn shutdown() {
+    let Some(hhdm) = page_table::hhdm() else {
+        return;
+    };
+    let _changing = REMAP_LOCK.lock();
+    for (i, on) in UNIT_ON.iter().enumerate() {
+        if !on.load(Ordering::Acquire) {
+            continue;
+        }
+        let Some(unit) = crate::iommu::get_unit(i) else {
+            continue;
+        };
+        let mmio = unit.register_base.wrapping_add(hhdm);
+        gcmd(mmio, 0, gcmd::TE);
+        if wait_for_status(mmio, gsts::TES, false).is_ok() {
+            on.store(false, Ordering::Release);
+        }
+    }
+    REMAP_ACTIVE.store(
+        UNIT_ON.iter().any(|on| on.load(Ordering::Acquire)),
+        Ordering::Release,
+    );
+}
+
 /// Whether DMA remapping is active.
 #[must_use]
 pub fn is_active() -> bool {
@@ -1658,6 +1753,18 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[iommu_remap]   Context entry layout: OK");
+
+    // Test 10b: the domain ids a unit holds, from its CAP register.
+    let ids = [
+        domain_ids_of(0),
+        domain_ids_of(2),
+        domain_ids_of(6),
+        domain_ids_of(0x80 | 1),
+    ];
+    if ids != [16, 256, 65536, 64] {
+        serial_println!("[iommu_remap]   FAIL: domain ids from CAP.ND: {:?}", ids);
+        return Err(KernelError::InternalError);
+    }
 
     // Test 11: with a unit on, every device passes through, and a device
     // given a domain is translated by it until it is detached.

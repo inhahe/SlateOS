@@ -302,7 +302,7 @@ no NVRAM boot entry is added, and the image is confined to the stick. So:
 | On-screen progress channel | **done** -- the boot steps, and the whole log with `log.screen=1`; used on the test PC 2026-10-27 |
 | The log on a PCIe serial card | **done in QEMU** -- `log.pci_serial=N`; a `pci-serial` behind a PCIe root port carried the whole log, byte for byte the same as COM1 (2026-10-27); awaits the card for the test PC |
 | Recovery procedure | **documented above**, never exercised |
-| Boot on the operator's PC | **in progress** on the test PC behind a PiKVM (§9) |
+| Boot on the operator's PC | **reaches the shell and runs** on the test PC behind a PiKVM (§9): every boot step and self-test, `init` and its services, the shell prompt, the benchmark suite, and 17+ minutes up (2026-10-27, d7261a3c5) |
 | Intel iGPU driver written against the real chip | blocked on the row above (§263) |
 
 ## 9. The test PC behind a PiKVM
@@ -340,6 +340,15 @@ QEMU):
 | (no NVMe found) | the PCI scan read bus 0 only; both M.2 drives sit behind root ports | `pci::scan_all` walks every bridge |
 | Storage, after USB starts | the xHCI driver reset the controller without taking it from the firmware's USB legacy support, and scanned its ports before they could show a device | `xhci::take_from_firmware` (to be confirmed on the PC) |
 | Memory manager (`FATAL: Frame allocator self-test failed`, "a Below16M frame could not be had") | the allocator's metadata -- 33 MiB for 64 GiB -- went in the first usable region, at 1 MiB, filling the whole ISA DMA zone below 16 MiB; QEMU's 3 GiB needs too little to show it | `frame::metadata_base`: above the zone where there is room |
+| vmguest self-test (panic: "Tick counter should increment by 3") | the test assumed a hypervisor, as QEMU always is; on bare metal guest integration is never set up and `tick()` counts nothing | the test expects no ticks on bare metal |
+| Benchmarks, after the shell prompt (double fault: kernel stack overflow in `crc32_raw`) | crc32's 8 KiB slicing table was a `const`, which an unoptimised build copies wherever it is used: eight uses, a 64 KiB frame for a 64 KiB task stack; QEMU's boot test never runs that benchmark | the CRC tables are `static`s |
+
+Seen and not yet explained: during and after the benchmarks, coloured vertical
+stripes are drawn over the right half of the log pane, rows at a time, and
+redrawn as the system runs -- something writes the framebuffer without taking
+the display (which stops the pane). Nothing in the kernel draws gradients; a
+userspace program drawing to the framebuffer is the likely source. The serial
+card's full log, or a QEMU boot with `log.screen=1`, should name it.
 
 The write fence held throughout: the Windows disk registered read-only, the
 spare writable.

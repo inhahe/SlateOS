@@ -627,7 +627,7 @@ fn pci_resource_lines(dev: &crate::pci::PciDevice) -> String {
 
 fn gen_pci_device(bdf: &str) -> KernelResult<Vec<u8>> {
     // bdf is something like "00:01.0" — parse it.
-    let devices = crate::pci::scan_bus0();
+    let devices = crate::pci::scan_all();
     for dev in &devices {
         let addr = format!(
             "{:02x}:{:02x}.{}",
@@ -1397,7 +1397,7 @@ impl FileSystem for SysFs {
             }
             SysPath::PciDir => {
                 // List all PCI devices as files named by BDF address.
-                let devices = crate::pci::scan_bus0();
+                let devices = crate::pci::scan_all();
                 let entries = devices
                     .iter()
                     .map(|dev| {
@@ -2870,7 +2870,7 @@ fn self_test_pci_resource_lines() -> KernelResult<()> {
         return fail("a made-up function's resource lines");
     }
     let mut bound = 0usize;
-    for dev in crate::pci::scan_bus0() {
+    for dev in crate::pci::scan_all() {
         let bdf = format!(
             "{:02x}:{:02x}.{}",
             dev.address.bus, dev.address.device, dev.address.function

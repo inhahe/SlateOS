@@ -57,6 +57,10 @@ const CFG_HEADER_TYPE: u8 = 0x0E;
 /// Clear means function 0 is the only one, and probing 1..8 would read
 /// floating config space rather than absent devices.
 const HEADER_TYPE_MULTIFUNCTION: u8 = 0x80;
+/// Header type (bits 6:0) of a PCI-to-PCI bridge.
+const HEADER_TYPE_BRIDGE: u8 = 0x01;
+/// A bridge's secondary bus number: the bus behind it.
+const CFG_SECONDARY_BUS: u8 = 0x19;
 /// BAR0 (32-bit, offset 0x10).
 const CFG_BAR0: u8 = 0x10;
 /// Interrupt line (8-bit, offset 0x3C low byte).
@@ -256,72 +260,69 @@ pub fn config_write16_native(bus: u8, device: u8, function: u8, offset: u8, valu
 // Bus scanning
 // ---------------------------------------------------------------------------
 
-/// Scan PCI bus 0 and return all discovered devices.
-///
-/// Probes all 32 device slots × 8 functions.  Multi-function devices
-/// are detected via header type bit 7.
-// Loop arithmetic with small counters; no overflow possible.
-#[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-pub fn scan_bus0() -> Vec<PciDevice> {
+/// Every PCI function on every bus reachable from bus 0, with what a driver
+/// needs of each ([`for_each_function`]'s order).
+pub fn scan_all() -> Vec<PciDevice> {
     let mut devices = Vec::new();
-
-    for device in 0..32u8 {
-        // Check function 0 first.
-        let vendor = config_read16(0, device, 0, CFG_VENDOR_ID);
-        if vendor == 0xFFFF {
-            continue; // No device in this slot.
-        }
-
-        scan_function(0, device, 0, &mut devices);
-
-        // Check if this is a multi-function device (header type bit 7).
-        let header_type = config_read8(0, device, 0, CFG_HEADER_TYPE);
-        if header_type & HEADER_TYPE_MULTIFUNCTION != 0 {
-            for function in 1..8u8 {
-                let vendor = config_read16(0, device, function, CFG_VENDOR_ID);
-                if vendor != 0xFFFF {
-                    scan_function(0, device, function, &mut devices);
-                }
-            }
-        }
-    }
-
+    for_each_function(|addr| scan_function(addr.bus, addr.device, addr.function, &mut devices));
     devices
 }
 
-/// Call `f` once for each PCI function present on bus 0, without allocating.
+/// Call `f` once for each PCI function present, without allocating: bus 0
+/// first, then the bus behind each PCI-to-PCI bridge found, in the order
+/// found. A PC's chipset puts its own devices on bus 0 and everything in a
+/// slot -- an M.2 drive, a PCIe card -- behind a root port's bridge. (A
+/// machine with a second root bus that no bridge leads to, a two-socket
+/// server's, would need ACPI's host bridges to find it.)
 ///
-/// [`scan_bus0`] is the convenient form, but it builds a `Vec`, and a caller
+/// [`scan_all`] is the convenient form, but it builds a `Vec`, and a caller
 /// running in interrupt or softirq context during a fault — the IRQ storm
 /// diagnostic is exactly that — must not depend on the heap being healthy.  An
 /// allocation failure inside a kernel is a panic, so a diagnostic that
 /// allocates can turn a recoverable storm into a dead machine at precisely the
 /// moment it was supposed to explain one.
 ///
-/// The traversal rule is the same as `scan_bus0`'s: probe function 0, and only
-/// look at functions 1–7 when the header type says the device is
-/// multi-function.
+/// In each slot, function 0 is probed, and functions 1–7 only when the header
+/// type says the device is multi-function.
 fn for_each_function(mut f: impl FnMut(PciAddress)) {
-    for device in 0..32u8 {
-        if config_read16(0, device, 0, CFG_VENDOR_ID) == 0xFFFF {
-            continue; // No device in this slot.
-        }
-
-        f(PciAddress {
-            bus: 0,
-            device,
-            function: 0,
-        });
-
-        // Multi-function device (header type bit 7)?
-        if config_read8(0, device, 0, CFG_HEADER_TYPE) & HEADER_TYPE_MULTIFUNCTION != 0 {
-            for function in 1..8u8 {
-                if config_read16(0, device, function, CFG_VENDOR_ID) != 0xFFFF {
-                    f(PciAddress {
-                        bus: 0,
-                        device,
-                        function,
-                    });
+    // Buses to scan, in the order their bridges were found; each once.
+    let mut queue = [0u8; 256];
+    let mut seen = [false; 256];
+    let mut queued = 1usize;
+    if let Some(first) = seen.first_mut() {
+        *first = true;
+    }
+    let mut next = 0usize;
+    while let Some(&bus) = queue.get(next).filter(|_| next < queued) {
+        next = next.saturating_add(1);
+        let mut visit = |device: u8, function: u8| {
+            f(PciAddress {
+                bus,
+                device,
+                function,
+            });
+            let header = config_read8(bus, device, function, CFG_HEADER_TYPE);
+            if header & !HEADER_TYPE_MULTIFUNCTION == HEADER_TYPE_BRIDGE {
+                let behind = config_read8(bus, device, function, CFG_SECONDARY_BUS);
+                if let Some(mark) = seen.get_mut(usize::from(behind)).filter(|s| !**s) {
+                    *mark = true;
+                    if let Some(slot) = queue.get_mut(queued) {
+                        *slot = behind;
+                        queued = queued.saturating_add(1);
+                    }
+                }
+            }
+        };
+        for device in 0..32u8 {
+            if config_read16(bus, device, 0, CFG_VENDOR_ID) == 0xFFFF {
+                continue; // No device in this slot.
+            }
+            visit(device, 0);
+            if config_read8(bus, device, 0, CFG_HEADER_TYPE) & HEADER_TYPE_MULTIFUNCTION != 0 {
+                for function in 1..8u8 {
+                    if config_read16(bus, device, function, CFG_VENDOR_ID) != 0xFFFF {
+                        visit(device, function);
+                    }
                 }
             }
         }
@@ -365,7 +366,7 @@ fn scan_function(bus: u8, device: u8, function: u8, devices: &mut Vec<PciDevice>
 
 /// Find the first PCI device matching a vendor/device ID pair.
 pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
-    let devices = scan_bus0();
+    let devices = scan_all();
     devices
         .into_iter()
         .find(|d| d.vendor_id == vendor && d.device_id == device)
@@ -378,7 +379,7 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
 /// virtio-blk controllers).
 #[allow(dead_code)] // API for drivers zone; unused until multi-device support.
 pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
-    let devices = scan_bus0();
+    let devices = scan_all();
     devices
         .into_iter()
         .filter(|d| d.vendor_id == vendor && d.device_id == device)
@@ -391,7 +392,7 @@ pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
 /// vendor (e.g., all mass-storage controllers: class=0x01).
 #[allow(dead_code)] // API for drivers zone; unused until driver framework.
 pub fn find_devices_by_class(class: u8, subclass: u8) -> Vec<PciDevice> {
-    let devices = scan_bus0();
+    let devices = scan_all();
     devices
         .into_iter()
         .filter(|d| d.class == class && d.subclass == subclass)
@@ -624,7 +625,7 @@ pub fn quiesce_unclaimed_intx() -> usize {
     INTX_SWEPT.store(true, Ordering::Release);
 
     let mut silenced = 0usize;
-    for dev in scan_bus0() {
+    for dev in scan_all() {
         // 0xFF means "not routed to any legacy interrupt line"; such a
         // function has no pin to silence.
         if dev.irq_line == 0xFF {
@@ -986,7 +987,7 @@ pub fn decode_bars(dev: &PciDevice) -> Vec<BarInfo> {
 pub fn self_test() -> Result<(), &'static str> {
     crate::serial_println!("[pci] Scanning PCI bus 0...");
 
-    let devices = scan_bus0();
+    let devices = scan_all();
     if devices.is_empty() {
         crate::serial_println!("[pci]   No devices found (unexpected!)");
         return Err("no PCI devices found");
@@ -1020,12 +1021,15 @@ pub fn self_test() -> Result<(), &'static str> {
 /// 32-bit memory BAR, a 64-bit prefetchable one spanning two registers (and
 /// reported once), and an unassigned register left out.
 fn self_test_bindings_and_bars() -> Result<(), &'static str> {
-    // Bus 0xFE is never scanned (`scan_bus0`), so nothing real is bound there.
+    // An address no function answers at, so nothing real is bound there.
     let nowhere = PciAddress {
         bus: 0xFE,
         device: 31,
         function: 7,
     };
+    if config_read16(nowhere.bus, nowhere.device, nowhere.function, CFG_VENDOR_ID) != 0xFFFF {
+        return Ok(());
+    }
     if bound_driver(nowhere).is_some() {
         return Err("an address no driver took reads as bound");
     }

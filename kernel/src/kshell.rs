@@ -24813,7 +24813,7 @@ fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
 // fixed-width arithmetic on small known values.
 #[allow(clippy::arithmetic_side_effects)]
 fn cmd_pci() {
-    let devices = crate::pci::scan_bus0();
+    let devices = crate::pci::scan_all();
     if devices.is_empty() {
         shell_println!("No PCI devices found.");
         return;
@@ -68474,7 +68474,7 @@ fn cmd_pciids(args: &str) {
     match sub {
         "" | "show" => {
             // Show PCI devices with human-readable names.
-            let devices = crate::pci::scan_bus0();
+            let devices = crate::pci::scan_all();
             if devices.is_empty() {
                 shell_println!("No PCI devices found.");
                 return;
@@ -68493,7 +68493,7 @@ fn cmd_pciids(args: &str) {
         }
         "verbose" | "-v" => {
             // Detailed view per device.
-            let devices = crate::pci::scan_bus0();
+            let devices = crate::pci::scan_all();
             for dev in &devices {
                 let vendor = pciids::vendor_name(dev.vendor_id).unwrap_or("Unknown vendor");
                 let device =

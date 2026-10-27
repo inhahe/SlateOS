@@ -1643,7 +1643,7 @@ fn gen_interrupts() -> Vec<u8> {
 fn gen_devices() -> Vec<u8> {
     let mut text = String::from("BUS  DEV  FN   CLASS:SUB  VENDOR:DEVICE\n");
 
-    let devices = crate::pci::scan_bus0();
+    let devices = crate::pci::scan_all();
     if devices.is_empty() {
         text.push_str("(no PCI devices found)\n");
     } else {

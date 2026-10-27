@@ -2613,7 +2613,12 @@ unsafe fn bring_back(pml4: u64, in_area: &dyn Fn(u64) -> bool) -> KernelResult<(
 /// its table. Returns how many were added.
 pub fn activate_signed_devices() -> usize {
     let mut added = 0usize;
-    for info in crate::blkdev::list_devices() {
+    let devices = crate::blkdev::list_devices();
+    serial_println!(
+        "[swap] Looking for swap areas on {} device(s)",
+        devices.len()
+    );
+    for info in devices {
         let mut path = b"/dev/".to_vec();
         path.extend_from_slice(info.name.as_bytes());
         let request = AreaRequest {

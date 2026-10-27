@@ -378,7 +378,7 @@ pub fn probe() -> KernelResult<Option<AtiDevice>> {
 
 /// Find the first PCI device this driver claims.
 fn find_supported() -> Option<(pci::PciDevice, &'static super::AsicInfo)> {
-    for dev in pci::scan_bus0() {
+    for dev in pci::scan_all() {
         if let Some(info) = super::identify(dev.vendor_id, dev.device_id) {
             return Some((dev, info));
         }

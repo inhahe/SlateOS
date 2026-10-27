@@ -236,7 +236,7 @@ fn pci_class_to_device_class(class: u8, subclass: u8) -> DeviceClass {
 /// Initialise the device manager by **reading through** to the real PCI bus.
 ///
 /// Each entry is built from an actual device returned by
-/// [`crate::pci::scan_bus0`]; the human-readable name, vendor name, and class
+/// [`crate::pci::scan_all`]; the human-readable name, vendor name, and class
 /// come from the bundled PCI ID database ([`crate::pciids`]).  Devices are
 /// registered with status [`DeviceStatus::Unknown`] and no bound driver —
 /// driver binding is reported only once a real driver subsystem calls
@@ -263,7 +263,7 @@ pub fn init_defaults() {
     let mut devices = Vec::new();
     let mut next_id = 1u32;
 
-    for pd in crate::pci::scan_bus0() {
+    for pd in crate::pci::scan_all() {
         if devices.len() >= MAX_DEVICES {
             break;
         }

@@ -2178,7 +2178,7 @@ pub unsafe fn quiesce() {
     //    function. A device left mastering could DMA through the old kernel's
     //    mappings into memory the new kernel is using. (Bus 0 only for now: QEMU's
     //    devices live there; recursing bridges is noted in todo.txt.)
-    for dev in crate::pci::scan_bus0() {
+    for dev in crate::pci::scan_all() {
         crate::pci::disable_bus_master(dev.address);
     }
 

@@ -40,7 +40,10 @@ case "$(uname -s)" in
             /[a-zA-Z]/*) ;;
             *) die "cannot map $self into WSL" ;;
         esac
-        exec env MSYS2_ARG_CONV_EXCL='*' wsl.exe -d "$distro" -e bash "/mnt$self" "$@"
+        # WSL imports only the variables WSLENV names: the tree's location
+        # is a WSL path, passed as it is.
+        exec env MSYS2_ARG_CONV_EXCL='*' WSLENV="SLATEOS_LINUX_ROOT${WSLENV:+:$WSLENV}" \
+            wsl.exe -d "$distro" -e bash "/mnt$self" "$@"
         ;;
 esac
 
@@ -206,10 +209,12 @@ needs() {
     # Every EXPORT_SYMBOL in the tree, once per source identity: a minute's
     # grep over the whole tree, so it is kept beside the objects.
     local exports="$obj/.slateos-exports" ident
-    ident=$(source_identity)
+    # The scan's own version is part of the key, so a changed pattern is not
+    # answered from a list the old one made.
+    ident="$(source_identity) exports-v2"
     if [ ! -f "$exports.id" ] || [ "$(cat "$exports.id")" != "$ident" ]; then
         (cd "$src" && grep -rEo --include='*.c' --include='*.h' --include='*.S' \
-            'EXPORT_SYMBOL(_GPL|_NS|_NS_GPL)?\([A-Za-z0-9_]+' . || true) |
+            'EXPORT_SYMBOL[A-Z_]*\([A-Za-z0-9_]+' . || true) |
             sed -E 's/^\.\/([^:]+):EXPORT_SYMBOL[A-Z_]*\(/\1 /' |
             awk '{ print $2, $1 }' | sort -u >"$exports"
         echo "$ident" >"$exports.id"

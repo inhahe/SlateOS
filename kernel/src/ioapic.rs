@@ -158,8 +158,8 @@ static IRQ_PENDING: [AtomicU64; MAX_IRQ] = {
 
 /// Per-IRQ registered task ID for deferred wakeup.
 ///
-/// `u64::MAX` means no task is registered.  Set by
-/// [`irq_register_task`], cleared by [`irq_unregister_task`].
+/// `u64::MAX` means no task holds the line.  Set by [`irq_claim`],
+/// cleared by [`irq_release_if_holder`] and [`release_irqs_for_task`].
 static IRQ_WAIT_TASK: [AtomicU64; MAX_IRQ] = {
     const NONE: AtomicU64 = AtomicU64::new(u64::MAX);
     [NONE; MAX_IRQ]
@@ -671,7 +671,15 @@ pub fn irq_is_pending(irq: u32) -> bool {
 pub fn irq_claim(irq: u32, task_id: u64) -> bool {
     IRQ_WAIT_TASK.get(irq as usize).is_some_and(|slot| {
         match slot.compare_exchange(u64::MAX, task_id, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => true,
+            Ok(_) => {
+                // A new holder starts from nothing: interrupts counted while
+                // the line was free, or still held by the last holder, were
+                // not for this one.
+                if let Some(pending) = IRQ_PENDING.get(irq as usize) {
+                    pending.store(0, Ordering::Release);
+                }
+                true
+            }
             Err(holder) => holder == task_id,
         }
     })

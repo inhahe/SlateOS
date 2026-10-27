@@ -15,7 +15,7 @@
 //! ```text
 //! 0x0000_0000_0000_0000 .. 0x0000_7FFF_FFFF_FFFF  User space (128 TiB)
 //!     0x0000_0000_0040_0000  ELF load base
-//!     0x0000_0060_0000_0000  Mmap region (MAP_LAZY / MAP_MMIO)
+//!     0x0000_0060_0000_0000  Device mmap region (DRM buffers, device BARs)
 //!     0x0000_7FFF_FFFF_0000  User stack top (grows down)
 //!
 //! 0x0000_8000_0000_0000 .. 0xFFFF_7FFF_FFFF_FFFF  Non-canonical hole

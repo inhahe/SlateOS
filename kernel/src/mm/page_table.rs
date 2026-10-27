@@ -2710,6 +2710,9 @@ pub unsafe fn destroy_user_address_space(pml4_phys: u64) {
 ///   allocated by this module (they are returned to the frame allocator
 ///   and PT page pool respectively).
 pub unsafe fn clear_user_address_space(pml4_phys: u64) {
+    // DMA buffers first, whole: the walk below would free their frames page
+    // by page and leave their tracking entries to free them again.
+    super::dma::free_all_for_process(pml4_phys);
     let Some(hhdm) = hhdm() else {
         return;
     };

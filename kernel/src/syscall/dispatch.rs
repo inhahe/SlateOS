@@ -1175,6 +1175,7 @@ pub fn self_test() -> KernelResult<()> {
     test_cpu_current()?;
     test_dispatch_shared_anonymous_memory()?;
     test_dispatch_mmio_refused()?;
+    test_dispatch_mmap_hint_stays_in_the_user_half()?;
     test_dispatch_irq_holder()?;
     test_dispatch_dma_exit_unmaps()?;
     crate::devhandle::self_test()?;
@@ -5733,38 +5734,6 @@ fn test_dispatch_fs_gates() -> KernelResult<()> {
     Ok(())
 }
 
-/// The Secure Boot doors (1082-1084, design-decisions §978).
-///
-/// **ENROLL and REMOVE** change the table, so each is gated before it reads an
-/// argument. This runs on a kernel task, which has no process, so each must
-/// answer `NoSuchProcess` -- and is handed pointers a kernel task *could*
-/// read, so no argument error can explain the refusal. As with
-/// [`test_dispatch_brightness_gated`], the granted arm needs a ring-3 caller
-/// holding `ENROLL_SECUREBOOT`.
-///
-/// **VERIFY** needs no right, and a kernel task's pointers pass the
-/// user-pointer checks (`mm::user::validate_user_read`), so its whole path
-/// runs here, against a scratch table: the 16-byte answer for a hash in no
-/// list and then for one in `db`; the name kept as the bytes it was given,
-/// which here are not UTF-8; an output that cannot be written refused before
-/// anything is recorded. The verdicts themselves are
-/// `fs::secureboot::self_test`'s.
-/// `SYS_POWER_RELOAD` is gated on `RELOAD_KERNEL` before it acts. In kernel
-/// context no process holds the right, so the call is refused (NoSuchProcess or
-/// PermissionDenied) before the image arguments are read -- proving the syscall
-/// is registered and gated, not ungated or gated after its arguments. What the
-/// granted arm refuses it refuses in `handlers::reload_request`, before
-/// anything is flushed or stopped, and that is checked here directly: reserved
-/// arguments, a length without its pointer and the reverse, an image or a
-/// command line over its limit, and an image that is not a kernel; and `(0, 0)`
-/// for both is the running kernel's own image, which is one, with its command
-/// line less `kexec.selftest=1`. The restart itself is the kexec boot's to
-/// prove (`python scripts/guest.py kexec`).
-/// `SYS_MEMORY_ADVISE` is wired to the Linux ABI's `madvise`, answering in
-/// Linux errnos: an unknown advice is `-EINVAL` before anything else is
-/// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
-/// 0, and memory-failure injection is `-EPERM`. (Its effects need a process
-/// and are tested in ring 3: `spawn::self_test_linux_madvise_fork`.)
 /// `SYS_MMAP` with `MAP_MMIO` is refused: a process could otherwise map any
 /// physical memory it named -- the kernel image, page 0 -- read and write.
 /// Asked for both as a scratch process, each answer must be
@@ -5821,6 +5790,58 @@ fn test_dispatch_mmio_refused() -> KernelResult<()> {
     Ok(())
 }
 
+/// An address hint to `SYS_MMAP` must keep the whole range in the user half:
+/// the kernel half is one set of tables every address space shares. A range
+/// straddling `USER_SPACE_END`, and one whose end overflows, are refused with
+/// `InvalidArgument` -- neither touches the kernel half if the check is gone,
+/// so a regression fails here rather than mapping into it.
+fn test_dispatch_mmap_hint_stays_in_the_user_half() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::mm::page_table::USER_SPACE_END;
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    let pid = pcb::create("mmap-hint", 0);
+    let invalid = i64::from(KernelError::InvalidArgument.code());
+    let mut failed = false;
+    for (what, hint, size) in [
+        (
+            "a range straddling the end of user space",
+            USER_SPACE_END - 0x4000,
+            0x8000,
+        ),
+        (
+            "a range whose end overflows",
+            USER_SPACE_END - 0x4000,
+            u64::MAX - 0x8000,
+        ),
+    ] {
+        let args = SyscallArgs {
+            arg0: hint,
+            arg1: size,
+            arg2: MAP_READ | MAP_WRITE,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        };
+        let got = self_test_as_process(pid, || dispatch(SYS_MMAP, &args).value);
+        if got != invalid {
+            serial_println!(
+                "[syscall]   FAIL: mmap hint: {} answered {:#x}, not InvalidArgument",
+                what,
+                got
+            );
+            failed = true;
+        }
+    }
+    pcb::destroy(pid);
+    if failed {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[syscall]   mmap hint stays in the user half: OK");
+    Ok(())
+}
+
 /// An interrupt line is its holder's alone: while another task holds it, the
 /// caller's `SYS_IRQ_WAIT` and `SYS_IRQ_RELEASE` are refused with
 /// `PermissionDenied` -- the wait at once, not after blocking -- the line is
@@ -5838,14 +5859,18 @@ fn test_dispatch_irq_holder() -> KernelResult<()> {
     const HOLDER: u64 = u64::MAX - 0x1A5;
     let fail = |msg: &str| -> KernelResult<()> {
         serial_println!("[syscall]   FAIL: interrupt line holder: {}", msg);
-        // Leave the line as the boot found it, whatever failed. The count is
-        // the one recorded below, so discarding it loses nothing.
+        // Leave the line as the boot found it: the test holds it and recorded
+        // the one interrupt pending on it, so discarding the count loses
+        // nothing.
         ioapic::irq_release_if_holder(LINE, HOLDER);
         let _recorded = ioapic::irq_consume(LINE);
         Err(KernelError::InternalError)
     };
     if !ioapic::irq_claim(LINE, HOLDER) {
-        return fail("line 5 is already held, so it cannot be the test's");
+        // Someone else's line: nothing here was recorded on it, and its
+        // pending count and holder are theirs, so neither is touched.
+        serial_println!("[syscall]   FAIL: interrupt line holder: line 5 is already held");
+        return Err(KernelError::InternalError);
     }
     ioapic::irq_notify(LINE);
     let args = SyscallArgs {
@@ -5924,9 +5949,31 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
         );
         return fail("free_all_for_process left the buffer mapped", pid);
     }
+    // A munmap that touches part of a buffer releases all of it, through the
+    // tracker: freed by the unmap alone, its entry would free it again.
+    let Ok((second, _phys, second_size)) = dma::alloc_for_user(pml4, 0x8000, DmaConstraint::None)
+    else {
+        return fail("no second DMA buffer could be made", pid);
+    };
+    crate::mm::user::unmap_user_range(pml4, second, second.saturating_add(0x1000));
+    let second_page =
+        |i: usize| VirtAddr::new(second.saturating_add((i as u64).saturating_mul(4096)));
+    let left = (0..second_size / 4096)
+        .filter(|&i| page_table::translate(pml4, second_page(i)).is_some())
+        .count();
+    let tracked = dma::is_tracked(pml4, second);
+    if tracked || left > 0 {
+        serial_println!(
+            "[syscall]     tracked: {}, {} page(s) still mapped",
+            tracked,
+            left
+        );
+        return fail("a munmap of part of a buffer did not release it whole", pid);
+    }
     pcb::destroy(pid);
     serial_println!(
-        "[syscall]   DMA buffers at exit: OK ({} page(s) unmapped before freeing)",
+        "[syscall]   DMA buffers at exit: OK ({} page(s) unmapped before freeing; a partial \
+         munmap releases a buffer whole)",
         pages
     );
     Ok(())
@@ -6022,6 +6069,11 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
     Ok(())
 }
 
+/// `SYS_MEMORY_ADVISE` is wired to the Linux ABI's `madvise`, answering in
+/// Linux errnos: an unknown advice is `-EINVAL` before anything else is
+/// looked at, a misaligned address is `-EINVAL`, a valid hint of length 0 is
+/// 0, and memory-failure injection is `-EPERM`. (Its effects need a process
+/// and are tested in ring 3: `spawn::self_test_linux_madvise_fork`.)
 fn test_dispatch_memory_advise() -> KernelResult<()> {
     use super::linux::errno;
     let call = |addr: u64, len: u64, advice: u64| {
@@ -6457,6 +6509,17 @@ fn test_dispatch_rseq() -> KernelResult<()> {
     Ok(())
 }
 
+/// `SYS_POWER_RELOAD` is gated on `RELOAD_KERNEL` before it acts. In kernel
+/// context no process holds the right, so the call is refused (NoSuchProcess or
+/// PermissionDenied) before the image arguments are read -- proving the syscall
+/// is registered and gated, not ungated or gated after its arguments. What the
+/// granted arm refuses it refuses in `handlers::reload_request`, before
+/// anything is flushed or stopped, and that is checked here directly: reserved
+/// arguments, a length without its pointer and the reverse, an image or a
+/// command line over its limit, and an image that is not a kernel; and `(0, 0)`
+/// for both is the running kernel's own image, which is one, with its command
+/// line less `kexec.selftest=1`. The restart itself is the kexec boot's to
+/// prove (`python scripts/guest.py kexec`).
 fn test_dispatch_power_reload() -> KernelResult<()> {
     let probe = SyscallArgs {
         arg0: 0x1000,
@@ -6606,6 +6669,22 @@ fn test_dispatch_power_off_and_reboot() -> KernelResult<()> {
     Ok(())
 }
 
+/// The Secure Boot doors (1082-1084, design-decisions §978).
+///
+/// **ENROLL and REMOVE** change the table, so each is gated before it reads an
+/// argument. This runs on a kernel task, which has no process, so each must
+/// answer `NoSuchProcess` -- and is handed pointers a kernel task *could*
+/// read, so no argument error can explain the refusal. As with
+/// [`test_dispatch_brightness_gated`], the granted arm needs a ring-3 caller
+/// holding `ENROLL_SECUREBOOT`.
+///
+/// **VERIFY** needs no right, and a kernel task's pointers pass the
+/// user-pointer checks (`mm::user::validate_user_read`), so its whole path
+/// runs here, against a scratch table: the 16-byte answer for a hash in no
+/// list and then for one in `db`; the name kept as the bytes it was given,
+/// which here are not UTF-8; an output that cannot be written refused before
+/// anything is recorded. The verdicts themselves are
+/// `fs::secureboot::self_test`'s.
 fn test_dispatch_secureboot_doors() -> KernelResult<()> {
     use crate::fs::secureboot::{self, BootState, KeyType};
 

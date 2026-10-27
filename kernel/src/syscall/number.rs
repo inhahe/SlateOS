@@ -102,7 +102,7 @@ pub const SYS_SLEEP: u64 = 11;
 /// | `MAP_READ`    | 0   | Pages are readable                       |
 /// | `MAP_WRITE`   | 1   | Pages are writable                       |
 /// | `MAP_EXEC`    | 2   | Pages are executable                     |
-/// | `MAP_NOCACHE` | 3   | Disable CPU caching                      |
+/// | `MAP_NOCACHE` | 3   | Refused (`InvalidArgument`); see below   |
 /// | `MAP_MMIO`    | 4   | Refused (`PermissionDenied`); see below  |
 /// | `MAP_FIXED`   | 5   | Use exact vaddr from `arg0` (must be set)|
 /// | `MAP_LAZY`    | 6   | Demand-paged rather than committed       |
@@ -117,7 +117,9 @@ pub const MAP_READ: u64 = 1 << 0;
 pub const MAP_WRITE: u64 = 1 << 1;
 /// Mmap flag: pages are executable.
 pub const MAP_EXEC: u64 = 1 << 2;
-/// Mmap flag: disable CPU caching (for device MMIO).
+/// Mmap flag, refused with `InvalidArgument`: it asked for uncached memory,
+/// which for anonymous memory is an uncached alias of RAM the kernel maps
+/// write-back (undefined, Intel SDM 11.12.4). Reserved, like `MAP_MMIO`.
 pub const MAP_NOCACHE: u64 = 1 << 3;
 /// Mmap flag, refused with `PermissionDenied`: it asked to map a physical
 /// address the caller named, which the kernel cannot tell from RAM. The bit
@@ -143,9 +145,8 @@ pub const MAP_LAZY: u64 = 1 << 6;
 /// futex in every process that maps them. Always committed: a lazily faulted
 /// page would be faulted separately in each process and share nothing, so
 /// `MAP_SHARED | MAP_LAZY` is `InvalidArgument`, and the per-process lazy
-/// default does not apply. Ignored with `MAP_MMIO`, whose device memory is
-/// shared already. Since 2026-10-01; it was ignored before, so "map it
-/// shared, then fork" did not exist.
+/// default does not apply. Since 2026-10-01; it was ignored before, so "map
+/// it shared, then fork" did not exist.
 pub const MAP_SHARED: u64 = 1 << 7;
 
 /// Unmap a previously mapped region.
@@ -185,8 +186,8 @@ pub const SYS_MPROTECT: u64 = 22;
 /// `arg0`: IRQ number (0–23).
 ///
 /// The IRQ line is unmasked on the IOAPIC and the calling task is
-/// registered to receive wakeups when the IRQ fires.  Only one
-/// task may be registered per IRQ line.
+/// registered to receive wakeups when the IRQ fires.  One task holds a
+/// line: a line another task holds is `DeviceBusy`.
 ///
 /// Returns: 0 on success, negative error.
 ///
@@ -199,7 +200,8 @@ pub const SYS_IRQ_REGISTER: u64 = 30;
 ///
 /// If the pending counter is already > 0, consumes it and returns
 /// immediately.  Otherwise, blocks the calling task until the IRQ
-/// fires.
+/// fires.  Only the task holding the line may wait on it; anyone else
+/// is `PermissionDenied`, at once.
 ///
 /// Returns: number of interrupts consumed (>= 1).
 pub const SYS_IRQ_WAIT: u64 = 31;
@@ -208,7 +210,8 @@ pub const SYS_IRQ_WAIT: u64 = 31;
 ///
 /// `arg0`: IRQ number (0–23).
 ///
-/// Masks the IRQ on the IOAPIC and unregisters the task.
+/// Masks the IRQ on the IOAPIC and unregisters the task.  Only the task
+/// holding the line may release it; anyone else is `PermissionDenied`.
 ///
 /// Returns: 0 on success.
 pub const SYS_IRQ_RELEASE: u64 = 32;

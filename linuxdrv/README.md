@@ -61,7 +61,8 @@ are the bottom layer to write.
 ## Licences
 
 Linux's files, and anything generated from them -- prepared headers,
-generated stops -- are GPL-2.0, and live in a directory that says so. The
+generated stops -- are GPL-2.0, and none is committed: they are made at
+build time, outside the repository. The
 layer's own C and Rust halves are MIT, which may be linked into a GPL
 program. Each driver *executable* is therefore GPL-2.0 as a whole; the kernel
 and the native services stay MIT and reach a driver only by IPC.

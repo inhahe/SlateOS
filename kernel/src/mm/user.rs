@@ -1496,6 +1496,10 @@ pub fn write_user_items<T: Copy>(user_dst: u64, items: &[T]) -> KernelResult<()>
 /// idempotent.
 pub fn unmap_user_range(pml4: u64, start: u64, end: u64) -> usize {
     use crate::mm::frame::{self, FRAME_SIZE, PhysFrame};
+
+    // A DMA buffer the range touches goes whole, through the DMA tracker:
+    // freeing its frames here would leave its entry to free them again.
+    crate::mm::dma::release_overlapping(pml4, start, end);
     use crate::mm::tlb_gather::TlbGather;
     use page_table::{HW_PAGE_SIZE, HW_PAGES_PER_FRAME};
 

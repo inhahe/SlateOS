@@ -262,11 +262,28 @@ pub fn alloc_for_user(
 
     let hw_pages = alloc_size / 4096;
     for i in 0..hw_pages {
-        let vaddr = VirtAddr::new(user_virt + (i as u64) * 4096);
-        let paddr = phys + (i as u64) * 4096;
+        let offset = (i as u64).saturating_mul(4096);
+        let vaddr = VirtAddr::new(user_virt.saturating_add(offset));
         // SAFETY: We own the physical memory and the process's page tables.
-        unsafe {
-            page_table::map_4k_if_absent(pml4_phys, vaddr, paddr, flags)?;
+        let mapped = unsafe {
+            page_table::map_4k_if_absent(pml4_phys, vaddr, phys.saturating_add(offset), flags)
+        };
+        // A page already mapped in the range is the process's own: the buffer
+        // cannot go there, and what this loop mapped so far is taken back.
+        if !matches!(mapped, Ok(true)) {
+            let placed = DmaMappingInfo {
+                pml4_phys,
+                user_virt,
+                phys,
+                order: buf.order,
+                size: i.saturating_mul(4096),
+            };
+            unmap_user_buffer(&placed);
+            crate::tlb::flush_range(user_virt, i as u32);
+            // SAFETY: nothing maps the buffer any more and no device was
+            // given it.
+            unsafe { free(buf) }?;
+            return Err(mapped.err().unwrap_or(KernelError::AlreadyExists));
         }
     }
 
@@ -301,12 +318,7 @@ pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
     let hw_pages = unmap_user_buffer(&mapping);
     // Flush TLB for the unmapped range.
     crate::tlb::flush_range(user_virt, hw_pages as u32);
-
-    // Free the physical frames.
-    let frame = PhysFrame::from_addr(mapping.phys).ok_or(KernelError::InternalError)?;
-    // SAFETY: We just unmapped all references, and the device should
-    // have been stopped before calling free.
-    unsafe { frame::free_order(frame, mapping.order) }
+    free_block(&mapping)
 }
 
 // ---------------------------------------------------------------------------
@@ -355,51 +367,85 @@ fn untrack_dma_mapping(pml4_phys: u64, user_virt: u64) -> Option<DmaMappingInfo>
     Some(mappings.swap_remove(pos))
 }
 
-/// Free all DMA mappings for a process (called on process exit).
-pub fn free_all_for_process(pml4_phys: u64) {
-    let mut mappings = DMA_MAPPINGS.lock();
-    let to_free: alloc::vec::Vec<_> = mappings
+/// Whether the address space `pml4_phys` has a user DMA buffer at
+/// `user_virt` still tracked.
+#[must_use]
+pub fn is_tracked(pml4_phys: u64, user_virt: u64) -> bool {
+    DMA_MAPPINGS
+        .lock()
         .iter()
-        .filter(|m| m.pml4_phys == pml4_phys)
-        .cloned()
-        .collect();
-    mappings.retain(|m| m.pml4_phys != pml4_phys);
-    drop(mappings); // Release lock before freeing.
+        .any(|m| m.pml4_phys == pml4_phys && m.user_virt == user_virt)
+}
 
-    for mapping in to_free {
-        let frame = match PhysFrame::from_addr(mapping.phys) {
-            Some(f) => f,
-            // SAFETY: If from_addr fails, the mapping was corrupt — skip.
-            None => continue,
+/// Free every user DMA buffer of the address space `pml4_phys`: called as
+/// the space is cleared, by exit or exec (`page_table::clear_user_address_space`).
+pub fn free_all_for_process(pml4_phys: u64) {
+    release_overlapping(pml4_phys, 0, u64::MAX);
+}
+
+/// Free, whole, every user DMA buffer of the address space `pml4_phys` that
+/// overlaps `[start, end)`. Called before anything else unmaps or frees in
+/// that range -- `munmap`, an exec or exit clearing the space -- so that a
+/// buffer leaves only through here: unmapped, untracked and freed together.
+/// Left to the generic paths, its frames would be freed page by page while
+/// its tracking entry stayed, and freed again when the entry was.
+pub fn release_overlapping(pml4_phys: u64, start: u64, end: u64) {
+    let doomed: alloc::vec::Vec<DmaMappingInfo> = {
+        let mut mappings = DMA_MAPPINGS.lock();
+        let overlaps = |m: &DmaMappingInfo| {
+            m.pml4_phys == pml4_phys
+                && m.user_virt < end
+                && m.user_virt.saturating_add(m.size as u64) > start
         };
-        // Unmapped before it is freed: the address space's teardown frees
-        // every frame still mapped in it, so a buffer left mapped would be
-        // freed twice -- once here as a block, once there page by page -- and
-        // two later allocations could be handed the same memory. No CPU runs
-        // these tables any more, so no TLB flush is needed.
-        unmap_user_buffer(&mapping);
-        // SAFETY: Process is exiting; no device should be using the buffer,
-        // and nothing maps it any more.
-        let _ = unsafe { frame::free_order(frame, mapping.order) };
+        let doomed = mappings.iter().filter(|m| overlaps(m)).cloned().collect();
+        mappings.retain(|m| !overlaps(m));
+        doomed
+    };
+    for mapping in doomed {
+        let hw_pages = unmap_user_buffer(&mapping);
+        crate::tlb::flush_range(mapping.user_virt, hw_pages as u32);
+        // Nothing can be done about a block the allocator refuses -- it
+        // would mean the block was already free -- but it is not silent.
+        if let Err(e) = free_block(&mapping) {
+            serial_println!(
+                "[dma] user buffer {:#x} ({} bytes) could not be freed: {:?}",
+                mapping.phys,
+                mapping.size,
+                e
+            );
+        }
     }
 }
 
+/// Free a user DMA buffer's block, which nothing maps any more, and uncharge
+/// it as `alloc` charged it.
+fn free_block(mapping: &DmaMappingInfo) -> KernelResult<()> {
+    let frame = PhysFrame::from_addr(mapping.phys).ok_or(KernelError::InternalError)?;
+    // SAFETY: the caller has unmapped every page of the buffer, and the
+    // device it was for has been stopped or never had it.
+    unsafe { frame::free_order(frame, mapping.order) }?;
+    super::memtype::uncharge(super::memtype::MemType::DmaBuf, 1u64 << mapping.order);
+    Ok(())
+}
+
 /// Clear the page-table entries of a user DMA buffer, leaving its frames
-/// allocated. Returns how many 4 KiB pages it covered.
+/// allocated. An entry no longer pointing into the buffer is someone else's
+/// and is left alone. Returns how many 4 KiB pages the buffer covers.
 fn unmap_user_buffer(mapping: &DmaMappingInfo) -> usize {
     use crate::mm::page_table::{self, VirtAddr};
 
     let hw_pages = mapping.size / 4096;
     for i in 0..hw_pages {
-        let vaddr = VirtAddr::new(
-            mapping
-                .user_virt
-                .saturating_add((i as u64).saturating_mul(4096)),
-        );
-        // SAFETY: the buffer was mapped by `alloc_for_user` into this page
-        // table, and its tracking entry is gone, so nothing else unmaps it.
-        // A page already absent is not an error worth reporting: the entry
-        // is cleared either way, which is all the caller needs.
+        let offset = (i as u64).saturating_mul(4096);
+        let vaddr = VirtAddr::new(mapping.user_virt.saturating_add(offset));
+        if page_table::translate(mapping.pml4_phys, vaddr)
+            != Some(mapping.phys.saturating_add(offset))
+        {
+            continue;
+        }
+        // SAFETY: the entry maps this buffer's own page, mapped by
+        // `alloc_for_user` into this table, and the buffer's tracking entry
+        // is gone, so nothing else unmaps it. Clearing it frees nothing.
         let _ = unsafe { page_table::unmap_4k(mapping.pml4_phys, vaddr) };
     }
     hw_pages

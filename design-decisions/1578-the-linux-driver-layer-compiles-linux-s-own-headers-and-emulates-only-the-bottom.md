@@ -1,6 +1,6 @@
 ## 1578. The Linux driver layer compiles Linux's own headers and core code, and emulates only the bottom: one cooperative thread per driver process
 
-**Date:** 2026-10-27 · **Decided by:** Claude (autonomous), within the operator's §1577 · **Lane:** A
+**Date:** 2026-10-27 · **Decided by:** Claude (operator-approved scope) -- the operator chose Linux's drivers through a layer (§1577); how the layer is built is Claude's call · **Lane:** A
 
 **In short:** §1577 decided that hardware without a public standard (GPUs,
 WiFi, Bluetooth, laptop sound) runs Linux's own drivers through a
@@ -21,8 +21,9 @@ trivially true rather than emulated.
 
 1. **Linux's own headers, configured once.** The driver is compiled against
    an unmodified Linux tree of a pinned release, configured by a committed
-   `.config` and prepared by Linux's own build (`make prepare`), whose
-   generated headers are committed beside it. Only the few headers that
+   fragment (`linuxdrv/linux.config`, on top of `allnoconfig`) and prepared
+   by Linux's own build (`make prepare`, `scripts/linux-tree.sh`); nothing
+   it generates is committed. Only the few headers that
    assume kernel mode are *shadowed*, by files earlier on the include path,
    never by editing Linux's: `current`; the interrupt flags (`cli`, `sti` and
    `pushf`/`popf` of IF are privileged in a program, and in this model
@@ -69,14 +70,18 @@ trivially true rather than emulated.
    whatever became runnable.
 6. **A pinned long-term release, fetched by hash, never vendored.** The
    tree is `linux-6.18.y` (the newest long-term series on 2026-10-27),
-   pinned by version and SHA-256 in the repository and fetched from
-   kernel.org (or a local copy) into `build/`, which git ignores. Linux's
+   pinned by version and SHA-256 in the repository (`linuxdrv/linux.pin`)
+   and fetched from kernel.org into WSL's own filesystem
+   (`~/slateos-build/linux`, outside the repository: the tree has file
+   names that differ only in case, which a Windows folder holds only with
+   admin rights). Linux's
    files are never edited; a change Linux needs is a patch file applied by
    the fetch script, visible in review. Moving the pin is one commit that
-   changes the version, the hash and the regenerated headers, and the boot
+   changes the version and the hash, and the boot
    test says whether every driver still works.
-7. **The GPL boundary.** Linux's files, the generated headers and the
-   generated stops are GPL-2.0, in a directory that says so. The two halves
+7. **The GPL boundary.** Linux's files and everything generated from them --
+   the prepared headers, the generated stops -- are GPL-2.0, and none is
+   committed: they are made at build time. The two halves
    written here are MIT, compatible with linking into a GPL program. Each
    driver *executable* is GPL-2.0 as a whole; the kernel and the native
    services stay MIT and reach it only by IPC.

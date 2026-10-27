@@ -337,8 +337,8 @@ pub enum AbiMode {
 /// Per-process memory-commit policy — the per-program half of the
 /// configurable commit strategy (design-decisions.md §11, "Option 5").
 ///
-/// `mmap` requests that do **not** explicitly carry a commit bit
-/// (`MAP_LAZY` / `MAP_MMIO`) fall back to a *default* commit mode.  That
+/// `mmap` requests that do **not** explicitly carry `MAP_LAZY` fall back
+/// to a *default* commit mode.  That
 /// default is normally the system-wide setting — each ABI has its own
 /// knob: native ABI uses [`crate::sysctl::PARAM_MM_LAZY_DEFAULT`]
 /// (committed by default), Linux ABI uses
@@ -1371,8 +1371,8 @@ pub struct Process {
     pub jc_report: Option<JobControlEvent>,
     /// Per-process memory-commit policy override (design-decisions.md §11,
     /// "Option 5").  Consulted by both `mmap` paths to pick the default
-    /// commit mode for requests that don't carry an explicit `MAP_LAZY` /
-    /// `MAP_MMIO` bit.  Starts at [`MmapCommitPolicy::Inherit`] (use the
+    /// commit mode for requests that don't carry an explicit `MAP_LAZY`
+    /// bit.  Starts at [`MmapCommitPolicy::Inherit`] (use the
     /// ABI/system default); the user/Settings may flip it to force
     /// committed or lazy for one program.  Inherited verbatim across `fork`.
     pub mmap_commit_policy: MmapCommitPolicy,
@@ -8896,11 +8896,6 @@ pub fn free_deferred_address_spaces() -> usize {
 
 /// Free a process address space no CPU can be running on.
 fn free_address_space(pml4_phys: u64) {
-    // Free DMA buffers allocated for this process before destroying the
-    // address space (DMA buffers are tracked separately from normal page
-    // table entries).
-    crate::mm::dma::free_all_for_process(pml4_phys);
-
     // Free the entire user address space (mapped frames, intermediate page
     // tables, and the PML4 page).
     // SAFETY: The process is gone from the process table, every thread of it

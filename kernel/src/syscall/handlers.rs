@@ -1138,8 +1138,11 @@ pub fn sys_dma_detach(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: virtual address hint (0 = kernel picks).
 /// `arg1`: size in bytes (rounded up to frame boundary).
-/// `arg2`: flags (`MAP_READ` | `MAP_WRITE` | `MAP_EXEC` | `MAP_NOCACHE` |
-///         `MAP_LAZY` | `MAP_SHARED`). `MAP_MMIO` is refused (see below).
+/// `arg2`: flags (`MAP_READ` | `MAP_WRITE` | `MAP_EXEC` | `MAP_LAZY` |
+///         `MAP_SHARED`). `MAP_MMIO` and `MAP_NOCACHE` are refused (see
+///         below).
+/// `arg0`, when not 0, must be frame-aligned, and the whole range below
+/// `USER_SPACE_END`.
 ///
 /// Returns: virtual address of the mapped region, or negative error.
 pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
@@ -1161,6 +1164,12 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // anything about the caller is looked up, so no path past here sees it.
     if flags & MAP_MMIO != 0 {
         return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    // Uncached anonymous memory is an uncached alias of RAM the kernel's
+    // direct map caches write-back, which the Intel SDM (11.12.4) leaves
+    // undefined; with device memory no longer mapped here, nothing needs it.
+    if flags & MAP_NOCACHE != 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
     }
     // Shared anonymous memory is always committed: a page faulted in lazily
     // would be faulted separately in each process after a fork and share
@@ -1229,9 +1238,6 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     if flags & MAP_EXEC == 0 {
         page_flags |= PageFlags::NO_EXECUTE;
     }
-    if flags & MAP_NOCACHE != 0 {
-        page_flags |= PageFlags::NO_CACHE;
-    }
     // Shared anonymous memory: fork maps these frames into the child as they
     // are instead of copy-on-write, and a futex in them is keyed by the
     // physical page (`ipc::futex`). The VMA carries the flag too, so the
@@ -1249,9 +1255,18 @@ pub fn sys_mmap(args: &SyscallArgs) -> SyscallResult {
     // anonymous branches below must NOT add the VMA again.
     let mut reserved = false;
     let base_vaddr = if vaddr_hint != 0 {
-        // Caller specified an address — validate alignment.
+        // Caller specified an address — validate alignment, and that the
+        // whole range is in the user half. The kernel half is one set of
+        // tables every address space shares: a mapping made there would be
+        // in every process, and the kernel's.
         if !vaddr_hint.is_multiple_of(frame_size) {
             return SyscallResult::err(KernelError::BadAlignment);
+        }
+        if vaddr_hint
+            .checked_add(size_aligned)
+            .is_none_or(|end| end > page_table::USER_SPACE_END)
+        {
+            return SyscallResult::err(KernelError::InvalidArgument);
         }
         vaddr_hint
     } else {

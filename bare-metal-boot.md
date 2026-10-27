@@ -339,6 +339,7 @@ QEMU):
 | Storage | AHCI's 2 KiB register block, not 16 KiB-aligned, left unmapped; five other drivers mapped the same way | `page_table::map_mmio` in every driver |
 | (no NVMe found) | the PCI scan read bus 0 only; both M.2 drives sit behind root ports | `pci::scan_all` walks every bridge |
 | Storage, after USB starts | the xHCI driver reset the controller without taking it from the firmware's USB legacy support, and scanned its ports before they could show a device | `xhci::take_from_firmware` (to be confirmed on the PC) |
+| Memory manager (`FATAL: Frame allocator self-test failed`, "a Below16M frame could not be had") | the allocator's metadata -- 33 MiB for 64 GiB -- went in the first usable region, at 1 MiB, filling the whole ISA DMA zone below 16 MiB; QEMU's 3 GiB needs too little to show it | `frame::metadata_base`: above the zone where there is room |
 
 The write fence held throughout: the Windows disk registered read-only, the
 spare writable.

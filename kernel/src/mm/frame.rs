@@ -1884,6 +1884,45 @@ pub fn pcpu_cache_stats() -> PerCpuCacheStats {
     }
 }
 
+/// [`metadata_base`] on made-up memory maps: a large machine's metadata goes
+/// above the ISA DMA zone, though its first region starts at 1 MiB; one
+/// whose only room is below the zone still gets a place; one with no room
+/// gets none; a region that is not usable is passed over.
+fn self_test_metadata_base() -> KernelResult<()> {
+    let entry = |base: u64, length: u64, type_: u64| MemmapEntry {
+        base,
+        length,
+        type_,
+    };
+    let mib = 1u64 << 20;
+    let usable = memmap_type::USABLE;
+    // 64 GiB from 1 MiB, as the test PC has it: 33 MiB of metadata.
+    let big = [entry(mib, 64 << 30, usable)];
+    // 12 MiB, all below the zone's end, after a reserved region above it.
+    let small = [
+        entry(16 * mib, 64 * mib, memmap_type::RESERVED),
+        entry(mib, 12 * mib, usable),
+    ];
+    let (big, small): (alloc::vec::Vec<_>, alloc::vec::Vec<_>) =
+        (big.iter().collect(), small.iter().collect());
+    let got = [
+        metadata_base(&big, 33 * mib),
+        metadata_base(&small, 2 * mib),
+        metadata_base(&small, 13 * mib),
+    ];
+    if got != [Some(DMA_ZONE_END), Some(mib), None] {
+        serial_println!(
+            "[mm]   FAIL: metadata placed at {:x?} (want [{:#x}, {:#x}, none])",
+            got,
+            DMA_ZONE_END,
+            mib
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[mm]   Metadata placed above the ISA DMA zone where there is room: OK");
+    Ok(())
+}
+
 /// Find the highest physical address in the memory map and compute
 /// metadata placement.  Returns `(total_frames, metadata_phys, metadata_size)`.
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
@@ -1951,21 +1990,36 @@ fn plan_metadata(memory_map: &[&MemmapEntry]) -> KernelResult<(usize, u64, u64)>
         zeroed_words(total_frames) * 8
     );
 
-    // Find the first USABLE region large enough for the metadata.
-    for entry in memory_map {
-        if entry.type_ != memmap_type::USABLE {
-            continue;
-        }
-        let base = align_up(entry.base, frame_size);
-        let end = align_down(entry.base.saturating_add(entry.length), frame_size);
-        if end > base && end - base >= metadata_size {
-            serial_println!("[mm] Metadata at {:#x} - {:#x}", base, base + metadata_size);
-            return Ok((total_frames, base, metadata_size));
-        }
-    }
+    let Some(base) = metadata_base(memory_map, metadata_size) else {
+        serial_println!("[mm] ERROR: No region large enough for metadata");
+        return Err(KernelError::OutOfMemory);
+    };
+    serial_println!("[mm] Metadata at {:#x} - {:#x}", base, base + metadata_size);
+    Ok((total_frames, base, metadata_size))
+}
 
-    serial_println!("[mm] ERROR: No region large enough for metadata");
-    Err(KernelError::OutOfMemory)
+/// Where the allocator's `metadata_size` bytes of metadata go: the start of
+/// the first USABLE region with room for them above the ISA DMA zone
+/// ([`DMA_ZONE_END`]), what of a region lies below the zone's end left out;
+/// below it only when nothing above has room (a machine of little memory).
+/// A PC's first usable region starts at 1 MiB, and a large machine's
+/// metadata -- 33 MiB for 64 GiB -- put there would fill the whole zone,
+/// leaving nothing for the devices that can reach only it (the test PC's
+/// first boot of 2026-10-27 stopped on exactly that). Linux allocates such
+/// early tables from the top of memory for the same reason.
+#[allow(clippy::arithmetic_side_effects)]
+fn metadata_base(memory_map: &[&MemmapEntry], metadata_size: u64) -> Option<u64> {
+    let frame_size = FRAME_SIZE as u64;
+    [DMA_ZONE_END, 0].into_iter().find_map(|floor| {
+        memory_map
+            .iter()
+            .filter(|entry| entry.type_ == memmap_type::USABLE)
+            .find_map(|entry| {
+                let base = align_up(entry.base.max(floor), frame_size);
+                let end = align_down(entry.base.saturating_add(entry.length), frame_size);
+                (end > base && end - base >= metadata_size).then_some(base)
+            })
+    })
 }
 
 /// Populate the allocator's free lists from USABLE memory map regions,
@@ -3239,6 +3293,7 @@ pub(crate) fn wait_for_open_remote_copies() {
 #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
 pub fn self_test() -> KernelResult<()> {
     serial_println!("[mm] Running frame allocator self-test...");
+    self_test_metadata_base()?;
 
     let mut skips = crate::fs::selftest::Skips::new();
 

@@ -18,7 +18,16 @@ command's IRE bit and nothing sets it again; there is no interrupt remapping
 table. `kernel/src/msi.rs` programs a device's MSI address and data directly
 (compatibility format), which is what works with remapping off.
 
-**The proper fix:**
+**The proper fix** (taken up by lane A 2026-10-28, in three phases, each
+booted and published on its own):
+
+0. **Queued invalidation first.** The interrupt-entry cache can only be
+   invalidated through the invalidation queue (VT-d §6.5.2: there is no
+   register-based IEC invalidation), and once the queue is enabled every
+   invalidation must go through it -- the register-based context and IOTLB
+   invalidations `iommu_remap` uses today included. So: a queue page per
+   unit (IQA), QIE set, context-cache, IOTLB and wait descriptors, the
+   register paths kept only for a unit without ECAP.QI.
 - An interrupt remapping table (IRT) per IOMMU unit, its address given with
   SIRTP, and IRE set in the global command, with compatibility-format
   interrupts blocked (CFI clear) so that only remapped ones are delivered.

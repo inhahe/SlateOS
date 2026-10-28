@@ -168,6 +168,9 @@ mod ecap {
     /// Page-walk coherency (bit 0): the unit snoops the CPU caches when it
     /// reads the tables.
     pub const C: u64 = 1 << 0;
+    /// Queued invalidation (bit 1): the unit takes invalidations as
+    /// descriptors on a queue in memory ([`super::Queue`]).
+    pub const QI: u64 = 1 << 1;
     /// Pass-through (bit 6): a context entry may let a device's requests
     /// through untranslated.
     pub const PT: u64 = 1 << 6;
@@ -349,6 +352,17 @@ static DOMAIN_IDS: AtomicU32 = AtomicU32::new(u32::MAX);
 /// can reach every unit with no lock to take.
 static UNIT_REGS: [AtomicU64; MAX_UNITS] = [const { AtomicU64::new(0) }; MAX_UNITS];
 
+/// Each unit's invalidation queue, by `iommu` unit index: `None` for a unit
+/// without one (no ECAP.QI), which is invalidated through its registers.
+///
+/// Once a unit's queue is on, every invalidation it gets must come through
+/// the queue -- the register interface no longer answers -- and the
+/// interrupt-entry cache interrupt remapping needs has no register interface
+/// at all (VT-d §6.5.2). One submission at a time per unit: [`queue_run`]
+/// holds the lock from the first descriptor written until the unit has done
+/// them all, so the queue is empty whenever no one holds it.
+static QUEUES: [Mutex<Option<Queue>>; MAX_UNITS] = [const { Mutex::new(None) }; MAX_UNITS];
+
 /// Every unit with translation on snoops the CPU caches when it walks the
 /// tables (ECAP.C). When one does not -- Intel's graphics unit often does
 /// not -- every table write must be pushed out to memory ([`sync_tables`]),
@@ -525,7 +539,7 @@ pub fn init() -> KernelResult<()> {
         let Some(mmio) = *mmio else {
             continue;
         };
-        match enable_unit(mmio, root) {
+        match enable_unit(i, mmio, root) {
             Ok(()) => {
                 if let Some(regs) = UNIT_REGS.get(i) {
                     regs.store(mmio, Ordering::Release);
@@ -710,9 +724,13 @@ fn build_pass_through_tables(hhdm: u64) -> KernelResult<u64> {
     Ok(root)
 }
 
-/// Point a unit at the root table, invalidate everything it cached, and
-/// turn translation on.
-fn enable_unit(mmio: u64, root: u64) -> KernelResult<()> {
+/// Point unit `index` at the root table -- its invalidation queue turned on
+/// first, where it has one -- invalidate everything it cached, and turn
+/// translation on.
+fn enable_unit(index: usize, mmio: u64, root: u64) -> KernelResult<()> {
+    if read_reg64(mmio, reg::ECAP) & ecap::QI != 0 {
+        enable_queue(index, mmio)?;
+    }
     write_reg64(mmio, reg::RTADDR, root);
     gcmd(mmio, gcmd::SRTP, 0);
     wait_for_status(mmio, gsts::RTPS, true)?;
@@ -764,8 +782,12 @@ fn sync_tables(phys: u64, len: usize, hhdm: u64) {
     }
 }
 
-/// Invalidate every context a unit cached (CCMD, global granularity).
+/// Invalidate every context a unit cached: a global context-cache
+/// invalidation, on its queue where it has one, else through CCMD.
 fn invalidate_context_global(mmio: u64) -> KernelResult<()> {
+    if let Some(done) = queue_run(mmio, &[[desc::CONTEXT | desc::CONTEXT_GLOBAL, 0]]) {
+        return done;
+    }
     const ICC: u64 = 1 << 63;
     const GLOBAL: u64 = 0b01 << 61;
     write_reg64(mmio, reg::CCMD, ICC | GLOBAL);
@@ -778,6 +800,25 @@ fn invalidate_context_global(mmio: u64) -> KernelResult<()> {
 fn invalidate_iotlb(mmio: u64, did: Option<DomainId>, drain_first: bool) -> KernelResult<()> {
     const IVT: u64 = 1 << 63;
     let cap_val = read_reg64(mmio, reg::CAP);
+    let drain_reads = drain_first && cap_val & cap::DRD != 0;
+    let drain_writes = drain_first && cap_val & cap::DWD != 0;
+    let queued = desc::IOTLB
+        | did.map_or(desc::IOTLB_GLOBAL, |d| {
+            desc::IOTLB_DOMAIN | (u64::from(d) << desc::DID_SHIFT)
+        })
+        | if drain_reads {
+            desc::IOTLB_DRAIN_READS
+        } else {
+            0
+        }
+        | if drain_writes {
+            desc::IOTLB_DRAIN_WRITES
+        } else {
+            0
+        };
+    if let Some(done) = queue_run(mmio, &[[queued, 0]]) {
+        return done;
+    }
     let iro = (read_reg64(mmio, reg::ECAP) & ecap::IRO_MASK) >> ecap::IRO_SHIFT;
     let iotlb = iro.saturating_mul(16).saturating_add(8);
     let granularity = match did {
@@ -785,10 +826,10 @@ fn invalidate_iotlb(mmio: u64, did: Option<DomainId>, drain_first: bool) -> Kern
         None => 0b01 << 60,
     };
     let mut drain = 0;
-    if drain_first && cap_val & cap::DRD != 0 {
+    if drain_reads {
         drain |= 1 << 49;
     }
-    if drain_first && cap_val & cap::DWD != 0 {
+    if drain_writes {
         drain |= 1 << 48;
     }
     write_reg64(mmio, iotlb, IVT | granularity | drain);
@@ -810,6 +851,205 @@ fn poll_clear(mmio: u64, offset: u64, bit: u64) -> KernelResult<()> {
         bit
     );
     Err(KernelError::TimedOut)
+}
+
+// ---------------------------------------------------------------------------
+// Queued invalidation (VT-d §6.5.2)
+// ---------------------------------------------------------------------------
+
+/// Invalidation descriptors, 128 bits each: the low qword's fields. The high
+/// qword is 0 for every kind here but the wait, where it is the address the
+/// status is written to.
+mod desc {
+    /// Context-cache invalidation (type 1), global granularity.
+    pub const CONTEXT: u64 = 0x1;
+    pub const CONTEXT_GLOBAL: u64 = 0b01 << 4;
+    /// IOTLB invalidation (type 2): global, or one domain's.
+    pub const IOTLB: u64 = 0x2;
+    pub const IOTLB_GLOBAL: u64 = 0b01 << 4;
+    pub const IOTLB_DOMAIN: u64 = 0b10 << 4;
+    pub const IOTLB_DRAIN_WRITES: u64 = 1 << 6;
+    pub const IOTLB_DRAIN_READS: u64 = 1 << 7;
+    /// Where a domain id goes in a context or IOTLB descriptor.
+    pub const DID_SHIFT: u32 = 16;
+    /// Invalidation wait (type 5): write the status (bits 63:32) to the
+    /// address in the high qword once every descriptor before it is done
+    /// (SW), and fence what follows behind it (FN).
+    pub const WAIT: u64 = 0x5;
+    pub const WAIT_STATUS_WRITE: u64 = 1 << 5;
+    pub const WAIT_FENCE: u64 = 1 << 6;
+    pub const WAIT_STATUS_SHIFT: u32 = 32;
+}
+
+/// FSTS's invalidation errors: a descriptor the unit could not take (IQE),
+/// a completion it could not report (ICE), a device that never answered a
+/// device-TLB invalidation (ITE). Each is cleared by writing it back.
+const FSTS_QUEUE_ERRORS: u32 = (1 << 4) | (1 << 5) | (1 << 6);
+
+/// Descriptors on one queue: one 4 KiB page of 16-byte descriptors (IQA's
+/// size field 0).
+const QUEUE_ENTRIES: u32 = 256;
+
+/// One unit's invalidation queue.
+struct Queue {
+    /// The unit's registers.
+    mmio: u64,
+    /// The descriptor page, and the page the wait descriptors write their
+    /// status to (its first word).
+    descs_phys: u64,
+    status_phys: u64,
+    /// Where the next descriptor goes.
+    tail: u32,
+    /// What the last wait wrote; the next writes one more.
+    seq: u32,
+}
+
+/// Give unit `index` an invalidation queue and turn it on: a descriptor page
+/// and a status page, IQT at 0 and IQA at the page -- 128-bit descriptors,
+/// one page of them -- then QIE.
+fn enable_queue(index: usize, mmio: u64) -> KernelResult<()> {
+    let slot = QUEUES.get(index).ok_or(KernelError::InvalidArgument)?;
+    let descs_phys = page_table::alloc_pt_page()?;
+    let status_phys = match page_table::alloc_pt_page() {
+        Ok(p) => p,
+        Err(e) => {
+            // SAFETY: just taken from the pool; nothing refers to it yet.
+            unsafe { page_table::free_pt_page(descs_phys) };
+            return Err(e);
+        }
+    };
+    write_reg64(mmio, reg::IQT, 0);
+    write_reg64(mmio, reg::IQA, descs_phys);
+    gcmd(mmio, gcmd::QIE, 0);
+    if let Err(e) = wait_for_status(mmio, gsts::QIES, true) {
+        // SAFETY: the unit never turned the queue on, so it holds neither.
+        unsafe {
+            page_table::free_pt_page(descs_phys);
+            page_table::free_pt_page(status_phys);
+        }
+        return Err(e);
+    }
+    *slot.lock() = Some(Queue {
+        mmio,
+        descs_phys,
+        status_phys,
+        tail: 0,
+        seq: 0,
+    });
+    serial_println!("[iommu_remap]   Queued invalidation on");
+    Ok(())
+}
+
+/// Put `descs` on unit `mmio`'s invalidation queue, with a wait behind them,
+/// and return once the unit has done them all: `None` when the unit has no
+/// queue, which the caller then invalidates through its registers.
+///
+/// # Errors
+///
+/// `TimedOut` when the wait never completes; `InternalError` when the unit
+/// reports an invalidation error (FSTS), which is cleared.
+fn queue_run(mmio: u64, descs: &[[u64; 2]]) -> Option<KernelResult<()>> {
+    let slot = QUEUES
+        .iter()
+        .find(|q| q.lock().as_ref().is_some_and(|q| q.mmio == mmio))?;
+    let mut guard = slot.lock();
+    let q = guard.as_mut()?;
+    let Some(hhdm) = page_table::hhdm() else {
+        return Some(Err(KernelError::NotSupported));
+    };
+    // One more than the last, never 0: the status page starts at 0, and the
+    // word is reset to 0 before each run.
+    q.seq = q.seq.wrapping_add(1).max(1);
+    let status = q.status_phys.wrapping_add(hhdm) as *mut u32;
+    // SAFETY: the status page is ours, and the unit writes it only for a
+    // wait on this queue, none of which is outstanding while we hold it.
+    unsafe { core::ptr::write_volatile(status, 0) };
+    let wait = [
+        desc::WAIT
+            | desc::WAIT_STATUS_WRITE
+            | desc::WAIT_FENCE
+            | (u64::from(q.seq) << desc::WAIT_STATUS_SHIFT),
+        q.status_phys,
+    ];
+    let ring = q.descs_phys.wrapping_add(hhdm) as *mut [u64; 2];
+    for d in descs.iter().chain(core::iter::once(&wait)) {
+        // SAFETY: `tail` < QUEUE_ENTRIES, inside the descriptor page; the
+        // queue is empty while we hold it (`QUEUES`), so the unit is not
+        // reading the entry.
+        unsafe { core::ptr::write_volatile(ring.add(q.tail as usize), *d) };
+        q.tail = q.tail.wrapping_add(1) % QUEUE_ENTRIES;
+    }
+    sync_tables(q.descs_phys, IOMMU_PAGE_SIZE, hhdm);
+    sync_tables(q.status_phys, 64, hhdm);
+    write_reg64(mmio, reg::IQT, u64::from(q.tail) << 4);
+    for _ in 0..INVALIDATION_POLLS {
+        sync_tables(q.status_phys, 64, hhdm);
+        // SAFETY: as above.
+        if unsafe { core::ptr::read_volatile(status) } == q.seq {
+            return Some(Ok(()));
+        }
+        let errors = read_reg32(mmio, reg::FSTS) & FSTS_QUEUE_ERRORS;
+        if errors != 0 {
+            write_reg32(mmio, reg::FSTS, errors);
+            serial_println!(
+                "[iommu_remap] invalidation queue error: FSTS {:#x}, head {:#x}",
+                errors,
+                read_reg64(mmio, reg::IQH)
+            );
+            return Some(Err(KernelError::InternalError));
+        }
+        core::hint::spin_loop();
+    }
+    serial_println!("[iommu_remap] Timeout waiting for the invalidation queue");
+    Some(Err(KernelError::TimedOut))
+}
+
+/// Every unit on that can queue invalidations has its queue on, and a run
+/// of a wait alone, and of each invalidation this module makes, completes:
+/// the queue is what every invalidation goes through, so one that stopped
+/// answering would stop every map and unmap.
+fn queue_test() -> KernelResult<()> {
+    let mut queued = 0u32;
+    for (i, regs) in UNIT_REGS.iter().enumerate() {
+        let mmio = regs.load(Ordering::Acquire);
+        if mmio == 0 {
+            continue;
+        }
+        let can = read_reg64(mmio, reg::ECAP) & ecap::QI != 0;
+        let has = QUEUES.get(i).is_some_and(|q| q.lock().is_some());
+        if can != has {
+            serial_println!(
+                "[iommu_remap]   FAIL: unit {} can queue invalidations: {}, has a queue: {}",
+                i,
+                can,
+                has
+            );
+            return Err(KernelError::InternalError);
+        }
+        if !has {
+            continue;
+        }
+        let runs = [
+            queue_run(mmio, &[]),
+            Some(invalidate_context_global(mmio)),
+            Some(invalidate_iotlb(mmio, None, true)),
+            Some(invalidate_iotlb(mmio, Some(PASS_THROUGH_DID), false)),
+        ];
+        if runs.iter().any(|r| !matches!(r, Some(Ok(())))) {
+            serial_println!(
+                "[iommu_remap]   FAIL: unit {}'s invalidation queue: {:?}",
+                i,
+                runs
+            );
+            return Err(KernelError::InternalError);
+        }
+        queued = queued.saturating_add(1);
+    }
+    serial_println!(
+        "[iommu_remap]   Queued invalidation: {} unit(s), a wait and each invalidation completed: OK",
+        queued
+    );
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -2107,6 +2347,7 @@ pub fn self_test() -> KernelResult<()> {
     // given a domain is translated by it until it is detached.
     if is_active() {
         remap_live_test()?;
+        queue_test()?;
     }
 
     serial_println!("[iommu_remap] Self-test PASSED");

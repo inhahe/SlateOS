@@ -895,7 +895,11 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             serial_println!(
                 "[selftest]   FAIL: selftest.only={:?} {} {:?}",
                 core::str::from_utf8(given),
-                if matches { "should name" } else { "should not name" },
+                if matches {
+                    "should name"
+                } else {
+                    "should not name"
+                },
                 name
             );
             return Err(crate::error::KernelError::InternalError);

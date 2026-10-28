@@ -3042,7 +3042,21 @@ fn restore_on(con: &mut ConsoleInner, snap: &ConsoleSnapshot) {
         con.screen_buf.resize(cells, ScrollCell::EMPTY);
     }
 
-    // Repaint the entire framebuffer from the screen buffer.
+    repaint_on(con);
+
+    // Reset ANSI parser to clean state so the restored session doesn't
+    // inherit a partial escape sequence from the previous session.
+    con.ansi_reset();
+}
+
+/// Paint the console's part of the framebuffer again from its text buffer:
+/// every cell, the hint row, and the margins right of the last column and
+/// below the last row, which take the background. Whatever was drawn there
+/// since is covered. Nothing, for a console without a framebuffer.
+fn repaint_on(con: &ConsoleInner) {
+    if !con.initialized || con.fb_addr == 0 {
+        return;
+    }
     let fb = con.fb_addr;
     let pitch = con.fb_pitch;
     let cols = con.cols;
@@ -3063,10 +3077,36 @@ fn restore_on(con: &mut ConsoleInner, snap: &ConsoleSnapshot) {
         }
     }
     draw_hint(con);
+    let text_width = cols.saturating_mul(GLYPH_WIDTH);
+    let text_height = rows
+        .saturating_add(u32::from(con.hint.is_some()))
+        .saturating_mul(GLYPH_HEIGHT);
+    for y in 0..con.own_height {
+        let from = if y < text_height { text_width } else { 0 };
+        for x in from..con.fb_width {
+            put_pixel(fb, pitch, x, y, con.default_bg);
+        }
+    }
+}
 
-    // Reset ANSI parser to clean state so the restored session doesn't
-    // inherit a partial escape sequence from the previous session.
-    con.ansi_reset();
+/// Lend the screen to `f`, which draws on it without taking it -- a display
+/// driver's self-test, setting modes and showing its own frames on the
+/// framebuffer the console and the kernel's log pane are drawn on -- and
+/// give it back afterwards: the console repainted from its text, and the
+/// log pane begun again at its top (`screenlog::resume`). Without this the
+/// test's last frame stays wherever neither has drawn since, which on a
+/// firmware framebuffer is most of the screen.
+///
+/// The pane draws nothing while `f` runs, so it neither covers a frame `f`
+/// reads back nor is covered by one; the lines logged meanwhile are on the
+/// serial log only. The console is not held back: what it draws meanwhile
+/// is in its text buffer too, and the repaint draws it again.
+pub fn lend_display<R>(f: impl FnOnce() -> R) -> R {
+    crate::screenlog::pause();
+    let result = f();
+    repaint_on(&CONSOLE.lock_irqsave());
+    crate::screenlog::resume();
+    result
 }
 
 /// Take ownership of the global scrollback buffer, replacing it with
@@ -3129,6 +3169,13 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         crate::serial_println!("[console]   FAIL: hint row: {}", what);
         return Err(crate::error::KernelError::InternalError);
     }
+    if let Err(what) = test_repaint() {
+        crate::serial_println!("[console]   FAIL: repaint: {}", what);
+        return Err(crate::error::KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[console]   repaint: text, blank cells, margins and the hint row drawn again over a test pattern: OK"
+    );
     crate::serial_println!(
         "[console]   hint row: the console a row shorter, its text moved up, scrolled \
          above the hint and never over it, given back blank: OK"
@@ -3477,6 +3524,56 @@ fn test_hint_row() -> Result<(), &'static str> {
     show_hint_on(&mut tiny, "hint");
     if tiny.rows != 1 || tiny.hint.is_some() {
         return Err("a console of one row gave its only row to a hint");
+    }
+    Ok(())
+}
+
+/// [`lend_display`]'s repaint ([`repaint_on`]), on a scratch console of 6
+/// columns by 2 rows on a framebuffer half a glyph wider and a row taller,
+/// so that it has margins: a test pattern drawn over all of it -- text,
+/// blank cells and margins -- must leave exactly the pixels the console drew.
+fn test_repaint() -> Result<(), &'static str> {
+    const COLS: u32 = 6;
+    const ROWS: u32 = 2;
+    const WIDTH: u32 = COLS * GLYPH_WIDTH + GLYPH_WIDTH / 2;
+    const HEIGHT: u32 = (ROWS + 1) * GLYPH_HEIGHT;
+    const PIXELS: usize = (WIDTH * HEIGHT) as usize;
+    const PATTERN: u32 = 0x0012_3456;
+    let mut fb = alloc::vec![DEFAULT_BG; PIXELS];
+    let mut c = ConsoleInner::scratch(COLS, ROWS, &mut fb).ok_or("no scratch console")?;
+    c.fb_width = WIDTH;
+    c.fb_height = HEIGHT;
+    c.own_height = HEIGHT;
+    c.fb_pitch = WIDTH * 4;
+    let base = c.fb_addr as *mut u32;
+    let pixels = || -> alloc::vec::Vec<u32> {
+        // SAFETY: `base` is `fb`'s, which outlives the test, and every index
+        // is inside its PIXELS.
+        (0..PIXELS).map(|i| unsafe { base.add(i).read() }).collect()
+    };
+    let paint = |value: u32| {
+        // SAFETY: as for `pixels`.
+        (0..PIXELS).for_each(|i| unsafe { base.add(i).write(value) });
+    };
+    for b in b"ab\r\nc" {
+        putchar_on(&mut c, *b);
+    }
+    let drawn = pixels();
+    if !drawn.contains(&DEFAULT_FG) {
+        return Err("the console drew no text to repaint");
+    }
+    paint(PATTERN);
+    repaint_on(&c);
+    if pixels() != drawn {
+        return Err("a repaint did not cover a test pattern with what the console holds");
+    }
+    // With the hint shown, its row is the console's too.
+    show_hint_on(&mut c, "hint");
+    let drawn = pixels();
+    paint(PATTERN);
+    repaint_on(&c);
+    if pixels() != drawn {
+        return Err("a repaint with the hint shown did not draw what was there");
     }
     Ok(())
 }

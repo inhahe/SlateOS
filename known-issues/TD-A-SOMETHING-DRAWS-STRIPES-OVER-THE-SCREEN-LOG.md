@@ -1,33 +1,43 @@
 ## TD-A-SOMETHING-DRAWS-STRIPES-OVER-THE-SCREEN-LOG (lane A, 2026-10-27) — OPEN
 
-**Status:** OPEN -- the drawer is not yet identified.
+**Status:** OPEN -- found and fixed on lane-a-wip (`console::lend_display`),
+awaiting a boot on main.
 
 **In short:** on the test PC, with the kernel's log on the screen
-(`log.screen=1`), something draws coloured vertical stripes -- short
-gradients, green to red and blue to violet -- over the right half of the log
-pane, a few rows at a time, and redraws them as the system runs. The log text
-on the left stays readable. Whatever draws them writes the framebuffer without
-taking the display: a mode set or page flip would have stopped the pane
-(`console::hide_hint` -> `screenlog::stop`). Nothing else is known to be wrong
-with the boot.
+(`log.screen=1`), coloured vertical stripes -- short gradients, green to red
+and blue to violet -- covered the right half of the log pane for the rest of
+the boot. They were the kernel's own DRM self-test's test pattern, left on the
+screen when the test finished. The log text on the left stayed readable;
+nothing else was wrong with the boot.
 
 **Seen:** the test PC behind the PiKVM, boots of d7261a3c5 and 6b12ad112 on
-2026-10-27 (`bare-metal-boot.md` §9), from the benchmark suite on (after the
-shell prompt) for as long as the system ran -- 20 minutes. Screenshots of the
-d7261a3c5 boot were in `build/pikvm/watch-d7261/` on the operator's machine.
+2026-10-27 (`bare-metal-boot.md` §9). Screenshots of the d7261a3c5 boot are in
+`build/pikvm/watch-d7261/` on the operator's machine. Counting their colourful
+pixels: none until `watch-006`, then a screenful at once, shrinking over the
+next three frames as the pane wrote over its rows, and from `watch-010` on
+exactly the same count in every frame to the end. So the stripes were drawn
+once and never again -- not redrawn as the system ran, as this entry first
+said.
 
-**What it is not:** nothing in `kernel/src` draws gradients (searched for
-gradient, hue, rainbow and colour-bar drawing); the log pane draws only glyphs
-in three colours. So the likely source is a userspace program or test drawing
-to the framebuffer through a mapping of it -- which would also be drawing over
-a desktop, were there one.
+**What drew them:** `drm::self_test`, which on the test PC (Intel UHD 630,
+no native display driver) tests the firmware-framebuffer backend: its mode
+sets, page flips and plane compositions (`drm/compose.rs`, `pattern_a`:
+`(x & 0xFFF) << 12 | (y & 0xFFF)`, which is green ramps 16 pixels wide, red
+rising across them and blue down the screen) are copied straight to the
+framebuffer the console and the log pane are drawn on. The test drives the
+device directly, not through the system calls whose mode sets and flips stop
+the pane (`console::hide_hint`), so the pane went on drawing -- each row only
+as far as its text reaches, which left the pattern beside the text. Turning
+the CRTC off at the end blanks nothing on a firmware framebuffer. The search
+that missed it looked for gradient, hue and rainbow drawing, and the pattern
+is an arithmetic one.
 
-**How to find it:** a QEMU boot with `log.screen=1` and a monitor screendump
-after the benchmarks, if QEMU's framebuffer shows the same; otherwise the full
-serial log from the test PC's serial card (`log.pci_serial=1`, once fitted),
-read for what runs when the stripes appear. Then the owner lane decides
-whether that program should take the display first (and so stop the pane) or
-not draw to the screen at all during a boot.
+**The fix:** `console::lend_display` runs the DRM self-test with the pane
+paused (`screenlog::pause`), so the pane neither draws into frames the test
+reads back nor is covered by them, then repaints the console from its text
+and begins the pane again, blank, at its top (`screenlog::resume`). The lines
+logged during the test are on the serial log only.
 
-**Where:** unknown; the pane is `kernel/src/screenlog.rs`, which stops only
-when the display is taken.
+**Where:** `kernel/src/console.rs` (`lend_display`, `repaint_on`),
+`kernel/src/screenlog.rs` (`pause`, `resume`, `Pane::restart`),
+`kernel/src/drm/mod.rs` (`self_test`).

@@ -1579,7 +1579,18 @@ pub fn init() {
 // ---------------------------------------------------------------------------
 
 /// Run DRM subsystem self-tests.
+///
+/// They set modes and show their own frames on the primary device, which on
+/// a machine with no native display driver is the firmware framebuffer the
+/// console and the kernel's log pane are drawn on: so they borrow the screen
+/// (`console::lend_display`), and the console and the pane are drawn again
+/// afterwards rather than left under the last test pattern.
 pub fn self_test() -> KernelResult<()> {
+    crate::console::lend_display(self_test_on_screen)
+}
+
+/// [`self_test`], on a screen lent to it.
+fn self_test_on_screen() -> KernelResult<()> {
     serial_println!("[drm] Running self-test...");
 
     // 1. At least one device is registered.

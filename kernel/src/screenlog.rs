@@ -18,10 +18,14 @@
 //!
 //! It stops for good when something takes the display (`console::hide_hint`,
 //! called on every mode set and page flip), so it never draws over a
-//! desktop. Escape sequences are dropped, and a multi-byte UTF-8 character
-//! is drawn as `~`: the font has ASCII only.
+//! desktop. Something that only borrows the screen -- a display driver's
+//! self-test, which shows its own frames on it -- pauses the pane instead
+//! (`console::lend_display`), and the pane begins again, blank, after it.
+//!
+//! Escape sequences are dropped, and a multi-byte UTF-8 character is drawn
+//! as `~`: the font has ASCII only.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use spin::Mutex;
 
 /// Glyph cell size in pixels, as the console's font has them.
@@ -50,6 +54,10 @@ struct Pane {
     top: u32,
     cols: u32,
     rows: u32,
+    /// The framebuffer's width and height in pixels: what [`Pane::blank`]
+    /// clears, rows `top..height`.
+    width: u32,
+    height: u32,
     /// The row the next line is drawn at.
     row: u32,
     /// How many columns of each row hold text: what a later line there
@@ -68,6 +76,9 @@ struct Pane {
 /// The pane draws: set once it is placed, cleared for good by [`stop`].
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 static PANE: Mutex<Option<Pane>> = Mutex::new(None);
+/// How many [`pause`]s are not yet [`resume`]d: the pane draws nothing while
+/// any is.
+static PAUSED: AtomicU32 = AtomicU32::new(0);
 
 /// Whether this boot's command line asks for the pane: `log.screen=1`.
 #[must_use]
@@ -83,16 +94,16 @@ pub fn requested() -> bool {
 /// # Safety
 ///
 /// `fb..fb + pitch * height` must be the framebuffer, mapped writable, and
-/// nothing else may draw at rows `top..height` while the pane is active.
+/// nothing else may draw at rows `top..height` while the pane is active,
+/// unless it is [`pause`]d.
 pub unsafe fn start(fb: u64, pitch: u32, width: u32, top: u32, height: u32) {
     let cols = (width / GLYPH_WIDTH).min(MAX_COLS as u32);
     let rows = (height.saturating_sub(top) / GLYPH_HEIGHT).min(MAX_ROWS as u32);
     if cols == 0 || rows < 2 {
         return;
     }
-    let mut pane = Pane::new(fb, pitch, top, cols, rows);
-    pane.blank(width, height);
-    pane.mark(0);
+    let mut pane = Pane::new(fb, pitch, top, cols, rows, width, height);
+    pane.restart();
     *PANE.lock() = Some(pane);
     ACTIVE.store(true, Ordering::Release);
 }
@@ -108,13 +119,35 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
+/// Draw nothing until the matching [`resume`]: something is about to draw
+/// on the screen for a while without taking it (`console::lend_display`).
+/// The lines logged meanwhile are left to the serial log.
+pub fn pause() {
+    PAUSED.fetch_add(1, Ordering::AcqRel);
+}
+
+/// Undo a [`pause`]. The last one outstanding begins the pane again: its
+/// rows cleared, whatever was drawn over them with them, and the next line
+/// at its top. Nothing is drawn once the pane has [`stop`]ped.
+pub fn resume() {
+    let mut guard = PANE.lock();
+    let previous = PAUSED.fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(previous > 0, "screenlog::resume without a pause");
+    if previous == 1
+        && active()
+        && let Some(pane) = guard.as_mut()
+    {
+        pane.restart();
+    }
+}
+
 /// Bytes just written to the serial log: each line they complete is drawn.
 ///
 /// Called only from the serial log's own print path, under its protocol.
 /// A print nested inside another (an exception that interrupted this CPU
 /// while it drew) finds the pane busy and is left to the serial log.
 pub fn feed(bytes: &[u8]) {
-    if !active() {
+    if !active() || PAUSED.load(Ordering::Acquire) != 0 {
         return;
     }
     let Some(mut guard) = PANE.try_lock() else {
@@ -127,14 +160,17 @@ pub fn feed(bytes: &[u8]) {
 
 impl Pane {
     /// A pane of `cols` by `rows` glyph cells, from pixel row `top` of the
-    /// framebuffer at `fb`, `pitch` bytes a pixel row; nothing drawn yet.
-    fn new(fb: u64, pitch: u32, top: u32, cols: u32, rows: u32) -> Self {
+    /// framebuffer at `fb`, `pitch` bytes a pixel row, `width` by `height`
+    /// pixels; nothing drawn yet.
+    fn new(fb: u64, pitch: u32, top: u32, cols: u32, rows: u32, width: u32, height: u32) -> Self {
         Self {
             fb,
             pitch,
             top,
             cols,
             rows,
+            width,
+            height,
             row: 0,
             row_len: [0; MAX_ROWS],
             line: [0; MAX_COLS],
@@ -144,11 +180,12 @@ impl Pane {
         }
     }
 
-    /// Paint the pane's pixel rows, `top` down to `height`, `width` pixels
-    /// across, the background: a line is drawn only as far as its text
+    /// Paint the pane's pixel rows, `top` down to the framebuffer's height,
+    /// all its width, the background: a line is drawn only as far as its text
     /// reaches, so whatever the screen held before -- a loader's image, the
     /// previous kernel's desktop after a kexec -- would show beside it.
-    fn blank(&self, width: u32, height: u32) {
+    fn blank(&self) {
+        let (width, height) = (self.width, self.height);
         // The background is black, all zero bytes: a row is one fill, as wide
         // as the CPU stores, rather than a store a pixel -- a 4K screen's pane
         // is millions of pixels.
@@ -163,6 +200,17 @@ impl Pane {
             // `top..height`).
             unsafe { core::ptr::write_bytes(row as *mut u8, 0, row_bytes) };
         }
+    }
+
+    /// Begin the pane afresh: its rows blank, no line half assembled, and
+    /// the marker at the top, where the next line goes.
+    fn restart(&mut self) {
+        self.blank();
+        self.row_len = [0; MAX_ROWS];
+        self.len = 0;
+        self.escape = false;
+        self.row = 0;
+        self.mark(0);
     }
 
     /// Assemble `bytes` into lines, drawing each one completed.
@@ -331,11 +379,19 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
     let fb = buf
         .get_mut(skip..skip.saturating_add(PIXELS))
         .ok_or("no framebuffer")?;
-    let mut pane = Pane::new(fb.as_mut_ptr() as u64, WIDTH * 4, 0, COLS, ROWS);
+    let mut pane = Pane::new(
+        fb.as_mut_ptr() as u64,
+        WIDTH * 4,
+        0,
+        COLS,
+        ROWS,
+        WIDTH,
+        ROWS * GLYPH_HEIGHT,
+    );
     if pane.wide != wide {
         return Err("the store width does not follow the framebuffer's alignment");
     }
-    pane.blank(WIDTH, ROWS * GLYPH_HEIGHT);
+    pane.blank();
     if fb.iter().any(|&p| p != BG) {
         return Err("the old image is left in the pane");
     }
@@ -385,6 +441,23 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
     pane.feed(b"\xc3\xa9\tz\n");
     if !shows(fb, 1, b"~ z ", FG) {
         return Err("a UTF-8 character or a tab is not drawn as it should be");
+    }
+    // Begun again after something drew over it (`resume`): all of it blank
+    // but the marker, at the top; a half-assembled line dropped; and the
+    // next line drawn at the top.
+    pane.feed(b"half");
+    fb.fill(STALE);
+    pane.restart();
+    if !shows(fb, 0, b"-- n", MARK) || pane.len != 0 {
+        return Err("a pane begun again has no marker at its top, or kept a half line");
+    }
+    let marker_row = (WIDTH * GLYPH_HEIGHT) as usize;
+    if fb.get(marker_row..).is_none_or(|rest| rest.iter().any(|&p| p != BG)) {
+        return Err("a pane begun again left what was drawn over it");
+    }
+    pane.feed(b"new\n");
+    if !shows(fb, 0, b"new ", FG) || !shows(fb, 1, b"-- n", MARK) {
+        return Err("the first line after a new beginning is not at the top");
     }
     Ok(())
 }

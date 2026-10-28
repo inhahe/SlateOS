@@ -1,7 +1,8 @@
-## TD-A-SOMETHING-DRAWS-STRIPES-OVER-THE-SCREEN-LOG (lane A, 2026-10-27) — OPEN
+## TD-A-SOMETHING-DRAWS-STRIPES-OVER-THE-SCREEN-LOG (lane A, 2026-10-27) — FIXED
 
-**Status:** OPEN -- found and fixed on lane-a-wip (`console::lend_display`),
-awaiting a boot on main.
+**Status:** FIXED 2026-10-28 -- on main at b58593756, booted green as
+051bf97ee (the same tree but for two lines rustfmt rewrapped). The test PC
+has not booted it yet: its next real-hardware boot is the last check.
 
 **In short:** on the test PC, with the kernel's log on the screen
 (`log.screen=1`), coloured vertical stripes -- short gradients, green to red

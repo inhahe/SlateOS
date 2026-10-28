@@ -5482,9 +5482,14 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         guards, generated stops, a boot module beside the kernel), and its
         first, `linuxdrv/hello`, runs Linux's vsprintf and an initcall in a
         process of its own (`linuxdrv::self_test`). In: kmalloc (a buddy
-        allocator, kmalloc's alignment), printk, interrupt flags, `current`,
-        jiffies' storage, randomness, initcalls. Left: everything else in
-        this item, which e1000e's inventory names
+        allocator, kmalloc's alignment), printk, WARN/BUG, interrupt flags,
+        `current`, jiffies, randomness, initcalls; and Linux's tasks as
+        coroutines on the process's one thread (§1578 rule 5) -- schedule()
+        and try_to_wake_up() under Linux's own wait queues, completions,
+        wait-on-bit and mutexes, compiled in as they are -- with kthreads,
+        schedule_timeout, msleep and delays. Left: timers, workqueues,
+        PCI and MSI, IRQs, DMA, the device model, `request_firmware`,
+        which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide

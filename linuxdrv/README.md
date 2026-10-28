@@ -65,8 +65,13 @@ linuxdrv/<name>`), where the kernel finds it (`boot::module`).
 ## Status
 
 The layer's first process runs: `hello`, Linux's headers and its own
-vsprintf in a process of their own, its initcall run, and a generated stop
-reached on purpose (`kernel/src/linuxdrv.rs`). No driver runs yet. The first,
+vsprintf in a process of their own, its initcalls run, and a generated stop
+reached on purpose (`kernel/src/linuxdrv.rs`). Linux's tasks are coroutines
+on the process's one thread (`kit/src/sched.rs`, `kit/src/task.rs`), under
+Linux's own wait queues, completions and mutexes (`emul/lx_sched.c`
+implements schedule() and try_to_wake_up() for them, and kthreads and
+sleeping); `hello` runs a kthread against a mutex held across a sleep. No
+driver runs yet. The first,
 `e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
 use 148 symbols they do not define. About 15 are Linux's generic library code
 (`lib/` string, bitmap, CRC, `vsprintf`, hexdump; `timecounter`), to be

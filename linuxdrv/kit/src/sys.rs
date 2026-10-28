@@ -37,6 +37,7 @@ core::arch::global_asm!(
 
 const SYS_EXIT: u64 = 1;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
+const SYS_SLEEP: u64 = 11;
 const SYS_GETRANDOM: u64 = 90;
 const SYS_MMAP: u64 = 20;
 const SYS_CONSOLE_WRITE: u64 = 100;
@@ -70,12 +71,22 @@ fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
 }
 
 /// Process-wide state one thread uses: see the module's documentation.
-struct Single<T>(UnsafeCell<T>);
+pub(crate) struct Single<T>(UnsafeCell<T>);
 
 // SAFETY: a driver process has one thread; nothing else reaches the cell.
 unsafe impl<T> Sync for Single<T> {}
 
 impl<T> Single<T> {
+    pub(crate) const fn new(value: T) -> Self {
+        Single(UnsafeCell::new(value))
+    }
+
+    /// A pointer to the value, for state a task switch crosses: no
+    /// reference made from it may be held across one.
+    pub(crate) const fn as_ptr(&self) -> *mut T {
+        self.0.get()
+    }
+
     /// The value, to change.
     ///
     /// # Safety
@@ -116,8 +127,19 @@ fn heap_init() -> Option<Buddy> {
 }
 
 unsafe extern "C" {
-    /// The C half: run the driver; what the process exits with.
+    /// The C half: run the driver's initcalls; what the process exits with.
     fn lx_emul_main() -> i32;
+}
+
+/// The first task's exit code, once it has one.
+static MAIN_CODE: Single<Option<i32>> = Single::new(None);
+
+/// The first task: the C half's `lx_emul_main`.
+unsafe extern "C" fn main_task(_: *mut core::ffi::c_void) {
+    // SAFETY: the C half's entry, called once.
+    let code = unsafe { lx_emul_main() };
+    // SAFETY: the one thread.
+    unsafe { *MAIN_CODE.get() = Some(code) };
 }
 
 /// The process's arguments, asked of the kernel once, kept in kmalloc's
@@ -176,12 +198,24 @@ unsafe extern "C" fn lxkit_start() -> ! {
     // SAFETY: the one thread, before any other use of the heap.
     unsafe { *HEAP.get() = Some(heap) };
     load_args();
-    // SAFETY: the C half's entry, called once.
-    let code = unsafe { lx_emul_main() };
-    exit_with(code)
+    // The C half's main runs as the first task, so that it can wait as any
+    // task does; the process ends once nothing will ever run again.
+    if crate::sched::slx_task_new(main_task, core::ptr::null_mut(), core::ptr::null_mut()) < 0 {
+        log(b"[lx] the first task could not be made\n");
+        exit_with(exit::NO_MEMORY);
+    }
+    crate::sched::run();
+    // SAFETY: the one thread; the tasks are done.
+    match unsafe { *MAIN_CODE.get() } {
+        Some(code) => exit_with(code),
+        None => {
+            log(b"[lx] every task waits on something that will never happen\n");
+            exit_with(exit::DEADLOCK)
+        }
+    }
 }
 
-fn log(text: &[u8]) {
+pub(crate) fn log(text: &[u8]) {
     syscall3(
         SYS_CONSOLE_WRITE,
         text.as_ptr() as u64,
@@ -190,7 +224,7 @@ fn log(text: &[u8]) {
     );
 }
 
-fn exit_with(code: i32) -> ! {
+pub(crate) fn exit_with(code: i32) -> ! {
     syscall3(SYS_EXIT, u64::from(code.cast_unsigned()), 0, 0);
     loop {
         core::hint::spin_loop();
@@ -274,10 +308,20 @@ pub unsafe extern "C" fn slx_random(buf: *mut u8, len: usize) {
     }
 }
 
+/// Nanoseconds of the monotonic clock.
+pub(crate) fn now_ns() -> u64 {
+    u64::try_from(syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0)).unwrap_or(0)
+}
+
+/// Sleep the process's thread for `ns` nanoseconds: no task may run.
+pub(crate) fn sleep_ns(ns: u64) {
+    syscall3(SYS_SLEEP, ns, 0, 0);
+}
+
 /// `slx_now_ns`: nanoseconds of the monotonic clock.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_now_ns() -> u64 {
-    u64::try_from(syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0)).unwrap_or(0)
+    now_ns()
 }
 
 /// `slx_argc`: how many arguments the process was given.

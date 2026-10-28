@@ -47,9 +47,10 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 }
 
 /// The layer's first process, `linuxdrv/hello`: Linux's headers and its own
-/// vsprintf in a process of their own. Run plainly, its initcall allocates,
-/// takes a spinlock with interrupts "off", prints a line formatted by Linux
-/// and frees, and the process exits 0; run with "stop", it then calls a
+/// vsprintf in a process of their own. Run plainly, its initcalls allocate,
+/// take a spinlock with interrupts "off", print a line formatted by Linux,
+/// and run a kthread against a mutex held across a sleep and a completion,
+/// and the process exits 0; run with "stop", the first then calls a
 /// function nothing defines, which the build made a generated stop, and it
 /// exits [`EXIT_STOP`]. Skipped, and recorded so, where the bootloader did
 /// not load it -- anywhere but the boot test, and after a kexec.
@@ -89,7 +90,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcall run, and a generated stop: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion), and a generated stop: OK",
         elf.len()
     );
     Ok(())

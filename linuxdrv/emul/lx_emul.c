@@ -20,6 +20,7 @@
 #include <linux/tracepoint-defs.h>
 #include <linux/random.h>
 #include <linux/notifier.h>
+#include <linux/wait_bit.h>
 
 #include "slx.h"
 
@@ -32,11 +33,11 @@ void slx_halted(void)
 }
 
 /*
- * The process's one task until there are more: what `current` names while
- * the driver's initcalls run. A plain global with this configuration (no
- * SMP), as every per-CPU variable is.
+ * The first task's record: what `current` names while the driver's
+ * initcalls run (the others' are lx_sched.c's). The per-CPU variable is a
+ * plain global with this configuration (no SMP), as every one is.
  */
-static struct task_struct lx_main_task;
+struct task_struct lx_main_task;
 DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
 
 /* Not in an interrupt, nothing disabled: what a task's count reads. */
@@ -49,6 +50,34 @@ DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
  * (`linuxdrv/link.ld`).
  */
 u64 __cacheline_aligned_in_smp jiffies_64 = INITIAL_JIFFIES;
+
+/*
+ * The Rust half's hooks, at every turn of its loop (linuxdrv/kit, sched.rs).
+ *
+ * The task whose record is `task` is about to run: it is `current`. The
+ * first task, Linux's initcalls, has no record of its own but the main one.
+ */
+void lx_emul_switch_to(struct task_struct *task)
+{
+	/*
+	 * Through a pointer to this CPU's copy: the per-CPU write macros
+	 * dispatch on the value's size, and refuse a pointer.
+	 */
+	*raw_cpu_ptr(&current_task) = task ? task : &lx_main_task;
+}
+
+/*
+ * The monotonic clock reads `now_ns`: jiffies count the ticks since the
+ * first time it was read, at HZ, from INITIAL_JIFFIES.
+ */
+void lx_emul_tick(u64 now_ns)
+{
+	static u64 start_ns;
+
+	if (!start_ns)
+		start_ns = now_ns;
+	jiffies_64 = INITIAL_JIFFIES + (now_ns - start_ns) / (NSEC_PER_SEC / HZ);
+}
 
 /*
  * kmalloc's per-size caches. Linux's inline kmalloc picks one by size and
@@ -199,10 +228,16 @@ void slx_bug(const char *file, int line)
  */
 extern initcall_entry_t __initcall_start[], __initcall_end[];
 
+/* lx_sched.c: the first task's handle, to wake it by. */
+extern int lx_main_handle;
+
 int lx_emul_main(void)
 {
 	initcall_entry_t *entry;
 
+	lx_main_handle = slx_task_current();
+	/* What Linux's sched_init() sets up before any initcall runs. */
+	wait_bit_init();
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
 		int ret = fn();

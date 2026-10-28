@@ -17,7 +17,10 @@
 
 pub mod args;
 pub mod buddy;
+pub mod task;
 
+#[cfg(target_os = "none")]
+mod sched;
 #[cfg(target_os = "none")]
 mod sys;
 
@@ -32,6 +35,8 @@ pub mod exit {
     pub const PANIC: i32 = 122;
     /// The system gave no random bytes.
     pub const NO_RANDOM: i32 = 123;
+    /// Every task waits on something that will never happen.
+    pub const DEADLOCK: i32 = 124;
     /// Linux code reached a function the layer does not implement.
     pub const STOP: i32 = 125;
     /// An initcall failed.

@@ -50,11 +50,34 @@ void slx_stop(const char *what, const void *caller) __attribute__((noreturn));
 #define SLX_EXIT_BUG 121		/* Linux code called BUG() */
 #define SLX_EXIT_PANIC 122		/* the layer's Rust half panicked */
 #define SLX_EXIT_NO_RANDOM 123		/* the system gave no random bytes */
+#define SLX_EXIT_DEADLOCK 124		/* every task waits on what will never happen */
 #define SLX_EXIT_STOP 125		/* a generated stop was reached */
 #define SLX_EXIT_INIT_FAILED 126	/* an initcall failed */
 #define SLX_EXIT_NO_MEMORY 127		/* the process's memory could not be set up */
 
-/* Implemented by the C half: run the driver; what slx_exit is given. */
+/*
+ * Tasks: coroutines on the process's one thread (design-decisions 1578
+ * rule 5), each run until it blocks, yields or returns.
+ *
+ * slx_task_new: a new runnable task that will run entry(arg); `data` is
+ * the C half's record of it (its task_struct), handed back at each switch.
+ * Its handle, or -1. slx_task_block: the running task waits until woken,
+ * or until the monotonic clock reaches `until_ns` when that is not 0.
+ * slx_task_wake: task `handle` may run again; 1 if it was waiting.
+ */
+int slx_task_new(void (*entry)(void *), void *arg, void *data);
+int slx_task_current(void);
+void slx_task_block(unsigned long long until_ns);
+void slx_task_yield(void);
+int slx_task_wake(int handle);
+
+/* Implemented by the C half, called by the Rust half. */
+/* Run the driver's initcalls, as the first task; what slx_exit is given. */
 int lx_emul_main(void);
+/* The task whose record is `task` (NULL: the first) is about to run. */
+struct task_struct;
+void lx_emul_switch_to(struct task_struct *task);
+/* The monotonic clock reads `now_ns`. */
+void lx_emul_tick(unsigned long long now_ns);
 
 #endif /* SLX_H */

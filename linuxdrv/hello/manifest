@@ -9,5 +9,13 @@ linux lib/ctype.o
 linux lib/hexdump.o
 linux lib/uuid.o
 
+# Waiting and locking, Linux's own, over the layer's scheduler.
+linux kernel/sched/wait.o
+linux kernel/sched/completion.o
+linux kernel/sched/swait.o
+linux kernel/sched/wait_bit.o
+linux kernel/locking/mutex.o
+
 layer emul/lx_emul.c
+layer emul/lx_sched.c
 layer hello/hello.c

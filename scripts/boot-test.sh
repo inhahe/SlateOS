@@ -677,6 +677,7 @@ check_linuxdrv_ran() {
     [ -f "$file" ] || return 0
     # Its line, as Linux's vsprintf formats it, and the kernel's verdict.
     if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
+        grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
         grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file"; then
         return 0
     fi

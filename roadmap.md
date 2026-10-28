@@ -5448,7 +5448,14 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         of arbitrary process memory are not built: §1579 serves the Linux
         layer from arenas; a native driver that needs them is the trigger
         (`known-issues/TD-A-DMA-SYSCALLS-MAP-ANY-MEMORY-AND-OUTLIVE-THEIR-PROCESS.md`)
-  - [ ] Its first user: Linux's `e1000e` through the layer below
+  - [ ] Its first ring-3 user: a probe driver in `linuxdrv/` (no Linux
+        code), embedded and spawned by the boot test with a `PciDevice`
+        grant for a second QEMU e1000e that no kernel driver binds: open
+        it, map BAR0 and read the MAC address, get a DMA arena, set up
+        its MSI, and exit -- proving the interface from userspace, with
+        real system calls and its exit's release, before the layer
+        stands on it
+  - [ ] Its first real user: Linux's `e1000e` through the layer below
 - [ ] `[A]` **Linux driver compatibility layer** -- Linux's own drivers, built
   from unmodified source, for hardware with no standard interface (GPUs, WiFi,
   Bluetooth, laptop audio DSPs); handwritten native drivers stay for the

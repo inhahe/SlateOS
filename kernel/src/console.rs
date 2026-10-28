@@ -3637,7 +3637,10 @@ fn test_repaint() -> Result<(), &'static str> {
     if after.get(..own) != drawn.get(..own) {
         return Err("a console beside the pane did not repaint its own rows");
     }
-    if after.get(own..).is_none_or(|rest| rest.iter().any(|&p| p != PATTERN)) {
+    if after
+        .get(own..)
+        .is_none_or(|rest| rest.iter().any(|&p| p != PATTERN))
+    {
         return Err("a console beside the pane repainted the pane's rows");
     }
     // A console with no text kept yet covers what was drawn with its
@@ -3645,7 +3648,10 @@ fn test_repaint() -> Result<(), &'static str> {
     c.screen_buf = Vec::new();
     paint(PATTERN);
     repaint_on(&c);
-    if pixels().get(..own).is_none_or(|mine| mine.iter().any(|&p| p != DEFAULT_BG)) {
+    if pixels()
+        .get(..own)
+        .is_none_or(|mine| mine.iter().any(|&p| p != DEFAULT_BG))
+    {
         return Err("a console with no text kept left what was drawn over it");
     }
     Ok(())

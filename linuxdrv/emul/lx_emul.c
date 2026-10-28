@@ -21,6 +21,7 @@
 #include <linux/random.h>
 #include <linux/notifier.h>
 #include <linux/wait_bit.h>
+#include <linux/cpumask.h>
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -52,6 +53,19 @@ struct task_struct lx_main_task = { .usage = REFCOUNT_INIT(1) };
 struct task_struct lx_idle_task = { .usage = REFCOUNT_INIT(1) };
 
 DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
+
+/*
+ * The process's one CPU, as Linux's kernel/cpu.c describes the CPUs it
+ * has: possible, present, online and active, and the one-bit mask
+ * get_cpu_mask() hands out for it (cpu_bit_bitmap's row 1 + cpu).
+ */
+struct cpumask __cpu_possible_mask __ro_after_init = { CPU_BITS_ALL };
+struct cpumask __cpu_present_mask __read_mostly = { CPU_BITS_ALL };
+struct cpumask __cpu_online_mask __read_mostly = { CPU_BITS_ALL };
+struct cpumask __cpu_active_mask __read_mostly = { CPU_BITS_ALL };
+const unsigned long cpu_bit_bitmap[BITS_PER_LONG + 1][BITS_TO_LONGS(NR_CPUS)] = {
+	[1] = { 1UL },
+};
 
 /* Not in an interrupt, nothing disabled: what a task's count reads. */
 DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
@@ -158,6 +172,13 @@ void *__kmalloc_noprof(size_t size, gfp_t flags)
 }
 
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
+{
+	return lx_alloc(size, flags);
+}
+
+/* kmalloc_track_caller(), which kasprintf uses: one node, no tracking. */
+void *__kmalloc_node_track_caller_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags, int node,
+					 unsigned long caller)
 {
 	return lx_alloc(size, flags);
 }
@@ -298,6 +319,8 @@ int lx_emul_main(void)
 	initcall_entry_t *entry;
 
 	lx_main_handle = slx_task_current();
+	if (lx_start_kthreadd())
+		return SLX_EXIT_NO_MEMORY;
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
 		int ret = fn();

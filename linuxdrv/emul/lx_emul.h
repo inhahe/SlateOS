@@ -25,6 +25,8 @@ int lx_softirq_init(void);
 void lx_rcu_run(void);
 /* lx_sched.c: whether any RCU callback waits to run. */
 bool lx_rcu_pending(void);
+/* lx_sched.c: Linux's kthreadd started, as a task; 0, or -ENOMEM. */
+int lx_start_kthreadd(void);
 /* lx_emul.c: when the running task was switched to, by the monotonic clock. */
 extern u64 lx_switched_ns;
 

@@ -77,6 +77,8 @@ extern const unsigned long slx_stack_bytes, slx_guard_bytes;
 int slx_task_current(void);
 void slx_task_block(unsigned long long until_ns);
 void slx_task_yield(void);
+/* The running task ends: finished, and never run again. */
+void slx_task_exit(void) __attribute__((noreturn));
 void slx_task_wake(int handle);
 
 /* Implemented by the C half, called by the Rust half. */
@@ -97,6 +99,12 @@ int lx_emul_main(void);
 void lx_emul_switch_to(void *task, unsigned long long now_ns);
 /* The task whose record is `task` (NULL: the first) waited past its deadline. */
 void lx_emul_timed_out(void *task);
+/*
+ * Whether the task whose record is `task` waits for work rather than for
+ * an event (kthreadd, a workqueue's workers): left waiting when every other
+ * task has finished, it does not keep the process from being done.
+ */
+_Bool lx_emul_task_is_daemon(void *task);
 /*
  * A turn of the loop, outside every task, the monotonic clock reading
  * `now_ns`: jiffies, RCU callbacks, timers and softirqs seen to.

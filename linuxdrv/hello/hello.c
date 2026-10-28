@@ -49,6 +49,9 @@
 #include "../emul/slx.h"
 #include "../emul/lx_emul.h"
 
+/* Kernel threads' records not yet freed, less kthreadd's, which never is. */
+#define HELLO_KTHREADS() (lx_kthreads - 1)
+
 /* Defined nowhere: the build makes it a generated stop. */
 void lx_hello_never_defined(void);
 
@@ -369,7 +372,9 @@ static int __init hello_edges_init(void)
 
 	if (slx_argc() > 1)
 		return 0;
-	HELLO_CHECK(lx_kthreads == 0, "a stopped kthread's record was not freed");
+	/* kthread_stop() lets its record go through RCU: freed by the next turn. */
+	msleep(1);
+	HELLO_CHECK(HELLO_KTHREADS() == 0, "a stopped kthread's record was not freed");
 
 	j = jiffies;
 	HELLO_CHECK(wait_for_completion_timeout(&hello_forever, 2) == 0,
@@ -457,9 +462,9 @@ static int __init hello_edges_init(void)
 	msleep(1);
 	HELLO_CHECK(kthread_stop(k) == 5 && put_ran, "a held kthread did not run");
 	put_task_struct(k);
-	HELLO_CHECK(lx_kthreads == 1, "put_task_struct() freed before a grace period");
+	HELLO_CHECK(HELLO_KTHREADS() == 1, "put_task_struct() freed before a grace period");
 	msleep(1);
-	HELLO_CHECK(lx_kthreads == 0, "put_task_struct() never freed the record");
+	HELLO_CHECK(HELLO_KTHREADS() == 0, "put_task_struct() never freed the record");
 
 	/*
 	 * A wake queue takes over a reference its caller held, lets go of a
@@ -473,7 +478,7 @@ static int __init hello_edges_init(void)
 	wake_q_add_safe(&wake_q, k);
 	wake_up_q(&wake_q);
 	msleep(1);
-	HELLO_CHECK(queued_ran && lx_kthreads == 0, "a wake queue kept or lost a reference");
+	HELLO_CHECK(queued_ran && HELLO_KTHREADS() == 0, "a wake queue kept or lost a reference");
 
 	/* A long loop's cond_resched() lets the others run once its slice is spent. */
 	HELLO_CHECK(!IS_ERR(kthread_run(hello_quick, &resched_ran, "hello-resched")), "no kthread");
@@ -493,10 +498,12 @@ static int __init hello_edges_init(void)
 	for (i = 0; i < 100 && !(READ_ONCE(quick_ran) && READ_ONCE(held_ran)); i++)
 		usleep_range(0, 50);
 	HELLO_CHECK(quick_ran && held_ran, "usleep_range(0, 50) let no other task run");
-	HELLO_CHECK(lx_kthreads == 1,
+	HELLO_CHECK(HELLO_KTHREADS() == 1,
 		    "a kthread that ended by itself was not freed, or one still held was");
-	HELLO_CHECK(kthread_stop_put(held) == 5 && lx_kthreads == 0,
-		    "kthread_stop_put() did not hand back an ended kthread's result and free it");
+	HELLO_CHECK(kthread_stop_put(held) == 5,
+		    "kthread_stop_put() did not hand back an ended kthread's result");
+	msleep(1);
+	HELLO_CHECK(HELLO_KTHREADS() == 0, "kthread_stop_put() did not free an ended kthread");
 
 	t0 = slx_now_ns();
 	j = jiffies;

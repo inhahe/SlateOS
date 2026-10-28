@@ -111,13 +111,14 @@ impl Table {
         woken
     }
 
-    /// Whether any task is blocked: with none runnable and no deadline, one
-    /// that will never run again.
-    #[must_use]
-    pub fn any_blocked(&self) -> bool {
+    /// The blocked tasks: with none runnable and no deadline, those that
+    /// will never run again.
+    pub fn blocked(&self) -> impl Iterator<Item = usize> + '_ {
         self.states
             .iter()
-            .any(|s| matches!(s, State::Blocked { .. }))
+            .enumerate()
+            .filter(|(_, s)| matches!(s, State::Blocked { .. }))
+            .map(|(i, _)| i)
     }
 
     /// The earliest deadline a blocked task has, if any has one.
@@ -199,16 +200,22 @@ mod tests {
     }
 
     #[test]
-    fn a_table_knows_whether_any_task_waits() {
+    fn a_table_knows_which_tasks_wait() {
         let mut t = Table::new();
-        assert!(!t.any_blocked(), "empty");
-        let a = t.add().unwrap();
-        assert!(!t.any_blocked(), "runnable");
+        assert_eq!(t.blocked().count(), 0, "empty");
+        let (a, b, c) = (t.add().unwrap(), t.add().unwrap(), t.add().unwrap());
+        assert_eq!(t.blocked().count(), 0, "runnable");
         t.block(a, None);
-        assert!(t.any_blocked());
+        t.block(c, Some(9));
+        assert_eq!(t.blocked().collect::<Vec<_>>(), [a, c]);
         t.wake(a);
         t.finish(a);
-        assert!(!t.any_blocked(), "finished");
+        t.finish(b);
+        assert_eq!(
+            t.blocked().collect::<Vec<_>>(),
+            [c],
+            "finished and runnable are not"
+        );
     }
 
     #[test]

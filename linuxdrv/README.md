@@ -71,8 +71,9 @@ vsprintf in a process of their own, its initcalls run, and a generated stop
 reached on purpose (`kernel/src/linuxdrv.rs`). Linux's tasks are coroutines
 on the process's one thread (`kit/src/sched.rs`, `kit/src/task.rs`), under
 Linux's own wait queues, completions and mutexes (`emul/lx_sched.c`
-implements schedule() and try_to_wake_up() for them, kthreads, sleeping,
-and call_rcu(), whose grace period is a switch), each on a 64 KiB stack of
+implements schedule() and try_to_wake_up() for them, sleeping, call_rcu(),
+whose grace period is a switch, and the kernel_thread() and do_exit() that
+Linux's own kthread.c and its kthreadd run on), each on a 64 KiB stack of
 its own above a guard page; Linux's own timer wheel, softirqs and tasklets,
 with the loop as their tick and ksoftirqd (`emul/lx_softirq.c`,
 design-decisions 1581). `hello` runs a kthread against a mutex held across

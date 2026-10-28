@@ -35,6 +35,8 @@
 #include <linux/slab.h>
 #include <linux/wait.h>
 #include <linux/err.h>
+#include <linux/uaccess.h>
+#include <linux/cpumask.h>
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -45,17 +47,16 @@ int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags);
 /* The first task's handle. */
 int lx_main_handle = -1;
 
-/* A task the layer made: Linux's record of it, and the Rust half's handle. */
+/*
+ * A thread the layer made (kernel_thread): Linux's record of it, the Rust
+ * half's handle, and what it runs.
+ */
 struct lx_task {
 	struct task_struct task;
 	/* -1 once it has ended: its slot may be another task's by then. */
 	int handle;
-	int (*threadfn)(void *data);
-	void *data;
-	/* What its function returned; -EINTR while it has not run. */
-	int result;
-	bool should_stop;
-	struct completion exited;
+	int (*fn)(void *arg);
+	void *arg;
 };
 
 unsigned long lx_kthreads;
@@ -447,21 +448,22 @@ void __ndelay(unsigned long nsecs)
 }
 
 /*
- * Kernel threads: a task of the Rust half's per thread, which waits, as a
- * new Linux kthread does, to be woken (kthread_run wakes it), runs its
- * function unless told to stop first, and ends.
+ * Kernel threads: Linux's own kernel/kthread.c -- kthread_create(),
+ * kthread_stop(), parking, kthread workers, kthreadd -- over what Linux's
+ * fork and exit would give it, which the layer gives here: kernel_thread()
+ * makes a task with a record of its own, and do_exit() ends one.
  *
- * Its record is counted as Linux counts a task's: the thread holds a
- * reference while it lives, and kthread_stop() one while it waits for it;
- * the last let go frees it. So a thread that ends on its own is freed when
- * it ends, and a stopped one when kthread_stop() returns -- and, as in
- * Linux, a caller may stop a thread that can end on its own only while it
- * holds a reference of its own (get_task_struct, then kthread_stop_put).
+ * A record is counted as Linux counts a task's: the thread holds one
+ * reference while it lives, which do_exit() lets go; kthread_stop() holds
+ * another while it waits; the last let go frees it -- at once when it is the
+ * layer's own (lx_put_task), after an RCU grace period when Linux's
+ * put_task_struct() lets it go.
  */
 
 /*
- * The last reference to a task's record let go: a kthread's is freed. The
- * first task's is never let go.
+ * The last reference to a task's record let go: a thread's record is
+ * freed, with what kthread.c hung on it. The first task's and the idle
+ * record are never let go.
  */
 void __put_task_struct(struct task_struct *p)
 {
@@ -469,6 +471,7 @@ void __put_task_struct(struct task_struct *p)
 
 	if (WARN_ON(!t))
 		return;
+	free_kthread_struct(p);
 	lx_kthreads--;
 	kfree(t);
 }
@@ -482,8 +485,9 @@ void __put_task_struct_rcu_cb(struct rcu_head *rhp)
 /*
  * Let go of a reference to a task's record. Linux's put_task_struct()
  * frees the last only after an RCU grace period, for the other CPUs that
- * may be walking the task list; a driver process has neither, and frees it
- * at once, as Linux's put_task_struct_many() does.
+ * may be walking the task list; a driver process has neither, and the
+ * layer's own drops free it at once, as Linux's put_task_struct_many()
+ * does.
  */
 static void lx_put_task(struct task_struct *p)
 {
@@ -491,42 +495,38 @@ static void lx_put_task(struct task_struct *p)
 		__put_task_struct(p);
 }
 
-static void lx_kthread_entry(void *arg)
+/* A thread's first and only frame: its function, then its end. */
+static void lx_thread_entry(void *arg)
 {
 	struct lx_task *t = arg;
 
-	/* Until kthread_run(), or kthread_stop(), wakes it; nothing else does. */
-	while (READ_ONCE(t->task.__state) != TASK_RUNNING)
-		schedule();
-	if (!READ_ONCE(t->should_stop))
-		t->result = t->threadfn(t->data);
-	/* Dead: no wake reaches it now, and its slot may be another task's. */
-	WRITE_ONCE(t->task.__state, TASK_DEAD);
-	t->handle = -1;
-	complete(&t->exited);
-	/* Its last touch of its record, which this may free. */
-	lx_put_task(&t->task);
+	do_exit(t->fn(t->arg));
 }
 
-struct task_struct *kthread_create_on_node(int (*threadfn)(void *data), void *data,
-					   int node, const char namefmt[], ...)
+/*
+ * A new task running fn(arg), as Linux's copy_process() makes a kernel
+ * thread: a record of its own, counted as one reference -- its own, which
+ * do_exit() lets go -- marked a kernel thread, with kthread.c's part hung
+ * on it. Runnable at once. The record, or an ERR_PTR.
+ */
+static struct task_struct *lx_new_thread(int (*fn)(void *), void *arg, const char *name)
 {
 	struct lx_task *t = kzalloc(sizeof(*t), GFP_KERNEL);
-	va_list args;
 
 	if (!t)
 		return ERR_PTR(-ENOMEM);
-	t->threadfn = threadfn;
-	t->data = data;
-	t->result = -EINTR;
-	init_completion(&t->exited);
+	t->fn = fn;
+	t->arg = arg;
 	refcount_set(&t->task.usage, 1);
-	va_start(args, namefmt);
-	vsnprintf(t->task.comm, sizeof(t->task.comm), namefmt, args);
-	va_end(args);
-	t->task.__state = TASK_UNINTERRUPTIBLE;
-	t->handle = slx_task_new(lx_kthread_entry, t, &t->task);
+	t->task.flags = PF_KTHREAD;
+	strscpy(t->task.comm, name ?: "", sizeof(t->task.comm));
+	if (!set_kthread_struct(&t->task)) {
+		kfree(t);
+		return ERR_PTR(-ENOMEM);
+	}
+	t->handle = slx_task_new(lx_thread_entry, t, &t->task);
 	if (t->handle < 0) {
+		free_kthread_struct(&t->task);
 		kfree(t);
 		return ERR_PTR(-ENOMEM);
 	}
@@ -534,46 +534,117 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data), void *da
 	return &t->task;
 }
 
-bool kthread_should_stop(void)
+/* What kthreadd's create_kthread() calls: the new thread's "pid", positive. */
+pid_t kernel_thread(int (*fn)(void *), void *arg, const char *name, unsigned long flags)
 {
-	struct lx_task *t = lx_task_of(current);
+	struct task_struct *p = lx_new_thread(fn, arg, name);
 
-	return t && READ_ONCE(t->should_stop);
-}
-
-bool kthread_should_stop_or_park(void)
-{
-	return kthread_should_stop();
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+	return lx_task_of(p)->handle + 1;
 }
 
 /*
- * As Linux's: told to stop, and -- with TIF_NOTIFY_SIGNAL, which
- * signal_pending() reads -- out of any interruptible wait, the thread is
- * woken, and what its function returned is handed back once it has ended
- * (-EINTR when it never ran).
+ * Linux's kthreadd, the thread every kthread_create() asks for a new
+ * thread, started as Linux's rest_init() starts it: before anything can ask.
+ * 0, or -ENOMEM.
  */
-int kthread_stop(struct task_struct *k)
+int lx_start_kthreadd(void)
 {
-	struct lx_task *t = lx_task_of(k);
-	int ret;
+	struct task_struct *p = lx_new_thread(kthreadd, NULL, "kthreadd");
 
-	if (WARN_ON(!t))
-		return -EINVAL;
-	get_task_struct(k);
-	WRITE_ONCE(t->should_stop, true);
-	set_tsk_thread_flag(k, TIF_NOTIFY_SIGNAL);
-	wake_up_process(k);
-	wait_for_completion(&t->exited);
-	ret = t->result;
-	lx_put_task(k);
-	return ret;
+	if (IS_ERR(p))
+		return PTR_ERR(p);
+	kthreadd_task = p;
+	return 0;
 }
 
-/* kthread_stop(), and the caller's own reference let go. */
-int kthread_stop_put(struct task_struct *k)
+/*
+ * The running thread ends, as Linux's do_exit() ends one: its result kept
+ * for kthread_stop() (kthread_do_exit), its record marked dead -- no wake
+ * reaches it now, and its slot may be another task's -- what waits for its
+ * end told (vfork_done, which set_kthread_struct() points at the kthread's
+ * `exited`, completed as Linux's exit_mm() completes it), and its own
+ * reference let go, which may free the record. Its last touch of it.
+ */
+void __noreturn do_exit(long code)
 {
-	int ret = kthread_stop(k);
+	struct task_struct *tsk = current;
+	struct lx_task *t = lx_task_of(tsk);
+	struct kthread *kthread = tsk_is_kthread(tsk);
+	struct completion *vfork = tsk->vfork_done;
 
-	lx_put_task(k);
-	return ret;
+	if (!t)
+		slx_stop("do_exit (by the first task, which returns instead)",
+			 __builtin_return_address(0));
+	if (kthread)
+		kthread_do_exit(kthread, code);
+	WRITE_ONCE(tsk->__state, TASK_DEAD);
+	t->handle = -1;
+	if (vfork) {
+		tsk->vfork_done = NULL;
+		complete(vfork);
+	}
+	lx_put_task(tsk);
+	slx_task_exit();
+}
+
+/* A thread's name, as Linux's __set_task_comm() sets it. */
+void __set_task_comm(struct task_struct *tsk, const char *buf, bool exec)
+{
+	strscpy(tsk->comm, buf, sizeof(tsk->comm));
+}
+
+/*
+ * What kthread.c asks of Linux's scheduler and signals, about CPUs, policy
+ * and signals a driver process does not have: its one CPU is every
+ * thread's, every thread runs at one priority, and no signal but
+ * kthread_stop()'s reaches a thread. A thread not running is inactive, as
+ * every thread but the caller is here.
+ */
+int set_cpus_allowed_ptr(struct task_struct *p, const struct cpumask *new_mask)
+{
+	return 0;
+}
+
+void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
+{
+}
+
+int sched_setscheduler_nocheck(struct task_struct *p, int policy,
+			       const struct sched_param *param)
+{
+	return 0;
+}
+
+void ignore_signals(struct task_struct *t)
+{
+}
+
+unsigned long wait_task_inactive(struct task_struct *p, unsigned int match_state)
+{
+	return 1;
+}
+
+/*
+ * A read of memory that may not be mapped (kthread_probe_data): what the
+ * layer's threads probe this way is their own kthread record, always
+ * mapped.
+ */
+long copy_from_kernel_nofault(void *dst, const void *src, size_t size)
+{
+	memcpy(dst, src, size);
+	return 0;
+}
+
+/*
+ * Tasks whose wait is for work to come rather than for an event -- kthreadd,
+ * a workqueue's workers: with every other task finished, the process is
+ * done, though these wait for ever.
+ */
+bool lx_emul_task_is_daemon(void *task)
+{
+	struct task_struct *p = task ? task : &lx_main_task;
+
+	return p == kthreadd_task || (p->flags & PF_WQ_WORKER);
 }

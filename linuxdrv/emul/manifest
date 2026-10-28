@@ -19,6 +19,12 @@ linux kernel/sched/swait.o
 linux kernel/sched/wait_bit.o
 linux kernel/locking/mutex.o
 
+# Kernel threads, Linux's own: kthread_create(), kthread_stop(), parking,
+# kthread workers and kthreadd, over the layer's kernel_thread() and
+# do_exit() (lx_sched.c); kasprintf for their names.
+linux kernel/kthread.o
+linux lib/kasprintf.o
+
 # Reference counts' overflow warning, which the inline counters call
 # (lx_sched.c counts its tasks' records).
 linux lib/refcount.o

@@ -126,6 +126,9 @@ unsafe extern "C" {
     /// The C half, with no task to run: when the loop must turn again, by
     /// the monotonic clock, 0 for never.
     fn lx_emul_next_event(now_ns: u64) -> u64;
+    /// The C half: whether the task whose record is `data` waits for work
+    /// rather than for an event (kthreadd, a workqueue's workers).
+    fn lx_emul_task_is_daemon(data: *mut c_void) -> bool;
 }
 
 /// The scheduler's state, through a raw pointer: every reference made from
@@ -159,15 +162,27 @@ fn to_loop(i: usize) {
 extern "C" fn trampoline() -> ! {
     let s = sched();
     // SAFETY: the loop set `current` to this task before switching to it.
-    let (i, entry, arg) = unsafe {
+    let (entry, arg) = unsafe {
         let i = (*s).current.unwrap_or(0);
         let t = (*s).tasks.get(i).copied().unwrap_or(NO_TASK);
-        (i, t.entry, t.arg)
+        (t.entry, t.arg)
     };
     if let Some(entry) = entry {
         // SAFETY: the C half's function and its argument, as it gave them.
         unsafe { entry(arg) };
     }
+    slx_task_exit()
+}
+
+/// `slx_task_exit`: the running task ends -- finished, never run again.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_task_exit() -> ! {
+    let s = sched();
+    // SAFETY: the one thread; a read.
+    let Some(i) = (unsafe { (*s).current }) else {
+        log(b"[lx] BUG: an end outside every task\n");
+        exit_with(crate::exit::PANIC);
+    };
     // SAFETY: the one thread; no other reference into the state is live.
     unsafe { (*s).table.finish(i) };
     to_loop(i);
@@ -362,9 +377,23 @@ pub fn run() -> bool {
         match task.into_iter().chain((event != 0).then_some(event)).min() {
             // From the clock read again: the turn's softirqs may have run long.
             Some(deadline) => sleep_ns(deadline.saturating_sub(now_ns())),
-            // SAFETY: as above.
-            None => return !unsafe { (*s).table.any_blocked() },
+            None => return !stranded(),
         }
+    }
+}
+
+/// Whether a task waits for what will never come: blocked with no deadline
+/// and nothing to wake it, and not one that only waits for work (a daemon,
+/// `lx_emul_task_is_daemon`). Asked when nothing can run again.
+fn stranded() -> bool {
+    let s = sched();
+    // SAFETY: the one thread, outside any switch; the C half's records of
+    // tasks that have not finished.
+    unsafe {
+        (*s).table.blocked().any(|i| {
+            let data = (*s).tasks.get(i).map_or(core::ptr::null_mut(), |t| t.data);
+            !lx_emul_task_is_daemon(data)
+        })
     }
 }
 

@@ -2179,7 +2179,8 @@ done
 # every one of them off -- it exists for scripts/guest.py's guest, which boots
 # what this script built so that a program can be tried in it -- and a boot that
 # ran none would pass on any kernel, so it is refused here, before the gates
-# and the build, whatever value it is given. `bench.skip` leaves the benchmark
+# and the build, whatever value it is given; so is `selftest.only`, which runs
+# only the self-tests it names. `bench.skip` leaves the benchmark
 # task unstarted, which only matters to a --bench run: it would wait for a
 # BENCH_OK that never comes. `read -a` rather than an unquoted expansion, which
 # would glob.
@@ -2189,6 +2190,11 @@ for _word in "${_slate_words[@]}"; do
         selftest.skip|selftest.skip=*)
             echo "ERROR: SLATE_CMDLINE holds '$_word'. selftest.skip, in any form, is" >&2
             echo "       scripts/guest.py's: a boot test that runs no self-tests proves nothing." >&2
+            exit 1
+            ;;
+        selftest.only|selftest.only=*)
+            echo "ERROR: SLATE_CMDLINE holds '$_word'. selftest.only runs only the self-tests" >&2
+            echo "       it names, for working on one: a boot test that skips the rest proves nothing." >&2
             exit 1
             ;;
         bench.skip|bench.skip=*)

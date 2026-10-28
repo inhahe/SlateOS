@@ -1,6 +1,10 @@
-## TD-A-NO-INTERRUPT-REMAPPING-SO-A-DEVICE-CAN-FORGE-MSIS (lane A, 2026-10-27) — OPEN
+## TD-A-NO-INTERRUPT-REMAPPING-SO-A-DEVICE-CAN-FORGE-MSIS (lane A, 2026-10-27) — FIXED
 
-**Status:** OPEN.
+**Status:** FIXED 2026-10-28. Every IOMMU unit remaps interrupts: a
+device's MSI and each I/O APIC pin go through an entry naming the one
+function allowed to raise it, and compatibility-format interrupts are
+blocked. What QEMU cannot show -- the blocking itself, and a device's plain
+DMA write into the MSI range, both below -- is for the test PC's boot.
 
 **In short:** a device signals an MSI by writing a small message to a fixed
 address range (`0xFEEx_xxxx`). The IOMMU's DMA remapping, which confines what
@@ -39,7 +43,25 @@ booted and published on its own):
   it, and programs the device's MSI in remappable format (the handle of the
   IRTE, not the vector).
 - The I/O APIC's lines go through IRTEs too once remapping is on.
+
+  **Done 2026-10-28** (`iommu_remap::enable_interrupt_remapping`): one table
+  every unit shares, all units or none; the I/O APIC's requester id read
+  from its DMAR scope (`iommu::ioapic_scope`), each pin's entry handle the
+  pin's number (`ioapic::write_redir_entry`). `scripts/boot-test.sh` runs
+  QEMU with `intremap=on` and fails a boot in which it never came on. QEMU
+  does not emulate CFI -- it delivers a compatibility-format interrupt with
+  remapping on whatever CFI says -- so in QEMU the blocking is checked only
+  as GSTS.CFIS clear; the test PC is where a compatibility-format message is
+  really refused.
 - A test: a device's message carrying a vector not in its IRTE (a write by
   `edu`'s DMA engine to the MSI range) must not be delivered.
+
+  **Done 2026-10-28** (`devhandle::forged_msi_test`): edu's MSI, pointed at
+  an entry made for another function, is delivered on neither vector and is
+  recorded as a source-id fault from edu (`iommu_remap::take_faults`). It
+  is sent through edu's MSI capability rather than its DMA engine: QEMU
+  gives a device's plain DMA writes no requester id (`pci_dma_write` passes
+  `MEMTXATTRS_UNSPECIFIED`), so it never checks one that lands in the MSI
+  range -- which a real unit does, on every write.
 
 Found by the batch-16 review (Opus at max).

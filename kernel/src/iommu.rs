@@ -162,6 +162,105 @@ static HOST_ADDRESS_WIDTH: AtomicU8 = AtomicU8::new(0);
 /// Whether interrupt remapping is supported.
 static INTERRUPT_REMAP: AtomicBool = AtomicBool::new(false);
 
+/// DMAR device scope type of an I/O APIC (VT-d §8.3.1).
+const SCOPE_IOAPIC: u8 = 3;
+/// Bytes of a DRHD before its device scopes.
+const DRHD_HEADER: usize = 16;
+/// Bytes of a device scope before its path.
+const SCOPE_HEADER: usize = 6;
+/// Hops a scope's path may take; a longer one is not believed.
+const MAX_HOPS: usize = 8;
+/// I/O APIC scopes kept, from every DRHD.
+const MAX_IOAPIC_SCOPES: usize = 8;
+
+/// A DMAR device scope naming an I/O APIC: which one, and the PCI path to
+/// the function whose requester id its interrupts carry -- what interrupt
+/// remapping checks them against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IoapicScope {
+    /// The I/O APIC's id, as the MADT gives it (the scope's enumeration id).
+    pub id: u8,
+    /// The bus the path starts on.
+    pub start_bus: u8,
+    /// Each hop's device and function: the bridges in turn, then the I/O
+    /// APIC's own function.
+    path: [(u8, u8); MAX_HOPS],
+    /// How many of `path` are hops: at least one.
+    hops: u8,
+}
+
+impl IoapicScope {
+    /// The path's hops, the I/O APIC's own function last.
+    #[must_use]
+    pub fn path(&self) -> &[(u8, u8)] {
+        self.path.get(..usize::from(self.hops)).unwrap_or(&[])
+    }
+
+    /// The requester id (bus << 8 | device << 3 | function) the I/O APIC's
+    /// interrupts carry. Each bridge on the path names the bus behind it,
+    /// which `secondary(bus, device, function)` reads (config offset 0x19),
+    /// as Linux's `ir_parse_one_ioapic_scope` does. `None` for an empty path.
+    #[must_use]
+    pub fn source_id(&self, secondary: impl Fn(u8, u8, u8) -> u8) -> Option<u16> {
+        let (&(device, function), bridges) = self.path().split_last()?;
+        let bus = bridges
+            .iter()
+            .fold(self.start_bus, |bus, &(d, f)| secondary(bus, d, f));
+        Some((u16::from(bus) << 8) | (u16::from(device & 0x1F) << 3) | u16::from(function & 0x7))
+    }
+}
+
+/// The I/O APIC scopes the DMAR's DRHDs list.
+static IOAPIC_SCOPES: spin::Mutex<[Option<IoapicScope>; MAX_IOAPIC_SCOPES]> =
+    spin::Mutex::new([None; MAX_IOAPIC_SCOPES]);
+
+/// Give `found` every I/O APIC scope in `drhd`, one DRHD structure's bytes
+/// (its header included). The walk ends at the first scope that is shorter
+/// than its own header or runs past the structure; an I/O APIC scope whose
+/// path is empty, odd-sized or longer than [`MAX_HOPS`] is passed over.
+fn ioapic_scopes(drhd: &[u8], mut found: impl FnMut(IoapicScope)) {
+    let mut at = DRHD_HEADER;
+    while let Some(&[kind, len, _, _, id, start_bus]) =
+        drhd.get(at..at.saturating_add(SCOPE_HEADER))
+    {
+        let len = usize::from(len);
+        let Some(scope) = drhd.get(at..at.saturating_add(len)) else {
+            break;
+        };
+        let Some(path_bytes) = scope.get(SCOPE_HEADER..) else {
+            break;
+        };
+        let hops = path_bytes.len() / 2;
+        if kind == SCOPE_IOAPIC && path_bytes.len() % 2 == 0 && (1..=MAX_HOPS).contains(&hops) {
+            let mut path = [(0, 0); MAX_HOPS];
+            for (slot, pair) in path.iter_mut().zip(path_bytes.chunks_exact(2)) {
+                if let &[device, function] = pair {
+                    *slot = (device, function);
+                }
+            }
+            found(IoapicScope {
+                id,
+                start_bus,
+                path,
+                // At most MAX_HOPS (8).
+                hops: u8::try_from(hops).unwrap_or(0),
+            });
+        }
+        at = at.saturating_add(len);
+    }
+}
+
+/// The DMAR's scope for the I/O APIC whose id is `id`, if it lists one.
+#[must_use]
+pub fn ioapic_scope(id: u8) -> Option<IoapicScope> {
+    IOAPIC_SCOPES
+        .lock()
+        .iter()
+        .flatten()
+        .find(|s| s.id == id)
+        .copied()
+}
+
 // ---------------------------------------------------------------------------
 // Initialization
 // ---------------------------------------------------------------------------
@@ -291,6 +390,27 @@ fn detect_intel_vtd() -> bool {
                     };
                 }
                 unit_count = unit_count.saturating_add(1);
+
+                // SAFETY: the DRHD's bytes, inside the table (checked above),
+                // which the direct map maps and nothing writes.
+                let drhd = unsafe {
+                    core::slice::from_raw_parts(
+                        hhdm.wrapping_add(dmar_phys).wrapping_add(offset as u64) as *const u8,
+                        struct_len,
+                    )
+                };
+                ioapic_scopes(drhd, |scope| {
+                    let mut scopes = IOAPIC_SCOPES.lock();
+                    if let Some(slot) = scopes.iter_mut().find(|s| s.is_none()) {
+                        *slot = Some(scope);
+                    }
+                    serial_println!(
+                        "[iommu]   its scope: I/O APIC {} at bus {:#x}, path {:x?}",
+                        scope.id,
+                        scope.start_bus,
+                        scope.path()
+                    );
+                });
             }
         }
 
@@ -475,6 +595,50 @@ pub fn self_test() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!("[iommu]   Bounds check: OK");
+
+    // Test 4: a DRHD's I/O APIC scopes, read from bytes laid out as VT-d
+    // §8.3.1 lays them out -- an endpoint scope passed over, an I/O APIC
+    // directly on its bus, one behind a bridge, one with an odd-sized path,
+    // and one running past the structure, which ends the walk.
+    let drhd = [0u8; DRHD_HEADER];
+    let mut bytes = alloc::vec::Vec::from(drhd);
+    bytes.extend_from_slice(&[1, 8, 0, 0, 0, 0, 3, 0]); // Endpoint 00:03.0.
+    bytes.extend_from_slice(&[3, 8, 0, 0, 2, 0xF0, 0x1F, 0]); // I/O APIC 2 at F0:1F.0.
+    bytes.extend_from_slice(&[3, 10, 0, 0, 5, 0, 1, 0, 0, 3]); // I/O APIC 5 behind 00:01.0.
+    bytes.extend_from_slice(&[3, 9, 0, 0, 6, 0, 1, 0, 7]); // Odd path: passed over.
+    bytes.extend_from_slice(&[3, 40, 0, 0, 7, 0, 1, 0]); // Runs past the end.
+    let mut found = alloc::vec::Vec::new();
+    ioapic_scopes(&bytes, |s| found.push(s));
+    // A bridge's secondary bus: 9 behind 00:01.0, nothing else asked.
+    let secondary = |bus, device, function| {
+        if (bus, device, function) == (0, 1, 0) {
+            9
+        } else {
+            0xEE
+        }
+    };
+    let read: alloc::vec::Vec<_> = found
+        .iter()
+        .map(|s| (s.id, s.start_bus, s.path().to_vec(), s.source_id(secondary)))
+        .collect();
+    let expected = [
+        (2, 0xF0, alloc::vec![(0x1F, 0)], Some(0xF0F8)),
+        (5, 0, alloc::vec![(1, 0), (0, 3)], Some(0x0903)),
+    ];
+    if read != expected {
+        serial_println!("[iommu]   FAIL: I/O APIC scopes read as {:x?}", read);
+        return Err(KernelError::InternalError);
+    }
+    // A scope of length 0 cannot loop the walk.
+    let mut zero = alloc::vec::Vec::from(drhd);
+    zero.extend_from_slice(&[3, 0, 0, 0, 2, 0, 0x1F, 0]);
+    let mut none = true;
+    ioapic_scopes(&zero, |_| none = false);
+    if !none {
+        serial_println!("[iommu]   FAIL: a scope of length 0 was read");
+        return Err(KernelError::InternalError);
+    }
+    serial_println!("[iommu]   DMAR I/O APIC scopes: OK");
 
     serial_println!("[iommu] Self-test PASSED");
     Ok(())

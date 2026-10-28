@@ -70,6 +70,14 @@ the kernel stops the device and takes everything back.
    the wait resolves the device's vector once and registers, tests and lets
    go on that one vector. MSI-X, INTx and several vectors are still to
    come.
+
+   *As built (2026-10-28): the MSI is remapped.* Where the IOMMU remaps
+   interrupts (`iommu_remap::interrupts_remapped`), the device's MSI names
+   an interrupt remapping entry of its own (`alloc_msi_entry`), which only
+   that function's requester id may raise, instead of carrying a vector and
+   a CPU itself; compatibility-format messages are blocked. So a driver --
+   or its device -- can no longer raise another device's interrupt or the
+   kernel's own by writing to the MSI address range.
 5. **Closing releases everything, in the safe order.** On the handle's last
    close -- including when the process exits or crashes -- the kernel turns
    bus mastering off first, so the device stops reading and writing memory;

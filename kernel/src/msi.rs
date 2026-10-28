@@ -567,6 +567,9 @@ pub struct MsiConfig {
     pub allocated_vector: u8,
     /// Number of vectors allocated.
     pub allocated_count: u8,
+    /// The interrupt remapping entry the MSI names, when interrupts are
+    /// remapped ([`crate::iommu_remap::alloc_msi_entry`]).
+    pub remap_handle: Option<u16>,
 }
 
 /// Find and parse the MSI capability for a PCI device.
@@ -595,6 +598,7 @@ pub fn find_msi_capability(bus: u8, device: u8, function: u8) -> Option<MsiConfi
         max_vectors,
         allocated_vector: 0,
         allocated_count: 0,
+        remap_handle: None,
     })
 }
 
@@ -628,15 +632,39 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
 
     // Allocate a vector.
     let vector = alloc_vector()?;
-    config.allocated_vector = vector;
-    config.allocated_count = 1;
-
     let (bus, dev, func) = (config.bus, config.device, config.function);
     let cap = config.cap_offset;
 
-    // Format the MSI message.
-    let address = format_address(target_cpu_lapic, false);
-    let data = format_data(vector, true, true);
+    // The message: with interrupts remapped, one naming an entry of its own
+    // that only this function may raise (its data then 0); otherwise the
+    // vector and the CPU themselves.
+    let (address, data) = if crate::iommu_remap::interrupts_remapped() {
+        let sid = (u16::from(bus) << 8) | (u16::from(dev & 0x1F) << 3) | u16::from(func & 0x7);
+        match crate::iommu_remap::alloc_msi_entry(sid, vector, target_cpu_lapic) {
+            Ok(handle) => {
+                config.remap_handle = Some(handle);
+                (crate::iommu_remap::msi_address(handle), 0)
+            }
+            Err(e) => {
+                serial_println!(
+                    "[msi] {:02x}:{:02x}.{}: no interrupt remapping entry: {:?}",
+                    bus,
+                    dev,
+                    func,
+                    e
+                );
+                free_vector(vector);
+                return None;
+            }
+        }
+    } else {
+        (
+            format_address(target_cpu_lapic, false),
+            format_data(vector, true, true),
+        )
+    };
+    config.allocated_vector = vector;
+    config.allocated_count = 1;
 
     // Write MSI Address (capability + 4).
     pci::config_write32(bus, dev, func, cap.wrapping_add(4), address);
@@ -702,6 +730,26 @@ pub fn disable_msi(config: &mut MsiConfig) {
     // the function goes back to whoever drives it next able to interrupt.
     let cmd = pci::config_read16(bus, dev, func, 4);
     pci::config_write16_native(bus, dev, func, 4, cmd & !(1 << 10));
+
+    // Its remapping entry, now that nothing raises it. One a unit could
+    // not be made to forget stays given out (`free_msi_entry`), and so does
+    // the vector it names: a late message must not reach whoever is given
+    // the vector next.
+    if let Some(handle) = config.remap_handle.take()
+        && let Err(e) = crate::iommu_remap::free_msi_entry(handle)
+    {
+        serial_println!(
+            "[msi] {:02x}:{:02x}.{}: remapping entry {} kept: {:?}",
+            bus,
+            dev,
+            func,
+            handle,
+            e
+        );
+        config.allocated_vector = 0;
+        config.allocated_count = 0;
+        return;
+    }
 
     // Free allocated vectors.
     free_vectors(config.allocated_vector, config.allocated_count as usize);

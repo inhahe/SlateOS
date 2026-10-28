@@ -638,30 +638,38 @@ marker_checks_pass() {
     elif ! check_bench_coverage "$1" "$BENCH"; then
         FAILED_CHECK="the benchmark suite left windows unjudged"
     elif ! check_iommu_active "$1"; then
-        FAILED_CHECK="DMA remapping never came on"
+        FAILED_CHECK="DMA or interrupt remapping never came on"
     fi
     [ -z "$FAILED_CHECK" ]
 }
 
-# Fail a boot in which the emulated IOMMU never came on.
+# Fail a boot in which the emulated IOMMU's DMA or interrupt remapping never
+# came on.
 #
-# QEMU runs with `-device intel-iommu` so that DMA remapping runs on every boot
-# (design-decisions §1576). A unit the kernel cannot use -- one whose deepest
-# table is not 4-level, as a QEMU with a 39-bit default address width offers --
-# is left off, every remapping path is skipped, and the boot would pass anyway:
-# a test of QEMU's defaults, not of the kernel. The kernel says
-# "DMA remapping active" when a unit comes on.
+# QEMU runs with `-device intel-iommu,intremap=on` so that both run on every
+# boot (design-decisions §1576). A unit the kernel cannot use -- one whose
+# deepest table is not 4-level, as a QEMU with a 39-bit default address width
+# offers -- is left off, every remapping path is skipped, and the boot would
+# pass anyway: a test of QEMU's defaults, not of the kernel. Interrupt
+# remapping is left off just as quietly when the hardware lacks it, and every
+# device's interrupts then go unchecked. The kernel says "DMA remapping
+# active" when a unit comes on, and "Interrupt remapping active" when every
+# unit remaps interrupts.
 #
-# Returns 0 when it did, 1 when it did not.
+# Returns 0 when both came on, 1 when either did not.
 check_iommu_active() {
-    local file="$1"
+    local file="$1" what=""
     [ -f "$file" ] || return 0
-    if grep -aq '^\[iommu_remap\] DMA remapping active' "$file"; then
+    if ! grep -aq '^\[iommu_remap\] DMA remapping active' "$file"; then
+        what="DMA REMAPPING"
+    elif ! grep -aq '^\[iommu_remap\] Interrupt remapping active' "$file"; then
+        what="INTERRUPT REMAPPING"
+    else
         return 0
     fi
-    echo "=== DMA REMAPPING NEVER CAME ON ==="
-    echo "  QEMU runs with -device intel-iommu, but the kernel never printed"
-    echo "  '[iommu_remap] DMA remapping active'. Its own lines say why:"
+    echo "=== $what NEVER CAME ON ==="
+    echo "  QEMU runs with -device intel-iommu,intremap=on, but the kernel never"
+    echo "  said it was active. Its own lines say why:"
     grep -a '^\[iommu_remap\]' "$file" | head -8 | sed 's/^/  /'
     return 1
 }
@@ -10041,7 +10049,10 @@ QEMU_START_EPOCH=$(date +%s)
 # missing invalidation after a mapping shows as a fault rather than passing.
 # `aw-bits=48` gives it 4-level tables, which the kernel requires of a unit
 # before it turns one on; QEMU's default was 39 bits, 3-level, before 9.2, and
-# `check_iommu_active` fails a boot whose unit stayed off.
+# `check_iommu_active` fails a boot whose unit stayed off. `intremap=on`
+# remaps interrupts too, so that a device's MSI is delivered only through an
+# entry naming it (VT-d interrupt remapping), as on the test PC; QEMU's
+# default for it depends on the accelerator, so it is named.
 # virtio devices bypass it (they would need `iommu_platform=on`).
 #
 # `pci-serial` behind its own root port: a 16550 on the PCI bus, as the PCIe
@@ -10059,7 +10070,7 @@ QEMU_START_EPOCH=$(date +%s)
 # (`services/devprobe`, `devhandle::self_test_ring3`) opens, and later the
 # Linux driver layer's first driver.
 "$QEMU" \
-    -device intel-iommu,caching-mode=on,aw-bits=48 \
+    -device intel-iommu,caching-mode=on,aw-bits=48,intremap=on \
     -netdev user,id=net0 \
     -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
     -netdev user,id=net1 \

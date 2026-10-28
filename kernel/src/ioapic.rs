@@ -97,6 +97,12 @@ const REDIR_LEVEL_TRIGGER: u64 = 1 << 15;
 #[allow(dead_code)]
 const REDIR_ACTIVE_LOW: u64 = 1 << 13;
 
+/// Interrupt format remappable (bit 48): with interrupts remapped, an entry
+/// names its pin's remapping entry -- handle bits 14:0 at 63:49, bit 15 at
+/// 11 -- in place of a destination (VT-d §5.1.5.1). The vector stays in bits
+/// 7:0, where the I/O APIC matches an EOI against it.
+const REDIR_REMAPPABLE: u64 = 1 << 48;
+
 // Delivery mode (bits 10:8): 000 = Fixed.  Other modes (lowest
 // priority, SMI, NMI, INIT, ExtINT) are not used.  Destination mode
 // (bit 11): 0 = Physical.  Both default to 0, so we don't define
@@ -176,6 +182,11 @@ static IRQ_WAIT_TASK: [AtomicU64; MAX_IRQ] = {
 /// and from IRQ balancing, on any CPU.
 static WINDOW: crate::sync::WindowLock = crate::sync::WindowLock::new();
 
+/// Each pin's entry as this module last wrote it, in compatibility format:
+/// what [`read_redir_entry`] answers when interrupts are remapped, since the
+/// hardware then holds the remappable form, which has no destination.
+static PROGRAMMED: [AtomicU64; MAX_IRQ] = [const { AtomicU64::new(0) }; MAX_IRQ];
+
 /// Run `access` -- register accesses through the window, a redirection
 /// entry's read-modify-write among them -- as one step, holding [`WINDOW`].
 /// On a CPU that holds it already (an NMI or exception that interrupted its
@@ -241,7 +252,7 @@ unsafe fn ioapic_write(reg: u8, value: u32) {
 ///
 /// IOAPIC must be initialized.  `irq` must be < `NUM_REDIR_ENTRIES`.  The
 /// window must be held ([`with_window`]).
-unsafe fn read_redir_entry(irq: u8) -> u64 {
+unsafe fn read_redir_hw(irq: u8) -> u64 {
     // Each entry occupies two consecutive 32-bit indirect registers.
     // SAFETY: Caller guarantees irq is valid.
     unsafe {
@@ -260,7 +271,7 @@ unsafe fn read_redir_entry(irq: u8) -> u64 {
 /// IOAPIC must be initialized.  `irq` must be < `NUM_REDIR_ENTRIES`.  The
 /// window must be held ([`with_window`]).
 #[allow(clippy::cast_possible_truncation)]
-unsafe fn write_redir_entry(irq: u8, entry: u64) {
+unsafe fn write_redir_hw(irq: u8, entry: u64) {
     // Write high DWORD first (destination), then low DWORD (vector +
     // flags).  Writing low last ensures the entry is complete before
     // potentially unmasking.
@@ -273,6 +284,100 @@ unsafe fn write_redir_entry(irq: u8, entry: u64) {
         ioapic_write(hi_reg, (entry >> 32) as u32);
         ioapic_write(lo_reg, entry as u32);
     }
+}
+
+/// Redirection entry `irq` as this module programs it: compatibility
+/// format, the destination's APIC id in bits 63:56. With interrupts
+/// remapped the hardware holds the remappable form, so the entry as last
+/// written is answered.
+///
+/// # Safety
+///
+/// As [`read_redir_hw`].
+unsafe fn read_redir_entry(irq: u8) -> u64 {
+    if crate::iommu_remap::interrupts_remapped()
+        && let Some(programmed) = PROGRAMMED.get(usize::from(irq))
+    {
+        return programmed.load(Ordering::Acquire);
+    }
+    // SAFETY: the caller's.
+    unsafe { read_redir_hw(irq) }
+}
+
+/// Write redirection entry `irq`, given in compatibility format. With
+/// interrupts remapped, the pin's remapping entry takes the vector, the
+/// destination and the trigger mode, and the I/O APIC the remappable form
+/// ([`remappable`]); a pin whose remapping entry could not be written is
+/// left masked, and said so.
+///
+/// # Safety
+///
+/// As [`write_redir_hw`].
+#[allow(clippy::cast_possible_truncation)] // The vector and the APIC id: a byte each.
+unsafe fn write_redir_entry(irq: u8, entry: u64) {
+    if !crate::iommu_remap::interrupts_remapped() {
+        // SAFETY: the caller's.
+        unsafe { write_redir_hw(irq, entry) };
+        return;
+    }
+    let routed = crate::iommu_remap::set_ioapic_entry(
+        irq,
+        entry as u8,
+        (entry >> 56) as u8,
+        entry & REDIR_LEVEL_TRIGGER != 0,
+    );
+    let entry = if let Err(e) = routed {
+        serial_println!(
+            "[ioapic] IRQ {}: its remapping entry could not be written ({:?}): masked",
+            irq,
+            e
+        );
+        entry | REDIR_MASKED
+    } else {
+        entry
+    };
+    if let Some(programmed) = PROGRAMMED.get(usize::from(irq)) {
+        programmed.store(entry, Ordering::Release);
+    }
+    // SAFETY: the caller's.
+    unsafe { write_redir_hw(irq, remappable(irq, entry)) };
+}
+
+/// Mask or unmask pin `irq`, nothing else about it changed. The mask bit is
+/// bit 16 in both formats, so this neither reads nor writes a remapping
+/// entry -- and so takes no lock but the window, for [`mask_all`].
+///
+/// # Safety
+///
+/// As [`write_redir_hw`].
+unsafe fn set_masked(irq: u8, masked: bool) {
+    // SAFETY: the caller's.
+    let hw = unsafe { read_redir_hw(irq) };
+    let hw = if masked {
+        hw | REDIR_MASKED
+    } else {
+        hw & !REDIR_MASKED
+    };
+    // SAFETY: the caller's.
+    unsafe { write_redir_hw(irq, hw) };
+    if let Some(programmed) = PROGRAMMED.get(usize::from(irq)) {
+        if masked {
+            programmed.fetch_or(REDIR_MASKED, Ordering::AcqRel);
+        } else {
+            programmed.fetch_and(!REDIR_MASKED, Ordering::AcqRel);
+        }
+    }
+}
+
+/// The remappable form of `entry` (compatibility format) for pin `irq`,
+/// whose remapping entry's handle is the pin's number: its vector, polarity,
+/// trigger mode and mask kept, its destination replaced by the handle.
+fn remappable(irq: u8, entry: u64) -> u64 {
+    let handle = u64::from(irq);
+    (entry & (0xFF | REDIR_ACTIVE_LOW | REDIR_LEVEL_TRIGGER | REDIR_MASKED))
+        | REDIR_REMAPPABLE
+        | ((handle & 0x7FFF) << 49)
+        | (((handle >> 15) & 1) << 11)
 }
 
 // ---------------------------------------------------------------------------
@@ -490,10 +595,7 @@ pub unsafe fn unmask_irq(irq: u8) {
     }
 
     // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-    with_window(|| unsafe {
-        let entry = read_redir_entry(irq);
-        write_redir_entry(irq, entry & !REDIR_MASKED);
-    });
+    with_window(|| unsafe { set_masked(irq, false) });
 
     serial_println!(
         "[ioapic] IRQ {} unmasked → vector {}",
@@ -510,10 +612,7 @@ pub fn mask_irq(irq: u8) {
     }
 
     // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-    with_window(|| unsafe {
-        let entry = read_redir_entry(irq);
-        write_redir_entry(irq, entry | REDIR_MASKED);
-    });
+    with_window(|| unsafe { set_masked(irq, true) });
 }
 
 /// Mask every IOAPIC redirection entry, so no external interrupt can be
@@ -536,10 +635,7 @@ pub unsafe fn mask_all() {
         // SAFETY: `irq < num`, and the IOAPIC is initialized when `num > 0`;
         // the window is held.
         #[allow(clippy::cast_possible_truncation)]
-        with_window(|| unsafe {
-            let entry = read_redir_entry(irq as u8);
-            write_redir_entry(irq as u8, entry | REDIR_MASKED);
-        });
+        with_window(|| unsafe { set_masked(irq as u8, true) });
     }
 }
 
@@ -920,11 +1016,56 @@ pub fn self_test() -> KernelResult<()> {
             );
             return Err(KernelError::InternalError);
         }
+
+        // Remapped: the I/O APIC holds the remappable form, naming the
+        // pin's own remapping entry, and that entry delivers the vector to
+        // the destination, with the trigger mode, from the I/O APIC alone.
+        if crate::iommu_remap::interrupts_remapped() {
+            // SAFETY: as above.
+            let hw = with_window(|| unsafe { read_redir_hw(irq) });
+            let remap = crate::iommu_remap::interrupt_entry(u16::from(irq));
+            let routed = remap.is_some_and(|[low, high]| {
+                low & 1 == 1
+                    && (low >> 16) & 0xFF == entry & 0xFF
+                    && (low >> 40) & 0xFF == entry >> 56
+                    && (low >> 4) & 1 == (entry >> 15) & 1
+                    && (high >> 18) & 0b11 == 0b01
+            });
+            if hw != remappable(irq, entry) || !routed {
+                serial_println!(
+                    "[ioapic]   FAIL: IRQ {} is {:#x} in the I/O APIC, its remapping entry {:#x?}, for {:#x}",
+                    irq,
+                    hw,
+                    remap,
+                    entry
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
     }
     serial_println!(
-        "[ioapic]   {} redirection entries: all masked, correct vectors",
+        "[ioapic]   {} redirection entries: all masked, correct vectors{}",
         num,
+        if crate::iommu_remap::interrupts_remapped() {
+            ", each remapped through its own entry"
+        } else {
+            ""
+        }
     );
+    if crate::iommu_remap::interrupts_remapped() {
+        // The remappable form, bit by bit: pin 5's handle at 63:49 with
+        // the format bit, the vector, polarity, trigger and mask kept, the
+        // destination gone.
+        let compat = (7 << 56) | REDIR_MASKED | REDIR_LEVEL_TRIGGER | REDIR_ACTIVE_LOW | 0x26;
+        if remappable(5, compat) != (5 << 49) | (1 << 48) | (1 << 16) | (1 << 15) | (1 << 13) | 0x26
+        {
+            serial_println!(
+                "[ioapic]   FAIL: the remappable form reads {:#x}",
+                remappable(5, compat)
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
 
     // Test 3: Notification counters are all zero.
     for i in 0..MAX_IRQ {
@@ -938,12 +1079,15 @@ pub fn self_test() -> KernelResult<()> {
     // Test 4: an access from inside one -- as an NMI interrupting this CPU's
     // own would be -- reads right, and leaves the index the outer access
     // selected in IOREGSEL.
-    let normal = get_irq_affinity(0);
+    // SAFETY: the I/O APIC is initialized (Test 1) and pin 0 exists; the
+    // window is held.
+    let read_pin0 = || with_window(|| unsafe { read_redir_hw(0) });
+    let normal = read_pin0();
     let (nested, left) = with_window(|| {
         let sel = base.wrapping_add(u64::from(IOREGSEL)) as *mut u32;
         // SAFETY: IOREGSEL of the mapped I/O APIC (Test 1); the window is held.
         unsafe { core::ptr::write_volatile(sel, u32::from(REG_VER)) };
-        let nested = get_irq_affinity(0);
+        let nested = read_pin0();
         // SAFETY: as above.
         (nested, unsafe { core::ptr::read_volatile(sel) })
     });

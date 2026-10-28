@@ -1350,18 +1350,23 @@ def _iommu_check(serial_text):
 
 
 def test_a_boot_whose_iommu_stayed_off_fails():
-    """QEMU's `intel-iommu` is there so that DMA remapping runs on every boot.
-    A unit the kernel left off -- a QEMU whose default address width offers no
-    4-level table -- skips every remapping path, and must fail the boot rather
-    than pass it.
+    """QEMU's `intel-iommu` is there so that DMA and interrupt remapping run on
+    every boot. A unit the kernel left off -- a QEMU whose default address
+    width offers no 4-level table -- skips every remapping path, and must fail
+    the boot rather than pass it; so must interrupt remapping left off, which
+    leaves every device's interrupts unchecked just as quietly.
     """
-    on = ("[iommu_remap] Root table at phys 0x7f000\n"
-          "[iommu_remap] DMA remapping active: every device passes through "
-          "until a driver gives it a domain\n")
+    dma = ("[iommu_remap] Root table at phys 0x7f000\n"
+           "[iommu_remap] DMA remapping active: every device passes through "
+           "until a driver gives it a domain\n")
+    both = dma + ("[iommu_remap] Interrupt remapping active: a device's interrupt "
+                  "is delivered only through an entry naming it\n")
+    no_ir = dma + "[iommu_remap] Interrupt remapping left off\n"
     off = ("[iommu_remap]   unit 0 at 0xfed90000 left off: NotSupported\n"
            "[iommu_remap] No unit can pass devices through: DMA remapping left off\n")
     for label, text, want in [
-        ("a unit that came on passes", on, "PASS"),
+        ("a unit remapping DMA and interrupts passes", both, "PASS"),
+        ("DMA remapping alone fails", no_ir, "FAIL"),
         ("a unit left off fails", off, "FAIL"),
         ("a log with no IOMMU line at all fails", "[boot] up\n", "FAIL"),
     ]:

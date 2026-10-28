@@ -106,6 +106,8 @@ mod reg {
     pub const IQT: u64 = 0x88;
     /// Invalidation queue address (64-bit, RW).
     pub const IQA: u64 = 0x90;
+    /// Interrupt remapping table address (64-bit, RW).
+    pub const IRTA: u64 = 0xB8;
 }
 
 /// GCMD (Global Command) register bits.
@@ -120,6 +122,10 @@ mod gcmd {
     pub const QIE: u32 = 1 << 26;
     /// Write buffer flush.
     pub const WBF: u32 = 1 << 27;
+    /// Set interrupt remapping table pointer.
+    pub const SIRTP: u32 = 1 << 24;
+    /// Compatibility format interrupts let through.
+    pub const CFI: u32 = 1 << 23;
 }
 
 /// GSTS (Global Status) register bits.
@@ -134,6 +140,10 @@ mod gsts {
     pub const QIES: u32 = 1 << 26;
     /// Write buffer flush status.
     pub const WBFS: u32 = 1 << 27;
+    /// Interrupt remapping table pointer status.
+    pub const IRTPS: u32 = 1 << 24;
+    /// Compatibility format interrupts let through.
+    pub const CFIS: u32 = 1 << 23;
 }
 
 /// CAP register bit fields.
@@ -174,6 +184,8 @@ mod ecap {
     /// Pass-through (bit 6): a context entry may let a device's requests
     /// through untranslated.
     pub const PT: u64 = 1 << 6;
+    /// Interrupt remapping (bit 3).
+    pub const IR: u64 = 1 << 3;
     /// The IOTLB registers' offset in 16-byte units (bits 8-17).
     pub const IRO_SHIFT: u32 = 8;
     pub const IRO_MASK: u64 = 0x3FF << 8;
@@ -568,6 +580,18 @@ pub fn init() -> KernelResult<()> {
         serial_println!(
             "[iommu_remap] DMA remapping active: every device passes through until a driver gives it a domain"
         );
+        match enable_interrupt_remapping() {
+            Ok(()) => serial_println!(
+                "[iommu_remap] Interrupt remapping active: a device's interrupt is delivered only through an entry naming it"
+            ),
+            Err(KernelError::NotSupported) => {
+                serial_println!("[iommu_remap] Interrupt remapping left off");
+            }
+            Err(e) => {
+                serial_println!("[iommu_remap] Interrupt remapping failed: {:?}", e);
+                REMAPPING_FAILED.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
     Ok(())
 }
@@ -902,6 +926,11 @@ mod desc {
     pub const WAIT_STATUS_WRITE: u64 = 1 << 5;
     pub const WAIT_FENCE: u64 = 1 << 6;
     pub const WAIT_STATUS_SHIFT: u32 = 32;
+    /// Interrupt entry cache invalidation (type 4): global, or one entry's
+    /// (bit 4) with its index at bits 47:32.
+    pub const IEC: u64 = 0x4;
+    pub const IEC_INDEX: u64 = 1 << 4;
+    pub const IEC_INDEX_SHIFT: u32 = 32;
 }
 
 /// FSTS's invalidation queue error (IQE): the unit could not take the
@@ -1247,6 +1276,462 @@ fn queue_test() -> KernelResult<()> {
     serial_println!(
         "[iommu_remap]   Queued invalidation: {} unit(s); a wait and each invalidation completed, encoded as VT-d encodes them; a refused descriptor failed its run and the queue went on: OK",
         queued
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Interrupt remapping (VT-d §5.1, §9.10)
+// ---------------------------------------------------------------------------
+
+/// An interrupt remapping table entry's fields (VT-d §9.10): the low qword's,
+/// then the high qword's.
+mod irte {
+    /// Present.
+    pub const PRESENT: u64 = 1 << 0;
+    /// Trigger mode level (TM): an I/O APIC pin's that is level-triggered.
+    /// Clear, edge -- as every MSI is.
+    pub const LEVEL: u64 = 1 << 4;
+    /// Where the vector goes.
+    pub const VECTOR_SHIFT: u32 = 16;
+    /// Where an xAPIC destination id goes: bits 15:8 of the destination
+    /// field, which is bits 63:32.
+    pub const DEST_SHIFT: u32 = 40;
+    /// High qword: the requester id must equal the entry's source id, all
+    /// 16 bits of it (SVT 01, SQ 00).
+    pub const VERIFY_SID: u64 = 0b01 << 18;
+}
+
+/// Entries in the interrupt remapping table: one 4 KiB page of 16-byte
+/// entries, which IRTA's size field calls 2^(7+1).
+const IRT_ENTRIES: u16 = 256;
+const IRTA_SIZE: u64 = 7;
+
+/// Handles below this are the I/O APIC's pins', the handle the pin's own
+/// number; MSIs are given the rest.
+pub const IOAPIC_PINS: u16 = 24;
+const _: () = assert!(IOAPIC_PINS as usize == crate::ioapic::MAX_IRQ);
+
+/// The interrupt remapping table every unit shares: a handle means the same
+/// entry whichever unit a message passes through.
+struct Irt {
+    /// Its page.
+    phys: u64,
+    /// Which handles are given out, a bit each.
+    used: [u64; IRT_ENTRIES as usize / 64],
+}
+
+impl Irt {
+    fn is_used(&self, handle: u16) -> bool {
+        self.used
+            .get(usize::from(handle / 64))
+            .is_some_and(|w| w & (1 << (handle % 64)) != 0)
+    }
+
+    fn set_used(&mut self, handle: u16, used: bool) {
+        if let Some(w) = self.used.get_mut(usize::from(handle / 64)) {
+            if used {
+                *w |= 1 << (handle % 64);
+            } else {
+                *w &= !(1 << (handle % 64));
+            }
+        }
+    }
+
+    /// Entry `handle`'s two qwords, low first.
+    fn entry(&self, handle: u16, hhdm: u64) -> Option<*mut [u64; 2]> {
+        (handle < IRT_ENTRIES).then(|| {
+            // Inside the table's page: `handle` < 256 entries of 16 bytes.
+            (self.phys.wrapping_add(hhdm) as *mut [u64; 2]).wrapping_add(usize::from(handle))
+        })
+    }
+
+    /// Entry `handle` as the units read it.
+    fn read(&self, handle: u16) -> Option<[u64; 2]> {
+        let at = self.entry(handle, page_table::hhdm()?)?;
+        // SAFETY: an entry of the table's page, which the direct map maps.
+        Some(unsafe { core::ptr::read_volatile(at) })
+    }
+
+    /// Make entry `handle` read `[low, high]`, and have every unit forget
+    /// what it cached of it. An entry coming present gets its high qword
+    /// first and one going away loses its low (and present bit) first, so a
+    /// unit never reads one half-written: the high qword -- the source id --
+    /// is never changed in a present entry.
+    fn write(&self, handle: u16, low: u64, high: u64) -> KernelResult<()> {
+        let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+        let at = self
+            .entry(handle, hhdm)
+            .ok_or(KernelError::InvalidArgument)? as *mut u64;
+        // SAFETY: the entry's two qwords, in the table's page; the IRT lock
+        // is held, so no one else writes them.
+        unsafe {
+            if low & irte::PRESENT != 0 {
+                core::ptr::write_volatile(at.wrapping_add(1), high);
+                core::sync::atomic::fence(Ordering::SeqCst);
+                core::ptr::write_volatile(at, low);
+            } else {
+                core::ptr::write_volatile(at, low);
+                core::sync::atomic::fence(Ordering::SeqCst);
+                core::ptr::write_volatile(at.wrapping_add(1), high);
+            }
+        }
+        sync_tables(
+            self.phys.wrapping_add(u64::from(handle).wrapping_mul(16)),
+            16,
+            hhdm,
+        );
+        invalidate_interrupt_entry(handle)
+    }
+}
+
+/// The table, once interrupt remapping is on.
+static IRT: Mutex<Option<Irt>> = Mutex::new(None);
+
+/// Whether every unit remaps interrupts: devices' MSIs and the I/O APIC's
+/// pins must then be programmed in remappable format.
+static INTERRUPTS_REMAPPED: AtomicBool = AtomicBool::new(false);
+
+/// How many times turning interrupt remapping on failed for a reason other
+/// than the hardware's lacking it: a fault [`self_test`] reports.
+static REMAPPING_FAILED: AtomicU32 = AtomicU32::new(0);
+
+/// The requester id the I/O APIC's interrupts carry (from its DMAR scope),
+/// which each of its pins' entries checks.
+static IOAPIC_SID: AtomicU32 = AtomicU32::new(0);
+
+/// Whether interrupts are remapped: whether [`alloc_msi_entry`] and
+/// [`set_ioapic_entry`] must be used, and a device's MSI or an I/O APIC pin
+/// programmed in remappable format.
+#[must_use]
+pub fn interrupts_remapped() -> bool {
+    INTERRUPTS_REMAPPED.load(Ordering::Acquire)
+}
+
+/// Every unit on forgets entry `handle` (an interrupt-entry-cache
+/// invalidation of that index, VT-d §6.5.2.7).
+///
+/// # Errors
+///
+/// The first unit's that failed, every unit tried regardless.
+fn invalidate_interrupt_entry(handle: u16) -> KernelResult<()> {
+    let one = desc::IEC | desc::IEC_INDEX | (u64::from(handle) << desc::IEC_INDEX_SHIFT);
+    for_each_unit_on(|i, mmio| {
+        queue_run(i, mmio, &[[one, 0]]).unwrap_or(Err(KernelError::NotSupported))
+    })
+}
+
+/// Turn interrupt remapping on in every unit, one table shared: compatibility
+/// -format interrupts -- the only kind a device could send before, carrying
+/// any vector to any CPU -- blocked (CFI clear), so that only a message
+/// naming an entry is delivered, and only from the function the entry names.
+///
+/// All or nothing: a device behind a unit without it would have its
+/// remappable-format messages read as compatibility-format ones. So every
+/// unit the DMAR lists must be on, with its queue (the entry cache has no
+/// register to invalidate it through) and ECAP.IR; and the I/O APIC the
+/// MADT names must have a DMAR scope, since its pins' entries check its
+/// requester id.
+///
+/// # Errors
+///
+/// `NotSupported` when the hardware or the tables lack any of that, which
+/// leaves interrupts as they were; otherwise what turning it on answered,
+/// with every unit's remapping turned off again.
+fn enable_interrupt_remapping() -> KernelResult<()> {
+    let units = usize::from(crate::iommu::unit_count()).min(MAX_UNITS);
+    let mut mmios = [0u64; MAX_UNITS];
+    for (i, (slot, regs)) in mmios.iter_mut().zip(&UNIT_REGS).enumerate().take(units) {
+        let mmio = regs.load(Ordering::Acquire);
+        let why = if mmio == 0 {
+            "it is off"
+        } else if read_reg64(mmio, reg::ECAP) & ecap::IR == 0 {
+            "it cannot remap interrupts (ECAP.IR clear)"
+        } else if QUEUES.get(i).is_none_or(|q| q.lock().is_none()) {
+            "it has no invalidation queue"
+        } else {
+            *slot = mmio;
+            continue;
+        };
+        serial_println!("[iommu_remap]   unit {}: {}", i, why);
+        return Err(KernelError::NotSupported);
+    }
+    let Some(ioapic) = crate::acpi::io_apics().first().copied() else {
+        serial_println!("[iommu_remap]   the MADT names no I/O APIC");
+        return Err(KernelError::NotSupported);
+    };
+    let Some(sid) = crate::iommu::ioapic_scope(ioapic.id).and_then(|scope| {
+        scope.source_id(|bus, device, function| {
+            crate::pci::config_read8(bus, device, function, 0x19)
+        })
+    }) else {
+        serial_println!(
+            "[iommu_remap]   the DMAR gives no scope for I/O APIC {}",
+            ioapic.id
+        );
+        return Err(KernelError::NotSupported);
+    };
+    let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
+    // A table page comes zeroed: every entry not present.
+    let phys = page_table::alloc_pt_page()?;
+    sync_tables(phys, IOMMU_PAGE_SIZE, hhdm);
+    IOAPIC_SID.store(u32::from(sid), Ordering::Release);
+    *IRT.lock() = Some(Irt {
+        phys,
+        used: [0; IRT_ENTRIES as usize / 64],
+    });
+    let units_on = mmios.get(..units).unwrap_or(&[]);
+    for (i, &mmio) in units_on.iter().enumerate() {
+        if let Err(e) = remap_unit(i, mmio, phys) {
+            serial_println!(
+                "[iommu_remap]   unit {} would not remap interrupts: {:?}",
+                i,
+                e
+            );
+            // Every unit back to compatibility format, and the table kept
+            // from the pool unless every unit has let go of it.
+            // Every unit asked, not only up to the first that stays on.
+            let mut all_off = true;
+            for &m in units_on {
+                all_off &= stop_remapping(m);
+            }
+            if let Some(irt) = IRT.lock().take()
+                && all_off
+            {
+                // SAFETY: no unit remaps interrupts, so none reads the page.
+                unsafe { page_table::free_pt_page(irt.phys) };
+            }
+            return Err(e);
+        }
+    }
+    INTERRUPTS_REMAPPED.store(true, Ordering::Release);
+    Ok(())
+}
+
+/// Point unit `index` (registers at `mmio`) at the table at `phys`, have it
+/// forget every entry it cached, block compatibility-format interrupts, and
+/// turn remapping on (VT-d §10.4.4's sequence, as Linux's
+/// `iommu_set_irq_remapping` and `iommu_enable_irq_remapping` do it).
+fn remap_unit(index: usize, mmio: u64, phys: u64) -> KernelResult<()> {
+    write_reg64(mmio, reg::IRTA, phys | IRTA_SIZE);
+    gcmd(mmio, gcmd::SIRTP, 0);
+    wait_for_status(mmio, gsts::IRTPS, true)?;
+    queue_run(index, mmio, &[[desc::IEC, 0]]).unwrap_or(Err(KernelError::NotSupported))?;
+    if read_reg32(mmio, reg::GSTS) & gsts::CFIS != 0 {
+        gcmd(mmio, 0, gcmd::CFI);
+        wait_for_status(mmio, gsts::CFIS, false)?;
+    }
+    gcmd(mmio, gcmd::IRE, 0);
+    wait_for_status(mmio, gsts::IRES, true)
+}
+
+/// Turn the unit at `mmio`'s interrupt remapping off: whether it is off.
+/// Takes no lock and prints nothing, for [`shutdown`].
+fn stop_remapping(mmio: u64) -> bool {
+    if read_reg32(mmio, reg::GSTS) & gsts::IRES == 0 {
+        return true;
+    }
+    gcmd(mmio, 0, gcmd::IRE);
+    status_reached(mmio, gsts::IRES, false)
+}
+
+/// The entry's low qword for `vector` delivered to the CPU whose APIC id is
+/// `dest`: present, fixed delivery, physical destination, edge or level.
+fn irte_low(vector: u8, dest: u8, level: bool) -> u64 {
+    irte::PRESENT
+        | if level { irte::LEVEL } else { 0 }
+        | (u64::from(vector) << irte::VECTOR_SHIFT)
+        | (u64::from(dest) << irte::DEST_SHIFT)
+}
+
+/// Point I/O APIC pin `pin` -- whose entry's handle is `pin` -- at `vector`
+/// on the CPU whose APIC id is `dest`, level- or edge-triggered as the pin
+/// is. Only the I/O APIC's requester id may raise it. An entry already so
+/// is left alone, and no unit is told.
+///
+/// # Errors
+///
+/// `NotSupported` when interrupts are not remapped; `InvalidArgument` for a
+/// pin past [`IOAPIC_PINS`]; or a unit's failure to forget the old entry.
+pub fn set_ioapic_entry(pin: u8, vector: u8, dest: u8, level: bool) -> KernelResult<u16> {
+    let handle = u16::from(pin);
+    if handle >= IOAPIC_PINS {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut guard = IRT.lock();
+    let irt = guard.as_mut().ok_or(KernelError::NotSupported)?;
+    let entry = [
+        irte_low(vector, dest, level),
+        u64::from(IOAPIC_SID.load(Ordering::Acquire)) | irte::VERIFY_SID,
+    ];
+    if irt.is_used(handle) && irt.read(handle) == Some(entry) {
+        return Ok(handle);
+    }
+    irt.set_used(handle, true);
+    let [low, high] = entry;
+    irt.write(handle, low, high)?;
+    Ok(handle)
+}
+
+/// Give a device's MSI an entry: `vector`, edge-triggered, on the CPU whose
+/// APIC id is `dest`, raised only by the function whose requester id (bus
+/// << 8 | device << 3 | function) is `sid`. Returns its handle, which the
+/// device's MSI address names ([`msi_address`]).
+///
+/// # Errors
+///
+/// `NotSupported` when interrupts are not remapped; `OutOfMemory` when
+/// every handle is given out; or a unit's failure to forget the entry, in
+/// which case the handle is not given out.
+pub fn alloc_msi_entry(sid: u16, vector: u8, dest: u8) -> KernelResult<u16> {
+    let mut guard = IRT.lock();
+    let irt = guard.as_mut().ok_or(KernelError::NotSupported)?;
+    let handle = (IOAPIC_PINS..IRT_ENTRIES)
+        .find(|&h| !irt.is_used(h))
+        .ok_or(KernelError::OutOfMemory)?;
+    irt.set_used(handle, true);
+    let written = irt.write(
+        handle,
+        irte_low(vector, dest, false),
+        u64::from(sid) | irte::VERIFY_SID,
+    );
+    if written.is_err() {
+        // Not present again -- whatever a unit still holds of it, the
+        // handle is never given out to another device while it may.
+        let _ = irt.write(handle, 0, 0);
+    }
+    written.map(|()| handle)
+}
+
+/// Take back an entry [`alloc_msi_entry`] gave, once its device's MSI is
+/// off. The handle goes back to the pool only once every unit has forgotten
+/// the entry; until then it stays given out, so no other device can be
+/// handed what a unit may still deliver for the first.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a handle that is an I/O APIC pin's or not given
+/// out; `NotSupported` when interrupts are not remapped; or a unit's
+/// failure to forget the entry.
+pub fn free_msi_entry(handle: u16) -> KernelResult<()> {
+    let mut guard = IRT.lock();
+    let irt = guard.as_mut().ok_or(KernelError::NotSupported)?;
+    if handle < IOAPIC_PINS || !irt.is_used(handle) {
+        return Err(KernelError::InvalidArgument);
+    }
+    irt.write(handle, 0, 0)?;
+    irt.set_used(handle, false);
+    Ok(())
+}
+
+/// The address a device's MSI writes to raise entry `handle`: remappable
+/// format (bit 4), the handle's bits 14:0 at 19:5 and bit 15 at 2, no
+/// subhandle (VT-d §5.1.2.2). Its data is 0.
+#[must_use]
+pub const fn msi_address(handle: u16) -> u32 {
+    0xFEE0_0000 | (((handle & 0x7FFF) as u32) << 5) | (1 << 4) | (((handle >> 15) as u32) << 2)
+}
+
+/// Entry `handle` as the units read it, for the I/O APIC's self-test.
+#[must_use]
+pub fn interrupt_entry(handle: u16) -> Option<[u64; 2]> {
+    IRT.lock().as_ref()?.read(handle)
+}
+
+/// For [`self_test`], with interrupts remapped: every unit says so, blocks
+/// compatibility-format interrupts and names the table; an MSI's entry is
+/// laid out as VT-d reads it, its handle reaches the address in the right
+/// bits, every unit is told when it goes, and its handle comes back; the
+/// handles run out, and say so, rather than overlapping the I/O APIC's.
+fn interrupt_remap_test() -> KernelResult<()> {
+    fn fail(what: &str) -> KernelResult<()> {
+        serial_println!("[iommu_remap]   FAIL: interrupt remapping: {}", what);
+        Err(KernelError::InternalError)
+    }
+    let Some(phys) = IRT.lock().as_ref().map(|irt| irt.phys) else {
+        return fail("on, but no table");
+    };
+    for regs in &UNIT_REGS {
+        let mmio = regs.load(Ordering::Acquire);
+        if mmio == 0 {
+            continue;
+        }
+        let status = read_reg32(mmio, reg::GSTS);
+        if status & gsts::IRES == 0 || status & gsts::CFIS != 0 {
+            return fail(
+                "a unit is not remapping, or lets compatibility-format interrupts through",
+            );
+        }
+        if read_reg64(mmio, reg::IRTA) & !0x800 != phys | IRTA_SIZE {
+            return fail("a unit names another table");
+        }
+    }
+    if msi_address(0x8001) != 0xFEE0_0034 || msi_address(0x1234) != 0xFEE2_4690 {
+        return fail("an MSI address does not carry its handle as VT-d reads it");
+    }
+    let handle = alloc_msi_entry(0x0A18, 0x41, 3)?;
+    let entry = interrupt_entry(handle);
+    if handle < IOAPIC_PINS || entry != Some([0x0000_0300_0041_0001, 0x4_0A18]) {
+        serial_println!("[iommu_remap]   handle {}: {:#x?}", handle, entry);
+        return fail("an MSI's entry is not laid out as VT-d reads it");
+    }
+    free_msi_entry(handle)?;
+    let told = UNIT_REGS
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.load(Ordering::Acquire) != 0)
+        .all(|(i, _)| {
+            queue_last_two(i)
+                .is_some_and(|(last, ..)| last == [0x14 | (u64::from(handle) << 32), 0])
+        });
+    if !told || interrupt_entry(handle) != Some([0, 0]) {
+        return fail("a freed entry was left present, or a unit was not told");
+    }
+    if free_msi_entry(handle) != Err(KernelError::InvalidArgument)
+        || free_msi_entry(0) != Err(KernelError::InvalidArgument)
+    {
+        return fail("a free handle, or an I/O APIC pin's, was taken back");
+    }
+    // Every handle the MSIs may have, then one more: those already given
+    // out (a driver's) counted, the pins' with them.
+    let in_use = IRT.lock().as_ref().map_or(0, |irt| {
+        irt.used
+            .iter()
+            .map(|w| w.count_ones() as usize)
+            .sum::<usize>()
+    });
+    let pins_unused = (0..IOAPIC_PINS)
+        .filter(|&h| IRT.lock().as_ref().is_some_and(|irt| !irt.is_used(h)))
+        .count();
+    let mut given = alloc::vec::Vec::new();
+    let exhausted = loop {
+        match alloc_msi_entry(0x0A18, 0x41, 3) {
+            Ok(h) => given.push(h),
+            Err(e) => break e,
+        }
+    };
+    let mut freed = given.iter().all(|&h| free_msi_entry(h).is_ok());
+    let first = alloc_msi_entry(0x0A18, 0x41, 3);
+    freed &= first.is_ok_and(|h| free_msi_entry(h).is_ok());
+    if exhausted != KernelError::OutOfMemory
+        || given.iter().any(|&h| h < IOAPIC_PINS)
+        || given
+            .len()
+            .saturating_add(in_use)
+            .saturating_add(pins_unused)
+            != usize::from(IRT_ENTRIES)
+        || !freed
+    {
+        serial_println!(
+            "[iommu_remap]   {} handle(s) given before {:?}",
+            given.len(),
+            exhausted
+        );
+        return fail("the handles did not run out cleanly, or did not come back");
+    }
+    serial_println!(
+        "[iommu_remap]   Interrupt remapping: every unit on with compatibility format blocked; an MSI's entry, its address, its freeing and {} handles: OK",
+        given.len()
     );
     Ok(())
 }
@@ -2143,10 +2628,13 @@ pub fn shutdown() {
         if status_reached(mmio, gsts::TES, false) {
             regs.store(0, Ordering::Release);
         }
-        // The next kernel finds no queue running on pages it may reuse.
-        // Its pages stay out of the pool: this kernel is going away.
+        // Nor a table of interrupt entries, nor a queue running, in pages
+        // the next kernel may reuse. Their pages stay out of the pool: this
+        // kernel is going away.
+        stop_remapping(mmio);
         drain_and_stop_queue(mmio);
     }
+    INTERRUPTS_REMAPPED.store(false, Ordering::Release);
     REMAP_ACTIVE.store(
         UNIT_REGS
             .iter()
@@ -2161,7 +2649,7 @@ pub fn is_active() -> bool {
     REMAP_ACTIVE.load(Ordering::Acquire)
 }
 
-/// Get the total number of DMA faults observed.
+/// How many faults [`take_faults`] has taken.
 #[must_use]
 pub fn fault_count() -> u64 {
     TOTAL_FAULTS.load(Ordering::Relaxed)
@@ -2206,52 +2694,64 @@ pub fn stats() -> RemapStats {
 // Fault handling
 // ---------------------------------------------------------------------------
 
-/// Handle an IOMMU DMA fault.
-///
-/// Called from the IOMMU fault interrupt handler (or polled from the
-/// fault status register).  Records the fault and logs details.
-pub fn handle_fault(unit_index: u8) {
-    let unit = match crate::iommu::get_unit(unit_index as usize) {
-        Some(u) => u,
-        None => return,
-    };
+/// A fault a unit recorded (VT-d §7.2.1): a DMA request it refused, or an
+/// interrupt request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fault {
+    /// The requester id (bus << 8 | device << 3 | function) the request
+    /// carried.
+    pub source_id: u16,
+    /// Why (VT-d Appendix A): [`FAULT_IR_SOURCE_ID`], say.
+    pub reason: u8,
+    /// The record's low qword: for an interrupt, the entry it named in bits
+    /// 63:48; for a DMA request, the page it was for.
+    pub info: u64,
+}
 
-    let hhdm = match page_table::hhdm() {
-        Some(h) => h,
-        None => return,
-    };
+/// An interrupt request naming an entry that does not name its function
+/// (VT-d Appendix A, fault reason 26h).
+pub const FAULT_IR_SOURCE_ID: u8 = 0x26;
 
-    let mmio = unit.register_base + hhdm;
-    let fsts = read_reg32(mmio, reg::FSTS);
+/// A fault record's high qword: the record holds a fault (F, bit 63, which
+/// writing 1 clears), its reason at bits 39:32, the requester id at 15:0.
+const FRCD_FAULT: u64 = 1 << 63;
+/// FSTS's primary fault overflow (PFO): a fault came with every record
+/// full, and no more are recorded until it is cleared.
+const FSTS_PFO: u32 = 1 << 0;
 
-    if fsts & 0x01 != 0 {
-        // Primary Fault — a device attempted unauthorized DMA.
-        TOTAL_FAULTS.fetch_add(1, Ordering::Relaxed);
-
-        // Read the fault recording register (at FRO offset from CAP).
+/// Take every fault the units on have recorded: each record read and
+/// cleared, and an overflow cleared with them, so that the next fault is
+/// recorded rather than dropped. Counted in [`fault_count`].
+pub fn take_faults() -> alloc::vec::Vec<Fault> {
+    let mut faults = alloc::vec::Vec::new();
+    for regs in &UNIT_REGS {
+        let mmio = regs.load(Ordering::Acquire);
+        if mmio == 0 {
+            continue;
+        }
         let cap_val = read_reg64(mmio, reg::CAP);
         let fro = (cap_val & cap::FRO_MASK) >> cap::FRO_SHIFT;
-        let fr_base = mmio + fro * 16; // Each fault record is 128 bits.
-
-        // Read fault info (simplified — full parsing would extract
-        // source BDF, fault reason, address, etc.).
-        let fr_lo = read_reg64(fr_base, 0);
-        let fr_hi = read_reg64(fr_base, 8);
-
-        let fault_addr = fr_lo & 0xFFFF_FFFF_FFFF_F000;
-        let source_id = ((fr_hi >> 8) & 0xFFFF) as u16;
-        let reason = (fr_hi & 0xFF) as u8;
-
-        serial_println!(
-            "[iommu_remap] DMA FAULT: addr={:#x} src={:04x} reason={}",
-            fault_addr,
-            source_id,
-            reason
-        );
-
-        // Clear the fault by writing 1 to PFO (bit 0 of FSTS).
-        write_reg32(mmio, reg::FSTS, 0x01);
+        let nfr = (cap_val & cap::NFR_MASK) >> cap::NFR_SHIFT;
+        for record in 0..=nfr {
+            // Inside the register block `probe_unit` mapped: it reaches
+            // the last record.
+            let at = fro.saturating_add(record).saturating_mul(16);
+            let high = read_reg64(mmio, at.saturating_add(8));
+            if high & FRCD_FAULT == 0 {
+                continue;
+            }
+            #[allow(clippy::cast_possible_truncation)] // Fields of the qword.
+            faults.push(Fault {
+                source_id: high as u16,
+                reason: (high >> 32) as u8,
+                info: read_reg64(mmio, at),
+            });
+            write_reg32(mmio, at.saturating_add(12), 1 << 31);
+        }
+        write_reg32(mmio, reg::FSTS, FSTS_PFO);
     }
+    TOTAL_FAULTS.fetch_add(faults.len() as u64, Ordering::Relaxed);
+    faults
 }
 
 // ---------------------------------------------------------------------------
@@ -2554,12 +3054,21 @@ pub fn self_test() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+    if REMAPPING_FAILED.load(Ordering::Relaxed) != 0 {
+        serial_println!(
+            "[iommu_remap]   FAIL: interrupt remapping the hardware has could not be turned on"
+        );
+        return Err(KernelError::InternalError);
+    }
 
     // Test 11: with a unit on, every device passes through, and a device
     // given a domain is translated by it until it is detached.
     if is_active() {
         remap_live_test()?;
         queue_test()?;
+    }
+    if interrupts_remapped() {
+        interrupt_remap_test()?;
     }
 
     serial_println!("[iommu_remap] Self-test PASSED");

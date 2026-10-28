@@ -949,6 +949,101 @@ const EDU_DEVICE: u16 = 0x11E8;
 /// on), writing it to the other acknowledges it.
 const EDU_IRQ_RAISE: u64 = 0x60;
 const EDU_IRQ_ACK: u64 = 0x64;
+/// With interrupts remapped, what edu itself can raise. Its MSI names a
+/// remapping entry of its own -- edu's requester id, its vector. Pointed at
+/// an entry made for another function, as a device that sends its message
+/// anywhere would, edu's interrupt is refused: not delivered, on that
+/// function's vector or its own, and recorded as a source-id fault from edu.
+///
+/// The message is sent through edu's MSI capability, rewritten here behind
+/// its driver's back, and not written by edu's DMA engine: QEMU gives a
+/// device's plain DMA writes no requester id, so one into the MSI range is
+/// never checked (a real unit sees every write's), whereas it gives an MSI
+/// its sender's.
+///
+/// `raw` and `owner` are edu's handle and its process, `regs` its mapped
+/// registers, `vector` its MSI's vector.
+fn forged_msi_test(
+    addr: PciAddress,
+    raw: u64,
+    owner: ProcessId,
+    regs: u64,
+    vector: u8,
+) -> Result<(), &'static str> {
+    /// Whom the other function's vector is counted for: no device handle.
+    const OTHER: u64 = u64::MAX;
+    let sid = (u16::from(addr.bus) << 8)
+        | (u16::from(addr.device & 0x1F) << 3)
+        | u16::from(addr.function & 7);
+    let msi = pci::find_capability(addr, CAP_MSI).ok_or("edu has no MSI capability")?;
+    let at = msi.offset.wrapping_add(4);
+    let address = pci::config_read32(addr.bus, addr.device, addr.function, at);
+    let handle =
+        u16::try_from(((address >> 5) & 0x7FFF) | (((address >> 2) & 1) << 15)).unwrap_or(0);
+    let own = iommu_remap::interrupt_entry(handle).is_some_and(|[low, high]| {
+        low & 1 == 1
+            && (low >> 16) & 0xFF == u64::from(vector)
+            && high & 0xFFFF == u64::from(sid)
+            && (high >> 18) & 0b11 == 0b01
+    });
+    if iommu_remap::msi_address(handle) != address || !own {
+        return Err("edu's MSI does not name a remapping entry of its own, edu's alone");
+    }
+    let other_vector = crate::msi::alloc_vector().ok_or("no vector for another function")?;
+    if !crate::msi::claim_delivery(other_vector, OTHER) {
+        crate::msi::free_vector(other_vector);
+        return Err("another function's vector could not be counted");
+    }
+    let reg = |offset: u64| regs.saturating_add(offset) as *mut u32;
+    let result = (|| {
+        // The next function on edu's bus.
+        let other =
+            iommu_remap::alloc_msi_entry(sid ^ (1 << 3), other_vector, crate::apic::read_id())
+                .map_err(|_| "no entry for another function")?;
+        // Faults from before are cleared: one pending from edu would have
+        // this one collapsed into it.
+        let _ = iommu_remap::take_faults();
+        pci::config_write32(
+            addr.bus,
+            addr.device,
+            addr.function,
+            at,
+            iommu_remap::msi_address(other),
+        );
+        // SAFETY: edu's interrupt registers, in the page the caller mapped.
+        unsafe { reg(EDU_IRQ_RAISE).write_volatile(1) };
+        // Time for it to land, were it delivered.
+        let settle = crate::hpet::elapsed_ns().saturating_add(20_000_000);
+        while crate::hpet::elapsed_ns() < settle {
+            core::hint::spin_loop();
+        }
+        // SAFETY: as above.
+        unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
+        pci::config_write32(addr.bus, addr.device, addr.function, at, address);
+        let delivered = crate::msi::pending(other_vector, OTHER).unwrap_or(0);
+        let own_taken = irq_wait(raw, owner, false).unwrap_or(0);
+        let faults = iommu_remap::take_faults();
+        let freed = iommu_remap::free_msi_entry(other);
+        if delivered != 0 || own_taken != 0 {
+            return Err("edu's interrupt, sent naming another function's entry, was delivered");
+        }
+        let recorded = faults.iter().any(|f| {
+            f.source_id == sid
+                && f.reason == iommu_remap::FAULT_IR_SOURCE_ID
+                && f.info >> 48 == u64::from(other)
+        });
+        if !recorded {
+            crate::serial_println!("[devhandle]   faults: {:x?}", faults);
+            return Err(
+                "edu's interrupt, sent naming another function's entry, was not recorded as a source-id fault from edu",
+            );
+        }
+        freed.map_err(|_| "the other function's entry could not be freed")
+    })();
+    crate::msi::release_delivery(other_vector, OTHER);
+    crate::msi::free_vector(other_vector);
+    result
+}
 
 /// Open, configure, map and close QEMU's `edu` device as a scratch process,
 /// and check every refusal on the way: a second open, another process's
@@ -1018,7 +1113,12 @@ pub fn self_test() -> KernelResult<()> {
         skips.record("IOMMU confinement", "no active IOMMU");
     }
     serial_println!(
-        "[devhandle]   open, configure, map, MSI (taken; waited for in irq_wait and as SYS_WAIT_MULTIPLE waits, woken by the interrupt), DMA arenas and close edu: OK"
+        "[devhandle]   open, configure, map, MSI (taken; waited for in irq_wait and as SYS_WAIT_MULTIPLE waits, woken by the interrupt), DMA arenas and close edu: OK{}",
+        if crate::iommu_remap::interrupts_remapped() {
+            "; its MSI remapped, and refused when sent naming another function's entry"
+        } else {
+            ""
+        }
     );
     skips.report("[devhandle]");
 
@@ -1187,6 +1287,10 @@ pub fn self_test() -> KernelResult<()> {
             let (kept, kept_addr) =
                 dma_alloc(raw, owner, 0x4000, crate::mm::dma::DmaConstraint::Below4G)
                     .map_err(|_| "a second arena could not be made")?;
+            // edu's interrupt reaches only its own entry.
+            if iommu_remap::interrupts_remapped() {
+                forged_msi_test(addr, raw, owner, regs, vector)?;
+            }
             // A fork's child gets neither the BAR nor the arena
             // (`PageFlags::FOREIGN`): it holds no handle and no tracker
             // entry. Cloned with no range excluded, so the flag alone is

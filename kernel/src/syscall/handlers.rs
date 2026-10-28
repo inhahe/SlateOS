@@ -3964,6 +3964,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
         CapInherit::All,
         None,
         crate::proc::spawn::SpawnAttrs::default(),
+        None,
     )
 }
 
@@ -3987,6 +3988,7 @@ fn spawn_ex_common(
     cap_inherit: crate::proc::spawn::CapInherit<'_>,
     cwd: Option<&[u8]>,
     attrs: crate::proc::spawn::SpawnAttrs,
+    identity: Option<crate::proc::spawn::SpawnIdentity<'_>>,
 ) -> SyscallResult {
     use crate::proc::spawn::{FdMapEntry, SpawnOptions, spawn_process_with_attrs};
 
@@ -4099,6 +4101,9 @@ fn spawn_ex_common(
     // does that for every child with a parent); with one, it starts there.
     if let Some(dir) = cwd {
         options = options.cwd(dir);
+    }
+    if let Some(identity) = identity {
+        options = options.identity(identity);
     }
 
     match spawn_process_with_attrs(&elf_data, &options, cap_inherit, attrs) {
@@ -4262,10 +4267,45 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    match ex2.cap_mode {
-        SPAWN_CAP_MODE_INHERIT_ALL => {
-            spawn_ex_common(&spawn_args, CapInherit::All, cwd.as_deref(), attrs)
+    // Who the child runs as (`cred_mode`): its caller's user, or the one
+    // named -- which takes `SET_CREDENTIALS` over processes, as `setuid`
+    // does, so a spawn can start a program only as someone its caller could
+    // become. Judged with the rest, before any image is read.
+    let may_set_credentials = caller_pid().is_some_and(|pid| {
+        pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS)
+    });
+    let ids = match crate::proc::spawn::ex2_identity(&ex2, may_set_credentials) {
+        Ok(ids) => ids,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let groups: alloc::vec::Vec<u32> = if ids.is_some() && ex2.groups_count != 0 {
+        #[allow(clippy::cast_possible_truncation)] // At most SPAWN_GROUPS_MAX, checked above.
+        let count = ex2.groups_count as usize;
+        match crate::mm::user::read_user_items::<u32>(
+            ex2.groups_ptr,
+            count,
+            crate::proc::spawn::SPAWN_GROUPS_MAX,
+        ) {
+            Ok(v) => v,
+            Err(e) => return SyscallResult::err(e),
         }
+    } else {
+        alloc::vec::Vec::new()
+    };
+    let identity = ids.map(|(uid, gid)| crate::proc::spawn::SpawnIdentity {
+        uid,
+        gid,
+        groups: &groups,
+    });
+
+    match ex2.cap_mode {
+        SPAWN_CAP_MODE_INHERIT_ALL => spawn_ex_common(
+            &spawn_args,
+            CapInherit::All,
+            cwd.as_deref(),
+            attrs,
+            identity,
+        ),
         SPAWN_CAP_MODE_SUBSET => {
             // A null pointer with a non-zero count is a caller bug, and is
             // refused rather than read as "no capabilities".
@@ -4325,6 +4365,7 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
                 CapInherit::Subset(&requested),
                 cwd.as_deref(),
                 attrs,
+                identity,
             )
         }
         // Not clamped and not defaulted — see the struct's `cap_mode` doc.

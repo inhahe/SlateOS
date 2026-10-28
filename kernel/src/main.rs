@@ -9434,6 +9434,18 @@ extern "C" fn kernel_main() -> ! {
             0,
             cap::Rights::WRITE.union(cap::Rights::TRANSFER),
         ),
+        // The display service's key (`org.slateos.Display`), held only to hand
+        // on: the login manager's `caps:` line names it, and the login manager
+        // gives it to the desktop it starts, alone -- the program that may act
+        // as the shell (lane F's `--require-shell-key`). Under the exact-id
+        // rule init can pass on only the id it holds, so the grant names it
+        // (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`,
+        // point 2).
+        (
+            cap::ResourceType::Service,
+            ipc::service::key_id(b"org.slateos.Display"),
+            cap::Rights::READ.union(cap::Rights::TRANSFER),
+        ),
     ];
     let spawn_opts = proc::spawn::SpawnOptions {
         name: "init",
@@ -9448,7 +9460,7 @@ extern "C" fn kernel_main() -> ! {
         // may not exist; /proc/1/exe therefore reports NotFound.
         exe_path: None,
         cwd: None,
-        uid_gid: None,
+        identity: None,
     };
     match proc::spawn::spawn_process(INIT_ELF, &spawn_opts) {
         Ok(result) => {

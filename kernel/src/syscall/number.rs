@@ -1970,7 +1970,7 @@ pub const SYS_PROCESS_COUNT: u64 = 521;
 ///
 /// Takes no arguments.  Reads the calling process's
 /// [`ProcessCredentials`](crate::proc::pcb::ProcessCredentials) (set from the
-/// parent at spawn, or from `SpawnOptions.uid_gid`) and returns the pair
+/// parent at spawn, or from `SpawnOptions.identity`) and returns the pair
 /// packed into one non-negative i64:
 ///
 /// - bits `[0..32)`  — real uid (u32)
@@ -2933,6 +2933,21 @@ pub const SYS_RLIMIT_SET: u64 = 558;
 /// not by the ring-3 ABI probe: they live in the delegation check, which runs
 /// after the ELF image is read, and that probe's `elf_ptr` is deliberately
 /// unmapped so it can never get that far.
+///
+/// # Starting the child as another user
+///
+/// Since 2026-10-28 the struct's last five fields name who the child runs
+/// as: `cred_mode` 0 (or a struct that stops before it) is the caller's user,
+/// as before; `cred_mode` 1 is `uid`, `gid` -- real, effective and saved --
+/// and `groups_count` supplementary groups at `groups_ptr` (`u32`s, at most
+/// 65536). That needs `SET_CREDENTIALS` over processes, as `setuid` does, or
+/// it is `PermissionDenied`; and a child whose uid is not 0 loses root's
+/// authority from what it is given, as a `setuid` would take it
+/// (design-decisions §1502). So a login manager starts the login screen and a
+/// person's desktop each as its user, holding exactly what it names
+/// (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
+/// A `cred_mode` other than 0 or 1, the identity's fields set beside a 0, an
+/// id that is no `u32`, or a count with no pointer, is `InvalidArgument`.
 ///
 /// Returns: process ID on success, negative error on failure.  Chosen number
 /// 559.  See design-decisions.md §279.

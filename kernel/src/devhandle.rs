@@ -1333,7 +1333,7 @@ pub fn self_test_ring3() -> KernelResult<()> {
         envp: &[],
         exe_path: None,
         cwd: None,
-        uid_gid: None,
+        identity: None,
     };
     let vectors_before = crate::msi::stats().vectors_used;
     let probe = match spawn::spawn_process(DEVPROBE_ELF, &options) {

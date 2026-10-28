@@ -372,7 +372,7 @@ fn run(seconds: u64, grants: &[u8], argv: &[Vec<u8>]) -> Vec<u8> {
         envp: &envp,
         exe_path: Some(program.as_slice()),
         cwd: None,
-        uid_gid: None,
+        identity: None,
     };
     let spawned = spawn::spawn_process(&elf, &options);
     // The child holds its own duplicates; this one would only leak.

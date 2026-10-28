@@ -4188,10 +4188,8 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // SAFETY: `SpawnEx2Args` is `#[repr(C)]` and every field is a `u64`, so the
-    // all-zero bit pattern is a valid value of the type (and is defined by the
-    // ABI to mean version-1 behaviour).
-    let mut ex2: SpawnEx2Args = unsafe { core::mem::zeroed() };
+    // All zero, which the ABI defines as version-1 behaviour.
+    let mut ex2 = SpawnEx2Args::default();
 
     // SAFETY: `head` holds exactly `copy_len` bytes, `copy_len <= known_size ==
     // size_of::<SpawnEx2Args>()`, and `ex2` is a live, properly aligned local of
@@ -4271,21 +4269,23 @@ pub fn sys_process_spawn_ex2(args: &SyscallArgs) -> SyscallResult {
     // named -- which takes `SET_CREDENTIALS` over processes, as `setuid`
     // does, so a spawn can start a program only as someone its caller could
     // become. Judged with the rest, before any image is read.
-    let may_set_credentials = caller_pid().is_some_and(|pid| {
-        pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS)
-    });
+    let may_set_credentials = || {
+        caller_pid().is_some_and(|pid| {
+            pcb::has_capability_type(pid, ResourceType::Process, Rights::SET_CREDENTIALS)
+        })
+    };
     let ids = match crate::proc::spawn::ex2_identity(&ex2, may_set_credentials) {
         Ok(ids) => ids,
         Err(e) => return SyscallResult::err(e),
     };
     let groups: alloc::vec::Vec<u32> = if ids.is_some() && ex2.groups_count != 0 {
-        #[allow(clippy::cast_possible_truncation)] // At most SPAWN_GROUPS_MAX, checked above.
+        #[allow(clippy::cast_possible_truncation)] // At most NGROUPS_MAX, checked above.
         let count = ex2.groups_count as usize;
-        match crate::mm::user::read_user_items::<u32>(
-            ex2.groups_ptr,
-            count,
-            crate::proc::spawn::SPAWN_GROUPS_MAX,
-        ) {
+        match crate::mm::user::read_user_items::<u32>(ex2.groups_ptr, count, pcb::NGROUPS_MAX) {
+            // The set-id calls' "keep" is no group, as it is no uid.
+            Ok(v) if v.contains(&crate::proc::setid::KEEP) => {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            }
             Ok(v) => v,
             Err(e) => return SyscallResult::err(e),
         }
@@ -21999,7 +21999,7 @@ pub fn sys_process_setgroups(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::thread;
 
     /// Linux's NGROUPS_MAX (since 2.6.4).  We follow the same cap.
-    const NGROUPS_MAX: u64 = 65536;
+    const NGROUPS_MAX: u64 = pcb::NGROUPS_MAX as u64;
 
     let count = args.arg0;
     let list_ptr = args.arg1;

@@ -672,7 +672,7 @@ pub struct SpawnExArgs {
 /// stops being one).
 ///
 /// Layout must match the userspace definition exactly (C ABI, all `u64`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct SpawnEx2Args {
     /// `size_of::<SpawnEx2Args>()` as the *caller* knows it, in bytes.
@@ -774,60 +774,71 @@ pub struct SpawnEx2Args {
     /// 0 leaves it in its parent's. Any other value is `InvalidArgument`.
     pub setsid: u64,
     /// Who the child runs as: 0, its caller's user, as before; 1, the user
-    /// named by the four fields below -- which needs `SET_CREDENTIALS` over
-    /// processes, as `setuid` does, and takes root's authority from what
-    /// the child is given when that user is not root (design-decisions
-    /// §1502). So a login manager starts the login screen and a person's
-    /// desktop each as its own user, holding exactly the capabilities it
-    /// names (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
+    /// named by the four fields below. Mode 1 is privileged whatever it
+    /// names, even the caller's own ids: it needs `SET_CREDENTIALS` over
+    /// processes, held when the spawn is asked for and still when the child
+    /// is made. A child that inherits its parent's whole table (`cap_mode`
+    /// 0) loses root's authority from it when its uid is not 0; a list
+    /// `cap_mode` 1 names is kept as named (design-decisions §1502 point 3).
+    /// So a login manager starts the login screen and a person's desktop
+    /// each as its own user, holding exactly the capabilities it names
+    /// (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
     /// Any other value is `InvalidArgument`, as are the fields below set
     /// beside a 0.
     pub cred_mode: u64,
-    /// With `cred_mode` 1, the child's real, effective and saved uid.
+    /// With `cred_mode` 1, the child's real, effective and saved uid; not
+    /// `0xFFFF_FFFF`, the set-id calls' "keep".
     pub uid: u64,
-    /// With `cred_mode` 1, its real, effective and saved gid.
+    /// With `cred_mode` 1, its real, effective and saved gid; not
+    /// `0xFFFF_FFFF`.
     pub gid: u64,
     /// With `cred_mode` 1, its supplementary groups: `groups_count` `u32`s
-    /// at `groups_ptr`, at most [`SPAWN_GROUPS_MAX`]; 0 of them is none.
+    /// at `groups_ptr`, at most [`pcb::NGROUPS_MAX`], none `0xFFFF_FFFF`; 0
+    /// of them is none.
     pub groups_ptr: u64,
     /// How many groups are at `groups_ptr`.
     pub groups_count: u64,
 }
 
-/// The most supplementary groups a spawned child may be given: Linux's
-/// `NGROUPS_MAX`, as `setgroups` takes.
-pub const SPAWN_GROUPS_MAX: usize = 65536;
-
 /// Read [`SpawnEx2Args`]'s `cred_mode` and the ids beside it: `None` for the
 /// caller's own identity, or the `(uid, gid)` the child runs as -- whose
-/// groups the caller then reads from `groups_ptr`. `may_set_credentials` is
-/// whether the caller holds `SET_CREDENTIALS` over processes.
+/// groups the caller then reads from `groups_ptr`. `may_set_credentials`
+/// answers whether the caller holds `SET_CREDENTIALS` over processes; it is
+/// asked only for `cred_mode` 1, after the rest has been judged.
 ///
-/// Pure, so the rules can be tested without a ring-3 caller.
+/// Pure but for that question, so the rules can be tested without a ring-3
+/// caller.
 ///
 /// # Errors
 ///
 /// `InvalidArgument` for a `cred_mode` other than 0 or 1, the identity's
-/// fields set beside a 0, an id that is not a `u32`, more than
-/// [`SPAWN_GROUPS_MAX`] groups, or a count with no pointer; `PermissionDenied`
-/// for `cred_mode` 1 from a caller that may not set credentials.
+/// fields set beside a 0, an id that is not a `u32` or is the set-id calls'
+/// "keep" (`0xFFFF_FFFF`), more than [`pcb::NGROUPS_MAX`] groups, or a count
+/// with no pointer; `PermissionDenied` for `cred_mode` 1 from a caller that
+/// may not set credentials.
 pub fn ex2_identity(
     ex2: &SpawnEx2Args,
-    may_set_credentials: bool,
+    may_set_credentials: impl FnOnce() -> bool,
 ) -> KernelResult<Option<(u32, u32)>> {
     match ex2.cred_mode {
         0 if ex2.uid == 0 && ex2.gid == 0 && ex2.groups_ptr == 0 && ex2.groups_count == 0 => {
             Ok(None)
         }
         1 => {
-            let uid = u32::try_from(ex2.uid).map_err(|_| KernelError::InvalidArgument)?;
-            let gid = u32::try_from(ex2.gid).map_err(|_| KernelError::InvalidArgument)?;
+            let id = |v: u64| {
+                u32::try_from(v)
+                    .ok()
+                    .filter(|&id| id != crate::proc::setid::KEEP)
+                    .ok_or(KernelError::InvalidArgument)
+            };
+            let uid = id(ex2.uid)?;
+            let gid = id(ex2.gid)?;
             let count =
                 usize::try_from(ex2.groups_count).map_err(|_| KernelError::InvalidArgument)?;
-            if count > SPAWN_GROUPS_MAX || (count != 0 && ex2.groups_ptr == 0) {
+            if count > pcb::NGROUPS_MAX || (count != 0 && ex2.groups_ptr == 0) {
                 return Err(KernelError::InvalidArgument);
             }
-            if !may_set_credentials {
+            if !may_set_credentials() {
                 return Err(KernelError::PermissionDenied);
             }
             Ok(Some((uid, gid)))
@@ -1067,10 +1078,11 @@ pub struct SpawnOptions<'a> {
     ///
     /// `None` (the default) leaves the child at its parent's credentials
     /// (root for a kernel-spawned init). When set, the child is started as
-    /// that identity -- real, effective and saved ids all -- and an identity
-    /// other than root takes root's authority from the capabilities it was
-    /// given, as a `setuid` would (`pcb::change_credentials`, design-decisions
-    /// §1502). Asked for by `SYS_PROCESS_SPAWN_EX2`'s `cred_mode` 1 -- a
+    /// that identity -- real, effective and saved ids all
+    /// (`pcb::install_spawn_identity`): capabilities it inherited wholesale
+    /// from its parent lose root's authority with a uid other than 0, while
+    /// a list its parent named is kept as named (design-decisions §1502
+    /// point 3). Asked for by `SYS_PROCESS_SPAWN_EX2`'s `cred_mode` 1 -- a
     /// login manager starting a user's program -- and by a container image's
     /// `User` config / the Docker `--user`/`-u uid[:gid]` flag.
     pub identity: Option<SpawnIdentity<'a>>,
@@ -1138,7 +1150,6 @@ impl<'a> SpawnOptions<'a> {
     /// Honors a container image's `User` config / the Docker `--user`/`-u`
     /// flag. Supplementary groups are not set. Passing a `(uid, gid)` of
     /// `(0, 0)` is equivalent to leaving the child as root.
-    #[allow(dead_code)] // Public builder API — callers use SpawnOptions::new() + chaining.
     #[must_use]
     pub fn uid_gid(self, uid: u32, gid: u32) -> Self {
         self.identity(SpawnIdentity {
@@ -2425,26 +2436,28 @@ pub fn spawn_process_suspended(
     }
 
     // The child's identity. One that was asked for (`SpawnOptions::identity`)
-    // replaces the root credentials the child was created with, through
-    // `change_credentials`, so that an identity other than root takes root's
-    // authority from the capabilities granted at Step 5 -- as a `setuid`
-    // would take it -- and the child can never hold more than its user could.
-    // A failure fails the spawn: a child started as other than the user asked
-    // for is not one to start. Otherwise a process's child is its parent's
-    // user, as `posix_spawn` -- a fork and an exec -- leaves it
-    // (`pcb::inherit_credentials`), and a spawn whose parent cannot be read
-    // fails rather than start a child as root. A kernel-spawned child
-    // (`parent == 0`) is root.
+    // replaces the root credentials the child was created with
+    // (`pcb::install_spawn_identity`): a parent process must still hold the
+    // right to name it, and capabilities the child inherited wholesale from
+    // its parent at Step 5 follow its new uid -- what was root's goes, as a
+    // `setuid` would take it -- while a list the parent named is kept as
+    // named (design-decisions §1502 point 3). A failure fails the spawn: a
+    // child started as other than the user asked for is not one to start.
+    // Otherwise a process's child is its parent's user, as `posix_spawn` --
+    // a fork and an exec -- leaves it (`pcb::inherit_credentials`), and a
+    // spawn whose parent cannot be read fails rather than start a child as
+    // root. A kernel-spawned child (`parent == 0`) is root.
     if let Some(identity) = options.identity {
         let mut credentials = pcb::ProcessCredentials::new(identity.uid, identity.gid);
         let mut groups = alloc::vec::Vec::new();
+        let inherited = options.parent != 0 && matches!(cap_inherit, CapInherit::All);
         let made = groups
             .try_reserve_exact(identity.groups.len())
             .map_err(|_| KernelError::OutOfMemory)
             .and_then(|()| {
                 groups.extend_from_slice(identity.groups);
                 credentials.groups = groups;
-                pcb::change_credentials(pid, credentials)
+                pcb::install_spawn_identity(options.parent, pid, credentials, inherited)
             });
         if let Err(e) = made {
             serial_println!(
@@ -30059,8 +30072,8 @@ pub fn self_test_spawn_ex2_abi() -> KernelResult<()> {
     }
 
     serial_println!(
-        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 21 probes — size gate, \
-         unknown tail, cap_mode, CapEntryInfo, cwd): OK"
+        "[spawn]   SYS_PROCESS_SPAWN_EX2 argument ABI (ring 3: 38 probes — size gate, \
+         unknown tail, cap_mode, CapEntryInfo, cwd, process group and signals, identity): OK"
     );
     Ok(())
 }
@@ -42076,10 +42089,8 @@ fn test_spawn_inherits_cwd_and_umask() -> KernelResult<()> {
 /// Test: [`ex2_attrs`] -- `SpawnEx2Args`'s six `posix_spawnattr_t` fields
 /// read into [`SpawnAttrs`], every value with no meaning refused.
 fn test_ex2_attrs() -> KernelResult<()> {
-    // SAFETY: `SpawnEx2Args` is `#[repr(C)]` and every field is a `u64`, so
-    // all-zero is a valid value -- the one the ABI defines as "ask for
-    // nothing".
-    let zero: SpawnEx2Args = unsafe { core::mem::zeroed() };
+    // All zero: what the ABI defines as "ask for nothing".
+    let zero = SpawnEx2Args::default();
     let with = |f: &dyn Fn(&mut SpawnEx2Args)| {
         let mut a = zero;
         f(&mut a);
@@ -42400,15 +42411,20 @@ fn test_spawn_child_of_sigchld_ignorer_is_reaped() -> KernelResult<()> {
     result
 }
 
-/// Test: an initial `(uid, gid)` is applied to the child's credentials, and a
-/// child with no `uid_gid` keeps the default root credentials.
 /// [`ex2_identity`]: `cred_mode` 0 with nothing beside it is the caller's
-/// own identity; 1 names one, given `SET_CREDENTIALS`; and every malformed
-/// or unauthorised request is refused, never read as something else.
+/// own identity, and the right to name one is not even asked about; 1 names
+/// one, given `SET_CREDENTIALS`; and every malformed or unauthorised request
+/// is refused, never read as something else.
 fn test_ex2_identity() -> KernelResult<()> {
-    // SAFETY: every field of `SpawnEx2Args` is a `u64`, for which all-zero
-    // is a valid value -- as the syscall builds its own copy.
-    let zero: SpawnEx2Args = unsafe { core::mem::zeroed() };
+    // What it asks, the struct, whether the caller may set credentials, and
+    // the answer.
+    type Case = (
+        &'static str,
+        SpawnEx2Args,
+        bool,
+        KernelResult<Option<(u32, u32)>>,
+    );
+    let zero = SpawnEx2Args::default();
     let named = SpawnEx2Args {
         cred_mode: 1,
         uid: 1000,
@@ -42417,19 +42433,45 @@ fn test_ex2_identity() -> KernelResult<()> {
         groups_count: 2,
         ..zero
     };
-    // What it asks, the struct, whether the caller may set credentials, and the answer.
-    type Case = (
-        &'static str,
-        SpawnEx2Args,
-        bool,
-        KernelResult<Option<(u32, u32)>>,
-    );
-    let cases: [Case; 8] = [
+    let cases: [Case; 15] = [
         ("mode 0, nothing set", zero, false, Ok(None)),
         ("mode 1, permitted", named, true, Ok(Some((1000, 100)))),
         (
+            "mode 1, as many groups as setgroups takes",
+            SpawnEx2Args {
+                groups_count: pcb::NGROUPS_MAX as u64,
+                ..named
+            },
+            true,
+            Ok(Some((1000, 100))),
+        ),
+        (
             "mode 0 with a uid beside it",
             SpawnEx2Args { uid: 5, ..zero },
+            true,
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "mode 0 with a gid beside it",
+            SpawnEx2Args { gid: 5, ..zero },
+            true,
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "mode 0 with a groups pointer beside it",
+            SpawnEx2Args {
+                groups_ptr: 0x1000,
+                ..zero
+            },
+            true,
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "mode 0 with a groups count beside it",
+            SpawnEx2Args {
+                groups_count: 1,
+                ..zero
+            },
             true,
             Err(KernelError::InvalidArgument),
         ),
@@ -42451,7 +42493,34 @@ fn test_ex2_identity() -> KernelResult<()> {
         (
             "a uid that is no u32",
             SpawnEx2Args {
-                uid: u64::from(u32::MAX) + 1,
+                uid: 1 << 32,
+                ..named
+            },
+            true,
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "a gid that is no u32",
+            SpawnEx2Args {
+                gid: 1 << 32,
+                ..named
+            },
+            true,
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "the uid the set-id calls read as keep",
+            SpawnEx2Args {
+                uid: u64::from(crate::proc::setid::KEEP),
+                ..named
+            },
+            true,
+            Err(KernelError::InvalidArgument),
+        ),
+        (
+            "the gid they read as keep",
+            SpawnEx2Args {
+                gid: u64::from(crate::proc::setid::KEEP),
                 ..named
             },
             true,
@@ -42460,9 +42529,7 @@ fn test_ex2_identity() -> KernelResult<()> {
         (
             "more groups than setgroups takes",
             SpawnEx2Args {
-                groups_count: u64::try_from(SPAWN_GROUPS_MAX)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(1),
+                groups_count: (pcb::NGROUPS_MAX as u64).saturating_add(1),
                 ..named
             },
             true,
@@ -42479,13 +42546,20 @@ fn test_ex2_identity() -> KernelResult<()> {
         ),
     ];
     for (what, ex2, may, want) in cases {
-        let got = ex2_identity(&ex2, may);
-        if got != want {
+        let asked = core::cell::Cell::new(false);
+        let got = ex2_identity(&ex2, || {
+            asked.set(true);
+            may
+        });
+        // The right is asked about only for a well-formed mode 1.
+        let should_ask = ex2.cred_mode == 1 && want != Err(KernelError::InvalidArgument);
+        if got != want || asked.get() != should_ask {
             serial_println!(
-                "[spawn]   FAIL: cred_mode, {}: got {:?}, want {:?}",
+                "[spawn]   FAIL: cred_mode, {}: got {:?}, want {:?}; the right asked about: {}",
                 what,
                 got,
-                want
+                want,
+                asked.get()
             );
             return Err(KernelError::InternalError);
         }
@@ -42497,38 +42571,53 @@ fn test_ex2_identity() -> KernelResult<()> {
 }
 
 /// A child started as a user ([`SpawnOptions::identity`]) runs as exactly
-/// that user -- every uid and gid, and its supplementary groups -- and the
-/// capabilities it was given lose root's authority when that user is not
-/// root, as a `setuid` takes it (design-decisions §1502): the rights a login
-/// manager starting a person's desktop must not hand on. Started as root,
-/// the same grant keeps it.
+/// that user -- every uid and gid, and its supplementary groups -- and what
+/// it holds follows design-decisions §1502: capabilities it inherited from
+/// its parent wholesale lose root's authority when that user is not root,
+/// as a `setuid` takes it, and keep it when the user is root; a list its
+/// parent named is kept as named (point 3, the daemon granted a low port).
+/// A parent that no longer holds the right to name an identity when the
+/// child is made is refused.
 fn test_spawn_identity_narrows_root_rights() -> KernelResult<()> {
     let elf_data = elf::build_test_elf_public();
-    let caps = [
-        (
-            ResourceType::Process,
-            0,
-            Rights::READ.union(Rights::SET_CREDENTIALS),
-        ),
-        (ResourceType::File, 1, Rights::READ),
-    ];
     let groups = [100u32, 200];
-    let check = |uid: u32, keeps_root: bool| -> Result<(), &'static str> {
-        let options = SpawnOptions {
-            capabilities: &caps,
-            ..SpawnOptions::new("spawn-test-identity")
-        }
-        .identity(SpawnIdentity {
-            uid,
-            gid: 100,
-            groups: &groups,
-        });
-        let result = spawn_process(&elf_data, &options).map_err(|_| "the spawn failed")?;
+    let parent = pcb::create("spawn-test-identity-parent", 0);
+    let granted = pcb::grant_capability(
+        parent,
+        ResourceType::Process,
+        0,
+        Rights::READ.union(Rights::SET_CREDENTIALS),
+    )
+    .and_then(|_| pcb::grant_capability(parent, ResourceType::File, 1, Rights::READ));
+    if let Err(e) = granted {
+        serial_println!(
+            "[spawn]   FAIL: could not grant to the identity test's parent: {:?}",
+            e
+        );
+        pcb::destroy(parent);
+        return Err(KernelError::InternalError);
+    }
+    let named = [(
+        ResourceType::Process,
+        0,
+        Rights::READ.union(Rights::SET_CREDENTIALS),
+    )];
+    // Spawn as `uid` under `inherit`; answer whether the child kept root's
+    // SET_CREDENTIALS, after checking its ids, its groups and its READ.
+    let run = |uid: u32, inherit: CapInherit<'_>| -> Result<bool, &'static str> {
+        let options = SpawnOptions::new("spawn-test-identity")
+            .parent(parent)
+            .identity(SpawnIdentity {
+                uid,
+                gid: 100,
+                groups: &groups,
+            });
+        let result = spawn_process_with_caps(&elf_data, &options, inherit)
+            .map_err(|_| "the spawn failed")?;
         let creds = pcb::get_credentials(result.pid);
-        let set_credentials =
+        let kept =
             pcb::has_capability_type(result.pid, ResourceType::Process, Rights::SET_CREDENTIALS);
-        let reads = pcb::has_capability_type(result.pid, ResourceType::Process, Rights::READ)
-            && pcb::has_capability_type(result.pid, ResourceType::File, Rights::READ);
+        let reads = pcb::has_capability_type(result.pid, ResourceType::Process, Rights::READ);
         crate::sched::yield_now();
         crate::sched::yield_now();
         crate::sched::reap_dead_tasks();
@@ -42541,26 +42630,69 @@ fn test_spawn_identity_narrows_root_rights() -> KernelResult<()> {
         {
             return Err("the child does not run as the identity asked for");
         }
-        if set_credentials != keeps_root {
-            return Err("root's authority did not follow the child's uid");
-        }
         if !reads {
             return Err("the child lost a right that is not root's");
         }
-        Ok(())
+        Ok(kept)
     };
-    for (uid, keeps_root) in [(1000, false), (0, true)] {
-        if let Err(what) = check(uid, keeps_root) {
-            serial_println!("[spawn]   FAIL: spawn as uid {}: {}", uid, what);
-            return Err(KernelError::InternalError);
+    let checks: [(&str, u32, CapInherit<'_>, bool); 3] = [
+        ("inherited, as uid 1000", 1000, CapInherit::All, false),
+        ("inherited, as uid 0", 0, CapInherit::All, true),
+        ("named, as uid 1000", 1000, CapInherit::Subset(&named), true),
+    ];
+    let mut failed = None;
+    for (what, uid, inherit, keeps_root) in checks {
+        match run(uid, inherit) {
+            Ok(kept) if kept == keeps_root => {}
+            Ok(_) => failed = Some((what, "root's authority was not as §1502 says")),
+            Err(why) => failed = Some((what, why)),
+        }
+        if failed.is_some() {
+            break;
         }
     }
+    // The right is looked at again when the child is made: a parent that has
+    // given it up since the spawn was asked for cannot name an identity.
+    if failed.is_none() {
+        // As another of its threads calling `setuid(1000)` would: root's
+        // authority goes for good.
+        let revoked = pcb::change_credentials(parent, pcb::ProcessCredentials::new(1000, 1000))
+            .is_ok()
+            && !pcb::has_capability_type(parent, ResourceType::Process, Rights::SET_CREDENTIALS);
+        let options = SpawnOptions::new("spawn-test-identity-late")
+            .parent(parent)
+            .identity(SpawnIdentity {
+                uid: 1000,
+                gid: 100,
+                groups: &[],
+            });
+        match spawn_process_with_caps(&elf_data, &options, CapInherit::Subset(&[])) {
+            Err(KernelError::PermissionDenied) if revoked => {}
+            Ok(r) => {
+                teardown_fixture(r.pid, r.task_id);
+                failed = Some(("a parent without the right", "the child was made"));
+            }
+            _ => {
+                failed = Some((
+                    "a parent without the right",
+                    "not refused with PermissionDenied",
+                ));
+            }
+        }
+    }
+    pcb::destroy(parent);
+    if let Some((what, why)) = failed {
+        serial_println!("[spawn]   FAIL: spawn as a user, {}: {}", what, why);
+        return Err(KernelError::InternalError);
+    }
     serial_println!(
-        "[spawn]   Spawn as a user: uid, gid and groups, root's rights gone with uid 1000 and kept with 0: OK"
+        "[spawn]   Spawn as a user: uid, gid and groups; inherited root's rights gone with uid 1000 and kept with 0, a named list kept; a parent without the right refused: OK"
     );
     Ok(())
 }
 
+/// Test: an initial `(uid, gid)` is applied to the child's credentials, and a
+/// child with no `identity` keeps the default root credentials.
 fn test_spawn_with_uid_gid() -> KernelResult<()> {
     let elf_data = elf::build_test_elf_public();
 

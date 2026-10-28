@@ -10088,20 +10088,65 @@ pub fn get_credentials(pid: ProcessId) -> Option<ProcessCredentials> {
     table.get(&pid).map(|p| p.credentials.clone())
 }
 
-/// Set the credentials for a process.
-///
-/// Only processes running as root (uid=0) or the kernel (PID 0
-/// caller) should call this.  The authorization check is the
-/// caller's responsibility.
-///
-/// Sets the identity and nothing else: for spawn, whose capability list for the
-/// child is a deliberate choice of its own. A process changing its *own*
-/// identity goes through [`change_credentials`].
+/// Replace `pid`'s credentials outright, its capability table untouched:
+/// no rule of design-decisions §1502 applies. For seeding a process the
+/// kernel builds itself -- self-tests, fixtures. A spawn installs its
+/// child's identity through [`install_spawn_identity`], and a process
+/// changing its own identity goes through [`change_credentials`]; neither
+/// should come here, which would skip what they check.
 pub fn set_credentials(pid: ProcessId, credentials: ProcessCredentials) -> KernelResult<()> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
 
     proc.credentials = credentials;
+    Ok(())
+}
+
+/// The most supplementary groups a process may hold: Linux's `NGROUPS_MAX`,
+/// which `setgroups` (both ABIs) and a spawn that names its child's groups
+/// all take as their bound.
+pub const NGROUPS_MAX: usize = 65536;
+
+/// Give a just-spawned `child` the identity its spawn named
+/// (`spawn::SpawnOptions::identity`), under the process table's lock.
+///
+/// - When `parent` is a process, it must hold `SET_CREDENTIALS` over
+///   processes *now*: the syscall checked it at entry, and a parent that has
+///   given root up since -- another of its threads calling `setuid` while
+///   the image was read -- must not start a child as anyone else.
+///   `PermissionDenied` otherwise. A kernel-spawned child (`parent` 0) is
+///   the kernel's choice.
+/// - `inherited` says the child was given its parent's whole table
+///   (`CapInherit::All`): that authority follows the child's new uid, as a
+///   `setuid` would take it ([`change_credentials`]). A list the parent
+///   named is its deliberate choice and is kept as named -- design-decisions
+///   §1502 point 3, the daemon its parent grants a low port.
+///
+/// # Errors
+///
+/// `PermissionDenied` as above; `NoSuchProcess` for a `child` not in the
+/// table.
+pub fn install_spawn_identity(
+    parent: ProcessId,
+    child: ProcessId,
+    credentials: ProcessCredentials,
+    inherited: bool,
+) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    if parent != 0
+        && !table.get(&parent).is_some_and(|p| {
+            p.cap_table
+                .has_capability_type(ResourceType::Process, Rights::SET_CREDENTIALS)
+        })
+    {
+        return Err(KernelError::PermissionDenied);
+    }
+    let proc = table.get_mut(&child).ok_or(KernelError::NoSuchProcess)?;
+    if inherited {
+        swap_credentials(proc, credentials);
+    } else {
+        proc.credentials = credentials;
+    }
     Ok(())
 }
 

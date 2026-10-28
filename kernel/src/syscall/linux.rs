@@ -17674,7 +17674,8 @@ fn sys_setgroups(args: &SyscallArgs) -> SyscallResult {
     //
     // Linux's NGROUPS_MAX since 2.6.4.  We follow the same cap to
     // avoid surprising callers that pre-validated against it.
-    const NGROUPS_MAX: u32 = 65536;
+    #[allow(clippy::cast_possible_truncation)] // 65536 fits.
+    const NGROUPS_MAX: u32 = crate::proc::pcb::NGROUPS_MAX as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let size_i32 = args.arg0 as i32;
     #[allow(clippy::cast_sign_loss)]

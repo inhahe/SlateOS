@@ -28052,6 +28052,12 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// | `0x2E` | `setsid = 1` | `-101` | …and a new session passes the gate |
 /// | `0x2F` | `sigdefault = !0` | `-101` | `sigdefault` takes any bits |
 /// | `0x30` | `struct_size = 144`, `pgid_mode = 2` beyond it | `-101` | a caller older than the six fields has them read as zero, not from its memory |
+/// | `0x31` | `cred_mode = 2` | `-3` | an unknown identity mode is refused |
+/// | `0x32` | `uid = 5`, `cred_mode = 0` | `-3` | an identity without its mode is refused, not ignored |
+/// | `0x33` | `cred_mode = 1`, `groups_count = 1`, `groups_ptr = 0` | `-3` | a count with no pointer is refused, before the right is asked for |
+/// | `0x34` | `cred_mode = 1`, `uid = 0xFFFF_FFFF` | `-3` | the set-id calls' "keep" value is no identity |
+/// | `0x35` | `cred_mode = 1`, `uid = 1000`, `gid = 100` | `-400` | naming an identity takes `SET_CREDENTIALS`, which this program does not hold |
+/// | `0x36` | `struct_size = 192`, `cred_mode = 2` beyond it | `-101` | a caller older than the identity fields has them read as zero |
 ///
 /// The size probes (`0x16`-`0x18`) moved when `cwd_ptr`/`cwd_len` made the
 /// struct 144 bytes (§960, 2026-09-25): aimed at the old 128, "the unknown
@@ -28059,7 +28065,9 @@ pub fn build_exec_test_elf(elf_addr: u64, elf_len: u32) -> alloc::vec::Vec<u8> {
 /// They moved again when the six `posix_spawnattr_t` fields made it 192
 /// (2026-10-01), and the scratch entry and path moved past the struct with
 /// them -- left at 160 and 200, the entry would have been read as
-/// `sigmask_set`.
+/// `sigmask_set`. And again when the five identity fields made it 232
+/// (2026-10-28): the entry at 208 would have been read as `gid`, and 0x18's
+/// "unknown tail" was `cred_mode`.
 ///
 /// # Deliberately out of scope
 ///
@@ -28104,20 +28112,31 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     const F_SIGMASK: u32 = 168;
     const F_SIGDEFAULT: u32 = 176;
     const F_SETSID: u32 = 184;
+    /// The five fields of the child's identity, which made it 232 bytes.
+    const F_CRED_MODE: u32 = 192;
+    const F_UID: u32 = 200;
+    const F_GID: u32 = 208;
+    const F_GROUPS_PTR: u32 = 216;
+    const F_GROUPS_COUNT: u32 = 224;
     /// This kernel's `size_of::<SpawnEx2Args>()`.
-    const CURRENT: u64 = 192;
+    const CURRENT: u64 = 232;
     /// The first byte past the struct — the "unknown tail" a newer caller
     /// would have written a new field into.  It was 128 until `cwd_ptr` took
-    /// that slot, and 144 until the six attribute fields took theirs; a probe
-    /// left aimed at a known field writes something that is accepted, and
-    /// 0x18 fails on every boot until it moves.
-    const F_TAIL: u32 = 192;
+    /// that slot, 144 until the six attribute fields took theirs, and 192
+    /// until the identity's five took theirs; a probe left aimed at a known
+    /// field writes something that is accepted, and 0x18 fails on every boot
+    /// until it moves.
+    const F_TAIL: u32 = 232;
     /// A scratch `CapEntryInfo`, past the struct: `resource_type` and
     /// `_reserved[3]` share this qword, then `rights`, then `resource_id`
     /// (both left zero).
-    const F_ENTRY: u32 = 208;
+    const F_ENTRY: u32 = 248;
     /// A scratch path for the `cwd` probes: one byte, then zeroes.
-    const F_PATH: u32 = 240;
+    const F_PATH: u32 = 280;
+    /// The zeroed frame the struct and both scratch areas live in.
+    const FRAME: u32 = 320;
+    /// `KernelError::PermissionDenied` as it arrives in `rax`.
+    const EPERM: i32 = -400;
 
     let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
 
@@ -28169,16 +28188,16 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
         code.push(0xCC); // int3 — exit does not return
     }
 
-    // --- prologue: 256 zeroed bytes of stack --------------------------------
+    // --- prologue: FRAME zeroed bytes of stack ------------------------------
     // Zeroing matters as much as reserving: every probe below sets only the
     // fields it is about, and reads a guaranteed-zero value for the rest.
     code.extend_from_slice(&[0x48, 0x81, 0xEC]); // sub rsp, imm32
-    code.extend_from_slice(&256u32.to_le_bytes());
+    code.extend_from_slice(&FRAME.to_le_bytes());
     code.push(0xFC); // cld — `rep stosq` must count upward
     code.extend_from_slice(&[0x48, 0x89, 0xE7]); // mov rdi, rsp
     code.extend_from_slice(&[0x31, 0xC0]); // xor eax, eax
-    code.push(0xB9); // mov ecx, 32 (× 8 bytes = 256)
-    code.extend_from_slice(&32u32.to_le_bytes());
+    code.push(0xB9); // mov ecx, FRAME / 8
+    code.extend_from_slice(&(FRAME / 8).to_le_bytes());
     code.extend_from_slice(&[0xF3, 0x48, 0xAB]); // rep stosq
 
     // A non-zero `elf_len` is required before the ELF pointer is even looked
@@ -28308,6 +28327,36 @@ pub fn build_spawn_ex2_abi_test_elf() -> alloc::vec::Vec<u8> {
     set(&mut code, F_PGID_MODE, 2);
     probe(&mut code, EFAULT, 0x30);
     set(&mut code, F_PGID_MODE, 0);
+    set(&mut code, F_SIZE, CURRENT);
+
+    // --- the child's identity ---------------------------------------------
+    // Judged at the gate too: what is malformed is refused before the right
+    // to name an identity is asked for, and naming one without that right
+    // -- this program holds no capabilities -- is PermissionDenied.
+    set(&mut code, F_CRED_MODE, 2);
+    probe(&mut code, EINVAL, 0x31);
+    set(&mut code, F_CRED_MODE, 0);
+    set(&mut code, F_UID, 5);
+    probe(&mut code, EINVAL, 0x32);
+    set(&mut code, F_UID, 0);
+    set(&mut code, F_CRED_MODE, 1);
+    set(&mut code, F_GROUPS_COUNT, 1);
+    probe(&mut code, EINVAL, 0x33);
+    set(&mut code, F_GROUPS_COUNT, 0);
+    set(&mut code, F_UID, 0xFFFF_FFFF);
+    probe(&mut code, EINVAL, 0x34);
+    set(&mut code, F_UID, 1000);
+    set(&mut code, F_GID, 100);
+    probe(&mut code, EPERM, 0x35);
+    set(&mut code, F_UID, 0);
+    set(&mut code, F_GID, 0);
+    set(&mut code, F_GROUPS_PTR, 0);
+    // An older caller's struct stops before the five: what lies past its
+    // end is not read as them.
+    set(&mut code, F_SIZE, 192);
+    set(&mut code, F_CRED_MODE, 2);
+    probe(&mut code, EFAULT, 0x36);
+    set(&mut code, F_CRED_MODE, 0);
     set(&mut code, F_SIZE, CURRENT);
 
     // --- every probe agreed -------------------------------------------------

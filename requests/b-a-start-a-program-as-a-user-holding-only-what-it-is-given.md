@@ -93,20 +93,25 @@ list before `exec` -- say so and the launcher follows it.
 `PermissionDenied`. The struct is now 29 words (232 bytes); an older caller's
 shorter struct still means `cred_mode` 0.
 
-The child is created, given its capabilities -- your subset, or everything
-with `cap_mode` 0 -- and then switched to the identity through the same path
-`setuid` takes (`pcb::change_credentials`). So a uid other than 0 takes
-root's authority (§1502's `rights_without_root`) from whatever it was given,
-before its first instruction: the login screen and the desktop cannot hold
-`SET_CREDENTIALS`, the clock, privileged ports and the rest even if
-`loginmgr` listed them by mistake. What is not root's -- your `Service` keys,
-file access -- stays as you named it. A failure to set the identity fails the
-spawn; it never starts the child as anyone else.
+What the child holds follows design-decisions §1502 (amended 2026-10-28):
+a list you name (`cap_mode` 1) is kept exactly as named -- point 3, "spawn
+is not a drop", so a parent can still grant a daemon run as uid 1000 one
+root power, such as a low port -- while a child given your whole table
+(`cap_mode` 0) loses root's authority from it with a uid other than 0, as a
+`setuid` would take it. So `loginmgr`'s safety is in what it names: give the
+login screen and the desktop exactly their own keys and nothing of root's,
+and neither can hold more. The right to name an identity is checked when
+you ask and again when the child is made, so a `loginmgr` thread that gives
+root up meanwhile cannot start anyone. A failure to set the identity fails
+the spawn; it never starts the child as anyone else. The ids `0xFFFF_FFFF`
+-- the set-id calls' "keep" -- are refused, uid, gid and groups alike.
 
-Pinned by `spawn::self_test`: `test_ex2_identity` (every refusal above, and
-the accepted case) and `test_spawn_identity_narrows_root_rights` (a child as
-uid 1000 runs with uid, gid and groups exactly as named, loses
-`SET_CREDENTIALS` and keeps its other rights; as uid 0 it keeps it).
+Pinned by `spawn::self_test` -- `test_ex2_identity` (every refusal, the
+accepted case, and the right asked about only for a well-formed mode 1) and
+`test_spawn_identity_narrows_root_rights` (ids and groups as named; an
+inherited table losing root's rights as uid 1000 and keeping them as 0, a
+named list kept; a parent that has given root up refused) -- and by the
+ring-3 ABI probe, which now covers the five fields (0x31-0x36).
 
 **2. Init holds the display key.** `(Service, key_id("org.slateos.Display"),
 READ | TRANSFER)` is in `init_caps` beside `Service/0/w` -- computed by

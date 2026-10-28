@@ -2940,14 +2940,17 @@ pub const SYS_RLIMIT_SET: u64 = 558;
 /// as: `cred_mode` 0 (or a struct that stops before it) is the caller's user,
 /// as before; `cred_mode` 1 is `uid`, `gid` -- real, effective and saved --
 /// and `groups_count` supplementary groups at `groups_ptr` (`u32`s, at most
-/// 65536). That needs `SET_CREDENTIALS` over processes, as `setuid` does, or
-/// it is `PermissionDenied`; and a child whose uid is not 0 loses root's
-/// authority from what it is given, as a `setuid` would take it
-/// (design-decisions §1502). So a login manager starts the login screen and a
-/// person's desktop each as its user, holding exactly what it names
-/// (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
+/// 65536). Mode 1 is privileged whatever it names: it needs `SET_CREDENTIALS`
+/// over processes, held when the spawn is asked for and still when the child
+/// is made, or it is `PermissionDenied`. A child given its parent's whole
+/// table (`cap_mode` 0) loses root's authority from it when its uid is not 0,
+/// as a `setuid` would take it; a list `cap_mode` 1 names is kept as named
+/// (design-decisions §1502 point 3). So a login manager starts the login
+/// screen and a person's desktop each as its user, holding exactly what it
+/// names (`requests/b-a-start-a-program-as-a-user-holding-only-what-it-is-given.md`).
 /// A `cred_mode` other than 0 or 1, the identity's fields set beside a 0, an
-/// id that is no `u32`, or a count with no pointer, is `InvalidArgument`.
+/// id that is no `u32` or is `0xFFFF_FFFF` (the set-id calls' "keep"), a
+/// group that is, or a count with no pointer, is `InvalidArgument`.
 ///
 /// Returns: process ID on success, negative error on failure.  Chosen number
 /// 559.  See design-decisions.md §279.

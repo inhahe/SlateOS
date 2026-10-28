@@ -61,6 +61,16 @@ capability-shaped answer to the daemon that must keep one power, such as a
 web server's low port: its parent grants it explicitly, rather than through
 Linux's `PR_SET_KEEPCAPS`.
 
+*Amended 2026-10-28 (Claude): spawning as a user.* `SYS_PROCESS_SPAWN_EX2`
+can now name the child's identity (`cred_mode` 1, which needs
+`SET_CREDENTIALS`; lane B's login manager). The rule above holds for what is
+*named*: a list the parent gives (`cap_mode` 1) is kept as named, root's
+rights included. What the child *inherits wholesale* (`cap_mode` 0, the
+parent's whole table) is not chosen, so it follows the new uid as it would
+across a fork and a `setuid`: a uid other than 0 loses root's authority from
+it (`pcb::install_spawn_identity`). Both halves are pinned by
+`spawn::test_spawn_identity_narrows_root_rights`.
+
 **4. Not modelled: a temporary drop.** A process has one uid, with no saved
 set-user-ID. On Linux, `seteuid(1000)` then `seteuid(0)` is legal for a
 process whose saved uid is 0; here the first call is permanent.

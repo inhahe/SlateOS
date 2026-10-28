@@ -188,13 +188,16 @@ pub enum Exit {
     /// Step 5: the interrupt the card was made to raise did not make the
     /// device ready in `SYS_WAIT_MULTIPLE`, or was not counted.
     InterruptLost = 22,
+    /// Step 5: the device was found ready only when the wait's timeout came:
+    /// the interrupt did not wake the waiting probe.
+    WokenLate = 23,
     /// The probe panicked: a bug in it.
     Panicked = 99,
 }
 
 impl Exit {
     /// Every exit code.
-    pub const ALL: [Exit; 15] = [
+    pub const ALL: [Exit; 16] = [
         Exit::Ok,
         Exit::OpenedNone,
         Exit::OpenedMore,
@@ -209,6 +212,7 @@ impl Exit {
         Exit::CommandRefused,
         Exit::ReadyTooSoon,
         Exit::InterruptLost,
+        Exit::WokenLate,
         Exit::Panicked,
     ];
 

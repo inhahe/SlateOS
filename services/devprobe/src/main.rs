@@ -52,6 +52,7 @@ core::arch::global_asm!(
 );
 
 const SYS_EXIT: u64 = 1;
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_PCI_DEVICE_OPEN: u64 = 1179;
 const SYS_PCI_DEVICE_BAR: u64 = 1181;
@@ -63,8 +64,12 @@ const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 const SYS_WAIT_MULTIPLE: u64 = 1066;
 
-/// How long the probe waits for the interrupt it has the card raise: 1 s.
-const INTERRUPT_WAIT_NS: u64 = 1_000_000_000;
+/// How long the probe waits for the interrupt it has the card raise: 5 s,
+/// and how soon the interrupt must wake it: 1 s. The wait looks at the
+/// device again when its timeout comes, so a wake that never came would
+/// still find the device ready -- late, which is how it is told apart.
+const INTERRUPT_WAIT_NS: u64 = 5_000_000_000;
+const PROMPT_WAKE_NS: u64 = 1_000_000_000;
 
 /// How many times to read EERD for one word before giving up on it.
 const EERD_POLLS: u32 = 100_000;
@@ -291,7 +296,9 @@ fn interrupts(handle: u64, bar0: &Bar0) {
     }
     bar0.write(IMS, TEST_CAUSE);
     bar0.write(ICS, TEST_CAUSE);
+    let started = syscall4(SYS_CLOCK_MONOTONIC, 0, 0, 0, 0);
     let ready = wait_for(&mut item, INTERRUPT_WAIT_NS);
+    let waited = syscall4(SYS_CLOCK_MONOTONIC, 0, 0, 0, 0).saturating_sub(started);
     let taken = syscall4(SYS_PCI_DEVICE_IRQ_WAIT, handle, 0, 0, 0);
     // Quiet again: every cause masked, and the one raised read away.
     bar0.write(IMC, u32::MAX);
@@ -304,6 +311,12 @@ fn interrupts(handle: u64, bar0: &Bar0) {
     }
     if taken < 1 {
         fail(Exit::InterruptLost, "the card's interrupt was not counted");
+    }
+    if !u64::try_from(waited).is_ok_and(|ns| ns < PROMPT_WAKE_NS) {
+        fail(
+            Exit::WokenLate,
+            "the card's interrupt did not wake the wait; its timeout found it",
+        );
     }
 }
 

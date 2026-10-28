@@ -42,7 +42,10 @@ header; and a file the bootloader loads beside the kernel.
    invalid-opcode handler to report, which in a program would kill the
    driver at its first warning; here they call the layer, which says a
    warning (once, for WARN_ONCE) and goes on, and ends the process on a
-   BUG().
+   BUG(). The third is `<asm/vdso/processor.h>`: Linux code waits for time
+   by spinning on `jiffies` with `cpu_relax()` in the loop while its timer
+   interrupt moves them on; nothing interrupts a driver process's task, so
+   here `cpu_relax()` brings `jiffies` up to the clock itself.
 3. **Generated stops for functions, hand-written data.** Every symbol the
    link would leave undefined and that is only ever *called* (only
    `R_X86_64_PLT32` relocations) becomes a generated stop: a function that

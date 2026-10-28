@@ -1,21 +1,6 @@
-# What the hello driver process is built from (scripts/linux-tree.sh driver).
-# `linux` lines: Linux's own objects, by path in the tree, built by Linux's
-# make. `layer` lines: the layer's own C files, by path under linuxdrv/.
+# What the hello driver process adds to what every driver process is built
+# from (linuxdrv/emul/manifest; scripts/linux-tree.sh driver). `linux`
+# lines: Linux's own objects, by path in the tree, built by Linux's make.
+# `layer` lines: the layer's own C files, by path under linuxdrv/.
 
-# printk's formatting, and the string and character functions it uses.
-linux lib/vsprintf.o
-linux lib/string.o
-linux lib/ctype.o
-linux lib/hexdump.o
-linux lib/uuid.o
-
-# Waiting and locking, Linux's own, over the layer's scheduler.
-linux kernel/sched/wait.o
-linux kernel/sched/completion.o
-linux kernel/sched/swait.o
-linux kernel/sched/wait_bit.o
-linux kernel/locking/mutex.o
-
-layer emul/lx_emul.c
-layer emul/lx_sched.c
 layer hello/hello.c

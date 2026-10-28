@@ -1,0 +1,27 @@
+# What every driver process is built from, whatever its driver: the layer's
+# C half and the Linux code it stands on. `scripts/linux-tree.sh driver`
+# reads this before the driver's own manifest, which adds the driver.
+# `linux` lines: Linux's own objects, by path in the tree, built by Linux's
+# make. `layer` lines: the layer's own C files, by path under linuxdrv/.
+
+# printk's formatting, and the string and character functions it uses.
+linux lib/vsprintf.o
+linux lib/string.o
+linux lib/ctype.o
+linux lib/hexdump.o
+linux lib/uuid.o
+
+# Waiting and locking, Linux's own, over the layer's scheduler; lx_emul.c
+# runs wait_bit_init() before the first initcall.
+linux kernel/sched/wait.o
+linux kernel/sched/completion.o
+linux kernel/sched/swait.o
+linux kernel/sched/wait_bit.o
+linux kernel/locking/mutex.o
+
+# Reference counts' overflow warning, which the inline counters call
+# (lx_sched.c counts its tasks' records).
+linux lib/refcount.o
+
+layer emul/lx_emul.c
+layer emul/lx_sched.c

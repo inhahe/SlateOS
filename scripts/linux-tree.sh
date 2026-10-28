@@ -244,12 +244,14 @@ install_shadow() {
 # build/linuxdrv/<name>.elf, linking the layer's Rust half, which cargo must
 # have built first (linuxdrv/kit: `cargo build --release`). Both paths are
 # the repository's own, not arguments: a path given from Git Bash would not
-# be one in WSL, where this runs. Its `manifest` names
-# what goes in: `linux <object>` for each of Linux's own objects (a path in
-# the tree, built by Linux's make), `layer <file>` for each of the layer's C
-# files (a path under linuxdrv/). Every function the result calls and nothing
-# defines becomes a generated stop (1578 rule 4); a data symbol nothing
-# defines is an error, to be written by hand.
+# be one in WSL, where this runs. What goes in is what the layer itself
+# stands on, `linuxdrv/emul/manifest`, and then what the driver's own
+# `manifest` adds: `linux <object>` for each of Linux's own objects (a path
+# in the tree, built by Linux's make), `layer <file>` for each of the
+# layer's C files (a path under linuxdrv/); a line the layer's already gives
+# is taken once. Every function the result calls and nothing defines becomes
+# a generated stop (1578 rule 4); a data symbol nothing defines is an error,
+# to be written by hand.
 driver() {
     local name=${1:-}
     [ -n "$name" ] || die "usage: linux-tree.sh driver <name under linuxdrv/>"
@@ -257,22 +259,28 @@ driver() {
     local kit="$repo/target/x86_64-unknown-none/release/liblxkit.a"
     local out="$repo/build/linuxdrv/$name.elf"
     mkdir -p "$(dirname "$out")"
-    local manifest="$repo/linuxdrv/$name/manifest"
+    local base="$repo/linuxdrv/emul/manifest" manifest="$repo/linuxdrv/$name/manifest"
     [ -f "$manifest" ] || die "$manifest: no such driver"
+    [ -f "$base" ] || die "$base: the layer's own manifest is missing"
     [ -f "$kit" ] || die "$kit: the layer's Rust half is not built"
     prepare
     install_shadow
-    local llvm work linux_objs=() layer_files=() kind path
+    local llvm work linux_objs=() layer_files=() kind path list
+    local -A seen=()
     llvm=$(llvm_setting)
-    while read -r kind path || [ -n "${kind:-}" ]; do
-        case $kind in
-            linux) linux_objs+=("$path") ;;
-            layer) layer_files+=("$path") ;;
-            '' | '#'*) ;;
-            *) die "$manifest: '$kind' is neither linux nor layer" ;;
-        esac
-    done <"$manifest"
-    [ "${#linux_objs[@]}" -gt 0 ] || die "$manifest names no Linux object"
+    for list in "$base" "$manifest"; do
+        while read -r kind path || [ -n "${kind:-}" ]; do
+            case $kind in
+                '' | '#'*) continue ;;
+                linux | layer) ;;
+                *) die "$list: '$kind' is neither linux nor layer" ;;
+            esac
+            [ -z "${seen["$kind:$path"]:-}" ] || continue
+            seen["$kind:$path"]=1
+            if [ "$kind" = linux ]; then linux_objs+=("$path"); else layer_files+=("$path"); fi
+        done <"$list"
+    done
+    [ "${#linux_objs[@]}" -gt 0 ] || die "$base and $manifest name no Linux object"
     # Linux's own objects, by Linux's own make.
     make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
         -j"$(nproc)" "${linux_objs[@]}" >"$obj/driver-$name.log" 2>&1 ||

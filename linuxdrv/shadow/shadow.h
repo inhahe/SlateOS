@@ -23,6 +23,7 @@
 #ifndef __ASSEMBLER__
 #include "irqflags.h"
 #include "bug.h"
+#include "processor.h"
 #endif
 
 #endif /* SLX_SHADOW_H */

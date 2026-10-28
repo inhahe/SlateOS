@@ -6,10 +6,13 @@
 //! which implements what the C half stands on -- the `slx_*` interface in
 //! `linuxdrv/emul/slx.h` -- with the system's own calls. It never sees a
 //! Linux header. It holds the process's entry point, its memory
-//! ([`buddy`]), the console, the clock, its arguments, and how it ends.
+//! ([`buddy`]), the console, the clock, its arguments ([`args`]), its tasks
+//! -- Linux's kthreads and the like, coroutines on its one thread ([`task`],
+//! and `sched`, which runs them) -- and how it ends.
 //!
-//! What can be tested on the host is a library ([`buddy`]); the rest is
-//! built only for the driver process's own target.
+//! What can be tested on the host is a library ([`args`], [`buddy`],
+//! [`task`]); the rest (`sched`, `sys`) is built only for the driver
+//! process's own target.
 
 // Bare only on the driver process's own target; on the host, std, for the
 // tests.
@@ -29,6 +32,8 @@ mod sys;
 pub mod exit {
     /// Every initcall returned 0.
     pub const OK: i32 = 0;
+    /// The system gave no clock.
+    pub const NO_CLOCK: i32 = 120;
     /// Linux code called `BUG()`.
     pub const BUG: i32 = 121;
     /// The layer's Rust half panicked.

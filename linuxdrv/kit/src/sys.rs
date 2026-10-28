@@ -40,11 +40,15 @@ const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_SLEEP: u64 = 11;
 const SYS_GETRANDOM: u64 = 90;
 const SYS_MMAP: u64 = 20;
+const SYS_MUNMAP: u64 = 21;
+const SYS_MPROTECT: u64 = 22;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_PROCESS_GET_ARGS: u64 = 519;
 const MAP_READ: u64 = 1 << 0;
 const MAP_WRITE: u64 = 1 << 1;
 const MAP_LAZY: u64 = 1 << 6;
+/// mprotect's "no access at all".
+const PROT_NONE: u64 = 0;
 
 /// kmalloc's region: 256 MiB, mapped lazily, so only what is used costs
 /// memory; aligned to its size, so every block is aligned to its own.
@@ -108,11 +112,23 @@ static HEAP: Single<Option<Buddy>> = Single(UnsafeCell::new(None));
 /// ([`load_args`]).
 static ARGS: Single<(usize, *const *const u8)> = Single(UnsafeCell::new((0, core::ptr::null())));
 
-/// Map `bytes` of lazily backed memory, read-write: its address, or `None`.
-fn map_lazy(bytes: usize) -> Option<usize> {
+/// Map `bytes` of lazily backed memory, read-write: its address, page
+/// aligned, or `None`.
+pub(crate) fn map_lazy(bytes: usize) -> Option<usize> {
     let size = u64::try_from(bytes).ok()?;
     let at = syscall3(SYS_MMAP, 0, size, MAP_READ | MAP_WRITE | MAP_LAZY);
     usize::try_from(at).ok().filter(|&a| a != 0)
+}
+
+/// Make `bytes` at `at` -- page-aligned, mapped -- untouchable, so that any
+/// access faults; whether it took.
+pub(crate) fn forbid(at: usize, bytes: usize) -> bool {
+    syscall3(SYS_MPROTECT, at as u64, bytes as u64, PROT_NONE) == 0
+}
+
+/// Unmap `bytes` at `at`, which [`map_lazy`] mapped; whether it took.
+pub(crate) fn unmap(at: usize, bytes: usize) -> bool {
+    syscall3(SYS_MUNMAP, at as u64, bytes as u64, 0) == 0
 }
 
 /// kmalloc's region and its order bytes: twice the region mapped, so that
@@ -131,15 +147,20 @@ unsafe extern "C" {
     fn lx_emul_main() -> i32;
 }
 
-/// The first task's exit code, once it has one.
-static MAIN_CODE: Single<Option<i32>> = Single::new(None);
+/// Whether the first task has ended, every initcall having succeeded.
+static MAIN_DONE: Single<bool> = Single::new(false);
 
-/// The first task: the C half's `lx_emul_main`.
+/// The first task: the C half's `lx_emul_main`. A failure ends the process
+/// at once, whatever tasks the initcalls before it started; success leaves
+/// those to run, and the process ends when they do.
 unsafe extern "C" fn main_task(_: *mut core::ffi::c_void) {
     // SAFETY: the C half's entry, called once.
     let code = unsafe { lx_emul_main() };
+    if code != exit::OK {
+        exit_with(code);
+    }
     // SAFETY: the one thread.
-    unsafe { *MAIN_CODE.get() = Some(code) };
+    unsafe { *MAIN_DONE.get() = true };
 }
 
 /// The process's arguments, asked of the kernel once, kept in kmalloc's
@@ -206,13 +227,11 @@ unsafe extern "C" fn lxkit_start() -> ! {
     }
     crate::sched::run();
     // SAFETY: the one thread; the tasks are done.
-    match unsafe { *MAIN_CODE.get() } {
-        Some(code) => exit_with(code),
-        None => {
-            log(b"[lx] every task waits on something that will never happen\n");
-            exit_with(exit::DEADLOCK)
-        }
+    if unsafe { *MAIN_DONE.get() } {
+        exit_with(exit::OK);
     }
+    log(b"[lx] every task waits on something that will never happen\n");
+    exit_with(exit::DEADLOCK)
 }
 
 pub(crate) fn log(text: &[u8]) {
@@ -308,12 +327,19 @@ pub unsafe extern "C" fn slx_random(buf: *mut u8, len: usize) {
     }
 }
 
-/// Nanoseconds of the monotonic clock.
+/// Nanoseconds of the monotonic clock. The tasks' deadlines and Linux's
+/// `jiffies` are kept by it, so a system that gives none ends the process.
 pub(crate) fn now_ns() -> u64 {
-    u64::try_from(syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0)).unwrap_or(0)
+    if let Ok(ns) = u64::try_from(syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0)) {
+        return ns;
+    }
+    log(b"[lx] the system gave no clock\n");
+    exit_with(exit::NO_CLOCK)
 }
 
-/// Sleep the process's thread for `ns` nanoseconds: no task may run.
+/// Sleep the process's thread for `ns` nanoseconds: no task may run. Its
+/// result is not needed: a sleep cut short or refused costs only a turn of
+/// the loop, which reads the clock again.
 pub(crate) fn sleep_ns(ns: u64) {
     syscall3(SYS_SLEEP, ns, 0, 0);
 }

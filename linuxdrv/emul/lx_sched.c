@@ -16,38 +16,49 @@
  * schedule(); it is woken by try_to_wake_up() setting it back to
  * TASK_RUNNING. As in Linux, a wake that comes between the two finds the
  * state already changed, and schedule() then does not block.
+ *
+ * Time: jiffies follow the monotonic clock wherever Linux's would have
+ * moved -- at every switch (lx_emul_switch_to), before a timed sleep
+ * reckons its end, after a busy wait, and at every cpu_relax() (the shadow
+ * <asm/vdso/processor.h>).
  */
 #include <linux/sched.h>
+#include <linux/sched/signal.h>
 #include <linux/sched/task.h>
 #include <linux/sched/wake_q.h>
 #include <linux/kthread.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/jiffies.h>
+#include <linux/math64.h>
+#include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
 #include <linux/err.h>
 
 #include "slx.h"
+#include "lx_emul.h"
 
 /* kernel/sched/sched.h's, which a driver file does not include. */
 int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags);
 
-/* The first task's record (lx_emul.c), and its handle. */
-extern struct task_struct lx_main_task;
+/* The first task's handle. */
 int lx_main_handle = -1;
 
 /* A task the layer made: Linux's record of it, and the Rust half's handle. */
 struct lx_task {
 	struct task_struct task;
+	/* -1 once it has ended: its slot may be another task's by then. */
 	int handle;
 	int (*threadfn)(void *data);
 	void *data;
+	/* What its function returned; -EINTR while it has not run. */
 	int result;
 	bool should_stop;
-	bool ran;
 	struct completion exited;
 };
+
+unsigned long lx_kthreads;
 
 static struct lx_task *lx_task_of(struct task_struct *p)
 {
@@ -74,6 +85,27 @@ asmlinkage __visible void schedule(void)
 void schedule_preempt_disabled(void)
 {
 	schedule();
+}
+
+/*
+ * A long loop's offer to let the others run (cond_resched()): taken once
+ * the task has run a jiffy since it was switched to, as Linux's tick asks a
+ * task to give way once its slice is spent, and never with interrupts off.
+ * 1 when it gave way.
+ */
+int __cond_resched(void)
+{
+	if (irqs_disabled() || slx_now_ns() - lx_switched_ns < NSEC_PER_SEC / HZ)
+		return 0;
+	slx_task_yield();
+	return 1;
+}
+
+/* Let the others run, and run again in turn. */
+void yield(void)
+{
+	set_current_state(TASK_RUNNING);
+	slx_task_yield();
 }
 
 int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags)
@@ -103,8 +135,9 @@ int default_wake_function(struct wait_queue_entry *curr, unsigned int mode,
 }
 
 /*
- * Wake queues, as Linux's kernel/sched/core.c keeps them, without the
- * reference counts: a task's record here lives until kthread_stop().
+ * Wake queues, as Linux's kernel/sched/core.c keeps them, without its
+ * reference counts: a task on one is woken before it can end, since it
+ * runs only when the queue's owner lets it.
  */
 void wake_q_add(struct wake_q_head *head, struct task_struct *task)
 {
@@ -135,10 +168,31 @@ void wake_up_q(struct wake_q_head *head)
 	}
 }
 
-/* Nanoseconds in `j` jiffies. */
-static u64 lx_jiffies_ns(unsigned long j)
+/* Nanoseconds in `count` units of `unit` ns; U64_MAX past what a u64 holds. */
+static u64 lx_ns(u64 count, u64 unit)
 {
-	return (u64)j * (NSEC_PER_SEC / HZ);
+	u64 ns;
+
+	return check_mul_overflow(count, unit, &ns) ? U64_MAX : ns;
+}
+
+/*
+ * The monotonic clock `ns` from now, as slx_task_block() takes a deadline:
+ * 0, none, when the clock will never get there.
+ */
+static u64 lx_deadline(u64 ns)
+{
+	u64 now = slx_now_ns();
+
+	if (ns >= U64_MAX - now)
+		return 0;
+	return max(now + ns, 1ULL);
+}
+
+/* jiffies brought up to the monotonic clock. */
+static void lx_tick(void)
+{
+	lx_emul_tick(slx_now_ns());
 }
 
 /*
@@ -159,11 +213,16 @@ long schedule_timeout(long timeout)
 		__set_current_state(TASK_RUNNING);
 		return 0;
 	}
+	/*
+	 * The deadline is reckoned from a later reading of the clock than
+	 * jiffies are, so when it comes jiffies have reached `expire`.
+	 */
+	lx_tick();
 	expire = jiffies + timeout;
 	if (READ_ONCE(current->__state) == TASK_RUNNING) {
 		slx_task_yield();
 	} else {
-		slx_task_block(slx_now_ns() + lx_jiffies_ns(timeout));
+		slx_task_block(lx_deadline(lx_ns(timeout, NSEC_PER_SEC / HZ)));
 		/* Woken, or its time came: running either way. */
 		__set_current_state(TASK_RUNNING);
 	}
@@ -215,58 +274,76 @@ void io_schedule(void)
 }
 
 /*
- * Sleep `ns` nanoseconds at least, letting the other tasks run; a wake that
- * comes sooner does not end it, as nothing ends Linux's msleep.
+ * Sleep `ns` nanoseconds in `state`, letting the other tasks run: at least
+ * once even for 0, as Linux's usleep arms a timer and schedules. A wake
+ * that comes sooner does not end it, as nothing ends Linux's usleep or
+ * msleep; when `signals`, a pending signal does -- kthread_stop() sends
+ * one -- as it ends msleep_interruptible(). The nanoseconds left.
  */
-static void lx_sleep_ns(u64 ns)
+static u64 lx_sleep(u64 ns, unsigned int state, bool signals)
 {
-	u64 until = slx_now_ns() + ns;
+	u64 until = lx_deadline(ns);
+	u64 now;
 
-	while (slx_now_ns() < until) {
-		__set_current_state(TASK_UNINTERRUPTIBLE);
+	for (;;) {
+		if (signals && signal_pending(current))
+			break;
+		__set_current_state(state);
 		slx_task_block(until);
 		__set_current_state(TASK_RUNNING);
+		if (until && slx_now_ns() >= until)
+			return 0;
 	}
+	now = slx_now_ns();
+	if (!until)
+		return U64_MAX;
+	return until > now ? until - now : 0;
 }
 
+/* Linux's sleeps msecs_to_jiffies(msecs), 0 for 0; this one yields for 0. */
 void msleep(unsigned int msecs)
 {
-	lx_sleep_ns((u64)msecs * NSEC_PER_MSEC);
+	lx_sleep((u64)msecs * NSEC_PER_MSEC, TASK_UNINTERRUPTIBLE, false);
 }
 
-/* No signals reach a driver process: it sleeps it all, and none is left. */
+/* The milliseconds left, rounded up, when a signal ends it. */
 unsigned long msleep_interruptible(unsigned int msecs)
 {
-	msleep(msecs);
-	return 0;
+	u64 left = lx_sleep((u64)msecs * NSEC_PER_MSEC, TASK_INTERRUPTIBLE, true);
+
+	return left / NSEC_PER_MSEC + (left % NSEC_PER_MSEC != 0);
 }
 
+/* At least `min` microseconds; Linux's slack up to `max` is not needed. */
 void usleep_range_state(unsigned long min, unsigned long max, unsigned int state)
 {
-	lx_sleep_ns((u64)min * NSEC_PER_USEC);
+	lx_sleep(lx_ns(min, NSEC_PER_USEC), state, false);
 }
 
 /*
  * Busy waits, as Linux's are: the process holds its thread for them
- * (design-decisions 1578, "What it costs"). __const_udelay takes Linux's
- * fixed-point count, microseconds * 2^32 / 10^6.
+ * (design-decisions 1578, "What it costs"), and jiffies move on by the
+ * time they end. __const_udelay takes Linux's fixed-point count,
+ * microseconds * 2^32 / 10^6.
  */
 static void lx_spin_ns(u64 ns)
 {
-	u64 until = slx_now_ns() + ns;
+	u64 until = lx_deadline(ns);
 
-	while (slx_now_ns() < until)
-		cpu_relax();
+	/* Not cpu_relax(), which would read the clock twice a turn. */
+	while (!until || slx_now_ns() < until)
+		native_pause();
+	lx_tick();
 }
 
 void __const_udelay(unsigned long xloops)
 {
-	lx_spin_ns(((u64)xloops * NSEC_PER_SEC) >> 32);
+	lx_spin_ns(mul_u64_u32_shr(xloops, NSEC_PER_SEC, 32));
 }
 
 void __udelay(unsigned long usecs)
 {
-	lx_spin_ns((u64)usecs * NSEC_PER_USEC);
+	lx_spin_ns(lx_ns(usecs, NSEC_PER_USEC));
 }
 
 void __ndelay(unsigned long nsecs)
@@ -277,20 +354,57 @@ void __ndelay(unsigned long nsecs)
 /*
  * Kernel threads: a task of the Rust half's per thread, which waits, as a
  * new Linux kthread does, to be woken (kthread_run wakes it), runs its
- * function, and is stopped by kthread_stop(), which frees its record.
+ * function unless told to stop first, and ends.
+ *
+ * Its record is counted as Linux counts a task's: the thread holds a
+ * reference while it lives, and kthread_stop() one while it waits for it;
+ * the last let go frees it. So a thread that ends on its own is freed when
+ * it ends, and a stopped one when kthread_stop() returns -- and, as in
+ * Linux, a caller may stop a thread that can end on its own only while it
+ * holds a reference of its own (get_task_struct, then kthread_stop_put).
  */
+
+/*
+ * The last reference to a task's record let go: a kthread's is freed. The
+ * first task's is never let go.
+ */
+void __put_task_struct(struct task_struct *p)
+{
+	struct lx_task *t = lx_task_of(p);
+
+	if (WARN_ON(!t))
+		return;
+	lx_kthreads--;
+	kfree(t);
+}
+
+/*
+ * Let go of a reference to a task's record. Linux's put_task_struct()
+ * frees the last only after an RCU grace period, for the other CPUs that
+ * may be walking the task list; a driver process has neither, and frees it
+ * at once, as Linux's put_task_struct_many() does.
+ */
+static void lx_put_task(struct task_struct *p)
+{
+	if (refcount_dec_and_test(&p->usage))
+		__put_task_struct(p);
+}
+
 static void lx_kthread_entry(void *arg)
 {
 	struct lx_task *t = arg;
 
-	if (READ_ONCE(t->task.__state) != TASK_RUNNING)
+	/* Until kthread_run(), or kthread_stop(), wakes it; nothing else does. */
+	while (READ_ONCE(t->task.__state) != TASK_RUNNING)
 		schedule();
-	if (!t->should_stop) {
-		t->ran = true;
+	if (!READ_ONCE(t->should_stop))
 		t->result = t->threadfn(t->data);
-	}
-	/* The last it touches of its record: kthread_stop() may free it next. */
+	/* Dead: no wake reaches it now, and its slot may be another task's. */
+	WRITE_ONCE(t->task.__state, TASK_DEAD);
+	t->handle = -1;
 	complete(&t->exited);
+	/* Its last touch of its record, which this may free. */
+	lx_put_task(&t->task);
 }
 
 struct task_struct *kthread_create_on_node(int (*threadfn)(void *data), void *data,
@@ -303,7 +417,9 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data), void *da
 		return ERR_PTR(-ENOMEM);
 	t->threadfn = threadfn;
 	t->data = data;
+	t->result = -EINTR;
 	init_completion(&t->exited);
+	refcount_set(&t->task.usage, 1);
 	va_start(args, namefmt);
 	vsnprintf(t->task.comm, sizeof(t->task.comm), namefmt, args);
 	va_end(args);
@@ -313,6 +429,7 @@ struct task_struct *kthread_create_on_node(int (*threadfn)(void *data), void *da
 		kfree(t);
 		return ERR_PTR(-ENOMEM);
 	}
+	lx_kthreads++;
 	return &t->task;
 }
 
@@ -328,22 +445,34 @@ bool kthread_should_stop_or_park(void)
 	return kthread_should_stop();
 }
 
+/*
+ * As Linux's: told to stop, and -- with TIF_NOTIFY_SIGNAL, which
+ * signal_pending() reads -- out of any interruptible wait, the thread is
+ * woken, and what its function returned is handed back once it has ended
+ * (-EINTR when it never ran).
+ */
 int kthread_stop(struct task_struct *k)
 {
 	struct lx_task *t = lx_task_of(k);
 	int ret;
 
-	if (!t)
+	if (WARN_ON(!t))
 		return -EINVAL;
+	get_task_struct(k);
 	WRITE_ONCE(t->should_stop, true);
+	set_tsk_thread_flag(k, TIF_NOTIFY_SIGNAL);
 	wake_up_process(k);
 	wait_for_completion(&t->exited);
-	ret = t->ran ? t->result : -EINTR;
-	kfree(t);
+	ret = t->result;
+	lx_put_task(k);
 	return ret;
 }
 
+/* kthread_stop(), and the caller's own reference let go. */
 int kthread_stop_put(struct task_struct *k)
 {
-	return kthread_stop(k);
+	int ret = kthread_stop(k);
+
+	lx_put_task(k);
+	return ret;
 }

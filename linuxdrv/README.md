@@ -27,7 +27,7 @@ locking is correct as compiled.
 | `linux.config` | The configuration, applied on top of `allnoconfig`; every line is checked to have taken |
 | `shadow/` | Linux headers that assume kernel mode, replaced by their include guards (design-decisions 1580) |
 | `emul/` | The Linux-facing half, C: Linux's functions over `slx_*` (`slx.h`) |
-| `kit/` | The system-facing half, Rust: `slx_*` on SlateOS -- entry, memory, console, exit |
+| `kit/` | The system-facing half, Rust: `slx_*` on SlateOS -- entry, memory, console, clock, arguments, tasks, exit |
 | `link.ld` | The driver process's layout: linked at 4 MiB, Linux's initcalls in order |
 | `hello/` | The first driver process, which drives nothing: the layer's own test |
 
@@ -54,7 +54,9 @@ the inventory a driver's port starts from.
     (cd linuxdrv/kit && cargo build --release)
     bash scripts/linux-tree.sh driver hello
 
-builds the process `linuxdrv/hello/manifest` describes into
+builds the process `linuxdrv/hello/manifest` describes, on top of what
+every driver process is built from (`linuxdrv/emul/manifest`: the layer's C
+half and the Linux code it stands on), into
 `build/linuxdrv/hello.elf`: Linux's own objects by Linux's make (with the
 small code model and the shadow headers, design-decisions 1580), the layer's
 C files with the same flags, a generated stop for every function nothing
@@ -70,8 +72,11 @@ reached on purpose (`kernel/src/linuxdrv.rs`). Linux's tasks are coroutines
 on the process's one thread (`kit/src/sched.rs`, `kit/src/task.rs`), under
 Linux's own wait queues, completions and mutexes (`emul/lx_sched.c`
 implements schedule() and try_to_wake_up() for them, and kthreads and
-sleeping); `hello` runs a kthread against a mutex held across a sleep. No
-driver runs yet. The first,
+sleeping), each on a 64 KiB stack of its own above a guard page;
+`hello` runs a kthread against a mutex held across a sleep, tries the
+scheduler's edges (timeouts, kthread_stop() out of interruptible waits,
+kthreads freed when they end, busy waits moving `jiffies`), and overflows a
+stack into its guard on purpose. No driver runs yet. The first,
 `e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
 use 148 symbols they do not define. About 15 are Linux's generic library code
 (`lib/` string, bitmap, CRC, `vsprintf`, hexdump; `timecounter`), to be

@@ -1401,15 +1401,15 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
     it only records a skip, which must fail the boot -- unless the harness
     could not build it here, and so named none.
     """
-    line = ("[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n"
-            "[lx] hello tasks: a kthread, a mutex held across a 20 ms sleep, a "
-            "completion: 18 jiffies\n")
+    hello = "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n"
+    tasks = ("[lx] hello tasks: a kthread, a mutex held across a 20 ms sleep, a "
+             "completion: 18 jiffies\n")
     verdict = ("[linuxdrv]   hello process (64192 bytes): Linux's headers and "
                "vsprintf in a process of their own, its initcall run, and a "
                "generated stop: OK\n")
-    ran = line + verdict
-    garbled = ("[lx] hello from Linux's own headers: 42, formatted by vsprintf, beef\n"
-               + verdict)
+    ran = hello + tasks + verdict
+    # Only its first line differs from `ran`: the one check it can fail.
+    garbled = (hello.replace("0xbeef", "beef") + tasks + verdict)
     skipped = ("[linuxdrv]   SKIP: Linux driver layer's hello process -- not "
                "loaded beside the kernel\n")
     failed = ("[linuxdrv]   FAIL: the hello process, which should have ran its "
@@ -1418,9 +1418,7 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
         ("a process named and run passes", ran, 1, "PASS"),
         ("its verdict without its line, formatted right, fails", garbled, 1, "FAIL"),
         ("its verdict alone fails", verdict, 1, "FAIL"),
-        ("its line without its tasks' fails",
-         "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n"
-         + verdict, 1, "FAIL"),
+        ("its line without its tasks' fails", hello + verdict, 1, "FAIL"),
         ("a process named and skipped fails", skipped, 1, "FAIL"),
         ("a process named whose test failed fails", failed, 1, "FAIL"),
         ("a process named and never mentioned fails", "[boot] up\n", 1, "FAIL"),

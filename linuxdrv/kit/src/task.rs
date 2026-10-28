@@ -85,28 +85,23 @@ impl Table {
         }
     }
 
-    /// Task `i` may run again; whether it was blocked (a runnable or
-    /// finished task is left as it is).
-    pub fn wake(&mut self, i: usize) -> bool {
-        let blocked = matches!(self.state(i), State::Blocked { .. });
-        if blocked {
+    /// Task `i`, if blocked, may run again (a runnable or finished task is
+    /// left as it is).
+    pub fn wake(&mut self, i: usize) {
+        if matches!(self.state(i), State::Blocked { .. }) {
             self.set(i, State::Runnable);
         }
-        blocked
     }
 
-    /// Every task whose deadline is at or before `now` wakes; how many did.
-    pub fn wake_expired(&mut self, now: u64) -> usize {
-        let mut woken = 0usize;
+    /// Every task whose deadline is at or before `now` wakes.
+    pub fn wake_expired(&mut self, now: u64) {
         for s in &mut self.states {
             if let State::Blocked { until: Some(t) } = *s
                 && t <= now
             {
                 *s = State::Runnable;
-                woken = woken.saturating_add(1);
             }
         }
-        woken
     }
 
     /// The earliest deadline a blocked task has, if any has one.
@@ -131,20 +126,6 @@ impl Table {
     /// Task `i`'s slot is free again (its stack given back).
     pub fn free(&mut self, i: usize) {
         self.set(i, State::Free);
-    }
-
-    /// Whether any task may run.
-    #[must_use]
-    pub fn any_runnable(&self) -> bool {
-        self.states.contains(&State::Runnable)
-    }
-
-    /// Whether any task is blocked, waiting to be woken or for a deadline.
-    #[must_use]
-    pub fn any_blocked(&self) -> bool {
-        self.states
-            .iter()
-            .any(|s| matches!(s, State::Blocked { .. }))
     }
 }
 
@@ -172,17 +153,20 @@ mod tests {
         let b = t.add().unwrap();
         t.block(a, None);
         t.block(b, Some(500));
-        assert!(!t.any_runnable());
-        assert!(t.any_blocked());
         assert_eq!(t.pick(), None);
         assert_eq!(t.next_deadline(), Some(500));
-        assert_eq!(t.wake_expired(499), 0);
-        assert_eq!(t.wake_expired(500), 1);
+        t.wake_expired(499);
+        assert_eq!(t.state(b), State::Blocked { until: Some(500) });
+        t.wake_expired(500);
+        assert_eq!(t.state(b), State::Runnable);
+        assert_eq!(t.state(a), State::Blocked { until: None }, "no deadline");
         assert_eq!(t.pick(), Some(b));
         assert_eq!(t.next_deadline(), None, "a's wait has no deadline");
-        assert!(t.wake(a));
-        assert!(!t.wake(a), "already runnable");
+        t.wake(a);
         assert_eq!(t.state(a), State::Runnable);
+        t.block(a, Some(9));
+        t.wake(a);
+        assert_eq!(t.state(a), State::Runnable, "woken before its deadline");
     }
 
     #[test]
@@ -190,7 +174,7 @@ mod tests {
         let mut t = Table::new();
         let a = t.add().unwrap();
         t.finish(a);
-        assert!(!t.wake(a));
+        t.wake(a);
         t.block(a, None);
         assert_eq!(t.state(a), State::Finished);
         assert_eq!(t.pick(), None);

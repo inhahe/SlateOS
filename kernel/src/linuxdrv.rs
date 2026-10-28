@@ -21,7 +21,14 @@ const HELLO: &[u8] = b"linuxdrv/hello";
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
 const EXIT_OK: i32 = 0;
+const EXIT_DEADLOCK: i32 = 124;
 const EXIT_STOP: i32 = 125;
+const EXIT_INIT_FAILED: i32 = 126;
+
+/// How a process the kernel killed for touching memory it may not ends: a
+/// driver process overflowing a task's stack into the guard page below it.
+const KILLED_ACCESS_VIOLATION: i32 =
+    pcb::crash_exit_code(crate::proc::exception::ExceptionCode::AccessViolation as u64);
 
 /// Run `elf` with `argv`, and answer how it ended: its exit code, or `None`
 /// when it did not end within 10 s.
@@ -49,11 +56,17 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 /// The layer's first process, `linuxdrv/hello`: Linux's headers and its own
 /// vsprintf in a process of their own. Run plainly, its initcalls allocate,
 /// take a spinlock with interrupts "off", print a line formatted by Linux,
-/// and run a kthread against a mutex held across a sleep and a completion,
-/// and the process exits 0; run with "stop", the first then calls a
-/// function nothing defines, which the build made a generated stop, and it
-/// exits [`EXIT_STOP`]. Skipped, and recorded so, where the bootloader did
-/// not load it -- anywhere but the boot test, and after a kexec.
+/// run a kthread against a mutex held across a sleep and a completion, and
+/// try the scheduler's edges, and the process exits 0. With one argument
+/// the first initcall ends it otherwise: "stop" calls a function nothing
+/// defines, which the build made a generated stop ([`EXIT_STOP`]);
+/// "deadlock" waits for what never comes ([`EXIT_DEADLOCK`]); "overflow"
+/// runs past its task's stack, into the guard page below it
+/// ([`KILLED_ACCESS_VIOLATION`]); "fail" starts a kthread that never ends
+/// and fails, which must end the process at once ([`EXIT_INIT_FAILED`]).
+/// Skipped, and recorded so, where the
+/// bootloader did not load it -- anywhere but the boot test, and after a
+/// kexec.
 ///
 /// # Errors
 ///
@@ -68,12 +81,27 @@ pub fn self_test() -> KernelResult<()> {
         skips.report("[linuxdrv]");
         return Ok(());
     };
-    let cases: [(&[&[u8]], i32, &str); 2] = [
-        (&[b"hello"], EXIT_OK, "ran its initcall and exited 0"),
+    let cases: [(&[&[u8]], i32, &str); 5] = [
+        (&[b"hello"], EXIT_OK, "ran its initcalls and exited 0"),
         (
             &[b"hello", b"stop"],
             EXIT_STOP,
             "stopped at a generated stop",
+        ),
+        (
+            &[b"hello", b"deadlock"],
+            EXIT_DEADLOCK,
+            "ended as deadlocked, its one task waiting for what never comes",
+        ),
+        (
+            &[b"hello", b"overflow"],
+            KILLED_ACCESS_VIOLATION,
+            "been killed at its task stack's guard page",
+        ),
+        (
+            &[b"hello", b"fail"],
+            EXIT_INIT_FAILED,
+            "exited at once on its failed initcall, its kthread still running",
         ),
     ];
     for (argv, want, what) in cases {
@@ -90,7 +118,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion), and a generated stop: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges), a generated stop, a deadlock, a stack overflow caught by its guard page, and a failed initcall: OK",
         elf.len()
     );
     Ok(())

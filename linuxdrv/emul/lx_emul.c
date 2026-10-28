@@ -23,6 +23,7 @@
 #include <linux/wait_bit.h>
 
 #include "slx.h"
+#include "lx_emul.h"
 
 /* Interrupt handlers may run (the shadow <asm/irqflags.h>). */
 unsigned long slx_irq_flags = X86_EFLAGS_IF;
@@ -34,10 +35,11 @@ void slx_halted(void)
 
 /*
  * The first task's record: what `current` names while the driver's
- * initcalls run (the others' are lx_sched.c's). The per-CPU variable is a
- * plain global with this configuration (no SMP), as every one is.
+ * initcalls run (the others' are lx_sched.c's), counted as one reference
+ * that is never let go. The per-CPU variable is a plain global with this
+ * configuration (no SMP), as every one is.
  */
-struct task_struct lx_main_task;
+struct task_struct lx_main_task = { .usage = REFCOUNT_INIT(1) };
 DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
 
 /* Not in an interrupt, nothing disabled: what a task's count reads. */
@@ -52,21 +54,6 @@ DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
 u64 __cacheline_aligned_in_smp jiffies_64 = INITIAL_JIFFIES;
 
 /*
- * The Rust half's hooks, at every turn of its loop (linuxdrv/kit, sched.rs).
- *
- * The task whose record is `task` is about to run: it is `current`. The
- * first task, Linux's initcalls, has no record of its own but the main one.
- */
-void lx_emul_switch_to(struct task_struct *task)
-{
-	/*
-	 * Through a pointer to this CPU's copy: the per-CPU write macros
-	 * dispatch on the value's size, and refuse a pointer.
-	 */
-	*raw_cpu_ptr(&current_task) = task ? task : &lx_main_task;
-}
-
-/*
  * The monotonic clock reads `now_ns`: jiffies count the ticks since the
  * first time it was read, at HZ, from INITIAL_JIFFIES.
  */
@@ -77,6 +64,32 @@ void lx_emul_tick(u64 now_ns)
 	if (!start_ns)
 		start_ns = now_ns;
 	jiffies_64 = INITIAL_JIFFIES + (now_ns - start_ns) / (NSEC_PER_SEC / HZ);
+}
+
+/* When the running task was switched to, by the monotonic clock. */
+u64 lx_switched_ns;
+
+/*
+ * The Rust half's hook, at every switch (linuxdrv/kit, sched.rs): the task
+ * whose record is `task` is about to run, and is `current`, the clock
+ * reading `now_ns`. The first task, Linux's initcalls, has no record of its
+ * own but the main one.
+ */
+void lx_emul_switch_to(void *task, u64 now_ns)
+{
+	/*
+	 * Through a pointer to this CPU's copy: the per-CPU write macros
+	 * dispatch on the value's size, and refuse a pointer.
+	 */
+	*raw_cpu_ptr(&current_task) = task ? task : &lx_main_task;
+	lx_switched_ns = now_ns;
+	lx_emul_tick(now_ns);
+}
+
+/* A busy wait's turn (cpu_relax(), the shadow <asm/vdso/processor.h>). */
+void slx_cpu_relax(void)
+{
+	lx_emul_tick(slx_now_ns());
 }
 
 /*
@@ -227,9 +240,6 @@ void slx_bug(const char *file, int line)
  * own entry (CONFIG_HAVE_ARCH_PREL32_RELOCATIONS).
  */
 extern initcall_entry_t __initcall_start[], __initcall_end[];
-
-/* lx_sched.c: the first task's handle, to wake it by. */
-extern int lx_main_handle;
 
 int lx_emul_main(void)
 {

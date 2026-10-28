@@ -1,0 +1,15 @@
+[package]
+name = "devprobe"
+version = "0.1.0"
+edition = "2024"
+description = "The device interface's ring-3 probe driver, run by the kernel's boot self-test"
+
+# As in services/init: what the host can test is the library (src/lib.rs);
+# the program -- no_std, no_main, with its own panic handler -- cannot be
+# built under the test harness, which brings std's. So `cargo test` runs the
+# library's tests and leaves the program to `cargo build`, which the kernel
+# embeds.
+[[bin]]
+name = "devprobe"
+path = "src/main.rs"
+test = false

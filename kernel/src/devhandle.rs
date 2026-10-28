@@ -1086,3 +1086,91 @@ pub fn self_test() -> KernelResult<()> {
     }
     Ok(())
 }
+
+/// The probe driver `services/devprobe`, embedded: the device interface's
+/// first ring-3 user. MIT, like the kernel.
+static DEVPROBE_ELF: &[u8] =
+    include_bytes!("../../services/devprobe/target/x86_64-unknown-none/release/devprobe");
+
+/// What the probe exits with when every step worked.
+const DEVPROBE_OK: i32 = 42;
+
+/// The device interface from ring 3: the probe driver is spawned holding a
+/// `PciDevice` capability for exactly one function -- an e1000e no kernel
+/// driver binds, which the boot test attaches for it -- and must open only
+/// that one, read its ids and its MAC through the handle, make a DMA arena,
+/// set up its MSI, and exit with 42. Its exit, which closes nothing itself,
+/// must leave the device released. Skipped, and recorded so, where there is
+/// no unbound e1000e.
+pub fn self_test_ring3() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::proc::{pcb, spawn};
+    use crate::serial_println;
+
+    let mut skips = crate::fs::selftest::Skips::new();
+    let target = pci::find_all_devices(0x8086, 0x10D3)
+        .into_iter()
+        .find(|d| pci::bound_driver(d.address).is_none());
+    let Some(target) = target else {
+        skips.record("ring-3 probe driver", "no unbound e1000e attached");
+        skips.report("[devhandle]");
+        return Ok(());
+    };
+    let a = target.address;
+    let caps = [(
+        ResourceType::PciDevice,
+        crate::cap::pci_device_id(a.bus, a.device, a.function),
+        Rights::WRITE,
+    )];
+    let options = spawn::SpawnOptions {
+        name: "devprobe",
+        parent: 0,
+        priority: crate::sched::task::DEFAULT_PRIORITY,
+        capabilities: &caps,
+        fd_map: &[],
+        argv: &[],
+        envp: &[],
+        exe_path: None,
+        cwd: None,
+        uid_gid: None,
+    };
+    let probe = match spawn::spawn_process(DEVPROBE_ELF, &options) {
+        Ok(p) => p,
+        Err(e) => {
+            serial_println!(
+                "[devhandle]   FAIL: the probe driver could not be spawned: {:?}",
+                e
+            );
+            return Err(KernelError::InternalError);
+        }
+    };
+    let deadline = crate::hrtimer::now_ns().saturating_add(10_000_000_000);
+    let finished = spawn::wait_for_fixture(probe.pid, deadline, 0);
+    let exit_code = pcb::exit_code(probe.pid);
+    // Released by its exit: the held handles close as its thread ends, which
+    // may be just after it is seen to have ended.
+    let released = yield_until(|| pci::bound_driver(a).is_none());
+    spawn::teardown_fixture(probe.pid, probe.task_id);
+    if !finished {
+        serial_println!("[devhandle]   FAIL: the probe driver did not exit within 10 s");
+        return Err(KernelError::TimedOut);
+    }
+    if exit_code != Some(DEVPROBE_OK) {
+        serial_println!(
+            "[devhandle]   FAIL: the probe driver exited with {:?}, not {} (the codes are `devprobe::Exit`, in services/devprobe/src/lib.rs)",
+            exit_code,
+            DEVPROBE_OK
+        );
+        return Err(KernelError::InternalError);
+    }
+    if !released {
+        serial_println!(
+            "[devhandle]   FAIL: the device is still bound after the probe driver's exit"
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[devhandle]   ring-3 probe driver: OK (only its granted function opened; ids, MAC, DMA arena, MSI; released at exit)"
+    );
+    Ok(())
+}

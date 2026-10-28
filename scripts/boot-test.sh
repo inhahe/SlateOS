@@ -10043,6 +10043,11 @@ QEMU_START_EPOCH=$(date +%s)
 # `edu`, QEMU's teaching device (1234:11e8: a 1 MiB register BAR, MSI, a DMA
 # engine) with no kernel driver: what `devhandle::self_test` opens, maps and
 # releases as a userspace driver would (design-decisions 1579).
+#
+# A second e1000e (MAC ...:59), which the kernel's e1000 driver leaves alone
+# (it takes the first it finds): the device the ring-3 probe driver
+# (`services/devprobe`, `devhandle::self_test_ring3`) opens, and later the
+# Linux driver layer's first driver.
 "$QEMU" \
     -device intel-iommu,caching-mode=on,aw-bits=48 \
     -netdev user,id=net0 \
@@ -10051,6 +10056,8 @@ QEMU_START_EPOCH=$(date +%s)
     -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 \
     -netdev user,id=net2 \
     -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 \
+    -netdev user,id=net3 \
+    -device e1000e,netdev=net3,mac=52:54:00:12:34:59 \
     -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
     "${ESP_DRIVE_ARGS[@]}" \
     -device virtio-blk-pci,drive=swap-disk \

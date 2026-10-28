@@ -644,7 +644,6 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
 /// Returns every matching device on bus 0.  Useful for discovering
 /// multiple instances of the same device type (e.g., multiple
 /// virtio-blk controllers).
-#[allow(dead_code)] // API for drivers zone; unused until multi-device support.
 pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
     let devices = scan_all();
     devices

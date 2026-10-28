@@ -8398,6 +8398,10 @@ extern "C" fn kernel_main() -> ! {
     selftest::dispatch_debug("Devhandle", selftest::Severity::Integrity, || {
         devhandle::self_test()
     });
+    // The same interface used from ring 3, by the probe driver.
+    selftest::dispatch_debug("Devhandle ring 3", selftest::Severity::Integrity, || {
+        devhandle::self_test_ring3()
+    });
 
     // AHCI/SATA driver self-test.
     selftest::dispatch_debug("Ahci", selftest::Severity::Diagnostic, || ahci::self_test());

@@ -229,6 +229,8 @@ OWNERSHIP: tuple[tuple[str, str], ...] = (
     # The Linux driver layer (design-decisions 1577, 1578).
     ("linuxdrv/", "A"),
     ("services/netstack/", "A"),
+    # The device interface's ring-3 probe driver (design-decisions 1579).
+    ("services/devprobe/", "A"),
     ("toolchain/x86_64-slateos.json", "A"),
     ("scripts/boot-test.sh", "A"),
     ("scripts/run-timeout.py", "A"),

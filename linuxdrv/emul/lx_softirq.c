@@ -126,20 +126,29 @@ int lx_softirq_init(void)
 /*
  * The Rust half's loop, at every turn, outside every task (linuxdrv/kit,
  * sched.rs), the monotonic clock reading `now_ns`: what Linux's tick and
- * ksoftirqd would do (above). `current` is the idle record meanwhile
- * (lx_emul.c), which is no task's and never freed.
+ * ksoftirqd would do (above). The task that ran last is charged its run
+ * time, as Linux's scheduler charges it at a switch; `current` is then the
+ * idle record (lx_emul.c), which is no task's and never freed.
  */
 void lx_emul_turn(u64 now_ns)
 {
 	static unsigned long ticked = INITIAL_JIFFIES;
 
+	lx_emul_account(now_ns);
 	*raw_cpu_ptr(&current_task) = &lx_idle_task;
 	lx_emul_jiffies_at(now_ns);
 	if (jiffies != ticked) {
 		ticked = jiffies;
 		raise_softirq(TIMER_SOFTIRQ);
 	}
+	/*
+	 * In softirq context, as Linux's RCU runs its callbacks from its
+	 * softirq: one that would sleep is a bug, and ends the process as one
+	 * (lx_may_sleep), rather than blocking the loop.
+	 */
+	preempt_count_add(SOFTIRQ_OFFSET);
 	lx_rcu_run();
+	preempt_count_sub(SOFTIRQ_OFFSET);
 	if (local_softirq_pending())
 		do_softirq();
 }

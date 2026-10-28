@@ -66,6 +66,9 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 /// runs past its task's stack, into the guard page below it
 /// ([`KILLED_ACCESS_VIOLATION`]); "fail" starts a kthread that never ends
 /// and fails, which must end the process at once ([`EXIT_INIT_FAILED`]);
+/// "earlyfail" fails a core initcall of the driver's own, which must end it
+/// too ([`EXIT_INIT_FAILED`]) -- a failure is carried past only when it is
+/// a Linux subsystem's, whatever its level;
 /// "stranded" succeeds but leaves a kthread waiting for what never comes,
 /// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done;
 /// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]).
@@ -74,7 +77,7 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 ///
 /// # Errors
 ///
-/// `InternalError` when any of the seven runs ends otherwise.
+/// `InternalError` when any of the eight runs ends otherwise.
 pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
     let Some(elf) = crate::boot::module(HELLO) else {
@@ -85,7 +88,7 @@ pub fn self_test() -> KernelResult<()> {
         skips.report("[linuxdrv]");
         return Ok(());
     };
-    let cases: [(&[&[u8]], i32, &str); 7] = [
+    let cases: [(&[&[u8]], i32, &str); 8] = [
         (&[b"hello"], EXIT_OK, "ran its initcalls and exited 0"),
         (
             &[b"hello", b"stop"],
@@ -106,6 +109,11 @@ pub fn self_test() -> KernelResult<()> {
             &[b"hello", b"fail"],
             EXIT_INIT_FAILED,
             "exited at once on its failed initcall, its kthread still running",
+        ),
+        (
+            &[b"hello", b"earlyfail"],
+            EXIT_INIT_FAILED,
+            "exited on its own failed core initcall",
         ),
         (
             &[b"hello", b"stranded"],
@@ -132,7 +140,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, a stranded kthread, and a sleep while atomic: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic: OK",
         elf.len()
     );
     Ok(())

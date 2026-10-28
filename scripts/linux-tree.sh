@@ -266,7 +266,9 @@ driver() {
     prepare
     install_shadow
     local llvm work linux_objs=() layer_files=() kind path list
-    local -A seen=()
+    # seen: every entry taken; drivers: those the driver's own manifest
+    # brought, whose code is the driver's (see mark_driver below).
+    local -A seen=() drivers=()
     llvm=$(llvm_setting)
     for list in "$layer_manifest" "$manifest"; do
         while read -r kind path || [ -n "${kind:-}" ]; do
@@ -277,6 +279,7 @@ driver() {
             esac
             [ -z "${seen["$kind:$path"]:-}" ] || continue
             seen["$kind:$path"]=1
+            [ "$list" = "$layer_manifest" ] || drivers["$kind:$path"]=1
             if [ "$kind" = linux ]; then linux_objs+=("$path"); else layer_files+=("$path"); fi
         done <"$list"
     done
@@ -298,8 +301,31 @@ driver() {
     mkdir -p "$work/src"
     # The layer's sources beside the objects: a path without spaces.
     cp -r "$repo/linuxdrv/emul" "$repo/linuxdrv/$name" "$work/src/"
+    # The driver's own code is told from Linux's by where it lands: its
+    # objects' text goes in sections of their own, which the linker script
+    # brackets (__driver_text_start/_end), so that the layer can tell a
+    # driver's initcall from a Linux subsystem's by its address. Linux's
+    # objects are shared with every other build, so a driver's is marked in
+    # a copy.
+    local objcopy
+    objcopy=$(tool llvm-objcopy)
+    mark_driver() {
+        "$objcopy" --rename-section .text=.text.lxdriver \
+            --rename-section .init.text=.init.text.lxdriver "$1" ||
+            die "marking $1 as the driver's failed"
+    }
     local objs=() file base
-    for file in "${linux_objs[@]}"; do objs+=("$obj/$file"); done
+    for file in "${linux_objs[@]}"; do
+        if [ -n "${drivers["linux:$file"]:-}" ]; then
+            local copy
+            copy="$work/linux_$(echo "${file%.o}" | tr '/' '_').o"
+            cp "$obj/$file" "$copy"
+            mark_driver "$copy"
+            objs+=("$copy")
+        else
+            objs+=("$obj/$file")
+        fi
+    done
     for file in "${layer_files[@]}"; do
         # Named by its path, so that emul/pci.c and <driver>/pci.c are two.
         local out_obj base
@@ -310,9 +336,12 @@ driver() {
         # half, which the SysV ABI promises a 16-aligned stack.
         # -fmacro-prefix-map: __FILE__ as the repository names it, not the
         # scratch copy's path, as Linux's flags do for Linux's files.
-        (cd "$obj" && eval "$flags -mstackrealign -fmacro-prefix-map='$work/src/=linuxdrv/' -DKBUILD_MODNAME='\"$name\"' -DKBUILD_BASENAME='\"$base\"' \
+        # -iquote: the tree's own internal headers ("kernel/...h"), which
+        # the layer, standing where Linux's core stands, may need.
+        (cd "$obj" && eval "$flags -mstackrealign -fmacro-prefix-map='$work/src/=linuxdrv/' -iquote '$src' -DKBUILD_MODNAME='\"$name\"' -DKBUILD_BASENAME='\"$base\"' \
             -c -o '$out_obj' '$work/src/$file'") ||
             die "compiling $file failed"
+        [ -z "${drivers["layer:$file"]:-}" ] || mark_driver "$out_obj"
         objs+=("$out_obj")
     done
     # The stops: every symbol used and defined nowhere -- not in the objects,

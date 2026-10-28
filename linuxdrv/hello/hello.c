@@ -17,11 +17,14 @@
  *               there by the guard page below it;
  *   "fail"      starts a kthread that never ends and fails, so must exit
  *               SLX_EXIT_INIT_FAILED at once;
+ *   "earlyfail" fails a core initcall of the driver's own -- at a level
+ *               Linux's subsystems use too, whose failures the process
+ *               carries past -- so must exit SLX_EXIT_INIT_FAILED as well;
  *   "stranded"  succeeds, leaving a kthread waiting for what never comes,
  *               so must exit SLX_EXIT_DEADLOCK, not 0;
  *   "atomic"    sleeps with bottom halves off, so must exit SLX_EXIT_BUG.
  * With an argument, the later initcalls do nothing: the first's ending is
- * the test.
+ * the test ("earlyfail"'s comes before the first).
  */
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -38,6 +41,7 @@
 #include <linux/sched/task.h>
 #include <linux/sched/wake_q.h>
 #include <linux/rcupdate.h>
+#include <linux/rcuwait.h>
 #include <linux/err.h>
 #include <linux/timer.h>
 #include <linux/interrupt.h>
@@ -49,9 +53,6 @@
 
 #include "../emul/slx.h"
 #include "../emul/lx_emul.h"
-
-/* Threads' records not yet freed, kthreadd and workqueue workers not counted. */
-#define HELLO_KTHREADS() lx_live_kthreads()
 
 /* Defined nowhere: the build makes it a generated stop. */
 void lx_hello_never_defined(void);
@@ -257,7 +258,7 @@ late_initcall(hello_tasks_init);
  * end by themselves, or when the last reference goes -- by kthread_stop_put(),
  * by put_task_struct() after an RCU grace period, by a wake queue; RCU
  * callbacks waiting for a grace period; usleep_range(0, ...), cond_resched() and yield()
- * letting the others run; and jiffies moving on through busy waits, and
+ * letting the others run; a task's run time counted; and jiffies moving on through busy waits, and
  * before a sleep reckons its end, as Linux's timer interrupt keeps them.
  * Each check says which failed.
  */
@@ -298,6 +299,23 @@ static int hello_wakes(void *task)
 }
 
 /*
+ * A task's run time, counted at its switches as Linux's scheduler counts
+ * it: 10 ms spun, then a sleep, which switches it out.
+ */
+static u64 hello_spun_runtime;
+
+static int hello_spins(void *unused)
+{
+	u64 t0 = slx_now_ns();
+
+	while (slx_now_ns() - t0 < 10 * NSEC_PER_MSEC)
+		barrier();
+	msleep(1);
+	hello_spun_runtime = current->se.sum_exec_runtime;
+	return 0;
+}
+
+/*
  * Stopped while in an uninterruptible sleep, which goes on: then neither a
  * bare interruptible schedule() nor schedule_timeout_interruptible() may
  * sleep, the stop's signal pending.
@@ -310,12 +328,29 @@ static int hello_sleeps_then_waits(void *unused)
 	return schedule_timeout_interruptible(10 * HZ) > 9 * HZ ? 3 : -ETIME;
 }
 
-static struct rcu_head hello_rcu;
-static bool hello_rcu_ran;
+static struct rcu_head hello_rcu, hello_barrier_rcu;
+static bool hello_rcu_ran, hello_rcu_in_softirq, hello_barrier_rcu_ran;
 
 static void hello_rcu_done(struct rcu_head *head)
 {
 	hello_rcu_ran = true;
+	hello_rcu_in_softirq = in_serving_softirq();
+}
+
+static void hello_barrier_rcu_done(struct rcu_head *head)
+{
+	hello_barrier_rcu_ran = true;
+}
+
+/* rcuwait: one task waiting, and a kthread that wakes it. */
+static struct rcuwait hello_rcuwait = __RCUWAIT_INITIALIZER(hello_rcuwait);
+static bool hello_rcuwait_cond;
+
+static int hello_rcuwait_wakes(void *unused)
+{
+	WRITE_ONCE(hello_rcuwait_cond, true);
+	rcuwait_wake_up(&hello_rcuwait);
+	return 0;
 }
 
 /* An object freed with kfree_rcu(), its head past the start. */
@@ -325,14 +360,26 @@ struct hello_rcu_object {
 };
 
 /*
- * A subsystem's initcall that fails: Linux's own carry on past such, and so
- * must the process -- only a driver's own failure ends it.
+ * The driver's own initcall, at the level of Linux's core subsystems: its
+ * failure ends the process as a later one's does, where a subsystem's
+ * there is carried past -- the plain run carries past one, workqueues'
+ * sysfs (subsys_virtual_register(), lx_emul.c).
  */
-static int __init hello_subsystem_fails(void)
+static int __init hello_fails_early(void)
 {
-	return -ENODEV;
+	return hello_mode("earlyfail") ? -ENODEV : 0;
 }
-core_initcall(hello_subsystem_fails);
+core_initcall(hello_fails_early);
+
+/*
+ * The driver's own initcall answering a positive value, which none should:
+ * Linux takes it as success, and so must the process.
+ */
+static int __init hello_answers_positive(void)
+{
+	return slx_argc() > 1 ? 0 : 1;
+}
+late_initcall(hello_answers_positive);
 
 /* A wake of `task`, and what try_to_wake_up() answered: 1 if it slept. */
 struct hello_wake {
@@ -382,7 +429,7 @@ static int __init hello_edges_init(void)
 	struct hello_sleep sleeps[2] = { { MAX_JIFFY_OFFSET }, { 1L << 56 } };
 	bool ran = false, quick_ran = false, held_ran = false;
 	bool resched_ran = false, yield_ran = false, put_ran = false, queued_ran = false;
-	unsigned long j;
+	unsigned long j, warned;
 	u64 t0, t1, give_up;
 	long left, elapsed;
 	int i;
@@ -391,7 +438,7 @@ static int __init hello_edges_init(void)
 		return 0;
 	/* kthread_stop() lets its record go through RCU: freed by the next turn. */
 	msleep(1);
-	HELLO_CHECK(HELLO_KTHREADS() == 0, "a stopped kthread's record was not freed");
+	HELLO_CHECK(lx_live_kthreads() == 0, "a stopped kthread's record was not freed");
 
 	j = jiffies;
 	HELLO_CHECK(wait_for_completion_timeout(&hello_forever, 2) == 0,
@@ -400,17 +447,18 @@ static int __init hello_edges_init(void)
 
 	/*
 	 * A sleep reckons its end from jiffies brought up to the clock: after
-	 * 120 ms that moved nothing on (a spin without cpu_relax()), 30
-	 * jiffies, a sleep of 60 woken at once has 60 left less the jiffies
-	 * the sleep itself took -- not 30 less them. Measured, so that a busy
-	 * system slows the sleep without failing the check; the check can
-	 * tell the two apart while the sleep takes under 30 jiffies.
+	 * 120 ms that moved nothing on (a spin without cpu_relax(), after the
+	 * waker is made, which blocks and so brings jiffies up), 30 jiffies, a
+	 * sleep of 60 woken at once has 60 left less the jiffies the sleep
+	 * itself took -- not 30 less them. Measured, so that a busy system
+	 * slows the sleep without failing the check; the check can tell the
+	 * two apart while the sleep takes under 30 jiffies.
 	 */
+	waker = kthread_run(hello_wakes, current, "hello-wakes");
+	HELLO_CHECK(!IS_ERR(waker), "no kthread");
 	t0 = slx_now_ns();
 	while (slx_now_ns() - t0 < 120 * NSEC_PER_MSEC)
 		barrier();
-	waker = kthread_run(hello_wakes, current, "hello-wakes");
-	HELLO_CHECK(!IS_ERR(waker), "no kthread");
 	t1 = slx_now_ns();
 	set_current_state(TASK_INTERRUPTIBLE);
 	left = schedule_timeout(60);
@@ -466,11 +514,26 @@ static int __init hello_edges_init(void)
 	HELLO_CHECK(kthread_stop(k) == 3,
 		    "a stopped kthread slept in schedule_timeout_interruptible()");
 
-	/* An RCU callback waits for a grace period: a switch. */
+	/*
+	 * An RCU callback waits for a grace period: a switch. It runs in
+	 * softirq context, as Linux's RCU runs it; rcu_barrier() waits for it.
+	 */
 	call_rcu(&hello_rcu, hello_rcu_done);
 	HELLO_CHECK(!hello_rcu_ran, "an RCU callback ran before a grace period");
 	msleep(1);
 	HELLO_CHECK(hello_rcu_ran, "an RCU callback never ran");
+	HELLO_CHECK(hello_rcu_in_softirq, "an RCU callback ran outside softirq context");
+	call_rcu(&hello_barrier_rcu, hello_barrier_rcu_done);
+	rcu_barrier();
+	HELLO_CHECK(hello_barrier_rcu_ran, "rcu_barrier() did not wait for a callback");
+
+	/* rcuwait: the waiter sleeps until the kthread wakes it by name. */
+	HELLO_CHECK(!IS_ERR(kthread_run(hello_rcuwait_wakes, NULL, "hello-rcuwait")),
+		    "no kthread");
+	HELLO_CHECK(rcuwait_wait_event(&hello_rcuwait, READ_ONCE(hello_rcuwait_cond),
+				       TASK_UNINTERRUPTIBLE) == 0,
+		    "an rcuwait was interrupted");
+	HELLO_CHECK(!rcu_access_pointer(hello_rcuwait.task), "an rcuwait still named its waiter");
 
 	/*
 	 * kfree_rcu() frees after a grace period, and kvfree_rcu() without a
@@ -499,11 +562,15 @@ static int __init hello_edges_init(void)
 	HELLO_CHECK(!IS_ERR(k), "no kthread");
 	get_task_struct(k);
 	msleep(1);
+	/* An ended thread cannot park: Linux warns, and refuses rather than waits. */
+	warned = lx_warnings;
+	HELLO_CHECK(kthread_park(k) == -ENOSYS && lx_warnings == warned + 1,
+		    "kthread_park() of an ended kthread did not refuse");
 	HELLO_CHECK(kthread_stop(k) == 5 && put_ran, "a held kthread did not run");
 	put_task_struct(k);
-	HELLO_CHECK(HELLO_KTHREADS() == 1, "put_task_struct() freed before a grace period");
+	HELLO_CHECK(lx_live_kthreads() == 1, "put_task_struct() freed before a grace period");
 	msleep(1);
-	HELLO_CHECK(HELLO_KTHREADS() == 0, "put_task_struct() never freed the record");
+	HELLO_CHECK(lx_live_kthreads() == 0, "put_task_struct() never freed the record");
 
 	/*
 	 * A wake queue takes over a reference its caller held, lets go of a
@@ -517,7 +584,7 @@ static int __init hello_edges_init(void)
 	wake_q_add_safe(&wake_q, k);
 	wake_up_q(&wake_q);
 	msleep(1);
-	HELLO_CHECK(queued_ran && HELLO_KTHREADS() == 0, "a wake queue kept or lost a reference");
+	HELLO_CHECK(queued_ran && lx_live_kthreads() == 0, "a wake queue kept or lost a reference");
 
 	/* A long loop's cond_resched() lets the others run once its slice is spent. */
 	HELLO_CHECK(!IS_ERR(kthread_run(hello_quick, &resched_ran, "hello-resched")), "no kthread");
@@ -529,6 +596,13 @@ static int __init hello_edges_init(void)
 	yield();
 	HELLO_CHECK(yield_ran, "yield() let no other task run");
 
+	/* Started by the sleep, so that kthread_stop() then waits for its end. */
+	k = kthread_run(hello_spins, NULL, "hello-spins");
+	HELLO_CHECK(!IS_ERR(k), "no kthread");
+	msleep(1);
+	HELLO_CHECK(kthread_stop(k) == 0 && hello_spun_runtime >= 10 * NSEC_PER_MSEC,
+		    "10 ms a task spun were not counted as its run time");
+
 	quick = kthread_run(hello_quick, &quick_ran, "hello-quick");
 	HELLO_CHECK(!IS_ERR(quick), "no kthread");
 	held = kthread_run(hello_quick, &held_ran, "hello-held");
@@ -537,12 +611,12 @@ static int __init hello_edges_init(void)
 	for (i = 0; i < 100 && !(READ_ONCE(quick_ran) && READ_ONCE(held_ran)); i++)
 		usleep_range(0, 50);
 	HELLO_CHECK(quick_ran && held_ran, "usleep_range(0, 50) let no other task run");
-	HELLO_CHECK(HELLO_KTHREADS() == 1,
+	HELLO_CHECK(lx_live_kthreads() == 1,
 		    "a kthread that ended by itself was not freed, or one still held was");
 	HELLO_CHECK(kthread_stop_put(held) == 5,
 		    "kthread_stop_put() did not hand back an ended kthread's result");
 	msleep(1);
-	HELLO_CHECK(HELLO_KTHREADS() == 0, "kthread_stop_put() did not free an ended kthread");
+	HELLO_CHECK(lx_live_kthreads() == 0, "kthread_stop_put() did not free an ended kthread");
 
 	t0 = slx_now_ns();
 	j = jiffies;
@@ -753,15 +827,32 @@ late_initcall(hello_timers_init);
  * driver's own workqueue runs its work and is destroyed; and a work item
  * that sleeps lets another, queued behind it on the same pool, run
  * meanwhile -- the concurrency Linux's scheduler gives a pool by telling it
- * when a worker sleeps.
+ * when a worker sleeps -- and so does one that hogs the CPU, once Linux's
+ * tick has marked it CPU-intensive. A worker, or a kthread worker, counts
+ * as idle (a daemon, not waited for) only while it has no work in hand.
  */
 static bool hello_work_in_worker, hello_delayed_ran, hello_cancelled_work_ran;
 static bool hello_own_work_ran, hello_sleeper_done, hello_passed_sleeper;
 static unsigned long hello_delayed_at;
 
+/* The worker that ran hello_work, and whether it counted as idle meanwhile. */
+static struct task_struct *hello_work_worker;
+static bool hello_busy_worker_idle;
+
 static void hello_work_fn(struct work_struct *work)
 {
 	hello_work_in_worker = current->flags & PF_WQ_WORKER;
+	hello_work_worker = current;
+	hello_busy_worker_idle = lx_emul_task_is_daemon(current);
+}
+
+/* A kthread worker's work item, and whether its worker counted as idle meanwhile. */
+static bool hello_kwork_ran, hello_busy_kworker_idle;
+
+static void hello_kwork_fn(struct kthread_work *work)
+{
+	hello_kwork_ran = true;
+	hello_busy_kworker_idle = lx_emul_task_is_daemon(current);
 }
 
 static DECLARE_COMPLETION(hello_delayed_done);
@@ -794,12 +885,43 @@ static void hello_passer_fn(struct work_struct *work)
 	hello_passed_sleeper = !READ_ONCE(hello_sleeper_done);
 }
 
+/*
+ * A work item hogging the CPU, giving way only at cond_resched(), and one
+ * queued behind it: Linux's tick marks the hog CPU-intensive once it has
+ * run 10 ms (wq_worker_tick), and its pool then runs the other beside it.
+ * The hog gives up after a second, so that a pool that never does fails
+ * the check, not the boot; half a second is what the check allows.
+ */
+static bool hello_behind_ran;
+static u64 hello_hog_waited_ns = U64_MAX;
+
+static void hello_hog_fn(struct work_struct *work)
+{
+	u64 t0 = slx_now_ns(), now;
+
+	do {
+		cond_resched();
+		now = slx_now_ns();
+		if (READ_ONCE(hello_behind_ran)) {
+			hello_hog_waited_ns = now - t0;
+			return;
+		}
+	} while (now - t0 < NSEC_PER_SEC);
+}
+
+static void hello_behind_fn(struct work_struct *work)
+{
+	WRITE_ONCE(hello_behind_ran, true);
+}
+
 static DECLARE_WORK(hello_work, hello_work_fn);
 static DECLARE_DELAYED_WORK(hello_delayed, hello_delayed_fn);
 static DECLARE_DELAYED_WORK(hello_cancelled_work, hello_cancelled_work_fn);
 static DECLARE_WORK(hello_own_work, hello_own_work_fn);
 static DECLARE_WORK(hello_sleeper, hello_sleeper_fn);
 static DECLARE_WORK(hello_passer, hello_passer_fn);
+static DECLARE_WORK(hello_hog, hello_hog_fn);
+static DECLARE_WORK(hello_behind, hello_behind_fn);
 
 static int __init hello_workqueues_init(void)
 {
@@ -822,6 +944,29 @@ static int __init hello_workqueues_init(void)
 	HELLO_CHECK(schedule_work(&hello_work), "a work item was not queued");
 	flush_work(&hello_work);
 	HELLO_CHECK(hello_work_in_worker, "a work item did not run in a worker");
+	/*
+	 * A worker is a daemon -- not waited for at the end -- only while it
+	 * has no work item in hand, so that a stuck item reads as a deadlock;
+	 * by the flush's end it has gone back to waiting for work.
+	 */
+	HELLO_CHECK(!hello_busy_worker_idle, "a worker running a work item counted as idle");
+	HELLO_CHECK(lx_emul_task_is_daemon(hello_work_worker), "an idle worker did not count as idle");
+
+	/* And a kthread worker the same. */
+	{
+		struct kthread_worker *kw = kthread_run_worker(0, "hello-kworker");
+		struct kthread_work kwork;
+
+		HELLO_CHECK(!IS_ERR(kw), "no kthread worker");
+		kthread_init_work(&kwork, hello_kwork_fn);
+		kthread_queue_work(kw, &kwork);
+		kthread_flush_work(&kwork);
+		HELLO_CHECK(hello_kwork_ran && !hello_busy_kworker_idle,
+			    "a kthread worker running a work item counted as idle");
+		HELLO_CHECK(lx_emul_task_is_daemon(kw->task),
+			    "an idle kthread worker did not count as idle");
+		kthread_destroy_worker(kw);
+	}
 
 	j = jiffies;
 	HELLO_CHECK(schedule_delayed_work(&hello_delayed, 3), "delayed work was not queued");
@@ -850,7 +995,15 @@ static int __init hello_workqueues_init(void)
 	HELLO_CHECK(hello_sleeper_done && hello_passed_sleeper,
 		    "work queued behind a sleeping work item waited for it");
 
-	pr_info("hello workqueues: work in a worker, delayed, cancelled, a queue of the driver's own, work passing a sleeper\n");
+	schedule_work(&hello_hog);
+	schedule_work(&hello_behind);
+	flush_work(&hello_hog);
+	flush_work(&hello_behind);
+	HELLO_CHECK(hello_hog_waited_ns < NSEC_PER_SEC / 2,
+		    "work queued behind a CPU-hogging work item waited half a second for it");
+
+	pr_info("hello workqueues: work in a worker, delayed, cancelled, a queue of the driver's own, workers idle and busy, work passing a sleeper and a CPU hog (%llu ms)\n",
+		hello_hog_waited_ns / NSEC_PER_MSEC);
 	return 0;
 }
 late_initcall(hello_workqueues_init);

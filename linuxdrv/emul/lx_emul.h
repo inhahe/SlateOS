@@ -29,12 +29,13 @@ bool lx_rcu_pending(void);
 int lx_start_kthreadd(void);
 /* lx_emul.c: when the running task was switched to, by the monotonic clock. */
 extern u64 lx_switched_ns;
+/* lx_emul.c: the running task's run time counted up to `now_ns`. */
+void lx_emul_account(u64 now_ns);
 
 /* For the hello driver's tests: warnings said (lx_emul.c), and threads'
- * records not yet freed, daemons (kthreadd, workers) not counted
+ * records not yet freed, daemons (kthreadd, idle workers) not counted
  * (lx_sched.c). */
 extern unsigned long lx_warnings;
 unsigned long lx_live_kthreads(void);
-bool lx_emul_task_is_daemon(void *task);
 
 #endif /* LX_EMUL_H */

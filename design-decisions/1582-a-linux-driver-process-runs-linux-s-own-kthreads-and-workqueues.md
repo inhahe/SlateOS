@@ -10,7 +10,7 @@ follow that are judgement calls. Linux's own subsystems sometimes fail to
 set themselves up in a driver process -- the workqueues' registration in
 sysfs, a file system the process does not have -- and Linux carries on past
 such failures, so the process does too; only the driver's own failing ends
-it. And helper threads that wait for work forever (kthreadd, the workqueues'
+it. And helper threads idly waiting for work (kthreadd, the workqueues'
 workers) no longer make the process look stuck: it is done when every other
 thread has finished.
 
@@ -29,21 +29,40 @@ thread has finished.
    Workqueues are initialised where Linux initialises them:
    `workqueue_init_early()` before the loop first turns,
    `workqueue_init()` once kthreadd can make workers.
-2. **A failing initcall below device level is logged and carried past**;
-   one at device level or later -- where a driver's `module_init` runs --
-   still ends the process (exit 126). The linker script marks the boundary
-   (`__initcall_device_start`). Linux itself ignores every initcall's
-   return value beyond logging it.
-3. **Daemons.** A thread that only waits for work -- kthreadd, a workqueue
-   worker (`PF_WQ_WORKER`), a kthread worker (`kthread_worker_fn`) -- does
-   not keep the process from being done: when nothing can run again, the
-   process exits 0 if every thread left waiting is such a daemon, DEADLOCK
-   (124) otherwise.
-4. **No sysfs.** A subsystem registering with sysfs is told it cannot
+2. **A failing initcall is fatal only when it is the driver's own.** The
+   build marks the code of the driver's own objects (`scripts/linux-tree.sh`
+   renames their `.text` and `.init.text` to `*.lxdriver`), the linker
+   script brackets it (`__driver_text_start` / `__driver_text_end`), and an
+   initcall whose function lies there ends the process on failure (exit
+   126), at whatever level it runs; a failure anywhere else -- a Linux
+   subsystem's -- is logged and carried past. Linux itself ignores every
+   initcall's return value beyond logging it. A positive return, which no
+   initcall should give, is logged and taken as success, as Linux takes it.
+3. **Daemons.** A thread idly waiting for work -- kthreadd, a workqueue
+   worker (`PF_WQ_WORKER`) or a kthread worker (`kthread_worker_fn`) with
+   no work item in hand -- does not keep the process from being done: when
+   nothing can run again, the process exits 0 if every thread left waiting
+   is such a daemon, DEADLOCK (124) otherwise. A worker blocked in the
+   middle of a work item is not idle, so a stuck work item is a deadlock.
+4. **Linux's tick, where workqueues need it.** A work item that hogs the
+   CPU, giving way only at `cond_resched()`, is marked CPU-intensive as
+   Linux's tick marks it (`wq_worker_tick`), so that its pool runs the work
+   queued behind it: `cond_resched()` does the tick's part once a task has
+   run a jiffy, the layer counting each task's run time (at every switch
+   and at the tick), and `loops_per_jiffy` reads what a 4 GHz CPU
+   calibrates, so that the threshold is Linux's 10 ms, not the second it
+   would be at the uncalibrated value.
+5. **No sysfs.** A subsystem registering with sysfs is told it cannot
    (`subsys_virtual_register` answers `-ENODEV`): a driver process has no
    file system for it, and turning `CONFIG_SYSFS` off needs `CONFIG_EXPERT`,
    which under `allnoconfig` also turns off `BUG`, `BLOCK`, `EPOLL` and
    dozens more -- a different configuration altogether.
+6. **RCU callbacks run in softirq context**, as Linux's RCU runs them: one
+   that would sleep ends the process as a BUG. The slab refuses what it
+   cannot keep: a `SLAB_TYPESAFE_BY_RCU` cache is a stop (its objects'
+   memory must stay the cache's past their free, which kfree does not
+   keep), and a `SLAB_PANIC` cache that cannot be made ends the process
+   (exit 127).
 
 ### The alternatives
 
@@ -56,6 +75,10 @@ thread has finished.
 - **Every failing initcall fatal** (as before): the workqueues' sysfs
   registration fails in every process, so every process would end before
   its driver ran; and Linux's own subsystems will meet more of this.
+- **Fatal by level** (an initcall at device level or later is the
+  driver's): simpler, but a driver may register a `core_initcall` or
+  `subsys_initcall` of its own, and a Linux subsystem may run at device
+  level; the level says when an initcall runs, not whose it is.
 - **Make the daemons finish** (stop kthreadd and the workers when the
   driver's initcalls are done): it would let the old exit rule stand, but a
   real driver needs its workers for as long as it lives, and the rule is
@@ -63,20 +86,29 @@ thread has finished.
 
 ### What it costs
 
-- A work item stuck forever with nothing else waiting on it now reads as a
-  finished process (exit 0), not DEADLOCK: its worker is a daemon. A driver
-  waiting on that item (flush_work) is not a daemon, so the usual case is
-  still caught.
+- Work behind a deferrable timer (`TIMER_DEFERRABLE`, as a deferrable
+  delayed work item is) does not keep the process alive: once only idle
+  daemons are left, the process ends without waiting for it, as an idle
+  Linux CPU does not wake for such a timer. Work queued now wakes a worker,
+  and work behind an ordinary timer keeps the loop waiting for it, so both
+  are run; a work item a worker has begun is waited for.
 - Every driver process logs the workqueues' failed sysfs registration
   once ("subsystem initcall ... failed: -19; carrying on").
+- The build renames the driver objects' sections, so a driver's own code
+  must live in `.text` or `.init.text` for its initcall to count as the
+  driver's (an initcall in another section would be carried past). Linux's
+  `__init` and plain functions are both covered.
 - The process is bigger: the hello driver grows from about 150 KB to about
   255 KB.
 
 ### Where it lands
 
 `linuxdrv/emul/manifest`, `linuxdrv/emul/lx_sched.c` (kernel_thread,
-do_exit, kthreadd, the daemon rule's question, the worker hooks, rcuwait,
-kfree_rcu), `linuxdrv/emul/lx_emul.c` (slab, per-CPU memory, sysfs's
-refusal, the initcall rule, population counts, workqueue init),
-`linuxdrv/link.ld` (`__initcall_device_start`), `linuxdrv/kit/src/sched.rs`
-(the exit rule, `slx_task_exit`), and the hello driver's workqueue tests.
+do_exit, kthreadd, the daemon rule's question, the worker hooks and tick,
+rcuwait, kfree_rcu), `linuxdrv/emul/lx_emul.c` (slab, per-CPU memory,
+sysfs's refusal, the initcall rule, run-time accounting, population counts,
+workqueue init), `linuxdrv/emul/lx_softirq.c` (RCU callbacks in softirq
+context, the turn's accounting), `scripts/linux-tree.sh` (the driver's
+sections marked), `linuxdrv/link.ld` (`__driver_text_start/_end`),
+`linuxdrv/kit/src/sched.rs` (the exit rule, `slx_task_exit`), and the hello
+driver's tests ("earlyfail" among the kernel's runs).

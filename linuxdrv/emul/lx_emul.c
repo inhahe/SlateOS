@@ -73,11 +73,13 @@ const unsigned long cpu_bit_bitmap[BITS_PER_LONG + 1][BITS_TO_LONGS(NR_CPUS)] = 
 };
 
 /*
- * Linux's value before its delay loop is calibrated, which a driver
- * process never does: its delays are the clock's (lx_sched.c). Workqueues
- * read it to scale their CPU-intensive threshold.
+ * What Linux's delay-loop calibration would find on a 4 GHz CPU. A driver
+ * process never calibrates -- its delays are the clock's (lx_sched.c) --
+ * but workqueues scale their CPU-intensive threshold by it: at Linux's
+ * uncalibrated value they would wait a whole second before letting the
+ * work behind a CPU hog run, rather than Linux's 10 ms.
  */
-unsigned long loops_per_jiffy = 1 << 12;
+unsigned long loops_per_jiffy = 4000000000UL / HZ;
 
 /*
  * Module parameters' kinds, which Linux code names in its parameter
@@ -122,6 +124,15 @@ void lx_emul_jiffies_now(void)
 /* When the running task was switched to, by the monotonic clock. */
 u64 lx_switched_ns;
 
+/* Up to when the running task's run time has been counted. */
+static u64 lx_accounted_ns;
+
+void lx_emul_account(u64 now_ns)
+{
+	current->se.sum_exec_runtime += now_ns - lx_accounted_ns;
+	lx_accounted_ns = now_ns;
+}
+
 /*
  * The Rust half's hook, at every switch (linuxdrv/kit, sched.rs): the task
  * whose record is `task` is about to run, and is `current`, the clock
@@ -137,6 +148,7 @@ void lx_emul_switch_to(void *task, u64 now_ns)
 	 */
 	*raw_cpu_ptr(&current_task) = task ? task : &lx_main_task;
 	lx_switched_ns = now_ns;
+	lx_accounted_ns = now_ns;
 }
 
 /*
@@ -215,27 +227,36 @@ void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t flags, int node, s
  * constructor, run on each object as it is handed out (Linux runs it once
  * per object of a new slab; running it again on an object freed in its
  * constructed state is the same object). mm/slab.h's struct, which no
- * driver sees.
+ * driver sees. What it cannot keep it refuses out loud: a cache whose
+ * objects RCU readers may touch after their free (SLAB_TYPESAFE_BY_RCU)
+ * needs its memory to stay the cache's, which kfree does not keep; and a
+ * cache Linux would panic without (SLAB_PANIC) ends the process.
  */
 struct kmem_cache {
 	unsigned int size;
 	void (*ctor)(void *object);
-	const char *name;
 };
 
 struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int object_size,
 					    struct kmem_cache_args *args, slab_flags_t flags)
 {
-	struct kmem_cache *s = kzalloc(sizeof(*s), GFP_KERNEL);
+	struct kmem_cache *s;
 	unsigned int align = args ? args->align : 0;
 
+	if (flags & SLAB_TYPESAFE_BY_RCU)
+		slx_stop("__kmem_cache_create_args (SLAB_TYPESAFE_BY_RCU)",
+			 __builtin_return_address(0));
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	if (!s && (flags & SLAB_PANIC)) {
+		pr_err("no memory for the slab cache %s\n", name);
+		slx_exit(SLX_EXIT_NO_MEMORY);
+	}
 	if (!s)
 		return NULL;
 	if (flags & SLAB_HWCACHE_ALIGN)
 		align = max(align, (unsigned int)L1_CACHE_BYTES);
 	s->size = max(object_size, align);
 	s->ctor = args ? args->ctor : NULL;
-	s->name = name;
 	return s;
 }
 
@@ -428,12 +449,13 @@ void slx_bug(const char *file, int line)
 /*
  * The process's initcalls, in Linux's order (the linker script keeps the
  * levels in sequence between __initcall_start and __initcall_end), each an
- * offset from its own entry (CONFIG_HAVE_ARCH_PREL32_RELOCATIONS). Those
- * before __initcall_device_start are the levels Linux's own subsystems set
- * themselves up at; from it on, device level and later, are where a
- * driver's own initcall (module_init) runs.
+ * offset from its own entry (CONFIG_HAVE_ARCH_PREL32_RELOCATIONS); and where
+ * the driver's own code lies (__driver_text_start/_end, which
+ * scripts/linux-tree.sh marks), which tells the driver's initcalls from
+ * Linux's own subsystems', whatever their level.
  */
-extern initcall_entry_t __initcall_start[], __initcall_device_start[], __initcall_end[];
+extern initcall_entry_t __initcall_start[], __initcall_end[];
+extern char __driver_text_start[], __driver_text_end[];
 
 /*
  * What Linux's start_kernel() sets up before anything runs, set up before
@@ -463,16 +485,22 @@ int lx_emul_main(void)
 	workqueue_init_topology();
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
+		bool drivers = (char *)fn >= __driver_text_start && (char *)fn < __driver_text_end;
 		int ret = fn();
 
-		if (!ret)
-			continue;
 		/*
-		 * By address: naming it would need the symbol table. A
-		 * subsystem's failing is Linux's own business, which Linux
-		 * carries on past, as here; the driver's ends the process.
+		 * By address: naming it would need the symbol table. Only a
+		 * negative return is a failure: Linux's module loader takes a
+		 * positive one as success. A Linux subsystem's failing is Linux's
+		 * own business, which Linux carries on past, as here; the
+		 * driver's ends the process.
 		 */
-		if (entry < __initcall_device_start) {
+		if (ret > 0)
+			pr_warn("initcall at %#lx returned %d; taken as success\n",
+				(unsigned long)fn, ret);
+		if (ret >= 0)
+			continue;
+		if (!drivers) {
 			pr_warn("subsystem initcall at %#lx failed: %d; carrying on\n",
 				(unsigned long)fn, ret);
 			continue;

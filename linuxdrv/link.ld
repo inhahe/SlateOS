@@ -31,6 +31,11 @@ SECTIONS
 
     .text : {
         KEEP(*(.text.start))
+        /* The driver's own code (scripts/linux-tree.sh marks its objects'
+         * sections), first, so that the patterns below do not take it. */
+        __driver_text_start = .;
+        *(.text.lxdriver .init.text.lxdriver)
+        __driver_text_end = .;
         *(.text .text.*)
         *(.init.text .init.text.* .exit.text .noinstr.text .ref.text)
         *(.sched.text .cpuidle.text .entry.text .head.text .spinlock.text)
@@ -58,7 +63,6 @@ SECTIONS
         KEEP(*(.initcall4.init)) KEEP(*(.initcall4s.init))
         KEEP(*(.initcall5.init)) KEEP(*(.initcall5s.init))
         KEEP(*(.initcallrootfs.init))
-        __initcall_device_start = .;
         KEEP(*(.initcall6.init)) KEEP(*(.initcall6s.init))
         KEEP(*(.initcall7.init)) KEEP(*(.initcall7s.init))
         __initcall_end = .;

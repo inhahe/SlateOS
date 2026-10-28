@@ -17,10 +17,14 @@ extern int lx_main_handle;
 /* lx_emul.c: jiffies brought up to the monotonic clock, read now or `now_ns`. */
 void lx_emul_jiffies_now(void);
 void lx_emul_jiffies_at(u64 now_ns);
+/* lx_emul.c: when, by the monotonic clock, the current jiffy began. */
+u64 lx_emul_jiffy_began_ns(void);
 /* lx_softirq.c: softirqs, tasklets and timers made ready; 0, or -ENOMEM. */
 int lx_softirq_init(void);
 /* lx_sched.c: the RCU callbacks queued so far, run: every task is switched out. */
 void lx_rcu_run(void);
+/* lx_sched.c: whether any RCU callback waits to run. */
+bool lx_rcu_pending(void);
 /* lx_emul.c: when the running task was switched to, by the monotonic clock. */
 extern u64 lx_switched_ns;
 

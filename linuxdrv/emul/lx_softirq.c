@@ -5,14 +5,19 @@
  * they are -- with the Rust half's loop as their tick and their ksoftirqd
  * (design-decisions 1578 rule 5, 1581).
  *
- * At every turn of the loop, between tasks, lx_emul_turn() brings jiffies
- * up to the clock, runs the RCU callbacks whose grace period has passed,
- * raises the timer softirq when a timer is due, and runs what softirqs
- * are pending -- where Linux runs them on the way out of its timer
- * interrupt, or in ksoftirqd. It answers when the next timer is due, which
- * the loop sleeps no longer than: Linux's NO_HZ_IDLE accounting
- * (get_next_timer_interrupt), so a process with nothing to do but wait for
- * a timer sleeps until it, and one with nothing at all can be seen to.
+ * At every turn of the loop, between tasks, lx_emul_turn() does what
+ * Linux's tick and ksoftirqd do: brings jiffies up to the clock, raises the
+ * timer softirq whenever they have moved -- as a tick does on a busy CPU,
+ * so that deferrable timers run on the first turn after their jiffy as
+ * they would on the first tick -- runs the RCU callbacks whose grace period
+ * has passed, and runs what softirqs are pending. When the loop has no
+ * task to run, lx_emul_next_event() says how long it may sleep: until the
+ * next timer, by Linux's NO_HZ_IDLE accounting (get_next_timer_interrupt,
+ * which, as on Linux, does not wake an idle process for a deferrable
+ * timer), not at all while softirqs or RCU callbacks are still pending,
+ * and for ever when there is nothing -- which is how a process that can
+ * never be woken is told from one waiting for a timer.
+ *
  * Softirqs raised in a task run at local_bh_enable(), as on Linux, or at the
  * next turn; they run on a stack of their own, as x86-64 Linux runs them
  * (hardirq_stack_ptr), which the Rust half maps with a guard below it.
@@ -54,23 +59,39 @@ bool static_key_initialized = true;
 struct workqueue_struct *system_percpu_wq;
 
 /*
- * What Linux's softirq.c and timer.c call at their start. The loop is the
- * process's ksoftirqd and its CPU never goes away, so there is no thread
- * to register and no hotplug state to set up; no POSIX CPU timers, and no
- * high-resolution timers, so none is ever due.
+ * Per-CPU hotplug threads: the loop is the process's ksoftirqd, so
+ * softirq.c's registration of it needs no thread. Any other registration
+ * would want threads that would never run: a stop, which says so.
  */
 int smpboot_register_percpu_thread(struct smp_hotplug_thread *plug_thread)
 {
-	return 0;
+	if (plug_thread->store == &ksoftirqd)
+		return 0;
+	slx_stop("smpboot_register_percpu_thread (a thread other than ksoftirqd)",
+		 __builtin_return_address(0));
 }
 
+/*
+ * A CPU hotplug state: the process's one CPU is online and never goes, so
+ * the state's startup runs for it now when asked to (`invoke`), as Linux's
+ * runs it on every online CPU, and its teardown never. A dynamic state
+ * answers a state number, as Linux's allocation does; a multi-instance
+ * state's callbacks run per instance, not here.
+ */
 int __cpuhp_setup_state(enum cpuhp_state state, const char *name, bool invoke,
 			int (*startup)(unsigned int cpu),
 			int (*teardown)(unsigned int cpu), bool multi_instance)
 {
-	return 0;
+	int ret = 0;
+
+	if (invoke && startup && !multi_instance)
+		ret = startup(0);
+	if (ret)
+		return ret;
+	return state == CPUHP_AP_ONLINE_DYN || state == CPUHP_BP_PREPARE_DYN ? state : 0;
 }
 
+/* No POSIX CPU timers, and no high-resolution timers, so none is ever due. */
 void posix_cputimers_init_work(void)
 {
 }
@@ -91,9 +112,10 @@ void workqueue_softirq_action(bool highpri)
 }
 
 /*
- * Softirqs and timers made ready, before the first initcall, as Linux's
- * start_kernel() makes them: the softirqs' stack, the tasklet lists, the
- * timer wheel. 0, or -ENOMEM when no stack could be mapped.
+ * Softirqs and timers made ready, before the loop's first turn, as Linux's
+ * start_kernel() makes them before anything runs: the softirqs' stack, the
+ * tasklet lists, the timer wheel. 0, or -ENOMEM when no stack could be
+ * mapped.
  */
 int lx_softirq_init(void)
 {
@@ -110,24 +132,42 @@ int lx_softirq_init(void)
 
 /*
  * The Rust half's loop, at every turn, outside every task (linuxdrv/kit,
- * sched.rs), the monotonic clock reading `now_ns`: the time and the work
- * Linux's tick and ksoftirqd would see to (above). `current` is the idle
- * record meanwhile (lx_emul.c), which is no task's and never freed. The
- * monotonic time the next timer is due, or 0 for none.
+ * sched.rs), the monotonic clock reading `now_ns`: what Linux's tick and
+ * ksoftirqd would do (above). `current` is the idle record meanwhile
+ * (lx_emul.c), which is no task's and never freed.
  */
-u64 lx_emul_turn(u64 now_ns)
+void lx_emul_turn(u64 now_ns)
 {
-	u64 next;
+	static unsigned long ticked = INITIAL_JIFFIES;
 
 	*raw_cpu_ptr(&current_task) = &lx_idle_task;
 	lx_emul_jiffies_at(now_ns);
-	lx_rcu_run();
-	/* A timer is due when its jiffy has come: the wheel answers `now`. */
-	if (get_next_timer_interrupt(jiffies, now_ns) <= now_ns)
+	if (jiffies != ticked) {
+		ticked = jiffies;
 		raise_softirq(TIMER_SOFTIRQ);
+	}
+	lx_rcu_run();
 	if (local_softirq_pending())
 		do_softirq();
-	/* Asked again: a timer's function may have armed another. */
-	next = get_next_timer_interrupt(jiffies, now_ns);
-	return next == KTIME_MAX ? 0 : max(next, 1ULL);
+}
+
+/*
+ * The Rust half's loop, with no task to run, the clock reading `now_ns`:
+ * when it must turn again -- `now_ns` while softirqs (more than one turn's
+ * worth) or RCU callbacks are still pending, else when the next timer is
+ * due -- or 0, never, when nothing is pending at all.
+ */
+u64 lx_emul_next_event(u64 now_ns)
+{
+	u64 began, next;
+
+	if (local_softirq_pending() || lx_rcu_pending())
+		return now_ns;
+	/* The wheel reckons from when the current jiffy began, as Linux's tick. */
+	began = lx_emul_jiffy_began_ns();
+	next = get_next_timer_interrupt(jiffies, began);
+	if (next == KTIME_MAX)
+		return 0;
+	/* A timer due already runs on the next jiffy's turn, as on the next tick. */
+	return max(next, began + TICK_NSEC);
 }

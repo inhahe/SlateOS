@@ -5,11 +5,11 @@
 //! A task runs until it blocks, yields or returns; then the loop runs
 //! another. At every turn, between tasks, the C half sees to what Linux's
 //! tick and ksoftirqd would (`lx_emul_turn`: `jiffies`, RCU callbacks,
-//! timers, softirqs) and says when its next timer is due; before switching
-//! to a task, the loop tells the C half which (`lx_emul_switch_to`, which
-//! sets Linux's `current`). With nothing runnable it sleeps until the
-//! earliest deadline, a task's or a timer's; with none, nothing will ever
-//! run again, and the process ends.
+//! timers, softirqs); before switching to a task, the loop tells the C half
+//! which (`lx_emul_switch_to`, which sets Linux's `current`). With nothing
+//! runnable it sleeps until the earliest of a task's deadline and the C
+//! half's next event (`lx_emul_next_event`: a timer, or work pending now);
+//! with neither, nothing will ever run again, and the process ends.
 
 use core::ffi::c_void;
 
@@ -27,6 +27,16 @@ const GUARD: usize = 16 * 1024;
 
 /// A task's mapping: its guard, then its stack.
 const MAPPING: usize = GUARD + STACK;
+
+/// `slx_stack_bytes` and `slx_guard_bytes`: [`STACK`] and [`GUARD`], for C
+/// code that needs a stack's shape -- the hello driver's tests of it.
+// Lower-case: they are C's names, declared in slx.h.
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static slx_stack_bytes: usize = STACK;
+#[allow(non_upper_case_globals)]
+#[unsafe(no_mangle)]
+pub static slx_guard_bytes: usize = GUARD;
 
 /// Finished tasks' mappings kept for the next tasks, so that a driver that
 /// starts and stops kthreads does not map, guard and unmap a stack each
@@ -111,9 +121,11 @@ unsafe extern "C" {
     /// The C half: the task whose record is `data` waited past its deadline
     /// and may run again.
     fn lx_emul_timed_out(data: *mut c_void);
-    /// The C half: a turn of the loop, the monotonic clock reading `now_ns`;
-    /// when its next timer is due, 0 for none.
-    fn lx_emul_turn(now_ns: u64) -> u64;
+    /// The C half: a turn of the loop, the monotonic clock reading `now_ns`.
+    fn lx_emul_turn(now_ns: u64);
+    /// The C half, with no task to run: when the loop must turn again, by
+    /// the monotonic clock, 0 for never.
+    fn lx_emul_next_event(now_ns: u64) -> u64;
 }
 
 /// The scheduler's state, through a raw pointer: every reference made from
@@ -319,7 +331,7 @@ pub fn run() -> bool {
     loop {
         let now = now_ns();
         // SAFETY: the C half's hook, outside every task; the one thread.
-        let timer = unsafe { lx_emul_turn(now) };
+        unsafe { lx_emul_turn(now) };
         // SAFETY: the one thread, outside any switch.
         let woken = unsafe { (*s).table.wake_expired(now) };
         timed_out(woken);
@@ -345,9 +357,11 @@ pub fn run() -> bool {
         }
         // SAFETY: as above.
         let task = unsafe { (*s).table.next_deadline() };
-        let timer = (timer != 0).then_some(timer);
-        match task.into_iter().chain(timer).min() {
-            Some(deadline) => sleep_ns(deadline.saturating_sub(now)),
+        // SAFETY: the C half's hook, outside every task; the one thread.
+        let event = unsafe { lx_emul_next_event(now) };
+        match task.into_iter().chain((event != 0).then_some(event)).min() {
+            // From the clock read again: the turn's softirqs may have run long.
+            Some(deadline) => sleep_ns(deadline.saturating_sub(now_ns())),
             // SAFETY: as above.
             None => return !unsafe { (*s).table.any_blocked() },
         }

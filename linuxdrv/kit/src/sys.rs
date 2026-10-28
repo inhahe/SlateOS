@@ -143,6 +143,9 @@ fn heap_init() -> Option<Buddy> {
 }
 
 unsafe extern "C" {
+    /// The C half: set up what must be ready before the loop first turns;
+    /// `exit::OK`, or what the process exits with.
+    fn lx_emul_init() -> i32;
     /// The C half: run the driver's initcalls; what the process exits with.
     fn lx_emul_main() -> i32;
 }
@@ -214,6 +217,11 @@ unsafe extern "C" fn lxkit_start() -> ! {
     // SAFETY: the one thread, before any other use of the heap.
     unsafe { *HEAP.get() = Some(heap) };
     load_args();
+    // SAFETY: the C half's set-up, once, before any task or turn.
+    let ready = unsafe { lx_emul_init() };
+    if ready != exit::OK {
+        exit_with(ready);
+    }
     // The C half's main runs as the first task, so that it can wait as any
     // task does; the process ends once nothing will ever run again.
     if crate::sched::slx_task_new(main_task, core::ptr::null_mut(), core::ptr::null_mut()) < 0 {

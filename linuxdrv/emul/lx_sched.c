@@ -96,8 +96,26 @@ static bool lx_stays_running(void)
 	return true;
 }
 
+/*
+ * A task about to give up the CPU must be in neither a softirq nor a
+ * section with bottom halves off: the count those raise is the process's
+ * one, so every other task would run inside it, and the loop could run no
+ * softirq again. Linux reports "scheduling while atomic" and carries on;
+ * here the process ends as a BUG, naming the caller, as a wait outside
+ * every task does.
+ */
+static void lx_may_sleep(void *caller)
+{
+	if (likely(!preempt_count()))
+		return;
+	pr_err("BUG: scheduling while atomic (preempt count %#x), called from %px\n",
+	       preempt_count(), caller);
+	slx_exit(SLX_EXIT_BUG);
+}
+
 asmlinkage __visible void schedule(void)
 {
+	lx_may_sleep(__builtin_return_address(0));
 	if (lx_stays_running()) {
 		slx_task_yield();
 		return;
@@ -122,7 +140,8 @@ int __cond_resched(void)
 {
 	static unsigned int calls;
 
-	if (irqs_disabled() || ++calls % 32)
+	/* As Linux's should_resched(0): never inside a softirq or with BHs off. */
+	if (irqs_disabled() || preempt_count() || ++calls % 32)
 		return 0;
 	if (slx_now_ns() - lx_switched_ns < NSEC_PER_SEC / HZ)
 		return 0;
@@ -133,6 +152,7 @@ int __cond_resched(void)
 /* Let the others run, and run again in turn. */
 void yield(void)
 {
+	lx_may_sleep(__builtin_return_address(0));
 	set_current_state(TASK_RUNNING);
 	slx_task_yield();
 }
@@ -227,6 +247,11 @@ void call_rcu(struct rcu_head *head, rcu_callback_t func)
 	lx_rcu_last = &head->next;
 }
 
+bool lx_rcu_pending(void)
+{
+	return lx_rcu_first;
+}
+
 void lx_rcu_run(void)
 {
 	struct rcu_head *head = lx_rcu_first;
@@ -276,6 +301,7 @@ long schedule_timeout(long timeout)
 		schedule();
 		return timeout;
 	}
+	lx_may_sleep(__builtin_return_address(0));
 	if (timeout < 0) {
 		pr_err("schedule_timeout: wrong timeout value %lx\n", timeout);
 		__set_current_state(TASK_RUNNING);
@@ -353,6 +379,7 @@ static u64 lx_sleep(u64 ns, unsigned int state, bool signals)
 	u64 until = lx_deadline(ns);
 	u64 now;
 
+	lx_may_sleep(__builtin_return_address(0));
 	for (;;) {
 		if (signals && signal_pending(current))
 			break;

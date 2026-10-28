@@ -18,7 +18,8 @@
  *   "fail"      starts a kthread that never ends and fails, so must exit
  *               SLX_EXIT_INIT_FAILED at once;
  *   "stranded"  succeeds, leaving a kthread waiting for what never comes,
- *               so must exit SLX_EXIT_DEADLOCK, not 0.
+ *               so must exit SLX_EXIT_DEADLOCK, not 0;
+ *   "atomic"    sleeps with bottom halves off, so must exit SLX_EXIT_BUG.
  * With an argument, the later initcalls do nothing: the first's ending is
  * the test.
  */
@@ -42,6 +43,7 @@
 #include <linux/interrupt.h>
 #include <linux/bottom_half.h>
 #include <linux/preempt.h>
+#include <linux/cpuhotplug.h>
 #include <asm/processor.h>
 
 #include "../emul/slx.h"
@@ -67,11 +69,14 @@ static void hello_warn_once(void)
 
 /*
  * About `depth` KiB of stack, used and given back: a frame of a KiB each.
- * HELLO_OVERFLOW_KIB of it runs past a task's 64 KiB stack but not past the
- * 16 KiB guard below it (linuxdrv/kit/src/sched.rs), so that it returns,
+ * hello_overflow_kib() of it runs past a task's stack but not past the
+ * guard below it (slx_stack_bytes, slx_guard_bytes), so that it returns,
  * having written over memory, only where the guard is missing.
  */
-#define HELLO_OVERFLOW_KIB 68
+static int hello_overflow_kib(void)
+{
+	return (slx_stack_bytes + slx_guard_bytes / 4) / 1024;
+}
 
 static noinline int hello_deep(int depth)
 {
@@ -145,9 +150,9 @@ static int __init hello_init(void)
 	if (hello_mode("deadlock"))
 		wait_for_completion(&hello_forever);
 	if (hello_mode("overflow")) {
-		hello_deep(HELLO_OVERFLOW_KIB);
+		hello_deep(hello_overflow_kib());
 		pr_err("hello: %d KiB of stack used, past the guard, and nothing faulted\n",
-		       HELLO_OVERFLOW_KIB);
+		       hello_overflow_kib());
 		return -EFAULT;
 	}
 	if (hello_mode("fail")) {
@@ -159,6 +164,13 @@ static int __init hello_init(void)
 	if (hello_mode("stranded") &&
 	    IS_ERR(kthread_run(hello_waits_forever, NULL, "hello-stranded")))
 		return -EPROTO;
+	if (hello_mode("atomic")) {
+		local_bh_disable();
+		msleep(1);
+		local_bh_enable();
+		pr_err("hello: slept with bottom halves off, and nothing said so\n");
+		return -EPROTO;
+	}
 	return 0;
 }
 module_init(hello_init);
@@ -521,6 +533,48 @@ static unsigned long hello_timer_fired_at;
 static bool hello_timer_in_softirq, hello_cancelled_fired;
 static int hello_ticks;
 
+/* A tasklet that schedules itself again until its 20th run. */
+static struct tasklet_struct hello_chain;
+static int hello_chain_runs;
+static DECLARE_COMPLETION(hello_chain_done);
+
+static void hello_chain_fn(struct tasklet_struct *t)
+{
+	if (++hello_chain_runs < 20)
+		tasklet_schedule(t);
+	else
+		complete(&hello_chain_done);
+}
+
+static struct timer_list hello_deferred;
+static bool hello_deferred_fired;
+
+static void hello_deferred_fn(struct timer_list *t)
+{
+	hello_deferred_fired = true;
+}
+
+/* A tasklet calling cond_resched() for 10 ms, and whether another task ran. */
+static struct tasklet_struct hello_resched_tasklet;
+static bool hello_other_ran, hello_ran_beside_tasklet;
+
+static void hello_resched_tasklet_fn(struct tasklet_struct *t)
+{
+	u64 t0 = slx_now_ns();
+
+	while (slx_now_ns() - t0 < 10 * NSEC_PER_MSEC)
+		cond_resched();
+	hello_ran_beside_tasklet = READ_ONCE(hello_other_ran);
+}
+
+static int hello_cpu_onlined = -1;
+
+static int hello_cpu_online(unsigned int cpu)
+{
+	hello_cpu_onlined = cpu;
+	return 0;
+}
+
 static void hello_timer_fn(struct timer_list *t)
 {
 	hello_timer_fired_at = jiffies;
@@ -554,7 +608,7 @@ static void hello_tasklet_fn(struct tasklet_struct *t)
 	char *top = (char *)*raw_cpu_ptr(&hardirq_stack_ptr), here;
 
 	hello_tasklet_ran = true;
-	hello_tasklet_on_its_stack = &here < top && &here > top - 64 * 1024;
+	hello_tasklet_on_its_stack = &here < top && &here > top - slx_stack_bytes;
 }
 
 static void hello_late_tasklet_fn(struct tasklet_struct *t)
@@ -613,7 +667,35 @@ static int __init hello_timers_init(void)
 	msleep(1);
 	HELLO_CHECK(hello_late_tasklet_ran, "a tasklet scheduled in a task never ran");
 
-	pr_info("hello timers: a timer slept on, deleted, moved, re-armed; tasklets at local_bh_enable and at the next turn\n");
+	/* More than one turn's softirqs, waited on with nothing else pending. */
+	tasklet_setup(&hello_chain, hello_chain_fn);
+	tasklet_schedule(&hello_chain);
+	wait_for_completion(&hello_chain_done);
+	HELLO_CHECK(hello_chain_runs == 20, "a tasklet scheduling itself stopped short");
+
+	/* A deferrable timer runs on the first turn past its jiffy, as on a tick. */
+	timer_setup(&hello_deferred, hello_deferred_fn, TIMER_DEFERRABLE);
+	mod_timer(&hello_deferred, jiffies + 2);
+	msleep(50);
+	HELLO_CHECK(hello_deferred_fired, "a deferrable timer did not run past its jiffy");
+
+	/* cond_resched() in softirq context lets no task run. */
+	HELLO_CHECK(!IS_ERR(kthread_run(hello_quick, &hello_other_ran, "hello-other")),
+		    "no kthread");
+	tasklet_setup(&hello_resched_tasklet, hello_resched_tasklet_fn);
+	local_bh_disable();
+	tasklet_schedule(&hello_resched_tasklet);
+	local_bh_enable();
+	HELLO_CHECK(!hello_ran_beside_tasklet, "cond_resched() in a tasklet let another task run");
+	msleep(1);
+	HELLO_CHECK(hello_other_ran, "a kthread never ran");
+
+	/* A hotplug state's startup runs for the one CPU, as Linux's for each. */
+	HELLO_CHECK(cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "hello:online", hello_cpu_online,
+				      NULL) >= 0 && hello_cpu_onlined == 0,
+		    "a hotplug state's startup did not run for CPU 0");
+
+	pr_info("hello timers: a timer slept on, deleted, moved, re-armed, deferred; tasklets at local_bh_enable, at the next turn, twenty in a chain; no switch from softirq; a hotplug startup\n");
 	return 0;
 }
 late_initcall(hello_timers_init);

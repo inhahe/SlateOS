@@ -21,6 +21,7 @@ const HELLO: &[u8] = b"linuxdrv/hello";
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
 const EXIT_OK: i32 = 0;
+const EXIT_BUG: i32 = 121;
 const EXIT_DEADLOCK: i32 = 124;
 const EXIT_STOP: i32 = 125;
 const EXIT_INIT_FAILED: i32 = 126;
@@ -66,13 +67,14 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 /// ([`KILLED_ACCESS_VIOLATION`]); "fail" starts a kthread that never ends
 /// and fails, which must end the process at once ([`EXIT_INIT_FAILED`]);
 /// "stranded" succeeds but leaves a kthread waiting for what never comes,
-/// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done.
+/// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done;
+/// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]).
 /// Skipped, and recorded so, where the bootloader did not load it --
 /// anywhere but the boot test, and after a kexec.
 ///
 /// # Errors
 ///
-/// `InternalError` when any of the six runs ends otherwise.
+/// `InternalError` when any of the seven runs ends otherwise.
 pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
     let Some(elf) = crate::boot::module(HELLO) else {
@@ -83,7 +85,7 @@ pub fn self_test() -> KernelResult<()> {
         skips.report("[linuxdrv]");
         return Ok(());
     };
-    let cases: [(&[&[u8]], i32, &str); 6] = [
+    let cases: [(&[&[u8]], i32, &str); 7] = [
         (&[b"hello"], EXIT_OK, "ran its initcalls and exited 0"),
         (
             &[b"hello", b"stop"],
@@ -110,6 +112,11 @@ pub fn self_test() -> KernelResult<()> {
             EXIT_DEADLOCK,
             "ended as deadlocked, its initcalls done but a kthread waiting for what never comes",
         ),
+        (
+            &[b"hello", b"atomic"],
+            EXIT_BUG,
+            "ended as a BUG, having slept with bottom halves off",
+        ),
     ];
     for (argv, want, what) in cases {
         match run(elf, argv) {
@@ -125,7 +132,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, and a stranded kthread: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, a stranded kthread, and a sleep while atomic: OK",
         elf.len()
     );
     Ok(())

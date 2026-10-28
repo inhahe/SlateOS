@@ -72,12 +72,19 @@ int slx_task_new(void (*entry)(void *), void *arg, void *data);
  * task's is: its top, or NULL. Softirqs run on one.
  */
 void *slx_stack_top(void);
+/* The size of a task's stack, and of the no-access guard below each. */
+extern const unsigned long slx_stack_bytes, slx_guard_bytes;
 int slx_task_current(void);
 void slx_task_block(unsigned long long until_ns);
 void slx_task_yield(void);
 void slx_task_wake(int handle);
 
 /* Implemented by the C half, called by the Rust half. */
+/*
+ * Set up what must be ready before the loop first turns: SLX_EXIT_OK, or
+ * the code the process exits with.
+ */
+int lx_emul_init(void);
 /*
  * Run the driver's initcalls, as the first task: what the process exits
  * with, at once when it is not 0.
@@ -92,9 +99,14 @@ void lx_emul_switch_to(void *task, unsigned long long now_ns);
 void lx_emul_timed_out(void *task);
 /*
  * A turn of the loop, outside every task, the monotonic clock reading
- * `now_ns`: jiffies, RCU callbacks, timers and softirqs seen to. When the
- * next timer is due, by the same clock, or 0 for none.
+ * `now_ns`: jiffies, RCU callbacks, timers and softirqs seen to.
  */
-unsigned long long lx_emul_turn(unsigned long long now_ns);
+void lx_emul_turn(unsigned long long now_ns);
+/*
+ * With no task to run, the clock reading `now_ns`: when the loop must turn
+ * again, by the same clock -- `now_ns` while work is pending, else when the
+ * next timer is due -- or 0, never.
+ */
+unsigned long long lx_emul_next_event(unsigned long long now_ns);
 
 #endif /* SLX_H */

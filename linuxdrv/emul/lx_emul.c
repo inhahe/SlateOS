@@ -64,13 +64,19 @@ DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
  * its other name, as Linux's linker script makes it, `linuxdrv/link.ld`);
  * the layer is what moves it, as Linux's tick does.
  */
+static u64 lx_start_ns;
+
 void lx_emul_jiffies_at(u64 now_ns)
 {
-	static u64 start_ns;
+	if (!lx_start_ns)
+		lx_start_ns = now_ns;
+	jiffies_64 = INITIAL_JIFFIES + (now_ns - lx_start_ns) / TICK_NSEC;
+}
 
-	if (!start_ns)
-		start_ns = now_ns;
-	jiffies_64 = INITIAL_JIFFIES + (now_ns - start_ns) / (NSEC_PER_SEC / HZ);
+/* When, by the monotonic clock, the current jiffy began. */
+u64 lx_emul_jiffy_began_ns(void)
+{
+	return lx_start_ns + (u64)(jiffies - INITIAL_JIFFIES) * TICK_NSEC;
 }
 
 void lx_emul_jiffies_now(void)
@@ -274,15 +280,24 @@ void slx_bug(const char *file, int line)
  */
 extern initcall_entry_t __initcall_start[], __initcall_end[];
 
+/*
+ * What Linux's start_kernel() sets up before anything runs, set up before
+ * the Rust half's loop first turns (its turns run softirqs and timers): an
+ * exit code, SLX_EXIT_OK when it is ready.
+ */
+int lx_emul_init(void)
+{
+	wait_bit_init();
+	if (lx_softirq_init())
+		return SLX_EXIT_NO_MEMORY;
+	return SLX_EXIT_OK;
+}
+
 int lx_emul_main(void)
 {
 	initcall_entry_t *entry;
 
 	lx_main_handle = slx_task_current();
-	/* What Linux's start_kernel() sets up before any initcall runs. */
-	wait_bit_init();
-	if (lx_softirq_init())
-		return SLX_EXIT_NO_MEMORY;
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
 		int ret = fn();

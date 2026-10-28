@@ -13,7 +13,15 @@ interrupt moves it whatever the CPU is doing. So a loop that waits for
 `READ_ONCE()` alone -- never sees time pass, and spins forever where Linux's
 would time out.
 
-**Where:** `linuxdrv/emul/lx_emul.c` (`lx_emul_tick`, `lx_emul_jiffies_now`,
+The same staleness reaches timers (raised by the batch-26 review, Opus,
+2026-10-28): a task that computes for 20 ms without a sleep, delay or
+switch, then arms `mod_timer(&t, jiffies + msecs_to_jiffies(10))`, arms it
+against `jiffies` five ticks old, so it is due at the next turn and fires
+at once instead of 10 ms later. `schedule_timeout()` refreshes `jiffies`
+before reckoning its end for this reason; nothing can do the same for a
+driver's own read of the variable.
+
+**Where:** `linuxdrv/emul/lx_emul.c` (`lx_emul_jiffies_at`, `lx_emul_jiffies_now`,
 `slx_cpu_relax`), `linuxdrv/emul/lx_sched.c`, `linuxdrv/shadow/processor.h`.
 
 **How to reproduce:** in a driver process, `unsigned long end = jiffies + 2;

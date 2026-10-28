@@ -22,16 +22,26 @@ gains `NO_HZ_IDLE`, which is how Linux itself tells when the next timer is due.
    context -- are then Linux's, not an approximation of them.
 2. **The loop is the tick and ksoftirqd.** At every turn, between tasks,
    `lx_emul_turn()` (`linuxdrv/emul/lx_softirq.c`) brings `jiffies` up to
-   the monotonic clock, runs the RCU callbacks whose grace period has
-   passed, raises `TIMER_SOFTIRQ` when a timer is due, and runs pending
-   softirqs. Softirqs raised inside a task run at `local_bh_enable()`, as on
-   Linux, or at the next turn -- where `ksoftirqd` would run them. They run
-   on a stack of their own, as x86-64 Linux runs them (`hardirq_stack_ptr`),
-   which the Rust half maps with a guard page below it.
-3. **`CONFIG_NO_HZ_IDLE`**, for `get_next_timer_interrupt()`: the loop
-   sleeps no longer than the next timer, so a process waiting only on a
-   timer sleeps until it, and one with neither a task deadline nor a timer
-   is known to have nothing that can ever wake it (the DEADLOCK exit).
+   the monotonic clock, raises `TIMER_SOFTIRQ` whenever they have moved --
+   as a tick does on a busy CPU, so deferrable timers run on the first turn
+   past their jiffy as on the first tick -- runs the RCU callbacks whose
+   grace period has passed, and runs pending softirqs. Softirqs raised
+   inside a task run at `local_bh_enable()`, as on Linux, or at the next
+   turn -- where `ksoftirqd` would run them. They run on a stack of their
+   own, as x86-64 Linux runs them (`hardirq_stack_ptr`), which the Rust
+   half maps with a guard page below it. A task may not give up the CPU
+   inside a softirq or with bottom halves off (the count is the process's
+   one): it ends the process as a BUG, where Linux warns "scheduling while
+   atomic".
+3. **`CONFIG_NO_HZ_IDLE`**, for `get_next_timer_interrupt()`: with no task
+   to run, the loop asks `lx_emul_next_event()` how long it may sleep --
+   not at all while softirqs or RCU callbacks are pending, else until the
+   next timer (reckoned from when the current jiffy began, as Linux's tick
+   reckons it), else for ever. So a process waiting only on a timer sleeps
+   until it, and one with neither a task deadline nor an event is known to
+   have nothing that can ever wake it (the DEADLOCK exit). As on Linux, a
+   deferrable timer does not wake an idle process; it runs at the next turn
+   something else causes.
 4. What the two files call and the layer does not need -- `ksoftirqd`'s
    registration, CPU hotplug states, POSIX CPU timers, high-resolution
    timers -- is defined to do nothing; what only Linux's real tick reaches
@@ -61,16 +71,18 @@ gains `NO_HZ_IDLE`, which is how Linux itself tells when the next timer is due.
   once, and, until every lane has merged it, a boot test from a lane still on
   the old configuration rebuilds it again (the tree is shared and keyed by
   version, `scripts/linux-tree.sh`). Transitional only.
-- Every turn of the loop asks the wheel for its next timer (twice when one is
-  due): a lookup of the wheel's cached next expiry, small beside a switch.
+- A turn raises the timer softirq once per jiffy, whether or not a timer
+  is due -- the cost a periodic tick has on a busy CPU; the wheel's next
+  expiry is asked only when the loop has nothing to run.
 - `NO_HZ_IDLE` adds the deferrable and global timer bases to the wheel,
   which a uniprocessor process does not need; harmless.
 
 ### Where it lands
 
 `linuxdrv/linux.config` (`CONFIG_NO_HZ_IDLE=y`), `linuxdrv/emul/manifest`,
-`linuxdrv/emul/lx_softirq.c`, `linuxdrv/emul/lx_emul.c` (`lx_emul_main`
-readies softirqs and timers before the first initcall),
-`linuxdrv/kit/src/sched.rs` (the loop's turn and its timer deadline;
+`linuxdrv/emul/lx_softirq.c`, `linuxdrv/emul/lx_emul.c` (`lx_emul_init`
+readies softirqs and timers before the loop first turns),
+`linuxdrv/emul/lx_sched.c` (the sleep-while-atomic check),
+`linuxdrv/kit/src/sched.rs` (the loop's turn and its next event;
 `slx_stack_top`), `linuxdrv/link.ld` (`.softirqentry.text`), and the hello
-driver's fourth initcall, which tests it.
+driver's fourth initcall and "atomic" mode, which test it.

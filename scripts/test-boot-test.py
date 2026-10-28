@@ -1410,7 +1410,8 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
                "a mutex held across a sleep, a completion, the scheduler's edges, "
                "timers and softirqs), "
                "a generated stop, a deadlock, a stack overflow caught by its guard "
-               "page, a failed initcall, and a stranded kthread: OK\n")
+               "page, a failed initcall, a stranded kthread, and a sleep while "
+               "atomic: OK\n")
     ran = hello + tasks + verdict
     # Only its first line differs from `ran`: the one check it can fail.
     garbled = (hello.replace("0xbeef", "beef") + tasks + verdict)

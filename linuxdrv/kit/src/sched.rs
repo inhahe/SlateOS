@@ -3,11 +3,13 @@
 //! (design-decisions 1578 rule 5). Which may run is [`crate::task`]'s.
 //!
 //! A task runs until it blocks, yields or returns; then the loop runs
-//! another. Before it switches to a task, it tells the C half which, and
-//! the time (`lx_emul_switch_to`, which sets Linux's `current` and advances
-//! `jiffies`). With nothing runnable it sleeps until the earliest deadline;
-//! with nothing runnable and no deadline, nothing will ever run again, and
-//! the process ends.
+//! another. At every turn, between tasks, the C half sees to what Linux's
+//! tick and ksoftirqd would (`lx_emul_turn`: `jiffies`, RCU callbacks,
+//! timers, softirqs) and says when its next timer is due; before switching
+//! to a task, the loop tells the C half which (`lx_emul_switch_to`, which
+//! sets Linux's `current`). With nothing runnable it sleeps until the
+//! earliest deadline, a task's or a timer's; with none, nothing will ever
+//! run again, and the process ends.
 
 use core::ffi::c_void;
 
@@ -109,6 +111,9 @@ unsafe extern "C" {
     /// The C half: the task whose record is `data` waited past its deadline
     /// and may run again.
     fn lx_emul_timed_out(data: *mut c_void);
+    /// The C half: a turn of the loop, the monotonic clock reading `now_ns`;
+    /// when its next timer is due, 0 for none.
+    fn lx_emul_turn(now_ns: u64) -> u64;
 }
 
 /// The scheduler's state, through a raw pointer: every reference made from
@@ -211,6 +216,15 @@ fn give_back_stack(mapping: usize) {
     unmap_stack(mapping);
 }
 
+/// `slx_stack_top`: a stack for the C half's own use (softirqs run on one),
+/// mapped with a guard below it as a task's is: its top, or null.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_stack_top() -> *mut c_void {
+    map_stack().map_or(core::ptr::null_mut(), |mapping| {
+        mapping.wrapping_add(MAPPING) as *mut c_void
+    })
+}
+
 /// `slx_task_new`: a new task, runnable, that will run `entry(arg)`; `data`
 /// is the C half's record of it. Its handle, or -1 when no slot or stack is
 /// left.
@@ -304,6 +318,8 @@ pub fn run() -> bool {
     let s = sched();
     loop {
         let now = now_ns();
+        // SAFETY: the C half's hook, outside every task; the one thread.
+        let timer = unsafe { lx_emul_turn(now) };
         // SAFETY: the one thread, outside any switch.
         let woken = unsafe { (*s).table.wake_expired(now) };
         timed_out(woken);
@@ -328,7 +344,9 @@ pub fn run() -> bool {
             continue;
         }
         // SAFETY: as above.
-        match unsafe { (*s).table.next_deadline() } {
+        let task = unsafe { (*s).table.next_deadline() };
+        let timer = (timer != 0).then_some(timer);
+        match task.into_iter().chain(timer).min() {
             Some(deadline) => sleep_ns(deadline.saturating_sub(now)),
             // SAFETY: as above.
             None => return !unsafe { (*s).table.any_blocked() },

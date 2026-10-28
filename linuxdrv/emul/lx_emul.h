@@ -9,11 +9,16 @@
 
 /* lx_emul.c: the first task's record, which `current` names while it runs. */
 extern struct task_struct lx_main_task;
+/* lx_emul.c: the record `current` names between tasks: no task's. */
+extern struct task_struct lx_idle_task;
 /* lx_sched.c: the first task's handle, to wake it by. */
 extern int lx_main_handle;
 
-/* lx_emul.c: jiffies brought up to the monotonic clock. */
+/* lx_emul.c: jiffies brought up to the monotonic clock, read now or `now_ns`. */
 void lx_emul_jiffies_now(void);
+void lx_emul_jiffies_at(u64 now_ns);
+/* lx_softirq.c: softirqs, tasklets and timers made ready; 0, or -ENOMEM. */
+int lx_softirq_init(void);
 /* lx_sched.c: the RCU callbacks queued so far, run: every task is switched out. */
 void lx_rcu_run(void);
 /* lx_emul.c: when the running task was switched to, by the monotonic clock. */

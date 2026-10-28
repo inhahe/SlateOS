@@ -56,10 +56,11 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 /// The layer's first process, `linuxdrv/hello`: Linux's headers and its own
 /// vsprintf in a process of their own. Run plainly, its initcalls allocate,
 /// take a spinlock with interrupts "off", print a line formatted by Linux,
-/// run a kthread against a mutex held across a sleep and a completion, and
-/// try the scheduler's edges, and the process exits 0. With one argument
-/// the first initcall ends it otherwise: "stop" calls a function nothing
-/// defines, which the build made a generated stop ([`EXIT_STOP`]);
+/// run a kthread against a mutex held across a sleep and a completion, try
+/// the scheduler's edges, and arm timers and schedule tasklets, and the
+/// process exits 0. With one argument the first initcall ends it otherwise:
+/// "stop" calls a function nothing defines, which the build made a
+/// generated stop ([`EXIT_STOP`]);
 /// "deadlock" waits for what never comes ([`EXIT_DEADLOCK`]); "overflow"
 /// runs past its task's stack, into the guard page below it
 /// ([`KILLED_ACCESS_VIOLATION`]); "fail" starts a kthread that never ends
@@ -124,7 +125,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, and a stranded kthread: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, and a stranded kthread: OK",
         elf.len()
     );
     Ok(())

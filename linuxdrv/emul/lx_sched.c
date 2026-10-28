@@ -18,7 +18,7 @@
  * state already changed, and schedule() then does not block.
  *
  * Time: jiffies follow the monotonic clock wherever Linux's would have
- * moved -- at every switch (lx_emul_switch_to), before a timed sleep
+ * moved -- at every turn of the loop (lx_emul_turn), before a timed sleep
  * reckons its end, after a busy wait, and at every cpu_relax() (the shadow
  * <asm/vdso/processor.h>).
  */
@@ -60,16 +60,22 @@ struct lx_task {
 
 unsigned long lx_kthreads;
 
+/* The layer's record around `p`: none for the first task's or the idle one. */
 static struct lx_task *lx_task_of(struct task_struct *p)
 {
-	return p == &lx_main_task ? NULL : container_of(p, struct lx_task, task);
+	if (p == &lx_main_task || p == &lx_idle_task)
+		return NULL;
+	return container_of(p, struct lx_task, task);
 }
 
+/* The Rust half's handle of the task `p` names; -1 for the idle record. */
 static int lx_handle(struct task_struct *p)
 {
 	struct lx_task *t = lx_task_of(p);
 
-	return t ? t->handle : lx_main_handle;
+	if (t)
+		return t->handle;
+	return p == &lx_main_task ? lx_main_handle : -1;
 }
 
 /*
@@ -206,9 +212,9 @@ void wake_up_q(struct wake_q_head *head)
  * process's one thread, and an RCU reader may not sleep (this configuration
  * has no preemptible RCU), so once the running task has switched away, no
  * task is inside a read-side critical section: a callback queued before a
- * switch has had its grace period by the next. lx_emul_switch_to() runs
- * them there, before the next task -- as Linux's tiny RCU runs them after a
- * context switch.
+ * switch has had its grace period by the next turn of the loop, between
+ * tasks, where lx_emul_turn() runs them -- as Linux's tiny RCU runs them
+ * after a context switch.
  */
 static struct rcu_head *lx_rcu_first;
 static struct rcu_head **lx_rcu_last = &lx_rcu_first;

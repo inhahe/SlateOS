@@ -38,6 +38,11 @@
 #include <linux/sched/wake_q.h>
 #include <linux/rcupdate.h>
 #include <linux/err.h>
+#include <linux/timer.h>
+#include <linux/interrupt.h>
+#include <linux/bottom_half.h>
+#include <linux/preempt.h>
+#include <asm/processor.h>
 
 #include "../emul/slx.h"
 #include "../emul/lx_emul.h"
@@ -243,7 +248,7 @@ late_initcall(hello_tasks_init);
 #define HELLO_CHECK(cond, what)						\
 	do {								\
 		if (!(cond)) {						\
-			pr_err("hello edges: %s\n", what);		\
+			pr_err("hello: check failed: %s\n", what);	\
 			return -EPROTO;					\
 		}							\
 	} while (0)
@@ -497,3 +502,118 @@ static int __init hello_edges_init(void)
 	return 0;
 }
 late_initcall(hello_edges_init);
+
+/*
+ * Timers and softirqs: Linux's own timer wheel and softirq code, run by the
+ * layer's loop as Linux's tick and ksoftirqd would. A timer fires no sooner
+ * than its jiffy, in softirq context, while the only task waits on it -- so
+ * the loop sleeps until it, rather than ending the process as deadlocked;
+ * a deleted one never fires; one moved sooner fires sooner; one re-arming
+ * itself fires each time; a tasklet scheduled under local_bh_disable() runs
+ * at local_bh_enable(), on the softirq stack, and one scheduled plainly at
+ * the loop's next turn.
+ */
+static struct timer_list hello_timer, hello_cancelled, hello_moved, hello_ticker;
+static DECLARE_COMPLETION(hello_timer_done);
+static DECLARE_COMPLETION(hello_moved_done);
+static DECLARE_COMPLETION(hello_ticker_done);
+static unsigned long hello_timer_fired_at;
+static bool hello_timer_in_softirq, hello_cancelled_fired;
+static int hello_ticks;
+
+static void hello_timer_fn(struct timer_list *t)
+{
+	hello_timer_fired_at = jiffies;
+	hello_timer_in_softirq = in_serving_softirq();
+	complete(&hello_timer_done);
+}
+
+static void hello_cancelled_fn(struct timer_list *t)
+{
+	hello_cancelled_fired = true;
+}
+
+static void hello_moved_fn(struct timer_list *t)
+{
+	complete(&hello_moved_done);
+}
+
+static void hello_ticker_fn(struct timer_list *t)
+{
+	if (++hello_ticks < 5)
+		mod_timer(t, jiffies + 1);
+	else
+		complete(&hello_ticker_done);
+}
+
+static struct tasklet_struct hello_tasklet, hello_late_tasklet;
+static bool hello_tasklet_ran, hello_tasklet_on_its_stack, hello_late_tasklet_ran;
+
+static void hello_tasklet_fn(struct tasklet_struct *t)
+{
+	char *top = (char *)*raw_cpu_ptr(&hardirq_stack_ptr), here;
+
+	hello_tasklet_ran = true;
+	hello_tasklet_on_its_stack = &here < top && &here > top - 64 * 1024;
+}
+
+static void hello_late_tasklet_fn(struct tasklet_struct *t)
+{
+	hello_late_tasklet_ran = true;
+}
+
+static int __init hello_timers_init(void)
+{
+	unsigned long j;
+
+	if (slx_argc() > 1)
+		return 0;
+
+	timer_setup(&hello_timer, hello_timer_fn, 0);
+	j = jiffies;
+	mod_timer(&hello_timer, j + 3);
+	HELLO_CHECK(timer_pending(&hello_timer), "an armed timer was not pending");
+	/* Nothing else can wake this: the loop must sleep until the timer. */
+	wait_for_completion(&hello_timer_done);
+	HELLO_CHECK(!time_before(hello_timer_fired_at, j + 3), "a timer fired before its jiffy");
+	HELLO_CHECK(hello_timer_in_softirq, "a timer's function ran outside softirq context");
+	HELLO_CHECK(!timer_pending(&hello_timer), "a timer that fired was still pending");
+
+	timer_setup(&hello_cancelled, hello_cancelled_fn, 0);
+	mod_timer(&hello_cancelled, jiffies + 2);
+	HELLO_CHECK(timer_delete_sync(&hello_cancelled) == 1, "deleting an armed timer said it was not");
+	HELLO_CHECK(timer_delete(&hello_cancelled) == 0, "deleting an idle timer said it was armed");
+	msleep(20);
+	HELLO_CHECK(!hello_cancelled_fired, "a deleted timer fired");
+
+	timer_setup(&hello_moved, hello_moved_fn, 0);
+	mod_timer(&hello_moved, jiffies + 10 * HZ);
+	HELLO_CHECK(mod_timer(&hello_moved, jiffies + 2) == 1,
+		    "moving an armed timer said it was not armed");
+	HELLO_CHECK(wait_for_completion_timeout(&hello_moved_done, HZ),
+		    "a timer moved sooner did not fire sooner");
+
+	timer_setup(&hello_ticker, hello_ticker_fn, 0);
+	j = jiffies;
+	mod_timer(&hello_ticker, j + 1);
+	HELLO_CHECK(wait_for_completion_timeout(&hello_ticker_done, HZ) && hello_ticks == 5,
+		    "a timer re-arming itself did not fire five times");
+	HELLO_CHECK(!time_before(jiffies, j + 5), "five re-armed jiffies took less than five");
+
+	tasklet_setup(&hello_tasklet, hello_tasklet_fn);
+	local_bh_disable();
+	tasklet_schedule(&hello_tasklet);
+	HELLO_CHECK(!hello_tasklet_ran, "a tasklet ran while bottom halves were off");
+	local_bh_enable();
+	HELLO_CHECK(hello_tasklet_ran, "a tasklet did not run at local_bh_enable()");
+	HELLO_CHECK(hello_tasklet_on_its_stack, "a tasklet did not run on the softirq stack");
+
+	tasklet_setup(&hello_late_tasklet, hello_late_tasklet_fn);
+	tasklet_schedule(&hello_late_tasklet);
+	msleep(1);
+	HELLO_CHECK(hello_late_tasklet_ran, "a tasklet scheduled in a task never ran");
+
+	pr_info("hello timers: a timer slept on, deleted, moved, re-armed; tasklets at local_bh_enable and at the next turn\n");
+	return 0;
+}
+late_initcall(hello_timers_init);

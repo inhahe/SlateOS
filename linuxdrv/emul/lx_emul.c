@@ -40,24 +40,31 @@ void slx_halted(void)
  * configuration (no SMP), as every one is.
  */
 struct task_struct lx_main_task = { .usage = REFCOUNT_INIT(1) };
+
+/*
+ * What `current` names between tasks, while the loop runs softirqs, timers
+ * and RCU callbacks (lx_softirq.c): no task's, as Linux's idle task belongs
+ * to no process, so that a wake done there reaches the task it names --
+ * a timer waking the first task wakes it, where `current` being the first
+ * task's own record would read as the task waking itself. Never freed,
+ * never woken.
+ */
+struct task_struct lx_idle_task = { .usage = REFCOUNT_INIT(1) };
+
 DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
 
 /* Not in an interrupt, nothing disabled: what a task's count reads. */
 DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
 
 /*
- * Linux's tick count, starting where Linux's does, five minutes short of
- * wrapping, so that a driver's wrong comparison shows early. `jiffies` is
- * this variable under its other name, as Linux's linker script makes it
- * (`linuxdrv/link.ld`).
- */
-u64 __cacheline_aligned_in_smp jiffies_64 = INITIAL_JIFFIES;
-
-/*
  * The monotonic clock reads `now_ns`: jiffies count the ticks since the
- * first time it was read, at HZ, from INITIAL_JIFFIES.
+ * first time it was read, at HZ, from INITIAL_JIFFIES -- five minutes short
+ * of wrapping, so that a driver's wrong comparison shows early. The
+ * variable is Linux's own (kernel/time/timer.c's jiffies_64; `jiffies` is
+ * its other name, as Linux's linker script makes it, `linuxdrv/link.ld`);
+ * the layer is what moves it, as Linux's tick does.
  */
-static void lx_emul_tick(u64 now_ns)
+void lx_emul_jiffies_at(u64 now_ns)
 {
 	static u64 start_ns;
 
@@ -68,7 +75,7 @@ static void lx_emul_tick(u64 now_ns)
 
 void lx_emul_jiffies_now(void)
 {
-	lx_emul_tick(slx_now_ns());
+	lx_emul_jiffies_at(slx_now_ns());
 }
 
 /* When the running task was switched to, by the monotonic clock. */
@@ -77,9 +84,9 @@ u64 lx_switched_ns;
 /*
  * The Rust half's hook, at every switch (linuxdrv/kit, sched.rs): the task
  * whose record is `task` is about to run, and is `current`, the clock
- * reading `now_ns`. The first task, Linux's initcalls, has no record of its
- * own but the main one. Every task is switched out here, so the RCU
- * callbacks queued so far have had their grace period, and run first.
+ * reading `now_ns` (jiffies brought up to it by the turn's lx_emul_turn()).
+ * The first task, Linux's initcalls, has no record of its own but the main
+ * one.
  */
 void lx_emul_switch_to(void *task, u64 now_ns)
 {
@@ -89,8 +96,6 @@ void lx_emul_switch_to(void *task, u64 now_ns)
 	 */
 	*raw_cpu_ptr(&current_task) = task ? task : &lx_main_task;
 	lx_switched_ns = now_ns;
-	lx_emul_tick(now_ns);
-	lx_rcu_run();
 }
 
 /*
@@ -274,8 +279,10 @@ int lx_emul_main(void)
 	initcall_entry_t *entry;
 
 	lx_main_handle = slx_task_current();
-	/* What Linux's sched_init() sets up before any initcall runs. */
+	/* What Linux's start_kernel() sets up before any initcall runs. */
 	wait_bit_init();
+	if (lx_softirq_init())
+		return SLX_EXIT_NO_MEMORY;
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
 		int ret = fn();

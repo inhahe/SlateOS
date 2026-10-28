@@ -5486,8 +5486,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         `current`, jiffies, randomness, initcalls; and Linux's tasks as
         coroutines on the process's one thread (§1578 rule 5) -- schedule()
         and try_to_wake_up() under Linux's own wait queues, completions,
-        wait-on-bit and mutexes, compiled in as they are -- with kthreads,
-        schedule_timeout, msleep and delays. Left: timers, workqueues,
+        wait-on-bit and mutexes, compiled in as they are -- with kthreads
+        (reference-counted records, stopped out of interruptible waits),
+        schedule_timeout, msleep and delays, cond_resched, call_rcu (a
+        switch is the grace period), and each task's stack above a guard
+        page; Linux's own timer wheel, softirqs and tasklets, the loop their
+        tick and ksoftirqd (§1581). Left: workqueues,
         PCI and MSI, IRQs, DMA, the device model, `request_firmware`,
         which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),

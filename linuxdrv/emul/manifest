@@ -23,5 +23,13 @@ linux kernel/locking/mutex.o
 # (lx_sched.c counts its tasks' records).
 linux lib/refcount.o
 
+# Softirqs, tasklets and the timer wheel, run by the layer's loop as Linux's
+# tick and ksoftirqd would (lx_softirq.c).
+linux kernel/softirq.o
+linux kernel/time/timer.o
+# The bit searches the wheel finds its next timer by.
+linux lib/find_bit.o
+
 layer emul/lx_emul.c
 layer emul/lx_sched.c
+layer emul/lx_softirq.c

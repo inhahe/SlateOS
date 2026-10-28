@@ -67,6 +67,11 @@ void slx_stop(const char *what, const void *caller) __attribute__((noreturn));
  * slx_task_wake: task `handle`, if it waits, may run again.
  */
 int slx_task_new(void (*entry)(void *), void *arg, void *data);
+/*
+ * A stack for the C half's own use, mapped with a guard below it as a
+ * task's is: its top, or NULL. Softirqs run on one.
+ */
+void *slx_stack_top(void);
 int slx_task_current(void);
 void slx_task_block(unsigned long long until_ns);
 void slx_task_yield(void);
@@ -85,5 +90,11 @@ int lx_emul_main(void);
 void lx_emul_switch_to(void *task, unsigned long long now_ns);
 /* The task whose record is `task` (NULL: the first) waited past its deadline. */
 void lx_emul_timed_out(void *task);
+/*
+ * A turn of the loop, outside every task, the monotonic clock reading
+ * `now_ns`: jiffies, RCU callbacks, timers and softirqs seen to. When the
+ * next timer is due, by the same clock, or 0 for none.
+ */
+unsigned long long lx_emul_turn(unsigned long long now_ns);
 
 #endif /* SLX_H */

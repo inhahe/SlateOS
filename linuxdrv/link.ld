@@ -34,6 +34,7 @@ SECTIONS
         *(.text .text.*)
         *(.init.text .init.text.* .exit.text .noinstr.text .ref.text)
         *(.sched.text .cpuidle.text .entry.text .head.text .spinlock.text)
+        *(.softirqentry.text)
     } :load
 
     .rodata : ALIGN(64) {

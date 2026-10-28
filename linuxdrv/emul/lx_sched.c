@@ -72,9 +72,27 @@ static int lx_handle(struct task_struct *p)
 	return t ? t->handle : lx_main_handle;
 }
 
+/*
+ * Whether the running task, about to sleep, stays running instead: it was
+ * woken already (TASK_RUNNING), or, as Linux's __schedule() decides, it
+ * would sleep interruptibly with a signal pending -- kthread_stop() sends
+ * one -- and so is made running again.
+ */
+static bool lx_stays_running(void)
+{
+	unsigned int state = READ_ONCE(current->__state);
+
+	if (state == TASK_RUNNING)
+		return true;
+	if (!signal_pending_state(state, current))
+		return false;
+	__set_current_state(TASK_RUNNING);
+	return true;
+}
+
 asmlinkage __visible void schedule(void)
 {
-	if (READ_ONCE(current->__state) == TASK_RUNNING) {
+	if (lx_stays_running()) {
 		slx_task_yield();
 		return;
 	}
@@ -91,11 +109,16 @@ void schedule_preempt_disabled(void)
  * A long loop's offer to let the others run (cond_resched()): taken once
  * the task has run a jiffy since it was switched to, as Linux's tick asks a
  * task to give way once its slice is spent, and never with interrupts off.
- * 1 when it gave way.
+ * The clock is a system call, so it is looked at once in 32 calls: a loop
+ * runs at most 31 more turns past its slice. 1 when it gave way.
  */
 int __cond_resched(void)
 {
-	if (irqs_disabled() || slx_now_ns() - lx_switched_ns < NSEC_PER_SEC / HZ)
+	static unsigned int calls;
+
+	if (irqs_disabled() || ++calls % 32)
+		return 0;
+	if (slx_now_ns() - lx_switched_ns < NSEC_PER_SEC / HZ)
 		return 0;
 	slx_task_yield();
 	return 1;
@@ -135,24 +158,33 @@ int default_wake_function(struct wait_queue_entry *curr, unsigned int mode,
 }
 
 /*
- * Wake queues, as Linux's kernel/sched/core.c keeps them, without its
- * reference counts: a task on one is woken before it can end, since it
- * runs only when the queue's owner lets it.
+ * Wake queues, as Linux's kernel/sched/core.c keeps them: a task queued
+ * holds a reference to its record until wake_up_q() has woken it. One
+ * thread queues and wakes, so no atomic exchange is needed to claim one.
  */
-void wake_q_add(struct wake_q_head *head, struct task_struct *task)
+static bool lx_wake_q_add(struct wake_q_head *head, struct task_struct *task)
 {
 	struct wake_q_node *node = &task->wake_q;
 
 	if (node->next)
-		return;
+		return false;
 	node->next = WAKE_Q_TAIL;
 	*head->lastp = node;
 	head->lastp = &node->next;
+	return true;
 }
 
+void wake_q_add(struct wake_q_head *head, struct task_struct *task)
+{
+	if (lx_wake_q_add(head, task))
+		get_task_struct(task);
+}
+
+/* The caller's own reference becomes the queue's, or goes if already queued. */
 void wake_q_add_safe(struct wake_q_head *head, struct task_struct *task)
 {
-	wake_q_add(head, task);
+	if (!lx_wake_q_add(head, task))
+		put_task_struct(task);
 }
 
 void wake_up_q(struct wake_q_head *head)
@@ -165,6 +197,42 @@ void wake_up_q(struct wake_q_head *head)
 		node = node->next;
 		WRITE_ONCE(task->wake_q.next, NULL);
 		wake_up_process(task);
+		put_task_struct(task);
+	}
+}
+
+/*
+ * RCU callbacks, after a grace period. Linux's tasks are coroutines on the
+ * process's one thread, and an RCU reader may not sleep (this configuration
+ * has no preemptible RCU), so once the running task has switched away, no
+ * task is inside a read-side critical section: a callback queued before a
+ * switch has had its grace period by the next. lx_emul_switch_to() runs
+ * them there, before the next task -- as Linux's tiny RCU runs them after a
+ * context switch.
+ */
+static struct rcu_head *lx_rcu_first;
+static struct rcu_head **lx_rcu_last = &lx_rcu_first;
+
+void call_rcu(struct rcu_head *head, rcu_callback_t func)
+{
+	head->func = func;
+	head->next = NULL;
+	*lx_rcu_last = head;
+	lx_rcu_last = &head->next;
+}
+
+void lx_rcu_run(void)
+{
+	struct rcu_head *head = lx_rcu_first;
+
+	/* What these queue waits for the next switch. */
+	lx_rcu_first = NULL;
+	lx_rcu_last = &lx_rcu_first;
+	while (head) {
+		struct rcu_head *next = head->next;
+
+		head->func(head);
+		head = next;
 	}
 }
 
@@ -189,12 +257,6 @@ static u64 lx_deadline(u64 ns)
 	return max(now + ns, 1ULL);
 }
 
-/* jiffies brought up to the monotonic clock. */
-static void lx_tick(void)
-{
-	lx_emul_tick(slx_now_ns());
-}
-
 /*
  * Sleep, in the state the caller set, until woken or `timeout` jiffies
  * pass: the jiffies left, as Linux's own answers.
@@ -217,9 +279,9 @@ long schedule_timeout(long timeout)
 	 * The deadline is reckoned from a later reading of the clock than
 	 * jiffies are, so when it comes jiffies have reached `expire`.
 	 */
-	lx_tick();
+	lx_emul_jiffies_now();
 	expire = jiffies + timeout;
-	if (READ_ONCE(current->__state) == TASK_RUNNING) {
+	if (lx_stays_running()) {
 		slx_task_yield();
 	} else {
 		slx_task_block(lx_deadline(lx_ns(timeout, NSEC_PER_SEC / HZ)));
@@ -333,7 +395,7 @@ static void lx_spin_ns(u64 ns)
 	/* Not cpu_relax(), which would read the clock twice a turn. */
 	while (!until || slx_now_ns() < until)
 		native_pause();
-	lx_tick();
+	lx_emul_jiffies_now();
 }
 
 void __const_udelay(unsigned long xloops)
@@ -376,6 +438,12 @@ void __put_task_struct(struct task_struct *p)
 		return;
 	lx_kthreads--;
 	kfree(t);
+}
+
+/* What Linux's put_task_struct() has RCU call once the last reference goes. */
+void __put_task_struct_rcu_cb(struct rcu_head *rhp)
+{
+	__put_task_struct(container_of(rhp, struct task_struct, rcu));
 }
 
 /*

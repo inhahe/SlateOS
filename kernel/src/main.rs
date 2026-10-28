@@ -9204,6 +9204,10 @@ extern "C" fn kernel_main() -> ! {
                 serial_println!("=== KEXEC-SELFTEST: reload did not happen: {:?} ===", e);
             }
 
+            // The self-tests are over: a `selftest.only=` name that matched none
+            // is said now, or it shows only as a test that never ran.
+            selftest::report_unselected();
+
             // Boot success marker — the boot test script greps for this.
             // Printed synchronously so it appears within seconds of power-on,
             // regardless of how long deferred benchmarks take.

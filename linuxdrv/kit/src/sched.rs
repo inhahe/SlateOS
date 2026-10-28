@@ -26,6 +26,11 @@ const GUARD: usize = 16 * 1024;
 /// A task's mapping: its guard, then its stack.
 const MAPPING: usize = GUARD + STACK;
 
+/// Finished tasks' mappings kept for the next tasks, so that a driver that
+/// starts and stops kthreads does not map, guard and unmap a stack each
+/// time: at most this many.
+const SPARE_STACKS: usize = 8;
+
 /// A task's function, which the C half gives.
 type Entry = unsafe extern "C" fn(*mut c_void);
 
@@ -57,6 +62,9 @@ struct Sched {
     current: Option<usize>,
     /// The loop's own stack pointer while a task runs.
     loop_rsp: usize,
+    /// Spare mappings ([`SPARE_STACKS`]): the first `spares` of these.
+    spare: [usize; SPARE_STACKS],
+    spares: usize,
 }
 
 static SCHED: Single<Sched> = Single::new(Sched {
@@ -64,6 +72,8 @@ static SCHED: Single<Sched> = Single::new(Sched {
     tasks: [NO_TASK; MAX_TASKS],
     current: None,
     loop_rsp: 0,
+    spare: [0; SPARE_STACKS],
+    spares: 0,
 });
 
 // Switch stacks: save the callee-saved registers on the current stack, its
@@ -96,6 +106,9 @@ unsafe extern "C" {
     /// The C half: the task whose record is `data` is about to run, the
     /// monotonic clock reading `now_ns`.
     fn lx_emul_switch_to(data: *mut c_void, now_ns: u64);
+    /// The C half: the task whose record is `data` waited past its deadline
+    /// and may run again.
+    fn lx_emul_timed_out(data: *mut c_void);
 }
 
 /// The scheduler's state, through a raw pointer: every reference made from
@@ -165,18 +178,51 @@ fn unmap_stack(mapping: usize) {
     }
 }
 
+/// A stack for a new task: a spare one, or a new mapping; its guard's
+/// address, or `None`.
+fn take_stack() -> Option<usize> {
+    let s = sched();
+    // SAFETY: the one thread, outside any switch.
+    unsafe {
+        if let Some(n) = (*s).spares.checked_sub(1)
+            && let Some(&mapping) = (*s).spare.get(n)
+        {
+            (*s).spares = n;
+            return Some(mapping);
+        }
+    }
+    map_stack()
+}
+
+/// A finished task's stack, kept as a spare, or unmapped when there are
+/// enough spares.
+fn give_back_stack(mapping: usize) {
+    let s = sched();
+    // SAFETY: the one thread, outside any switch.
+    unsafe {
+        let n = (*s).spares;
+        if let Some(slot) = (*s).spare.get_mut(n) {
+            *slot = mapping;
+            // n < SPARE_STACKS: `get_mut` found the slot.
+            (*s).spares = n.wrapping_add(1);
+            return;
+        }
+    }
+    unmap_stack(mapping);
+}
+
 /// `slx_task_new`: a new task, runnable, that will run `entry(arg)`; `data`
 /// is the C half's record of it. Its handle, or -1 when no slot or stack is
 /// left.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_task_new(entry: Entry, arg: *mut c_void, data: *mut c_void) -> i32 {
-    let Some(mapping) = map_stack() else {
+    let Some(mapping) = take_stack() else {
         return -1;
     };
     let s = sched();
     // SAFETY: the one thread, outside any switch.
     let Some(i) = (unsafe { (*s).table.add() }) else {
-        unmap_stack(mapping);
+        give_back_stack(mapping);
         return -1;
     };
     // The top of the stack, page-aligned and so 16-aligned: as if
@@ -215,13 +261,16 @@ pub extern "C" fn slx_task_current() -> i32 {
 
 /// `slx_task_block`: the running task waits -- until woken, or, when
 /// `until_ns` is not 0, until the monotonic clock reaches it -- while the
-/// others run. Returns when it runs again. Outside every task, nothing.
+/// others run. Returns when it runs again. Outside every task -- in an RCU
+/// callback the loop runs, say -- nothing can wait, and returning would let
+/// Linux code go on as if woken: the process ends as a BUG.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_task_block(until_ns: u64) {
     let s = sched();
     // SAFETY: the one thread, outside any switch.
     let Some(i) = (unsafe { (*s).current }) else {
-        return;
+        log(b"[lx] BUG: a wait outside every task\n");
+        exit_with(crate::exit::PANIC);
     };
     // SAFETY: as above.
     unsafe { (*s).table.block(i, (until_ns != 0).then_some(until_ns)) };
@@ -248,14 +297,16 @@ pub extern "C" fn slx_task_wake(handle: i32) {
     }
 }
 
-/// Run the tasks until nothing ever will again: every task finished, or
-/// every one left waits with no deadline and nothing to wake it.
-pub fn run() {
+/// Run the tasks until nothing ever will again: whether every task
+/// finished -- `false` when some wait with no deadline and nothing to wake
+/// them.
+pub fn run() -> bool {
     let s = sched();
     loop {
         let now = now_ns();
         // SAFETY: the one thread, outside any switch.
-        unsafe { (*s).table.wake_expired(now) };
+        let woken = unsafe { (*s).table.wake_expired(now) };
+        timed_out(woken);
         // SAFETY: as above.
         if let Some(i) = unsafe { (*s).table.pick() } {
             // SAFETY: as above; no reference is held across the switch.
@@ -267,7 +318,7 @@ pub fn run() {
                 lxkit_switch(save, t.rsp);
                 (*s).current = None;
                 if (*s).table.state(i) == State::Finished {
-                    unmap_stack(t.mapping);
+                    give_back_stack(t.mapping);
                     (*s).table.free(i);
                     if let Some(slot) = (*s).tasks.get_mut(i) {
                         *slot = NO_TASK;
@@ -279,7 +330,30 @@ pub fn run() {
         // SAFETY: as above.
         match unsafe { (*s).table.next_deadline() } {
             Some(deadline) => sleep_ns(deadline.saturating_sub(now)),
-            None => return,
+            // SAFETY: as above.
+            None => return !unsafe { (*s).table.any_blocked() },
+        }
+    }
+}
+
+/// Tell the C half of each task in `woken` (a bit per slot) that its
+/// deadline woke it: Linux's record then reads running, as a Linux timer's
+/// wake leaves it, so a wake that comes before it runs finds it awake.
+fn timed_out(woken: u64) {
+    let s = sched();
+    for i in 0..MAX_TASKS {
+        let bit = u32::try_from(i)
+            .ok()
+            .and_then(|i| 1u64.checked_shl(i))
+            .unwrap_or(0);
+        if woken & bit == 0 {
+            continue;
+        }
+        // SAFETY: the one thread, outside any switch; the C half's record
+        // of a task that has not finished, as it gave it.
+        unsafe {
+            let data = (*s).tasks.get(i).map_or(core::ptr::null_mut(), |t| t.data);
+            lx_emul_timed_out(data);
         }
     }
 }

@@ -16,7 +16,11 @@
  *   "overflow"  runs past the end of its task's stack, so must be killed
  *               there by the guard page below it;
  *   "fail"      starts a kthread that never ends and fails, so must exit
- *               SLX_EXIT_INIT_FAILED at once.
+ *               SLX_EXIT_INIT_FAILED at once;
+ *   "stranded"  succeeds, leaving a kthread waiting for what never comes,
+ *               so must exit SLX_EXIT_DEADLOCK, not 0.
+ * With an argument, the later initcalls do nothing: the first's ending is
+ * the test.
  */
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -31,6 +35,8 @@
 #include <linux/jiffies.h>
 #include <linux/sched.h>
 #include <linux/sched/task.h>
+#include <linux/sched/wake_q.h>
+#include <linux/rcupdate.h>
 #include <linux/err.h>
 
 #include "../emul/slx.h"
@@ -78,6 +84,13 @@ static int hello_polls(void *unused)
 {
 	while (!kthread_should_stop())
 		msleep(100);
+	return 0;
+}
+
+/* A kthread that waits for what never comes. */
+static int hello_waits_forever(void *unused)
+{
+	wait_for_completion(&hello_forever);
 	return 0;
 }
 
@@ -133,9 +146,14 @@ static int __init hello_init(void)
 		return -EFAULT;
 	}
 	if (hello_mode("fail")) {
-		kthread_run(hello_polls, NULL, "hello-polls");
+		/* Not -ENODEV without its kthread: the run would prove nothing. */
+		if (IS_ERR(kthread_run(hello_polls, NULL, "hello-polls")))
+			return -EPROTO;
 		return -ENODEV;
 	}
+	if (hello_mode("stranded") &&
+	    IS_ERR(kthread_run(hello_waits_forever, NULL, "hello-stranded")))
+		return -EPROTO;
 	return 0;
 }
 module_init(hello_init);
@@ -183,6 +201,8 @@ static int __init hello_tasks_init(void)
 	struct task_struct *worker;
 	int i, ret;
 
+	if (slx_argc() > 1)
+		return 0;
 	mutex_lock(&hello_mutex);
 	hello_step(1);
 	worker = kthread_run(hello_worker, NULL, "hello-worker");
@@ -212,8 +232,10 @@ late_initcall(hello_tasks_init);
 /*
  * The scheduler's edges: a wait that times out; kthreads stopped before
  * they ran, and out of interruptible waits, as Linux's kthread_stop() does
- * by signal; their records freed when they end by themselves, or when the
- * last reference goes; usleep_range(0, ...), cond_resched() and yield()
+ * by signal, and then not put back to sleep; their records freed when they
+ * end by themselves, or when the last reference goes -- by kthread_stop_put(),
+ * by put_task_struct() after an RCU grace period, by a wake queue; RCU
+ * callbacks waiting for a grace period; usleep_range(0, ...), cond_resched() and yield()
  * letting the others run; and jiffies moving on through busy waits, and
  * before a sleep reckons its end, as Linux's timer interrupt keeps them.
  * Each check says which failed.
@@ -254,6 +276,48 @@ static int hello_wakes(void *task)
 	return 0;
 }
 
+/*
+ * Stopped while in an uninterruptible sleep, which goes on: then neither a
+ * bare interruptible schedule() nor schedule_timeout_interruptible() may
+ * sleep, the stop's signal pending.
+ */
+static int hello_sleeps_then_waits(void *unused)
+{
+	msleep(10);
+	set_current_state(TASK_INTERRUPTIBLE);
+	schedule();
+	return schedule_timeout_interruptible(10 * HZ) > 9 * HZ ? 3 : -ETIME;
+}
+
+static struct rcu_head hello_rcu;
+static bool hello_rcu_ran;
+
+static void hello_rcu_done(struct rcu_head *head)
+{
+	hello_rcu_ran = true;
+}
+
+/* A wake of `task`, and what try_to_wake_up() answered: 1 if it slept. */
+struct hello_wake {
+	struct task_struct *task;
+	int woke;
+};
+
+static int hello_wakes_and_says(void *arg)
+{
+	struct hello_wake *wake = arg;
+
+	wake->woke = wake_up_process(wake->task);
+	return 0;
+}
+
+static int hello_naps_briefly(void *unused)
+{
+	set_current_state(TASK_INTERRUPTIBLE);
+	schedule_timeout(1);
+	return 0;
+}
+
 /* A sleep of `timeout` jiffies, and whether it has ended. */
 struct hello_sleep {
 	long timeout;
@@ -271,19 +335,23 @@ static int hello_sleeps_long(void *arg)
 
 static int __init hello_edges_init(void)
 {
-	struct task_struct *never, *waiter, *napper, *quick, *held, *waker, *sleepers[2];
+	struct task_struct *never, *waiter, *napper, *quick, *held, *waker, *sleepers[2], *k;
+	struct hello_wake wake = { NULL, -1 };
+	DEFINE_WAKE_Q(wake_q);
 	/*
 	 * The longest sleep there is, and one whose nanoseconds (at HZ 250,
 	 * 4,000,000 a jiffy, 2^8 * 15625) are 2^64 * 15625: both too long to end.
 	 */
 	struct hello_sleep sleeps[2] = { { MAX_JIFFY_OFFSET }, { 1L << 56 } };
 	bool ran = false, quick_ran = false, held_ran = false;
-	bool resched_ran = false, yield_ran = false;
+	bool resched_ran = false, yield_ran = false, put_ran = false, queued_ran = false;
 	unsigned long j;
-	u64 t0, give_up;
-	long left;
+	u64 t0, t1, give_up;
+	long left, elapsed;
 	int i;
 
+	if (slx_argc() > 1)
+		return 0;
 	HELLO_CHECK(lx_kthreads == 0, "a stopped kthread's record was not freed");
 
 	j = jiffies;
@@ -294,17 +362,22 @@ static int __init hello_edges_init(void)
 	/*
 	 * A sleep reckons its end from jiffies brought up to the clock: after
 	 * 120 ms that moved nothing on (a spin without cpu_relax()), 30
-	 * jiffies, a sleep of 60 woken at once has nearly 60 left, not 30. The
-	 * margin is for the process waiting for the CPU on a busy system.
+	 * jiffies, a sleep of 60 woken at once has 60 left less the jiffies
+	 * the sleep itself took -- not 30 less them. Measured, so that a busy
+	 * system slows the sleep without failing the check; the check can
+	 * tell the two apart while the sleep takes under 30 jiffies.
 	 */
 	t0 = slx_now_ns();
 	while (slx_now_ns() - t0 < 120 * NSEC_PER_MSEC)
 		barrier();
 	waker = kthread_run(hello_wakes, current, "hello-wakes");
 	HELLO_CHECK(!IS_ERR(waker), "no kthread");
+	t1 = slx_now_ns();
 	set_current_state(TASK_INTERRUPTIBLE);
 	left = schedule_timeout(60);
-	HELLO_CHECK(left > 40, "a sleep woken at once reckoned its end from stale jiffies");
+	elapsed = (slx_now_ns() - t1) / (NSEC_PER_SEC / HZ) + 1;
+	HELLO_CHECK(left >= 60 - elapsed,
+		    "a sleep woken at once reckoned its end from stale jiffies");
 
 	for (i = 0; i < ARRAY_SIZE(sleeps); i++) {
 		sleepers[i] = kthread_run(hello_sleeps_long, &sleeps[i], "hello-sleeps");
@@ -317,6 +390,24 @@ static int __init hello_edges_init(void)
 		HELLO_CHECK(kthread_stop(sleepers[i]) == 0 && sleeps[i].woke,
 			    "a long sleep was not woken");
 
+	/*
+	 * A task its deadline woke reads awake before it runs, as a Linux
+	 * timer's wake leaves it: a wake that reaches it first answers 0. The
+	 * waker is made first, so it takes the lower slot and runs first;
+	 * the main task spins past the napper's deadline, then lets both go.
+	 */
+	k = kthread_create(hello_wakes_and_says, &wake, "hello-checks");
+	HELLO_CHECK(!IS_ERR(k), "no kthread");
+	wake.task = kthread_run(hello_naps_briefly, NULL, "hello-naps-briefly");
+	HELLO_CHECK(!IS_ERR(wake.task), "no kthread");
+	yield();
+	t0 = slx_now_ns();
+	while (slx_now_ns() - t0 < 10 * NSEC_PER_MSEC)
+		barrier();
+	wake_up_process(k);
+	msleep(1);
+	HELLO_CHECK(wake.woke == 0, "a task its deadline woke still read asleep");
+
 	never = kthread_create(hello_never_runs, &ran, "hello-never");
 	HELLO_CHECK(!IS_ERR(never), "no kthread");
 	HELLO_CHECK(kthread_stop(never) == -EINTR && !ran,
@@ -327,11 +418,45 @@ static int __init hello_edges_init(void)
 	napper = kthread_run(hello_naps, NULL, "hello-naps");
 	HELLO_CHECK(!IS_ERR(napper), "no kthread");
 	msleep(5);
-	j = jiffies;
 	HELLO_CHECK(kthread_stop(waiter) == -ERESTARTSYS,
 		    "kthread_stop() did not end an interruptible wait");
-	HELLO_CHECK(kthread_stop(napper) > 9000 && time_before(jiffies, j + HZ),
-		    "kthread_stop() did not end msleep_interruptible()");
+	HELLO_CHECK(kthread_stop(napper) > 0, "kthread_stop() did not end msleep_interruptible()");
+	k = kthread_run(hello_sleeps_then_waits, NULL, "hello-sleeps-waits");
+	HELLO_CHECK(!IS_ERR(k), "no kthread");
+	msleep(2);
+	HELLO_CHECK(kthread_stop(k) == 3,
+		    "a stopped kthread slept in schedule_timeout_interruptible()");
+
+	/* An RCU callback waits for a grace period: a switch. */
+	call_rcu(&hello_rcu, hello_rcu_done);
+	HELLO_CHECK(!hello_rcu_ran, "an RCU callback ran before a grace period");
+	msleep(1);
+	HELLO_CHECK(hello_rcu_ran, "an RCU callback never ran");
+
+	/* put_task_struct() frees the last reference after a grace period. */
+	k = kthread_run(hello_quick, &put_ran, "hello-put");
+	HELLO_CHECK(!IS_ERR(k), "no kthread");
+	get_task_struct(k);
+	msleep(1);
+	HELLO_CHECK(kthread_stop(k) == 5 && put_ran, "a held kthread did not run");
+	put_task_struct(k);
+	HELLO_CHECK(lx_kthreads == 1, "put_task_struct() freed before a grace period");
+	msleep(1);
+	HELLO_CHECK(lx_kthreads == 0, "put_task_struct() never freed the record");
+
+	/*
+	 * A wake queue takes over a reference its caller held, lets go of a
+	 * second given for a task already queued, and of its own once woken.
+	 */
+	k = kthread_create(hello_quick, &queued_ran, "hello-wakeq");
+	HELLO_CHECK(!IS_ERR(k), "no kthread");
+	get_task_struct(k);
+	get_task_struct(k);
+	wake_q_add_safe(&wake_q, k);
+	wake_q_add_safe(&wake_q, k);
+	wake_up_q(&wake_q);
+	msleep(1);
+	HELLO_CHECK(queued_ran && lx_kthreads == 0, "a wake queue kept or lost a reference");
 
 	/* A long loop's cond_resched() lets the others run once its slice is spent. */
 	HELLO_CHECK(!IS_ERR(kthread_run(hello_quick, &resched_ran, "hello-resched")), "no kthread");

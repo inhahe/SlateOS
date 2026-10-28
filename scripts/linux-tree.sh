@@ -259,16 +259,16 @@ driver() {
     local kit="$repo/target/x86_64-unknown-none/release/liblxkit.a"
     local out="$repo/build/linuxdrv/$name.elf"
     mkdir -p "$(dirname "$out")"
-    local base="$repo/linuxdrv/emul/manifest" manifest="$repo/linuxdrv/$name/manifest"
+    local layer_manifest="$repo/linuxdrv/emul/manifest" manifest="$repo/linuxdrv/$name/manifest"
     [ -f "$manifest" ] || die "$manifest: no such driver"
-    [ -f "$base" ] || die "$base: the layer's own manifest is missing"
+    [ -f "$layer_manifest" ] || die "$layer_manifest: the layer's own manifest is missing"
     [ -f "$kit" ] || die "$kit: the layer's Rust half is not built"
     prepare
     install_shadow
     local llvm work linux_objs=() layer_files=() kind path list
     local -A seen=()
     llvm=$(llvm_setting)
-    for list in "$base" "$manifest"; do
+    for list in "$layer_manifest" "$manifest"; do
         while read -r kind path || [ -n "${kind:-}" ]; do
             case $kind in
                 '' | '#'*) continue ;;
@@ -280,7 +280,7 @@ driver() {
             if [ "$kind" = linux ]; then linux_objs+=("$path"); else layer_files+=("$path"); fi
         done <"$list"
     done
-    [ "${#linux_objs[@]}" -gt 0 ] || die "$base and $manifest name no Linux object"
+    [ "${#linux_objs[@]}" -gt 0 ] || die "$layer_manifest and $manifest name no Linux object"
     # Linux's own objects, by Linux's own make.
     make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
         -j"$(nproc)" "${linux_objs[@]}" >"$obj/driver-$name.log" 2>&1 ||

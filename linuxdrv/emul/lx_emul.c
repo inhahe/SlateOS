@@ -57,13 +57,18 @@ u64 __cacheline_aligned_in_smp jiffies_64 = INITIAL_JIFFIES;
  * The monotonic clock reads `now_ns`: jiffies count the ticks since the
  * first time it was read, at HZ, from INITIAL_JIFFIES.
  */
-void lx_emul_tick(u64 now_ns)
+static void lx_emul_tick(u64 now_ns)
 {
 	static u64 start_ns;
 
 	if (!start_ns)
 		start_ns = now_ns;
 	jiffies_64 = INITIAL_JIFFIES + (now_ns - start_ns) / (NSEC_PER_SEC / HZ);
+}
+
+void lx_emul_jiffies_now(void)
+{
+	lx_emul_tick(slx_now_ns());
 }
 
 /* When the running task was switched to, by the monotonic clock. */
@@ -73,7 +78,8 @@ u64 lx_switched_ns;
  * The Rust half's hook, at every switch (linuxdrv/kit, sched.rs): the task
  * whose record is `task` is about to run, and is `current`, the clock
  * reading `now_ns`. The first task, Linux's initcalls, has no record of its
- * own but the main one.
+ * own but the main one. Every task is switched out here, so the RCU
+ * callbacks queued so far have had their grace period, and run first.
  */
 void lx_emul_switch_to(void *task, u64 now_ns)
 {
@@ -84,12 +90,34 @@ void lx_emul_switch_to(void *task, u64 now_ns)
 	*raw_cpu_ptr(&current_task) = task ? task : &lx_main_task;
 	lx_switched_ns = now_ns;
 	lx_emul_tick(now_ns);
+	lx_rcu_run();
 }
 
-/* A busy wait's turn (cpu_relax(), the shadow <asm/vdso/processor.h>). */
+/*
+ * The Rust half's hook for a task its deadline woke: Linux's record reads
+ * running, as the wake of a Linux timer leaves it, so that a wake that
+ * comes before the task runs finds it awake (try_to_wake_up() answers 0),
+ * and an exclusive wake goes to a waiter still waiting.
+ */
+void lx_emul_timed_out(void *task)
+{
+	struct task_struct *p = task ? task : &lx_main_task;
+
+	WRITE_ONCE(p->__state, TASK_RUNNING);
+}
+
+/*
+ * A busy wait's turn (cpu_relax(), the shadow <asm/vdso/processor.h>). The
+ * clock is a system call, so it is read once in 16 turns: a loop waiting on
+ * jiffies spins a few turns longer, a loop waiting on anything else is not
+ * slowed by a system call each turn.
+ */
 void slx_cpu_relax(void)
 {
-	lx_emul_tick(slx_now_ns());
+	static unsigned int turns;
+
+	if (++turns % 16 == 0)
+		lx_emul_jiffies_now();
 }
 
 /*

@@ -83,5 +83,7 @@ int lx_emul_main(void);
  * monotonic clock reading `now_ns`.
  */
 void lx_emul_switch_to(void *task, unsigned long long now_ns);
+/* The task whose record is `task` (NULL: the first) waited past its deadline. */
+void lx_emul_timed_out(void *task);
 
 #endif /* SLX_H */

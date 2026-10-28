@@ -93,15 +93,31 @@ impl Table {
         }
     }
 
-    /// Every task whose deadline is at or before `now` wakes.
-    pub fn wake_expired(&mut self, now: u64) {
-        for s in &mut self.states {
+    /// Every task whose deadline is at or before `now` wakes: which did, a
+    /// bit per slot (MAX_TASKS is 64).
+    pub fn wake_expired(&mut self, now: u64) -> u64 {
+        let mut woken = 0u64;
+        for (i, s) in self.states.iter_mut().enumerate() {
             if let State::Blocked { until: Some(t) } = *s
                 && t <= now
             {
                 *s = State::Runnable;
+                woken |= u32::try_from(i)
+                    .ok()
+                    .and_then(|i| 1u64.checked_shl(i))
+                    .unwrap_or(0);
             }
         }
+        woken
+    }
+
+    /// Whether any task is blocked: with none runnable and no deadline, one
+    /// that will never run again.
+    #[must_use]
+    pub fn any_blocked(&self) -> bool {
+        self.states
+            .iter()
+            .any(|s| matches!(s, State::Blocked { .. }))
     }
 
     /// The earliest deadline a blocked task has, if any has one.
@@ -155,9 +171,9 @@ mod tests {
         t.block(b, Some(500));
         assert_eq!(t.pick(), None);
         assert_eq!(t.next_deadline(), Some(500));
-        t.wake_expired(499);
+        assert_eq!(t.wake_expired(499), 0);
         assert_eq!(t.state(b), State::Blocked { until: Some(500) });
-        t.wake_expired(500);
+        assert_eq!(t.wake_expired(500), 1 << b, "b, and only b");
         assert_eq!(t.state(b), State::Runnable);
         assert_eq!(t.state(a), State::Blocked { until: None }, "no deadline");
         assert_eq!(t.pick(), Some(b));
@@ -180,6 +196,31 @@ mod tests {
         assert_eq!(t.pick(), None);
         t.free(a);
         assert_eq!(t.add(), Some(a));
+    }
+
+    #[test]
+    fn a_table_knows_whether_any_task_waits() {
+        let mut t = Table::new();
+        assert!(!t.any_blocked(), "empty");
+        let a = t.add().unwrap();
+        assert!(!t.any_blocked(), "runnable");
+        t.block(a, None);
+        assert!(t.any_blocked());
+        t.wake(a);
+        t.finish(a);
+        assert!(!t.any_blocked(), "finished");
+    }
+
+    #[test]
+    fn the_last_slot_s_deadline_wakes_its_own_bit() {
+        let mut t = Table::new();
+        for _ in 0..MAX_TASKS {
+            t.add().unwrap();
+        }
+        t.block(MAX_TASKS - 1, Some(7));
+        t.block(0, Some(9));
+        assert_eq!(t.wake_expired(8), 1 << 63);
+        assert_eq!(t.wake_expired(9), 1);
     }
 
     #[test]

@@ -30,7 +30,7 @@
 use crate::serial_println;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Severity classification (§914)
@@ -218,50 +218,119 @@ pub fn skip() -> bool {
 // Running some alone (`selftest.only=<names>`)
 // ---------------------------------------------------------------------------
 
+/// Whether `selftest.only=` is on the command line: looked for once, since
+/// most boots have none and every dispatched test asks.
+fn only_present() -> bool {
+    static PRESENT: AtomicU8 = AtomicU8::new(0);
+    cmdline_flag_with(&PRESENT, |word| word.starts_with(b"selftest.only="))
+}
+
+/// Which of `selftest.only=`'s names have named a self-test this boot: a
+/// bit per name, in the order [`only_names`] gives them (the first 64).
+static ONLY_MATCHED: AtomicU64 = AtomicU64::new(0);
+
 /// Whether this boot runs the self-test [`dispatch`] is given as `name`.
 ///
 /// Every one, unless [`skip`]. With `selftest.only=<names>` on the command
-/// line, only those it names: comma-separated, each compared with `name`
-/// regardless of case, an `_` standing for a space
-/// (`selftest.only=linuxdrv,devhandle_ring_3`). For working on one test,
-/// whose boot then reaches it in a minute or two rather than after every
-/// other; a test that relies on state an earlier one left fails there, as it
-/// would on its own. Like `selftest.skip`, a boot with it proves nothing,
-/// and `scripts/boot-test.sh` refuses it. The first such boot says so on the
-/// serial line, once.
+/// line, only those it names ([`selects`]): comma-separated, each compared
+/// with `name` regardless of case, an `_` matching a space as well as itself
+/// (`selftest.only=linuxdrv,devhandle_ring_3`); a name holding a comma cannot
+/// be given. For working on one test, whose boot then reaches it in a minute
+/// or two rather than after every other; a test that relies on state an
+/// earlier one left fails there, as it would on its own. Like
+/// `selftest.skip`, a boot with it proves nothing, and `scripts/boot-test.sh`
+/// refuses it: the first such boot says so on the serial line, each test it
+/// runs is named as it starts, and [`report_unselected`] names, at the end,
+/// any name that matched no test.
 fn runs(name: &str) -> bool {
     static SAID: AtomicBool = AtomicBool::new(false);
     if skip() {
         return false;
     }
-    let Some(line) = crate::boot::kernel_cmdline_bytes() else {
-        return true;
-    };
-    let mut lists = line
-        .split(u8::is_ascii_whitespace)
-        .filter_map(|word| word.strip_prefix(b"selftest.only="))
-        .peekable();
-    if lists.peek().is_none() {
+    if !only_present() {
         return true;
     }
+    let Some(matched) = crate::boot::kernel_cmdline_bytes().and_then(|line| selects(line, name))
+    else {
+        return true;
+    };
     if !SAID.swap(true, Ordering::Relaxed) {
         serial_println!(
             "[selftest] selftest.only: this boot runs only the self-tests it names, and proves nothing"
         );
     }
-    lists
-        .flat_map(|list| list.split(|&b| b == b','))
-        .any(|given| names_match(given, name))
+    ONLY_MATCHED.fetch_or(matched, Ordering::Relaxed);
+    if matched != 0 {
+        serial_println!("[selftest] selftest.only: running {}", name);
+    }
+    matched != 0
+}
+
+/// At the end of the self-tests, with `selftest.only=`: each name it gave
+/// that named no self-test, said -- a misspelt name otherwise shows only as
+/// a test that never ran.
+pub fn report_unselected() {
+    if skip() || !only_present() {
+        return;
+    }
+    let Some(names) = crate::boot::kernel_cmdline_bytes().and_then(only_names) else {
+        return;
+    };
+    let matched = ONLY_MATCHED.load(Ordering::Relaxed);
+    for (i, given) in names.enumerate().take(64) {
+        if matched & name_bit(i) == 0 {
+            serial_println!(
+                "[selftest] selftest.only: {:?} named no self-test",
+                core::str::from_utf8(given)
+            );
+        }
+    }
+}
+
+/// The names the `selftest.only=` words of the command line `line` give, in
+/// order, the empty ones dropped; `None` when it has no such word.
+fn only_names(line: &[u8]) -> Option<impl Iterator<Item = &[u8]>> {
+    let mut lists = line
+        .split(u8::is_ascii_whitespace)
+        .filter_map(|word| word.strip_prefix(b"selftest.only="))
+        .peekable();
+    lists.peek()?;
+    Some(
+        lists
+            .flat_map(|list| list.split(|&b| b == b','))
+            .filter(|given| !given.is_empty()),
+    )
+}
+
+/// The bit of the `i`-th name in [`ONLY_MATCHED`]; 0 past the 64th.
+fn name_bit(i: usize) -> u64 {
+    u32::try_from(i)
+        .ok()
+        .and_then(|i| 1u64.checked_shl(i))
+        .unwrap_or(0)
+}
+
+/// What the command line `line` says of the self-test `name` through
+/// `selftest.only=` ([`runs`]): `None` when it has no such word, so every
+/// test runs; otherwise which of its names ([`only_names`]) name it, a bit
+/// each -- 0 when none does.
+fn selects(line: &[u8], name: &str) -> Option<u64> {
+    Some(
+        only_names(line)?
+            .enumerate()
+            .filter(|(_, given)| names_match(given, name))
+            .fold(0, |bits, (i, _)| bits | name_bit(i)),
+    )
 }
 
 /// Whether `given`, a name from `selftest.only=`, names the self-test
 /// `name` ([`runs`]).
 fn names_match(given: &[u8], name: &str) -> bool {
     given.len() == name.len()
-        && given.iter().zip(name.bytes()).all(|(&g, n)| {
-            let g = if g == b'_' { b' ' } else { g };
-            g.eq_ignore_ascii_case(&n)
-        })
+        && given
+            .iter()
+            .zip(name.bytes())
+            .all(|(&g, n)| g.eq_ignore_ascii_case(&n) || (g == b'_' && n == b' '))
 }
 
 /// Wait until `done()` holds, yielding between looks, for at most
@@ -302,14 +371,18 @@ pub fn wait_until(timeout_ms: u64, done: impl Fn() -> bool) -> bool {
 /// `answer` caches it, as the command line never changes: 0 not looked yet,
 /// 1 no, 2 yes.
 fn cmdline_flag(answer: &AtomicU8, key: &[u8]) -> bool {
+    cmdline_flag_with(answer, |word| flag_word_sets(word, key))
+}
+
+/// Whether a word of the kernel command line satisfies `word_sets`, cached
+/// in `answer` as [`cmdline_flag`] caches its own.
+fn cmdline_flag_with(answer: &AtomicU8, word_sets: impl Fn(&[u8]) -> bool) -> bool {
     match answer.load(Ordering::Relaxed) {
         1 => false,
         2 => true,
         _ => {
-            let yes = crate::boot::kernel_cmdline_bytes().is_some_and(|line| {
-                line.split(u8::is_ascii_whitespace)
-                    .any(|word| flag_word_sets(word, key))
-            });
+            let yes = crate::boot::kernel_cmdline_bytes()
+                .is_some_and(|line| line.split(u8::is_ascii_whitespace).any(&word_sets));
             answer.store(if yes { 2 } else { 1 }, Ordering::Relaxed);
             yes
         }
@@ -890,6 +963,8 @@ pub fn self_test() -> crate::error::KernelResult<()> {
         (b"linuxdr", "Linuxdrv", false),
         (b"", "Linuxdrv", false),
         (b"devhandle-ring-3", "Devhandle ring 3", false),
+        (b"sleep_ns", "sleep_ns", true),
+        (b"sleep ns", "sleep_ns", false),
     ] {
         if names_match(given, name) != matches {
             serial_println!(
@@ -905,7 +980,37 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(crate::error::KernelError::InternalError);
         }
     }
-    serial_println!("[selftest]   selftest.only: 8 names matched to self-tests or not: OK");
+    serial_println!("[selftest]   selftest.only: 10 names matched to self-tests or not: OK");
+
+    // Test 6: which command lines select which self-test through
+    // `selftest.only=`, a bit per name that names it: `None` runs every test.
+    for (line, name, selected) in [
+        (b"quiet".as_slice(), "Linuxdrv", None),
+        (b"a selftest.only=linuxdrv b", "Linuxdrv", Some(0b1)),
+        (b"selftest.only=linuxdrv", "Selftest", Some(0)),
+        (b"selftest.only=selftest,linuxdrv", "Linuxdrv", Some(0b10)),
+        (
+            b"selftest.only=selftest selftest.only=linuxdrv",
+            "Linuxdrv",
+            Some(0b10),
+        ),
+        (b"selftest.only=linuxdrv,LINUXDRV", "Linuxdrv", Some(0b11)),
+        (b"selftest.only=", "Linuxdrv", Some(0)),
+        (b"selftest.only=,,linuxdrv", "Linuxdrv", Some(0b1)),
+        (b"selftest.onlyx=linuxdrv", "Linuxdrv", None),
+        (b"selftest.only", "Linuxdrv", None),
+    ] {
+        if selects(line, name) != selected {
+            serial_println!(
+                "[selftest]   FAIL: the command line {:?} should select {:?} as {:?}",
+                core::str::from_utf8(line),
+                name,
+                selected
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    serial_println!("[selftest]   selftest.only: 10 command lines read: OK");
 
     serial_println!("[selftest] Self-test PASSED");
     Ok(())

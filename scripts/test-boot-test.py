@@ -1404,9 +1404,12 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
     hello = "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n"
     tasks = ("[lx] hello tasks: a kthread, a mutex held across a 20 ms sleep, a "
              "completion: 18 jiffies\n")
-    verdict = ("[linuxdrv]   hello process (64192 bytes): Linux's headers and "
-               "vsprintf in a process of their own, its initcall run, and a "
-               "generated stop: OK\n")
+    # As kernel/src/linuxdrv.rs prints it.
+    verdict = ("[linuxdrv]   hello process (108080 bytes): Linux's headers and "
+               "vsprintf in a process of their own, its initcalls run (a kthread, "
+               "a mutex held across a sleep, a completion, the scheduler's edges), "
+               "a generated stop, a deadlock, a stack overflow caught by its guard "
+               "page, a failed initcall, and a stranded kthread: OK\n")
     ran = hello + tasks + verdict
     # Only its first line differs from `ran`: the one check it can fail.
     garbled = (hello.replace("0xbeef", "beef") + tasks + verdict)

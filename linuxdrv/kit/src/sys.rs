@@ -147,9 +147,6 @@ unsafe extern "C" {
     fn lx_emul_main() -> i32;
 }
 
-/// Whether the first task has ended, every initcall having succeeded.
-static MAIN_DONE: Single<bool> = Single::new(false);
-
 /// The first task: the C half's `lx_emul_main`. A failure ends the process
 /// at once, whatever tasks the initcalls before it started; success leaves
 /// those to run, and the process ends when they do.
@@ -159,8 +156,6 @@ unsafe extern "C" fn main_task(_: *mut core::ffi::c_void) {
     if code != exit::OK {
         exit_with(code);
     }
-    // SAFETY: the one thread.
-    unsafe { *MAIN_DONE.get() = true };
 }
 
 /// The process's arguments, asked of the kernel once, kept in kmalloc's
@@ -225,9 +220,9 @@ unsafe extern "C" fn lxkit_start() -> ! {
         log(b"[lx] the first task could not be made\n");
         exit_with(exit::NO_MEMORY);
     }
-    crate::sched::run();
-    // SAFETY: the one thread; the tasks are done.
-    if unsafe { *MAIN_DONE.get() } {
+    // Done when every task finished; a task left waiting for what will never
+    // come -- the first, or one an initcall started -- is a deadlock.
+    if crate::sched::run() {
         exit_with(exit::OK);
     }
     log(b"[lx] every task waits on something that will never happen\n");

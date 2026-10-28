@@ -3658,9 +3658,10 @@ fi
 # knowledge lived only in the shell history of whoever set the tree up first.
 #
 # Checked here, before Step 1, because that is the last point at which the
-# limine failure is free.  The list is not restated: bootstrap-worktree.sh
-# derives it from the kernel's own `include_bytes!` paths, so a service added
-# to the kernel is covered here without anyone remembering to add it.
+# limine failure is free.  The service binaries are no longer checked here:
+# the build step now builds every one the kernel embeds before the kernel
+# (bootstrap-worktree.sh --services, which derives the list from the kernel's
+# own `include_bytes!` paths), so a missing one is built rather than missing.
 check_prerequisites() {
     local boot="$SCRIPT_DIR/bootstrap-worktree.sh"
     if [ ! -x "$boot" ] && [ ! -f "$boot" ]; then
@@ -3679,12 +3680,18 @@ check_prerequisites() {
     # Asking about it there would report a missing prerequisite for a run that
     # does not have one, and print "this run tests LESS than a normal one" as
     # though the tree were at fault rather than the flag.
+    #
+    # The embedded services are not asked about at all. A run that builds
+    # builds them first ("Building the embedded services", before the
+    # kernel), so a missing one is provided, not missing -- and a service
+    # newly embedded by a merge from main would otherwise refuse every other
+    # lane's next run until it was built by hand. A run that does not build
+    # compiles nothing that embeds them.
     local need=""
     [ "$NO_ROOTFS" -eq 0 ] && need="rootfs"
-    [ "$NO_BUILD" -eq 0 ] && need="services${need:+,$need}"
     [ "$NO_STAGE" -eq 0 ] && need="limine${need:+,$need}"
     if [ -z "$need" ]; then
-        echo "Prerequisites: nothing this run depends on (--no-build --no-stage --no-rootfs)."
+        echo "Prerequisites: nothing this run depends on (--no-stage --no-rootfs)."
         return 0
     fi
 
@@ -9987,7 +9994,7 @@ QEMU_START_EPOCH=$(date +%s)
 # and change which disk is which, which is the sort of thing that turns a
 # coverage improvement into a mysterious rootfs failure.
 #
-# --- The three NICs ---------------------------------------------------------
+# --- The four NICs ----------------------------------------------------------
 #
 # Until now the boot test attached no NIC at all, and got one anyway: with no
 # -netdev/-nic/-net on the command line QEMU silently creates a default NIC,
@@ -9995,7 +10002,10 @@ QEMU_START_EPOCH=$(date +%s)
 # and rtl8139.rs and virtio/net.rs printed "no device" on every boot and had
 # never executed a single line past their PCI scan.
 #
-# All three are now named explicitly, each on its own user-mode netdev.  Being
+# Three of the four are named for their drivers -- e1000e, rtl8139 and
+# virtio-net, each tested through its transmit datapath (below) -- and the
+# fourth, a second e1000e, is the ring-3 probe driver's (further below).
+# All are named explicitly, each on its own user-mode netdev.  Being
 # explicit is the point: the implicit default is a QEMU policy that changes by
 # machine type and by version, so a test that depends on it is a test that
 # reports on QEMU as much as on us.  `e1000e` is named rather than `e1000`

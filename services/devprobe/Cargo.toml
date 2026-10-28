@@ -8,8 +8,21 @@ description = "The device interface's ring-3 probe driver, run by the kernel's b
 # the program -- no_std, no_main, with its own panic handler -- cannot be
 # built under the test harness, which brings std's. So `cargo test` runs the
 # library's tests and leaves the program to `cargo build`, which the kernel
-# embeds.
+# embeds. The kernel also uses the library, for the constants and exit codes
+# the two sides share.
 [[bin]]
 name = "devprobe"
 path = "src/main.rs"
 test = false
+
+# The workspace's lints, set here because a crate outside the workspace
+# cannot inherit `[workspace.lints]` (scripts/check-workspace-lints.py accepts
+# this table in its place). Pedantic is deny rather than the workspace's warn.
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+arithmetic_side_effects = "warn"

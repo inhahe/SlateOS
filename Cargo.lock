@@ -1085,6 +1085,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "devprobe"
+version = "0.1.0"
+
+[[package]]
 name = "dhcpcd"
 version = "0.1.0"
 dependencies = [
@@ -2158,6 +2162,7 @@ dependencies = [
  "bzip2",
  "crc32",
  "deflate",
+ "devprobe",
  "elfparse",
  "ere",
  "log",

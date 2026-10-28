@@ -152,7 +152,8 @@ LANES: dict[str, Lane] = {
         "the ELF parser that loads them (elfparse/**), the "
         "in-kernel drivers and filesystems, the kernel graphics surface "
         "(DRM/KMS, fb), all of networking -- the in-kernel stack, the userspace "
-        "net crates, WiFi, services/netstack -- the benchmarks and the boot test.",
+        "net crates, WiFi, services/netstack -- the device interface's probe "
+        "driver (services/devprobe), the benchmarks and the boot test.",
         "gained networking from lane C (net/**, netipc/**, netproto/**, "
         "netring/**, net80211/**, aes/**, hmac/**) and services/netstack/** "
         "from lane B's old tree.",
@@ -183,7 +184,8 @@ LANES: dict[str, Lane] = {
         "POSIX, libc & Toolchain",
         "the POSIX/libc layer (posix/**), the sysroot (toolchain/stubs, "
         "build-sysroot.ps1), the bare-metal service binaries and C test "
-        "fixtures (services/**, except netstack), the rootfs image recipe, and "
+        "fixtures (services/**, except netstack and devprobe), the rootfs image "
+        "recipe, and "
         "the large ports that stand on libc (gcc/make/cmake, CPython, fastpy "
         "self-hosting, the Rust toolchain, WINE).",
         "new lane, taken from lane B's old tree.",

@@ -7,25 +7,49 @@
 //! cargo test --lib --target x86_64-pc-windows-gnu
 //! ```
 //!
+//! The kernel's self-test that runs the probe (`devhandle::self_test_ring3`)
+//! uses this library too, for what the two sides must agree on: the card,
+//! its MAC address, the registers it is read through, and the exit codes.
+//!
 //! On the target this is `no_std`, like the binary that uses it.
 
 #![cfg_attr(not(test), no_std)]
-#![deny(clippy::all, clippy::pedantic)]
 
-/// The card the boot test attaches for the probe: an Intel 82574 (QEMU's
-/// `e1000e`), with the MAC address `scripts/boot-test.sh` gives it.
-pub const INTEL: u32 = 0x8086;
-pub const E1000E_82574: u32 = 0x10D3;
+/// Intel's PCI vendor id.
+pub const INTEL: u16 = 0x8086;
+/// The 82574's device id: QEMU's `e1000e`, which the boot test attaches for
+/// the probe.
+pub const E1000E_82574: u16 = 0x10D3;
+/// The MAC address `scripts/boot-test.sh` gives the probe's card. It is what
+/// marks the card as the boot test's: QEMU's prefix, and an address no other
+/// card in the boot test has. The kernel selects only a card with it, so a
+/// real 82574 on the same machine is never handed to the probe.
 pub const EXPECTED_MAC: [u8; 6] = [0x52, 0x54, 0x00, 0x12, 0x34, 0x59];
 
 /// The smallest BAR0 an 82574 has: its register window is 128 KiB.
 pub const MIN_BAR0: u64 = 0x2_0000;
 
-/// 82574 registers, as offsets into BAR0: receive address 0, low and high
-/// halves, and the EEPROM read register.
+/// The 82574's receive address 0, low half: the MAC's first four bytes.
 pub const RAL0: usize = 0x5400;
+/// Receive address 0, high half: the MAC's last two bytes and the Address
+/// Valid bit.
 pub const RAH0: usize = 0x5404;
+/// The 82574's EEPROM read register.
 pub const EERD: usize = 0x0014;
+
+/// The PCI command register's offset in configuration space.
+pub const PCI_COMMAND: u64 = 0x04;
+/// The command register's Memory Space bit: the function decodes its
+/// memory BARs.
+pub const COMMAND_MEMORY_SPACE: u64 = 1 << 1;
+/// The command register's Bus Master bit: the function may start DMA, and
+/// send MSIs, which are memory writes.
+pub const COMMAND_BUS_MASTER: u64 = 1 << 2;
+
+/// What `SYS_PCI_DEVICE_OPEN` returns for a function the caller holds no
+/// capability for: `KernelError::PermissionDenied`'s code. (The kernel
+/// asserts at compile time that the two agree.)
+pub const PERMISSION_DENIED: i64 = -400;
 
 /// RAH's Address Valid bit: the receive address holds a MAC.
 const RAH_AV: u32 = 1 << 31;
@@ -44,9 +68,9 @@ pub fn mac_from_receive_address(ral: u32, rah: u32) -> Option<[u8; 6]> {
     if rah & RAH_AV == 0 {
         return None;
     }
-    let low = ral.to_le_bytes();
-    let high = rah.to_le_bytes();
-    Some([low[0], low[1], low[2], low[3], high[0], high[1]])
+    let [b0, b1, b2, b3] = ral.to_le_bytes();
+    let [b4, b5, _, _] = rah.to_le_bytes();
+    Some([b0, b1, b2, b3, b4, b5])
 }
 
 /// What to write to EERD to read EEPROM word `word`.
@@ -77,50 +101,115 @@ pub fn mac_from_eeprom_words(words: [u16; 3]) -> [u8; 6] {
     mac
 }
 
+/// Whether a 32-bit register at `offset` lies inside a BAR of `len` bytes:
+/// 4-aligned, and wholly inside it.
+#[must_use]
+pub fn register_inside(offset: usize, len: u64) -> bool {
+    offset.is_multiple_of(4)
+        && u64::try_from(offset)
+            .ok()
+            .and_then(|start| start.checked_add(4))
+            .is_some_and(|end| end <= len)
+}
+
 /// What the probe exits with: `Ok` when every step worked, and otherwise the
 /// step that failed, so the kernel's self-test can name it. Each value is
-/// distinct, and none is `Ok`'s.
+/// distinct, none is `Ok`'s, and none is 128 or more, where the kernel puts
+/// the codes of a process killed by a fault.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Exit {
+    /// Every step worked.
     Ok = 42,
+    /// Step 1: no function opened, so the granted one did not.
     OpenedNone = 10,
+    /// Step 1: a second function opened: the capability check let through a
+    /// function the probe was not granted.
     OpenedMore = 11,
+    /// Step 2: the opened function is not an 82574.
     WrongDevice = 12,
+    /// Step 3: BAR0 is not a memory BAR of at least [`MIN_BAR0`] bytes.
     BarUnusable = 13,
+    /// Step 3: BAR0 could not be mapped.
     MapFailed = 14,
+    /// Step 3: the MAC read through BAR0 is not [`EXPECTED_MAC`].
     WrongMac = 15,
+    /// Step 4: no DMA arena.
     DmaFailed = 16,
+    /// Step 5: the card's MSI could not be set up.
     IrqSetupFailed = 17,
+    /// Step 5: the card's pending interrupts could not be taken.
     IrqTakeFailed = 18,
+    /// Step 1: an open failed with something other than
+    /// [`PERMISSION_DENIED`]: either the granted function failed to open, or
+    /// another was refused for a reason other than the capability check.
+    OpenFailed = 19,
+    /// Step 3: decoding and bus mastering could not be turned on through the
+    /// command register.
+    CommandRefused = 20,
+    /// The probe panicked: a bug in it.
     Panicked = 99,
 }
 
 impl Exit {
+    /// Every exit code.
+    pub const ALL: [Exit; 13] = [
+        Exit::Ok,
+        Exit::OpenedNone,
+        Exit::OpenedMore,
+        Exit::WrongDevice,
+        Exit::BarUnusable,
+        Exit::MapFailed,
+        Exit::WrongMac,
+        Exit::DmaFailed,
+        Exit::IrqSetupFailed,
+        Exit::IrqTakeFailed,
+        Exit::OpenFailed,
+        Exit::CommandRefused,
+        Exit::Panicked,
+    ];
+
     /// The exit code itself.
     #[must_use]
     pub fn code(self) -> u64 {
         u64::from(self as u8)
     }
-}
 
-/// Step 1's verdict: of the functions on bus 0, exactly one may open -- the
-/// one the probe was granted. `opened` is how many did, `last` the handle of
-/// the last that did.
-///
-/// # Errors
-///
-/// `OpenedNone` when none opened, `OpenedMore` when more than one did: the
-/// capability check let through a function it was not granted.
-pub fn only_granted_opened(opened: u32, last: Option<u64>) -> Result<u64, Exit> {
-    match (opened, last) {
-        (1, Some(handle)) => Ok(handle),
-        (0, _) | (_, None) => Err(Exit::OpenedNone),
-        _ => Err(Exit::OpenedMore),
+    /// The exit whose code is `code`, if any.
+    #[must_use]
+    pub fn from_code(code: i64) -> Option<Exit> {
+        Self::ALL
+            .into_iter()
+            .find(|e| u64::try_from(code).is_ok_and(|c| c == e.code()))
     }
 }
 
+/// Step 1, one open: `result` is what `SYS_PCI_DEVICE_OPEN` returned for one
+/// function on bus 0, and `found` the handle of the one that opened before,
+/// if any. Exactly one may open -- the one granted -- and every other must be
+/// refused by the capability check, with [`PERMISSION_DENIED`].
+///
+/// # Errors
+///
+/// [`Exit::OpenedMore`] for a second function opened, and
+/// [`Exit::OpenFailed`] for any other failure.
+pub fn note_open(found: &mut Option<u64>, result: i64) -> Result<(), Exit> {
+    if result == PERMISSION_DENIED {
+        return Ok(());
+    }
+    let handle = u64::try_from(result)
+        .ok()
+        .filter(|&h| h != 0)
+        .ok_or(Exit::OpenFailed)?;
+    if found.replace(handle).is_some() {
+        return Err(Exit::OpenedMore);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
+// Tests may panic and index: that is how they fail.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 mod tests {
     use super::*;
 
@@ -173,35 +262,50 @@ mod tests {
     }
 
     #[test]
-    fn exit_codes_are_distinct_and_only_ok_is_42() {
-        let all = [
-            Exit::Ok,
-            Exit::OpenedNone,
-            Exit::OpenedMore,
-            Exit::WrongDevice,
-            Exit::BarUnusable,
-            Exit::MapFailed,
-            Exit::WrongMac,
-            Exit::DmaFailed,
-            Exit::IrqSetupFailed,
-            Exit::IrqTakeFailed,
-            Exit::Panicked,
-        ];
-        for (i, a) in all.iter().enumerate() {
-            for b in &all[i + 1..] {
+    fn registers_must_be_aligned_and_inside_the_bar() {
+        assert!(register_inside(0, MIN_BAR0));
+        assert!(register_inside(RAH0, MIN_BAR0));
+        assert!(register_inside(0x1_FFFC, MIN_BAR0));
+        assert!(!register_inside(0x2_0000, MIN_BAR0));
+        assert!(!register_inside(0x1_FFFE, MIN_BAR0));
+        assert!(!register_inside(2, MIN_BAR0));
+        assert!(!register_inside(usize::MAX - 3, u64::MAX));
+    }
+
+    #[test]
+    fn exit_codes_are_distinct_below_128_and_decode() {
+        for (i, a) in Exit::ALL.iter().enumerate() {
+            assert!(a.code() < 128, "{a:?}");
+            assert_eq!(Exit::from_code(a.code().cast_signed()), Some(*a));
+            for b in &Exit::ALL[i + 1..] {
                 assert_ne!(a.code(), b.code(), "{a:?} and {b:?}");
             }
         }
         assert_eq!(Exit::Ok.code(), 42);
+        assert_eq!(Exit::from_code(0), None);
+        assert_eq!(Exit::from_code(-1), None);
+        assert_eq!(Exit::from_code(139), None);
     }
 
     #[test]
-    fn exactly_one_open_is_the_only_pass() {
-        assert_eq!(only_granted_opened(1, Some(7)), Ok(7));
-        assert_eq!(only_granted_opened(0, None), Err(Exit::OpenedNone));
-        assert_eq!(only_granted_opened(2, Some(7)), Err(Exit::OpenedMore));
-        assert_eq!(only_granted_opened(255, Some(7)), Err(Exit::OpenedMore));
-        // A count with no handle is a bookkeeping slip, read as nothing opened.
-        assert_eq!(only_granted_opened(1, None), Err(Exit::OpenedNone));
+    fn exactly_one_open_and_every_other_refused() {
+        let mut found = None;
+        assert_eq!(note_open(&mut found, PERMISSION_DENIED), Ok(()));
+        assert_eq!(note_open(&mut found, 7), Ok(()));
+        assert_eq!(found, Some(7));
+        assert_eq!(note_open(&mut found, PERMISSION_DENIED), Ok(()));
+        assert_eq!(note_open(&mut found, 8), Err(Exit::OpenedMore));
+    }
+
+    #[test]
+    fn a_refusal_other_than_the_capability_check_fails() {
+        // Other error codes, and 0, which is no handle.
+        for result in [-1, -402, 0] {
+            assert_eq!(
+                note_open(&mut None, result),
+                Err(Exit::OpenFailed),
+                "{result}"
+            );
+        }
     }
 }

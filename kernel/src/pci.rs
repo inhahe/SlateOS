@@ -641,9 +641,9 @@ pub fn find_device(vendor: u16, device: u16) -> Option<PciDevice> {
 
 /// Find all PCI devices matching a vendor/device ID pair.
 ///
-/// Returns every matching device on bus 0.  Useful for discovering
-/// multiple instances of the same device type (e.g., multiple
-/// virtio-blk controllers).
+/// Returns every matching function on every bus the scan reaches, behind
+/// bridges too (`scan_all`). Useful for discovering multiple instances of
+/// the same device type (e.g., multiple virtio-blk controllers).
 pub fn find_all_devices(vendor: u16, device: u16) -> Vec<PciDevice> {
     let devices = scan_all();
     devices

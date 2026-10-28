@@ -1092,31 +1092,64 @@ pub fn self_test() -> KernelResult<()> {
 static DEVPROBE_ELF: &[u8] =
     include_bytes!("../../services/devprobe/target/x86_64-unknown-none/release/devprobe");
 
-/// What the probe exits with when every step worked.
-const DEVPROBE_OK: i32 = 42;
+// The probe answers a refused open with `devprobe::PERMISSION_DENIED`, and
+// tells the capability check from every other refusal by it.
+#[allow(clippy::cast_lossless)] // `i64::from` is not const.
+const _: () = assert!(devprobe::PERMISSION_DENIED == KernelError::PermissionDenied.code() as i64);
 
-/// The device interface from ring 3: the probe driver is spawned holding a
-/// `PciDevice` capability for exactly one function -- an e1000e no kernel
-/// driver binds, which the boot test attaches for it -- and must open only
-/// that one, read its ids and its MAC through the handle, make a DMA arena,
-/// set up its MSI, and exit with 42. Its exit, which closes nothing itself,
-/// must leave the device released. Skipped, and recorded so, where there is
-/// no unbound e1000e.
+/// The boot test's card for the probe: an unbound 82574 on bus 0 -- the only
+/// bus the probe scans -- whose receive address 0 holds
+/// `devprobe::EXPECTED_MAC`, the address `scripts/boot-test.sh` gives it. A
+/// real 82574 has another address, so one on the same machine, spare or one
+/// the e1000 driver failed to take, is never handed to the probe.
+fn probe_card() -> Option<pci::PciDevice> {
+    pci::find_all_devices(devprobe::INTEL, devprobe::E1000E_82574)
+        .into_iter()
+        .filter(|d| d.address.bus == 0 && pci::bound_driver(d.address).is_none())
+        .find(|d| card_mac(d) == Some(devprobe::EXPECTED_MAC))
+}
+
+/// The MAC address in `dev`'s receive address 0, read through its BAR0, if
+/// that is a memory BAR and the address is marked valid. A card not decoding
+/// its BAR reads all ones, which is no valid address.
+fn card_mac(dev: &pci::PciDevice) -> Option<[u8; 6]> {
+    let phys = pci::bar_mmio_addr64(dev, 0)?;
+    // SAFETY: BAR0 of an 82574 is its register block, device memory of at
+    // least `MIN_BAR0` bytes, mapped uncached as the e1000 driver maps it.
+    let base = unsafe { crate::mm::page_table::map_mmio(phys, devprobe::MIN_BAR0).ok()? };
+    let read = |offset: usize| {
+        let at = base.checked_add(u64::try_from(offset).ok()?)?;
+        // SAFETY: inside the mapping just made: both registers read here
+        // are 4-aligned and well inside the first `MIN_BAR0` bytes.
+        Some(unsafe { (at as *const u32).read_volatile() })
+    };
+    devprobe::mac_from_receive_address(read(devprobe::RAL0)?, read(devprobe::RAH0)?)
+}
+
+/// The device interface from ring 3: the probe driver (`services/devprobe`)
+/// is spawned holding a `PciDevice` capability for exactly one function --
+/// the boot test's card for it ([`probe_card`]) -- and must open only that
+/// one, with every other refused by the capability check; read its ids;
+/// turn on decoding and bus mastering; map BAR0 and read the MAC through it;
+/// make a DMA arena; set up its MSI; and exit with `devprobe::Exit::Ok`. Its
+/// exit, which closes nothing itself, must release the device: unbound, bus
+/// mastering off, MSI off and its vector back in the pool. Skipped, and
+/// recorded so, where there is no such card.
 pub fn self_test_ring3() -> KernelResult<()> {
     use crate::cap::{ResourceType, Rights};
     use crate::proc::{pcb, spawn};
     use crate::serial_println;
 
     let mut skips = crate::fs::selftest::Skips::new();
-    let target = pci::find_all_devices(0x8086, 0x10D3)
-        .into_iter()
-        .find(|d| pci::bound_driver(d.address).is_none());
-    let Some(target) = target else {
-        skips.record("ring-3 probe driver", "no unbound e1000e attached");
+    let Some(card) = probe_card() else {
+        skips.record(
+            "ring-3 probe driver",
+            "no unbound 82574 on bus 0 with the boot test's MAC address",
+        );
         skips.report("[devhandle]");
         return Ok(());
     };
-    let a = target.address;
+    let a = card.address;
     let caps = [(
         ResourceType::PciDevice,
         crate::cap::pci_device_id(a.bus, a.device, a.function),
@@ -1134,6 +1167,7 @@ pub fn self_test_ring3() -> KernelResult<()> {
         cwd: None,
         uid_gid: None,
     };
+    let vectors_before = crate::msi::stats().vectors_used;
     let probe = match spawn::spawn_process(DEVPROBE_ELF, &options) {
         Ok(p) => p,
         Err(e) => {
@@ -1155,11 +1189,13 @@ pub fn self_test_ring3() -> KernelResult<()> {
         serial_println!("[devhandle]   FAIL: the probe driver did not exit within 10 s");
         return Err(KernelError::TimedOut);
     }
-    if exit_code != Some(DEVPROBE_OK) {
+    let exit = exit_code.and_then(|c| devprobe::Exit::from_code(i64::from(c)));
+    if exit != Some(devprobe::Exit::Ok) {
+        // A code that is no step's is a death: 128 and up, a fault's signal.
         serial_println!(
-            "[devhandle]   FAIL: the probe driver exited with {:?}, not {} (the codes are `devprobe::Exit`, in services/devprobe/src/lib.rs)",
+            "[devhandle]   FAIL: the probe driver exited with {:?}: {:?} (devprobe::Exit; None is no step's code, a fault)",
             exit_code,
-            DEVPROBE_OK
+            exit
         );
         return Err(KernelError::InternalError);
     }
@@ -1169,8 +1205,30 @@ pub fn self_test_ring3() -> KernelResult<()> {
         );
         return Err(KernelError::InternalError);
     }
+    // What the release must undo of what the probe turned on: bus mastering
+    // (step 3), and MSI with its vector (step 5).
+    let command = pci::config_read16(a.bus, a.device, a.function, CFG_COMMAND);
+    if command & (1 << 2) != 0 {
+        serial_println!(
+            "[devhandle]   FAIL: bus mastering is still on after the probe driver's exit"
+        );
+        return Err(KernelError::InternalError);
+    }
+    let msi_on = crate::msi::find_msi_capability(a.bus, a.device, a.function).is_some_and(|cap| {
+        pci::config_read16(a.bus, a.device, a.function, cap.cap_offset.wrapping_add(2)) & 1 != 0
+    });
+    if msi_on {
+        serial_println!("[devhandle]   FAIL: MSI is still on after the probe driver's exit");
+        return Err(KernelError::InternalError);
+    }
+    if crate::msi::stats().vectors_used != vectors_before {
+        serial_println!(
+            "[devhandle]   FAIL: the probe driver's MSI vector was not given back at its exit"
+        );
+        return Err(KernelError::InternalError);
+    }
     serial_println!(
-        "[devhandle]   ring-3 probe driver: OK (only its granted function opened; ids, MAC, DMA arena, MSI; released at exit)"
+        "[devhandle]   ring-3 probe driver: OK (only its granted function opened, every other refused by the capability check; ids, MAC, DMA arena, MSI; released at exit, bus mastering and MSI off)"
     );
     Ok(())
 }

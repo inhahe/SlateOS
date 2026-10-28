@@ -2,7 +2,7 @@
  * Linker script for the devprobe userspace binary.
  *
  * Same layout as init: single PT_LOAD segment at 0x4000000000.
- * See userspace/init/linker.ld for details.
+ * See services/init/linker.ld for details.
  */
 
 ENTRY(_start)

@@ -14,7 +14,9 @@ subject to it if its manifest says
     [lints]
     workspace = true
 
-or its source carries the equivalent inner attribute. **206 of 248 userspace
+or -- for a crate outside the workspace, which cargo does not let inherit
+the table -- its own `[lints.clippy]` sets every lint the workspace's sets
+above `allow`, at least as strictly (`_sets_own`). **206 of 248 userspace
 crates had neither the manifest line, and 128 had neither that nor the
 attribute** when this was written on 2026-09-10. For those 128, `clippy::all`
 is `warn` rather than `deny`, `pedantic` is off, and all five defensive lints
@@ -56,6 +58,7 @@ import argparse
 import os
 import re
 import sys
+import tomllib
 from pathlib import Path
 from typing import NamedTuple
 
@@ -120,11 +123,59 @@ def _inherits(manifest_text: str) -> bool:
     return bool(_WORKSPACE_TRUE.search(section))
 
 
+#: Lint levels, weakest first. `expect` silences like `allow`.
+_LEVELS = {"allow": 0, "expect": 0, "warn": 1, "deny": 2, "forbid": 3}
+
+
+def _level(entry: object) -> int:
+    """The level of one `[lints]` entry -- `"warn"`, or
+    `{ level = "warn", priority = -1 }` -- or -1 when it names none."""
+    if isinstance(entry, dict):
+        entry = entry.get("level")
+    return _LEVELS.get(entry, -1) if isinstance(entry, str) else -1
+
+
+def required_lints(root_manifest: str) -> dict[str, int]:
+    """The clippy lints the root manifest's `[workspace.lints.clippy]` sets
+    above `allow`, each with its level: what a crate that cannot inherit the
+    table must set itself. Empty when the table cannot be read, which
+    `_sets_own` then takes as nothing satisfied."""
+    try:
+        table = tomllib.loads(root_manifest)["workspace"]["lints"]["clippy"]
+    except (tomllib.TOMLDecodeError, KeyError, TypeError):
+        return {}
+    if not isinstance(table, dict):
+        return {}
+    return {name: lvl for name, entry in table.items() if (lvl := _level(entry)) > 0}
+
+
+def _sets_own(manifest_text: str, required: dict[str, int]) -> bool:
+    """Whether this manifest's own `[lints.clippy]` sets every lint in
+    `required` at least as strictly as the workspace does.
+
+    That is what a crate excluded from the workspace does instead of
+    `workspace = true`, which cargo refuses outside the workspace: the bare-
+    metal services under `services/`, each built from its own directory. It
+    gets the same checking, so it is not exempt. Allowing more of the
+    workspace's relaxed lints is not required; setting a lint stricter is
+    fine."""
+    if not required:
+        return False
+    try:
+        own = tomllib.loads(manifest_text).get("lints", {}).get("clippy", {})
+    except tomllib.TOMLDecodeError:
+        return False
+    if not isinstance(own, dict):
+        return False
+    return all(_level(own.get(name)) >= lvl for name, lvl in required.items())
+
+
 def survey(tree: gittree.Tree) -> Scan:
     """Every crate under `CRATE_ROOTS` not subject to the workspace lints."""
     exempt: list[str] = []
     weak: set[str] = set()
     manifests = 0
+    required = required_lints(tree.read_text("Cargo.toml") or "")
     for top in CRATE_ROOTS:
         for rel in sorted(tree.files_under(top)):
             if not rel.endswith("/Cargo.toml"):
@@ -133,7 +184,7 @@ def survey(tree: gittree.Tree) -> Scan:
             if text is None:
                 continue
             manifests += 1
-            if _inherits(text):
+            if _inherits(text) or _sets_own(text, required):
                 continue
             # A bare `#![deny(clippy::all)]` USED TO COUNT AS COVERAGE here,
             # on the grounds that such a crate "is not unlinted" and that
@@ -226,7 +277,8 @@ HEADER = """\
 
 
 def _self_test() -> int:
-    """Fixtures for `_inherits`, which is the whole judgement here."""
+    """Fixtures for `_inherits` and `_sets_own`, which are the whole
+    judgement here."""
     failures = 0
 
     def expect(label: str, got: object, want: object) -> None:
@@ -270,6 +322,32 @@ def _self_test() -> int:
            _inherits("[package]\nname = \"x\"\n"), False)
     expect("...not even the full CLAUDE.md spelling of it",
            _inherits("# ![deny(clippy::all, clippy::pedantic)]\n"), False)
+
+    # A crate outside the workspace sets the lints itself.
+    root = ("[workspace.lints.clippy]\n"
+            "all = { level = \"deny\", priority = -1 }\n"
+            "pedantic = { level = \"warn\", priority = -1 }\n"
+            "unwrap_used = \"warn\"\n"
+            "module_name_repetitions = \"allow\"\n")
+    req = required_lints(root)
+    expect("the required set is the workspace's lints above allow",
+           req, {"all": 2, "pedantic": 1, "unwrap_used": 1})
+    full = ("[lints.clippy]\n"
+            "all = { level = \"deny\", priority = -1 }\n"
+            "pedantic = { level = \"deny\", priority = -1 }\n"
+            "unwrap_used = \"warn\"\n")
+    expect("an own table setting all of them, one stricter, counts",
+           _sets_own(full, req), True)
+    expect("...missing one does not",
+           _sets_own(full.replace("unwrap_used = \"warn\"\n", ""), req), False)
+    expect("...nor setting one weaker",
+           _sets_own(full.replace("all = { level = \"deny\"", "all = { level = \"warn\""), req),
+           False)
+    expect("...nor one the workspace allows set to allow in its place",
+           _sets_own(full.replace("unwrap_used = \"warn\"", "unwrap_used = \"allow\""), req),
+           False)
+    expect("an unreadable root table satisfies nothing",
+           (required_lints("[workspace.lints.clippy\n"), _sets_own(full, {})), ({}, False))
 
     print(f"check-workspace-lints: self-test "
           f"{'FAILED' if failures else 'passed'} ({failures} failure(s))")

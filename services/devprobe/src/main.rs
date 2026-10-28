@@ -65,9 +65,12 @@ const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 const SYS_WAIT_MULTIPLE: u64 = 1066;
 
 /// How long the probe waits for the interrupt it has the card raise: 5 s,
-/// and how soon the interrupt must wake it: 1 s. The wait looks at the
-/// device again when its timeout comes, so a wake that never came would
-/// still find the device ready -- late, which is how it is told apart.
+/// and how soon the wait must end: 1 s. The wait looks at the device again
+/// when its timeout comes, so an interrupt that landed during the wait and
+/// did not wake it would still be found -- late, which is how it is told
+/// apart. On QEMU the interrupt usually lands before the wait begins, so
+/// the wake itself is checked by the kernel's own test, which parks its
+/// waiter first (`devhandle::self_test`).
 const INTERRUPT_WAIT_NS: u64 = 5_000_000_000;
 const PROMPT_WAKE_NS: u64 = 1_000_000_000;
 

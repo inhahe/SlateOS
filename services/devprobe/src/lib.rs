@@ -36,6 +36,41 @@ pub const RAL0: usize = 0x5400;
 pub const RAH0: usize = 0x5404;
 /// The 82574's EEPROM read register.
 pub const EERD: usize = 0x0014;
+/// The 82574's interrupt cause read register: reading it clears it.
+pub const ICR: usize = 0x00C0;
+/// Interrupt cause set: a cause written here is raised as if it had happened.
+pub const ICS: usize = 0x00C8;
+/// Interrupt mask set: the causes written here interrupt.
+pub const IMS: usize = 0x00D0;
+/// Interrupt mask clear: the causes written here no longer interrupt.
+pub const IMC: usize = 0x00D8;
+/// The cause the probe has the card raise: transmit descriptor written back.
+/// Any cause would do; this one the card never raises by itself while it
+/// sends nothing.
+pub const TEST_CAUSE: u32 = 1;
+
+/// One item of `SYS_WAIT_MULTIPLE`'s array, as the kernel documents it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
+pub struct WaitItem {
+    /// The handle waited on.
+    pub handle: u64,
+    /// Its kind: a `cap::ResourceType` discriminant.
+    pub kind: u32,
+    /// The `poll(2)` events asked about.
+    pub events: u32,
+    /// The events that came, written by the kernel.
+    pub revents: u32,
+    /// Tail padding: the item is 24 bytes, aligned to 8.
+    pub pad: u32,
+}
+
+/// `cap::ResourceType::PciDevice`: the kind of a device handle in a
+/// [`WaitItem`]. (The kernel asserts at compile time that the two agree.)
+pub const KIND_PCI_DEVICE: u32 = 36;
+/// `poll(2)`'s `POLLIN`: a device handle is readable when its interrupts are
+/// counted and not yet taken.
+pub const POLLIN: u32 = 0x0001;
 
 /// The PCI command register's offset in configuration space.
 pub const PCI_COMMAND: u64 = 0x04;
@@ -147,13 +182,19 @@ pub enum Exit {
     /// Step 3: decoding and bus mastering could not be turned on through the
     /// command register.
     CommandRefused = 20,
+    /// Step 5: `SYS_WAIT_MULTIPLE` said the device was ready before it had
+    /// interrupted, or failed.
+    ReadyTooSoon = 21,
+    /// Step 5: the interrupt the card was made to raise did not make the
+    /// device ready in `SYS_WAIT_MULTIPLE`, or was not counted.
+    InterruptLost = 22,
     /// The probe panicked: a bug in it.
     Panicked = 99,
 }
 
 impl Exit {
     /// Every exit code.
-    pub const ALL: [Exit; 13] = [
+    pub const ALL: [Exit; 15] = [
         Exit::Ok,
         Exit::OpenedNone,
         Exit::OpenedMore,
@@ -166,6 +207,8 @@ impl Exit {
         Exit::IrqTakeFailed,
         Exit::OpenFailed,
         Exit::CommandRefused,
+        Exit::ReadyTooSoon,
+        Exit::InterruptLost,
         Exit::Panicked,
     ];
 
@@ -285,6 +328,15 @@ mod tests {
         assert_eq!(Exit::from_code(0), None);
         assert_eq!(Exit::from_code(-1), None);
         assert_eq!(Exit::from_code(139), None);
+    }
+
+    #[test]
+    fn a_wait_item_is_the_kernels_24_bytes() {
+        assert_eq!(core::mem::size_of::<WaitItem>(), 24);
+        assert_eq!(core::mem::align_of::<WaitItem>(), 8);
+        assert_eq!(core::mem::offset_of!(WaitItem, kind), 8);
+        assert_eq!(core::mem::offset_of!(WaitItem, events), 12);
+        assert_eq!(core::mem::offset_of!(WaitItem, revents), 16);
     }
 
     #[test]

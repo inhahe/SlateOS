@@ -25,7 +25,7 @@
 //!
 //! | set contents | behaviour |
 //! |---|---|
-//! | every item blockable (pipe, eventfd, socketpair, timerfd, pty, channel, service listener, Unix-domain socket, ALSA PCM substream) | true block: woken by the object, zero wakeups while idle |
+//! | every item blockable (pipe, eventfd, socketpair, timerfd, pty, channel, service listener, Unix-domain socket, ALSA PCM substream, device handle) | true block: woken by the object, zero wakeups while idle |
 //! | any item poll-only | park capped at an adaptive backoff, re-scanning on each wake |
 //!
 //! [`WaitTarget::EpollCtl`] sits outside that table because it is not a
@@ -138,6 +138,10 @@ pub enum WaitTarget {
     /// playback substream's room, or ends a drain
     /// ([`crate::audio_mixer::register_room_waiter`]).
     AlsaPcm(u64),
+    /// A device handle's raw value (`crate::devhandle`): woken by each of
+    /// the device's interrupts, and by its close
+    /// ([`crate::devhandle::watch_irq`]).
+    Device(u64),
     /// [`super::epoll::EpollHandle`] raw value — the instance's
     /// **interest-set-change** notification, *not* its readiness.
     ///
@@ -200,6 +204,7 @@ impl WaitTarget {
             }
             // One set for every substream: the pump's take changes them all.
             Self::AlsaPcm(_) => crate::audio_mixer::register_room_waiter(task),
+            Self::Device(raw) => crate::devhandle::watch_irq(raw, task),
             Self::EpollCtl(raw) => {
                 super::epoll::register_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }
@@ -255,6 +260,7 @@ impl WaitTarget {
                 );
             }
             Self::AlsaPcm(_) => crate::audio_mixer::deregister_room_waiter(task),
+            Self::Device(raw) => crate::devhandle::unwatch_irq(raw, task),
             Self::EpollCtl(raw) => {
                 super::epoll::deregister_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }

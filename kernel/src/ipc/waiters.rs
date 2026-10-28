@@ -94,6 +94,13 @@ impl WaiterSet {
     pub fn count(&self) -> usize {
         self.tasks.len()
     }
+
+    /// The registered tasks, in registration order, without taking them: for
+    /// a waker that may not allocate or free -- an interrupt handler, which
+    /// wakes each with `sched::try_wake` (`msi::dispatch`).
+    pub fn iter(&self) -> impl Iterator<Item = TaskId> + '_ {
+        self.tasks.iter().copied()
+    }
 }
 
 impl Default for WaiterSet {

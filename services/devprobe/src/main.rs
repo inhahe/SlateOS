@@ -16,7 +16,11 @@
 //!    boot test gave the card (`52:54:00:12:34:59`), from the receive-address
 //!    registers or, failing those, the EEPROM through EERD;
 //! 4. allocates a DMA arena and writes it;
-//! 5. sets up the card's MSI, and takes its (zero) pending interrupts;
+//! 5. sets up the card's MSI and takes its (zero) pending interrupts; finds
+//!    the device not ready in `SYS_WAIT_MULTIPLE`; has the card raise an
+//!    interrupt (IMS, ICS); waits for it with `SYS_WAIT_MULTIPLE`, as a
+//!    driver's event loop waits on its device beside its other handles; and
+//!    takes it;
 //! 6. exits *without* closing the handle, so that its exit's release of the
 //!    device is what the kernel test checks next.
 //!
@@ -28,9 +32,10 @@
 #![no_main]
 
 use devprobe::{
-    COMMAND_BUS_MASTER, COMMAND_MEMORY_SPACE, E1000E_82574, EERD, EXPECTED_MAC, Exit, INTEL,
-    MIN_BAR0, PCI_COMMAND, RAH0, RAL0, eerd_data, eerd_read_command, mac_from_eeprom_words,
-    mac_from_receive_address, note_open, register_inside,
+    COMMAND_BUS_MASTER, COMMAND_MEMORY_SPACE, E1000E_82574, EERD, EXPECTED_MAC, Exit, ICR, ICS,
+    IMC, IMS, INTEL, KIND_PCI_DEVICE, MIN_BAR0, PCI_COMMAND, POLLIN, RAH0, RAL0, TEST_CAUSE,
+    WaitItem, eerd_data, eerd_read_command, mac_from_eeprom_words, mac_from_receive_address,
+    note_open, register_inside,
 };
 
 // The SlateOS ABI note, as `services/hello` carries it (see there for why it
@@ -56,6 +61,10 @@ const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 const SYS_PCI_DEVICE_DMA_ALLOC: u64 = 1185;
 const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
+const SYS_WAIT_MULTIPLE: u64 = 1066;
+
+/// How long the probe waits for the interrupt it has the card raise: 1 s.
+const INTERRUPT_WAIT_NS: u64 = 1_000_000_000;
 
 /// How many times to read EERD for one word before giving up on it.
 const EERD_POLLS: u32 = 100_000;
@@ -247,7 +256,18 @@ pub extern "C" fn _start() -> ! {
     // SAFETY: the arena just mapped into this process, 16 KiB, writable.
     unsafe { (arena as *mut u64).write_volatile(0x5EED_DA7A) };
 
-    // 5. Its MSI, set up, with nothing pending.
+    // 5. Its MSI, and an interrupt waited for and taken.
+    interrupts(handle, &bar0);
+
+    // 6. Out without closing: the exit releases the device.
+    print("[devprobe] opened, read the MAC, made an arena, and waited for an interrupt\n");
+    exit(Exit::Ok);
+}
+
+/// Step 5: the card's MSI set up, with nothing pending; the device not
+/// ready in `SYS_WAIT_MULTIPLE`; an interrupt the card is made to raise
+/// (IMS, ICS), waited for there as a driver's event loop waits, and taken.
+fn interrupts(handle: u64, bar0: &Bar0) {
     if syscall4(SYS_PCI_DEVICE_IRQ_SETUP, handle, 0, 0, 0) != 0 {
         fail(Exit::IrqSetupFailed, "the card's MSI could not be set up");
     }
@@ -257,10 +277,47 @@ pub extern "C" fn _start() -> ! {
             "the card's interrupts could not be taken",
         );
     }
+    let mut item = WaitItem {
+        handle,
+        kind: KIND_PCI_DEVICE,
+        events: POLLIN,
+        ..WaitItem::default()
+    };
+    if wait_for(&mut item, 0) != 0 {
+        fail(
+            Exit::ReadyTooSoon,
+            "the device was ready before it interrupted",
+        );
+    }
+    bar0.write(IMS, TEST_CAUSE);
+    bar0.write(ICS, TEST_CAUSE);
+    let ready = wait_for(&mut item, INTERRUPT_WAIT_NS);
+    let taken = syscall4(SYS_PCI_DEVICE_IRQ_WAIT, handle, 0, 0, 0);
+    // Quiet again: every cause masked, and the one raised read away.
+    bar0.write(IMC, u32::MAX);
+    let _cleared = bar0.read(ICR);
+    if ready != 1 || item.revents & POLLIN == 0 {
+        fail(
+            Exit::InterruptLost,
+            "the card's interrupt did not make the device ready",
+        );
+    }
+    if taken < 1 {
+        fail(Exit::InterruptLost, "the card's interrupt was not counted");
+    }
+}
 
-    // 6. Out without closing: the exit releases the device.
-    print("[devprobe] opened, read the MAC, made an arena and set up MSI\n");
-    exit(Exit::Ok);
+/// `SYS_WAIT_MULTIPLE` on the one item: how many items are ready (0 or 1),
+/// waiting up to `timeout_ns` (0 looks once); negative on failure.
+fn wait_for(item: &mut WaitItem, timeout_ns: u64) -> i64 {
+    item.revents = 0;
+    syscall4(
+        SYS_WAIT_MULTIPLE,
+        core::ptr::from_mut(item) as u64,
+        1,
+        timeout_ns,
+        0,
+    )
 }
 
 #[panic_handler]

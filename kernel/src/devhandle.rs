@@ -422,7 +422,9 @@ pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
 
 /// The device's interrupts since the last take, owned by `pid`: taken at
 /// once when `block` is false (0 when none came), else waited for until at
-/// least one has. One task waits at a time (`DeviceBusy` for a second).
+/// least one has. Several tasks may wait, here or in `SYS_WAIT_MULTIPLE`
+/// ([`watch_irq`]): every interrupt wakes them all, and whoever takes the
+/// count has it -- the others look again and wait on.
 /// `InvalidArgument` before [`irq_setup`]; `InvalidHandle` when the device
 /// is closed, waiting or not; `Interrupted` when a signal or a freeze comes
 /// for `pid` while it waits.
@@ -462,6 +464,47 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
     crate::proc::signal::deregister_signalfd_waiter(pid, task);
     crate::msi::unregister_waiter(vector, task);
     taken
+}
+
+/// The MSI vector of the device `raw` names, if it is open and its MSI is
+/// set up.
+fn vector_of(raw: u64) -> KernelResult<u8> {
+    DEVICES
+        .lock()
+        .iter()
+        .find(|d| d.raw == raw)
+        .ok_or(KernelError::InvalidHandle)?
+        .msi
+        .as_ref()
+        .map(|c| c.allocated_vector)
+        .ok_or(KernelError::InvalidArgument)
+}
+
+/// For `SYS_WAIT_MULTIPLE`: how many of the device's interrupts are counted
+/// and not yet taken, left where they are. `InvalidArgument` when its MSI is
+/// not set up -- it cannot become ready -- and `InvalidHandle` when the
+/// device is closed. The caller has checked that its process holds `raw`.
+pub fn irq_readiness(raw: u64) -> KernelResult<u64> {
+    let vector = vector_of(raw)?;
+    crate::msi::pending(vector, raw).ok_or(KernelError::InvalidHandle)
+}
+
+/// For `SYS_WAIT_MULTIPLE`: `task` is woken by the device's next interrupt,
+/// and by its close. Nothing when there is nothing to wait for -- the device
+/// closed, or no MSI set up -- which the readiness test reports instead.
+pub fn watch_irq(raw: u64, task: crate::sched::task::TaskId) {
+    if let Ok(vector) = vector_of(raw) {
+        // Refused only when the device was closed in between, which wakes
+        // its waiters anyway: there is nothing left to wait for.
+        let _closed = crate::msi::register_waiter(vector, raw, task);
+    }
+}
+
+/// Undo [`watch_irq`]. A device closed since has let its waiters go already.
+pub fn unwatch_irq(raw: u64, task: crate::sched::task::TaskId) {
+    if let Ok(vector) = vector_of(raw) {
+        crate::msi::unregister_waiter(vector, task);
+    }
 }
 
 /// The IOMMU domain of the device `raw` names, if `pid` owns it.
@@ -793,7 +836,7 @@ fn start_waiter(raw: u64, owner: ProcessId, vector: u8) -> bool {
     if crate::sched::spawn(b"devhandle-irq", 16, irq_waiter, 0, 0).is_err() {
         return false;
     }
-    yield_until(|| crate::msi::waiter_of(vector).is_some())
+    yield_until(|| crate::msi::waiter_count(vector) > 0)
 }
 
 /// The worker's answer, once it has one.
@@ -1096,6 +1139,8 @@ static DEVPROBE_ELF: &[u8] =
 // tells the capability check from every other refusal by it.
 #[allow(clippy::cast_lossless)] // `i64::from` is not const.
 const _: () = assert!(devprobe::PERMISSION_DENIED == KernelError::PermissionDenied.code() as i64);
+// The kind the probe names its device by in `SYS_WAIT_MULTIPLE`.
+const _: () = assert!(devprobe::KIND_PCI_DEVICE == crate::cap::ResourceType::PciDevice as u32);
 
 /// The boot test's card for the probe: an unbound 82574 on bus 0 -- the only
 /// bus the probe scans -- whose receive address 0 holds
@@ -1131,7 +1176,9 @@ fn card_mac(dev: &pci::PciDevice) -> Option<[u8; 6]> {
 /// the boot test's card for it ([`probe_card`]) -- and must open only that
 /// one, with every other refused by the capability check; read its ids;
 /// turn on decoding and bus mastering; map BAR0 and read the MAC through it;
-/// make a DMA arena; set up its MSI; and exit with `devprobe::Exit::Ok`. Its
+/// make a DMA arena; set up its MSI; find the device not ready in
+/// `SYS_WAIT_MULTIPLE`, have the card raise an interrupt, wait for it there
+/// and take it; and exit with `devprobe::Exit::Ok`. Its
 /// exit, which closes nothing itself, must release the device: unbound, bus
 /// mastering off, MSI off and its vector back in the pool. Skipped, and
 /// recorded so, where there is no such card.
@@ -1228,7 +1275,7 @@ pub fn self_test_ring3() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[devhandle]   ring-3 probe driver: OK (only its granted function opened, every other refused by the capability check; ids, MAC, DMA arena, MSI; released at exit, bus mastering and MSI off)"
+        "[devhandle]   ring-3 probe driver: OK (only its granted function opened, every other refused by the capability check; ids, MAC, DMA arena, MSI; an interrupt waited for in SYS_WAIT_MULTIPLE and taken; released at exit, bus mastering and MSI off)"
     );
     Ok(())
 }

@@ -5336,6 +5336,13 @@ pub const SYS_DRM_ATOMIC_COMMIT: u64 = 1060;
 /// lane F's `requests/f-a-a-channel-handle-can-be-guessed-and-any-process-can-use-it.md`
 /// point 4).
 ///
+/// Since 2026-10-28 a **device handle** (`ResourceType::PciDevice`, from
+/// `SYS_PCI_DEVICE_OPEN`) joins them, truly blockable: `POLLIN` when its
+/// interrupts are counted and not yet taken (`SYS_PCI_DEVICE_IRQ_WAIT` takes
+/// them), `POLLHUP` once it is closed, `POLLERR` while its MSI is not set up.
+/// So a driver's one thread waits on its device, its channels and its timers
+/// together (design-decisions 1579, 1578).
+///
 /// Chosen number 1066, at the high-water mark — see
 /// [`SYS_PTY_MASTER_TRY_WRITE`] for why numbers are never recycled.
 pub const SYS_WAIT_MULTIPLE: u64 = 1066;
@@ -7385,7 +7392,10 @@ pub const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 /// has come and return at once (0 when nothing has), anything else to wait
 /// until at least one has. Returns how many. `InvalidArgument` before
 /// `SYS_PCI_DEVICE_IRQ_SETUP`; `InvalidHandle` if the handle is closed while
-/// waiting.
+/// waiting. Several threads may wait at once, and every interrupt wakes them
+/// all: whoever takes the count has it. To wait for a device beside other
+/// handles, use [`SYS_WAIT_MULTIPLE`] with its handle (kind
+/// `ResourceType::PciDevice`), then take its interrupts here with `arg1` 0.
 pub const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 
 // ---------------------------------------------------------------------------

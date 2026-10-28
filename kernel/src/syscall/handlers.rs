@@ -21642,6 +21642,9 @@ enum WaitTest {
     /// A service listener: readable when a connection is waiting to be
     /// accepted. Native-only.
     Listener,
+    /// A device handle: readable when the device's interrupts are counted and
+    /// not yet taken (`SYS_PCI_DEVICE_IRQ_WAIT` takes them). Native-only.
+    Device,
 }
 
 /// An item that resolved to something waitable.
@@ -21676,6 +21679,7 @@ fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
         ResourceType::Pty => WaitTest::Pty,
         ResourceType::Channel => WaitTest::Channel,
         ResourceType::Service => WaitTest::Listener,
+        ResourceType::PciDevice => WaitTest::Device,
         // A pidfd (`SYS_PIDFD_OPEN`): ready once its process has exited.
         ResourceType::Process => WaitTest::Handle(HandleKind::PidFd),
         _ => return None,
@@ -21748,6 +21752,14 @@ fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
                 0
             }
         }
+        // Closed while waited on: POLLHUP, as a channel whose peer went. No
+        // MSI set up: POLLERR, since nothing could ever make it ready.
+        WaitTest::Device => match crate::devhandle::irq_readiness(raw) {
+            Ok(0) => 0,
+            Ok(_) => poll_bits::POLLIN | poll_bits::POLLRDNORM,
+            Err(KernelError::InvalidArgument) => poll_bits::POLLERR,
+            Err(_) => poll_bits::POLLHUP,
+        },
     };
 
     bits & (events | always)
@@ -21770,6 +21782,7 @@ fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarge
         WaitTest::Pty => WaitTarget::Pty(raw),
         WaitTest::Channel => WaitTarget::Channel(raw),
         WaitTest::Listener => WaitTarget::Listener(raw),
+        WaitTest::Device => WaitTarget::Device(raw),
     }
 }
 

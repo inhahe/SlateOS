@@ -941,6 +941,25 @@ fn yield_until(mut ready: impl FnMut() -> bool) -> bool {
     ready()
 }
 
+/// Spin until `ready`, for at most `ns` nanoseconds -- or a bounded number
+/// of polls, should the clock not run (no HPET) -- and answer whether it
+/// became so.
+fn spin_until(ns: u64, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = crate::hpet::elapsed_ns().saturating_add(ns);
+    // About as many polls as nanoseconds / 10: a spin is a few nanoseconds,
+    // a poll of `ready` more.
+    for _ in 0..ns / 10 {
+        if ready() {
+            return true;
+        }
+        if crate::hpet::elapsed_ns() > deadline {
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    ready()
+}
+
 /// QEMU's `edu` device, which the boot test attaches for this test: a 1 MiB
 /// memory BAR and an MSI capability, and no kernel driver.
 const EDU_VENDOR: u16 = 0x1234;
@@ -972,14 +991,12 @@ fn forged_msi_test(
 ) -> Result<(), &'static str> {
     /// Whom the other function's vector is counted for: no device handle.
     const OTHER: u64 = u64::MAX;
-    let sid = (u16::from(addr.bus) << 8)
-        | (u16::from(addr.device & 0x1F) << 3)
-        | u16::from(addr.function & 7);
+    let sid = addr.requester_id();
     let msi = pci::find_capability(addr, CAP_MSI).ok_or("edu has no MSI capability")?;
     let at = msi.offset.wrapping_add(4);
     let address = pci::config_read32(addr.bus, addr.device, addr.function, at);
     let handle =
-        u16::try_from(((address >> 5) & 0x7FFF) | (((address >> 2) & 1) << 15)).unwrap_or(0);
+        iommu_remap::msi_handle(address).ok_or("edu's MSI address is not in remappable format")?;
     let own = iommu_remap::interrupt_entry(handle).is_some_and(|[low, high]| {
         low & 1 == 1
             && (low >> 16) & 0xFF == u64::from(vector)
@@ -996,10 +1013,14 @@ fn forged_msi_test(
     }
     let reg = |offset: u64| regs.saturating_add(offset) as *mut u32;
     let result = (|| {
-        // The next function on edu's bus.
-        let other =
-            iommu_remap::alloc_msi_entry(sid ^ (1 << 3), other_vector, crate::apic::read_id())
-                .map_err(|_| "no entry for another function")?;
+        // Function 1 of edu's device: another function's id, and one no
+        // device has (edu has one function).
+        let other = iommu_remap::alloc_msi_entry(
+            pci::MsiSource::Exact(sid ^ 1),
+            other_vector,
+            crate::apic::read_id(),
+        )
+        .map_err(|_| "no entry for another function")?;
         // Faults from before are cleared: one pending from edu would have
         // this one collapsed into it.
         let _ = iommu_remap::take_faults();
@@ -1012,11 +1033,8 @@ fn forged_msi_test(
         );
         // SAFETY: edu's interrupt registers, in the page the caller mapped.
         unsafe { reg(EDU_IRQ_RAISE).write_volatile(1) };
-        // Time for it to land, were it delivered.
-        let settle = crate::hpet::elapsed_ns().saturating_add(20_000_000);
-        while crate::hpet::elapsed_ns() < settle {
-            core::hint::spin_loop();
-        }
+        // Time for it to land, were it delivered: 20 ms.
+        spin_until(20_000_000, || false);
         // SAFETY: as above.
         unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
         pci::config_write32(addr.bus, addr.device, addr.function, at, address);
@@ -1194,12 +1212,11 @@ pub fn self_test() -> KernelResult<()> {
                 reg(EDU_IRQ_ACK).write_volatile(u32::MAX);
                 reg(EDU_IRQ_RAISE).write_volatile(1);
             }
-            let deadline = crate::hpet::elapsed_ns().saturating_add(100_000_000);
             let mut taken = 0;
-            while taken == 0 && crate::hpet::elapsed_ns() < deadline {
+            spin_until(100_000_000, || {
                 taken = irq_wait(raw, owner, false).unwrap_or(0);
-                core::hint::spin_loop();
-            }
+                taken != 0
+            });
             // SAFETY: as above; the raised bit is acknowledged.
             unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
             if taken != 1 {
@@ -1207,6 +1224,12 @@ pub fn self_test() -> KernelResult<()> {
             }
             if irq_wait(raw, owner, false) != Ok(0) {
                 return Err("one MSI was taken twice");
+            }
+            // edu's interrupt reaches only its own entry -- checked before
+            // any waiter is parked on edu's vector, which would take an
+            // interrupt delivered there before the check could see it.
+            if iommu_remap::interrupts_remapped() {
+                forged_msi_test(addr, raw, owner, regs, vector)?;
             }
             // Parked in a blocking wait, a waiter is woken by the device's
             // interrupt and takes it.
@@ -1287,10 +1310,6 @@ pub fn self_test() -> KernelResult<()> {
             let (kept, kept_addr) =
                 dma_alloc(raw, owner, 0x4000, crate::mm::dma::DmaConstraint::Below4G)
                     .map_err(|_| "a second arena could not be made")?;
-            // edu's interrupt reaches only its own entry.
-            if iommu_remap::interrupts_remapped() {
-                forged_msi_test(addr, raw, owner, regs, vector)?;
-            }
             // A fork's child gets neither the BAR nor the arena
             // (`PageFlags::FOREIGN`): it holds no handle and no tracker
             // entry. Cloned with no range excluded, so the flag alone is

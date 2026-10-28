@@ -639,8 +639,13 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
     // that only this function may raise (its data then 0); otherwise the
     // vector and the CPU themselves.
     let (address, data) = if crate::iommu_remap::interrupts_remapped() {
-        let sid = (u16::from(bus) << 8) | (u16::from(dev & 0x1F) << 3) | u16::from(func & 0x7);
-        match crate::iommu_remap::alloc_msi_entry(sid, vector, target_cpu_lapic) {
+        // What its messages arrive as: its own id, or a bridge's alias.
+        let source = pci::msi_source(pci::PciAddress {
+            bus,
+            device: dev,
+            function: func,
+        });
+        match crate::iommu_remap::alloc_msi_entry(source, vector, target_cpu_lapic) {
             Ok(handle) => {
                 config.remap_handle = Some(handle);
                 (crate::iommu_remap::msi_address(handle), 0)

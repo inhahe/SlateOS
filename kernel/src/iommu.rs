@@ -206,7 +206,14 @@ impl IoapicScope {
         let bus = bridges
             .iter()
             .fold(self.start_bus, |bus, &(d, f)| secondary(bus, d, f));
-        Some((u16::from(bus) << 8) | (u16::from(device & 0x1F) << 3) | u16::from(function & 0x7))
+        Some(
+            crate::pci::PciAddress {
+                bus,
+                device,
+                function,
+            }
+            .requester_id(),
+        )
     }
 }
 
@@ -636,6 +643,25 @@ pub fn self_test() -> KernelResult<()> {
     ioapic_scopes(&zero, |_| none = false);
     if !none {
         serial_println!("[iommu]   FAIL: a scope of length 0 was read");
+        return Err(KernelError::InternalError);
+    }
+    // An I/O APIC no scope names is found in none: an id none of the
+    // scopes read at boot carries.
+    let listed: alloc::vec::Vec<u8> = IOAPIC_SCOPES
+        .lock()
+        .iter()
+        .flatten()
+        .map(|s| s.id)
+        .collect();
+    let absent = (0..=u8::MAX).find(|id| !listed.contains(id));
+    if absent.is_none_or(|id| ioapic_scope(id).is_some())
+        || listed
+            .iter()
+            .any(|&id| ioapic_scope(id).is_none_or(|s| s.id != id))
+    {
+        serial_println!(
+            "[iommu]   FAIL: an I/O APIC's scope was found for the wrong id, or not found"
+        );
         return Err(KernelError::InternalError);
     }
     serial_println!("[iommu]   DMAR I/O APIC scopes: OK");

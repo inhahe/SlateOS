@@ -1,6 +1,7 @@
 ## A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS (lane A, 2026-09-09)
 
-**Status:** FIXED 2026-10-28. It recurred (the boot test of 6e3bbeb4a was
+**Status:** OPEN -- fixed on lane-a-wip (1c88393cc, and the batch-22
+follow-up), awaiting a boot on main. It recurred (the boot test of 6e3bbeb4a was
 refused for it), so option 2 below was taken: the test's
 `reclaim_when_unheld` asks `reclaim_dir` again, for up to ten seconds, while
 the file `make_tree` just wrote is held, and the check that the directory is

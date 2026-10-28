@@ -97,6 +97,52 @@ pub struct PciAddress {
     pub function: u8,
 }
 
+impl PciAddress {
+    /// The requester id a request from this function carries, and what an
+    /// IOMMU names it by: bus << 8 | device << 3 | function.
+    #[must_use]
+    pub const fn requester_id(self) -> u16 {
+        ((self.bus as u16) << 8)
+            | (((self.device & 0x1F) as u16) << 3)
+            | ((self.function & 0x7) as u16)
+    }
+}
+
+/// What an interrupt remapping entry can check of the requester id a
+/// function's MSIs carry when they reach the IOMMU ([`msi_source`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsiSource {
+    /// Exactly this requester id: the function's own, or the one bridge
+    /// above it that sends its requests under its own name.
+    Exact(u16),
+    /// Only a bus from `start` to `end`: behind a PCIe-to-PCI bridge, which
+    /// may send a function's request under the bus behind it (VT-d's SVT
+    /// 10b).
+    Buses { start: u8, end: u8 },
+}
+
+/// The PCI Express capability, and its device/port type (bits 7:4 of the
+/// capabilities register, offset 2; PCI Express Base §7.5.3.2).
+const CAP_PCIE: u8 = 0x10;
+/// Port types that pass a requester id through unchanged.
+const PCIE_ROOT_PORT: u8 = 0x4;
+const PCIE_UPSTREAM_PORT: u8 = 0x5;
+const PCIE_DOWNSTREAM_PORT: u8 = 0x6;
+/// A PCI Express to PCI/PCI-X bridge, which sends a request from behind it
+/// under the bus behind it, device and function 0.
+const PCIE_TO_PCI_BRIDGE: u8 = 0x7;
+/// A PCI/PCI-X to PCI Express bridge, which sends one under its own id.
+const PCI_TO_PCIE_BRIDGE: u8 = 0x8;
+
+/// A bridge on the way up from a function: where it is, its PCI Express
+/// port type (`None` for a conventional PCI bridge), and the bus behind it.
+#[derive(Debug, Clone, Copy)]
+struct Upstream {
+    address: PciAddress,
+    pcie_type: Option<u8>,
+    secondary: u8,
+}
+
 /// Information about a discovered PCI device.
 #[derive(Debug, Clone)]
 pub struct PciDevice {
@@ -1290,6 +1336,157 @@ pub fn decode_bars(dev: &PciDevice) -> Vec<BarInfo> {
 }
 
 // ---------------------------------------------------------------------------
+// The requester id an MSI carries
+// ---------------------------------------------------------------------------
+
+/// What an interrupt remapping entry for `addr`'s MSI can check of the
+/// requester id it arrives with. A function on a PCI Express path sends
+/// its own; behind a bridge to conventional PCI, the bridge may send it
+/// under another, which only a bus range, or the bridge's own id, matches.
+/// Linux's `pci_for_each_dma_alias` walk, read as its interrupt remapping's
+/// `set_msi_sid` reads it.
+#[must_use]
+pub fn msi_source(addr: PciAddress) -> MsiSource {
+    msi_source_in(addr, parent_bridge)
+}
+
+/// The bridge whose secondary bus is `bus`, if one leads there: none for
+/// bus 0, or for a bus no bridge leads to (a root complex's own).
+fn parent_bridge(bus: u8) -> Option<Upstream> {
+    if bus == 0 {
+        return None;
+    }
+    let mut found = None;
+    for_each_function(|f| {
+        if found.is_some()
+            || config_read8(f.bus, f.device, f.function, CFG_HEADER_TYPE)
+                & !HEADER_TYPE_MULTIFUNCTION
+                != HEADER_TYPE_BRIDGE
+            || config_read8(f.bus, f.device, f.function, CFG_SECONDARY_BUS) != bus
+        {
+            return;
+        }
+        let pcie_type = find_capability(f, CAP_PCIE)
+            .map(|cap| {
+                (config_read16(f.bus, f.device, f.function, cap.offset.wrapping_add(2)) >> 4) & 0xF
+            })
+            // A nibble.
+            .map(|t| t as u8);
+        found = Some(Upstream {
+            address: f,
+            pcie_type,
+            secondary: bus,
+        });
+    });
+    found
+}
+
+/// [`msi_source`] over the topology `parent` describes, `parent(bus)`
+/// naming the bridge leading to `bus`.
+fn msi_source_in(addr: PciAddress, parent: impl Fn(u8) -> Option<Upstream>) -> MsiSource {
+    let own = addr.requester_id();
+    // The last alias the walk found, and the bus of the function that made
+    // it; how many aliases, and how many of them on the bus before.
+    let (mut alias, mut alias_from_bus) = (own, addr.bus);
+    let (mut count, mut same_bus) = (1u32, 1u32);
+    let mut bus = addr.bus;
+    // A bus is passed once at most; more is a loop in the topology.
+    for _ in 0..256 {
+        let Some(up) = parent(bus) else {
+            break;
+        };
+        let found = match up.pcie_type {
+            Some(PCIE_ROOT_PORT | PCIE_UPSTREAM_PORT | PCIE_DOWNSTREAM_PORT) => None,
+            Some(PCIE_TO_PCI_BRIDGE) => Some(u16::from(up.secondary) << 8),
+            Some(PCI_TO_PCIE_BRIDGE) | None => Some(up.address.requester_id()),
+            Some(_) => None,
+        };
+        if let Some(next) = found {
+            if next >> 8 == alias >> 8 {
+                same_bus = same_bus.saturating_add(1);
+            }
+            alias = next;
+            alias_from_bus = up.address.bus;
+            count = count.saturating_add(1);
+        }
+        bus = up.address.bus;
+    }
+    // The high byte: a bus number.
+    #[allow(clippy::cast_possible_truncation)]
+    let alias_bus = (alias >> 8) as u8;
+    if alias_bus != alias_from_bus {
+        MsiSource::Buses {
+            start: alias_bus,
+            end: addr.bus,
+        }
+    } else if count >= 2 && same_bus == count {
+        MsiSource::Buses {
+            start: addr.bus,
+            end: addr.bus,
+        }
+    } else if alias_from_bus != addr.bus {
+        MsiSource::Exact(alias)
+    } else {
+        MsiSource::Exact(own)
+    }
+}
+
+/// [`msi_source_in`] on four made-up topologies, and [`PciAddress::
+/// requester_id`] bit by bit.
+fn self_test_msi_source() -> Result<(), &'static str> {
+    let at = |bus, device, function| PciAddress {
+        bus,
+        device,
+        function,
+    };
+    let bridge = |address, pcie_type, secondary| Upstream {
+        address,
+        pcie_type,
+        secondary,
+    };
+    // 00:1c.0 a root port to bus 4; 04:00.0 a PCIe-to-PCI bridge to bus 5;
+    // 05:03.0 a conventional PCI bridge to bus 6.
+    let topology = |bus: u8| match bus {
+        4 => Some(bridge(at(0, 0x1C, 0), Some(PCIE_ROOT_PORT), 4)),
+        5 => Some(bridge(at(4, 0, 0), Some(PCIE_TO_PCI_BRIDGE), 5)),
+        6 => Some(bridge(at(5, 3, 0), None, 6)),
+        _ => None,
+    };
+    let cases = [
+        // On the root bus: its own.
+        (at(0, 0x1F, 3), MsiSource::Exact(0x00FB)),
+        // Behind a root port only: its own.
+        (at(4, 0, 1), MsiSource::Exact(0x0401)),
+        // Behind the PCIe-to-PCI bridge: bus 5 only.
+        (at(5, 2, 0), MsiSource::Buses { start: 5, end: 5 }),
+        // Behind the conventional bridge too: buses 5 to 6.
+        (at(6, 1, 0), MsiSource::Buses { start: 5, end: 6 }),
+    ];
+    for (addr, want) in cases {
+        let got = msi_source_in(addr, topology);
+        if got != want {
+            crate::serial_println!(
+                "[pci]   FAIL: {:x?}'s MSI source {:x?}, want {:x?}",
+                addr,
+                got,
+                want
+            );
+            return Err("an MSI's requester id was read wrongly from the topology");
+        }
+    }
+    // A PCI-to-PCIe bridge sends under its own id.
+    let up_only = |bus: u8| (bus == 7).then(|| bridge(at(3, 4, 2), Some(PCI_TO_PCIE_BRIDGE), 7));
+    if msi_source_in(at(7, 0, 0), up_only) != MsiSource::Exact(0x0322)
+        || at(0xAB, 0x1F, 7).requester_id() != 0xABFF
+        || at(1, 0x20, 8).requester_id() != 0x0100
+    {
+        return Err("a requester id is not laid out as PCI lays it out");
+    }
+    crate::serial_println!("[pci]   MSI requester ids through bridges: OK");
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Self-test
 // ---------------------------------------------------------------------------
 
@@ -1328,6 +1525,7 @@ pub fn self_test() -> Result<(), &'static str> {
     self_test_bindings_and_bars()?;
     self_test_serial_match()?;
     self_test_nested_access()?;
+    self_test_msi_source()?;
 
     crate::serial_println!("[pci] Self-test PASSED");
     Ok(())

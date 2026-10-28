@@ -42,7 +42,7 @@
 //! - Based on Linux `arch/x86/kernel/apic/io_apic.c` register access
 //!   patterns.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{KernelError, KernelResult};
 use crate::mm::page_table;
@@ -304,43 +304,73 @@ unsafe fn read_redir_entry(irq: u8) -> u64 {
     unsafe { read_redir_hw(irq) }
 }
 
-/// Write redirection entry `irq`, given in compatibility format. With
-/// interrupts remapped, the pin's remapping entry takes the vector, the
-/// destination and the trigger mode, and the I/O APIC the remappable form
-/// ([`remappable`]); a pin whose remapping entry could not be written is
-/// left masked, and said so.
+/// Changes to a pin's routing, one at a time, when interrupts are remapped:
+/// the pin's remapping entry and its redirection entry change together. Held
+/// with interrupts off -- the IRQ balancer changes a pin from a softirq --
+/// and taken before the register window, never inside it: the remapping
+/// entry is written first, under locks of its own
+/// (`iommu_remap::set_ioapic_entry`), with the window not held.
+static ROUTING: spin::Mutex<()> = spin::Mutex::new(());
+
+/// Pins whose remapping entry could not be written: their redirection entry
+/// is masked, and [`unmask_irq`] leaves it so until a later write succeeds --
+/// an interrupt through such a pin would reach an entry not written, or
+/// whatever a unit still holds of the old one.
+static UNROUTED: [AtomicBool; MAX_IRQ] = [const { AtomicBool::new(false) }; MAX_IRQ];
+
+/// Change pin `irq`'s redirection entry, read and written in compatibility
+/// format, to what `change` makes of it. With interrupts remapped, the pin's
+/// remapping entry takes the vector, the destination and the trigger mode,
+/// and the I/O APIC the remappable form ([`remappable`]); a pin whose
+/// remapping entry could not be written is left masked, and said so.
 ///
 /// # Safety
 ///
-/// As [`write_redir_hw`].
+/// The I/O APIC is initialized and `irq` is below its entry count. The
+/// window must not be held.
 #[allow(clippy::cast_possible_truncation)] // The vector and the APIC id: a byte each.
-unsafe fn write_redir_entry(irq: u8, entry: u64) {
+unsafe fn route(irq: u8, change: impl FnOnce(u64) -> u64) {
     if !crate::iommu_remap::interrupts_remapped() {
-        // SAFETY: the caller's.
-        unsafe { write_redir_hw(irq, entry) };
+        // SAFETY: the caller's; the window is held.
+        with_window(|| unsafe {
+            let entry = read_redir_hw(irq);
+            write_redir_hw(irq, change(entry));
+        });
         return;
     }
-    let routed = crate::iommu_remap::set_ioapic_entry(
-        irq,
-        entry as u8,
-        (entry >> 56) as u8,
-        entry & REDIR_LEVEL_TRIGGER != 0,
-    );
-    let entry = if let Err(e) = routed {
+    let failed = crate::cpu::without_interrupts(|| {
+        let _routing = ROUTING.lock();
+        let (Some(programmed), Some(unrouted)) = (
+            PROGRAMMED.get(usize::from(irq)),
+            UNROUTED.get(usize::from(irq)),
+        ) else {
+            return None;
+        };
+        let entry = change(programmed.load(Ordering::Acquire));
+        let routed = crate::iommu_remap::set_ioapic_entry(
+            irq,
+            entry as u8,
+            (entry >> 56) as u8,
+            entry & REDIR_LEVEL_TRIGGER != 0,
+        );
+        let entry = if routed.is_err() {
+            entry | REDIR_MASKED
+        } else {
+            entry
+        };
+        unrouted.store(routed.is_err(), Ordering::Release);
+        programmed.store(entry, Ordering::Release);
+        // SAFETY: the caller's; the window is held.
+        with_window(|| unsafe { write_redir_hw(irq, remappable(irq, entry)) });
+        routed.err()
+    });
+    if let Some(e) = failed {
         serial_println!(
             "[ioapic] IRQ {}: its remapping entry could not be written ({:?}): masked",
             irq,
             e
         );
-        entry | REDIR_MASKED
-    } else {
-        entry
-    };
-    if let Some(programmed) = PROGRAMMED.get(usize::from(irq)) {
-        programmed.store(entry, Ordering::Release);
     }
-    // SAFETY: the caller's.
-    unsafe { write_redir_hw(irq, remappable(irq, entry)) };
 }
 
 /// Mask or unmask pin `irq`, nothing else about it changed. The mask bit is
@@ -550,8 +580,9 @@ pub unsafe fn init() -> KernelResult<()> {
             }
         }
 
-        // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-        with_window(|| unsafe { write_redir_entry(irq_u8, entry) });
+        // SAFETY: IOAPIC is initialized, irq < num_entries; the window is
+        // not held.
+        unsafe { route(irq_u8, |_| entry) };
     }
 
     serial_println!(
@@ -594,8 +625,27 @@ pub unsafe fn unmask_irq(irq: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-    with_window(|| unsafe { set_masked(irq, false) });
+    // Under the routing lock, so that no change to the pin's remapping entry
+    // is half done; a pin whose entry could not be written stays masked.
+    let unmasked = crate::cpu::without_interrupts(|| {
+        let _routing = ROUTING.lock();
+        if UNROUTED
+            .get(usize::from(irq))
+            .is_some_and(|u| u.load(Ordering::Acquire))
+        {
+            return false;
+        }
+        // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
+        with_window(|| unsafe { set_masked(irq, false) });
+        true
+    });
+    if !unmasked {
+        serial_println!(
+            "[ioapic] IRQ {} left masked: its remapping entry was never written",
+            irq
+        );
+        return;
+    }
 
     serial_println!(
         "[ioapic] IRQ {} unmasked → vector {}",
@@ -653,11 +703,9 @@ pub unsafe fn set_level_triggered(irq: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-    with_window(|| unsafe {
-        let entry = read_redir_entry(irq);
-        write_redir_entry(irq, entry | REDIR_LEVEL_TRIGGER | REDIR_ACTIVE_LOW);
-    });
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is not
+    // held.
+    unsafe { route(irq, |entry| entry | REDIR_LEVEL_TRIGGER | REDIR_ACTIVE_LOW) };
 }
 
 /// Set the CPU affinity for an IRQ — route it to a specific LAPIC.
@@ -681,7 +729,9 @@ pub unsafe fn set_level_triggered(irq: u8) {
 ///
 /// The target LAPIC must be valid and online.  Routing to an offline
 /// CPU causes lost interrupts.  IOAPIC must be initialized.
-#[allow(dead_code)] // API for drivers zone; used when IRQ balancing is implemented.
+///
+/// The IRQ balancer calls it from a softirq: with interrupts remapped, what
+/// it takes is held with interrupts off ([`route`]).
 pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     if u64::from(irq) >= num {
@@ -689,14 +739,13 @@ pub unsafe fn set_irq_affinity(irq: u8, lapic_id: u8) {
         return;
     }
 
-    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is held.
-    // Destination LAPIC ID occupies bits 63:56 of the 64-bit entry.
-    with_window(|| unsafe {
-        let entry = read_redir_entry(irq);
-        // Clear old destination (bits 63:56), set new one.
-        let entry = (entry & 0x00FF_FFFF_FFFF_FFFF) | (u64::from(lapic_id) << 56);
-        write_redir_entry(irq, entry);
-    });
+    // SAFETY: IOAPIC is initialized, irq < num_entries; the window is not
+    // held. The destination's LAPIC ID is bits 63:56 of the entry.
+    unsafe {
+        route(irq, |entry| {
+            (entry & 0x00FF_FFFF_FFFF_FFFF) | (u64::from(lapic_id) << 56)
+        });
+    }
 
     serial_println!("[ioapic] IRQ {} affinity → LAPIC ID {}", irq, lapic_id,);
 }

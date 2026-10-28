@@ -1,6 +1,7 @@
-## TD-A-NO-INTERRUPT-REMAPPING-SO-A-DEVICE-CAN-FORGE-MSIS (lane A, 2026-10-27) — FIXED
+## TD-A-NO-INTERRUPT-REMAPPING-SO-A-DEVICE-CAN-FORGE-MSIS (lane A, 2026-10-27) — OPEN
 
-**Status:** FIXED 2026-10-28. Every IOMMU unit remaps interrupts: a
+**Status:** OPEN -- fixed on lane-a-wip (76f772966, and the batch-22
+follow-up), awaiting a boot on main. Every IOMMU unit remaps interrupts: a
 device's MSI and each I/O APIC pin go through an entry naming the one
 function allowed to raise it, and compatibility-format interrupts are
 blocked. What QEMU cannot show -- the blocking itself, and a device's plain
@@ -45,9 +46,15 @@ booted and published on its own):
 - The I/O APIC's lines go through IRTEs too once remapping is on.
 
   **Done 2026-10-28** (`iommu_remap::enable_interrupt_remapping`): one table
-  every unit shares, all units or none; the I/O APIC's requester id read
-  from its DMAR scope (`iommu::ioapic_scope`), each pin's entry handle the
-  pin's number (`ioapic::write_redir_entry`). `scripts/boot-test.sh` runs
+  every unit shares, all units or none -- a unit that cannot translate
+  remaps too -- and only where the DMAR's INTR_REMAP flag allows it; the
+  I/O APIC's requester id read from its DMAR scope (`iommu::ioapic_scope`),
+  each pin's entry handle the pin's number (`ioapic::route`); an MSI's entry
+  checks the requester id it really arrives with, a bridge's alias or bus
+  range behind a PCIe-to-PCI bridge (`pci::msi_source`, Linux's
+  `set_msi_sid`). The table's and the queues' locks are held with
+  interrupts off, as Linux holds its own, since the IRQ balancer changes a
+  pin from a softirq. `scripts/boot-test.sh` runs
   QEMU with `intremap=on` and fails a boot in which it never came on. QEMU
   does not emulate CFI -- it delivers a compatibility-format interrupt with
   remapping on whatever CFI says -- so in QEMU the blocking is checked only

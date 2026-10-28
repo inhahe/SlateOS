@@ -16,11 +16,17 @@
 //! writes, and only as far along a row as its new text or its old reaches,
 //! two pixels a store.
 //!
-//! It stops for good when something takes the display (`console::hide_hint`,
-//! called on every mode set and page flip), so it never draws over a
-//! desktop. Something that only borrows the screen -- a display driver's
-//! self-test, which shows its own frames on it -- pauses the pane instead
-//! (`console::lend_display`), and the pane begins again, blank, after it.
+//! It keeps each row's text as well as drawing it, so that it can be drawn
+//! again. That is what lets something borrow the screen for a while without
+//! taking it -- a display driver's self-test, which shows its own frames
+//! there (`console::lend_display`): the pane is [`pause`]d, goes on keeping
+//! the lines logged meanwhile without drawing them, and is drawn again, all
+//! of it, at the matching [`resume`]. A CPU that stops for good
+//! (`cpu::halt_loop`, the end of every panic and fatal fault) draws it again
+//! first, so what the kernel said on the way down is on the screen even when
+//! it died during a loan. It stops for good when something takes the display
+//! (`console::hide_hint`, called on every mode set and page flip a program
+//! makes), so it never draws over a desktop.
 //!
 //! Escape sequences are dropped, and a multi-byte UTF-8 character is drawn
 //! as `~`: the font has ASCII only.
@@ -44,8 +50,11 @@ const FG: u32 = 0x00C8_C8C8;
 const BG: u32 = 0x0000_0000;
 const MARK: u32 = 0x00FF_A000;
 
+/// One row's text, as drawn there.
+type RowText = [u8; MAX_COLS];
+
 /// The pane: where it is on the framebuffer, where the next line goes, and
-/// the line being assembled.
+/// the line being assembled. Its rows' text is kept beside it ([`Log`]).
 struct Pane {
     /// The framebuffer's virtual address, and its bytes per pixel row.
     fb: u64,
@@ -61,7 +70,7 @@ struct Pane {
     /// The row the next line is drawn at.
     row: u32,
     /// How many columns of each row hold text: what a later line there
-    /// must cover.
+    /// must cover, and how much of the row's kept text is its own.
     row_len: [u16; MAX_ROWS],
     /// The line being assembled, `len` bytes of it.
     line: [u8; MAX_COLS],
@@ -73,11 +82,22 @@ struct Pane {
     wide: bool,
 }
 
+/// The pane and its rows' text, under one lock. All zeros until [`start`]
+/// places the pane -- a pane of no rows -- so the 128 KiB of text costs no
+/// stack and no space in the kernel image.
+struct Log {
+    pane: Pane,
+    text: [RowText; MAX_ROWS],
+}
+
 /// The pane draws: set once it is placed, cleared for good by [`stop`].
 static ACTIVE: AtomicBool = AtomicBool::new(false);
-static PANE: Mutex<Option<Pane>> = Mutex::new(None);
+static LOG: Mutex<Log> = Mutex::new(Log {
+    pane: Pane::UNPLACED,
+    text: [[0; MAX_COLS]; MAX_ROWS],
+});
 /// How many [`pause`]s are not yet [`resume`]d: the pane draws nothing while
-/// any is.
+/// any is, and keeps what it would have drawn.
 static PAUSED: AtomicU32 = AtomicU32::new(0);
 
 /// Whether this boot's command line asks for the pane: `log.screen=1`.
@@ -102,9 +122,11 @@ pub unsafe fn start(fb: u64, pitch: u32, width: u32, top: u32, height: u32) {
     if cols == 0 || rows < 2 {
         return;
     }
-    let mut pane = Pane::new(fb, pitch, top, cols, rows, width, height);
-    pane.restart();
-    *PANE.lock() = Some(pane);
+    let mut log = LOG.lock();
+    log.pane = Pane::new(fb, pitch, top, cols, rows, width, height);
+    log.pane.blank();
+    log.pane.mark(0, true);
+    drop(log);
     ACTIVE.store(true, Ordering::Release);
 }
 
@@ -119,46 +141,90 @@ pub fn active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
-/// Draw nothing until the matching [`resume`]: something is about to draw
-/// on the screen for a while without taking it (`console::lend_display`).
-/// The lines logged meanwhile are left to the serial log.
+/// Draw nothing until the matching [`resume`], keeping the lines logged
+/// meanwhile: something is about to draw on the screen for a while without
+/// taking it (`console::lend_display`). Returns once no line is being drawn,
+/// on any CPU.
 pub fn pause() {
     PAUSED.fetch_add(1, Ordering::AcqRel);
+    // A line another CPU was drawing when the count rose is finished before
+    // this returns: `feed` reads the count under the lock.
+    drop(LOG.lock());
 }
 
-/// Undo a [`pause`]. The last one outstanding begins the pane again: its
-/// rows cleared, whatever was drawn over them with them, and the next line
-/// at its top. Nothing is drawn once the pane has [`stop`]ped.
-pub fn resume() {
-    let mut guard = PANE.lock();
-    let previous = PAUSED.fetch_sub(1, Ordering::AcqRel);
-    debug_assert!(previous > 0, "screenlog::resume without a pause");
-    if previous == 1
-        && active()
-        && let Some(pane) = guard.as_mut()
-    {
-        pane.restart();
+/// Undo a [`pause`]. The last one outstanding draws the pane again, all of
+/// it: its rows as they are now, the lines kept during the pause included,
+/// over whatever was drawn there meanwhile. Nothing is drawn once the pane
+/// has [`stop`]ped.
+///
+/// Returns false, changing nothing, when there is no pause to undo: a
+/// caller's pause and resume do not pair, which is a bug in the caller.
+#[must_use]
+pub fn resume() -> bool {
+    let mut log = LOG.lock();
+    match PAUSED.fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1)) {
+        Ok(1) => {
+            if active() {
+                let Log { pane, text } = &mut *log;
+                pane.repaint(text);
+            }
+            true
+        }
+        Ok(_) => true,
+        Err(_) => false,
     }
 }
 
-/// Bytes just written to the serial log: each line they complete is drawn.
+/// Undo every [`pause`] and draw the pane again now: this CPU is stopping
+/// for good (`cpu::halt_loop`), and what the kernel said on the way down is
+/// what the pane is for. A pane busy on this CPU -- the end came while it
+/// drew -- is left as it is.
+pub fn unpause_all() {
+    if PAUSED.swap(0, Ordering::AcqRel) == 0 || !active() {
+        return;
+    }
+    if let Some(mut log) = LOG.try_lock() {
+        let Log { pane, text } = &mut *log;
+        pane.repaint(text);
+    }
+}
+
+/// Bytes just written to the serial log: each line they complete is kept,
+/// and drawn unless the pane is paused.
 ///
 /// Called only from the serial log's own print path, under its protocol.
 /// A print nested inside another (an exception that interrupted this CPU
 /// while it drew) finds the pane busy and is left to the serial log.
 pub fn feed(bytes: &[u8]) {
-    if !active() || PAUSED.load(Ordering::Acquire) != 0 {
+    if !active() {
         return;
     }
-    let Some(mut guard) = PANE.try_lock() else {
+    let Some(mut log) = LOG.try_lock() else {
         return;
     };
-    if let Some(pane) = guard.as_mut() {
-        pane.feed(bytes);
-    }
+    let show = PAUSED.load(Ordering::Acquire) == 0;
+    let Log { pane, text } = &mut *log;
+    pane.feed(bytes, text, show);
 }
 
 impl Pane {
+    /// No pane: what [`LOG`] holds until [`start`].
+    const UNPLACED: Pane = Pane {
+        fb: 0,
+        pitch: 0,
+        top: 0,
+        cols: 0,
+        rows: 0,
+        width: 0,
+        height: 0,
+        row: 0,
+        row_len: [0; MAX_ROWS],
+        line: [0; MAX_COLS],
+        len: 0,
+        escape: false,
+        wide: false,
+    };
+
     /// A pane of `cols` by `rows` glyph cells, from pixel row `top` of the
     /// framebuffer at `fb`, `pitch` bytes a pixel row, `width` by `height`
     /// pixels; nothing drawn yet.
@@ -171,12 +237,8 @@ impl Pane {
             rows,
             width,
             height,
-            row: 0,
-            row_len: [0; MAX_ROWS],
-            line: [0; MAX_COLS],
-            len: 0,
-            escape: false,
             wide: fb.is_multiple_of(8) && pitch.is_multiple_of(8),
+            ..Self::UNPLACED
         }
     }
 
@@ -185,13 +247,12 @@ impl Pane {
     /// reaches, so whatever the screen held before -- a loader's image, the
     /// previous kernel's desktop after a kexec -- would show beside it.
     fn blank(&self) {
-        let (width, height) = (self.width, self.height);
         // The background is black, all zero bytes: a row is one fill, as wide
         // as the CPU stores, rather than a store a pixel -- a 4K screen's pane
         // is millions of pixels.
         const _: () = assert!(BG == 0);
-        let row_bytes = usize::try_from(width).unwrap_or(0).saturating_mul(4);
-        for y in self.top..height {
+        let row_bytes = usize::try_from(self.width).unwrap_or(0).saturating_mul(4);
+        for y in self.top..self.height {
             let row = self
                 .fb
                 .wrapping_add(u64::from(y).wrapping_mul(u64::from(self.pitch)));
@@ -202,19 +263,23 @@ impl Pane {
         }
     }
 
-    /// Begin the pane afresh: its rows blank, no line half assembled, and
-    /// the marker at the top, where the next line goes.
-    fn restart(&mut self) {
+    /// Draw the pane again, all of it, from `text`: its rows blank, each
+    /// row's kept text, and the marker where the next line goes.
+    fn repaint(&self, text: &[RowText]) {
         self.blank();
-        self.row_len = [0; MAX_ROWS];
-        self.len = 0;
-        self.escape = false;
-        self.row = 0;
-        self.mark(0);
+        for row in 0..self.rows {
+            if row == self.row {
+                self.draw_marker(row, 0);
+            } else {
+                let len = self.row_len(row);
+                self.draw_text(row, text, len, len);
+            }
+        }
     }
 
-    /// Assemble `bytes` into lines, drawing each one completed.
-    fn feed(&mut self, bytes: &[u8]) {
+    /// Assemble `bytes` into lines, keeping each one completed in `text`,
+    /// and drawing it when `show`.
+    fn feed(&mut self, bytes: &[u8], text: &mut [RowText], show: bool) {
         for &b in bytes {
             if self.escape {
                 // CSI parameters and the like run until a letter ends them.
@@ -223,7 +288,7 @@ impl Pane {
             }
             let shown = match b {
                 b'\n' => {
-                    self.flush();
+                    self.flush(text, show);
                     continue;
                 }
                 0x1B => {
@@ -238,7 +303,7 @@ impl Pane {
                 _ => b'?',
             };
             if self.len >= self.cols as usize {
-                self.flush();
+                self.flush(text, show);
             }
             if let Some(slot) = self.line.get_mut(self.len) {
                 *slot = shown;
@@ -247,36 +312,60 @@ impl Pane {
         }
     }
 
-    /// Draw the line assembled at the current row -- as far as it, or the
-    /// line it replaces, reaches -- and the marker at the row after it.
-    fn flush(&mut self) {
+    /// Keep the line assembled as the current row's text and, when `show`,
+    /// draw it -- as far as it, or the line it replaces, reaches -- and the
+    /// marker at the row after it.
+    fn flush(&mut self, text: &mut [RowText], show: bool) {
         let row = self.row;
-        let reach = self.len.max(self.row_len(row));
+        let len = self.len;
+        if let (Some(kept), Some(line)) = (
+            text.get_mut(row as usize).and_then(|t| t.get_mut(..len)),
+            self.line.get(..len),
+        ) {
+            kept.copy_from_slice(line);
+        }
+        if show {
+            let reach = len.max(self.row_len(row));
+            self.draw_text(row, text, len, reach);
+        }
+        self.set_row_len(row, len);
+        self.len = 0;
+        self.row = row.saturating_add(1).checked_rem(self.rows).unwrap_or(0);
+        self.mark(self.row, show);
+    }
+
+    /// The marker row: where the next line goes, below the newest. Its old
+    /// text is cleared when `show`, and it is labelled.
+    fn mark(&mut self, row: u32, show: bool) {
+        let label = MARKER.len().min(self.cols as usize);
+        if show {
+            self.draw_marker(row, self.row_len(row));
+        }
+        self.set_row_len(row, label);
+    }
+
+    /// Draw `row`'s first `len` characters of `text`, and spaces from there
+    /// to `reach`, covering the row's old text.
+    fn draw_text(&self, row: u32, text: &[RowText], len: usize, reach: usize) {
+        let kept = text.get(row as usize);
         for col in 0..u32::try_from(reach).unwrap_or(0).min(self.cols) {
-            let ch = match self.line.get(col as usize) {
-                Some(&c) if (col as usize) < self.len => c,
+            let ch = match kept.and_then(|t| t.get(col as usize)) {
+                Some(&c) if (col as usize) < len => c,
                 _ => b' ',
             };
             self.glyph(col, row, ch, FG);
         }
-        self.set_row_len(row, self.len);
-        self.len = 0;
-        self.row = row.saturating_add(1).checked_rem(self.rows).unwrap_or(0);
-        self.mark(self.row);
     }
 
-    /// The marker row: where the next line goes, below the newest. Its old
-    /// text is cleared, and it is labelled.
-    fn mark(&mut self, row: u32) {
+    /// Draw the marker at `row`, and spaces to `reach`, covering old text.
+    fn draw_marker(&self, row: u32, reach: usize) {
         let label = MARKER.len().min(self.cols as usize);
-        let reach = self.row_len(row).max(label);
-        for col in 0..u32::try_from(reach).unwrap_or(0).min(self.cols) {
+        for col in 0..u32::try_from(reach.max(label)).unwrap_or(0).min(self.cols) {
             match MARKER.get(col as usize) {
                 Some(&c) => self.glyph(col, row, c, MARK),
                 None => self.glyph(col, row, b' ', FG),
             }
         }
-        self.set_row_len(row, label);
     }
 
     /// How many columns of `row` hold text.
@@ -342,7 +431,9 @@ impl Pane {
 /// drawn at their rows, the marker after the newest, escape sequences
 /// dropped, a long line split, and the rows wrapping to the top -- on an
 /// 8-byte-aligned framebuffer, two pixels a store, and on one that is not,
-/// one a store.
+/// one a store; lines kept undrawn while paused and the whole pane drawn
+/// again over a frame drawn across it; and the pause count, which nests,
+/// refuses an unmatched resume, and is cleared for a CPU that stops.
 pub fn self_test() -> crate::error::KernelResult<()> {
     crate::serial_println!("[screenlog] Running self-test...");
     for wide in [true, false] {
@@ -355,18 +446,55 @@ pub fn self_test() -> crate::error::KernelResult<()> {
             return Err(crate::error::KernelError::InternalError);
         }
     }
+    if let Err(what) = self_test_pause_count() {
+        crate::serial_println!("[screenlog]   FAIL: {}", what);
+        return Err(crate::error::KernelError::InternalError);
+    }
     crate::serial_println!(
-        "[screenlog]   lines, the marker, escapes dropped, splitting, wrapping, both store widths: OK"
+        "[screenlog]   lines, the marker, escapes dropped, splitting, wrapping, both store widths; kept while paused and drawn again whole; pauses nest, an unmatched resume refused, all undone for a CPU that stops: OK"
     );
     Ok(())
 }
 
-/// [`self_test`] on a framebuffer whose base is 8-byte aligned (`wide`) or
-/// 4 bytes past that.
+/// The pause count, through [`pause`], [`resume`] and [`unpause_all`]
+/// themselves. On a boot with the pane on screen this pauses and redraws the
+/// real pane, which leaves it as it was.
+fn self_test_pause_count() -> Result<(), &'static str> {
+    let count = || PAUSED.load(Ordering::Acquire);
+    let before = count();
+    if before != 0 {
+        return Err("the screen is lent while the self-tests run");
+    }
+    pause();
+    pause();
+    if count() != 2 {
+        return Err("two pauses are not counted as two");
+    }
+    if !resume() || count() != 1 {
+        return Err("a resume did not undo one of two pauses");
+    }
+    if !resume() || count() != 0 {
+        return Err("the last resume did not undo the last pause");
+    }
+    if resume() || count() != 0 {
+        return Err("a resume with no pause was taken, not refused");
+    }
+    pause();
+    pause();
+    unpause_all();
+    if count() != 0 {
+        return Err("a CPU stopping did not undo every pause");
+    }
+    Ok(())
+}
+
+/// [`self_test`]'s pane on a framebuffer whose base is 8-byte aligned
+/// (`wide`) or 4 bytes past that.
 fn self_test_pane(wide: bool) -> Result<(), &'static str> {
     // A framebuffer of 4 columns by 3 rows of glyphs, holding an old image,
     // placed in a buffer one pixel longer so that it can start either on an
-    // 8-byte boundary or 4 bytes past one.
+    // 8-byte boundary or 4 bytes past one. Every access to it, the pane's and
+    // the test's, goes through `base`, taken once.
     const COLS: u32 = 4;
     const ROWS: u32 = 3;
     const WIDTH: u32 = COLS * GLYPH_WIDTH;
@@ -375,12 +503,19 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
     let width = WIDTH;
     let mut buf = alloc::vec![STALE; PIXELS + 1];
     let aligned = (buf.as_ptr() as usize).is_multiple_of(8);
-    let skip = usize::from(aligned != wide);
-    let fb = buf
-        .get_mut(skip..skip.saturating_add(PIXELS))
-        .ok_or("no framebuffer")?;
+    let base = buf.as_mut_ptr().wrapping_add(usize::from(aligned != wide));
+    let fb = || {
+        // SAFETY: `base` points into `buf`, which outlives the test, with
+        // PIXELS pixels after it; nothing writes while the slice is held.
+        unsafe { core::slice::from_raw_parts(base, PIXELS) }
+    };
+    let paint = |value: u32| {
+        // SAFETY: as for `fb`; no slice from it is held across this.
+        (0..PIXELS).for_each(|i| unsafe { base.add(i).write(value) });
+    };
+    let mut text = alloc::vec![[0u8; MAX_COLS]; ROWS as usize];
     let mut pane = Pane::new(
-        fb.as_mut_ptr() as u64,
+        base as u64,
         WIDTH * 4,
         0,
         COLS,
@@ -392,12 +527,13 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
         return Err("the store width does not follow the framebuffer's alignment");
     }
     pane.blank();
-    if fb.iter().any(|&p| p != BG) {
+    if fb().iter().any(|&p| p != BG) {
         return Err("the old image is left in the pane");
     }
+    pane.mark(0, true);
     // The glyph drawn at a cell: true where a pixel has `fg`, false where it
     // has the background; None if any pixel is neither.
-    let cell = |fb: &[u32], col: u32, row: u32, fg: u32| -> Option<[u8; 16]> {
+    let cell = |col: u32, row: u32, fg: u32| -> Option<[u8; 16]> {
         let mut bits = [0u8; 16];
         for (gy, out) in (0u32..).zip(bits.iter_mut()) {
             for gx in 0..GLYPH_WIDTH {
@@ -407,7 +543,7 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
                     .saturating_mul(width)
                     .saturating_add(col.saturating_mul(GLYPH_WIDTH))
                     .saturating_add(gx);
-                match fb.get(at as usize).copied() {
+                match fb().get(at as usize).copied() {
                     Some(p) if p == fg => *out |= 0x80 >> gx,
                     Some(p) if p == BG => {}
                     _ => return None,
@@ -416,48 +552,54 @@ fn self_test_pane(wide: bool) -> Result<(), &'static str> {
         }
         Some(bits)
     };
-    let shows = |fb: &[u32], row: u32, text: &[u8; 4], fg: u32| {
+    let shows = |row: u32, text: &[u8; 4], fg: u32| {
         (0..COLS).all(|col| {
             let ch = text.get(col as usize).copied().unwrap_or(b' ');
-            cell(fb, col, row, fg) == Some(*crate::font::glyph(ch))
+            cell(col, row, fg) == Some(*crate::font::glyph(ch))
         })
     };
 
-    pane.feed(b"AB\nx");
-    if !shows(fb, 0, b"AB  ", FG) || !shows(fb, 1, b"-- n", MARK) || pane.len != 1 {
+    pane.feed(b"AB\nx", &mut text, true);
+    if !shows(0, b"AB  ", FG) || !shows(1, b"-- n", MARK) || pane.len != 1 {
         return Err("a line is not drawn at its row with the marker after it");
     }
-    pane.feed(b"\x1b[1;32mOK\x1b[0m\n");
+    pane.feed(b"\x1b[1;32mOK\x1b[0m\n", &mut text, true);
     // The line covers the marker it replaces, the label's last letter too.
-    if !shows(fb, 1, b"xOK ", FG) || !shows(fb, 2, b"-- n", MARK) {
+    if !shows(1, b"xOK ", FG) || !shows(2, b"-- n", MARK) {
         return Err("an escape sequence was drawn, a line split, or old text left");
     }
     // Six bytes into four columns: split, and the rows wrap to the top.
-    pane.feed(b"abcdef\n");
-    if !shows(fb, 2, b"abcd", FG) || !shows(fb, 0, b"ef  ", FG) || !shows(fb, 1, b"-- n", MARK) {
+    pane.feed(b"abcdef\n", &mut text, true);
+    if !shows(2, b"abcd", FG) || !shows(0, b"ef  ", FG) || !shows(1, b"-- n", MARK) {
         return Err("a long line is not split, or the rows do not wrap");
     }
     // "é" (two bytes) and a tab.
-    pane.feed(b"\xc3\xa9\tz\n");
-    if !shows(fb, 1, b"~ z ", FG) {
+    pane.feed(b"\xc3\xa9\tz\n", &mut text, true);
+    if !shows(1, b"~ z ", FG) {
         return Err("a UTF-8 character or a tab is not drawn as it should be");
     }
-    // Begun again after something drew over it (`resume`): all of it blank
-    // but the marker, at the top; a half-assembled line dropped; and the
-    // next line drawn at the top.
-    pane.feed(b"half");
-    fb.fill(STALE);
-    pane.restart();
-    if !shows(fb, 0, b"-- n", MARK) || pane.len != 0 {
-        return Err("a pane begun again has no marker at its top, or kept a half line");
+
+    // Paused: lines kept, nothing drawn -- an escape sequence left open at
+    // the end of the pause runs on into the first line after it.
+    let before: alloc::vec::Vec<u32> = fb().to_vec();
+    pane.feed(b"p1\nq2\n\x1b[1", &mut text, false);
+    if fb() != before.as_slice() {
+        return Err("a paused pane drew");
     }
-    let marker_row = (WIDTH * GLYPH_HEIGHT) as usize;
-    if fb.get(marker_row..).is_none_or(|rest| rest.iter().any(|&p| p != BG)) {
-        return Err("a pane begun again left what was drawn over it");
+    // A frame drawn over all of it, then the pane drawn again: every row as
+    // it would have been drawn, the paused lines and the marker included.
+    paint(STALE);
+    pane.repaint(&text);
+    if !shows(2, b"p1  ", FG) || !shows(0, b"q2  ", FG) || !shows(1, b"-- n", MARK) {
+        return Err("the pane was not drawn again whole, the paused lines included");
     }
-    pane.feed(b"new\n");
-    if !shows(fb, 0, b"new ", FG) || !shows(fb, 1, b"-- n", MARK) {
-        return Err("the first line after a new beginning is not at the top");
+    if fb().iter().any(|&p| p != BG && p != FG && p != MARK) {
+        return Err("drawing the pane again left the frame drawn over it");
     }
+    pane.feed(b"mok\n", &mut text, true);
+    if !shows(1, b"ok  ", FG) || !shows(2, b"-- n", MARK) {
+        return Err("an escape sequence open across a pause was not dropped whole");
+    }
+    drop(buf);
     Ok(())
 }

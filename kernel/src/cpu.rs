@@ -76,7 +76,12 @@ pub unsafe fn sti() {
 ///
 /// Used as the final stop in panic handlers and fatal error paths.
 /// The CPU will never execute another instruction after this.
+///
+/// First the kernel's log pane, if the screen was lent and it is paused, is
+/// drawn again (`screenlog::unpause_all`): what was said on the way down is
+/// what a machine with no readable serial port has to go on.
 pub fn halt_loop() -> ! {
+    crate::screenlog::unpause_all();
     loop {
         // SAFETY: We intentionally disable interrupts and halt forever.
         // This is a terminal state — the system is dead.

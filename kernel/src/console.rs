@@ -3066,13 +3066,17 @@ fn repaint_on(con: &ConsoleInner) {
             let idx = (row as usize)
                 .wrapping_mul(cols as usize)
                 .wrapping_add(col as usize);
-            if let Some(cell) = con.screen_buf.get(idx) {
-                if cell.ch == b' ' && cell.fg == DEFAULT_FG && cell.bg == DEFAULT_BG {
+            match con.screen_buf.get(idx) {
+                Some(cell) if cell.ch == b' ' && cell.fg == DEFAULT_FG && cell.bg == DEFAULT_BG => {
                     // Empty cell — erase is faster than drawing a space glyph.
                     erase_cell(fb, pitch, col, row, cell.bg);
-                } else {
+                }
+                Some(cell) => {
                     draw_glyph_full(fb, pitch, col, row, cell.ch, cell.fg, cell.bg, false, false);
                 }
+                // No text kept for it (the buffer is made once the heap
+                // exists): the background, whatever was drawn there.
+                None => erase_cell(fb, pitch, col, row, con.default_bg),
             }
         }
     }
@@ -3089,23 +3093,65 @@ fn repaint_on(con: &ConsoleInner) {
     }
 }
 
+/// What [`repaint_on`] reads of `con`, as a console of its own -- the text
+/// buffer copied -- so that the painting, millions of stores to device
+/// memory, runs without the console's lock and with interrupts on, as
+/// [`clear`]'s does. `None` when the copy cannot be allocated.
+fn repaint_view(con: &ConsoleInner) -> Option<ConsoleInner> {
+    let mut cells = Vec::new();
+    cells.try_reserve_exact(con.screen_buf.len()).ok()?;
+    cells.extend_from_slice(&con.screen_buf);
+    let mut view = ConsoleInner::new();
+    view.screen_buf = cells;
+    view.initialized = con.initialized;
+    view.fb_addr = con.fb_addr;
+    view.fb_pitch = con.fb_pitch;
+    view.fb_width = con.fb_width;
+    view.fb_height = con.fb_height;
+    view.own_height = con.own_height;
+    view.cols = con.cols;
+    view.rows = con.rows;
+    view.hint = con.hint;
+    view.default_fg = con.default_fg;
+    view.default_bg = con.default_bg;
+    Some(view)
+}
+
 /// Lend the screen to `f`, which draws on it without taking it -- a display
 /// driver's self-test, setting modes and showing its own frames on the
 /// framebuffer the console and the kernel's log pane are drawn on -- and
 /// give it back afterwards: the console repainted from its text, and the
-/// log pane begun again at its top (`screenlog::resume`). Without this the
-/// test's last frame stays wherever neither has drawn since, which on a
-/// firmware framebuffer is most of the screen.
+/// log pane drawn again whole (`screenlog::resume`), the lines logged while
+/// `f` ran included. Without this the last frame `f` showed stays wherever
+/// neither has drawn since, which on a firmware framebuffer is most of the
+/// screen. `borrower` names `f` in the line logged before the pane pauses:
+/// the last one the pane shows, should `f` hang.
 ///
 /// The pane draws nothing while `f` runs, so it neither covers a frame `f`
-/// reads back nor is covered by one; the lines logged meanwhile are on the
-/// serial log only. The console is not held back: what it draws meanwhile
-/// is in its text buffer too, and the repaint draws it again.
-pub fn lend_display<R>(f: impl FnOnce() -> R) -> R {
+/// reads back nor is covered by one. The console is not held back: what it
+/// draws meanwhile is in its text buffer too, and the repaint draws it
+/// again. What the buffer cannot give back stays blank: text drawn before
+/// the heap existed, which it never held.
+pub fn lend_display<R>(borrower: &str, f: impl FnOnce() -> R) -> R {
+    if crate::screenlog::active() {
+        crate::serial_println!(
+            "[console] the screen is lent to {}; this log is drawn again after it",
+            borrower
+        );
+    }
     crate::screenlog::pause();
     let result = f();
-    repaint_on(&CONSOLE.lock_irqsave());
-    crate::screenlog::resume();
+    let view = repaint_view(&CONSOLE.lock_irqsave());
+    match view {
+        Some(view) => repaint_on(&view),
+        None => repaint_on(&CONSOLE.lock_irqsave()),
+    }
+    if !crate::screenlog::resume() {
+        crate::serial_println!(
+            "[console] BUG: the log pane was not paused after lending the screen to {}",
+            borrower
+        );
+    }
     result
 }
 
@@ -3528,10 +3574,13 @@ fn test_hint_row() -> Result<(), &'static str> {
     Ok(())
 }
 
-/// [`lend_display`]'s repaint ([`repaint_on`]), on a scratch console of 6
-/// columns by 2 rows on a framebuffer half a glyph wider and a row taller,
-/// so that it has margins: a test pattern drawn over all of it -- text,
-/// blank cells and margins -- must leave exactly the pixels the console drew.
+/// [`lend_display`]'s repaint ([`repaint_on`], through [`repaint_view`]'s
+/// copy), on a scratch console of 6 columns by 2 rows on a framebuffer half
+/// a glyph wider and a row taller, so that it has margins: a test pattern
+/// drawn over all of it -- text, blank cells and margins -- must leave
+/// exactly the pixels the console drew; a console owning only the top rows
+/// must leave the rows below alone; and one with no text kept must cover
+/// its rows with the background.
 fn test_repaint() -> Result<(), &'static str> {
     const COLS: u32 = 6;
     const ROWS: u32 = 2;
@@ -3562,8 +3611,9 @@ fn test_repaint() -> Result<(), &'static str> {
     if !drawn.contains(&DEFAULT_FG) {
         return Err("the console drew no text to repaint");
     }
+    // Through the copy `lend_display` paints from, as it does.
     paint(PATTERN);
-    repaint_on(&c);
+    repaint_on(&repaint_view(&c).ok_or("no copy of the console to repaint")?);
     if pixels() != drawn {
         return Err("a repaint did not cover a test pattern with what the console holds");
     }
@@ -3571,9 +3621,32 @@ fn test_repaint() -> Result<(), &'static str> {
     show_hint_on(&mut c, "hint");
     let drawn = pixels();
     paint(PATTERN);
-    repaint_on(&c);
+    repaint_on(&repaint_view(&c).ok_or("no copy of the console to repaint")?);
     if pixels() != drawn {
         return Err("a repaint with the hint shown did not draw what was there");
+    }
+    // A console that owns only the screen's top rows, as beside the log pane,
+    // repaints those and never the rows below, which are the pane's.
+    hide_hint_on(&mut c);
+    c.own_height = ROWS * GLYPH_HEIGHT;
+    let own = (WIDTH * ROWS * GLYPH_HEIGHT) as usize;
+    let drawn = pixels();
+    paint(PATTERN);
+    repaint_on(&c);
+    let after = pixels();
+    if after.get(..own) != drawn.get(..own) {
+        return Err("a console beside the pane did not repaint its own rows");
+    }
+    if after.get(own..).is_none_or(|rest| rest.iter().any(|&p| p != PATTERN)) {
+        return Err("a console beside the pane repainted the pane's rows");
+    }
+    // A console with no text kept yet covers what was drawn with its
+    // background, rather than leaving it.
+    c.screen_buf = Vec::new();
+    paint(PATTERN);
+    repaint_on(&c);
+    if pixels().get(..own).is_none_or(|mine| mine.iter().any(|&p| p != DEFAULT_BG)) {
+        return Err("a console with no text kept left what was drawn over it");
     }
     Ok(())
 }

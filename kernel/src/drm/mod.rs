@@ -1580,13 +1580,21 @@ pub fn init() {
 
 /// Run DRM subsystem self-tests.
 ///
-/// They set modes and show their own frames on the primary device, which on
-/// a machine with no native display driver is the firmware framebuffer the
-/// console and the kernel's log pane are drawn on: so they borrow the screen
+/// They set modes and show their own frames on the primary device. When
+/// that is the firmware framebuffer -- a machine with no native display
+/// driver -- those frames land on the framebuffer the console and the
+/// kernel's log pane are drawn on, so the test borrows the screen
 /// (`console::lend_display`), and the console and the pane are drawn again
-/// afterwards rather than left under the last test pattern.
+/// afterwards rather than left under the last test pattern. Another primary
+/// device scans out from its own memory and leaves them alone.
 pub fn self_test() -> KernelResult<()> {
-    crate::console::lend_display(self_test_on_screen)
+    let on_boot_framebuffer =
+        with_primary(|dev| Ok(matches!(dev.backend, DrmBackend::Limine(_)))).unwrap_or(false);
+    if on_boot_framebuffer {
+        crate::console::lend_display("the DRM self-test", self_test_on_screen)
+    } else {
+        self_test_on_screen()
+    }
 }
 
 /// [`self_test`], on a screen lent to it.
@@ -1973,7 +1981,10 @@ fn self_test_on_screen() -> KernelResult<()> {
         //     `ensure_crtc_configured` before its first flip, which re-times
         //     the CRTC against its own buffer. On both backends that can be
         //     primary today (`limine-fb`, `virtio-gpu`) `disable_crtc` is a
-        //     no-op anyway, so the console keeps its pixels either way.
+        //     no-op anyway. On `limine-fb` that leaves this test's last frame
+        //     on the framebuffer the console and the log pane draw on, which
+        //     is why `self_test` lends the screen (`console::lend_display`)
+        //     and has them drawn again after it.
         dev.fb_destroy(bad_fb)?;
         dev.gem_destroy(bad_gem)?;
         dev.fb_destroy(good_fb)?;

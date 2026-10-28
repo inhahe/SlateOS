@@ -27,7 +27,10 @@ booted and published on its own):
    invalidation must go through it -- the register-based context and IOTLB
    invalidations `iommu_remap` uses today included. So: a queue page per
    unit (IQA), QIE set, context-cache, IOTLB and wait descriptors, the
-   register paths kept only for a unit without ECAP.QI.
+   register paths kept only for a unit without ECAP.QI, or one whose queue
+   will not come on. **Done 2026-10-28** (`queue_run`): a refused descriptor
+   is replaced by a wait and fails its run, a timed-out queue is left alone
+   and fails every later run, and kexec drains and stops each queue.
 - An interrupt remapping table (IRT) per IOMMU unit, its address given with
   SIRTP, and IRE set in the global command, with compatibility-format
   interrupts blocked (CFI clear) so that only remapped ones are delivered.

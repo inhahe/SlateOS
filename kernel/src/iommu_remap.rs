@@ -335,9 +335,17 @@ static REMAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Total DMA faults observed.
 static TOTAL_FAULTS: AtomicU64 = AtomicU64::new(0);
 
+/// How many units passed [`probe_unit`] -- could be turned on -- and then
+/// failed to come on: a timeout, or an invalidation the unit refused. A
+/// unit refused at probe lacks something remapping needs; one counted here
+/// is a fault in the unit or in this module, which [`self_test`] reports.
+static UNITS_FAILED: AtomicU32 = AtomicU32::new(0);
+
 /// Held across every change to a context entry and every invalidation once
-/// the units are on: a unit's invalidation registers take one request at a
-/// time, and a context entry is read, checked and rewritten in steps.
+/// the units are on: a context entry is read, checked and rewritten in
+/// steps, and a unit's invalidation registers take one request at a time.
+/// (Its queue has a lock of its own, [`QUEUES`], which this lock never
+/// needs to be held to take.)
 /// Taken by the public entry points ([`attach_device`], [`detach_device`],
 /// [`unmap_dma`]); the helpers they call assume it is held.
 static REMAP_LOCK: Mutex<()> = Mutex::new(());
@@ -548,6 +556,7 @@ pub fn init() -> KernelResult<()> {
             }
             Err(e) => {
                 serial_println!("[iommu_remap]   unit {} not enabled: {:?}", i, e);
+                UNITS_FAILED.fetch_add(1, Ordering::Relaxed);
                 // Left off, as a unit refused at probe is. A failure is said,
                 // and the unit is off either way.
                 let _ = disable_protected_memory(mmio);
@@ -572,8 +581,8 @@ pub fn init() -> KernelResult<()> {
 /// Every unit is quiesced first, whether or not it can be turned on:
 /// translation, interrupt remapping and queued invalidation the firmware
 /// left on would keep devices using the firmware's tables and queue --
-/// memory the kernel now owns -- and queued invalidation forbids the
-/// register-based invalidations this module uses.
+/// memory the kernel now owns -- and [`enable_unit`] builds its own queue,
+/// or invalidates through registers a running queue would refuse.
 fn probe_unit(register_base: u64) -> KernelResult<(u64, bool)> {
     // SAFETY: a DRHD's register base is its unit's register block: device
     // memory.
@@ -651,20 +660,12 @@ fn quiesce_unit(mmio: u64) -> KernelResult<()> {
         serial_println!("[iommu_remap]   interrupt remapping the firmware left on: turned off");
     }
     if status & gsts::QIES != 0 {
-        let mut drained = false;
-        for _ in 0..INVALIDATION_POLLS {
-            if read_reg64(mmio, reg::IQH) == read_reg64(mmio, reg::IQT) {
-                drained = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        if !drained {
-            serial_println!("[iommu_remap]   the firmware's invalidation queue never drained");
+        if !drain_and_stop_queue(mmio) {
+            serial_println!(
+                "[iommu_remap]   the firmware's invalidation queue would not drain and turn off"
+            );
             return Err(KernelError::TimedOut);
         }
-        gcmd(mmio, 0, gcmd::QIE);
-        wait_for_status(mmio, gsts::QIES, false)?;
         serial_println!("[iommu_remap]   queued invalidation the firmware left on: turned off");
     }
     Ok(())
@@ -728,9 +729,26 @@ fn build_pass_through_tables(hhdm: u64) -> KernelResult<u64> {
 /// first, where it has one -- invalidate everything it cached, and turn
 /// translation on.
 fn enable_unit(index: usize, mmio: u64, root: u64) -> KernelResult<()> {
-    if read_reg64(mmio, reg::ECAP) & ecap::QI != 0 {
-        enable_queue(index, mmio)?;
+    // A unit whose queue will not come on is invalidated through its
+    // registers instead: that loses nothing DMA remapping needs.
+    if read_reg64(mmio, reg::ECAP) & ecap::QI != 0
+        && let Err(e) = enable_queue(index, mmio)
+    {
+        serial_println!(
+            "[iommu_remap]   queued invalidation could not be turned on ({:?}): registers instead",
+            e
+        );
     }
+    let enabled = enable_translation(index, mmio, root);
+    if enabled.is_err() {
+        // Left off, its queue with it: a unit left off is quiet.
+        disable_queue(index, mmio);
+    }
+    enabled
+}
+
+/// [`enable_unit`] after the queue: the root table, its invalidations, TE.
+fn enable_translation(index: usize, mmio: u64, root: u64) -> KernelResult<()> {
     write_reg64(mmio, reg::RTADDR, root);
     gcmd(mmio, gcmd::SRTP, 0);
     wait_for_status(mmio, gsts::RTPS, true)?;
@@ -739,8 +757,8 @@ fn enable_unit(index: usize, mmio: u64, root: u64) -> KernelResult<()> {
         wait_for_status(mmio, gsts::WBFS, false)?;
     }
     // A new root table: every context and translation it cached is stale.
-    invalidate_context_global(mmio)?;
-    invalidate_iotlb(mmio, None, true)?;
+    invalidate_context_global(index, mmio)?;
+    invalidate_iotlb(index, mmio, None, true)?;
     gcmd(mmio, gcmd::TE, 0);
     wait_for_status(mmio, gsts::TES, true)?;
     serial_println!("[iommu_remap]   Translation enabled");
@@ -784,8 +802,8 @@ fn sync_tables(phys: u64, len: usize, hhdm: u64) {
 
 /// Invalidate every context a unit cached: a global context-cache
 /// invalidation, on its queue where it has one, else through CCMD.
-fn invalidate_context_global(mmio: u64) -> KernelResult<()> {
-    if let Some(done) = queue_run(mmio, &[[desc::CONTEXT | desc::CONTEXT_GLOBAL, 0]]) {
+fn invalidate_context_global(index: usize, mmio: u64) -> KernelResult<()> {
+    if let Some(done) = queue_run(index, mmio, &[[desc::CONTEXT | desc::CONTEXT_GLOBAL, 0]]) {
         return done;
     }
     const ICC: u64 = 1 << 63;
@@ -797,7 +815,12 @@ fn invalidate_context_global(mmio: u64) -> KernelResult<()> {
 /// Invalidate a unit's IOTLB: domain `did`'s translations, or every one.
 /// With `drain_first`, in-flight DMA is drained first where the unit can:
 /// after an unmap, no read or write may still use the old translation.
-fn invalidate_iotlb(mmio: u64, did: Option<DomainId>, drain_first: bool) -> KernelResult<()> {
+fn invalidate_iotlb(
+    index: usize,
+    mmio: u64,
+    did: Option<DomainId>,
+    drain_first: bool,
+) -> KernelResult<()> {
     const IVT: u64 = 1 << 63;
     let cap_val = read_reg64(mmio, reg::CAP);
     let drain_reads = drain_first && cap_val & cap::DRD != 0;
@@ -816,7 +839,7 @@ fn invalidate_iotlb(mmio: u64, did: Option<DomainId>, drain_first: bool) -> Kern
         } else {
             0
         };
-    if let Some(done) = queue_run(mmio, &[[queued, 0]]) {
+    if let Some(done) = queue_run(index, mmio, &[[queued, 0]]) {
         return done;
     }
     let iro = (read_reg64(mmio, reg::ECAP) & ecap::IRO_MASK) >> ecap::IRO_SHIFT;
@@ -881,10 +904,15 @@ mod desc {
     pub const WAIT_STATUS_SHIFT: u32 = 32;
 }
 
-/// FSTS's invalidation errors: a descriptor the unit could not take (IQE),
-/// a completion it could not report (ICE), a device that never answered a
-/// device-TLB invalidation (ITE). Each is cleared by writing it back.
-const FSTS_QUEUE_ERRORS: u32 = (1 << 4) | (1 << 5) | (1 << 6);
+/// FSTS's invalidation queue error (IQE): the unit could not take the
+/// descriptor at the queue's head, and fetches nothing more until it is
+/// cleared -- after which it fetches that descriptor again.
+const FSTS_IQE: u32 = 1 << 4;
+/// FSTS's invalidation completion error (ICE: a device answered a
+/// device-TLB invalidation the unit did not expect) and time-out error (ITE:
+/// a device never answered one). This module sends no device-TLB
+/// invalidations, so either means something is wrong with the unit.
+const FSTS_ICE_ITE: u32 = (1 << 5) | (1 << 6);
 
 /// Descriptors on one queue: one 4 KiB page of 16-byte descriptors (IQA's
 /// size field 0).
@@ -892,23 +920,43 @@ const QUEUE_ENTRIES: u32 = 256;
 
 /// One unit's invalidation queue.
 struct Queue {
-    /// The unit's registers.
-    mmio: u64,
-    /// The descriptor page, and the page the wait descriptors write their
-    /// status to (its first word).
+    /// The page of descriptors.
     descs_phys: u64,
+    /// The page whose first word the wait descriptors write their status to.
     status_phys: u64,
     /// Where the next descriptor goes.
     tail: u32,
     /// What the last wait wrote; the next writes one more.
     seq: u32,
+    /// A run timed out, or the queue was found with descriptors in it: the
+    /// unit may still be behind, so nothing more is put on it, and every
+    /// invalidation on the unit fails rather than overwrite entries it has
+    /// yet to read.
+    broken: bool,
 }
 
-/// Give unit `index` an invalidation queue and turn it on: a descriptor page
-/// and a status page, IQT at 0 and IQA at the page -- 128-bit descriptors,
-/// one page of them -- then QIE.
+/// The queue's head, as an index: where the unit will fetch next (IQH bits
+/// 18:4 for 128-bit descriptors).
+fn queue_head(mmio: u64) -> u32 {
+    // The index field is 15 bits, and the ring has 256 entries.
+    #[allow(clippy::cast_possible_truncation)]
+    let index = ((read_reg64(mmio, reg::IQH) >> 4) & 0x7FFF) as u32;
+    index % QUEUE_ENTRIES
+}
+
+/// Give unit `index` an invalidation queue and turn it on: its sticky
+/// queue errors cleared (they survive a reset, and one left set would stop
+/// the first fetch), a descriptor page and a status page, IQT at 0 and IQA
+/// at the page -- 128-bit descriptors, one page of them -- then QIE.
+///
+/// # Errors
+///
+/// What the page pool answers, or `TimedOut` if the queue never comes on --
+/// in which case QIE is cleared again, and the pages are kept from the pool
+/// unless the unit lets go of them.
 fn enable_queue(index: usize, mmio: u64) -> KernelResult<()> {
     let slot = QUEUES.get(index).ok_or(KernelError::InvalidArgument)?;
+    write_reg32(mmio, reg::FSTS, FSTS_IQE | FSTS_ICE_ITE);
     let descs_phys = page_table::alloc_pt_page()?;
     let status_phys = match page_table::alloc_pt_page() {
         Ok(p) => p,
@@ -922,47 +970,110 @@ fn enable_queue(index: usize, mmio: u64) -> KernelResult<()> {
     write_reg64(mmio, reg::IQA, descs_phys);
     gcmd(mmio, gcmd::QIE, 0);
     if let Err(e) = wait_for_status(mmio, gsts::QIES, true) {
-        // SAFETY: the unit never turned the queue on, so it holds neither.
-        unsafe {
-            page_table::free_pt_page(descs_phys);
-            page_table::free_pt_page(status_phys);
+        gcmd(mmio, 0, gcmd::QIE);
+        if wait_for_status(mmio, gsts::QIES, false).is_ok() {
+            // SAFETY: the queue is off, so the unit holds neither page.
+            unsafe {
+                page_table::free_pt_page(descs_phys);
+                page_table::free_pt_page(status_phys);
+            }
         }
         return Err(e);
     }
     *slot.lock() = Some(Queue {
-        mmio,
         descs_phys,
         status_phys,
         tail: 0,
         seq: 0,
+        broken: false,
     });
     serial_println!("[iommu_remap]   Queued invalidation on");
     Ok(())
 }
 
-/// Put `descs` on unit `mmio`'s invalidation queue, with a wait behind them,
-/// and return once the unit has done them all: `None` when the unit has no
-/// queue, which the caller then invalidates through its registers.
+/// Turn unit `index`'s queue off, if it has one: drained (as far as the
+/// unit will go), QIE cleared, and its pages given back once the unit has
+/// let go of them. For a unit that is being left off after its queue came
+/// on, and for [`shutdown`]'s kin.
+fn disable_queue(index: usize, mmio: u64) {
+    let Some(queue) = QUEUES.get(index).and_then(|q| q.lock().take()) else {
+        return;
+    };
+    // A queue that will not turn off keeps its pages: the unit may still
+    // read them.
+    if drain_and_stop_queue(mmio) {
+        // SAFETY: the queue is off, so the unit holds neither page.
+        unsafe {
+            page_table::free_pt_page(queue.descs_phys);
+            page_table::free_pt_page(queue.status_phys);
+        }
+    }
+}
+
+/// Wait, a bounded while, for the queue of the unit at `mmio` to drain, then
+/// turn it off: whether it is off (or was). A queue that never drains is
+/// left on, as the spec requires of one with descriptors in it. Takes no
+/// lock and prints nothing, for [`shutdown`].
+fn drain_and_stop_queue(mmio: u64) -> bool {
+    if read_reg32(mmio, reg::GSTS) & gsts::QIES == 0 {
+        return true;
+    }
+    let drained = (0..INVALIDATION_POLLS).any(|_| {
+        let empty = read_reg64(mmio, reg::IQH) == read_reg64(mmio, reg::IQT);
+        if !empty {
+            core::hint::spin_loop();
+        }
+        empty
+    });
+    if !drained {
+        return false;
+    }
+    gcmd(mmio, 0, gcmd::QIE);
+    status_reached(mmio, gsts::QIES, false)
+}
+
+/// Put `descs` on unit `index`'s invalidation queue (registers at `mmio`),
+/// with a wait behind them, and return once the unit has done them all:
+/// `None` when the unit has no queue, which the caller then invalidates
+/// through its registers.
+///
+/// The queue is empty whenever no one holds its lock, and is found so on
+/// entry or the run fails. A descriptor the unit refuses (IQE) is replaced
+/// at the queue's head by this run's wait -- Linux's `qi_check_fault` -- so
+/// the unit goes on past it, the queue drains, and the run reports the
+/// failure. A run that times out leaves the queue [`Queue::broken`].
 ///
 /// # Errors
 ///
-/// `TimedOut` when the wait never completes; `InternalError` when the unit
-/// reports an invalidation error (FSTS), which is cleared.
-fn queue_run(mmio: u64, descs: &[[u64; 2]]) -> Option<KernelResult<()>> {
-    let slot = QUEUES
-        .iter()
-        .find(|q| q.lock().as_ref().is_some_and(|q| q.mmio == mmio))?;
-    let mut guard = slot.lock();
+/// `InvalidArgument` for more descriptors than the ring holds beside a wait;
+/// `InternalError` when the unit refused a descriptor, reported an
+/// invalidation error, or the queue was not empty; `TimedOut` when the wait
+/// never completed, or the queue is broken.
+fn queue_run(index: usize, mmio: u64, descs: &[[u64; 2]]) -> Option<KernelResult<()>> {
+    let mut guard = QUEUES.get(index)?.lock();
     let q = guard.as_mut()?;
+    if q.broken {
+        return Some(Err(KernelError::TimedOut));
+    }
+    // One entry is always left empty, so a full ring is never mistaken for
+    // an empty one.
+    if descs.len().saturating_add(1) >= QUEUE_ENTRIES as usize {
+        return Some(Err(KernelError::InvalidArgument));
+    }
+    if queue_head(mmio) != q.tail {
+        q.broken = true;
+        serial_println!("[iommu_remap] invalidation queue not empty between runs: left alone");
+        return Some(Err(KernelError::InternalError));
+    }
     let Some(hhdm) = page_table::hhdm() else {
         return Some(Err(KernelError::NotSupported));
     };
-    // One more than the last, never 0: the status page starts at 0, and the
-    // word is reset to 0 before each run.
+    // One more than the last, never 0: the status word is reset to 0 before
+    // each run.
     q.seq = q.seq.wrapping_add(1).max(1);
     let status = q.status_phys.wrapping_add(hhdm) as *mut u32;
-    // SAFETY: the status page is ours, and the unit writes it only for a
-    // wait on this queue, none of which is outstanding while we hold it.
+    // SAFETY: the status page is ours, and no wait on it is outstanding:
+    // the queue is empty.
     unsafe { core::ptr::write_volatile(status, 0) };
     let wait = [
         desc::WAIT
@@ -974,41 +1085,90 @@ fn queue_run(mmio: u64, descs: &[[u64; 2]]) -> Option<KernelResult<()>> {
     let ring = q.descs_phys.wrapping_add(hhdm) as *mut [u64; 2];
     for d in descs.iter().chain(core::iter::once(&wait)) {
         // SAFETY: `tail` < QUEUE_ENTRIES, inside the descriptor page; the
-        // queue is empty while we hold it (`QUEUES`), so the unit is not
-        // reading the entry.
+        // queue is empty, so the unit is reading no entry.
         unsafe { core::ptr::write_volatile(ring.add(q.tail as usize), *d) };
         q.tail = q.tail.wrapping_add(1) % QUEUE_ENTRIES;
     }
-    sync_tables(q.descs_phys, IOMMU_PAGE_SIZE, hhdm);
-    sync_tables(q.status_phys, 64, hhdm);
+    // The unit reads the queue coherently whatever ECAP.C says (VT-d
+    // §6.5.2), so nothing is flushed: the descriptors need only be in
+    // memory's order before the tail moves.
+    core::sync::atomic::fence(Ordering::SeqCst);
     write_reg64(mmio, reg::IQT, u64::from(q.tail) << 4);
+    let mut failed = false;
     for _ in 0..INVALIDATION_POLLS {
-        sync_tables(q.status_phys, 64, hhdm);
-        // SAFETY: as above.
-        if unsafe { core::ptr::read_volatile(status) } == q.seq {
-            return Some(Ok(()));
+        let errors = read_reg32(mmio, reg::FSTS) & (FSTS_IQE | FSTS_ICE_ITE);
+        if errors & FSTS_IQE != 0 {
+            // The refused descriptor gives way to a harmless one, and the
+            // unit fetches it once the error is cleared.
+            let bad = queue_head(mmio);
+            // SAFETY: `bad` < QUEUE_ENTRIES; the unit has stopped fetching.
+            unsafe { core::ptr::write_volatile(ring.add(bad as usize), wait) };
+            core::sync::atomic::fence(Ordering::SeqCst);
+            serial_println!(
+                "[iommu_remap] invalidation queue refused descriptor {} ({:#x}): replaced",
+                bad,
+                errors
+            );
+            failed = true;
         }
-        let errors = read_reg32(mmio, reg::FSTS) & FSTS_QUEUE_ERRORS;
         if errors != 0 {
             write_reg32(mmio, reg::FSTS, errors);
-            serial_println!(
-                "[iommu_remap] invalidation queue error: FSTS {:#x}, head {:#x}",
-                errors,
-                read_reg64(mmio, reg::IQH)
-            );
-            return Some(Err(KernelError::InternalError));
+            failed |= errors & FSTS_ICE_ITE != 0;
+        }
+        if errors & FSTS_IQE != 0 {
+            // The same tail again, which moves nothing: a unit that fetches
+            // only when the tail is written (QEMU's) goes on from the head.
+            write_reg64(mmio, reg::IQT, u64::from(q.tail) << 4);
+        }
+        // SAFETY: as above. A wait from an earlier run that lands late writes
+        // an earlier `seq`.
+        let done = unsafe { core::ptr::read_volatile(status) } == q.seq
+            && (!failed || queue_head(mmio) == q.tail);
+        if done {
+            return Some(if failed {
+                Err(KernelError::InternalError)
+            } else {
+                Ok(())
+            });
         }
         core::hint::spin_loop();
     }
-    serial_println!("[iommu_remap] Timeout waiting for the invalidation queue");
+    q.broken = true;
+    serial_println!("[iommu_remap] Timeout waiting for the invalidation queue: left alone");
     Some(Err(KernelError::TimedOut))
 }
 
-/// Every unit on that can queue invalidations has its queue on, and a run
-/// of a wait alone, and of each invalidation this module makes, completes:
-/// the queue is what every invalidation goes through, so one that stopped
-/// answering would stop every map and unmap.
+/// The last two descriptors put on unit `index`'s queue -- the last run's
+/// final descriptor and its wait -- with the status the wait writes and
+/// where: for [`queue_test`] to check their encoding.
+fn queue_last_two(index: usize) -> Option<([u64; 2], [u64; 2], u32, u64)> {
+    let guard = QUEUES.get(index)?.lock();
+    let q = guard.as_ref()?;
+    let hhdm = page_table::hhdm()?;
+    let ring = q.descs_phys.wrapping_add(hhdm) as *const [u64; 2];
+    let at = |back: u32| {
+        let i = q.tail.wrapping_add(QUEUE_ENTRIES).wrapping_sub(back) % QUEUE_ENTRIES;
+        // SAFETY: `i` < QUEUE_ENTRIES, inside the descriptor page; the
+        // queue is empty, so the unit is not writing it.
+        unsafe { core::ptr::read_volatile(ring.add(i as usize)) }
+    };
+    Some((at(2), at(1), q.seq, q.status_phys))
+}
+
+/// Every unit on that can queue invalidations has its queue on; a wait
+/// alone, and each invalidation this module makes, completes on it, put
+/// there exactly as VT-d encodes it (a wrong field would complete as well,
+/// and invalidate the wrong thing); and a descriptor the unit refuses fails
+/// its run and leaves the queue working for the next.
 fn queue_test() -> KernelResult<()> {
+    fn fail(unit: usize, what: &str) -> KernelResult<()> {
+        serial_println!(
+            "[iommu_remap]   FAIL: unit {}'s invalidation queue: {}",
+            unit,
+            what
+        );
+        Err(KernelError::InternalError)
+    }
     let mut queued = 0u32;
     for (i, regs) in UNIT_REGS.iter().enumerate() {
         let mmio = regs.load(Ordering::Acquire);
@@ -1018,35 +1178,74 @@ fn queue_test() -> KernelResult<()> {
         let can = read_reg64(mmio, reg::ECAP) & ecap::QI != 0;
         let has = QUEUES.get(i).is_some_and(|q| q.lock().is_some());
         if can != has {
-            serial_println!(
-                "[iommu_remap]   FAIL: unit {} can queue invalidations: {}, has a queue: {}",
+            return fail(
                 i,
-                can,
-                has
+                "a unit that can queue has no queue, or one that cannot has",
             );
-            return Err(KernelError::InternalError);
         }
         if !has {
             continue;
         }
-        let runs = [
-            queue_run(mmio, &[]),
-            Some(invalidate_context_global(mmio)),
-            Some(invalidate_iotlb(mmio, None, true)),
-            Some(invalidate_iotlb(mmio, Some(PASS_THROUGH_DID), false)),
+        let cap_val = read_reg64(mmio, reg::CAP);
+        let drains = if cap_val & cap::DRD != 0 {
+            desc::IOTLB_DRAIN_READS
+        } else {
+            0
+        } | if cap_val & cap::DWD != 0 {
+            desc::IOTLB_DRAIN_WRITES
+        } else {
+            0
+        };
+        type Run<'a> = (&'a str, &'a dyn Fn() -> KernelResult<()>, Option<u64>);
+        let runs: [Run<'_>; 4] = [
+            (
+                "a wait alone",
+                &|| queue_run(i, mmio, &[]).unwrap_or(Err(KernelError::NotFound)),
+                None,
+            ),
+            (
+                "a global context invalidation",
+                &|| invalidate_context_global(i, mmio),
+                Some(0x11),
+            ),
+            (
+                "a global IOTLB invalidation, drained",
+                &|| invalidate_iotlb(i, mmio, None, true),
+                Some(0x12 | drains),
+            ),
+            (
+                "a domain's IOTLB invalidation",
+                &|| invalidate_iotlb(i, mmio, Some(PASS_THROUGH_DID), false),
+                Some(0x22 | (u64::from(PASS_THROUGH_DID) << 16)),
+            ),
         ];
-        if runs.iter().any(|r| !matches!(r, Some(Ok(())))) {
-            serial_println!(
-                "[iommu_remap]   FAIL: unit {}'s invalidation queue: {:?}",
-                i,
-                runs
-            );
-            return Err(KernelError::InternalError);
+        for (what, run, expected) in runs {
+            if run().is_err() {
+                return fail(i, what);
+            }
+            let Some((last, wait, seq, status_phys)) = queue_last_two(i) else {
+                return fail(i, "its descriptors could not be read back");
+            };
+            if wait != [0x65 | (u64::from(seq) << 32), status_phys] {
+                return fail(i, "a wait is not encoded as VT-d encodes it");
+            }
+            if expected.is_some_and(|low| last != [low, 0]) {
+                serial_println!("[iommu_remap]   {}: {:#x?}", what, last);
+                return fail(i, "an invalidation is not encoded as VT-d encodes it");
+            }
+        }
+        // A descriptor of a type VT-d does not define: refused, and the run
+        // says so; the next run works.
+        if queue_run(i, mmio, &[[0xF, 0]]) != Some(Err(KernelError::InternalError)) {
+            return fail(i, "a refused descriptor did not fail its run");
+        }
+        if queue_run(i, mmio, &[]) != Some(Ok(())) {
+            return fail(i, "the queue did not work again after a refused descriptor");
         }
         queued = queued.saturating_add(1);
     }
     serial_println!(
-        "[iommu_remap]   Queued invalidation: {} unit(s), a wait and each invalidation completed: OK",
+        "[iommu_remap]   Queued invalidation: {} unit(s); a wait and each invalidation completed, encoded as VT-d encodes them; a refused descriptor failed its run and the queue went on: OK",
         queued
     );
     Ok(())
@@ -1879,7 +2078,7 @@ fn flush_context_cache() -> KernelResult<()> {
 /// Invalidate domain `domain_id`'s translations on every unit with
 /// translation on: after its table changed, or a device left it.
 fn flush_iotlb_domain(domain_id: DomainId) -> KernelResult<()> {
-    for_each_unit_on(|mmio| invalidate_iotlb(mmio, Some(domain_id), true))
+    for_each_unit_on(|i, mmio| invalidate_iotlb(i, mmio, Some(domain_id), true))
 }
 
 /// Tell every unit of domain `domain_id`'s new translations as it needs:
@@ -1889,10 +2088,10 @@ fn flush_iotlb_domain(domain_id: DomainId) -> KernelResult<()> {
 /// the new entries (§6.8, Linux's `iommu_flush_write_buffer`). No DMA in
 /// flight can use a translation that did not exist, so none is drained.
 fn flush_new_mappings(domain_id: DomainId) -> KernelResult<()> {
-    for_each_unit_on(|mmio| {
+    for_each_unit_on(|i, mmio| {
         let cap_val = read_reg64(mmio, reg::CAP);
         if cap_val & cap::CM != 0 {
-            return invalidate_iotlb(mmio, Some(domain_id), false);
+            return invalidate_iotlb(i, mmio, Some(domain_id), false);
         }
         if cap_val & cap::RWBF != 0 {
             gcmd(mmio, gcmd::WBF, 0);
@@ -1904,14 +2103,14 @@ fn flush_new_mappings(domain_id: DomainId) -> KernelResult<()> {
 
 /// Run `f` on each unit with translation on, by its registers' virtual
 /// base: every unit tried, and the first failure answered.
-fn for_each_unit_on(f: impl Fn(u64) -> KernelResult<()>) -> KernelResult<()> {
+fn for_each_unit_on(f: impl Fn(usize, u64) -> KernelResult<()>) -> KernelResult<()> {
     let mut first = Ok(());
     for (i, regs) in UNIT_REGS.iter().enumerate() {
         let mmio = regs.load(Ordering::Acquire);
         if mmio == 0 {
             continue;
         }
-        if let Err(e) = f(mmio) {
+        if let Err(e) = f(i, mmio) {
             serial_println!("[iommu_remap] unit {}: invalidation failed: {:?}", i, e);
             if first.is_ok() {
                 first = Err(e);
@@ -1944,6 +2143,9 @@ pub fn shutdown() {
         if status_reached(mmio, gsts::TES, false) {
             regs.store(0, Ordering::Release);
         }
+        // The next kernel finds no queue running on pages it may reuse.
+        // Its pages stay out of the pool: this kernel is going away.
+        drain_and_stop_queue(mmio);
     }
     REMAP_ACTIVE.store(
         UNIT_REGS
@@ -2340,6 +2542,16 @@ pub fn self_test() -> KernelResult<()> {
     ];
     if ids != [16, 256, 65536, 64] {
         serial_println!("[iommu_remap]   FAIL: domain ids from CAP.ND: {:?}", ids);
+        return Err(KernelError::InternalError);
+    }
+
+    // Test 10c: every unit that could be turned on came on.
+    let failed = UNITS_FAILED.load(Ordering::Relaxed);
+    if failed != 0 {
+        serial_println!(
+            "[iommu_remap]   FAIL: {} unit(s) that could be turned on did not come on",
+            failed
+        );
         return Err(KernelError::InternalError);
     }
 

@@ -5437,12 +5437,14 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
   - [x] Its configuration space read and written through the handle, with the
         registers the kernel manages (BARs, ROM, MSI, MSI-X) refused
   - [-] Its interrupts: MSI and MSI-X vectors, and INTx for what has nothing
-        else; waitable together with channels and timers (`SYS_WAIT_MULTIPLE`
-        or completion ports take no interrupt source today); masked when its
+        else; waitable together with channels and timers (completion ports
+        take no interrupt source yet); masked when its
         process exits, so a level-triggered line cannot storm -- MSI with one
         vector is in (`SYS_PCI_DEVICE_IRQ_SETUP`/`IRQ_WAIT`, 1186/1187; the
-        MSI pool's vectors 64..=223 each have an IDT stub). Left: MSI-X,
-        INTx, several vectors, and readiness in `SYS_WAIT_MULTIPLE`
+        MSI pool's vectors 64..=223 each have an IDT stub), waitable with
+        channels and timers in `SYS_WAIT_MULTIPLE` (kind
+        `ResourceType::PciDevice`, 2026-10-28). Left: MSI-X, INTx, several
+        vectors
   - [x] DMA through the device's own IOMMU domain: arenas placed in it
         (`SYS_PCI_DEVICE_DMA_ALLOC`), revoked from the device before any path
         frees them, and the domain destroyed with the handle. Streaming maps

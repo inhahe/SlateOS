@@ -71,6 +71,9 @@ pub const KIND_PCI_DEVICE: u32 = 36;
 /// `poll(2)`'s `POLLIN`: a device handle is readable when its interrupts are
 /// counted and not yet taken.
 pub const POLLIN: u32 = 0x0001;
+/// `poll(2)`'s `POLLERR`: what a device handle answers while its MSI is not
+/// set up -- set it up before waiting on the device.
+pub const POLLERR: u32 = 0x0008;
 
 /// The PCI command register's offset in configuration space.
 pub const PCI_COMMAND: u64 = 0x04;
@@ -188,9 +191,9 @@ pub enum Exit {
     /// Step 5: the interrupt the card was made to raise did not make the
     /// device ready in `SYS_WAIT_MULTIPLE`, or was not counted.
     InterruptLost = 22,
-    /// Step 5: the device was found ready only when the wait's timeout came:
-    /// the interrupt did not wake the waiting probe.
-    WokenLate = 23,
+    /// Step 5: `SYS_WAIT_MULTIPLE` did not answer `POLLERR` for the device
+    /// while its MSI was not set up.
+    NoErrorBeforeSetUp = 23,
     /// The probe panicked: a bug in it.
     Panicked = 99,
 }
@@ -212,7 +215,7 @@ impl Exit {
         Exit::CommandRefused,
         Exit::ReadyTooSoon,
         Exit::InterruptLost,
-        Exit::WokenLate,
+        Exit::NoErrorBeforeSetUp,
         Exit::Panicked,
     ];
 

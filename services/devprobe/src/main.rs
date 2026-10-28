@@ -16,7 +16,9 @@
 //!    boot test gave the card (`52:54:00:12:34:59`), from the receive-address
 //!    registers or, failing those, the EEPROM through EERD;
 //! 4. allocates a DMA arena and writes it;
-//! 5. sets up the card's MSI and takes its (zero) pending interrupts; finds
+//! 5. finds the device `POLLERR` in `SYS_WAIT_MULTIPLE` while its MSI is
+//!    not set up; sets up the card's MSI and takes its (zero) pending
+//!    interrupts; finds
 //!    the device not ready in `SYS_WAIT_MULTIPLE`; has the card raise an
 //!    interrupt (IMS, ICS); waits for it with `SYS_WAIT_MULTIPLE`, as a
 //!    driver's event loop waits on its device beside its other handles; and
@@ -33,9 +35,9 @@
 
 use devprobe::{
     COMMAND_BUS_MASTER, COMMAND_MEMORY_SPACE, E1000E_82574, EERD, EXPECTED_MAC, Exit, ICR, ICS,
-    IMC, IMS, INTEL, KIND_PCI_DEVICE, MIN_BAR0, PCI_COMMAND, POLLIN, RAH0, RAL0, TEST_CAUSE,
-    WaitItem, eerd_data, eerd_read_command, mac_from_eeprom_words, mac_from_receive_address,
-    note_open, register_inside,
+    IMC, IMS, INTEL, KIND_PCI_DEVICE, MIN_BAR0, PCI_COMMAND, POLLERR, POLLIN, RAH0, RAL0,
+    TEST_CAUSE, WaitItem, eerd_data, eerd_read_command, mac_from_eeprom_words,
+    mac_from_receive_address, note_open, register_inside,
 };
 
 // The SlateOS ABI note, as `services/hello` carries it (see there for why it
@@ -52,7 +54,6 @@ core::arch::global_asm!(
 );
 
 const SYS_EXIT: u64 = 1;
-const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_CONSOLE_WRITE: u64 = 100;
 const SYS_PCI_DEVICE_OPEN: u64 = 1179;
 const SYS_PCI_DEVICE_BAR: u64 = 1181;
@@ -64,15 +65,13 @@ const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 const SYS_WAIT_MULTIPLE: u64 = 1066;
 
-/// How long the probe waits for the interrupt it has the card raise: 5 s,
-/// and how soon the wait must end: 1 s. The wait looks at the device again
-/// when its timeout comes, so an interrupt that landed during the wait and
-/// did not wake it would still be found -- late, which is how it is told
-/// apart. On QEMU the interrupt usually lands before the wait begins, so
-/// the wake itself is checked by the kernel's own test, which parks its
-/// waiter first (`devhandle::self_test`).
-const INTERRUPT_WAIT_NS: u64 = 5_000_000_000;
-const PROMPT_WAKE_NS: u64 = 1_000_000_000;
+/// How long the probe waits for the interrupt it has the card raise: 1 s.
+/// On QEMU it lands the moment ICS is written, before the wait begins, so
+/// the wait finds it at once: what this checks is the readiness answer,
+/// through the system call. The wake of a waiter already parked is checked
+/// by the kernel's own test, which parks its waiter first
+/// (`devhandle::self_test`).
+const INTERRUPT_WAIT_NS: u64 = 1_000_000_000;
 
 /// How many times to read EERD for one word before giving up on it.
 const EERD_POLLS: u32 = 100_000;
@@ -272,10 +271,23 @@ pub extern "C" fn _start() -> ! {
     exit(Exit::Ok);
 }
 
-/// Step 5: the card's MSI set up, with nothing pending; the device not
-/// ready in `SYS_WAIT_MULTIPLE`; an interrupt the card is made to raise
-/// (IMS, ICS), waited for there as a driver's event loop waits, and taken.
+/// Step 5: `SYS_WAIT_MULTIPLE` answering `POLLERR` before the card's MSI is
+/// set up; then the MSI set up, with nothing pending; the device not ready;
+/// an interrupt the card is made to raise (IMS, ICS), waited for there as a
+/// driver's event loop waits, and taken.
 fn interrupts(handle: u64, bar0: &Bar0) {
+    let mut item = WaitItem {
+        handle,
+        kind: KIND_PCI_DEVICE,
+        events: POLLIN,
+        ..WaitItem::default()
+    };
+    if wait_for(&mut item, 0) != 1 || item.revents & POLLERR == 0 {
+        fail(
+            Exit::NoErrorBeforeSetUp,
+            "a device with no MSI set up was not POLLERR",
+        );
+    }
     if syscall4(SYS_PCI_DEVICE_IRQ_SETUP, handle, 0, 0, 0) != 0 {
         fail(Exit::IrqSetupFailed, "the card's MSI could not be set up");
     }
@@ -285,12 +297,6 @@ fn interrupts(handle: u64, bar0: &Bar0) {
             "the card's interrupts could not be taken",
         );
     }
-    let mut item = WaitItem {
-        handle,
-        kind: KIND_PCI_DEVICE,
-        events: POLLIN,
-        ..WaitItem::default()
-    };
     if wait_for(&mut item, 0) != 0 {
         fail(
             Exit::ReadyTooSoon,
@@ -299,9 +305,7 @@ fn interrupts(handle: u64, bar0: &Bar0) {
     }
     bar0.write(IMS, TEST_CAUSE);
     bar0.write(ICS, TEST_CAUSE);
-    let started = syscall4(SYS_CLOCK_MONOTONIC, 0, 0, 0, 0);
     let ready = wait_for(&mut item, INTERRUPT_WAIT_NS);
-    let waited = syscall4(SYS_CLOCK_MONOTONIC, 0, 0, 0, 0).saturating_sub(started);
     let taken = syscall4(SYS_PCI_DEVICE_IRQ_WAIT, handle, 0, 0, 0);
     // Quiet again: every cause masked, and the one raised read away.
     bar0.write(IMC, u32::MAX);
@@ -314,12 +318,6 @@ fn interrupts(handle: u64, bar0: &Bar0) {
     }
     if taken < 1 {
         fail(Exit::InterruptLost, "the card's interrupt was not counted");
-    }
-    if !u64::try_from(waited).is_ok_and(|ns| ns < PROMPT_WAKE_NS) {
-        fail(
-            Exit::WokenLate,
-            "the card's interrupt did not wake the wait; its timeout found it",
-        );
     }
 }
 

@@ -55,12 +55,21 @@ the kernel stops the device and takes everything back.
    *As built (2026-10-27): MSI, one vector.* `SYS_PCI_DEVICE_IRQ_SETUP(h)`
    (1186) programs the device's MSI capability; `SYS_PCI_DEVICE_IRQ_WAIT(h,
    block)` (1187) takes the count, at once or after blocking until there is
-   one -- woken from the interrupt, and by the handle's close. MSI-X, INTx,
-   several vectors, and readiness in `SYS_WAIT_MULTIPLE` are still to come:
-   a wait there can block only on objects with a waiter set woken from
-   ordinary kernel context, which an interrupt is not, so until a device
-   has one a driver blocks in `IRQ_WAIT` on a thread of its own and tells
-   its main loop through an eventfd.
+   one -- woken from the interrupt, and by the handle's close. Several
+   threads may wait; every interrupt wakes them all, and whoever takes the
+   count has it.
+
+   *As built (2026-10-28): readiness in `SYS_WAIT_MULTIPLE`.* A device
+   handle is a kind there (`ResourceType::PciDevice`): `POLLIN` while its
+   interrupts are counted and not yet taken, `POLLHUP` once it is closed,
+   `POLLERR` while its MSI is not set up -- set it up before waiting on the
+   device. So a driver's one thread waits on its device, its channels and
+   its timers together (§1578), and takes the interrupts with `IRQ_WAIT`'s
+   non-blocking form. Each vector keeps a waiter set the interrupt handler
+   try-locks and wakes, a wake it cannot make being owed to the next tick;
+   the wait resolves the device's vector once and registers, tests and lets
+   go on that one vector. MSI-X, INTx and several vectors are still to
+   come.
 5. **Closing releases everything, in the safe order.** On the handle's last
    close -- including when the process exits or crashes -- the kernel turns
    bus mastering off first, so the device stops reading and writing memory;

@@ -138,10 +138,11 @@ pub enum WaitTarget {
     /// playback substream's room, or ends a drain
     /// ([`crate::audio_mixer::register_room_waiter`]).
     AlsaPcm(u64),
-    /// A device handle's raw value (`crate::devhandle`): woken by each of
-    /// the device's interrupts, and by its close
-    /// ([`crate::devhandle::watch_irq`]).
-    Device(u64),
+    /// A device handle's raw value (`crate::devhandle`) and the MSI vector
+    /// its interrupts arrive on, looked up once when the wait was set up
+    /// ([`crate::devhandle::irq_vector`]): woken by each of the device's
+    /// interrupts, and by its close ([`crate::devhandle::watch_irq`]).
+    Device { raw: u64, vector: u8 },
     /// [`super::epoll::EpollHandle`] raw value — the instance's
     /// **interest-set-change** notification, *not* its readiness.
     ///
@@ -204,7 +205,7 @@ impl WaitTarget {
             }
             // One set for every substream: the pump's take changes them all.
             Self::AlsaPcm(_) => crate::audio_mixer::register_room_waiter(task),
-            Self::Device(raw) => crate::devhandle::watch_irq(raw, task),
+            Self::Device { raw, vector } => crate::devhandle::watch_irq(raw, vector, task),
             Self::EpollCtl(raw) => {
                 super::epoll::register_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }
@@ -260,7 +261,7 @@ impl WaitTarget {
                 );
             }
             Self::AlsaPcm(_) => crate::audio_mixer::deregister_room_waiter(task),
-            Self::Device(raw) => crate::devhandle::unwatch_irq(raw, task),
+            Self::Device { vector, .. } => crate::devhandle::unwatch_irq(vector, task),
             Self::EpollCtl(raw) => {
                 super::epoll::deregister_waiter(super::epoll::EpollHandle::from_raw(raw), task);
             }

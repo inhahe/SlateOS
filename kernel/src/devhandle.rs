@@ -13,8 +13,9 @@
 //! holder. Its holder's exit closes it with the rest of its held handles
 //! (`pcb::exit_close_fds`), before the address space its BARs and arenas are
 //! mapped in is released. Interrupts are MSI, one vector, taken or waited
-//! for through the handle (`msi` delivers them); MSI-X, INTx and readiness
-//! in `SYS_WAIT_MULTIPLE` are not here yet (roadmap.md 2.1).
+//! for through the handle (`msi` delivers them), or waited for beside other
+//! handles in `SYS_WAIT_MULTIPLE` ([`irq_vector`], [`watch_irq`]); MSI-X and
+//! INTx are not here yet (roadmap.md 2.1).
 
 use crate::error::{KernelError, KernelResult};
 use crate::iommu_remap::{self, Caller, DmaPerms};
@@ -86,6 +87,17 @@ struct Device {
     msi: Option<crate::msi::MsiConfig>,
     /// An MSI set-up in progress (made outside the table's lock).
     msi_busy: bool,
+}
+
+impl Device {
+    /// Its MSI vector, once [`irq_setup`] has set one up: `InvalidArgument`
+    /// before.
+    fn msi_vector(&self) -> KernelResult<u8> {
+        self.msi
+            .as_ref()
+            .map(|c| c.allocated_vector)
+            .ok_or(KernelError::InvalidArgument)
+    }
 }
 
 /// A DMA arena: memory the device may read and write, mapped in its owner
@@ -429,12 +441,7 @@ pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
 /// is closed, waiting or not; `Interrupted` when a signal or a freeze comes
 /// for `pid` while it waits.
 pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
-    let vector = with_owned(raw, pid, |d| {
-        d.msi
-            .as_ref()
-            .map(|c| c.allocated_vector)
-            .ok_or(KernelError::InvalidArgument)
-    })?;
+    let vector = with_owned(raw, pid, |d| d.msi_vector())?;
     if !block {
         return crate::msi::take(vector, raw).ok_or(KernelError::InvalidHandle);
     }
@@ -466,45 +473,50 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
     taken
 }
 
-/// The MSI vector of the device `raw` names, if it is open and its MSI is
-/// set up.
-fn vector_of(raw: u64) -> KernelResult<u8> {
+/// For `SYS_WAIT_MULTIPLE`, when it resolves a device handle: the MSI
+/// vector its interrupts arrive on, which a wait on the device registers on,
+/// tests and lets go of -- looked up this once, so that an MSI set up or a
+/// close in the middle of the wait cannot make the three disagree.
+/// `InvalidArgument` while its MSI is not set up, nothing then being able to
+/// make it ready; `InvalidHandle` when it is closed. The caller has checked
+/// that its process holds `raw`.
+pub fn irq_vector(raw: u64) -> KernelResult<u8> {
     DEVICES
         .lock()
         .iter()
         .find(|d| d.raw == raw)
         .ok_or(KernelError::InvalidHandle)?
-        .msi
-        .as_ref()
-        .map(|c| c.allocated_vector)
-        .ok_or(KernelError::InvalidArgument)
+        .msi_vector()
 }
 
-/// For `SYS_WAIT_MULTIPLE`: how many of the device's interrupts are counted
-/// and not yet taken, left where they are. `InvalidArgument` when its MSI is
-/// not set up -- it cannot become ready -- and `InvalidHandle` when the
-/// device is closed. The caller has checked that its process holds `raw`.
-pub fn irq_readiness(raw: u64) -> KernelResult<u64> {
-    let vector = vector_of(raw)?;
-    crate::msi::pending(vector, raw).ok_or(KernelError::InvalidHandle)
+/// The target a wait on the device `raw` parks on: its interrupts on
+/// `vector` ([`irq_vector`]), which wake it, as its close does.
+#[must_use]
+pub fn wait_target(raw: u64, vector: u8) -> crate::ipc::multiwait::WaitTarget {
+    crate::ipc::multiwait::WaitTarget::Device { raw, vector }
 }
 
-/// For `SYS_WAIT_MULTIPLE`: `task` is woken by the device's next interrupt,
-/// and by its close. Nothing when there is nothing to wait for -- the device
-/// closed, or no MSI set up -- which the readiness test reports instead.
-pub fn watch_irq(raw: u64, task: crate::sched::task::TaskId) {
-    if let Ok(vector) = vector_of(raw) {
-        // Refused only when the device was closed in between, which wakes
-        // its waiters anyway: there is nothing left to wait for.
-        let _closed = crate::msi::register_waiter(vector, raw, task);
-    }
+/// The device's interrupts counted on `vector` and not yet taken, left where
+/// they are; `None` once the device no longer has the vector -- closed.
+#[must_use]
+pub fn irq_pending(raw: u64, vector: u8) -> Option<u64> {
+    crate::msi::pending(vector, raw)
 }
 
-/// Undo [`watch_irq`]. A device closed since has let its waiters go already.
-pub fn unwatch_irq(raw: u64, task: crate::sched::task::TaskId) {
-    if let Ok(vector) = vector_of(raw) {
-        crate::msi::unregister_waiter(vector, task);
-    }
+/// `task` is woken by the device's next interrupt on `vector`, and by its
+/// close. Nothing when it has closed already, which [`irq_pending`] then
+/// says.
+pub fn watch_irq(raw: u64, vector: u8, task: crate::sched::task::TaskId) {
+    // Refused only when the device has closed, whose release wakes its
+    // waiters: there is nothing left to wait for.
+    let _closed = crate::msi::register_waiter(vector, raw, task);
+}
+
+/// Undo [`watch_irq`]: on the same vector, whatever has happened to the
+/// device since, so the task is never left behind in a set it does not
+/// wait on.
+pub fn unwatch_irq(vector: u8, task: crate::sched::task::TaskId) {
+    crate::msi::unregister_waiter(vector, task);
 }
 
 /// The IOMMU domain of the device `raw` names, if `pid` owns it.
@@ -807,80 +819,110 @@ fn unmap_bar(pml4: u64, owner: ProcessId, bar: &MappedBar) {
     crate::proc::pcb::remove_foreign_region(owner, bar.user_virt, end);
 }
 
-/// The blocking-wait tests' worker: waits on the device its statics name,
-/// as a driver's interrupt thread would -- in [`irq_wait`], or with
-/// `SYS_WAIT_MULTIPLE`'s machinery ([`WAITER_MULTI`]) -- and leaves the
-/// outcome behind.
-static WAITER_RAW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static WAITER_OWNER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-static WAITER_RESULT: core::sync::atomic::AtomicI64 = core::sync::atomic::AtomicI64::new(WAITING);
-/// Wait as `SYS_WAIT_MULTIPLE` does on a device handle, not in `irq_wait`.
-static WAITER_MULTI: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-/// How long the worker's wait lasted, in nanoseconds.
-static WAITER_WAITED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-/// [`WAITER_RESULT`] while the worker has not answered.
-const WAITING: i64 = i64::MIN;
-/// How long a multiwait worker waits at most: five times the second its
-/// wake must come within, so a wake that never comes is not mistaken for a
-/// slow one.
-const MULTIWAIT_TIMEOUT_NS: u64 = 5_000_000_000;
-
-extern "C" fn irq_waiter(_arg: u64) {
-    use core::sync::atomic::Ordering;
-    let raw = WAITER_RAW.load(Ordering::SeqCst);
-    let owner = WAITER_OWNER.load(Ordering::SeqCst);
-    let started = crate::hrtimer::now_ns();
-    let outcome = if WAITER_MULTI.load(Ordering::SeqCst) {
-        crate::ipc::multiwait::wait_multiple(
-            &[crate::ipc::multiwait::WaitTarget::Device(raw)],
-            Some(MULTIWAIT_TIMEOUT_NS),
-            || usize::from(irq_readiness(raw).is_ok_and(|count| count > 0)),
-        )
-        .map(|ready| u64::try_from(ready).unwrap_or(u64::MAX))
-    } else {
-        irq_wait(raw, owner, true)
-    };
-    let answer = match outcome {
-        Ok(count) => i64::try_from(count).unwrap_or(i64::MAX),
-        Err(e) => i64::from(e.code()),
-    };
-    WAITER_WAITED.store(
-        crate::hrtimer::now_ns().saturating_sub(started),
-        Ordering::SeqCst,
-    );
-    WAITER_RESULT.store(answer, Ordering::SeqCst);
+/// One worker of the blocking-wait tests: what it waits on, how, and what
+/// it found.
+struct TestWaiter {
+    raw: core::sync::atomic::AtomicU64,
+    owner: core::sync::atomic::AtomicU64,
+    /// Wait as `SYS_WAIT_MULTIPLE` waits on a device handle, not in
+    /// [`irq_wait`].
+    multi: core::sync::atomic::AtomicBool,
+    /// `irq_wait`'s count or error code; for a multiwait, the `revents` it
+    /// found (0 at its timeout); [`WAITING`] until it answers.
+    result: core::sync::atomic::AtomicI64,
 }
 
-/// Start the worker on `raw` -- waiting in `SYS_WAIT_MULTIPLE`'s way when
+impl TestWaiter {
+    const IDLE: TestWaiter = TestWaiter {
+        raw: core::sync::atomic::AtomicU64::new(0),
+        owner: core::sync::atomic::AtomicU64::new(0),
+        multi: core::sync::atomic::AtomicBool::new(false),
+        result: core::sync::atomic::AtomicI64::new(WAITING),
+    };
+}
+
+/// Two, so that two tasks can wait on one device at once.
+static TEST_WAITERS: [TestWaiter; 2] = [TestWaiter::IDLE, TestWaiter::IDLE];
+/// [`TestWaiter::result`] while the worker has not answered.
+const WAITING: i64 = i64::MIN;
+/// How long a multiwait worker waits at most: longer than
+/// [`waiter_answer`]'s one-second patience, so a wake that never comes shows
+/// as no answer rather than a late one.
+const MULTIWAIT_TIMEOUT_NS: u64 = 5_000_000_000;
+
+extern "C" fn irq_waiter(slot: u64) {
+    use core::sync::atomic::Ordering;
+    let Some(w) = usize::try_from(slot).ok().and_then(|i| TEST_WAITERS.get(i)) else {
+        return;
+    };
+    let raw = w.raw.load(Ordering::SeqCst);
+    let answer = if w.multi.load(Ordering::SeqCst) {
+        multiwait_once(raw)
+    } else {
+        match irq_wait(raw, w.owner.load(Ordering::SeqCst), true) {
+            Ok(count) => i64::try_from(count).unwrap_or(i64::MAX),
+            Err(e) => i64::from(e.code()),
+        }
+    };
+    w.result.store(answer, Ordering::SeqCst);
+}
+
+/// Wait on the device `raw` as `SYS_WAIT_MULTIPLE` does -- its vector looked
+/// up once, its target and its answer the syscall's own -- and return the
+/// `revents` found: 0 at the timeout, an error's code if the wait failed.
+fn multiwait_once(raw: u64) -> i64 {
+    let vector = match irq_vector(raw) {
+        Ok(vector) => vector,
+        Err(e) => return i64::from(e.code()),
+    };
+    let revents = || crate::syscall::handlers::device_revents(raw, vector);
+    match crate::ipc::multiwait::wait_multiple(
+        &[wait_target(raw, vector)],
+        Some(MULTIWAIT_TIMEOUT_NS),
+        || usize::from(revents() != 0),
+    ) {
+        Ok(0) => 0,
+        Ok(_) => i64::from(revents()),
+        Err(e) => i64::from(e.code()),
+    }
+}
+
+/// Start worker `slot` on `raw` -- waiting as `SYS_WAIT_MULTIPLE` does when
 /// `multi` -- and return once it is registered for `vector` and blocked
 /// (`false` if it never got there). Blocked, not only registered: an
 /// interrupt landing between the two would be found by its scan with no
 /// wake, and the wake is what is under test.
-fn start_waiter(raw: u64, owner: ProcessId, vector: u8, multi: bool) -> bool {
+fn start_waiter(slot: usize, raw: u64, owner: ProcessId, vector: u8, multi: bool) -> bool {
     use core::sync::atomic::Ordering;
-    WAITER_RAW.store(raw, Ordering::SeqCst);
-    WAITER_OWNER.store(owner, Ordering::SeqCst);
-    WAITER_MULTI.store(multi, Ordering::SeqCst);
-    WAITER_RESULT.store(WAITING, Ordering::SeqCst);
-    let Ok(task) = crate::sched::spawn(b"devhandle-irq", 16, irq_waiter, 0, 0) else {
+    let Some(w) = TEST_WAITERS.get(slot) else {
+        return false;
+    };
+    w.raw.store(raw, Ordering::SeqCst);
+    w.owner.store(owner, Ordering::SeqCst);
+    w.multi.store(multi, Ordering::SeqCst);
+    w.result.store(WAITING, Ordering::SeqCst);
+    let before = crate::msi::waiter_count(vector);
+    let Ok(task) = crate::sched::spawn(b"devhandle-irq", 16, irq_waiter, slot as u64, 0) else {
         return false;
     };
     yield_until(|| {
-        crate::msi::waiter_count(vector) > 0
+        crate::msi::waiter_count(vector) > before
             && crate::sched::task_state(task) == Some(crate::sched::task::TaskState::Blocked)
     })
 }
 
-/// The worker's answer, once it has one.
-fn waiter_answer() -> Option<i64> {
-    use core::sync::atomic::Ordering;
-    let mut answer = None;
-    let _done = yield_until(|| {
-        let value = WAITER_RESULT.load(Ordering::SeqCst);
-        answer = (value != WAITING).then_some(value);
-        answer.is_some()
-    });
-    answer
+/// Worker `slot`'s answer, if it has one yet.
+fn answered(slot: usize) -> Option<i64> {
+    TEST_WAITERS
+        .get(slot)
+        .map(|w| w.result.load(core::sync::atomic::Ordering::SeqCst))
+        .filter(|&value| value != WAITING)
+}
+
+/// Worker `slot`'s answer, once it has one (`None` after a second without).
+fn waiter_answer(slot: usize) -> Option<i64> {
+    let _done = yield_until(|| answered(slot).is_some());
+    answered(slot)
 }
 
 /// Yield until `ready`, for at most a second (or a bounded number of
@@ -1039,13 +1081,8 @@ pub fn self_test() -> KernelResult<()> {
             if irq_setup(raw, owner) != Err(KernelError::AlreadyExists) {
                 return Err("a second MSI set-up was not refused");
             }
-            let vector = with_owned(raw, owner, |d| {
-                d.msi
-                    .as_ref()
-                    .map(|c| c.allocated_vector)
-                    .ok_or(KernelError::InvalidArgument)
-            })
-            .map_err(|_| "no vector recorded")?;
+            let vector =
+                with_owned(raw, owner, |d| d.msi_vector()).map_err(|_| "no vector recorded")?;
             // SAFETY: BAR0 is edu's register window, which nothing else in
             // the kernel maps or drives.
             let regs = unsafe { page_table::map_mmio(bar0.base, HW_PAGE) }
@@ -1073,37 +1110,59 @@ pub fn self_test() -> KernelResult<()> {
             }
             // Parked in a blocking wait, a waiter is woken by the device's
             // interrupt and takes it.
-            if !start_waiter(raw, owner, vector, false) {
+            if !start_waiter(0, raw, owner, vector, false) {
                 return Err("the blocking waiter never parked");
             }
             // SAFETY: as above.
             unsafe { reg(EDU_IRQ_RAISE).write_volatile(1) };
-            let woken = waiter_answer();
+            let woken = waiter_answer(0);
             // SAFETY: as above.
             unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
             if woken != Some(1) {
                 return Err("a parked waiter was not woken by the device's interrupt");
             }
-            // Parked as SYS_WAIT_MULTIPLE parks on a device handle, a waiter
-            // is woken by the device's interrupt -- within a second, not
-            // found when its five-second timeout comes -- and leaves the
-            // interrupt for the take.
-            if !start_waiter(raw, owner, vector, true) {
+            // Parked as SYS_WAIT_MULTIPLE parks on a device handle -- the
+            // syscall's own target and answer -- a waiter is woken by the
+            // device's interrupt, well inside its timeout, finds POLLIN, and
+            // leaves the interrupt for the take.
+            if !start_waiter(0, raw, owner, vector, true) {
                 return Err("the multiwait waiter never parked");
             }
             // SAFETY: as above.
             unsafe { reg(EDU_IRQ_RAISE).write_volatile(1) };
-            let ready = waiter_answer();
-            let waited = WAITER_WAITED.load(core::sync::atomic::Ordering::SeqCst);
+            let found = waiter_answer(0);
             // SAFETY: as above.
             unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
-            if ready != Some(1) || waited >= 1_000_000_000 {
+            let readable = crate::syscall::linux::poll_bits::POLLIN
+                | crate::syscall::linux::poll_bits::POLLRDNORM;
+            if found != Some(i64::from(readable)) {
                 return Err(
-                    "a waiter in SYS_WAIT_MULTIPLE was not woken by the device's interrupt",
+                    "a waiter in SYS_WAIT_MULTIPLE was not woken by the device's interrupt to POLLIN",
                 );
             }
             if irq_wait(raw, owner, false) != Ok(1) {
                 return Err("the interrupt a multiwait waiter saw was not left for the take");
+            }
+            // Two waiters, one interrupt: one takes it, and the other waits
+            // on -- until the close, below.
+            if !start_waiter(0, raw, owner, vector, false)
+                || !start_waiter(1, raw, owner, vector, false)
+            {
+                return Err("two blocking waiters did not both park");
+            }
+            // SAFETY: as above.
+            unsafe { reg(EDU_IRQ_RAISE).write_volatile(1) };
+            let one = yield_until(|| answered(0).is_some() || answered(1).is_some());
+            // SAFETY: as above.
+            unsafe { reg(EDU_IRQ_ACK).write_volatile(1) };
+            let (took, waits) = if answered(0).is_some() {
+                (0, 1)
+            } else {
+                (1, 0)
+            };
+            let settled = yield_until(|| crate::msi::waiter_count(vector) == 1);
+            if !one || answered(took) != Some(1) || !settled || answered(waits).is_some() {
+                return Err("of two waiters, not exactly one took the interrupt and one waited on");
             }
             // A DMA arena: where the owner sees it is its device address,
             // and the device's domain reaches it until it is freed.
@@ -1114,7 +1173,7 @@ pub fn self_test() -> KernelResult<()> {
                 return Err("the arena is not at its device address");
             }
             let Some(domain) = domain_of(raw, owner).map_err(|_| "no domain answer")? else {
-                return Ok((va, None, vector));
+                return Ok((va, None, vector, waits));
             };
             if iommu_remap::translate_bus(domain, device_addr) != Some(device_addr) {
                 return Err("the device's domain does not reach its arena");
@@ -1143,24 +1202,31 @@ pub fn self_test() -> KernelResult<()> {
             if given {
                 return Err("a forked child got the device's registers or its arena");
             }
-            Ok((va, Some((domain, kept_addr)), vector))
+            Ok((va, Some((domain, kept_addr)), vector, waits))
         })();
-        let (va, kept, vector) = match checks {
+        let (va, kept, vector, waits) = match checks {
             Ok(found) => found,
             Err(msg) => {
                 close(raw);
                 return Err(msg);
             }
         };
-        // A waiter parked when the device closes is woken, to find it gone.
-        let parked = start_waiter(raw, owner, vector, false);
+        // At the close, the waiter still parked from above, and one parked
+        // as SYS_WAIT_MULTIPLE parks, are both woken to find the device gone:
+        // InvalidHandle, and POLLHUP.
+        let multi = usize::from(waits == 0);
+        let parked = start_waiter(multi, raw, owner, vector, true);
         close(raw);
-        let woken = waiter_answer();
+        let gone = waiter_answer(waits);
+        let hung_up = waiter_answer(multi);
         if !parked {
-            return Err("the second blocking waiter never parked");
+            return Err("a multiwait waiter never parked beside the blocking one");
         }
-        if woken != Some(i64::from(KernelError::InvalidHandle.code())) {
+        if gone != Some(i64::from(KernelError::InvalidHandle.code())) {
             return Err("a waiter parked at close was not woken with InvalidHandle");
+        }
+        if hung_up != Some(i64::from(crate::syscall::linux::poll_bits::POLLHUP)) {
+            return Err("a multiwait waiter parked at close did not find POLLHUP");
         }
         if pci::bound_driver(addr).is_some() {
             return Err("the function is still bound after its last close");

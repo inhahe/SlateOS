@@ -21642,9 +21642,12 @@ enum WaitTest {
     /// A service listener: readable when a connection is waiting to be
     /// accepted. Native-only.
     Listener,
-    /// A device handle: readable when the device's interrupts are counted and
-    /// not yet taken (`SYS_PCI_DEVICE_IRQ_WAIT` takes them). Native-only.
-    Device,
+    /// A device handle, by the MSI vector its interrupts arrive on -- looked
+    /// up once, when the item is resolved, so that registering, testing and
+    /// letting go all name the same vector whatever happens to the device
+    /// meanwhile. Readable when its interrupts are counted and not yet taken
+    /// (`SYS_PCI_DEVICE_IRQ_WAIT` takes them). Native-only.
+    Device(u8),
 }
 
 /// An item that resolved to something waitable.
@@ -21656,16 +21659,19 @@ struct ResolvedWait {
     events: u16,
 }
 
-/// Map a wire `kind` onto its readiness test, or `None` if this resource type
-/// is not something one can wait on.
+/// Map a wire `kind` and the handle `raw` the caller holds onto its readiness
+/// test, or the `revents` the item answers with at once: `POLLNVAL` for a
+/// resource type that is not something one can wait on, `POLLERR` for a
+/// device whose MSI is not set up -- it is set up before it is waited on.
 ///
 /// Deliberately not a catch-all: a type absent from this list gets `POLLNVAL`,
 /// which is a better answer than silently never becoming ready. The families
 /// here are exactly those with a readiness notion — a `Process` or a `PortIo`
 /// capability has none.
-fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
+fn wait_test_for(kind: ResourceType, raw: u64) -> Result<WaitTest, u16> {
+    use super::linux::poll_bits;
     use crate::proc::linux_fd::HandleKind;
-    Some(match kind {
+    Ok(match kind {
         ResourceType::Pipe => WaitTest::Handle(HandleKind::Pipe),
         ResourceType::EventFd => WaitTest::Handle(HandleKind::EventFd),
         ResourceType::Epoll => WaitTest::Handle(HandleKind::Epoll),
@@ -21679,10 +21685,14 @@ fn wait_test_for(kind: ResourceType) -> Option<WaitTest> {
         ResourceType::Pty => WaitTest::Pty,
         ResourceType::Channel => WaitTest::Channel,
         ResourceType::Service => WaitTest::Listener,
-        ResourceType::PciDevice => WaitTest::Device,
+        ResourceType::PciDevice => match crate::devhandle::irq_vector(raw) {
+            Ok(vector) => WaitTest::Device(vector),
+            Err(KernelError::InvalidArgument) => return Err(poll_bits::POLLERR),
+            Err(_) => return Err(poll_bits::POLLNVAL),
+        },
         // A pidfd (`SYS_PIDFD_OPEN`): ready once its process has exited.
         ResourceType::Process => WaitTest::Handle(HandleKind::PidFd),
-        _ => return None,
+        _ => return Err(poll_bits::POLLNVAL),
     })
 }
 
@@ -21752,17 +21762,23 @@ fn wait_revents(test: WaitTest, raw: u64, events: u16, pid: u64) -> u16 {
                 0
             }
         }
-        // Closed while waited on: POLLHUP, as a channel whose peer went. No
-        // MSI set up: POLLERR, since nothing could ever make it ready.
-        WaitTest::Device => match crate::devhandle::irq_readiness(raw) {
-            Ok(0) => 0,
-            Ok(_) => poll_bits::POLLIN | poll_bits::POLLRDNORM,
-            Err(KernelError::InvalidArgument) => poll_bits::POLLERR,
-            Err(_) => poll_bits::POLLHUP,
-        },
+        WaitTest::Device(vector) => device_revents(raw, vector),
     };
 
     bits & (events | always)
+}
+
+/// What a device handle waited on through `vector` answers: `POLLIN` when its
+/// interrupts are counted and not yet taken, and `POLLHUP` once the device no
+/// longer has the vector -- closed while waited on, as a channel whose peer
+/// went. Shared with the device's own self-test, which waits as this does.
+pub(crate) fn device_revents(raw: u64, vector: u8) -> u16 {
+    use super::linux::poll_bits;
+    match crate::devhandle::irq_pending(raw, vector) {
+        Some(0) => 0,
+        Some(_) => poll_bits::POLLIN | poll_bits::POLLRDNORM,
+        None => poll_bits::POLLHUP,
+    }
 }
 
 /// Which waiter set(s) an item can sleep on, if any.
@@ -21782,7 +21798,7 @@ fn wait_target_for(test: WaitTest, raw: u64) -> crate::ipc::multiwait::WaitTarge
         WaitTest::Pty => WaitTarget::Pty(raw),
         WaitTest::Channel => WaitTarget::Channel(raw),
         WaitTest::Listener => WaitTarget::Listener(raw),
-        WaitTest::Device => WaitTarget::Device(raw),
+        WaitTest::Device(vector) => crate::devhandle::wait_target(raw, vector),
     }
 }
 
@@ -21839,11 +21855,6 @@ pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
             item.revents = u32::from(poll_bits::POLLNVAL);
             continue;
         };
-        let Some(test) = wait_test_for(kind) else {
-            item.revents = u32::from(poll_bits::POLLNVAL);
-            continue;
-        };
-
         // Authorise exactly as this kind's own syscalls do: the caller must
         // hold the handle. This used to be checked for ptys alone, on the
         // reading that only the pty handle space -- `(tty_id << 1) | end` -- was
@@ -21851,11 +21862,19 @@ pub fn sys_wait_multiple(args: &SyscallArgs) -> SyscallResult {
         // are counters too (A-CHANNEL-HANDLES-WERE-USABLE-BY-ANY-PROCESS).
         // Waiting must not confer authority that operating would not: an
         // unheld handle would be a readiness oracle over a stranger's object
-        // *and* would splice the caller's task into its waiter set.
+        // *and* would splice the caller's task into its waiter set. Checked
+        // before the kind is mapped, since mapping a device looks it up.
         if !pcb::owns_ipc_handle(pid, kind, item.handle) {
             item.revents = u32::from(poll_bits::POLLNVAL);
             continue;
         }
+        let test = match wait_test_for(kind, item.handle) {
+            Ok(test) => test,
+            Err(bits) => {
+                item.revents = u32::from(bits);
+                continue;
+            }
+        };
 
         #[allow(clippy::cast_possible_truncation)]
         let events = item.events as u16;

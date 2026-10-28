@@ -4074,6 +4074,7 @@ pub fn run_all() {
     // Target from baselines.toml: < 200 ns (Linux getpid: ~100 ns
     // including ring transition — our dispatch-only should be faster).
     bench_syscall_dispatch();
+    bench_msi_dispatch();
 
     // --- IPC channel send+recv round-trip ---
     //
@@ -4645,6 +4646,68 @@ fn bench_pick_next_scaling() {
 /// Measures the cost of looking up and executing SYS_TASK_ID (which just
 /// returns the current task ID — minimal work).  This is the kernel-side
 /// dispatch overhead, excluding the user↔kernel ring transition.
+/// One MSI on a claimed pool vector, sent to this CPU and seen counted: the
+/// local APIC's delivery, `msi::dispatch` -- counting it, waking the
+/// vector's waiters (none here: each costs a `sched::try_wake`, measured with
+/// the scheduler's benchmarks), EOI, the softirq check -- and the
+/// `msi::take` that sees it. `performance-targets.md` gives an interrupt's
+/// whole service 10 us.
+fn bench_msi_dispatch() {
+    // No device handle has this raw value: handles count up from 1.
+    const OWNER: u64 = u64::MAX - 1;
+    if !crate::apic::is_ready() {
+        serial_println!("[bench]   msi_dispatch: SKIP (no local APIC)");
+        return;
+    }
+    let Some(vector) = crate::msi::alloc_vector() else {
+        serial_println!("[bench]   msi_dispatch: SKIP (no MSI vector free)");
+        return;
+    };
+    if !crate::msi::claim_delivery(vector, OWNER) {
+        crate::msi::free_vector(vector);
+        serial_println!("[bench]   msi_dispatch: SKIP (the vector could not be claimed)");
+        return;
+    }
+    let mut lost = 0u32;
+    let result = run("msi_dispatch_selfipi", 500, || {
+        // SAFETY: a self-IPI on a vector of the pool, whose IDT stub only
+        // counts it; the APIC is up (checked above) and interrupts are on.
+        unsafe { crate::apic::send_self_ipi(vector) };
+        let mut counted = false;
+        for _ in 0..1_000_000 {
+            if crate::msi::take(vector, OWNER).is_some_and(|n| n > 0) {
+                counted = true;
+                break;
+            }
+            core::hint::spin_loop();
+        }
+        lost = lost.saturating_add(u32::from(!counted));
+    });
+    crate::msi::release_delivery(vector, OWNER);
+    crate::msi::free_vector(vector);
+    if lost > 0 {
+        serial_println!(
+            "[bench]   msi_dispatch: {} of the self-IPIs were never counted; the timing below is not of delivered interrupts",
+            lost
+        );
+    }
+    let target_ns = 10_000u64;
+    score("msi_dispatch", &result, target_ns);
+    if result.min_ns <= target_ns {
+        serial_println!(
+            "[bench]   msi_dispatch: PASS (min {}ns <= target {}ns)",
+            result.min_ns,
+            target_ns
+        );
+    } else {
+        serial_println!(
+            "[bench]   msi_dispatch: ABOVE TARGET (min {}ns > target {}ns)",
+            result.min_ns,
+            target_ns
+        );
+    }
+}
+
 fn bench_syscall_dispatch() {
     use crate::syscall::dispatch::{SyscallArgs, dispatch};
     use crate::syscall::number::SYS_TASK_ID;

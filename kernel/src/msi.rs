@@ -35,7 +35,7 @@
 //! Vectors 64-223 are reserved for device MSI (below: exceptions, the timer
 //! and the I/O APIC's lines; above: the IPIs and the spurious vector). Each
 //! has an IDT stub that calls [`dispatch`], which counts the interrupt for
-//! the device handle owning the vector and wakes its waiter.
+//! the device handle owning the vector and wakes its waiters.
 //!
 //! ## References
 //!
@@ -106,10 +106,11 @@ static PENDING: [AtomicU64; MSI_VECTOR_COUNT] = {
 /// The tasks waiting for each vector's interrupts -- blocked in
 /// `SYS_PCI_DEVICE_IRQ_WAIT`, or in `SYS_WAIT_MULTIPLE` on the device. Every
 /// interrupt wakes them all: whoever takes the count has it, and the rest
-/// look again. Changed only under [`DELIVERY`]; the interrupt handler reads
-/// a set only through `try_lock`, never waiting, so a set busy when an
-/// interrupt comes leaves its wake owed. A `spin::Mutex`, not the kernel's
-/// lock-tracked one: it is the one lock an interrupt handler tries.
+/// look again. Changed only under [`DELIVERY`], with interrupts off on the
+/// changing CPU ([`with_waiters`]); the interrupt handler reads a set only
+/// through `try_lock`, never waiting, so a set busy when an interrupt comes
+/// -- held on another CPU -- leaves its wake owed. A `spin::Mutex`, not the
+/// kernel's lock-tracked one: it is the one lock an interrupt handler tries.
 static WAITERS: [spin::Mutex<WaiterSet>; MSI_VECTOR_COUNT] = {
     const EMPTY: spin::Mutex<WaiterSet> = spin::Mutex::new(WaiterSet::new());
     [EMPTY; MSI_VECTOR_COUNT]
@@ -135,7 +136,7 @@ fn pool_index(vector: u8) -> Option<usize> {
 }
 
 /// An interrupt arrived on MSI `vector` (the IDT dispatcher's arm for the
-/// pool): counted for its owner, its waiter woken, the local APIC told it is
+/// pool): counted for its owner, its waiters woken, the local APIC told it is
 /// done, and the softirqs it may have raised run -- as an I/O APIC line's
 /// handler does. Interrupt context: atomics and a try-lock wake only.
 ///
@@ -188,22 +189,30 @@ pub fn claim_delivery(vector: u8, owner: u64) -> bool {
     let Some(index) = pool_index(vector) else {
         return false;
     };
-    let (Some(slot), Some(pending), Some(waiters), Some(owed)) = (
-        OWNER.get(index),
-        PENDING.get(index),
-        WAITERS.get(index),
-        WAKE_OWED.get(index),
-    ) else {
+    let (Some(slot), Some(pending), Some(owed)) =
+        (OWNER.get(index), PENDING.get(index), WAKE_OWED.get(index))
+    else {
         return false;
     };
     if owner == 0 || slot.load(Ordering::SeqCst) != 0 {
         return false;
     }
     pending.store(0, Ordering::SeqCst);
-    // Empty already -- the last release took them -- and kept so.
-    drop(waiters.lock().take_all());
     owed.store(false, Ordering::Release);
     slot.store(owner, Ordering::SeqCst);
+    // Empty: the last release took its waiters. Any left would wait on a
+    // vector that is now another device's, so they are woken -- after the
+    // lock, as every full wake is -- and said, rather than dropped.
+    let left = with_waiters(index, WaiterSet::take_all).unwrap_or_default();
+    drop(_serial);
+    if !left.is_empty() {
+        serial_println!(
+            "[msi] BUG: vector {} was claimed with {} waiter(s) left by its last owner; woken",
+            vector,
+            left.len()
+        );
+        crate::ipc::waiters::wake_all(left);
+    }
     true
 }
 
@@ -228,10 +237,7 @@ pub fn release_delivery(vector: u8, owner: u64) {
         if let Some(pending) = PENDING.get(index) {
             pending.store(0, Ordering::SeqCst);
         }
-        WAITERS
-            .get(index)
-            .map(|w| w.lock().take_all())
-            .unwrap_or_default()
+        with_waiters(index, WaiterSet::take_all).unwrap_or_default()
     };
     crate::ipc::waiters::wake_all(tasks);
 }
@@ -272,28 +278,35 @@ pub fn register_waiter(vector: u8, owner: u64, task: u64) -> crate::error::Kerne
     {
         return Err(KernelError::InvalidHandle);
     }
-    WAITERS
-        .get(index)
-        .ok_or(KernelError::InvalidHandle)?
-        .lock()
-        .insert(task);
-    Ok(())
+    with_waiters(index, |w| w.insert(task)).ok_or(KernelError::InvalidHandle)
 }
 
 /// `task` stops waiting for `vector`, if it waits.
 pub fn unregister_waiter(vector: u8, task: u64) {
     let _serial = DELIVERY.lock();
-    if let Some(waiters) = pool_index(vector).and_then(|index| WAITERS.get(index)) {
-        waiters.lock().remove(task);
+    if let Some(index) = pool_index(vector) {
+        with_waiters(index, |w| w.remove(task));
     }
 }
 
 /// How many tasks wait for `vector`.
 #[must_use]
 pub fn waiter_count(vector: u8) -> usize {
+    let _serial = DELIVERY.lock();
     pool_index(vector)
-        .and_then(|index| WAITERS.get(index))
-        .map_or(0, |w| w.lock().count())
+        .and_then(|index| with_waiters(index, |w| w.count()))
+        .unwrap_or(0)
+}
+
+/// Run `f` on the waiter set of the vector at pool `index`, from thread
+/// context: the caller holds [`DELIVERY`], which keeps it from being
+/// preempted with the set held, and interrupts are off on this CPU for the
+/// moment, so an MSI cannot land here to find its set held by the very
+/// thread it interrupted -- whose wake would then wait for the next tick.
+/// `None` for an index outside the pool.
+fn with_waiters<R>(index: usize, f: impl FnOnce(&mut WaiterSet) -> R) -> Option<R> {
+    let waiters = WAITERS.get(index)?;
+    Some(crate::cpu::without_interrupts(|| f(&mut waiters.lock())))
 }
 
 /// Wake every task waiting on the vector at pool `index`, from interrupt
@@ -325,8 +338,11 @@ pub fn is_allocated(vector: u8) -> bool {
 /// each timer tick.
 pub fn process_deferred_wakes() {
     for (index, owed) in WAKE_OWED.iter().enumerate() {
-        if owed.load(Ordering::Acquire) && wake_waiters(index) {
-            owed.store(false, Ordering::Release);
+        // Cleared before the wakes, not after: an interrupt that finds the
+        // set held by this very pass owes its wake afresh, and a clear
+        // after the pass would erase that.
+        if owed.swap(false, Ordering::AcqRel) && !wake_waiters(index) {
+            owed.store(true, Ordering::Release);
         }
     }
 }

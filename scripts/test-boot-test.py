@@ -1373,6 +1373,57 @@ def test_a_boot_whose_iommu_stayed_off_fails():
         check(label, _iommu_check(text), want)
 
 
+def _linuxdrv_check(serial_text, named):
+    """Run the real `check_linuxdrv_ran` on a serial log holding
+    `serial_text`, a module named or not: "PASS" or "FAIL", `None` on a hang.
+    """
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "serial.txt"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(serial_text)
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -uo pipefail\n"
+                + extract_shell_function("check_linuxdrv_ran") + "\n\n"
+                + f"if check_linuxdrv_ran serial.txt {named} > /dev/null; then echo PASS; "
+                  "else echo FAIL; fi\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the linuxdrv check")
+        return None if proc is None else proc.stdout.strip()
+    finally:
+        drop_fixture(tmp)
+
+
+def test_a_boot_whose_driver_process_did_not_run_fails():
+    """The boot test puts the Linux driver layer's process on the boot medium
+    and names it in limine.conf; a kernel that then could not find it or run
+    it only records a skip, which must fail the boot -- unless the harness
+    could not build it here, and so named none.
+    """
+    line = "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n"
+    verdict = ("[linuxdrv]   hello process (64192 bytes): Linux's headers and "
+               "vsprintf in a process of their own, its initcall run, and a "
+               "generated stop: OK\n")
+    ran = line + verdict
+    garbled = ("[lx] hello from Linux's own headers: 42, formatted by vsprintf, beef\n"
+               + verdict)
+    skipped = ("[linuxdrv]   SKIP: Linux driver layer's hello process -- not "
+               "loaded beside the kernel\n")
+    failed = ("[linuxdrv]   FAIL: the hello process, which should have ran its "
+              "initcall and exited 0, ended Ok(Some(-8))\n")
+    for label, text, named, want in [
+        ("a process named and run passes", ran, 1, "PASS"),
+        ("its verdict without its line, formatted right, fails", garbled, 1, "FAIL"),
+        ("its verdict alone fails", verdict, 1, "FAIL"),
+        ("a process named and skipped fails", skipped, 1, "FAIL"),
+        ("a process named whose test failed fails", failed, 1, "FAIL"),
+        ("a process named and never mentioned fails", "[boot] up\n", 1, "FAIL"),
+        ("no process named passes, whatever the log", skipped, 0, "PASS"),
+    ]:
+        check(label, _linuxdrv_check(text, named), want)
+
+
 def _append_steps(steps):
     """Shell that appends each `(elapsed, text)` to serial.txt and scans it.
 

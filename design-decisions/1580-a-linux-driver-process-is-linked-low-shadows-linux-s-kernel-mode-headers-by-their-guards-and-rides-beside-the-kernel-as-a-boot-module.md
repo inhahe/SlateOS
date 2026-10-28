@@ -37,11 +37,18 @@ header; and a file the bootloader loads beside the kernel.
    pinned tree on every build -- a pin move that renames a guard fails the
    build instead of letting both versions in. The first is
    `<asm/irqflags.h>`: interrupts "off" is a flag the layer keeps, and no
-   handler runs while it is clear (§1578 rule 5).
+   handler runs while it is clear (§1578 rule 5). The second is
+   `<asm/bug.h>`: Linux's WARN() and BUG() execute `ud2` for the kernel's
+   invalid-opcode handler to report, which in a program would kill the
+   driver at its first warning; here they call the layer, which says a
+   warning (once, for WARN_ONCE) and goes on, and ends the process on a
+   BUG().
 3. **Generated stops for functions, hand-written data.** Every symbol the
    link would leave undefined and that is only ever *called* (only
    `R_X86_64_PLT32` relocations) becomes a generated stop: a function that
-   prints its own name and ends the process with exit code 125. A symbol
+   prints its own name and its caller's address (for the symbol table the
+   driver's file keeps) and ends the process with exit code 125, which
+   nothing else exits with. A symbol
    referenced any other way is data, which a function cannot stand in for:
    the build refuses until it is written by hand (the first three were
    vsprintf's flag-name tables).
@@ -54,7 +61,11 @@ header; and a file the bootloader loads beside the kernel.
    its tree, which lives in WSL's filesystem (§1578 rule 6); the layer's
    Rust half (`linuxdrv/kit`, a workspace member) is built by cargo as a
    static library and linked there by `linux-tree.sh driver <name>`. The
-   boot test builds both, and a driver that no longer builds stops the run.
+   boot test builds both, and a driver that no longer builds stops the run;
+   a host that cannot build them at all (no WSL, no toolchain, offline on
+   the first fetch: the script's exit 3) runs the boot test without them,
+   saying so, since the boot test must run on a host with only Rust and
+   QEMU. A boot whose medium carried one must show it ran.
 
 ### The alternatives
 
@@ -76,6 +87,9 @@ header; and a file the bootloader loads beside the kernel.
 - Every boot medium that runs a Linux driver must stage it beside the
   kernel and name it in `limine.conf`: the boot test does; the USB image
   builder will when the first real driver runs on the test PC.
+- The tree and its objects are one per machine, shared by every lane's
+  worktree, so builds of it take a lock and run one at a time; and lanes
+  whose `linux.config` differ rebuild it in turn.
 - Each shadow is a promise to match a Linux header's interface by hand;
   the guard check catches a renamed header, not a changed function in it.
   Shadows are few, and each is checked against its original when the pin

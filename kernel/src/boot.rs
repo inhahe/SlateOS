@@ -123,8 +123,9 @@ static MODULE_REQUEST: LimineRequest<ModuleResponse> = LimineRequest::MODULE;
 // Public accessors
 // ---------------------------------------------------------------------------
 
-/// The NUL-terminated string at `ptr`, at most `max` bytes, without its
-/// terminator: `None` for a null pointer or one with no terminator in reach.
+/// The NUL-terminated string at `ptr`, without its terminator, and cut at
+/// `max` bytes should it run on so far -- a bound, so that a malformed
+/// pointer cannot make a runaway scan. `None` for a null pointer.
 ///
 /// # Safety
 ///
@@ -135,8 +136,10 @@ unsafe fn limine_str(ptr: *const u8, max: usize) -> Option<&'static [u8]> {
         return None;
     }
     // SAFETY: the caller's; the scan stops at the terminator or `max`.
-    let len = (0..max).find(|&i| unsafe { ptr.add(i).read() } == 0)?;
-    // SAFETY: `len` bytes before the terminator, all read above.
+    let len = (0..max)
+        .find(|&i| unsafe { ptr.add(i).read() } == 0)
+        .unwrap_or(max);
+    // SAFETY: `len` bytes before the terminator or the bound, all read above.
     Some(unsafe { core::slice::from_raw_parts(ptr, len) })
 }
 
@@ -424,27 +427,7 @@ pub fn kernel_cmdline_bytes() -> Option<&'static [u8]> {
     // SAFETY: Limine guarantees the response and file descriptor are valid and
     // live for the entire kernel lifetime.
     let file = unsafe { &*file_ptr };
-    if file.cmdline.is_null() {
-        return None;
-    }
-    // Measure the null-terminated cmdline length, capped to a sane bound so a
-    // malformed pointer cannot cause a runaway scan.
     const MAX_CMDLINE: usize = 4096;
-    let mut len = 0usize;
-    while len < MAX_CMDLINE {
-        // SAFETY: file.cmdline is a non-null, null-terminated string from Limine
-        // that lives for the kernel lifetime. We read at most MAX_CMDLINE bytes
-        // and stop at the terminator, never reading past the allocation.
-        let byte = unsafe { *file.cmdline.add(len) };
-        if byte == 0 {
-            break;
-        }
-        len = len.saturating_add(1);
-    }
-    if len == 0 {
-        return None;
-    }
-    // SAFETY: bytes 0..len are valid, initialized, and live for the kernel
-    // lifetime per the Limine guarantee above.
-    Some(unsafe { core::slice::from_raw_parts(file.cmdline, len) })
+    // SAFETY: a string Limine gave, live for the kernel's lifetime.
+    unsafe { limine_str(file.cmdline, MAX_CMDLINE) }.filter(|line| !line.is_empty())
 }

@@ -82,6 +82,8 @@ impl<T> Single<T> {
     ///
     /// No other reference to it is live: the process's one thread does not
     /// re-enter the function that holds it.
+    // A `&mut` from `&self` is this cell's purpose: one thread, which the
+    // module's documentation says, and the caller promises not to re-enter.
     #[allow(clippy::mut_from_ref)]
     unsafe fn get(&self) -> &mut T {
         // SAFETY: the caller's.
@@ -195,14 +197,28 @@ fn exit_with(code: i32) -> ! {
     }
 }
 
-/// `slx_log`: write `len` bytes at `text` to the console.
+/// `slx_log`: write `len` bytes at `text` to the console: in as many calls
+/// as the kernel needs, since one takes at most a few KiB and says how many.
+/// A call that takes none ends it, what is left unsaid.
 ///
 /// # Safety
 ///
 /// `text` points at `len` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slx_log(text: *const u8, len: usize) {
-    syscall3(SYS_CONSOLE_WRITE, text as u64, len as u64, 0);
+    let mut done = 0usize;
+    while done < len {
+        let took = syscall3(
+            SYS_CONSOLE_WRITE,
+            text.wrapping_add(done) as u64,
+            len.saturating_sub(done) as u64,
+            0,
+        );
+        match usize::try_from(took) {
+            Ok(n) if n > 0 => done = done.saturating_add(n),
+            _ => return,
+        }
+    }
 }
 
 /// `slx_alloc`: `size` bytes aligned to their own size rounded up to a
@@ -252,7 +268,7 @@ pub unsafe extern "C" fn slx_random(buf: *mut u8, len: usize) {
             Ok(n) if n > 0 => done = done.saturating_add(n),
             _ => {
                 log(b"[lx] the system gave no random bytes\n");
-                exit_with(exit::STOP);
+                exit_with(exit::NO_RANDOM);
             }
         }
     }
@@ -290,23 +306,32 @@ pub extern "C" fn slx_exit(code: i32) -> ! {
 }
 
 /// `slx_stop`: Linux code reached `what` (NUL-terminated), which the layer
-/// does not implement: said, and the process ends with [`exit::STOP`].
+/// does not implement, called from `caller`: said -- the caller's address,
+/// for the driver's symbol table, which its file keeps -- and the process
+/// ends with [`exit::STOP`].
 ///
 /// # Safety
 ///
 /// `what` is a NUL-terminated string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn slx_stop(what: *const u8) -> ! {
+pub unsafe extern "C" fn slx_stop(what: *const u8, caller: usize) -> ! {
     log(b"[lx] stop: Linux code reached ");
     // SAFETY: the caller's: a generated stop passes its own name.
     let name = unsafe { core::ffi::CStr::from_ptr(what.cast()) };
     log(name.to_bytes());
-    log(b", which the layer does not implement\n");
+    log(b", which the layer does not implement, called from 0x");
+    let mut hex = [0u8; 16];
+    for (i, digit) in hex.iter_mut().enumerate() {
+        let nibble = (caller >> (60usize.saturating_sub(i.saturating_mul(4)))) & 0xF;
+        *digit = b"0123456789abcdef".get(nibble).copied().unwrap_or(b'?');
+    }
+    log(&hex);
+    log(b"\n");
     exit_with(exit::STOP)
 }
 
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo<'_>) -> ! {
     log(b"[lx] the layer's Rust half panicked\n");
-    exit_with(exit::STOP)
+    exit_with(exit::PANIC)
 }

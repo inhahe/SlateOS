@@ -315,6 +315,10 @@ mod tests {
         let mut r = region(12);
         let a = r.buddy.alloc(64).unwrap();
         assert!(!r.buddy.free(a + 16), "inside a block");
+        assert!(
+            !r.buddy.free(a + 8),
+            "inside a block, off a 16-byte boundary"
+        );
         assert!(!r.buddy.free(a + (1 << 12)), "past the region");
         assert!(!r.buddy.free(a.wrapping_sub(1 << 20)), "before it");
         assert!(r.buddy.free(a));

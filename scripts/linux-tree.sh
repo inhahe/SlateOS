@@ -33,6 +33,11 @@
 set -euo pipefail
 
 die() { echo "linux-tree: $*" >&2; exit 1; }
+# What this host lacks to build at all -- WSL, the toolchain, the network to
+# fetch the tree the first time -- is exit 3, not 1, so that the boot test
+# can tell "cannot build here" (it skips the driver processes, saying so)
+# from "does not build" (it fails).
+die_env() { echo "linux-tree: cannot build on this host: $*" >&2; exit 3; }
 
 case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*)
@@ -45,6 +50,9 @@ case "$(uname -s)" in
         esac
         # WSL imports only the variables WSLENV names: the tree's location
         # is a WSL path, passed as it is.
+        command -v wsl.exe >/dev/null 2>&1 || die_env "no WSL"
+        wsl.exe -d "$distro" -e true >/dev/null 2>&1 ||
+            die_env "no WSL distribution '$distro' (\$SLATEOS_WSL_DISTRO)"
         exec env MSYS2_ARG_CONV_EXCL='*' MSYS2_ENV_CONV_EXCL='SLATEOS_LINUX_ROOT' WSLENV="SLATEOS_LINUX_ROOT${WSLENV:+:$WSLENV}" \
             wsl.exe -d "$distro" -e bash "/mnt$self" "$@"
         ;;
@@ -84,7 +92,7 @@ llvm_setting() {
     fi
     local dir
     dir=$(find /usr/lib -maxdepth 1 -name 'llvm-*' -type d 2>/dev/null | sort -V | tail -1)
-    [ -n "$dir" ] && [ -x "$dir/bin/llvm-ar" ] || die "no LLVM toolchain (llvm-ar) found"
+    [ -n "$dir" ] && [ -x "$dir/bin/llvm-ar" ] || die_env "no LLVM toolchain (llvm-ar) found"
     echo "$dir/bin/"
 }
 
@@ -122,7 +130,7 @@ fetch() {
     local dl="$root/dl/$tarball"
     if ! { [ -f "$dl" ] && echo "$sha  $dl" | sha256sum -c --status; }; then
         echo "linux-tree: fetching $url"
-        curl -fL --retry 3 -o "$dl.part" "$url"
+        curl -fL --retry 3 -o "$dl.part" "$url" || die_env "could not fetch $url"
         mv "$dl.part" "$dl"
     fi
     echo "$sha  $dl" | sha256sum -c --status ||
@@ -216,7 +224,11 @@ install_shadow() {
     local dir file path guard real
     dir=$(shadow_dir)
     mkdir -p "$dir"
-    cp "$repo"/linuxdrv/shadow/*.h "$dir/"
+    # Only what changed: every object depends on these headers, so a fresh
+    # copy's new mtime would have make rebuild them all on every run.
+    for file in "$repo"/linuxdrv/shadow/*.h; do
+        cmp -s "$file" "$dir/$(basename "$file")" || cp "$file" "$dir/"
+    done
     for file in "$dir"/*.h; do
         read -r path guard < <(sed -n 's/^ \* SHADOWS \([^ ]*\) \([^ ]*\)$/\1 \2/p' "$file") || continue
         [ -n "${path:-}" ] || continue
@@ -252,7 +264,7 @@ driver() {
     install_shadow
     local llvm work linux_objs=() layer_files=() kind path
     llvm=$(llvm_setting)
-    while read -r kind path; do
+    while read -r kind path || [ -n "${kind:-}" ]; do
         case $kind in
             linux) linux_objs+=("$path") ;;
             layer) layer_files+=("$path") ;;
@@ -281,11 +293,19 @@ driver() {
     local objs=() file base
     for file in "${linux_objs[@]}"; do objs+=("$obj/$file"); done
     for file in "${layer_files[@]}"; do
+        # Named by its path, so that emul/pci.c and <driver>/pci.c are two.
+        local out_obj base
         base=$(basename "$file" .c)
-        (cd "$obj" && eval "$flags -DKBUILD_MODNAME='\"$name\"' -DKBUILD_BASENAME='\"$base\"' \
-            -c -o '$work/$base.o' '$work/src/$file'") ||
+        out_obj="$work/$(echo "${file%.c}" | tr '/' '_').o"
+        # -mstackrealign: Linux's flags keep the stack 8-aligned
+        # (-mstack-alignment=8), and the layer's files call into the Rust
+        # half, which the SysV ABI promises a 16-aligned stack.
+        # -fmacro-prefix-map: __FILE__ as the repository names it, not the
+        # scratch copy's path, as Linux's flags do for Linux's files.
+        (cd "$obj" && eval "$flags -mstackrealign -fmacro-prefix-map='$work/src/=linuxdrv/' -DKBUILD_MODNAME='\"$name\"' -DKBUILD_BASENAME='\"$base\"' \
+            -c -o '$out_obj' '$work/src/$file'") ||
             die "compiling $file failed"
-        objs+=("$work/$base.o")
+        objs+=("$out_obj")
     done
     # The stops: every symbol used and defined nowhere -- not in the objects,
     # not in the Rust half, not by the linker script -- that is only ever
@@ -295,11 +315,13 @@ driver() {
     nm=$(tool llvm-nm)
     dump=$(tool llvm-objdump)
     python3 - "$work/stops.c" <(
-        "$nm" --undefined-only "${objs[@]}" "$kit" 2>/dev/null | awk 'NF == 2 { print $2 }' | sort -u
+        # Strong ones only ("U"): a weak reference ("w") resolves to NULL, as
+        # Linux's code expects of it, and a stop would turn its NULL check true.
+        "$nm" --undefined-only "${objs[@]}" "$kit" 2>/dev/null | awk 'NF == 2 && $1 == "U" { print $2 }' | sort -u
     ) <(
         "$nm" --defined-only "${objs[@]}" "$kit" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u
     ) <(
-        "$dump" -r "${objs[@]}" | awk '/R_X86_64/ { sub(/[-+]0x[0-9a-f]+$/, "", $3); print $2, $3 }' | sort -u
+        "$dump" -r "${objs[@]}" "$kit" | awk '/R_X86_64/ { sub(/[-+]0x[0-9a-f]+$/, "", $3); print $2, $3 }' | sort -u
     ) "$repo/linuxdrv/link.ld" <<'PY'
 import re
 import sys
@@ -324,13 +346,15 @@ with open(stops_path, "w", encoding="utf-8", newline="\n") as out:
     out.write("/* Generated by scripts/linux-tree.sh driver: each function a driver\n"
               " * calls that nothing defines stops the driver, naming itself\n"
               " * (design-decisions 1578 rule 4). It includes no Linux header. */\n"
-              "void slx_stop(const char *what) __attribute__((noreturn));\n")
+              "void slx_stop(const char *what, const void *caller) __attribute__((noreturn));\n")
     for s in missing:
-        out.write(f'void {s}(void) {{ slx_stop("{s}"); }}\n')
+        out.write(f'void {s}(void) {{ slx_stop("{s}", __builtin_return_address(0)); }}\n')
 print(f"linux-tree: {len(missing)} generated stop(s)")
 PY
+    # Called from Linux's code, whose stack is 8-aligned: realigned before
+    # the call into the Rust half, as the layer's own files are.
     "$(tool clang)" --target=x86_64-linux-gnu -O2 -ffreestanding -fno-builtin -fno-pic \
-        -mcmodel=small -mno-red-zone -mno-sse -fno-asynchronous-unwind-tables \
+        -mcmodel=small -mno-red-zone -mno-sse -mstackrealign -fno-asynchronous-unwind-tables \
         -c -o "$work/stops.o" "$work/stops.c"
     "$(tool ld.lld)" -T "$repo/linuxdrv/link.ld" --orphan-handling=error -static -nostdlib \
         -z max-page-size=0x4000 --gc-sections -o "$work/$name.elf" \
@@ -376,7 +400,8 @@ needs() {
     mapfile -t objs < <(find "$obj/$dir" -name '*.o' ! -name '*.mod.o' | sort)
     [ "${#objs[@]}" -gt 0 ] || die "building $dir produced no objects (is it enabled in linux.config?)"
     python3 - "$exports" <(
-        "$nm" --undefined-only "${objs[@]}" | awk 'NF == 2 { print $2 }' | sort -u
+        # The shadow headers' own names (slx_*) are the layer's, not Linux's.
+        "$nm" --undefined-only "${objs[@]}" | awk 'NF == 2 && $2 !~ /^slx_/ { print $2 }' | sort -u
     ) <(
         "$nm" --defined-only "${objs[@]}" | awk 'NF == 3 { print $3 }' | sort -u
     ) "${#objs[@]}" "$dir" <<'PY'
@@ -410,6 +435,18 @@ for path in sorted(groups, key=lambda p: (-len(groups[p]), p)):
 PY
 }
 
+# The tree and its objects are one per machine, shared by every worktree:
+# one build at a time, or one lane's `rm -rf` and `make` run through
+# another's. A lane waits up to half an hour for another's to finish.
+lock_tree() {
+    mkdir -p "$root"
+    exec 9>"$root/.slateos-lock"
+    flock -w 1800 9 || die "another build of the Linux tree held its lock for half an hour"
+}
+
+case "${1:-}" in
+    fetch | prepare | needs | driver) lock_tree ;;
+esac
 case "${1:-}" in
     fetch) fetch && echo "linux-tree: $src" ;;
     prepare) prepare ;;

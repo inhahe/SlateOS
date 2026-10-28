@@ -26,6 +26,12 @@ mod sys;
 pub mod exit {
     /// Every initcall returned 0.
     pub const OK: i32 = 0;
+    /// Linux code called `BUG()`.
+    pub const BUG: i32 = 121;
+    /// The layer's Rust half panicked.
+    pub const PANIC: i32 = 122;
+    /// The system gave no random bytes.
+    pub const NO_RANDOM: i32 = 123;
     /// Linux code reached a function the layer does not implement.
     pub const STOP: i32 = 125;
     /// An initcall failed.

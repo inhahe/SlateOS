@@ -37,14 +37,22 @@ void slx_exit(int code) __attribute__((noreturn));
 
 /*
  * End it because Linux code reached `what`, a function the layer does not
- * implement: said on the console, then exit code SLX_EXIT_STOP.
+ * implement, called from `caller`: said on the console -- the caller's
+ * address for the driver's symbol table -- then exit code SLX_EXIT_STOP.
  */
-void slx_stop(const char *what) __attribute__((noreturn));
+void slx_stop(const char *what, const void *caller) __attribute__((noreturn));
 
-/* The exit codes a driver process ends with, besides an initcall's own. */
+/*
+ * The exit codes a driver process ends with; each means one thing, so that
+ * the kernel can tell them apart (kernel/src/linuxdrv.rs, lxkit::exit).
+ */
 #define SLX_EXIT_OK 0
-#define SLX_EXIT_STOP 125
-#define SLX_EXIT_INIT_FAILED 126
+#define SLX_EXIT_BUG 121		/* Linux code called BUG() */
+#define SLX_EXIT_PANIC 122		/* the layer's Rust half panicked */
+#define SLX_EXIT_NO_RANDOM 123		/* the system gave no random bytes */
+#define SLX_EXIT_STOP 125		/* a generated stop was reached */
+#define SLX_EXIT_INIT_FAILED 126	/* an initcall failed */
+#define SLX_EXIT_NO_MEMORY 127		/* the process's memory could not be set up */
 
 /* Implemented by the C half: run the driver; what slx_exit is given. */
 int lx_emul_main(void);

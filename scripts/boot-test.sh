@@ -639,6 +639,8 @@ marker_checks_pass() {
         FAILED_CHECK="the benchmark suite left windows unjudged"
     elif ! check_iommu_active "$1"; then
         FAILED_CHECK="DMA or interrupt remapping never came on"
+    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_NAMED:-0}"; then
+        FAILED_CHECK="the Linux driver layer's process did not run"
     fi
     [ -z "$FAILED_CHECK" ]
 }
@@ -650,13 +652,40 @@ LINUX_DRIVERS=(hello)
 
 # Build the layer's Rust half, then each of LINUX_DRIVERS into
 # build/linuxdrv/<name>.elf. cargo no-ops a current build, and Linux's make a
-# current object.
+# current object. Returns linux-tree.sh's 3 when this host cannot build them
+# at all, and 1 when they do not build.
 build_linux_drivers() {
     (cd "$PROJECT_ROOT/linuxdrv/kit" && cargo build --release --quiet) || return 1
-    local name
+    local name rc
     for name in "${LINUX_DRIVERS[@]}"; do
-        bash "$SCRIPT_DIR/linux-tree.sh" driver "$name" || return 1
+        rc=0
+        bash "$SCRIPT_DIR/linux-tree.sh" driver "$name" || rc=$?
+        [ "$rc" -eq 0 ] || return "$rc"
     done
+}
+
+# Fail a boot whose medium carried a Linux driver process (a module_path:
+# line went into limine.conf) in which the kernel's linuxdrv self-test did
+# not say it ran: a module the kernel could not find is a skip there, and a
+# skip of what this harness put on the medium is a failure here.
+#
+# $1: the serial log; $2: whether a module was named. Returns 0 when none
+# was, or the test ran.
+check_linuxdrv_ran() {
+    local file="$1" named="$2"
+    [ "$named" = 1 ] || return 0
+    [ -f "$file" ] || return 0
+    # Its line, as Linux's vsprintf formats it, and the kernel's verdict.
+    if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
+        grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file"; then
+        return 0
+    fi
+    echo "=== THE LINUX DRIVER LAYER'S PROCESS DID NOT RUN ==="
+    echo "  The boot medium carried linuxdrv/hello, but the kernel never said"
+    echo "  '[linuxdrv]   hello process ...: OK', or the process never printed"
+    echo "  its line as Linux formats it. Their own lines say why:"
+    grep -a '^\[linuxdrv\]\|^\[lx\]' "$file" | head -8 | sed 's/^/  /'
+    return 1
 }
 
 # Fail a boot in which the emulated IOMMU's DMA or interrupt remapping never
@@ -8904,11 +8933,26 @@ if [ "$NO_BUILD" -eq 0 ]; then
     # process is GPL-2.0 as a whole, the kernel MIT. One that no longer builds
     # stops the run, as an embedded service does.
     echo "=== Building the Linux driver processes ==="
-    if ! build_linux_drivers; then
-        echo "ERROR: a Linux driver process did not build (above).  The kernel's" >&2
-        echo "       linuxdrv self-test would run one that is not this tree's." >&2
-        exit 1
-    fi
+    linuxdrv_rc=0
+    build_linux_drivers || linuxdrv_rc=$?
+    case "$linuxdrv_rc" in
+        0) ;;
+        3)
+            # This host cannot build them (no WSL, no toolchain, offline the
+            # first time): the boot test must still run on one carrying only
+            # Rust and QEMU. They are left off the boot medium, and the
+            # kernel's linuxdrv self-test records the skip.
+            echo "=== SKIPPED: the Linux driver processes (this host cannot build them, above) ==="
+            for name in "${LINUX_DRIVERS[@]}"; do
+                rm -f "$PROJECT_ROOT/build/linuxdrv/$name.elf"
+            done
+            ;;
+        *)
+            echo "ERROR: a Linux driver process did not build (above).  The kernel's" >&2
+            echo "       linuxdrv self-test would run one that is not this tree's." >&2
+            exit 1
+            ;;
+    esac
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #
@@ -9052,6 +9096,9 @@ fi
 if [ "$NO_STAGE" -eq 0 ]; then
     mkdir -p "$ESP_DIR/linuxdrv"
     for name in "${LINUX_DRIVERS[@]}"; do
+        rm -f "$ESP_DIR/linuxdrv/$name.elf"
+        # One this host could not build is not there to stage (above).
+        [ -f "$PROJECT_ROOT/build/linuxdrv/$name.elf" ] || continue
         if ! cp "$PROJECT_ROOT/build/linuxdrv/$name.elf" "$ESP_DIR/linuxdrv/$name.elf"; then
             echo "ERROR: could not stage the Linux driver process $name." >&2
             exit 1
@@ -9103,10 +9150,15 @@ fi
 limine_rc=0
 # The Linux driver processes as the first entry's modules, after its
 # command line: a module_path: and the module_cmdline: the kernel finds it by.
+# Only those on the medium: Limine stops at a module it cannot open, and
+# under --no-stage the medium is whatever it was.
 MODULE_LINES=""
+LINUXDRV_NAMED=0
 for name in "${LINUX_DRIVERS[@]}"; do
+    [ -f "$ESP_DIR/linuxdrv/$name.elf" ] || continue
     MODULE_LINES+="    module_path: boot():/linuxdrv/$name.elf"$'\n'
     MODULE_LINES+="    module_cmdline: linuxdrv/$name"$'\n'
+    LINUXDRV_NAMED=1
 done
 KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" MODULE_LINES="${MODULE_LINES%$'\n'}" awk '
     substr($0, 1, 1) == "/" { entry++ }

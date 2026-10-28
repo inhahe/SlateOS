@@ -22,19 +22,45 @@
 /* Defined nowhere: the build makes it a generated stop. */
 void lx_hello_never_defined(void);
 
+/* How many warnings the layer has said (lx_emul.c). */
+extern unsigned long lx_warnings;
+
+/* A warning from one place, given twice: said once, and the driver goes on. */
+static void hello_warn_once(void)
+{
+	WARN_ON_ONCE(1);
+}
+
 static DEFINE_SPINLOCK(hello_lock);
 
 static int __init hello_init(void)
 {
-	unsigned long flags;
+	unsigned long flags, warned;
 	bool off;
-	int *answer = kmalloc(sizeof(*answer), GFP_KERNEL | __GFP_ZERO);
+	int *answer, *dirty = kmalloc(sizeof(*answer), GFP_KERNEL);
 
+	/*
+	 * kzalloc clears: a block written and given back is the one the next
+	 * allocation of its size gets (the free list is last in, first out),
+	 * so a zero read there is the clearing's and not the memory's.
+	 */
+	if (!dirty)
+		return -ENOMEM;
+	*dirty = 0x5a5a;
+	kfree(dirty);
+	answer = kmalloc(sizeof(*answer), GFP_KERNEL | __GFP_ZERO);
 	if (!answer)
 		return -ENOMEM;
-	if (*answer != 0) {
+	if (answer != dirty || *answer != 0) {
 		kfree(answer);
 		return -EINVAL;
+	}
+	warned = lx_warnings;
+	hello_warn_once();
+	hello_warn_once();
+	if (lx_warnings != warned + 1) {
+		kfree(answer);
+		return -EDOM;
 	}
 	spin_lock_irqsave(&hello_lock, flags);
 	off = irqs_disabled();

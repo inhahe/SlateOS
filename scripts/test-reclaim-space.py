@@ -33,6 +33,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -72,6 +73,28 @@ def make_tree(parent, name="target"):
     return path
 
 
+def reclaim_when_unheld(mod, path, attempts=40, pause=0.25):
+    """`reclaim_dir` on `path`, asked again while something outside the test
+    holds the file `make_tree` has just written.
+
+    The rename that answers "in use" is the script's safety property, and the
+    script rightly never retries it.  But on this host a continuous backup
+    scanner opens a new file microseconds after it is written, and
+    `reclaim_dir` then skips the tree as it should (known-issues
+    A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS).  What the caller
+    asserts is what reclaiming an unheld tree does, so this waits for the
+    scanner to let go -- ten seconds at most; a veto that outlasts that is
+    still reported, by the caller's check that the directory is gone.
+    """
+    freed = 0.0
+    for _ in range(attempts):
+        freed = mod.reclaim_dir(path, dry_run=False, sizes=False, log=lambda _m: None)
+        if not os.path.exists(path):
+            break
+        time.sleep(pause)
+    return freed
+
+
 def test_reclaims_and_returns_a_number(mod, tmp):
     """The regression test for the FileNotFoundError.
 
@@ -82,7 +105,7 @@ def test_reclaims_and_returns_a_number(mod, tmp):
     was gone would have passed while the script still aborted mid-run.
     """
     path = make_tree(tmp)
-    freed = mod.reclaim_dir(path, dry_run=False, sizes=False, log=lambda _m: None)
+    freed = reclaim_when_unheld(mod, path)
     check("reclaim returns a float", isinstance(freed, float),
           "got %r" % (freed,))
     check("reclaim removes the directory", not os.path.exists(path))

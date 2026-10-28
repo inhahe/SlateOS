@@ -1,5 +1,12 @@
 ## A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS (lane A, 2026-09-09)
 
+**Status:** FIXED 2026-10-28. It recurred (the boot test of 6e3bbeb4a was
+refused for it), so option 2 below was taken: the test's
+`reclaim_when_unheld` asks `reclaim_dir` again, for up to ten seconds, while
+the file `make_tree` just wrote is held, and the check that the directory is
+gone still fails a veto that outlasts that. `reclaim_dir` itself still never
+retries the rename.
+
 **In short:** `scripts/test-reclaim-space.py` failed one check during a boot
 test and passes every time it is run by hand. It is not testing anything that
 broke; it is racing the four backup jobs the operator runs continuously on this

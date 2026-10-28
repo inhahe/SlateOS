@@ -30,9 +30,11 @@ int lx_start_kthreadd(void);
 /* lx_emul.c: when the running task was switched to, by the monotonic clock. */
 extern u64 lx_switched_ns;
 
-/* For the hello driver's tests: warnings said (lx_emul.c), and kernel
- * threads' records not yet freed (lx_sched.c). */
+/* For the hello driver's tests: warnings said (lx_emul.c), and threads'
+ * records not yet freed, daemons (kthreadd, workers) not counted
+ * (lx_sched.c). */
 extern unsigned long lx_warnings;
-extern unsigned long lx_kthreads;
+unsigned long lx_live_kthreads(void);
+bool lx_emul_task_is_daemon(void *task);
 
 #endif /* LX_EMUL_H */

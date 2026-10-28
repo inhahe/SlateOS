@@ -22,6 +22,11 @@
 #include <linux/notifier.h>
 #include <linux/wait_bit.h>
 #include <linux/cpumask.h>
+#include <linux/moduleparam.h>
+#include <linux/device.h>
+#include <linux/cache.h>
+#include <linux/workqueue.h>
+#include <linux/radix-tree.h>
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -66,6 +71,22 @@ struct cpumask __cpu_active_mask __read_mostly = { CPU_BITS_ALL };
 const unsigned long cpu_bit_bitmap[BITS_PER_LONG + 1][BITS_TO_LONGS(NR_CPUS)] = {
 	[1] = { 1UL },
 };
+
+/*
+ * Linux's value before its delay loop is calibrated, which a driver
+ * process never does: its delays are the clock's (lx_sched.c). Workqueues
+ * read it to scale their CPU-intensive threshold.
+ */
+unsigned long loops_per_jiffy = 1 << 12;
+
+/*
+ * Module parameters' kinds, which Linux code names in its parameter
+ * tables. Nothing in a driver process sets a parameter -- it has no kernel
+ * command line, and the tables are discarded at link (linuxdrv/link.ld) --
+ * so a kind needs no operations.
+ */
+const struct kernel_param_ops param_ops_bool;
+const struct kernel_param_ops param_ops_ulong;
 
 /* Not in an interrupt, nothing disabled: what a task's count reads. */
 DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
@@ -174,6 +195,116 @@ void *__kmalloc_noprof(size_t size, gfp_t flags)
 void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
 {
 	return lx_alloc(size, flags);
+}
+
+void *__kmalloc_node_noprof(DECL_BUCKET_PARAMS(size, b), gfp_t flags, int node)
+{
+	return lx_alloc(size, flags);
+}
+
+void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t flags, int node, size_t size)
+{
+	return lx_alloc(size, flags);
+}
+
+/*
+ * Slab caches: what kmem_cache_alloc() hands out, by size. kmalloc's buddy
+ * allocator serves the objects -- aligned to their size rounded up to a
+ * power of two, so to any alignment the cache asks when the size is raised
+ * to it. A cache keeps what of Linux's matters here: the size, and the
+ * constructor, run on each object as it is handed out (Linux runs it once
+ * per object of a new slab; running it again on an object freed in its
+ * constructed state is the same object). mm/slab.h's struct, which no
+ * driver sees.
+ */
+struct kmem_cache {
+	unsigned int size;
+	void (*ctor)(void *object);
+	const char *name;
+};
+
+struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int object_size,
+					    struct kmem_cache_args *args, slab_flags_t flags)
+{
+	struct kmem_cache *s = kzalloc(sizeof(*s), GFP_KERNEL);
+	unsigned int align = args ? args->align : 0;
+
+	if (!s)
+		return NULL;
+	if (flags & SLAB_HWCACHE_ALIGN)
+		align = max(align, (unsigned int)L1_CACHE_BYTES);
+	s->size = max(object_size, align);
+	s->ctor = args ? args->ctor : NULL;
+	s->name = name;
+	return s;
+}
+
+void kmem_cache_destroy(struct kmem_cache *s)
+{
+	kfree(s);
+}
+
+static void *lx_cache_alloc(struct kmem_cache *s, gfp_t flags)
+{
+	void *p = lx_alloc(s->size, flags);
+
+	if (p && s->ctor)
+		s->ctor(p);
+	return p;
+}
+
+void *kmem_cache_alloc_noprof(struct kmem_cache *s, gfp_t flags)
+{
+	return lx_cache_alloc(s, flags);
+}
+
+void *kmem_cache_alloc_node_noprof(struct kmem_cache *s, gfp_t flags, int node)
+{
+	return lx_cache_alloc(s, flags);
+}
+
+void *kmem_cache_alloc_lru_noprof(struct kmem_cache *s, struct list_lru *lru, gfp_t flags)
+{
+	return lx_cache_alloc(s, flags);
+}
+
+void kmem_cache_free(struct kmem_cache *s, void *p)
+{
+	kfree(p);
+}
+
+/*
+ * Per-CPU memory: one CPU, so one copy, and a per-CPU pointer is the
+ * copy's address (per_cpu_ptr() adds nothing with this configuration).
+ * Zeroed, as Linux's is.
+ */
+void __percpu *pcpu_alloc_noprof(size_t size, size_t align, bool reserved, gfp_t gfp)
+{
+	return (void __percpu __force *)lx_alloc(max(size, align), gfp | __GFP_ZERO);
+}
+
+void free_percpu(void __percpu *ptr)
+{
+	kfree((void __force *)ptr);
+}
+
+/*
+ * sysfs, which a driver process has none of: what Linux code would show
+ * there has nowhere to go, and a subsystem registering with it is told so.
+ * Workqueues' core initcall (wq_sysfs_init) is, and carries on without.
+ */
+int subsys_virtual_register(const struct bus_type *subsys, const struct attribute_group **groups)
+{
+	return -ENODEV;
+}
+
+/* Deferred printk: every line goes straight out here, so nothing to defer. */
+void __printk_deferred_enter(void)
+{
+}
+
+void __printk_deferred_exit(void)
+{
 }
 
 /* kmalloc_track_caller(), which kasprintf uses: one node, no tracking. */
@@ -295,11 +426,14 @@ void slx_bug(const char *file, int line)
 }
 
 /*
- * The driver's initcalls, in Linux's order (the linker script keeps the
- * levels in sequence between these two symbols), each an offset from its
- * own entry (CONFIG_HAVE_ARCH_PREL32_RELOCATIONS).
+ * The process's initcalls, in Linux's order (the linker script keeps the
+ * levels in sequence between __initcall_start and __initcall_end), each an
+ * offset from its own entry (CONFIG_HAVE_ARCH_PREL32_RELOCATIONS). Those
+ * before __initcall_device_start are the levels Linux's own subsystems set
+ * themselves up at; from it on, device level and later, are where a
+ * driver's own initcall (module_init) runs.
  */
-extern initcall_entry_t __initcall_start[], __initcall_end[];
+extern initcall_entry_t __initcall_start[], __initcall_device_start[], __initcall_end[];
 
 /*
  * What Linux's start_kernel() sets up before anything runs, set up before
@@ -311,6 +445,9 @@ int lx_emul_init(void)
 	wait_bit_init();
 	if (lx_softirq_init())
 		return SLX_EXIT_NO_MEMORY;
+	/* The radix tree's node cache, which idr and the workqueues number by. */
+	radix_tree_init();
+	workqueue_init_early();
 	return SLX_EXIT_OK;
 }
 
@@ -321,15 +458,85 @@ int lx_emul_main(void)
 	lx_main_handle = slx_task_current();
 	if (lx_start_kthreadd())
 		return SLX_EXIT_NO_MEMORY;
+	/* As Linux's kernel_init_freeable(): workers, once kthreadd can make them. */
+	workqueue_init();
+	workqueue_init_topology();
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
 		int ret = fn();
 
-		if (ret) {
-			/* By address: naming it would need the symbol table. */
-			pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
-			return SLX_EXIT_INIT_FAILED;
+		if (!ret)
+			continue;
+		/*
+		 * By address: naming it would need the symbol table. A
+		 * subsystem's failing is Linux's own business, which Linux
+		 * carries on past, as here; the driver's ends the process.
+		 */
+		if (entry < __initcall_device_start) {
+			pr_warn("subsystem initcall at %#lx failed: %d; carrying on\n",
+				(unsigned long)fn, ret);
+			continue;
 		}
+		pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
+		return SLX_EXIT_INIT_FAILED;
 	}
 	return SLX_EXIT_OK;
+}
+
+/*
+ * Population counts, for x86's arch_hweight.h, which calls them from
+ * inline assembly that names no clobbered register: they keep every
+ * register but the result's (%rax), taking the value in %rdi. Linux's own
+ * assembly versions are part of a library its build will not make alone,
+ * and lib/hweight.c's, plain C, may clobber what the caller keeps live; so
+ * the layer's are assembly: the counts of pairs, then nibbles, then bytes,
+ * summed by a multiply. Kernel code has no red zone, so the pushes are safe.
+ */
+asm(
+"	.pushsection .text\n"
+"	.globl	__sw_hweight64\n"
+"	.type	__sw_hweight64, @function\n"
+"__sw_hweight64:\n"
+"	pushq	%rcx\n"
+"	pushq	%rdx\n"
+"	movq	%rdi, %rax\n"
+"	movq	%rax, %rdx\n"
+"	shrq	$1, %rdx\n"
+"	movabsq	$0x5555555555555555, %rcx\n"
+"	andq	%rcx, %rdx\n"
+"	subq	%rdx, %rax\n"
+"	movabsq	$0x3333333333333333, %rcx\n"
+"	movq	%rax, %rdx\n"
+"	shrq	$2, %rdx\n"
+"	andq	%rcx, %rdx\n"
+"	andq	%rcx, %rax\n"
+"	addq	%rdx, %rax\n"
+"	movq	%rax, %rdx\n"
+"	shrq	$4, %rdx\n"
+"	addq	%rdx, %rax\n"
+"	movabsq	$0x0f0f0f0f0f0f0f0f, %rcx\n"
+"	andq	%rcx, %rax\n"
+"	movabsq	$0x0101010101010101, %rcx\n"
+"	imulq	%rcx, %rax\n"
+"	shrq	$56, %rax\n"
+"	popq	%rdx\n"
+"	popq	%rcx\n"
+"	ret\n"
+"	.size	__sw_hweight64, . - __sw_hweight64\n"
+"	.globl	__sw_hweight32\n"
+"	.type	__sw_hweight32, @function\n"
+"__sw_hweight32:\n"
+"	pushq	%rdi\n"
+"	movl	%edi, %edi\n"
+"	call	__sw_hweight64\n"
+"	popq	%rdi\n"
+"	ret\n"
+"	.size	__sw_hweight32, . - __sw_hweight32\n"
+"	.popsection\n"
+);
+
+/* kvmalloc()'s memory is kmalloc's here, so kvfree() is kfree(). */
+void kvfree(const void *addr)
+{
+	kfree(addr);
 }

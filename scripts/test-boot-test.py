@@ -1408,7 +1408,7 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
     verdict = ("[linuxdrv]   hello process (108080 bytes): Linux's headers and "
                "vsprintf in a process of their own, its initcalls run (a kthread, "
                "a mutex held across a sleep, a completion, the scheduler's edges, "
-               "timers and softirqs), "
+               "timers and softirqs, workqueues), "
                "a generated stop, a deadlock, a stack overflow caught by its guard "
                "page, a failed initcall, a stranded kthread, and a sleep while "
                "atomic: OK\n")

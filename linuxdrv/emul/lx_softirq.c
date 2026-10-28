@@ -55,8 +55,6 @@ DEFINE_PER_CPU(struct kernel_stat, kstat);
 DEFINE_STATIC_KEY_FALSE(force_irqthreads_key);
 /* Static keys are plain variables here: nothing to patch, so ready at once. */
 bool static_key_initialized = true;
-/* No workqueues yet: timer.c names one only where NO_HZ modes change. */
-struct workqueue_struct *system_percpu_wq;
 
 /*
  * Per-CPU hotplug threads: the loop is the process's ksoftirqd, so
@@ -103,11 +101,6 @@ u64 hrtimer_get_next_event(void)
 
 /* An RCU quiescent state: a switch is the grace period here (lx_sched.c). */
 void rcu_qs(void)
-{
-}
-
-/* Softirq-run work items: no workqueues yet, so none is queued. */
-void workqueue_softirq_action(bool highpri)
 {
 }
 

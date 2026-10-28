@@ -58,6 +58,7 @@ SECTIONS
         KEEP(*(.initcall4.init)) KEEP(*(.initcall4s.init))
         KEEP(*(.initcall5.init)) KEEP(*(.initcall5s.init))
         KEEP(*(.initcallrootfs.init))
+        __initcall_device_start = .;
         KEEP(*(.initcall6.init)) KEEP(*(.initcall6s.init))
         KEEP(*(.initcall7.init)) KEEP(*(.initcall7s.init))
         __initcall_end = .;

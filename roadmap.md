@@ -5491,8 +5491,10 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         schedule_timeout, msleep and delays, cond_resched, call_rcu (a
         switch is the grace period), and each task's stack above a guard
         page; Linux's own timer wheel, softirqs and tasklets, the loop their
-        tick and ksoftirqd (§1581). Left: workqueues,
-        PCI and MSI, IRQs, DMA, the device model, `request_firmware`,
+        tick and ksoftirqd (§1581); Linux's own kthread.c and workqueues,
+        over the layer's kernel_thread()/do_exit(), slab and per-CPU memory
+        (§1582). Left: PCI and MSI, IRQs, DMA, the device model,
+        `request_firmware`,
         which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured

@@ -37,12 +37,18 @@
 #include <linux/err.h>
 #include <linux/uaccess.h>
 #include <linux/cpumask.h>
+#include <linux/rcuwait.h>
+#include <linux/rcupdate.h>
+#include <linux/mm.h>
 
 #include "slx.h"
 #include "lx_emul.h"
 
 /* kernel/sched/sched.h's, which a driver file does not include. */
 int try_to_wake_up(struct task_struct *p, unsigned int state, int wake_flags);
+/* kernel/workqueue_internal.h's, likewise. */
+void wq_worker_sleeping(struct task_struct *task);
+void wq_worker_running(struct task_struct *task);
 
 /* The first task's handle. */
 int lx_main_handle = -1;
@@ -57,9 +63,12 @@ struct lx_task {
 	int handle;
 	int (*fn)(void *arg);
 	void *arg;
+	/* On lx_threads while the record lives. */
+	struct list_head node;
 };
 
-unsigned long lx_kthreads;
+/* Every thread's record not yet freed. */
+static LIST_HEAD(lx_threads);
 
 /* The layer's record around `p`: none for the first task's or the idle one. */
 static struct lx_task *lx_task_of(struct task_struct *p)
@@ -114,6 +123,23 @@ static void lx_may_sleep(void *caller)
 	slx_exit(SLX_EXIT_BUG);
 }
 
+/*
+ * The running task blocks -- until woken, or until `until_ns` when that is
+ * not 0. A workqueue's worker says so first, as Linux's scheduler has it
+ * say (wq_worker_sleeping), so that its pool wakes another worker for the
+ * work still queued, and says it runs again once it does.
+ */
+static void lx_block(u64 until_ns)
+{
+	bool worker = current->flags & PF_WQ_WORKER;
+
+	if (worker)
+		wq_worker_sleeping(current);
+	slx_task_block(until_ns);
+	if (worker)
+		wq_worker_running(current);
+}
+
 asmlinkage __visible void schedule(void)
 {
 	lx_may_sleep(__builtin_return_address(0));
@@ -122,7 +148,7 @@ asmlinkage __visible void schedule(void)
 		return;
 	}
 	/* Until try_to_wake_up() makes it TASK_RUNNING and wakes it. */
-	slx_task_block(0);
+	lx_block(0);
 }
 
 void schedule_preempt_disabled(void)
@@ -237,6 +263,12 @@ void wake_up_q(struct wake_q_head *head)
  * tasks, where lx_emul_turn() runs them -- as Linux's tiny RCU runs them
  * after a context switch.
  */
+/*
+ * kvfree_call_rcu()'s code for a head within this many bytes of its
+ * object's start: the callback is the offset, below any function's address.
+ */
+#define LX_KVFREE_OFFSETS 4096
+
 static struct rcu_head *lx_rcu_first;
 static struct rcu_head **lx_rcu_last = &lx_rcu_first;
 
@@ -262,10 +294,95 @@ void lx_rcu_run(void)
 	lx_rcu_last = &lx_rcu_first;
 	while (head) {
 		struct rcu_head *next = head->next;
+		unsigned long offset = (unsigned long)head->func;
 
-		head->func(head);
+		/* kvfree_call_rcu()'s: the head's offset in its object. */
+		if (offset < LX_KVFREE_OFFSETS)
+			kvfree((void *)head - offset);
+		else
+			head->func(head);
 		head = next;
 	}
+}
+
+/* An object kvfree_call_rcu() frees whose head is too far into it to code. */
+struct lx_kvfree {
+	struct rcu_head rcu;
+	void *ptr;
+};
+
+static void lx_kvfree_cb(struct rcu_head *rcu)
+{
+	struct lx_kvfree *rec = container_of(rcu, struct lx_kvfree, rcu);
+
+	kvfree(rec->ptr);
+	kfree(rec);
+}
+
+/*
+ * kfree_rcu() and kvfree_rcu(): the object freed after a grace period.
+ * Linux's own finds the object from its head through the slab's own
+ * records, which the layer's slab does not keep; so the head carries,
+ * where its callback would be, its offset in the object -- as Linux's tiny
+ * RCU once coded it, no function living so low (lx_rcu_run frees it) --
+ * or, too far in for that, goes with a record of the object. Without a
+ * head the caller may sleep, so it is in no read-side critical section,
+ * and no other task is (they are switched out): the grace period has
+ * passed, and the object goes now.
+ */
+void kvfree_call_rcu(struct rcu_head *head, void *ptr)
+{
+	unsigned long offset = (unsigned long)head - (unsigned long)ptr;
+	struct lx_kvfree *rec;
+
+	if (!head) {
+		kvfree(ptr);
+		return;
+	}
+	if (offset < LX_KVFREE_OFFSETS) {
+		call_rcu(head, (rcu_callback_t)offset);
+		return;
+	}
+	rec = kmalloc(sizeof(*rec), GFP_ATOMIC);
+	if (WARN_ON_ONCE(!rec))
+		return;
+	rec->ptr = ptr;
+	call_rcu(&rec->rcu, lx_kvfree_cb);
+}
+
+/* Every callback queued so far run: the next turn of the loop runs them. */
+void rcu_barrier(void)
+{
+	if (lx_rcu_pending())
+		slx_task_yield();
+}
+
+/*
+ * rcuwait, as Linux's kernel/exit.c and kernel/rcu/update.c have it: one
+ * task waiting, woken by name.
+ */
+int rcuwait_wake_up(struct rcuwait *w)
+{
+	struct task_struct *task;
+	int ret = 0;
+
+	rcu_read_lock();
+	task = rcu_dereference(w->task);
+	if (task)
+		ret = wake_up_process(task);
+	rcu_read_unlock();
+	return ret;
+}
+
+void finish_rcuwait(struct rcuwait *w)
+{
+	rcu_assign_pointer(w->task, NULL);
+	__set_current_state(TASK_RUNNING);
+}
+
+/* One priority for every task: a nice value changes nothing. */
+void set_user_nice(struct task_struct *p, long nice)
+{
 }
 
 /* Nanoseconds in `count` units of `unit` ns; U64_MAX past what a u64 holds. */
@@ -317,7 +434,7 @@ long schedule_timeout(long timeout)
 	if (lx_stays_running()) {
 		slx_task_yield();
 	} else {
-		slx_task_block(lx_deadline(lx_ns(timeout, NSEC_PER_SEC / HZ)));
+		lx_block(lx_deadline(lx_ns(timeout, NSEC_PER_SEC / HZ)));
 		/* Woken, or its time came: running either way. */
 		__set_current_state(TASK_RUNNING);
 	}
@@ -385,7 +502,7 @@ static u64 lx_sleep(u64 ns, unsigned int state, bool signals)
 		if (signals && signal_pending(current))
 			break;
 		__set_current_state(state);
-		slx_task_block(until);
+		lx_block(until);
 		__set_current_state(TASK_RUNNING);
 		if (until && slx_now_ns() >= until)
 			return 0;
@@ -472,7 +589,7 @@ void __put_task_struct(struct task_struct *p)
 	if (WARN_ON(!t))
 		return;
 	free_kthread_struct(p);
-	lx_kthreads--;
+	list_del(&t->node);
 	kfree(t);
 }
 
@@ -530,7 +647,7 @@ static struct task_struct *lx_new_thread(int (*fn)(void *), void *arg, const cha
 		kfree(t);
 		return ERR_PTR(-ENOMEM);
 	}
-	lx_kthreads++;
+	list_add(&t->node, &lx_threads);
 	return &t->task;
 }
 
@@ -646,5 +763,18 @@ bool lx_emul_task_is_daemon(void *task)
 {
 	struct task_struct *p = task ? task : &lx_main_task;
 
-	return p == kthreadd_task || (p->flags & PF_WQ_WORKER);
+	if (p == kthreadd_task || (p->flags & PF_WQ_WORKER))
+		return true;
+	/* A kthread worker (kthread_create_worker), which runs what is queued on it. */
+	return (p->flags & PF_KTHREAD) && kthread_func(p) == (void *)kthread_worker_fn;
+}
+
+unsigned long lx_live_kthreads(void)
+{
+	struct lx_task *t;
+	unsigned long n = 0;
+
+	list_for_each_entry(t, &lx_threads, node)
+		n += !lx_emul_task_is_daemon(&t->task);
+	return n;
 }

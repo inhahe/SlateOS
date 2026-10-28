@@ -24,6 +24,15 @@ linux kernel/locking/mutex.o
 # do_exit() (lx_sched.c); kasprintf for their names.
 linux kernel/kthread.o
 linux lib/kasprintf.o
+# Jiffies to and from milliseconds and the rest, for any value.
+linux kernel/time/time.o
+
+# Workqueues, Linux's own, with the ID allocators they number workers and
+# pools by.
+linux kernel/workqueue.o
+linux lib/idr.o
+linux lib/radix-tree.o
+linux lib/xarray.o
 
 # Reference counts' overflow warning, which the inline counters call
 # (lx_sched.c counts its tasks' records).
@@ -33,8 +42,11 @@ linux lib/refcount.o
 # tick and ksoftirqd would (lx_softirq.c).
 linux kernel/softirq.o
 linux kernel/time/timer.o
-# The bit searches the wheel finds its next timer by.
+# Bit searches and operations: the wheel finds its next timer by them,
+# the workqueues keep their CPU masks with them. (Population counts are
+# the layer's own, lx_emul.c.)
 linux lib/find_bit.o
+linux lib/bitmap.o
 
 layer emul/lx_emul.c
 layer emul/lx_sched.c

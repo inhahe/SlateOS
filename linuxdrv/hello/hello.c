@@ -44,13 +44,14 @@
 #include <linux/bottom_half.h>
 #include <linux/preempt.h>
 #include <linux/cpuhotplug.h>
+#include <linux/workqueue.h>
 #include <asm/processor.h>
 
 #include "../emul/slx.h"
 #include "../emul/lx_emul.h"
 
-/* Kernel threads' records not yet freed, less kthreadd's, which never is. */
-#define HELLO_KTHREADS() (lx_kthreads - 1)
+/* Threads' records not yet freed, kthreadd and workqueue workers not counted. */
+#define HELLO_KTHREADS() lx_live_kthreads()
 
 /* Defined nowhere: the build makes it a generated stop. */
 void lx_hello_never_defined(void);
@@ -317,6 +318,22 @@ static void hello_rcu_done(struct rcu_head *head)
 	hello_rcu_ran = true;
 }
 
+/* An object freed with kfree_rcu(), its head past the start. */
+struct hello_rcu_object {
+	long payload[3];
+	struct rcu_head rcu;
+};
+
+/*
+ * A subsystem's initcall that fails: Linux's own carry on past such, and so
+ * must the process -- only a driver's own failure ends it.
+ */
+static int __init hello_subsystem_fails(void)
+{
+	return -ENODEV;
+}
+core_initcall(hello_subsystem_fails);
+
 /* A wake of `task`, and what try_to_wake_up() answered: 1 if it slept. */
 struct hello_wake {
 	struct task_struct *task;
@@ -454,6 +471,28 @@ static int __init hello_edges_init(void)
 	HELLO_CHECK(!hello_rcu_ran, "an RCU callback ran before a grace period");
 	msleep(1);
 	HELLO_CHECK(hello_rcu_ran, "an RCU callback never ran");
+
+	/*
+	 * kfree_rcu() frees after a grace period, and kvfree_rcu() without a
+	 * head at once (its caller may sleep): seen by kmalloc handing back the
+	 * block last freed, its free list being last in, first out.
+	 */
+	{
+		struct hello_rcu_object *obj = kmalloc(sizeof(*obj), GFP_KERNEL), *again;
+
+		HELLO_CHECK(obj, "no memory");
+		kfree_rcu(obj, rcu);
+		again = kmalloc(sizeof(*obj), GFP_KERNEL);
+		HELLO_CHECK(again != obj, "kfree_rcu() freed before a grace period");
+		kfree(again);
+		msleep(1);
+		again = kmalloc(sizeof(*obj), GFP_KERNEL);
+		HELLO_CHECK(again == obj, "kfree_rcu() never freed its object");
+		kvfree_rcu_mightsleep(again);
+		obj = kmalloc(sizeof(*obj), GFP_KERNEL);
+		HELLO_CHECK(obj == again, "kvfree_rcu() without a head did not free at once");
+		kfree(obj);
+	}
 
 	/* put_task_struct() frees the last reference after a grace period. */
 	k = kthread_run(hello_quick, &put_ran, "hello-put");
@@ -706,3 +745,112 @@ static int __init hello_timers_init(void)
 	return 0;
 }
 late_initcall(hello_timers_init);
+
+/*
+ * Workqueues: Linux's own, over the layer's kthreads and timers. A work
+ * item runs in a worker, and flush_work() waits for it; delayed work waits
+ * its jiffies; delayed work cancelled before its time never runs; a
+ * driver's own workqueue runs its work and is destroyed; and a work item
+ * that sleeps lets another, queued behind it on the same pool, run
+ * meanwhile -- the concurrency Linux's scheduler gives a pool by telling it
+ * when a worker sleeps.
+ */
+static bool hello_work_in_worker, hello_delayed_ran, hello_cancelled_work_ran;
+static bool hello_own_work_ran, hello_sleeper_done, hello_passed_sleeper;
+static unsigned long hello_delayed_at;
+
+static void hello_work_fn(struct work_struct *work)
+{
+	hello_work_in_worker = current->flags & PF_WQ_WORKER;
+}
+
+static DECLARE_COMPLETION(hello_delayed_done);
+
+static void hello_delayed_fn(struct work_struct *work)
+{
+	hello_delayed_at = jiffies;
+	hello_delayed_ran = true;
+	complete(&hello_delayed_done);
+}
+
+static void hello_cancelled_work_fn(struct work_struct *work)
+{
+	hello_cancelled_work_ran = true;
+}
+
+static void hello_own_work_fn(struct work_struct *work)
+{
+	hello_own_work_ran = true;
+}
+
+static void hello_sleeper_fn(struct work_struct *work)
+{
+	msleep(20);
+	WRITE_ONCE(hello_sleeper_done, true);
+}
+
+static void hello_passer_fn(struct work_struct *work)
+{
+	hello_passed_sleeper = !READ_ONCE(hello_sleeper_done);
+}
+
+static DECLARE_WORK(hello_work, hello_work_fn);
+static DECLARE_DELAYED_WORK(hello_delayed, hello_delayed_fn);
+static DECLARE_DELAYED_WORK(hello_cancelled_work, hello_cancelled_work_fn);
+static DECLARE_WORK(hello_own_work, hello_own_work_fn);
+static DECLARE_WORK(hello_sleeper, hello_sleeper_fn);
+static DECLARE_WORK(hello_passer, hello_passer_fn);
+
+static int __init hello_workqueues_init(void)
+{
+	struct workqueue_struct *wq;
+	unsigned long j;
+
+	if (slx_argc() > 1)
+		return 0;
+
+	/* The layer's population counts (lx_emul.c), at run time. */
+	{
+		volatile u64 bits = 0x8000000000000001ULL, ones = ~0ULL, none = 0;
+
+		HELLO_CHECK(hweight64(bits) == 2 && hweight64(ones) == 64 &&
+			    hweight64(none) == 0 && hweight32((u32)ones) == 32 &&
+			    hweight32((u32)(bits >> 32)) == 1,
+			    "a population count was wrong");
+	}
+
+	HELLO_CHECK(schedule_work(&hello_work), "a work item was not queued");
+	flush_work(&hello_work);
+	HELLO_CHECK(hello_work_in_worker, "a work item did not run in a worker");
+
+	j = jiffies;
+	HELLO_CHECK(schedule_delayed_work(&hello_delayed, 3), "delayed work was not queued");
+	/* Not flush_delayed_work(), which runs it at once: its timer's time. */
+	wait_for_completion(&hello_delayed_done);
+	HELLO_CHECK(hello_delayed_ran && !time_before(hello_delayed_at, j + 3),
+		    "delayed work did not wait its jiffies");
+
+	schedule_delayed_work(&hello_cancelled_work, 2);
+	HELLO_CHECK(cancel_delayed_work_sync(&hello_cancelled_work),
+		    "cancelling pending delayed work said none was pending");
+	msleep(20);
+	HELLO_CHECK(!hello_cancelled_work_ran, "cancelled delayed work ran");
+
+	wq = alloc_workqueue("hello", 0, 0);
+	HELLO_CHECK(wq, "no workqueue");
+	queue_work(wq, &hello_own_work);
+	flush_workqueue(wq);
+	destroy_workqueue(wq);
+	HELLO_CHECK(hello_own_work_ran, "a driver's own workqueue did not run its work");
+
+	schedule_work(&hello_sleeper);
+	schedule_work(&hello_passer);
+	flush_work(&hello_sleeper);
+	flush_work(&hello_passer);
+	HELLO_CHECK(hello_sleeper_done && hello_passed_sleeper,
+		    "work queued behind a sleeping work item waited for it");
+
+	pr_info("hello workqueues: work in a worker, delayed, cancelled, a queue of the driver's own, work passing a sleeper\n");
+	return 0;
+}
+late_initcall(hello_workqueues_init);

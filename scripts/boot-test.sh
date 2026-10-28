@@ -643,6 +643,22 @@ marker_checks_pass() {
     [ -z "$FAILED_CHECK" ]
 }
 
+# The Linux driver processes the boot test loads beside the kernel, by their
+# directory under linuxdrv/; the kernel finds each by its module_cmdline,
+# linuxdrv/<name> (kernel/src/linuxdrv.rs).
+LINUX_DRIVERS=(hello)
+
+# Build the layer's Rust half, then each of LINUX_DRIVERS into
+# build/linuxdrv/<name>.elf. cargo no-ops a current build, and Linux's make a
+# current object.
+build_linux_drivers() {
+    (cd "$PROJECT_ROOT/linuxdrv/kit" && cargo build --release --quiet) || return 1
+    local name
+    for name in "${LINUX_DRIVERS[@]}"; do
+        bash "$SCRIPT_DIR/linux-tree.sh" driver "$name" || return 1
+    done
+}
+
 # Fail a boot in which the emulated IOMMU's DMA or interrupt remapping never
 # came on.
 #
@@ -8881,6 +8897,18 @@ if [ "$NO_BUILD" -eq 0 ]; then
         echo "       embed a binary that is not the one in this tree." >&2
         exit 1
     fi
+    # The Linux driver layer's processes (design-decisions 1580): its Rust
+    # half by cargo, then each driver by Linux's own build in WSL
+    # (scripts/linux-tree.sh driver), into build/linuxdrv/, from where the
+    # staging below puts them beside the kernel. Not embedded: a driver
+    # process is GPL-2.0 as a whole, the kernel MIT. One that no longer builds
+    # stops the run, as an embedded service does.
+    echo "=== Building the Linux driver processes ==="
+    if ! build_linux_drivers; then
+        echo "ERROR: a Linux driver process did not build (above).  The kernel's" >&2
+        echo "       linuxdrv self-test would run one that is not this tree's." >&2
+        exit 1
+    fi
     echo "=== Building kernel ==="
     # Timed, and recorded in bench/boot-history.jsonl alongside the QEMU window.
     #
@@ -9018,6 +9046,18 @@ if [ "$stage_ok" -eq 0 ]; then
     echo "       process holding the disk open.  Kill it and re-run." >&2
     exit 1
 fi
+# The Linux driver processes, beside the kernel on the boot medium; the
+# limine.conf written below names each as a module. Under --no-stage the
+# medium is reused as it is.
+if [ "$NO_STAGE" -eq 0 ]; then
+    mkdir -p "$ESP_DIR/linuxdrv"
+    for name in "${LINUX_DRIVERS[@]}"; do
+        if ! cp "$PROJECT_ROOT/build/linuxdrv/$name.elf" "$ESP_DIR/linuxdrv/$name.elf"; then
+            echo "ERROR: could not stage the Linux driver process $name." >&2
+            exit 1
+        fi
+    done
+fi
 # Guard against a staged image that predates this build: it must be newer
 # than the freshly-built kernel binary we just compiled.  Skipped under
 # --no-stage, where an older image is exactly what was asked for.
@@ -9061,12 +9101,20 @@ fi
 # ENVIRON rather than `awk -v`, which would read backslash escapes in an
 # SLATE_CMDLINE value as escapes.
 limine_rc=0
-KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" awk '
+# The Linux driver processes as the first entry's modules, after its
+# command line: a module_path: and the module_cmdline: the kernel finds it by.
+MODULE_LINES=""
+for name in "${LINUX_DRIVERS[@]}"; do
+    MODULE_LINES+="    module_path: boot():/linuxdrv/$name.elf"$'\n'
+    MODULE_LINES+="    module_cmdline: linuxdrv/$name"$'\n'
+done
+KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" MODULE_LINES="${MODULE_LINES%$'\n'}" awk '
     substr($0, 1, 1) == "/" { entry++ }
     entry == 1 && $1 == "cmdline:" { clash = 1 }
     { print }
     entry == 1 && !done && $1 == "kernel_path:" {
         print ENVIRON["KERNEL_CMDLINE_LINE"]
+        if (ENVIRON["MODULE_LINES"] != "") print ENVIRON["MODULE_LINES"]
         done = 1
     }
     END { exit clash ? 3 : (done ? 0 : 2) }

@@ -478,3 +478,23 @@ impl LimineRequest<KernelFileResponse> {
     // in limine.h (Limine 8.7.0).
     pub const KERNEL_FILE: Self = Self::new([0xad97_e90e_83f1_ed67, 0x31eb_5d1c_5ff2_3b69]);
 }
+
+// ---------------------------------------------------------------------------
+// Modules: files the bootloader loads beside the kernel
+// ---------------------------------------------------------------------------
+
+/// Module response: the files limine.conf's `module_path:` lines name, each
+/// with the `module_cmdline:` given after it.
+#[repr(C)]
+pub struct ModuleResponse {
+    pub revision: u64,
+    /// How many modules.
+    pub module_count: u64,
+    /// Their descriptors, `module_count` of them.
+    pub modules: *const *const LimineFile,
+}
+
+impl LimineRequest<ModuleResponse> {
+    /// Limine Module feature request ID (`LIMINE_MODULE_REQUEST`, limine.h).
+    pub const MODULE: Self = Self::new([0x3e7e_2797_02be_32af, 0xca1c_4f3b_d128_0cee]);
+}

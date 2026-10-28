@@ -31,8 +31,8 @@
 
 use crate::limine::{
     BaseRevision, ExecutableAddressResponse, FramebufferResponse, HhdmResponse, KernelFileResponse,
-    LimineRequest, MemmapEntry, MemmapResponse, RequestsEndMarker, RequestsStartMarker,
-    RsdpResponse, memmap_type,
+    LimineRequest, MemmapEntry, MemmapResponse, ModuleResponse, RequestsEndMarker,
+    RequestsStartMarker, RsdpResponse, memmap_type,
 };
 use crate::serial_println;
 
@@ -111,9 +111,61 @@ static EXECUTABLE_ADDRESS_REQUEST: LimineRequest<ExecutableAddressResponse> =
 #[unsafe(link_section = ".requests")]
 static KERNEL_FILE_REQUEST: LimineRequest<KernelFileResponse> = LimineRequest::KERNEL_FILE;
 
+/// Request the files limine.conf's `module_path:` lines name: the Linux
+/// driver processes (design-decisions 1580), loaded beside the kernel rather
+/// than embedded in it. Their memory is the bootloader's "executable and
+/// modules" kind, which the frame allocator never takes.
+#[used]
+#[unsafe(link_section = ".requests")]
+static MODULE_REQUEST: LimineRequest<ModuleResponse> = LimineRequest::MODULE;
+
 // ---------------------------------------------------------------------------
 // Public accessors
 // ---------------------------------------------------------------------------
+
+/// The NUL-terminated string at `ptr`, at most `max` bytes, without its
+/// terminator: `None` for a null pointer or one with no terminator in reach.
+///
+/// # Safety
+///
+/// `ptr` is null or points at a string Limine gave, live for the kernel's
+/// lifetime.
+unsafe fn limine_str(ptr: *const u8, max: usize) -> Option<&'static [u8]> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the caller's; the scan stops at the terminator or `max`.
+    let len = (0..max).find(|&i| unsafe { ptr.add(i).read() } == 0)?;
+    // SAFETY: `len` bytes before the terminator, all read above.
+    Some(unsafe { core::slice::from_raw_parts(ptr, len) })
+}
+
+/// The module limine.conf loaded with `module_cmdline: <name>`: its bytes,
+/// as the bootloader loaded them, live for the kernel's lifetime. `None`
+/// when no module has that name -- none was configured, or the kernel was
+/// started by kexec, which passes no modules on.
+pub fn module(name: &[u8]) -> Option<&'static [u8]> {
+    let response = MODULE_REQUEST.response()?;
+    if response.modules.is_null() {
+        return None;
+    }
+    // At most a few hundred: a count past that is not Limine's.
+    let count = usize::try_from(response.module_count).ok()?.min(256);
+    (0..count).find_map(|i| {
+        // SAFETY: Limine's response holds `module_count` file pointers, each
+        // to a descriptor live for the kernel's lifetime.
+        let file = unsafe { response.modules.add(i).read().as_ref()? };
+        // SAFETY: a string Limine gave.
+        let cmdline = unsafe { limine_str(file.cmdline, 256)? };
+        if cmdline != name || file.address.is_null() {
+            return None;
+        }
+        let size = usize::try_from(file.size).ok()?;
+        // SAFETY: the module's contents: `size` bytes at `address` in the
+        // direct map, which Limine loaded and nothing frees.
+        Some(unsafe { core::slice::from_raw_parts(file.address, size) })
+    })
+}
 
 /// The HHDM offset, read before any other kernel code has run.
 ///

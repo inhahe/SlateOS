@@ -142,6 +142,7 @@ mod ktrace;
 mod kwarn;
 mod layout_pad;
 mod limine;
+mod linuxdrv;
 mod lockdep;
 mod logpersist;
 mod membarrier;
@@ -8401,6 +8402,12 @@ extern "C" fn kernel_main() -> ! {
     // The same interface used from ring 3, by the probe driver.
     selftest::dispatch_debug("Devhandle ring 3", selftest::Severity::Integrity, || {
         devhandle::self_test_ring3()
+    });
+    // The Linux driver layer's first process (design-decisions 1580), loaded
+    // beside the kernel by the bootloader. §914: Integrity -- a driver
+    // process is the sandbox the layer promises.
+    selftest::dispatch_debug("Linuxdrv", selftest::Severity::Integrity, || {
+        linuxdrv::self_test()
     });
 
     // AHCI/SATA driver self-test.

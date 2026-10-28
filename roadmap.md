@@ -5475,8 +5475,16 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         prepares it (2026-10-27). `linux-tree.sh needs <dir>` measured
         `e1000e`: 148 symbols, about 100 of them the bottom layer
         (`linuxdrv/README.md`)
-  - [ ] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
+  - [-] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
         timers, PCI and MSI, IRQs, the minimal device model, `request_firmware`
+        -- begun 2026-10-28: a driver process builds and runs (§1580:
+        Linux's make for the small code model, headers shadowed by their
+        guards, generated stops, a boot module beside the kernel), and its
+        first, `linuxdrv/hello`, runs Linux's vsprintf and an initcall in a
+        process of its own (`linuxdrv::self_test`). In: kmalloc (a buddy
+        allocator, kmalloc's alignment), printk, interrupt flags, `current`,
+        jiffies' storage, randomness, initcalls. Left: everything else in
+        this item, which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide

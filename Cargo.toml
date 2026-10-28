@@ -316,6 +316,11 @@ members = [
     # cannot be. no_std; built for the kernel as its dependency, and out of
     # `default-members` like `yamldoc`.
     "elfparse",
+    # The Linux driver layer's Rust half (lane A, design-decisions 1580): a
+    # static library linked into each driver process, built for the
+    # bare-metal target from its own directory; a member so that its host
+    # tests run with the workspace's.
+    "linuxdrv/kit",
 ]
 # Default members: only the crates that build under the workspace-root
 # target (x86_64-unknown-none). A plain `cargo build` from the project

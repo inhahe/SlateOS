@@ -1,0 +1,17 @@
+[package]
+name = "lxkit"
+version = "0.1.0"
+edition = "2024"
+description = "The Linux driver layer's system-facing half: the slx_* interface on SlateOS (design-decisions 1578, 1580)"
+license = "MIT"
+
+# A static library linked into each Linux driver process beside Linux's code
+# and the layer's C half (scripts/linux-tree.sh driver), built for the
+# bare-metal target its own .cargo/config.toml names by `cargo build
+# --release` in this directory; and a library whose host tests the workspace
+# runs.
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[lints]
+workspace = true

@@ -10,6 +10,9 @@
 #   bash scripts/linux-tree.sh paths     # print the source and object directories
 #   bash scripts/linux-tree.sh needs drivers/net/ethernet/intel/e1000e
 #                                        # what that code uses and does not define
+#   bash scripts/linux-tree.sh driver hello
+#                                        # the driver process linuxdrv/hello/
+#                                        # describes, into build/linuxdrv/hello.elf
 #
 # Runs on a Linux host. From Git Bash on Windows it runs itself again in WSL
 # (distribution `Ubuntu`, or $SLATEOS_WSL_DISTRO): the tree holds file names
@@ -189,6 +192,154 @@ prepare() {
     echo "linux-tree: prepared $obj"
 }
 
+# What every C file of a driver process is compiled with on top of Linux's
+# own flags (design-decisions 1580): the small code model, since the process
+# is linked low rather than in the kernel's top 2 GiB, and the shadow headers
+# forced in first. Both through KCFLAGS, which Linux's build puts last, so
+# `-mcmodel=small` overrides its `-mcmodel=kernel`. `needs` uses them too, so
+# the two never rebuild each other's objects.
+shadow_dir() { echo "$obj/slateos-shadow"; }
+
+# An LLVM tool by name, as llvm_setting's answer reaches it: unversioned on
+# PATH ("1"), or in a directory.
+tool() {
+    local llvm
+    llvm=$(llvm_setting)
+    if [ "$llvm" = 1 ]; then echo "$1"; else echo "$llvm$1"; fi
+}
+driver_kcflags() { echo "-mcmodel=small -include $(shadow_dir)/shadow.h"; }
+
+# Copy the shadow headers beside the objects -- a path without spaces, for
+# KCFLAGS -- and check that each names the guard its Linux header really has:
+# a guard that no longer matches lets both versions in, or neither.
+install_shadow() {
+    local dir file path guard real
+    dir=$(shadow_dir)
+    mkdir -p "$dir"
+    cp "$repo"/linuxdrv/shadow/*.h "$dir/"
+    for file in "$dir"/*.h; do
+        read -r path guard < <(sed -n 's/^ \* SHADOWS \([^ ]*\) \([^ ]*\)$/\1 \2/p' "$file") || continue
+        [ -n "${path:-}" ] || continue
+        [ -f "$src/$path" ] || die "$file shadows $path, which $version does not have"
+        real=$(sed -n 's/^#ifndef \([A-Za-z0-9_]*\)$/\1/p' "$src/$path" | head -1)
+        [ "$real" = "$guard" ] ||
+            die "$file shadows $path by guard $guard, but $version's guard is ${real:-missing}"
+        path='' guard=''
+    done
+}
+
+# Build the driver process `linuxdrv/<name>/` describes into
+# build/linuxdrv/<name>.elf, linking the layer's Rust half, which cargo must
+# have built first (linuxdrv/kit: `cargo build --release`). Both paths are
+# the repository's own, not arguments: a path given from Git Bash would not
+# be one in WSL, where this runs. Its `manifest` names
+# what goes in: `linux <object>` for each of Linux's own objects (a path in
+# the tree, built by Linux's make), `layer <file>` for each of the layer's C
+# files (a path under linuxdrv/). Every function the result calls and nothing
+# defines becomes a generated stop (1578 rule 4); a data symbol nothing
+# defines is an error, to be written by hand.
+driver() {
+    local name=${1:-}
+    [ -n "$name" ] || die "usage: linux-tree.sh driver <name under linuxdrv/>"
+    # The workspace's target directory: linuxdrv/kit is a member.
+    local kit="$repo/target/x86_64-unknown-none/release/liblxkit.a"
+    local out="$repo/build/linuxdrv/$name.elf"
+    mkdir -p "$(dirname "$out")"
+    local manifest="$repo/linuxdrv/$name/manifest"
+    [ -f "$manifest" ] || die "$manifest: no such driver"
+    [ -f "$kit" ] || die "$kit: the layer's Rust half is not built"
+    prepare
+    install_shadow
+    local llvm work linux_objs=() layer_files=() kind path
+    llvm=$(llvm_setting)
+    while read -r kind path; do
+        case $kind in
+            linux) linux_objs+=("$path") ;;
+            layer) layer_files+=("$path") ;;
+            '' | '#'*) ;;
+            *) die "$manifest: '$kind' is neither linux nor layer" ;;
+        esac
+    done <"$manifest"
+    [ "${#linux_objs[@]}" -gt 0 ] || die "$manifest names no Linux object"
+    # Linux's own objects, by Linux's own make.
+    make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
+        -j"$(nproc)" "${linux_objs[@]}" >"$obj/driver-$name.log" 2>&1 ||
+        { tail -30 "$obj/driver-$name.log" >&2; die "building $name's Linux objects failed"; }
+    # The flags those were compiled with -- Linux's, with KCFLAGS -- for the
+    # layer's own files: the saved command of the first object, without its
+    # dependency file, input, output and per-object names.
+    local first=${linux_objs[0]} cmdfile flags
+    cmdfile="$obj/$(dirname "$first")/.$(basename "$first").cmd"
+    [ -f "$cmdfile" ] || die "$cmdfile: no saved command for $first"
+    flags=$(sed -n 's/^savedcmd_[^ ]* := //p' "$cmdfile" | sed 's/ ; .*//' |
+        tr ' ' '\n' | grep -v -E '^(-Wp,-MMD.*|-c|-o|-DKBUILD_.*|-D__KBUILD_.*)$|\.[co]$|^$' | tr '\n' ' ')
+    work="$obj/slateos-drivers/$name"
+    rm -rf "$work"
+    mkdir -p "$work/src"
+    # The layer's sources beside the objects: a path without spaces.
+    cp -r "$repo/linuxdrv/emul" "$repo/linuxdrv/$name" "$work/src/"
+    local objs=() file base
+    for file in "${linux_objs[@]}"; do objs+=("$obj/$file"); done
+    for file in "${layer_files[@]}"; do
+        base=$(basename "$file" .c)
+        (cd "$obj" && eval "$flags -DKBUILD_MODNAME='\"$name\"' -DKBUILD_BASENAME='\"$base\"' \
+            -c -o '$work/$base.o' '$work/src/$file'") ||
+            die "compiling $file failed"
+        objs+=("$work/$base.o")
+    done
+    # The stops: every symbol used and defined nowhere -- not in the objects,
+    # not in the Rust half, not by the linker script -- that is only ever
+    # called is a function that stops the driver naming itself; anything
+    # referenced otherwise is data, which a stop cannot stand in for.
+    local nm dump
+    nm=$(tool llvm-nm)
+    dump=$(tool llvm-objdump)
+    python3 - "$work/stops.c" <(
+        "$nm" --undefined-only "${objs[@]}" "$kit" 2>/dev/null | awk 'NF == 2 { print $2 }' | sort -u
+    ) <(
+        "$nm" --defined-only "${objs[@]}" "$kit" 2>/dev/null | awk 'NF == 3 { print $3 }' | sort -u
+    ) <(
+        "$dump" -r "${objs[@]}" | awk '/R_X86_64/ { sub(/[-+]0x[0-9a-f]+$/, "", $3); print $2, $3 }' | sort -u
+    ) "$repo/linuxdrv/link.ld" <<'PY'
+import re
+import sys
+
+stops_path, undef_path, def_path, refs_path, script_path = sys.argv[1:6]
+undef = {l.strip() for l in open(undef_path, encoding="utf-8")}
+defined = {l.strip() for l in open(def_path, encoding="utf-8")}
+script = open(script_path, encoding="utf-8").read()
+# What the linker script defines: `name = ...;` at the start of a statement.
+defined |= set(re.findall(r"(?m)^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", script))
+defined |= set(re.findall(r";\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", script))
+kinds = {}
+for line in open(refs_path, encoding="utf-8"):
+    kind, _, sym = line.strip().partition(" ")
+    kinds.setdefault(sym, set()).add(kind)
+missing = sorted(undef - defined)
+data = [s for s in missing if kinds.get(s, set()) - {"R_X86_64_PLT32"}]
+if data:
+    sys.exit("linux-tree: data symbols nothing defines (write them by hand):\n    "
+             + "\n    ".join(f"{s} ({', '.join(sorted(kinds.get(s, ())))})" for s in data))
+with open(stops_path, "w", encoding="utf-8", newline="\n") as out:
+    out.write("/* Generated by scripts/linux-tree.sh driver: each function a driver\n"
+              " * calls that nothing defines stops the driver, naming itself\n"
+              " * (design-decisions 1578 rule 4). It includes no Linux header. */\n"
+              "void slx_stop(const char *what) __attribute__((noreturn));\n")
+    for s in missing:
+        out.write(f'void {s}(void) {{ slx_stop("{s}"); }}\n')
+print(f"linux-tree: {len(missing)} generated stop(s)")
+PY
+    "$(tool clang)" --target=x86_64-linux-gnu -O2 -ffreestanding -fno-builtin -fno-pic \
+        -mcmodel=small -mno-red-zone -mno-sse -fno-asynchronous-unwind-tables \
+        -c -o "$work/stops.o" "$work/stops.c"
+    "$(tool ld.lld)" -T "$repo/linuxdrv/link.ld" --orphan-handling=error -static -nostdlib \
+        -z max-page-size=0x4000 --gc-sections -o "$work/$name.elf" \
+        "${objs[@]}" "$work/stops.o" "$kit" ||
+        die "linking $name failed"
+    cp "$work/$name.elf" "$out"
+    echo "linux-tree: built $out"
+}
+
 # What a directory of Linux code calls that it does not define, grouped by the
 # Linux file that exports each symbol: the inventory a driver's port starts
 # from (design-decisions 1578 rule 4). Built by Linux's own build, so the
@@ -199,9 +350,11 @@ needs() {
     dir=${dir%/}
     prepare
     [ -d "$src/$dir" ] || die "$src/$dir is not a directory"
+    install_shadow
     local llvm
     llvm=$(llvm_setting)
-    make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" -j"$(nproc)" "$dir/" \
+    make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
+        -j"$(nproc)" "$dir/" \
         >"$obj/needs.log" 2>&1 ||
         { tail -30 "$obj/needs.log" >&2; die "building $dir failed (log: $obj/needs.log)"; }
     local nm=llvm-nm
@@ -262,5 +415,6 @@ case "${1:-}" in
     prepare) prepare ;;
     paths) printf 'src %s\nobj %s\n' "$src" "$obj" ;;
     needs) needs "${2:-}" ;;
-    *) die "usage: linux-tree.sh fetch | prepare | paths | needs <dir>" ;;
+    driver) driver "${2:-}" ;;
+    *) die "usage: linux-tree.sh fetch | prepare | paths | needs <dir> | driver <name>" ;;
 esac

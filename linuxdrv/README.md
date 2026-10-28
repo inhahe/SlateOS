@@ -25,6 +25,11 @@ locking is correct as compiled.
 |---|---|
 | `linux.pin` | The Linux release, by version and SHA-256 |
 | `linux.config` | The configuration, applied on top of `allnoconfig`; every line is checked to have taken |
+| `shadow/` | Linux headers that assume kernel mode, replaced by their include guards (design-decisions 1580) |
+| `emul/` | The Linux-facing half, C: Linux's functions over `slx_*` (`slx.h`) |
+| `kit/` | The system-facing half, Rust: `slx_*` on SlateOS -- entry, memory, console, exit |
+| `link.ld` | The driver process's layout: linked at 4 MiB, Linux's initcalls in order |
+| `hello/` | The first driver process, which drives nothing: the layer's own test |
 
 ## Preparing the Linux tree
 
@@ -44,9 +49,24 @@ builds one directory of Linux code with Linux's own build and lists what it
 uses and does not define, grouped by the Linux file that exports each symbol:
 the inventory a driver's port starts from.
 
+## Building a driver process
+
+    (cd linuxdrv/kit && cargo build --release)
+    bash scripts/linux-tree.sh driver hello
+
+builds the process `linuxdrv/hello/manifest` describes into
+`build/linuxdrv/hello.elf`: Linux's own objects by Linux's make (with the
+small code model and the shadow headers, design-decisions 1580), the layer's
+C files with the same flags, a generated stop for every function nothing
+defines, and the Rust half. The boot test builds every process it loads and
+puts it beside the kernel as a Limine module (`module_cmdline:
+linuxdrv/<name>`), where the kernel finds it (`boot::module`).
+
 ## Status
 
-The tree is fetched, verified and prepared; no driver runs yet. The first,
+The layer's first process runs: `hello`, Linux's headers and its own
+vsprintf in a process of their own, its initcall run, and a generated stop
+reached on purpose (`kernel/src/linuxdrv.rs`). No driver runs yet. The first,
 `e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
 use 148 symbols they do not define. About 15 are Linux's generic library code
 (`lib/` string, bitmap, CRC, `vsprintf`, hexdump; `timecounter`), to be

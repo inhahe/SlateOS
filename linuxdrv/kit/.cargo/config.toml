@@ -1,0 +1,15 @@
+# Build configuration for lxkit, the Linux driver layer's Rust half.
+#
+# Linked into a driver process at a low address (linuxdrv/link.ld puts it at
+# 4 MiB), beside Linux code compiled for the small code model with 32-bit
+# absolute relocations: so static relocation and the small code model here
+# too (design-decisions 1580). The target disables SSE, as Linux's flags do.
+
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "code-model=small",
+]

@@ -1,0 +1,172 @@
+// SPDX-License-Identifier: MIT
+/*
+ * The core of the driver layer's Linux-facing half (design-decisions 1578,
+ * 1580): what every Linux driver process needs whatever its driver --
+ * the process's one task, interrupt flags, printk, kmalloc, jiffies,
+ * randomness, and running the driver's initcalls.
+ *
+ * Compiled with the flags Linux's own build gives a driver file, so that
+ * every declaration it defines a symbol for is Linux's own, checked by the
+ * compiler against what it defines.
+ */
+#include <linux/init.h>
+#include <linux/kernel.h>
+#include <linux/printk.h>
+#include <linux/slab.h>
+#include <linux/jiffies.h>
+#include <linux/sched.h>
+#include <linux/percpu.h>
+#include <asm/preempt.h>
+#include <linux/tracepoint-defs.h>
+#include <linux/random.h>
+#include <linux/notifier.h>
+
+#include "slx.h"
+
+/* Interrupt handlers may run (the shadow <asm/irqflags.h>). */
+unsigned long slx_irq_flags = X86_EFLAGS_IF;
+
+void slx_halted(void)
+{
+	slx_stop("halt");
+}
+
+/*
+ * The process's one task until there are more: what `current` names while
+ * the driver's initcalls run. A plain global with this configuration (no
+ * SMP), as every per-CPU variable is.
+ */
+static struct task_struct lx_main_task;
+DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
+
+/* Not in an interrupt, nothing disabled: what a task's count reads. */
+DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
+
+/*
+ * Linux's tick count, starting where Linux's does, five minutes short of
+ * wrapping, so that a driver's wrong comparison shows early. `jiffies` is
+ * this variable under its other name, as Linux's linker script makes it
+ * (`linuxdrv/link.ld`).
+ */
+u64 __cacheline_aligned_in_smp jiffies_64 = INITIAL_JIFFIES;
+
+/*
+ * kmalloc's per-size caches. Linux's inline kmalloc picks one by size and
+ * passes it to __kmalloc_cache_noprof with the size; here they are all
+ * NULL, and the size is what is used.
+ */
+kmem_buckets kmalloc_caches[NR_KMALLOC_TYPES];
+
+static void *lx_alloc(size_t size, gfp_t flags)
+{
+	void *p = slx_alloc(size);
+
+	if (p && (flags & __GFP_ZERO))
+		memset(p, 0, size);
+	return p;
+}
+
+void *__kmalloc_noprof(size_t size, gfp_t flags)
+{
+	return lx_alloc(size, flags);
+}
+
+void *__kmalloc_cache_noprof(struct kmem_cache *s, gfp_t flags, size_t size)
+{
+	return lx_alloc(size, flags);
+}
+
+void kfree(const void *p)
+{
+	slx_free(p);
+}
+
+/*
+ * Randomness, from the system's CSPRNG, which the kernel seeds before any
+ * process starts: Linux's random number generator is always "ready" in a
+ * driver process, so what waits for it runs at once, as Linux runs it once
+ * its generator is (drivers/char/random.c).
+ */
+void get_random_bytes(void *buf, size_t len)
+{
+	slx_random(buf, len);
+}
+
+int execute_with_initialized_rng(struct notifier_block *nb)
+{
+	nb->notifier_call(nb, 0, NULL);
+	return 0;
+}
+
+/*
+ * The names vsprintf prints page, GFP and VMA flags by (%pGp, %pGg, %pGv).
+ * Linux's own are mm/debug.c's, built from mm's flag lists, which the layer
+ * does not compile; empty, each terminated as vsprintf expects, so a driver
+ * printing flags gets them in hex. Declared in mm/internal.h, which is not
+ * on a driver's include path.
+ */
+const struct trace_print_flags pageflag_names[] = { { 0, NULL } };
+const struct trace_print_flags gfpflag_names[] = { { 0, NULL } };
+const struct trace_print_flags vmaflag_names[] = { { 0, NULL } };
+
+/*
+ * The console, a line at a time: printk's level prefix (KERN_*) taken off
+ * and "[lx] " put on, and a line longer than the buffer cut where it ends.
+ */
+static void lx_vprint(const char *prefix, const char *fmt, va_list args)
+{
+	char line[512];
+	const char *text = printk_skip_level(fmt);
+	size_t at = strscpy(line, prefix, sizeof(line));
+	size_t len;
+
+	if ((ssize_t)at < 0)
+		at = 0;
+	len = at + vscnprintf(line + at, sizeof(line) - at, text, args);
+	if (len > 0 && line[len - 1] != '\n' && len < sizeof(line) - 1)
+		line[len++] = '\n';
+	slx_log(line, len);
+}
+
+int _printk(const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	lx_vprint("[lx] ", fmt, args);
+	va_end(args);
+	return 0;
+}
+
+void __warn_printk(const char *fmt, ...)
+{
+	va_list args;
+
+	va_start(args, fmt);
+	lx_vprint("[lx] WARNING: ", fmt, args);
+	va_end(args);
+}
+
+/*
+ * The driver's initcalls, in Linux's order (the linker script keeps the
+ * levels in sequence between these two symbols), each an offset from its
+ * own entry (CONFIG_HAVE_ARCH_PREL32_RELOCATIONS).
+ */
+extern initcall_entry_t __initcall_start[], __initcall_end[];
+
+int lx_emul_main(void)
+{
+	initcall_entry_t *entry;
+
+	for (entry = __initcall_start; entry < __initcall_end; entry++) {
+		initcall_t fn = initcall_from_entry(entry);
+		int ret = fn();
+
+		if (ret) {
+			/* By address: naming it would need the symbol table. */
+			pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
+			return SLX_EXIT_INIT_FAILED;
+		}
+	}
+	return SLX_EXIT_OK;
+}

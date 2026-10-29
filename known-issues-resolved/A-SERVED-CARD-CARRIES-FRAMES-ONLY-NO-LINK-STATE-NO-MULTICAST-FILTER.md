@@ -1,7 +1,7 @@
-## A-SERVED-CARD-CARRIES-FRAMES-ONLY-NO-LINK-STATE-NO-MULTICAST-FILTER (lane A, 2026-10-29) — OPEN
+## A-SERVED-CARD-CARRIES-FRAMES-ONLY-NO-LINK-STATE-NO-MULTICAST-FILTER (lane A, 2026-10-29) — FIXED
 
-**Status:** OPEN -- fixed on lane-a-wip (the port's version 2: link and
-multicast messages, design-decisions 1589 item 7), awaiting a boot on main.
+**Status:** FIXED 2026-10-29 -- the port's version 2 (link and multicast
+messages, design-decisions 1589 item 7), booted green on main at 16fba6542.
 What is left on the daemon's side -- one NIC interface, a port in its
 serving mode, the link acted on -- is
 `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`.

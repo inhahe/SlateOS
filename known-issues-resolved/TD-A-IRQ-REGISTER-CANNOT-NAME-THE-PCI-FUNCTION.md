@@ -1,6 +1,6 @@
-## `TD-A-IRQ-REGISTER-CANNOT-NAME-THE-PCI-FUNCTION` — open, found 2026-08-22 (lane A)
+## `TD-A-IRQ-REGISTER-CANNOT-NAME-THE-PCI-FUNCTION` — fixed 2026-10-29, found 2026-08-22 (lane A)
 
-**Status:** OPEN -- fixed on lane-a-wip, awaiting a boot on main: a PCI
+**Status:** FIXED 2026-10-29, booted green on main at 16fba6542: a PCI
 function's driver takes its INTx through its device handle
 (`SYS_PCI_DEVICE_IRQ_SETUP` with `IRQ_SETUP_INTX`; design-decisions 1579 as
 built, 2026-10-29), which names the function, so the kernel arms exactly its

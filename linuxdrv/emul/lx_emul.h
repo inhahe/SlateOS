@@ -48,10 +48,29 @@ struct pci_dev;
 bool lx_pci_check_bound(void);
 int lx_pci_index(const struct pci_dev *dev);
 long lx_pci_handle(int i);
-/* lx_irq.c: the interrupts that came since the last turn, handled; and how
- * many times the handler of interrupt `irq` has run, for the tests. */
+/* lx_irq.c: the interrupts that came since the last turn, handled; which
+ * the loop is to wait for when idle, told the kit (just before it waits);
+ * and how many times the handler of interrupt `irq` has run, for the tests. */
 void lx_irq_poll(void);
+void lx_irq_listen(void);
 unsigned long lx_irq_count(unsigned int irq);
+
+/*
+ * Hardirq context, as Linux enters it for an interrupt -- interrupts off,
+ * the count raised (<linux/hardirq.h>'s __irq_enter_raw()) -- and left: for
+ * the devices' handlers and the turn's irq_work alike, so that both run in
+ * the one context.
+ */
+#define lx_hardirq_enter(flags)		\
+	do {				\
+		local_irq_save(flags);	\
+		__irq_enter_raw();	\
+	} while (0)
+#define lx_hardirq_exit(flags)		\
+	do {				\
+		__irq_exit_raw();	\
+		local_irq_restore(flags);	\
+	} while (0)
 
 /* For the hello driver's tests: warnings said (lx_emul.c), and threads'
  * records not yet freed, daemons (kthreadd, idle workers) not counted

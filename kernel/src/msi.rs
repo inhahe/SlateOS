@@ -697,9 +697,24 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
         (msg_control & !(0b111 << 4)) | MSI_CONTROL_ENABLE,
     );
 
-    // Disable legacy INTx (set bit 10 of PCI Command register).
-    let cmd = pci::config_read16(bus, dev, func, 4);
-    pci::config_write16_native(bus, dev, func, 4, cmd | (1 << 10));
+    // Disable legacy INTx (set bit 10 of PCI Command register) -- unless on
+    // this part that silences its MSI too.
+    let vendor = pci::config_read16(bus, dev, func, 0);
+    let device = pci::config_read16(bus, dev, func, 2);
+    let revision = pci::config_read8(bus, dev, func, 8);
+    let smbus = pci::find_device(0x1002, 0x4385)
+        .map(|s| pci::config_read8(s.address.bus, s.address.device, s.address.function, 8));
+    if intx_disable_silences_msi(vendor, device, revision, smbus) {
+        serial_println!(
+            "[msi] {:02x}:{:02x}.{} keeps its legacy line on: turned off, its MSI would be too",
+            bus,
+            dev,
+            func
+        );
+    } else {
+        let cmd = pci::config_read16(bus, dev, func, 4);
+        pci::config_write16_native(bus, dev, func, 4, cmd | (1 << 10));
+    }
 
     serial_println!(
         "[msi] Enabled MSI for {:02x}:{:02x}.{}: vector={}, cpu={}",
@@ -823,8 +838,62 @@ pub fn stats() -> MsiStats {
 // ---------------------------------------------------------------------------
 
 /// Self-test for the MSI subsystem.
+/// Whether turning a function's legacy line off -- the command register's
+/// INTx Disable, which enabling MSI otherwise sets -- also silences its MSI:
+/// a hardware bug of a few parts, which Linux's quirks keep the line on for
+/// (`PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG`). Broadcom's Tigon3 5714, 5715 and
+/// 5780 and their S parts; ATI's SB600/SB700 functions 0x4373-0x4375, and
+/// 0x4390-0x4394 while the chipset's SMBus controller (0x4385) is revision
+/// 0x30 to 0x3a, the bug fixed from A21 on; Atheros/Qualcomm (0x1969)
+/// 0x1062, 0x1063, 0x2060, 0x2062, 0x1073 and 0x1083, and 0x1090, 0x1091,
+/// 0x10a0, 0x10a1 and 0xe091 below revision 0x18, the bug fixed from then
+/// on. `smbus_revision` is the ATI SMBus controller's, if the machine has one.
+#[must_use]
+pub fn intx_disable_silences_msi(
+    vendor: u16,
+    device: u16,
+    revision: u8,
+    smbus_revision: Option<u8>,
+) -> bool {
+    match (vendor, device) {
+        (0x14e4, 0x1668 | 0x1669 | 0x166a | 0x166b | 0x1678 | 0x1679)
+        | (0x1002, 0x4373..=0x4375)
+        | (0x1969, 0x1062 | 0x1063 | 0x2060 | 0x2062 | 0x1073 | 0x1083) => true,
+        (0x1002, 0x4390..=0x4394) => smbus_revision.is_some_and(|r| (0x30..0x3b).contains(&r)),
+        (0x1969, 0x1090 | 0x1091 | 0x10a0 | 0x10a1 | 0xe091) => revision < 0x18,
+        _ => false,
+    }
+}
+
 pub fn self_test() -> crate::error::KernelResult<()> {
     serial_println!("[msi] Running self-test...");
+
+    // The parts whose MSI the legacy line's disable silences, as Linux lists them.
+    let quirks: [(u16, u16, u8, Option<u8>, bool); 9] = [
+        (0x14e4, 0x166a, 0, None, true),
+        (0x14e4, 0x1677, 0, None, false),
+        (0x1002, 0x4374, 0, None, true),
+        (0x1002, 0x4391, 0, Some(0x3a), true),
+        (0x1002, 0x4391, 0, Some(0x3b), false),
+        (0x1002, 0x4391, 0, None, false),
+        (0x1969, 0x1091, 0x17, None, true),
+        (0x1969, 0x1091, 0x18, None, false),
+        (0x8086, 0x10d3, 0, None, false),
+    ];
+    for (vendor, device, revision, smbus, want) in quirks {
+        if intx_disable_silences_msi(vendor, device, revision, smbus) != want {
+            serial_println!(
+                "[msi]   FAIL: {:04x}:{:04x} rev {:#x} (SMBus {:?}): the MSI INTx-disable bug {}",
+                vendor,
+                device,
+                revision,
+                smbus,
+                if want { "not known" } else { "wrongly assumed" }
+            );
+            return Err(crate::error::KernelError::InternalError);
+        }
+    }
+    serial_println!("[msi]   MSI INTx-disable quirks: OK");
 
     // Test 0: the pool shares no vector with the I/O APIC's lines or the
     // kernel's own vectors.

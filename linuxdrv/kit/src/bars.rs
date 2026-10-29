@@ -144,10 +144,15 @@ impl Bars {
             base |= u64::from(self.real.get(upper).copied().unwrap_or(0)) << 32;
             in_place &= self.register(upper) == self.real.get(upper).copied().unwrap_or(0);
         }
+        let mut seen = u64::from(self.register(i) & !TYPE_BITS);
+        if self.is_64(i) {
+            seen |= u64::from(self.register(i.saturating_add(1))) << 32;
+        }
         Some(Window {
             base,
             size,
             moved: !in_place,
+            seen,
         })
     }
 }
@@ -157,9 +162,12 @@ impl Bars {
 pub struct Window {
     /// Where the kernel placed it, and the device decodes it.
     pub base: u64,
+    /// Its size in bytes, the whole BAR's: a power of two of 16 or more.
     pub size: u64,
     /// Whether Linux has written it elsewhere since.
     pub moved: bool,
+    /// Where Linux's view of it is: `base` unless it was moved.
+    pub seen: u64,
 }
 
 /// The low `width` bytes of a register.
@@ -184,6 +192,7 @@ mod tests {
             base,
             size,
             moved: false,
+            seen: base,
         })
     }
 
@@ -278,9 +287,10 @@ mod tests {
             Some(Window {
                 base: 0x8916_0000,
                 size: 0x2_0000,
-                moved: true
+                moved: true,
+                seen: 0xa000_0000
             }),
-            "where it really is, and that it moved"
+            "where it really is, where Linux thinks it is, and that it moved"
         );
         assert!(b.write(FIRST, 4, 0x8916_0000));
         assert_eq!(b.window(0), placed(0x8916_0000, 0x2_0000));
@@ -290,7 +300,9 @@ mod tests {
         assert!(w.write(FIRST + 4, 4, 0x5));
         assert_eq!(w.window(0), placed(0x4_0000_0000, 1 << 33));
         assert!(w.write(FIRST + 4, 4, 0x6));
-        assert!(w.window(0).unwrap().moved, "the upper half moved");
+        let moved = w.window(0).unwrap();
+        assert!(moved.moved, "the upper half moved");
+        assert_eq!(moved.seen, 0x6_0000_0000, "and Linux sees it there");
     }
 
     #[test]

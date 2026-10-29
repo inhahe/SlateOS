@@ -22,11 +22,17 @@
  * cause register for. The turn's softirqs run after it, as on Linux's
  * irq_exit(). A threaded handler's second half runs in a kthread of its
  * own, as Linux's "irq/N-name" thread runs it, woken when the first half
- * answers IRQ_WAKE_THREAD; a ONESHOT interrupt is not taken again until it
- * has finished. While no handler is requested, or the interrupt is disabled,
- * its interrupts stay counted in the kernel, not taken -- delivered once it
- * is enabled, as Linux replays a pending one -- and the loop does not wait
- * for them (slx_pci_irq_listen).
+ * answers IRQ_WAKE_THREAD, and run once for however many asked. MSI is
+ * safe without ONESHOT -- an edge cannot storm while the thread runs -- so
+ * IRQF_ONESHOT is dropped, as Linux drops it for such an interrupt chip,
+ * and a threaded handler needs no first half. Requests and frees of one
+ * interrupt are serialised, as by Linux's request_mutex: both sleep.
+ *
+ * While no handler is requested, or the interrupt is disabled, its
+ * interrupts stay counted in the kernel, not taken -- delivered once it is
+ * enabled, as Linux replays a pending one -- and the loop does not wait for
+ * them: which interrupts it waits for is worked out just before it waits
+ * (lx_irq_listen, from lx_emul_next_event).
  */
 #include <linux/interrupt.h>
 #include <linux/irqreturn.h>
@@ -35,12 +41,18 @@
 #include <linux/msi.h>
 #include <linux/sched.h>
 #include <linux/wait.h>
+#include <linux/mutex.h>
+#include <linux/hardirq.h>
 
 #include "slx.h"
 #include "lx_emul.h"
 
-/* A function's interrupt number: well above any legacy line's (0-23). */
-#define LX_IRQ_BASE 64
+/*
+ * A function's interrupt number: above every value PCI's 8-bit Interrupt
+ * Line register can hold, so that no function's legacy number -- its
+ * dev->irq while its MSI is off -- is another function's MSI.
+ */
+#define LX_IRQ_BASE 1024
 
 struct lx_irq {
 	struct pci_dev *dev;
@@ -56,6 +68,8 @@ struct lx_irq {
 	void *dev_id;
 	/* disable_irq() nesting; taken only at 0. */
 	unsigned int depth;
+	/* Held across a request or a free, which both sleep. */
+	struct mutex lock;
 	/* The threaded half's thread; woken to run it, and running it; and
 	 * who waits for it to have finished (synchronize_irq). */
 	struct task_struct *thread;
@@ -88,6 +102,7 @@ static struct lx_irq *lx_irq_for(struct pci_dev *dev)
 		lx_irqs[i].handle = lx_pci_handle(i);
 		lx_irqs[i].intx = dev->irq;
 		init_waitqueue_head(&lx_irqs[i].idle);
+		mutex_init(&lx_irqs[i].lock);
 	}
 	return &lx_irqs[i];
 }
@@ -98,19 +113,21 @@ static unsigned int lx_irq_number(const struct lx_irq *d)
 }
 
 /*
- * Whether the loop waits for the interrupt, and lx_irq_poll() takes it: a
- * handler requested, the interrupt enabled, and no ONESHOT thread still
- * running for the last.
+ * Whether the loop waits for the interrupt, and lx_irq_poll() takes it: its
+ * MSI on, a handler requested, the interrupt enabled.
  */
 static bool lx_irq_live(const struct lx_irq *d)
 {
-	return d->msi && d->handler && !d->depth &&
-	       !((d->flags & IRQF_ONESHOT) && (d->thread_due || d->thread_running));
+	return d->msi && d->handler && !d->depth;
 }
 
-static void lx_irq_update(struct lx_irq *d)
+void lx_irq_listen(void)
 {
-	slx_pci_irq_listen(d->handle, lx_irq_live(d));
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(lx_irqs); i++)
+		if (lx_irqs[i].dev)
+			slx_pci_irq_listen(lx_irqs[i].handle, lx_irq_live(&lx_irqs[i]));
 }
 
 /* The function's MSI set up: its interrupt number then Linux's dev->irq. */
@@ -124,11 +141,10 @@ static int lx_msi_enable(struct pci_dev *dev)
 		return 0;
 	if (!dev->msi_cap || slx_pci_irq_setup(d->handle) < 0)
 		return -ENOSPC;
+	/* The kernel turned the legacy line off as it set the MSI up. */
 	d->msi = true;
 	dev->msi_enabled = 1;
 	dev->irq = lx_irq_number(d);
-	/* As Linux's own: the legacy line off while messages are sent. */
-	pci_intx(dev, 0);
 	return 0;
 }
 
@@ -153,7 +169,6 @@ void pci_disable_msi(struct pci_dev *dev)
 	d->msi = false;
 	dev->msi_enabled = 0;
 	dev->irq = d->intx;
-	lx_irq_update(d);
 }
 
 /* MSI-X is not offered: drivers fall back to MSI. */
@@ -190,11 +205,18 @@ void pci_free_irq_vectors(struct pci_dev *dev)
 	pci_disable_msi(dev);
 }
 
+/*
+ * As Linux's: vector 0 is the MSI's interrupt while MSI is on, the legacy
+ * line's number (dev->irq) while it is off -- a number requesting which
+ * fails here, the line not being routed.
+ */
 int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 {
 	struct lx_irq *d = lx_irq_for(dev);
 
-	return d && d->msi && nr == 0 ? lx_irq_number(d) : -EINVAL;
+	if (nr)
+		return -EINVAL;
+	return d && d->msi ? lx_irq_number(d) : dev->irq;
 }
 
 /* One CPU: every vector's affinity is it, which Linux answers as none. */
@@ -220,26 +242,29 @@ static irqreturn_t lx_irq_wake_thread(int irq, void *dev_id)
 	return IRQ_WAKE_THREAD;
 }
 
-/* An interrupt's thread, as Linux's irq_thread(): its second half, each time it is woken. */
+/*
+ * An interrupt's thread, as Linux's irq_thread(): its second half, each time
+ * it is woken to -- a run asked for before a stop is still made, as Linux's
+ * irq_wait_for_interrupt() makes it -- and who waits for it told after each.
+ */
 static int lx_irq_thread(void *data)
 {
 	struct lx_irq *d = data;
 
 	for (;;) {
 		set_current_state(TASK_INTERRUPTIBLE);
-		if (kthread_should_stop())
-			break;
-		if (!d->thread_due) {
-			schedule();
+		if (d->thread_due) {
+			__set_current_state(TASK_RUNNING);
+			d->thread_due = false;
+			d->thread_running = true;
+			d->thread_fn(lx_irq_number(d), d->dev_id);
+			d->thread_running = false;
+			wake_up_all(&d->idle);
 			continue;
 		}
-		__set_current_state(TASK_RUNNING);
-		d->thread_due = false;
-		d->thread_running = true;
-		d->thread_fn(lx_irq_number(d), d->dev_id);
-		d->thread_running = false;
-		lx_irq_update(d);
-		wake_up_all(&d->idle);
+		if (kthread_should_stop())
+			break;
+		schedule();
 	}
 	__set_current_state(TASK_RUNNING);
 	return 0;
@@ -249,48 +274,59 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler, irq_handler_t 
 			 unsigned long flags, const char *name, void *dev)
 {
 	struct lx_irq *d = lx_irq_of(irq);
+	struct task_struct *t = NULL;
+	int ret = 0;
 
-	if (!d || !d->msi)
+	if (!d || !d->msi || (!handler && !thread_fn))
 		return -EINVAL;
-	if (d->handler)
-		return -EBUSY;
-	if (!handler) {
-		/* As Linux's: no first half needs ONESHOT, or a level line would storm. */
-		if (!thread_fn || !(flags & IRQF_ONESHOT))
-			return -EINVAL;
-		handler = lx_irq_wake_thread;
+	mutex_lock(&d->lock);
+	if (d->handler) {
+		ret = -EBUSY;
+		goto out;
 	}
 	if (thread_fn) {
-		struct task_struct *t = kthread_create(lx_irq_thread, d, "irq/%u-%s", irq, name);
-
-		if (IS_ERR(t))
-			return PTR_ERR(t);
-		d->thread = t;
-		wake_up_process(t);
+		t = kthread_create(lx_irq_thread, d, "irq/%u-%s", irq, name);
+		if (IS_ERR(t)) {
+			ret = PTR_ERR(t);
+			goto out;
+		}
 	}
+	d->thread = t;
 	d->thread_fn = thread_fn;
-	d->flags = flags;
+	/* MSI is safe without ONESHOT: dropped, as Linux drops it for such a chip. */
+	d->flags = flags & ~IRQF_ONESHOT;
 	d->name = name;
 	d->dev_id = dev;
 	d->depth = flags & IRQF_NO_AUTOEN ? 1 : 0;
 	d->thread_due = d->thread_running = false;
-	d->handler = handler;
-	lx_irq_update(d);
-	return 0;
+	/* Last: lx_irq_poll() may run it from the next turn on. */
+	d->handler = handler ?: lx_irq_wake_thread;
+	if (t)
+		wake_up_process(t);
+out:
+	mutex_unlock(&d->lock);
+	return ret;
 }
 
+/*
+ * The handler gone, as Linux's __free_irq(): not run again from now, its
+ * threaded half's last asked-for run waited for, then its thread stopped.
+ */
 const void *free_irq(unsigned int irq, void *dev_id)
 {
 	struct lx_irq *d = lx_irq_of(irq);
-	const char *name;
+	const char *name = NULL;
 
-	if (!d || !d->handler || d->dev_id != dev_id) {
-		WARN(1, "Trying to free already-free IRQ %u\n", irq);
-		return NULL;
+	if (!d)
+		goto none;
+	mutex_lock(&d->lock);
+	if (!d->handler || d->dev_id != dev_id) {
+		mutex_unlock(&d->lock);
+		goto none;
 	}
 	d->handler = NULL;
-	lx_irq_update(d);
 	if (d->thread) {
+		wait_event(d->idle, !d->thread_due && !d->thread_running);
 		kthread_stop(d->thread);
 		d->thread = NULL;
 	}
@@ -298,7 +334,11 @@ const void *free_irq(unsigned int irq, void *dev_id)
 	d->thread_fn = NULL;
 	d->name = NULL;
 	d->dev_id = NULL;
+	mutex_unlock(&d->lock);
 	return name;
+none:
+	WARN(1, "Trying to free already-free IRQ %u\n", irq);
+	return NULL;
 }
 
 void disable_irq_nosync(unsigned int irq)
@@ -308,7 +348,6 @@ void disable_irq_nosync(unsigned int irq)
 	if (!d)
 		return;
 	d->depth++;
-	lx_irq_update(d);
 }
 
 /*
@@ -337,7 +376,6 @@ void enable_irq(unsigned int irq)
 	if (!d || WARN(!d->depth, "Unbalanced enable for IRQ %u\n", irq))
 		return;
 	d->depth--;
-	lx_irq_update(d);
 }
 
 /*
@@ -356,17 +394,20 @@ void lx_irq_poll(void)
 
 		if (!d->dev || !lx_irq_live(d) || slx_pci_irq_take(d->handle) <= 0)
 			continue;
-		local_irq_save(flags);
-		preempt_count_add(HARDIRQ_OFFSET);
+		lx_hardirq_enter(flags);
 		ret = d->handler(lx_irq_number(d), d->dev_id);
-		preempt_count_sub(HARDIRQ_OFFSET);
-		local_irq_restore(flags);
+		lx_hardirq_exit(flags);
 		d->count++;
-		if ((ret & IRQ_WAKE_THREAD) && d->thread) {
-			d->thread_due = true;
-			wake_up_process(d->thread);
-			lx_irq_update(d);
+		if (!(ret & IRQ_WAKE_THREAD))
+			continue;
+		if (!d->thread) {
+			/* As Linux's warn_no_thread(): a driver's bug, said once. */
+			pr_warn_once("IRQ %u device %s returned IRQ_WAKE_THREAD but no thread function available.\n",
+				     lx_irq_number(d), d->name);
+			continue;
 		}
+		d->thread_due = true;
+		wake_up_process(d->thread);
 	}
 }
 

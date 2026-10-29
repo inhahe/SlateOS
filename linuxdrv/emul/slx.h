@@ -45,9 +45,9 @@ void *slx_map_lazy(unsigned long bytes);
  *                        after what was written, which never reaches them;
  *   slx_pci_config_write and written: 0;
  *   slx_pci_bar_window   memory BAR `bar`'s place -- where the kernel put
- *                        it -- and size: 1 while Linux's view is there too,
- *                        -1 when Linux wrote it elsewhere, 0 for no memory
- *                        BAR;
+ *                        it -- its size, and where Linux's view of it is:
+ *                        1 while the two agree, -1 when Linux wrote it
+ *                        elsewhere, 0 for no memory BAR;
  *   slx_pci_map_bar      memory BAR `bar` mapped whole and uncached: where,
  *                        or the kernel's error.
  */
@@ -58,7 +58,7 @@ long slx_pci_config_read(long handle, unsigned int offset, unsigned int width);
 long slx_pci_config_write(long handle, unsigned int offset, unsigned int width,
 			  unsigned int value);
 int slx_pci_bar_window(long handle, unsigned int bar, unsigned long long *base,
-		       unsigned long long *size);
+		       unsigned long long *size, unsigned long long *seen);
 long slx_pci_map_bar(long handle, unsigned int bar);
 /*
  * Its interrupts: its MSI set up, once for the handle's life (0, or an

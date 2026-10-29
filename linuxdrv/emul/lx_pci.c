@@ -298,22 +298,26 @@ static void __iomem *lx_ioremap(resource_size_t phys, unsigned long size)
 		struct lx_pci_function *f = &lx_pci_functions[i];
 
 		for (b = 0; b < PCI_STD_NUM_BARS; b++) {
-			u64 base, len;
-			int at = slx_pci_bar_window(f->handle, b, &base, &len);
+			u64 base, len, seen;
+			int at = slx_pci_bar_window(f->handle, b, &base, &len, &seen);
 			long mapped;
 
-			if (!at || phys < base || phys - base >= len || size > len - (phys - base))
+			if (!at)
 				continue;
-			if (at < 0) {
-				pci_err(f->dev, "ioremap of %#llx: BAR %u was moved, which the device cannot follow\n",
-					(unsigned long long)phys, b);
+			/* Where Linux moved it to: the device is not there. */
+			if (at < 0 && phys >= seen && phys - seen < len) {
+				pci_err(f->dev, "ioremap of %#llx: BAR %u was moved there from %#llx, which the device cannot follow\n",
+					(unsigned long long)phys, b, base);
 				return NULL;
 			}
+			if (phys < base || phys - base >= len || size > len - (phys - base))
+				continue;
 			if (!f->mapped[b]) {
 				mapped = slx_pci_map_bar(f->handle, b);
 				if (mapped <= 0) {
-					pci_err(f->dev, "BAR %u could not be mapped: %ld (whole BARs of 4 KiB or more, page-aligned, only)\n",
-						b, mapped);
+					/* NotSupported (-2): the handle maps whole BARs of a page or more. */
+					pci_err(f->dev, "BAR %u could not be mapped: %ld%s\n", b, mapped,
+						mapped == -2 ? " (a BAR under 4 KiB, or not page-aligned)" : "");
 					return NULL;
 				}
 				f->mapped[b] = (void __iomem *)mapped;

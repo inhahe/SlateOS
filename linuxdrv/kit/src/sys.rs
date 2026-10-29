@@ -252,7 +252,10 @@ unsafe extern "C" fn lxkit_start() -> ! {
         exit_with(exit::NO_MEMORY);
     }
     // Done when every task finished; a task left waiting for what will never
-    // come -- the first, or one an initcall started -- is a deadlock.
+    // come -- the first, or one an initcall started -- is a deadlock. Unless
+    // a device with a handler requested may still wake it: the process then
+    // waits for its device for ever, as a driver does (design-decisions
+    // 1585), and is never done by itself.
     if crate::sched::run() {
         exit_with(exit::OK);
     }

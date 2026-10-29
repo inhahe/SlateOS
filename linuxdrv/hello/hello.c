@@ -166,9 +166,10 @@ static bool hello_bar0_sizes(struct pci_dev *pdev)
  * the last) comes when the process has gone idle with nothing else due, so
  * that only the loop's wait on the device can wake it; a threaded
  * handler's second half runs in a task, which may sleep. The waits have no
- * timeout: an interrupt lost leaves the process waiting for nothing, which
- * ends it as deadlocked. The handlers read the cause register, which clears
- * it, as e1000e's do.
+ * timeout: an interrupt lost leaves the process waiting on its device for
+ * ever -- a driver with a handler requested is never done by itself -- and
+ * the kernel's deadline for the run ends it. The handlers read the cause
+ * register, which clears it, as e1000e's do.
  */
 #define HELLO_ICR 0x00c0
 #define HELLO_ICS 0x00c8
@@ -257,8 +258,10 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 	HELLO_PCI_CHECK(hello_thread_in_task, "a threaded handler's second half ran outside a task");
 	free_irq(irq, pdev);
 	pci_free_irq_vectors(pdev);
-	HELLO_PCI_CHECK(!pdev->msi_enabled && pci_irq_vector(pdev, 0) < 0,
+	HELLO_PCI_CHECK(!pdev->msi_enabled && pci_irq_vector(pdev, 0) == pdev->irq && pdev->irq != irq,
 			"MSI stayed on once its vectors were freed");
+	HELLO_PCI_CHECK(request_irq(pdev->irq, hello_isr, 0, "hello", pdev) == -EINVAL,
+			"a legacy line, not routed, was requested");
 	writel(~0U, hello_regs + HELLO_IMC);
 	readl(hello_regs + HELLO_ICR);
 	return 0;

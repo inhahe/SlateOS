@@ -15,16 +15,19 @@ device as well as for its timers.
 1. **Linux's MSI API, one vector per function** (`linuxdrv/emul/lx_irq.c`):
    `pci_alloc_irq_vectors()` and `pci_enable_msi()` set up the function's
    MSI through the handle -- the kernel programs it, once for the handle's
-   life -- and give it an interrupt number of its own; `pci_irq_vector()`
-   names it. MSI-X is refused, which drivers take as the cue to fall back to
-   MSI (e1000e does), and the legacy line is not routed: the handle offers
-   one MSI vector, and nothing else.
+   life -- and give it an interrupt number of its own, from 1024 up, above
+   anything PCI's 8-bit Interrupt Line holds; `pci_irq_vector()` names it,
+   and with MSI off answers the legacy line's number, as Linux's does. MSI-X
+   is refused, which drivers take as the cue to fall back to MSI (e1000e
+   does), and the legacy line is not routed -- requesting it fails: the
+   handle offers one MSI vector, and nothing else.
 2. **The layer's own interrupt core, not Linux's**: `request_threaded_irq()`,
    `free_irq()`, `disable_irq()`/`enable_irq()` and `synchronize_irq()` over
    that one vector. Linux's `kernel/irq` and `drivers/pci/msi` program
    interrupt controllers and hang every interrupt on irq domains, which the
    kernel does here; compiling them would mean faking a controller for them
-   to program.
+   to program. A request and a free of one interrupt are serialised, as by
+   Linux's `request_mutex`: both sleep.
 3. **Taken at each turn of the loop** (`lx_irq_poll`, before the turn's
    softirqs, as Linux's `irq_exit()` runs them): each function with a
    handler requested and enabled has its interrupts taken, without waiting,
@@ -33,16 +36,24 @@ device as well as for its timers.
    with interrupts off.
 4. **A threaded handler's second half runs in a kthread of its own**, as
    Linux's `irq/N-name` thread runs it, woken when the first half answers
-   `IRQ_WAKE_THREAD`; a ONESHOT interrupt is not taken again until it has
-   finished, and `synchronize_irq()` waits for it.
+   `IRQ_WAKE_THREAD`, and run once for however many asked; a run asked for
+   before `free_irq()` is still made, and waited for, as Linux's are.
+   `synchronize_irq()` waits for it. MSI is safe without ONESHOT -- an edge
+   cannot storm while the thread runs -- so `IRQF_ONESHOT` is dropped, as
+   Linux drops it for such an interrupt chip, and a threaded handler needs
+   no first half.
 5. **Held, not lost**: while no handler is requested, or the interrupt is
    disabled, its interrupts stay counted in the kernel, not taken, and are
    delivered once it is enabled, as Linux replays a pending interrupt.
 6. **The idle wait includes the device** (`linuxdrv/kit`): with nothing to
    run, the loop waits on every function with a live handler and the next
-   timer together (`SYS_WAIT_MULTIPLE`), for ever when no timer is due. A
-   process with a live handler therefore never ends by itself: a driver
-   lives as long as its device can call on it.
+   timer together (`SYS_WAIT_MULTIPLE`), for ever when no timer is due.
+   Which functions it waits for is worked out just before it waits
+   (`lx_irq_listen`), from the interrupts' state, not kept in step as it
+   changes. A process with a live handler therefore never ends by itself --
+   a task left waiting is not a deadlock while the device may wake it: a
+   driver lives as long as its device can call on it. A device the kernel
+   answers cannot be waited on is said, and not waited for again.
 
 ### The alternatives
 

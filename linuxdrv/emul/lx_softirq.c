@@ -35,6 +35,7 @@
 #include <linux/sched.h>
 #include <linux/percpu.h>
 #include <linux/irq_work.h>
+#include <linux/hardirq.h>
 #include <linux/tick.h>
 
 #include "slx.h"
@@ -170,11 +171,9 @@ void lx_emul_turn(u64 now_ns)
 	 * sooner (update_process_times -> irq_work_tick): in hardirq context,
 	 * interrupts off.
 	 */
-	local_irq_save(flags);
-	preempt_count_add(HARDIRQ_OFFSET);
+	lx_hardirq_enter(flags);
 	irq_work_tick();
-	preempt_count_sub(HARDIRQ_OFFSET);
-	local_irq_restore(flags);
+	lx_hardirq_exit(flags);
 	if (local_softirq_pending())
 		do_softirq();
 }
@@ -189,6 +188,8 @@ u64 lx_emul_next_event(u64 now_ns)
 {
 	u64 began, next;
 
+	/* Which devices' interrupts the wait to come waits for, worked out now. */
+	lx_irq_listen();
 	if (local_softirq_pending() || lx_rcu_pending() || irq_work_needs_cpu())
 		return now_ns;
 	/* The wheel reckons from when the current jiffy began, as Linux's tick. */

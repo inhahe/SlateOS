@@ -301,8 +301,45 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         name: "lx-e1000e",
         limit_s: 30,
     };
+    native_bench(skips)?;
     e1000e_serve(&program, &caps, a, &arg)?;
     Ok(true)
+}
+
+/// The kernel's NIC -- its own e1000 driver's -- timed by the netstack
+/// daemon's `nic-bench`, as its `nic-check` then times Linux's e1000e serving
+/// the spare card: the two lines, read side by side, are what a driver
+/// process costs against the kernel's driver (the same 82574 model, behind
+/// the same kind of QEMU network). Skipped, and recorded so, where the
+/// kernel's NIC has no address to ping from.
+fn native_bench(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    let ifinfo = crate::net::interface::info();
+    if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] || ifinfo.gateway.0 == [0, 0, 0, 0] {
+        skips.record(
+            "the kernel's NIC timed beside Linux's e1000e",
+            "the kernel's NIC has no address",
+        );
+        return Ok(());
+    }
+    let program = Program {
+        elf: spawn::NETSTACK_ELF,
+        name: "netstack-bench",
+        limit_s: 60,
+    };
+    let ran = run(
+        &program,
+        &[b"netstack", b"nic-bench"],
+        &[(ResourceType::NetRaw, 0, Rights::WRITE)],
+    );
+    if ran == Ok(Some(check::OK)) {
+        return Ok(());
+    }
+    serial_println!(
+        "[linuxdrv]   FAIL: the netstack daemon timing the kernel's NIC ended {:?} ({})",
+        ran,
+        nic_check_outcome(&ran)
+    );
+    Err(KernelError::InternalError)
 }
 
 /// The service the boot test's card is served as: `serve=spare`.

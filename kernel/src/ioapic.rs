@@ -618,11 +618,14 @@ pub unsafe fn init() -> KernelResult<()> {
 /// The corresponding IDT entry must have an ISR that handles this IRQ
 /// and sends EOI.  Unmasking without a handler causes an unhandled
 /// interrupt (double fault).
-pub unsafe fn unmask_irq(irq: u8) {
+///
+/// Returns whether the line is unmasked: not for one past the I/O APIC's
+/// entries, nor for one whose remapping entry was never written.
+pub unsafe fn unmask_irq(irq: u8) -> bool {
     let num = NUM_REDIR_ENTRIES.load(Ordering::Acquire);
     if u64::from(irq) >= num {
         serial_println!("[ioapic] WARNING: unmask_irq({}) out of range", irq);
-        return;
+        return false;
     }
 
     // Under the routing lock, so that no change to the pin's remapping entry
@@ -644,7 +647,7 @@ pub unsafe fn unmask_irq(irq: u8) {
             "[ioapic] IRQ {} left masked: its remapping entry was never written",
             irq
         );
-        return;
+        return false;
     }
 
     serial_println!(
@@ -652,6 +655,7 @@ pub unsafe fn unmask_irq(irq: u8) {
         irq,
         IRQ_VECTOR_BASE.wrapping_add(irq),
     );
+    true
 }
 
 /// Mask (disable) an IOAPIC IRQ line.

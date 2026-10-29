@@ -310,6 +310,15 @@ pub fn is_enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)
 }
 
+/// Whether line `irq` is masked now because it stormed: unmasking it before
+/// its cool-down would let the storm go on unwatched -- the rate checks are
+/// skipped while a line is believed masked.
+pub fn is_storm_masked(irq: usize) -> bool {
+    IRQ_STORM
+        .get(irq)
+        .is_some_and(|state| state.masked.load(Ordering::Relaxed))
+}
+
 /// Manually unmask an IRQ that was storm-masked (for debugging).
 ///
 /// Resets the storm state for that IRQ.

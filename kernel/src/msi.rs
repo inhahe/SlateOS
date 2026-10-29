@@ -967,16 +967,46 @@ fn legacy_line_off(bus: u8, dev: u8, func: u8) {
             func
         );
     } else {
-        let cmd = pci::config_read16(bus, dev, func, 4);
-        pci::config_write16_native(bus, dev, func, 4, cmd | (1 << 10));
+        let addr = pci::PciAddress {
+            bus,
+            device: dev,
+            function: func,
+        };
+        pci::update_command(addr, |cmd| cmd | pci::CMD_INTX_DISABLE);
     }
 }
 
 /// The legacy line back on, as [`legacy_line_off`] found it: the function
 /// goes back to whoever drives it next able to interrupt.
 fn legacy_line_on(bus: u8, dev: u8, func: u8) {
-    let cmd = pci::config_read16(bus, dev, func, 4);
-    pci::config_write16_native(bus, dev, func, 4, cmd & !(1 << 10));
+    let addr = pci::PciAddress {
+        bus,
+        device: dev,
+        function: func,
+    };
+    pci::update_command(addr, |cmd| cmd & !pci::CMD_INTX_DISABLE);
+}
+
+/// `addr`'s MSI and MSI-X turned off, whatever left them on -- firmware, a
+/// kernel before a kexec, a driver before: while either is enabled the
+/// function may not assert its legacy line, which a user of that line
+/// (`devhandle`'s INTx) must be able to rely on. The legacy line itself is
+/// left as it is.
+pub fn messages_off(addr: pci::PciAddress) {
+    let (b, d, f) = (addr.bus, addr.device, addr.function);
+    for cap in pci::walk_capabilities(addr) {
+        // The message control register, and its enable bit.
+        let enable: u16 = match cap.id {
+            0x05 => 1,
+            0x11 => 1 << 15,
+            _ => continue,
+        };
+        let control_at = cap.offset.wrapping_add(2);
+        let control = pci::config_read16(b, d, f, control_at);
+        if control & enable != 0 {
+            pci::config_write16_native(b, d, f, control_at, control & !enable);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

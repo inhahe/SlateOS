@@ -82,8 +82,15 @@ the kernel stops the device and takes everything back.
    *As built (2026-10-29): INTx.* `SYS_PCI_DEVICE_IRQ_SETUP(h, 0, 1)`
    (`arg2` `IRQ_SETUP_INTX`; 0 is MSI and MSI-X, as before) sets up the
    function's legacy line, as the firmware routed it (the Interrupt Line
-   register; refused, `NotSupported`, for a function with no pin or no
-   routed line). Its interrupts are delivered through an MSI pool vector the
+   register, as the kernel's own PCI drivers take it -- not ACPI's `_PRT`:
+   known-issues `A-PCI-INTX-ROUTING-IS-THE-INTERRUPT-LINE-REGISTER-NOT-ACPI-PRT`).
+   Refused, `NotSupported`, for a function with no pin, a line the I/O
+   APIC lacks or one the kernel's ISA devices use, a function that cannot
+   mask its INTx (before PCI 2.3), or a line the I/O APIC would not
+   unmask. The set-up turns off any MSI or MSI-X the function was left
+   with, makes the line level-triggered and active-low, and leaves a line
+   the storm detector masked for it to unmask. Its interrupts are
+   delivered through an MSI pool vector the
    handle claims and no hardware raises, so everything above -- the count,
    the mask, waiting here and in `SYS_WAIT_MULTIPLE` -- is MSI's: the I/O
    APIC line's handler (`devhandle::handle_intx`, from
@@ -91,10 +98,15 @@ the kernel stops the device and takes everything back.
    INTx armed, sets its INTx-disable bit, and counts the interrupt on that
    vector; a take that finds interrupts clears the bit. A function its
    driver has not serviced by then interrupts once more and is quenched
-   again: it cannot hold a shared line. The bit is the kernel's while INTx
-   is set up -- a driver's write to the command register keeps it as it
-   is, made under the device table's lock -- and a release or a set-up
-   replacing INTx leaves it set. The line stays unmasked at the I/O APIC
+   again: it cannot hold a shared line. The bit is the kernel's from open
+   to release -- set at open, and set again by every tear-down (turning
+   MSI off turns the legacy line back on), cleared only while INTx is set
+   up and armed -- and a driver's write to the command register keeps it
+   as it is. Every change the kernel makes to the command register, the
+   handler's quench included, is one read and one write under one hold of
+   the configuration ports (`pci::update_command`), and a driver's
+   configuration writes are made under the device table's lock, so none
+   undoes another's bits or lands after a release. The line stays unmasked at the I/O APIC
    afterwards: a kernel driver may share it, and a line no function asserts
    is quiet. The handler finds its functions in a lock-free table of 16
    slots, published and unpublished around the handler's own count of

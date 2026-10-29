@@ -65,6 +65,8 @@ const CFG_SECONDARY_BUS: u8 = 0x19;
 const CFG_BAR0: u8 = 0x10;
 /// Interrupt line (8-bit, offset 0x3C low byte).
 const CFG_INTERRUPT_LINE: u8 = 0x3C;
+/// Interrupt pin (8-bit, offset 0x3D): 0 for none, 1-4 for INTA-INTD.
+const CFG_INTERRUPT_PIN: u8 = 0x3D;
 
 // Command register bits
 /// I/O space access enable.
@@ -75,7 +77,7 @@ const CMD_MEMORY_SPACE: u16 = 1 << 1;
 const CMD_BUS_MASTER: u16 = 1 << 2;
 /// INTx assertion **disable** (PCI 2.3+).  Set = the function may not drive
 /// its legacy interrupt pin.  Note the inverted sense: the bit *disables*.
-const CMD_INTX_DISABLE: u16 = 1 << 10;
+pub(crate) const CMD_INTX_DISABLE: u16 = 1 << 10;
 
 // Status register bits
 /// Interrupt Status (PCI 2.3+): set while this function is asserting INTx.
@@ -737,12 +739,30 @@ fn write_command(addr: PciAddress, cmd: u16) {
     );
 }
 
+/// `addr`'s command register changed by `change`, read and written as one:
+/// the config ports held throughout, with interrupts off, so that no other
+/// CPU's change of it, and no interrupt handler's on this one, falls
+/// between the read and the write -- each would otherwise undo the other's
+/// bits. Nothing is written when `change` keeps it as it was. Returns what
+/// it was.
+pub fn update_command(addr: PciAddress, change: impl FnOnce(u16) -> u16) -> u16 {
+    CONFIG_PORTS.with(|_| {
+        let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
+        let new = change(cmd);
+        if new != cmd {
+            write_command(addr, new);
+        }
+        cmd
+    })
+}
+
 /// Enable bus mastering (DMA) for a PCI device.
 ///
 /// Also enables I/O space and memory space access.
 pub fn enable_bus_master(addr: PciAddress) {
-    let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
-    write_command(addr, cmd | CMD_IO_SPACE | CMD_MEMORY_SPACE | CMD_BUS_MASTER);
+    update_command(addr, |cmd| {
+        cmd | CMD_IO_SPACE | CMD_MEMORY_SPACE | CMD_BUS_MASTER
+    });
 }
 
 /// Clear bus mastering for a PCI device, stopping any DMA it is performing.
@@ -754,8 +774,7 @@ pub fn enable_bus_master(addr: PciAddress) {
 /// path (each driver resets its device when the new kernel probes it). I/O and
 /// memory space are left as they were.
 pub fn disable_bus_master(addr: PciAddress) {
-    let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
-    write_command(addr, cmd & !CMD_BUS_MASTER);
+    update_command(addr, |cmd| cmd & !CMD_BUS_MASTER);
 }
 
 /// Stop every function on every bus mastering, for a kexec: DMA stops at
@@ -836,14 +855,26 @@ static INTX_CLAIMS: [AtomicU32; MAX_INTX_CLAIMS] = {
 /// the sweep's effect on that one function, making the two order-independent.
 static INTX_SWEPT: AtomicBool = AtomicBool::new(false);
 
-/// Pack a [`PciAddress`] into the 16-bit key stored in [`INTX_CLAIMS`].
+/// Pack a [`PciAddress`] into the 16-bit key stored in [`INTX_CLAIMS`]
+/// (and `devhandle`'s INTx table).
 ///
 /// Bus occupies bits 15:8, device bits 7:3, function bits 2:0 — so the key is
 /// always below `1 << 16` and can never be mistaken for [`CLAIM_EMPTY`].
-fn pack_addr(addr: PciAddress) -> u32 {
+pub(crate) fn pack_addr(addr: PciAddress) -> u32 {
     (u32::from(addr.bus) << 8)
         | ((u32::from(addr.device) & 0x1F) << 3)
         | (u32::from(addr.function) & 0x07)
+}
+
+/// [`pack_addr`] undone.
+// Each field is masked to its width before it is narrowed.
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn unpack_addr(key: u32) -> PciAddress {
+    PciAddress {
+        bus: ((key >> 8) & 0xFF) as u8,
+        device: ((key >> 3) & 0x1F) as u8,
+        function: (key & 0x07) as u8,
+    }
 }
 
 /// Is this function currently asserting its legacy interrupt pin?
@@ -873,15 +904,93 @@ pub fn intx_is_enabled(addr: PciAddress) -> bool {
 /// This does not touch MSI or MSI-X, which are separate mechanisms with their
 /// own enables; a function using either is unaffected either way.
 pub fn intx_set_enabled(addr: PciAddress, enabled: bool) {
-    let cmd = config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
-    let new_cmd = if enabled {
-        cmd & !CMD_INTX_DISABLE
-    } else {
-        cmd | CMD_INTX_DISABLE
-    };
-    if new_cmd != cmd {
-        write_command(addr, new_cmd);
-    }
+    update_command(addr, |cmd| {
+        if enabled {
+            cmd & !CMD_INTX_DISABLE
+        } else {
+            cmd | CMD_INTX_DISABLE
+        }
+    });
+}
+
+/// `addr`'s INTx quenched -- its INTx-disable bit set -- if it asserts its
+/// pin while it may: whether it did. Its command and status registers are
+/// read as one dword, and the quench written, under one hold of the config
+/// ports ([`update_command`]'s reason). For an interrupt handler.
+pub fn quench_intx_if_asserting(addr: PciAddress) -> bool {
+    CONFIG_PORTS.with(|_| {
+        let dword = config_read32(addr.bus, addr.device, addr.function, CFG_COMMAND);
+        let (cmd, status) = split_command_status(dword);
+        if cmd & CMD_INTX_DISABLE != 0 || status & STATUS_INTERRUPT == 0 {
+            return false;
+        }
+        write_command(addr, cmd | CMD_INTX_DISABLE);
+        true
+    })
+}
+
+/// The command register (low half) and the status register (high half) of
+/// the dword at offset 4.
+#[allow(clippy::cast_possible_truncation)] // Each half is 16 bits, shifted down first.
+fn split_command_status(dword: u32) -> (u16, u16) {
+    (dword as u16, (dword >> 16) as u16)
+}
+
+/// Whether `addr` honours its INTx-disable bit -- PCI 2.3's INTx masking,
+/// which a function from before it lacks, the bit then reading 0 whatever is
+/// written: the bit flipped, read back, and put back as it was, under one
+/// hold of the config ports, as Linux's `pci_intx_mask_supported` does.
+pub fn intx_mask_supported(addr: PciAddress) -> bool {
+    CONFIG_PORTS.with(|_| {
+        let (b, d, f) = (addr.bus, addr.device, addr.function);
+        let cmd = config_read16(b, d, f, CFG_COMMAND);
+        write_command(addr, cmd ^ CMD_INTX_DISABLE);
+        let flipped = config_read16(b, d, f, CFG_COMMAND);
+        write_command(addr, cmd);
+        (flipped ^ cmd) & CMD_INTX_DISABLE != 0
+    })
+}
+
+/// `width` bytes (1, 2 or 4, naturally aligned) of `value` written at
+/// `offset` in `addr`'s configuration space -- the INTx-disable bit, where
+/// the write covers it, kept as `addr` has it now: read and written under
+/// one hold of the config ports, so that an interrupt handler's quench
+/// cannot fall between. A userspace driver's writes (`devhandle`), the bit
+/// being the kernel's.
+pub fn config_write_keeping_intx_disable(addr: PciAddress, offset: u8, width: u8, value: u32) {
+    let (b, d, f) = (addr.bus, addr.device, addr.function);
+    // The bit's place in configuration space, and in the write, in bits.
+    let bit = u32::from(CFG_COMMAND)
+        .saturating_mul(8)
+        .saturating_add(CMD_INTX_DISABLE.trailing_zeros());
+    let at = bit
+        .checked_sub(u32::from(offset).saturating_mul(8))
+        .filter(|&at| at < u32::from(width).saturating_mul(8));
+    CONFIG_PORTS.with(|_| {
+        let value = match at {
+            Some(at) => {
+                let set = config_read16(b, d, f, CFG_COMMAND) & CMD_INTX_DISABLE != 0;
+                (value & !(1 << at)) | u32::from(set) << at
+            }
+            None => value,
+        };
+        #[allow(clippy::cast_possible_truncation)] // Narrowed to the width written.
+        match width {
+            1 => config_write8(b, d, f, offset, value as u8),
+            2 => config_write16_native(b, d, f, offset, value as u16),
+            _ => config_write32(b, d, f, offset, value),
+        }
+    });
+}
+
+/// `addr`'s interrupt pin (0 for none, 1-4 for INTA-INTD) and the line the
+/// firmware routed it to (the Interrupt Line register).
+pub fn interrupt_pin_and_line(addr: PciAddress) -> (u8, u8) {
+    let (b, d, f) = (addr.bus, addr.device, addr.function);
+    (
+        config_read8(b, d, f, CFG_INTERRUPT_PIN),
+        config_read8(b, d, f, CFG_INTERRUPT_LINE),
+    )
 }
 
 /// Declare that this function's legacy interrupt is serviced by a driver.

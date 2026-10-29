@@ -45,11 +45,8 @@ const CFG_COMMAND: u8 = 0x04;
 const CFG_BAR0: u8 = 0x10;
 const CFG_ROM: u8 = 0x30;
 const CFG_HEADER_TYPE: u8 = 0x0E;
-const CFG_INTERRUPT_LINE: u8 = 0x3C;
-const CFG_INTERRUPT_PIN: u8 = 0x3D;
 /// Bits of the command register.
 const CMD_MEMORY_SPACE: u16 = 1 << 1;
-const CMD_INTX_DISABLE: u16 = 1 << 10;
 /// Capability ids whose registers the kernel manages.
 const CAP_MSI: u8 = 0x05;
 const CAP_MSIX: u8 = 0x11;
@@ -131,12 +128,11 @@ enum Irq {
 
 /// A function's INTx, set up: the line it asserts, the pool vector its
 /// interrupts are counted on (allocated, never programmed into anything),
-/// and its slot in [`INTX`] once the line's handler can see it.
+/// and its slot in [`INTX`], where the line's handler sees it.
 struct Intx {
-    addr: PciAddress,
     line: u8,
     vector: u8,
-    slot: Option<usize>,
+    slot: usize,
 }
 
 impl Irq {
@@ -166,29 +162,32 @@ impl Irq {
         }
     }
 
-    /// Delivery let go and the device's interrupts turned off.
-    fn tear_down(self, raw: u64) {
+    /// Delivery let go and the interrupts of the device at `addr` turned
+    /// off ([`Irq::disable`]).
+    fn tear_down(self, raw: u64, addr: PciAddress) {
         crate::msi::release_group(self.first_vector(), self.count(), raw);
-        self.disable();
+        self.disable(addr);
     }
 
-    /// The device's interrupts turned off and the vectors freed: its messages
-    /// off, or its INTx quenched at the function and out of its line's
-    /// handler's sight. An INTx line is left unmasked at the I/O APIC: a
-    /// kernel driver may share it, and a line no function asserts is quiet
-    /// (`pci::quiesce_unclaimed_intx` silenced every unclaimed one at boot).
-    fn disable(self) {
+    /// The interrupts of the device at `addr` turned off and the vectors
+    /// freed: its messages off, or its INTx out of its line's handler's
+    /// sight -- and either way its INTx quenched, as the device was opened
+    /// ([`open`]): turning MSI or MSI-X off turns the legacy line back on
+    /// (`msi::disable_msi`), which nothing would then quench. An INTx line is
+    /// left unmasked at the I/O APIC: a kernel driver may share it, and a
+    /// line no function asserts is quiet (`pci::quiesce_unclaimed_intx`
+    /// silenced every unclaimed one at boot).
+    fn disable(self, addr: PciAddress) {
         match self {
             Self::Msi(mut c) => crate::msi::disable_msi(&mut c),
             Self::Msix(c) => crate::msi::disable_msix(c),
             Self::Intx(i) => {
-                pci::intx_set_enabled(i.addr, false);
-                if let Some(slot) = i.slot {
-                    intx_unpublish(slot);
-                }
+                pci::intx_set_enabled(addr, false);
+                intx_unpublish(i.slot);
                 crate::msi::free_vector(i.vector);
             }
         }
+        pci::intx_set_enabled(addr, false);
     }
 }
 
@@ -219,14 +218,25 @@ enum Request {
     Intx,
 }
 
+/// The lines the kernel's own ISA devices use -- the timer, the keyboard,
+/// the cascade, the RTC, the mouse, the FPU -- edge-triggered, never a PCI
+/// function's: an Interrupt Line register naming one is wrong.
+const ISA_LINES: [u8; 6] = [0, 1, 2, 8, 12, 13];
+
 /// The I/O APIC line `addr`'s INTx is wired to, as the firmware routed it
-/// (the Interrupt Line register): `None` for a function with no interrupt
-/// pin, or a line the firmware left unrouted or the I/O APIC lacks.
+/// (the Interrupt Line register, as the kernel's own PCI drivers take it;
+/// ACPI's `_PRT` is not read: known-issues
+/// `A-PCI-INTX-ROUTING-IS-THE-INTERRUPT-LINE-REGISTER-NOT-ACPI-PRT`): `None`
+/// for a function with no interrupt pin, a line the I/O APIC lacks or one
+/// of [`ISA_LINES`], or one that cannot mask its INTx (before PCI 2.3: the
+/// quench at each interrupt is the INTx-disable bit, which it ignores).
 fn intx_line(addr: PciAddress) -> Option<u8> {
-    let (b, d, f) = (addr.bus, addr.device, addr.function);
-    let pin = pci::config_read8(b, d, f, CFG_INTERRUPT_PIN);
-    let line = pci::config_read8(b, d, f, CFG_INTERRUPT_LINE);
-    (pin != 0 && usize::from(line) < crate::ioapic::MAX_IRQ).then_some(line)
+    let (pin, line) = pci::interrupt_pin_and_line(addr);
+    let usable = pin != 0
+        && usize::from(line) < crate::ioapic::MAX_IRQ
+        && !ISA_LINES.contains(&line)
+        && pci::intx_mask_supported(addr);
+    usable.then_some(line)
 }
 
 /// The INTx set-ups the lines' handler looks at ([`handle_intx`]), without a
@@ -261,24 +271,10 @@ static INTX: [IntxSlot; INTX_SLOTS] = {
     [FREE; INTX_SLOTS]
 };
 
-/// `addr` packed as [`IntxSlot::addr`] holds it.
-fn pack(addr: PciAddress) -> u32 {
-    u32::from(addr.bus) << 8 | u32::from(addr.device & 0x1F) << 3 | u32::from(addr.function & 7)
-}
-
-/// [`pack`] undone.
-fn unpack(packed: u32) -> PciAddress {
-    #[allow(clippy::cast_possible_truncation)]
-    PciAddress {
-        bus: (packed >> 8) as u8,
-        device: ((packed >> 3) & 0x1F) as u8,
-        function: (packed & 7) as u8,
-    }
-}
-
-/// `intx` made visible to its line's handler, for the device handle `raw`:
-/// the slot it took, or `None` with none free.
-fn intx_publish(raw: u64, intx: &Intx) -> Option<usize> {
+/// The function at `addr`, asserting `line`, made visible to the line's
+/// handler for the device handle `raw`, its interrupts to be counted on
+/// `vector`: the slot it took, or `None` with none free.
+fn intx_publish(raw: u64, addr: PciAddress, line: u8, vector: u8) -> Option<usize> {
     use core::sync::atomic::Ordering;
     let slot = INTX.iter().position(|s| {
         s.owner
@@ -286,9 +282,9 @@ fn intx_publish(raw: u64, intx: &Intx) -> Option<usize> {
             .is_ok()
     })?;
     let s = INTX.get(slot)?;
-    s.addr.store(pack(intx.addr), Ordering::Release);
-    s.vector.store(intx.vector, Ordering::Release);
-    s.line.store(u16::from(intx.line), Ordering::SeqCst);
+    s.addr.store(pci::pack_addr(addr), Ordering::Release);
+    s.vector.store(vector, Ordering::Release);
+    s.line.store(u16::from(line), Ordering::SeqCst);
     Some(slot)
 }
 
@@ -315,8 +311,11 @@ fn intx_unpublish(slot: usize) {
 /// armed is quenched at the function and its interrupt counted on its vector
 /// -- its driver re-arms it by taking its interrupts. One that asserts while
 /// quenched is another's turn on the shared line, or its own interrupt
-/// already counted. Interrupt context: atomics, the configuration ports
-/// (with interrupts off), and `msi::deliver`.
+/// already counted. The quench is one read and one write of the function's
+/// command register, under one hold of the configuration ports
+/// (`pci::quench_intx_if_asserting`): no other writer of it falls between.
+/// Interrupt context: atomics, the configuration ports (with interrupts
+/// off), and `msi::deliver`.
 pub fn handle_intx(irq: u32) {
     use core::sync::atomic::Ordering;
     let Ok(line) = u16::try_from(irq) else {
@@ -327,12 +326,10 @@ pub fn handle_intx(irq: u32) {
             continue;
         }
         s.busy.fetch_add(1, Ordering::SeqCst);
-        if s.line.load(Ordering::SeqCst) == line {
-            let addr = unpack(s.addr.load(Ordering::Acquire));
-            if pci::intx_is_enabled(addr) && pci::intx_asserting(addr) {
-                pci::intx_set_enabled(addr, false);
-                crate::msi::deliver(s.vector.load(Ordering::Acquire));
-            }
+        if s.line.load(Ordering::SeqCst) == line
+            && pci::quench_intx_if_asserting(pci::unpack_addr(s.addr.load(Ordering::Acquire)))
+        {
+            crate::msi::deliver(s.vector.load(Ordering::Acquire));
         }
         s.busy.fetch_sub(1, Ordering::SeqCst);
     }
@@ -346,6 +343,11 @@ impl Device {
             .as_ref()
             .map(|i| (i.first_vector(), i.count()))
             .ok_or(KernelError::InvalidArgument)
+    }
+
+    /// Whether its interrupts are its INTx, which a take re-arms.
+    fn is_intx(&self) -> bool {
+        matches!(self.irq, Some(Irq::Intx(_)))
     }
 }
 
@@ -406,6 +408,9 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
         let guards = Guards::of(addr);
         let domain = confine(addr)?;
         pci::bind_driver(addr, USERSPACE_DRIVER);
+        // Its INTx quenched from the start: the bit is the kernel's from here
+        // on (`config_write`), set except while INTx is set up and armed.
+        pci::intx_set_enabled(addr, false);
         Ok(Device {
             raw: NEXT_RAW.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
             addr,
@@ -464,7 +469,7 @@ fn release(device: Device) {
     // are still this device's, then its MSI or MSI-X is turned off and the
     // vectors freed.
     if let Some(irq) = device.irq {
-        irq.tear_down(device.raw);
+        irq.tear_down(device.raw, device.addr);
     }
     let pml4 = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0);
     // Detached and destroyed before any arena is freed: the device can reach
@@ -763,7 +768,7 @@ fn setup(raw: u64, pid: ProcessId, request: Request) -> KernelResult<u16> {
     // What was set up before goes first: its vectors' waiters are woken to
     // find them gone, and the device sends nothing until the new set-up.
     if let Some(old) = old {
-        old.tear_down(raw);
+        old.tear_down(raw, addr);
     }
     let made = (|| {
         let (b, d, f) = (addr.bus, addr.device, addr.function);
@@ -777,39 +782,31 @@ fn setup(raw: u64, pid: ProcessId, request: Request) -> KernelResult<u16> {
                 crate::msi::enable_msix(b, d, f, layout, table_phys, granted, cpu)
                     .ok_or(KernelError::ResourceExhausted)?,
             ),
-            Plan::Intx(line) => Irq::Intx(Intx {
-                addr,
-                line,
-                vector: crate::msi::alloc_vector().ok_or(KernelError::ResourceExhausted)?,
-                slot: None,
-            }),
+            Plan::Intx(line) => {
+                let vector = crate::msi::alloc_vector().ok_or(KernelError::ResourceExhausted)?;
+                // Published now, not yet armed: the line's handler finds the
+                // function quenched and leaves it, and an interrupt on a
+                // vector nobody owns yet would be dropped.
+                let Some(slot) = intx_publish(raw, addr, line, vector) else {
+                    crate::msi::free_vector(vector);
+                    return Err(KernelError::ResourceExhausted);
+                };
+                Irq::Intx(Intx { line, vector, slot })
+            }
         };
         if !crate::msi::claim_group(irq.first_vector(), irq.count(), raw) {
-            irq.disable();
+            irq.disable(addr);
             return Err(KernelError::InternalError);
         }
-        // An INTx is counted from here: published to its line's handler,
-        // then armed at the function, then its line unmasked.
-        let mut irq = irq;
-        let published = match &mut irq {
-            Irq::Intx(intx) => {
-                intx.slot = intx_publish(raw, intx);
-                Some(intx.slot.map(|_| intx.line))
-            }
+        let intx_line = match &irq {
+            Irq::Intx(intx) => Some(intx.line),
             Irq::Msi(_) | Irq::Msix(_) => None,
         };
-        match published {
-            Some(None) => {
-                irq.tear_down(raw);
-                return Err(KernelError::ResourceExhausted);
-            }
-            Some(Some(line)) => {
-                pci::intx_set_enabled(addr, true);
-                // SAFETY: every I/O APIC line's vector has the device-
-                // interrupt stub (`idt::init`), whose handler ends it.
-                unsafe { crate::ioapic::unmask_irq(line) };
-            }
-            None => {}
+        if let Some(line) = intx_line
+            && let Err(e) = arm_intx(addr, line)
+        {
+            irq.tear_down(raw, addr);
+            return Err(e);
         }
         Ok(irq)
     })();
@@ -819,7 +816,7 @@ fn setup(raw: u64, pid: ProcessId, request: Request) -> KernelResult<u16> {
         // here; were it not, what was made is undone, not left behind.
         drop(devices);
         if let Ok(irq) = made {
-            irq.tear_down(raw);
+            irq.tear_down(raw, addr);
         }
         return Err(KernelError::InvalidHandle);
     };
@@ -839,6 +836,32 @@ fn setup(raw: u64, pid: ProcessId, request: Request) -> KernelResult<u16> {
     drop(devices);
     release(device);
     Err(KernelError::InvalidHandle)
+}
+
+/// The function at `addr`, its INTx set up on `line`, made able to
+/// interrupt: any MSI or MSI-X it was left with turned off -- while either
+/// is on it may not assert its pin -- the line made level-triggered and
+/// active-low, as a PCI line is (as the kernel's own PCI drivers make
+/// theirs), the function armed, and the line unmasked -- unless the storm
+/// detector has it masked, which unmasks it itself once its cool-down ends.
+/// `NotSupported` for a line the I/O APIC would not unmask.
+fn arm_intx(addr: PciAddress, line: u8) -> KernelResult<()> {
+    crate::msi::messages_off(addr);
+    // SAFETY: the I/O APIC is up (the local APIC is, which `setup` checked
+    // first, and the I/O APIC is brought up before it), and `line` is below
+    // `MAX_IRQ` (`intx_line`).
+    unsafe { crate::ioapic::set_level_triggered(line) };
+    pci::intx_set_enabled(addr, true);
+    if crate::irq_storm::is_storm_masked(usize::from(line)) {
+        return Ok(());
+    }
+    // SAFETY: every I/O APIC line's vector has the device-interrupt stub
+    // (`idt::init`), whose handler ends the interrupt.
+    if unsafe { crate::ioapic::unmask_irq(line) } {
+        Ok(())
+    } else {
+        Err(KernelError::NotSupported)
+    }
 }
 
 /// Where the function's MSI-X table is, physically: its BAR's base plus the
@@ -868,10 +891,10 @@ fn msix_table_phys(layout: &crate::msi::MsixLayout, bars: &[Option<MemoryBar>; 6
 /// is closed, waiting or not; `Interrupted` when a signal or a freeze comes
 /// for `pid` while it waits.
 pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
-    let (vector, count) = with_owned(raw, pid, |d| d.irq_vectors())?;
+    let (vector, count, intx) = with_owned(raw, pid, vectors_and_kind)?;
     if !block {
         let taken = crate::msi::take_group(vector, count, raw).ok_or(KernelError::InvalidHandle)?;
-        if taken != 0 {
+        if taken != 0 && intx {
             rearm(raw, pid);
         }
         return Ok(taken);
@@ -885,9 +908,14 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
     // vectors meanwhile -- even claimed the same first vector anew, its
     // waiters taken by the release -- so the task waits on what is there now.
     let mut on: Option<u8> = None;
+    // Whether what was taken from was INTx, which a take re-arms.
+    let mut intx = false;
     let taken = loop {
-        let (vector, count) = match with_owned(raw, pid, |d| d.irq_vectors()) {
-            Ok(found) => found,
+        let (vector, count) = match with_owned(raw, pid, vectors_and_kind) {
+            Ok((vector, count, is_intx)) => {
+                intx = is_intx;
+                (vector, count)
+            }
             Err(e) => break Err(e),
         };
         if let Some(old) = on.filter(|&v| v != vector) {
@@ -918,10 +946,17 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
     if let Some(vector) = on {
         crate::msi::unregister_waiter(vector, task);
     }
-    if taken.is_ok() {
+    if taken.is_ok() && intx {
         rearm(raw, pid);
     }
     taken
+}
+
+/// A device's interrupts' first vector, how many, and whether they are its
+/// INTx ([`Device::irq_vectors`]).
+fn vectors_and_kind(d: &mut Device) -> KernelResult<(u8, usize, bool)> {
+    d.irq_vectors()
+        .map(|(first, count)| (first, count, d.is_intx()))
 }
 
 /// After a take that found interrupts: the device's INTx, when that is what
@@ -931,8 +966,8 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
 fn rearm(raw: u64, pid: ProcessId) {
     // A device closed meanwhile has nothing to arm.
     let _owned = with_owned(raw, pid, |d| {
-        if let Some(Irq::Intx(intx)) = &d.irq {
-            pci::intx_set_enabled(intx.addr, true);
+        if d.is_intx() {
+            pci::intx_set_enabled(d.addr, true);
         }
         Ok(())
     });
@@ -962,9 +997,9 @@ pub fn irq_vector(raw: u64) -> KernelResult<u8> {
 /// each vector's handler runs for its own. `InvalidArgument` before
 /// [`irq_setup`]; `InvalidHandle` when the device is closed.
 pub fn irq_pending_mask(raw: u64, pid: ProcessId) -> KernelResult<u64> {
-    let (first, count) = with_owned(raw, pid, |d| d.irq_vectors())?;
+    let (first, count, intx) = with_owned(raw, pid, vectors_and_kind)?;
     let mask = crate::msi::take_mask(first, count, raw).ok_or(KernelError::InvalidHandle)?;
-    if mask != 0 {
+    if mask != 0 && intx {
         rearm(raw, pid);
     }
     Ok(mask)
@@ -1034,11 +1069,13 @@ pub fn config_read(raw: u64, pid: ProcessId, offset: u16, width: u8) -> KernelRe
 
 /// Write `width` bytes of configuration space at `offset`. The registers the
 /// kernel manages -- the BARs, the expansion ROM, and the MSI and MSI-X
-/// capabilities -- are refused with `PermissionDenied`. While the device's
-/// INTx is set up, the command register's INTx-disable bit is the kernel's
-/// ([`handle_intx`] quenches with it, a take re-arms with it): a write there
-/// keeps the bit as it is, and is made under the table's lock, so that it
-/// cannot land after the device's release has quenched it.
+/// capabilities -- are refused with `PermissionDenied`. The command
+/// register's INTx-disable bit is the kernel's from open to release -- set,
+/// but while INTx is set up, where [`handle_intx`] quenches with it and a
+/// take re-arms with it -- so a write there keeps it as it is
+/// (`pci::config_write_keeping_intx_disable`). The write is made under the
+/// table's lock: it cannot land after the device's release has turned its
+/// bus mastering off and quenched it.
 pub fn config_write(
     raw: u64,
     pid: ProcessId,
@@ -1047,52 +1084,13 @@ pub fn config_write(
     value: u32,
 ) -> KernelResult<()> {
     let offset = config_offset(offset, width)?;
-    let unwritten = with_owned(raw, pid, |d| {
+    with_owned(raw, pid, |d| {
         if d.guards.refuse(offset, width, value) {
             return Err(KernelError::PermissionDenied);
         }
-        if matches!(d.irq, Some(Irq::Intx(_))) {
-            let kept = keep_intx_disable(d.addr, offset, width, value);
-            write_config(d.addr, offset, width, kept);
-            return Ok(None);
-        }
-        Ok(Some(d.addr))
-    })?;
-    if let Some(addr) = unwritten {
-        write_config(addr, offset, width, value);
-    }
-    Ok(())
-}
-
-/// `width` bytes of `value` written to `addr`'s configuration space at
-/// `offset` (checked by [`config_offset`]).
-fn write_config(addr: PciAddress, offset: u8, width: u8, value: u32) {
-    let (b, d, f) = (addr.bus, addr.device, addr.function);
-    #[allow(clippy::cast_possible_truncation)]
-    match width {
-        1 => pci::config_write8(b, d, f, offset, value as u8),
-        2 => pci::config_write16_native(b, d, f, offset, value as u16),
-        _ => pci::config_write32(b, d, f, offset, value),
-    }
-}
-
-/// `value`, a write of `width` bytes at `offset`, with the command
-/// register's INTx-disable bit, where it covers it, as `addr` has it now.
-fn keep_intx_disable(addr: PciAddress, offset: u8, width: u8, value: u32) -> u32 {
-    // The bit's place in configuration space, and in the write, in bits.
-    let bit = u32::from(CFG_COMMAND)
-        .saturating_mul(8)
-        .saturating_add(CMD_INTX_DISABLE.trailing_zeros());
-    let first = u32::from(offset).saturating_mul(8);
-    let Some(at) = bit
-        .checked_sub(first)
-        .filter(|&at| at < u32::from(width).saturating_mul(8))
-    else {
-        return value;
-    };
-    let command = pci::config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
-    let set = u32::from(command & CMD_INTX_DISABLE != 0);
-    (value & !(1 << at)) | set << at
+        pci::config_write_keeping_intx_disable(d.addr, offset, width, value);
+        Ok(())
+    })
 }
 
 /// Map memory BAR `index` of the device `raw` names into its owner `pid`,
@@ -1984,6 +1982,11 @@ pub fn self_test() -> KernelResult<()> {
         if command & (1 << 2) != 0 {
             return Err("bus mastering is still on after the last close");
         }
+        // Turning its MSI off turns the legacy line back on: the release
+        // quenches it again, nothing being there to.
+        if pci::intx_is_enabled(addr) {
+            return Err("the function's INTx was left armed after its MSI's last close");
+        }
         if crate::msi::is_allocated(vector) {
             return Err("the device's MSI vector is still allocated after the last close");
         }
@@ -2030,8 +2033,13 @@ fn self_test_intx(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     /// The checks, on edu at `addr`, opened for `owner`, and the close.
     fn intx_on(addr: PciAddress, owner: ProcessId) -> Result<(), &'static str> {
         use core::sync::atomic::Ordering;
+        // Left armed, as a kernel driver or an owner before may leave it
+        // (edu asserts nothing now): the open quenches it.
+        pci::intx_set_enabled(addr, true);
         let raw = open(owner, addr).map_err(|_| "edu could not be opened")?;
         let checked = intx_checks(addr, raw, owner);
+        // The vector, to be found free after the close; none when the checks
+        // failed before INTx was set up, which `checked` then reports.
         let vector = with_owned(raw, owner, |d| d.irq_vectors())
             .ok()
             .map(|(v, _)| v);
@@ -2067,8 +2075,17 @@ fn self_test_intx(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         let ack = || unsafe { reg(EDU_IRQ_ACK).write_volatile(u32::MAX) };
         let armed = || pci::intx_is_enabled(addr);
         let command = u16::from(CFG_COMMAND);
-        let quench_bit = u32::from(CMD_INTX_DISABLE);
+        let quench_bit = u32::from(pci::CMD_INTX_DISABLE);
         ack();
+        // Opened, the function is quenched, and a driver's write cannot arm
+        // it before INTx is set up: nothing would quench it.
+        let cmd = config_read(raw, owner, command, 2).map_err(|_| "no command register")?;
+        if armed() {
+            return Err("the function's INTx was armed at open");
+        }
+        if config_write(raw, owner, command, 2, cmd & !quench_bit).is_err() || armed() {
+            return Err("before INTx was set up, a driver's write armed it");
+        }
         if irq_setup_intx(raw, owner) != Ok(0) {
             return Err("INTx could not be set up");
         }
@@ -2149,6 +2166,9 @@ fn self_test_intx(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         if woken != Some(1) {
             return Err("a parked waiter was not woken by the function's INTx");
         }
+        // The re-interrupt, if it came, may still be in its handler on
+        // another CPU: it is let finish, then taken.
+        crate::sched::sleep_ns(20_000_000);
         if !matches!(irq_wait(raw, owner, false), Ok(0 | 1)) || !armed() {
             return Err("after the waiter's take, the function was not left armed");
         }

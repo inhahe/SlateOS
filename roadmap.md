@@ -5505,7 +5505,10 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         delivered to Linux's handlers, hard and threaded (§1585); DMA from
         a window beside the heap, backed by the device's own arenas
         (§1586). Left: `request_firmware`, which WiFi's drivers need
-        (`iwlwifi` loads its firmware; e1000e calls it nowhere)
+        (`iwlwifi` loads its firmware; e1000e calls it nowhere); INTx for
+        Linux's drivers -- `pci_alloc_irq_vectors` with `PCI_IRQ_INTX` and
+        `request_irq` on `pdev->irq`, over the device handle's INTx
+        (§1579 as built) -- for the first driver that has nothing else
   - [-] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured
         -- begun 2026-10-29: Linux's own e1000e, in a driver process with

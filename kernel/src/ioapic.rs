@@ -959,6 +959,10 @@ pub extern "C" fn handle_device_irq(irq: u32) {
     crate::virtio::blk::handle_irq(irq);
     crate::virtio::net::handle_irq(irq);
     crate::rtl8139::handle_irq(irq);
+    // Functions userspace drivers took the INTx of through device handles:
+    // each asserting one quenched at the function and counted for its
+    // driver, who re-arms it.
+    crate::devhandle::handle_intx(irq);
 
     // 1. Record the interrupt (for IRQ storm detection and notification).
     irq_notify(irq);

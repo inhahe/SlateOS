@@ -5436,15 +5436,17 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         refused (`SYS_PCI_DEVICE_MAP_BAR`)
   - [x] Its configuration space read and written through the handle, with the
         registers the kernel manages (BARs, ROM, MSI, MSI-X) refused
-  - [-] Its interrupts: MSI and MSI-X vectors, and INTx for what has nothing
+  - [x] Its interrupts: MSI and MSI-X vectors, and INTx for what has nothing
         else; waitable together with channels and timers (completion ports
         take no interrupt source yet); masked when its
         process exits, so a level-triggered line cannot storm -- MSI with one
-        vector is in (`SYS_PCI_DEVICE_IRQ_SETUP`/`IRQ_WAIT`, 1186/1187; the
+        vector (`SYS_PCI_DEVICE_IRQ_SETUP`/`IRQ_WAIT`, 1186/1187; the
         MSI pool's vectors 64..=223 each have an IDT stub), waitable with
         channels and timers in `SYS_WAIT_MULTIPLE` (kind
-        `ResourceType::PciDevice`, 2026-10-28). Left: MSI-X, INTx, several
-        vectors
+        `ResourceType::PciDevice`, 2026-10-28); MSI-X, several vectors
+        (§1587, 2026-10-29); INTx, quenched at the function at each
+        interrupt and re-armed by its take, so an unserviced one cannot hold
+        a shared line (§1579 as built, 2026-10-29)
   - [x] DMA through the device's own IOMMU domain: arenas placed in it
         (`SYS_PCI_DEVICE_DMA_ALLOC`), revoked from the device before any path
         frees them, and the domain destroyed with the handle. Streaming maps
@@ -5460,7 +5462,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         `linuxdrv/`: the kernel embeds `services/<dir>` binaries, and
         `bootstrap-worktree.sh` builds what it embeds;
         `devhandle::self_test_ring3` runs it (2026-10-27)
-  - [ ] Its first real user: Linux's `e1000e` through the layer below
+  - [x] Its first real user: Linux's `e1000e` through the layer below --
+        binding the boot test's spare 82574 on three MSI-X vectors and
+        serving it to the network stack (§1588, §1589, 2026-10-29)
 - [ ] `[A]` **Linux driver compatibility layer** -- Linux's own drivers, built
   from unmodified source, for hardware with no standard interface (GPUs, WiFi,
   Bluetooth, laptop audio DSPs); handwritten native drivers stay for the

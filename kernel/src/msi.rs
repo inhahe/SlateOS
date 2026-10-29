@@ -174,19 +174,7 @@ pub fn dispatch(vector: u8) {
         u64::from(vector),
         crate::sched::current_cpu_id() as u64,
     );
-    if let Some(index) = pool_index(vector)
-        && OWNER
-            .get(index)
-            .is_some_and(|o| o.load(Ordering::SeqCst) != 0)
-        && let woken = wake_index(index)
-        && let (Some(pending), Some(owed)) = (PENDING.get(index), WAKE_OWED.get(woken))
-    {
-        pending.fetch_add(1, Ordering::SeqCst);
-        if !wake_waiters(woken) {
-            owed.store(true, Ordering::Release);
-            crate::softirq::raise(crate::softirq::IRQ_POLL_SOFTIRQ);
-        }
-    }
+    deliver(vector);
     // SAFETY: called from the interrupt handler for this vector, which the
     // local APIC delivered and now expects to be told is finished.
     unsafe { crate::apic::eoi() };
@@ -200,6 +188,28 @@ pub fn dispatch(vector: u8) {
         crate::sched::current_cpu_id() as u64,
     );
     crate::cputime::exit_irq();
+}
+
+/// An interrupt on pool `vector` counted for its owner and its waiters
+/// woken -- [`dispatch`]'s work, without the end of the interrupt, which is
+/// its caller's. A source with no vector of its own, a device handle's INTx
+/// (`devhandle::handle_intx`), is delivered through the vector its handle
+/// claimed for it. Nothing for a vector outside the pool or owned by no one.
+/// Interrupt context: atomics and a try-lock wake only.
+pub fn deliver(vector: u8) {
+    if let Some(index) = pool_index(vector)
+        && OWNER
+            .get(index)
+            .is_some_and(|o| o.load(Ordering::SeqCst) != 0)
+        && let woken = wake_index(index)
+        && let (Some(pending), Some(owed)) = (PENDING.get(index), WAKE_OWED.get(woken))
+    {
+        pending.fetch_add(1, Ordering::SeqCst);
+        if !wake_waiters(woken) {
+            owed.store(true, Ordering::Release);
+            crate::softirq::raise(crate::softirq::IRQ_POLL_SOFTIRQ);
+        }
+    }
 }
 
 /// Make `owner` (a device handle's raw value, not 0) the one `vector`'s

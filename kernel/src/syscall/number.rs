@@ -7406,19 +7406,29 @@ pub const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 /// handle's release) takes it from the device first.
 pub const SYS_PCI_DEVICE_DMA_ALLOC: u64 = 1185;
 
-/// Set up an open device's interrupts: `arg0` the handle; `arg1` 0 for its
-/// MSI, one vector -- returning 0 -- or how many MSI-X vectors it wants, a
-/// vector for each of its first MSI-X entries, returning how many it has (as
-/// many as asked, its table holds and 32 allow). The messages go to the CPU
-/// the call ran on; the kernel programs the MSI or MSI-X capability and the
-/// MSI-X table (which the caller may not write, and whose pages a mapping of
-/// their BAR leaves out). A set-up the device has already is kept; a
-/// different one replaces it. `NotSupported` for a device without the
-/// capability asked for and `AlreadyExists` while another set-up is in
-/// progress, both changing nothing; `ResourceExhausted` with no vector or
-/// remapping entry free, and `InternalError`, after which the device has no
-/// interrupts set up -- the old set-up gone.
+/// Set up an open device's interrupts: `arg0` the handle; `arg2`
+/// [`IRQ_SETUP_MESSAGE`] or [`IRQ_SETUP_INTX`] (anything else
+/// `InvalidArgument`). Messages: `arg1` 0 for its MSI, one vector --
+/// returning 0 -- or how many MSI-X vectors it wants, a vector for each of
+/// its first MSI-X entries, returning how many it has (as many as asked, its
+/// table holds and 32 allow). The messages go to the CPU the call ran on;
+/// the kernel programs the MSI or MSI-X capability and the MSI-X table
+/// (which the caller may not write, and whose pages a mapping of their BAR
+/// leaves out). INTx: `arg1` 0, returning 0; the function's legacy line,
+/// whose interrupts are taken as one MSI vector's are -- the kernel quenches
+/// the function at each (the command register's INTx-disable bit, which a
+/// write of the caller's then leaves as it is) and a take re-arms it.
+/// A set-up the device has already is kept; a different one replaces it.
+/// `NotSupported` for a device without the capability asked for (or with no
+/// interrupt pin or routed line, for INTx) and `AlreadyExists` while another
+/// set-up is in progress, both changing nothing; `ResourceExhausted` with no
+/// vector, remapping entry or INTx slot free, and `InternalError`, after
+/// which the device has no interrupts set up -- the old set-up gone.
 pub const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
+/// [`SYS_PCI_DEVICE_IRQ_SETUP`]'s `arg2`: MSI or MSI-X.
+pub const IRQ_SETUP_MESSAGE: u64 = 0;
+/// [`SYS_PCI_DEVICE_IRQ_SETUP`]'s `arg2`: the legacy line (INTx).
+pub const IRQ_SETUP_INTX: u64 = 1;
 
 /// Take an open device's interrupts: `arg0` the handle, `arg1` 0 to take what
 /// has come and return at once (0 when nothing has), anything else to wait

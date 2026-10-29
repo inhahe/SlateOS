@@ -874,12 +874,19 @@ pub fn sys_pci_device_dma_alloc_at(args: &SyscallArgs) -> SyscallResult {
     device_result(r)
 }
 
-/// `SYS_PCI_DEVICE_IRQ_SETUP` — set up an open device's MSI or MSI-X. See
-/// [`SYS_PCI_DEVICE_IRQ_SETUP`](super::number::SYS_PCI_DEVICE_IRQ_SETUP).
+/// `SYS_PCI_DEVICE_IRQ_SETUP` — set up an open device's MSI, MSI-X or
+/// INTx. See [`SYS_PCI_DEVICE_IRQ_SETUP`](super::number::SYS_PCI_DEVICE_IRQ_SETUP).
 pub fn sys_pci_device_irq_setup(args: &SyscallArgs) -> SyscallResult {
-    let r = held_device(args.arg0).and_then(|pid| {
-        let vectors = u16::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
-        crate::devhandle::irq_setup(args.arg0, pid, vectors).map(u64::from)
+    use super::number::{IRQ_SETUP_INTX, IRQ_SETUP_MESSAGE};
+    let r = held_device(args.arg0).and_then(|pid| match args.arg2 {
+        IRQ_SETUP_MESSAGE => {
+            let vectors = u16::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
+            crate::devhandle::irq_setup(args.arg0, pid, vectors).map(u64::from)
+        }
+        IRQ_SETUP_INTX if args.arg1 == 0 => {
+            crate::devhandle::irq_setup_intx(args.arg0, pid).map(u64::from)
+        }
+        _ => Err(KernelError::InvalidArgument),
     });
     device_result(r)
 }

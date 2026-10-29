@@ -5120,55 +5120,10 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
         crate::sched::yield_now();
     }
 
-    // Connect and send an A-record resolve request for a well-known name.
-    let client = match service::connect(b"net.stack") {
-        Ok(c) => c,
-        Err(e) => {
-            serial_println!("[spawn]   FAIL: connect(net.stack) returned {:?}", e);
-            let _ = crate::container::wait_process(result.pid);
-            return Err(e);
-        }
-    };
-
-    let host: &[u8] = b"example.com";
-    let mut req = [0u8; 64];
-    let req_len = match netipc::encode_resolve_a(&mut req, host) {
-        Some(n) => n,
-        None => {
-            channel::close(client);
-            let _ = crate::container::wait_process(result.pid);
-            return Err(KernelError::InternalError);
-        }
-    };
-    let msg = channel::Message::from_bytes(&req[..req_len])?;
-    if let Err(e) = channel::send(client, msg) {
-        serial_println!("[spawn]   FAIL: send to netstack returned {:?}", e);
-        channel::close(client);
-        let _ = crate::container::wait_process(result.pid);
-        return Err(e);
-    }
-
-    // Block for the reply.  The daemon does real network I/O (ARP + DNS round
-    // trip), so allow a few seconds.
-    let reply = match channel::recv_timeout(client, 6_000_000_000) {
-        Ok(m) => m,
-        Err(e) => {
-            serial_println!("[spawn]   FAIL: no reply from netstack ({:?})", e);
-            channel::close(client);
-            let _ = crate::container::wait_process(result.pid);
-            return Err(e);
-        }
-    };
-
-    // Copy the reply bytes out before closing, then decode via the shared schema.
-    let mut data = [0u8; 5];
-    let dlen = reply.data().len().min(data.len());
-    data[..dlen].copy_from_slice(&reply.data()[..dlen]);
-    channel::close(client);
-
-    let mut a_ip: Option<[u8; 4]> = None;
-    match netipc::parse_ipv4_reply(&data[..dlen]) {
-        netipc::Ipv4Reply::Ok(ip) => {
+    // Ask it to resolve a well-known name. The daemon does real network I/O
+    // (ARP + DNS round trip), so allow a few seconds.
+    let a_ip = match netstack_resolve_a(b"example.com") {
+        Ok(Some(ip)) => {
             serial_println!(
                 "[spawn]   netstack DNS-over-IPC (ring 3: kernel→daemon resolve of \
                  example.com over net.stack): OK — {}.{}.{}.{}",
@@ -5177,9 +5132,9 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
                 ip[2],
                 ip[3]
             );
-            a_ip = Some(ip);
+            Some(ip)
         }
-        netipc::Ipv4Reply::Fail => {
+        Ok(None) => {
             // The IPC round-trip worked (we got a structured reply); DNS itself
             // didn't resolve — most likely no upstream resolver behind slirp.
             // The Phase-4 wiring is proven either way, so don't fail the boot.
@@ -5187,13 +5142,18 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
                 "[spawn]   netstack DNS-over-IPC (ring 3): A IPC round-trip OK, DNS \
                  unresolved (no upstream?) — Phase-4 path proven, resolution skipped"
             );
+            None
         }
-        netipc::Ipv4Reply::Malformed => {
-            serial_println!("[spawn]   FAIL: malformed netstack A reply (len={})", dlen);
+        Err(e) => {
+            // A malformed reply is an `InternalError` (`netstack_resolve_a`).
+            serial_println!(
+                "[spawn]   FAIL: resolving example.com over net.stack: {:?}",
+                e
+            );
             let _ = crate::container::wait_process(result.pid);
-            return Err(KernelError::InternalError);
+            return Err(e);
         }
-    }
+    };
 
     // Second round-trip: reverse (PTR) resolve a well-known address with a
     // stable PTR record (8.8.8.8 → dns.google) so the decode path exercises
@@ -5451,7 +5411,7 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
 /// `ST_FAIL` (IPC fine, DNS unresolved — common under slirp), or `Err` on a
 /// transport fault. Service-name based, so it works against any live daemon
 /// (bounded self-test or the persistent boot daemon).
-fn netstack_resolve_a(host: &[u8]) -> KernelResult<Option<[u8; 4]>> {
+pub(crate) fn netstack_resolve_a(host: &[u8]) -> KernelResult<Option<[u8; 4]>> {
     use crate::ipc::{channel, service};
 
     let client = service::connect(b"net.stack")?;

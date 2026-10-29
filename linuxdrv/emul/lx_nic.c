@@ -26,10 +26,10 @@
  *   every frame the stack submits is sent by the task. The stack is told
  *   the device's carrier as its link, and the multicast addresses it lists
  *   become the device's own (dev_mc_add), until it lists others or leaves.
- *   With "once" as well,
- *   the process ends when the first stack to attach has gone -- the
- *   kernel's self-test, which a warning from Linux code anywhere in the
- *   process fails -- and without, the card waits for the next.
+ *   With "stacks=<n>" as well, the process ends once the n-th stack to
+ *   attach has gone -- the kernel's self-test, which a warning from Linux
+ *   code anywhere in the process fails -- and without, the card waits for
+ *   the next for ever.
  */
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -392,10 +392,11 @@ static long lx_nic_port_send(struct net_device *dev, const void *frame, long len
 
 /*
  * `dev`, its link up, served as "nic.<name>": what the stack submits sent,
- * until -- with "once" -- the first stack has gone. 0, or why not.
+ * until `stacks` stacks have come and gone (0: for ever). 0, or why not.
  */
-static int lx_nic_serve(struct net_device *dev, const char *name, bool once)
+static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long stacks)
 {
+	unsigned long gone = 0;
 	const void *frame;
 	long len, err;
 
@@ -427,23 +428,13 @@ static int lx_nic_serve(struct net_device *dev, const char *name, bool once)
 			rtnl_lock();
 			lx_nic_drop_mcast(dev);
 			rtnl_unlock();
-			if (once)
+			if (stacks && ++gone == stacks)
 				return 0;
 		}
 		lx_nic_port_mcast(dev);
 		while ((len = slx_nicport_tx_next(&frame)) > 0)
 			slx_nicport_tx_done(lx_nic_port_send(dev, frame, len));
 	}
-}
-
-static bool lx_nic_mode(const char *mode)
-{
-	int i;
-
-	for (i = 1; i < slx_argc(); i++)
-		if (!strcmp(slx_argv(i), mode))
-			return true;
-	return false;
 }
 
 /* The argument "<key><value>": its value, or NULL. */
@@ -459,18 +450,44 @@ static const char *lx_nic_arg(const char *key)
 }
 
 /*
+ * How many stacks "stacks=<n>" says to serve before the process ends: n,
+ * 0 without it, or -1 for a value that is not a number above 0.
+ */
+static long lx_nic_stacks(void)
+{
+	const char *s = lx_nic_arg("stacks=");
+	long n = 0;
+
+	if (!s)
+		return 0;
+	if (!*s)
+		return -1;
+	for (; *s; s++) {
+		if (*s < '0' || *s > '9' || n > 1000000)
+			return -1;
+		n = n * 10 + (*s - '0');
+	}
+	return n ? n : -1;
+}
+
+/*
  * With "serve=<name>": the first device the driver registered opened, taken
- * what it receives, and served, until -- with "once" -- the process ends.
- * Without, the devices are left as the driver's probe left them.
+ * what it receives, and served, until -- with "stacks=<n>" -- the process
+ * ends. Without, the devices are left as the driver's probe left them.
  */
 static int lx_nic_task(void *unused)
 {
 	const char *serve = lx_nic_arg("serve=");
+	long stacks = lx_nic_stacks();
 	struct net_device *dev, *first = NULL;
 	int err = 0;
 
 	if (!serve)
 		return 0;
+	if (stacks < 0) {
+		pr_err("lx-nic: stacks= takes a number above 0\n");
+		slx_exit(SLX_EXIT_INIT_FAILED);
+	}
 	rtnl_lock();
 	for_each_netdev(&init_net, dev) {
 		if (!(dev->flags & IFF_LOOPBACK)) {
@@ -491,7 +508,7 @@ static int lx_nic_task(void *unused)
 		err = -ENODEV;
 	}
 	if (!err)
-		err = lx_nic_serve(first, serve, lx_nic_mode("once"));
+		err = lx_nic_serve(first, serve, (unsigned long)stacks);
 	/* A warning anywhere in the process -- the driver's probe too -- is a bug. */
 	if (!err && lx_warnings) {
 		pr_err("lx-nic: Linux warned %lu time(s) in a run that must not\n", lx_warnings);

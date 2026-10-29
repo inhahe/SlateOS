@@ -194,7 +194,7 @@ pub fn self_test() -> KernelResult<()> {
     );
     if e1000e {
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol, the driver warning nowhere: OK",
+            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK",
             if cable_puller() {
                 ", the link following the card's cable"
             } else {
@@ -401,7 +401,7 @@ fn cable_puller() -> bool {
 /// (design-decisions 1589): the driver process -- `program`, holding
 /// `capabilities` (the card's) and a `Service` capability for [`SERVICE`]
 /// alone, the card at `a`, `pci` its argument naming it -- in its
-/// "serve=spare once" mode, and beside it the netstack daemon in its
+/// "serve=spare stacks=2" mode, and beside it the netstack daemon in its
 /// "nic-check nic.spare" mode -- first without the card's key, when the
 /// driver must refuse the daemon for want of it, the daemon then exiting
 /// [`check::TURNED_AWAY`]; then holding it, when it
@@ -414,8 +414,10 @@ fn cable_puller() -> bool {
 /// the harness can pull the card's cable ([`cable_puller`]) -- be told the
 /// link down and up again as it does, time the card (`nic-bench`'s pings,
 /// failing only for too many lost or one corrupted), be let go for breaking
-/// the protocol; and exit 0. The driver then ends, the
-/// daemon gone, with 0, no warning from Linux code in it, the card released.
+/// the protocol; and exit 0. Then the daemon serves sockets over the card
+/// ([`serve_sockets`]), the driver's second stack. The driver then ends,
+/// both daemons gone, with 0, no warning from Linux code in it, the card
+/// released.
 fn e1000e_serve(
     program: &Program<'_>,
     capabilities: &[(ResourceType, u64, Rights)],
@@ -429,7 +431,7 @@ fn e1000e_serve(
     caps.push((ResourceType::Service, service, Rights::WRITE));
     let driver = start(
         program,
-        &[b"e1000e", b"serve=spare", b"once", pci.as_bytes()],
+        &[b"e1000e", b"serve=spare", b"stacks=2", pci.as_bytes()],
         &caps,
     )?;
     // The daemon run first without the card's key, then with it. Refused, it
@@ -480,17 +482,29 @@ fn e1000e_serve(
             return Err(e);
         }
     };
-    let served = finish(program, &driver);
+    // Then sockets served over the card: the driver's second stack. A driver
+    // whose stacks did not both come and go waits for one: not for its limit.
+    let sockets = checked == Some(check::OK) && serve_sockets(service);
+    let served = if sockets {
+        finish(program, &driver)
+    } else {
+        stop(&driver)
+    };
     let warned = served == Some(EXIT_WARNED);
     let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
-    if checked == Some(check::OK) && served == Some(EXIT_OK) && released {
+    if sockets && served == Some(EXIT_OK) && released {
         return Ok(());
     }
     serial_println!(
-        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}) (an exit code, or None for not within {} s / {} s){}",
+        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}), sockets served over it {} (an exit code, or None for not within {} s / {} s){}",
         served,
         checked,
         nic_check_outcome(&Ok(checked)),
+        if sockets {
+            "as they should be"
+        } else {
+            "not, or not as they should be"
+        },
         program.limit_s,
         stack.limit_s,
         if released {
@@ -505,6 +519,90 @@ fn e1000e_serve(
         );
     }
     Err(KernelError::InternalError)
+}
+
+/// Sockets served over the card: the netstack daemon as `serve-dns
+/// nic.spare` -- the driver's second stack -- holding the card's key
+/// (`card_key`) and the right to register `net.stack`. Once it has, attached
+/// and given an address by DHCP on the card, the kernel asks it to resolve a
+/// name, as a socket client asks, and it must answer: the name resolved, or
+/// not -- the boot test's host may have no upstream DNS, which is said, the
+/// card's frames having been proved by `nic-check` already. Idle after, the
+/// daemon lets the card go and ends 0. Whether all of that held; what did
+/// not is said.
+fn serve_sockets(card_key: u64) -> bool {
+    let program = Program {
+        elf: spawn::NETSTACK_ELF,
+        name: "netstack-serve",
+        limit_s: 60,
+        poll_ms: DAEMON_POLL_MS,
+    };
+    let caps = [
+        (ResourceType::Service, card_key, Rights::READ),
+        (
+            ResourceType::Service,
+            crate::ipc::service::key_id(b"net.stack"),
+            Rights::WRITE,
+        ),
+    ];
+    let daemon = match start(&program, &[b"netstack", b"serve-dns", SERVICE], &caps) {
+        Ok(daemon) => daemon,
+        Err(e) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: the netstack daemon serving sockets could not be started: {:?}",
+                e
+            );
+            return false;
+        }
+    };
+    // Attached, an address taken and `net.stack` registered: seconds, the
+    // card being up already.
+    let deadline = crate::hrtimer::now_ns().saturating_add(40_000_000_000);
+    let registered = || crate::ipc::service::is_registered(b"net.stack");
+    while !registered()
+        && crate::hrtimer::now_ns() < deadline
+        && pcb::state(daemon.pid) != Some(pcb::ProcessState::Zombie)
+    {
+        crate::sched::sleep_ms(DAEMON_POLL_MS);
+    }
+    let answer = registered().then(|| spawn::netstack_resolve_a(b"example.com"));
+    let ended = finish(&program, &daemon);
+    match (answer, ended) {
+        (Some(Ok(ip)), Some(0)) => {
+            match ip {
+                Some(ip) => serial_println!(
+                    "[linuxdrv]   sockets served over the card: example.com resolved to {}.{}.{}.{} through it",
+                    ip[0],
+                    ip[1],
+                    ip[2],
+                    ip[3]
+                ),
+                None => serial_println!(
+                    "[linuxdrv]   sockets served over the card: example.com answered unresolved (no upstream DNS behind the emulator?)"
+                ),
+            }
+            true
+        }
+        (answer, ended) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: the netstack daemon serving sockets over the card answered {:?} (None: it never registered net.stack) and ended {:?} ({})",
+                answer,
+                ended,
+                nic_check_outcome(&Ok(ended))
+            );
+            false
+        }
+    }
+}
+
+/// `driver` stopped: its exit code if it had ended by itself, `None` when it
+/// had not and was torn down.
+fn stop(driver: &spawn::SpawnResult) -> Option<i32> {
+    let code = (pcb::state(driver.pid) == Some(pcb::ProcessState::Zombie))
+        .then(|| pcb::exit_code(driver.pid))
+        .flatten();
+    spawn::teardown_fixture(driver.pid, driver.task_id);
+    code
 }
 
 /// One run of a driver process -- `argv`, holding `capabilities` -- which

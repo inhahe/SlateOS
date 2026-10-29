@@ -5646,46 +5646,10 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
             .put(b"\n")
             .print();
     };
-    // The driver probes the card and waits for its link before it serves
-    // it, which takes seconds under emulation.
-    let began = now_ns();
-    let port = match port::attach(service, 30_000_000_000) {
-        Ok(p) => p,
-        Err(e) => {
-            let mut line = Line::new();
-            line.put(b"[netstack] nic-check: FAIL: ")
-                .put(e.why.as_bytes())
-                .put(b" (");
-            if let Some(answer) = e.answer {
-                line.put(b"the kernel answered ")
-                    .put(if answer < 0 { b"-" } else { b"" })
-                    .dec(answer.unsigned_abs())
-                    .put(b", ");
-            }
-            line.put(b"after ")
-                .dec(now_ns().saturating_sub(began) / 1_000_000)
-                .put(b" ms)\n")
-                .print();
-            return if e.refused == Some(netipc::nicport::REFUSED_NO_KEY) {
-                NIC_TURNED_AWAY
-            } else {
-                NIC_NO_CARD
-            };
-        }
+    let port = match attach_card(service, b"nic-check") {
+        Ok(port) => port,
+        Err(code) => return code,
     };
-    Line::new()
-        .put(b"[netstack] nic-check: attached to ")
-        .put(service)
-        .put(b": ")
-        .mac(&port.mac)
-        .put(b", MTU ")
-        .dec(u64::from(port.mtu))
-        .put(b", a ring of ")
-        .dec(u64::from(port.slots))
-        .put(b" slots, after ")
-        .dec(now_ns().saturating_sub(began) / 1_000_000)
-        .put(b" ms\n")
-        .print();
     let refused = port::grant_unheld();
     if refused != PERMISSION_DENIED {
         Line::new()
@@ -5695,14 +5659,7 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
             .print();
         return NIC_GRANT;
     }
-    let mut me = IfInfo {
-        ip: [0; 4],
-        mask: [0; 4],
-        gateway: [0; 4],
-        dns: [0; 4],
-        mac: port.mac,
-        ip6: icmpv6::link_local_from_mac(&port.mac),
-    };
+    let mut me = card_if_info(port.mac);
     if let Err(why) = dhcp_lease(&mut me) {
         say(why.as_bytes());
         return NIC_NO_ADDRESS;
@@ -6125,14 +6082,7 @@ fn nic_bench_card(mac_hex: &[u8], name: &[u8]) -> i64 {
         say("FAIL: no card of the kernel's with that MAC address could be claimed");
         return NIC_NO_CARD;
     }
-    let mut me = IfInfo {
-        ip: [0; 4],
-        mask: [0; 4],
-        gateway: [0; 4],
-        dns: [0; 4],
-        mac,
-        ip6: icmpv6::link_local_from_mac(&mac),
-    };
+    let mut me = card_if_info(mac);
     let code = if let Err(why) = dhcp_lease(&mut me) {
         say(why);
         NIC_NO_ADDRESS
@@ -6596,6 +6546,120 @@ fn echo_answer(frame: &[u8], me: &IfInfo) -> Option<(usize, bool)> {
     Some((seq, intact))
 }
 
+/// The card a serving mode was named (`serve-dns <service>`), attached
+/// ([`attach_card`]) and given an address by DHCP: the daemon's interface on
+/// it. An exit code (`netipc::nicport::check`) for what failed.
+fn serve_card(service: &[u8]) -> Result<IfInfo, i64> {
+    let port = attach_card(service, b"serve")?;
+    let mut me = card_if_info(port.mac);
+    if let Err(why) = dhcp_lease(&mut me) {
+        Line::new()
+            .put(b"[netstack] serve: ")
+            .put(why.as_bytes())
+            .put(b"\n")
+            .print();
+        port::detach();
+        return Err(NIC_NO_ADDRESS);
+    }
+    Line::new()
+        .put(b"[netstack] serving over ")
+        .put(service)
+        .put(b": ")
+        .mac(&me.mac)
+        .put(b", DHCP gave ")
+        .ip(&me.ip)
+        .put(b" mask ")
+        .ip(&me.mask)
+        .put(b", gateway ")
+        .ip(&me.gateway)
+        .put(b", DNS ")
+        .ip(&me.dns)
+        .put(b"\n")
+        .print();
+    Ok(me)
+}
+
+/// The card `service` names attached ([`port::attach`]), waiting up to 30 s
+/// -- a driver probes its card and waits for the link before it serves it,
+/// seconds under emulation -- and said so under `who`, or why not, with the
+/// exit code (`netipc::nicport::check`) for it: turned away for want of the
+/// card's key, or no card.
+fn attach_card(service: &[u8], who: &[u8]) -> Result<netipc::nicport::Port, i64> {
+    let began = now_ns();
+    match port::attach(service, 30_000_000_000) {
+        Ok(port) => {
+            Line::new()
+                .put(b"[netstack] ")
+                .put(who)
+                .put(b": attached to ")
+                .put(service)
+                .put(b": ")
+                .mac(&port.mac)
+                .put(b", MTU ")
+                .dec(u64::from(port.mtu))
+                .put(b", a ring of ")
+                .dec(u64::from(port.slots))
+                .put(b" slots, after ")
+                .dec(now_ns().saturating_sub(began) / 1_000_000)
+                .put(b" ms\n")
+                .print();
+            Ok(port)
+        }
+        Err(e) => {
+            let mut line = Line::new();
+            line.put(b"[netstack] ")
+                .put(who)
+                .put(b": FAIL: ")
+                .put(e.why.as_bytes())
+                .put(b" (");
+            if let Some(answer) = e.answer {
+                line.put(b"the kernel answered ")
+                    .put(if answer < 0 { b"-" } else { b"" })
+                    .dec(answer.unsigned_abs())
+                    .put(b", ");
+            }
+            line.put(b"after ")
+                .dec(now_ns().saturating_sub(began) / 1_000_000)
+                .put(b" ms)\n")
+                .print();
+            Err(if e.refused == Some(netipc::nicport::REFUSED_NO_KEY) {
+                NIC_TURNED_AWAY
+            } else {
+                NIC_NO_CARD
+            })
+        }
+    }
+}
+
+/// The daemon's interface on a card of MAC address `mac` before DHCP has
+/// given it an address: its IPv6 link-local identity only.
+fn card_if_info(mac: [u8; 6]) -> IfInfo {
+    IfInfo {
+        ip: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        mac,
+        ip6: icmpv6::link_local_from_mac(&mac),
+    }
+}
+
+/// Let go of the NIC the daemon served over: the kernel's (`card` empty),
+/// whose claim is released, or the card `card` names, detached.
+fn release_nic(card: &[u8]) {
+    if card.is_empty() {
+        raw_close();
+        print("[netstack] released raw NIC\n");
+    } else {
+        port::detach();
+        Line::new()
+            .put(b"[netstack] let ")
+            .put(card)
+            .put(b" go\n")
+            .print();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -6626,11 +6690,25 @@ pub extern "C" fn _start() -> ! {
         exit(nic_bench_card(arg(args, 2), arg(args, 3)));
     }
 
-    let me = match query_if_info() {
-        Some(i) => i,
-        None => {
-            print("[netstack] FAIL: could not query interface info\n");
-            exit(2);
+    // `serve-dns [<service>]` and `serve-net [<service>]`: with a card's
+    // service named -- `nic.<name>`, a card a driver process serves
+    // (design-decisions 1589) -- the daemon serves its sockets over that
+    // card, its address taken there by DHCP, rather than over the kernel's
+    // NIC, which it then neither queries nor claims.
+    let serving = mode == b"serve-dns" || mode == b"serve-net";
+    let card = if serving { arg(args, 2) } else { b"" };
+    let me = if card.is_empty() {
+        match query_if_info() {
+            Some(i) => i,
+            None => {
+                print("[netstack] FAIL: could not query interface info\n");
+                exit(2);
+            }
+        }
+    } else {
+        match serve_card(card) {
+            Ok(me) => me,
+            Err(code) => exit(code),
         }
     };
 
@@ -6645,11 +6723,13 @@ pub extern "C" fn _start() -> ! {
     // Key TCP's port and ISN choices before any mode can open a connection.
     init_tcp_key(&me);
 
-    if !raw_open() {
-        print("[netstack] FAIL: could not claim raw NIC (SYS_NET_RAW_OPEN)\n");
-        exit(3);
+    if card.is_empty() {
+        if !raw_open() {
+            print("[netstack] FAIL: could not claim raw NIC (SYS_NET_RAW_OPEN)\n");
+            exit(3);
+        }
+        print("[netstack] claimed raw NIC\n");
     }
-    print("[netstack] claimed raw NIC\n");
 
     // Mode selection via argv[1]. Default = Phase-2 ARP round-trip self-test;
     // `serve-dns` = Phase-4 bounded DNS/TCP/UDP-over-IPC service (register
@@ -6660,8 +6740,7 @@ pub extern "C" fn _start() -> ! {
     if mode == b"serve-dns" {
         print("[netstack] mode: serve-dns (Phase 4 bounded DNS/TCP/UDP-over-IPC)\n");
         let code = run_dns_service(&me, false);
-        raw_close();
-        print("[netstack] released raw NIC\n");
+        release_nic(card);
         exit(code);
     }
     if mode == b"serve-net" {
@@ -6669,8 +6748,8 @@ pub extern "C" fn _start() -> ! {
         // Persistent: owns the NIC for the system's lifetime. Only returns on an
         // unrecoverable service fault, in which case release the NIC and exit.
         let code = run_dns_service(&me, true);
-        raw_close();
-        print("[netstack] persistent service returned; released raw NIC\n");
+        print("[netstack] persistent service returned\n");
+        release_nic(card);
         exit(code);
     }
 

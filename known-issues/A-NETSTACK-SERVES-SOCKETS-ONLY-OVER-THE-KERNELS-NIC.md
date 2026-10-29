@@ -2,11 +2,15 @@
 
 **Status:** OPEN
 
-**What is wrong.** The netstack daemon can attach to a card a Linux driver
-process serves (design-decisions 1589), but only its `nic-check` mode -- the
-boot test's -- ever does. Its serving mode, the one that answers the
-sockets of every other process, still uses the kernel's NIC alone, so a
-card only a driver process drives carries no socket's traffic.
+**What is wrong.** The netstack daemon's serving modes serve sockets over
+a card a Linux driver process serves (design-decisions 1589) when named one
+(`serve-dns <service>`, `serve-net <service>`; narrowed 2026-10-29, the
+boot test's linuxdrv self-test resolving a name through the spare 82574 so).
+But nothing names one -- the persistent daemon the kernel starts serves the
+kernel's NIC -- and over a port the daemon waits as over the kernel's NIC,
+by sleeping 5 ms after reading nothing, not by the driver's doorbell, and
+reads nothing between requests. So a card only a driver process drives
+carries no socket's traffic on a running system, and would carry it slowly.
 
 What stands between the two:
 

@@ -5527,8 +5527,11 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         on its late timers, which the native path, reading its ring without
         an interrupt, does not meet. Left: the same measured on
         hardware (the test PC's I219-V), where the process's own cost can be
-        told apart; and the daemon serving sockets over a port (known-issues
-        `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)
+        told apart; and the daemon serving sockets over a port on a running
+        system -- it does when named one (`serve-dns nic.spare`, a name
+        resolved through the spare card at every boot), but nothing names
+        one, and it waits by sleeping, not by the driver's doorbell
+        (known-issues `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
         then how lane A's `net80211` meets `mac80211`/`cfg80211`
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge

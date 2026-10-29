@@ -144,15 +144,16 @@ through the kernel per frame.
 - Frames, the link and the multicast list cross the port, and nothing
   else of a card's: no speed or duplex, no statistics, no offloads, no
   bringing the card down. The daemon learns the link but does nothing yet
-  when it changes, and only `nic-check` attaches to a port at all; the
-  daemon's serving mode still uses the kernel's NIC alone
+  when it changes; its serving modes serve over a port only when named one
+  (`serve-dns <service>`), and wait on it as on the kernel's NIC, by
+  sleeping, not by its doorbell
   (`known-issues/A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`).
 - A grant is all or nothing: a region shared is writable by both.
 
 ### How it is checked
 
 The boot test's linuxdrv self-test runs the e1000e process serving the
-spare 82574 (`serve=spare once`), and beside it the netstack daemon in its
+spare 82574 (`serve=spare stacks=2`), and beside it the netstack daemon in its
 `nic-check nic.spare` mode -- first without the card's key, when the
 driver must refuse it for that reason (it then exits 15,
 `netipc::nicport::check::TURNED_AWAY`, which no other failure to attach
@@ -176,8 +177,12 @@ fast boots cannot), the daemon asks it to -- `set_link net3 off`, then
 down, then up, within 20 s each, and the gateway must answer ARP again.
 Last, the daemon sends what only a driver sends, and must be let go within
 a second. The daemon's exit is the verdict
-(`netipc::nicport::check`), and the driver must end 0 once the daemon has
-gone --
+(`netipc::nicport::check`). Then the daemon serves sockets over the card
+(`serve-dns nic.spare`, the driver's second stack): it takes an address by
+DHCP there and registers `net.stack`, the kernel asks it to resolve a name
+as a socket client asks, and it must answer -- resolved, or unresolved
+where the host has no upstream DNS -- and end 0 once idle. The driver must
+end 0 once both daemons have gone --
 not `SLX_EXIT_WARNED`, which it ends with when Linux code warned anywhere
 in the process, a bug even in a run that otherwise passed. (The first
 version sent every frame twice, through `net_xmit_eval()`'s double

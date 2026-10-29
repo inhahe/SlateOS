@@ -154,6 +154,8 @@ void lx_emul_turn(u64 now_ns)
 		ticked = jiffies;
 		raise_softirq(TIMER_SOFTIRQ);
 	}
+	/* The devices' interrupts, before the softirqs they raise (lx_irq.c). */
+	lx_irq_poll();
 	/*
 	 * In softirq context, as Linux's RCU runs its callbacks from its
 	 * softirq: one that would sleep is a bug, and ends the process as one

@@ -38,7 +38,7 @@
 #include "lx_emul.h"
 
 /* As many as the system-facing half keeps (linuxdrv/kit/src/pci.rs). */
-#define LX_PCI_FUNCTIONS 8
+#define LX_PCI_FUNCTIONS LX_PCI_FUNCTIONS_MAX
 
 /* A function given: its handle, where it is, its BARs' mappings once made. */
 struct lx_pci_function {
@@ -244,6 +244,21 @@ static int __init lx_pci_scan(void)
 	return 0;
 }
 subsys_initcall(lx_pci_scan);
+
+int lx_pci_index(const struct pci_dev *dev)
+{
+	unsigned int i;
+
+	for (i = 0; i < lx_pci_count; i++)
+		if (lx_pci_functions[i].dev == dev)
+			return i;
+	return -1;
+}
+
+long lx_pci_handle(int i)
+{
+	return i >= 0 && i < lx_pci_count ? lx_pci_functions[i].handle : -1;
+}
 
 bool lx_pci_check_bound(void)
 {

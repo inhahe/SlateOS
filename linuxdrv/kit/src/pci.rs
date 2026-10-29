@@ -8,6 +8,11 @@
 //! the handle refusing to write them; every other access is the handle's
 //! system call.
 //!
+//! And its interrupts: its MSI set up once (the kernel programs it), the
+//! interrupts counted since last taken, and whether the loop, with nothing
+//! to run, waits for them too ([`wait_for_interrupts`]) -- while the C half
+//! has a handler requested and enabled for them.
+//!
 //! Results are the system call's: a value of 0 or more, or a negative
 //! SlateOS error code (`PermissionDenied`, -400, for a function the process
 //! holds no capability for, or a configuration register the kernel manages).
@@ -20,6 +25,14 @@ const SYS_PCI_DEVICE_BAR: u64 = 1181;
 const SYS_PCI_DEVICE_CONFIG_READ: u64 = 1182;
 const SYS_PCI_DEVICE_CONFIG_WRITE: u64 = 1183;
 const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
+const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
+const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
+const SYS_WAIT_MULTIPLE: u64 = 1066;
+/// `cap::ResourceType::PciDevice`: a device handle's kind in
+/// `SYS_WAIT_MULTIPLE`.
+const KIND_PCI_DEVICE: u32 = 36;
+/// `poll(2)`'s `POLLIN`: a device's interrupts counted and not yet taken.
+const POLLIN: u32 = 0x0001;
 
 /// SlateOS's `OutOfMemory`: more functions opened than are kept.
 const OUT_OF_MEMORY: i64 = -100;
@@ -27,10 +40,25 @@ const OUT_OF_MEMORY: i64 = -100;
 /// How many functions one process may be given.
 const FUNCTIONS: usize = 8;
 
-/// A function opened: its handle and its BARs.
+/// A function opened: its handle, its BARs, whether its MSI is set up, and
+/// whether the loop waits for its interrupts.
 struct Function {
     handle: i64,
     bars: Bars,
+    msi: bool,
+    listen: bool,
+}
+
+/// One item of `SYS_WAIT_MULTIPLE`'s array, as the kernel documents it: 24
+/// bytes, aligned to 8.
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct WaitItem {
+    handle: u64,
+    kind: u32,
+    events: u32,
+    revents: u32,
+    pad: u32,
 }
 
 static OPEN: Single<[Option<Function>; FUNCTIONS]> = Single::new([const { None }; FUNCTIONS]);
@@ -94,8 +122,75 @@ pub extern "C" fn slx_pci_open(bus: u8, devfn: u8) -> i64 {
     *slot = Some(Function {
         handle,
         bars: Bars::new(real, size),
+        msi: false,
+        listen: false,
     });
     handle
+}
+
+/// `slx_pci_irq_setup`: the function's MSI set up -- the kernel programs
+/// it, once for the handle's life, so a second call finds it done: 0, or an
+/// error.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_irq_setup(handle: i64) -> i64 {
+    if with_function(handle, |f| f.msi) == Some(true) {
+        return 0;
+    }
+    let answer = syscall4(SYS_PCI_DEVICE_IRQ_SETUP, handle.cast_unsigned(), 0, 0, 0);
+    if answer == 0 {
+        with_function(handle, |f| f.msi = true);
+    }
+    answer
+}
+
+/// `slx_pci_irq_take`: the function's interrupts counted since they were
+/// last taken, now, without waiting; an error while its MSI is not set up.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_irq_take(handle: i64) -> i64 {
+    syscall4(SYS_PCI_DEVICE_IRQ_WAIT, handle.cast_unsigned(), 0, 0, 0)
+}
+
+/// `slx_pci_irq_listen`: whether the loop, with nothing to run, waits for
+/// the function's interrupts too -- only once its MSI is set up, the
+/// handle being an error to wait on before.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_irq_listen(handle: i64, on: bool) {
+    with_function(handle, |f| f.listen = on && f.msi);
+}
+
+/// The loop with nothing to run: wait until a function it listens to
+/// interrupts, or `timeout_ns` has passed (`u64::MAX`: for ever). `false`,
+/// at once, when it listens to none -- the caller then sleeps, or ends.
+pub(crate) fn wait_for_interrupts(timeout_ns: u64) -> bool {
+    let mut items = [WaitItem::default(); FUNCTIONS];
+    let mut count = 0usize;
+    // SAFETY: as in `with_function`.
+    let open = unsafe { OPEN.get() };
+    for (item, f) in items
+        .iter_mut()
+        .zip(open.iter().flatten().filter(|f| f.listen))
+    {
+        *item = WaitItem {
+            handle: f.handle.cast_unsigned(),
+            kind: KIND_PCI_DEVICE,
+            events: POLLIN,
+            ..WaitItem::default()
+        };
+        count = count.saturating_add(1);
+    }
+    if count == 0 {
+        return false;
+    }
+    // Whatever it answers -- ready, timed out, interrupted -- the loop turns
+    // again and takes what came.
+    let _woke = syscall4(
+        SYS_WAIT_MULTIPLE,
+        items.as_mut_ptr() as u64,
+        count as u64,
+        timeout_ns,
+        0,
+    );
+    true
 }
 
 /// `slx_pci_config_read`: `width` bytes (1, 2 or 4, naturally aligned) of

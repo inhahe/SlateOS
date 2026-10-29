@@ -374,9 +374,19 @@ pub fn run() -> bool {
         let task = unsafe { (*s).table.next_deadline() };
         // SAFETY: the C half's hook, outside every task; the one thread.
         let event = unsafe { lx_emul_next_event(now) };
-        match task.into_iter().chain((event != 0).then_some(event)).min() {
-            // From the clock read again: the turn's softirqs may have run long.
-            Some(deadline) => sleep_ns(deadline.saturating_sub(now_ns())),
+        // From the clock read again: the turn's softirqs may have run long.
+        let timeout = task
+            .into_iter()
+            .chain((event != 0).then_some(event))
+            .min()
+            .map(|deadline| deadline.saturating_sub(now_ns()));
+        // A device with a handler requested can wake the tasks: wait for it
+        // as well -- for ever when nothing else is due.
+        if crate::pci::wait_for_interrupts(timeout.unwrap_or(u64::MAX)) {
+            continue;
+        }
+        match timeout {
+            Some(ns) => sleep_ns(ns),
             None => return !stranded(),
         }
     }

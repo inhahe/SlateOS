@@ -118,3 +118,4 @@ layer emul/lx_sched.c
 layer emul/lx_softirq.c
 layer emul/lx_fs.c
 layer emul/lx_pci.c
+layer emul/lx_irq.c

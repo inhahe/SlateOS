@@ -25,8 +25,8 @@
  *   "atomic"    sleeps with bottom halves off, so must exit SLX_EXIT_BUG;
  *   "pci"       with `pci=BB:DD.F` naming the boot test's spare 82574,
  *               registers hello's pci_driver for it, which must be probed
- *               through Linux's PCI core and read the card's MAC through
- *               BAR0, so must exit 0;
+ *               through Linux's PCI core, read the card's MAC through BAR0
+ *               and handle its interrupts, so must exit 0;
  *   "pcifail"   the same, its probe failing, so that the function is left
  *               without a driver: must exit SLX_EXIT_INIT_FAILED.
  * With an argument, the later initcalls do nothing: the first's ending is
@@ -154,6 +154,103 @@ static bool hello_bar0_sizes(struct pci_dev *pdev)
 	       again == bar && (bar & PCI_BASE_ADDRESS_MEM_MASK) == (u32)pci_resource_start(pdev, 0);
 }
 
+/*
+ * The card's interrupts, through Linux's own API (lx_irq.c): its MSI
+ * allocated, a handler requested, and the card made to raise one -- its
+ * interrupt cause set (ICS) with the cause unmasked (IMS), as the boot
+ * test's probe driver raises it. The handler runs in hardirq context; a
+ * disabled interrupt is held, not lost, and delivered once enabled; a
+ * threaded handler's second half runs in a task, which may sleep. The
+ * handlers read the cause register, which clears it, as e1000e's do.
+ */
+#define HELLO_ICR 0x00c0
+#define HELLO_ICS 0x00c8
+#define HELLO_IMS 0x00d0
+#define HELLO_IMC 0x00d8
+#define HELLO_CAUSE 0x1
+static void __iomem *hello_regs;
+static DECLARE_COMPLETION(hello_irq_done);
+static bool hello_irq_in_hardirq, hello_thread_in_task;
+
+static void hello_raise(void)
+{
+	reinit_completion(&hello_irq_done);
+	writel(HELLO_CAUSE, hello_regs + HELLO_IMS);
+	writel(HELLO_CAUSE, hello_regs + HELLO_ICS);
+}
+
+static irqreturn_t hello_isr(int irq, void *data)
+{
+	if (!(readl(hello_regs + HELLO_ICR) & HELLO_CAUSE))
+		return IRQ_NONE;
+	hello_irq_in_hardirq = in_hardirq() && irqs_disabled();
+	complete(&hello_irq_done);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t hello_isr_first_half(int irq, void *data)
+{
+	return readl(hello_regs + HELLO_ICR) & HELLO_CAUSE ? IRQ_WAKE_THREAD : IRQ_NONE;
+}
+
+static irqreturn_t hello_isr_thread(int irq, void *data)
+{
+	hello_thread_in_task = !in_interrupt() && !irqs_disabled() && (current->flags & PF_KTHREAD);
+	msleep(1);
+	complete(&hello_irq_done);
+	return IRQ_HANDLED;
+}
+
+#define HELLO_PCI_CHECK(cond, what)						\
+	do {									\
+		if (!(cond)) {							\
+			dev_err(&pdev->dev, "check failed: %s\n", what);	\
+			return -EPROTO;						\
+		}								\
+	} while (0)
+
+static int hello_pci_interrupts(struct pci_dev *pdev)
+{
+	unsigned long before;
+	int irq;
+
+	HELLO_PCI_CHECK(pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI) == 1, "no MSI vector");
+	irq = pci_irq_vector(pdev, 0);
+	HELLO_PCI_CHECK(irq > 0 && irq == pdev->irq && pdev->msi_enabled,
+			"the MSI vector's interrupt is not the device's");
+	HELLO_PCI_CHECK(!request_irq(irq, hello_isr, 0, "hello", pdev), "no handler requested");
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"the card's interrupt never reached its handler");
+	HELLO_PCI_CHECK(hello_irq_in_hardirq, "a handler ran outside hardirq context");
+
+	disable_irq(irq);
+	before = lx_irq_count(irq);
+	hello_raise();
+	msleep(20);
+	HELLO_PCI_CHECK(lx_irq_count(irq) == before, "a disabled interrupt was delivered");
+	enable_irq(irq);
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"an interrupt that came while disabled was lost");
+	HELLO_PCI_CHECK(free_irq(irq, pdev), "free_irq() did not name the handler");
+
+	HELLO_PCI_CHECK(!request_threaded_irq(irq, hello_isr_first_half, hello_isr_thread,
+					      IRQF_ONESHOT, "hello", pdev),
+			"no threaded handler requested");
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"the card's interrupt never reached its threaded handler");
+	synchronize_irq(irq);
+	HELLO_PCI_CHECK(hello_thread_in_task, "a threaded handler's second half ran outside a task");
+	free_irq(irq, pdev);
+	pci_free_irq_vectors(pdev);
+	HELLO_PCI_CHECK(!pdev->msi_enabled && pci_irq_vector(pdev, 0) < 0,
+			"MSI stayed on once its vectors were freed");
+	writel(~0U, hello_regs + HELLO_IMC);
+	readl(hello_regs + HELLO_ICR);
+	return 0;
+}
+
 static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	void __iomem *regs;
@@ -201,7 +298,12 @@ static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		err = -EPROTO;
 		goto unmap;
 	}
-	dev_info(&pdev->dev, "an 82574 (%pR), MAC %pM read through BAR0\n", &pdev->resource[0], mac);
+	hello_regs = regs;
+	err = hello_pci_interrupts(pdev);
+	if (err)
+		goto unmap;
+	dev_info(&pdev->dev, "an 82574 (%pR), MAC %pM read through BAR0, its interrupts handled\n",
+		 &pdev->resource[0], mac);
 	hello_pci_probed = true;
 	return 0;
 unmap:

@@ -152,7 +152,7 @@ pub fn self_test() -> KernelResult<()> {
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic{}: OK",
         elf.len(),
         if pci {
-            ", a PCI function probed through Linux's PCI core, and one no driver took"
+            ", a PCI function probed through Linux's PCI core and its interrupts handled, and one no driver took"
         } else {
             ""
         }
@@ -162,7 +162,8 @@ pub fn self_test() -> KernelResult<()> {
 
 /// The boot test's spare 82574 ([`crate::devhandle::probe_card`]) given to
 /// the hello process -- an argument `pci=BB:DD.F` and a capability for that
-/// function alone: "pci" must probe it through Linux's PCI core and exit 0,
+/// function alone: "pci" must probe it through Linux's PCI core, handle the
+/// interrupts it has the card raise (lx_irq.c), and exit 0,
 /// "pcifail" must have its probe fail and so end as an initcall failure,
 /// the function left without a driver. Each exit must release the card.
 /// Whether they ran: skipped, and recorded so, where there is no such card.
@@ -185,7 +186,7 @@ fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         (
             b"pci",
             EXIT_OK,
-            "probed the card through Linux's PCI core and exited 0",
+            "probed the card through Linux's PCI core, handled its interrupts and exited 0",
         ),
         (
             b"pcifail",

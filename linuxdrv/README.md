@@ -83,7 +83,9 @@ and uevents showing nothing (`emul/lx_fs.c`, design-decisions 1583); Linux's
 own PCI core, given the functions the process was started with
 (`pci=BB:DD.F`) through the kernel's device handle, their BARs shadowed and
 mapped by `ioremap` (`emul/lx_pci.c`), and the heap laid out as Linux's
-direct map (`emul/lx_mm.c`, design-decisions 1584). The driver's own
+direct map (`emul/lx_mm.c`, design-decisions 1584); their MSI delivered to
+the handlers drivers request, taken at each turn of the loop and waited
+for when it is idle (`emul/lx_irq.c`, design-decisions 1585). The driver's own
 code is marked at build (`scripts/linux-tree.sh` renames its sections to
 `*.lxdriver`, which `link.ld` brackets), so that only the driver's failing
 initcall ends the process, a Linux subsystem's being carried past. `hello`
@@ -93,8 +95,8 @@ when they end, busy waits moving `jiffies`, RCU callbacks, rcuwait), arms
 timers, schedules tasklets, queues work -- a sleeper and a CPU hog with work
 queued behind each -- probes a device of its own through the driver core,
 and overflows a stack into its guard on purpose; given the boot test's
-spare 82574, it probes the card through Linux's PCI core and reads its MAC
-address through BAR0. No
+spare 82574, it probes the card through Linux's PCI core, reads its MAC
+address through BAR0 and handles the interrupts it has the card raise. No
 driver runs yet. The first,
 `e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
 use 148 symbols they do not define. About 15 are Linux's generic library code

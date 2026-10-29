@@ -1173,6 +1173,8 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_sched_affinity()?;
     test_dispatch_process_get_phdr()?;
     test_dispatch_channel_peer_has_key()?;
+    test_dispatch_shm_grant()?;
+    test_dispatch_service_register_scoped()?;
     test_dispatch_unix_sockets()?;
     test_dispatch_unix_rights()?;
     test_dispatch_priority_doors()?;
@@ -3683,6 +3685,163 @@ fn test_dispatch_channel_peer_has_key() -> KernelResult<()> {
         }
         Err(what) => {
             serial_println!("[syscall]   FAIL: SYS_CHANNEL_PEER_HAS_KEY: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_SHM_GRANT` (1190; design-decisions 1589), made as processes make it
+/// (`thread::self_test_as_process`): the owner of a region grants it to the
+/// process that connected to the owner's service, which may then size it;
+/// a region the caller may not use, a channel it does not hold, and a peer
+/// that has closed its end are refused; a second grant changes nothing;
+/// and the grantee's close gives back its own reference alone -- once, the
+/// owner's region still there after it.
+fn test_dispatch_shm_grant() -> KernelResult<()> {
+    use super::number::SYS_SHM_GRANT;
+    use crate::cap::ResourceType;
+    use crate::ipc::{channel, service};
+    use crate::proc::pcb;
+    use crate::proc::thread::self_test_as_process;
+
+    const NAME: &[u8] = b"slate.selftest.grant";
+    const SIZE: u64 = 16 * 1024;
+    let call = |nr: u64, arg0: u64, arg1: u64| {
+        dispatch(
+            nr,
+            &SyscallArgs {
+                arg0,
+                arg1,
+                arg2: 0,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            },
+        )
+        .value
+    };
+    let code = |e: KernelError| i64::from(e.code());
+    let owner = pcb::create("grant-owner", 0);
+    let peer = pcb::create("grant-peer", 0);
+    let stranger = pcb::create("grant-stranger", 0);
+    let listener = service::register(NAME)?;
+    let connected = self_test_as_process(peer, || service::connect(NAME));
+    let result = (|| -> Result<(), &'static str> {
+        let peer_end = connected.map_err(|_| "the peer could not connect")?;
+        pcb::register_ipc_handle(peer, ResourceType::Channel, peer_end.raw());
+        let owner_end = service::try_accept(listener)
+            .ok()
+            .flatten()
+            .ok_or("the service had no connection to accept")?;
+        pcb::register_ipc_handle(owner, ResourceType::Channel, owner_end.raw());
+        let made = |pid| u64::try_from(self_test_as_process(pid, || call(SYS_SHM_CREATE, SIZE, 0)));
+        let region = made(owner).map_err(|_| "the owner could not make a region")?;
+        let theirs = made(stranger).map_err(|_| "the stranger could not make a region")?;
+        let grant = |r: u64, end: u64| self_test_as_process(owner, || call(SYS_SHM_GRANT, r, end));
+        let as_peer = |nr: u64| self_test_as_process(peer, || call(nr, region, 0));
+        let sized = |v: i64| u64::try_from(v).is_ok_and(|s| s >= SIZE);
+        if as_peer(SYS_SHM_SIZE) != code(KernelError::PermissionDenied) {
+            return Err("the peer could use the region before any grant");
+        }
+        if grant(theirs, owner_end.raw()) != code(KernelError::PermissionDenied) {
+            return Err("a region the caller may not use was granted");
+        }
+        if grant(region, peer_end.raw()) >= 0 {
+            return Err("a grant on a channel the caller does not hold was made");
+        }
+        if grant(region, owner_end.raw()) != 0 {
+            return Err("the owner's grant was refused");
+        }
+        if !sized(as_peer(SYS_SHM_SIZE)) {
+            return Err("the peer could not size the region granted it");
+        }
+        if grant(region, owner_end.raw()) != 0 {
+            return Err("a second grant was refused");
+        }
+        if as_peer(SYS_SHM_CLOSE) != 0 {
+            return Err("the peer could not close the reference granted it");
+        }
+        if as_peer(SYS_SHM_CLOSE) != code(KernelError::InvalidHandle) {
+            return Err(
+                "the peer closed a reference it no longer held: a second grant gave another",
+            );
+        }
+        if !sized(self_test_as_process(owner, || {
+            call(SYS_SHM_SIZE, region, 0)
+        })) {
+            return Err("the peer's close took the owner's region away");
+        }
+        pcb::deregister_ipc_handle(peer, ResourceType::Channel, peer_end.raw());
+        channel::close(peer_end);
+        if grant(region, owner_end.raw()) != code(KernelError::ChannelClosed) {
+            return Err("a grant to a closed end was made");
+        }
+        Ok(())
+    })();
+    // The test's own listener; gone either way. Each process's channel ends
+    // and regions go with it.
+    let _ = service::unregister(listener);
+    pcb::destroy(owner);
+    pcb::destroy(peer);
+    pcb::destroy(stranger);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_SHM_GRANT (1190): OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: SYS_SHM_GRANT: {}", what);
+            Err(KernelError::InternalError)
+        }
+    }
+}
+
+/// `SYS_SERVICE_REGISTER`'s rule (`handlers::may_register_service`): a
+/// `Service` capability with `WRITE` for one name lets its holder register
+/// that name and no other; one for every name (resource id 0), any; a key
+/// (`READ`), none.
+fn test_dispatch_service_register_scoped() -> KernelResult<()> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::ipc::service::key_id;
+    use crate::proc::pcb;
+
+    const MINE: &[u8] = b"slate.selftest.mine";
+    const OTHER: &[u8] = b"slate.selftest.other";
+    let one = pcb::create("register-one", 0);
+    let every = pcb::create("register-every", 0);
+    let keyed = pcb::create("register-keyed", 0);
+    let result = (|| -> Result<(), &'static str> {
+        let grant = |pid, id, rights| {
+            pcb::grant_capability(pid, ResourceType::Service, id, rights).map_err(|_| "grant")
+        };
+        grant(one, key_id(MINE), Rights::WRITE)?;
+        grant(every, 0, Rights::WRITE)?;
+        grant(keyed, key_id(MINE), Rights::READ)?;
+        let may = handlers::may_register_service;
+        if !may(one, MINE) {
+            return Err("a capability for a name did not let its holder register it");
+        }
+        if may(one, OTHER) {
+            return Err("a capability for one name let its holder register another");
+        }
+        if !may(every, MINE) || !may(every, OTHER) {
+            return Err("a capability for every name did not let its holder register any");
+        }
+        if may(keyed, MINE) {
+            return Err("a service's key let its holder register the service");
+        }
+        Ok(())
+    })();
+    pcb::destroy(one);
+    pcb::destroy(every);
+    pcb::destroy(keyed);
+    match result {
+        Ok(()) => {
+            serial_println!("[syscall]   SYS_SERVICE_REGISTER's capability scoped to a name: OK");
+            Ok(())
+        }
+        Err(what) => {
+            serial_println!("[syscall]   FAIL: SYS_SERVICE_REGISTER's scoping: {}", what);
             Err(KernelError::InternalError)
         }
     }

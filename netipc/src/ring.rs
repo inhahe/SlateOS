@@ -78,6 +78,15 @@ pub const OFF_SQ_TAIL: usize = 2 * CACHE_LINE;
 pub const OFF_CQ_HEAD: usize = 3 * CACHE_LINE;
 /// CQ tail index (daemon = CQ producer writes it). Own cache line.
 pub const OFF_CQ_TAIL: usize = 4 * CACHE_LINE;
+/// The SQ consumer's sleep word, beside its head in its cache line: 0 while
+/// it is awake, and before it sleeps waiting for submissions a nonzero
+/// number of its own, new for each sleep. A producer that pushes rings the
+/// consumer's doorbell only for a number it has not rung for -- a doorbell
+/// then costs a system call only when the peer sleeps (a driver process's
+/// card, design-decisions 1589; the kernel's own rings leave it 0).
+pub const OFF_SQ_SLEEP: usize = OFF_SQ_HEAD + 4;
+/// The CQ consumer's sleep word, beside its head: as [`OFF_SQ_SLEEP`].
+pub const OFF_CQ_SLEEP: usize = OFF_CQ_HEAD + 4;
 
 /// Total header length: five cache lines (scalars + four separated indices).
 pub const HEADER_LEN: usize = 5 * CACHE_LINE;
@@ -429,6 +438,11 @@ pub const ERR_NO_DEVICE: i32 = -19;
 /// multicast address, a value out of range, an option with no value.
 pub const ERR_INVALID: i32 = -22;
 
+/// Completion `result` sentinel (`-EOPNOTSUPP`): an operation the ring's
+/// consumer does not perform -- a driver process's card asked for anything
+/// but sending and receiving frames (design-decisions 1589).
+pub const ERR_NOT_SUPPORTED: i32 = -95;
+
 /// [`OP_POLL`] readiness bit: the connection is **readable** — it has buffered
 /// in-order bytes waiting, or the peer has closed (so a `recv` would return `0`
 /// / EOF promptly). Mirrors the sense of Linux `POLLIN`.
@@ -659,6 +673,15 @@ pub fn is_empty(head: u32, tail: u32) -> bool {
 #[must_use]
 pub fn is_full(head: u32, tail: u32, entries: u32) -> bool {
     used(head, tail) >= entries
+}
+
+/// True if the indices claim more occupied slots than the ring has: a
+/// producer that wrote a tail it could not have reached, which a consumer
+/// must take nothing from -- or it would read the same slots over and over,
+/// up to four billion times.
+#[must_use]
+pub fn is_broken(head: u32, tail: u32, entries: u32) -> bool {
+    used(head, tail) > entries
 }
 
 /// Free slots available to the producer.
@@ -1168,6 +1191,19 @@ mod tests {
             head = head.wrapping_add(1);
         }
         assert!(is_empty(head, tail));
+    }
+
+    #[test]
+    fn a_tail_past_what_the_ring_holds_is_broken() {
+        let entries = 8u32;
+        assert!(!is_broken(0, 0, entries), "empty");
+        assert!(!is_broken(5, 5 + entries, entries), "full");
+        assert!(is_broken(5, 5 + entries + 1, entries), "one past full");
+        assert!(is_broken(5, 4, entries), "a tail behind the head");
+        assert!(
+            !is_broken(u32::MAX - 1, 2, entries),
+            "four used, across the wrap"
+        );
     }
 
     #[test]

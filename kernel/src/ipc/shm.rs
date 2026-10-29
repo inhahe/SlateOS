@@ -308,6 +308,28 @@ pub fn authorize(handle: ShmHandle, pid: u64) -> KernelResult<()> {
     Ok(())
 }
 
+/// Give process `pid` a region as its creator has it (`SYS_SHM_GRANT`): the
+/// right to map, size and close it, and a reference of its own, which its
+/// close -- or its exit, the caller recording the handle among its IPC
+/// handles -- gives back. Whether a reference was taken: `false`, nothing
+/// changed, when `pid` may already use the region.
+///
+/// # Errors
+///
+/// `InvalidHandle` if the region does not exist.
+pub fn grant(handle: ShmHandle, pid: u64) -> KernelResult<bool> {
+    let mut table = SHM_TABLE.lock();
+    let region = table
+        .get_mut(&handle.region_id())
+        .ok_or(KernelError::InvalidHandle)?;
+    if region.authorized.contains(&pid) {
+        return Ok(false);
+    }
+    region.authorized.push(pid);
+    region.ref_count = region.ref_count.saturating_add(1);
+    Ok(true)
+}
+
 /// Check whether `pid` is authorized to operate on a region.
 ///
 /// Returns `false` if the region does not exist or the PID is not in the

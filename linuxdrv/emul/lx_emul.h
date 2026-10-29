@@ -66,9 +66,9 @@ bool lx_irq_due(void);
  * none). */
 void lx_hrtimer_run(void);
 u64 lx_hrtimer_next(u64 now_ns);
-/* lx_softirq.c: run at the end of every turn once set -- by lx_nic.c, to
- * see to a card served to the network stack. */
-extern void (*lx_emul_turn_hook)(void);
+/* lx_softirq.c: run at the end of every turn once set, the clock reading
+ * `now_ns` -- by lx_nic.c, to see to a card served to the network stack. */
+extern void (*lx_emul_turn_hook)(u64 now_ns);
 unsigned long lx_irq_count(unsigned int irq);
 
 /*

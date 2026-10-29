@@ -113,6 +113,9 @@ impl Ring {
             atomic_at(base, ring::OFF_SQ_TAIL).store(0, Ordering::Relaxed);
             atomic_at(base, ring::OFF_CQ_HEAD).store(0, Ordering::Relaxed);
             atomic_at(base, ring::OFF_CQ_TAIL).store(0, Ordering::Relaxed);
+            // And both consumers awake.
+            atomic_at(base, ring::OFF_SQ_SLEEP).store(0, Ordering::Relaxed);
+            atomic_at(base, ring::OFF_CQ_SLEEP).store(0, Ordering::Relaxed);
             // Publish: release-store the magic after all geometry is in place.
             atomic_at(base, ring::OFF_MAGIC).store(ring::RING_MAGIC, Ordering::Release);
         }
@@ -233,13 +236,15 @@ impl Ring {
     }
 
     /// Pop a submission entry (consumer side). Returns `None` if the SQ is
-    /// empty.
+    /// empty -- or broken, its tail further ahead than it holds
+    /// ([`ring::is_broken`]): a peer that wrote that is answered with
+    /// nothing, not with the same entries again and again.
     #[must_use]
     pub fn sq_pop(&self) -> Option<Sqe> {
         // We own the head (Relaxed); observe the producer's tail (Acquire).
         let head = self.load_relaxed(ring::OFF_SQ_HEAD);
         let tail = self.load_acquire(ring::OFF_SQ_TAIL);
-        if ring::is_empty(head, tail) {
+        if ring::is_empty(head, tail) || ring::is_broken(head, tail, self.sq_entries) {
             return None;
         }
         let slot = ring::slot(head, self.sq_entries) as usize;
@@ -273,12 +278,12 @@ impl Ring {
     }
 
     /// Pop a completion entry (consumer side). Returns `None` if the CQ is
-    /// empty.
+    /// empty or broken, as [`Ring::sq_pop`].
     #[must_use]
     pub fn cq_pop(&self) -> Option<Cqe> {
         let head = self.load_relaxed(ring::OFF_CQ_HEAD);
         let tail = self.load_acquire(ring::OFF_CQ_TAIL);
-        if ring::is_empty(head, tail) {
+        if ring::is_empty(head, tail) || ring::is_broken(head, tail, self.cq_entries) {
             return None;
         }
         let slot = ring::slot(head, self.cq_entries) as usize;
@@ -337,6 +342,101 @@ impl Ring {
         }
         // data_off + data_len <= len, checked at construction.
         Some(self.base.wrapping_add(self.data_off + off))
+    }
+
+    // ---- Sleeping consumers and their doorbells ----
+    //
+    // A consumer about to sleep waiting for entries says so in its sleep
+    // word (`ring::OFF_SQ_SLEEP` / `OFF_CQ_SLEEP`) and then looks at the
+    // queue once more; a producer, having pushed, looks at the word. Each
+    // side's store is followed by a SeqCst fence before its load, so at
+    // least one of them sees the other's: either the consumer finds the new
+    // entry and does not sleep, or the producer finds the sleeper and rings.
+    // No wakeup is lost, and a doorbell goes only to a consumer that said it
+    // would sleep.
+
+    /// The SQ's consumer is going to sleep for submissions: its sleep word
+    /// set to `number` (nonzero, new for each sleep) -- unless the SQ holds
+    /// something already, when the word is left 0 and the answer is `false`:
+    /// take it rather than sleep.
+    #[must_use]
+    pub fn sq_sleep(&self, number: u32) -> bool {
+        self.sleep(
+            ring::OFF_SQ_SLEEP,
+            ring::OFF_SQ_HEAD,
+            ring::OFF_SQ_TAIL,
+            self.sq_entries,
+            number,
+        )
+    }
+
+    /// The SQ's consumer is awake again.
+    pub fn sq_wake(&self) {
+        self.store_release(ring::OFF_SQ_SLEEP, 0);
+    }
+
+    /// For the SQ's producer, after pushing: the consumer's sleep number, 0
+    /// while it is awake. Ring its doorbell for a number not yet rung for.
+    #[must_use]
+    pub fn sq_sleeper(&self) -> u32 {
+        fence(Ordering::SeqCst);
+        self.load_relaxed(ring::OFF_SQ_SLEEP)
+    }
+
+    /// The CQ's consumer is going to sleep for completions: as
+    /// [`Ring::sq_sleep`].
+    #[must_use]
+    pub fn cq_sleep(&self, number: u32) -> bool {
+        self.sleep(
+            ring::OFF_CQ_SLEEP,
+            ring::OFF_CQ_HEAD,
+            ring::OFF_CQ_TAIL,
+            self.cq_entries,
+            number,
+        )
+    }
+
+    /// The CQ's consumer is awake again.
+    pub fn cq_wake(&self) {
+        self.store_release(ring::OFF_CQ_SLEEP, 0);
+    }
+
+    /// For the CQ's producer, after pushing: as [`Ring::sq_sleeper`].
+    #[must_use]
+    pub fn cq_sleeper(&self) -> u32 {
+        fence(Ordering::SeqCst);
+        self.load_relaxed(ring::OFF_CQ_SLEEP)
+    }
+
+    /// Whether the SQ is broken: its producer wrote a tail further ahead
+    /// than the queue holds ([`ring::is_broken`]) -- a peer to stop serving,
+    /// since nothing more will be taken from it.
+    #[must_use]
+    pub fn sq_broken(&self) -> bool {
+        let head = self.load_relaxed(ring::OFF_SQ_HEAD);
+        ring::is_broken(head, self.load_acquire(ring::OFF_SQ_TAIL), self.sq_entries)
+    }
+
+    /// Whether the CQ is broken: as [`Ring::sq_broken`].
+    #[must_use]
+    pub fn cq_broken(&self) -> bool {
+        let head = self.load_relaxed(ring::OFF_CQ_HEAD);
+        ring::is_broken(head, self.load_acquire(ring::OFF_CQ_TAIL), self.cq_entries)
+    }
+
+    fn sleep(&self, word: usize, head: usize, tail: usize, entries: u32, number: u32) -> bool {
+        // SAFETY: `word` is a header offset (< HEADER_LEN <= len), 4-aligned.
+        let word = unsafe { atomic_at(self.base, word) };
+        word.store(number, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        let (head, tail) = (self.load_relaxed(head), self.load_acquire(tail));
+        // A broken queue has nothing to take ([`Ring::sq_pop`]): sleeping on
+        // it is right, or its consumer would spin.
+        if ring::is_empty(head, tail) || ring::is_broken(head, tail, entries) {
+            return true;
+        }
+        word.store(0, Ordering::Release);
+        false
     }
 
     // ---- Internal atomic / byte helpers ----
@@ -558,6 +658,51 @@ mod tests {
         assert!(!r.read_data(64, &mut [0u8; 1]));
         // Boundary: last byte exactly.
         assert!(r.write_data(63, b"x"));
+    }
+
+    #[test]
+    fn a_consumer_sleeps_only_on_an_empty_queue_and_its_producer_sees_it() {
+        let (sq, cq, data) = (4u32, 4u32, 64u32);
+        let need = ring::region_size(sq, cq, data);
+        let mut buf = region(need);
+        let base = buf.as_mut_ptr().cast::<u8>();
+        let r = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
+        assert_eq!(r.sq_sleeper(), 0, "awake from the start");
+        assert!(r.sq_sleep(7), "an empty queue: sleep");
+        assert_eq!(r.sq_sleeper(), 7, "the producer sees the sleep's number");
+        r.sq_wake();
+        assert_eq!(r.sq_sleeper(), 0);
+        assert!(r.sq_push(&Sqe::default()));
+        assert!(
+            !r.sq_sleep(8),
+            "a submission waiting: take it, do not sleep"
+        );
+        assert_eq!(r.sq_sleeper(), 0, "and the word is left as awake");
+        assert_eq!(r.cq_sleeper(), 0, "the queues' words are their own");
+        assert!(r.cq_push(&Cqe::default()));
+        assert!(!r.cq_sleep(9));
+        assert!(r.cq_pop().is_some());
+        assert!(r.cq_sleep(9));
+        assert_eq!(r.cq_sleeper(), 9);
+        assert_eq!(r.sq_sleeper(), 0);
+    }
+
+    #[test]
+    fn a_tail_written_past_the_queue_takes_nothing_and_sleeps() {
+        let (sq, cq, data) = (4u32, 4u32, 64u32);
+        let need = ring::region_size(sq, cq, data);
+        let mut buf = region(need);
+        let base = buf.as_mut_ptr().cast::<u8>();
+        let r = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
+        assert!(!r.sq_broken());
+        // A peer writes a tail five past the head, of a queue of four.
+        unsafe { atomic_at(base, ring::OFF_SQ_TAIL) }.store(5, Ordering::Release);
+        assert!(r.sq_broken());
+        assert!(r.sq_pop().is_none(), "nothing taken from a broken queue");
+        assert!(r.sq_sleep(1), "and its consumer may sleep, not spin");
+        unsafe { atomic_at(base, ring::OFF_CQ_TAIL) }.store(u32::MAX, Ordering::Release);
+        assert!(r.cq_broken());
+        assert!(r.cq_pop().is_none());
     }
 
     #[test]

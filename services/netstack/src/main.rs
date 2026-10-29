@@ -2637,25 +2637,32 @@ fn print_slow_request(opcode: u8, ms: u64) {
 }
 
 /// A console line built without an allocator -- text, numbers and addresses
-/// written into a buffer -- and printed whole. What does not fit is cut.
+/// written into a buffer -- and printed whole. What does not fit is cut, and
+/// the line then ends with `...` and a newline of its own, so that what is
+/// printed next starts a line.
 struct Line {
-    buf: [u8; 192],
+    buf: [u8; 320],
     len: usize,
+    cut: bool,
 }
 
 impl Line {
     fn new() -> Self {
         Line {
-            buf: [0; 192],
+            buf: [0; 320],
             len: 0,
+            cut: false,
         }
     }
 
     fn put(&mut self, s: &[u8]) -> &mut Self {
         for &b in s {
-            if let Some(d) = self.buf.get_mut(self.len) {
-                *d = b;
-                self.len += 1;
+            match self.buf.get_mut(self.len) {
+                Some(d) => {
+                    *d = b;
+                    self.len += 1;
+                }
+                None => self.cut = true,
             }
         }
         self
@@ -2702,9 +2709,13 @@ impl Line {
         self
     }
 
+    /// The line written to the console as its bytes: a service name, say,
+    /// need not be UTF-8.
     fn print(&self) {
-        if let Ok(s) = core::str::from_utf8(self.buf.get(..self.len).unwrap_or(&[])) {
-            print(s);
+        let bytes = self.buf.get(..self.len).unwrap_or(&[]);
+        syscall2(SYS_CONSOLE_WRITE, bytes.as_ptr() as u64, bytes.len() as u64);
+        if self.cut {
+            print("...\n");
         }
     }
 }
@@ -5781,7 +5792,9 @@ fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &
         }
         let deadline = now_ns().saturating_add(1_000_000_000);
         while now_ns() < deadline {
-            let _woke = port::wait(deadline.saturating_sub(now_ns()));
+            if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
+                return Err("FAIL: the card's driver went away");
+            }
             loop {
                 let n = raw_rx(&mut frame);
                 let Ok(n) = usize::try_from(n) else { break };

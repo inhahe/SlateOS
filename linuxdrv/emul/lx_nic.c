@@ -225,9 +225,9 @@ static unsigned long lx_nic_port_received, lx_nic_port_dropped, lx_nic_port_sent
 static DECLARE_WAIT_QUEUE_HEAD(lx_nic_port_work);
 
 /* The turn hook: the stack's connection seen to, the task woken for it. */
-static void lx_nic_port_turn(void)
+static void lx_nic_port_turn(u64 now_ns)
 {
-	if (slx_nicport_turn())
+	if (slx_nicport_turn(now_ns))
 		wake_up(&lx_nic_port_work);
 }
 
@@ -312,6 +312,10 @@ static int lx_nic_serve(struct net_device *dev, const char *name, bool once)
 	netdev_info(dev, "%pM served to the network stack as nic.%s\n", dev->dev_addr, name);
 	for (;;) {
 		wait_event(lx_nic_port_work, slx_nicport_work());
+		if (!slx_nicport_serving()) {
+			netdev_err(dev, "nic.%s is no longer served\n", name);
+			return -EPIPE;
+		}
 		while ((len = slx_nicport_tx_next(&frame)) > 0)
 			slx_nicport_tx_done(lx_nic_port_send(dev, frame, len));
 		if (slx_nicport_ended()) {

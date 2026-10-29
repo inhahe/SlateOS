@@ -1265,6 +1265,11 @@ pub const SYS_SEM_WAIT_TIMEOUT: u64 = 275;
 /// `arg0`: pointer to service name (bytes).
 /// `arg1`: name length.
 ///
+/// The caller needs a `Service` capability with `WRITE`: for every name
+/// (resource id 0), or for this name alone (resource id
+/// `ipc::service::key_id(name)`) -- so a driver process given its card's
+/// name can register that and no other. `PermissionDenied` otherwise.
+///
 /// Returns: listener handle on success, negative error.
 pub const SYS_SERVICE_REGISTER: u64 = 280;
 
@@ -7457,8 +7462,10 @@ pub const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
 /// handle, `arg1` a channel end the caller holds. The process is the one
 /// the other end was bound to when it connected or accepted, as
 /// [`SYS_CHANNEL_PEER_CRED`] reports it; process ids are never reused, so
-/// the grant cannot pass to another process. The region's handle then
-/// travels as plain bytes in a message. So a driver process shares a frame
+/// the grant cannot pass to another process. It gets a reference of its
+/// own, which its `SYS_SHM_CLOSE` or its exit gives back; a second grant to
+/// it changes nothing. The region's handle then travels as plain bytes in a
+/// message. So a driver process shares a frame
 /// ring with the network stack that connected to it (design-decisions
 /// 1589). Returns 0; `PermissionDenied` for a region the caller may not
 /// use; `ChannelClosed` once the other end is closed; `NotFound` when no

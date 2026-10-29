@@ -95,14 +95,17 @@ void slx_pci_irq_listen(long handle, _Bool on);
  * kit's nicport.rs), one a process:
  *   slx_nicport_open     serve the card whose MAC address is the six bytes
  *                        at `mac`, carrying `mtu` bytes a frame, as the
- *                        service "nic.<name>": 0, or an error (-400 for a
- *                        process without the capability, -501 for a name
- *                        taken);
- *   slx_nicport_turn     a turn of the loop, between tasks: the stack's
- *                        connection seen to; whether the task serving the
- *                        card has something to do;
+ *                        service "nic.<name>" to stacks holding its key: 0,
+ *                        or an error (-400 for a process without the
+ *                        capability for the name, -501 for a name taken);
+ *   slx_nicport_turn     a turn of the loop, between tasks, the clock
+ *                        reading `now_ns`: the stack's connection seen to;
+ *                        whether the task serving the card has something
+ *                        to do;
  *   slx_nicport_work     whether it has, nothing changed: frames to send,
- *                        or a stack gone;
+ *                        a stack gone, or the card no longer served;
+ *   slx_nicport_serving  whether the card is still served (its listener
+ *                        failed: no longer);
  *   slx_nicport_ended    how many stacks have gone since last asked;
  *   slx_nicport_tx_next  the next frame to send: its length and, at
  *                        `*frame`, its bytes -- the stack's, which it can
@@ -116,8 +119,9 @@ void slx_pci_irq_listen(long handle, _Bool on);
  *                        negative `len`: not used, it stays posted.
  */
 long slx_nicport_open(const char *name, const unsigned char *mac, unsigned int mtu);
-_Bool slx_nicport_turn(void);
+_Bool slx_nicport_turn(unsigned long long now_ns);
 _Bool slx_nicport_work(void);
+_Bool slx_nicport_serving(void);
 unsigned int slx_nicport_ended(void);
 long slx_nicport_tx_next(const void **frame);
 void slx_nicport_tx_done(long result);

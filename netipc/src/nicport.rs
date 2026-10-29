@@ -12,10 +12,16 @@
 //! On the ring the stack submits and owns the slots: `OP_SEND` names a slot
 //! holding a frame to send (`data_off`, `data_len`), `OP_RECV` posts an empty
 //! slot for a frame to be received into (`data_off`, `data_len` its
-//! capacity). The driver completes every submission with its `user_data`
-//! -- sends in the order submitted, with the length sent or a negative
-//! errno; receives in the order posted, as frames come, with the frame's
-//! length. After pushing, a side sends [`DOORBELL`] on the connection.
+//! capacity, which must hold the longest frame: header, VLAN tag and MTU).
+//! The driver completes every submission with its `user_data` -- sends in
+//! the order submitted, with the length sent or a negative errno; receives
+//! in the order posted, as frames come, with the frame's length.
+//!
+//! A side about to sleep waiting for the other says so in the ring (its
+//! queue's sleep word, `ring::OFF_SQ_SLEEP` / `OFF_CQ_SLEEP`); the other,
+//! having pushed, sends [`DOORBELL`] on the connection only then, once for
+//! that sleep. The stack rings after frames to send, not after slots posted
+//! to receive into, which the driver looks for when a frame comes.
 
 /// The prefix of a card's service name.
 pub const SERVICE_PREFIX: &[u8] = b"nic.";
@@ -24,7 +30,8 @@ pub const SERVICE_PREFIX: &[u8] = b"nic.";
 /// room to spare.
 pub const SLOT_SIZE: u32 = 2048;
 
-/// The doorbell: one byte, sent on the connection after pushing.
+/// The doorbell: one byte, sent on the connection after pushing to a side
+/// that said it sleeps.
 pub const DOORBELL: u8 = b'D';
 
 /// The attach message's magic ("NPRT") and version.
@@ -131,7 +138,7 @@ mod tests {
     #[test]
     fn a_wrong_or_short_message_is_refused() {
         let mut b = [0u8; ATTACH_LEN];
-        PORT.encode(&mut b);
+        assert_eq!(PORT.encode(&mut b), Some(ATTACH_LEN));
         // Byte 17 is the slot size's (2048 = 0x800) one non-zero byte.
         for (at, value) in [(0, 0xFF), (4, 2), (17, 0), (20, 3)] {
             let mut bad = b;

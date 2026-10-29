@@ -7,14 +7,19 @@
 //! The ring's slots are the daemon's: the first half posted to receive
 //! into, each posted again once its frame is read; the second half to send
 //! from, each free again once its send completes. A submission's token is
-//! its slot. After pushing, the daemon rings the driver's doorbell (a byte
-//! on the connection); the driver rings back after completing.
+//! its slot.
+//!
+//! Doorbells (a byte on the connection) go only to a side that sleeps
+//! (`netring`'s sleep words): the daemon says in the ring when it sleeps
+//! waiting for completions, and rings the driver after submitting a frame
+//! to send only when the driver said it sleeps. A slot posted to receive
+//! into needs no doorbell: the driver looks for slots when a frame comes.
 //!
 //! Single-threaded daemon: the card is a `static mut` no borrow of which
 //! outlives a call here, as [`super::loopback`]'s state is.
 
 use netipc::nicport::{DOORBELL, Port, SLOT_SIZE};
-use netipc::ring::{OP_RECV, OP_SEND, Sqe};
+use netipc::ring::{ERR_INVALID, ERR_MSG_SIZE, OP_RECV, OP_SEND, Sqe};
 use netring::Ring;
 
 use super::{
@@ -36,6 +41,11 @@ const NET_DOWN: i64 = -100;
 const MAX_SLOTS: usize = 256;
 /// How long a send waits for a send slot to come free: 100 ms.
 const SLOT_WAIT_NS: u64 = 100_000_000;
+/// The most doorbells one wait takes after the first.
+const DOORBELLS_A_WAIT: usize = 64;
+/// An Ethernet header and a VLAN tag: what a frame carries besides its MTU.
+const ETH_HLEN: usize = 14;
+const VLAN_HLEN: usize = 4;
 
 struct Card {
     channel: u64,
@@ -53,6 +63,10 @@ struct Card {
     got_len: usize,
     /// Sends the driver completed with an error.
     send_errors: u64,
+    /// The daemon's own sleep number, new for each wait.
+    slept: u32,
+    /// The driver's sleep last rung for.
+    rung: u32,
     gone: bool,
 }
 
@@ -93,7 +107,6 @@ pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, (&'static str, i64
                 for slot in 0..c.rx {
                     post(c, slot);
                 }
-                doorbell(c);
             }
             Ok(port)
         }
@@ -154,6 +167,8 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, &'static str> {
         got_head: 0,
         got_len: 0,
         send_errors: 0,
+        slept: 0,
+        rung: 0,
         gone: false,
     })
 }
@@ -163,7 +178,7 @@ fn post(c: &mut Card, slot: u32) {
     let sqe = Sqe {
         op: OP_RECV,
         conn_id: 0,
-        data_off: slot.saturating_mul(SLOT_SIZE),
+        data_off: c.port.slot_offset(slot).unwrap_or(0),
         data_len: SLOT_SIZE,
         user_data: u64::from(slot),
         aux: 0,
@@ -173,19 +188,32 @@ fn post(c: &mut Card, slot: u32) {
     let _pushed = c.ring.sq_push(&sqe);
 }
 
-/// The driver's doorbell rung. A connection with no room holds one already.
-fn doorbell(c: &mut Card) {
+/// A frame submitted: the driver rung if it said it sleeps and was not rung
+/// for that sleep. A connection with no room holds a doorbell already.
+fn ring_if_asleep(c: &mut Card) {
+    let sleeper = c.ring.sq_sleeper();
+    if sleeper == 0 || sleeper == c.rung {
+        return;
+    }
+    c.rung = sleeper;
     let bell = [DOORBELL];
     if syscall3(SYS_CHANNEL_SEND, c.channel, bell.as_ptr() as u64, 1) == CHANNEL_CLOSED {
         c.gone = true;
     }
 }
 
-/// Every completion taken: a frame received queued to be read (a failed
-/// receive's slot posted again), a send's slot freed.
+/// The completions taken -- a queue's worth at most: a frame received
+/// queued to be read (a failed receive's slot posted again), a send's slot
+/// freed. A completion queue the driver wrote broken is the card gone.
 fn reap(c: &mut Card) {
-    let mut posted = false;
-    while let Some(cqe) = c.ring.cq_pop() {
+    if c.ring.cq_broken() {
+        c.gone = true;
+        return;
+    }
+    for _ in 0..c.ring.cq_entries() {
+        let Some(cqe) = c.ring.cq_pop() else {
+            return;
+        };
         let Ok(slot) = u32::try_from(cqe.user_data) else {
             continue;
         };
@@ -196,10 +224,7 @@ fn reap(c: &mut Card) {
                     c.got[at] = (slot, len);
                     c.got_len += 1;
                 }
-                _ => {
-                    post(c, slot);
-                    posted = true;
-                }
+                _ => post(c, slot),
             }
         } else if slot < c.port.slots && c.nfree < MAX_SLOTS {
             if cqe.result < 0 {
@@ -209,25 +234,28 @@ fn reap(c: &mut Card) {
             c.nfree += 1;
         }
     }
-    if posted {
-        doorbell(c);
-    }
 }
 
-/// `frame` sent on the card: its length, or a negative errno. `None` with
-/// no card attached.
+/// `frame` sent on the card: its length, or a negative errno -- at once for
+/// a frame the card cannot send: one with no header, or longer than a
+/// header, a VLAN tag and the card's MTU. `None` with no card attached.
 pub fn send(frame: &[u8]) -> Option<i64> {
     let c = card()?;
     if c.gone {
         return Some(NET_DOWN);
     }
-    if frame.len() > SLOT_SIZE as usize {
-        return Some(-90); // EMSGSIZE
+    if frame.len() < ETH_HLEN {
+        return Some(i64::from(ERR_INVALID));
+    }
+    if frame.len() > usize::from(c.port.mtu) + ETH_HLEN + VLAN_HLEN
+        || frame.len() > SLOT_SIZE as usize
+    {
+        return Some(i64::from(ERR_MSG_SIZE));
     }
     reap(c);
     let deadline = now_ns().saturating_add(SLOT_WAIT_NS);
     while c.nfree == 0 && !c.gone && now_ns() < deadline {
-        wait_on(c, deadline.saturating_sub(now_ns()));
+        let _rang = wait_on(c, deadline.saturating_sub(now_ns()));
         reap(c);
     }
     if c.nfree == 0 {
@@ -235,11 +263,7 @@ pub fn send(frame: &[u8]) -> Option<i64> {
     }
     c.nfree -= 1;
     let slot = c.free[c.nfree];
-    let off = slot.saturating_mul(SLOT_SIZE);
-    if !c.ring.write_data(off as usize, frame) {
-        c.nfree += 1;
-        return Some(-22); // EINVAL: cannot happen, the slot being inside
-    }
+    let off = c.port.slot_offset(slot).unwrap_or(0);
     let sqe = Sqe {
         op: OP_SEND,
         conn_id: 0,
@@ -248,8 +272,14 @@ pub fn send(frame: &[u8]) -> Option<i64> {
         user_data: u64::from(slot),
         aux: 0,
     };
-    let _pushed = c.ring.sq_push(&sqe);
-    doorbell(c);
+    // The slot is inside the data area and the queue has an entry per slot:
+    // neither can fail while the driver keeps to the protocol. If one does,
+    // the slot is given back and the frame not sent.
+    if !c.ring.write_data(off as usize, frame) || !c.ring.sq_push(&sqe) {
+        c.nfree += 1;
+        return Some(E_WOULD_BLOCK);
+    }
+    ring_if_asleep(c);
     Some(frame.len() as i64)
 }
 
@@ -267,17 +297,20 @@ pub fn recv(buf: &mut [u8]) -> Option<i64> {
     c.got_head = (c.got_head + 1) % MAX_SLOTS;
     c.got_len -= 1;
     let n = (len as usize).min(buf.len()).min(SLOT_SIZE as usize);
-    let off = slot.saturating_mul(SLOT_SIZE) as usize;
+    let off = c.port.slot_offset(slot).unwrap_or(0) as usize;
     let read = c.ring.read_data(off, &mut buf[..n]);
     post(c, slot);
-    doorbell(c);
-    Some(if read { n as i64 } else { -22 })
+    Some(if read {
+        n as i64
+    } else {
+        i64::from(ERR_INVALID)
+    })
 }
 
 /// How a [`wait`] ended.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Woke {
-    /// The driver rang, or a frame was already there to read.
+    /// The driver rang, or completions were already there.
     Rang,
     /// The time ran out with no doorbell.
     Slept,
@@ -300,9 +333,15 @@ pub fn wait(timeout_ns: u64) -> Woke {
     }
 }
 
-/// The driver's doorbell waited for, up to `timeout_ns`, and any more that
-/// came taken: whether it rang.
+/// The driver's doorbell waited for, up to `timeout_ns` -- the daemon
+/// saying in the ring that it sleeps, unless completions are there already
+/// -- and any more that came taken: whether it rang, or completions were
+/// there.
 fn wait_on(c: &mut Card, timeout_ns: u64) -> bool {
+    c.slept = c.slept.wrapping_add(1).max(1);
+    if !c.ring.cq_sleep(c.slept) {
+        return true;
+    }
     let mut byte = [0u8; 16];
     let got = syscall4(
         SYS_CHANNEL_RECV_TIMEOUT,
@@ -311,11 +350,13 @@ fn wait_on(c: &mut Card, timeout_ns: u64) -> bool {
         byte.len() as u64,
         timeout_ns.max(1),
     );
+    c.ring.cq_wake();
     if got == CHANNEL_CLOSED {
         c.gone = true;
         return false;
     }
-    loop {
+    let mut rang = got > 0;
+    for _ in 0..DOORBELLS_A_WAIT {
         let more = syscall3(
             SYS_CHANNEL_TRY_RECV,
             c.channel,
@@ -326,9 +367,11 @@ fn wait_on(c: &mut Card, timeout_ns: u64) -> bool {
             c.gone = true;
         }
         if more <= 0 {
-            return got > 0;
+            break;
         }
+        rang = true;
     }
+    rang
 }
 
 /// Sends the driver completed with an error, so far.

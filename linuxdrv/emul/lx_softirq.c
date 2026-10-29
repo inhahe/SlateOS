@@ -184,10 +184,10 @@ void lx_emul_turn(u64 now_ns)
 		do_softirq();
 	/* Last, after the frames the softirqs received: a served card's stack. */
 	if (lx_emul_turn_hook)
-		lx_emul_turn_hook();
+		lx_emul_turn_hook(now_ns);
 }
 
-void (*lx_emul_turn_hook)(void);
+void (*lx_emul_turn_hook)(u64 now_ns);
 
 /*
  * The Rust half's loop, with no task to run, the clock reading `now_ns`:

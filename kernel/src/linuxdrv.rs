@@ -186,7 +186,7 @@ pub fn self_test() -> KernelResult<()> {
     );
     if e1000e {
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack, whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, the driver warning nowhere: OK"
+            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- turning away a daemon without the card's key -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, the driver warning nowhere: OK"
         );
     }
     Ok(())
@@ -298,11 +298,18 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     Ok(true)
 }
 
+/// The service the boot test's card is served as: `serve=spare`.
+const SERVICE: &[u8] = b"nic.spare";
+/// What the netstack daemon's `nic-check` exits with when it cannot attach
+/// to the card -- as it must not, without the card's key.
+const NIC_NO_CARD: i32 = 10;
+
 /// What the netstack daemon's `nic-check` exits with (`services/netstack`):
 /// what failed.
 fn nic_check_failure(code: i32) -> &'static str {
     match code {
-        10 => "it could not attach to the card",
+        0 => "it passed",
+        NIC_NO_CARD => "it could not attach to the card",
         11 => "the kernel let it pass on a region it was never granted",
         12 => "it took no address by DHCP",
         13 => "the gateway did not answer its ARP requests",
@@ -315,21 +322,28 @@ fn nic_check_failure(code: i32) -> &'static str {
 
 /// Linux's e1000e serving the spare 82574 to the network stack
 /// (design-decisions 1589): the driver process -- `program`, holding
-/// `capabilities` (the card's) and a `Service` capability, the card at `a`,
-/// `pci` its argument naming it -- in its "serve=spare once" mode, and beside it the netstack daemon in
-/// its "nic-check nic.spare" mode, which must attach to the card, be refused
-/// passing on a region it was never granted, take an address by DHCP from
-/// QEMU's network through it, resolve the gateway by ARP, have 400
-/// full-size pings answered 16 at a time, payloads as sent, and exit 0; the
-/// driver then ends, the daemon gone, with 0, the card released.
+/// `capabilities` (the card's) and a `Service` capability for [`SERVICE`]
+/// alone, the card at `a`, `pci` its argument naming it -- in its
+/// "serve=spare once" mode, and beside it the netstack daemon in its
+/// "nic-check nic.spare" mode -- first without the card's key, when the
+/// driver must turn it away (it exits [`NIC_NO_CARD`]), then holding it,
+/// when it must attach to the
+/// card, be refused passing on a region it was never granted, take an
+/// address by DHCP from QEMU's network through it, resolve the gateway by
+/// ARP, have 400 full-size pings answered 16 at a time and 8 more sent to an
+/// idle driver, payloads as sent, and exit 0; the driver then ends, the
+/// daemon gone, with 0, no warning from Linux code in it, the card released.
 fn e1000e_serve(
     program: &Program<'_>,
     capabilities: &[(ResourceType, u64, Rights)],
     a: crate::pci::PciAddress,
     pci: &str,
 ) -> KernelResult<()> {
+    // The driver may register its card's name and no other; the daemon
+    // holds the card's key, which the driver asks of whoever connects.
+    let service = crate::ipc::service::key_id(SERVICE);
     let mut caps = alloc::vec::Vec::from(capabilities);
-    caps.push((ResourceType::Service, 0, Rights::WRITE));
+    caps.push((ResourceType::Service, service, Rights::WRITE));
     let driver = start(
         program,
         &[b"e1000e", b"serve=spare", b"once", pci.as_bytes()],
@@ -340,18 +354,34 @@ fn e1000e_serve(
         name: "netstack-nic",
         limit_s: 90,
     };
-    let daemon = match start(&stack, &[b"netstack", b"nic-check", b"nic.spare"], &[]) {
-        Ok(d) => d,
+    // The daemon run first without the card's key, then with it.
+    let check = |key: &[(ResourceType, u64, Rights)]| {
+        let daemon = start(&stack, &[b"netstack", b"nic-check", SERVICE], key);
+        daemon.map(|d| finish(&stack, &d))
+    };
+    let keyless = check(&[]);
+    if keyless != Ok(Some(NIC_NO_CARD)) {
+        serial_println!(
+            "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?}: it should have been turned away, exit {}",
+            keyless,
+            NIC_NO_CARD
+        );
+        // The driver waits for a stack that will not come, or served the
+        // wrong one: no use waiting out its limit.
+        spawn::teardown_fixture(driver.pid, driver.task_id);
+        return Err(KernelError::InternalError);
+    }
+    let checked = match check(&[(ResourceType::Service, service, Rights::READ)]) {
+        Ok(checked) => checked,
         Err(e) => {
             serial_println!(
                 "[linuxdrv]   FAIL: the netstack daemon could not be started: {:?}",
                 e
             );
-            let _ended = finish(program, &driver);
+            spawn::teardown_fixture(driver.pid, driver.task_id);
             return Err(e);
         }
     };
-    let checked = finish(&stack, &daemon);
     let served = finish(program, &driver);
     let warned = served == Some(EXIT_WARNED);
     let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
@@ -359,7 +389,7 @@ fn e1000e_serve(
         return Ok(());
     }
     serial_println!(
-        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}) (Ok(Some(code)), None for not within {} s / {} s){}",
+        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}) (an exit code, or None for not within {} s / {} s){}",
         served,
         checked,
         checked.map_or("it did not end", nic_check_failure),

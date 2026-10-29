@@ -6,22 +6,16 @@
 //!
 //! The stack is another process, so nothing it submits is trusted: a
 //! window outside the data area, a frame too short to have a header or too
-//! long for the card, or an operation a card has no use for, is refused --
-//! completed at once with an error -- and never reaches the C half.
+//! long for the card, a slot too short for the longest frame, or an
+//! operation a card has no use for, is refused -- completed at once with an
+//! error -- and never reaches the C half.
 
-use netipc::ring::{OP_RECV, OP_SEND, Sqe};
+use netipc::ring::{ERR_INVALID, ERR_MSG_SIZE, ERR_NOT_SUPPORTED, OP_RECV, OP_SEND, Sqe};
 
 /// An Ethernet header: the least a frame can be.
 pub const ETH_HLEN: u32 = 14;
 /// What a VLAN tag adds to a frame's header.
 pub const VLAN_HLEN: u32 = 4;
-
-/// The errnos refusals and failures complete with, negated (Linux's numbers,
-/// as the ring's completions carry them).
-pub const EINVAL: i32 = 22;
-pub const EMSGSIZE: i32 = 90;
-pub const EOPNOTSUPP: i32 = 95;
-pub const ENOBUFS: i32 = 105;
 
 /// A submission taken: its token, and its window in the data area -- the
 /// frame to send, or the slot to receive into.
@@ -40,7 +34,7 @@ pub enum Sorted {
     /// A slot to receive a frame into.
     Recv(Window),
     /// Refused: to be completed at once with its token and this negative
-    /// errno.
+    /// errno (`netipc::ring::ERR_*`).
     Refused(u64, i32),
 }
 
@@ -52,9 +46,9 @@ pub fn max_frame(mtu: u32) -> u32 {
 }
 
 /// `sqe` sorted, against a data area of `area` bytes and a card carrying
-/// `mtu` bytes a frame. A receive slot may be any length that holds a
-/// header: a frame longer than the slot it would go to is dropped, the slot
-/// kept.
+/// `mtu` bytes a frame. A receive slot must hold the longest frame the card
+/// receives ([`max_frame`]): slots are filled in the order posted, so one
+/// too short for the frames that come would stop them all.
 #[must_use]
 pub fn sort(sqe: &Sqe, area: usize, mtu: u32) -> Sorted {
     let w = Window {
@@ -67,13 +61,14 @@ pub fn sort(sqe: &Sqe, area: usize, mtu: u32) -> Sorted {
         .zip(usize::try_from(w.len).ok())
         .and_then(|(off, len)| off.checked_add(len))
         .is_some_and(|end| end <= area);
-    let refuse = |errno: i32| Sorted::Refused(w.user_data, errno.saturating_neg());
+    let refuse = |errno: i32| Sorted::Refused(w.user_data, errno);
     match sqe.op {
-        OP_SEND | OP_RECV if !inside || w.len < ETH_HLEN => refuse(EINVAL),
-        OP_SEND if w.len > max_frame(mtu) => refuse(EMSGSIZE),
+        OP_SEND | OP_RECV if !inside || w.len < ETH_HLEN => refuse(ERR_INVALID),
+        OP_SEND if w.len > max_frame(mtu) => refuse(ERR_MSG_SIZE),
         OP_SEND => Sorted::Send(w),
+        OP_RECV if w.len < max_frame(mtu) => refuse(ERR_INVALID),
         OP_RECV => Sorted::Recv(w),
-        _ => refuse(EOPNOTSUPP),
+        _ => refuse(ERR_NOT_SUPPORTED),
     }
 }
 
@@ -171,7 +166,18 @@ mod tests {
             len: 60,
         };
         assert_eq!(sort(&sqe(OP_SEND, 2048, 60), 4096, 1500), Sorted::Send(w));
-        assert_eq!(sort(&sqe(OP_RECV, 2048, 60), 4096, 1500), Sorted::Recv(w));
+        let slot = Window { len: 2048, ..w };
+        assert_eq!(
+            sort(&sqe(OP_RECV, 2048, 2048), 4096, 1500),
+            Sorted::Recv(slot)
+        );
+        assert!(
+            matches!(
+                sort(&sqe(OP_SEND, 0, ETH_HLEN), 4096, 1500),
+                Sorted::Send(_)
+            ),
+            "a frame of a header alone"
+        );
         let last = sqe(OP_SEND, 4096 - 1518, 1518);
         assert!(
             matches!(sort(&last, 4096, 1500), Sorted::Send(_)),
@@ -182,25 +188,38 @@ mod tests {
     #[test]
     fn what_a_card_cannot_take_is_refused() {
         let cases = [
-            (sqe(OP_SEND, 4000, 200), -EINVAL, "past the area"),
-            (sqe(OP_RECV, 4000, 200), -EINVAL, "a slot past the area"),
-            (sqe(OP_SEND, u32::MAX, 20), -EINVAL, "an end that overflows"),
+            (sqe(OP_SEND, 4000, 200), ERR_INVALID, "past the area"),
+            (sqe(OP_RECV, 4000, 200), ERR_INVALID, "a slot past the area"),
+            (
+                sqe(OP_SEND, u32::MAX, 20),
+                ERR_INVALID,
+                "an end that overflows",
+            ),
             (
                 sqe(OP_SEND, 0, ETH_HLEN - 1),
-                -EINVAL,
+                ERR_INVALID,
                 "no room for a header",
             ),
             (
                 sqe(OP_RECV, 0, ETH_HLEN - 1),
-                -EINVAL,
+                ERR_INVALID,
                 "a slot with no room for one",
             ),
             (
+                sqe(OP_RECV, 0, max_frame(1500) - 1),
+                ERR_INVALID,
+                "a slot too short for the longest frame",
+            ),
+            (
                 sqe(OP_SEND, 0, max_frame(1500) + 1),
-                -EMSGSIZE,
+                ERR_MSG_SIZE,
                 "longer than the card sends",
             ),
-            (sqe(0x01, 0, 64), -EOPNOTSUPP, "not a card's operation"),
+            (
+                sqe(0x01, 0, 64),
+                ERR_NOT_SUPPORTED,
+                "not a card's operation",
+            ),
         ];
         for (s, errno, what) in cases {
             assert_eq!(sort(&s, 4096, 1500), Sorted::Refused(77, errno), "{what}");
@@ -211,6 +230,13 @@ mod tests {
                 Sorted::Send(_)
             ),
             "the longest frame, VLAN tag and all"
+        );
+        assert!(
+            matches!(
+                sort(&sqe(OP_RECV, 0, max_frame(1500)), 4096, 1500),
+                Sorted::Recv(_)
+            ),
+            "a slot just long enough for it"
         );
     }
 
@@ -226,6 +252,7 @@ mod tests {
         for round in 0..4u64 {
             for i in 0..3 {
                 assert!(q.push(w(round * 10 + i)));
+                assert!(!q.is_empty());
             }
             assert!(!q.push(w(99)), "full");
             assert_eq!(q.len(), 3);

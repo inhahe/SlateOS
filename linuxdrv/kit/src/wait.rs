@@ -46,6 +46,13 @@ pub(crate) fn idle(timeout_ns: u64) -> bool {
     if count == 0 {
         return false;
     }
+    // A stack that submitted just as the loop said it would sleep: look at
+    // everything once, and turn.
+    let timeout_ns = if crate::nicport::must_not_sleep() {
+        0
+    } else {
+        timeout_ns
+    };
     // Ready, timed out or interrupted, the loop turns again and takes what
     // came; each is told what its items answered.
     let _woke = syscall4(

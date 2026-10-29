@@ -13,9 +13,18 @@ through the kernel per frame.
 ### The decision
 
 1. **The card is a named service** (`netipc::nicport`): the driver
-   process registers `nic.<name>` (it holds a `Service` capability) and
-   serves one client at a time. A stack connects by name, so cards are
-   chosen by name -- by the stack, an administrator or a test.
+   process registers `nic.<name>` and serves one client at a time. A stack
+   connects by name, so cards are chosen by name -- by the stack, an
+   administrator or a test. Both ends are vouched for by capabilities:
+   - the driver holds a `Service` capability for `nic.<name>` alone (its
+     resource id `ipc::service::key_id(name)`; `SYS_SERVICE_REGISTER` now
+     takes a capability for one name as well as one for every name, id 0),
+     so it can register its card's name and no other -- not `net.stack`;
+   - a stack must hold the card's key (`Service`, `key_id(name)`, `READ`;
+     design-decisions 1518): the driver asks `SYS_CHANNEL_PEER_HAS_KEY` of
+     whoever connects and turns away a process without it, which would
+     otherwise receive every frame on the card and send its own -- what
+     the kernel's raw-frame calls keep behind `NetRaw`.
 2. **Attaching**: on a connection, the driver makes the ring's region
    (`SYS_SHM_CREATE`) and lays out a `netipc::ring` in it, lets the stack
    map it (`SYS_SHM_GRANT`, below), and sends the attach message -- the
@@ -28,7 +37,10 @@ through the kernel per frame.
    `SYS_CHANNEL_PEER_CRED` reports it. Until now only the kernel could
    authorize a process for a region (D-SHM-MAP-NOCAP's resolution), so no
    two processes could share memory. Process ids are never reused, so a
-   grant cannot pass to another process.
+   grant cannot pass to another process. The grantee gets a reference of
+   its own, which its `SYS_SHM_CLOSE` or its exit gives back; and a close
+   now gives back only a reference the caller holds (it dropped the
+   creator's for any process merely authorized).
 3. **The ring's roles**: the stack submits and owns the data area, cut
    into fixed slots of 2 KiB: `OP_SEND` names a slot holding a frame to
    send, `OP_RECV` posts an empty slot for a frame to be received into.
@@ -38,10 +50,19 @@ through the kernel per frame.
    with no slot posted is dropped and counted, as a card drops one with no
    descriptor. The ring's index ordering is `netring`'s, written once and
    linked into both sides (§65).
-4. **Doorbells**: after pushing, a side sends one byte on the connection;
-   when idle, each waits on the connection beside its other handles. A
-   doorbell the connection has no room for is dropped: the peer has one
-   waiting already. The connection closing is the end of the attachment.
+4. **Doorbells**: a doorbell is one byte on the connection, and goes only
+   to a side that sleeps. Each consumer about to sleep writes a nonzero
+   number of its own, new for each sleep, into its queue's sleep word in
+   the ring (`netipc::ring::OFF_SQ_SLEEP`, `OFF_CQ_SLEEP`, beside its head),
+   fences, and looks at its queue once more; each producer, having pushed,
+   fences, reads the word, and rings once for a number it has not rung for.
+   One of the two sees the other's store, so no wakeup is lost, and a busy
+   driver and stack exchange frames with no system call between them. The
+   stack rings after frames to send, never after slots posted to receive
+   into: the driver looks for those when a frame comes. When idle, each
+   waits on the connection beside its other handles. A doorbell the
+   connection has no room for is dropped: the peer has one waiting
+   already. The connection closing is the end of the attachment.
 5. **The driver's side**: the ring logic is the kit's (Rust, linking
    `netring`: `nicport.rs`, with what the stack submits checked and sorted
    in `frames.rs`), and the layer's `lx_nic.c` calls it -- frames the card
@@ -49,9 +70,13 @@ through the kernel per frame.
    tag the card took out put back), and the `lx-nic` task sends what the
    stack submits with `dev_queue_xmit()`. The connection is seen to at the
    end of every turn of the loop (`lx_emul_turn_hook`), and the loop's idle
-   wait includes it. Nothing the stack submits is trusted: a window outside
+   wait includes it. Nothing the stack does is trusted: a window outside
    the data area, a frame without a header or longer than the card sends,
-   or another operation, is refused at once with an errno. The card is
+   a receive slot too short for the longest frame, or another operation,
+   is refused at once with an errno; at most a queue's worth of
+   submissions is taken a turn and 64 doorbells a look; and a ring whose
+   indices the stack wrote past what it holds (`ring::is_broken`, which
+   `netring`'s pops refuse) ends the attachment. The card is
    served once its link is up; the driver's argument `serve=<name>` names
    it, and `once` ends the process when the first stack has gone.
 6. **The stack's side** (`services/netstack`): a NIC is the kernel's (the
@@ -88,9 +113,11 @@ through the kernel per frame.
 - A slot holds at most 2 KiB: jumbo frames need bigger slots, a version
   bump of the attach message.
 - One stack per card at a time.
-- No link state crosses the port yet: the card is served once its link is
-  up, and a stack learns of the link going down only by frames ceasing. A
-  message on the connection for link changes is the next step.
+- Only frames cross the port: no link state (the card is served once its
+  link is up, and a stack learns of the link going down only by frames
+  ceasing) and no multicast filter (the card keeps its probe-time filter);
+  `known-issues/A-SERVED-CARD-CARRIES-FRAMES-ONLY-NO-LINK-STATE-NO-MULTICAST-FILTER`
+  is the next step.
 - A grant is all or nothing: a region shared is writable by both.
 
 ### How it is checked

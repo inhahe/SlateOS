@@ -9134,11 +9134,17 @@ pub fn name(pid: ProcessId) -> Option<String> {
 /// Register an IPC handle as owned by a process.
 ///
 /// Called by IPC create syscalls so the kernel can release the handle
-/// if the process dies without explicitly closing it.
-pub fn register_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) {
+/// if the process dies without explicitly closing it. Whether it was
+/// recorded: `false` for a process no longer in the table, whose exit has
+/// released everything it will -- a reference given to it now would never
+/// be given back.
+pub fn register_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle_raw: u64) -> bool {
     let mut table = PROCESS_TABLE.lock();
     if let Some(proc) = table.get_mut(&pid) {
         proc.ipc_handles.push((resource_type, handle_raw));
+        true
+    } else {
+        false
     }
 }
 

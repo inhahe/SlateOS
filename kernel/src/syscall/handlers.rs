@@ -3156,13 +3156,21 @@ pub fn sys_shm_size(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_SHM_CLOSE` — close a shared memory handle.
 ///
 /// `arg0`: shared memory handle.
+///
+/// A process gives back a reference it holds -- the one its
+/// `SYS_SHM_CREATE` or a `SYS_SHM_GRANT` gave it -- and only that: one that
+/// may use the region but holds none (a kernel→daemon handoff authorizes
+/// without one) is `InvalidHandle`, or its close would drop the holder's.
 pub fn sys_shm_close(args: &SyscallArgs) -> SyscallResult {
     let handle = ShmHandle::from_raw(args.arg0);
     if let Err(e) = shm_check_authorized(handle) {
         return SyscallResult::err(e);
     }
-    if let Some(pid) = caller_pid() {
-        pcb::deregister_ipc_handle(pid, ResourceType::SharedMemory, handle.raw());
+    if let Some(pid) = caller_pid()
+        && pid != 0
+        && !pcb::take_ipc_handle(pid, ResourceType::SharedMemory, handle.raw())
+    {
+        return SyscallResult::err(KernelError::InvalidHandle);
     }
     shm::close(handle);
     SyscallResult::ok(0)
@@ -3225,8 +3233,16 @@ pub fn sys_shm_grant(args: &SyscallArgs) -> SyscallResult {
     let Some(peer) = channel::peer_cred(channel) else {
         return SyscallResult::err(KernelError::NotFound);
     };
-    match shm::authorize(region, peer.pid) {
-        Ok(()) => SyscallResult::ok(0),
+    match shm::grant(region, peer.pid) {
+        // Its reference is recorded with it, so that its exit gives it back;
+        // a process already gone could never, so it is given back now.
+        Ok(true) => {
+            if !pcb::register_ipc_handle(peer.pid, ResourceType::SharedMemory, region.raw()) {
+                shm::close(region);
+            }
+            SyscallResult::ok(0)
+        }
+        Ok(false) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
 }
@@ -19222,6 +19238,16 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
 // Service registry handlers (280–289)
 // ---------------------------------------------------------------------------
 
+/// Whether process `pid` may register the service `name`: it holds a
+/// `Service` capability with `WRITE` for every name (resource id 0) or for
+/// this one alone (`service::key_id(name)`) -- so a driver given its card's
+/// name cannot take another service's, `net.stack` say.
+pub(crate) fn may_register_service(pid: pcb::ProcessId, name: &[u8]) -> bool {
+    let holds =
+        |id| pcb::has_capability_for(pid, ResourceType::Service, id, crate::cap::Rights::WRITE);
+    holds(0) || holds(service::key_id(name))
+}
+
 /// `SYS_SERVICE_REGISTER` — register a named service.
 ///
 /// `arg0`: pointer to service name (bytes).
@@ -19229,7 +19255,8 @@ pub fn sys_sem_wait_timeout(args: &SyscallArgs) -> SyscallResult {
 ///
 /// Returns: listener handle.
 pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
-    // Capability check: requires Service capability with WRITE rights.
+    // Capability check: requires Service capability with WRITE rights --
+    // first any, before the name is read; then one for this name (below).
     // This prevents untrusted processes from squatting on service names.
     if let Err(e) = require_cap_type(crate::cap::ResourceType::Service, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
@@ -19248,6 +19275,11 @@ pub fn sys_service_register(args: &SyscallArgs) -> SyscallResult {
         Ok(n) => n,
         Err(e) => return SyscallResult::err(e),
     };
+    if let Some(pid) = caller_pid().filter(|&pid| pid != 0)
+        && !may_register_service(pid, &name)
+    {
+        return SyscallResult::err(KernelError::PermissionDenied);
+    }
 
     match service::register(&name) {
         Ok(listener) => {

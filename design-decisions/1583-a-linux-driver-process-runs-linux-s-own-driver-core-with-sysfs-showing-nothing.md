@@ -29,7 +29,7 @@ so those calls succeed and keep nothing.
    nodes, hypervisors, CPUs, memory blocks, NUMA nodes and the platform bus
    as devices, none of which a driver process has. `system_state` moves as
    `init/main.c` moves it.
-3. **sysfs and uevents show nothing** (`linuxdrv/emul/lx_sysfs.c`): every
+3. **sysfs and uevents show nothing** (`linuxdrv/emul/lx_fs.c`): every
    call that would create, remove, rename, move or link a sysfs node
    succeeds and keeps nothing, so every object's node stays NULL, which
    Linux's kernfs takes safely; `kobject_uevent()` delivers to no one. What
@@ -76,7 +76,7 @@ workqueues' (`wq_sysfs_init`) now succeeds through Linux's own `bus.c`.
 
 ### Where it lands
 
-`linuxdrv/emul/manifest`, `linuxdrv/emul/lx_sysfs.c` (sysfs, kernfs and
+`linuxdrv/emul/manifest`, `linuxdrv/emul/lx_fs.c` (sysfs, kernfs and
 uevents; `kernel_kobj`; the block-device identities), `linuxdrv/emul/
 lx_emul.c` (`driver_init()`'s core, `system_state`, `vprintk_emit` for
 `dev_*()` messages, `kstrdup` and kin, `ksize` and

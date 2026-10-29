@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 /*
- * The driver core's view from outside, as a driver process has it: none.
+ * The file systems Linux shows itself through, as a driver process has
+ * them: none -- sysfs, procfs, and any mount.
  *
  * Linux's own driver core runs in every driver process (drivers/base,
  * lib/kobject.c; linuxdrv/emul/manifest), and as it adds each device, driver,
@@ -12,6 +13,11 @@
  * finds for an object not shown, and every kernfs call it makes with one is
  * safe with NULL. What a driver itself keeps in an attribute -- its own
  * state behind a show() function -- is the driver's, unaffected.
+ *
+ * procfs the same: Linux's own code shows its resource tree and its PCI
+ * devices there (kernel/resource.c, drivers/pci/proc.c), and every entry it
+ * makes is answered NULL -- no entry, which its code takes as procfs being
+ * absent or full, and goes on without.
  *
  * Left out, and so generated stops: what only a reader or writer of sysfs
  * reaches -- an attribute removing itself from its own store()
@@ -27,6 +33,9 @@
 #include <linux/kobject.h>
 #include <linux/device.h>
 #include <linux/blkdev.h>
+#include <linux/fs.h>
+#include <linux/user_namespace.h>
+#include <linux/proc_fs.h>
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -132,11 +141,62 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action, char *e
  */
 struct kobject *kernel_kobj;
 
-int lx_sysfs_init(void)
+int lx_fs_init(void)
 {
 	kernel_kobj = kobject_create_and_add("kernel", NULL);
 	return kernel_kobj ? 0 : -ENOMEM;
 }
+
+struct proc_dir_entry *proc_mkdir(const char *name, struct proc_dir_entry *parent)
+{
+	return NULL;
+}
+
+struct proc_dir_entry *proc_create_data(const char *name, umode_t mode,
+					struct proc_dir_entry *parent,
+					const struct proc_ops *proc_ops, void *data)
+{
+	return NULL;
+}
+
+struct proc_dir_entry *proc_create_seq_private(const char *name, umode_t mode,
+					       struct proc_dir_entry *parent,
+					       const struct seq_operations *ops,
+					       unsigned int state_size, void *data)
+{
+	return NULL;
+}
+
+void proc_set_size(struct proc_dir_entry *de, loff_t size)
+{
+}
+
+void proc_remove(struct proc_dir_entry *de)
+{
+}
+
+/*
+ * No file system can be mounted in a driver process: the one Linux's own
+ * core tries is kernel/resource.c's iomem file system, through which it
+ * revokes /dev/mem mappings of a region a driver claims, and there is no
+ * /dev/mem here to revoke. Its fs_initcall is told so, and carried past;
+ * the file system's type names kill_anon_super, never reached.
+ */
+int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount, int *count)
+{
+	return -ENODEV;
+}
+
+void kill_anon_super(struct super_block *sb)
+{
+	slx_stop("kill_anon_super", __builtin_return_address(0));
+}
+
+/*
+ * The one user namespace, which only procfs's view of the resource tree
+ * asks after (/proc/iomem), and a driver process has no procfs.
+ */
+struct user_namespace init_user_ns;
 
 /* No device here is a disk or a partition: these only ever compare unequal. */
 const struct class block_class = { .name = "block" };

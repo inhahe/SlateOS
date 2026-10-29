@@ -51,7 +51,7 @@ linux lib/bitmap.o
 # The driver core, Linux's own: devices, drivers, buses and classes, their
 # matching and probing, and managed resources (devres); lx_emul.c runs its
 # setup before the first initcall, as Linux's driver_init(). Its file system
-# view, sysfs, is the layer's (lx_sysfs.c): nothing in a driver process
+# view, sysfs, is the layer's (lx_fs.c): nothing in a driver process
 # reads it.
 linux drivers/base/core.o
 linux drivers/base/bus.o
@@ -81,7 +81,40 @@ linux lib/string_helpers.o
 # vsprintf's hashing of printed pointers (%p).
 linux lib/siphash.o
 
+# The PCI core, Linux's own: buses scanned, functions read and set up,
+# their BARs claimed in the resource tree, drivers matched by their id
+# tables, quirks, and register mappings (pci_iomap, ioread/iowrite). The
+# layer gives it the functions the process was given (lx_pci.c), and maps
+# their BARs (ioremap).
+linux drivers/pci/access.o
+linux drivers/pci/bus.o
+linux drivers/pci/probe.o
+linux drivers/pci/host-bridge.o
+linux drivers/pci/remove.o
+linux drivers/pci/pci.o
+linux drivers/pci/pci-driver.o
+linux drivers/pci/search.o
+linux drivers/pci/setup-res.o
+linux drivers/pci/setup-bus.o
+linux drivers/pci/iomap.o
+linux drivers/pci/quirks.o
+linux drivers/pci/pci-sysfs.o
+linux drivers/pci/pci-label.o
+linux drivers/pci/vpd.o
+linux drivers/pci/pcie/aspm.o
+linux drivers/pci/vc.o
+linux drivers/pci/rebar.o
+linux drivers/pci/slot.o
+linux drivers/pci/proc.o
+linux drivers/pci/irq.o
+linux drivers/pci/msi/pcidev_msi.o
+linux lib/ratelimit.o
+linux kernel/resource.o
+linux lib/iomap.o
+
+layer emul/lx_mm.c
 layer emul/lx_emul.c
 layer emul/lx_sched.c
 layer emul/lx_softirq.c
-layer emul/lx_sysfs.c
+layer emul/lx_fs.c
+layer emul/lx_pci.c

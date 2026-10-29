@@ -74,6 +74,29 @@ fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
     ret
 }
 
+/// A four-argument system call (the fourth in r10), for the device calls
+/// (`pci`).
+#[inline]
+pub(crate) fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    let ret: i64;
+    // SAFETY: the SlateOS system-call convention: number in rax, arguments
+    // in rdi, rsi, rdx, r10; result in rax; rcx and r11 clobbered.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            inlateout("rax") nr.cast_signed() => ret,
+            in("rdi") a0,
+            in("rsi") a1,
+            in("rdx") a2,
+            in("r10") a3,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    ret
+}
+
 /// Process-wide state one thread uses: see the module's documentation.
 pub(crate) struct Single<T>(UnsafeCell<T>);
 
@@ -100,7 +123,7 @@ impl<T> Single<T> {
     // A `&mut` from `&self` is this cell's purpose: one thread, which the
     // module's documentation says, and the caller promises not to re-enter.
     #[allow(clippy::mut_from_ref)]
-    unsafe fn get(&self) -> &mut T {
+    pub(crate) unsafe fn get(&self) -> &mut T {
         // SAFETY: the caller's.
         unsafe { &mut *self.0.get() }
     }
@@ -310,6 +333,32 @@ pub extern "C" fn slx_block_size(ptr: *const u8) -> usize {
     heap.as_ref()
         .and_then(|h| h.block_size(ptr as usize))
         .unwrap_or(0)
+}
+
+/// `slx_heap`: kmalloc's region -- the memory Linux's direct map covers,
+/// over which the C half lays its page array -- where it begins and how
+/// many bytes it spans; both 0 when there is none.
+///
+/// # Safety
+///
+/// `base` and `bytes` point at writable words.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slx_heap(base: *mut usize, bytes: *mut usize) {
+    // SAFETY: as in slx_alloc.
+    let heap = unsafe { HEAP.get() };
+    let (at, size) = heap.as_ref().map_or((0, 0), Buddy::span);
+    // SAFETY: the caller's.
+    unsafe {
+        base.write(at);
+        bytes.write(size);
+    }
+}
+
+/// `slx_map_lazy`: `bytes` of memory reading 0, read-write, backed only
+/// where it is touched; NULL when it cannot be mapped.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_map_lazy(bytes: usize) -> *mut u8 {
+    map_lazy(bytes).map_or(core::ptr::null_mut(), |at| at as *mut u8)
 }
 
 /// `slx_free`: give back what `slx_alloc` gave; null is ignored, and anything

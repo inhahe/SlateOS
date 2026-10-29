@@ -22,7 +22,13 @@
  *               carries past -- so must exit SLX_EXIT_INIT_FAILED as well;
  *   "stranded"  succeeds, leaving a kthread waiting for what never comes,
  *               so must exit SLX_EXIT_DEADLOCK, not 0;
- *   "atomic"    sleeps with bottom halves off, so must exit SLX_EXIT_BUG.
+ *   "atomic"    sleeps with bottom halves off, so must exit SLX_EXIT_BUG;
+ *   "pci"       with `pci=BB:DD.F` naming the boot test's spare 82574,
+ *               registers hello's pci_driver for it, which must be probed
+ *               through Linux's PCI core and read the card's MAC through
+ *               BAR0, so must exit 0;
+ *   "pcifail"   the same, its probe failing, so that the function is left
+ *               without a driver: must exit SLX_EXIT_INIT_FAILED.
  * With an argument, the later initcalls do nothing: the first's ending is
  * the test ("earlyfail"'s comes before the first).
  */
@@ -50,6 +56,12 @@
 #include <linux/cpuhotplug.h>
 #include <linux/workqueue.h>
 #include <linux/device.h>
+#include <linux/mm.h>
+#include <linux/pci.h>
+#include <linux/io.h>
+#include <linux/etherdevice.h>
+#include <linux/unaligned.h>
+#include <linux/sizes.h>
 #include <asm/processor.h>
 
 #include "../emul/slx.h"
@@ -109,6 +121,107 @@ static int hello_waits_forever(void *unused)
 	wait_for_completion(&hello_forever);
 	return 0;
 }
+
+/*
+ * The boot test's spare 82574 (kernel/src/devhandle.rs's probe card), as
+ * hello's own pci_driver drives it: enabled, its memory BARs claimed, bus
+ * mastering on, BAR0 mapped as e1000e maps it -- ioremap() of the resource
+ * Linux's own probe sized -- and the MAC address the boot test gave it read
+ * from receive address 0. On the way, the BARs as the layer shadows them:
+ * BAR0 sized by writing all ones and reading back, without the device
+ * moving; the I/O BAR absent, the handle offering none.
+ */
+#define HELLO_82574 0x10d3
+#define HELLO_RAL0 0x5400
+#define HELLO_RAH0 0x5404
+#define HELLO_RAH_VALID BIT(31)
+static const u8 hello_card_mac[ETH_ALEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x59 };
+static bool hello_pci_probed;
+
+/* BAR0 written all ones reads its size back, and written back reads as before. */
+static bool hello_bar0_sizes(struct pci_dev *pdev)
+{
+	u32 bar, sized, again, len = pci_resource_len(pdev, 0);
+
+	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &bar);
+	pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0, ~0U);
+	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &sized);
+	pci_write_config_dword(pdev, PCI_BASE_ADDRESS_0, bar);
+	pci_read_config_dword(pdev, PCI_BASE_ADDRESS_0, &again);
+	return len && (sized & PCI_BASE_ADDRESS_MEM_MASK) == (~(len - 1) & PCI_BASE_ADDRESS_MEM_MASK) &&
+	       (sized & ~PCI_BASE_ADDRESS_MEM_MASK) == (bar & ~PCI_BASE_ADDRESS_MEM_MASK) &&
+	       again == bar && (bar & PCI_BASE_ADDRESS_MEM_MASK) == (u32)pci_resource_start(pdev, 0);
+}
+
+static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
+{
+	void __iomem *regs;
+	u8 mac[ETH_ALEN];
+	u16 command;
+	u32 rah;
+	int err;
+
+	if (hello_mode("pcifail"))
+		return -EIO;
+	if (pci_resource_len(pdev, 0) < SZ_128K || !(pci_resource_flags(pdev, 0) & IORESOURCE_MEM) ||
+	    pci_resource_len(pdev, 2) || !pdev->msi_cap) {
+		dev_err(&pdev->dev, "BAR0 %pR, BAR2 %pR, MSI capability at %#x: not the card as shown\n",
+			&pdev->resource[0], &pdev->resource[2], pdev->msi_cap);
+		return -EPROTO;
+	}
+	if (!hello_bar0_sizes(pdev)) {
+		dev_err(&pdev->dev, "BAR0 did not size as hardware does\n");
+		return -EPROTO;
+	}
+	err = pci_enable_device_mem(pdev);
+	if (err)
+		return err;
+	err = pci_request_selected_regions(pdev, pci_select_bars(pdev, IORESOURCE_MEM), "hello");
+	if (err)
+		goto disable;
+	pci_set_master(pdev);
+	pci_read_config_word(pdev, PCI_COMMAND, &command);
+	if ((command & (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) !=
+	    (PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER)) {
+		dev_err(&pdev->dev, "command register %#x: decoding or bus mastering off\n", command);
+		err = -EPROTO;
+		goto release;
+	}
+	regs = ioremap(pci_resource_start(pdev, 0), pci_resource_len(pdev, 0));
+	if (!regs) {
+		err = -ENOMEM;
+		goto release;
+	}
+	put_unaligned_le32(readl(regs + HELLO_RAL0), mac);
+	rah = readl(regs + HELLO_RAH0);
+	put_unaligned_le16(rah & 0xffff, mac + 4);
+	if (!(rah & HELLO_RAH_VALID) || !ether_addr_equal(mac, hello_card_mac)) {
+		dev_err(&pdev->dev, "receive address 0 reads %pM, not the boot test's\n", mac);
+		err = -EPROTO;
+		goto unmap;
+	}
+	dev_info(&pdev->dev, "an 82574 (%pR), MAC %pM read through BAR0\n", &pdev->resource[0], mac);
+	hello_pci_probed = true;
+	return 0;
+unmap:
+	iounmap(regs);
+release:
+	pci_release_selected_regions(pdev, pci_select_bars(pdev, IORESOURCE_MEM));
+disable:
+	pci_disable_device(pdev);
+	return err;
+}
+
+static const struct pci_device_id hello_pci_ids[] = {
+	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, HELLO_82574) },
+	{ }
+};
+
+static struct pci_driver hello_pci_driver = {
+	.name = "hello",
+	.id_table = hello_pci_ids,
+	.probe = hello_pci_probe,
+};
 
 static DEFINE_SPINLOCK(hello_lock);
 
@@ -176,6 +289,15 @@ static int __init hello_init(void)
 		local_bh_enable();
 		pr_err("hello: slept with bottom halves off, and nothing said so\n");
 		return -EPROTO;
+	}
+	if (hello_mode("pci") || hello_mode("pcifail")) {
+		int err = pci_register_driver(&hello_pci_driver);
+
+		if (err)
+			return err;
+		/* "pcifail": the process's end is the layer's, once probing is done. */
+		if (hello_mode("pci") && !hello_pci_probed)
+			return -ENODEV;
 	}
 	return 0;
 }
@@ -1105,6 +1227,26 @@ static int __init hello_driver_core_init(void)
 	HELLO_CHECK(!lx_initcall_fatal((const void *)hello_init, 1) && !lx_initcall_fatal((const void *)hello_init, 0),
 		    "a driver's initcall answering 0 or more ended the process");
 
+	/*
+	 * Linux's direct map over the heap (lx_mm.c): a kmalloc'd block's page
+	 * says it is slab memory -- what kernel/resource.c frees a released
+	 * resource by -- and Linux's own arithmetic goes from the block to its
+	 * page and back, both ways.
+	 */
+	{
+		char *block = kmalloc(200, GFP_KERNEL);
+		struct page *page;
+
+		HELLO_CHECK(block, "no memory");
+		page = virt_to_page(block + 150);
+		HELLO_CHECK(PageSlab(page), "a kmalloc'd block's page did not say it was slab");
+		HELLO_CHECK(page_address(page) == (void *)((unsigned long)block & PAGE_MASK) &&
+			    __pa(block) == (unsigned long)block - page_offset_base &&
+			    virt_to_page(__va(__pa(block))) == virt_to_page(block),
+			    "the direct map's arithmetic did not go from a block to its page and back");
+		kfree(block);
+	}
+
 	HELLO_CHECK(bus_register(&hello_bus) == 0, "a bus was not registered");
 	HELLO_CHECK(driver_register(&hello_drv) == 0, "a driver was not registered");
 	HELLO_CHECK(device_register(&hello_dev) == 0, "a device was not registered");
@@ -1128,7 +1270,7 @@ static int __init hello_driver_core_init(void)
 	HELLO_CHECK(wait_for_completion_timeout(&hello_consumer_released, HZ),
 		    "a dropped device link never let go of its consumer");
 
-	pr_info("hello driver core: a bus, a driver and a device, probed, managed, removed and released; a device link dropped after an SRCU grace period\n");
+	pr_info("hello driver core: a bus, a driver and a device, probed, managed, removed and released; a device link dropped after an SRCU grace period; the direct map\n");
 	return 0;
 }
 late_initcall(hello_driver_core_init);

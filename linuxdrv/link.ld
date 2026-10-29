@@ -50,6 +50,34 @@ SECTIONS
         __end_rodata = .;
     } :load
 
+    /* PCI quirks, bounded as Linux's own linker script bounds them. */
+    .pci_fixup : ALIGN(8) {
+        __start_pci_fixups_early = .;
+        KEEP(*(.pci_fixup_early))
+        __end_pci_fixups_early = .;
+        __start_pci_fixups_header = .;
+        KEEP(*(.pci_fixup_header))
+        __end_pci_fixups_header = .;
+        __start_pci_fixups_final = .;
+        KEEP(*(.pci_fixup_final))
+        __end_pci_fixups_final = .;
+        __start_pci_fixups_enable = .;
+        KEEP(*(.pci_fixup_enable))
+        __end_pci_fixups_enable = .;
+        __start_pci_fixups_resume = .;
+        KEEP(*(.pci_fixup_resume))
+        __end_pci_fixups_resume = .;
+        __start_pci_fixups_resume_early = .;
+        KEEP(*(.pci_fixup_resume_early))
+        __end_pci_fixups_resume_early = .;
+        __start_pci_fixups_suspend = .;
+        KEEP(*(.pci_fixup_suspend))
+        __end_pci_fixups_suspend = .;
+        __start_pci_fixups_suspend_late = .;
+        KEEP(*(.pci_fixup_suspend_late))
+        __end_pci_fixups_suspend_late = .;
+    } :load
+
     /* Before the writable sections: after .bss it would make .bss take
      * room in the file. */
     .note.slateos : ALIGN(4) {

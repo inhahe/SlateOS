@@ -8,10 +8,11 @@
 //! Linux header. It holds the process's entry point, its memory
 //! ([`buddy`]), the console, the clock, its arguments ([`args`]), its tasks
 //! -- Linux's kthreads and the like, coroutines on its one thread ([`task`],
-//! and `sched`, which runs them) -- and how it ends.
+//! and `sched`, which runs them) -- the PCI functions it was given (`pci`),
+//! and how it ends.
 //!
-//! What can be tested on the host is a library ([`args`], [`buddy`],
-//! [`task`]); the rest (`sched`, `sys`) is built only for the driver
+//! What can be tested on the host is a library ([`args`], [`bars`],
+//! [`buddy`], [`task`]); the rest (`pci`, `sched`, `sys`) is built only for the driver
 //! process's own target.
 
 // Bare only on the driver process's own target; on the host, std, for the
@@ -19,9 +20,12 @@
 #![cfg_attr(target_os = "none", no_std)]
 
 pub mod args;
+pub mod bars;
 pub mod buddy;
 pub mod task;
 
+#[cfg(target_os = "none")]
+mod pci;
 #[cfg(target_os = "none")]
 mod sched;
 #[cfg(target_os = "none")]

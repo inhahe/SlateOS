@@ -5495,8 +5495,10 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         over the layer's kernel_thread()/do_exit(), slab and per-CPU memory
         (§1582); Linux's own driver core (drivers/base, kobjects, devres,
         device links over tiny SRCU and irq_work), its sysfs and uevents
-        the layer's no-ops (§1583). Left: PCI and MSI, IRQs, DMA,
-        `request_firmware`,
+        the layer's no-ops (§1583); Linux's own PCI core, the process's
+        functions given through the device handle with their BARs
+        shadowed, and the heap as Linux's direct map (§1584). Left: MSI
+        and IRQs, DMA, `request_firmware`,
         which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured

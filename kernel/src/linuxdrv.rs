@@ -11,6 +11,7 @@
 //! For now the kernel only tests the layer: [`self_test`] runs its first
 //! process, `linuxdrv/hello`, which is no driver.
 
+use crate::cap::{ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
 use crate::proc::{pcb, spawn};
 use crate::serial_println;
@@ -31,14 +32,18 @@ const EXIT_INIT_FAILED: i32 = 126;
 const KILLED_ACCESS_VIOLATION: i32 =
     pcb::crash_exit_code(crate::proc::exception::ExceptionCode::AccessViolation as u64);
 
-/// Run `elf` with `argv`, and answer how it ended: its exit code, or `None`
-/// when it did not end within 10 s.
-fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
+/// Run `elf` with `argv`, holding `capabilities`, and answer how it ended:
+/// its exit code, or `None` when it did not end within 10 s.
+fn run(
+    elf: &[u8],
+    argv: &[&[u8]],
+    capabilities: &[(ResourceType, u64, Rights)],
+) -> Result<Option<i32>, KernelError> {
     let options = spawn::SpawnOptions {
         name: "lx-hello",
         parent: 0,
         priority: crate::sched::task::DEFAULT_PRIORITY,
-        capabilities: &[],
+        capabilities,
         fd_map: &[],
         argv,
         envp: &[],
@@ -72,13 +77,14 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 /// a Linux subsystem's, whatever its level;
 /// "stranded" succeeds but leaves a kthread waiting for what never comes,
 /// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done;
-/// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]).
-/// Skipped, and recorded so, where the bootloader did not load it --
-/// anywhere but the boot test, and after a kexec.
+/// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]). Then
+/// [`pci_runs`]: given the boot test's spare 82574, its driver probes it
+/// through Linux's PCI core. Skipped, and recorded so, where the bootloader
+/// did not load it -- anywhere but the boot test, and after a kexec.
 ///
 /// # Errors
 ///
-/// `InternalError` when any of the eight runs ends otherwise.
+/// `InternalError` when any of the runs ends otherwise.
 pub fn self_test() -> KernelResult<()> {
     let mut skips = crate::fs::selftest::Skips::new();
     let Some(elf) = crate::boot::module(HELLO) else {
@@ -128,7 +134,7 @@ pub fn self_test() -> KernelResult<()> {
         ),
     ];
     for (argv, want, what) in cases {
-        match run(elf, argv) {
+        match run(elf, argv, &[]) {
             Ok(Some(code)) if code == want => {}
             outcome => {
                 serial_println!(
@@ -140,9 +146,68 @@ pub fn self_test() -> KernelResult<()> {
             }
         }
     }
+    let pci = pci_runs(elf, &mut skips)?;
+    skips.report("[linuxdrv]");
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic: OK",
-        elf.len()
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic{}: OK",
+        elf.len(),
+        if pci {
+            ", a PCI function probed through Linux's PCI core, and one no driver took"
+        } else {
+            ""
+        }
     );
     Ok(())
+}
+
+/// The boot test's spare 82574 ([`crate::devhandle::probe_card`]) given to
+/// the hello process -- an argument `pci=BB:DD.F` and a capability for that
+/// function alone: "pci" must probe it through Linux's PCI core and exit 0,
+/// "pcifail" must have its probe fail and so end as an initcall failure,
+/// the function left without a driver. Each exit must release the card.
+/// Whether they ran: skipped, and recorded so, where there is no such card.
+fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
+    let Some(card) = crate::devhandle::probe_card() else {
+        skips.record(
+            "Linux driver layer's PCI runs",
+            "no unbound 82574 on bus 0 with the boot test's MAC address",
+        );
+        return Ok(false);
+    };
+    let a = card.address;
+    let caps = [(
+        ResourceType::PciDevice,
+        crate::cap::pci_device_id(a.bus, a.device, a.function),
+        Rights::WRITE,
+    )];
+    let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
+    let cases: [(&[u8], i32, &str); 2] = [
+        (
+            b"pci",
+            EXIT_OK,
+            "probed the card through Linux's PCI core and exited 0",
+        ),
+        (
+            b"pcifail",
+            EXIT_INIT_FAILED,
+            "ended as an initcall failure, its probe having failed and the card no driver's",
+        ),
+    ];
+    for (mode, want, what) in cases {
+        let outcome = run(elf, &[b"hello", mode, arg.as_bytes()], &caps);
+        let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
+        match outcome {
+            Ok(Some(code)) if code == want && released => {}
+            outcome => {
+                serial_println!(
+                    "[linuxdrv]   FAIL: the hello process given the card, which should have {}, ended {:?}, the card {}",
+                    what,
+                    outcome,
+                    if released { "released" } else { "still bound" }
+                );
+                return Err(KernelError::InternalError);
+            }
+        }
+    }
+    Ok(true)
 }

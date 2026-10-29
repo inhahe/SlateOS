@@ -67,8 +67,9 @@ DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
 
 /*
  * The process's one CPU, as Linux's kernel/cpu.c describes the CPUs it
- * has: possible, present, online and active, and the one-bit mask
- * get_cpu_mask() hands out for it (cpu_bit_bitmap's row 1 + cpu).
+ * has: possible, present, online and active, the one-bit mask
+ * get_cpu_mask() hands out for it (cpu_bit_bitmap's row 1 + cpu), and
+ * every CPU (cpu_all_mask).
  */
 struct cpumask __cpu_possible_mask __ro_after_init = { CPU_BITS_ALL };
 struct cpumask __cpu_present_mask __read_mostly = { CPU_BITS_ALL };
@@ -77,6 +78,7 @@ struct cpumask __cpu_active_mask __read_mostly = { CPU_BITS_ALL };
 const unsigned long cpu_bit_bitmap[BITS_PER_LONG + 1][BITS_TO_LONGS(NR_CPUS)] = {
 	[1] = { 1UL },
 };
+const DECLARE_BITMAP(cpu_all_bits, NR_CPUS) = CPU_BITS_ALL;
 
 /*
  * The CPU as Linux's code asks after it (boot_cpu_has() and the rest): no
@@ -146,6 +148,12 @@ u64 lx_emul_jiffy_began_ns(void)
 void lx_emul_jiffies_now(void)
 {
 	lx_emul_jiffies_at(slx_now_ns());
+}
+
+/* Linux's monotonic clock, as its timekeeping reads it: the system's. */
+ktime_t ktime_get(void)
+{
+	return slx_now_ns();
 }
 
 /* When the running task was switched to, by the monotonic clock. */
@@ -220,8 +228,10 @@ static void *lx_alloc(size_t size, gfp_t flags)
 	if (!size)
 		return ZERO_SIZE_PTR;
 	p = slx_alloc(size);
-
-	if (p && (flags & __GFP_ZERO))
+	if (!p)
+		return NULL;
+	lx_mm_mark_slab(p, size);
+	if (flags & __GFP_ZERO)
 		memset(p, 0, size);
 	return p;
 }
@@ -367,6 +377,11 @@ static char *lx_kmemdup_nul(const char *s, size_t len, gfp_t gfp)
 	memcpy(buf, s, len);
 	buf[len] = '\0';
 	return buf;
+}
+
+char *kmemdup_nul(const char *s, size_t len, gfp_t gfp)
+{
+	return s ? lx_kmemdup_nul(s, len, gfp) : NULL;
 }
 
 char *kstrdup(const char *s, gfp_t gfp)
@@ -560,6 +575,9 @@ extern char __driver_text_start[], __driver_text_end[];
  */
 int lx_emul_init(void)
 {
+	/* First: every kmalloc() marks its pages in the direct map's array. */
+	if (lx_mm_init())
+		return SLX_EXIT_NO_MEMORY;
 	wait_bit_init();
 	if (lx_softirq_init())
 		return SLX_EXIT_NO_MEMORY;
@@ -599,7 +617,7 @@ int lx_emul_main(void)
 	 * process has none of -- firmware nodes, hypervisors, CPUs, memory
 	 * blocks and NUMA nodes as devices, the platform bus.
 	 */
-	if (devices_init() || buses_init() || classes_init() || lx_sysfs_init())
+	if (devices_init() || buses_init() || classes_init() || lx_fs_init())
 		return SLX_EXIT_NO_MEMORY;
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
@@ -617,6 +635,9 @@ int lx_emul_main(void)
 			pr_warn("subsystem initcall at %#lx failed: %d; carrying on\n",
 				(unsigned long)fn, ret);
 	}
+	/* A driver process exists to drive what it was given. */
+	if (!lx_pci_check_bound())
+		return SLX_EXIT_INIT_FAILED;
 	system_state = SYSTEM_RUNNING;
 	return SLX_EXIT_OK;
 }

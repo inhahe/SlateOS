@@ -150,6 +150,12 @@ impl Buddy {
         true
     }
 
+    /// The region: where it begins, and how many bytes it spans.
+    #[must_use]
+    pub fn span(&self) -> (usize, usize) {
+        (self.base, 1usize.checked_shl(self.top).unwrap_or(0))
+    }
+
     /// The bytes the block [`Self::alloc`] gave at `ptr` holds -- what was
     /// asked for, rounded up to the block's size -- or `None` for a pointer
     /// that is not an allocated block's start.
@@ -320,6 +326,14 @@ mod tests {
         assert_eq!(r.buddy.free_bytes(), total);
         // Joined into the one block again: the whole region can be had.
         assert!(r.buddy.alloc(1 << 16).is_some());
+    }
+
+    #[test]
+    fn its_span_is_the_region() {
+        let r = region(14);
+        let (base, bytes) = r.buddy.span();
+        assert_eq!(bytes, 1 << 14);
+        assert_eq!(base % bytes, 0);
     }
 
     #[test]

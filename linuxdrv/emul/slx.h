@@ -29,6 +29,33 @@ void slx_free(const void *ptr);
  */
 unsigned long slx_alloc_size(unsigned long size);
 unsigned long slx_block_size(const void *ptr);
+/* slx_alloc's region -- where it begins, and its bytes (0 for none) -- and
+ * `bytes` of memory reading 0, backed only where touched, or NULL. */
+void slx_heap(unsigned long *base, unsigned long *bytes);
+void *slx_map_lazy(unsigned long bytes);
+
+/*
+ * The PCI functions the process was given, by their device handles
+ * (design-decisions 1579, 1584): each answers a value of 0 or more, or a
+ * negative SlateOS error (-400 when the process may not: no capability for
+ * the function, or a configuration register the kernel manages).
+ *   slx_pci_open         the function at `bus`, `devfn`: its handle;
+ *   slx_pci_config_read  `width` (1, 2, 4) bytes at `offset`, below 256 --
+ *                        the BARs and the ROM as the hardware would answer
+ *                        after what was written, which never reaches them;
+ *   slx_pci_config_write and written: 0;
+ *   slx_pci_bar_window   memory BAR `bar`'s place and size: 1 while it is
+ *                        where the kernel put it, 0 for no memory BAR, -1
+ *                        for one Linux wrote elsewhere;
+ *   slx_pci_map_bar      memory BAR `bar` mapped uncached: where, or NULL.
+ */
+long slx_pci_open(unsigned char bus, unsigned char devfn);
+long slx_pci_config_read(long handle, unsigned int offset, unsigned int width);
+long slx_pci_config_write(long handle, unsigned int offset, unsigned int width,
+			  unsigned int value);
+int slx_pci_bar_window(long handle, unsigned int bar, unsigned long long *base,
+		       unsigned long long *size);
+void *slx_pci_map_bar(long handle, unsigned int bar);
 
 /* Fill `len` bytes at `buf` from the system's CSPRNG, or stop the driver. */
 void slx_random(void *buf, unsigned long len);

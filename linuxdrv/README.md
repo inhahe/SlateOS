@@ -27,7 +27,7 @@ locking is correct as compiled.
 | `linux.config` | The configuration, applied on top of `allnoconfig`; every line is checked to have taken |
 | `shadow/` | Linux headers that assume kernel mode, replaced by their include guards (design-decisions 1580) |
 | `emul/` | The Linux-facing half, C: Linux's functions over `slx_*` (`slx.h`) |
-| `kit/` | The system-facing half, Rust: `slx_*` on SlateOS -- entry, memory, console, clock, arguments, tasks, exit |
+| `kit/` | The system-facing half, Rust: `slx_*` on SlateOS -- entry, memory, console, clock, arguments, tasks, PCI functions through their device handles, exit |
 | `link.ld` | The driver process's layout: linked at 4 MiB, Linux's initcalls in order |
 | `hello/` | The first driver process, which drives nothing: the layer's own test |
 
@@ -79,7 +79,11 @@ with the loop as their tick and ksoftirqd (`emul/lx_softirq.c`,
 design-decisions 1581); Linux's own workqueues, over a slab and per-CPU
 memory the layer keeps on kmalloc (design-decisions 1582); Linux's own
 driver core -- devices, drivers, buses, devres, device links -- its sysfs
-and uevents showing nothing (`emul/lx_sysfs.c`, design-decisions 1583). The driver's own
+and uevents showing nothing (`emul/lx_fs.c`, design-decisions 1583); Linux's
+own PCI core, given the functions the process was started with
+(`pci=BB:DD.F`) through the kernel's device handle, their BARs shadowed and
+mapped by `ioremap` (`emul/lx_pci.c`), and the heap laid out as Linux's
+direct map (`emul/lx_mm.c`, design-decisions 1584). The driver's own
 code is marked at build (`scripts/linux-tree.sh` renames its sections to
 `*.lxdriver`, which `link.ld` brackets), so that only the driver's failing
 initcall ends the process, a Linux subsystem's being carried past. `hello`
@@ -88,7 +92,9 @@ edges (timeouts, kthread_stop() out of interruptible waits, kthreads freed
 when they end, busy waits moving `jiffies`, RCU callbacks, rcuwait), arms
 timers, schedules tasklets, queues work -- a sleeper and a CPU hog with work
 queued behind each -- probes a device of its own through the driver core,
-and overflows a stack into its guard on purpose. No
+and overflows a stack into its guard on purpose; given the boot test's
+spare 82574, it probes the card through Linux's PCI core and reads its MAC
+address through BAR0. No
 driver runs yet. The first,
 `e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
 use 148 symbols they do not define. About 15 are Linux's generic library code

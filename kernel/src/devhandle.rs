@@ -927,7 +927,7 @@ fn waiter_answer(slot: usize) -> Option<i64> {
 
 /// Yield until `ready`, for at most a second (or a bounded number of
 /// yields, should the clock not run).
-fn yield_until(mut ready: impl FnMut() -> bool) -> bool {
+pub(crate) fn yield_until(mut ready: impl FnMut() -> bool) -> bool {
     let deadline = crate::hpet::elapsed_ns().saturating_add(1_000_000_000);
     for _ in 0..200_000 {
         if ready() {
@@ -1391,7 +1391,7 @@ const _: () = assert!(devprobe::KIND_PCI_DEVICE == crate::cap::ResourceType::Pci
 /// `devprobe::EXPECTED_MAC`, the address `scripts/boot-test.sh` gives it. A
 /// real 82574 has another address, so one on the same machine, spare or one
 /// the e1000 driver failed to take, is never handed to the probe.
-fn probe_card() -> Option<pci::PciDevice> {
+pub(crate) fn probe_card() -> Option<pci::PciDevice> {
     pci::find_all_devices(devprobe::INTEL, devprobe::E1000E_82574)
         .into_iter()
         .filter(|d| d.address.bus == 0 && pci::bound_driver(d.address).is_none())

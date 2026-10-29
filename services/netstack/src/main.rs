@@ -68,6 +68,8 @@ const SYS_YIELD: u64 = 0;
 
 /// `EAGAIN`/`WouldBlock`: raw RX had no frame ready.
 const E_WOULD_BLOCK: i64 = -4;
+/// SlateOS's `TimedOut`: a wait, an accept among them, that saw nothing come.
+const E_TIMED_OUT: i64 = -6;
 
 // ---------------------------------------------------------------------------
 // netstack IPC control protocol (Phase 4)
@@ -199,10 +201,15 @@ fn sleep_ns(ns: u64) {
 }
 
 /// Nanoseconds since boot (`SYS_CLOCK_MONOTONIC`): the clock TCP's
-/// retransmission timers run on. A failed read is `0`, which only holds the
-/// timers still -- a resend comes late, never early.
+/// retransmission timers run on, and every wait's deadline. A clock that
+/// cannot be read ends the daemon, said so: every wait is bounded by this
+/// clock alone, and a time held still would make each one endless.
 fn now_ns() -> u64 {
-    u64::try_from(syscall0(SYS_CLOCK_MONOTONIC)).unwrap_or(0)
+    let Ok(now) = u64::try_from(syscall0(SYS_CLOCK_MONOTONIC)) else {
+        print("[netstack] FATAL: the monotonic clock could not be read\n");
+        exit(9);
+    };
+    now
 }
 
 // ---------------------------------------------------------------------------
@@ -316,66 +323,12 @@ fn raw_close() {
     syscall0(SYS_NET_RAW_CLOSE);
 }
 
-/// Transmit one raw Ethernet frame.
-///
-/// A frame destined to *our own IP* never reaches the wire — QEMU's slirp (and a
-/// real switch) would drop a packet a host sends to itself — so we divert it into
-/// the in-process [`loopback`] RX queue instead. That lets the daemon speak to its
-/// own listening sockets: a client connection opened to `me.ip:port` reaches a
-/// [`Listener`] bound on that port entirely within the daemon (the server-socket
-/// self-test, and genuine intra-host connections). Diversion is purely by
-/// destination IP, so the (otherwise gateway-shaped) Ethernet/next-hop MAC is
-/// irrelevant for loopback frames. Non-loopback frames go out the NIC unchanged:
-/// a driver process's card ([`port`]) when one is attached, else the kernel's.
-fn raw_tx(frame: &[u8]) -> i64 {
-    if loopback::maybe_divert(frame) {
-        return frame.len() as i64;
-    }
-    if let Some(sent) = port::send(frame) {
-        return sent;
-    }
-    syscall2(SYS_NET_RAW_TX, frame.as_ptr() as u64, frame.len() as u64)
-}
-
-/// Receive one raw Ethernet frame into `buf`. Returns bytes read, or a
-/// negative errno (`E_WOULD_BLOCK` when no frame is queued).
-///
-/// Any queued [`loopback`] frame is delivered first (ahead of the NIC) so a
-/// self-connection makes progress; only when the loopback queue is empty do we
-/// read the NIC -- a driver process's card ([`port`]) when one is attached,
-/// else the kernel's.
-fn raw_rx(buf: &mut [u8]) -> i64 {
-    if let Some(n) = loopback::maybe_deliver(buf) {
-        return n;
-    }
-    if let Some(n) = port::recv(buf) {
-        return n;
-    }
-    syscall2(SYS_NET_RAW_RX, buf.as_mut_ptr() as u64, buf.len() as u64)
-}
-
-/// Until a frame may have come, [`POLL_SLEEP_NS`] at most: on a driver
-/// process's card, its doorbell waited for -- the driver rings once it has
-/// filled a slot -- so that a frame is read as it comes; on the kernel's
-/// NIC, which has no wait, a sleep. A card gone sleeps too, so that the
-/// loops waiting on it end at their deadlines rather than spin.
-fn nic_idle() {
-    if port::attached() && port::wait(POLL_SLEEP_NS) != port::Woke::Gone {
-        return;
-    }
-    sleep_ns(POLL_SLEEP_NS);
-}
-
-/// The time `iters` polls of [`POLL_SLEEP_NS`] take, from now: a wait's
-/// deadline, so that [`nic_idle`] returning early for a frame that came --
-/// someone else's, say -- does not shorten it.
-fn poll_deadline(iters: u32) -> u64 {
-    now_ns().saturating_add(u64::from(iters).saturating_mul(POLL_SLEEP_NS))
-}
-
 /// A network card a driver process serves: when the daemon has attached to
 /// one, its frames go there rather than to the kernel's NIC.
 mod port;
+
+/// The daemon's card, chosen once: every use of it after.
+mod nic;
 
 /// In-process software loopback for frames the daemon sends to *its own IP*.
 ///
@@ -594,14 +547,11 @@ fn push_unique(set: &mut [[u8; 6]; MAX_FILTER], len: &mut usize, mac: [u8; 6]) {
     }
 }
 
-/// Tell the kernel which multicast addresses the network cards must pass:
+/// Tell the card which multicast addresses it must pass ([`nic::set_mcast`]):
 /// all-hosts (IGMP queries), all-nodes (MLD queries, router
 /// advertisements), our solicited-node group (neighbour discovery) and every
-/// group a socket is in -- when that set has changed since the last push.
-/// (The serving mode never attaches to a driver process's card; when it
-/// does, the list goes to [`port::set_mcast`], and the driver's answer --
-/// [`port::mcast_settled`] -- decides whether it was pushed:
-/// known-issues `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`.)
+/// group a socket is in -- when that set has changed since the last push,
+/// or a driver process's card refused the last list ([`nic::mcast_refused`]).
 /// Without it an e1000 or rtl8139 card drops every multicast frame (kernel
 /// known-issues `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`).
 fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
@@ -624,12 +574,12 @@ fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
     let wanted = set.get_mut(..len).unwrap_or(&mut []);
     wanted.sort_unstable();
     let have = &net.filter;
-    if have.pushed && have.addrs.get(..have.len) == Some(&*wanted) {
+    if have.pushed && !nic::mcast_refused() && have.addrs.get(..have.len) == Some(&*wanted) {
         return;
     }
-    if syscall2(SYS_NET_RAW_MCAST, wanted.as_ptr() as u64, len as u64) < 0 {
-        // The cards keep the previous filter; the next change retries.
-        print("[netstack] WARN: the kernel refused the multicast filter\n");
+    if !nic::set_mcast(wanted) {
+        // The card keeps the previous filter; the next change retries.
+        print("[netstack] WARN: the card's multicast filter could not be set\n");
         net.filter.pushed = false;
         return;
     }
@@ -698,7 +648,7 @@ fn handle_arp(body: &[u8], me: &IfInfo) -> Handled {
             if pkt.target_ip == me.ip {
                 // Answer: tell the requester our MAC (unicast back to it).
                 if let Some(reply) = arp::reply_to(&pkt, &me.mac) {
-                    let _ = raw_tx(&reply);
+                    let _ = nic::send(&reply);
                     print("[netstack] answered ARP request for our IP\n");
                 }
             }
@@ -756,7 +706,7 @@ fn reply_icmp_echo(src_ip: &[u8; 4], dst_mac: &[u8; 6], req: &icmp::Echo, me: &I
     ethernet::write_header(&mut buf, dst_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
 
     let total = icmp_off + icmp_len;
-    let _ = raw_tx(&buf[..total]);
+    let _ = nic::send(&buf[..total]);
     print("[netstack] answered ICMP echo request\n");
 }
 
@@ -774,21 +724,23 @@ fn reply_icmp_echo(src_ip: &[u8; 4], dst_mac: &[u8; 6], req: &icmp::Echo, me: &I
 /// doesn't need a port table; any high port distinct from well-known ones works.
 const EPHEMERAL_PORT: u16 = 0xC000;
 
-/// Per-resolution RX poll budget (iterations * `POLL_SLEEP_NS`).
-const RESOLVE_POLL_ITERS: u32 = 120; // 120 * 5ms = 600ms
+/// How long an ARP, NDP, DNS or UDP answer -- and the answer to each TCP
+/// SYN -- is waited for. A deadline, so that a wait woken early by someone
+/// else's frame ([`nic::idle`]) is not cut short.
+const RESOLVE_WAIT_NS: u64 = 600_000_000;
 
 /// ARP-resolve `target_ip` on the local link: broadcast a request and poll raw
 /// RX for the reply, returning the sender's MAC. `None` on timeout.
 fn arp_resolve(target_ip: &[u8; 4], me: &IfInfo) -> Option<[u8; 6]> {
     let req = arp::request(&me.mac, &me.ip, target_ip);
-    if raw_tx(&req) < 0 {
+    if nic::send(&req) < 0 {
         return None;
     }
     let mut buf = [0u8; MAX_FRAME];
-    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
     while now_ns() < until {
         loop {
-            let n = raw_rx(&mut buf);
+            let n = nic::recv(&mut buf);
             if n < 0 {
                 break; // WouldBlock or error — sleep and retry.
             }
@@ -800,7 +752,7 @@ fn arp_resolve(target_ip: &[u8; 4], me: &IfInfo) -> Option<[u8; 6]> {
                 return Some(mac);
             }
         }
-        nic_idle();
+        nic::idle();
     }
     None
 }
@@ -856,15 +808,15 @@ fn ndp_resolve(target_ip6: &[u8; 16], me: &IfInfo) -> Option<[u8; 6]> {
     .build_header(ns_len as u16);
     frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
     ethernet::write_header(&mut frame, &eth_dst, &me.mac, ethernet::ETHERTYPE_IPV6);
-    if raw_tx(&frame[..total]) < 0 {
+    if nic::send(&frame[..total]) < 0 {
         return None;
     }
 
     let mut buf = [0u8; MAX_FRAME];
-    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
     while now_ns() < until {
         loop {
-            let n = raw_rx(&mut buf);
+            let n = nic::recv(&mut buf);
             if n < 0 {
                 break; // WouldBlock or error — sleep and retry.
             }
@@ -876,7 +828,7 @@ fn ndp_resolve(target_ip6: &[u8; 16], me: &IfInfo) -> Option<[u8; 6]> {
                 return Some(mac);
             }
         }
-        nic_idle();
+        nic::idle();
     }
     None
 }
@@ -930,7 +882,7 @@ fn tx_dns_query(qbuf: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, id: u16) -> bo
     frame[ethernet::HEADER_LEN..udp_off].copy_from_slice(&ip_hdr);
     ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
     let total = udp_off + udp_len;
-    raw_tx(&frame[..total]) >= 0
+    nic::send(&frame[..total]) >= 0
 }
 
 /// Validate a received frame as *our* DNS response (matching `txid`, our
@@ -966,10 +918,10 @@ fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) 
         return None;
     }
     let mut buf = [0u8; MAX_FRAME];
-    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
     while now_ns() < until {
         loop {
-            let n = raw_rx(&mut buf);
+            let n = nic::recv(&mut buf);
             if n < 0 {
                 break;
             }
@@ -984,7 +936,7 @@ fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) 
                 }
             }
         }
-        nic_idle();
+        nic::idle();
     }
     None
 }
@@ -1005,10 +957,10 @@ fn resolve_ptr(
         return None;
     }
     let mut buf = [0u8; MAX_FRAME];
-    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
     while now_ns() < until {
         loop {
-            let n = raw_rx(&mut buf);
+            let n = nic::recv(&mut buf);
             if n < 0 {
                 break;
             }
@@ -1023,7 +975,7 @@ fn resolve_ptr(
                 return Some(w);
             }
         }
-        nic_idle();
+        nic::idle();
     }
     None
 }
@@ -1047,12 +999,11 @@ fn resolve_ptr(
 /// Advertised receive window for our segments (bytes). Fixed; we drain promptly.
 const TCP_WINDOW: u16 = 64240;
 
-/// Per-attempt RX poll budget for the data phase (iterations * `POLL_SLEEP_NS`).
-/// 400 * 5ms = 2s of quiescence before we give up on more data.
-const TCP_DATA_ITERS: u32 = 400;
-/// How long a TCP wait allows a connection to stay quiet: what
-/// [`TCP_DATA_ITERS`] polls of [`POLL_SLEEP_NS`] once took.
-const TCP_QUIET_NS: u64 = TCP_DATA_ITERS as u64 * POLL_SLEEP_NS;
+/// How long a TCP wait allows a connection to stay quiet -- nothing heard
+/// from it -- before it gives up on more data: timed from the last frame,
+/// not counted in polls, so that a wait woken early by someone else's
+/// frame ([`nic::idle`]) is not cut short.
+const TCP_QUIET_NS: u64 = 2_000_000_000;
 
 /// Number of SYN / payload (re)transmission attempts before giving up.
 const TCP_SYN_ATTEMPTS: u32 = 5;
@@ -1124,7 +1075,7 @@ fn send_ipv4_ttl(
     .build_header(l4.len() as u16);
     frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
     ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV4);
-    raw_tx(&frame[..total]) >= 0
+    nic::send(&frame[..total]) >= 0
 }
 
 /// Build and transmit one TCP segment for our connection.
@@ -1201,7 +1152,7 @@ fn send_ipv6_hops(
     .build_header(l4.len() as u16);
     frame[ethernet::HEADER_LEN..l4_off].copy_from_slice(&ip_hdr);
     ethernet::write_header(&mut frame, next_hop_mac, &me.mac, ethernet::ETHERTYPE_IPV6);
-    raw_tx(&frame[..total]) >= 0
+    nic::send(&frame[..total]) >= 0
 }
 
 /// Build and transmit one TCP segment over IPv6 for our connection. The IPv6
@@ -1247,7 +1198,7 @@ fn recv_tcp_seg(
     frame: &mut [u8],
     pl: &mut [u8],
 ) -> Option<TcpRx> {
-    let n = raw_rx(frame);
+    let n = nic::recv(frame);
     if n < 0 {
         return None;
     }
@@ -1288,7 +1239,7 @@ fn recv_tcp_seg6(
     frame: &mut [u8],
     pl: &mut [u8],
 ) -> Option<TcpRx> {
-    let n = raw_rx(frame);
+    let n = nic::recv(frame);
     if n < 0 {
         return None;
     }
@@ -1650,7 +1601,7 @@ impl TcpConn {
             ) {
                 return None;
             }
-            let until = poll_deadline(RESOLVE_POLL_ITERS);
+            let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
             while now_ns() < until {
                 while let Some(rx) =
                     recv_tcp_seg(me, &dst_ip, local_port, dst_port, &mut frame, &mut pl)
@@ -1670,7 +1621,7 @@ impl TcpConn {
                         break 'syn;
                     }
                 }
-                nic_idle();
+                nic::idle();
             }
         }
         if !established {
@@ -1886,7 +1837,7 @@ impl TcpConn {
             ) {
                 return None;
             }
-            let until = poll_deadline(RESOLVE_POLL_ITERS);
+            let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
             while now_ns() < until {
                 while let Some(rx) =
                     recv_tcp_seg6(me, &dst_ip6, local_port, dst_port, &mut frame, &mut pl)
@@ -1906,7 +1857,7 @@ impl TcpConn {
                         break 'syn;
                     }
                 }
-                nic_idle();
+                nic::idle();
             }
         }
         if !established {
@@ -2329,7 +2280,7 @@ impl TcpConn {
                 if self.service_retransmit(me, now_ns()) {
                     heard = now_ns();
                 }
-                nic_idle();
+                nic::idle();
             }
         }
         self.take_rx(out)
@@ -2499,10 +2450,10 @@ fn udp_exchange(
         return None;
     }
     let mut frame = [0u8; MAX_FRAME];
-    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    let until = now_ns().saturating_add(RESOLVE_WAIT_NS);
     while now_ns() < until {
         loop {
-            let n = raw_rx(&mut frame);
+            let n = nic::recv(&mut frame);
             if n < 0 {
                 break;
             }
@@ -2516,7 +2467,7 @@ fn udp_exchange(
                 return Some(take);
             }
         }
-        nic_idle();
+        nic::idle();
     }
     None
 }
@@ -2538,8 +2489,9 @@ const SERVICE_NAME: &[u8] = b"net.stack";
 /// kernel client's connect latency; short enough to re-check the deadline.
 const ACCEPT_TIMEOUT_NS: u64 = 500_000_000; // 500ms
 
-/// Total idle budget: after this long with no new connection, the daemon exits.
-const SERVICE_IDLE_ITERS: u32 = 6; // 6 * 500ms = 3s
+/// How long the bounded service waits after its last request for another
+/// before it ends.
+const SERVICE_IDLE_NS: u64 = 3_000_000_000;
 
 /// Maximum control-message size we accept/produce.
 const MSG_CAP: usize = 512;
@@ -2547,7 +2499,7 @@ const MSG_CAP: usize = 512;
 /// Run the netstack IPC service (DNS/TCP/UDP over the `net.stack` channel).
 ///
 /// When `persistent` is false (the Phase-4 bounded self-test path, argv
-/// `serve-dns`) the daemon exits after [`SERVICE_IDLE_ITERS`] idle iterations and
+/// `serve-dns`) the daemon exits [`SERVICE_IDLE_NS`] after its last request and
 /// releases the NIC, so the still-live kernel stack regains it (§64). When
 /// `persistent` is true (the Phase-5 boot daemon, argv `serve-net`) the idle
 /// deadline is ignored: the daemon owns the NIC for the lifetime of the system
@@ -2591,11 +2543,10 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
 
     // Persistent mode ignores the idle deadline and serves for the system's
     // lifetime; bounded mode exits once no client has come for
-    // SERVICE_IDLE_ITERS accept timeouts.
-    let idle_ns = u64::from(SERVICE_IDLE_ITERS).saturating_mul(ACCEPT_TIMEOUT_NS);
+    // SERVICE_IDLE_NS.
     let mut last_client = now_ns();
     let mut code = 0;
-    while persistent || now_ns().saturating_sub(last_client) < idle_ns {
+    while persistent || now_ns().saturating_sub(last_client) < SERVICE_IDLE_NS {
         let ch = match next_client(listener as u64, &mut net, me, next_hop_mac.as_ref()) {
             Ok(Some(ch)) => ch,
             Ok(None) => continue,
@@ -2649,6 +2600,20 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
         last_client = now_ns();
     }
 
+    // A bounded service whose next hop never answered ARP sent nothing
+    // anywhere -- every request failed before reaching the card -- which
+    // its answers alone cannot tell from a network with no upstream.
+    if !persistent && code == 0 && next_hop_mac.is_none() {
+        print("[netstack] FAIL: the DNS server's next hop never answered ARP: nothing was sent\n");
+        code = NIC_NO_GATEWAY;
+    }
+    // Nor did one whose card never put its multicast filter in force: its
+    // neighbour discovery and multicast sockets got nothing.
+    if !persistent && code == 0 && !nic::mcast_in_force() {
+        print("[netstack] FAIL: the card never put the multicast filter in force\n");
+        code = NIC_MCAST;
+    }
+
     // Tear down any ring session the client left open (unmaps + closes conns).
     sessions.close_all(&mut net, me);
 
@@ -2664,40 +2629,45 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
 /// The next client connected to `listener`, waited for up to
 /// [`ACCEPT_TIMEOUT_NS`]: `None` for none in that time.
 ///
-/// Over a driver process's card the card is served meanwhile: what comes
-/// between requests -- a segment for an open session, an ARP request -- is
-/// routed as it comes ([`pump`]) rather than left for the next request, and
-/// the wait is woken by the card's doorbell or the client, whichever comes
-/// first; a client waiting is taken before the card is read. Over the
-/// kernel's NIC, which has no wait, frames wait for the next request. An
-/// error when the card has gone.
+/// The card is served meanwhile: what comes between requests -- a segment
+/// for an open session, an ARP request -- is routed as it comes ([`pump`])
+/// rather than left for the next request, and a client waiting is taken
+/// before the card is read. On a driver process's card the wait is woken by
+/// its doorbell or the client, whichever comes first; on the kernel's NIC,
+/// which has no wait, by the client or the time. An error when the card has
+/// gone, the listener has, or the wait failed.
 fn next_client(
     listener: u64,
     net: &mut Net,
     me: &IfInfo,
     next_hop_mac: Option<&[u8; 6]>,
 ) -> Result<Option<u64>, &'static str> {
-    if !port::attached() {
-        let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener, ACCEPT_TIMEOUT_NS);
-        return Ok(u64::try_from(ch).ok());
-    }
     let deadline = now_ns().saturating_add(ACCEPT_TIMEOUT_NS);
     loop {
-        if let Ok(ch) = u64::try_from(syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener, 0)) {
+        let accepted = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener, 0);
+        if let Ok(ch) = u64::try_from(accepted) {
             return Ok(Some(ch));
         }
-        // Without a next hop nothing can be sent, a retransmission
-        // included: the frames wait for a request, which will fail.
-        if let Some(mac) = next_hop_mac {
-            pump(net, me, mac);
+        if accepted != E_TIMED_OUT {
+            return Err("FAIL: the service's listener is gone");
+        }
+        match next_hop_mac {
+            Some(mac) => {
+                pump(net, me, mac);
+            }
+            // Without a next hop nothing can be sent, retransmissions
+            // included; what came is answered as any frame is -- an ARP
+            // request for our address -- rather than left to end every
+            // wait at once.
+            None => {
+                let _advertisements = take_frames(Some(me));
+            }
         }
         let left = deadline.saturating_sub(now_ns());
         if left == 0 {
             return Ok(None);
         }
-        if port::wait_or_client(listener, left).0 == port::Woke::Gone {
-            return Err("[netstack] FAIL: the card's driver went away\n");
-        }
+        nic::wait_or_client(listener, left)?;
     }
 }
 
@@ -3097,7 +3067,7 @@ enum Rx {
 /// served waited for its sender's retransmission. With every socket in one
 /// session (design A of A-Q15) that was ordinary traffic, not a corner case.
 fn recv_any(me: &IfInfo, frame: &mut [u8], tcp_pl: &mut [u8], udp_pl: &mut [u8]) -> Rx {
-    let n = raw_rx(frame);
+    let n = nic::recv(frame);
     if n < 0 {
         return Rx::Drained;
     }
@@ -3141,7 +3111,7 @@ fn answer_link(frame: &[u8], me: &IfInfo) {
                 && let Some(reply) = arp::reply_to(&pkt, &me.mac)
             {
                 // A lost reply is asked for again.
-                let _ = raw_tx(&reply);
+                let _ = nic::send(&reply);
             }
         }
         ethernet::ETHERTYPE_IPV4 => handle_ipv4(eth.payload, &eth.src, me),
@@ -3212,7 +3182,7 @@ fn answer_icmpv6(body: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
     out[ethernet::HEADER_LEN..l4_off].copy_from_slice(&hdr);
     ethernet::write_header(&mut out, &eth_dst, &me.mac, ethernet::ETHERTYPE_IPV6);
     // A lost answer is asked for again.
-    let _ = raw_tx(&out[..l4_off + len]);
+    let _ = nic::send(&out[..l4_off + len]);
 }
 
 /// Classify a frame as a router's membership query: an IGMP Membership
@@ -3974,7 +3944,7 @@ fn send_membership(me: &IfInfo, group: mcast::Group, report: bool) -> bool {
                 &me.mac,
                 ethernet::ETHERTYPE_IPV4,
             );
-            raw_tx(&frame[..l4_off + n]) >= 0
+            nic::send(&frame[..l4_off + n]) >= 0
         }
         mcast::Group::V6(g) => {
             let dst = if report {
@@ -4012,7 +3982,7 @@ fn send_membership(me: &IfInfo, group: mcast::Group, report: bool) -> bool {
                 &me.mac,
                 ethernet::ETHERTYPE_IPV6,
             );
-            raw_tx(&frame[..msg_off + n]) >= 0
+            nic::send(&frame[..msg_off + n]) >= 0
         }
     }
 }
@@ -5289,7 +5259,7 @@ fn ring_tcp_send(
             if pump(net, me, next_hop_mac) {
                 heard = now_ns();
             } else {
-                nic_idle();
+                nic::idle();
             }
             match net.conns.get_mut(target_id) {
                 Some(c) if c.timed_out => return netipc::ring::ERR_TIMED_OUT,
@@ -5383,7 +5353,7 @@ fn ring_tcp_recv(
             // recv returns available data promptly, like `read(2)` — it must not
             // spin the whole receive deadline once data has arrived), or its stream
             // has ended, or we've waited long enough. Without the `rx_len > 0` break
-            // a recv burned the full `TCP_DATA_ITERS` deadline even with data already
+            // a recv burned the full `TCP_QUIET_NS` deadline even with data already
             // buffered — harmless for a fast path that stayed under the kernel's
             // control-channel timeout, but on the slower IPv6 loopback path it pushed
             // the round past `RECV_TIMEOUT_NS`, surfacing as a spurious `TimedOut`.
@@ -5398,7 +5368,7 @@ fn ring_tcp_recv(
             if pump(net, me, next_hop_mac) {
                 heard = now_ns();
             } else {
-                nic_idle();
+                nic::idle();
             }
         }
         // Nothing to deliver and the stream still open: say why, never `0`,
@@ -5907,7 +5877,7 @@ fn rx_barrier(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
             if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
                 return Err("FAIL: the card's driver went away");
             }
-            while let Ok(n) = usize::try_from(raw_rx(&mut frame)) {
+            while let Ok(n) = usize::try_from(nic::recv(&mut frame)) {
                 let Some(bytes) = frame.get(..n) else {
                     continue;
                 };
@@ -6082,7 +6052,7 @@ fn bench_wait(
     let mut left = answered.iter().filter(|&&a| !a).count();
     let mut frame = [0u8; MAX_FRAME];
     while left != 0 {
-        while let Ok(n) = usize::try_from(raw_rx(&mut frame)) {
+        while let Ok(n) = usize::try_from(nic::recv(&mut frame)) {
             let Some(bytes) = frame.get(..n) else {
                 continue;
             };
@@ -6109,25 +6079,10 @@ fn bench_wait(
             return Ok(false);
         }
         if left != 0 {
-            nic_wait(deadline)?;
+            nic::wait_until(deadline)?;
         }
     }
     Ok(true)
-}
-
-/// Until a frame may have come, `deadline` at most: on a driver process's
-/// card, its doorbell waited for; on a card of the kernel's, which has no
-/// wait and whose receive call reads the card's ring itself, the CPU given
-/// up once. An error when a driver process's card has gone.
-fn nic_wait(deadline: u64) -> Result<(), &'static str> {
-    if !port::attached() {
-        syscall0(SYS_YIELD);
-        return Ok(());
-    }
-    match port::wait(deadline.saturating_sub(now_ns())) {
-        port::Woke::Gone => Err("FAIL: the card's driver went away"),
-        port::Woke::Rang | port::Woke::Slept => Ok(()),
-    }
 }
 
 /// `nic-bench <mac> <name>`: the kernel's card whose MAC address is `mac`
@@ -6321,7 +6276,7 @@ fn take_frames(me: Option<&IfInfo>) -> u64 {
     let mut frame = [0u8; MAX_FRAME];
     let mut advertisements = 0;
     loop {
-        let Ok(n) = usize::try_from(raw_rx(&mut frame)) else {
+        let Ok(n) = usize::try_from(nic::recv(&mut frame)) else {
             return advertisements;
         };
         let Some(bytes) = frame.get(..n) else {
@@ -6398,9 +6353,9 @@ fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &
         }
         let deadline = now_ns().saturating_add(1_000_000_000);
         while now_ns() < deadline {
-            nic_wait(deadline)?;
+            nic::wait_until(deadline)?;
             loop {
-                let n = raw_rx(&mut frame);
+                let n = nic::recv(&mut frame);
                 let Ok(n) = usize::try_from(n) else { break };
                 let Some(bytes) = frame.get(..n) else {
                     continue;
@@ -6539,7 +6494,7 @@ impl Pings {
         }
         let mut frame = [0u8; MAX_FRAME];
         loop {
-            let n = raw_rx(&mut frame);
+            let n = nic::recv(&mut frame);
             let Ok(n) = usize::try_from(n) else {
                 return Ok(());
             };
@@ -6713,22 +6668,6 @@ fn card_if_info(mac: [u8; 6]) -> IfInfo {
     }
 }
 
-/// Let go of the NIC the daemon served over: the kernel's (`card` empty),
-/// whose claim is released, or the card `card` names, detached.
-fn release_nic(card: &[u8]) {
-    if card.is_empty() {
-        raw_close();
-        print("[netstack] released raw NIC\n");
-    } else {
-        port::detach();
-        Line::new()
-            .put(b"[netstack] let ")
-            .put(card)
-            .put(b" go\n")
-            .print();
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -6759,13 +6698,21 @@ pub extern "C" fn _start() -> ! {
         exit(nic_bench_card(arg(args, 2), arg(args, 3)));
     }
 
-    // `serve-dns [<service>]` and `serve-net [<service>]`: with a card's
-    // service named -- `nic.<name>`, a card a driver process serves
-    // (design-decisions 1589) -- the daemon serves its sockets over that
-    // card, its address taken there by DHCP, rather than over the kernel's
-    // NIC, which it then neither queries nor claims.
+    // `serve-dns [<service>]`: with a card's service named -- `nic.<name>`,
+    // a card a driver process serves (design-decisions 1589) -- the daemon
+    // serves its sockets over that card, its address taken there by DHCP,
+    // rather than over the kernel's NIC, which it then neither queries nor
+    // claims. `serve-net` refuses a card, below.
     let serving = mode == b"serve-dns" || mode == b"serve-net";
     let card = if serving { arg(args, 2) } else { b"" };
+    if mode == b"serve-net" && !card.is_empty() {
+        // A card's lease is the daemon's own, taken once by DHCP: the
+        // persistent service would hold it past its end, never renewing it.
+        print(
+            "[netstack] FAIL: serve-net does not serve over a card: it would not renew the card's lease (known-issues A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC)\n",
+        );
+        exit(NIC_USAGE);
+    }
     let me = if card.is_empty() {
         match query_if_info() {
             Some(i) => i,
@@ -6809,7 +6756,7 @@ pub extern "C" fn _start() -> ! {
     if mode == b"serve-dns" {
         print("[netstack] mode: serve-dns (Phase 4 bounded DNS/TCP/UDP-over-IPC)\n");
         let code = run_dns_service(&me, false);
-        release_nic(card);
+        nic::release(card);
         exit(code);
     }
     if mode == b"serve-net" {
@@ -6818,7 +6765,7 @@ pub extern "C" fn _start() -> ! {
         // unrecoverable service fault, in which case release the NIC and exit.
         let code = run_dns_service(&me, true);
         print("[netstack] persistent service returned\n");
-        release_nic(card);
+        nic::release(card);
         exit(code);
     }
 
@@ -6827,7 +6774,7 @@ pub extern "C" fn _start() -> ! {
 
     // Broadcast an ARP request for the gateway to prove TX + RX end-to-end.
     let arp_req = arp::request(&me.mac, &me.ip, &me.gateway);
-    if raw_tx(&arp_req) < 0 {
+    if nic::send(&arp_req) < 0 {
         print("[netstack] FAIL: raw TX of ARP request failed\n");
         raw_close();
         exit(4);
@@ -6838,7 +6785,7 @@ pub extern "C" fn _start() -> ! {
     let mut resolved = false;
     for _ in 0..POLL_ITERS {
         loop {
-            let n = raw_rx(&mut buf);
+            let n = nic::recv(&mut buf);
             if n == E_WOULD_BLOCK {
                 break; // Drain done for this tick.
             }

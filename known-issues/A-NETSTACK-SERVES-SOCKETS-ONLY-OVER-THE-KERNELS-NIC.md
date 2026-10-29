@@ -4,7 +4,7 @@
 
 **What is wrong.** The netstack daemon's serving modes serve sockets over
 a card a Linux driver process serves (design-decisions 1589) when named one
-(`serve-dns <service>`, `serve-net <service>`; narrowed 2026-10-29, the
+(`serve-dns <service>`; narrowed 2026-10-29, the
 boot test's linuxdrv self-test resolving a name through the spare 82574 so).
 But nothing names one -- the persistent daemon the kernel starts serves the
 kernel's NIC -- so a card only a driver process drives carries no socket's
@@ -27,6 +27,10 @@ What stands between the two:
   should make the daemon confirm its lease (RFC 2131 INIT-REBOOT) and send
   its gratuitous ARP and IPv6 neighbour advertisements again; a link down
   should fail sends at once rather than let them queue in the driver.
+- **Renewing the card's lease.** Over a card the address is the daemon's
+  own, taken once by DHCP; nothing renews it (RFC 2131 RENEWING at T1,
+  REBINDING at T2), so the persistent `serve-net` refuses a card until
+  something does. The bounded `serve-dns` lives seconds.
 - **Choosing a card.** Nothing yet says which `nic.<name>` the daemon
   should attach to; with several cards, which are the daemon's.
 

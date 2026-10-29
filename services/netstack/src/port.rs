@@ -1,7 +1,7 @@
 //! A network card a driver process serves (design-decisions 1589), as the
 //! daemon's NIC: the service `nic.<name>` connected to, the ring it is
 //! given in shared memory attached, and frames sent and received through
-//! it. With a card attached, [`super::raw_tx`] and [`super::raw_rx`] come
+//! it. With a card attached, [`super::nic::send`] and [`super::nic::recv`] come
 //! here instead of to the kernel's raw-frame calls.
 //!
 //! The ring's slots are the daemon's: the first half posted to receive
@@ -48,6 +48,8 @@ const SYS_WAIT_MULTIPLE: u64 = 1066;
 const KIND_CHANNEL: u32 = 1;
 const KIND_SERVICE: u32 = 14;
 const POLLIN: u32 = 1;
+/// `poll(2)`'s bit for an item `SYS_WAIT_MULTIPLE` did not know.
+const POLLNVAL: u32 = 0x20;
 /// SlateOS's `NotFound` (no such service yet) and `ChannelClosed` (the
 /// driver has gone).
 const NOT_FOUND: i64 = -500;
@@ -94,6 +96,8 @@ struct Card {
     mcast_sent: bool,
     /// The last list's answer: 0 in force, or the driver's errno.
     mcast_result: i32,
+    /// How many lists the driver has answered.
+    mcast_answers: u32,
     gone: bool,
 }
 
@@ -295,6 +299,7 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
         mcast_want: None,
         mcast_sent: false,
         mcast_result: 0,
+        mcast_answers: 0,
         gone: false,
     })
 }
@@ -382,6 +387,7 @@ pub fn send(frame: &[u8]) -> Option<i64> {
     reap(c);
     let deadline = now_ns().saturating_add(SLOT_WAIT_NS);
     while c.nfree == 0 && !c.gone && now_ns() < deadline {
+        // Waiting on the card alone cannot fail but by the card going.
         let _rang = wait_on(c, deadline.saturating_sub(now_ns()), None);
         reap(c);
     }
@@ -451,51 +457,78 @@ pub enum Woke {
 /// messages that have come are taken ([`see_to_channel`]): a card busy with
 /// frames does not leave its link and answers unread behind them.
 pub fn wait(timeout_ns: u64) -> Woke {
-    wait_for(timeout_ns, None).0
+    // Waiting on the card alone, the wait itself cannot fail: its channel
+    // receive answering an error is the card gone ([`take_message`]).
+    wait_for(timeout_ns, None).unwrap_or(Woke::Gone)
 }
 
 /// [`wait`], woken as well by a connection waiting on the service
-/// `listener` (the handle `SYS_SERVICE_REGISTER` answered): what the card
-/// did, and whether a client is waiting -- for a daemon that serves its
-/// clients and its card together. A frame already there answers at once,
-/// without looking at the listener.
-pub fn wait_or_client(listener: u64, timeout_ns: u64) -> (Woke, bool) {
+/// `listener` (the handle `SYS_SERVICE_REGISTER` answered) -- for a daemon
+/// that serves its clients and its card together, the caller then asking
+/// the listener. A frame already there answers at once, without looking at
+/// the listener. An error ([`WaitFailed`]) when the wait itself failed.
+pub fn wait_or_client(listener: u64, timeout_ns: u64) -> Result<Woke, WaitFailed> {
     wait_for(timeout_ns, Some(listener))
 }
 
-/// [`wait`] and [`wait_or_client`]: the card's wake, and whether a client
-/// is waiting on `listener`.
-fn wait_for(timeout_ns: u64, listener: Option<u64>) -> (Woke, bool) {
+/// A connection waiting on the service `listener` waited for, `timeout_ns`
+/// at most, with no card in it -- the kernel's NIC having no wait. An error
+/// ([`WaitFailed`]) when the wait itself failed.
+pub fn wait_listener(listener: u64, timeout_ns: u64) -> Result<(), WaitFailed> {
+    let mut items = [WaitItem::readable(listener, KIND_SERVICE)];
+    wait_multiple(&mut items, timeout_ns)
+}
+
+/// `SYS_WAIT_MULTIPLE` failed, or knew an item not (`POLLNVAL`): a handle
+/// gone or wrong, which waiting again would not mend.
+#[derive(Debug)]
+pub struct WaitFailed;
+
+/// `items` waited on, `timeout_ns` at most (`SYS_WAIT_MULTIPLE`).
+fn wait_multiple(items: &mut [WaitItem], timeout_ns: u64) -> Result<(), WaitFailed> {
+    let answer = syscall3(
+        SYS_WAIT_MULTIPLE,
+        items.as_mut_ptr() as u64,
+        items.len() as u64,
+        timeout_ns.max(1),
+    );
+    if answer < 0 || items.iter().any(|i| i.revents & POLLNVAL != 0) {
+        return Err(WaitFailed);
+    }
+    Ok(())
+}
+
+/// [`wait`] and [`wait_or_client`]: the card's wake.
+fn wait_for(timeout_ns: u64, listener: Option<u64>) -> Result<Woke, WaitFailed> {
     let Some(c) = card() else {
-        return (Woke::Gone, false);
+        return Ok(Woke::Gone);
     };
     reap(c);
-    let (rang, client) = if c.got_len != 0 || c.gone {
+    let rang = if c.got_len != 0 || c.gone {
         see_to_channel(c);
-        (true, false)
+        true
     } else {
-        wait_on(c, timeout_ns, listener)
+        wait_on(c, timeout_ns, listener)?
     };
-    let woke = match (c.gone, rang) {
+    Ok(match (c.gone, rang) {
         (true, _) => Woke::Gone,
         (false, true) => Woke::Rang,
         (false, false) => Woke::Slept,
-    };
-    (woke, client)
+    })
 }
 
 /// The driver's doorbell or another message waited for, up to `timeout_ns`
 /// -- the daemon saying in the ring that it sleeps, unless completions are
 /// there already -- or, given a service `listener`, a connection waiting
 /// on it; and any messages that came taken: whether one came, or
-/// completions were there, and whether a client is waiting.
-fn wait_on(c: &mut Card, timeout_ns: u64, listener: Option<u64>) -> (bool, bool) {
+/// completions were there. An error when the wait itself failed.
+fn wait_on(c: &mut Card, timeout_ns: u64, listener: Option<u64>) -> Result<bool, WaitFailed> {
     c.slept = c.slept.wrapping_add(1).max(1);
     if !c.ring.cq_sleep(c.slept) {
         see_to_channel(c);
-        return (true, false);
+        return Ok(true);
     }
-    let (came, client) = match listener {
+    let waited = match listener {
         None => {
             let mut buf = [0u8; MESSAGE_MAX];
             let got = syscall4(
@@ -505,7 +538,7 @@ fn wait_on(c: &mut Card, timeout_ns: u64, listener: Option<u64>) -> (bool, bool)
                 buf.len() as u64,
                 timeout_ns.max(1),
             );
-            (take_message(c, got, &buf), false)
+            Ok(take_message(c, got, &buf))
         }
         // The driver's messages are taken below, as any that come while
         // the daemon is awake are.
@@ -514,17 +547,12 @@ fn wait_on(c: &mut Card, timeout_ns: u64, listener: Option<u64>) -> (bool, bool)
                 WaitItem::readable(c.channel, KIND_CHANNEL),
                 WaitItem::readable(listener, KIND_SERVICE),
             ];
-            syscall3(
-                SYS_WAIT_MULTIPLE,
-                items.as_mut_ptr() as u64,
-                items.len() as u64,
-                timeout_ns.max(1),
-            );
-            (false, items.get(1).is_some_and(|i| i.revents != 0))
+            wait_multiple(&mut items, timeout_ns).map(|()| false)
         }
     };
     c.ring.cq_wake();
-    (see_to_channel(c) || came, client)
+    let came = waited?;
+    Ok(see_to_channel(c) || came)
 }
 
 /// One object `SYS_WAIT_MULTIPLE` waits on, laid out as its ABI says (24
@@ -601,6 +629,7 @@ fn take_message(c: &mut Card, got: i64, buf: &[u8]) -> bool {
         Some(Message::McastDone { result }) if c.mcast_sent => {
             c.mcast_sent = false;
             c.mcast_result = result;
+            c.mcast_answers = c.mcast_answers.saturating_add(1);
         }
         _ => {
             super::print(
@@ -667,6 +696,12 @@ pub fn set_mcast(all: bool, addrs: &[[u8; 6]]) -> bool {
     c.mcast_want = Some(McastList::new(all, addrs));
     send_mcast(c);
     true
+}
+
+/// How many multicast lists the driver has answered, in force or refused;
+/// 0 with no card attached.
+pub fn mcast_answers() -> u32 {
+    card().map_or(0, |c| c.mcast_answers)
 }
 
 /// How the multicast lists asked for went: `None` while one is still to be

@@ -397,6 +397,7 @@ static long lx_nic_port_send(struct net_device *dev, const void *frame, long len
 static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long stacks)
 {
 	unsigned long gone = 0;
+	unsigned int ended;
 	const void *frame;
 	long len, err;
 
@@ -416,7 +417,8 @@ static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long 
 			netdev_err(dev, "nic.%s is no longer served\n", name);
 			return -EPIPE;
 		}
-		if (slx_nicport_ended()) {
+		ended = slx_nicport_ended();
+		if (ended) {
 			netdev_info(dev, "a network stack left: %lu frame(s) sent for it, %lu received, %lu dropped\n",
 				    lx_nic_port_sent, lx_nic_port_received, lx_nic_port_dropped);
 			lx_nic_card_counts(dev);
@@ -428,7 +430,11 @@ static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long 
 			rtnl_lock();
 			lx_nic_drop_mcast(dev);
 			rtnl_unlock();
-			if (stacks && ++gone == stacks)
+			/* How many have gone since last asked: the kit lets
+			 * the next attach only once this one's end is taken, so
+			 * 1, but counted as many as it says. */
+			gone += ended;
+			if (stacks && gone >= stacks)
 				return 0;
 		}
 		lx_nic_port_mcast(dev);

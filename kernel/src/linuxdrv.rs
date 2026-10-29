@@ -496,7 +496,7 @@ fn e1000e_serve(
         return Ok(());
     }
     serial_println!(
-        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}), sockets served over it {} (an exit code, or None for not within {} s / {} s){}",
+        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}), sockets served over it {} (an exit code; None: not within {} s / {} s, or stopped at once, its stacks not both come and gone){}",
         served,
         checked,
         nic_check_outcome(&Ok(checked)),

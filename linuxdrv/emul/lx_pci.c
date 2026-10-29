@@ -170,6 +170,15 @@ static int lx_pci_take(const char *arg)
 		pr_err("pci: %02x:%02x.%x could not be opened: %ld\n", bus, dev, fn, f->handle);
 		return -ENODEV;
 	}
+	/*
+	 * The first function's DMA window (lx_dma.c), in a PCI device's
+	 * default 32 bits until its driver says more (dma_set_mask), so that
+	 * what is allocated from here on is memory it reaches.
+	 */
+	if (!lx_pci_count && slx_dma_open(f->handle, 32) < 0) {
+		pr_err("pci: %02x:%02x.%x: no DMA window\n", bus, dev, fn);
+		return -ENOMEM;
+	}
 	lx_pci_count++;
 	return 0;
 }
@@ -208,6 +217,9 @@ static int lx_pci_scan_bus(unsigned int number)
 
 		if (f->bus == number)
 			f->dev = pci_dev_get(pci_scan_single_device(bus, f->devfn));
+		/* Coherent: nothing to sync, ever (lx_dma.c). */
+		if (f->dev)
+			f->dev->dev.dma_skip_sync = true;
 	}
 	pci_bus_claim_resources(bus);
 	pci_bus_add_devices(bus);

@@ -10,6 +10,7 @@ use core::cell::UnsafeCell;
 
 use crate::buddy::{Buddy, MIN_ORDER};
 use crate::exit;
+use crate::window::Chunks;
 
 // The SlateOS ABI note: a native program (see `services/hello`).
 core::arch::global_asm!(
@@ -53,6 +54,14 @@ const PROT_NONE: u64 = 0;
 /// kmalloc's region: 256 MiB, mapped lazily, so only what is used costs
 /// memory; aligned to its size, so every block is aligned to its own.
 const HEAP_ORDER: u32 = 28;
+/// The DMA window beside it (design-decisions 1586): as large, reserved
+/// with it and untouched until backed, a chunk of 4 MiB at a time, by the
+/// device's DMA memory (`SYS_PCI_DEVICE_DMA_ALLOC_AT`).
+const WINDOW_ORDER: u32 = HEAP_ORDER;
+const CHUNK_ORDER: u32 = 22;
+const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
+// The window's chunks are what the chunk table counts.
+const _: () = assert!(1usize << (WINDOW_ORDER - CHUNK_ORDER) == crate::window::CHUNKS);
 
 #[inline]
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
@@ -129,7 +138,68 @@ impl<T> Single<T> {
     }
 }
 
-static HEAP: Single<Option<Buddy>> = Single(UnsafeCell::new(None));
+/// The process's memory: kmalloc's heap, the window reserved beside it, and
+/// once a device's DMA is set up ([`slx_dma_open`]) the window in use.
+struct Memory {
+    heap: Buddy,
+    window_base: usize,
+    dma: Option<Dma>,
+}
+
+/// The DMA window in use: its allocator, given each chunk once backed; the
+/// chunks backed and where the device sees them; the device whose memory
+/// backs them; and how many address bits it has.
+struct Dma {
+    buddy: Buddy,
+    chunks: Chunks,
+    handle: i64,
+    bits: u64,
+}
+
+impl Dma {
+    /// A block of `size` bytes from the window, the window grown by a chunk
+    /// when it has none: `None` past a chunk's size, or when the device
+    /// gives no more.
+    fn alloc(&mut self, size: usize) -> Option<usize> {
+        loop {
+            if let Some(at) = self.buddy.alloc(size) {
+                return Some(at);
+            }
+            if size > self.chunks.chunk_bytes() {
+                return None;
+            }
+            self.grow()?;
+        }
+    }
+
+    /// The next chunk backed by the device's memory and given to the
+    /// allocator.
+    fn grow(&mut self) -> Option<()> {
+        let at = self.chunks.next()?;
+        let bytes = self.chunks.chunk_bytes();
+        let device_addr = syscall4(
+            SYS_PCI_DEVICE_DMA_ALLOC_AT,
+            self.handle.cast_unsigned(),
+            at as u64,
+            bytes as u64,
+            self.bits,
+        );
+        let Ok(device_addr) = u64::try_from(device_addr) else {
+            log(b"[lx] the DMA window could not grow: the device gave no more memory\n");
+            return None;
+        };
+        self.chunks.record(device_addr);
+        // SAFETY: the chunk was just backed for this alone, inside the window.
+        unsafe { self.buddy.give(at, CHUNK_ORDER) }.then_some(())
+    }
+
+    fn holds(&self, at: usize) -> bool {
+        let (base, bytes) = self.buddy.span();
+        at.checked_sub(base).is_some_and(|offset| offset < bytes)
+    }
+}
+
+static MEMORY: Single<Option<Memory>> = Single(UnsafeCell::new(None));
 
 /// The arguments: how many, and an array of pointers to each, NUL-terminated
 /// ([`load_args`]).
@@ -154,15 +224,21 @@ pub(crate) fn unmap(at: usize, bytes: usize) -> bool {
     syscall3(SYS_MUNMAP, at as u64, bytes as u64, 0) == 0
 }
 
-/// kmalloc's region and its order bytes: twice the region mapped, so that
-/// a base aligned to its size fits inside.
-fn heap_init() -> Option<Buddy> {
+/// kmalloc's region, its order bytes, and the DMA window reserved beside
+/// it: three times the region mapped, so that a base aligned to its size
+/// with the window after it fits inside.
+fn heap_init() -> Option<Memory> {
     let size = 1usize << HEAP_ORDER;
-    let mapped = map_lazy(size.checked_mul(2)?)?;
+    let mapped = map_lazy(size.checked_mul(3)?)?;
     let base = mapped.checked_next_multiple_of(size)?;
     let orders = map_lazy(size >> MIN_ORDER)?;
     // SAFETY: both ranges were just mapped for this alone, and read 0.
-    unsafe { Buddy::new(base, HEAP_ORDER, orders as *mut u8) }.ok()
+    let heap = unsafe { Buddy::new(base, HEAP_ORDER, orders as *mut u8) }.ok()?;
+    Some(Memory {
+        heap,
+        window_base: base.checked_add(size)?,
+        dma: None,
+    })
 }
 
 unsafe extern "C" {
@@ -233,12 +309,12 @@ fn load_args() {
 /// Called once, by `_start`.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn lxkit_start() -> ! {
-    let Some(heap) = heap_init() else {
+    let Some(memory) = heap_init() else {
         log(b"[lx] the driver process's memory could not be mapped\n");
         exit_with(exit::NO_MEMORY);
     };
     // SAFETY: the one thread, before any other use of the heap.
-    unsafe { *HEAP.get() = Some(heap) };
+    unsafe { *MEMORY.get() = Some(memory) };
     load_args();
     // SAFETY: the C half's set-up, once, before any task or turn.
     let ready = unsafe { lx_emul_init() };
@@ -304,14 +380,93 @@ pub unsafe extern "C" fn slx_log(text: *const u8, len: usize) {
 }
 
 /// `slx_alloc`: `size` bytes aligned to their own size rounded up to a
-/// power of two, or NULL.
+/// power of two, or NULL. Once a device's DMA is set up, from the DMA
+/// window while it can hold the block -- so that what Linux code hands its
+/// device is memory the device reaches -- and from the heap past that.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_alloc(size: usize) -> *mut u8 {
     // SAFETY: the one thread; slx_alloc and slx_free do not re-enter.
-    let heap = unsafe { HEAP.get() };
-    heap.as_mut()
-        .and_then(|h| h.alloc(size))
+    let memory = unsafe { MEMORY.get() };
+    memory
+        .as_mut()
+        .and_then(|m| {
+            m.dma
+                .as_mut()
+                .and_then(|d| d.alloc(size))
+                .or_else(|| m.heap.alloc(size))
+        })
         .map_or(core::ptr::null_mut(), |at| at as *mut u8)
+}
+
+/// `slx_dma_alloc`: [`slx_alloc`] from the DMA window alone -- memory the
+/// device reaches, a chunk (4 MiB) at most -- or NULL.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_dma_alloc(size: usize) -> *mut u8 {
+    // SAFETY: as in slx_alloc.
+    let memory = unsafe { MEMORY.get() };
+    memory
+        .as_mut()
+        .and_then(|m| m.dma.as_mut())
+        .and_then(|d| d.alloc(size))
+        .map_or(core::ptr::null_mut(), |at| at as *mut u8)
+}
+
+/// `slx_dma_open`: the DMA window set up for the device `handle` names,
+/// which has `bits` address bits (64 for any; the kernel's rule): from now
+/// on [`slx_alloc`] serves from it. One window per process, the first
+/// device's: 0 when it is set up, now or already; an error when it cannot
+/// be.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_dma_open(handle: i64, bits: u64) -> i64 {
+    // SAFETY: as in slx_alloc.
+    let memory = unsafe { MEMORY.get() };
+    let Some(m) = memory.as_mut() else {
+        return -1;
+    };
+    if m.dma.is_some() {
+        return 0;
+    }
+    let Some(orders) = map_lazy((1usize << WINDOW_ORDER) >> MIN_ORDER) else {
+        return -1;
+    };
+    // SAFETY: the order bytes were just mapped for this alone, and read 0;
+    // the window is the process's, reserved with the heap and untouched.
+    let Ok(buddy) = (unsafe { Buddy::new_empty(m.window_base, WINDOW_ORDER, orders as *mut u8) })
+    else {
+        return -1;
+    };
+    m.dma = Some(Dma {
+        buddy,
+        chunks: Chunks::new(m.window_base, CHUNK_ORDER),
+        handle,
+        bits,
+    });
+    0
+}
+
+/// `slx_dma_bits`: the window's device has `bits` address bits from now on:
+/// the chunks backed after this are within them.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_dma_bits(bits: u64) {
+    // SAFETY: as in slx_alloc.
+    let memory = unsafe { MEMORY.get() };
+    if let Some(d) = memory.as_mut().and_then(|m| m.dma.as_mut()) {
+        d.bits = bits;
+    }
+}
+
+/// `slx_dma_address`: where the window's device sees the `len` bytes at
+/// `ptr`, or `u64::MAX` when it does not -- memory outside the window, or a
+/// range crossing two of its chunks.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_dma_address(ptr: *const u8, len: usize) -> u64 {
+    // SAFETY: as in slx_alloc.
+    let memory = unsafe { MEMORY.get() };
+    memory
+        .as_ref()
+        .and_then(|m| m.dma.as_ref())
+        .and_then(|d| d.chunks.device_address(ptr as usize, len))
+        .unwrap_or(u64::MAX)
 }
 
 /// `slx_alloc_size`: the bytes `slx_alloc(size)` hands out -- `size` rounded
@@ -320,9 +475,10 @@ pub extern "C" fn slx_alloc(size: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_alloc_size(size: usize) -> usize {
     // SAFETY: as in slx_alloc.
-    let heap = unsafe { HEAP.get() };
-    heap.as_ref()
-        .and_then(|h| h.order_for(size))
+    let memory = unsafe { MEMORY.get() };
+    memory
+        .as_ref()
+        .and_then(|m| m.heap.order_for(size))
         .and_then(|k| 1usize.checked_shl(k))
         .unwrap_or(size)
 }
@@ -332,15 +488,19 @@ pub extern "C" fn slx_alloc_size(size: usize) -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_block_size(ptr: *const u8) -> usize {
     // SAFETY: as in slx_alloc.
-    let heap = unsafe { HEAP.get() };
-    heap.as_ref()
-        .and_then(|h| h.block_size(ptr as usize))
+    let memory = unsafe { MEMORY.get() };
+    memory
+        .as_ref()
+        .and_then(|m| match m.dma.as_ref().filter(|d| d.holds(ptr as usize)) {
+            Some(d) => d.buddy.block_size(ptr as usize),
+            None => m.heap.block_size(ptr as usize),
+        })
         .unwrap_or(0)
 }
 
-/// `slx_heap`: kmalloc's region -- the memory Linux's direct map covers,
-/// over which the C half lays its page array -- where it begins and how
-/// many bytes it spans; both 0 when there is none.
+/// `slx_heap`: the memory Linux's direct map covers -- kmalloc's heap and
+/// the DMA window beside it -- over which the C half lays its page array:
+/// where it begins and how many bytes it spans; both 0 when there is none.
 ///
 /// # Safety
 ///
@@ -348,8 +508,11 @@ pub extern "C" fn slx_block_size(ptr: *const u8) -> usize {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slx_heap(base: *mut usize, bytes: *mut usize) {
     // SAFETY: as in slx_alloc.
-    let heap = unsafe { HEAP.get() };
-    let (at, size) = heap.as_ref().map_or((0, 0), Buddy::span);
+    let memory = unsafe { MEMORY.get() };
+    let (at, size) = memory.as_ref().map_or((0, 0), |m| {
+        let (at, heap) = m.heap.span();
+        (at, heap.saturating_mul(2))
+    });
     // SAFETY: the caller's.
     unsafe {
         base.write(at);
@@ -372,8 +535,15 @@ pub extern "C" fn slx_free(ptr: *const u8) {
         return;
     }
     // SAFETY: as in slx_alloc.
-    let heap = unsafe { HEAP.get() };
-    if !heap.as_mut().is_some_and(|h| h.free(ptr as usize)) {
+    let memory = unsafe { MEMORY.get() };
+    let freed =
+        memory
+            .as_mut()
+            .is_some_and(|m| match m.dma.as_mut().filter(|d| d.holds(ptr as usize)) {
+                Some(d) => d.buddy.free(ptr as usize),
+                None => m.heap.free(ptr as usize),
+            });
+    if !freed {
         log(b"[lx] BUG: kfree of memory kmalloc did not give\n");
     }
 }

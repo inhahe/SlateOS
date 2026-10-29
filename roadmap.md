@@ -5498,8 +5498,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         the layer's no-ops (§1583); Linux's own PCI core, the process's
         functions given through the device handle with their BARs
         shadowed, and the heap as Linux's direct map (§1584); their MSI
-        delivered to Linux's handlers, hard and threaded (§1585). Left:
-        DMA, `request_firmware`,
+        delivered to Linux's handlers, hard and threaded (§1585); DMA from
+        a window beside the heap, backed by the device's own arenas
+        (§1586). Left: `request_firmware`,
         which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured

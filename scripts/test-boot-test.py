@@ -1412,8 +1412,8 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
                "a generated stop, a deadlock, a stack overflow caught by its guard "
                "page, a failed initcall, early and late, a stranded kthread, and "
                "a sleep while "
-               "atomic, a PCI function probed through Linux's PCI core and its "
-               "interrupts handled, and one "
+               "atomic, a PCI function probed through Linux's PCI core, its "
+               "interrupts handled and its DMA done, and one "
                "no driver took: OK\n")
     ran = hello + tasks + verdict
     # Only its first line differs from `ran`: the one check it can fail.

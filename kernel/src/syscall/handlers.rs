@@ -834,14 +834,7 @@ pub fn sys_pci_device_config_write(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_pci_device_dma_alloc(args: &SyscallArgs) -> SyscallResult {
     let r = held_device(args.arg0).and_then(|pid| {
         let pml4 = caller_pml4().ok_or(KernelError::NoSuchProcess)?;
-        use crate::mm::dma::DmaConstraint;
-        // The device's address width: what it can be given.
-        let constraint = match args.arg3 {
-            0 | 64 => DmaConstraint::None,
-            32 => DmaConstraint::Below4G,
-            24 => DmaConstraint::Below16M,
-            _ => return Err(KernelError::InvalidArgument),
-        };
+        let constraint = dma_constraint(args.arg3)?;
         let (user_virt, device_addr) =
             crate::devhandle::dma_alloc(args.arg0, pid, args.arg1, constraint)?;
         if let Err(e) =
@@ -854,6 +847,29 @@ pub fn sys_pci_device_dma_alloc(args: &SyscallArgs) -> SyscallResult {
             return Err(e);
         }
         Ok(user_virt)
+    });
+    device_result(r)
+}
+
+/// The addresses a device with `bits` address bits can be given: 64 or 0
+/// for any, 32, or 24; anything else `InvalidArgument`.
+fn dma_constraint(bits: u64) -> KernelResult<crate::mm::dma::DmaConstraint> {
+    use crate::mm::dma::DmaConstraint;
+    match bits {
+        0 | 64 => Ok(DmaConstraint::None),
+        32 => Ok(DmaConstraint::Below4G),
+        24 => Ok(DmaConstraint::Below16M),
+        _ => Err(KernelError::InvalidArgument),
+    }
+}
+
+/// `SYS_PCI_DEVICE_DMA_ALLOC_AT` — a DMA arena for an open device, placed
+/// where the caller says. See
+/// [`SYS_PCI_DEVICE_DMA_ALLOC_AT`](super::number::SYS_PCI_DEVICE_DMA_ALLOC_AT).
+pub fn sys_pci_device_dma_alloc_at(args: &SyscallArgs) -> SyscallResult {
+    let r = held_device(args.arg0).and_then(|pid| {
+        let constraint = dma_constraint(args.arg3)?;
+        crate::devhandle::dma_alloc_at(args.arg0, pid, args.arg1, args.arg2, constraint)
     });
     device_result(r)
 }

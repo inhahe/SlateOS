@@ -235,26 +235,70 @@ pub fn alloc_for_user(
     size: usize,
     constraint: DmaConstraint,
 ) -> KernelResult<(u64, u64, usize)> {
-    use crate::mm::page_table::{self, PageFlags, VirtAddr};
-
     let buf = alloc(size, constraint)?;
-    let phys = buf.phys_addr();
-    let alloc_size = buf.allocated_size();
-
     // Find a free region in the process's user address space.
     // Use the upper portion of user space (below 0x7FFF_FFFF_F000).
     // We search downward from a high address to avoid conflicts with
     // the normal heap/stack regions.
-    let user_virt = find_user_vaddr(pml4_phys, alloc_size)?;
+    let user_virt = match find_user_vaddr(pml4_phys, buf.allocated_size()) {
+        Ok(at) => at,
+        Err(e) => {
+            // SAFETY: just allocated, mapped nowhere and given to no device.
+            unsafe { free(buf) }?;
+            return Err(e);
+        }
+    };
+    place(pml4_phys, user_virt, buf)
+}
 
-    // Map the DMA buffer into the process's address space.
-    // Use write-through caching — x86 PCI DMA is cache-coherent, but
-    // write-through avoids subtle ordering issues with device reads.
-    // FOREIGN: the frames are the DMA tracker's, freed through it and only
-    // it -- not by an unmap or the address space's teardown, which clear the
-    // entries and leave the frames -- and a fork does not give them to the
-    // child, which holds no tracker entry and no device (design-decisions
-    // 1579).
+/// [`alloc_for_user`], placed where the process says: exactly `size` bytes
+/// -- a size [`alloc`] gives as it is, a power of two of frames (16 KiB) or
+/// more --
+/// mapped at `user_virt`, page-aligned. The caller has checked that the
+/// range is the process's own to fill; a page already mapped in it undoes
+/// the placement (`AlreadyExists`). Returns `(user_virt, phys_addr, size)`.
+///
+/// # Errors
+///
+/// `InvalidArgument` for an address not page-aligned or a size `alloc` would
+/// round; `AlreadyExists` for a page already mapped in the range; whatever
+/// `alloc` answers.
+pub fn alloc_for_user_at(
+    pml4_phys: u64,
+    user_virt: u64,
+    size: usize,
+    constraint: DmaConstraint,
+) -> KernelResult<(u64, u64, usize)> {
+    if !user_virt.is_multiple_of(4096) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let buf = alloc(size, constraint)?;
+    if buf.allocated_size() != size {
+        // SAFETY: just allocated, mapped nowhere and given to no device.
+        unsafe { free(buf) }?;
+        return Err(KernelError::InvalidArgument);
+    }
+    place(pml4_phys, user_virt, buf)
+}
+
+/// The buffer `buf` mapped into the process at `user_virt`, and tracked:
+/// `(user_virt, phys_addr, size)`. A page already mapped in the range is the
+/// process's own: the buffer cannot go there, so what was mapped is taken
+/// back and the buffer freed (`AlreadyExists`).
+///
+/// The buffer is mapped with PRESENT + WRITABLE + USER + WRITE-THROUGH
+/// flags (suitable for device DMA). Write-through ensures the device sees
+/// writes immediately without needing explicit cache flushes on x86 (which
+/// has cache-coherent DMA for PCI devices). FOREIGN: the frames are the DMA
+/// tracker's, freed through it and only it -- not by an unmap or the
+/// address space's teardown, which clear the entries and leave the frames
+/// -- and a fork does not give them to the child, which holds no tracker
+/// entry and no device (design-decisions 1579).
+fn place(pml4_phys: u64, user_virt: u64, buf: DmaBuffer) -> KernelResult<(u64, u64, usize)> {
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+
+    let phys = buf.phys_addr();
+    let alloc_size = buf.allocated_size();
     let flags = PageFlags::PRESENT
         | PageFlags::WRITABLE
         | PageFlags::USER_ACCESSIBLE
@@ -269,8 +313,6 @@ pub fn alloc_for_user(
         let mapped = unsafe {
             page_table::map_4k_if_absent(pml4_phys, vaddr, phys.saturating_add(offset), flags)
         };
-        // A page already mapped in the range is the process's own: the buffer
-        // cannot go there, and what this loop mapped so far is taken back.
         if !matches!(mapped, Ok(true)) {
             let placed = DmaMappingInfo {
                 pml4_phys,
@@ -289,16 +331,12 @@ pub fn alloc_for_user(
         }
     }
 
-    // The physical memory is now owned by the process mapping.  It will
-    // be freed when the process unmaps the DMA region (via SYS_DMA_FREE).
-    //
-    // We need to store the order somewhere so we can free the correct
-    // buddy block later.  We store it in a tracking table.
-    //
-    // `DmaBuffer` has no `Drop` impl (the buddy frame is not auto-freed),
-    // so letting `buf` fall out of scope here does not release the
-    // physical memory — it stays allocated and tracked above until
-    // SYS_DMA_FREE.
+    // The physical memory is now owned by the process mapping. It is freed
+    // when the process frees the region (SYS_DMA_FREE), or the device it was
+    // given to is released. `DmaBuffer` has no `Drop` impl (the buddy frame
+    // is not auto-freed), so letting `buf` fall out of scope here does not
+    // release the physical memory: it stays allocated, and tracked here
+    // with its order, until then.
     track_dma_mapping(pml4_phys, user_virt, phys, buf.order, alloc_size);
 
     Ok((user_virt, phys, alloc_size))

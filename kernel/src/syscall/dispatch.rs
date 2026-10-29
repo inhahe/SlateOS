@@ -811,6 +811,8 @@ const fn build_v1_table() -> SyscallTable {
         Some(handlers::sys_pci_device_map_bar);
     handlers[super::number::SYS_PCI_DEVICE_DMA_ALLOC as usize] =
         Some(handlers::sys_pci_device_dma_alloc);
+    handlers[super::number::SYS_PCI_DEVICE_DMA_ALLOC_AT as usize] =
+        Some(handlers::sys_pci_device_dma_alloc_at);
     handlers[super::number::SYS_PCI_DEVICE_IRQ_SETUP as usize] =
         Some(handlers::sys_pci_device_irq_setup);
     handlers[super::number::SYS_PCI_DEVICE_IRQ_WAIT as usize] =
@@ -5987,17 +5989,20 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
 /// The `SYS_PCI_DEVICE_*` calls as scratch processes drive QEMU's `edu` device:
 /// open refused without a `PciDevice` capability and granted with one; the
 /// owner's configuration read and BAR size through the handle; another
-/// process's use of the handle `InvalidHandle`; and the owner's exit --
+/// process's use of the handle `InvalidHandle`; a DMA arena placed in memory
+/// the owner reserved, and refused anywhere else; and the owner's exit --
 /// `pcb::exit_close_fds`, as a dying thread runs it -- unbinds the device and
 /// unmaps its BAR, after which the handle is no longer held (a close is
 /// `InvalidHandle`). Skipped, and recorded so, where there is no `edu`.
 fn test_dispatch_device_calls() -> KernelResult<()> {
     use super::number::{
         SYS_PCI_DEVICE_BAR, SYS_PCI_DEVICE_CLOSE, SYS_PCI_DEVICE_CONFIG_READ,
-        SYS_PCI_DEVICE_IRQ_WAIT, SYS_PCI_DEVICE_MAP_BAR, SYS_PCI_DEVICE_OPEN,
+        SYS_PCI_DEVICE_DMA_ALLOC_AT, SYS_PCI_DEVICE_IRQ_WAIT, SYS_PCI_DEVICE_MAP_BAR,
+        SYS_PCI_DEVICE_OPEN,
     };
     use crate::cap::{ResourceType, Rights};
-    use crate::mm::page_table::{self, VirtAddr};
+    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+    use crate::mm::vma::{ForkPolicy, Vma, VmaKind};
     use crate::proc::pcb;
     use crate::proc::thread::self_test_as_process;
 
@@ -6062,6 +6067,56 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         if call(stranger, SYS_PCI_DEVICE_IRQ_WAIT, handle, 0, 0) != invalid {
             return Err("another process took the owner's interrupts");
         }
+        // A DMA arena placed in memory the owner reserved (as SYS_MMAP with
+        // MAP_LAZY reserves it), and refused anywhere else.
+        let reserved: u64 = 0x5000_0000_0000;
+        let frame = crate::mm::frame::FRAME_SIZE as u64;
+        pcb::add_vma(
+            driver,
+            Vma {
+                start: reserved,
+                end: reserved + 4 * frame,
+                kind: VmaKind::Anonymous,
+                flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+                fork: ForkPolicy::COPY,
+            },
+        )
+        .map_err(|_| "no reservation could be made")?;
+        let at = |va: u64, size: u64| {
+            let args = SyscallArgs {
+                arg0: handle,
+                arg1: va,
+                arg2: size,
+                arg3: 0,
+                arg4: 0,
+                arg5: 0,
+            };
+            self_test_as_process(driver, || {
+                dispatch(SYS_PCI_DEVICE_DMA_ALLOC_AT, &args).value
+            })
+        };
+        let invalid_argument = i64::from(KernelError::InvalidArgument.code());
+        if at(reserved + 4 * frame, frame) != invalid_argument
+            || at(reserved + 3 * frame, 2 * frame) != invalid_argument
+        {
+            return Err("a DMA arena was placed outside the owner's reservation");
+        }
+        if at(reserved + 1, frame) != invalid_argument
+            || at(reserved, frame + 4096) != invalid_argument
+        {
+            return Err("a DMA arena was placed misaligned, or rounded");
+        }
+        let device_addr = u64::try_from(at(reserved, 2 * frame))
+            .map_err(|_| "no DMA arena was placed in the reservation")?;
+        // The device's address is the arena's own, identity-mapped in its
+        // domain (or, with no IOMMU, physical): one page in, one page on.
+        if page_table::translate(pml4, VirtAddr::new(reserved + frame)) != Some(device_addr + frame)
+        {
+            return Err("the arena placed is not mapped where its device address says");
+        }
+        if at(reserved, frame) != i64::from(KernelError::AlreadyExists.code()) {
+            return Err("a DMA arena was placed over one already there");
+        }
         // The owner's exit, as a dying thread runs it: held handles closed,
         // its address space still there.
         pcb::exit_close_fds(driver);
@@ -6070,6 +6125,9 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         }
         if page_table::translate(pml4, VirtAddr::new(va)).is_some() {
             return Err("BAR0 is still mapped after its owner's exit");
+        }
+        if page_table::translate(pml4, VirtAddr::new(reserved)).is_some() {
+            return Err("the placed DMA arena is still mapped after its owner's exit");
         }
         if call(driver, SYS_PCI_DEVICE_CLOSE, handle, 0, 0)
             != i64::from(KernelError::InvalidHandle.code())
@@ -6084,7 +6142,9 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         serial_println!("[syscall]   FAIL: device calls: {}", msg);
         return Err(KernelError::InternalError);
     }
-    serial_println!("[syscall]   device calls: OK (capability, ownership, exit release)");
+    serial_println!(
+        "[syscall]   device calls: OK (capability, ownership, a DMA arena placed, exit release)"
+    );
     skips.report("[syscall]");
     Ok(())
 }

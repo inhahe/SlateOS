@@ -283,6 +283,83 @@ pub fn dma_alloc(
     size: u64,
     constraint: crate::mm::dma::DmaConstraint,
 ) -> KernelResult<(u64, u64)> {
+    let pml4 = crate::proc::pcb::get_pml4(pid)
+        .filter(|&p| p != 0)
+        .ok_or(KernelError::NoSuchProcess)?;
+    with_owned(raw, pid, |_| Ok(()))?;
+    let size = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
+    let (user_virt, phys, size) = crate::mm::dma::alloc_for_user(pml4, size, constraint)?;
+    give(raw, pid, pml4, user_virt, phys, size)
+}
+
+/// [`dma_alloc`], placed where `pid` says: an arena of exactly `size` bytes
+/// -- a power of two of frames -- at `user_virt`, inside memory `pid` has
+/// reserved for itself and not yet touched (a lazily mapped anonymous
+/// region, `SYS_MMAP` with `MAP_LAZY`). So a driver process can keep its
+/// device's memory where its own allocator wants it -- beside its heap, the
+/// Linux layer's direct map -- rather than where the kernel would put it.
+/// Returns the address the device must be given.
+///
+/// # Errors
+///
+/// `InvalidArgument` for a range outside such a reservation, or a size or
+/// an address [`crate::mm::dma::alloc_for_user_at`] refuses; `AlreadyExists`
+/// for a range with a page already in it; the device's own refusals.
+pub fn dma_alloc_at(
+    raw: u64,
+    pid: ProcessId,
+    user_virt: u64,
+    size: u64,
+    constraint: crate::mm::dma::DmaConstraint,
+) -> KernelResult<u64> {
+    let pml4 = crate::proc::pcb::get_pml4(pid)
+        .filter(|&p| p != 0)
+        .ok_or(KernelError::NoSuchProcess)?;
+    with_owned(raw, pid, |_| Ok(()))?;
+    let end = user_virt
+        .checked_add(size)
+        .ok_or(KernelError::InvalidArgument)?;
+    if !reserved_anonymous(pid, user_virt, end) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let size = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
+    let (user_virt, phys, size) =
+        crate::mm::dma::alloc_for_user_at(pml4, user_virt, size, constraint)?;
+    give(raw, pid, pml4, user_virt, phys, size).map(|(_, device_addr)| device_addr)
+}
+
+/// Whether `[start, end)` lies wholly in anonymous regions `pid` mapped for
+/// itself -- no gap, no stack, guard, fixed or shared mapping -- so that an
+/// arena placed there takes nobody else's addresses.
+fn reserved_anonymous(pid: ProcessId, start: u64, end: u64) -> bool {
+    use crate::mm::vma::VmaKind;
+
+    if start >= end {
+        return false;
+    }
+    let covered =
+        crate::proc::pcb::vma_coverage_gaps(pid, start, end).is_some_and(|gaps| gaps.is_empty());
+    covered
+        && crate::proc::pcb::list_vmas(pid).is_some_and(|vmas| {
+            vmas.iter()
+                .filter(|v| v.start < end && start < v.end)
+                .all(|v| v.kind == VmaKind::Anonymous)
+        })
+}
+
+/// The arena just mapped at `user_virt` in `pid` (physical `phys`, `size`
+/// bytes) given to the device `raw` names: marked its, mapped into its
+/// domain, and recorded among its arenas. Returns (the address `pid` sees,
+/// the address the device must be given). Not given -- the device gone, the
+/// domain refusing -- the arena is freed.
+fn give(
+    raw: u64,
+    pid: ProcessId,
+    pml4: u64,
+    user_virt: u64,
+    phys: u64,
+    size: usize,
+) -> KernelResult<(u64, u64)> {
     use crate::mm::dma;
 
     /// Why the arena did not reach the device.
@@ -293,12 +370,6 @@ pub fn dma_alloc(
         Error(KernelError),
     }
 
-    let pml4 = crate::proc::pcb::get_pml4(pid)
-        .filter(|&p| p != 0)
-        .ok_or(KernelError::NoSuchProcess)?;
-    with_owned(raw, pid, |_| Ok(()))?;
-    let size = usize::try_from(size).map_err(|_| KernelError::InvalidArgument)?;
-    let (user_virt, phys, size) = dma::alloc_for_user(pml4, size, constraint)?;
     // Given to the device under the device table's lock: a close cannot
     // release the device -- and its domain id be reused by another device --
     // between finding the domain and mapping into it, and a free racing this

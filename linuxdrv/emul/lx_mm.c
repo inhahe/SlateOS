@@ -49,8 +49,30 @@ int lx_mm_init(void)
  * The `size` bytes kmalloc() hands out at `p` are slab memory, as Linux's
  * own are: their pages say so (PageSlab), which is how Linux code tells an
  * object it may kfree() from one it took elsewhere -- kernel/resource.c's
- * free_resource() among them.
+ * free_resource() among them. Whole pages handed out otherwise -- coherent
+ * DMA memory (lx_dma.c) -- are no slab's, and say that, whatever their
+ * pages last held.
  */
+/*
+ * A driver process has no vmalloc area: every address Linux code holds is
+ * the heap's, the window's, or the process's own, none of them vmalloc
+ * memory (whose DMA Linux refuses, it being no direct-map memory).
+ */
+bool is_vmalloc_addr(const void *x)
+{
+	return false;
+}
+
+void lx_mm_mark_pages(const void *p, size_t size)
+{
+	struct page *page = virt_to_page(p);
+	struct page *last = virt_to_page(p + size - 1);
+
+	for (; page <= last; page++)
+		if (PageSlab(page))
+			__folio_clear_slab(page_folio(page));
+}
+
 void lx_mm_mark_slab(const void *p, size_t size)
 {
 	struct page *page = virt_to_page(p);

@@ -62,6 +62,28 @@ impl Buddy {
     /// Both ranges are writable memory, the allocator's alone for as long
     /// as it lives; the order bytes read 0 (fresh mapped memory does).
     pub unsafe fn new(base: usize, top: u32, orders: *mut u8) -> Result<Self, RegionError> {
+        // SAFETY: the caller's, which `new_empty` asks too.
+        let mut buddy = unsafe { Self::new_empty(base, top, orders) }?;
+        // SAFETY: the whole region is one block of the region's order,
+        // aligned to it, the caller's memory.
+        unsafe { buddy.give(base, top) };
+        Ok(buddy)
+    }
+
+    /// An allocator over `2^top` bytes at `base` with nothing free in it
+    /// yet: blocks are given to it ([`Self::give`]) as their memory becomes
+    /// usable, and it touches the region's memory only where it has been
+    /// given some -- a free block holds its list links.
+    ///
+    /// # Errors
+    ///
+    /// A region the allocator cannot manage ([`RegionError`]).
+    ///
+    /// # Safety
+    ///
+    /// The order bytes at `orders` are writable, the allocator's alone for
+    /// as long as it lives, and read 0.
+    pub unsafe fn new_empty(base: usize, top: u32, orders: *mut u8) -> Result<Self, RegionError> {
         let size = 1usize.checked_shl(top).ok_or(RegionError::BadSize)?;
         let levels = top
             .checked_sub(MIN_ORDER)
@@ -73,15 +95,41 @@ impl Buddy {
         if !base.is_multiple_of(size) {
             return Err(RegionError::Misaligned);
         }
-        let mut buddy = Buddy {
+        Ok(Buddy {
             base,
             top,
             orders,
             heads: [0; ORDERS],
+        })
+    }
+
+    /// The block of `2^k` bytes at `at` made the allocator's to give out:
+    /// whether it took -- a block inside the region, aligned to its size,
+    /// of an order the allocator has, and not already its.
+    ///
+    /// # Safety
+    ///
+    /// The block is writable memory, the allocator's alone from now on.
+    pub unsafe fn give(&mut self, at: usize, k: u32) -> bool {
+        let Some(size) = 1usize.checked_shl(k) else {
+            return false;
         };
-        // SAFETY: the whole region is one free block, the caller's memory.
-        unsafe { buddy.push(base, top) };
-        Ok(buddy)
+        let inside = at
+            .checked_sub(self.base)
+            .zip(1usize.checked_shl(self.top))
+            .is_some_and(|(offset, region)| {
+                offset.checked_add(size).is_some_and(|end| end <= region)
+            });
+        if !inside || !at.is_multiple_of(size) || k < MIN_ORDER || k > self.top {
+            return false;
+        }
+        if self.meta(at) != Some(0) {
+            return false;
+        }
+        // SAFETY: the caller's: the block is the allocator's to write; it is
+        // on no list (its order byte reads none) and given to no one.
+        unsafe { self.push(at, k) };
+        true
     }
 
     /// The order an allocation of `size` bytes takes: the smallest whose
@@ -326,6 +374,45 @@ mod tests {
         assert_eq!(r.buddy.free_bytes(), total);
         // Joined into the one block again: the whole region can be had.
         assert!(r.buddy.alloc(1 << 16).is_some());
+    }
+
+    #[test]
+    fn an_empty_region_gives_out_only_what_it_was_given() {
+        let size = 1usize << 16;
+        let mut memory = vec![0u8; size * 2];
+        let base = (memory.as_mut_ptr() as usize).next_multiple_of(size);
+        let mut orders = vec![0u8; size >> MIN_ORDER];
+        // SAFETY: both vectors live as long as the allocator, untouched else.
+        let mut b = unsafe { Buddy::new_empty(base, 16, orders.as_mut_ptr()) }.unwrap();
+        assert_eq!(b.free_bytes(), 0);
+        assert!(b.alloc(16).is_none(), "nothing given yet");
+        let chunk = base + (1 << 14);
+        // SAFETY: inside `memory`.
+        unsafe {
+            assert!(!b.give(chunk + 16, 14), "misaligned");
+            assert!(!b.give(base + size, 14), "past the region");
+            assert!(!b.give(chunk, 17), "an order past the region's");
+            assert!(b.give(chunk, 14));
+            assert!(!b.give(chunk, 14), "given twice");
+        }
+        assert_eq!(b.free_bytes(), 1 << 14);
+        let blocks: Vec<usize> = (0..4).map(|_| b.alloc(1 << 12).unwrap()).collect();
+        for &a in &blocks {
+            assert!(
+                a >= chunk && a < chunk + (1 << 14),
+                "only from the block given"
+            );
+        }
+        assert!(b.alloc(16).is_none(), "and no more than it");
+        for &a in &blocks {
+            assert!(b.free(a));
+        }
+        assert_eq!(
+            b.free_bytes(),
+            1 << 14,
+            "joined into the block given, no further"
+        );
+        drop(memory);
     }
 
     #[test]

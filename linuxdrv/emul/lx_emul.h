@@ -39,6 +39,8 @@ bool lx_initcall_fatal(const void *fn, int ret);
  * pages of `size` bytes kmalloc handed out at `p` marked slab memory. */
 int lx_mm_init(void);
 void lx_mm_mark_slab(const void *p, size_t size);
+/* lx_mm.c: the pages of `size` bytes at `p`, handed out whole, said to be no slab's. */
+void lx_mm_mark_pages(const void *p, size_t size);
 /* lx_pci.c: whether a driver took every PCI function the process was given,
  * once probing is done; each it did not is said. And of the functions given,
  * at most LX_PCI_FUNCTIONS_MAX: `dev`'s place among them (-1 for none), and

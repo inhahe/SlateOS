@@ -35,6 +35,21 @@ void slx_heap(unsigned long *base, unsigned long *bytes);
 void *slx_map_lazy(unsigned long bytes);
 
 /*
+ * The DMA window (design-decisions 1586): beside the heap, backed a chunk
+ * at a time by the device's own DMA memory. slx_dma_open sets it up for the
+ * device `handle` names, which has `bits` address bits (64 for any, 32 or
+ * 24; the kernel's rule) -- from then on slx_alloc serves from it while it
+ * can -- and answers 0, or an error; one per process. slx_dma_bits changes
+ * the width for the chunks to come; slx_dma_alloc allocates from the window
+ * alone (a chunk, 4 MiB, at most); slx_dma_address is where the device sees
+ * the `len` bytes at `ptr`, or ~0 when it does not.
+ */
+long slx_dma_open(long handle, unsigned long long bits);
+void slx_dma_bits(unsigned long long bits);
+void *slx_dma_alloc(unsigned long size);
+unsigned long long slx_dma_address(const void *ptr, unsigned long len);
+
+/*
  * The PCI functions the process was given, by their device handles
  * (design-decisions 1579, 1584): each answers a value of 0 or more, or a
  * negative SlateOS error (-400 when the process may not: no capability for

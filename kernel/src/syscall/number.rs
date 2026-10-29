@@ -7416,6 +7416,20 @@ pub const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 /// `ResourceType::PciDevice`), then take its interrupts here with `arg1` 0.
 pub const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 
+/// [`SYS_PCI_DEVICE_DMA_ALLOC`], placed where the caller says: `arg0` the
+/// handle; `arg1` the address, page-aligned, inside anonymous memory the
+/// caller mapped for itself (`SYS_MMAP` with `MAP_LAZY`) and has not yet
+/// touched; `arg2` the size, given exactly -- a power of two of frames
+/// (16 KiB) or more; `arg3` the device's address bits, as for
+/// `SYS_PCI_DEVICE_DMA_ALLOC`. Returns the address the device must be given.
+/// `InvalidArgument` for a range outside such memory, a misaligned address
+/// or a size that would be rounded; `AlreadyExists` for a range with a page
+/// already in it. So a driver keeps its device's memory where its own
+/// allocator wants it -- the Linux driver layer, beside its heap
+/// (design-decisions 1586) -- not where the kernel would put it. Freed as
+/// `SYS_PCI_DEVICE_DMA_ALLOC`'s arenas are.
+pub const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

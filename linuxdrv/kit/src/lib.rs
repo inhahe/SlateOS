@@ -12,7 +12,7 @@
 //! and how it ends.
 //!
 //! What can be tested on the host is a library ([`args`], [`bars`],
-//! [`buddy`], [`task`]); the rest (`pci`, `sched`, `sys`) is built only for the driver
+//! [`buddy`], [`task`], [`window`]); the rest (`pci`, `sched`, `sys`) is built only for the driver
 //! process's own target.
 
 // Bare only on the driver process's own target; on the host, std, for the
@@ -23,6 +23,7 @@ pub mod args;
 pub mod bars;
 pub mod buddy;
 pub mod task;
+pub mod window;
 
 #[cfg(target_os = "none")]
 mod pci;

@@ -142,7 +142,7 @@ pub fn self_test() -> KernelResult<()> {
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic{}: OK",
         elf.len(),
         if pci {
-            ", a PCI function probed through Linux's PCI core and its interrupts handled, and one no driver took"
+            ", a PCI function probed through Linux's PCI core, its interrupts handled and its DMA done, and one no driver took"
         } else {
             ""
         }
@@ -176,7 +176,7 @@ fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         (
             b"pci",
             EXIT_OK,
-            "probed the card through Linux's PCI core, handled its interrupts and exited 0",
+            "probed the card through Linux's PCI core, handled its interrupts, had it DMA and exited 0",
         ),
         (
             b"pcifail",

@@ -61,6 +61,7 @@
 #include <linux/srcu.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
+#include <linux/dma-mapping.h>
 #include <linux/io.h>
 #include <linux/etherdevice.h>
 #include <linux/unaligned.h>
@@ -210,6 +211,40 @@ static irqreturn_t hello_isr_thread(int irq, void *data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * DMA (lx_dma.c): a 64-bit mask; memory outside the DMA window refused;
+ * coherent memory zeroed and aligned; a kmalloc'd frame given a DMA
+ * address -- and the card itself, given a descriptor ring in the coherent
+ * memory pointing at the frame, reading both from the window through its
+ * IOMMU domain and writing the descriptor's status back into it.
+ */
+#define HELLO_TCTL 0x0400
+#define HELLO_TCTL_EN BIT(1)
+#define HELLO_TCTL_PSP BIT(3)
+#define HELLO_TDBAL 0x3800
+#define HELLO_TDBAH 0x3804
+#define HELLO_TDLEN 0x3808
+#define HELLO_TDH 0x3810
+#define HELLO_TDT 0x3818
+#define HELLO_TXD_EOP 0x01
+#define HELLO_TXD_IFCS 0x02
+#define HELLO_TXD_RS 0x08
+#define HELLO_TXD_DD 0x01
+#define HELLO_TX_DESCS 8
+
+/* The 82574's legacy transmit descriptor. */
+struct hello_tx_desc {
+	__le64 addr;
+	__le16 length;
+	u8 cso;
+	u8 cmd;
+	u8 status;
+	u8 css;
+	__le16 special;
+};
+
+static char hello_static_frame[ETH_ZLEN];
+
 #define HELLO_PCI_CHECK(cond, what)						\
 	do {									\
 		if (!(cond)) {							\
@@ -267,6 +302,57 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 	return 0;
 }
 
+static int hello_pci_dma(struct pci_dev *pdev)
+{
+	size_t ring_bytes = HELLO_TX_DESCS * sizeof(struct hello_tx_desc);
+	struct hello_tx_desc *ring;
+	dma_addr_t ring_dma, frame_dma;
+	u8 *frame;
+	size_t i;
+
+	HELLO_PCI_CHECK(!dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64)),
+			"a 64-bit DMA mask was refused");
+	HELLO_PCI_CHECK(dma_mapping_error(&pdev->dev,
+					  dma_map_single(&pdev->dev, hello_static_frame,
+							 sizeof(hello_static_frame), DMA_TO_DEVICE)),
+			"memory outside the DMA window was mapped for the device");
+	ring = dma_alloc_coherent(&pdev->dev, ring_bytes, &ring_dma, GFP_KERNEL);
+	HELLO_PCI_CHECK(ring && ring_dma && !(ring_dma & (PAGE_SIZE - 1)),
+			"no page-aligned coherent memory for a descriptor ring");
+	for (i = 0; i < ring_bytes; i++)
+		HELLO_PCI_CHECK(!((u8 *)ring)[i], "coherent memory was not zeroed");
+	frame = kmalloc(ETH_ZLEN, GFP_KERNEL);
+	HELLO_PCI_CHECK(frame, "no memory");
+	eth_broadcast_addr(frame);
+	ether_addr_copy(frame + ETH_ALEN, hello_card_mac);
+	memset(frame + 2 * ETH_ALEN, 0, ETH_ZLEN - 2 * ETH_ALEN);
+	frame_dma = dma_map_single(&pdev->dev, frame, ETH_ZLEN, DMA_TO_DEVICE);
+	HELLO_PCI_CHECK(!dma_mapping_error(&pdev->dev, frame_dma),
+			"a kmalloc'd frame had no DMA address");
+
+	ring[0].addr = cpu_to_le64(frame_dma);
+	ring[0].length = cpu_to_le16(ETH_ZLEN);
+	ring[0].cmd = HELLO_TXD_EOP | HELLO_TXD_IFCS | HELLO_TXD_RS;
+	writel(lower_32_bits(ring_dma), hello_regs + HELLO_TDBAL);
+	writel(upper_32_bits(ring_dma), hello_regs + HELLO_TDBAH);
+	writel(ring_bytes, hello_regs + HELLO_TDLEN);
+	writel(0, hello_regs + HELLO_TDH);
+	writel(0, hello_regs + HELLO_TDT);
+	writel(HELLO_TCTL_EN | HELLO_TCTL_PSP, hello_regs + HELLO_TCTL);
+	/* The descriptor in memory before the card is told of it. */
+	wmb();
+	writel(1, hello_regs + HELLO_TDT);
+	for (i = 0; i < 200 && !(READ_ONCE(ring[0].status) & HELLO_TXD_DD); i++)
+		msleep(1);
+	writel(0, hello_regs + HELLO_TCTL);
+	HELLO_PCI_CHECK(READ_ONCE(ring[0].status) & HELLO_TXD_DD,
+			"the card never wrote back the descriptor it was given");
+	dma_unmap_single(&pdev->dev, frame_dma, ETH_ZLEN, DMA_TO_DEVICE);
+	kfree(frame);
+	dma_free_coherent(&pdev->dev, ring_bytes, ring, ring_dma);
+	return 0;
+}
+
 static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	void __iomem *regs;
@@ -316,9 +402,11 @@ static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 	hello_regs = regs;
 	err = hello_pci_interrupts(pdev);
+	if (!err)
+		err = hello_pci_dma(pdev);
 	if (err)
 		goto unmap;
-	dev_info(&pdev->dev, "an 82574 (%pR), MAC %pM read through BAR0, its interrupts handled\n",
+	dev_info(&pdev->dev, "an 82574 (%pR), MAC %pM read through BAR0, its interrupts handled, a descriptor and a frame read by it from the DMA window\n",
 		 &pdev->resource[0], mac);
 	hello_pci_probed = true;
 	return 0;

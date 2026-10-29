@@ -270,6 +270,15 @@ static char hello_static_frame[ETH_ZLEN];
 #define HELLO_ICR_TXQ0 BIT(22)
 #define HELLO_ICR_OTHER BIT(24)
 #define HELLO_IVAR_ROUTES (0x8 | (0x9 << 8) | (0xa << 16))
+/*
+ * Each vector's throttle interval, EITR(n), in 256 ns units, while the
+ * causes are raised one by one: its most, 16.8 ms, past any short fixed wait
+ * -- a jiffy's sleep or two -- for QEMU's second sending of each vector
+ * (below), so that the test meets a late second every time, not on a loaded
+ * day. 0, the shortest, before and after.
+ */
+#define HELLO_EITR(n) (0x00e8 + 4 * (n))
+#define HELLO_EITR_LATE 0xffff
 
 static irqreturn_t hello_isr_msix(int irq, void *data)
 {
@@ -285,6 +294,7 @@ static int hello_pci_msix(struct pci_dev *pdev)
 	};
 	unsigned long before[3];
 	unsigned int i, v, tries;
+	u64 give_up;
 	int irqs[3];
 
 	HELLO_PCI_CHECK(pci_alloc_irq_vectors(pdev, 3, 3, PCI_IRQ_MSIX) == 3 && pdev->msix_enabled,
@@ -295,6 +305,8 @@ static int hello_pci_msix(struct pci_dev *pdev)
 	writel(~0U, hello_regs + HELLO_IMC);
 	writel(~0U, hello_regs + HELLO_ICR);
 	writel(HELLO_IVAR_ROUTES, hello_regs + HELLO_IVAR);
+	for (v = 0; v < 3; v++)
+		writel(0, hello_regs + HELLO_EITR(v));
 	writel(HELLO_ICR_RXQ0 | HELLO_ICR_TXQ0 | HELLO_ICR_OTHER, hello_regs + HELLO_IMS);
 	for (v = 0; v < 3; v++) {
 		irqs[v] = pci_irq_vector(pdev, v);
@@ -302,9 +314,14 @@ static int hello_pci_msix(struct pci_dev *pdev)
 				"MSI-X vectors without interrupts of their own");
 		before[v] = lx_irq_count(irqs[v]);
 	}
-	/* An interrupt that comes before any handler is requested is dropped, not the next handler's. */
+	/*
+	 * An interrupt that comes before any handler is requested is dropped,
+	 * not the next handler's -- QEMU's second sending of it too, which its
+	 * shortest throttle interval (the EITRs' 0 above) and its timers'
+	 * lateness under emulation bring within tens of milliseconds: waited out.
+	 */
 	writel(HELLO_ICR_RXQ0, hello_regs + HELLO_ICS);
-	msleep(5);
+	msleep(100);
 	writel(HELLO_ICR_RXQ0, hello_regs + HELLO_ICR);
 	for (v = 0; v < 3; v++)
 		HELLO_PCI_CHECK(!request_irq(irqs[v], hello_isr_msix, 0, "hello-msix", pdev),
@@ -313,21 +330,35 @@ static int hello_pci_msix(struct pci_dev *pdev)
 	for (v = 0; v < 3; v++)
 		HELLO_PCI_CHECK(lx_irq_count(irqs[v]) == before[v],
 				"an interrupt from before its handler was requested reached it");
+	for (v = 0; v < 3; v++)
+		writel(HELLO_EITR_LATE, hello_regs + HELLO_EITR(v));
 	for (i = 0; i < ARRAY_SIZE(causes); i++) {
 		for (v = 0; v < 3; v++)
 			before[v] = lx_irq_count(irqs[v]);
 		writel(causes[i].cause, hello_regs + HELLO_ICS);
-		for (tries = 0; tries < 100 && lx_irq_count(irqs[causes[i].vector]) == before[causes[i].vector];
-		     tries++)
-			msleep(1);
+		/*
+		 * Its first run, seen as soon as it comes -- the loop takes the
+		 * device's interrupts at each turn, and a yield() is one -- not a
+		 * jiffy's sleep later, by when QEMU's second sending (below) may
+		 * have come too and hidden whether it was waited for.
+		 */
+		give_up = slx_now_ns() + 100 * NSEC_PER_MSEC;
+		while (lx_irq_count(irqs[causes[i].vector]) == before[causes[i].vector] &&
+		       slx_now_ns() < give_up)
+			yield();
 		writel(causes[i].clear, hello_regs + HELLO_ICR);
 		/*
-		 * Its own vector, at least once -- QEMU's model throttles each
-		 * MSI-X vector, and sends it once more when its throttle timer
-		 * ends (128 us), which is waited out here, before the next
-		 * cause -- and no other.
+		 * Its own vector, at least once, and no other. QEMU's model
+		 * throttles each MSI-X vector, and sends it once more when its
+		 * throttle interval ends -- HELLO_EITR_LATE here, 128 us by
+		 * default -- and its timers fire late under emulation, by
+		 * milliseconds: a fixed wait once let the second land in the next
+		 * cause's window. So it is waited for before the next cause: the
+		 * handler's second run, a second at most (hardware sends none).
 		 */
-		msleep(2);
+		for (tries = 0; tries < 1000 && lx_irq_count(irqs[causes[i].vector]) < before[causes[i].vector] + 2;
+		     tries++)
+			msleep(1);
 		for (v = 0; v < 3; v++)
 			if ((lx_irq_count(irqs[v]) != before[v]) != (v == causes[i].vector)) {
 				dev_err(&pdev->dev, "cause %#x: vectors ran %lu, %lu, %lu times, not vector %u alone\n",
@@ -337,8 +368,22 @@ static int hello_pci_msix(struct pci_dev *pdev)
 				HELLO_PCI_CHECK(false, "a cause did not run its own MSI-X vector's handler alone");
 			}
 	}
+	/*
+	 * Then nothing more, for 200 ms: each vector's second sending was taken
+	 * in its own cause's turn. One that comes now was left by a wait that
+	 * ended too soon -- which a later cause's turn would have taken for its
+	 * own -- or is no cause's at all.
+	 */
+	for (v = 0; v < 3; v++)
+		before[v] = lx_irq_count(irqs[v]);
+	msleep(200);
+	for (v = 0; v < 3; v++)
+		HELLO_PCI_CHECK(lx_irq_count(irqs[v]) == before[v],
+				"an MSI-X vector ran after its cause's turn had ended");
 	writel(~0U, hello_regs + HELLO_IMC);
 	writel(0, hello_regs + HELLO_IVAR);
+	for (v = 0; v < 3; v++)
+		writel(0, hello_regs + HELLO_EITR(v));
 	for (v = 0; v < 3; v++)
 		free_irq(irqs[v], pdev);
 	pci_free_irq_vectors(pdev);

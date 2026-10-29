@@ -6690,6 +6690,157 @@ pub fn remove_foreign_region(pid: ProcessId, start: u64, end: u64) -> bool {
     ours
 }
 
+/// What a device region took from the memory a process reserved
+/// ([`claim_reserved_region`]): the reservation's own flags and fork
+/// policy, which [`return_reserved_region`] gives back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reservation {
+    /// The reserved region's flags.
+    pub flags: crate::mm::page_table::PageFlags,
+    /// What a fork did with the reserved region.
+    pub fork: crate::mm::vma::ForkPolicy,
+}
+
+/// Make `[start, end)` -- whole frames -- a device region of `pid`'s, as a
+/// mapped BAR is one (`Fixed`, with `flags`, which carry
+/// `PageFlags::FOREIGN`, and not given to a forked child), taken out of
+/// memory `pid` reserved for itself: the range lies wholly inside one
+/// private anonymous region -- not a stack, a guard, the `brk` heap, a file,
+/// a shared mapping or another device's region -- that `pid` may read and
+/// write. Checked and changed under one lock, so nothing can map or unmap
+/// there in between. The region's pages are the caller's to fill, under the
+/// address space's page-table lock, and the caller checks that none is
+/// there already (a page the process touched before the claim).
+///
+/// Returns the reservation's flags and fork policy, for
+/// [`return_reserved_region`] to give back when the device's memory leaves.
+///
+/// # Errors
+/// - [`KernelError::NoSuchProcess`] if the PID doesn't exist.
+/// - [`KernelError::InvalidArgument`] if the range is empty or not whole
+///   frames, or does not lie inside one such region.
+pub fn claim_reserved_region(
+    pid: ProcessId,
+    start: u64,
+    end: u64,
+    flags: crate::mm::page_table::PageFlags,
+) -> KernelResult<Reservation> {
+    use crate::mm::page_table::PageFlags;
+    use crate::mm::vma::ForkPolicy;
+
+    let frame = crate::mm::frame::FRAME_SIZE as u64;
+    if end <= start || !start.is_multiple_of(frame) || !end.is_multiple_of(frame) {
+        return Err(KernelError::InvalidArgument);
+    }
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table.get_mut(&pid).ok_or(KernelError::NoSuchProcess)?;
+    let idx = proc
+        .vmas
+        .iter()
+        .position(|v| v.start <= start && end <= v.end)
+        .ok_or(KernelError::InvalidArgument)?;
+    // Writable is readable too: `PROT_NONE` clears both (`protect_vma_range`).
+    let reservable = proc.vmas.get(idx).is_some_and(|v| {
+        v.kind == VmaKind::Anonymous
+            && !v.flags.contains(PageFlags::SHARED)
+            && v.flags.contains(PageFlags::WRITABLE)
+    });
+    if !reservable {
+        return Err(KernelError::InvalidArgument);
+    }
+    let vma = proc.vmas.remove(idx);
+    let mut pieces: Vec<Vma> = Vec::with_capacity(3);
+    if vma.start < start {
+        pieces.push(vma_subrange(&vma, vma.start, start, vma.flags));
+    }
+    pieces.push(Vma {
+        start,
+        end,
+        kind: VmaKind::Fixed,
+        flags,
+        fork: ForkPolicy {
+            dont_copy: true,
+            ..ForkPolicy::COPY
+        },
+    });
+    if end < vma.end {
+        pieces.push(vma_subrange(&vma, end, vma.end, vma.flags));
+    }
+    // An anonymous region has no backing file: no reference to share out
+    // among the pieces. They take its place in the sorted list.
+    for piece in pieces.into_iter().rev() {
+        proc.vmas.insert(idx, piece);
+    }
+    Ok(Reservation {
+        flags: vma.flags,
+        fork: vma.fork,
+    })
+}
+
+/// Give `[start, end)` back to the memory it was claimed from
+/// ([`claim_reserved_region`]) once the device's memory there has gone: if
+/// it is still exactly that device region, in the address space
+/// `pml4_phys`, it becomes anonymous memory again with the reservation's
+/// flags and fork policy -- reading 0 when next touched -- joined to an
+/// anonymous neighbour that matches. A region the process has replaced
+/// since, or a process gone or exec'd (whose regions were reset), is left
+/// alone. Returns whether it was given back.
+pub fn return_reserved_region(
+    pid: ProcessId,
+    pml4_phys: u64,
+    start: u64,
+    end: u64,
+    reservation: Reservation,
+) -> bool {
+    use crate::mm::page_table::PageFlags;
+
+    let mut table = PROCESS_TABLE.lock();
+    let Some(proc) = table.get_mut(&pid).filter(|p| p.pml4_phys == pml4_phys) else {
+        return false;
+    };
+    let Ok(idx) = proc.vmas.binary_search_by_key(&start, |v| v.start) else {
+        return false;
+    };
+    let ours = proc.vmas.get(idx).is_some_and(|v| {
+        v.end == end && v.kind == VmaKind::Fixed && v.flags.contains(PageFlags::FOREIGN)
+    });
+    if !ours {
+        return false;
+    }
+    let same = |v: &Vma| {
+        v.kind == VmaKind::Anonymous && v.flags == reservation.flags && v.fork == reservation.fork
+    };
+    let mut region = Vma {
+        start,
+        end,
+        kind: VmaKind::Anonymous,
+        flags: reservation.flags,
+        fork: reservation.fork,
+    };
+    // The neighbour after first, so that the index of the one before stays
+    // what it was.
+    let after = idx.saturating_add(1);
+    if proc
+        .vmas
+        .get(after)
+        .is_some_and(|v| v.start == end && same(v))
+    {
+        region.end = proc.vmas.remove(after).end;
+    }
+    let joined = idx
+        .checked_sub(1)
+        .and_then(|before| proc.vmas.get_mut(before))
+        .filter(|v| v.end == start && same(v))
+        .map(|v| v.end = region.end)
+        .is_some();
+    if joined {
+        proc.vmas.remove(idx);
+    } else if let Some(slot) = proc.vmas.get_mut(idx) {
+        *slot = region;
+    }
+    true
+}
+
 /// Remove a VMA from a process's VMA list by start address.
 ///
 /// Returns `true` if a VMA was found and removed, `false` otherwise.
@@ -7394,8 +7545,12 @@ fn resolve_subpaged_fault(
         sibling_present = true;
         #[allow(clippy::arithmetic_side_effects)]
         let candidate = phys4k & !(FRAME_SIZE as u64 - 1);
-        let shared_by_design = page_table::translate_flags(pml4_phys, sub_va)
-            .is_some_and(|f| f.contains(PageFlags::SHARED));
+        // Shared by design, or not the space's at all (`FOREIGN`: a device's
+        // registers or DMA memory, whose frame a refcount of 1 says nothing
+        // about) -- never the frame to zero a slice of and map as its own.
+        let not_owned = PageFlags::SHARED.bits() | PageFlags::FOREIGN.bits();
+        let shared_by_design = page_table::read_leaf_pte(pml4_phys, sub_va)
+            .is_some_and(|pte| pte.raw() & not_owned != 0);
         let alone = !shared_by_design
             && PhysFrame::from_addr(candidate).is_some_and(|f| frame::refcount(f) == 1);
         if alone {

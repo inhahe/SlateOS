@@ -220,10 +220,8 @@ pub unsafe fn free(buf: DmaBuffer) -> KernelResult<()> {
 ///
 /// Returns `(user_virt, phys_addr, actual_size)` on success.
 ///
-/// The buffer is mapped with PRESENT + WRITABLE + USER + WRITE-THROUGH
-/// flags (suitable for device DMA).  Write-through ensures the device
-/// sees writes immediately without needing explicit cache flushes on
-/// x86 (which has cache-coherent DMA for PCI devices).
+/// The buffer is mapped as [`place`] maps it: write-back, which x86's
+/// cache-coherent PCI DMA needs nothing more than, and never executable.
 ///
 /// ## Arguments
 ///
@@ -248,87 +246,141 @@ pub fn alloc_for_user(
             return Err(e);
         }
     };
-    place(pml4_phys, user_virt, buf)
+    place(pml4_phys, user_virt, buf, None)
 }
 
-/// [`alloc_for_user`], placed where the process says: exactly `size` bytes
-/// -- a size [`alloc`] gives as it is, a power of two of frames (16 KiB) or
-/// more --
-/// mapped at `user_virt`, page-aligned. The caller has checked that the
-/// range is the process's own to fill; a page already mapped in it undoes
-/// the placement (`AlreadyExists`). Returns `(user_virt, phys_addr, size)`.
+/// [`alloc_for_user`], placed where the process `pid` says: exactly `size`
+/// bytes -- a power of two of frames (16 KiB) or more -- at `user_virt`, on
+/// a frame boundary, inside memory `pid` reserved for itself and has not
+/// touched there. The range becomes a device region of its own
+/// ([`crate::proc::pcb::claim_reserved_region`]) for as long as the buffer
+/// lives, so that no anonymous-memory path -- a fault, a fork, reclaim --
+/// meets the device's frames, and is given back to the reservation when
+/// the buffer is freed. Returns `(user_virt, phys_addr, size)`.
+///
+/// Everything about the request is checked before anything is allocated.
 ///
 /// # Errors
 ///
-/// `InvalidArgument` for an address not page-aligned or a size `alloc` would
-/// round; `AlreadyExists` for a page already mapped in the range; whatever
-/// `alloc` answers.
+/// `InvalidArgument` for a size or an address not as above, or a range
+/// outside such a reservation; `AlreadyExists` for a page already in the
+/// range (touched, or swapped out since); whatever `alloc` answers.
 pub fn alloc_for_user_at(
     pml4_phys: u64,
+    pid: crate::proc::pcb::ProcessId,
     user_virt: u64,
     size: usize,
     constraint: DmaConstraint,
 ) -> KernelResult<(u64, u64, usize)> {
-    if !user_virt.is_multiple_of(4096) {
+    use crate::proc::pcb;
+
+    let end = u64::try_from(size)
+        .ok()
+        .and_then(|bytes| user_virt.checked_add(bytes));
+    let (true, Some(end)) = (size >= FRAME_SIZE && size.is_power_of_two(), end) else {
         return Err(KernelError::InvalidArgument);
+    };
+    // Refuses a range off a frame boundary as well as one outside a
+    // reservation.
+    let reservation = pcb::claim_reserved_region(pid, user_virt, end, arena_flags())?;
+    let placed = alloc(size, constraint)
+        .and_then(|buf| place(pml4_phys, user_virt, buf, Some((pid, reservation))));
+    if placed.is_err() {
+        // Nothing of the buffer is left in the range: the region is the
+        // reservation's again, with whatever the process had put there.
+        pcb::return_reserved_region(pid, pml4_phys, user_virt, end, reservation);
     }
-    let buf = alloc(size, constraint)?;
-    if buf.allocated_size() != size {
-        // SAFETY: just allocated, mapped nowhere and given to no device.
-        unsafe { free(buf) }?;
-        return Err(KernelError::InvalidArgument);
-    }
-    place(pml4_phys, user_virt, buf)
+    placed
 }
 
-/// The buffer `buf` mapped into the process at `user_virt`, and tracked:
-/// `(user_virt, phys_addr, size)`. A page already mapped in the range is the
-/// process's own: the buffer cannot go there, so what was mapped is taken
-/// back and the buffer freed (`AlreadyExists`).
-///
-/// The buffer is mapped with PRESENT + WRITABLE + USER + WRITE-THROUGH
-/// flags (suitable for device DMA). Write-through ensures the device sees
-/// writes immediately without needing explicit cache flushes on x86 (which
-/// has cache-coherent DMA for PCI devices). FOREIGN: the frames are the DMA
-/// tracker's, freed through it and only it -- not by an unmap or the
+/// How a user DMA buffer is mapped: present, writable, the process's.
+/// Write-back, as the kernel's own view of the frames is: x86's PCI DMA is
+/// cache-coherent, so nothing weaker is needed, and two views of one frame
+/// with different memory types are what the SDM forbids (11.12.4). Never
+/// executable: memory a device writes is data. FOREIGN: the frames are the
+/// DMA tracker's, freed through it and only it -- not by an unmap or the
 /// address space's teardown, which clear the entries and leave the frames
 /// -- and a fork does not give them to the child, which holds no tracker
 /// entry and no device (design-decisions 1579).
-fn place(pml4_phys: u64, user_virt: u64, buf: DmaBuffer) -> KernelResult<(u64, u64, usize)> {
-    use crate::mm::page_table::{self, PageFlags, VirtAddr};
+fn arena_flags() -> crate::mm::page_table::PageFlags {
+    use crate::mm::page_table::PageFlags;
+    PageFlags::PRESENT
+        | PageFlags::WRITABLE
+        | PageFlags::USER_ACCESSIBLE
+        | PageFlags::NO_EXECUTE
+        | PageFlags::FOREIGN
+}
+
+/// The buffer `buf` mapped into the process at `user_virt` ([`arena_flags`])
+/// and tracked: `(user_virt, phys_addr, size)`. `reservation`: the process
+/// and the reservation the range was claimed from, given back when the
+/// buffer is freed; `None` for a buffer the kernel placed.
+///
+/// The range must be vacant -- no page present, none swapped out -- which is
+/// checked and the buffer mapped under the address space's page-table lock
+/// (`mm::as_lock`), so that a fault resolving there at the same time either
+/// installs first, and the placement is refused, or finds the buffer there.
+/// Refused, the buffer is freed (`AlreadyExists`).
+fn place(
+    pml4_phys: u64,
+    user_virt: u64,
+    buf: DmaBuffer,
+    reservation: Option<(crate::proc::pcb::ProcessId, crate::proc::pcb::Reservation)>,
+) -> KernelResult<(u64, u64, usize)> {
+    use crate::mm::page_table::{self, VirtAddr};
 
     let phys = buf.phys_addr();
     let alloc_size = buf.allocated_size();
-    let flags = PageFlags::PRESENT
-        | PageFlags::WRITABLE
-        | PageFlags::USER_ACCESSIBLE
-        | PageFlags::WRITE_THROUGH
-        | PageFlags::FOREIGN;
-
+    let flags = arena_flags();
     let hw_pages = alloc_size / 4096;
-    for i in 0..hw_pages {
-        let offset = (i as u64).saturating_mul(4096);
-        let vaddr = VirtAddr::new(user_virt.saturating_add(offset));
-        // SAFETY: We own the physical memory and the process's page tables.
-        let mapped = unsafe {
-            page_table::map_4k_if_absent(pml4_phys, vaddr, phys.saturating_add(offset), flags)
-        };
-        if !matches!(mapped, Ok(true)) {
-            let placed = DmaMappingInfo {
-                pml4_phys,
-                user_virt,
-                phys,
-                order: buf.order,
-                size: i.saturating_mul(4096),
-                device: None,
-            };
-            unmap_user_buffer(&placed);
-            crate::tlb::flush_range(user_virt, i as u32);
-            // SAFETY: nothing maps the buffer any more and no device was
-            // given it.
-            unsafe { free(buf) }?;
-            return Err(mapped.err().unwrap_or(KernelError::AlreadyExists));
+    let page = |i: usize| VirtAddr::new(user_virt.saturating_add((i as u64).saturating_mul(4096)));
+
+    // How many pages were mapped, and why the rest were not.
+    let (mapped, refused) = {
+        let _held = crate::mm::as_lock::lock(pml4_phys);
+        if (0..hw_pages).all(|i| page_table::leaf_vacant(pml4_phys, page(i))) {
+            let mut mapped = 0usize;
+            let mut refused = None;
+            for i in 0..hw_pages {
+                let offset = (i as u64).saturating_mul(4096);
+                // SAFETY: the frames are the buffer's, allocated for this
+                // alone; the table is the process's; the page is vacant, and
+                // stays so while the lock is held.
+                let done = unsafe {
+                    page_table::map_4k_if_absent(
+                        pml4_phys,
+                        page(i),
+                        phys.saturating_add(offset),
+                        flags,
+                    )
+                };
+                if !matches!(done, Ok(true)) {
+                    refused = Some(done.err().unwrap_or(KernelError::AlreadyExists));
+                    break;
+                }
+                mapped = mapped.saturating_add(1);
+            }
+            (mapped, refused)
+        } else {
+            (0, Some(KernelError::AlreadyExists))
         }
+    };
+    if let Some(e) = refused {
+        let placed = DmaMappingInfo {
+            pml4_phys,
+            user_virt,
+            phys,
+            order: buf.order,
+            size: mapped.saturating_mul(4096),
+            device: None,
+            reservation: None,
+        };
+        unmap_user_buffer(&placed);
+        crate::tlb::flush_range(user_virt, mapped as u32);
+        // SAFETY: nothing maps the buffer any more and no device was given
+        // it.
+        unsafe { free(buf) }?;
+        return Err(e);
     }
 
     // The physical memory is now owned by the process mapping. It is freed
@@ -337,9 +389,31 @@ fn place(pml4_phys: u64, user_virt: u64, buf: DmaBuffer) -> KernelResult<(u64, u
     // is not auto-freed), so letting `buf` fall out of scope here does not
     // release the physical memory: it stays allocated, and tracked here
     // with its order, until then.
-    track_dma_mapping(pml4_phys, user_virt, phys, buf.order, alloc_size);
+    DMA_MAPPINGS.lock().push(DmaMappingInfo {
+        pml4_phys,
+        user_virt,
+        phys,
+        order: buf.order,
+        size: alloc_size,
+        device: None,
+        reservation,
+    });
 
     Ok((user_virt, phys, alloc_size))
+}
+
+/// After a user DMA buffer has left its range: a range claimed from the
+/// process's reservation is the reservation's again.
+fn return_range(mapping: &DmaMappingInfo) {
+    if let Some((pid, reservation)) = mapping.reservation {
+        crate::proc::pcb::return_reserved_region(
+            pid,
+            mapping.pml4_phys,
+            mapping.user_virt,
+            mapping.user_virt.saturating_add(mapping.size as u64),
+            reservation,
+        );
+    }
 }
 
 /// Free a DMA buffer previously allocated with `alloc_for_user`.
@@ -359,6 +433,7 @@ pub fn free_for_user(pml4_phys: u64, user_virt: u64) -> KernelResult<()> {
     let hw_pages = unmap_user_buffer(&mapping);
     // Flush TLB for the unmapped range.
     crate::tlb::flush_range(user_virt, hw_pages as u32);
+    return_range(&mapping);
     free_block(&mapping)
 }
 
@@ -374,6 +449,8 @@ pub fn abandon_for_user(pml4_phys: u64, user_virt: u64) {
     };
     let hw_pages = unmap_user_buffer(&mapping);
     crate::tlb::flush_range(user_virt, hw_pages as u32);
+    // The range is the process's again; the frames it gets there are new.
+    return_range(&mapping);
     serial_println!(
         "[dma] user buffer {:#x} ({} bytes) abandoned, not freed: a device may still reach it",
         mapping.phys,
@@ -402,6 +479,10 @@ struct DmaMappingInfo {
     /// domain (`devhandle`), told before the buffer is freed so that it
     /// stops reaching it first.
     device: Option<u64>,
+    /// For a buffer placed where its process said ([`alloc_for_user_at`]):
+    /// the process, and the reservation its range was claimed from, which
+    /// gets the range back when the buffer leaves.
+    reservation: Option<(crate::proc::pcb::ProcessId, crate::proc::pcb::Reservation)>,
 }
 
 /// Global table of active DMA mappings.
@@ -411,18 +492,6 @@ struct DmaMappingInfo {
 /// (pml4_phys, user_virt) would be better for large systems.
 static DMA_MAPPINGS: crate::sync::Mutex<alloc::vec::Vec<DmaMappingInfo>> =
     crate::sync::Mutex::named(alloc::vec::Vec::new(), b"DMA_MAP");
-
-fn track_dma_mapping(pml4_phys: u64, user_virt: u64, phys: u64, order: usize, size: usize) {
-    let mut mappings = DMA_MAPPINGS.lock();
-    mappings.push(DmaMappingInfo {
-        pml4_phys,
-        user_virt,
-        phys,
-        order,
-        size,
-        device: None,
-    });
-}
 
 /// Record that the device behind device handle `device` may reach the user
 /// DMA buffer at `user_virt` (design-decisions 1579), so that whatever frees
@@ -492,6 +561,10 @@ pub fn release_overlapping(pml4_phys: u64, start: u64, end: u64) {
         revoke_device(&mapping);
         let hw_pages = unmap_user_buffer(&mapping);
         crate::tlb::flush_range(mapping.user_virt, hw_pages as u32);
+        // Whatever unmaps the range next (`munmap`) takes the part it names;
+        // the rest is the reservation's again. A space being cleared resets
+        // its regions after this.
+        return_range(&mapping);
         // Nothing can be done about a block the allocator refuses -- it
         // would mean the block was already free -- but it is not silent.
         if let Err(e) = free_block(&mapping) {

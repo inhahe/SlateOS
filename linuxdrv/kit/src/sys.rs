@@ -59,9 +59,12 @@ const HEAP_ORDER: u32 = 28;
 /// device's DMA memory (`SYS_PCI_DEVICE_DMA_ALLOC_AT`).
 const WINDOW_ORDER: u32 = HEAP_ORDER;
 const CHUNK_ORDER: u32 = 22;
-const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 // The window's chunks are what the chunk table counts.
 const _: () = assert!(1usize << (WINDOW_ORDER - CHUNK_ORDER) == crate::window::CHUNKS);
+// The layout `heap_init` reserves: three heaps' worth holds a heap aligned
+// to its size and the window after it, which is then aligned to its own
+// size too, only while the window is no larger than the heap.
+const _: () = assert!(WINDOW_ORDER <= HEAP_ORDER);
 
 #[inline]
 fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
@@ -148,46 +151,68 @@ struct Memory {
 
 /// The DMA window in use: its allocator, given each chunk once backed; the
 /// chunks backed and where the device sees them; the device whose memory
-/// backs them; and how many address bits it has.
+/// backs them; how many address bits it has; and when the kernel last
+/// refused to back a chunk, if it has since the last that it backed.
 struct Dma {
     buddy: Buddy,
     chunks: Chunks,
     handle: i64,
     bits: u64,
+    refused_at: Option<u64>,
 }
+
+/// How long the window waits after the kernel refused it a chunk before it
+/// asks again: what it asks is a contiguous 4 MiB, which a refusal for want
+/// of memory says will not be there a moment later either.
+const GROW_RETRY_NS: u64 = 1_000_000_000;
 
 impl Dma {
     /// A block of `size` bytes from the window, the window grown by a chunk
-    /// when it has none: `None` past a chunk's size, or when the device
-    /// gives no more.
+    /// when it has none: `None` past a chunk's size -- a block of the window
+    /// larger than a chunk spans two arenas, which the device need not see
+    /// side by side -- or when the device gives no more.
     fn alloc(&mut self, size: usize) -> Option<usize> {
+        if size > self.chunks.chunk_bytes() {
+            return None;
+        }
         loop {
             if let Some(at) = self.buddy.alloc(size) {
                 return Some(at);
-            }
-            if size > self.chunks.chunk_bytes() {
-                return None;
             }
             self.grow()?;
         }
     }
 
     /// The next chunk backed by the device's memory and given to the
-    /// allocator.
+    /// allocator. Refused, the window asks again no sooner than
+    /// [`GROW_RETRY_NS`] later, and says so once for each run of refusals:
+    /// every allocation the window cannot hold meanwhile comes from the heap
+    /// without a system call or a line in the log.
     fn grow(&mut self) -> Option<()> {
+        let now = now_ns();
+        if self
+            .refused_at
+            .is_some_and(|t| now.saturating_sub(t) < GROW_RETRY_NS)
+        {
+            return None;
+        }
         let at = self.chunks.next()?;
         let bytes = self.chunks.chunk_bytes();
         let device_addr = syscall4(
-            SYS_PCI_DEVICE_DMA_ALLOC_AT,
+            crate::pci::SYS_PCI_DEVICE_DMA_ALLOC_AT,
             self.handle.cast_unsigned(),
             at as u64,
             bytes as u64,
             self.bits,
         );
         let Ok(device_addr) = u64::try_from(device_addr) else {
-            log(b"[lx] the DMA window could not grow: the device gave no more memory\n");
+            if self.refused_at.is_none() {
+                log(b"[lx] the DMA window could not grow: the device gave no more memory\n");
+            }
+            self.refused_at = Some(now);
             return None;
         };
+        self.refused_at = None;
         self.chunks.record(device_addr);
         // SAFETY: the chunk was just backed for this alone, inside the window.
         unsafe { self.buddy.give(at, CHUNK_ORDER) }.then_some(())
@@ -440,18 +465,27 @@ pub extern "C" fn slx_dma_open(handle: i64, bits: u64) -> i64 {
         chunks: Chunks::new(m.window_base, CHUNK_ORDER),
         handle,
         bits,
+        refused_at: None,
     });
     0
 }
 
-/// `slx_dma_bits`: the window's device has `bits` address bits from now on:
-/// the chunks backed after this are within them.
+/// `slx_dma_bits`: the window's device has `bits` address bits from now on
+/// (64, 32 or 24, the kernel's widths): the chunks backed after this are
+/// within them. 0 when that holds for the window as it is; -1, changing
+/// nothing, when a chunk already backed lies beyond them -- the memory
+/// `kmalloc` already serves from it would be memory the device cannot
+/// reach -- or there is no window.
 #[unsafe(no_mangle)]
-pub extern "C" fn slx_dma_bits(bits: u64) {
+pub extern "C" fn slx_dma_bits(bits: u64) -> i64 {
     // SAFETY: as in slx_alloc.
     let memory = unsafe { MEMORY.get() };
-    if let Some(d) = memory.as_mut().and_then(|m| m.dma.as_mut()) {
-        d.bits = bits;
+    match memory.as_mut().and_then(|m| m.dma.as_mut()) {
+        Some(d) if d.chunks.within(bits) => {
+            d.bits = bits;
+            0
+        }
+        _ => -1,
     }
 }
 
@@ -509,9 +543,11 @@ pub extern "C" fn slx_block_size(ptr: *const u8) -> usize {
 pub unsafe extern "C" fn slx_heap(base: *mut usize, bytes: *mut usize) {
     // SAFETY: as in slx_alloc.
     let memory = unsafe { MEMORY.get() };
+    // From the heap's start to the window's end, whatever their sizes.
     let (at, size) = memory.as_ref().map_or((0, 0), |m| {
-        let (at, heap) = m.heap.span();
-        (at, heap.saturating_mul(2))
+        let (at, _) = m.heap.span();
+        let end = m.window_base.saturating_add(1usize << WINDOW_ORDER);
+        (at, end.saturating_sub(at))
     });
     // SAFETY: the caller's.
     unsafe {

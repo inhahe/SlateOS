@@ -44,12 +44,15 @@ void lx_mm_mark_pages(const void *p, size_t size);
 /* lx_pci.c: whether a driver took every PCI function the process was given,
  * once probing is done; each it did not is said. And of the functions given,
  * at most LX_PCI_FUNCTIONS_MAX: `dev`'s place among them (-1 for none), and
- * the handle of the one at `i`. */
+ * the handle of the one at `i`. And whether `dev` is the device whose
+ * arenas back the DMA window (the first function given). */
 #define LX_PCI_FUNCTIONS_MAX 8
 struct pci_dev;
+struct device;
 bool lx_pci_check_bound(void);
 int lx_pci_index(const struct pci_dev *dev);
 long lx_pci_handle(int i);
+bool lx_pci_dma_device(const struct device *dev);
 /* lx_irq.c: the interrupts that came since the last turn, handled; which
  * the loop is to wait for when idle, told the kit (just before it waits);
  * and how many times the handler of interrupt `irq` has run, for the tests. */

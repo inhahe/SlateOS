@@ -153,10 +153,13 @@ pub fn self_test() -> KernelResult<()> {
 /// The boot test's spare 82574 ([`crate::devhandle::probe_card`]) given to
 /// the hello process -- an argument `pci=BB:DD.F` and a capability for that
 /// function alone: "pci" must probe it through Linux's PCI core, handle the
-/// interrupts it has the card raise (lx_irq.c), and exit 0,
+/// interrupts it has the card raise (lx_irq.c), have it DMA, and exit 0,
 /// "pcifail" must have its probe fail and so end as an initcall failure,
-/// the function left without a driver. Each exit must release the card.
-/// Whether they ran: skipped, and recorded so, where there is no such card.
+/// the function left without a driver. "pci" is given QEMU's edu as well,
+/// after the card, where there is one no driver holds: a second function,
+/// whose DMA must all be refused (the DMA window is the first's). Each exit
+/// must release what it was given. Whether they ran: skipped, and recorded
+/// so, where there is no such card.
 fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     let Some(card) = crate::devhandle::probe_card() else {
         skips.record(
@@ -165,37 +168,54 @@ fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         );
         return Ok(false);
     };
-    let a = card.address;
-    let caps = [(
-        ResourceType::PciDevice,
-        crate::cap::pci_device_id(a.bus, a.device, a.function),
-        Rights::WRITE,
-    )];
-    let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
-    let cases: [(&[u8], i32, &str); 2] = [
+    let edu = crate::pci::find_device(0x1234, 0x11E8)
+        .map(|d| d.address)
+        .filter(|&e| crate::pci::bound_driver(e).is_none());
+    if edu.is_none() {
+        skips.record(
+            "Linux driver layer's second-function DMA refusal",
+            "no unbound QEMU edu device",
+        );
+    }
+    let given = |with_edu: bool| core::iter::once(card.address).chain(edu.filter(|_| with_edu));
+    let cases: [(&[u8], bool, i32, &str); 2] = [
         (
             b"pci",
+            true,
             EXIT_OK,
-            "probed the card through Linux's PCI core, handled its interrupts, had it DMA and exited 0",
+            "probed the card through Linux's PCI core, handled its interrupts, had it DMA, \
+             refused a second function DMA and exited 0",
         ),
         (
             b"pcifail",
+            false,
             EXIT_INIT_FAILED,
             "ended as an initcall failure, its probe having failed and the card no driver's",
         ),
     ];
-    for (mode, want, what) in cases {
-        expect(
-            elf,
-            &[b"hello", mode, arg.as_bytes()],
-            &caps,
-            want,
-            what,
-            || {
-                (!crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none()))
-                    .then_some("the card still bound after it")
-            },
-        )?;
+    for (mode, with_edu, want, what) in cases {
+        let caps: alloc::vec::Vec<_> = given(with_edu)
+            .map(|a| {
+                (
+                    ResourceType::PciDevice,
+                    crate::cap::pci_device_id(a.bus, a.device, a.function),
+                    Rights::WRITE,
+                )
+            })
+            .collect();
+        let args: alloc::vec::Vec<alloc::string::String> = given(with_edu)
+            .map(|a| alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function))
+            .collect();
+        let argv: alloc::vec::Vec<&[u8]> = [b"hello".as_slice(), mode]
+            .into_iter()
+            .chain(args.iter().map(alloc::string::String::as_bytes))
+            .collect();
+        expect(elf, &argv, &caps, want, what, || {
+            (!crate::devhandle::yield_until(|| {
+                given(with_edu).all(|a| crate::pci::bound_driver(a).is_none())
+            }))
+            .then_some("a function still bound after it")
+        })?;
     }
     Ok(true)
 }

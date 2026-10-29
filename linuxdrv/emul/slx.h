@@ -40,12 +40,13 @@ void *slx_map_lazy(unsigned long bytes);
  * device `handle` names, which has `bits` address bits (64 for any, 32 or
  * 24; the kernel's rule) -- from then on slx_alloc serves from it while it
  * can -- and answers 0, or an error; one per process. slx_dma_bits changes
- * the width for the chunks to come; slx_dma_alloc allocates from the window
+ * the width for the chunks to come: 0, or -1 (nothing changed) when a chunk
+ * already backed lies beyond it; slx_dma_alloc allocates from the window
  * alone (a chunk, 4 MiB, at most); slx_dma_address is where the device sees
  * the `len` bytes at `ptr`, or ~0 when it does not.
  */
 long slx_dma_open(long handle, unsigned long long bits);
-void slx_dma_bits(unsigned long long bits);
+long slx_dma_bits(unsigned long long bits);
 void *slx_dma_alloc(unsigned long size);
 unsigned long long slx_dma_address(const void *ptr, unsigned long len);
 
@@ -64,9 +65,11 @@ unsigned long long slx_dma_address(const void *ptr, unsigned long len);
  *                        1 while the two agree, -1 when Linux wrote it
  *                        elsewhere, 0 for no memory BAR;
  *   slx_pci_map_bar      memory BAR `bar` mapped whole and uncached: where,
- *                        or the kernel's error.
+ *                        or the kernel's error;
+ *   slx_pci_close        the function given back, its handle closed: 0.
  */
 long slx_pci_open(unsigned char bus, unsigned char devfn);
+long slx_pci_close(long handle);
 /* How many functions one process may be given: the kit's tables' size. */
 unsigned long slx_pci_functions(void);
 long slx_pci_config_read(long handle, unsigned int offset, unsigned int width);

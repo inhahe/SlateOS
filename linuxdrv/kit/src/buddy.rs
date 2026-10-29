@@ -47,6 +47,8 @@ pub enum RegionError {
     BadSize,
     /// Its base is not aligned to its size.
     Misaligned,
+    /// Its order bytes do not read 0: they are not fresh memory.
+    NotFresh,
 }
 
 impl Buddy {
@@ -55,7 +57,8 @@ impl Buddy {
     ///
     /// # Errors
     ///
-    /// A region the allocator cannot manage ([`RegionError`]).
+    /// A region the allocator cannot manage ([`RegionError`]), or order
+    /// bytes that do not read 0 as promised ([`RegionError::NotFresh`]).
     ///
     /// # Safety
     ///
@@ -65,9 +68,12 @@ impl Buddy {
         // SAFETY: the caller's, which `new_empty` asks too.
         let mut buddy = unsafe { Self::new_empty(base, top, orders) }?;
         // SAFETY: the whole region is one block of the region's order,
-        // aligned to it, the caller's memory.
-        unsafe { buddy.give(base, top) };
-        Ok(buddy)
+        // aligned to it, the caller's memory, none of it given yet.
+        if unsafe { buddy.give(base, top) } {
+            Ok(buddy)
+        } else {
+            Err(RegionError::NotFresh)
+        }
     }
 
     /// An allocator over `2^top` bytes at `base` with nothing free in it
@@ -105,11 +111,14 @@ impl Buddy {
 
     /// The block of `2^k` bytes at `at` made the allocator's to give out:
     /// whether it took -- a block inside the region, aligned to its size,
-    /// of an order the allocator has, and not already its.
+    /// of an order the allocator has, and whose own first order byte says
+    /// it is not the allocator's already (only that one byte is read).
     ///
     /// # Safety
     ///
-    /// The block is writable memory, the allocator's alone from now on.
+    /// The block is writable memory, the allocator's alone from now on, and
+    /// no part of it was given before: a block given over one given earlier
+    /// -- or inside one -- is two free blocks over the same bytes.
     pub unsafe fn give(&mut self, at: usize, k: u32) -> bool {
         let Some(size) = 1usize.checked_shl(k) else {
             return false;
@@ -413,6 +422,18 @@ mod tests {
             "joined into the block given, no further"
         );
         drop(memory);
+    }
+
+    #[test]
+    fn order_bytes_that_are_not_fresh_are_refused() {
+        let size = 1usize << 14;
+        let mut memory = vec![0u8; size * 2];
+        let base = (memory.as_mut_ptr() as usize).next_multiple_of(size);
+        let mut orders = vec![0u8; size >> MIN_ORDER];
+        orders[0] = 1;
+        // SAFETY: both vectors outlive the attempt, untouched else.
+        let made = unsafe { Buddy::new(base, 14, orders.as_mut_ptr()) };
+        assert_eq!(made.err(), Some(RegionError::NotFresh));
     }
 
     #[test]

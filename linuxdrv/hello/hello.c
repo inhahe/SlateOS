@@ -136,6 +136,8 @@ static int hello_waits_forever(void *unused)
  * moving; the I/O BAR absent, the handle offering none.
  */
 #define HELLO_82574 0x10d3
+/* The ID table's mark for QEMU's edu (1234:11e8), the second function. */
+#define HELLO_EDU 1
 #define HELLO_RAL0 0x5400
 #define HELLO_RAH0 0x5404
 #define HELLO_RAH_VALID BIT(31)
@@ -213,10 +215,13 @@ static irqreturn_t hello_isr_thread(int irq, void *data)
 
 /*
  * DMA (lx_dma.c): a 64-bit mask; memory outside the DMA window refused;
- * coherent memory zeroed and aligned; a kmalloc'd frame given a DMA
- * address -- and the card itself, given a descriptor ring in the coherent
- * memory pointing at the frame, reading both from the window through its
- * IOMMU domain and writing the descriptor's status back into it.
+ * coherent memory within the coherent mask, zeroed whole -- the block, not
+ * just the bytes asked for -- and aligned; a mask the memory already given
+ * lies beyond refused; a kmalloc'd frame given a DMA address -- and the
+ * card itself, given a descriptor ring in the coherent memory pointing at
+ * the frame, reading both from the window through its IOMMU domain and
+ * writing the descriptor's status back into it. And a second function
+ * (QEMU's edu, when given) refused all DMA: the window is the card's.
  */
 #define HELLO_TCTL 0x0400
 #define HELLO_TCTL_EN BIT(1)
@@ -307,6 +312,8 @@ static int hello_pci_dma(struct pci_dev *pdev)
 	size_t ring_bytes = HELLO_TX_DESCS * sizeof(struct hello_tx_desc);
 	struct hello_tx_desc *ring;
 	dma_addr_t ring_dma, frame_dma;
+	void *big;
+	u64 mask;
 	u8 *frame;
 	size_t i;
 
@@ -316,17 +323,63 @@ static int hello_pci_dma(struct pci_dev *pdev)
 					  dma_map_single(&pdev->dev, hello_static_frame,
 							 sizeof(hello_static_frame), DMA_TO_DEVICE)),
 			"memory outside the DMA window was mapped for the device");
+	/*
+	 * kmalloc and the window (linuxdrv/kit): a block the size of a chunk
+	 * comes from the window, whole; a larger one from the heap, the window
+	 * holding nothing past a chunk; ksize() answers for both, and
+	 * kmalloc_size_roundup() as the allocator rounds. And kfree() gives
+	 * back: more than the window and the heap together hold, a block at a
+	 * time, all comes.
+	 */
+	big = kmalloc(SZ_4M, GFP_KERNEL);
+	HELLO_PCI_CHECK(big && !dma_mapping_error(&pdev->dev, dma_map_single(&pdev->dev, big, SZ_4M,
+									    DMA_TO_DEVICE)),
+			"a block the size of a chunk did not come from the DMA window, whole");
+	HELLO_PCI_CHECK(ksize(big) == SZ_4M, "ksize() of a window block was not its size");
+	kfree(big);
+	big = kmalloc(SZ_4M + 1, GFP_KERNEL);
+	HELLO_PCI_CHECK(big && dma_mapping_error(&pdev->dev, dma_map_single(&pdev->dev, big, SZ_4M + 1,
+									   DMA_TO_DEVICE)),
+			"a block larger than a chunk came from the DMA window");
+	HELLO_PCI_CHECK(ksize(big) == SZ_8M, "ksize() of a heap block was not its size");
+	kfree(big);
+	HELLO_PCI_CHECK(kmalloc_size_roundup(100) == 128,
+			"kmalloc_size_roundup() did not round as the allocator does");
+	for (i = 0; i < 600; i++) {
+		big = kmalloc(SZ_1M, GFP_KERNEL);
+		HELLO_PCI_CHECK(big, "memory kfree() gave back did not come again");
+		kfree(big);
+	}
+
+	/* Coherent memory answers to the coherent mask, not the streaming one. */
+	mask = pdev->dev.coherent_dma_mask;
+	pdev->dev.coherent_dma_mask = PAGE_SIZE - 1;
+	ring = dma_alloc_coherent(&pdev->dev, ring_bytes, &ring_dma, GFP_KERNEL);
+	pdev->dev.coherent_dma_mask = mask;
+	HELLO_PCI_CHECK(!ring, "coherent memory was given beyond the coherent mask");
 	ring = dma_alloc_coherent(&pdev->dev, ring_bytes, &ring_dma, GFP_KERNEL);
 	HELLO_PCI_CHECK(ring && ring_dma && !(ring_dma & (PAGE_SIZE - 1)),
 			"no page-aligned coherent memory for a descriptor ring");
 	for (i = 0; i < ring_bytes; i++)
 		HELLO_PCI_CHECK(!((u8 *)ring)[i], "coherent memory was not zeroed");
-	/* Written, given back and taken again -- the window reuses it first -- still zero. */
-	memset(ring, 0xa5, ring_bytes);
+	/*
+	 * A width the memory already given lies beyond -- the ring's chunk, above
+	 * 16 MiB -- is refused, and the mask stays what it was. (A chunk that
+	 * low says nothing, and is not asked.)
+	 */
+	HELLO_PCI_CHECK(ring_dma < SZ_16M ||
+			dma_set_coherent_mask(&pdev->dev, DMA_BIT_MASK(24)) == -EIO,
+			"a mask narrower than the memory already given was taken");
+	HELLO_PCI_CHECK(pdev->dev.coherent_dma_mask == DMA_BIT_MASK(64), "a refused mask was kept");
+	/*
+	 * Written to the end of its page, given back and taken again -- the
+	 * window reuses it first -- still zero, the whole page.
+	 */
+	memset(ring, 0xa5, PAGE_SIZE);
 	dma_free_coherent(&pdev->dev, ring_bytes, ring, ring_dma);
 	ring = dma_alloc_coherent(&pdev->dev, ring_bytes, &ring_dma, GFP_KERNEL);
 	HELLO_PCI_CHECK(ring, "no coherent memory the second time");
-	for (i = 0; i < ring_bytes; i++)
+	for (i = 0; i < PAGE_SIZE; i++)
 		HELLO_PCI_CHECK(!((u8 *)ring)[i], "coherent memory given back and taken again was not zeroed");
 	frame = kmalloc(ETH_ZLEN, GFP_KERNEL);
 	HELLO_PCI_CHECK(frame, "no memory");
@@ -360,6 +413,30 @@ static int hello_pci_dma(struct pci_dev *pdev)
 	return 0;
 }
 
+/*
+ * QEMU's edu, given after the card: a second function, whose own IOMMU
+ * domain holds none of the card's DMA window -- so every DMA call for it is
+ * refused, kmalloc'd memory from the window included.
+ */
+static int hello_edu_probe(struct pci_dev *pdev)
+{
+	dma_addr_t handle;
+	void *p;
+
+	HELLO_PCI_CHECK(dma_set_mask(&pdev->dev, DMA_BIT_MASK(32)) == -EIO,
+			"a second function's DMA mask was taken");
+	p = kmalloc(64, GFP_KERNEL);
+	HELLO_PCI_CHECK(p, "no memory");
+	handle = dma_map_single(&pdev->dev, p, 64, DMA_TO_DEVICE);
+	kfree(p);
+	HELLO_PCI_CHECK(dma_mapping_error(&pdev->dev, handle),
+			"a second function was given the card's DMA window");
+	HELLO_PCI_CHECK(!dma_alloc_coherent(&pdev->dev, PAGE_SIZE, &handle, GFP_KERNEL),
+			"a second function was given coherent memory");
+	dev_info(&pdev->dev, "a second function: its DMA refused\n");
+	return 0;
+}
+
 static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	void __iomem *regs;
@@ -370,6 +447,8 @@ static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	if (hello_mode("pcifail"))
 		return -EIO;
+	if (id->driver_data == HELLO_EDU)
+		return hello_edu_probe(pdev);
 	if (pci_resource_len(pdev, 0) < SZ_128K || !(pci_resource_flags(pdev, 0) & IORESOURCE_MEM) ||
 	    pci_resource_len(pdev, 2) || !pdev->msi_cap) {
 		dev_err(&pdev->dev, "BAR0 %pR, BAR2 %pR, MSI capability at %#x: not the card as shown\n",
@@ -428,6 +507,7 @@ disable:
 
 static const struct pci_device_id hello_pci_ids[] = {
 	{ PCI_DEVICE(PCI_VENDOR_ID_INTEL, HELLO_82574) },
+	{ PCI_DEVICE(0x1234, 0x11e8), .driver_data = HELLO_EDU },
 	{ }
 };
 

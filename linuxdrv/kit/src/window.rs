@@ -60,6 +60,21 @@ impl Chunks {
         }
     }
 
+    /// Whether every chunk backed so far lies wholly below `2^bits` where the
+    /// device sees it: what a device of `bits` address bits reaches. Any
+    /// chunk for 64 bits or more.
+    #[must_use]
+    pub fn within(&self, bits: u64) -> bool {
+        let Some(limit) = u32::try_from(bits).ok().and_then(|b| 1u64.checked_shl(b)) else {
+            return true;
+        };
+        let bytes = u64::try_from(self.chunk_bytes()).unwrap_or(u64::MAX);
+        self.device
+            .iter()
+            .take(self.backed)
+            .all(|&at| at.checked_add(bytes).is_some_and(|end| end <= limit))
+    }
+
     /// The device address of the `len` bytes at `at`: `None` unless they lie
     /// in one chunk already backed.
     #[must_use]
@@ -139,5 +154,21 @@ mod tests {
             None,
             "past the address space"
         );
+    }
+
+    #[test]
+    fn a_width_holds_the_chunks_wholly_below_it() {
+        let mut c = Chunks::new(BASE, ORDER);
+        assert!(c.within(24), "none backed: any width");
+        c.record(0x00c0_0000);
+        assert!(c.within(24), "12..16 MiB is below 16 MiB");
+        c.record(0x8000_0000);
+        assert!(!c.within(24), "2 GiB is not below 16 MiB");
+        assert!(c.within(32));
+        c.record(0x1_0000_0000 - MIB4 as u64);
+        assert!(c.within(32), "a chunk ending at 4 GiB exactly is below it");
+        c.record(0x1_0000_0000 - MIB4 as u64 + 0x4000);
+        assert!(!c.within(32), "one crossing 4 GiB is not");
+        assert!(c.within(64) && c.within(100), "64 bits or more: anything");
     }
 }

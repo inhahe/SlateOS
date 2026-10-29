@@ -27,6 +27,8 @@ const SYS_PCI_DEVICE_CONFIG_WRITE: u64 = 1183;
 const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
+/// A DMA arena placed where the caller says (`sys.rs`'s DMA window).
+pub(crate) const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 const SYS_WAIT_MULTIPLE: u64 = 1066;
 /// `cap::ResourceType::PciDevice`: a device handle's kind in
 /// `SYS_WAIT_MULTIPLE`.
@@ -153,6 +155,24 @@ pub extern "C" fn slx_pci_open(bus: u8, devfn: u8) -> i64 {
         unwaitable: false,
     });
     handle
+}
+
+/// `slx_pci_close`: the function `handle` names given back -- its handle
+/// closed, the kernel releasing the device -- for a function the C half
+/// took and then could not use. 0, or the close's error; `INVALID_ARGUMENT`
+/// for a handle [`slx_pci_open`] did not give.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_close(handle: i64) -> i64 {
+    // SAFETY: as in `with_function`.
+    let open = unsafe { OPEN.get() };
+    let Some(slot) = open
+        .iter_mut()
+        .find(|f| f.as_ref().is_some_and(|f| f.handle == handle))
+    else {
+        return INVALID_ARGUMENT;
+    };
+    *slot = None;
+    syscall4(SYS_PCI_DEVICE_CLOSE, handle.cast_unsigned(), 0, 0, 0)
 }
 
 /// `slx_pci_irq_setup`: the function's MSI set up -- the kernel programs

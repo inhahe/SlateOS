@@ -246,8 +246,9 @@ pub const SYS_PORT_WRITE: u64 = 41;
 /// - `value`: user-space virtual address of the buffer.
 /// - `value2`: physical address (for programming device DMA descriptors).
 ///
-/// The buffer is zeroed and mapped with write-through caching
-/// suitable for DMA.  The caller must call `SYS_DMA_FREE` when done.
+/// The buffer is zeroed and mapped write-back (x86's PCI DMA is
+/// cache-coherent) and never executable.  The caller must call
+/// `SYS_DMA_FREE` when done.
 ///
 /// Requires: PortIo or DeviceIrq capability (driver privilege).
 pub const SYS_DMA_ALLOC: u64 = 42;
@@ -7417,17 +7418,21 @@ pub const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 pub const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 
 /// [`SYS_PCI_DEVICE_DMA_ALLOC`], placed where the caller says: `arg0` the
-/// handle; `arg1` the address, page-aligned, inside anonymous memory the
+/// handle; `arg1` the address, on a frame (16 KiB) boundary, inside one
+/// region of private anonymous memory, readable and writable, that the
 /// caller mapped for itself (`SYS_MMAP` with `MAP_LAZY`) and has not yet
-/// touched; `arg2` the size, given exactly -- a power of two of frames
-/// (16 KiB) or more; `arg3` the device's address bits, as for
+/// touched there; `arg2` the size, given exactly -- a power of two of frames
+/// or more; `arg3` the device's address bits, as for
 /// `SYS_PCI_DEVICE_DMA_ALLOC`. Returns the address the device must be given.
 /// `InvalidArgument` for a range outside such memory, a misaligned address
-/// or a size that would be rounded; `AlreadyExists` for a range with a page
-/// already in it. So a driver keeps its device's memory where its own
-/// allocator wants it -- the Linux driver layer, beside its heap
-/// (design-decisions 1586) -- not where the kernel would put it. Freed as
-/// `SYS_PCI_DEVICE_DMA_ALLOC`'s arenas are.
+/// or a size that would be rounded -- all checked before anything is
+/// allocated; `AlreadyExists` for a range with a page already in it, present
+/// or swapped out. While the arena lives its range is a region of its own,
+/// as a mapped BAR's is (never executable, not given to a forked child);
+/// freed, the range is the reservation's again. So a driver keeps its
+/// device's memory where its own allocator wants it -- the Linux driver
+/// layer, beside its heap (design-decisions 1586) -- not where the kernel
+/// would put it. Freed as `SYS_PCI_DEVICE_DMA_ALLOC`'s arenas are.
 pub const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 
 // ---------------------------------------------------------------------------

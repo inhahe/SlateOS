@@ -14,12 +14,17 @@ the card where a buffer is becomes simple arithmetic.
 ### The decision
 
 1. **A new kernel call places a device's arena where the process says**
-   (`SYS_PCI_DEVICE_DMA_ALLOC_AT`, 1188): a power of two of frames at an
-   address inside anonymous memory the process reserved for itself
-   (`SYS_MMAP` with `MAP_LAZY`) and has not touched. The arena is the same
-   as `SYS_PCI_DEVICE_DMA_ALLOC`'s -- contiguous, in the device's IOMMU
-   domain, freed with the device -- only placed. The kernel refuses a range
-   outside such a reservation, so an arena takes nobody else's addresses.
+   (`SYS_PCI_DEVICE_DMA_ALLOC_AT`, 1188): a power of two of frames, on a
+   frame boundary, inside one region of private anonymous memory the
+   process reserved for itself (`SYS_MMAP` with `MAP_LAZY`) and has not
+   touched there. The arena is the same as `SYS_PCI_DEVICE_DMA_ALLOC`'s --
+   contiguous, in the device's IOMMU domain, freed with the device -- only
+   placed. The kernel refuses a range outside such a reservation, so an
+   arena takes nobody else's addresses, and checks everything before it
+   allocates. While the arena lives, its range is a region of its own, as a
+   mapped BAR's is -- never executable, not given to a forked child -- so
+   that no path for ordinary memory (a page fault, a fork, swapping) ever
+   meets the device's frames; freed, the range is the reservation's again.
 2. **The DMA window** (`linuxdrv/kit`, `window.rs`, `sys.rs`): the kit
    reserves 256 MiB beside its 256 MiB heap, in the same region, so that
    Linux's direct map (§1584) covers both. When the process's first PCI
@@ -37,14 +42,22 @@ the card where a buffer is becomes simple arithmetic.
    outside the window -- allocated before the device came, the process's
    own data, a task's stack -- or a range crossing two chunks has no DMA
    address, and mapping it fails as an IOMMU's refusal would
-   (`DMA_MAPPING_ERROR`), said once.
+   (`DMA_MAPPING_ERROR`), said once. So does all DMA for any device but
+   the window's -- the first function given -- whose own IOMMU domain
+   holds none of the window's arenas.
 4. **Nothing to sync, no bounce buffers**: x86's DMA is cache-coherent and
-   the arenas are mapped write-through, so every device is marked as
-   needing no syncs (`dma_skip_sync`) and the syncs Linux still calls do
-   nothing.
+   the arenas are mapped write-back, as the kernel's own view of their
+   frames is (two views of a frame with different memory types are what
+   the SDM forbids), so every device is marked as needing no syncs
+   (`dma_skip_sync`) and the syncs Linux still calls do nothing.
 5. **The device's address width**: the window opens at a PCI device's
-   default 32 bits; `dma_set_mask()` changes the width for the chunks
-   backed after it (the kernel's widths: 64, 32, 24).
+   default 32 bits. The window serves both streaming mappings and coherent
+   memory, so the chunks backed from then on are kept within the narrower
+   of the device's two masks (`dma_set_mask()`, `dma_set_coherent_mask()`),
+   at the widest of the kernel's widths inside it (64, 32, 24). A mask
+   narrower than a chunk already backed is refused (`-EIO`), as Linux
+   refuses a mask its platform cannot meet: `kmalloc` already serves from
+   that chunk.
 
 ### The alternatives
 
@@ -54,8 +67,11 @@ the card where a buffer is becomes simple arithmetic.
   a page array terabytes long; and `kmalloc`'s memory would still not be
   the device's.
 - **A bounce buffer** (copy every buffer a driver maps into an arena):
-  Linux's own SWIOTLB does this; it costs a copy per packet in both
-  directions, which a network driver's performance cannot afford.
+  Linux's own SWIOTLB does this, for devices it does not trust and in
+  confidential virtual machines. It keeps the driver's own memory out of
+  the device's reach (see "What it costs"), at a copy per packet in each
+  direction: about 2% of a core at 1 Gb/s, about 20% at 10 Gb/s. Whether
+  some devices should pay it is the operator's question A-Q30.
 - **Map arbitrary process memory into the device's domain per mapping**:
   a system call and an IOMMU update per packet, and pinning (§1579 chose
   arenas for this reason).
@@ -64,9 +80,21 @@ the card where a buffer is becomes simple arithmetic.
 
 ### What it costs
 
+- **The device reaches all of its driver's `kmalloc` memory**, not only
+  the buffers it is handed: the driver's own records, timers and the
+  pointers to its code included, for as long as the process lives. A
+  working device does nothing with that; a broken or hostile one could
+  overwrite them and take over its driver process -- never the kernel or
+  another process, which its IOMMU domain keeps it from. Linux's own
+  exposure for a trusted device is smaller (the pages around a buffer,
+  while it is mapped). Open question A-Q30 asks whether some devices --
+  external ones, as Linux does -- should get bounce buffers instead.
 - One device's window per process: a second function's device cannot
-  reach the first's arenas (each has its own IOMMU domain), so its DMA
-  mappings fail. Every driver planned so far drives one function.
+  reach the first's arenas (each has its own IOMMU domain), so all its DMA
+  is refused. Every driver planned so far drives one function.
+- A device whose mask is narrower than the window's first chunk (a 24- to
+  31-bit device; the chunk is backed below 4 GiB before probing) has its
+  mask refused, and its driver fails to probe.
 - A DMA buffer is at most a chunk (4 MiB); larger coherent allocations
   fail.
 - A driver process given a device commits at least one chunk (4 MiB) of

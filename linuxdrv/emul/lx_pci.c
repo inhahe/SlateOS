@@ -177,6 +177,10 @@ static int lx_pci_take(const char *arg)
 	 */
 	if (!lx_pci_count && slx_dma_open(f->handle, 32) < 0) {
 		pr_err("pci: %02x:%02x.%x: no DMA window\n", bus, dev, fn);
+		/* Given back: the process ends, but a function it took is not left held meanwhile. */
+		if (slx_pci_close(f->handle) < 0)
+			pr_err("pci: %02x:%02x.%x could not be given back\n", bus, dev, fn);
+		memset(f, 0, sizeof(*f));
 		return -ENOMEM;
 	}
 	lx_pci_count++;
@@ -279,6 +283,12 @@ int lx_pci_index(const struct pci_dev *dev)
 long lx_pci_handle(int i)
 {
 	return i >= 0 && i < lx_pci_count ? lx_pci_functions[i].handle : -1;
+}
+
+/* Whether `dev` is the device whose arenas back the DMA window: the first function given. */
+bool lx_pci_dma_device(const struct device *dev)
+{
+	return lx_pci_count && lx_pci_functions[0].dev && dev == &lx_pci_functions[0].dev->dev;
 }
 
 bool lx_pci_check_bound(void)

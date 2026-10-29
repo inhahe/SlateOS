@@ -5994,6 +5994,9 @@ fn test_dispatch_dma_exit_unmaps() -> KernelResult<()> {
 /// `pcb::exit_close_fds`, as a dying thread runs it -- unbinds the device and
 /// unmaps its BAR, after which the handle is no longer held (a close is
 /// `InvalidHandle`). Skipped, and recorded so, where there is no `edu`.
+// The test's addresses are a fixed reservation plus a few frames: nothing in
+// its arithmetic can overflow.
+#[allow(clippy::arithmetic_side_effects)]
 fn test_dispatch_device_calls() -> KernelResult<()> {
     use super::number::{
         SYS_PCI_DEVICE_BAR, SYS_PCI_DEVICE_CLOSE, SYS_PCI_DEVICE_CONFIG_READ,
@@ -6068,26 +6071,49 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
             return Err("another process took the owner's interrupts");
         }
         // A DMA arena placed in memory the owner reserved (as SYS_MMAP with
-        // MAP_LAZY reserves it), and refused anywhere else.
+        // MAP_LAZY reserves it), and refused anywhere else: past it, in
+        // memory of another kind, misaligned, rounded, or over a page the
+        // owner touched. Placed, it is a device region of its own; freed,
+        // the reservation's again.
         let reserved: u64 = 0x5000_0000_0000;
         let frame = crate::mm::frame::FRAME_SIZE as u64;
-        pcb::add_vma(
-            driver,
-            Vma {
-                start: reserved,
-                end: reserved + 4 * frame,
-                kind: VmaKind::Anonymous,
-                flags: PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE,
+        let rw = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::USER_ACCESSIBLE;
+        let others: [(u64, VmaKind, PageFlags); 4] = [
+            (reserved + 0x10_0000, VmaKind::Stack, rw),
+            // PROT_NONE, as a guard below a thread's stack is.
+            (reserved + 0x20_0000, VmaKind::Anonymous, PageFlags::PRESENT),
+            // PROT_READ.
+            (
+                reserved + 0x40_0000,
+                VmaKind::Anonymous,
+                PageFlags::PRESENT | PageFlags::USER_ACCESSIBLE,
+            ),
+            // MAP_SHARED | MAP_ANONYMOUS.
+            (
+                reserved + 0x30_0000,
+                VmaKind::Anonymous,
+                rw | PageFlags::SHARED,
+            ),
+        ];
+        let regions = [(reserved, VmaKind::Anonymous, rw)]
+            .into_iter()
+            .chain(others)
+            .map(|(start, kind, flags)| Vma {
+                start,
+                end: start + 8 * frame,
+                kind,
+                flags,
                 fork: ForkPolicy::COPY,
-            },
-        )
-        .map_err(|_| "no reservation could be made")?;
-        let at = |va: u64, size: u64| {
+            });
+        for vma in regions {
+            pcb::add_vma(driver, vma).map_err(|_| "no reservation could be made")?;
+        }
+        let at_bits = |va: u64, size: u64, bits: u64| {
             let args = SyscallArgs {
                 arg0: handle,
                 arg1: va,
                 arg2: size,
-                arg3: 0,
+                arg3: bits,
                 arg4: 0,
                 arg5: 0,
             };
@@ -6095,16 +6121,56 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
                 dispatch(SYS_PCI_DEVICE_DMA_ALLOC_AT, &args).value
             })
         };
+        let at = |va: u64, size: u64| at_bits(va, size, 0);
+        // The regions of the driver's over `[start, end)`: (start, end, kind,
+        // fork policy, whether a device's).
+        let regions_over = |start: u64, end: u64| {
+            pcb::list_vmas(driver)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|v| v.start < end && start < v.end)
+                .map(|v| {
+                    let foreign = v.flags.contains(PageFlags::FOREIGN);
+                    (v.start, v.end, v.kind, v.fork, foreign)
+                })
+                .collect::<alloc::vec::Vec<_>>()
+        };
+        let reservation = |start: u64, end: u64| {
+            alloc::vec![(start, end, VmaKind::Anonymous, ForkPolicy::COPY, false)]
+        };
         let invalid_argument = i64::from(KernelError::InvalidArgument.code());
-        if at(reserved + 4 * frame, frame) != invalid_argument
-            || at(reserved + 3 * frame, 2 * frame) != invalid_argument
+        let already = i64::from(KernelError::AlreadyExists.code());
+        if at(reserved + 8 * frame, frame) != invalid_argument
+            || at(reserved + 7 * frame, 2 * frame) != invalid_argument
         {
             return Err("a DMA arena was placed outside the owner's reservation");
         }
+        if others
+            .iter()
+            .any(|&(start, _, _)| at(start, frame) != invalid_argument)
+        {
+            return Err("a DMA arena was placed over a stack, a guard or shared memory");
+        }
+        // A frame boundary, not just a page's: the arena's first frame would
+        // otherwise share a 16 KiB group with the reservation's own pages.
         if at(reserved + 1, frame) != invalid_argument
+            || at(reserved + 4096, frame) != invalid_argument
             || at(reserved, frame + 4096) != invalid_argument
+            || at(reserved, 3 * frame) != invalid_argument
         {
             return Err("a DMA arena was placed misaligned, or rounded");
+        }
+        // A page the owner touched is its own: refused, and the range left
+        // the reservation it was.
+        crate::mm::user::copy_to_user_as(pml4, reserved + 6 * frame, &[1])
+            .map_err(|_| "the reservation could not be touched")?;
+        if at(reserved + 6 * frame, frame) != already {
+            return Err("a DMA arena was placed over a page the owner touched");
+        }
+        if regions_over(reserved, reserved + 8 * frame)
+            != reservation(reserved, reserved + 8 * frame)
+        {
+            return Err("a refused placement left the reservation changed");
         }
         let device_addr = u64::try_from(at(reserved, 2 * frame))
             .map_err(|_| "no DMA arena was placed in the reservation")?;
@@ -6114,8 +6180,67 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         {
             return Err("the arena placed is not mapped where its device address says");
         }
-        if at(reserved, frame) != i64::from(KernelError::AlreadyExists.code()) {
+        // Mapped as data -- never executable -- write-back, and not the
+        // space's own frames.
+        let wanted = PageFlags::NO_EXECUTE.bits() | PageFlags::FOREIGN.bits();
+        let caching = PageFlags::WRITE_THROUGH.bits() | PageFlags::NO_CACHE.bits();
+        if page_table::read_leaf_pte(pml4, VirtAddr::new(reserved))
+            .is_none_or(|pte| pte.raw() & wanted != wanted || pte.raw() & caching != 0)
+        {
+            return Err("the arena is executable, not write-back, or not marked the device's");
+        }
+        let dont_copy = ForkPolicy {
+            dont_copy: true,
+            ..ForkPolicy::COPY
+        };
+        let placed = alloc::vec![
+            (
+                reserved,
+                reserved + 2 * frame,
+                VmaKind::Fixed,
+                dont_copy,
+                true
+            ),
+            (
+                reserved + 2 * frame,
+                reserved + 8 * frame,
+                VmaKind::Anonymous,
+                ForkPolicy::COPY,
+                false
+            ),
+        ];
+        if regions_over(reserved, reserved + 8 * frame) != placed {
+            return Err("the arena placed is not a device region of its own, kept from a fork");
+        }
+        if at(reserved, frame) != invalid_argument {
             return Err("a DMA arena was placed over one already there");
+        }
+        // A device of 32 address bits gets an arena it can reach.
+        let low = u64::try_from(at_bits(reserved + 4 * frame, frame, 32))
+            .map_err(|_| "no 32-bit DMA arena was placed")?;
+        if low.saturating_add(frame) > 1 << 32 {
+            return Err("a 32-bit device was given an arena above 4 GiB");
+        }
+        // Freed, its range is the reservation's again -- one region with its
+        // neighbours -- and can be placed in anew.
+        if call(
+            driver,
+            super::number::SYS_DMA_FREE,
+            reserved + 4 * frame,
+            0,
+            0,
+        ) != 0
+        {
+            return Err("a placed DMA arena could not be freed");
+        }
+        if page_table::translate(pml4, VirtAddr::new(reserved + 4 * frame)).is_some()
+            || regions_over(reserved + 2 * frame, reserved + 8 * frame)
+                != reservation(reserved + 2 * frame, reserved + 8 * frame)
+        {
+            return Err("a freed arena's range was not given back to the reservation");
+        }
+        if at(reserved + 4 * frame, frame) < 0 {
+            return Err("a DMA arena could not be placed again where one was freed");
         }
         // The owner's exit, as a dying thread runs it: held handles closed,
         // its address space still there.
@@ -6126,8 +6251,15 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         if page_table::translate(pml4, VirtAddr::new(va)).is_some() {
             return Err("BAR0 is still mapped after its owner's exit");
         }
-        if page_table::translate(pml4, VirtAddr::new(reserved)).is_some() {
-            return Err("the placed DMA arena is still mapped after its owner's exit");
+        if page_table::translate(pml4, VirtAddr::new(reserved)).is_some()
+            || page_table::translate(pml4, VirtAddr::new(reserved + 4 * frame)).is_some()
+        {
+            return Err("a placed DMA arena is still mapped after its owner's exit");
+        }
+        if regions_over(reserved, reserved + 8 * frame)
+            != reservation(reserved, reserved + 8 * frame)
+        {
+            return Err("the arenas' ranges were not given back to the reservation at exit");
         }
         if call(driver, SYS_PCI_DEVICE_CLOSE, handle, 0, 0)
             != i64::from(KernelError::InvalidHandle.code())
@@ -6143,7 +6275,8 @@ fn test_dispatch_device_calls() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[syscall]   device calls: OK (capability, ownership, a DMA arena placed, exit release)"
+        "[syscall]   device calls: OK (capability, ownership, DMA arenas placed and refused, \
+         freed back to the reservation, exit release)"
     );
     skips.report("[syscall]");
     Ok(())

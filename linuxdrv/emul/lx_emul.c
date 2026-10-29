@@ -276,6 +276,35 @@ void *__kmalloc_cache_node_noprof(struct kmem_cache *s, gfp_t flags, int node, s
 }
 
 /*
+ * A large kmalloc() -- a size known at compile time past Linux's largest
+ * cache, two pages -- is the page allocator's in Linux, page-aligned and its
+ * pages no slab's. The same allocator serves it here as every other size
+ * (its blocks are aligned to their size, so a page at least), and its pages
+ * say what Linux's would.
+ */
+static void *lx_alloc_large(size_t size, gfp_t flags)
+{
+	void *p = slx_alloc(size);
+
+	if (!p)
+		return NULL;
+	lx_mm_mark_pages(p, size);
+	if (flags & __GFP_ZERO)
+		memset(p, 0, size);
+	return p;
+}
+
+void *__kmalloc_large_noprof(size_t size, gfp_t flags)
+{
+	return lx_alloc_large(size, flags);
+}
+
+void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
+{
+	return lx_alloc_large(size, flags);
+}
+
+/*
  * Slab caches: what kmem_cache_alloc() hands out, by size. kmalloc's buddy
  * allocator serves the objects -- aligned to their size rounded up to a
  * power of two, so to any alignment the cache asks when the size is raised

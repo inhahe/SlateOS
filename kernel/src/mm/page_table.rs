@@ -2087,6 +2087,48 @@ pub fn read_leaf_pte(pml4_phys: u64, virt: VirtAddr) -> Option<PageTableEntry> {
     if pte.is_present() { Some(pte) } else { None }
 }
 
+/// Whether nothing at all is at the 4 KiB page `virt` in `pml4_phys`: no
+/// table reaches it, or its entry is entirely zero. A page swapped out
+/// leaves a not-present entry that is not zero -- the swap slot it is in --
+/// so it is not vacant, unlike what [`read_leaf_pte`] (present entries
+/// only) would say; nor is a page inside a huge mapping. `false` for an
+/// address that is not canonical, or before the subsystem is up.
+///
+/// The caller holds the address space's page-table lock (`mm::as_lock`) for
+/// as long as the answer must stay true.
+#[must_use]
+pub fn leaf_vacant(pml4_phys: u64, virt: VirtAddr) -> bool {
+    let Some(hhdm) = hhdm() else {
+        return false;
+    };
+    if !virt.is_canonical() {
+        return false;
+    }
+    // SAFETY for the reads: `pml4_phys` is valid (the caller's contract),
+    // each table is the one its present parent entry names, and indices
+    // taken from a `VirtAddr` are below 512.
+    let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
+    if !pml4e.is_present() {
+        return true;
+    }
+    let pdpte = unsafe { read_entry(pml4e.phys_addr(), virt.pdpt_index(), hhdm) };
+    if !pdpte.is_present() {
+        return true;
+    }
+    if pdpte.is_huge() {
+        return false;
+    }
+    let pde = unsafe { read_entry(pdpte.phys_addr(), virt.pd_index(), hhdm) };
+    if !pde.is_present() {
+        return true;
+    }
+    if pde.is_huge() {
+        return false;
+    }
+    let pte = unsafe { read_entry(pde.phys_addr(), virt.pt_index(), hhdm) };
+    pte.raw() == 0
+}
+
 /// The page table holding the four 4 KiB entries of the 16 KiB frame at
 /// `virt`, and the index of the first of them, found without creating
 /// anything. `None` when `virt` is not canonical or frame-aligned, or the

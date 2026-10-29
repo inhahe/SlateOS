@@ -23,7 +23,9 @@ function that renames, deletes and measures in one breath, and every one of
 those three defects lived in it or in its callers.
 
 Run:  python scripts/test-reclaim-space.py
-Exit: 0 all passed, 1 one or more failed.
+Exit: 0 when every check made passed -- some may have been skipped, each
+printed as SKIP with why and counted in the summary ("PASSED, n skipped") --
+and 1 when one or more failed.
 """
 
 from __future__ import annotations
@@ -56,12 +58,34 @@ def load_module():
 FAILURES = []
 
 
+SKIPS = []
+
+
 def check(name, cond, detail=""):
     if cond:
         print("  ok    %s" % name)
     else:
         print("  FAIL  %s %s" % (name, detail))
         FAILURES.append(name)
+
+
+def skip(names, why):
+    """Checks `names` not made, and why: each printed and counted."""
+    for name in names:
+        print("  SKIP  %s: %s" % (name, why))
+        SKIPS.append(name)
+
+
+def foreign_holder(lines):
+    """The pid `reclaim_dir`'s veto named as holding the tree, when it is not
+    this process -- a backup or indexing scanner on this host -- else None:
+    a veto with no holder named, or this process named, is no excuse."""
+    for line in lines:
+        words = line.split()
+        if words[:3] == ["HELD", "BY", "pid"] and len(words) > 3 and words[3].isdigit():
+            if int(words[3]) != os.getpid():
+                return int(words[3])
+    return None
 
 
 def make_tree(parent, name="target"):
@@ -73,33 +97,12 @@ def make_tree(parent, name="target"):
     return path
 
 
-SKIPS = []
-
-
-def reclaim_unheld(mod, path, tries=5, pause=2.0):
-    """`reclaim_dir` on `path` for real, asked again -- `tries` times, `pause`
-    seconds apart -- while it answers that something outside the test holds
-    the tree: what it returned, the lines it logged last, and whether every
-    try was refused for a holder.
-
-    `reclaim_dir`'s rename is its probe for "in use", and the script rightly
-    never retries it. But on this host continuous backup scanners open a new
-    file microseconds after it is written -- and again after any rename, so a
-    probe of the test's own just before the call loses the same race
-    (known-issues A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS). A
-    refusal names the holder (its holder scan), so a tree held through every
-    try is reported as a skip with that evidence, not as a failure: the test
-    cannot assert a rename succeeds while another process legitimately holds
-    the file.
-    """
-    for attempt in range(tries):
-        lines = []
-        freed = mod.reclaim_dir(path, dry_run=False, sizes=False, log=lines.append)
-        if not any("SKIP (in use)" in line for line in lines):
-            return freed, lines, False
-        if attempt + 1 < tries:
-            time.sleep(pause)
-    return freed, lines, True
+#: Why a check is skipped when another process held the tree through all of
+#: `reclaim_dir`'s tries: this host's continuous backup scanners open a new
+#: file, and again after any rename, and the test cannot assert a rename
+#: succeeds while another process legitimately holds the file (known-issues
+#: A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS).
+HELD_ELSEWHERE = "another process (pid %d) held the tree through every try"
 
 
 def test_reclaims_and_returns_a_number(mod, tmp):
@@ -112,16 +115,17 @@ def test_reclaims_and_returns_a_number(mod, tmp):
     was gone would have passed while the script still aborted mid-run.
     """
     path = make_tree(tmp)
-    freed, lines, held = reclaim_unheld(mod, path)
+    lines = []
+    freed = mod.reclaim_dir(path, dry_run=False, sizes=False, log=lines.append)
+    holder = foreign_holder(lines) if os.path.exists(path) else None
+    if holder is not None:
+        skip(["reclaim returns a float", "reclaim removes the directory",
+              "reclaim leaves no staging directory behind"], HELD_ELSEWHERE % holder)
+        return
     check("reclaim returns a float", isinstance(freed, float),
           "got %r" % (freed,))
-    if held:
-        name = "reclaim removes the directory"
-        print("  SKIP  %s: another process held the new tree through every try: %s"
-              % (name, " | ".join(line.strip() for line in lines)))
-        SKIPS.append(name)
-        return
-    check("reclaim removes the directory", not os.path.exists(path))
+    check("reclaim removes the directory", not os.path.exists(path),
+          " | ".join(line.strip() for line in lines))
     leftovers = [d for d in os.listdir(tmp) if ".reclaim-" in d]
     check("reclaim leaves no staging directory behind", leftovers == [],
           "found %r" % (leftovers,))
@@ -129,14 +133,26 @@ def test_reclaims_and_returns_a_number(mod, tmp):
 
 def test_dry_run_puts_it_back(mod, tmp):
     path = make_tree(tmp, "target-dry")
-    freed = mod.reclaim_dir(path, dry_run=True, sizes=False, log=lambda _m: None)
+    lines = []
+    freed = mod.reclaim_dir(path, dry_run=True, sizes=False, log=lines.append)
+    probes = [d for d in os.listdir(tmp) if ".probe-" in d]
+    holder = foreign_holder(lines)
+    if holder is not None and not os.path.isdir(path) and probes:
+        # Held under its probe name through every try to put it back.
+        skip(["dry run leaves the directory in place", "dry run keeps the contents",
+              "dry run leaves no staging directory behind"], HELD_ELSEWHERE % holder)
+        return
     check("dry run returns a float", isinstance(freed, float))
-    check("dry run leaves the directory in place", os.path.isdir(path))
+    check("dry run leaves the directory in place", os.path.isdir(path),
+          " | ".join(line.strip() for line in lines))
     check("dry run keeps the contents",
           os.path.exists(os.path.join(path, "debug", "artifact.bin")))
-    leftovers = [d for d in os.listdir(tmp) if ".reclaim-" in d]
+    leftovers = [d for d in os.listdir(tmp) if ".reclaim-" in d or ".probe-" in d]
     check("dry run leaves no staging directory behind", leftovers == [],
           "found %r" % (leftovers,))
+    check("a dry run's probe name is not one the sweep of abandoned deletions takes",
+          mod.STAGED.search("target.probe-1234") is None
+          and mod.STAGED.search("target.reclaim-1234") is not None)
 
 
 def test_missing_path_is_not_an_error(mod, tmp):
@@ -156,6 +172,7 @@ def test_in_use_is_skipped_not_forced(mod, tmp):
     """
     path = make_tree(tmp, "target-busy")
     held = open(os.path.join(path, "debug", "artifact.bin"), "rb")
+    saved = quickly(mod)
     try:
         freed = mod.reclaim_dir(path, dry_run=False, sizes=False,
                                 log=lambda _m: None)
@@ -164,8 +181,9 @@ def test_in_use_is_skipped_not_forced(mod, tmp):
                   "got %r" % (freed,))
             check("in-use directory survives", os.path.isdir(path))
         else:
-            print("  skip  in-use directory is skipped (POSIX allows the rename)")
+            skip(["in-use directory is skipped"], "POSIX allows the rename")
     finally:
+        mod.RENAME_PAUSE_S = saved
         held.close()
 
 
@@ -186,12 +204,13 @@ def test_veto_names_the_holder(mod, tmp):
     attribute.
     """
     if sys.platform != "win32":
-        print("  skip  veto names the holder (POSIX allows the rename)")
+        skip(["veto names the holder"], "POSIX allows the rename")
         return
     path = make_tree(tmp, "target-attributed")
     victim = os.path.join(path, "debug", "artifact.bin")
     held = open(victim, "rb")
     lines = []
+    saved = quickly(mod)
     try:
         freed = mod.reclaim_dir(path, dry_run=False, sizes=False,
                                 log=lines.append)
@@ -207,7 +226,41 @@ def test_veto_names_the_holder(mod, tmp):
         check("veto does not claim the directory is free",
               "no holder visible" not in blob, blob)
     finally:
+        mod.RENAME_PAUSE_S = saved
         held.close()
+
+
+def test_a_glance_is_waited_out(mod, tmp):
+    """A handle held for a moment -- a backup scanner's glance at a new file
+    -- is waited out (`rename_patiently`), not taken for "in use": the tree is
+    reclaimed once it is let go within the tries. Windows-only, as the vetoes
+    above."""
+    if sys.platform != "win32":
+        skip(["a glance is waited out"], "POSIX allows the rename")
+        return
+    import threading
+
+    path = make_tree(tmp, "target-glanced")
+    held = open(os.path.join(path, "debug", "artifact.bin"), "rb")
+    # Let go after the first refused try, well inside the tries' window.
+    timer = threading.Timer(mod.RENAME_PAUSE_S / 2, held.close)
+    timer.start()
+    lines = []
+    try:
+        mod.reclaim_dir(path, dry_run=False, sizes=False, log=lines.append)
+    finally:
+        timer.join()
+        held.close()
+    check("a glance is waited out", not os.path.exists(path),
+          " | ".join(line.strip() for line in lines))
+
+
+def quickly(mod):
+    """The rename's tries made quick, for a test that holds the file itself
+    through all of them: the waiting is for other processes' glances."""
+    saved = mod.RENAME_PAUSE_S
+    mod.RENAME_PAUSE_S = 0.01
+    return saved
 
 
 def test_classifies_worktrees_by_branch_not_by_name(mod, tmp):
@@ -413,6 +466,7 @@ def main():
         test_missing_path_is_not_an_error,
         test_in_use_is_skipped_not_forced,
         test_veto_names_the_holder,
+        test_a_glance_is_waited_out,
         test_classifies_worktrees_by_branch_not_by_name,
         test_scratch_targets_are_reclaimable_without_the_lane_flag,
         test_our_own_tree_is_never_promoted_by_being_detached,
@@ -437,14 +491,11 @@ def main():
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    skipped = (", %d skipped: %s" % (len(SKIPS), "; ".join(SKIPS))) if SKIPS else ""
     if FAILURES:
-        print("FAILED: %d of the checks above" % len(FAILURES))
+        print("FAILED: %d of the checks above%s" % (len(FAILURES), skipped))
         return 1
-    if SKIPS:
-        print("PASSED, %d skipped (held by another process): %s"
-              % (len(SKIPS), "; ".join(SKIPS)))
-        return 0
-    print("PASSED")
+    print("PASSED%s" % skipped)
     return 0
 
 

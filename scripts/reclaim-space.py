@@ -18,8 +18,10 @@ This script answers the "is it in use?" question with a fact rather than a
 heuristic: it *renames* the directory first.  Windows refuses to rename a
 directory that has any file open inside it, and the rename is atomic, so a
 success means no process held anything there at that instant and no observer
-ever sees a half-deleted tree.  A failure means "in use", and the candidate is
-skipped rather than forced.
+ever sees a half-deleted tree.  A failure that lasts means "in use", and the
+candidate is skipped rather than forced -- one that does not, a backup or
+indexing scanner's glance at a file, is tried again for a few seconds first
+(`rename_patiently`): a build holds its `target/` for minutes.
 
 The worst case after a successful rename is that a lane starts a build one
 second later and rebuilds from scratch -- the same cost as any `cargo clean`,
@@ -361,6 +363,36 @@ def attribute_holder(path, log):
         log("    (cannot attribute: %s: %s)" % (type(exc).__name__, exc))
 
 
+#: How a rename Windows refuses for a sharing violation is tried again. A
+#: backup or indexing scanner opens a file it sees appear or move and lets go
+#: within a second or two; a build holding its `target/` holds it for minutes.
+#: So a refusal that outlasts these tries is "in use"; one that does not was a
+#: scanner's glance (known-issues
+#: A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS). Read at each call,
+#: so a test may shorten them.
+RENAME_TRIES = 5
+RENAME_PAUSE_S = 1.0
+#: A dry run's rename back must not be given up so soon: the tree would be
+#: left under its probe name.
+RESTORE_TRIES = 30
+
+
+def rename_patiently(src, dst, tries=None):
+    """`os.rename(src, dst)`, tried again -- `tries` times (default
+    [`RENAME_TRIES`]), [`RENAME_PAUSE_S`] apart -- while it is refused for a
+    sharing violation (`PermissionError`: a handle open inside for the moment).
+    Any other error, and the last refusal, are raised."""
+    tries = RENAME_TRIES if tries is None else tries
+    for attempt in range(tries):
+        try:
+            os.rename(src, dst)
+            return
+        except PermissionError:
+            if attempt + 1 >= tries:
+                raise
+            time.sleep(RENAME_PAUSE_S)
+
+
 def reclaim_dir(path, dry_run, sizes, log):
     """Delete `path` iff nothing holds a file open inside it.
 
@@ -376,9 +408,11 @@ def reclaim_dir(path, dry_run, sizes, log):
     """
     if not os.path.isdir(path):
         return 0.0
-    staged = "%s.reclaim-%d" % (path, os.getpid())
+    # A dry run's probe name is not one `reclaim_staged` deletes: a tree a dry
+    # run could not put back must not be taken for an abandoned deletion.
+    staged = "%s.%s-%d" % (path, "probe" if dry_run else "reclaim", os.getpid())
     try:
-        os.rename(path, staged)
+        rename_patiently(path, staged)
     except OSError as exc:
         log("  SKIP (in use)  %s  [%s]" % (path, exc.strerror))
         attribute_holder(path, log)
@@ -388,7 +422,13 @@ def reclaim_dir(path, dry_run, sizes, log):
         # back.  A dry run that skipped the probe could only report on
         # timestamps, which is the guesswork this script exists to avoid.
         size = dir_size_gib(staged) if sizes else 0.0
-        os.rename(staged, path)
+        try:
+            rename_patiently(staged, path, RESTORE_TRIES)
+        except OSError as exc:
+            log("  WARNING: %s could not be put back at %s [%s]; rename it back by hand"
+                % (staged, path, exc.strerror))
+            attribute_holder(staged, log)
+            return 0.0
         log("  WOULD reclaim  %s%s"
             % (path, ("  (%.1f GiB)" % size) if sizes else "  (not in use)"))
         return size

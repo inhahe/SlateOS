@@ -5,12 +5,15 @@ main. It recurred on 2026-10-29 (the boot test of 4e530c752 was refused for
 it) despite the earlier fix, a probe of the test's own (`wait_until_unheld`,
 a rename there and back) before calling `reclaim_dir` once: the probe's own
 rename is a change the scanners react to, so they held the file again by
-the time `reclaim_dir` renamed it. Option 2 below is now complete: the test
-asks `reclaim_dir` itself, five times two seconds apart, while it answers
-`SKIP (in use)`, and a tree held through every try is a printed SKIP --
-with the holder `reclaim_dir` names -- and `PASSED, 1 skipped` in the
-summary, not a failure. `reclaim_dir` itself still never retries the
-rename.
+the time `reclaim_dir` renamed it. Both options below are now taken. Option
+1: `reclaim_dir` tries a rename refused for a sharing violation again, five
+times a second apart (`rename_patiently`) -- a scanner's glance lasts a
+second or two, a build's hold minutes -- and a dry run's rename back thirty
+times, under a probe name the sweep of abandoned deletions never takes. Option
+2: a tree held by *another* process through every try, named by
+`reclaim_dir`'s holder scan, is a printed SKIP of the checks it prevents and
+counted in the summary (`PASSED, 3 skipped: ...`); held by the test itself, or
+refused with no holder named, it is a failure.
 
 **In short:** `scripts/test-reclaim-space.py` failed one check during a boot
 test and passes every time it is run by hand. It is not testing anything that

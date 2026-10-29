@@ -817,6 +817,8 @@ const fn build_v1_table() -> SyscallTable {
         Some(handlers::sys_pci_device_irq_setup);
     handlers[super::number::SYS_PCI_DEVICE_IRQ_WAIT as usize] =
         Some(handlers::sys_pci_device_irq_wait);
+    handlers[super::number::SYS_PCI_DEVICE_IRQ_PENDING as usize] =
+        Some(handlers::sys_pci_device_irq_pending);
     handlers[SYS_MEMORY_LOCK as usize] = Some(handlers::sys_memory_lock);
     handlers[SYS_THREAD_SCHEDULER as usize] = Some(handlers::sys_thread_scheduler);
     handlers[SYS_MEMBARRIER as usize] = Some(handlers::sys_membarrier);

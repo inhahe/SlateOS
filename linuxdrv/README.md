@@ -83,12 +83,16 @@ and uevents showing nothing (`emul/lx_fs.c`, design-decisions 1583); Linux's
 own PCI core, given the functions the process was started with
 (`pci=BB:DD.F`) through the kernel's device handle, their BARs shadowed and
 mapped by `ioremap` (`emul/lx_pci.c`), and the heap laid out as Linux's
-direct map (`emul/lx_mm.c`, design-decisions 1584); their MSI delivered to
-the handlers drivers request, taken at each turn of the loop and waited
-for when it is idle (`emul/lx_irq.c`, design-decisions 1585); and DMA from
-a window beside the heap that the device's own memory backs, kmalloc
-serving from it (`emul/lx_dma.c`, `kit/src/window.rs`, design-decisions
-1586). The driver's own
+direct map (`emul/lx_mm.c`, design-decisions 1584); their MSI or MSI-X --
+a vector per table entry -- delivered to the handlers drivers request,
+each vector's taken at each turn of the loop and all waited for when it is
+idle (`emul/lx_irq.c`, design-decisions 1585, 1587); DMA from a window
+beside the heap that the device's own memory backs, kmalloc serving from it
+(`emul/lx_dma.c`, `kit/src/window.rs`, design-decisions 1586); a page
+allocator, vmalloc and high-resolution timers (`emul/lx_mm.c`,
+`emul/lx_hrtimer.c`); and for a network driver, Linux's own network core
+below the sockets, the devices it registers opened and used by the layer's
+own task (`emul/lx_nic.c`, design-decisions 1588). The driver's own
 code is marked at build (`scripts/linux-tree.sh` renames its sections to
 `*.lxdriver`, which `link.ld` brackets), so that only the driver's failing
 initcall ends the process, a Linux subsystem's being carried past. `hello`
@@ -100,18 +104,15 @@ queued behind each -- probes a device of its own through the driver core,
 and overflows a stack into its guard on purpose; given the boot test's
 spare 82574, it probes the card through Linux's PCI core, reads its MAC
 address through BAR0, handles the interrupts it has the card raise, and
-has it read a descriptor and a frame from the DMA window. No
-driver runs yet. The first,
-`e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
-use 148 symbols they do not define. About 15 are Linux's generic library code
-(`lib/` string, bitmap, CRC, `vsprintf`, hexdump; `timecounter`), to be
-compiled in as they are; about 25 are the socket-buffer and Ethernet helpers
-(`net/core/skbuff.c`, `net/ethernet/eth.c`, ethtool's), Linux's own where their
-dependencies allow; the rest -- PCI (21), DMA (8), interrupts (3), timers,
-`jiffies` and sleeping (about 11), workqueues (6), memory (about 10),
-mutexes, `printk` and the `dev_*` messages, and `net/core/dev.c`'s NAPI and
-`net_device` side (18), which is the bridge to the native network stack --
-are the bottom layer to write.
+has it read a descriptor and a frame from the DMA window, and routes three
+of its causes to three MSI-X vectors.
+
+The first real driver, Linux's own `e1000e` (`linuxdrv/e1000e/`, roadmap.md
+2.1), binds the spare 82574 in QEMU: it registers `eth0`, brings its link up
+on three MSI-X vectors, and -- in the "arp" mode the kernel's self-test
+runs -- asks QEMU's gateway for its address and has the answer, a frame
+sent and a frame received through Linux's driver, its interrupts and its
+DMA. Its bridge to the native network stack is next.
 
 ## Licences
 

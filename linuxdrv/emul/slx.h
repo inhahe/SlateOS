@@ -79,12 +79,15 @@ int slx_pci_bar_window(long handle, unsigned int bar, unsigned long long *base,
 		       unsigned long long *size, unsigned long long *seen);
 long slx_pci_map_bar(long handle, unsigned int bar);
 /*
- * Its interrupts: its MSI set up, once for the handle's life (0, or an
- * error); the interrupts counted since last taken, taken now without
- * waiting; and whether the loop, with nothing to run, waits for them too.
+ * Its interrupts: set up -- `vectors` 0 for its MSI, answering 0; more for
+ * its MSI-X, answering how many vectors it has; a different set-up
+ * replaces the last -- or an error; which of its vectors have had
+ * interrupts since last asked (MSI-X vector i as bit i, MSI as bit 0),
+ * taken now without waiting; and whether the loop, with nothing to run,
+ * waits for them too.
  */
-long slx_pci_irq_setup(long handle);
-long slx_pci_irq_take(long handle);
+long slx_pci_irq_setup(long handle, unsigned int vectors);
+long slx_pci_irq_pending(long handle);
 void slx_pci_irq_listen(long handle, _Bool on);
 
 /* Fill `len` bytes at `buf` from the system's CSPRNG, or stop the driver. */

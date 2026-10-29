@@ -647,8 +647,9 @@ marker_checks_pass() {
 
 # The Linux driver processes the boot test loads beside the kernel, by their
 # directory under linuxdrv/; the kernel finds each by its module_cmdline,
-# linuxdrv/<name> (kernel/src/linuxdrv.rs).
-LINUX_DRIVERS=(hello)
+# linuxdrv/<name> (kernel/src/linuxdrv.rs): the layer's test process, and
+# Linux's own e1000e, which drives the spare card.
+LINUX_DRIVERS=(hello e1000e)
 
 # Build the layer's Rust half, then each of LINUX_DRIVERS into
 # build/linuxdrv/<name>.elf. cargo no-ops a current build, and Linux's make a
@@ -685,12 +686,14 @@ check_linuxdrv_ran() {
     if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
         grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
         grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file" &&
+        grep -aq '^\[linuxdrv\]   e1000e process: .*: OK' "$file" &&
         ! grep -aq '^\[linuxdrv\]   SKIP' "$file"; then
         return 0
     fi
     echo "=== THE LINUX DRIVER LAYER'S PROCESS DID NOT RUN ==="
-    echo "  The boot medium carried linuxdrv/hello, but the kernel never said"
-    echo "  '[linuxdrv]   hello process ...: OK', or skipped some of its runs,"
+    echo "  The boot medium carried linuxdrv/hello and linuxdrv/e1000e, but the"
+    echo "  kernel never said '[linuxdrv]   hello process ...: OK' and"
+    echo "  '[linuxdrv]   e1000e process: ...: OK', or skipped some of their runs,"
     echo "  or the process never printed its line as Linux formats it. Their own"
     echo "  lines say why:"
     grep -a '^\[linuxdrv\]\|^\[lx\]' "$file" | head -8 | sed 's/^/  /'

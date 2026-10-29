@@ -8,10 +8,11 @@
 //! the handle refusing to write them; every other access is the handle's
 //! system call.
 //!
-//! And its interrupts: its MSI set up once (the kernel programs it), the
-//! interrupts counted since last taken, and whether the loop, with nothing
-//! to run, waits for them too ([`wait_for_interrupts`]) -- while the C half
-//! has a handler requested and enabled for them.
+//! And its interrupts: its MSI or MSI-X set up (the kernel programs them),
+//! which of its vectors have had interrupts since last asked, and whether
+//! the loop, with nothing to run, waits for them too
+//! ([`wait_for_interrupts`]) -- while the C half has a handler requested and
+//! enabled for one.
 //!
 //! Results are the system call's: a value of 0 or more, or a negative
 //! SlateOS error code (`PermissionDenied`, -400, for a function the process
@@ -26,9 +27,9 @@ const SYS_PCI_DEVICE_CONFIG_READ: u64 = 1182;
 const SYS_PCI_DEVICE_CONFIG_WRITE: u64 = 1183;
 const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
-const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 /// A DMA arena placed where the caller says (`sys.rs`'s DMA window).
 pub(crate) const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
+const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
 const SYS_WAIT_MULTIPLE: u64 = 1066;
 /// `cap::ResourceType::PciDevice`: a device handle's kind in
 /// `SYS_WAIT_MULTIPLE`.
@@ -47,6 +48,10 @@ const SYS_PCI_DEVICE_CLOSE: u64 = 1180;
 const OUT_OF_MEMORY: i64 = -100;
 /// SlateOS's `InvalidArgument`: a configuration offset no register has.
 const INVALID_ARGUMENT: i64 = -3;
+/// SlateOS's `ResourceExhausted` and `InternalError`: the interrupt set-ups
+/// that fail having taken the old one away.
+const RESOURCE_EXHAUSTED: i64 = -304;
+const INTERNAL_ERROR: i64 = -1;
 
 /// How many functions one process may be given: the C half asks
 /// (`slx_pci_functions`), and sizes its own tables by it.
@@ -58,9 +63,9 @@ pub extern "C" fn slx_pci_functions() -> usize {
     FUNCTIONS
 }
 
-/// A function opened: its handle, its BARs, whether its MSI is set up,
-/// whether the loop waits for its interrupts, and whether the kernel has
-/// said it cannot be waited on.
+/// A function opened: its handle, its BARs, whether its interrupts (MSI or
+/// MSI-X) are set up, whether the loop waits for them, and whether the
+/// kernel has said it cannot be waited on.
 struct Function {
     handle: i64,
     bars: Bars,
@@ -175,26 +180,40 @@ pub extern "C" fn slx_pci_close(handle: i64) -> i64 {
     syscall4(SYS_PCI_DEVICE_CLOSE, handle.cast_unsigned(), 0, 0, 0)
 }
 
-/// `slx_pci_irq_setup`: the function's MSI set up -- the kernel programs
-/// it, once for the handle's life, so a second call finds it done: 0, or an
-/// error.
+/// `slx_pci_irq_setup`: the function's interrupts set up -- the kernel
+/// programs them: `vectors` 0 for its MSI, answering 0; more for its MSI-X,
+/// answering how many vectors it has. A set-up the function has already is
+/// kept; another replaces it. Or an error: one the kernel answers before it
+/// changes anything (no such capability, a set-up in progress) leaves the
+/// function as it was; running out of vectors, or an internal error, leaves
+/// it with none, the old set-up gone.
 #[unsafe(no_mangle)]
-pub extern "C" fn slx_pci_irq_setup(handle: i64) -> i64 {
-    if with_function(handle, |f| f.msi) == Some(true) {
-        return 0;
-    }
-    let answer = syscall4(SYS_PCI_DEVICE_IRQ_SETUP, handle.cast_unsigned(), 0, 0, 0);
-    if answer == 0 {
-        with_function(handle, |f| f.msi = true);
-    }
+pub extern "C" fn slx_pci_irq_setup(handle: i64, vectors: u32) -> i64 {
+    let answer = syscall4(
+        SYS_PCI_DEVICE_IRQ_SETUP,
+        handle.cast_unsigned(),
+        u64::from(vectors),
+        0,
+        0,
+    );
+    with_function(handle, |f| {
+        if answer >= 0 {
+            f.msi = true;
+            // Waitable again: what made it not was its last set-up's.
+            f.unwaitable = false;
+        } else if matches!(answer, RESOURCE_EXHAUSTED | INTERNAL_ERROR) {
+            f.msi = false;
+        }
+    });
     answer
 }
 
-/// `slx_pci_irq_take`: the function's interrupts counted since they were
-/// last taken, now, without waiting; an error while its MSI is not set up.
+/// `slx_pci_irq_pending`: which of the function's vectors have had
+/// interrupts since last asked, taken now without waiting -- MSI-X vector
+/// `i` as bit `i`, MSI as bit 0; an error while none are set up.
 #[unsafe(no_mangle)]
-pub extern "C" fn slx_pci_irq_take(handle: i64) -> i64 {
-    syscall4(SYS_PCI_DEVICE_IRQ_WAIT, handle.cast_unsigned(), 0, 0, 0)
+pub extern "C" fn slx_pci_irq_pending(handle: i64) -> i64 {
+    syscall4(SYS_PCI_DEVICE_IRQ_PENDING, handle.cast_unsigned(), 0, 0, 0)
 }
 
 /// `slx_pci_irq_listen`: whether the loop, with nothing to run, waits for

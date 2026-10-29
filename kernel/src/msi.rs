@@ -49,7 +49,7 @@
 use crate::ipc::waiters::WaiterSet;
 use crate::pci;
 use crate::serial_println;
-use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -128,6 +128,27 @@ static WAKE_OWED: [AtomicBool; MSI_VECTOR_COUNT] = {
 /// meanwhile changed hands. The interrupt handler never takes it.
 static DELIVERY: crate::sync::Mutex<()> = crate::sync::Mutex::new(());
 
+/// For each vector, whose waiters its interrupts wake: the pool index of a
+/// group's first vector plus one, for the later vectors of a device's group
+/// ([`claim_group`]) -- its waiters wait for all of them -- and 0, its own,
+/// for every other. Set and cleared by the owner under [`DELIVERY`]; read by
+/// the interrupt handler.
+static WAKE_GROUP: [AtomicU8; MSI_VECTOR_COUNT] = {
+    const OWN: AtomicU8 = AtomicU8::new(0);
+    [OWN; MSI_VECTOR_COUNT]
+};
+
+/// The pool index whose waiters an interrupt at pool `index` wakes.
+fn wake_index(index: usize) -> usize {
+    match WAKE_GROUP
+        .get(index)
+        .map_or(0, |g| g.load(Ordering::Acquire))
+    {
+        0 => index,
+        first => usize::from(first).saturating_sub(1),
+    }
+}
+
 /// The index of `vector` in the pool, if it is one.
 fn pool_index(vector: u8) -> Option<usize> {
     (MSI_VECTOR_BASE..=MSI_VECTOR_MAX)
@@ -157,10 +178,11 @@ pub fn dispatch(vector: u8) {
         && OWNER
             .get(index)
             .is_some_and(|o| o.load(Ordering::SeqCst) != 0)
-        && let (Some(pending), Some(owed)) = (PENDING.get(index), WAKE_OWED.get(index))
+        && let woken = wake_index(index)
+        && let (Some(pending), Some(owed)) = (PENDING.get(index), WAKE_OWED.get(woken))
     {
         pending.fetch_add(1, Ordering::SeqCst);
-        if !wake_waiters(index) {
+        if !wake_waiters(woken) {
             owed.store(true, Ordering::Release);
             crate::softirq::raise(crate::softirq::IRQ_POLL_SOFTIRQ);
         }
@@ -279,6 +301,112 @@ pub fn register_waiter(vector: u8, owner: u64, task: u64) -> crate::error::Kerne
         return Err(KernelError::InvalidHandle);
     }
     with_waiters(index, |w| w.insert(task)).ok_or(KernelError::InvalidHandle)
+}
+
+/// Make `owner` the one the `count` vectors from `first` count for, as
+/// [`claim_delivery`] each, and the first's waiters the ones every one of
+/// them wakes: a device's MSI-X entries, waited for together. All or none
+/// (`false`).
+#[must_use]
+pub fn claim_group(first: u8, count: usize, owner: u64) -> bool {
+    let Some(base) = pool_index(first) else {
+        return false;
+    };
+    if count == 0 || base.saturating_add(count) > MSI_VECTOR_COUNT {
+        return false;
+    }
+    for i in 0..count {
+        #[allow(clippy::cast_possible_truncation)] // `base + count` is in the pool.
+        if !claim_delivery(first.wrapping_add(i as u8), owner) {
+            for j in 0..i {
+                #[allow(clippy::cast_possible_truncation)]
+                release_delivery(first.wrapping_add(j as u8), owner);
+            }
+            return false;
+        }
+    }
+    let _serial = DELIVERY.lock();
+    #[allow(clippy::cast_possible_truncation)] // a pool index plus one fits a u8.
+    let tag = base.saturating_add(1) as u8;
+    for group in WAKE_GROUP
+        .iter()
+        .skip(base.saturating_add(1))
+        .take(count.saturating_sub(1))
+    {
+        group.store(tag, Ordering::Release);
+    }
+    true
+}
+
+/// Undo [`claim_group`]: each vector's delivery let go, each its own again.
+pub fn release_group(first: u8, count: usize, owner: u64) {
+    if let Some(base) = pool_index(first) {
+        let _serial = DELIVERY.lock();
+        for group in WAKE_GROUP.iter().skip(base).take(count) {
+            group.store(0, Ordering::Release);
+        }
+    }
+    for i in 0..count {
+        #[allow(clippy::cast_possible_truncation)]
+        release_delivery(first.wrapping_add(i as u8), owner);
+    }
+}
+
+/// The group's vectors owned by `owner`, as pool indices: `None` when any is
+/// not -- released, or another's.
+fn group_indices(first: u8, count: usize, owner: u64) -> Option<core::ops::Range<usize>> {
+    let base = pool_index(first)?;
+    let end = base.checked_add(count).filter(|&e| e <= MSI_VECTOR_COUNT)?;
+    (base..end)
+        .all(|i| {
+            OWNER
+                .get(i)
+                .is_some_and(|o| o.load(Ordering::SeqCst) == owner)
+        })
+        .then_some(base..end)
+}
+
+/// Take, and clear, the interrupts counted on the `count` vectors from
+/// `first` for `owner` (at most 64): which of them had any, vector `first +
+/// i` as bit `i`. `None` when `owner` no longer has them.
+#[must_use]
+pub fn take_mask(first: u8, count: usize, owner: u64) -> Option<u64> {
+    if count > 64 {
+        return None;
+    }
+    let _serial = DELIVERY.lock();
+    let indices = group_indices(first, count, owner)?;
+    let mut mask = 0u64;
+    for (bit, index) in indices.enumerate() {
+        if PENDING.get(index)?.swap(0, Ordering::SeqCst) != 0 {
+            mask |= 1u64.checked_shl(u32::try_from(bit).ok()?)?;
+        }
+    }
+    Some(mask)
+}
+
+/// Take, and clear, the interrupts counted on the group: how many, all told.
+#[must_use]
+pub fn take_group(first: u8, count: usize, owner: u64) -> Option<u64> {
+    let _serial = DELIVERY.lock();
+    let indices = group_indices(first, count, owner)?;
+    let mut total = 0u64;
+    for index in indices {
+        total = total.saturating_add(PENDING.get(index)?.swap(0, Ordering::SeqCst));
+    }
+    Some(total)
+}
+
+/// The interrupts counted on the group and not yet taken, all told, left
+/// where they are: what a readiness test reads.
+#[must_use]
+pub fn pending_group(first: u8, count: usize, owner: u64) -> Option<u64> {
+    let indices = group_indices(first, count, owner)?;
+    let mut total = 0u64;
+    for index in indices {
+        total = total.saturating_add(PENDING.get(index)?.load(Ordering::SeqCst));
+    }
+    Some(total)
 }
 
 /// `task` stops waiting for `vector`, if it waits.
@@ -697,24 +825,7 @@ pub fn enable_msi(config: &mut MsiConfig, target_cpu_lapic: u8) -> Option<u8> {
         (msg_control & !(0b111 << 4)) | MSI_CONTROL_ENABLE,
     );
 
-    // Disable legacy INTx (set bit 10 of PCI Command register) -- unless on
-    // this part that silences its MSI too.
-    let vendor = pci::config_read16(bus, dev, func, 0);
-    let device = pci::config_read16(bus, dev, func, 2);
-    let revision = pci::config_read8(bus, dev, func, 8);
-    let smbus = pci::find_device(0x1002, 0x4385)
-        .map(|s| pci::config_read8(s.address.bus, s.address.device, s.address.function, 8));
-    if intx_disable_silences_msi(vendor, device, revision, smbus) {
-        serial_println!(
-            "[msi] {:02x}:{:02x}.{} keeps its legacy line on: turned off, its MSI would be too",
-            bus,
-            dev,
-            func
-        );
-    } else {
-        let cmd = pci::config_read16(bus, dev, func, 4);
-        pci::config_write16_native(bus, dev, func, 4, cmd | (1 << 10));
-    }
+    legacy_line_off(bus, dev, func);
 
     serial_println!(
         "[msi] Enabled MSI for {:02x}:{:02x}.{}: vector={}, cpu={}",
@@ -746,10 +857,7 @@ pub fn disable_msi(config: &mut MsiConfig) {
         cap.wrapping_add(2),
         msg_control & !MSI_CONTROL_ENABLE,
     );
-    // Legacy INTx back on (Command bit 10), as `enable_msi` found it off:
-    // the function goes back to whoever drives it next able to interrupt.
-    let cmd = pci::config_read16(bus, dev, func, 4);
-    pci::config_write16_native(bus, dev, func, 4, cmd & !(1 << 10));
+    legacy_line_on(bus, dev, func);
 
     // Its remapping entry, now that nothing raises it. One a unit could
     // not be made to forget stays given out (`free_msi_entry`), and so does
@@ -775,6 +883,311 @@ pub fn disable_msi(config: &mut MsiConfig) {
     free_vectors(config.allocated_vector, config.allocated_count as usize);
     config.allocated_vector = 0;
     config.allocated_count = 0;
+}
+
+/// The function's legacy line off (the command register's INTx Disable), as
+/// MSI and MSI-X are turned on -- unless on a part where that silences its
+/// messages too ([`intx_disable_silences_msi`]).
+fn legacy_line_off(bus: u8, dev: u8, func: u8) {
+    let vendor = pci::config_read16(bus, dev, func, 0);
+    let device = pci::config_read16(bus, dev, func, 2);
+    let revision = pci::config_read8(bus, dev, func, 8);
+    let smbus = pci::find_device(0x1002, 0x4385)
+        .map(|s| pci::config_read8(s.address.bus, s.address.device, s.address.function, 8));
+    if intx_disable_silences_msi(vendor, device, revision, smbus) {
+        serial_println!(
+            "[msi] {:02x}:{:02x}.{} keeps its legacy line on: turned off, its MSI would be too",
+            bus,
+            dev,
+            func
+        );
+    } else {
+        let cmd = pci::config_read16(bus, dev, func, 4);
+        pci::config_write16_native(bus, dev, func, 4, cmd | (1 << 10));
+    }
+}
+
+/// The legacy line back on, as [`legacy_line_off`] found it: the function
+/// goes back to whoever drives it next able to interrupt.
+fn legacy_line_on(bus: u8, dev: u8, func: u8) {
+    let cmd = pci::config_read16(bus, dev, func, 4);
+    pci::config_write16_native(bus, dev, func, 4, cmd & !(1 << 10));
+}
+
+// ---------------------------------------------------------------------------
+// MSI-X
+// ---------------------------------------------------------------------------
+
+/// The most MSI-X vectors one function is given: a device's group is taken
+/// together ([`take_mask`] answers 64 at most), and the pool is shared by
+/// every device.
+pub const MSIX_MAX_VECTORS: u16 = 32;
+
+/// Where a function's MSI-X keeps its table and its pending bits -- which
+/// BAR, how far into it -- and how many entries the table has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MsixLayout {
+    /// Offset of the capability in configuration space.
+    pub cap_offset: u8,
+    /// Entries in the table, 1 to 2048.
+    pub table_size: u16,
+    /// The BAR (by register index) the table is in, and its offset there.
+    pub table_bar: u8,
+    pub table_offset: u32,
+    /// The BAR the pending bits are in, and their offset there.
+    pub pba_bar: u8,
+    pub pba_offset: u32,
+}
+
+impl MsixLayout {
+    /// The table's length in bytes: 16 per entry.
+    #[must_use]
+    pub fn table_bytes(&self) -> u64 {
+        u64::from(self.table_size).saturating_mul(16)
+    }
+
+    /// The pending bits' length in bytes: one bit per entry, in 64-bit words.
+    #[must_use]
+    pub fn pba_bytes(&self) -> u64 {
+        u64::from(self.table_size).div_ceil(64).saturating_mul(8)
+    }
+}
+
+/// The function's MSI-X capability, read: `None` for a function without one.
+#[must_use]
+pub fn find_msix_capability(bus: u8, device: u8, function: u8) -> Option<MsixLayout> {
+    let cap = find_pci_capability(bus, device, function, PCI_CAP_ID_MSIX)?;
+    let control = pci::config_read16(bus, device, function, cap.wrapping_add(2));
+    let table = pci::config_read32(bus, device, function, cap.wrapping_add(4));
+    let pba = pci::config_read32(bus, device, function, cap.wrapping_add(8));
+    #[allow(clippy::cast_possible_truncation)] // the BIR is three bits.
+    Some(MsixLayout {
+        cap_offset: cap,
+        table_size: (control & 0x7ff).saturating_add(1),
+        table_bar: (table & 7) as u8,
+        table_offset: table & !7,
+        pba_bar: (pba & 7) as u8,
+        pba_offset: pba & !7,
+    })
+}
+
+/// A function's MSI-X, on: its layout, the table as the kernel maps it, the
+/// vectors its first `count` entries send -- `first_vector` on -- and, with
+/// interrupts remapped, the remapping entry each names.
+#[derive(Debug, Clone)]
+pub struct MsixConfig {
+    pub bus: u8,
+    pub device: u8,
+    pub function: u8,
+    pub layout: MsixLayout,
+    /// The table's kernel address (mapped uncached, for good).
+    table_virt: u64,
+    pub first_vector: u8,
+    pub count: u16,
+    remap: alloc::vec::Vec<u16>,
+}
+
+/// Bit 0 of an entry's vector control: masked.
+const MSIX_ENTRY_MASKED: u32 = 1;
+
+/// Write one 32-bit field of table entry `entry` (`field` 0 address low, 1
+/// address high, 2 data, 3 vector control).
+///
+/// # Safety
+///
+/// `table_virt` maps a table of more than `entry` entries, uncached.
+unsafe fn msix_write(table_virt: u64, entry: u16, field: u64, value: u32) {
+    let at = table_virt
+        .wrapping_add(u64::from(entry).wrapping_mul(16))
+        .wrapping_add(field.wrapping_mul(4));
+    // SAFETY: the caller's: inside the mapped table, 4-byte aligned (the
+    // table is 8-byte aligned and the fields are 4 bytes apart).
+    unsafe { core::ptr::write_volatile(at as *mut u32, value) };
+}
+
+/// MSI-X on for the function, its first `count` entries (1 to
+/// [`MSIX_MAX_VECTORS`], within its table) each sending a vector of its own,
+/// to the CPU whose local APIC id is `target_cpu_lapic`; its other entries
+/// masked. `table_phys` is where its table is: the table BAR's base plus the
+/// layout's offset. MSI goes off first (the specification forbids both),
+/// the function is masked while its table is written, and its legacy line
+/// goes off. With interrupts remapped each entry names a remapping entry of
+/// its own, which only this function may raise. `None`, nothing changed,
+/// when vectors or remapping entries run out or the table cannot be mapped.
+#[must_use]
+pub fn enable_msix(
+    bus: u8,
+    dev: u8,
+    func: u8,
+    layout: MsixLayout,
+    table_phys: u64,
+    count: u16,
+    target_cpu_lapic: u8,
+) -> Option<MsixConfig> {
+    if count == 0 || count > layout.table_size || count > MSIX_MAX_VECTORS {
+        return None;
+    }
+    // SAFETY: the function's own MSI-X table, device memory in its BAR.
+    let table_virt =
+        unsafe { crate::mm::page_table::map_mmio(table_phys, layout.table_bytes()) }.ok()?;
+    let first = alloc_vectors(usize::from(count))?;
+    let mut remap = alloc::vec::Vec::new();
+    let mut messages = alloc::vec::Vec::new();
+    for i in 0..count {
+        #[allow(clippy::cast_possible_truncation)] // count <= 32.
+        let vector = first.wrapping_add(i as u8);
+        if crate::iommu_remap::interrupts_remapped() {
+            let source = pci::msi_source(pci::PciAddress {
+                bus,
+                device: dev,
+                function: func,
+            });
+            match crate::iommu_remap::alloc_msi_entry(source, vector, target_cpu_lapic) {
+                Ok(handle) => {
+                    remap.push(handle);
+                    messages.push((crate::iommu_remap::msi_address(handle), 0));
+                }
+                Err(e) => {
+                    serial_println!(
+                        "[msi] {:02x}:{:02x}.{}: no interrupt remapping entry for MSI-X entry {}: {:?}",
+                        bus,
+                        dev,
+                        func,
+                        i,
+                        e
+                    );
+                    free_remap_entries(bus, dev, func, &remap, first, count);
+                    return None;
+                }
+            }
+        } else {
+            messages.push((
+                format_address(target_cpu_lapic, false),
+                format_data(vector, true, true),
+            ));
+        }
+    }
+
+    // MSI off, should anything have left it on.
+    if let Some(msi) = find_pci_capability(bus, dev, func, PCI_CAP_ID_MSI) {
+        let control = pci::config_read16(bus, dev, func, msi.wrapping_add(2));
+        if control & MSI_CONTROL_ENABLE != 0 {
+            pci::config_write16_native(
+                bus,
+                dev,
+                func,
+                msi.wrapping_add(2),
+                control & !MSI_CONTROL_ENABLE,
+            );
+        }
+    }
+    let at = layout.cap_offset.wrapping_add(2);
+    let control = pci::config_read16(bus, dev, func, at);
+    // Enabled with the whole function masked, while its table is written.
+    pci::config_write16_native(
+        bus,
+        dev,
+        func,
+        at,
+        control | MSIX_CONTROL_ENABLE | MSIX_CONTROL_FUNCTION_MASK,
+    );
+    for entry in 0..layout.table_size {
+        // SAFETY: `table_virt` maps the whole table, uncached; `entry` is in it.
+        unsafe {
+            match messages.get(usize::from(entry)) {
+                Some(&(address, data)) => {
+                    msix_write(table_virt, entry, 0, address);
+                    msix_write(table_virt, entry, 1, 0);
+                    msix_write(table_virt, entry, 2, data);
+                    msix_write(table_virt, entry, 3, 0);
+                }
+                None => msix_write(table_virt, entry, 3, MSIX_ENTRY_MASKED),
+            }
+        }
+    }
+    pci::config_write16_native(
+        bus,
+        dev,
+        func,
+        at,
+        (control | MSIX_CONTROL_ENABLE) & !MSIX_CONTROL_FUNCTION_MASK,
+    );
+    legacy_line_off(bus, dev, func);
+    serial_println!(
+        "[msi] Enabled MSI-X for {:02x}:{:02x}.{}: {} vector(s) from {}, cpu={}",
+        bus,
+        dev,
+        func,
+        count,
+        first,
+        target_cpu_lapic
+    );
+    Some(MsixConfig {
+        bus,
+        device: dev,
+        function: func,
+        layout,
+        table_virt,
+        first_vector: first,
+        count,
+        remap,
+    })
+}
+
+/// The remapping entries an MSI-X set-up made, freed, and its vectors with
+/// them -- but a vector whose entry a unit could not be made to forget stays
+/// given out (as [`disable_msi`] keeps one): a late message must not reach
+/// whoever is given it next.
+fn free_remap_entries(bus: u8, dev: u8, func: u8, remap: &[u16], first: u8, count: u16) {
+    let mut kept = alloc::vec::Vec::new();
+    for (i, &handle) in remap.iter().enumerate() {
+        if let Err(e) = crate::iommu_remap::free_msi_entry(handle) {
+            serial_println!(
+                "[msi] {:02x}:{:02x}.{}: remapping entry {} kept: {:?}",
+                bus,
+                dev,
+                func,
+                handle,
+                e
+            );
+            kept.push(i);
+        }
+    }
+    for i in 0..usize::from(count) {
+        if !kept.contains(&i) {
+            #[allow(clippy::cast_possible_truncation)] // count <= 32.
+            free_vector(first.wrapping_add(i as u8));
+        }
+    }
+}
+
+/// MSI-X off: every entry masked, then the capability turned off, the legacy
+/// line back on, and the remapping entries and vectors freed.
+pub fn disable_msix(config: MsixConfig) {
+    let (bus, dev, func) = (config.bus, config.device, config.function);
+    let at = config.layout.cap_offset.wrapping_add(2);
+    let control = pci::config_read16(bus, dev, func, at);
+    pci::config_write16_native(bus, dev, func, at, control | MSIX_CONTROL_FUNCTION_MASK);
+    for entry in 0..config.layout.table_size {
+        // SAFETY: the table `enable_msix` mapped, for good; `entry` is in it.
+        unsafe { msix_write(config.table_virt, entry, 3, MSIX_ENTRY_MASKED) };
+    }
+    pci::config_write16_native(
+        bus,
+        dev,
+        func,
+        at,
+        control & !(MSIX_CONTROL_ENABLE | MSIX_CONTROL_FUNCTION_MASK),
+    );
+    legacy_line_on(bus, dev, func);
+    free_remap_entries(
+        bus,
+        dev,
+        func,
+        &config.remap,
+        config.first_vector,
+        config.count,
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -258,6 +258,80 @@ static char hello_static_frame[ETH_ZLEN];
 		}								\
 	} while (0)
 
+/*
+ * MSI-X (lx_irq.c): three vectors, the card's receive, transmit and other
+ * causes routed one to each (its IVAR register: each field's vector, and bit
+ * 3 for valid), each cause raised in turn running its own vector's handler
+ * alone, and the vectors gone once freed.
+ */
+#define HELLO_IVAR 0x00e4
+#define HELLO_ICR_LSC BIT(2)
+#define HELLO_ICR_RXQ0 BIT(20)
+#define HELLO_ICR_TXQ0 BIT(22)
+#define HELLO_ICR_OTHER BIT(24)
+#define HELLO_IVAR_ROUTES (0x8 | (0x9 << 8) | (0xa << 16))
+
+static irqreturn_t hello_isr_msix(int irq, void *data)
+{
+	return IRQ_HANDLED;
+}
+
+static int hello_pci_msix(struct pci_dev *pdev)
+{
+	static const struct { u32 cause, clear; unsigned int vector; } causes[] = {
+		{ HELLO_ICR_RXQ0, HELLO_ICR_RXQ0, 0 },
+		{ HELLO_ICR_TXQ0, HELLO_ICR_TXQ0, 1 },
+		{ HELLO_ICR_LSC, HELLO_ICR_LSC | HELLO_ICR_OTHER, 2 },
+	};
+	unsigned long before[3];
+	unsigned int i, v, tries;
+	int irqs[3];
+
+	HELLO_PCI_CHECK(pci_alloc_irq_vectors(pdev, 3, 3, PCI_IRQ_MSIX) == 3 && pdev->msix_enabled,
+			"no three MSI-X vectors");
+	for (v = 0; v < 3; v++) {
+		irqs[v] = pci_irq_vector(pdev, v);
+		HELLO_PCI_CHECK(irqs[v] > 0 && (!v || irqs[v] != irqs[v - 1]),
+				"MSI-X vectors without interrupts of their own");
+		HELLO_PCI_CHECK(!request_irq(irqs[v], hello_isr_msix, 0, "hello-msix", pdev),
+				"no MSI-X handler requested");
+	}
+	writel(~0U, hello_regs + HELLO_IMC);
+	writel(~0U, hello_regs + HELLO_ICR);
+	writel(HELLO_IVAR_ROUTES, hello_regs + HELLO_IVAR);
+	writel(HELLO_ICR_RXQ0 | HELLO_ICR_TXQ0 | HELLO_ICR_OTHER, hello_regs + HELLO_IMS);
+	for (i = 0; i < ARRAY_SIZE(causes); i++) {
+		for (v = 0; v < 3; v++)
+			before[v] = lx_irq_count(irqs[v]);
+		writel(causes[i].cause, hello_regs + HELLO_ICS);
+		for (tries = 0; tries < 100 && lx_irq_count(irqs[causes[i].vector]) == before[causes[i].vector];
+		     tries++)
+			msleep(1);
+		writel(causes[i].clear, hello_regs + HELLO_ICR);
+		/*
+		 * Its own vector, at least once -- QEMU's model throttles each
+		 * MSI-X vector, and sends it once more when its throttle timer
+		 * ends -- and no other.
+		 */
+		for (v = 0; v < 3; v++)
+			if ((lx_irq_count(irqs[v]) != before[v]) != (v == causes[i].vector)) {
+				dev_err(&pdev->dev, "cause %#x: vectors ran %lu, %lu, %lu times, not vector %u alone\n",
+					causes[i].cause, lx_irq_count(irqs[0]) - before[0],
+					lx_irq_count(irqs[1]) - before[1], lx_irq_count(irqs[2]) - before[2],
+					causes[i].vector);
+				HELLO_PCI_CHECK(false, "a cause did not run its own MSI-X vector's handler alone");
+			}
+	}
+	writel(~0U, hello_regs + HELLO_IMC);
+	writel(0, hello_regs + HELLO_IVAR);
+	for (v = 0; v < 3; v++)
+		free_irq(irqs[v], pdev);
+	pci_free_irq_vectors(pdev);
+	HELLO_PCI_CHECK(!pdev->msix_enabled && pci_irq_vector(pdev, 1) == -EINVAL,
+			"MSI-X stayed on once its vectors were freed");
+	return 0;
+}
+
 static int hello_pci_interrupts(struct pci_dev *pdev)
 {
 	unsigned long before;
@@ -304,7 +378,7 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 			"a legacy line, not routed, was requested");
 	writel(~0U, hello_regs + HELLO_IMC);
 	readl(hello_regs + HELLO_ICR);
-	return 0;
+	return hello_pci_msix(pdev);
 }
 
 static int hello_pci_dma(struct pci_dev *pdev)

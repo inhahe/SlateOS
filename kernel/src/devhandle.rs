@@ -83,19 +83,73 @@ struct Device {
     guards: Guards,
     /// DMA arenas mapped in the domain.
     arenas: Vec<Arena>,
-    /// Its MSI, once set up: the vector its messages arrive on.
-    msi: Option<crate::msi::MsiConfig>,
-    /// An MSI set-up in progress (made outside the table's lock).
-    msi_busy: bool,
+    /// Its interrupts, once set up.
+    irq: Option<Irq>,
+    /// An interrupt set-up in progress (made outside the table's lock).
+    irq_busy: bool,
+    /// Its MSI-X capability's layout, read at open: where its table and
+    /// pending bits are, which a mapping of their BAR leaves out.
+    msix: Option<crate::msi::MsixLayout>,
+}
+
+/// What a device's interrupts are set up as: one MSI vector, or a vector
+/// for each of its first MSI-X entries, waited for together
+/// (`msi::claim_group`).
+enum Irq {
+    Msi(crate::msi::MsiConfig),
+    Msix(crate::msi::MsixConfig),
+}
+
+impl Irq {
+    /// The first of its vectors, which waits register on.
+    fn first_vector(&self) -> u8 {
+        match self {
+            Self::Msi(c) => c.allocated_vector,
+            Self::Msix(c) => c.first_vector,
+        }
+    }
+
+    /// How many vectors it has.
+    fn count(&self) -> usize {
+        match self {
+            Self::Msi(_) => 1,
+            Self::Msix(c) => usize::from(c.count),
+        }
+    }
+
+    /// Whether it is what a set-up asking for `want` makes.
+    fn is(&self, want: Want) -> bool {
+        match (self, want) {
+            (Self::Msi(_), Want::Msi) => true,
+            (Self::Msix(c), Want::Msix(n)) => c.count == n,
+            _ => false,
+        }
+    }
+
+    /// Delivery let go and the device's messages turned off.
+    fn tear_down(self, raw: u64) {
+        crate::msi::release_group(self.first_vector(), self.count(), raw);
+        match self {
+            Self::Msi(mut c) => crate::msi::disable_msi(&mut c),
+            Self::Msix(c) => crate::msi::disable_msix(c),
+        }
+    }
+}
+
+/// What an interrupt set-up is to make: MSI, or MSI-X with this many vectors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Want {
+    Msi,
+    Msix(u16),
 }
 
 impl Device {
-    /// Its MSI vector, once [`irq_setup`] has set one up: `InvalidArgument`
-    /// before.
-    fn msi_vector(&self) -> KernelResult<u8> {
-        self.msi
+    /// Its interrupts' first vector and how many there are, once
+    /// [`irq_setup`] has set them up: `InvalidArgument` before.
+    fn irq_vectors(&self) -> KernelResult<(u8, usize)> {
+        self.irq
             .as_ref()
-            .map(|c| c.allocated_vector)
+            .map(|i| (i.first_vector(), i.count()))
             .ok_or(KernelError::InvalidArgument)
     }
 }
@@ -166,8 +220,9 @@ pub fn open(owner: ProcessId, addr: PciAddress) -> KernelResult<u64> {
             domain,
             guards,
             arenas: Vec::new(),
-            msi: None,
-            msi_busy: false,
+            irq: None,
+            irq_busy: false,
+            msix: crate::msi::find_msix_capability(addr.bus, addr.device, addr.function),
         })
     })();
     let mut devices = DEVICES.lock();
@@ -197,11 +252,11 @@ pub fn close(raw: u64) {
 fn release(device: Device) {
     pci::disable_bus_master(device.addr);
     // Bus mastering is off, so the device sends no more messages. Its
-    // vector's waiter is woken and its count dropped while the vector is
-    // still this device's, then MSI is turned off and the vector freed.
-    if let Some(mut config) = device.msi {
-        crate::msi::release_delivery(config.allocated_vector, device.raw);
-        crate::msi::disable_msi(&mut config);
+    // vectors' waiters are woken and their counts dropped while the vectors
+    // are still this device's, then its MSI or MSI-X is turned off and the
+    // vectors freed.
+    if let Some(irq) = device.irq {
+        irq.tear_down(device.raw);
     }
     let pml4 = crate::proc::pcb::get_pml4(device.owner).filter(|&p| p != 0);
     // Detached and destroyed before any arena is freed: the device can reach
@@ -421,13 +476,18 @@ pub fn revoke_arena(raw: u64, phys: u64, size: usize) {
     }
 }
 
-/// Set up the device's MSI, owned by `pid`: one vector, its messages sent to
+/// Set up the device's interrupts, owned by `pid`, their messages sent to
 /// the CPU this runs on (online by definition, read from its own local APIC;
-/// a waiter on another CPU is woken from there). `NotSupported` before the
-/// local APIC is up and for a device without an MSI capability,
-/// `AlreadyExists` once it is set up (or being set up), `ResourceExhausted`
-/// with no vector free.
-pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
+/// a waiter on another CPU is woken from there): `vectors` 0 for its MSI,
+/// one vector; more for its MSI-X, a vector for each of its first entries --
+/// as many as asked, its table holds and `msi::MSIX_MAX_VECTORS` allows.
+/// Returns how many MSI-X vectors it has, 0 for MSI. A set-up the device has
+/// already is kept; a different one replaces what it had, whose vectors'
+/// waiters are woken to find them gone. `NotSupported` before the local APIC
+/// is up and for a device without the capability asked for, `AlreadyExists`
+/// while another set-up is in progress, `ResourceExhausted` with no vector
+/// or remapping entry free.
+pub fn irq_setup(raw: u64, pid: ProcessId, vectors: u16) -> KernelResult<u16> {
     // No local APIC yet (early boot): no message could be delivered.
     if !crate::apic::is_ready() {
         return Err(KernelError::NotSupported);
@@ -435,7 +495,7 @@ pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
     // Reserved under the table's lock, made outside it: the capability walk
     // and the programming are port accesses and a log line, too long to hold
     // a spinlock across.
-    let addr = {
+    let (addr, want, table_phys, old) = {
         let mut devices = DEVICES.lock();
         let device = devices
             .iter_mut()
@@ -444,39 +504,87 @@ pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
         if device.owner != pid {
             return Err(KernelError::PermissionDenied);
         }
-        if device.msi.is_some() || device.msi_busy {
+        if device.irq_busy {
             return Err(KernelError::AlreadyExists);
         }
-        device.msi_busy = true;
-        device.addr
+        let (want, table_phys) = if vectors == 0 {
+            (Want::Msi, 0)
+        } else {
+            let layout = device.msix.ok_or(KernelError::NotSupported)?;
+            let bar = device
+                .bars
+                .get(usize::from(layout.table_bar))
+                .copied()
+                .flatten()
+                .ok_or(KernelError::NotSupported)?;
+            let count = vectors
+                .min(layout.table_size)
+                .min(crate::msi::MSIX_MAX_VECTORS);
+            (
+                Want::Msix(count),
+                bar.base.saturating_add(u64::from(layout.table_offset)),
+            )
+        };
+        let granted = match want {
+            Want::Msi => 0,
+            Want::Msix(n) => n,
+        };
+        if device.irq.as_ref().is_some_and(|i| i.is(want)) {
+            return Ok(granted);
+        }
+        device.irq_busy = true;
+        (device.addr, want, table_phys, device.irq.take())
     };
+    // What was set up before goes first: its vectors' waiters are woken to
+    // find them gone, and the device sends nothing until the new set-up.
+    if let Some(old) = old {
+        old.tear_down(raw);
+    }
     let made = (|| {
         let (b, d, f) = (addr.bus, addr.device, addr.function);
-        let mut config =
-            crate::msi::find_msi_capability(b, d, f).ok_or(KernelError::NotSupported)?;
-        crate::msi::enable_msi(&mut config, crate::apic::read_id())
-            .ok_or(KernelError::ResourceExhausted)?;
-        if !crate::msi::claim_delivery(config.allocated_vector, raw) {
-            crate::msi::disable_msi(&mut config);
+        let cpu = crate::apic::read_id();
+        let irq = match want {
+            Want::Msi => {
+                let mut config =
+                    crate::msi::find_msi_capability(b, d, f).ok_or(KernelError::NotSupported)?;
+                crate::msi::enable_msi(&mut config, cpu).ok_or(KernelError::ResourceExhausted)?;
+                Irq::Msi(config)
+            }
+            Want::Msix(count) => {
+                let layout =
+                    crate::msi::find_msix_capability(b, d, f).ok_or(KernelError::NotSupported)?;
+                Irq::Msix(
+                    crate::msi::enable_msix(b, d, f, layout, table_phys, count, cpu)
+                        .ok_or(KernelError::ResourceExhausted)?,
+                )
+            }
+        };
+        if !crate::msi::claim_group(irq.first_vector(), irq.count(), raw) {
+            match irq {
+                Irq::Msi(mut c) => crate::msi::disable_msi(&mut c),
+                Irq::Msix(c) => crate::msi::disable_msix(c),
+            }
             return Err(KernelError::InternalError);
         }
-        Ok(config)
+        Ok(irq)
     })();
     let unwanted = {
         let mut devices = DEVICES.lock();
         match devices.iter_mut().find(|d| d.raw == raw) {
             Some(device) => {
-                device.msi_busy = false;
-                device.msi = Some(made?);
-                return Ok(());
+                device.irq_busy = false;
+                device.irq = Some(made?);
+                return Ok(match want {
+                    Want::Msi => 0,
+                    Want::Msix(n) => n,
+                });
             }
             // Closed while it was being made: undone below, without the lock.
             None => made.ok(),
         }
     };
-    if let Some(mut config) = unwanted {
-        crate::msi::release_delivery(config.allocated_vector, raw);
-        crate::msi::disable_msi(&mut config);
+    if let Some(irq) = unwanted {
+        irq.tear_down(raw);
     }
     Err(KernelError::InvalidHandle)
 }
@@ -490,9 +598,9 @@ pub fn irq_setup(raw: u64, pid: ProcessId) -> KernelResult<()> {
 /// is closed, waiting or not; `Interrupted` when a signal or a freeze comes
 /// for `pid` while it waits.
 pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
-    let vector = with_owned(raw, pid, |d| d.msi_vector())?;
+    let (vector, count) = with_owned(raw, pid, |d| d.irq_vectors())?;
     if !block {
-        return crate::msi::take(vector, raw).ok_or(KernelError::InvalidHandle);
+        return crate::msi::take_group(vector, count, raw).ok_or(KernelError::InvalidHandle);
     }
     let task = crate::sched::current_task_id();
     crate::msi::register_waiter(vector, raw, task)?;
@@ -500,7 +608,7 @@ pub fn irq_wait(raw: u64, pid: ProcessId, block: bool) -> KernelResult<u64> {
     // a sleeping nanosleep.
     crate::proc::signal::register_signalfd_waiter(pid, task, 0);
     let taken = loop {
-        match crate::msi::take(vector, raw) {
+        match crate::msi::take_group(vector, count, raw) {
             None => break Err(KernelError::InvalidHandle),
             Some(count) if count > 0 => break Ok(count),
             Some(_) => {}
@@ -535,7 +643,18 @@ pub fn irq_vector(raw: u64) -> KernelResult<u8> {
         .iter()
         .find(|d| d.raw == raw)
         .ok_or(KernelError::InvalidHandle)?
-        .msi_vector()
+        .irq_vectors()
+        .map(|(first, _)| first)
+}
+
+/// Which of the device's vectors have had interrupts since last asked, owned
+/// by `pid`, taken now -- MSI-X vector `i` (its entry `i`) as bit `i`, MSI as
+/// bit 0 -- without waiting: what a driver's loop asks at each turn, so that
+/// each vector's handler runs for its own. `InvalidArgument` before
+/// [`irq_setup`]; `InvalidHandle` when the device is closed.
+pub fn irq_pending_mask(raw: u64, pid: ProcessId) -> KernelResult<u64> {
+    let (first, count) = with_owned(raw, pid, |d| d.irq_vectors())?;
+    crate::msi::take_mask(first, count, raw).ok_or(KernelError::InvalidHandle)
 }
 
 /// The target a wait on the device `raw` parks on: its interrupts on
@@ -545,11 +664,20 @@ pub fn wait_target(raw: u64, vector: u8) -> crate::ipc::multiwait::WaitTarget {
     crate::ipc::multiwait::WaitTarget::Device { raw, vector }
 }
 
-/// The device's interrupts counted on `vector` and not yet taken, left where
-/// they are; `None` once the device no longer has the vector -- closed.
+/// The device's interrupts counted on its vectors -- `vector` and those
+/// grouped with it -- and not yet taken, left where they are; `None` once
+/// the device no longer has the vector: closed, or set up anew.
 #[must_use]
 pub fn irq_pending(raw: u64, vector: u8) -> Option<u64> {
-    crate::msi::pending(vector, raw)
+    let count = DEVICES
+        .lock()
+        .iter()
+        .find(|d| d.raw == raw)?
+        .irq_vectors()
+        .ok()
+        .filter(|&(first, _)| first == vector)?
+        .1;
+    crate::msi::pending_group(vector, count, raw)
 }
 
 /// `task` is woken by the device's next interrupt on `vector`, and by its
@@ -631,13 +759,34 @@ pub fn map_bar(raw: u64, pid: ProcessId, index: usize) -> KernelResult<(u64, u64
     let pml4 = pcb::get_pml4(pid)
         .filter(|&p| p != 0)
         .ok_or(KernelError::NoSuchProcess)?;
-    let bar = with_owned(raw, pid, |d| {
+    let (bar, msix) = with_owned(raw, pid, |d| {
         d.bars
             .get(index)
             .copied()
             .flatten()
+            .map(|bar| (bar, d.msix))
             .ok_or(KernelError::InvalidArgument)
     })?;
+    // The MSI-X table and pending bits in this BAR, as byte ranges: the
+    // kernel programs them (`msi::enable_msix`), and a driver writing the
+    // table could aim its device's messages anywhere, so their pages are
+    // left out of the mapping -- an access there faults -- as Linux's VFIO
+    // leaves them out. A register sharing a page with them goes with it.
+    let hidden: Vec<(u64, u64)> = msix
+        .into_iter()
+        .flat_map(|l| {
+            [
+                (l.table_bar, u64::from(l.table_offset), l.table_bytes()),
+                (l.pba_bar, u64::from(l.pba_offset), l.pba_bytes()),
+            ]
+        })
+        .filter(|&(b, _, _)| usize::from(b) == index)
+        .map(|(_, at, len)| (at, at.saturating_add(len)))
+        .collect();
+    let hides = |offset: u64| {
+        let end = offset.saturating_add(HW_PAGE);
+        hidden.iter().any(|&(at, until)| at < end && offset < until)
+    };
     if bar.size < HW_PAGE || !bar.base.is_multiple_of(HW_PAGE) {
         return Err(KernelError::NotSupported);
     }
@@ -674,6 +823,9 @@ pub fn map_bar(raw: u64, pid: ProcessId, index: usize) -> KernelResult<(u64, u64
     .and_then(|()| {
         for page in 0..pages {
             let offset = page.saturating_mul(HW_PAGE);
+            if hides(offset) {
+                continue;
+            }
             // SAFETY: `pml4` is the owner's own table; the region was
             // just reserved for this mapping; the physical page is the
             // device's own BAR, which the allocator does not own.
@@ -1158,6 +1310,7 @@ pub fn self_test() -> KernelResult<()> {
     }
 
     let mut skips = crate::fs::selftest::Skips::new();
+    self_test_msix(&mut skips)?;
     let Some(edu) = pci::find_device(EDU_VENDOR, EDU_DEVICE) else {
         skips.record("edu device", "no QEMU edu device attached");
         skips.report("[devhandle]");
@@ -1244,12 +1397,22 @@ pub fn self_test() -> KernelResult<()> {
             }
             // An MSI: edu sends one when its interrupt-raise register is
             // written, and it is taken once on the vector set up for it.
-            irq_setup(raw, owner).map_err(|_| "MSI could not be set up")?;
-            if irq_setup(raw, owner) != Err(KernelError::AlreadyExists) {
-                return Err("a second MSI set-up was not refused");
+            if irq_setup(raw, owner, 0) != Ok(0) {
+                return Err("MSI could not be set up");
             }
-            let vector =
-                with_owned(raw, owner, |d| d.msi_vector()).map_err(|_| "no vector recorded")?;
+            let vector = with_owned(raw, owner, |d| d.irq_vectors())
+                .map_err(|_| "no vector recorded")?
+                .0;
+            // The same set-up asked again keeps what is there.
+            if irq_setup(raw, owner, 0) != Ok(0)
+                || with_owned(raw, owner, |d| d.irq_vectors()).map(|(v, _)| v) != Ok(vector)
+            {
+                return Err("a second MSI set-up did not keep the first");
+            }
+            // edu has no MSI-X: refused, the MSI kept.
+            if irq_setup(raw, owner, 3) != Err(KernelError::NotSupported) {
+                return Err("MSI-X was set up for a function without it");
+            }
             // SAFETY: BAR0 is edu's register window, which nothing else in
             // the kernel maps or drives.
             let regs = unsafe { page_table::map_mmio(bar0.base, HW_PAGE) }
@@ -1420,6 +1583,158 @@ pub fn self_test() -> KernelResult<()> {
         }
         Ok(kept.is_some())
     }
+    Ok(())
+}
+
+/// MSI-X on the boot test's spare 82574 ([`probe_card`]): three vectors set
+/// up, the card's receive, transmit and other causes routed one to each (its
+/// IVAR register), and each cause raised in turn reaching its own vector
+/// alone ([`irq_pending_mask`]); the table and its pending bits left out of
+/// a mapping of their BAR; the same set-up asked again kept, and MSI then
+/// replacing it; and the close releasing every vector. Skipped, and recorded
+/// so, where there is no such card.
+fn self_test_msix(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    use crate::mm::page_table::{self, VirtAddr};
+    use crate::proc::pcb;
+
+    /// The 82574's registers, by offset in BAR0.
+    const ICR: u64 = 0x00C0;
+    const ICS: u64 = 0x00C8;
+    const IMS: u64 = 0x00D0;
+    const IMC: u64 = 0x00D8;
+    const IVAR: u64 = 0x00E4;
+    /// Its interrupt causes as MSI-X routes them, and link-status change,
+    /// one of the "other" causes.
+    const RXQ0: u32 = 1 << 20;
+    const TXQ0: u32 = 1 << 22;
+    const OTHER: u32 = 1 << 24;
+    const LSC: u32 = 1 << 2;
+    /// IVAR: receive queue 0 to vector 0, transmit queue 0 to vector 1,
+    /// other causes to vector 2, each marked valid (bit 3 of its field).
+    const ROUTES: u32 = 0x8 | (0x9 << 8) | (0xA << 16);
+
+    let Some(card) = probe_card() else {
+        skips.record("MSI-X", "no unbound 82574 with the boot test's MAC address");
+        return Ok(());
+    };
+    let addr = card.address;
+    let owner = pcb::create("devhandle-msix", 0);
+    let result = (|| -> Result<(), &'static str> {
+        let raw = open(owner, addr).map_err(|_| "the card could not be opened")?;
+        let checks = (|| -> Result<u8, &'static str> {
+            let pml4 = pcb::get_pml4(owner)
+                .filter(|&p| p != 0)
+                .ok_or("no address space")?;
+            let (layout, bar0) = with_owned(raw, owner, |d| {
+                Ok((d.msix, d.bars.first().copied().flatten()))
+            })
+            .map_err(|_| "the card's record could not be read")?;
+            let (Some(layout), Some(bar0)) = (layout, bar0) else {
+                return Err("the card has no MSI-X capability or no BAR0");
+            };
+            // Decoding and bus mastering on: a message is a memory write.
+            let command = config_read(raw, owner, u16::from(CFG_COMMAND), 2)
+                .map_err(|_| "the command register could not be read")?;
+            config_write(raw, owner, u16::from(CFG_COMMAND), 2, command | 0b110)
+                .map_err(|_| "decoding and bus mastering could not be turned on")?;
+            if irq_setup(raw, owner, 3) != Ok(3) {
+                return Err("three MSI-X vectors could not be set up");
+            }
+            let (first, count) =
+                with_owned(raw, owner, |d| d.irq_vectors()).map_err(|_| "no vectors recorded")?;
+            if count != 3 {
+                return Err("the set-up recorded other than three vectors");
+            }
+            // SAFETY: BAR0 is the card's register block, which no kernel
+            // driver binds (the e1000 driver takes the first 82574 only).
+            let regs = unsafe { page_table::map_mmio(bar0.base, 0x1000) }
+                .map_err(|_| "BAR0 could not be mapped for the kernel")?;
+            let write = |offset: u64, value: u32| {
+                // SAFETY: a 32-bit register inside the page just mapped.
+                unsafe { (regs.saturating_add(offset) as *mut u32).write_volatile(value) };
+            };
+            write(IMC, u32::MAX);
+            write(ICR, u32::MAX);
+            write(IVAR, ROUTES);
+            write(IMS, RXQ0 | TXQ0 | OTHER);
+            let stale = irq_pending_mask(raw, owner);
+            for (cause, cleared, vector) in [
+                (RXQ0, RXQ0, 0b001u64),
+                (TXQ0, TXQ0, 0b010),
+                (LSC, LSC | OTHER, 0b100),
+            ] {
+                write(ICS, cause);
+                let mut seen = 0;
+                spin_until(100_000_000, || {
+                    seen |= irq_pending_mask(raw, owner).unwrap_or(0);
+                    seen != 0
+                });
+                write(ICR, cleared);
+                if seen != vector {
+                    write(IMC, u32::MAX);
+                    crate::serial_println!(
+                        "[devhandle]   cause {:#x}: vectors {:#b} took it, not {:#b} alone (stale {:?})",
+                        cause,
+                        seen,
+                        vector,
+                        stale
+                    );
+                    return Err("a cause did not reach its own MSI-X vector alone");
+                }
+            }
+            write(IMC, u32::MAX);
+            write(IVAR, 0);
+            // The table and its pending bits: in no mapping of their BAR.
+            let (va, _) = map_bar(raw, owner, usize::from(layout.table_bar))
+                .map_err(|_| "the MSI-X table's BAR could not be mapped")?;
+            let at = |offset: u32| {
+                page_table::translate(pml4, VirtAddr::new(va.saturating_add(u64::from(offset))))
+            };
+            if at(layout.table_offset).is_some()
+                || (layout.pba_bar == layout.table_bar && at(layout.pba_offset).is_some())
+            {
+                return Err("the MSI-X table or its pending bits were mapped for the driver");
+            }
+            // The same set-up kept; MSI then replacing it.
+            if irq_setup(raw, owner, 3) != Ok(3)
+                || with_owned(raw, owner, |d| d.irq_vectors()).map(|(v, _)| v) != Ok(first)
+            {
+                return Err("the same MSI-X set-up asked again was not kept");
+            }
+            if irq_setup(raw, owner, 0) != Ok(0) {
+                return Err("MSI could not replace MSI-X");
+            }
+            let control = pci::config_read16(
+                addr.bus,
+                addr.device,
+                addr.function,
+                layout.cap_offset.wrapping_add(2),
+            );
+            if control & (1 << 15) != 0 {
+                return Err("MSI-X is still on after MSI replaced it");
+            }
+            Ok(first)
+        })();
+        close(raw);
+        let first = checks?;
+        let command = pci::config_read16(addr.bus, addr.device, addr.function, CFG_COMMAND);
+        if command & (1 << 2) != 0 {
+            return Err("bus mastering is still on after the close");
+        }
+        if (0..3u8).any(|i| crate::msi::is_allocated(first.wrapping_add(i))) {
+            return Err("an MSI-X vector is still allocated after the close");
+        }
+        Ok(())
+    })();
+    pcb::destroy(owner);
+    if let Err(msg) = result {
+        crate::serial_println!("[devhandle]   FAIL: MSI-X: {}", msg);
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!(
+        "[devhandle]   MSI-X on the spare 82574: OK (three vectors, each cause on its own; the \
+         table out of the driver's mapping; the set-up kept, then replaced by MSI; all released)"
+    );
     Ok(())
 }
 

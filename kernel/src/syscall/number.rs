@@ -7401,10 +7401,18 @@ pub const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 /// handle's release) takes it from the device first.
 pub const SYS_PCI_DEVICE_DMA_ALLOC: u64 = 1185;
 
-/// Set up an open device's MSI: `arg0` the handle. One vector, its messages
-/// sent to the CPU the call ran on; the kernel programs the device's MSI capability
-/// (which the caller may not write). `NotSupported` for a device without
-/// one, `AlreadyExists` once it is set up.
+/// Set up an open device's interrupts: `arg0` the handle; `arg1` 0 for its
+/// MSI, one vector -- returning 0 -- or how many MSI-X vectors it wants, a
+/// vector for each of its first MSI-X entries, returning how many it has (as
+/// many as asked, its table holds and 32 allow). The messages go to the CPU
+/// the call ran on; the kernel programs the MSI or MSI-X capability and the
+/// MSI-X table (which the caller may not write, and whose pages a mapping of
+/// their BAR leaves out). A set-up the device has already is kept; a
+/// different one replaces it. `NotSupported` for a device without the
+/// capability asked for and `AlreadyExists` while another set-up is in
+/// progress, both changing nothing; `ResourceExhausted` with no vector or
+/// remapping entry free, and `InternalError`, after which the device has no
+/// interrupts set up -- the old set-up gone.
 pub const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 
 /// Take an open device's interrupts: `arg0` the handle, `arg1` 0 to take what
@@ -7434,6 +7442,15 @@ pub const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 /// layer, beside its heap (design-decisions 1586) -- not where the kernel
 /// would put it. Freed as `SYS_PCI_DEVICE_DMA_ALLOC`'s arenas are.
 pub const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
+
+/// Which of an open device's vectors have had interrupts since last asked:
+/// `arg0` the handle. Returns a mask -- MSI-X vector `i` (its entry `i`) as
+/// bit `i`, MSI as bit 0 -- the interrupts taken, without waiting: so a
+/// driver with several vectors runs each one's handler for its own. To wait
+/// for any of them, use [`SYS_WAIT_MULTIPLE`] with the handle.
+/// `InvalidArgument` before `SYS_PCI_DEVICE_IRQ_SETUP`; `InvalidHandle` once
+/// the device is closed.
+pub const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
 
 // ---------------------------------------------------------------------------
 // Version info

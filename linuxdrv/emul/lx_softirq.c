@@ -192,7 +192,7 @@ u64 lx_emul_next_event(u64 now_ns)
 
 	/* Which devices' interrupts the wait to come waits for, worked out now. */
 	lx_irq_listen();
-	if (local_softirq_pending() || lx_rcu_pending() || irq_work_needs_cpu())
+	if (local_softirq_pending() || lx_rcu_pending() || irq_work_needs_cpu() || lx_irq_due())
 		return now_ns;
 	/* The wheel reckons from when the current jiffy began, as Linux's tick. */
 	began = lx_emul_jiffy_began_ns();

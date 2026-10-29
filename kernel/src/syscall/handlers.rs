@@ -877,9 +877,19 @@ pub fn sys_pci_device_dma_alloc_at(args: &SyscallArgs) -> SyscallResult {
 /// `SYS_PCI_DEVICE_IRQ_SETUP` — set up an open device's MSI. See
 /// [`SYS_PCI_DEVICE_IRQ_SETUP`](super::number::SYS_PCI_DEVICE_IRQ_SETUP).
 pub fn sys_pci_device_irq_setup(args: &SyscallArgs) -> SyscallResult {
-    let r = held_device(args.arg0)
-        .and_then(|pid| crate::devhandle::irq_setup(args.arg0, pid))
-        .map(|()| 0);
+    let r = held_device(args.arg0).and_then(|pid| {
+        let vectors = u16::try_from(args.arg1).map_err(|_| KernelError::InvalidArgument)?;
+        crate::devhandle::irq_setup(args.arg0, pid, vectors).map(u64::from)
+    });
+    device_result(r)
+}
+
+/// `SYS_PCI_DEVICE_IRQ_PENDING` — which of an open device's vectors have had
+/// interrupts, taken. See
+/// [`SYS_PCI_DEVICE_IRQ_PENDING`](super::number::SYS_PCI_DEVICE_IRQ_PENDING).
+pub fn sys_pci_device_irq_pending(args: &SyscallArgs) -> SyscallResult {
+    let r =
+        held_device(args.arg0).and_then(|pid| crate::devhandle::irq_pending_mask(args.arg0, pid));
     device_result(r)
 }
 

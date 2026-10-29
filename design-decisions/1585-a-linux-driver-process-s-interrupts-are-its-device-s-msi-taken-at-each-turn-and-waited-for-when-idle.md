@@ -19,7 +19,8 @@ device as well as for its timers.
    anything PCI's 8-bit Interrupt Line holds; `pci_irq_vector()` names it,
    and with MSI off answers the legacy line's number, as Linux's does. MSI-X
    is refused, which drivers take as the cue to fall back to MSI (e1000e
-   does), and the legacy line is not routed -- requesting it fails: the
+   does) -- *superseded by §1587 (2026-10-29)*: MSI-X is offered, a vector
+   per entry, e1000e on QEMU's card needing it -- and the legacy line is not routed -- requesting it fails: the
    handle offers one MSI vector, and nothing else.
 2. **The layer's own interrupt core, not Linux's**: `request_threaded_irq()`,
    `free_irq()`, `disable_irq()`/`enable_irq()` and `synchronize_irq()` over
@@ -76,7 +77,7 @@ device as well as for its timers.
 - A handler runs between tasks, never in the middle of one: latency is the
   longest a task runs without blocking or calling `cond_resched()`.
 - One MSI vector per function: a driver that wants a vector per queue
-  (MSI-X) runs with one.
+  (MSI-X) runs with one. (*Superseded by §1587*: it gets them.)
 
 ### Where it lands
 

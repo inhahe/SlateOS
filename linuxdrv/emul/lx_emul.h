@@ -58,6 +58,9 @@ bool lx_pci_dma_device(const struct device *dev);
  * and how many times the handler of interrupt `irq` has run, for the tests. */
 void lx_irq_poll(void);
 void lx_irq_listen(void);
+/* lx_irq.c: whether an interrupt owed while its handler was disabled waits
+ * to be run now that it is enabled -- the next turn must come at once. */
+bool lx_irq_due(void);
 /* lx_hrtimer.c: the high-resolution timers due, run; and when the earliest
  * queued one is due by the monotonic clock reading `now_ns` (KTIME_MAX for
  * none). */

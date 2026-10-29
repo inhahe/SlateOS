@@ -5502,8 +5502,15 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         a window beside the heap, backed by the device's own arenas
         (§1586). Left: `request_firmware`, which WiFi's drivers need
         (`iwlwifi` loads its firmware; e1000e calls it nowhere)
-  - [ ] First driver: a wired network driver with a native twin (`e1000e`),
+  - [-] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured
+        -- begun 2026-10-29: Linux's own e1000e, in a driver process with
+        Linux's network core below the sockets (§1588), binds the spare
+        82574 in the boot test, brings its link up on three MSI-X vectors
+        (the device handle's MSI-X, §1587) and has QEMU's gateway answer an
+        ARP request through it (`linuxdrv::self_test`). Left: the bridge to
+        the native network stack (`netring`, §65) in place of the check, and
+        the overhead against the native driver measured
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
         then how lane A's `net80211` meets `mac80211`/`cfg80211`
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge

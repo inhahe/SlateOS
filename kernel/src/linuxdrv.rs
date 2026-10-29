@@ -134,17 +134,7 @@ pub fn self_test() -> KernelResult<()> {
         ),
     ];
     for (argv, want, what) in cases {
-        match run(elf, argv, &[]) {
-            Ok(Some(code)) if code == want => {}
-            outcome => {
-                serial_println!(
-                    "[linuxdrv]   FAIL: the hello process, which should have {}, ended {:?} (Ok(Some(code)), Ok(None) for not within 10 s)",
-                    what,
-                    outcome
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
+        expect(elf, argv, &[], want, what, || None)?;
     }
     let pci = pci_runs(elf, &mut skips)?;
     skips.report("[linuxdrv]");
@@ -195,20 +185,51 @@ fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         ),
     ];
     for (mode, want, what) in cases {
-        let outcome = run(elf, &[b"hello", mode, arg.as_bytes()], &caps);
-        let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
-        match outcome {
-            Ok(Some(code)) if code == want && released => {}
-            outcome => {
-                serial_println!(
-                    "[linuxdrv]   FAIL: the hello process given the card, which should have {}, ended {:?}, the card {}",
-                    what,
-                    outcome,
-                    if released { "released" } else { "still bound" }
-                );
-                return Err(KernelError::InternalError);
-            }
-        }
+        expect(
+            elf,
+            &[b"hello", mode, arg.as_bytes()],
+            &caps,
+            want,
+            what,
+            || {
+                (!crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none()))
+                    .then_some("the card still bound after it")
+            },
+        )?;
     }
     Ok(true)
+}
+
+/// One run of the hello process -- `argv`, holding `capabilities` -- which
+/// should have ended with `want`, as `what` says, and passed `after`: `None`
+/// when what it left is right, else what is wrong. Said and an
+/// `InternalError` otherwise.
+fn expect(
+    elf: &[u8],
+    argv: &[&[u8]],
+    capabilities: &[(ResourceType, u64, Rights)],
+    want: i32,
+    what: &str,
+    after: impl FnOnce() -> Option<&'static str>,
+) -> KernelResult<()> {
+    let outcome = run(elf, argv, capabilities);
+    let wrong = after();
+    match (outcome, wrong) {
+        (Ok(Some(code)), None) if code == want => Ok(()),
+        (outcome, wrong) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: the hello process {:?}, which should have {}, ended {:?} (Ok(Some(code)), Ok(None) for not within 10 s){}{}",
+                argv.get(1..)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|a| core::str::from_utf8(a).unwrap_or("?"))
+                    .collect::<alloc::vec::Vec<_>>(),
+                what,
+                outcome,
+                if wrong.is_some() { ", " } else { "" },
+                wrong.unwrap_or("")
+            );
+            Err(KernelError::InternalError)
+        }
+    }
 }

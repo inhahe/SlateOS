@@ -25,10 +25,13 @@ memory is now laid out so that arithmetic holds.
    driver process (`linuxdrv/emul/manifest`).
 3. **The layer is its host bridge** (`linuxdrv/emul/lx_pci.c`): at
    subsystem level, where x86 Linux scans (`pci_subsys_init`), it opens each
-   function's handle and scans a root bus of its number with Linux's own
-   `pci_scan_root_bus()`, the memory space and the one bus number its
-   windows; the configuration accessors are the handle's. A function the
-   process was not given reads as absent. Linux's probe then reads the
+   function's handle and makes a root bus of its number with Linux's own
+   `pci_create_root_bus()`, the memory space and the one bus number its
+   windows, the configuration accessors the handle's; then scans only the
+   functions given (`pci_scan_single_device()`). A function the process was
+   not given reads as absent, and a slot's function 0 need not be given:
+   Linux's own slot scan would stop at it (the I219 e1000e drives on a PCH
+   is 00:1f.6). Linux's probe then reads the
    function, claims its BARs in Linux's own resource tree, and the driver
    core matches it with the driver when that registers.
 4. **The BARs are shadowed** in the system-facing half
@@ -86,6 +89,11 @@ memory is now laid out so that arithmetic holds.
   forbids that too (`CONFIG_DEBUG_VIRTUAL`).
 - The page array costs 64 bytes for every 4 KiB of the heap that is
   handed out.
+- Every driver process logs one failed subsystem initcall, carried past:
+  `kernel/resource.c`'s `iomem` file system, through which Linux revokes
+  `/dev/mem` mappings of a region a driver claims, cannot be mounted
+  ("Cannot mount iomem pseudo filesystem: -19") -- there is no file system
+  to mount it in, and no `/dev/mem` to revoke.
 
 ### Where it lands
 

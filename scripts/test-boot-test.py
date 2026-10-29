@@ -1420,6 +1420,10 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
     garbled = (hello.replace("0xbeef", "beef") + tasks + verdict)
     skipped = ("[linuxdrv]   SKIP: Linux driver layer's hello process -- not "
                "loaded beside the kernel\n")
+    # The verdict as the kernel prints it when its PCI runs were skipped.
+    no_pci = hello + tasks + verdict.replace(
+        ", a PCI function probed through Linux's PCI core and its interrupts "
+        "handled, and one no driver took", "")
     failed = ("[linuxdrv]   FAIL: the hello process, which should have ran its "
               "initcall and exited 0, ended Ok(Some(-8))\n")
     for label, text, named, want in [
@@ -1427,6 +1431,7 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
         ("its verdict without its line, formatted right, fails", garbled, 1, "FAIL"),
         ("its verdict alone fails", verdict, 1, "FAIL"),
         ("its line without its tasks' fails", hello + verdict, 1, "FAIL"),
+        ("its verdict without the PCI runs fails", no_pci, 1, "FAIL"),
         ("a process named and skipped fails", skipped, 1, "FAIL"),
         ("a process named whose test failed fails", failed, 1, "FAIL"),
         ("a process named and never mentioned fails", "[boot] up\n", 1, "FAIL"),

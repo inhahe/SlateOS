@@ -57,6 +57,8 @@
 #include <linux/workqueue.h>
 #include <linux/irq_work.h>
 #include <linux/device.h>
+#include <linux/kobject_ns.h>
+#include <linux/srcu.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
 #include <linux/io.h>
@@ -160,13 +162,19 @@ static bool hello_bar0_sizes(struct pci_dev *pdev)
  * interrupt cause set (ICS) with the cause unmasked (IMS), as the boot
  * test's probe driver raises it. The handler runs in hardirq context; a
  * disabled interrupt is held, not lost, and delivered once enabled; a
- * threaded handler's second half runs in a task, which may sleep. The
- * handlers read the cause register, which clears it, as e1000e's do.
+ * throttled one (the card's interrupt throttle, ITR, holding it back after
+ * the last) comes when the process has gone idle with nothing else due, so
+ * that only the loop's wait on the device can wake it; a threaded
+ * handler's second half runs in a task, which may sleep. The waits have no
+ * timeout: an interrupt lost leaves the process waiting for nothing, which
+ * ends it as deadlocked. The handlers read the cause register, which clears
+ * it, as e1000e's do.
  */
 #define HELLO_ICR 0x00c0
 #define HELLO_ICS 0x00c8
 #define HELLO_IMS 0x00d0
 #define HELLO_IMC 0x00d8
+#define HELLO_ITR 0x00c4
 #define HELLO_CAUSE 0x1
 static void __iomem *hello_regs;
 static DECLARE_COMPLETION(hello_irq_done);
@@ -220,9 +228,16 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 			"the MSI vector's interrupt is not the device's");
 	HELLO_PCI_CHECK(!request_irq(irq, hello_isr, 0, "hello", pdev), "no handler requested");
 	hello_raise();
-	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
-			"the card's interrupt never reached its handler");
+	wait_for_completion(&hello_irq_done);
 	HELLO_PCI_CHECK(hello_irq_in_hardirq, "a handler ran outside hardirq context");
+
+	/* 0xffff x 256 ns, about 16.8 ms, between the card's interrupts. */
+	writel(0xffff, hello_regs + HELLO_ITR);
+	hello_raise();
+	wait_for_completion(&hello_irq_done);
+	hello_raise();
+	wait_for_completion(&hello_irq_done);
+	writel(0, hello_regs + HELLO_ITR);
 
 	disable_irq(irq);
 	before = lx_irq_count(irq);
@@ -230,16 +245,14 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 	msleep(20);
 	HELLO_PCI_CHECK(lx_irq_count(irq) == before, "a disabled interrupt was delivered");
 	enable_irq(irq);
-	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
-			"an interrupt that came while disabled was lost");
+	wait_for_completion(&hello_irq_done);
 	HELLO_PCI_CHECK(free_irq(irq, pdev), "free_irq() did not name the handler");
 
 	HELLO_PCI_CHECK(!request_threaded_irq(irq, hello_isr_first_half, hello_isr_thread,
 					      IRQF_ONESHOT, "hello", pdev),
 			"no threaded handler requested");
 	hello_raise();
-	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
-			"the card's interrupt never reached its threaded handler");
+	wait_for_completion(&hello_irq_done);
 	synchronize_irq(irq);
 	HELLO_PCI_CHECK(hello_thread_in_task, "a threaded handler's second half ran outside a task");
 	free_irq(irq, pdev);
@@ -568,13 +581,6 @@ static void hello_barrier_rcu_done(struct rcu_head *head)
 	hello_barrier_rcu_ran = true;
 }
 
-static struct rcu_head hello_sync_rcu;
-static bool hello_sync_rcu_ran;
-
-static void hello_sync_rcu_done(struct rcu_head *head)
-{
-	hello_sync_rcu_ran = true;
-}
 
 /* rcuwait: one task waiting, and a kthread that wakes it. */
 static struct rcuwait hello_rcuwait = __RCUWAIT_INITIALIZER(hello_rcuwait);
@@ -750,8 +756,7 @@ static int __init hello_edges_init(void)
 
 	/*
 	 * An RCU callback waits for a grace period: a switch. It runs in
-	 * softirq context, as Linux's RCU runs it; rcu_barrier() waits for it,
-	 * and so does synchronize_rcu().
+	 * softirq context, as Linux's RCU runs it; rcu_barrier() waits for it.
 	 */
 	call_rcu(&hello_rcu, hello_rcu_done);
 	HELLO_CHECK(!hello_rcu_ran, "an RCU callback ran before a grace period");
@@ -761,10 +766,6 @@ static int __init hello_edges_init(void)
 	call_rcu(&hello_barrier_rcu, hello_barrier_rcu_done);
 	rcu_barrier();
 	HELLO_CHECK(hello_barrier_rcu_ran, "rcu_barrier() did not wait for a callback");
-	/* A grace period waited for: a callback queued before it has run. */
-	call_rcu(&hello_sync_rcu, hello_sync_rcu_done);
-	synchronize_rcu();
-	HELLO_CHECK(hello_sync_rcu_ran, "synchronize_rcu() returned before a grace period");
 
 	/* rcuwait: the waiter sleeps until the kthread wakes it by name. */
 	HELLO_CHECK(!IS_ERR(kthread_run(hello_rcuwait_wakes, NULL, "hello-rcuwait")),
@@ -1359,6 +1360,117 @@ static struct device hello_consumer = {
 	.release = hello_consumer_release,
 };
 
+/* A driver that probes asynchronously, on a bus of its own. */
+static int hello_async_probes;
+
+static int hello_async_bus_match(struct device *dev, const struct device_driver *drv)
+{
+	return 1;
+}
+
+static const struct bus_type hello_async_bus = {
+	.name = "hello-async",
+	.match = hello_async_bus_match,
+};
+
+static int hello_async_probe(struct device *dev)
+{
+	hello_async_probes++;
+	return 0;
+}
+
+static struct device_driver hello_async_drv = {
+	.name = "hello-async",
+	.bus = &hello_async_bus,
+	.probe = hello_async_probe,
+	.probe_type = PROBE_PREFER_ASYNCHRONOUS,
+};
+
+static void hello_static_release(struct device *dev)
+{
+}
+
+static struct device hello_async_dev = {
+	.init_name = "hello-async0",
+	.bus = &hello_async_bus,
+	.release = hello_static_release,
+};
+
+/*
+ * A class whose devices' directories carry a namespace, as the net class's
+ * do: its own directory is a namespaced one (kernfs_enable_ns()).
+ */
+static int hello_ns_tag;
+
+static bool hello_ns_may_mount(void)
+{
+	return true;
+}
+
+static void *hello_ns_grab(void)
+{
+	return &hello_ns_tag;
+}
+
+static const void *hello_ns_initial(void)
+{
+	return &hello_ns_tag;
+}
+
+static void hello_ns_drop(void *ns)
+{
+}
+
+static const struct kobj_ns_type_operations hello_ns_ops = {
+	.type = KOBJ_NS_TYPE_NET,
+	.current_may_mount = hello_ns_may_mount,
+	.grab_current_ns = hello_ns_grab,
+	.initial_ns = hello_ns_initial,
+	.drop_ns = hello_ns_drop,
+};
+
+static const void *hello_ns_of(const struct device *dev)
+{
+	return &hello_ns_tag;
+}
+
+static const struct class hello_ns_class = {
+	.name = "hello-ns",
+	.ns_type = &hello_ns_ops,
+	.namespace = hello_ns_of,
+};
+
+/*
+ * Two devices of one class under one parent share the class's glue
+ * directory there, which must stay while either is in it: Linux's own
+ * reference counting, over the layer's directory nodes.
+ */
+static const struct class hello_glue_class = { .name = "hello-glue" };
+static struct device hello_glue_parent = {
+	.init_name = "hello-glue-parent",
+	.release = hello_static_release,
+};
+static struct device hello_glue[2] = {
+	{ .init_name = "hello-glue0", .class = &hello_glue_class, .parent = &hello_glue_parent,
+	  .release = hello_static_release },
+	{ .init_name = "hello-glue1", .class = &hello_glue_class, .parent = &hello_glue_parent,
+	  .release = hello_static_release },
+};
+
+/* An SRCU reader inside its read-side section for 20 ms. */
+DEFINE_STATIC_SRCU(hello_srcu);
+static bool hello_srcu_reader_done;
+
+static int hello_srcu_reader(void *unused)
+{
+	int idx = srcu_read_lock(&hello_srcu);
+
+	msleep(20);
+	WRITE_ONCE(hello_srcu_reader_done, true);
+	srcu_read_unlock(&hello_srcu, idx);
+	return 0;
+}
+
 static int __init hello_driver_core_init(void)
 {
 	struct device_link *link;
@@ -1415,7 +1527,47 @@ static int __init hello_driver_core_init(void)
 	HELLO_CHECK(wait_for_completion_timeout(&hello_consumer_released, HZ),
 		    "a dropped device link never let go of its consumer");
 
-	pr_info("hello driver core: a bus, a driver and a device, probed, managed, removed and released; a device link dropped after an SRCU grace period; the direct map\n");
+	/* A grace period waits for a reader already inside its section. */
+	HELLO_CHECK(!IS_ERR(kthread_run(hello_srcu_reader, NULL, "hello-srcu")), "no kthread");
+	msleep(1);
+	synchronize_srcu(&hello_srcu);
+	HELLO_CHECK(READ_ONCE(hello_srcu_reader_done),
+		    "synchronize_srcu() returned while a reader was in its read-side section");
+
+	/* Asynchronous probing: scheduled on async's own workqueue, waited for. */
+	HELLO_CHECK(bus_register(&hello_async_bus) == 0 && device_register(&hello_async_dev) == 0 &&
+		    driver_register(&hello_async_drv) == 0,
+		    "an asynchronously probing driver was not registered");
+	wait_for_device_probe();
+	HELLO_CHECK(hello_async_probes == 1 && hello_async_dev.driver == &hello_async_drv,
+		    "a device was not probed asynchronously");
+	device_unregister(&hello_async_dev);
+	driver_unregister(&hello_async_drv);
+	bus_unregister(&hello_async_bus);
+
+	{
+		int ns = kobj_ns_type_register(&hello_ns_ops), cls = class_register(&hello_ns_class);
+
+		if (ns || cls)
+			pr_err("hello: kobj_ns_type_register %d, class_register %d\n", ns, cls);
+		HELLO_CHECK(!ns && !cls, "a namespaced class was not registered");
+	}
+	class_unregister(&hello_ns_class);
+
+	HELLO_CHECK(!class_register(&hello_glue_class) && !device_register(&hello_glue_parent) &&
+		    !device_register(&hello_glue[0]) && !device_register(&hello_glue[1]),
+		    "a class's devices under a parent were not registered");
+	HELLO_CHECK(hello_glue[0].kobj.parent == hello_glue[1].kobj.parent &&
+		    hello_glue[0].kobj.parent != &hello_glue_parent.kobj,
+		    "two devices of a class under one parent did not share a glue directory");
+	device_unregister(&hello_glue[0]);
+	HELLO_CHECK(hello_glue[1].kobj.parent->state_in_sysfs,
+		    "a glue directory went while a device was still in it");
+	device_unregister(&hello_glue[1]);
+	device_unregister(&hello_glue_parent);
+	class_unregister(&hello_glue_class);
+
+	pr_info("hello driver core: a bus, a driver and a device, probed, managed, removed and released; a device link dropped after an SRCU grace period, which waits for a reader; asynchronous probing; a namespaced class; a glue directory kept for its devices; the direct map\n");
 	return 0;
 }
 late_initcall(hello_driver_core_init);

@@ -353,18 +353,16 @@ void wakeme_after_rcu(struct rcu_head *head)
 }
 
 /*
- * A grace period waited for, as Linux's wait_rcu_gp() waits for one: a
- * callback queued, which the loop's next turn runs, and waited on.
+ * A grace period: already passed, as in Linux's Tiny RCU. One task runs at
+ * a time and none is preempted, so a task that may sleep -- which a caller
+ * of synchronize_rcu() must be able to -- is in no read-side critical
+ * section, and no other task can be in one either: each gave up the CPU
+ * outside of it. Callbacks queued before it still wait for the loop's turn
+ * (rcu_barrier() waits for those).
  */
 void synchronize_rcu(void)
 {
-	struct rcu_synchronize rs;
-
-	init_rcu_head_on_stack(&rs.head);
-	init_completion(&rs.completion);
-	call_rcu(&rs.head, wakeme_after_rcu);
-	wait_for_completion(&rs.completion);
-	destroy_rcu_head_on_stack(&rs.head);
+	lx_may_sleep(__builtin_return_address(0));
 }
 
 /* Every callback queued so far run: the next turn of the loop runs them. */

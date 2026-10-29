@@ -9,10 +9,9 @@
  * links -- and announces it to user space (uevents). Nothing in a driver
  * process reads sysfs or listens for uevents, and the process has no file
  * system to show them in, so here every such call succeeds and keeps
- * nothing: an object's sysfs node stays NULL, which is what Linux's own code
- * finds for an object not shown, and every kernfs call it makes with one is
- * safe with NULL. What a driver itself keeps in an attribute -- its own
- * state behind a show() function -- is the driver's, unaffected.
+ * nothing -- but a kobject's directory, which keeps what Linux's own code
+ * reads of it (below). What a driver itself keeps in an attribute -- its
+ * own state behind a show() function -- is the driver's, unaffected.
  *
  * procfs the same: Linux's own code shows its resource tree and its PCI
  * devices there (kernel/resource.c, drivers/pci/proc.c), and every entry it
@@ -40,22 +39,63 @@
 #include "slx.h"
 #include "lx_emul.h"
 
+/*
+ * A kobject's directory: a kernfs node shown nowhere and linked into no
+ * tree, kept because Linux's own code reaches into it -- a namespaced
+ * class, as the net class is, marks its directory so (lib/kobject.c's
+ * create_dir() -> kernfs_enable_ns(), inline, which reads and writes the
+ * node). Counted as Linux's kernfs counts one: a reference while the
+ * kobject is shown, one more for each kernfs_get(); freed with the last.
+ * Nothing reads its place in a tree -- a parent, the directories under it
+ * (drivers/base/core.c's kobject_has_children() guards a race between two
+ * CPUs, and the glue directory it asks about is kept by its references
+ * here) -- so it keeps none.
+ */
+void kernfs_get(struct kernfs_node *kn)
+{
+	if (kn)
+		atomic_inc(&kn->count);
+}
+
+void kernfs_put(struct kernfs_node *kn)
+{
+	if (kn && atomic_dec_and_test(&kn->count))
+		kfree(kn);
+}
+
 int sysfs_create_dir_ns(struct kobject *kobj, const void *ns)
 {
+	struct kernfs_node *kn = kzalloc(sizeof(*kn), GFP_KERNEL);
+
+	if (!kn)
+		return -ENOMEM;
+	atomic_set(&kn->count, 1);
+	kn->flags = KERNFS_DIR;
+	kn->ns = ns;
+	kn->dir.children = RB_ROOT;
+	kobj->sd = kn;
 	return 0;
 }
 
 void sysfs_remove_dir(struct kobject *kobj)
 {
+	struct kernfs_node *kn = kobj->sd;
+
+	kobj->sd = NULL;
+	kernfs_put(kn);
 }
 
 int sysfs_rename_dir_ns(struct kobject *kobj, const char *new_name, const void *new_ns)
 {
+	if (kobj->sd)
+		kobj->sd->ns = new_ns;
 	return 0;
 }
 
 int sysfs_move_dir_ns(struct kobject *kobj, struct kobject *new_parent_kobj, const void *new_ns)
 {
+	if (kobj->sd)
+		kobj->sd->ns = new_ns;
 	return 0;
 }
 
@@ -112,15 +152,6 @@ int sysfs_rename_link_ns(struct kobject *kobj, struct kobject *target, const cha
 			 const char *new_name, const void *new_ns)
 {
 	return 0;
-}
-
-/* Every node is NULL here (above), and Linux's own kernfs is safe with one. */
-void kernfs_get(struct kernfs_node *kn)
-{
-}
-
-void kernfs_put(struct kernfs_node *kn)
-{
 }
 
 /* Nobody listens: an event announced is an event delivered to no one. */

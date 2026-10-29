@@ -175,9 +175,12 @@ static int lx_pci_take(const char *arg)
 }
 
 /*
- * Each bus a given function is on, as Linux's x86 code scans a root bus:
- * the memory space and the one bus number its windows, its sysdata the
- * x86 kind (domain 0, no NUMA node).
+ * Each bus a given function is on, made as Linux's x86 code makes a root
+ * bus -- the memory space and the one bus number its windows, its sysdata
+ * the x86 kind (domain 0, no NUMA node) -- with only the functions given
+ * scanned on it: a slot's other functions are not the process's, and
+ * Linux's own slot scan would stop at a function 0 it cannot read (the
+ * I219 e1000e drives on a PCH is 00:1f.6).
  */
 static int lx_pci_scan_bus(unsigned int number)
 {
@@ -195,19 +198,19 @@ static int lx_pci_scan_bus(unsigned int number)
 	busn->flags = IORESOURCE_BUS;
 	pci_add_resource(&resources, &iomem_resource);
 	pci_add_resource(&resources, busn);
-	bus = pci_scan_root_bus(NULL, number, &lx_pci_ops, sysdata, &resources);
+	bus = pci_create_root_bus(NULL, number, &lx_pci_ops, sysdata, &resources);
 	if (!bus) {
 		pci_free_resource_list(&resources);
 		return -ENODEV;
 	}
-	pci_bus_claim_resources(bus);
-	pci_bus_add_devices(bus);
 	for (i = 0; i < lx_pci_count; i++) {
 		struct lx_pci_function *f = &lx_pci_functions[i];
 
 		if (f->bus == number)
-			f->dev = pci_get_slot(bus, f->devfn);
+			f->dev = pci_dev_get(pci_scan_single_device(bus, f->devfn));
 	}
+	pci_bus_claim_resources(bus);
+	pci_bus_add_devices(bus);
 	return 0;
 }
 
@@ -222,6 +225,12 @@ static int __init lx_pci_scan(void)
 	unsigned int i, j;
 	int err = 0;
 
+	/* The two halves' tables must agree on how many functions there may be. */
+	if (slx_pci_functions() != LX_PCI_FUNCTIONS) {
+		pr_err("pci: the layer's halves disagree on how many functions a process may have (%lu, %d)\n",
+		       slx_pci_functions(), LX_PCI_FUNCTIONS);
+		slx_exit(SLX_EXIT_BUG);
+	}
 	for (i = 1; i < slx_argc() && !err; i++)
 		if (!strncmp(slx_argv(i), "pci=", 4))
 			err = lx_pci_take(slx_argv(i));
@@ -283,7 +292,6 @@ bool lx_pci_check_bound(void)
  */
 static void __iomem *lx_ioremap(resource_size_t phys, unsigned long size)
 {
-	struct lx_pci_function *moved = NULL;
 	unsigned int i, b;
 
 	for (i = 0; i < lx_pci_count; i++) {
@@ -292,22 +300,29 @@ static void __iomem *lx_ioremap(resource_size_t phys, unsigned long size)
 		for (b = 0; b < PCI_STD_NUM_BARS; b++) {
 			u64 base, len;
 			int at = slx_pci_bar_window(f->handle, b, &base, &len);
+			long mapped;
 
-			if (at < 0)
-				moved = f;
-			if (at <= 0 || phys < base || phys - base >= len || size > len - (phys - base))
+			if (!at || phys < base || phys - base >= len || size > len - (phys - base))
 				continue;
-			if (!f->mapped[b])
-				f->mapped[b] = (void __iomem *)slx_pci_map_bar(f->handle, b);
-			return f->mapped[b] ? f->mapped[b] + (phys - base) : NULL;
+			if (at < 0) {
+				pci_err(f->dev, "ioremap of %#llx: BAR %u was moved, which the device cannot follow\n",
+					(unsigned long long)phys, b);
+				return NULL;
+			}
+			if (!f->mapped[b]) {
+				mapped = slx_pci_map_bar(f->handle, b);
+				if (mapped <= 0) {
+					pci_err(f->dev, "BAR %u could not be mapped: %ld (whole BARs of 4 KiB or more, page-aligned, only)\n",
+						b, mapped);
+					return NULL;
+				}
+				f->mapped[b] = (void __iomem *)mapped;
+			}
+			return f->mapped[b] + (phys - base);
 		}
 	}
-	if (moved)
-		pci_err(moved->dev, "ioremap of %#llx: a BAR was moved, which the device cannot follow\n",
-			(unsigned long long)phys);
-	else
-		pr_err("ioremap of %#llx (%lu bytes): no BAR of the process's holds it\n",
-		       (unsigned long long)phys, size);
+	pr_err("ioremap of %#llx (%lu bytes): no BAR of the process's holds it\n",
+	       (unsigned long long)phys, size);
 	return NULL;
 }
 

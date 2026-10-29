@@ -92,7 +92,8 @@ thread has finished.
   and work behind an ordinary timer keeps the loop waiting for it, so both
   are run; a work item a worker has begun is waited for.
 - (Until §1583, every driver process logged the workqueues' failed sysfs
-  registration once; now it succeeds.)
+  registration once; now it succeeds, and the failed initcall every process
+  logs is `kernel/resource.c`'s `iomem` mount, §1584.)
 - The build renames the driver objects' sections, so a driver's own code
   must live in `.text` or `.init.text` for its initcall to count as the
   driver's (an initcall in another section would be carried past). Linux's

@@ -34,11 +34,22 @@ const KIND_PCI_DEVICE: u32 = 36;
 /// `poll(2)`'s `POLLIN`: a device's interrupts counted and not yet taken.
 const POLLIN: u32 = 0x0001;
 
+const SYS_PCI_DEVICE_CLOSE: u64 = 1180;
+
 /// SlateOS's `OutOfMemory`: more functions opened than are kept.
 const OUT_OF_MEMORY: i64 = -100;
+/// SlateOS's `InvalidArgument`: a configuration offset no register has.
+const INVALID_ARGUMENT: i64 = -3;
 
-/// How many functions one process may be given.
+/// How many functions one process may be given: the C half asks
+/// (`slx_pci_functions`), and sizes its own tables by it.
 const FUNCTIONS: usize = 8;
+
+/// `slx_pci_functions`: how many functions one process may be given.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_functions() -> usize {
+    FUNCTIONS
+}
 
 /// A function opened: its handle, its BARs, whether its MSI is set up, and
 /// whether the loop waits for its interrupts.
@@ -107,7 +118,15 @@ pub extern "C" fn slx_pci_open(bus: u8, devfn: u8) -> i64 {
     let mut size = [0u64; bars::COUNT];
     for (i, (r, s)) in (0u16..).zip(real.iter_mut().zip(size.iter_mut())) {
         let offset = bars::FIRST.saturating_add(i.saturating_mul(4));
-        *r = u32::try_from(config_read(handle, offset, 4)).unwrap_or(0);
+        let read = config_read(handle, offset, 4);
+        let Ok(value) = u32::try_from(read) else {
+            // A function whose BARs cannot be read cannot be shown to Linux
+            // as it is: the open fails, and the handle goes. Its close's own
+            // answer adds nothing to the read's.
+            let _closed = syscall4(SYS_PCI_DEVICE_CLOSE, handle.cast_unsigned(), 0, 0, 0);
+            return read.min(INVALID_ARGUMENT);
+        };
+        *r = value;
         // A memory BAR's size, bit 0 its prefetchability; an error for any
         // other kind, which has none here.
         let answer = syscall4(
@@ -199,7 +218,7 @@ pub(crate) fn wait_for_interrupts(timeout_ns: u64) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_pci_config_read(handle: i64, offset: u32, width: u32) -> i64 {
     let Ok(offset) = u16::try_from(offset) else {
-        return config_read(handle, u16::MAX, width);
+        return INVALID_ARGUMENT;
     };
     match with_function(handle, |f| f.bars.read(offset, width)).flatten() {
         Some(value) => i64::from(value),
@@ -226,9 +245,10 @@ pub extern "C" fn slx_pci_config_write(handle: i64, offset: u32, width: u32, val
 }
 
 /// `slx_pci_bar_window`: where memory BAR `bar` of the function `handle`
-/// names is, and how large, into `base` and `size`: 1 while Linux's view of
-/// it is where the kernel placed it, 0 for no memory BAR, -1 for one Linux
-/// has written elsewhere -- which the device does not follow.
+/// names is -- where the kernel placed it -- and how large, into `base` and
+/// `size`: 1 while Linux's view of it is there too, -1 when Linux has
+/// written it elsewhere (which the device does not follow), 0 for no memory
+/// BAR, `base` and `size` then untouched.
 ///
 /// # Safety
 ///
@@ -243,31 +263,29 @@ pub unsafe extern "C" fn slx_pci_bar_window(
     let window = usize::try_from(bar)
         .ok()
         .and_then(|i| with_function(handle, |f| f.bars.window(i)))
-        .unwrap_or(Ok(None));
-    match window {
-        Ok(Some((at, bytes))) => {
-            // SAFETY: the caller's.
-            unsafe {
-                base.write(at);
-                size.write(bytes);
-            }
-            1
-        }
-        Ok(None) => 0,
-        Err(()) => -1,
+        .flatten();
+    let Some(w) = window else {
+        return 0;
+    };
+    // SAFETY: the caller's.
+    unsafe {
+        base.write(w.base);
+        size.write(w.size);
     }
+    if w.moved { -1 } else { 1 }
 }
 
-/// `slx_pci_map_bar`: where memory BAR `bar` is mapped in the process,
-/// uncached, or NULL when it cannot be.
+/// `slx_pci_map_bar`: memory BAR `bar` mapped in the process, whole and
+/// uncached: where, or the kernel's error -- `NotSupported` (-301) for a BAR
+/// smaller than a 4 KiB page or not aligned to one, which cannot be mapped
+/// without exposing the registers beside it.
 #[unsafe(no_mangle)]
-pub extern "C" fn slx_pci_map_bar(handle: i64, bar: u32) -> *mut u8 {
-    let at = syscall4(
+pub extern "C" fn slx_pci_map_bar(handle: i64, bar: u32) -> i64 {
+    syscall4(
         SYS_PCI_DEVICE_MAP_BAR,
         handle.cast_unsigned(),
         u64::from(bar),
         0,
         0,
-    );
-    usize::try_from(at).map_or(core::ptr::null_mut(), |at| at as *mut u8)
+    )
 }

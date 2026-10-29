@@ -9,8 +9,8 @@
 //! a memory BAR's address bits below its size read 0, its type bits are the
 //! device's, and the rest is what Linux last wrote -- kept here, never
 //! reaching the device, so that the BAR stays where the kernel put it. A BAR
-//! that Linux has written somewhere else reads so, and [`Bars::window`] then
-//! refuses to say where it is: the device would not follow it. An I/O BAR,
+//! that Linux has written somewhere else reads so, and [`Bars::window`] says
+//! it was moved: the device would not follow it. An I/O BAR,
 //! an absent one, and the expansion ROM read as 0: the handle offers none.
 
 /// How many BARs a type-0 function has.
@@ -129,20 +129,14 @@ impl Bars {
         true
     }
 
-    /// Where memory BAR `i` is, and how large: `Ok(Some((base, size)))`
-    /// while Linux's view of it is where the kernel placed it, `Ok(None)`
-    /// for no memory BAR, `Err(())` for one Linux has written elsewhere.
-    ///
-    /// # Errors
-    ///
-    /// A BAR Linux moved: the device decodes it where the kernel placed it,
-    /// so a mapping where Linux thinks it is would reach nothing.
-    #[allow(clippy::result_unit_err)] // One failure, said by the doc.
-    pub fn window(&self, i: usize) -> Result<Option<(u64, u64)>, ()> {
+    /// Where memory BAR `i` is -- where the kernel placed it, which the
+    /// device decodes -- how large, and whether Linux has written it
+    /// elsewhere since (a mapping where Linux then thinks it is would reach
+    /// nothing); `None` for no memory BAR.
+    #[must_use]
+    pub fn window(&self, i: usize) -> Option<Window> {
         let size = self.size.get(i).copied().unwrap_or(0);
-        let Some(&real) = self.real.get(i).filter(|_| size != 0) else {
-            return Ok(None);
-        };
+        let real = *self.real.get(i).filter(|_| size != 0)?;
         let mut base = u64::from(real & !TYPE_BITS);
         let mut in_place = self.register(i) == real;
         if self.is_64(i) {
@@ -150,12 +144,22 @@ impl Bars {
             base |= u64::from(self.real.get(upper).copied().unwrap_or(0)) << 32;
             in_place &= self.register(upper) == self.real.get(upper).copied().unwrap_or(0);
         }
-        if in_place {
-            Ok(Some((base, size)))
-        } else {
-            Err(())
-        }
+        Some(Window {
+            base,
+            size,
+            moved: !in_place,
+        })
     }
+}
+
+/// A memory BAR's place ([`Bars::window`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    /// Where the kernel placed it, and the device decodes it.
+    pub base: u64,
+    pub size: u64,
+    /// Whether Linux has written it elsewhere since.
+    pub moved: bool,
 }
 
 /// The low `width` bytes of a register.
@@ -172,6 +176,16 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::arithmetic_side_effects)]
 
     use super::*;
+
+    /// What `window()` answers for a BAR where the kernel placed it.
+    #[allow(clippy::unnecessary_wraps)] // Compared with `window()`'s own answer.
+    fn placed(base: u64, size: u64) -> Option<Window> {
+        Some(Window {
+            base,
+            size,
+            moved: false,
+        })
+    }
 
     /// An 82574's BARs, as QEMU shows one: BAR0 and BAR1 32-bit memory,
     /// 128 KiB each; BAR2 I/O (no size from the kernel); BAR3 memory, 16 KiB.
@@ -208,7 +222,7 @@ mod tests {
         assert_eq!(was, 0x8916_0000);
         assert_eq!(sized, !(0x2_0000u32 - 1) & !0xf);
         assert_eq!(b.read(FIRST, 4), Some(0x8916_0000), "restored");
-        assert_eq!(b.window(0), Ok(Some((0x8916_0000, 0x2_0000))));
+        assert_eq!(b.window(0), placed(0x8916_0000, 0x2_0000));
         let (_, sized) = size_as_linux(&mut b, 3);
         assert_eq!(sized, !(0x4000u32 - 1) & !0xf);
     }
@@ -228,8 +242,8 @@ mod tests {
         assert_eq!(b.read(FIRST + 8, 4), Some(0), "the I/O BAR");
         assert_eq!(size_as_linux(&mut b, 2), (0, 0));
         assert_eq!(b.read(FIRST + 16, 4), Some(0), "absent");
-        assert_eq!(b.window(2), Ok(None));
-        assert_eq!(b.window(4), Ok(None));
+        assert_eq!(b.window(2), None);
+        assert_eq!(b.window(4), None);
         assert!(b.write(ROM, 4, !1));
         assert_eq!(b.read(ROM, 4), Some(0), "the ROM, sized");
     }
@@ -245,13 +259,13 @@ mod tests {
         assert_eq!(hi, !1);
         let size = !((u64::from(hi) << 32) | u64::from(lo & !0xf)) + 1;
         assert_eq!(size, 1 << 33);
-        assert_eq!(b.window(0), Ok(Some((0x4_0000_0000, 1 << 33))));
-        assert_eq!(b.window(1), Ok(None), "an upper half is no BAR of its own");
+        assert_eq!(b.window(0), placed(0x4_0000_0000, 1 << 33));
+        assert_eq!(b.window(1), None, "an upper half is no BAR of its own");
         let (_, lo) = size_as_linux(&mut b, 2);
         let (_, hi) = size_as_linux(&mut b, 3);
         assert_eq!(lo, !(0x1_0000u32 - 1) & !0xf | 0x4);
         assert_eq!(hi, u32::MAX);
-        assert_eq!(b.window(2), Ok(Some((0x1_2345_0000, 0x1_0000))));
+        assert_eq!(b.window(2), placed(0x1_2345_0000, 0x1_0000));
     }
 
     #[test]
@@ -259,25 +273,45 @@ mod tests {
         let mut b = e1000e();
         assert!(b.write(FIRST, 4, 0xa000_0000));
         assert_eq!(b.read(FIRST, 4), Some(0xa000_0000));
-        assert_eq!(b.window(0), Err(()));
+        assert_eq!(
+            b.window(0),
+            Some(Window {
+                base: 0x8916_0000,
+                size: 0x2_0000,
+                moved: true
+            }),
+            "where it really is, and that it moved"
+        );
         assert!(b.write(FIRST, 4, 0x8916_0000));
-        assert_eq!(b.window(0), Ok(Some((0x8916_0000, 0x2_0000))));
+        assert_eq!(b.window(0), placed(0x8916_0000, 0x2_0000));
         let mut w = wide();
         // Bit 0 of the upper half is below the 8 GiB size: written, it still
         // reads 0, and the BAR has not moved.
         assert!(w.write(FIRST + 4, 4, 0x5));
-        assert_eq!(w.window(0), Ok(Some((0x4_0000_0000, 1 << 33))));
+        assert_eq!(w.window(0), placed(0x4_0000_0000, 1 << 33));
         assert!(w.write(FIRST + 4, 4, 0x6));
-        assert_eq!(w.window(0), Err(()), "the upper half moved");
+        assert!(w.window(0).unwrap().moved, "the upper half moved");
     }
 
     #[test]
     fn narrow_accesses_reach_their_bytes() {
         let mut b = e1000e();
         assert_eq!(b.read(FIRST + 2, 2), Some(0x8916));
+        assert_eq!(b.read(FIRST, 2), Some(0x0000), "the low word alone");
         assert_eq!(b.read(FIRST + 3, 1), Some(0x89));
+        assert_eq!(b.read(FIRST + 2, 1), Some(0x16), "one byte alone");
+        assert_eq!(b.read(FIRST + 1, 1), Some(0x00));
         assert!(b.write(FIRST + 2, 2, 0xa000));
         assert_eq!(b.read(FIRST, 4), Some(0xa000_0000));
+        // A narrow write leaves the bytes beside it.
+        assert!(b.write(FIRST + 2, 1, 0x5a));
+        assert_eq!(b.read(FIRST, 4), Some(0xa05a_0000));
+        assert!(b.write(FIRST, 2, 0xffff));
+        assert_eq!(
+            b.read(FIRST, 4),
+            Some(0xa05a_0000),
+            "the low word, below the size, fixed"
+        );
     }
 
     #[test]

@@ -667,7 +667,11 @@ build_linux_drivers() {
 # Fail a boot whose medium carried a Linux driver process (a module_path:
 # line went into limine.conf) in which the kernel's linuxdrv self-test did
 # not say it ran: a module the kernel could not find is a skip there, and a
-# skip of what this harness put on the medium is a failure here.
+# skip of what this harness put on the medium is a failure here. So is a
+# verdict without its PCI runs: this harness always attaches the spare
+# e1000e (mac 52:54:00:12:34:59) the kernel gives the process, so a run
+# that skipped them -- the card bound, or unreadable -- has stopped testing
+# Linux's PCI core while it reads as a pass.
 #
 # $1: the serial log; $2: whether a module was named. Returns 0 when none
 # was, or the test ran.
@@ -678,13 +682,14 @@ check_linuxdrv_ran() {
     # Its line, as Linux's vsprintf formats it, and the kernel's verdict.
     if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
         grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
-        grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file"; then
+        grep -aq "^\[linuxdrv\]   hello process .*, a PCI function probed through Linux's PCI core.*: OK" "$file"; then
         return 0
     fi
     echo "=== THE LINUX DRIVER LAYER'S PROCESS DID NOT RUN ==="
     echo "  The boot medium carried linuxdrv/hello, but the kernel never said"
-    echo "  '[linuxdrv]   hello process ...: OK', or the process never printed"
-    echo "  its line as Linux formats it. Their own lines say why:"
+    echo "  '[linuxdrv]   hello process ...: OK' with its PCI runs, or the"
+    echo "  process never printed its line as Linux formats it. Their own lines"
+    echo "  say why:"
     grep -a '^\[linuxdrv\]\|^\[lx\]' "$file" | head -8 | sed 's/^/  /'
     return 1
 }

@@ -25,14 +25,18 @@ so those calls succeed and keep nothing.
 2. **Its set-up runs where Linux's does.** Before the first initcall the
    layer runs the core of Linux's `driver_init()` -- devices, buses and
    classes -- and makes the kernel's own kobject (`/sys/kernel`), as
-   `ksysfs_init()` does. The rest of `driver_init()` registers firmware
+   `ksysfs_init()` does; and, after the workqueues, asynchronous probing's
+   own workqueue (`async_init()`, as Linux 6.9 on makes it there). The rest of `driver_init()` registers firmware
    nodes, hypervisors, CPUs, memory blocks, NUMA nodes and the platform bus
    as devices, none of which a driver process has. `system_state` moves as
    `init/main.c` moves it.
 3. **sysfs and uevents show nothing** (`linuxdrv/emul/lx_fs.c`): every
-   call that would create, remove, rename, move or link a sysfs node
-   succeeds and keeps nothing, so every object's node stays NULL, which
-   Linux's kernfs takes safely; `kobject_uevent()` delivers to no one. What
+   call that would create, remove, rename, move or link a sysfs file or
+   link succeeds and keeps nothing, and `kobject_uevent()` delivers to no
+   one. A kobject's directory is a kernfs node shown nowhere and linked
+   into no tree, counted as Linux's kernfs counts one, because Linux's own
+   code reaches into it: a namespaced class, as the net class is, marks its
+   directory so (`kernfs_enable_ns()`, inline). What
    only a reader or writer of sysfs reaches -- an attribute removing itself
    from its own `store()`, a file's owner changed for a namespace -- stays a
    generated stop.

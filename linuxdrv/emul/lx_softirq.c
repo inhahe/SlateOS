@@ -146,6 +146,7 @@ int lx_softirq_init(void)
 void lx_emul_turn(u64 now_ns)
 {
 	static unsigned long ticked = INITIAL_JIFFIES;
+	unsigned long flags;
 
 	lx_emul_account(now_ns);
 	*raw_cpu_ptr(&current_task) = &lx_idle_task;
@@ -169,11 +170,11 @@ void lx_emul_turn(u64 now_ns)
 	 * sooner (update_process_times -> irq_work_tick): in hardirq context,
 	 * interrupts off.
 	 */
-	local_irq_disable();
+	local_irq_save(flags);
 	preempt_count_add(HARDIRQ_OFFSET);
 	irq_work_tick();
 	preempt_count_sub(HARDIRQ_OFFSET);
-	local_irq_enable();
+	local_irq_restore(flags);
 	if (local_softirq_pending())
 		do_softirq();
 }

@@ -179,6 +179,12 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 	return lx_msi_enable(dev) ?: 1;
 }
 
+int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs, unsigned int max_vecs,
+			  unsigned int flags)
+{
+	return pci_alloc_irq_vectors_affinity(dev, min_vecs, max_vecs, flags, NULL);
+}
+
 void pci_free_irq_vectors(struct pci_dev *dev)
 {
 	pci_disable_msi(dev);
@@ -345,15 +351,16 @@ void lx_irq_poll(void)
 
 	for (i = 0; i < ARRAY_SIZE(lx_irqs); i++) {
 		struct lx_irq *d = &lx_irqs[i];
+		unsigned long flags;
 		irqreturn_t ret;
 
 		if (!d->dev || !lx_irq_live(d) || slx_pci_irq_take(d->handle) <= 0)
 			continue;
-		local_irq_disable();
+		local_irq_save(flags);
 		preempt_count_add(HARDIRQ_OFFSET);
 		ret = d->handler(lx_irq_number(d), d->dev_id);
 		preempt_count_sub(HARDIRQ_OFFSET);
-		local_irq_enable();
+		local_irq_restore(flags);
 		d->count++;
 		if ((ret & IRQ_WAKE_THREAD) && d->thread) {
 			d->thread_due = true;

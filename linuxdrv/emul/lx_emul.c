@@ -28,6 +28,7 @@
 #include <linux/workqueue.h>
 #include <linux/radix-tree.h>
 #include <linux/srcu.h>
+#include <linux/async.h>
 #include <linux/rcupdate.h>
 #include <linux/swiotlb.h>
 #include <linux/string.h>
@@ -620,6 +621,8 @@ int lx_emul_main(void)
 	/* As Linux's kernel_init_freeable(): workers, once kthreadd can make them. */
 	workqueue_init();
 	workqueue_init_topology();
+	/* Asynchronous probing's own workqueue, as Linux 6.9 on makes it here. */
+	async_init();
 	/*
 	 * As Linux's driver_init() before the initcalls: the driver core's
 	 * devices, buses and classes. Its other pieces are for what a driver

@@ -44,18 +44,22 @@ void *slx_map_lazy(unsigned long bytes);
  *                        the BARs and the ROM as the hardware would answer
  *                        after what was written, which never reaches them;
  *   slx_pci_config_write and written: 0;
- *   slx_pci_bar_window   memory BAR `bar`'s place and size: 1 while it is
- *                        where the kernel put it, 0 for no memory BAR, -1
- *                        for one Linux wrote elsewhere;
- *   slx_pci_map_bar      memory BAR `bar` mapped uncached: where, or NULL.
+ *   slx_pci_bar_window   memory BAR `bar`'s place -- where the kernel put
+ *                        it -- and size: 1 while Linux's view is there too,
+ *                        -1 when Linux wrote it elsewhere, 0 for no memory
+ *                        BAR;
+ *   slx_pci_map_bar      memory BAR `bar` mapped whole and uncached: where,
+ *                        or the kernel's error.
  */
 long slx_pci_open(unsigned char bus, unsigned char devfn);
+/* How many functions one process may be given: the kit's tables' size. */
+unsigned long slx_pci_functions(void);
 long slx_pci_config_read(long handle, unsigned int offset, unsigned int width);
 long slx_pci_config_write(long handle, unsigned int offset, unsigned int width,
 			  unsigned int value);
 int slx_pci_bar_window(long handle, unsigned int bar, unsigned long long *base,
 		       unsigned long long *size);
-void *slx_pci_map_bar(long handle, unsigned int bar);
+long slx_pci_map_bar(long handle, unsigned int bar);
 /*
  * Its interrupts: its MSI set up, once for the handle's life (0, or an
  * error); the interrupts counted since last taken, taken now without

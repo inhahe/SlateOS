@@ -118,8 +118,8 @@ generated headers and objects, one per linuxdrv/linux.config).
 Made by: scripts/linux-tree.sh in the SlateOS repository, from the release
 pinned in linuxdrv/linux.pin ($version on $(date -u +%Y-%m-%d)).
 When it can go: any time -- the script fetches and prepares it again. Older
-linux-*/ and obj-*/ directories than the pinned release are no longer used,
-nor an obj-*/ for a configuration no worktree has any more.
+linux-*/ directories than the pinned release are no longer used; obj-*/
+directories the script removes itself, keeping the four used last.
 EOF
 }
 
@@ -180,6 +180,26 @@ check_config() {
     fi
 }
 
+# The prepared trees no worktree uses any more go: one is made for each
+# linux.config (`obj`, above), and a worktree that has moved on never comes
+# back to its old one. The one in use stays, and the three others used
+# last -- as many configurations as the lanes are likely to be on at once;
+# a tree removed that is wanted again is prepared again. Run under the
+# tree's lock (lock_tree), so that no build is using one while it goes.
+prune_objs() {
+    local others=3 dir used
+    touch "$obj/.slateos-used"
+    for dir in "$root"/obj-*/; do
+        dir=${dir%/}
+        [ -d "$dir" ] && [ "$dir" != "$obj" ] || continue
+        used=$(stat -c %Y "$dir/.slateos-used" 2>/dev/null || stat -c %Y "$dir")
+        printf '%s %s\n' "$used" "$dir"
+    done | sort -rn | tail -n +"$((others + 1))" | cut -d' ' -f2- | while read -r dir; do
+        echo "linux-tree: removing $dir, unused since it was last prepared or built in"
+        rm -rf "$dir"
+    done
+}
+
 prepare() {
     fetch
     local llvm stamp want
@@ -188,6 +208,7 @@ prepare() {
     stamp="$obj/.slateos-prepared"
     if [ -f "$stamp" ] && [ "$(cat "$stamp")" = "$want" ]; then
         echo "linux-tree: $obj is prepared"
+        prune_objs
         return 0
     fi
     rm -f "$stamp"
@@ -203,6 +224,7 @@ prepare() {
         { tail -30 "$obj/prepare.log" >&2; die "make prepare failed (log: $obj/prepare.log)"; }
     echo "$want" >"$stamp"
     echo "linux-tree: prepared $obj"
+    prune_objs
 }
 
 # What every C file of a driver process is compiled with on top of Linux's

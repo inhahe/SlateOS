@@ -266,11 +266,51 @@ pub fn build_request(
     finish(out, pos)
 }
 
+/// Build the DHCPREQUEST of a bound client renewing or rebinding its lease
+/// (RFC 2131 §4.3.2, §4.4.5) for MAC `chaddr`, transaction `xid`: `ciaddr`
+/// its address, which it can answer at, and so no requested address, no
+/// server named, and no broadcast flag -- the answer comes to the address.
+/// Sent to the server that gave the lease when renewing, broadcast when
+/// rebinding. Returns the message length.
+#[must_use]
+pub fn build_renewal(
+    out: &mut [u8],
+    xid: u32,
+    chaddr: &MacAddr,
+    ciaddr: &Ipv4Addr,
+) -> Option<usize> {
+    let mut pos = write_fixed(out, xid, chaddr, false)?;
+    out.get_mut(12..16)?.copy_from_slice(ciaddr);
+    pos = push_option(out, pos, OPT_MSG_TYPE, &[REQUEST])?;
+    pos = push_option(out, pos, OPT_PARAM_REQUEST, &PARAM_REQUEST_LIST)?;
+    finish(out, pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const MAC: MacAddr = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    #[test]
+    fn a_renewal_carries_its_address_and_asks_for_nothing_else() {
+        let mut buf = [0u8; 300];
+        let n = build_renewal(&mut buf, 9, &MAC, &[10, 0, 2, 15]).unwrap();
+        let m = Message::parse(&buf[..n]).unwrap();
+        assert_eq!(m.msg_type(), Some(REQUEST));
+        assert_eq!(&buf[12..16], &[10, 0, 2, 15], "ciaddr is the address held");
+        assert_eq!(m.option(OPT_REQUESTED_IP), None);
+        assert_eq!(m.server_id(), None);
+        assert_eq!(
+            &buf[10..12],
+            &[0, 0],
+            "no broadcast flag: it can be answered at its address"
+        );
+        assert_eq!(
+            build_renewal(&mut [0u8; 100], 9, &MAC, &[10, 0, 2, 15]),
+            None
+        );
+    }
 
     #[test]
     fn reboot_request_asks_for_the_address_and_names_no_server() {

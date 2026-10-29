@@ -28,6 +28,7 @@
 pub mod arp;
 pub mod checksum;
 pub mod dhcp;
+pub mod dhcp_client;
 pub mod dns;
 pub mod ethernet;
 pub mod icmp;

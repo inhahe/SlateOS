@@ -146,8 +146,10 @@ through the kernel per frame.
   bringing the card down. The daemon refuses sends at once while the link
   is down, and when it comes back confirms its lease (RFC 2131
   INIT-REBOOT) and announces its addresses again (a gratuitous ARP, an
-  unsolicited neighbour advertisement); its serving modes serve over a port
-  only when named one
+  unsolicited neighbour advertisement); over a card the lease is the
+  daemon's own, kept in the serving loop (`netproto::dhcp_client`: renewed
+  at T1, rebound at T2). Its serving modes serve over a port only when
+  named one
   (`serve-dns <service>`), nothing yet naming one on a running system
   (`known-issues/A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`).
   Over a port the daemon waits by the driver's doorbell, and between

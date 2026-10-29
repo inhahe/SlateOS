@@ -1,12 +1,16 @@
 ## A-TEST-RECLAIM-SPACE-RACES-THIS-HOST-BACKUP-SCANNERS (lane A, 2026-09-09)
 
-**Status:** OPEN -- fixed on lane-a-wip (1c88393cc, and the batch-22
-follow-up), awaiting a boot on main. It recurred (the boot test of 6e3bbeb4a was
-refused for it), so option 2 below was taken: the test's
-`reclaim_when_unheld` asks `reclaim_dir` again, for up to ten seconds, while
-the file `make_tree` just wrote is held, and the check that the directory is
-gone still fails a veto that outlasts that. `reclaim_dir` itself still never
-retries the rename.
+**Status:** OPEN -- fixed on lane-a-wip (2026-10-29), awaiting a boot on
+main. It recurred on 2026-10-29 (the boot test of 4e530c752 was refused for
+it) despite the earlier fix, a probe of the test's own (`wait_until_unheld`,
+a rename there and back) before calling `reclaim_dir` once: the probe's own
+rename is a change the scanners react to, so they held the file again by
+the time `reclaim_dir` renamed it. Option 2 below is now complete: the test
+asks `reclaim_dir` itself, five times two seconds apart, while it answers
+`SKIP (in use)`, and a tree held through every try is a printed SKIP --
+with the holder `reclaim_dir` names -- and `PASSED, 1 skipped` in the
+summary, not a failure. `reclaim_dir` itself still never retries the
+rename.
 
 **In short:** `scripts/test-reclaim-space.py` failed one check during a boot
 test and passes every time it is run by hand. It is not testing anything that

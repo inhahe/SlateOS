@@ -319,11 +319,12 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
 /// keeping its primary card), an address taken on it by DHCP -- as
 /// `nic-check` has just timed Linux's e1000e serving the spare 82574: the
 /// same model, behind the same kind of QEMU network, its native twin. The
-/// two `[bench] SCORE nic_...` sets are read side by side
+/// two `[bench] PROCESS nic_...` sets are read side by side
 /// (design-decisions 1588, measured). After the e1000e run, which it cannot
 /// keep from running; it fails only for what is wrong, not for being slow:
 /// the card not claimed or not passing frames, an answer corrupted.
-/// Skipped, and recorded so, where the kernel drives no e1000.
+/// Skipped, and recorded so, where the kernel drives no e1000, or where its
+/// e1000 is its primary card -- no virtio-net before it.
 fn native_bench(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let Some(mac) = crate::e1000::with_device(|d| d.mac().0) else {
         skips.record(
@@ -332,6 +333,13 @@ fn native_bench(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         );
         return Ok(());
     };
+    if crate::net::raw::Card::alone_with_mac(mac).is_err() {
+        skips.record(
+            "the kernel's e1000 timed beside Linux's e1000e",
+            "the e1000 is the kernel's primary card, which is not claimed alone",
+        );
+        return Ok(());
+    }
     let hex = alloc::format!(
         "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
         mac[0],

@@ -169,7 +169,7 @@ def test_declared_series_requires_reachability(bh, tmpdir):
     unrestricted = (set(bh.SCORE_CALL_RE.findall(mutated))
                     | set(bh.TRACK_CALL_RE.findall(mutated)))
     check("a text-only scan still sees the orphaned series, which is the defect",
-          len(unrestricted) > len(after), True)
+          len(unrestricted) > len(after - bh.PROCESS_SERIES), True)
 
 
 def test_parse_formats(bh, tmpdir):
@@ -246,6 +246,35 @@ def test_suite_position_matches_the_canary_axis(bh, tmpdir):
           (got["first"][0], got["first"][6]), (11, 2))
     check("a duplicate does not shift its successors",
           got["fourth"][6], 3)
+
+
+def test_parse_process_lines(bh, tmpdir):
+    """A process's `[bench] PROCESS` lines join a record beside the scorecard
+    without taking suite positions, and make no record alone.
+
+    The netstack daemon prints them during the boot's self-tests, before the
+    kernel's scorecard. Counted as SCORE lines they would move every kernel
+    benchmark's position away from the canary sample taken at it, by however
+    many lines the daemon happened to print that boot.
+    """
+    log = write(tmpdir, "process.txt",
+                "[bench] PROCESS nic_kernel_e1000_rtt_median 875000 - TRACK\n"
+                "[bench] SCORE first 10 20 PASS 12 500\n"
+                "[bench] SCORE second 10 - TRACK 12 500\n"
+                "[bench] PROCESS first 99 - TRACK\n")
+    got = bh.parse_serial(log)
+    check("process lines take no suite position",
+          [got[n][6] for n in ("first", "second")], [0, 1])
+    check("a process line joins the record without a position",
+          got["nic_kernel_e1000_rtt_median"],
+          (875000, None, "TRACK", None, None, bh.SPLIT_ABSENT))
+    check("a process line never replaces a scorecard entry",
+          got["first"][0], 10)
+    alone = write(tmpdir, "process-alone.txt",
+                  "[bench] PROCESS nic_kernel_e1000_rtt_median 875000 - TRACK\n")
+    check("process lines alone make no record", bh.parse_serial(alone), {})
+    check("the processes' series are declared",
+          bh.PROCESS_SERIES <= bh.declared_series(), True)
 
 
 def test_parse_split_column(bh, tmpdir):

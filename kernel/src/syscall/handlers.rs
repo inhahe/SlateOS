@@ -20028,19 +20028,12 @@ pub fn sys_net_raw_open(args: &SyscallArgs) -> SyscallResult {
     }
     let card = match args.arg0 {
         0 => Card::Primary,
-        1 => {
-            let mac = match crate::mm::user::read_user_vec(args.arg1, 6, 6) {
-                Ok(bytes) => bytes,
-                Err(e) => return SyscallResult::err(e),
-            };
-            let Ok(mac) = <[u8; 6]>::try_from(mac.as_slice()) else {
-                return SyscallResult::err(KernelError::InvalidArgument);
-            };
-            match Card::with_mac(mac) {
-                Some(card) => card,
-                None => return SyscallResult::err(KernelError::NotFound),
-            }
-        }
+        1 => match crate::mm::user::read_user_value::<[u8; 6]>(args.arg1)
+            .and_then(Card::alone_with_mac)
+        {
+            Ok(card) => card,
+            Err(e) => return SyscallResult::err(e),
+        },
         _ => return SyscallResult::err(KernelError::InvalidArgument),
     };
     let pid = match caller_pid() {
@@ -20063,9 +20056,10 @@ pub fn sys_net_raw_tx(args: &SyscallArgs) -> SyscallResult {
     };
     // Defense in depth: only the current raw owner may transmit, even if the
     // process still holds the NetRaw capability.
-    if crate::net::raw::owner() != Some(pid) {
-        return SyscallResult::err(KernelError::PermissionDenied);
-    }
+    let card = match crate::net::raw::live_claim() {
+        Some((owner, card)) if owner == pid => card,
+        _ => return SyscallResult::err(KernelError::PermissionDenied),
+    };
     let len = args.arg1 as usize;
     if !(RAW_FRAME_MIN..=RAW_FRAME_MAX).contains(&len) {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -20077,7 +20071,7 @@ pub fn sys_net_raw_tx(args: &SyscallArgs) -> SyscallResult {
         Ok(f) => f,
         Err(e) => return SyscallResult::err(e),
     };
-    match crate::net::raw::transmit(&frame) {
+    match crate::net::raw::transmit(card, &frame) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -20092,9 +20086,10 @@ pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return SyscallResult::err(KernelError::NoSuchProcess),
     };
-    if crate::net::raw::owner() != Some(pid) {
-        return SyscallResult::err(KernelError::PermissionDenied);
-    }
+    let card = match crate::net::raw::live_claim() {
+        Some((owner, card)) if owner == pid => card,
+        _ => return SyscallResult::err(KernelError::PermissionDenied),
+    };
     let cap = args.arg1 as usize;
     // Require room for a full standard frame so a pending frame is never
     // truncated or lost after being dequeued from the NIC.
@@ -20104,7 +20099,7 @@ pub fn sys_net_raw_rx(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_write(args.arg0, cap) {
         return SyscallResult::err(e);
     }
-    match crate::net::raw::receive() {
+    match crate::net::raw::receive(card) {
         Some(frame) => {
             let n = frame.len();
             if n > cap {
@@ -20133,13 +20128,14 @@ pub fn sys_net_raw_mcast(args: &SyscallArgs) -> SyscallResult {
         Some(p) => p,
         None => return SyscallResult::err(KernelError::NoSuchProcess),
     };
-    if crate::net::raw::owner() != Some(pid) {
-        return SyscallResult::err(KernelError::PermissionDenied);
-    }
-    // The filter is the kernel's cards' together: an owner of one card
-    // alone may not change what the kernel's stack's cards pass.
-    if !crate::net::raw::is_claimed() {
-        return SyscallResult::err(KernelError::NotSupported);
+    match crate::net::raw::live_claim() {
+        Some((owner, crate::net::raw::Card::Primary)) if owner == pid => {}
+        // The filter is the kernel's cards' together: an owner of one card
+        // alone may not change what the kernel's stack's cards pass.
+        Some((owner, _)) if owner == pid => {
+            return SyscallResult::err(KernelError::NotSupported);
+        }
+        _ => return SyscallResult::err(KernelError::PermissionDenied),
     }
     let Ok(count) = usize::try_from(args.arg1) else {
         return SyscallResult::err(KernelError::InvalidArgument);

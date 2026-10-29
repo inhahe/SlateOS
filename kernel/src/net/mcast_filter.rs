@@ -23,7 +23,9 @@
 //!   comes back.
 //!
 //! Every present card is programmed, not only the one that transmits:
-//! `net::recv_frame` drains them all. virtio-net needs nothing -- without
+//! `net::poll` drains them all. A card a raw owner holds alone keeps the
+//! set in force meanwhile -- `SYS_NET_RAW_MCAST` takes the primary claim
+//! only. virtio-net needs nothing -- without
 //! `VIRTIO_NET_F_CTRL_RX`, which the driver does not negotiate, the device
 //! receives all multicast.
 //!

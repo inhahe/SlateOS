@@ -135,14 +135,13 @@ pub fn poll() {
 }
 
 /// Receive a single frame from the NICs, but `claimed`'s when a raw owner
-/// holds that card alone (`raw::Card`; the primary claim leaves none).
+/// holds that card alone (`raw::Card`; virtio-net, the primary whenever it
+/// is present, is never claimed alone, and the primary claim leaves none).
 ///
 /// Tries virtio-net first, then e1000, then rtl8139.
 fn recv_frame_except(claimed: Option<raw::Card>) -> Option<Vec<u8>> {
     // Try virtio-net first.
-    if claimed != Some(raw::Card::VirtioNet)
-        && let Some(Some(data)) = crate::virtio::net::with_device(|dev| dev.recv())
-    {
+    if let Some(Some(data)) = crate::virtio::net::with_device(|dev| dev.recv()) {
         return Some(data);
     }
     // Fall back to e1000.

@@ -74,8 +74,10 @@ QEMU network; 1000-byte pings, 200 one at a time, then 400 in bursts of 16.
 Each card is waited on as fast as it can be: the port by its doorbell, as
 the daemon's serving loops wait on it; the kernel's card read again after
 one yield -- its best case, for those loops sleep 5 ms after reading nothing
-there. The figures go to the boot history as `nic_<card>_...` benchmark
-lines. On QEMU TCG, Windows host, five boots:
+there. A `--bench` boot records the figures in the benchmark history
+(`bench/history.jsonl`) as `nic_<card>_...` series, beside the kernel's
+scorecard but out of its suite (`[bench] PROCESS` lines). On QEMU TCG,
+Windows host, five boots:
 
 | | round trip, median | 90th percentile | answered a second, 16 in flight |
 |---|---|---|---|

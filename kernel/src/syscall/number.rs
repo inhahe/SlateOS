@@ -4920,9 +4920,10 @@ pub const SYS_NET_FW_FLUSH: u64 = 864;
 ///   and every card it reads, which the kernel's own stack then reads none
 ///   of. 1, the card whose MAC address is the 6 bytes at `arg1`, alone: the
 ///   kernel's stack keeps its primary and the other cards (`NotFound` for a
-///   MAC no card has; the primary's MAC is the primary claim). Anything else
-///   `InvalidArgument`. One claim at a time, whichever card it names;
-///   `SYS_NET_RAW_MCAST` takes the primary claim only.
+///   MAC no card has; `InvalidArgument` for the primary's, which is claimed
+///   with 0 or not at all). Anything else `InvalidArgument`. One claim at a
+///   time, whichever card it names; `SYS_NET_RAW_MCAST` takes the primary
+///   claim only.
 ///
 /// Returns: 0 on success (the raw handle is the process's NetRaw claim itself,
 /// referenced implicitly by subsequent `SYS_NET_RAW_*` calls); negative error

@@ -105,6 +105,25 @@ SCORE_RE = re.compile(
     r"(?:\s+(\d+)\s+(\d+)(?:\s+(-|\?|\d+!?))?)?\s*$"
 )
 
+# `[bench] PROCESS <name> <measured_ns> - TRACK`: a figure a ring-3 process
+# measured and printed itself -- the netstack daemon's `nic-bench` (design-
+# decisions 1588). Not the kernel's scorecard: such a line comes whenever its
+# process runs, before the scorecard as often as not, so it takes no suite
+# position (`parse_serial`), and it is recorded only beside a scorecard.
+PROCESS_RE = re.compile(r"^\[bench\]\s+PROCESS\s+(\S+)\s+(\d+)\s+-\s+TRACK\s*$")
+
+#: The series `PROCESS` lines carry. Declared here for `declared_series`
+#: because no kernel source names them: the netstack daemon builds them at
+#: run time as `nic_<card>_<what>` (`nic_bench`, services/netstack/src/
+#: main.rs), for the kernel's e1000 (`linuxdrv::native_bench`) and Linux's
+#: e1000e (`nic-check`). A boot that cannot run them -- no Linux driver
+#: module, say -- then lacks them without failing the vanished-series gate.
+PROCESS_SERIES = frozenset(
+    f"nic_{card}_{what}"
+    for card in ("kernel_e1000", "linux_e1000e")
+    for what in ("rtt_median", "rtt_p90", "burst16_per_answer")
+)
+
 # `[boot] build profile: sanitizer=<none|kasan-instrumented> textpad=<bytes>`
 #
 # `textpad` is the number of padding bytes `kernel/src/layout_pad.rs` prepended
@@ -612,9 +631,11 @@ def parse_serial(path):
     plausible integer for every benchmark, just not the right one.
 
     Returns an empty dict if the log has no scorecard, which is the normal
-    case for a boot run without `--bench`.
+    case for a boot run without `--bench`. With one, a process's figures
+    (`PROCESS_RE`) are added beside it as six-field entries, with no `pos`.
     """
     entries = {}
+    process = {}
     seen = 0
     try:
         # The serial log is written by QEMU and can contain stray bytes if a
@@ -646,12 +667,23 @@ def parse_serial(path):
                         seen,
                     )
                     seen += 1
+                    continue
+                match = PROCESS_RE.match(line.strip())
+                if match:
+                    process[match.group(1)] = int(match.group(2))
     except FileNotFoundError:
         print(f"bench-history: no serial log at {path}", file=sys.stderr)
         return {}
     except OSError as exc:
         print(f"bench-history: cannot read {path}: {exc}", file=sys.stderr)
         return {}
+    # A process's figures beside the scorecard, never alone: a boot without
+    # `--bench` prints them too, and must still read as having no record. Six
+    # fields, no position -- every positional reader skips such an entry --
+    # and never over a scorecard entry of the same name.
+    if entries:
+        for name, measured in process.items():
+            entries.setdefault(name, (measured, None, "TRACK", None, None, SPLIT_ABSENT))
     return entries
 
 
@@ -4086,7 +4118,8 @@ def reachable_bench_fns(text):
 
 
 def declared_series(bench_source=BENCH_SOURCE):
-    """Every series name `kernel/src/bench.rs` still records, scored or tracked.
+    """Every series name `kernel/src/bench.rs` still records, scored or tracked,
+    and the processes' series (`PROCESS_SERIES`).
 
     The authority for "is this benchmark still measured?". `bench/history.jsonl` is
     only a proxy for it, and a proxy that lags by one run every time a series is
@@ -4109,8 +4142,9 @@ def declared_series(bench_source=BENCH_SOURCE):
         # refusing to excuse a removal, and an unexcused removal is a pre-build
         # failure that only a new boot record can clear. That is the deadlock this
         # function was written to end, and a parse failure must not recreate it.
-        return set(SCORE_CALL_RE.findall(text)) | set(TRACK_CALL_RE.findall(text))
-    out: set[str] = set()
+        return (set(SCORE_CALL_RE.findall(text)) | set(TRACK_CALL_RE.findall(text))
+                | PROCESS_SERIES)
+    out: set[str] = set(PROCESS_SERIES)
     for fn, body in reachable.items():
         del fn
         out |= set(SCORE_CALL_RE.findall(body))

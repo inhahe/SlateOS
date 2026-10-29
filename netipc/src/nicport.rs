@@ -352,6 +352,8 @@ pub mod check {
     pub const MCAST: i32 = 17;
     /// The card's driver kept a stack that broke the protocol.
     pub const PROTOCOL: i32 = 18;
+    /// It was started with arguments it does not take.
+    pub const USAGE: i32 = 19;
 
     /// What exit `code` says went wrong.
     #[must_use]
@@ -369,6 +371,7 @@ pub mod check {
             LINK => "the card's link was never told, or did not follow its cable",
             MCAST => "the card did not pass multicast frames as its list said",
             PROTOCOL => "the card's driver kept a stack that broke the protocol",
+            USAGE => "it was started with arguments it does not take",
             _ => "it ended otherwise",
         }
     }

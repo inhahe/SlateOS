@@ -320,6 +320,8 @@ pub struct E1000Device {
     tx_buf: *mut u8,
     /// Current TX tail index (next available descriptor).
     tx_tail: u16,
+    /// Frames [`Self::recv`] has handed out since the card was set up.
+    received: u64,
 }
 
 // SAFETY: E1000Device contains raw pointers to DMA memory that we
@@ -503,6 +505,7 @@ impl E1000Device {
             tx_buf_frame: None,
             tx_buf: core::ptr::null_mut(),
             tx_tail: 0,
+            received: 0,
         };
 
         // Step 1: Reset the device.
@@ -713,6 +716,11 @@ impl E1000Device {
         self.mac
     }
 
+    /// How many frames [`Self::recv`] has handed out, whoever asked.
+    pub fn frames_received(&self) -> u64 {
+        self.received
+    }
+
     /// Send an Ethernet frame.
     ///
     /// The frame should include the Ethernet header (dst + src + ethertype)
@@ -864,6 +872,7 @@ impl E1000Device {
         compiler_fence(Ordering::Release);
         self.write_reg(REG_RDT, old_tail as u32);
 
+        self.received = self.received.wrapping_add(1);
         Some(packet)
     }
 

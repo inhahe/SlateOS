@@ -1405,6 +1405,9 @@ pub fn self_test_fs() -> KernelResult<()> {
     test_dispatch_tmpfile()?;
     test_dispatch_dns_resolve2()?;
     test_dispatch_xattr_buffers()?;
+    // After the network cards are set up: its claim on a card alone needs a
+    // virtio-net and an e1000 side by side.
+    test_dispatch_raw_open()?;
 
     serial_println!("[syscall] Post-mount dispatch self-test PASSED");
     Ok(())
@@ -4480,6 +4483,107 @@ fn test_dispatch_exit_status_is_not_a_signal() -> KernelResult<()> {
          after a kill replacing it, SYS_SIGNAL_EXIT_SELF (1136) refusing non-fatal signals: OK"
     );
     Ok(())
+}
+
+/// `SYS_NET_RAW_OPEN` (865) through the syscall layer, the MAC address in
+/// the caller's own memory: refused without the `NetRaw` capability; with
+/// it, an unknown `arg0`, an unreadable address and a MAC no card has are
+/// refused and claim nothing. With a virtio-net and an e1000 side by side --
+/// the boot test's pair -- the virtio-net's MAC, the primary's, is refused as
+/// a card alone; the e1000's claims that card alone, again idempotently, the
+/// primary is then refused to its owner, and `SYS_NET_RAW_CLOSE` ends the
+/// claim. Skipped if something already holds a claim.
+fn test_dispatch_raw_open() -> KernelResult<()> {
+    use super::number::{MAP_READ, MAP_WRITE};
+    use crate::cap::{ResourceType, Rights};
+    use crate::mm::user::copy_to_user_as;
+    use crate::net::raw::{self, Card};
+    use crate::proc::pcb;
+    use crate::proc::thread::{self_test_as_process, self_test_in_process};
+
+    if raw::owner().is_some() {
+        serial_println!("[syscall]   SYS_NET_RAW_OPEN (865): the NIC is claimed -- skipped");
+        return Ok(());
+    }
+    let args = |arg0: u64, arg1: u64| SyscallArgs {
+        arg0,
+        arg1,
+        arg2: 0,
+        arg3: 0,
+        arg4: 0,
+        arg5: 0,
+    };
+    let code = |e: KernelError| Some(i64::from(e.code()));
+    let virtio = crate::virtio::net::with_device(|d| d.mac().0);
+    let e1000 = crate::e1000::with_device(|d| d.mac().0);
+
+    let pid = pcb::create("raw-open-dispatch", 0);
+    let checked = (|| {
+        let map = SyscallArgs {
+            arg2: MAP_READ | MAP_WRITE,
+            ..args(0, 0x4000)
+        };
+        let mapped = self_test_as_process(pid, || dispatch(SYS_MMAP, &map).value);
+        let page = u64::try_from(mapped).map_err(|_| "could not map the process's memory")?;
+        let pml4 = pcb::get_pml4(pid)
+            .filter(|&p| p != 0)
+            .ok_or("the process has no address space")?;
+        let (nobody, primary_at, alone_at) =
+            (page, page.saturating_add(16), page.saturating_add(32));
+        let written = copy_to_user_as(pml4, nobody, &[0xff; 6]).is_ok()
+            && copy_to_user_as(pml4, primary_at, &virtio.unwrap_or([0; 6])).is_ok()
+            && copy_to_user_as(pml4, alone_at, &e1000.unwrap_or([0; 6])).is_ok();
+        if !written {
+            return Err("could not write into the process's memory");
+        }
+        let call = |nr: u64, a: SyscallArgs| self_test_in_process(pid, || dispatch(nr, &a).value);
+        let open = |arg0: u64, arg1: u64| call(SYS_NET_RAW_OPEN, args(arg0, arg1));
+
+        if open(0, 0) != code(KernelError::PermissionDenied) {
+            return Err("taken without the NetRaw capability");
+        }
+        pcb::grant_capability(pid, ResourceType::NetRaw, 0, Rights::WRITE)
+            .map_err(|_| "could not grant the NetRaw capability")?;
+        let refused = open(2, nobody) == code(KernelError::InvalidArgument)
+            && open(1, 0).is_some_and(|v| v < 0)
+            && open(1, nobody) == code(KernelError::NotFound);
+        if !refused || raw::owner().is_some() {
+            return Err("an unknown kind, an unreadable address or an unknown MAC was taken");
+        }
+        let (Some(_), Some(_)) = (virtio, e1000) else {
+            serial_println!(
+                "[syscall]   SYS_NET_RAW_OPEN (865): refusals OK; a card alone SKIPPED (no virtio-net and e1000 side by side)"
+            );
+            return Ok(());
+        };
+        if open(1, primary_at) != code(KernelError::InvalidArgument) || raw::owner().is_some() {
+            return Err("the primary card was claimed alone");
+        }
+        if open(1, alone_at) != Some(0) || open(1, alone_at) != Some(0) {
+            return Err("the e1000 could not be claimed alone, or not again by its owner");
+        }
+        if raw::live_claim() != Some((pid, Card::E1000)) {
+            return Err("the claim on the e1000 alone named another card or owner");
+        }
+        if open(0, 0) != code(KernelError::DeviceBusy) {
+            return Err("the owner of one card took the primary while holding it");
+        }
+        if call(SYS_NET_RAW_CLOSE, args(0, 0)) != Some(0) || raw::owner().is_some() {
+            return Err("closing did not end the claim on the e1000 alone");
+        }
+        serial_println!(
+            "[syscall]   SYS_NET_RAW_OPEN (865): refused without the capability, for an unknown kind, address or MAC, and for the primary as a card alone; the e1000 claimed alone, the primary then refused, closed: OK"
+        );
+        Ok(())
+    })();
+    // Releasing a claim the process may not hold is a no-op, and never fails
+    // (`net::raw::release`).
+    let _ = raw::release(pid);
+    pcb::destroy(pid);
+    checked.map_err(|msg| {
+        serial_println!("[syscall]   FAIL: SYS_NET_RAW_OPEN: {}", msg);
+        KernelError::InternalError
+    })
 }
 
 /// `SYS_NET_RAW_MCAST` (1135) through the syscall layer, the list in the

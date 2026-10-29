@@ -199,7 +199,7 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             // read/write by `fs::devfs`, which is the only code that can tell a
             // block node from a regular file.
             // NetRaw's exclusive NIC claim is released lazily by
-            // `net::raw::is_claimed` when it observes the owner has died.
+            // `net::raw::live_claim` when it observes the owner has died.
             //
             // SystemClock/PrivilegedPort/ResourceLimit name no per-open kernel
             // object at all: they exist only as entries in a capability table,

@@ -321,6 +321,13 @@ static int hello_pci_dma(struct pci_dev *pdev)
 			"no page-aligned coherent memory for a descriptor ring");
 	for (i = 0; i < ring_bytes; i++)
 		HELLO_PCI_CHECK(!((u8 *)ring)[i], "coherent memory was not zeroed");
+	/* Written, given back and taken again -- the window reuses it first -- still zero. */
+	memset(ring, 0xa5, ring_bytes);
+	dma_free_coherent(&pdev->dev, ring_bytes, ring, ring_dma);
+	ring = dma_alloc_coherent(&pdev->dev, ring_bytes, &ring_dma, GFP_KERNEL);
+	HELLO_PCI_CHECK(ring, "no coherent memory the second time");
+	for (i = 0; i < ring_bytes; i++)
+		HELLO_PCI_CHECK(!((u8 *)ring)[i], "coherent memory given back and taken again was not zeroed");
 	frame = kmalloc(ETH_ZLEN, GFP_KERNEL);
 	HELLO_PCI_CHECK(frame, "no memory");
 	eth_broadcast_addr(frame);

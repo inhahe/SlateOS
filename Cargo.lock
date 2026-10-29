@@ -2602,6 +2602,10 @@ dependencies = [
 [[package]]
 name = "lxkit"
 version = "0.1.0"
+dependencies = [
+ "netipc",
+ "netring",
+]
 
 [[package]]
 name = "m4"

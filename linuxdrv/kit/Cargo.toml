@@ -13,5 +13,12 @@ license = "MIT"
 [lib]
 crate-type = ["staticlib", "rlib"]
 
+[dependencies]
+# A served network card's ring (design-decisions 1589): the attach message
+# and ring layout, and the ring's index ordering, shared with the network
+# stack.
+netipc = { path = "../../netipc" }
+netring = { path = "../../netring" }
+
 [lints]
 workspace = true

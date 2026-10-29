@@ -4943,6 +4943,12 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
     Ok(())
 }
 
+/// The userspace network-stack daemon (`services/netstack`, built for
+/// x86_64-unknown-none before the kernel), embedded at compile time: the
+/// netstack self-tests here and the Linux driver layer's (`linuxdrv`) run it.
+pub(crate) static NETSTACK_ELF: &[u8] =
+    include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
+
 /// Ring-3 end-to-end test of the userspace `netstack` daemon (net→userspace
 /// migration, Phase 2 — see `net-userspace-migration.md`).
 ///
@@ -4963,12 +4969,6 @@ pub fn self_test_linux_file_mmap() -> KernelResult<()> {
 /// Skips gracefully (`Ok`) when the interface isn't up or DHCP hasn't assigned
 /// an address — there is no network to prove the path against in that case.
 pub fn self_test_userspace_netstack() -> KernelResult<()> {
-    // The prebuilt daemon ELF, embedded at compile time (same pattern as the
-    // `hello` service used by the container tests).  Built by
-    // `services/netstack` for x86_64-unknown-none.
-    static NETSTACK_ELF: &[u8] =
-        include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
-
     // Skip when there's no usable network: the daemon's proof is an ARP
     // round-trip with the gateway, which requires a bound address.
     let ifinfo = crate::net::interface::info();
@@ -5078,9 +5078,6 @@ pub fn self_test_netstack_dns_ipc() -> KernelResult<()> {
     }
 
     serial_println!("[spawn] Running netstack DNS-over-IPC (ring 3) integration test...");
-
-    static NETSTACK_ELF: &[u8] =
-        include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
 
     let argv: &[&[u8]] = &[b"netstack", b"serve-dns"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
@@ -5523,9 +5520,6 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     }
 
     serial_println!("[spawn] Starting persistent userspace netstack daemon (net.userspace on)...");
-
-    static NETSTACK_ELF: &[u8] =
-        include_bytes!("../../../services/netstack/target/x86_64-unknown-none/release/netstack");
 
     let argv: &[&[u8]] = &[b"netstack", b"serve-net"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];

@@ -40,7 +40,7 @@
 
 #![cfg_attr(not(test), no_std)]
 
-use core::sync::atomic::{fence, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering, fence};
 
 pub use netipc::ring;
 use netipc::ring::{Cqe, Sqe};
@@ -323,6 +323,22 @@ impl Ring {
         true
     }
 
+    /// Where the data area's bytes `[off, off + len)` are, for a party that
+    /// copies a whole payload in or out with its own code (a driver handing
+    /// a frame to C): `None` when the window falls outside the data area.
+    /// The peer may change those bytes at any time, so what is read there
+    /// is untrusted; and the address is good only while the region stays
+    /// mapped.
+    #[must_use]
+    pub fn data_window(&self, off: usize, len: usize) -> Option<*mut u8> {
+        let end = off.checked_add(len)?;
+        if end > self.data_len {
+            return None;
+        }
+        // data_off + data_len <= len, checked at construction.
+        Some(self.base.wrapping_add(self.data_off + off))
+    }
+
     // ---- Internal atomic / byte helpers ----
 
     fn load_relaxed(&self, off: usize) -> u32 {
@@ -470,7 +486,11 @@ mod tests {
         let base = buf.as_mut_ptr().cast::<u8>();
         let r = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
         for i in 0..sq {
-            let sqe = Sqe { op: ring::OP_NOP, user_data: i as u64, ..Sqe::default() };
+            let sqe = Sqe {
+                op: ring::OP_NOP,
+                user_data: i as u64,
+                ..Sqe::default()
+            };
             assert!(r.sq_push(&sqe), "push {i} should fit");
         }
         // Now full.
@@ -478,7 +498,11 @@ mod tests {
         // Drain one, then one more fits.
         let first = r.sq_pop().unwrap();
         assert_eq!(first.user_data, 0);
-        assert!(r.sq_push(&Sqe { op: ring::OP_NOP, user_data: 99, ..Sqe::default() }));
+        assert!(r.sq_push(&Sqe {
+            op: ring::OP_NOP,
+            user_data: 99,
+            ..Sqe::default()
+        }));
     }
 
     #[test]
@@ -490,7 +514,11 @@ mod tests {
         let r = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
         // Push/pop 1000 entries through a 2-slot ring.
         for i in 0..1000u64 {
-            let sqe = Sqe { op: ring::OP_SEND, user_data: i, ..Sqe::default() };
+            let sqe = Sqe {
+                op: ring::OP_SEND,
+                user_data: i,
+                ..Sqe::default()
+            };
             assert!(r.sq_push(&sqe));
             let got = r.sq_pop().unwrap();
             assert_eq!(got.user_data, i);
@@ -505,7 +533,11 @@ mod tests {
         let base = buf.as_mut_ptr().cast::<u8>();
         let r = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
         assert!(r.cq_pop().is_none());
-        let cqe = Cqe { user_data: 0xCAFE, result: 42, flags: 0 };
+        let cqe = Cqe {
+            user_data: 0xCAFE,
+            result: 42,
+            flags: 0,
+        };
         assert!(r.cq_push(&cqe));
         assert_eq!(r.cq_pop().unwrap(), cqe);
     }
@@ -529,6 +561,22 @@ mod tests {
     }
 
     #[test]
+    fn a_data_window_is_where_the_data_is_and_inside_the_area() {
+        let (sq, cq, data) = (4u32, 4u32, 64u32);
+        let need = ring::region_size(sq, cq, data);
+        let mut buf = region(need);
+        let base = buf.as_mut_ptr().cast::<u8>();
+        let r = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
+        assert!(r.write_data(10, b"frame"));
+        let at = r.data_window(10, 5).unwrap();
+        let seen = unsafe { core::slice::from_raw_parts(at, 5) };
+        assert_eq!(seen, b"frame");
+        assert!(r.data_window(60, 4).is_some(), "the last bytes");
+        assert!(r.data_window(60, 5).is_none(), "one past the end");
+        assert!(r.data_window(usize::MAX, 2).is_none(), "an overflowing end");
+    }
+
+    #[test]
     fn end_to_end_echo_through_ring() {
         // Simulate the kernel↔daemon echo: producer submits an OP_SEND whose
         // data window holds "PING"; consumer reads it, upper-cases into the same
@@ -541,7 +589,14 @@ mod tests {
         // Kernel side inits.
         let k = unsafe { Ring::init(base, need, sq, cq, data) }.unwrap();
         assert!(k.write_data(0, b"ping"));
-        let sqe = Sqe { op: ring::OP_SEND, conn_id: 1, data_off: 0, data_len: 4, user_data: 0xABCD, aux: 0 };
+        let sqe = Sqe {
+            op: ring::OP_SEND,
+            conn_id: 1,
+            data_off: 0,
+            data_len: 4,
+            user_data: 0xABCD,
+            aux: 0,
+        };
         assert!(k.sq_push(&sqe));
 
         // Daemon side attaches to the same region.
@@ -555,7 +610,11 @@ mod tests {
             *b = b.to_ascii_uppercase();
         }
         assert!(d.write_data(req.data_off as usize, &payload));
-        assert!(d.cq_push(&Cqe { user_data: req.user_data, result: 4, flags: 0 }));
+        assert!(d.cq_push(&Cqe {
+            user_data: req.user_data,
+            result: 4,
+            flags: 0
+        }));
 
         // Kernel reaps the completion and sees the transformed data.
         let cqe = k.cq_pop().unwrap();

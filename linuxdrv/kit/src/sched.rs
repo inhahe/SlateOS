@@ -380,9 +380,10 @@ pub fn run() -> bool {
             .chain((event != 0).then_some(event))
             .min()
             .map(|deadline| deadline.saturating_sub(now_ns()));
-        // A device with a handler requested can wake the tasks: wait for it
-        // as well -- for ever when nothing else is due.
-        if crate::pci::wait_for_interrupts(timeout.unwrap_or(u64::MAX)) {
+        // A device with a handler requested, or a network stack at a card
+        // the process serves, can wake the tasks: wait for them as well --
+        // for ever when nothing else is due.
+        if crate::wait::idle(timeout.unwrap_or(u64::MAX)) {
             continue;
         }
         match timeout {

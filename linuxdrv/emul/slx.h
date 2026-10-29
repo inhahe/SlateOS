@@ -90,6 +90,40 @@ long slx_pci_irq_setup(long handle, unsigned int vectors);
 long slx_pci_irq_pending(long handle);
 void slx_pci_irq_listen(long handle, _Bool on);
 
+/*
+ * A network card served to the network stack (design-decisions 1589; the
+ * kit's nicport.rs), one a process:
+ *   slx_nicport_open     serve the card whose MAC address is the six bytes
+ *                        at `mac`, carrying `mtu` bytes a frame, as the
+ *                        service "nic.<name>": 0, or an error (-400 for a
+ *                        process without the capability, -501 for a name
+ *                        taken);
+ *   slx_nicport_turn     a turn of the loop, between tasks: the stack's
+ *                        connection seen to; whether the task serving the
+ *                        card has something to do;
+ *   slx_nicport_work     whether it has, nothing changed: frames to send,
+ *                        or a stack gone;
+ *   slx_nicport_ended    how many stacks have gone since last asked;
+ *   slx_nicport_tx_next  the next frame to send: its length and, at
+ *                        `*frame`, its bytes -- the stack's, which it can
+ *                        change, so copied before they are relied on -- or
+ *                        0 for none;
+ *   slx_nicport_tx_done  it finished: the length sent, or a negative errno;
+ *   slx_nicport_rx_slot  where the next frame received goes: the slot's
+ *                        capacity and, at `*slot`, its bytes, or 0 when the
+ *                        stack has none posted;
+ *   slx_nicport_rx_done  the slot holds `len` bytes, the stack is told; a
+ *                        negative `len`: not used, it stays posted.
+ */
+long slx_nicport_open(const char *name, const unsigned char *mac, unsigned int mtu);
+_Bool slx_nicport_turn(void);
+_Bool slx_nicport_work(void);
+unsigned int slx_nicport_ended(void);
+long slx_nicport_tx_next(const void **frame);
+void slx_nicport_tx_done(long result);
+long slx_nicport_rx_slot(void **slot);
+void slx_nicport_rx_done(long len);
+
 /* Fill `len` bytes at `buf` from the system's CSPRNG, or stop the driver. */
 void slx_random(void *buf, unsigned long len);
 
@@ -117,6 +151,7 @@ void slx_stop(const char *what, const void *caller) __attribute__((noreturn));
  * the kernel can tell them apart (kernel/src/linuxdrv.rs, lxkit::exit).
  */
 #define SLX_EXIT_OK 0
+#define SLX_EXIT_WARNED 119		/* a run that must not, warned (lx_nic.c's serve-once) */
 #define SLX_EXIT_NO_CLOCK 120		/* the system gave no clock */
 #define SLX_EXIT_BUG 121		/* Linux code called BUG() */
 #define SLX_EXIT_PANIC 122		/* the layer's Rust half panicked */

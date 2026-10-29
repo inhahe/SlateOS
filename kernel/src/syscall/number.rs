@@ -7452,6 +7452,19 @@ pub const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 /// the device is closed.
 pub const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
 
+/// Let the process at the other end of a channel use a shared memory region
+/// -- map it, size it, close it -- as the caller may: `arg0` the region's
+/// handle, `arg1` a channel end the caller holds. The process is the one
+/// the other end was bound to when it connected or accepted, as
+/// [`SYS_CHANNEL_PEER_CRED`] reports it; process ids are never reused, so
+/// the grant cannot pass to another process. The region's handle then
+/// travels as plain bytes in a message. So a driver process shares a frame
+/// ring with the network stack that connected to it (design-decisions
+/// 1589). Returns 0; `PermissionDenied` for a region the caller may not
+/// use; `ChannelClosed` once the other end is closed; `NotFound` when no
+/// process is bound to it.
+pub const SYS_SHM_GRANT: u64 = 1190;
+
 // ---------------------------------------------------------------------------
 // Version info
 // ---------------------------------------------------------------------------

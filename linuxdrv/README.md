@@ -108,12 +108,23 @@ has it read a descriptor and a frame from the DMA window, and routes three
 of its causes to three MSI-X vectors.
 
 The first real driver, Linux's own `e1000e` (`linuxdrv/e1000e/`, roadmap.md
-2.1), binds the spare 82574 in QEMU: it registers `eth0`, brings its link up
-on three MSI-X vectors, and -- in the "check" mode the kernel's self-test
-runs -- asks QEMU's gateway for its address, then pings it 400 times with
-1000 bytes, every answer's payload as sent: frames sent and received
-through Linux's driver, its interrupts, its DMA and its receive ring's page
-fragments. Its bridge to the native network stack is next.
+2.1), binds the spare 82574 in QEMU -- it registers `eth0` and brings its
+link up on three MSI-X vectors -- and serves the card to SlateOS's own
+network stack (design-decisions 1589): with `serve=<name>` the card, once
+its link is up, is the service
+`nic.<name>`; the netstack daemon connects to it and is given a ring in
+shared memory (`netipc::ring`, its region shared by `SYS_SHM_GRANT`), into
+whose posted slots the rx handler copies every frame received, and from
+which the layer's task sends every frame the daemon submits
+(`emul/lx_nic.c`; the ring's side in `kit/src/nicport.rs`, what the daemon
+submits checked in `kit/src/frames.rs`; the loop waits for the connection
+with the device's interrupts, `kit/src/wait.rs`). The kernel's self-test
+runs it beside the daemon's `nic-check`, which takes an address by DHCP
+through the card, resolves the gateway and has 400 full-size pings
+answered, 16 at a time -- frames sent and received through Linux's driver,
+its interrupts, its DMA and its receive ring's page fragments. A warning
+from Linux code anywhere in that driver process fails the run
+(`SLX_EXIT_WARNED`).
 
 ## Licences
 

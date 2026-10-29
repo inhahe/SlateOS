@@ -11,7 +11,7 @@
 //! And its interrupts: its MSI or MSI-X set up (the kernel programs them),
 //! which of its vectors have had interrupts since last asked, and whether
 //! the loop, with nothing to run, waits for them too
-//! ([`wait_for_interrupts`]) -- while the C half has a handler requested and
+//! ([`wait_items`]) -- while the C half has a handler requested and
 //! enabled for one.
 //!
 //! Results are the system call's: a value of 0 or more, or a negative
@@ -20,6 +20,7 @@
 
 use crate::bars::{self, Bars};
 use crate::sys::{Single, syscall4};
+use crate::wait::{KIND_PCI_DEVICE, POLLERR, POLLHUP, POLLIN, POLLNVAL, WaitItem};
 
 const SYS_PCI_DEVICE_OPEN: u64 = 1179;
 const SYS_PCI_DEVICE_BAR: u64 = 1181;
@@ -30,17 +31,6 @@ const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
 /// A DMA arena placed where the caller says (`sys.rs`'s DMA window).
 pub(crate) const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
-const SYS_WAIT_MULTIPLE: u64 = 1066;
-/// `cap::ResourceType::PciDevice`: a device handle's kind in
-/// `SYS_WAIT_MULTIPLE`.
-const KIND_PCI_DEVICE: u32 = 36;
-/// `poll(2)`'s `POLLIN`: a device's interrupts counted and not yet taken.
-const POLLIN: u32 = 0x0001;
-/// `poll(2)`'s answers for a handle that cannot be waited on: its MSI not
-/// set up (`POLLERR`), closed (`POLLHUP`), or no device's (`POLLNVAL`).
-const POLLERR: u32 = 0x0008;
-const POLLHUP: u32 = 0x0010;
-const POLLNVAL: u32 = 0x0020;
 
 const SYS_PCI_DEVICE_CLOSE: u64 = 1180;
 
@@ -55,7 +45,7 @@ const INTERNAL_ERROR: i64 = -1;
 
 /// How many functions one process may be given: the C half asks
 /// (`slx_pci_functions`), and sizes its own tables by it.
-const FUNCTIONS: usize = 8;
+pub(crate) const FUNCTIONS: usize = 8;
 
 /// `slx_pci_functions`: how many functions one process may be given.
 #[unsafe(no_mangle)]
@@ -72,18 +62,6 @@ struct Function {
     msi: bool,
     listen: bool,
     unwaitable: bool,
-}
-
-/// One item of `SYS_WAIT_MULTIPLE`'s array, as the kernel documents it: 24
-/// bytes, aligned to 8.
-#[derive(Clone, Copy, Default)]
-#[repr(C)]
-struct WaitItem {
-    handle: u64,
-    kind: u32,
-    events: u32,
-    revents: u32,
-    pad: u32,
 }
 
 static OPEN: Single<[Option<Function>; FUNCTIONS]> = Single::new([const { None }; FUNCTIONS]);
@@ -224,16 +202,14 @@ pub extern "C" fn slx_pci_irq_listen(handle: i64, on: bool) {
     with_function(handle, |f| f.listen = on && f.msi);
 }
 
-/// The loop with nothing to run: wait until a function it listens to
-/// interrupts, or `timeout_ns` has passed (`u64::MAX`: for ever). `false`,
-/// at once, when it listens to none -- the caller then sleeps, or ends. A
-/// function the kernel answers cannot be waited on is said, and not waited
-/// for again: waiting on it would return at once, every time.
-pub(crate) fn wait_for_interrupts(timeout_ns: u64) -> bool {
-    let mut items = [WaitItem::default(); FUNCTIONS];
-    let mut count = 0usize;
+/// The waits for the functions the loop listens to, while it has nothing to
+/// run ([`crate::wait`]): written into `items`, as many as fit; how many.
+/// A function the kernel answered cannot be waited on is not waited for
+/// again: waiting on it would return at once, every time.
+pub(crate) fn wait_items(items: &mut [WaitItem]) -> usize {
     // SAFETY: as in `with_function`.
     let open = unsafe { OPEN.get() };
+    let mut count = 0usize;
     for (item, f) in items
         .iter_mut()
         .zip(open.iter().flatten().filter(|f| f.listen && !f.unwaitable))
@@ -246,19 +222,14 @@ pub(crate) fn wait_for_interrupts(timeout_ns: u64) -> bool {
         };
         count = count.saturating_add(1);
     }
-    if count == 0 {
-        return false;
-    }
-    // Ready, timed out or interrupted, the loop turns again and takes what
-    // came; only a handle answered as unwaitable needs more.
-    let _woke = syscall4(
-        SYS_WAIT_MULTIPLE,
-        items.as_mut_ptr() as u64,
-        count as u64,
-        timeout_ns,
-        0,
-    );
-    for item in items.iter().take(count) {
+    count
+}
+
+/// After the wait: a function `items` says cannot be waited on -- its MSI
+/// gone, or itself closed -- is said, and marked so. Ready or not, the
+/// loop turns and takes what came.
+pub(crate) fn waited(items: &[WaitItem]) {
+    for item in items {
         if item.revents & (POLLERR | POLLHUP | POLLNVAL) == 0 {
             continue;
         }
@@ -267,7 +238,6 @@ pub(crate) fn wait_for_interrupts(timeout_ns: u64) -> bool {
             crate::sys::log(b"[lx] a device can no longer be waited on: its interrupts are not\n");
         }
     }
-    true
 }
 
 /// `slx_pci_config_read`: `width` bytes (1, 2 or 4, naturally aligned) of

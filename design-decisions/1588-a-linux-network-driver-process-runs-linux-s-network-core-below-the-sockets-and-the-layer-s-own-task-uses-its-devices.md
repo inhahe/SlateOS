@@ -28,17 +28,13 @@ SlateOS's network stack.
    deferred unregisters; netlink's notifications and handlers going
    nowhere; the socket destructors and static keys the core refers to;
    `full_name_hash`; the RSS key; ethtool's generic answers.
-3. **The layer's task uses the devices** (`lx-nic`): every device the
-   driver registered is opened and listened to with an rx handler -- so
-   received frames go to the task, nothing above the device being asked --
-   and frames are sent with `dev_queue_xmit()`. This is where the bridge to
-   the native network stack (§65's `netring`) goes. Until then its one job
-   is the "check" the kernel's self-test runs: the link up within 10 s,
-   QEMU's user-network gateway (10.0.2.2) asked for its address from
-   10.0.2.15, a request a second until it answers, then pinged 400 times
-   with 1000 bytes, every answer's payload checked -- enough full-size
-   frames for e1000e's receive ring to wrap onto buffers cut from page
-   fragments and for whole fragment pages to be given back.
+3. **The layer's task uses the devices** (`lx-nic`): the device served is
+   opened and listened to with an rx handler -- so received frames go to
+   the task, nothing above the device being asked -- and frames are sent
+   with `dev_queue_xmit()`. What it does with them is §1589's bridge to the
+   native network stack. (Until that bridge, its one job was a "check" of
+   its own -- ARP and 400 pings to QEMU's gateway, built in C -- which the
+   bridge's test replaced.)
 4. **What the core needs below it, the layer's, for every driver**: a page
    allocator (blocks of pages from kmalloc's allocator, their page entries
    set as Linux's, compound pages through `mm/internal.h`'s own helpers,

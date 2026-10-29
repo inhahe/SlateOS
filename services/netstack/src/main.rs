@@ -321,10 +321,14 @@ fn raw_close() {
 /// [`Listener`] bound on that port entirely within the daemon (the server-socket
 /// self-test, and genuine intra-host connections). Diversion is purely by
 /// destination IP, so the (otherwise gateway-shaped) Ethernet/next-hop MAC is
-/// irrelevant for loopback frames. Non-loopback frames go out the NIC unchanged.
+/// irrelevant for loopback frames. Non-loopback frames go out the NIC unchanged:
+/// a driver process's card ([`port`]) when one is attached, else the kernel's.
 fn raw_tx(frame: &[u8]) -> i64 {
     if loopback::maybe_divert(frame) {
         return frame.len() as i64;
+    }
+    if let Some(sent) = port::send(frame) {
+        return sent;
     }
     syscall2(SYS_NET_RAW_TX, frame.as_ptr() as u64, frame.len() as u64)
 }
@@ -334,13 +338,21 @@ fn raw_tx(frame: &[u8]) -> i64 {
 ///
 /// Any queued [`loopback`] frame is delivered first (ahead of the NIC) so a
 /// self-connection makes progress; only when the loopback queue is empty do we
-/// read the physical NIC.
+/// read the NIC -- a driver process's card ([`port`]) when one is attached,
+/// else the kernel's.
 fn raw_rx(buf: &mut [u8]) -> i64 {
     if let Some(n) = loopback::maybe_deliver(buf) {
         return n;
     }
+    if let Some(n) = port::recv(buf) {
+        return n;
+    }
     syscall2(SYS_NET_RAW_RX, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
+
+/// A network card a driver process serves: when the daemon has attached to
+/// one, its frames go there rather than to the kernel's NIC.
+mod port;
 
 /// In-process software loopback for frames the daemon sends to *its own IP*.
 ///
@@ -2613,41 +2625,87 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
 /// A request that holds the daemon this long is logged ([`print_slow_request`]).
 const SLOW_REQUEST_MS: u64 = 1_000;
 
-/// `[netstack] slow request: opcode 0x.. held the daemon for N ms`, without
-/// an allocator: digits written into a stack buffer.
+/// `[netstack] slow request: opcode 0x.. held the daemon for N ms`.
 fn print_slow_request(opcode: u8, ms: u64) {
-    let mut buf = [0u8; 96];
-    let mut len = 0usize;
-    let mut put = |s: &[u8]| {
-        for &b in s {
-            if let Some(d) = buf.get_mut(len) {
-                *d = b;
-                len += 1;
-            }
-        }
-    };
-    put(b"[netstack] slow request: opcode 0x");
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    put(&[
-        HEX[usize::from(opcode >> 4)],
-        HEX[usize::from(opcode & 0xf)],
-    ]);
-    put(b" held the daemon for ");
-    let mut digits = [0u8; 20];
-    let mut n = ms;
-    let mut i = digits.len();
-    loop {
-        i -= 1;
-        digits[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 || i == 0 {
-            break;
+    Line::new()
+        .put(b"[netstack] slow request: opcode 0x")
+        .hex(opcode)
+        .put(b" held the daemon for ")
+        .dec(ms)
+        .put(b" ms\n")
+        .print();
+}
+
+/// A console line built without an allocator -- text, numbers and addresses
+/// written into a buffer -- and printed whole. What does not fit is cut.
+struct Line {
+    buf: [u8; 192],
+    len: usize,
+}
+
+impl Line {
+    fn new() -> Self {
+        Line {
+            buf: [0; 192],
+            len: 0,
         }
     }
-    put(&digits[i..]);
-    put(b" ms\n");
-    if let Ok(s) = core::str::from_utf8(buf.get(..len).unwrap_or(&[])) {
-        print(s);
+
+    fn put(&mut self, s: &[u8]) -> &mut Self {
+        for &b in s {
+            if let Some(d) = self.buf.get_mut(self.len) {
+                *d = b;
+                self.len += 1;
+            }
+        }
+        self
+    }
+
+    fn dec(&mut self, n: u64) -> &mut Self {
+        let mut digits = [0u8; 20];
+        let mut n = n;
+        let mut i = digits.len();
+        loop {
+            i -= 1;
+            digits[i] = b'0' + (n % 10) as u8;
+            n /= 10;
+            if n == 0 || i == 0 {
+                break;
+            }
+        }
+        self.put(&digits[i..])
+    }
+
+    /// `b` as two hexadecimal digits.
+    fn hex(&mut self, b: u8) -> &mut Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        self.put(&[HEX[usize::from(b >> 4)], HEX[usize::from(b & 0xf)]])
+    }
+
+    fn ip(&mut self, a: &[u8; 4]) -> &mut Self {
+        for (i, &b) in a.iter().enumerate() {
+            if i > 0 {
+                self.put(b".");
+            }
+            self.dec(u64::from(b));
+        }
+        self
+    }
+
+    fn mac(&mut self, m: &[u8; 6]) -> &mut Self {
+        for (i, &b) in m.iter().enumerate() {
+            if i > 0 {
+                self.put(b":");
+            }
+            self.hex(b);
+        }
+        self
+    }
+
+    fn print(&self) {
+        if let Ok(s) = core::str::from_utf8(self.buf.get(..self.len).unwrap_or(&[])) {
+            print(s);
+        }
     }
 }
 
@@ -5486,40 +5544,406 @@ fn ring_tcp_accept(
     }
 }
 
-/// Read argv[1] into `out`, returning the slice actually populated. Native
-/// SlateOS processes fetch argv via `SYS_PROCESS_GET_ARGS` (the stack is bare):
-/// a `SpawnArgsHeader` (argc:u32, envc:u32, argv_len:u32, envp_len:u32) followed
-/// by packed NUL-terminated argv strings, then envp strings.
-fn read_argv1(out: &mut [u8; 32]) -> usize {
-    let mut raw = [0u8; 256];
-    let n = syscall2(
+/// The process's argument block, fetched into `raw`: how many of its bytes
+/// are there (0 for none, or none that fit). Native processes fetch argv
+/// via `SYS_PROCESS_GET_ARGS` (the stack is bare), which hands the block
+/// out once -- a second call answers 0 -- so it is fetched once and kept.
+fn read_args(raw: &mut [u8; 256]) -> usize {
+    let got = syscall2(
         SYS_PROCESS_GET_ARGS,
         raw.as_mut_ptr() as u64,
         raw.len() as u64,
     );
-    if n < 16 {
-        return 0; // No args or header didn't fit.
+    usize::try_from(got).map_or(0, |n| n.min(raw.len()))
+}
+
+/// `argv[n]` in the argument block `raw` ([`read_args`]): empty when there
+/// is none. The block is a `SpawnArgsHeader` (argc:u32, envc:u32,
+/// argv_len:u32, envp_len:u32) followed by packed NUL-terminated argv
+/// strings, then envp strings.
+fn arg(raw: &[u8], n: u32) -> &[u8] {
+    let Some(header) = raw.get(..16) else {
+        return &[];
+    };
+    let argc = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+    if argc <= n {
+        return &[];
     }
-    let argc = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
-    if argc < 2 {
-        return 0;
+    raw[16..].split(|&b| b == 0).nth(n as usize).unwrap_or(&[])
+}
+
+// ---------------------------------------------------------------------------
+// `nic-check`: a card a driver process serves (design-decisions 1589)
+// ---------------------------------------------------------------------------
+
+/// The pings `nic-check` sends the gateway, how much each carries, and how
+/// many go out before their answers are awaited: full-size frames, enough
+/// for every one of the ring's slots to be used many times over, several in
+/// flight at once each way.
+const NIC_PINGS: usize = 400;
+const NIC_PING_BYTES: usize = 1000;
+const NIC_BURST: usize = 16;
+/// The echo identifier `nic-check`'s pings carry.
+const NIC_PING_ID: u16 = 0x5158;
+
+/// What `nic-check` exits with: what failed.
+const NIC_OK: i64 = 0;
+const NIC_NO_CARD: i64 = 10;
+const NIC_GRANT: i64 = 11;
+const NIC_NO_ADDRESS: i64 = 12;
+const NIC_NO_GATEWAY: i64 = 13;
+const NIC_PINGS_LOST: i64 = 14;
+/// SlateOS's `PermissionDenied`.
+const PERMISSION_DENIED: i64 = -400;
+
+/// `nic-check <service>`, the boot test's check of a card a driver process
+/// serves: attached to by its service name; the kernel refusing to let the
+/// daemon pass on a region it was never given; an address taken by DHCP
+/// from the network beyond the card; the gateway resolved by ARP; then
+/// [`NIC_PINGS`] pings of [`NIC_PING_BYTES`] bytes, [`NIC_BURST`] at a time,
+/// each answered within a second -- sent again once if not -- with its
+/// payload as sent. The exit code says what failed, 0 for nothing.
+fn nic_check(service: &[u8]) -> i64 {
+    let say = |what: &[u8]| {
+        Line::new()
+            .put(b"[netstack] nic-check: ")
+            .put(what)
+            .put(b"\n")
+            .print();
+    };
+    // The driver probes the card and waits for its link before it serves
+    // it, which takes seconds under emulation.
+    let began = now_ns();
+    let port = match port::attach(service, 30_000_000_000) {
+        Ok(p) => p,
+        Err((why, answer)) => {
+            Line::new()
+                .put(b"[netstack] nic-check: FAIL: ")
+                .put(why.as_bytes())
+                .put(b" (the kernel answered -")
+                .dec(answer.unsigned_abs())
+                .put(b", after ")
+                .dec(now_ns().saturating_sub(began) / 1_000_000)
+                .put(b" ms)\n")
+                .print();
+            return NIC_NO_CARD;
+        }
+    };
+    Line::new()
+        .put(b"[netstack] nic-check: attached to ")
+        .put(service)
+        .put(b": ")
+        .mac(&port.mac)
+        .put(b", MTU ")
+        .dec(u64::from(port.mtu))
+        .put(b", a ring of ")
+        .dec(u64::from(port.slots))
+        .put(b" slots, after ")
+        .dec(now_ns().saturating_sub(began) / 1_000_000)
+        .put(b" ms\n")
+        .print();
+    let refused = port::grant_unheld();
+    if refused != PERMISSION_DENIED {
+        Line::new()
+            .put(b"[netstack] nic-check: FAIL: passing on a region never granted answered ")
+            .dec(refused.unsigned_abs())
+            .put(if refused < 0 { b" (negated)\n" } else { b"\n" })
+            .print();
+        return NIC_GRANT;
     }
-    // Walk past argv[0] (first NUL-terminated string) in the packed argv data.
-    let mut off = 16usize;
-    let end = (n as usize).min(raw.len());
-    // Skip argv[0].
-    while off < end && raw[off] != 0 {
-        off += 1;
+    let mut me = IfInfo {
+        ip: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        mac: port.mac,
+        ip6: icmpv6::link_local_from_mac(&port.mac),
+    };
+    if let Err(why) = dhcp_lease(&mut me) {
+        say(why.as_bytes());
+        return NIC_NO_ADDRESS;
     }
-    off += 1; // step over the NUL
-    // Copy argv[1].
-    let mut i = 0;
-    while off < end && raw[off] != 0 && i < out.len() {
-        out[i] = raw[off];
-        off += 1;
-        i += 1;
+    Line::new()
+        .put(b"[netstack] nic-check: DHCP gave ")
+        .ip(&me.ip)
+        .put(b" mask ")
+        .ip(&me.mask)
+        .put(b", gateway ")
+        .ip(&me.gateway)
+        .put(b"\n")
+        .print();
+    let Some(gateway_mac) = (0..5).find_map(|_| arp_resolve(&me.gateway, &me)) else {
+        say(b"FAIL: the gateway did not answer ARP");
+        return NIC_NO_GATEWAY;
+    };
+    Line::new()
+        .put(b"[netstack] nic-check: the gateway is at ")
+        .mac(&gateway_mac)
+        .put(b"\n")
+        .print();
+    let seen = match ping_gateway(&me, &gateway_mac) {
+        Ok(seen) => seen,
+        Err(why) => {
+            say(why.as_bytes());
+            return NIC_PINGS_LOST;
+        }
+    };
+    Line::new()
+        .put(b"[netstack] nic-check: ")
+        .dec(NIC_PINGS as u64)
+        .put(b" pings of ")
+        .dec(NIC_PING_BYTES as u64)
+        .put(b" bytes answered, payloads as sent (")
+        .dec(seen.resent)
+        .put(b" sent again, ")
+        .dec(port::send_errors())
+        .put(b" send(s) failed, ")
+        .dec(seen.slept)
+        .put(b" wait(s) with no doorbell; ")
+        .dec(seen.again)
+        .put(b" answer(s) twice, ")
+        .dec(seen.own)
+        .put(b" of its own frames back, ")
+        .dec(seen.other)
+        .put(b" other(s))\n")
+        .print();
+    // A frame twice, or our own back, is the card or its driver sending
+    // what it should not; a wait the driver's doorbell did not end, other
+    // than for a ping lost, is a doorbell not rung; a ping sent again more
+    // than a burst's worth is one the daemon's doorbell did not get sent.
+    if seen.again != 0 || seen.own != 0 {
+        say(b"FAIL: frames came that were never sent, or twice");
+        return NIC_PINGS_LOST;
     }
-    i
+    if port::send_errors() != 0 {
+        say(b"FAIL: the driver failed sends");
+        return NIC_PINGS_LOST;
+    }
+    if seen.slept > seen.resent || seen.resent > NIC_BURST as u64 {
+        say(b"FAIL: answers waited on no doorbell, or pings had to be sent again too often");
+        return NIC_PINGS_LOST;
+    }
+    port::detach();
+    say(b"SUCCESS");
+    NIC_OK
+}
+
+/// What a DHCP server answered: the address offered or acknowledged, and
+/// what comes with it.
+struct Lease {
+    ip: [u8; 4],
+    server: [u8; 4],
+    mask: [u8; 4],
+    router: [u8; 4],
+    dns: [u8; 4],
+}
+
+/// An address for `me` (its MAC known, its addresses all zero) by DHCP:
+/// DISCOVER until an OFFER, REQUEST until an ACK -- each sent up to five
+/// times, a second apart -- and `me`'s addresses filled in from the ACK.
+fn dhcp_lease(me: &mut IfInfo) -> Result<(), &'static str> {
+    use netproto::dhcp;
+    let mac = me.mac;
+    let xid = (now_ns() as u32) ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+    let mut msg = [0u8; 320];
+    let n = dhcp::build_discover(&mut msg, xid, &mac).ok_or("FAIL: no room for a DHCPDISCOVER")?;
+    let offer = dhcp_exchange(me, &msg[..n], xid, dhcp::OFFER)?;
+    let n = dhcp::build_request(&mut msg, xid, &mac, &offer.ip, &offer.server)
+        .ok_or("FAIL: no room for a DHCPREQUEST")?;
+    let ack = dhcp_exchange(me, &msg[..n], xid, dhcp::ACK)?;
+    me.ip = ack.ip;
+    me.mask = ack.mask;
+    me.gateway = ack.router;
+    me.dns = ack.dns;
+    Ok(())
+}
+
+/// `msg` broadcast from 0.0.0.0 until the server answers transaction `xid`
+/// with a message of type `want`: its lease. A DHCPNAK is a refusal.
+fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &'static str> {
+    use netproto::dhcp;
+    let mut datagram = [0u8; 400];
+    let len = udp::write(&mut datagram, &[0; 4], &[255; 4], 68, 67, msg)
+        .ok_or("FAIL: no room for a DHCP datagram")?;
+    let mut frame = [0u8; MAX_FRAME];
+    for attempt in 0..5u16 {
+        if !send_ipv4(
+            me,
+            &[0xff; 6],
+            &[255; 4],
+            ipv4::PROTO_UDP,
+            &datagram[..len],
+            attempt,
+        ) {
+            return Err("FAIL: a DHCP message could not be sent");
+        }
+        let deadline = now_ns().saturating_add(1_000_000_000);
+        while now_ns() < deadline {
+            let _woke = port::wait(deadline.saturating_sub(now_ns()));
+            loop {
+                let n = raw_rx(&mut frame);
+                let Ok(n) = usize::try_from(n) else { break };
+                let Some(bytes) = frame.get(..n) else {
+                    continue;
+                };
+                let Some(m) = dhcp_reply(bytes) else { continue };
+                if m.op != dhcp::OP_REPLY || m.xid != xid {
+                    continue;
+                }
+                match m.msg_type() {
+                    Some(t) if t == want => {
+                        return Ok(Lease {
+                            ip: m.yiaddr,
+                            server: m.server_id().unwrap_or(m.siaddr),
+                            mask: m.subnet_mask().unwrap_or([255, 255, 255, 0]),
+                            router: m.router().ok_or("FAIL: the DHCP server named no router")?,
+                            dns: m.dns().unwrap_or([0; 4]),
+                        });
+                    }
+                    Some(dhcp::NAK) => return Err("FAIL: the DHCP server refused (DHCPNAK)"),
+                    _ => {}
+                }
+            }
+        }
+    }
+    Err("FAIL: no answer from a DHCP server")
+}
+
+/// The DHCP message `frame` carries to the client port, if it carries one.
+fn dhcp_reply(frame: &[u8]) -> Option<netproto::dhcp::Message<'_>> {
+    let eth = ethernet::Frame::parse(frame)?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = ipv4::Packet::parse(eth.payload)?;
+    if ip.protocol != ipv4::PROTO_UDP {
+        return None;
+    }
+    let datagram = udp::Datagram::parse(ip.payload, &ip.src, &ip.dst)?;
+    if datagram.dst_port != 68 {
+        return None;
+    }
+    netproto::dhcp::Message::parse(datagram.payload)
+}
+
+/// Byte `i` of ping `seq`'s payload.
+fn nic_payload(seq: usize, i: usize) -> u8 {
+    (seq.wrapping_mul(7).wrapping_add(i)) as u8
+}
+
+/// What [`ping_gateway`] saw besides the answers it waited for: pings sent
+/// again, waits that ran to their deadline with no doorbell, answers that
+/// came twice, the daemon's own frames come back, and other frames.
+#[derive(Default)]
+struct Seen {
+    resent: u64,
+    slept: u64,
+    again: u64,
+    own: u64,
+    other: u64,
+}
+
+/// [`NIC_PINGS`] pings to the gateway, at `gateway_mac`, [`NIC_BURST`] at a
+/// time: what else was seen, or what failed. Frames that are not an answer
+/// -- an ARP request for our address, say -- are handled as the daemon
+/// handles any.
+fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<Seen, &'static str> {
+    let mut answered = [false; NIC_PINGS];
+    let mut seen = Seen::default();
+    let mut message = [0u8; icmp::HEADER_LEN + NIC_PING_BYTES];
+    let mut payload = [0u8; NIC_PING_BYTES];
+    let mut frame = [0u8; MAX_FRAME];
+    for first in (0..NIC_PINGS).step_by(NIC_BURST) {
+        let burst = first..(first + NIC_BURST).min(NIC_PINGS);
+        for attempt in 0..2 {
+            for seq in burst.clone().filter(|&s| !answered[s]) {
+                for (i, b) in payload.iter_mut().enumerate() {
+                    *b = nic_payload(seq, i);
+                }
+                let n = icmp::write_echo(&mut message, true, NIC_PING_ID, seq as u16, &payload)
+                    .ok_or("FAIL: no room for a ping")?;
+                if !send_ipv4(
+                    me,
+                    gateway_mac,
+                    &me.gateway,
+                    ipv4::PROTO_ICMP,
+                    &message[..n],
+                    seq as u16,
+                ) {
+                    return Err("FAIL: a ping could not be sent");
+                }
+                if attempt > 0 {
+                    seen.resent += 1;
+                }
+            }
+            let deadline = now_ns().saturating_add(1_000_000_000);
+            while burst.clone().any(|s| !answered[s]) && now_ns() < deadline {
+                match port::wait(deadline.saturating_sub(now_ns())) {
+                    port::Woke::Rang => {}
+                    port::Woke::Slept => seen.slept += 1,
+                    port::Woke::Gone => return Err("FAIL: the card's driver went away"),
+                }
+                loop {
+                    let n = raw_rx(&mut frame);
+                    let Ok(n) = usize::try_from(n) else { break };
+                    let Some(bytes) = frame.get(..n) else {
+                        continue;
+                    };
+                    match echo_answer(bytes, me) {
+                        Some((seq, true)) if seq < NIC_PINGS => {
+                            if core::mem::replace(&mut answered[seq], true) {
+                                seen.again += 1;
+                            }
+                        }
+                        Some((_, false)) => {
+                            return Err("FAIL: a ping was answered with another payload");
+                        }
+                        Some(_) => {}
+                        None => {
+                            if bytes.get(6..12) == Some(&me.mac[..]) {
+                                seen.own += 1;
+                            } else {
+                                seen.other += 1;
+                            }
+                            let _ = handle_frame(bytes, me);
+                        }
+                    }
+                }
+            }
+            if burst.clone().all(|s| answered[s]) {
+                break;
+            }
+        }
+        if !burst.clone().all(|s| answered[s]) {
+            return Err("FAIL: a ping went unanswered, sent twice");
+        }
+    }
+    Ok(seen)
+}
+
+/// The ping `frame` answers, from the gateway to us -- its sequence number,
+/// and whether its payload is the one sent -- if it is an answer.
+fn echo_answer(frame: &[u8], me: &IfInfo) -> Option<(usize, bool)> {
+    let eth = ethernet::Frame::parse(frame)?;
+    if eth.ethertype != ethernet::ETHERTYPE_IPV4 {
+        return None;
+    }
+    let ip = ipv4::Packet::parse(eth.payload)?;
+    if ip.protocol != ipv4::PROTO_ICMP || ip.src != me.gateway || ip.dst != me.ip {
+        return None;
+    }
+    let echo = icmp::Echo::parse(ip.payload)?;
+    if echo.is_request || echo.id != NIC_PING_ID {
+        return None;
+    }
+    let seq = usize::from(echo.seq);
+    let intact = echo.data.len() == NIC_PING_BYTES
+        && echo
+            .data
+            .iter()
+            .enumerate()
+            .all(|(i, &b)| b == nic_payload(seq, i));
+    Some((seq, intact))
 }
 
 // ---------------------------------------------------------------------------
@@ -5533,6 +5957,16 @@ const POLL_SLEEP_NS: u64 = 5_000_000;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     print("[netstack] starting\n");
+
+    // `nic-check <service>` (design-decisions 1589) uses a driver process's
+    // card alone: the kernel's NIC is neither queried nor claimed.
+    let mut block = [0u8; 256];
+    let fetched = read_args(&mut block);
+    let args = &block[..fetched];
+    let mode = arg(args, 1);
+    if mode == b"nic-check" {
+        exit(nic_check(arg(args, 2)));
+    }
 
     let me = match query_if_info() {
         Some(i) => i,
@@ -5565,16 +5999,14 @@ pub extern "C" fn _start() -> ! {
     // deadline); `serve-net` = Phase-5 persistent boot daemon (same service, but
     // owns the NIC for the system's lifetime and never idles out — used once the
     // kernel stack has stood down under the `net.userspace` switch).
-    let mut arg = [0u8; 32];
-    let arglen = read_argv1(&mut arg);
-    if &arg[..arglen] == b"serve-dns" {
+    if mode == b"serve-dns" {
         print("[netstack] mode: serve-dns (Phase 4 bounded DNS/TCP/UDP-over-IPC)\n");
         let code = run_dns_service(&me, false);
         raw_close();
         print("[netstack] released raw NIC\n");
         exit(code);
     }
-    if &arg[..arglen] == b"serve-net" {
+    if mode == b"serve-net" {
         print("[netstack] mode: serve-net (Phase 5 persistent netstack daemon)\n");
         // Persistent: owns the NIC for the system's lifetime. Only returns on an
         // unrecoverable service fault, in which case release the NIC and exit.

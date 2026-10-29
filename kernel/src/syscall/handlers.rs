@@ -3205,6 +3205,32 @@ pub fn sys_shm_map_at(args: &SyscallArgs) -> SyscallResult {
     shm_map_into(ShmHandle::from_raw(args.arg0), args.arg1, at)
 }
 
+/// `SYS_SHM_GRANT` — let the process at the other end of a channel use a
+/// shared memory region. See
+/// [`SYS_SHM_GRANT`](super::number::SYS_SHM_GRANT).
+pub fn sys_shm_grant(args: &SyscallArgs) -> SyscallResult {
+    let region = ShmHandle::from_raw(args.arg0);
+    if let Err(e) = shm_check_authorized(region) {
+        return SyscallResult::err(e);
+    }
+    let channel = ChannelHandle::from_raw(args.arg1);
+    if let Err(e) = require_ipc_handle(ResourceType::Channel, channel.raw()) {
+        return SyscallResult::err(e);
+    }
+    // A closed end's process may be gone; its id is never another's, so a
+    // grant to it would be harmless, but the caller is told it went nowhere.
+    if channel::peer_closed(channel) {
+        return SyscallResult::err(KernelError::ChannelClosed);
+    }
+    let Some(peer) = channel::peer_cred(channel) else {
+        return SyscallResult::err(KernelError::NotFound);
+    };
+    match shm::authorize(region, peer.pid) {
+        Ok(()) => SyscallResult::ok(0),
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
 /// Reserve `[addr, addr + size)` for a shared-memory mapping at the caller's
 /// chosen address, registering its `Fixed` VMA, and return `addr`.
 ///

@@ -9,7 +9,9 @@
 //! `module_cmdline:`), and the kernel finds it with [`crate::boot::module`].
 //!
 //! For now the kernel only tests the layer: [`self_test`] runs its first
-//! process, `linuxdrv/hello`, which is no driver.
+//! process, `linuxdrv/hello`, which is no driver, then Linux's e1000e on the
+//! boot test's spare 82574, serving the card to the netstack daemon
+//! (design-decisions 1589).
 
 use crate::cap::{ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
@@ -24,6 +26,9 @@ const E1000E: &[u8] = b"linuxdrv/e1000e";
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
 const EXIT_OK: i32 = 0;
+/// A network driver's serving of one stack in which Linux code warned: a
+/// bug, though the run otherwise passed.
+const EXIT_WARNED: i32 = 119;
 const EXIT_BUG: i32 = 121;
 const EXIT_DEADLOCK: i32 = 124;
 const EXIT_STOP: i32 = 125;
@@ -42,13 +47,12 @@ struct Program<'a> {
     limit_s: u64,
 }
 
-/// Run `program` with `argv`, holding `capabilities`, and answer how it
-/// ended: its exit code, or `None` when it did not end within its limit.
-fn run(
+/// `program` started with `argv`, holding `capabilities`.
+fn start(
     program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
-) -> Result<Option<i32>, KernelError> {
+) -> KernelResult<spawn::SpawnResult> {
     let options = spawn::SpawnOptions {
         name: program.name,
         parent: 0,
@@ -61,13 +65,29 @@ fn run(
         cwd: None,
         identity: None,
     };
-    let process = spawn::spawn_process(program.elf, &options)?;
+    spawn::spawn_process(program.elf, &options)
+}
+
+/// How `process`, started from `program`, ended within `program`'s limit
+/// from now: its exit code, or `None` when it did not. Torn down either way.
+fn finish(program: &Program<'_>, process: &spawn::SpawnResult) -> Option<i32> {
     let deadline =
         crate::hrtimer::now_ns().saturating_add(program.limit_s.saturating_mul(1_000_000_000));
     let finished = spawn::wait_for_fixture(process.pid, deadline, 0);
     let code = pcb::exit_code(process.pid);
     spawn::teardown_fixture(process.pid, process.task_id);
-    Ok(if finished { code } else { None })
+    if finished { code } else { None }
+}
+
+/// Run `program` with `argv`, holding `capabilities`, and answer how it
+/// ended: its exit code, or `None` when it did not end within its limit.
+fn run(
+    program: &Program<'_>,
+    argv: &[&[u8]],
+    capabilities: &[(ResourceType, u64, Rights)],
+) -> Result<Option<i32>, KernelError> {
+    let process = start(program, argv, capabilities)?;
+    Ok(finish(program, &process))
 }
 
 /// The layer's first process, `linuxdrv/hello`: Linux's headers and its own
@@ -166,7 +186,7 @@ pub fn self_test() -> KernelResult<()> {
     );
     if e1000e {
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e drove the spare 82574 -- bound it, brought its link up, and had QEMU's gateway answer an ARP request and 400 full-size pings through it, payloads as sent: OK"
+            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack, whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, the driver warning nowhere: OK"
         );
     }
     Ok(())
@@ -243,14 +263,10 @@ fn pci_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> Kern
 }
 
 /// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
-/// given the boot test's spare 82574 as hello's PCI runs are, in its "check"
-/// mode: it must bind the card, bring its link up, ask QEMU's user-network
-/// gateway for its address and have the answer, then ping it 400 times with
-/// 1000 bytes and have every answer, its payload as sent -- frames sent and
-/// received through Linux's driver, its interrupts, its DMA and its receive
-/// ring's page fragments -- then exit 0, the card released. Whether it ran:
-/// skipped, and recorded so, where the bootloader did not load it or there
-/// is no such card.
+/// given the boot test's spare 82574 as hello's PCI runs are, serving it to
+/// the network stack ([`e1000e_serve`]). Whether it ran: skipped, and
+/// recorded so, where the bootloader did not load it or there is no such
+/// card.
 fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     let Some(elf) = crate::boot::module(E1000E) else {
         skips.record(
@@ -278,19 +294,89 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         name: "lx-e1000e",
         limit_s: 30,
     };
-    expect(
-        &program,
-        &[b"e1000e", b"check", arg.as_bytes()],
-        &caps,
-        EXIT_OK,
-        "bound the card with Linux's e1000e, brought its link up, had QEMU's gateway answer \
-         an ARP request and 400 full-size pings through it, payloads as sent, and exited 0",
-        || {
-            (!crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none()))
-                .then_some("the card still bound after it")
-        },
-    )?;
+    e1000e_serve(&program, &caps, a, &arg)?;
     Ok(true)
+}
+
+/// What the netstack daemon's `nic-check` exits with (`services/netstack`):
+/// what failed.
+fn nic_check_failure(code: i32) -> &'static str {
+    match code {
+        10 => "it could not attach to the card",
+        11 => "the kernel let it pass on a region it was never granted",
+        12 => "it took no address by DHCP",
+        13 => "the gateway did not answer its ARP requests",
+        14 => {
+            "its pings went wrong: unanswered, answered otherwise or twice, sent again too often, or waited for with no doorbell"
+        }
+        _ => "it ended otherwise",
+    }
+}
+
+/// Linux's e1000e serving the spare 82574 to the network stack
+/// (design-decisions 1589): the driver process -- `program`, holding
+/// `capabilities` (the card's) and a `Service` capability, the card at `a`,
+/// `pci` its argument naming it -- in its "serve=spare once" mode, and beside it the netstack daemon in
+/// its "nic-check nic.spare" mode, which must attach to the card, be refused
+/// passing on a region it was never granted, take an address by DHCP from
+/// QEMU's network through it, resolve the gateway by ARP, have 400
+/// full-size pings answered 16 at a time, payloads as sent, and exit 0; the
+/// driver then ends, the daemon gone, with 0, the card released.
+fn e1000e_serve(
+    program: &Program<'_>,
+    capabilities: &[(ResourceType, u64, Rights)],
+    a: crate::pci::PciAddress,
+    pci: &str,
+) -> KernelResult<()> {
+    let mut caps = alloc::vec::Vec::from(capabilities);
+    caps.push((ResourceType::Service, 0, Rights::WRITE));
+    let driver = start(
+        program,
+        &[b"e1000e", b"serve=spare", b"once", pci.as_bytes()],
+        &caps,
+    )?;
+    let stack = Program {
+        elf: spawn::NETSTACK_ELF,
+        name: "netstack-nic",
+        limit_s: 90,
+    };
+    let daemon = match start(&stack, &[b"netstack", b"nic-check", b"nic.spare"], &[]) {
+        Ok(d) => d,
+        Err(e) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: the netstack daemon could not be started: {:?}",
+                e
+            );
+            let _ended = finish(program, &driver);
+            return Err(e);
+        }
+    };
+    let checked = finish(&stack, &daemon);
+    let served = finish(program, &driver);
+    let warned = served == Some(EXIT_WARNED);
+    let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
+    if checked == Some(EXIT_OK) && served == Some(EXIT_OK) && released {
+        return Ok(());
+    }
+    serial_println!(
+        "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}) (Ok(Some(code)), None for not within {} s / {} s){}",
+        served,
+        checked,
+        checked.map_or("it did not end", nic_check_failure),
+        program.limit_s,
+        stack.limit_s,
+        if released {
+            ""
+        } else {
+            ", the card still bound after them"
+        }
+    );
+    if warned {
+        serial_println!(
+            "[linuxdrv]   ... the e1000e process ended so because Linux code warned in it (its log says where)"
+        );
+    }
+    Err(KernelError::InternalError)
 }
 
 /// One run of a driver process -- `argv`, holding `capabilities` -- which

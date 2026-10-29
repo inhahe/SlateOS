@@ -21,6 +21,10 @@
  * Softirqs raised in a task run at local_bh_enable(), as on Linux, or at the
  * next turn; they run on a stack of their own, as x86-64 Linux runs them
  * (hardirq_stack_ptr), which the Rust half maps with a guard below it.
+ *
+ * A turn ends with its hook, when one is set (lx_emul_turn_hook): a network
+ * driver process's card served to the network stack (lx_nic.c) is seen to
+ * there.
  */
 #include <linux/interrupt.h>
 #include <linux/jiffies.h>
@@ -178,7 +182,12 @@ void lx_emul_turn(u64 now_ns)
 	lx_hardirq_exit(flags);
 	if (local_softirq_pending())
 		do_softirq();
+	/* Last, after the frames the softirqs received: a served card's stack. */
+	if (lx_emul_turn_hook)
+		lx_emul_turn_hook();
 }
+
+void (*lx_emul_turn_hook)(void);
 
 /*
  * The Rust half's loop, with no task to run, the clock reading `now_ns`:

@@ -8,12 +8,14 @@
 //! Linux header. It holds the process's entry point, its memory
 //! ([`buddy`]), the console, the clock, its arguments ([`args`]), its tasks
 //! -- Linux's kthreads and the like, coroutines on its one thread ([`task`],
-//! and `sched`, which runs them) -- the PCI functions it was given (`pci`),
-//! and how it ends.
+//! and `sched`, which runs them, and `wait`, where it waits with none to run)
+//! -- the PCI functions it was given (`pci`), a network card it serves to
+//! the network stack (`nicport`, [`frames`]), and how it ends.
 //!
 //! What can be tested on the host is a library ([`args`], [`bars`],
-//! [`buddy`], [`task`], [`window`]); the rest (`pci`, `sched`, `sys`) is built only for the driver
-//! process's own target.
+//! [`buddy`], [`frames`], [`task`], [`window`]); the rest (`nicport`,
+//! `pci`, `sched`, `sys`, `wait`) is built only for the driver process's
+//! own target.
 
 // Bare only on the driver process's own target; on the host, std, for the
 // tests.
@@ -22,21 +24,29 @@
 pub mod args;
 pub mod bars;
 pub mod buddy;
+pub mod frames;
 pub mod task;
 pub mod window;
 
+#[cfg(target_os = "none")]
+mod nicport;
 #[cfg(target_os = "none")]
 mod pci;
 #[cfg(target_os = "none")]
 mod sched;
 #[cfg(target_os = "none")]
 mod sys;
+#[cfg(target_os = "none")]
+mod wait;
 
 /// The exit codes a driver process ends with besides an initcall's own;
 /// `slx.h` names the same, and the kernel's self-test reads them.
 pub mod exit {
     /// Every initcall returned 0.
     pub const OK: i32 = 0;
+    /// Linux code warned in a run that must not: a network driver's serving
+    /// of one stack (`lx_nic.c`).
+    pub const WARNED: i32 = 119;
     /// The system gave no clock.
     pub const NO_CLOCK: i32 = 120;
     /// Linux code called `BUG()`.

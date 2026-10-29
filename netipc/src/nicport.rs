@@ -22,6 +22,23 @@
 //! having pushed, sends [`DOORBELL`] on the connection only then, once for
 //! that sleep. The stack rings after frames to send, not after slots posted
 //! to receive into, which the driver looks for when a frame comes.
+//!
+//! Besides doorbells the connection carries [`Message`]s, each a channel
+//! message of its own, its first byte its kind:
+//!
+//! - a driver that will not serve a stack says why ([`Message::Refused`])
+//!   in place of the attach message, and closes the connection;
+//! - the driver tells the stack the card's link ([`Message::Link`]) right
+//!   after the attach message and again whenever it changes;
+//! - the stack gives the driver the multicast addresses the card must pass
+//!   ([`Message::Mcast`]), which replace the last it gave, and the driver
+//!   answers each, once it is in force or has failed
+//!   ([`Message::McastDone`]). One at a time: the stack sends the next only
+//!   once the last is answered; one sent before then breaks the protocol.
+//!
+//! A side reads every message into a buffer of [`MESSAGE_MAX`] bytes; one
+//! that is longer, or that [`Message::decode`] refuses, the peer has broken
+//! the protocol with.
 
 /// The prefix of a card's service name.
 pub const SERVICE_PREFIX: &[u8] = b"nic.";
@@ -34,9 +51,141 @@ pub const SLOT_SIZE: u32 = 2048;
 /// that said it sleeps.
 pub const DOORBELL: u8 = b'D';
 
-/// The attach message's magic ("NPRT") and version.
+/// The attach message's magic ("NPRT") and version: 2 since the connection
+/// carries [`Message`]s besides doorbells.
 pub const MAGIC: u32 = 0x4E50_5254;
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+/// The kinds of [`Message`]: their first byte.
+const KIND_REFUSED: u8 = b'R';
+const KIND_LINK: u8 = b'L';
+const KIND_MCAST: u8 = b'M';
+const KIND_MCAST_DONE: u8 = b'm';
+
+/// Why a driver refuses a stack ([`Message::Refused`]): it holds no key for
+/// the card -- the `Service` capability for its name, with `READ`.
+pub const REFUSED_NO_KEY: u8 = 1;
+/// ... the driver could not make the ring, or give it to the stack.
+pub const REFUSED_NO_RING: u8 = 2;
+
+/// [`Message::Mcast`]'s flag: pass every multicast frame, whatever the list.
+const MCAST_ALL: u8 = 1;
+
+/// The most addresses one [`Message::Mcast`] lists. A stack in more groups
+/// asks for every multicast frame instead, as a card with too small a
+/// filter passes them all.
+pub const MCAST_MAX: usize = 64;
+
+/// The longest message on the connection: a [`Message::Mcast`] listing
+/// [`MCAST_MAX`] addresses.
+pub const MESSAGE_MAX: usize = 4 + 6 * MCAST_MAX;
+
+/// A message on the connection, the attach message aside.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Message<'a> {
+    /// The peer pushed to a queue its side said it sleeps on.
+    Doorbell,
+    /// Driver to stack, in place of the attach message: it will not serve
+    /// this stack, for `reason` ([`REFUSED_NO_KEY`], [`REFUSED_NO_RING`], or
+    /// one a later driver adds), and closes the connection.
+    Refused { reason: u8 },
+    /// Driver to stack: the card's link is up, or down.
+    Link { up: bool },
+    /// Stack to driver: the multicast addresses the card must pass from now
+    /// on -- every one, with `all` -- the six bytes of each in turn, each a
+    /// multicast address.
+    Mcast { all: bool, addrs: &'a [u8] },
+    /// Driver to stack: the last [`Message::Mcast`] is in force (0), or
+    /// failed (a negative errno) -- the card then passing none of its
+    /// addresses, as if it had listed none.
+    McastDone { result: i32 },
+}
+
+impl<'a> Message<'a> {
+    /// The message read from `b`, the whole of one channel message: `None`
+    /// for an unknown kind, a wrong length, or a list naming more than
+    /// [`MCAST_MAX`] addresses, or one that is not a multicast address.
+    #[must_use]
+    pub fn decode(b: &'a [u8]) -> Option<Self> {
+        match *b {
+            [DOORBELL] => Some(Self::Doorbell),
+            [KIND_REFUSED, reason] => Some(Self::Refused { reason }),
+            [KIND_LINK, up @ (0 | 1)] => Some(Self::Link { up: up == 1 }),
+            [KIND_MCAST, flags, lo, hi, ref addrs @ ..] => {
+                let count = usize::from(u16::from_le_bytes([lo, hi]));
+                let all = match flags {
+                    0 => false,
+                    MCAST_ALL => true,
+                    _ => return None,
+                };
+                let whole = count <= MCAST_MAX
+                    && addrs.len() == count.checked_mul(6)?
+                    && addrs.chunks_exact(6).all(is_multicast);
+                whole.then_some(Self::Mcast { all, addrs })
+            }
+            [KIND_MCAST_DONE, 0, 0, 0, a, b2, c, d] => Some(Self::McastDone {
+                result: i32::from_le_bytes([a, b2, c, d]),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// Whether `mac` is a multicast address: the first octet's low bit set.
+fn is_multicast(mac: &[u8]) -> bool {
+    mac.first().is_some_and(|b| b & 1 == 1)
+}
+
+/// [`Message::Refused`] written into `out`: its length, `None` when `out`
+/// is too short.
+#[must_use]
+pub fn encode_refused(reason: u8, out: &mut [u8]) -> Option<usize> {
+    out.get_mut(..2)?.copy_from_slice(&[KIND_REFUSED, reason]);
+    Some(2)
+}
+
+/// [`Message::Link`] written into `out`: its length, `None` when `out` is
+/// too short.
+#[must_use]
+pub fn encode_link(up: bool, out: &mut [u8]) -> Option<usize> {
+    out.get_mut(..2)?
+        .copy_from_slice(&[KIND_LINK, u8::from(up)]);
+    Some(2)
+}
+
+/// [`Message::Mcast`] written into `out`, listing `addrs`: its length;
+/// `None` for more than [`MCAST_MAX`] addresses, one that is not a
+/// multicast address, or `out` too short.
+#[must_use]
+pub fn encode_mcast(all: bool, addrs: &[[u8; 6]], out: &mut [u8]) -> Option<usize> {
+    if addrs.len() > MCAST_MAX || !addrs.iter().all(|a| is_multicast(a)) {
+        return None;
+    }
+    let len = 4 + 6 * addrs.len();
+    let out = out.get_mut(..len)?;
+    let count = u16::try_from(addrs.len()).ok()?.to_le_bytes();
+    out.get_mut(..4)?.copy_from_slice(&[
+        KIND_MCAST,
+        if all { MCAST_ALL } else { 0 },
+        count[0],
+        count[1],
+    ]);
+    for (to, from) in out.get_mut(4..)?.chunks_exact_mut(6).zip(addrs) {
+        to.copy_from_slice(from);
+    }
+    Some(len)
+}
+
+/// [`Message::McastDone`] written into `out`: its length, `None` when `out`
+/// is too short.
+#[must_use]
+pub fn encode_mcast_done(result: i32, out: &mut [u8]) -> Option<usize> {
+    let out = out.get_mut(..8)?;
+    out.get_mut(..4)?
+        .copy_from_slice(&[KIND_MCAST_DONE, 0, 0, 0]);
+    out.get_mut(4..)?.copy_from_slice(&result.to_le_bytes());
+    Some(8)
+}
 
 /// The attach message's length on the wire.
 pub const ATTACH_LEN: usize = 32;
@@ -128,9 +277,13 @@ pub mod check {
     pub const NO_ADDRESS: i32 = 12;
     pub const NO_GATEWAY: i32 = 13;
     pub const PINGS_LOST: i32 = 14;
-    /// The card's driver closed the connection before attaching it -- as
-    /// it does to a process without the card's key.
+    /// The card's driver refused it for want of the card's key
+    /// ([`super::REFUSED_NO_KEY`]).
     pub const TURNED_AWAY: i32 = 15;
+    /// The card's link was never told, or did not follow its cable.
+    pub const LINK: i32 = 16;
+    /// The card did not pass multicast frames as its list said.
+    pub const MCAST: i32 = 17;
 
     /// What exit `code` says went wrong.
     #[must_use]
@@ -144,7 +297,9 @@ pub mod check {
             PINGS_LOST => {
                 "its pings went wrong: unanswered, answered otherwise or twice, sent again too often, or waited for with no doorbell"
             }
-            TURNED_AWAY => "the card's driver closed the connection before attaching it",
+            TURNED_AWAY => "the card's driver refused it for want of the card's key",
+            LINK => "the card's link was never told, or did not follow its cable",
+            MCAST => "the card did not pass multicast frames as its list said",
             _ => "it ended otherwise",
         }
     }
@@ -173,13 +328,114 @@ mod tests {
     fn a_wrong_or_short_message_is_refused() {
         let mut b = [0u8; ATTACH_LEN];
         assert_eq!(PORT.encode(&mut b), Some(ATTACH_LEN));
-        // Byte 17 is the slot size's (2048 = 0x800) one non-zero byte.
-        for (at, value) in [(0, 0xFF), (4, 2), (17, 0), (20, 3)] {
+        // Byte 4 is the version's low byte: version 1's driver sends no
+        // link and takes no list. Byte 17 is the slot size's (2048 = 0x800)
+        // one non-zero byte.
+        for (at, value) in [(0, 0xFF), (4, 1), (4, 3), (17, 0), (20, 3)] {
             let mut bad = b;
             bad[at] = value;
             assert_eq!(Port::decode(&bad), None, "byte {at} = {value}");
         }
         assert_eq!(Port::decode(&b[..ATTACH_LEN - 1]), None);
+    }
+
+    const ALL_NODES: [u8; 6] = [0x33, 0x33, 0, 0, 0, 1];
+    const ALL_HOSTS: [u8; 6] = [0x01, 0x00, 0x5E, 0, 0, 1];
+
+    #[test]
+    fn messages_read_back_as_written() {
+        let mut b = [0u8; MESSAGE_MAX];
+        assert_eq!(Message::decode(&[DOORBELL]), Some(Message::Doorbell));
+        for reason in [REFUSED_NO_KEY, REFUSED_NO_RING, 200] {
+            let n = encode_refused(reason, &mut b).unwrap();
+            assert_eq!(Message::decode(&b[..n]), Some(Message::Refused { reason }));
+        }
+        assert_ne!(REFUSED_NO_KEY, REFUSED_NO_RING);
+        for up in [false, true] {
+            let n = encode_link(up, &mut b).unwrap();
+            assert_eq!(Message::decode(&b[..n]), Some(Message::Link { up }));
+        }
+        for result in [0, -12, i32::MIN] {
+            let n = encode_mcast_done(result, &mut b).unwrap();
+            assert_eq!(
+                Message::decode(&b[..n]),
+                Some(Message::McastDone { result })
+            );
+        }
+        let n = encode_mcast(false, &[ALL_NODES, ALL_HOSTS], &mut b).unwrap();
+        assert_eq!(n, 16);
+        let Some(Message::Mcast { all, addrs }) = Message::decode(&b[..n]) else {
+            panic!("not a list: {:?}", Message::decode(&b[..n]));
+        };
+        assert!(!all);
+        assert_eq!(addrs, &[ALL_NODES, ALL_HOSTS].concat()[..]);
+        let n = encode_mcast(true, &[], &mut b).unwrap();
+        assert_eq!(
+            Message::decode(&b[..n]),
+            Some(Message::Mcast {
+                all: true,
+                addrs: &[]
+            })
+        );
+    }
+
+    #[test]
+    fn the_longest_list_fills_the_longest_message() {
+        let mut b = [0u8; MESSAGE_MAX + 1];
+        let many = [ALL_NODES; MCAST_MAX];
+        assert_eq!(encode_mcast(false, &many, &mut b), Some(MESSAGE_MAX));
+        assert!(Message::decode(&b[..MESSAGE_MAX]).is_some());
+        let too_many = [ALL_NODES; MCAST_MAX + 1];
+        assert_eq!(encode_mcast(false, &too_many, &mut b), None);
+        assert_eq!(
+            encode_mcast(false, &many, &mut b[..MESSAGE_MAX - 1]),
+            None,
+            "no room"
+        );
+    }
+
+    #[test]
+    fn a_unicast_address_is_never_listed() {
+        let mut b = [0u8; MESSAGE_MAX];
+        assert_eq!(encode_mcast(false, &[ALL_NODES, PORT.mac], &mut b), None);
+        // Written by hand, as a stack that does not keep to the protocol may.
+        let n = encode_mcast(false, &[ALL_NODES, ALL_HOSTS], &mut b).unwrap();
+        b[10] = PORT.mac[0];
+        assert_eq!(Message::decode(&b[..n]), None);
+    }
+
+    #[test]
+    fn a_wrong_message_is_refused() {
+        let mut b = [0u8; MESSAGE_MAX + 6];
+        let n = encode_mcast(false, &[ALL_NODES], &mut b).unwrap();
+        let bad: [&[u8]; 14] = [
+            &[],
+            &[DOORBELL, 0],
+            b"X",
+            &[KIND_REFUSED],
+            &[KIND_REFUSED, REFUSED_NO_KEY, 0],
+            &[KIND_LINK],
+            &[KIND_LINK, 2],
+            &[KIND_LINK, 1, 0],
+            &[KIND_MCAST_DONE, 0, 0, 0, 0, 0, 0],
+            &[KIND_MCAST_DONE, 1, 0, 0, 0, 0, 0, 0],
+            // The count says two, the list holds one; and one and a half.
+            &[KIND_MCAST, 0, 2, 0, 0x33, 0x33, 0, 0, 0, 1],
+            &[KIND_MCAST, 0, 1, 0, 0x33, 0x33, 0, 0, 0, 1, 0x33, 0x33, 0],
+            // An unknown flag.
+            &[KIND_MCAST, 2, 1, 0, 0x33, 0x33, 0, 0, 0, 1],
+            &b[..n - 1],
+        ];
+        for m in bad {
+            assert_eq!(Message::decode(m), None, "{m:?}");
+        }
+        // A count past the most, its list whole.
+        let count = u16::try_from(MCAST_MAX + 1).unwrap().to_le_bytes();
+        b[..4].copy_from_slice(&[KIND_MCAST, 0, count[0], count[1]]);
+        for at in (4..4 + 6 * (MCAST_MAX + 1)).step_by(6) {
+            b[at..at + 6].copy_from_slice(&ALL_NODES);
+        }
+        assert_eq!(Message::decode(&b[..4 + 6 * (MCAST_MAX + 1)]), None);
     }
 
     #[test]
@@ -193,6 +449,8 @@ mod tests {
             NO_GATEWAY,
             PINGS_LOST,
             TURNED_AWAY,
+            LINK,
+            MCAST,
         ];
         let said: Vec<_> = codes.iter().map(|&c| failure(c)).collect();
         for (i, a) in said.iter().enumerate() {

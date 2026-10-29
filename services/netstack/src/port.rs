@@ -15,10 +15,19 @@
 //! to send only when the driver said it sleeps. A slot posted to receive
 //! into needs no doorbell: the driver looks for slots when a frame comes.
 //!
+//! The driver's other messages are read as they come with its doorbells:
+//! the card's link, kept for [`link`], and the answer to the last multicast
+//! list. The daemon's lists go through [`set_mcast`], which keeps the
+//! latest and sends it once the last is answered -- the protocol allows one
+//! at a time -- so the card ends with the latest asked for.
+//!
 //! Single-threaded daemon: the card is a `static mut` no borrow of which
 //! outlives a call here, as [`super::loopback`]'s state is.
 
-use netipc::nicport::{ATTACH_LEN, DOORBELL, Port, SLOT_SIZE};
+use netipc::nicport::{
+    ATTACH_LEN, DOORBELL, MCAST_MAX, MESSAGE_MAX, Message, Port, REFUSED_NO_KEY, REFUSED_NO_RING,
+    SLOT_SIZE, encode_mcast,
+};
 use netipc::ring::{ERR_INVALID, ERR_MSG_SIZE, OP_RECV, OP_SEND, Sqe};
 use netring::Ring;
 
@@ -43,8 +52,8 @@ const NET_DOWN: i64 = -100;
 const MAX_SLOTS: usize = 256;
 /// How long a send waits for a send slot to come free: 100 ms.
 const SLOT_WAIT_NS: u64 = 100_000_000;
-/// The most doorbells one wait takes after the first.
-const DOORBELLS_A_WAIT: usize = 64;
+/// The most messages one wait takes after the first.
+const MESSAGES_A_WAIT: usize = 64;
 /// An Ethernet header and a VLAN tag: what a frame carries besides its MTU.
 const ETH_HLEN: usize = 14;
 const VLAN_HLEN: usize = 4;
@@ -69,7 +78,24 @@ struct Card {
     slept: u32,
     /// The driver's sleep last rung for.
     rung: u32,
+    /// The card's link as the driver last told it; `None` before it has.
+    link: Option<bool>,
+    /// The multicast list asked for and not yet sent.
+    mcast_want: Option<McastList>,
+    /// A list was sent and is not yet answered.
+    mcast_sent: bool,
+    /// The last list's answer: 0 in force, or the driver's errno.
+    mcast_result: i32,
     gone: bool,
+}
+
+/// A multicast list: `len` addresses of `addrs`, or every multicast frame
+/// with `all`.
+#[derive(Clone, Copy)]
+struct McastList {
+    addrs: [[u8; 6]; MCAST_MAX],
+    len: usize,
+    all: bool,
 }
 
 static mut CARD: Option<Card> = None;
@@ -87,10 +113,9 @@ pub struct AttachError {
     pub why: &'static str,
     /// The kernel's answer to the system call that failed, if one did.
     pub answer: Option<i64>,
-    /// The driver closed the connection before attaching it -- as it does
-    /// to a process without the card's key, and also when it could not make
-    /// the ring, or died.
-    pub turned_away: bool,
+    /// Why the driver refused the daemon, when it did
+    /// (`netipc::nicport::REFUSED_*`).
+    pub refused: Option<u8>,
 }
 
 impl AttachError {
@@ -99,7 +124,7 @@ impl AttachError {
         Self {
             why,
             answer: Some(answer),
-            turned_away: false,
+            refused: None,
         }
     }
 
@@ -108,7 +133,7 @@ impl AttachError {
         Self {
             why,
             answer: None,
-            turned_away: false,
+            refused: None,
         }
     }
 }
@@ -155,9 +180,9 @@ pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, AttachError> {
 }
 
 /// The driver's attach message on `channel`, before `deadline`, and the
-/// ring it names mapped and attached. On every way out but that, the
-/// daemon's reference to the region it names (its grant's) is given back,
-/// and the region unmapped if it was mapped.
+/// ring it names mapped and attached -- or its refusal. On every way out
+/// but the first, the daemon's reference to the region the message names
+/// (its grant's) is given back, and the region unmapped if it was mapped.
 fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
     // One byte more than the message, so that a longer one is told apart.
     let mut message = [0u8; ATTACH_LEN + 1];
@@ -170,11 +195,10 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
         wait,
     );
     if got == CHANNEL_CLOSED {
-        return Err(AttachError {
-            why: "the card's driver closed the connection without attaching it",
-            answer: Some(got),
-            turned_away: true,
-        });
+        return Err(AttachError::call(
+            "the card's driver closed the connection without a word",
+            got,
+        ));
     }
     let Ok(len) = usize::try_from(got) else {
         return Err(AttachError::call(
@@ -182,13 +206,27 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
             got,
         ));
     };
+    let first = message.get(..len).unwrap_or(&[]);
+    if let Some(Message::Refused { reason }) = Message::decode(first) {
+        return Err(AttachError {
+            why: match reason {
+                REFUSED_NO_KEY => {
+                    "the card's driver refused the daemon: it holds no key for the card"
+                }
+                REFUSED_NO_RING => "the card's driver refused the daemon: it could not make a ring",
+                _ => "the card's driver refused the daemon, for a reason this daemon does not know",
+            },
+            answer: None,
+            refused: Some(reason),
+        });
+    }
     if len > ATTACH_LEN {
         return Err(AttachError::plain(
             "an attach message longer than the protocol's",
         ));
     }
-    let port = Port::decode(message.get(..len).unwrap_or(&[]))
-        .ok_or_else(|| AttachError::plain("a malformed attach message"))?;
+    let port =
+        Port::decode(first).ok_or_else(|| AttachError::plain("a malformed attach message"))?;
     let give_back = |e: AttachError| {
         // A region never granted is no handle of the daemon's: the close
         // fails, and there is nothing to give back.
@@ -253,6 +291,10 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
         send_errors: 0,
         slept: 0,
         rung: 0,
+        link: None,
+        mcast_want: None,
+        mcast_sent: false,
+        mcast_result: 0,
         gone: false,
     })
 }
@@ -417,45 +459,144 @@ pub fn wait(timeout_ns: u64) -> Woke {
     }
 }
 
-/// The driver's doorbell waited for, up to `timeout_ns` -- the daemon
-/// saying in the ring that it sleeps, unless completions are there already
-/// -- and any more that came taken: whether it rang, or completions were
-/// there.
+/// The driver's doorbell or another message waited for, up to `timeout_ns`
+/// -- the daemon saying in the ring that it sleeps, unless completions are
+/// there already -- and any more that came taken: whether one came, or
+/// completions were there.
 fn wait_on(c: &mut Card, timeout_ns: u64) -> bool {
     c.slept = c.slept.wrapping_add(1).max(1);
     if !c.ring.cq_sleep(c.slept) {
         return true;
     }
-    let mut byte = [0u8; 16];
+    let mut buf = [0u8; MESSAGE_MAX];
     let got = syscall4(
         SYS_CHANNEL_RECV_TIMEOUT,
         c.channel,
-        byte.as_mut_ptr() as u64,
-        byte.len() as u64,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
         timeout_ns.max(1),
     );
     c.ring.cq_wake();
+    let mut came = take_message(c, got, &buf);
+    for _ in 0..MESSAGES_A_WAIT {
+        if c.gone {
+            break;
+        }
+        let more = syscall3(
+            SYS_CHANNEL_TRY_RECV,
+            c.channel,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        );
+        if !take_message(c, more, &buf) {
+            break;
+        }
+        came = true;
+    }
+    send_mcast(c);
+    came
+}
+
+/// The receive that answered `got`, the message in `buf`, taken: whether
+/// there was one. A connection closed is the card gone, and so is a
+/// message the protocol has no place for from a driver -- too long,
+/// unreadable, or a stack's.
+fn take_message(c: &mut Card, got: i64, buf: &[u8]) -> bool {
     if got == CHANNEL_CLOSED {
         c.gone = true;
         return false;
     }
-    let mut rang = got > 0;
-    for _ in 0..DOORBELLS_A_WAIT {
-        let more = syscall3(
-            SYS_CHANNEL_TRY_RECV,
-            c.channel,
-            byte.as_mut_ptr() as u64,
-            byte.len() as u64,
-        );
-        if more == CHANNEL_CLOSED {
+    let Ok(len) = usize::try_from(got) else {
+        return false;
+    };
+    if len == 0 {
+        return false;
+    }
+    match buf.get(..len).and_then(Message::decode) {
+        Some(Message::Doorbell) => {}
+        Some(Message::Link { up }) => c.link = Some(up),
+        Some(Message::McastDone { result }) if c.mcast_sent => {
+            c.mcast_sent = false;
+            c.mcast_result = result;
+        }
+        _ => {
+            super::print(
+                "[netstack] the card's driver sent a message the protocol has no place for; the card is let go\n",
+            );
             c.gone = true;
         }
-        if more <= 0 {
-            break;
-        }
-        rang = true;
     }
-    rang
+    true
+}
+
+/// The multicast list asked for sent, if there is one and the last was
+/// answered; kept for a later wait if the connection has no room for it.
+fn send_mcast(c: &mut Card) {
+    let Some(want) = c.mcast_want.filter(|_| !c.mcast_sent && !c.gone) else {
+        return;
+    };
+    let mut message = [0u8; MESSAGE_MAX];
+    let addrs = want.addrs.get(..want.len).unwrap_or(&[]);
+    let Some(n) = encode_mcast(want.all, addrs, &mut message) else {
+        // set_mcast keeps only lists that encode.
+        c.mcast_want = None;
+        return;
+    };
+    let sent = syscall3(
+        SYS_CHANNEL_SEND,
+        c.channel,
+        message.as_ptr() as u64,
+        n as u64,
+    );
+    if sent == CHANNEL_CLOSED {
+        c.gone = true;
+    } else if sent == 0 {
+        c.mcast_want = None;
+        c.mcast_sent = true;
+    }
+}
+
+/// The card's link as its driver last told it: `None` with no card
+/// attached, or before the driver has said.
+pub fn link() -> Option<bool> {
+    card().and_then(|c| c.link)
+}
+
+/// The multicast addresses the card must pass from now on: `addrs` -- any
+/// that is not a multicast address left out -- and every one with `all`, or
+/// with more addresses than one list holds. Sent now if the driver has
+/// answered the last list, else once it has. Whether a card is attached to
+/// take it.
+pub fn set_mcast(all: bool, addrs: &[[u8; 6]]) -> bool {
+    let Some(c) = card() else {
+        return false;
+    };
+    let mut want = McastList {
+        addrs: [[0; 6]; MCAST_MAX],
+        len: 0,
+        all: all || addrs.len() > MCAST_MAX,
+    };
+    if !want.all {
+        let multicast = |a: &[u8; 6]| a[0] & 1 == 1;
+        want.len = want
+            .addrs
+            .iter_mut()
+            .zip(addrs.iter().filter(|a| multicast(a)))
+            .map(|(to, from)| *to = *from)
+            .count();
+    }
+    c.mcast_want = Some(want);
+    send_mcast(c);
+    true
+}
+
+/// How the multicast lists asked for went: `None` while one is still to be
+/// sent or answered (or no card is attached), else the last one's answer
+/// -- 0 in force, or the driver's negative errno.
+pub fn mcast_settled() -> Option<i32> {
+    card()
+        .filter(|c| c.mcast_want.is_none() && !c.mcast_sent)
+        .map(|c| c.mcast_result)
 }
 
 /// Sends the driver completed with an error, so far.

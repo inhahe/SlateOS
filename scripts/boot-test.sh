@@ -1845,6 +1845,39 @@ screen_probe() {
         --timeout "${SCREEN_PROBE_TIMEOUT:-180}" --keep "$PROJECT_ROOT/build/screen"
 }
 
+# The spare 82574's cable (`-netdev user,id=net3`), pulled and plugged back
+# when the netstack daemon asks -- its nic-check lines "cable: pull it" and
+# "cable: plug it back", which it prints only when the kernel says this
+# harness can (linuxdrv.cable=hmp, set above with the monitor) -- through
+# the HMP monitor: `set_link net3 off`, then `on`, once each a boot. Called
+# from the wait loop every second. Anything QEMU says back is printed; the
+# daemon, waiting for the link to follow, fails the boot if it does not.
+CABLE_PULLED=0
+CABLE_BACK=0
+cable_responder() {
+    [ "$CABLE_BACK" -eq 0 ] && [ "${#MONITOR_ARGS[@]}" -gt 0 ] && [ -f "$SERIAL_FILE" ] || return 0
+    local want state
+    # Not anchored: a kernel line can be printed into the middle of another.
+    if [ "$CABLE_PULLED" -eq 0 ]; then
+        want='[netstack] nic-check: cable: pull it'
+        state=off
+    else
+        want='[netstack] nic-check: cable: plug it back'
+        state=on
+    fi
+    grep -a -q -F "$want" "$SERIAL_FILE" 2>/dev/null || return 0
+    if [ "$CABLE_PULLED" -eq 0 ]; then
+        CABLE_PULLED=1
+    else
+        CABLE_BACK=1
+    fi
+    local py=python
+    command -v python &>/dev/null || py=python3
+    local said rc=0
+    said="$("$py" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 $state" 2>&1)" || rc=$?
+    echo "=== Cable: set_link net3 $state at the daemon's asking${said:+ -- QEMU said: $said} (rc $rc) ==="
+}
+
 # Stop QEMU and put the log back as it stood at the marker ($SERIAL_AT_MARKER,
 # copied when the marker was seen): what every verdict reads is what it read
 # before the screen probe kept the guest up. The whole log, the probe's time
@@ -9160,6 +9193,12 @@ fi
 # pass, since nothing changes until something fails):
 #     SLATE_CMDLINE="selftest.keep_going=1" ./scripts/boot-test.sh
 KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
+# With the monitor, the harness pulls the spare 82574's cable when the
+# netstack daemon asks (cable_responder): the kernel is told so, and
+# without one the daemon leaves the cable alone.
+if [ "$MONITOR_ENABLED" -eq 1 ]; then
+    KERNEL_CMDLINE="$KERNEL_CMDLINE linuxdrv.cable=hmp"
+fi
 if [ -n "${SLATE_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"
 fi
@@ -10472,6 +10511,7 @@ OWN_SCAN_OWED=0
 while kill -0 "$QEMU_PID" 2>/dev/null && [ "$ELAPSED" -lt "$TIMEOUT" ]; do
     sleep 1
     ELAPSED=$(( $(date +%s) - WAIT_START_EPOCH ))
+    cable_responder
 
     # Anchor to line start: the success marker is printed as a standalone line
     # (`serial_println!("BOOT_OK")`).  An UNanchored match also trips on the

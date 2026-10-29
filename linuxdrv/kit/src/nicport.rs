@@ -6,14 +6,18 @@
 //!
 //! Between tasks, at every turn, the loop sees to the connection
 //! ([`slx_nicport_turn`], through the C half's turn hook): a stack
-//! connecting -- served only when it holds the card's key -- its
-//! doorbells, its leaving, and its submissions sorted ([`crate::frames`]);
-//! then, completions pushed, the stack rung if it sleeps. With nothing to
-//! run, the loop waits for the listener or the connection as well
-//! ([`wait_items`]), having said in the ring that it sleeps. A doorbell is
-//! looked for when the wait says one came, and every [`LOOK_EVERY_NS`]
-//! besides, so that a loop kept busy still sees a stack leave; the ring
-//! itself is read at every turn.
+//! connecting -- served only when it holds the card's key -- its messages,
+//! its leaving, and its submissions sorted ([`crate::frames`]); the card's
+//! link told it when it changed; then, completions pushed, the stack rung
+//! if it sleeps. With nothing to run, the loop waits for the listener or
+//! the connection as well ([`wait_items`]), having said in the ring that it
+//! sleeps. Messages are looked for when the wait says one came, and every
+//! [`LOOK_EVERY_NS`] besides, so that a loop kept busy still sees a stack
+//! leave; the ring itself is read at every turn.
+//!
+//! A multicast list the stack sends is kept until the C half's task takes
+//! it ([`slx_nicport_mcast_next`]), puts it in force and says how that went
+//! ([`slx_nicport_mcast_done`]), which the stack is told.
 //!
 //! Doorbells go only to a side that sleeps (`netring`'s sleep words): each
 //! says in the ring that it is about to sleep, and the other rings once for
@@ -21,12 +25,15 @@
 //! call between them.
 //!
 //! Nothing the stack does is trusted: what it submits is checked, at most a
-//! queue's worth is taken a turn, at most [`DOORBELLS_A_LOOK`] doorbells a
-//! look, and a ring whose indices it wrote past what the ring holds ends
-//! its attachment. One stack at a time: another that connects waits until
-//! the first has gone.
+//! queue's worth is taken a turn, at most [`MESSAGES_A_LOOK`] messages a
+//! look, and a ring whose indices it wrote past what the ring holds, or a
+//! message the protocol has no place for, ends its attachment. One stack at
+//! a time: another that connects waits until the first has gone.
 
-use netipc::nicport::{ATTACH_LEN, DOORBELL, Port, SERVICE_PREFIX, SLOT_SIZE};
+use netipc::nicport::{
+    ATTACH_LEN, DOORBELL, MCAST_MAX, MESSAGE_MAX, Message, Port, REFUSED_NO_KEY, REFUSED_NO_RING,
+    SERVICE_PREFIX, SLOT_SIZE, encode_link, encode_mcast_done, encode_refused,
+};
 use netipc::ring::{Cqe, ERR_INVALID, ERR_NO_BUFS};
 use netring::Ring;
 
@@ -61,11 +68,13 @@ const SLOTS: u32 = 128;
 const QUEUED: usize = SLOTS as usize;
 /// How often a busy loop looks at the connection anyway: 10 ms.
 const LOOK_EVERY_NS: u64 = 10_000_000;
-/// The most doorbells one look takes: a stack ringing faster than the
+/// The most messages one look takes: a stack sending faster than the
 /// driver turns is answered at the next look, not by a loop it keeps going.
-const DOORBELLS_A_LOOK: usize = 64;
+const MESSAGES_A_LOOK: usize = 64;
 /// What the loop's idle wait may ask of this module: one item.
 pub(crate) const WAIT_ITEMS: usize = 1;
+// The C half's list buffer is `SLX_NICPORT_MCAST_MAX` (slx.h) addresses.
+const _: () = assert!(MCAST_MAX == 64);
 /// The longest name a card is served under, after the prefix.
 const NAME_MAX: usize = 59;
 
@@ -90,9 +99,25 @@ struct Client {
     rung: u32,
     /// The driver's own sleep number, new for each idle wait.
     slept: u32,
-    /// The connection closed, or the stack broke its ring: no more work
+    /// The link the stack was last told of; `None` before the first.
+    told_link: Option<bool>,
+    /// The multicast list the stack last sent, not yet answered.
+    mcast: Option<McastList>,
+    /// The answer to the last list, not yet sent: the connection had no
+    /// room for it.
+    answer: Option<i32>,
+    /// The connection closed, or the stack broke the protocol: no more work
     /// taken, the attachment ended once the C half holds nothing of it.
     gone: bool,
+}
+
+/// A multicast list a stack sent: `len` addresses of `addrs`, or every
+/// multicast frame with `all`; `taken` once the C half has it.
+struct McastList {
+    addrs: [[u8; 6]; MCAST_MAX],
+    len: usize,
+    all: bool,
+    taken: bool,
 }
 
 struct Served {
@@ -102,6 +127,8 @@ struct Served {
     opened: bool,
     mac: [u8; 6],
     mtu: u16,
+    /// The card's link as of the last turn.
+    link: bool,
     client: Option<Client>,
     /// The wait said the listener or the connection has something.
     look: bool,
@@ -121,6 +148,7 @@ static SERVED: Single<Served> = Single::new(Served {
     opened: false,
     mac: [0; 6],
     mtu: 0,
+    link: false,
     client: None,
     look: false,
     looked_ns: 0,
@@ -195,21 +223,23 @@ pub unsafe extern "C" fn slx_nicport_open(name: *const u8, mac: *const u8, mtu: 
 }
 
 /// `slx_nicport_turn`: a turn of the loop, between tasks, the clock reading
-/// `now_ns`: the connection seen to -- a stack accepted and attached,
-/// doorbells taken, the stack's leaving noticed -- its submissions sorted,
-/// and the stack rung if completions were pushed while it sleeps. Whether
-/// the C half's task has something to do (`slx_nicport_work`).
+/// `now_ns` and the card's link `link` (up or down): the connection seen to
+/// -- a stack accepted and attached, its messages taken, its leaving
+/// noticed -- its submissions sorted, the link told it if it changed, and
+/// the stack rung if completions were pushed while it sleeps. Whether the
+/// C half's task has something to do (`slx_nicport_work`).
 #[unsafe(no_mangle)]
-pub extern "C" fn slx_nicport_turn(now_ns: u64) -> bool {
+pub extern "C" fn slx_nicport_turn(now_ns: u64, link: bool) -> bool {
     let s = served();
     if !s.opened {
         return false;
     }
+    s.link = link;
     if s.look || now_ns.saturating_sub(s.looked_ns) >= LOOK_EVERY_NS {
         s.look = false;
         s.looked_ns = now_ns;
         match (s.client.as_mut(), s.listener) {
-            (Some(c), _) => take_doorbells(c),
+            (Some(c), _) => take_messages(c),
             (None, Some(listener)) => {
                 match accept(listener, s.mac, s.mtu) {
                     Ok(client) => s.client = client,
@@ -228,10 +258,17 @@ pub extern "C" fn slx_nicport_turn(now_ns: u64) -> bool {
     if !c.gone {
         sort_submissions(c, s.mtu, &mut s.lost);
     }
+    if !c.gone && c.told_link != Some(s.link) {
+        tell_link(c, s.link);
+    }
+    if !c.gone {
+        tell_answer(c);
+    }
     if c.kick && !c.gone {
         ring_if_asleep(c);
     }
-    if c.gone && c.sending.is_none() && !c.receiving {
+    let applying = c.mcast.as_ref().is_some_and(|m| m.taken);
+    if c.gone && c.sending.is_none() && !c.receiving && !applying {
         if let Some(c) = s.client.take() {
             detach(&c);
         }
@@ -242,20 +279,77 @@ pub extern "C" fn slx_nicport_turn(now_ns: u64) -> bool {
         s.ended = s.ended.saturating_add(1);
         return true;
     }
-    !c.sends.is_empty()
+    has_work(c)
+}
+
+/// Whether the C half's task has something to do for `c`: frames to send,
+/// or a multicast list to put in force.
+fn has_work(c: &Client) -> bool {
+    !c.gone && (!c.sends.is_empty() || c.mcast.as_ref().is_some_and(|m| !m.taken))
 }
 
 /// `slx_nicport_work`: whether the C half's task has something to do --
-/// frames to send, an attachment ended, or the card no longer served --
-/// without changing anything.
+/// frames to send, a multicast list to put in force, an attachment ended,
+/// or the card no longer served -- without changing anything.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_nicport_work() -> bool {
     let s = served();
     s.ended != 0
         || (s.opened && s.listener.is_none() && s.client.is_none())
-        || s.client
-            .as_ref()
-            .is_some_and(|c| !c.gone && !c.sends.is_empty())
+        || s.client.as_ref().is_some_and(has_work)
+}
+
+/// `slx_nicport_mcast_next`: the multicast list the stack sent and the C
+/// half has not yet taken: the addresses written to `list`, six bytes each,
+/// whether every multicast frame is wanted to `*all`, and how many there
+/// are; or -1 for none. [`slx_nicport_mcast_done`] says how it went before
+/// the next is given.
+///
+/// # Safety
+///
+/// `list` points at `6 * MCAST_MAX` bytes to write, `all` at a bool.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn slx_nicport_mcast_next(list: *mut u8, all: *mut bool) -> i64 {
+    let s = served();
+    let Some(m) = s
+        .client
+        .as_mut()
+        .filter(|c| !c.gone)
+        .and_then(|c| c.mcast.as_mut())
+        .filter(|m| !m.taken)
+    else {
+        return -1;
+    };
+    m.taken = true;
+    let mut to = list;
+    for addr in m.addrs.get(..m.len).unwrap_or(&[]) {
+        // SAFETY: the caller's: `list` holds `6 * MCAST_MAX` bytes, and at
+        // most `MCAST_MAX` addresses are written, six bytes each.
+        unsafe { core::ptr::copy_nonoverlapping(addr.as_ptr(), to, 6) };
+        to = to.wrapping_add(6);
+    }
+    // SAFETY: the caller's.
+    unsafe { all.write(m.all) };
+    i64::try_from(m.len).unwrap_or(-1)
+}
+
+/// `slx_nicport_mcast_done`: the list [`slx_nicport_mcast_next`] gave is in
+/// force (`result` 0) or failed (a negative errno): the stack told, and the
+/// next list it sends taken.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_nicport_mcast_done(result: i32) {
+    let s = served();
+    let Some(c) = s.client.as_mut() else {
+        return;
+    };
+    if !c.mcast.as_ref().is_some_and(|m| m.taken) {
+        return;
+    }
+    c.mcast = None;
+    c.answer = Some(result);
+    if !c.gone {
+        tell_answer(c);
+    }
 }
 
 /// `slx_nicport_serving`: whether the card is still served -- its listener
@@ -446,7 +540,7 @@ fn accept(listener: u64, mac: [u8; 6], mtu: u16) -> Result<Option<Client>, Liste
     };
     if syscall4(SYS_CHANNEL_PEER_HAS_KEY, channel, 0, 0, 0) != 1 {
         log(b"[lx] nicport: a process without the card's key connected; it was turned away\n");
-        syscall4(SYS_CHANNEL_CLOSE, channel, 0, 0, 0);
+        turn_away(channel, REFUSED_NO_KEY);
         return Ok(None);
     }
     let port = Port {
@@ -458,7 +552,7 @@ fn accept(listener: u64, mac: [u8; 6], mtu: u16) -> Result<Option<Client>, Liste
     let size = port.region_size();
     let Ok(region) = u64::try_from(syscall4(SYS_SHM_CREATE, size as u64, 0, 0, 0)) else {
         log(b"[lx] nicport: no memory for a stack's ring; it was turned away\n");
-        syscall4(SYS_CHANNEL_CLOSE, channel, 0, 0, 0);
+        turn_away(channel, REFUSED_NO_RING);
         return Ok(None);
     };
     let mapping = syscall4(SYS_SHM_MAP, region, MAP_READ_WRITE, 0, 0);
@@ -490,7 +584,7 @@ fn accept(listener: u64, mac: [u8; 6], mtu: u16) -> Result<Option<Client>, Liste
             syscall4(SYS_SHM_UNMAP, at, size as u64, 0, 0);
         }
         syscall4(SYS_SHM_CLOSE, region, 0, 0, 0);
-        syscall4(SYS_CHANNEL_CLOSE, channel, 0, 0, 0);
+        turn_away(channel, REFUSED_NO_RING);
         return Ok(None);
     };
     Ok(Some(Client {
@@ -506,30 +600,118 @@ fn accept(listener: u64, mac: [u8; 6], mtu: u16) -> Result<Option<Client>, Liste
         kick: false,
         rung: 0,
         slept: 0,
+        told_link: None,
+        mcast: None,
+        answer: None,
         gone: false,
     }))
 }
 
-/// The stack's doorbells taken -- [`DOORBELLS_A_LOOK`] at most -- and its
-/// leaving noticed: whatever it rang for is in the ring, read at every turn.
-fn take_doorbells(c: &mut Client) {
-    let mut byte = [0u8; 16];
-    for _ in 0..DOORBELLS_A_LOOK {
+/// A stack that connected on `channel` told it is not served, and why
+/// (`REFUSED_*`), and its connection closed.
+fn turn_away(channel: u64, reason: u8) {
+    let mut message = [0u8; 2];
+    if let Some(n) = encode_refused(reason, &mut message) {
+        // Not sent -- the stack gone already, say -- it still sees the
+        // connection close.
+        let _sent = syscall4(
+            SYS_CHANNEL_SEND,
+            channel,
+            message.as_ptr() as u64,
+            n as u64,
+            0,
+        );
+    }
+    syscall4(SYS_CHANNEL_CLOSE, channel, 0, 0, 0);
+}
+
+/// The stack's messages taken -- [`MESSAGES_A_LOOK`] at most -- and its
+/// leaving noticed. Whatever a doorbell rang for is in the ring, read at
+/// every turn; a multicast list is kept for the C half. A message the
+/// protocol has no place for from a stack -- one too long or unreadable, a
+/// driver's, or a list sent before the last was answered -- ends its
+/// attachment.
+fn take_messages(c: &mut Client) {
+    let mut buf = [0u8; MESSAGE_MAX];
+    for _ in 0..MESSAGES_A_LOOK {
         let got = syscall4(
             SYS_CHANNEL_TRY_RECV,
             c.channel,
-            byte.as_mut_ptr() as u64,
-            byte.len() as u64,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
             0,
         );
-        match got {
-            1.. => {}
-            0 => return,
+        let Ok(len) = usize::try_from(got) else {
+            c.gone = true;
+            return;
+        };
+        if len == 0 {
+            return;
+        }
+        match buf.get(..len).and_then(Message::decode) {
+            Some(Message::Doorbell) => {}
+            Some(Message::Mcast { all, addrs }) if c.mcast.is_none() && c.answer.is_none() => {
+                let mut list = McastList {
+                    addrs: [[0; 6]; MCAST_MAX],
+                    len: 0,
+                    all,
+                    taken: false,
+                };
+                // Decoded: at most MCAST_MAX of them.
+                list.len = list
+                    .addrs
+                    .iter_mut()
+                    .zip(addrs.chunks_exact(6))
+                    .map(|(to, from)| to.copy_from_slice(from))
+                    .count();
+                c.mcast = Some(list);
+            }
             _ => {
+                log(b"[lx] nicport: the stack sent a message the protocol has no place for; it is let go\n");
                 c.gone = true;
                 return;
             }
         }
+    }
+}
+
+/// `message` sent to the stack: whether it went. A connection closed is
+/// the stack gone; one with no room keeps it for a later turn.
+fn send_message(c: &mut Client, message: &[u8]) -> bool {
+    let sent = syscall4(
+        SYS_CHANNEL_SEND,
+        c.channel,
+        message.as_ptr() as u64,
+        message.len() as u64,
+        0,
+    );
+    if sent == CHANNEL_CLOSED {
+        c.gone = true;
+    }
+    sent == 0
+}
+
+/// The stack told the card's link is `up`, unless the connection has no
+/// room for it yet.
+fn tell_link(c: &mut Client, up: bool) {
+    let mut message = [0u8; 2];
+    let told = encode_link(up, &mut message)
+        .is_some_and(|n| send_message(c, message.get(..n).unwrap_or(&[])));
+    if told {
+        c.told_link = Some(up);
+    }
+}
+
+/// The stack told how its last multicast list went, if it has not been.
+fn tell_answer(c: &mut Client) {
+    let Some(result) = c.answer else {
+        return;
+    };
+    let mut message = [0u8; 8];
+    let told = encode_mcast_done(result, &mut message)
+        .is_some_and(|n| send_message(c, message.get(..n).unwrap_or(&[])));
+    if told {
+        c.answer = None;
     }
 }
 
@@ -544,10 +726,8 @@ fn ring_if_asleep(c: &mut Client) {
         return;
     }
     c.rung = sleeper;
-    let bell = [DOORBELL];
-    if syscall4(SYS_CHANNEL_SEND, c.channel, bell.as_ptr() as u64, 1, 0) == CHANNEL_CLOSED {
-        c.gone = true;
-    }
+    // Not sent, the connection has no room: it holds a doorbell already.
+    let _sent = send_message(c, &[DOORBELL]);
 }
 
 /// The submissions in the ring taken and sorted -- a queue's worth at most:

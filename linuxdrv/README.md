@@ -118,11 +118,16 @@ whose posted slots the rx handler copies every frame received, and from
 which the layer's task sends every frame the daemon submits
 (`emul/lx_nic.c`; the ring's side in `kit/src/nicport.rs`, what the daemon
 submits checked in `kit/src/frames.rs`; the loop waits for the connection
-with the device's interrupts, `kit/src/wait.rs`). The kernel's self-test
-runs it beside the daemon's `nic-check`, which takes an address by DHCP
-through the card, resolves the gateway and has 400 full-size pings
-answered, 16 at a time -- frames sent and received through Linux's driver,
-its interrupts, its DMA and its receive ring's page fragments. A warning
+with the device's interrupts, `kit/src/wait.rs`). The daemon is told the
+device's carrier as the card's link, and the multicast addresses it lists
+become the device's own (`dev_mc_add`). The kernel's self-test runs it
+beside the daemon's `nic-check`, which takes an address by DHCP through the
+card, resolves the gateway and has 400 full-size pings answered, 16 at a
+time -- frames sent and received through Linux's driver, its interrupts,
+its DMA and its receive ring's page fragments -- then finds the card
+passing a multicast group exactly while it is listed, and, in the boot
+test, the link following the card's cable as QEMU's monitor pulls it and
+plugs it back. A warning
 from Linux code anywhere in that driver process fails the run
 (`SLX_EXIT_WARNED`).
 

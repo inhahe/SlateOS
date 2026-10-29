@@ -314,19 +314,32 @@ fn nic_check_outcome(run: &KernelResult<Option<i32>>) -> &'static str {
     }
 }
 
+/// Whether the harness pulls the spare card's cable when the netstack
+/// daemon asks (`linuxdrv.cable=hmp`: the boot test, through QEMU's
+/// monitor, at the daemon's line "cable: pull it").
+fn cable_puller() -> bool {
+    crate::boot::kernel_cmdline().is_some_and(|line| {
+        line.split_ascii_whitespace()
+            .any(|w| w == "linuxdrv.cable=hmp")
+    })
+}
+
 /// Linux's e1000e serving the spare 82574 to the network stack
 /// (design-decisions 1589): the driver process -- `program`, holding
 /// `capabilities` (the card's) and a `Service` capability for [`SERVICE`]
 /// alone, the card at `a`, `pci` its argument naming it -- in its
 /// "serve=spare once" mode, and beside it the netstack daemon in its
 /// "nic-check nic.spare" mode -- first without the card's key, when the
-/// driver must close the daemon's connection before attaching it, the
-/// daemon then exiting [`check::TURNED_AWAY`]; then holding it, when it
+/// driver must refuse the daemon for want of it, the daemon then exiting
+/// [`check::TURNED_AWAY`]; then holding it, when it
 /// must attach to the card, be refused passing on a region it was never
 /// granted, take an
 /// address by DHCP from QEMU's network through it, resolve the gateway by
 /// ARP, have 400 full-size pings answered 16 at a time and 8 more sent to an
-/// idle driver, payloads as sent, and exit 0; the driver then ends, the
+/// idle driver, payloads as sent, be told the card's link is up, find the
+/// card passing a multicast group exactly while it lists it, and -- where
+/// the harness can pull the card's cable ([`cable_puller`]) -- be told the
+/// link down and up again as it does; and exit 0. The driver then ends, the
 /// daemon gone, with 0, no warning from Linux code in it, the card released.
 fn e1000e_serve(
     program: &Program<'_>,
@@ -344,17 +357,21 @@ fn e1000e_serve(
         &[b"e1000e", b"serve=spare", b"once", pci.as_bytes()],
         &caps,
     )?;
+    // The cable's two waits are 20 s each at most.
     let stack = Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-nic",
-        limit_s: 90,
+        limit_s: 150,
     };
     // The daemon run first without the card's key, then with it.
-    let run_daemon = |key: &[(ResourceType, u64, Rights)]| {
-        let daemon = start(&stack, &[b"netstack", b"nic-check", SERVICE], key);
+    let run_daemon = |args: &[&[u8]], key: &[(ResourceType, u64, Rights)]| {
+        let daemon = start(&stack, args, key);
         daemon.map(|d| finish(&stack, &d))
     };
-    let keyless = run_daemon(&[]);
+    let plain: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE];
+    let with_cable: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"cable"];
+    let keyed = if cable_puller() { with_cable } else { plain };
+    let keyless = run_daemon(plain, &[]);
     if keyless != Ok(Some(check::TURNED_AWAY)) {
         serial_println!(
             "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?} ({}): it should have been turned away, exit {}",
@@ -367,7 +384,7 @@ fn e1000e_serve(
         spawn::teardown_fixture(driver.pid, driver.task_id);
         return Err(KernelError::InternalError);
     }
-    let checked = match run_daemon(&[(ResourceType::Service, service, Rights::READ)]) {
+    let checked = match run_daemon(keyed, &[(ResourceType::Service, service, Rights::READ)]) {
         Ok(checked) => checked,
         Err(e) => {
             serial_println!(

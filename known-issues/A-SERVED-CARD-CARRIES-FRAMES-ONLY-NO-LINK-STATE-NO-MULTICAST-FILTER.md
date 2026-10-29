@@ -1,6 +1,10 @@
 ## A-SERVED-CARD-CARRIES-FRAMES-ONLY-NO-LINK-STATE-NO-MULTICAST-FILTER (lane A, 2026-10-29) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip (the port's version 2: link and
+multicast messages, design-decisions 1589 item 7), awaiting a boot on main.
+What is left on the daemon's side -- one NIC interface, a port in its
+serving mode, the link acted on -- is
+`A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`.
 
 **What is wrong.** A network card a Linux driver process serves to the
 netstack daemon (design-decisions 1589) carries frames and nothing else.

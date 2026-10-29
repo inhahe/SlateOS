@@ -24,7 +24,10 @@ through the kernel per frame.
      design-decisions 1518): the driver asks `SYS_CHANNEL_PEER_HAS_KEY` of
      whoever connects and turns away a process without it, which would
      otherwise receive every frame on the card and send its own -- what
-     the kernel's raw-frame calls keep behind `NetRaw`.
+     the kernel's raw-frame calls keep behind `NetRaw`. A stack turned
+     away is told why before the connection closes (item 7's
+     `Message::Refused`: no key, or no ring could be made for it), so a
+     refusal is told apart from a driver that died.
 2. **Attaching**: on a connection, the driver makes the ring's region
    (`SYS_SHM_CREATE`) and lays out a `netipc::ring` in it, lets the stack
    map it (`SYS_SHM_GRANT`, below), and sends the attach message -- the
@@ -84,6 +87,28 @@ through the kernel per frame.
    whichever it has. With a port it learns its address by DHCP
    (`netproto::dhcp`), the kernel having configured nothing for that card.
    Half the slots are posted to receive into, half are for sending.
+7. **Refusals, the link and the multicast filter** (added the same day;
+   the attach message's version 2): the connection carries messages
+   besides the doorbell, each a channel message whose first byte is its
+   kind (`netipc::nicport::Message`). A driver that will not serve a stack
+   sends a refusal and its reason in place of the attach message, then
+   closes the connection. The driver tells the stack the card's
+   link -- Linux's carrier, read at every turn of the loop -- right after
+   the attach message and whenever it changes. The stack gives the
+   driver the multicast addresses the card must pass, 64 at most or
+   "every one", each list replacing the last; the `lx-nic` task makes them
+   the device's own (`dev_mc_flush`, `dev_mc_add`, `dev_set_allmulti`,
+   under the RTNL) and the driver answers each, once in force or failed
+   (a failure leaves the card passing none of them). One list at a time:
+   the daemon keeps the latest it wants and sends it once the last is
+   answered, so the card ends with the latest. A stack's groups go when it
+   leaves. A message a side has no place for -- too long, unreadable, the
+   other side's kind, a list before the last was answered -- is the peer
+   breaking the protocol, and ends the attachment, as a broken ring does;
+   an address in a list that is not a multicast address is such a message
+   (a card listing another host's unicast address would hand the stack
+   that host's frames). An answer or link the connection has no room for
+   is sent at a later turn, not lost.
 
 ### The alternatives
 
@@ -113,11 +138,12 @@ through the kernel per frame.
 - A slot holds at most 2 KiB: jumbo frames need bigger slots, a version
   bump of the attach message.
 - One stack per card at a time.
-- Only frames cross the port: no link state (the card is served once its
-  link is up, and a stack learns of the link going down only by frames
-  ceasing) and no multicast filter (the card keeps its probe-time filter);
-  `known-issues/A-SERVED-CARD-CARRIES-FRAMES-ONLY-NO-LINK-STATE-NO-MULTICAST-FILTER`
-  is the next step.
+- Frames, the link and the multicast list cross the port, and nothing
+  else of a card's: no speed or duplex, no statistics, no offloads, no
+  bringing the card down. The daemon learns the link but does nothing yet
+  when it changes, and only `nic-check` attaches to a port at all; the
+  daemon's serving mode still uses the kernel's NIC alone
+  (`known-issues/A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`).
 - A grant is all or nothing: a region shared is writable by both.
 
 ### How it is checked
@@ -125,19 +151,29 @@ through the kernel per frame.
 The boot test's linuxdrv self-test runs the e1000e process serving the
 spare 82574 (`serve=spare once`), and beside it the netstack daemon in its
 `nic-check nic.spare` mode -- first without the card's key, when the
-driver must close the connection unattached (the daemon's receive answers
-`ChannelClosed` and it exits 15, `netipc::nicport::check::TURNED_AWAY` --
-though a driver that could not make a ring, or died, closes it so too),
-then holding it -- which attaches to the card, is refused passing
+driver must refuse it for that reason (it then exits 15,
+`netipc::nicport::check::TURNED_AWAY`, which no other failure to attach
+gives: a connection closed without a refusal, or refused for want of a
+ring, is exit 10), then holding it -- which attaches to the card, is
+refused passing
 on a region it was never granted (`SYS_SHM_GRANT`'s check), takes an
 address by DHCP from QEMU's network, resolves the gateway by ARP and has
-400 full-size pings answered, 16 at a time, payloads as sent; the daemon's
-exit is the verdict, and the driver must end 0 once the daemon has gone --
+400 full-size pings answered, 16 at a time, payloads as sent. Then the
+link must have been told up, and the card must pass router advertisements
+to all nodes -- which QEMU's network sends whenever a router is solicited
+-- exactly while the daemon lists the all-nodes group: none before, one
+once listed, none once the list is emptied, each list answered before it
+is tried. Where the harness can pull the card's cable (the boot test, with
+its monitor, says `linuxdrv.cable=hmp`; `--no-monitor` runs and fast boots
+cannot), the daemon asks it to -- `set_link net3 off`, then `on` -- and
+the link must be told down, then up, within 20 s each, and the gateway
+must answer ARP again. The daemon's exit is the verdict, and the driver
+must end 0 once the daemon has gone --
 not `SLX_EXIT_WARNED`, which it ends with when Linux code warned anywhere
 in the process, a bug even in a run that otherwise passed. (The first
 version sent every frame twice, through `net_xmit_eval()`'s double
 evaluation of `dev_queue_xmit(skb)`; every check passed, and only Linux's
 refcount warnings said so.)
 The kit's submission checks and queues have host tests (`frames.rs`), as
-do the attach message (`netipc::nicport`) and the ring's data window
-(`netring`).
+do the attach message and the other messages (`netipc::nicport`) and the
+ring's data window (`netring`).

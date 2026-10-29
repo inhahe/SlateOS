@@ -571,10 +571,11 @@ fn push_unique(set: &mut [[u8; 6]; MAX_FILTER], len: &mut usize, mac: [u8; 6]) {
     }
 }
 
-/// Tell the kernel which multicast addresses the network cards must pass:
-/// all-hosts (IGMP queries), all-nodes (MLD queries, router
-/// advertisements), our solicited-node group (neighbour discovery) and every
-/// group a socket is in -- when that set has changed since the last push.
+/// Tell the card which multicast addresses it must pass -- the kernel, for
+/// its cards, or a driver process's card attached ([`port`]): all-hosts
+/// (IGMP queries), all-nodes (MLD queries, router advertisements), our
+/// solicited-node group (neighbour discovery) and every group a socket is
+/// in -- when that set has changed since the last push.
 /// Without it an e1000 or rtl8139 card drops every multicast frame (kernel
 /// known-issues `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`).
 fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
@@ -598,6 +599,16 @@ fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
     wanted.sort_unstable();
     let have = &net.filter;
     if have.pushed && have.addrs.get(..have.len) == Some(&*wanted) {
+        return;
+    }
+    // A driver process's card takes the list itself, and puts the latest
+    // in force (port::set_mcast).
+    if port::set_mcast(false, wanted) {
+        net.filter = McastFilter {
+            addrs: set,
+            len,
+            pushed: true,
+        };
         return;
     }
     if syscall2(SYS_NET_RAW_MCAST, wanted.as_ptr() as u64, len as u64) < 0 {
@@ -5606,6 +5617,8 @@ const NIC_NO_ADDRESS: i64 = nic_exit(check::NO_ADDRESS);
 const NIC_NO_GATEWAY: i64 = nic_exit(check::NO_GATEWAY);
 const NIC_PINGS_LOST: i64 = nic_exit(check::PINGS_LOST);
 const NIC_TURNED_AWAY: i64 = nic_exit(check::TURNED_AWAY);
+const NIC_LINK: i64 = nic_exit(check::LINK);
+const NIC_MCAST: i64 = nic_exit(check::MCAST);
 
 /// An exit code as `exit` takes it.
 const fn nic_exit(code: i32) -> i64 {
@@ -5622,8 +5635,11 @@ const PERMISSION_DENIED: i64 = -400;
 /// from the network beyond the card; the gateway resolved by ARP; then
 /// [`NIC_PINGS`] pings of [`NIC_PING_BYTES`] bytes, [`NIC_BURST`] at a time,
 /// each answered within a second -- sent again once if not -- with its
-/// payload as sent. The exit code says what failed, 0 for nothing.
-fn nic_check(service: &[u8]) -> i64 {
+/// payload as sent; the card's link told up; its multicast filter as the
+/// daemon lists it ([`nic_check_mcast`]); and, with `cable`, the link
+/// following the card's cable out and back in ([`nic_check_cable`]). The
+/// exit code says what failed, 0 for nothing.
+fn nic_check(service: &[u8], cable: bool) -> i64 {
     let say = |what: &[u8]| {
         Line::new()
             .put(b"[netstack] nic-check: ")
@@ -5651,7 +5667,7 @@ fn nic_check(service: &[u8]) -> i64 {
                 .dec(now_ns().saturating_sub(began) / 1_000_000)
                 .put(b" ms)\n")
                 .print();
-            return if e.turned_away {
+            return if e.refused == Some(netipc::nicport::REFUSED_NO_KEY) {
                 NIC_TURNED_AWAY
             } else {
                 NIC_NO_CARD
@@ -5754,9 +5770,206 @@ fn nic_check(service: &[u8]) -> i64 {
         say(b"FAIL: answers waited on no doorbell, or pings had to be sent again too often");
         return NIC_PINGS_LOST;
     }
+    // Told right after the attach message, and read in the waits since.
+    if port::link() != Some(true) {
+        say(b"FAIL: the card's driver did not say its link is up");
+        return NIC_LINK;
+    }
+    if let Err(why) = nic_check_mcast(&me) {
+        say(why.as_bytes());
+        return NIC_MCAST;
+    }
+    if !cable {
+        say(b"the cable is not pulled: nothing here can pull it");
+    } else if let Err(why) = nic_check_cable(&me) {
+        say(why.as_bytes());
+        return NIC_LINK;
+    }
     port::detach();
     say(b"SUCCESS");
     NIC_OK
+}
+
+/// How long `nic-check` gives the network to advertise a router that is
+/// not to come through, and how long one that is.
+const NIC_QUIET_NS: u64 = 1_500_000_000;
+const NIC_ADVERT_NS: u64 = 3_000_000_000;
+/// How often a solicitation is sent while advertisements are looked for.
+const NIC_SOLICIT_EVERY_NS: u64 = 500_000_000;
+
+/// The card's multicast filter as the daemon lists it, checked with router
+/// advertisements -- which QEMU's network, beyond the card, sends to all
+/// nodes (ff02::1, 33:33:00:00:00:01) whenever a router is solicited: none
+/// passes while the list is empty, as when the card was opened; one does
+/// once all-nodes is listed; none again once the list is emptied. The
+/// driver answers each list before the card is tried.
+fn nic_check_mcast(me: &IfInfo) -> Result<(), &'static str> {
+    let all_nodes = mld::multicast_mac(&icmpv6::ALL_NODES_LINK_LOCAL);
+    let before = advertisements(me, NIC_QUIET_NS, false)?;
+    mcast_in_force(me, &[all_nodes])?;
+    let listed = advertisements(me, NIC_ADVERT_NS, true)?;
+    mcast_in_force(me, &[])?;
+    let after = advertisements(me, NIC_QUIET_NS, false)?;
+    Line::new()
+        .put(b"[netstack] nic-check: router advertisements to all nodes: ")
+        .dec(before)
+        .put(b" before the card listed the group, ")
+        .dec(listed)
+        .put(b" once it did, ")
+        .dec(after)
+        .put(b" once it no longer did\n")
+        .print();
+    if before != 0 || after != 0 {
+        return Err("FAIL: the card passed a multicast group it was not listed");
+    }
+    if listed == 0 {
+        return Err("FAIL: the card did not pass a multicast group it was listed");
+    }
+    Ok(())
+}
+
+/// `addrs` made the card's multicast list, and the driver's answer that it
+/// is in force waited for, two seconds at most -- frames that come
+/// meanwhile taken, advertisements not counted.
+fn mcast_in_force(me: &IfInfo, addrs: &[[u8; 6]]) -> Result<(), &'static str> {
+    if !port::set_mcast(false, addrs) {
+        return Err("FAIL: no card to give a multicast list");
+    }
+    let deadline = now_ns().saturating_add(2_000_000_000);
+    loop {
+        match port::mcast_settled() {
+            Some(0) => return Ok(()),
+            Some(_) => {
+                return Err("FAIL: the card's driver could not put a multicast list in force");
+            }
+            None if now_ns() >= deadline => {
+                return Err("FAIL: the card's driver did not answer a multicast list within 2 s");
+            }
+            None => {}
+        }
+        if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
+            return Err("FAIL: the card's driver went away");
+        }
+        let _advertisements = take_frames(Some(me));
+    }
+}
+
+/// Routers solicited from the card for `within_ns` -- a solicitation every
+/// [`NIC_SOLICIT_EVERY_NS`] -- and the advertisements to all nodes that
+/// came counted; with `first`, done at the first.
+fn advertisements(me: &IfInfo, within_ns: u64, first: bool) -> Result<u64, &'static str> {
+    let mut rs = [0u8; 16];
+    let n = icmpv6::write_router_solicitation(
+        &mut rs,
+        &me.ip6,
+        &icmpv6::ALL_ROUTERS_LINK_LOCAL,
+        &me.mac,
+    )
+    .ok_or("FAIL: no room for a router solicitation")?;
+    let to = mld::multicast_mac(&icmpv6::ALL_ROUTERS_LINK_LOCAL);
+    let deadline = now_ns().saturating_add(within_ns);
+    let mut next = 0;
+    let mut seen = 0;
+    while now_ns() < deadline && !(first && seen != 0) {
+        if now_ns() >= next {
+            // Neighbour discovery's messages carry a hop limit of 255
+            // (RFC 4861 6.1.2): a router drops any other.
+            let rs = rs.get(..n).unwrap_or(&[]);
+            if !send_ipv6_hops(
+                me,
+                &to,
+                &icmpv6::ALL_ROUTERS_LINK_LOCAL,
+                icmpv6::NH_ICMPV6,
+                rs,
+                255,
+            ) {
+                return Err("FAIL: a router solicitation could not be sent");
+            }
+            next = now_ns().saturating_add(NIC_SOLICIT_EVERY_NS);
+        }
+        let until = deadline.min(next);
+        if port::wait(until.saturating_sub(now_ns())) == port::Woke::Gone {
+            return Err("FAIL: the card's driver went away");
+        }
+        seen += take_frames(Some(me));
+    }
+    Ok(seen)
+}
+
+/// The card's link following its cable: the harness asked to pull it --
+/// the boot test does, through QEMU's monitor, at the line "cable: pull
+/// it" -- the link told down; asked to plug it back, told up; and the
+/// gateway answering ARP again, frames flowing once more. 20 s for each.
+fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
+    const WITHIN_NS: u64 = 20_000_000_000;
+    print("[netstack] nic-check: cable: pull it\n");
+    let down = link_becomes(false, me, WITHIN_NS)
+        .ok_or("FAIL: the card's link was not told down within 20 s of its cable being pulled")?;
+    print("[netstack] nic-check: cable: plug it back\n");
+    let up = link_becomes(true, me, WITHIN_NS).ok_or(
+        "FAIL: the card's link was not told up within 20 s of its cable being plugged back",
+    )?;
+    if (0..5).find_map(|_| arp_resolve(&me.gateway, me)).is_none() {
+        return Err("FAIL: the gateway did not answer ARP once the cable was back");
+    }
+    Line::new()
+        .put(b"[netstack] nic-check: the link went down ")
+        .dec(down / 1_000_000)
+        .put(b" ms after the cable was pulled and up ")
+        .dec(up / 1_000_000)
+        .put(b" ms after it was plugged back, and the gateway answered again\n")
+        .print();
+    Ok(())
+}
+
+/// How long until the driver tells the card's link `up` (or down): `None`
+/// past `within_ns`, or when the card has gone.
+fn link_becomes(up: bool, me: &IfInfo, within_ns: u64) -> Option<u64> {
+    let began = now_ns();
+    let deadline = began.saturating_add(within_ns);
+    while port::link() != Some(up) {
+        if now_ns() >= deadline || port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone
+        {
+            return None;
+        }
+        let _advertisements = take_frames(Some(me));
+    }
+    Some(now_ns().saturating_sub(began))
+}
+
+/// Every frame received so far taken: how many were router advertisements
+/// to all nodes. The rest are handled as the daemon handles any, when `me`
+/// is given -- an ARP request for our address answered, say -- else
+/// dropped. (`port::wait` returns at once while a frame waits unread, so a
+/// loop waiting on the card takes them all.)
+fn take_frames(me: Option<&IfInfo>) -> u64 {
+    let mut frame = [0u8; MAX_FRAME];
+    let mut advertisements = 0;
+    loop {
+        let Ok(n) = usize::try_from(raw_rx(&mut frame)) else {
+            return advertisements;
+        };
+        let Some(bytes) = frame.get(..n) else {
+            continue;
+        };
+        if is_advertisement_to_all_nodes(bytes) {
+            advertisements += 1;
+        } else if let Some(me) = me {
+            let _ = handle_frame(bytes, me);
+        }
+    }
+}
+
+/// Whether `frame` is an ICMPv6 router advertisement to all nodes.
+fn is_advertisement_to_all_nodes(frame: &[u8]) -> bool {
+    let Some(eth) = ethernet::Frame::parse(frame) else {
+        return false;
+    };
+    let ip = eth.payload;
+    eth.ethertype == ethernet::ETHERTYPE_IPV6
+        && ip.get(6) == Some(&icmpv6::NH_ICMPV6)
+        && ip.get(24..40) == Some(&icmpv6::ALL_NODES_LINK_LOCAL[..])
+        && ip.get(ipv6::HEADER_LEN) == Some(&icmpv6::TYPE_ROUTER_ADVERTISEMENT)
 }
 
 /// What a DHCP server answered: the address offered or acknowledged, and
@@ -6048,7 +6261,10 @@ pub extern "C" fn _start() -> ! {
     let args = &block[..fetched];
     let mode = arg(args, 1);
     if mode == b"nic-check" {
-        exit(nic_check(arg(args, 2)));
+        // `nic-check <service> [cable]`: with "cable", something outside
+        // can pull the card's cable when asked (the boot test, through
+        // QEMU's monitor).
+        exit(nic_check(arg(args, 2), arg(args, 3) == b"cable"));
     }
 
     let me = match query_if_info() {

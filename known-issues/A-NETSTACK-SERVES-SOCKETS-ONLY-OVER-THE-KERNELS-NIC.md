@@ -1,0 +1,39 @@
+## A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC (lane A, 2026-10-29) — OPEN
+
+**Status:** OPEN
+
+**What is wrong.** The netstack daemon can attach to a card a Linux driver
+process serves (design-decisions 1589), but only its `nic-check` mode -- the
+boot test's -- ever does. Its serving mode, the one that answers the
+sockets of every other process, still uses the kernel's NIC alone, so a
+card only a driver process drives carries no socket's traffic.
+
+What stands between the two:
+
+- **No one NIC interface.** The daemon's NIC calls pick per call: `raw_tx`
+  and `raw_rx` go to the port when one is attached, `sync_mcast_filter`
+  likewise; `query_if_info`, `raw_open` and `raw_close` are the kernel's
+  only. The proper shape is one NIC chosen once at start-up -- the kernel's,
+  or a port named on the command line or by configuration -- behind which
+  every call goes, with the address configuration coming from the kernel's
+  for the one and the daemon's own DHCP for the other.
+- **The link is learnt and not acted on.** `port::link()` reports the
+  driver's word, but nothing in the daemon reacts: a link that comes back
+  should make the daemon confirm its lease (RFC 2131 INIT-REBOOT) and send
+  its gratuitous ARP and IPv6 neighbour advertisements again; a link down
+  should fail sends at once rather than let them queue in the driver.
+- **Choosing a card.** Nothing yet says which `nic.<name>` the daemon
+  should attach to; with several cards, which are the daemon's.
+
+**Where.** `services/netstack/src/main.rs` (`main`'s serving path,
+`query_if_info`, `raw_*`, `sync_mcast_filter`) and
+`services/netstack/src/port.rs`.
+
+**Who sees it.** No one yet: no machine's only card is a driver process's.
+It bites the first time one is -- the test PC's WiFi, say, once a Linux
+WiFi driver serves it.
+
+**The proper fix.** As above: a `nic` module in the daemon with one
+implementation per kind, chosen once; the serving mode attaching to a port
+when told to; the link's changes acted on as a host does on a cable
+plugged back.

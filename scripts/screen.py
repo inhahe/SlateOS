@@ -5,7 +5,12 @@
     python scripts/screen.py type (--hmp PORT | --qmp PORT) TEXT     # `\\n` in TEXT is Enter
     python scripts/screen.py text SCREEN.ppm|SCREEN.png              # the console's text
     python scripts/screen.py probe (--hmp PORT | --qmp PORT) [--timeout 120] [--keep DIR]
+    python scripts/screen.py hmp --hmp PORT COMMAND                  # e.g. "set_link net3 off"
     python scripts/screen.py --self-test
+
+`hmp` runs one other HMP command through the same client -- the boot test
+pulls a card's cable with it -- and prints what QEMU printed, which for most
+commands is nothing on success; exit 1 when it printed anything.
 
 Design decision 1392 makes "a boot test that boots to the desktop and checks
 it, with QEMU's screen capture and simulated input" lane A's step on the path
@@ -786,7 +791,23 @@ def main(argv: list[str]) -> int:
     p.add_argument("--timeout", type=float, default=120.0)
     p.add_argument("--keep", metavar="DIR", help="keep the last screen there, as probe.png "
                    "and probe.txt")
+    p = sub.add_parser("hmp", help="run one HMP command; exit 1 if QEMU printed anything")
+    p.add_argument("--hmp", type=int, metavar="PORT", required=True,
+                   help="QEMU's text monitor (-monitor tcp:)")
+    p.add_argument("command")
     args = ap.parse_args(argv)
+
+    if args.verb == "hmp":
+        try:
+            with Monitor("hmp", args.hmp) as mon:
+                said = mon.hmp(args.command)
+        except MonitorError as e:
+            print(f"screen: {e}", file=sys.stderr)
+            return 2
+        if said:
+            print(said)
+            return 1
+        return 0
 
     if args.verb == "text":
         try:

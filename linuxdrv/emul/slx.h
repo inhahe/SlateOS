@@ -99,11 +99,20 @@ void slx_pci_irq_listen(long handle, _Bool on);
  *                        or an error (-400 for a process without the
  *                        capability for the name, -501 for a name taken);
  *   slx_nicport_turn     a turn of the loop, between tasks, the clock
- *                        reading `now_ns`: the stack's connection seen to;
- *                        whether the task serving the card has something
- *                        to do;
- *   slx_nicport_work     whether it has, nothing changed: frames to send,
- *                        a stack gone, or the card no longer served;
+ *                        reading `now_ns` and the card's link `link`: the
+ *                        stack's connection seen to, the link told it when
+ *                        it changed; whether the task serving the card has
+ *                        something to do;
+ *   slx_nicport_work     whether it has, nothing changed: frames to send, a
+ *                        multicast list to put in force, a stack gone, or
+ *                        the card no longer served;
+ *   slx_nicport_mcast_next  the multicast list the stack sent: its count,
+ *                        its addresses written to `list` (six bytes each,
+ *                        SLX_NICPORT_MCAST_MAX at most), whether every
+ *                        multicast frame is wanted to `*all`; or -1 for
+ *                        none;
+ *   slx_nicport_mcast_done  it is in force (0) or failed (a negative errno),
+ *                        the stack is told;
  *   slx_nicport_serving  whether the card is still served (its listener
  *                        failed: no longer);
  *   slx_nicport_ended    how many stacks have gone since last asked;
@@ -119,8 +128,12 @@ void slx_pci_irq_listen(long handle, _Bool on);
  *                        negative `len`: not used, it stays posted.
  */
 long slx_nicport_open(const char *name, const unsigned char *mac, unsigned int mtu);
-_Bool slx_nicport_turn(unsigned long long now_ns);
+_Bool slx_nicport_turn(unsigned long long now_ns, _Bool link);
 _Bool slx_nicport_work(void);
+/* netipc::nicport::MCAST_MAX. */
+#define SLX_NICPORT_MCAST_MAX 64
+long slx_nicport_mcast_next(unsigned char *list, _Bool *all);
+void slx_nicport_mcast_done(int result);
 _Bool slx_nicport_serving(void);
 unsigned int slx_nicport_ended(void);
 long slx_nicport_tx_next(const void **frame);

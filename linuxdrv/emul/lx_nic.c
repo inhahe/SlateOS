@@ -23,7 +23,10 @@
  *   stack as the service "nic.<name>" (design-decisions 1589; the kit's
  *   nicport.rs). Every frame it receives is copied into the next slot the
  *   stack posted, from an rx handler, so nothing above the device is asked;
- *   every frame the stack submits is sent by the task. With "once" as well,
+ *   every frame the stack submits is sent by the task. The stack is told
+ *   the device's carrier as its link, and the multicast addresses it lists
+ *   become the device's own (dev_mc_add), until it lists others or leaves.
+ *   With "once" as well,
  *   the process ends when the first stack to attach has gone -- the
  *   kernel's self-test, which a warning from Linux code anywhere in the
  *   process fails -- and without, the card waits for the next.
@@ -223,12 +226,62 @@ static bool lx_nic_link(struct net_device *dev)
  */
 static unsigned long lx_nic_port_received, lx_nic_port_dropped, lx_nic_port_sent;
 static DECLARE_WAIT_QUEUE_HEAD(lx_nic_port_work);
+/* The device served, from before the turn hook is set. */
+static struct net_device *lx_nic_port_dev;
 
-/* The turn hook: the stack's connection seen to, the task woken for it. */
+/*
+ * The turn hook: the stack's connection seen to, the device's carrier its
+ * link -- set and cleared by the driver as Linux's own watchdog sees the
+ * card's -- and the task woken for it.
+ */
 static void lx_nic_port_turn(u64 now_ns)
 {
-	if (slx_nicport_turn(now_ns))
+	if (slx_nicport_turn(now_ns, netif_carrier_ok(lx_nic_port_dev)))
 		wake_up(&lx_nic_port_work);
+}
+
+/* Whether the device passes every multicast frame for the stack. */
+static bool lx_nic_allmulti;
+
+/*
+ * The multicast addresses `dev` passes made the `n` six-byte addresses at
+ * `list`, and every one with `all`, in place of the last: 0, or a negative
+ * errno -- the device then passing none of them, as if none were listed.
+ */
+static int lx_nic_set_mcast(struct net_device *dev, const u8 *list, long n, bool all)
+{
+	long i;
+	int err = 0;
+
+	rtnl_lock();
+	dev_mc_flush(dev);
+	for (i = 0; i < n && !err; i++)
+		err = dev_mc_add(dev, list + 6 * i);
+	if (!err && all != lx_nic_allmulti) {
+		err = dev_set_allmulti(dev, all ? 1 : -1);
+		if (!err)
+			lx_nic_allmulti = all;
+	}
+	if (err) {
+		dev_mc_flush(dev);
+		if (lx_nic_allmulti && !dev_set_allmulti(dev, -1))
+			lx_nic_allmulti = false;
+	}
+	/* dev_mc_add() writes the card's filter; an empty list writes none. */
+	dev_set_rx_mode(dev);
+	rtnl_unlock();
+	return err;
+}
+
+/* The multicast list the stack sent, if any, put in force and answered. */
+static void lx_nic_port_mcast(struct net_device *dev)
+{
+	static u8 list[6 * SLX_NICPORT_MCAST_MAX];
+	bool all;
+	long n = slx_nicport_mcast_next(list, &all);
+
+	if (n >= 0)
+		slx_nicport_mcast_done(lx_nic_set_mcast(dev, list, n, all));
 }
 
 /*
@@ -308,6 +361,7 @@ static int lx_nic_serve(struct net_device *dev, const char *name, bool once)
 		netdev_err(dev, "could not be served as nic.%s: %ld\n", name, err);
 		return -EPERM;
 	}
+	lx_nic_port_dev = dev;
 	lx_emul_turn_hook = lx_nic_port_turn;
 	netdev_info(dev, "%pM served to the network stack as nic.%s\n", dev->dev_addr, name);
 	for (;;) {
@@ -316,14 +370,19 @@ static int lx_nic_serve(struct net_device *dev, const char *name, bool once)
 			netdev_err(dev, "nic.%s is no longer served\n", name);
 			return -EPIPE;
 		}
+		lx_nic_port_mcast(dev);
 		while ((len = slx_nicport_tx_next(&frame)) > 0)
 			slx_nicport_tx_done(lx_nic_port_send(dev, frame, len));
 		if (slx_nicport_ended()) {
 			netdev_info(dev, "a network stack left: %lu frame(s) sent for it, %lu received, %lu dropped\n",
 				    lx_nic_port_sent, lx_nic_port_received, lx_nic_port_dropped);
 			lx_nic_card_counts(dev);
+			/* Its groups go with it: the next stack starts from none. */
+			err = lx_nic_set_mcast(dev, NULL, 0, false);
+			if (err)
+				netdev_err(dev, "the stack's multicast groups could not be dropped: %ld\n", err);
 			if (once)
-				return 0;
+				return err ? -EIO : 0;
 		}
 	}
 }

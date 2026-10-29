@@ -929,11 +929,12 @@ mod tests {
         // POLL_ERR is a distinct, positive, non-overlapping readiness bit.
         const { assert!(POLL_ERR > 0) };
         assert_eq!(POLL_ERR & (POLL_READABLE | POLL_WRITABLE), 0);
-        // POLL_COUNTED too: a reader testing any one bit must not see it, and a
-        // result carrying all four stays positive (not an errno).
+        // POLL_COUNTED too: a reader testing any one bit must not see it. A
+        // result carrying all four stays positive (not an errno) because each
+        // is: the sign bit is in none of them, so in no union of them.
         const { assert!(POLL_COUNTED > 0) };
         assert_eq!(POLL_COUNTED & (POLL_READABLE | POLL_WRITABLE | POLL_ERR), 0);
-        const { assert!((POLL_READABLE | POLL_WRITABLE | POLL_ERR | POLL_COUNTED) > 0) };
+        const { assert!(POLL_READABLE > 0 && POLL_WRITABLE > 0) };
     }
 
     #[test]

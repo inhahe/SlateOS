@@ -5510,9 +5510,11 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         (the device handle's MSI-X, §1587) and serves it to the netstack
         daemon over a shared-memory ring (§1589, `SYS_SHM_GRANT`), which
         takes an address by DHCP through it and has 400 full-size pings
-        answered (`linuxdrv::self_test`). Left: the overhead against the
-        native driver measured, and the card's link state carried to the
-        stack
+        answered (`linuxdrv::self_test`); the card's link and multicast
+        filter cross the port too (§1589 item 7), the boot test pulling its
+        cable through QEMU's monitor. Left: the overhead against the native
+        driver measured, and the daemon serving sockets over a port
+        (known-issues `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
         then how lane A's `net80211` meets `mac80211`/`cfg80211`
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge

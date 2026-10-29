@@ -97,7 +97,7 @@ pub fn wait_until(deadline: u64) -> Result<(), &'static str> {
 /// alone. An error when the card has gone, or the wait itself failed.
 pub fn wait_or_client(listener: u64, timeout_ns: u64) -> Result<(), &'static str> {
     if !over_card() {
-        return port::wait_listener(listener, timeout_ns)
+        return super::wait::listener(listener, timeout_ns)
             .map_err(|_| "FAIL: the service's listener could not be waited on");
     }
     match port::wait_or_client(listener, timeout_ns) {
@@ -130,7 +130,14 @@ pub fn mcast_refused() -> bool {
 /// kernel's NIC, which answers as it is told; on a driver process's card,
 /// once its driver has answered a list, the last without an error.
 pub fn mcast_in_force() -> bool {
-    !over_card() || (port::mcast_answers() > 0 && port::mcast_settled() == Some(0))
+    !over_card() || port::mcast_settled() == Some(0)
+}
+
+/// Whether the card's link is up: a driver process's card's as its driver
+/// last told it; the kernel's NIC's always, its link the kernel's own stack's
+/// to follow.
+pub fn link_up() -> bool {
+    !over_card() || port::link() == Some(true)
 }
 
 /// Whether a driver process's card's link has come back up since it was

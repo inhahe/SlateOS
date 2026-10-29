@@ -240,40 +240,28 @@ pub fn build_discover(out: &mut [u8], xid: u32, chaddr: &MacAddr) -> Option<usiz
     finish(out, pos)
 }
 
-/// Build a DHCPREQUEST accepting `requested_ip` from server `server_id`,
-/// writing into `out`. Returns the message length.
+/// Build a DHCPREQUEST for MAC `chaddr`, transaction `xid`, asking for
+/// `requested_ip`, writing into `out`. Returns the message length.
+///
+/// With `server_id`, it accepts that server's offer (SELECTING). Without, it
+/// is the request of a client in INIT-REBOOT (RFC 2131 §4.3.2) -- asking to
+/// keep an address it had, once its link has come back, say -- which names
+/// no server and leaves `ciaddr` zero, as §4.3.2 says; a server that knows
+/// the address is no longer the client's answers DHCPNAK.
 #[must_use]
 pub fn build_request(
     out: &mut [u8],
     xid: u32,
     chaddr: &MacAddr,
     requested_ip: &Ipv4Addr,
-    server_id: &Ipv4Addr,
+    server_id: Option<&Ipv4Addr>,
 ) -> Option<usize> {
     let mut pos = write_fixed(out, xid, chaddr, true)?;
     pos = push_option(out, pos, OPT_MSG_TYPE, &[REQUEST])?;
     pos = push_option(out, pos, OPT_REQUESTED_IP, requested_ip)?;
-    pos = push_option(out, pos, OPT_SERVER_ID, server_id)?;
-    pos = push_option(out, pos, OPT_PARAM_REQUEST, &PARAM_REQUEST_LIST)?;
-    finish(out, pos)
-}
-
-/// Build the DHCPREQUEST of a client in INIT-REBOOT (RFC 2131 §4.3.2) for MAC
-/// `chaddr`, transaction `xid`: asking to keep `requested_ip`, an address it
-/// had, without naming a server -- once its link has come back, say. Its
-/// `ciaddr` stays zero and it carries no server identifier, as §4.3.2 says;
-/// a server that knows the address is no longer the client's answers
-/// DHCPNAK. Returns the message length.
-#[must_use]
-pub fn build_reboot_request(
-    out: &mut [u8],
-    xid: u32,
-    chaddr: &MacAddr,
-    requested_ip: &Ipv4Addr,
-) -> Option<usize> {
-    let mut pos = write_fixed(out, xid, chaddr, true)?;
-    pos = push_option(out, pos, OPT_MSG_TYPE, &[REQUEST])?;
-    pos = push_option(out, pos, OPT_REQUESTED_IP, requested_ip)?;
+    if let Some(server_id) = server_id {
+        pos = push_option(out, pos, OPT_SERVER_ID, server_id)?;
+    }
     pos = push_option(out, pos, OPT_PARAM_REQUEST, &PARAM_REQUEST_LIST)?;
     finish(out, pos)
 }
@@ -287,13 +275,26 @@ mod tests {
     #[test]
     fn reboot_request_asks_for_the_address_and_names_no_server() {
         let mut buf = [0u8; 300];
-        let n = build_reboot_request(&mut buf, 7, &MAC, &[10, 0, 2, 15]).unwrap();
+        let n = build_request(&mut buf, 7, &MAC, &[10, 0, 2, 15], None).unwrap();
         let m = Message::parse(&buf[..n]).unwrap();
         assert_eq!(m.msg_type(), Some(REQUEST));
         assert_eq!(m.xid, 7);
         assert_eq!(m.option(OPT_REQUESTED_IP), Some(&[10, 0, 2, 15][..]));
         assert_eq!(m.server_id(), None, "INIT-REBOOT names no server");
         assert_eq!(&buf[12..16], &[0, 0, 0, 0], "ciaddr stays zero");
+    }
+
+    #[test]
+    fn a_request_with_no_room_is_refused() {
+        // Shorter than the fixed area, then with room for it but not the options.
+        assert_eq!(
+            build_request(&mut [0u8; 100], 1, &MAC, &[10, 0, 2, 15], None),
+            None
+        );
+        assert_eq!(
+            build_request(&mut [0u8; 244], 1, &MAC, &[10, 0, 2, 15], None),
+            None
+        );
     }
 
     #[test]
@@ -313,7 +314,7 @@ mod tests {
     #[test]
     fn request_carries_requested_ip_and_server() {
         let mut buf = [0u8; 300];
-        let n = build_request(&mut buf, 1, &MAC, &[10, 0, 2, 15], &[10, 0, 2, 2]).unwrap();
+        let n = build_request(&mut buf, 1, &MAC, &[10, 0, 2, 15], Some(&[10, 0, 2, 2])).unwrap();
         let m = Message::parse(&buf[..n]).unwrap();
         assert_eq!(m.msg_type(), Some(REQUEST));
         assert_eq!(m.option(OPT_REQUESTED_IP), Some(&[10, 0, 2, 15][..]));

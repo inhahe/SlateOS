@@ -330,6 +330,9 @@ mod port;
 /// The daemon's card, chosen once: every use of it after.
 mod nic;
 
+/// Waiting on several kernel objects at once (`SYS_WAIT_MULTIPLE`).
+mod wait;
+
 /// In-process software loopback for frames the daemon sends to *its own IP*.
 ///
 /// The daemon is otherwise a pure NIC client: everything it emits goes out the
@@ -338,15 +341,15 @@ mod nic;
 /// [`Listener`] in the *same* daemon, the SYN/data/ACK/FIN frames must circulate
 /// internally rather than hit slirp (which silently drops a host-to-self packet).
 ///
-/// [`raw_tx`] calls [`maybe_divert`](loopback::maybe_divert): if the outgoing
+/// [`nic::send`] calls [`maybe_divert`](loopback::maybe_divert): if the outgoing
 /// frame is IPv4 with `dst == my_ip` (and `my_ip` has been set), the whole frame
-/// is copied into a small FIFO and *not* sent on the NIC. [`raw_rx`] calls
+/// is copied into a small FIFO and *not* sent on the NIC. [`nic::recv`] calls
 /// [`maybe_deliver`](loopback::maybe_deliver) first, draining that FIFO ahead of
 /// the physical NIC. The demux downstream matches by IP + 4-tuple, so both ends of
 /// a loopback connection coexist in the one daemon without collision.
 ///
 /// Single-threaded daemon → a plain `static mut` guarded by a "not reentrant"
-/// discipline (we never hold a `&`/`&mut` across a `raw_tx`/`raw_rx`) is sound; the
+/// discipline (we never hold a `&`/`&mut` across a `nic::send`/`nic::recv`) is sound; the
 /// accessors below encapsulate every `unsafe`.
 mod loopback {
     use super::MAX_FRAME;
@@ -376,7 +379,7 @@ mod loopback {
     };
 
     /// Record our IP so loopback can recognise self-addressed frames. Called once
-    /// at startup before any `raw_tx`/`raw_rx`.
+    /// at startup before any `nic::send`/`nic::recv`.
     pub fn set_my_ip(ip: [u8; 4]) {
         // SAFETY: single-threaded daemon; no borrow of STATE is live across this
         // call, and this runs at startup before the serve loop begins.
@@ -2611,9 +2614,11 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
         print("[netstack] FAIL: the DNS server's next hop never answered ARP: nothing was sent\n");
         code = NIC_NO_GATEWAY;
     }
-    // Nor did one whose card never put its multicast filter in force: its
-    // neighbour discovery and multicast sockets got nothing.
-    if !persistent && code == 0 && !nic::mcast_in_force() {
+    // Nor did one whose card never put its multicast filter in force --
+    // the kernel refusing it (`net.filter.pushed`) or a driver's card not
+    // answering it in force: its neighbour discovery and multicast sockets
+    // got nothing.
+    if !persistent && code == 0 && !(net.filter.pushed && nic::mcast_in_force()) {
         print("[netstack] FAIL: the card never put the multicast filter in force\n");
         code = NIC_MCAST;
     }
@@ -2662,11 +2667,16 @@ fn next_client(
                 pump(net, me, mac);
             }
             // Without a next hop nothing can be sent, retransmissions
-            // included; what came is answered as any frame is -- an ARP
-            // request for our address -- rather than left to end every
-            // wait at once.
+            // included; what came is answered as the link expects -- an ARP
+            // request or a neighbour solicitation for our address, a ping --
+            // rather than left to end every wait at once.
             None => {
-                let _advertisements = take_frames(Some(me));
+                let mut frame = [0u8; MAX_FRAME];
+                while let Ok(n) = usize::try_from(nic::recv(&mut frame)) {
+                    if let Some(bytes) = frame.get(..n) {
+                        answer_link(bytes, me);
+                    }
+                }
             }
         }
         let left = deadline.saturating_sub(now_ns());
@@ -2674,9 +2684,17 @@ fn next_client(
             return Ok(None);
         }
         nic::wait_or_client(listener, left)?;
-        if nic::take_link_back() {
-            relink(me)?;
-            print("[netstack] the card's link came back: lease confirmed, addresses announced\n");
+        // A link come back, once it is up: one gone down again first waits
+        // for its next return.
+        if nic::link_up() && nic::take_link_back() {
+            print(match relink(me)? {
+                Relinked::Confirmed => {
+                    "[netstack] the card's link came back: lease confirmed, addresses announced\n"
+                }
+                Relinked::Kept => {
+                    "[netstack] the card's link came back: no DHCP answer, the lease kept; addresses announced\n"
+                }
+            });
         }
     }
 }
@@ -3140,11 +3158,8 @@ fn answer_icmpv6(body: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
     if ip.next_header != icmpv6::NH_ICMPV6 {
         return;
     }
-    let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
     let mut out = [0u8; MAX_FRAME];
-    let Some(l4) = out.get_mut(l4_off..) else {
-        return;
-    };
+    let l4 = out.as_mut_slice();
     let (dst, eth_dst, hop_limit, len) =
         if ip.payload.first() == Some(&icmpv6::TYPE_NEIGHBOR_SOLICITATION) {
             // Only from this link (hop limit 255), and a duplicate-address check
@@ -3180,19 +3195,10 @@ fn answer_icmpv6(body: &[u8], src_mac: &[u8; 6], me: &IfInfo) {
         } else {
             return;
         };
-    let hdr = ipv6::Builder {
-        traffic_class: 0,
-        flow_label: 0,
-        next_header: icmpv6::NH_ICMPV6,
-        hop_limit,
-        src: me.ip6,
-        dst,
-    }
-    .build_header(len as u16);
-    out[ethernet::HEADER_LEN..l4_off].copy_from_slice(&hdr);
-    ethernet::write_header(&mut out, &eth_dst, &me.mac, ethernet::ETHERTYPE_IPV6);
     // A lost answer is asked for again.
-    let _ = nic::send(&out[..l4_off + len]);
+    let _sent = out
+        .get(..len)
+        .is_some_and(|l4| send_ipv6_hops(me, &eth_dst, &dst, icmpv6::NH_ICMPV6, l4, hop_limit));
 }
 
 /// Classify a frame as a router's membership query: an IGMP Membership
@@ -5786,7 +5792,7 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
     }
     if !cable {
         say(b"the cable is not pulled: nothing here can pull it");
-    } else if let Err(why) = nic_check_cable(&me) {
+    } else if let Err(why) = nic_check_cable(&me, &gateway_mac) {
         say(why.as_bytes());
         return NIC_LINK;
     }
@@ -5920,7 +5926,7 @@ const BENCH_LOST_MOST: u64 = 5;
 /// [`NIC_BURST`], how long each answer took on average over the bursts
 /// answered whole. Printed as process benchmark lines ([`bench_score`]) and
 /// in a line of prose. Each card is waited on as fast as it can be
-/// ([`nic_wait`]): a driver process's by its doorbell, as the daemon's
+/// ([`nic::wait_until`]): a driver process's by its doorbell, as the daemon's
 /// serving loops wait on it; the kernel's by reading it again after
 /// yielding once, sooner than those loops, which sleep [`POLL_SLEEP_NS`]
 /// after reading nothing -- the kernel's card's best case. A ping
@@ -6228,20 +6234,27 @@ fn advertisements(me: &IfInfo, within_ns: u64, first: bool) -> Result<u64, &'sta
 
 /// The card's link following its cable: the harness asked to pull it --
 /// the boot test does, through QEMU's monitor, at the line "cable: pull
-/// it" -- the link told down, and a frame sent then refused at once; asked
-/// to plug it back, told up, its coming back noticed and acted on -- the
-/// lease confirmed, our addresses announced ([`relink`]) -- and the gateway
-/// answering ARP again, frames flowing once more. 20 s for each.
-fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
+/// it" -- the link told down, and a ping sent then dropped, as on a wire
+/// with nothing at its end; asked to plug it back, told up, its coming back
+/// noticed and acted on -- the lease confirmed, our addresses announced
+/// ([`relink`]) -- the gateway answering ARP again, frames flowing once
+/// more, and the ping sent while the link was down never answered: had it
+/// been queued, it would have gone out once the link was back. 20 s for
+/// each.
+fn nic_check_cable(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
     const WITHIN_NS: u64 = 20_000_000_000;
+    /// The ping sent with the cable out: past every other check's.
+    const CABLE_SEQ: usize = 30_000;
     print("[netstack] nic-check: cable: pull it\n");
     let down = link_becomes(false, me, WITHIN_NS).map_err(|gone| {
         gone.unwrap_or(
             "FAIL: the card's link was not told down within 20 s of its cable being pulled",
         )
     })?;
-    if nic::send(&arp::request(&me.mac, &me.ip, &me.gateway)) != port::NET_DOWN {
-        return Err("FAIL: a frame sent with the card's link down was not refused at once");
+    let dropped = port::dropped_while_down();
+    send_ping(me, gateway_mac, CABLE_SEQ)?;
+    if port::dropped_while_down() != dropped + 1 {
+        return Err("FAIL: a frame sent with the card's link down was not dropped");
     }
     print("[netstack] nic-check: cable: plug it back\n");
     let up = link_becomes(true, me, WITHIN_NS).map_err(|gone| {
@@ -6249,87 +6262,104 @@ fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
             "FAIL: the card's link was not told up within 20 s of its cable being plugged back",
         )
     })?;
-    if !port::take_link_back() {
+    if !nic::take_link_back() {
         return Err("FAIL: the card's link coming back was not noticed");
     }
-    relink(me)?;
+    if relink(me)? != Relinked::Confirmed {
+        return Err("FAIL: no DHCP server answered the INIT-REBOOT once the cable was back");
+    }
     if (0..5).find_map(|_| arp_resolve(&me.gateway, me)).is_none() {
         return Err("FAIL: the gateway did not answer ARP once the cable was back");
+    }
+    let mut stale = [false];
+    if bench_wait(
+        me,
+        CABLE_SEQ,
+        &mut stale,
+        now_ns().saturating_add(1_000_000_000),
+    )? {
+        return Err("FAIL: a ping sent with the card's link down went out once it was back");
     }
     Line::new()
         .put(b"[netstack] nic-check: the link went down ")
         .dec(down / 1_000_000)
-        .put(b" ms after the cable was pulled, a send then refused at once, and up ")
+        .put(b" ms after the cable was pulled, a ping then dropped, and up ")
         .dec(up / 1_000_000)
-        .put(b" ms after it was plugged back; the lease was confirmed, the addresses announced, and the gateway answered again\n")
+        .put(b" ms after it was plugged back; the lease was confirmed, the addresses announced, the gateway answered again, and the dropped ping never went out\n")
         .print();
     Ok(())
 }
 
-/// The card's link back after it went down ([`port::take_link_back`]): the
-/// lease confirmed -- RFC 2131's INIT-REBOOT, a DHCPREQUEST for our address
+/// What renewing the lease once the card's link came back ([`relink`]) found.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Relinked {
+    /// The DHCP server confirmed the address.
+    Confirmed,
+    /// No server answered: the unexpired lease is kept, as RFC 2131 §3.2
+    /// lets a client in INIT-REBOOT that hears neither ACK nor NAK.
+    Kept,
+}
+
+/// The card's link back after it went down ([`nic::take_link_back`]): the
+/// lease renewed -- RFC 2131's INIT-REBOOT, a DHCPREQUEST for our address
 /// naming no server -- and our addresses announced again, a gratuitous ARP
 /// for the IPv4 one and an unsolicited neighbour advertisement for the IPv6
-/// one, what the link's other end knew of us perhaps gone with the link. An
-/// error when the server refused the address -- it is no longer ours -- or
-/// confirmed another, or did not answer, or an announcement could not be
-/// sent.
-fn relink(me: &IfInfo) -> Result<(), &'static str> {
+/// one, what the link's other end knew of us perhaps gone with the link.
+/// Whether the server confirmed the address or none answered; an error when
+/// it refused the address -- it is no longer ours -- or confirmed another,
+/// or a message could not be sent.
+fn relink(me: &IfInfo) -> Result<Relinked, &'static str> {
     use netproto::dhcp;
-    let mac = me.mac;
-    let xid = (now_ns() as u32) ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+    let xid = dhcp_xid(&me.mac);
     let mut msg = [0u8; 320];
-    let n = dhcp::build_reboot_request(&mut msg, xid, &mac, &me.ip)
+    let n = dhcp::build_request(&mut msg, xid, &me.mac, &me.ip, None)
         .ok_or("FAIL: no room for a DHCPREQUEST")?;
-    let ack = dhcp_exchange(me, &msg[..n], xid, dhcp::ACK)?;
-    if ack.ip != me.ip {
-        return Err("FAIL: the DHCP server confirmed another address once the link came back");
-    }
+    // Frames that come meanwhile are answered as the link expects -- an ARP
+    // request for our address, likely just after the link came back.
+    let answer = |frame: &[u8]| answer_link(frame, me);
+    let relinked = match dhcp_exchange(me.mac, &msg[..n], xid, dhcp::ACK, answer) {
+        Ok(ack) if ack.ip == me.ip => Relinked::Confirmed,
+        Ok(_) => {
+            return Err("FAIL: the DHCP server confirmed another address once the link came back");
+        }
+        Err(DhcpFailed::NoAnswer) => Relinked::Kept,
+        Err(failed) => return Err(failed.why()),
+    };
     if nic::send(&arp::request(&me.mac, &me.ip, &me.ip)) < 0 {
         return Err("FAIL: the gratuitous ARP could not be sent once the link came back");
     }
     if !announce_ip6(me) {
         return Err("FAIL: the neighbour advertisement could not be sent once the link came back");
     }
-    Ok(())
+    Ok(relinked)
 }
 
 /// Our IPv6 link-local address announced to every node on the link: an
 /// unsolicited neighbour advertisement (RFC 4861 §7.2.6), the override flag
 /// set and the solicited one clear. Whether it was sent.
 fn announce_ip6(me: &IfInfo) -> bool {
-    let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
-    let mut out = [0u8; MAX_FRAME];
+    let mut na = [0u8; 64];
     let dst = icmpv6::ALL_NODES_LINK_LOCAL;
-    let Some(len) = out.get_mut(l4_off..).and_then(|l4| {
-        icmpv6::write_neighbor_advertisement(
-            l4,
-            &me.ip6,
-            &dst,
-            &me.ip6,
-            icmpv6::NA_FLAG_OVERRIDE,
-            &me.mac,
-        )
-    }) else {
+    let Some(len) = icmpv6::write_neighbor_advertisement(
+        &mut na,
+        &me.ip6,
+        &dst,
+        &me.ip6,
+        icmpv6::NA_FLAG_OVERRIDE,
+        &me.mac,
+    ) else {
         return false;
     };
-    let hdr = ipv6::Builder {
-        traffic_class: 0,
-        flow_label: 0,
-        next_header: icmpv6::NH_ICMPV6,
-        hop_limit: icmpv6::NDP_HOP_LIMIT,
-        src: me.ip6,
-        dst,
-    }
-    .build_header(len as u16);
-    out[ethernet::HEADER_LEN..l4_off].copy_from_slice(&hdr);
-    ethernet::write_header(
-        &mut out,
-        &mld::multicast_mac(&dst),
-        &me.mac,
-        ethernet::ETHERTYPE_IPV6,
-    );
-    nic::send(&out[..l4_off + len]) >= 0
+    na.get(..len).is_some_and(|l4| {
+        send_ipv6_hops(
+            me,
+            &mld::multicast_mac(&dst),
+            &dst,
+            icmpv6::NH_ICMPV6,
+            l4,
+            icmpv6::NDP_HOP_LIMIT,
+        )
+    })
 }
 
 /// How long until the driver tells the card's link `up` (or down); or
@@ -6403,13 +6433,14 @@ struct Lease {
 fn dhcp_lease(me: &mut IfInfo) -> Result<(), &'static str> {
     use netproto::dhcp;
     let mac = me.mac;
-    let xid = (now_ns() as u32) ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+    let xid = dhcp_xid(&mac);
     let mut msg = [0u8; 320];
     let n = dhcp::build_discover(&mut msg, xid, &mac).ok_or("FAIL: no room for a DHCPDISCOVER")?;
-    let offer = dhcp_exchange(me, &msg[..n], xid, dhcp::OFFER)?;
-    let n = dhcp::build_request(&mut msg, xid, &mac, &offer.ip, &offer.server)
+    // Holding no address yet, there is nothing to answer for meanwhile.
+    let offer = dhcp_exchange(mac, &msg[..n], xid, dhcp::OFFER, |_| {}).map_err(|f| f.why())?;
+    let n = dhcp::build_request(&mut msg, xid, &mac, &offer.ip, Some(&offer.server))
         .ok_or("FAIL: no room for a DHCPREQUEST")?;
-    let ack = dhcp_exchange(me, &msg[..n], xid, dhcp::ACK)?;
+    let ack = dhcp_exchange(mac, &msg[..n], xid, dhcp::ACK, |_| {}).map_err(|f| f.why())?;
     me.ip = ack.ip;
     me.mask = ack.mask;
     me.gateway = ack.router;
@@ -6417,17 +6448,53 @@ fn dhcp_lease(me: &mut IfInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// `msg` broadcast from 0.0.0.0 until the server answers transaction `xid`
-/// with a message of type `want`: its lease. A DHCPNAK is a refusal.
-fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &'static str> {
+/// A DHCP transaction's id for the client of MAC `mac`: the time mixed with
+/// the MAC's last four bytes, so that two clients starting together differ.
+fn dhcp_xid(mac: &[u8; 6]) -> u32 {
+    (now_ns() as u32) ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]])
+}
+
+/// Why a DHCP exchange ended without the answer it waited for.
+#[derive(Clone, Copy)]
+enum DhcpFailed {
+    /// No server answered, the message sent five times a second apart.
+    NoAnswer,
+    /// The server refused it (DHCPNAK).
+    Refused,
+    /// It could not be done: a message not sent, an answer missing a part,
+    /// or the card gone.
+    Failed(&'static str),
+}
+
+impl DhcpFailed {
+    /// What went wrong, as the daemon's FAIL lines say it.
+    fn why(self) -> &'static str {
+        match self {
+            Self::NoAnswer => "FAIL: no answer from a DHCP server",
+            Self::Refused => "FAIL: the DHCP server refused (DHCPNAK)",
+            Self::Failed(why) => why,
+        }
+    }
+}
+
+/// `msg` broadcast from 0.0.0.0, by the client of MAC `mac`, until the
+/// server answers transaction `xid` with a message of type `want`: its
+/// lease. From 0.0.0.0 whatever address the client holds -- as RFC 2131 has
+/// a client send until it is sure of one, INIT-REBOOT included -- which is
+/// also the source the datagram's UDP checksum is written over. Every frame
+/// that is no DHCP reply is given to `other`.
+fn dhcp_exchange(
+    mac: [u8; 6],
+    msg: &[u8],
+    xid: u32,
+    want: u8,
+    mut other: impl FnMut(&[u8]),
+) -> Result<Lease, DhcpFailed> {
     use netproto::dhcp;
-    // From 0.0.0.0 whatever address `me` has -- as RFC 2131 has a client
-    // send until it is sure of one, INIT-REBOOT included -- so that the IP
-    // header agrees with the UDP checksum written below over that source.
-    let me = &card_if_info(me.mac);
+    let me = &card_if_info(mac);
     let mut datagram = [0u8; 400];
     let len = udp::write(&mut datagram, &[0; 4], &[255; 4], 68, 67, msg)
-        .ok_or("FAIL: no room for a DHCP datagram")?;
+        .ok_or(DhcpFailed::Failed("FAIL: no room for a DHCP datagram"))?;
     let mut frame = [0u8; MAX_FRAME];
     for attempt in 0..5u16 {
         if !send_ipv4(
@@ -6438,18 +6505,21 @@ fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &
             &datagram[..len],
             attempt,
         ) {
-            return Err("FAIL: a DHCP message could not be sent");
+            return Err(DhcpFailed::Failed("FAIL: a DHCP message could not be sent"));
         }
         let deadline = now_ns().saturating_add(1_000_000_000);
         while now_ns() < deadline {
-            nic::wait_until(deadline)?;
+            nic::wait_until(deadline).map_err(DhcpFailed::Failed)?;
             loop {
                 let n = nic::recv(&mut frame);
                 let Ok(n) = usize::try_from(n) else { break };
                 let Some(bytes) = frame.get(..n) else {
                     continue;
                 };
-                let Some(m) = dhcp_reply(bytes) else { continue };
+                let Some(m) = dhcp_reply(bytes) else {
+                    other(bytes);
+                    continue;
+                };
                 if m.op != dhcp::OP_REPLY || m.xid != xid {
                     continue;
                 }
@@ -6459,17 +6529,19 @@ fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &
                             ip: m.yiaddr,
                             server: m.server_id().unwrap_or(m.siaddr),
                             mask: m.subnet_mask().unwrap_or([255, 255, 255, 0]),
-                            router: m.router().ok_or("FAIL: the DHCP server named no router")?,
+                            router: m.router().ok_or(DhcpFailed::Failed(
+                                "FAIL: the DHCP server named no router",
+                            ))?,
                             dns: m.dns().unwrap_or([0; 4]),
                         });
                     }
-                    Some(dhcp::NAK) => return Err("FAIL: the DHCP server refused (DHCPNAK)"),
+                    Some(dhcp::NAK) => return Err(DhcpFailed::Refused),
                     _ => {}
                 }
             }
         }
     }
-    Err("FAIL: no answer from a DHCP server")
+    Err(DhcpFailed::NoAnswer)
 }
 
 /// The DHCP message `frame` carries to the client port, if it carries one.

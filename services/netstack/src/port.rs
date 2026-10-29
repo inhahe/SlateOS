@@ -31,6 +31,8 @@ use netipc::nicport::{
 use netipc::ring::{ERR_INVALID, ERR_MSG_SIZE, OP_RECV, OP_SEND, Sqe};
 use netring::Ring;
 
+use super::wait::{KIND_CHANNEL, KIND_SERVICE, WaitFailed, WaitItem, wait_multiple};
+
 use super::{
     E_WOULD_BLOCK, SHM_MAP_RW, SYS_CHANNEL_CLOSE, SYS_CHANNEL_RECV_TIMEOUT, SYS_CHANNEL_SEND,
     SYS_SHM_MAP, now_ns, sleep_ns, syscall1, syscall2, syscall3, syscall4,
@@ -42,19 +44,12 @@ const SYS_SHM_CLOSE: u64 = 232;
 const SYS_SHM_UNMAP: u64 = 234;
 const SYS_SERVICE_CONNECT: u64 = 281;
 const SYS_SHM_GRANT: u64 = 1190;
-const SYS_WAIT_MULTIPLE: u64 = 1066;
-/// `SYS_WAIT_MULTIPLE`'s kinds of a channel end and a service listener
-/// (`cap::ResourceType`), and `poll(2)`'s readable bit.
-const KIND_CHANNEL: u32 = 1;
-const KIND_SERVICE: u32 = 14;
-const POLLIN: u32 = 1;
-/// `poll(2)`'s bit for an item `SYS_WAIT_MULTIPLE` did not know.
-const POLLNVAL: u32 = 0x20;
 /// SlateOS's `NotFound` (no such service yet) and `ChannelClosed` (the
 /// driver has gone).
 const NOT_FOUND: i64 = -500;
 const CHANNEL_CLOSED: i64 = -300;
-/// What `send` answers once the card has gone: `ENETDOWN`.
+/// What `send` answers once the card has gone: `ENETDOWN`. (While its link
+/// is down a frame is dropped, as on a wire with nothing at its end.)
 pub const NET_DOWN: i64 = -100;
 /// The most slots a card's ring may have: the daemon's tables' size.
 const MAX_SLOTS: usize = 256;
@@ -97,10 +92,11 @@ struct Card {
     mcast_want: Option<McastList>,
     /// A list was sent and is not yet answered.
     mcast_sent: bool,
-    /// The last list's answer: 0 in force, or the driver's errno.
-    mcast_result: i32,
-    /// How many lists the driver has answered.
-    mcast_answers: u32,
+    /// The last list's answer: 0 in force, or the driver's errno; `None`
+    /// before any.
+    mcast_result: Option<i32>,
+    /// Frames dropped for being sent while the link was down.
+    dropped_down: u64,
     gone: bool,
 }
 
@@ -302,8 +298,8 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
         link_back: false,
         mcast_want: None,
         mcast_sent: false,
-        mcast_result: 0,
-        mcast_answers: 0,
+        mcast_result: None,
+        dropped_down: 0,
         gone: false,
     })
 }
@@ -374,14 +370,21 @@ fn reap(c: &mut Card) {
 
 /// `frame` sent on the card: its length, or a negative errno -- at once for
 /// a frame the card cannot send: one with no header, or longer than a
-/// header, a VLAN tag and the card's MTU; `ENETDOWN` for a card gone or
-/// its link down. `None` with no card attached.
+/// header, a VLAN tag and the card's MTU; `ENETDOWN` for a card gone. A
+/// frame sent while the link is down is dropped ([`dropped_while_down`]).
+/// `None` with no card attached.
 pub fn send(frame: &[u8]) -> Option<i64> {
     let c = card()?;
-    // A link down fails a send at once rather than queue it in the driver,
-    // for a card that may not come back soon.
-    if c.gone || c.link == Some(false) {
+    if c.gone {
         return Some(NET_DOWN);
+    }
+    // A link down drops the frame, as a wire with nothing at its end would,
+    // rather than queue it in the driver to go out stale once the link is
+    // back -- or fail the send, which TCP would take for the connection's
+    // end where its retransmissions ride a short flap out.
+    if c.link == Some(false) {
+        c.dropped_down = c.dropped_down.saturating_add(1);
+        return Some(frame.len() as i64);
     }
     if frame.len() < ETH_HLEN {
         return Some(i64::from(ERR_INVALID));
@@ -394,8 +397,7 @@ pub fn send(frame: &[u8]) -> Option<i64> {
     reap(c);
     let deadline = now_ns().saturating_add(SLOT_WAIT_NS);
     while c.nfree == 0 && !c.gone && now_ns() < deadline {
-        // Waiting on the card alone cannot fail but by the card going.
-        let _rang = wait_on(c, deadline.saturating_sub(now_ns()), None);
+        let _rang = wait_on(c, deadline.saturating_sub(now_ns()));
         reap(c);
     }
     if c.nfree == 0 {
@@ -464,9 +466,17 @@ pub enum Woke {
 /// messages that have come are taken ([`see_to_channel`]): a card busy with
 /// frames does not leave its link and answers unread behind them.
 pub fn wait(timeout_ns: u64) -> Woke {
-    // Waiting on the card alone, the wait itself cannot fail: its channel
-    // receive answering an error is the card gone ([`take_message`]).
-    wait_for(timeout_ns, None).unwrap_or(Woke::Gone)
+    let Some(c) = card() else {
+        return Woke::Gone;
+    };
+    reap(c);
+    let rang = if c.got_len != 0 || c.gone {
+        see_to_channel(c);
+        true
+    } else {
+        wait_on(c, timeout_ns)
+    };
+    woke(c, rang)
 }
 
 /// [`wait`], woken as well by a connection waiting on the service
@@ -475,38 +485,6 @@ pub fn wait(timeout_ns: u64) -> Woke {
 /// the listener. A frame already there answers at once, without looking at
 /// the listener. An error ([`WaitFailed`]) when the wait itself failed.
 pub fn wait_or_client(listener: u64, timeout_ns: u64) -> Result<Woke, WaitFailed> {
-    wait_for(timeout_ns, Some(listener))
-}
-
-/// A connection waiting on the service `listener` waited for, `timeout_ns`
-/// at most, with no card in it -- the kernel's NIC having no wait. An error
-/// ([`WaitFailed`]) when the wait itself failed.
-pub fn wait_listener(listener: u64, timeout_ns: u64) -> Result<(), WaitFailed> {
-    let mut items = [WaitItem::readable(listener, KIND_SERVICE)];
-    wait_multiple(&mut items, timeout_ns)
-}
-
-/// `SYS_WAIT_MULTIPLE` failed, or knew an item not (`POLLNVAL`): a handle
-/// gone or wrong, which waiting again would not mend.
-#[derive(Debug)]
-pub struct WaitFailed;
-
-/// `items` waited on, `timeout_ns` at most (`SYS_WAIT_MULTIPLE`).
-fn wait_multiple(items: &mut [WaitItem], timeout_ns: u64) -> Result<(), WaitFailed> {
-    let answer = syscall3(
-        SYS_WAIT_MULTIPLE,
-        items.as_mut_ptr() as u64,
-        items.len() as u64,
-        timeout_ns.max(1),
-    );
-    if answer < 0 || items.iter().any(|i| i.revents & POLLNVAL != 0) {
-        return Err(WaitFailed);
-    }
-    Ok(())
-}
-
-/// [`wait`] and [`wait_or_client`]: the card's wake.
-fn wait_for(timeout_ns: u64, listener: Option<u64>) -> Result<Woke, WaitFailed> {
     let Some(c) = card() else {
         return Ok(Woke::Gone);
     };
@@ -515,76 +493,61 @@ fn wait_for(timeout_ns: u64, listener: Option<u64>) -> Result<Woke, WaitFailed> 
         see_to_channel(c);
         true
     } else {
-        wait_on(c, timeout_ns, listener)?
+        wait_on_or_client(c, timeout_ns, listener)?
     };
-    Ok(match (c.gone, rang) {
+    Ok(woke(c, rang))
+}
+
+/// How the card woke: gone, rung (or with something to read), or neither.
+fn woke(c: &Card, rang: bool) -> Woke {
+    match (c.gone, rang) {
         (true, _) => Woke::Gone,
         (false, true) => Woke::Rang,
         (false, false) => Woke::Slept,
-    })
+    }
 }
 
 /// The driver's doorbell or another message waited for, up to `timeout_ns`
 /// -- the daemon saying in the ring that it sleeps, unless completions are
-/// there already -- or, given a service `listener`, a connection waiting
-/// on it; and any messages that came taken: whether one came, or
-/// completions were there. An error when the wait itself failed.
-fn wait_on(c: &mut Card, timeout_ns: u64, listener: Option<u64>) -> Result<bool, WaitFailed> {
+/// there already -- and any more that came taken: whether one came, or
+/// completions were there. A failed receive is the card gone
+/// ([`take_message`]).
+fn wait_on(c: &mut Card, timeout_ns: u64) -> bool {
+    c.slept = c.slept.wrapping_add(1).max(1);
+    if !c.ring.cq_sleep(c.slept) {
+        see_to_channel(c);
+        return true;
+    }
+    let mut buf = [0u8; MESSAGE_MAX];
+    let got = syscall4(
+        SYS_CHANNEL_RECV_TIMEOUT,
+        c.channel,
+        buf.as_mut_ptr() as u64,
+        buf.len() as u64,
+        timeout_ns.max(1),
+    );
+    c.ring.cq_wake();
+    let came = take_message(c, got, &buf);
+    see_to_channel(c) || came
+}
+
+/// [`wait_on`], woken as well by a connection waiting on the service
+/// `listener`; the driver's messages taken after, as any that come while
+/// the daemon is awake are. An error when the wait itself failed.
+fn wait_on_or_client(c: &mut Card, timeout_ns: u64, listener: u64) -> Result<bool, WaitFailed> {
     c.slept = c.slept.wrapping_add(1).max(1);
     if !c.ring.cq_sleep(c.slept) {
         see_to_channel(c);
         return Ok(true);
     }
-    let waited = match listener {
-        None => {
-            let mut buf = [0u8; MESSAGE_MAX];
-            let got = syscall4(
-                SYS_CHANNEL_RECV_TIMEOUT,
-                c.channel,
-                buf.as_mut_ptr() as u64,
-                buf.len() as u64,
-                timeout_ns.max(1),
-            );
-            Ok(take_message(c, got, &buf))
-        }
-        // The driver's messages are taken below, as any that come while
-        // the daemon is awake are.
-        Some(listener) => {
-            let mut items = [
-                WaitItem::readable(c.channel, KIND_CHANNEL),
-                WaitItem::readable(listener, KIND_SERVICE),
-            ];
-            wait_multiple(&mut items, timeout_ns).map(|()| false)
-        }
-    };
+    let mut items = [
+        WaitItem::readable(c.channel, KIND_CHANNEL),
+        WaitItem::readable(listener, KIND_SERVICE),
+    ];
+    let waited = wait_multiple(&mut items, timeout_ns);
     c.ring.cq_wake();
-    let came = waited?;
-    Ok(see_to_channel(c) || came)
-}
-
-/// One object `SYS_WAIT_MULTIPLE` waits on, laid out as its ABI says (24
-/// bytes): the handle, its kind (`cap::ResourceType`), the `poll(2)` events
-/// asked for and those that came.
-#[repr(C)]
-struct WaitItem {
-    handle: u64,
-    kind: u32,
-    events: u32,
-    revents: u32,
-    _tail: u32,
-}
-
-impl WaitItem {
-    /// `handle`, of `kind`, waited on until it is readable.
-    fn readable(handle: u64, kind: u32) -> Self {
-        Self {
-            handle,
-            kind,
-            events: POLLIN,
-            revents: 0,
-            _tail: 0,
-        }
-    }
+    waited?;
+    Ok(see_to_channel(c))
 }
 
 /// The driver's messages that have come, taken without waiting --
@@ -636,8 +599,7 @@ fn take_message(c: &mut Card, got: i64, buf: &[u8]) -> bool {
         }
         Some(Message::McastDone { result }) if c.mcast_sent => {
             c.mcast_sent = false;
-            c.mcast_result = result;
-            c.mcast_answers = c.mcast_answers.saturating_add(1);
+            c.mcast_result = Some(result);
         }
         _ => {
             super::print(
@@ -714,19 +676,20 @@ pub fn set_mcast(all: bool, addrs: &[[u8; 6]]) -> bool {
     true
 }
 
-/// How many multicast lists the driver has answered, in force or refused;
-/// 0 with no card attached.
-pub fn mcast_answers() -> u32 {
-    card().map_or(0, |c| c.mcast_answers)
+/// How many frames were dropped for being sent while the card's link was
+/// down; 0 with no card attached.
+pub fn dropped_while_down() -> u64 {
+    card().map_or(0, |c| c.dropped_down)
 }
 
 /// How the multicast lists asked for went: `None` while one is still to be
-/// sent or answered (or no card is attached), else the last one's answer
-/// -- 0 in force, or the driver's negative errno.
+/// sent or answered, before the driver has answered any, or with no card
+/// attached; else the last one's answer -- 0 in force, or the driver's
+/// negative errno.
 pub fn mcast_settled() -> Option<i32> {
     card()
         .filter(|c| c.mcast_want.is_none() && !c.mcast_sent)
-        .map(|c| c.mcast_result)
+        .and_then(|c| c.mcast_result)
 }
 
 /// Sends the driver completed with an error, so far.

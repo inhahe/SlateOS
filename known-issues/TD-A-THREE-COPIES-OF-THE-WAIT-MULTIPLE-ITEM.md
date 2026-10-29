@@ -9,7 +9,7 @@ change to the kernel's layout would have to be found and made three times
 more, and nothing would say a copy was missed.
 
 **Where.** `linuxdrv/kit/src/wait.rs`, `services/devprobe/src/lib.rs` and
-`services/netstack/src/port.rs` (`WaitItem`, `KIND_CHANNEL`,
+`services/netstack/src/wait.rs` (`WaitItem`, `KIND_CHANNEL`,
 `KIND_SERVICE`, `POLLIN`, `POLLNVAL`); the kernel's own `WaitItem` is
 private to `kernel/src/syscall/`, its layout stated in
 `SYS_WAIT_MULTIPLE`'s doc in `kernel/src/syscall/number.rs`.

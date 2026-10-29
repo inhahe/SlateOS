@@ -22,7 +22,12 @@ What stands between the two:
   own, taken once by DHCP and confirmed when the link comes back; nothing
   renews it as it nears its end (RFC 2131 RENEWING at T1, REBINDING at
   T2), so the persistent `serve-net` refuses a card until something does.
-  The bounded `serve-dns` lives seconds.
+  The bounded `serve-dns` lives seconds. Renewal and the lease's
+  confirmation when the link comes back (`relink`) should be states of the
+  serving loop: `relink` now blocks it for the DHCP exchange -- up to 5 s
+  when no server answers -- serving no client meanwhile and answering only
+  ARP, neighbour solicitations and pings, a session's TCP segments left to
+  their retransmission.
 - **Choosing a card.** Nothing yet says which `nic.<name>` the daemon
   should attach to; with several cards, which are the daemon's.
 

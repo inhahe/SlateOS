@@ -4916,7 +4916,13 @@ pub const SYS_NET_FW_FLUSH: u64 = 864;
 /// `DeviceBusy`.  Re-opening from the same process is idempotent.  The claim
 /// self-heals if the owner dies without closing.
 ///
-/// - `arg0`: reserved (interface index; currently must be 0 = the primary NIC).
+/// - `arg0`: which card. 0, the primary: the card the kernel sends through
+///   and every card it reads, which the kernel's own stack then reads none
+///   of. 1, the card whose MAC address is the 6 bytes at `arg1`, alone: the
+///   kernel's stack keeps its primary and the other cards (`NotFound` for a
+///   MAC no card has; the primary's MAC is the primary claim). Anything else
+///   `InvalidArgument`. One claim at a time, whichever card it names;
+///   `SYS_NET_RAW_MCAST` takes the primary claim only.
 ///
 /// Returns: 0 on success (the raw handle is the process's NetRaw claim itself,
 /// referenced implicitly by subsequent `SYS_NET_RAW_*` calls); negative error
@@ -6609,6 +6615,8 @@ pub const SYS_UDP_GET_OPTION: u64 = 1134;
 /// few other groups get through too: the receiver still checks the
 /// destination. Releasing the NIC puts the kernel stack's own set back.
 /// `PermissionDenied` unless the caller holds the raw claim;
+/// `NotSupported` for a claim on one card alone (`SYS_NET_RAW_OPEN`'s
+/// `arg0` 1), whose owner may not change what the kernel's cards pass;
 /// `InvalidArgument` for more than `net::mcast_filter::MAX_ADDRS` (128)
 /// addresses or a unicast one. See `net::mcast_filter`.
 pub const SYS_NET_RAW_MCAST: u64 = 1135;

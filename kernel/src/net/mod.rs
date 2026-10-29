@@ -83,13 +83,15 @@ pub fn poll() {
     // the daemon, which reads them via `sys_net_raw_rx`.  Skip the physical
     // drain but keep servicing container-internal veth/bridge traffic and
     // periodic maintenance below.  See net::raw / design-decisions.md §63.
-    if !raw::is_claimed() {
+    let claimed = raw::claimed_card();
+    if claimed != Some(raw::Card::Primary) {
         // A raw owner that died without releasing leaves its multicast
         // filter behind; the stack's own comes back with the NIC.
         mcast_filter::restore_if_raw_left();
-        // Read all pending packets from the active NIC.
+        // Read all pending packets from the active NICs -- but one a raw
+        // owner holds alone, whose frames are its.
         loop {
-            let frame = recv_frame();
+            let frame = recv_frame_except(claimed);
             match frame {
                 Some(data) => {
                     interface::record_rx(interface::Source::Nic, data.len());
@@ -132,20 +134,27 @@ pub fn poll() {
     }
 }
 
-/// Receive a single frame from the active NIC.
+/// Receive a single frame from the NICs, but `claimed`'s when a raw owner
+/// holds that card alone (`raw::Card`; the primary claim leaves none).
 ///
 /// Tries virtio-net first, then e1000, then rtl8139.
-fn recv_frame() -> Option<Vec<u8>> {
+fn recv_frame_except(claimed: Option<raw::Card>) -> Option<Vec<u8>> {
     // Try virtio-net first.
-    if let Some(Some(data)) = crate::virtio::net::with_device(|dev| dev.recv()) {
+    if claimed != Some(raw::Card::VirtioNet)
+        && let Some(Some(data)) = crate::virtio::net::with_device(|dev| dev.recv())
+    {
         return Some(data);
     }
     // Fall back to e1000.
-    if let Some(Some(data)) = crate::e1000::with_device(|dev| dev.recv()) {
+    if claimed != Some(raw::Card::E1000)
+        && let Some(Some(data)) = crate::e1000::with_device(|dev| dev.recv())
+    {
         return Some(data);
     }
     // Fall back to rtl8139.
-    if let Some(data) = crate::rtl8139::recv() {
+    if claimed != Some(raw::Card::Rtl8139)
+        && let Some(data) = crate::rtl8139::recv()
+    {
         return Some(data);
     }
     None

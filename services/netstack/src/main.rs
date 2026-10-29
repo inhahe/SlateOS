@@ -63,6 +63,8 @@ const SYS_NET_RAW_CLOSE: u64 = 868;
 /// Set the multicast Ethernet addresses the network cards pass up (the raw
 /// owner's call; kernel `net::mcast_filter`).
 const SYS_NET_RAW_MCAST: u64 = 1135;
+/// The CPU given up, for a loop that polls.
+const SYS_YIELD: u64 = 0;
 
 /// `EAGAIN`/`WouldBlock`: raw RX had no frame ready.
 const E_WOULD_BLOCK: i64 = -4;
@@ -5794,7 +5796,7 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
     }
     // Timed as `nic-bench` times the kernel's NIC, for the two to be read
     // side by side.
-    if let Err(why) = nic_bench("Linux's e1000e in a driver process", &me, &gateway_mac) {
+    if let Err(why) = nic_bench("linux_e1000e", &me, &gateway_mac) {
         say(why.as_bytes());
         return NIC_PINGS_LOST;
     }
@@ -5894,49 +5896,56 @@ fn rx_barrier(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
 
 /// `nic-bench`'s pings: how many are timed one at a time, and how many are
 /// sent [`NIC_BURST`] at a time for the rate; their sequence numbers start
-/// past every other check's.
+/// past every other check's. More than [`BENCH_LOST_MOST`] lost and the
+/// timing stops: a card that drops that many frames is not being measured.
 const BENCH_ONE_AT_A_TIME: usize = 200;
 const BENCH_BURSTS: usize = 25;
 const BENCH_SEQ: usize = 20_000;
-
-/// The CPU given up, for a loop that polls (`SYS_YIELD`).
-const SYS_YIELD: u64 = 0;
+const BENCH_LOST_MOST: u64 = 5;
 
 /// How long the daemon's pings to the gateway take through the card it
-/// uses -- the kernel's NIC, or a driver process's card ([`port`]) -- named
-/// `path` in the line it prints: [`BENCH_ONE_AT_A_TIME`] pings of
-/// [`NIC_PING_BYTES`] bytes one at a time, their round trips' median, 90th
-/// percentile and most; then [`BENCH_BURSTS`] bursts of [`NIC_BURST`], how
-/// many are answered a second. Each card is waited on as the daemon uses
-/// it ([`bench_wait`]): the kernel's NIC polled, the CPU yielded between
-/// polls -- it has no wait, and its receive call reads the card's ring
-/// itself -- and a port by its driver's doorbell. A ping unanswered within
-/// a second is counted lost.
-///
-/// Under QEMU on the boot test's host the two differ by more than their
-/// paths: a driver process takes the card's interrupts, which QEMU's e1000e
-/// throttles to one per 128 us at least whatever the driver asks
-/// (`E1000E_MIN_XITR`) on timers that fire milliseconds late, while the
-/// kernel's NIC is read without one (design-decisions 1588, measured).
-fn nic_bench(path: &str, me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
+/// uses -- a card of the kernel's claimed alone, or a driver process's card
+/// ([`port`]) -- reported as `name`: [`BENCH_ONE_AT_A_TIME`] pings of
+/// [`NIC_PING_BYTES`] bytes one at a time, the answered ones' round trips'
+/// median, 90th percentile and most; then [`BENCH_BURSTS`] bursts of
+/// [`NIC_BURST`], how long each answer took on average. Printed as the
+/// kernel's ungraded benchmark lines (`[bench] SCORE nic_<name>_... - TRACK`)
+/// and in a line of prose. Each card is waited on as fast as it can be
+/// ([`nic_wait`]): a driver process's by its doorbell, as the daemon's
+/// serving loops wait on it; the kernel's by reading it again after
+/// yielding once, sooner than those loops, which sleep [`POLL_SLEEP_NS`]
+/// after reading nothing -- the kernel's card's best case. A ping
+/// unanswered within a second is lost: counted, left out of the round
+/// trips, and past [`BENCH_LOST_MOST`] the end of the timing. An error for
+/// that, a card gone, a send failed -- at once or once the driver has it --
+/// or an answer with another payload.
+fn nic_bench(name: &str, me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
+    const TOO_MANY: &str = "FAIL: too many pings to the gateway were lost to time the card";
     let mut rtts = [0u64; BENCH_ONE_AT_A_TIME];
+    let mut timed = 0usize;
     let mut lost = 0u64;
-    for (i, rtt) in rtts.iter_mut().enumerate() {
+    let failed_before = port::send_errors();
+    for i in 0..BENCH_ONE_AT_A_TIME {
         let seq = BENCH_SEQ + i;
         let sent = now_ns();
         send_ping(me, gateway_mac, seq)?;
-        let deadline = sent.saturating_add(1_000_000_000);
         let mut answered = [false];
-        if bench_wait(me, seq, 1, &mut answered, deadline) {
-            *rtt = now_ns().saturating_sub(sent);
+        if bench_wait(me, seq, &mut answered, sent.saturating_add(1_000_000_000))? {
+            if let Some(rtt) = rtts.get_mut(timed) {
+                *rtt = now_ns().saturating_sub(sent);
+                timed += 1;
+            }
         } else {
-            *rtt = u64::MAX;
             lost += 1;
+            if lost > BENCH_LOST_MOST {
+                return Err(TOO_MANY);
+            }
         }
     }
+    let rtts = rtts.get_mut(..timed).unwrap_or(&mut []);
     rtts.sort_unstable();
     let at = |q: usize| {
-        rtts.get(q * (BENCH_ONE_AT_A_TIME - 1) / 100)
+        rtts.get(q * timed.saturating_sub(1) / 100)
             .copied()
             .unwrap_or(0)
     };
@@ -5949,82 +5958,196 @@ fn nic_bench(path: &str, me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'sta
             send_ping(me, gateway_mac, seq)?;
         }
         let mut answered = [false; NIC_BURST];
-        let deadline = now_ns().saturating_add(1_000_000_000);
-        bench_wait(me, first, NIC_BURST, &mut answered, deadline);
+        bench_wait(
+            me,
+            first,
+            &mut answered,
+            now_ns().saturating_add(1_000_000_000),
+        )?;
         let got = answered.iter().filter(|&&a| a).count() as u64;
         answers += got;
         lost += NIC_BURST as u64 - got;
+        if lost > BENCH_LOST_MOST {
+            return Err(TOO_MANY);
+        }
     }
-    let elapsed = now_ns().saturating_sub(began).max(1);
-    let us = |ns: u64| if ns == u64::MAX { 0 } else { ns / 1_000 };
+    let per_answer = now_ns().saturating_sub(began) / answers.max(1);
+    if port::send_errors() != failed_before {
+        return Err("FAIL: the driver failed sends while the card was timed");
+    }
+    bench_score(name, "rtt_median", median);
+    bench_score(name, "rtt_p90", p90);
+    bench_score(name, "burst16_per_answer", per_answer);
     Line::new()
         .put(b"[netstack] nic-bench, ")
-        .put(path.as_bytes())
+        .put(name.as_bytes())
         .put(b": ")
-        .dec(BENCH_ONE_AT_A_TIME as u64)
+        .dec(timed as u64)
         .put(b" pings of ")
         .dec(NIC_PING_BYTES as u64)
-        .put(b" bytes one at a time, round trip median ")
-        .dec(us(median))
+        .put(b" bytes answered one at a time, round trip median ")
+        .dec(median / 1_000)
         .put(b" us, 90th percentile ")
-        .dec(us(p90))
+        .dec(p90 / 1_000)
         .put(b" us, most ")
-        .dec(us(most))
+        .dec(most / 1_000)
         .put(b" us; ")
-        .dec((BENCH_BURSTS * NIC_BURST) as u64)
+        .dec(answers)
         .put(b" in bursts of ")
         .dec(NIC_BURST as u64)
         .put(b", ")
-        .dec(answers.saturating_mul(1_000_000_000) / elapsed)
+        .dec(1_000_000_000 / per_answer.max(1))
         .put(b" answered a second; ")
         .dec(lost)
         .put(b" lost\n")
         .print();
-    if lost != 0 {
-        return Err("FAIL: pings to the gateway were lost while being timed");
-    }
     Ok(())
 }
 
-/// The answers to the `count` pings from sequence number `first` waited
-/// for until `deadline`, each marked in `answered` as it comes -- a port's
-/// by its driver's doorbell, the kernel's NIC's by polling with the CPU
-/// yielded between polls ([`nic_bench`]); other frames handled as the
-/// daemon handles any. Whether every one came.
+/// One of [`nic_bench`]'s figures as the kernel's ungraded benchmark line,
+/// which `scripts/bench-history.py` reads: `nic_<name>_<what>`, `ns`
+/// nanoseconds, no target.
+fn bench_score(name: &str, what: &str, ns: u64) {
+    Line::new()
+        .put(b"[bench] SCORE nic_")
+        .put(name.as_bytes())
+        .put(b"_")
+        .put(what.as_bytes())
+        .put(b" ")
+        .dec(ns)
+        .put(b" - TRACK\n")
+        .print();
+}
+
+/// The answers to the pings from sequence number `first`, one for each of
+/// `answered`, waited for until `deadline`, each marked there as it comes --
+/// every frame the card holds read once more at the deadline, so that one
+/// in by then counts -- other frames handled as the daemon handles any.
+/// Whether every one came; an error for a card gone or an answer with
+/// another payload.
 fn bench_wait(
     me: &IfInfo,
     first: usize,
-    count: usize,
     answered: &mut [bool],
     deadline: u64,
-) -> bool {
+) -> Result<bool, &'static str> {
+    let count = answered.len();
+    let mut left = answered.iter().filter(|&&a| !a).count();
     let mut frame = [0u8; MAX_FRAME];
-    let mut left = count;
-    while left != 0 && now_ns() < deadline {
-        let Ok(n) = usize::try_from(raw_rx(&mut frame)) else {
-            if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
-                syscall0(SYS_YIELD);
-            }
-            continue;
-        };
-        let Some(bytes) = frame.get(..n) else {
-            continue;
-        };
-        match echo_answer(bytes, me) {
-            Some((seq, true)) if (first..first + count).contains(&seq) => {
-                if let Some(slot) = answered.get_mut(seq - first)
-                    && !core::mem::replace(slot, true)
-                {
-                    left -= 1;
+    loop {
+        while let Ok(n) = usize::try_from(raw_rx(&mut frame)) {
+            let Some(bytes) = frame.get(..n) else {
+                continue;
+            };
+            match echo_answer(bytes, me) {
+                Some((_, false)) => return Err("FAIL: a ping was answered with another payload"),
+                Some((seq, true)) if (first..first + count).contains(&seq) => {
+                    if let Some(slot) = answered.get_mut(seq - first)
+                        && !core::mem::replace(slot, true)
+                    {
+                        left -= 1;
+                    }
+                }
+                // A ping of before, answered late.
+                Some(_) => {}
+                None => {
+                    let _ = handle_frame(bytes, me);
                 }
             }
-            Some(_) => {}
-            None => {
-                let _ = handle_frame(bytes, me);
+        }
+        if left == 0 {
+            return Ok(true);
+        }
+        if now_ns() >= deadline {
+            return Ok(false);
+        }
+        nic_wait(deadline)?;
+    }
+}
+
+/// Until a frame may have come, `deadline` at most: on a driver process's
+/// card, its doorbell waited for; on a card of the kernel's, which has no
+/// wait and whose receive call reads the card's ring itself, the CPU given
+/// up once. An error when a driver process's card has gone.
+fn nic_wait(deadline: u64) -> Result<(), &'static str> {
+    if !port::attached() {
+        syscall0(SYS_YIELD);
+        return Ok(());
+    }
+    match port::wait(deadline.saturating_sub(now_ns())) {
+        port::Woke::Gone => Err("FAIL: the card's driver went away"),
+        port::Woke::Rang | port::Woke::Slept => Ok(()),
+    }
+}
+
+/// `nic-bench <mac> <name>`: the kernel's card whose MAC address is `mac`
+/// (twelve hex digits) claimed alone -- the kernel's own stack keeps its
+/// primary -- an address taken on it by DHCP, the gateway resolved, and
+/// the card timed ([`nic_bench`]) as `nic-check` times a driver process's
+/// card: a kernel driver's path, reported as `name`, for the two to be read
+/// side by side. The exit code says what failed (`netipc::nicport::check`),
+/// 0 for nothing.
+fn nic_bench_card(mac_hex: &[u8], name: &[u8]) -> i64 {
+    let say = |what: &str| {
+        print("[netstack] nic-bench: ");
+        print(what);
+        print("\n");
+    };
+    let (Some(mac), Ok(name)) = (parse_mac(mac_hex), core::str::from_utf8(name)) else {
+        say("FAIL: usage: nic-bench <twelve hex digits of a MAC address> <name>");
+        return NIC_NO_CARD;
+    };
+    if syscall2(SYS_NET_RAW_OPEN, RAW_OPEN_BY_MAC, mac.as_ptr() as u64) < 0 {
+        say("FAIL: no card of the kernel's with that MAC address could be claimed");
+        return NIC_NO_CARD;
+    }
+    let mut me = IfInfo {
+        ip: [0; 4],
+        mask: [0; 4],
+        gateway: [0; 4],
+        dns: [0; 4],
+        mac,
+        ip6: icmpv6::link_local_from_mac(&mac),
+    };
+    let code = if let Err(why) = dhcp_lease(&mut me) {
+        say(why);
+        NIC_NO_ADDRESS
+    } else if let Some(gateway_mac) = (0..5).find_map(|_| arp_resolve(&me.gateway, &me)) {
+        match nic_bench(name, &me, &gateway_mac) {
+            Ok(()) => NIC_OK,
+            Err(why) => {
+                say(why);
+                NIC_PINGS_LOST
             }
         }
+    } else {
+        say("FAIL: the gateway did not answer ARP");
+        NIC_NO_GATEWAY
+    };
+    raw_close();
+    code
+}
+
+/// `SYS_NET_RAW_OPEN`'s `arg0` for the card whose MAC address `arg1` points
+/// at, claimed alone.
+const RAW_OPEN_BY_MAC: u64 = 1;
+
+/// The MAC address twelve hex digits spell, `None` for anything else.
+fn parse_mac(hex: &[u8]) -> Option<[u8; 6]> {
+    let digit = |c: u8| match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    };
+    if hex.len() != 12 {
+        return None;
     }
-    left == 0
+    let mut mac = [0u8; 6];
+    for (byte, pair) in mac.iter_mut().zip(hex.chunks_exact(2)) {
+        *byte = digit(*pair.first()?)? << 4 | digit(*pair.get(1)?)?;
+    }
+    Some(mac)
 }
 
 /// The card's multicast list made `addrs`, and every multicast frame with
@@ -6232,9 +6355,7 @@ fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &
         }
         let deadline = now_ns().saturating_add(1_000_000_000);
         while now_ns() < deadline {
-            if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
-                return Err("FAIL: the card's driver went away");
-            }
+            nic_wait(deadline)?;
             loop {
                 let n = raw_rx(&mut frame);
                 let Ok(n) = usize::try_from(n) else { break };
@@ -6475,6 +6596,11 @@ pub extern "C" fn _start() -> ! {
         // QEMU's monitor).
         exit(nic_check(arg(args, 2), arg(args, 3) == b"cable"));
     }
+    if mode == b"nic-bench" {
+        // `nic-bench <mac> <name>`: a card of the kernel's timed, claimed
+        // by its MAC alone, before the primary is claimed below.
+        exit(nic_bench_card(arg(args, 2), arg(args, 3)));
+    }
 
     let me = match query_if_info() {
         Some(i) => i,
@@ -6507,27 +6633,6 @@ pub extern "C" fn _start() -> ! {
     // deadline); `serve-net` = Phase-5 persistent boot daemon (same service, but
     // owns the NIC for the system's lifetime and never idles out — used once the
     // kernel stack has stood down under the `net.userspace` switch).
-    if mode == b"nic-bench" {
-        // The kernel's NIC timed as `nic-check` times a driver process's
-        // card, for the two to be read side by side.
-        let code = match (0..5).find_map(|_| arp_resolve(&me.gateway, &me)) {
-            None => {
-                print("[netstack] nic-bench: FAIL: the gateway did not answer ARP\n");
-                NIC_NO_GATEWAY
-            }
-            Some(gateway_mac) => match nic_bench("the kernel's e1000 driver", &me, &gateway_mac) {
-                Ok(()) => NIC_OK,
-                Err(why) => {
-                    print("[netstack] nic-bench: ");
-                    print(why);
-                    print("\n");
-                    NIC_PINGS_LOST
-                }
-            },
-        };
-        raw_close();
-        exit(code);
-    }
     if mode == b"serve-dns" {
         print("[netstack] mode: serve-dns (Phase 4 bounded DNS/TCP/UDP-over-IPC)\n");
         let code = run_dns_service(&me, false);

@@ -65,22 +65,31 @@ SlateOS's network stack.
 ### Measured (2026-10-29)
 
 The boot test times the netstack daemon's pings to QEMU's gateway through
-each driver (`nic-bench`): through the kernel's own e1000 driver on the
-first 82574 (the daemon's `nic-bench` mode, holding the kernel's NIC), and
-through Linux's e1000e in its process on the spare 82574, over the port of
-design-decisions 1589 (in `nic-check`). The same 82574 model, behind the
-same kind of QEMU network; 1000-byte pings, 200 one at a time, then 400 in
-bursts of 16. Each card is waited on as the daemon uses it: the kernel's
-NIC polled (its receive call reads the card's ring), the port by doorbell.
-On QEMU TCG, Windows host, four boots:
+each driver (`nic-bench`): Linux's e1000e in its process on the spare
+82574, over the port of design-decisions 1589 (in `nic-check`), then the
+kernel's own e1000 driver on the first 82574, which the daemon claims alone
+by its MAC address while the kernel's stack keeps its virtio-net
+(`SYS_NET_RAW_OPEN` by MAC). The same 82574 model, behind the same kind of
+QEMU network; 1000-byte pings, 200 one at a time, then 400 in bursts of 16.
+Each card is waited on as fast as it can be: the port by its doorbell, as
+the daemon's serving loops wait on it; the kernel's card read again after
+one yield -- its best case, for those loops sleep 5 ms after reading nothing
+there. The figures go to the boot history as `nic_<card>_...` benchmark
+lines. On QEMU TCG, Windows host, five boots:
 
 | | round trip, median | 90th percentile | answered a second, 16 in flight |
 |---|---|---|---|
-| the kernel's e1000 | 1.3-1.5 ms | 1.5-1.9 ms | 740-890 |
-| Linux's e1000e in a process | 3.2-4.9 ms | 14-15 ms | 750-1010 |
+| the kernel's e1000, read in a loop | 0.75-1.7 ms | 1.1-2.2 ms | 630-1120 |
+| Linux's e1000e in a process | 3.4-4.9 ms | 13.7-14.3 ms | 1020-1035 |
 
-The rates are the same -- QEMU's network, not either driver, bounds them
--- and so a driver process costs nothing in throughput here. The round
+(A version of this section from earlier the same day timed the kernel's
+virtio-net under the e1000's name: the daemon's claim then took the
+kernel's primary card, whichever it was.)
+
+In bursts the two are alike, the driver process the steadier: the kernel's
+card ranges from well below it to a little above. Why it varies so is not
+known; it is not the daemon spinning on it, for read after a 1 ms sleep
+instead of a yield, neither of its figures moved. One at a time, the round
 trips differ by more than the process: the kernel's NIC is read without an
 interrupt, while the driver process waits for the card's (MSI-X), and
 QEMU's e1000e throttles every interrupt to one per 128 us at least,
@@ -89,9 +98,9 @@ units), on timers that fire 7-16 ms late on this host. The driver's own
 timing of each round trip (from handing a frame to Linux until the next
 received frame is in the stack's slot, an experiment not kept) put most of
 them at 8-16 ms: the interrupt waits for the late timer. Turning Linux's
-moderation off (`set_coalesce`, `rx_coalesce_usecs` 0) changed nothing,
-as the clamp says; the stack polling instead of sleeping changed nothing
+moderation off (`set_coalesce`, `rx_coalesce_usecs` 0) changed nothing, as
+the clamp says; the stack polling instead of sleeping changed nothing
 either. The process's own cost -- a copy each way, two process switches a
-frame -- is therefore not separable from the emulator's on this host; it
-is to be measured on hardware, where an interval of 0 means no throttle
-(the test PC's Intel I219-V is an e1000e part).
+frame -- is therefore not separable from the emulator's on this host; it is
+to be measured on hardware, where an interval of 0 means no throttle (the
+test PC's Intel I219-V is an e1000e part).

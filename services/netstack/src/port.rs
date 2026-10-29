@@ -571,6 +571,11 @@ fn send_mcast(c: &mut Card) {
     }
 }
 
+/// Whether a card is attached -- gone or not.
+pub fn attached() -> bool {
+    card().is_some()
+}
+
 /// The card's link as its driver last told it: `None` with no card
 /// attached, or before the driver has said.
 pub fn link() -> Option<bool> {

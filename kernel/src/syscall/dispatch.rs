@@ -4483,8 +4483,8 @@ fn test_dispatch_exit_status_is_not_a_signal() -> KernelResult<()> {
 }
 
 /// `SYS_NET_RAW_MCAST` (1135) through the syscall layer, the list in the
-/// caller's own memory: refused to a process without the raw claim; with it,
-/// the filter takes the list (sorted, duplicates dropped) and reports the raw
+/// caller's own memory: refused to a process without the raw claim, and to
+/// one holding a card alone; with the claim, the filter takes the list (sorted, duplicates dropped) and reports the raw
 /// owner; a unicast address or a list past the limit is refused and changes
 /// nothing; an empty list passes none; and releasing the claim puts the
 /// kernel stack's set back. Skipped if something already holds the claim --
@@ -4516,7 +4516,7 @@ fn test_dispatch_raw_mcast() -> KernelResult<()> {
         pcb::destroy(pid);
         Err(KernelError::InternalError)
     }
-    if crate::net::raw::is_claimed() {
+    if crate::net::raw::owner().is_some() {
         serial_println!("[syscall]   SYS_NET_RAW_MCAST (1135): the NIC is claimed -- skipped");
         return Ok(());
     }
@@ -4553,7 +4553,17 @@ fn test_dispatch_raw_mcast() -> KernelResult<()> {
     if call(args(page, 3, 0)) != Some(code(KernelError::PermissionDenied)) {
         return fail("taken from a process without the raw claim", pid);
     }
-    if crate::net::raw::claim(pid).is_err() {
+    // The filter is the kernel's cards' together, not one card's.
+    if crate::net::raw::claim(pid, crate::net::raw::Card::E1000).is_err() {
+        return fail("could not claim one card alone", pid);
+    }
+    let alone = call(args(page, 3, 0)) == Some(code(KernelError::NotSupported));
+    // Releasing never fails (`net::raw::release`).
+    let _ = crate::net::raw::release(pid);
+    if !alone || filter().map(|(owner, _)| owner) != Some(Owner::Kernel) {
+        return fail("taken from the owner of one card alone", pid);
+    }
+    if crate::net::raw::claim(pid, crate::net::raw::Card::Primary).is_err() {
         return fail("could not claim the NIC", pid);
     }
     let set = call(args(page, 3, 0)) == Some(0);
@@ -4584,7 +4594,8 @@ fn test_dispatch_raw_mcast() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     serial_println!(
-        "[syscall]   SYS_NET_RAW_MCAST (1135): refused without the claim; with it the list \
+        "[syscall]   SYS_NET_RAW_MCAST (1135): refused without the claim and to one card's \
+         owner; with the claim the list \
          from user memory became the filter, refusals changed nothing, release restored \
          the kernel's set: OK"
     );

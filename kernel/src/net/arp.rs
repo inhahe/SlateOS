@@ -294,6 +294,17 @@ fn send_reply(
     Ok(())
 }
 
+/// The Ethernet frame by which `mac`, at `ip`, asks who has `target_ip`:
+/// broadcast, the target's MAC address left zero -- what is asked for.
+pub(crate) fn request_frame(
+    mac: &MacAddress,
+    ip: Ipv4Addr,
+    target_ip: Ipv4Addr,
+) -> alloc::vec::Vec<u8> {
+    let arp_data = build_arp(ARP_REQUEST, mac, ip, &MacAddress([0; 6]), target_ip);
+    ethernet::build_frame(&BROADCAST_MAC, mac, ETHERTYPE_ARP, &arp_data)
+}
+
 /// Send an ARP request for the given IP address (root namespace).
 pub fn send_request(target_ip: Ipv4Addr) -> KernelResult<()> {
     send_request_ns(crate::netns::ROOT_NS, target_ip)
@@ -308,15 +319,7 @@ pub fn send_request(target_ip: Ipv4Addr) -> KernelResult<()> {
 pub fn send_request_ns(ns_id: crate::netns::NetNsId, target_ip: Ipv4Addr) -> KernelResult<()> {
     let our_mac = interface::ns_mac(ns_id);
     let our_ip = interface::ns_ip(ns_id);
-
-    let arp_data = build_arp(
-        ARP_REQUEST,
-        &our_mac,
-        our_ip,
-        &MacAddress([0; 6]), // Target MAC unknown — that's what we're asking for.
-        target_ip,
-    );
-    let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_ARP, &arp_data);
+    let frame = request_frame(&our_mac, our_ip, target_ip);
 
     super::send_frame_ns(ns_id, &frame)?;
 
@@ -397,15 +400,8 @@ pub fn send_gratuitous() -> KernelResult<()> {
         return Ok(()); // No IP configured — nothing to announce.
     }
 
-    // Gratuitous ARP: request for our own IP, broadcast target MAC.
-    let arp_data = build_arp(
-        ARP_REQUEST,
-        &our_mac,
-        our_ip,
-        &MacAddress([0; 6]),
-        our_ip, // Target IP = our IP (gratuitous).
-    );
-    let frame = ethernet::build_frame(&BROADCAST_MAC, &our_mac, ETHERTYPE_ARP, &arp_data);
+    // Gratuitous ARP: a request for our own IP.
+    let frame = request_frame(&our_mac, our_ip, our_ip);
 
     super::send_frame(&frame)?;
     crate::serial_println!("[arp] Gratuitous ARP sent for {}", our_ip);

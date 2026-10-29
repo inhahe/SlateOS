@@ -20017,24 +20017,37 @@ const RAW_FRAME_MIN: usize = 14;
 /// 1514 = 14-byte header + 1500 MTU; +8 slack for one/two 802.1Q VLAN tags.
 const RAW_FRAME_MAX: usize = 1522;
 
-/// `SYS_NET_RAW_OPEN` — claim exclusive raw L2 access to the physical NIC.
-///
-/// Requires a `NetRaw` capability with `WRITE` rights.  `arg0` (interface
-/// index) is reserved and must be 0.
+/// `SYS_NET_RAW_OPEN` — claim exclusive raw L2 access to the physical NIC,
+/// or to one card. See
+/// [`SYS_NET_RAW_OPEN`](super::number::SYS_NET_RAW_OPEN).
 pub fn sys_net_raw_open(args: &SyscallArgs) -> SyscallResult {
+    use crate::net::raw::Card;
     // Capability gate: raw L2 access is strictly more privileged than a socket.
     if let Err(e) = require_cap_type(crate::cap::ResourceType::NetRaw, crate::cap::Rights::WRITE) {
         return SyscallResult::err(e);
     }
-    if args.arg0 != 0 {
-        // Only the primary NIC (index 0) is supported for now.
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
+    let card = match args.arg0 {
+        0 => Card::Primary,
+        1 => {
+            let mac = match crate::mm::user::read_user_vec(args.arg1, 6, 6) {
+                Ok(bytes) => bytes,
+                Err(e) => return SyscallResult::err(e),
+            };
+            let Ok(mac) = <[u8; 6]>::try_from(mac.as_slice()) else {
+                return SyscallResult::err(KernelError::InvalidArgument);
+            };
+            match Card::with_mac(mac) {
+                Some(card) => card,
+                None => return SyscallResult::err(KernelError::NotFound),
+            }
+        }
+        _ => return SyscallResult::err(KernelError::InvalidArgument),
+    };
     let pid = match caller_pid() {
         Some(p) => p,
         None => return SyscallResult::err(KernelError::NoSuchProcess),
     };
-    match crate::net::raw::claim(pid) {
+    match crate::net::raw::claim(pid, card) {
         Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
@@ -20122,6 +20135,11 @@ pub fn sys_net_raw_mcast(args: &SyscallArgs) -> SyscallResult {
     };
     if crate::net::raw::owner() != Some(pid) {
         return SyscallResult::err(KernelError::PermissionDenied);
+    }
+    // The filter is the kernel's cards' together: an owner of one card
+    // alone may not change what the kernel's stack's cards pass.
+    if !crate::net::raw::is_claimed() {
+        return SyscallResult::err(KernelError::NotSupported);
     }
     let Ok(count) = usize::try_from(args.arg1) else {
         return SyscallResult::err(KernelError::InvalidArgument);

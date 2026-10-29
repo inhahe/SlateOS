@@ -5519,11 +5519,13 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         takes an address by DHCP through it and has 400 full-size pings
         answered (`linuxdrv::self_test`); the card's link and multicast
         filter cross the port too (§1589 item 7), the boot test pulling its
-        cable through QEMU's monitor. Its overhead against the native driver
-        is measured at every boot (`nic-bench`, §1588 "Measured"): the same
-        rate; round trips longer, mostly QEMU's throttling of the card's
-        interrupts on its late timers, which the native path, reading its
-        ring without an interrupt, does not meet. Left: the same measured on
+        cable through QEMU's monitor. Its overhead against the native
+        driver -- the kernel's e1000 on the first 82574, claimed alone by
+        the daemon -- is measured at every boot (`nic-bench`, §1588
+        "Measured"): about the same rate in bursts; round trips three to
+        four times longer, mostly QEMU's throttling of the card's interrupts
+        on its late timers, which the native path, reading its ring without
+        an interrupt, does not meet. Left: the same measured on
         hardware (the test PC's I219-V), where the process's own cost can be
         told apart; and the daemon serving sockets over a port (known-issues
         `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)

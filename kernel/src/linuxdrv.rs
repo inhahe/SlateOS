@@ -11,7 +11,9 @@
 //! For now the kernel only tests the layer: [`self_test`] runs its first
 //! process, `linuxdrv/hello`, which is no driver, then Linux's e1000e on the
 //! boot test's spare 82574, serving the card to the netstack daemon
-//! (design-decisions 1589).
+//! (design-decisions 1589), which also times it; then the daemon times the
+//! kernel's own e1000 driver the same way, for the two to be read side by
+//! side (design-decisions 1588, measured).
 
 use netipc::nicport::check;
 
@@ -47,6 +49,9 @@ struct Program<'a> {
     elf: &'a [u8],
     name: &'static str,
     limit_s: u64,
+    /// How often its end is looked for: 0 after every yield of the CPU,
+    /// else that many milliseconds' sleep between looks.
+    poll_ms: u64,
 }
 
 /// `program` started with `argv`, holding `capabilities`.
@@ -75,7 +80,7 @@ fn start(
 fn finish(program: &Program<'_>, process: &spawn::SpawnResult) -> Option<i32> {
     let deadline =
         crate::hrtimer::now_ns().saturating_add(program.limit_s.saturating_mul(1_000_000_000));
-    let finished = spawn::wait_for_fixture(process.pid, deadline, 0);
+    let finished = spawn::wait_for_fixture(process.pid, deadline, program.poll_ms);
     let code = pcb::exit_code(process.pid);
     spawn::teardown_fixture(process.pid, process.task_id);
     if finished { code } else { None }
@@ -132,6 +137,7 @@ pub fn self_test() -> KernelResult<()> {
         elf,
         name: "lx-hello",
         limit_s: 10,
+        poll_ms: 0,
     };
     let cases: [(&[&[u8]], i32, &str); 8] = [
         (&[b"hello"], EXIT_OK, "ran its initcalls and exited 0"),
@@ -188,7 +194,7 @@ pub fn self_test() -> KernelResult<()> {
     );
     if e1000e {
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, and was let go for breaking the protocol, the driver warning nowhere: OK",
+            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol, the driver warning nowhere: OK",
             if cable_puller() {
                 ", the link following the card's cable"
             } else {
@@ -271,9 +277,10 @@ fn pci_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> Kern
 
 /// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
 /// given the boot test's spare 82574 as hello's PCI runs are, serving it to
-/// the network stack ([`e1000e_serve`]). Whether it ran: skipped, and
-/// recorded so, where the bootloader did not load it or there is no such
-/// card.
+/// the network stack ([`e1000e_serve`]); then the kernel's own e1000 timed
+/// as the daemon timed that card ([`native_bench`]). Whether it ran:
+/// skipped, and recorded so, where the bootloader did not load it or there
+/// is no such card.
 fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     let Some(elf) = crate::boot::module(E1000E) else {
         skips.record(
@@ -300,47 +307,66 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         elf,
         name: "lx-e1000e",
         limit_s: 30,
+        poll_ms: 0,
     };
-    native_bench(skips)?;
     e1000e_serve(&program, &caps, a, &arg)?;
+    native_bench(skips)?;
     Ok(true)
 }
 
-/// The kernel's NIC -- its own e1000 driver's -- timed by the netstack
-/// daemon's `nic-bench`, as its `nic-check` then times Linux's e1000e serving
-/// the spare card: the two lines, read side by side, are what a driver
-/// process costs against the kernel's driver (the same 82574 model, behind
-/// the same kind of QEMU network). Skipped, and recorded so, where the
-/// kernel's NIC has no address to ping from.
+/// The kernel's own e1000 driver timed by the netstack daemon's `nic-bench`
+/// -- the first 82574, claimed alone by its MAC address (the kernel's stack
+/// keeping its primary card), an address taken on it by DHCP -- as
+/// `nic-check` has just timed Linux's e1000e serving the spare 82574: the
+/// same model, behind the same kind of QEMU network, its native twin. The
+/// two `[bench] SCORE nic_...` sets are read side by side
+/// (design-decisions 1588, measured). After the e1000e run, which it cannot
+/// keep from running; it fails only for what is wrong, not for being slow:
+/// the card not claimed or not passing frames, an answer corrupted.
+/// Skipped, and recorded so, where the kernel drives no e1000.
 fn native_bench(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
-    let ifinfo = crate::net::interface::info();
-    if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] || ifinfo.gateway.0 == [0, 0, 0, 0] {
+    let Some(mac) = crate::e1000::with_device(|d| d.mac().0) else {
         skips.record(
-            "the kernel's NIC timed beside Linux's e1000e",
-            "the kernel's NIC has no address",
+            "the kernel's e1000 timed beside Linux's e1000e",
+            "the kernel drives no e1000",
         );
         return Ok(());
-    }
+    };
+    let hex = alloc::format!(
+        "{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        mac[0],
+        mac[1],
+        mac[2],
+        mac[3],
+        mac[4],
+        mac[5]
+    );
     let program = Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-bench",
         limit_s: 60,
+        poll_ms: DAEMON_POLL_MS,
     };
     let ran = run(
         &program,
-        &[b"netstack", b"nic-bench"],
+        &[b"netstack", b"nic-bench", hex.as_bytes(), b"kernel_e1000"],
         &[(ResourceType::NetRaw, 0, Rights::WRITE)],
     );
     if ran == Ok(Some(check::OK)) {
         return Ok(());
     }
     serial_println!(
-        "[linuxdrv]   FAIL: the netstack daemon timing the kernel's NIC ended {:?} ({})",
+        "[linuxdrv]   FAIL: the netstack daemon timing the kernel's e1000 ended {:?} ({})",
         ran,
         nic_check_outcome(&ran)
     );
     Err(KernelError::InternalError)
 }
+
+/// How often the kernel looks whether a netstack daemon it runs has ended:
+/// it sleeps between looks rather than yielding, so that on one CPU the
+/// daemon's timings are not shared with a boot thread always runnable.
+const DAEMON_POLL_MS: u64 = 10;
 
 /// The service the boot test's card is served as: `serve=spare`.
 const SERVICE: &[u8] = b"nic.spare";
@@ -378,7 +404,9 @@ fn cable_puller() -> bool {
 /// idle driver, payloads as sent, be told the card's link is up, find the
 /// card passing a multicast group exactly while it lists it, and -- where
 /// the harness can pull the card's cable ([`cable_puller`]) -- be told the
-/// link down and up again as it does; and exit 0. The driver then ends, the
+/// link down and up again as it does, time the card (`nic-bench`'s pings,
+/// failing only for too many lost or one corrupted), be let go for breaking
+/// the protocol; and exit 0. The driver then ends, the
 /// daemon gone, with 0, no warning from Linux code in it, the card released.
 fn e1000e_serve(
     program: &Program<'_>,
@@ -398,8 +426,8 @@ fn e1000e_serve(
     )?;
     // The daemon run first without the card's key, then with it. Refused, it
     // needs only to connect -- once the driver has probed the card and its
-    // link is up, seconds under emulation; holding the key, its checks take
-    // a minute at most and the cable's two waits 20 s each.
+    // link is up, seconds under emulation; holding the key, its checks and
+    // its timing take a minute at most, and the cable's two waits 20 s each.
     let plain: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE];
     let with_cable: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"cable"];
     let cable = cable_puller();
@@ -407,6 +435,7 @@ fn e1000e_serve(
         elf: spawn::NETSTACK_ELF,
         name: "netstack-nic",
         limit_s,
+        poll_ms: DAEMON_POLL_MS,
     };
     let keyless_stack = netstack(60);
     let stack = netstack(if cable { 150 } else { 90 });

@@ -85,8 +85,8 @@ struct lx_irq {
 	struct task_struct *thread;
 	bool thread_due, thread_running;
 	wait_queue_head_t idle;
-	/* Handlers run, for the tests. */
-	unsigned long count;
+	/* Handlers run, and interrupts dropped for want of one, for the tests. */
+	unsigned long count, dropped;
 };
 
 /* A function given to the process, and its vectors. */
@@ -594,7 +594,11 @@ void lx_irq_poll(void)
 		for (v = 0; v < fn->vectors; v++) {
 			struct lx_irq *d = &fn->vec[v];
 
-			if (!d->handler || !((came >> v) & 1 || d->owed))
+			if (!d->handler) {
+				d->dropped += (came >> v) & 1;
+				continue;
+			}
+			if (!((came >> v) & 1 || d->owed))
 				continue;
 			if (d->depth)
 				d->owed = true;
@@ -609,4 +613,11 @@ unsigned long lx_irq_count(unsigned int irq)
 	struct lx_irq *d = lx_irq_of(irq);
 
 	return d ? d->count : 0;
+}
+
+unsigned long lx_irq_dropped(unsigned int irq)
+{
+	struct lx_irq *d = lx_irq_of(irq);
+
+	return d ? d->dropped : 0;
 }

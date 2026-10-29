@@ -70,6 +70,8 @@ u64 lx_hrtimer_next(u64 now_ns);
  * `now_ns` -- by lx_nic.c, to see to a card served to the network stack. */
 extern void (*lx_emul_turn_hook)(u64 now_ns);
 unsigned long lx_irq_count(unsigned int irq);
+/* lx_irq.c: how many interrupts on `irq` were dropped, no handler requested. */
+unsigned long lx_irq_dropped(unsigned int irq);
 
 /*
  * Hardirq context, as Linux enters it for an interrupt -- interrupts off,

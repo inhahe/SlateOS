@@ -1194,9 +1194,16 @@ fn waiter_answer(slot: usize) -> Option<i64> {
 
 /// Yield until `ready`, for at most a second (or a bounded number of
 /// yields, should the clock not run).
-pub(crate) fn yield_until(mut ready: impl FnMut() -> bool) -> bool {
-    let deadline = crate::hpet::elapsed_ns().saturating_add(1_000_000_000);
-    for _ in 0..200_000 {
+pub(crate) fn yield_until(ready: impl FnMut() -> bool) -> bool {
+    yield_until_within(1_000_000_000, ready)
+}
+
+/// Yield until `ready`, for at most `ns` nanoseconds -- or a bounded number
+/// of yields, one per 5 us, should the clock not run -- and answer whether
+/// it became so.
+pub(crate) fn yield_until_within(ns: u64, mut ready: impl FnMut() -> bool) -> bool {
+    let deadline = crate::hpet::elapsed_ns().saturating_add(ns);
+    for _ in 0..ns / 5_000 {
         if ready() {
             return true;
         }
@@ -1704,7 +1711,10 @@ pub fn self_test() -> KernelResult<()> {
 /// MSI-X on the boot test's spare 82574 ([`probe_card`]): three vectors set
 /// up, the card's receive, transmit and other causes routed one to each (its
 /// IVAR register), and each cause raised in turn reaching its own vector
-/// alone ([`irq_pending_mask`]); the table and its pending bits left out of
+/// alone ([`irq_pending_mask`]) -- QEMU's second sending of each taken in
+/// its own turn, its throttle interval (EITR) set to its most meanwhile and
+/// put back after, and nothing coming in the 200 ms after the last cause;
+/// the table and its pending bits left out of
 /// a mapping of their BAR; the same set-up asked again kept, and MSI then
 /// replacing it; and the close releasing every vector. Skipped, and recorded
 /// so, where there is no such card.
@@ -1720,10 +1730,9 @@ fn self_test_msix(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     const IVAR: u64 = 0x00E4;
     /// Each MSI-X vector's throttle interval, in 256 ns units: EITR(n).
     const EITR: u64 = 0x00E8;
-    /// Its most, 16.8 ms: QEMU's model sends each vector a second time when
-    /// its throttle interval ends, and this puts that second past any short
-    /// fixed wait -- a host's load had done so by chance -- so that the
-    /// test meets it every time, not on a loaded day.
+    /// Its most, 16.8 ms, while the causes are raised: QEMU's model sends
+    /// each vector a second time when its throttle interval ends, and this
+    /// puts that second past any short wait, every run.
     const EITR_LATE: u32 = 0xFFFF;
     /// Its interrupt causes as MSI-X routes them, and link-status change,
     /// one of the "other" causes.
@@ -1775,77 +1784,95 @@ fn self_test_msix(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
                 // SAFETY: a 32-bit register inside the page just mapped.
                 unsafe { (regs.saturating_add(offset) as *mut u32).write_volatile(value) };
             };
+            let read = |offset: u64| {
+                // SAFETY: as `write`.
+                unsafe { (regs.saturating_add(offset) as *const u32).read_volatile() }
+            };
+            let eitr = |n: u64| EITR.saturating_add(n.saturating_mul(4));
+            let pending = || {
+                irq_pending_mask(raw, owner)
+                    .map_err(|_| "the card's interrupts could not be asked for")
+            };
+            let found = [read(eitr(0)), read(eitr(1)), read(eitr(2))];
             write(IMC, u32::MAX);
             write(ICR, u32::MAX);
             write(IVAR, ROUTES);
             for n in 0..3u64 {
-                write(EITR.saturating_add(n.saturating_mul(4)), EITR_LATE);
+                write(eitr(n), EITR_LATE);
             }
             write(IMS, RXQ0 | TXQ0 | OTHER);
-            let stale = irq_pending_mask(raw, owner);
-            for (cause, cleared, vector) in [
-                (RXQ0, RXQ0, 0b001u64),
-                (TXQ0, TXQ0, 0b010),
-                (LSC, LSC | OTHER, 0b100),
-            ] {
-                write(ICS, cause);
-                let mut seen = 0;
-                spin_until(100_000_000, || {
-                    seen |= irq_pending_mask(raw, owner).unwrap_or(0);
-                    seen != 0
-                });
-                write(ICR, cleared);
-                // QEMU's model throttles each vector, and sends it once more
-                // when its throttle interval ends -- EITR_LATE here, 128 us
-                // by default -- and its timers fire late under emulation, by
-                // 7 to 16 ms here and more on a loaded host: a fixed wait once
-                // let the second land in the next cause's window. So it is
-                // waited for, and taken, before the next cause: until the
-                // vector comes again, a second at most (hardware sends no
-                // second; nor does QEMU when both came before the first
-                // look). Whatever else came in the meantime counts against
-                // this cause.
-                let mut again = 0;
-                spin_until(1_000_000_000, || {
-                    again |= irq_pending_mask(raw, owner).unwrap_or(0);
-                    again & vector != 0
-                });
-                seen |= again;
-                if seen != vector {
-                    write(IMC, u32::MAX);
-                    crate::serial_println!(
-                        "[devhandle]   cause {:#x}: vectors {:#b} took it, not {:#b} alone (stale {:?})",
-                        cause,
-                        seen,
-                        vector,
-                        stale
-                    );
-                    return Err("a cause did not reach its own MSI-X vector alone");
+            let causes = (|| -> Result<(), &'static str> {
+                let stale = pending()?;
+                for (cause, cleared, vector) in [
+                    (RXQ0, RXQ0, 0b001u64),
+                    (TXQ0, TXQ0, 0b010),
+                    (LSC, LSC | OTHER, 0b100),
+                ] {
+                    write(ICS, cause);
+                    let mut seen = 0;
+                    let mut failed = None;
+                    let mut look = |into: &mut u64| match pending() {
+                        Ok(mask) => {
+                            *into |= mask;
+                            false
+                        }
+                        Err(e) => {
+                            failed = Some(e);
+                            true
+                        }
+                    };
+                    yield_until_within(100_000_000, || look(&mut seen) || seen != 0);
+                    write(ICR, cleared);
+                    // QEMU's model sends each vector a second time when its
+                    // throttle interval ends -- EITR_LATE here -- and its
+                    // timers fire late under emulation by an amount no fixed
+                    // wait bounds. So the second is waited for, and taken,
+                    // before the next cause: until the vector comes again, a
+                    // second at most (none comes from hardware). Whatever
+                    // else came meanwhile counts against this cause.
+                    let mut again = 0;
+                    yield_until_within(1_000_000_000, || look(&mut again) || again & vector != 0);
+                    if let Some(e) = failed {
+                        return Err(e);
+                    }
+                    seen |= again;
+                    if seen != vector {
+                        crate::serial_println!(
+                            "[devhandle]   cause {:#x}: vectors {:#b} took it, not {:#b} alone (stale {:#b})",
+                            cause,
+                            seen,
+                            vector,
+                            stale
+                        );
+                        return Err("a cause did not reach its own MSI-X vector alone");
+                    }
                 }
-            }
-            // Then nothing more, for 200 ms: each vector's second sending was
-            // taken in its own cause's turn. One that comes now was left by a
-            // wait that ended too soon -- which a later cause's turn would
-            // have taken for its own -- or is no cause's at all.
-            let mut late = 0;
-            spin_until(200_000_000, || {
-                late |= irq_pending_mask(raw, owner).unwrap_or(0);
-                false
-            });
+                // Then, every cause masked, nothing for 200 ms: each vector's
+                // second sending was taken in its own cause's turn, and none
+                // of the card's causes can raise another. One that comes now
+                // is a second a wait left for later -- which a later cause's
+                // turn would have taken for its own.
+                write(IMC, u32::MAX);
+                crate::sched::sleep_ns(200_000_000);
+                let late = pending()?;
+                if late != 0 {
+                    crate::serial_println!(
+                        "[devhandle]   vectors {:#b} came after every cause's turn had ended",
+                        late
+                    );
+                    return Err("an MSI-X vector came after its cause's turn had ended");
+                }
+                Ok(())
+            })();
+            // On every way out: the card's causes masked and unrouted, and its
+            // throttle intervals as they were found, for its next user (the
+            // hello and e1000e processes).
             write(IMC, u32::MAX);
-            // Back to the shortest interval, as found: the card's next user
-            // (the hello and e1000e processes) is not to meet this one.
-            for n in 0..3u64 {
-                write(EITR.saturating_add(n.saturating_mul(4)), 0);
-            }
-            if late != 0 {
-                crate::serial_println!(
-                    "[devhandle]   vectors {:#b} came after every cause's turn had ended",
-                    late
-                );
-                return Err("an MSI-X vector came after its cause's turn had ended");
-            }
             write(IVAR, 0);
+            for (n, value) in (0..3u64).zip(found) {
+                write(eitr(n), value);
+            }
+            causes?;
             // The table and its pending bits: in no mapping of their BAR.
             let (va, _) = map_bar(raw, owner, usize::from(layout.table_bar))
                 .map_err(|_| "the MSI-X table's BAR could not be mapped")?;

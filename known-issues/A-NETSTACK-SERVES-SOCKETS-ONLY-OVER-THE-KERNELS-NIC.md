@@ -11,9 +11,12 @@ card only a driver process drives carries no socket's traffic.
 What stands between the two:
 
 - **No one NIC interface.** The daemon's NIC calls pick per call: `raw_tx`
-  and `raw_rx` go to the port when one is attached, `sync_mcast_filter`
-  likewise; `query_if_info`, `raw_open` and `raw_close` are the kernel's
-  only. The proper shape is one NIC chosen once at start-up -- the kernel's,
+  and `raw_rx` go to the port when one is attached; `query_if_info`,
+  `raw_open`, `raw_close` and `sync_mcast_filter` are the kernel's only.
+  Over a port the filter goes to `port::set_mcast`, and is pushed only once
+  the driver's answer (`port::mcast_settled`) says it is in force -- a
+  refused list retried at the next change, as the kernel path does, and the
+  list given again to a card attached anew. The proper shape is one NIC chosen once at start-up -- the kernel's,
   or a port named on the command line or by configuration -- behind which
   every call goes, with the address configuration coming from the kernel's
   for the one and the daemon's own DHCP for the other.

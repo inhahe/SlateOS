@@ -1278,6 +1278,84 @@ def _progress_harness(body):
         drop_fixture(tmp)
 
 
+def _cable_harness(body, python="bash"):
+    """Run the real `cable_responder`, `$CABLE_PY` being `python` and
+    `screen.py` a fake that appends its arguments to calls.txt and exits with
+    the number in rc.txt (0 without one), then `body`: its stdout, `None` on
+    a hang."""
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "screen.py"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write('echo "$*" >> calls.txt\n'
+                         'exit "$(cat rc.txt 2>/dev/null || echo 0)"\n')
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                "SERIAL_FILE=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\n"
+                f"CABLE_STEP=0\nCABLE_SEEN=0\nCABLE_PY={_sq(python)}\n"
+                + extract_shell_function("cable_responder") + "\n\n"
+                + body)
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the cable responder")
+        return None if proc is None else proc.stdout
+    finally:
+        drop_fixture(tmp)
+
+
+def test_the_cable_is_pulled_and_plugged_back_once_each_when_the_daemon_asks():
+    """`cable_responder` pulls the spare card's cable at the daemon's "pull it"
+    and plugs it back at "plug it back", once each; a set_link that fails is
+    tried again the next call; it reads only what the log gained since its last
+    look, a line split at that point included; and with no Python it does
+    nothing.
+
+    The review of 234e9e77b: the first version marked a step done before its
+    set_link ran, so one failed call was final, and it read the whole log every
+    second for the whole boot.
+    """
+    body = (
+        "step() { cable_responder 2>>errors.txt; echo \"step=$CABLE_STEP\"; }\n"
+        "printf '%01000d\\n' 0 > serial.txt\n"
+        "step\n"
+        # Written in two pieces across a look: the line split where it stopped.
+        "printf 'noise\\n[netstack] nic-check: cab' >> serial.txt\n"
+        "step\n"
+        "printf 'le: pull it\\n' >> serial.txt\n"
+        "echo 2 > rc.txt\n"
+        "step\n"
+        "echo 0 > rc.txt\n"
+        "step\n"
+        "step\n"
+        "printf '[netstack] nic-check: cable: plug it back\\n' >> serial.txt\n"
+        "step\n"
+        "step\n"
+        "echo calls:; cat calls.txt\n"
+        "echo failures: $(grep -c 'trying again' errors.txt)\n")
+    out = _cable_harness(body)
+    check("the responder ran to its end", out is not None, True)
+    if out is None:
+        return
+    lines = out.splitlines()
+    check("its steps: nothing asked, half a line, asked and failed, pulled, "
+          "waiting, plugged back, done",
+          [line for line in lines if line.startswith("step=")],
+          ["step=0", "step=0", "step=1", "step=2", "step=2", "step=4", "step=4"])
+    calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
+    check("set_link off twice (once failed), on once, nothing else",
+          [line for line in calls if not line.startswith("failures:")],
+          ["hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 off",
+           "hmp --hmp 1 set_link net3 on"])
+    check("the failed call said so", "failures: 1" in out, True)
+    quiet = _cable_harness(
+        "printf '[netstack] nic-check: cable: pull it\\n' > serial.txt\n"
+        "cable_responder; echo \"step=$CABLE_STEP\"\n"
+        "test -f calls.txt && echo called || echo not-called\n",
+        python="")
+    check("with no Python the responder does nothing",
+          quiet.split() if quiet else quiet, ["step=0", "not-called"])
+
+
 def _death_harness(cmdline, serial_text):
     """Run the real `kernel_is_dead` on a serial log holding `serial_text`,
     the kernel's command line `cmdline`: "DEAD" or "ALIVE", `None` on a hang.

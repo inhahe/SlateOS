@@ -5,12 +5,13 @@
     python scripts/screen.py type (--hmp PORT | --qmp PORT) TEXT     # `\\n` in TEXT is Enter
     python scripts/screen.py text SCREEN.ppm|SCREEN.png              # the console's text
     python scripts/screen.py probe (--hmp PORT | --qmp PORT) [--timeout 120] [--keep DIR]
-    python scripts/screen.py hmp --hmp PORT COMMAND                  # e.g. "set_link net3 off"
+    python scripts/screen.py hmp (--hmp PORT | --qmp PORT) COMMAND   # e.g. "set_link net3 off"
     python scripts/screen.py --self-test
 
-`hmp` runs one other HMP command through the same client -- the boot test
-pulls a card's cable with it -- and prints what QEMU printed, which for most
-commands is nothing on success; exit 1 when it printed anything.
+`hmp` runs one other HMP command line through the same client -- on a QMP
+monitor through its `human-monitor-command` -- and prints what QEMU
+printed, which for most commands is nothing on success; exit 1 when it
+printed anything. The boot test pulls a card's cable with it.
 
 Design decision 1392 makes "a boot test that boots to the desktop and checks
 it, with QEMU's screen capture and simulated input" lane A's step on the path
@@ -396,8 +397,15 @@ class Monitor:
         return out
 
     def hmp(self, command: str) -> str:
-        """Run one HMP command; answer what it printed."""
-        self.sock.sendall(command.encode("utf-8") + b"\n")
+        """Run one HMP command line -- through QMP's `human-monitor-command`
+        on a QMP monitor -- and answer what it printed."""
+        if self.kind == "qmp":
+            said = self._qmp("human-monitor-command", {"command-line": command})
+            return str(said).strip() if said else ""
+        try:
+            self.sock.sendall(command.encode("utf-8") + b"\n")
+        except OSError as e:
+            raise MonitorError(f"the monitor connection failed: {e}") from e
         return hmp_output(self._until(_HMP_PROMPT), command)
 
     def _qmp_message(self) -> dict:
@@ -547,6 +555,15 @@ class _FakeGuest:
         self.lose_first = lose_first
         self.typing = ""
         self.lock = threading.Lock()
+        # The `set_link` commands it took, as (device, state).
+        self.links: list[tuple[str, str]] = []
+
+    def set_link(self, args: list[str]) -> str:
+        """`set_link` for its one card, `net3`: what QEMU prints."""
+        if len(args) == 2 and args[0] == "net3" and args[1] in ("on", "off"):
+            self.links.append((args[0], args[1]))
+            return ""
+        return f"Device '{args[0] if args else ''}' not found\r\n"
 
     def key(self, names: list[str]) -> None:
         if not self.keys_arrive:
@@ -585,6 +602,19 @@ def _serve(kind: str, guest: _FakeGuest) -> tuple[int, threading.Thread]:
     srv.listen(1)
     port = srv.getsockname()[1]
 
+    def hmp_line(line: str) -> str:
+        """An HMP command line run: what it prints."""
+        words = re.findall(r'"(?:[^"\\]|\\.)*"|\S+', line)
+        if words[0] == "screendump":
+            Path(words[1].strip('"')).write_bytes(ppm_bytes(guest.screen()))
+        elif words[0] == "sendkey":
+            guest.key(words[1].split("-"))
+        elif words[0] == "set_link":
+            return guest.set_link(words[1:])
+        else:
+            return f"unknown command: '{words[0]}'\r\n"
+        return ""
+
     def run() -> None:
         conn, _ = srv.accept()
         srv.close()
@@ -599,24 +629,22 @@ def _serve(kind: str, guest: _FakeGuest) -> tuple[int, threading.Thread]:
                 # The echo as QEMU's readline sends it: redrawn a key at a time.
                 echo = "".join(line[: i + 1] + "\x1b[K" + "\x1b[D" * (i + 1)
                                for i in range(len(line)))
-                words = re.findall(r'"(?:[^"\\]|\\.)*"|\S+', line)
-                out = ""
-                if words[0] == "screendump":
-                    Path(words[1].strip('"')).write_bytes(ppm_bytes(guest.screen()))
-                elif words[0] == "sendkey":
-                    guest.key(words[1].split("-"))
-                else:
-                    out = f"unknown command: '{words[0]}'\r\n"
+                out = hmp_line(line)
                 conn.sendall((echo + "\r\n" + out + "(qemu) ").encode())
             else:
                 request = json.loads(line)
                 command, arguments = request["execute"], request.get("arguments", {})
+                said: object = {}
                 if command == "screendump":
                     Path(arguments["filename"]).write_bytes(ppm_bytes(guest.screen()))
                 elif command == "send-key":
                     guest.key([k["data"] for k in arguments["keys"]])
-                reply = {"return": {}} if command in (
-                    "qmp_capabilities", "screendump", "send-key") else {
+                elif command == "human-monitor-command":
+                    # QEMU answers with what the command printed, a string.
+                    said = hmp_line(arguments["command-line"])
+                reply = {"return": said} if command in (
+                    "qmp_capabilities", "screendump", "send-key",
+                    "human-monitor-command") else {
                     "error": {"class": "CommandNotFound", "desc": f"no {command}"}}
                 # An event between the command and its answer, as QEMU may send.
                 conn.sendall(b'{"event": "VNC_CONNECTED", "data": {}}\r\n'
@@ -731,6 +759,20 @@ def self_test() -> int:
                 expect(f"{label}: {'passes' if want_ok else 'fails'}", r.ok, want_ok)
                 expect(f"{label}: says `{said}`", said in r.message, True)
             t.join(5)
+        # Any other command line, through either monitor: the cable pulled
+        # and plugged back, and a device QEMU does not have refused in words.
+        for kind in ("hmp", "qmp"):
+            guest = _FakeGuest(font, [])
+            port, t = _serve(kind, guest)
+            with Monitor(kind, port, timeout=10) as mon:
+                said = (mon.hmp("set_link net3 off"), mon.hmp("set_link net3 on"),
+                        mon.hmp("set_link net9 off"))
+            t.join(5)
+            expect(f"{kind.upper()}: set_link done says nothing", said[:2], ("", ""))
+            expect(f"{kind.upper()}: set_link reached the guest", guest.links,
+                   [("net3", "off"), ("net3", "on")])
+            expect(f"{kind.upper()}: set_link on no such device says so",
+                   "not found" in said[2], True)
         # A refusal comes back as an error, not as a capture of nothing.
         guest = _FakeGuest(font, [])
         port, t = _serve("qmp", guest)
@@ -791,23 +833,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--timeout", type=float, default=120.0)
     p.add_argument("--keep", metavar="DIR", help="keep the last screen there, as probe.png "
                    "and probe.txt")
-    p = sub.add_parser("hmp", help="run one HMP command; exit 1 if QEMU printed anything")
-    p.add_argument("--hmp", type=int, metavar="PORT", required=True,
-                   help="QEMU's text monitor (-monitor tcp:)")
+    p = sub.add_parser("hmp", help="run one HMP command line; exit 1 if QEMU printed anything")
+    monitor_args(p)
     p.add_argument("command")
     args = ap.parse_args(argv)
-
-    if args.verb == "hmp":
-        try:
-            with Monitor("hmp", args.hmp) as mon:
-                said = mon.hmp(args.command)
-        except MonitorError as e:
-            print(f"screen: {e}", file=sys.stderr)
-            return 2
-        if said:
-            print(said)
-            return 1
-        return 0
 
     if args.verb == "text":
         try:
@@ -843,6 +872,11 @@ def main(argv: list[str]) -> int:
             if args.verb == "type":
                 mon.type_text(args.text.replace("\\n", "\n"))
                 return 0
+            if args.verb == "hmp":
+                said = mon.hmp(args.command)
+                if said:
+                    print(said)
+                return 1 if said else 0
             keep = Path(args.keep) if args.keep else None
             scratch_dir = keep or Path(os.environ.get("TEMP", "/tmp"))
             scratch_dir.mkdir(parents=True, exist_ok=True)

@@ -97,12 +97,15 @@ through the kernel per frame.
    the attach message and whenever it changes. The stack gives the
    driver the multicast addresses the card must pass, 64 at most or
    "every one", each list replacing the last; the `lx-nic` task makes them
-   the device's own (`dev_mc_flush`, `dev_mc_add`, `dev_set_allmulti`,
-   under the RTNL) and the driver answers each, once in force or failed
-   (a failure leaves the card passing none of them). One list at a time:
-   the daemon keeps the latest it wants and sends it once the last is
-   answered, so the card ends with the latest. A stack's groups go when it
-   leaves. A message a side has no place for -- too long, unreadable, the
+   the device's own (`dev_mc_del` for those leaving, then `dev_mc_add` for
+   those coming, so one in both lists never leaves the card's filter, and
+   `dev_set_allmulti`, under the RTNL) and the driver answers each, once in
+   force or failed (a failure leaves the card passing none of them). One
+   list at a time: the daemon keeps the latest it wants and sends it once
+   the last is answered, so the card ends with the latest. A stack's groups
+   go when it leaves, and the next stack is accepted only after that. The
+   daemon reads the driver's messages at every wait on the card, frames
+   queued or not. A message a side has no place for -- too long, unreadable, the
    other side's kind, a list before the last was answered -- is the peer
    breaking the protocol, and ends the attachment, as a broken ring does;
    an address in a list that is not a multicast address is such a message
@@ -161,14 +164,20 @@ address by DHCP from QEMU's network, resolves the gateway by ARP and has
 400 full-size pings answered, 16 at a time, payloads as sent. Then the
 link must have been told up, and the card must pass router advertisements
 to all nodes -- which QEMU's network sends whenever a router is solicited
--- exactly while the daemon lists the all-nodes group: none before, one
-once listed, none once the list is emptied, each list answered before it
-is tried. Where the harness can pull the card's cable (the boot test, with
-its monitor, says `linuxdrv.cable=hmp`; `--no-monitor` runs and fast boots
-cannot), the daemon asks it to -- `set_link net3 off`, then `on` -- and
-the link must be told down, then up, within 20 s each, and the gateway
-must answer ARP again. The daemon's exit is the verdict, and the driver
-must end 0 once the daemon has gone --
+-- exactly while the daemon lists the all-nodes group or asks for every
+multicast frame: none before, one once listed, one once every frame is
+asked for, none once the list is emptied, each list answered before it is
+tried, and before the last count a ping's answer read as a barrier, so
+that nothing the card took under the earlier lists is counted. Where the
+harness can pull the card's cable (the boot test, with its monitor and a
+Python for `screen.py`, says `linuxdrv.cable=hmp`; `--no-monitor` runs and
+fast boots cannot), the daemon asks it to -- `set_link net3 off`, then
+`on`, tried each second until QEMU takes it -- and the link must be told
+down, then up, within 20 s each, and the gateway must answer ARP again.
+Last, the daemon sends what only a driver sends, and must be let go within
+a second. The daemon's exit is the verdict
+(`netipc::nicport::check`), and the driver must end 0 once the daemon has
+gone --
 not `SLX_EXIT_WARNED`, which it ends with when Linux code warned anywhere
 in the process, a bug even in a run that otherwise passed. (The first
 version sent every frame twice, through `net_xmit_eval()`'s double

@@ -31,8 +31,8 @@
 //! a time: another that connects waits until the first has gone.
 
 use netipc::nicport::{
-    ATTACH_LEN, DOORBELL, MCAST_MAX, MESSAGE_MAX, Message, Port, REFUSED_NO_KEY, REFUSED_NO_RING,
-    SERVICE_PREFIX, SLOT_SIZE, encode_link, encode_mcast_done, encode_refused,
+    ATTACH_LEN, DOORBELL, MCAST_MAX, MESSAGE_MAX, McastList, Message, Port, REFUSED_NO_KEY,
+    REFUSED_NO_RING, SERVICE_PREFIX, SLOT_SIZE, encode_link, encode_mcast_done, encode_refused,
 };
 use netipc::ring::{Cqe, ERR_INVALID, ERR_NO_BUFS};
 use netring::Ring;
@@ -103,21 +103,14 @@ struct Client {
     told_link: Option<bool>,
     /// The multicast list the stack last sent, not yet answered.
     mcast: Option<McastList>,
+    /// The C half has the list, and is putting it in force.
+    mcast_taken: bool,
     /// The answer to the last list, not yet sent: the connection had no
     /// room for it.
     answer: Option<i32>,
     /// The connection closed, or the stack broke the protocol: no more work
     /// taken, the attachment ended once the C half holds nothing of it.
     gone: bool,
-}
-
-/// A multicast list a stack sent: `len` addresses of `addrs`, or every
-/// multicast frame with `all`; `taken` once the C half has it.
-struct McastList {
-    addrs: [[u8; 6]; MCAST_MAX],
-    len: usize,
-    all: bool,
-    taken: bool,
 }
 
 struct Served {
@@ -127,8 +120,6 @@ struct Served {
     opened: bool,
     mac: [u8; 6],
     mtu: u16,
-    /// The card's link as of the last turn.
-    link: bool,
     client: Option<Client>,
     /// The wait said the listener or the connection has something.
     look: bool,
@@ -148,7 +139,6 @@ static SERVED: Single<Served> = Single::new(Served {
     opened: false,
     mac: [0; 6],
     mtu: 0,
-    link: false,
     client: None,
     look: false,
     looked_ns: 0,
@@ -234,13 +224,15 @@ pub extern "C" fn slx_nicport_turn(now_ns: u64, link: bool) -> bool {
     if !s.opened {
         return false;
     }
-    s.link = link;
     if s.look || now_ns.saturating_sub(s.looked_ns) >= LOOK_EVERY_NS {
         s.look = false;
         s.looked_ns = now_ns;
         match (s.client.as_mut(), s.listener) {
             (Some(c), _) => take_messages(c),
-            (None, Some(listener)) => {
+            // The next stack waits until the C half has seen to the last
+            // one's end (`slx_nicport_ended`) -- dropped its groups -- so
+            // that nothing of the last undoes anything of the next.
+            (None, Some(listener)) if s.ended == 0 => {
                 match accept(listener, s.mac, s.mtu) {
                     Ok(client) => s.client = client,
                     Err(ListenerFailed) => {
@@ -249,17 +241,17 @@ pub extern "C" fn slx_nicport_turn(now_ns: u64, link: bool) -> bool {
                     }
                 }
             }
-            (None, None) => {}
+            (None, _) => {}
         }
     }
     let Some(c) = s.client.as_mut() else {
-        return s.listener.is_none();
+        return s.listener.is_none() || s.ended != 0;
     };
     if !c.gone {
         sort_submissions(c, s.mtu, &mut s.lost);
     }
-    if !c.gone && c.told_link != Some(s.link) {
-        tell_link(c, s.link);
+    if !c.gone && c.told_link != Some(link) {
+        tell_link(c, link);
     }
     if !c.gone {
         tell_answer(c);
@@ -267,7 +259,7 @@ pub extern "C" fn slx_nicport_turn(now_ns: u64, link: bool) -> bool {
     if c.kick && !c.gone {
         ring_if_asleep(c);
     }
-    let applying = c.mcast.as_ref().is_some_and(|m| m.taken);
+    let applying = c.mcast.is_some() && c.mcast_taken;
     if c.gone && c.sending.is_none() && !c.receiving && !applying {
         if let Some(c) = s.client.take() {
             detach(&c);
@@ -285,7 +277,7 @@ pub extern "C" fn slx_nicport_turn(now_ns: u64, link: bool) -> bool {
 /// Whether the C half's task has something to do for `c`: frames to send,
 /// or a multicast list to put in force.
 fn has_work(c: &Client) -> bool {
-    !c.gone && (!c.sends.is_empty() || c.mcast.as_ref().is_some_and(|m| !m.taken))
+    !c.gone && (!c.sends.is_empty() || (c.mcast.is_some() && !c.mcast_taken))
 }
 
 /// `slx_nicport_work`: whether the C half's task has something to do --
@@ -311,18 +303,15 @@ pub extern "C" fn slx_nicport_work() -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn slx_nicport_mcast_next(list: *mut u8, all: *mut bool) -> i64 {
     let s = served();
-    let Some(m) = s
-        .client
-        .as_mut()
-        .filter(|c| !c.gone)
-        .and_then(|c| c.mcast.as_mut())
-        .filter(|m| !m.taken)
-    else {
+    let Some(c) = s.client.as_mut().filter(|c| !c.gone && !c.mcast_taken) else {
         return -1;
     };
-    m.taken = true;
+    let Some(m) = c.mcast else {
+        return -1;
+    };
+    c.mcast_taken = true;
     let mut to = list;
-    for addr in m.addrs.get(..m.len).unwrap_or(&[]) {
+    for addr in m.addrs() {
         // SAFETY: the caller's: `list` holds `6 * MCAST_MAX` bytes, and at
         // most `MCAST_MAX` addresses are written, six bytes each.
         unsafe { core::ptr::copy_nonoverlapping(addr.as_ptr(), to, 6) };
@@ -330,7 +319,7 @@ pub unsafe extern "C" fn slx_nicport_mcast_next(list: *mut u8, all: *mut bool) -
     }
     // SAFETY: the caller's.
     unsafe { all.write(m.all) };
-    i64::try_from(m.len).unwrap_or(-1)
+    i64::try_from(m.addrs().len()).unwrap_or(-1)
 }
 
 /// `slx_nicport_mcast_done`: the list [`slx_nicport_mcast_next`] gave is in
@@ -342,10 +331,11 @@ pub extern "C" fn slx_nicport_mcast_done(result: i32) {
     let Some(c) = s.client.as_mut() else {
         return;
     };
-    if !c.mcast.as_ref().is_some_and(|m| m.taken) {
+    if c.mcast.is_none() || !c.mcast_taken {
         return;
     }
     c.mcast = None;
+    c.mcast_taken = false;
     c.answer = Some(result);
     if !c.gone {
         tell_answer(c);
@@ -602,6 +592,7 @@ fn accept(listener: u64, mac: [u8; 6], mtu: u16) -> Result<Option<Client>, Liste
         slept: 0,
         told_link: None,
         mcast: None,
+        mcast_taken: false,
         answer: None,
         gone: false,
     }))
@@ -651,20 +642,7 @@ fn take_messages(c: &mut Client) {
         match buf.get(..len).and_then(Message::decode) {
             Some(Message::Doorbell) => {}
             Some(Message::Mcast { all, addrs }) if c.mcast.is_none() && c.answer.is_none() => {
-                let mut list = McastList {
-                    addrs: [[0; 6]; MCAST_MAX],
-                    len: 0,
-                    all,
-                    taken: false,
-                };
-                // Decoded: at most MCAST_MAX of them.
-                list.len = list
-                    .addrs
-                    .iter_mut()
-                    .zip(addrs.chunks_exact(6))
-                    .map(|(to, from)| to.copy_from_slice(from))
-                    .count();
-                c.mcast = Some(list);
+                c.mcast = Some(McastList::from_message(all, addrs));
             }
             _ => {
                 log(b"[lx] nicport: the stack sent a message the protocol has no place for; it is let go\n");
@@ -726,7 +704,8 @@ fn ring_if_asleep(c: &mut Client) {
         return;
     }
     c.rung = sleeper;
-    // Not sent, the connection has no room: it holds a doorbell already.
+    // Not sent, the connection has no room: it holds messages already,
+    // which wake the stack as a doorbell would.
     let _sent = send_message(c, &[DOORBELL]);
 }
 

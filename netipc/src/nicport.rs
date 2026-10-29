@@ -132,8 +132,74 @@ impl<'a> Message<'a> {
 }
 
 /// Whether `mac` is a multicast address: the first octet's low bit set.
-fn is_multicast(mac: &[u8]) -> bool {
+#[must_use]
+pub fn is_multicast(mac: &[u8]) -> bool {
     mac.first().is_some_and(|b| b & 1 == 1)
+}
+
+/// A multicast list, as a [`Message::Mcast`] carries it: the first `len` of
+/// `addrs`, each a multicast address -- or every multicast frame, with
+/// `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct McastList {
+    addrs: [[u8; 6]; MCAST_MAX],
+    len: usize,
+    /// Every multicast frame is wanted, whatever the list.
+    pub all: bool,
+}
+
+impl McastList {
+    /// The list a stack wants: `addrs` -- any that is not a multicast
+    /// address left out -- or, with `all` or more than [`MCAST_MAX`] of
+    /// them, every multicast frame and no list.
+    #[must_use]
+    pub fn new(all: bool, addrs: &[[u8; 6]]) -> Self {
+        let mut list = Self {
+            addrs: [[0; 6]; MCAST_MAX],
+            len: 0,
+            all: all || addrs.len() > MCAST_MAX,
+        };
+        if !list.all {
+            list.len = list
+                .addrs
+                .iter_mut()
+                .zip(addrs.iter().filter(|a| is_multicast(&a[..])))
+                .map(|(to, from)| *to = *from)
+                .count();
+        }
+        list
+    }
+
+    /// The list a [`Message::Mcast`] carries: `addrs` is its six-byte
+    /// addresses in turn, as [`Message::decode`] checked them.
+    #[must_use]
+    pub fn from_message(all: bool, addrs: &[u8]) -> Self {
+        let mut list = Self {
+            addrs: [[0; 6]; MCAST_MAX],
+            len: 0,
+            all,
+        };
+        list.len = list
+            .addrs
+            .iter_mut()
+            .zip(addrs.chunks_exact(6))
+            .map(|(to, from)| to.copy_from_slice(from))
+            .count();
+        list
+    }
+
+    /// Its addresses.
+    #[must_use]
+    pub fn addrs(&self) -> &[[u8; 6]] {
+        self.addrs.get(..self.len).unwrap_or(&[])
+    }
+
+    /// The [`Message::Mcast`] saying it, written into `out`: its length,
+    /// `None` when `out` is too short.
+    #[must_use]
+    pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
+        encode_mcast(self.all, self.addrs(), out)
+    }
 }
 
 /// [`Message::Refused`] written into `out`: its length, `None` when `out`
@@ -284,6 +350,8 @@ pub mod check {
     pub const LINK: i32 = 16;
     /// The card did not pass multicast frames as its list said.
     pub const MCAST: i32 = 17;
+    /// The card's driver kept a stack that broke the protocol.
+    pub const PROTOCOL: i32 = 18;
 
     /// What exit `code` says went wrong.
     #[must_use]
@@ -300,6 +368,7 @@ pub mod check {
             TURNED_AWAY => "the card's driver refused it for want of the card's key",
             LINK => "the card's link was never told, or did not follow its cable",
             MCAST => "the card did not pass multicast frames as its list said",
+            PROTOCOL => "the card's driver kept a stack that broke the protocol",
             _ => "it ended otherwise",
         }
     }
@@ -439,6 +508,43 @@ mod tests {
     }
 
     #[test]
+    fn a_list_keeps_multicast_addresses_and_asks_for_all_past_the_most() {
+        let list = McastList::new(false, &[ALL_NODES, PORT.mac, ALL_HOSTS]);
+        assert!(!list.all);
+        assert_eq!(
+            list.addrs(),
+            &[ALL_NODES, ALL_HOSTS],
+            "the unicast one left out"
+        );
+        let many = McastList::new(false, &[ALL_NODES; MCAST_MAX + 1]);
+        assert!(
+            many.all && many.addrs().is_empty(),
+            "past the most: all, no list"
+        );
+        let full = McastList::new(false, &[ALL_HOSTS; MCAST_MAX]);
+        assert!(!full.all && full.addrs().len() == MCAST_MAX);
+        let all = McastList::new(true, &[ALL_NODES]);
+        assert!(all.all && all.addrs().is_empty());
+    }
+
+    #[test]
+    fn a_list_reads_back_from_its_message() {
+        let mut b = [0u8; MESSAGE_MAX];
+        for list in [
+            McastList::new(false, &[ALL_NODES, ALL_HOSTS]),
+            McastList::new(true, &[]),
+            McastList::new(false, &[]),
+            McastList::new(false, &[ALL_HOSTS; MCAST_MAX]),
+        ] {
+            let n = list.encode(&mut b).unwrap();
+            let Some(Message::Mcast { all, addrs }) = Message::decode(&b[..n]) else {
+                panic!("not a list");
+            };
+            assert_eq!(McastList::from_message(all, addrs), list);
+        }
+    }
+
+    #[test]
     fn every_check_exit_says_its_own_failure() {
         use check::*;
         let codes = [
@@ -451,6 +557,7 @@ mod tests {
             TURNED_AWAY,
             LINK,
             MCAST,
+            PROTOCOL,
         ];
         let said: Vec<_> = codes.iter().map(|&c| failure(c)).collect();
         for (i, a) in said.iter().enumerate() {

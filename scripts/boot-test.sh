@@ -1848,34 +1848,47 @@ screen_probe() {
 # The spare 82574's cable (`-netdev user,id=net3`), pulled and plugged back
 # when the netstack daemon asks -- its nic-check lines "cable: pull it" and
 # "cable: plug it back", which it prints only when the kernel says this
-# harness can (linuxdrv.cable=hmp, set above with the monitor) -- through
-# the HMP monitor: `set_link net3 off`, then `on`, once each a boot. Called
-# from the wait loop every second. Anything QEMU says back is printed; the
-# daemon, waiting for the link to follow, fails the boot if it does not.
-CABLE_PULLED=0
-CABLE_BACK=0
+# harness can (linuxdrv.cable=hmp, set with the monitor when there is a
+# Python to run screen.py: $CABLE_PY) -- through the HMP monitor:
+# `set_link net3 off`, then `on`. Called from the wait loop every second.
+#
+# CABLE_STEP: 0 waiting for "pull it", 1 asked to pull, 2 pulled and waiting
+# for "plug it back", 3 asked to plug it back, 4 done. A set_link that fails
+# -- the monitor busy or not answering, QEMU refusing -- is said and tried
+# again the next second; the daemon, waiting 20 s for the link to follow,
+# fails the boot if it never does. The log is read from where the last look
+# stopped (less 200 bytes, for a line split there), not whole every second.
+CABLE_STEP=0
+CABLE_SEEN=0
+CABLE_PY=""
 cable_responder() {
-    [ "$CABLE_BACK" -eq 0 ] && [ "${#MONITOR_ARGS[@]}" -gt 0 ] && [ -f "$SERIAL_FILE" ] || return 0
-    local want state
-    # Not anchored: a kernel line can be printed into the middle of another.
-    if [ "$CABLE_PULLED" -eq 0 ]; then
-        want='[netstack] nic-check: cable: pull it'
-        state=off
-    else
-        want='[netstack] nic-check: cable: plug it back'
-        state=on
+    [ "$CABLE_STEP" -lt 4 ] && [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
+    if [ "$CABLE_STEP" -eq 0 ] || [ "$CABLE_STEP" -eq 2 ]; then
+        local want size from
+        # Not anchored: a kernel line can be printed into the middle of another.
+        if [ "$CABLE_STEP" -eq 0 ]; then
+            want='[netstack] nic-check: cable: pull it'
+        else
+            want='[netstack] nic-check: cable: plug it back'
+        fi
+        size=$(wc -c < "$SERIAL_FILE")
+        from=$(( CABLE_SEEN > 200 ? CABLE_SEEN - 200 : 0 ))
+        CABLE_SEEN=$size
+        # Not `tail | grep -q`: under pipefail, grep leaving early makes the
+        # pipeline fail on tail's SIGPIPE, and a match would read as none.
+        grep -a -q -F "$want" <(tail -c +$(( from + 1 )) "$SERIAL_FILE") || return 0
+        CABLE_STEP=$(( CABLE_STEP + 1 ))
     fi
-    grep -a -q -F "$want" "$SERIAL_FILE" 2>/dev/null || return 0
-    if [ "$CABLE_PULLED" -eq 0 ]; then
-        CABLE_PULLED=1
-    else
-        CABLE_BACK=1
-    fi
-    local py=python
-    command -v python &>/dev/null || py=python3
+    local state=off
+    [ "$CABLE_STEP" -eq 3 ] && state=on
     local said rc=0
-    said="$("$py" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 $state" 2>&1)" || rc=$?
-    echo "=== Cable: set_link net3 $state at the daemon's asking${said:+ -- QEMU said: $said} (rc $rc) ==="
+    said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 $state" 2>&1)" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        echo "=== Cable: set_link net3 $state at the daemon's asking ==="
+        CABLE_STEP=$(( CABLE_STEP + 1 ))
+    else
+        echo "=== Cable: set_link net3 $state failed (rc $rc)${said:+: $said}; trying again ===" >&2
+    fi
 }
 
 # Stop QEMU and put the log back as it stood at the marker ($SERIAL_AT_MARKER,
@@ -9193,11 +9206,18 @@ fi
 # pass, since nothing changes until something fails):
 #     SLATE_CMDLINE="selftest.keep_going=1" ./scripts/boot-test.sh
 KERNEL_CMDLINE="sched.boot_deadline_ms=$((TIMEOUT * 1000))"
-# With the monitor, the harness pulls the spare 82574's cable when the
-# netstack daemon asks (cable_responder): the kernel is told so, and
-# without one the daemon leaves the cable alone.
+# With the monitor, and a Python to run screen.py, the harness pulls the
+# spare 82574's cable when the netstack daemon asks (cable_responder): the
+# kernel is told so, and without them the daemon leaves the cable alone.
 if [ "$MONITOR_ENABLED" -eq 1 ]; then
-    KERNEL_CMDLINE="$KERNEL_CMDLINE linuxdrv.cable=hmp"
+    if command -v python &>/dev/null; then
+        CABLE_PY=python
+    elif command -v python3 &>/dev/null; then
+        CABLE_PY=python3
+    fi
+    if [ -n "$CABLE_PY" ]; then
+        KERNEL_CMDLINE="$KERNEL_CMDLINE linuxdrv.cable=hmp"
+    fi
 fi
 if [ -n "${SLATE_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"

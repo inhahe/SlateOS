@@ -240,35 +240,80 @@ static void lx_nic_port_turn(u64 now_ns)
 		wake_up(&lx_nic_port_work);
 }
 
-/* Whether the device passes every multicast frame for the stack. */
+/*
+ * What the stack's lists made the device pass: the addresses added
+ * (dev_mc_add), which the next list is told apart from, and whether every
+ * multicast frame.
+ */
+static u8 lx_nic_mc[SLX_NICPORT_MCAST_MAX][ETH_ALEN];
+static long lx_nic_mc_n;
 static bool lx_nic_allmulti;
+
+/* Whether `addr` is among the `n` six-byte addresses at `list`. */
+static bool lx_nic_listed(const u8 *addr, const u8 *list, long n)
+{
+	long i;
+
+	for (i = 0; i < n; i++)
+		if (ether_addr_equal(addr, list + ETH_ALEN * i))
+			return true;
+	return false;
+}
+
+/* Every address the stack's lists added dropped, and every-frame mode left. */
+static void lx_nic_drop_mcast(struct net_device *dev)
+{
+	long i;
+
+	for (i = 0; i < lx_nic_mc_n; i++)
+		dev_mc_del(dev, lx_nic_mc[i]);
+	lx_nic_mc_n = 0;
+	if (lx_nic_allmulti) {
+		/* Only an increment can fail: an overflow. */
+		WARN_ON(dev_set_allmulti(dev, -1));
+		lx_nic_allmulti = false;
+	}
+}
 
 /*
  * The multicast addresses `dev` passes made the `n` six-byte addresses at
  * `list`, and every one with `all`, in place of the last: 0, or a negative
  * errno -- the device then passing none of them, as if none were listed.
+ * Those leaving are taken out first, then those coming put in, each change
+ * writing the card's filter (dev_mc_del/add): one in both lists never leaves
+ * it.
  */
 static int lx_nic_set_mcast(struct net_device *dev, const u8 *list, long n, bool all)
 {
-	long i;
+	u8 next[SLX_NICPORT_MCAST_MAX][ETH_ALEN];
+	long i, kept = 0;
 	int err = 0;
 
 	rtnl_lock();
-	dev_mc_flush(dev);
-	for (i = 0; i < n && !err; i++)
-		err = dev_mc_add(dev, list + 6 * i);
+	for (i = 0; i < lx_nic_mc_n; i++) {
+		if (lx_nic_listed(lx_nic_mc[i], list, n))
+			memcpy(next[kept++], lx_nic_mc[i], ETH_ALEN);
+		else
+			dev_mc_del(dev, lx_nic_mc[i]);
+	}
+	for (i = 0; i < n && !err; i++) {
+		const u8 *addr = list + ETH_ALEN * i;
+
+		if (lx_nic_listed(addr, next[0], kept))
+			continue;
+		err = dev_mc_add(dev, addr);
+		if (!err)
+			memcpy(next[kept++], addr, ETH_ALEN);
+	}
+	memcpy(lx_nic_mc, next, sizeof(next[0]) * kept);
+	lx_nic_mc_n = kept;
 	if (!err && all != lx_nic_allmulti) {
 		err = dev_set_allmulti(dev, all ? 1 : -1);
 		if (!err)
 			lx_nic_allmulti = all;
 	}
-	if (err) {
-		dev_mc_flush(dev);
-		if (lx_nic_allmulti && !dev_set_allmulti(dev, -1))
-			lx_nic_allmulti = false;
-	}
-	/* dev_mc_add() writes the card's filter; an empty list writes none. */
-	dev_set_rx_mode(dev);
+	if (err)
+		lx_nic_drop_mcast(dev);
 	rtnl_unlock();
 	return err;
 }
@@ -370,20 +415,24 @@ static int lx_nic_serve(struct net_device *dev, const char *name, bool once)
 			netdev_err(dev, "nic.%s is no longer served\n", name);
 			return -EPIPE;
 		}
-		lx_nic_port_mcast(dev);
-		while ((len = slx_nicport_tx_next(&frame)) > 0)
-			slx_nicport_tx_done(lx_nic_port_send(dev, frame, len));
 		if (slx_nicport_ended()) {
 			netdev_info(dev, "a network stack left: %lu frame(s) sent for it, %lu received, %lu dropped\n",
 				    lx_nic_port_sent, lx_nic_port_received, lx_nic_port_dropped);
 			lx_nic_card_counts(dev);
-			/* Its groups go with it: the next stack starts from none. */
-			err = lx_nic_set_mcast(dev, NULL, 0, false);
-			if (err)
-				netdev_err(dev, "the stack's multicast groups could not be dropped: %ld\n", err);
+			/*
+			 * Its groups go with it, before the next stack is
+			 * accepted -- the kit waits for this -- which starts
+			 * from none.
+			 */
+			rtnl_lock();
+			lx_nic_drop_mcast(dev);
+			rtnl_unlock();
 			if (once)
-				return err ? -EIO : 0;
+				return 0;
 		}
+		lx_nic_port_mcast(dev);
+		while ((len = slx_nicport_tx_next(&frame)) > 0)
+			slx_nicport_tx_done(lx_nic_port_send(dev, frame, len));
 	}
 }
 

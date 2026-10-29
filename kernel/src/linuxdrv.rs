@@ -188,7 +188,12 @@ pub fn self_test() -> KernelResult<()> {
     );
     if e1000e {
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- turning away a daemon without the card's key -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, the driver warning nowhere: OK"
+            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, and was let go for breaking the protocol, the driver warning nowhere: OK",
+            if cable_puller() {
+                ", the link following the card's cable"
+            } else {
+                ""
+            }
         );
     }
     Ok(())
@@ -318,10 +323,7 @@ fn nic_check_outcome(run: &KernelResult<Option<i32>>) -> &'static str {
 /// daemon asks (`linuxdrv.cable=hmp`: the boot test, through QEMU's
 /// monitor, at the daemon's line "cable: pull it").
 fn cable_puller() -> bool {
-    crate::boot::kernel_cmdline().is_some_and(|line| {
-        line.split_ascii_whitespace()
-            .any(|w| w == "linuxdrv.cable=hmp")
-    })
+    crate::fs::kernparam::get("linuxdrv.cable").is_some_and(|v| v == "hmp")
 }
 
 /// Linux's e1000e serving the spare 82574 to the network stack
@@ -357,21 +359,26 @@ fn e1000e_serve(
         &[b"e1000e", b"serve=spare", b"once", pci.as_bytes()],
         &caps,
     )?;
-    // The cable's two waits are 20 s each at most.
-    let stack = Program {
-        elf: spawn::NETSTACK_ELF,
-        name: "netstack-nic",
-        limit_s: 150,
-    };
-    // The daemon run first without the card's key, then with it.
-    let run_daemon = |args: &[&[u8]], key: &[(ResourceType, u64, Rights)]| {
-        let daemon = start(&stack, args, key);
-        daemon.map(|d| finish(&stack, &d))
-    };
+    // The daemon run first without the card's key, then with it. Refused, it
+    // needs only to connect -- once the driver has probed the card and its
+    // link is up, seconds under emulation; holding the key, its checks take
+    // a minute at most and the cable's two waits 20 s each.
     let plain: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE];
     let with_cable: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"cable"];
-    let keyed = if cable_puller() { with_cable } else { plain };
-    let keyless = run_daemon(plain, &[]);
+    let cable = cable_puller();
+    let netstack = |limit_s| Program {
+        elf: spawn::NETSTACK_ELF,
+        name: "netstack-nic",
+        limit_s,
+    };
+    let keyless_stack = netstack(60);
+    let stack = netstack(if cable { 150 } else { 90 });
+    let run_daemon = |stack: &Program<'_>, args: &[&[u8]], key: &[(ResourceType, u64, Rights)]| {
+        let daemon = start(stack, args, key);
+        daemon.map(|d| finish(stack, &d))
+    };
+    let keyed = if cable { with_cable } else { plain };
+    let keyless = run_daemon(&keyless_stack, plain, &[]);
     if keyless != Ok(Some(check::TURNED_AWAY)) {
         serial_println!(
             "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?} ({}): it should have been turned away, exit {}",
@@ -384,7 +391,11 @@ fn e1000e_serve(
         spawn::teardown_fixture(driver.pid, driver.task_id);
         return Err(KernelError::InternalError);
     }
-    let checked = match run_daemon(keyed, &[(ResourceType::Service, service, Rights::READ)]) {
+    let checked = match run_daemon(
+        &stack,
+        keyed,
+        &[(ResourceType::Service, service, Rights::READ)],
+    ) {
         Ok(checked) => checked,
         Err(e) => {
             serial_println!(

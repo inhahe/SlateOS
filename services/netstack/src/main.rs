@@ -571,11 +571,14 @@ fn push_unique(set: &mut [[u8; 6]; MAX_FILTER], len: &mut usize, mac: [u8; 6]) {
     }
 }
 
-/// Tell the card which multicast addresses it must pass -- the kernel, for
-/// its cards, or a driver process's card attached ([`port`]): all-hosts
-/// (IGMP queries), all-nodes (MLD queries, router advertisements), our
-/// solicited-node group (neighbour discovery) and every group a socket is
-/// in -- when that set has changed since the last push.
+/// Tell the kernel which multicast addresses the network cards must pass:
+/// all-hosts (IGMP queries), all-nodes (MLD queries, router
+/// advertisements), our solicited-node group (neighbour discovery) and every
+/// group a socket is in -- when that set has changed since the last push.
+/// (The serving mode never attaches to a driver process's card; when it
+/// does, the list goes to [`port::set_mcast`], and the driver's answer --
+/// [`port::mcast_settled`] -- decides whether it was pushed:
+/// known-issues `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`.)
 /// Without it an e1000 or rtl8139 card drops every multicast frame (kernel
 /// known-issues `A-E1000-AND-RTL8139-DROP-EVERY-MULTICAST-FRAME`).
 fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
@@ -599,16 +602,6 @@ fn sync_mcast_filter(net: &mut Net, me: &IfInfo) {
     wanted.sort_unstable();
     let have = &net.filter;
     if have.pushed && have.addrs.get(..have.len) == Some(&*wanted) {
-        return;
-    }
-    // A driver process's card takes the list itself, and puts the latest
-    // in force (port::set_mcast).
-    if port::set_mcast(false, wanted) {
-        net.filter = McastFilter {
-            addrs: set,
-            len,
-            pushed: true,
-        };
         return;
     }
     if syscall2(SYS_NET_RAW_MCAST, wanted.as_ptr() as u64, len as u64) < 0 {
@@ -5619,6 +5612,7 @@ const NIC_PINGS_LOST: i64 = nic_exit(check::PINGS_LOST);
 const NIC_TURNED_AWAY: i64 = nic_exit(check::TURNED_AWAY);
 const NIC_LINK: i64 = nic_exit(check::LINK);
 const NIC_MCAST: i64 = nic_exit(check::MCAST);
+const NIC_PROTOCOL: i64 = nic_exit(check::PROTOCOL);
 
 /// An exit code as `exit` takes it.
 const fn nic_exit(code: i32) -> i64 {
@@ -5775,7 +5769,7 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
         say(b"FAIL: the card's driver did not say its link is up");
         return NIC_LINK;
     }
-    if let Err(why) = nic_check_mcast(&me) {
+    if let Err(why) = nic_check_mcast(&me, &gateway_mac) {
         say(why.as_bytes());
         return NIC_MCAST;
     }
@@ -5784,6 +5778,31 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
     } else if let Err(why) = nic_check_cable(&me) {
         say(why.as_bytes());
         return NIC_LINK;
+    }
+    // Told on attaching and at each change, and no more: up, then down and
+    // up again with the cable. More is a driver telling it at every turn.
+    let changes = if cable { 2 } else { 0 };
+    if port::links_told() != 1 + changes {
+        Line::new()
+            .put(b"[netstack] nic-check: FAIL: the driver told the link ")
+            .dec(u64::from(port::links_told()))
+            .put(b" time(s), for ")
+            .dec(u64::from(changes))
+            .put(b" change(s)\n")
+            .print();
+        return NIC_LINK;
+    }
+    // Last, for it ends the attachment: a message the protocol has no place
+    // for from a stack -- one only a driver sends -- and the driver lets the
+    // stack go, within a second.
+    port::send_out_of_place();
+    let deadline = now_ns().saturating_add(1_000_000_000);
+    while port::wait(deadline.saturating_sub(now_ns())) != port::Woke::Gone {
+        let _advertisements = take_frames(Some(&me));
+        if now_ns() >= deadline {
+            say(b"FAIL: the card's driver kept a stack that broke the protocol");
+            return NIC_PROTOCOL;
+        }
     }
     port::detach();
     say(b"SUCCESS");
@@ -5801,14 +5820,19 @@ const NIC_SOLICIT_EVERY_NS: u64 = 500_000_000;
 /// advertisements -- which QEMU's network, beyond the card, sends to all
 /// nodes (ff02::1, 33:33:00:00:00:01) whenever a router is solicited: none
 /// passes while the list is empty, as when the card was opened; one does
-/// once all-nodes is listed; none again once the list is emptied. The
-/// driver answers each list before the card is tried.
-fn nic_check_mcast(me: &IfInfo) -> Result<(), &'static str> {
+/// once all-nodes is listed, and once every multicast frame is asked for
+/// instead; none again once the list is emptied. The driver answers each
+/// list before the card is tried, and before the last count everything the
+/// card took under the lists before is read out ([`rx_barrier`]).
+fn nic_check_mcast(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
     let all_nodes = mld::multicast_mac(&icmpv6::ALL_NODES_LINK_LOCAL);
     let before = advertisements(me, NIC_QUIET_NS, false)?;
-    mcast_in_force(me, &[all_nodes])?;
+    mcast_in_force(me, false, &[all_nodes])?;
     let listed = advertisements(me, NIC_ADVERT_NS, true)?;
-    mcast_in_force(me, &[])?;
+    mcast_in_force(me, true, &[])?;
+    let every = advertisements(me, NIC_ADVERT_NS, true)?;
+    mcast_in_force(me, false, &[])?;
+    rx_barrier(me, gateway_mac)?;
     let after = advertisements(me, NIC_QUIET_NS, false)?;
     Line::new()
         .put(b"[netstack] nic-check: router advertisements to all nodes: ")
@@ -5816,23 +5840,57 @@ fn nic_check_mcast(me: &IfInfo) -> Result<(), &'static str> {
         .put(b" before the card listed the group, ")
         .dec(listed)
         .put(b" once it did, ")
+        .dec(every)
+        .put(b" once it asked for every multicast frame, ")
         .dec(after)
-        .put(b" once it no longer did\n")
+        .put(b" once it asked for none\n")
         .print();
     if before != 0 || after != 0 {
         return Err("FAIL: the card passed a multicast group it was not listed");
     }
-    if listed == 0 {
-        return Err("FAIL: the card did not pass a multicast group it was listed");
+    if listed == 0 || every == 0 {
+        return Err("FAIL: the card did not pass a multicast group it was listed, or every one");
     }
     Ok(())
 }
 
-/// `addrs` made the card's multicast list, and the driver's answer that it
-/// is in force waited for, two seconds at most -- frames that come
-/// meanwhile taken, advertisements not counted.
-fn mcast_in_force(me: &IfInfo, addrs: &[[u8; 6]]) -> Result<(), &'static str> {
-    if !port::set_mcast(false, addrs) {
+/// Every frame the card took before now read out: a ping sent to the
+/// gateway, and the frames that come before its answer taken (any
+/// advertisement among them uncounted). The card has one receive queue and
+/// the driver copies its frames into the ring in order, so whatever came
+/// before the answer came before the ping was sent -- under the multicast
+/// list in force before. Three tries, a second each.
+fn rx_barrier(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<(), &'static str> {
+    let mut frame = [0u8; MAX_FRAME];
+    for attempt in 0..3 {
+        let seq = NIC_PINGS + NIC_COLD + attempt;
+        send_ping(me, gateway_mac, seq)?;
+        let deadline = now_ns().saturating_add(1_000_000_000);
+        while now_ns() < deadline {
+            if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
+                return Err("FAIL: the card's driver went away");
+            }
+            while let Ok(n) = usize::try_from(raw_rx(&mut frame)) {
+                let Some(bytes) = frame.get(..n) else {
+                    continue;
+                };
+                if echo_answer(bytes, me).is_some_and(|(s, _)| s == seq) {
+                    return Ok(());
+                }
+                if !is_advertisement_to_all_nodes(bytes) {
+                    let _ = handle_frame(bytes, me);
+                }
+            }
+        }
+    }
+    Err("FAIL: the gateway answered none of three pings sent as a barrier")
+}
+
+/// The card's multicast list made `addrs`, and every multicast frame with
+/// `all`; the driver's answer that it is in force waited for, two seconds
+/// at most -- frames that come meanwhile taken, advertisements not counted.
+fn mcast_in_force(me: &IfInfo, all: bool, addrs: &[[u8; 6]]) -> Result<(), &'static str> {
+    if !port::set_mcast(all, addrs) {
         return Err("FAIL: no card to give a multicast list");
     }
     let deadline = now_ns().saturating_add(2_000_000_000);
@@ -5903,12 +5961,17 @@ fn advertisements(me: &IfInfo, within_ns: u64, first: bool) -> Result<u64, &'sta
 fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
     const WITHIN_NS: u64 = 20_000_000_000;
     print("[netstack] nic-check: cable: pull it\n");
-    let down = link_becomes(false, me, WITHIN_NS)
-        .ok_or("FAIL: the card's link was not told down within 20 s of its cable being pulled")?;
+    let down = link_becomes(false, me, WITHIN_NS).map_err(|gone| {
+        gone.unwrap_or(
+            "FAIL: the card's link was not told down within 20 s of its cable being pulled",
+        )
+    })?;
     print("[netstack] nic-check: cable: plug it back\n");
-    let up = link_becomes(true, me, WITHIN_NS).ok_or(
-        "FAIL: the card's link was not told up within 20 s of its cable being plugged back",
-    )?;
+    let up = link_becomes(true, me, WITHIN_NS).map_err(|gone| {
+        gone.unwrap_or(
+            "FAIL: the card's link was not told up within 20 s of its cable being plugged back",
+        )
+    })?;
     if (0..5).find_map(|_| arp_resolve(&me.gateway, me)).is_none() {
         return Err("FAIL: the gateway did not answer ARP once the cable was back");
     }
@@ -5922,19 +5985,24 @@ fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// How long until the driver tells the card's link `up` (or down): `None`
-/// past `within_ns`, or when the card has gone.
-fn link_becomes(up: bool, me: &IfInfo, within_ns: u64) -> Option<u64> {
+/// How long until the driver tells the card's link `up` (or down); or
+/// `Err(None)` past `within_ns`, and `Err(Some(why))` when the card has
+/// gone -- its driver died, or let the daemon go.
+fn link_becomes(up: bool, me: &IfInfo, within_ns: u64) -> Result<u64, Option<&'static str>> {
     let began = now_ns();
     let deadline = began.saturating_add(within_ns);
     while port::link() != Some(up) {
-        if now_ns() >= deadline || port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone
-        {
-            return None;
+        if now_ns() >= deadline {
+            return Err(None);
+        }
+        if port::wait(deadline.saturating_sub(now_ns())) == port::Woke::Gone {
+            return Err(Some(
+                "FAIL: the card's driver went away while its link was waited for",
+            ));
         }
         let _advertisements = take_frames(Some(me));
     }
-    Some(now_ns().saturating_sub(began))
+    Ok(now_ns().saturating_sub(began))
 }
 
 /// Every frame received so far taken: how many were router advertisements

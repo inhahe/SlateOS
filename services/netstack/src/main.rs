@@ -5604,6 +5604,9 @@ const NIC_GRANT: i64 = 11;
 const NIC_NO_ADDRESS: i64 = 12;
 const NIC_NO_GATEWAY: i64 = 13;
 const NIC_PINGS_LOST: i64 = 14;
+/// The card's driver closed the connection without attaching it, as it
+/// does to a process without the card's key.
+const NIC_TURNED_AWAY: i64 = 15;
 /// SlateOS's `PermissionDenied`.
 const PERMISSION_DENIED: i64 = -400;
 
@@ -5627,17 +5630,25 @@ fn nic_check(service: &[u8]) -> i64 {
     let began = now_ns();
     let port = match port::attach(service, 30_000_000_000) {
         Ok(p) => p,
-        Err((why, answer)) => {
-            Line::new()
-                .put(b"[netstack] nic-check: FAIL: ")
-                .put(why.as_bytes())
-                .put(b" (the kernel answered -")
-                .dec(answer.unsigned_abs())
-                .put(b", after ")
+        Err(e) => {
+            let mut line = Line::new();
+            line.put(b"[netstack] nic-check: FAIL: ")
+                .put(e.why.as_bytes())
+                .put(b" (");
+            if e.answer < 0 {
+                line.put(b"the kernel answered -")
+                    .dec(e.answer.unsigned_abs())
+                    .put(b", ");
+            }
+            line.put(b"after ")
                 .dec(now_ns().saturating_sub(began) / 1_000_000)
                 .put(b" ms)\n")
                 .print();
-            return NIC_NO_CARD;
+            return if e.turned_away {
+                NIC_TURNED_AWAY
+            } else {
+                NIC_NO_CARD
+            };
         }
     };
     Line::new()

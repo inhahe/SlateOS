@@ -300,22 +300,24 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
 
 /// The service the boot test's card is served as: `serve=spare`.
 const SERVICE: &[u8] = b"nic.spare";
-/// What the netstack daemon's `nic-check` exits with when it cannot attach
-/// to the card -- as it must not, without the card's key.
-const NIC_NO_CARD: i32 = 10;
+/// What the netstack daemon's `nic-check` exits with when the card's
+/// driver closed its connection without attaching it -- as the driver must,
+/// to a daemon without the card's key.
+const NIC_TURNED_AWAY: i32 = 15;
 
 /// What the netstack daemon's `nic-check` exits with (`services/netstack`):
 /// what failed.
 fn nic_check_failure(code: i32) -> &'static str {
     match code {
         0 => "it passed",
-        NIC_NO_CARD => "it could not attach to the card",
+        10 => "it could not attach to the card",
         11 => "the kernel let it pass on a region it was never granted",
         12 => "it took no address by DHCP",
         13 => "the gateway did not answer its ARP requests",
         14 => {
             "its pings went wrong: unanswered, answered otherwise or twice, sent again too often, or waited for with no doorbell"
         }
+        NIC_TURNED_AWAY => "the card's driver turned it away",
         _ => "it ended otherwise",
     }
 }
@@ -326,8 +328,8 @@ fn nic_check_failure(code: i32) -> &'static str {
 /// alone, the card at `a`, `pci` its argument naming it -- in its
 /// "serve=spare once" mode, and beside it the netstack daemon in its
 /// "nic-check nic.spare" mode -- first without the card's key, when the
-/// driver must turn it away (it exits [`NIC_NO_CARD`]), then holding it,
-/// when it must attach to the
+/// driver must close its connection unattached (it exits
+/// [`NIC_TURNED_AWAY`]), then holding it, when it must attach to the
 /// card, be refused passing on a region it was never granted, take an
 /// address by DHCP from QEMU's network through it, resolve the gateway by
 /// ARP, have 400 full-size pings answered 16 at a time and 8 more sent to an
@@ -360,11 +362,15 @@ fn e1000e_serve(
         daemon.map(|d| finish(&stack, &d))
     };
     let keyless = check(&[]);
-    if keyless != Ok(Some(NIC_NO_CARD)) {
+    if keyless != Ok(Some(NIC_TURNED_AWAY)) {
         serial_println!(
-            "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?}: it should have been turned away, exit {}",
+            "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?} ({}): it should have been turned away, exit {}",
             keyless,
-            NIC_NO_CARD
+            match &keyless {
+                Ok(Some(code)) => nic_check_failure(*code),
+                _ => "it did not run to its end",
+            },
+            NIC_TURNED_AWAY
         );
         // The driver waits for a stack that will not come, or served the
         // wrong one: no use waiting out its limit.

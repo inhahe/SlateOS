@@ -79,10 +79,31 @@ fn card() -> Option<&'static mut Card> {
     unsafe { (*core::ptr::addr_of_mut!(CARD)).as_mut() }
 }
 
+/// Why attaching to a card failed.
+pub struct AttachError {
+    /// What went wrong, for the log.
+    pub why: &'static str,
+    /// The failed system call's answer, or 0 where none failed.
+    pub answer: i64,
+    /// The driver closed the connection before attaching it: it turns away
+    /// a process without the card's key.
+    pub turned_away: bool,
+}
+
+impl AttachError {
+    fn new(why: &'static str, answer: i64) -> Self {
+        Self {
+            why,
+            answer,
+            turned_away: false,
+        }
+    }
+}
+
 /// Attach to the card served as `service` (`nic.<name>`), waiting up to
 /// `within_ns` for its driver to register it and answer: the card's
-/// description, or what went wrong and the kernel's answer (0 for none).
-pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, (&'static str, i64)> {
+/// description, or why it could not be attached.
+pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, AttachError> {
     let deadline = now_ns().saturating_add(within_ns);
     let channel = loop {
         let got = syscall2(
@@ -94,7 +115,10 @@ pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, (&'static str, i64
             break channel;
         }
         if got != NOT_FOUND || now_ns() >= deadline {
-            return Err(("could not connect to the card's service", got));
+            return Err(AttachError::new(
+                "could not connect to the card's service",
+                got,
+            ));
         }
         sleep_ns(20_000_000);
     };
@@ -110,16 +134,16 @@ pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, (&'static str, i64
             }
             Ok(port)
         }
-        Err(why) => {
+        Err(failed) => {
             syscall1(SYS_CHANNEL_CLOSE, channel);
-            Err((why, 0))
+            Err(failed)
         }
     }
 }
 
 /// The driver's attach message on `channel`, before `deadline`, and the
 /// ring it names mapped and attached.
-fn ring_for(channel: u64, deadline: u64) -> Result<Card, &'static str> {
+fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
     let mut message = [0u8; 64];
     let wait = deadline.saturating_sub(now_ns()).max(1);
     let got = syscall4(
@@ -129,25 +153,51 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, &'static str> {
         message.len() as u64,
         wait,
     );
-    let Ok(len) = usize::try_from(got) else {
-        return Err("no attach message from the card's driver");
-    };
-    let port =
-        Port::decode(message.get(..len).unwrap_or(&[])).ok_or("a malformed attach message")?;
-    if port.slots < 2 || port.slots as usize > MAX_SLOTS {
-        return Err("an attach message with a slot count the daemon cannot use");
+    if got == CHANNEL_CLOSED {
+        return Err(AttachError {
+            why: "the card's driver closed the connection without attaching it",
+            answer: got,
+            turned_away: true,
+        });
     }
-    let Ok(at) = u64::try_from(syscall2(SYS_SHM_MAP, port.region, SHM_MAP_RW)) else {
-        return Err("the card's ring could not be mapped");
+    let Ok(len) = usize::try_from(got) else {
+        return Err(AttachError::new(
+            "no attach message from the card's driver",
+            got,
+        ));
     };
-    let size = usize::try_from(syscall1(SYS_SHM_SIZE, port.region)).unwrap_or(0);
+    let port = Port::decode(message.get(..len).unwrap_or(&[]))
+        .ok_or_else(|| AttachError::new("a malformed attach message", 0))?;
+    if port.slots < 2 || port.slots as usize > MAX_SLOTS {
+        return Err(AttachError::new(
+            "an attach message with a slot count the daemon cannot use",
+            0,
+        ));
+    }
+    let mapped = syscall2(SYS_SHM_MAP, port.region, SHM_MAP_RW);
+    let Ok(at) = u64::try_from(mapped) else {
+        return Err(AttachError::new(
+            "the card's ring could not be mapped",
+            mapped,
+        ));
+    };
+    let sized = syscall1(SYS_SHM_SIZE, port.region);
+    let Ok(size) = usize::try_from(sized) else {
+        return Err(AttachError::new(
+            "the card's ring's size could not be asked for",
+            sized,
+        ));
+    };
     // SAFETY: the region is mapped at `at`, `size` bytes, page-aligned, for
     // the rest of the daemon's life (it is never unmapped).
-    let ring =
-        unsafe { Ring::attach(at as *mut u8, size) }.ok_or("the card's ring is malformed")?;
+    let ring = unsafe { Ring::attach(at as *mut u8, size) }
+        .ok_or_else(|| AttachError::new("the card's ring is malformed", 0))?;
     let need = (port.slots as usize).saturating_mul(SLOT_SIZE as usize);
     if ring.sq_entries() < port.slots || ring.cq_entries() < port.slots || ring.data_len() < need {
-        return Err("the card's ring is smaller than its attach message says");
+        return Err(AttachError::new(
+            "the card's ring is smaller than its attach message says",
+            0,
+        ));
     }
     let rx = port.slots / 2;
     let mut free = [0u32; MAX_SLOTS];

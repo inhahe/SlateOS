@@ -124,7 +124,10 @@ through the kernel per frame.
 
 The boot test's linuxdrv self-test runs the e1000e process serving the
 spare 82574 (`serve=spare once`), and beside it the netstack daemon in its
-`nic-check nic.spare` mode, which attaches to the card, is refused passing
+`nic-check nic.spare` mode -- first without the card's key, when the
+driver must close the connection unattached (the daemon's receive answers
+`ChannelClosed` and it exits 15, which no other failure to attach gives),
+then holding it -- which attaches to the card, is refused passing
 on a region it was never granted (`SYS_SHM_GRANT`'s check), takes an
 address by DHCP from QEMU's network, resolves the gateway by ARP and has
 400 full-size pings answered, 16 at a time, payloads as sent; the daemon's

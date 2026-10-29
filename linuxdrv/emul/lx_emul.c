@@ -27,6 +27,8 @@
 #include <linux/cache.h>
 #include <linux/workqueue.h>
 #include <linux/radix-tree.h>
+#include <linux/srcu.h>
+#include <linux/rcupdate.h>
 #include <linux/swiotlb.h>
 #include <linux/string.h>
 #include <asm/sections.h>
@@ -584,6 +586,8 @@ int lx_emul_init(void)
 	/* The radix tree's node cache, which idr and the workqueues number by. */
 	radix_tree_init();
 	workqueue_init_early();
+	/* As start_kernel(): sleepable RCU's grace periods may start, by work items. */
+	srcu_init();
 	return SLX_EXIT_OK;
 }
 
@@ -605,6 +609,11 @@ int lx_emul_main(void)
 	initcall_entry_t *entry;
 
 	lx_main_handle = slx_task_current();
+	/*
+	 * As rest_init(): the scheduler runs, so RCU's grace periods are real --
+	 * before it, synchronize_srcu() returns at once, nothing else running.
+	 */
+	rcu_scheduler_starting();
 	if (lx_start_kthreadd())
 		return SLX_EXIT_NO_MEMORY;
 	system_state = SYSTEM_SCHEDULING;

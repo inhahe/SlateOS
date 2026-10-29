@@ -55,6 +55,7 @@
 #include <linux/preempt.h>
 #include <linux/cpuhotplug.h>
 #include <linux/workqueue.h>
+#include <linux/irq_work.h>
 #include <linux/device.h>
 #include <linux/mm.h>
 #include <linux/pci.h>
@@ -465,6 +466,14 @@ static void hello_barrier_rcu_done(struct rcu_head *head)
 	hello_barrier_rcu_ran = true;
 }
 
+static struct rcu_head hello_sync_rcu;
+static bool hello_sync_rcu_ran;
+
+static void hello_sync_rcu_done(struct rcu_head *head)
+{
+	hello_sync_rcu_ran = true;
+}
+
 /* rcuwait: one task waiting, and a kthread that wakes it. */
 static struct rcuwait hello_rcuwait = __RCUWAIT_INITIALIZER(hello_rcuwait);
 static bool hello_rcuwait_cond;
@@ -639,7 +648,8 @@ static int __init hello_edges_init(void)
 
 	/*
 	 * An RCU callback waits for a grace period: a switch. It runs in
-	 * softirq context, as Linux's RCU runs it; rcu_barrier() waits for it.
+	 * softirq context, as Linux's RCU runs it; rcu_barrier() waits for it,
+	 * and so does synchronize_rcu().
 	 */
 	call_rcu(&hello_rcu, hello_rcu_done);
 	HELLO_CHECK(!hello_rcu_ran, "an RCU callback ran before a grace period");
@@ -649,6 +659,10 @@ static int __init hello_edges_init(void)
 	call_rcu(&hello_barrier_rcu, hello_barrier_rcu_done);
 	rcu_barrier();
 	HELLO_CHECK(hello_barrier_rcu_ran, "rcu_barrier() did not wait for a callback");
+	/* A grace period waited for: a callback queued before it has run. */
+	call_rcu(&hello_sync_rcu, hello_sync_rcu_done);
+	synchronize_rcu();
+	HELLO_CHECK(hello_sync_rcu_ran, "synchronize_rcu() returned before a grace period");
 
 	/* rcuwait: the waiter sleeps until the kthread wakes it by name. */
 	HELLO_CHECK(!IS_ERR(kthread_run(hello_rcuwait_wakes, NULL, "hello-rcuwait")),
@@ -810,6 +824,27 @@ static void hello_resched_tasklet_fn(struct tasklet_struct *t)
 	hello_ran_beside_tasklet = READ_ONCE(hello_other_ran);
 }
 
+/*
+ * An irq_work queued from a timer, inside the loop's turn: the turn after
+ * runs it, in hardirq context, though nothing else is pending -- the loop
+ * must not sleep with it queued.
+ */
+static struct irq_work hello_irq_work;
+static struct timer_list hello_irq_work_timer;
+static DECLARE_COMPLETION(hello_irq_work_done);
+static bool hello_irq_work_in_hardirq;
+
+static void hello_irq_work_fn(struct irq_work *work)
+{
+	hello_irq_work_in_hardirq = in_hardirq() && irqs_disabled();
+	complete(&hello_irq_work_done);
+}
+
+static void hello_irq_work_timer_fn(struct timer_list *t)
+{
+	irq_work_queue(&hello_irq_work);
+}
+
 static int hello_cpu_onlined = -1;
 
 static int hello_cpu_online(unsigned int cpu)
@@ -933,12 +968,20 @@ static int __init hello_timers_init(void)
 	msleep(1);
 	HELLO_CHECK(hello_other_ran, "a kthread never ran");
 
+	/* Nothing but the irq_work a timer queues can wake this. */
+	init_irq_work(&hello_irq_work, hello_irq_work_fn);
+	timer_setup(&hello_irq_work_timer, hello_irq_work_timer_fn, 0);
+	mod_timer(&hello_irq_work_timer, jiffies + 1);
+	wait_for_completion(&hello_irq_work_done);
+	HELLO_CHECK(hello_irq_work_in_hardirq,
+		    "an irq_work ran outside hardirq context, or with interrupts on");
+
 	/* A hotplug state's startup runs for the one CPU, as Linux's for each. */
 	HELLO_CHECK(cpuhp_setup_state(CPUHP_AP_ONLINE_DYN, "hello:online", hello_cpu_online,
 				      NULL) >= 0 && hello_cpu_onlined == 0,
 		    "a hotplug state's startup did not run for CPU 0");
 
-	pr_info("hello timers: a timer slept on, deleted, moved, re-armed, deferred; tasklets at local_bh_enable, at the next turn, twenty in a chain; no switch from softirq; a hotplug startup\n");
+	pr_info("hello timers: a timer slept on, deleted, moved, re-armed, deferred; tasklets at local_bh_enable, at the next turn, twenty in a chain; no switch from softirq; an irq_work queued from a timer; a hotplug startup\n");
 	return 0;
 }
 late_initcall(hello_timers_init);

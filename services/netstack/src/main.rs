@@ -5693,7 +5693,9 @@ fn nic_check(service: &[u8]) -> i64 {
         .dec(NIC_PINGS as u64)
         .put(b" pings of ")
         .dec(NIC_PING_BYTES as u64)
-        .put(b" bytes answered, payloads as sent (")
+        .put(b" bytes answered, and ")
+        .dec(NIC_COLD as u64)
+        .put(b" sent to an idle driver, payloads as sent (")
         .dec(seen.resent)
         .put(b" sent again, ")
         .dec(port::send_errors())
@@ -5843,82 +5845,132 @@ struct Seen {
     other: u64,
 }
 
-/// [`NIC_PINGS`] pings to the gateway, at `gateway_mac`, [`NIC_BURST`] at a
-/// time: what else was seen, or what failed. Frames that are not an answer
-/// -- an ARP request for our address, say -- are handled as the daemon
-/// handles any.
+/// The pings `nic-check` sends after the bursts, one at a time, each to a
+/// driver left idle first: its doorbell must wake the driver to send it.
+/// (In the bursts it never has to: answers read just before ring it awake,
+/// and on one CPU the burst is in the ring by the time it runs.)
+const NIC_COLD: usize = 8;
+const NIC_COLD_QUIET_NS: u64 = 100_000_000;
+
+/// The pings to the gateway: [`NIC_PINGS`] [`NIC_BURST`] at a time, each
+/// answered within a second -- sent again once if not -- then [`NIC_COLD`]
+/// to an idle driver, each answered within a second of its one sending.
+/// What else was seen, or what failed. Frames that are not an answer -- an
+/// ARP request for our address, say -- are handled as the daemon handles
+/// any.
 fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<Seen, &'static str> {
-    let mut answered = [false; NIC_PINGS];
-    let mut seen = Seen::default();
-    let mut message = [0u8; icmp::HEADER_LEN + NIC_PING_BYTES];
-    let mut payload = [0u8; NIC_PING_BYTES];
-    let mut frame = [0u8; MAX_FRAME];
+    let mut pings = Pings {
+        answered: [false; NIC_PINGS + NIC_COLD],
+        resent: [false; NIC_PINGS + NIC_COLD],
+        seen: Seen::default(),
+    };
     for first in (0..NIC_PINGS).step_by(NIC_BURST) {
         let burst = first..(first + NIC_BURST).min(NIC_PINGS);
         for attempt in 0..2 {
-            for seq in burst.clone().filter(|&s| !answered[s]) {
-                for (i, b) in payload.iter_mut().enumerate() {
-                    *b = nic_payload(seq, i);
-                }
-                let n = icmp::write_echo(&mut message, true, NIC_PING_ID, seq as u16, &payload)
-                    .ok_or("FAIL: no room for a ping")?;
-                if !send_ipv4(
-                    me,
-                    gateway_mac,
-                    &me.gateway,
-                    ipv4::PROTO_ICMP,
-                    &message[..n],
-                    seq as u16,
-                ) {
-                    return Err("FAIL: a ping could not be sent");
-                }
+            for seq in burst.clone().filter(|&s| !pings.answered[s]) {
+                send_ping(me, gateway_mac, seq)?;
                 if attempt > 0 {
-                    seen.resent += 1;
+                    pings.resent[seq] = true;
+                    pings.seen.resent += 1;
                 }
             }
             let deadline = now_ns().saturating_add(1_000_000_000);
-            while burst.clone().any(|s| !answered[s]) && now_ns() < deadline {
-                match port::wait(deadline.saturating_sub(now_ns())) {
-                    port::Woke::Rang => {}
-                    port::Woke::Slept => seen.slept += 1,
-                    port::Woke::Gone => return Err("FAIL: the card's driver went away"),
-                }
-                loop {
-                    let n = raw_rx(&mut frame);
-                    let Ok(n) = usize::try_from(n) else { break };
-                    let Some(bytes) = frame.get(..n) else {
-                        continue;
-                    };
-                    match echo_answer(bytes, me) {
-                        Some((seq, true)) if seq < NIC_PINGS => {
-                            if core::mem::replace(&mut answered[seq], true) {
-                                seen.again += 1;
-                            }
-                        }
-                        Some((_, false)) => {
-                            return Err("FAIL: a ping was answered with another payload");
-                        }
-                        Some(_) => {}
-                        None => {
-                            if bytes.get(6..12) == Some(&me.mac[..]) {
-                                seen.own += 1;
-                            } else {
-                                seen.other += 1;
-                            }
-                            let _ = handle_frame(bytes, me);
-                        }
-                    }
-                }
+            while burst.clone().any(|s| !pings.answered[s]) && now_ns() < deadline {
+                pings.wait(me, deadline)?;
             }
-            if burst.clone().all(|s| answered[s]) {
+            if burst.clone().all(|s| pings.answered[s]) {
                 break;
             }
         }
-        if !burst.clone().all(|s| answered[s]) {
+        if !burst.clone().all(|s| pings.answered[s]) {
             return Err("FAIL: a ping went unanswered, sent twice");
         }
     }
-    Ok(seen)
+    for seq in NIC_PINGS..NIC_PINGS + NIC_COLD {
+        sleep_ns(NIC_COLD_QUIET_NS);
+        send_ping(me, gateway_mac, seq)?;
+        let deadline = now_ns().saturating_add(1_000_000_000);
+        while !pings.answered[seq] && now_ns() < deadline {
+            pings.wait(me, deadline)?;
+        }
+        if !pings.answered[seq] {
+            return Err(
+                "FAIL: a ping sent to an idle driver went unanswered for a second: the daemon's doorbell did not wake it",
+            );
+        }
+    }
+    Ok(pings.seen)
+}
+
+/// The pings' state: which were answered, which sent again, what else
+/// was seen.
+struct Pings {
+    answered: [bool; NIC_PINGS + NIC_COLD],
+    resent: [bool; NIC_PINGS + NIC_COLD],
+    seen: Seen,
+}
+
+impl Pings {
+    /// The driver's doorbell waited for, up to `deadline`, and every frame
+    /// received taken: an answer marked -- one answered before counted as
+    /// twice, unless it was sent twice -- anything else counted and handled.
+    fn wait(&mut self, me: &IfInfo, deadline: u64) -> Result<(), &'static str> {
+        match port::wait(deadline.saturating_sub(now_ns())) {
+            port::Woke::Rang => {}
+            port::Woke::Slept => self.seen.slept += 1,
+            port::Woke::Gone => return Err("FAIL: the card's driver went away"),
+        }
+        let mut frame = [0u8; MAX_FRAME];
+        loop {
+            let n = raw_rx(&mut frame);
+            let Ok(n) = usize::try_from(n) else {
+                return Ok(());
+            };
+            let Some(bytes) = frame.get(..n) else {
+                continue;
+            };
+            match echo_answer(bytes, me) {
+                Some((seq, true)) if seq < self.answered.len() => {
+                    if core::mem::replace(&mut self.answered[seq], true) && !self.resent[seq] {
+                        self.seen.again += 1;
+                    }
+                }
+                Some((_, false)) => return Err("FAIL: a ping was answered with another payload"),
+                Some(_) => {}
+                None => {
+                    if bytes.get(6..12) == Some(&me.mac[..]) {
+                        self.seen.own += 1;
+                    } else {
+                        self.seen.other += 1;
+                    }
+                    let _ = handle_frame(bytes, me);
+                }
+            }
+        }
+    }
+}
+
+/// Ping `seq` sent to the gateway, at `gateway_mac`.
+fn send_ping(me: &IfInfo, gateway_mac: &[u8; 6], seq: usize) -> Result<(), &'static str> {
+    let mut payload = [0u8; NIC_PING_BYTES];
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = nic_payload(seq, i);
+    }
+    let mut message = [0u8; icmp::HEADER_LEN + NIC_PING_BYTES];
+    let n = icmp::write_echo(&mut message, true, NIC_PING_ID, seq as u16, &payload)
+        .ok_or("FAIL: no room for a ping")?;
+    if send_ipv4(
+        me,
+        gateway_mac,
+        &me.gateway,
+        ipv4::PROTO_ICMP,
+        &message[..n],
+        seq as u16,
+    ) {
+        Ok(())
+    } else {
+        Err("FAIL: a ping could not be sent")
+    }
 }
 
 /// The ping `frame` answers, from the gateway to us -- its sequence number,

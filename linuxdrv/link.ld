@@ -40,6 +40,11 @@ SECTIONS
         *(.init.text .init.text.* .exit.text .noinstr.text .ref.text)
         *(.sched.text .cpuidle.text .entry.text .head.text .spinlock.text)
         *(.softirqentry.text)
+        /* Static calls' trampolines, each a jump to its default. Linux
+         * patches one to another target only for a CPU feature (crc32's
+         * PCLMULQDQ), which the layer reports none of (boot_cpu_data), so
+         * these stay as compiled; read-only text could not be patched. */
+        *(.static_call.text)
     } :load
 
     /* Bracketed as Linux's own: kfree_const() leaves alone what lies here. */

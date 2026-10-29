@@ -38,6 +38,7 @@ core::arch::global_asm!(
 
 const SYS_EXIT: u64 = 1;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
+const SYS_CLOCK_REALTIME: u64 = 14;
 const SYS_SLEEP: u64 = 11;
 const SYS_GETRANDOM: u64 = 90;
 const SYS_MMAP: u64 = 20;
@@ -620,6 +621,14 @@ pub(crate) fn now_ns() -> u64 {
     }
     log(b"[lx] the system gave no clock\n");
     exit_with(exit::NO_CLOCK)
+}
+
+/// `slx_real_ns`: the wall clock, nanoseconds since the Unix epoch; the
+/// monotonic clock where the system gives none, which then reads as 1970
+/// plus the time since boot.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_real_ns() -> u64 {
+    u64::try_from(syscall3(SYS_CLOCK_REALTIME, 0, 0, 0)).unwrap_or_else(|_| now_ns())
 }
 
 /// Sleep the process's thread for `ns` nanoseconds: no task may run. Its

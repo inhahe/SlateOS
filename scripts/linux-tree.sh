@@ -311,10 +311,30 @@ driver() {
         done <"$list"
     done
     [ "${#linux_objs[@]}" -gt 0 ] || die "$layer_manifest and $manifest name no Linux object"
-    # Linux's own objects, by Linux's own make.
-    make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
-        -j"$(nproc)" "${linux_objs[@]}" >"$obj/driver-$name.log" 2>&1 ||
-        { tail -30 "$obj/driver-$name.log" >&2; die "building $name's Linux objects failed"; }
+    # Linux's own objects, by Linux's own make. Kbuild enters arch/x86/lib
+    # twice in one run -- once for its library objects, once for its
+    # built-in ones -- and each pass builds a target named there, so two
+    # parallel jobs compile one object at once and trip over its dependency
+    # file. Those are built in a make of their own, one job at a time, where
+    # the second pass finds the first's work done.
+    local parallel=() serial=() o
+    for o in "${linux_objs[@]}"; do
+        case $o in
+            arch/x86/lib/*) serial+=("$o") ;;
+            *) parallel+=("$o") ;;
+        esac
+    done
+    : >"$obj/driver-$name.log"
+    if [ "${#parallel[@]}" -gt 0 ]; then
+        make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
+            -j"$(nproc)" "${parallel[@]}" >>"$obj/driver-$name.log" 2>&1 ||
+            { tail -30 "$obj/driver-$name.log" >&2; die "building $name's Linux objects failed"; }
+    fi
+    if [ "${#serial[@]}" -gt 0 ]; then
+        make -C "$src" O="$obj" ARCH=x86_64 LLVM="$llvm" KCFLAGS="$(driver_kcflags)" \
+            -j1 "${serial[@]}" >>"$obj/driver-$name.log" 2>&1 ||
+            { tail -30 "$obj/driver-$name.log" >&2; die "building $name's Linux objects failed"; }
+    fi
     # The flags those were compiled with -- Linux's, with KCFLAGS -- for the
     # layer's own files: the saved command of the first object, without its
     # dependency file, input, output and per-object names.

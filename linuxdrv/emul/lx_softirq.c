@@ -158,6 +158,8 @@ void lx_emul_turn(u64 now_ns)
 	}
 	/* The devices' interrupts, before the softirqs they raise (lx_irq.c). */
 	lx_irq_poll();
+	/* High-resolution timers due, as Linux's timer interrupt runs them (lx_hrtimer.c). */
+	lx_hrtimer_run();
 	/*
 	 * In softirq context, as Linux's RCU runs its callbacks from its
 	 * softirq: one that would sleep is a bug, and ends the process as one
@@ -186,7 +188,7 @@ void lx_emul_turn(u64 now_ns)
  */
 u64 lx_emul_next_event(u64 now_ns)
 {
-	u64 began, next;
+	u64 began, next, hr;
 
 	/* Which devices' interrupts the wait to come waits for, worked out now. */
 	lx_irq_listen();
@@ -195,8 +197,11 @@ u64 lx_emul_next_event(u64 now_ns)
 	/* The wheel reckons from when the current jiffy began, as Linux's tick. */
 	began = lx_emul_jiffy_began_ns();
 	next = get_next_timer_interrupt(jiffies, began);
-	if (next == KTIME_MAX)
-		return 0;
 	/* A timer due already runs on the next jiffy's turn, as on the next tick. */
-	return max(next, began + TICK_NSEC);
+	if (next != KTIME_MAX)
+		next = max(next, began + TICK_NSEC);
+	/* A high-resolution timer runs when it is due, on no tick. */
+	hr = lx_hrtimer_next(now_ns);
+	next = min(next, hr);
+	return next == KTIME_MAX ? 0 : next;
 }

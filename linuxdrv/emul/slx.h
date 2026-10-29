@@ -92,6 +92,8 @@ void slx_random(void *buf, unsigned long len);
 
 /* Nanoseconds since some fixed moment, never going back. */
 unsigned long long slx_now_ns(void);
+/* The wall clock: nanoseconds since the Unix epoch. */
+unsigned long long slx_real_ns(void);
 
 /* The process's arguments: how many, and the n-th (NULL past the last). */
 int slx_argc(void);

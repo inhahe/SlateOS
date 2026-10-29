@@ -652,6 +652,14 @@ static struct task_struct *lx_new_thread(int (*fn)(void *), void *arg, const cha
 	t->arg = arg;
 	refcount_set(&t->task.usage, 1);
 	t->task.flags = PF_KTHREAD;
+	/*
+	 * Allowed the one CPU, its mask its own as copy_process() leaves it:
+	 * migrate_enable() (inline since 6.18) goes to the scheduler's slow
+	 * path for a task whose cpus_ptr points elsewhere.
+	 */
+	t->task.cpus_ptr = &t->task.cpus_mask;
+	cpumask_copy(&t->task.cpus_mask, cpumask_of(0));
+	t->task.nr_cpus_allowed = 1;
 	strscpy(t->task.comm, name ?: "", sizeof(t->task.comm));
 	if (!set_kthread_struct(&t->task)) {
 		kfree(t);

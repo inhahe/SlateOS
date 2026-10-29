@@ -54,7 +54,13 @@ void slx_halted(void)
  * that is never let go. The per-CPU variable is a plain global with this
  * configuration (no SMP), as every one is.
  */
-struct task_struct lx_main_task = { .usage = REFCOUNT_INIT(1) };
+struct task_struct lx_main_task = {
+	.usage = REFCOUNT_INIT(1),
+	/* Allowed the one CPU, as every task's record says (lx_sched.c). */
+	.cpus_ptr = &lx_main_task.cpus_mask,
+	.cpus_mask = CPU_MASK_CPU0,
+	.nr_cpus_allowed = 1,
+};
 
 /*
  * What `current` names between tasks, while the loop runs softirqs, timers
@@ -64,7 +70,12 @@ struct task_struct lx_main_task = { .usage = REFCOUNT_INIT(1) };
  * task's own record would read as the task waking itself. Never freed,
  * never woken.
  */
-struct task_struct lx_idle_task = { .usage = REFCOUNT_INIT(1) };
+struct task_struct lx_idle_task = {
+	.usage = REFCOUNT_INIT(1),
+	.cpus_ptr = &lx_idle_task.cpus_mask,
+	.cpus_mask = CPU_MASK_CPU0,
+	.nr_cpus_allowed = 1,
+};
 
 DEFINE_PER_CPU_CACHE_HOT(struct task_struct *, current_task) = &lx_main_task;
 
@@ -106,11 +117,15 @@ unsigned long loops_per_jiffy = 4000000000UL / HZ;
 /*
  * Module parameters' kinds, which Linux code names in its parameter
  * tables. Nothing in a driver process sets a parameter -- it has no kernel
- * command line, and the tables are discarded at link (linuxdrv/link.ld) --
- * so a kind needs no operations.
+ * command line, and nothing refers to the tables, so the link's garbage
+ * collection drops them (linuxdrv/link.ld) -- so a kind needs no
+ * operations, and a parameter keeps the value it was compiled with.
  */
 const struct kernel_param_ops param_ops_bool;
 const struct kernel_param_ops param_ops_ulong;
+const struct kernel_param_ops param_ops_int;
+const struct kernel_param_ops param_ops_uint;
+const struct kernel_param_ops param_array_ops;
 
 /* No initcall's time is reported (init/main.c's initcall_debug, off). */
 bool initcall_debug;
@@ -157,6 +172,27 @@ void lx_emul_jiffies_now(void)
 ktime_t ktime_get(void)
 {
 	return slx_now_ns();
+}
+
+/*
+ * Linux's other clocks, as offsets from the monotonic one: real time is
+ * the system's wall clock; boot time is monotonic, a driver process never
+ * having seen a suspend; TAI is real time, its offset from UTC being 0
+ * until NTP sets one, as in Linux.
+ */
+ktime_t ktime_get_with_offset(enum tk_offsets offs)
+{
+	return offs == TK_OFFS_BOOT ? (ktime_t)slx_now_ns() : (ktime_t)slx_real_ns();
+}
+
+void ktime_get_real_ts64(struct timespec64 *ts)
+{
+	*ts = ns_to_timespec64(slx_real_ns());
+}
+
+time64_t ktime_get_real_seconds(void)
+{
+	return div_u64(slx_real_ns(), NSEC_PER_SEC);
 }
 
 /* When the running task was switched to, by the monotonic clock. */
@@ -319,6 +355,7 @@ void *__kmalloc_large_node_noprof(size_t size, gfp_t flags, int node)
  */
 struct kmem_cache {
 	unsigned int size;
+	unsigned int object_size;
 	void (*ctor)(void *object);
 };
 
@@ -341,8 +378,45 @@ struct kmem_cache *__kmem_cache_create_args(const char *name, unsigned int objec
 	if (flags & SLAB_HWCACHE_ALIGN)
 		align = max(align, (unsigned int)L1_CACHE_BYTES);
 	s->size = max(object_size, align);
+	s->object_size = object_size;
 	s->ctor = args ? args->ctor : NULL;
 	return s;
+}
+
+/* The size of the cache's objects, as created. */
+unsigned int kmem_cache_size(struct kmem_cache *s)
+{
+	return s->object_size;
+}
+
+static void *lx_cache_alloc(struct kmem_cache *s, gfp_t flags);
+
+/*
+ * Objects by the batch (the network core keeps a stock of socket buffer
+ * heads this way): `size` of them into `p`, all or none, as Linux's.
+ * How many, or 0.
+ */
+int kmem_cache_alloc_bulk_noprof(struct kmem_cache *s, gfp_t flags, size_t size, void **p)
+{
+	size_t i;
+
+	for (i = 0; i < size; i++) {
+		p[i] = lx_cache_alloc(s, flags);
+		if (!p[i]) {
+			while (i--)
+				kfree(p[i]);
+			return 0;
+		}
+	}
+	return size;
+}
+
+void kmem_cache_free_bulk(struct kmem_cache *s, size_t size, void **p)
+{
+	size_t i;
+
+	for (i = 0; i < size; i++)
+		kfree(p[i]);
 }
 
 void kmem_cache_destroy(struct kmem_cache *s)
@@ -482,6 +556,34 @@ void kfree(const void *p)
 void get_random_bytes(void *buf, size_t len)
 {
 	slx_random(buf, len);
+}
+
+/* A uniform random number below `ceil`: Lemire's multiply-and-shift, its biased low end redrawn. */
+u32 __get_random_u32_below(u32 ceil)
+{
+	u32 r;
+	u64 mult;
+
+	get_random_bytes(&r, sizeof(r));
+	mult = (u64)ceil * r;
+	if (unlikely((u32)mult < ceil)) {
+		u32 bound = -ceil % ceil;
+
+		while (unlikely((u32)mult < bound)) {
+			get_random_bytes(&r, sizeof(r));
+			mult = (u64)ceil * r;
+		}
+	}
+	return mult >> 32;
+}
+
+/*
+ * Device data mixed into Linux's pool (a MAC address, as a device
+ * registers): the system's generator is seeded already, and owes nothing
+ * to what a driver process could add.
+ */
+void add_device_randomness(const void *buf, size_t len)
+{
 }
 
 int execute_with_initialized_rng(struct notifier_block *nb)

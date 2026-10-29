@@ -5500,8 +5500,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         shadowed, and the heap as Linux's direct map (§1584); their MSI
         delivered to Linux's handlers, hard and threaded (§1585); DMA from
         a window beside the heap, backed by the device's own arenas
-        (§1586). Left: `request_firmware`,
-        which e1000e's inventory names
+        (§1586). Left: `request_firmware`, which WiFi's drivers need
+        (`iwlwifi` loads its firmware; e1000e calls it nowhere)
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide

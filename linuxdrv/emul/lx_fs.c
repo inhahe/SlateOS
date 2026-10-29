@@ -34,6 +34,8 @@
 #include <linux/blkdev.h>
 #include <linux/fs.h>
 #include <linux/user_namespace.h>
+#include <linux/pid_namespace.h>
+#include <linux/threads.h>
 #include <linux/proc_fs.h>
 
 #include "slx.h"
@@ -123,6 +125,11 @@ int sysfs_create_group(struct kobject *kobj, const struct attribute_group *grp)
 }
 
 int sysfs_create_groups(struct kobject *kobj, const struct attribute_group **groups)
+{
+	return 0;
+}
+
+int sysfs_update_group(struct kobject *kobj, const struct attribute_group *grp)
 {
 	return 0;
 }
@@ -228,6 +235,19 @@ void kill_anon_super(struct super_block *sb)
  * asks after (/proc/iomem), and a driver process has no procfs.
  */
 struct user_namespace init_user_ns;
+
+/*
+ * The one process-id namespace, which the namespace code asks after when a
+ * task wants to see every namespace (kernel/nscommon.c); a driver process's
+ * tasks have no process ids.
+ */
+struct pid_namespace init_pid_ns = {
+	.ns.__ns_ref = REFCOUNT_INIT(2),
+	.idr = IDR_INIT(init_pid_ns.idr),
+	.level = 0,
+	.user_ns = &init_user_ns,
+	.pid_max = PID_MAX_DEFAULT,
+};
 
 /* No device here is a disk or a partition: these only ever compare unequal. */
 const struct class block_class = { .name = "block" };

@@ -18,6 +18,8 @@ use crate::serial_println;
 
 /// The name the boot test gives the hello process (`module_cmdline:`).
 const HELLO: &[u8] = b"linuxdrv/hello";
+/// ... and Linux's e1000e, the layer's first real driver.
+const E1000E: &[u8] = b"linuxdrv/e1000e";
 
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
@@ -32,15 +34,23 @@ const EXIT_INIT_FAILED: i32 = 126;
 const KILLED_ACCESS_VIOLATION: i32 =
     pcb::crash_exit_code(crate::proc::exception::ExceptionCode::AccessViolation as u64);
 
-/// Run `elf` with `argv`, holding `capabilities`, and answer how it ended:
-/// its exit code, or `None` when it did not end within 10 s.
+/// A driver process's program, as the kernel runs it: its image, the name
+/// its process gets, and how long a run may take before it counts as hung.
+struct Program<'a> {
+    elf: &'a [u8],
+    name: &'static str,
+    limit_s: u64,
+}
+
+/// Run `program` with `argv`, holding `capabilities`, and answer how it
+/// ended: its exit code, or `None` when it did not end within its limit.
 fn run(
-    elf: &[u8],
+    program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
 ) -> Result<Option<i32>, KernelError> {
     let options = spawn::SpawnOptions {
-        name: "lx-hello",
+        name: program.name,
         parent: 0,
         priority: crate::sched::task::DEFAULT_PRIORITY,
         capabilities,
@@ -51,8 +61,9 @@ fn run(
         cwd: None,
         identity: None,
     };
-    let process = spawn::spawn_process(elf, &options)?;
-    let deadline = crate::hrtimer::now_ns().saturating_add(10_000_000_000);
+    let process = spawn::spawn_process(program.elf, &options)?;
+    let deadline =
+        crate::hrtimer::now_ns().saturating_add(program.limit_s.saturating_mul(1_000_000_000));
     let finished = spawn::wait_for_fixture(process.pid, deadline, 0);
     let code = pcb::exit_code(process.pid);
     spawn::teardown_fixture(process.pid, process.task_id);
@@ -95,6 +106,11 @@ pub fn self_test() -> KernelResult<()> {
         skips.report("[linuxdrv]");
         return Ok(());
     };
+    let hello = Program {
+        elf,
+        name: "lx-hello",
+        limit_s: 10,
+    };
     let cases: [(&[&[u8]], i32, &str); 8] = [
         (&[b"hello"], EXIT_OK, "ran its initcalls and exited 0"),
         (
@@ -134,9 +150,10 @@ pub fn self_test() -> KernelResult<()> {
         ),
     ];
     for (argv, want, what) in cases {
-        expect(elf, argv, &[], want, what, || None)?;
+        expect(&hello, argv, &[], want, what, || None)?;
     }
-    let pci = pci_runs(elf, &mut skips)?;
+    let pci = pci_runs(&hello, &mut skips)?;
+    let e1000e = e1000e_run(&mut skips)?;
     skips.report("[linuxdrv]");
     serial_println!(
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic{}: OK",
@@ -147,6 +164,11 @@ pub fn self_test() -> KernelResult<()> {
             ""
         }
     );
+    if e1000e {
+        serial_println!(
+            "[linuxdrv]   e1000e process: Linux's e1000e drove the spare 82574 -- bound it, brought its link up, and had QEMU's gateway answer an ARP request through it: OK"
+        );
+    }
     Ok(())
 }
 
@@ -160,7 +182,7 @@ pub fn self_test() -> KernelResult<()> {
 /// whose DMA must all be refused (the DMA window is the first's). Each exit
 /// must release what it was given. Whether they ran: skipped, and recorded
 /// so, where there is no such card.
-fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
+fn pci_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     let Some(card) = crate::devhandle::probe_card() else {
         skips.record(
             "Linux driver layer's PCI runs",
@@ -210,7 +232,7 @@ fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<
             .into_iter()
             .chain(args.iter().map(alloc::string::String::as_bytes))
             .collect();
-        expect(elf, &argv, &caps, want, what, || {
+        expect(hello, &argv, &caps, want, what, || {
             (!crate::devhandle::yield_until(|| {
                 given(with_edu).all(|a| crate::pci::bound_driver(a).is_none())
             }))
@@ -220,32 +242,86 @@ fn pci_runs(elf: &[u8], skips: &mut crate::fs::selftest::Skips) -> KernelResult<
     Ok(true)
 }
 
-/// One run of the hello process -- `argv`, holding `capabilities` -- which
+/// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
+/// given the boot test's spare 82574 as hello's PCI runs are, in its "arp"
+/// mode: it must bind the card, bring its link up, ask QEMU's user-network
+/// gateway for its address and have the answer -- a frame sent and one
+/// received through Linux's driver, its interrupts and its DMA -- then exit
+/// 0, the card released. Whether it ran: skipped, and recorded so, where
+/// the bootloader did not load it or there is no such card.
+fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
+    let Some(elf) = crate::boot::module(E1000E) else {
+        skips.record(
+            "Linux's e1000e through the driver layer",
+            "not loaded beside the kernel (no limine.conf module named linuxdrv/e1000e)",
+        );
+        return Ok(false);
+    };
+    let Some(card) = crate::devhandle::probe_card() else {
+        skips.record(
+            "Linux's e1000e through the driver layer",
+            "no unbound 82574 on bus 0 with the boot test's MAC address",
+        );
+        return Ok(false);
+    };
+    let a = card.address;
+    let caps = [(
+        ResourceType::PciDevice,
+        crate::cap::pci_device_id(a.bus, a.device, a.function),
+        Rights::WRITE,
+    )];
+    let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
+    let program = Program {
+        elf,
+        name: "lx-e1000e",
+        limit_s: 30,
+    };
+    expect(
+        &program,
+        &[b"e1000e", b"arp", arg.as_bytes()],
+        &caps,
+        EXIT_OK,
+        "bound the card with Linux's e1000e, brought its link up, had QEMU's gateway answer \
+         an ARP request through it, and exited 0",
+        || {
+            (!crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none()))
+                .then_some("the card still bound after it")
+        },
+    )?;
+    Ok(true)
+}
+
+/// One run of a driver process -- `argv`, holding `capabilities` -- which
 /// should have ended with `want`, as `what` says, and passed `after`: `None`
 /// when what it left is right, else what is wrong. Said and an
 /// `InternalError` otherwise.
 fn expect(
-    elf: &[u8],
+    program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
     want: i32,
     what: &str,
     after: impl FnOnce() -> Option<&'static str>,
 ) -> KernelResult<()> {
-    let outcome = run(elf, argv, capabilities);
+    let outcome = run(program, argv, capabilities);
     let wrong = after();
     match (outcome, wrong) {
         (Ok(Some(code)), None) if code == want => Ok(()),
         (outcome, wrong) => {
+            fn text<'a>(a: &&'a [u8]) -> &'a str {
+                core::str::from_utf8(a).unwrap_or("?")
+            }
             serial_println!(
-                "[linuxdrv]   FAIL: the hello process {:?}, which should have {}, ended {:?} (Ok(Some(code)), Ok(None) for not within 10 s){}{}",
+                "[linuxdrv]   FAIL: the {} process {:?}, which should have {}, ended {:?} (Ok(Some(code)), Ok(None) for not within {} s){}{}",
+                argv.first().map_or("?", text),
                 argv.get(1..)
                     .unwrap_or(&[])
                     .iter()
-                    .map(|a| core::str::from_utf8(a).unwrap_or("?"))
+                    .map(text)
                     .collect::<alloc::vec::Vec<_>>(),
                 what,
                 outcome,
+                program.limit_s,
                 if wrong.is_some() { ", " } else { "" },
                 wrong.unwrap_or("")
             );

@@ -47,6 +47,10 @@ linux kernel/time/timer.o
 # the layer's own, lx_emul.c.)
 linux lib/find_bit.o
 linux lib/bitmap.o
+# High-resolution timers' queues (lx_hrtimer.c), ordered by Linux's own
+# timer queue over its red-black trees.
+linux lib/rbtree.o
+linux lib/timerqueue.o
 
 # The driver core, Linux's own: devices, drivers, buses and classes, their
 # matching and probing, and managed resources (devres); lx_emul.c runs its
@@ -120,3 +124,5 @@ layer emul/lx_fs.c
 layer emul/lx_pci.c
 layer emul/lx_irq.c
 layer emul/lx_dma.c
+layer emul/lx_hrtimer.c
+layer emul/lx_rq.c

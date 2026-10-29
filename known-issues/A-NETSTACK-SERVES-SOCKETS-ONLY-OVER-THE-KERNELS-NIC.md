@@ -7,23 +7,21 @@ a card a Linux driver process serves (design-decisions 1589) when named one
 (`serve-dns <service>`, `serve-net <service>`; narrowed 2026-10-29, the
 boot test's linuxdrv self-test resolving a name through the spare 82574 so).
 But nothing names one -- the persistent daemon the kernel starts serves the
-kernel's NIC -- and over a port the daemon waits as over the kernel's NIC,
-by sleeping 5 ms after reading nothing, not by the driver's doorbell, and
-reads nothing between requests. So a card only a driver process drives
-carries no socket's traffic on a running system, and would carry it slowly.
+kernel's NIC -- so a card only a driver process drives carries no socket's
+traffic on a running system. (Over a port the daemon waits by the driver's
+doorbell and serves the card between requests, since 2026-10-29; over the
+kernel's NIC it still sleeps 5 ms after reading nothing and reads nothing
+between requests, that NIC having no wait.)
 
 What stands between the two:
 
-- **No one NIC interface.** The daemon's NIC calls pick per call: `raw_tx`
-  and `raw_rx` go to the port when one is attached; `query_if_info`,
-  `raw_open`, `raw_close` and `sync_mcast_filter` are the kernel's only.
-  Over a port the filter goes to `port::set_mcast`, and is pushed only once
-  the driver's answer (`port::mcast_settled`) says it is in force -- a
-  refused list retried at the next change, as the kernel path does, and the
-  list given again to a card attached anew. The proper shape is one NIC chosen once at start-up -- the kernel's,
-  or a port named on the command line or by configuration -- behind which
-  every call goes, with the address configuration coming from the kernel's
-  for the one and the daemon's own DHCP for the other.
+- **No one NIC interface.** The NIC is chosen once at start-up now -- the
+  kernel's (`query_if_info`, `raw_open`) or the port named (`serve_card`,
+  DHCP) -- and let go once (`release_nic`), but each call still picks its
+  path by whether a port is attached: `raw_tx`, `raw_rx`, `nic_idle`,
+  `next_client`, `sync_mcast_filter`. The proper shape is a `nic` module
+  with one implementation per kind, chosen once, behind which every call
+  goes.
 - **The link is learnt and not acted on.** `port::link()` reports the
   driver's word, but nothing in the daemon reacts: a link that comes back
   should make the daemon confirm its lease (RFC 2131 INIT-REBOOT) and send

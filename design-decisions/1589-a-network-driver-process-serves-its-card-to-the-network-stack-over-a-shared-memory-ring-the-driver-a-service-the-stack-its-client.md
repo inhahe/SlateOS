@@ -145,9 +145,11 @@ through the kernel per frame.
   else of a card's: no speed or duplex, no statistics, no offloads, no
   bringing the card down. The daemon learns the link but does nothing yet
   when it changes; its serving modes serve over a port only when named one
-  (`serve-dns <service>`), and wait on it as on the kernel's NIC, by
-  sleeping, not by its doorbell
+  (`serve-dns <service>`), nothing yet naming one on a running system
   (`known-issues/A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`).
+  Over a port the daemon waits by the driver's doorbell, and between
+  requests it waits on its clients and the card together
+  (`SYS_WAIT_MULTIPLE`), routing what the card brings as it comes.
 - A grant is all or nothing: a region shared is writable by both.
 
 ### How it is checked

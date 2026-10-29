@@ -354,6 +354,25 @@ fn raw_rx(buf: &mut [u8]) -> i64 {
     syscall2(SYS_NET_RAW_RX, buf.as_mut_ptr() as u64, buf.len() as u64)
 }
 
+/// Until a frame may have come, [`POLL_SLEEP_NS`] at most: on a driver
+/// process's card, its doorbell waited for -- the driver rings once it has
+/// filled a slot -- so that a frame is read as it comes; on the kernel's
+/// NIC, which has no wait, a sleep. A card gone sleeps too, so that the
+/// loops waiting on it end at their deadlines rather than spin.
+fn nic_idle() {
+    if port::attached() && port::wait(POLL_SLEEP_NS) != port::Woke::Gone {
+        return;
+    }
+    sleep_ns(POLL_SLEEP_NS);
+}
+
+/// The time `iters` polls of [`POLL_SLEEP_NS`] take, from now: a wait's
+/// deadline, so that [`nic_idle`] returning early for a frame that came --
+/// someone else's, say -- does not shorten it.
+fn poll_deadline(iters: u32) -> u64 {
+    now_ns().saturating_add(u64::from(iters).saturating_mul(POLL_SLEEP_NS))
+}
+
 /// A network card a driver process serves: when the daemon has attached to
 /// one, its frames go there rather than to the kernel's NIC.
 mod port;
@@ -766,7 +785,8 @@ fn arp_resolve(target_ip: &[u8; 4], me: &IfInfo) -> Option<[u8; 6]> {
         return None;
     }
     let mut buf = [0u8; MAX_FRAME];
-    for _ in 0..RESOLVE_POLL_ITERS {
+    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    while now_ns() < until {
         loop {
             let n = raw_rx(&mut buf);
             if n < 0 {
@@ -780,7 +800,7 @@ fn arp_resolve(target_ip: &[u8; 4], me: &IfInfo) -> Option<[u8; 6]> {
                 return Some(mac);
             }
         }
-        sleep_ns(POLL_SLEEP_NS);
+        nic_idle();
     }
     None
 }
@@ -841,7 +861,8 @@ fn ndp_resolve(target_ip6: &[u8; 16], me: &IfInfo) -> Option<[u8; 6]> {
     }
 
     let mut buf = [0u8; MAX_FRAME];
-    for _ in 0..RESOLVE_POLL_ITERS {
+    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    while now_ns() < until {
         loop {
             let n = raw_rx(&mut buf);
             if n < 0 {
@@ -855,7 +876,7 @@ fn ndp_resolve(target_ip6: &[u8; 16], me: &IfInfo) -> Option<[u8; 6]> {
                 return Some(mac);
             }
         }
-        sleep_ns(POLL_SLEEP_NS);
+        nic_idle();
     }
     None
 }
@@ -945,7 +966,8 @@ fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) 
         return None;
     }
     let mut buf = [0u8; MAX_FRAME];
-    for _ in 0..RESOLVE_POLL_ITERS {
+    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    while now_ns() < until {
         loop {
             let n = raw_rx(&mut buf);
             if n < 0 {
@@ -962,7 +984,7 @@ fn resolve_dns(hostname: &[u8], next_hop_mac: &[u8; 6], me: &IfInfo, txid: u16) 
                 }
             }
         }
-        sleep_ns(POLL_SLEEP_NS);
+        nic_idle();
     }
     None
 }
@@ -983,7 +1005,8 @@ fn resolve_ptr(
         return None;
     }
     let mut buf = [0u8; MAX_FRAME];
-    for _ in 0..RESOLVE_POLL_ITERS {
+    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    while now_ns() < until {
         loop {
             let n = raw_rx(&mut buf);
             if n < 0 {
@@ -1000,7 +1023,7 @@ fn resolve_ptr(
                 return Some(w);
             }
         }
-        sleep_ns(POLL_SLEEP_NS);
+        nic_idle();
     }
     None
 }
@@ -1027,6 +1050,9 @@ const TCP_WINDOW: u16 = 64240;
 /// Per-attempt RX poll budget for the data phase (iterations * `POLL_SLEEP_NS`).
 /// 400 * 5ms = 2s of quiescence before we give up on more data.
 const TCP_DATA_ITERS: u32 = 400;
+/// How long a TCP wait allows a connection to stay quiet: what
+/// [`TCP_DATA_ITERS`] polls of [`POLL_SLEEP_NS`] once took.
+const TCP_QUIET_NS: u64 = TCP_DATA_ITERS as u64 * POLL_SLEEP_NS;
 
 /// Number of SYN / payload (re)transmission attempts before giving up.
 const TCP_SYN_ATTEMPTS: u32 = 5;
@@ -1624,7 +1650,8 @@ impl TcpConn {
             ) {
                 return None;
             }
-            for _ in 0..RESOLVE_POLL_ITERS {
+            let until = poll_deadline(RESOLVE_POLL_ITERS);
+            while now_ns() < until {
                 while let Some(rx) =
                     recv_tcp_seg(me, &dst_ip, local_port, dst_port, &mut frame, &mut pl)
                 {
@@ -1643,7 +1670,7 @@ impl TcpConn {
                         break 'syn;
                     }
                 }
-                sleep_ns(POLL_SLEEP_NS);
+                nic_idle();
             }
         }
         if !established {
@@ -1859,7 +1886,8 @@ impl TcpConn {
             ) {
                 return None;
             }
-            for _ in 0..RESOLVE_POLL_ITERS {
+            let until = poll_deadline(RESOLVE_POLL_ITERS);
+            while now_ns() < until {
                 while let Some(rx) =
                     recv_tcp_seg6(me, &dst_ip6, local_port, dst_port, &mut frame, &mut pl)
                 {
@@ -1878,7 +1906,7 @@ impl TcpConn {
                         break 'syn;
                     }
                 }
-                sleep_ns(POLL_SLEEP_NS);
+                nic_idle();
             }
         }
         if !established {
@@ -2285,8 +2313,8 @@ impl TcpConn {
         let mut frame = [0u8; MAX_FRAME];
         let mut pl = [0u8; MAX_FRAME];
 
-        let mut idle = 0u32;
-        while idle < TCP_DATA_ITERS && !self.peer_fin && !self.timed_out {
+        let mut heard = now_ns();
+        while now_ns().saturating_sub(heard) < TCP_QUIET_NS && !self.peer_fin && !self.timed_out {
             let mut got = false;
             while let Some(rx) = self.recv_one_seg(me, &mut frame, &mut pl) {
                 got = true;
@@ -2296,13 +2324,12 @@ impl TcpConn {
                 }
             }
             if got {
-                idle = 0;
+                heard = now_ns();
             } else {
-                idle = idle.saturating_add(1);
                 if self.service_retransmit(me, now_ns()) {
-                    idle = 0;
+                    heard = now_ns();
                 }
-                sleep_ns(POLL_SLEEP_NS);
+                nic_idle();
             }
         }
         self.take_rx(out)
@@ -2472,7 +2499,8 @@ fn udp_exchange(
         return None;
     }
     let mut frame = [0u8; MAX_FRAME];
-    for _ in 0..RESOLVE_POLL_ITERS {
+    let until = poll_deadline(RESOLVE_POLL_ITERS);
+    while now_ns() < until {
         loop {
             let n = raw_rx(&mut frame);
             if n < 0 {
@@ -2488,7 +2516,7 @@ fn udp_exchange(
                 return Some(take);
             }
         }
-        sleep_ns(POLL_SLEEP_NS);
+        nic_idle();
     }
     None
 }
@@ -2553,7 +2581,6 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
 
     let mut txid: u16 = 0x1000;
     let mut served: u32 = 0;
-    let mut idle_ticks: u32 = 0;
     // Persistent ring-TCP session: survives across separate OP_RING_TCP control
     // calls so a connection opened in one call is addressable in later ones.
     let mut sessions = Sessions::new();
@@ -2563,19 +2590,21 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     sync_mcast_filter(&mut net, me);
 
     // Persistent mode ignores the idle deadline and serves for the system's
-    // lifetime; bounded mode exits after SERVICE_IDLE_ITERS idle iterations.
-    while persistent || idle_ticks < SERVICE_IDLE_ITERS {
-        let ch = syscall2(
-            SYS_SERVICE_ACCEPT_TIMEOUT,
-            listener as u64,
-            ACCEPT_TIMEOUT_NS,
-        );
-        if ch < 0 {
-            idle_ticks += 1; // Timed out (or transient) — count toward idle exit.
-            continue;
-        }
-        idle_ticks = 0;
-        let ch = ch as u64;
+    // lifetime; bounded mode exits once no client has come for
+    // SERVICE_IDLE_ITERS accept timeouts.
+    let idle_ns = u64::from(SERVICE_IDLE_ITERS).saturating_mul(ACCEPT_TIMEOUT_NS);
+    let mut last_client = now_ns();
+    let mut code = 0;
+    while persistent || now_ns().saturating_sub(last_client) < idle_ns {
+        let ch = match next_client(listener as u64, &mut net, me, next_hop_mac.as_ref()) {
+            Ok(Some(ch)) => ch,
+            Ok(None) => continue,
+            Err(why) => {
+                print(why);
+                code = 6;
+                break;
+            }
+        };
 
         // One request per connection (one-shot control path).
         let mut req = [0u8; MSG_CAP];
@@ -2616,6 +2645,8 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
             served += 1;
         }
         syscall1(SYS_CHANNEL_CLOSE, ch);
+        // Idle from the end of a request: its own time is not idleness.
+        last_client = now_ns();
     }
 
     // Tear down any ring session the client left open (unmaps + closes conns).
@@ -2627,7 +2658,47 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
     } else {
         print("[netstack] no requests before idle deadline; unregistered\n");
     }
-    0
+    code
+}
+
+/// The next client connected to `listener`, waited for up to
+/// [`ACCEPT_TIMEOUT_NS`]: `None` for none in that time.
+///
+/// Over a driver process's card the card is served meanwhile: what comes
+/// between requests -- a segment for an open session, an ARP request -- is
+/// routed as it comes ([`pump`]) rather than left for the next request, and
+/// the wait is woken by the card's doorbell or the client, whichever comes
+/// first; a client waiting is taken before the card is read. Over the
+/// kernel's NIC, which has no wait, frames wait for the next request. An
+/// error when the card has gone.
+fn next_client(
+    listener: u64,
+    net: &mut Net,
+    me: &IfInfo,
+    next_hop_mac: Option<&[u8; 6]>,
+) -> Result<Option<u64>, &'static str> {
+    if !port::attached() {
+        let ch = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener, ACCEPT_TIMEOUT_NS);
+        return Ok(u64::try_from(ch).ok());
+    }
+    let deadline = now_ns().saturating_add(ACCEPT_TIMEOUT_NS);
+    loop {
+        if let Ok(ch) = u64::try_from(syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener, 0)) {
+            return Ok(Some(ch));
+        }
+        // Without a next hop nothing can be sent, a retransmission
+        // included: the frames wait for a request, which will fail.
+        if let Some(mac) = next_hop_mac {
+            pump(net, me, mac);
+        }
+        let left = deadline.saturating_sub(now_ns());
+        if left == 0 {
+            return Ok(None);
+        }
+        if port::wait_or_client(listener, left).0 == port::Woke::Gone {
+            return Err("[netstack] FAIL: the card's driver went away\n");
+        }
+    }
 }
 
 /// A request that holds the daemon this long is logged ([`print_slow_request`]).
@@ -5210,16 +5281,15 @@ fn ring_tcp_send(
         // Blocking send: wait for the outstanding segment to be ACKed, driving its
         // retransmit while we wait -- `pump` runs the retransmission timers.
         // Bounded by the send deadline.
-        let mut idle = 0u32;
+        let mut heard = now_ns();
         loop {
-            if idle >= TCP_DATA_ITERS {
+            if now_ns().saturating_sub(heard) >= TCP_QUIET_NS {
                 break;
             }
             if pump(net, me, next_hop_mac) {
-                idle = 0;
+                heard = now_ns();
             } else {
-                idle = idle.saturating_add(1);
-                sleep_ns(POLL_SLEEP_NS);
+                nic_idle();
             }
             match net.conns.get_mut(target_id) {
                 Some(c) if c.timed_out => return netipc::ring::ERR_TIMED_OUT,
@@ -5307,7 +5377,7 @@ fn ring_tcp_recv(
             None => return -1,
         }
     } else {
-        let mut idle = 0u32;
+        let mut heard = now_ns();
         loop {
             // Stop as soon as the target has in-order bytes to deliver (a blocking
             // recv returns available data promptly, like `read(2)` — it must not
@@ -5322,14 +5392,13 @@ fn ring_tcp_recv(
                 Some(_) => {}
                 None => break, // connection vanished (shouldn't happen mid-recv)
             }
-            if idle >= TCP_DATA_ITERS {
+            if now_ns().saturating_sub(heard) >= TCP_QUIET_NS {
                 break;
             }
             if pump(net, me, next_hop_mac) {
-                idle = 0;
+                heard = now_ns();
             } else {
-                idle = idle.saturating_add(1);
-                sleep_ns(POLL_SLEEP_NS);
+                nic_idle();
             }
         }
         // Nothing to deliver and the stream still open: say why, never `0`,

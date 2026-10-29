@@ -42,6 +42,12 @@ const SYS_SHM_CLOSE: u64 = 232;
 const SYS_SHM_UNMAP: u64 = 234;
 const SYS_SERVICE_CONNECT: u64 = 281;
 const SYS_SHM_GRANT: u64 = 1190;
+const SYS_WAIT_MULTIPLE: u64 = 1066;
+/// `SYS_WAIT_MULTIPLE`'s kinds of a channel end and a service listener
+/// (`cap::ResourceType`), and `poll(2)`'s readable bit.
+const KIND_CHANNEL: u32 = 1;
+const KIND_SERVICE: u32 = 14;
+const POLLIN: u32 = 1;
 /// SlateOS's `NotFound` (no such service yet) and `ChannelClosed` (the
 /// driver has gone).
 const NOT_FOUND: i64 = -500;
@@ -376,7 +382,7 @@ pub fn send(frame: &[u8]) -> Option<i64> {
     reap(c);
     let deadline = now_ns().saturating_add(SLOT_WAIT_NS);
     while c.nfree == 0 && !c.gone && now_ns() < deadline {
-        let _rang = wait_on(c, deadline.saturating_sub(now_ns()));
+        let _rang = wait_on(c, deadline.saturating_sub(now_ns()), None);
         reap(c);
     }
     if c.nfree == 0 {
@@ -445,44 +451,105 @@ pub enum Woke {
 /// messages that have come are taken ([`see_to_channel`]): a card busy with
 /// frames does not leave its link and answers unread behind them.
 pub fn wait(timeout_ns: u64) -> Woke {
+    wait_for(timeout_ns, None).0
+}
+
+/// [`wait`], woken as well by a connection waiting on the service
+/// `listener` (the handle `SYS_SERVICE_REGISTER` answered): what the card
+/// did, and whether a client is waiting -- for a daemon that serves its
+/// clients and its card together. A frame already there answers at once,
+/// without looking at the listener.
+pub fn wait_or_client(listener: u64, timeout_ns: u64) -> (Woke, bool) {
+    wait_for(timeout_ns, Some(listener))
+}
+
+/// [`wait`] and [`wait_or_client`]: the card's wake, and whether a client
+/// is waiting on `listener`.
+fn wait_for(timeout_ns: u64, listener: Option<u64>) -> (Woke, bool) {
     let Some(c) = card() else {
-        return Woke::Gone;
+        return (Woke::Gone, false);
     };
     reap(c);
-    let rang = if c.got_len != 0 || c.gone {
+    let (rang, client) = if c.got_len != 0 || c.gone {
         see_to_channel(c);
-        true
+        (true, false)
     } else {
-        wait_on(c, timeout_ns)
+        wait_on(c, timeout_ns, listener)
     };
-    match (c.gone, rang) {
+    let woke = match (c.gone, rang) {
         (true, _) => Woke::Gone,
         (false, true) => Woke::Rang,
         (false, false) => Woke::Slept,
-    }
+    };
+    (woke, client)
 }
 
 /// The driver's doorbell or another message waited for, up to `timeout_ns`
 /// -- the daemon saying in the ring that it sleeps, unless completions are
-/// there already -- and any more that came taken: whether one came, or
-/// completions were there.
-fn wait_on(c: &mut Card, timeout_ns: u64) -> bool {
+/// there already -- or, given a service `listener`, a connection waiting
+/// on it; and any messages that came taken: whether one came, or
+/// completions were there, and whether a client is waiting.
+fn wait_on(c: &mut Card, timeout_ns: u64, listener: Option<u64>) -> (bool, bool) {
     c.slept = c.slept.wrapping_add(1).max(1);
     if !c.ring.cq_sleep(c.slept) {
         see_to_channel(c);
-        return true;
+        return (true, false);
     }
-    let mut buf = [0u8; MESSAGE_MAX];
-    let got = syscall4(
-        SYS_CHANNEL_RECV_TIMEOUT,
-        c.channel,
-        buf.as_mut_ptr() as u64,
-        buf.len() as u64,
-        timeout_ns.max(1),
-    );
+    let (came, client) = match listener {
+        None => {
+            let mut buf = [0u8; MESSAGE_MAX];
+            let got = syscall4(
+                SYS_CHANNEL_RECV_TIMEOUT,
+                c.channel,
+                buf.as_mut_ptr() as u64,
+                buf.len() as u64,
+                timeout_ns.max(1),
+            );
+            (take_message(c, got, &buf), false)
+        }
+        // The driver's messages are taken below, as any that come while
+        // the daemon is awake are.
+        Some(listener) => {
+            let mut items = [
+                WaitItem::readable(c.channel, KIND_CHANNEL),
+                WaitItem::readable(listener, KIND_SERVICE),
+            ];
+            syscall3(
+                SYS_WAIT_MULTIPLE,
+                items.as_mut_ptr() as u64,
+                items.len() as u64,
+                timeout_ns.max(1),
+            );
+            (false, items.get(1).is_some_and(|i| i.revents != 0))
+        }
+    };
     c.ring.cq_wake();
-    let came = take_message(c, got, &buf);
-    see_to_channel(c) || came
+    (see_to_channel(c) || came, client)
+}
+
+/// One object `SYS_WAIT_MULTIPLE` waits on, laid out as its ABI says (24
+/// bytes): the handle, its kind (`cap::ResourceType`), the `poll(2)` events
+/// asked for and those that came.
+#[repr(C)]
+struct WaitItem {
+    handle: u64,
+    kind: u32,
+    events: u32,
+    revents: u32,
+    _tail: u32,
+}
+
+impl WaitItem {
+    /// `handle`, of `kind`, waited on until it is readable.
+    fn readable(handle: u64, kind: u32) -> Self {
+        Self {
+            handle,
+            kind,
+            events: POLLIN,
+            revents: 0,
+            _tail: 0,
+        }
+    }
 }
 
 /// The driver's messages that have come, taken without waiting --

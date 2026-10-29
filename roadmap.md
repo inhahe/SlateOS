@@ -5530,8 +5530,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         told apart; and the daemon serving sockets over a port on a running
         system -- it does when named one (`serve-dns nic.spare`, a name
         resolved through the spare card at every boot, the daemon waiting by
-        the driver's doorbell), but nothing names one, and a link that comes
-        back is not acted on (known-issues
+        the driver's doorbell and following its link), but nothing names one
+        (known-issues
         `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
         then how lane A's `net80211` meets `mac80211`/`cfg80211`

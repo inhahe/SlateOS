@@ -7,7 +7,8 @@
 //! taking the one path for the card chosen: frames sent ([`send`]) and
 //! received ([`recv`]), a frame waited for ([`idle`], [`wait_until`]), a
 //! client or a frame waited for ([`wait_or_client`]), the multicast filter
-//! set ([`set_mcast`]), the card let go ([`release`]). A frame to the
+//! set ([`set_mcast`]), its link's coming back taken ([`take_link_back`]),
+//! the card let go ([`release`]). A frame to the
 //! daemon's own address reaches neither card ([`super::loopback`]).
 
 use super::{
@@ -130,6 +131,14 @@ pub fn mcast_refused() -> bool {
 /// once its driver has answered a list, the last without an error.
 pub fn mcast_in_force() -> bool {
     !over_card() || (port::mcast_answers() > 0 && port::mcast_settled() == Some(0))
+}
+
+/// Whether a driver process's card's link has come back up since it was
+/// told down, since this last answered ([`port::take_link_back`]): for the
+/// daemon to renew its lease and announce its addresses. Never for the
+/// kernel's NIC, whose link the kernel's own stack follows.
+pub fn take_link_back() -> bool {
+    port::take_link_back()
 }
 
 /// Let go of the card: the kernel's NIC's claim released

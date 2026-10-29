@@ -196,7 +196,7 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!(
             "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK",
             if cable_puller() {
-                ", the link following the card's cable"
+                ", the link following the card's cable -- a send refused while it was down, the lease confirmed and the addresses announced when it came back"
             } else {
                 ""
             }
@@ -412,7 +412,8 @@ fn cable_puller() -> bool {
 /// idle driver, payloads as sent, be told the card's link is up, find the
 /// card passing a multicast group exactly while it lists it, and -- where
 /// the harness can pull the card's cable ([`cable_puller`]) -- be told the
-/// link down and up again as it does, time the card (`nic-bench`'s pings,
+/// link down and up again as it does, a send refused at once while it is
+/// down, its lease confirmed and its addresses announced once it is back, time the card (`nic-bench`'s pings,
 /// failing only for too many lost or one corrupted), be let go for breaking
 /// the protocol; and exit 0. Then the daemon serves sockets over the card
 /// ([`serve_sockets`]), the driver's second stack. The driver then ends,

@@ -55,7 +55,7 @@ const POLLNVAL: u32 = 0x20;
 const NOT_FOUND: i64 = -500;
 const CHANNEL_CLOSED: i64 = -300;
 /// What `send` answers once the card has gone: `ENETDOWN`.
-const NET_DOWN: i64 = -100;
+pub const NET_DOWN: i64 = -100;
 /// The most slots a card's ring may have: the daemon's tables' size.
 const MAX_SLOTS: usize = 256;
 /// How long a send waits for a send slot to come free: 100 ms.
@@ -90,6 +90,9 @@ struct Card {
     link: Option<bool>,
     /// How many times the driver has told it.
     links_told: u32,
+    /// Whether the link has come back up since it was last told down, and
+    /// the daemon has not yet taken that ([`take_link_back`]).
+    link_back: bool,
     /// The multicast list asked for and not yet sent.
     mcast_want: Option<McastList>,
     /// A list was sent and is not yet answered.
@@ -296,6 +299,7 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
         rung: 0,
         link: None,
         links_told: 0,
+        link_back: false,
         mcast_want: None,
         mcast_sent: false,
         mcast_result: 0,
@@ -370,10 +374,13 @@ fn reap(c: &mut Card) {
 
 /// `frame` sent on the card: its length, or a negative errno -- at once for
 /// a frame the card cannot send: one with no header, or longer than a
-/// header, a VLAN tag and the card's MTU. `None` with no card attached.
+/// header, a VLAN tag and the card's MTU; `ENETDOWN` for a card gone or
+/// its link down. `None` with no card attached.
 pub fn send(frame: &[u8]) -> Option<i64> {
     let c = card()?;
-    if c.gone {
+    // A link down fails a send at once rather than queue it in the driver,
+    // for a card that may not come back soon.
+    if c.gone || c.link == Some(false) {
         return Some(NET_DOWN);
     }
     if frame.len() < ETH_HLEN {
@@ -623,6 +630,7 @@ fn take_message(c: &mut Card, got: i64, buf: &[u8]) -> bool {
     match buf.get(..len).and_then(Message::decode) {
         Some(Message::Doorbell) => {}
         Some(Message::Link { up }) => {
+            c.link_back |= up && c.link == Some(false);
             c.link = Some(up);
             c.links_told = c.links_told.saturating_add(1);
         }
@@ -682,6 +690,14 @@ pub fn link() -> Option<bool> {
 /// attaching, then at each change -- 0 with no card attached.
 pub fn links_told() -> u32 {
     card().map_or(0, |c| c.links_told)
+}
+
+/// Whether the card's link has come back up since it was told down -- a
+/// cable plugged back, say -- since this last answered: for the daemon to
+/// confirm its lease and announce its addresses again, what the link's
+/// other end knew of it perhaps gone. False with no card attached.
+pub fn take_link_back() -> bool {
+    card().is_some_and(|c| core::mem::replace(&mut c.link_back, false))
 }
 
 /// The multicast addresses the card must pass from now on (`McastList::new`:

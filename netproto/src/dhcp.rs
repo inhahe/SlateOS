@@ -258,11 +258,43 @@ pub fn build_request(
     finish(out, pos)
 }
 
+/// Build the DHCPREQUEST of a client in INIT-REBOOT (RFC 2131 §4.3.2) for MAC
+/// `chaddr`, transaction `xid`: asking to keep `requested_ip`, an address it
+/// had, without naming a server -- once its link has come back, say. Its
+/// `ciaddr` stays zero and it carries no server identifier, as §4.3.2 says;
+/// a server that knows the address is no longer the client's answers
+/// DHCPNAK. Returns the message length.
+#[must_use]
+pub fn build_reboot_request(
+    out: &mut [u8],
+    xid: u32,
+    chaddr: &MacAddr,
+    requested_ip: &Ipv4Addr,
+) -> Option<usize> {
+    let mut pos = write_fixed(out, xid, chaddr, true)?;
+    pos = push_option(out, pos, OPT_MSG_TYPE, &[REQUEST])?;
+    pos = push_option(out, pos, OPT_REQUESTED_IP, requested_ip)?;
+    pos = push_option(out, pos, OPT_PARAM_REQUEST, &PARAM_REQUEST_LIST)?;
+    finish(out, pos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     const MAC: MacAddr = [0x52, 0x54, 0x00, 0x12, 0x34, 0x56];
+
+    #[test]
+    fn reboot_request_asks_for_the_address_and_names_no_server() {
+        let mut buf = [0u8; 300];
+        let n = build_reboot_request(&mut buf, 7, &MAC, &[10, 0, 2, 15]).unwrap();
+        let m = Message::parse(&buf[..n]).unwrap();
+        assert_eq!(m.msg_type(), Some(REQUEST));
+        assert_eq!(m.xid, 7);
+        assert_eq!(m.option(OPT_REQUESTED_IP), Some(&[10, 0, 2, 15][..]));
+        assert_eq!(m.server_id(), None, "INIT-REBOOT names no server");
+        assert_eq!(&buf[12..16], &[0, 0, 0, 0], "ciaddr stays zero");
+    }
 
     #[test]
     fn discover_is_parseable() {

@@ -143,8 +143,11 @@ through the kernel per frame.
 - One stack per card at a time.
 - Frames, the link and the multicast list cross the port, and nothing
   else of a card's: no speed or duplex, no statistics, no offloads, no
-  bringing the card down. The daemon learns the link but does nothing yet
-  when it changes; its serving modes serve over a port only when named one
+  bringing the card down. The daemon refuses sends at once while the link
+  is down, and when it comes back confirms its lease (RFC 2131
+  INIT-REBOOT) and announces its addresses again (a gratuitous ARP, an
+  unsolicited neighbour advertisement); its serving modes serve over a port
+  only when named one
   (`serve-dns <service>`), nothing yet naming one on a running system
   (`known-issues/A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`).
   Over a port the daemon waits by the driver's doorbell, and between

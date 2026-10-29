@@ -2551,7 +2551,11 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
             Ok(Some(ch)) => ch,
             Ok(None) => continue,
             Err(why) => {
-                print(why);
+                Line::new()
+                    .put(b"[netstack] ")
+                    .put(why.as_bytes())
+                    .put(b"\n")
+                    .print();
                 code = 6;
                 break;
             }
@@ -2631,11 +2635,13 @@ fn run_dns_service(me: &IfInfo, persistent: bool) -> i64 {
 ///
 /// The card is served meanwhile: what comes between requests -- a segment
 /// for an open session, an ARP request -- is routed as it comes ([`pump`])
-/// rather than left for the next request, and a client waiting is taken
-/// before the card is read. On a driver process's card the wait is woken by
-/// its doorbell or the client, whichever comes first; on the kernel's NIC,
-/// which has no wait, by the client or the time. An error when the card has
-/// gone, the listener has, or the wait failed.
+/// rather than left for the next request, a client waiting is taken before
+/// the card is read, and a link come back is acted on ([`relink`]). On a
+/// driver process's card the wait is woken by its doorbell or the client,
+/// whichever comes first; on the kernel's NIC, which has no wait, by the
+/// client or the time. An error when the card has gone, the listener has,
+/// the wait failed, or the link came back and our lease or addresses could
+/// not be renewed.
 fn next_client(
     listener: u64,
     net: &mut Net,
@@ -2668,6 +2674,10 @@ fn next_client(
             return Ok(None);
         }
         nic::wait_or_client(listener, left)?;
+        if nic::take_link_back() {
+            relink(me)?;
+            print("[netstack] the card's link came back: lease confirmed, addresses announced\n");
+        }
     }
 }
 
@@ -6218,8 +6228,10 @@ fn advertisements(me: &IfInfo, within_ns: u64, first: bool) -> Result<u64, &'sta
 
 /// The card's link following its cable: the harness asked to pull it --
 /// the boot test does, through QEMU's monitor, at the line "cable: pull
-/// it" -- the link told down; asked to plug it back, told up; and the
-/// gateway answering ARP again, frames flowing once more. 20 s for each.
+/// it" -- the link told down, and a frame sent then refused at once; asked
+/// to plug it back, told up, its coming back noticed and acted on -- the
+/// lease confirmed, our addresses announced ([`relink`]) -- and the gateway
+/// answering ARP again, frames flowing once more. 20 s for each.
 fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
     const WITHIN_NS: u64 = 20_000_000_000;
     print("[netstack] nic-check: cable: pull it\n");
@@ -6228,23 +6240,96 @@ fn nic_check_cable(me: &IfInfo) -> Result<(), &'static str> {
             "FAIL: the card's link was not told down within 20 s of its cable being pulled",
         )
     })?;
+    if nic::send(&arp::request(&me.mac, &me.ip, &me.gateway)) != port::NET_DOWN {
+        return Err("FAIL: a frame sent with the card's link down was not refused at once");
+    }
     print("[netstack] nic-check: cable: plug it back\n");
     let up = link_becomes(true, me, WITHIN_NS).map_err(|gone| {
         gone.unwrap_or(
             "FAIL: the card's link was not told up within 20 s of its cable being plugged back",
         )
     })?;
+    if !port::take_link_back() {
+        return Err("FAIL: the card's link coming back was not noticed");
+    }
+    relink(me)?;
     if (0..5).find_map(|_| arp_resolve(&me.gateway, me)).is_none() {
         return Err("FAIL: the gateway did not answer ARP once the cable was back");
     }
     Line::new()
         .put(b"[netstack] nic-check: the link went down ")
         .dec(down / 1_000_000)
-        .put(b" ms after the cable was pulled and up ")
+        .put(b" ms after the cable was pulled, a send then refused at once, and up ")
         .dec(up / 1_000_000)
-        .put(b" ms after it was plugged back, and the gateway answered again\n")
+        .put(b" ms after it was plugged back; the lease was confirmed, the addresses announced, and the gateway answered again\n")
         .print();
     Ok(())
+}
+
+/// The card's link back after it went down ([`port::take_link_back`]): the
+/// lease confirmed -- RFC 2131's INIT-REBOOT, a DHCPREQUEST for our address
+/// naming no server -- and our addresses announced again, a gratuitous ARP
+/// for the IPv4 one and an unsolicited neighbour advertisement for the IPv6
+/// one, what the link's other end knew of us perhaps gone with the link. An
+/// error when the server refused the address -- it is no longer ours -- or
+/// confirmed another, or did not answer, or an announcement could not be
+/// sent.
+fn relink(me: &IfInfo) -> Result<(), &'static str> {
+    use netproto::dhcp;
+    let mac = me.mac;
+    let xid = (now_ns() as u32) ^ u32::from_be_bytes([mac[2], mac[3], mac[4], mac[5]]);
+    let mut msg = [0u8; 320];
+    let n = dhcp::build_reboot_request(&mut msg, xid, &mac, &me.ip)
+        .ok_or("FAIL: no room for a DHCPREQUEST")?;
+    let ack = dhcp_exchange(me, &msg[..n], xid, dhcp::ACK)?;
+    if ack.ip != me.ip {
+        return Err("FAIL: the DHCP server confirmed another address once the link came back");
+    }
+    if nic::send(&arp::request(&me.mac, &me.ip, &me.ip)) < 0 {
+        return Err("FAIL: the gratuitous ARP could not be sent once the link came back");
+    }
+    if !announce_ip6(me) {
+        return Err("FAIL: the neighbour advertisement could not be sent once the link came back");
+    }
+    Ok(())
+}
+
+/// Our IPv6 link-local address announced to every node on the link: an
+/// unsolicited neighbour advertisement (RFC 4861 §7.2.6), the override flag
+/// set and the solicited one clear. Whether it was sent.
+fn announce_ip6(me: &IfInfo) -> bool {
+    let l4_off = ethernet::HEADER_LEN + ipv6::HEADER_LEN;
+    let mut out = [0u8; MAX_FRAME];
+    let dst = icmpv6::ALL_NODES_LINK_LOCAL;
+    let Some(len) = out.get_mut(l4_off..).and_then(|l4| {
+        icmpv6::write_neighbor_advertisement(
+            l4,
+            &me.ip6,
+            &dst,
+            &me.ip6,
+            icmpv6::NA_FLAG_OVERRIDE,
+            &me.mac,
+        )
+    }) else {
+        return false;
+    };
+    let hdr = ipv6::Builder {
+        traffic_class: 0,
+        flow_label: 0,
+        next_header: icmpv6::NH_ICMPV6,
+        hop_limit: icmpv6::NDP_HOP_LIMIT,
+        src: me.ip6,
+        dst,
+    }
+    .build_header(len as u16);
+    out[ethernet::HEADER_LEN..l4_off].copy_from_slice(&hdr);
+    ethernet::write_header(
+        &mut out,
+        &mld::multicast_mac(&dst),
+        &me.mac,
+        ethernet::ETHERTYPE_IPV6,
+    );
+    nic::send(&out[..l4_off + len]) >= 0
 }
 
 /// How long until the driver tells the card's link `up` (or down); or
@@ -6336,6 +6421,10 @@ fn dhcp_lease(me: &mut IfInfo) -> Result<(), &'static str> {
 /// with a message of type `want`: its lease. A DHCPNAK is a refusal.
 fn dhcp_exchange(me: &IfInfo, msg: &[u8], xid: u32, want: u8) -> Result<Lease, &'static str> {
     use netproto::dhcp;
+    // From 0.0.0.0 whatever address `me` has -- as RFC 2131 has a client
+    // send until it is sure of one, INIT-REBOOT included -- so that the IP
+    // header agrees with the UDP checksum written below over that source.
+    let me = &card_if_info(me.mac);
     let mut datagram = [0u8; 400];
     let len = udp::write(&mut datagram, &[0; 4], &[255; 4], 68, 67, msg)
         .ok_or("FAIL: no room for a DHCP datagram")?;

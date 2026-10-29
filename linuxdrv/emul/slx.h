@@ -21,6 +21,14 @@ void slx_log(const char *text, unsigned long len);
 void *slx_alloc(unsigned long size);
 /* Give back what slx_alloc gave; NULL is ignored. */
 void slx_free(const void *ptr);
+/*
+ * The bytes slx_alloc(size) hands out -- `size` rounded up as the heap
+ * rounds it (a power of two, 16 at least) -- or `size` where the heap could
+ * never hold that much; and the bytes the block slx_alloc gave at `ptr`
+ * holds, 0 for anything it did not give.
+ */
+unsigned long slx_alloc_size(unsigned long size);
+unsigned long slx_block_size(const void *ptr);
 
 /* Fill `len` bytes at `buf` from the system's CSPRNG, or stop the driver. */
 void slx_random(void *buf, unsigned long len);

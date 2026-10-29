@@ -58,7 +58,8 @@ fn run(elf: &[u8], argv: &[&[u8]]) -> Result<Option<i32>, KernelError> {
 /// vsprintf in a process of their own. Run plainly, its initcalls allocate,
 /// take a spinlock with interrupts "off", print a line formatted by Linux,
 /// run a kthread against a mutex held across a sleep and a completion, try
-/// the scheduler's edges, arm timers, schedule tasklets and queue work, and
+/// the scheduler's edges, arm timers, schedule tasklets, queue work and
+/// probe a device of their own through Linux's driver core, and
 /// the process exits 0. With one argument the first initcall ends it otherwise:
 /// "stop" calls a function nothing defines, which the build made a
 /// generated stop ([`EXIT_STOP`]);
@@ -140,7 +141,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic: OK",
         elf.len()
     );
     Ok(())

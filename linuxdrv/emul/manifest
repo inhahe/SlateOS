@@ -48,6 +48,40 @@ linux kernel/time/timer.o
 linux lib/find_bit.o
 linux lib/bitmap.o
 
+# The driver core, Linux's own: devices, drivers, buses and classes, their
+# matching and probing, and managed resources (devres); lx_emul.c runs its
+# setup before the first initcall, as Linux's driver_init(). Its file system
+# view, sysfs, is the layer's (lx_sysfs.c): nothing in a driver process
+# reads it.
+linux drivers/base/core.o
+linux drivers/base/bus.o
+linux drivers/base/dd.o
+linux drivers/base/driver.o
+linux drivers/base/class.o
+linux drivers/base/devres.o
+linux lib/kobject.o
+linux lib/klist.o
+# Sleepable RCU, which the driver core's device links read under: Linux's
+# tiny SRCU, its grace periods driven by a work item and an irq_work, which
+# the layer's loop runs as Linux's tick does (lx_softirq.c).
+linux kernel/rcu/srcutiny.o
+linux kernel/irq_work.o
+# What the driver core stands on: notifier chains, read-write semaphores,
+# asynchronous probing, firmware-node properties and software nodes, and
+# the string and number-parsing helpers it names objects with (the
+# duplicating ones are lx_emul.c's).
+linux kernel/notifier.o
+linux kernel/locking/rwsem.o
+linux kernel/async.o
+linux drivers/base/property.o
+linux drivers/base/swnode.o
+linux lib/kstrtox.o
+linux lib/cmdline.o
+linux lib/string_helpers.o
+# vsprintf's hashing of printed pointers (%p).
+linux lib/siphash.o
+
 layer emul/lx_emul.c
 layer emul/lx_sched.c
 layer emul/lx_softirq.c
+layer emul/lx_sysfs.c

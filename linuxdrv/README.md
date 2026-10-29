@@ -77,7 +77,9 @@ Linux's own kthread.c and its kthreadd run on), each on a 64 KiB stack of
 its own above a guard page; Linux's own timer wheel, softirqs and tasklets,
 with the loop as their tick and ksoftirqd (`emul/lx_softirq.c`,
 design-decisions 1581); Linux's own workqueues, over a slab and per-CPU
-memory the layer keeps on kmalloc (design-decisions 1582). The driver's own
+memory the layer keeps on kmalloc (design-decisions 1582); Linux's own
+driver core -- devices, drivers, buses, devres, device links -- its sysfs
+and uevents showing nothing (`emul/lx_sysfs.c`, design-decisions 1583). The driver's own
 code is marked at build (`scripts/linux-tree.sh` renames its sections to
 `*.lxdriver`, which `link.ld` brackets), so that only the driver's failing
 initcall ends the process, a Linux subsystem's being carried past. `hello`
@@ -85,7 +87,8 @@ runs a kthread against a mutex held across a sleep, tries the scheduler's
 edges (timeouts, kthread_stop() out of interruptible waits, kthreads freed
 when they end, busy waits moving `jiffies`, RCU callbacks, rcuwait), arms
 timers, schedules tasklets, queues work -- a sleeper and a CPU hog with work
-queued behind each -- and overflows a stack into its guard on purpose. No
+queued behind each -- probes a device of its own through the driver core,
+and overflows a stack into its guard on purpose. No
 driver runs yet. The first,
 `e1000e` (roadmap.md 2.1), measured on 2026-10-27 against 6.18.59: 11 objects
 use 148 symbols they do not define. About 15 are Linux's generic library code

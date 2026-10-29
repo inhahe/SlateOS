@@ -5493,7 +5493,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         page; Linux's own timer wheel, softirqs and tasklets, the loop their
         tick and ksoftirqd (§1581); Linux's own kthread.c and workqueues,
         over the layer's kernel_thread()/do_exit(), slab and per-CPU memory
-        (§1582). Left: PCI and MSI, IRQs, DMA, the device model,
+        (§1582); Linux's own driver core (drivers/base, kobjects, devres,
+        device links over tiny SRCU and irq_work), its sysfs and uevents
+        the layer's no-ops (§1583). Left: PCI and MSI, IRQs, DMA,
         `request_firmware`,
         which e1000e's inventory names
   - [ ] First driver: a wired network driver with a native twin (`e1000e`),

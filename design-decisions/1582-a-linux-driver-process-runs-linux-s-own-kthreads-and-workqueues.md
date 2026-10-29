@@ -52,11 +52,10 @@ thread has finished.
    and at the tick), and `loops_per_jiffy` reads what a 4 GHz CPU
    calibrates, so that the threshold is Linux's 10 ms, not the second it
    would be at the uncalibrated value.
-5. **No sysfs.** A subsystem registering with sysfs is told it cannot
-   (`subsys_virtual_register` answers `-ENODEV`): a driver process has no
-   file system for it, and turning `CONFIG_SYSFS` off needs `CONFIG_EXPERT`,
-   which under `allnoconfig` also turns off `BUG`, `BLOCK`, `EPOLL` and
-   dozens more -- a different configuration altogether.
+5. **No sysfs** -- *superseded by §1583 (2026-10-29)*, under which Linux's
+   own driver core runs and sysfs registration succeeds, showing nothing.
+   It was: a subsystem registering with sysfs is told it cannot
+   (`subsys_virtual_register` answers `-ENODEV`).
 6. **RCU callbacks run in softirq context**, as Linux's RCU runs them: one
    that would sleep ends the process as a BUG. The slab refuses what it
    cannot keep: a `SLAB_TYPESAFE_BY_RCU` cache is a stop (its objects'
@@ -92,8 +91,8 @@ thread has finished.
   Linux CPU does not wake for such a timer. Work queued now wakes a worker,
   and work behind an ordinary timer keeps the loop waiting for it, so both
   are run; a work item a worker has begun is waited for.
-- Every driver process logs the workqueues' failed sysfs registration
-  once ("subsystem initcall ... failed: -19; carrying on").
+- (Until §1583, every driver process logged the workqueues' failed sysfs
+  registration once; now it succeeds.)
 - The build renames the driver objects' sections, so a driver's own code
   must live in `.text` or `.init.text` for its initcall to count as the
   driver's (an initcall in another section would be carried past). Linux's

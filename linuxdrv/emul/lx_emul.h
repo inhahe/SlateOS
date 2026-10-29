@@ -31,6 +31,10 @@ int lx_start_kthreadd(void);
 extern u64 lx_switched_ns;
 /* lx_emul.c: the running task's run time counted up to `now_ns`. */
 void lx_emul_account(u64 now_ns);
+/* lx_sysfs.c: the objects Linux's own sysfs set-up makes; 0, or -ENOMEM. */
+int lx_sysfs_init(void);
+/* lx_emul.c: whether the initcall at `fn`, answering `ret`, ends the process. */
+bool lx_initcall_fatal(const void *fn, int ret);
 
 /* For the hello driver's tests: warnings said (lx_emul.c), and threads'
  * records not yet freed, daemons (kthreadd, idle workers) not counted

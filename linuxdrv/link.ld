@@ -42,9 +42,12 @@ SECTIONS
         *(.softirqentry.text)
     } :load
 
+    /* Bracketed as Linux's own: kfree_const() leaves alone what lies here. */
     .rodata : ALIGN(64) {
+        __start_rodata = .;
         *(.rodata .rodata.*)
         *(.init.rodata .init.rodata.*)
+        __end_rodata = .;
     } :load
 
     /* Before the writable sections: after .bss it would make .bss take

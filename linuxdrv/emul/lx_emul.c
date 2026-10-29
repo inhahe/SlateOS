@@ -27,6 +27,12 @@
 #include <linux/cache.h>
 #include <linux/workqueue.h>
 #include <linux/radix-tree.h>
+#include <linux/swiotlb.h>
+#include <linux/string.h>
+#include <asm/sections.h>
+
+/* The driver core's own setup, as Linux's driver_init() runs it. */
+#include "drivers/base/base.h"
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -73,6 +79,17 @@ const unsigned long cpu_bit_bitmap[BITS_PER_LONG + 1][BITS_TO_LONGS(NR_CPUS)] = 
 };
 
 /*
+ * The CPU as Linux's code asks after it (boot_cpu_has() and the rest): no
+ * feature that the kernel proper would have set up -- no APIC, so that
+ * irq_work runs at the loop's tick rather than from a self-interrupt it
+ * cannot send -- and Linux's cache line, 64 bytes.
+ */
+struct cpuinfo_x86 boot_cpu_data = {
+	.x86_cache_alignment = 64,
+	.x86_clflush_size = 64,
+};
+
+/*
  * What Linux's delay-loop calibration would find on a 4 GHz CPU. A driver
  * process never calibrates -- its delays are the clock's (lx_sched.c) --
  * but workqueues scale their CPU-intensive threshold by it: at Linux's
@@ -89,6 +106,16 @@ unsigned long loops_per_jiffy = 4000000000UL / HZ;
  */
 const struct kernel_param_ops param_ops_bool;
 const struct kernel_param_ops param_ops_ulong;
+
+/* No initcall's time is reported (init/main.c's initcall_debug, off). */
+bool initcall_debug;
+
+/*
+ * Where start-up has got to, as init/main.c moves it: booting until the
+ * first task can sleep and kthreadd can make threads, scheduling while the
+ * initcalls run, running once they are done (lx_emul_main).
+ */
+enum system_states system_state __read_mostly;
 
 /* Not in an interrupt, nothing disabled: what a task's count reads. */
 DEFINE_PER_CPU_CACHE_HOT(int, __preempt_count) = PREEMPT_ENABLED;
@@ -197,6 +224,22 @@ static void *lx_alloc(size_t size, gfp_t flags)
 	if (p && (flags & __GFP_ZERO))
 		memset(p, 0, size);
 	return p;
+}
+
+/*
+ * What kmalloc() really hands out for `size`, and what a block it gave
+ * holds: Linux code sizes buffers by these so as to use the whole block
+ * (devres's records, socket buffers). As Linux's, 0 for nothing, and for a
+ * pointer that is no allocation's.
+ */
+size_t kmalloc_size_roundup(size_t size)
+{
+	return size ? slx_alloc_size(size) : 0;
+}
+
+size_t ksize(const void *objp)
+{
+	return ZERO_OR_NULL_PTR(objp) ? 0 : slx_block_size(objp);
 }
 
 void *__kmalloc_noprof(size_t size, gfp_t flags)
@@ -310,13 +353,53 @@ void free_percpu(void __percpu *ptr)
 }
 
 /*
- * sysfs, which a driver process has none of: what Linux code would show
- * there has nowhere to go, and a subsystem registering with it is told so.
- * Workqueues' core initcall (wq_sysfs_init) is, and carries on without.
+ * Strings duplicated, as Linux's mm/util.c duplicates them -- written here,
+ * that file being otherwise the memory manager's (mappings, overcommit,
+ * folios), which a driver process has none of. A constant string, in the
+ * process's read-only data, is handed back itself, and never freed.
  */
-int subsys_virtual_register(const struct bus_type *subsys, const struct attribute_group **groups)
+static char *lx_kmemdup_nul(const char *s, size_t len, gfp_t gfp)
 {
-	return -ENODEV;
+	char *buf = kmalloc_track_caller(len + 1, gfp);
+
+	if (!buf)
+		return NULL;
+	memcpy(buf, s, len);
+	buf[len] = '\0';
+	return buf;
+}
+
+char *kstrdup(const char *s, gfp_t gfp)
+{
+	return s ? lx_kmemdup_nul(s, strlen(s), gfp) : NULL;
+}
+
+char *kstrndup(const char *s, size_t max, gfp_t gfp)
+{
+	return s ? lx_kmemdup_nul(s, strnlen(s, max), gfp) : NULL;
+}
+
+const char *kstrdup_const(const char *s, gfp_t gfp)
+{
+	if (is_kernel_rodata((unsigned long)s))
+		return s;
+	return kstrdup(s, gfp);
+}
+
+void kfree_const(const void *x)
+{
+	if (!is_kernel_rodata((unsigned long)x))
+		kfree(x);
+}
+
+/*
+ * A new device's bounce buffers (device_initialize()): none. Every buffer a
+ * driver hands its device lies in memory the device can reach already, so
+ * no copy through a buffer it can reach is ever needed; the device keeps no
+ * pool, and the layer's DMA mapping never consults one.
+ */
+void swiotlb_dev_init(struct device *dev)
+{
 }
 
 /* Deferred printk: every line goes straight out here, so nothing to defer. */
@@ -375,7 +458,7 @@ const struct trace_print_flags vmaflag_names[] = { { 0, NULL } };
  * The console, a line at a time: printk's level prefix (KERN_*) taken off
  * and "[lx] " put on, and a line longer than the buffer cut where it ends.
  */
-static void lx_vprint(const char *prefix, const char *fmt, va_list args)
+static int lx_vprint(const char *prefix, const char *fmt, va_list args)
 {
 	char line[512];
 	const char *text = printk_skip_level(fmt);
@@ -389,16 +472,29 @@ static void lx_vprint(const char *prefix, const char *fmt, va_list args)
 	if (len > 0 && line[len - 1] != '\n' && len < sizeof(line))
 		line[len++] = '\n';
 	slx_log(line, len);
+	return len;
 }
 
 int _printk(const char *fmt, ...)
 {
 	va_list args;
+	int len;
 
 	va_start(args, fmt);
-	lx_vprint("[lx] ", fmt, args);
+	len = lx_vprint("[lx] ", fmt, args);
 	va_end(args);
-	return 0;
+	return len;
+}
+
+/*
+ * What dev_printk() and the rest reach (drivers/base/core.c): a line already
+ * formatted with the device's driver and name. Its level and the device's
+ * details for the log's metadata (`dev_info`) the console does not keep.
+ */
+int vprintk_emit(int facility, int level, const struct dev_printk_info *dev_info,
+		 const char *fmt, va_list args)
+{
+	return lx_vprint("[lx] ", fmt, args);
 }
 
 void __warn_printk(const char *fmt, ...)
@@ -473,6 +569,19 @@ int lx_emul_init(void)
 	return SLX_EXIT_OK;
 }
 
+/*
+ * Whether an initcall, the function at `fn`, ends the process by answering
+ * `ret`: when it failed (a negative answer -- Linux's module loader takes a
+ * positive one as success) and it is the driver's own code, which the build
+ * marks (scripts/linux-tree.sh, __driver_text_start/_end). A Linux
+ * subsystem's failing is Linux's own business, which Linux carries on past.
+ */
+bool lx_initcall_fatal(const void *fn, int ret)
+{
+	return ret < 0 && (const char *)fn >= __driver_text_start &&
+	       (const char *)fn < __driver_text_end;
+}
+
 int lx_emul_main(void)
 {
 	initcall_entry_t *entry;
@@ -480,34 +589,35 @@ int lx_emul_main(void)
 	lx_main_handle = slx_task_current();
 	if (lx_start_kthreadd())
 		return SLX_EXIT_NO_MEMORY;
+	system_state = SYSTEM_SCHEDULING;
 	/* As Linux's kernel_init_freeable(): workers, once kthreadd can make them. */
 	workqueue_init();
 	workqueue_init_topology();
+	/*
+	 * As Linux's driver_init() before the initcalls: the driver core's
+	 * devices, buses and classes. Its other pieces are for what a driver
+	 * process has none of -- firmware nodes, hypervisors, CPUs, memory
+	 * blocks and NUMA nodes as devices, the platform bus.
+	 */
+	if (devices_init() || buses_init() || classes_init() || lx_sysfs_init())
+		return SLX_EXIT_NO_MEMORY;
 	for (entry = __initcall_start; entry < __initcall_end; entry++) {
 		initcall_t fn = initcall_from_entry(entry);
-		bool drivers = (char *)fn >= __driver_text_start && (char *)fn < __driver_text_end;
 		int ret = fn();
 
-		/*
-		 * By address: naming it would need the symbol table. Only a
-		 * negative return is a failure: Linux's module loader takes a
-		 * positive one as success. A Linux subsystem's failing is Linux's
-		 * own business, which Linux carries on past, as here; the
-		 * driver's ends the process.
-		 */
+		/* By address: naming it would need the symbol table. */
+		if (lx_initcall_fatal((const void *)fn, ret)) {
+			pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
+			return SLX_EXIT_INIT_FAILED;
+		}
 		if (ret > 0)
 			pr_warn("initcall at %#lx returned %d; taken as success\n",
 				(unsigned long)fn, ret);
-		if (ret >= 0)
-			continue;
-		if (!drivers) {
+		else if (ret < 0)
 			pr_warn("subsystem initcall at %#lx failed: %d; carrying on\n",
 				(unsigned long)fn, ret);
-			continue;
-		}
-		pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
-		return SLX_EXIT_INIT_FAILED;
 	}
+	system_state = SYSTEM_RUNNING;
 	return SLX_EXIT_OK;
 }
 

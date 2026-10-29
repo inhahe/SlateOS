@@ -39,6 +39,7 @@
 #include <linux/cpumask.h>
 #include <linux/rcuwait.h>
 #include <linux/rcupdate.h>
+#include <linux/rcupdate_wait.h>
 #include <linux/mm.h>
 
 /* The workqueues' own, for their workers' hooks and what a worker is doing. */
@@ -339,6 +340,31 @@ void kvfree_call_rcu(struct rcu_head *head, void *ptr)
 		slx_stop("kvfree_call_rcu (a head 4 KiB or more into its object)",
 			 __builtin_return_address(0));
 	call_rcu(head, (rcu_callback_t)offset);
+}
+
+/*
+ * What synchronize_rcu()'s kin -- synchronize_srcu() among them -- queue as
+ * their callback and wait on: the grace period has passed. As Linux's
+ * kernel/rcu/update.c has it.
+ */
+void wakeme_after_rcu(struct rcu_head *head)
+{
+	complete(&container_of(head, struct rcu_synchronize, head)->completion);
+}
+
+/*
+ * A grace period waited for, as Linux's wait_rcu_gp() waits for one: a
+ * callback queued, which the loop's next turn runs, and waited on.
+ */
+void synchronize_rcu(void)
+{
+	struct rcu_synchronize rs;
+
+	init_rcu_head_on_stack(&rs.head);
+	init_completion(&rs.completion);
+	call_rcu(&rs.head, wakeme_after_rcu);
+	wait_for_completion(&rs.completion);
+	destroy_rcu_head_on_stack(&rs.head);
 }
 
 /* Every callback queued so far run: the next turn of the loop runs them. */

@@ -34,6 +34,8 @@
 #include <linux/timer.h>
 #include <linux/sched.h>
 #include <linux/percpu.h>
+#include <linux/irq_work.h>
+#include <linux/tick.h>
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -99,6 +101,17 @@ u64 hrtimer_get_next_event(void)
 	return KTIME_MAX;
 }
 
+/*
+ * The tick never stops: every turn of the loop is one, and looks at the
+ * irq_work lists (lx_emul_turn) -- and the loop does not sleep while either
+ * holds work (lx_emul_next_event) -- so irq_work queued lazily, for the next
+ * tick, is run by it.
+ */
+bool tick_nohz_tick_stopped(void)
+{
+	return false;
+}
+
 /* An RCU quiescent state: a switch is the grace period here (lx_sched.c). */
 void rcu_qs(void)
 {
@@ -149,6 +162,16 @@ void lx_emul_turn(u64 now_ns)
 	preempt_count_add(SOFTIRQ_OFFSET);
 	lx_rcu_run();
 	preempt_count_sub(SOFTIRQ_OFFSET);
+	/*
+	 * irq_work, as Linux's tick runs it where nothing can raise it
+	 * sooner (update_process_times -> irq_work_tick): in hardirq context,
+	 * interrupts off.
+	 */
+	local_irq_disable();
+	preempt_count_add(HARDIRQ_OFFSET);
+	irq_work_tick();
+	preempt_count_sub(HARDIRQ_OFFSET);
+	local_irq_enable();
 	if (local_softirq_pending())
 		do_softirq();
 }
@@ -163,7 +186,7 @@ u64 lx_emul_next_event(u64 now_ns)
 {
 	u64 began, next;
 
-	if (local_softirq_pending() || lx_rcu_pending())
+	if (local_softirq_pending() || lx_rcu_pending() || irq_work_needs_cpu())
 		return now_ns;
 	/* The wheel reckons from when the current jiffy began, as Linux's tick. */
 	began = lx_emul_jiffy_began_ns();

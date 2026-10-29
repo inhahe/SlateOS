@@ -288,6 +288,30 @@ pub extern "C" fn slx_alloc(size: usize) -> *mut u8 {
         .map_or(core::ptr::null_mut(), |at| at as *mut u8)
 }
 
+/// `slx_alloc_size`: the bytes `slx_alloc(size)` hands out -- `size` rounded
+/// up as the heap rounds it -- or `size` itself where the heap could never
+/// hold that much, which `slx_alloc` then refuses.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_alloc_size(size: usize) -> usize {
+    // SAFETY: as in slx_alloc.
+    let heap = unsafe { HEAP.get() };
+    heap.as_ref()
+        .and_then(|h| h.order_for(size))
+        .and_then(|k| 1usize.checked_shl(k))
+        .unwrap_or(size)
+}
+
+/// `slx_block_size`: the bytes the block `slx_alloc` gave at `ptr` holds, or
+/// 0 for anything it did not give.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_block_size(ptr: *const u8) -> usize {
+    // SAFETY: as in slx_alloc.
+    let heap = unsafe { HEAP.get() };
+    heap.as_ref()
+        .and_then(|h| h.block_size(ptr as usize))
+        .unwrap_or(0)
+}
+
 /// `slx_free`: give back what `slx_alloc` gave; null is ignored, and anything
 /// else not given is refused and said.
 #[unsafe(no_mangle)]

@@ -150,6 +150,18 @@ impl Buddy {
         true
     }
 
+    /// The bytes the block [`Self::alloc`] gave at `ptr` holds -- what was
+    /// asked for, rounded up to the block's size -- or `None` for a pointer
+    /// that is not an allocated block's start.
+    #[must_use]
+    pub fn block_size(&self, ptr: usize) -> Option<usize> {
+        let meta = self.meta(ptr)?;
+        if meta == 0 || meta & FREE != 0 {
+            return None;
+        }
+        1usize.checked_shl(u32::from(meta))
+    }
+
     /// How many bytes are free, for the tests and for reporting.
     #[must_use]
     pub fn free_bytes(&self) -> usize {
@@ -308,6 +320,32 @@ mod tests {
         assert_eq!(r.buddy.free_bytes(), total);
         // Joined into the one block again: the whole region can be had.
         assert!(r.buddy.alloc(1 << 16).is_some());
+    }
+
+    #[test]
+    fn a_block_s_size_is_what_its_allocation_was_rounded_to() {
+        let mut r = region(16);
+        for size in [1, 15, 16, 17, 100, 4096, 4097, 1 << 15] {
+            let block = r.buddy.alloc(size).unwrap();
+            let want = size.max(16).next_power_of_two();
+            assert_eq!(r.buddy.block_size(block), Some(want), "size {size}");
+            assert_eq!(
+                r.buddy.order_for(size).map(|k| 1usize << k),
+                Some(want),
+                "size {size}"
+            );
+            assert!(r.buddy.free(block));
+            assert_eq!(
+                r.buddy.block_size(block),
+                None,
+                "a freed block, size {size}"
+            );
+        }
+        let a = r.buddy.alloc(64).unwrap();
+        assert_eq!(r.buddy.block_size(a + 16), None, "inside a block");
+        assert_eq!(r.buddy.block_size(a + 8), None, "off a 16-byte boundary");
+        assert_eq!(r.buddy.block_size(0), None, "outside the region");
+        assert_eq!(r.buddy.order_for((1 << 16) + 1), None, "past the region");
     }
 
     #[test]

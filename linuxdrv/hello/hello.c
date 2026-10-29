@@ -49,6 +49,7 @@
 #include <linux/preempt.h>
 #include <linux/cpuhotplug.h>
 #include <linux/workqueue.h>
+#include <linux/device.h>
 #include <asm/processor.h>
 
 #include "../emul/slx.h"
@@ -362,8 +363,8 @@ struct hello_rcu_object {
 /*
  * The driver's own initcall, at the level of Linux's core subsystems: its
  * failure ends the process as a later one's does, where a subsystem's
- * there is carried past -- the plain run carries past one, workqueues'
- * sysfs (subsys_virtual_register(), lx_emul.c).
+ * there is carried past (lx_initcall_fatal, which hello_driver_core_init
+ * asks of Linux's code and the layer's too).
  */
 static int __init hello_fails_early(void)
 {
@@ -1007,3 +1008,127 @@ static int __init hello_workqueues_init(void)
 	return 0;
 }
 late_initcall(hello_workqueues_init);
+
+/*
+ * The driver core: Linux's own drivers/base. A bus of hello's own, a driver
+ * on it and a device added to it -- matched and probed, the probe's managed
+ * resource (devm) let go when the device goes, its driver's remove() called
+ * and its release() last; a line through dev_info(); a device link made
+ * between two devices and dropped, whose release waits for an SRCU grace
+ * period (Linux's tiny SRCU, over the loop's irq_work and a workqueue)
+ * before it lets go of the two. And the initcall rule (lx_initcall_fatal):
+ * a failure ends the process only when the code is the driver's.
+ */
+static int hello_probes, hello_removes, hello_devm_releases;
+static DECLARE_COMPLETION(hello_dev_released);
+static DECLARE_COMPLETION(hello_consumer_released);
+
+static int hello_bus_match(struct device *dev, const struct device_driver *drv)
+{
+	return 1;
+}
+
+static const struct bus_type hello_bus = {
+	.name = "hello",
+	.match = hello_bus_match,
+};
+
+static void hello_devm_release(void *unused)
+{
+	hello_devm_releases++;
+}
+
+static int hello_drv_probe(struct device *dev)
+{
+	int ret = devm_add_action_or_reset(dev, hello_devm_release, NULL);
+
+	if (ret)
+		return ret;
+	hello_probes++;
+	dev_info(dev, "probed by hello's driver\n");
+	return 0;
+}
+
+static int hello_drv_remove(struct device *dev)
+{
+	hello_removes++;
+	return 0;
+}
+
+static struct device_driver hello_drv = {
+	.name = "hello",
+	.bus = &hello_bus,
+	.probe = hello_drv_probe,
+	.remove = hello_drv_remove,
+};
+
+static void hello_dev_release(struct device *dev)
+{
+	complete(&hello_dev_released);
+}
+
+static void hello_consumer_release(struct device *dev)
+{
+	complete(&hello_consumer_released);
+}
+
+static void hello_supplier_release(struct device *dev)
+{
+}
+
+static struct device hello_dev = {
+	.init_name = "hello0",
+	.bus = &hello_bus,
+	.release = hello_dev_release,
+};
+
+static struct device hello_supplier = {
+	.init_name = "hello-supplier",
+	.release = hello_supplier_release,
+};
+
+static struct device hello_consumer = {
+	.init_name = "hello-consumer",
+	.release = hello_consumer_release,
+};
+
+static int __init hello_driver_core_init(void)
+{
+	struct device_link *link;
+
+	if (slx_argc() > 1)
+		return 0;
+
+	HELLO_CHECK(lx_initcall_fatal((const void *)hello_init, -ENODEV), "a driver's failing initcall did not end the process");
+	HELLO_CHECK(!lx_initcall_fatal((const void *)kthreadd, -ENODEV), "a failure in Linux's code ended the process");
+	HELLO_CHECK(!lx_initcall_fatal((const void *)lx_emul_main, -ENODEV), "a failure in the layer's code ended the process");
+	HELLO_CHECK(!lx_initcall_fatal((const void *)hello_init, 1) && !lx_initcall_fatal((const void *)hello_init, 0),
+		    "a driver's initcall answering 0 or more ended the process");
+
+	HELLO_CHECK(bus_register(&hello_bus) == 0, "a bus was not registered");
+	HELLO_CHECK(driver_register(&hello_drv) == 0, "a driver was not registered");
+	HELLO_CHECK(device_register(&hello_dev) == 0, "a device was not registered");
+	HELLO_CHECK(hello_probes == 1 && hello_dev.driver == &hello_drv,
+		    "a device on a bus with a matching driver was not probed by it");
+	device_unregister(&hello_dev);
+	HELLO_CHECK(hello_removes == 1, "a device's driver was not told it went");
+	HELLO_CHECK(hello_devm_releases == 1, "a probe's managed resource outlived its device");
+	HELLO_CHECK(wait_for_completion_timeout(&hello_dev_released, HZ),
+		    "a device's last reference never went");
+	driver_unregister(&hello_drv);
+	bus_unregister(&hello_bus);
+
+	HELLO_CHECK(device_register(&hello_supplier) == 0 && device_register(&hello_consumer) == 0,
+		    "a device was not registered");
+	link = device_link_add(&hello_consumer, &hello_supplier, DL_FLAG_STATELESS);
+	HELLO_CHECK(link, "a device link was not made");
+	device_link_del(link);
+	device_unregister(&hello_consumer);
+	device_unregister(&hello_supplier);
+	HELLO_CHECK(wait_for_completion_timeout(&hello_consumer_released, HZ),
+		    "a dropped device link never let go of its consumer");
+
+	pr_info("hello driver core: a bus, a driver and a device, probed, managed, removed and released; a device link dropped after an SRCU grace period\n");
+	return 0;
+}
+late_initcall(hello_driver_core_init);

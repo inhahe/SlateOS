@@ -1417,7 +1417,7 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
                "no driver took: OK\n")
     e1000e = ("[linuxdrv]   e1000e process: Linux's e1000e drove the spare 82574 -- "
               "bound it, brought its link up, and had QEMU's gateway answer an ARP "
-              "request through it: OK\n")
+              "request and 400 full-size pings through it, payloads as sent: OK\n")
     ran = hello + tasks + verdict + e1000e
     # Only its first line differs from `ran`: the one check it can fail.
     garbled = (hello.replace("0xbeef", "beef") + tasks + verdict + e1000e)

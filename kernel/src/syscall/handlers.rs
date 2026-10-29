@@ -874,7 +874,7 @@ pub fn sys_pci_device_dma_alloc_at(args: &SyscallArgs) -> SyscallResult {
     device_result(r)
 }
 
-/// `SYS_PCI_DEVICE_IRQ_SETUP` — set up an open device's MSI. See
+/// `SYS_PCI_DEVICE_IRQ_SETUP` — set up an open device's MSI or MSI-X. See
 /// [`SYS_PCI_DEVICE_IRQ_SETUP`](super::number::SYS_PCI_DEVICE_IRQ_SETUP).
 pub fn sys_pci_device_irq_setup(args: &SyscallArgs) -> SyscallResult {
     let r = held_device(args.arg0).and_then(|pid| {

@@ -20,11 +20,13 @@
  *   listeners.
  * - The task (lx-nic): opens every device the driver registered and takes
  *   what it receives (an rx handler, so nothing above the device is asked).
- *   For now it does one thing, the "arp" check the boot test runs: once the
+ *   For now it does one thing, the "check" the boot test runs: once the
  *   link is up, it asks for QEMU's user-network gateway (10.0.2.2) from
- *   10.0.2.15 and waits for the answer -- a frame sent and a frame received
- *   through the driver, its interrupts and its DMA -- and ends the process
- *   with the verdict. Serving the native network stack comes next.
+ *   10.0.2.15, then pings it 400 times with 1000 bytes each, every answer's
+ *   payload checked -- frames sent and received through the driver, its
+ *   interrupts, its DMA and its receive ring's page fragments -- and ends
+ *   the process with the verdict. Serving the native network stack comes
+ *   next.
  */
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -41,6 +43,10 @@
 #include <linux/pipe_fs_i.h>
 #include <linux/stringhash.h>
 #include <linux/random.h>
+#include <linux/wait.h>
+#include <linux/ip.h>
+#include <linux/icmp.h>
+#include <net/checksum.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 
@@ -192,12 +198,21 @@ int ethtool_op_get_ts_info(struct net_device *dev, struct kernel_ethtool_ts_info
 }
 
 /*
- * The "arp" check. Our address and the gateway's are QEMU's user network's
- * defaults; its gateway answers an ARP request for its own address whoever
- * asks.
+ * The "check" the kernel's self-test runs. Our address and the gateway's
+ * are QEMU's user network's defaults; its gateway answers an ARP request
+ * for its own address, and echoes a ping to it, whoever asks.
  */
 #define LX_NIC_OURS 0x0a00020f		/* 10.0.2.15 */
 #define LX_NIC_GATEWAY 0x0a000202	/* 10.0.2.2 */
+
+/*
+ * How many pings, and how much each carries: enough full-size frames -- past
+ * e1000e's copybreak, so each is received into a buffer of its ring -- for
+ * the ring (256 buffers) to wrap onto the buffers its refills cut from page
+ * fragments, and for whole fragment pages to be used up and given back.
+ */
+#define LX_NIC_PINGS 400
+#define LX_NIC_PING_BYTES 1000
 
 struct lx_nic_arp {
 	__be16 htype, ptype;
@@ -209,11 +224,58 @@ struct lx_nic_arp {
 	__be32 tpa;
 } __packed;
 
+struct lx_nic_icmp {
+	u8 type, code;
+	__sum16 checksum;
+	__be16 id, seq;
+} __packed;
+
 static DECLARE_COMPLETION(lx_nic_answered);
 static u8 lx_nic_gateway_mac[ETH_ALEN];
 static unsigned long lx_nic_received;
+/* The ping last answered, its payload as sent or not; woken each answer. */
+static DECLARE_WAIT_QUEUE_HEAD(lx_nic_echoed);
+static int lx_nic_echo_seq = -1;
+static unsigned long lx_nic_echo_bad;
 
-/* Every frame the device receives: counted, the gateway's ARP answer noted, all consumed. */
+/* Byte `i` of ping `seq`'s payload. */
+static u8 lx_nic_payload(unsigned int seq, unsigned int i)
+{
+	return (u8)(seq * 7 + i);
+}
+
+/* An echo reply from the gateway to us: which ping it answers, its payload checked. */
+static void lx_nic_echo(struct sk_buff *skb)
+{
+	const struct iphdr *ip = (const struct iphdr *)skb->data;
+	const struct lx_nic_icmp *icmp;
+	const u8 *payload;
+	unsigned int seq, i;
+
+	if (!pskb_may_pull(skb, sizeof(*ip) + sizeof(*icmp) + LX_NIC_PING_BYTES))
+		return;
+	ip = (const struct iphdr *)skb->data;
+	if (ip->ihl != 5 || ip->protocol != IPPROTO_ICMP || ip->saddr != htonl(LX_NIC_GATEWAY) ||
+	    ip->daddr != htonl(LX_NIC_OURS))
+		return;
+	icmp = (const struct lx_nic_icmp *)(ip + 1);
+	if (icmp->type != ICMP_ECHOREPLY || icmp->id != htons(0x5157))
+		return;
+	seq = ntohs(icmp->seq);
+	payload = (const u8 *)(icmp + 1);
+	for (i = 0; i < LX_NIC_PING_BYTES; i++)
+		if (payload[i] != lx_nic_payload(seq, i)) {
+			lx_nic_echo_bad++;
+			break;
+		}
+	WRITE_ONCE(lx_nic_echo_seq, seq);
+	wake_up_all(&lx_nic_echoed);
+}
+
+/*
+ * Every frame the device receives: counted, the gateway's ARP answer and
+ * echo replies noted, all consumed.
+ */
 static rx_handler_result_t lx_nic_rx(struct sk_buff **pskb)
 {
 	struct sk_buff *skb = *pskb;
@@ -227,24 +289,40 @@ static rx_handler_result_t lx_nic_rx(struct sk_buff **pskb)
 			ether_addr_copy(lx_nic_gateway_mac, arp->sha);
 			complete(&lx_nic_answered);
 		}
+	} else if (skb->protocol == htons(ETH_P_IP)) {
+		lx_nic_echo(skb);
 	}
 	kfree_skb(skb);
 	return RX_HANDLER_CONSUMED;
 }
 
-/* An ARP request for the gateway, queued to `dev`: 0, or why not. */
-static int lx_nic_ask(struct net_device *dev)
+/* A frame of `bytes` after its Ethernet header to `dest`, of type `proto`, its body to fill. */
+static struct sk_buff *lx_nic_frame(struct net_device *dev, const u8 *dest, u16 proto,
+				    unsigned int bytes)
 {
-	struct sk_buff *skb = alloc_skb(ETH_HLEN + sizeof(struct lx_nic_arp) + ETH_ZLEN, GFP_KERNEL);
-	struct lx_nic_arp *arp;
+	struct sk_buff *skb = alloc_skb(ETH_HLEN + max_t(unsigned int, bytes, ETH_ZLEN), GFP_KERNEL);
 	struct ethhdr *eth;
 
 	if (!skb)
-		return -ENOMEM;
+		return NULL;
 	eth = skb_put(skb, ETH_HLEN);
-	eth_broadcast_addr(eth->h_dest);
+	ether_addr_copy(eth->h_dest, dest);
 	ether_addr_copy(eth->h_source, dev->dev_addr);
-	eth->h_proto = htons(ETH_P_ARP);
+	eth->h_proto = htons(proto);
+	skb_reset_mac_header(skb);
+	skb->dev = dev;
+	skb->protocol = htons(proto);
+	return skb;
+}
+
+/* An ARP request for the gateway, queued to `dev`: 0, or why not. */
+static int lx_nic_ask(struct net_device *dev)
+{
+	struct sk_buff *skb = lx_nic_frame(dev, dev->broadcast, ETH_P_ARP, sizeof(struct lx_nic_arp));
+	struct lx_nic_arp *arp;
+
+	if (!skb)
+		return -ENOMEM;
 	arp = skb_put_zero(skb, sizeof(*arp));
 	arp->htype = htons(ARPHRD_ETHER);
 	arp->ptype = htons(ETH_P_IP);
@@ -254,21 +332,55 @@ static int lx_nic_ask(struct net_device *dev)
 	ether_addr_copy(arp->sha, dev->dev_addr);
 	arp->spa = htonl(LX_NIC_OURS);
 	arp->tpa = htonl(LX_NIC_GATEWAY);
-	skb_reset_mac_header(skb);
-	skb->dev = dev;
-	skb->protocol = htons(ETH_P_ARP);
+	return dev_queue_xmit(skb);
+}
+
+/* Ping `seq` to the gateway, queued to `dev`: 0, or why not. */
+static int lx_nic_ping(struct net_device *dev, unsigned int seq)
+{
+	unsigned int len = sizeof(struct lx_nic_icmp) + LX_NIC_PING_BYTES;
+	struct sk_buff *skb = lx_nic_frame(dev, lx_nic_gateway_mac, ETH_P_IP,
+					   sizeof(struct iphdr) + len);
+	struct lx_nic_icmp *icmp;
+	struct iphdr *ip;
+	u8 *payload;
+	unsigned int i;
+
+	if (!skb)
+		return -ENOMEM;
+	ip = skb_put_zero(skb, sizeof(*ip));
+	ip->version = 4;
+	ip->ihl = 5;
+	ip->tot_len = htons(sizeof(*ip) + len);
+	ip->id = htons(seq);
+	ip->ttl = 64;
+	ip->protocol = IPPROTO_ICMP;
+	ip->saddr = htonl(LX_NIC_OURS);
+	ip->daddr = htonl(LX_NIC_GATEWAY);
+	ip->check = ip_fast_csum(ip, ip->ihl);
+	icmp = skb_put_zero(skb, sizeof(*icmp));
+	icmp->type = ICMP_ECHO;
+	icmp->id = htons(0x5157);
+	icmp->seq = htons(seq);
+	payload = skb_put(skb, LX_NIC_PING_BYTES);
+	for (i = 0; i < LX_NIC_PING_BYTES; i++)
+		payload[i] = lx_nic_payload(seq, i);
+	icmp->checksum = csum_fold(csum_partial(icmp, len, 0));
 	return dev_queue_xmit(skb);
 }
 
 /*
- * The check on `dev`, opened: the link up within 10 s, then a request a
+ * The check on `dev`, opened: the link up within 10 s; an ARP request a
  * second until the gateway answers, 10 at most -- the first may meet the
  * queue that drops everything until the link's news has been acted on
- * (link_watch). 0, or why not.
+ * (link_watch); then LX_NIC_PINGS pings, one at a time, each answered within
+ * a second -- sent again once if not -- with its payload as sent. 0, or why
+ * not.
  */
-static int lx_nic_arp_check(struct net_device *dev)
+static int lx_nic_check(struct net_device *dev)
 {
 	unsigned long deadline = jiffies + 10 * HZ;
+	unsigned int seq, resent = 0;
 	int tries, err;
 
 	while (!netif_carrier_ok(dev) && time_before(jiffies, deadline))
@@ -283,15 +395,39 @@ static int lx_nic_arp_check(struct net_device *dev)
 			netdev_err(dev, "an ARP request could not be queued: %d\n", err);
 			return err;
 		}
-		if (wait_for_completion_timeout(&lx_nic_answered, HZ)) {
-			netdev_info(dev, "%pM: the gateway (10.0.2.2) is at %pM, after %d request(s), %lu frame(s) received\n",
-				    dev->dev_addr, lx_nic_gateway_mac, tries + 1, lx_nic_received);
-			return 0;
+		if (wait_for_completion_timeout(&lx_nic_answered, HZ))
+			break;
+	}
+	if (tries == 10) {
+		netdev_err(dev, "no ARP answer from the gateway in 10 s (%lu frame(s) received)\n",
+			   lx_nic_received);
+		return -ETIMEDOUT;
+	}
+	netdev_info(dev, "%pM: the gateway (10.0.2.2) is at %pM, after %d request(s)\n",
+		    dev->dev_addr, lx_nic_gateway_mac, tries + 1);
+	for (seq = 0; seq < LX_NIC_PINGS; seq++) {
+		for (tries = 0; tries < 2; tries++) {
+			err = lx_nic_ping(dev, seq);
+			if (err < 0) {
+				netdev_err(dev, "ping %u could not be queued: %d\n", seq, err);
+				return err;
+			}
+			if (wait_event_timeout(lx_nic_echoed, READ_ONCE(lx_nic_echo_seq) == seq, HZ))
+				break;
+			resent++;
+		}
+		if (tries == 2) {
+			netdev_err(dev, "ping %u unanswered (%u answered before it)\n", seq, seq);
+			return -ETIMEDOUT;
 		}
 	}
-	netdev_err(dev, "no ARP answer from the gateway in 10 s (%lu frame(s) received)\n",
-		   lx_nic_received);
-	return -ETIMEDOUT;
+	if (lx_nic_echo_bad) {
+		netdev_err(dev, "%lu ping(s) answered with a payload other than sent\n", lx_nic_echo_bad);
+		return -EIO;
+	}
+	netdev_info(dev, "%u pings of %u bytes answered, payloads as sent (%u sent again), %lu frame(s) received\n",
+		    LX_NIC_PINGS, LX_NIC_PING_BYTES, resent, lx_nic_received);
+	return 0;
 }
 
 static bool lx_nic_mode(const char *mode)
@@ -329,9 +465,9 @@ static int lx_nic_task(void *unused)
 		pr_err("lx-nic: the driver registered no network device\n");
 		err = -ENODEV;
 	}
-	if (!err && lx_nic_mode("arp"))
-		err = lx_nic_arp_check(first);
-	if (lx_nic_mode("arp") || err)
+	if (!err && lx_nic_mode("check"))
+		err = lx_nic_check(first);
+	if (lx_nic_mode("check") || err)
 		slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
 	return 0;
 }

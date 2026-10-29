@@ -17,8 +17,8 @@
  * number is no interrupt here.
  *
  * Each turn of the loop asks the kernel which vectors of each function with
- * a handler have had interrupts since the last turn (lx_irq_poll), and runs
- * each one's handler as Linux runs a hard interrupt's: in hardirq context,
+ * its MSI or MSI-X on have had interrupts since the last turn (lx_irq_poll),
+ * and runs each one's handler as Linux runs a hard interrupt's: in hardirq context,
  * interrupts off, once however many came -- a message is an edge, which
  * Linux's own handlers read their device's cause register for. The turn's
  * softirqs run after it, as on Linux's irq_exit(). A threaded handler's
@@ -206,6 +206,13 @@ static int lx_irq_set_mode(struct lx_irq_function *fn, enum lx_irq_mode mode, un
 	long given = slx_pci_irq_setup(fn->handle, ask);
 	unsigned int v;
 
+	/*
+	 * The kernel gives at most what was asked, and what is asked is at most
+	 * LX_IRQ_VECTORS -- the records this side keeps: more would be vectors
+	 * with nowhere to go.
+	 */
+	if (WARN_ON(given > (long)ask))
+		given = -1;
 	if (given < 0) {
 		/* None to take: the kernel may have let the old set-up go. */
 		fn->mode = LX_IRQ_NONE;
@@ -225,9 +232,8 @@ static int lx_msi_enable(struct pci_dev *dev)
 
 	if (!fn)
 		return -ENODEV;
-	if (fn->mode == LX_IRQ_MSI)
-		return 0;
-	if (fn->mode == LX_IRQ_MSIX)
+	/* As Linux's: on already is a driver's bug; MSI-X on refuses MSI. */
+	if (WARN_ON_ONCE(fn->mode == LX_IRQ_MSI) || fn->mode == LX_IRQ_MSIX)
 		return -EINVAL;
 	if (!dev->msi_cap || lx_irq_set_mode(fn, LX_IRQ_MSI, 0))
 		return -ENOSPC;
@@ -269,8 +275,9 @@ static unsigned int lx_msix_table_size(struct pci_dev *dev)
 /*
  * MSI-X for between `minvec` and `maxvec` of the function's first table
  * entries, as many as the table holds and the kernel gives: how many, their
- * interrupt numbers then pci_irq_vector()'s. MSI on is -EINVAL, as Linux's;
- * fewer than `minvec` is -ENOSPC, the function left with no vectors.
+ * interrupt numbers then pci_irq_vector()'s. MSI or MSI-X on already is
+ * -EINVAL, as Linux's; fewer than `minvec` is -ENOSPC, the function left
+ * with no vectors.
  */
 static int lx_msix_enable(struct pci_dev *dev, unsigned int minvec, unsigned int maxvec)
 {
@@ -279,12 +286,10 @@ static int lx_msix_enable(struct pci_dev *dev, unsigned int minvec, unsigned int
 
 	if (!fn)
 		return -ENODEV;
-	if (fn->mode == LX_IRQ_MSI)
+	if (WARN_ON_ONCE(fn->mode == LX_IRQ_MSIX) || fn->mode == LX_IRQ_MSI)
 		return -EINVAL;
 	if (!minvec || want < minvec)
 		return -ENOSPC;
-	if (fn->mode == LX_IRQ_MSIX && fn->vectors == want)
-		return want;
 	if (lx_irq_set_mode(fn, LX_IRQ_MSIX, want))
 		return -ENOSPC;
 	if (fn->vectors < minvec) {
@@ -297,14 +302,15 @@ static int lx_msix_enable(struct pci_dev *dev, unsigned int minvec, unsigned int
 
 /*
  * The entries a driver names are its table's first, in order -- the kernel
- * programs the first ones; a driver naming others is refused out loud.
+ * programs the first ones; a driver naming others is refused out loud. With
+ * no entries named (NULL, as Linux allows), they are the first, in order.
  */
 int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries, int minvec, int maxvec)
 {
 	struct lx_irq_function *fn = lx_irq_for(dev);
 	int i, given;
 
-	for (i = 0; i < maxvec; i++)
+	for (i = 0; entries && i < maxvec; i++)
 		if (entries[i].entry != i) {
 			pci_err(dev, "MSI-X entry %u asked for at %d: only the first entries, in order, are given\n",
 				entries[i].entry, i);
@@ -313,7 +319,7 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries, int m
 	given = lx_msix_enable(dev, minvec, maxvec);
 	if (given < 0)
 		return given;
-	for (i = 0; i < given; i++)
+	for (i = 0; entries && i < given; i++)
 		entries[i].vector = lx_irq_number(&fn->vec[i]);
 	return given;
 }
@@ -564,9 +570,12 @@ static void lx_irq_run(struct lx_irq *d)
 }
 
 /*
- * A turn of the loop: each function with a handler requested asked which of
- * its vectors have had interrupts, and each of those run -- or owed, while
- * disabled -- together with the owed ones since enabled.
+ * A turn of the loop: each function with its vectors set up asked which of
+ * them have had interrupts, and each of those run -- or owed, while
+ * disabled -- together with the owed ones since enabled; those that came
+ * with no handler requested are dropped, as Linux's shut-down interrupt
+ * drops them. A function none of whose vectors has a handler is asked too,
+ * so that what came before a handler was requested is never run by it.
  */
 void lx_irq_poll(void)
 {
@@ -577,7 +586,7 @@ void lx_irq_poll(void)
 		struct lx_irq_function *fn = &lx_irq_functions[i];
 		long came;
 
-		if (!fn->dev || !lx_irq_requested(fn))
+		if (!fn->dev || fn->mode == LX_IRQ_NONE)
 			continue;
 		came = slx_pci_irq_pending(fn->handle);
 		if (came < 0)

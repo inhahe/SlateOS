@@ -22,7 +22,13 @@
 #include "slx.h"
 #include "lx_emul.h"
 
-static struct hrtimer_clock_base lx_hrtimer_bases[HRTIMER_MAX_CLOCK_BASES] = {
+/*
+ * The bases in use: Linux's own array has a soft twin of each, which these
+ * do without -- a soft timer is marked so on the timer itself (is_soft).
+ */
+#define LX_HRTIMER_BASES (HRTIMER_BASE_TAI + 1)
+
+static struct hrtimer_clock_base lx_hrtimer_bases[LX_HRTIMER_BASES] = {
 	[HRTIMER_BASE_MONOTONIC] = { .index = HRTIMER_BASE_MONOTONIC, .clockid = CLOCK_MONOTONIC },
 	[HRTIMER_BASE_REALTIME] = { .index = HRTIMER_BASE_REALTIME, .clockid = CLOCK_REALTIME },
 	[HRTIMER_BASE_BOOTTIME] = { .index = HRTIMER_BASE_BOOTTIME, .clockid = CLOCK_BOOTTIME },
@@ -33,7 +39,7 @@ static int __init lx_hrtimer_init(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++)
+	for (i = 0; i < LX_HRTIMER_BASES; i++)
 		timerqueue_init_head(&lx_hrtimer_bases[i].active);
 	return 0;
 }
@@ -187,16 +193,23 @@ static void lx_hrtimer_fire(struct hrtimer_clock_base *base, struct hrtimer *tim
 		lx_hrtimer_enqueue(timer);
 }
 
-/* Every timer due by its clock, in order of expiry: the loop's, at each turn. */
+/*
+ * Every timer due by its clock, in order of expiry: the loop's, at each turn.
+ * A base's clock is read only while it has a timer queued -- each reading is
+ * a system call, and a turn comes at every task switch.
+ */
 void lx_hrtimer_run(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
+	for (i = 0; i < LX_HRTIMER_BASES; i++) {
 		struct hrtimer_clock_base *base = &lx_hrtimer_bases[i];
-		ktime_t now = lx_hrtimer_now(base);
 		struct timerqueue_node *next;
+		ktime_t now;
 
+		if (!timerqueue_getnext(&base->active))
+			continue;
+		now = lx_hrtimer_now(base);
 		while ((next = timerqueue_getnext(&base->active)) && next->expires <= now)
 			lx_hrtimer_fire(base, container_of(next, struct hrtimer, node));
 	}
@@ -211,7 +224,7 @@ u64 lx_hrtimer_next(u64 now_ns)
 	u64 next = KTIME_MAX;
 	unsigned int i;
 
-	for (i = 0; i < HRTIMER_MAX_CLOCK_BASES; i++) {
+	for (i = 0; i < LX_HRTIMER_BASES; i++) {
 		struct hrtimer_clock_base *base = &lx_hrtimer_bases[i];
 		struct timerqueue_node *first = timerqueue_getnext(&base->active);
 		ktime_t left;

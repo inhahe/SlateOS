@@ -5508,7 +5508,8 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         Linux's network core below the sockets (§1588), binds the spare
         82574 in the boot test, brings its link up on three MSI-X vectors
         (the device handle's MSI-X, §1587) and has QEMU's gateway answer an
-        ARP request through it (`linuxdrv::self_test`). Left: the bridge to
+        ARP request and 400 full-size pings through it, payloads checked
+        (`linuxdrv::self_test`). Left: the bridge to
         the native network stack (`netring`, §65) in place of the check, and
         the overhead against the native driver measured
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide

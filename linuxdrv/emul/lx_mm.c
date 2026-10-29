@@ -170,6 +170,16 @@ void __folio_put(struct folio *folio)
 }
 
 /*
+ * A block whose count its holder has already brought to 0 ("frozen"),
+ * freed: how page fragments give back a page once its last fragment goes
+ * (mm/page_frag_cache.c).
+ */
+void free_frozen_pages(struct page *page, unsigned int order)
+{
+	lx_free_pages(page, order);
+}
+
+/*
  * vmalloc: memory contiguous where the process sees it, which kmalloc's
  * already is -- the heap is one range -- so it comes from there, a page at
  * least and page-aligned as Linux's, its pages no slab's. It is direct-map

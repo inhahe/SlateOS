@@ -109,10 +109,11 @@ of its causes to three MSI-X vectors.
 
 The first real driver, Linux's own `e1000e` (`linuxdrv/e1000e/`, roadmap.md
 2.1), binds the spare 82574 in QEMU: it registers `eth0`, brings its link up
-on three MSI-X vectors, and -- in the "arp" mode the kernel's self-test
-runs -- asks QEMU's gateway for its address and has the answer, a frame
-sent and a frame received through Linux's driver, its interrupts and its
-DMA. Its bridge to the native network stack is next.
+on three MSI-X vectors, and -- in the "check" mode the kernel's self-test
+runs -- asks QEMU's gateway for its address, then pings it 400 times with
+1000 bytes, every answer's payload as sent: frames sent and received
+through Linux's driver, its interrupts, its DMA and its receive ring's page
+fragments. Its bridge to the native network stack is next.
 
 ## Licences
 

@@ -166,7 +166,7 @@ pub fn self_test() -> KernelResult<()> {
     );
     if e1000e {
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e drove the spare 82574 -- bound it, brought its link up, and had QEMU's gateway answer an ARP request through it: OK"
+            "[linuxdrv]   e1000e process: Linux's e1000e drove the spare 82574 -- bound it, brought its link up, and had QEMU's gateway answer an ARP request and 400 full-size pings through it, payloads as sent: OK"
         );
     }
     Ok(())
@@ -243,12 +243,14 @@ fn pci_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> Kern
 }
 
 /// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
-/// given the boot test's spare 82574 as hello's PCI runs are, in its "arp"
+/// given the boot test's spare 82574 as hello's PCI runs are, in its "check"
 /// mode: it must bind the card, bring its link up, ask QEMU's user-network
-/// gateway for its address and have the answer -- a frame sent and one
-/// received through Linux's driver, its interrupts and its DMA -- then exit
-/// 0, the card released. Whether it ran: skipped, and recorded so, where
-/// the bootloader did not load it or there is no such card.
+/// gateway for its address and have the answer, then ping it 400 times with
+/// 1000 bytes and have every answer, its payload as sent -- frames sent and
+/// received through Linux's driver, its interrupts, its DMA and its receive
+/// ring's page fragments -- then exit 0, the card released. Whether it ran:
+/// skipped, and recorded so, where the bootloader did not load it or there
+/// is no such card.
 fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     let Some(elf) = crate::boot::module(E1000E) else {
         skips.record(
@@ -278,11 +280,11 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     };
     expect(
         &program,
-        &[b"e1000e", b"arp", arg.as_bytes()],
+        &[b"e1000e", b"check", arg.as_bytes()],
         &caps,
         EXIT_OK,
         "bound the card with Linux's e1000e, brought its link up, had QEMU's gateway answer \
-         an ARP request through it, and exited 0",
+         an ARP request and 400 full-size pings through it, payloads as sent, and exited 0",
         || {
             (!crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none()))
                 .then_some("the card still bound after it")

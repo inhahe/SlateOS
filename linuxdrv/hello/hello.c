@@ -289,17 +289,30 @@ static int hello_pci_msix(struct pci_dev *pdev)
 
 	HELLO_PCI_CHECK(pci_alloc_irq_vectors(pdev, 3, 3, PCI_IRQ_MSIX) == 3 && pdev->msix_enabled,
 			"no three MSI-X vectors");
-	for (v = 0; v < 3; v++) {
-		irqs[v] = pci_irq_vector(pdev, v);
-		HELLO_PCI_CHECK(irqs[v] > 0 && (!v || irqs[v] != irqs[v - 1]),
-				"MSI-X vectors without interrupts of their own");
-		HELLO_PCI_CHECK(!request_irq(irqs[v], hello_isr_msix, 0, "hello-msix", pdev),
-				"no MSI-X handler requested");
-	}
+	/* As Linux's: enabled twice is a driver's bug, refused (and warned of once). */
+	HELLO_PCI_CHECK(pci_enable_msix_range(pdev, NULL, 3, 3) == -EINVAL,
+			"MSI-X enabled while it was on already");
 	writel(~0U, hello_regs + HELLO_IMC);
 	writel(~0U, hello_regs + HELLO_ICR);
 	writel(HELLO_IVAR_ROUTES, hello_regs + HELLO_IVAR);
 	writel(HELLO_ICR_RXQ0 | HELLO_ICR_TXQ0 | HELLO_ICR_OTHER, hello_regs + HELLO_IMS);
+	for (v = 0; v < 3; v++) {
+		irqs[v] = pci_irq_vector(pdev, v);
+		HELLO_PCI_CHECK(irqs[v] > 0 && (!v || irqs[v] != irqs[v - 1]),
+				"MSI-X vectors without interrupts of their own");
+		before[v] = lx_irq_count(irqs[v]);
+	}
+	/* An interrupt that comes before any handler is requested is dropped, not the next handler's. */
+	writel(HELLO_ICR_RXQ0, hello_regs + HELLO_ICS);
+	msleep(5);
+	writel(HELLO_ICR_RXQ0, hello_regs + HELLO_ICR);
+	for (v = 0; v < 3; v++)
+		HELLO_PCI_CHECK(!request_irq(irqs[v], hello_isr_msix, 0, "hello-msix", pdev),
+				"no MSI-X handler requested");
+	msleep(5);
+	for (v = 0; v < 3; v++)
+		HELLO_PCI_CHECK(lx_irq_count(irqs[v]) == before[v],
+				"an interrupt from before its handler was requested reached it");
 	for (i = 0; i < ARRAY_SIZE(causes); i++) {
 		for (v = 0; v < 3; v++)
 			before[v] = lx_irq_count(irqs[v]);
@@ -311,8 +324,10 @@ static int hello_pci_msix(struct pci_dev *pdev)
 		/*
 		 * Its own vector, at least once -- QEMU's model throttles each
 		 * MSI-X vector, and sends it once more when its throttle timer
-		 * ends -- and no other.
+		 * ends (128 us), which is waited out here, before the next
+		 * cause -- and no other.
 		 */
+		msleep(2);
 		for (v = 0; v < 3; v++)
 			if ((lx_irq_count(irqs[v]) != before[v]) != (v == causes[i].vector)) {
 				dev_err(&pdev->dev, "cause %#x: vectors ran %lu, %lu, %lu times, not vector %u alone\n",
@@ -329,6 +344,10 @@ static int hello_pci_msix(struct pci_dev *pdev)
 	pci_free_irq_vectors(pdev);
 	HELLO_PCI_CHECK(!pdev->msix_enabled && pci_irq_vector(pdev, 1) == -EINVAL,
 			"MSI-X stayed on once its vectors were freed");
+	/* No entries named, as Linux allows: its first ones, in order. */
+	HELLO_PCI_CHECK(pci_enable_msix_range(pdev, NULL, 3, 3) == 3 && pdev->msix_enabled,
+			"MSI-X with no entries named was refused");
+	pci_disable_msix(pdev);
 	return 0;
 }
 
@@ -629,6 +648,12 @@ static int __init hello_init(void)
 	if (!off || irqs_disabled()) {
 		kfree(answer);
 		return -EFAULT;
+	}
+	/* The wall clock is the system's: some time after 2020 began, not the epoch. */
+	if (ktime_get_real_seconds() < 1577836800) {
+		pr_err("hello: the wall clock reads %lld s after 1970\n", ktime_get_real_seconds());
+		kfree(answer);
+		return -ERANGE;
 	}
 	pr_info("hello from Linux's own headers: %d, %s, %#x\n", *answer, "formatted by vsprintf", 0xbeef);
 	kfree(answer);

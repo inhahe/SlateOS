@@ -268,23 +268,14 @@ pub fn release_delivery(vector: u8, owner: u64) {
 /// when `owner` no longer has it.
 #[must_use]
 pub fn take(vector: u8, owner: u64) -> Option<u64> {
-    let _serial = DELIVERY.lock();
-    let index = pool_index(vector)?;
-    if OWNER.get(index)?.load(Ordering::SeqCst) != owner {
-        return None;
-    }
-    Some(PENDING.get(index)?.swap(0, Ordering::SeqCst))
+    take_group(vector, 1, owner)
 }
 
 /// The interrupts counted on `vector` for `owner`, left where they are: what
 /// a readiness test reads. `None` when `owner` no longer has it.
 #[must_use]
 pub fn pending(vector: u8, owner: u64) -> Option<u64> {
-    let index = pool_index(vector)?;
-    if OWNER.get(index)?.load(Ordering::SeqCst) != owner {
-        return None;
-    }
-    Some(PENDING.get(index)?.load(Ordering::SeqCst))
+    pending_group(vector, 1, owner)
 }
 
 /// Register `task` as waiting for `vector`, owned by `owner`, beside any
@@ -319,7 +310,7 @@ pub fn claim_group(first: u8, count: usize, owner: u64) -> bool {
         #[allow(clippy::cast_possible_truncation)] // `base + count` is in the pool.
         if !claim_delivery(first.wrapping_add(i as u8), owner) {
             for j in 0..i {
-                #[allow(clippy::cast_possible_truncation)]
+                #[allow(clippy::cast_possible_truncation)] // `j < i < count`, in the pool.
                 release_delivery(first.wrapping_add(j as u8), owner);
             }
             return false;
@@ -347,7 +338,7 @@ pub fn release_group(first: u8, count: usize, owner: u64) {
         }
     }
     for i in 0..count {
-        #[allow(clippy::cast_possible_truncation)]
+        #[allow(clippy::cast_possible_truncation)] // a group lies in the pool: `i` fits a u8.
         release_delivery(first.wrapping_add(i as u8), owner);
     }
 }
@@ -553,6 +544,70 @@ pub fn self_test_delivery() -> crate::error::KernelResult<()> {
     serial_println!(
         "[msi]   delivery: OK (vector {}: nothing from before its claim, counted once)",
         vector
+    );
+    self_test_group()
+}
+
+/// A group of three vectors ([`claim_group`]), as a device's MSI-X has: an
+/// interrupt on the third counted for it alone ([`take_mask`] bit 2) and
+/// routed to the first's waiters ([`wake_index`]), then nothing; and once
+/// released, each vector its own again and the group no one's. Sent as
+/// self-IPIs, so it needs no device.
+fn self_test_group() -> crate::error::KernelResult<()> {
+    use crate::error::KernelError;
+    const OWNER_TAG: u64 = 0x6_0007;
+    let Some(first) = alloc_vectors(3) else {
+        serial_println!("[msi]   FAIL: groups: no three vectors free together");
+        return Err(KernelError::InternalError);
+    };
+    let base = pool_index(first).unwrap_or(0);
+    if !claim_group(first, 3, OWNER_TAG) {
+        free_vectors(first, 3);
+        serial_println!(
+            "[msi]   FAIL: groups: vectors {}.. could not be claimed",
+            first
+        );
+        return Err(KernelError::InternalError);
+    }
+    let routed = (0..3).all(|i| wake_index(base.saturating_add(i)) == base);
+    // SAFETY: a self-IPI on a pool vector, whose IDT stub only counts it;
+    // the APIC is up (interrupts are on).
+    unsafe { crate::apic::send_self_ipi(first.wrapping_add(2)) };
+    let mut mask = 0;
+    let _arrived = wait_briefly(|| {
+        mask |= take_mask(first, 3, OWNER_TAG).unwrap_or(0);
+        mask != 0
+    });
+    let after = take_mask(first, 3, OWNER_TAG);
+    let stranger = take_mask(first, 3, OWNER_TAG ^ 1);
+    release_group(first, 3, OWNER_TAG);
+    let own_again = (0..3).all(|i| wake_index(base.saturating_add(i)) == base.saturating_add(i));
+    let released = take_mask(first, 3, OWNER_TAG);
+    free_vectors(first, 3);
+    if !routed
+        || mask != 0b100
+        || after != Some(0)
+        || stranger.is_some()
+        || !own_again
+        || released.is_some()
+    {
+        serial_println!(
+            "[msi]   FAIL: groups: vectors {}..: routed to the first {}, the third's interrupt \
+             as {:#b} then {:?}, a stranger took {:?}, each its own again {}, after release {:?}",
+            first,
+            routed,
+            mask,
+            after,
+            stranger,
+            own_again,
+            released
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[msi]   groups: OK (vectors {}..{}: the third's interrupt its own bit, woken through the first)",
+        first,
+        first.wrapping_add(2)
     );
     Ok(())
 }

@@ -13,6 +13,8 @@
 //! boot test's spare 82574, serving the card to the netstack daemon
 //! (design-decisions 1589).
 
+use netipc::nicport::check;
+
 use crate::cap::{ResourceType, Rights};
 use crate::error::{KernelError, KernelResult};
 use crate::proc::{pcb, spawn};
@@ -300,25 +302,15 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
 
 /// The service the boot test's card is served as: `serve=spare`.
 const SERVICE: &[u8] = b"nic.spare";
-/// What the netstack daemon's `nic-check` exits with when the card's
-/// driver closed its connection without attaching it -- as the driver must,
-/// to a daemon without the card's key.
-const NIC_TURNED_AWAY: i32 = 15;
 
-/// What the netstack daemon's `nic-check` exits with (`services/netstack`):
-/// what failed.
-fn nic_check_failure(code: i32) -> &'static str {
-    match code {
-        0 => "it passed",
-        10 => "it could not attach to the card",
-        11 => "the kernel let it pass on a region it was never granted",
-        12 => "it took no address by DHCP",
-        13 => "the gateway did not answer its ARP requests",
-        14 => {
-            "its pings went wrong: unanswered, answered otherwise or twice, sent again too often, or waited for with no doorbell"
-        }
-        NIC_TURNED_AWAY => "the card's driver turned it away",
-        _ => "it ended otherwise",
+/// How a run of the netstack daemon's `nic-check` went, for a FAIL line:
+/// what its exit code says (`netipc::nicport::check`), or that it did not
+/// end, or could not be started.
+fn nic_check_outcome(run: &KernelResult<Option<i32>>) -> &'static str {
+    match run {
+        Ok(Some(code)) => check::failure(*code),
+        Ok(None) => "it did not end within its limit",
+        Err(_) => "it could not be started",
     }
 }
 
@@ -328,9 +320,10 @@ fn nic_check_failure(code: i32) -> &'static str {
 /// alone, the card at `a`, `pci` its argument naming it -- in its
 /// "serve=spare once" mode, and beside it the netstack daemon in its
 /// "nic-check nic.spare" mode -- first without the card's key, when the
-/// driver must close its connection unattached (it exits
-/// [`NIC_TURNED_AWAY`]), then holding it, when it must attach to the
-/// card, be refused passing on a region it was never granted, take an
+/// driver must close the daemon's connection before attaching it, the
+/// daemon then exiting [`check::TURNED_AWAY`]; then holding it, when it
+/// must attach to the card, be refused passing on a region it was never
+/// granted, take an
 /// address by DHCP from QEMU's network through it, resolve the gateway by
 /// ARP, have 400 full-size pings answered 16 at a time and 8 more sent to an
 /// idle driver, payloads as sent, and exit 0; the driver then ends, the
@@ -357,27 +350,24 @@ fn e1000e_serve(
         limit_s: 90,
     };
     // The daemon run first without the card's key, then with it.
-    let check = |key: &[(ResourceType, u64, Rights)]| {
+    let run_daemon = |key: &[(ResourceType, u64, Rights)]| {
         let daemon = start(&stack, &[b"netstack", b"nic-check", SERVICE], key);
         daemon.map(|d| finish(&stack, &d))
     };
-    let keyless = check(&[]);
-    if keyless != Ok(Some(NIC_TURNED_AWAY)) {
+    let keyless = run_daemon(&[]);
+    if keyless != Ok(Some(check::TURNED_AWAY)) {
         serial_println!(
             "[linuxdrv]   FAIL: the netstack daemon without the card's key ended {:?} ({}): it should have been turned away, exit {}",
             keyless,
-            match &keyless {
-                Ok(Some(code)) => nic_check_failure(*code),
-                _ => "it did not run to its end",
-            },
-            NIC_TURNED_AWAY
+            nic_check_outcome(&keyless),
+            check::TURNED_AWAY
         );
         // The driver waits for a stack that will not come, or served the
         // wrong one: no use waiting out its limit.
         spawn::teardown_fixture(driver.pid, driver.task_id);
         return Err(KernelError::InternalError);
     }
-    let checked = match check(&[(ResourceType::Service, service, Rights::READ)]) {
+    let checked = match run_daemon(&[(ResourceType::Service, service, Rights::READ)]) {
         Ok(checked) => checked,
         Err(e) => {
             serial_println!(
@@ -391,14 +381,14 @@ fn e1000e_serve(
     let served = finish(program, &driver);
     let warned = served == Some(EXIT_WARNED);
     let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
-    if checked == Some(EXIT_OK) && served == Some(EXIT_OK) && released {
+    if checked == Some(check::OK) && served == Some(EXIT_OK) && released {
         return Ok(());
     }
     serial_println!(
         "[linuxdrv]   FAIL: the e1000e process serving the card to the network stack ended {:?}, the netstack daemon checking it {:?} ({}) (an exit code, or None for not within {} s / {} s){}",
         served,
         checked,
-        checked.map_or("it did not end", nic_check_failure),
+        nic_check_outcome(&Ok(checked)),
         program.limit_s,
         stack.limit_s,
         if released {

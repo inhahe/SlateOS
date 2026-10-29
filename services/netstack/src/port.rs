@@ -18,7 +18,7 @@
 //! Single-threaded daemon: the card is a `static mut` no borrow of which
 //! outlives a call here, as [`super::loopback`]'s state is.
 
-use netipc::nicport::{DOORBELL, Port, SLOT_SIZE};
+use netipc::nicport::{ATTACH_LEN, DOORBELL, Port, SLOT_SIZE};
 use netipc::ring::{ERR_INVALID, ERR_MSG_SIZE, OP_RECV, OP_SEND, Sqe};
 use netring::Ring;
 
@@ -29,6 +29,8 @@ use super::{
 
 const SYS_CHANNEL_TRY_RECV: u64 = 203;
 const SYS_SHM_SIZE: u64 = 231;
+const SYS_SHM_CLOSE: u64 = 232;
+const SYS_SHM_UNMAP: u64 = 234;
 const SYS_SERVICE_CONNECT: u64 = 281;
 const SYS_SHM_GRANT: u64 = 1190;
 /// SlateOS's `NotFound` (no such service yet) and `ChannelClosed` (the
@@ -83,18 +85,29 @@ fn card() -> Option<&'static mut Card> {
 pub struct AttachError {
     /// What went wrong, for the log.
     pub why: &'static str,
-    /// The failed system call's answer, or 0 where none failed.
-    pub answer: i64,
-    /// The driver closed the connection before attaching it: it turns away
-    /// a process without the card's key.
+    /// The kernel's answer to the system call that failed, if one did.
+    pub answer: Option<i64>,
+    /// The driver closed the connection before attaching it -- as it does
+    /// to a process without the card's key, and also when it could not make
+    /// the ring, or died.
     pub turned_away: bool,
 }
 
 impl AttachError {
-    fn new(why: &'static str, answer: i64) -> Self {
+    /// `why`, a system call having answered `answer`.
+    fn call(why: &'static str, answer: i64) -> Self {
         Self {
             why,
-            answer,
+            answer: Some(answer),
+            turned_away: false,
+        }
+    }
+
+    /// `why`, no system call having failed.
+    fn plain(why: &'static str) -> Self {
+        Self {
+            why,
+            answer: None,
             turned_away: false,
         }
     }
@@ -115,7 +128,7 @@ pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, AttachError> {
             break channel;
         }
         if got != NOT_FOUND || now_ns() >= deadline {
-            return Err(AttachError::new(
+            return Err(AttachError::call(
                 "could not connect to the card's service",
                 got,
             ));
@@ -142,9 +155,12 @@ pub fn attach(service: &[u8], within_ns: u64) -> Result<Port, AttachError> {
 }
 
 /// The driver's attach message on `channel`, before `deadline`, and the
-/// ring it names mapped and attached.
+/// ring it names mapped and attached. On every way out but that, the
+/// daemon's reference to the region it names (its grant's) is given back,
+/// and the region unmapped if it was mapped.
 fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
-    let mut message = [0u8; 64];
+    // One byte more than the message, so that a longer one is told apart.
+    let mut message = [0u8; ATTACH_LEN + 1];
     let wait = deadline.saturating_sub(now_ns()).max(1);
     let got = syscall4(
         SYS_CHANNEL_RECV_TIMEOUT,
@@ -156,48 +172,66 @@ fn ring_for(channel: u64, deadline: u64) -> Result<Card, AttachError> {
     if got == CHANNEL_CLOSED {
         return Err(AttachError {
             why: "the card's driver closed the connection without attaching it",
-            answer: got,
+            answer: Some(got),
             turned_away: true,
         });
     }
     let Ok(len) = usize::try_from(got) else {
-        return Err(AttachError::new(
+        return Err(AttachError::call(
             "no attach message from the card's driver",
             got,
         ));
     };
-    let port = Port::decode(message.get(..len).unwrap_or(&[]))
-        .ok_or_else(|| AttachError::new("a malformed attach message", 0))?;
-    if port.slots < 2 || port.slots as usize > MAX_SLOTS {
-        return Err(AttachError::new(
-            "an attach message with a slot count the daemon cannot use",
-            0,
+    if len > ATTACH_LEN {
+        return Err(AttachError::plain(
+            "an attach message longer than the protocol's",
         ));
     }
-    let mapped = syscall2(SYS_SHM_MAP, port.region, SHM_MAP_RW);
-    let Ok(at) = u64::try_from(mapped) else {
-        return Err(AttachError::new(
-            "the card's ring could not be mapped",
-            mapped,
-        ));
+    let port = Port::decode(message.get(..len).unwrap_or(&[]))
+        .ok_or_else(|| AttachError::plain("a malformed attach message"))?;
+    let give_back = |e: AttachError| {
+        // A region never granted is no handle of the daemon's: the close
+        // fails, and there is nothing to give back.
+        syscall1(SYS_SHM_CLOSE, port.region);
+        e
     };
+    if port.slots < 2 || port.slots as usize > MAX_SLOTS {
+        return Err(give_back(AttachError::plain(
+            "an attach message with a slot count the daemon cannot use",
+        )));
+    }
     let sized = syscall1(SYS_SHM_SIZE, port.region);
     let Ok(size) = usize::try_from(sized) else {
-        return Err(AttachError::new(
+        return Err(give_back(AttachError::call(
             "the card's ring's size could not be asked for",
             sized,
-        ));
+        )));
     };
-    // SAFETY: the region is mapped at `at`, `size` bytes, page-aligned, for
-    // the rest of the daemon's life (it is never unmapped).
-    let ring = unsafe { Ring::attach(at as *mut u8, size) }
-        .ok_or_else(|| AttachError::new("the card's ring is malformed", 0))?;
+    let mapped = syscall2(SYS_SHM_MAP, port.region, SHM_MAP_RW);
+    let Ok(at) = u64::try_from(mapped) else {
+        return Err(give_back(AttachError::call(
+            "the card's ring could not be mapped",
+            mapped,
+        )));
+    };
+    let unmap_and_give_back = |e: AttachError| {
+        syscall2(SYS_SHM_UNMAP, at, size as u64);
+        give_back(e)
+    };
+    // SAFETY: the region is mapped at `at`, `size` bytes, page-aligned: on
+    // success for the rest of the daemon's life; otherwise unmapped below,
+    // after which the ring -- a view of the mapping, with nothing to drop --
+    // is never used.
+    let Some(ring) = (unsafe { Ring::attach(at as *mut u8, size) }) else {
+        return Err(unmap_and_give_back(AttachError::plain(
+            "the card's ring is malformed",
+        )));
+    };
     let need = (port.slots as usize).saturating_mul(SLOT_SIZE as usize);
     if ring.sq_entries() < port.slots || ring.cq_entries() < port.slots || ring.data_len() < need {
-        return Err(AttachError::new(
+        return Err(unmap_and_give_back(AttachError::plain(
             "the card's ring is smaller than its attach message says",
-            0,
-        ));
+        )));
     }
     let rx = port.slots / 2;
     let mut free = [0u32; MAX_SLOTS];

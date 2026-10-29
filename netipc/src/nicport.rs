@@ -116,6 +116,40 @@ impl Port {
     }
 }
 
+/// What the netstack daemon's `nic-check` -- the boot test's check of a card
+/// served this way, which the kernel's self-test runs and reads -- exits
+/// with: what failed, [`check::OK`] for nothing.
+pub mod check {
+    pub const OK: i32 = 0;
+    /// It could not attach to the card.
+    pub const NO_CARD: i32 = 10;
+    /// The kernel let it pass on a region it was never granted.
+    pub const GRANT: i32 = 11;
+    pub const NO_ADDRESS: i32 = 12;
+    pub const NO_GATEWAY: i32 = 13;
+    pub const PINGS_LOST: i32 = 14;
+    /// The card's driver closed the connection before attaching it -- as
+    /// it does to a process without the card's key.
+    pub const TURNED_AWAY: i32 = 15;
+
+    /// What exit `code` says went wrong.
+    #[must_use]
+    pub fn failure(code: i32) -> &'static str {
+        match code {
+            OK => "it passed",
+            NO_CARD => "it could not attach to the card",
+            GRANT => "the kernel let it pass on a region it was never granted",
+            NO_ADDRESS => "it took no address by DHCP",
+            NO_GATEWAY => "the gateway did not answer its ARP requests",
+            PINGS_LOST => {
+                "its pings went wrong: unanswered, answered otherwise or twice, sent again too often, or waited for with no doorbell"
+            }
+            TURNED_AWAY => "the card's driver closed the connection before attaching it",
+            _ => "it ended otherwise",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +180,27 @@ mod tests {
             assert_eq!(Port::decode(&bad), None, "byte {at} = {value}");
         }
         assert_eq!(Port::decode(&b[..ATTACH_LEN - 1]), None);
+    }
+
+    #[test]
+    fn every_check_exit_says_its_own_failure() {
+        use check::*;
+        let codes = [
+            OK,
+            NO_CARD,
+            GRANT,
+            NO_ADDRESS,
+            NO_GATEWAY,
+            PINGS_LOST,
+            TURNED_AWAY,
+        ];
+        let said: Vec<_> = codes.iter().map(|&c| failure(c)).collect();
+        for (i, a) in said.iter().enumerate() {
+            assert_ne!(*a, failure(-1), "exit {} is described", codes[i]);
+            for b in &said[i + 1..] {
+                assert_ne!(a, b, "two exits described alike");
+            }
+        }
     }
 
     #[test]

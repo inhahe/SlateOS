@@ -5597,16 +5597,22 @@ const NIC_BURST: usize = 16;
 /// The echo identifier `nic-check`'s pings carry.
 const NIC_PING_ID: u16 = 0x5158;
 
-/// What `nic-check` exits with: what failed.
-const NIC_OK: i64 = 0;
-const NIC_NO_CARD: i64 = 10;
-const NIC_GRANT: i64 = 11;
-const NIC_NO_ADDRESS: i64 = 12;
-const NIC_NO_GATEWAY: i64 = 13;
-const NIC_PINGS_LOST: i64 = 14;
-/// The card's driver closed the connection without attaching it, as it
-/// does to a process without the card's key.
-const NIC_TURNED_AWAY: i64 = 15;
+/// What `nic-check` exits with: what failed (`netipc::nicport::check`,
+/// which the kernel's self-test reads).
+const NIC_OK: i64 = nic_exit(check::OK);
+const NIC_NO_CARD: i64 = nic_exit(check::NO_CARD);
+const NIC_GRANT: i64 = nic_exit(check::GRANT);
+const NIC_NO_ADDRESS: i64 = nic_exit(check::NO_ADDRESS);
+const NIC_NO_GATEWAY: i64 = nic_exit(check::NO_GATEWAY);
+const NIC_PINGS_LOST: i64 = nic_exit(check::PINGS_LOST);
+const NIC_TURNED_AWAY: i64 = nic_exit(check::TURNED_AWAY);
+
+/// An exit code as `exit` takes it.
+const fn nic_exit(code: i32) -> i64 {
+    code as i64
+}
+
+use netipc::nicport::check;
 /// SlateOS's `PermissionDenied`.
 const PERMISSION_DENIED: i64 = -400;
 
@@ -5635,9 +5641,10 @@ fn nic_check(service: &[u8]) -> i64 {
             line.put(b"[netstack] nic-check: FAIL: ")
                 .put(e.why.as_bytes())
                 .put(b" (");
-            if e.answer < 0 {
-                line.put(b"the kernel answered -")
-                    .dec(e.answer.unsigned_abs())
+            if let Some(answer) = e.answer {
+                line.put(b"the kernel answered ")
+                    .put(if answer < 0 { b"-" } else { b"" })
+                    .dec(answer.unsigned_abs())
                     .put(b", ");
             }
             line.put(b"after ")

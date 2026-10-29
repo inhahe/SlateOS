@@ -80,7 +80,10 @@ sha=$(pin_field sha256) || die "$pin: needs exactly one 'sha256' line"
 tarball="linux-$version.tar.xz"
 url="https://cdn.kernel.org/pub/linux/kernel/v${version%%.*}.x/$tarball"
 src="$root/linux-$version"
-obj="$root/obj-$version"
+# One build directory per configuration as well as per release: a worktree
+# that has not yet merged a change to linux.config goes on building against
+# its own, rather than re-preparing a directory every worktree shares.
+obj="$root/obj-$version-$(sha256sum <"$config" | cut -c1-12)"
 
 # The LLVM tools Linux's build uses: unversioned names on PATH, or else the
 # newest /usr/lib/llvm-N/bin (Ubuntu installs `clang` unversioned but the
@@ -110,11 +113,13 @@ write_readme() {
     cat >"$root/README.txt" <<EOF
 What: the Linux source tree SlateOS's driver layer compiles against
 (design-decisions 1578), the tarball it came from (dl/), and Linux's build
-output (obj-*/: the prepared configuration and generated headers).
+output (obj-<release>-<configuration hash>/: the prepared configuration,
+generated headers and objects, one per linuxdrv/linux.config).
 Made by: scripts/linux-tree.sh in the SlateOS repository, from the release
 pinned in linuxdrv/linux.pin ($version on $(date -u +%Y-%m-%d)).
 When it can go: any time -- the script fetches and prepares it again. Older
-linux-*/ and obj-*/ directories than the pinned release are no longer used.
+linux-*/ and obj-*/ directories than the pinned release are no longer used,
+nor an obj-*/ for a configuration no worktree has any more.
 EOF
 }
 

@@ -1436,6 +1436,7 @@ def _death_harness(cmdline, serial_text):
             handle.write(
                 "set -uo pipefail\n"
                 f"KERNEL_CMDLINE={_sq(cmdline)}\n"
+                + _shell_assignment("KERNEL_DEATH_RE") + "\n"
                 + extract_shell_function("keep_going_boot") + "\n\n"
                 + extract_shell_function("kernel_is_dead") + "\n\n"
                 + "if kernel_is_dead serial.txt; then echo DEAD; else echo ALIVE; fi\n")

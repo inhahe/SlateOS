@@ -85,7 +85,11 @@ bool lx_irq_ready(struct pci_dev *dev);
  * genetlink runs a doit, its replies queued on `replies` -- the handler's
  * answer, the request still the caller's; a multicast group, by its name,
  * listened to (0, or -ENOENT for no such group); and the next message sent
- * to it, waiting up to `timeout` jiffies (NULL for none by then).
+ * to it, waiting up to `timeout` jiffies (NULL for none by then). The next
+ * message sent to the layer's port that answers none of its requests -- a
+ * management frame it registered for, a frame's transmit status -- the
+ * same way; and whether anything is kept for it, a group's or its port's,
+ * waiting up to `timeout` jiffies for something to be.
  */
 struct genl_family;
 struct sk_buff;
@@ -97,6 +101,8 @@ int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
 int lx_genl_listen(const struct genl_family *family, const char *name);
 struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name,
 			      unsigned long timeout);
+struct sk_buff *lx_genl_unicast(unsigned long timeout);
+bool lx_genl_wait(unsigned long timeout);
 
 /*
  * Hardirq context, as Linux enters it for an interrupt -- interrupts off,

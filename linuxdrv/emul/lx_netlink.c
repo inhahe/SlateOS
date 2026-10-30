@@ -17,10 +17,12 @@
  *   the command's policy, the family's pre_doit and post_doit around its
  *   handler, as genetlink runs one. Its replies come back to the layer.
  * - A message multicast to a group the layer listens to is kept for it
- *   (lx_genl_listen(), lx_genl_event()); to any other group, or to any
- *   other socket, it is freed, answered as Linux answers a send no one
- *   receives. The routing netlink's notifications (rtnl_notify and the
- *   rest) go to no one.
+ *   (lx_genl_listen(), lx_genl_event()); so is one sent to the layer's own
+ *   port that answers none of its requests -- a management frame it
+ *   registered for, a frame's transmit status (lx_genl_unicast()). To any
+ *   other group, or to any other socket, a message is freed, answered as
+ *   Linux answers a send no one receives. The routing netlink's
+ *   notifications (rtnl_notify and the rest) go to no one.
  *
  * The layer's are nl80211's ABI, the interface wpa_supplicant and iwd
  * drive Linux's WiFi through, which stays put from one release to the next
@@ -227,6 +229,48 @@ static struct lx_genl_listen {
 } lx_genl_listens[LX_GENL_LISTENS];
 static DECLARE_WAIT_QUEUE_HEAD(lx_genl_events);
 
+/*
+ * Messages sent to the layer's port that answer none of its requests --
+ * nl80211 unicasts the management frames a port registered for to it, and
+ * their transmit statuses -- kept, in the order sent, until taken
+ * (lx_genl_unicast()). At most LX_GENL_UNSOLICITED_MAX: past that, refused
+ * as a socket whose receive queue is full refuses one.
+ */
+#define LX_GENL_UNSOLICITED_MAX 64
+static struct sk_buff_head lx_genl_unsolicited;
+
+static int __init lx_genl_init(void)
+{
+	skb_queue_head_init(&lx_genl_unsolicited);
+	return 0;
+}
+pure_initcall(lx_genl_init);
+
+struct sk_buff *lx_genl_unicast(unsigned long timeout)
+{
+	wait_event_timeout(lx_genl_events, !skb_queue_empty(&lx_genl_unsolicited), timeout);
+	return skb_dequeue(&lx_genl_unsolicited);
+}
+
+/* Whether anything is kept for the layer: a group's message, or its port's. */
+static bool lx_genl_pending(void)
+{
+	int i;
+
+	if (!skb_queue_empty(&lx_genl_unsolicited))
+		return true;
+	for (i = 0; i < LX_GENL_LISTENS; i++)
+		if (lx_genl_listens[i].group && !skb_queue_empty(&lx_genl_listens[i].queue))
+			return true;
+	return false;
+}
+
+bool lx_genl_wait(unsigned long timeout)
+{
+	wait_event_timeout(lx_genl_events, lx_genl_pending(), timeout);
+	return lx_genl_pending();
+}
+
 /* Where group `group`'s messages are kept, or NULL when no one listens. */
 static struct lx_genl_listen *lx_genl_listener(unsigned int group)
 {
@@ -358,19 +402,33 @@ int netlink_broadcast_filtered(struct sock *ssk, struct sk_buff *skb, __u32 port
 }
 
 /*
- * Sent to one socket: the layer's own, while a request of its runs, which
- * Linux answers with the bytes sent; else there is none, -ECONNREFUSED.
+ * Sent to one socket. To the layer's own: a reply to the request of its
+ * that runs -- the request's sequence number -- queued with its replies;
+ * anything else kept for it (lx_genl_unicast()), or refused, -ENOBUFS, when
+ * LX_GENL_UNSOLICITED_MAX are. Linux answers a delivery with the bytes
+ * sent. There is no other socket: -ECONNREFUSED.
  */
 int netlink_unicast(struct sock *ssk, struct sk_buff *skb, __u32 portid, int nonblock)
 {
 	unsigned int len = skb->len;
 
-	if (portid == LX_GENL_PORTID && lx_genl_replies) {
+	if (portid != LX_GENL_PORTID) {
+		kfree_skb(skb);
+		return -ECONNREFUSED;
+	}
+	if (lx_genl_replies && nlmsg_hdr(skb)->nlmsg_seq == lx_genl_seq) {
 		skb_queue_tail(lx_genl_replies, skb);
 		return len;
 	}
-	kfree_skb(skb);
-	return -ECONNREFUSED;
+	if (skb_queue_len(&lx_genl_unsolicited) >= LX_GENL_UNSOLICITED_MAX) {
+		pr_info_ratelimited("lx-genl: a message to the layer's port refused: %d kept already\n",
+				    LX_GENL_UNSOLICITED_MAX);
+		kfree_skb(skb);
+		return -ENOBUFS;
+	}
+	skb_queue_tail(&lx_genl_unsolicited, skb);
+	wake_up(&lx_genl_events);
+	return len;
 }
 
 /* Told when a netlink socket is released: none ever is. */

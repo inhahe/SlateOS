@@ -252,6 +252,12 @@ time64_t ktime_get_real_seconds(void)
 	return div_u64(slx_real_ns(), NSEC_PER_SEC);
 }
 
+/* The monotonic clock's whole seconds (mac80211 times a station's connection by them). */
+time64_t ktime_get_seconds(void)
+{
+	return div_u64(slx_now_ns(), NSEC_PER_SEC);
+}
+
 /* When the running task was switched to, by the monotonic clock. */
 u64 lx_switched_ns;
 

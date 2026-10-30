@@ -40,7 +40,10 @@ linux net/ethtool/common.o
 linux drivers/net/loopback.o
 linux kernel/nscommon.o
 linux kernel/nstree.o
-# What drivers and the core count, hash and time with.
+# What drivers and the core count, hash and time with -- and the once-only
+# helpers (DO_ONCE) the flow dissector makes its hash key with, at the
+# first frame hashed (mac80211 hashes each it sends to pick its queue).
+linux lib/once.o
 linux kernel/time/timecounter.o
 linux lib/crc/crc32-main.o
 linux lib/crc/x86/crc32-pclmul.o

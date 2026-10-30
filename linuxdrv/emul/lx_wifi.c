@@ -15,10 +15,13 @@
  * - "hwsim": mac80211_hwsim's two simulated radios on one medium -- the
  *   first made an open access point (NL80211_CMD_SET_INTERFACE to AP, then
  *   NL80211_CMD_START_AP, beaconing LX_WIFI_SSID on LX_WIFI_FREQ), the
- *   second scanning as above -- and the process ends 0 only if the scan
- *   found that network, from the first radio's address, on that frequency.
- *   The whole of the stack and the layer's use of it, where there is no
- *   card (the boot test).
+ *   second scanning as above, which must find that network, from the first
+ *   radio's address, on that frequency. Then the second joins it
+ *   (NL80211_CMD_CONNECT), the layer answering its authentication and
+ *   association on the first as hostapd would (lx_wifi_join), and a frame
+ *   crosses the network each way (lx_wifi_cross); the process ends 0 only
+ *   if every step did. The whole of the stack and the layer's use of it,
+ *   where there is no card (the boot test).
  * - Neither, and given no card: the process ends once its initcalls are
  *   done. Given a card, the task does nothing.
  *
@@ -29,6 +32,7 @@
  * And what of the kernel's key management cfg80211 asks for: a keyring
  * that trusts nothing (below).
  */
+#include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/etherdevice.h>
 #include <linux/ieee80211.h>
@@ -96,6 +100,16 @@ void key_put(struct key *key)
 #define LX_WIFI_CHANNEL 1
 
 /*
+ * How long the second radio has to join it, and a frame to cross it; the
+ * association id the access point gives its one station; what the frames
+ * carry.
+ */
+#define LX_WIFI_JOIN_S 20
+#define LX_WIFI_FRAME_MS 2000
+#define LX_WIFI_AID 1
+#define LX_WIFI_PAYLOAD "slateos-hwsim: a frame across the network"
+
+/*
  * The first `n` wireless interfaces, in the order mac80211 made them, once
  * there are that many -- waiting up to LX_WIFI_REGISTER_MS for the driver to
  * register its radios -- each held (dev_hold), so that one unregistered
@@ -151,18 +165,20 @@ static int lx_wifi_open(struct net_device *dev)
 
 /*
  * nl80211's command `cmd` for `dev`'s interface, with `fill` (when not NULL)
- * adding its other attributes to the request: the handler's answer, said
- * when it is an error. The replies are not wanted.
+ * adding its other attributes to the request, given `arg`: the handler's
+ * answer, said -- as what `dev` would not `what` -- when it is an error.
+ * The replies are not wanted.
  */
 static int lx_wifi_ask(const struct genl_family *nl80211, u8 cmd, struct net_device *dev,
-		       int (*fill)(struct sk_buff *req, struct net_device *dev), const char *what)
+		       int (*fill)(struct sk_buff *req, struct net_device *dev, const void *arg),
+		       const void *arg, const char *what)
 {
 	struct sk_buff *req = lx_genl_request(nl80211, cmd);
 	struct sk_buff_head replies;
 	int err;
 
 	if (!req || nla_put_u32(req, NL80211_ATTR_IFINDEX, dev->ifindex) ||
-	    (fill && fill(req, dev))) {
+	    (fill && fill(req, dev, arg))) {
 		nlmsg_free(req);
 		return -ENOMEM;
 	}
@@ -175,6 +191,29 @@ static int lx_wifi_ask(const struct genl_family *nl80211, u8 cmd, struct net_dev
 	return err;
 }
 
+/* The nl80211 command a message nl80211 sent carries. */
+static u8 lx_wifi_cmd(struct sk_buff *msg)
+{
+	return ((struct genlmsghdr *)nlmsg_data(nlmsg_hdr(msg)))->cmd;
+}
+
+/* A message's attribute `type` (nl80211 has no header of its own); NULL for none. */
+static const struct nlattr *lx_wifi_attr(struct sk_buff *msg, int type)
+{
+	return nlmsg_find_attr(nlmsg_hdr(msg), GENL_HDRLEN, type);
+}
+
+/*
+ * The jiffies left until `until`, read once -- a tick between a test and a
+ * subtraction would wrap it -- and 0 once it has passed.
+ */
+static unsigned long lx_wifi_left(unsigned long until)
+{
+	long left = (long)(until - jiffies);
+
+	return left > 0 ? left : 0;
+}
+
 /*
  * The next message nl80211's "scan" group sends that ends a scan: the
  * results in, or the scan aborted -- the command it carries; 0 for none in
@@ -185,17 +224,16 @@ static u8 lx_wifi_scan_end(const struct genl_family *nl80211)
 	unsigned long until = jiffies + LX_WIFI_SCAN_S * HZ;
 
 	for (;;) {
-		/* What is left, read once: a tick between a test and a subtraction would wrap it. */
-		long left = (long)(until - jiffies);
+		unsigned long left = lx_wifi_left(until);
 		struct sk_buff *msg;
 		u8 cmd;
 
-		if (left <= 0)
+		if (!left)
 			break;
 		msg = lx_genl_event(nl80211, NL80211_MULTICAST_GROUP_SCAN, left);
 		if (!msg)
 			break;
-		cmd = ((struct genlmsghdr *)nlmsg_data(nlmsg_hdr(msg)))->cmd;
+		cmd = lx_wifi_cmd(msg);
 		nlmsg_free(msg);
 		if (cmd == NL80211_CMD_NEW_SCAN_RESULTS || cmd == NL80211_CMD_SCAN_ABORTED)
 			return cmd;
@@ -220,7 +258,7 @@ static int lx_wifi_scan_on(const struct genl_family *nl80211, struct net_device 
 	u8 end;
 
 	if (!err)
-		err = lx_wifi_ask(nl80211, NL80211_CMD_TRIGGER_SCAN, dev, NULL, "scan");
+		err = lx_wifi_ask(nl80211, NL80211_CMD_TRIGGER_SCAN, dev, NULL, NULL, "scan");
 	if (err)
 		return err;
 	end = lx_wifi_scan_end(nl80211);
@@ -286,24 +324,25 @@ static int lx_wifi_scan(void)
 }
 
 /* The access point's interface made one (NL80211_CMD_SET_INTERFACE). */
-static int lx_wifi_ap_type(struct sk_buff *req, struct net_device *dev)
+static int lx_wifi_ap_type(struct sk_buff *req, struct net_device *dev, const void *unused)
 {
 	return nla_put_u32(req, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_AP);
 }
+
+/* The rates the access point offers, as an element: 1, 2, 5.5 and 11 Mb/s, all basic. */
+static const u8 lx_wifi_rates[] = { WLAN_EID_SUPP_RATES, 4, 0x82, 0x84, 0x8b, 0x96 };
 
 /*
  * NL80211_CMD_START_AP's attributes: an open network named LX_WIFI_SSID on
  * LX_WIFI_FREQ, without HT, beaconing every 100 TU. The beacon's head is
  * the frame up to its first element and the elements cfg80211 wants there
- * -- the SSID and the rates, 1, 2, 5.5 and 11 Mb/s, all basic -- its tail
- * the channel.
+ * -- the SSID and the rates -- its tail the channel.
  */
-static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev)
+static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev, const void *unused)
 {
-	static const u8 rates[] = { WLAN_EID_SUPP_RATES, 4, 0x82, 0x84, 0x8b, 0x96 };
 	const u8 tail[] = { WLAN_EID_DS_PARAMS, 1, LX_WIFI_CHANNEL };
 	const size_t ssid_len = strlen(LX_WIFI_SSID);
-	u8 head[sizeof(struct ieee80211_hdr_3addr) + 12 + 2 + 32 + sizeof(rates)];
+	u8 head[sizeof(struct ieee80211_hdr_3addr) + 12 + 2 + 32 + sizeof(lx_wifi_rates)];
 	struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)head;
 	u8 *ie = mgmt->u.beacon.variable;
 
@@ -318,8 +357,8 @@ static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev)
 	*ie++ = ssid_len;
 	memcpy(ie, LX_WIFI_SSID, ssid_len);
 	ie += ssid_len;
-	memcpy(ie, rates, sizeof(rates));
-	ie += sizeof(rates);
+	memcpy(ie, lx_wifi_rates, sizeof(lx_wifi_rates));
+	ie += sizeof(lx_wifi_rates);
 	return nla_put(req, NL80211_ATTR_BEACON_HEAD, ie - head, head) ||
 	       nla_put(req, NL80211_ATTR_BEACON_TAIL, sizeof(tail), tail) ||
 	       nla_put_u32(req, NL80211_ATTR_BEACON_INTERVAL, 100) ||
@@ -331,6 +370,368 @@ static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev)
 	       nla_put_u32(req, NL80211_ATTR_WIPHY_CHANNEL_TYPE, NL80211_CHAN_NO_HT);
 }
 
+/*
+ * The access point's side of a join, as hostapd keeps it for an open
+ * network: its interface, the one station it is taking, how far that has
+ * got, and the first error met answering it.
+ */
+struct lx_wifi_ap {
+	const struct genl_family *nl80211;
+	struct net_device *dev;
+	u8 sta[ETH_ALEN];
+	bool authenticated;
+	bool associated;
+	int err;
+};
+
+/* A management frame for the access point to receive (NL80211_CMD_REGISTER_FRAME), by its type. */
+static int lx_wifi_frame_type(struct sk_buff *req, struct net_device *dev, const void *type)
+{
+	/* Every frame of the type: an empty match. */
+	static const u8 any[1];
+
+	return nla_put_u16(req, NL80211_ATTR_FRAME_TYPE, *(const u16 *)type) ||
+	       nla_put(req, NL80211_ATTR_FRAME_MATCH, 0, any);
+}
+
+/* The frame `len` bytes at `frame` to be sent (NL80211_CMD_FRAME). */
+struct lx_wifi_tx {
+	const void *frame;
+	size_t len;
+};
+
+static int lx_wifi_frame(struct sk_buff *req, struct net_device *dev, const void *arg)
+{
+	const struct lx_wifi_tx *tx = arg;
+
+	return nla_put(req, NL80211_ATTR_FRAME, tx->len, tx->frame);
+}
+
+/* A management frame of subtype `stype` from the access point to its station, its fixed fields left 0. */
+static void lx_wifi_ap_header(const struct lx_wifi_ap *ap, struct ieee80211_mgmt *m, u16 stype)
+{
+	m->frame_control = cpu_to_le16(IEEE80211_FTYPE_MGMT | stype);
+	ether_addr_copy(m->da, ap->sta);
+	ether_addr_copy(m->sa, ap->dev->dev_addr);
+	ether_addr_copy(m->bssid, ap->dev->dev_addr);
+}
+
+/*
+ * An open system authentication's request, answered: the second frame of
+ * its two, success. The station it came from is the one the access point
+ * takes; another's, while it takes one, is not answered.
+ */
+static int lx_wifi_ap_auth(struct lx_wifi_ap *ap, const struct ieee80211_mgmt *req, size_t len)
+{
+	u8 buf[offsetof(struct ieee80211_mgmt, u.auth.variable)] = {};
+	struct ieee80211_mgmt *resp = (struct ieee80211_mgmt *)buf;
+	const struct lx_wifi_tx tx = { buf, sizeof(buf) };
+
+	if (len < sizeof(buf) || le16_to_cpu(req->u.auth.auth_alg) != WLAN_AUTH_OPEN ||
+	    le16_to_cpu(req->u.auth.auth_transaction) != 1) {
+		netdev_err(ap->dev, "an authentication that is not an open system's first frame, from %pM\n",
+			   req->sa);
+		return -EPROTO;
+	}
+	if (ap->authenticated && !ether_addr_equal(req->sa, ap->sta))
+		return 0;
+	ether_addr_copy(ap->sta, req->sa);
+	lx_wifi_ap_header(ap, resp, IEEE80211_STYPE_AUTH);
+	resp->u.auth.auth_alg = cpu_to_le16(WLAN_AUTH_OPEN);
+	resp->u.auth.auth_transaction = cpu_to_le16(2);
+	resp->u.auth.status_code = cpu_to_le16(WLAN_STATUS_SUCCESS);
+	ap->authenticated = true;
+	return lx_wifi_ask(ap->nl80211, NL80211_CMD_FRAME, ap->dev, lx_wifi_frame, &tx,
+			   "answer an authentication");
+}
+
+/* The station an association asks for, as NL80211_CMD_NEW_STATION adds it. */
+struct lx_wifi_new_sta {
+	const u8 *addr;
+	const u8 *rates;
+	u8 n_rates;
+	u16 listen_interval;
+	u16 capability;
+};
+
+static int lx_wifi_new_sta(struct sk_buff *req, struct net_device *dev, const void *arg)
+{
+	const struct lx_wifi_new_sta *sta = arg;
+
+	return nla_put(req, NL80211_ATTR_MAC, ETH_ALEN, sta->addr) ||
+	       nla_put(req, NL80211_ATTR_STA_SUPPORTED_RATES, sta->n_rates, sta->rates) ||
+	       nla_put_u16(req, NL80211_ATTR_STA_LISTEN_INTERVAL, sta->listen_interval) ||
+	       nla_put_u16(req, NL80211_ATTR_STA_AID, LX_WIFI_AID) ||
+	       nla_put_u16(req, NL80211_ATTR_STA_CAPABILITY, sta->capability);
+}
+
+/* The station at `addr`, named (NL80211_CMD_GET_STATION). */
+static int lx_wifi_mac(struct sk_buff *req, struct net_device *dev, const void *addr)
+{
+	return nla_put(req, NL80211_ATTR_MAC, ETH_ALEN, addr);
+}
+
+/* The station at `addr` let through the access point's port (NL80211_CMD_SET_STATION). */
+static int lx_wifi_authorize(struct sk_buff *req, struct net_device *dev, const void *addr)
+{
+	const struct nl80211_sta_flag_update flags = {
+		.mask = BIT(NL80211_STA_FLAG_AUTHORIZED),
+		.set = BIT(NL80211_STA_FLAG_AUTHORIZED),
+	};
+
+	return lx_wifi_mac(req, dev, addr) ||
+	       nla_put(req, NL80211_ATTR_STA_FLAGS2, sizeof(flags), &flags);
+}
+
+/*
+ * An association's request, from the station authenticated, answered as
+ * hostapd answers one on an open network: the station added with the rates
+ * it asked for (NL80211_CMD_NEW_STATION), the response sent -- success, its
+ * association id, the access point's rates -- and the station let through
+ * the port, there being no 802.1X to wait for.
+ */
+static int lx_wifi_ap_assoc(struct lx_wifi_ap *ap, const struct ieee80211_mgmt *req, size_t len)
+{
+	const size_t fixed = offsetof(struct ieee80211_mgmt, u.assoc_req.variable);
+	u8 buf[offsetof(struct ieee80211_mgmt, u.assoc_resp.variable) + sizeof(lx_wifi_rates)] = {};
+	struct ieee80211_mgmt *resp = (struct ieee80211_mgmt *)buf;
+	const struct lx_wifi_tx tx = { buf, sizeof(buf) };
+	const size_t ssid_len = strlen(LX_WIFI_SSID);
+	struct lx_wifi_new_sta sta;
+	const u8 *ssid, *rates;
+	int err;
+
+	if (!ap->authenticated || !ether_addr_equal(req->sa, ap->sta) || len < fixed) {
+		netdev_err(ap->dev, "an association asked by %pM, not by the station authenticated\n",
+			   req->sa);
+		return -EPROTO;
+	}
+	ssid = cfg80211_find_ie(WLAN_EID_SSID, req->u.assoc_req.variable, len - fixed);
+	rates = cfg80211_find_ie(WLAN_EID_SUPP_RATES, req->u.assoc_req.variable, len - fixed);
+	if (!ssid || ssid[1] != ssid_len || memcmp(ssid + 2, LX_WIFI_SSID, ssid_len) || !rates ||
+	    !rates[1]) {
+		netdev_err(ap->dev, "an association from %pM without this network's name, or without rates\n",
+			   req->sa);
+		return -EPROTO;
+	}
+	sta = (struct lx_wifi_new_sta){
+		.addr = ap->sta,
+		.rates = rates + 2,
+		.n_rates = rates[1],
+		.listen_interval = le16_to_cpu(req->u.assoc_req.listen_interval),
+		.capability = le16_to_cpu(req->u.assoc_req.capab_info),
+	};
+	err = lx_wifi_ask(ap->nl80211, NL80211_CMD_NEW_STATION, ap->dev, lx_wifi_new_sta, &sta,
+			  "add the station associating");
+	if (err)
+		return err;
+	lx_wifi_ap_header(ap, resp, IEEE80211_STYPE_ASSOC_RESP);
+	resp->u.assoc_resp.capab_info = cpu_to_le16(WLAN_CAPABILITY_ESS);
+	resp->u.assoc_resp.status_code = cpu_to_le16(WLAN_STATUS_SUCCESS);
+	/* The two top bits set, as every association id is sent. */
+	resp->u.assoc_resp.aid = cpu_to_le16(LX_WIFI_AID | BIT(14) | BIT(15));
+	memcpy(resp->u.assoc_resp.variable, lx_wifi_rates, sizeof(lx_wifi_rates));
+	err = lx_wifi_ask(ap->nl80211, NL80211_CMD_FRAME, ap->dev, lx_wifi_frame, &tx,
+			  "answer an association");
+	if (!err)
+		err = lx_wifi_ask(ap->nl80211, NL80211_CMD_SET_STATION, ap->dev, lx_wifi_authorize,
+				  ap->sta, "let the station through");
+	if (!err)
+		ap->associated = true;
+	return err;
+}
+
+/*
+ * A message sent to the layer's port, as the access point's hostapd: a
+ * registered frame for its interface answered, anything else -- the
+ * statuses of the frames it sent -- passed over. The first error is kept.
+ */
+static void lx_wifi_ap_message(struct lx_wifi_ap *ap, struct sk_buff *msg)
+{
+	const struct nlattr *ifindex = lx_wifi_attr(msg, NL80211_ATTR_IFINDEX);
+	const struct nlattr *frame = lx_wifi_attr(msg, NL80211_ATTR_FRAME);
+	const struct ieee80211_mgmt *m;
+	size_t len;
+	int err;
+
+	if (lx_wifi_cmd(msg) != NL80211_CMD_FRAME || !ifindex || !frame ||
+	    nla_get_u32(ifindex) != (u32)ap->dev->ifindex || ap->err)
+		return;
+	m = nla_data(frame);
+	len = nla_len(frame);
+	/* Each answer checks its own fixed fields: here, the header they all have. */
+	if (len < offsetof(struct ieee80211_mgmt, u))
+		err = -EPROTO;
+	else if (ieee80211_is_auth(m->frame_control))
+		err = lx_wifi_ap_auth(ap, m, len);
+	else if (ieee80211_is_assoc_req(m->frame_control))
+		err = lx_wifi_ap_assoc(ap, m, len);
+	else
+		err = 0;
+	ap->err = err;
+}
+
+/* What the station connecting asks (NL80211_CMD_CONNECT): the open network the scan found. */
+static int lx_wifi_connect_params(struct sk_buff *req, struct net_device *dev, const void *bssid)
+{
+	return nla_put(req, NL80211_ATTR_SSID, strlen(LX_WIFI_SSID), LX_WIFI_SSID) ||
+	       nla_put(req, NL80211_ATTR_MAC, ETH_ALEN, bssid) ||
+	       nla_put_u32(req, NL80211_ATTR_WIPHY_FREQ, LX_WIFI_FREQ) ||
+	       nla_put_u32(req, NL80211_ATTR_AUTH_TYPE, NL80211_AUTHTYPE_OPEN_SYSTEM);
+}
+
+/*
+ * A message nl80211's "mlme" group sent: for a connection's end on `dev`
+ * (NL80211_CMD_CONNECT), its status code -- WLAN_STATUS_SUCCESS for joined
+ * -- else -1. One that timed out carries no code: WLAN_STATUS_UNSPECIFIED_FAILURE.
+ */
+static int lx_wifi_connect_status(struct sk_buff *msg, struct net_device *dev)
+{
+	const struct nlattr *ifindex = lx_wifi_attr(msg, NL80211_ATTR_IFINDEX);
+	const struct nlattr *status = lx_wifi_attr(msg, NL80211_ATTR_STATUS_CODE);
+
+	if (lx_wifi_cmd(msg) != NL80211_CMD_CONNECT || !ifindex ||
+	    nla_get_u32(ifindex) != (u32)dev->ifindex)
+		return -1;
+	return status ? nla_get_u16(status) : WLAN_STATUS_UNSPECIFIED_FAILURE;
+}
+
+/*
+ * The station `sta` joining the open network the access point `ap` runs:
+ * `ap` registered for authentications and associations, `sta` told to
+ * connect, and the frames `ap` is sent answered -- as hostapd answers them
+ * -- until nl80211 says how `sta`'s connection ended, within LX_WIFI_JOIN_S.
+ * 0 once `sta` is connected, its carrier on, and `ap` has it as a station;
+ * else why not, said.
+ */
+static int lx_wifi_join(const struct genl_family *nl80211, struct net_device *ap_dev,
+			struct net_device *sta_dev)
+{
+	static const u16 auth = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_AUTH;
+	static const u16 assoc = IEEE80211_FTYPE_MGMT | IEEE80211_STYPE_ASSOC_REQ;
+	struct lx_wifi_ap ap = { .nl80211 = nl80211, .dev = ap_dev };
+	unsigned long until = jiffies + LX_WIFI_JOIN_S * HZ;
+	int status = -1;
+	int err;
+
+	err = lx_genl_listen(nl80211, NL80211_MULTICAST_GROUP_MLME);
+	if (!err)
+		err = lx_wifi_ask(nl80211, NL80211_CMD_REGISTER_FRAME, ap_dev, lx_wifi_frame_type, &auth,
+				  "take authentications");
+	if (!err)
+		err = lx_wifi_ask(nl80211, NL80211_CMD_REGISTER_FRAME, ap_dev, lx_wifi_frame_type, &assoc,
+				  "take associations");
+	if (!err)
+		err = lx_wifi_ask(nl80211, NL80211_CMD_CONNECT, sta_dev, lx_wifi_connect_params,
+				  ap_dev->dev_addr, "connect");
+	while (!err && status < 0) {
+		struct sk_buff *msg;
+
+		if (!lx_genl_wait(lx_wifi_left(until))) {
+			netdev_err(sta_dev, "did not join \"%s\" in %d s (the access point %s it)\n",
+				   LX_WIFI_SSID, LX_WIFI_JOIN_S,
+				   ap.associated ? "associated" : ap.authenticated ? "authenticated" :
+										    "never heard from");
+			return -ETIMEDOUT;
+		}
+		while ((msg = lx_genl_unicast(0))) {
+			lx_wifi_ap_message(&ap, msg);
+			nlmsg_free(msg);
+		}
+		err = ap.err;
+		while ((msg = lx_genl_event(nl80211, NL80211_MULTICAST_GROUP_MLME, 0))) {
+			if (status < 0)
+				status = lx_wifi_connect_status(msg, sta_dev);
+			nlmsg_free(msg);
+		}
+	}
+	if (err)
+		return err;
+	if (status != WLAN_STATUS_SUCCESS || !ap.associated) {
+		netdev_err(sta_dev, "joining \"%s\" ended with status %d, the access point %s\n",
+			   LX_WIFI_SSID, status,
+			   ap.associated ? "having associated it" : "not having associated it");
+		return -ECONNREFUSED;
+	}
+	if (!netif_carrier_ok(sta_dev)) {
+		netdev_err(sta_dev, "joined \"%s\", but its carrier is off\n", LX_WIFI_SSID);
+		return -ENOLINK;
+	}
+	/* The access point has it as a station: nl80211 answers for it, -ENOENT were it not. */
+	err = lx_wifi_ask(nl80211, NL80211_CMD_GET_STATION, ap_dev, lx_wifi_mac, sta_dev->dev_addr,
+			  "say what it has of the station");
+	if (!err)
+		netdev_info(sta_dev, "joined \"%s\", %pM, as station %pM\n", LX_WIFI_SSID,
+			    ap_dev->dev_addr, sta_dev->dev_addr);
+	return err;
+}
+
+/*
+ * A frame crossing the network: `from` sending LX_WIFI_PAYLOAD to `to`,
+ * under the local experimental ethertype, and `to` receiving it -- from
+ * `from`'s address, the payload whole -- within LX_WIFI_FRAME_MS.
+ */
+struct lx_wifi_crossing {
+	struct packet_type type;
+	struct net_device *from;
+	struct completion arrived;
+};
+
+static int lx_wifi_rx(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt,
+		      struct net_device *orig_dev)
+{
+	struct lx_wifi_crossing *c = container_of(pt, struct lx_wifi_crossing, type);
+	const size_t len = strlen(LX_WIFI_PAYLOAD);
+
+	if (skb->len >= len && !memcmp(skb->data, LX_WIFI_PAYLOAD, len) &&
+	    ether_addr_equal(eth_hdr(skb)->h_source, c->from->dev_addr))
+		complete(&c->arrived);
+	kfree_skb(skb);
+	return NET_RX_SUCCESS;
+}
+
+static int lx_wifi_cross(struct net_device *from, struct net_device *to)
+{
+	struct lx_wifi_crossing c = {
+		.type = { .type = htons(ETH_P_802_EX1), .dev = to, .func = lx_wifi_rx },
+		.from = from,
+	};
+	const size_t len = strlen(LX_WIFI_PAYLOAD);
+	struct sk_buff *skb;
+	int err;
+
+	init_completion(&c.arrived);
+	skb = alloc_skb(LL_RESERVED_SPACE(from) + len + from->needed_tailroom, GFP_KERNEL);
+	if (!skb)
+		return -ENOMEM;
+	skb_reserve(skb, LL_RESERVED_SPACE(from));
+	skb_reset_network_header(skb);
+	skb_put_data(skb, LX_WIFI_PAYLOAD, len);
+	skb->dev = from;
+	skb->protocol = htons(ETH_P_802_EX1);
+	if (dev_hard_header(skb, from, ETH_P_802_EX1, to->dev_addr, from->dev_addr, len) < 0) {
+		kfree_skb(skb);
+		return -EINVAL;
+	}
+	dev_add_pack(&c.type);
+	/*
+	 * A drop is a positive code (NET_XMIT_DROP); congestion is no failure.
+	 * Sent once, then judged: net_xmit_eval() is a macro that reads its
+	 * argument twice, so the send in it would be made twice -- the second
+	 * time of a buffer the first had already consumed.
+	 */
+	err = dev_queue_xmit(skb);
+	err = net_xmit_eval(err);
+	if (err > 0)
+		err = -ENOBUFS;
+	if (!err && !wait_for_completion_timeout(&c.arrived, msecs_to_jiffies(LX_WIFI_FRAME_MS)))
+		err = -ETIMEDOUT;
+	dev_remove_pack(&c.type);
+	if (err)
+		netdev_err(from, "a frame to %pM did not cross the network: %d\n", to->dev_addr, err);
+	return err;
+}
+
 static int lx_wifi_hwsim(void)
 {
 	const struct genl_family *nl80211 = lx_wifi_nl80211();
@@ -340,12 +741,12 @@ static int lx_wifi_hwsim(void)
 
 	if (!nl80211 || !lx_wifi_devs(devs, 2))
 		return -ENODEV;
-	err = lx_wifi_ask(nl80211, NL80211_CMD_SET_INTERFACE, devs[0], lx_wifi_ap_type,
+	err = lx_wifi_ask(nl80211, NL80211_CMD_SET_INTERFACE, devs[0], lx_wifi_ap_type, NULL,
 			  "make the first radio an access point");
 	if (!err)
 		err = lx_wifi_open(devs[0]);
 	if (!err)
-		err = lx_wifi_ask(nl80211, NL80211_CMD_START_AP, devs[0], lx_wifi_ap_params,
+		err = lx_wifi_ask(nl80211, NL80211_CMD_START_AP, devs[0], lx_wifi_ap_params, NULL,
 				  "start the access point");
 	if (!err)
 		err = lx_wifi_open(devs[1]);
@@ -362,6 +763,14 @@ static int lx_wifi_hwsim(void)
 			       LX_WIFI_SSID, devs[0]->dev_addr, LX_WIFI_FREQ);
 		err = found.wanted ? 0 : -ENOENT;
 	}
+	if (!err)
+		err = lx_wifi_join(nl80211, devs[0], devs[1]);
+	if (!err)
+		err = lx_wifi_cross(devs[1], devs[0]);
+	if (!err)
+		err = lx_wifi_cross(devs[0], devs[1]);
+	if (!err)
+		pr_info("lx-wifi: hwsim: a frame crossed \"%s\" each way\n", LX_WIFI_SSID);
 	lx_wifi_put(devs, 2);
 	return err;
 }

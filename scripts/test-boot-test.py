@@ -1595,7 +1595,9 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
                "exited 0: OK\n")
     hwsim = ("[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on "
              "one medium -- the first made an open access point through nl80211, the "
-             "second's scan finding it, its name, address and frequency as beaconed: OK\n")
+             "second's scan finding it, its name, address and frequency as beaconed, and "
+             "joining it, the layer answering its authentication and association as "
+             "hostapd would, and a frame crossing the network each way: OK\n")
     ran = hello + tasks + verdict + e1000e + mt7925e + hwsim
     # Only its first line differs from `ran`: the one check it can fail.
     garbled = (hello.replace("0xbeef", "beef") + tasks + verdict + e1000e + mt7925e + hwsim)

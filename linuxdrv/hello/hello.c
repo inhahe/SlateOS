@@ -1450,17 +1450,26 @@ static enum hrtimer_restart hello_hrtimer_fn(struct hrtimer *timer)
 }
 
 /*
- * High-resolution timers (lx_hrtimer.c): ktime_add_safe() at its edges, as
- * Linux's -- a sum, an overflow and a negative operand each saturated to
- * the furthest time -- and a relative timer firing.
+ * High-resolution timers (lx_hrtimer.c) and the clock they run by: the
+ * monotonic clock's whole seconds (lx_emul.c) read between two readings of
+ * it; ktime_add_safe() at its edges, as Linux's -- a sum, an overflow, a
+ * negative sum and one below either operand each saturated to the furthest
+ * time -- and a relative timer firing.
  */
 static int __init hello_hrtimer_init(void)
 {
 	const ktime_t furthest = ktime_set(KTIME_SEC_MAX, 0);
 	struct hrtimer timer;
+	ktime_t before, after;
+	time64_t seconds;
 
 	if (hello_any_mode())
 		return 0;
+	before = ktime_get();
+	seconds = ktime_get_seconds();
+	after = ktime_get();
+	HELLO_CHECK(seconds >= before / NSEC_PER_SEC && seconds <= after / NSEC_PER_SEC,
+		    "ktime_get_seconds() was not the monotonic clock's whole seconds");
 	HELLO_CHECK(ktime_add_safe(2, 3) == 5, "ktime_add_safe(2, 3) was not 5");
 	HELLO_CHECK(ktime_add_safe(KTIME_MAX, 1) == furthest,
 		    "an overflowing sum was not the furthest time");
@@ -1474,7 +1483,7 @@ static int __init hello_hrtimer_init(void)
 	hrtimer_start(&timer, ms_to_ktime(2), HRTIMER_MODE_REL);
 	HELLO_CHECK(wait_for_completion_timeout(&hello_hrtimer_done, HZ),
 		    "a relative high-resolution timer never fired");
-	pr_info("hello hrtimers: ktime_add_safe saturating as Linux's, a relative timer fired\n");
+	pr_info("hello hrtimers: the clock's seconds, ktime_add_safe saturating as Linux's, a relative timer fired\n");
 	return 0;
 }
 late_initcall(hello_hrtimer_init);

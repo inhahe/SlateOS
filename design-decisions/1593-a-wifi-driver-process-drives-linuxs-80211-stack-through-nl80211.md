@@ -9,7 +9,9 @@ network", "use this key". On Linux, programs tell cfg80211 those things
 through a message protocol called nl80211, the one wpa_supplicant and iwd
 use. The driver process has no message sockets, so the layer stands where
 those programs would and speaks nl80211 to cfg80211 directly in the process.
-The first use is a scan; joining a network and its keys will go the same way.
+The first use is a scan; the second, joining a network -- on simulated
+radios, where the layer also plays the access point's own program
+(hostapd), answering the radio that asks to join. Keys will go the same way.
 
 ### The decision
 
@@ -21,14 +23,27 @@ The first use is a scan; joining a network and its keys will go the same way.
    `post_doit`. Replies come back to the layer. A message multicast to a
    group the layer listens to is queued for it; any other message, and the
    routing netlink's notifications, are freed as a send no one receives.
-   Permission flags (`GENL_ADMIN_PERM`) are not checked: the process's
-   rights are the capabilities the kernel gave it.
+   So is a message to the layer's own port that answers none of its
+   requests -- nl80211 sends a management frame the layer registered for
+   that way, to the port that registered -- except that it is queued for
+   the layer (`lx_genl_unicast`), up to 64, a reply told from it by the
+   request's sequence number. Permission flags (`GENL_ADMIN_PERM`) are not
+   checked: the process's rights are the capabilities the kernel gave it.
 2. **The WiFi task speaks nl80211** (`linuxdrv/emul/lx_wifi.c`): with
    "scan", it waits for the interface mac80211 makes once the card is
    registered, brings it up, sends `NL80211_CMD_TRIGGER_SCAN` -- passive,
    with no SSID, so the card only listens -- waits for the "scan" group's
    `NEW_SCAN_RESULTS`, and says each network cfg80211 found.
-3. **The kernel names the card** with `linuxdrv.wifi=BB:DD.F`, as
+3. **Joining an open network** (`lx_wifi_join`): the station is told
+   `NL80211_CMD_CONNECT`, and cfg80211's own connection manager
+   authenticates and associates. On simulated radios the access point is
+   the layer's too, and does what hostapd does for an open network: it
+   registers for authentication and association frames
+   (`NL80211_CMD_REGISTER_FRAME`), answers each (`NL80211_CMD_FRAME`), adds
+   the station with the rates it asked for (`NEW_STATION`), and lets it
+   through the port (`SET_STATION`, authorized) -- there being no 802.1X
+   to wait for.
+4. **The kernel names the card** with `linuxdrv.wifi=BB:DD.F`, as
    `linuxdrv.card` names an Ethernet card (§1590's hardware mode): a
    MediaTek network controller of subclass 80 that no driver holds. Without
    it the boot test runs the process with no card, which still runs
@@ -50,6 +65,10 @@ The first use is a scan; joining a network and its keys will go the same way.
 - **Active scanning** (probe requests for the wildcard SSID) -- quicker on
   the 2.4 GHz band, but it transmits; a first run on hardware should only
   listen.
+- **hostapd's own code for the access point** -- what a real access point
+  runs, but a userspace program over sockets, for a role the layer plays
+  only so that a station has something to join where there is no network:
+  for an open network it is two answers and two station commands.
 
 ### Checked by
 
@@ -58,7 +77,10 @@ Linux's 802.11 stack and exit 0 (`linuxdrv::wifi_runs`), and Linux's
 `mac80211_hwsim` with two simulated radios (`linuxdrv::hwsim_run`): the
 first made an open access point through nl80211 (`SET_INTERFACE`,
 `START_AP` with a beacon the layer builds), the second's passive scan
-having to find it -- the dispatcher, the event queue and the scan task
-tested end to end where there is no card. On the test PC,
+having to find it, the second then joining it -- its carrier on, the
+access point holding it as a station -- and a frame crossing the network
+each way, payload and sender as sent: the dispatcher, the event queue,
+the scan, the join and the data path tested end to end where there is no
+card. On the test PC,
 `scripts/pikvm.py stage --add-cmdline "linuxdrv.wifi=06:00.0"` runs it on
 the RZ717, which must scan and exit 0, the networks it found on the screen.

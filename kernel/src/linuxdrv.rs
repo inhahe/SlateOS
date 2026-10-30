@@ -167,7 +167,8 @@ fn run(
 /// - [`wifi_runs`]: Linux's mt7925e with its 802.11 stack, started with no
 ///   card, or scanning with the one `linuxdrv.wifi` names.
 /// - [`hwsim_run`]: Linux's mac80211_hwsim, two simulated radios on that
-///   stack, one made an access point the other's scan must find.
+///   stack, one made an access point the other must find, join and pass a
+///   frame each way across.
 ///
 /// Then the verdicts of what ran, one line a process, which the boot test
 /// requires of each process it put on the medium (`scripts/boot-test.sh`,
@@ -373,7 +374,7 @@ fn say_runs(e1000e: Option<Network>, wifi: Option<bool>, hwsim: bool) {
     }
     if hwsim {
         serial_println!(
-            "[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on one medium -- the first made an open access point through nl80211, the second's scan finding it, its name, address and frequency as beaconed: OK"
+            "[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on one medium -- the first made an open access point through nl80211, the second's scan finding it, its name, address and frequency as beaconed, and joining it, the layer answering its authentication and association as hostapd would, and a frame crossing the network each way: OK"
         );
     }
 }
@@ -381,9 +382,11 @@ fn say_runs(e1000e: Option<Network>, wifi: Option<bool>, hwsim: bool) {
 /// Linux's mac80211_hwsim (`linuxdrv/hwsim`): two simulated radios, which
 /// mac80211 drives as it drives a card, on one medium. Its "hwsim" run
 /// (`linuxdrv/emul/lx_wifi.c`) must make the first an open access point
-/// through nl80211 and have the second's scan find it, and exit 0 -- the
-/// 802.11 stack and the layer's use of it tested end to end where there is
-/// no WiFi card. Whether it ran: skipped, and recorded so, where the
+/// through nl80211, have the second's scan find it and the second join it
+/// -- the layer answering its authentication and association on the first
+/// as hostapd would -- and a frame cross the network each way, and exit 0:
+/// the 802.11 stack and the layer's use of it tested end to end where there
+/// is no WiFi card. Whether it ran: skipped, and recorded so, where the
 /// bootloader did not load it.
 ///
 /// # Errors
@@ -397,14 +400,14 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         );
         return Ok(false);
     };
-    // Up to 30 s for the radios to register and 30 s for the scan
-    // (lx_wifi.c), with room past both for the process to say which ran out
-    // before the kernel cuts it off.
+    // Up to 30 s for the radios to register, 30 s for the scan, 20 s to join
+    // and 2 s for each frame (lx_wifi.c), with room past them all for the
+    // process to say which ran out before the kernel cuts it off.
     let program = Program {
         elf,
         name: "lx-hwsim",
         driver: true,
-        limit_s: 90,
+        limit_s: 120,
         poll_ms: 0,
     };
     expect(
@@ -412,7 +415,7 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         &[b"hwsim", b"hwsim"],
         &[],
         EXIT_OK,
-        "made one simulated radio an access point and found it from the other",
+        "made one simulated radio an access point, found it from the other, joined it and passed a frame each way",
         || None,
     )?;
     Ok(true)

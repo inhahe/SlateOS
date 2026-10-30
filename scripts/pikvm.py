@@ -344,11 +344,19 @@ class PiKvm:
                 self.write_image(image, size)
                 break
             except urllib.error.HTTPError as e:
+                said = e.read()[:300]
                 if e.code == 409 and attempt < RETRIES:
                     print(f"pikvm: the drive is busy; trying again in {RETRY_WAIT} s", file=sys.stderr)
                     time.sleep(RETRY_WAIT)
                     continue
-                sys.exit(f"pikvm: the PiKVM refused the image: {e.code} {e.read()[:300]!r}")
+                # An image of this script's own name kvmd still keeps -- one
+                # an upload left as the network dropped, which the removal
+                # above found busy: removed, as the loop's next turn does.
+                if b"MsdImageExistsError" in said and attempt < RETRIES:
+                    print(f"pikvm: {IMAGE_NAME} is still stored; removing it and starting again",
+                          file=sys.stderr)
+                    continue
+                sys.exit(f"pikvm: the PiKVM refused the image: {e.code} {said!r}")
             except NETWORK_ERRORS as e:
                 if attempt == RETRIES:
                     raise
@@ -849,6 +857,40 @@ def self_test_requests(check) -> None:
             check("upload: a missing image fails", "uploaded", "raised")
         except FileNotFoundError:
             check("upload: a missing image fails before the drive is touched", stub.log, [])
+
+        class UploadStub(Stub):
+            """A PiKVM whose first write is refused: the image is stored still."""
+
+            def __init__(self):
+                super().__init__([True])
+                self.writes = 0
+
+            def set_connected(self, connected):
+                self.log.append(f"connected={int(connected)}")
+
+            def wait_idle(self, seconds=120):
+                pass
+
+            def write_image(self, image, size):
+                self.writes += 1
+                if self.writes == 1:
+                    raise urllib.error.HTTPError(
+                        self.url if hasattr(self, "url") else "https://pikvm.test", 400, "Bad Request",
+                        None, io.BytesIO(b'{"result": {"error": "MsdImageExistsError"}}'))
+                self.log.append("written")
+
+            def json(self, method, path, **_kw):
+                return {"drive": {"image": {"complete": True}}}
+
+        with tempfile.TemporaryDirectory(prefix="pikvm-selftest-") as tmp:
+            image = Path(tmp) / "x.img"
+            image.write_bytes(b"image")
+            stub = UploadStub()
+            PiKvm.upload(stub, image)
+            removes = [p for p in stub.log if isinstance(p, str) and p.startswith("/api/msd/remove")]
+            check("upload: an image of its name still stored is removed and the upload made again",
+                  (stub.writes, len(removes), "written" in stub.log, stub.log[-1]),
+                  (2, 2, True, "connected=1"))
     finally:
         RETRY_WAIT = saved_wait
 
@@ -952,6 +994,17 @@ def main(argv: list[str]) -> int:
         stage(args.worktree, args.output, cmdline, linuxdrv=not args.no_linuxdrv)
         return 0
     kvm = PiKvm()
+    try:
+        run_command(kvm, args)
+    except urllib.error.HTTPError as e:
+        sys.exit(f"pikvm: the PiKVM refused a request: {e.code} {e.reason}")
+    except NETWORK_ERRORS as e:
+        sys.exit(f"pikvm: the PiKVM at {kvm.url} does not answer ({e}): is it on the network?")
+    return 0
+
+
+def run_command(kvm: PiKvm, args) -> None:
+    """The command `args` names, on `kvm`."""
     if args.cmd == "status":
         print("leds", kvm.leds())
         source = kvm.json("GET", "/api/streamer")["streamer"]["source"]
@@ -974,7 +1027,6 @@ def main(argv: list[str]) -> int:
         kvm.type_text(args.text, args.layout)
     elif args.cmd == "key":
         kvm.key(args.code)
-    return 0
 
 
 if __name__ == "__main__":

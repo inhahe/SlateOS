@@ -43,7 +43,13 @@ case "$(uname -s)" in
     MINGW* | MSYS* | CYGWIN*)
         distro=${SLATEOS_WSL_DISTRO:-Ubuntu}
         # /c/visual studio projects/... is /mnt/c/visual studio projects/...
+        # -- in the POSIX form cygpath gives, whatever form pwd answers in: a
+        # bash started by a Windows program (pikvm.py, through Python) gets
+        # PWD as MSYS hands it to Windows programs, C:/..., and keeps it.
         self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+        if command -v cygpath >/dev/null 2>&1; then
+            self=$(cygpath -u "$self")
+        fi
         case $self in
             /[a-zA-Z]/*) ;;
             *) die "cannot map $self into WSL" ;;

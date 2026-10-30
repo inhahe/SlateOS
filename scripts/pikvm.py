@@ -54,6 +54,10 @@ WIDTH, HEIGHT = 1920, 1080
 DEFAULT_CMDLINE = "blk.writable=eui64:0025385181b1cd22 selftest.keep_going=1 log.screen=1"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
+#: The Linux driver processes `stage` puts beside the kernel when they are
+#: built (`scripts/linux-tree.sh driver <name>`), as boot-test.sh does: each a
+#: Limine module the kernel finds by its module_cmdline, linuxdrv/<name>.
+LINUXDRV = ("hello", "e1000e")
 
 # The PiKVM reaches the network by WiFi, which drops now and then: a request
 # that is safe to repeat, and that the network loses, is made again -- RETRIES
@@ -142,10 +146,11 @@ def to_absolute(pixel: int, size: int) -> int:
     return round(pixel / size * 65535) - 32768
 
 
-def limine_conf(template: str, cmdline: str) -> str:
+def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = ()) -> str:
     """`template` (the repository's limine.conf) with `cmdline` on its first
     entry, the line after that entry's `kernel_path:` -- as boot-test.sh
-    gives the test's command line."""
+    gives the test's command line -- and after it each Linux driver process
+    of `modules` as a module, `linuxdrv/<name>.elf` named `linuxdrv/<name>`."""
     out, entry, done = [], 0, False
     for line in template.splitlines(keepends=True):
         if line.startswith("/"):
@@ -153,6 +158,9 @@ def limine_conf(template: str, cmdline: str) -> str:
         out.append(line)
         if entry == 1 and not done and line.split()[:1] == ["kernel_path:"]:
             out.append(f"    cmdline: {cmdline}\n")
+            for name in modules:
+                out.append(f"    module_path: boot():/linuxdrv/{name}.elf\n")
+                out.append(f"    module_cmdline: linuxdrv/{name}\n")
             done = True
     if not done:
         raise ValueError("limine.conf has no first entry with a kernel_path")
@@ -366,8 +374,9 @@ def stage(worktree: Path, out: Path, cmdline: str) -> None:
 
 def stage_esp(worktree: Path, esp: Path, cmdline: str) -> None:
     """Lay out an ESP in `esp`: Limine, `worktree`'s built kernel (stripped of
-    its debug sections when llvm-strip is there), and its limine.conf with
-    `cmdline` on the first entry."""
+    its debug sections when llvm-strip is there), the Linux driver processes
+    it has built (`LINUXDRV`), and its limine.conf with `cmdline` on the
+    first entry, the driver processes as its modules."""
     (esp / "EFI" / "BOOT").mkdir(parents=True)
     (esp / "boot").mkdir()
     limine = worktree / "limine" / "BOOTX64.EFI"
@@ -382,8 +391,15 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str) -> None:
                        check=True)
     else:
         shutil.copy(kernel, esp / "boot" / "kernel")
+    built = worktree / "build" / "linuxdrv"
+    modules = tuple(name for name in LINUXDRV if (built / f"{name}.elf").exists())
+    if modules:
+        (esp / "linuxdrv").mkdir()
+        for name in modules:
+            shutil.copy(built / f"{name}.elf", esp / "linuxdrv" / f"{name}.elf")
     template = (worktree / "limine.conf").read_text(encoding="utf-8")
-    (esp / "limine.conf").write_text(limine_conf(template, cmdline), encoding="utf-8", newline="\n")
+    (esp / "limine.conf").write_text(limine_conf(template, cmdline, modules), encoding="utf-8",
+                                     newline="\n")
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
@@ -552,6 +568,14 @@ def self_test() -> int:
     check("limine.conf: in the first entry, not the recovery one",
           conf.find("cmdline: a=1 b") < conf.find("/OS Kernel (recovery)"), True)
     check("limine.conf: the recovery entry keeps its own", conf.count("cmdline: single recovery"), 1)
+    check("limine.conf: no driver process, no module", "module_path" in conf, False)
+    conf = limine_conf(template, "a=1 b", ("hello", "e1000e"))
+    check("limine.conf: each driver process a module after the cmdline, named as the kernel finds it",
+          "    cmdline: a=1 b\n"
+          "    module_path: boot():/linuxdrv/hello.elf\n    module_cmdline: linuxdrv/hello\n"
+          "    module_path: boot():/linuxdrv/e1000e.elf\n    module_cmdline: linuxdrv/e1000e\n" in conf, True)
+    check("limine.conf: the modules in the first entry only",
+          conf.rfind("module_path") < conf.find("/OS Kernel (recovery)"), True)
     try:
         limine_conf("timeout: 3\n", "x")
         check("limine.conf without an entry is refused", "taken", "refused")

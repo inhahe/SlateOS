@@ -5788,10 +5788,12 @@ const PERMISSION_DENIED: i64 = -400;
 /// [`NIC_PINGS`] pings of [`NIC_PING_BYTES`] bytes, [`NIC_BURST`] at a time,
 /// each answered within a second -- sent again once if not -- with its
 /// payload as sent; the card's link told up; its multicast filter as the
-/// daemon lists it ([`nic_check_mcast`]); and, with `cable`, the link
-/// following the card's cable out and back in ([`nic_check_cable`]). The
-/// exit code says what failed, 0 for nothing.
-fn nic_check(service: &[u8], cable: bool) -> i64 {
+/// daemon lists it ([`nic_check_mcast`]) where the network is QEMU's; and,
+/// with [`Beyond::QemuCable`], the link following the card's cable out and
+/// back in ([`nic_check_cable`]). The exit code says what failed, 0 for
+/// nothing.
+fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
+    let cable = beyond == Beyond::QemuCable;
     let say = |what: &[u8]| {
         Line::new()
             .put(b"[netstack] nic-check: ")
@@ -5887,7 +5889,9 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
         say(b"FAIL: the card's driver did not say its link is up");
         return NIC_LINK;
     }
-    if let Err(why) = nic_check_mcast(&me, &gateway_mac) {
+    if beyond == Beyond::Lan {
+        say(b"a real network, whose router need not answer a solicitation to all nodes, which the multicast check counts: not checked");
+    } else if let Err(why) = nic_check_mcast(&me, &gateway_mac) {
         say(why.as_bytes());
         return NIC_MCAST;
     }
@@ -5931,6 +5935,32 @@ fn nic_check(service: &[u8], cable: bool) -> i64 {
     port::detach();
     say(b"SUCCESS");
     NIC_OK
+}
+
+/// What `nic-check` may take of the network beyond the card, its third
+/// argument: QEMU's -- which answers a router solicitation to all nodes,
+/// the multicast check's signal -- with its cable left alone, or (`cable`)
+/// pulled and plugged back from outside, when asked (the boot test, through
+/// QEMU's monitor); or (`lan`) a real network, whose router need not answer
+/// so: the multicast check is said and skipped, the cable left alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Beyond {
+    Qemu,
+    QemuCable,
+    Lan,
+}
+
+impl Beyond {
+    /// `nic-check`'s third argument, `arg` (empty when there is none), or
+    /// `None` for one it does not know.
+    fn from_arg(arg: &[u8]) -> Option<Beyond> {
+        match arg {
+            b"" => Some(Beyond::Qemu),
+            b"cable" => Some(Beyond::QemuCable),
+            b"lan" => Some(Beyond::Lan),
+            _ => None,
+        }
+    }
 }
 
 /// How long `nic-check` gives the network to advertise a router that is
@@ -7219,10 +7249,11 @@ pub extern "C" fn _start() -> ! {
     let args = &block[..fetched];
     let mode = arg(args, 1);
     if mode == b"nic-check" {
-        // `nic-check <service> [cable]`: with "cable", something outside
-        // can pull the card's cable when asked (the boot test, through
-        // QEMU's monitor).
-        exit(nic_check(arg(args, 2), arg(args, 3) == b"cable"));
+        // `nic-check <service> [cable|lan]` ([`Beyond`]).
+        let Some(beyond) = Beyond::from_arg(arg(args, 3)) else {
+            exit(NIC_USAGE);
+        };
+        exit(nic_check(arg(args, 2), beyond));
     }
     if mode == b"nic-bench" {
         // `nic-bench <mac> <name>`: a card of the kernel's timed, claimed

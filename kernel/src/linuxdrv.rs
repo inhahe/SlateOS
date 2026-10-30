@@ -199,7 +199,11 @@ pub fn self_test() -> KernelResult<()> {
             ""
         }
     );
-    if e1000e {
+    if e1000e == Some(Network::Lan) {
+        serial_println!(
+            "[linuxdrv]   e1000e process: Linux's e1000e bound the card linuxdrv.card names, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP on this real network, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, left multicast unchecked (a real router need not answer the check's solicitations), timed the card, and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK"
+        );
+    } else if e1000e == Some(Network::Qemu) {
         serial_println!(
             "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK",
             if cable_puller() {
@@ -418,26 +422,80 @@ fn pci_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> Kern
     Ok(true)
 }
 
+/// The network beyond the card Linux's e1000e is given: the boot test's
+/// QEMU network, or a real one -- the card `linuxdrv.card` names, on a
+/// machine with no boot-test spare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Network {
+    Qemu,
+    Lan,
+}
+
+/// `BB:DD.F` in hex, as `lspci` writes a PCI function.
+fn parse_pci_address(text: &str) -> Option<crate::pci::PciAddress> {
+    let (bus, rest) = text.split_once(':')?;
+    let (device, function) = rest.split_once('.')?;
+    let address = crate::pci::PciAddress {
+        bus: u8::from_str_radix(bus, 16).ok()?,
+        device: u8::from_str_radix(device, 16).ok()?,
+        function: u8::from_str_radix(function, 16).ok()?,
+    };
+    (address.device < 32 && address.function < 8).then_some(address)
+}
+
+/// The card `linuxdrv.card=BB:DD.F` names for Linux's e1000e, on a machine
+/// with no boot-test spare -- the test PC's I219-V, which the kernel's own
+/// e1000 does not drive: an Intel function no driver holds. `None` without
+/// the option.
+///
+/// # Errors
+///
+/// `InvalidArgument`, said, for an option naming no such function: an
+/// operator's run asked for it, and a skip would read as the card's absence.
+fn named_card() -> KernelResult<Option<crate::pci::PciDevice>> {
+    const INTEL: u16 = 0x8086;
+    let Some(named) = crate::fs::kernparam::get("linuxdrv.card") else {
+        return Ok(None);
+    };
+    let card = parse_pci_address(&named)
+        .and_then(|a| crate::pci::scan_all().into_iter().find(|d| d.address == a))
+        .filter(|d| d.vendor_id == INTEL && crate::pci::bound_driver(d.address).is_none());
+    if card.is_none() {
+        serial_println!(
+            "[linuxdrv]   FAIL: linuxdrv.card={named} names no Intel PCI function that no driver holds"
+        );
+        return Err(KernelError::InvalidArgument);
+    }
+    Ok(card)
+}
+
 /// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
-/// given the boot test's spare 82574 as hello's PCI runs are, serving it to
-/// the network stack ([`e1000e_serve`]); then the kernel's own e1000 timed
-/// as the daemon timed that card ([`native_bench`]). Whether it ran:
-/// skipped, and recorded so, where the bootloader did not load it or there
-/// is no such card.
-fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
+/// given a card to serve to the network stack ([`e1000e_serve`]): the one
+/// `linuxdrv.card` names, on a real network ([`named_card`]), or else the
+/// boot test's spare 82574 as hello's PCI runs are -- then the kernel's own
+/// e1000 timed as the daemon timed that card ([`native_bench`]). Which
+/// network it ran on; `None`, skipped and recorded so, where the bootloader
+/// did not load it or there is no such card.
+fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<Network>> {
     let Some(elf) = crate::boot::module(E1000E) else {
         skips.record(
             "Linux's e1000e through the driver layer",
             "not loaded beside the kernel (no limine.conf module named linuxdrv/e1000e)",
         );
-        return Ok(false);
+        return Ok(None);
     };
-    let Some(card) = crate::devhandle::probe_card() else {
-        skips.record(
-            "Linux's e1000e through the driver layer",
-            "no unbound 82574 on bus 0 with the boot test's MAC address",
-        );
-        return Ok(false);
+    let (card, network) = match named_card()? {
+        Some(card) => (card, Network::Lan),
+        None => match crate::devhandle::probe_card() {
+            Some(card) => (card, Network::Qemu),
+            None => {
+                skips.record(
+                    "Linux's e1000e through the driver layer",
+                    "no unbound 82574 on bus 0 with the boot test's MAC address, and no linuxdrv.card",
+                );
+                return Ok(None);
+            }
+        },
     };
     let a = card.address;
     let caps = [(
@@ -452,9 +510,9 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         limit_s: 30,
         poll_ms: 0,
     };
-    e1000e_serve(&program, &caps, a, &arg)?;
+    e1000e_serve(&program, &caps, a, &arg, network)?;
     native_bench(skips)?;
-    Ok(true)
+    Ok(Some(network))
 }
 
 /// The kernel's own e1000 driver timed by the netstack daemon's `nic-bench`
@@ -540,7 +598,8 @@ fn cable_puller() -> bool {
     crate::fs::kernparam::get("linuxdrv.cable").is_some_and(|v| v == "hmp")
 }
 
-/// Linux's e1000e serving the spare 82574 to the network stack
+/// Linux's e1000e serving its card -- the spare 82574, or the one
+/// `linuxdrv.card` names ([`named_card`]) -- to the network stack
 /// (design-decisions 1589): the driver process -- `program`, holding
 /// `capabilities` (the card's) and a `Service` capability for [`SERVICE`]
 /// alone, the card at `a`, `pci` its argument naming it -- in its
@@ -550,11 +609,13 @@ fn cable_puller() -> bool {
 /// [`check::TURNED_AWAY`]; then holding it, when it
 /// must attach to the card, be refused passing on a region it was never
 /// granted, take an
-/// address by DHCP from QEMU's network through it, resolve the gateway by
+/// address by DHCP from the `network` beyond it, resolve the gateway by
 /// ARP, have 400 full-size pings answered 16 at a time and 8 more sent to an
 /// idle driver, payloads as sent, be told the card's link is up, find the
-/// card passing a multicast group exactly while it lists it, and -- where
-/// the harness can pull the card's cable ([`cable_puller`]) -- be told the
+/// card passing a multicast group exactly while it lists it -- on QEMU's
+/// network, whose router answers the check's solicitations; a real one's
+/// need not (`nic-check`'s `lan`) -- and -- where the harness can pull the
+/// card's cable on QEMU's network ([`cable_puller`]) -- be told the
 /// link down and up again as it does, a send refused at once while it is
 /// down, its lease confirmed and its addresses announced once it is back, time the card (`nic-bench`'s pings,
 /// failing only for too many lost or one corrupted), be let go for breaking
@@ -567,6 +628,7 @@ fn e1000e_serve(
     capabilities: &[(ResourceType, u64, Rights)],
     a: crate::pci::PciAddress,
     pci: &str,
+    network: Network,
 ) -> KernelResult<()> {
     // The driver may register its card's name and no other; the daemon
     // holds the card's key, which the driver asks of whoever connects.
@@ -584,7 +646,8 @@ fn e1000e_serve(
     // its timing take a minute at most, and the cable's two waits 20 s each.
     let plain: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE];
     let with_cable: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"cable"];
-    let cable = cable_puller();
+    let on_lan: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"lan"];
+    let cable = network == Network::Qemu && cable_puller();
     let netstack = |limit_s| Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-nic",
@@ -597,7 +660,11 @@ fn e1000e_serve(
         let daemon = start(stack, args, key);
         daemon.map(|d| finish(stack, &d))
     };
-    let keyed = if cable { with_cable } else { plain };
+    let keyed = match network {
+        Network::Lan => on_lan,
+        Network::Qemu if cable => with_cable,
+        Network::Qemu => plain,
+    };
     let keyless = run_daemon(&keyless_stack, plain, &[]);
     if keyless != Ok(Some(check::TURNED_AWAY)) {
         serial_println!(

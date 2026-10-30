@@ -1582,9 +1582,12 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
     mt7925e = ("[linuxdrv]   mt7925e process: Linux's 802.11 stack (cfg80211, nl80211, "
                "mac80211) and the mt7925e driver started with no card, and the process "
                "exited 0: OK\n")
-    ran = hello + tasks + verdict + e1000e + mt7925e
+    hwsim = ("[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on "
+             "one medium -- the first made an open access point through nl80211, the "
+             "second's scan finding it, its name, address and frequency as beaconed: OK\n")
+    ran = hello + tasks + verdict + e1000e + mt7925e + hwsim
     # Only its first line differs from `ran`: the one check it can fail.
-    garbled = (hello.replace("0xbeef", "beef") + tasks + verdict + e1000e + mt7925e)
+    garbled = (hello.replace("0xbeef", "beef") + tasks + verdict + e1000e + mt7925e + hwsim)
     skipped = ("[linuxdrv]   SKIP: Linux driver layer's hello process -- not "
                "loaded beside the kernel\n")
     # As the kernel prints it when its PCI runs were skipped: their SKIP
@@ -1593,16 +1596,19 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
               + "[linuxdrv]   SKIP: Linux driver layer's PCI runs (no unbound "
                 "82574 on bus 0 with the boot test's MAC address)\n"
               + verdict.replace(", a PCI function probed through Linux's PCI core", "")
-              + e1000e + mt7925e)
+              + e1000e + mt7925e + hwsim)
     failed = ("[linuxdrv]   FAIL: the hello process, which should have ran its "
               "initcall and exited 0, ended Ok(Some(-8))\n")
     for label, text, named, want in [
         ("a process named and run passes", ran, 1, "PASS"),
         ("its verdict without its line, formatted right, fails", garbled, 1, "FAIL"),
         ("its verdict alone fails", verdict, 1, "FAIL"),
-        ("its line without its tasks' fails", hello + verdict + e1000e + mt7925e, 1, "FAIL"),
-        ("hello's verdict without e1000e's fails", hello + tasks + verdict + mt7925e, 1, "FAIL"),
-        ("the verdicts without mt7925e's fail", hello + tasks + verdict + e1000e, 1, "FAIL"),
+        ("its line without its tasks' fails",
+         hello + verdict + e1000e + mt7925e + hwsim, 1, "FAIL"),
+        ("hello's verdict without e1000e's fails",
+         hello + tasks + verdict + mt7925e + hwsim, 1, "FAIL"),
+        ("the verdicts without mt7925e's fail", hello + tasks + verdict + e1000e + hwsim, 1, "FAIL"),
+        ("the verdicts without hwsim's fail", hello + tasks + verdict + e1000e + mt7925e, 1, "FAIL"),
         ("its verdict without the PCI runs fails", no_pci, 1, "FAIL"),
         ("a process named and skipped fails", skipped, 1, "FAIL"),
         ("a process named whose test failed fails", failed, 1, "FAIL"),

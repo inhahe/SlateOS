@@ -1027,13 +1027,15 @@ int lx_emul_main(void)
 	async_init();
 	/*
 	 * As Linux's driver_init() before the initcalls: the driver core's
-	 * devices, buses and classes, and the faux bus -- the home of a device
-	 * that stands for no hardware, which cfg80211 makes its regulatory one
-	 * (drivers/base/faux.c). Its other pieces are for what a driver process
-	 * has none of -- firmware nodes, hypervisors, CPUs, memory blocks and
-	 * NUMA nodes as devices, the platform bus.
+	 * devices, buses and classes; the faux bus -- the home of a device that
+	 * stands for no hardware, which cfg80211 makes its regulatory one
+	 * (drivers/base/faux.c) -- and the platform bus, which a driver of no
+	 * bus registers on (mac80211_hwsim's simulated radios). Its other
+	 * pieces are for what a driver process has none of -- firmware nodes,
+	 * hypervisors, CPUs, memory blocks and NUMA nodes as devices.
 	 */
-	if (devices_init() || buses_init() || classes_init() || lx_fs_init() || faux_bus_init())
+	if (devices_init() || buses_init() || classes_init() || lx_fs_init() || faux_bus_init() ||
+	    platform_bus_init())
 		return SLX_EXIT_NO_MEMORY;
 	ret = lx_run_initcalls(__initcall_start, __initcall0_start);
 	for (level = 0; !ret && level < ARRAY_SIZE(lx_initcall_level_names); level++) {

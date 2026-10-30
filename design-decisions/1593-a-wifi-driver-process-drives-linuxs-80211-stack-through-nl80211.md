@@ -54,6 +54,11 @@ The first use is a scan; joining a network and its keys will go the same way.
 ### Checked by
 
 The boot test runs the mt7925e process with no card, which must start
-Linux's 802.11 stack and exit 0 (`linuxdrv::wifi_runs`). On the test PC,
+Linux's 802.11 stack and exit 0 (`linuxdrv::wifi_runs`), and Linux's
+`mac80211_hwsim` with two simulated radios (`linuxdrv::hwsim_run`): the
+first made an open access point through nl80211 (`SET_INTERFACE`,
+`START_AP` with a beacon the layer builds), the second's passive scan
+having to find it -- the dispatcher, the event queue and the scan task
+tested end to end where there is no card. On the test PC,
 `scripts/pikvm.py stage --add-cmdline "linuxdrv.wifi=06:00.0"` runs it on
 the RZ717, which must scan and exit 0, the networks it found on the screen.

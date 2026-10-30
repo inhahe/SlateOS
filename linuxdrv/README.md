@@ -164,7 +164,11 @@ layer's task (`emul/lx_wifi.c`) brings the card's interface up, has nl80211
 scan passively and says each network found. The kernel's self-test runs it
 on the card `linuxdrv.wifi=BB:DD.F` names (`06:00.0` on the test PC, its
 firmware staged with it); in QEMU, which has no such card, it runs with none,
-which must still start the 802.11 stack and exit 0.
+which must still start the 802.11 stack and exit 0. And in QEMU the stack
+is tested end to end on Linux's own `mac80211_hwsim` (`linuxdrv/hwsim/`):
+two simulated radios on one medium, the first made an open access point
+through nl80211 (`SET_INTERFACE`, `START_AP`), the second's scan having to
+find it -- its name, address and frequency.
 
 ## Licences
 

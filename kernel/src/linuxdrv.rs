@@ -30,6 +30,8 @@ const E1000E: &[u8] = b"linuxdrv/e1000e";
 /// ... and Linux's mt7925e, its first WiFi driver, with Linux's 802.11
 /// stack (cfg80211, mac80211).
 const MT7925E: &[u8] = b"linuxdrv/mt7925e";
+/// ... and Linux's mac80211_hwsim, simulated radios on the same stack.
+const HWSIM: &[u8] = b"linuxdrv/hwsim";
 
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
@@ -224,6 +226,7 @@ pub fn self_test() -> KernelResult<()> {
     let pci = pci_runs(&hello, &mut skips)?;
     let e1000e = e1000e_run(&mut skips, named)?;
     let wifi = wifi_runs(&mut skips, named_wifi)?;
+    let hwsim = hwsim_run(&mut skips)?;
     skips.report("[linuxdrv]");
     serial_println!(
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}{}: OK",
@@ -275,7 +278,48 @@ pub fn self_test() -> KernelResult<()> {
         ),
         None => {}
     }
+    if hwsim {
+        serial_println!(
+            "[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on one medium -- the first made an open access point through nl80211, the second's scan finding it, its name, address and frequency as beaconed: OK"
+        );
+    }
     Ok(())
+}
+
+/// Linux's mac80211_hwsim (`linuxdrv/hwsim`): two simulated radios, which
+/// mac80211 drives as it drives a card, on one medium. Its "hwsim" run
+/// (`linuxdrv/emul/lx_wifi.c`) must make the first an open access point
+/// through nl80211 and have the second's scan find it, and exit 0 -- the
+/// 802.11 stack and the layer's use of it tested end to end where there is
+/// no WiFi card. Whether it ran: skipped, and recorded so, where the
+/// bootloader did not load it.
+///
+/// # Errors
+///
+/// `InternalError` when the run ends otherwise.
+fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
+    let Some(elf) = crate::boot::module(HWSIM) else {
+        skips.record(
+            "Linux's mac80211_hwsim through the driver layer",
+            "not loaded beside the kernel (no limine.conf module named linuxdrv/hwsim)",
+        );
+        return Ok(false);
+    };
+    let program = Program {
+        elf,
+        name: "lx-hwsim",
+        limit_s: 60,
+        poll_ms: 0,
+    };
+    expect(
+        &program,
+        &[b"hwsim", b"hwsim"],
+        &[],
+        EXIT_OK,
+        "made one simulated radio an access point and found it from the other",
+        || None,
+    )?;
+    Ok(true)
 }
 
 /// Linux's mt7925e (`linuxdrv/mt7925e`), the layer's first WiFi driver.

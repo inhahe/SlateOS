@@ -81,7 +81,14 @@ are off by default.
 
 `check_parse_serve` (every boot): `linuxdrv.serve`'s value read, and each
 malformed one refused as what it is; and the linuxdrv self-test chooses the
-card a `linuxdrv.serve` given names, as `serve_at_boot` will. A QEMU boot
+card a `linuxdrv.serve` given names, as `serve_at_boot` will. Every boot
+test's card boot (`scripts/boot-test.sh` `card_boot`, since 2026-10-30):
+once the main boot has passed, the same QEMU machine is booted again with
+`linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e` and self-tests skipped,
+the spare 82574 on a network of its own (10.0.5.0/24), and the run fails
+unless Linux's e1000e served it, the daemon took its address there,
+`SYS_NET_IF_INFO` said that address, and every persistent-daemon check
+finished without a failure. Before it, a QEMU boot by hand
 with `linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e` (2026-10-30):
 Linux's e1000e serving the spare 82574 for the system's life, the daemon
 attached and given an address by DHCP through it, and every

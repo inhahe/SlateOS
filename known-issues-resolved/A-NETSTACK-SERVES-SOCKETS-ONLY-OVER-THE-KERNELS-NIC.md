@@ -1,6 +1,6 @@
-## A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC (lane A, 2026-10-29) — OPEN
+## A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC (lane A, 2026-10-29) — FIXED 2026-10-30
 
-**Status:** OPEN -- fixed on lane-a-wip (design-decisions 1594), awaiting a boot on main
+**Status:** FIXED 2026-10-30 -- design-decisions 1594, on main at 83cc422be, which passed the boot test; every boot test checks it since (its card boot)
 
 **What is wrong.** The netstack daemon's serving modes serve sockets over
 a card a Linux driver process serves (design-decisions 1589) when named one

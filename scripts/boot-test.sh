@@ -228,6 +228,15 @@
 #                                       # check its screen shows the answer).
 #                                       # SCREEN_PROBE_TIMEOUT=N gives it N
 #                                       # seconds instead of 180.
+#   CARD_BOOT=0 ./scripts/boot-test.sh
+#                                       # skip the card boot (card_boot: after
+#                                       # the main boot passes, boot the same
+#                                       # machine again with the persistent
+#                                       # network over the spare 82574, served
+#                                       # by Linux's e1000e, and check every
+#                                       # persistent-daemon check passed over
+#                                       # it; about a minute). Its log is
+#                                       # build/serial-card.txt.
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -1705,11 +1714,16 @@ GATED_MARKERS_FRESH=0
 # dies instantly.  This silently broke every repeated run (e.g. wedge-soak).
 # The pidfile holds qemu's real Windows PID; kill_qemu() taskkills it.
 PIDFILE="$PROJECT_ROOT/build/qemu.pid"
+# The card boot's serial log and QEMU stderr (card_boot): its own, so that the
+# main boot's stay as they were for every verdict and record read from them.
+CARD_SERIAL="$PROJECT_ROOT/build/serial-card.txt"
+CARD_QEMU_STDERR="$PROJECT_ROOT/build/qemu-stderr-card.txt"
 # QEMU args need Windows paths
 ESP_DIR_WIN="$(to_win_path "$ESP_DIR")"
 USB_IMG_WIN="$(to_win_path "$USB_IMG")"
 SERIAL_FILE_WIN="$(to_win_path "$SERIAL_FILE")"
 PIDFILE_WIN="$(to_win_path "$PIDFILE")"
+CARD_SERIAL_WIN="$(to_win_path "$CARD_SERIAL")"
 
 # Raise QEMU above normal priority once it is running.
 #
@@ -1980,6 +1994,130 @@ cable_responder() {
     else
         echo "=== Cable: set_link net3 $state failed (rc $rc)${said:+: $said}; trying again ===" >&2
     fi
+}
+
+# The card boot: a running system's network over a card a Linux driver
+# process serves (design-decisions 1594), checked by every boot test.
+#
+# The main boot keeps the persistent netstack daemon on the kernel's NIC,
+# which is what every machine without the options runs. Once it has passed,
+# QEMU is started again on the same machine (QEMU_MACHINE) with CARD_BOOT_WORDS
+# added to the kernel's command line: `linuxdrv.serve` starts Linux's e1000e
+# serving the spare 82574 for the system's life -- net3, the second e1000e,
+# at 00:05.0 by QEMU_MACHINE's device order -- and `net.nic` has the daemon
+# serve every socket over it, so that every persistent-daemon check runs over
+# the card. Self-tests are skipped (`selftest.skip=1`): the main boot ran
+# them, and without them the daemon's checks come within a minute. net3 is
+# on a network of its own, so a check that reached the kernel's NIC instead
+# cannot pass by accident.
+CARD_BOOT_WORDS="selftest.skip=1 linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e"
+# The daemon's closing line over the card, which ends the card boot.
+CARD_BOOT_DONE="parity checks done; the daemon serves nic.e1000e"
+# How long the card boot may take to print it: under a minute idle.
+CARD_BOOT_TIMEOUT=600
+
+# What is wrong with the card boot whose serial log is $1, read up to the
+# daemon's closing line ($CARD_BOOT_DONE): one line saying what, or nothing
+# when it passed. A check that skipped for want of an upstream -- QEMU's
+# network without the host's -- passes, as it does in the main boot; one that
+# failed does not, nor a card served on any network but net3's own.
+card_boot_verdict() {
+    local log="$1" upto part bad want served
+    if [ ! -f "$log" ]; then
+        echo "no serial log at $log"
+        return 0
+    fi
+    # Read whole, then searched through here-strings: under pipefail a grep
+    # that finds nothing, or a reader that stops early, fails a pipeline, and
+    # under set -e that would end the run rather than say why.
+    part="$(tr -d '\r' < "$log")"
+    upto="$(grep -a -n -F -- "$CARD_BOOT_DONE" <<< "$part")" || true
+    upto="${upto%%:*}"
+    if [ -z "$upto" ]; then
+        echo "the daemon's checks never finished over the card; its last line: $(tail -n 1 <<< "$part" | cut -c1-160)"
+        return 0
+    fi
+    part="$(head -n "$upto" <<< "$part")"
+    bad="$(grep -a -E -- 'self-test failed|  FAIL|^FATAL|PANIC|panicked|startup failed' <<< "$part")" || true
+    if [ -n "$bad" ]; then
+        bad="${bad%%$'\n'*}"
+        echo "${bad:0:200}"
+        return 0
+    fi
+    for want in \
+        "[linuxdrv] e1000e started serving the card at 00:05.0 as nic.e1000e" \
+        "[netstack] serving over nic.e1000e: " \
+        "interface parity: SYS_NET_IF_INFO says the interface the daemon serves (10.0.5."; do
+        if ! grep -a -q -F -- "$want" <<< "$part"; then
+            echo "no line saying: $want"
+            return 0
+        fi
+    done
+    served="$(grep -a -F -- "[netstack] serving over nic.e1000e: " <<< "$part")" || true
+    if ! grep -a -q -F -- "DHCP gave 10.0.5." <<< "$served"; then
+        echo "the card was not served on net3's own network (10.0.5.0/24)"
+    fi
+    return 0
+}
+
+# Run the card boot (above) and judge it, setting FAILED_CHECK and returning
+# non-zero when it did not pass. Called by finish_pass once the main boot has
+# passed, QEMU stopped first; CARD_BOOT=0 skips it, saying so.
+card_boot() {
+    if [ "${CARD_BOOT:-1}" != "1" ]; then
+        echo "=== Card boot: skipped (CARD_BOOT=${CARD_BOOT}) ==="
+        return 0
+    fi
+    kill_qemu "$QEMU_PID"
+    local conf="$ESP_DIR/limine.conf" kept="$ESP_DIR/limine.conf.main" rc=0 began why
+    if ! cp "$conf" "$kept"; then
+        FAILED_CHECK="the card boot could not keep $conf"
+        return 1
+    fi
+    # The words on the first entry's command line, the one the main boot's
+    # limine.conf was given (Step 2's writer).
+    CARD_WORDS="$CARD_BOOT_WORDS" awk '
+        substr($0, 1, 1) == "/" { entry++ }
+        entry == 1 && !done && $1 == "cmdline:" { $0 = $0 " " ENVIRON["CARD_WORDS"]; done = 1 }
+        { print }
+        END { exit done ? 0 : 2 }
+    ' "$kept" > "$conf" || rc=$?
+    if [ "$rc" -eq 0 ] && [ "$USB_IMAGE" -eq 1 ]; then
+        python "$PROJECT_ROOT/scripts/build-usb-image.py" \
+            --source "$ESP_DIR" --output "$USB_IMG" > /dev/null || rc=$?
+    fi
+    if [ "$rc" -ne 0 ]; then
+        mv -f "$kept" "$conf"
+        FAILED_CHECK="the card boot could not write its command line (exit $rc)"
+        return 1
+    fi
+    echo "=== Card boot: the persistent network over the spare 82574 ($CARD_BOOT_WORDS) ==="
+    rm -f "$CARD_SERIAL"
+    began=$(date +%s)
+    "$QEMU" "${QEMU_MACHINE[@]}" \
+        -serial "file:$CARD_SERIAL_WIN" \
+        -pidfile "$PIDFILE_WIN" 2> "$CARD_QEMU_STDERR" &
+    QEMU_PID=$!
+    while kill -0 "$QEMU_PID" 2>/dev/null && [ $(( $(date +%s) - began )) -lt "$CARD_BOOT_TIMEOUT" ]; do
+        sleep 1
+        [ -f "$CARD_SERIAL" ] || continue
+        grep -a -q -F -- "$CARD_BOOT_DONE" "$CARD_SERIAL" && break
+        if kernel_is_dead "$CARD_SERIAL"; then
+            sleep 2
+            break
+        fi
+    done
+    kill_qemu "$QEMU_PID"
+    mv -f "$kept" "$conf"
+    why="$(card_boot_verdict "$CARD_SERIAL")"
+    if [ -n "$why" ]; then
+        FAILED_CHECK="the card boot: $why"
+        echo "=== Card boot: FAILED after $(( $(date +%s) - began ))s -- $why ==="
+        echo "    Its log: $CARD_SERIAL; QEMU's stderr: $CARD_QEMU_STDERR. Its last lines:"
+        tail -n 15 "$CARD_SERIAL" 2>/dev/null | tr -d '\r' | sed 's/^/    /'
+        return 1
+    fi
+    echo "=== Card boot: PASS after $(( $(date +%s) - began ))s -- Linux's e1000e served the spare 82574 for the system's life and every persistent-daemon check ran over it ==="
 }
 
 # Stop QEMU and put the log back as it stood at the marker ($SERIAL_AT_MARKER,
@@ -3778,6 +3916,15 @@ finish_pass() {
     if [ "$BENCH_RECORDER_STATUS" -ne 0 ]; then
         echo "=== Boot test INCOMPLETE ($WAIT_MARKER reached, but --bench recorded nothing) ==="
         exit 3
+    fi
+
+    # The persistent network over a driver process's card, on a second boot
+    # of the same machine. A --bench run is about the numbers, which it has.
+    if [ "$BENCH" -eq 1 ]; then
+        echo "=== Card boot: not run (--bench) ==="
+    elif ! card_boot; then
+        echo "=== Boot test FAILED ($FAILED_CHECK) ==="
+        exit 1
     fi
 
     prune_build_cache_if_low
@@ -10363,52 +10510,64 @@ QEMU_START_EPOCH=$(date +%s)
 #
 # A second e1000e (MAC ...:59), which the kernel's e1000 driver leaves alone
 # (it takes the first it finds): the device the ring-3 probe driver
-# (`services/devprobe`, `devhandle::self_test_ring3`) opens, and later the
-# Linux driver layer's first driver.
-"$QEMU" \
-    -device intel-iommu,caching-mode=on,aw-bits=48,intremap=on \
-    -netdev user,id=net0 \
-    -device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
-    -netdev user,id=net1 \
-    -device rtl8139,netdev=net1,mac=52:54:00:12:34:57 \
-    -netdev user,id=net2 \
-    -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58 \
-    -netdev user,id=net3 \
-    -device e1000e,netdev=net3,mac=52:54:00:12:34:59 \
-    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN" \
-    "${ESP_DRIVE_ARGS[@]}" \
-    -device virtio-blk-pci,drive=swap-disk \
-    -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN" \
-    "${ROOTFS_ARGS[@]}" \
-    "${VCON_ARGS[@]}" \
-    "${WATCHDOG_ARGS[@]}" \
+# (`services/devprobe`, `devhandle::self_test_ring3`) opens, and the Linux
+# driver layer's e1000e serves -- at 00:05.0, by the order of the devices
+# here, which the card boot names. Its network is one of its own
+# (10.0.5.0/24, where the others are QEMU's 10.0.2.0/24), so that what goes
+# over this card -- its address, gateway and DNS server -- cannot be taken
+# for what goes over the kernel's NIC.
+#
+# The machine is kept as QEMU_MACHINE for the card boot (card_boot), which
+# starts the same one again; the serial log, the pidfile and the monitor are
+# each boot's own.
+# SC2054: the commas are QEMU's property separators within one argument.
+# shellcheck disable=SC2054
+QEMU_MACHINE=(
+    -device intel-iommu,caching-mode=on,aw-bits=48,intremap=on
+    -netdev user,id=net0
+    -device e1000e,netdev=net0,mac=52:54:00:12:34:56
+    -netdev user,id=net1
+    -device rtl8139,netdev=net1,mac=52:54:00:12:34:57
+    -netdev user,id=net2
+    -device virtio-net-pci,netdev=net2,mac=52:54:00:12:34:58
+    -netdev user,id=net3,net=10.0.5.0/24
+    -device e1000e,netdev=net3,mac=52:54:00:12:34:59
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_WIN"
+    "${ESP_DRIVE_ARGS[@]}"
+    -device virtio-blk-pci,drive=swap-disk
+    -drive "id=swap-disk,if=none,format=raw,file=$SWAP_IMG_WIN"
+    "${ROOTFS_ARGS[@]}"
+    "${VCON_ARGS[@]}"
+    "${WATCHDOG_ARGS[@]}"
+    -device "$GPU_DEVICE"
+    -vga std
+    -device ati-vga,model=rv100
+    -audiodev none,id=snd0
+    -device AC97,audiodev=snd0
+    -device intel-hda
+    -device hda-duplex,audiodev=snd0
+    -device virtio-sound-pci,audiodev=snd0,streams=2
+    -drive "id=nvme-disk,if=none,format=raw,file=$NVME_IMG_WIN"
+    -device nvme,drive=nvme-disk,serial=SLATE-NVME-1
+    -device qemu-xhci,id=xhci0
+    -device usb-kbd,bus=xhci0.0
+    "${USB_STICK_ARGS[@]}"
+    -device pcie-root-port,id=rpser,bus=pcie.0,chassis=40,slot=40
+    -chardev null,id=pciser0
+    -device pci-serial,bus=rpser,chardev=pciser0
+    -device edu
+    "${GPU_DISPLAY_ARGS[@]}"
+    -no-reboot
+    -m 3072M
+    -cpu "$QEMU_CPU"
+    "${SMP_ARGS[@]}"
+    "${QEMU_EXTRA_ARGS[@]}"
+    -machine q35
+)
+"$QEMU" "${QEMU_MACHINE[@]}" \
     "${MONITOR_ARGS[@]}" \
-    -device "$GPU_DEVICE" \
-    -vga std \
-    -device ati-vga,model=rv100 \
-    -audiodev none,id=snd0 \
-    -device AC97,audiodev=snd0 \
-    -device intel-hda \
-    -device hda-duplex,audiodev=snd0 \
-    -device virtio-sound-pci,audiodev=snd0,streams=2 \
-    -drive "id=nvme-disk,if=none,format=raw,file=$NVME_IMG_WIN" \
-    -device nvme,drive=nvme-disk,serial=SLATE-NVME-1 \
-    -device qemu-xhci,id=xhci0 \
-    -device usb-kbd,bus=xhci0.0 \
-    "${USB_STICK_ARGS[@]}" \
-    -device pcie-root-port,id=rpser,bus=pcie.0,chassis=40,slot=40 \
-    -chardev null,id=pciser0 \
-    -device pci-serial,bus=rpser,chardev=pciser0 \
-    -device edu \
     -serial "file:$SERIAL_FILE_WIN" \
-    -pidfile "$PIDFILE_WIN" \
-    "${GPU_DISPLAY_ARGS[@]}" \
-    -no-reboot \
-    -m 3072M \
-    -cpu "$QEMU_CPU" \
-    "${SMP_ARGS[@]}" \
-    "${QEMU_EXTRA_ARGS[@]}" \
-    -machine q35 2> "$QEMU_STDERR" &
+    -pidfile "$PIDFILE_WIN" 2> "$QEMU_STDERR" &
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)
 # or exits early — a surviving qemu keeps the serial file locked and breaks

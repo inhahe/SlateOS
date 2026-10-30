@@ -1771,6 +1771,122 @@ def _append_steps(steps):
 BREADCRUMB = "[liveness] boot-window breadcrumb: {}s armed (deadline 2234s, heartbeat=9307)\n"
 
 
+def _card_boot_setting(name):
+    """boot-test.sh's `NAME="..."` line for the card boot setting `name`."""
+    with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+        found = re.search(rf'^{name}="[^"]*"$', handle.read(), re.M)
+    assert found, f"boot-test.sh has no {name}=\"...\" line"
+    return found.group(0)
+
+
+def _card_boot_verdict(serial_text):
+    """Run the real `card_boot_verdict`, with the real CARD_BOOT_DONE, on a
+    serial log holding `serial_text` (`None`: no log at all): what it said,
+    "" for a pass; `None` on a hang.
+    """
+    tmp = new_fixture()
+    try:
+        if serial_text is not None:
+            with open(os.path.join(tmp, "serial.txt"), "w",
+                      encoding="utf-8", newline="") as handle:
+                handle.write(serial_text)
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                + _card_boot_setting("CARD_BOOT_DONE") + "\n"
+                + extract_shell_function("card_boot_verdict") + "\n\n"
+                + "card_boot_verdict serial.txt > said.txt\n"
+                + "echo ran\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the card boot's verdict")
+        if proc is None or "ran" not in proc.stdout:
+            return None
+        with open(os.path.join(tmp, "said.txt"), encoding="utf-8") as handle:
+            return handle.read().strip()
+    finally:
+        drop_fixture(tmp)
+
+
+def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_network():
+    """The card boot (design-decisions 1594) passes when Linux's e1000e
+    served the spare 82574 and the daemon ran every check over it -- on
+    net3's own network, so not over the kernel's NIC by mistake -- and said
+    so before its closing line; a failure, a missing line, another network
+    or no closing line fails it, saying which. A check skipped for want of
+    an upstream passes, as in the main boot. Run under set -euo pipefail, as
+    boot-test.sh is: a grep finding nothing must not end the run.
+    """
+    served = ("[linuxdrv] e1000e started serving the card at 00:05.0 as "
+              "nic.e1000e (pid 10)\n")
+    leased = ("[netstack] serving over nic.e1000e: 52:54:00:12:34:59, DHCP gave "
+              "10.0.5.15 mask 255.255.255.0, gateway 10.0.5.2, DNS 10.0.5.3\n")
+    told = ("[spawn]   interface parity: SYS_NET_IF_INFO says the interface the "
+            "daemon serves (10.0.5.15): OK\n")
+    done = ("[spawn]   persistent netstack daemon: DNS/TCP/UDP parity checks done; "
+            "the daemon serves nic.e1000e for the system's lifetime\n")
+    good = "[boot] up\n" + served + leased + told + done
+    skipped = ("[spawn]   native resolver parity: the daemon cannot resolve either "
+               "-- check skipped\n")
+    failed = "[spawn]   FAIL: interface parity (InternalError)\n"
+    reported = "WARNING: native socket parity self-test failed: NotFound\n"
+    for label, text, want in [
+        ("every line said passes", good, ""),
+        ("CRLF line ends pass", good.replace("\n", "\r\n"), ""),
+        ("a check skipped for want of an upstream passes",
+         "[boot] up\n" + served + leased + skipped + told + done, ""),
+        ("a failure after the closing line is not the card boot's",
+         good + failed, ""),
+        ("no log fails", None, "no serial log at serial.txt"),
+        ("no closing line fails, naming the last line",
+         "[boot] up\n" + served + leased + told,
+         "the daemon's checks never finished over the card; its last line: "
+         + told.strip()),
+        ("a check's FAIL fails, naming it",
+         "[boot] up\n" + served + leased + failed + told + done, failed.strip()),
+        ("a self-test reported failed fails",
+         "[boot] up\n" + served + leased + reported + told + done, reported.strip()),
+        ("the driver never serving fails",
+         "[boot] up\n" + leased + told + done,
+         "no line saying: [linuxdrv] e1000e started serving the card at 00:05.0 "
+         "as nic.e1000e"),
+        ("the daemon never serving the card fails",
+         "[boot] up\n" + served + told + done,
+         # Its trailing space is the read-back's to drop.
+         "no line saying: [netstack] serving over nic.e1000e:"),
+        ("the card leased on the kernel NIC's network fails",
+         "[boot] up\n" + served + leased.replace("10.0.5.", "10.0.2.") + told + done,
+         "the card was not served on net3's own network (10.0.5.0/24)"),
+        ("SYS_NET_IF_INFO saying another network fails",
+         "[boot] up\n" + served + leased + told.replace("10.0.5.", "10.0.2.") + done,
+         "no line saying: interface parity: SYS_NET_IF_INFO says the interface "
+         "the daemon serves (10.0.5."),
+    ]:
+        check(label, _card_boot_verdict(text), want)
+
+
+def test_the_card_boot_waits_for_the_kernels_own_closing_line():
+    """CARD_BOOT_DONE, which ends the card boot, is what kernel/src/proc/spawn.rs
+    prints when the daemon's checks are done, for the card CARD_BOOT_WORDS
+    names; and the card it names is the one the words have the driver serve.
+    A reworded line would leave every card boot waiting out its limit.
+    """
+    done = _card_boot_setting("CARD_BOOT_DONE").split("=", 1)[1].strip('"')
+    words = _card_boot_setting("CARD_BOOT_WORDS").split("=", 1)[1].strip('"').split()
+    prefix, _, card = done.rpartition(" ")
+    with open(os.path.join(REPO_ROOT, "kernel", "src", "proc", "spawn.rs"),
+              encoding="utf-8") as handle:
+        spawn = handle.read()
+    check("the kernel prints the closing line, the card filled in",
+          prefix + " {}" in spawn, True)
+    check("the words have the daemon serve the card the line names",
+          f"net.nic={card}" in words, True)
+    check("the words have the driver serve that card",
+          any(w.startswith("linuxdrv.serve=") and card == "nic." + w.split("=", 1)[1].split("@")[0]
+              for w in words), True)
+    check("the words skip the self-tests the main boot ran",
+          "selftest.skip=1" in words, True)
+
+
 def test_a_watchdog_breadcrumb_is_not_the_boots_own_output():
     """Breadcrumbs prove the machine alive; they are not the boot progressing.
 

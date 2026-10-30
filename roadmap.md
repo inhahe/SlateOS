@@ -5536,7 +5536,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         `linuxdrv.serve=<driver>@<BB:DD.F>` keeps the driver process serving
         its card for the system's life, and `net.nic=nic.<driver>` has the
         persistent netstack daemon serve sockets over it -- every
-        persistent-daemon check passing over Linux's e1000e in QEMU. Left:
+        persistent-daemon check passing over Linux's e1000e in QEMU, which
+        every boot test checks on a second boot of its machine (the card
+        boot, the spare card on a network of its own). Left:
         the same measured on hardware (the test PC's I219-V), where the
         process's own cost can be told apart
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide

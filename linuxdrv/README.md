@@ -31,7 +31,7 @@ locking is correct as compiled.
 | `link.ld` | The driver process's layout: linked at 4 MiB, Linux's initcalls in order |
 | `hello/` | The first driver process, which drives nothing: the layer's own test |
 | `e1000e/`, `mt7925e/`, `hwsim/` | Driver processes: Linux's e1000e; its mt7925e WiFi driver; its `mac80211_hwsim`, simulated radios that test the 802.11 stack end to end |
-| `stacks/` | What several driver processes stand on, which their manifests `include`: the network stack below the sockets (`net.manifest`), Linux's 802.11 stack over it (`wifi.manifest`) |
+| `stacks/` | What several driver processes stand on, which their manifests `include`: the network stack below the sockets (`net.manifest`), Linux's 802.11 stack over it (`wifi.manifest`), and the crypto API its ciphers use (`crypto.manifest`) |
 
 ## Preparing the Linux tree
 

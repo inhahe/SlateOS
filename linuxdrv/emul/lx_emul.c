@@ -670,6 +670,14 @@ u32 __get_random_u32_below(u32 ceil)
 	return mult >> 32;
 }
 
+u8 get_random_u8(void)
+{
+	u8 r;
+
+	get_random_bytes(&r, sizeof(r));
+	return r;
+}
+
 u16 get_random_u16(void)
 {
 	u16 r;

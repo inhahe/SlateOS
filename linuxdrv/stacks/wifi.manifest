@@ -1,7 +1,8 @@
 # Linux's 802.11 stack, which every WiFi driver process stands on
 # (`include stacks/wifi.manifest`; scripts/linux-tree.sh driver), on the
-# network stack below it.
+# network stack below it and the crypto API its ciphers use.
 include stacks/net.manifest
+include stacks/crypto.manifest
 
 # mac80211: the 802.11 MAC on the host -- scanning, the station's
 # management, frames to and from the card -- as Linux builds it without

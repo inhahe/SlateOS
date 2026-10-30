@@ -12,7 +12,8 @@
  *   ends: 0 for a scan that finished, whatever it found. Passive (no SSID
  *   asked for): the card only listens, sending nothing on a network nobody
  *   has chosen.
- * - "hwsim": first the layer's netlink at its edges (lx_genl_check); then
+ * - "hwsim": first the layer's netlink at its edges (lx_genl_check), and
+ *   the crypto API's CCM against RFC 3610 (lx_wifi_ccm_check); then
  *   mac80211_hwsim's two simulated radios on one medium -- the
  *   first made an open access point (NL80211_CMD_SET_INTERFACE to AP, then
  *   NL80211_CMD_START_AP, beaconing LX_WIFI_SSID on LX_WIFI_FREQ), the
@@ -33,8 +34,10 @@
  * And what of the kernel's key management cfg80211 asks for: a keyring
  * that trusts nothing (below).
  */
+#include <crypto/aead.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
+#include <linux/scatterlist.h>
 #include <linux/etherdevice.h>
 #include <linux/ieee80211.h>
 #include <linux/key.h>
@@ -841,6 +844,109 @@ static int lx_wifi_cross(struct net_device *from, struct net_device *to)
 	return err;
 }
 
+/* RFC 3610's packet vector #1: AES-CCM, an 8-byte tag, a 2-byte length field. */
+static const u8 lx_ccm_key[16] = {
+	0xc0, 0xc1, 0xc2, 0xc3, 0xc4, 0xc5, 0xc6, 0xc7,
+	0xc8, 0xc9, 0xca, 0xcb, 0xcc, 0xcd, 0xce, 0xcf,
+};
+static const u8 lx_ccm_nonce[13] = {
+	0x00, 0x00, 0x00, 0x03, 0x02, 0x01, 0x00, 0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5,
+};
+/* The header the tag covers, and the payload it encrypts, back to back. */
+static const u8 lx_ccm_plain[8 + 23] = {
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+	0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+	0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
+};
+/* The header, then the payload encrypted and the tag. */
+static const u8 lx_ccm_sealed[8 + 23 + 8] = {
+	0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+	0x58, 0x8c, 0x97, 0x9a, 0x61, 0xc6, 0x63, 0xd2, 0xf0, 0x66, 0xd0, 0xc2, 0xc0, 0xf9,
+	0x89, 0x80, 0x6d, 0x5f, 0x6b, 0x61, 0xda, 0xc3, 0x84, 0x17, 0xe8, 0xd1, 0x2c, 0xfd,
+	0xf9, 0x26, 0xe0,
+};
+#define LX_CCM_AAD 8
+#define LX_CCM_TAG 8
+
+/*
+ * One CCM operation of `req` on the `len` bytes at `buf` (the header
+ * first), in place: encrypting `len` of header and payload, or decrypting
+ * them with the tag. The counter block made afresh each time, since CCM
+ * writes into it: its first byte the length field's size less one (2 - 1),
+ * then the nonce.
+ */
+static int lx_ccm_op(struct aead_request *req, u8 *buf, unsigned int len, bool encrypt)
+{
+	struct scatterlist sg;
+	u8 iv[16] = { 1 };
+
+	memcpy(iv + 1, lx_ccm_nonce, sizeof(lx_ccm_nonce));
+	sg_init_one(&sg, buf, encrypt ? len + LX_CCM_TAG : len);
+	aead_request_set_callback(req, 0, NULL, NULL);
+	aead_request_set_ad(req, LX_CCM_AAD);
+	aead_request_set_crypt(req, &sg, &sg, len - LX_CCM_AAD, iv);
+	return encrypt ? crypto_aead_encrypt(req) : crypto_aead_decrypt(req);
+}
+
+/*
+ * The crypto API's CCM -- what mac80211's CCMP encrypts and authenticates
+ * every frame with where the card does not -- against RFC 3610's first
+ * vector, as mac80211 asks for it (a synchronous "ccm(aes)"): the vector
+ * sealed as the RFC seals it, opened back, and refused with one bit of it
+ * changed. Both ends of a simulated network use the same code, so a cipher
+ * wrong in the same way at each would pass a join unnoticed. 0, or why
+ * not, said.
+ */
+static int lx_wifi_ccm_check(void)
+{
+	struct aead_request *req = NULL;
+	struct crypto_aead *tfm;
+	const char *wrong = NULL;
+	u8 *buf = NULL;
+	int err;
+
+	tfm = crypto_alloc_aead("ccm(aes)", 0, CRYPTO_ALG_ASYNC);
+	if (IS_ERR(tfm)) {
+		pr_err("lx-wifi: the crypto API has no ccm(aes): %ld\n", PTR_ERR(tfm));
+		return PTR_ERR(tfm);
+	}
+	err = crypto_aead_setauthsize(tfm, LX_CCM_TAG);
+	if (!err)
+		err = crypto_aead_setkey(tfm, lx_ccm_key, sizeof(lx_ccm_key));
+	buf = kmalloc(sizeof(lx_ccm_sealed), GFP_KERNEL);
+	req = aead_request_alloc(tfm, GFP_KERNEL);
+	if (!err && (!buf || !req))
+		err = -ENOMEM;
+	if (!err) {
+		memcpy(buf, lx_ccm_plain, sizeof(lx_ccm_plain));
+		err = lx_ccm_op(req, buf, sizeof(lx_ccm_plain), true);
+		if (!err && memcmp(buf, lx_ccm_sealed, sizeof(lx_ccm_sealed)))
+			wrong = "sealed RFC 3610's first vector otherwise than the RFC";
+	}
+	if (!err && !wrong) {
+		err = lx_ccm_op(req, buf, sizeof(lx_ccm_sealed), false);
+		if (!err && memcmp(buf, lx_ccm_plain, sizeof(lx_ccm_plain)))
+			wrong = "opened RFC 3610's first vector otherwise than the RFC";
+	}
+	if (!err && !wrong) {
+		memcpy(buf, lx_ccm_sealed, sizeof(lx_ccm_sealed));
+		buf[LX_CCM_AAD] ^= 1;
+		if (lx_ccm_op(req, buf, sizeof(lx_ccm_sealed), false) != -EBADMSG)
+			wrong = "opened RFC 3610's first vector with a bit of it changed";
+	}
+	if (err)
+		pr_err("lx-wifi: ccm(aes) could not be set up or run on RFC 3610's first vector: %d\n",
+		       err);
+	else if (wrong)
+		pr_err("lx-wifi: ccm(aes) %s\n", wrong);
+	else
+		pr_info("lx-wifi: ccm(aes) sealed, opened and refused RFC 3610's first vector as the RFC does\n");
+	aead_request_free(req);
+	kfree(buf);
+	crypto_free_aead(tfm);
+	return err ?: wrong ? -EBADMSG : 0;
+}
+
 static int lx_wifi_hwsim(void)
 {
 	const struct genl_family *nl80211 = lx_wifi_nl80211();
@@ -850,8 +956,10 @@ static int lx_wifi_hwsim(void)
 
 	if (!nl80211 || !lx_wifi_devs(devs, 2))
 		return -ENODEV;
-	/* What the join relies on, at its edges, first. */
+	/* What the join relies on, at its edges, first -- and the cipher it will encrypt with. */
 	err = lx_genl_check(nl80211, NL80211_MULTICAST_GROUP_MLME, NL80211_MULTICAST_GROUP_SCAN);
+	if (!err)
+		err = lx_wifi_ccm_check();
 	if (!err)
 		err = lx_wifi_ask(nl80211, NL80211_CMD_SET_INTERFACE, devs[0], lx_wifi_ap_type, NULL,
 				  "make the first radio an access point");

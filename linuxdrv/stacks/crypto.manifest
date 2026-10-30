@@ -1,0 +1,42 @@
+# Linux's crypto API, for what a driver process encrypts and authenticates
+# in software (`include stacks/crypto.manifest`; scripts/linux-tree.sh
+# driver): mac80211's ciphers -- CCMP, GCMP and the management frames'
+# BIP -- wherever the card does not do them itself, which a simulated radio
+# never does.
+#
+# The API's core: algorithms registered and looked up, their instances'
+# kinds (ciphers, AEADs, symmetric ciphers, hashes), the walk over
+# scatterlists they encrypt in, and /proc/crypto (the layer's /proc,
+# lx_fs.c).
+linux crypto/api.o
+linux crypto/cipher.o
+linux crypto/algapi.o
+linux crypto/scatterwalk.o
+linux crypto/proc.o
+linux crypto/aead.o
+linux crypto/skcipher.o
+linux crypto/lskcipher.o
+linux crypto/ahash.o
+linux crypto/shash.o
+# The crypto manager: a template such as "ccm(aes)" instantiated on its
+# first use, in a kthread of its own, and the self-test it would run there
+# (none is configured: CONFIG_CRYPTO_SELFTESTS is off).
+linux crypto/algboss.o
+linux crypto/testmgr.o
+# AES, and the modes 802.11's ciphers are made of: CTR, CCM (CCMP), GCM and
+# GHASH (GCMP, BIP-GMAC), CMAC (BIP-CMAC).
+linux crypto/aes_generic.o
+linux crypto/ctr.o
+linux crypto/ccm.o
+linux crypto/gcm.o
+linux crypto/ghash-generic.o
+linux crypto/cmac.o
+# The library routines they stand on: AES's key schedule, GF(2^128)
+# multiplication for GHASH, constant-time comparison and XOR, and
+# scatterlists -- and RC4, which mac80211's WEP and TKIP use directly.
+linux lib/crypto/aes.o
+linux lib/crypto/arc4.o
+linux lib/crypto/gf128mul.o
+linux lib/crypto/memneq.o
+linux lib/crypto/utils.o
+linux lib/scatterlist.o

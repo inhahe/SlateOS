@@ -9219,6 +9219,18 @@ if [ "$NO_STAGE" -eq 0 ]; then
             exit 1
         fi
     done
+    # Firmware on the boot medium, which the kernel puts under /lib/firmware
+    # (linuxdrv::mount_boot_firmware): the hello process's "bootfw" run
+    # loads this one, whose text linuxdrv/hello/hello.c's HELLO_BOOT_FW_TEXT
+    # holds too. Beside hello only, its one reader.
+    rm -rf "$ESP_DIR/firmware"
+    if [ -f "$ESP_DIR/linuxdrv/hello.elf" ]; then
+        if ! { mkdir -p "$ESP_DIR/firmware/slateos" &&
+               printf 'SlateOS boot-medium firmware for linuxdrv/hello\n' > "$ESP_DIR/firmware/slateos/hello.fw"; }; then
+            echo "ERROR: could not stage the boot medium's test firmware." >&2
+            exit 1
+        fi
+    fi
 fi
 # Guard against a staged image that predates this build: it must be newer
 # than the freshly-built kernel binary we just compiled.  Skipped under
@@ -9288,6 +9300,15 @@ for name in "${LINUX_DRIVERS[@]}"; do
     MODULE_LINES+="    module_cmdline: linuxdrv/$name"$'\n'
     LINUXDRV_NAMED=1
 done
+# The boot medium's firmware: each file under firmware/ a module named by
+# its path, which the kernel puts at the rest of that path under
+# /lib/firmware.
+if [ -d "$ESP_DIR/firmware" ]; then
+    while IFS= read -r fw; do
+        MODULE_LINES+="    module_path: boot():/$fw"$'\n'
+        MODULE_LINES+="    module_cmdline: $fw"$'\n'
+    done < <(cd "$ESP_DIR" && find firmware -type f | LC_ALL=C sort)
+fi
 KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" MODULE_LINES="${MODULE_LINES%$'\n'}" awk '
     substr($0, 1, 1) == "/" { entry++ }
     entry == 1 && $1 == "cmdline:" { clash = 1 }

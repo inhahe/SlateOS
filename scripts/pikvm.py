@@ -52,6 +52,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import linuxfw  # noqa: E402
 import msysbash  # noqa: E402
 import selftestflag  # noqa: E402
 
@@ -60,6 +61,11 @@ HERE = Path(__file__).resolve().parent
 WIDTH, HEIGHT = 1920, 1080
 #: The command line `stage` gives the kernel by default.
 DEFAULT_CMDLINE = "blk.writable=eui64:0025385181b1cd22 selftest.keep_going=1 log.screen=1"
+#: The hello process's boot-medium firmware, under the ESP's firmware/, and
+#: its text: hello.c's HELLO_BOOT_FW and HELLO_BOOT_FW_TEXT, as boot-test.sh
+#: stages it too (the self-test holds the three together).
+HELLO_BOOT_FW = "slateos/hello.fw"
+HELLO_BOOT_FW_TEXT = b"SlateOS boot-medium firmware for linuxdrv/hello\n"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
 
@@ -161,11 +167,15 @@ def to_absolute(pixel: int, size: int) -> int:
     return round(pixel / size * 65535) - 32768
 
 
-def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = ()) -> str:
+def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = (),
+                firmware: tuple[str, ...] = ()) -> str:
     """`template` (the repository's limine.conf) with `cmdline` on its first
     entry, the line after that entry's `kernel_path:` -- as boot-test.sh
     gives the test's command line -- and after it each Linux driver process
-    of `modules` as a module, `linuxdrv/<name>.elf` named `linuxdrv/<name>`."""
+    of `modules` as a module, `linuxdrv/<name>.elf` named `linuxdrv/<name>`,
+    then each firmware file of `firmware` (paths under the ESP's firmware/),
+    `firmware/<path>` named so, which the kernel puts at <path> under
+    /lib/firmware."""
     out, entry, done = [], 0, False
     for line in template.splitlines(keepends=True):
         if line.startswith("/"):
@@ -176,6 +186,9 @@ def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = ()) -> s
             for name in modules:
                 out.append(f"    module_path: boot():/linuxdrv/{name}.elf\n")
                 out.append(f"    module_cmdline: linuxdrv/{name}\n")
+            for path in firmware:
+                out.append(f"    module_path: boot():/firmware/{path}\n")
+                out.append(f"    module_cmdline: firmware/{path}\n")
             done = True
     if not done:
         raise ValueError("limine.conf has no first entry with a kernel_path")
@@ -414,10 +427,13 @@ def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> Non
     for needed in (kernel_path(worktree), limine_path(worktree), worktree / "limine.conf"):
         if not needed.exists():
             sys.exit(f"pikvm: nothing to stage at {needed}")
+    firmware: tuple[str, ...] = ()
     if names:
         build_linux_drivers(worktree, names)
+        # What linuxdrv/firmware.pin names, fetched and checked against it.
+        firmware = tuple(p.as_posix() for p in linuxfw.fetch(worktree))
     with tempfile.TemporaryDirectory(prefix="pikvm-esp-") as scratch:
-        stage_esp(worktree, Path(scratch), cmdline, names)
+        stage_esp(worktree, Path(scratch), cmdline, names, firmware=firmware)
         subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", scratch,
                         "--output", str(out)], check=True)
 
@@ -437,12 +453,15 @@ def limine_path(worktree: Path) -> Path:
 
 
 def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
-              strip_kernel: bool = True) -> None:
+              strip_kernel: bool = True, firmware: tuple[str, ...] = ()) -> None:
     """Lay out an ESP in `esp`: Limine, `worktree`'s built kernel (stripped of
     its debug sections when `strip_kernel` and llvm-strip is there), the
     Linux driver processes `modules` names from build/linuxdrv/ -- each
-    required -- and its limine.conf with `cmdline` on the first entry, the
-    driver processes as its modules."""
+    required -- the firmware files `firmware` names from build/firmware/
+    (linuxfw.py's; each required) under firmware/, with hello's own test
+    file there when hello is staged, as boot-test.sh stages it, and its
+    limine.conf with `cmdline` on the first entry, the driver processes and
+    the firmware as its modules."""
     (esp / "EFI" / "BOOT").mkdir(parents=True)
     (esp / "boot").mkdir()
     shutil.copy(limine_path(worktree), esp / "EFI" / "BOOT" / "BOOTX64.EFI")
@@ -462,9 +481,21 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
         (esp / "linuxdrv").mkdir()
         for name in modules:
             shutil.copy(built / f"{name}.elf", esp / "linuxdrv" / f"{name}.elf")
+    fetched = worktree / "build" / "firmware"
+    missing = [path for path in firmware if not (fetched / path).is_file()]
+    if missing:
+        raise FileNotFoundError(f"no build/firmware/{missing[0]} to stage")
+    staged = list(firmware)
+    for path in firmware:
+        (esp / "firmware" / path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(fetched / path, esp / "firmware" / path)
+    if "hello" in modules and HELLO_BOOT_FW not in staged:
+        (esp / "firmware" / HELLO_BOOT_FW).parent.mkdir(parents=True, exist_ok=True)
+        (esp / "firmware" / HELLO_BOOT_FW).write_bytes(HELLO_BOOT_FW_TEXT)
+        staged.append(HELLO_BOOT_FW)
     template = (worktree / "limine.conf").read_text(encoding="utf-8")
-    (esp / "limine.conf").write_text(limine_conf(template, cmdline, modules), encoding="utf-8",
-                                     newline="\n")
+    (esp / "limine.conf").write_text(limine_conf(template, cmdline, modules, tuple(staged)),
+                                     encoding="utf-8", newline="\n")
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
@@ -643,6 +674,14 @@ def self_test() -> int:
           conf.rfind("module_path") < conf.find("/OS Kernel (recovery)"), True)
     check("the driver processes are boot-test.sh's list",
           {"hello", "e1000e"} <= set(linux_drivers(HERE.parent)), True)
+    hello_c = (HERE.parent / "linuxdrv" / "hello" / "hello.c").read_text(encoding="utf-8")
+    boot_test = (HERE / "boot-test.sh").read_text(encoding="utf-8")
+    text = HELLO_BOOT_FW_TEXT.decode().replace("\n", "\\n")
+    check("hello's boot-medium firmware: its path and text as hello.c's and boot-test.sh's",
+          (f'#define HELLO_BOOT_FW "{HELLO_BOOT_FW}"' in hello_c,
+           f'#define HELLO_BOOT_FW_TEXT "{text}"' in hello_c,
+           f"printf '{text}' > \"$ESP_DIR/firmware/{HELLO_BOOT_FW}\"" in boot_test),
+          (True, True, True))
     with tempfile.TemporaryDirectory(prefix="pikvm-selftest-") as tmp:
         wt = Path(tmp) / "wt"
         for rel, data in [("limine/BOOTX64.EFI", b"efi"),
@@ -660,11 +699,33 @@ def self_test() -> int:
               [b"hello", b"e1000e"])
         check("stage: each a module of the first entry",
               conf.count("module_cmdline: linuxdrv/hello") + conf.count("module_cmdline: linuxdrv/e1000e"), 2)
+        check("stage: hello's boot-medium firmware beside it, a module named by its path",
+              ((esp / "firmware" / HELLO_BOOT_FW).read_bytes(),
+               "    module_path: boot():/firmware/slateos/hello.fw\n"
+               "    module_cmdline: firmware/slateos/hello.fw\n" in conf),
+              (HELLO_BOOT_FW_TEXT, True))
+        fw = "mediatek/mt7925/x.bin"
+        (wt / "build/firmware" / fw).parent.mkdir(parents=True)
+        (wt / "build/firmware" / fw).write_bytes(b"fw")
+        esp4 = Path(tmp) / "esp4"
+        stage_esp(wt, esp4, "a=1", ("hello",), strip_kernel=False, firmware=(fw,))
+        conf = (esp4 / "limine.conf").read_text(encoding="utf-8")
+        check("stage: the pinned firmware copied under firmware/, each a module after the drivers",
+              ((esp4 / "firmware" / fw).read_bytes(),
+               conf.find("module_cmdline: linuxdrv/hello") < conf.find(f"module_cmdline: firmware/{fw}"),
+               conf.count("module_cmdline: firmware/")),
+              (b"fw", True, 2))
+        try:
+            stage_esp(wt, Path(tmp) / "esp5", "a=1", (), strip_kernel=False, firmware=("nonesuch.bin",))
+            check("stage: firmware asked for and not fetched is refused", "staged", "refused")
+        except FileNotFoundError:
+            pass
         esp2 = Path(tmp) / "esp2"
         stage_esp(wt, esp2, "a=1", (), strip_kernel=False)
         check("stage: none asked for, none staged",
-              ((esp2 / "linuxdrv").exists(), "module_path" in (esp2 / "limine.conf").read_text(encoding="utf-8")),
-              (False, False))
+              ((esp2 / "linuxdrv").exists(), (esp2 / "firmware").exists(),
+               "module_path" in (esp2 / "limine.conf").read_text(encoding="utf-8")),
+              (False, False, False))
         (wt / "build/linuxdrv/e1000e.elf").unlink()
         try:
             stage_esp(wt, Path(tmp) / "esp3", "a=1", ("hello", "e1000e"), strip_kernel=False)

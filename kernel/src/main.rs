@@ -1467,6 +1467,21 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::sysfs::mount("/sys") {
                 serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
             }
+            // The boot medium's firmware, where the Linux driver processes'
+            // loader looks by default.
+            match linuxdrv::mount_boot_firmware() {
+                Ok((0, _)) => {}
+                Ok((files, bytes)) => serial_println!(
+                    "[boot] Firmware from the boot medium: {} file(s), {} bytes, at {} (read-only)",
+                    files,
+                    bytes,
+                    linuxdrv::BOOT_FIRMWARE_DIR
+                ),
+                Err(e) => serial_println!(
+                    "[boot] WARNING: the boot medium's firmware was not placed: {:?}",
+                    e
+                ),
+            }
 
             // Probe secondary block devices for ext4 filesystems.
             // Try common virtio-blk device names.  The first ext4 partition

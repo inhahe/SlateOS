@@ -1,0 +1,21 @@
+# The firmware the Linux driver processes load, from linux-firmware
+# (https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git).
+#
+# `scripts/linuxfw.py fetch` fetches each file named here at the release
+# named here into build/firmware/<path>, and refuses any whose bytes are not
+# the hash given. The files are not committed: each is a binary under its
+# own licence, which linux-firmware's WHENCE names. `scripts/pikvm.py stage`
+# puts them on the boot medium as modules `firmware/<path>`, which the kernel
+# places under /lib/firmware (design-decisions 1592).
+#
+# Moving the release is one commit: the tag, and every file's hash, taken
+# from a fetch over HTTPS from kernel.org; once committed, these lines are
+# the trust anchor.
+release 20261019
+
+# mt7925e, the test PC's MediaTek RZ717 (PCI 14C3:0717): its MCU's ROM
+# patch and its WM firmware (mt792x.h, MT7925_ROM_PATCH and
+# MT7925_FIRMWARE_WM). WHENCE: "Licence: Redistributable. See
+# LICENCE.mediatek for details."
+file mediatek/mt7925/WIFI_MT7925_PATCH_MCU_1_1_hdr.bin 8eb46014d2a6b4124472eee7476d995008a6f40b1daffef87eb42f30d98699e1
+file mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin 23ff53b4bb639b30481e2e06bb1688569ad1ba971b897936db539882abfbd120

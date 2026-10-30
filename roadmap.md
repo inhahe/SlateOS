@@ -5545,7 +5545,10 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         a MediaTek `RZ717 WiFi 7` (PCI `14C3:0717`), not an Intel one: the
         pinned release drives it with `mt7925e` (`drivers/net/wireless/
         mediatek/mt76/mt7925/pci.c` lists the ID), so the first WiFi driver
-        is that one, not `iwlwifi`
+        is that one, not `iwlwifi` -- begun 2026-10-30: its firmware
+        (linux-firmware 20261019, pinned and fetched, `linuxdrv/firmware.pin`)
+        reaches the test PC on the boot medium, which the kernel places at
+        `/lib/firmware` read-only (§1592)
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
         from Linux's DRM/KMS onto the graphics stack -- this is how the i915
         item in 3.1 gets done

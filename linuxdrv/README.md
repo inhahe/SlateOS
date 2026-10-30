@@ -102,7 +102,12 @@ capability to read with -- and Linux's own module parameters, set from the
 process's arguments (`<module>.<parameter>=<value>`, each initcall level's
 before that level runs; an unknown one, or a refused value, ending the
 process), `emul/lx_fs.c`, `emul/lx_emul.c`, `kit/src/files.rs`,
-design-decisions 1590. The driver's own
+design-decisions 1590. The firmware a driver loads comes from
+linux-firmware at the release `firmware.pin` names, each file's sha256
+pinned: `scripts/linuxfw.py fetch` takes them into `build/firmware/`, and
+`scripts/pikvm.py stage` puts them on the boot medium as Limine modules
+`firmware/<path>`, which the kernel places at `/lib/firmware/<path>`,
+read-only (design-decisions 1592). The driver's own
 code is marked at build (`scripts/linux-tree.sh` renames its sections to
 `*.lxdriver`, which `link.ld` brackets), so that only the driver's failing
 initcall ends the process, a Linux subsystem's being carried past. `hello`

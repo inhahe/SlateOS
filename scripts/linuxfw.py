@@ -1,0 +1,266 @@
+"""The firmware the Linux driver processes load: fetched, and verified against its pin.
+
+`linuxdrv/firmware.pin` names a linux-firmware release (its git tag) and each
+file wanted from it with its sha256. `fetch` takes each from kernel.org at
+that release into `build/firmware/<path>` of the worktree, refuses any whose
+bytes are not the pinned ones, and leaves a file already there with the right
+bytes alone. The files are not committed -- each is a binary under its own
+licence, which linux-firmware's WHENCE names -- so they are fetched, as the
+Linux tree is (`scripts/linux-tree.sh`). `scripts/pikvm.py stage` puts them
+on the boot medium as modules `firmware/<path>`, which the kernel places
+under /lib/firmware (design-decisions 1592).
+
+    python scripts/linuxfw.py fetch [--worktree DIR]   # fetch what is missing
+    python scripts/linuxfw.py paths [--worktree DIR]   # where each file goes
+    python scripts/linuxfw.py --self-test
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import re
+import sys
+import tempfile
+import time
+import urllib.request
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import selftestflag  # noqa: E402
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+PIN = Path("linuxdrv") / "firmware.pin"
+OUT = Path("build") / "firmware"
+URL = ("https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git/"
+       "plain/{path}?h={release}")
+# The largest file the pin may name: linux-firmware's largest are tens of MB;
+# a response past this is not the file asked for.
+MAX_BYTES = 256 << 20
+
+
+class PinError(Exception):
+    """The pin is not one: said, with the line."""
+
+
+def read_pin(text: str) -> tuple[str, list[tuple[str, str]]]:
+    """The release `text`, a pin's contents, names, and each file's path and
+    sha256 in its order. PinError for a pin that is not exactly one
+    `release <YYYYMMDD>` line and `file <path> <sha256>` lines -- a path
+    relative, its components neither empty nor `.` nor `..`, named once."""
+    release = None
+    files: list[tuple[str, str]] = []
+    for n, line in enumerate(text.splitlines(), 1):
+        words = line.split("#", 1)[0].split()
+        if not words:
+            continue
+        if words[0] == "release" and len(words) == 2:
+            if release is not None:
+                raise PinError(f"line {n}: a second release line")
+            if not re.fullmatch(r"\d{8}", words[1]):
+                raise PinError(f"line {n}: a release is a linux-firmware tag, YYYYMMDD: {words[1]!r}")
+            release = words[1]
+        elif words[0] == "file" and len(words) == 3:
+            path, sha = words[1], words[2]
+            if any(c in ("", ".", "..") for c in path.split("/")):
+                raise PinError(f"line {n}: {path!r} is no relative path")
+            if not re.fullmatch(r"[0-9a-f]{64}", sha):
+                raise PinError(f"line {n}: {sha!r} is no sha256")
+            if any(p == path for p, _ in files):
+                raise PinError(f"line {n}: {path} named twice")
+            files.append((path, sha))
+        else:
+            raise PinError(f"line {n}: neither 'release <tag>' nor 'file <path> <sha256>': {line.strip()!r}")
+    if release is None:
+        raise PinError("no release line")
+    return release, files
+
+
+def pinned(worktree: Path) -> tuple[str, list[tuple[str, str]]]:
+    """`worktree`'s pin, read. SystemExit, saying why, for one that is not."""
+    try:
+        return read_pin((worktree / PIN).read_text(encoding="utf-8"))
+    except OSError as e:
+        sys.exit(f"linuxfw: cannot read {worktree / PIN}: {e}")
+    except PinError as e:
+        sys.exit(f"linuxfw: {worktree / PIN}: {e}")
+
+
+def sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def download(url: str, opener=urllib.request.urlopen, sleep=time.sleep, tries: int = 3) -> bytes:
+    """`url`'s body, tried `tries` times, `sleep`ing 3 s between. OSError
+    (the last attempt's) when none answered, or one answered with more than
+    MAX_BYTES."""
+    # kernel.org answers urllib's own User-Agent with 403 Forbidden.
+    request = urllib.request.Request(url, headers={"User-Agent": "slateos-linuxfw/1"})
+    last: OSError | None = None
+    for attempt in range(tries):
+        try:
+            with opener(request, timeout=60) as response:
+                body = response.read(MAX_BYTES + 1)
+            if len(body) > MAX_BYTES:
+                raise OSError(f"{url}: more than {MAX_BYTES} bytes")
+            return body
+        except OSError as e:
+            last = e
+            if attempt + 1 < tries:
+                sleep(3)
+    assert last is not None
+    raise last
+
+
+def fetch(worktree: Path, opener=urllib.request.urlopen, say=print, sleep=time.sleep) -> list[Path]:
+    """Every file `worktree`'s pin names, in `build/firmware/<path>` with its
+    pinned bytes: those already right left alone, the rest fetched. The
+    paths, relative to `build/firmware`, in the pin's order. SystemExit,
+    saying which, for a file that cannot be fetched or whose bytes are not
+    the pin's -- nothing is left at its path but a right file."""
+    release, files = pinned(worktree)
+    out = worktree / OUT
+    got: list[Path] = []
+    for path, want in files:
+        dest = out / path
+        if dest.is_file() and sha256(dest.read_bytes()) == want:
+            got.append(Path(path))
+            continue
+        url = URL.format(path=path, release=release)
+        say(f"linuxfw: fetching {path} at linux-firmware {release}")
+        try:
+            body = download(url, opener, sleep)
+        except OSError as e:
+            sys.exit(f"linuxfw: could not fetch {url}: {e}")
+        if sha256(body) != want:
+            sys.exit(f"linuxfw: {url} is not the file the pin names (sha256 {sha256(body)}, "
+                     f"pinned {want}); refusing it")
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        part = dest.with_name(dest.name + ".part")
+        part.write_bytes(body)
+        part.replace(dest)
+        got.append(Path(path))
+    return got
+
+
+def self_test() -> int:
+    failures = 0
+
+    def check(what, got, want):
+        nonlocal failures
+        ok = got == want
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} {what}" + ("" if ok else f": got {got!r}, want {want!r}"))
+
+    def pin_error(text):
+        try:
+            read_pin(text)
+        except PinError as e:
+            return str(e)
+        return None
+
+    a, b = b"first file", b"second file"
+    good = (f"# a comment\nrelease 20261019\nfile x/a.bin {sha256(a)}  # trailing\n\n"
+            f"file b.bin {sha256(b)}\n")
+    check("a pin read: its release and files, in order",
+          read_pin(good), ("20261019", [("x/a.bin", sha256(a)), ("b.bin", sha256(b))]))
+    check("no release refused", pin_error(f"file b.bin {sha256(b)}\n"), "no release line")
+    check("two releases refused", (pin_error("release 20261019\nrelease 20261020\n") or "").endswith(
+        "a second release line"), True)
+    check("a release not a tag refused", "YYYYMMDD" in (pin_error("release main\n") or ""), True)
+    for bad in ("../a.bin", "/a.bin", "a//b.bin", "a/./b.bin", "a/"):
+        check(f"path {bad!r} refused", "no relative path" in (pin_error(
+            f"release 20261019\nfile {bad} {sha256(a)}\n") or ""), True)
+    check("a short hash refused", "no sha256" in (pin_error("release 20261019\nfile a.bin abc\n") or ""), True)
+    check("a file named twice refused", "named twice" in (pin_error(
+        f"release 20261019\nfile a.bin {sha256(a)}\nfile a.bin {sha256(a)}\n") or ""), True)
+    check("an unknown line refused", "neither" in (pin_error("release 20261019\nfetch everything\n") or ""), True)
+
+    class Answer:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, n=-1):
+            return self.body if n < 0 else self.body[:n]
+
+    asked: list[str] = []
+
+    def kernel_org(files, lose=0):
+        lost = [lose]
+
+        def opener(request, timeout=None):
+            url = request.full_url
+            asked.append(url)
+            # Without one of its own, urllib sends its own, which kernel.org refuses.
+            if not request.get_header("User-agent"):
+                raise OSError("HTTP Error 403: Forbidden")
+            if lost[0]:
+                lost[0] -= 1
+                raise OSError("connection reset")
+            for path, body in files.items():
+                if url == URL.format(path=path, release="20261019"):
+                    return Answer(body)
+            raise OSError(f"404 {url}")
+        return opener
+
+    with tempfile.TemporaryDirectory() as tmp:
+        wt = Path(tmp)
+        (wt / PIN).parent.mkdir(parents=True)
+        (wt / PIN).write_text(good, encoding="utf-8")
+        quiet = lambda _line: None  # noqa: E731
+        nap = lambda _s: None  # noqa: E731
+        got = fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, lose=1), quiet, nap)
+        check("fetched: each file at its path, in the pin's order",
+              (got, (wt / OUT / "x/a.bin").read_bytes(), (wt / OUT / "b.bin").read_bytes()),
+              ([Path("x/a.bin"), Path("b.bin")], a, b))
+        check("a lost answer tried again", len(asked), 3)
+        asked.clear()
+        fetch(wt, kernel_org({}), quiet, nap)
+        check("files already right not fetched again", asked, [])
+        (wt / OUT / "b.bin").write_bytes(b"stale")
+        fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}), quiet, nap)
+        check("a file not right fetched again", ((wt / OUT / "b.bin").read_bytes(), len(asked)), (b, 1))
+        (wt / OUT / "b.bin").unlink()
+        try:
+            fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b"tampered"}), quiet, nap)
+            refused = None
+        except SystemExit as e:
+            refused = str(e)
+        check("bytes not the pin's refused, and not left",
+              ("refusing it" in (refused or ""), (wt / OUT / "b.bin").exists(),
+               (wt / OUT / "b.bin.part").exists()), (True, False, False))
+        try:
+            fetch(wt, kernel_org({}, lose=5), quiet, nap)
+            unreachable = None
+        except SystemExit as e:
+            unreachable = str(e)
+        check("an unreachable file said", "could not fetch" in (unreachable or ""), True)
+    check("the repository's own pin reads", bool(read_pin((REPO / PIN).read_text(encoding="utf-8"))[1]), True)
+    print(f"linuxfw self-test: {'passed' if not failures else f'{failures} FAILED'}")
+    return 1 if failures else 0
+
+
+def main(argv: list[str]) -> int:
+    if selftestflag.wants_selftest(argv):
+        return self_test()
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("cmd", choices=("fetch", "paths"))
+    ap.add_argument("--worktree", type=Path, default=REPO)
+    args = ap.parse_args(argv)
+    if args.cmd == "fetch":
+        for path in fetch(args.worktree):
+            print(args.worktree / OUT / path)
+    else:
+        for path, _sha in pinned(args.worktree)[1]:
+            print(args.worktree / OUT / path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

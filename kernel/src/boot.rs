@@ -143,31 +143,42 @@ unsafe fn limine_str(ptr: *const u8, max: usize) -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(ptr, len) })
 }
 
-/// The module limine.conf loaded with `module_cmdline: <name>`: its bytes,
-/// as the bootloader loaded them, live for the kernel's lifetime. `None`
-/// when no module has that name -- none was configured, or the kernel was
+/// Every module limine.conf loaded: its `module_cmdline:` name and its
+/// bytes, as the bootloader loaded them, live for the kernel's lifetime --
+/// in limine.conf's order. None when none was configured, or the kernel was
 /// started by kexec, which passes no modules on.
-pub fn module(name: &[u8]) -> Option<&'static [u8]> {
-    let response = MODULE_REQUEST.response()?;
-    if response.modules.is_null() {
-        return None;
-    }
-    // At most a few hundred: a count past that is not Limine's.
-    let count = usize::try_from(response.module_count).ok()?.min(256);
-    (0..count).find_map(|i| {
-        // SAFETY: Limine's response holds `module_count` file pointers, each
-        // to a descriptor live for the kernel's lifetime.
-        let file = unsafe { response.modules.add(i).read().as_ref()? };
+pub fn modules() -> impl Iterator<Item = (&'static [u8], &'static [u8])> {
+    let (files, count) = match MODULE_REQUEST.response() {
+        // At most a few hundred: a count past that is not Limine's.
+        Some(r) if !r.modules.is_null() => (
+            r.modules,
+            usize::try_from(r.module_count).map_or(0, |n| n.min(256)),
+        ),
+        _ => (core::ptr::null(), 0),
+    };
+    (0..count).filter_map(move |i| {
+        // SAFETY: `files` is Limine's array of `count` file pointers (not
+        // null when `count` is not 0), each null or a descriptor live for
+        // the kernel's lifetime.
+        let file = unsafe { files.add(i).read().as_ref()? };
         // SAFETY: a string Limine gave.
-        let cmdline = unsafe { limine_str(file.cmdline, 256)? };
-        if cmdline != name || file.address.is_null() {
+        let name = unsafe { limine_str(file.cmdline, 256)? };
+        if file.address.is_null() {
             return None;
         }
         let size = usize::try_from(file.size).ok()?;
         // SAFETY: the module's contents: `size` bytes at `address` in the
         // direct map, which Limine loaded and nothing frees.
-        Some(unsafe { core::slice::from_raw_parts(file.address, size) })
+        Some((name, unsafe {
+            core::slice::from_raw_parts(file.address, size)
+        }))
     })
+}
+
+/// The module limine.conf loaded with `module_cmdline: <name>`: its bytes,
+/// as [`modules`] gives them. `None` when no module has that name.
+pub fn module(name: &[u8]) -> Option<&'static [u8]> {
+    modules().find(|&(n, _)| n == name).map(|(_, bytes)| bytes)
 }
 
 /// The HHDM offset, read before any other kernel code has run.

@@ -507,6 +507,7 @@ SCRIPT_OWNERS: dict[str, tuple[str, ...]] = {
         "ki_split.py",
         "layout-sweep.py",
         "linux-tree.sh",
+        "linuxfw.py",
         "live-counter-ledger.txt",
         "merge-readiness.py",
         "migrate-worktrees-to-drive.ps1",

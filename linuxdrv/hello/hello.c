@@ -34,7 +34,10 @@
  *               Linux's own firmware loader (hello_firmware_init), so must
  *               exit 0;
  *   "firmware-denied"  the same without a capability to read files, which
- *               must read none: must exit 0.
+ *               must read none: must exit 0;
+ *   "bootfw"    with no firmware_class.path, loads the boot medium's
+ *               firmware from /lib/firmware, where Linux's loader looks by
+ *               default and the kernel put it: must exit 0.
  * With an argument, the later initcalls do nothing: the first's ending is
  * the test ("earlyfail"'s comes before the first) -- but the firmware runs',
  * a late one's. An argument naming a parameter hello does not have, or
@@ -2081,6 +2084,15 @@ core_initcall(hello_params_early);
 #define HELLO_FW_PATH_ARG "firmware_class.path="
 #define HELLO_DIR_ARG "dir="
 
+/*
+ * What the boot test stages as the module firmware/slateos/hello.fw, which
+ * the kernel puts at /lib/firmware/slateos/hello.fw (scripts/boot-test.sh,
+ * kernel/src/linuxdrv.rs): the "bootfw" run's, found by Linux's loader with
+ * no firmware_class.path.
+ */
+#define HELLO_BOOT_FW "slateos/hello.fw"
+#define HELLO_BOOT_FW_TEXT "SlateOS boot-medium firmware for linuxdrv/hello\n"
+
 static u8 hello_fw_byte(size_t i)
 {
 	return (u8)(i * 7 + (i >> 8));
@@ -2139,11 +2151,24 @@ static int __init hello_firmware_init(void)
 	u8 tail[100];
 	void *data;
 
-	if (!hello_mode("firmware") && !hello_mode("firmware-denied"))
+	if (!hello_mode("firmware") && !hello_mode("firmware-denied") && !hello_mode("bootfw"))
 		return 0;
-	HELLO_CHECK(dir, "no firmware_class.path= argument");
 	dev = root_device_register("hello-fw");
 	HELLO_CHECK(!IS_ERR(dev), "no device to load firmware for");
+
+	if (hello_mode("bootfw")) {
+		HELLO_CHECK(!dir, "the bootfw run was given a firmware_class.path=");
+		HELLO_CHECK(request_firmware(&fw, HELLO_BOOT_FW, dev) == 0,
+			    "the boot medium's firmware was not found where Linux looks by default");
+		HELLO_CHECK(fw->size == sizeof(HELLO_BOOT_FW_TEXT) - 1 &&
+				    !memcmp(fw->data, HELLO_BOOT_FW_TEXT, fw->size),
+			    "the boot medium's firmware was not its bytes");
+		release_firmware(fw);
+		root_device_unregister(dev);
+		pr_info("hello firmware: the boot medium's found in /lib/firmware\n");
+		return 0;
+	}
+	HELLO_CHECK(dir, "no firmware_class.path= argument");
 
 	if (hello_mode("firmware-denied")) {
 		HELLO_CHECK(firmware_request_nowarn(&fw, "slx-test.fw", dev) == -EACCES && !fw,

@@ -2015,37 +2015,18 @@ const LATE_DGRAM_PAYLOAD: &[u8] = b"slate-udp6:the-datagram-came-late";
 /// Set by [`late_dgram_sender`] once its send has returned (either way).
 static LATE_DGRAM_SENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
-/// The daemon's link-local IPv6 address, derived from the NIC's MAC the way the
-/// daemon seeds `me.ip6` (EUI-64, RFC 4291 App. A).
-fn netstack_link_local(mac: [u8; 6]) -> [u8; 16] {
-    [
-        0xFE,
-        0x80,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        mac[0] ^ 0x02,
-        mac[1],
-        mac[2],
-        0xFF,
-        0xFE,
-        mac[3],
-        mac[4],
-        mac[5],
-    ]
-}
-
 /// Helper task for [`self_test_dgram_blocking_recv`]: wait 50 ms, then send the
-/// datagram the main task is already blocked receiving, on that same socket.
+/// datagram the main task is already blocked receiving, on that same socket --
+/// to the daemon's own link-local address, as it says it.
 extern "C" fn late_dgram_sender(handle_raw: u64) {
     crate::sched::sleep_ms(50);
     let handle = SocketHandle::from_raw(handle_raw);
-    let ll = netstack_link_local(crate::net::interface::mac().0);
-    // Ignored on purpose: the main task judges the outcome by what it received.
-    let _ = dgram_send_to6(handle, &ll, LATE_DGRAM_PORT, LATE_DGRAM_PAYLOAD);
+    // Ignored on purpose: the main task judges the outcome by what it
+    // received. A datagram that never comes leaves it waiting -- its receive
+    // has no bound -- which the boot's liveness deadline then reports.
+    if let Ok(daemon) = crate::net::netstack_client::daemon_interface() {
+        let _ = dgram_send_to6(handle, &daemon.ip6, LATE_DGRAM_PORT, LATE_DGRAM_PAYLOAD);
+    }
     LATE_DGRAM_SENT.store(true, core::sync::atomic::Ordering::SeqCst);
 }
 
@@ -2060,14 +2041,11 @@ extern "C" fn late_dgram_sender(handle_raw: u64) {
 /// non-blocking receive on the drained socket afterwards must still be
 /// `WouldBlock`: the fix waits only where waiting was asked for.
 ///
-/// `Ok(None)` with no NIC: the daemon then has no address to loop back to.
+/// The daemon's address is its own answer (`daemon_interface`): the card it
+/// serves need not be the kernel's NIC (`net.nic`).
 pub fn self_test_dgram_blocking_recv() -> KernelResult<Option<()>> {
     const AF_INET6: u16 = 10;
-    let mac = crate::net::interface::mac().0;
-    if mac == [0u8; 6] {
-        return Ok(None);
-    }
-    let ll = netstack_link_local(mac);
+    let ll = crate::net::netstack_client::daemon_interface()?.ip6;
     let handle = create_dgram(AF_INET6)?;
     let bound = match dgram_bind(handle, LATE_DGRAM_PORT) {
         Ok(p) => p,

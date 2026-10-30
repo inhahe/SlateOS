@@ -1,6 +1,6 @@
 ## A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC (lane A, 2026-10-29) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip (design-decisions 1594), awaiting a boot on main
 
 **What is wrong.** The netstack daemon's serving modes serve sockets over
 a card a Linux driver process serves (design-decisions 1589) when named one
@@ -35,3 +35,13 @@ WiFi driver serves it.
 -- a `nic.<name>` in the network's settings, or every card a driver
 process serves, one daemon each -- and started with it, the kernel's NIC
 the fallback where no card is named.
+
+**Fixed (lane A, 2026-10-30, design-decisions 1594).** Two boot options,
+both off by default: `linuxdrv.serve=<driver>@<BB:DD.F>` starts that Linux
+driver process at boot, serving the card as `nic.<driver>` for the
+system's life; `net.nic=<service>` has the persistent netstack daemon serve
+sockets over it, holding its key, not the kernel's NIC. The daemon now says
+its own interface (`netipc::OP_IFINFO`), which the kernel's self-tests ask
+rather than assume the kernel's NIC. Checked by a QEMU boot with both set:
+every persistent-daemon check passed over Linux's e1000e serving the spare
+82574.

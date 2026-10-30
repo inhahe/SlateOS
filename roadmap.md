@@ -5531,14 +5531,14 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         "Measured"): about the same rate in bursts; round trips three to
         four times longer, mostly QEMU's throttling of the card's interrupts
         on its late timers, which the native path, reading its ring without
-        an interrupt, does not meet. Left: the same measured on
-        hardware (the test PC's I219-V), where the process's own cost can be
-        told apart; and the daemon serving sockets over a port on a running
-        system -- it does when named one (`serve-dns nic.spare`, a name
-        resolved through the spare card at every boot, the daemon waiting by
-        the driver's doorbell and following its link), but nothing names one
-        (known-issues
-        `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)
+        an interrupt, does not meet. A running system's sockets go over
+        such a card when the machine is configured so (§1594):
+        `linuxdrv.serve=<driver>@<BB:DD.F>` keeps the driver process serving
+        its card for the system's life, and `net.nic=nic.<driver>` has the
+        persistent netstack daemon serve sockets over it -- every
+        persistent-daemon check passing over Linux's e1000e in QEMU. Left:
+        the same measured on hardware (the test PC's I219-V), where the
+        process's own cost can be told apart
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
         then how lane A's `net80211` meets `mac80211`/`cfg80211`. The test
         PC's card, read from its Windows through the PiKVM on 2026-10-30, is

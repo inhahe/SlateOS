@@ -109,6 +109,60 @@ pub const RING_ECHO_USER_DATA: u64 = 0x5249_4E47_4543_484F; // "RINGECHO"
 /// streaming socket API is built on.
 pub const OP_RING_TCP: u8 = 0x07;
 
+/// The daemon's own interface, as it serves it: no operands. Reply:
+/// [`ST_OK`] then [`IFINFO_LEN`] bytes, an [`IfInfo`] --
+/// `[mac:6][ipv4:4][ipv6:16][dns:4]` -- whichever card that is: the kernel's
+/// NIC, or one a driver process serves (`net.nic`), whose addresses the
+/// kernel does not hold.
+pub const OP_IFINFO: u8 = 0x08;
+
+/// The length of an [`OP_IFINFO`] reply's bytes after its status.
+pub const IFINFO_LEN: usize = 6 + 4 + 16 + 4;
+
+/// The daemon's interface, as an [`OP_IFINFO`] reply says it: the card's MAC
+/// address, the IPv4 address it took, its IPv6 link-local address, and the
+/// DNS server it was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IfInfo {
+    /// The card's MAC address.
+    pub mac: [u8; 6],
+    /// The IPv4 address the daemon took on it.
+    pub ip4: [u8; 4],
+    /// Its IPv6 link-local address (EUI-64 from `mac`).
+    pub ip6: [u8; 16],
+    /// The DNS server it was given (its lease's).
+    pub dns: [u8; 4],
+}
+
+impl IfInfo {
+    /// An [`OP_IFINFO`] reply's bytes, read; `None` for bytes too few.
+    #[must_use]
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        Some(Self {
+            mac: bytes.get(..6)?.try_into().ok()?,
+            ip4: bytes.get(6..10)?.try_into().ok()?,
+            ip6: bytes.get(10..26)?.try_into().ok()?,
+            dns: bytes.get(26..IFINFO_LEN)?.try_into().ok()?,
+        })
+    }
+
+    /// The reply's bytes: [`IFINFO_LEN`].
+    #[must_use]
+    pub fn bytes(&self) -> [u8; IFINFO_LEN] {
+        let mut out = [0u8; IFINFO_LEN];
+        let fields = self
+            .mac
+            .iter()
+            .chain(&self.ip4)
+            .chain(&self.ip6)
+            .chain(&self.dns);
+        for (o, b) in out.iter_mut().zip(fields) {
+            *o = *b;
+        }
+        out
+    }
+}
+
 /// Reply status: success. Any op-specific result bytes follow.
 pub const ST_OK: u8 = 0x00;
 /// Reply status: failure. No result bytes follow.
@@ -170,6 +224,8 @@ pub enum Request<'a> {
         /// Region size in bytes (as reported by `SYS_SHM_SIZE`).
         size: u32,
     },
+    /// The daemon's own interface ([`OP_IFINFO`]).
+    IfInfo,
     /// An opcode this build does not recognise (carries the raw byte).
     Unknown(u8),
 }
@@ -214,6 +270,7 @@ impl<'a> Request<'a> {
                 let (handle, size) = parse_handle_size(rest)?;
                 Some(Request::RingTcp { handle, size })
             }
+            OP_IFINFO => Some(Request::IfInfo),
             other => Some(Request::Unknown(other)),
         }
     }
@@ -278,6 +335,14 @@ pub fn encode_ring_echo(out: &mut [u8], handle: u64, size: u32) -> Option<usize>
 #[must_use]
 pub fn encode_ring_tcp(out: &mut [u8], handle: u64, size: u32) -> Option<usize> {
     encode_handle_size(out, OP_RING_TCP, handle, size)
+}
+
+/// Encode an [`OP_IFINFO`] request (`[op]`) into `out`. Returns bytes written
+/// (1), or `None` if `out` is empty.
+#[must_use]
+pub fn encode_ifinfo(out: &mut [u8]) -> Option<usize> {
+    *out.first_mut()? = OP_IFINFO;
+    Some(1)
 }
 
 /// Shared encoder for the `[op][handle_le:8][size_le:4]` request layout used by
@@ -632,6 +697,44 @@ mod tests {
     fn short_ring_tcp_request_is_none() {
         // op + handle but truncated size field.
         assert!(Request::parse(&[OP_RING_TCP, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0]).is_none());
+    }
+
+    #[test]
+    fn ifinfo_request_round_trip() {
+        let mut buf = [0u8; 4];
+        let n = encode_ifinfo(&mut buf).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(Request::parse(&buf[..n]), Some(Request::IfInfo));
+        assert_eq!(encode_ifinfo(&mut []), None);
+    }
+
+    #[test]
+    fn ifinfo_reply_round_trip() {
+        let mut ip6 = [0u8; 16];
+        ip6[0] = 0xfe;
+        ip6[1] = 0x80;
+        ip6[15] = 0x59;
+        let info = IfInfo {
+            mac: [0x52, 0x54, 0, 0x12, 0x34, 0x59],
+            ip4: [10, 0, 2, 15],
+            ip6,
+            dns: [10, 0, 2, 3],
+        };
+        let bytes = info.bytes();
+        assert_eq!(bytes[..6], info.mac);
+        assert_eq!(bytes[6..10], info.ip4);
+        assert_eq!(bytes[10..26], info.ip6);
+        assert_eq!(bytes[26..], info.dns);
+        assert_eq!(IfInfo::parse(&bytes), Some(info));
+        // Behind a status byte, as the reply carries it.
+        let mut out = [0u8; 40];
+        let n = encode_ok_bytes(&mut out, &bytes).unwrap();
+        match parse_bytes_reply(&out[..n]) {
+            BytesReply::Ok(b) => assert_eq!(IfInfo::parse(b), Some(info)),
+            other => panic!("wrong reply: {other:?}"),
+        }
+        // A byte short is no reply.
+        assert_eq!(IfInfo::parse(&bytes[..IFINFO_LEN - 1]), None);
     }
 
     #[test]

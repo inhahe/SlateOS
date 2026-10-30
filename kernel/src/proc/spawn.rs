@@ -5469,8 +5469,12 @@ pub(crate) fn netstack_resolve_a(host: &[u8]) -> KernelResult<Option<[u8; 4]>> {
 pub fn run_persistent_netstack() -> KernelResult<()> {
     use crate::ipc::service;
 
+    // The card the daemon serves: the one `net.nic` names -- a card a Linux
+    // driver process serves (`linuxdrv.serve`), `nic.<driver>` -- or else the
+    // kernel's NIC, which it claims.
+    let card = crate::fs::kernparam::get("net.nic");
     let ifinfo = crate::net::interface::info();
-    if !ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0] {
+    if card.is_none() && (!ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0]) {
         serial_println!(
             "[spawn]   persistent netstack daemon: SKIP (no network — up={}, ip={})",
             ifinfo.up,
@@ -5479,21 +5483,55 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         return Ok(());
     }
 
-    serial_println!("[spawn] Starting persistent userspace netstack daemon (net.userspace on)...");
+    serial_println!(
+        "[spawn] Starting persistent userspace netstack daemon (net.userspace on), serving {}...",
+        card.as_deref().unwrap_or("the kernel's NIC")
+    );
 
-    let argv: &[&[u8]] = &[b"netstack", b"serve-net"];
     let envp: &[&[u8]] = &[b"PATH=/bin"];
-    // NetRaw (WRITE) to claim the NIC persistently, plus Service (WRITE) to
-    // register `net.stack`.
-    let caps = [
+    // Over the kernel's NIC: NetRaw (WRITE) to claim it, and Service (WRITE)
+    // to register `net.stack`. Over a driver process's card: the card's key
+    // (Service READ), which the driver asks of whoever attaches, and the
+    // right to register `net.stack` alone -- no claim on the kernel's NIC,
+    // which stays the kernel's.
+    let caps_nic = [
         (ResourceType::NetRaw, 0u64, Rights::WRITE),
         (ResourceType::Service, 0u64, Rights::WRITE),
     ];
+    let caps_card = card.as_deref().map(|name| {
+        [
+            (
+                ResourceType::Service,
+                service::key_id(name.as_bytes()),
+                Rights::READ,
+            ),
+            (
+                ResourceType::Service,
+                service::key_id(b"net.stack"),
+                Rights::WRITE,
+            ),
+        ]
+    });
+    let argv_card: Option<[&[u8]; 3]> = card.as_deref().map(|name| {
+        [
+            b"netstack".as_slice(),
+            b"serve-net".as_slice(),
+            name.as_bytes(),
+        ]
+    });
+    let argv: &[&[u8]] = match &argv_card {
+        Some(argv) => argv,
+        None => &[b"netstack", b"serve-net"],
+    };
+    let capabilities: &[(ResourceType, u64, Rights)] = match &caps_card {
+        Some(caps) => caps,
+        None => &caps_nic,
+    };
     let options = SpawnOptions {
         name: "netstack",
         parent: 0,
         priority: DEFAULT_PRIORITY,
-        capabilities: &caps,
+        capabilities,
         fd_map: &[],
         argv,
         envp,
@@ -5510,13 +5548,20 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         }
     };
 
-    // Wait for the daemon to publish `net.stack` (it registers early, before the
-    // slow ARP work). Yield so the daemon actually gets CPU time.
-    let reg_deadline = crate::hrtimer::now_ns().saturating_add(3_000_000_000); // 3s
+    // Wait for the daemon to publish `net.stack`. Over the kernel's NIC it
+    // registers early, before the slow ARP work: 3 s. Over a driver process's
+    // card, only once it has attached -- the driver having probed the card and
+    // brought its link up -- and taken an address: seconds under emulation, as
+    // the boot test's serving daemon is given (linuxdrv::serve_sockets), 40 s.
+    // Yield so the daemon actually gets CPU time.
+    let reg_wait_s: u64 = if card.is_some() { 40 } else { 3 };
+    let reg_deadline =
+        crate::hrtimer::now_ns().saturating_add(reg_wait_s.saturating_mul(1_000_000_000));
     while !service::is_registered(b"net.stack") {
         if crate::hrtimer::now_ns() >= reg_deadline {
             serial_println!(
-                "[spawn]   FAIL: persistent netstack did not register net.stack within 3s"
+                "[spawn]   FAIL: persistent netstack did not register net.stack within {}s",
+                reg_wait_s
             );
             return Err(KernelError::TimedOut);
         }
@@ -5526,6 +5571,18 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         "[spawn]   persistent netstack daemon registered net.stack (pid {})",
         result.pid
     );
+    // The DNS server the UDP checks ask: the daemon's own, from its lease on
+    // the card it serves -- the kernel's NIC's only where that is its card.
+    let dns = match crate::net::netstack_client::daemon_interface() {
+        Ok(daemon) => daemon.dns,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   persistent netstack daemon did not say its interface ({:?}); the UDP checks ask the kernel's DNS server",
+                e
+            );
+            ifinfo.dns.0
+        }
+    };
 
     // Parity validation over the live persistent daemon: DNS → TCP, then UDP.
     match netstack_resolve_a(b"example.com") {
@@ -5560,7 +5617,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
     }
 
-    match netstack_udp_dns_roundtrip(&ifinfo.dns.0) {
+    match netstack_udp_dns_roundtrip(&dns) {
         Ok(Some(())) => serial_println!(
             "[spawn]   persistent netstack UDP: DNS response datagram returned over the daemon"
         ),
@@ -5580,7 +5637,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // + OP_UDP_RECV with the in-band source-address header — sending a DNS query and
     // reading the reply back through a bound socket, proving connectionless sockets
     // work end-to-end over the daemon.
-    match crate::net::netstack_client::self_test_udp_dns(&ifinfo.dns.0) {
+    match crate::net::netstack_client::self_test_udp_dns(&dns) {
         Ok(Some(())) => serial_println!(
             "[spawn]   persistent netstack UDP socket: bind+sendto+recvfrom returned a DNS reply \
              from port 53 — SOCK_DGRAM parity proven over the daemon"
@@ -6101,7 +6158,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // *ring-3* datagram socket-fd dispatch wiring (sockaddr parse, fd install,
     // errno mapping in `dispatch_linux` → `net::socket::dgram_*`) works end to end
     // — previously only the kernel-context `self_test_udp_dns` covered it.
-    run_ring3_udp_capstone(&ifinfo.dns.0);
+    run_ring3_udp_capstone(&dns);
 
     // Ring-3 IPv6 datagram capstone: the v6 sibling of `run_ring3_udp_capstone`.
     // slirp has no IPv6 DNS upstream, so this arm does a self-loopback — udpget
@@ -6467,37 +6524,22 @@ fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
 /// `me.ip6` (which the daemon diverts back into its RX FIFO, bypassing NDP), and
 /// asserts the exact bytes echo back with an `AF_INET6` source.
 ///
-/// The kernel derives `me.ip6` from the NIC MAC (the same inline EUI-64
-/// link-local the daemon seeds and the `self_test_udp6_loopback` check uses) and
-/// passes it as a 32-hex-char argv string plus a `"6"` mode selector. A missing
-/// NIC MAC skips the check. Never fails the boot — a spawn fault is a WARNING, a
+/// The kernel asks the daemon for its `me.ip6` (`daemon_interface`: the card
+/// it serves need not be the kernel's NIC, `net.nic`) and passes it as a
+/// 32-hex-char argv string plus a `"6"` mode selector. A daemon that does not
+/// say skips the check. Never fails the boot — a spawn fault is a WARNING, a
 /// network/exit variance a non-fatal note, matching the other parity checks.
 fn run_ring3_udp6_capstone() {
-    let mac = crate::net::interface::mac().0;
-    if mac == [0u8; 6] {
-        serial_println!("[spawn]   ring3 UDP6 capstone: no NIC MAC (no me.ip6) — check skipped");
-        return;
-    }
-    // EUI-64 link-local (RFC 4291 App. A), matching the daemon's
-    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
-    let ll: [u8; 16] = [
-        0xFE,
-        0x80,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        mac[0] ^ 0x02,
-        mac[1],
-        mac[2],
-        0xFF,
-        0xFE,
-        mac[3],
-        mac[4],
-        mac[5],
-    ];
+    let ll = match crate::net::netstack_client::daemon_interface() {
+        Ok(daemon) => daemon.ip6,
+        Err(e) => {
+            serial_println!(
+                "[spawn]   ring3 UDP6 capstone: the daemon did not say its address ({:?}) — check skipped",
+                e
+            );
+            return;
+        }
+    };
     let mut hex = [0u8; 32];
     fmt_ipv6_hex32(&ll, &mut hex);
 

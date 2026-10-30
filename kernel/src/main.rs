@@ -9073,6 +9073,15 @@ extern "C" fn kernel_main() -> ! {
             // off (the in-kernel resident stack owns the NIC; bounded net self-tests
             // already ran earlier).
             if crate::net::netstack_client::userspace_enabled() {
+                // A card a Linux driver process serves for the system's life
+                // (`linuxdrv.serve`), first: the daemon `net.nic` points at it
+                // attaches to it.
+                if let Err(e) = linuxdrv::serve_at_boot() {
+                    serial_println!(
+                        "WARNING: the Linux driver process linuxdrv.serve names was not started: {:?}",
+                        e
+                    );
+                }
                 if let Err(e) = proc::spawn::run_persistent_netstack() {
                     serial_println!(
                         "WARNING: persistent userspace netstack (ring 3) startup failed: {:?}",

@@ -124,6 +124,39 @@ pub fn userspace_enabled() -> bool {
         .is_none_or(|v| v.is_empty() || v == "1" || v == "yes" || v == "true")
 }
 
+/// The interface the running `net.stack` daemon serves, as it says it
+/// (`netipc::OP_IFINFO`): its MAC address, IPv4 address, IPv6 link-local
+/// address and DNS server. Whichever card that is -- the kernel's NIC, or one
+/// a Linux driver process serves (`net.nic`), whose addresses the kernel does
+/// not hold -- so a self-test that loops traffic back to the daemon, or asks
+/// its DNS server, asks here, never [`crate::net::interface`].
+///
+/// # Errors
+///
+/// The service connection's or the channel's error; `InternalError` for a
+/// reply that is not one, `NotFound` for the daemon's refusal.
+pub fn daemon_interface() -> KernelResult<netipc::IfInfo> {
+    use crate::ipc::{channel, service};
+
+    let client = service::connect(b"net.stack")?;
+    let mut req = [0u8; 1];
+    let asked = netipc::encode_ifinfo(&mut req)
+        .and_then(|n| req.get(..n))
+        .ok_or(KernelError::InternalError)
+        .and_then(channel::Message::from_bytes)
+        .and_then(|msg| channel::send(client, msg))
+        .and_then(|()| channel::recv_timeout(client, 6_000_000_000));
+    channel::close(client);
+    let reply = asked?;
+    match netipc::parse_bytes_reply(reply.data()) {
+        netipc::BytesReply::Ok(bytes) => {
+            netipc::IfInfo::parse(bytes).ok_or(KernelError::InternalError)
+        }
+        netipc::BytesReply::Fail => Err(KernelError::NotFound),
+        netipc::BytesReply::Malformed => Err(KernelError::InternalError),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The one ring (A-Q15 design A)
 // ---------------------------------------------------------------------------
@@ -1940,32 +1973,9 @@ pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
     const PORT: u16 = 9201;
     const PAYLOAD: &[u8] = b"slate-udp6:datagram-loopback";
 
-    let mac = crate::net::interface::mac().0;
-    if mac == [0u8; 6] {
-        // No NIC → the daemon has no me.ip6 to loop back to.
-        return Ok(None);
-    }
-
-    // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
-    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
-    let ll: [u8; 16] = [
-        0xFE,
-        0x80,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        mac[0] ^ 0x02,
-        mac[1],
-        mac[2],
-        0xFF,
-        0xFE,
-        mac[3],
-        mac[4],
-        mac[5],
-    ];
+    // The daemon's own link-local, as it says it: the card it serves need
+    // not be the kernel's NIC (`net.nic`).
+    let ll = daemon_interface()?.ip6;
 
     let mut conn = NetstackConn::open()?;
 
@@ -2081,31 +2091,9 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
     const OTHER: u16 = 9312;
     const PAYLOAD: &[u8] = b"slate-udp:connect-default-peer";
 
-    let mac = crate::net::interface::mac().0;
-    if mac == [0u8; 6] {
-        // No NIC → the daemon has no me.ip6 to loop back to.
-        return Ok(None);
-    }
-    // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
-    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
-    let ll: [u8; 16] = [
-        0xFE,
-        0x80,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        mac[0] ^ 0x02,
-        mac[1],
-        mac[2],
-        0xFF,
-        0xFE,
-        mac[3],
-        mac[4],
-        mac[5],
-    ];
+    // The daemon's own link-local, as it says it (`net.nic` may give it a
+    // card other than the kernel's NIC).
+    let ll = daemon_interface()?.ip6;
 
     let h = socket::create_dgram(10)?;
     let bound = match socket::dgram_bind(h, PORT) {
@@ -2262,7 +2250,8 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
 /// serial line naming it; a control-protocol fault propagates as itself.
 pub fn self_test_udp_multicast() -> KernelResult<Option<()>> {
     use crate::net::socket;
-    if crate::net::interface::mac().0 == [0u8; 6] {
+    // The interface the daemon is a member on is the one it serves.
+    if daemon_interface()?.mac == [0u8; 6] {
         return Ok(None);
     }
     let h = socket::create_dgram(2)?;
@@ -2396,6 +2385,13 @@ fn mcast_arrives(
 /// `SYS_NET_RAW_MCAST` (`net::mcast_filter`), is the daemon's and does
 /// (`want`) or does not pass `mac`.
 fn mcast_filter_check(what: &str, mac: [u8; 6], want: bool) -> KernelResult<()> {
+    // The kernel's NIC's filter is the daemon's only when the daemon serves
+    // that NIC. A card a driver process serves (`net.nic`) keeps its own,
+    // its groups sent across the port (linuxdrv's lx_nic.c), which the
+    // driver's own self-test checks.
+    if daemon_interface()?.mac != crate::net::interface::mac().0 {
+        return Ok(());
+    }
     let (owner, addrs) = crate::net::mcast_filter::current()?;
     if owner == crate::net::mcast_filter::Owner::Raw && addrs.contains(&mac) == want {
         return Ok(());
@@ -3249,32 +3245,9 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
     const CLIENT_MSG: &[u8] = b"slate-connect6:ping";
     const SERVER_MSG: &[u8] = b"slate-connect6:pong";
 
-    let mac = crate::net::interface::mac().0;
-    if mac == [0u8; 6] {
-        // No NIC → the daemon has no me.ip6 to loop back to.
-        return Ok(None);
-    }
-
-    // Inline EUI-64 link-local (RFC 4291 App. A), matching the daemon's
-    // `icmpv6::link_local_from_mac(mac)` used to seed `me.ip6`.
-    let ll: [u8; 16] = [
-        0xFE,
-        0x80,
-        0,
-        0,
-        0,
-        0,
-        0,
-        0,
-        mac[0] ^ 0x02,
-        mac[1],
-        mac[2],
-        0xFF,
-        0xFE,
-        mac[3],
-        mac[4],
-        mac[5],
-    ];
+    // The daemon's own link-local, as it says it (`net.nic` may give it a
+    // card other than the kernel's NIC).
+    let ll = daemon_interface()?.ip6;
 
     let mut conn = NetstackConn::open()?;
     // The listener's and the accepted connection's ids come from the one

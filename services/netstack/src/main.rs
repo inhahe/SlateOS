@@ -2957,6 +2957,17 @@ fn handle_request(
                 fail(out)
             }
         }
+        // Its own interface, whichever card it serves: the kernel holds the
+        // addresses of its own NIC only.
+        Some(netipc::Request::IfInfo) => {
+            let info = netipc::IfInfo {
+                mac: me.mac,
+                ip4: me.ip,
+                ip6: me.ip6,
+                dns: me.dns,
+            };
+            netipc::encode_ok_bytes(out, &info.bytes()).unwrap_or_else(|| fail(out))
+        }
         // Unknown opcode or a structurally invalid request → uniform failure.
         Some(netipc::Request::Unknown(_)) | None => fail(out),
     }

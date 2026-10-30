@@ -40,6 +40,10 @@ pub const OPT_MSG_TYPE: u8 = 53;
 pub const OPT_SERVER_ID: u8 = 54;
 /// Option 55: parameter request list.
 pub const OPT_PARAM_REQUEST: u8 = 55;
+/// Option 58: renewal time, T1 (seconds).
+pub const OPT_RENEWAL_TIME: u8 = 58;
+/// Option 59: rebinding time, T2 (seconds).
+pub const OPT_REBINDING_TIME: u8 = 59;
 const OPT_PAD: u8 = 0;
 const OPT_END: u8 = 255;
 
@@ -171,7 +175,24 @@ impl<'a> Message<'a> {
     /// Lease time in seconds (option 51).
     #[must_use]
     pub fn lease_secs(&self) -> Option<u32> {
-        let v = self.option(OPT_LEASE_TIME)?;
+        self.secs_option(OPT_LEASE_TIME)
+    }
+
+    /// Renewal time, T1, in seconds (option 58), if the server set one.
+    #[must_use]
+    pub fn renewal_secs(&self) -> Option<u32> {
+        self.secs_option(OPT_RENEWAL_TIME)
+    }
+
+    /// Rebinding time, T2, in seconds (option 59), if the server set one.
+    #[must_use]
+    pub fn rebinding_secs(&self) -> Option<u32> {
+        self.secs_option(OPT_REBINDING_TIME)
+    }
+
+    /// A 4-byte seconds option.
+    fn secs_option(&self, code: u8) -> Option<u32> {
+        let v = self.option(code)?;
         if v.len() < 4 {
             return None;
         }

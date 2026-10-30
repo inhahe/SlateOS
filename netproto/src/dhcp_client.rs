@@ -5,7 +5,8 @@
 //! of its own: the caller asks it what to send ([`Client::poll`]), sends
 //! that, and hands it the replies ([`Client::on_reply`]); it answers with
 //! what happened ([`Event`]). The first lease -- DISCOVER, OFFER, REQUEST,
-//! ACK -- is the caller's, and the client starts bound to it.
+//! ACK -- is the caller's, and the client starts bound to it; a lease gone
+//! is the caller's to take anew.
 //!
 //! Times are nanoseconds on the caller's monotonic clock.
 
@@ -30,6 +31,40 @@ pub struct Lease {
     pub server: Ipv4Addr,
     /// How long it runs from when it was given, in seconds.
     pub secs: u32,
+    /// The server's T1 and T2 (options 58, 59), in seconds from when it was
+    /// given; `None` for the defaults, half the lease and seven eighths
+    /// (§4.4.5). Ones out of order -- T1 past T2, or T2 past the lease's
+    /// end -- are ignored for the defaults.
+    pub t1_secs: Option<u32>,
+    pub t2_secs: Option<u32>,
+}
+
+impl Lease {
+    /// The lease an ACK gives, of `server` unless it names another: its
+    /// address, time, and T1 and T2. `None` for an ACK with no time, which
+    /// gives no lease to keep.
+    #[must_use]
+    pub fn from_ack(msg: &Message<'_>, server: Ipv4Addr) -> Option<Self> {
+        Some(Self {
+            ip: msg.yiaddr,
+            server: msg.server_id().unwrap_or(server),
+            secs: msg.lease_secs()?,
+            t1_secs: msg.renewal_secs(),
+            t2_secs: msg.rebinding_secs(),
+        })
+    }
+
+    /// T1 and T2 in seconds: the server's when they are in order, else the
+    /// defaults.
+    fn times(&self) -> (u64, u64) {
+        let secs = u64::from(self.secs);
+        match (self.t1_secs, self.t2_secs) {
+            (Some(t1), Some(t2)) if t1 <= t2 && u64::from(t2) <= secs => {
+                (u64::from(t1), u64::from(t2))
+            }
+            _ => (secs / 2, secs / 8 * 7),
+        }
+    }
 }
 
 /// Where the client is in its lease's life.
@@ -67,7 +102,7 @@ pub enum Event {
 
 /// A message [`Client::poll`] built: its length, and where it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Send {
+pub struct Outgoing {
     pub len: usize,
     /// The server it is for (renewing), or `None` for every server
     /// (broadcast: rebinding, rebooting).
@@ -84,7 +119,7 @@ pub enum Polled {
     /// Nothing yet: ask again by [`Client::next_ns`].
     Idle,
     /// Send the message built.
-    Send(Send),
+    Send(Outgoing),
     /// A phase ended without an answer.
     Event(Event),
 }
@@ -135,24 +170,24 @@ impl Client {
         self.phase
     }
 
-    fn at_fraction(&self, eighths: u64) -> u64 {
-        let ns = u64::from(self.lease.secs).saturating_mul(SEC) / 8 * eighths;
-        self.obtained_ns.saturating_add(ns)
+    /// `secs` from when the lease was given, in nanoseconds on the clock.
+    fn after(&self, secs: u64) -> u64 {
+        self.obtained_ns.saturating_add(secs.saturating_mul(SEC))
     }
 
-    /// T1: half the lease, when renewing starts (§4.4.5).
+    /// T1, when renewing starts.
     fn t1(&self) -> u64 {
-        self.at_fraction(4)
+        self.after(self.lease.times().0)
     }
 
-    /// T2: seven eighths of it, when rebinding starts.
+    /// T2, when rebinding starts.
     fn t2(&self) -> u64 {
-        self.at_fraction(7)
+        self.after(self.lease.times().1)
     }
 
-    /// Its end.
+    /// The lease's end.
     fn expiry(&self) -> u64 {
-        self.at_fraction(8)
+        self.after(u64::from(self.lease.secs))
     }
 
     /// Renew the lease from now rather than at T1 -- asked for by whoever
@@ -188,7 +223,8 @@ impl Client {
     }
 
     /// Time passing, at `now_ns`: a message to send now, built into `out`;
-    /// an event when a phase ended unanswered; or nothing.
+    /// an event when a phase ended unanswered; or nothing. A message `out`
+    /// has no room for is not sent, and is asked for again at the next poll.
     pub fn poll(&mut self, now_ns: u64, out: &mut [u8]) -> Polled {
         if self.phase != Phase::Gone && now_ns >= self.expiry() {
             self.phase = Phase::Gone;
@@ -200,45 +236,37 @@ impl Client {
         if self.phase == Phase::Renewing && now_ns >= self.t2() {
             self.begin(Phase::Rebinding, now_ns);
         }
-        if self.phase == Phase::Gone || self.phase == Phase::Bound || now_ns < self.next_ns {
+        if now_ns < self.next_ns {
             return Polled::Idle;
         }
-        let (len, to, bound) = match self.phase {
-            Phase::Renewing => {
-                self.next_ns = now_ns.saturating_add(half_until(now_ns, self.t2()));
-                (
-                    dhcp::build_renewal(out, self.xid, &self.mac, &self.lease.ip),
-                    Some(self.lease.server),
-                    true,
-                )
-            }
-            Phase::Rebinding => {
-                self.next_ns = now_ns.saturating_add(half_until(now_ns, self.expiry()));
-                (
-                    dhcp::build_renewal(out, self.xid, &self.mac, &self.lease.ip),
-                    None,
-                    true,
-                )
+        let built = match self.phase {
+            Phase::Renewing | Phase::Rebinding => {
+                dhcp::build_renewal(out, self.xid, &self.mac, &self.lease.ip)
             }
             Phase::Rebooting if self.tries >= REBOOT_TRIES => {
                 // Unanswered: the unexpired lease is kept, its timers as
-                // they were.
+                // they were -- a renewal under way when the link went, and
+                // past T1, resumed at once.
                 self.phase = Phase::Bound;
                 self.next_ns = self.t1();
                 return Polled::Event(Event::Kept);
             }
-            Phase::Rebooting => {
-                self.tries += 1;
-                self.next_ns = now_ns.saturating_add(REBOOT_GAP_NS);
-                (
-                    dhcp::build_request(out, self.xid, &self.mac, &self.lease.ip, None),
-                    None,
-                    false,
-                )
-            }
+            Phase::Rebooting => dhcp::build_request(out, self.xid, &self.mac, &self.lease.ip, None),
             Phase::Bound | Phase::Gone => return Polled::Idle,
         };
-        len.map_or(Polled::Idle, |len| Polled::Send(Send { len, to, bound }))
+        let Some(len) = built else {
+            return Polled::Idle;
+        };
+        let (gap, to, bound) = match self.phase {
+            Phase::Renewing => (half_until(now_ns, self.t2()), Some(self.lease.server), true),
+            Phase::Rebinding => (half_until(now_ns, self.expiry()), None, true),
+            _ => {
+                self.tries += 1;
+                (REBOOT_GAP_NS, None, false)
+            }
+        };
+        self.next_ns = now_ns.saturating_add(gap);
+        Polled::Send(Outgoing { len, to, bound })
     }
 
     fn begin(&mut self, phase: Phase, now_ns: u64) {
@@ -249,9 +277,9 @@ impl Client {
 
     /// A DHCP reply that came at `now_ns`: what it did to the lease, if it
     /// answered the transaction asked about. An ACK extends or confirms the
-    /// lease -- its time and server as it says, from now -- unless it is
-    /// for another address; a NAK, or an ACK for another address, refuses
-    /// it.
+    /// lease -- its time, T1, T2 and server as it says, from now -- unless
+    /// it is for another address; a NAK, or an ACK for another address,
+    /// refuses it.
     pub fn on_reply(&mut self, now_ns: u64, msg: &Message<'_>) -> Option<Event> {
         let asking = matches!(
             self.phase,
@@ -277,6 +305,8 @@ impl Client {
                 };
                 self.lease.secs = msg.lease_secs().unwrap_or(self.lease.secs);
                 self.lease.server = msg.server_id().unwrap_or(self.lease.server);
+                self.lease.t1_secs = msg.renewal_secs();
+                self.lease.t2_secs = msg.rebinding_secs();
                 self.obtained_ns = now_ns;
                 self.phase = Phase::Bound;
                 self.next_ns = self.t1();
@@ -305,45 +335,55 @@ mod tests {
         ip: IP,
         server: SERVER,
         secs: 800,
+        t1_secs: None,
+        t2_secs: None,
     };
 
     fn client() -> Client {
         Client::new(MAC, LEASE, 0, 100)
     }
 
-    /// A reply of type `kind` to transaction `xid`, for `yiaddr`, giving
-    /// `secs`.
-    fn reply(kind: u8, xid: u32, yiaddr: Ipv4Addr, secs: u32) -> [u8; 300] {
+    /// A message of `op` and type `kind` to transaction `xid`, for
+    /// `yiaddr`, from `server`, giving `secs` and, when set, T1 and T2.
+    fn message(
+        op: u8,
+        kind: u8,
+        xid: u32,
+        yiaddr: Ipv4Addr,
+        server: Ipv4Addr,
+        secs: u32,
+        times: Option<(u32, u32)>,
+    ) -> [u8; 300] {
         let mut b = [0u8; 300];
-        b[0] = dhcp::OP_REPLY;
+        b[0] = op;
         b[1] = 1;
         b[2] = 6;
         b[4..8].copy_from_slice(&xid.to_be_bytes());
         b[16..20].copy_from_slice(&yiaddr);
         b[236..240].copy_from_slice(&dhcp::MAGIC_COOKIE.to_be_bytes());
-        let opts = [
-            dhcp::OPT_MSG_TYPE,
-            1,
-            kind,
-            dhcp::OPT_LEASE_TIME,
-            4,
-            (secs >> 24) as u8,
-            (secs >> 16) as u8,
-            (secs >> 8) as u8,
-            secs as u8,
-            dhcp::OPT_SERVER_ID,
-            4,
-            SERVER[0],
-            SERVER[1],
-            SERVER[2],
-            SERVER[3],
-            255,
-        ];
-        b[240..240 + opts.len()].copy_from_slice(&opts);
+        let mut at = 240;
+        let mut put = |code: u8, value: &[u8]| {
+            b[at] = code;
+            b[at + 1] = value.len() as u8;
+            b[at + 2..at + 2 + value.len()].copy_from_slice(value);
+            at += 2 + value.len();
+        };
+        put(dhcp::OPT_MSG_TYPE, &[kind]);
+        put(dhcp::OPT_LEASE_TIME, &secs.to_be_bytes());
+        put(dhcp::OPT_SERVER_ID, &server);
+        if let Some((t1, t2)) = times {
+            put(dhcp::OPT_RENEWAL_TIME, &t1.to_be_bytes());
+            put(dhcp::OPT_REBINDING_TIME, &t2.to_be_bytes());
+        }
+        b[at] = 255;
         b
     }
 
-    fn sent(c: &mut Client, at: u64) -> (Send, u32, [u8; 300]) {
+    fn reply(kind: u8, xid: u32, yiaddr: Ipv4Addr, secs: u32) -> [u8; 300] {
+        message(dhcp::OP_REPLY, kind, xid, yiaddr, SERVER, secs, None)
+    }
+
+    fn sent(c: &mut Client, at: u64) -> (Outgoing, u32, [u8; 300]) {
         let mut out = [0u8; 300];
         match c.poll(at, &mut out) {
             Polled::Send(s) => {
@@ -378,7 +418,9 @@ mod tests {
         // Half of 150 s is 75 s; then the minute floor.
         assert_eq!(c.next_ns(), 625 * SEC);
         let _ = sent(&mut c, 625 * SEC);
-        assert_eq!(c.next_ns(), 685 * SEC, "a minute, not 37.5 s");
+        assert_eq!(c.next_ns(), 685 * SEC);
+        let _ = sent(&mut c, 685 * SEC);
+        assert_eq!(c.next_ns(), 700 * SEC, "T2 caps the renewal's next try");
     }
 
     #[test]
@@ -387,6 +429,7 @@ mod tests {
         let _ = sent(&mut c, 400 * SEC);
         let (s, _, _) = sent(&mut c, 700 * SEC);
         assert_eq!(s.to, None, "rebinding broadcasts");
+        assert!(s.bound, "from the address still held");
         assert_eq!(c.phase(), Phase::Rebinding);
         assert_eq!(
             c.poll(800 * SEC, &mut [0u8; 300]),
@@ -398,16 +441,60 @@ mod tests {
     }
 
     #[test]
-    fn an_ack_extends_the_lease_from_when_it_came() {
+    fn an_ack_extends_the_lease_from_when_it_came_as_its_server_says() {
         let mut c = client();
         let (_, xid, _) = sent(&mut c, 400 * SEC);
-        let ack = reply(dhcp::ACK, xid, IP, 1000);
+        let other = [10, 0, 2, 3];
+        let ack = message(dhcp::OP_REPLY, dhcp::ACK, xid, IP, other, 1000, None);
         let msg = Message::parse(&ack).unwrap();
         assert_eq!(c.on_reply(410 * SEC, &msg), Some(Event::Renewed));
         assert_eq!(c.phase(), Phase::Bound);
         assert_eq!(c.lease().secs, 1000);
+        assert_eq!(
+            c.lease().server,
+            other,
+            "the server that extended it is asked next"
+        );
         // T1 is now 410 s + 500 s.
         assert_eq!(c.next_ns(), 910 * SEC);
+    }
+
+    #[test]
+    fn the_servers_t1_and_t2_are_kept_when_in_order() {
+        let lease = Lease {
+            t1_secs: Some(100),
+            t2_secs: Some(200),
+            ..LEASE
+        };
+        let mut c = Client::new(MAC, lease, 0, 1);
+        assert_eq!(c.next_ns(), 100 * SEC);
+        let _ = sent(&mut c, 100 * SEC);
+        let (s, _, _) = sent(&mut c, 200 * SEC);
+        assert_eq!(s.to, None, "rebinding from the server's T2");
+        // Out of order: T2 past the lease's end. The defaults then.
+        let odd = Lease {
+            t1_secs: Some(100),
+            t2_secs: Some(900),
+            ..LEASE
+        };
+        assert_eq!(Client::new(MAC, odd, 0, 1).next_ns(), 400 * SEC);
+        // An ACK giving times sets them.
+        let mut c = client();
+        let (_, xid, _) = sent(&mut c, 400 * SEC);
+        let ack = message(
+            dhcp::OP_REPLY,
+            dhcp::ACK,
+            xid,
+            IP,
+            SERVER,
+            800,
+            Some((50, 60)),
+        );
+        assert_eq!(
+            c.on_reply(400 * SEC, &Message::parse(&ack).unwrap()),
+            Some(Event::Renewed)
+        );
+        assert_eq!(c.next_ns(), 450 * SEC);
     }
 
     #[test]
@@ -431,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_to_another_transaction_or_while_bound_changes_nothing() {
+    fn what_is_not_an_answer_to_the_transaction_changes_nothing() {
         let mut c = client();
         let stray = reply(dhcp::ACK, 7, IP, 5);
         assert_eq!(
@@ -443,6 +530,12 @@ mod tests {
         let other = reply(dhcp::NAK, xid.wrapping_add(1), [0; 4], 0);
         assert_eq!(
             c.on_reply(401 * SEC, &Message::parse(&other).unwrap()),
+            None
+        );
+        // A client's request, seen on the link, carrying the transaction.
+        let request = message(dhcp::OP_REQUEST, dhcp::NAK, xid, [0; 4], SERVER, 0, None);
+        assert_eq!(
+            c.on_reply(401 * SEC, &Message::parse(&request).unwrap()),
             None
         );
         assert_eq!(c.phase(), Phase::Renewing);
@@ -487,6 +580,23 @@ mod tests {
     }
 
     #[test]
+    fn a_link_back_while_renewing_resumes_the_renewal_once_kept() {
+        let mut c = client();
+        let _ = sent(&mut c, 400 * SEC);
+        c.reboot(410 * SEC);
+        for i in 0..5 {
+            let _ = sent(&mut c, (410 + i) * SEC);
+        }
+        assert_eq!(
+            c.poll(415 * SEC, &mut [0u8; 300]),
+            Polled::Event(Event::Kept)
+        );
+        let (s, _, _) = sent(&mut c, 415 * SEC);
+        assert_eq!(s.to, Some(SERVER), "past T1: renewing again at once");
+        assert_eq!(c.phase(), Phase::Renewing);
+    }
+
+    #[test]
     fn a_gone_lease_is_not_rebooted() {
         let mut c = client();
         assert_eq!(
@@ -514,8 +624,43 @@ mod tests {
     }
 
     #[test]
-    fn a_message_with_no_room_is_not_sent() {
+    fn a_message_with_no_room_is_not_sent_and_costs_nothing() {
         let mut c = client();
         assert_eq!(c.poll(400 * SEC, &mut [0u8; 10]), Polled::Idle);
+        let _ = sent(&mut c, 400 * SEC);
+        // An INIT-REBOOT unbuilt is no try spent: five still go out.
+        c.reboot(500 * SEC);
+        assert_eq!(c.poll(500 * SEC, &mut [0u8; 10]), Polled::Idle);
+        for i in 0..5 {
+            let _ = sent(&mut c, (500 + i) * SEC);
+        }
+        assert_eq!(
+            c.poll(505 * SEC, &mut [0u8; 300]),
+            Polled::Event(Event::Kept)
+        );
+    }
+
+    #[test]
+    fn an_ack_gives_a_lease_only_with_a_time() {
+        let ack = message(
+            dhcp::OP_REPLY,
+            dhcp::ACK,
+            1,
+            IP,
+            SERVER,
+            800,
+            Some((300, 600)),
+        );
+        let lease = Lease::from_ack(&Message::parse(&ack).unwrap(), [0; 4]).unwrap();
+        assert_eq!(lease.secs, 800);
+        assert_eq!((lease.t1_secs, lease.t2_secs), (Some(300), Some(600)));
+        assert_eq!(lease.server, SERVER);
+        let mut timeless = ack;
+        // Option 51 is the second option, at 243: its code and length made
+        // pads, its four value bytes too.
+        timeless[243..249].copy_from_slice(&[0; 6]);
+        let msg = Message::parse(&timeless).unwrap();
+        assert_eq!(msg.lease_secs(), None);
+        assert_eq!(Lease::from_ack(&msg, SERVER), None);
     }
 }

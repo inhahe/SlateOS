@@ -1338,9 +1338,9 @@ def test_the_cable_is_pulled_and_plugged_back_once_each_when_the_daemon_asks():
         return
     lines = out.splitlines()
     check("its steps: nothing asked, half a line, asked and failed, pulled, "
-          "waiting, plugged back, done",
+          "waiting, plugged back, then waiting for the next cycle",
           [line for line in lines if line.startswith("step=")],
-          ["step=0", "step=0", "step=1", "step=2", "step=2", "step=4", "step=4"])
+          ["step=0", "step=0", "step=1", "step=2", "step=2", "step=4", "step=0"])
     calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
     check("set_link off twice (once failed), on once, nothing else",
           [line for line in calls if not line.startswith("failures:")],
@@ -1354,6 +1354,42 @@ def test_the_cable_is_pulled_and_plugged_back_once_each_when_the_daemon_asks():
         python="")
     check("with no Python the responder does nothing",
           quiet.split() if quiet else quiet, ["step=0", "not-called"])
+
+
+def test_a_second_cycle_is_answered_for_whoever_asks_and_the_first_not_again():
+    """After a cycle `cable_responder` waits for the next, and any line asking
+    counts: the kernel's test of the daemon serving sockets over the card asks
+    a second time, after nic-check. Only what was printed after the first
+    cycle's end is read for it, so nic-check's own lines, still in the log,
+    do not start it.
+    """
+    body = (
+        "step() { cable_responder 2>>errors.txt; echo \"step=$CABLE_STEP\"; }\n"
+        "printf '[netstack] nic-check: cable: pull it\\n' > serial.txt\n"
+        "step\n"
+        "printf '[netstack] nic-check: cable: plug it back\\n' >> serial.txt\n"
+        "step\n"
+        # The cycle's end: nic-check's lines are still the last in the log.
+        "step\n"
+        "step\n"
+        "printf '[linuxdrv]   cable: pull it\\n' >> serial.txt\n"
+        "step\n"
+        "printf '[linuxdrv]   cable: plug it back\\n' >> serial.txt\n"
+        "step\n"
+        "echo calls:; cat calls.txt\n")
+    out = _cable_harness(body)
+    check("the responder ran to its end", out is not None, True)
+    if out is None:
+        return
+    lines = out.splitlines()
+    check("its steps: pulled, plugged back, waiting -- not started again by the "
+          "first cycle's lines -- then pulled and plugged back again",
+          [line for line in lines if line.startswith("step=")],
+          ["step=2", "step=4", "step=0", "step=0", "step=2", "step=4"])
+    calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
+    check("off and on for each cycle, nothing more", calls,
+          ["hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 on",
+           "hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 on"])
 
 
 def _death_harness(cmdline, serial_text):

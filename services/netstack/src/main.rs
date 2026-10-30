@@ -2556,7 +2556,12 @@ fn run_dns_service(me: &IfInfo, persistent: bool, dhcp: Option<dhcp_client::Clie
         let ch = match next_client(listener as u64, &mut net, me, next_hop_mac.as_ref()) {
             Ok(Some(ch)) => ch,
             Ok(None) => continue,
-            Err(why) => {
+            // Said already; the caller may take a new lease and serve again.
+            Err(Ended::LeaseLost) => {
+                code = NIC_NO_ADDRESS;
+                break;
+            }
+            Err(Ended::Fault(why)) => {
                 Line::new()
                     .put(b"[netstack] ")
                     .put(why.as_bytes())
@@ -2625,6 +2630,12 @@ fn run_dns_service(me: &IfInfo, persistent: bool, dhcp: Option<dhcp_client::Clie
         print("[netstack] FAIL: the card never put the multicast filter in force\n");
         code = NIC_MCAST;
     }
+    // Nor did one whose card's link came back and whose lease was then not
+    // confirmed by its server -- or whose link's return was never taken.
+    if !persistent && code == 0 && (net.relinks > net.confirmed || nic::take_link_back()) {
+        print("[netstack] FAIL: the card's link came back and its lease was never confirmed\n");
+        code = NIC_LINK;
+    }
 
     // Tear down any ring session the client left open (unmaps + closes conns).
     sessions.close_all(&mut net, me);
@@ -2641,30 +2652,31 @@ fn run_dns_service(me: &IfInfo, persistent: bool, dhcp: Option<dhcp_client::Clie
 /// The next client connected to `listener`, waited for up to
 /// [`ACCEPT_TIMEOUT_NS`]: `None` for none in that time.
 ///
-/// The card is served meanwhile: what comes between requests -- a segment
-/// for an open session, an ARP request -- is routed as it comes ([`pump`])
-/// rather than left for the next request, a client waiting is taken before
-/// the card is read, a link come back is acted on -- our addresses
-/// announced ([`announce_addresses`]), the lease confirmed -- and a card's lease kept
-/// ([`drive_dhcp`]). On a driver process's card the wait is woken by its
-/// doorbell or the client, whichever comes first; on the kernel's NIC,
-/// which has no wait, by the client or the time. An error when the card has
-/// gone, the listener has, the wait failed, an announcement could not be
-/// sent, or the card's lease was refused or ran out.
+/// The card is served meanwhile, and first: its lease kept and a link come
+/// back acted on ([`lease_step`]) before a client waiting is taken, so that
+/// clients that never stop coming do not starve it; what comes between
+/// requests -- a segment for an open session, an ARP request -- routed as
+/// it comes ([`pump`]) rather than left for the next request. On a driver
+/// process's card the wait is woken by its doorbell or the client,
+/// whichever comes first; on the kernel's NIC, which has no wait, by the
+/// client or the time. An error ([`Ended`]) when the card has gone, the
+/// listener has, the wait failed, our addresses could not be announced, or
+/// the card's lease was lost.
 fn next_client(
     listener: u64,
     net: &mut Net,
     me: &IfInfo,
     next_hop_mac: Option<&[u8; 6]>,
-) -> Result<Option<u64>, &'static str> {
+) -> Result<Option<u64>, Ended> {
     let deadline = now_ns().saturating_add(ACCEPT_TIMEOUT_NS);
     loop {
+        lease_step(net, me)?;
         let accepted = syscall2(SYS_SERVICE_ACCEPT_TIMEOUT, listener, 0);
         if let Ok(ch) = u64::try_from(accepted) {
             return Ok(Some(ch));
         }
         if accepted != E_TIMED_OUT {
-            return Err("FAIL: the service's listener is gone");
+            return Err(Ended::Fault("FAIL: the service's listener is gone"));
         }
         match next_hop_mac {
             Some(mac) => {
@@ -2681,10 +2693,10 @@ fn next_client(
                     let Some(bytes) = frame.get(..n) else {
                         continue;
                     };
-                    match (dhcp_reply(bytes), net.dhcp.as_mut()) {
+                    match (dhcp_payload(bytes), net.dhcp.as_mut()) {
                         (Some(reply), Some(client)) => {
-                            if let Some(event) = client.on_reply(now_ns(), &reply) {
-                                net.dhcp_event = Some(event);
+                            if let Some(event) = dhcp_take(client, reply) {
+                                note_dhcp(&mut net.dhcp_event, event);
                             }
                         }
                         _ => answer_link(bytes, me),
@@ -2692,23 +2704,21 @@ fn next_client(
                 }
             }
         }
-        // A link come back, once it is up: one gone down again first waits
-        // for its next return.
-        if nic::link_up() && nic::take_link_back() {
-            announce_addresses(me)?;
-            if let Some(client) = net.dhcp.as_mut() {
-                client.reboot(now_ns());
-            }
-            print(
-                "[netstack] the card's link came back: addresses announced, the lease to be confirmed\n",
-            );
-        }
-        drive_dhcp(net, me)?;
         let left = deadline.saturating_sub(now_ns());
         if left == 0 {
             return Ok(None);
         }
-        nic::wait_or_client(listener, left)?;
+        nic::wait_or_client(listener, left).map_err(Ended::Fault)?;
+    }
+}
+
+/// `event`, what a DHCP reply did to the lease, kept in `pending` for
+/// [`lease_step`]: one at a time, a lease lost never overwritten by what
+/// came after it.
+fn note_dhcp(pending: &mut Option<dhcp_client::Event>, event: dhcp_client::Event) {
+    use dhcp_client::Event;
+    if !matches!(pending, Some(Event::Refused | Event::Expired)) {
+        *pending = Some(event);
     }
 }
 
@@ -3096,9 +3106,9 @@ enum Rx {
     Tcp(RawRx),
     /// A UDP datagram addressed to us.
     Udp(UdpRx),
-    /// A DHCP message to the client port, its bytes copied to the UDP
-    /// buffer: whatever its address, broadcast included, which [`Rx::Udp`]
-    /// passes over.
+    /// A DHCP message to the client port not at our address -- broadcast,
+    /// or before we hold one, which [`Rx::Udp`] passes over -- its bytes
+    /// copied to the UDP buffer.
     Dhcp(usize),
     /// A frame that is neither: skip it and keep draining.
     Other,
@@ -3123,14 +3133,16 @@ fn recv_any(me: &IfInfo, frame: &mut [u8], tcp_pl: &mut [u8], udp_pl: &mut [u8])
         RawRx::Ignore => {}
         seg => return Rx::Tcp(seg),
     }
-    if let Some(msg) = dhcp_payload(bytes)
-        && let Some(slot) = udp_pl.get_mut(..msg.len())
-    {
-        slot.copy_from_slice(msg);
-        return Rx::Dhcp(msg.len());
-    }
     match parse_udp(me, bytes, udp_pl) {
         Some(dg) => Rx::Udp(dg),
+        // A DHCP reply not at our address -- broadcast, or before we hold
+        // one -- which `parse_udp` passes over.
+        None if let Some(msg) = dhcp_payload(bytes)
+            && let Some(slot) = udp_pl.get_mut(..msg.len()) =>
+        {
+            slot.copy_from_slice(msg);
+            Rx::Dhcp(msg.len())
+        }
         None => match parse_query(bytes) {
             Some(query) => query,
             None => {
@@ -3271,6 +3283,13 @@ fn parse_query(bytes: &[u8]) -> Option<Rx> {
 /// One pump for both protocols over one [`Net`]: see [`recv_any`] for what
 /// the two separate pumps it replaced used to drop.
 fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
+    // The card's lease kept wherever the daemon waits on its card -- a long
+    // request's loops included -- not only between requests.
+    if let Some(client) = net.dhcp.as_mut()
+        && let Some(event) = dhcp_poll(client, me)
+    {
+        note_dhcp(&mut net.dhcp_event, event);
+    }
     let mut frame = [0u8; MAX_FRAME];
     let mut tcp_pl = [0u8; MAX_FRAME];
     let mut udp_pl = [0u8; UDP_DGRAM_MAX];
@@ -3325,14 +3344,21 @@ fn pump(net: &mut Net, me: &IfInfo, next_hop_mac: &[u8; 6]) -> bool {
             Rx::Dhcp(len) => {
                 any = true;
                 if let Some(client) = net.dhcp.as_mut()
-                    && let Some(msg) = udp_pl.get(..len).and_then(netproto::dhcp::Message::parse)
-                    && let Some(event) = client.on_reply(now_ns(), &msg)
+                    && let Some(event) = udp_pl.get(..len).and_then(|m| dhcp_take(client, m))
                 {
-                    net.dhcp_event = Some(event);
+                    note_dhcp(&mut net.dhcp_event, event);
                 }
             }
             Rx::Udp(dg) => {
                 any = true;
+                // A DHCP reply at our address is the lease's when it answers
+                // its client; else a socket's, bound to the port, as any.
+                if let Some(client) = net.dhcp.as_mut()
+                    && let Some(event) = dhcp_at_our_address(client, &dg, &udp_pl)
+                {
+                    note_dhcp(&mut net.dhcp_event, event);
+                    continue;
+                }
                 // A datagram to an unbound port is dropped (no ICMP port-unreachable yet),
                 // and one to a group only reaches a socket that joined it.
                 if let Some(sock) = net.udp.by_port(dg.dst_port)
@@ -4454,12 +4480,17 @@ struct Net {
     /// Connections their owner has closed, lingering to answer their peers.
     closing: Closing,
     /// The lease the daemon holds on a driver process's card, kept in the
-    /// serving loop ([`drive_dhcp`]); `None` over the kernel's NIC, whose
+    /// serving loop ([`lease_step`]); `None` over the kernel's NIC, whose
     /// address is the kernel's.
     dhcp: Option<dhcp_client::Client>,
-    /// What a DHCP reply did to the lease, from [`pump`], for [`drive_dhcp`]
-    /// to act on.
+    /// What a DHCP reply did to the lease, from [`pump`], for [`lease_step`]
+    /// to act on ([`note_dhcp`]).
     dhcp_event: Option<dhcp_client::Event>,
+    /// How many times the card's link came back, and how many times its
+    /// lease was then confirmed by its server: the bounded service -- the
+    /// boot test's -- ends failed when they differ.
+    relinks: u32,
+    confirmed: u32,
 }
 
 /// Most closed connections that linger at once.
@@ -4579,6 +4610,8 @@ impl Net {
             closing: Closing::new(),
             dhcp: None,
             dhcp_event: None,
+            relinks: 0,
+            confirmed: 0,
         }
     }
 
@@ -6280,9 +6313,10 @@ fn advertisements(me: &IfInfo, within_ns: u64, first: bool) -> Result<u64, &'sta
 /// the boot test does, through QEMU's monitor, at the line "cable: pull
 /// it" -- the link told down, and a ping sent then dropped, as on a wire
 /// with nothing at its end; asked to plug it back, told up, its coming back
-/// noticed and acted on -- our addresses announced ([`announce_addresses`]), the
-/// `lease` confirmed by INIT-REBOOT and then renewed as asked, as the
-/// serving loop's client keeps it ([`dhcp_settle`]) -- the gateway answering
+/// noticed and acted on -- the `lease` confirmed by INIT-REBOOT, then our
+/// addresses announced ([`announce_addresses`]), then the lease renewed as
+/// asked, as the serving loop's client keeps it ([`dhcp_settle`]) -- the
+/// gateway answering
 /// ARP again, frames flowing once more, and the ping sent while the link
 /// was down never answered: had it been queued, it would have gone out once
 /// the link was back. 20 s for each.
@@ -6315,7 +6349,6 @@ fn nic_check_cable(
     if !nic::take_link_back() {
         return Err("FAIL: the card's link coming back was not noticed");
     }
-    announce_addresses(me)?;
     let mut client = dhcp_client::Client::new(me.mac, lease, now_ns(), dhcp_xid(&me.mac));
     client.reboot(now_ns());
     let within = now_ns().saturating_add(6_000_000_000);
@@ -6324,6 +6357,9 @@ fn nic_check_cable(
             "FAIL: the DHCP server did not confirm the lease by INIT-REBOOT once the cable was back",
         );
     }
+    // Announced once confirmed (RFC 2131 §4.4.1): not an address the server
+    // may since have given another.
+    announce_addresses(me)?;
     client.renew(now_ns());
     let within = now_ns().saturating_add(3_000_000_000);
     if dhcp_settle(&mut client, me, within)? != Some(Event::Renewed) {
@@ -6352,9 +6388,10 @@ fn nic_check_cable(
 }
 
 /// Our addresses announced again, what the link's other end knew of us
-/// perhaps gone with it -- once a card's link comes back: a gratuitous ARP
-/// for the IPv4 one and an unsolicited neighbour advertisement for the IPv6
-/// one. An error when either could not be sent.
+/// perhaps gone with it -- once a card's link has come back and the lease
+/// is confirmed or kept: a gratuitous ARP for the IPv4 one and an
+/// unsolicited neighbour advertisement for the IPv6 one. An error when
+/// either could not be sent.
 fn announce_addresses(me: &IfInfo) -> Result<(), &'static str> {
     if nic::send(&arp::request(&me.mac, &me.ip, &me.ip)) < 0 {
         return Err("FAIL: the gratuitous ARP could not be sent once the link came back");
@@ -6365,94 +6402,139 @@ fn announce_addresses(me: &IfInfo) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// A DHCP client message `msg` sent as `send` says ([`dhcp_client::Send`]):
-/// to its server or to every one, from our address or from 0.0.0.0 -- in an
-/// Ethernet broadcast either way, the server's address on the link not
-/// looked up for it. Whether it was sent.
-fn send_dhcp(me: &IfInfo, msg: &[u8], send: dhcp_client::Send) -> bool {
+/// A DHCP client message `msg` sent as `out` says
+/// ([`dhcp_client::Outgoing`]): from our address, or from 0.0.0.0; to
+/// every server in an Ethernet broadcast, or to one at its next hop's MAC
+/// address, looked up by ARP -- a unicast IP datagram is not sent in a
+/// link broadcast (RFC 1122 §3.3.6). Whether it was sent: not when the
+/// next hop does not answer, the message then asked again at its client's
+/// next retransmission.
+fn send_dhcp(me: &IfInfo, msg: &[u8], out: dhcp_client::Outgoing) -> bool {
     let unbound = card_if_info(me.mac);
-    let from = if send.bound { me } else { &unbound };
-    let to = send.to.unwrap_or([255; 4]);
+    let from = if out.bound { me } else { &unbound };
+    let (to, to_mac) = match out.to {
+        Some(server) => match arp_resolve(&me.next_hop(&server), me) {
+            Some(mac) => (server, mac),
+            None => return false,
+        },
+        None => ([255; 4], [0xff; 6]),
+    };
     let mut datagram = [0u8; 400];
     let Some(len) = udp::write(&mut datagram, &from.ip, &to, 68, 67, msg) else {
         return false;
     };
     datagram
         .get(..len)
-        .is_some_and(|d| send_ipv4(from, &[0xff; 6], &to, ipv4::PROTO_UDP, d, 0))
+        .is_some_and(|d| send_ipv4(from, &to_mac, &to, ipv4::PROTO_UDP, d, 0))
 }
 
-/// The card's lease kept, a step of the serving loop: what time asks sent
-/// ([`dhcp_client::Client::poll`]), and what happened to the lease -- as
-/// time passed, or as a reply came ([`pump`]) -- acted on: a renewal or a
-/// confirmation said, a lease refused or run out an error, the address no
-/// longer ours. Nothing over the kernel's NIC, whose address is the
-/// kernel's.
-fn drive_dhcp(net: &mut Net, me: &IfInfo) -> Result<(), &'static str> {
-    use dhcp_client::{Event, Polled};
+/// What time asks of `client` done -- a message due sent ([`send_dhcp`]) --
+/// and the event, if a phase ended unanswered.
+fn dhcp_poll(client: &mut dhcp_client::Client, me: &IfInfo) -> Option<dhcp_client::Event> {
+    let mut msg = [0u8; 320];
+    match client.poll(now_ns(), &mut msg) {
+        dhcp_client::Polled::Send(out) => {
+            // Unsent, it is asked again at the next retransmission.
+            let _sent = msg.get(..out.len).is_some_and(|m| send_dhcp(me, m, out));
+            None
+        }
+        dhcp_client::Polled::Event(event) => Some(event),
+        dhcp_client::Polled::Idle => None,
+    }
+}
+
+/// The DHCP message `payload` given to `client`: what it did to the lease,
+/// if it answered the transaction the client asked about.
+fn dhcp_take(client: &mut dhcp_client::Client, payload: &[u8]) -> Option<dhcp_client::Event> {
+    let msg = netproto::dhcp::Message::parse(payload)?;
+    client.on_reply(now_ns(), &msg)
+}
+
+/// How the serving loop ended early: a fault, said, or the card's lease
+/// lost -- refused, or run out -- which its caller may take anew.
+enum Ended {
+    Fault(&'static str),
+    LeaseLost,
+}
+
+/// The card's lease kept, a step of the serving loop: a link come back
+/// starting its confirmation (INIT-REBOOT); what time asks of the client
+/// done ([`dhcp_poll`]); and what happened to the lease -- as time passed,
+/// or as a reply came ([`pump`]) -- acted on: our addresses announced once
+/// it is confirmed or kept, a renewal said, a lease refused or run out the
+/// end of the service ([`Ended::LeaseLost`]). The link alone over the
+/// kernel's NIC, whose address is the kernel's.
+fn lease_step(net: &mut Net, me: &IfInfo) -> Result<(), Ended> {
+    use dhcp_client::Event;
+    // A link come back, once it is up: one gone down again first waits for
+    // its next return.
+    if nic::link_up() && nic::take_link_back() {
+        if let Some(client) = net.dhcp.as_mut() {
+            client.reboot(now_ns());
+        }
+        net.relinks = net.relinks.saturating_add(1);
+        print("[netstack] the card's link came back: its lease to be confirmed\n");
+    }
     let Some(client) = net.dhcp.as_mut() else {
         return Ok(());
     };
-    let mut msg = [0u8; 320];
-    let timed = match client.poll(now_ns(), &mut msg) {
-        Polled::Send(send) => {
-            // Unsent, it is asked again at the next retransmission.
-            let _sent = msg.get(..send.len).is_some_and(|m| send_dhcp(me, m, send));
-            None
-        }
-        Polled::Event(event) => Some(event),
-        Polled::Idle => None,
-    };
+    let timed = dhcp_poll(client, me);
     for event in [timed, net.dhcp_event.take()].into_iter().flatten() {
         match event {
             Event::Renewed => print("[netstack] the card's lease was renewed\n"),
-            Event::Confirmed => print("[netstack] the card's lease was confirmed\n"),
-            Event::Kept => print("[netstack] no DHCP server answered: the card's lease is kept\n"),
-            Event::Refused => {
-                return Err(
-                    "FAIL: the DHCP server refused the card's lease: the address is no longer ours",
-                );
+            Event::Confirmed | Event::Kept => {
+                announce_addresses(me).map_err(Ended::Fault)?;
+                if event == Event::Confirmed {
+                    net.confirmed = net.confirmed.saturating_add(1);
+                }
+                print(if event == Event::Confirmed {
+                    "[netstack] the card's lease was confirmed: addresses announced\n"
+                } else {
+                    "[netstack] no DHCP server answered: the card's lease kept, addresses announced\n"
+                });
             }
-            Event::Expired => return Err("FAIL: the card's lease ran out unrenewed"),
+            Event::Refused => {
+                print(
+                    "[netstack] the DHCP server refused the card's lease: the address is no longer ours\n",
+                );
+                return Err(Ended::LeaseLost);
+            }
+            Event::Expired => {
+                print("[netstack] the card's lease ran out unrenewed\n");
+                return Err(Ended::LeaseLost);
+            }
         }
     }
     Ok(())
 }
 
 /// `client` driven until something happens to the lease, `deadline` at
-/// most, outside the serving loop: what time asks sent, the DHCP replies
-/// given to it. The event, or `None` past the deadline; an error when the
-/// card has gone.
+/// most, outside the serving loop: what time asks done ([`dhcp_poll`]), the
+/// card read as the serving loop reads it ([`recv_any`]) so that a reply
+/// reaches the lease here as it would there. The event, or `None` past the
+/// deadline; an error when the card has gone.
 fn dhcp_settle(
     client: &mut dhcp_client::Client,
     me: &IfInfo,
     deadline: u64,
 ) -> Result<Option<dhcp_client::Event>, &'static str> {
-    use dhcp_client::Polled;
-    let mut msg = [0u8; 320];
     let mut frame = [0u8; MAX_FRAME];
     let mut tcp = [0u8; MAX_FRAME];
     let mut udp = [0u8; UDP_DGRAM_MAX];
     while now_ns() < deadline {
-        match client.poll(now_ns(), &mut msg) {
-            Polled::Send(send) => {
-                if !msg.get(..send.len).is_some_and(|m| send_dhcp(me, m, send)) {
-                    return Err("FAIL: a DHCP message could not be sent");
-                }
-            }
-            Polled::Event(event) => return Ok(Some(event)),
-            Polled::Idle => {}
+        if let Some(event) = dhcp_poll(client, me) {
+            return Ok(Some(event));
         }
-        // Read as the serving loop reads ([`recv_any`]), so that a reply
-        // reaches the lease here as it would there; what is not one is
-        // passed over.
         loop {
             match recv_any(me, &mut frame, &mut tcp, &mut udp) {
                 Rx::Drained => break,
                 Rx::Dhcp(len) => {
-                    if let Some(reply) = udp.get(..len).and_then(netproto::dhcp::Message::parse)
-                        && let Some(event) = client.on_reply(now_ns(), &reply)
-                    {
+                    if let Some(event) = udp.get(..len).and_then(|m| dhcp_take(client, m)) {
+                        return Ok(Some(event));
+                    }
+                }
+                Rx::Udp(dg) => {
+                    if let Some(event) = dhcp_at_our_address(client, &dg, &udp) {
                         return Ok(Some(event));
                     }
                 }
@@ -6462,6 +6544,57 @@ fn dhcp_settle(
         nic::wait_until(deadline.min(client.next_ns()))?;
     }
     Ok(None)
+}
+
+/// The UDP port a DHCP client is answered at.
+const DHCP_CLIENT_PORT: u16 = 68;
+
+/// What a UDP datagram that came at our address -- `dg`, its payload at the
+/// head of `payload` -- did to the lease, when it is a DHCP reply to the
+/// client's transaction: a renewal's ACK, which comes to the address it
+/// renews. `None` for any other, which is a socket's.
+fn dhcp_at_our_address(
+    client: &mut dhcp_client::Client,
+    dg: &UdpRx,
+    payload: &[u8],
+) -> Option<dhcp_client::Event> {
+    if dg.dst_port != DHCP_CLIENT_PORT {
+        return None;
+    }
+    payload
+        .get(..dg.payload_len.min(payload.len()))
+        .and_then(|m| dhcp_take(client, m))
+}
+
+/// The card's lease taken anew, the last one lost: an address by DHCP for
+/// `me` -- perhaps not the one it had -- and the client to keep it. An exit
+/// code (`netipc::nicport::check`) for none.
+fn retake_lease(me: &mut IfInfo) -> Result<dhcp_client::Client, i64> {
+    me.ip = [0; 4];
+    match dhcp_lease(me) {
+        Ok(lease) => {
+            loopback::set_my_ip(me.ip);
+            Line::new()
+                .put(b"[netstack] the card's lease was taken anew: ")
+                .ip(&me.ip)
+                .put(b"\n")
+                .print();
+            Ok(dhcp_client::Client::new(
+                me.mac,
+                lease,
+                now_ns(),
+                dhcp_xid(&me.mac),
+            ))
+        }
+        Err(why) => {
+            Line::new()
+                .put(b"[netstack] ")
+                .put(why.as_bytes())
+                .put(b"\n")
+                .print();
+            Err(NIC_NO_ADDRESS)
+        }
+    }
 }
 
 /// Our IPv6 link-local address announced to every node on the link: an
@@ -6550,13 +6683,13 @@ fn is_advertisement_to_all_nodes(frame: &[u8]) -> bool {
 /// What a DHCP server answered: the address offered or acknowledged, and
 /// what comes with it.
 struct Lease {
-    ip: [u8; 4],
-    server: [u8; 4],
+    /// Its address, server, time, T1 and T2: what the client that keeps it
+    /// needs ([`dhcp_client::Client`]). A server that gave no time gave it
+    /// for ever.
+    core: dhcp_client::Lease,
     mask: [u8; 4],
     router: [u8; 4],
     dns: [u8; 4],
-    /// How long it runs, in seconds; for ever when the server said not.
-    secs: u32,
 }
 
 /// An address for `me` (its MAC known, its addresses all zero) by DHCP:
@@ -6571,18 +6704,20 @@ fn dhcp_lease(me: &mut IfInfo) -> Result<dhcp_client::Lease, &'static str> {
     let n = dhcp::build_discover(&mut msg, xid, &mac).ok_or("FAIL: no room for a DHCPDISCOVER")?;
     // Holding no address yet, there is nothing to answer for meanwhile.
     let offer = dhcp_exchange(mac, &msg[..n], xid, dhcp::OFFER, |_| {}).map_err(|f| f.why())?;
-    let n = dhcp::build_request(&mut msg, xid, &mac, &offer.ip, Some(&offer.server))
-        .ok_or("FAIL: no room for a DHCPREQUEST")?;
+    let n = dhcp::build_request(
+        &mut msg,
+        xid,
+        &mac,
+        &offer.core.ip,
+        Some(&offer.core.server),
+    )
+    .ok_or("FAIL: no room for a DHCPREQUEST")?;
     let ack = dhcp_exchange(mac, &msg[..n], xid, dhcp::ACK, |_| {}).map_err(|f| f.why())?;
-    me.ip = ack.ip;
+    me.ip = ack.core.ip;
     me.mask = ack.mask;
     me.gateway = ack.router;
     me.dns = ack.dns;
-    Ok(dhcp_client::Lease {
-        ip: ack.ip,
-        server: ack.server,
-        secs: ack.secs,
-    })
+    Ok(ack.core)
 }
 
 /// A DHCP transaction's id for the client of MAC `mac`: the time mixed with
@@ -6629,19 +6764,14 @@ fn dhcp_exchange(
 ) -> Result<Lease, DhcpFailed> {
     use netproto::dhcp;
     let me = &card_if_info(mac);
-    let mut datagram = [0u8; 400];
-    let len = udp::write(&mut datagram, &[0; 4], &[255; 4], 68, 67, msg)
-        .ok_or(DhcpFailed::Failed("FAIL: no room for a DHCP datagram"))?;
+    let out = dhcp_client::Outgoing {
+        len: msg.len(),
+        to: None,
+        bound: false,
+    };
     let mut frame = [0u8; MAX_FRAME];
-    for attempt in 0..5u16 {
-        if !send_ipv4(
-            me,
-            &[0xff; 6],
-            &[255; 4],
-            ipv4::PROTO_UDP,
-            &datagram[..len],
-            attempt,
-        ) {
+    for _attempt in 0..5u16 {
+        if !send_dhcp(me, msg, out) {
             return Err(DhcpFailed::Failed("FAIL: a DHCP message could not be sent"));
         }
         let deadline = now_ns().saturating_add(1_000_000_000);
@@ -6662,15 +6792,22 @@ fn dhcp_exchange(
                 }
                 match m.msg_type() {
                     Some(t) if t == want => {
+                        let core = dhcp_client::Lease::from_ack(&m, m.siaddr).unwrap_or(
+                            dhcp_client::Lease {
+                                ip: m.yiaddr,
+                                server: m.server_id().unwrap_or(m.siaddr),
+                                secs: u32::MAX,
+                                t1_secs: None,
+                                t2_secs: None,
+                            },
+                        );
                         return Ok(Lease {
-                            ip: m.yiaddr,
-                            server: m.server_id().unwrap_or(m.siaddr),
+                            core,
                             mask: m.subnet_mask().unwrap_or([255, 255, 255, 0]),
                             router: m.router().ok_or(DhcpFailed::Failed(
                                 "FAIL: the DHCP server named no router",
                             ))?,
                             dns: m.dns().unwrap_or([0; 4]),
-                            secs: m.lease_secs().unwrap_or(u32::MAX),
                         });
                     }
                     Some(dhcp::NAK) => return Err(DhcpFailed::Refused),
@@ -7017,7 +7154,7 @@ pub extern "C" fn _start() -> ! {
     // loop.
     let serving = mode == b"serve-dns" || mode == b"serve-net";
     let card = if serving { arg(args, 2) } else { b"" };
-    let (me, dhcp) = if card.is_empty() {
+    let (mut me, dhcp) = if card.is_empty() {
         match query_if_info() {
             Some(i) => (i, None),
             None => {
@@ -7066,8 +7203,17 @@ pub extern "C" fn _start() -> ! {
     if mode == b"serve-net" {
         print("[netstack] mode: serve-net (Phase 5 persistent netstack daemon)\n");
         // Persistent: owns the NIC for the system's lifetime. Only returns on an
-        // unrecoverable service fault, in which case release the NIC and exit.
-        let code = run_dns_service(&me, true, dhcp);
+        // unrecoverable service fault, in which case release the NIC and exit
+        // -- or, over a card, on its lease lost: a new one is taken (tried
+        // again for as long as no server answers, as RFC 2131's INIT state
+        // does) and the service begun again on it.
+        let mut code = run_dns_service(&me, true, dhcp);
+        while code == NIC_NO_ADDRESS && nic::over_card() {
+            code = match retake_lease(&mut me) {
+                Ok(client) => run_dns_service(&me, true, Some(client)),
+                Err(failed) => failed,
+            };
+        }
         print("[netstack] persistent service returned\n");
         nic::release(card);
         exit(code);

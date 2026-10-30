@@ -196,7 +196,7 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!(
             "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK",
             if cable_puller() {
-                ", the link following the card's cable -- a send refused while it was down, the lease confirmed and the addresses announced when it came back"
+                ", the link following the card's cable -- a ping sent while it was down dropped, never sent later; the lease confirmed by INIT-REBOOT, the addresses announced and the lease renewed when it came back -- and the serving daemon's lease confirmed after a pull of its own"
             } else {
                 ""
             }
@@ -528,9 +528,13 @@ fn e1000e_serve(
 /// and given an address by DHCP on the card, the kernel asks it to resolve a
 /// name, as a socket client asks, and it must answer: the name resolved, or
 /// not -- the boot test's host may have no upstream DNS, which is said, the
-/// card's frames having been proved by `nic-check` already. Idle after, the
-/// daemon lets the card go and ends 0. Whether all of that held; what did
-/// not is said.
+/// card's frames having been proved by `nic-check` already. Where the
+/// harness can pull the card's cable ([`cable_puller`]) it is pulled and
+/// plugged back under the daemon, asked all the while ([`keep_asking`]),
+/// which must then confirm its lease and announce its addresses. Idle after,
+/// the daemon lets the card go and ends 0 -- not `check::LINK`, its exit when
+/// a link came back and its lease was never confirmed. Whether all of that
+/// held; what did not is said.
 fn serve_sockets(card_key: u64) -> bool {
     let program = Program {
         elf: spawn::NETSTACK_ELF,
@@ -567,6 +571,16 @@ fn serve_sockets(card_key: u64) -> bool {
         crate::sched::sleep_ms(DAEMON_POLL_MS);
     }
     let answer = registered().then(|| spawn::netstack_resolve_a(b"example.com"));
+    // Where the harness can pull the card's cable, it is pulled and plugged
+    // back under the serving daemon, which is asked all the while -- kept
+    // from idling out -- and must, once the link is back, confirm its lease
+    // and announce its addresses, its exit saying whether it did.
+    if cable_puller() && answer.is_some() {
+        serial_println!("[linuxdrv]   cable: pull it");
+        keep_asking(5_000_000_000);
+        serial_println!("[linuxdrv]   cable: plug it back");
+        keep_asking(10_000_000_000);
+    }
     let ended = finish(&program, &daemon);
     match (answer, ended) {
         (Some(Ok(ip)), Some(0)) => {
@@ -593,6 +607,19 @@ fn serve_sockets(card_key: u64) -> bool {
             );
             false
         }
+    }
+}
+
+/// The netstack daemon serving `net.stack` asked to resolve a name every
+/// half second for `ns`, the answers not looked at: what keeps a bounded
+/// daemon from idling out while its card is being done to.
+fn keep_asking(ns: u64) {
+    let until = crate::hrtimer::now_ns().saturating_add(ns);
+    while crate::hrtimer::now_ns() < until {
+        // Only that it is asked matters here; the answer may well fail with
+        // the cable out.
+        let _ = spawn::netstack_resolve_a(b"example.com");
+        crate::sched::sleep_ms(500);
     }
 }
 

@@ -1853,26 +1853,39 @@ screen_probe() {
 # `set_link net3 off`, then `on`. Called from the wait loop every second.
 #
 # CABLE_STEP: 0 waiting for "pull it", 1 asked to pull, 2 pulled and waiting
-# for "plug it back", 3 asked to plug it back, 4 done. A set_link that fails
+# for "plug it back", 3 asked to plug it back, 4 done -- and then 0 again,
+# for the next cycle another part of the run asks for (the netstack daemon's
+# nic-check, then the kernel's test of the daemon serving sockets over the
+# card), only what was printed after a cycle's end read for it. Any line
+# asking counts: "cable: pull it" and "cable: plug it back", whoever prints
+# them. A set_link that fails
 # -- the monitor busy or not answering, QEMU refusing -- is said and tried
 # again the next second; the daemon, waiting 20 s for the link to follow,
 # fails the boot if it never does. The log is read from where the last look
 # stopped (less 200 bytes, for a line split there), not whole every second.
 CABLE_STEP=0
 CABLE_SEEN=0
+CABLE_FLOOR=0
 CABLE_PY=""
 cable_responder() {
-    [ "$CABLE_STEP" -lt 4 ] && [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
+    [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
+    if [ "$CABLE_STEP" -ge 4 ]; then
+        CABLE_STEP=0
+        CABLE_SEEN=$(wc -c < "$SERIAL_FILE")
+        CABLE_FLOOR=$CABLE_SEEN
+    fi
     if [ "$CABLE_STEP" -eq 0 ] || [ "$CABLE_STEP" -eq 2 ]; then
         local want size from
         # Not anchored: a kernel line can be printed into the middle of another.
         if [ "$CABLE_STEP" -eq 0 ]; then
-            want='[netstack] nic-check: cable: pull it'
+            want='cable: pull it'
         else
-            want='[netstack] nic-check: cable: plug it back'
+            want='cable: plug it back'
         fi
         size=$(wc -c < "$SERIAL_FILE")
         from=$(( CABLE_SEEN > 200 ? CABLE_SEEN - 200 : 0 ))
+        # Never back over a cycle's end: its own lines are not the next's.
+        from=$(( from < ${CABLE_FLOOR:-0} ? ${CABLE_FLOOR:-0} : from ))
         CABLE_SEEN=$size
         # Not `tail | grep -q`: under pipefail, grep leaving early makes the
         # pipeline fail on tail's SIGPIPE, and a match would read as none.
@@ -1884,7 +1897,7 @@ cable_responder() {
     local said rc=0
     said="$("$CABLE_PY" "$SCRIPT_DIR/screen.py" hmp --hmp "$MONITOR_PORT" "set_link net3 $state" 2>&1)" || rc=$?
     if [ "$rc" -eq 0 ]; then
-        echo "=== Cable: set_link net3 $state at the daemon's asking ==="
+        echo "=== Cable: set_link net3 $state as the run asked ==="
         CABLE_STEP=$(( CABLE_STEP + 1 ))
     else
         echo "=== Cable: set_link net3 $state failed (rc $rc)${said:+: $said}; trying again ===" >&2

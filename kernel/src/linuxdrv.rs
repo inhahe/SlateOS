@@ -194,7 +194,7 @@ pub fn self_test() -> KernelResult<()> {
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}: OK",
         elf.len(),
         if pci {
-            ", a PCI function probed through Linux's PCI core, its interrupts handled and its DMA done, and one no driver took"
+            ", a PCI function probed through Linux's PCI core, its interrupts handled -- on its legacy line, then by message -- and its DMA done, and one no driver took"
         } else {
             ""
         }

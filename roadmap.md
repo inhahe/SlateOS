@@ -5479,7 +5479,7 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         prepares it (2026-10-27). `linux-tree.sh needs <dir>` measured
         `e1000e`: 148 symbols, about 100 of them the bottom layer
         (`linuxdrv/README.md`)
-  - [-] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
+  - [x] The core shim: memory and DMA, locking/RCU/wait queues, workqueues and
         timers, PCI and MSI, IRQs, the minimal device model, `request_firmware`
         -- begun 2026-10-28: a driver process builds and runs (§1580:
         Linux's make for the small code model, headers shadowed by their
@@ -5509,11 +5509,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         calls with the process's own authority -- and Linux's module
         parameters from the process's arguments (§1590, 2026-10-29;
         confining the right to read files is
-        `known-issues/A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED.md`).
-        Left: INTx for
-        Linux's drivers -- `pci_alloc_irq_vectors` with `PCI_IRQ_INTX` and
-        `request_irq` on `pdev->irq`, over the device handle's INTx
-        (§1579 as built) -- for the first driver that has nothing else
+        `known-issues/A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED.md`);
+        and INTx for Linux's drivers -- `dev->irq` a number of the layer's
+        own from before the probe, `pci_alloc_irq_vectors` with
+        `PCI_IRQ_INTX`, `request_irq` on `pdev->irq`, over the device
+        handle's INTx, each interrupt taken only once its handler has run
+        (§1591, 2026-10-30)
   - [-] First driver: a wired network driver with a native twin (`e1000e`),
         in QEMU's boot test beside the native one, its overhead measured
         -- begun 2026-10-29: Linux's own e1000e, in a driver process with

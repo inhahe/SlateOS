@@ -86,7 +86,10 @@ mapped by `ioremap` (`emul/lx_pci.c`), and the heap laid out as Linux's
 direct map (`emul/lx_mm.c`, design-decisions 1584); their MSI or MSI-X --
 a vector per table entry -- delivered to the handlers drivers request,
 each vector's taken at each turn of the loop and all waited for when it is
-idle (`emul/lx_irq.c`, design-decisions 1585, 1587); DMA from a window
+idle (`emul/lx_irq.c`, design-decisions 1585, 1587), or their legacy line
+(INTx), `dev->irq` a number of the layer's own, each interrupt taken only
+after its handler has run, as Linux unmasks a level interrupt
+(design-decisions 1591); DMA from a window
 beside the heap that the device's own memory backs, kmalloc serving from it
 (`emul/lx_dma.c`, `kit/src/window.rs`, design-decisions 1586); a page
 allocator, vmalloc and high-resolution timers (`emul/lx_mm.c`,
@@ -110,7 +113,8 @@ timers, schedules tasklets, queues work -- a sleeper and a CPU hog with work
 queued behind each -- probes a device of its own through the driver core,
 and overflows a stack into its guard on purpose; given the boot test's
 spare 82574, it probes the card through Linux's PCI core, reads its MAC
-address through BAR0, handles the interrupts it has the card raise, and
+address through BAR0, handles the interrupts it has the card raise --
+on its legacy line, then by MSI -- and
 has it read a descriptor and a frame from the DMA window, and routes three
 of its causes to three MSI-X vectors. Given a firmware directory and
 parameters of its own, it reads files through the layer at each of

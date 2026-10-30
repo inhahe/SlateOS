@@ -8,11 +8,11 @@
 //! the handle refusing to write them; every other access is the handle's
 //! system call.
 //!
-//! And its interrupts: its MSI or MSI-X set up (the kernel programs them),
-//! which of its vectors have had interrupts since last asked, and whether
-//! the loop, with nothing to run, waits for them too
-//! ([`wait_items`]) -- while the C half has a handler requested and
-//! enabled for one.
+//! And its interrupts: its MSI, MSI-X or legacy line (INTx) set up (the
+//! kernel programs them), which of its vectors have had interrupts since
+//! last asked, whether any has without taking them, and whether the loop,
+//! with nothing to run, waits for them too ([`wait_items`]) -- while the C
+//! half has a handler requested and enabled for one.
 //!
 //! Results are the system call's: a value of 0 or more, or a negative
 //! SlateOS error code (`PermissionDenied`, -400, for a function the process
@@ -28,6 +28,10 @@ const SYS_PCI_DEVICE_CONFIG_READ: u64 = 1182;
 const SYS_PCI_DEVICE_CONFIG_WRITE: u64 = 1183;
 const SYS_PCI_DEVICE_MAP_BAR: u64 = 1184;
 const SYS_PCI_DEVICE_IRQ_SETUP: u64 = 1186;
+/// `SYS_PCI_DEVICE_IRQ_SETUP`'s kinds: messages (MSI or MSI-X), or the
+/// legacy line.
+const IRQ_SETUP_MESSAGE: u64 = 0;
+const IRQ_SETUP_INTX: u64 = 1;
 /// A DMA arena placed where the caller says (`sys.rs`'s DMA window).
 pub(crate) const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
@@ -53,13 +57,13 @@ pub extern "C" fn slx_pci_functions() -> usize {
     FUNCTIONS
 }
 
-/// A function opened: its handle, its BARs, whether its interrupts (MSI or
-/// MSI-X) are set up, whether the loop waits for them, and whether the
-/// kernel has said it cannot be waited on.
+/// A function opened: its handle, its BARs, whether its interrupts (MSI,
+/// MSI-X or INTx) are set up, whether the loop waits for them, and whether
+/// the kernel has said it cannot be waited on.
 struct Function {
     handle: i64,
     bars: Bars,
-    msi: bool,
+    irqs: bool,
     listen: bool,
     unwaitable: bool,
 }
@@ -133,7 +137,7 @@ pub extern "C" fn slx_pci_open(bus: u8, devfn: u8) -> i64 {
     *slot = Some(Function {
         handle,
         bars: Bars::new(real, size),
-        msi: false,
+        irqs: false,
         listen: false,
         unwaitable: false,
     });
@@ -167,20 +171,37 @@ pub extern "C" fn slx_pci_close(handle: i64) -> i64 {
 /// it with none, the old set-up gone.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_pci_irq_setup(handle: i64, vectors: u32) -> i64 {
+    irq_setup(handle, vectors, IRQ_SETUP_MESSAGE)
+}
+
+/// `slx_pci_intx_setup`: the function's legacy line set up -- routed as the
+/// firmware routed it, its interrupts then taken as one MSI vector's, the
+/// kernel quenching the function at each until it is taken -- answering 0.
+/// Or an error, as [`slx_pci_irq_setup`]'s: `NotSupported` for a function
+/// with no pin or routed line, which changes nothing.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_intx_setup(handle: i64) -> i64 {
+    irq_setup(handle, 0, IRQ_SETUP_INTX)
+}
+
+/// The function's interrupts set up as `kind` (`count` vectors, for MSI-X)
+/// and the answer recorded: set up, and waitable again -- what made it not
+/// was its last set-up's -- or, after a failure that took the old set-up
+/// away, none.
+fn irq_setup(handle: i64, count: u32, kind: u64) -> i64 {
     let answer = syscall4(
         SYS_PCI_DEVICE_IRQ_SETUP,
         handle.cast_unsigned(),
-        u64::from(vectors),
-        0,
+        u64::from(count),
+        kind,
         0,
     );
     with_function(handle, |f| {
         if answer >= 0 {
-            f.msi = true;
-            // Waitable again: what made it not was its last set-up's.
+            f.irqs = true;
             f.unwaitable = false;
         } else if matches!(answer, RESOURCE_EXHAUSTED | INTERNAL_ERROR) {
-            f.msi = false;
+            f.irqs = false;
         }
     });
     answer
@@ -194,12 +215,21 @@ pub extern "C" fn slx_pci_irq_pending(handle: i64) -> i64 {
     syscall4(SYS_PCI_DEVICE_IRQ_PENDING, handle.cast_unsigned(), 0, 0, 0)
 }
 
+/// `slx_pci_irq_ready`: whether the function has had interrupts not yet
+/// taken, looked at without taking them -- so that a legacy line, which
+/// the kernel quenches until its interrupts are taken, is re-armed only
+/// once its handler has run. False while none are set up.
+#[unsafe(no_mangle)]
+pub extern "C" fn slx_pci_irq_ready(handle: i64) -> bool {
+    with_function(handle, |f| f.irqs) == Some(true) && crate::wait::device_ready(handle)
+}
+
 /// `slx_pci_irq_listen`: whether the loop, with nothing to run, waits for
-/// the function's interrupts too -- only once its MSI is set up, the
-/// handle being an error to wait on before.
+/// the function's interrupts too -- only once they are set up, the handle
+/// being an error to wait on before.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_pci_irq_listen(handle: i64, on: bool) {
-    with_function(handle, |f| f.listen = on && f.msi);
+    with_function(handle, |f| f.listen = on && f.irqs);
 }
 
 /// The waits for the functions the loop listens to, while it has nothing to

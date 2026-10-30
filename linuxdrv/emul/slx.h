@@ -80,14 +80,19 @@ int slx_pci_bar_window(long handle, unsigned int bar, unsigned long long *base,
 long slx_pci_map_bar(long handle, unsigned int bar);
 /*
  * Its interrupts: set up -- `vectors` 0 for its MSI, answering 0; more for
- * its MSI-X, answering how many vectors it has; a different set-up
+ * its MSI-X, answering how many vectors it has; or its legacy line (INTx),
+ * answering 0, whose interrupts the kernel takes as one MSI vector's,
+ * quenching the function at each until they are taken; a different set-up
  * replaces the last -- or an error; which of its vectors have had
- * interrupts since last asked (MSI-X vector i as bit i, MSI as bit 0),
- * taken now without waiting; and whether the loop, with nothing to run,
+ * interrupts since last asked (MSI-X vector i as bit i, MSI and INTx as
+ * bit 0), taken now without waiting -- which re-arms a legacy line; whether
+ * any has, without taking them; and whether the loop, with nothing to run,
  * waits for them too.
  */
 long slx_pci_irq_setup(long handle, unsigned int vectors);
+long slx_pci_intx_setup(long handle);
 long slx_pci_irq_pending(long handle);
+_Bool slx_pci_irq_ready(long handle);
 void slx_pci_irq_listen(long handle, _Bool on);
 
 /*

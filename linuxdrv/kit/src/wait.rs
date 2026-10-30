@@ -35,6 +35,21 @@ pub(crate) struct WaitItem {
     pub(crate) pad: u32,
 }
 
+/// Whether the device `handle` has had interrupts counted and not yet
+/// taken, looked at without waiting and without taking them: one item,
+/// waited for not at all. A wait the kernel refuses leaves the item's
+/// answer empty, which reads as none.
+pub(crate) fn device_ready(handle: i64) -> bool {
+    let mut item = [WaitItem {
+        handle: handle.cast_unsigned(),
+        kind: KIND_PCI_DEVICE,
+        events: POLLIN,
+        ..WaitItem::default()
+    }];
+    syscall4(SYS_WAIT_MULTIPLE, item.as_mut_ptr() as u64, 1, 0, 0);
+    item.first().is_some_and(|i| i.revents & POLLIN != 0)
+}
+
 /// Wait until something waited for fires, or `timeout_ns` has passed
 /// (`u64::MAX`: for ever): `false`, at once, when there is nothing to wait
 /// for -- the caller then sleeps, or ends.

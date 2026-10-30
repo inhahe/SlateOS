@@ -424,6 +424,80 @@ static int hello_pci_msix(struct pci_dev *pdev)
 	return 0;
 }
 
+/* A oneshot thread with no first half: it reads the cause, as nothing did. */
+static irqreturn_t hello_intx_thread(int irq, void *data)
+{
+	if (!(readl(hello_regs + HELLO_ICR) & HELLO_CAUSE))
+		return IRQ_NONE;
+	hello_thread_in_task = !in_interrupt() && !irqs_disabled() && (current->flags & PF_KTHREAD);
+	msleep(1);
+	complete(&hello_irq_done);
+	return IRQ_HANDLED;
+}
+
+/*
+ * The function's legacy line (lx_irq.c's INTx), before its MSI: dev->irq a
+ * number of the layer's own from before the probe; a handler on it run in
+ * hardirq context once for each interrupt -- the line re-armed only after
+ * the handler has run, so a serviced card does not interrupt again for
+ * nothing -- and the line re-armed for the next; disabled, its interrupt
+ * held until enabled; a threaded handler with no first half refused
+ * without ONESHOT, as Linux refuses it, and with it run in its thread, the
+ * line re-armed once the thread is done.
+ */
+static int hello_pci_intx(struct pci_dev *pdev)
+{
+	unsigned long before;
+	int irq = pdev->irq;
+
+	HELLO_PCI_CHECK(irq >= 1024 && pci_irq_vector(pdev, 0) == irq,
+			"the legacy interrupt is not a number of the layer's own");
+	HELLO_PCI_CHECK(pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_INTX) == 1 && pdev->irq == irq,
+			"no INTx vector");
+	HELLO_PCI_CHECK(!request_irq(irq, hello_isr, IRQF_SHARED, "hello-intx", pdev),
+			"no handler requested on the legacy line");
+	before = lx_irq_count(irq);
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ), "an INTx interrupt never came");
+	HELLO_PCI_CHECK(hello_irq_in_hardirq, "an INTx handler ran outside hardirq context");
+	msleep(20);
+	HELLO_PCI_CHECK(lx_irq_count(irq) == before + 1,
+			"an INTx interrupt ran its handler more than once: the line re-armed before it was handled");
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"a second INTx interrupt never came: the line was not re-armed");
+
+	disable_irq(irq);
+	before = lx_irq_count(irq);
+	hello_raise();
+	msleep(20);
+	HELLO_PCI_CHECK(lx_irq_count(irq) == before, "a disabled INTx interrupt was delivered");
+	enable_irq(irq);
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"an INTx interrupt held while disabled never came once enabled");
+	HELLO_PCI_CHECK(free_irq(irq, pdev), "free_irq() did not name the INTx handler");
+
+	HELLO_PCI_CHECK(request_threaded_irq(irq, NULL, hello_intx_thread, 0, "hello-intx", pdev) ==
+				-EINVAL,
+			"a threaded INTx handler with no first half and no ONESHOT was not refused");
+	HELLO_PCI_CHECK(!request_threaded_irq(irq, NULL, hello_intx_thread, IRQF_ONESHOT,
+					      "hello-intx", pdev),
+			"no oneshot threaded handler requested on the legacy line");
+	hello_thread_in_task = false;
+	before = lx_irq_count(irq);
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ) && hello_thread_in_task,
+			"a oneshot INTx thread did not run in its task");
+	msleep(20);
+	HELLO_PCI_CHECK(lx_irq_count(irq) == before + 1,
+			"a oneshot INTx line was re-armed before its thread had run");
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"the line was not re-armed once its oneshot thread had run");
+	HELLO_PCI_CHECK(free_irq(irq, pdev), "free_irq() did not name the threaded INTx handler");
+	return 0;
+}
+
 static int hello_pci_interrupts(struct pci_dev *pdev)
 {
 	unsigned long before;
@@ -466,8 +540,13 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 	pci_free_irq_vectors(pdev);
 	HELLO_PCI_CHECK(!pdev->msi_enabled && pci_irq_vector(pdev, 0) == pdev->irq && pdev->irq != irq,
 			"MSI stayed on once its vectors were freed");
-	HELLO_PCI_CHECK(request_irq(pdev->irq, hello_isr, 0, "hello", pdev) == -EINVAL,
-			"a legacy line, not routed, was requested");
+	/* MSI off: the legacy line is the interrupt again, set up anew when asked for. */
+	HELLO_PCI_CHECK(!request_irq(pdev->irq, hello_isr, IRQF_SHARED, "hello", pdev),
+			"the legacy line could not be requested once MSI was off");
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"no interrupt came on the legacy line set up again after MSI");
+	HELLO_PCI_CHECK(free_irq(pdev->irq, pdev), "free_irq() did not name the legacy line's handler");
 	writel(~0U, hello_regs + HELLO_IMC);
 	readl(hello_regs + HELLO_ICR);
 	return hello_pci_msix(pdev);
@@ -653,7 +732,9 @@ static int hello_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto unmap;
 	}
 	hello_regs = regs;
-	err = hello_pci_interrupts(pdev);
+	err = hello_pci_intx(pdev);
+	if (!err)
+		err = hello_pci_interrupts(pdev);
 	if (!err)
 		err = hello_pci_dma(pdev);
 	if (err)

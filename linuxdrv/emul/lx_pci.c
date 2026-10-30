@@ -64,20 +64,10 @@ static struct lx_pci_function lx_pci_functions[LX_PCI_FUNCTIONS];
 static unsigned int lx_pci_count;
 
 /*
- * x86's own hooks into the PCI core, as the process has its devices: a
- * device's legacy interrupt line is not routed here -- its interrupts are
- * the MSI the kernel programs through its handle -- and bus numbers are
- * never reassigned, every bus being where the kernel found it.
+ * x86's own hooks into the PCI core, as the process has its devices: bus
+ * numbers are never reassigned, every bus being where the kernel found it.
+ * (Its interrupt routing, pcibios_alloc_irq(), is lx_irq.c's.)
  */
-int pcibios_alloc_irq(struct pci_dev *dev)
-{
-	return 0;
-}
-
-void pcibios_free_irq(struct pci_dev *dev)
-{
-}
-
 unsigned int pcibios_assign_all_busses(void)
 {
 	return 0;

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 /*
  * Interrupts in a driver process (design-decisions 1585, 1587): a PCI
- * function's MSI or MSI-X, which the kernel programs through its device
- * handle, delivered to the handlers a driver requests as Linux's interrupt
- * core would deliver them.
+ * function's MSI, MSI-X or legacy line (INTx), which the kernel sets up
+ * through its device handle, delivered to the handlers a driver requests as
+ * Linux's interrupt core would deliver them.
  *
  * Linux's own MSI and interrupt cores are not compiled: they program the
  * device and the CPU's interrupt controller, which the kernel does here, and
@@ -13,8 +13,10 @@
  * pci_irq_vector()) -- one MSI vector, or MSI-X vectors for a function's
  * first table entries, as many as the kernel gives (LX_IRQ_VECTORS at most);
  * and request_threaded_irq(), free_irq(), disable_irq() and enable_irq(),
- * synchronize_irq(). A function's legacy line is not routed: its interrupt
- * number is no interrupt here.
+ * synchronize_irq(). And a function's legacy line: dev->irq, from before
+ * its driver probes (pcibios_alloc_irq), is a number of the layer's own for
+ * it, set up as the kernel routes the line when a handler is first asked
+ * for on it -- see lx_intx_poll() for how it is taken.
  *
  * Each turn of the loop asks the kernel which vectors of each function with
  * its MSI or MSI-X on have had interrupts since the last turn (lx_irq_poll),
@@ -59,8 +61,15 @@
  */
 #define LX_IRQ_BASE 1024
 #define LX_IRQ_VECTORS 32
+/*
+ * A function's legacy line has a number of its own above every function's
+ * vectors -- LX_INTX_BASE + function -- so that, as on Linux, its dev->irq
+ * changes when its MSI is turned on and back when it is turned off, and a
+ * number kept from one is never the other's.
+ */
+#define LX_INTX_BASE (LX_IRQ_BASE + LX_PCI_FUNCTIONS_MAX * LX_IRQ_VECTORS)
 
-enum lx_irq_mode { LX_IRQ_NONE, LX_IRQ_MSI, LX_IRQ_MSIX };
+enum lx_irq_mode { LX_IRQ_NONE, LX_IRQ_MSI, LX_IRQ_MSIX, LX_IRQ_INTX };
 
 struct lx_irq_function;
 
@@ -78,6 +87,8 @@ struct lx_irq {
 	unsigned int depth;
 	/* An interrupt that came while it was disabled, run once enabled. */
 	bool owed;
+	/* INTx: handled, its line to be re-armed once its oneshot thread has run. */
+	bool rearm;
 	/* Held across a request or a free, which both sleep. */
 	struct mutex lock;
 	/* The threaded half's thread; woken to run it, and running it; and
@@ -93,7 +104,11 @@ struct lx_irq {
 struct lx_irq_function {
 	struct pci_dev *dev;
 	long handle;
-	/* The function's legacy line, restored when its MSI is turned off. */
+	/*
+	 * The function's INTx: a number of the layer's own (LX_INTX_BASE +
+	 * function), or 0 for a function with no interrupt pin -- dev->irq
+	 * while its MSI is off.
+	 */
 	unsigned int intx;
 	enum lx_irq_mode mode;
 	/* Its vectors in the mode: 1 for MSI, as many as given for MSI-X. */
@@ -108,6 +123,8 @@ static bool lx_irq_replay;
 
 static unsigned int lx_irq_number(const struct lx_irq *d)
 {
+	if (d->fn->mode == LX_IRQ_INTX)
+		return d->fn->intx;
 	return LX_IRQ_BASE + (d->fn - lx_irq_functions) * LX_IRQ_VECTORS + d->index;
 }
 
@@ -117,6 +134,10 @@ static struct lx_irq *lx_irq_of(unsigned int irq)
 	unsigned int at = irq - LX_IRQ_BASE;
 	struct lx_irq_function *fn;
 
+	if (irq >= LX_INTX_BASE && irq - LX_INTX_BASE < ARRAY_SIZE(lx_irq_functions)) {
+		fn = &lx_irq_functions[irq - LX_INTX_BASE];
+		return fn->dev && fn->mode == LX_IRQ_INTX ? &fn->vec[0] : NULL;
+	}
 	if (irq < LX_IRQ_BASE || at / LX_IRQ_VECTORS >= ARRAY_SIZE(lx_irq_functions))
 		return NULL;
 	fn = &lx_irq_functions[at / LX_IRQ_VECTORS];
@@ -138,15 +159,46 @@ static struct lx_irq_function *lx_irq_for(struct pci_dev *dev)
 	if (!fn->dev) {
 		fn->dev = dev;
 		fn->handle = lx_pci_handle(i);
-		fn->intx = dev->irq;
 		for (v = 0; v < LX_IRQ_VECTORS; v++) {
 			fn->vec[v].fn = fn;
 			fn->vec[v].index = v;
 			init_waitqueue_head(&fn->vec[v].idle);
 			mutex_init(&fn->vec[v].lock);
 		}
+		fn->intx = dev->pin ? LX_INTX_BASE + i : 0;
 	}
 	return fn;
+}
+
+/*
+ * x86's hook into the PCI core before a driver probes, which routes the
+ * function's legacy interrupt into dev->irq: here its INTx number, the
+ * layer's own (lx_irq_for), so that a legacy driver's request_irq(pdev->irq)
+ * reaches its function and no other -- two functions on one line keep
+ * numbers of their own -- or 0, Linux's "none", for a function with no pin.
+ * The line is set up when a handler is asked for on it.
+ */
+int pcibios_alloc_irq(struct pci_dev *dev)
+{
+	struct lx_irq_function *fn = lx_irq_for(dev);
+
+	if (fn && fn->mode == LX_IRQ_NONE)
+		dev->irq = fn->intx;
+	return 0;
+}
+
+void pcibios_free_irq(struct pci_dev *dev)
+{
+}
+
+/*
+ * Whether the INTx vector's line waits for its oneshot thread before it is
+ * re-armed, as Linux keeps a oneshot interrupt masked until its thread has
+ * run.
+ */
+static bool lx_intx_held(const struct lx_irq *d)
+{
+	return (d->flags & IRQF_ONESHOT) && (d->thread_due || d->thread_running);
 }
 
 /* Whether the vector's handler runs when its interrupts come: requested and enabled. */
@@ -178,6 +230,13 @@ void lx_irq_listen(void)
 			continue;
 		for (v = 0; fn->mode != LX_IRQ_NONE && v < fn->vectors; v++)
 			live |= lx_irq_live(&fn->vec[v]);
+		/*
+		 * A legacy line held for its thread has an interrupt not yet
+		 * taken, which would end every wait at once: the thread's end
+		 * turns the loop instead.
+		 */
+		if (fn->mode == LX_IRQ_INTX && lx_intx_held(&fn->vec[0]))
+			live = false;
 		slx_pci_irq_listen(fn->handle, live);
 	}
 }
@@ -197,13 +256,15 @@ static void lx_irq_warn_requested(struct lx_irq_function *fn)
 
 /*
  * The function's vectors in a new mode: the kernel asked (slx_pci_irq_setup
- * with `ask`, 0 for MSI) and its answer, how many it gave, recorded. The
+ * with `ask`, 0 for MSI; slx_pci_intx_setup for INTx) and its answer, how
+ * many it gave, recorded. The
  * kernel keeps a set-up for as long as nothing replaces it, so turning a
  * mode off here only stops its interrupts being taken or waited for.
  */
 static int lx_irq_set_mode(struct lx_irq_function *fn, enum lx_irq_mode mode, unsigned int ask)
 {
-	long given = slx_pci_irq_setup(fn->handle, ask);
+	long given = mode == LX_IRQ_INTX ? slx_pci_intx_setup(fn->handle) :
+					   slx_pci_irq_setup(fn->handle, ask);
 	unsigned int v;
 
 	/*
@@ -219,10 +280,25 @@ static int lx_irq_set_mode(struct lx_irq_function *fn, enum lx_irq_mode mode, un
 		return -ENOSPC;
 	}
 	fn->mode = mode;
-	fn->vectors = mode == LX_IRQ_MSI ? 1 : given;
-	for (v = 0; v < LX_IRQ_VECTORS; v++)
+	fn->vectors = mode == LX_IRQ_MSIX ? given : 1;
+	for (v = 0; v < LX_IRQ_VECTORS; v++) {
 		fn->vec[v].owed = false;
+		fn->vec[v].rearm = false;
+	}
 	return 0;
+}
+
+/*
+ * A function's INTx, when MSI or MSI-X is turned on instead: the kernel
+ * replaces the line's set-up with the messages', and a handler still
+ * requested on the line is a driver's bug, as on Linux.
+ */
+static void lx_intx_leave(struct lx_irq_function *fn)
+{
+	if (fn->mode == LX_IRQ_INTX) {
+		lx_irq_warn_requested(fn);
+		fn->mode = LX_IRQ_NONE;
+	}
 }
 
 /* The function's MSI set up: its interrupt number then Linux's dev->irq. */
@@ -235,6 +311,7 @@ static int lx_msi_enable(struct pci_dev *dev)
 	/* As Linux's: on already is a driver's bug; MSI-X on refuses MSI. */
 	if (WARN_ON_ONCE(fn->mode == LX_IRQ_MSI) || fn->mode == LX_IRQ_MSIX)
 		return -EINVAL;
+	lx_intx_leave(fn);
 	if (!dev->msi_cap || lx_irq_set_mode(fn, LX_IRQ_MSI, 0))
 		return -ENOSPC;
 	/* The kernel turned the legacy line off as it set the MSI up. */
@@ -290,6 +367,7 @@ static int lx_msix_enable(struct pci_dev *dev, unsigned int minvec, unsigned int
 		return -EINVAL;
 	if (!minvec || want < minvec)
 		return -ENOSPC;
+	lx_intx_leave(fn);
 	if (lx_irq_set_mode(fn, LX_IRQ_MSIX, want))
 		return -ENOSPC;
 	if (fn->vectors < minvec) {
@@ -337,8 +415,9 @@ void pci_disable_msix(struct pci_dev *dev)
 
 /*
  * As Linux's: MSI-X first when asked for and the function has it, then MSI
- * -- one vector -- when asked for and enough. The legacy line is not
- * offered.
+ * -- one vector -- when asked for and enough, then the legacy line, when
+ * asked for and the function has one: its number dev->irq, set up when a
+ * handler is asked for on it.
  */
 int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 				   unsigned int max_vecs, unsigned int flags,
@@ -353,8 +432,10 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 		if (given > 0)
 			return given;
 	}
-	if ((flags & PCI_IRQ_MSI) && min_vecs == 1)
-		return lx_msi_enable(dev) ?: 1;
+	if ((flags & PCI_IRQ_MSI) && min_vecs == 1 && !lx_msi_enable(dev))
+		return 1;
+	if ((flags & PCI_IRQ_INTX) && min_vecs == 1 && dev->irq)
+		return 1;
 	return -ENOSPC;
 }
 
@@ -372,8 +453,7 @@ void pci_free_irq_vectors(struct pci_dev *dev)
 
 /*
  * As Linux's: vector `nr`'s interrupt while MSI or MSI-X is on, the legacy
- * line's number (dev->irq) for vector 0 while neither is -- a number
- * requesting which fails here, the line not being routed.
+ * line's number (dev->irq) for vector 0 while neither is.
  */
 int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 {
@@ -435,15 +515,51 @@ static int lx_irq_thread(void *data)
 	return 0;
 }
 
+/*
+ * The INTx vector `irq` names, its function's line set up now, as the
+ * kernel routes it, if it has nothing set up yet; NULL for a number that is
+ * no function's INTx, or a line that cannot be set up.
+ */
+static struct lx_irq *lx_intx_of(unsigned int irq)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(lx_irq_functions); i++) {
+		struct lx_irq_function *fn = &lx_irq_functions[i];
+		long err;
+
+		if (!fn->dev || !fn->intx || fn->intx != irq || fn->mode != LX_IRQ_NONE)
+			continue;
+		err = lx_irq_set_mode(fn, LX_IRQ_INTX, 0);
+		if (err) {
+			pci_err(fn->dev, "its legacy interrupt could not be set up: %ld\n", err);
+			return NULL;
+		}
+		return &fn->vec[0];
+	}
+	return NULL;
+}
+
 int request_threaded_irq(unsigned int irq, irq_handler_t handler, irq_handler_t thread_fn,
 			 unsigned long flags, const char *name, void *dev)
 {
-	struct lx_irq *d = lx_irq_of(irq);
+	struct lx_irq *d = lx_irq_of(irq) ?: lx_intx_of(irq);
 	struct task_struct *t = NULL;
+	bool intx;
 	int ret = 0;
 
 	if (!d || (!handler && !thread_fn))
 		return -EINVAL;
+	intx = d->fn->mode == LX_IRQ_INTX;
+	/*
+	 * As Linux's: a level line with no first half must stay masked until
+	 * its thread has run -- without ONESHOT it would interrupt for ever.
+	 */
+	if (intx && !handler && !(flags & IRQF_ONESHOT)) {
+		pr_err("Threaded irq requested with handler=NULL and !ONESHOT for %s (irq %u)\n",
+		       name, irq);
+		return -EINVAL;
+	}
 	mutex_lock(&d->lock);
 	if (d->handler) {
 		ret = -EBUSY;
@@ -458,12 +574,16 @@ int request_threaded_irq(unsigned int irq, irq_handler_t handler, irq_handler_t 
 	}
 	d->thread = t;
 	d->thread_fn = thread_fn;
-	/* MSI is safe without ONESHOT: dropped, as Linux drops it for such a chip. */
-	d->flags = flags & ~IRQF_ONESHOT;
+	/*
+	 * A message is safe without ONESHOT: dropped, as Linux drops it for
+	 * such a chip. A level line keeps it.
+	 */
+	d->flags = intx ? flags : flags & ~IRQF_ONESHOT;
 	d->name = name;
 	d->dev_id = dev;
 	d->depth = flags & IRQF_NO_AUTOEN ? 1 : 0;
 	d->owed = false;
+	d->rearm = false;
 	d->thread_due = d->thread_running = false;
 	/* Last: lx_irq_poll() may run it from the next turn on. */
 	d->handler = handler ?: lx_irq_wake_thread;
@@ -570,12 +690,54 @@ static void lx_irq_run(struct lx_irq *d)
 }
 
 /*
+ * A turn for a function on its legacy line, which the kernel quenches at
+ * each interrupt until its interrupts are taken -- taking re-arms it
+ * (design-decisions 1579). It is taken only once its handler has run, as
+ * Linux unmasks a level interrupt only after handling it: taken first, the
+ * line would be re-armed with the device still asserting, and interrupt
+ * again for nothing. So it is looked at without taking (slx_pci_irq_ready),
+ * the handler run, and then taken. While the handler is disabled, or a
+ * oneshot thread has yet to run, the line stays quenched, as Linux keeps a
+ * level line masked: owed, or re-armed once the thread is done. An
+ * interrupt with no handler requested is taken and dropped.
+ */
+static void lx_intx_poll(struct lx_irq_function *fn)
+{
+	struct lx_irq *d = &fn->vec[0];
+
+	if (lx_intx_held(d))
+		return;
+	if (d->rearm) {
+		d->rearm = false;
+		slx_pci_irq_pending(fn->handle);
+		return;
+	}
+	if (!d->owed && !slx_pci_irq_ready(fn->handle))
+		return;
+	if (!d->handler) {
+		d->dropped++;
+		slx_pci_irq_pending(fn->handle);
+		return;
+	}
+	if (d->depth) {
+		d->owed = true;
+		return;
+	}
+	lx_irq_run(d);
+	if (lx_intx_held(d))
+		d->rearm = true;
+	else
+		slx_pci_irq_pending(fn->handle);
+}
+
+/*
  * A turn of the loop: each function with its vectors set up asked which of
  * them have had interrupts, and each of those run -- or owed, while
  * disabled -- together with the owed ones since enabled; those that came
  * with no handler requested are dropped, as Linux's shut-down interrupt
  * drops them. A function none of whose vectors has a handler is asked too,
- * so that what came before a handler was requested is never run by it.
+ * so that what came before a handler was requested is never run by it. A
+ * function on its legacy line is lx_intx_poll()'s.
  */
 void lx_irq_poll(void)
 {
@@ -588,6 +750,10 @@ void lx_irq_poll(void)
 
 		if (!fn->dev || fn->mode == LX_IRQ_NONE)
 			continue;
+		if (fn->mode == LX_IRQ_INTX) {
+			lx_intx_poll(fn);
+			continue;
+		}
 		came = slx_pci_irq_pending(fn->handle);
 		if (came < 0)
 			came = 0;

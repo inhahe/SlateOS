@@ -5539,7 +5539,12 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         (known-issues
         `A-NETSTACK-SERVES-SOCKETS-ONLY-OVER-THE-KERNELS-NIC`)
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide
-        then how lane A's `net80211` meets `mac80211`/`cfg80211`
+        then how lane A's `net80211` meets `mac80211`/`cfg80211`. The test
+        PC's card, read from its Windows through the PiKVM on 2026-10-30, is
+        a MediaTek `RZ717 WiFi 7` (PCI `14C3:0717`), not an Intel one: the
+        pinned release drives it with `mt7925e` (`drivers/net/wireless/
+        mediatek/mt76/mt7925/pci.c` lists the ID), so the first WiFi driver
+        is that one, not `iwlwifi`
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
         from Linux's DRM/KMS onto the graphics stack -- this is how the i915
         item in 3.1 gets done

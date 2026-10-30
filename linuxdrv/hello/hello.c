@@ -28,9 +28,18 @@
  *               through Linux's PCI core, read the card's MAC through BAR0
  *               and handle its interrupts, so must exit 0;
  *   "pcifail"   the same, its probe failing, so that the function is left
- *               without a driver: must exit SLX_EXIT_INIT_FAILED.
+ *               without a driver: must exit SLX_EXIT_INIT_FAILED;
+ *   "firmware"  with `firmware_class.path=<dir>`, the test files in it, and
+ *               hello's own parameters, reads files through the layer and
+ *               Linux's own firmware loader (hello_firmware_init), so must
+ *               exit 0;
+ *   "firmware-denied"  the same without a capability to read files, which
+ *               must read none: must exit 0.
  * With an argument, the later initcalls do nothing: the first's ending is
- * the test ("earlyfail"'s comes before the first).
+ * the test ("earlyfail"'s comes before the first) -- but the firmware runs',
+ * a late one's. An argument naming a parameter hello does not have, or
+ * giving one a value its kind refuses, ends the process before any
+ * initcall: SLX_EXIT_ARGUMENT.
  */
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -66,6 +75,9 @@
 #include <linux/etherdevice.h>
 #include <linux/unaligned.h>
 #include <linux/sizes.h>
+#include <linux/firmware.h>
+#include <linux/kernel_read_file.h>
+#include <linux/vmalloc.h>
 #include <asm/processor.h>
 
 #include "../emul/slx.h"
@@ -1908,3 +1920,190 @@ static int __init hello_driver_core_init(void)
 	return 0;
 }
 late_initcall(hello_driver_core_init);
+
+/*
+ * Module parameters of hello's own, which the "firmware" run is given
+ * (hello.answer=42 "hello.motto=two words" hello.device_level=6) and set
+ * from the process's arguments by Linux's own parse_args() (lx_emul.c):
+ * a module's own before any initcall, one of the device level's
+ * (device_param_cb) just before the device initcalls, so that a core
+ * initcall still sees it unset (hello_params_early).
+ */
+static int hello_answer;
+module_param_named(answer, hello_answer, int, 0444);
+static char *hello_motto;
+module_param_named(motto, hello_motto, charp, 0444);
+static int hello_device_level;
+device_param_cb(device_level, &param_ops_int, &hello_device_level, 0444);
+static int hello_device_level_at_core = -1;
+
+static int __init hello_params_early(void)
+{
+	hello_device_level_at_core = hello_device_level;
+	return 0;
+}
+core_initcall(hello_params_early);
+
+/*
+ * What the kernel's self-test puts in the directory the "firmware" run is
+ * pointed at (firmware_class.path=<dir>; kernel/src/linuxdrv.rs): slx-test.fw,
+ * HELLO_FW_BYTES bytes of hello_fw_byte() -- more than the system's one
+ * read gives, so that a whole file takes several -- and slx-empty.fw, empty;
+ * and it names a directory to read as a file (dir=<path>), one whose size
+ * is not 0, so that it is refused for not being a regular file rather than
+ * for being empty.
+ */
+#define HELLO_FW_BYTES 70001
+#define HELLO_FW_PATH_ARG "firmware_class.path="
+#define HELLO_DIR_ARG "dir="
+
+static u8 hello_fw_byte(size_t i)
+{
+	return (u8)(i * 7 + (i >> 8));
+}
+
+/* Whether `len` bytes at `data` are the test file's from byte `from`. */
+static bool hello_fw_matches(const u8 *data, size_t from, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++)
+		if (data[i] != hello_fw_byte(from + i))
+			return false;
+	return true;
+}
+
+/* The layer's read of `name` in `dir` (lx_fs.c), as the loader reads one. */
+static ssize_t hello_read(const char *dir, const char *name, loff_t offset, void **buf,
+			  size_t buf_size, size_t *file_size)
+{
+	char *path = kasprintf(GFP_KERNEL, "%s/%s", dir, name);
+	ssize_t got;
+
+	if (!path)
+		return -ENOMEM;
+	got = kernel_read_file_from_path_initns(path, offset, buf, buf_size, file_size,
+						READING_FIRMWARE);
+	kfree(path);
+	return got;
+}
+
+static DECLARE_COMPLETION(hello_fw_loaded);
+static const struct firmware *hello_fw_async;
+
+static void hello_fw_arrived(const struct firmware *fw, void *done)
+{
+	hello_fw_async = fw;
+	complete(done);
+}
+
+/*
+ * The "firmware" run: hello's parameters set as given; the layer's reading
+ * at its edges, each answer Linux's kernel_read_file()'s; then Linux's own
+ * firmware loader finding the test file in firmware_class.path -- whole,
+ * shared when asked for twice, into a buffer of the driver's own, its tail
+ * from an offset, and asynchronously -- and a missing one -ENOENT. The
+ * "firmware-denied" run, without a File capability: nothing read, -EACCES
+ * from every place the loader looks.
+ */
+static int __init hello_firmware_init(void)
+{
+	size_t prefix = strlen(HELLO_FW_PATH_ARG), dir_prefix = strlen(HELLO_DIR_ARG), size = 0;
+	const char *dir = NULL, *a_dir = NULL;
+	const struct firmware *fw, *again;
+	struct device *dev;
+	u8 tail[100];
+	void *data;
+	int i;
+
+	if (!hello_mode("firmware") && !hello_mode("firmware-denied"))
+		return 0;
+	for (i = 2; i < slx_argc(); i++) {
+		if (!strncmp(slx_argv(i), HELLO_FW_PATH_ARG, prefix))
+			dir = slx_argv(i) + prefix;
+		if (!strncmp(slx_argv(i), HELLO_DIR_ARG, dir_prefix))
+			a_dir = slx_argv(i) + dir_prefix;
+	}
+	HELLO_CHECK(dir, "no firmware_class.path= argument");
+	dev = root_device_register("hello-fw");
+	HELLO_CHECK(!IS_ERR(dev), "no device to load firmware for");
+
+	if (hello_mode("firmware-denied")) {
+		HELLO_CHECK(firmware_request_nowarn(&fw, "slx-test.fw", dev) == -EACCES && !fw,
+			    "firmware was read without a capability to read files");
+		root_device_unregister(dev);
+		pr_info("hello firmware: none read without a capability to read files\n");
+		return 0;
+	}
+
+	HELLO_CHECK(hello_answer == 42, "hello.answer=42 was not set");
+	HELLO_CHECK(hello_motto && !strcmp(hello_motto, "two words"),
+		    "\"hello.motto=two words\" was not set as one value");
+	HELLO_CHECK(hello_device_level == 6 && hello_device_level_at_core == 0,
+		    "a device-level parameter was not set between the core and device initcalls");
+
+	data = NULL;
+	HELLO_CHECK(hello_read(dir, "slx-test.fw", 0, &data, INT_MAX, NULL) == HELLO_FW_BYTES &&
+		    hello_fw_matches(data, 0, HELLO_FW_BYTES),
+		    "a whole file read was not its bytes");
+	vfree(data);
+	data = tail;
+	HELLO_CHECK(hello_read(dir, "slx-test.fw", 1000, &data, sizeof(tail), &size) == sizeof(tail) &&
+		    size == HELLO_FW_BYTES && hello_fw_matches(tail, 1000, sizeof(tail)),
+		    "part of a file, from an offset into a buffer given, was not its bytes and size");
+	data = NULL;
+	HELLO_CHECK(hello_read(dir, "slx-test.fw", 0, &data, 4096, NULL) == -EFBIG && !data,
+		    "a whole file larger than the buffer allowed was not -EFBIG");
+	HELLO_CHECK(hello_read(dir, "slx-test.fw", 5, &data, INT_MAX, &size) == -EINVAL && !data,
+		    "a read from an offset with no buffer was not -EINVAL");
+	HELLO_CHECK(a_dir, "no dir= argument");
+	HELLO_CHECK(kernel_read_file_from_path_initns(a_dir, 0, &data, INT_MAX, NULL,
+						      READING_FIRMWARE) == -EINVAL && !data,
+		    "a directory read as a file was not -EINVAL");
+	HELLO_CHECK(hello_read(dir, "slx-empty.fw", 0, &data, INT_MAX, NULL) == -EINVAL && !data,
+		    "an empty file was not -EINVAL");
+	HELLO_CHECK(hello_read(dir, "slx-missing.fw", 0, &data, INT_MAX, NULL) == -ENOENT,
+		    "a missing file was not -ENOENT");
+	HELLO_CHECK(kernel_read_file_from_path_initns("", 0, &data, INT_MAX, NULL,
+						      READING_FIRMWARE) == -EINVAL,
+		    "an empty path was not -EINVAL");
+
+	HELLO_CHECK(request_firmware(&fw, "slx-test.fw", dev) == 0, "the firmware was not loaded");
+	HELLO_CHECK(fw->size == HELLO_FW_BYTES && hello_fw_matches(fw->data, 0, fw->size),
+		    "the firmware loaded was not the file's bytes");
+	HELLO_CHECK(request_firmware(&again, "slx-test.fw", dev) == 0 && again->data == fw->data,
+		    "firmware asked for twice while held was not shared");
+	release_firmware(again);
+	release_firmware(fw);
+	HELLO_CHECK(firmware_request_nowarn(&fw, "slx-missing.fw", dev) == -ENOENT && !fw,
+		    "a missing firmware file was not -ENOENT");
+
+	data = vmalloc(HELLO_FW_BYTES + 1000);
+	HELLO_CHECK(data, "no memory");
+	HELLO_CHECK(request_firmware_into_buf(&fw, "slx-test.fw", dev, data, HELLO_FW_BYTES + 1000) == 0 &&
+		    fw->data == data && fw->size == HELLO_FW_BYTES &&
+		    hello_fw_matches(data, 0, HELLO_FW_BYTES),
+		    "firmware read into the driver's buffer was not the file's bytes");
+	release_firmware(fw);
+	HELLO_CHECK(request_partial_firmware_into_buf(&fw, "slx-test.fw", dev, data, 1000,
+						      HELLO_FW_BYTES - 501) == 0 &&
+		    fw->size == 501 && hello_fw_matches(data, HELLO_FW_BYTES - 501, 501),
+		    "the firmware's tail, from an offset, was not its last 501 bytes");
+	release_firmware(fw);
+	vfree(data);
+
+	HELLO_CHECK(request_firmware_nowait(THIS_MODULE, FW_ACTION_NOUEVENT, "slx-test.fw", dev,
+					    GFP_KERNEL, &hello_fw_loaded, hello_fw_arrived) == 0,
+		    "an asynchronous load was not started");
+	HELLO_CHECK(wait_for_completion_timeout(&hello_fw_loaded, 5 * HZ),
+		    "an asynchronous load never called back");
+	HELLO_CHECK(hello_fw_async && hello_fw_async->size == HELLO_FW_BYTES &&
+		    hello_fw_matches(hello_fw_async->data, 0, HELLO_FW_BYTES),
+		    "an asynchronous load was not given the file's bytes");
+	release_firmware(hello_fw_async);
+	root_device_unregister(dev);
+
+	pr_info("hello firmware: parameters set from the arguments, each at its level; files read at the edges of Linux's kernel_read_file(); Linux's loader finding firmware in firmware_class.path -- whole, shared, into a buffer, its tail from an offset, asynchronously -- and a missing one -ENOENT\n");
+	return 0;
+}
+late_initcall(hello_firmware_init);

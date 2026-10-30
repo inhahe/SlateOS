@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 /*
  * The file systems Linux shows itself through, as a driver process has
- * them: none -- sysfs, procfs, and any mount.
+ * them: none -- sysfs, procfs, and any mount. And the one file system it
+ * reads: the system's own, through which its firmware loader reads a
+ * driver's firmware (below).
  *
  * Linux's own driver core runs in every driver process (drivers/base,
  * lib/kobject.c; linuxdrv/emul/manifest), and as it adds each device, driver,
@@ -37,6 +39,9 @@
 #include <linux/pid_namespace.h>
 #include <linux/threads.h>
 #include <linux/proc_fs.h>
+#include <linux/kernel_read_file.h>
+#include <linux/vmalloc.h>
+#include <linux/slab.h>
 
 #include "slx.h"
 #include "lx_emul.h"
@@ -179,10 +184,108 @@ int kobject_uevent_env(struct kobject *kobj, enum kobject_action action, char *e
  */
 struct kobject *kernel_kobj;
 
+/*
+ * Path names' cache, from which __getname() takes PATH_MAX bytes at a time
+ * (the firmware loader builds each path it tries in one), made as Linux's
+ * vfs_caches_init() makes it, before the first initcall.
+ */
+struct kmem_cache *names_cachep;
+
 int lx_fs_init(void)
 {
 	kernel_kobj = kobject_create_and_add("kernel", NULL);
-	return kernel_kobj ? 0 : -ENOMEM;
+	names_cachep = kmem_cache_create("names_cache", PATH_MAX, 0, SLAB_HWCACHE_ALIGN, NULL);
+	return kernel_kobj && names_cachep ? 0 : -ENOMEM;
+}
+
+/*
+ * The open file `handle` read as Linux's kernel_read_file() reads one
+ * (fs/kernel_read_file.c), its every check kept: from byte `offset` into
+ * `*buf`, `buf_size` bytes at most -- a buffer of the file's size
+ * vmalloc'ed there when `*buf` is NULL, and freed again on a failure --
+ * and the file's size told at `*file_size` when asked. A read from 0
+ * without `file_size` is of the whole file, which must fit and must all
+ * be read. Bytes read, or a negative errno. Nothing else can hold the file
+ * open for writing as Linux's deny_write_access() keeps it: the firmware
+ * it reads is the system's, which a driver process does not write.
+ */
+static ssize_t lx_read_file(long handle, loff_t offset, void **buf, size_t buf_size,
+			    size_t *file_size)
+{
+	void *allocated = NULL;
+	long long i_size;
+	bool regular, whole_file;
+	ssize_t copied = 0;
+	loff_t pos = offset;
+	int ret = 0;
+
+	if (offset != 0 && (!*buf || !file_size))
+		return -EINVAL;
+	/* A size past SSIZE_MAX the kit answers -EFBIG, as Linux's check. */
+	i_size = slx_file_stat(handle, &regular);
+	if (i_size < 0)
+		return i_size;
+	if (!regular || i_size == 0)
+		return -EINVAL;
+	/* The entire file cannot be read in one buffer. */
+	if (!file_size && offset == 0 && i_size > buf_size)
+		return -EFBIG;
+	whole_file = offset == 0 && i_size <= buf_size;
+	if (file_size)
+		*file_size = i_size;
+	if (!*buf)
+		*buf = allocated = vmalloc(i_size);
+	if (!*buf)
+		return -ENOMEM;
+	while (copied < buf_size) {
+		size_t wanted = min_t(size_t, buf_size - copied, i_size - pos);
+		long bytes;
+
+		if (!wanted)
+			break;
+		bytes = slx_file_read(handle, *buf + copied, wanted, pos);
+		if (bytes < 0) {
+			ret = bytes;
+			goto out_free;
+		}
+		if (bytes == 0)
+			break;
+		pos += bytes;
+		copied += bytes;
+	}
+	/* The file shrank while it was read. */
+	if (whole_file && pos != i_size)
+		ret = -EIO;
+out_free:
+	if (ret < 0 && allocated) {
+		vfree(allocated);
+		*buf = NULL;
+	}
+	return ret ? ret : copied;
+}
+
+/*
+ * The file at `path` read as lx_read_file() reads one: Linux reads it in
+ * init's mount namespace, so that a firmware file is found whoever asked;
+ * a driver process sees the system's one file system, with its own
+ * authority -- what the process was given to read with (a File
+ * capability), as whom it runs.
+ */
+ssize_t kernel_read_file_from_path_initns(const char *path, loff_t offset, void **buf,
+					  size_t buf_size, size_t *file_size,
+					  enum kernel_read_file_id id)
+{
+	ssize_t ret;
+	long handle;
+
+	if (!path || !*path)
+		return -EINVAL;
+	handle = slx_file_open(path);
+	if (handle < 0)
+		return handle;
+	ret = lx_read_file(handle, offset, buf, buf_size, file_size);
+	slx_file_close(handle);
+	return ret;
 }
 
 struct proc_dir_entry *proc_mkdir(const char *name, struct proc_dir_entry *parent)

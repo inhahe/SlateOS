@@ -92,7 +92,14 @@ beside the heap that the device's own memory backs, kmalloc serving from it
 allocator, vmalloc and high-resolution timers (`emul/lx_mm.c`,
 `emul/lx_hrtimer.c`); and for a network driver, Linux's own network core
 below the sockets, the devices it registers opened and used by the layer's
-own task (`emul/lx_nic.c`, design-decisions 1588). The driver's own
+own task (`emul/lx_nic.c`, design-decisions 1588); Linux's own firmware
+loader, reading `firmware_class.path` and `/lib/firmware` through the
+system's file calls with the process's own authority -- a `File`
+capability to read with -- and Linux's own module parameters, set from the
+process's arguments (`<module>.<parameter>=<value>`, each initcall level's
+before that level runs; an unknown one, or a refused value, ending the
+process), `emul/lx_fs.c`, `emul/lx_emul.c`, `kit/src/files.rs`,
+design-decisions 1590. The driver's own
 code is marked at build (`scripts/linux-tree.sh` renames its sections to
 `*.lxdriver`, which `link.ld` brackets), so that only the driver's failing
 initcall ends the process, a Linux subsystem's being carried past. `hello`
@@ -105,7 +112,10 @@ and overflows a stack into its guard on purpose; given the boot test's
 spare 82574, it probes the card through Linux's PCI core, reads its MAC
 address through BAR0, handles the interrupts it has the card raise, and
 has it read a descriptor and a frame from the DMA window, and routes three
-of its causes to three MSI-X vectors.
+of its causes to three MSI-X vectors. Given a firmware directory and
+parameters of its own, it reads files through the layer at each of
+Linux's edge cases, and firmware through Linux's loader every way a
+driver asks for it; given no capability to read files, it reads none.
 
 The first real driver, Linux's own `e1000e` (`linuxdrv/e1000e/`, roadmap.md
 2.1), binds the spare 82574 in QEMU -- it registers `eth0` and brings its

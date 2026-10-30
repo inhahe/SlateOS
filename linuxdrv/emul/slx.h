@@ -153,6 +153,24 @@ unsigned long long slx_real_ns(void);
 int slx_argc(void);
 const char *slx_argv(int n);
 
+/*
+ * Files, by path, read with the process's own authority (the kit's
+ * files.rs; lx_fs.c reads firmware through them). Each answers a negative
+ * Linux errno for a failure:
+ *   slx_file_open   the file at `path` (NUL-terminated) opened to read -- a
+ *                   directory too, as Linux's open for reading takes one:
+ *                   its handle;
+ *   slx_file_stat   its size, and at `*regular` whether it is a regular
+ *                   file;
+ *   slx_file_read   up to `len` bytes from byte `offset` into `buf`: how
+ *                   many, 0 at or past its end;
+ *   slx_file_close  close it.
+ */
+long slx_file_open(const char *path);
+long long slx_file_stat(long handle, _Bool *regular);
+long slx_file_read(long handle, void *buf, unsigned long len, unsigned long long offset);
+void slx_file_close(long handle);
+
 /* End the driver process with `code`. */
 void slx_exit(int code) __attribute__((noreturn));
 
@@ -168,6 +186,7 @@ void slx_stop(const char *what, const void *caller) __attribute__((noreturn));
  * the kernel can tell them apart (kernel/src/linuxdrv.rs, lxkit::exit).
  */
 #define SLX_EXIT_OK 0
+#define SLX_EXIT_ARGUMENT 118		/* a module parameter unknown, or its value refused */
 #define SLX_EXIT_WARNED 119		/* a run that must not, warned (lx_nic.c's serve-once) */
 #define SLX_EXIT_NO_CLOCK 120		/* the system gave no clock */
 #define SLX_EXIT_BUG 121		/* Linux code called BUG() */

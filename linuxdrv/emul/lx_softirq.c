@@ -154,7 +154,7 @@ void lx_emul_turn(u64 now_ns)
 	unsigned long flags;
 
 	lx_emul_account(now_ns);
-	*raw_cpu_ptr(&current_task) = &lx_idle_task;
+	*raw_cpu_ptr(&current_task) = &init_task;
 	lx_emul_jiffies_at(now_ns);
 	if (jiffies != ticked) {
 		ticked = jiffies;

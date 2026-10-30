@@ -74,7 +74,7 @@ static LIST_HEAD(lx_threads);
 /* The layer's record around `p`: none for the first task's or the idle one. */
 static struct lx_task *lx_task_of(struct task_struct *p)
 {
-	if (p == &lx_main_task || p == &lx_idle_task)
+	if (p == &lx_main_task || p == &init_task)
 		return NULL;
 	return container_of(p, struct lx_task, task);
 }
@@ -733,7 +733,7 @@ void __noreturn do_exit(long code)
 	 * next turn charges it the run time (lx_emul_turn), and the record may
 	 * be freed now.
 	 */
-	*raw_cpu_ptr(&current_task) = &lx_idle_task;
+	*raw_cpu_ptr(&current_task) = &init_task;
 	lx_put_task(tsk);
 	slx_task_exit();
 }

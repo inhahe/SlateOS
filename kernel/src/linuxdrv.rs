@@ -30,6 +30,9 @@ const E1000E: &[u8] = b"linuxdrv/e1000e";
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
 const EXIT_OK: i32 = 0;
+/// An argument naming a module parameter the process does not have, or
+/// giving one a value its kind refuses.
+const EXIT_ARGUMENT: i32 = 118;
 /// A network driver's serving of one stack in which Linux code warned: a
 /// bug, though the run otherwise passed.
 const EXIT_WARNED: i32 = 119;
@@ -116,6 +119,8 @@ fn run(
 /// "stranded" succeeds but leaves a kthread waiting for what never comes,
 /// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done;
 /// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]). Then
+/// [`firmware_runs`]: module parameters set from its arguments, and
+/// firmware read through Linux's own loader. Then
 /// [`pci_runs`]: given the boot test's spare 82574, its driver probes it
 /// through Linux's PCI core. Skipped, and recorded so, where the bootloader
 /// did not load it -- anywhere but the boot test, and after a kexec.
@@ -180,11 +185,12 @@ pub fn self_test() -> KernelResult<()> {
     for (argv, want, what) in cases {
         expect(&hello, argv, &[], want, what, || None)?;
     }
+    firmware_runs(&hello, &mut skips)?;
     let pci = pci_runs(&hello, &mut skips)?;
     let e1000e = e1000e_run(&mut skips)?;
     skips.report("[linuxdrv]");
     serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, and a sleep while atomic{}: OK",
+        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}: OK",
         elf.len(),
         if pci {
             ", a PCI function probed through Linux's PCI core, its interrupts handled and its DMA done, and one no driver took"
@@ -203,6 +209,121 @@ pub fn self_test() -> KernelResult<()> {
         );
     }
     Ok(())
+}
+
+/// Where [`firmware_runs`] puts the hello process's firmware.
+const FIRMWARE_DIR: &str = "/tmp/linuxdrv-fw";
+/// A directory with a size of its own, for [`firmware_runs`] to have read
+/// as a file: the rootfs's ext4, where the boot test mounts it.
+const SIZED_DIR: &str = "/mnt";
+/// The test firmware's size: more than one `SYS_FS_PREAD` gives, so that a
+/// whole file takes several.
+const FIRMWARE_BYTES: usize = 70_001;
+
+/// The test firmware's `i`-th byte, as `hello_fw_byte()` in
+/// `linuxdrv/hello/hello.c` has it.
+#[allow(clippy::cast_possible_truncation)] // Truncation to a byte is the formula.
+fn firmware_byte(i: usize) -> u8 {
+    i.wrapping_mul(7).wrapping_add(i >> 8) as u8
+}
+
+/// Module parameters and firmware: the hello process's "firmware" run,
+/// given a File capability to read with, the directory [`FIRMWARE_DIR`]
+/// written for it (`slx-test.fw`, `slx-empty.fw`), a directory to read as
+/// a file ([`SIZED_DIR`]; where it has no size of its own, `slx-dir.fw`,
+/// recorded as a skip) and its own parameters, must read through the layer
+/// and Linux's firmware loader what was written (`hello_firmware_init`) and
+/// exit 0; its "firmware-denied" run, given no such capability, must read
+/// nothing; an argument naming a parameter hello lacks, or giving one a
+/// value its kind refuses, must end the process before any initcall
+/// ([`EXIT_ARGUMENT`]). The directory is removed whatever the runs found.
+fn firmware_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    use crate::fs::vfs::Vfs;
+    let file = |name: &str| alloc::format!("{FIRMWARE_DIR}/{name}");
+    // Nothing should be there; whatever is, is a fixture's leftovers, and
+    // the mkdir below refuses what this does not remove.
+    let _ = Vfs::remove_recursive(FIRMWARE_DIR);
+    let written = (|| {
+        Vfs::mkdir(FIRMWARE_DIR)?;
+        let firmware: alloc::vec::Vec<u8> = (0..FIRMWARE_BYTES).map(firmware_byte).collect();
+        Vfs::write_file(file("slx-test.fw").as_str(), &firmware)?;
+        Vfs::write_file(file("slx-empty.fw").as_str(), &[])?;
+        Vfs::mkdir(file("slx-dir.fw").as_str())
+    })();
+    // A directory read as a file is refused for not being a regular file,
+    // which only one whose size is not 0 shows: an empty file is refused
+    // too, and memfs gives every directory the size 0. ext4 gives one its
+    // blocks' -- the rootfs's, at /mnt in the boot test.
+    let sized = Vfs::stat(SIZED_DIR)
+        .is_ok_and(|e| e.entry_type == crate::fs::vfs::EntryType::Directory && e.size > 0);
+    if !sized {
+        skips.record(
+            "Linux driver layer's refusal of a directory read as a file",
+            "no directory with a size of its own at /mnt (no ext4 rootfs); a sizeless one tried",
+        );
+    }
+    let dir_arg = alloc::format!(
+        "dir={}",
+        if sized {
+            alloc::string::String::from(SIZED_DIR)
+        } else {
+            file("slx-dir.fw")
+        }
+    );
+    let path_arg = alloc::format!("firmware_class.path={FIRMWARE_DIR}");
+    let path_arg = path_arg.as_bytes();
+    let read = [(ResourceType::File, 0, Rights::READ)];
+    let ran = written.and_then(|()| {
+        expect(
+            hello,
+            &[
+                b"hello",
+                b"firmware",
+                path_arg,
+                b"hello.answer=42",
+                b"hello.motto=two words",
+                b"hello.device_level=6",
+                dir_arg.as_bytes(),
+            ],
+            &read,
+            EXIT_OK,
+            "set its parameters, read files through the layer and loaded firmware through Linux's loader",
+            || None,
+        )?;
+        expect(
+            hello,
+            &[b"hello", b"firmware-denied", path_arg],
+            &[],
+            EXIT_OK,
+            "read no firmware, having no capability to read files",
+            || None,
+        )?;
+        expect(
+            hello,
+            &[b"hello", b"hello.nonesuch=1"],
+            &[],
+            EXIT_ARGUMENT,
+            "ended on a parameter it does not have",
+            || None,
+        )?;
+        expect(
+            hello,
+            &[b"hello", b"hello.answer=forty"],
+            &[],
+            EXIT_ARGUMENT,
+            "ended on a value its parameter's kind refuses",
+            || None,
+        )
+    });
+    // The fixture's own: a removal that fails leaves files in /tmp, which
+    // the next boot does not see, and the runs' verdict stands either way.
+    let _ = Vfs::remove_recursive(FIRMWARE_DIR);
+    if let Err(e) = &ran {
+        serial_println!(
+            "[linuxdrv]   firmware runs: {e:?} (the fixture in {FIRMWARE_DIR} written: {written:?})"
+        );
+    }
+    ran
 }
 
 /// The boot test's spare 82574 ([`crate::devhandle::probe_card`]) given to

@@ -85,6 +85,18 @@ linux lib/string_helpers.o
 # vsprintf's hashing of printed pointers (%p).
 linux lib/siphash.o
 
+# Module parameters, Linux's own: an argument <module>.<parameter>=<value>
+# sets one as Linux's command line does, each level's just before its
+# initcalls (lx_emul.c), and their kinds' parsing is Linux's.
+linux kernel/params.o
+
+# The firmware loader, Linux's own: request_firmware() and its kin look in
+# firmware_class.path, then /lib/firmware, reading through the system's own
+# files (lx_fs.c's kernel_read_file_from_path_initns); firmware built into
+# the program first, of which there is none.
+linux drivers/base/firmware_loader/main.o
+linux drivers/base/firmware_loader/builtin/main.o
+
 # The PCI core, Linux's own: buses scanned, functions read and set up,
 # their BARs claimed in the resource tree, drivers matched by their id
 # tables, quirks, and register mappings (pci_iomap, ioread/iowrite). The

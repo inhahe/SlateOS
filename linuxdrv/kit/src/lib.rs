@@ -6,14 +6,15 @@
 //! which implements what the C half stands on -- the `slx_*` interface in
 //! `linuxdrv/emul/slx.h` -- with the system's own calls. It never sees a
 //! Linux header. It holds the process's entry point, its memory
-//! ([`buddy`]), the console, the clock, its arguments ([`args`]), its tasks
+//! ([`buddy`]), the console, the clock, its arguments ([`args`]), files
+//! read by path ([`files`]), its tasks
 //! -- Linux's kthreads and the like, coroutines on its one thread ([`task`],
 //! and `sched`, which runs them, and `wait`, where it waits with none to run)
 //! -- the PCI functions it was given (`pci`), a network card it serves to
 //! the network stack (`nicport`, [`frames`]), and how it ends.
 //!
 //! What can be tested on the host is a library ([`args`], [`bars`],
-//! [`buddy`], [`frames`], [`task`], [`window`]); the rest (`nicport`,
+//! [`buddy`], [`files`], [`frames`], [`task`], [`window`]); the rest (`nicport`,
 //! `pci`, `sched`, `sys`, `wait`) is built only for the driver process's
 //! own target.
 
@@ -24,6 +25,7 @@
 pub mod args;
 pub mod bars;
 pub mod buddy;
+pub mod files;
 pub mod frames;
 pub mod task;
 pub mod window;
@@ -44,6 +46,9 @@ mod wait;
 pub mod exit {
     /// Every initcall returned 0.
     pub const OK: i32 = 0;
+    /// An argument named a Linux module parameter that does not exist, or
+    /// gave one a value its kind refuses (`lx_emul.c`'s parameters).
+    pub const ARGUMENT: i32 = 118;
     /// Linux code warned in a run that must not: a network driver's serving
     /// of one stack (`lx_nic.c`).
     pub const WARNED: i32 = 119;

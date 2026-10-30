@@ -32,6 +32,10 @@
 #include <linux/rcupdate.h>
 #include <linux/swiotlb.h>
 #include <linux/string.h>
+#include <linux/ctype.h>
+#include <linux/cred.h>
+#include <linux/reboot.h>
+#include <linux/panic.h>
 #include <asm/sections.h>
 
 /* The driver core's own setup, as Linux's driver_init() runs it. */
@@ -68,11 +72,12 @@ struct task_struct lx_main_task = {
  * to no process, so that a wake done there reaches the task it names --
  * a timer waking the first task wakes it, where `current` being the first
  * task's own record would read as the task waking itself. Never freed,
- * never woken.
+ * never woken. Linux's name for it, init_task: the firmware loader reads
+ * files as it (kernel credentials, prepare_kernel_cred() below).
  */
-struct task_struct lx_idle_task = {
+struct task_struct init_task = {
 	.usage = REFCOUNT_INIT(1),
-	.cpus_ptr = &lx_idle_task.cpus_mask,
+	.cpus_ptr = &init_task.cpus_mask,
 	.cpus_mask = CPU_MASK_CPU0,
 	.nr_cpus_allowed = 1,
 };
@@ -114,21 +119,73 @@ struct cpuinfo_x86 boot_cpu_data = {
  */
 unsigned long loops_per_jiffy = 4000000000UL / HZ;
 
-/*
- * Module parameters' kinds, which Linux code names in its parameter
- * tables. Nothing in a driver process sets a parameter -- it has no kernel
- * command line, and nothing refers to the tables, so the link's garbage
- * collection drops them (linuxdrv/link.ld) -- so a kind needs no
- * operations, and a parameter keeps the value it was compiled with.
- */
-const struct kernel_param_ops param_ops_bool;
-const struct kernel_param_ops param_ops_ulong;
-const struct kernel_param_ops param_ops_int;
-const struct kernel_param_ops param_ops_uint;
-const struct kernel_param_ops param_array_ops;
-
 /* No initcall's time is reported (init/main.c's initcall_debug, off). */
 bool initcall_debug;
+
+/*
+ * kmalloc works from the first instruction (lx_mm_init() runs before
+ * anything): Linux's code that asks -- a module parameter's string copied
+ * into memory of its own (kernel/params.c) -- is told so.
+ */
+bool slab_is_available(void)
+{
+	return true;
+}
+
+/*
+ * The kernel's own credentials, which the firmware loader reads its files
+ * under (drivers/base/firmware_loader/main.c), so that a driver serving
+ * some user reads them as the kernel, not as that user. A driver process
+ * has one authority, its own, which the system checks at each file call
+ * (lx_fs.c); Linux's record is kept only for its count, root's ids being
+ * zero as kzalloc leaves them. Nothing reads a credential under RCU here,
+ * so the last reference frees it at once.
+ */
+struct cred *prepare_kernel_cred(struct task_struct *daemon)
+{
+	struct cred *new = kzalloc(sizeof(*new), GFP_KERNEL);
+
+	if (new)
+		atomic_long_set(&new->usage, 1);
+	return new;
+}
+
+void __put_cred(struct cred *cred)
+{
+	kfree(cred);
+}
+
+/*
+ * What Linux tells before a restart or a power-off: a driver process is
+ * never shut down so -- it ends, and the system takes back its device --
+ * so the chain is kept, as Linux's, and never called. The firmware loader
+ * puts a waiter for user-space-loaded firmware on it, which a driver
+ * process has none of.
+ */
+static BLOCKING_NOTIFIER_HEAD(reboot_notifier_list);
+
+int register_reboot_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_register(&reboot_notifier_list, nb);
+}
+
+int unregister_reboot_notifier(struct notifier_block *nb)
+{
+	return blocking_notifier_chain_unregister(&reboot_notifier_list, nb);
+}
+
+/*
+ * Linux code marking the kernel tainted -- a parameter marked dangerous
+ * set (kernel/params.c), a warning -- said, and kept as Linux keeps it, in
+ * a mask of TAINT_* bits nothing here reads.
+ */
+static unsigned long lx_tainted_mask;
+
+void add_taint(unsigned flag, enum lockdep_ok lockdep_ok)
+{
+	if (!test_and_set_bit(flag, &lx_tainted_mask))
+		pr_warn("tainted: flag %u\n", flag);
+}
 
 /*
  * Where start-up has got to, as init/main.c moves it: booting until the
@@ -703,6 +760,100 @@ extern initcall_entry_t __initcall_start[], __initcall_end[];
 extern char __driver_text_start[], __driver_text_end[];
 
 /*
+ * Each level's initcalls, as Linux's init/main.c finds them: a level runs
+ * from its start to the next one's, the last to __initcall_end, the early
+ * ones (core_initcall's "early" kin) before level 0 (linuxdrv/link.ld).
+ */
+extern initcall_entry_t __initcall0_start[], __initcall1_start[], __initcall2_start[],
+	__initcall3_start[], __initcall4_start[], __initcall5_start[], __initcall6_start[],
+	__initcall7_start[];
+
+static initcall_entry_t *const lx_initcall_levels[] = {
+	__initcall0_start, __initcall1_start, __initcall2_start, __initcall3_start,
+	__initcall4_start, __initcall5_start, __initcall6_start, __initcall7_start,
+	__initcall_end,
+};
+
+/* The levels' names, as Linux's parse_args() says them in a refusal. */
+static const char *const lx_initcall_level_names[] = {
+	"pure", "core", "postcore", "arch", "subsys", "fs", "device", "late",
+};
+static_assert(ARRAY_SIZE(lx_initcall_levels) == ARRAY_SIZE(lx_initcall_level_names) + 1);
+
+/*
+ * The argument `arg` as one argument of Linux's command line, for
+ * parse_args() to cut up: as it is, unless it holds a space, which would
+ * cut it in two and which the process's arguments -- each already one --
+ * may hold; then its value quoted (name="value"), as Linux's command line
+ * quotes one. One holding a quote is taken as quoted already. A copy, or
+ * NULL when memory runs out.
+ */
+static char *lx_param_arg(const char *arg)
+{
+	const char *eq = strchr(arg, '=');
+	const char *c;
+
+	for (c = arg; *c && !isspace(*c); c++)
+		;
+	if (!*c || strchr(arg, '"'))
+		return kstrdup(arg, GFP_KERNEL);
+	if (!eq)
+		return kasprintf(GFP_KERNEL, "\"%s\"", arg);
+	return kasprintf(GFP_KERNEL, "%.*s=\"%s\"", (int)(eq - arg), arg, eq + 1);
+}
+
+/*
+ * An argument parse_args() found no parameter of any level for. The
+ * layer's own (pci=, serve=, ...) and a driver's mode words have no dot in
+ * their names, and are left to what reads them; a dotted name is a module's
+ * parameter (module.parameter) this process does not have -- mistyped, or
+ * meant for another driver -- and is refused, as an unknown option is.
+ */
+static int lx_param_unknown(char *param, char *val, const char *doing, void *arg)
+{
+	return strchr(param, '.') ? -ENOENT : 0;
+}
+
+/* The passes after the first: what is unknown, that one has said. */
+static int lx_param_known(char *param, char *val, const char *doing, void *arg)
+{
+	return 0;
+}
+
+/*
+ * Linux's module parameters set from the process's arguments, as Linux
+ * sets them from its command line (kernel/params.c's parse_args), those of
+ * initcall level `level`: -1, a module's own (module_param), before
+ * anything but memory is set up, as start_kernel() sets them; each other
+ * level's just before its initcalls run, as do_initcall_level(). Whether
+ * every argument was taken; parse_args() says what was not -- a dotted
+ * name no parameter has, or a value its kind refuses -- and the process
+ * ends for it (SLX_EXIT_ARGUMENT).
+ */
+static bool lx_params(int level)
+{
+	bool ok = true;
+	int i;
+
+	for (i = 1; i < slx_argc(); i++) {
+		char *arg = lx_param_arg(slx_argv(i));
+		char *err;
+
+		if (!arg) {
+			pr_err("no memory for the argument %s\n", slx_argv(i));
+			return false;
+		}
+		err = parse_args(level < 0 ? "Setting parameters" : lx_initcall_level_names[level],
+				 arg, __start___param, __stop___param - __start___param, level,
+				 level, NULL, level < 0 ? lx_param_unknown : lx_param_known);
+		kfree(arg);
+		if (IS_ERR(err))
+			ok = false;
+	}
+	return ok;
+}
+
+/*
  * What Linux's start_kernel() sets up before anything runs, set up before
  * the Rust half's loop first turns (its turns run softirqs and timers): an
  * exit code, SLX_EXIT_OK when it is ready.
@@ -712,6 +863,8 @@ int lx_emul_init(void)
 	/* First: every kmalloc() marks its pages in the direct map's array. */
 	if (lx_mm_init())
 		return SLX_EXIT_NO_MEMORY;
+	if (!lx_params(-1))
+		return SLX_EXIT_ARGUMENT;
 	wait_bit_init();
 	if (lx_softirq_init())
 		return SLX_EXIT_NO_MEMORY;
@@ -736,9 +889,36 @@ bool lx_initcall_fatal(const void *fn, int ret)
 	       (const char *)fn < __driver_text_end;
 }
 
-int lx_emul_main(void)
+/*
+ * The initcalls from `from` to `to`, in order: SLX_EXIT_OK, or
+ * SLX_EXIT_INIT_FAILED at the first of the driver's own to fail.
+ */
+static int lx_run_initcalls(initcall_entry_t *from, initcall_entry_t *to)
 {
 	initcall_entry_t *entry;
+
+	for (entry = from; entry < to; entry++) {
+		initcall_t fn = initcall_from_entry(entry);
+		int ret = fn();
+
+		/* By address: naming it would need the symbol table. */
+		if (lx_initcall_fatal((const void *)fn, ret)) {
+			pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
+			return SLX_EXIT_INIT_FAILED;
+		}
+		if (ret > 0)
+			pr_warn("initcall at %#lx returned %d; taken as success\n",
+				(unsigned long)fn, ret);
+		else if (ret < 0)
+			pr_warn("subsystem initcall at %#lx failed: %d; carrying on\n",
+				(unsigned long)fn, ret);
+	}
+	return SLX_EXIT_OK;
+}
+
+int lx_emul_main(void)
+{
+	int level, ret;
 
 	lx_main_handle = slx_task_current();
 	/*
@@ -762,22 +942,14 @@ int lx_emul_main(void)
 	 */
 	if (devices_init() || buses_init() || classes_init() || lx_fs_init())
 		return SLX_EXIT_NO_MEMORY;
-	for (entry = __initcall_start; entry < __initcall_end; entry++) {
-		initcall_t fn = initcall_from_entry(entry);
-		int ret = fn();
-
-		/* By address: naming it would need the symbol table. */
-		if (lx_initcall_fatal((const void *)fn, ret)) {
-			pr_err("initcall at %#lx failed: %d\n", (unsigned long)fn, ret);
-			return SLX_EXIT_INIT_FAILED;
-		}
-		if (ret > 0)
-			pr_warn("initcall at %#lx returned %d; taken as success\n",
-				(unsigned long)fn, ret);
-		else if (ret < 0)
-			pr_warn("subsystem initcall at %#lx failed: %d; carrying on\n",
-				(unsigned long)fn, ret);
+	ret = lx_run_initcalls(__initcall_start, __initcall0_start);
+	for (level = 0; !ret && level < ARRAY_SIZE(lx_initcall_level_names); level++) {
+		if (!lx_params(level))
+			return SLX_EXIT_ARGUMENT;
+		ret = lx_run_initcalls(lx_initcall_levels[level], lx_initcall_levels[level + 1]);
 	}
+	if (ret)
+		return ret;
 	/* A driver process exists to drive what it was given. */
 	if (!lx_pci_check_bound())
 		return SLX_EXIT_INIT_FAILED;

@@ -9,8 +9,8 @@
 
 /* lx_emul.c: the first task's record, which `current` names while it runs. */
 extern struct task_struct lx_main_task;
-/* lx_emul.c: the record `current` names between tasks: no task's. */
-extern struct task_struct lx_idle_task;
+/* lx_emul.c: the record `current` names between tasks, Linux's idle task's. */
+extern struct task_struct init_task;
 /* lx_sched.c: the first task's handle, to wake it by. */
 extern int lx_main_handle;
 

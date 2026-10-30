@@ -5504,8 +5504,13 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         shadowed, and the heap as Linux's direct map (§1584); their MSI
         delivered to Linux's handlers, hard and threaded (§1585); DMA from
         a window beside the heap, backed by the device's own arenas
-        (§1586). Left: `request_firmware`, which WiFi's drivers need
-        (`iwlwifi` loads its firmware; e1000e calls it nowhere); INTx for
+        (§1586); `request_firmware` -- Linux's own loader, reading
+        `firmware_class.path` and `/lib/firmware` through the system's file
+        calls with the process's own authority -- and Linux's module
+        parameters from the process's arguments (§1590, 2026-10-29;
+        confining the right to read files is
+        `known-issues/A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED.md`).
+        Left: INTx for
         Linux's drivers -- `pci_alloc_irq_vectors` with `PCI_IRQ_INTX` and
         `request_irq` on `pdev->irq`, over the device handle's INTx
         (§1579 as built) -- for the first driver that has nothing else

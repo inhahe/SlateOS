@@ -68,7 +68,7 @@ const _: () = assert!(1usize << (WINDOW_ORDER - CHUNK_ORDER) == crate::window::C
 const _: () = assert!(WINDOW_ORDER <= HEAP_ORDER);
 
 #[inline]
-fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
+pub(crate) fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> i64 {
     let ret: i64;
     // SAFETY: the SlateOS system-call convention: number in rax, arguments
     // in rdi, rsi, rdx; result in rax; rcx and r11 clobbered.

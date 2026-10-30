@@ -258,6 +258,9 @@ pub fn init() {
         // Every PCI function a userspace driver may open (design-decisions
         // 1579): the class, id 0.
         ResourceType::PciDevice,
+        // A directory tree to read beneath (design-decisions 1595): id 0
+        // names no tree, and admin's File above is every file already.
+        ResourceType::FileTree,
     ]
     .map(|resource_type| CapGrant {
         resource_type,
@@ -742,9 +745,8 @@ fn test_admin_grants_every_resource_type() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     };
 
-    // Bit `d` set means discriminant `d` is granted.  LAST is 29 today; the
-    // guard keeps this from silently becoming a no-op if the enum ever outgrows
-    // a u64 bitmap.
+    // Bit `d` set means discriminant `d` is granted.  The guard keeps this
+    // from silently becoming a no-op if the enum ever outgrows a u64 bitmap.
     if usize::from(ResourceType::LAST) >= u64::BITS as usize {
         serial_println!(
             "[cap/groups]   FAIL: ResourceType::LAST is {}, too many for this test's bitmap",

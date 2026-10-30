@@ -437,6 +437,16 @@ pub enum ResourceType {
     /// when its holder closes it or exits. Not inherited: a device is one
     /// driver's at a time, as `NetRaw`'s NIC is.
     PciDevice = 36,
+
+    /// A directory tree a process may read beneath (design-decisions 1595):
+    /// `SYS_FS_OPEN` opens, to read only, a file under the directory the
+    /// capability's `resource_id` names ([`crate::fs::trees`]), the walk
+    /// confined beneath it so that neither `..` nor a symbolic link leads
+    /// out -- for a process holding no `File` capability, which is every
+    /// file. The right a Linux driver process is given to read its firmware.
+    /// `resource_id` 0 names no tree. Satisfies no other file check, and
+    /// implies no Linux capability.
+    FileTree = 37,
 }
 
 /// The capability `resource_id` naming the PCI function at bus:device.function.
@@ -455,7 +465,7 @@ impl ResourceType {
     /// `1..=LAST` skipping them ([`Self::all`]) rather than keeping their own
     /// list — see
     /// [`groups::test_admin_grants_every_resource_type`](crate::cap::groups).
-    pub const LAST: u16 = Self::PciDevice as u16;
+    pub const LAST: u16 = Self::FileTree as u16;
 
     /// Discriminants that named a type no longer here: 17, the memfd, a file
     /// since 2026-10-17 (design-decisions §1573).
@@ -550,7 +560,8 @@ impl ResourceType {
             | Self::UnixSocket
             | Self::NativeSocket
             | Self::CapBroker
-            | Self::PciDevice => self as u16,
+            | Self::PciDevice
+            | Self::FileTree => self as u16,
         }
     }
 
@@ -622,6 +633,7 @@ impl ResourceType {
             34 => Self::NativeSocket,
             35 => Self::CapBroker,
             36 => Self::PciDevice,
+            37 => Self::FileTree,
             _ => return None,
         };
         Some(ty)
@@ -925,13 +937,17 @@ fn test_cap_entry_info_abi() -> KernelResult<()> {
     //    1579) -- narrower than any Linux capability (`CAP_SYS_RAWIO` is all
     //    of port I/O and /dev/mem); told to lane D in
     //    requests/a-d-resource-type-36-is-pcidevice.md.
-    if ResourceType::LAST != 36 {
+    //    37 since 2026-10-30: `FileTree`, the right to read beneath one
+    //    directory (design-decisions 1595) -- narrower than any Linux
+    //    capability (`CAP_DAC_READ_SEARCH` is every file); told to lane D in
+    //    requests/a-d-resource-type-37-is-filetree.md.
+    if ResourceType::LAST != 37 {
         serial_println!(
-            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 36 — a new resource type \
+            "[cap]   FAIL: ResourceType::LAST is {}, pinned at 37 — a new resource type \
              was appended. That is fine, but the wire ABI just grew: bump the pin here, \
              and ask lane D whether the new type implies a Linux capability. If it does, \
              posix/src/sys_capability.rs needs a rule; if it does not — which is the usual \
-             answer, that file names seven of our thirty-six types — it needs nothing, and \
+             answer, that file names seven of our thirty-seven types — it needs nothing, and \
              adding it anyway would make capget() report a CAP_* the kernel will refuse. \
              Ask either way: no compiler here can see that tree.",
             ResourceType::LAST

@@ -130,7 +130,12 @@ has it read a descriptor and a frame from the DMA window, and routes three
 of its causes to three MSI-X vectors. Given a firmware directory and
 parameters of its own, it reads files through the layer at each of
 Linux's edge cases, and firmware through Linux's loader every way a
-driver asks for it; given no capability to read files, it reads none.
+driver asks for it; given no capability to read files, it reads none. A
+driver process that loads firmware is given the right to read beneath the
+firmware directories alone -- the boot medium's (`/.boot-firmware`) and the
+system's (`/lib/firmware`) -- not every file (`ResourceType::FileTree`,
+design-decisions 1595); holding a tree for another directory, the hello
+process reads none of the boot medium's firmware.
 
 The first real driver, Linux's own `e1000e` (`linuxdrv/e1000e/`, roadmap.md
 2.1), binds the spare 82574 in QEMU -- it registers `eth0` and brings its

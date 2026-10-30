@@ -439,7 +439,7 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
 /// With no card -- QEMU has none -- its initcalls, cfg80211's, nl80211's
 /// and mac80211's among them, must run and the process exit 0, having
 /// probed nothing. Given `named`, the card `linuxdrv.wifi` names
-/// ([`named_card`]), and a File capability to read its firmware with, its
+/// ([`named_card`]), and the right to read its firmware ([`firmware_reading`]), its
 /// "scan" run must bind the card, bring its interface up, have nl80211 scan
 /// and say what it found (`linuxdrv/emul/lx_wifi.c`), and exit 0. Which ran
 /// -- `Some(true)` the card's scan -- or `None`, skipped and recorded so,
@@ -479,13 +479,15 @@ fn wifi_runs(
         return Ok(Some(false));
     };
     let a = card.address;
+    let [boot_fw, system_fw] = firmware_reading()?;
     let caps = [
         (
             ResourceType::PciDevice,
             crate::cap::pci_device_id(a.bus, a.device, a.function),
             Rights::WRITE,
         ),
-        (ResourceType::File, 0, Rights::READ),
+        boot_fw,
+        system_fw,
     ];
     let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
     // The card's firmware loaded -- from the boot medium's, which start()
@@ -555,6 +557,27 @@ fn check_parse_pci_address() -> KernelResult<()> {
 /// `/lib/firmware` an installed system carries, which Linux's loader
 /// searches after this one.
 pub const BOOT_FIRMWARE_DIR: &str = "/.boot-firmware";
+
+/// Where an installed system keeps its firmware, which Linux's loader
+/// searches after [`BOOT_FIRMWARE_DIR`].
+const SYSTEM_FIRMWARE_DIR: &str = "/lib/firmware";
+
+/// The right a driver process reads its firmware with: to read beneath the
+/// boot medium's firmware and the system's, and nothing else
+/// (`ResourceType::FileTree`, design-decisions 1595) -- never the File
+/// capability, which is every file
+/// (known-issues A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED).
+///
+/// # Errors
+///
+/// The tree registry's (`fs::trees::register`): full.
+fn firmware_reading() -> KernelResult<[(ResourceType, u64, Rights); 2]> {
+    let tree = |dir: &str| {
+        crate::fs::trees::register(crate::fs::path::Path::new(dir))
+            .map(|id| (ResourceType::FileTree, id, Rights::READ))
+    };
+    Ok([tree(BOOT_FIRMWARE_DIR)?, tree(SYSTEM_FIRMWARE_DIR)?])
+}
 
 /// Whether [`mount_boot_firmware`] placed the boot medium's firmware, whole
 /// and sealed read-only. Only then is a driver process told
@@ -905,9 +928,12 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
 /// placed it and the hello process's "bootfw" run must load it: at
 /// [`BOOT_FIRMWARE_DIR`]`/slateos/hello.fw`, the module's bytes, where
 /// nothing may write -- loaded through Linux's loader from the directory
-/// every driver process is told (`firmware_class.path`); and, given no
-/// capability to read files, not loaded, the run ending as a failed
-/// initcall: so that a run passing for a hello that did nothing is caught.
+/// every driver process is told (`firmware_class.path`), holding only the
+/// right every firmware-loading driver holds ([`firmware_reading`]); and,
+/// given no capability to read files, or only one to read beneath another
+/// directory, not loaded, the run ending as a failed initcall: so that a run
+/// passing for a hello that did nothing is caught, and a tree that let its
+/// holder out of it too.
 /// Whether it ran: skipped, and recorded so, where the boot medium carries
 /// no such module.
 ///
@@ -952,12 +978,14 @@ fn boot_firmware_run(
     }
     // Told where the firmware is as every driver process is (start()).
     let argv: [&[u8]; 2] = [b"hello", b"bootfw"];
+    // With the right every firmware-loading driver has, to read beneath
+    // the firmware directories alone.
     expect(
         hello,
         &argv,
-        &[(ResourceType::File, 0, Rights::READ)],
+        &firmware_reading()?,
         EXIT_OK,
-        "loaded the boot medium's firmware through Linux's loader",
+        "loaded the boot medium's firmware through Linux's loader, holding only the right to read beneath the firmware directories",
         || None,
     )?;
     expect(
@@ -966,6 +994,17 @@ fn boot_firmware_run(
         &[],
         EXIT_INIT_FAILED,
         "failed its firmware initcall, given no capability to read the boot medium's firmware",
+        || None,
+    )?;
+    // A tree is that directory alone: holding one for another, the boot
+    // medium's firmware is as unreadable as with none.
+    let elsewhere = crate::fs::trees::register(crate::fs::path::Path::new(FIRMWARE_DIR))?;
+    expect(
+        hello,
+        &argv,
+        &[(ResourceType::FileTree, elsewhere, Rights::READ)],
+        EXIT_INIT_FAILED,
+        "failed its firmware initcall, holding only the right to read beneath another directory",
         || None,
     )?;
     Ok(true)
@@ -1612,9 +1651,8 @@ fn check_parse_serve() -> KernelResult<()> {
     Ok(())
 }
 
-/// The driver processes that read their card's firmware: the File
-/// capability they are given for it reads any file, so it goes to these
-/// alone -- e1000e reads none.
+/// The driver processes that read their card's firmware, and are given the
+/// right to ([`firmware_reading`]) -- e1000e reads none.
 const FIRMWARE_DRIVERS: &[&str] = &["mt7925e"];
 
 /// The card `linuxdrv.serve=<driver>@<BB:DD.F>` names for its driver
@@ -1657,7 +1695,8 @@ fn served_card() -> KernelResult<Option<(alloc::string::String, crate::pci::PciD
 /// `nic.<driver>` for as long as the system runs (its `serve=` mode with no
 /// `stacks=` limit). It holds the card, the right to register that one name,
 /// and, for a driver that reads its card's firmware ([`FIRMWARE_DRIVERS`]),
-/// a File capability to read it. Started past the kernel's self-tests,
+/// the right to read it there ([`firmware_reading`]). Started past the
+/// kernel's self-tests,
 /// before the persistent netstack daemon, which `net.nic` points at the card.
 /// The name it serves, or `None` when the option is absent: no card is a
 /// driver process's unless the machine is configured so.
@@ -1691,7 +1730,7 @@ pub fn serve_at_boot() -> KernelResult<Option<alloc::string::String>> {
         ),
     ];
     if FIRMWARE_DRIVERS.contains(&driver.as_str()) {
-        caps.push((ResourceType::File, 0, Rights::READ));
+        caps.extend(firmware_reading()?);
     }
     let serve = alloc::format!("serve={driver}");
     let pci = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);

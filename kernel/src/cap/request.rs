@@ -289,8 +289,9 @@ fn truncate_utf8(s: &str, max: usize) -> String {
 ///   access, the clock, input devices, disks. Their ids are reserved or name
 ///   handles, so a non-zero one names nothing a user could judge.
 /// - Never: handles (had by making or receiving them -- a channel, a pipe,
-///   another process's terminal end would be a keystroke injector), and the
-///   right to answer requests itself.
+///   another process's terminal end would be a keystroke injector), the
+///   right to answer requests itself, and a directory tree, whose id is the
+///   kernel's own (`fs::trees`).
 ///
 /// Exhaustive on purpose: a new type cannot be added without deciding here
 /// whether a user may be asked for it.
@@ -337,7 +338,10 @@ pub fn requestable(resource_type: ResourceType, resource_id: u64) -> KernelResul
         | T::Semaphore
         | T::UnixSocket
         | T::NativeSocket
-        | T::CapBroker => Err(KernelError::InvalidArgument),
+        | T::CapBroker
+        // A tree's id is the kernel's to give (fs::trees), and names no
+        // directory a user could judge from the request.
+        | T::FileTree => Err(KernelError::InvalidArgument),
     }
 }
 

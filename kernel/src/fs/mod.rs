@@ -415,6 +415,7 @@ pub mod touchscreen;
 pub mod tracemon;
 pub mod transaction;
 pub mod trash;
+pub mod trees;
 pub mod ttystat;
 pub mod undelete;
 pub mod updatemgr;

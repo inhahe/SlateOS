@@ -17,9 +17,10 @@ are off by default.
    reaps it, serving the card at that PCI address as `nic.<driver>` for the
    system's life (the driver's `serve=` mode with no `stacks=` limit). It
    holds the card and the right to register that one name -- and, for a
-   driver that reads its card's firmware (`FIRMWARE_DRIVERS`: `mt7925e`), a
-   File capability to read it, which reads any file and so goes to no
-   other. The card is chosen as `linuxdrv.card` chooses one
+   driver that reads its card's firmware (`FIRMWARE_DRIVERS`: `mt7925e`),
+   the right to read beneath the firmware directories alone
+   (`FileTree`, decision 1595) -- never the File capability, which is
+   every file. The card is chosen as `linuxdrv.card` chooses one
    (`card_choice`, `CardKind::Network`): a value that is not a driver's
    name and a PCI address, a driver not loaded, a function not there, one
    that is not a network controller (PCI class 02 -- a slip naming the GPU

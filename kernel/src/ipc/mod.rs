@@ -220,7 +220,8 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             | ResourceType::PrivilegedPort
             | ResourceType::ResourceLimit
             | ResourceType::BlockDevice
-            | ResourceType::CapBroker => {}
+            | ResourceType::CapBroker
+            | ResourceType::FileTree => {}
             // A device handle: its last holder's exit releases the device --
             // bus mastering off first, then its mappings (`devhandle`).
             ResourceType::PciDevice => crate::devhandle::close(handle_raw),

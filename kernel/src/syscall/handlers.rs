@@ -13820,11 +13820,15 @@ pub fn fs_open_tmpfile_kernel_path(
 /// mode. The handle is registered to the caller, closed at its exit and
 /// shared with a `fork` child.
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
-    // Capability: require READ for read-only, WRITE for write.
-    // We check the broader File capability — specific rights are
-    // enforced by the handle flags.
-    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
-        return SyscallResult::err(e);
+    // Capability: a File capability, which is every file -- or, to read
+    // only, a FileTree one naming a directory the path lies beneath
+    // (open_in_held_tree). We check the broader File capability — specific
+    // rights are enforced by the handle flags.
+    let every_file = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ);
+    if let Err(e) = every_file {
+        if require_cap_type(crate::cap::ResourceType::FileTree, crate::cap::Rights::READ).is_err() {
+            return SyscallResult::err(e);
+        }
     }
 
     let path_len = args.arg1 as usize;
@@ -13842,7 +13846,12 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 
     let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
 
-    match crate::fs::handle::open(&path, flags) {
+    let opened = if every_file.is_ok() {
+        crate::fs::handle::open(&path, flags)
+    } else {
+        open_in_held_tree(path.as_path(), flags).unwrap_or(Err(KernelError::PermissionDenied))
+    };
+    match opened {
         Ok(handle) => {
             // Track the open file handle as a per-process resource so it
             // is closed when the process exits (cleanup_handles), and so
@@ -13858,6 +13867,45 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// `path` opened to read beneath a directory tree the caller holds a
+/// `FileTree` capability for (design-decisions 1595): the handle, or the
+/// open's error, a walk that would leave the tree -- a `..`, a symbolic link
+/// leading out -- being `PermissionDenied`, as any file outside it is.
+/// `None` when the caller holds no tree `path` lies beneath, or `flags` ask
+/// for more than reading: a tree is the right to read, and nothing else.
+fn open_in_held_tree(
+    path: &crate::fs::path::Path,
+    flags: crate::fs::handle::OpenFlags,
+) -> Option<KernelResult<u64>> {
+    use crate::fs::handle::OpenFlags as F;
+    let more_than_read = [F::WRITE, F::CREATE, F::TRUNCATE, F::APPEND, F::EXCL];
+    if more_than_read.iter().any(|&f| flags.contains(f)) {
+        return None;
+    }
+    let held = pcb::cap_entries(caller_pid()?)?;
+    let trees = held.iter().filter(|e| {
+        e.resource_type == ResourceType::FileTree && e.rights.contains(crate::cap::Rights::READ)
+    });
+    for tree in trees {
+        if let Some((base, rest)) = crate::fs::trees::beneath(tree.resource_id, path) {
+            let beneath = crate::fs::handle::Beneath {
+                base: &base,
+                rel: &rest,
+            };
+            return Some(
+                crate::fs::handle::open_beneath(beneath, flags).map_err(|e| {
+                    if e == KernelError::CrossDevice {
+                        KernelError::PermissionDenied
+                    } else {
+                        e
+                    }
+                }),
+            );
+        }
+    }
+    None
 }
 
 /// `SYS_FS_OPEN_MODE` — open (and, with `O_CREAT`, create) a file, stamping a

@@ -1758,6 +1758,11 @@ extern "C" fn kernel_main() -> ! {
             selftest::dispatch_debug("File handle", selftest::Severity::Diagnostic, || {
                 fs::handle::self_test()
             });
+            // The directories a `FileTree` capability can name: a process's
+            // right to read beneath one, rather than every file.
+            selftest::dispatch_debug("File trees", selftest::Severity::Diagnostic, || {
+                fs::trees::self_test()
+            });
             // In-memory filesystem self-test (standalone, doesn't touch VFS mount).
             selftest::dispatch_debug("MemFs", selftest::Severity::Diagnostic, || {
                 fs::memfs::self_test()

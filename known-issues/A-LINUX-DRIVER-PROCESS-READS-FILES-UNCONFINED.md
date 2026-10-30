@@ -1,6 +1,6 @@
 ## A-LINUX-DRIVER-PROCESS-READS-FILES-UNCONFINED (lane A, 2026-10-29) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip (design-decisions 1595), awaiting a boot on main
 
 **In short:** a Linux driver process that loads firmware must be given the
 right to read files, and that right is not limited to its firmware: with
@@ -33,3 +33,17 @@ identity of their own (`identity: None` in `kernel/src/linuxdrv.rs`'s
 
 When the first driver that needs firmware runs on a real system (WiFi,
 roadmap 2.1), it must not be started with the unconfined right.
+
+**Fixed (lane A, 2026-10-30, design-decisions 1595).** The second of the two
+fixes above: a capability to read beneath one directory,
+`ResourceType::FileTree`, its id naming a directory the kernel registered
+(`fs::trees`). `SYS_FS_OPEN` opens, to read only, a file beneath that
+directory for a process holding no `File` capability, the walk confined
+beneath it (`open_beneath`); it satisfies no other file check. Every
+firmware-loading driver process is given trees for `/.boot-firmware` and
+`/lib/firmware` in place of the `File` capability (`linuxdrv::firmware_reading`),
+`mt7925e` and a driver `linuxdrv.serve` starts among them. Checked by the
+linuxdrv self-test: holding only the trees, the hello process loads the boot
+medium's firmware; holding a tree for another directory, it loads none. The
+first fix -- an unprivileged identity per driver -- is still worth having, and
+waits on lane B's user database.

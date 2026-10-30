@@ -174,7 +174,9 @@ which must still start the 802.11 stack and exit 0. And in QEMU the stack
 is tested end to end on Linux's own `mac80211_hwsim` (`linuxdrv/hwsim/`):
 two simulated radios on one medium, the first made an open access point
 through nl80211 (`SET_INTERFACE`, `START_AP`), the second's scan having to
-find it -- its name, address and frequency.
+find it -- its name, address and frequency -- and the second then joining
+it (`CONNECT`), the layer answering its authentication and association on
+the first as hostapd would, and a frame crossing the network each way.
 
 ## Licences
 

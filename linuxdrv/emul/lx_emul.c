@@ -783,6 +783,8 @@ void lx_end_run(const char *who, int err)
 		pr_err("%s: Linux warned %lu time(s) in a run that must not\n", who, lx_warnings);
 		slx_exit(SLX_EXIT_WARNED);
 	}
+	if (err)
+		pr_err("%s: the run failed: %d\n", who, err);
 	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
 }
 

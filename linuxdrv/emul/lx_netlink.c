@@ -19,10 +19,11 @@
  * - A message multicast to a group the layer listens to is kept for it
  *   (lx_genl_listen(), lx_genl_event()); so is one sent to the layer's own
  *   port that answers none of its requests -- a management frame it
- *   registered for, a frame's transmit status (lx_genl_unicast()). To any
- *   other group, or to any other socket, a message is freed, answered as
- *   Linux answers a send no one receives. The routing netlink's
- *   notifications (rtnl_notify and the rest) go to no one.
+ *   registered for (lx_genl_unicast()); a frame's transmit status is
+ *   nl80211's to multicast, to "mlme". To any other group, or to any other
+ *   socket, a message is freed, answered as Linux answers a send no one
+ *   receives. The routing netlink's notifications (rtnl_notify and the
+ *   rest) go to no one.
  *
  * The layer's are nl80211's ABI, the interface wpa_supplicant and iwd
  * drive Linux's WiFi through, which stays put from one release to the next
@@ -94,11 +95,13 @@ const struct genl_family *lx_genl_family(const char *name)
 /*
  * The layer's own requests, as a netlink socket of its own would send them:
  * from LX_GENL_PORTID, each with the next sequence number. Replies to that
- * port, while a request of the layer's runs, go to the queue it gave.
+ * port -- carrying the sequence number of the request that runs -- go to
+ * the queue it gave.
  */
 #define LX_GENL_PORTID 1
 static u32 lx_genl_seq;
 static struct sk_buff_head *lx_genl_replies;
+static u32 lx_genl_reply_seq;
 
 struct sk_buff *lx_genl_request(const struct genl_family *family, u8 cmd)
 {
@@ -204,6 +207,7 @@ int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
 	};
 	write_pnet(&info._net, &init_net);
 	lx_genl_replies = replies;
+	lx_genl_reply_seq = nlh->nlmsg_seq;
 	err = op.pre_doit ? op.pre_doit(&op, req, &info) : 0;
 	if (!err) {
 		err = op.doit(req, &info);
@@ -231,10 +235,10 @@ static DECLARE_WAIT_QUEUE_HEAD(lx_genl_events);
 
 /*
  * Messages sent to the layer's port that answer none of its requests --
- * nl80211 unicasts the management frames a port registered for to it, and
- * their transmit statuses -- kept, in the order sent, until taken
- * (lx_genl_unicast()). At most LX_GENL_UNSOLICITED_MAX: past that, refused
- * as a socket whose receive queue is full refuses one.
+ * nl80211 unicasts the management frames a port registered for to it --
+ * kept, in the order sent, until taken (lx_genl_unicast()). At most
+ * LX_GENL_UNSOLICITED_MAX: past that, refused as a socket whose receive
+ * queue is full refuses one.
  */
 #define LX_GENL_UNSOLICITED_MAX 64
 static struct sk_buff_head lx_genl_unsolicited;
@@ -246,29 +250,9 @@ static int __init lx_genl_init(void)
 }
 pure_initcall(lx_genl_init);
 
-struct sk_buff *lx_genl_unicast(unsigned long timeout)
+struct sk_buff *lx_genl_unicast(void)
 {
-	wait_event_timeout(lx_genl_events, !skb_queue_empty(&lx_genl_unsolicited), timeout);
 	return skb_dequeue(&lx_genl_unsolicited);
-}
-
-/* Whether anything is kept for the layer: a group's message, or its port's. */
-static bool lx_genl_pending(void)
-{
-	int i;
-
-	if (!skb_queue_empty(&lx_genl_unsolicited))
-		return true;
-	for (i = 0; i < LX_GENL_LISTENS; i++)
-		if (lx_genl_listens[i].group && !skb_queue_empty(&lx_genl_listens[i].queue))
-			return true;
-	return false;
-}
-
-bool lx_genl_wait(unsigned long timeout)
-{
-	wait_event_timeout(lx_genl_events, lx_genl_pending(), timeout);
-	return lx_genl_pending();
 }
 
 /* Where group `group`'s messages are kept, or NULL when no one listens. */
@@ -321,6 +305,25 @@ struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name
 		return NULL;
 	wait_event_timeout(lx_genl_events, !skb_queue_empty(&l->queue), timeout);
 	return skb_dequeue(&l->queue);
+}
+
+/* Whether a message is kept on the layer's port, or in `l`'s group when not NULL. */
+static bool lx_genl_pending(const struct lx_genl_listen *l)
+{
+	return !skb_queue_empty(&lx_genl_unsolicited) || (l && !skb_queue_empty(&l->queue));
+}
+
+/*
+ * Only the port and the one group the caller takes from: a message waiting
+ * in another -- a scan's, say, while a join waits -- would otherwise make
+ * every wait return at once, and the caller spin without ever yielding.
+ */
+bool lx_genl_wait(const struct genl_family *family, const char *name, unsigned long timeout)
+{
+	struct lx_genl_listen *l = name ? lx_genl_listener(lx_genl_group(family, name)) : NULL;
+
+	wait_event_timeout(lx_genl_events, lx_genl_pending(l), timeout);
+	return lx_genl_pending(l);
 }
 
 /*
@@ -403,7 +406,7 @@ int netlink_broadcast_filtered(struct sock *ssk, struct sk_buff *skb, __u32 port
 
 /*
  * Sent to one socket. To the layer's own: a reply to the request of its
- * that runs -- the request's sequence number -- queued with its replies;
+ * that runs -- that request's sequence number -- queued with its replies;
  * anything else kept for it (lx_genl_unicast()), or refused, -ENOBUFS, when
  * LX_GENL_UNSOLICITED_MAX are. Linux answers a delivery with the bytes
  * sent. There is no other socket: -ECONNREFUSED.
@@ -416,7 +419,7 @@ int netlink_unicast(struct sock *ssk, struct sk_buff *skb, __u32 portid, int non
 		kfree_skb(skb);
 		return -ECONNREFUSED;
 	}
-	if (lx_genl_replies && nlmsg_hdr(skb)->nlmsg_seq == lx_genl_seq) {
+	if (lx_genl_replies && nlmsg_hdr(skb)->nlmsg_seq == lx_genl_reply_seq) {
 		skb_queue_tail(lx_genl_replies, skb);
 		return len;
 	}
@@ -462,4 +465,103 @@ int rtnl_unicast(struct sk_buff *skb, struct net *net, u32 pid)
 
 void rtnl_set_sk_err(struct net *net, u32 group, int error)
 {
+}
+
+/* A message of `family`'s, of no command, as one might be sent to the layer. */
+static struct sk_buff *lx_genl_test_msg(const struct genl_family *family)
+{
+	struct sk_buff *skb = nlmsg_new(NLMSG_DEFAULT_SIZE, GFP_KERNEL);
+	void *hdr = skb ? genlmsg_put(skb, 0, 0, family, 0, 0) : NULL;
+
+	if (!hdr) {
+		nlmsg_free(skb);
+		return NULL;
+	}
+	genlmsg_end(skb, hdr);
+	return skb;
+}
+
+/* Everything kept on the layer's port, and in group `name`, freed: how many. */
+static unsigned int lx_genl_drain(const struct genl_family *family, const char *name)
+{
+	struct sk_buff *skb;
+	unsigned int n = 0;
+
+	while ((skb = lx_genl_unicast()) || (skb = lx_genl_event(family, name, 0))) {
+		kfree_skb(skb);
+		n++;
+	}
+	return n;
+}
+
+#define LX_GENL_CHECK(cond, what)                                       \
+	do {                                                            \
+		if (!(cond)) {                                          \
+			pr_err("lx-genl: check failed: %s\n", what);    \
+			goto fail;                                      \
+		}                                                       \
+	} while (0)
+
+int lx_genl_check(const struct genl_family *family, const char *group, const char *other)
+{
+	struct sk_buff *a = NULL, *b = NULL, *skb;
+	unsigned int n;
+	int i;
+
+	if (lx_genl_listen(family, group) || lx_genl_listen(family, other)) {
+		pr_err("lx-genl: check failed: the groups \"%s\" and \"%s\" could not be listened to\n",
+		       group, other);
+		return -EPROTO;
+	}
+	/* What came before is not the check's. */
+	lx_genl_drain(family, group);
+	lx_genl_drain(family, other);
+	LX_GENL_CHECK(!lx_genl_wait(family, group, 1) && !lx_genl_unicast(),
+		      "a wait, nothing sent, saw something");
+	/* Two messages to the port, outside any request: kept, and taken in order. */
+	a = lx_genl_test_msg(family);
+	b = lx_genl_test_msg(family);
+	if (!a || !b) {
+		kfree_skb(a);
+		kfree_skb(b);
+		LX_GENL_CHECK(false, "no memory for the messages");
+	}
+	LX_GENL_CHECK(netlink_unicast(NULL, a, LX_GENL_PORTID, 0) > 0 &&
+		      netlink_unicast(NULL, b, LX_GENL_PORTID, 0) > 0,
+		      "a message to the layer's port, outside a request, was refused");
+	LX_GENL_CHECK(lx_genl_wait(family, NULL, 0), "a wait for the port missed its message");
+	skb = lx_genl_unicast();
+	LX_GENL_CHECK(skb == a, "the port's first message was not taken first");
+	kfree_skb(skb);
+	skb = lx_genl_unicast();
+	LX_GENL_CHECK(skb == b, "the port's second message was not taken second");
+	kfree_skb(skb);
+	LX_GENL_CHECK(!lx_genl_unicast(), "the port gave more than it was sent");
+	/* As many as the port keeps, then one refused. */
+	for (i = 0; i <= LX_GENL_UNSOLICITED_MAX; i++) {
+		int sent;
+
+		skb = lx_genl_test_msg(family);
+		LX_GENL_CHECK(skb, "no memory for the messages");
+		sent = netlink_unicast(NULL, skb, LX_GENL_PORTID, 0);
+		LX_GENL_CHECK(i < LX_GENL_UNSOLICITED_MAX ? sent > 0 : sent == -ENOBUFS,
+			      i < LX_GENL_UNSOLICITED_MAX ? "a message the port had room for was refused" :
+							    "a message past the port's limit was not refused");
+	}
+	n = lx_genl_drain(family, group);
+	LX_GENL_CHECK(n == LX_GENL_UNSOLICITED_MAX, "the port did not keep as many as its limit");
+	/* A message in one group: a wait for the other does not see it, one for its own does. */
+	skb = lx_genl_test_msg(family);
+	LX_GENL_CHECK(skb, "no memory for the messages");
+	LX_GENL_CHECK(!lx_genl_deliver(skb, lx_genl_group(family, other)),
+		      "a message to a group listened to was not kept");
+	LX_GENL_CHECK(!lx_genl_wait(family, group, 1), "a wait for one group woke for another's message");
+	LX_GENL_CHECK(lx_genl_wait(family, other, 0), "a wait for a group missed its message");
+	LX_GENL_CHECK(lx_genl_drain(family, other) == 1, "the group kept other than the one message");
+	pr_info("lx-genl: the port's queue, its limit and the groups' waits: as they should be\n");
+	return 0;
+fail:
+	lx_genl_drain(family, group);
+	lx_genl_drain(family, other);
+	return -EPROTO;
 }

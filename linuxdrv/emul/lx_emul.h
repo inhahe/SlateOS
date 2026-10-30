@@ -87,9 +87,9 @@ bool lx_irq_ready(struct pci_dev *dev);
  * listened to (0, or -ENOENT for no such group); and the next message sent
  * to it, waiting up to `timeout` jiffies (NULL for none by then). The next
  * message sent to the layer's port that answers none of its requests -- a
- * management frame it registered for, a frame's transmit status -- the
- * same way; and whether anything is kept for it, a group's or its port's,
- * waiting up to `timeout` jiffies for something to be.
+ * management frame it registered for -- or NULL, without waiting; and
+ * whether a message is kept on the port or in the group `name` (NULL for
+ * the port alone), waiting up to `timeout` jiffies for one to be.
  */
 struct genl_family;
 struct sk_buff;
@@ -101,8 +101,15 @@ int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
 int lx_genl_listen(const struct genl_family *family, const char *name);
 struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name,
 			      unsigned long timeout);
-struct sk_buff *lx_genl_unicast(unsigned long timeout);
-bool lx_genl_wait(unsigned long timeout);
+struct sk_buff *lx_genl_unicast(void);
+bool lx_genl_wait(const struct genl_family *family, const char *name, unsigned long timeout);
+/*
+ * lx_netlink.c: the port's queue and the waits at their edges, for a run to
+ * check before it relies on them -- `family`'s groups `group` and `other`
+ * listened to, and anything kept in them or on the port dropped: 0, or
+ * -EPROTO with what was wrong said.
+ */
+int lx_genl_check(const struct genl_family *family, const char *group, const char *other);
 
 /*
  * Hardirq context, as Linux enters it for an interrupt -- interrupts off,
@@ -129,8 +136,8 @@ unsigned long lx_live_kthreads(void);
 
 /*
  * lx_emul.c: a run of the layer's own task ended, `err` its outcome and
- * `who` its task's name for the log -- the process ended with it: a failure
- * as a failed initcall; a success in which Linux code warned anywhere in the
+ * `who` its task's name for the log -- the process ended with it: a failure,
+ * its error said, as a failed initcall; a success in which Linux code warned anywhere in the
  * process, as warned (SLX_EXIT_WARNED), a bug the run must not pass; else 0.
  */
 void lx_end_run(const char *who, int err) __attribute__((noreturn));

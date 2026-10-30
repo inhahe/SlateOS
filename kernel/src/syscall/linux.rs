@@ -7303,6 +7303,11 @@ fn open_kernel_path_install(
         kernel_bits |= crate::fs::handle::OpenFlags::NO_SYMLINKS.bits();
     }
     let kernel_flags = crate::fs::handle::OpenFlags::from_bits(kernel_bits);
+    // And the rights the flags ask for besides reading -- to truncate, to
+    // create -- which the open does itself.
+    if let Err(e) = handlers::require_open_rights(kernel_flags) {
+        return linux_err(linux_errno_for(e));
+    }
     // RESOLVE_BENEATH routes to the containment-checked open; everything
     // after this point -- handle registration, FdEntry, fd install -- is
     // identical, which is deliberate.  Lane B's request came from the two

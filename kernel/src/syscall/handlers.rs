@@ -13646,7 +13646,7 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
 /// process is calling.  `sys_fs_open` keeps its own userspace-pointer path
 /// for the native ABI; this helper does not read userspace memory.
 ///
-/// Performs the same File-READ capability check and per-process handle
+/// Performs the same File capability check ([`require_open_rights`]) and per-process handle
 /// registration `sys_fs_open` does, so the returned handle is closed on
 /// process exit and refcount-shared across `fork`. Its twin without a mode,
 /// `fs_open_kernel_path`, lost its last caller when the Linux layer began
@@ -13656,10 +13656,10 @@ pub fn fs_open_kernel_path_mode(
     flags_raw: u32,
     create_mode: u16,
 ) -> SyscallResult {
-    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    if let Err(e) = require_open_rights(flags) {
         return SyscallResult::err(e);
     }
-    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
     match crate::fs::handle::open_with_mode(path, flags, create_mode) {
         Ok(handle) => {
             register_for_caller(ResourceType::File, handle);
@@ -13689,10 +13689,10 @@ pub fn fs_open_node_kernel_path_mode(
     flags_raw: u32,
     create_mode: u16,
 ) -> NodeOpen {
-    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
+    if let Err(e) = require_open_rights(flags) {
         return NodeOpen::Done(SyscallResult::err(e));
     }
-    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
     match crate::fs::handle::open_node_with_mode(path, flags, create_mode) {
         Ok(crate::fs::handle::Opened::File(handle)) => {
             register_for_caller(ResourceType::File, handle);
@@ -13820,11 +13820,13 @@ pub fn fs_open_tmpfile_kernel_path(
 /// mode. The handle is registered to the caller, closed at its exit and
 /// shared with a `fork` child.
 pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
-    // Capability: a File capability, which is every file -- or, to read
-    // only, a FileTree one naming a directory the path lies beneath
-    // (open_in_held_tree). We check the broader File capability — specific
-    // rights are enforced by the handle flags.
-    let every_file = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ);
+    #[allow(clippy::cast_possible_truncation)]
+    let flags = crate::fs::handle::OpenFlags::from_bits(args.arg2 as u32);
+    // Capability: a File capability with the rights the flags ask for
+    // (require_open_rights), which is every file -- or, to read only, a
+    // FileTree one naming a directory the path lies beneath
+    // (open_in_held_tree).
+    let every_file = require_open_rights(flags);
     if let Err(e) = every_file {
         if require_cap_type(crate::cap::ResourceType::FileTree, crate::cap::Rights::READ).is_err() {
             return SyscallResult::err(e);
@@ -13832,8 +13834,6 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
     }
 
     let path_len = args.arg1 as usize;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags_raw = args.arg2 as u32;
 
     if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -13843,8 +13843,6 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
         Ok(s) => s,
         Err(e) => return SyscallResult::err(e),
     };
-
-    let flags = crate::fs::handle::OpenFlags::from_bits(flags_raw);
 
     let opened = if every_file.is_ok() {
         crate::fs::handle::open(&path, flags)
@@ -13867,6 +13865,32 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
         }
         Err(e) => SyscallResult::err(e),
     }
+}
+
+/// The File capability rights an open asking `flags` needs: `READ` always;
+/// `WRITE` as well to write, truncate or append; `CREATE` as well to create
+/// -- what `SYS_FS_WRITE` and `sys_fs_create` ask for the same acts, which
+/// an open's flags do inside the open (known-issues
+/// A-OPEN-WITH-ONLY-READ-RIGHTS-CAN-TRUNCATE-AND-CREATE). Every open path
+/// asks this.
+///
+/// # Errors
+///
+/// `PermissionDenied` for a right the caller's File capabilities lack.
+pub(crate) fn require_open_rights(flags: crate::fs::handle::OpenFlags) -> Result<(), KernelError> {
+    use crate::cap::{ResourceType, Rights};
+    use crate::fs::handle::OpenFlags as F;
+    require_cap_type(ResourceType::File, Rights::READ)?;
+    if [F::WRITE, F::TRUNCATE, F::APPEND]
+        .iter()
+        .any(|&f| flags.contains(f))
+    {
+        require_cap_type(ResourceType::File, Rights::WRITE)?;
+    }
+    if flags.contains(F::CREATE) {
+        require_cap_type(ResourceType::File, Rights::CREATE)?;
+    }
+    Ok(())
 }
 
 /// `path` opened to read beneath a directory tree the caller holds a
@@ -13923,13 +13947,13 @@ fn open_in_held_tree(
 /// register undefined) keep their historical 0o644-default create behaviour
 /// with no risk of an undefined register being misread as a mode.
 pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_raw = args.arg2 as u32;
+    if let Err(e) = require_open_rights(crate::fs::handle::OpenFlags::from_bits(flags_raw)) {
         return SyscallResult::err(e);
     }
 
     let path_len = args.arg1 as usize;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags_raw = args.arg2 as u32;
 
     if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);
@@ -14006,7 +14030,9 @@ pub fn sys_fs_open_mode(args: &SyscallArgs) -> SyscallResult {
 ///    and [`crate::fs::Vfs::resolve_beneath`] repeats the check as its own
 ///    first step, so the early exit cannot disagree with it.
 pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
-    if let Err(e) = require_cap_type(crate::cap::ResourceType::File, crate::cap::Rights::READ) {
+    #[allow(clippy::cast_possible_truncation)]
+    let flags_raw = args.arg2 as u32;
+    if let Err(e) = require_open_rights(crate::fs::handle::OpenFlags::from_bits(flags_raw)) {
         return SyscallResult::err(e);
     }
 
@@ -14020,8 +14046,6 @@ pub fn sys_fs_openat2(args: &SyscallArgs) -> SyscallResult {
     }
 
     let path_len = args.arg1 as usize;
-    #[allow(clippy::cast_possible_truncation)]
-    let flags_raw = args.arg2 as u32;
 
     if args.arg0 == 0 || path_len == 0 {
         return SyscallResult::err(KernelError::InvalidArgument);

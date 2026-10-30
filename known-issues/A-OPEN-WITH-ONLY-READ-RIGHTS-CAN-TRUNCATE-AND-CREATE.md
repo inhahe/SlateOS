@@ -1,6 +1,6 @@
 ## A-OPEN-WITH-ONLY-READ-RIGHTS-CAN-TRUNCATE-AND-CREATE (lane A, 2026-10-30) — OPEN
 
-**Status:** OPEN
+**Status:** OPEN -- fixed on lane-a-wip, awaiting a boot on main
 
 **In short:** a process given only the right to *read* files can still empty
 a file or make a new one, by opening it with "truncate" or "create". Writing
@@ -36,3 +36,11 @@ always; `WRITE` too for `WRITE`, `TRUNCATE` or `APPEND`; `CREATE` too for
 a boot test, any process given `READ` alone that opened to write (none of
 the kernel's own spawns does: each such grant is for a program that only
 reads), and give it what it uses.
+
+**Fixed (lane A, 2026-10-30).** `require_open_rights` in
+`kernel/src/syscall/handlers.rs`: `READ` always, `WRITE` too for `WRITE`,
+`TRUNCATE` or `APPEND`, `CREATE` too for `CREATE` -- asked by every open
+path above (`sys_fs_open`, `sys_fs_open_mode`, `sys_fs_openat2`, the kernel-
+path helpers the Linux `open` reaches, and the Linux `openat`). Checked by
+`proc::spawn::self_test_open_rights`, from ring 3: a process holding `READ`
+alone neither truncates nor creates, and the file is whole after.

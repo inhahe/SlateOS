@@ -64,8 +64,13 @@ right for the firmware directories, instead of the right to every file.
 
 `fs::trees::self_test` (every boot): ids kept and never zero, a directory
 named with `.` or `..` or relatively refused, and `beneath` component by
-component, absolute only, no tree for id 0 or an id never given. The
-linuxdrv self-test's boot-firmware runs: the hello process loads the boot
+component, absolute only, no tree for id 0 or an id never given.
+`proc::spawn::self_test_open_rights` (every boot, ring 3): a process holding
+only a tree opens a file beneath it to read, and is refused truncating or
+creating there, reading the file beside it, one reached by `..`, or one
+reached by a symbolic link out of it; a tree for another directory reads
+nothing there. The linuxdrv self-test's boot-firmware runs: the hello
+process loads the boot
 medium's firmware through Linux's loader holding only the firmware trees;
 holding none, or only a tree for another directory, it loads nothing, its
 firmware initcall failing.

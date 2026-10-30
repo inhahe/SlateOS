@@ -4371,6 +4371,224 @@ pub fn self_test_linux_dynamic_interp() -> KernelResult<()> {
     Ok(())
 }
 
+/// Ring-3 proof that a process holding `File` `READ` alone can neither
+/// truncate nor create through an open's flags
+/// ([`crate::syscall::handlers`]'s `require_open_rights`), and that a
+/// `FileTree` capability (design-decisions 1595) opens, to read only, files
+/// beneath its directory and no others: not one beside it, not one reached
+/// by `..` or a symbolic link out of it, and nothing for a tree naming
+/// another directory. A process holding exactly those rights runs
+/// [`elf::build_open_probe_elf`] per case; the kernel's own context bypasses
+/// every check, so nothing less shows them. Afterwards the file a refused
+/// truncation named is still whole, and the one a refused create named does
+/// not exist.
+///
+/// # Errors
+///
+/// `InternalError`, every failing case said, when one answers otherwise;
+/// skipped, and said so, where no filesystem can hold the fixture.
+#[allow(clippy::cast_possible_truncation)]
+pub fn self_test_open_rights() -> KernelResult<()> {
+    use crate::fs::Vfs;
+    use crate::fs::handle::OpenFlags as F;
+    /// The probe's directory, a tree of its own, and a file in it.
+    const DIR: &str = "/slateos-open-rights";
+    const FILE: &str = "/slateos-open-rights/f.txt";
+    /// What the file holds: a truncation refused must leave it whole.
+    const CONTENT: &[u8] = b"slateos open rights";
+    /// A name nothing makes: a create refused must leave it unmade.
+    const NEW: &str = "/slateos-open-rights/new.txt";
+    /// Outside the tree, beside it: `/slateos-open-rights2` is not beneath
+    /// `/slateos-open-rights`.
+    const BESIDE: &str = "/slateos-open-rights2.txt";
+    /// A symbolic link in the tree, to the file beside it.
+    const LINK: &str = "/slateos-open-rights/out";
+
+    serial_println!("[spawn] Running open rights and FileTree (ring 3) test...");
+    let mut skips = crate::fs::selftest::Skips::new();
+    let ready = crate::selftest_setup!(
+        skips,
+        "[spawn]",
+        "open rights and FileTree",
+        "no writable filesystem to stage the fixture in",
+        Vfs::mkdir(DIR).or_else(|e| if e == KernelError::AlreadyExists {
+            Ok(())
+        } else {
+            Err(e)
+        }),
+        Vfs::write_file(FILE, CONTENT),
+        Vfs::write_file(BESIDE, CONTENT),
+    );
+    if !ready {
+        skips.report("[spawn]");
+        return Ok(());
+    }
+    // Ignored on purpose: a leftover link from an earlier boot is made
+    // again below, and none is no matter.
+    let _ = Vfs::remove(LINK);
+    // A filesystem without symbolic links leaves that one case out, said
+    // below.
+    let linked = Vfs::symlink(LINK, BESIDE).is_ok();
+    let tree = crate::fs::trees::register(crate::fs::path::Path::new(DIR))?;
+    let other =
+        crate::fs::trees::register(crate::fs::path::Path::new("/slateos-open-rights-other"))?;
+
+    let read_only = [(ResourceType::File, 0u64, Rights::READ)];
+    let read_write = [(
+        ResourceType::File,
+        0u64,
+        Rights::READ | Rights::WRITE | Rights::CREATE,
+    )];
+    let tree_only = [(ResourceType::FileTree, tree, Rights::READ)];
+    let other_tree = [(ResourceType::FileTree, other, Rights::READ)];
+    let read = F::READ.bits();
+    let truncate = F::READ.bits() | F::WRITE.bits() | F::TRUNCATE.bits();
+    let create = F::READ.bits() | F::WRITE.bits() | F::CREATE.bits();
+
+    // (what, caps, path, flags, the probe's exit: 0 opened, 1 PermissionDenied)
+    /// What a case is: what it shows, the probe's capabilities, the path
+    /// it opens, its flags, and the exit it must give.
+    type Case<'a> = (
+        &'a str,
+        &'a [(ResourceType, u64, Rights)],
+        &'a str,
+        u32,
+        i32,
+    );
+    let mut cases: alloc::vec::Vec<Case<'_>> = alloc::vec![
+        ("READ opens to read", &read_only, FILE, read, 0),
+        (
+            "READ alone does not truncate",
+            &read_only,
+            FILE,
+            truncate,
+            1
+        ),
+        ("READ alone does not create", &read_only, NEW, create, 1),
+        ("READ and WRITE truncate", &read_write, BESIDE, truncate, 0),
+        ("a tree opens to read beneath it", &tree_only, FILE, read, 0),
+        (
+            "a tree does not truncate beneath it",
+            &tree_only,
+            FILE,
+            truncate,
+            1
+        ),
+        (
+            "a tree does not create beneath it",
+            &tree_only,
+            NEW,
+            create,
+            1
+        ),
+        (
+            "a tree does not read beside it",
+            &tree_only,
+            BESIDE,
+            read,
+            1
+        ),
+        (
+            "a tree does not read out of it by ..",
+            &tree_only,
+            "/slateos-open-rights/../slateos-open-rights2.txt",
+            read,
+            1
+        ),
+        (
+            "a tree for another directory reads nothing here",
+            &other_tree,
+            FILE,
+            read,
+            1
+        ),
+    ];
+    if linked {
+        cases.push((
+            "a tree does not read out of it by a symbolic link",
+            &tree_only,
+            LINK,
+            read,
+            1,
+        ));
+    } else {
+        skips.record(
+            "open rights: a tree left by a symbolic link",
+            "the filesystem made no symbolic link",
+        );
+    }
+
+    let mut failed = 0u32;
+    for (what, caps, path, flags, want) in cases {
+        let mut path_nul = alloc::vec::Vec::from(path.as_bytes());
+        path_nul.push(0);
+        let elf = elf::build_open_probe_elf(&path_nul, path.len() as u32, flags);
+        let options = SpawnOptions {
+            name: "spawn-test-open-rights",
+            parent: 0,
+            priority: DEFAULT_PRIORITY,
+            capabilities: caps,
+            fd_map: &[],
+            argv: &[b"openprobe"],
+            envp: &[],
+            exe_path: None,
+            cwd: None,
+            identity: None,
+        };
+        let got = match spawn_process(&elf, &options) {
+            Ok(result) => {
+                let deadline = crate::hrtimer::now_ns().saturating_add(5_000_000_000);
+                while pcb::state(result.pid) != Some(pcb::ProcessState::Zombie)
+                    && crate::hrtimer::now_ns() < deadline
+                {
+                    crate::sched::sleep_ms(5);
+                }
+                let code = pcb::exit_code(result.pid);
+                teardown_fixture(result.pid, result.task_id);
+                code
+            }
+            Err(e) => {
+                serial_println!(
+                    "[spawn]   FAIL: open rights: {what}: the probe was not spawned ({e:?})"
+                );
+                failed = failed.saturating_add(1);
+                continue;
+            }
+        };
+        if got != Some(want) {
+            serial_println!(
+                "[spawn]   FAIL: open rights: {what}: the probe of {path} exited {got:?}, not {want} \
+                 (0 opened, 1 PermissionDenied, 2 another refusal)"
+            );
+            failed = failed.saturating_add(1);
+        }
+    }
+    // What the refusals left: the file whole, and nothing made.
+    if Vfs::read_file(FILE).ok().as_deref() != Some(CONTENT) {
+        serial_println!("[spawn]   FAIL: open rights: a refused truncation changed {FILE}");
+        failed = failed.saturating_add(1);
+    }
+    if Vfs::metadata(NEW).is_ok() {
+        serial_println!("[spawn]   FAIL: open rights: a refused create made {NEW}");
+        failed = failed.saturating_add(1);
+    }
+    // Ignored on purpose: the fixture's leftovers harm nothing, and a
+    // failure here says nothing about the rights tested.
+    let _ = Vfs::remove(LINK);
+    let _ = Vfs::remove(NEW);
+    let _ = Vfs::remove(FILE);
+    let _ = Vfs::rmdir(DIR);
+    let _ = Vfs::remove(BESIDE);
+    skips.report("[spawn]");
+    if failed > 0 {
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[spawn]   open rights: READ alone neither truncates nor creates, and a FileTree reads beneath its directory and nowhere else -- not beside it, not out by .. or a link -- and nothing more: OK"
+    );
+    Ok(())
+}
+
 /// Ring-3 end-to-end test that a process cannot use a file handle it does not
 /// own — the `require_file_handle_owner` gate in `syscall::handlers`.
 ///

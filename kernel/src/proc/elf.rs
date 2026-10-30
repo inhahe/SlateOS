@@ -26073,6 +26073,119 @@ pub fn build_native_handle_ownership_test_elf(
     buf
 }
 
+/// Build a native-ABI test ELF that opens one path with one set of flags
+/// (`SYS_FS_OPEN`) and says, by its exit code, what the open answered:
+///
+/// | code | meaning |
+/// |---|---|
+/// | `0` | opened |
+/// | `1` | refused with `PermissionDenied` |
+/// | `2` | refused otherwise |
+///
+/// For the capability checks of an open -- the rights a File capability
+/// must hold for the flags (`require_open_rights`), and a `FileTree` one's
+/// directory -- which only a process holding just those can show. The
+/// handle, when there is one, is left open: the process's exit closes it.
+///
+/// `path_nul` must be NUL-terminated; `path_len` is the path's length
+/// without the NUL; `flags` are `fs::handle::OpenFlags` bits.
+#[must_use]
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+pub fn build_open_probe_elf(path_nul: &[u8], path_len: u32, flags: u32) -> alloc::vec::Vec<u8> {
+    const SYS_EXIT: u32 = 1;
+    const SYS_FS_OPEN: u32 = 610;
+    /// `KernelError::PermissionDenied` as it arrives in `rax`.
+    const PERMISSION_DENIED: i32 = -400;
+
+    let phdr_offset: u64 = 64;
+    let code_offset: u64 = 120; // 64 (ehdr) + 56 (one phdr)
+    let load_vaddr: u64 = 0x0000_0040_0000_0000;
+
+    let mut code: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+    /// `mov edi, imm32; mov eax, SYS_EXIT; syscall` — 12 bytes, fixed width,
+    /// which is what lets the jumps above each one use a known rel8.
+    fn exit_with(code: &mut alloc::vec::Vec<u8>, v: u32) {
+        code.push(0xBF);
+        code.extend_from_slice(&v.to_le_bytes());
+        code.extend_from_slice(&[0xB8]);
+        code.extend_from_slice(&SYS_EXIT.to_le_bytes());
+        code.extend_from_slice(&[0x0F, 0x05]);
+    }
+
+    code.extend_from_slice(&[0x48, 0xBF]); // movabs rdi, &path
+    let path_imm = code.len();
+    code.extend_from_slice(&[0u8; 8]);
+    code.push(0xBE); // mov esi, path_len
+    code.extend_from_slice(&path_len.to_le_bytes());
+    code.push(0xBA); // mov edx, flags
+    code.extend_from_slice(&flags.to_le_bytes());
+    code.push(0xB8); // mov eax, SYS_FS_OPEN
+    code.extend_from_slice(&SYS_FS_OPEN.to_le_bytes());
+    code.extend_from_slice(&[0x0F, 0x05]); // syscall
+
+    code.extend_from_slice(&[0x48, 0x85, 0xC0]); // test rax, rax
+    code.extend_from_slice(&[0x78, 0x00]); // js .refused
+    let js_refused = code.len() - 1;
+    exit_with(&mut code, 0);
+    let refused = code.len();
+    code[js_refused] = ((refused as isize) - (js_refused as isize + 1)) as u8;
+
+    code.extend_from_slice(&[0x48, 0x3D]); // cmp rax, imm32 (sign-extended)
+    code.extend_from_slice(&PERMISSION_DENIED.to_le_bytes());
+    code.extend_from_slice(&[0x74, 0x00]); // je .denied
+    let je_denied = code.len() - 1;
+    exit_with(&mut code, 2);
+    let denied = code.len();
+    code[je_denied] = ((denied as isize) - (je_denied as isize + 1)) as u8;
+    exit_with(&mut code, 1);
+    code.push(0xCC); // int3 — unreachable
+
+    // --- data ----------------------------------------------------------
+    let code_len = code.len();
+    let path_off = code_offset as usize + code_len;
+    let file_size = path_off + path_nul.len();
+
+    let vaddr_of = |fo: usize| load_vaddr + (fo as u64 - code_offset);
+    let pv = vaddr_of(path_off).to_le_bytes();
+    code[path_imm..path_imm + 8].copy_from_slice(&pv);
+
+    let mut buf = alloc::vec![0u8; file_size];
+    buf[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    buf[4] = 2; // ELFCLASS64
+    buf[5] = 1; // ELFDATA2LSB
+    buf[6] = EV_CURRENT;
+    write_u16(&mut buf, 16, ET_EXEC);
+    write_u16(&mut buf, 18, EM_X86_64);
+    write_u32(&mut buf, 20, u32::from(EV_CURRENT));
+    write_u64(&mut buf, 24, load_vaddr);
+    write_u64(&mut buf, 32, phdr_offset);
+    write_u64(&mut buf, 40, 0);
+    write_u32(&mut buf, 48, 0);
+    write_u16(&mut buf, 52, ELF64_EHDR_SIZE as u16);
+    write_u16(&mut buf, 54, ELF64_PHDR_SIZE as u16);
+    write_u16(&mut buf, 56, 1);
+    write_u16(&mut buf, 58, ELF64_SHDR_SIZE as u16);
+    write_u16(&mut buf, 60, 0);
+    write_u16(&mut buf, 62, 0);
+
+    let ph = phdr_offset as usize;
+    let seg_len = (file_size - code_offset as usize) as u64;
+    write_u32(&mut buf, ph, PT_LOAD);
+    write_u32(&mut buf, ph + 4, PF_R | PF_W | PF_X);
+    write_u64(&mut buf, ph + 8, code_offset);
+    write_u64(&mut buf, ph + 16, load_vaddr);
+    write_u64(&mut buf, ph + 24, 0);
+    write_u64(&mut buf, ph + 32, seg_len);
+    write_u64(&mut buf, ph + 40, seg_len);
+    write_u64(&mut buf, ph + 48, 0x1000);
+
+    buf[code_offset as usize..code_offset as usize + code_len].copy_from_slice(&code);
+    buf[path_off..path_off + path_nul.len()].copy_from_slice(path_nul);
+
+    buf
+}
+
 /// Build a **Linux-ABI** test ELF that exercises `openat2(2)` — in particular
 /// the `RESOLVE_BENEATH` containment path — end-to-end from ring 3.
 ///

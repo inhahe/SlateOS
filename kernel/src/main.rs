@@ -2248,6 +2248,14 @@ extern "C" fn kernel_main() -> ! {
         selftest::Severity::Diagnostic,
         || proc::spawn::self_test_file_handle_ownership(),
     );
+    // And what an open's flags may ask of a File capability, and what a
+    // FileTree one reaches -- ring 3 for the same reason: kernel context
+    // bypasses both checks.
+    selftest::dispatch_debug(
+        "open rights and FileTree (ring 3)",
+        selftest::Severity::Diagnostic,
+        || proc::spawn::self_test_open_rights(),
+    );
 
     {
         #[inline(never)]

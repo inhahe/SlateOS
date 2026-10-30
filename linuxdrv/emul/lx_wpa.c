@@ -139,8 +139,9 @@ int lx_wpa_wrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *plain, size_t len, u8 *o
 
 	if (len < 16 || len % 8 || aes_expandkey(&aes, kek, LX_WPA_KEK_LEN))
 		return -EINVAL;
-	memcpy(out, lx_wpa_wrap_iv, 8);
+	/* The plaintext moved before the IV goes in front of it: `out` may be `plain`. */
 	memmove(out + 8, plain, len);
+	memcpy(out, lx_wpa_wrap_iv, 8);
 	for (j = 0; j < 6; j++) {
 		for (i = 1; i <= n; i++) {
 			u64 t = (u64)n * j + i;
@@ -237,7 +238,9 @@ int lx_wpa_key_frame(u8 *buf, size_t room, u16 info, u64 replay, const u8 *nonce
 	if (nonce)
 		memcpy(k->nonce, nonce, LX_WPA_NONCE_LEN);
 	k->data_length = cpu_to_be16(data_len);
-	memcpy(k->data, data, data_len);
+	/* No key data comes as NULL: memcpy() is not to be handed it, whatever the length. */
+	if (data_len)
+		memcpy(k->data, data, data_len);
 	if (kck)
 		lx_wpa_mic(kck, buf, len, k->mic);
 	return len;
@@ -284,9 +287,23 @@ int lx_wpa_key_data_wrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *data, size_t le
 	return err ?: (int)(n + 8);
 }
 
+/* The GTK KDE's selector (12.7.2, table 12-10): IEEE's OUI and data type 1. */
+static const u8 lx_wpa_gtk_selector[] = { 0x00, 0x0f, 0xac, 0x01 };
+
+size_t lx_wpa_gtk_kde(u8 *out, u8 keyid, const u8 *gtk, size_t gtk_len)
+{
+	out[0] = WLAN_EID_VENDOR_SPECIFIC;
+	out[1] = sizeof(lx_wpa_gtk_selector) + 2 + gtk_len;
+	memcpy(out + 2, lx_wpa_gtk_selector, sizeof(lx_wpa_gtk_selector));
+	/* The key's id (bits 0-1), not for sending (bit 2 clear): pairwise keys are in use. */
+	out[6] = keyid & 0x03;
+	out[7] = 0;
+	memcpy(out + 8, gtk, gtk_len);
+	return 8 + gtk_len;
+}
+
 const u8 *lx_wpa_find_gtk(const u8 *data, size_t len, u8 *keyid, size_t *gtk_len)
 {
-	static const u8 gtk_kde[] = { 0x00, 0x0f, 0xac, 0x01 };
 	size_t at = 0;
 
 	while (at + 2 <= len) {
@@ -298,7 +315,8 @@ const u8 *lx_wpa_find_gtk(const u8 *data, size_t len, u8 *keyid, size_t *gtk_len
 			break;
 		if (at + 2 + elen > len)
 			break;
-		if (e[0] == 0xdd && elen >= 6 + 5 && !memcmp(e + 2, gtk_kde, sizeof(gtk_kde))) {
+		if (e[0] == WLAN_EID_VENDOR_SPECIFIC && elen >= 6 + 5 &&
+		    !memcmp(e + 2, lx_wpa_gtk_selector, sizeof(lx_wpa_gtk_selector))) {
 			*keyid = e[6] & 0x03;
 			*gtk_len = elen - 6;
 			return e + 8;
@@ -366,10 +384,10 @@ int lx_wpa_check(void)
 		0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b, 0x0b,
 	};
 	u8 pmk[LX_WPA_PMK_LEN], prf[64], anonce[LX_WPA_NONCE_LEN], snonce[LX_WPA_NONCE_LEN];
-	u8 wrapped[24], unwrapped[16], frame[LX_WPA_KEY_HDR + 8];
+	u8 wrapped[24], unwrapped[16], in_place[24], frame[LX_WPA_KEY_HDR + 8];
 	struct lx_wpa_ptk ptk, ptk_other_way;
 	bool ok = true;
-	int i, len;
+	int i, len, err;
 
 	for (i = 0; i < LX_WPA_NONCE_LEN; i++) {
 		anonce[i] = i;
@@ -386,10 +404,33 @@ int lx_wpa_check(void)
 	lx_wpa_ptk(pmk_want, spa, aa, snonce, anonce, &ptk_other_way);
 	ok &= lx_wpa_same("the PTK derived from the other side", (const u8 *)&ptk_other_way,
 			  ptk_want, sizeof(ptk));
-	ok &= !lx_wpa_wrap(kek, key, sizeof(key), wrapped) &&
-	      lx_wpa_same("RFC 3394's key wrapped", wrapped, wrapped_want, sizeof(wrapped));
-	ok &= !lx_wpa_unwrap(kek, wrapped_want, sizeof(wrapped_want), unwrapped) &&
-	      lx_wpa_same("RFC 3394's key unwrapped", unwrapped, key, sizeof(key));
+	err = lx_wpa_wrap(kek, key, sizeof(key), wrapped);
+	if (err)
+		pr_err("lx-wpa: check failed: RFC 3394's key could not be wrapped: %d\n", err);
+	ok &= !err && lx_wpa_same("RFC 3394's key wrapped", wrapped, wrapped_want, sizeof(wrapped));
+	err = lx_wpa_unwrap(kek, wrapped_want, sizeof(wrapped_want), unwrapped);
+	if (err)
+		pr_err("lx-wpa: check failed: RFC 3394's wrapped key did not unwrap: %d\n", err);
+	ok &= !err && lx_wpa_same("RFC 3394's key unwrapped", unwrapped, key, sizeof(key));
+	/* Wrapped where it lies, as well as into a buffer of its own. */
+	memcpy(in_place, key, sizeof(key));
+	err = lx_wpa_wrap(kek, in_place, sizeof(key), in_place);
+	ok &= !err && lx_wpa_same("RFC 3394's key wrapped in place", in_place, wrapped_want,
+				  sizeof(wrapped_want));
+	/* A group key's KDE built, and found again in key data after another element. */
+	{
+		u8 data[4 + 8 + LX_WPA_TK_LEN] = { WLAN_EID_RSN, 2, 0x01, 0x00 };
+		size_t gtk_len = 0;
+		const u8 *gtk;
+		u8 keyid = 0;
+
+		lx_wpa_gtk_kde(data + 4, 2, key, sizeof(key));
+		gtk = lx_wpa_find_gtk(data, sizeof(data), &keyid, &gtk_len);
+		if (!gtk || keyid != 2 || gtk_len != sizeof(key) || memcmp(gtk, key, sizeof(key))) {
+			pr_err("lx-wpa: check failed: a group key's KDE built was not found again as built\n");
+			ok = false;
+		}
+	}
 	memcpy(wrapped, wrapped_want, sizeof(wrapped));
 	wrapped[23] ^= 1;
 	if (lx_wpa_unwrap(kek, wrapped, sizeof(wrapped), unwrapped) != -EBADMSG) {

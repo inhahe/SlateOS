@@ -198,9 +198,12 @@ int lx_wpa_key_data_wrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *data, size_t le
 			 size_t room);
 /*
  * The group key in key data (its GTK KDE): the key, its id and its length
- * through `keyid` and `gtk_len` -- or NULL when there is none.
+ * through `keyid` and `gtk_len` -- or NULL when there is none. And the KDE
+ * built at `out`, for the `gtk_len`-byte key at `gtk` with id `keyid`: its
+ * length, 8 + `gtk_len`.
  */
 const u8 *lx_wpa_find_gtk(const u8 *data, size_t len, u8 *keyid, size_t *gtk_len);
+size_t lx_wpa_gtk_kde(u8 *out, u8 keyid, const u8 *gtk, size_t gtk_len);
 /* lx_wpa.c at its edges, against published vectors: 0, or -EBADMSG with what was wrong said. */
 int lx_wpa_check(void);
 

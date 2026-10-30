@@ -12,18 +12,25 @@
  *   ends: 0 for a scan that finished, whatever it found. Passive (no SSID
  *   asked for): the card only listens, sending nothing on a network nobody
  *   has chosen.
- * - "hwsim": first the layer's netlink at its edges (lx_genl_check), and
- *   the crypto API's CCM against RFC 3610 (lx_wifi_ccm_check); then
- *   mac80211_hwsim's two simulated radios on one medium -- the
- *   first made an open access point (NL80211_CMD_SET_INTERFACE to AP, then
- *   NL80211_CMD_START_AP, beaconing LX_WIFI_SSID on LX_WIFI_FREQ), the
- *   second scanning as above, which must find that network, from the first
- *   radio's address, on that frequency. Then the second joins it
- *   (NL80211_CMD_CONNECT), the layer answering its authentication and
- *   association on the first as hostapd would (lx_wifi_join), and a frame
- *   crosses the network each way (lx_wifi_cross); the process ends 0 only
- *   if every step did. The whole of the stack and the layer's use of it,
- *   where there is no card (the boot test).
+ * - "hwsim": first what the run relies on, at its edges: the layer's
+ *   netlink (lx_genl_check), the crypto API's CCM against RFC 3610
+ *   (lx_wifi_ccm_check), and WPA2's keys and frames against 802.11's and
+ *   RFC 3394's vectors (lx_wpa_check). Then mac80211_hwsim's two simulated
+ *   radios on one medium: the first made an open access point
+ *   (NL80211_CMD_SET_INTERFACE to AP, then NL80211_CMD_START_AP, beaconing
+ *   LX_WIFI_SSID on LX_WIFI_FREQ), the second scanning as above, which must
+ *   find that network, from the first radio's address, on that frequency.
+ *   The second joins it (NL80211_CMD_CONNECT), the layer answering its
+ *   authentication and association on the first as hostapd would
+ *   (lx_wifi_join), and a frame crosses the network each way, watched on
+ *   the air through hwsim's monitor interface: in clear
+ *   (lx_wifi_cross_watched). Then the network is made WPA2-PSK's
+ *   (lx_wifi_protect), the second scans and joins it again, the layer
+ *   makes the four-way handshake as both sides (lx_wifi_handshake), and a
+ *   frame crosses each way protected on the air, its payload never in
+ *   clear. The process ends 0 only if every step did: the whole of the
+ *   stack, its ciphers and the layer's use of them, where there is no card
+ *   (the boot test).
  * - Neither, and given no card: the process ends once its initcalls are
  *   done. Given a card, the task does nothing.
  *
@@ -275,17 +282,22 @@ static int lx_wifi_scan_on(const struct genl_family *nl80211, struct net_device 
 	return 0;
 }
 
-/* What the networks a scan found are told against: the one wanted, if any. */
+/*
+ * What the networks a scan found are told against: the one wanted, if
+ * any -- and whether it advertised itself protected (privacy, and an RSN
+ * element).
+ */
 struct lx_wifi_found {
 	unsigned int networks;
 	const u8 *bssid;
 	bool wanted;
+	bool protected;
 };
 
 /*
  * One network cfg80211 has: said, its name escaped as Linux prints one;
  * and whether it is the wanted one -- LX_WIFI_SSID from `bssid`, on
- * LX_WIFI_FREQ.
+ * LX_WIFI_FREQ -- and protected.
  */
 static void lx_wifi_bss(struct wiphy *wiphy, struct cfg80211_bss *bss, void *data)
 {
@@ -294,12 +306,16 @@ static void lx_wifi_bss(struct wiphy *wiphy, struct cfg80211_bss *bss, void *dat
 
 	rcu_read_lock();
 	ssid = ieee80211_bss_get_ie(bss, WLAN_EID_SSID);
-	pr_info("lx-wifi: \"%*pE\" %pM %u MHz %d dBm\n", ssid ? ssid[1] : 0, ssid ? ssid + 2 : NULL,
-		bss->bssid, bss->channel->center_freq, bss->signal / 100);
+	pr_info("lx-wifi: \"%*pE\" %pM %u MHz %d dBm%s\n", ssid ? ssid[1] : 0,
+		ssid ? ssid + 2 : NULL, bss->bssid, bss->channel->center_freq, bss->signal / 100,
+		bss->capability & WLAN_CAPABILITY_PRIVACY ? ", protected" : "");
 	if (found->bssid && ssid && ssid[1] == strlen(LX_WIFI_SSID) &&
 	    !memcmp(ssid + 2, LX_WIFI_SSID, ssid[1]) && ether_addr_equal(bss->bssid, found->bssid) &&
-	    bss->channel->center_freq == LX_WIFI_FREQ)
+	    bss->channel->center_freq == LX_WIFI_FREQ) {
 		found->wanted = true;
+		found->protected = (bss->capability & WLAN_CAPABILITY_PRIVACY) &&
+				   ieee80211_bss_get_ie(bss, WLAN_EID_RSN);
+	}
 	rcu_read_unlock();
 	found->networks++;
 }
@@ -309,6 +325,31 @@ static void lx_wifi_results(struct net_device *dev, struct lx_wifi_found *found)
 {
 	cfg80211_bss_iter(dev->ieee80211_ptr->wiphy, NULL, lx_wifi_bss, found);
 	pr_info("lx-wifi: scan: %u network(s)\n", found->networks);
+}
+
+/*
+ * The station `sta_dev`'s scan told against the network the access point
+ * `ap_dev` runs: found -- its name, from its address, on its frequency --
+ * and advertising itself protected exactly when `protect`. 0, or -ENOENT,
+ * said.
+ */
+static int lx_wifi_heard(struct net_device *sta_dev, struct net_device *ap_dev, bool protect)
+{
+	struct lx_wifi_found found = { .bssid = ap_dev->dev_addr };
+
+	lx_wifi_results(sta_dev, &found);
+	if (found.wanted && found.protected == protect) {
+		pr_info("lx-wifi: hwsim: \"%s\" found%s, beaconed by the first radio and heard by the second\n",
+			LX_WIFI_SSID, protect ? ", protected" : "");
+		return 0;
+	}
+	if (!found.wanted)
+		pr_err("lx-wifi: the scan did not find \"%s\" from %pM on %u MHz\n", LX_WIFI_SSID,
+		       ap_dev->dev_addr, LX_WIFI_FREQ);
+	else
+		pr_err("lx-wifi: the scan heard \"%s\" %s, not %s\n", LX_WIFI_SSID,
+		       found.protected ? "protected" : "open", protect ? "protected" : "open");
+	return -ENOENT;
 }
 
 static int lx_wifi_scan(void)
@@ -352,9 +393,9 @@ static void lx_wifi_mgmt_header(struct ieee80211_mgmt *m, u16 stype, const u8 *d
 static const u8 lx_wifi_rates[] = { WLAN_EID_SUPP_RATES, 4, 0x82, 0x84, 0x8b, 0x96 };
 
 /*
- * A WPA2-PSK network's RSN element, as the access point beacons it and the
- * station asks for it: version 1, CCMP its group and its one pairwise
- * cipher, PSK its one key management, no capabilities.
+ * A WPA2-PSK network's RSN element, as the station asks for it: version 1,
+ * CCMP its group and its one pairwise cipher, PSK its one key management,
+ * no capabilities.
  */
 static const u8 lx_wifi_rsn[] = {
 	WLAN_EID_RSN, 20,
@@ -363,6 +404,22 @@ static const u8 lx_wifi_rsn[] = {
 	0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
 	0x01, 0x00, 0x00, 0x0f, 0xac, 0x02,
 	0x00, 0x00,
+};
+
+/*
+ * The same, as the access point advertises it -- in its beacons, and in
+ * the handshake's third message, which must repeat what it advertised --
+ * with the capabilities many access points set (16 replay counters for
+ * each of the two kinds of traffic, 0x000c): not the station's element
+ * byte for byte, as a real network's is not.
+ */
+static const u8 lx_wifi_ap_rsn[] = {
+	WLAN_EID_RSN, 20,
+	0x01, 0x00,
+	0x00, 0x0f, 0xac, 0x04,
+	0x01, 0x00, 0x00, 0x0f, 0xac, 0x04,
+	0x01, 0x00, 0x00, 0x0f, 0xac, 0x02,
+	0x0c, 0x00,
 };
 
 /* The "hwsim" run's protected network's passphrase. */
@@ -400,7 +457,7 @@ static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev, const 
 	const bool protect = wpa2 && *(const bool *)wpa2;
 	const size_t ssid_len = strlen(LX_WIFI_SSID);
 	u8 head[sizeof(struct ieee80211_hdr_3addr) + 12 + 2 + 32 + sizeof(lx_wifi_rates)];
-	u8 tail[3 + sizeof(lx_wifi_rsn)] = { WLAN_EID_DS_PARAMS, 1, LX_WIFI_CHANNEL };
+	u8 tail[3 + sizeof(lx_wifi_ap_rsn)] = { WLAN_EID_DS_PARAMS, 1, LX_WIFI_CHANNEL };
 	struct ieee80211_mgmt *mgmt = (struct ieee80211_mgmt *)head;
 	u8 *ie = mgmt->u.beacon.variable;
 
@@ -416,7 +473,7 @@ static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev, const 
 	memcpy(ie, lx_wifi_rates, sizeof(lx_wifi_rates));
 	ie += sizeof(lx_wifi_rates);
 	if (protect)
-		memcpy(tail + 3, lx_wifi_rsn, sizeof(lx_wifi_rsn));
+		memcpy(tail + 3, lx_wifi_ap_rsn, sizeof(lx_wifi_ap_rsn));
 	return nla_put(req, NL80211_ATTR_BEACON_HEAD, ie - head, head) ||
 	       nla_put(req, NL80211_ATTR_BEACON_TAIL, protect ? sizeof(tail) : 3, tail) ||
 	       nla_put_u32(req, NL80211_ATTR_BEACON_INTERVAL, 100) ||
@@ -434,8 +491,9 @@ static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev, const 
  * whether its network is protected (WPA2-PSK), the one station it is
  * taking -- the first to authenticate -- how far that has got
  * (authenticated; added as a station; associated, and, open, let through
- * the port), the RSN element a protected network's station associated
- * with, its group key, and the first error met answering it.
+ * the port), its group key, and the first error met answering it. A
+ * protected network's station associated with exactly its RSN element,
+ * lx_wifi_rsn, or not at all.
  */
 struct lx_wifi_ap {
 	const struct genl_family *nl80211;
@@ -446,7 +504,6 @@ struct lx_wifi_ap {
 	bool authenticated;
 	bool added;
 	bool associated;
-	u8 sta_rsn[sizeof(lx_wifi_rsn)];
 	int err;
 };
 
@@ -545,7 +602,7 @@ static int lx_wifi_authorize(struct sk_buff *req, struct net_device *dev, const 
  * association id, the access point's rates -- and, on an open network, the
  * station let through the port, there being no 802.1X to wait for. On a
  * protected one the request must ask for the network's own security (its
- * RSN element), kept for the handshake to hold the station to, and the
+ * RSN element, lx_wifi_rsn), which message 2 must then repeat, and the
  * port stays closed until the handshake opens it. A request asked again --
  * the station heard no answer in time and resent it -- has the response
  * sent again; the station is added and let through once.
@@ -587,7 +644,6 @@ static int lx_wifi_ap_assoc(struct lx_wifi_ap *ap, const struct ieee80211_mgmt *
 				   req->sa);
 			return -EPROTO;
 		}
-		memcpy(ap->sta_rsn, rsn, sizeof(ap->sta_rsn));
 	} else if (rsn) {
 		netdev_err(ap->dev, "an association from %pM asking for security an open network has not\n",
 			   req->sa);
@@ -799,12 +855,11 @@ static int lx_wifi_ap_take_frames(const struct genl_family *nl80211, struct net_
  * on a protected network, with its port still closed to all but the
  * handshake (lx_wifi_handshake); else why not, said.
  */
-static int lx_wifi_join(const struct genl_family *nl80211, struct lx_wifi_ap *ap_state,
+static int lx_wifi_join(const struct genl_family *nl80211, struct lx_wifi_ap *ap,
 			struct net_device *sta_dev)
 {
-	struct lx_wifi_ap ap = *ap_state;
-	struct net_device *ap_dev = ap.dev;
-	const struct lx_wifi_connect connect = { .bssid = ap_dev->dev_addr, .wpa2 = ap.wpa2 };
+	struct net_device *ap_dev = ap->dev;
+	const struct lx_wifi_connect connect = { .bssid = ap_dev->dev_addr, .wpa2 = ap->wpa2 };
 	unsigned long until = jiffies + LX_WIFI_JOIN_S * HZ;
 	struct lx_wifi_connected c = {};
 	bool ended = false;
@@ -824,15 +879,15 @@ static int lx_wifi_join(const struct genl_family *nl80211, struct lx_wifi_ap *ap
 		if (!lx_genl_wait(nl80211, NL80211_MULTICAST_GROUP_MLME, lx_wifi_left(until))) {
 			netdev_err(sta_dev, "did not join \"%s\" in %d s (the access point %s it)\n",
 				   LX_WIFI_SSID, LX_WIFI_JOIN_S,
-				   ap.associated ? "associated" : ap.authenticated ? "authenticated" :
+				   ap->associated ? "associated" : ap->authenticated ? "authenticated" :
 										    "never heard from");
 			return -ETIMEDOUT;
 		}
 		while ((msg = lx_genl_unicast())) {
-			lx_wifi_ap_message(&ap, msg);
+			lx_wifi_ap_message(ap, msg);
 			nlmsg_free(msg);
 		}
-		err = ap.err;
+		err = ap->err;
 		while ((msg = lx_genl_event(nl80211, NL80211_MULTICAST_GROUP_MLME, 0))) {
 			if (!ended)
 				ended = lx_wifi_connect_result(msg, sta_dev, &c);
@@ -841,11 +896,11 @@ static int lx_wifi_join(const struct genl_family *nl80211, struct lx_wifi_ap *ap
 	}
 	if (err)
 		return err;
-	if (c.status != WLAN_STATUS_SUCCESS || !ap.associated) {
+	if (c.status != WLAN_STATUS_SUCCESS || !ap->associated) {
 		netdev_err(sta_dev, "joining \"%s\" ended with status %d%s%s, the access point %s\n",
 			   LX_WIFI_SSID, c.status, c.timed_out ? ", timed out in " : "",
 			   c.timed_out ? lx_wifi_timeout_step(c.timeout_reason) : "",
-			   ap.associated ? "having associated it" : "not having associated it");
+			   ap->associated ? "having associated it" : "not having associated it");
 		return -ECONNREFUSED;
 	}
 	if (!netif_carrier_ok(sta_dev)) {
@@ -857,9 +912,8 @@ static int lx_wifi_join(const struct genl_family *nl80211, struct lx_wifi_ap *ap
 			  "say what it has of the station");
 	if (!err)
 		netdev_info(sta_dev, "joined \"%s\"%s, %pM, as station %pM\n", LX_WIFI_SSID,
-			    ap.wpa2 ? " (WPA2, its port closed until the handshake)" : "",
+			    ap->wpa2 ? " (WPA2, its port closed until the handshake)" : "",
 			    ap_dev->dev_addr, sta_dev->dev_addr);
-	*ap_state = ap;
 	return err;
 }
 
@@ -955,12 +1009,20 @@ static int lx_wifi_cross(struct net_device *from, struct net_device *to)
 /* The group key's index: the access point's first, as hostapd numbers it. */
 #define LX_WIFI_GTK_IDX 1
 
-/* A key installed (NL80211_CMD_NEW_KEY): CCMP's, pairwise with the peer at `mac`, or the group's. */
+/*
+ * A key installed (NL80211_CMD_NEW_KEY): CCMP's, pairwise with the peer at
+ * `mac`, or the group's -- with, when `rsc` is not NULL, the packet number
+ * its frames have reached, below which none is taken (a CCMP PN, 6 bytes).
+ */
 struct lx_wifi_key {
 	const u8 *key;
 	u8 idx;
 	const u8 *mac;
+	const u8 *rsc;
 };
+
+/* A CCMP packet number's length, as a key's RSC carries it. */
+#define LX_WIFI_CCMP_PN_LEN 6
 
 static int lx_wifi_key_params(struct sk_buff *req, struct net_device *dev, const void *arg)
 {
@@ -971,7 +1033,8 @@ static int lx_wifi_key_params(struct sk_buff *req, struct net_device *dev, const
 	       nla_put_u32(req, NL80211_ATTR_KEY_CIPHER, WLAN_CIPHER_SUITE_CCMP) ||
 	       nla_put_u32(req, NL80211_ATTR_KEY_TYPE,
 			   k->mac ? NL80211_KEYTYPE_PAIRWISE : NL80211_KEYTYPE_GROUP) ||
-	       (k->mac && nla_put(req, NL80211_ATTR_MAC, ETH_ALEN, k->mac));
+	       (k->mac && nla_put(req, NL80211_ATTR_MAC, ETH_ALEN, k->mac)) ||
+	       (k->rsc && nla_put(req, NL80211_ATTR_KEY_SEQ, LX_WIFI_CCMP_PN_LEN, k->rsc));
 }
 
 /* The group key at index `idx` (a u8) made the one multicast frames go under (NL80211_CMD_SET_KEY). */
@@ -1080,16 +1143,31 @@ static int lx_wifi_eapol_rx(struct sk_buff *skb, struct net_device *dev, struct 
 	return NET_RX_SUCCESS;
 }
 
-/* One side's part of the handshake: its PMK, the PTK, both nonces, the replay counter, and whether it is done. */
+/*
+ * One side's part of the handshake: its PMK, the PTK, both nonces, the
+ * replay counter -- the authenticator's, of the frame it last sent, and of
+ * its first message 1 (`first_replay`); the supplicant's, of the last
+ * whose MIC held (`replayed` once there is one: a message 1, unsigned,
+ * sets none) -- the last message it handled, and whether it is done. The
+ * supplicant's also: whether it has made its nonce
+ * (once for the handshake), and the network it joined as its scan heard
+ * it -- the access point's address and the RSN element it advertised,
+ * which message 3 must repeat.
+ */
 struct lx_wifi_side {
 	u8 pmk[LX_WPA_PMK_LEN];
 	struct lx_wpa_ptk ptk;
 	u8 anonce[LX_WPA_NONCE_LEN];
 	u8 snonce[LX_WPA_NONCE_LEN];
+	bool snonce_made;
 	u64 replay;
+	u64 first_replay;
 	bool replayed;
 	int frames;
 	bool done;
+	u8 bssid[ETH_ALEN];
+	u8 rsn[2 + 255];
+	size_t rsn_len;
 };
 
 /* The handshake under way: the access point's join, the station, and the two sides. */
@@ -1116,22 +1194,57 @@ static int lx_wifi_eapol_send(struct net_device *from, const u8 *to, u16 info, u
 }
 
 /*
+ * The network the station `dev` has joined, as its scan heard it, into the
+ * supplicant's side `s`: the access point's address, and the RSN element
+ * it advertised. 0, or -ENOENT, said, when cfg80211 has no such network or
+ * it advertised none.
+ */
+static int lx_wifi_joined(struct net_device *dev, struct lx_wifi_side *s)
+{
+	struct wireless_dev *wdev = dev->ieee80211_ptr;
+	struct cfg80211_bss *bss;
+	const u8 *ie;
+
+	ether_addr_copy(s->bssid, wdev->u.client.connected_addr);
+	bss = cfg80211_get_bss(wdev->wiphy, NULL, s->bssid, NULL, 0, IEEE80211_BSS_TYPE_ESS,
+			       IEEE80211_PRIVACY_ANY);
+	if (bss) {
+		rcu_read_lock();
+		ie = ieee80211_bss_get_ie(bss, WLAN_EID_RSN);
+		s->rsn_len = ie ? ie[1] + 2 : 0;
+		if (ie)
+			memcpy(s->rsn, ie, s->rsn_len);
+		rcu_read_unlock();
+		cfg80211_put_bss(wdev->wiphy, bss);
+	}
+	if (!bss || !s->rsn_len) {
+		netdev_err(dev, "cfg80211 has no RSN element for %pM, the network joined\n", s->bssid);
+		return -ENOENT;
+	}
+	return 0;
+}
+
+/*
  * The supplicant -- the station -- given a frame of the handshake from the
- * access point, as wpa_supplicant takes it: message 1 answered with
- * message 2 (its nonce, the PTK derived, its RSN element, signed);
- * message 3 checked (signed by that PTK, the access point's nonce
- * unchanged, a later replay counter, the network's RSN element and the
- * group key wrapped inside), answered with message 4, and its keys
- * installed and its port opened. 0, or what was wrong, said.
+ * access point it joined (lx_wifi_joined), as wpa_supplicant takes it:
+ * message 1 answered with message 2 (its nonce, made once for the
+ * handshake; the PTK derived; its RSN element; signed) -- message 1 carries
+ * no MIC, so nothing in it is trusted further, its replay counter not
+ * kept, and one sent again is answered again; message 3 checked (signed by
+ * that PTK, a replay counter past any it has checked, the access point's
+ * nonce unchanged, the RSN element it advertised, the group key wrapped
+ * inside), answered with message 4, and its keys installed -- the group
+ * key from the packet number message 3 gives -- and its port opened. 0, or
+ * what was wrong, said.
  */
 static int lx_wifi_supplicant(struct lx_wifi_handshaking *h, struct sk_buff *skb)
 {
 	struct lx_wifi_side *s = &h->supplicant;
 	struct net_device *dev = h->sta_dev;
-	const u8 *bssid = h->ap->dev->dev_addr;
+	const u8 *bssid = s->bssid;
 	const struct lx_wpa_eapol_key *k;
 	u8 plain[LX_WPA_KEY_DATA_MAX];
-	const u8 *gtk;
+	const u8 *gtk, *rsn;
 	size_t gtk_len, data_len;
 	u16 info;
 	u64 replay;
@@ -1153,12 +1266,13 @@ static int lx_wifi_supplicant(struct lx_wifi_handshaking *h, struct sk_buff *skb
 		return -EPROTO;
 	}
 	if (!(info & LX_WPA_INFO_MIC)) {
-		/* Message 1. */
+		/* Message 1, perhaps sent again: the PTK from its nonce and the station's one. */
+		if (!s->snonce_made) {
+			get_random_bytes(s->snonce, LX_WPA_NONCE_LEN);
+			s->snonce_made = true;
+		}
 		memcpy(s->anonce, k->nonce, LX_WPA_NONCE_LEN);
-		get_random_bytes(s->snonce, LX_WPA_NONCE_LEN);
 		lx_wpa_ptk(s->pmk, bssid, dev->dev_addr, s->anonce, s->snonce, &s->ptk);
-		s->replay = replay;
-		s->replayed = true;
 		s->frames = 1;
 		return lx_wifi_eapol_send(dev, bssid, LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE |
 					  LX_WPA_INFO_MIC, replay, s->snonce, lx_wifi_rsn,
@@ -1175,6 +1289,8 @@ static int lx_wifi_supplicant(struct lx_wifi_handshaking *h, struct sk_buff *skb
 		netdev_err(dev, "the third handshake frame's MIC does not hold\n");
 		return -EBADMSG;
 	}
+	s->replay = replay;
+	s->replayed = true;
 	if (memcmp(k->nonce, s->anonce, LX_WPA_NONCE_LEN)) {
 		netdev_err(dev, "the third handshake frame's nonce is not the first's\n");
 		return -EPROTO;
@@ -1184,20 +1300,22 @@ static int lx_wifi_supplicant(struct lx_wifi_handshaking *h, struct sk_buff *skb
 		netdev_err(dev, "the third handshake frame's key data does not unwrap\n");
 		return -EBADMSG;
 	}
+	rsn = cfg80211_find_ie(WLAN_EID_RSN, plain, data_len - 8);
 	gtk = lx_wpa_find_gtk(plain, data_len - 8, &keyid, &gtk_len);
-	if (memcmp(plain, lx_wifi_rsn, sizeof(lx_wifi_rsn)) || !gtk || gtk_len != LX_WPA_TK_LEN) {
-		netdev_err(dev, "the third handshake frame's key data has not the network's RSN element and a group key\n");
+	if (!rsn || rsn[1] + 2 != s->rsn_len || memcmp(rsn, s->rsn, s->rsn_len) || !gtk ||
+	    gtk_len != LX_WPA_TK_LEN) {
+		netdev_err(dev, "the third handshake frame's key data has not the RSN element the access point advertised, and a group key\n");
 		memzero_explicit(plain, sizeof(plain));
 		return -EPROTO;
 	}
-	s->replay = replay;
+	s->frames = 3;
 	err = lx_wifi_eapol_send(dev, bssid, LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE |
 				 LX_WPA_INFO_MIC | LX_WPA_INFO_SECURE, replay, NULL, NULL, 0,
 				 s->ptk.kck);
 	/* Message 4 is sent before the keys go in: it must leave unencrypted. */
 	if (!err) {
 		const struct lx_wifi_key ptk = { .key = s->ptk.tk, .idx = 0, .mac = bssid };
-		const struct lx_wifi_key group = { .key = gtk, .idx = keyid };
+		const struct lx_wifi_key group = { .key = gtk, .idx = keyid, .rsc = k->rsc };
 
 		err = lx_wifi_ask(h->nl80211, NL80211_CMD_NEW_KEY, dev, lx_wifi_key_params, &ptk,
 				  "install its pairwise key");
@@ -1227,8 +1345,9 @@ static int lx_wifi_authenticator(struct lx_wifi_handshaking *h, struct sk_buff *
 	struct lx_wifi_side *a = &h->authenticator;
 	struct lx_wifi_ap *ap = h->ap;
 	const struct lx_wpa_eapol_key *k;
-	u8 plain[sizeof(lx_wifi_rsn) + 8 + LX_WPA_TK_LEN];
+	u8 plain[sizeof(lx_wifi_ap_rsn) + 8 + LX_WPA_TK_LEN];
 	u8 wrapped[LX_WPA_KEY_DATA_MAX + 8];
+	u64 replay;
 	u16 info;
 	int len, err;
 
@@ -1238,16 +1357,19 @@ static int lx_wifi_authenticator(struct lx_wifi_handshaking *h, struct sk_buff *
 		return -EPROTO;
 	}
 	info = be16_to_cpu(k->info);
-	if ((info & LX_WPA_INFO_ACK) || !(info & LX_WPA_INFO_MIC) ||
-	    get_unaligned_be64(k->replay) != a->replay) {
-		netdev_err(ap->dev, "a handshake frame (key information %#x) the station would not send, or not of the last replay counter\n",
+	replay = get_unaligned_be64(k->replay);
+	if ((info & LX_WPA_INFO_ACK) || !(info & LX_WPA_INFO_MIC)) {
+		netdev_err(ap->dev, "a handshake frame (key information %#x) the station would not send\n",
 			   info);
 		return -EPROTO;
 	}
 	if (!(info & LX_WPA_INFO_SECURE)) {
-		/* Message 2. */
-		if (a->frames != 1) {
-			netdev_err(ap->dev, "a second handshake frame out of turn\n");
+		/* Message 2, answering one of the message 1s sent; once message 3 is out, a later answer is passed over. */
+		if (a->frames == 3 && replay >= a->first_replay && replay < a->replay)
+			return 0;
+		if (a->frames != 1 || replay < a->first_replay || replay > a->replay) {
+			netdev_err(ap->dev, "a second handshake frame out of turn, or answering no first one (replay counter %llu)\n",
+				   replay);
 			return -EPROTO;
 		}
 		memcpy(a->snonce, k->nonce, LX_WPA_NONCE_LEN);
@@ -1256,19 +1378,16 @@ static int lx_wifi_authenticator(struct lx_wifi_handshaking *h, struct sk_buff *
 			netdev_err(ap->dev, "the second handshake frame's MIC does not hold: the passphrases differ\n");
 			return -EBADMSG;
 		}
-		if (be16_to_cpu(k->data_length) != sizeof(ap->sta_rsn) ||
-		    memcmp(k->data, ap->sta_rsn, sizeof(ap->sta_rsn))) {
+		/* What the station associated with: the association was refused unless it was this. */
+		if (be16_to_cpu(k->data_length) != sizeof(lx_wifi_rsn) ||
+		    memcmp(k->data, lx_wifi_rsn, sizeof(lx_wifi_rsn))) {
 			netdev_err(ap->dev, "the second handshake frame's RSN element is not the one the station associated with\n");
 			return -EPROTO;
 		}
-		/* The network's RSN element, then the group key's KDE: its id, and the key. */
-		memcpy(plain, lx_wifi_rsn, sizeof(lx_wifi_rsn));
-		plain[sizeof(lx_wifi_rsn)] = 0xdd;
-		plain[sizeof(lx_wifi_rsn) + 1] = 6 + LX_WPA_TK_LEN;
-		memcpy(plain + sizeof(lx_wifi_rsn) + 2, "\x00\x0f\xac\x01", 4);
-		plain[sizeof(lx_wifi_rsn) + 6] = LX_WIFI_GTK_IDX;
-		plain[sizeof(lx_wifi_rsn) + 7] = 0;
-		memcpy(plain + sizeof(lx_wifi_rsn) + 8, ap->gtk, LX_WPA_TK_LEN);
+		/* The RSN element the access point advertises, then the group key's KDE. */
+		memcpy(plain, lx_wifi_ap_rsn, sizeof(lx_wifi_ap_rsn));
+		lx_wpa_gtk_kde(plain + sizeof(lx_wifi_ap_rsn), LX_WIFI_GTK_IDX, ap->gtk,
+			       LX_WPA_TK_LEN);
 		len = lx_wpa_key_data_wrap(a->ptk.kek, plain, sizeof(plain), wrapped, sizeof(wrapped));
 		memzero_explicit(plain, sizeof(plain));
 		if (len < 0) {
@@ -1282,9 +1401,10 @@ static int lx_wifi_authenticator(struct lx_wifi_handshaking *h, struct sk_buff *
 					  LX_WPA_INFO_SECURE | LX_WPA_INFO_ENCRYPTED, a->replay,
 					  a->anonce, wrapped, len, a->ptk.kck);
 	}
-	/* Message 4. */
-	if (a->frames != 3) {
-		netdev_err(ap->dev, "a fourth handshake frame out of turn\n");
+	/* Message 4, answering message 3. */
+	if (a->frames != 3 || replay != a->replay) {
+		netdev_err(ap->dev, "a fourth handshake frame out of turn, or not answering the third (replay counter %llu)\n",
+			   replay);
 		return -EPROTO;
 	}
 	if (!lx_wpa_key_parse(skb->data, skb->len, a->ptk.kck)) {
@@ -1307,8 +1427,9 @@ static int lx_wifi_authenticator(struct lx_wifi_handshaking *h, struct sk_buff *
 /*
  * The four-way handshake between the access point `ap`, whose station
  * `sta_dev` has just joined its protected network, and that station --
- * the layer each side, as hostapd and wpa_supplicant are: each side's PMK
- * worked out from the passphrase, message 1 sent, and each side's frames
+ * the layer each side, as hostapd and wpa_supplicant are: the network the
+ * station joined learnt from its own join (lx_wifi_joined), the PMK worked
+ * out from the passphrase, message 1 sent, and each side's frames
  * taken as they come (lx_wifi_supplicant, lx_wifi_authenticator) until
  * both have installed their keys and opened their ports, within
  * LX_WIFI_HANDSHAKE_S. 0, or why not, said. Every key is wiped after.
@@ -1334,21 +1455,34 @@ static int lx_wifi_handshake(const struct genl_family *nl80211, struct lx_wifi_a
 	h->nl80211 = nl80211;
 	h->ap = ap;
 	h->sta_dev = sta_dev;
+	/* The supplicant knows the network from its own join and scan, not from the access point. */
+	err = lx_wifi_joined(sta_dev, &h->supplicant);
+	if (err) {
+		kfree_sensitive(h);
+		return err;
+	}
+	/* The PMK worked out once: both sides hold the same one, from the one passphrase. */
 	lx_wpa_pmk(LX_WIFI_PASSPHRASE, (const u8 *)LX_WIFI_SSID, strlen(LX_WIFI_SSID),
 		   h->authenticator.pmk);
-	lx_wpa_pmk(LX_WIFI_PASSPHRASE, (const u8 *)LX_WIFI_SSID, strlen(LX_WIFI_SSID),
-		   h->supplicant.pmk);
+	memcpy(h->supplicant.pmk, h->authenticator.pmk, LX_WPA_PMK_LEN);
 	skb_queue_head_init(&at_ap.frames);
 	skb_queue_head_init(&at_sta.frames);
 	dev_add_pack(&at_ap.type);
 	dev_add_pack(&at_sta.type);
-	/* Message 1: the access point's nonce, no MIC, the first replay counter. */
+	/*
+	 * Message 1 -- the access point's nonce, no MIC -- and again, its
+	 * replay counter the next, as hostapd sends it again when message 2 is
+	 * slow: the supplicant must answer both without losing the handshake.
+	 */
 	get_random_bytes(h->authenticator.anonce, LX_WPA_NONCE_LEN);
-	h->authenticator.replay = 1;
+	h->authenticator.first_replay = 1;
 	h->authenticator.frames = 1;
-	err = lx_wifi_eapol_send(ap->dev, ap->sta, LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE |
-				 LX_WPA_INFO_ACK, h->authenticator.replay, h->authenticator.anonce,
-				 NULL, 0, NULL);
+	for (h->authenticator.replay = 1; !err && h->authenticator.replay <= 2;
+	     h->authenticator.replay++)
+		err = lx_wifi_eapol_send(ap->dev, ap->sta, LX_WPA_INFO_VERSION | LX_WPA_INFO_PAIRWISE |
+					 LX_WPA_INFO_ACK, h->authenticator.replay,
+					 h->authenticator.anonce, NULL, 0, NULL);
+	h->authenticator.replay--;
 	until = jiffies + LX_WIFI_HANDSHAKE_S * HZ;
 	while (!err && !(h->authenticator.done && h->supplicant.done)) {
 		struct sk_buff *skb;
@@ -1356,7 +1490,7 @@ static int lx_wifi_handshake(const struct genl_family *nl80211, struct lx_wifi_a
 		if (!wait_event_timeout(wq, !skb_queue_empty(&at_ap.frames) ||
 					    !skb_queue_empty(&at_sta.frames),
 					lx_wifi_left(until))) {
-			netdev_err(sta_dev, "the handshake did not end in %d s: the station had message %d, the access point sent message %d\n",
+			netdev_err(sta_dev, "the handshake did not end in %d s: the station last handled message %d, the access point last sent message %d\n",
 				   LX_WIFI_HANDSHAKE_S, h->supplicant.frames,
 				   h->authenticator.frames);
 			err = -ETIMEDOUT;
@@ -1469,6 +1603,10 @@ static int lx_wifi_cross_watched(struct net_device *a, struct net_device *b, boo
 		for (waited = 0; !err && air.frames < 2 && waited < LX_WIFI_FRAME_MS; waited += 10)
 			msleep(10);
 		dev_remove_pack(&air.type);
+		/* Down again: up, hwsim copies every frame on the medium to it -- each beacon too. */
+		rtnl_lock();
+		dev_close(mon);
+		rtnl_unlock();
 	}
 	dev_put(mon);
 	if (err)
@@ -1591,7 +1729,6 @@ static int lx_wifi_ccm_check(void)
 static int lx_wifi_hwsim(void)
 {
 	const struct genl_family *nl80211 = lx_wifi_nl80211();
-	struct lx_wifi_found found = {};
 	struct net_device *devs[2];
 	struct lx_wifi_ap *ap;
 	int err;
@@ -1626,17 +1763,8 @@ static int lx_wifi_hwsim(void)
 		err = lx_wifi_open(devs[1]);
 	if (!err)
 		err = lx_wifi_scan_on(nl80211, devs[1]);
-	if (!err) {
-		found.bssid = devs[0]->dev_addr;
-		lx_wifi_results(devs[1], &found);
-		if (found.wanted)
-			pr_info("lx-wifi: hwsim: \"%s\" found, beaconed by the first radio and heard by the second\n",
-				LX_WIFI_SSID);
-		else
-			pr_err("lx-wifi: the scan did not find \"%s\" from %pM on %u MHz\n",
-			       LX_WIFI_SSID, devs[0]->dev_addr, LX_WIFI_FREQ);
-		err = found.wanted ? 0 : -ENOENT;
-	}
+	if (!err)
+		err = lx_wifi_heard(devs[1], devs[0], false);
 	/* The open network: joined, and a frame across it each way, in clear on the air. */
 	if (!err)
 		err = lx_wifi_join(nl80211, ap, devs[1]);
@@ -1659,6 +1787,8 @@ static int lx_wifi_hwsim(void)
 	 */
 	if (!err)
 		err = lx_wifi_scan_on(nl80211, devs[1]);
+	if (!err)
+		err = lx_wifi_heard(devs[1], devs[0], true);
 	if (!err)
 		err = lx_wifi_join(nl80211, ap, devs[1]);
 	if (!err)

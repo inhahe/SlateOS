@@ -403,17 +403,19 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         );
         return Ok(false);
     };
-    // Up to 30 s for the radios to register, 30 s for the scan, 20 s for
-    // each of the two joins and for the open network's leaving, 10 s for
-    // the handshake, and 2 s for each frame and each link to come up
-    // (lx_wifi.c) -- 130 s with every step at its limit -- with room past
-    // them all for the process to say which ran out before the kernel cuts
-    // it off.
+    // The process's own waits, each at its limit (lx_wifi.c): 30 s for the
+    // radios to register; 30 s for each of the two scans; 20 s for each of
+    // the two joins and for the open network's leaving; 10 s for the
+    // handshake; 2 s for each of the four links to come up, each of the
+    // four frames to cross and each of the two watches to see them -- 180 s
+    // all told -- and the crypto manager's own wait to make "ccm(aes)" on
+    // top (crypto/api.c's larval wait, 60 s): 240 s. A minute past those,
+    // for the process to say which ran out before the kernel cuts it off.
     let program = Program {
         elf,
         name: "lx-hwsim",
         driver: true,
-        limit_s: 180,
+        limit_s: 300,
         poll_ms: 0,
     };
     expect(

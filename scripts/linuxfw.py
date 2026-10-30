@@ -255,7 +255,7 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         wt = Path(tmp)
         (wt / PIN).parent.mkdir(parents=True)
-        (wt / PIN).write_text(good, encoding="utf-8")
+        (wt / PIN).write_text(good, encoding="utf-8", newline="")
         quiet = lambda _line: None  # noqa: E731
         nap = lambda _s: None  # noqa: E731
         got = fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, lose=1), quiet, nap)

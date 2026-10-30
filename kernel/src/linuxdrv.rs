@@ -214,6 +214,9 @@ pub fn self_test() -> KernelResult<()> {
 
 /// Where [`firmware_runs`] puts the hello process's firmware.
 const FIRMWARE_DIR: &str = "/tmp/linuxdrv-fw";
+/// A directory with a size of its own, for [`firmware_runs`] to have read
+/// as a file: the rootfs's ext4, where the boot test mounts it.
+const SIZED_DIR: &str = "/mnt";
 /// The test firmware's size: several pages, and none of them whole at its
 /// end. (One `SYS_FS_PREAD` reads all of it: a read cut short, which the
 /// layer's loop would continue, does not happen here.)
@@ -228,9 +231,10 @@ fn firmware_byte(i: usize) -> u8 {
 
 /// Module parameters and firmware: the hello process's "firmware" run,
 /// given a File capability to read with, the directory [`FIRMWARE_DIR`]
-/// written for it (`slx-test.fw`, `slx-empty.fw`, the directory
-/// `slx-dir.fw`) and its own parameters, must read through the layer and
-/// Linux's firmware loader what was written (`hello_firmware_init`) and
+/// written for it (`slx-test.fw`, `slx-empty.fw`), a directory to read as
+/// a file ([`SIZED_DIR`]; where it has no size of its own, `slx-dir.fw`,
+/// recorded as a skip) and its own parameters, must read through the layer
+/// and Linux's firmware loader what was written (`hello_firmware_init`) and
 /// exit 0; its "firmware-denied" run, given no such capability, must read
 /// nothing; an argument naming a parameter hello lacks, giving one a value
 /// its kind refuses -- one of its own before any initcall, one of the
@@ -261,18 +265,30 @@ fn firmware_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) ->
         let firmware: alloc::vec::Vec<u8> = (0..FIRMWARE_BYTES).map(firmware_byte).collect();
         Vfs::write_file(file("slx-test.fw").as_str(), &firmware)?;
         Vfs::write_file(file("slx-empty.fw").as_str(), &[])?;
-        Vfs::mkdir(file("slx-dir.fw").as_str())?;
-        // A directory read as a file is refused for not being a regular
-        // file, which only one whose size is not 0 shows, an empty file
-        // being refused too: memfs sizes a directory as tmpfs does, never 0.
-        if Vfs::stat(file("slx-dir.fw").as_str())?.size == 0 {
-            serial_println!(
-                "[linuxdrv]   a directory in /tmp has the size 0: a directory read as a file would be refused as empty, its own refusal untested"
-            );
-            return Err(KernelError::InternalError);
-        }
-        Ok(())
+        Vfs::mkdir(file("slx-dir.fw").as_str())
     })();
+    // A directory read as a file is refused for not being a regular file,
+    // which only one whose size is not 0 shows: an empty file is refused
+    // too, and memfs gives every directory the size 0. ext4 gives one its
+    // blocks' -- the rootfs's, at /mnt in the boot test.
+    // As the process sees it: its fstat reads the file's metadata, which
+    // stat's directory entry need not agree with.
+    let sized = Vfs::metadata(SIZED_DIR)
+        .is_ok_and(|m| m.entry_type == crate::fs::vfs::EntryType::Directory && m.size > 0);
+    if !sized {
+        skips.record(
+            "Linux driver layer's refusal of a directory read as a file",
+            "no directory with a size of its own at /mnt (no ext4 rootfs); a sizeless one tried",
+        );
+    }
+    let dir_arg = alloc::format!(
+        "dir={}",
+        if sized {
+            alloc::string::String::from(SIZED_DIR)
+        } else {
+            file("slx-dir.fw")
+        }
+    );
     let path_arg = alloc::format!("firmware_class.path={FIRMWARE_DIR}");
     let path_arg = path_arg.as_bytes();
     let read = [(ResourceType::File, 0, Rights::READ)];
@@ -286,6 +302,7 @@ fn firmware_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) ->
                 b"hello.answer=42",
                 b"hello.motto=two words",
                 b"hello.device_level=6",
+                dir_arg.as_bytes(),
             ],
             &read,
             EXIT_OK,
@@ -325,7 +342,7 @@ fn firmware_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) ->
     let _ = Vfs::remove_recursive(FIRMWARE_DIR);
     ran.map_err(|e| {
         serial_println!(
-            "[linuxdrv]   firmware runs: {e:?} (the fixture in {FIRMWARE_DIR} written: {written:?})"
+            "[linuxdrv]   FAIL: firmware runs: {e:?} (the fixture in {FIRMWARE_DIR} written: {written:?})"
         );
         KernelError::InternalError
     })

@@ -1949,12 +1949,14 @@ core_initcall(hello_params_early);
  * What the kernel's self-test puts in the directory the "firmware" run is
  * pointed at (firmware_class.path=<dir>; kernel/src/linuxdrv.rs): slx-test.fw,
  * HELLO_FW_BYTES bytes of hello_fw_byte() -- several pages, the last not
- * whole -- slx-empty.fw, empty, and slx-dir.fw, a directory whose size is
- * not 0 (the kernel sees to it), so that it is refused for not being a
- * regular file rather than for being empty.
+ * whole -- and slx-empty.fw, empty;
+ * and it names a directory to read as a file (dir=<path>), one whose size
+ * is not 0, so that it is refused for not being a regular file rather than
+ * for being empty.
  */
 #define HELLO_FW_BYTES 70001
 #define HELLO_FW_PATH_ARG "firmware_class.path="
+#define HELLO_DIR_ARG "dir="
 
 static u8 hello_fw_byte(size_t i)
 {
@@ -2007,7 +2009,7 @@ static void hello_fw_arrived(const struct firmware *fw, void *done)
  */
 static int __init hello_firmware_init(void)
 {
-	const char *dir = lx_arg(HELLO_FW_PATH_ARG);
+	const char *dir = lx_arg(HELLO_FW_PATH_ARG), *a_dir = lx_arg(HELLO_DIR_ARG);
 	const struct firmware *fw, *again;
 	struct device *dev;
 	size_t size = 0;
@@ -2048,7 +2050,9 @@ static int __init hello_firmware_init(void)
 		    "a whole file larger than the buffer allowed was not -EFBIG");
 	HELLO_CHECK(hello_read(dir, "slx-test.fw", 5, &data, INT_MAX, &size) == -EINVAL && !data,
 		    "a read from an offset with no buffer was not -EINVAL");
-	HELLO_CHECK(hello_read(dir, "slx-dir.fw", 0, &data, INT_MAX, NULL) == -EINVAL && !data,
+	HELLO_CHECK(a_dir, "no dir= argument");
+	HELLO_CHECK(kernel_read_file_from_path_initns(a_dir, 0, &data, INT_MAX, NULL,
+						      READING_FIRMWARE) == -EINVAL && !data,
 		    "a directory read as a file was not -EINVAL");
 	HELLO_CHECK(hello_read(dir, "slx-empty.fw", 0, &data, INT_MAX, NULL) == -EINVAL && !data,
 		    "an empty file was not -EINVAL");

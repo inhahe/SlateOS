@@ -99,10 +99,13 @@ Linux.
 `linuxdrv/hello` (`hello_firmware_init`), run by the kernel's self-test
 (`linuxdrv::firmware_runs`) over a directory it writes in `/tmp`: the
 parameters set, each at its level; the layer's read at each of its
-edges -- a directory read as a file being one in `/tmp`, whose size memfs
-gives as Linux's tmpfs does (20 bytes an entry, never 0), so that it is
-refused for not being a regular file rather than for being empty, in
-every boot; Linux's loader whole, shared, into a buffer, a file's
+edges -- a directory read as a file being ext4's at `/mnt`, whose size
+is not 0, so that it is refused for not being a regular file rather than
+for being empty (memfs gives every directory the size 0). A boot whose
+guest has no rootfs.ext4 -- `--no-rootfs`, or a worktree that never packed
+one -- has no such directory: the run is recorded as skipped, and the boot
+test lets that one skip through only there, saying so; Linux's loader
+whole, shared, into a buffer, a file's
 tail from an offset, asynchronously, a missing file `-ENOENT`; with no
 `File` capability, nothing read (`-EACCES`); an unknown parameter, a
 refused value of a module's own and of the device level's, and a value

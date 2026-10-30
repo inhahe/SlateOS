@@ -1516,9 +1516,20 @@ def test_a_boot_whose_iommu_stayed_off_fails():
         check(label, _iommu_check(text), want)
 
 
-def _linuxdrv_check(serial_text, named):
-    """Run the real `check_linuxdrv_ran` on a serial log holding
-    `serial_text`, a module named or not: "PASS" or "FAIL", `None` on a hang.
+def _linuxdrv_no_ext4_skip_line():
+    """boot-test.sh's `LINUXDRV_NO_EXT4_SKIP=...` assignment, as it stands."""
+    with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+        for line in handle:
+            if line.startswith("LINUXDRV_NO_EXT4_SKIP="):
+                return line.rstrip("\n")
+    raise AssertionError("boot-test.sh no longer sets LINUXDRV_NO_EXT4_SKIP")
+
+
+def _linuxdrv_check(serial_text, named, rootfs=True):
+    """Run the real `check_linuxdrv_ran` -- with the real `rootfs_attached`
+    and the real skip it may excuse -- on a serial log holding `serial_text`,
+    a module named or not, Step 3b having given the guest rootfs.ext4 or not:
+    ("PASS" or "FAIL", what it printed), `None` on a hang.
     """
     tmp = new_fixture()
     try:
@@ -1529,11 +1540,18 @@ def _linuxdrv_check(serial_text, named):
                   encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "set -uo pipefail\n"
+                + (f"ROOTFS_ARGS=(-device virtio-blk-pci,drive=rootfs-disk)\n" if rootfs
+                   else "ROOTFS_ARGS=()\n")
+                + _linuxdrv_no_ext4_skip_line() + "\n"
+                + extract_shell_function("rootfs_attached") + "\n\n"
                 + extract_shell_function("check_linuxdrv_ran") + "\n\n"
-                + f"if check_linuxdrv_ran serial.txt {named} > /dev/null; then echo PASS; "
+                + f"if check_linuxdrv_ran serial.txt {named} > said.txt; then echo PASS; "
                   "else echo FAIL; fi\n")
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the linuxdrv check")
-        return None if proc is None else proc.stdout.strip()
+        if proc is None:
+            return None
+        with open(os.path.join(tmp, "said.txt"), encoding="utf-8") as handle:
+            return proc.stdout.strip(), handle.read()
     finally:
         drop_fixture(tmp)
 
@@ -1587,7 +1605,52 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
         ("a process named and never mentioned fails", "[boot] up\n", 1, "FAIL"),
         ("no process named passes, whatever the log", skipped, 0, "PASS"),
     ]:
-        check(label, _linuxdrv_check(text, named), want)
+        got = _linuxdrv_check(text, named)
+        check(label, got and got[0], want)
+    # The one run that needs the rootfs's ext4, skipped as the kernel says
+    # it: excused -- and said to be -- where Step 3b gave the guest no
+    # rootfs.ext4 (--no-rootfs, or a worktree that never packed it), a
+    # failure where it did; no other skip is let through there, nor that
+    # section's skip for another reason.
+    no_sized_dir = ("[linuxdrv]   SKIP: Linux driver layer's refusal of a directory "
+                    "read as a file (no directory with a size of its own at /mnt (no "
+                    "ext4 rootfs); a sizeless one tried)\n")
+    other_reason = no_sized_dir.replace("no directory with a size of its own at /mnt",
+                                        "its stat failed")
+    note = "refusal of a directory read as a file was not tested"
+    for label, text, rootfs, want, noted in [
+        ("the sized directory's skip fails a boot with its rootfs",
+         ran + no_sized_dir, True, "FAIL", False),
+        ("the sized directory's skip passes a boot without its rootfs, saying so",
+         ran + no_sized_dir, False, "PASS", True),
+        ("another skip still fails a boot without its rootfs",
+         ran + no_sized_dir + skipped, False, "FAIL", True),
+        ("the section skipped for another reason fails a boot without its rootfs",
+         ran + other_reason, False, "FAIL", False),
+        ("a run with no skip passes a boot without its rootfs, saying nothing",
+         ran, False, "PASS", False),
+    ]:
+        got = _linuxdrv_check(text, 1, rootfs)
+        check(label, got and (got[0], note in got[1]), (want, noted))
+
+
+def test_the_excused_linuxdrv_skip_is_the_kernels():
+    """The skip boot-test.sh excuses is the line the kernel prints for it:
+    `skips.record(what, why)` in kernel/src/linuxdrv.rs's firmware_runs, said
+    as `[linuxdrv]   SKIP: <what> (<why>)`. A reworded one would be excused
+    no longer, and fail every boot without a rootfs.
+    """
+    line = _linuxdrv_no_ext4_skip_line()
+    value = line.split("=", 1)[1].strip('"')
+    prefix = "[linuxdrv]   SKIP: "
+    check("the excused skip has the kernel's prefix", value.startswith(prefix), True)
+    what, _, why = value[len(prefix):].partition(" (")
+    why = why[:-1] if why.endswith(")") else why
+    with open(os.path.join(REPO_ROOT, "kernel", "src", "linuxdrv.rs"),
+              encoding="utf-8") as handle:
+        kernel = handle.read()
+    check("the kernel records the excused skip's what", f'"{what}"' in kernel, True)
+    check("the kernel records the excused skip's why", f'"{why}"' in kernel, True)
 
 
 def _append_steps(steps):

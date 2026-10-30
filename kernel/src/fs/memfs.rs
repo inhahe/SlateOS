@@ -97,12 +97,6 @@ fn alloc_memfs_ino() -> u64 {
 // Node types
 // ---------------------------------------------------------------------------
 
-/// What a directory's size counts each of its entries as, Linux's tmpfs's
-/// `BOGO_DIRENT_SIZE` (`mm/shmem.c`): bytes it does not hold, but a size
-/// that is never 0 and grows with what the directory names, as `stat` on a
-/// tmpfs directory reports.
-const BOGO_DIRENT_SIZE: u64 = 20;
-
 /// Kind of a memory filesystem node.
 enum MemFsNodeKind {
     /// A regular file, its contents.
@@ -785,21 +779,13 @@ impl MemFsNode {
     /// Size in bytes.
     ///
     /// - Files: data length.
-    /// - Directories: [`BOGO_DIRENT_SIZE`] for each entry, "." and ".."
-    ///   among them, as Linux's tmpfs counts a directory -- so 40 empty,
-    ///   never 0, which is what tells a directory from an empty file where
-    ///   both are refused (a Linux driver process's read of a directory as
-    ///   a file, `kernel/src/linuxdrv.rs`).
+    /// - Directories: 0.
     /// - Symlinks: length of the target path string (like Linux `lstat`).
-    /// - Sockets and FIFOs: 0.
+    /// - Sockets: 0.
     fn size(&self) -> u64 {
         match &self.kind {
             MemFsNodeKind::File(data) => data.len(),
-            MemFsNodeKind::Dir(children) => u64::try_from(children.len())
-                .unwrap_or(u64::MAX)
-                .saturating_add(2)
-                .saturating_mul(BOGO_DIRENT_SIZE),
-            MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
+            MemFsNodeKind::Dir(_) | MemFsNodeKind::Socket | MemFsNodeKind::Fifo => 0,
             MemFsNodeKind::Symlink(target) => target.len() as u64,
         }
     }
@@ -2506,23 +2492,6 @@ pub fn self_test() -> KernelResult<()> {
         crate::serial_println!("[memfs]   FAILED: stat mismatch");
         return Err(KernelError::IoError);
     }
-
-    // A directory's size, as tmpfs counts it: "." and ".." and each entry
-    // 20 bytes -- /testdir holds hello.txt; an empty one is 40, never 0.
-    fs.mkdir(Path::new("/testdir/empty"))?;
-    let sizes = (
-        fs.stat(Path::new("/testdir"))?.size,
-        fs.stat(Path::new("/testdir/empty"))?.size,
-    );
-    fs.rmdir(Path::new("/testdir/empty"))?;
-    let after = fs.stat(Path::new("/testdir"))?.size;
-    if sizes != (80, 40) || after != 60 {
-        crate::serial_println!(
-            "[memfs]   FAILED: directory sizes {sizes:?}, then {after} (want (80, 40), then 60)"
-        );
-        return Err(KernelError::IoError);
-    }
-    crate::serial_println!("[memfs]   directory sizes as tmpfs counts them: OK");
 
     // Test case sensitivity: "Hello.txt" should NOT find "hello.txt".
     match fs.read_file(Path::new("/testdir/Hello.txt")) {

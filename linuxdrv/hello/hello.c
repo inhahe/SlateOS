@@ -38,7 +38,8 @@
  *   "bootfw"    with firmware_class.path naming where the kernel put the
  *               boot medium's firmware, loads hello's own from it: must exit
  *               0, and, with no capability to read files, fail its initcall.
- * With an argument, the later initcalls do nothing: the first's ending is
+ * With a mode -- the first argument with no '=' in it, which a parameter has,
+ * wherever it stands (hello_the_mode) -- the later initcalls do nothing: the first's ending is
  * the test ("earlyfail"'s comes before the first) -- but the firmware runs',
  * a late one's. An argument naming a parameter hello does not have, or
  * holding both a space and a quote, ends the process before any initcall;
@@ -93,20 +94,33 @@ void lx_hello_never_defined(void);
 /* Never completed. */
 static DECLARE_COMPLETION(hello_forever);
 
-/* Whether the process's argument is `mode`. */
 /*
- * Whether the process was given a mode: its first argument, a word. A module
- * parameter, or the firmware_class.path the kernel may give any driver
- * process, has an '=' and is none.
+ * The process's mode: the first of its arguments that is a word, wherever it
+ * stands; NULL for none. A module parameter, or the firmware_class.path the
+ * kernel may give any driver process, has an '=' and is none.
  */
-static bool hello_any_mode(void)
+static const char *hello_the_mode(void)
 {
-	return slx_argc() > 1 && !strchr(slx_argv(1), '=');
+	int i;
+
+	for (i = 1; i < slx_argc(); i++)
+		if (!strchr(slx_argv(i), '='))
+			return slx_argv(i);
+	return NULL;
 }
 
+/* Whether the process was given a mode. */
+static bool hello_any_mode(void)
+{
+	return hello_the_mode() != NULL;
+}
+
+/* Whether the process's mode is `mode`. */
 static bool hello_mode(const char *mode)
 {
-	return hello_any_mode() && strcmp(slx_argv(1), mode) == 0;
+	const char *given = hello_the_mode();
+
+	return given && strcmp(given, mode) == 0;
 }
 
 /* A warning from one place, given twice: said once, and the driver goes on. */
@@ -1398,22 +1412,72 @@ static int __init hello_memory_init(void)
 	OPTIMIZER_HIDE_VAR(huge);
 	HELLO_CHECK(!kmemdup_array(words, huge, sizeof(words[0]), GFP_KERNEL),
 		    "kmemdup_array() of a size that overflows was not refused");
-	secret = kstrdup("a passphrase", GFP_KERNEL);
+	/*
+	 * Wiped as it is freed, read where it lay. The allocator's free list
+	 * writes its own links over a freed block's first 16 bytes
+	 * (kit/src/buddy.rs) -- the whole of a 16-byte one, which then reads 0
+	 * wiped or not -- so the block is 64 bytes, and the 48 past the links
+	 * are the wipe's alone. Hidden from the compiler, which must not reason
+	 * about memory read after it is freed.
+	 */
+	secret = kmalloc(64, GFP_KERNEL);
 	HELLO_CHECK(secret, "no memory");
+	memset(secret, 0xa5, 64);
 	kfree_sensitive(secret);
+	OPTIMIZER_HIDE_VAR(secret);
+	HELLO_CHECK(!memchr_inv(secret + 16, 0, 48), "kfree_sensitive() left the block's bytes");
 	kfree_sensitive(NULL);
 	kept = pages[1] = alloc_page(GFP_KERNEL);
 	HELLO_CHECK(kept, "no page");
 	HELLO_CHECK(alloc_pages_bulk(GFP_KERNEL, ARRAY_SIZE(pages), pages) == ARRAY_SIZE(pages) &&
 			    pages[1] == kept && pages[0] && pages[2] && pages[3] &&
-			    pages[0] != kept && pages[2] != kept && pages[3] != kept,
-		    "the bulk page call did not fill the array's empty slots alone");
+			    pages[0] != kept && pages[2] != kept && pages[3] != kept &&
+			    pages[0] != pages[2] && pages[0] != pages[3] && pages[2] != pages[3],
+		    "the bulk page call did not fill the array's empty slots alone, each a page of its own");
 	for (i = 0; i < ARRAY_SIZE(pages); i++)
 		__free_page(pages[i]);
 	pr_info("hello memory: kmemdup, kmemdup_array (an overflow refused), kfree_sensitive, the bulk page call filling empty slots\n");
 	return 0;
 }
 late_initcall(hello_memory_init);
+
+static DECLARE_COMPLETION(hello_hrtimer_done);
+
+static enum hrtimer_restart hello_hrtimer_fn(struct hrtimer *timer)
+{
+	complete(&hello_hrtimer_done);
+	return HRTIMER_NORESTART;
+}
+
+/*
+ * High-resolution timers (lx_hrtimer.c): ktime_add_safe() at its edges, as
+ * Linux's -- a sum, an overflow and a negative operand each saturated to
+ * the furthest time -- and a relative timer firing.
+ */
+static int __init hello_hrtimer_init(void)
+{
+	const ktime_t furthest = ktime_set(KTIME_SEC_MAX, 0);
+	struct hrtimer timer;
+
+	if (hello_any_mode())
+		return 0;
+	HELLO_CHECK(ktime_add_safe(2, 3) == 5, "ktime_add_safe(2, 3) was not 5");
+	HELLO_CHECK(ktime_add_safe(KTIME_MAX, 1) == furthest,
+		    "an overflowing sum was not the furthest time");
+	HELLO_CHECK(ktime_add_safe(-5, 3) == furthest,
+		    "a negative sum was not saturated as Linux saturates it");
+	HELLO_CHECK(ktime_add_safe(5, -3) == furthest,
+		    "a sum below its first operand was not saturated as Linux saturates it");
+	HELLO_CHECK(ktime_add_safe(-3, 5) == furthest,
+		    "a sum below its second operand was not saturated as Linux saturates it");
+	hrtimer_setup(&timer, hello_hrtimer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_REL);
+	hrtimer_start(&timer, ms_to_ktime(2), HRTIMER_MODE_REL);
+	HELLO_CHECK(wait_for_completion_timeout(&hello_hrtimer_done, HZ),
+		    "a relative high-resolution timer never fired");
+	pr_info("hello hrtimers: ktime_add_safe saturating as Linux's, a relative timer fired\n");
+	return 0;
+}
+late_initcall(hello_hrtimer_init);
 
 /*
  * Timers and softirqs: Linux's own timer wheel and softirq code, run by the

@@ -115,10 +115,18 @@ struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name
 		local_irq_restore(flags);	\
 	} while (0)
 
-/* For the hello driver's tests: warnings said (lx_emul.c), and threads'
- * records not yet freed, daemons (kthreadd, idle workers) not counted
- * (lx_sched.c). */
+/* Warnings said (lx_emul.c), and threads' records not yet freed, daemons
+ * (kthreadd, idle workers) not counted (lx_sched.c): for the hello driver's
+ * tests, and the runs' ending (lx_end_run). */
 extern unsigned long lx_warnings;
 unsigned long lx_live_kthreads(void);
+
+/*
+ * lx_emul.c: a run of the layer's own task ended, `err` its outcome and
+ * `who` its task's name for the log -- the process ended with it: a failure
+ * as a failed initcall; a success in which Linux code warned anywhere in the
+ * process, as warned (SLX_EXIT_WARNED), a bug the run must not pass; else 0.
+ */
+void lx_end_run(const char *who, int err) __attribute__((noreturn));
 
 #endif /* LX_EMUL_H */

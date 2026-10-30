@@ -30,6 +30,8 @@ locking is correct as compiled.
 | `kit/` | The system-facing half, Rust: `slx_*` on SlateOS -- entry, memory, console, clock, arguments, tasks, PCI functions through their device handles, exit |
 | `link.ld` | The driver process's layout: linked at 4 MiB, Linux's initcalls in order |
 | `hello/` | The first driver process, which drives nothing: the layer's own test |
+| `e1000e/`, `mt7925e/`, `hwsim/` | Driver processes: Linux's e1000e; its mt7925e WiFi driver; its `mac80211_hwsim`, simulated radios that test the 802.11 stack end to end |
+| `stacks/` | What several driver processes stand on, which their manifests `include`: the network stack below the sockets (`net.manifest`), Linux's 802.11 stack over it (`wifi.manifest`) |
 
 ## Preparing the Linux tree
 
@@ -60,9 +62,13 @@ half and the Linux code it stands on), into
 `build/linuxdrv/hello.elf`: Linux's own objects by Linux's make (with the
 small code model and the shadow headers, design-decisions 1580), the layer's
 C files with the same flags, a generated stop for every function nothing
-defines, and the Rust half. The boot test builds every process it loads and
-puts it beside the kernel as a Limine module (`module_cmdline:
-linuxdrv/<name>`), where the kernel finds it (`boot::module`).
+defines, and the Rust half. A manifest's lines: `linux <object>`, Linux's
+own, by path in the tree; `layer <file>`, the layer's C, by path under
+`linuxdrv/`; `include <manifest>`, another manifest's lines, by path under
+`linuxdrv/` (each manifest once, each object once). The boot test builds
+every process it loads and puts it beside the kernel as a Limine module
+(`module_cmdline: linuxdrv/<name>`), where the kernel finds it
+(`boot::module`).
 
 ## Status
 

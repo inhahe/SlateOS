@@ -1,10 +1,11 @@
 # The e1000e driver process: Linux's driver for Intel's PCI Express gigabit
 # controllers (the 82571-82574 and 82583, the ICH8-ICH10 and the PCH's
-# I217-I219), and the network core it stands on, added to what every
-# driver process is built from (linuxdrv/emul/manifest; scripts/linux-tree.sh
-# driver). `linux` lines: Linux's own objects, by path in the tree, built by
-# Linux's make. `layer` lines: the layer's own C files, by path under
-# linuxdrv/.
+# I217-I219), on the network stack below the sockets (stacks/net.manifest),
+# added to what every driver process is built from (linuxdrv/emul/manifest;
+# scripts/linux-tree.sh driver). `linux` lines: Linux's own objects, by path
+# in the tree, built by Linux's make. `include` lines: a stack several
+# driver processes share, under linuxdrv/. (The driver's module parameters
+# keep their compiled defaults: lx_emul.c.)
 
 # The driver, as Linux builds it.
 linux drivers/net/ethernet/intel/e1000e/82571.o
@@ -19,52 +20,4 @@ linux drivers/net/ethernet/intel/e1000e/ethtool.o
 linux drivers/net/ethernet/intel/e1000e/netdev.o
 linux drivers/net/ethernet/intel/e1000e/ptp.o
 
-# The network core, Linux's own, below the sockets: devices registered,
-# opened and queued to, NAPI and GRO, socket buffers, Ethernet's headers,
-# the default queueing discipline, the link's news acted on, and the
-# initial network namespace the devices live in. Their sysfs view is the
-# layer's no-ops (lx_fs.c); what is above them -- sockets, protocols,
-# netlink -- is not compiled in, and the layer stands in for what the core
-# calls of it (lx_nic.c).
-linux net/core/dev.o
-linux net/core/dev_api.o
-linux net/core/dev_addr_lists.o
-linux net/core/gro.o
-linux net/core/hotdata.o
-linux net/core/link_watch.o
-linux net/core/net-sysfs.o
-linux net/core/net_namespace.o
-linux net/core/skbuff.o
-linux net/core/flow_dissector.o
-linux net/core/xdp.o
-linux net/core/utils.o
-# The page pools the core makes for every CPU as it starts (net_dev_init),
-# which the configuration has since mt76 needs them (linuxdrv/linux.config),
-# and the hash table their memory model's ids are kept in (net/core/xdp.c).
-linux net/core/page_pool.o
-linux lib/rhashtable.o
-linux net/ethernet/eth.o
-linux net/sched/sch_generic.o
-linux net/sched/sch_mq.o
-# A queueing discipline's counters and rate estimator.
-linux net/core/gen_stats.o
-linux net/core/gen_estimator.o
-linux net/ethtool/common.o
-# The loopback device, which the core makes in every namespace; and the
-# namespace's place among the system's (6.18's namespace tree).
-linux drivers/net/loopback.o
-linux kernel/nscommon.o
-linux kernel/nstree.o
-# What the driver and the core count, hash and time with. (The driver's
-# module parameters keep their compiled defaults: lx_emul.c.)
-linux kernel/time/timecounter.o
-linux lib/crc/crc32-main.o
-linux lib/crc/x86/crc32-pclmul.o
-linux lib/dynamic_queue_limits.o
-# The page fragments receive buffers are cut from (over the layer's page
-# allocator, lx_mm.c), and the Internet checksum, x86's own.
-linux mm/page_frag_cache.o
-linux arch/x86/lib/csum-partial_64.o
-linux arch/x86/lib/csum-wrappers_64.o
-
-layer emul/lx_nic.c
+include stacks/net.manifest

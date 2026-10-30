@@ -1004,9 +1004,10 @@ def main(argv: list[str]) -> int:
     except urllib.error.HTTPError as e:
         sys.exit(f"pikvm: the PiKVM refused a request: {e.code} {e.reason}")
     # The network's failures only -- not every OSError, which a missing
-    # image or an unwritable directory is too, and says itself better.
+    # image or an unwritable directory is too, and says itself better. TLS
+    # cut off mid-answer (ssl.SSLEOFError) is one of them.
     except (urllib.error.URLError, http.client.HTTPException, ConnectionError,
-            TimeoutError) as e:
+            TimeoutError, ssl.SSLError) as e:
         sys.exit(f"pikvm: the PiKVM at {kvm.url} does not answer ({e}): is it on the network?")
     return 0
 

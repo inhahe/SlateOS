@@ -1525,12 +1525,20 @@ def _linuxdrv_no_ext4_skip_line():
     raise AssertionError("boot-test.sh no longer sets LINUXDRV_NO_EXT4_SKIP")
 
 
-def _linuxdrv_check(serial_text, named, rootfs=True):
-    """Run the real `check_linuxdrv_ran` -- with the real `rootfs_attached`
-    and the real skip it may excuse -- on a serial log holding `serial_text`,
-    a module named or not, Step 3b having given the guest rootfs.ext4 or not:
-    ("PASS" or "FAIL", what it printed), `None` on a hang.
+ALL_STAGED = "hello e1000e mt7925e hwsim"
+
+
+def _linuxdrv_check(serial_text, staged, rootfs=True):
+    """Run the real `check_linuxdrv_ran` -- with the real `rootfs_attached`,
+    the real skip it may excuse, the real LINUX_DRIVERS and what the kernel
+    says of each -- on a serial log holding `serial_text`, `staged` the
+    driver processes on the medium (names, space-separated; "" for none),
+    Step 3b having given the guest rootfs.ext4 or not: ("PASS" or "FAIL",
+    what it printed), `None` on a hang.
     """
+    with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+        drivers = re.search(r"^LINUX_DRIVERS=\([^)]*\)$", handle.read(), re.M)
+    assert drivers, "boot-test.sh has no LINUX_DRIVERS=(...) line"
     tmp = new_fixture()
     try:
         with open(os.path.join(tmp, "serial.txt"), "w",
@@ -1543,9 +1551,12 @@ def _linuxdrv_check(serial_text, named, rootfs=True):
                 + (f"ROOTFS_ARGS=(-device virtio-blk-pci,drive=rootfs-disk)\n" if rootfs
                    else "ROOTFS_ARGS=()\n")
                 + _linuxdrv_no_ext4_skip_line() + "\n"
+                + drivers.group(0) + "\n"
                 + extract_shell_function("rootfs_attached") + "\n\n"
+                + extract_shell_function("linuxdrv_absent") + "\n\n"
+                + extract_shell_function("linuxdrv_verdict") + "\n\n"
                 + extract_shell_function("check_linuxdrv_ran") + "\n\n"
-                + f"if check_linuxdrv_ran serial.txt {named} > said.txt; then echo PASS; "
+                + f"if check_linuxdrv_ran serial.txt '{staged}' > said.txt; then echo PASS; "
                   "else echo FAIL; fi\n")
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the linuxdrv check")
         if proc is None:
@@ -1599,24 +1610,57 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
               + e1000e + mt7925e + hwsim)
     failed = ("[linuxdrv]   FAIL: the hello process, which should have ran its "
               "initcall and exited 0, ended Ok(Some(-8))\n")
-    for label, text, named, want in [
-        ("a process named and run passes", ran, 1, "PASS"),
-        ("its verdict without its line, formatted right, fails", garbled, 1, "FAIL"),
-        ("its verdict alone fails", verdict, 1, "FAIL"),
+    for label, text, staged, want in [
+        ("every process staged and run passes", ran, ALL_STAGED, "PASS"),
+        ("its verdict without its line, formatted right, fails", garbled, ALL_STAGED, "FAIL"),
+        ("its verdict alone fails", verdict, ALL_STAGED, "FAIL"),
         ("its line without its tasks' fails",
-         hello + verdict + e1000e + mt7925e + hwsim, 1, "FAIL"),
+         hello + verdict + e1000e + mt7925e + hwsim, ALL_STAGED, "FAIL"),
         ("hello's verdict without e1000e's fails",
-         hello + tasks + verdict + mt7925e + hwsim, 1, "FAIL"),
-        ("the verdicts without mt7925e's fail", hello + tasks + verdict + e1000e + hwsim, 1, "FAIL"),
-        ("the verdicts without hwsim's fail", hello + tasks + verdict + e1000e + mt7925e, 1, "FAIL"),
-        ("its verdict without the PCI runs fails", no_pci, 1, "FAIL"),
-        ("a process named and skipped fails", skipped, 1, "FAIL"),
-        ("a process named whose test failed fails", failed, 1, "FAIL"),
-        ("a process named and never mentioned fails", "[boot] up\n", 1, "FAIL"),
-        ("no process named passes, whatever the log", skipped, 0, "PASS"),
+         hello + tasks + verdict + mt7925e + hwsim, ALL_STAGED, "FAIL"),
+        ("the verdicts without mt7925e's fail",
+         hello + tasks + verdict + e1000e + hwsim, ALL_STAGED, "FAIL"),
+        ("the verdicts without hwsim's fail",
+         hello + tasks + verdict + e1000e + mt7925e, ALL_STAGED, "FAIL"),
+        ("its verdict without the PCI runs fails", no_pci, ALL_STAGED, "FAIL"),
+        ("a process staged and skipped fails", skipped, ALL_STAGED, "FAIL"),
+        ("a process staged whose test failed fails", failed, ALL_STAGED, "FAIL"),
+        ("a process staged and never mentioned fails", "[boot] up\n", ALL_STAGED, "FAIL"),
+        ("hello alone staged, its lines and verdict said, passes",
+         hello + tasks + verdict, "hello", "PASS"),
+        ("hwsim alone staged, its verdict said, passes", hwsim, "hwsim", "PASS"),
+        ("hwsim alone staged, hello's verdict said instead, fails",
+         hello + tasks + verdict, "hwsim", "FAIL"),
+        ("no process staged passes, whatever the log", skipped, "", "PASS"),
     ]:
-        got = _linuxdrv_check(text, named)
+        got = _linuxdrv_check(text, staged)
         check(label, got and got[0], want)
+    # A medium reused with --no-stage from before a driver process was
+    # staged: the kernel's "not loaded" skip of what the medium does not
+    # carry is excused, and said to be; that of one it does carry is not;
+    # nor is any other skip of the absent process's.
+    def not_loaded(what, name):
+        return (f"[linuxdrv]   SKIP: {what} (not loaded beside the kernel (no "
+                f"limine.conf module named linuxdrv/{name}))\n")
+    no_hwsim = not_loaded("Linux's mac80211_hwsim through the driver layer", "hwsim")
+    no_mt7925e = not_loaded("Linux's mt7925e through the driver layer", "mt7925e")
+    before_wifi = hello + tasks + verdict + e1000e
+    absent_note = "the boot medium carries no linuxdrv/"
+    for label, text, staged, want, noted in [
+        ("hwsim not staged, its not-loaded skip passes, saying so",
+         before_wifi + mt7925e + no_hwsim, "hello e1000e mt7925e", "PASS", True),
+        ("the WiFi pair not staged, both skips pass, saying so",
+         before_wifi + no_mt7925e + no_hwsim, "hello e1000e", "PASS", True),
+        ("hwsim staged, its not-loaded skip fails",
+         before_wifi + mt7925e + no_hwsim, ALL_STAGED, "FAIL", False),
+        ("hwsim not staged, another skip of its fails",
+         before_wifi + mt7925e + no_hwsim.replace("not loaded", "no radios"),
+         "hello e1000e mt7925e", "FAIL", True),
+        ("every process staged says no absent one",
+         ran, ALL_STAGED, "PASS", False),
+    ]:
+        got = _linuxdrv_check(text, staged)
+        check(label, got and (got[0], absent_note in got[1]), (want, noted))
     # The one run that needs the rootfs's ext4, skipped as the kernel says
     # it: excused -- and said to be -- where Step 3b gave the guest no
     # rootfs.ext4 (--no-rootfs, or a worktree that never packed it), a
@@ -1640,7 +1684,7 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
         ("a run with no skip passes a boot without its rootfs, saying nothing",
          ran, False, "PASS", False),
     ]:
-        got = _linuxdrv_check(text, 1, rootfs)
+        got = _linuxdrv_check(text, ALL_STAGED, rootfs)
         check(label, got and (got[0], note in got[1]), (want, noted))
 
 
@@ -1661,6 +1705,43 @@ def test_the_excused_linuxdrv_skip_is_the_kernels():
         kernel = handle.read()
     check("the kernel records the excused skip's what", f'"{what}"' in kernel, True)
     check("the kernel records the excused skip's why", f'"{why}"' in kernel, True)
+
+
+def test_the_excused_not_loaded_skips_are_the_kernels():
+    """What boot-test.sh's `linuxdrv_absent` says the kernel calls each of
+    LINUX_DRIVERS is what kernel/src/linuxdrv.rs records when that process is
+    not loaded: a reworded one would no longer be excused, and fail every
+    boot from a medium staged before that driver was; a driver added to
+    LINUX_DRIVERS without one would be excused never.
+    """
+    with open(BOOT_TEST, "r", encoding="utf-8") as handle:
+        drivers = re.search(r"^LINUX_DRIVERS=\(([^)]*)\)$", handle.read(), re.M)
+    assert drivers, "boot-test.sh has no LINUX_DRIVERS=(...) line"
+    names = drivers.group(1).split()
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -uo pipefail\n"
+                + extract_shell_function("linuxdrv_absent") + "\n\n"
+                + "".join(f"echo \"$(linuxdrv_absent {name})\"\n" for name in names))
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "linuxdrv_absent")
+    finally:
+        drop_fixture(tmp)
+    if proc is None:
+        check("linuxdrv_absent answers", "hang", "an answer")
+        return
+    with open(os.path.join(REPO_ROOT, "kernel", "src", "linuxdrv.rs"),
+              encoding="utf-8") as handle:
+        kernel = handle.read()
+    for name, what in zip(names, proc.stdout.splitlines() + [""] * len(names)):
+        recorded = re.search(
+            r'skips\.record\(\s*"' + re.escape(what) + r'",\s*"not loaded beside the kernel '
+            r'\(no limine\.conf module named linuxdrv/' + re.escape(name) + r'\)",',
+            kernel) if what else None
+        check(f"the kernel's not-loaded skip of {name} is linuxdrv_absent's",
+              bool(recorded), True)
 
 
 def _append_steps(steps):

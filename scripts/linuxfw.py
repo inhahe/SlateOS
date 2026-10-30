@@ -17,6 +17,7 @@ under /.boot-firmware (design-decisions 1592).
 from __future__ import annotations
 
 import argparse
+import email.utils
 import hashlib
 import http.client
 import re
@@ -92,34 +93,60 @@ def sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def download(url: str, opener=urllib.request.urlopen, sleep=time.sleep, tries: int = 3) -> bytes:
-    """`url`'s whole body. Tried up to `tries` times, `sleep`ing 3 s between
-    (and, for a 429, as long as its Retry-After asks, up to a minute), for
-    what another try may mend: a connection lost or refused, a body cut
-    short (fewer bytes than its Content-Length, or http.client's
-    IncompleteRead), a server's error (5xx), a "not now" (408, 429).
-    OSError, saying why, for the last of those, or at once for what no try
-    mends: any other 4xx (the pin names a file or release kernel.org does
-    not have) or a body past MAX_BYTES."""
+#: Seconds between tries, unless a 429 asks for another wait.
+RETRY_WAIT_S = 3
+#: The longest a 429's Retry-After is waited for.
+RETRY_AFTER_MAX_S = 60
+
+
+def retry_after(value: str, now: float) -> float | None:
+    """The seconds a Retry-After header's `value` asks to wait from `now`
+    (seconds since the epoch), at most RETRY_AFTER_MAX_S: given as seconds,
+    or as an HTTP date (RFC 9110 allows either). None when it is neither."""
+    # ASCII digits only: "²" is a digit to isdigit() and not to int().
+    if value.isascii() and value.isdigit():
+        return min(int(value), RETRY_AFTER_MAX_S)
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        return None
+    return min(max(when.timestamp() - now, 0.0), RETRY_AFTER_MAX_S)
+
+
+def download(url: str, opener=urllib.request.urlopen, sleep=time.sleep, tries: int = 3,
+             clock=time.time) -> bytes:
+    """`url`'s whole body. Tried up to `tries` times, `sleep`ing
+    RETRY_WAIT_S between -- or, after a 429, as long as its Retry-After asks
+    (retry_after, by `clock`), up to a minute -- for what another try may
+    mend: a connection lost or refused, a body cut short (fewer bytes than
+    its Content-Length, or http.client's IncompleteRead), a server's error
+    (5xx), a "not now" (408, 429). OSError, saying why, for the last of
+    those, or at once for what no try mends: any other 4xx (the pin names a
+    file or release kernel.org does not have) or a body past MAX_BYTES."""
     # kernel.org answers urllib's own User-Agent with 403 Forbidden.
     request = urllib.request.Request(url, headers={"User-Agent": "slateos-linuxfw/1"})
     why = "no attempt made"
+    wait: float = RETRY_WAIT_S
     for attempt in range(tries):
         if attempt:
-            sleep(3)
+            sleep(wait)
+        wait = RETRY_WAIT_S
         try:
             with opener(request, timeout=60) as response:
                 body = response.read(MAX_BYTES + 1)
                 promised = response.headers.get("Content-Length")
         except urllib.error.HTTPError as e:
             # 408 and 429 are the server's "not now": tried again, after the
-            # wait it asks for (Retry-After, seconds) when it asks one.
+            # wait a 429 asks for when it asks one.
             if e.code < 500 and e.code not in (408, 429):
                 raise OSError(f"HTTP {e.code} {e.reason}") from e
             why = f"HTTP {e.code} {e.reason}"
-            wait = (e.headers or {}).get("Retry-After", "") if e.code == 429 else ""
-            if wait.isdigit() and attempt + 1 < tries:
-                sleep(min(int(wait), 60))
+            asked = (e.headers or {}).get("Retry-After", "") if e.code == 429 else ""
+            asked_s = retry_after(asked, clock()) if asked else None
+            if asked_s is not None:
+                wait = asked_s
             continue
         except (OSError, http.client.HTTPException) as e:
             why = f"{type(e).__name__}: {e}"
@@ -249,6 +276,16 @@ def self_test() -> int:
                 raise urllib.error.HTTPError(url, 503, "Service Unavailable", None, None)
             if fault == "slow":
                 raise urllib.error.HTTPError(url, 429, "Too Many Requests", {"Retry-After": "2"}, None)
+            if fault == "odd":
+                # A Retry-After of byte 0xB2, as latin-1 decodes it: a digit to
+                # isdigit() and not to int().
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests",
+                                             {"Retry-After": "²"}, None)
+            if fault == "dated":
+                # Retry-After as an HTTP date, half a minute from now.
+                when = email.utils.formatdate(time.time() + 30, usegmt=True)
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests",
+                                             {"Retry-After": when}, None)
             return Answer(body)
         return opener
 
@@ -293,9 +330,28 @@ def self_test() -> int:
         asked.clear()
         slept: list[float] = []
         fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, faults=("slow",)), quiet, slept.append)
-        check("a 429 tried again, after the Retry-After it asked",
-              ((wt / OUT / "b.bin").read_bytes(), len(asked), 2 in slept), (b, 2, True))
+        check("a 429 tried again, after the Retry-After it asked, and only that",
+              ((wt / OUT / "b.bin").read_bytes(), len(asked), slept), (b, 2, [2]))
         (wt / OUT / "b.bin").unlink()
+        asked.clear()
+        slept.clear()
+        fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, faults=("odd",)), quiet, slept.append)
+        check("a 429 whose Retry-After is no number tried again all the same, after the usual wait",
+              ((wt / OUT / "b.bin").read_bytes(), len(asked), slept), (b, 2, [RETRY_WAIT_S]))
+        (wt / OUT / "b.bin").unlink()
+        asked.clear()
+        slept.clear()
+        fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, faults=("dated",)), quiet, slept.append)
+        check("a 429 whose Retry-After is a date tried again, after waiting until then",
+              ((wt / OUT / "b.bin").read_bytes(), len(asked), len(slept),
+               all(25 <= s <= 30 for s in slept)), (b, 2, 1, True))
+        (wt / OUT / "b.bin").unlink()
+        now = 1_000_000_000.0
+        for value, want in [("7", 7), ("600", RETRY_AFTER_MAX_S), ("", None), ("soon", None),
+                            (email.utils.formatdate(now + 12, usegmt=True), 12),
+                            (email.utils.formatdate(now - 12, usegmt=True), 0),
+                            (email.utils.formatdate(now + 3600, usegmt=True), RETRY_AFTER_MAX_S)]:
+            check(f"Retry-After {value!r} read as {want}", retry_after(value, now), want)
         asked.clear()
         try:
             fetch(wt, kernel_org({"x/a.bin": a}), quiet, nap)

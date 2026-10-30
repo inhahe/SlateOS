@@ -1,0 +1,79 @@
+# Linux's 802.11 stack, which every WiFi driver process stands on
+# (`include stacks/wifi.manifest`; scripts/linux-tree.sh driver), on the
+# network stack below it.
+include stacks/net.manifest
+
+# mac80211: the 802.11 MAC on the host -- scanning, the station's
+# management, frames to and from the card -- as Linux builds it without
+# mesh, LEDs or debugfs, with its default rate control (Minstrel HT).
+linux net/mac80211/main.o
+linux net/mac80211/status.o
+linux net/mac80211/driver-ops.o
+linux net/mac80211/sta_info.o
+linux net/mac80211/wep.o
+linux net/mac80211/aead_api.o
+linux net/mac80211/wpa.o
+linux net/mac80211/scan.o
+linux net/mac80211/offchannel.o
+linux net/mac80211/ht.o
+linux net/mac80211/agg-tx.o
+linux net/mac80211/agg-rx.o
+linux net/mac80211/vht.o
+linux net/mac80211/he.o
+linux net/mac80211/s1g.o
+linux net/mac80211/ibss.o
+linux net/mac80211/iface.o
+linux net/mac80211/link.o
+linux net/mac80211/rate.o
+linux net/mac80211/tkip.o
+linux net/mac80211/aes_cmac.o
+linux net/mac80211/aes_gmac.o
+linux net/mac80211/fils_aead.o
+linux net/mac80211/cfg.o
+linux net/mac80211/ethtool.o
+linux net/mac80211/rx.o
+linux net/mac80211/spectmgmt.o
+linux net/mac80211/tx.o
+linux net/mac80211/key.o
+linux net/mac80211/util.o
+linux net/mac80211/parse.o
+linux net/mac80211/wme.o
+linux net/mac80211/chan.o
+linux net/mac80211/trace.o
+linux net/mac80211/mlme.o
+linux net/mac80211/tdls.o
+linux net/mac80211/ocb.o
+linux net/mac80211/airtime.o
+linux net/mac80211/eht.o
+linux net/mac80211/wbrf.o
+linux net/mac80211/rc80211_minstrel_ht.o
+
+# cfg80211: the wireless configuration API, the regulatory rules and the
+# scan results, with nl80211, its netlink interface.
+linux net/wireless/core.o
+linux net/wireless/sysfs.o
+linux net/wireless/radiotap.o
+linux net/wireless/util.o
+linux net/wireless/reg.o
+linux net/wireless/scan.o
+linux net/wireless/nl80211.o
+linux net/wireless/mlme.o
+linux net/wireless/ibss.o
+linux net/wireless/sme.o
+linux net/wireless/chan.o
+linux net/wireless/ethtool.o
+linux net/wireless/mesh.o
+linux net/wireless/ap.o
+linux net/wireless/trace.o
+linux net/wireless/ocb.o
+linux net/wireless/michael-mic.o
+linux net/wireless/pmsr.o
+# The keys a regulatory database's signature is checked against, made by
+# Linux's make from the tree's net/wireless/certs.
+linux net/wireless/shipped-certs.o
+# What cfg80211 reckons with (net/wireless/util.c).
+linux lib/math/gcd.o
+
+# The layer as nl80211's one user, and its WiFi task (design-decisions 1593).
+layer emul/lx_netlink.c
+layer emul/lx_wifi.c

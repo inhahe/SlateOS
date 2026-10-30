@@ -281,7 +281,8 @@ install_shadow() {
 # stands on, `linuxdrv/emul/manifest`, and then what the driver's own
 # `manifest` adds: `linux <object>` for each of Linux's own objects (a path
 # in the tree, built by Linux's make), `layer <file>` for each of the
-# layer's C files (a path under linuxdrv/); a line the layer's already gives
+# layer's C files (a path under linuxdrv/), `include <manifest>` for a stack
+# several drivers share (linuxdrv/stacks/); a line the layer's already gives
 # is taken once. Every function the result calls and nothing defines becomes
 # a generated stop (1578 rule 4); a data symbol nothing defines is an error,
 # to be written by hand.
@@ -298,24 +299,39 @@ driver() {
     [ -f "$kit" ] || die "$kit: the layer's Rust half is not built"
     prepare
     install_shadow
-    local llvm work linux_objs=() layer_files=() kind path list
-    # seen: every entry taken; drivers: those the driver's own manifest
-    # brought, whose code is the driver's (see mark_driver below).
+    local llvm work linux_objs=() layer_files=() kind path
+    # seen: every entry taken, and every manifest included; drivers: those
+    # the driver's own manifest brought, directly or by an include, whose
+    # code is the driver's (see mark_driver below).
     local -A seen=() drivers=()
     llvm=$(llvm_setting)
-    for list in "$layer_manifest" "$manifest"; do
+    # read_manifest <file> <whose>: each entry of <file> taken, `whose` the
+    # layer's or the driver's -- an `include <path>` line (a manifest under
+    # linuxdrv/, a stack several drivers share) read in its place, as part
+    # of the manifest that names it, and each manifest at most once.
+    read_manifest() {
+        local list=$1 whose=$2 kind path
         while read -r kind path || [ -n "${kind:-}" ]; do
             case $kind in
                 '' | '#'*) continue ;;
                 linux | layer) ;;
-                *) die "$list: '$kind' is neither linux nor layer" ;;
+                include)
+                    [ -f "$repo/linuxdrv/$path" ] || die "$list: include $path: no such manifest"
+                    [ -z "${seen["include:$path"]:-}" ] || continue
+                    seen["include:$path"]=1
+                    read_manifest "$repo/linuxdrv/$path" "$whose"
+                    continue
+                    ;;
+                *) die "$list: '$kind' is neither linux, layer nor include" ;;
             esac
             [ -z "${seen["$kind:$path"]:-}" ] || continue
             seen["$kind:$path"]=1
-            [ "$list" = "$layer_manifest" ] || drivers["$kind:$path"]=1
+            [ "$whose" = layer ] || drivers["$kind:$path"]=1
             if [ "$kind" = linux ]; then linux_objs+=("$path"); else layer_files+=("$path"); fi
         done <"$list"
-    done
+    }
+    read_manifest "$layer_manifest" layer
+    read_manifest "$manifest" driver
     [ "${#linux_objs[@]}" -gt 0 ] || die "$layer_manifest and $manifest name no Linux object"
     # Linux's own objects, by Linux's own make. Kbuild enters arch/x86/lib
     # twice in one run -- once for its library objects, once for its

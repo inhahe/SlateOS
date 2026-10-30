@@ -4,12 +4,14 @@
 # `linux` lines: Linux's own objects, by path in the tree, built by Linux's
 # make. `layer` lines: the layer's own C files, by path under linuxdrv/.
 
-# printk's formatting, and the string and character functions it uses.
+# printk's formatting, and the string and character functions it uses --
+# and the calendar its %ptR prints a time by.
 linux lib/vsprintf.o
 linux lib/string.o
 linux lib/ctype.o
 linux lib/hexdump.o
 linux lib/uuid.o
+linux kernel/time/timeconv.o
 
 # Waiting and locking, Linux's own, over the layer's scheduler; lx_emul.c
 # runs wait_bit_init() before the first initcall.

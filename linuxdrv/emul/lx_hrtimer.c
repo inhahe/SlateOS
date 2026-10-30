@@ -109,15 +109,17 @@ static void lx_hrtimer_enqueue(struct hrtimer *timer)
 }
 
 /*
- * `lhs` + `rhs`, or, where the sum would pass what a ktime_t holds, the
- * furthest time Linux gives (KTIME_SEC_MAX seconds), as its own does: a
- * relative timer's expiry, and a periodic one's next (hrtimer_forward).
+ * `lhs` + `rhs` -- a relative timer's expiry, a periodic one's next
+ * (hrtimer_forward) -- or the furthest time Linux gives (KTIME_SEC_MAX
+ * seconds) where the sum is below 0 or below either operand, as Linux's
+ * own judges it: an overflow, and a negative operand too, whose timer then
+ * never fires there either.
  */
 ktime_t ktime_add_safe(const ktime_t lhs, const ktime_t rhs)
 {
-	ktime_t sum;
+	ktime_t sum = (ktime_t)((u64)lhs + (u64)rhs);
 
-	if (check_add_overflow(lhs, rhs, &sum) || sum < 0)
+	if (sum < 0 || sum < lhs || sum < rhs)
 		return ktime_set(KTIME_SEC_MAX, 0);
 	return sum;
 }

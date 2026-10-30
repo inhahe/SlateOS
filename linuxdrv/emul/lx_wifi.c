@@ -203,6 +203,16 @@ static u8 lx_wifi_scan_end(const struct genl_family *nl80211)
 	return 0;
 }
 
+/* nl80211, as cfg80211 registered it; NULL, said, when it did not. */
+static const struct genl_family *lx_wifi_nl80211(void)
+{
+	const struct genl_family *nl80211 = lx_genl_family(NL80211_GENL_NAME);
+
+	if (!nl80211)
+		pr_err("lx-wifi: nl80211 is not registered\n");
+	return nl80211;
+}
+
 /* A passive scan on `dev`, which is up, to its end: 0, or why not. */
 static int lx_wifi_scan_on(const struct genl_family *nl80211, struct net_device *dev)
 {
@@ -259,7 +269,7 @@ static void lx_wifi_results(struct net_device *dev, struct lx_wifi_found *found)
 
 static int lx_wifi_scan(void)
 {
-	const struct genl_family *nl80211 = lx_genl_family(NL80211_GENL_NAME);
+	const struct genl_family *nl80211 = lx_wifi_nl80211();
 	struct lx_wifi_found found = {};
 	struct net_device *dev;
 	int err;
@@ -323,7 +333,7 @@ static int lx_wifi_ap_params(struct sk_buff *req, struct net_device *dev)
 
 static int lx_wifi_hwsim(void)
 {
-	const struct genl_family *nl80211 = lx_genl_family(NL80211_GENL_NAME);
+	const struct genl_family *nl80211 = lx_wifi_nl80211();
 	struct lx_wifi_found found = {};
 	struct net_device *devs[2];
 	int err;
@@ -356,26 +366,13 @@ static int lx_wifi_hwsim(void)
 	return err;
 }
 
-/*
- * How a run that `err` ended ends the process: a failure as a failed
- * initcall; a success in which Linux code warned anywhere -- the driver,
- * the 802.11 stack, the layer -- as a warning, a bug the run must not pass.
- */
-static void __noreturn lx_wifi_end(int err)
-{
-	if (!err && lx_warnings) {
-		pr_err("lx-wifi: Linux warned %lu time(s) in a run that must not\n", lx_warnings);
-		slx_exit(SLX_EXIT_WARNED);
-	}
-	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
-}
-
 static int lx_wifi_task(void *unused)
 {
+	/* A warning anywhere -- the driver, the 802.11 stack, the layer -- is a bug. */
 	if (lx_arg("scan"))
-		lx_wifi_end(lx_wifi_scan());
+		lx_end_run("lx-wifi", lx_wifi_scan());
 	if (lx_arg("hwsim"))
-		lx_wifi_end(lx_wifi_hwsim());
+		lx_end_run("lx-wifi", lx_wifi_hwsim());
 	if (lx_arg("pci="))
 		return 0;
 	/*
@@ -387,7 +384,7 @@ static int lx_wifi_task(void *unused)
 	 */
 	while (system_state != SYSTEM_RUNNING)
 		msleep(10);
-	lx_wifi_end(0);
+	lx_end_run("lx-wifi", 0);
 }
 
 /* After the driver's own initcalls, which register its radios as they probe. */

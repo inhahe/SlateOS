@@ -505,11 +505,7 @@ static int lx_nic_task(void *unused)
 	if (!err)
 		err = lx_nic_serve(first, serve, (unsigned long)stacks);
 	/* A warning anywhere in the process -- the driver's probe too -- is a bug. */
-	if (!err && lx_warnings) {
-		pr_err("lx-nic: Linux warned %lu time(s) in a run that must not\n", lx_warnings);
-		slx_exit(SLX_EXIT_WARNED);
-	}
-	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
+	lx_end_run("lx-nic", err);
 }
 
 /*

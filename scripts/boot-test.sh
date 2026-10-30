@@ -639,7 +639,7 @@ marker_checks_pass() {
         FAILED_CHECK="the benchmark suite left windows unjudged"
     elif ! check_iommu_active "$1"; then
         FAILED_CHECK="DMA or interrupt remapping never came on"
-    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_NAMED:-0}"; then
+    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_STAGED:-}"; then
         FAILED_CHECK="the Linux driver layer's processes did not all run"
     fi
     [ -z "$FAILED_CHECK" ]
@@ -667,19 +667,6 @@ build_linux_drivers() {
     done
 }
 
-# Fail a boot whose medium carried a Linux driver process (a module_path:
-# line went into limine.conf) in which the kernel's linuxdrv self-test did
-# not say it ran: a module the kernel could not find is a skip there, and a
-# skip of what this harness put on the medium is a failure here. So is a
-# skip of any of its runs -- the kernel prints '[linuxdrv]   SKIP: ...' for
-# each -- since this harness always attaches the spare e1000e (mac
-# 52:54:00:12:34:59) the kernel gives the process: a run of its PCI runs
-# skipped (the card bound, or unreadable) has stopped testing Linux's PCI
-# core while it reads as a pass. The SKIP line is the contract, not the
-# verdict's wording, which changes as the runs grow.
-#
-# $1: the serial log; $2: whether a module was named. Returns 0 when none
-# was, or the test ran.
 # Whether this run gave the guest rootfs.ext4 (Step 3b fills ROOTFS_ARGS
 # exactly then): not under --no-rootfs, nor in a worktree that never packed
 # it. What QEMU was told, so it cannot drift from what the guest had.
@@ -692,9 +679,41 @@ rootfs_attached() {
 # directory with a size of its own, which memfs never gives.
 LINUXDRV_NO_EXT4_SKIP="[linuxdrv]   SKIP: Linux driver layer's refusal of a directory read as a file (no directory with a size of its own at /mnt (no ext4 rootfs); a sizeless one tried)"
 
+# What the kernel's linuxdrv self-test says of each driver process: the
+# skip it records when the process is not loaded beside the kernel, and its
+# verdict when its runs passed (kernel/src/linuxdrv.rs).
+linuxdrv_absent() {
+    case $1 in
+        hello) echo "Linux driver layer's hello process" ;;
+        e1000e) echo "Linux's e1000e through the driver layer" ;;
+        mt7925e) echo "Linux's mt7925e through the driver layer" ;;
+        hwsim) echo "Linux's mac80211_hwsim through the driver layer" ;;
+    esac
+}
+linuxdrv_verdict() {
+    case $1 in
+        hello) echo '^\[linuxdrv\]   hello process .*: OK' ;;
+        *) echo "^\\[linuxdrv\\]   $1 process: .*: OK" ;;
+    esac
+}
+
+# Fail a boot whose medium carried a Linux driver process (a module_path:
+# line went into limine.conf) of which the kernel's linuxdrv self-test did
+# not say its verdict: a module the kernel could not find is a skip there,
+# and a skip of what this harness put on the medium is a failure here. So is
+# a skip of any of their runs -- the kernel prints '[linuxdrv]   SKIP: ...'
+# for each -- since this harness always attaches the spare e1000e (mac
+# 52:54:00:12:34:59) the kernel gives the processes: a PCI run skipped (the
+# card bound, or unreadable) has stopped testing Linux's PCI core while it
+# reads as a pass. The SKIP line is the contract, not the verdict's wording,
+# which changes as the runs grow.
+#
+# $1: the serial log; $2: the driver processes the medium carries, their
+# names space-separated (empty for none). Returns 0 when it carries none, or
+# each said its verdict and nothing was skipped but what is excused below.
 check_linuxdrv_ran() {
-    local file="$1" named="$2" skips
-    [ "$named" = 1 ] || return 0
+    local file="$1" staged="$2" skips name absent="" missing=""
+    [ -n "$staged" ] || return 0
     [ -f "$file" ] || return 0
     # Any run skipped fails it -- but, in a boot whose guest had no
     # rootfs.ext4, that one skip, said whole, which is then said here too.
@@ -703,26 +722,41 @@ check_linuxdrv_ran() {
         skips=$(printf '%s\n' "$skips" | grep -vxF "$LINUXDRV_NO_EXT4_SKIP" || true)
         echo "=== NOTE: no rootfs.ext4 attached: the Linux driver layer's refusal of a directory read as a file was not tested ==="
     fi
-    # Its line, as Linux's vsprintf formats it, and the kernel's verdict.
-    if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
-        grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
-        grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file" &&
-        grep -aq '^\[linuxdrv\]   e1000e process: .*: OK' "$file" &&
-        grep -aq '^\[linuxdrv\]   mt7925e process: .*: OK' "$file" &&
-        grep -aq '^\[linuxdrv\]   hwsim process: .*: OK' "$file" &&
-        [ -z "$skips" ]; then
+    # A driver process the medium does not carry -- one reused with
+    # --no-stage from before it was staged -- is not loaded, which the
+    # kernel skips: excused, and said, as nothing this harness put there.
+    for name in "${LINUX_DRIVERS[@]}"; do
+        case " $staged " in *" $name "*) continue ;; esac
+        absent+="$name "
+        skips=$(printf '%s\n' "$skips" | grep -vF "SKIP: $(linuxdrv_absent "$name") (not loaded beside the kernel" || true)
+    done
+    if [ -n "$absent" ]; then
+        echo "=== NOTE: the boot medium carries no linuxdrv/{${absent% }}: its runs were not made (a medium reused with --no-stage; stage it again) ==="
+    fi
+    # Each staged process's verdict -- and hello's lines, as Linux's
+    # vsprintf formats them.
+    for name in $staged; do
+        grep -aq "$(linuxdrv_verdict "$name")" "$file" || missing+="$name "
+    done
+    case " $staged " in
+        *" hello "*)
+            if ! grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" ||
+                ! grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file"; then
+                missing+="hello's-lines "
+            fi
+            ;;
+    esac
+    if [ -z "$missing" ] && [ -z "$skips" ]; then
         return 0
     fi
     # A failed run is a failed self-test, which check_selftest_failures has
     # already failed the boot for: what reaches here is a run skipped, or a
     # process that never said its lines.
     echo "=== THE LINUX DRIVER LAYER'S PROCESSES DID NOT ALL RUN ==="
-    echo "  The boot medium carried linuxdrv/hello, e1000e, mt7925e and hwsim, but the"
-    echo "  kernel never said '[linuxdrv]   hello process ...: OK',"
-    echo "  '[linuxdrv]   e1000e process: ...: OK', '[linuxdrv]   mt7925e process: ...: OK'"
-    echo "  and '[linuxdrv]   hwsim process: ...: OK', or skipped some of their runs,"
-    echo "  or the process never printed its line as Linux formats it. The"
-    echo "  kernel's skips first, its verdicts, then the process's own lines:"
+    echo "  The boot medium carried linuxdrv/{${staged% }}."
+    [ -z "$missing" ] || echo "  Never said: the verdicts, or hello's own lines, of {${missing% }}."
+    [ -z "$skips" ] || echo "  Skipped: some of their runs."
+    echo "  The kernel's skips first, its verdicts, then the processes' own lines:"
     # A medium reused from before the firmware was staged skips the boot
     # firmware's run: said as the cause, which the skip alone does not say.
     if [ "${NO_STAGE:-0}" -eq 1 ] && [ ! -f "${ESP_DIR:-}/firmware/slateos/hello.fw" ]; then
@@ -9304,12 +9338,12 @@ limine_rc=0
 # Only those on the medium: Limine stops at a module it cannot open, and
 # under --no-stage the medium is whatever it was.
 MODULE_LINES=""
-LINUXDRV_NAMED=0
+LINUXDRV_STAGED=""
 for name in "${LINUX_DRIVERS[@]}"; do
     [ -f "$ESP_DIR/linuxdrv/$name.elf" ] || continue
     MODULE_LINES+="    module_path: boot():/linuxdrv/$name.elf"$'\n'
     MODULE_LINES+="    module_cmdline: linuxdrv/$name"$'\n'
-    LINUXDRV_NAMED=1
+    LINUXDRV_STAGED+="$name "
 done
 # The boot medium's firmware: each file under firmware/ a module named by
 # its path, which the kernel puts at the rest of that path under

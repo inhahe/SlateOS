@@ -771,6 +771,15 @@ void __warn_printk(const char *fmt, ...)
 static struct { const char *file; int line; } lx_warned[LX_WARNED_ONCE];
 unsigned long lx_warnings;
 
+void lx_end_run(const char *who, int err)
+{
+	if (!err && lx_warnings) {
+		pr_err("%s: Linux warned %lu time(s) in a run that must not\n", who, lx_warnings);
+		slx_exit(SLX_EXIT_WARNED);
+	}
+	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
+}
+
 void slx_warn(const char *file, int line, unsigned int flags)
 {
 	int i;

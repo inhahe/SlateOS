@@ -5551,8 +5551,14 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         `/.boot-firmware` read-only, every driver process told to look there (§1592);
         the driver process (`linuxdrv/mt7925e`) builds, Linux's 802.11 stack
         -- cfg80211, nl80211, mac80211 -- starting in it in the boot test with
-        no card, the layer driving it through nl80211 (§1593). Next: its scan
-        on the RZ717 (`linuxdrv.wifi=06:00.0`, through `scripts/pikvm.py`)
+        no card, the layer driving it through nl80211 (§1593); and the stack
+        tested end to end in every boot test on Linux's `mac80211_hwsim`
+        (`linuxdrv/hwsim`): one simulated radio made an open access point
+        through nl80211, the other's scan finding it. Next: its scan on the
+        RZ717 (`linuxdrv.wifi=06:00.0`, through `scripts/pikvm.py`; the
+        PiKVM fell off the network mid-run on 2026-10-30), then joining a
+        network -- an open one first, on hwsim, which needs the layer to
+        answer authentication and association as hostapd would
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
         from Linux's DRM/KMS onto the graphics stack -- this is how the i915
         item in 3.1 gets done

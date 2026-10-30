@@ -14,7 +14,12 @@
 //! network (the test PC's I219-V) -- serving the card to the netstack daemon
 //! (design-decisions 1589), which also times it; then the daemon times the
 //! kernel's own e1000 driver the same way, for the two to be read side by
-//! side (design-decisions 1588, measured).
+//! side (design-decisions 1588, measured). Then Linux's 802.11 stack: its
+//! mt7925e, started with no card or scanning with the one `linuxdrv.wifi`
+//! names (the test PC's RZ717), and its mac80211_hwsim, whose simulated
+//! radios test the stack end to end where there is no card (design-decisions
+//! 1593). The boot medium's firmware is placed where every driver process is
+//! told to look ([`mount_boot_firmware`], design-decisions 1592).
 
 use netipc::nicport::check;
 
@@ -40,7 +45,8 @@ const EXIT_OK: i32 = 0;
 /// giving one a value its kind refuses, or holding both a space and a
 /// quote.
 const EXIT_ARGUMENT: i32 = 118;
-/// A network driver's serving of one stack in which Linux code warned: a
+/// A run in which Linux code warned -- a network driver's serving of one
+/// stack, or a WiFi run (`lx_end_run` in `linuxdrv/emul/lx_emul.c`): a
 /// bug, though the run otherwise passed.
 const EXIT_WARNED: i32 = 119;
 const EXIT_BUG: i32 = 121;
@@ -52,6 +58,22 @@ const EXIT_INIT_FAILED: i32 = 126;
 /// driver process overflowing a task's stack into the guard page below it.
 const KILLED_ACCESS_VIOLATION: i32 =
     pcb::crash_exit_code(crate::proc::exception::ExceptionCode::AccessViolation as u64);
+
+/// What a driver process's exit `code` says of how it ended, for a FAIL
+/// line to say beside the number: `None` for a code with no meaning of its
+/// own (0, or one nothing here gives).
+const fn exit_meaning(code: i32) -> Option<&'static str> {
+    match code {
+        EXIT_ARGUMENT => Some("it refused an argument"),
+        EXIT_WARNED => Some("Linux code warned in it (its log says where)"),
+        EXIT_BUG => Some("Linux code hit a BUG in it (its log says where)"),
+        EXIT_DEADLOCK => Some("its tasks were all waiting for what never comes"),
+        EXIT_STOP => Some("it called a function the layer does not have (its log names it)"),
+        EXIT_INIT_FAILED => Some("an initcall failed (its log says which)"),
+        KILLED_ACCESS_VIOLATION => Some("the kernel killed it for touching memory it may not"),
+        _ => None,
+    }
+}
 
 /// A driver process's program, as the kernel runs it: its image, the name
 /// its process gets, and how long a run may take before it counts as hung.
@@ -79,12 +101,14 @@ fn start(
     capabilities: &[(ResourceType, u64, Rights)],
 ) -> KernelResult<spawn::SpawnResult> {
     const PATH_KEY: &[u8] = b"firmware_class.path=";
-    let path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
+    // Outlives `args`, which borrows it; made only when it is passed.
+    let path_arg;
     let mut args = argv.to_vec();
     if program.driver
         && BOOT_FIRMWARE_PLACED.load(core::sync::atomic::Ordering::Acquire)
         && !argv.iter().any(|a| a.starts_with(PATH_KEY))
     {
+        path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
         args.push(path_arg.as_bytes());
     }
     let options = spawn::SpawnOptions {
@@ -124,35 +148,30 @@ fn run(
     Ok(finish(program, &process))
 }
 
-/// The layer's first process, `linuxdrv/hello`: Linux's headers and its own
-/// vsprintf in a process of their own. Run plainly, its initcalls allocate,
-/// take a spinlock with interrupts "off", print a line formatted by Linux,
-/// run a kthread against a mutex held across a sleep and a completion, try
-/// the scheduler's edges, arm timers, schedule tasklets, queue work and
-/// probe a device of their own through Linux's driver core, and
-/// the process exits 0. With one argument the first initcall ends it otherwise:
-/// "stop" calls a function nothing defines, which the build made a
-/// generated stop ([`EXIT_STOP`]);
-/// "deadlock" waits for what never comes ([`EXIT_DEADLOCK`]); "overflow"
-/// runs past its task's stack, into the guard page below it
-/// ([`KILLED_ACCESS_VIOLATION`]); "fail" starts a kthread that never ends
-/// and fails, which must end the process at once ([`EXIT_INIT_FAILED`]);
-/// "earlyfail" fails a core initcall of the driver's own, which must end it
-/// too ([`EXIT_INIT_FAILED`]) -- a failure is carried past only when it is
-/// a Linux subsystem's, whatever its level;
-/// "stranded" succeeds but leaves a kthread waiting for what never comes,
-/// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done;
-/// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]). Then
-/// [`firmware_runs`]: module parameters set from its arguments, and
-/// firmware read through Linux's own loader; [`boot_firmware_run`]: the boot
-/// medium's firmware, where [`mount_boot_firmware`] placed it. Then
-/// [`pci_runs`]: given the boot test's spare 82574, its driver probes it
-/// through Linux's PCI core. Skipped, and recorded so, where the bootloader
-/// did not load it -- anywhere but the boot test, and after a kexec. Then
-/// Linux's e1000e ([`e1000e_run`]) and mt7925e ([`wifi_runs`]). Before any
-/// of them, the checks that need no process: the operator's options
-/// (`linuxdrv.card`, `linuxdrv.wifi`) read and their cards and processes
-/// found, and firmware's paths and placing ([`check_place_firmware`]).
+/// The Linux driver layer, tested through its processes. First the checks
+/// that need no process: the operator's options (`linuxdrv.card`,
+/// `linuxdrv.wifi`) read and their cards and processes found, and
+/// firmware's paths and placing ([`check_place_firmware`]). Then each
+/// process's runs, which stand alone: one the bootloader did not load --
+/// anywhere but the boot test, and after a kexec -- skips its own runs,
+/// recorded so, and never another's.
+///
+/// - [`hello_runs`]: the layer's own test process, `linuxdrv/hello`, no
+///   driver -- Linux's headers and vsprintf in a process of their own, its
+///   initcalls run plainly and in each way that must end it otherwise; then
+///   module parameters and firmware ([`firmware_runs`]), the boot medium's
+///   firmware ([`boot_firmware_run`]), and the boot test's spare 82574
+///   probed through Linux's PCI core ([`pci_runs`]).
+/// - [`e1000e_run`]: Linux's e1000e on that card -- or on the one
+///   `linuxdrv.card` names -- serving it to the netstack daemon.
+/// - [`wifi_runs`]: Linux's mt7925e with its 802.11 stack, started with no
+///   card, or scanning with the one `linuxdrv.wifi` names.
+/// - [`hwsim_run`]: Linux's mac80211_hwsim, two simulated radios on that
+///   stack, one made an access point the other's scan must find.
+///
+/// Then the verdicts of what ran, one line a process, which the boot test
+/// requires of each process it put on the medium (`scripts/boot-test.sh`,
+/// `check_linuxdrv_ran`).
 ///
 /// # Errors
 ///
@@ -217,9 +236,30 @@ struct HelloRan {
     pci: bool,
 }
 
-/// The hello process's runs (`linuxdrv/hello`; [`self_test`] says what
-/// each must end as): what ran, or `None`, skipped and recorded so, where
-/// the bootloader did not load it.
+/// The hello process's runs (`linuxdrv/hello`): what ran, or `None`,
+/// skipped and recorded so, where the bootloader did not load it.
+///
+/// Run with no mode -- its first argument without an `=`; the rest set
+/// module parameters, and [`start`] adds the firmware's directory -- its
+/// initcalls allocate, take a spinlock with interrupts "off", print a line
+/// formatted by Linux, run a kthread against a mutex held across a sleep and
+/// a completion, try the scheduler's edges, arm timers, schedule tasklets,
+/// queue work, probe a device of their own through Linux's driver core and
+/// try the layer's memory helpers, and the process exits 0. Given a mode,
+/// the first initcall ends it otherwise: "stop" calls a function nothing
+/// defines, which the build made a generated stop ([`EXIT_STOP`]);
+/// "deadlock" waits for what never comes ([`EXIT_DEADLOCK`]); "overflow"
+/// runs past its task's stack, into the guard page below it
+/// ([`KILLED_ACCESS_VIOLATION`]); "fail" starts a kthread that never ends
+/// and fails, which must end the process at once ([`EXIT_INIT_FAILED`]);
+/// "earlyfail" fails a core initcall of the driver's own, which must end it
+/// too ([`EXIT_INIT_FAILED`]) -- a failure is carried past only when it is
+/// a Linux subsystem's, whatever its level; "stranded" succeeds but leaves a
+/// kthread waiting for what never comes, which must end it as deadlocked
+/// ([`EXIT_DEADLOCK`]), not as done; "atomic" sleeps with bottom halves
+/// off, a BUG ([`EXIT_BUG`]). Then [`firmware_runs`], [`boot_firmware_run`]
+/// and [`pci_runs`], each skipped, and recorded so, where what it needs is
+/// not there.
 ///
 /// # Errors
 ///
@@ -241,8 +281,10 @@ fn hello_runs(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<Hel
     };
     let cases: [(&[&[u8]], i32, &str); 8] = [
         (&[b"hello"], EXIT_OK, "ran its initcalls and exited 0"),
+        // Its mode after a parameter: a mode is the first word wherever it
+        // stands, and one missed would run the plain initcalls, exiting 0.
         (
-            &[b"hello", b"stop"],
+            &[b"hello", b"hello.answer=42", b"stop"],
             EXIT_STOP,
             "stopped at a generated stop",
         ),
@@ -355,11 +397,14 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         );
         return Ok(false);
     };
+    // Up to 30 s for the radios to register and 30 s for the scan
+    // (lx_wifi.c), with room past both for the process to say which ran out
+    // before the kernel cuts it off.
     let program = Program {
         elf,
         name: "lx-hwsim",
         driver: true,
-        limit_s: 60,
+        limit_s: 90,
         poll_ms: 0,
     };
     expect(
@@ -825,11 +870,18 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         ));
     }
     let clash: [FirmwareFile<'_>; 2] = [(b"x", b"1"), (b"x/y", b"2")];
-    if place_firmware(&clash, AT).is_ok() || is_mounted(AT) {
+    let refused = place_firmware(&clash, AT).is_err();
+    let left = is_mounted(AT);
+    if left {
         gone();
-        return Err(fail("a placement that failed part-way left a mount"));
     }
-    Ok(())
+    match (refused, left) {
+        (true, false) => Ok(()),
+        (false, _) => Err(fail(
+            "a file and a directory of the same name were both placed",
+        )),
+        (true, true) => Err(fail("a placement that failed part-way left a mount")),
+    }
 }
 
 /// The boot test's firmware module, as [`mount_boot_firmware`] must have
@@ -862,6 +914,13 @@ fn boot_firmware_run(
         serial_println!("[linuxdrv]   FAIL: boot firmware: {what}");
         KernelError::InternalError
     };
+    // The module is there, so the boot placed it -- or said why not, a
+    // WARNING from boot long before this.
+    if !BOOT_FIRMWARE_PLACED.load(core::sync::atomic::Ordering::Acquire) {
+        return Err(fail(
+            "the boot medium's firmware was not placed (the boot's WARNING says why)",
+        ));
+    }
     let path = alloc::format!("{BOOT_FIRMWARE_DIR}/slateos/hello.fw");
     if Vfs::read_file(path.as_str()).ok().as_deref() != Some(module) {
         return Err(fail("slateos/hello.fw is not the module's bytes"));
@@ -1623,7 +1682,6 @@ fn e1000e_serve(
     } else {
         stop(&driver)
     };
-    let warned = served == Some(EXIT_WARNED);
     let released = crate::devhandle::yield_until(|| crate::pci::bound_driver(a).is_none());
     if sockets && served == Some(EXIT_OK) && released {
         return Ok(());
@@ -1646,11 +1704,7 @@ fn e1000e_serve(
             ", the card still bound after them"
         }
     );
-    if warned {
-        serial_println!(
-            "[linuxdrv]   ... the e1000e process ended so because Linux code warned in it (its log says where)"
-        );
-    }
+    say_exit_meaning("e1000e", served);
     Err(KernelError::InternalError)
 }
 
@@ -1806,7 +1860,20 @@ fn expect(
                 if wrong.is_some() { ", " } else { "" },
                 wrong.unwrap_or("")
             );
+            if let Ok(Some(code)) = outcome
+                && code != want
+            {
+                say_exit_meaning(argv.first().map_or("?", text), Some(code));
+            }
             Err(KernelError::InternalError)
         }
+    }
+}
+
+/// Under a FAIL line, what the `who` process's exit code `code` says of how
+/// it ended ([`exit_meaning`]), when it says anything.
+fn say_exit_meaning(who: &str, code: Option<i32>) {
+    if let Some(why) = code.and_then(exit_meaning) {
+        serial_println!("[linuxdrv]   ... the {who} process ended so because {why}");
     }
 }

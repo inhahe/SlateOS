@@ -6,43 +6,51 @@
 1594), a running system's network is two processes the kernel starts once:
 the Linux driver process serving the card (`linuxdrv::serve_at_boot`) and
 the persistent netstack daemon serving sockets over it
-(`proc::spawn::run_persistent_netstack`). Nothing restarts either, and each
-gives up at start-up on a condition a real machine meets:
+(`proc::spawn::run_persistent_netstack`). Two things are still wrong:
 
-| Process | Gives up when | After |
-|---|---|---|
-| driver (`lx_nic_serve`, `linuxdrv/emul/lx_nic.c`) | the card has no link | 10 s (`lx_nic_link`) |
-| daemon (`serve_card`, `services/netstack/src/main.rs`) | no driver attaches it to the card | 30 s (`attach_card`) |
-| daemon | no DHCP server answers | ~10 s (`dhcp_lease`: two exchanges, 5 tries of 1 s) |
-| kernel | the daemon has not registered `net.stack` | 60 s, then a WARNING |
+1. **Nothing restarts either.** A driver crash, a daemon fault, or a
+   driver that never registered its card (the daemon gives up attaching
+   after 30 s, `attach_card`) leaves the machine without a network until it
+   is restarted. With `net.userspace` on, the kernel's own stack has stood
+   down on the root namespace, so nothing else carries its sockets.
+2. **Sockets do not survive the address going.** The daemon registers
+   `net.stack` only once it holds a lease, and leaves its serving loop when
+   the lease is lost (refused, or run out unrenewed), taking a new one before
+   it serves again (`run_dns_service`, `retake_lease`). Every open socket is
+   lost then, even when the new lease gives the same address; and until the
+   first lease, a program asking for a socket is told there is no network
+   service at all rather than that the network is unreachable.
 
-With `net.userspace` on the kernel's own stack has stood down, so any one
-of these leaves the machine without a network until it is restarted -- and
-so does either process dying later (a driver crash, a daemon fault).
+**Fixed already (2026-10-30).** Neither gives up at start-up any longer on a
+card with no link or a network with no DHCP answer: the driver serving for
+the system's life serves the card at once, its link told to the stack as it
+comes (`lx_nic_serve`), and the daemon waits for its first lease as it does
+for a lost one -- tried again later and later yet, and at once when the link
+comes up (`serve_card`, `rest_until_link_up`); the kernel goes on after 60 s
+without the persistent-daemon checks, the card still the network
+(`set_serves_a_card` at the daemon's start). Every boot test's card boot
+starts with the card's cable out.
 
-**Who sees it.** No one yet: both options are off by default, and the
-only configuration using them is the boot test's QEMU, whose link and DHCP
-are always there. It bites the first machine whose only network is a card a
-driver process serves -- the test PC's WiFi -- booted with the cable out, out
-of range of its access point, or with the router still starting.
+**Who sees it.** No one yet: both options are off by default. The first is
+the test PC once its WiFi carries its network -- a driver that faults, or a
+lease the access point refuses.
 
-**Where.** `linuxdrv/emul/lx_nic.c` (`lx_nic_serve`'s bounded link wait),
-`services/netstack/src/main.rs` (`serve_card`: the attach and the lease
-before serving), `kernel/src/proc/spawn.rs` (`run_persistent_netstack`'s
-registration wait), and whoever supervises services -- nothing yet.
+**Where.** Whoever supervises services -- nothing yet -- and, for 2,
+`services/netstack/src/main.rs`'s serving loop (`IfInfo` is fixed for a
+`run_dns_service` call: the address, mask, gateway and DNS server are read
+from it throughout).
 
-**The proper fix.** Two halves:
+**The proper fix.**
 
-1. *For-life modes that wait instead of ending.* The driver serving for
-   the system's life (no `stacks=`) serves the card at once and leaves the
-   link to the port, which already tells the stack its carrier at every
-   turn; the daemon serving a card registers `net.stack` without a lease and
-   takes one in its serving loop (`dhcp_client` from INIT, not only renewing),
-   answering sockets with "network unreachable" meanwhile; and the kernel
-   stops holding its boot for it. The self-tests that need a lease then wait
-   for one inside their own bound.
-2. *Supervision.* The service manager restarts a persistent driver process
+1. *Supervision.* The service manager restarts a persistent driver process
    or daemon that ends, the driver first; the daemon re-attaches to the
    card's service name (the kit already accepts the next stack, design-
    decisions 1589). Until there is a service manager, the kernel could do
    it for these two -- it started them.
+2. *The address as state of the serving loop.* The daemon registers
+   `net.stack` at once and holds its interface's addresses as state the loop
+   changes: the first lease taken there (`dhcp_client` from INIT --
+   DISCOVER, OFFER, REQUEST, ACK -- not only renewing), a lost one given up
+   and a new one taken without leaving the loop, the sockets bound to the old
+   address reset and the others kept; meanwhile a connect answers "network
+   unreachable".

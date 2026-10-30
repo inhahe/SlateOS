@@ -7226,20 +7226,50 @@ fn echo_answer(frame: &[u8], me: &IfInfo) -> Option<(usize, bool)> {
 /// ([`attach_card`]) and given an address by DHCP: the daemon's interface on
 /// it, and the client that keeps its lease. An exit code
 /// (`netipc::nicport::check`) for what failed.
-fn serve_card(service: &[u8]) -> Result<(IfInfo, dhcp_client::Client), i64> {
+///
+/// `for_life` (`serve-net`, the daemon a running system's sockets go
+/// through): a card with no link yet, or a network whose DHCP server does
+/// not answer, is waited for rather than given up on -- tried again later
+/// and later yet, as a lost lease is ([`RETAKE_FIRST_NS`]), and at once when
+/// the link comes up: a cable plugged in after boot, or a WiFi network
+/// joined. Only the card going ends it then.
+fn serve_card(service: &[u8], for_life: bool) -> Result<(IfInfo, dhcp_client::Client), i64> {
     let port = attach_card(service, b"serve")?;
     let mut me = card_if_info(port.mac);
-    let lease = match dhcp_lease(&mut me) {
-        Ok(lease) => lease,
-        Err(why) => {
-            Line::new()
-                .put(b"[netstack] serve: ")
-                .put(why.as_bytes())
-                .put(b"\n")
-                .print();
+    let mut wait_ns = RETAKE_FIRST_NS;
+    let lease = loop {
+        // A bounded run is served only once its card's link is up, so it
+        // asks at once, as it always has.
+        let why = if !for_life || nic::link_up() {
+            match dhcp_lease(&mut me) {
+                Ok(lease) => break lease,
+                Err(why) => why,
+            }
+        } else {
+            "the card has no link"
+        };
+        Line::new()
+            .put(b"[netstack] serve: ")
+            .put(why.as_bytes())
+            .put(b"\n")
+            .print();
+        if !for_life {
             port::detach();
             return Err(NIC_NO_ADDRESS);
         }
+        Line::new()
+            .put(b"[netstack] serve: no address over ")
+            .put(service)
+            .put(b" yet: asked again within ")
+            .dec(wait_ns / 1_000_000_000)
+            .put(b" s, or as soon as its link comes up\n")
+            .print();
+        if !rest_until_link_up(&me, wait_ns) {
+            print("[netstack] serve: FAIL: the card's driver went away\n");
+            port::detach();
+            return Err(NIC_NO_CARD);
+        }
+        wait_ns = wait_ns.saturating_mul(2).min(RETAKE_MOST_NS);
     };
     Line::new()
         .put(b"[netstack] serving over ")
@@ -7258,6 +7288,30 @@ fn serve_card(service: &[u8]) -> Result<(IfInfo, dhcp_client::Client), i64> {
         .print();
     let client = dhcp_client::Client::new(me.mac, lease, now_ns(), dhcp_xid(&me.mac));
     Ok((me, client))
+}
+
+/// `ns` rested between two tries at a first lease, cut short when the card's
+/// link comes up -- a cable plugged in, a network joined -- that being when
+/// a try can first succeed. The frames that come meanwhile are read and let
+/// go: none is for an address not yet held, and one left unread would wake
+/// every wait at once. False when the card has gone.
+fn rest_until_link_up(me: &IfInfo, ns: u64) -> bool {
+    let deadline = now_ns().saturating_add(ns);
+    let mut frame = [0u8; MAX_FRAME];
+    let mut tcp = [0u8; MAX_FRAME];
+    let mut udp = [0u8; UDP_DGRAM_MAX];
+    let was_up = nic::link_up();
+    while now_ns() < deadline {
+        while !matches!(recv_any(me, &mut frame, &mut tcp, &mut udp), Rx::Drained) {}
+        // Up from down, or up at last when it was not yet told.
+        if nic::take_link_back() || (!was_up && nic::link_up()) {
+            return true;
+        }
+        if nic::wait_until(deadline).is_err() {
+            return false;
+        }
+    }
+    !nic::card_gone()
 }
 
 /// The card `service` names attached ([`port::attach`]), waiting up to 30 s
@@ -7377,7 +7431,9 @@ pub extern "C" fn _start() -> ! {
             }
         }
     } else {
-        match serve_card(card) {
+        // `serve-net` serves a running system's sockets for its life: it
+        // waits for its card's network rather than give up on it.
+        match serve_card(card, mode == b"serve-net") {
             Ok((me, client)) => (me, Some(client)),
             Err(code) => exit(code),
         }

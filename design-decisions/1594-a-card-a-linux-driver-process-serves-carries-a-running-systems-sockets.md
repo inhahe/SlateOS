@@ -68,10 +68,20 @@ are off by default.
   daemon request, but the kernel would keep a second record of what the
   daemon holds; asking the daemon cannot drift.
 
+5. **Served for life, both wait for the card's network rather than give
+   up on it.** The driver serves the card at once, link or none -- the port
+   tells the stack its carrier at every turn; the daemon waits for its first
+   lease as it does for a lost one, tried again later and later yet
+   (4 s doubling to 64 s) and at once when the link comes up; the kernel
+   treats the card as the network from the daemon's start, and after 60 s
+   without it goes on without the persistent-daemon checks, saying why. A
+   cable plugged in after boot, or a WiFi network joined, is a link coming
+   up like any other.
+
 ### What it does not do yet
 
-- Nothing restarts either process, and each gives up at start-up on a card
-  with no link or a network with no DHCP answer: known-issues
+- Nothing restarts either process, and the daemon's sockets do not survive
+  its address going (it serves only while it holds a lease): known-issues
   `A-PERSISTENT-NETWORK-PROCESSES-ARE-NOT-RESTARTED`.
 - `/proc/net`, `/sys/devices/net`, `netstat` and `SYS_NET_IF_CONFIG` still
   describe and configure the kernel's NIC alone: known-issues
@@ -85,10 +95,13 @@ card a `linuxdrv.serve` given names, as `serve_at_boot` will. Every boot
 test's card boot (`scripts/boot-test.sh` `card_boot`, since 2026-10-30):
 once the main boot has passed, the same QEMU machine is booted again with
 `linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e` and self-tests skipped,
-the spare 82574 on a network of its own (10.0.5.0/24), and the run fails
-unless Linux's e1000e served it, the daemon took its address there,
-`SYS_NET_IF_INFO` said that address, and every persistent-daemon check
-finished without a failure. Before it, a QEMU boot by hand
+the spare 82574 on a network of its own (10.0.5.0/24) and its cable out
+until the daemon says it waits for the card's network, and the run fails
+unless Linux's e1000e served it, the daemon waited and then took its
+address there, `SYS_NET_IF_INFO` said that address, every
+persistent-daemon check finished without a failure (as the main boot's
+checks define one), and the daemon reached over the card whatever the main
+boot's reached beyond QEMU's network. Before it, a QEMU boot by hand
 with `linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e` (2026-10-30):
 Linux's e1000e serving the spare 82574 for the system's life, the daemon
 attached and given an address by DHCP through it, and every

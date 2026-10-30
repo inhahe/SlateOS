@@ -5538,7 +5538,9 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         persistent netstack daemon serve sockets over it -- every
         persistent-daemon check passing over Linux's e1000e in QEMU, which
         every boot test checks on a second boot of its machine (the card
-        boot, the spare card on a network of its own). Left:
+        boot, the spare card on a network of its own, its cable out until
+        the daemon waits for it: served for life, neither the driver nor
+        the daemon gives up on a card with no network yet). Left:
         the same measured on hardware (the test PC's I219-V), where the
         process's own cost can be told apart
   - [ ] Then WiFi (`iwlwifi` or whatever card the test PC can carry) -- decide

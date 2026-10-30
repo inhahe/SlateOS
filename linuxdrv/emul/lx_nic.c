@@ -29,7 +29,8 @@
  *   With "stacks=<n>" as well, the process ends once the n-th stack to
  *   attach has gone -- the kernel's self-test, which a warning from Linux
  *   code anywhere in the process fails -- and without, the card waits for
- *   the next for ever.
+ *   the next for ever, and is served at once, its link up or not (the
+ *   kernel's linuxdrv.serve, design-decisions 1594).
  */
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -392,8 +393,14 @@ static long lx_nic_port_send(struct net_device *dev, const void *frame, long len
 }
 
 /*
- * `dev`, its link up, served as "nic.<name>": what the stack submits sent,
- * until `stacks` stacks have come and gone (0: for ever). 0, or why not.
+ * `dev` served as "nic.<name>": what the stack submits sent, until `stacks`
+ * stacks have come and gone (0: for ever). 0, or why not.
+ *
+ * A bounded run -- the kernel's self-test -- serves the card once its link
+ * is up, and ends without one. Served for ever, the card is served at once,
+ * link or none: the port tells the stack its carrier at every turn, and a
+ * cable plugged in later, or a network joined, is a link coming up like any
+ * other.
  */
 static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long stacks)
 {
@@ -402,7 +409,7 @@ static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long 
 	const void *frame;
 	long len, err;
 
-	if (!lx_nic_link(dev))
+	if (stacks && !lx_nic_link(dev))
 		return -ENOLINK;
 	err = slx_nicport_open(name, dev->dev_addr, dev->mtu);
 	if (err) {

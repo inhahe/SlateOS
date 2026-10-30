@@ -1790,15 +1790,17 @@ def _card_boot_value(name):
 
 #: What card_boot_verdict reads besides its arguments.
 _CARD_BOOT_SETTINGS = ("CARD_BOOT_CLOSING", "CARD_BOOT_DONE", "CARD_BOOT_NO_DAEMON",
-                       "CARD_BOOT_UPSTREAM", "KERNEL_DEATH_RE", "LIVENESS_FAILURE_RE")
+                       "CARD_BOOT_UPSTREAM", "CARD_BOOT_WAITING", "KERNEL_DEATH_RE",
+                       "LIVENESS_FAILURE_RE")
 
 
-def _card_boot_verdict(serial_text, main_text=None):
+def _card_boot_verdict(serial_text, main_text=None, pulled=""):
     """Run the real `card_boot_verdict`, with the settings it reads as
     boot-test.sh has them, on a card boot's serial log holding `serial_text`
     (`None`: no log at all) and a main boot's holding `main_text` (`None`:
-    none given): its two lines -- the failure's kind and its detail -- as a
-    pair, ("", "") for a pass; `None` on a hang.
+    none given), `pulled` "pulled" when the card's cable was out at the
+    start: its two lines -- the failure's kind and its detail -- as a pair,
+    ("", "") for a pass; `None` on a hang.
     """
     tmp = new_fixture()
     try:
@@ -1814,7 +1816,8 @@ def _card_boot_verdict(serial_text, main_text=None):
                 + "\n".join(_shell_assignment(n) for n in _CARD_BOOT_SETTINGS) + "\n"
                 + extract_shell_function("card_boot_verdict") + "\n\n"
                 + "card_boot_verdict serial.txt "
-                + ("main.txt" if main_text is not None else "''") + " > said.txt\n"
+                + ("main.txt" if main_text is not None else "''")
+                + f" '{pulled}' > said.txt\n"
                 + "echo ran\n")
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the card boot's verdict")
         if proc is None or "ran" not in proc.stdout:
@@ -1920,6 +1923,28 @@ def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_netw
                    "serves (10.0.5.")),
     ]:
         check(label, _card_boot_verdict(text, main), want)
+    # Booted with the card's cable out: the daemon must have said it waited
+    # for the card's network, and before it served over it.
+    waited = ("[netstack] serve: no address over nic.e1000e yet: asked again "
+              "within 4 s, or as soon as its link comes up\n")
+    for label, text, want in [
+        ("cable out: the wait said before the lease passes",
+         "[boot] up\n" + _SERVED + waited + _LEASED + _RESOLVED + _TOLD + _DONE, ("", "")),
+        ("cable out: no wait said fails", good,
+         ("the daemon never waited for the card's network",
+          "the cable was out at the start, and no line said: "
+          "[netstack] serve: no address over nic.e1000e yet")),
+        ("cable out: the wait said only after the lease fails",
+         "[boot] up\n" + _SERVED + _LEASED + waited + _RESOLVED + _TOLD + _DONE,
+         ("the daemon waited only after it served", waited.strip())),
+        ("cable out: a failure still fails first",
+         "[boot] up\n" + _SERVED + waited + _LEASED + failed + _TOLD + _DONE,
+         ("a check failed", failed.strip())),
+    ]:
+        check(label, _card_boot_verdict(text, None, "pulled"), want)
+    check("cable in: a wait said is no failure",
+          _card_boot_verdict("[boot] up\n" + _SERVED + waited + _LEASED + _TOLD + _DONE),
+          ("", ""))
 
 
 def _limine_conf(cmdline, template):
@@ -2049,6 +2074,10 @@ def test_every_line_the_card_boot_reads_is_printed_by_the_tree():
            "as {name} (pid {})" in linuxdrv), (True, True))
     check("the daemon says it serves over the card, and its lease",
           ('b"[netstack] serving over "' in daemon, 'b", DHCP gave "' in daemon),
+          (True, True))
+    before, _, after = _card_boot_value("CARD_BOOT_WAITING").partition(card)
+    check("the daemon says it waits for the card's network, the card's name between",
+          (f'b"{before}"' in daemon, f'b"{after}: asked again within "' in daemon),
           (True, True))
     check("the kernel says the interface parity",
           "interface parity: SYS_NET_IF_INFO says the interface the daemon serves" in spawn,

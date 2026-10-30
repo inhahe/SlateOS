@@ -718,6 +718,12 @@ check_linuxdrv_ran() {
     echo "  '[linuxdrv]   e1000e process: ...: OK', or skipped some of their runs,"
     echo "  or the process never printed its line as Linux formats it. The"
     echo "  kernel's skips first, its verdicts, then the process's own lines:"
+    # A medium reused from before the firmware was staged skips the boot
+    # firmware's run: said as the cause, which the skip alone does not say.
+    if [ "${NO_STAGE:-0}" -eq 1 ] && [ ! -f "${ESP_DIR:-}/firmware/slateos/hello.fw" ]; then
+        echo "  (The medium was reused -- --no-stage -- and has no firmware/slateos/hello.fw:"
+        echo "  it was staged before the boot medium carried firmware. Stage it again.)"
+    fi
     {
         printf '%s\n' "$skips" | grep -v '^$'
         grep -a '^\[linuxdrv\]   \(hello\|e1000e\) process' "$file" | cut -c1-160
@@ -9219,14 +9225,14 @@ if [ "$NO_STAGE" -eq 0 ]; then
             exit 1
         fi
     done
-    # Firmware on the boot medium, which the kernel puts under /lib/firmware
-    # (linuxdrv::mount_boot_firmware): the hello process's "bootfw" run
-    # loads this one, whose text linuxdrv/hello/hello.c's HELLO_BOOT_FW_TEXT
-    # holds too. Beside hello only, its one reader.
+    # Firmware on the boot medium, which the kernel places for the driver
+    # processes (linuxdrv::mount_boot_firmware): the hello process's "bootfw"
+    # run loads this one, whose text linuxdrv/hello/hello.c's
+    # HELLO_BOOT_FW_TEXT holds too. Beside hello only, its one reader.
     rm -rf "$ESP_DIR/firmware"
     if [ -f "$ESP_DIR/linuxdrv/hello.elf" ]; then
         if ! { mkdir -p "$ESP_DIR/firmware/slateos" &&
-               printf 'SlateOS boot-medium firmware for linuxdrv/hello\n' > "$ESP_DIR/firmware/slateos/hello.fw"; }; then
+               cp "$PROJECT_ROOT/linuxdrv/hello/hello.fw" "$ESP_DIR/firmware/slateos/hello.fw"; }; then
             echo "ERROR: could not stage the boot medium's test firmware." >&2
             exit 1
         fi
@@ -9302,7 +9308,7 @@ for name in "${LINUX_DRIVERS[@]}"; do
 done
 # The boot medium's firmware: each file under firmware/ a module named by
 # its path, which the kernel puts at the rest of that path under
-# /lib/firmware.
+# /.boot-firmware.
 if [ -d "$ESP_DIR/firmware" ]; then
     while IFS= read -r fw; do
         MODULE_LINES+="    module_path: boot():/$fw"$'\n'

@@ -143,16 +143,36 @@ unsafe fn limine_str(ptr: *const u8, max: usize) -> Option<&'static [u8]> {
     Some(unsafe { core::slice::from_raw_parts(ptr, len) })
 }
 
+/// The most modules [`modules`] reads, and the longest name it reads whole:
+/// bounds, so that a malformed response cannot make a runaway walk -- far
+/// past any boot medium's, whose names are a driver's or a firmware file's
+/// path.
+const MODULES_MAX: usize = 4096;
+const MODULE_NAME_MAX: usize = 4096;
+
+/// How many modules the bootloader says it loaded, read or not: more than
+/// [`modules`] gives when one has no name it can read or lies past
+/// [`MODULES_MAX`].
+#[must_use]
+pub fn module_count() -> usize {
+    match MODULE_REQUEST.response() {
+        Some(r) if !r.modules.is_null() => usize::try_from(r.module_count).unwrap_or(usize::MAX),
+        _ => 0,
+    }
+}
+
 /// Every module limine.conf loaded: its `module_cmdline:` name and its
 /// bytes, as the bootloader loaded them, live for the kernel's lifetime --
-/// in limine.conf's order. None when none was configured, or the kernel was
-/// started by kexec, which passes no modules on.
+/// in limine.conf's order. Passed over: a module with no contents, or no
+/// name ending within [`MODULE_NAME_MAX`] bytes -- never cut short, which
+/// would make it another's -- and any past [`MODULES_MAX`]. Empty when none
+/// was configured, or the kernel was started by kexec, which passes no
+/// modules on.
 pub fn modules() -> impl Iterator<Item = (&'static [u8], &'static [u8])> {
     let (files, count) = match MODULE_REQUEST.response() {
-        // At most a few hundred: a count past that is not Limine's.
         Some(r) if !r.modules.is_null() => (
             r.modules,
-            usize::try_from(r.module_count).map_or(0, |n| n.min(256)),
+            usize::try_from(r.module_count).map_or(0, |n| n.min(MODULES_MAX)),
         ),
         _ => (core::ptr::null(), 0),
     };
@@ -162,8 +182,8 @@ pub fn modules() -> impl Iterator<Item = (&'static [u8], &'static [u8])> {
         // the kernel's lifetime.
         let file = unsafe { files.add(i).read().as_ref()? };
         // SAFETY: a string Limine gave.
-        let name = unsafe { limine_str(file.cmdline, 256)? };
-        if file.address.is_null() {
+        let name = unsafe { limine_str(file.cmdline, MODULE_NAME_MAX.saturating_add(1))? };
+        if name.len() > MODULE_NAME_MAX || file.address.is_null() {
             return None;
         }
         let size = usize::try_from(file.size).ok()?;

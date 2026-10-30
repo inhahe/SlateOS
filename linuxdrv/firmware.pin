@@ -6,7 +6,7 @@
 # the hash given. The files are not committed: each is a binary under its
 # own licence, which linux-firmware's WHENCE names. `scripts/pikvm.py stage`
 # puts them on the boot medium as modules `firmware/<path>`, which the kernel
-# places under /lib/firmware (design-decisions 1592).
+# places under /.boot-firmware (design-decisions 1592).
 #
 # Moving the release is one commit: the tag, and every file's hash, taken
 # from a fetch over HTTPS from kernel.org; once committed, these lines are

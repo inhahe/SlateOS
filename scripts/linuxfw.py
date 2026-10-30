@@ -8,7 +8,7 @@ bytes alone. The files are not committed -- each is a binary under its own
 licence, which linux-firmware's WHENCE names -- so they are fetched, as the
 Linux tree is (`scripts/linux-tree.sh`). `scripts/pikvm.py stage` puts them
 on the boot medium as modules `firmware/<path>`, which the kernel places
-under /lib/firmware (design-decisions 1592).
+under /.boot-firmware (design-decisions 1592).
 
     python scripts/linuxfw.py fetch [--worktree DIR]   # fetch what is missing
     python scripts/linuxfw.py paths [--worktree DIR]   # where each file goes
@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import re
 import sys
 import tempfile
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -91,25 +93,38 @@ def sha256(data: bytes) -> str:
 
 
 def download(url: str, opener=urllib.request.urlopen, sleep=time.sleep, tries: int = 3) -> bytes:
-    """`url`'s body, tried `tries` times, `sleep`ing 3 s between. OSError
-    (the last attempt's) when none answered, or one answered with more than
+    """`url`'s whole body. Tried up to `tries` times, `sleep`ing 3 s between,
+    for what another try may mend: a connection lost or refused, a body cut
+    short (fewer bytes than its Content-Length, or http.client's
+    IncompleteRead), a server's error (5xx). OSError, saying why, for the
+    last of those, or at once for what no try mends: an answer of 4xx (the
+    pin names a file or release kernel.org does not have) or a body past
     MAX_BYTES."""
     # kernel.org answers urllib's own User-Agent with 403 Forbidden.
     request = urllib.request.Request(url, headers={"User-Agent": "slateos-linuxfw/1"})
-    last: OSError | None = None
+    why = "no attempt made"
     for attempt in range(tries):
+        if attempt:
+            sleep(3)
         try:
             with opener(request, timeout=60) as response:
                 body = response.read(MAX_BYTES + 1)
-            if len(body) > MAX_BYTES:
-                raise OSError(f"{url}: more than {MAX_BYTES} bytes")
-            return body
-        except OSError as e:
-            last = e
-            if attempt + 1 < tries:
-                sleep(3)
-    assert last is not None
-    raise last
+                promised = response.headers.get("Content-Length")
+        except urllib.error.HTTPError as e:
+            if e.code < 500:
+                raise OSError(f"HTTP {e.code} {e.reason}") from e
+            why = f"HTTP {e.code} {e.reason}"
+            continue
+        except (OSError, http.client.HTTPException) as e:
+            why = f"{type(e).__name__}: {e}"
+            continue
+        if len(body) > MAX_BYTES:
+            raise OSError(f"more than {MAX_BYTES} bytes")
+        if promised is not None and promised.isdigit() and int(promised) != len(body):
+            why = f"cut short: {len(body)} of the {promised} bytes promised"
+            continue
+        return body
+    raise OSError(f"{why} (tried {tries} times)")
 
 
 def fetch(worktree: Path, opener=urllib.request.urlopen, say=print, sleep=time.sleep) -> list[Path]:
@@ -123,9 +138,13 @@ def fetch(worktree: Path, opener=urllib.request.urlopen, say=print, sleep=time.s
     got: list[Path] = []
     for path, want in files:
         dest = out / path
-        if dest.is_file() and sha256(dest.read_bytes()) == want:
-            got.append(Path(path))
-            continue
+        if dest.is_file():
+            if sha256(dest.read_bytes()) == want:
+                got.append(Path(path))
+                continue
+            # Not the pin's bytes (an older release's, or damaged): gone
+            # before anything else, so that a fetch that fails leaves nothing.
+            dest.unlink()
         url = URL.format(path=path, release=release)
         say(f"linuxfw: fetching {path} at linux-firmware {release}")
         try:
@@ -177,8 +196,11 @@ def self_test() -> int:
     check("an unknown line refused", "neither" in (pin_error("release 20261019\nfetch everything\n") or ""), True)
 
     class Answer:
-        def __init__(self, body):
+        """A response: `body`, and the length its header promised."""
+
+        def __init__(self, body, promised=None):
             self.body = body
+            self.headers = {"Content-Length": str(len(body) if promised is None else promised)}
 
         def __enter__(self):
             return self
@@ -191,22 +213,35 @@ def self_test() -> int:
 
     asked: list[str] = []
 
-    def kernel_org(files, lose=0):
+    def kernel_org(files, lose=0, faults=()):
+        """kernel.org serving `files` at release 20261019 -- the first `lose`
+        requests lost, then each of `faults` spoiling the next answer:
+        "cut" (IncompleteRead), "short" (fewer bytes than promised),
+        "busy" (503) -- and 404 for any other file."""
         lost = [lose]
+        spoil = list(faults)
 
         def opener(request, timeout=None):
             url = request.full_url
             asked.append(url)
             # Without one of its own, urllib sends its own, which kernel.org refuses.
             if not request.get_header("User-agent"):
-                raise OSError("HTTP Error 403: Forbidden")
+                raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)
             if lost[0]:
                 lost[0] -= 1
                 raise OSError("connection reset")
-            for path, body in files.items():
-                if url == URL.format(path=path, release="20261019"):
-                    return Answer(body)
-            raise OSError(f"404 {url}")
+            body = next((b for p, b in files.items()
+                         if url == URL.format(path=p, release="20261019")), None)
+            if body is None:
+                raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+            fault = spoil.pop(0) if spoil else None
+            if fault == "cut":
+                raise http.client.IncompleteRead(body[:3], len(body) - 3)
+            if fault == "short":
+                return Answer(body[:3], promised=len(body))
+            if fault == "busy":
+                raise urllib.error.HTTPError(url, 503, "Service Unavailable", None, None)
+            return Answer(body)
         return opener
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +276,26 @@ def self_test() -> int:
         except SystemExit as e:
             unreachable = str(e)
         check("an unreachable file said", "could not fetch" in (unreachable or ""), True)
+        for fault in ("cut", "short", "busy"):
+            asked.clear()
+            fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, faults=(fault,)), quiet, nap)
+            check(f"an answer {fault} tried again, and taken whole",
+                  ((wt / OUT / "b.bin").read_bytes(), len(asked)), (b, 2))
+            (wt / OUT / "b.bin").unlink()
+        asked.clear()
+        try:
+            fetch(wt, kernel_org({"x/a.bin": a}), quiet, nap)
+            missing = None
+        except SystemExit as e:
+            missing = str(e)
+        check("a file kernel.org does not have said at once, not tried again",
+              ("HTTP 404" in (missing or ""), len(asked)), (True, 1))
+        (wt / OUT / "b.bin").write_bytes(b"an older release's")
+        try:
+            fetch(wt, kernel_org({"x/a.bin": a}), quiet, nap)
+        except SystemExit:
+            pass
+        check("a stale file is gone once its fetch fails", (wt / OUT / "b.bin").exists(), False)
     check("the repository's own pin reads", bool(read_pin((REPO / PIN).read_text(encoding="utf-8"))[1]), True)
     print(f"linuxfw self-test: {'passed' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0

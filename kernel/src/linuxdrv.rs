@@ -122,10 +122,15 @@ fn run(
 /// which must end it as deadlocked ([`EXIT_DEADLOCK`]), not as done;
 /// "atomic" sleeps with bottom halves off, a BUG ([`EXIT_BUG`]). Then
 /// [`firmware_runs`]: module parameters set from its arguments, and
-/// firmware read through Linux's own loader. Then
+/// firmware read through Linux's own loader; [`boot_firmware_run`]: the boot
+/// medium's firmware, where [`mount_boot_firmware`] placed it. Then
 /// [`pci_runs`]: given the boot test's spare 82574, its driver probes it
 /// through Linux's PCI core. Skipped, and recorded so, where the bootloader
-/// did not load it -- anywhere but the boot test, and after a kexec.
+/// did not load it -- anywhere but the boot test, and after a kexec. Then
+/// Linux's e1000e ([`e1000e_run`]). Before any of them, the checks that
+/// need no process: the operator's `linuxdrv.card` read and its card and
+/// processes found, and firmware's paths and placing
+/// ([`check_place_firmware`]).
 ///
 /// # Errors
 ///
@@ -151,6 +156,7 @@ pub fn self_test() -> KernelResult<()> {
         }
     }
     let mut skips = crate::fs::selftest::Skips::new();
+    check_place_firmware(&mut skips)?;
     let Some(elf) = crate::boot::module(HELLO) else {
         skips.record(
             "Linux driver layer's hello process",
@@ -215,7 +221,7 @@ pub fn self_test() -> KernelResult<()> {
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}{}: OK",
         elf.len(),
         if boot_firmware {
-            ", and finding the boot medium's in /lib/firmware, read-only"
+            ", and finding the boot medium's where the kernel placed it, read-only"
         } else {
             ""
         },
@@ -293,27 +299,27 @@ fn check_parse_pci_address() -> KernelResult<()> {
     Ok(())
 }
 
-/// Where the boot medium's firmware is put ([`mount_boot_firmware`]): the
-/// directory Linux's firmware loader looks in when no `firmware_class.path`
-/// names another.
-pub const BOOT_FIRMWARE_DIR: &str = "/lib/firmware";
+/// Where the boot medium's firmware is put ([`mount_boot_firmware`]), and
+/// what every driver process is told as `firmware_class.path`: a mount point
+/// of its own, at the top of the tree -- whose parent, `/`, always exists
+/// and is never replaced -- so that placing the firmware writes nothing to
+/// whatever root there is, and hides no `/lib/firmware` an installed system
+/// carries, which Linux's loader searches after this one.
+pub const BOOT_FIRMWARE_DIR: &str = "/.boot-firmware";
 /// The `module_cmdline:` prefix that makes a module firmware, what follows
 /// it the file's path under [`BOOT_FIRMWARE_DIR`].
 const FIRMWARE_MODULE: &[u8] = b"firmware/";
 
 /// `name`, a module's, as a firmware file's path under
-/// [`BOOT_FIRMWARE_DIR`]: what follows [`FIRMWARE_MODULE`]. `None` for a
-/// module that is not firmware; why not, for one whose path is no path --
-/// not UTF-8, empty, or with an empty, `.` or `..` component, any of which
-/// would put the file elsewhere or nowhere.
-fn firmware_module_path(name: &[u8]) -> Option<Result<&str, &'static str>> {
+/// [`BOOT_FIRMWARE_DIR`]: what follows [`FIRMWARE_MODULE`], as bytes, as a
+/// path is. `None` for a module that is not firmware; why not, for one whose
+/// path is no path -- empty, or with an empty, `.` or `..` component, any of
+/// which would put the file elsewhere or nowhere.
+fn firmware_module_path(name: &[u8]) -> Option<Result<&[u8], &'static str>> {
     let path = name.strip_prefix(FIRMWARE_MODULE)?;
-    let Ok(path) = core::str::from_utf8(path) else {
-        return Some(Err("its path is not UTF-8"));
-    };
     if path
-        .split('/')
-        .any(|c| c.is_empty() || c == "." || c == "..")
+        .split(|&b| b == b'/')
+        .any(|c| c.is_empty() || c == b"." || c == b"..")
     {
         return Some(Err("its path is empty, or has an empty, . or .. component"));
     }
@@ -322,7 +328,7 @@ fn firmware_module_path(name: &[u8]) -> Option<Result<&str, &'static str>> {
 
 /// A firmware file the boot medium carries: its path under
 /// [`BOOT_FIRMWARE_DIR`], and its bytes.
-type FirmwareFile<'a> = (&'a str, &'a [u8]);
+type FirmwareFile<'a> = (&'a [u8], &'a [u8]);
 
 /// A module [`firmware_files`] refused: its name, and why.
 #[derive(Debug, PartialEq, Eq)]
@@ -331,11 +337,18 @@ struct FirmwareRefused<'a> {
     why: &'static str,
 }
 
+/// Whether `dir` is a directory on `path`'s way: `path` lies inside it.
+fn under(path: &[u8], dir: &[u8]) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.first() == Some(&b'/'))
+}
+
 /// The firmware files `modules` -- names and bytes, as
 /// [`crate::boot::modules`] gives them -- carry, in their order: each module
 /// named `firmware/<path>` as its path ([`firmware_module_path`]) and bytes,
-/// the rest passed over. The first module refused, for a path that is none
-/// or names a file an earlier module names too.
+/// the rest passed over. The first module refused, for a path that is none,
+/// or that an earlier module's path names too or has as a directory, or the
+/// reverse -- any of which would leave one of them unplaced.
 fn firmware_files<'a>(
     modules: impl Iterator<Item = (&'a [u8], &'a [u8])>,
 ) -> Result<alloc::vec::Vec<FirmwareFile<'a>>, FirmwareRefused<'a>> {
@@ -343,35 +356,90 @@ fn firmware_files<'a>(
     for (name, bytes) in modules {
         let why = match firmware_module_path(name) {
             None => continue,
-            Some(Ok(path)) if files.iter().all(|&(p, _)| p != path) => {
+            Some(Err(why)) => why,
+            Some(Ok(path)) if files.iter().any(|&(p, _)| p == path) => {
+                "another module names the same file"
+            }
+            Some(Ok(path)) if files.iter().any(|&(p, _)| under(p, path) || under(path, p)) => {
+                "another module's file is a directory on its path, or the reverse"
+            }
+            Some(Ok(path)) => {
                 files.push((path, bytes));
                 continue;
             }
-            Some(Ok(_)) => "another module names the same file",
-            Some(Err(why)) => why,
         };
         return Err(FirmwareRefused { name, why });
     }
     Ok(files)
 }
 
-/// The boot medium's firmware -- every module limine.conf names
-/// `firmware/<path>` -- at `<path>` under [`BOOT_FIRMWARE_DIR`], on a memfs
-/// of its own mounted there and then made read-only: as an initramfs carries
-/// a machine's firmware on Linux, for the driver processes' loader, whose
-/// default directory it is, on a machine whose root holds none (the test
-/// PC, booted from a medium with only an ESP). Nothing is mounted, or made,
-/// without such a module. How many files were placed, and their bytes.
+/// `files` at their paths under `at` -- a mount point whose parent exists --
+/// on a memfs of its own mounted there, then made read-only: a driver
+/// process loads what the boot medium carried, and nothing another process
+/// put there. Nothing is mounted for no files. How many files were placed,
+/// and their bytes.
 ///
 /// # Errors
 ///
-/// `InvalidArgument`, said, for a firmware module whose path is none
-/// ([`firmware_module_path`]) or names a file another names too: nothing is
-/// placed. The VFS's error when `/lib` cannot be made, the memfs mounted or
-/// a file written: what was mounted is left, read-only, with what was
-/// written.
-pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
+/// The VFS's, when the memfs cannot be mounted, a file written or the mount
+/// sealed: then nothing is left -- the memfs unmounted, as no firmware
+/// rather than some.
+fn place_firmware(files: &[FirmwareFile<'_>], at: &str) -> KernelResult<(usize, usize)> {
+    use crate::fs::path::{Path, PathBuf};
     use crate::fs::vfs::Vfs;
+    if files.is_empty() {
+        return Ok((0, 0));
+    }
+    crate::fs::memfs::mount(at)?;
+    let placed = (|| {
+        let mut bytes = 0usize;
+        for &(path, data) in files {
+            let mut full = PathBuf::from(at);
+            full.push(Path::new(path));
+            if let Some(dir) = full.parent() {
+                Vfs::mkdir_all(dir)?;
+            }
+            Vfs::write_file(&full, data)?;
+            bytes = bytes.saturating_add(data.len());
+        }
+        let mut options = Vfs::mount_options(at)?;
+        options.read_only = true;
+        Vfs::remount(at, options)?;
+        Ok::<usize, KernelError>(bytes)
+    })();
+    match placed {
+        Ok(bytes) => Ok((files.len(), bytes)),
+        Err(e) => {
+            // The placement's error is the answer; an unmount that fails
+            // as well leaves a memfs nothing names as firmware's home.
+            let _ = Vfs::unmount(at);
+            Err(e)
+        }
+    }
+}
+
+/// The boot medium's firmware -- every module limine.conf names
+/// `firmware/<path>` -- placed at `<path>` under [`BOOT_FIRMWARE_DIR`]
+/// ([`place_firmware`]): as an initramfs carries a machine's firmware on
+/// Linux, for the driver processes' loader, on a machine whose root holds
+/// none (the test PC, booted from a medium with only an ESP). Modules the
+/// bootloader loaded that cannot be read whole are said, since one may be
+/// firmware a driver will then not find. How many files were placed, and
+/// their bytes.
+///
+/// # Errors
+///
+/// `InvalidArgument`, said, for a firmware module [`firmware_files`]
+/// refuses: nothing is placed. [`place_firmware`]'s.
+pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
+    let loaded = crate::boot::module_count();
+    let read = crate::boot::modules().count();
+    if read < loaded {
+        serial_println!(
+            "[boot] {} of the bootloader's {loaded} module(s) cannot be read: no name ending within the bound, or past the most read -- neither run nor placed",
+            loaded.saturating_sub(read)
+        );
+    }
     let files = firmware_files(crate::boot::modules()).map_err(|refused| {
         serial_println!(
             "[boot] firmware module \"{}\": {}; no firmware placed",
@@ -380,29 +448,7 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
         );
         KernelError::InvalidArgument
     })?;
-    if files.is_empty() {
-        return Ok((0, 0));
-    }
-    if Vfs::metadata("/lib").is_err() {
-        Vfs::mkdir("/lib")?;
-    }
-    crate::fs::memfs::mount(BOOT_FIRMWARE_DIR)?;
-    let placed = files.iter().try_fold(0usize, |bytes, &(path, data)| {
-        let full = alloc::format!("{BOOT_FIRMWARE_DIR}/{path}");
-        if let Some((dir, _)) = full.rsplit_once('/') {
-            Vfs::mkdir_all(dir)?;
-        }
-        Vfs::write_file(full.as_str(), data)?;
-        Ok::<usize, KernelError>(bytes.saturating_add(data.len()))
-    });
-    // Read-only whatever was written: a driver process loads what the boot
-    // medium carried, and nothing another process put there.
-    let mut options = Vfs::mount_options(BOOT_FIRMWARE_DIR)?;
-    options.read_only = true;
-    let sealed = Vfs::remount(BOOT_FIRMWARE_DIR, options);
-    let bytes = placed?;
-    sealed?;
-    Ok((files.len(), bytes))
+    place_firmware(&files, BOOT_FIRMWARE_DIR)
 }
 
 /// [`firmware_module_path`] at its edges: each answer `None` (not
@@ -412,27 +458,32 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
 ///
 /// `InternalError`, said, for an answer that is not right.
 fn check_firmware_module_path() -> KernelResult<()> {
-    let cases: [(&[u8], Option<Option<&str>>); 10] = [
+    /// A module's name, and how it must be read.
+    type Case = (&'static [u8], Option<Option<&'static [u8]>>);
+    let cases: [Case; 10] = [
         (b"linuxdrv/hello", None),
         (b"firmware", None),
-        (b"firmware/x.bin", Some(Some("x.bin"))),
+        (b"firmware/x.bin", Some(Some(b"x.bin"))),
         (
             b"firmware/mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin",
-            Some(Some("mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin")),
+            Some(Some(b"mediatek/mt7925/WIFI_RAM_CODE_MT7925_1_1.bin")),
         ),
+        // A path is bytes: any but '/' and NUL make a name.
+        (b"firmware/caf\xe9.bin", Some(Some(b"caf\xe9.bin"))),
         (b"firmware/", Some(None)),
         (b"firmware//x.bin", Some(None)),
         (b"firmware/a/", Some(None)),
         (b"firmware/../x.bin", Some(None)),
         (b"firmware/a/./x.bin", Some(None)),
-        (b"firmware/\xff.bin", Some(None)),
     ];
     for (name, want) in cases {
         let got = firmware_module_path(name).map(Result::ok);
         if got != want {
             serial_println!(
-                "[linuxdrv]   FAIL: module \"{}\" read as firmware path {got:?}, not {want:?}",
-                name.escape_ascii()
+                "[linuxdrv]   FAIL: module \"{}\" read as firmware path {:?}, not {:?}",
+                name.escape_ascii(),
+                got.map(|p| p.map(<[u8]>::escape_ascii).map(|e| alloc::format!("{e}"))),
+                want.map(|p| p.map(<[u8]>::escape_ascii).map(|e| alloc::format!("{e}")))
             );
             return Err(KernelError::InternalError);
         }
@@ -441,8 +492,10 @@ fn check_firmware_module_path() -> KernelResult<()> {
 }
 
 /// [`firmware_files`] over made-up module lists: a driver passed over, the
-/// firmware in its order; nothing at all; a file two modules name, and a
-/// path that is none, each refused as the module that did it.
+/// firmware in its order; nothing at all; a file two modules name, a file
+/// that is a directory on another's path -- either way round -- and a path
+/// that is none, each refused as the module that did it; a name that only
+/// begins as another's does, which is no clash.
 ///
 /// # Errors
 ///
@@ -452,20 +505,33 @@ fn check_firmware_files() -> KernelResult<()> {
     const MIXED: &[&[u8]] = &[b"linuxdrv/hello", b"firmware/a.bin", b"firmware/b/c.bin"];
     const NONE: &[&[u8]] = &[b"linuxdrv/hello"];
     const TWICE: &[&[u8]] = &[b"firmware/a.bin", b"firmware/b.bin", b"firmware/a.bin"];
+    const FILE_THEN_DIR: &[&[u8]] = &[b"firmware/rtl/fw", b"firmware/rtl/fw/v2.bin"];
+    const DIR_THEN_FILE: &[&[u8]] = &[b"firmware/rtl/fw/v2.bin", b"firmware/rtl/fw"];
+    const ALIKE: &[&[u8]] = &[b"firmware/rtl/fw", b"firmware/rtl/fwx.bin"];
     const ESCAPING: &[&[u8]] = &[b"firmware/a.bin", b"firmware/../b.bin"];
+    const CLASH: &str = "another module's file is a directory on its path, or the reverse";
     let refused = |name: &'static [u8], why| Err(FirmwareRefused { name, why });
     let cases = [
         (
             MIXED,
             Ok(alloc::vec![
-                ("a.bin", b"firmware/a.bin" as &[u8]),
-                ("b/c.bin", b"firmware/b/c.bin"),
+                (b"a.bin" as &[u8], b"firmware/a.bin" as &[u8]),
+                (b"b/c.bin", b"firmware/b/c.bin"),
             ]),
         ),
         (NONE, Ok(alloc::vec![])),
         (
             TWICE,
             refused(b"firmware/a.bin", "another module names the same file"),
+        ),
+        (FILE_THEN_DIR, refused(b"firmware/rtl/fw/v2.bin", CLASH)),
+        (DIR_THEN_FILE, refused(b"firmware/rtl/fw", CLASH)),
+        (
+            ALIKE,
+            Ok(alloc::vec![
+                (b"rtl/fw" as &[u8], b"firmware/rtl/fw" as &[u8]),
+                (b"rtl/fwx.bin", b"firmware/rtl/fwx.bin"),
+            ]),
         ),
         (
             ESCAPING,
@@ -484,7 +550,7 @@ fn check_firmware_files() -> KernelResult<()> {
                     "{:?}",
                     files
                         .iter()
-                        .map(|&(p, _)| p)
+                        .map(|&(p, _)| alloc::format!("{}", p.escape_ascii()))
                         .collect::<alloc::vec::Vec<_>>()
                 ),
                 Err(r) => alloc::format!("\"{}\" refused: {}", r.name.escape_ascii(), r.why),
@@ -504,23 +570,76 @@ fn check_firmware_files() -> KernelResult<()> {
     Ok(())
 }
 
+/// [`place_firmware`] at a scratch mount point under `/tmp`: nothing
+/// mounted for no files; two files placed, their bytes as given, where
+/// nothing may then write; and a placement that fails part-way -- a file
+/// where a later one wants a directory, which [`firmware_files`] refuses
+/// but this is not given through it -- leaving nothing mounted. Skipped,
+/// and recorded so, where `/tmp` is not mounted.
+///
+/// # Errors
+///
+/// `InternalError`, said, for an outcome that is not right.
+fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
+    use crate::fs::selftest::is_mounted;
+    use crate::fs::vfs::Vfs;
+    const AT: &str = "/tmp/linuxdrv-fwplace";
+    if !is_mounted("/tmp") {
+        skips.record(
+            "Linux driver layer's placing of firmware",
+            "/tmp is not mounted",
+        );
+        return Ok(());
+    }
+    let fail = |what: &str| {
+        serial_println!("[linuxdrv]   FAIL: placing firmware: {what}");
+        KernelError::InternalError
+    };
+    if place_firmware(&[], AT) != Ok((0, 0)) || is_mounted(AT) {
+        return Err(fail("no files mounted something"));
+    }
+    let files: [FirmwareFile<'_>; 2] = [(b"a/b.bin", b"one"), (b"c.bin", b"two!")];
+    let placed = place_firmware(&files, AT);
+    let found = (
+        Vfs::read_file("/tmp/linuxdrv-fwplace/a/b.bin"),
+        Vfs::read_file("/tmp/linuxdrv-fwplace/c.bin"),
+    );
+    let written = Vfs::write_file("/tmp/linuxdrv-fwplace/d.bin", b"x").is_ok();
+    // The check's own: an unmount that fails leaves a scratch mount in /tmp,
+    // which the next boot does not see, and the outcome stands either way.
+    let _ = Vfs::unmount(AT);
+    if placed != Ok((2, 7)) || found != (Ok(b"one".to_vec()), Ok(b"two!".to_vec())) || written {
+        return Err(fail(
+            "two files were not placed as given, or a third could be written beside them",
+        ));
+    }
+    let clash: [FirmwareFile<'_>; 2] = [(b"x", b"1"), (b"x/y", b"2")];
+    if place_firmware(&clash, AT).is_ok() || is_mounted(AT) {
+        let _ = Vfs::unmount(AT);
+        return Err(fail("a placement that failed part-way left a mount"));
+    }
+    Ok(())
+}
+
 /// The boot test's firmware module, as [`mount_boot_firmware`] must have
 /// placed it and the hello process's "bootfw" run must load it: at
 /// [`BOOT_FIRMWARE_DIR`]`/slateos/hello.fw`, the module's bytes, where
-/// nothing may write -- loaded by Linux's loader, with no
-/// `firmware_class.path`, from where it looks by default. Whether it ran:
-/// skipped, and recorded so, where the boot medium carries no such module.
+/// nothing may write -- loaded through Linux's loader from the directory
+/// every driver process is told (`firmware_class.path`); and, given no
+/// capability to read files, not loaded, the run ending as a failed
+/// initcall: so that a run passing for a hello that did nothing is caught.
+/// Whether it ran: skipped, and recorded so, where the boot medium carries
+/// no such module.
 ///
 /// # Errors
 ///
 /// `InternalError`, said, when the file is not there as the module was, a
-/// write to its directory is let through, or the run ends otherwise.
+/// write to its directory is let through, or a run ends otherwise.
 fn boot_firmware_run(
     hello: &Program<'_>,
     skips: &mut crate::fs::selftest::Skips,
 ) -> KernelResult<bool> {
     use crate::fs::vfs::Vfs;
-    const PATH: &str = "/lib/firmware/slateos/hello.fw";
     let Some(module) = crate::boot::module(b"firmware/slateos/hello.fw") else {
         skips.record(
             "Linux driver layer's firmware from the boot medium",
@@ -532,20 +651,34 @@ fn boot_firmware_run(
         serial_println!("[linuxdrv]   FAIL: boot firmware: {what}");
         KernelError::InternalError
     };
-    if Vfs::read_file(PATH).ok().as_deref() != Some(module) {
-        return Err(fail(
-            "/lib/firmware/slateos/hello.fw is not the module's bytes",
-        ));
+    let path = alloc::format!("{BOOT_FIRMWARE_DIR}/slateos/hello.fw");
+    if Vfs::read_file(path.as_str()).ok().as_deref() != Some(module) {
+        return Err(fail("slateos/hello.fw is not the module's bytes"));
     }
-    if Vfs::write_file("/lib/firmware/slateos/written.fw", b"x").is_ok() {
-        return Err(fail("a file was written in /lib/firmware"));
+    if Vfs::write_file(
+        alloc::format!("{BOOT_FIRMWARE_DIR}/slateos/written.fw").as_str(),
+        b"x",
+    )
+    .is_ok()
+    {
+        return Err(fail("a file was written beside the boot medium's"));
     }
+    let path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
+    let argv: [&[u8]; 3] = [b"hello", b"bootfw", path_arg.as_bytes()];
     expect(
         hello,
-        &[b"hello", b"bootfw"],
+        &argv,
         &[(ResourceType::File, 0, Rights::READ)],
         EXIT_OK,
-        "loaded the boot medium's firmware through Linux's loader, from where it looks by default",
+        "loaded the boot medium's firmware through Linux's loader",
+        || None,
+    )?;
+    expect(
+        hello,
+        &argv,
+        &[],
+        EXIT_INIT_FAILED,
+        "failed its firmware initcall, given no capability to read the boot medium's firmware",
         || None,
     )?;
     Ok(true)

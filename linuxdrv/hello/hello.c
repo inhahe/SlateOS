@@ -35,9 +35,9 @@
  *               exit 0;
  *   "firmware-denied"  the same without a capability to read files, which
  *               must read none: must exit 0;
- *   "bootfw"    with no firmware_class.path, loads the boot medium's
- *               firmware from /lib/firmware, where Linux's loader looks by
- *               default and the kernel put it: must exit 0.
+ *   "bootfw"    with firmware_class.path naming where the kernel put the
+ *               boot medium's firmware, loads hello's own from it: must exit
+ *               0, and, with no capability to read files, fail its initcall.
  * With an argument, the later initcalls do nothing: the first's ending is
  * the test ("earlyfail"'s comes before the first) -- but the firmware runs',
  * a late one's. An argument naming a parameter hello does not have, or
@@ -2085,10 +2085,11 @@ core_initcall(hello_params_early);
 #define HELLO_DIR_ARG "dir="
 
 /*
- * What the boot test stages as the module firmware/slateos/hello.fw, which
- * the kernel puts at /lib/firmware/slateos/hello.fw (scripts/boot-test.sh,
- * kernel/src/linuxdrv.rs): the "bootfw" run's, found by Linux's loader with
- * no firmware_class.path.
+ * What the boot test stages as the module firmware/slateos/hello.fw
+ * (linuxdrv/hello/hello.fw, whose bytes this text must be), which the kernel
+ * places at slateos/hello.fw in the boot medium's firmware directory
+ * (kernel/src/linuxdrv.rs): the "bootfw" run's, found by Linux's loader in
+ * firmware_class.path.
  */
 #define HELLO_BOOT_FW "slateos/hello.fw"
 #define HELLO_BOOT_FW_TEXT "SlateOS boot-medium firmware for linuxdrv/hello\n"
@@ -2157,15 +2158,15 @@ static int __init hello_firmware_init(void)
 	HELLO_CHECK(!IS_ERR(dev), "no device to load firmware for");
 
 	if (hello_mode("bootfw")) {
-		HELLO_CHECK(!dir, "the bootfw run was given a firmware_class.path=");
+		HELLO_CHECK(dir, "the bootfw run was given no firmware_class.path=");
 		HELLO_CHECK(request_firmware(&fw, HELLO_BOOT_FW, dev) == 0,
-			    "the boot medium's firmware was not found where Linux looks by default");
+			    "the boot medium's firmware was not found in firmware_class.path");
 		HELLO_CHECK(fw->size == sizeof(HELLO_BOOT_FW_TEXT) - 1 &&
 				    !memcmp(fw->data, HELLO_BOOT_FW_TEXT, fw->size),
 			    "the boot medium's firmware was not its bytes");
 		release_firmware(fw);
 		root_device_unregister(dev);
-		pr_info("hello firmware: the boot medium's found in /lib/firmware\n");
+		pr_info("hello firmware: the boot medium's found in firmware_class.path\n");
 		return 0;
 	}
 	HELLO_CHECK(dir, "no firmware_class.path= argument");

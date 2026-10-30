@@ -61,11 +61,12 @@ HERE = Path(__file__).resolve().parent
 WIDTH, HEIGHT = 1920, 1080
 #: The command line `stage` gives the kernel by default.
 DEFAULT_CMDLINE = "blk.writable=eui64:0025385181b1cd22 selftest.keep_going=1 log.screen=1"
-#: The hello process's boot-medium firmware, under the ESP's firmware/, and
-#: its text: hello.c's HELLO_BOOT_FW and HELLO_BOOT_FW_TEXT, as boot-test.sh
-#: stages it too (the self-test holds the three together).
+#: The hello process's boot-medium firmware: its path under the ESP's
+#: firmware/ (hello.c's HELLO_BOOT_FW), and the file staged there, which
+#: boot-test.sh stages too (its text hello.c's HELLO_BOOT_FW_TEXT; the
+#: self-test holds the two together).
 HELLO_BOOT_FW = "slateos/hello.fw"
-HELLO_BOOT_FW_TEXT = b"SlateOS boot-medium firmware for linuxdrv/hello\n"
+HELLO_BOOT_FW_FILE = Path("linuxdrv") / "hello" / "hello.fw"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
 
@@ -175,7 +176,7 @@ def limine_conf(template: str, cmdline: str, modules: tuple[str, ...] = (),
     of `modules` as a module, `linuxdrv/<name>.elf` named `linuxdrv/<name>`,
     then each firmware file of `firmware` (paths under the ESP's firmware/),
     `firmware/<path>` named so, which the kernel puts at <path> under
-    /lib/firmware."""
+    /.boot-firmware."""
     out, entry, done = [], 0, False
     for line in template.splitlines(keepends=True):
         if line.startswith("/"):
@@ -429,9 +430,10 @@ def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> Non
             sys.exit(f"pikvm: nothing to stage at {needed}")
     firmware: tuple[str, ...] = ()
     if names:
-        build_linux_drivers(worktree, names)
-        # What linuxdrv/firmware.pin names, fetched and checked against it.
+        # What linuxdrv/firmware.pin names, fetched and checked against it --
+        # before minutes of building, as what is staged beside them is.
         firmware = tuple(p.as_posix() for p in linuxfw.fetch(worktree))
+        build_linux_drivers(worktree, names)
     with tempfile.TemporaryDirectory(prefix="pikvm-esp-") as scratch:
         stage_esp(worktree, Path(scratch), cmdline, names, firmware=firmware)
         subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", scratch,
@@ -491,7 +493,7 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
         shutil.copy(fetched / path, esp / "firmware" / path)
     if "hello" in modules and HELLO_BOOT_FW not in staged:
         (esp / "firmware" / HELLO_BOOT_FW).parent.mkdir(parents=True, exist_ok=True)
-        (esp / "firmware" / HELLO_BOOT_FW).write_bytes(HELLO_BOOT_FW_TEXT)
+        shutil.copy(worktree / HELLO_BOOT_FW_FILE, esp / "firmware" / HELLO_BOOT_FW)
         staged.append(HELLO_BOOT_FW)
     template = (worktree / "limine.conf").read_text(encoding="utf-8")
     (esp / "limine.conf").write_text(limine_conf(template, cmdline, modules, tuple(staged)),
@@ -676,11 +678,14 @@ def self_test() -> int:
           {"hello", "e1000e"} <= set(linux_drivers(HERE.parent)), True)
     hello_c = (HERE.parent / "linuxdrv" / "hello" / "hello.c").read_text(encoding="utf-8")
     boot_test = (HERE / "boot-test.sh").read_text(encoding="utf-8")
-    text = HELLO_BOOT_FW_TEXT.decode().replace("\n", "\\n")
-    check("hello's boot-medium firmware: its path and text as hello.c's and boot-test.sh's",
+    text = re.search(r'^#define HELLO_BOOT_FW_TEXT "((?:[^"\\]|\\.)*)"$', hello_c, re.M)
+    check("hello's boot-medium firmware: its path hello.c's, its file's bytes the text hello.c "
+          "checks, and boot-test.sh staging that file there",
           (f'#define HELLO_BOOT_FW "{HELLO_BOOT_FW}"' in hello_c,
-           f'#define HELLO_BOOT_FW_TEXT "{text}"' in hello_c,
-           f"printf '{text}' > \"$ESP_DIR/firmware/{HELLO_BOOT_FW}\"" in boot_test),
+           text is not None and (HERE.parent / HELLO_BOOT_FW_FILE).read_bytes()
+           == text.group(1).encode().decode("unicode_escape").encode(),
+           f'"$PROJECT_ROOT/{HELLO_BOOT_FW_FILE.as_posix()}" "$ESP_DIR/firmware/{HELLO_BOOT_FW}"'
+           in boot_test),
           (True, True, True))
     with tempfile.TemporaryDirectory(prefix="pikvm-selftest-") as tmp:
         wt = Path(tmp) / "wt"
@@ -688,7 +693,8 @@ def self_test() -> int:
                           ("target/x86_64-unknown-none/debug/kernel", b"kernel"),
                           ("limine.conf", template.encode()),
                           ("build/linuxdrv/hello.elf", b"hello"),
-                          ("build/linuxdrv/e1000e.elf", b"e1000e")]:
+                          ("build/linuxdrv/e1000e.elf", b"e1000e"),
+                          (HELLO_BOOT_FW_FILE.as_posix(), b"hello's firmware\n")]:
             (wt / rel).parent.mkdir(parents=True, exist_ok=True)
             (wt / rel).write_bytes(data)
         esp = Path(tmp) / "esp"
@@ -703,7 +709,7 @@ def self_test() -> int:
               ((esp / "firmware" / HELLO_BOOT_FW).read_bytes(),
                "    module_path: boot():/firmware/slateos/hello.fw\n"
                "    module_cmdline: firmware/slateos/hello.fw\n" in conf),
-              (HELLO_BOOT_FW_TEXT, True))
+              (b"hello's firmware\n", True))
         fw = "mediatek/mt7925/x.bin"
         (wt / "build/firmware" / fw).parent.mkdir(parents=True)
         (wt / "build/firmware" / fw).write_bytes(b"fw")

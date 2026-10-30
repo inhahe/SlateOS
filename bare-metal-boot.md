@@ -324,7 +324,7 @@ USB drive, and works its power and reset buttons.
 the Linux driver processes as Limine modules -- built first, `--no-linuxdrv`
 to leave them off -- with the firmware `linuxdrv/firmware.pin` names,
 fetched and checked by `scripts/linuxfw.py`, as modules `firmware/<path>`
-that the kernel places at `/lib/firmware` (design-decisions 1592), and
+that the kernel places at `/.boot-firmware` (design-decisions 1592), and
 `limine.conf` with
 `blk.writable=eui64:0025385181b1cd22 log.screen=1` on the first entry,
 `--add-cmdline` adding to it) is made

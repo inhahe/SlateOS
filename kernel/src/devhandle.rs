@@ -371,7 +371,7 @@ static NEXT_RAW: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::
 /// The name a function opened by a process is recorded under in
 /// `pci::bound_driver`, so the kernel's own drivers and a second open both
 /// see it as taken.
-const USERSPACE_DRIVER: &str = "userspace driver";
+pub(crate) const USERSPACE_DRIVER: &str = "userspace driver";
 
 /// Open `addr` for `owner`, returning the raw handle.
 ///
@@ -1003,6 +1003,18 @@ pub fn irq_pending_mask(raw: u64, pid: ProcessId) -> KernelResult<u64> {
         rearm(raw, pid);
     }
     Ok(mask)
+}
+
+/// [`irq_pending_mask`] without taking: whether any of the device's
+/// vectors has interrupts counted and not yet taken -- 1, or 0 -- leaving
+/// them where they are and a quenched INTx quenched. What a driver whose
+/// legacy line must be re-armed only after its handler has run asks first
+/// (the Linux driver layer, design-decisions 1591). `InvalidArgument`
+/// before [`irq_setup`]; `InvalidHandle` when the device is closed.
+pub fn irq_pending_peek(raw: u64, pid: ProcessId) -> KernelResult<u64> {
+    let (first, count, _intx) = with_owned(raw, pid, vectors_and_kind)?;
+    let pending = crate::msi::pending_group(first, count, raw).ok_or(KernelError::InvalidHandle)?;
+    Ok(u64::from(pending != 0))
 }
 
 /// The target a wait on the device `raw` parks on: its interrupts on
@@ -2025,7 +2037,7 @@ fn self_test_intx(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
     crate::serial_println!(
-        "[devhandle]   INTx on edu (line {}): OK (each interrupt quenched at the function and counted once, a take re-arming it, one taken unserviced interrupting once more, a parked waiter woken, the INTx-disable bit kept through the driver's writes, MSI replacing it, the close leaving it quenched)",
+        "[devhandle]   INTx on edu (line {}): OK (each interrupt quenched at the function and counted once, a look taking and re-arming nothing, a take re-arming it, one taken unserviced interrupting once more, a parked waiter woken, the INTx-disable bit kept through the driver's writes, MSI replacing it, the close leaving it quenched)",
         line
     );
     return Ok(());
@@ -2116,6 +2128,11 @@ fn self_test_intx(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
         }
         if written.is_err() || !kept {
             return Err("a driver's write to the command register re-armed a quenched function");
+        }
+        // A look takes nothing and re-arms nothing: still counted, still
+        // quenched.
+        if irq_pending_peek(raw, owner) != Ok(1) || pending() != 1 || armed() {
+            return Err("a look at the interrupts took one, or re-armed the function");
         }
         if pending() != 1 || irq_wait(raw, owner, false) != Ok(1) {
             return Err("one interrupt was not counted and taken once");

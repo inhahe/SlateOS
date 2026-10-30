@@ -28,7 +28,8 @@ passes packets with it.
    `SYS_PCI_DEVICE_IRQ_WAIT`, wait for all of them, unchanged. The new
    `SYS_PCI_DEVICE_IRQ_PENDING` (1189) answers which vectors have had
    interrupts since last asked, as a mask, taking them: each vector's
-   handler runs for its own.
+   handler runs for its own. (`IRQ_PENDING_TAKE`; with `IRQ_PENDING_LOOK`
+   it only looks, for a legacy line, §1591.)
 3. **The table is the kernel's**: a mapping of the BAR that holds the
    table or its pending bits leaves their pages out (`map_bar`), as Linux's
    VFIO leaves them out -- a driver writing the table could aim its

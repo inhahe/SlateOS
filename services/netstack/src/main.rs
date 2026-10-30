@@ -5793,7 +5793,7 @@ const PERMISSION_DENIED: i64 = -400;
 /// back in ([`nic_check_cable`]). The exit code says what failed, 0 for
 /// nothing.
 fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
-    let cable = beyond == Beyond::QemuCable;
+    let cable = beyond.pulls_cable();
     let say = |what: &[u8]| {
         Line::new()
             .put(b"[netstack] nic-check: ")
@@ -5840,7 +5840,7 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         .mac(&gateway_mac)
         .put(b"\n")
         .print();
-    let seen = match ping_gateway(&me, &gateway_mac, beyond == Beyond::Lan) {
+    let seen = match ping_gateway(&me, &gateway_mac, beyond.lost_most()) {
         Ok(seen) => seen,
         Err(why) => {
             say(why.as_bytes());
@@ -5882,10 +5882,9 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         say(b"FAIL: the driver failed sends");
         return NIC_PINGS_LOST;
     }
-    // Not on a real network: a ping it loses makes a wait run out, which
-    // reads here as a doorbell not rung -- QEMU's lossless network is where
-    // the doorbell is checked.
-    if beyond != Beyond::Lan && (seen.slept > seen.resent || seen.resent > NIC_BURST as u64) {
+    // A wait that ran out is a doorbell not rung -- but for a ping sent
+    // again, or one the network lost, each of which makes one.
+    if seen.slept > seen.resent.saturating_add(seen.lost) || seen.resent > NIC_BURST as u64 {
         say(b"FAIL: answers waited on no doorbell, or pings had to be sent again too often");
         return NIC_PINGS_LOST;
     }
@@ -5894,7 +5893,7 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         say(b"FAIL: the card's driver did not say its link is up");
         return NIC_LINK;
     }
-    if beyond == Beyond::Lan {
+    if !beyond.checks_mcast() {
         say(b"a real network, whose router need not answer a solicitation to all nodes, which the multicast check counts: not checked");
     } else if let Err(why) = nic_check_mcast(&me, &gateway_mac) {
         say(why.as_bytes());
@@ -5906,23 +5905,18 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         say(why.as_bytes());
         return NIC_LINK;
     }
-    // Told on attaching and at each change, and no more: up, then down and
-    // up again with the cable. More is a driver telling it at every turn --
-    // but a real link may renegotiate once, down and up again.
-    let changes = if cable { 2 } else { 0 };
+    // Told on attaching and at each change, and no more (Beyond::links_told).
     let told = port::links_told();
-    let wrong = if beyond == Beyond::Lan {
-        !(1..=3).contains(&told)
-    } else {
-        told != 1 + changes
-    };
-    if wrong {
+    let allowed = beyond.links_told();
+    if !allowed.contains(&told) {
         Line::new()
             .put(b"[netstack] nic-check: FAIL: the driver told the link ")
-            .dec(u64::from(port::links_told()))
-            .put(b" time(s), for ")
-            .dec(u64::from(changes))
-            .put(b" change(s)\n")
+            .dec(u64::from(told))
+            .put(b" time(s), where ")
+            .dec(u64::from(*allowed.start()))
+            .put(b" to ")
+            .dec(u64::from(*allowed.end()))
+            .put(b" are right on this network\n")
             .print();
         return NIC_LINK;
     }
@@ -5965,6 +5959,40 @@ enum Beyond {
 }
 
 impl Beyond {
+    /// How many pings this network may lose ([`ping_gateway`]): none on
+    /// QEMU's, [`NIC_LAN_LOST_MOST`] on a real one, whose router may drop or
+    /// delay an echo under load.
+    fn lost_most(self) -> u64 {
+        if self == Beyond::Lan {
+            NIC_LAN_LOST_MOST
+        } else {
+            0
+        }
+    }
+
+    /// Whether the multicast check can be made: the network's router
+    /// answers a solicitation to all nodes, as QEMU's does.
+    fn checks_mcast(self) -> bool {
+        self != Beyond::Lan
+    }
+
+    /// Whether the card's cable is pulled and plugged back from outside.
+    fn pulls_cable(self) -> bool {
+        self == Beyond::QemuCable
+    }
+
+    /// How many times the driver may tell the link: on attaching; with the
+    /// cable pulled, down and up again; on a real network, which may
+    /// renegotiate, up to once more down and up. More is a driver telling it
+    /// at every turn.
+    fn links_told(self) -> core::ops::RangeInclusive<u32> {
+        match self {
+            Beyond::Qemu => 1..=1,
+            Beyond::QemuCable => 3..=3,
+            Beyond::Lan => 1..=3,
+        }
+    }
+
     /// `nic-check`'s third argument, `arg` (empty when there is none), or
     /// `None` for one it does not know.
     fn from_arg(arg: &[u8]) -> Option<Beyond> {
@@ -7003,14 +7031,30 @@ const NIC_COLD_QUIET_NS: u64 = 100_000_000;
 /// them. More is a card or driver losing frames.
 const NIC_LAN_LOST_MOST: u64 = 4;
 
+/// The failure for more pings lost than the network may lose: `lost` said,
+/// against `lost_most`, when it may lose any -- a real network's, which a
+/// QEMU doorbell failure must not read like.
+fn too_many_lost(lost: u64, lost_most: u64) -> &'static str {
+    if lost_most == 0 {
+        return "FAIL: a ping went unanswered, sent twice";
+    }
+    Line::new()
+        .put(b"[netstack] nic-check: ")
+        .dec(lost)
+        .put(b" pings lost, more than the ")
+        .dec(lost_most)
+        .put(b" this network may lose\n")
+        .print();
+    "FAIL: more pings lost than this network may lose"
+}
+
 /// The pings to the gateway: [`NIC_PINGS`] [`NIC_BURST`] at a time, each
 /// answered within a second -- sent again once if not -- then [`NIC_COLD`]
 /// to an idle driver, each answered within a second of its one sending;
-/// on a real network (`lossy`), [`NIC_LAN_LOST_MOST`] of them may go
-/// unanswered. What else was seen, or what failed. Frames that are not an
-/// answer -- an ARP request for our address, say -- are handled as the
-/// daemon handles any.
-fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6], lossy: bool) -> Result<Seen, &'static str> {
+/// `lost_most` of them may go unanswered ([`Beyond::lost_most`]). What else
+/// was seen, or what failed. Frames that are not an answer -- an ARP request
+/// for our address, say -- are handled as the daemon handles any.
+fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6], lost_most: u64) -> Result<Seen, &'static str> {
     let mut pings = Pings {
         answered: [false; NIC_PINGS + NIC_COLD],
         resent: [false; NIC_PINGS + NIC_COLD],
@@ -7036,8 +7080,11 @@ fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6], lossy: bool) -> Result<Seen,
         }
         let unanswered = burst.clone().filter(|&s| !pings.answered[s]).count() as u64;
         if unanswered != 0 {
-            if !lossy || pings.seen.lost.saturating_add(unanswered) > NIC_LAN_LOST_MOST {
-                return Err("FAIL: a ping went unanswered, sent twice");
+            if pings.seen.lost.saturating_add(unanswered) > lost_most {
+                return Err(too_many_lost(
+                    pings.seen.lost.saturating_add(unanswered),
+                    lost_most,
+                ));
             }
             pings.seen.lost = pings.seen.lost.saturating_add(unanswered);
         }
@@ -7050,9 +7097,12 @@ fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6], lossy: bool) -> Result<Seen,
             pings.wait(me, deadline)?;
         }
         if !pings.answered[seq] {
-            if lossy && pings.seen.lost < NIC_LAN_LOST_MOST {
+            if pings.seen.lost < lost_most {
                 pings.seen.lost = pings.seen.lost.saturating_add(1);
                 continue;
+            }
+            if lost_most != 0 {
+                return Err(too_many_lost(pings.seen.lost.saturating_add(1), lost_most));
             }
             return Err(
                 "FAIL: a ping sent to an idle driver went unanswered for a second: the daemon's doorbell did not wake it",

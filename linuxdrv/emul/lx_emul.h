@@ -74,6 +74,9 @@ extern void (*lx_emul_turn_hook)(u64 now_ns);
 unsigned long lx_irq_count(unsigned int irq);
 /* lx_irq.c: how many interrupts on `irq` were dropped, no handler requested. */
 unsigned long lx_irq_dropped(unsigned int irq);
+/* lx_irq.c: whether the kernel has interrupts of `dev`'s not yet taken,
+ * looked at as lx_intx_poll() looks (slx_pci_irq_ready), for the tests. */
+bool lx_irq_ready(struct pci_dev *dev);
 
 /*
  * Hardirq context, as Linux enters it for an interrupt -- interrupts off,

@@ -35,6 +35,9 @@ const IRQ_SETUP_INTX: u64 = 1;
 /// A DMA arena placed where the caller says (`sys.rs`'s DMA window).
 pub(crate) const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
+/// `SYS_PCI_DEVICE_IRQ_PENDING`'s ways: take the interrupts, or look.
+const IRQ_PENDING_TAKE: u64 = 0;
+const IRQ_PENDING_LOOK: u64 = 1;
 
 const SYS_PCI_DEVICE_CLOSE: u64 = 1180;
 
@@ -212,7 +215,13 @@ fn irq_setup(handle: i64, count: u32, kind: u64) -> i64 {
 /// `i` as bit `i`, MSI as bit 0; an error while none are set up.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_pci_irq_pending(handle: i64) -> i64 {
-    syscall4(SYS_PCI_DEVICE_IRQ_PENDING, handle.cast_unsigned(), 0, 0, 0)
+    syscall4(
+        SYS_PCI_DEVICE_IRQ_PENDING,
+        handle.cast_unsigned(),
+        IRQ_PENDING_TAKE,
+        0,
+        0,
+    )
 }
 
 /// `slx_pci_irq_ready`: whether the function has had interrupts not yet
@@ -221,7 +230,14 @@ pub extern "C" fn slx_pci_irq_pending(handle: i64) -> i64 {
 /// once its handler has run. False while none are set up.
 #[unsafe(no_mangle)]
 pub extern "C" fn slx_pci_irq_ready(handle: i64) -> bool {
-    with_function(handle, |f| f.irqs) == Some(true) && crate::wait::device_ready(handle)
+    with_function(handle, |f| f.irqs) == Some(true)
+        && syscall4(
+            SYS_PCI_DEVICE_IRQ_PENDING,
+            handle.cast_unsigned(),
+            IRQ_PENDING_LOOK,
+            0,
+            0,
+        ) > 0
 }
 
 /// `slx_pci_irq_listen`: whether the loop, with nothing to run, waits for

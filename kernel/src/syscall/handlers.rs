@@ -892,11 +892,14 @@ pub fn sys_pci_device_irq_setup(args: &SyscallArgs) -> SyscallResult {
 }
 
 /// `SYS_PCI_DEVICE_IRQ_PENDING` — which of an open device's vectors have had
-/// interrupts, taken. See
+/// interrupts, taken, or whether any has, looked at. See
 /// [`SYS_PCI_DEVICE_IRQ_PENDING`](super::number::SYS_PCI_DEVICE_IRQ_PENDING).
 pub fn sys_pci_device_irq_pending(args: &SyscallArgs) -> SyscallResult {
-    let r =
-        held_device(args.arg0).and_then(|pid| crate::devhandle::irq_pending_mask(args.arg0, pid));
+    let r = held_device(args.arg0).and_then(|pid| match args.arg1 {
+        super::number::IRQ_PENDING_TAKE => crate::devhandle::irq_pending_mask(args.arg0, pid),
+        super::number::IRQ_PENDING_LOOK => crate::devhandle::irq_pending_peek(args.arg0, pid),
+        _ => Err(KernelError::InvalidArgument),
+    });
     device_result(r)
 }
 

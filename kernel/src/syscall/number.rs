@@ -7468,13 +7468,21 @@ pub const SYS_PCI_DEVICE_IRQ_WAIT: u64 = 1187;
 pub const SYS_PCI_DEVICE_DMA_ALLOC_AT: u64 = 1188;
 
 /// Which of an open device's vectors have had interrupts since last asked:
-/// `arg0` the handle. Returns a mask -- MSI-X vector `i` (its entry `i`) as
-/// bit `i`, MSI as bit 0 -- the interrupts taken, without waiting: so a
-/// driver with several vectors runs each one's handler for its own. To wait
-/// for any of them, use [`SYS_WAIT_MULTIPLE`] with the handle.
-/// `InvalidArgument` before `SYS_PCI_DEVICE_IRQ_SETUP`; `InvalidHandle` once
-/// the device is closed.
+/// `arg0` the handle, `arg1` [`IRQ_PENDING_TAKE`] or [`IRQ_PENDING_LOOK`]
+/// (anything else `InvalidArgument`). Taking returns a mask -- MSI-X vector
+/// `i` (its entry `i`) as bit `i`, MSI and INTx as bit 0 -- the interrupts
+/// taken, without waiting, a quenched INTx re-armed: so a driver with
+/// several vectors runs each one's handler for its own. Looking returns 1
+/// when any has interrupts not yet taken, 0 when none has, taking nothing
+/// and re-arming nothing -- so a driver can run its legacy line's handler
+/// before re-arming the line (design-decisions 1591). To wait for any of
+/// them, use [`SYS_WAIT_MULTIPLE`] with the handle. `InvalidArgument` before
+/// `SYS_PCI_DEVICE_IRQ_SETUP`; `InvalidHandle` once the device is closed.
 pub const SYS_PCI_DEVICE_IRQ_PENDING: u64 = 1189;
+/// [`SYS_PCI_DEVICE_IRQ_PENDING`]'s `arg1`: take the interrupts.
+pub const IRQ_PENDING_TAKE: u64 = 0;
+/// [`SYS_PCI_DEVICE_IRQ_PENDING`]'s `arg1`: look, taking nothing.
+pub const IRQ_PENDING_LOOK: u64 = 1;
 
 /// Let the process at the other end of a channel use a shared memory region
 /// -- map it, size it, close it -- as the caller may: `arg0` the region's

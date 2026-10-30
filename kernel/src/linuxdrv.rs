@@ -135,15 +135,22 @@ fn run(
 pub fn self_test() -> KernelResult<()> {
     check_parse_pci_address()?;
     check_card_choice()?;
+    // An operator's run, asked for by name: refused before the hello runs
+    // for a card it cannot have or a driver process not loaded -- never
+    // skipped, which would read as the card's absence.
+    let named = named_card()?;
+    if named.is_some() {
+        for (module, name) in [(HELLO, "linuxdrv/hello"), (E1000E, "linuxdrv/e1000e")] {
+            if crate::boot::module(module).is_none() {
+                serial_println!(
+                    "[linuxdrv]   FAIL: linuxdrv.card is given, but {name} is not loaded beside the kernel"
+                );
+                return Err(KernelError::InvalidArgument);
+            }
+        }
+    }
     let mut skips = crate::fs::selftest::Skips::new();
     let Some(elf) = crate::boot::module(HELLO) else {
-        // An operator's run asked for by name, which a skip would hide.
-        if crate::fs::kernparam::get("linuxdrv.card").is_some() {
-            serial_println!(
-                "[linuxdrv]   FAIL: linuxdrv.card is given, but linuxdrv/hello is not loaded beside the kernel"
-            );
-            return Err(KernelError::InvalidArgument);
-        }
         skips.record(
             "Linux driver layer's hello process",
             "not loaded beside the kernel (no limine.conf module named linuxdrv/hello)",
@@ -200,7 +207,7 @@ pub fn self_test() -> KernelResult<()> {
     }
     firmware_runs(&hello, &mut skips)?;
     let pci = pci_runs(&hello, &mut skips)?;
-    let e1000e = e1000e_run(&mut skips)?;
+    let e1000e = e1000e_run(&mut skips, named)?;
     skips.report("[linuxdrv]");
     serial_println!(
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}: OK",
@@ -524,17 +531,8 @@ fn named_card() -> KernelResult<Option<crate::pci::PciDevice>> {
     };
     match card_choice(&named, &crate::pci::scan_all(), crate::pci::bound_driver) {
         Ok(card) => Ok(Some(card)),
-        Err(CardRefused::Held(driver)) => {
-            serial_println!(
-                "[linuxdrv]   FAIL: linuxdrv.card={named}: the kernel's {driver} driver holds it"
-            );
-            Err(KernelError::InvalidArgument)
-        }
         Err(refused) => {
-            serial_println!(
-                "[linuxdrv]   FAIL: linuxdrv.card={named}: {}",
-                refused.why()
-            );
+            serial_println!("[linuxdrv]   FAIL: linuxdrv.card={named}: {refused}");
             Err(KernelError::InvalidArgument)
         }
     }
@@ -546,17 +544,20 @@ enum CardRefused {
     NotAnAddress,
     NothingThere,
     NotIntelEthernet,
-    /// The kernel driver of this name holds it.
+    /// The driver of this name (`pci::bound_driver`'s) holds it.
     Held(&'static str),
 }
 
-impl CardRefused {
-    fn why(self) -> &'static str {
+impl core::fmt::Display for CardRefused {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            CardRefused::NotAnAddress => "not a PCI function as BB:DD.F, in hex",
-            CardRefused::NothingThere => "no PCI function there",
-            CardRefused::NotIntelEthernet => "not an Intel Ethernet controller",
-            CardRefused::Held(_) => "a kernel driver holds it",
+            CardRefused::NotAnAddress => f.write_str("not a PCI function as BB:DD.F, in hex"),
+            CardRefused::NothingThere => f.write_str("no PCI function there"),
+            CardRefused::NotIntelEthernet => f.write_str("not an Intel Ethernet controller"),
+            CardRefused::Held(crate::devhandle::USERSPACE_DRIVER) => {
+                f.write_str("a process's driver holds it")
+            }
+            CardRefused::Held(driver) => write!(f, "the kernel's {driver} driver holds it"),
         }
     }
 }
@@ -631,38 +632,52 @@ fn check_card_choice() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
     }
+    let said = [
+        (
+            CardRefused::Held("e1000"),
+            "the kernel's e1000 driver holds it",
+        ),
+        (
+            CardRefused::Held(crate::devhandle::USERSPACE_DRIVER),
+            "a process's driver holds it",
+        ),
+    ];
+    for (refused, want) in said {
+        let got = alloc::format!("{refused}");
+        if got != want {
+            serial_println!("[linuxdrv]   FAIL: {refused:?} reads \"{got}\", not \"{want}\"");
+            return Err(KernelError::InternalError);
+        }
+    }
     Ok(())
 }
 
 /// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
-/// given a card to serve to the network stack ([`e1000e_serve`]): the one
-/// `linuxdrv.card` names, on a real network ([`named_card`]), or else the
-/// boot test's spare 82574 as hello's PCI runs are -- then the kernel's own
-/// e1000 timed as the daemon timed that card ([`native_bench`]). Which
-/// network it ran on; `None`, skipped and recorded so, where the bootloader
-/// did not load it or there is no such card. On a named card's network the
-/// checks it cannot make there -- the multicast filter, and the cable a
+/// given a card to serve to the network stack ([`e1000e_serve`]): `named`,
+/// the one `linuxdrv.card` names, on a real network ([`named_card`]), or
+/// else the boot test's spare 82574 as hello's PCI runs are -- then the
+/// kernel's own e1000 timed as the daemon timed that card ([`native_bench`]).
+/// Which network it ran on; `None`, skipped and recorded so, where the
+/// bootloader did not load it (never with a card named: [`self_test`]
+/// refuses that first) or there is no such card. On a named card's network
+/// the checks it cannot make there -- the multicast filter, and the cable a
 /// harness would pull -- are recorded as skipped.
 ///
 /// # Errors
 ///
-/// `InvalidArgument` when `linuxdrv.card` asks for a run this boot cannot
-/// make ([`named_card`]); `InternalError` when a run ends otherwise.
-fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<Network>> {
+/// `InternalError` when a run ends otherwise.
+fn e1000e_run(
+    skips: &mut crate::fs::selftest::Skips,
+    named: Option<crate::pci::PciDevice>,
+) -> KernelResult<Option<Network>> {
     let Some(elf) = crate::boot::module(E1000E) else {
-        if crate::fs::kernparam::get("linuxdrv.card").is_some() {
-            serial_println!(
-                "[linuxdrv]   FAIL: linuxdrv.card is given, but linuxdrv/e1000e is not loaded beside the kernel"
-            );
-            return Err(KernelError::InvalidArgument);
-        }
         skips.record(
             "Linux's e1000e through the driver layer",
             "not loaded beside the kernel (no limine.conf module named linuxdrv/e1000e)",
         );
         return Ok(None);
     };
-    let (card, network) = match named_card()? {
+    let (card, network) = match named {
         Some(card) => (card, Network::Lan),
         None => match crate::devhandle::probe_card() {
             Some(card) => (card, Network::Qemu),

@@ -52,6 +52,7 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import msysbash  # noqa: E402
 import selftestflag  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
@@ -379,18 +380,24 @@ class Progress:
 
 def build_linux_drivers(worktree: Path, names: tuple[str, ...]) -> None:
     """The layer's Rust half, then each driver process of `names`, built in
-    `worktree` as boot-test.sh's build_linux_drivers builds them, so that
-    none older than the tree is staged. SystemExit, saying which, for one
-    that does not build -- or a host that cannot build them at all, which
-    `--no-linuxdrv` stages without."""
-    subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=worktree / "linuxdrv" / "kit",
-                   check=True)
-    bash = shutil.which("bash") or "bash"
+    `worktree` as boot-test.sh's build_linux_drivers builds them -- under
+    Git's MSYS bash, as boot-test.sh runs, not whatever bash PATH finds
+    first (WSL's, on this machine) -- so that none older than the tree is
+    staged. SystemExit, saying which, for one that does not build, or a host
+    that cannot build them at all, which `--no-linuxdrv` stages without."""
+    cannot = "pikvm: this host cannot build the Linux driver processes ({}); --no-linuxdrv stages without them"
+    try:
+        kit = subprocess.run(["cargo", "build", "--release", "--quiet"],
+                             cwd=worktree / "linuxdrv" / "kit").returncode
+        bash = msysbash.bash()
+    except (OSError, RuntimeError) as e:
+        sys.exit(cannot.format(e))
+    if kit:
+        sys.exit("pikvm: the Linux driver layer's Rust half (linuxdrv/kit) did not build (above)")
     for name in names:
         rc = subprocess.run([bash, "scripts/linux-tree.sh", "driver", name], cwd=worktree).returncode
         if rc == 3:
-            sys.exit(f"pikvm: this host cannot build the Linux driver processes (above); "
-                     f"--no-linuxdrv stages without them")
+            sys.exit(cannot.format("above"))
         if rc:
             sys.exit(f"pikvm: the Linux driver process {name} did not build (above)")
 
@@ -403,12 +410,30 @@ def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> Non
     if not linuxdrv and "linuxdrv.card=" in cmdline:
         sys.exit("pikvm: linuxdrv.card asks for a Linux driver run, and --no-linuxdrv leaves "
                  "the driver processes off")
+    # What is staged besides the drivers, there before minutes of building.
+    for needed in (kernel_path(worktree), limine_path(worktree), worktree / "limine.conf"):
+        if not needed.exists():
+            sys.exit(f"pikvm: nothing to stage at {needed}")
     if names:
         build_linux_drivers(worktree, names)
     with tempfile.TemporaryDirectory(prefix="pikvm-esp-") as scratch:
         stage_esp(worktree, Path(scratch), cmdline, names)
         subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", scratch,
                         "--output", str(out)], check=True)
+
+
+def kernel_path(worktree: Path) -> Path:
+    """`worktree`'s built kernel, as `stage` stages it."""
+    return worktree / "target" / "x86_64-unknown-none" / "debug" / "kernel"
+
+
+def limine_path(worktree: Path) -> Path:
+    """The Limine `stage` puts on the ESP: `worktree`'s, or else os-lane-a's
+    beside it (a fresh worktree has none until provisioned)."""
+    limine = worktree / "limine" / "BOOTX64.EFI"
+    if not limine.exists():
+        limine = worktree.parent / "os-lane-a" / "limine" / "BOOTX64.EFI"
+    return limine
 
 
 def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
@@ -420,11 +445,8 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
     driver processes as its modules."""
     (esp / "EFI" / "BOOT").mkdir(parents=True)
     (esp / "boot").mkdir()
-    limine = worktree / "limine" / "BOOTX64.EFI"
-    if not limine.exists():
-        limine = worktree.parent / "os-lane-a" / "limine" / "BOOTX64.EFI"
-    shutil.copy(limine, esp / "EFI" / "BOOT" / "BOOTX64.EFI")
-    kernel = worktree / "target" / "x86_64-unknown-none" / "debug" / "kernel"
+    shutil.copy(limine_path(worktree), esp / "EFI" / "BOOT" / "BOOTX64.EFI")
+    kernel = kernel_path(worktree)
     strip = (Path.home() / ".rustup" / "toolchains" / "stable-x86_64-pc-windows-gnu" / "lib"
              / "rustlib" / "x86_64-pc-windows-gnu" / "bin" / "llvm-strip.exe")
     if strip_kernel and strip.exists():

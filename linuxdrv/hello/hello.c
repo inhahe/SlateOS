@@ -427,12 +427,8 @@ static int hello_pci_msix(struct pci_dev *pdev)
 /* A oneshot thread with no first half: it reads the cause, as nothing did. */
 static irqreturn_t hello_intx_thread(int irq, void *data)
 {
-	if (!(readl(hello_regs + HELLO_ICR) & HELLO_CAUSE))
-		return IRQ_NONE;
-	hello_thread_in_task = !in_interrupt() && !irqs_disabled() && (current->flags & PF_KTHREAD);
-	msleep(1);
-	complete(&hello_irq_done);
-	return IRQ_HANDLED;
+	return hello_isr_first_half(irq, data) == IRQ_WAKE_THREAD ? hello_isr_thread(irq, data) :
+								      IRQ_NONE;
 }
 
 /*
@@ -500,8 +496,8 @@ static int hello_pci_intx(struct pci_dev *pdev)
 
 static int hello_pci_interrupts(struct pci_dev *pdev)
 {
-	unsigned long before;
-	int irq;
+	unsigned long before, dropped;
+	int irq, legacy;
 
 	HELLO_PCI_CHECK(pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_MSI) == 1, "no MSI vector");
 	irq = pci_irq_vector(pdev, 0);
@@ -540,13 +536,59 @@ static int hello_pci_interrupts(struct pci_dev *pdev)
 	pci_free_irq_vectors(pdev);
 	HELLO_PCI_CHECK(!pdev->msi_enabled && pci_irq_vector(pdev, 0) == pdev->irq && pdev->irq != irq,
 			"MSI stayed on once its vectors were freed");
+	/*
+	 * MSI off, but still the kernel's until another set-up replaces it
+	 * (lx_irq_set_mode), and none of the layer's to take: an interrupt the
+	 * kernel counts is seen by a look twice -- a look takes nothing, as
+	 * lx_intx_poll's must, re-arming a legacy line only once its handler
+	 * has run -- then its cause is cleared at the card.
+	 */
+	hello_raise();
+	msleep(20);
+	HELLO_PCI_CHECK(lx_irq_ready(pdev) && lx_irq_ready(pdev),
+			"a look at the function's interrupts took them");
+	readl(hello_regs + HELLO_ICR);
 	/* MSI off: the legacy line is the interrupt again, set up anew when asked for. */
-	HELLO_PCI_CHECK(!request_irq(pdev->irq, hello_isr, IRQF_SHARED, "hello", pdev),
+	legacy = pdev->irq;
+	HELLO_PCI_CHECK(!request_irq(legacy, hello_isr, IRQF_SHARED, "hello", pdev),
 			"the legacy line could not be requested once MSI was off");
 	hello_raise();
 	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
 			"no interrupt came on the legacy line set up again after MSI");
-	HELLO_PCI_CHECK(free_irq(pdev->irq, pdev), "free_irq() did not name the legacy line's handler");
+	/* A number kept from MSI is not the line's. */
+	HELLO_PCI_CHECK(request_irq(irq, hello_isr, 0, "hello-stale", pdev) == -EINVAL,
+			"a number kept from MSI reached the legacy line");
+	/*
+	 * MSI turned on over the line's handler: the handler stays the line's --
+	 * asked for again while MSI is on, too, leaving MSI on -- never run
+	 * while MSI is on, and the MSI vector is free: its interrupt dropped, at
+	 * least once, since the card sends it again while its cause is unread
+	 * (QEMU's e1000e, once its throttling interval, never under 128 us,
+	 * ends). MSI off, the line delivers again: for a new cause, the unread
+	 * one cleared first, since the card raises its line only for a cause
+	 * that is new.
+	 */
+	before = lx_irq_count(legacy);
+	HELLO_PCI_CHECK(!pci_enable_msi(pdev) && pdev->irq != legacy,
+			"MSI could not be turned on over the legacy line's handler");
+	HELLO_PCI_CHECK(free_irq(legacy, pdev) &&
+				!request_irq(legacy, hello_isr, IRQF_SHARED, "hello", pdev) &&
+				pdev->msi_enabled,
+			"the legacy line's handler could not be asked for again while MSI was on");
+	dropped = lx_irq_dropped(pdev->irq);
+	hello_raise();
+	msleep(20);
+	HELLO_PCI_CHECK(lx_irq_count(legacy) == before,
+			"the legacy line's handler ran for an MSI interrupt");
+	HELLO_PCI_CHECK(lx_irq_dropped(pdev->irq) > dropped,
+			"an MSI interrupt with no handler requested was not dropped");
+	pci_disable_msi(pdev);
+	HELLO_PCI_CHECK(pdev->irq == legacy, "dev->irq is not the legacy line once MSI was off");
+	readl(hello_regs + HELLO_ICR);
+	hello_raise();
+	HELLO_PCI_CHECK(wait_for_completion_timeout(&hello_irq_done, HZ),
+			"the legacy line did not deliver again once MSI was off");
+	HELLO_PCI_CHECK(free_irq(legacy, pdev), "free_irq() did not name the legacy line's handler");
 	writel(~0U, hello_regs + HELLO_IMC);
 	readl(hello_regs + HELLO_ICR);
 	return hello_pci_msix(pdev);

@@ -37,6 +37,7 @@
 #include <linux/reboot.h>
 #include <linux/panic.h>
 #include <asm/sections.h>
+#include <asm/fpu/api.h>
 
 /* The driver core's own setup, as Linux's driver_init() runs it. */
 #include "drivers/base/base.h"
@@ -109,6 +110,19 @@ struct cpuinfo_x86 boot_cpu_data = {
 	.x86_cache_alignment = 64,
 	.x86_clflush_size = 64,
 };
+
+/*
+ * Nor any extended register state (AVX and the rest) for Linux's code to
+ * save and use in the kernel's way: the library code that asks -- SHA-1's,
+ * choosing an implementation at start-up -- keeps to its plain C, as with
+ * every feature above. `feature_name`, when asked for, says why.
+ */
+int cpu_has_xfeatures(u64 xfeatures_needed, const char **feature_name)
+{
+	if (feature_name)
+		*feature_name = "extended register state (none in a driver process)";
+	return 0;
+}
 
 /*
  * What Linux's delay-loop calibration would find on a 4 GHz CPU. A driver

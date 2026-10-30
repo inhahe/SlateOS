@@ -961,6 +961,8 @@ static int lx_wifi_hwsim(void)
 	if (!err)
 		err = lx_wifi_ccm_check();
 	if (!err)
+		err = lx_wpa_check();
+	if (!err)
 		err = lx_wifi_ask(nl80211, NL80211_CMD_SET_INTERFACE, devs[0], lx_wifi_ap_type, NULL,
 				  "make the first radio an access point");
 	if (!err)

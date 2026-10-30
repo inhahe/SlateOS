@@ -78,3 +78,6 @@ linux lib/math/gcd.o
 # The layer as nl80211's one user, and its WiFi task (design-decisions 1593).
 layer emul/lx_netlink.c
 layer emul/lx_wifi.c
+# WPA2's keys and handshake frames, over Linux's SHA-1 library (HMAC-SHA1).
+layer emul/lx_wpa.c
+linux lib/crypto/sha1.o

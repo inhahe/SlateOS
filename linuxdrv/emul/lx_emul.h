@@ -112,6 +112,99 @@ bool lx_genl_wait(const struct genl_family *family, const char *name, unsigned l
 int lx_genl_check(const struct genl_family *family, const char *group, const char *other);
 
 /*
+ * lx_wpa.c: WPA2-PSK's keys and the frames of its four-way handshake
+ * (IEEE 802.11-2020 12.7), CCMP its cipher.
+ */
+#define LX_WPA_PMK_LEN 32
+#define LX_WPA_NONCE_LEN 32
+#define LX_WPA_KCK_LEN 16
+#define LX_WPA_KEK_LEN 16
+#define LX_WPA_TK_LEN 16
+#define LX_WPA_MIC_LEN 16
+/* The most key data a handshake frame of the layer's carries, unwrapped. */
+#define LX_WPA_KEY_DATA_MAX 256
+/* An EAPOL-Key frame's Key Information: version 2 (HMAC-SHA1-128, AES key wrap), and its bits. */
+#define LX_WPA_INFO_VERSION 2
+#define LX_WPA_INFO_PAIRWISE BIT(3)
+#define LX_WPA_INFO_INSTALL BIT(6)
+#define LX_WPA_INFO_ACK BIT(7)
+#define LX_WPA_INFO_MIC BIT(8)
+#define LX_WPA_INFO_SECURE BIT(9)
+#define LX_WPA_INFO_ENCRYPTED BIT(12)
+
+/* The PTK, as 12.7.1.3 cuts it for CCMP: KCK, KEK, TK. */
+struct lx_wpa_ptk {
+	u8 kck[LX_WPA_KCK_LEN];
+	u8 kek[LX_WPA_KEK_LEN];
+	u8 tk[LX_WPA_TK_LEN];
+};
+
+/* An EAPOL-Key frame (12.7.2), RSN key descriptor, behind 802.1X's header. */
+struct lx_wpa_eapol_key {
+	u8 version;		/* 802.1X's: 2 */
+	u8 type;		/* 3, EAPOL-Key */
+	__be16 length;		/* of what follows these four bytes */
+	u8 descriptor;		/* 2, RSN */
+	__be16 info;
+	__be16 key_length;
+	u8 replay[8];
+	u8 nonce[LX_WPA_NONCE_LEN];
+	u8 iv[16];
+	u8 rsc[8];
+	u8 reserved[8];
+	u8 mic[LX_WPA_MIC_LEN];
+	__be16 data_length;
+	u8 data[];
+} __packed;
+
+/*
+ * The PMK of `passphrase` on the network named by the `ssid_len` bytes at
+ * `ssid`; the standard's PRF of `key` over `label` and `data`, `out_len`
+ * bytes of it; the PTK of the PMK between the authenticator at `aa` and the
+ * supplicant at `spa`, by their nonces -- the same whichever side asks.
+ */
+void lx_wpa_pmk(const char *passphrase, const u8 *ssid, size_t ssid_len, u8 pmk[LX_WPA_PMK_LEN]);
+void lx_wpa_prf(const u8 *key, size_t key_len, const char *label, const u8 *data, size_t data_len,
+		u8 *out, size_t out_len);
+void lx_wpa_ptk(const u8 pmk[LX_WPA_PMK_LEN], const u8 *aa, const u8 *spa, const u8 *anonce,
+		const u8 *snonce, struct lx_wpa_ptk *ptk);
+/*
+ * RFC 3394's key wrap of the `len` bytes at `plain` (16 or more, a multiple
+ * of 8) by `kek` into `len` + 8 bytes at `out`; its unwrap of the `len`
+ * bytes at `wrapped` into `len` - 8 at `out` -- -EBADMSG, `out` cleared,
+ * when they were not wrapped by `kek`. -EINVAL for a length that cannot be.
+ */
+int lx_wpa_wrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *plain, size_t len, u8 *out);
+int lx_wpa_unwrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *wrapped, size_t len, u8 *out);
+/*
+ * An EAPOL-Key frame built in the `room` bytes at `buf`: its Key
+ * Information `info`, replay counter `replay`, nonce (NULL for none) and
+ * the `data_len` bytes of key data at `data` -- signed by `kck` when it is
+ * not NULL. Its length, or -ENOSPC.
+ */
+int lx_wpa_key_frame(u8 *buf, size_t room, u16 info, u64 replay, const u8 *nonce,
+		     const u8 *data, size_t data_len, const u8 *kck);
+/*
+ * The `len` bytes at `buf` read as an EAPOL-Key frame -- its MIC checked by
+ * `kck` when that is not NULL: the frame, or NULL for one that is not one,
+ * or whose MIC does not hold.
+ */
+const struct lx_wpa_eapol_key *lx_wpa_key_parse(const u8 *buf, size_t len, const u8 *kck);
+/*
+ * The `len` bytes of key data at `data`, padded as 12.7.2 pads them and
+ * wrapped by `kek` into the `room` bytes at `out`: their length, or -ENOSPC.
+ */
+int lx_wpa_key_data_wrap(const u8 kek[LX_WPA_KEK_LEN], const u8 *data, size_t len, u8 *out,
+			 size_t room);
+/*
+ * The group key in key data (its GTK KDE): the key, its id and its length
+ * through `keyid` and `gtk_len` -- or NULL when there is none.
+ */
+const u8 *lx_wpa_find_gtk(const u8 *data, size_t len, u8 *keyid, size_t *gtk_len);
+/* lx_wpa.c at its edges, against published vectors: 0, or -EBADMSG with what was wrong said. */
+int lx_wpa_check(void);
+
+/*
  * Hardirq context, as Linux enters it for an interrupt -- interrupts off,
  * the count raised (<linux/hardirq.h>'s __irq_enter_raw()) -- and left: for
  * the devices' handlers and the turn's irq_work alike, so that both run in

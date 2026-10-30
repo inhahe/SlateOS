@@ -639,8 +639,8 @@ marker_checks_pass() {
         FAILED_CHECK="the benchmark suite left windows unjudged"
     elif ! check_iommu_active "$1"; then
         FAILED_CHECK="DMA or interrupt remapping never came on"
-    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_NAMED:-0}" "${ROOTFS_ATTACHED:-1}"; then
-        FAILED_CHECK="the Linux driver layer's process did not run"
+    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_NAMED:-0}"; then
+        FAILED_CHECK="the Linux driver layer's processes did not all run and pass"
     fi
     [ -z "$FAILED_CHECK" ]
 }
@@ -679,32 +679,29 @@ build_linux_drivers() {
 # $1: the serial log; $2: whether a module was named. Returns 0 when none
 # was, or the test ran.
 check_linuxdrv_ran() {
-    local file="$1" named="$2" rootfs="${3:-1}" skips
+    local file="$1" named="$2"
     [ "$named" = 1 ] || return 0
     [ -f "$file" ] || return 0
-    # Any run skipped fails it -- but, where the guest had no rootfs.ext4
-    # (--no-rootfs, or a worktree that never packed it), the one that needs
-    # its ext4: a directory with a size of its own, which only ext4 gives
-    # (kernel/src/linuxdrv.rs's firmware_runs).
-    skips=$(grep -a '^\[linuxdrv\]   SKIP' "$file" || true)
-    if [ "$rootfs" != 1 ]; then
-        skips=$(printf '%s\n' "$skips" | grep -v -F "refusal of a directory read as a file" || true)
-    fi
     # Its line, as Linux's vsprintf formats it, and the kernel's verdict.
     if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
         grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
         grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file" &&
         grep -aq '^\[linuxdrv\]   e1000e process: .*: OK' "$file" &&
-        [ -z "$skips" ]; then
+        ! grep -aq '^\[linuxdrv\]   SKIP' "$file"; then
         return 0
     fi
-    echo "=== THE LINUX DRIVER LAYER'S PROCESS DID NOT RUN ==="
+    echo "=== THE LINUX DRIVER LAYER'S PROCESSES DID NOT ALL RUN AND PASS ==="
     echo "  The boot medium carried linuxdrv/hello and linuxdrv/e1000e, but the"
     echo "  kernel never said '[linuxdrv]   hello process ...: OK' and"
     echo "  '[linuxdrv]   e1000e process: ...: OK', or skipped some of their runs,"
-    echo "  or the process never printed its line as Linux formats it. Their own"
-    echo "  lines say why:"
-    grep -a '^\[linuxdrv\]\|^\[lx\]' "$file" | head -8 | sed 's/^/  /'
+    echo "  or the process never printed its line as Linux formats it. The"
+    echo "  kernel's verdicts on them -- a FAIL or SKIP first -- then the process's"
+    echo "  own first lines:"
+    {
+        grep -a '^\[linuxdrv\]   \(FAIL\|SKIP\)' "$file"
+        grep -a '^\[linuxdrv\]   \(hello\|e1000e\) process' "$file" | cut -c1-160
+        grep -a '^\[lx\]' "$file" | head -6
+    } | head -16 | sed 's/^/  /' || true
     return 1
 }
 
@@ -2134,9 +2131,6 @@ USB_IMAGE=0
 # Suppress the rootfs.ext4 attachment even when the file is present.
 # See the --no-rootfs case in the arg parser.
 NO_ROOTFS=0
-# Whether the guest was given rootfs.ext4 (Step 3b): not under --no-rootfs,
-# nor in a worktree that never packed it.
-ROOTFS_ATTACHED=0
 
 # How many CPUs QEMU gives the guest. See the --smp case in the arg parser.
 SMP_CPUS=1
@@ -9374,7 +9368,6 @@ if [ "$NO_ROOTFS" -eq 0 ] && [ -f "$ROOTFS_IMG" ]; then
     # tested nothing current.  See check_rootfs_freshness.
     check_rootfs_freshness
     ROOTFS_IMG_WIN="$(to_win_path "$ROOTFS_IMG")"
-    ROOTFS_ATTACHED=1
     # `snapshot=on`: the guest gets a fully writable vdb, but QEMU buffers the
     # writes into a throwaway overlay and the host file is never modified.
     #

@@ -379,6 +379,22 @@ pub mod check {
             _ => "it ended otherwise",
         }
     }
+
+    /// `nic-check`'s third argument, what it may take of the network beyond
+    /// the card -- one word each side of the kernel/daemon boundary reads,
+    /// the kernel to start it, the daemon to parse it. None at all: QEMU's
+    /// network, whose router answers a router solicitation to all nodes (the
+    /// multicast check's signal), the cable left alone.
+    pub mod mode {
+        /// QEMU's network, the card's cable pulled and plugged back from
+        /// outside when asked (the boot test, through QEMU's monitor).
+        pub const CABLE: &[u8] = b"cable";
+        /// A network that need not behave as QEMU's does -- a real one: its
+        /// router need not answer a solicitation to all nodes, so the
+        /// multicast check is said and skipped; a ping may be lost, so a few
+        /// are allowed; the cable is left alone.
+        pub const LAN: &[u8] = b"lan";
+    }
 }
 
 #[cfg(test)]
@@ -391,6 +407,18 @@ mod tests {
         slots: 128,
         region: 0x1_0000_0007,
     };
+
+    #[test]
+    fn nic_checks_modes_are_distinct_nonempty_words() {
+        use check::mode::{CABLE, LAN};
+        for word in [CABLE, LAN] {
+            assert!(
+                !word.is_empty() && word.iter().all(u8::is_ascii_lowercase),
+                "{word:?}"
+            );
+        }
+        assert_ne!(CABLE, LAN);
+    }
 
     #[test]
     fn an_attach_message_reads_back_as_written() {

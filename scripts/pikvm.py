@@ -6,17 +6,23 @@ a network device that captures its screen, acts as its keyboard, mouse and a
 USB drive, and works its power button. This script is how a session drives it:
 
     python scripts/pikvm.py status
-    python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."]
+    python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."] [--add-cmdline "..."] [--no-linuxdrv]
     python scripts/pikvm.py boot <img>          # upload, restart, pick it at F12
     python scripts/pikvm.py watch --seconds 90  # screenshots until the screen settles
     python scripts/pikvm.py snap <out.png> [--crop X0,Y0,X1,Y1]
     python scripts/pikvm.py power on|off|off-hard|reset-hard
 
 `stage` builds the USB image from a worktree's built kernel: Limine, the kernel
-(debug info stripped), and `limine.conf` with the command line on its first
-entry. The default command line names the PC's spare disk as the only one the
-kernel may write (`blk.writable=`, design-decisions 1575) and puts the kernel's
-log on the screen (`log.screen=1`), which is the only log there is.
+(debug info stripped), the Linux driver processes -- built first, as the boot
+test builds them, so that none older than the tree is staged -- as Limine
+modules, and `limine.conf` with the command line on its first entry. The
+default command line names the PC's spare disk as the only one the kernel may
+write (`blk.writable=`, design-decisions 1575) and puts the kernel's log on the
+screen (`log.screen=1`), which is the only log there is; `--add-cmdline` adds
+to it, `--cmdline` replaces it. For the Linux e1000e run on the PC's I219-V,
+add `linuxdrv.card=00:1f.6` (and `selftest.only=Linuxdrv` to run only that);
+`--no-linuxdrv` leaves the driver processes off, and their self-test with
+them.
 
 The PiKVM's address and login are read from `~/.pikvm` -- JSON with `url`,
 `user`, `password` and, for `boot`, `boot_entry_xy`: where on the screen the
@@ -33,6 +39,7 @@ import http.client
 import io
 import json
 import os
+import re
 import shutil
 import ssl
 import subprocess
@@ -54,10 +61,17 @@ WIDTH, HEIGHT = 1920, 1080
 DEFAULT_CMDLINE = "blk.writable=eui64:0025385181b1cd22 selftest.keep_going=1 log.screen=1"
 #: The name the image is kept under on the PiKVM.
 IMAGE_NAME = "slateos-pikvm.img"
-#: The Linux driver processes `stage` puts beside the kernel when they are
-#: built (`scripts/linux-tree.sh driver <name>`), as boot-test.sh does: each a
-#: Limine module the kernel finds by its module_cmdline, linuxdrv/<name>.
-LINUXDRV = ("hello", "e1000e")
+
+
+def linux_drivers(worktree: Path) -> tuple[str, ...]:
+    """The Linux driver processes `stage` builds and puts beside the kernel:
+    boot-test.sh's LINUX_DRIVERS, read from the one list both use -- each a
+    Limine module the kernel finds by its module_cmdline, linuxdrv/<name>."""
+    text = (worktree / "scripts" / "boot-test.sh").read_text(encoding="utf-8")
+    match = re.search(r"^LINUX_DRIVERS=\(([^)]*)\)", text, re.M)
+    if not match or not match.group(1).split():
+        raise ValueError("boot-test.sh has no LINUX_DRIVERS=(...) list")
+    return tuple(match.group(1).split())
 
 # The PiKVM reaches the network by WiFi, which drops now and then: a request
 # that is safe to repeat, and that the network loses, is made again -- RETRIES
@@ -363,20 +377,47 @@ class Progress:
         return block
 
 
-def stage(worktree: Path, out: Path, cmdline: str) -> None:
-    """Build the USB image of `worktree`'s built kernel at `out`, from an ESP
+def build_linux_drivers(worktree: Path, names: tuple[str, ...]) -> None:
+    """The layer's Rust half, then each driver process of `names`, built in
+    `worktree` as boot-test.sh's build_linux_drivers builds them, so that
+    none older than the tree is staged. SystemExit, saying which, for one
+    that does not build -- or a host that cannot build them at all, which
+    `--no-linuxdrv` stages without."""
+    subprocess.run(["cargo", "build", "--release", "--quiet"], cwd=worktree / "linuxdrv" / "kit",
+                   check=True)
+    bash = shutil.which("bash") or "bash"
+    for name in names:
+        rc = subprocess.run([bash, "scripts/linux-tree.sh", "driver", name], cwd=worktree).returncode
+        if rc == 3:
+            sys.exit(f"pikvm: this host cannot build the Linux driver processes (above); "
+                     f"--no-linuxdrv stages without them")
+        if rc:
+            sys.exit(f"pikvm: the Linux driver process {name} did not build (above)")
+
+
+def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> None:
+    """Build the USB image of `worktree`'s built kernel at `out` -- its Linux
+    driver processes built first, unless `linuxdrv` is false -- from an ESP
     tree laid out in a scratch directory that is gone afterwards."""
+    names = linux_drivers(worktree) if linuxdrv else ()
+    if not linuxdrv and "linuxdrv.card=" in cmdline:
+        sys.exit("pikvm: linuxdrv.card asks for a Linux driver run, and --no-linuxdrv leaves "
+                 "the driver processes off")
+    if names:
+        build_linux_drivers(worktree, names)
     with tempfile.TemporaryDirectory(prefix="pikvm-esp-") as scratch:
-        stage_esp(worktree, Path(scratch), cmdline)
+        stage_esp(worktree, Path(scratch), cmdline, names)
         subprocess.run([sys.executable, str(HERE / "build-usb-image.py"), "--source", scratch,
                         "--output", str(out)], check=True)
 
 
-def stage_esp(worktree: Path, esp: Path, cmdline: str) -> None:
+def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
+              strip_kernel: bool = True) -> None:
     """Lay out an ESP in `esp`: Limine, `worktree`'s built kernel (stripped of
-    its debug sections when llvm-strip is there), the Linux driver processes
-    it has built (`LINUXDRV`), and its limine.conf with `cmdline` on the
-    first entry, the driver processes as its modules."""
+    its debug sections when `strip_kernel` and llvm-strip is there), the
+    Linux driver processes `modules` names from build/linuxdrv/ -- each
+    required -- and its limine.conf with `cmdline` on the first entry, the
+    driver processes as its modules."""
     (esp / "EFI" / "BOOT").mkdir(parents=True)
     (esp / "boot").mkdir()
     limine = worktree / "limine" / "BOOTX64.EFI"
@@ -386,13 +427,15 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str) -> None:
     kernel = worktree / "target" / "x86_64-unknown-none" / "debug" / "kernel"
     strip = (Path.home() / ".rustup" / "toolchains" / "stable-x86_64-pc-windows-gnu" / "lib"
              / "rustlib" / "x86_64-pc-windows-gnu" / "bin" / "llvm-strip.exe")
-    if strip.exists():
+    if strip_kernel and strip.exists():
         subprocess.run([str(strip), "--strip-debug", str(kernel), "-o", str(esp / "boot" / "kernel")],
                        check=True)
     else:
         shutil.copy(kernel, esp / "boot" / "kernel")
     built = worktree / "build" / "linuxdrv"
-    modules = tuple(name for name in LINUXDRV if (built / f"{name}.elf").exists())
+    missing = [name for name in modules if not (built / f"{name}.elf").exists()]
+    if missing:
+        raise FileNotFoundError(f"no build/linuxdrv/{missing[0]}.elf to stage")
     if modules:
         (esp / "linuxdrv").mkdir()
         for name in modules:
@@ -576,6 +619,36 @@ def self_test() -> int:
           "    module_path: boot():/linuxdrv/e1000e.elf\n    module_cmdline: linuxdrv/e1000e\n" in conf, True)
     check("limine.conf: the modules in the first entry only",
           conf.rfind("module_path") < conf.find("/OS Kernel (recovery)"), True)
+    check("the driver processes are boot-test.sh's list",
+          {"hello", "e1000e"} <= set(linux_drivers(HERE.parent)), True)
+    with tempfile.TemporaryDirectory(prefix="pikvm-selftest-") as tmp:
+        wt = Path(tmp) / "wt"
+        for rel, data in [("limine/BOOTX64.EFI", b"efi"),
+                          ("target/x86_64-unknown-none/debug/kernel", b"kernel"),
+                          ("limine.conf", template.encode()),
+                          ("build/linuxdrv/hello.elf", b"hello"),
+                          ("build/linuxdrv/e1000e.elf", b"e1000e")]:
+            (wt / rel).parent.mkdir(parents=True, exist_ok=True)
+            (wt / rel).write_bytes(data)
+        esp = Path(tmp) / "esp"
+        stage_esp(wt, esp, "a=1", ("hello", "e1000e"), strip_kernel=False)
+        conf = (esp / "limine.conf").read_text(encoding="utf-8")
+        check("stage: each driver process copied beside the kernel",
+              [(esp / "linuxdrv" / f"{n}.elf").read_bytes() for n in ("hello", "e1000e")],
+              [b"hello", b"e1000e"])
+        check("stage: each a module of the first entry",
+              conf.count("module_cmdline: linuxdrv/hello") + conf.count("module_cmdline: linuxdrv/e1000e"), 2)
+        esp2 = Path(tmp) / "esp2"
+        stage_esp(wt, esp2, "a=1", (), strip_kernel=False)
+        check("stage: none asked for, none staged",
+              ((esp2 / "linuxdrv").exists(), "module_path" in (esp2 / "limine.conf").read_text(encoding="utf-8")),
+              (False, False))
+        (wt / "build/linuxdrv/e1000e.elf").unlink()
+        try:
+            stage_esp(wt, Path(tmp) / "esp3", "a=1", ("hello", "e1000e"), strip_kernel=False)
+            check("stage: a driver process asked for and not built is refused", "staged", "refused")
+        except FileNotFoundError:
+            pass
     try:
         limine_conf("timeout: 3\n", "x")
         check("limine.conf without an entry is refused", "taken", "refused")
@@ -759,6 +832,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("worktree", type=Path)
     p.add_argument("-o", "--output", type=Path, required=True)
     p.add_argument("--cmdline", default=DEFAULT_CMDLINE)
+    p.add_argument("--add-cmdline", default="",
+                   help="words added to the command line (the default's, or --cmdline's)")
+    p.add_argument("--no-linuxdrv", action="store_true",
+                   help="leave the Linux driver processes off, and their self-test with them")
     p = sub.add_parser("boot")
     p.add_argument("image", type=Path)
     p.add_argument("--menu-key", default="F12")
@@ -779,7 +856,8 @@ def main(argv: list[str]) -> int:
     args = ap.parse_args(argv)
 
     if args.cmd == "stage":
-        stage(args.worktree, args.output, args.cmdline)
+        cmdline = " ".join(w for w in (args.cmdline, args.add_cmdline) if w)
+        stage(args.worktree, args.output, cmdline, linuxdrv=not args.no_linuxdrv)
         return 0
     kvm = PiKvm()
     if args.cmd == "status":

@@ -10,7 +10,8 @@
 //!
 //! For now the kernel only tests the layer: [`self_test`] runs its first
 //! process, `linuxdrv/hello`, which is no driver, then Linux's e1000e on the
-//! boot test's spare 82574, serving the card to the netstack daemon
+//! boot test's spare 82574 -- or on the card `linuxdrv.card` names, on a real
+//! network (the test PC's I219-V) -- serving the card to the netstack daemon
 //! (design-decisions 1589), which also times it; then the daemon times the
 //! kernel's own e1000 driver the same way, for the two to be read side by
 //! side (design-decisions 1588, measured).
@@ -128,10 +129,21 @@ fn run(
 ///
 /// # Errors
 ///
-/// `InternalError` when any of the runs ends otherwise.
+/// `InternalError` when any of the runs ends otherwise; `InvalidArgument`
+/// when `linuxdrv.card` asks for a run this boot cannot make
+/// ([`named_card`]).
 pub fn self_test() -> KernelResult<()> {
+    check_parse_pci_address()?;
+    check_card_choice()?;
     let mut skips = crate::fs::selftest::Skips::new();
     let Some(elf) = crate::boot::module(HELLO) else {
+        // An operator's run asked for by name, which a skip would hide.
+        if crate::fs::kernparam::get("linuxdrv.card").is_some() {
+            serial_println!(
+                "[linuxdrv]   FAIL: linuxdrv.card is given, but linuxdrv/hello is not loaded beside the kernel"
+            );
+            return Err(KernelError::InvalidArgument);
+        }
         skips.record(
             "Linux driver layer's hello process",
             "not loaded beside the kernel (no limine.conf module named linuxdrv/hello)",
@@ -199,19 +211,70 @@ pub fn self_test() -> KernelResult<()> {
             ""
         }
     );
-    if e1000e == Some(Network::Lan) {
+    if let Some(network) = e1000e {
+        let lan = network == Network::Lan;
         serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e bound the card linuxdrv.card names, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP on this real network, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, left multicast unchecked (a real router need not answer the check's solicitations), timed the card, and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK"
-        );
-    } else if e1000e == Some(Network::Qemu) {
-        serial_println!(
-            "[linuxdrv]   e1000e process: Linux's e1000e bound the spare 82574, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason -- whose daemon attached to it, took an address by DHCP through it, resolved the gateway and had 400 full-size pings answered 16 at a time, payloads as sent, was told the link, found multicast passing as listed{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK",
-            if cable_puller() {
+            "[linuxdrv]   e1000e process: Linux's e1000e bound {}, brought its link up and served it to the network stack -- refusing a daemon without the card's key, for that reason, and the daemon refusing a mode it does not know -- whose daemon attached to it, took an address by DHCP {}, resolved the gateway and had 400 full-size pings answered 16 at a time{}, payloads as sent, was told the link, {}{}, timed the card -- then, unless skipped above, the kernel's own e1000 the same way -- and was let go for breaking the protocol; then a daemon served sockets over the card, a name asked through it answered; the driver warning nowhere: OK",
+            if lan {
+                "the card linuxdrv.card names"
+            } else {
+                "the spare 82574"
+            },
+            if lan {
+                "on the network beyond it"
+            } else {
+                "through it"
+            },
+            if lan { " (a few allowed lost)" } else { "" },
+            if lan {
+                "left multicast unchecked (its router need not answer the check's solicitations)"
+            } else {
+                "found multicast passing as listed"
+            },
+            if !lan && cable_puller() {
                 ", the link following the card's cable -- a ping sent while it was down dropped, never sent later; the lease confirmed by INIT-REBOOT, the addresses announced and the lease renewed when it came back -- and the serving daemon's lease confirmed after a pull of its own"
             } else {
                 ""
             }
         );
+    }
+    Ok(())
+}
+
+/// `parse_pci_address` at its edges, as the operator's `linuxdrv.card`
+/// reaches it.
+///
+/// # Errors
+///
+/// `InternalError`, said, for an answer that is not right.
+fn check_parse_pci_address() -> KernelResult<()> {
+    let at = |bus, device, function| {
+        Some(crate::pci::PciAddress {
+            bus,
+            device,
+            function,
+        })
+    };
+    let cases = [
+        ("00:1f.6", at(0, 0x1f, 6)),
+        ("3:0.1", at(3, 0, 1)),
+        ("ff:1f.7", at(0xff, 0x1f, 7)),
+        ("00:20.0", None),
+        ("00:1f.8", None),
+        ("00:1f", None),
+        ("00.1f.6", None),
+        ("00:1f.6x", None),
+        ("100:00.0", None),
+        ("", None),
+    ];
+    for (text, want) in cases {
+        if parse_pci_address(text) != want {
+            serial_println!(
+                "[linuxdrv]   FAIL: linuxdrv.card={text} read as {:?}, not {want:?}",
+                parse_pci_address(text)
+            );
+            return Err(KernelError::InternalError);
+        }
     }
     Ok(())
 }
@@ -445,28 +508,130 @@ fn parse_pci_address(text: &str) -> Option<crate::pci::PciAddress> {
 
 /// The card `linuxdrv.card=BB:DD.F` names for Linux's e1000e, on a machine
 /// with no boot-test spare -- the test PC's I219-V, which the kernel's own
-/// e1000 does not drive: an Intel function no driver holds. `None` without
-/// the option.
+/// e1000 does not drive: an Intel Ethernet controller (class 02, subclass
+/// 00) no driver holds -- so that a slip naming the GPU whose framebuffer
+/// carries the screen log, or a bridge, is refused before its decoding is
+/// touched. `None` without the option.
 ///
 /// # Errors
 ///
-/// `InvalidArgument`, said, for an option naming no such function: an
-/// operator's run asked for it, and a skip would read as the card's absence.
+/// `InvalidArgument`, said with the check that failed, for an option naming
+/// no such function: an operator's run asked for it, and a skip would read
+/// as the card's absence.
 fn named_card() -> KernelResult<Option<crate::pci::PciDevice>> {
-    const INTEL: u16 = 0x8086;
     let Some(named) = crate::fs::kernparam::get("linuxdrv.card") else {
         return Ok(None);
     };
-    let card = parse_pci_address(&named)
-        .and_then(|a| crate::pci::scan_all().into_iter().find(|d| d.address == a))
-        .filter(|d| d.vendor_id == INTEL && crate::pci::bound_driver(d.address).is_none());
-    if card.is_none() {
-        serial_println!(
-            "[linuxdrv]   FAIL: linuxdrv.card={named} names no Intel PCI function that no driver holds"
-        );
-        return Err(KernelError::InvalidArgument);
+    match card_choice(&named, &crate::pci::scan_all(), crate::pci::bound_driver) {
+        Ok(card) => Ok(Some(card)),
+        Err(CardRefused::Held(driver)) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: linuxdrv.card={named}: the kernel's {driver} driver holds it"
+            );
+            Err(KernelError::InvalidArgument)
+        }
+        Err(refused) => {
+            serial_println!(
+                "[linuxdrv]   FAIL: linuxdrv.card={named}: {}",
+                refused.why()
+            );
+            Err(KernelError::InvalidArgument)
+        }
     }
-    Ok(card)
+}
+
+/// Why [`card_choice`] refused the card an operator named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardRefused {
+    NotAnAddress,
+    NothingThere,
+    NotIntelEthernet,
+    /// The kernel driver of this name holds it.
+    Held(&'static str),
+}
+
+impl CardRefused {
+    fn why(self) -> &'static str {
+        match self {
+            CardRefused::NotAnAddress => "not a PCI function as BB:DD.F, in hex",
+            CardRefused::NothingThere => "no PCI function there",
+            CardRefused::NotIntelEthernet => "not an Intel Ethernet controller",
+            CardRefused::Held(_) => "a kernel driver holds it",
+        }
+    }
+}
+
+/// The function `named` names among `functions`, if Linux's e1000e may be
+/// given it: an Intel Ethernet controller (class 02, subclass 00) that no
+/// kernel driver holds (`bound`, the PCI layer's `bound_driver`); or why
+/// not.
+fn card_choice(
+    named: &str,
+    functions: &[crate::pci::PciDevice],
+    bound: impl Fn(crate::pci::PciAddress) -> Option<&'static str>,
+) -> Result<crate::pci::PciDevice, CardRefused> {
+    let address = parse_pci_address(named).ok_or(CardRefused::NotAnAddress)?;
+    let card = functions
+        .iter()
+        .find(|d| d.address == address)
+        .ok_or(CardRefused::NothingThere)?;
+    if card.vendor_id != devprobe::INTEL || card.class != 0x02 || card.subclass != 0x00 {
+        return Err(CardRefused::NotIntelEthernet);
+    }
+    if let Some(driver) = bound(address) {
+        return Err(CardRefused::Held(driver));
+    }
+    Ok(card.clone())
+}
+
+/// [`card_choice`] at each of its refusals and its one acceptance, over a
+/// made-up bus: the test PC's I219-V at 00:1f.6, its UHD 630 at 00:02.0, an
+/// Intel function no Ethernet controller at 00:1f.3, another vendor's NIC
+/// at 00:03.0, and a held Intel NIC at 00:19.0.
+///
+/// # Errors
+///
+/// `InternalError`, said, for an answer that is not right.
+fn check_card_choice() -> KernelResult<()> {
+    use crate::pci::{PciAddress, PciDevice};
+    let function = |device, function, vendor_id, class, subclass| PciDevice {
+        address: PciAddress {
+            bus: 0,
+            device,
+            function,
+        },
+        vendor_id,
+        device_id: 0x15b8,
+        class,
+        subclass,
+        irq_line: 0,
+        bars: [0; 6],
+    };
+    let bus = [
+        function(0x1f, 6, devprobe::INTEL, 0x02, 0x00),
+        function(0x02, 0, devprobe::INTEL, 0x03, 0x00),
+        function(0x1f, 3, devprobe::INTEL, 0x04, 0x03),
+        function(0x03, 0, 0x10ec, 0x02, 0x00),
+        function(0x19, 0, devprobe::INTEL, 0x02, 0x00),
+    ];
+    let bound = |a: PciAddress| (a.device == 0x19).then_some("e1000");
+    let cases = [
+        ("00:1f.6", Ok((0x1f, 6))),
+        ("00:1f:6", Err(CardRefused::NotAnAddress)),
+        ("00:1c.0", Err(CardRefused::NothingThere)),
+        ("00:02.0", Err(CardRefused::NotIntelEthernet)),
+        ("00:1f.3", Err(CardRefused::NotIntelEthernet)),
+        ("00:03.0", Err(CardRefused::NotIntelEthernet)),
+        ("00:19.0", Err(CardRefused::Held("e1000"))),
+    ];
+    for (named, want) in cases {
+        let got = card_choice(named, &bus, bound).map(|d| (d.address.device, d.address.function));
+        if got != want {
+            serial_println!("[linuxdrv]   FAIL: linuxdrv.card={named} chose {got:?}, not {want:?}");
+            return Err(KernelError::InternalError);
+        }
+    }
+    Ok(())
 }
 
 /// The layer's first real driver, Linux's own e1000e (`linuxdrv/e1000e`),
@@ -475,9 +640,22 @@ fn named_card() -> KernelResult<Option<crate::pci::PciDevice>> {
 /// boot test's spare 82574 as hello's PCI runs are -- then the kernel's own
 /// e1000 timed as the daemon timed that card ([`native_bench`]). Which
 /// network it ran on; `None`, skipped and recorded so, where the bootloader
-/// did not load it or there is no such card.
+/// did not load it or there is no such card. On a named card's network the
+/// checks it cannot make there -- the multicast filter, and the cable a
+/// harness would pull -- are recorded as skipped.
+///
+/// # Errors
+///
+/// `InvalidArgument` when `linuxdrv.card` asks for a run this boot cannot
+/// make ([`named_card`]); `InternalError` when a run ends otherwise.
 fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<Network>> {
     let Some(elf) = crate::boot::module(E1000E) else {
+        if crate::fs::kernparam::get("linuxdrv.card").is_some() {
+            serial_println!(
+                "[linuxdrv]   FAIL: linuxdrv.card is given, but linuxdrv/e1000e is not loaded beside the kernel"
+            );
+            return Err(KernelError::InvalidArgument);
+        }
         skips.record(
             "Linux's e1000e through the driver layer",
             "not loaded beside the kernel (no limine.conf module named linuxdrv/e1000e)",
@@ -511,6 +689,18 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<Net
         poll_ms: 0,
     };
     e1000e_serve(&program, &caps, a, &arg, network)?;
+    if network == Network::Lan {
+        skips.record(
+            "Linux's e1000e's multicast filter",
+            "on the network beyond the card linuxdrv.card names, whose router need not answer the check's solicitations",
+        );
+        if cable_puller() {
+            skips.record(
+                "Linux's e1000e following its card's cable",
+                "the harness's cable is not the card linuxdrv.card names",
+            );
+        }
+    }
     native_bench(skips)?;
     Ok(Some(network))
 }
@@ -518,8 +708,10 @@ fn e1000e_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<Net
 /// The kernel's own e1000 driver timed by the netstack daemon's `nic-bench`
 /// -- the first 82574, claimed alone by its MAC address (the kernel's stack
 /// keeping its primary card), an address taken on it by DHCP -- as
-/// `nic-check` has just timed Linux's e1000e serving the spare 82574: the
-/// same model, behind the same kind of QEMU network, its native twin. The
+/// `nic-check` has just timed Linux's e1000e serving its card: on QEMU's
+/// network the spare 82574, the same model behind the same kind of
+/// network, its native twin; on a named card's (`linuxdrv.card`), another
+/// card on another network, which these numbers only stand beside. The
 /// two `[bench] PROCESS nic_...` sets are read side by side
 /// (design-decisions 1588, measured). After the e1000e run, which it cannot
 /// keep from running; it fails only for what is wrong, not for being slow:
@@ -645,9 +837,15 @@ fn e1000e_serve(
     // link is up, seconds under emulation; holding the key, its checks and
     // its timing take a minute at most, and the cable's two waits 20 s each.
     let plain: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE];
-    let with_cable: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"cable"];
-    let on_lan: &[&[u8]] = &[b"netstack", b"nic-check", SERVICE, b"lan"];
     let cable = network == Network::Qemu && cable_puller();
+    // What the daemon may take of the network: its third argument, none for
+    // QEMU's with the cable left alone.
+    let mode = match network {
+        Network::Lan => Some(check::mode::LAN),
+        Network::Qemu if cable => Some(check::mode::CABLE),
+        Network::Qemu => None,
+    };
+    let keyed: alloc::vec::Vec<&[u8]> = plain.iter().copied().chain(mode).collect();
     let netstack = |limit_s| Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-nic",
@@ -660,11 +858,22 @@ fn e1000e_serve(
         let daemon = start(stack, args, key);
         daemon.map(|d| finish(stack, &d))
     };
-    let keyed = match network {
-        Network::Lan => on_lan,
-        Network::Qemu if cable => with_cable,
-        Network::Qemu => plain,
-    };
+    // A mode the daemon does not know is refused before it attaches.
+    let unknown = run_daemon(
+        &keyless_stack,
+        &[b"netstack", b"nic-check", SERVICE, b"wifi"],
+        &[],
+    );
+    if unknown != Ok(Some(check::USAGE)) {
+        serial_println!(
+            "[linuxdrv]   FAIL: the netstack daemon given a mode it does not know ended {:?} ({}): it should have refused it, exit {}",
+            unknown,
+            nic_check_outcome(&unknown),
+            check::USAGE
+        );
+        spawn::teardown_fixture(driver.pid, driver.task_id);
+        return Err(KernelError::InternalError);
+    }
     let keyless = run_daemon(&keyless_stack, plain, &[]);
     if keyless != Ok(Some(check::TURNED_AWAY)) {
         serial_println!(
@@ -680,7 +889,7 @@ fn e1000e_serve(
     }
     let checked = match run_daemon(
         &stack,
-        keyed,
+        &keyed,
         &[(ResourceType::Service, service, Rights::READ)],
     ) {
         Ok(checked) => checked,
@@ -695,7 +904,7 @@ fn e1000e_serve(
     };
     // Then sockets served over the card: the driver's second stack. A driver
     // whose stacks did not both come and go waits for one: not for its limit.
-    let sockets = checked == Some(check::OK) && serve_sockets(service);
+    let sockets = checked == Some(check::OK) && serve_sockets(service, cable);
     let served = if sockets {
         finish(program, &driver)
     } else {
@@ -738,14 +947,15 @@ fn e1000e_serve(
 /// and given an address by DHCP on the card, the kernel asks it to resolve a
 /// name, as a socket client asks, and it must answer: the name resolved, or
 /// not -- the boot test's host may have no upstream DNS, which is said, the
-/// card's frames having been proved by `nic-check` already. Where the
-/// harness can pull the card's cable ([`cable_puller`]) it is pulled and
-/// plugged back under the daemon, asked all the while ([`keep_asking`]),
+/// card's frames having been proved by `nic-check` already. With `cable`
+/// -- the harness pulling the card's cable on QEMU's network
+/// ([`cable_puller`]) -- it is pulled and plugged back under the daemon,
+/// asked all the while ([`keep_asking`]),
 /// which must then confirm its lease and announce its addresses. Idle after,
 /// the daemon lets the card go and ends 0 -- not `check::LEASE`, its exit when
 /// a link came back and its lease was never confirmed. Whether all of that
 /// held; what did not is said.
-fn serve_sockets(card_key: u64) -> bool {
+fn serve_sockets(card_key: u64, cable: bool) -> bool {
     let program = Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-serve",
@@ -762,7 +972,7 @@ fn serve_sockets(card_key: u64) -> bool {
     ];
     // With the cable to be pulled under it, the daemon is told to expect its
     // link back and to fail unless its lease is then confirmed.
-    let relinking = cable_puller();
+    let relinking = cable;
     let plain: &[&[u8]] = &[b"netstack", b"serve-dns", SERVICE];
     let relink: &[&[u8]] = &[b"netstack", b"serve-dns", SERVICE, b"relink"];
     let daemon = match start(&program, if relinking { relink } else { plain }, &caps) {

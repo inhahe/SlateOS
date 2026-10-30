@@ -5840,7 +5840,7 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         .mac(&gateway_mac)
         .put(b"\n")
         .print();
-    let seen = match ping_gateway(&me, &gateway_mac) {
+    let seen = match ping_gateway(&me, &gateway_mac, beyond == Beyond::Lan) {
         Ok(seen) => seen,
         Err(why) => {
             say(why.as_bytes());
@@ -5855,6 +5855,8 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         .put(b" bytes answered, and ")
         .dec(NIC_COLD as u64)
         .put(b" sent to an idle driver, payloads as sent (")
+        .dec(seen.lost)
+        .put(b" lost, ")
         .dec(seen.resent)
         .put(b" sent again, ")
         .dec(port::send_errors())
@@ -5880,7 +5882,10 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         say(b"FAIL: the driver failed sends");
         return NIC_PINGS_LOST;
     }
-    if seen.slept > seen.resent || seen.resent > NIC_BURST as u64 {
+    // Not on a real network: a ping it loses makes a wait run out, which
+    // reads here as a doorbell not rung -- QEMU's lossless network is where
+    // the doorbell is checked.
+    if beyond != Beyond::Lan && (seen.slept > seen.resent || seen.resent > NIC_BURST as u64) {
         say(b"FAIL: answers waited on no doorbell, or pings had to be sent again too often");
         return NIC_PINGS_LOST;
     }
@@ -5902,9 +5907,16 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
         return NIC_LINK;
     }
     // Told on attaching and at each change, and no more: up, then down and
-    // up again with the cable. More is a driver telling it at every turn.
+    // up again with the cable. More is a driver telling it at every turn --
+    // but a real link may renegotiate once, down and up again.
     let changes = if cable { 2 } else { 0 };
-    if port::links_told() != 1 + changes {
+    let told = port::links_told();
+    let wrong = if beyond == Beyond::Lan {
+        !(1..=3).contains(&told)
+    } else {
+        told != 1 + changes
+    };
+    if wrong {
         Line::new()
             .put(b"[netstack] nic-check: FAIL: the driver told the link ")
             .dec(u64::from(port::links_told()))
@@ -5942,7 +5954,9 @@ fn nic_check(service: &[u8], beyond: Beyond) -> i64 {
 /// the multicast check's signal -- with its cable left alone, or (`cable`)
 /// pulled and plugged back from outside, when asked (the boot test, through
 /// QEMU's monitor); or (`lan`) a real network, whose router need not answer
-/// so: the multicast check is said and skipped, the cable left alone.
+/// so: the multicast check is said and skipped, a few pings may be lost
+/// ([`NIC_LAN_LOST_MOST`]), the link may renegotiate once, and the cable is
+/// left alone. The words are `netipc::nicport::check::mode`'s.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Beyond {
     Qemu,
@@ -5956,8 +5970,8 @@ impl Beyond {
     fn from_arg(arg: &[u8]) -> Option<Beyond> {
         match arg {
             b"" => Some(Beyond::Qemu),
-            b"cable" => Some(Beyond::QemuCable),
-            b"lan" => Some(Beyond::Lan),
+            check::mode::CABLE => Some(Beyond::QemuCable),
+            check::mode::LAN => Some(Beyond::Lan),
             _ => None,
         }
     }
@@ -6962,11 +6976,13 @@ fn nic_payload(seq: usize, i: usize) -> u8 {
     (seq.wrapping_mul(7).wrapping_add(i)) as u8
 }
 
-/// What [`ping_gateway`] saw besides the answers it waited for: pings sent
-/// again, waits that ran to their deadline with no doorbell, answers that
-/// came twice, the daemon's own frames come back, and other frames.
+/// What [`ping_gateway`] saw besides the answers it waited for: pings lost
+/// on a real network, pings sent again, waits that ran to their deadline
+/// with no doorbell, answers that came twice, the daemon's own frames come
+/// back, and other frames.
 #[derive(Default)]
 struct Seen {
+    lost: u64,
     resent: u64,
     slept: u64,
     again: u64,
@@ -6981,13 +6997,20 @@ struct Seen {
 const NIC_COLD: usize = 8;
 const NIC_COLD_QUIET_NS: u64 = 100_000_000;
 
+/// How many pings `nic-check` may lose on a real network (`lan`), where a
+/// router may drop or delay an echo under load: a burst's ping unanswered
+/// twice, or an idle driver's unanswered once, counted, not failed -- 1% of
+/// them. More is a card or driver losing frames.
+const NIC_LAN_LOST_MOST: u64 = 4;
+
 /// The pings to the gateway: [`NIC_PINGS`] [`NIC_BURST`] at a time, each
 /// answered within a second -- sent again once if not -- then [`NIC_COLD`]
-/// to an idle driver, each answered within a second of its one sending.
-/// What else was seen, or what failed. Frames that are not an answer -- an
-/// ARP request for our address, say -- are handled as the daemon handles
-/// any.
-fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<Seen, &'static str> {
+/// to an idle driver, each answered within a second of its one sending;
+/// on a real network (`lossy`), [`NIC_LAN_LOST_MOST`] of them may go
+/// unanswered. What else was seen, or what failed. Frames that are not an
+/// answer -- an ARP request for our address, say -- are handled as the
+/// daemon handles any.
+fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6], lossy: bool) -> Result<Seen, &'static str> {
     let mut pings = Pings {
         answered: [false; NIC_PINGS + NIC_COLD],
         resent: [false; NIC_PINGS + NIC_COLD],
@@ -7011,8 +7034,12 @@ fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<Seen, &'static str
                 break;
             }
         }
-        if !burst.clone().all(|s| pings.answered[s]) {
-            return Err("FAIL: a ping went unanswered, sent twice");
+        let unanswered = burst.clone().filter(|&s| !pings.answered[s]).count() as u64;
+        if unanswered != 0 {
+            if !lossy || pings.seen.lost.saturating_add(unanswered) > NIC_LAN_LOST_MOST {
+                return Err("FAIL: a ping went unanswered, sent twice");
+            }
+            pings.seen.lost = pings.seen.lost.saturating_add(unanswered);
         }
     }
     for seq in NIC_PINGS..NIC_PINGS + NIC_COLD {
@@ -7023,6 +7050,10 @@ fn ping_gateway(me: &IfInfo, gateway_mac: &[u8; 6]) -> Result<Seen, &'static str
             pings.wait(me, deadline)?;
         }
         if !pings.answered[seq] {
+            if lossy && pings.seen.lost < NIC_LAN_LOST_MOST {
+                pings.seen.lost = pings.seen.lost.saturating_add(1);
+                continue;
+            }
             return Err(
                 "FAIL: a ping sent to an idle driver went unanswered for a second: the daemon's doorbell did not wake it",
             );

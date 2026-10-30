@@ -320,8 +320,11 @@ USB drive, and works its power and reset buttons.
 | Firmware | UEFI, Secure Boot off; nothing was changed for SlateOS |
 | Serial | none on the board; a PCIe serial card (LinksTek PCIE-SE2, an AX99100) into an RS-232 USB adapter on the PiKVM is on order, for `log.pci_serial=1` |
 
-**A boot.** The staged ESP (Limine, the kernel, `limine.conf` with
-`blk.writable=eui64:0025385181b1cd22 log.screen=1` on the first entry) is made
+**A boot.** The staged ESP (`scripts/pikvm.py stage`: Limine, the kernel,
+the Linux driver processes as Limine modules -- built first, `--no-linuxdrv`
+to leave them off -- and `limine.conf` with
+`blk.writable=eui64:0025385181b1cd22 log.screen=1` on the first entry,
+`--add-cmdline` adding to it) is made
 into a disk image (`scripts/build-usb-image.py`) and loaded onto the PiKVM's
 virtual USB drive (`/api/msd/write`, then `set_params cdrom=0`,
 `set_connected`). The PC is forced off and on (`/api/atx/power?action=off_hard`

@@ -198,3 +198,15 @@ refcount warnings said so.)
 The kit's submission checks and queues have host tests (`frames.rs`), as
 do the attach message and the other messages (`netipc::nicport`) and the
 ring's data window (`netring`).
+
+On real hardware (2026-10-30) the same run is made on the card
+`linuxdrv.card=BB:DD.F` names -- an Intel Ethernet controller no driver
+holds, the test PC's I219-V at `00:1f.6` -- the daemon told `lan`
+(`netipc::nicport::check::mode`): a real network's router need not answer
+a solicitation to all nodes, so the multicast check is said and skipped (and
+recorded as a skip); a few pings may be lost (four, 1%) and the link may
+renegotiate once, where QEMU's lossless network allows neither; the
+doorbell's check, which a lost ping would trip, stays QEMU's; and the cable
+is left alone. A mode the daemon does not know it refuses (`check::USAGE`),
+which the kernel's run checks. `scripts/pikvm.py stage` puts the driver
+processes on the PiKVM's image, built as the boot test builds them.

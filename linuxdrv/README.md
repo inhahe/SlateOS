@@ -143,7 +143,10 @@ passing a multicast group exactly while it is listed, and, in the boot
 test, the link following the card's cable as QEMU's monitor pulls it and
 plugs it back. A warning
 from Linux code anywhere in that driver process fails the run
-(`SLX_EXIT_WARNED`).
+(`SLX_EXIT_WARNED`). On real hardware the same run is made on the card
+`linuxdrv.card=BB:DD.F` names -- the test PC's I219-V at `00:1f.6`, staged
+by `scripts/pikvm.py stage` -- `nic-check` told the network is a real one
+(`lan`: the multicast check skipped, a few pings allowed lost).
 
 ## Licences
 

@@ -176,7 +176,10 @@ two simulated radios on one medium, the first made an open access point
 through nl80211 (`SET_INTERFACE`, `START_AP`), the second's scan having to
 find it -- its name, address and frequency -- and the second then joining
 it (`CONNECT`), the layer answering its authentication and association on
-the first as hostapd would, and a frame crossing the network each way.
+the first as hostapd would, and a frame crossing the network each way; then
+the network made WPA2-PSK, joined again, the four-way handshake made by
+the layer as both sides (`emul/lx_wpa.c`), and a frame crossing each way
+encrypted -- the air watched through hwsim's monitor interface throughout.
 
 ## Licences
 

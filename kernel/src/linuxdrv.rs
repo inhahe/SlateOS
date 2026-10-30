@@ -168,7 +168,7 @@ fn run(
 ///   card, or scanning with the one `linuxdrv.wifi` names.
 /// - [`hwsim_run`]: Linux's mac80211_hwsim, two simulated radios on that
 ///   stack, one made an access point the other must find, join and pass a
-///   frame each way across.
+///   frame each way across -- open, then protected by WPA2.
 ///
 /// Then the verdicts of what ran, one line a process, which the boot test
 /// requires of each process it put on the medium (`scripts/boot-test.sh`,
@@ -374,7 +374,7 @@ fn say_runs(e1000e: Option<Network>, wifi: Option<bool>, hwsim: bool) {
     }
     if hwsim {
         serial_println!(
-            "[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on one medium -- the first made an open access point through nl80211, the second's scan finding it, its name, address and frequency as beaconed, and joining it, the layer answering its authentication and association as hostapd would, and a frame crossing the network each way: OK"
+            "[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on one medium -- the first made an open access point through nl80211, the second's scan finding it, its name, address and frequency as beaconed, and joining it, the layer answering its authentication and association as hostapd would, and a frame crossing the network each way, in clear on the air; then the network made WPA2's, joined again, the four-way handshake made by the layer as both sides, and a frame crossing each way encrypted by mac80211's CCMP, protected on the air, its CCM checked against RFC 3610 and the handshake's keys against 802.11's vectors: OK"
         );
     }
 }
@@ -384,9 +384,12 @@ fn say_runs(e1000e: Option<Network>, wifi: Option<bool>, hwsim: bool) {
 /// (`linuxdrv/emul/lx_wifi.c`) must make the first an open access point
 /// through nl80211, have the second's scan find it and the second join it
 /// -- the layer answering its authentication and association on the first
-/// as hostapd would -- and a frame cross the network each way, and exit 0:
-/// the 802.11 stack and the layer's use of it tested end to end where there
-/// is no WiFi card. Whether it ran: skipped, and recorded so, where the
+/// as hostapd would -- and a frame cross the network each way, in clear on
+/// the air; then make the network WPA2's, have the second join it again,
+/// make the four-way handshake as both sides, and a frame cross each way
+/// encrypted, protected on the air; and exit 0: the 802.11 stack, its
+/// ciphers and the layer's use of them tested end to end where there is no
+/// WiFi card. Whether it ran: skipped, and recorded so, where the
 /// bootloader did not load it.
 ///
 /// # Errors
@@ -400,14 +403,17 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         );
         return Ok(false);
     };
-    // Up to 30 s for the radios to register, 30 s for the scan, 20 s to join
-    // and 2 s for each frame (lx_wifi.c), with room past them all for the
-    // process to say which ran out before the kernel cuts it off.
+    // Up to 30 s for the radios to register, 30 s for the scan, 20 s for
+    // each of the two joins and for the open network's leaving, 10 s for
+    // the handshake, and 2 s for each frame and each link to come up
+    // (lx_wifi.c) -- 130 s with every step at its limit -- with room past
+    // them all for the process to say which ran out before the kernel cuts
+    // it off.
     let program = Program {
         elf,
         name: "lx-hwsim",
         driver: true,
-        limit_s: 120,
+        limit_s: 180,
         poll_ms: 0,
     };
     expect(
@@ -415,7 +421,7 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
         &[b"hwsim", b"hwsim"],
         &[],
         EXIT_OK,
-        "made one simulated radio an access point, found it from the other, joined it and passed a frame each way",
+        "made one simulated radio an access point, found it from the other, joined it and passed a frame each way, open and then protected by WPA2",
         || None,
     )?;
     Ok(true)

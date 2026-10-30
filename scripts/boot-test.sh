@@ -734,13 +734,15 @@ check_linuxdrv_ran() {
         echo "=== NOTE: the boot medium carries no linuxdrv/{${absent% }}: its runs were not made (a medium reused with --no-stage; stage it again) ==="
     fi
     # Each staged process's verdict -- and hello's lines, as Linux's
-    # vsprintf formats them.
+    # vsprintf formats them, one with its level passed as an argument,
+    # which the layer's console must take off.
     for name in $staged; do
         grep -aq "$(linuxdrv_verdict "$name")" "$file" || missing+="$name "
     done
     case " $staged " in
         *" hello "*)
             if ! grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" ||
+                ! grep -aq '^\[lx\] hello: a level passed as an argument, taken off' "$file" ||
                 ! grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file"; then
                 missing+="hello's-lines "
             fi

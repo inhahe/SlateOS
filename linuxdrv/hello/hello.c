@@ -884,6 +884,12 @@ static int __init hello_init(void)
 		return -ERANGE;
 	}
 	pr_info("hello from Linux's own headers: %d, %s, %#x\n", *answer, "formatted by vsprintf", 0xbeef);
+	/*
+	 * Its level passed as an argument, as netdev_printk() passes it for a
+	 * device with no parent: the console must take it off the line as
+	 * formatted (the boot test reads the line).
+	 */
+	printk("%shello: a level passed as an argument, taken off\n", KERN_INFO);
 	kfree(answer);
 	if (hello_mode("stop"))
 		lx_hello_never_defined();

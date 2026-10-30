@@ -737,17 +737,23 @@ const struct trace_print_flags vmaflag_names[] = { { 0, NULL } };
 /*
  * The console, a line at a time: printk's level prefix (KERN_*) taken off
  * and "[lx] " put on, and a line longer than the buffer cut where it ends.
+ * The level is taken off the line as formatted, as Linux's printk takes it
+ * (printk_parse_prefix): a caller may pass it as an argument --
+ * netdev_printk() does, for a device with no parent ("%s%s: ...").
  */
 static int lx_vprint(const char *prefix, const char *fmt, va_list args)
 {
 	char line[512];
-	const char *text = printk_skip_level(fmt);
 	size_t at = strscpy(line, prefix, sizeof(line));
 	size_t len;
 
 	if ((ssize_t)at < 0)
 		at = 0;
-	len = at + vscnprintf(line + at, sizeof(line) - at, text, args);
+	len = at + vscnprintf(line + at, sizeof(line) - at, fmt, args);
+	while (len >= at + 2 && printk_get_level(line + at)) {
+		memmove(line + at, line + at + 2, len - at - 2);
+		len -= 2;
+	}
 	/* slx_log takes a length: the terminator's byte can hold the newline. */
 	if (len > 0 && line[len - 1] != '\n' && len < sizeof(line))
 		line[len++] = '\n';

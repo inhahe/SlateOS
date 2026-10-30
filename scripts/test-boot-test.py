@@ -1573,7 +1573,9 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
     it only records a skip, which must fail the boot -- unless the harness
     could not build it here, and so named none.
     """
-    hello = "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n"
+    # Its first line, and the one whose level it passed as an argument.
+    level = "[lx] hello: a level passed as an argument, taken off\n"
+    hello = "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef\n" + level
     tasks = ("[lx] hello tasks: a kthread, a mutex held across a 20 ms sleep, a "
              "completion: 18 jiffies\n")
     # As kernel/src/linuxdrv.rs prints it.
@@ -1616,6 +1618,10 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
         ("every process staged and run passes", ran, ALL_STAGED, "PASS"),
         ("its verdict without its line, formatted right, fails", garbled, ALL_STAGED, "FAIL"),
         ("its verdict alone fails", verdict, ALL_STAGED, "FAIL"),
+        ("its line whose level it passed, the level left in, fails",
+         ran.replace(level, level.replace("[lx] ", "[lx] 6")), ALL_STAGED, "FAIL"),
+        ("its line whose level it passed, missing, fails",
+         ran.replace(level, ""), ALL_STAGED, "FAIL"),
         ("its line without its tasks' fails",
          hello + verdict + e1000e + mt7925e + hwsim, ALL_STAGED, "FAIL"),
         ("hello's verdict without e1000e's fails",

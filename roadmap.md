@@ -5556,12 +5556,15 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         (`linuxdrv/hwsim`): one simulated radio made an open access point
         through nl80211, the other's scan finding it, joining it -- the
         layer answering its authentication and association as hostapd
-        would -- and a frame crossing the network each way. Next: its scan
-        on the RZ717 (`linuxdrv.wifi=06:00.0`, through `scripts/pikvm.py`;
-        the PiKVM fell off the network mid-run on 2026-10-30), then a
-        protected network: WPA2's four-way handshake (the layer as the
-        supplicant, and as the access point's authenticator on hwsim), then
-        the card joining a real one
+        would -- and a frame crossing the network each way; then the
+        network made WPA2-PSK and joined again, the four-way handshake made
+        by the layer as both sides (`emul/lx_wpa.c`), and frames crossing
+        encrypted by mac80211's CCMP over Linux's crypto API, protected on
+        the air. Next: its scan on the RZ717 (`linuxdrv.wifi=06:00.0`,
+        through `scripts/pikvm.py`; the PiKVM fell off the network mid-run
+        on 2026-10-30), then the card joining a real WPA2 network -- which
+        needs the network and its passphrase from the operator, and a way
+        to give the process a passphrase that keeps it off the command line
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
         from Linux's DRM/KMS onto the graphics stack -- this is how the i915
         item in 3.1 gets done

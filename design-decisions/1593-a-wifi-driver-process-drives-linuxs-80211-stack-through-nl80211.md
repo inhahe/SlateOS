@@ -11,7 +11,9 @@ use. The driver process has no message sockets, so the layer stands where
 those programs would and speaks nl80211 to cfg80211 directly in the process.
 The first use is a scan; the second, joining a network -- on simulated
 radios, where the layer also plays the access point's own program
-(hostapd), answering the radio that asks to join. Keys will go the same way.
+(hostapd), answering the radio that asks to join; the third, joining a
+network protected by a passphrase (WPA2), the layer making the exchange
+that agrees the keys as both sides.
 
 ### The decision
 
@@ -43,7 +45,16 @@ radios, where the layer also plays the access point's own program
    the station with the rates it asked for (`NEW_STATION`), and lets it
    through the port (`SET_STATION`, authorized) -- there being no 802.1X
    to wait for.
-4. **The kernel names the card** with `linuxdrv.wifi=BB:DD.F`, as
+4. **Joining a WPA2-PSK network** (`lx_wifi_handshake`, keys and frames in
+   `emul/lx_wpa.c`): the station connects with WPA2's settings and its port
+   closed; the four-way handshake travels as EAPOL frames over the network
+   devices (ethertype 0x888e, which mac80211 lets through a closed port);
+   each side's keys go in with `NEW_KEY` and its port opens with
+   `SET_STATION`. The layer makes the handshake itself, as wpa_supplicant
+   (and, on simulated radios, hostapd) would: PBKDF2, the PRF, the MIC and
+   the key wrap over Linux's SHA-1 and AES libraries, CCMP by Linux's own
+   crypto API (`stacks/crypto.manifest`) wherever the card does not do it.
+5. **The kernel names the card** with `linuxdrv.wifi=BB:DD.F`, as
    `linuxdrv.card` names an Ethernet card (§1590's hardware mode): a
    MediaTek network controller of subclass 80 that no driver holds. Without
    it the boot test runs the process with no card, which still runs
@@ -69,6 +80,12 @@ radios, where the layer also plays the access point's own program
   runs, but a userspace program over sockets, for a role the layer plays
   only so that a station has something to join where there is no network:
   for an open network it is two answers and two station commands.
+- **wpa_supplicant's own code for the handshake** -- the reference, and
+  WPA3 and enterprise networks with it, but a BSD-licensed program of tens
+  of thousands of lines over sockets, its own event loop and drivers; a
+  port is its own task. WPA2-PSK's handshake is four frames and five
+  primitives, each checked against a published vector; WPA3 (SAE) would
+  reopen this.
 
 ### Checked by
 
@@ -79,8 +96,12 @@ first made an open access point through nl80211 (`SET_INTERFACE`,
 `START_AP` with a beacon the layer builds), the second's passive scan
 having to find it, the second then joining it -- its carrier on, the
 access point holding it as a station -- and a frame crossing the network
-each way, payload and sender as sent: the dispatcher, the event queue,
-the scan, the join and the data path tested end to end where there is no
-card. On the test PC,
+each way, payload and sender as sent, in clear on the air (hwsim's
+monitor interface); then the network made WPA2-PSK, the second joining it
+again, the handshake made, and a frame crossing each way protected on the
+air, its payload never in clear. Before any of it, the run checks the
+crypto API's CCM against RFC 3610 and the handshake's primitives against
+802.11's and RFC 3394's vectors -- both ends share the code, so a mistake
+the same at each would pass a join unnoticed. On the test PC,
 `scripts/pikvm.py stage --add-cmdline "linuxdrv.wifi=06:00.0"` runs it on
 the RZ717, which must scan and exit 0, the networks it found on the screen.

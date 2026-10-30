@@ -647,9 +647,10 @@ marker_checks_pass() {
 
 # The Linux driver processes the boot test loads beside the kernel, by their
 # directory under linuxdrv/; the kernel finds each by its module_cmdline,
-# linuxdrv/<name> (kernel/src/linuxdrv.rs): the layer's test process, and
-# Linux's own e1000e, which drives the spare card.
-LINUX_DRIVERS=(hello e1000e)
+# linuxdrv/<name> (kernel/src/linuxdrv.rs): the layer's test process,
+# Linux's own e1000e, which drives the spare card, and Linux's mt7925e with
+# its 802.11 stack, which QEMU has no card for and starts without one.
+LINUX_DRIVERS=(hello e1000e mt7925e)
 
 # Build the layer's Rust half, then each of LINUX_DRIVERS into
 # build/linuxdrv/<name>.elf. cargo no-ops a current build, and Linux's make a
@@ -706,6 +707,7 @@ check_linuxdrv_ran() {
         grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
         grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file" &&
         grep -aq '^\[linuxdrv\]   e1000e process: .*: OK' "$file" &&
+        grep -aq '^\[linuxdrv\]   mt7925e process: .*: OK' "$file" &&
         [ -z "$skips" ]; then
         return 0
     fi
@@ -713,9 +715,10 @@ check_linuxdrv_ran() {
     # already failed the boot for: what reaches here is a run skipped, or a
     # process that never said its lines.
     echo "=== THE LINUX DRIVER LAYER'S PROCESSES DID NOT ALL RUN ==="
-    echo "  The boot medium carried linuxdrv/hello and linuxdrv/e1000e, but the"
-    echo "  kernel never said '[linuxdrv]   hello process ...: OK' and"
-    echo "  '[linuxdrv]   e1000e process: ...: OK', or skipped some of their runs,"
+    echo "  The boot medium carried linuxdrv/hello, e1000e and mt7925e, but the"
+    echo "  kernel never said '[linuxdrv]   hello process ...: OK',"
+    echo "  '[linuxdrv]   e1000e process: ...: OK' and"
+    echo "  '[linuxdrv]   mt7925e process: ...: OK', or skipped some of their runs,"
     echo "  or the process never printed its line as Linux formats it. The"
     echo "  kernel's skips first, its verdicts, then the process's own lines:"
     # A medium reused from before the firmware was staged skips the boot
@@ -726,7 +729,7 @@ check_linuxdrv_ran() {
     fi
     {
         printf '%s\n' "$skips" | grep -v '^$'
-        grep -a '^\[linuxdrv\]   \(hello\|e1000e\) process' "$file" | cut -c1-160
+        grep -a '^\[linuxdrv\]   \(hello\|e1000e\|mt7925e\) process' "$file" | cut -c1-160
         grep -a '^\[lx\]' "$file" | head -6
     } | head -16 | sed 's/^/  /' || true
     return 1

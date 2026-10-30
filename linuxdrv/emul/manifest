@@ -63,6 +63,7 @@ linux drivers/base/dd.o
 linux drivers/base/driver.o
 linux drivers/base/class.o
 linux drivers/base/devres.o
+linux drivers/base/faux.o
 linux lib/kobject.o
 linux lib/klist.o
 # Sleepable RCU, which the driver core's device links read under: Linux's

@@ -348,6 +348,36 @@ size_t ksize(const void *objp)
 	return ZERO_OR_NULL_PTR(objp) ? 0 : slx_block_size(objp);
 }
 
+/* A copy of `len` bytes at `src`, in a block of its own. */
+void *kmemdup_noprof(const void *src, size_t len, gfp_t gfp)
+{
+	void *p = lx_alloc(len, gfp & ~__GFP_ZERO);
+
+	if (!ZERO_OR_NULL_PTR(p))
+		memcpy(p, src, len);
+	return p;
+}
+
+/* ... of `count` elements of `element_size` bytes: NULL when that overflows. */
+void *kmemdup_array(const void *src, size_t count, size_t element_size, gfp_t gfp)
+{
+	size_t len;
+
+	if (check_mul_overflow(count, element_size, &len))
+		return NULL;
+	return kmemdup_noprof(src, len, gfp);
+}
+
+/* A block freed with its whole contents wiped first: keys, passphrases. */
+void kfree_sensitive(const void *objp)
+{
+	size_t len = ksize(objp);
+
+	if (len)
+		memzero_explicit((void *)objp, len);
+	kfree(objp);
+}
+
 void *__kmalloc_noprof(size_t size, gfp_t flags)
 {
 	return lx_alloc(size, flags);
@@ -632,6 +662,22 @@ u32 __get_random_u32_below(u32 ceil)
 		}
 	}
 	return mult >> 32;
+}
+
+u16 get_random_u16(void)
+{
+	u16 r;
+
+	get_random_bytes(&r, sizeof(r));
+	return r;
+}
+
+u32 get_random_u32(void)
+{
+	u32 r;
+
+	get_random_bytes(&r, sizeof(r));
+	return r;
 }
 
 /*
@@ -981,11 +1027,13 @@ int lx_emul_main(void)
 	async_init();
 	/*
 	 * As Linux's driver_init() before the initcalls: the driver core's
-	 * devices, buses and classes. Its other pieces are for what a driver
-	 * process has none of -- firmware nodes, hypervisors, CPUs, memory
-	 * blocks and NUMA nodes as devices, the platform bus.
+	 * devices, buses and classes, and the faux bus -- the home of a device
+	 * that stands for no hardware, which cfg80211 makes its regulatory one
+	 * (drivers/base/faux.c). Its other pieces are for what a driver process
+	 * has none of -- firmware nodes, hypervisors, CPUs, memory blocks and
+	 * NUMA nodes as devices, the platform bus.
 	 */
-	if (devices_init() || buses_init() || classes_init() || lx_fs_init())
+	if (devices_init() || buses_init() || classes_init() || lx_fs_init() || faux_bus_init())
 		return SLX_EXIT_NO_MEMORY;
 	ret = lx_run_initcalls(__initcall_start, __initcall0_start);
 	for (level = 0; !ret && level < ARRAY_SIZE(lx_initcall_level_names); level++) {

@@ -153,6 +153,19 @@ from Linux code anywhere in that driver process fails the run
 by `scripts/pikvm.py stage` -- `nic-check` told the network is a real one
 (`lan`: the multicast check skipped, a few pings allowed lost).
 
+The first WiFi driver, Linux's own `mt7925e` (`linuxdrv/mt7925e/`), drives
+the test PC's MediaTek RZ717 on top of Linux's own 802.11 stack -- mac80211
+and cfg80211, with nl80211 -- compiled into its process. The layer is
+generic netlink's one user there (`emul/lx_netlink.c`, design-decisions
+1593): it asks nl80211 as wpa_supplicant would, its requests parsed by each
+command's policy and run between the family's `pre_doit` and `post_doit`,
+and it is told what the groups it listens to are told. With "scan", the
+layer's task (`emul/lx_wifi.c`) brings the card's interface up, has nl80211
+scan passively and says each network found. The kernel's self-test runs it
+on the card `linuxdrv.wifi=BB:DD.F` names (`06:00.0` on the test PC, its
+firmware staged with it); in QEMU, which has no such card, it runs with none,
+which must still start the 802.11 stack and exit 0.
+
 ## Licences
 
 Linux's files, and anything generated from them -- prepared headers,

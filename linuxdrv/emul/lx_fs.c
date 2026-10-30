@@ -37,6 +37,9 @@
 #include <linux/fs.h>
 #include <linux/user_namespace.h>
 #include <linux/pid_namespace.h>
+#include <linux/utsname.h>
+#include <linux/uts.h>
+#include <generated/utsrelease.h>
 #include <linux/threads.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel_read_file.h>
@@ -367,3 +370,37 @@ struct pid_namespace init_pid_ns = {
 /* No device here is a disk or a partition: these only ever compare unequal. */
 const struct class block_class = { .name = "block" };
 const struct device_type part_type = { .name = "partition" };
+
+/*
+ * The one UTS namespace -- the system's name and release as Linux's own
+ * code reports them (cfg80211's ethtool answer gives the release as its
+ * driver's version) -- as init/version-timestamp.c has it, the release the
+ * driver was built from. That file is made only as vmlinux is linked, with
+ * a compile.h of the build's host and time, which a driver process has
+ * nothing to say for: no version string, and the machine named here.
+ */
+struct uts_namespace init_uts_ns = {
+	.ns.__ns_ref = REFCOUNT_INIT(2),
+	.name = {
+		.sysname = UTS_SYSNAME,
+		.nodename = UTS_NODENAME,
+		.release = UTS_RELEASE,
+		.version = "",
+		.machine = "x86_64",
+		.domainname = UTS_DOMAINNAME,
+	},
+	.user_ns = &init_user_ns,
+};
+
+/*
+ * What a debugfs attribute's file is released with: DEFINE_DEBUGFS_ATTRIBUTE
+ * and DEFINE_SIMPLE_ATTRIBUTE point their file operations at it. As
+ * fs/libfs.c has it; nothing opens such a file here, debugfs being absent,
+ * but a pointer to a function is data, which no generated stop stands in
+ * for.
+ */
+int simple_attr_release(struct inode *inode, struct file *file)
+{
+	kfree(file->private_data);
+	return 0;
+}

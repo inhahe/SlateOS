@@ -23,6 +23,7 @@
  * syncs Linux still calls do nothing.
  */
 #include <linux/dma-mapping.h>
+#include <linux/device.h>
 #include <linux/pci.h>
 #include <linux/mm.h>
 #include <linux/slab.h>
@@ -111,6 +112,40 @@ void dma_free_attrs(struct device *dev, size_t size, void *cpu_addr, dma_addr_t 
 		    unsigned long attrs)
 {
 	slx_free(cpu_addr);
+}
+
+/* What dmam_alloc_attrs() hands back when the device goes. */
+struct lx_dmam {
+	void *cpu_addr;
+	dma_addr_t dma_handle;
+	size_t size;
+	unsigned long attrs;
+};
+
+static void lx_dmam_release(struct device *dev, void *res)
+{
+	struct lx_dmam *m = res;
+
+	dma_free_attrs(dev, m->size, m->cpu_addr, m->dma_handle, m->attrs);
+}
+
+/* Coherent memory as dma_alloc_attrs() gives it, freed when the device is released (devres). */
+void *dmam_alloc_attrs(struct device *dev, size_t size, dma_addr_t *dma_handle, gfp_t gfp,
+		       unsigned long attrs)
+{
+	struct lx_dmam *m = devres_alloc(lx_dmam_release, sizeof(*m), gfp);
+	void *p;
+
+	if (!m)
+		return NULL;
+	p = dma_alloc_attrs(dev, size, dma_handle, gfp, attrs);
+	if (!p) {
+		devres_free(m);
+		return NULL;
+	}
+	*m = (struct lx_dmam){ .cpu_addr = p, .dma_handle = *dma_handle, .size = size, .attrs = attrs };
+	devres_add(dev, m);
+	return p;
 }
 
 /*

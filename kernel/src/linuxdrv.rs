@@ -27,6 +27,9 @@ use crate::serial_println;
 const HELLO: &[u8] = b"linuxdrv/hello";
 /// ... and Linux's e1000e, the layer's first real driver.
 const E1000E: &[u8] = b"linuxdrv/e1000e";
+/// ... and Linux's mt7925e, its first WiFi driver, with Linux's 802.11
+/// stack (cfg80211, mac80211).
+const MT7925E: &[u8] = b"linuxdrv/mt7925e";
 
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
@@ -127,16 +130,16 @@ fn run(
 /// [`pci_runs`]: given the boot test's spare 82574, its driver probes it
 /// through Linux's PCI core. Skipped, and recorded so, where the bootloader
 /// did not load it -- anywhere but the boot test, and after a kexec. Then
-/// Linux's e1000e ([`e1000e_run`]). Before any of them, the checks that
-/// need no process: the operator's `linuxdrv.card` read and its card and
-/// processes found, and firmware's paths and placing
-/// ([`check_place_firmware`]).
+/// Linux's e1000e ([`e1000e_run`]) and mt7925e ([`wifi_runs`]). Before any
+/// of them, the checks that need no process: the operator's options
+/// (`linuxdrv.card`, `linuxdrv.wifi`) read and their cards and processes
+/// found, and firmware's paths and placing ([`check_place_firmware`]).
 ///
 /// # Errors
 ///
 /// `InternalError` when any of the runs ends otherwise; `InvalidArgument`
-/// when `linuxdrv.card` asks for a run this boot cannot make
-/// ([`named_card`]).
+/// when `linuxdrv.card` or `linuxdrv.wifi` asks for a run this boot cannot
+/// make ([`named_card`]).
 pub fn self_test() -> KernelResult<()> {
     check_parse_pci_address()?;
     check_card_choice()?;
@@ -144,15 +147,19 @@ pub fn self_test() -> KernelResult<()> {
     // An operator's run, asked for by name: refused before the hello runs
     // for a card it cannot have or a driver process not loaded -- never
     // skipped, which would read as the card's absence.
-    let named = named_card()?;
-    if named.is_some() {
-        for (module, name) in [(HELLO, "linuxdrv/hello"), (E1000E, "linuxdrv/e1000e")] {
-            if crate::boot::module(module).is_none() {
-                serial_println!(
-                    "[linuxdrv]   FAIL: linuxdrv.card is given, but {name} is not loaded beside the kernel"
-                );
-                return Err(KernelError::InvalidArgument);
-            }
+    let named = named_card(CardKind::IntelEthernet)?;
+    let named_wifi = named_card(CardKind::MediatekWifi)?;
+    let needs: [(bool, &str, &[u8]); 3] = [
+        (named.is_some(), "linuxdrv/hello", HELLO),
+        (named.is_some(), "linuxdrv/e1000e", E1000E),
+        (named_wifi.is_some(), "linuxdrv/mt7925e", MT7925E),
+    ];
+    for (asked, name, module) in needs {
+        if asked && crate::boot::module(module).is_none() {
+            serial_println!(
+                "[linuxdrv]   FAIL: a card is named for {name}, but it is not loaded beside the kernel"
+            );
+            return Err(KernelError::InvalidArgument);
         }
     }
     let mut skips = crate::fs::selftest::Skips::new();
@@ -216,6 +223,7 @@ pub fn self_test() -> KernelResult<()> {
     let boot_firmware = boot_firmware_run(&hello, &mut skips)?;
     let pci = pci_runs(&hello, &mut skips)?;
     let e1000e = e1000e_run(&mut skips, named)?;
+    let wifi = wifi_runs(&mut skips, named_wifi)?;
     skips.report("[linuxdrv]");
     serial_println!(
         "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}{}: OK",
@@ -258,7 +266,88 @@ pub fn self_test() -> KernelResult<()> {
             }
         );
     }
+    match wifi {
+        Some(true) => serial_println!(
+            "[linuxdrv]   mt7925e process: Linux's mt7925e bound the card linuxdrv.wifi names, loaded its firmware from the boot medium, brought its interface up and had nl80211 scan, the networks found said above: OK"
+        ),
+        Some(false) => serial_println!(
+            "[linuxdrv]   mt7925e process: Linux's 802.11 stack (cfg80211, nl80211, mac80211) and the mt7925e driver started with no card, and the process exited 0: OK"
+        ),
+        None => {}
+    }
     Ok(())
+}
+
+/// Linux's mt7925e (`linuxdrv/mt7925e`), the layer's first WiFi driver.
+/// With no card -- QEMU has none -- its initcalls, cfg80211's, nl80211's
+/// and mac80211's among them, must run and the process exit 0, having
+/// probed nothing. Given `named`, the card `linuxdrv.wifi` names
+/// ([`named_card`]), and a File capability to read its firmware with, its
+/// "scan" run must bind the card, bring its interface up, have nl80211 scan
+/// and say what it found (`linuxdrv/emul/lx_wifi.c`), and exit 0. Which ran
+/// -- `Some(true)` the card's scan -- or `None`, skipped and recorded so,
+/// where the bootloader did not load it (never with a card named:
+/// [`self_test`] refuses that first).
+///
+/// # Errors
+///
+/// `InternalError` when a run ends otherwise.
+fn wifi_runs(
+    skips: &mut crate::fs::selftest::Skips,
+    named: Option<crate::pci::PciDevice>,
+) -> KernelResult<Option<bool>> {
+    let Some(elf) = crate::boot::module(MT7925E) else {
+        skips.record(
+            "Linux's mt7925e through the driver layer",
+            "not loaded beside the kernel (no limine.conf module named linuxdrv/mt7925e)",
+        );
+        return Ok(None);
+    };
+    let Some(card) = named else {
+        let program = Program {
+            elf,
+            name: "lx-mt7925e",
+            limit_s: 30,
+            poll_ms: 0,
+        };
+        expect(
+            &program,
+            &[b"mt7925e"],
+            &[],
+            EXIT_OK,
+            "ran Linux's 802.11 stack's initcalls with no card and exited 0",
+            || None,
+        )?;
+        return Ok(Some(false));
+    };
+    let a = card.address;
+    let caps = [
+        (
+            ResourceType::PciDevice,
+            crate::cap::pci_device_id(a.bus, a.device, a.function),
+            Rights::WRITE,
+        ),
+        (ResourceType::File, 0, Rights::READ),
+    ];
+    let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
+    let path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
+    // The card's firmware loaded, then up to 30 s for it to register and
+    // 30 s for the scan (lx_wifi.c).
+    let program = Program {
+        elf,
+        name: "lx-mt7925e",
+        limit_s: 90,
+        poll_ms: 0,
+    };
+    expect(
+        &program,
+        &[b"mt7925e", arg.as_bytes(), path_arg.as_bytes(), b"scan"],
+        &caps,
+        EXIT_OK,
+        "bound the card, brought its interface up, had nl80211 scan and said what it found",
+        || None,
+    )?;
+    Ok(Some(true))
 }
 
 /// `parse_pci_address` at its edges, as the operator's `linuxdrv.card`
@@ -911,10 +1000,53 @@ fn parse_pci_address(text: &str) -> Option<crate::pci::PciAddress> {
     (address.device < 32 && address.function < 8).then_some(address)
 }
 
-/// The card `linuxdrv.card=BB:DD.F` names for Linux's e1000e, on a machine
-/// with no boot-test spare -- the test PC's I219-V, which the kernel's own
-/// e1000 does not drive: an Intel Ethernet controller (class 02, subclass
-/// 00) no driver holds -- so that a slip naming the GPU whose framebuffer
+/// MediaTek's PCI vendor id.
+const MEDIATEK: u16 = 0x14c3;
+
+/// The kind of card an operator's option names for a Linux driver run on a
+/// machine with no boot-test spare, which the function named must be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardKind {
+    /// `linuxdrv.card`'s, for Linux's e1000e: an Intel Ethernet controller
+    /// (class 02, subclass 00) -- the test PC's I219-V, which the kernel's
+    /// own e1000 does not drive.
+    IntelEthernet,
+    /// `linuxdrv.wifi`'s, for Linux's mt7925e: a MediaTek network
+    /// controller of subclass 80, "other", which is WiFi's (class 02) --
+    /// the test PC's RZ717.
+    MediatekWifi,
+}
+
+impl CardKind {
+    /// The kernel parameter that names such a card.
+    fn option(self) -> &'static str {
+        match self {
+            CardKind::IntelEthernet => "linuxdrv.card",
+            CardKind::MediatekWifi => "linuxdrv.wifi",
+        }
+    }
+
+    /// Whether `card` is one.
+    fn is(self, card: &crate::pci::PciDevice) -> bool {
+        let (vendor, subclass) = match self {
+            CardKind::IntelEthernet => (devprobe::INTEL, 0x00),
+            CardKind::MediatekWifi => (MEDIATEK, 0x80),
+        };
+        card.vendor_id == vendor && card.class == 0x02 && card.subclass == subclass
+    }
+}
+
+impl core::fmt::Display for CardKind {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            CardKind::IntelEthernet => "an Intel Ethernet controller",
+            CardKind::MediatekWifi => "a MediaTek WiFi card",
+        })
+    }
+}
+
+/// The card `kind`'s option (`<option>=BB:DD.F`) names: a function of that
+/// kind no driver holds -- so that a slip naming the GPU whose framebuffer
 /// carries the screen log, or a bridge, is refused before its decoding is
 /// touched. `None` without the option.
 ///
@@ -923,14 +1055,19 @@ fn parse_pci_address(text: &str) -> Option<crate::pci::PciAddress> {
 /// `InvalidArgument`, said with the check that failed, for an option naming
 /// no such function: an operator's run asked for it, and a skip would read
 /// as the card's absence.
-fn named_card() -> KernelResult<Option<crate::pci::PciDevice>> {
-    let Some(named) = crate::fs::kernparam::get("linuxdrv.card") else {
+fn named_card(kind: CardKind) -> KernelResult<Option<crate::pci::PciDevice>> {
+    let Some(named) = crate::fs::kernparam::get(kind.option()) else {
         return Ok(None);
     };
-    match card_choice(&named, &crate::pci::scan_all(), crate::pci::bound_driver) {
+    match card_choice(
+        &named,
+        kind,
+        &crate::pci::scan_all(),
+        crate::pci::bound_driver,
+    ) {
         Ok(card) => Ok(Some(card)),
         Err(refused) => {
-            serial_println!("[linuxdrv]   FAIL: linuxdrv.card={named}: {refused}");
+            serial_println!("[linuxdrv]   FAIL: {}={named}: {refused}", kind.option());
             Err(KernelError::InvalidArgument)
         }
     }
@@ -941,7 +1078,8 @@ fn named_card() -> KernelResult<Option<crate::pci::PciDevice>> {
 enum CardRefused {
     NotAnAddress,
     NothingThere,
-    NotIntelEthernet,
+    /// Not the kind of card asked for.
+    NotA(CardKind),
     /// The driver of this name (`pci::bound_driver`'s) holds it.
     Held(&'static str),
 }
@@ -951,7 +1089,7 @@ impl core::fmt::Display for CardRefused {
         match self {
             CardRefused::NotAnAddress => f.write_str("not a PCI function as BB:DD.F, in hex"),
             CardRefused::NothingThere => f.write_str("no PCI function there"),
-            CardRefused::NotIntelEthernet => f.write_str("not an Intel Ethernet controller"),
+            CardRefused::NotA(kind) => write!(f, "not {kind}"),
             CardRefused::Held(crate::devhandle::USERSPACE_DRIVER) => {
                 f.write_str("a process's driver holds it")
             }
@@ -960,12 +1098,12 @@ impl core::fmt::Display for CardRefused {
     }
 }
 
-/// The function `named` names among `functions`, if Linux's e1000e may be
-/// given it: an Intel Ethernet controller (class 02, subclass 00) that no
-/// kernel driver holds (`bound`, the PCI layer's `bound_driver`); or why
-/// not.
+/// The function `named` names among `functions`, if a Linux driver for
+/// `kind` may be given it: one of that kind that no kernel driver holds
+/// (`bound`, the PCI layer's `bound_driver`); or why not.
 fn card_choice(
     named: &str,
+    kind: CardKind,
     functions: &[crate::pci::PciDevice],
     bound: impl Fn(crate::pci::PciAddress) -> Option<&'static str>,
 ) -> Result<crate::pci::PciDevice, CardRefused> {
@@ -974,8 +1112,8 @@ fn card_choice(
         .iter()
         .find(|d| d.address == address)
         .ok_or(CardRefused::NothingThere)?;
-    if card.vendor_id != devprobe::INTEL || card.class != 0x02 || card.subclass != 0x00 {
-        return Err(CardRefused::NotIntelEthernet);
+    if !kind.is(card) {
+        return Err(CardRefused::NotA(kind));
     }
     if let Some(driver) = bound(address) {
         return Err(CardRefused::Held(driver));
@@ -983,16 +1121,18 @@ fn card_choice(
     Ok(card.clone())
 }
 
-/// [`card_choice`] at each of its refusals and its one acceptance, over a
+/// [`card_choice`] at each of its refusals and its acceptances, over a
 /// made-up bus: the test PC's I219-V at 00:1f.6, its UHD 630 at 00:02.0, an
 /// Intel function no Ethernet controller at 00:1f.3, another vendor's NIC
-/// at 00:03.0, and a held Intel NIC at 00:19.0.
+/// at 00:03.0, a held Intel NIC at 00:19.0, and its RZ717 WiFi card at
+/// 00:05.0, beside a MediaTek function no network controller at 00:06.0.
 ///
 /// # Errors
 ///
 /// `InternalError`, said, for an answer that is not right.
 fn check_card_choice() -> KernelResult<()> {
     use crate::pci::{PciAddress, PciDevice};
+    use CardKind::{IntelEthernet, MediatekWifi};
     let function = |device, function, vendor_id, class, subclass| PciDevice {
         address: PciAddress {
             bus: 0,
@@ -1012,21 +1152,55 @@ fn check_card_choice() -> KernelResult<()> {
         function(0x1f, 3, devprobe::INTEL, 0x04, 0x03),
         function(0x03, 0, 0x10ec, 0x02, 0x00),
         function(0x19, 0, devprobe::INTEL, 0x02, 0x00),
+        function(0x05, 0, MEDIATEK, 0x02, 0x80),
+        function(0x06, 0, MEDIATEK, 0x04, 0x03),
     ];
     let bound = |a: PciAddress| (a.device == 0x19).then_some("e1000");
     let cases = [
-        ("00:1f.6", Ok((0x1f, 6))),
-        ("00:1f:6", Err(CardRefused::NotAnAddress)),
-        ("00:1c.0", Err(CardRefused::NothingThere)),
-        ("00:02.0", Err(CardRefused::NotIntelEthernet)),
-        ("00:1f.3", Err(CardRefused::NotIntelEthernet)),
-        ("00:03.0", Err(CardRefused::NotIntelEthernet)),
-        ("00:19.0", Err(CardRefused::Held("e1000"))),
+        ("00:1f.6", IntelEthernet, Ok((0x1f, 6))),
+        ("00:1f:6", IntelEthernet, Err(CardRefused::NotAnAddress)),
+        ("00:1c.0", IntelEthernet, Err(CardRefused::NothingThere)),
+        (
+            "00:02.0",
+            IntelEthernet,
+            Err(CardRefused::NotA(IntelEthernet)),
+        ),
+        (
+            "00:1f.3",
+            IntelEthernet,
+            Err(CardRefused::NotA(IntelEthernet)),
+        ),
+        (
+            "00:03.0",
+            IntelEthernet,
+            Err(CardRefused::NotA(IntelEthernet)),
+        ),
+        ("00:19.0", IntelEthernet, Err(CardRefused::Held("e1000"))),
+        (
+            "00:05.0",
+            IntelEthernet,
+            Err(CardRefused::NotA(IntelEthernet)),
+        ),
+        ("00:05.0", MediatekWifi, Ok((0x05, 0))),
+        (
+            "00:06.0",
+            MediatekWifi,
+            Err(CardRefused::NotA(MediatekWifi)),
+        ),
+        (
+            "00:1f.6",
+            MediatekWifi,
+            Err(CardRefused::NotA(MediatekWifi)),
+        ),
     ];
-    for (named, want) in cases {
-        let got = card_choice(named, &bus, bound).map(|d| (d.address.device, d.address.function));
+    for (named, kind, want) in cases {
+        let got =
+            card_choice(named, kind, &bus, bound).map(|d| (d.address.device, d.address.function));
         if got != want {
-            serial_println!("[linuxdrv]   FAIL: linuxdrv.card={named} chose {got:?}, not {want:?}");
+            serial_println!(
+                "[linuxdrv]   FAIL: {}={named} chose {got:?}, not {want:?}",
+                kind.option()
+            );
             return Err(KernelError::InternalError);
         }
     }
@@ -1039,6 +1213,7 @@ fn check_card_choice() -> KernelResult<()> {
             CardRefused::Held(crate::devhandle::USERSPACE_DRIVER),
             "a process's driver holds it",
         ),
+        (CardRefused::NotA(MediatekWifi), "not a MediaTek WiFi card"),
     ];
     for (refused, want) in said {
         let got = alloc::format!("{refused}");

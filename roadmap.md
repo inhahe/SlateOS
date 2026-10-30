@@ -5548,7 +5548,11 @@ _Depends on: Phase 1 complete. Goal: boot to a shell prompt._
         is that one, not `iwlwifi` -- begun 2026-10-30: its firmware
         (linux-firmware 20261019, pinned and fetched, `linuxdrv/firmware.pin`)
         reaches the test PC on the boot medium, which the kernel places at
-        `/.boot-firmware` read-only, every driver process told to look there (§1592)
+        `/.boot-firmware` read-only, every driver process told to look there (§1592);
+        the driver process (`linuxdrv/mt7925e`) builds, Linux's 802.11 stack
+        -- cfg80211, nl80211, mac80211 -- starting in it in the boot test with
+        no card, the layer driving it through nl80211 (§1593). Next: its scan
+        on the RZ717 (`linuxdrv.wifi=06:00.0`, through `scripts/pikvm.py`)
   - [ ] Then the test PC's Intel UHD 630 (`i915`), with `[F]` for the bridge
         from Linux's DRM/KMS onto the graphics stack -- this is how the i915
         item in 3.1 gets done

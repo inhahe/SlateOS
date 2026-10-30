@@ -51,6 +51,7 @@
 
 #include "slx.h"
 #include "lx_emul.h"
+#include "net/core/page_pool_priv.h"
 
 /* What start_kernel() and the socket layer set up for the network core. */
 static int __init lx_net_init(void)
@@ -509,6 +510,27 @@ static int lx_nic_task(void *unused)
 		slx_exit(SLX_EXIT_WARNED);
 	}
 	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
+}
+
+/*
+ * The page pools' list, which Linux keeps for netlink to show
+ * (net/core/page_pool_user.c: each pool given an id, its device's going
+ * noted): a driver process has no netlink to show it through, so no pool
+ * is listed. The lock stays a lock: page_pool.c takes it itself.
+ */
+DEFINE_MUTEX(page_pools_lock);
+
+int page_pool_list(struct page_pool *pool)
+{
+	return 0;
+}
+
+void page_pool_detached(struct page_pool *pool)
+{
+}
+
+void page_pool_unlist(struct page_pool *pool)
+{
 }
 
 /* After the driver's own initcalls, which register its devices as they probe. */

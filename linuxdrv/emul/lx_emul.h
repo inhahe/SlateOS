@@ -79,6 +79,26 @@ unsigned long lx_irq_dropped(unsigned int irq);
 bool lx_irq_ready(struct pci_dev *dev);
 
 /*
+ * lx_netlink.c: the layer as a generic netlink user. A family registered,
+ * by its name (NULL for none); a request to its command `cmd`, for the
+ * caller to add attributes to (NULL for no memory); the request run as
+ * genetlink runs a doit, its replies queued on `replies` -- the handler's
+ * answer, the request still the caller's; a multicast group, by its name,
+ * listened to (0, or -ENOENT for no such group); and the next message sent
+ * to it, waiting up to `timeout` jiffies (NULL for none by then).
+ */
+struct genl_family;
+struct sk_buff;
+struct sk_buff_head;
+const struct genl_family *lx_genl_family(const char *name);
+struct sk_buff *lx_genl_request(const struct genl_family *family, u8 cmd);
+int lx_genl_doit(const struct genl_family *family, struct sk_buff *req,
+		 struct sk_buff_head *replies);
+int lx_genl_listen(const struct genl_family *family, const char *name);
+struct sk_buff *lx_genl_event(const struct genl_family *family, const char *name,
+			      unsigned long timeout);
+
+/*
  * Hardirq context, as Linux enters it for an interrupt -- interrupts off,
  * the count raised (<linux/hardirq.h>'s __irq_enter_raw()) -- and left: for
  * the devices' handlers and the turn's irq_work alike, so that both run in

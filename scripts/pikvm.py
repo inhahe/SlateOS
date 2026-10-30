@@ -20,9 +20,11 @@ default command line names the PC's spare disk as the only one the kernel may
 write (`blk.writable=`, design-decisions 1575) and puts the kernel's log on the
 screen (`log.screen=1`), which is the only log there is; `--add-cmdline` adds
 to it, `--cmdline` replaces it. For the Linux e1000e run on the PC's I219-V,
-add `linuxdrv.card=00:1f.6` (and `selftest.only=Linuxdrv` to run only that);
-`--no-linuxdrv` leaves the driver processes off, and their self-test with
-them.
+add `linuxdrv.card=00:1f.6`; for Linux's mt7925e on its RZ717 WiFi card, which
+scans and says the networks it finds, `linuxdrv.wifi=06:00.0` (and
+`selftest.only=Linuxdrv` to run only those); `--no-linuxdrv` leaves the
+driver processes off, and their self-test with them. The firmware the drivers
+load (`linuxdrv/firmware.pin`) is staged with them.
 
 The PiKVM's address and login are read from `~/.pikvm` -- JSON with `url`,
 `user`, `password` and, for `boot`, `boot_entry_xy`: where on the screen the
@@ -421,9 +423,10 @@ def stage(worktree: Path, out: Path, cmdline: str, linuxdrv: bool = True) -> Non
     driver processes built first, unless `linuxdrv` is false -- from an ESP
     tree laid out in a scratch directory that is gone afterwards."""
     names = linux_drivers(worktree) if linuxdrv else ()
-    if not linuxdrv and "linuxdrv.card=" in cmdline:
-        sys.exit("pikvm: linuxdrv.card asks for a Linux driver run, and --no-linuxdrv leaves "
-                 "the driver processes off")
+    for option in ("linuxdrv.card=", "linuxdrv.wifi="):
+        if not linuxdrv and option in cmdline:
+            sys.exit(f"pikvm: {option[:-1]} asks for a Linux driver run, and --no-linuxdrv "
+                     "leaves the driver processes off")
     # What is staged besides the drivers, there before minutes of building.
     for needed in (kernel_path(worktree), limine_path(worktree), worktree / "limine.conf"):
         if not needed.exists():

@@ -38,6 +38,11 @@ linux net/core/skbuff.o
 linux net/core/flow_dissector.o
 linux net/core/xdp.o
 linux net/core/utils.o
+# The page pools the core makes for every CPU as it starts (net_dev_init),
+# which the configuration has since mt76 needs them (linuxdrv/linux.config),
+# and the hash table their memory model's ids are kept in (net/core/xdp.c).
+linux net/core/page_pool.o
+linux lib/rhashtable.o
 linux net/ethernet/eth.o
 linux net/sched/sch_generic.o
 linux net/sched/sch_mq.o

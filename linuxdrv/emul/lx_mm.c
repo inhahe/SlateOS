@@ -126,6 +126,26 @@ struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order, int preferred_n
 	return page;
 }
 
+/*
+ * Single pages into the empty slots of `page_array`'s first `nr_pages`, in
+ * order, until one cannot be had: how many slots from the first hold a page
+ * then, as Linux's bulk allocator answers. The page pool refills from it.
+ */
+unsigned long alloc_pages_bulk_noprof(gfp_t gfp, int preferred_nid, nodemask_t *nodemask,
+				      int nr_pages, struct page **page_array)
+{
+	int filled = 0;
+
+	for (; filled < nr_pages; filled++) {
+		if (page_array[filled])
+			continue;
+		page_array[filled] = __alloc_pages_noprof(gfp, 0, preferred_nid, nodemask);
+		if (!page_array[filled])
+			break;
+	}
+	return filled;
+}
+
 static void lx_free_pages(struct page *page, unsigned int order)
 {
 	void *p = page_address(page);

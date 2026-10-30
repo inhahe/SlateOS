@@ -642,6 +642,11 @@ pub fn attached() -> bool {
     card().is_some()
 }
 
+/// Whether the card attached has gone: its driver died, or let it go.
+pub fn gone() -> bool {
+    card().is_some_and(|c| c.gone)
+}
+
 /// The card's link as its driver last told it: `None` with no card
 /// attached, or before the driver has said.
 pub fn link() -> Option<bool> {

@@ -354,6 +354,9 @@ pub mod check {
     pub const PROTOCOL: i32 = 18;
     /// It was started with arguments it does not take.
     pub const USAGE: i32 = 19;
+    /// Its lease on the card was not kept: lost -- refused, or run out -- or
+    /// not confirmed by its server when the card's link came back.
+    pub const LEASE: i32 = 20;
 
     /// What exit `code` says went wrong.
     #[must_use]
@@ -372,6 +375,7 @@ pub mod check {
             MCAST => "the card did not pass multicast frames as its list said",
             PROTOCOL => "the card's driver kept a stack that broke the protocol",
             USAGE => "it was started with arguments it does not take",
+            LEASE => "its lease on the card was lost, or not confirmed when the link came back",
             _ => "it ended otherwise",
         }
     }

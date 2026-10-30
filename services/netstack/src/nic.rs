@@ -22,6 +22,12 @@ pub fn over_card() -> bool {
     port::attached()
 }
 
+/// Whether a driver process's card has gone -- its driver died, or let it
+/// go -- so that nothing done on it can come to anything.
+pub fn card_gone() -> bool {
+    port::gone()
+}
+
 /// Transmit one raw Ethernet frame: its length, or a negative errno.
 ///
 /// A frame destined to *our own IP* never reaches the wire — QEMU's slirp (and a

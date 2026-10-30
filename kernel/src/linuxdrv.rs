@@ -532,7 +532,7 @@ fn e1000e_serve(
 /// harness can pull the card's cable ([`cable_puller`]) it is pulled and
 /// plugged back under the daemon, asked all the while ([`keep_asking`]),
 /// which must then confirm its lease and announce its addresses. Idle after,
-/// the daemon lets the card go and ends 0 -- not `check::LINK`, its exit when
+/// the daemon lets the card go and ends 0 -- not `check::LEASE`, its exit when
 /// a link came back and its lease was never confirmed. Whether all of that
 /// held; what did not is said.
 fn serve_sockets(card_key: u64) -> bool {
@@ -550,7 +550,12 @@ fn serve_sockets(card_key: u64) -> bool {
             Rights::WRITE,
         ),
     ];
-    let daemon = match start(&program, &[b"netstack", b"serve-dns", SERVICE], &caps) {
+    // With the cable to be pulled under it, the daemon is told to expect its
+    // link back and to fail unless its lease is then confirmed.
+    let relinking = cable_puller();
+    let plain: &[&[u8]] = &[b"netstack", b"serve-dns", SERVICE];
+    let relink: &[&[u8]] = &[b"netstack", b"serve-dns", SERVICE, b"relink"];
+    let daemon = match start(&program, if relinking { relink } else { plain }, &caps) {
         Ok(daemon) => daemon,
         Err(e) => {
             serial_println!(
@@ -575,7 +580,7 @@ fn serve_sockets(card_key: u64) -> bool {
     // back under the serving daemon, which is asked all the while -- kept
     // from idling out -- and must, once the link is back, confirm its lease
     // and announce its addresses, its exit saying whether it did.
-    if cable_puller() && answer.is_some() {
+    if relinking && answer.is_some() {
         serial_println!("[linuxdrv]   cable: pull it");
         keep_asking(5_000_000_000);
         serial_println!("[linuxdrv]   cable: plug it back");

@@ -1870,12 +1870,13 @@ CABLE_PY=""
 cable_responder() {
     [ -n "$CABLE_PY" ] && [ -f "$SERIAL_FILE" ] || return 0
     if [ "$CABLE_STEP" -ge 4 ]; then
+        # The next cycle is read from the end of this one's "plug it back"
+        # line: what was printed after it, in the same look or later.
         CABLE_STEP=0
-        CABLE_SEEN=$(wc -c < "$SERIAL_FILE")
-        CABLE_FLOOR=$CABLE_SEEN
+        CABLE_SEEN=$CABLE_FLOOR
     fi
     if [ "$CABLE_STEP" -eq 0 ] || [ "$CABLE_STEP" -eq 2 ]; then
-        local want size from
+        local want size from at
         # Not anchored: a kernel line can be printed into the middle of another.
         if [ "$CABLE_STEP" -eq 0 ]; then
             want='cable: pull it'
@@ -1885,11 +1886,15 @@ cable_responder() {
         size=$(wc -c < "$SERIAL_FILE")
         from=$(( CABLE_SEEN > 200 ? CABLE_SEEN - 200 : 0 ))
         # Never back over a cycle's end: its own lines are not the next's.
-        from=$(( from < ${CABLE_FLOOR:-0} ? ${CABLE_FLOOR:-0} : from ))
+        from=$(( from < CABLE_FLOOR ? CABLE_FLOOR : from ))
         CABLE_SEEN=$size
-        # Not `tail | grep -q`: under pipefail, grep leaving early makes the
-        # pipeline fail on tail's SIGPIPE, and a match would read as none.
-        grep -a -q -F "$want" <(tail -c +$(( from + 1 )) "$SERIAL_FILE") || return 0
+        # Where the line is, from `from`. Not `tail | grep -q`: under pipefail,
+        # grep leaving early makes the pipeline fail on tail's SIGPIPE, and a
+        # match would read as none; `|| true` for `head` doing the same here.
+        at=$(grep -a -b -o -F "$want" <(tail -c +$(( from + 1 )) "$SERIAL_FILE") \
+            | head -1 | cut -d: -f1) || true
+        [ -n "$at" ] || return 0
+        [ "$CABLE_STEP" -eq 2 ] && CABLE_FLOOR=$(( from + at + ${#want} ))
         CABLE_STEP=$(( CABLE_STEP + 1 ))
     fi
     local state=off

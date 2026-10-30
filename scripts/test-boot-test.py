@@ -1294,7 +1294,7 @@ def _cable_harness(body, python="bash"):
             handle.write(
                 "set -euo pipefail\n"
                 "SERIAL_FILE=serial.txt\nSCRIPT_DIR=.\nMONITOR_PORT=1\n"
-                f"CABLE_STEP=0\nCABLE_SEEN=0\nCABLE_PY={_sq(python)}\n"
+                f"CABLE_STEP=0\nCABLE_SEEN=0\nCABLE_FLOOR=0\nCABLE_PY={_sq(python)}\n"
                 + extract_shell_function("cable_responder") + "\n\n"
                 + body)
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the cable responder")
@@ -1390,6 +1390,35 @@ def test_a_second_cycle_is_answered_for_whoever_asks_and_the_first_not_again():
     check("off and on for each cycle, nothing more", calls,
           ["hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 on",
            "hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 on"])
+
+
+def test_a_pull_printed_right_after_a_plug_starts_the_next_cycle():
+    """A "pull it" printed just after a cycle's "plug it back" -- before the
+    responder's next look, in the very look that answers the plug -- starts
+    the next cycle: the next is read from the end of the plug line, not from
+    wherever the log had grown to when the cycle ended.
+    """
+    body = (
+        "step() { cable_responder 2>>errors.txt; echo \"step=$CABLE_STEP\"; }\n"
+        "printf '[netstack] nic-check: cable: pull it\\n' > serial.txt\n"
+        "step\n"
+        "printf '[netstack] nic-check: cable: plug it back\\n"
+        "[linuxdrv]   cable: pull it\\n' >> serial.txt\n"
+        "step\n"
+        "step\n"
+        "echo calls:; cat calls.txt\n")
+    out = _cable_harness(body)
+    check("the responder ran to its end", out is not None, True)
+    if out is None:
+        return
+    lines = out.splitlines()
+    check("its steps: pulled, plugged back, pulled again",
+          [line for line in lines if line.startswith("step=")],
+          ["step=2", "step=4", "step=2"])
+    calls = lines[lines.index("calls:") + 1:] if "calls:" in lines else []
+    check("off, on, off", calls,
+          ["hmp --hmp 1 set_link net3 off", "hmp --hmp 1 set_link net3 on",
+           "hmp --hmp 1 set_link net3 off"])
 
 
 def _death_harness(cmdline, serial_text):

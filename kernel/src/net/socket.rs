@@ -770,8 +770,8 @@ extern "C" fn late_sender(_arg: u64) {
 /// sits in a blocking `recv` on the accepted connection. The receive must
 /// return exactly those bytes, and not before the send.
 ///
-/// Returns `Ok(None)` when the interface has no IPv4 address yet: the loopback
-/// divert keys on a non-zero local IP.
+/// Returns `Ok(None)` when the daemon says it has no IPv4 address yet: the
+/// loopback divert keys on a non-zero local IP.
 ///
 /// # Errors
 ///
@@ -785,7 +785,7 @@ pub fn self_test_blocking_recv_waits_for_late_data() -> KernelResult<Option<()>>
     /// Yields allowed for the late sender to finish after the receive.
     const FINISH_YIELDS: u32 = 4_000;
 
-    let me_ip = crate::net::interface::ip().0;
+    let me_ip = crate::net::netstack_client::daemon_interface()?.ip4;
     if me_ip == [0, 0, 0, 0] {
         return Ok(None);
     }
@@ -903,8 +903,8 @@ pub fn self_test_blocking_recv_waits_for_late_data() -> KernelResult<Option<()>>
 /// datagram socket. The count is the daemon's, carried in its poll completion
 /// (`netipc::ring::POLL_COUNTED`).
 ///
-/// Returns `Ok(None)` when the interface has no IPv4 address yet: the loopback
-/// divert keys on a non-zero local IP.
+/// Returns `Ok(None)` when the daemon says it has no IPv4 address yet: the
+/// loopback divert keys on a non-zero local IP.
 ///
 /// # Errors
 ///
@@ -917,7 +917,7 @@ pub fn self_test_fionread() -> KernelResult<Option<()>> {
     /// Polls allowed for the bytes to reach the accepted side.
     const ARRIVAL_POLLS: u32 = 200;
 
-    let me_ip = crate::net::interface::ip().0;
+    let me_ip = crate::net::netstack_client::daemon_interface()?.ip4;
     if me_ip == [0, 0, 0, 0] {
         return Ok(None);
     }
@@ -1044,8 +1044,8 @@ extern "C" fn hol_idle_reader(handle_raw: u64) {
 /// never returns, and a self-test that hangs turns a clear regression into a
 /// 2400-second timeout with no diagnosis.
 ///
-/// Returns `Ok(None)` when the interface has no IPv4 address yet: the loopback
-/// divert keys on a non-zero local IP, so there is nothing to assert.
+/// Returns `Ok(None)` when the daemon says it has no IPv4 address yet: the
+/// loopback divert keys on a non-zero local IP, so there is nothing to assert.
 ///
 /// # Errors
 ///
@@ -1070,7 +1070,7 @@ pub fn self_test_no_head_of_line() -> KernelResult<Option<()>> {
     /// reason and this allows more because the machine is busier here.
     const ACCEPT_SPINS: u32 = 64;
 
-    let me_ip = crate::net::interface::ip().0;
+    let me_ip = crate::net::netstack_client::daemon_interface()?.ip4;
     if me_ip == [0, 0, 0, 0] {
         return Ok(None);
     }
@@ -2015,18 +2015,28 @@ const LATE_DGRAM_PAYLOAD: &[u8] = b"slate-udp6:the-datagram-came-late";
 /// Set by [`late_dgram_sender`] once its send has returned (either way).
 static LATE_DGRAM_SENT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
+/// Where [`late_dgram_sender`] sends: the daemon's own link-local address,
+/// which the main task asked the daemon before it started the helper -- its
+/// two halves, big-endian.
+static LATE_DGRAM_TO: [core::sync::atomic::AtomicU64; 2] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
 /// Helper task for [`self_test_dgram_blocking_recv`]: wait 50 ms, then send the
 /// datagram the main task is already blocked receiving, on that same socket --
-/// to the daemon's own link-local address, as it says it.
+/// to the address [`LATE_DGRAM_TO`] holds.
 extern "C" fn late_dgram_sender(handle_raw: u64) {
     crate::sched::sleep_ms(50);
     let handle = SocketHandle::from_raw(handle_raw);
-    // Ignored on purpose: the main task judges the outcome by what it
-    // received. A datagram that never comes leaves it waiting -- its receive
-    // has no bound -- which the boot's liveness deadline then reports.
-    if let Ok(daemon) = crate::net::netstack_client::daemon_interface() {
-        let _ = dgram_send_to6(handle, &daemon.ip6, LATE_DGRAM_PORT, LATE_DGRAM_PAYLOAD);
+    let mut to = [0u8; 16];
+    for (half, at) in to.chunks_exact_mut(8).zip(&LATE_DGRAM_TO) {
+        half.copy_from_slice(&at.load(core::sync::atomic::Ordering::SeqCst).to_be_bytes());
     }
+    // Ignored on purpose: the main task judges the outcome by what it
+    // received. A send that fails leaves it waiting -- its receive has no
+    // bound -- which the boot's liveness deadline then reports.
+    let _ = dgram_send_to6(handle, &to, LATE_DGRAM_PORT, LATE_DGRAM_PAYLOAD);
     LATE_DGRAM_SENT.store(true, core::sync::atomic::Ordering::SeqCst);
 }
 
@@ -2043,7 +2053,12 @@ extern "C" fn late_dgram_sender(handle_raw: u64) {
 ///
 /// The daemon's address is its own answer (`daemon_interface`): the card it
 /// serves need not be the kernel's NIC (`net.nic`).
-pub fn self_test_dgram_blocking_recv() -> KernelResult<Option<()>> {
+///
+/// # Errors
+///
+/// The socket call's error, or `InternalError` for a datagram that came back
+/// wrong or a drained socket that did not say `WouldBlock`; each is said.
+pub fn self_test_dgram_blocking_recv() -> KernelResult<()> {
     const AF_INET6: u16 = 10;
     let ll = crate::net::netstack_client::daemon_interface()?.ip6;
     let handle = create_dgram(AF_INET6)?;
@@ -2061,6 +2076,14 @@ pub fn self_test_dgram_blocking_recv() -> KernelResult<Option<()>> {
     }
 
     LATE_DGRAM_SENT.store(false, core::sync::atomic::Ordering::SeqCst);
+    for (half, at) in ll.chunks_exact(8).zip(&LATE_DGRAM_TO) {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(half);
+        at.store(
+            u64::from_be_bytes(word),
+            core::sync::atomic::Ordering::SeqCst,
+        );
+    }
     if let Err(e) =
         crate::sched::spawn(b"dgram-late-sender", 16, late_dgram_sender, handle.raw(), 0)
     {
@@ -2110,7 +2133,7 @@ pub fn self_test_dgram_blocking_recv() -> KernelResult<Option<()>> {
         );
         return Err(KernelError::InternalError);
     }
-    Ok(Some(()))
+    Ok(())
 }
 
 /// `connect(2)` a datagram (`SOCK_DGRAM`) socket to a default peer.

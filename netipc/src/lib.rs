@@ -111,38 +111,52 @@ pub const OP_RING_TCP: u8 = 0x07;
 
 /// The daemon's own interface, as it serves it: no operands. Reply:
 /// [`ST_OK`] then [`IFINFO_LEN`] bytes, an [`IfInfo`] --
-/// `[mac:6][ipv4:4][ipv6:16][dns:4]` -- whichever card that is: the kernel's
-/// NIC, or one a driver process serves (`net.nic`), whose addresses the
-/// kernel does not hold.
+/// `[mac:6][ipv4:4][mask:4][gateway:4][ipv6:16][dns:4][up:1]` -- whichever
+/// card that is: the kernel's NIC, or one a driver process serves
+/// (`net.nic`), whose addresses the kernel does not hold.
 pub const OP_IFINFO: u8 = 0x08;
 
 /// The length of an [`OP_IFINFO`] reply's bytes after its status.
-pub const IFINFO_LEN: usize = 6 + 4 + 16 + 4;
+pub const IFINFO_LEN: usize = 6 + 4 + 4 + 4 + 16 + 4 + 1;
 
 /// The daemon's interface, as an [`OP_IFINFO`] reply says it: the card's MAC
-/// address, the IPv4 address it took, its IPv6 link-local address, and the
-/// DNS server it was given.
+/// address, the IPv4 address, mask and gateway it took, its IPv6 link-local
+/// address, the DNS server it was given, and whether the card has a link.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IfInfo {
     /// The card's MAC address.
     pub mac: [u8; 6],
     /// The IPv4 address the daemon took on it.
     pub ip4: [u8; 4],
+    /// That address's subnet mask.
+    pub mask: [u8; 4],
+    /// The IPv4 gateway it was given.
+    pub gateway: [u8; 4],
     /// Its IPv6 link-local address (EUI-64 from `mac`).
     pub ip6: [u8; 16],
     /// The DNS server it was given (its lease's).
     pub dns: [u8; 4],
+    /// Whether the card's link is up.
+    pub up: bool,
 }
 
 impl IfInfo {
-    /// An [`OP_IFINFO`] reply's bytes, read; `None` for bytes too few.
+    /// An [`OP_IFINFO`] reply's bytes, read; `None` for bytes too few, or a
+    /// link byte other than 0 or 1.
     #[must_use]
     pub fn parse(bytes: &[u8]) -> Option<Self> {
         Some(Self {
             mac: bytes.get(..6)?.try_into().ok()?,
             ip4: bytes.get(6..10)?.try_into().ok()?,
-            ip6: bytes.get(10..26)?.try_into().ok()?,
-            dns: bytes.get(26..IFINFO_LEN)?.try_into().ok()?,
+            mask: bytes.get(10..14)?.try_into().ok()?,
+            gateway: bytes.get(14..18)?.try_into().ok()?,
+            ip6: bytes.get(18..34)?.try_into().ok()?,
+            dns: bytes.get(34..38)?.try_into().ok()?,
+            up: match bytes.get(38)? {
+                0 => false,
+                1 => true,
+                _ => return None,
+            },
         })
     }
 
@@ -150,12 +164,16 @@ impl IfInfo {
     #[must_use]
     pub fn bytes(&self) -> [u8; IFINFO_LEN] {
         let mut out = [0u8; IFINFO_LEN];
+        let up = [u8::from(self.up)];
         let fields = self
             .mac
             .iter()
             .chain(&self.ip4)
+            .chain(&self.mask)
+            .chain(&self.gateway)
             .chain(&self.ip6)
-            .chain(&self.dns);
+            .chain(&self.dns)
+            .chain(&up);
         for (o, b) in out.iter_mut().zip(fields) {
             *o = *b;
         }
@@ -717,17 +735,23 @@ mod tests {
         let info = IfInfo {
             mac: [0x52, 0x54, 0, 0x12, 0x34, 0x59],
             ip4: [10, 0, 2, 15],
+            mask: [255, 255, 255, 0],
+            gateway: [10, 0, 2, 2],
             ip6,
             dns: [10, 0, 2, 3],
+            up: true,
         };
         let bytes = info.bytes();
         assert_eq!(bytes[..6], info.mac);
         assert_eq!(bytes[6..10], info.ip4);
-        assert_eq!(bytes[10..26], info.ip6);
-        assert_eq!(bytes[26..], info.dns);
+        assert_eq!(bytes[10..14], info.mask);
+        assert_eq!(bytes[14..18], info.gateway);
+        assert_eq!(bytes[18..34], info.ip6);
+        assert_eq!(bytes[34..38], info.dns);
+        assert_eq!(bytes[38], 1);
         assert_eq!(IfInfo::parse(&bytes), Some(info));
         // Behind a status byte, as the reply carries it.
-        let mut out = [0u8; 40];
+        let mut out = [0u8; 48];
         let n = encode_ok_bytes(&mut out, &bytes).unwrap();
         match parse_bytes_reply(&out[..n]) {
             BytesReply::Ok(b) => assert_eq!(IfInfo::parse(b), Some(info)),
@@ -735,6 +759,13 @@ mod tests {
         }
         // A byte short is no reply.
         assert_eq!(IfInfo::parse(&bytes[..IFINFO_LEN - 1]), None);
+        // The link byte is 0 or 1, and nothing else.
+        let down = IfInfo { up: false, ..info };
+        assert_eq!(down.bytes()[38], 0);
+        assert_eq!(IfInfo::parse(&down.bytes()), Some(down));
+        let mut odd = bytes;
+        odd[38] = 2;
+        assert_eq!(IfInfo::parse(&odd), None);
     }
 
     #[test]

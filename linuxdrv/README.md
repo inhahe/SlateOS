@@ -159,6 +159,18 @@ from Linux code anywhere in that driver process fails the run
 by `scripts/pikvm.py stage` -- `nic-check` told the network is a real one
 (`lan`: the multicast check skipped, a few pings allowed lost).
 
+A running system's network can be such a card too (design-decisions 1594).
+Two boot options, both off by default and read only with `net.userspace`
+on: `linuxdrv.serve=<driver>@<BB:DD.F>` starts `linuxdrv/<driver>` at boot,
+serving that network controller as `nic.<driver>` for the system's life
+(no `stacks=` limit) -- refused, before the card is touched, for a function
+that is not a network controller or that a driver already holds -- and
+`net.nic=nic.<driver>` has the persistent netstack daemon serve every
+socket over it, rather than over the kernel's NIC. The daemon says its own
+interface (`netipc::OP_IFINFO`), so the kernel's socket and DNS paths, and
+its self-tests, follow whichever card it serves. Nothing yet restarts either
+process (known-issues `A-PERSISTENT-NETWORK-PROCESSES-ARE-NOT-RESTARTED`).
+
 The first WiFi driver, Linux's own `mt7925e` (`linuxdrv/mt7925e/`), drives
 the test PC's MediaTek RZ717 on top of Linux's own 802.11 stack -- mac80211
 and cfg80211, with nl80211 -- compiled into its process. The layer is

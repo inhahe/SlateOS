@@ -124,12 +124,46 @@ pub fn userspace_enabled() -> bool {
         .is_none_or(|v| v.is_empty() || v == "1" || v == "yes" || v == "true")
 }
 
+/// Whether the persistent daemon serves sockets over a card a Linux driver
+/// process serves (`net.nic`), set once it has registered: the root
+/// namespace's native sockets, its DNS and its interface (`SYS_NET_IF_INFO`)
+/// are then the daemon's, as they are while it holds the kernel's NIC
+/// (`net::raw::is_claimed`) -- the kernel's NIC, which it does not claim,
+/// staying the kernel's.
+static SERVES_A_CARD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Whether the persistent daemon serves sockets over a driver process's card
+/// ([`SERVES_A_CARD`]).
+pub fn serves_a_card() -> bool {
+    SERVES_A_CARD.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// The DNS server the daemon serving a card has now -- its lease's, which a
+/// renewal or a new network may change, so asked each time -- when it serves
+/// one and has one.
+pub fn card_dns() -> Option<[u8; 4]> {
+    if !serves_a_card() {
+        return None;
+    }
+    // A daemon not answering has no resolver to offer: the caller falls back
+    // to the kernel NIC's server, and the query, which goes to the daemon
+    // all the same (`dns::dns_query_raw`), fails there with its own error.
+    let dns = daemon_interface().ok()?.dns;
+    (dns != [0; 4]).then_some(dns)
+}
+
+/// The persistent daemon has registered serving a driver process's card.
+pub(crate) fn set_serves_a_card() {
+    SERVES_A_CARD.store(true, core::sync::atomic::Ordering::Release);
+}
+
 /// The interface the running `net.stack` daemon serves, as it says it
-/// (`netipc::OP_IFINFO`): its MAC address, IPv4 address, IPv6 link-local
-/// address and DNS server. Whichever card that is -- the kernel's NIC, or one
-/// a Linux driver process serves (`net.nic`), whose addresses the kernel does
-/// not hold -- so a self-test that loops traffic back to the daemon, or asks
-/// its DNS server, asks here, never [`crate::net::interface`].
+/// (`netipc::OP_IFINFO`): its MAC address, IPv4 address, mask and gateway,
+/// IPv6 link-local address, DNS server and link. Whichever card that is --
+/// the kernel's NIC, or one a Linux driver process serves (`net.nic`), whose
+/// addresses the kernel does not hold -- so a self-test that loops traffic
+/// back to the daemon, or asks its DNS server, asks here, never
+/// [`crate::net::interface`].
 ///
 /// # Errors
 ///
@@ -1945,9 +1979,10 @@ pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
 ///
 /// Like the v6 TCP test, slirp offers no IPv6 peer under QEMU, so this uses the
 /// daemon's loopback divert: a frame addressed to `me.ip6` (the daemon's
-/// EUI-64 link-local, derived from the NIC MAC) is routed into the daemon's RX
-/// FIFO instead of the wire. The test binds a UDP socket on a fixed port, sends a
-/// datagram to `[me.ip6]:port`, then polls for it to come back. Because
+/// EUI-64 link-local, which it says through [`daemon_interface`]) is routed
+/// into the daemon's RX FIFO instead of the wire. The test binds a UDP socket
+/// on a fixed port, sends a datagram to `[me.ip6]:port`, then polls for it
+/// to come back. Because
 /// [`NetstackConn::udp_send_to6`] uses the socket's own local port as the UDP source, the
 /// looped-back datagram is delivered to the very socket that sent it. A received
 /// datagram whose source header reports `AF_INET6`, the local link-local address,
@@ -1955,20 +1990,13 @@ pub fn self_test_udp_dns(dns_ip: &[u8; 4]) -> KernelResult<Option<()>> {
 /// loopback → daemon v6 RX classify (`parse_udp` IPv6 arm) → `OP_UDP_RECV` with
 /// the `UDP_AF_INET6` in-band header → kernel client.
 ///
-/// The EUI-64 link-local derivation is inlined (the kernel crate cannot depend on
-/// `netproto`), matching [`self_test_connect6`] and `icmpv6::link_local_from_mac`.
-///
-/// Returns `Ok(Some(()))` on a proven v6 datagram round-trip, `Ok(None)` if there
-/// is no NIC yet (no MAC → the daemon has no `me.ip6` to loop back to), and `Err`
-/// on a real control-protocol fault or a parity break (bind/send failure, or the
-/// looped-back datagram never arriving).
-///
 /// # Errors
 ///
-/// Propagates control-protocol faults from the client; a bind/send failure or a
-/// missing loopback datagram is reported as an error (the v6 UDP path is broken,
-/// not mere network variance — the loopback is deterministic and in-process).
-pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
+/// Propagates control-protocol faults from the client, [`daemon_interface`]'s
+/// among them; a bind/send failure or a missing loopback datagram is reported
+/// as an error (the v6 UDP path is broken, not mere network variance — the
+/// loopback is deterministic and in-process).
+pub fn self_test_udp6_loopback() -> KernelResult<()> {
     /// Loopback datagram port (arbitrary, distinct from the other self-tests').
     const PORT: u16 = 9201;
     const PAYLOAD: &[u8] = b"slate-udp6:datagram-loopback";
@@ -2024,7 +2052,7 @@ pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
                         len,
                         src_port
                     );
-                    return Ok(Some(()));
+                    return Ok(());
                 }
                 if family != netipc::ring::UDP_AF_INET6 && len > 0 {
                     conn.close()?;
@@ -2074,15 +2102,12 @@ pub fn self_test_udp6_loopback() -> KernelResult<Option<()>> {
 ///    UDP socket to its peer. A receive that returns any datagram means the filter
 ///    leaked.
 ///
-/// Returns `Ok(Some(()))` on both phases proven, `Ok(None)` if there is no NIC yet
-/// (no MAC → the daemon has no `me.ip6`), and `Err` on a control-protocol fault or
-/// a parity break.
-///
 /// # Errors
 ///
-/// Propagates control-protocol faults; a bind/connect/send failure, a missing
-/// loopback datagram (phase 1), or a leaked filter (phase 2) is an error.
-pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
+/// Propagates control-protocol faults, [`daemon_interface`]'s among them; a
+/// bind/connect/send failure, a missing loopback datagram (phase 1), or a
+/// leaked filter (phase 2) is an error.
+pub fn self_test_udp_connect() -> KernelResult<()> {
     use crate::net::socket::{self, DgramPeer};
     /// Bound/connected port for phase 1 (self-connect).
     const PORT: u16 = 9310;
@@ -2211,7 +2236,7 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
          (filter-pass), getpeername ok, non-peer datagram dropped (filter-drop) — \
          SOCK_DGRAM connect parity"
     );
-    Ok(Some(()))
+    Ok(())
 }
 
 /// Boot self-test: UDP **multicast** end to end through the
@@ -2241,8 +2266,9 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
 /// Then for IPv6: join before bind, hop limit 0 read back, bind, and the
 /// send to the group comes back as an `AF_INET6` datagram.
 ///
-/// Returns `Ok(Some(()))` when every step held, `Ok(None)` with no NIC (the
-/// daemon then has no interface to be a member on), `Err` on any break.
+/// Returns `Ok(Some(()))` when every step held, `Ok(None)` when the daemon
+/// says it has no card (an all-zero MAC: no interface to be a member on),
+/// `Err` on any break.
 ///
 /// # Errors
 ///
@@ -2250,16 +2276,24 @@ pub fn self_test_udp_connect() -> KernelResult<Option<()>> {
 /// serial line naming it; a control-protocol fault propagates as itself.
 pub fn self_test_udp_multicast() -> KernelResult<Option<()>> {
     use crate::net::socket;
-    // The interface the daemon is a member on is the one it serves.
-    if daemon_interface()?.mac == [0u8; 6] {
+    // The interface the daemon is a member on is the one it serves, asked
+    // once: whether the kernel's NIC's filter is the daemon's follows.
+    let daemon = daemon_interface()?;
+    if daemon.mac == [0u8; 6] {
         return Ok(None);
     }
+    let kernel_filter = daemon.mac == crate::net::interface::mac().0;
+    if !kernel_filter {
+        crate::serial_println!(
+            "[netstack-client]   multicast: the daemon serves a driver process's card, whose filter crosses the port -- the kernel's NIC's filter is not checked"
+        );
+    }
     let h = socket::create_dgram(2)?;
-    let v4 = multicast_v4_steps(h);
+    let v4 = multicast_v4_steps(h, kernel_filter);
     socket::close(h);
     v4?;
     let h6 = socket::create_dgram(10)?;
-    let v6 = multicast_v6_steps(h6);
+    let v6 = multicast_v6_steps(h6, kernel_filter);
     socket::close(h6);
     v6?;
     crate::serial_println!(
@@ -2384,12 +2418,17 @@ fn mcast_arrives(
 /// Check the network cards' multicast filter, which the daemon sets through
 /// `SYS_NET_RAW_MCAST` (`net::mcast_filter`), is the daemon's and does
 /// (`want`) or does not pass `mac`.
-fn mcast_filter_check(what: &str, mac: [u8; 6], want: bool) -> KernelResult<()> {
+fn mcast_filter_check(
+    kernel_filter: bool,
+    what: &str,
+    mac: [u8; 6],
+    want: bool,
+) -> KernelResult<()> {
     // The kernel's NIC's filter is the daemon's only when the daemon serves
-    // that NIC. A card a driver process serves (`net.nic`) keeps its own,
-    // its groups sent across the port (linuxdrv's lx_nic.c), which the
-    // driver's own self-test checks.
-    if daemon_interface()?.mac != crate::net::interface::mac().0 {
+    // that NIC (`kernel_filter`). A card a driver process serves (`net.nic`)
+    // keeps its own, its groups sent across the port (linuxdrv's lx_nic.c),
+    // which the driver's own self-test checks.
+    if !kernel_filter {
         return Ok(());
     }
     let (owner, addrs) = crate::net::mcast_filter::current()?;
@@ -2422,7 +2461,10 @@ fn mcast_check(what: &str, got: bool, want: bool) -> KernelResult<()> {
 }
 
 /// The IPv4 steps of [`self_test_udp_multicast`] on the fresh socket `h`.
-fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
+fn multicast_v4_steps(
+    h: crate::net::socket::SocketHandle,
+    kernel_filter: bool,
+) -> KernelResult<()> {
     use crate::net::socket;
     use netipc::ring as r;
     let af = netipc::ring::UDP_AF_INET;
@@ -2432,12 +2474,27 @@ fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
     mcast_expect_get(h, "TTL set unbound", r::UDP_OPT_MCAST_TTL, 0)?;
     // 2. Joins before bind, and the daemon's refusals. The daemon's filter
     // has the base groups from the start, and the group from its join.
-    mcast_filter_check("all-hosts", crate::net::mcast_filter::ALL_HOSTS_MAC, true)?;
-    mcast_filter_check("all-nodes", crate::net::mcast_filter::ALL_NODES_MAC, true)?;
-    mcast_filter_check("the group before the join", MCAST_GROUP4_MAC, false)?;
+    mcast_filter_check(
+        kernel_filter,
+        "all-hosts",
+        crate::net::mcast_filter::ALL_HOSTS_MAC,
+        true,
+    )?;
+    mcast_filter_check(
+        kernel_filter,
+        "all-nodes",
+        crate::net::mcast_filter::ALL_NODES_MAC,
+        true,
+    )?;
+    mcast_filter_check(
+        kernel_filter,
+        "the group before the join",
+        MCAST_GROUP4_MAC,
+        false,
+    )?;
     let join = mcast_group4(MCAST_GROUP4, [0; 4], true);
     mcast_expect_set(h, "join", join, Ok(()))?;
-    mcast_filter_check("the joined group", MCAST_GROUP4_MAC, true)?;
+    mcast_filter_check(kernel_filter, "the joined group", MCAST_GROUP4_MAC, true)?;
     mcast_expect_set(
         h,
         "join twice",
@@ -2498,6 +2555,7 @@ fn multicast_v4_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
     let leave = mcast_group4(MCAST_GROUP4, [0; 4], false);
     mcast_expect_set(h, "leave", leave, Ok(()))?;
     mcast_filter_check(
+        kernel_filter,
         "the group after its last member left",
         MCAST_GROUP4_MAC,
         false,
@@ -2551,7 +2609,10 @@ fn multicast_refused_bind(h2: crate::net::socket::SocketHandle) -> KernelResult<
 
 /// The IPv6 steps of [`self_test_udp_multicast`] on the fresh `AF_INET6`
 /// socket `h`.
-fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
+fn multicast_v6_steps(
+    h: crate::net::socket::SocketHandle,
+    kernel_filter: bool,
+) -> KernelResult<()> {
     use crate::net::socket;
     use netipc::ring as r;
     let join = netipc::sockopt::Set::Group {
@@ -2560,7 +2621,7 @@ fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
         len: r::UDP_MREQ6_LEN,
     };
     mcast_expect_set(h, "v6 join", join, Ok(()))?;
-    mcast_filter_check("the joined v6 group", MCAST_GROUP6_MAC, true)?;
+    mcast_filter_check(kernel_filter, "the joined v6 group", MCAST_GROUP6_MAC, true)?;
     mcast_expect_set(
         h,
         "hop limit 0",
@@ -2586,7 +2647,12 @@ fn multicast_v6_steps(h: crate::net::socket::SocketHandle) -> KernelResult<()> {
         len: r::UDP_MREQ6_LEN,
     };
     mcast_expect_set(h, "v6 leave", leave, Ok(()))?;
-    mcast_filter_check("the v6 group after the leave", MCAST_GROUP6_MAC, false)
+    mcast_filter_check(
+        kernel_filter,
+        "the v6 group after the leave",
+        MCAST_GROUP6_MAC,
+        false,
+    )
 }
 
 /// Boot self-test: prove that a **non-blocking** receive on a freshly-connected
@@ -2923,8 +2989,8 @@ pub fn self_test_nonblock_send(ip: &[u8; 4], port: u16) -> KernelResult<Option<(
 /// own ([`alloc_conn_id`]), all demuxed by the daemon by 4-tuple.
 ///
 /// Returns `Ok(Some(()))` if the listen→connect→accept→data round-trip completed,
-/// `Ok(None)` if the interface has no IPv4 address yet (no DHCP lease — loopback
-/// needs a non-zero `me.ip`, nothing to assert), and `Err` on a real
+/// `Ok(None)` if the daemon says it has no IPv4 address yet (no DHCP lease —
+/// loopback needs a non-zero `me.ip`, nothing to assert), and `Err` on a real
 /// control-protocol fault or a parity break (listen/accept/connect failing over
 /// loopback, or the echoed data mismatching).
 ///
@@ -2980,7 +3046,7 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
     const CLIENT_MSG: &[u8] = b"slate-listen-accept:ping";
     const SERVER_MSG: &[u8] = b"slate-listen-accept:pong";
 
-    let me_ip = crate::net::interface::ip().0;
+    let me_ip = daemon_interface()?.ip4;
     if me_ip == [0, 0, 0, 0] {
         // No lease yet — the loopback divert keys on a non-zero me.ip.
         return Ok(None);
@@ -3217,8 +3283,8 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
 /// Like [`self_test_listen_accept`], it exercises the daemon's **in-process software
 /// loopback** because slirp offers no IPv6 peer (and no IPv6 router, so real NDP
 /// cannot be driven end-to-end under QEMU). The connect target is the daemon's own
-/// **link-local address** `fe80::/64 + EUI-64(mac)` — the same value the daemon
-/// derives from its NIC MAC for `me.ip6`. A frame addressed to `me.ip6` is diverted
+/// **link-local address** `fe80::/64 + EUI-64(mac)`, its `me.ip6`, as it says it
+/// through [`daemon_interface`]. A frame addressed to `me.ip6` is diverted
 /// into the daemon's internal RX FIFO (bypassing NDP entirely, since the loopback
 /// demuxes by destination IP), so the v6 handshake completes in-process exactly as
 /// the v4 loopback does. A single non-blocking `OP_CONNECT6` pump drives the 3-way
@@ -3226,20 +3292,12 @@ pub fn self_test_listen_accept() -> KernelResult<Option<()>> {
 /// dequeues the passive side; then a bidirectional exchange proves the accepted
 /// IPv6 connection is a real, addressable socket.
 ///
-/// The kernel crate cannot depend on `netproto`, so the EUI-64 link-local
-/// derivation is inlined here (RFC 4291 App. A: flip the U/L bit of the first MAC
-/// octet, insert `FF:FE` in the middle) to reproduce `icmpv6::link_local_from_mac`.
-///
-/// Returns `Ok(Some(()))` if the v6 connect→accept→data round-trip completed,
-/// `Ok(None)` if the interface has no MAC yet (no NIC — the loopback v6 divert keys
-/// on a non-zero `me.ip6` derived from the MAC), and `Err` on a real
-/// control-protocol fault or a parity break.
-///
 /// # Errors
 ///
-/// Propagates control-protocol faults from the client; reports a failed
-/// connect6/accept over loopback, or a data mismatch, as an error.
-pub fn self_test_connect6() -> KernelResult<Option<()>> {
+/// Propagates control-protocol faults from the client, [`daemon_interface`]'s
+/// among them; reports a failed connect6/accept over loopback, or a data
+/// mismatch, as an error.
+pub fn self_test_connect6() -> KernelResult<()> {
     /// Loopback listen port (arbitrary, distinct from the v4 self-test's).
     const PORT: u16 = 9101;
     const CLIENT_MSG: &[u8] = b"slate-connect6:ping";
@@ -3414,7 +3472,7 @@ pub fn self_test_connect6() -> KernelResult<Option<()>> {
     crate::serial_println!(
         "[netstack-client]   IPv6 connect/accept + bidirectional data + getsockname over loopback ok — IPv6 parity ok"
     );
-    Ok(Some(()))
+    Ok(())
 }
 
 /// Blocking-receive helper for the listen/accept self-test: read from `conn_id`

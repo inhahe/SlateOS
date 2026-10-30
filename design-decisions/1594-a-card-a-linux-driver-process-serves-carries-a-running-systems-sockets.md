@@ -16,26 +16,44 @@ are off by default.
    the kernel's self-tests, the kernel starts `linuxdrv/<driver>` and never
    reaps it, serving the card at that PCI address as `nic.<driver>` for the
    system's life (the driver's `serve=` mode with no `stacks=` limit). It
-   holds the card, a File capability to read the card's firmware, and the
-   right to register that one name. A value that is not a driver's name and
-   a PCI address, a driver not loaded, a function not there or one a kernel
-   driver holds is refused and said (`WARNING` at boot), the boot going on.
-2. **`net.nic=<service>`** (`proc::spawn::run_persistent_netstack`): the
-   persistent netstack daemon serves `serve-net <service>` -- attaching to
-   the card over its port (decision 1589) -- holding the card's key and the
-   right to register `net.stack` alone, not the kernel's NIC, which stays the
-   kernel's. It is started even when the kernel has no network of its own,
-   and given 40 s, not 3, to register: it registers once it has attached and
-   taken an address.
-3. **The daemon says its own interface** (`netipc::OP_IFINFO`,
-   `netstack_client::daemon_interface`): its card's MAC, IPv4 address, IPv6
-   link-local address and DNS server. Every kernel self-test that loops
-   traffic back to the daemon, or asks its DNS server, asks it, rather than
-   deriving the daemon's addresses from the kernel's NIC -- which over
-   another card belong to no one (an IPv6 datagram the daemon would never
-   hear left a blocking receive waiting until the boot's deadline). The
-   kernel's multicast filter is checked only where the daemon serves the
-   kernel's NIC; a driver's card keeps its own filter across the port.
+   holds the card and the right to register that one name -- and, for a
+   driver that reads its card's firmware (`FIRMWARE_DRIVERS`: `mt7925e`), a
+   File capability to read it, which reads any file and so goes to no
+   other. The card is chosen as `linuxdrv.card` chooses one
+   (`card_choice`, `CardKind::Network`): a value that is not a driver's
+   name and a PCI address, a driver not loaded, a function not there, one
+   that is not a network controller (PCI class 02 -- a slip naming the GPU
+   is refused before its decoding is touched) or one a driver holds is
+   refused and said (`WARNING` at boot, and the linuxdrv self-test fails),
+   the boot going on.
+2. **`net.nic=<service>`** (`linuxdrv::netstack_card`,
+   `proc::spawn::run_persistent_netstack`): the persistent netstack daemon
+   serves `serve-net <service>` -- attaching to the card over its port
+   (decision 1589) -- holding the card's key and the right to register
+   `net.stack` alone, not the kernel's NIC, which stays the kernel's. It is
+   honoured only when it names the card `linuxdrv.serve` started serving;
+   empty, or naming another, or with no card served, it is said and the
+   daemon serves the kernel's NIC. It is started even when the kernel has no
+   network of its own, and given 60 s, not 3, to register -- it registers
+   once it has attached (its own limit 30 s) and taken an address (about
+   10 s) -- the kernel sleeping between looks and saying at once, with its
+   exit code, a daemon that ended first. Both options are read only with
+   `net.userspace` on; without it, either given is said to be unread.
+3. **Over the card, the root namespace's network is the daemon's.** Native
+   sockets and the resolver go to it (`netstack_client::serves_a_card`, as
+   `raw::is_claimed` does while it holds the kernel's NIC), the resolver's
+   server is its lease's, asked each time (`card_dns`), and
+   `SYS_NET_IF_INFO` says its interface. The kernel's own stack keeps the
+   kernel's NIC, which a container's namespace still uses (A-Q29).
+4. **The daemon says its own interface** (`netipc::OP_IFINFO`,
+   `netstack_client::daemon_interface`): its card's MAC, IPv4 address, mask
+   and gateway, IPv6 link-local address, DNS server and link. Every kernel
+   self-test that loops traffic back to the daemon -- IPv4 and IPv6 alike
+   -- or asks its DNS server, asks it, rather than deriving the daemon's
+   addresses from the kernel's NIC, which over another card belong to no
+   one. The kernel's multicast filter is checked only where the daemon
+   serves the kernel's NIC; a driver's card keeps its own filter across the
+   port.
 
 ### Alternatives
 
@@ -50,15 +68,25 @@ are off by default.
   daemon request, but the kernel would keep a second record of what the
   daemon holds; asking the daemon cannot drift.
 
+### What it does not do yet
+
+- Nothing restarts either process, and each gives up at start-up on a card
+  with no link or a network with no DHCP answer: known-issues
+  `A-PERSISTENT-NETWORK-PROCESSES-ARE-NOT-RESTARTED`.
+- `/proc/net`, `/sys/devices/net`, `netstat` and `SYS_NET_IF_CONFIG` still
+  describe and configure the kernel's NIC alone: known-issues
+  `A-INTERFACE-VIEWS-SHOW-ONLY-THE-KERNELS-NIC`.
+
 ### Checked by
 
 `check_parse_serve` (every boot): `linuxdrv.serve`'s value read, and each
-malformed one refused as what it is. A QEMU boot with
-`linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e` (2026-10-30): Linux's
-e1000e serving the spare 82574 for the system's life, the daemon attached
-and given an address by DHCP through it, and every persistent-daemon check
-over it -- DNS, TCP, UDP, non-blocking I/O, poll, listen/accept, IPv6
-connect and datagrams, the blocking receive, connected UDP, multicast, and
-the ring-3 HTTP fetch -- passing. The default boot keeps the daemon on the
-kernel's NIC, whose persistent path every boot test checks, `OP_IFINFO`
-with it.
+malformed one refused as what it is; and the linuxdrv self-test chooses the
+card a `linuxdrv.serve` given names, as `serve_at_boot` will. A QEMU boot
+with `linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e` (2026-10-30):
+Linux's e1000e serving the spare 82574 for the system's life, the daemon
+attached and given an address by DHCP through it, and every
+persistent-daemon check over it -- DNS, TCP, UDP, non-blocking I/O, poll,
+listen/accept, IPv6 connect and datagrams, the blocking receive, connected
+UDP, multicast, the native socket and resolver parity, and the ring-3 HTTP
+fetch -- passing. The default boot keeps the daemon on the kernel's NIC,
+whose persistent path every boot test checks, `OP_IFINFO` with it.

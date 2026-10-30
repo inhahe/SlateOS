@@ -9075,18 +9075,32 @@ extern "C" fn kernel_main() -> ! {
             if crate::net::netstack_client::userspace_enabled() {
                 // A card a Linux driver process serves for the system's life
                 // (`linuxdrv.serve`), first: the daemon `net.nic` points at it
-                // attaches to it.
-                if let Err(e) = linuxdrv::serve_at_boot() {
+                // attaches to it -- or, that card not served, the daemon
+                // serves the kernel's NIC, which is said.
+                let served = linuxdrv::serve_at_boot().unwrap_or_else(|e| {
                     serial_println!(
                         "WARNING: the Linux driver process linuxdrv.serve names was not started: {:?}",
                         e
                     );
-                }
-                if let Err(e) = proc::spawn::run_persistent_netstack() {
+                    None
+                });
+                let card = linuxdrv::netstack_card(served.as_deref());
+                if let Err(e) = proc::spawn::run_persistent_netstack(card.as_deref()) {
                     serial_println!(
                         "WARNING: persistent userspace netstack (ring 3) startup failed: {:?}",
                         e
                     );
+                }
+            } else {
+                // The options that put a driver process's card into service
+                // are read only where the daemon serves sockets: said, so a
+                // card configured and carrying nothing is not a mystery.
+                for option in ["linuxdrv.serve", "net.nic"] {
+                    if crate::fs::kernparam::get(option).is_some() {
+                        serial_println!(
+                            "NOTE: {option} is read only with net.userspace on: no card is served by it"
+                        );
+                    }
                 }
             }
 

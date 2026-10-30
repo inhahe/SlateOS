@@ -110,6 +110,15 @@ static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
 static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
 /// Number of cache evictions (when a slot is reused for a new entry).
 static CACHE_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+/// Number of queries sent over the network daemon ([`dns_query_daemon`]).
+static DAEMON_QUERIES: AtomicU64 = AtomicU64::new(0);
+
+/// How many queries have gone over the network daemon rather than the
+/// kernel's own UDP: for a self-test to tell which way a resolve went.
+#[must_use]
+pub fn daemon_queries() -> u64 {
+    DAEMON_QUERIES.load(Ordering::Relaxed)
+}
 
 /// DNS cache statistics snapshot.
 #[derive(Debug, Clone, Copy)]
@@ -1119,6 +1128,11 @@ impl core::fmt::Display for DnsServer {
 /// Prefers IPv4 (from DHCP) since it's more widely deployed.  Falls back
 /// to IPv6 (from SLAAC RDNSS) when no IPv4 DNS server is configured.
 fn pick_dns_server_root() -> KernelResult<DnsServer> {
+    // Over a card the daemon serves (`net.nic`), its lease's server: the
+    // kernel's NIC, which the daemon does not hold, may have none.
+    if let Some([a, b, c, d]) = super::netstack_client::card_dns() {
+        return Ok(DnsServer::V4(Ipv4Addr::new(a, b, c, d)));
+    }
     let v4 = interface::info().dns;
     if !v4.is_unspecified() {
         return Ok(DnsServer::V4(v4));
@@ -1176,8 +1190,9 @@ fn pick_dns_server() -> KernelResult<DnsServer> {
 #[allow(clippy::arithmetic_side_effects)]
 fn dns_query_raw(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
     // While the network daemon holds the card, the kernel's own UDP can send
-    // but never hears the answer: what arrives is the daemon's to read.
-    if super::raw::is_claimed() {
+    // but never hears the answer: what arrives is the daemon's to read. Over
+    // a card a driver process serves, the question goes the daemon's way too.
+    if super::raw::is_claimed() || super::netstack_client::serves_a_card() {
         return dns_query_daemon(server, query, name);
     }
     // Port 0 means "any free port", which the allocator draws from the
@@ -1271,6 +1286,7 @@ const MAX_DNS_REPLY: usize = netipc::ring::UDP_DGRAM_MAX;
 fn dns_query_daemon(server: &DnsServer, query: &[u8], name: &str) -> KernelResult<Vec<u8>> {
     use super::socket;
 
+    DAEMON_QUERIES.fetch_add(1, Ordering::Relaxed);
     let sock = socket::create_dgram(match server {
         DnsServer::V4(_) => socket::AF_INET,
         DnsServer::V6(_) => socket::AF_INET6,

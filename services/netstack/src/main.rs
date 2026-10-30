@@ -2963,8 +2963,11 @@ fn handle_request(
             let info = netipc::IfInfo {
                 mac: me.mac,
                 ip4: me.ip,
+                mask: me.mask,
+                gateway: me.gateway,
                 ip6: me.ip6,
                 dns: me.dns,
+                up: nic::link_up(),
             };
             netipc::encode_ok_bytes(out, &info.bytes()).unwrap_or_else(|| fail(out))
         }

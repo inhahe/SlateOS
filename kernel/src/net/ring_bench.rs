@@ -138,7 +138,7 @@ fn round_trip(p: Pair, len: usize) -> KernelResult<u64> {
 /// Connections are made and accepted one at a time: the daemon's backlog holds
 /// only a few, and a tier is larger.
 fn open_pairs(mode: RingMode, k: usize) -> KernelResult<(SocketHandle, Vec<Pair>)> {
-    let me_ip = crate::net::interface::ip().0;
+    let me_ip = netstack_client::daemon_interface()?.ip4;
     if me_ip == [0, 0, 0, 0] {
         return Err(KernelError::NotConnected);
     }
@@ -625,14 +625,14 @@ pub fn run() -> KernelResult<()> {
 /// A small run of the harness on every boot, so it cannot rot between bench
 /// boots: two connections, both designs, request/response and idle-beside-busy.
 ///
-/// Returns `Ok(None)` when the interface has no IPv4 address yet: the
+/// Returns `Ok(None)` when the daemon says it has no IPv4 address yet: the
 /// loopback divert keys on a non-zero local IP.
 ///
 /// # Errors
 ///
 /// A load that fails, times out, or produced no samples.
 pub fn self_test() -> KernelResult<Option<()>> {
-    if crate::net::interface::ip().0 == [0, 0, 0, 0] {
+    if netstack_client::daemon_interface()?.ip4 == [0, 0, 0, 0] {
         return Ok(None);
     }
     for mode in [RingMode::Shared, RingMode::PerSocket] {

@@ -190,6 +190,10 @@ pub fn self_test() -> KernelResult<()> {
     // skipped, which would read as the card's absence.
     let named = named_card(CardKind::IntelEthernet)?;
     let named_wifi = named_card(CardKind::MediatekWifi)?;
+    // The card the operator has a driver process serve for the system's life
+    // (`linuxdrv.serve`): refused here as the others are, not only warned of
+    // when it is started past the self-tests.
+    served_card()?;
     let needs: [(bool, &str, &[u8]); 2] = [
         (named.is_some(), "linuxdrv/e1000e", E1000E),
         (named_wifi.is_some(), "linuxdrv/mt7925e", MT7925E),
@@ -1209,6 +1213,9 @@ enum CardKind {
     /// controller of subclass 80, "other", which is WiFi's (class 02) --
     /// the test PC's RZ717.
     MediatekWifi,
+    /// `linuxdrv.serve`'s ([`serve_at_boot`]): any network controller
+    /// (class 02), the driver process named being the one to drive it.
+    Network,
 }
 
 impl CardKind {
@@ -1217,6 +1224,7 @@ impl CardKind {
         match self {
             CardKind::IntelEthernet => "linuxdrv.card",
             CardKind::MediatekWifi => "linuxdrv.wifi",
+            CardKind::Network => "linuxdrv.serve",
         }
     }
 
@@ -1225,6 +1233,7 @@ impl CardKind {
         let (vendor, subclass) = match self {
             CardKind::IntelEthernet => (devprobe::INTEL, 0x00),
             CardKind::MediatekWifi => (MEDIATEK, 0x80),
+            CardKind::Network => return card.class == 0x02,
         };
         card.vendor_id == vendor && card.class == 0x02 && card.subclass == subclass
     }
@@ -1235,6 +1244,7 @@ impl core::fmt::Display for CardKind {
         f.write_str(match self {
             CardKind::IntelEthernet => "an Intel Ethernet controller",
             CardKind::MediatekWifi => "a MediaTek WiFi card",
+            CardKind::Network => "a network controller",
         })
     }
 }
@@ -1326,7 +1336,7 @@ fn card_choice(
 /// `InternalError`, said, for an answer that is not right.
 fn check_card_choice() -> KernelResult<()> {
     use crate::pci::{PciAddress, PciDevice};
-    use CardKind::{IntelEthernet, MediatekWifi};
+    use CardKind::{IntelEthernet, MediatekWifi, Network};
     let function = |device, function, vendor_id, class, subclass| PciDevice {
         address: PciAddress {
             bus: 0,
@@ -1386,6 +1396,14 @@ fn check_card_choice() -> KernelResult<()> {
             MediatekWifi,
             Err(CardRefused::NotA(MediatekWifi)),
         ),
+        // `linuxdrv.serve`: any network controller, wired or not, of any maker
+        // -- never the GPU, a bridge or an audio function a slip names.
+        ("00:1f.6", Network, Ok((0x1f, 6))),
+        ("00:05.0", Network, Ok((0x05, 0))),
+        ("00:03.0", Network, Ok((0x03, 0))),
+        ("00:02.0", Network, Err(CardRefused::NotA(Network))),
+        ("00:06.0", Network, Err(CardRefused::NotA(Network))),
+        ("00:19.0", Network, Err(CardRefused::Held("e1000"))),
     ];
     for (named, kind, want) in cases {
         let got =
@@ -1408,6 +1426,7 @@ fn check_card_choice() -> KernelResult<()> {
             "a process's driver holds it",
         ),
         (CardRefused::NotA(MediatekWifi), "not a MediaTek WiFi card"),
+        (CardRefused::NotA(Network), "not a network controller"),
     ];
     for (refused, want) in said {
         let got = alloc::format!("{refused}");
@@ -1548,19 +1567,13 @@ fn native_bench(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     Err(KernelError::InternalError)
 }
 
-/// The name a card served at boot is registered under: `nic.<driver>`
-/// ([`serve_at_boot`]), the name `net.nic` gives the netstack daemon.
-pub fn served_card_name(driver: &str) -> alloc::string::String {
-    alloc::format!("nic.{driver}")
-}
-
 /// What [`parse_serve`] reads in `linuxdrv.serve`: the driver's name and the
-/// card's PCI address, or why not.
-type Serve<'a> = Result<(&'a str, crate::pci::PciAddress), &'static str>;
+/// card's PCI address as written, or why not.
+type Serve<'a> = Result<(&'a str, &'a str), &'static str>;
 
 /// `linuxdrv.serve`'s value read: the driver's name -- a directory name under
 /// `linuxdrv/`, letters, digits, `_` and `-` -- and the PCI address after its
-/// `@`; else why not.
+/// `@`, as written ([`card_choice`] reads it); else why not.
 fn parse_serve(value: &str) -> Serve<'_> {
     let (driver, at) = value.split_once('@').ok_or("not <driver>@<BB:DD.F>")?;
     let named = !driver.is_empty()
@@ -1570,8 +1583,7 @@ fn parse_serve(value: &str) -> Serve<'_> {
     if !named {
         return Err("not a driver's name before the @");
     }
-    let a = parse_pci_address(at).ok_or("not a PCI address after the @")?;
-    Ok((driver, a))
+    Ok((driver, at))
 }
 
 /// [`parse_serve`] at its edges, as the operator's `linuxdrv.serve` reaches it.
@@ -1580,19 +1592,13 @@ fn parse_serve(value: &str) -> Serve<'_> {
 ///
 /// `InternalError`, said, for an answer that is not right.
 fn check_parse_serve() -> KernelResult<()> {
-    let at = |bus, device, function| crate::pci::PciAddress {
-        bus,
-        device,
-        function,
-    };
-    let cases: [(&str, Serve<'_>); 7] = [
-        ("e1000e@00:05.0", Ok(("e1000e", at(0, 5, 0)))),
-        ("mt7925e@06:00.0", Ok(("mt7925e", at(6, 0, 0)))),
+    let cases: [(&str, Serve<'_>); 6] = [
+        ("e1000e@00:05.0", Ok(("e1000e", "00:05.0"))),
+        ("mt7925e@06:00.0", Ok(("mt7925e", "06:00.0"))),
         ("e1000e", Err("not <driver>@<BB:DD.F>")),
         ("@00:05.0", Err("not a driver's name before the @")),
         ("../hello@00:05.0", Err("not a driver's name before the @")),
-        ("e1000e@00:20.0", Err("not a PCI address after the @")),
-        ("e1000e@", Err("not a PCI address after the @")),
+        ("e1000e@", Ok(("e1000e", ""))),
     ];
     for (value, want) in cases {
         let got = parse_serve(value);
@@ -1606,59 +1612,87 @@ fn check_parse_serve() -> KernelResult<()> {
     Ok(())
 }
 
-/// A Linux driver process kept running for the system's life: the one
-/// `linuxdrv.serve=<driver>@<BB:DD.F>` names -- `linuxdrv/<driver>`,
-/// serving the card at that PCI address to the network stack as
-/// `nic.<driver>` ([`served_card_name`]) for as long as the system runs (its
-/// `serve=` mode with no `stacks=` limit). It holds the card, a File
-/// capability to read the card's firmware, and the right to register that
-/// one name. Started past the kernel's self-tests, before the persistent
-/// netstack daemon, which `net.nic` points at the card. Nothing when the
-/// option is absent: no card is a driver process's unless the machine is
-/// configured so.
+/// The driver processes that read their card's firmware: the File
+/// capability they are given for it reads any file, so it goes to these
+/// alone -- e1000e reads none.
+const FIRMWARE_DRIVERS: &[&str] = &["mt7925e"];
+
+/// The card `linuxdrv.serve=<driver>@<BB:DD.F>` names for its driver
+/// process: the driver's name, and a network controller no driver holds
+/// ([`card_choice`], [`CardKind::Network`]) -- so that a slip naming the GPU,
+/// a bridge or an audio function is refused before the function is touched.
+/// `None` without the option.
 ///
 /// # Errors
 ///
-/// `InvalidArgument`, said, for an option that is not `<driver>@<BB:DD.F>`,
-/// names a driver process not loaded beside the kernel, a PCI function
-/// there is not, or one a kernel driver holds; the spawn's error otherwise.
-pub fn serve_at_boot() -> KernelResult<()> {
-    let Some(value) = crate::fs::kernparam::get("linuxdrv.serve") else {
-        return Ok(());
+/// `InvalidArgument`, said with what was wrong, for an option naming no such
+/// card or no driver's name.
+fn served_card() -> KernelResult<Option<(alloc::string::String, crate::pci::PciDevice)>> {
+    let Some(value) = crate::fs::kernparam::get(CardKind::Network.option()) else {
+        return Ok(None);
     };
-    let refuse = |why: &str| {
-        serial_println!("[linuxdrv] linuxdrv.serve={value}: not served: {why}");
+    let refuse = |why: &dyn core::fmt::Display| {
+        serial_println!("[linuxdrv]   FAIL: linuxdrv.serve={value}: {why}");
         KernelError::InvalidArgument
     };
-    let (driver, a) = parse_serve(&value).map_err(refuse)?;
-    let at = value.split_once('@').map_or("", |(_, at)| at);
-    let module = alloc::format!("linuxdrv/{driver}");
-    let Some(elf) = crate::boot::module(module.as_bytes()) else {
-        return Err(refuse("no such driver process is loaded beside the kernel"));
+    let (driver, at) = parse_serve(&value).map_err(|why| refuse(&why))?;
+    let card = card_choice(
+        at,
+        CardKind::Network,
+        &crate::pci::scan_all(),
+        crate::pci::bound_driver,
+    )
+    .map_err(|refused| refuse(&refused))?;
+    if crate::boot::module(alloc::format!("linuxdrv/{driver}").as_bytes()).is_none() {
+        return Err(refuse(
+            &"no such driver process is loaded beside the kernel",
+        ));
+    }
+    Ok(Some((alloc::string::String::from(driver), card)))
+}
+
+/// A Linux driver process kept running for the system's life: the one
+/// `linuxdrv.serve=<driver>@<BB:DD.F>` names ([`served_card`]) --
+/// `linuxdrv/<driver>`, serving its card to the network stack as
+/// `nic.<driver>` for as long as the system runs (its `serve=` mode with no
+/// `stacks=` limit). It holds the card, the right to register that one name,
+/// and, for a driver that reads its card's firmware ([`FIRMWARE_DRIVERS`]),
+/// a File capability to read it. Started past the kernel's self-tests,
+/// before the persistent netstack daemon, which `net.nic` points at the card.
+/// The name it serves, or `None` when the option is absent: no card is a
+/// driver process's unless the machine is configured so.
+///
+/// Nothing restarts it should it end: known-issues
+/// `A-PERSISTENT-NETWORK-PROCESSES-ARE-NOT-RESTARTED`.
+///
+/// # Errors
+///
+/// `InvalidArgument`, said, for an option [`served_card`] refuses; the
+/// spawn's error otherwise.
+pub fn serve_at_boot() -> KernelResult<Option<alloc::string::String>> {
+    let Some((driver, card)) = served_card()? else {
+        return Ok(None);
     };
-    if !crate::pci::scan_all().iter().any(|d| d.address == a) {
-        return Err(refuse("no PCI function there"));
-    }
-    if let Some(holder) = crate::pci::bound_driver(a) {
-        serial_println!(
-            "[linuxdrv] linuxdrv.serve={value}: not served: the kernel's {holder} driver holds it"
-        );
+    let Some(elf) = crate::boot::module(alloc::format!("linuxdrv/{driver}").as_bytes()) else {
         return Err(KernelError::InvalidArgument);
-    }
-    let name = served_card_name(driver);
-    let caps = [
+    };
+    let a = card.address;
+    let name = alloc::format!("nic.{driver}");
+    let mut caps = alloc::vec![
         (
             ResourceType::PciDevice,
             crate::cap::pci_device_id(a.bus, a.device, a.function),
             Rights::WRITE,
         ),
-        (ResourceType::File, 0, Rights::READ),
         (
             ResourceType::Service,
             crate::ipc::service::key_id(name.as_bytes()),
             Rights::WRITE,
         ),
     ];
+    if FIRMWARE_DRIVERS.contains(&driver.as_str()) {
+        caps.push((ResourceType::File, 0, Rights::READ));
+    }
     let serve = alloc::format!("serve={driver}");
     let pci = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
     // Never waited for: its limit is no one's to enforce.
@@ -1675,10 +1709,33 @@ pub fn serve_at_boot() -> KernelResult<()> {
         &caps,
     )?;
     serial_println!(
-        "[linuxdrv] {driver} serving the card at {at} as {name} for the system's life (pid {})",
+        "[linuxdrv] {driver} started serving the card at {:02x}:{:02x}.{:x} as {name} (pid {})",
+        a.bus,
+        a.device,
+        a.function,
         process.pid
     );
-    Ok(())
+    Ok(Some(name))
+}
+
+/// The card the persistent netstack daemon is to serve: the one `net.nic`
+/// names, when it is the card [`serve_at_boot`] started serving (`served`);
+/// else -- no `net.nic`, an empty one, or one naming a card no driver
+/// process serves -- `None`, the kernel's NIC, which is said when `net.nic`
+/// asked for another.
+pub fn netstack_card(served: Option<&str>) -> Option<alloc::string::String> {
+    let named = crate::fs::kernparam::get("net.nic").filter(|n| !n.is_empty())?;
+    if served == Some(named.as_str()) {
+        return Some(named);
+    }
+    serial_println!(
+        "WARNING: net.nic={named} names no card a driver process serves ({}): the netstack daemon serves the kernel's NIC",
+        served.map_or_else(
+            || alloc::string::String::from("linuxdrv.serve started none"),
+            |s| alloc::format!("linuxdrv.serve serves {s}")
+        )
+    );
+    None
 }
 
 /// How often the kernel looks whether a netstack daemon it runs has ended:

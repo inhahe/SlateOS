@@ -5454,25 +5454,28 @@ pub(crate) fn netstack_resolve_a(host: &[u8]) -> KernelResult<Option<[u8; 4]>> {
 
 /// Phase-5 boot path (`net.userspace` on): spawn the **persistent** userspace
 /// `netstack` daemon (`serve-net`), validate DNS/TCP/UDP/O_NONBLOCK/poll parity
-/// over it, then leave it running to own the NIC for the system's lifetime.
+/// over it, then leave it running to serve sockets for the system's lifetime.
 ///
 /// This is the switch-on counterpart to [`self_test_netstack_dns_ipc`] (§66,
 /// Q22b staged cutover). Unlike the bounded self-test, the daemon is **not
-/// reaped**: it keeps the exclusive raw-NIC claim so the in-kernel stack stands
-/// down (its physical-NIC RX is skipped while a raw owner holds the claim, §64)
-/// and all AF_INET socket traffic (increment 5.5) routes to the daemon.
+/// reaped**. Its card is `card` -- a card a Linux driver process serves
+/// (`net.nic`, `nic.<driver>`, design-decisions 1594) -- or, `None`, the
+/// kernel's NIC. On the kernel's NIC it keeps the exclusive raw-NIC claim, so
+/// the in-kernel stack stands down (its physical-NIC RX is skipped while a raw
+/// owner holds the claim, §64). Over a driver's card it does not claim the
+/// kernel's NIC, which stays the kernel's: two stacks are then live, the
+/// kernel's own on its NIC (a container's namespace's resolver, say) while
+/// the root namespace's sockets, native ones and its resolver included, go
+/// over the card, which `SYS_NET_IF_INFO` then describes. Either way all
+/// AF_INET socket traffic (increment 5.5) routes to the daemon.
 ///
-/// Skips gracefully (returns `Ok(())`) when there's no network. A genuine
-/// spawn/registration fault returns `Err`; per-check network variance (no
-/// upstream) is logged as a non-fatal WARNING but never fails the boot, since a
-/// persistent daemon cannot be cleanly torn down here.
-pub fn run_persistent_netstack() -> KernelResult<()> {
+/// Over the kernel's NIC, skips gracefully (returns `Ok(())`) when the kernel
+/// has no network. A genuine spawn/registration fault returns `Err`; per-check
+/// network variance (no upstream) is logged as a non-fatal WARNING but never
+/// fails the boot, since a persistent daemon cannot be cleanly torn down here.
+pub fn run_persistent_netstack(card: Option<&str>) -> KernelResult<()> {
     use crate::ipc::service;
 
-    // The card the daemon serves: the one `net.nic` names -- a card a Linux
-    // driver process serves (`linuxdrv.serve`), `nic.<driver>` -- or else the
-    // kernel's NIC, which it claims.
-    let card = crate::fs::kernparam::get("net.nic");
     let ifinfo = crate::net::interface::info();
     if card.is_none() && (!ifinfo.up || ifinfo.ip.0 == [0, 0, 0, 0]) {
         serial_println!(
@@ -5485,7 +5488,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
 
     serial_println!(
         "[spawn] Starting persistent userspace netstack daemon (net.userspace on), serving {}...",
-        card.as_deref().unwrap_or("the kernel's NIC")
+        card.unwrap_or("the kernel's NIC")
     );
 
     let envp: &[&[u8]] = &[b"PATH=/bin"];
@@ -5498,7 +5501,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         (ResourceType::NetRaw, 0u64, Rights::WRITE),
         (ResourceType::Service, 0u64, Rights::WRITE),
     ];
-    let caps_card = card.as_deref().map(|name| {
+    let caps_card = card.map(|name| {
         [
             (
                 ResourceType::Service,
@@ -5512,7 +5515,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             ),
         ]
     });
-    let argv_card: Option<[&[u8]; 3]> = card.as_deref().map(|name| {
+    let argv_card: Option<[&[u8]; 3]> = card.map(|name| {
         [
             b"netstack".as_slice(),
             b"serve-net".as_slice(),
@@ -5550,14 +5553,23 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
 
     // Wait for the daemon to publish `net.stack`. Over the kernel's NIC it
     // registers early, before the slow ARP work: 3 s. Over a driver process's
-    // card, only once it has attached -- the driver having probed the card and
-    // brought its link up -- and taken an address: seconds under emulation, as
-    // the boot test's serving daemon is given (linuxdrv::serve_sockets), 40 s.
-    // Yield so the daemon actually gets CPU time.
-    let reg_wait_s: u64 = if card.is_some() { 40 } else { 3 };
+    // card, only once it has attached (its own limit 30 s: the driver probing
+    // the card and bringing its link up) and taken an address (five tries a
+    // second apart, and as long again for the offer): 60 s. Slept between
+    // looks rather than yielded, so that on one CPU the boot thread does not
+    // share the driver's and the daemon's time; and a daemon that has ended
+    // is said, with how, rather than waited out.
+    let reg_wait_s: u64 = if card.is_some() { 60 } else { 3 };
     let reg_deadline =
         crate::hrtimer::now_ns().saturating_add(reg_wait_s.saturating_mul(1_000_000_000));
     while !service::is_registered(b"net.stack") {
+        if crate::proc::pcb::state(result.pid) == Some(crate::proc::pcb::ProcessState::Zombie) {
+            serial_println!(
+                "[spawn]   FAIL: the persistent netstack daemon ended (exit {:?}) before it registered net.stack",
+                crate::proc::pcb::exit_code(result.pid)
+            );
+            return Err(KernelError::InternalError);
+        }
         if crate::hrtimer::now_ns() >= reg_deadline {
             serial_println!(
                 "[spawn]   FAIL: persistent netstack did not register net.stack within {}s",
@@ -5565,14 +5577,21 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             );
             return Err(KernelError::TimedOut);
         }
-        crate::sched::yield_now();
+        crate::sched::sleep_ms(10);
     }
     serial_println!(
         "[spawn]   persistent netstack daemon registered net.stack (pid {})",
         result.pid
     );
-    // The DNS server the UDP checks ask: the daemon's own, from its lease on
-    // the card it serves -- the kernel's NIC's only where that is its card.
+    // Over a driver's card, the root namespace's native sockets, its resolver
+    // and its interface are the daemon's from now on
+    // (`netstack_client::serves_a_card`).
+    if card.is_some() {
+        crate::net::netstack_client::set_serves_a_card();
+    }
+    // The daemon's own interface, once: the DNS server the UDP checks ask --
+    // its lease's on the card it serves, the kernel's NIC's only where that
+    // is its card.
     let dns = match crate::net::netstack_client::daemon_interface() {
         Ok(daemon) => daemon.dns,
         Err(e) => {
@@ -5972,17 +5991,14 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // IPv6 connect parity (D-NETSOCK-SYNC, final gap): OP_CONNECT6 over the daemon.
     // Slirp offers no IPv6 peer or router, so this too drives the in-process
     // loopback — a non-blocking connect to the daemon's own link-local (me.ip6,
-    // derived from the NIC MAC) completes a full TCP-over-IPv6 handshake for both
+    // as the daemon says it) completes a full TCP-over-IPv6 handshake for both
     // ends, and accept + a bidirectional exchange prove the accepted v6 connection
     // is a real socket. This closes the last pre-5.7 IPv6 parity gap.
     match crate::net::netstack_client::self_test_connect6() {
-        Ok(Some(())) => serial_println!(
+        Ok(()) => serial_println!(
             "[spawn]   persistent netstack connect6: IPv6 handshake completed over loopback and \
              echoed data both ways — IPv6-connect parity proven over the daemon"
         ),
-        Ok(None) => {
-            serial_println!("[spawn]   persistent netstack connect6: no NIC MAC — check skipped")
-        }
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: persistent netstack connect6 ({:?}) — an IPv6 connection over the \
@@ -6005,13 +6021,10 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // (slirp has no IPv6 peer), and its source header must report AF_INET6 with the
     // link-local address and the sent payload. Proves the AF_INET6 SOCK_DGRAM path.
     match crate::net::netstack_client::self_test_udp6_loopback() {
-        Ok(Some(())) => serial_println!(
+        Ok(()) => serial_println!(
             "[spawn]   persistent netstack udp6: IPv6 datagram looped back with an AF_INET6 \
              source header and matching payload — AF_INET6 SOCK_DGRAM parity proven over the daemon"
         ),
-        Ok(None) => {
-            serial_println!("[spawn]   persistent netstack udp6: no NIC MAC — check skipped")
-        }
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: persistent netstack udp6 ({:?}) — an IPv6 datagram over the \
@@ -6050,13 +6063,10 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // asked (known-issues.md A-BLOCKING-UDP-RECV-DID-NOT-BLOCK): loopback, so an
     // error is a real break and fails the run.
     match crate::net::socket::self_test_dgram_blocking_recv() {
-        Ok(Some(())) => serial_println!(
+        Ok(()) => serial_println!(
             "[spawn]   persistent netstack blocking udp recv: a blocking recvfrom waited for \
              a datagram sent 50 ms after it asked, and a non-blocking one on the drained \
              socket still said EAGAIN"
-        ),
-        Ok(None) => serial_println!(
-            "[spawn]   persistent netstack blocking udp recv: no NIC MAC — check skipped"
         ),
         Err(e) => {
             serial_println!(
@@ -6077,13 +6087,10 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     // send targets the default peer and its recv filters to that peer (Linux drops
     // non-peer datagrams). Proves both filter directions + getpeername.
     match crate::net::netstack_client::self_test_udp_connect() {
-        Ok(Some(())) => serial_println!(
+        Ok(()) => serial_println!(
             "[spawn]   persistent netstack udp-connect: connected send looped back and the \
              non-peer datagram was dropped — UDP connect() default-peer parity proven"
         ),
-        Ok(None) => {
-            serial_println!("[spawn]   persistent netstack udp-connect: no NIC MAC — check skipped")
-        }
         Err(e) => {
             serial_println!(
                 "[spawn]   FAIL: persistent netstack udp-connect ({:?}) — a connected UDP socket's \
@@ -6111,7 +6118,7 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
         ),
         Ok(None) => {
             serial_println!(
-                "[spawn]   persistent netstack udp-multicast: no NIC MAC — check skipped"
+                "[spawn]   persistent netstack udp-multicast: the daemon has no card — check skipped"
             );
         }
         Err(e) => {
@@ -6151,6 +6158,15 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
             Err::<(), _>(e),
         );
     }
+    // And the interface a program is told is the one those calls go over.
+    if let Err(e) = check_if_info_parity() {
+        serial_println!("[spawn]   FAIL: interface parity ({:?})", e);
+        crate::selftest::report_debug(
+            "interface parity",
+            crate::selftest::Severity::Diagnostic,
+            Err::<(), _>(e),
+        );
+    }
 
     // Ring-3 datagram capstone (UDP SOCK_DGRAM cutover): the datagram sibling of
     // the HTTP capstone. `udpget` (a bare Linux-ABI ELF) does socket(SOCK_DGRAM)/
@@ -6170,21 +6186,25 @@ pub fn run_persistent_netstack() -> KernelResult<()> {
     serial_println!(
         "[spawn]   persistent netstack daemon: DNS/TCP/UDP/O_NONBLOCK/poll/nonblock-connect/\
          nonblock-send/listen-accept/connect6/udp6/udp-connect/ring3-capstone/ring3-udp/ring3-udp6 \
-         parity checks done; daemon now owns the NIC for the system's lifetime"
+         parity checks done; the daemon serves {} for the system's lifetime",
+        card.unwrap_or("the kernel's NIC")
     );
     Ok(())
 }
 
 /// Whether the native `SYS_DNS_RESOLVE` -- what lane D's C library looks a
-/// name up with -- answers while the daemon holds the card, wherever the
-/// daemon's own resolver does. With no upstream (the daemon cannot resolve
+/// name up with -- answers while the daemon holds the card (the kernel's NIC,
+/// or one a driver process serves), wherever the daemon's own resolver does,
+/// and asks the daemon to. With no upstream (the daemon cannot resolve
 /// either) there is nothing to compare, and the check passes.
 ///
 /// # Errors
 ///
 /// `NotFound` when the daemon resolves `example.com` and the native call
 /// does not: the native call is still on the kernel's stack, which hears
-/// nothing while the daemon holds the card.
+/// nothing while the daemon holds the kernel's NIC. `InternalError` when it
+/// answers without asking the daemon: over a driver process's card, the
+/// kernel's stack would then be answering from the kernel's NIC's network.
 fn check_native_resolve_parity() -> KernelResult<()> {
     let Ok(Some(_)) = netstack_resolve_a(b"example.com") else {
         serial_println!(
@@ -6202,6 +6222,12 @@ fn check_native_resolve_parity() -> KernelResult<()> {
         arg4: 0,
         arg5: 0,
     };
+    // Asked of the network, not the cache, so that which way the question
+    // went shows: the daemon's, which holds the card. The kernel's own UDP
+    // would be answered too wherever the kernel's NIC has a network of its
+    // own -- QEMU's does -- and then nothing else would tell them apart.
+    crate::net::dns::flush_cache();
+    let daemon_asked = crate::net::dns::daemon_queries();
     let r = crate::syscall::dispatch::dispatch(crate::syscall::number::SYS_DNS_RESOLVE, &args);
     if r.value < 0 || out == [0; 4] {
         serial_println!(
@@ -6210,6 +6236,13 @@ fn check_native_resolve_parity() -> KernelResult<()> {
             r.value
         );
         return Err(KernelError::NotFound);
+    }
+    if crate::net::dns::daemon_queries() == daemon_asked {
+        serial_println!(
+            "[spawn]   native resolver parity: SYS_DNS_RESOLVE answered without asking the daemon, \
+             which holds the card"
+        );
+        return Err(KernelError::InternalError);
     }
     serial_println!(
         "[spawn]   native resolver parity: SYS_DNS_RESOLVE resolves example.com to {}.{}.{}.{} \
@@ -6222,15 +6255,80 @@ fn check_native_resolve_parity() -> KernelResult<()> {
     check_native_tcp_parity(out)
 }
 
+/// Whether `SYS_NET_IF_INFO` says the interface the daemon serves -- the one
+/// the root namespace's sockets go over: the kernel's NIC, or a card a driver
+/// process serves, whose addresses only the daemon holds -- its address,
+/// mask, gateway, DNS server, MAC and link each as the daemon says them.
+///
+/// # Errors
+///
+/// The daemon's error when it cannot say its interface; `InternalError`,
+/// said, when the syscall fails or answers another interface.
+fn check_if_info_parity() -> KernelResult<()> {
+    use crate::syscall::dispatch::{SyscallArgs, dispatch};
+    const RECORD: usize = 24;
+
+    let daemon = crate::net::netstack_client::daemon_interface()?;
+    let mut record = [0u8; RECORD];
+    let r = dispatch(
+        crate::syscall::number::SYS_NET_IF_INFO,
+        &SyscallArgs {
+            arg0: record.as_mut_ptr() as u64,
+            arg1: RECORD as u64,
+            arg2: 0,
+            arg3: 0,
+            arg4: 0,
+            arg5: 0,
+        },
+    );
+    if r.value < 0 {
+        serial_println!(
+            "[spawn]   interface parity: SYS_NET_IF_INFO answers {}",
+            r.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    // [ip:4][mask:4][gateway:4][dns:4][mac:6][up:1], as `sys_net_if_info`
+    // lays the record out.
+    let up = [u8::from(daemon.up)];
+    let want: [(&str, core::ops::Range<usize>, &[u8]); 6] = [
+        ("address", 0..4, &daemon.ip4),
+        ("mask", 4..8, &daemon.mask),
+        ("gateway", 8..12, &daemon.gateway),
+        ("DNS server", 12..16, &daemon.dns),
+        ("MAC", 16..22, &daemon.mac),
+        ("link", 22..23, &up),
+    ];
+    for (what, at, daemons) in want {
+        let told = record.get(at).unwrap_or(&[]);
+        if told != daemons {
+            serial_println!(
+                "[spawn]   interface parity: SYS_NET_IF_INFO's {what} is {told:02x?}, the daemon's {daemons:02x?}"
+            );
+            return Err(KernelError::InternalError);
+        }
+    }
+    serial_println!(
+        "[spawn]   interface parity: SYS_NET_IF_INFO says the interface the daemon serves \
+         ({}.{}.{}.{}): OK",
+        daemon.ip4[0],
+        daemon.ip4[1],
+        daemon.ip4[2],
+        daemon.ip4[3]
+    );
+    Ok(())
+}
+
 /// Whether a native TCP connection -- `SYS_TCP_CONNECT`, `_SEND`, `_RECV`,
 /// what lane D's C library's `connect`, `send` and `recv` are -- reaches
 /// `ip`'s port 80 and gets an HTTP answer while the daemon holds the card,
-/// wherever the daemon's own fetch of it does.
+/// wherever the daemon's own fetch of it does, over a socket of the
+/// daemon's.
 ///
 /// # Errors
 ///
 /// `NotConnected` when the daemon fetches from `ip` and the native calls do
-/// not.
+/// not; `InternalError` when the connection made is the kernel stack's.
 fn check_native_tcp_parity(ip: [u8; 4]) -> KernelResult<()> {
     use crate::syscall::dispatch::{SyscallArgs, dispatch};
     use crate::syscall::number::{SYS_TCP_CLOSE, SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND};
@@ -6268,6 +6366,21 @@ fn check_native_tcp_parity(ip: [u8; 4]) -> KernelResult<()> {
         );
         return Err(KernelError::NotConnected);
     };
+    // The daemon's socket, as the card is its: a kernel-stack one would
+    // fetch too wherever the kernel's NIC has a network of its own -- QEMU's
+    // does -- and the answer alone would not tell them apart.
+    let daemons = matches!(
+        crate::net::native_socket::resolve(handle, crate::net::native_socket::Kind::TcpConnection),
+        Some(crate::net::native_socket::Resolved::Daemon(_))
+    );
+    if !daemons {
+        call(SYS_TCP_CLOSE, [handle, 0, 0, 0]);
+        serial_println!(
+            "[spawn]   native TCP parity: SYS_TCP_CONNECT made a kernel-stack socket while the \
+             daemon holds the card"
+        );
+        return Err(KernelError::InternalError);
+    }
     let request = b"HEAD / HTTP/1.0\r\nHost: example.com\r\n\r\n";
     let sent = call(
         SYS_TCP_SEND,
@@ -6427,10 +6540,11 @@ fn run_ring3_http_capstone() {
 /// datagram socket arms (`create_dgram`/`dgram_bind`/`dgram_send_to`/
 /// `dgram_recv_from`) end to end.
 ///
-/// `dns_ip` is the interface's resolver address (`ifinfo.dns.0`); the query goes
-/// to `dns_ip:53`. A zero resolver (no DHCP-provided DNS) skips the check. Never
-/// fails the boot: network variance (no upstream under slirp) is logged as a
-/// non-fatal note, exactly like the other persistent-daemon parity checks.
+/// `dns_ip` is the resolver the daemon was given on the card it serves (its
+/// `IfInfo::dns`); the query goes to `dns_ip:53`. A zero resolver (no
+/// DHCP-provided DNS) skips the check. Never fails the boot: network variance
+/// (no upstream under slirp) is logged as a non-fatal note, exactly like the
+/// other persistent-daemon parity checks.
 fn run_ring3_udp_capstone(dns_ip: &[u8; 4]) {
     if *dns_ip == [0, 0, 0, 0] {
         serial_println!(

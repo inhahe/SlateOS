@@ -17447,11 +17447,13 @@ fn native_socket(handle: u64, kind: NativeKind) -> Result<Resolved, KernelError>
 
 /// Whether a native socket made now is the network daemon's: while the
 /// daemon holds the card, the kernel's own stack can send but hears
-/// nothing, so its sockets reach only this machine. A container's network
-/// namespace is the exception, which only the kernel's stack serves
-/// (`open-questions/A-Q29.md`).
+/// nothing, so its sockets reach only this machine; and while it serves a
+/// card a Linux driver process serves (`net.nic`), that card is the
+/// network. A container's network namespace is the exception, which only
+/// the kernel's stack serves (`open-questions/A-Q29.md`).
 fn daemon_sockets() -> bool {
-    crate::net::raw::is_claimed() && crate::sched::current_task_net_ns() == crate::netns::ROOT_NS
+    (crate::net::raw::is_claimed() || crate::net::netstack_client::serves_a_card())
+        && crate::sched::current_task_net_ns() == crate::netns::ROOT_NS
 }
 
 /// Issue a native socket handle for the daemon socket `socket`, held by the
@@ -20659,7 +20661,13 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
 /// `arg0`: pointer to output buffer (>= 24 bytes).
 /// `arg1`: buffer length in bytes.
 ///
-/// Returns 0 on success with interface info written.
+/// The interface the caller's sockets go over: the kernel's NIC, or, while
+/// the network daemon serves a card a Linux driver process serves
+/// (`net.nic`) and the caller is in the root namespace, that card, as the
+/// daemon says it -- whose addresses the kernel does not hold.
+///
+/// Returns 0 on success with interface info written; the daemon's error
+/// when it serves the card and cannot say it.
 pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
     let buf_len = args.arg1 as usize;
 
@@ -20672,7 +20680,18 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
 
-    let info = crate::net::interface::info();
+    // [ip:4][mask:4][gateway:4][dns:4][mac:6][up:1].
+    let (ip, mask, gateway, dns, mac, up) = if crate::net::netstack_client::serves_a_card()
+        && crate::sched::current_task_net_ns() == crate::netns::ROOT_NS
+    {
+        match crate::net::netstack_client::daemon_interface() {
+            Ok(i) => (i.ip4, i.mask, i.gateway, i.dns, i.mac, i.up),
+            Err(e) => return SyscallResult::err(e),
+        }
+    } else {
+        let i = crate::net::interface::info();
+        (i.ip.0, i.subnet_mask.0, i.gateway.0, i.dns.0, i.mac.0, i.up)
+    };
     let mut record = [0u8; INFO_SIZE];
     {
         // Constant offsets inside a fixed-size array; a `get_mut` here can
@@ -20682,12 +20701,12 @@ pub fn sys_net_if_info(args: &SyscallArgs) -> SyscallResult {
                 dst.copy_from_slice(bytes);
             }
         };
-        put(0, &info.ip.0); // [0..4]   IPv4 address
-        put(4, &info.subnet_mask.0); // [4..8]   subnet mask
-        put(8, &info.gateway.0); // [8..12]  gateway
-        put(12, &info.dns.0); // [12..16] DNS server
-        put(16, &info.mac.0); // [16..22] MAC address
-        put(22, &[u8::from(info.up)]); // [22]     flags
+        put(0, &ip); // [0..4]   IPv4 address
+        put(4, &mask); // [4..8]   subnet mask
+        put(8, &gateway); // [8..12]  gateway
+        put(12, &dns); // [12..16] DNS server
+        put(16, &mac); // [16..22] MAC address
+        put(22, &[u8::from(up)]); // [22]     flags
         // [23] reserved: stays zero.
     }
 

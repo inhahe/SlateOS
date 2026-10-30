@@ -443,25 +443,13 @@ static int lx_nic_serve(struct net_device *dev, const char *name, unsigned long 
 	}
 }
 
-/* The argument "<key><value>": its value, or NULL. */
-static const char *lx_nic_arg(const char *key)
-{
-	size_t n = strlen(key);
-	int i;
-
-	for (i = 1; i < slx_argc(); i++)
-		if (!strncmp(slx_argv(i), key, n))
-			return slx_argv(i) + n;
-	return NULL;
-}
-
 /*
  * How many stacks "stacks=<n>" says to serve before the process ends: n,
  * 0 without it, or -1 for a value that is not a number above 0.
  */
 static long lx_nic_stacks(void)
 {
-	const char *s = lx_nic_arg("stacks=");
+	const char *s = lx_arg("stacks=");
 	long n = 0;
 
 	if (!s)
@@ -483,7 +471,7 @@ static long lx_nic_stacks(void)
  */
 static int lx_nic_task(void *unused)
 {
-	const char *serve = lx_nic_arg("serve=");
+	const char *serve = lx_arg("serve=");
 	long stacks = lx_nic_stacks();
 	struct net_device *dev, *first = NULL;
 	int err = 0;

@@ -38,8 +38,9 @@
  * With an argument, the later initcalls do nothing: the first's ending is
  * the test ("earlyfail"'s comes before the first) -- but the firmware runs',
  * a late one's. An argument naming a parameter hello does not have, or
- * giving one a value its kind refuses, ends the process before any
- * initcall: SLX_EXIT_ARGUMENT.
+ * holding both a space and a quote, ends the process before any initcall;
+ * one giving a parameter a value its kind refuses, at the parameter's own
+ * level -- before any initcall for a module's own: SLX_EXIT_ARGUMENT.
  */
 #include <linux/module.h>
 #include <linux/slab.h>
@@ -1947,8 +1948,8 @@ core_initcall(hello_params_early);
 /*
  * What the kernel's self-test puts in the directory the "firmware" run is
  * pointed at (firmware_class.path=<dir>; kernel/src/linuxdrv.rs): slx-test.fw,
- * HELLO_FW_BYTES bytes of hello_fw_byte() -- more than the system's one
- * read gives, so that a whole file takes several -- and slx-empty.fw, empty;
+ * HELLO_FW_BYTES bytes of hello_fw_byte() -- several pages, the last not
+ * whole -- and slx-empty.fw, empty;
  * and it names a directory to read as a file (dir=<path>), one whose size
  * is not 0, so that it is refused for not being a regular file rather than
  * for being empty.
@@ -2008,22 +2009,15 @@ static void hello_fw_arrived(const struct firmware *fw, void *done)
  */
 static int __init hello_firmware_init(void)
 {
-	size_t prefix = strlen(HELLO_FW_PATH_ARG), dir_prefix = strlen(HELLO_DIR_ARG), size = 0;
-	const char *dir = NULL, *a_dir = NULL;
+	const char *dir = lx_arg(HELLO_FW_PATH_ARG), *a_dir = lx_arg(HELLO_DIR_ARG);
 	const struct firmware *fw, *again;
 	struct device *dev;
+	size_t size = 0;
 	u8 tail[100];
 	void *data;
-	int i;
 
 	if (!hello_mode("firmware") && !hello_mode("firmware-denied"))
 		return 0;
-	for (i = 2; i < slx_argc(); i++) {
-		if (!strncmp(slx_argv(i), HELLO_FW_PATH_ARG, prefix))
-			dir = slx_argv(i) + prefix;
-		if (!strncmp(slx_argv(i), HELLO_DIR_ARG, dir_prefix))
-			a_dir = slx_argv(i) + dir_prefix;
-	}
 	HELLO_CHECK(dir, "no firmware_class.path= argument");
 	dev = root_device_register("hello-fw");
 	HELLO_CHECK(!IS_ERR(dev), "no device to load firmware for");

@@ -639,7 +639,7 @@ marker_checks_pass() {
         FAILED_CHECK="the benchmark suite left windows unjudged"
     elif ! check_iommu_active "$1"; then
         FAILED_CHECK="DMA or interrupt remapping never came on"
-    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_NAMED:-0}"; then
+    elif ! check_linuxdrv_ran "$1" "${LINUXDRV_NAMED:-0}" "${NO_ROOTFS:-0}"; then
         FAILED_CHECK="the Linux driver layer's process did not run"
     fi
     [ -z "$FAILED_CHECK" ]
@@ -679,15 +679,22 @@ build_linux_drivers() {
 # $1: the serial log; $2: whether a module was named. Returns 0 when none
 # was, or the test ran.
 check_linuxdrv_ran() {
-    local file="$1" named="$2"
+    local file="$1" named="$2" no_rootfs="${3:-0}" skips
     [ "$named" = 1 ] || return 0
     [ -f "$file" ] || return 0
+    # Any run skipped fails it -- but, under --no-rootfs, the one that needs
+    # the rootfs's ext4 (a directory with a size of its own, which only ext4
+    # gives: kernel/src/linuxdrv.rs's firmware_runs), absent there by design.
+    skips=$(grep -a '^\[linuxdrv\]   SKIP' "$file" || true)
+    if [ "$no_rootfs" = 1 ]; then
+        skips=$(printf '%s\n' "$skips" | grep -v -F "refusal of a directory read as a file" || true)
+    fi
     # Its line, as Linux's vsprintf formats it, and the kernel's verdict.
     if grep -aqF "[lx] hello from Linux's own headers: 42, formatted by vsprintf, 0xbeef" "$file" &&
         grep -aq '^\[lx\] hello tasks: a kthread, a mutex held across a 20 ms sleep, a completion' "$file" &&
         grep -aq '^\[linuxdrv\]   hello process .*: OK' "$file" &&
         grep -aq '^\[linuxdrv\]   e1000e process: .*: OK' "$file" &&
-        ! grep -aq '^\[linuxdrv\]   SKIP' "$file"; then
+        [ -z "$skips" ]; then
         return 0
     fi
     echo "=== THE LINUX DRIVER LAYER'S PROCESS DID NOT RUN ==="

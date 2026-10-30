@@ -155,7 +155,11 @@ pub struct DirEntry {
     pub name: PathBuf,
     /// Entry type.
     pub entry_type: EntryType,
-    /// File size in bytes (0 for directories).
+    /// Size in bytes, as `stat`'s `st_size`: a file's length, a symlink's
+    /// target's; a directory's as its filesystem counts it -- ext4's the
+    /// bytes of its blocks, as Linux's ext4 reports, memfs's and the pseudo
+    /// filesystems' 0. (A Linux driver process's test of a directory read
+    /// as a file needs one whose size is not 0: `kernel/src/linuxdrv.rs`.)
     pub size: u64,
     /// Inode number of the object this name refers to, or `0` when the
     /// filesystem has no stable per-object identity to report.

@@ -30,8 +30,9 @@ const E1000E: &[u8] = b"linuxdrv/e1000e";
 /// Exit codes a driver process ends with (`SLX_EXIT_*` in
 /// `linuxdrv/emul/slx.h`; `lxkit::exit`).
 const EXIT_OK: i32 = 0;
-/// An argument naming a module parameter the process does not have, or
-/// giving one a value its kind refuses.
+/// An argument naming a module parameter the process does not have,
+/// giving one a value its kind refuses, or holding both a space and a
+/// quote.
 const EXIT_ARGUMENT: i32 = 118;
 /// A network driver's serving of one stack in which Linux code warned: a
 /// bug, though the run otherwise passed.
@@ -216,8 +217,9 @@ const FIRMWARE_DIR: &str = "/tmp/linuxdrv-fw";
 /// A directory with a size of its own, for [`firmware_runs`] to have read
 /// as a file: the rootfs's ext4, where the boot test mounts it.
 const SIZED_DIR: &str = "/mnt";
-/// The test firmware's size: more than one `SYS_FS_PREAD` gives, so that a
-/// whole file takes several.
+/// The test firmware's size: several pages, and none of them whole at its
+/// end. (One `SYS_FS_PREAD` reads all of it: a read cut short, which the
+/// layer's loop would continue, does not happen here.)
 const FIRMWARE_BYTES: usize = 70_001;
 
 /// The test firmware's `i`-th byte, as `hello_fw_byte()` in
@@ -234,11 +236,26 @@ fn firmware_byte(i: usize) -> u8 {
 /// recorded as a skip) and its own parameters, must read through the layer
 /// and Linux's firmware loader what was written (`hello_firmware_init`) and
 /// exit 0; its "firmware-denied" run, given no such capability, must read
-/// nothing; an argument naming a parameter hello lacks, or giving one a
-/// value its kind refuses, must end the process before any initcall
-/// ([`EXIT_ARGUMENT`]). The directory is removed whatever the runs found.
+/// nothing; an argument naming a parameter hello lacks, giving one a value
+/// its kind refuses -- one of its own before any initcall, one of the
+/// device level's there -- or holding both a space and a quote, which no
+/// command line carries, must end the process ([`EXIT_ARGUMENT`]). The
+/// directory is removed whatever the runs found. Skipped, and recorded so,
+/// where `/tmp` is not mounted.
+///
+/// # Errors
+///
+/// `InternalError` when the fixture cannot be written or a run ends
+/// otherwise.
 fn firmware_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     use crate::fs::vfs::Vfs;
+    if !crate::fs::selftest::is_mounted("/tmp") {
+        skips.record(
+            "Linux driver layer's firmware and parameter runs",
+            "/tmp is not mounted",
+        );
+        return Ok(());
+    }
     let file = |name: &str| alloc::format!("{FIRMWARE_DIR}/{name}");
     // Nothing should be there; whatever is, is a fixture's leftovers, and
     // the mkdir below refuses what this does not remove.
@@ -298,32 +315,35 @@ fn firmware_runs(hello: &Program<'_>, skips: &mut crate::fs::selftest::Skips) ->
             "read no firmware, having no capability to read files",
             || None,
         )?;
-        expect(
-            hello,
-            &[b"hello", b"hello.nonesuch=1"],
-            &[],
-            EXIT_ARGUMENT,
-            "ended on a parameter it does not have",
-            || None,
-        )?;
-        expect(
-            hello,
-            &[b"hello", b"hello.answer=forty"],
-            &[],
-            EXIT_ARGUMENT,
-            "ended on a value its parameter's kind refuses",
-            || None,
-        )
+        let refused: [(&[u8], &str); 4] = [
+            (b"hello.nonesuch=1", "ended on a parameter it does not have"),
+            (
+                b"hello.answer=forty",
+                "ended, before any initcall, on a value its parameter's kind refuses",
+            ),
+            (
+                b"hello.device_level=six",
+                "ended, at the device initcalls, on a value its device-level parameter's kind refuses",
+            ),
+            (
+                b"hello.motto=say \"hi\" now",
+                "ended on a value holding both a space and a quote",
+            ),
+        ];
+        for (arg, what) in refused {
+            expect(hello, &[b"hello", arg], &[], EXIT_ARGUMENT, what, || None)?;
+        }
+        Ok(())
     });
     // The fixture's own: a removal that fails leaves files in /tmp, which
     // the next boot does not see, and the runs' verdict stands either way.
     let _ = Vfs::remove_recursive(FIRMWARE_DIR);
-    if let Err(e) = &ran {
+    ran.map_err(|e| {
         serial_println!(
             "[linuxdrv]   firmware runs: {e:?} (the fixture in {FIRMWARE_DIR} written: {written:?})"
         );
-    }
-    ran
+        KernelError::InternalError
+    })
 }
 
 /// The boot test's spare 82574 ([`crate::devhandle::probe_card`]) given to

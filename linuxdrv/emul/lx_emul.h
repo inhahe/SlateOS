@@ -33,6 +33,8 @@ extern u64 lx_switched_ns;
 void lx_emul_account(u64 now_ns);
 /* lx_fs.c: the objects Linux's own sysfs set-up makes; 0, or -ENOMEM. */
 int lx_fs_init(void);
+/* lx_emul.c: the first argument "<key><value>"'s value, or NULL. */
+const char *lx_arg(const char *key);
 /* lx_emul.c: whether the initcall at `fn`, answering `ret`, ends the process. */
 bool lx_initcall_fatal(const void *fn, int ret);
 /* lx_mm.c: Linux's direct map laid over the heap; 0, or -ENOMEM. And the

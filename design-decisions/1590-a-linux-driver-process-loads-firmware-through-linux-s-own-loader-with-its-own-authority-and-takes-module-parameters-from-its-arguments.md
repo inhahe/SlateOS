@@ -35,9 +35,14 @@ Linux.
    `_stat`, `_read` and `_close` (`linuxdrv/kit/src/files.rs`:
    `SYS_FS_OPEN` with `DIRECTORY_ALLOWED`, as Linux's open for reading
    takes a directory, `SYS_FS_FSTAT`, `SYS_FS_PREAD`, `SYS_FS_CLOSE`).
-   The kernel's codes are translated to Linux's errnos as the kernel's
-   own Linux entry points translate them (`linux_errno_for`); the kit's
-   tests read the kernel's tables, so the two cannot drift apart.
+   Linux keeps writers out while it reads (`deny_write_access()`); the
+   system has no such lock, so a file written while it is read is caught
+   after: its change time is read again, and the read refused `-ETXTBSY`,
+   as Linux refuses a file being written, if it moved. The kernel's codes
+   the file calls are known to answer are translated to Linux's errnos as
+   the kernel's own Linux entry points translate them (`linux_errno_for`),
+   any other `-EIO`; the kit's tests read the kernel's tables and its stat
+   record's layout, so the copies cannot drift apart.
 3. **The process's own authority.** Linux reads firmware as the kernel --
    kernel credentials, init's mount namespace -- whoever asked. A driver
    process has one authority, its own: it needs a `File` capability with
@@ -51,14 +56,20 @@ Linux.
    a module's own (`module_param`) before anything but memory is set up,
    as `start_kernel()` sets them; each initcall level's just before that
    level runs, as `do_initcall_level()` -- the initcalls now run level by
-   level, each bounded in `linuxdrv/link.ld` as Linux bounds it. An
-   argument holding a space is quoted for `parse_args()`, as the command
-   line would quote it. Arguments with no dot in their names are the
-   layer's own (`pci=`, `serve=`, `stacks=`) and a driver's mode words,
-   left alone. A dotted name no parameter has, or a value its kind
-   refuses, is said by `parse_args()` and ends the process before any
-   initcall (`SLX_EXIT_ARGUMENT`, 118): a mistyped option fails at once
-   rather than doing nothing.
+   level, each bounded in `linuxdrv/link.ld` as Linux bounds it. Only
+   arguments with a dot in their names go to `parse_args()`: every
+   parameter a driver process carries has one (Linux's undotted
+   `core_param`s are the kernel proper's), and the rest are the layer's
+   own (`pci=`, `serve=`, `stacks=`) and a driver's mode words. They make
+   one command line, built once and copied for each level; one holding a
+   space has its value quoted, as the command line quotes one, and one
+   holding a quote as well -- which no command line carries, having no
+   escape -- is refused. A name no parameter has, or a value its kind
+   refuses, is said by `parse_args()` and ends the process
+   (`SLX_EXIT_ARGUMENT`, 118): a mistyped option fails at once rather
+   than doing nothing. Before any initcall for a name, and for a value of
+   a module's own parameter; a level's parameter's value is judged at its
+   level, as Linux judges it, the earlier levels' initcalls having run.
 
 ### Alternatives
 
@@ -88,10 +99,17 @@ Linux.
 `linuxdrv/hello` (`hello_firmware_init`), run by the kernel's self-test
 (`linuxdrv::firmware_runs`) over a directory it writes in `/tmp`: the
 parameters set, each at its level; the layer's read at each of its
-edges; Linux's loader whole, shared, into a buffer, a file's tail from an
-offset, asynchronously, a missing file `-ENOENT`; with no `File`
-capability, nothing read (`-EACCES`); an unknown parameter and a refused
-value each ending the process with 118.
+edges -- a directory read as a file being ext4's at `/mnt`, whose size
+is not 0, so that it is refused for not being a regular file rather than
+for being empty (a `--no-rootfs` boot has none: a skip the boot test
+expects there); Linux's loader whole, shared, into a buffer, a file's
+tail from an offset, asynchronously, a missing file `-ENOENT`; with no
+`File` capability, nothing read (`-EACCES`); an unknown parameter, a
+refused value of a module's own and of the device level's, and a value
+holding both a space and a quote, each ending the process with 118. The
+kit's host tests hold its translations, the stat record's layout, the
+calls' numbers and flags, and the exit codes to the kernel's own. Not
+booted: a write racing the read, caught by the change time.
 
 ### Left
 

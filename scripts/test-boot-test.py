@@ -1516,9 +1516,10 @@ def test_a_boot_whose_iommu_stayed_off_fails():
         check(label, _iommu_check(text), want)
 
 
-def _linuxdrv_check(serial_text, named):
+def _linuxdrv_check(serial_text, named, no_rootfs=0):
     """Run the real `check_linuxdrv_ran` on a serial log holding
-    `serial_text`, a module named or not: "PASS" or "FAIL", `None` on a hang.
+    `serial_text`, a module named or not, under `--no-rootfs` or not: "PASS"
+    or "FAIL", `None` on a hang.
     """
     tmp = new_fixture()
     try:
@@ -1530,7 +1531,7 @@ def _linuxdrv_check(serial_text, named):
             handle.write(
                 "set -uo pipefail\n"
                 + extract_shell_function("check_linuxdrv_ran") + "\n\n"
-                + f"if check_linuxdrv_ran serial.txt {named} > /dev/null; then echo PASS; "
+                + f"if check_linuxdrv_ran serial.txt {named} {no_rootfs} > /dev/null; then echo PASS; "
                   "else echo FAIL; fi\n")
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the linuxdrv check")
         return None if proc is None else proc.stdout.strip()
@@ -1588,6 +1589,22 @@ def test_a_boot_whose_driver_process_did_not_run_fails():
         ("no process named passes, whatever the log", skipped, 0, "PASS"),
     ]:
         check(label, _linuxdrv_check(text, named), want)
+    # The one run that needs the rootfs's ext4, skipped as the kernel says
+    # it: expected under --no-rootfs, a failure anywhere else; and no other
+    # skip is let through there.
+    no_sized_dir = ("[linuxdrv]   SKIP: Linux driver layer's refusal of a directory "
+                    "read as a file (no directory with a size of its own at /mnt (no "
+                    "ext4 rootfs); a sizeless one tried)\n")
+    for label, text, no_rootfs, want in [
+        ("the sized directory's skip fails a boot with its rootfs",
+         ran + no_sized_dir, 0, "FAIL"),
+        ("the sized directory's skip passes a --no-rootfs boot",
+         ran + no_sized_dir, 1, "PASS"),
+        ("another skip still fails a --no-rootfs boot",
+         ran + no_sized_dir + skipped, 1, "FAIL"),
+        ("a run with no skip passes a --no-rootfs boot", ran, 1, "PASS"),
+    ]:
+        check(label, _linuxdrv_check(text, 1, no_rootfs), want)
 
 
 def _append_steps(steps):

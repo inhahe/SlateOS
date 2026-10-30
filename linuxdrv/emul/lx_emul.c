@@ -780,44 +780,91 @@ static const char *const lx_initcall_level_names[] = {
 };
 static_assert(ARRAY_SIZE(lx_initcall_levels) == ARRAY_SIZE(lx_initcall_level_names) + 1);
 
-/*
- * The argument `arg` as one argument of Linux's command line, for
- * parse_args() to cut up: as it is, unless it holds a space, which would
- * cut it in two and which the process's arguments -- each already one --
- * may hold; then its value quoted (name="value"), as Linux's command line
- * quotes one. One holding a quote is taken as quoted already. A copy, or
- * NULL when memory runs out.
- */
-static char *lx_param_arg(const char *arg)
+/* The first argument "<key><value>": its value, or NULL. */
+const char *lx_arg(const char *key)
 {
-	const char *eq = strchr(arg, '=');
-	const char *c;
+	size_t n = strlen(key);
+	int i;
 
-	for (c = arg; *c && !isspace(*c); c++)
-		;
-	if (!*c || strchr(arg, '"'))
-		return kstrdup(arg, GFP_KERNEL);
-	if (!eq)
-		return kasprintf(GFP_KERNEL, "\"%s\"", arg);
-	return kasprintf(GFP_KERNEL, "%.*s=\"%s\"", (int)(eq - arg), arg, eq + 1);
+	for (i = 1; i < slx_argc(); i++)
+		if (!strncmp(slx_argv(i), key, n))
+			return slx_argv(i) + n;
+	return NULL;
 }
 
 /*
- * An argument parse_args() found no parameter of any level for. The
- * layer's own (pci=, serve=, ...) and a driver's mode words have no dot in
- * their names, and are left to what reads them; a dotted name is a module's
- * parameter (module.parameter) this process does not have -- mistyped, or
- * meant for another driver -- and is refused, as an unknown option is.
+ * The process's arguments that name module parameters, as one line of
+ * Linux's command line: built once (lx_emul_init), copied for each pass,
+ * which parse_args() cuts up, and freed once the initcalls are done.
  */
-static int lx_param_unknown(char *param, char *val, const char *doing, void *arg)
+static char *lx_cmdline;
+
+/*
+ * Whether the argument `arg` names a module parameter: a dot in its name
+ * (module.parameter), before any '='. Every parameter a driver process
+ * carries has one -- Linux's undotted ones, core_param(), are the kernel
+ * proper's -- and the other arguments are the layer's own (pci=, serve=,
+ * ...) and a driver's mode words, which parse_args() never sees.
+ */
+static bool lx_names_param(const char *arg)
 {
-	return strchr(param, '.') ? -ENOENT : 0;
+	const char *dot = strchr(arg, '.'), *eq = strchr(arg, '=');
+
+	return dot && (!eq || dot < eq);
 }
 
-/* The passes after the first: what is unknown, that one has said. */
-static int lx_param_known(char *param, char *val, const char *doing, void *arg)
+static char *lx_put(char *at, const char *s, size_t n)
 {
-	return 0;
+	memcpy(at, s, n);
+	return at + n;
+}
+
+/*
+ * lx_cmdline made: each argument naming a parameter, separated by spaces,
+ * one holding a space with its value quoted (name="value") -- each is one
+ * argument already, which an unquoted space would cut in two -- as the
+ * command line quotes one. One holding a quote as well cannot be carried,
+ * the command line having no escape: refused. An exit code.
+ */
+static int lx_cmdline_build(void)
+{
+	size_t len = 1;
+	char *at;
+	int i;
+
+	for (i = 1; i < slx_argc(); i++)
+		if (lx_names_param(slx_argv(i)))
+			/* Two quotes at most, and a space. */
+			len += strlen(slx_argv(i)) + 3;
+	lx_cmdline = at = kmalloc(len, GFP_KERNEL);
+	if (!lx_cmdline)
+		return SLX_EXIT_NO_MEMORY;
+	for (i = 1; i < slx_argc(); i++) {
+		const char *arg = slx_argv(i), *eq = strchr(arg, '='), *c;
+		size_t n = strlen(arg), head;
+		bool spaced = false;
+
+		if (!lx_names_param(arg))
+			continue;
+		for (c = arg; *c; c++)
+			spaced |= isspace(*c);
+		if (spaced && strchr(arg, '"')) {
+			pr_err("Setting parameters: `%s' holds both a space and a quote, which no command line carries\n",
+			       arg);
+			return SLX_EXIT_ARGUMENT;
+		}
+		/* What goes before the quotes: the name and its '=', or nothing. */
+		head = !spaced ? n : eq ? eq + 1 - arg : 0;
+		at = lx_put(at, arg, head);
+		if (spaced) {
+			*at++ = '"';
+			at = lx_put(at, arg + head, n - head);
+			*at++ = '"';
+		}
+		*at++ = ' ';
+	}
+	*at = '\0';
+	return SLX_EXIT_OK;
 }
 
 /*
@@ -825,32 +872,25 @@ static int lx_param_known(char *param, char *val, const char *doing, void *arg)
  * sets them from its command line (kernel/params.c's parse_args), those of
  * initcall level `level`: -1, a module's own (module_param), before
  * anything but memory is set up, as start_kernel() sets them; each other
- * level's just before its initcalls run, as do_initcall_level(). Whether
- * every argument was taken; parse_args() says what was not -- a dotted
- * name no parameter has, or a value its kind refuses -- and the process
- * ends for it (SLX_EXIT_ARGUMENT).
+ * level's just before its initcalls run, as do_initcall_level(). An exit
+ * code: parse_args() says what it did not take -- a name no parameter has
+ * (at -1, where every name is looked up), or a value its kind refuses (at
+ * the parameter's own level, the earlier levels' initcalls having run) --
+ * and the process ends for it (SLX_EXIT_ARGUMENT).
  */
-static bool lx_params(int level)
+static int lx_params(int level)
 {
-	bool ok = true;
-	int i;
+	char *line, *err;
 
-	for (i = 1; i < slx_argc(); i++) {
-		char *arg = lx_param_arg(slx_argv(i));
-		char *err;
-
-		if (!arg) {
-			pr_err("no memory for the argument %s\n", slx_argv(i));
-			return false;
-		}
-		err = parse_args(level < 0 ? "Setting parameters" : lx_initcall_level_names[level],
-				 arg, __start___param, __stop___param - __start___param, level,
-				 level, NULL, level < 0 ? lx_param_unknown : lx_param_known);
-		kfree(arg);
-		if (IS_ERR(err))
-			ok = false;
-	}
-	return ok;
+	if (!*lx_cmdline)
+		return SLX_EXIT_OK;
+	line = kstrdup(lx_cmdline, GFP_KERNEL);
+	if (!line)
+		return SLX_EXIT_NO_MEMORY;
+	err = parse_args(level < 0 ? "Setting parameters" : lx_initcall_level_names[level], line,
+			 __start___param, __stop___param - __start___param, level, level, NULL, NULL);
+	kfree(line);
+	return IS_ERR(err) ? SLX_EXIT_ARGUMENT : SLX_EXIT_OK;
 }
 
 /*
@@ -860,11 +900,16 @@ static bool lx_params(int level)
  */
 int lx_emul_init(void)
 {
+	int ret;
+
 	/* First: every kmalloc() marks its pages in the direct map's array. */
 	if (lx_mm_init())
 		return SLX_EXIT_NO_MEMORY;
-	if (!lx_params(-1))
-		return SLX_EXIT_ARGUMENT;
+	ret = lx_cmdline_build();
+	if (!ret)
+		ret = lx_params(-1);
+	if (ret)
+		return ret;
 	wait_bit_init();
 	if (lx_softirq_init())
 		return SLX_EXIT_NO_MEMORY;
@@ -944,10 +989,13 @@ int lx_emul_main(void)
 		return SLX_EXIT_NO_MEMORY;
 	ret = lx_run_initcalls(__initcall_start, __initcall0_start);
 	for (level = 0; !ret && level < ARRAY_SIZE(lx_initcall_level_names); level++) {
-		if (!lx_params(level))
-			return SLX_EXIT_ARGUMENT;
-		ret = lx_run_initcalls(lx_initcall_levels[level], lx_initcall_levels[level + 1]);
+		ret = lx_params(level);
+		if (!ret)
+			ret = lx_run_initcalls(lx_initcall_levels[level],
+					       lx_initcall_levels[level + 1]);
 	}
+	kfree(lx_cmdline);
+	lx_cmdline = NULL;
 	if (ret)
 		return ret;
 	/* A driver process exists to drive what it was given. */

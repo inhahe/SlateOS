@@ -205,15 +205,22 @@ int lx_fs_init(void)
  * vmalloc'ed there when `*buf` is NULL, and freed again on a failure --
  * and the file's size told at `*file_size` when asked. A read from 0
  * without `file_size` is of the whole file, which must fit and must all
- * be read. Bytes read, or a negative errno. Nothing else can hold the file
- * open for writing as Linux's deny_write_access() keeps it: the firmware
- * it reads is the system's, which a driver process does not write.
+ * be read. Bytes read, or a negative errno.
+ *
+ * Linux keeps writers out while it reads, and refuses a file a writer
+ * holds (deny_write_access(), -ETXTBSY). The system has no such lock, so
+ * a file written while it is read -- firmware rewritten in place by an
+ * update -- is caught after the read: its change time, which every write
+ * moves, is read again, and the read refused as Linux refuses one,
+ * -ETXTBSY, if it moved. A write in the same tick of the system's clock as
+ * the file's last change before the read is not seen.
  */
 static ssize_t lx_read_file(long handle, loff_t offset, void **buf, size_t buf_size,
 			    size_t *file_size)
 {
+	unsigned long long changed, changed_after;
 	void *allocated = NULL;
-	long long i_size;
+	long long i_size, size_after;
 	bool regular, whole_file;
 	ssize_t copied = 0;
 	loff_t pos = offset;
@@ -222,7 +229,7 @@ static ssize_t lx_read_file(long handle, loff_t offset, void **buf, size_t buf_s
 	if (offset != 0 && (!*buf || !file_size))
 		return -EINVAL;
 	/* A size past SSIZE_MAX the kit answers -EFBIG, as Linux's check. */
-	i_size = slx_file_stat(handle, &regular);
+	i_size = slx_file_stat(handle, &regular, &changed);
 	if (i_size < 0)
 		return i_size;
 	if (!regular || i_size == 0)
@@ -253,8 +260,13 @@ static ssize_t lx_read_file(long handle, loff_t offset, void **buf, size_t buf_s
 		pos += bytes;
 		copied += bytes;
 	}
+	size_after = slx_file_stat(handle, &regular, &changed_after);
+	if (size_after < 0)
+		ret = size_after;
+	else if (changed_after != changed)
+		ret = -ETXTBSY;
 	/* The file shrank while it was read. */
-	if (whole_file && pos != i_size)
+	else if (whole_file && pos != i_size)
 		ret = -EIO;
 out_free:
 	if (ret < 0 && allocated) {

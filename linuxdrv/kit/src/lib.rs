@@ -46,8 +46,9 @@ mod wait;
 pub mod exit {
     /// Every initcall returned 0.
     pub const OK: i32 = 0;
-    /// An argument named a Linux module parameter that does not exist, or
-    /// gave one a value its kind refuses (`lx_emul.c`'s parameters).
+    /// An argument named a Linux module parameter that does not exist,
+    /// gave one a value its kind refuses, or held both a space and a quote
+    /// (`lx_emul.c`'s parameters).
     pub const ARGUMENT: i32 = 118;
     /// Linux code warned in a run that must not: a network driver's serving
     /// of one stack (`lx_nic.c`).
@@ -68,4 +69,66 @@ pub mod exit {
     pub const INIT_FAILED: i32 = 126;
     /// The process's memory could not be set up.
     pub const NO_MEMORY: i32 = 127;
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::panic, clippy::expect_used)]
+
+    use super::exit;
+    use std::collections::HashMap;
+
+    fn read(rel: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The exit codes are written three times -- `slx.h` for the C half,
+    /// [`exit`] for this one, `kernel/src/linuxdrv.rs` for the self-test
+    /// that reads them -- and must be one set.
+    #[test]
+    fn the_exit_codes_are_one_set() {
+        let header: HashMap<String, i32> = read("../emul/slx.h")
+            .lines()
+            .filter_map(|l| {
+                let mut words = l.strip_prefix("#define SLX_EXIT_")?.split_whitespace();
+                Some((words.next()?.to_string(), words.next()?.parse().ok()?))
+            })
+            .collect();
+        let kit = [
+            ("OK", exit::OK),
+            ("ARGUMENT", exit::ARGUMENT),
+            ("WARNED", exit::WARNED),
+            ("NO_CLOCK", exit::NO_CLOCK),
+            ("BUG", exit::BUG),
+            ("PANIC", exit::PANIC),
+            ("NO_RANDOM", exit::NO_RANDOM),
+            ("DEADLOCK", exit::DEADLOCK),
+            ("STOP", exit::STOP),
+            ("INIT_FAILED", exit::INIT_FAILED),
+            ("NO_MEMORY", exit::NO_MEMORY),
+        ];
+        assert_eq!(
+            header.len(),
+            kit.len(),
+            "slx.h's codes are not lxkit::exit's: {header:?}"
+        );
+        for (name, code) in kit {
+            assert_eq!(header.get(name), Some(&code), "SLX_EXIT_{name}");
+        }
+        let kernel = read("../../kernel/src/linuxdrv.rs");
+        let mut seen = 0;
+        for line in kernel.lines() {
+            let Some(rest) = line.strip_prefix("const EXIT_") else {
+                continue;
+            };
+            let (name, value) = rest
+                .split_once(": i32 = ")
+                .expect("const EXIT_<NAME>: i32 = <n>;");
+            let value: i32 = value.trim_end_matches(';').parse().expect("a number");
+            assert_eq!(header.get(name), Some(&value), "the kernel's EXIT_{name}");
+            seen += 1;
+        }
+        assert!(seen >= 5, "the kernel's exit codes were not found");
+    }
 }

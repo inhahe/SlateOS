@@ -94,9 +94,19 @@ void lx_hello_never_defined(void);
 static DECLARE_COMPLETION(hello_forever);
 
 /* Whether the process's argument is `mode`. */
+/*
+ * Whether the process was given a mode: its first argument, a word. A module
+ * parameter, or the firmware_class.path the kernel may give any driver
+ * process, has an '=' and is none.
+ */
+static bool hello_any_mode(void)
+{
+	return slx_argc() > 1 && !strchr(slx_argv(1), '=');
+}
+
 static bool hello_mode(const char *mode)
 {
-	return slx_argc() > 1 && strcmp(slx_argv(1), mode) == 0;
+	return hello_any_mode() && strcmp(slx_argv(1), mode) == 0;
 }
 
 /* A warning from one place, given twice: said once, and the driver goes on. */
@@ -671,6 +681,11 @@ static int hello_pci_dma(struct pci_dev *pdev)
 	HELLO_PCI_CHECK(ring, "no coherent memory the second time");
 	for (i = 0; i < PAGE_SIZE; i++)
 		HELLO_PCI_CHECK(!((u8 *)ring)[i], "coherent memory given back and taken again was not zeroed");
+	/* Managed coherent memory (dmamem): the same, given back with the device. */
+	big = dmam_alloc_coherent(&pdev->dev, PAGE_SIZE, &frame_dma, GFP_KERNEL);
+	HELLO_PCI_CHECK(big && frame_dma && !(frame_dma & (PAGE_SIZE - 1)) &&
+				!memchr_inv(big, 0, PAGE_SIZE),
+			"managed coherent memory was not a zeroed page the device reaches");
 	frame = kmalloc(ETH_ZLEN, GFP_KERNEL);
 	HELLO_PCI_CHECK(frame, "no memory");
 	eth_broadcast_addr(frame);
@@ -938,7 +953,7 @@ static int __init hello_tasks_init(void)
 	struct task_struct *worker;
 	int i, ret;
 
-	if (slx_argc() > 1)
+	if (hello_any_mode())
 		return 0;
 	mutex_lock(&hello_mutex);
 	hello_step(1);
@@ -1093,7 +1108,7 @@ core_initcall(hello_fails_early);
  */
 static int __init hello_answers_positive(void)
 {
-	return slx_argc() > 1 ? 0 : 1;
+	return hello_any_mode() ? 0 : 1;
 }
 late_initcall(hello_answers_positive);
 
@@ -1150,7 +1165,7 @@ static int __init hello_edges_init(void)
 	long left, elapsed;
 	int i;
 
-	if (slx_argc() > 1)
+	if (hello_any_mode())
 		return 0;
 	/* kthread_stop() lets its record go through RCU: freed by the next turn. */
 	msleep(1);
@@ -1352,6 +1367,55 @@ static int __init hello_edges_init(void)
 late_initcall(hello_edges_init);
 
 /*
+ * The memory helpers Linux's code calls by name, the layer's (lx_emul.c,
+ * lx_mm.c): a block duplicated, an array of them -- a count whose bytes
+ * overflow refused -- a sensitive block freed, and the page allocator's
+ * bulk call filling only the empty slots of its array.
+ */
+static int __init hello_memory_init(void)
+{
+	static const u32 words[3] = { 1, 2, 3 };
+	struct page *pages[4] = { NULL }, *kept;
+	/*
+	 * Elements whose bytes, times sizeof(u32), wrap to 4: without the
+	 * overflow check a copy of 4 bytes, which a refusal must be told from.
+	 */
+	size_t huge = (SIZE_MAX >> 2) + 2;
+	char *secret;
+	u32 *copy;
+	int i;
+
+	if (hello_any_mode())
+		return 0;
+	copy = kmemdup(words, sizeof(words), GFP_KERNEL);
+	HELLO_CHECK(copy && copy != words && !memcmp(copy, words, sizeof(words)),
+		    "kmemdup() was not a copy of its own");
+	kfree(copy);
+	copy = kmemdup_array(words, ARRAY_SIZE(words), sizeof(words[0]), GFP_KERNEL);
+	HELLO_CHECK(copy && !memcmp(copy, words, sizeof(words)), "kmemdup_array() was not a copy");
+	kfree(copy);
+	/* Out of the compiler's sight, so that it sees no oversized allocation. */
+	OPTIMIZER_HIDE_VAR(huge);
+	HELLO_CHECK(!kmemdup_array(words, huge, sizeof(words[0]), GFP_KERNEL),
+		    "kmemdup_array() of a size that overflows was not refused");
+	secret = kstrdup("a passphrase", GFP_KERNEL);
+	HELLO_CHECK(secret, "no memory");
+	kfree_sensitive(secret);
+	kfree_sensitive(NULL);
+	kept = pages[1] = alloc_page(GFP_KERNEL);
+	HELLO_CHECK(kept, "no page");
+	HELLO_CHECK(alloc_pages_bulk(GFP_KERNEL, ARRAY_SIZE(pages), pages) == ARRAY_SIZE(pages) &&
+			    pages[1] == kept && pages[0] && pages[2] && pages[3] &&
+			    pages[0] != kept && pages[2] != kept && pages[3] != kept,
+		    "the bulk page call did not fill the array's empty slots alone");
+	for (i = 0; i < ARRAY_SIZE(pages); i++)
+		__free_page(pages[i]);
+	pr_info("hello memory: kmemdup, kmemdup_array (an overflow refused), kfree_sensitive, the bulk page call filling empty slots\n");
+	return 0;
+}
+late_initcall(hello_memory_init);
+
+/*
  * Timers and softirqs: Linux's own timer wheel and softirq code, run by the
  * layer's loop as Linux's tick and ksoftirqd would. A timer fires no sooner
  * than its jiffy, in softirq context, while the only task waits on it -- so
@@ -1477,7 +1541,7 @@ static int __init hello_timers_init(void)
 {
 	unsigned long j;
 
-	if (slx_argc() > 1)
+	if (hello_any_mode())
 		return 0;
 
 	timer_setup(&hello_timer, hello_timer_fn, 0);
@@ -1673,7 +1737,7 @@ static int __init hello_workqueues_init(void)
 	struct workqueue_struct *wq;
 	unsigned long j;
 
-	if (slx_argc() > 1)
+	if (hello_any_mode())
 		return 0;
 
 	/* The layer's population counts (lx_emul.c), at run time. */
@@ -1951,7 +2015,7 @@ static int __init hello_driver_core_init(void)
 {
 	struct device_link *link;
 
-	if (slx_argc() > 1)
+	if (hello_any_mode())
 		return 0;
 
 	HELLO_CHECK(lx_initcall_fatal((const void *)hello_init, -ENODEV), "a driver's failing initcall did not end the process");

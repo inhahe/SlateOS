@@ -93,13 +93,14 @@ def sha256(data: bytes) -> str:
 
 
 def download(url: str, opener=urllib.request.urlopen, sleep=time.sleep, tries: int = 3) -> bytes:
-    """`url`'s whole body. Tried up to `tries` times, `sleep`ing 3 s between,
-    for what another try may mend: a connection lost or refused, a body cut
+    """`url`'s whole body. Tried up to `tries` times, `sleep`ing 3 s between
+    (and, for a 429, as long as its Retry-After asks, up to a minute), for
+    what another try may mend: a connection lost or refused, a body cut
     short (fewer bytes than its Content-Length, or http.client's
-    IncompleteRead), a server's error (5xx). OSError, saying why, for the
-    last of those, or at once for what no try mends: an answer of 4xx (the
-    pin names a file or release kernel.org does not have) or a body past
-    MAX_BYTES."""
+    IncompleteRead), a server's error (5xx), a "not now" (408, 429).
+    OSError, saying why, for the last of those, or at once for what no try
+    mends: any other 4xx (the pin names a file or release kernel.org does
+    not have) or a body past MAX_BYTES."""
     # kernel.org answers urllib's own User-Agent with 403 Forbidden.
     request = urllib.request.Request(url, headers={"User-Agent": "slateos-linuxfw/1"})
     why = "no attempt made"
@@ -111,9 +112,14 @@ def download(url: str, opener=urllib.request.urlopen, sleep=time.sleep, tries: i
                 body = response.read(MAX_BYTES + 1)
                 promised = response.headers.get("Content-Length")
         except urllib.error.HTTPError as e:
-            if e.code < 500:
+            # 408 and 429 are the server's "not now": tried again, after the
+            # wait it asks for (Retry-After, seconds) when it asks one.
+            if e.code < 500 and e.code not in (408, 429):
                 raise OSError(f"HTTP {e.code} {e.reason}") from e
             why = f"HTTP {e.code} {e.reason}"
+            wait = (e.headers or {}).get("Retry-After", "") if e.code == 429 else ""
+            if wait.isdigit() and attempt + 1 < tries:
+                sleep(min(int(wait), 60))
             continue
         except (OSError, http.client.HTTPException) as e:
             why = f"{type(e).__name__}: {e}"
@@ -241,6 +247,8 @@ def self_test() -> int:
                 return Answer(body[:3], promised=len(body))
             if fault == "busy":
                 raise urllib.error.HTTPError(url, 503, "Service Unavailable", None, None)
+            if fault == "slow":
+                raise urllib.error.HTTPError(url, 429, "Too Many Requests", {"Retry-After": "2"}, None)
             return Answer(body)
         return opener
 
@@ -282,6 +290,12 @@ def self_test() -> int:
             check(f"an answer {fault} tried again, and taken whole",
                   ((wt / OUT / "b.bin").read_bytes(), len(asked)), (b, 2))
             (wt / OUT / "b.bin").unlink()
+        asked.clear()
+        slept: list[float] = []
+        fetch(wt, kernel_org({"x/a.bin": a, "b.bin": b}, faults=("slow",)), quiet, slept.append)
+        check("a 429 tried again, after the Retry-After it asked",
+              ((wt / OUT / "b.bin").read_bytes(), len(asked), 2 in slept), (b, 2, True))
+        (wt / OUT / "b.bin").unlink()
         asked.clear()
         try:
             fetch(wt, kernel_org({"x/a.bin": a}), quiet, nap)

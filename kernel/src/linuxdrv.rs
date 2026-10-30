@@ -58,25 +58,42 @@ const KILLED_ACCESS_VIOLATION: i32 =
 struct Program<'a> {
     elf: &'a [u8],
     name: &'static str,
+    /// A Linux driver process -- told where the boot medium's firmware is
+    /// ([`start`]) -- rather than one of the system's own (the netstack
+    /// daemon), which takes no such argument.
+    driver: bool,
     limit_s: u64,
     /// How often its end is looked for: 0 after every yield of the CPU,
     /// else that many milliseconds' sleep between looks.
     poll_ms: u64,
 }
 
-/// `program` started with `argv`, holding `capabilities`.
+/// `program` started with `argv`, holding `capabilities` -- and, a driver
+/// process once the boot medium's firmware is placed
+/// ([`BOOT_FIRMWARE_PLACED`]), told where
+/// (`firmware_class.path=`[`BOOT_FIRMWARE_DIR`]), unless `argv` names a
+/// directory of its own.
 fn start(
     program: &Program<'_>,
     argv: &[&[u8]],
     capabilities: &[(ResourceType, u64, Rights)],
 ) -> KernelResult<spawn::SpawnResult> {
+    const PATH_KEY: &[u8] = b"firmware_class.path=";
+    let path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
+    let mut args = argv.to_vec();
+    if program.driver
+        && BOOT_FIRMWARE_PLACED.load(core::sync::atomic::Ordering::Acquire)
+        && !argv.iter().any(|a| a.starts_with(PATH_KEY))
+    {
+        args.push(path_arg.as_bytes());
+    }
     let options = spawn::SpawnOptions {
         name: program.name,
         parent: 0,
         priority: crate::sched::task::DEFAULT_PRIORITY,
         capabilities,
         fd_map: &[],
-        argv,
+        argv: &args,
         envp: &[],
         exe_path: None,
         cwd: None,
@@ -151,8 +168,7 @@ pub fn self_test() -> KernelResult<()> {
     // skipped, which would read as the card's absence.
     let named = named_card(CardKind::IntelEthernet)?;
     let named_wifi = named_card(CardKind::MediatekWifi)?;
-    let needs: [(bool, &str, &[u8]); 3] = [
-        (named.is_some(), "linuxdrv/hello", HELLO),
+    let needs: [(bool, &str, &[u8]); 2] = [
         (named.is_some(), "linuxdrv/e1000e", E1000E),
         (named_wifi.is_some(), "linuxdrv/mt7925e", MT7925E),
     ];
@@ -166,17 +182,60 @@ pub fn self_test() -> KernelResult<()> {
     }
     let mut skips = crate::fs::selftest::Skips::new();
     check_place_firmware(&mut skips)?;
+    // Each driver process's runs on their own: one not loaded is a skip of
+    // its runs alone, never of another's.
+    let hello = hello_runs(&mut skips)?;
+    let e1000e = e1000e_run(&mut skips, named)?;
+    let wifi = wifi_runs(&mut skips, named_wifi)?;
+    let hwsim = hwsim_run(&mut skips)?;
+    skips.report("[linuxdrv]");
+    if let Some(ran) = hello {
+        serial_println!(
+            "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core, the layer's memory helpers), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}{}: OK",
+            ran.bytes,
+            if ran.boot_firmware {
+                ", and finding the boot medium's where the kernel placed it, read-only"
+            } else {
+                ""
+            },
+            if ran.pci {
+                ", a PCI function probed through Linux's PCI core, its interrupts handled -- on its legacy line, then by message -- and its DMA done, and one no driver took"
+            } else {
+                ""
+            }
+        );
+    }
+    say_runs(e1000e, wifi, hwsim);
+    Ok(())
+}
+
+/// What [`hello_runs`] ran: the process's size, and whether its boot
+/// firmware and PCI runs were among them.
+struct HelloRan {
+    bytes: usize,
+    boot_firmware: bool,
+    pci: bool,
+}
+
+/// The hello process's runs (`linuxdrv/hello`; [`self_test`] says what
+/// each must end as): what ran, or `None`, skipped and recorded so, where
+/// the bootloader did not load it.
+///
+/// # Errors
+///
+/// `InternalError` when a run ends otherwise.
+fn hello_runs(skips: &mut crate::fs::selftest::Skips) -> KernelResult<Option<HelloRan>> {
     let Some(elf) = crate::boot::module(HELLO) else {
         skips.record(
             "Linux driver layer's hello process",
             "not loaded beside the kernel (no limine.conf module named linuxdrv/hello)",
         );
-        skips.report("[linuxdrv]");
-        return Ok(());
+        return Ok(None);
     };
     let hello = Program {
         elf,
         name: "lx-hello",
+        driver: true,
         limit_s: 10,
         poll_ms: 0,
     };
@@ -221,27 +280,19 @@ pub fn self_test() -> KernelResult<()> {
     for (argv, want, what) in cases {
         expect(&hello, argv, &[], want, what, || None)?;
     }
-    firmware_runs(&hello, &mut skips)?;
-    let boot_firmware = boot_firmware_run(&hello, &mut skips)?;
-    let pci = pci_runs(&hello, &mut skips)?;
-    let e1000e = e1000e_run(&mut skips, named)?;
-    let wifi = wifi_runs(&mut skips, named_wifi)?;
-    let hwsim = hwsim_run(&mut skips)?;
-    skips.report("[linuxdrv]");
-    serial_println!(
-        "[linuxdrv]   hello process ({} bytes): Linux's headers and vsprintf in a process of their own, its initcalls run (a kthread, a mutex held across a sleep, a completion, the scheduler's edges, timers and softirqs, workqueues, the driver core), a generated stop, a deadlock, a stack overflow caught by its guard page, a failed initcall, early and late, a stranded kthread, a sleep while atomic, module parameters set from its arguments -- an unknown one and a refused value ending it -- and Linux's firmware loader reading files, none without the capability to{}{}: OK",
-        elf.len(),
-        if boot_firmware {
-            ", and finding the boot medium's where the kernel placed it, read-only"
-        } else {
-            ""
-        },
-        if pci {
-            ", a PCI function probed through Linux's PCI core, its interrupts handled -- on its legacy line, then by message -- and its DMA done, and one no driver took"
-        } else {
-            ""
-        }
-    );
+    firmware_runs(&hello, skips)?;
+    let boot_firmware = boot_firmware_run(&hello, skips)?;
+    let pci = pci_runs(&hello, skips)?;
+    Ok(Some(HelloRan {
+        bytes: elf.len(),
+        boot_firmware,
+        pci,
+    }))
+}
+
+/// The verdicts of the runs after hello's, for what ran: e1000e's on its
+/// network, mt7925e's with or without a card, hwsim's.
+fn say_runs(e1000e: Option<Network>, wifi: Option<bool>, hwsim: bool) {
     if let Some(network) = e1000e {
         let lan = network == Network::Lan;
         serial_println!(
@@ -283,7 +334,6 @@ pub fn self_test() -> KernelResult<()> {
             "[linuxdrv]   hwsim process: Linux's mac80211_hwsim, two simulated radios on one medium -- the first made an open access point through nl80211, the second's scan finding it, its name, address and frequency as beaconed: OK"
         );
     }
-    Ok(())
 }
 
 /// Linux's mac80211_hwsim (`linuxdrv/hwsim`): two simulated radios, which
@@ -308,6 +358,7 @@ fn hwsim_run(skips: &mut crate::fs::selftest::Skips) -> KernelResult<bool> {
     let program = Program {
         elf,
         name: "lx-hwsim",
+        driver: true,
         limit_s: 60,
         poll_ms: 0,
     };
@@ -351,6 +402,7 @@ fn wifi_runs(
         let program = Program {
             elf,
             name: "lx-mt7925e",
+            driver: true,
             limit_s: 30,
             poll_ms: 0,
         };
@@ -374,18 +426,19 @@ fn wifi_runs(
         (ResourceType::File, 0, Rights::READ),
     ];
     let arg = alloc::format!("pci={:02x}:{:02x}.{:x}", a.bus, a.device, a.function);
-    let path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
-    // The card's firmware loaded, then up to 30 s for it to register and
-    // 30 s for the scan (lx_wifi.c).
+    // The card's firmware loaded -- from the boot medium's, which start()
+    // names -- then up to 30 s for it to register and 30 s for the scan
+    // (lx_wifi.c).
     let program = Program {
         elf,
         name: "lx-mt7925e",
+        driver: true,
         limit_s: 90,
         poll_ms: 0,
     };
     expect(
         &program,
-        &[b"mt7925e", arg.as_bytes(), path_arg.as_bytes(), b"scan"],
+        &[b"mt7925e", arg.as_bytes(), b"scan"],
         &caps,
         EXIT_OK,
         "bound the card, brought its interface up, had nl80211 scan and said what it found",
@@ -433,12 +486,20 @@ fn check_parse_pci_address() -> KernelResult<()> {
 }
 
 /// Where the boot medium's firmware is put ([`mount_boot_firmware`]), and
-/// what every driver process is told as `firmware_class.path`: a mount point
-/// of its own, at the top of the tree -- whose parent, `/`, always exists
-/// and is never replaced -- so that placing the firmware writes nothing to
-/// whatever root there is, and hides no `/lib/firmware` an installed system
-/// carries, which Linux's loader searches after this one.
+/// what every driver process is told as `firmware_class.path` once it is
+/// ([`start`]): a mount point of its own, at the top of the tree -- whose
+/// parent, `/`, always exists and is never replaced -- so that placing the
+/// firmware writes nothing to whatever root there is, and hides no
+/// `/lib/firmware` an installed system carries, which Linux's loader
+/// searches after this one.
 pub const BOOT_FIRMWARE_DIR: &str = "/.boot-firmware";
+
+/// Whether [`mount_boot_firmware`] placed the boot medium's firmware, whole
+/// and sealed read-only. Only then is a driver process told
+/// [`BOOT_FIRMWARE_DIR`]: without the mount, the name is anyone's to make on
+/// the root, and a placement that failed may have left one half-written.
+static BOOT_FIRMWARE_PLACED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
 /// The `module_cmdline:` prefix that makes a module firmware, what follows
 /// it the file's path under [`BOOT_FIRMWARE_DIR`].
 const FIRMWARE_MODULE: &[u8] = b"firmware/";
@@ -470,12 +531,6 @@ struct FirmwareRefused<'a> {
     why: &'static str,
 }
 
-/// Whether `dir` is a directory on `path`'s way: `path` lies inside it.
-fn under(path: &[u8], dir: &[u8]) -> bool {
-    path.strip_prefix(dir)
-        .is_some_and(|rest| rest.first() == Some(&b'/'))
-}
-
 /// The firmware files `modules` -- names and bytes, as
 /// [`crate::boot::modules`] gives them -- carry, in their order: each module
 /// named `firmware/<path>` as its path ([`firmware_module_path`]) and bytes,
@@ -485,6 +540,7 @@ fn under(path: &[u8], dir: &[u8]) -> bool {
 fn firmware_files<'a>(
     modules: impl Iterator<Item = (&'a [u8], &'a [u8])>,
 ) -> Result<alloc::vec::Vec<FirmwareFile<'a>>, FirmwareRefused<'a>> {
+    use crate::fs::path::Path;
     let mut files: alloc::vec::Vec<FirmwareFile<'a>> = alloc::vec::Vec::new();
     for (name, bytes) in modules {
         let why = match firmware_module_path(name) {
@@ -493,7 +549,14 @@ fn firmware_files<'a>(
             Some(Ok(path)) if files.iter().any(|&(p, _)| p == path) => {
                 "another module names the same file"
             }
-            Some(Ok(path)) if files.iter().any(|&(p, _)| under(p, path) || under(path, p)) => {
+            // Equal paths are caught above; a component-aligned prefix
+            // either way is a file where the other wants a directory.
+            Some(Ok(path))
+                if files.iter().any(|&(p, _)| {
+                    let (p, path) = (Path::new(p), Path::new(path));
+                    p.starts_with(path) || path.starts_with(p)
+                }) =>
+            {
                 "another module's file is a directory on its path, or the reverse"
             }
             Some(Ok(path)) => {
@@ -543,9 +606,15 @@ fn place_firmware(files: &[FirmwareFile<'_>], at: &str) -> KernelResult<(usize, 
     match placed {
         Ok(bytes) => Ok((files.len(), bytes)),
         Err(e) => {
-            // The placement's error is the answer; an unmount that fails
-            // as well leaves a memfs nothing names as firmware's home.
-            let _ = Vfs::unmount(at);
+            // The placement's error is the answer. An unmount that fails as
+            // well leaves the half-written memfs at `at`, said here -- which
+            // no driver process is then told of: mount_boot_firmware marks
+            // the firmware placed only on success (BOOT_FIRMWARE_PLACED).
+            if let Err(unmounted) = Vfs::unmount(at) {
+                serial_println!(
+                    "[boot] the firmware's mount at {at} stays, half-placed: its unmount failed: {unmounted:?}"
+                );
+            }
             Err(e)
         }
     }
@@ -581,7 +650,11 @@ pub fn mount_boot_firmware() -> KernelResult<(usize, usize)> {
         );
         KernelError::InvalidArgument
     })?;
-    place_firmware(&files, BOOT_FIRMWARE_DIR)
+    let placed = place_firmware(&files, BOOT_FIRMWARE_DIR)?;
+    if placed.0 > 0 {
+        BOOT_FIRMWARE_PLACED.store(true, core::sync::atomic::Ordering::Release);
+    }
+    Ok(placed)
 }
 
 /// [`firmware_module_path`] at its edges: each answer `None` (not
@@ -728,7 +801,12 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         serial_println!("[linuxdrv]   FAIL: placing firmware: {what}");
         KernelError::InternalError
     };
+    // Whatever a case left mounted taken down before the next, or before a
+    // failure is answered: true when nothing is left. A scratch mount that
+    // will not go stays in /tmp, which the next boot does not see.
+    let gone = || !is_mounted(AT) || Vfs::unmount(AT).is_ok();
     if place_firmware(&[], AT) != Ok((0, 0)) || is_mounted(AT) {
+        gone();
         return Err(fail("no files mounted something"));
     }
     let files: [FirmwareFile<'_>; 2] = [(b"a/b.bin", b"one"), (b"c.bin", b"two!")];
@@ -738,9 +816,9 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
         Vfs::read_file("/tmp/linuxdrv-fwplace/c.bin"),
     );
     let written = Vfs::write_file("/tmp/linuxdrv-fwplace/d.bin", b"x").is_ok();
-    // The check's own: an unmount that fails leaves a scratch mount in /tmp,
-    // which the next boot does not see, and the outcome stands either way.
-    let _ = Vfs::unmount(AT);
+    if !gone() {
+        return Err(fail("the placed files' scratch mount would not go"));
+    }
     if placed != Ok((2, 7)) || found != (Ok(b"one".to_vec()), Ok(b"two!".to_vec())) || written {
         return Err(fail(
             "two files were not placed as given, or a third could be written beside them",
@@ -748,7 +826,7 @@ fn check_place_firmware(skips: &mut crate::fs::selftest::Skips) -> KernelResult<
     }
     let clash: [FirmwareFile<'_>; 2] = [(b"x", b"1"), (b"x/y", b"2")];
     if place_firmware(&clash, AT).is_ok() || is_mounted(AT) {
-        let _ = Vfs::unmount(AT);
+        gone();
         return Err(fail("a placement that failed part-way left a mount"));
     }
     Ok(())
@@ -796,8 +874,8 @@ fn boot_firmware_run(
     {
         return Err(fail("a file was written beside the boot medium's"));
     }
-    let path_arg = alloc::format!("firmware_class.path={BOOT_FIRMWARE_DIR}");
-    let argv: [&[u8]; 3] = [b"hello", b"bootfw", path_arg.as_bytes()];
+    // Told where the firmware is as every driver process is (start()).
+    let argv: [&[u8]; 2] = [b"hello", b"bootfw"];
     expect(
         hello,
         &argv,
@@ -1317,6 +1395,7 @@ fn e1000e_run(
     let program = Program {
         elf,
         name: "lx-e1000e",
+        driver: true,
         limit_s: 30,
         poll_ms: 0,
     };
@@ -1377,6 +1456,7 @@ fn native_bench(skips: &mut crate::fs::selftest::Skips) -> KernelResult<()> {
     let program = Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-bench",
+        driver: false,
         limit_s: 60,
         poll_ms: DAEMON_POLL_MS,
     };
@@ -1481,6 +1561,7 @@ fn e1000e_serve(
     let netstack = |limit_s| Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-nic",
+        driver: false,
         limit_s,
         poll_ms: DAEMON_POLL_MS,
     };
@@ -1591,6 +1672,7 @@ fn serve_sockets(card_key: u64, cable: bool) -> bool {
     let program = Program {
         elf: spawn::NETSTACK_ELF,
         name: "netstack-serve",
+        driver: false,
         limit_s: 60,
         poll_ms: DAEMON_POLL_MS,
     };

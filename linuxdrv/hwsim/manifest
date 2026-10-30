@@ -53,6 +53,7 @@ linux net/mac80211/tdls.o
 linux net/mac80211/ocb.o
 linux net/mac80211/airtime.o
 linux net/mac80211/eht.o
+linux net/mac80211/wbrf.o
 linux net/mac80211/rc80211_minstrel_ht.o
 
 # cfg80211: the wireless configuration API, the regulatory rules and the

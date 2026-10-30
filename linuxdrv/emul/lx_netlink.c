@@ -147,10 +147,11 @@ static bool lx_genl_doit_op(const struct genl_family *family, u8 cmd, struct gen
 	}
 	if (!op->doit)
 		return false;
-	if (!op->policy) {
-		op->policy = family->policy;
+	/* Each the family's where the op has none, apart, as genl_op_from_full() takes them. */
+	if (!op->maxattr)
 		op->maxattr = family->maxattr;
-	}
+	if (!op->policy)
+		op->policy = family->policy;
 	op->cmd = cmd;
 	op->pre_doit = family->pre_doit;
 	op->post_doit = family->post_doit;

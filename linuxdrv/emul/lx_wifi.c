@@ -22,6 +22,10 @@
  * - Neither, and given no card: the process ends once its initcalls are
  *   done. Given a card, the task does nothing.
  *
+ * A run that ends otherwise well, but in which Linux code warned anywhere --
+ * the driver, the 802.11 stack, the layer -- ends as warned (SLX_EXIT_WARNED),
+ * which the kernel's self-test fails, as the e1000e process's does.
+ *
  * And what of the kernel's key management cfg80211 asks for: a keyring
  * that trusts nothing (below).
  */
@@ -94,7 +98,9 @@ void key_put(struct key *key)
 /*
  * The first `n` wireless interfaces, in the order mac80211 made them, once
  * there are that many -- waiting up to LX_WIFI_REGISTER_MS for the driver to
- * register its radios. False, said, when there never are.
+ * register its radios -- each held (dev_hold), so that one unregistered
+ * while the run waits on it is not freed under it: lx_wifi_put() gives them
+ * back. False, said, when there never are.
  */
 static bool lx_wifi_devs(struct net_device **devs, int n)
 {
@@ -108,14 +114,25 @@ static bool lx_wifi_devs(struct net_device **devs, int n)
 		for_each_netdev(&init_net, dev)
 			if (dev->ieee80211_ptr && found < n)
 				devs[found++] = dev;
-		rtnl_unlock();
-		if (found == n)
+		if (found == n) {
+			for (found = 0; found < n; found++)
+				dev_hold(devs[found]);
+			rtnl_unlock();
 			return true;
+		}
+		rtnl_unlock();
 		msleep(100);
 	}
 	pr_err("lx-wifi: %d of the %d wireless interface(s) wanted in %d s: the radios did not register\n",
 	       found, n, LX_WIFI_REGISTER_MS / 1000);
 	return false;
+}
+
+/* What lx_wifi_devs() held, given back. */
+static void lx_wifi_put(struct net_device **devs, int n)
+{
+	while (n--)
+		dev_put(devs[n]);
 }
 
 static int lx_wifi_open(struct net_device *dev)
@@ -167,11 +184,15 @@ static u8 lx_wifi_scan_end(const struct genl_family *nl80211)
 {
 	unsigned long until = jiffies + LX_WIFI_SCAN_S * HZ;
 
-	while (time_before(jiffies, until)) {
-		struct sk_buff *msg = lx_genl_event(nl80211, NL80211_MULTICAST_GROUP_SCAN,
-						    until - jiffies);
+	for (;;) {
+		/* What is left, read once: a tick between a test and a subtraction would wrap it. */
+		long left = (long)(until - jiffies);
+		struct sk_buff *msg;
 		u8 cmd;
 
+		if (left <= 0)
+			break;
+		msg = lx_genl_event(nl80211, NL80211_MULTICAST_GROUP_SCAN, left);
 		if (!msg)
 			break;
 		cmd = ((struct genlmsghdr *)nlmsg_data(nlmsg_hdr(msg)))->cmd;
@@ -250,6 +271,7 @@ static int lx_wifi_scan(void)
 		err = lx_wifi_scan_on(nl80211, dev);
 	if (!err)
 		lx_wifi_results(dev, &found);
+	lx_wifi_put(&dev, 1);
 	return err;
 }
 
@@ -319,26 +341,41 @@ static int lx_wifi_hwsim(void)
 		err = lx_wifi_open(devs[1]);
 	if (!err)
 		err = lx_wifi_scan_on(nl80211, devs[1]);
-	if (err)
-		return err;
-	found.bssid = devs[0]->dev_addr;
-	lx_wifi_results(devs[1], &found);
-	if (!found.wanted) {
-		pr_err("lx-wifi: the scan did not find \"%s\" from %pM on %u MHz\n", LX_WIFI_SSID,
-		       devs[0]->dev_addr, LX_WIFI_FREQ);
-		return -ENOENT;
+	if (!err) {
+		found.bssid = devs[0]->dev_addr;
+		lx_wifi_results(devs[1], &found);
+		if (found.wanted)
+			pr_info("lx-wifi: hwsim: \"%s\" found, beaconed by the first radio and heard by the second\n",
+				LX_WIFI_SSID);
+		else
+			pr_err("lx-wifi: the scan did not find \"%s\" from %pM on %u MHz\n",
+			       LX_WIFI_SSID, devs[0]->dev_addr, LX_WIFI_FREQ);
+		err = found.wanted ? 0 : -ENOENT;
 	}
-	pr_info("lx-wifi: hwsim: \"%s\" found, beaconed by the first radio and heard by the second\n",
-		LX_WIFI_SSID);
-	return 0;
+	lx_wifi_put(devs, 2);
+	return err;
+}
+
+/*
+ * How a run that `err` ended ends the process: a failure as a failed
+ * initcall; a success in which Linux code warned anywhere -- the driver,
+ * the 802.11 stack, the layer -- as a warning, a bug the run must not pass.
+ */
+static void __noreturn lx_wifi_end(int err)
+{
+	if (!err && lx_warnings) {
+		pr_err("lx-wifi: Linux warned %lu time(s) in a run that must not\n", lx_warnings);
+		slx_exit(SLX_EXIT_WARNED);
+	}
+	slx_exit(err ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
 }
 
 static int lx_wifi_task(void *unused)
 {
 	if (lx_arg("scan"))
-		slx_exit(lx_wifi_scan() ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
+		lx_wifi_end(lx_wifi_scan());
 	if (lx_arg("hwsim"))
-		slx_exit(lx_wifi_hwsim() ? SLX_EXIT_INIT_FAILED : SLX_EXIT_OK);
+		lx_wifi_end(lx_wifi_hwsim());
 	if (lx_arg("pci="))
 		return 0;
 	/*
@@ -350,7 +387,7 @@ static int lx_wifi_task(void *unused)
 	 */
 	while (system_state != SYSTEM_RUNNING)
 		msleep(10);
-	slx_exit(SLX_EXIT_OK);
+	lx_wifi_end(0);
 }
 
 /* After the driver's own initcalls, which register its radios as they probe. */

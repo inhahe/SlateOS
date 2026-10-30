@@ -32,9 +32,13 @@ a machine's firmware.
    link can stand in for the directory. A placement that fails part-way
    unmounts it: no firmware rather than some. Without a firmware module
    nothing is mounted.
-3. **Every driver process is told `firmware_class.path=/.boot-firmware`.**
-   Linux's loader searches it first, then `/lib/firmware` -- so firmware an
-   installed system carries is still found, never hidden by the medium's.
+3. **Every driver process is told `firmware_class.path=/.boot-firmware`**
+   (`linuxdrv::start`, unless a run names a directory of its own) -- once
+   the firmware is placed, whole and sealed, and only then: without the
+   mount the name is anyone's to make on the root, and a placement that
+   failed may have left one half-written. Linux's loader searches it first,
+   then `/lib/firmware` -- so firmware an installed system carries is still
+   found, never hidden by the medium's.
 4. **The files are pinned, fetched and verified, not committed.**
    `linuxdrv/firmware.pin` names a linux-firmware release tag and each file
    with its sha256; `scripts/linuxfw.py fetch` takes them from kernel.org

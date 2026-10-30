@@ -108,6 +108,20 @@ static void lx_hrtimer_enqueue(struct hrtimer *timer)
 	timer->state = HRTIMER_STATE_ENQUEUED;
 }
 
+/*
+ * `lhs` + `rhs`, or, where the sum would pass what a ktime_t holds, the
+ * furthest time Linux gives (KTIME_SEC_MAX seconds), as its own does: a
+ * relative timer's expiry, and a periodic one's next (hrtimer_forward).
+ */
+ktime_t ktime_add_safe(const ktime_t lhs, const ktime_t rhs)
+{
+	ktime_t sum;
+
+	if (check_add_overflow(lhs, rhs, &sum) || sum < 0)
+		return ktime_set(KTIME_SEC_MAX, 0);
+	return sum;
+}
+
 void hrtimer_start_range_ns(struct hrtimer *timer, ktime_t tim, u64 range_ns,
 			    const enum hrtimer_mode mode)
 {

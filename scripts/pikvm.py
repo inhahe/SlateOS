@@ -344,7 +344,12 @@ class PiKvm:
                 self.write_image(image, size)
                 break
             except urllib.error.HTTPError as e:
-                said = e.read()[:300]
+                # Its body, to tell one refusal from another; a body the
+                # network loses is said as nothing, not raised from here.
+                try:
+                    said = e.read()[:300]
+                except NETWORK_ERRORS:
+                    said = b""
                 if e.code == 409 and attempt < RETRIES:
                     print(f"pikvm: the drive is busy; trying again in {RETRY_WAIT} s", file=sys.stderr)
                     time.sleep(RETRY_WAIT)
@@ -998,7 +1003,10 @@ def main(argv: list[str]) -> int:
         run_command(kvm, args)
     except urllib.error.HTTPError as e:
         sys.exit(f"pikvm: the PiKVM refused a request: {e.code} {e.reason}")
-    except NETWORK_ERRORS as e:
+    # The network's failures only -- not every OSError, which a missing
+    # image or an unwritable directory is too, and says itself better.
+    except (urllib.error.URLError, http.client.HTTPException, ConnectionError,
+            TimeoutError) as e:
         sys.exit(f"pikvm: the PiKVM at {kvm.url} does not answer ({e}): is it on the network?")
     return 0
 

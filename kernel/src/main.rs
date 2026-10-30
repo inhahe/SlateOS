@@ -1467,8 +1467,8 @@ extern "C" fn kernel_main() -> ! {
             if let Err(e) = fs::sysfs::mount("/sys") {
                 serial_println!("[boot] WARNING: failed to mount sysfs at /sys: {:?}", e);
             }
-            // The boot medium's firmware, where the Linux driver processes'
-            // loader looks by default.
+            // The boot medium's firmware, at a mount of its own, which every
+            // Linux driver process is then told as its firmware_class.path.
             match linuxdrv::mount_boot_firmware() {
                 Ok((0, _)) => {}
                 Ok((files, bytes)) => serial_println!(

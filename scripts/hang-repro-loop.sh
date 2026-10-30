@@ -31,7 +31,8 @@ caught=""
 
 for i in $(seq 1 "$MAX_ITERS"); do
     echo "=== hang-repro iteration $i/$MAX_ITERS ($(date +%H:%M:%S)) ==="
-    bash scripts/boot-test.sh --no-build --hard-lockup-watchdog >"$CATCH_DIR/iter-$i.stdout" 2>&1
+    # CARD_BOOT=0: the hunt is the main boot's, whose log alone is read below.
+    CARD_BOOT=0 bash scripts/boot-test.sh --no-build --hard-lockup-watchdog >"$CATCH_DIR/iter-$i.stdout" 2>&1
     rc=$?
 
     # rc=4: another lane's live run held the cross-worktree QEMU lock, so

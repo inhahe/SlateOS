@@ -10,7 +10,9 @@
 #
 # Exit codes:
 #   0 — success marker detected AND no self-test failures
-#   1 — Timeout, PANIC, or a non-fatal self-test failure detected
+#   1 — Timeout, PANIC, or a non-fatal self-test failure detected -- in the
+#       main boot, or in the card boot that follows it (card_boot; its log
+#       build/serial-card.txt, its FAILED_CHECK beginning "the card boot:")
 #   2 — Wedge: the serial log stopped growing for --stall-secs with the marker
 #       still absent (opt-in; distinct from 1 because a wedge is a hang to be
 #       debugged with the captured RIP, not a test that reported a failure)
@@ -236,7 +238,9 @@
 #                                       # by Linux's e1000e, and check every
 #                                       # persistent-daemon check passed over
 #                                       # it; about a minute). Its log is
-#                                       # build/serial-card.txt.
+#                                       # build/serial-card.txt. A run that
+#                                       # skips it is recorded as an
+#                                       # experiment.
 #   ./scripts/boot-test.sh --bootstrap  # if a git-ignored prerequisite is
 #                                       # missing (one of the six ring-3 service
 #                                       # binaries the kernel embeds, or the
@@ -435,11 +439,13 @@ check_selftest_failures() {
 # harness needing to know how many of them there are.
 #
 # Returns 0 if clean, 1 if any liveness failure marker is present.
+# The liveness watchdog's real reports (above), as one extended regex: the
+# card boot's verdict reads them too.
+LIVENESS_FAILURE_RE='^\[liveness\] (SYSTEM HANG|SUSPECTED LIVELOCK)|^\[liveness\].*BOOT DEADLINE EXCEEDED|^\[liveness\].*FALSE POSITIVE'
 check_liveness_failures() {
     local file="$1"
     [ -f "$file" ] || return 0
-    # shellcheck disable=SC2016
-    local pat='^\[liveness\] (SYSTEM HANG|SUSPECTED LIVELOCK)|^\[liveness\].*BOOT DEADLINE EXCEEDED|^\[liveness\].*FALSE POSITIVE'
+    local pat="$LIVENESS_FAILURE_RE"
     if grep -aEq "$pat" "$file" 2>/dev/null; then
         echo "LIVENESS WATCHDOG failure detected in serial log:"
         grep -aEn "$pat" "$file" || true
@@ -833,6 +839,9 @@ keep_going_boot() {
     esac
     return 1
 }
+# A kernel that is dead, as one extended regex: a panic, or a FATAL line --
+# kernel_is_dead's test outside a keep-going boot, and the card boot's.
+KERNEL_DEATH_RE='^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)'
 kernel_is_dead() {
     local file="$1"
     [ -f "$file" ] || return 1
@@ -842,7 +851,7 @@ kernel_is_dead() {
         # the second does not drop.
         grep -a '^FATAL:' "$file" 2>/dev/null | grep -avq 'self-test failed'
     else
-        grep -aEq '^(FATAL:|!!! KERNEL PANIC !!!|!!! DOUBLE PANIC)' "$file" 2>/dev/null
+        grep -aEq "$KERNEL_DEATH_RE" "$file" 2>/dev/null
     fi
 }
 
@@ -1996,52 +2005,158 @@ cable_responder() {
     fi
 }
 
+# Write the ESP's limine.conf from the tree's: the kernel command line $1
+# after the first entry's kernel_path:, and the modules the medium carries
+# (MODULE_LINES, which Step 2 gathers) after it. 0; 2 when the first entry
+# has no kernel_path: to put it after; 3 when it has a cmdline: of its own,
+# which this would give a second; else awk's failure. Step 2 writes it with
+# the main boot's command line, and the card boot with its own and then the
+# main boot's again (card_boot_restore): one writer, so the two cannot place
+# the line differently.
+write_limine_conf() {
+    local rc=0
+    # ENVIRON rather than `awk -v`, which would read backslash escapes in an
+    # SLATE_CMDLINE value as escapes.
+    KERNEL_CMDLINE_LINE="    cmdline: $1" MODULE_LINES="${MODULE_LINES%$'\n'}" awk '
+        substr($0, 1, 1) == "/" { entry++ }
+        entry == 1 && $1 == "cmdline:" { clash = 1 }
+        { print }
+        entry == 1 && !done && $1 == "kernel_path:" {
+            print ENVIRON["KERNEL_CMDLINE_LINE"]
+            if (ENVIRON["MODULE_LINES"] != "") print ENVIRON["MODULE_LINES"]
+            done = 1
+        }
+        END { exit clash ? 3 : (done ? 0 : 2) }
+    ' "$PROJECT_ROOT/limine.conf" > "$ESP_DIR/limine.conf" || rc=$?
+    return "$rc"
+}
+
+# Start QEMU on the machine every boot of this run uses (QEMU_MACHINE), in the
+# background: its serial log the file $1 (a Windows path), its stderr the
+# file $2. $! is then its PID. The serial port is named before QEMU_EXTRA, so
+# that one QEMU_EXTRA adds is COM2 and the kernel's log stays on COM1.
+launch_qemu() {
+    "$QEMU" "${QEMU_MACHINE[@]}" \
+        "${MONITOR_ARGS[@]}" \
+        -serial "file:$1" \
+        -pidfile "$PIDFILE_WIN" \
+        "${QEMU_EXTRA_ARGS[@]}" \
+        -machine q35 2> "$2" &
+}
+
 # The card boot: a running system's network over a card a Linux driver
 # process serves (design-decisions 1594), checked by every boot test.
 #
 # The main boot keeps the persistent netstack daemon on the kernel's NIC,
 # which is what every machine without the options runs. Once it has passed,
-# QEMU is started again on the same machine (QEMU_MACHINE) with CARD_BOOT_WORDS
-# added to the kernel's command line: `linuxdrv.serve` starts Linux's e1000e
-# serving the spare 82574 for the system's life -- net3, the second e1000e,
-# at 00:05.0 by QEMU_MACHINE's device order -- and `net.nic` has the daemon
-# serve every socket over it, so that every persistent-daemon check runs over
-# the card. Self-tests are skipped (`selftest.skip=1`): the main boot ran
-# them, and without them the daemon's checks come within a minute. net3 is
-# on a network of its own, so a check that reached the kernel's NIC instead
-# cannot pass by accident.
-CARD_BOOT_WORDS="selftest.skip=1 linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e"
-# The daemon's closing line over the card, which ends the card boot.
+# QEMU is started again on the same machine (launch_qemu) with the kernel's
+# command line led by the card boot's own words (card_boot_cmdline), which
+# win over any later ones -- the kernel takes an option's first value:
+# `linuxdrv.serve` starts Linux's e1000e serving the spare 82574 for the
+# system's life -- net3, the second e1000e, at 00:05.0 by QEMU_MACHINE's
+# device order -- and `net.nic` has the daemon serve every socket over it, so
+# that every persistent-daemon check runs over the card. Self-tests are
+# skipped (`selftest.skip=1`): the main boot ran them, and without them the
+# daemon's checks come within a minute. net3 is on a network of its own, so a
+# check that reached the kernel's NIC instead cannot pass by accident; and
+# whatever the main boot's daemon reached beyond QEMU's network, the card
+# boot's must reach too (CARD_BOOT_UPSTREAM).
+CARD_BOOT_WORDS="net.userspace=1 selftest.skip=1 linuxdrv.serve=e1000e@00:05.0 net.nic=nic.e1000e"
+# The daemon's closing line, whichever NIC it served, and that line over the
+# card, which ends the card boot.
+CARD_BOOT_CLOSING="parity checks done; the daemon serves "
 CARD_BOOT_DONE="parity checks done; the daemon serves nic.e1000e"
-# How long the card boot may take to print it: under a minute idle.
-CARD_BOOT_TIMEOUT=600
+# What the kernel prints when the persistent daemon could not be started.
+CARD_BOOT_NO_DAEMON="persistent userspace netstack (ring 3) startup failed"
+# Lines the persistent daemon prints only when it reached past QEMU's
+# network: each one the main boot printed, the card boot must print too.
+CARD_BOOT_UPSTREAM=(
+    "[spawn]   persistent netstack DNS: example.com -> "
+    "[spawn]   persistent netstack TCP: HTTP response received over the daemon"
+    "[spawn]   native resolver parity: SYS_DNS_RESOLVE resolves example.com"
+)
+# 1 while the ESP carries the card boot's command line (card_boot_restore).
+CARD_BOOT_ACTIVE=0
+# Set by card_boot when it failed, for record_boot_outcome to keep and read
+# the card boot's own evidence.
+CARD_BOOT_FAILED=0
+# Why the card boot did not run, when it did not: for record_boot_outcome to
+# record a boot that checked less as an experiment.
+CARD_BOOT_NOT_RUN=""
 
-# What is wrong with the card boot whose serial log is $1, read up to the
-# daemon's closing line ($CARD_BOOT_DONE): one line saying what, or nothing
-# when it passed. A check that skipped for want of an upstream -- QEMU's
-# network without the host's -- passes, as it does in the main boot; one that
-# failed does not, nor a card served on any network but net3's own.
+# The card boot's kernel command line: its deadline -- the liveness
+# watchdog's, timed to land before the harness gives up on it -- and its
+# words, then the main boot's command line, every word of which they win
+# over. $1: the card boot's limit, in seconds.
+card_boot_cmdline() {
+    echo "sched.boot_deadline_ms=$(( $1 * 1000 )) $CARD_BOOT_WORDS $KERNEL_CMDLINE"
+}
+
+# Put the ESP back as the main boot had it -- limine.conf, and under
+# --usb-image the image built from it -- once the card boot has finished, or
+# from on_boot_exit when a run ends during it. Nothing when the card boot did
+# not change it. Non-zero when it could not.
+card_boot_restore() {
+    [ "$CARD_BOOT_ACTIVE" = 1 ] || return 0
+    write_limine_conf "$KERNEL_CMDLINE" || return 1
+    if [ "$USB_IMAGE" -eq 1 ]; then
+        python "$PROJECT_ROOT/scripts/build-usb-image.py" \
+            --source "$ESP_DIR" --output "$USB_IMG" > /dev/null || return 1
+    fi
+    CARD_BOOT_ACTIVE=0
+}
+
+# What is wrong with the card boot whose serial log is $1, the main boot's
+# being $2: nothing when it passed; else a first line naming what kind of
+# failure it was, the same words every time it fails that way (it becomes
+# FAILED_CHECK, which boot-history counts), and a second giving the detail.
+#
+# Read up to the daemon's closing line over the card (CARD_BOOT_DONE), or the
+# whole log when it never came. A failure is what the main boot's own checks
+# call one (check_selftest_failures, check_liveness_failures,
+# kernel_is_dead's KERNEL_DEATH_RE) and a check's FAIL line. A check that
+# skipped for want of an upstream passes, as it does in the main boot --
+# unless the main boot's daemon reached that upstream (CARD_BOOT_UPSTREAM).
+# The card must be served on net3's own network, and SYS_NET_IF_INFO must say
+# so.
 card_boot_verdict() {
-    local log="$1" upto part bad want served
+    local log="$1" main="${2:-}" upto part bad want served proof
     if [ ! -f "$log" ]; then
-        echo "no serial log at $log"
+        echo "no serial log"
+        echo "none at $log"
         return 0
     fi
     # Read whole, then searched through here-strings: under pipefail a grep
-    # that finds nothing, or a reader that stops early, fails a pipeline, and
-    # under set -e that would end the run rather than say why.
+    # that finds nothing, or a reader that stops early, fails a pipeline.
     part="$(tr -d '\r' < "$log")"
     upto="$(grep -a -n -F -- "$CARD_BOOT_DONE" <<< "$part")" || true
     upto="${upto%%:*}"
-    if [ -z "$upto" ]; then
-        echo "the daemon's checks never finished over the card; its last line: $(tail -n 1 <<< "$part" | cut -c1-160)"
+    if [ -n "$upto" ]; then
+        part="$(head -n "$upto" <<< "$part")"
+    fi
+    bad="$(grep -a -E -- "$KERNEL_DEATH_RE" <<< "$part")" || true
+    if [ -n "$bad" ]; then
+        echo "the kernel died"
+        echo "${bad%%$'\n'*}" | cut -c1-200
         return 0
     fi
-    part="$(head -n "$upto" <<< "$part")"
-    bad="$(grep -a -E -- 'self-test failed|  FAIL|^FATAL|PANIC|panicked|startup failed' <<< "$part")" || true
+    bad="$( { grep -a -i -F -- "self-test failed" <<< "$part" || true
+              grep -a -E -- "$LIVENESS_FAILURE_RE" <<< "$part" || true
+              grep -a -F -e "  FAIL" -e "$CARD_BOOT_NO_DAEMON" <<< "$part" || true; } )"
     if [ -n "$bad" ]; then
-        bad="${bad%%$'\n'*}"
-        echo "${bad:0:200}"
+        echo "a check failed"
+        echo "${bad%%$'\n'*}" | cut -c1-200
+        return 0
+    fi
+    if [ -z "$upto" ]; then
+        served="$(grep -a -F -- "$CARD_BOOT_CLOSING" <<< "$part")" || true
+        if [ -n "$served" ]; then
+            echo "the daemon served another card"
+            echo "${served%%$'\n'*}" | cut -c1-200
+        else
+            echo "the daemon's checks never finished"
+            tail -n 1 <<< "$part" | cut -c1-200
+        fi
         return 0
     fi
     for want in \
@@ -2049,70 +2164,104 @@ card_boot_verdict() {
         "[netstack] serving over nic.e1000e: " \
         "interface parity: SYS_NET_IF_INFO says the interface the daemon serves (10.0.5."; do
         if ! grep -a -q -F -- "$want" <<< "$part"; then
-            echo "no line saying: $want"
+            echo "a line the card boot needs is missing"
+            echo "$want"
             return 0
         fi
     done
     served="$(grep -a -F -- "[netstack] serving over nic.e1000e: " <<< "$part")" || true
     if ! grep -a -q -F -- "DHCP gave 10.0.5." <<< "$served"; then
-        echo "the card was not served on net3's own network (10.0.5.0/24)"
+        echo "the card was not on its own network"
+        echo "${served%%$'\n'*}" | cut -c1-200
+        return 0
+    fi
+    if [ -n "$main" ] && [ -f "$main" ]; then
+        for proof in "${CARD_BOOT_UPSTREAM[@]}"; do
+            if grep -a -q -F -- "$proof" "$main" && ! grep -a -q -F -- "$proof" <<< "$part"; then
+                echo "the card reached less than the kernel's NIC did"
+                echo "the main boot said, and the card boot did not: $proof"
+                return 0
+            fi
+        done
     fi
     return 0
 }
 
 # Run the card boot (above) and judge it, setting FAILED_CHECK and returning
 # non-zero when it did not pass. Called by finish_pass once the main boot has
-# passed, QEMU stopped first; CARD_BOOT=0 skips it, saying so.
+# passed. Not run, and said not to be, with CARD_BOOT=0 or when the boot
+# medium carries no linuxdrv/e1000e (a host that cannot build the Linux
+# drivers); record_boot_outcome then records the run as one that checked
+# less.
 card_boot() {
     if [ "${CARD_BOOT:-1}" != "1" ]; then
+        CARD_BOOT_NOT_RUN="CARD_BOOT=${CARD_BOOT} (the card boot not run)"
         echo "=== Card boot: skipped (CARD_BOOT=${CARD_BOOT}) ==="
         return 0
     fi
+    case " $LINUXDRV_STAGED " in
+        *" e1000e "*) ;;
+        *)
+            CARD_BOOT_NOT_RUN="no linuxdrv/e1000e on the boot medium (the card boot not run)"
+            echo "=== Card boot: not run -- the boot medium carries no linuxdrv/e1000e ==="
+            return 0
+            ;;
+    esac
+    # Its limit: a quarter of the main boot's, ten minutes at least -- under
+    # a minute idle, and as much slower as the run's own --timeout allows.
+    local limit=$(( TIMEOUT / 4 > 600 ? TIMEOUT / 4 : 600 ))
+    local began rc=0 out kind detail
     kill_qemu "$QEMU_PID"
-    local conf="$ESP_DIR/limine.conf" kept="$ESP_DIR/limine.conf.main" rc=0 began why
-    if ! cp "$conf" "$kept"; then
-        FAILED_CHECK="the card boot could not keep $conf"
-        return 1
-    fi
-    # The words on the first entry's command line, the one the main boot's
-    # limine.conf was given (Step 2's writer).
-    CARD_WORDS="$CARD_BOOT_WORDS" awk '
-        substr($0, 1, 1) == "/" { entry++ }
-        entry == 1 && !done && $1 == "cmdline:" { $0 = $0 " " ENVIRON["CARD_WORDS"]; done = 1 }
-        { print }
-        END { exit done ? 0 : 2 }
-    ' "$kept" > "$conf" || rc=$?
+    CARD_BOOT_ACTIVE=1
+    write_limine_conf "$(card_boot_cmdline "$limit")" || rc=$?
     if [ "$rc" -eq 0 ] && [ "$USB_IMAGE" -eq 1 ]; then
         python "$PROJECT_ROOT/scripts/build-usb-image.py" \
             --source "$ESP_DIR" --output "$USB_IMG" > /dev/null || rc=$?
     fi
     if [ "$rc" -ne 0 ]; then
-        mv -f "$kept" "$conf"
-        FAILED_CHECK="the card boot could not write its command line (exit $rc)"
+        card_boot_restore || true
+        CARD_BOOT_FAILED=1
+        FAILED_CHECK="the card boot: its boot medium could not be written"
+        echo "=== Card boot: FAILED -- its boot medium could not be written (exit $rc) ==="
         return 1
     fi
-    echo "=== Card boot: the persistent network over the spare 82574 ($CARD_BOOT_WORDS) ==="
+    echo "=== Card boot: the persistent network over the spare 82574 ($(card_boot_cmdline "$limit" | cut -d' ' -f1-5)) ==="
     rm -f "$CARD_SERIAL"
     began=$(date +%s)
-    "$QEMU" "${QEMU_MACHINE[@]}" \
-        -serial "file:$CARD_SERIAL_WIN" \
-        -pidfile "$PIDFILE_WIN" 2> "$CARD_QEMU_STDERR" &
+    launch_qemu "$CARD_SERIAL_WIN" "$CARD_QEMU_STDERR"
     QEMU_PID=$!
-    while kill -0 "$QEMU_PID" 2>/dev/null && [ $(( $(date +%s) - began )) -lt "$CARD_BOOT_TIMEOUT" ]; do
+    raise_qemu_priority &
+    while kill -0 "$QEMU_PID" 2>/dev/null && [ $(( $(date +%s) - began )) -lt "$limit" ]; do
         sleep 1
         [ -f "$CARD_SERIAL" ] || continue
-        grep -a -q -F -- "$CARD_BOOT_DONE" "$CARD_SERIAL" && break
+        # The daemon's closing line, whichever NIC it served; its start
+        # failing; the boot over without either; or the kernel dead.
+        if grep -a -q -F -e "$CARD_BOOT_CLOSING" -e "$CARD_BOOT_NO_DAEMON" "$CARD_SERIAL" \
+                || grep -a -q "^BOOT_OK" "$CARD_SERIAL"; then
+            break
+        fi
         if kernel_is_dead "$CARD_SERIAL"; then
             sleep 2
             break
         fi
     done
+    # Out of time with the guest still up: what it was doing, read from the
+    # emulator as the main boot's timeout does.
+    if [ $(( $(date +%s) - began )) -ge "$limit" ] && [ "${#MONITOR_ARGS[@]}" -gt 0 ] \
+            && kill -0 "$QEMU_PID" 2>/dev/null; then
+        capture_guest_state "$MONITOR_PORT" "${CARD_SERIAL%.txt}-regs.txt" "Card boot RIP at its limit" || true
+    fi
     kill_qemu "$QEMU_PID"
-    mv -f "$kept" "$conf"
-    why="$(card_boot_verdict "$CARD_SERIAL")"
-    if [ -n "$why" ]; then
-        FAILED_CHECK="the card boot: $why"
-        echo "=== Card boot: FAILED after $(( $(date +%s) - began ))s -- $why ==="
+    if ! card_boot_restore; then
+        echo "=== Card boot: WARNING: the ESP could not be put back as the main boot had it; the next boot test writes it again ===" >&2
+    fi
+    out="$(card_boot_verdict "$CARD_SERIAL" "$SERIAL_FILE")"
+    if [ -n "$out" ]; then
+        kind="${out%%$'\n'*}"
+        detail="${out#*$'\n'}"
+        CARD_BOOT_FAILED=1
+        FAILED_CHECK="the card boot: $kind"
+        echo "=== Card boot: FAILED after $(( $(date +%s) - began ))s -- $kind: $detail ==="
         echo "    Its log: $CARD_SERIAL; QEMU's stderr: $CARD_QEMU_STDERR. Its last lines:"
         tail -n 15 "$CARD_SERIAL" 2>/dev/null | tr -d '\r' | sed 's/^/    /'
         return 1
@@ -2146,12 +2295,21 @@ marker_log_back() {
 # in a scrollback -- and only when non-empty, since qemu is silent on a healthy
 # run and an empty banner every boot is noise that trains the reader to skip it.
 echo_qemu_stderr() {
-    [ -s "$QEMU_STDERR" ] || return 0
-    {
-        echo "--- qemu stderr (build/qemu-stderr.txt) ---"
-        cat "$QEMU_STDERR"
-        echo "--- end qemu stderr ---"
-    } >&2 || true
+    if [ -s "$QEMU_STDERR" ]; then
+        {
+            echo "--- qemu stderr (build/qemu-stderr.txt) ---"
+            cat "$QEMU_STDERR"
+            echo "--- end qemu stderr ---"
+        } >&2 || true
+    fi
+    # The card boot's, from this run only: a leftover is the last run's.
+    if [ -s "$CARD_QEMU_STDERR" ] && [ "$(date -r "$CARD_QEMU_STDERR" +%s 2>/dev/null || echo 0)" -ge "${BOOT_TEST_START_EPOCH:-0}" ]; then
+        {
+            echo "--- qemu stderr, card boot (build/qemu-stderr-card.txt) ---"
+            cat "$CARD_QEMU_STDERR"
+            echo "--- end qemu stderr, card boot ---"
+        } >&2 || true
+    fi
     return 0
 }
 # Default boot timeout.  The boot path runs the full self-test suite before
@@ -3599,6 +3757,13 @@ record_boot_outcome() {
         local stamp
         stamp="$(date -u '+%Y%m%dT%H%M%SZ')"
         cp -f "$SERIAL_FILE" "$keep/$stamp-${BT_HEAD:-unknown}-rc$rc.txt" 2>/dev/null || true
+        # A run the card boot failed: the main boot's log passed, and the
+        # card boot's is the evidence -- kept beside it, and counted in the
+        # cap below with it.
+        if [ "$CARD_BOOT_FAILED" = 1 ] && [ -f "$CARD_SERIAL" ]; then
+            cp -f "$CARD_SERIAL" "$keep/$stamp-${BT_HEAD:-unknown}-rc$rc-card.txt" 2>/dev/null || true
+            echo "boot-test: the card boot's serial log preserved at $keep/$stamp-${BT_HEAD:-unknown}-rc$rc-card.txt" >&2
+        fi
         # Keep the 20 newest; drop the rest.  `ls -1t` newest-first, so tail -n +21
         # is everything past the cap.
         ls -1t "$keep"/*.txt 2>/dev/null | tail -n +21 | while IFS= read -r _old; do
@@ -3619,7 +3784,12 @@ record_boot_outcome() {
     # the same reason: a stale host-failure signature would excuse a boot that
     # the host had nothing to do with, which is the one direction this feature
     # must not fail in.
-    if [ -f "$QEMU_STDERR" ]; then
+    # A run the card boot failed is judged by the card boot's QEMU: a host
+    # failure there (out of memory, a mapping refused) is the host's, as it
+    # would be in the main boot.
+    if [ "$CARD_BOOT_FAILED" = 1 ] && [ -f "$CARD_QEMU_STDERR" ]; then
+        args+=(--qemu-stderr "$CARD_QEMU_STDERR")
+    elif [ -f "$QEMU_STDERR" ]; then
         args+=(--qemu-stderr "$QEMU_STDERR")
     fi
     if [ -n "${BT_SRC_DIGEST:-}" ]; then
@@ -3692,6 +3862,12 @@ record_boot_outcome() {
         # The same narrower boot without the flag: a worktree that never
         # packed the image.
         why="${why:+$why; }no rootfs.ext4 in this worktree (not attached; /mnt rungs no-op)"
+    fi
+    # A run whose card boot did not run checked less in the same way, though
+    # its timings are a tracking run's -- so this reason is the outcome's
+    # alone, not the benchmark recorder's.
+    if [ -n "$CARD_BOOT_NOT_RUN" ]; then
+        why="${why:+$why; }$CARD_BOOT_NOT_RUN"
     fi
     if [ -n "$why" ]; then
         args+=(--experiment "$why")
@@ -3864,6 +4040,12 @@ on_boot_exit() {
     fi
     _BOOT_EXIT_DONE=1
     kill_qemu "$QEMU_PID"
+    # A run ended during the card boot: the ESP put back as the main boot had
+    # it, so that what boots it next (guest.py, the USB stick) is not handed
+    # the card boot's command line.
+    if ! card_boot_restore; then
+        echo "boot-test: WARNING: the ESP still carries the card boot's command line; the next boot test writes it again" >&2
+    fi
     echo_qemu_stderr
     if [ "$reason" = "exit" ]; then
         record_boot_outcome "$rc"
@@ -9479,8 +9661,6 @@ fi
 if [ -n "${SLATE_CMDLINE:-}" ]; then
     KERNEL_CMDLINE="$KERNEL_CMDLINE $SLATE_CMDLINE"
 fi
-# ENVIRON rather than `awk -v`, which would read backslash escapes in an
-# SLATE_CMDLINE value as escapes.
 limine_rc=0
 # The Linux driver processes as the first entry's modules, after its
 # command line: a module_path: and the module_cmdline: the kernel finds it by.
@@ -9503,17 +9683,7 @@ if [ -d "$ESP_DIR/firmware" ]; then
         MODULE_LINES+="    module_cmdline: $fw"$'\n'
     done < <(cd "$ESP_DIR" && find firmware -type f | LC_ALL=C sort)
 fi
-KERNEL_CMDLINE_LINE="    cmdline: $KERNEL_CMDLINE" MODULE_LINES="${MODULE_LINES%$'\n'}" awk '
-    substr($0, 1, 1) == "/" { entry++ }
-    entry == 1 && $1 == "cmdline:" { clash = 1 }
-    { print }
-    entry == 1 && !done && $1 == "kernel_path:" {
-        print ENVIRON["KERNEL_CMDLINE_LINE"]
-        if (ENVIRON["MODULE_LINES"] != "") print ENVIRON["MODULE_LINES"]
-        done = 1
-    }
-    END { exit clash ? 3 : (done ? 0 : 2) }
-' "$PROJECT_ROOT/limine.conf" > "$ESP_DIR/limine.conf" || limine_rc=$?
+write_limine_conf "$KERNEL_CMDLINE" || limine_rc=$?
 case "$limine_rc" in
     0) ;;
     2)
@@ -10517,9 +10687,10 @@ QEMU_START_EPOCH=$(date +%s)
 # over this card -- its address, gateway and DNS server -- cannot be taken
 # for what goes over the kernel's NIC.
 #
-# The machine is kept as QEMU_MACHINE for the card boot (card_boot), which
-# starts the same one again; the serial log, the pidfile and the monitor are
-# each boot's own.
+# The machine is kept as QEMU_MACHINE, which launch_qemu starts -- here, and
+# again for the card boot (card_boot); the serial log and QEMU's stderr are
+# each boot's own, and launch_qemu adds the monitor, the pidfile and
+# QEMU_EXTRA.
 # SC2054: the commas are QEMU's property separators within one argument.
 # shellcheck disable=SC2054
 QEMU_MACHINE=(
@@ -10561,13 +10732,8 @@ QEMU_MACHINE=(
     -m 3072M
     -cpu "$QEMU_CPU"
     "${SMP_ARGS[@]}"
-    "${QEMU_EXTRA_ARGS[@]}"
-    -machine q35
 )
-"$QEMU" "${QEMU_MACHINE[@]}" \
-    "${MONITOR_ARGS[@]}" \
-    -serial "file:$SERIAL_FILE_WIN" \
-    -pidfile "$PIDFILE_WIN" 2> "$QEMU_STDERR" &
+launch_qemu "$SERIAL_FILE_WIN" "$QEMU_STDERR"
 QEMU_PID=$!
 # Ensure QEMU is reaped even if the harness is interrupted (Ctrl-C, SIGTERM)
 # or exits early — a surviving qemu keeps the serial file locked and breaks

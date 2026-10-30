@@ -32,6 +32,7 @@ from __future__ import annotations
 import inspect
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -1771,120 +1772,291 @@ def _append_steps(steps):
 BREADCRUMB = "[liveness] boot-window breadcrumb: {}s armed (deadline 2234s, heartbeat=9307)\n"
 
 
-def _card_boot_setting(name):
-    """boot-test.sh's `NAME="..."` line for the card boot setting `name`."""
+def _shell_assignment(name):
+    """boot-test.sh's top-level assignment of `name`: a quoted one-line value
+    (`NAME="..."` or `NAME='...'`) or an array (`NAME=( ... )`), as written."""
     with open(BOOT_TEST, "r", encoding="utf-8") as handle:
-        found = re.search(rf'^{name}="[^"]*"$', handle.read(), re.M)
-    assert found, f"boot-test.sh has no {name}=\"...\" line"
+        text = handle.read()
+    found = (re.search(rf"^{name}=\([^)]*\)$", text, re.M)
+             or re.search(rf"^{name}=(\"[^\"\n]*\"|'[^'\n]*')$", text, re.M))
+    assert found, f"boot-test.sh has no top-level {name}=... assignment"
     return found.group(0)
 
 
-def _card_boot_verdict(serial_text):
-    """Run the real `card_boot_verdict`, with the real CARD_BOOT_DONE, on a
-    serial log holding `serial_text` (`None`: no log at all): what it said,
-    "" for a pass; `None` on a hang.
+def _card_boot_value(name):
+    """The quoted value boot-test.sh gives `name`, unquoted."""
+    return _shell_assignment(name).split("=", 1)[1][1:-1]
+
+
+#: What card_boot_verdict reads besides its arguments.
+_CARD_BOOT_SETTINGS = ("CARD_BOOT_CLOSING", "CARD_BOOT_DONE", "CARD_BOOT_NO_DAEMON",
+                       "CARD_BOOT_UPSTREAM", "KERNEL_DEATH_RE", "LIVENESS_FAILURE_RE")
+
+
+def _card_boot_verdict(serial_text, main_text=None):
+    """Run the real `card_boot_verdict`, with the settings it reads as
+    boot-test.sh has them, on a card boot's serial log holding `serial_text`
+    (`None`: no log at all) and a main boot's holding `main_text` (`None`:
+    none given): its two lines -- the failure's kind and its detail -- as a
+    pair, ("", "") for a pass; `None` on a hang.
     """
     tmp = new_fixture()
     try:
-        if serial_text is not None:
-            with open(os.path.join(tmp, "serial.txt"), "w",
-                      encoding="utf-8", newline="") as handle:
-                handle.write(serial_text)
+        for name, text in (("serial.txt", serial_text), ("main.txt", main_text)):
+            if text is not None:
+                with open(os.path.join(tmp, name), "w",
+                          encoding="utf-8", newline="") as handle:
+                    handle.write(text)
         with open(os.path.join(tmp, "harness.sh"), "w",
                   encoding="utf-8", newline="\n") as handle:
             handle.write(
                 "set -euo pipefail\n"
-                + _card_boot_setting("CARD_BOOT_DONE") + "\n"
+                + "\n".join(_shell_assignment(n) for n in _CARD_BOOT_SETTINGS) + "\n"
                 + extract_shell_function("card_boot_verdict") + "\n\n"
-                + "card_boot_verdict serial.txt > said.txt\n"
+                + "card_boot_verdict serial.txt "
+                + ("main.txt" if main_text is not None else "''") + " > said.txt\n"
                 + "echo ran\n")
         proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the card boot's verdict")
         if proc is None or "ran" not in proc.stdout:
             return None
         with open(os.path.join(tmp, "said.txt"), encoding="utf-8") as handle:
-            return handle.read().strip()
+            said = handle.read().splitlines()
+        return (said + ["", ""])[0], (said + ["", ""])[1]
     finally:
         drop_fixture(tmp)
+
+
+# A card boot's lines, as the kernel and the daemon print them.
+_SERVED = ("[linuxdrv] e1000e started serving the card at 00:05.0 as "
+           "nic.e1000e (pid 10)\n")
+_LEASED = ("[netstack] serving over nic.e1000e: 52:54:00:12:34:59, DHCP gave "
+           "10.0.5.15 mask 255.255.255.0, gateway 10.0.5.2, DNS 10.0.5.3\n")
+_RESOLVED = "[spawn]   persistent netstack DNS: example.com -> 172.66.147.243\n"
+_TOLD = ("[spawn]   interface parity: SYS_NET_IF_INFO says the interface the "
+         "daemon serves (10.0.5.15): OK\n")
+_DONE = ("[spawn]   persistent netstack daemon: DNS/TCP/UDP parity checks done; "
+         "the daemon serves nic.e1000e for the system's lifetime\n")
 
 
 def test_the_card_boot_passes_only_a_daemon_that_served_the_card_on_its_own_network():
     """The card boot (design-decisions 1594) passes when Linux's e1000e
     served the spare 82574 and the daemon ran every check over it -- on
-    net3's own network, so not over the kernel's NIC by mistake -- and said
-    so before its closing line; a failure, a missing line, another network
-    or no closing line fails it, saying which. A check skipped for want of
-    an upstream passes, as in the main boot. Run under set -euo pipefail, as
-    boot-test.sh is: a grep finding nothing must not end the run.
+    net3's own network, so not over the kernel's NIC by mistake -- reaching
+    whatever the main boot's daemon reached, and said so before its closing
+    line. Anything else fails it, its kind said in the same words every time
+    (FAILED_CHECK, which boot-history counts) and the detail apart. A check
+    skipped for want of an upstream the main boot did not reach either
+    passes, as in the main boot. Run under set -euo pipefail, as boot-test.sh
+    is: a grep finding nothing must not end the run.
     """
-    served = ("[linuxdrv] e1000e started serving the card at 00:05.0 as "
-              "nic.e1000e (pid 10)\n")
-    leased = ("[netstack] serving over nic.e1000e: 52:54:00:12:34:59, DHCP gave "
-              "10.0.5.15 mask 255.255.255.0, gateway 10.0.5.2, DNS 10.0.5.3\n")
-    told = ("[spawn]   interface parity: SYS_NET_IF_INFO says the interface the "
-            "daemon serves (10.0.5.15): OK\n")
-    done = ("[spawn]   persistent netstack daemon: DNS/TCP/UDP parity checks done; "
-            "the daemon serves nic.e1000e for the system's lifetime\n")
-    good = "[boot] up\n" + served + leased + told + done
-    skipped = ("[spawn]   native resolver parity: the daemon cannot resolve either "
-               "-- check skipped\n")
+    good = "[boot] up\n" + _SERVED + _LEASED + _RESOLVED + _TOLD + _DONE
+    unresolved = good.replace(_RESOLVED, "[spawn]   persistent netstack DNS: "
+                                         "example.com unresolved (no upstream?)\n")
     failed = "[spawn]   FAIL: interface parity (InternalError)\n"
     reported = "WARNING: native socket parity self-test failed: NotFound\n"
-    for label, text, want in [
-        ("every line said passes", good, ""),
-        ("CRLF line ends pass", good.replace("\n", "\r\n"), ""),
-        ("a check skipped for want of an upstream passes",
-         "[boot] up\n" + served + leased + skipped + told + done, ""),
+    old_form = "[hpet] WARNING: Self-test failed: the counter did not move\n"
+    hang = "[liveness] SYSTEM HANG: no progress for 30 s\n"
+    death = "FATAL: Unrecoverable kernel page fault. Halting.\n"
+    no_daemon = "WARNING: persistent userspace netstack (ring 3) startup failed: InternalError\n"
+    other_nic = ("[spawn]   persistent netstack daemon: DNS/TCP/UDP parity checks done; "
+                 "the daemon serves the kernel's NIC for the system's lifetime\n")
+    missing = "a line the card boot needs is missing"
+    for label, text, main, want in [
+        ("every line said passes", good, None, ("", "")),
+        ("CRLF line ends pass", good.replace("\n", "\r\n"), None, ("", "")),
+        ("an upstream not reached passes when the main boot did not reach it either",
+         unresolved, unresolved, ("", "")),
+        ("an upstream not reached passes when no main boot log is given",
+         unresolved, None, ("", "")),
+        ("an upstream the main boot reached and the card boot did not fails",
+         unresolved, good,
+         ("the card reached less than the kernel's NIC did",
+          "the main boot said, and the card boot did not: " + _RESOLVED.split("172")[0])),
+        ("an upstream both reached passes", good, good, ("", "")),
         ("a failure after the closing line is not the card boot's",
-         good + failed, ""),
-        ("no log fails", None, "no serial log at serial.txt"),
+         good + failed, None, ("", "")),
+        ("no log fails", None, None, ("no serial log", "none at serial.txt")),
         ("no closing line fails, naming the last line",
-         "[boot] up\n" + served + leased + told,
-         "the daemon's checks never finished over the card; its last line: "
-         + told.strip()),
+         "[boot] up\n" + _SERVED + _LEASED + _TOLD, None,
+         ("the daemon's checks never finished", _TOLD.strip())),
+        ("a failure with no closing line is the failure, not the wait",
+         "[boot] up\n" + _SERVED + _LEASED + failed + "[init] later\n", None,
+         ("a check failed", failed.strip())),
         ("a check's FAIL fails, naming it",
-         "[boot] up\n" + served + leased + failed + told + done, failed.strip()),
+         "[boot] up\n" + _SERVED + _LEASED + failed + _TOLD + _DONE, None,
+         ("a check failed", failed.strip())),
         ("a self-test reported failed fails",
-         "[boot] up\n" + served + leased + reported + told + done, reported.strip()),
+         "[boot] up\n" + _SERVED + reported + _LEASED + _TOLD + _DONE, None,
+         ("a check failed", reported.strip())),
+        ("a self-test failure in the older capitalised form fails",
+         "[boot] up\n" + _SERVED + old_form + _LEASED + _TOLD + _DONE, None,
+         ("a check failed", old_form.strip())),
+        ("a liveness report fails",
+         "[boot] up\n" + _SERVED + hang + _LEASED + _TOLD + _DONE, None,
+         ("a check failed", hang.strip())),
+        ("a kernel death fails as one",
+         "[boot] up\n" + _SERVED + death, None, ("the kernel died", death.strip())),
+        ("the daemon not starting fails",
+         "[boot] up\n" + _SERVED + no_daemon + "BOOT_OK\n", None,
+         ("a check failed", no_daemon.strip())),
+        ("the daemon serving the kernel's NIC instead fails, saying so",
+         "[boot] up\n" + _LEASED.replace("nic.e1000e", "the kernel's NIC") + other_nic, None,
+         ("the daemon served another card", other_nic.strip())),
         ("the driver never serving fails",
-         "[boot] up\n" + leased + told + done,
-         "no line saying: [linuxdrv] e1000e started serving the card at 00:05.0 "
-         "as nic.e1000e"),
+         "[boot] up\n" + _LEASED + _TOLD + _DONE, None,
+         (missing, "[linuxdrv] e1000e started serving the card at 00:05.0 as nic.e1000e")),
         ("the daemon never serving the card fails",
-         "[boot] up\n" + served + told + done,
-         # Its trailing space is the read-back's to drop.
-         "no line saying: [netstack] serving over nic.e1000e:"),
+         "[boot] up\n" + _SERVED + _TOLD + _DONE, None,
+         (missing, "[netstack] serving over nic.e1000e: ")),
         ("the card leased on the kernel NIC's network fails",
-         "[boot] up\n" + served + leased.replace("10.0.5.", "10.0.2.") + told + done,
-         "the card was not served on net3's own network (10.0.5.0/24)"),
+         "[boot] up\n" + _SERVED + _LEASED.replace("10.0.5.", "10.0.2.") + _TOLD + _DONE,
+         None,
+         ("the card was not on its own network",
+          _LEASED.replace("10.0.5.", "10.0.2.").strip())),
         ("SYS_NET_IF_INFO saying another network fails",
-         "[boot] up\n" + served + leased + told.replace("10.0.5.", "10.0.2.") + done,
-         "no line saying: interface parity: SYS_NET_IF_INFO says the interface "
-         "the daemon serves (10.0.5."),
+         "[boot] up\n" + _SERVED + _LEASED + _TOLD.replace("10.0.5.", "10.0.2.") + _DONE,
+         None,
+         (missing, "interface parity: SYS_NET_IF_INFO says the interface the daemon "
+                   "serves (10.0.5.")),
     ]:
-        check(label, _card_boot_verdict(text), want)
+        check(label, _card_boot_verdict(text, main), want)
 
 
-def test_the_card_boot_waits_for_the_kernels_own_closing_line():
-    """CARD_BOOT_DONE, which ends the card boot, is what kernel/src/proc/spawn.rs
-    prints when the daemon's checks are done, for the card CARD_BOOT_WORDS
-    names; and the card it names is the one the words have the driver serve.
-    A reworded line would leave every card boot waiting out its limit.
+def _limine_conf(cmdline, template):
+    """The real `write_limine_conf` run on the tree's limine.conf replaced by
+    `template`, MODULE_LINES one module: (its exit status, the limine.conf
+    written); `None` on a hang."""
+    tmp = new_fixture()
+    try:
+        os.makedirs(os.path.join(tmp, "esp"))
+        with open(os.path.join(tmp, "limine.conf"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(template)
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                "PROJECT_ROOT=. ESP_DIR=esp\n"
+                "MODULE_LINES=$'    module_path: boot():/linuxdrv/e1000e.elf\\n'\n"
+                + extract_shell_function("write_limine_conf") + "\n\n"
+                + "rc=0; write_limine_conf " + shlex.quote(cmdline) + " || rc=$?\n"
+                + "echo \"rc=$rc\"\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the limine.conf writer")
+        if proc is None:
+            return None
+        rc = re.search(r"rc=(\d+)", proc.stdout)
+        with open(os.path.join(tmp, "esp", "limine.conf"), encoding="utf-8") as handle:
+            return (int(rc.group(1)) if rc else None), handle.read()
+    finally:
+        drop_fixture(tmp)
+
+
+def test_the_card_boots_words_lead_the_command_line_of_the_first_entry_alone():
+    """The card boot's command line leads with its own words, which the
+    kernel takes over any later value of the same option (kernparam::get
+    returns an option's first): a SLATE_CMDLINE saying net.userspace=0, or
+    naming another net.nic, cannot turn the card boot off or point it
+    elsewhere, and its deadline is its own. write_limine_conf puts a command
+    line after the first entry's kernel_path: alone, the modules after it,
+    and refuses an entry with a cmdline: of its own (3) or no kernel_path:
+    (2): one writer for both boots.
     """
-    done = _card_boot_setting("CARD_BOOT_DONE").split("=", 1)[1].strip('"')
-    words = _card_boot_setting("CARD_BOOT_WORDS").split("=", 1)[1].strip('"').split()
-    prefix, _, card = done.rpartition(" ")
-    with open(os.path.join(REPO_ROOT, "kernel", "src", "proc", "spawn.rs"),
+    with open(os.path.join(REPO_ROOT, "kernel", "src", "fs", "kernparam.rs"),
               encoding="utf-8") as handle:
-        spawn = handle.read()
+        kernparam = handle.read()
+    check("the kernel takes an option's first value",
+          ".find(|p| p.key == key)" in kernparam, True)
+    tmp = new_fixture()
+    try:
+        with open(os.path.join(tmp, "harness.sh"), "w",
+                  encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "set -euo pipefail\n"
+                + _shell_assignment("CARD_BOOT_WORDS") + "\n"
+                + "KERNEL_CMDLINE='sched.boot_deadline_ms=2400000 net.userspace=0 net.nic=nic.other'\n"
+                + extract_shell_function("card_boot_cmdline") + "\n\n"
+                + "card_boot_cmdline 600\n")
+        proc = run_harness(tmp, HARNESS_HANG_GUARD_S, "the card boot's command line")
+        words = proc.stdout.split() if proc else []
+    finally:
+        drop_fixture(tmp)
+    first = {}
+    for word in words:
+        key, _, value = word.partition("=")
+        first.setdefault(key, value)
+    check("its deadline, its own and first",
+          first.get("sched.boot_deadline_ms"), "600000")
+    check("net.userspace on, whatever the main command line says",
+          first.get("net.userspace"), "1")
+    check("net.nic the card's, whatever the main command line says",
+          first.get("net.nic"), "nic.e1000e")
+    check("the main command line kept after its words",
+          words[-3:], ["sched.boot_deadline_ms=2400000", "net.userspace=0", "net.nic=nic.other"])
+
+    template = ("timeout: 3\n/SlateOS\n    protocol: limine\n    kernel_path: boot():/boot/kernel\n"
+                "/SlateOS recovery\n    protocol: limine\n    kernel_path: boot():/boot/kernel\n")
+    got = _limine_conf("net.nic=nic.e1000e quiet", template)
+    check("the writer runs", got is not None, True)
+    if got is not None:
+        rc, conf = got
+        lines = conf.splitlines()
+        check("it succeeds", rc, 0)
+        check("the command line and the modules after the first entry's kernel_path:",
+              lines[3:6], ["    kernel_path: boot():/boot/kernel",
+                           "    cmdline: net.nic=nic.e1000e quiet",
+                           "    module_path: boot():/linuxdrv/e1000e.elf"])
+        check("the second entry untouched", conf.count("cmdline:"), 1)
+    clash = _limine_conf("x", template.replace("kernel_path: boot():/boot/kernel\n/SlateOS rec",
+                                               "kernel_path: boot():/boot/kernel\n    cmdline: y\n/SlateOS rec", 1))
+    check("a first entry with a cmdline: of its own is refused", clash and clash[0], 3)
+    none = _limine_conf("x", "timeout: 3\n/SlateOS\n    protocol: limine\n")
+    check("a first entry with no kernel_path: is refused", none and none[0], 2)
+
+
+def test_every_line_the_card_boot_reads_is_printed_by_the_tree():
+    """Each line card_boot_verdict and the card boot's wait read is pinned to
+    the source that prints it -- the closing line, the daemon failing to
+    start, the driver serving the card, the daemon serving over it, the
+    interface parity, and every upstream proof -- and the card the words
+    serve is the one the lines name. A reworded line would otherwise pass
+    this suite and fail every boot test's card boot after its main boot.
+    """
+    def source(*parts):
+        with open(os.path.join(REPO_ROOT, *parts), encoding="utf-8") as handle:
+            return handle.read()
+    spawn = source("kernel", "src", "proc", "spawn.rs")
+    linuxdrv = source("kernel", "src", "linuxdrv.rs")
+    main_rs = source("kernel", "src", "main.rs")
+    daemon = source("services", "netstack", "src", "main.rs")
+    words = _card_boot_value("CARD_BOOT_WORDS").split()
+    done = _card_boot_value("CARD_BOOT_DONE")
+    closing = _card_boot_value("CARD_BOOT_CLOSING")
+    card = done[len(closing):]
+    check("the closing line over the card is the general one, the card named",
+          done.startswith(closing) and card == "nic.e1000e", True)
     check("the kernel prints the closing line, the card filled in",
-          prefix + " {}" in spawn, True)
-    check("the words have the daemon serve the card the line names",
+          closing + "{}" in spawn, True)
+    check("the kernel says when the daemon could not start",
+          _card_boot_value("CARD_BOOT_NO_DAEMON") in main_rs, True)
+    check("the words have the daemon serve the card the lines name",
           f"net.nic={card}" in words, True)
-    check("the words have the driver serve that card",
-          any(w.startswith("linuxdrv.serve=") and card == "nic." + w.split("=", 1)[1].split("@")[0]
-              for w in words), True)
-    check("the words skip the self-tests the main boot ran",
-          "selftest.skip=1" in words, True)
+    serve = [w.split("=", 1)[1] for w in words if w.startswith("linuxdrv.serve=")]
+    check("the words have the driver serve that card at 00:05.0",
+          serve, ["e1000e@00:05.0"])
+    check("the words skip the self-tests the main boot ran", "selftest.skip=1" in words, True)
+    check("the driver says it serves the card",
+          ('"[linuxdrv] {driver} started serving the card at ' in linuxdrv,
+           "as {name} (pid {})" in linuxdrv), (True, True))
+    check("the daemon says it serves over the card, and its lease",
+          ('b"[netstack] serving over "' in daemon, 'b", DHCP gave "' in daemon),
+          (True, True))
+    check("the kernel says the interface parity",
+          "interface parity: SYS_NET_IF_INFO says the interface the daemon serves" in spawn,
+          True)
+    upstream = re.findall(r'"([^"]*)"', _shell_assignment("CARD_BOOT_UPSTREAM"))
+    check("there are upstream proofs", len(upstream) >= 3, True)
+    for proof in upstream:
+        check(f"the kernel prints the upstream proof {proof!r}", proof in spawn, True)
 
 
 def test_a_watchdog_breadcrumb_is_not_the_boots_own_output():

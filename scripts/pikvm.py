@@ -7,10 +7,15 @@ USB drive, and works its power button. This script is how a session drives it:
 
     python scripts/pikvm.py status
     python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."] [--add-cmdline "..."] [--no-linuxdrv] [--wifi FILE]
-    python scripts/pikvm.py boot <img>          # upload, restart, pick it at F12
+    python scripts/pikvm.py boot <img> [--off-hard]  # upload, restart, pick it at F12
     python scripts/pikvm.py watch --seconds 90  # screenshots until the screen settles
     python scripts/pikvm.py snap <out.png> [--crop X0,Y0,X1,Y1]
     python scripts/pikvm.py power on|off|off-hard|reset-hard
+
+`boot` restarts the PC by cutting its power, so it refuses a PC that is on
+unless `--off-hard` says what runs there is SlateOS: Windows is shut down
+from its Start menu first (its power button is set to do nothing), or it
+loses what is open and is not shut down properly.
 
 `stage` builds the USB image from a worktree's built kernel: Limine, the kernel
 (debug info stripped), the Linux driver processes -- built first, as the boot
@@ -592,14 +597,31 @@ def stage_esp(worktree: Path, esp: Path, cmdline: str, modules: tuple[str, ...],
         encoding="utf-8", newline="\n")
 
 
-def boot(kvm: PiKvm, image: Path, menu_key: str) -> None:
+def check_may_cut_power(kvm, off_hard: bool) -> None:
+    """Refuse, before anything is done, to restart a PC that is on unless
+    `off_hard` says what it runs may lose its power: `boot` restarts it by
+    holding the power button down, which cuts the power. That is safe for
+    SlateOS, which may write only the spare disk, and no way to stop
+    Windows, which loses what is open and is left not shut down: shut
+    Windows down from its Start menu first -- its power button is set to do
+    nothing -- then boot."""
+    if kvm.leds()["power"] and not off_hard:
+        sys.exit("pikvm: the PC is on, and boot would cut its power. Look at what it runs "
+                 "(pikvm.py snap): shut Windows down from its Start menu first, or pass "
+                 "--off-hard when what runs is SlateOS")
+
+
+def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool) -> None:
     """Upload `image`, restart the PC, and pick the PiKVM drive in its boot
-    menu. The click is checked as far as pictures allow: one the menu does
-    not take (the screen unchanged) is made again. A screen that changes is
-    taken for the boot starting -- which it may not be, if what settled was a
-    logo before the menu; `watch` or `snap` shows which."""
+    menu: a PC that is on only with `off_hard`, which cuts its power
+    ([`check_may_cut_power`]). The click is checked as far as pictures
+    allow: one the menu does not take (the screen unchanged) is made again.
+    A screen that changes is taken for the boot starting -- which it may not
+    be, if what settled was a logo before the menu; `watch` or `snap` shows
+    which."""
     if not kvm.boot_entry_xy:
         sys.exit("pikvm: boot needs boot_entry_xy in ~/.pikvm: where the boot menu shows the PiKVM drive")
+    check_may_cut_power(kvm, off_hard)
     kvm.upload(image)
     if kvm.leds()["power"]:
         kvm.power("off_hard")
@@ -732,6 +754,24 @@ def self_test() -> int:
     check("every printable character types in both layouts",
           [c for c in map(chr, range(32, 127)) if c not in dv or c not in us], [])
     check("coordinates: the corners", (to_absolute(0, WIDTH), to_absolute(WIDTH, WIDTH)), (-32768, 32767))
+
+    class Lit:
+        """A PiKVM whose power light reads `on`."""
+        def __init__(self, on):
+            self.on = on
+
+        def leds(self):
+            return {"power": self.on, "hdd": False}
+
+    def cuts(on, off_hard):
+        try:
+            check_may_cut_power(Lit(on), off_hard)
+        except SystemExit:
+            return "refused"
+        return "let through"
+    check("boot: a PC that is on is not cut off unasked", cuts(True, False), "refused")
+    check("boot: --off-hard cuts off a PC that is on", cuts(True, True), "let through")
+    check("boot: a PC that is off needs no --off-hard", cuts(False, False), "let through")
     check("typing: a line, its Enter", key_presses("ls\n", "us"),
           [("KeyL", False), ("KeyS", False), ("Enter", False)])
     try:
@@ -1116,6 +1156,9 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("boot")
     p.add_argument("image", type=Path)
     p.add_argument("--menu-key", default="F12")
+    p.add_argument("--off-hard", action="store_true",
+                   help="cut the power of a PC that is on: only when it runs SlateOS, "
+                        "never Windows, which is shut down from its Start menu first")
     p = sub.add_parser("watch")
     p.add_argument("--seconds", type=float, default=90)
     p.add_argument("--every", type=float, default=6)
@@ -1159,7 +1202,7 @@ def run_command(kvm: PiKvm, args) -> None:
         print("video", source["online"], source["resolution"])
         print("drive", kvm.json("GET", "/api/msd")["drive"])
     elif args.cmd == "boot":
-        boot(kvm, args.image, args.menu_key)
+        boot(kvm, args.image, args.menu_key, args.off_hard)
     elif args.cmd == "watch":
         watch(kvm, args.seconds, args.every, args.dir)
     elif args.cmd == "snap":

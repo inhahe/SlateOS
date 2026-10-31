@@ -135,3 +135,4 @@
 - A-Q25 [who lets a debugger take over a running program?] -- resolved 2026-10-09, **Claude's recommendation: the user, asked at the moment, or the program's own advance consent** (§1567).
 - A-Q26 [what does "Always allow" mean?] -- resolved 2026-10-09, **B, remembered for that program by fingerprint, plus an Allow for this run only** (§1568).
 - A-Q27 [Process Lasso's controls: remembered processors and a profile while a program runs?] -- closed 2026-10-15 as a duplicate of B-Q26, which the operator answered **A** on 2026-10-11 (§1074, lane B): a program's remembered settings gain the processors it may use, a processor cap and a profile while it runs.
+- A-Q31 [which WiFi network should the test PC join, and how should its password reach it?] -- resolved 2026-10-30, **A: the operator's home network**, its name and password in a file outside git that the boot medium carries (option 1, the question's recommendation for that answer) (§1596).

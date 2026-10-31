@@ -10,6 +10,23 @@ A lane that processes a new file adds its section, fills in its own lane's
 rows, and leaves the other lanes' rows as `relayed <date>` for those lanes to
 fill in. Section numbers (§) are `design-decisions/` entries.
 
+## chat, 2026-10-30: the test PC's WiFi joins the operator's home network
+
+- **Given:** 2026-10-30, in chat to lane A's session, answering A-Q31: the
+  network's name and its password, which is option A, the home network. The
+  answer left the question's second half -- how the password reaches the test
+  PC -- open; lane A applied the question's recommendation for option A,
+  option 1, a file on the boot medium.
+- **Processed:** 2026-10-30 by lane A: copied with the network's name and
+  password redacted (they are in `C:\Users\Computer\.slateos-wifi`, outside
+  every repository); recorded as §1596; A-Q31 removed.
+- **Copy:** `operator-answers/2026-10-30-chat-to-lane-a.txt`
+- **Content:** sha256 `2d2ca0f52cb6492f47625de72fdb625a61a3f5b45d375bc061fe4a374814827b`
+
+| Answer | Lane | Recorded in | State |
+|---|---|---|---|
+| A-Q31: the test PC's WiFi joins the operator's home network; its password reaches the test PC in a file on the boot medium, never in git or a log | A | §1596; `open-questions-resolved/lane-a.md` | recorded |
+
 ## chat, 2026-10-22: remote desktop's video prefers AV1, with VP9 as the fallback
 
 - **Given:** 2026-10-22, in chat to lane B's session, answering lane B's

@@ -1,0 +1,6 @@
+[Lane A asked, in open-questions/A-Q31.md: which WiFi network should the test PC join -- A. the operator's home network, or B. a separate test network -- and how should its password reach it -- 1. a file on the boot medium, kept outside the repository, or 2. the kernel command line. Its recommendation: B and 1; with A, still 1.]
+
+[The operator answered, in chat to lane A's session:]
+use network [the network's name], password [its password]
+
+[Redacted by lane A, the only change to the operator's words: the network's name and its password are not copied here, so that they reach no git history. Lane A keeps them in C:\Users\Computer\.slateos-wifi on the operator's PC, outside every repository, as option 1 has it.]

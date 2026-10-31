@@ -7,13 +7,14 @@ USB drive, and works its power button. This script is how a session drives it:
 
     python scripts/pikvm.py status
     python scripts/pikvm.py stage <worktree> -o <img> [--cmdline "..."] [--add-cmdline "..."] [--no-linuxdrv] [--wifi FILE]
-    python scripts/pikvm.py boot <img> [--off-hard]  # upload, restart, pick it at F12
+    python scripts/pikvm.py boot <img> [--off-hard]  # shut down, upload, start, pick it at F12
     python scripts/pikvm.py watch --seconds 90  # screenshots until the screen settles
     python scripts/pikvm.py snap <out.png> [--crop X0,Y0,X1,Y1]
     python scripts/pikvm.py power on|off|off-hard|reset-hard
 
-`boot` shuts a PC that is on down first, with a press of its power button,
-and goes on once the power light is out. A press shuts Windows down
+`boot` checks first that the image can be uploaded -- it reads, the PiKVM
+answers, and has room for it -- then shuts a PC that is on down, with a
+press of its power button, and goes on once the power light is out. A press shuts Windows down
 properly (Windows' power button setting, since 2026-10-31). It stops
 SlateOS too, which handles no power-button event yet, most likely by the
 firmware powering the PC off (known-issues
@@ -52,6 +53,7 @@ PC, US Dvorak (`--layout us` for QWERTY): the PiKVM sends physical keys.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import io
 import json
@@ -609,7 +611,41 @@ SHUTDOWN_SECONDS = 180
 OFF_HARD_SECONDS = 15
 
 
-def shut_down(kvm, off_hard: bool, wait_s: float = SHUTDOWN_SECONDS) -> None:
+def storage_room(msd: dict) -> int | None:
+    """The bytes an upload of this script's image may take on the PiKVM's
+    storage, from kvmd's /api/msd answer `msd`: what is free, and what its
+    earlier image of the same name holds, which the upload replaces. None
+    when kvmd says nothing of what is free -- an older or newer kvmd's
+    answer -- so that nothing is refused for want of it."""
+    storage = msd.get("storage") or {}
+    free = storage.get("free")
+    if free is None:
+        free = ((storage.get("parts") or {}).get("") or {}).get("free")
+    if free is None:
+        return None
+    own = ((storage.get("images") or {}).get(IMAGE_NAME) or {}).get("size", 0)
+    return int(free) + int(own)
+
+
+def check_upload(kvm, image: Path) -> int:
+    """What can be known of an upload of `image` before anything is done to
+    the PC: that it reads, that the PiKVM answers, and that its storage has
+    room for it ([`storage_room`]). Its size. Exits, the PC untouched, when
+    one is not so; a PiKVM that does not answer is said by main()."""
+    try:
+        size = image.stat().st_size
+        with image.open("rb"):
+            pass
+    except OSError as e:
+        sys.exit(f"pikvm: the image {image} cannot be read ({e}); nothing was done to the PC")
+    room = storage_room(kvm.json("GET", "/api/msd"))
+    if room is not None and size > room:
+        sys.exit(f"pikvm: the image ({size} bytes) does not fit the PiKVM's storage "
+                 f"({room} bytes free for it); nothing was done to the PC")
+    return size
+
+
+def shut_down(kvm, off_hard: bool, wait_s: float | None = None) -> None:
     """The PC off, before `boot` starts it again: nothing when it is off
     already. Else its power button pressed -- which shuts Windows down
     properly (its power button setting), and stops SlateOS too, most likely
@@ -617,13 +653,18 @@ def shut_down(kvm, off_hard: bool, wait_s: float = SHUTDOWN_SECONDS) -> None:
     power-button event yet -- and
     `wait_s` given for the power light to go out; or, `off_hard`, the button
     held down, which cuts the power at once, for a PC a press does not stop,
-    never for Windows. Exits, the PC left on, when the light stays on: a PC
-    that took no notice of the press, or Windows held up by something
-    open."""
+    never for Windows -- given `wait_s` too, [`SHUTDOWN_SECONDS`] or
+    [`OFF_HARD_SECONDS`] when it is None. What it waits for is said. Exits,
+    the PC left on, when the light stays on: a PC that took no notice of the
+    press, or Windows held up by something open."""
     if not kvm.leds()["power"]:
         return
+    if wait_s is None:
+        wait_s = OFF_HARD_SECONDS if off_hard else SHUTDOWN_SECONDS
     kvm.power("off_hard" if off_hard else "off")
-    deadline = time.monotonic() + (OFF_HARD_SECONDS if off_hard else wait_s)
+    print(f"pikvm: the power button {'held down' if off_hard else 'pressed'}; waiting up to "
+          f"{wait_s:.0f} s for the PC to go off", flush=True)
+    deadline = time.monotonic() + wait_s
     while kvm.leds()["power"]:
         if time.monotonic() >= deadline:
             if off_hard:
@@ -633,20 +674,29 @@ def shut_down(kvm, off_hard: bool, wait_s: float = SHUTDOWN_SECONDS) -> None:
                      "waiting on something open; for SlateOS, or a PC that has stopped "
                      "answering, pass --off-hard")
         time.sleep(1)
+    print("pikvm: the PC is off", flush=True)
 
 
 def boot(kvm: PiKvm, image: Path, menu_key: str, off_hard: bool) -> None:
-    """Shut the PC down ([`shut_down`]; `off_hard` cuts its power), upload
-    `image` -- the drive taken from the PC only once nothing runs there to
-    lose it -- start the PC, and pick the PiKVM drive in its boot menu. The
-    click is checked as far as pictures allow: one the menu does not take
-    (the screen unchanged) is made again. A screen that changes is taken for
-    the boot starting -- which it may not be, if what settled was a logo
-    before the menu; `watch` or `snap` shows which."""
+    """Check that `image` can be uploaded ([`check_upload`]), shut the PC
+    down ([`shut_down`]; `off_hard` cuts its power), upload `image` -- the
+    drive taken from the PC only once nothing runs there to lose it -- start
+    the PC, and pick the PiKVM drive in its boot menu. An upload that fails
+    all the same leaves the PC off, and says so. The click is checked as far
+    as pictures allow: one the menu does not take (the screen unchanged) is
+    made again. A screen that changes is taken for the boot starting --
+    which it may not be, if what settled was a logo before the menu; `watch`
+    or `snap` shows which."""
     if not kvm.boot_entry_xy:
         sys.exit("pikvm: boot needs boot_entry_xy in ~/.pikvm: where the boot menu shows the PiKVM drive")
+    check_upload(kvm, image)
     shut_down(kvm, off_hard)
-    kvm.upload(image)
+    try:
+        kvm.upload(image)
+    except BaseException:
+        print("pikvm: the upload failed after the PC was shut down for it: the PC is off "
+              "(boot again, or `power on`)", file=sys.stderr)
+        raise
     time.sleep(2)
     kvm.power("on")
     for _ in range(MENU_KEY_SECONDS * 4):
@@ -778,21 +828,23 @@ def self_test() -> int:
         button (Windows; SlateOS, by its firmware) or not (one that has
         stopped answering); holding the button down cuts it off either way.
         Its presses kept."""
-        def __init__(self, on, heeds_press):
-            self.on, self.heeds_press, self.presses = on, heeds_press, []
+        def __init__(self, on, heeds_press, heeds_hold=True):
+            self.on, self.heeds_press, self.heeds_hold = on, heeds_press, heeds_hold
+            self.presses = []
 
         def leds(self):
             return {"power": self.on, "hdd": False}
 
         def power(self, action):
             self.presses.append(action)
-            if action == "off_hard" or (action == "off" and self.heeds_press):
+            if (action == "off_hard" and self.heeds_hold) or (action == "off" and self.heeds_press):
                 self.on = False
 
-    def shuts(on, heeds_press, off_hard):
-        pc = Pc(on, heeds_press)
+    def shuts(on, heeds_press, off_hard, heeds_hold=True):
+        pc = Pc(on, heeds_press, heeds_hold)
         try:
-            shut_down(pc, off_hard, wait_s=0)
+            with contextlib.redirect_stdout(io.StringIO()):
+                shut_down(pc, off_hard, wait_s=0)
         except SystemExit:
             return ("left on" if pc.on else "exited off", pc.presses)
         return ("off" if not pc.on else "returned on", pc.presses)
@@ -803,6 +855,38 @@ def self_test() -> int:
     check("boot: --off-hard cuts the power, with no press first",
           shuts(True, False, True), ("off", ["off_hard"]))
     check("boot: a PC that is off is not pressed", shuts(False, True, False), ("off", []))
+    check("boot: a PC still on with the button held down is left on, and said",
+          shuts(True, False, True, heeds_hold=False), ("left on", ["off_hard"]))
+
+    def room(storage):
+        return storage_room({"storage": storage})
+    check("upload room: what is free", room({"free": 100}), 100)
+    check("upload room: the image it replaces counted free",
+          room({"free": 100, "images": {IMAGE_NAME: {"size": 50}, "other.img": {"size": 7}}}), 150)
+    check("upload room: kvmd 4's parts", room({"parts": {"": {"free": 30}}}), 30)
+    check("upload room: nothing said of it", room({}), None)
+
+    class Answers:
+        """A PiKVM whose storage has `free` bytes free."""
+        def __init__(self, free):
+            self.free = free
+
+        def json(self, method, path, **_kw):
+            return {"storage": {"free": self.free}}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        image = Path(tmp) / "image.img"
+        image.write_bytes(b"x" * 10)
+
+        def checked(kvm, path):
+            try:
+                return check_upload(kvm, path)
+            except SystemExit:
+                return "refused"
+        check("upload check: an image that fits", checked(Answers(10), image), 10)
+        check("upload check: one that does not", checked(Answers(9), image), "refused")
+        check("upload check: one that is not there", checked(Answers(99), Path(tmp) / "none.img"),
+              "refused")
     check("typing: a line, its Enter", key_presses("ls\n", "us"),
           [("KeyL", False), ("KeyS", False), ("Enter", False)])
     try:

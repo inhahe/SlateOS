@@ -328,11 +328,17 @@ that the kernel places at `/.boot-firmware` (design-decisions 1592), and
 `limine.conf` with
 `blk.writable=eui64:0025385181b1cd22 log.screen=1` on the first entry,
 `--add-cmdline` adding to it) is made
-into a disk image (`scripts/build-usb-image.py`) and loaded onto the PiKVM's
-virtual USB drive (`/api/msd/write`, then `set_params cdrom=0`,
-`set_connected`). The PC is forced off and on (`/api/atx/power?action=off_hard`
-then `on`), F12 pressed through the PiKVM's keyboard until the boot menu shows,
-and `UEFI: PiKVM Flash Drive` chosen; screenshots (`/api/streamer/snapshot`)
+into a disk image (`scripts/build-usb-image.py`). `scripts/pikvm.py boot`
+checks that it can be uploaded (it reads, and the PiKVM's storage has room),
+shuts the PC down with a press of its power button
+(`/api/atx/power?action=off`) -- Windows' button is set to shut it down;
+under SlateOS the firmware turns the PC off -- and waits up to 180 s for
+the power light to go out, before anything is uploaded; `--off-hard` cuts
+the power instead (`action=off_hard`), for a PC a press does not stop, never
+for Windows. It then loads the image onto the PiKVM's virtual USB drive
+(`/api/msd/write`, then `set_params cdrom=0`, `set_connected`), powers the
+PC on, presses F12 through the PiKVM's keyboard until the boot menu shows,
+and chooses `UEFI: PiKVM Flash Drive`; screenshots (`/api/streamer/snapshot`)
 are the log. The PC's Windows keyboard layout is US Dvorak, which matters only
 when typing into Windows.
 

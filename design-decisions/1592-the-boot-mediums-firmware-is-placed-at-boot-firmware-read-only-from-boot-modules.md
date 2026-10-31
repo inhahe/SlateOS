@@ -24,19 +24,21 @@ a machine's firmware.
    A module the kernel cannot read whole -- a name with no end within its
    bound, or one past the most it reads -- is said at boot, since it may be
    firmware a driver will not find.
-2. **On a memfs of its own, mounted at `/.boot-firmware` and then made
-   read-only** (`place_firmware`). The mount point's parent is `/`, which
+2. **On a memfs of its own, written before it is mounted at
+   `/.boot-firmware`, and read-only as a whole from its first moment**
+   (`place_firmware`, `memfs::mount_sealed`; built first since 2026-10-31,
+   mounted and then sealed before). The mount point's parent is `/`, which
    always exists and is never renamed or replaced, so placing the firmware
    writes nothing into the root -- which may be a FAT disk, a read-only
    one, or, after the pivot of §1513, the system image -- and no symbolic
-   link can stand in for the directory. A placement that fails part-way
-   unmounts it: no firmware rather than some. Without a firmware module
-   nothing is mounted.
+   link can stand in for the directory. A placement that fails mounts
+   nothing: no firmware rather than some. Without a firmware module nothing
+   is mounted.
 3. **Every driver process is told `firmware_class.path=/.boot-firmware`**
    (`linuxdrv::start`, unless a run names a directory of its own) -- once
    the firmware is placed, whole and sealed, and only then: without the
-   mount the name is anyone's to make on the root, and a placement that
-   failed may have left one half-written. Linux's loader searches it first,
+   mount the name is anyone's to make on the root. Linux's loader searches
+   it first,
    then `/lib/firmware` -- so firmware an installed system carries is still
    found, never hidden by the medium's.
 4. **The files are pinned, fetched and verified, not committed.**

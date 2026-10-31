@@ -1817,30 +1817,40 @@ static void lx_wifi_station_free(struct lx_wifi_station *st)
  * within LX_WIFI_HANDSHAKE_S: 0, or why not, said -- `what` what was
  * awaited.
  */
-static int lx_wifi_ap_take(struct lx_wifi_handshaking *h, struct lx_wifi_eapol *at_ap,
-			   wait_queue_head_t *wq, const bool *done, const char *what)
+static int lx_wifi_ap_take_by(struct lx_wifi_handshaking *h, struct lx_wifi_eapol *at_ap,
+			      wait_queue_head_t *wq,
+			      int (*take)(struct lx_wifi_handshaking *h, struct sk_buff *skb),
+			      const bool *done, const char *what)
 {
-	int err = lx_wifi_take(h, &at_ap->frames, wq, lx_wifi_authenticator, done);
+	int err = lx_wifi_take(h, &at_ap->frames, wq, take, done);
 
 	if (err == -ETIMEDOUT)
 		netdev_err(h->ap->dev, "%s did not come in %d s\n", what, LX_WIFI_HANDSHAKE_S);
 	return err;
 }
 
+static int lx_wifi_ap_take(struct lx_wifi_handshaking *h, struct lx_wifi_eapol *at_ap,
+			   wait_queue_head_t *wq, const bool *done, const char *what)
+{
+	return lx_wifi_ap_take_by(h, at_ap, wq, lx_wifi_authenticator, done, what);
+}
+
 static int lx_wifi_cross_watched(struct net_device *a, struct net_device *b, bool protect);
 
 /*
- * One of the station's counts (struct lx_wifi_sta_keys) once its keeper --
- * another task, which wakes `wq` as it finishes each run (lx_wifi_keep) --
- * has reached `want`, or LX_WIFI_FRAME_MS has passed: the access point has
- * the station's answer before the station has finished what it answers for
- * (message 4 is sent before its keys go in), so what the access point does
- * next must wait for the station's count, not read it at once.
+ * One of the station `st`'s counts (struct lx_wifi_sta_keys) once its
+ * keeper -- another task, which wakes the station's wait queue as it
+ * finishes each run (lx_wifi_keep) -- has reached `want`, or
+ * LX_WIFI_FRAME_MS has passed: the access point has the station's answer
+ * before the station has finished what it answers for (message 4 is sent
+ * before its keys go in), so what the access point does next must wait for
+ * the station's count, not read it at once.
  */
-static unsigned int lx_wifi_kept_count(wait_queue_head_t *wq, const unsigned int *count,
+static unsigned int lx_wifi_kept_count(struct lx_wifi_station *st, const unsigned int *count,
 				       unsigned int want)
 {
-	wait_event_timeout(*wq, READ_ONCE(*count) >= want, msecs_to_jiffies(LX_WIFI_FRAME_MS));
+	wait_event_timeout(*st->eapol.wq, READ_ONCE(*count) >= want,
+			   msecs_to_jiffies(LX_WIFI_FRAME_MS));
 	return READ_ONCE(*count);
 }
 
@@ -1864,23 +1874,29 @@ static int lx_wifi_ap_forged_message_1(struct lx_wifi_handshaking *h)
 
 /*
  * The station's answer to a message 1 the access point did not send: a
- * message 2, taken and dropped, as an access point drops one for no
- * handshake of its own. 0, or -EPROTO for a frame that is not one.
+ * message 2 -- pairwise, signed, neither an acknowledgement asked for nor
+ * secure -- from the station, under that message's replay counter; taken
+ * and dropped, as an access point drops one for no handshake of its own.
+ * 0, or -EPROTO for a frame that is not that.
  */
 static int lx_wifi_ap_forged_answer(struct lx_wifi_handshaking *h, struct sk_buff *skb)
 {
+	const u16 wanted = LX_WPA_INFO_PAIRWISE | LX_WPA_INFO_MIC;
 	const struct lx_wpa_eapol_key *k;
+	u64 replay;
 	u16 info;
 
-	if (skb_linearize(skb) || !(k = lx_wpa_key_parse(skb->data, skb->len, NULL))) {
-		netdev_err(h->ap->dev, "an answer to a forged message 1 that is not a key frame\n");
+	if (skb_linearize(skb) || !(k = lx_wpa_key_parse(skb->data, skb->len, NULL)) ||
+	    !ether_addr_equal(eth_hdr(skb)->h_source, h->ap->sta)) {
+		netdev_err(h->ap->dev, "an answer to a forged message 1 that is not a key frame from the station\n");
 		return -EPROTO;
 	}
 	info = be16_to_cpu(k->info);
-	if ((info & (LX_WPA_INFO_PAIRWISE | LX_WPA_INFO_MIC | LX_WPA_INFO_ACK)) !=
-	    (LX_WPA_INFO_PAIRWISE | LX_WPA_INFO_MIC)) {
-		netdev_err(h->ap->dev, "an answer to a forged message 1 that is not a message 2 (key information %#x)\n",
-			   info);
+	replay = get_unaligned_be64(k->replay);
+	if ((info & (wanted | LX_WPA_INFO_ACK | LX_WPA_INFO_SECURE)) != wanted ||
+	    replay != h->authenticator.replay) {
+		netdev_err(h->ap->dev, "an answer to a forged message 1 that is not its message 2 (key information %#x, replay counter %llu)\n",
+			   info, replay);
 		return -EPROTO;
 	}
 	h->authenticator.forged_answered = true;
@@ -1916,7 +1932,7 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 	err = lx_wifi_ap_message_3(h);
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->done, "message 4, answering message 3 sent again,");
-	if (!err && (n = lx_wifi_kept_count(wq, &s->resent, 1)) != 1) {
+	if (!err && (n = lx_wifi_kept_count(st, &s->resent, 1)) != 1) {
 		netdev_err(h->sta_dev, "message 3 sent again was answered %u time(s) again, not once\n",
 			   n);
 		err = -EPROTO;
@@ -1925,7 +1941,7 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 		err = lx_wifi_ap_message_1(h);
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->done, "the pairwise key's renewal");
-	if (!err && (n = lx_wifi_kept_count(wq, &s->pairwise_rekeys, 1)) != 1) {
+	if (!err && (n = lx_wifi_kept_count(st, &s->pairwise_rekeys, 1)) != 1) {
 		netdev_err(h->sta_dev, "the pairwise key was renewed %u time(s), not once\n", n);
 		err = -EPROTO;
 	}
@@ -1934,11 +1950,9 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 	if (!err)
 		err = lx_wifi_ap_forged_message_1(h);
 	if (!err)
-		err = lx_wifi_take(h, &at_ap->frames, wq, lx_wifi_ap_forged_answer,
-				   &a->forged_answered);
-	if (err == -ETIMEDOUT)
-		netdev_err(ap->dev, "the station did not answer a message 1 in %d s\n",
-			   LX_WIFI_HANDSHAKE_S);
+		err = lx_wifi_ap_take_by(h, at_ap, wq, lx_wifi_ap_forged_answer,
+					 &a->forged_answered,
+					 "the answer to a message 1 the access point did not send");
 	if (!err) {
 		a->done = false;
 		err = lx_wifi_ap_message_3(h);
@@ -1946,7 +1960,7 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->done,
 				      "message 4, answering message 3 sent again after a forged message 1,");
-	if (!err && (n = lx_wifi_kept_count(wq, &s->resent, 2)) != 2) {
+	if (!err && (n = lx_wifi_kept_count(st, &s->resent, 2)) != 2) {
 		netdev_err(h->sta_dev, "after a forged message 1, message 3 sent again was answered %u time(s) in all, not twice\n",
 			   n);
 		err = -EPROTO;
@@ -1961,7 +1975,7 @@ static int lx_wifi_kept_check(struct lx_wifi_station *st, struct lx_wifi_eapol *
 		err = lx_wifi_ap_group_key(h);
 	if (!err)
 		err = lx_wifi_ap_take(h, at_ap, wq, &a->group_answered, "the renewed group key's answer");
-	if (!err && (n = lx_wifi_kept_count(wq, &s->rekeys, 1)) != 1) {
+	if (!err && (n = lx_wifi_kept_count(st, &s->rekeys, 1)) != 1) {
 		netdev_err(h->sta_dev, "the group key renewed was taken %u time(s), not once\n", n);
 		err = -EPROTO;
 	}

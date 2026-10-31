@@ -118,10 +118,10 @@ fn generate_nonce() -> KernelResult<[u8; NONCE_SIZE]> {
 // Types
 // ---------------------------------------------------------------------------
 
-/// A named encryption key.
+/// A named encryption key, wiped as the entry goes.
 struct KeyEntry {
     name: String,
-    key: [u8; KEY_SIZE],
+    key: crate::crypto::Secret<KEY_SIZE>,
 }
 
 /// Public info about a stored key.
@@ -205,7 +205,7 @@ pub fn add_raw_key(name: &str, key: [u8; KEY_SIZE]) -> KernelResult<()> {
         String::from(name),
         KeyEntry {
             name: String::from(name),
-            key,
+            key: crate::crypto::Secret(key),
         },
     );
 
@@ -254,20 +254,20 @@ pub fn key_count() -> usize {
 pub fn encrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     let state = STATE.lock();
     let entry = state.keys.get(key_name).ok_or(KernelError::NotFound)?;
-    let key = entry.key;
+    let key = crate::crypto::Secret(entry.key.0);
     drop(state);
 
     // Generate random nonce.
     let nonce = generate_nonce()?;
 
     // Encrypt.
-    let ciphertext = chacha20_crypt(&key, &nonce, data);
+    let ciphertext = chacha20_crypt(&key.0, &nonce, data);
 
     // Compute HMAC over nonce || ciphertext.
     let mut hmac_input = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
     hmac_input.extend_from_slice(&nonce);
     hmac_input.extend_from_slice(&ciphertext);
-    let mac = hmac_sha256(&key, &hmac_input);
+    let mac = hmac_sha256(&key.0, &hmac_input);
 
     // Build output.
     let mut output = Vec::with_capacity(HEADER_SIZE + ciphertext.len());
@@ -309,7 +309,7 @@ pub fn decrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
 
     let state = STATE.lock();
     let entry = state.keys.get(key_name).ok_or(KernelError::NotFound)?;
-    let key = entry.key;
+    let key = crate::crypto::Secret(entry.key.0);
     drop(state);
 
     // Extract header fields.
@@ -329,7 +329,7 @@ pub fn decrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     let mut hmac_input = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
     hmac_input.extend_from_slice(&nonce);
     hmac_input.extend_from_slice(ciphertext);
-    let computed_mac = hmac_sha256(&key, &hmac_input);
+    let computed_mac = hmac_sha256(&key.0, &hmac_input);
 
     // Constant-time comparison to prevent timing attacks.
     if !constant_time_eq(&stored_mac, &computed_mac) {
@@ -337,7 +337,7 @@ pub fn decrypt(data: &[u8], key_name: &str) -> KernelResult<Vec<u8>> {
     }
 
     // Decrypt.
-    let plaintext = chacha20_crypt(&key, &nonce, ciphertext);
+    let plaintext = chacha20_crypt(&key.0, &nonce, ciphertext);
 
     // Single acquisition — see the note in `encrypt()` above.
     let mut state = STATE.lock();
@@ -390,14 +390,14 @@ pub fn stats() -> (u64, u64, usize) {
 // ---------------------------------------------------------------------------
 
 /// Derive a key from passphrase and salt.
-fn derive_key(passphrase: &str, salt: &str) -> [u8; KEY_SIZE] {
+fn derive_key(passphrase: &str, salt: &str) -> crate::crypto::Secret<KEY_SIZE> {
     use crate::crypto::Sha256;
 
     let mut hasher = Sha256::new();
     hasher.update(passphrase.as_bytes());
     hasher.update(salt.as_bytes());
     hasher.update(b"FENC_KDF_V1");
-    hasher.finalize()
+    crate::crypto::Secret(hasher.finalize())
 }
 
 /// Constant-time byte array comparison (prevents timing attacks).

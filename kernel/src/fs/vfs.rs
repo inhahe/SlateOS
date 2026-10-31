@@ -3472,6 +3472,57 @@ impl Vfs {
         Ok(())
     }
 
+    /// Detach every mount of the filesystem `fs_id` -- a [`FileId`]'s
+    /// `fs_id`, as [`Self::pin_dir`] gives it -- in every mount namespace's
+    /// table, each with every mount beneath it: [`Self::unmount_detach`] by
+    /// what is mounted rather than by where, so that neither a mount
+    /// stacked on it, nor a bind mount of it, nor a namespace's copy of it
+    /// keeps it reachable. The files held open on it go on working until
+    /// released, as for [`Self::unmount_detach`]. How many mounts were
+    /// detached, those beneath counted.
+    pub fn detach_filesystem(fs_id: u64) -> usize {
+        let (now, detached) = {
+            let mut vfs = VFS.lock();
+            let mut gone = Vec::new();
+            let inner = &mut *vfs;
+            for table in core::iter::once(&mut inner.root).chain(inner.others.values_mut()) {
+                let before = gone.len();
+                while let Some(top) = table.iter().position(|m| m.fs_id == fs_id) {
+                    let tree = subtree(table, top);
+                    gone.extend(take_entries(table, &tree));
+                }
+                if gone.len() != before {
+                    recompute_visibility(table);
+                }
+            }
+            let detached = gone.len();
+            let (now, later): (Vec<MountPoint>, Vec<MountPoint>) =
+                gone.into_iter().partition(|mp| mp.objects == 0);
+            inner.detached.extend(later);
+            (now, detached)
+        };
+        if detached > 0 {
+            VFS_DCACHE.lock().invalidate_all();
+        }
+        for mp in now {
+            finish_unmount(mp);
+        }
+        detached
+    }
+
+    /// Whether the filesystem `fs_id` is mounted in any mount namespace's
+    /// table: reachable by some path. One detached lazily and still held
+    /// open ([`Self::unmount_detach`]) is not; nor is a kernel-internal
+    /// mount, which no path reaches.
+    #[must_use]
+    pub fn filesystem_mounted(fs_id: u64) -> bool {
+        let vfs = VFS.lock();
+        vfs.root
+            .iter()
+            .chain(vfs.others.values().flatten())
+            .any(|m| m.fs_id == fs_id)
+    }
+
     /// `umount2(MNT_EXPIRE)`: the first call marks the mount at `mount_path`
     /// expired and answers `WouldBlock` (Linux's `EAGAIN`); a later one finds
     /// it still marked -- no file held through it since -- and unmounts it as

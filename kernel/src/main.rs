@@ -9130,7 +9130,9 @@ extern "C" fn kernel_main() -> ! {
             // case, before init starts. The driver and network daemon
             // started just above already run: the drop after the join is the
             // one that keeps the file from them (design-decisions 1596).
-            linuxdrv::drop_boot_wifi();
+            // One that cannot be dropped stops the boot here: init is not
+            // started with the passphrase reachable.
+            linuxdrv::drop_boot_wifi_before_init();
 
             // Arm the container healthcheck supervisor. Deferred to here — after every
             // timer self-test (the hrtimer self-test asserts an exact `pending_count`,

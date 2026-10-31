@@ -6,8 +6,10 @@
 //! - **CRC32C** (Castagnoli) for ext4 metadata checksums, and **CRC-32**
 //! - **HMAC-SHA256** (RFC 2104) and **ChaCha20** (RFC 8439), for the kernel
 //!   shell's file encryption (`fs::encrypt`)
-//! - **Wiping** a secret's memory before it is given back ([`wipe`],
-//!   [`wipe_raw`]), which every holder of one uses
+//! - **Wiping** a secret's memory before it is given back: [`wipe`] and
+//!   [`wipe_raw`], and [`Secret`], key material wiped as it is dropped --
+//!   what disk encryption's and file encryption's keys, the memfs that holds
+//!   the boot medium's WiFi passphrase and the boot modules use
 //!
 //! The rest of what this module once held -- HKDF, Poly1305, the
 //! ChaCha20-Poly1305 AEAD, X25519, SHA-512 and Ed25519 -- served the
@@ -37,6 +39,25 @@ pub fn wipe(bytes: &mut [u8]) {
     // SAFETY: `bytes` is `len` bytes, valid for writes, that this call holds
     // exclusively.
     unsafe { wipe_raw(bytes.as_mut_ptr(), len) };
+}
+
+/// Key material, wiped when it is dropped ([`wipe`]). Its bytes are `.0`;
+/// a copy of them made elsewhere is that holder's to wipe, or to hold in a
+/// `Secret` of its own.
+pub struct Secret<const N: usize>(pub [u8; N]);
+
+impl<const N: usize> Secret<N> {
+    /// `N` zero bytes, to be filled.
+    #[must_use]
+    pub fn zeroed() -> Self {
+        Self([0; N])
+    }
+}
+
+impl<const N: usize> Drop for Secret<N> {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
 }
 
 /// [`wipe`], of the `len` bytes at `at`: for memory no slice may name while

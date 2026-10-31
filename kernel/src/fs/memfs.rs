@@ -504,10 +504,14 @@ impl MemData {
 
     /// The frames, the bytes turned into them first -- a mapping's first
     /// fault, or a file growing past [`BYTES_MAX`]: never more than that much
-    /// to copy.
+    /// to copy. The bytes are zeroed before they go back to the heap: a
+    /// file that wipes as its filesystem drops ([`mount_sealed`]) may be
+    /// mapped too, and its first fault comes here.
     fn frames(&mut self) -> KernelResult<&mut FileFrames> {
         if let Self::Bytes(bytes) = self {
-            *self = Self::Frames(FileFrames::from_bytes(bytes)?);
+            let frames = FileFrames::from_bytes(bytes)?;
+            crate::crypto::wipe(bytes);
+            *self = Self::Frames(frames);
         }
         match self {
             Self::Frames(frames) => Ok(frames),
@@ -933,21 +937,27 @@ pub struct MemFs {
     wipe_on_drop: bool,
 }
 
-/// How many filesystems that wipe their contents ([`MemFs::wipe_on_drop`])
-/// have been dropped, and wiped: what a check that one was compares.
-static WIPED_ON_DROP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// How many bytes filesystems that wipe their contents
+/// ([`MemFs::wipe_on_drop`]) have zeroed as they were dropped: what a check
+/// that one was wiped compares with what it held.
+static WIPED_BYTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// How many filesystems that wipe their contents have been dropped and
-/// wiped since boot ([`mount_sealed`]'s `wipe`).
-pub fn wiped_on_drop() -> u64 {
-    WIPED_ON_DROP.load(core::sync::atomic::Ordering::Acquire)
+/// How many bytes filesystems that wipe their contents ([`mount_sealed`]'s
+/// `wipe`) have zeroed as they were dropped, since boot: a file's length
+/// for one kept as bytes, a whole frame for each frame of one kept in
+/// frames ([`MemFs::wipe_contents`]).
+pub fn wiped_bytes_on_drop() -> u64 {
+    WIPED_BYTES.load(core::sync::atomic::Ordering::Acquire)
 }
 
 impl Drop for MemFs {
     fn drop(&mut self) {
         if self.wipe_on_drop {
-            self.wipe_contents();
-            WIPED_ON_DROP.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+            let wiped = self.wipe_contents();
+            WIPED_BYTES.fetch_add(
+                u64::try_from(wiped).unwrap_or(u64::MAX),
+                core::sync::atomic::Ordering::AcqRel,
+            );
         }
     }
 }
@@ -984,11 +994,16 @@ impl MemFs {
 
     /// Every file's contents zeroed where they lie, its length kept: its
     /// bytes, or each frame it holds -- which the page cache and any mapping
-    /// of the file then read as zeros too ([`crate::crypto::wipe`]).
-    fn wipe_contents(&mut self) {
+    /// of the file then read as zeros too ([`crate::crypto::wipe`]). How
+    /// many bytes were zeroed.
+    fn wipe_contents(&mut self) -> usize {
+        let mut wiped = 0usize;
         for node in self.inodes.values_mut() {
             match &mut node.kind {
-                MemFsNodeKind::File(MemData::Bytes(bytes)) => crate::crypto::wipe(bytes),
+                MemFsNodeKind::File(MemData::Bytes(bytes)) => {
+                    crate::crypto::wipe(bytes);
+                    wiped = wiped.saturating_add(bytes.len());
+                }
                 MemFsNodeKind::File(MemData::Frames(frames)) => {
                     for &held in frames.pages.values() {
                         // A frame not reachable has nothing of the file's in
@@ -1002,37 +1017,44 @@ impl MemFs {
                         // (the cache, a mapping) read memory a write may
                         // change at any time, as they always do.
                         unsafe { crate::crypto::wipe_raw(at, FRAME_SIZE) };
+                        wiped = wiped.saturating_add(FRAME_SIZE);
                     }
                 }
                 _ => {}
             }
         }
+        wiped
     }
 
-    /// A memfs holding `files` -- each `(path, bytes)`, absolute, its
-    /// directories made as it needs them -- and nothing else, written now,
-    /// before anything can reach it ([`mount_sealed`]). `wipe`: every
-    /// file's contents zeroed when it is dropped ([`Self::wipe_contents`]).
+    /// A memfs holding `files` -- each `(path, bytes)`, the path relative to
+    /// its root, its directories made as it needs them -- and nothing else,
+    /// written now, before anything can reach it ([`mount_sealed`]). `wipe`:
+    /// every file's contents zeroed when it is dropped
+    /// ([`Self::wipe_contents`]).
     ///
     /// # Errors
     ///
-    /// What a directory or a write refuses -- a file named as another's
-    /// directory, say. The filesystem is dropped with what it held, wiped if
+    /// `InvalidArgument` for a path no lookup could name
+    /// ([`crate::fs::vfs::validate_path`]: a component over 255 bytes, say),
+    /// or what a directory or a write refuses -- a file named as another's
+    /// directory. The filesystem is dropped with what it held, wiped if
     /// `wipe`.
     fn holding(files: &[(&Path, &[u8])], wipe: bool) -> KernelResult<Self> {
         let mut fs = Self::new();
         fs.wipe_on_drop = wipe;
         for &(path, data) in files {
+            let mut full = PathBuf::from("/");
+            full.push(path);
+            crate::fs::vfs::validate_path(&full)?;
             let mut dir = PathBuf::from("/");
-            let parts: Vec<_> = path.components().collect();
-            for part in parts.iter().take(parts.len().saturating_sub(1)) {
+            for part in full.parent().into_iter().flat_map(Path::components) {
                 dir.push(part);
                 match fs.mkdir(&dir) {
                     Ok(()) | Err(KernelError::AlreadyExists) => {}
                     Err(e) => return Err(e),
                 }
             }
-            fs.write_file(path, data)?;
+            fs.write_file(&full, data)?;
         }
         Ok(fs)
     }
@@ -2534,8 +2556,8 @@ pub fn mount<P: AsRef<crate::fs::path::Path> + ?Sized>(mount_path: &P) -> Kernel
     Ok(())
 }
 
-/// A memfs holding `files` -- each `(path, bytes)`, absolute, as
-/// [`MemFs::holding`] takes them -- mounted at `mount_path` read-only as a
+/// A memfs holding `files` -- each `(path, bytes)`, the path relative to its
+/// root, as [`MemFs::holding`] takes them -- mounted at `mount_path` read-only as a
 /// whole from the start (the boot medium's firmware, its WiFi network
 /// file): written once, before any process can reach them, and never
 /// changed. `wipe`: their contents zeroed when the filesystem is dropped,
@@ -2556,22 +2578,23 @@ pub fn mount_sealed(mount_path: &Path, files: &[(&Path, &[u8])], wipe: bool) -> 
 
 /// [`MemFs::wipe_contents`], which a filesystem that wipes runs as it is
 /// dropped: a file of bytes and one of frames (past [`BYTES_MAX`]), read
-/// back as zeros of the length each had; and the drop -- a filesystem made
-/// to wipe counted wiped as it goes ([`wiped_on_drop`]), one not made to
-/// not.
+/// back as zeros of the length each had, every byte of both said zeroed;
+/// and the drop -- a filesystem made to wipe zeroing what it held as it
+/// goes ([`wiped_bytes_on_drop`]), one not made to zeroing nothing.
 ///
 /// # Errors
 /// `IoError`, said, when anything is not so.
 fn wipe_self_test() -> KernelResult<()> {
-    let before = wiped_on_drop();
+    let before = wiped_bytes_on_drop();
     let secret: &[u8] = b"a secret";
-    drop(MemFs::holding(&[(Path::new("/a/secret"), secret)], true)?);
-    let after_wiping = wiped_on_drop();
-    drop(MemFs::holding(&[(Path::new("/a/plain"), secret)], false)?);
-    let after_plain = wiped_on_drop();
-    if after_wiping.wrapping_sub(before) != 1 || after_plain != after_wiping {
+    drop(MemFs::holding(&[(Path::new("a/secret"), secret)], true)?);
+    let after_wiping = wiped_bytes_on_drop();
+    drop(MemFs::holding(&[(Path::new("a/plain"), secret)], false)?);
+    let after_plain = wiped_bytes_on_drop();
+    let held = u64::try_from(secret.len()).map_err(|_| KernelError::InternalError)?;
+    if after_wiping.wrapping_sub(before) != held || after_plain != after_wiping {
         crate::serial_println!(
-            "[memfs]   FAILED: a filesystem made to wipe counted {} wiped as it dropped, one not made to {}",
+            "[memfs]   FAILED: a filesystem made to wipe zeroed {} of its {held} byte(s) as it dropped, one not made to {}",
             after_wiping.wrapping_sub(before),
             after_plain.wrapping_sub(after_wiping)
         );
@@ -2591,7 +2614,15 @@ fn wipe_self_test() -> KernelResult<()> {
         crate::serial_println!("[memfs]   FAILED: the files to wipe were not written as given");
         return Err(KernelError::IoError);
     }
-    fs.wipe_contents();
+    let zeroed = fs.wipe_contents();
+    // The large file is whole frames, so its frames are its length.
+    if zeroed != small.len().saturating_add(large.len()) {
+        crate::serial_println!(
+            "[memfs]   FAILED: a wipe said {zeroed} byte(s) zeroed of {}",
+            small.len().saturating_add(large.len())
+        );
+        return Err(KernelError::IoError);
+    }
     let wiped = (
         fs.read_file(Path::new("/small"))?,
         fs.read_file(Path::new("/large"))?,

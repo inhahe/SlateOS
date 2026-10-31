@@ -40,7 +40,7 @@
 //! layer's to read and write -- and the progress of an in-place encryption is
 //! whatever its caller reports through [`update_progress`].
 
-use crate::crypto::wipe;
+use crate::crypto::{Secret, wipe};
 use crate::error::{KernelError, KernelResult};
 use crate::fs::path::{Path, PathBuf};
 use crate::sync::PreemptSpinMutex as Mutex;
@@ -194,21 +194,6 @@ pub struct EncryptedVolume {
     // A-DISK-ENCRYPTION-HAS-NO-BLOCK-LAYER).
     #[allow(dead_code)]
     pub progress_pct: u8,
-}
-
-/// Key material, wiped when it is dropped.
-struct Secret<const N: usize>([u8; N]);
-
-impl<const N: usize> Secret<N> {
-    fn zeroed() -> Self {
-        Self([0; N])
-    }
-}
-
-impl<const N: usize> Drop for Secret<N> {
-    fn drop(&mut self) {
-        wipe(&mut self.0);
-    }
 }
 
 /// A key slot with what it opens with.
